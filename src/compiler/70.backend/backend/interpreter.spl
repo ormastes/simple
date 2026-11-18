@@ -10,7 +10,14 @@ use compiler.hir.hir.*
 use compiler.hir.hir_types.{HirSymbol, Effect}
 use compiler.common.diagnostics.span.{Span}
 use compiler.backend.backend_types.*
-use compiler.backend.env.{EvalContext, Environment}
+use compiler.backend.env.{
+    EvalContext,
+    Environment,
+    InterpModuleIndex,
+    ModuleIndexMap,
+    FnByNameMap,
+    ModuleByNameMap
+}
 use compiler.backend.interpreter_calls.*
 use compiler.backend.interpreter_expr.*
 use compiler.backend.interpreter_binop.*
@@ -39,10 +46,26 @@ fn interp_hir_stmt_expr_discriminant() -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(HirStmtKind.Expr(HirExpr(kind: HirExprKind.IntLit(0, None), has_type_: false, type_: nil, span: Span.empty())))
 
+# Cached SIMPLE_INTERP_TRACE state: -1 = uninitialized, 0 = disabled, 1 = enabled.
+# Refreshed once per module entry so hot-path eval/call loops read a scalar
+# instead of probing process environment variables on every node.
+var _interp_trace_cached: i64 = -1
+
+pub fn interp_refresh_trace_cache():
+    val enabled = (env_get_opt("SIMPLE_INTERP_TRACE") ?? "") == "1"
+    _interp_trace_cached = if enabled: 1 else: 0
+
+# reason: boolean trace predicate gating hot-path diagnostic string formatting
+@allow(primitive_api)
+pub fn interp_trace_enabled() -> bool:
+    if _interp_trace_cached < 0:
+        interp_refresh_trace_cache()
+    _interp_trace_cached == 1
+
 # Env-gated interpreter trace probe. Set SIMPLE_INTERP_TRACE=1 to enable the
 # [EE]/[ES]/[EB] eval probe trail (invaluable for stage4 codegen diagnosis).
 fn itrace(msg: text) -> ():
-    if (env_get_opt("SIMPLE_INTERP_TRACE") ?? "") == "1":
+    if interp_trace_enabled():
         eprint(msg)
 
 # M5 pure-Simple parity for the Rust seed's strict interpreter mode
@@ -59,12 +82,15 @@ fn interp_strict_mem_enabled() -> bool:
 # Resolve a SymbolId to its stable variable name (bug doc iteration 21, target
 # (a)). The environment is name-keyed; a `Let` carries only a SymbolId, so we
 # map its (define-fresh, readable) `.id` back to the name via ctx.names. Falls
-# back to the empty string when the id is absent (defensive).
+# back to the module symbol table when pre-built indexes were omitted, and then
+# to the empty string when the id is absent (defensive).
 fn resolve_sym_name(symbol: SymbolId, ctx: EvalContext) -> text:
     val sid: i64 = symbol.id
-    val nm = ctx.names.get(sid)
-    if nm != nil:
-        return nm ?? ""
+    if ctx.names.has(sid):
+        return ctx.names[sid]
+    if not ctx.has_fn_index:
+        if val sym = ctx.module.symbols.get_symbol_raw(sid):
+            return sym.name
     ""
 
 # Reinterpret an i64 bit-pattern as an UNSIGNED 64-bit value expressed as f64.
@@ -164,42 +190,54 @@ impl InterpreterBackendImpl:
         self.process_verified_module_with_providers(module, no_providers, false)
 
     fn process_verified_module_with_providers(module: HirModule, providers: Dict<text, HirModule>, has_providers: bool) -> Result<BackendResult, BackendError>:
-        # Create evaluation context
+        interp_refresh_trace_cache()
+        # Create evaluation context and pre-index module symbols/functions/methods once.
         val env = Environment.new()
-        # Build the id -> name map (bug doc iteration 21, target (a)). The
-        # environment is keyed by variable NAME; a `Let`/`Var`'s SymbolId is
-        # resolved to its name through this map. `module.symbols.symbols` is a
-        # Dict<i64, HirSymbol>; iterate .values() bound to `val s: HirSymbol` (ANY-
-        # erasure cure) and read the proven-readable `s.id.id` / `s.name`.
-        var names_map: Dict<i64, text> = {}
-        for nsym_ in module.symbols.symbols.values():
-            val ns: HirSymbol = nsym_
-            val ns_id: i64 = ns.id.id
-            names_map[ns_id] = ns.name
-        # Build the name -> HirFunction index ONCE (perf). Both the Call
-        # fast-path in eval_expr and call_function used to linear-scan
-        # module.functions.values() with NO early break on every named call;
-        # for a self-host build (~5.8k fns) that is an O(calls * fns) blowup.
-        # Last-writer-wins here mirrors the old no-break loop exactly. Iterate
-        # .values() bound to a typed local (ANY-erasure cure, same idiom as
-        # names_map) and key by the proven-readable HirFunction.name text.
-        var fn_index: Dict<text, HirFunction> = {}
-        for fidx_fn_ in module.functions.values():
-            val fidx_f: HirFunction = fidx_fn_
-            fn_index[fidx_f.name] = fidx_f
+        val entry_idx = interp_build_module_index(module)
+        env.cache_module_index(module.name, entry_idx)
+        var module_indexes: ModuleIndexMap = {}
+        module_indexes[module.name] = entry_idx
         val strict_mem_on = interp_strict_mem_enabled()
-        # Imported functions: the first provider defining a name owns it; the
-        # entry module's own definitions always win (they are never indexed).
-        var fn_owner: Dict<text, HirModule> = {}
+        # Imported functions and methods: the first provider defining a name
+        # owns it; the entry module's own definitions always win.
+        var fn_owner: ModuleByNameMap = {}
+        var provider_method_by_key: FnByNameMap = {}
+        var provider_method_owner: ModuleByNameMap = {}
         if has_providers:
             for pm_ in providers.values():
                 val pm: HirModule = pm_
-                if pm.name != module.name:
+                if pm.name != module.name and not module_indexes.has(pm.name):
+                    val pm_idx = interp_build_module_index(pm)
+                    module_indexes[pm.name] = pm_idx
+                    env.cache_module_index(pm.name, pm_idx)
                     for pf_ in pm.functions.values():
                         val pf: HirFunction = pf_
-                        if not fn_index.has(pf.name) and not fn_owner.has(pf.name):
+                        if not entry_idx.fn_by_name.has(pf.name) and not fn_owner.has(pf.name):
                             fn_owner[pf.name] = pm
-        val ctx = EvalContext(env: env, module: module, backend: self, names: names_map, fn_by_name: fn_index, has_fn_index: true, fn_owner: fn_owner, has_fn_owner: has_providers, strict_mem: strict_mem_on)
+                    for mkey_ in pm_idx.method_by_key.keys():
+                        val mkey: text = mkey_
+                        if not provider_method_by_key.has(mkey):
+                            provider_method_by_key[mkey] = pm_idx.method_by_key[mkey]
+                            provider_method_owner[mkey] = pm
+        val ctx = EvalContext(
+            env: env,
+            module: module,
+            backend: self,
+            names: entry_idx.names,
+            fn_by_name: entry_idx.fn_by_name,
+            has_fn_index: true,
+            fn_by_id: entry_idx.fn_by_id,
+            has_fn_by_id: true,
+            method_by_key: entry_idx.method_by_key,
+            has_method_index: true,
+            module_indexes: module_indexes,
+            provider_method_by_key: provider_method_by_key,
+            provider_method_owner: provider_method_owner,
+            has_provider_method_index: has_providers,
+            fn_owner: fn_owner,
+            has_fn_owner: has_providers,
+            strict_mem: strict_mem_on
+        )
 
         # Locate `main` by symbol name via the symbol table. The cranelift seed
         # miscompiles two things on the single-file / synthetic-main HIR module:
@@ -261,10 +299,14 @@ impl InterpreterBackendImpl:
             for pm2_ in providers.values():
                 val pm2: HirModule = pm2_
                 if pm2.name != module.name:
-                    pending = pending.push(pm2)
-                    pending_left = pending_left.push(interp_const_indexes(pm2))
-        pending = pending.push(module)
-        pending_left = pending_left.push(interp_const_indexes(module))
+                    val pm_cidxs = interp_const_indexes(pm2)
+                    if pm_cidxs.len() > 0:
+                        pending = pending.push(pm2)
+                        pending_left = pending_left.push(pm_cidxs)
+        val entry_cidxs = interp_const_indexes(module)
+        if entry_cidxs.len() > 0:
+            pending = pending.push(module)
+            pending_left = pending_left.push(entry_cidxs)
         var progress = true
         while pending.len() > 0 and progress:
             progress = false
@@ -362,6 +404,7 @@ impl InterpreterBackendImpl:
                 for f_ in s.fields:
                     val f: HirField = f_
                     field_names = field_names.push(f.name)
+                break
         if not found_type:
             for c_ in ctx.module.classes.values():
                 val c: HirClass = c_
@@ -371,6 +414,7 @@ impl InterpreterBackendImpl:
                     for cf_ in c.fields:
                         val cf: HirField = cf_
                         field_names = field_names.push(cf.name)
+                    break
         if not found_type:
             return nil
         var fields: Dict<text, Value> = {}
@@ -526,7 +570,8 @@ impl InterpreterBackendImpl:
         # forces the value to materialize so the qualified arms test correctly.
         # Feed it into itrace so it is never dead-code-eliminated.
         val stmt_disc = interp_enum_discriminant_raw(stmt.kind)
-        itrace("[ES] exec_stmt entry disc={stmt_disc}")
+        if interp_trace_enabled():
+            itrace("[ES] exec_stmt entry disc={stmt_disc}")
         # Arm ORDER matters on stage4: `Expr` and `Block` are struct-shadowed
         # variant names, so their pattern tests compile ALWAYS-TRUE (bug doc
         # iteration 18 hazard #1) — an `Expr`-first arm swallows EVERY statement,
@@ -652,7 +697,8 @@ impl InterpreterBackendImpl:
 
 impl InterpreterBackendImpl:
     fn eval_block(block: HirBlock, ctx: EvalContext) -> Result<Value, BackendError>:
-        itrace("[EB] eval_block stmts.len={block.stmts.len()} has={block.has}")
+        if interp_trace_enabled():
+            itrace("[EB] eval_block stmts.len={block.stmts.len()} has={block.has}")
         ctx.env.push_scope()
 
         # Seed-lowered single-file blocks can carry their trailing expression

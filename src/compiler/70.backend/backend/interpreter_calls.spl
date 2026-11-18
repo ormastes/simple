@@ -11,8 +11,17 @@ use compiler.hir.hir.*
 use compiler.hir.hir_types.{HirSymbol, HirModule}
 use compiler.common.diagnostics.span.{Span}
 use compiler.backend.backend_types.*
-use compiler.backend.env.{EvalContext, Environment}
-use compiler.backend.interpreter.{InterpreterBackendImpl, itrace}
+use compiler.backend.env.{
+    EvalContext,
+    Environment,
+    InterpModuleIndex,
+    SymbolNameMap,
+    FnByNameMap,
+    FnByIdMap,
+    ModuleIndexMap,
+    ModuleByNameMap
+}
+use compiler.backend.interpreter.{InterpreterBackendImpl, itrace, interp_trace_enabled}
 use compiler.backend.interpreter_aop_weave.*
 use compiler.backend.interpreter_run_abi.{interpreter_run_abi}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -183,6 +192,67 @@ fn interp_find_method(pm: HirModule, key: text) -> HirFunction?:
                 return Some(pf)
     None
 
+fn interp_short_method_key(c: text) -> text:
+    """Collapse `Type::Trait::method` to `Type::method`; returns `c` when
+    there is only one `::` separator."""
+    val first_sep = c.index_of("::")
+    if first_sep < 0:
+        return ""
+    val last_sep = c.last_index_of("::")
+    if last_sep <= first_sep:
+        return c
+    "{c.substring(0, first_sep)}{c.substring(last_sep, c.byte_len())}"
+
+var _interp_module_index_rebuild_count: i64 = 0
+
+# reason: diagnostic counter exposing module-index rebuilds to hotpath unit specs
+@allow(primitive_api)
+pub fn interp_module_index_rebuild_count() -> i64:
+    _interp_module_index_rebuild_count
+
+pub fn interp_reset_module_index_rebuild_count():
+    _interp_module_index_rebuild_count = 0
+
+pub fn interp_build_module_index(m: HirModule) -> InterpModuleIndex:
+    """Build `(names, fn_by_name, fn_by_id, method_by_key)` once for `m`."""
+    _interp_module_index_rebuild_count = _interp_module_index_rebuild_count + 1
+    var names_map: SymbolNameMap = {}
+    for nsym_ in m.symbols.symbols.values():
+        val ns: HirSymbol = nsym_
+        val ns_id: i64 = ns.id.id
+        names_map[ns_id] = ns.name
+    var fn_index: FnByNameMap = {}
+    var fn_by_id: FnByIdMap = {}
+    var method_by_key: FnByNameMap = {}
+    for fidx_fn_ in m.functions.values():
+        val pf: HirFunction = fidx_fn_
+        fn_index[pf.name] = pf
+        val fid: i64 = pf.symbol.id
+        if not fn_by_id.has(fid):
+            fn_by_id[fid] = pf
+        val c_own = interp_method_key(pf.name)
+        if c_own != "":
+            if not method_by_key.has(c_own):
+                method_by_key[c_own] = pf
+            val s_own = interp_short_method_key(c_own)
+            if s_own != "" and s_own != c_own and not method_by_key.has(s_own):
+                method_by_key[s_own] = pf
+        if val psym = m.symbols.get_symbol_raw(fid):
+            val c_sym = interp_method_key(psym.name)
+            if c_sym != "":
+                if not method_by_key.has(c_sym):
+                    method_by_key[c_sym] = pf
+                val s_sym = interp_short_method_key(c_sym)
+                if s_sym != "" and s_sym != c_sym and not method_by_key.has(s_sym):
+                    method_by_key[s_sym] = pf
+    InterpModuleIndex(
+        names: names_map,
+        fn_by_name: fn_index,
+        fn_by_id: fn_by_id,
+        method_by_key: method_by_key,
+        ready: true
+    )
+
 impl InterpreterBackendImpl:
     fn resolve_function_by_name(name: text, ctx: EvalContext) -> HirFunction?:
         if ctx.fn_by_name.has(name):
@@ -202,6 +272,18 @@ impl InterpreterBackendImpl:
         else:
             nil
 
+    fn ensure_module_index(m: HirModule, ctx: EvalContext) -> InterpModuleIndex:
+        """Return pre-indexed lookup tables for `m` in O(1), lazily building and
+        caching in `ctx.env` only when `ctx` omitted pre-built indexes."""
+        if ctx.module_indexes.has(m.name):
+            val hit: InterpModuleIndex = ctx.module_indexes[m.name]
+            return hit
+        if val env_hit = ctx.env.get_module_index(m.name):
+            return env_hit
+        val built = interp_build_module_index(m)
+        ctx.env.cache_module_index(m.name, built)
+        built
+
     fn provider_context_for(name: text, ctx: EvalContext) -> EvalContext?:
         """Context of the imported module that defines `name`, sharing the caller's env."""
         if not ctx.has_fn_owner or not ctx.fn_owner.has(name):
@@ -210,26 +292,38 @@ impl InterpreterBackendImpl:
         Some(self.module_context(owner, ctx))
 
     fn module_context(owner: HirModule, ctx: EvalContext) -> EvalContext:
-        """Context that evaluates in `owner`, sharing the caller's env."""
-        var names_map: Dict<i64, text> = {}
-        for osym_ in owner.symbols.symbols.values():
-            val os: HirSymbol = osym_
-            val os_id: i64 = os.id.id
-            names_map[os_id] = os.name
-        var fn_index: Dict<text, HirFunction> = {}
-        for ofn_ in owner.functions.values():
-            val of: HirFunction = ofn_
-            fn_index[of.name] = of
-        EvalContext(env: ctx.env, module: owner, backend: ctx.backend, names: names_map, fn_by_name: fn_index, has_fn_index: true, fn_owner: ctx.fn_owner, has_fn_owner: true, strict_mem: ctx.strict_mem)
+        """Context that evaluates in `owner`, reusing pre-indexed module tables in O(1)."""
+        val oidx = self.ensure_module_index(owner, ctx)
+        EvalContext(
+            env: ctx.env,
+            module: owner,
+            backend: ctx.backend,
+            names: oidx.names,
+            fn_by_name: oidx.fn_by_name,
+            has_fn_index: true,
+            fn_by_id: oidx.fn_by_id,
+            has_fn_by_id: true,
+            method_by_key: oidx.method_by_key,
+            has_method_index: true,
+            module_indexes: ctx.module_indexes,
+            provider_method_by_key: ctx.provider_method_by_key,
+            provider_method_owner: ctx.provider_method_owner,
+            has_provider_method_index: ctx.has_provider_method_index,
+            fn_owner: ctx.fn_owner,
+            has_fn_owner: ctx.has_fn_owner,
+            strict_mem: ctx.strict_mem
+        )
 
     fn call_function(fn_value: Value, args: [Value], ctx: EvalContext, span: Span) -> Result<Value, BackendError>:
         itrace("[CF] call_function enter")
         match fn_value:
             case Value.Function(f):
-                itrace("[CF] Function arm f_nil={f == nil}")
+                if interp_trace_enabled():
+                    itrace("[CF] Function arm f_nil={f == nil}")
                 # Typed rebind (stage4 extracted-payload hazard, iteration 18).
                 val f_t: FunctionValue = f
-                itrace("[CF] name={f_t.name}")
+                if interp_trace_enabled():
+                    itrace("[CF] name={f_t.name}")
                 # Check for builtin functions first
                 val builtin_result = self.try_call_builtin(f_t.name, args)
                 if builtin_result.?:
@@ -321,19 +415,21 @@ impl InterpreterBackendImpl:
         # Look up function definition in module
         if ctx.module.functions.has(method_id):
             return self.call_hir_function(ctx.module.functions[method_id], args, ctx)
-        # A trait-impl method's SymbolId carries the same numeric id as its
-        # functions key but does not compare equal as a struct key; match the
-        # id number instead.
-        for f_ in ctx.module.functions.values():
-            val f: HirFunction = f_
-            if f.symbol.id == method_id.id:
-                return self.call_hir_function(f, args, ctx)
+        val raw_id: i64 = method_id.id
+        if ctx.fn_by_id.has(raw_id):
+            val hit_fn: HirFunction = ctx.fn_by_id[raw_id]
+            return self.call_hir_function(hit_fn, args, ctx)
+        if not ctx.has_fn_by_id:
+            val lazy_idx = self.ensure_module_index(ctx.module, ctx)
+            if lazy_idx.fn_by_id.has(raw_id):
+                val lazy_fn: HirFunction = lazy_idx.fn_by_id[raw_id]
+                return self.call_hir_function(lazy_fn, args, ctx)
         # SymbolIds are per module: a method of an imported type carries the
         # caller module's id for it, never the provider's. Resolve it by its
         # `Type::method` name in the module that defines it instead.
         var qname = ""
         var defining = ""
-        if val sym = ctx.module.symbols.get_symbol_raw(method_id.id):
+        if val sym = ctx.module.symbols.get_symbol_raw(raw_id):
             qname = sym.name
             defining = sym.defining_module ?? ""
         if val found = self.call_method_by_key(interp_method_key(qname), args, ctx):
@@ -346,15 +442,33 @@ impl InterpreterBackendImpl:
         imported module that defines it; None when no module has it."""
         if key == "":
             return None
-        if val own_fn = interp_find_method(ctx.module, key):
-            return Some(self.call_hir_function(own_fn, args, ctx))
+        if ctx.method_by_key.has(key):
+            val own_hit: HirFunction = ctx.method_by_key[key]
+            return Some(self.call_hir_function(own_hit, args, ctx))
+        if not ctx.has_method_index:
+            val own_idx = self.ensure_module_index(ctx.module, ctx)
+            if own_idx.method_by_key.has(key):
+                val lazy_own: HirFunction = own_idx.method_by_key[key]
+                return Some(self.call_hir_function(lazy_own, args, ctx))
+            if val fallback_own = interp_find_method(ctx.module, key):
+                return Some(self.call_hir_function(fallback_own, args, ctx))
         if not ctx.has_fn_owner:
+            return None
+        if ctx.has_provider_method_index:
+            if ctx.provider_method_by_key.has(key) and ctx.provider_method_owner.has(key):
+                val owner_fn: HirFunction = ctx.provider_method_by_key[key]
+                val owner_mod: HirModule = ctx.provider_method_owner[key]
+                return Some(self.call_hir_function(owner_fn, args, self.module_context(owner_mod, ctx)))
             return None
         var seen: Dict<text, bool> = {}
         for pm_ in ctx.fn_owner.values():
             val pm: HirModule = pm_
             if not seen.has(pm.name):
                 seen[pm.name] = true
+                val pm_idx = self.ensure_module_index(pm, ctx)
+                if pm_idx.method_by_key.has(key):
+                    val pm_fn: HirFunction = pm_idx.method_by_key[key]
+                    return Some(self.call_hir_function(pm_fn, args, self.module_context(pm, ctx)))
                 if val owner_fn = interp_find_method(pm, key):
                     return Some(self.call_hir_function(owner_fn, args, self.module_context(pm, ctx)))
         None
@@ -416,14 +530,17 @@ impl InterpreterBackendImpl:
         """
         itrace("[TCB0] try_call_builtin enter")
         val tag = lookup_builtin_tag(name)
-        itrace("[TCB] try_call_builtin name={name}")
+        if interp_trace_enabled():
+            itrace("[TCB] try_call_builtin name={name}")
         match tag:
             case BuiltinTag.Print:
-                itrace("[BUILTIN] Print reached args_len={args.len()}")
+                if interp_trace_enabled():
+                    itrace("[BUILTIN] Print reached args_len={args.len()}")
                 if args.len() > 0:
                     # Typed rebind (stage4 ANY-erased list element).
                     val arg: Value = args[0]
-                    itrace("[BUILTIN] Print arg bound nil={arg == nil}")
+                    if interp_trace_enabled():
+                        itrace("[BUILTIN] Print arg bound nil={arg == nil}")
                     # @workaround bug=riscv64_interp_enum_check_discriminant_shift_2026_11_06 reason=in the riscv64 in-guest build every `case Value.X` pattern test lowers to rt_enum_check_variant whose baked discriminant operand arrives one nibble shifted (ctor stamps the unshifted hash), so the match always falls through and strings print as <unknown>. Identity-check against a freshly constructed String probe (both discriminants come from rt_enum_new at runtime and therefore agree) and print the raw payload; non-enum values answer -1 and never match the probe. See doc/08_tracking/bug/riscv64_interp_enum_check_discriminant_shift_2026-11-06.md.
                     # `print` ends the line like the language statement does;
                     # rt_print_value wrote no newline, so native runs printed

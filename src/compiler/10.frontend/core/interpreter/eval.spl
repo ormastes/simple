@@ -43,7 +43,8 @@ fn coverage_condition_id(condition_eid: i64) -> i64:
     -1
 
 fn coverage_span_decision_id(span_id: i64) -> i64:
-    if span_is_valid(span_id): return span_start(span_id) + 1
+    if rt_coverage_enabled():
+        if span_is_valid(span_id): return span_start(span_id) + 1
     -1
 
 fn record_control_decision(file: text, line: i64, column: i64, decision_id: i64, taken: bool):
@@ -51,6 +52,7 @@ fn record_control_decision(file: text, line: i64, column: i64, decision_id: i64,
         rt_coverage_decision_probe(decision_id, taken, file, line, column)
 
 fn record_control_condition(decision_id: i64, condition_eid: i64, taken: bool):
+    if decision_id < 0: return
     if rt_coverage_enabled():
         val condition_node = expr_get(condition_eid)
         val condition_span = condition_node.span_id
@@ -304,8 +306,133 @@ pub var eval_yield_stack: [[i64]] = []
 pub var eval_current_decl_id: i64 = -1
 pub var eval_implicit_new_stack: [i64] = []
 
-# ===== Warning Tracking =====
+# ===== Warning Tracking & Per-Site Memoization =====
 pub var eval_warnings: [text] = []
+
+val EVAL_MEMO_HM_SIZE: i64 = 256
+var match_expr_memo_eids: [i64] = []
+var match_expr_memo_types: [text] = []
+var match_expr_memo_nexts: [i64] = []
+var match_expr_memo_buckets: [i64] = []
+var match_expr_memo_found: bool = false
+
+var match_stmt_memo_sids: [i64] = []
+var match_stmt_memo_types: [text] = []
+var match_stmt_memo_nexts: [i64] = []
+var match_stmt_memo_buckets: [i64] = []
+pub var match_stmt_memo_found: bool = false
+var eval_match_exhaustive_runs: i64 = 0
+
+var ignored_ret_memo_sids: [i64] = []
+var ignored_ret_memo_nexts: [i64] = []
+var ignored_ret_memo_buckets: [i64] = []
+
+fn eval_memo_make_buckets() -> [i64]:
+    var buckets: [i64] = []
+    var i: i64 = 0
+    while i < EVAL_MEMO_HM_SIZE:
+        buckets.push(-1)
+        i = i + 1
+    buckets
+
+fn eval_match_expr_memo_get(eid: i64) -> text:
+    if eid < 0 or match_expr_memo_buckets.len() == 0:
+        match_expr_memo_found = false
+        return ""
+    val bucket = eid % EVAL_MEMO_HM_SIZE
+    var idx = match_expr_memo_buckets[bucket]
+    while idx != -1:
+        if match_expr_memo_eids[idx] == eid:
+            match_expr_memo_found = true
+            return match_expr_memo_types[idx]
+        idx = match_expr_memo_nexts[idx]
+    match_expr_memo_found = false
+    ""
+
+fn eval_match_expr_memo_put(eid: i64, inferred_type: text):
+    if eid < 0: return
+    if match_expr_memo_buckets.len() == 0:
+        match_expr_memo_buckets = eval_memo_make_buckets()
+    val bucket = eid % EVAL_MEMO_HM_SIZE
+    var idx = match_expr_memo_buckets[bucket]
+    while idx != -1:
+        if match_expr_memo_eids[idx] == eid:
+            match_expr_memo_types[idx] = inferred_type
+            return
+        idx = match_expr_memo_nexts[idx]
+    val new_idx = match_expr_memo_eids.len()
+    match_expr_memo_eids.push(eid)
+    match_expr_memo_types.push(inferred_type)
+    match_expr_memo_nexts.push(match_expr_memo_buckets[bucket])
+    match_expr_memo_buckets[bucket] = new_idx
+    eval_match_exhaustive_runs = eval_match_exhaustive_runs + 1
+
+# reason: core AST statement arena IDs are raw i64 indices across interpreter modules
+@allow(primitive_api)
+pub fn eval_match_stmt_memo_get(sid: i64) -> text:
+    if sid < 0 or match_stmt_memo_buckets.len() == 0:
+        match_stmt_memo_found = false
+        return ""
+    val bucket = sid % EVAL_MEMO_HM_SIZE
+    var idx = match_stmt_memo_buckets[bucket]
+    while idx != -1:
+        if match_stmt_memo_sids[idx] == sid:
+            match_stmt_memo_found = true
+            return match_stmt_memo_types[idx]
+        idx = match_stmt_memo_nexts[idx]
+    match_stmt_memo_found = false
+    ""
+
+# reason: core AST statement arena IDs are raw i64 indices across interpreter modules
+@allow(primitive_api)
+pub fn eval_match_stmt_memo_put(sid: i64, inferred_type: text):
+    if sid < 0: return
+    if match_stmt_memo_buckets.len() == 0:
+        match_stmt_memo_buckets = eval_memo_make_buckets()
+    val bucket = sid % EVAL_MEMO_HM_SIZE
+    var idx = match_stmt_memo_buckets[bucket]
+    while idx != -1:
+        if match_stmt_memo_sids[idx] == sid:
+            match_stmt_memo_types[idx] = inferred_type
+            return
+        idx = match_stmt_memo_nexts[idx]
+    val new_idx = match_stmt_memo_sids.len()
+    match_stmt_memo_sids.push(sid)
+    match_stmt_memo_types.push(inferred_type)
+    match_stmt_memo_nexts.push(match_stmt_memo_buckets[bucket])
+    match_stmt_memo_buckets[bucket] = new_idx
+    eval_match_exhaustive_runs = eval_match_exhaustive_runs + 1
+
+# reason: core interpreter telemetry counter matches raw i64 arena count APIs
+@allow(primitive_api)
+pub fn eval_match_exhaustive_check_count() -> i64:
+    eval_match_exhaustive_runs
+
+# reason: core AST statement arena IDs and seen predicate use raw i64/bool primitives
+@allow(primitive_api)
+pub fn eval_ignored_return_sid_seen(sid: i64) -> bool:
+    if sid < 0 or ignored_ret_memo_buckets.len() == 0:
+        return false
+    val bucket = sid % EVAL_MEMO_HM_SIZE
+    var idx = ignored_ret_memo_buckets[bucket]
+    while idx != -1:
+        if ignored_ret_memo_sids[idx] == sid:
+            return true
+        idx = ignored_ret_memo_nexts[idx]
+    false
+
+# reason: core AST statement arena IDs are raw i64 indices across interpreter modules
+@allow(primitive_api)
+pub fn eval_ignored_return_sid_mark(sid: i64):
+    if sid < 0: return
+    if eval_ignored_return_sid_seen(sid): return
+    if ignored_ret_memo_buckets.len() == 0:
+        ignored_ret_memo_buckets = eval_memo_make_buckets()
+    val bucket = sid % EVAL_MEMO_HM_SIZE
+    val new_idx = ignored_ret_memo_sids.len()
+    ignored_ret_memo_sids.push(sid)
+    ignored_ret_memo_nexts.push(ignored_ret_memo_buckets[bucket])
+    ignored_ret_memo_buckets[bucket] = new_idx
 
 fn eval_clear_warnings():
     eval_warnings = []
@@ -318,6 +445,20 @@ fn eval_reset():
     eval_had_error = false
     eval_error_msg = ""
     eval_warnings = []
+    match_expr_memo_eids = []
+    match_expr_memo_types = []
+    match_expr_memo_nexts = []
+    match_expr_memo_buckets = []
+    match_expr_memo_found = false
+    match_stmt_memo_sids = []
+    match_stmt_memo_types = []
+    match_stmt_memo_nexts = []
+    match_stmt_memo_buckets = []
+    match_stmt_memo_found = false
+    eval_match_exhaustive_runs = 0
+    ignored_ret_memo_sids = []
+    ignored_ret_memo_nexts = []
+    ignored_ret_memo_buckets = []
     eval_break_label = ""
     eval_continue_label = ""
     eval_label_stack = []
@@ -625,18 +766,17 @@ fn eval_if_expr(eid: i64) -> i64:
     val then_id = e_node.right
     val else_id = e_node.extra
 
-    val cond_val = eval_control_condition(cond_id, coverage_span_decision_id(e_node.span_id))
+    var decision_id: i64 = -1
+    if rt_coverage_enabled():
+        decision_id = coverage_span_decision_id(e_node.span_id)
+    val cond_val = eval_control_condition(cond_id, decision_id)
     if eval_had_error: return -1
 
     val taken = val_is_truthy(cond_val)
-    val span_id = e_node.span_id
-    var source_line = 0
-    var source_column = 0
-    if span_is_valid(span_id):
-        source_line = span_line(span_id)
-        source_column = span_col(span_id)
-    if span_is_valid(span_id):
-        record_control_decision(coverage_owner_file(), source_line, source_column, span_start(span_id) + 1, taken)
+    if rt_coverage_enabled():
+        val span_id = e_node.span_id
+        if span_is_valid(span_id):
+            record_control_decision(coverage_owner_file(), span_line(span_id), span_col(span_id), span_start(span_id) + 1, taken)
 
     if taken:
         return eval_expr(then_id)
@@ -732,6 +872,52 @@ fn eval_for_expr(eid: i64) -> i64:
     val iterable_eid = e_node.left
     val body_stmts = e_node.stmts
 
+    # Stream bounded range expressions in O(1) memory without allocating a
+    # [i64] VAL_ARRAY (matching eval_stmt_for). The loop is bounded by the
+    # range end itself; there is deliberately no iteration cap here (see
+    # doc/08_tracking/bug/core_interpreter_hard_loop_iteration_caps_2026-08-28.md):
+    # a silent cap turned `for i in 0..2_000_000` into a wrong partial answer.
+    if iterable_eid >= 0 and expr_get(iterable_eid).tag == EXPR_RANGE:
+        val range_node = expr_get(iterable_eid)
+        val start_val = eval_expr(range_node.left)
+        if eval_had_error: return -1
+        val end_val = eval_expr(range_node.right)
+        if eval_had_error: return -1
+        val inclusive = range_node.i_val
+        val start_n = val_get_int(start_val)
+        val end_n = val_get_int(end_val)
+        var current = start_n
+        val limit = end_n
+        var range_last_val = val_make_nil()
+        while current <= limit:
+            if eval_breaking: break
+            if eval_returning: break
+            if eval_had_error: break
+            if inclusive == 0:
+                if current == limit: break
+            eval_continuing = false
+            eval_continue_label = ""
+            env_push_scope()
+            env_define(iter_name, val_make_int(current))
+            for sid in body_stmts:
+                if eval_had_error: break
+                if eval_returning: break
+                if eval_breaking: break
+                if eval_continuing: break
+                range_last_val = eval_stmt(sid)
+            env_pop_scope()
+            # Seed parity: checked increment — stop at i64::MAX instead of
+            # wrapping to a ~2^63-iteration loop (seed breaks on overflow).
+            if current == 9223372036854775807: break
+            current = current + 1
+        if eval_breaking:
+            if eval_break_label == "":
+                eval_breaking = false
+        if eval_continuing:
+            if eval_continue_label == "":
+                eval_continuing = false
+        return range_last_val
+
     val iterable = eval_expr(iterable_eid)
     if eval_had_error: return -1
 
@@ -746,6 +932,7 @@ fn eval_for_expr(eid: i64) -> i64:
             if eval_returning: break
             if eval_had_error: break
             eval_continuing = false
+            eval_continue_label = ""
             env_push_scope()
             env_define(iter_name, val_copy_if_value_struct(elem_vid))
             for sid in body_stmts:
@@ -755,53 +942,13 @@ fn eval_for_expr(eid: i64) -> i64:
                 if eval_continuing: break
                 last_val = eval_stmt(sid)
             env_pop_scope()
-        eval_breaking = false
-        eval_continuing = false
-        return last_val
-
-    # Iterate over range (check if iterable is a range pair)
-    # Range is stored as: left=start, right=end, i_val=inclusive
-    # The loop is bounded by the range end itself; there is deliberately no
-    # iteration cap here (see
-    # doc/08_tracking/bug/core_interpreter_hard_loop_iteration_caps_2026-08-28.md):
-    # a silent cap turned `for i in 0..2_000_000` into a wrong partial answer.
-    if kind == VAL_INT:
-        # Check if iterable_eid is a RANGE expression
-        val iterable_tag = expr_get(iterable_eid).tag
-        if iterable_tag == EXPR_RANGE:
-            val range_node = expr_get(iterable_eid)
-            val start_val = eval_expr(range_node.left)
-            if eval_had_error: return -1
-            val end_val = eval_expr(range_node.right)
-            if eval_had_error: return -1
-            val inclusive = range_node.i_val
-            val start_n = val_get_int(start_val)
-            val end_n = val_get_int(end_val)
-            var current = start_n
-            val limit = end_n
-            while current <= limit:
-                if eval_breaking: break
-                if eval_returning: break
-                if eval_had_error: break
-                if inclusive == 0:
-                    if current == limit: break
+        if eval_breaking:
+            if eval_break_label == "":
+                eval_breaking = false
+        if eval_continuing:
+            if eval_continue_label == "":
                 eval_continuing = false
-                env_push_scope()
-                env_define(iter_name, val_make_int(current))
-                for sid in body_stmts:
-                    if eval_had_error: break
-                    if eval_returning: break
-                    if eval_breaking: break
-                    if eval_continuing: break
-                    last_val = eval_stmt(sid)
-                env_pop_scope()
-                # Seed parity: checked increment — stop at i64::MAX instead of
-                # wrapping to a ~2^63-iteration loop (seed breaks on overflow).
-                if current == 9223372036854775807: break
-                current = current + 1
-            eval_breaking = false
-            eval_continuing = false
-            return last_val
+        return last_val
 
     eval_set_error("cannot iterate over " + val_kind_name(kind))
     -1
@@ -840,20 +987,24 @@ fn eval_while_expr(eid: i64) -> i64:
     var last_val = val_make_nil()
     var iterations: i64 = 0
     val max_iterations: i64 = 1000000
+    var decision_id: i64 = -1
+    if rt_coverage_enabled():
+        decision_id = coverage_span_decision_id(e_node.span_id)
 
     while iterations < max_iterations:
         if eval_had_error: break
         if eval_returning: break
         if eval_breaking: break
-        val cond_val = eval_control_condition(cond_eid, coverage_span_decision_id(e_node.span_id))
+        val cond_val = eval_control_condition(cond_eid, decision_id)
         if eval_had_error: break
         val taken = val_is_truthy(cond_val)
-        val span_id = e_node.span_id
         # Coverage bookkeeping (owner-file lookup, span line/col decode) is
         # gated on rt_coverage_enabled() BEFORE it is computed; previously the
         # per-iteration decode ran unconditionally and only the probe was gated.
-        if rt_coverage_enabled() and span_is_valid(span_id):
-            record_control_decision(coverage_owner_file(), span_line(span_id), span_col(span_id), span_start(span_id) + 1, taken)
+        if rt_coverage_enabled():
+            val span_id = e_node.span_id
+            if span_is_valid(span_id):
+                record_control_decision(coverage_owner_file(), span_line(span_id), span_col(span_id), span_start(span_id) + 1, taken)
         if taken == false: break
         eval_continuing = false
         env_push_scope()
@@ -881,9 +1032,12 @@ fn eval_match_expr(eid: i64) -> i64:
     if eval_had_error: return -1
     val arm_ids = e_node.args
 
-    # Exhaustiveness check: warn if enum variants are not all covered
-    val inferred_type = infer_match_enum_type(arm_ids)
-    check_match_exhaustive(arm_ids, inferred_type)
+    # Exhaustiveness check: warn if enum variants are not all covered (memoized per eid)
+    var inferred_type = eval_match_expr_memo_get(eid)
+    if not match_expr_memo_found:
+        inferred_type = infer_match_enum_type(arm_ids)
+        check_match_exhaustive(arm_ids, inferred_type)
+        eval_match_expr_memo_put(eid, inferred_type)
 
     for arm_id in arm_ids:
         val pattern_eid = arm_get_pattern(arm_id)
@@ -898,22 +1052,21 @@ fn eval_match_expr(eid: i64) -> i64:
         if matched:
             # Check guard
             if guard_eid >= 0:
-                val guard_val = eval_control_condition(guard_eid, coverage_span_decision_id(expr_get(guard_eid).span_id))
+                var guard_decision_id: i64 = -1
+                if rt_coverage_enabled():
+                    guard_decision_id = coverage_span_decision_id(expr_get(guard_eid).span_id)
+                val guard_val = eval_control_condition(guard_eid, guard_decision_id)
                 if eval_had_error:
                     env_pop_scope()
                     return -1
                 val guard_taken = val_is_truthy(guard_val)
-                val guard_span = expr_get(guard_eid).span_id
-                var guard_line: i64 = 0
-                var guard_column: i64 = 0
-                if span_is_valid(guard_span):
-                    guard_line = span_line(guard_span)
-                    guard_column = span_col(guard_span)
-                if span_is_valid(guard_span):
-                    record_control_decision(
-                        coverage_owner_file(), guard_line, guard_column,
-                        span_start(guard_span) + 1, guard_taken
-                    )
+                if rt_coverage_enabled():
+                    val guard_span = expr_get(guard_eid).span_id
+                    if span_is_valid(guard_span):
+                        record_control_decision(
+                            coverage_owner_file(), span_line(guard_span), span_col(guard_span),
+                            span_start(guard_span) + 1, guard_taken
+                        )
                 if guard_taken == false:
                     env_pop_scope()
                     continue
@@ -1239,7 +1392,7 @@ use compiler.core.interpreter.eval_calls.val_copy_if_value_struct
 
 # ===== Exports =====
 # Symbols defined in this file
-export eval_warnings, eval_clear_warnings
+export eval_warnings, eval_clear_warnings, eval_match_exhaustive_check_count
 
 # Re-exports from eval_tables.spl
 

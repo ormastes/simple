@@ -1,7 +1,7 @@
 # `TieredJitManager` never tiers up in the interpreter — `compiled` and `call_count` writes are lost, recompilation is unbounded
 Status: SUPERSEDED. Triage 2026-11-11 (lane interp4, PR #8185): seed-smoke verified, fixing commit cited in addendum below.
 
-- **Status:** OPEN
+- **Status:** RESOLVED (2026-11-18 Wave B5; root-cause carrier bug superseded 2026-11-10)
 - **Filed:** 2026-08-18
 - **Severity:** HIGH (unbounded work, wrong dispatch; degrades rather than crashes)
 - **Evidence bar:** **SOURCE-VERIFIED, NOT EXECUTION-VERIFIED**
@@ -137,3 +137,35 @@ SIMPLE_EXECUTION_MODE=interpreter:
 No write-back added to tiered_jit.spl (per this doc, the engine fix is
 correct — and is now the shipped behavior on this seed). No change from this
 lane.
+
+## 2026-11-18 resolution — Wave B5 (negative compile cache, explicit write-back, honest Tier-2)
+
+While the 2026-11-04 `ClassInstance` carrier flip resolved the happy-path
+`call_count` / `compiled = true` loss on the seed interpreter, a second
+unbounded-recompilation defect remained in both tiered-JIT managers whenever
+`rt_jit_compile_source` failed (or compiled source that did not export the
+registered function name): neither manager recorded compile failure, so every
+subsequent call at or above threshold re-invoked `rt_jit_compile_source`
+unboundedly. In addition, `compiler.interp.execution.tiered_jit_manager`
+promoted `JitTier.Fast` to `JitTier.Optimized` and incremented
+`tier2_compilations` at `tier2_threshold` even though no Tier-2 compiler ran,
+and `driver_pipeline_execution.jit_compile_and_run` iterated `mir_modules.keys()`
+without placing `source_module_names_owner[0]` (entry module) last as required
+by `static_backend_cranelift_jit_lane.spl:35`.
+
+Shipped in Wave B5:
+- `src/lib/nogc_sync_mut/jit/tiered_jit.spl`: added `compile_failed: bool` and
+  `last_error: text` to `HotFunction` (plus `compile_failures: i64` and
+  `call_i64_checked` on `TieredJitManager`), explicit `self.functions[idx] = hf`
+  write-backs on every state update, re-read after `try_compile`, and early
+  skip once `hf.compile_failed` is `true`.
+- `src/compiler/95.interp/execution/tiered_jit_manager.spl`: added
+  `compile_failed: Dict<text, text>` and `compile_failures: i64` on
+  `TieredJitManager` (preserving `FunctionProfile` layout), skipped
+  `_compile_function` once `compile_failed.has(name)`, removed fake
+  `JitTier.Optimized` / `tier2_compilations` promotion, and added
+  `call_i64_checked(name, arg) -> Result<i64, text>`.
+- `src/compiler/80.driver/driver_pipeline_execution.spl`: extracted
+  `ordered_jit_mir_modules_v1` and wired `jit_compile_and_run` so
+  `source_module_names[0]` is always placed last in `modules`.
+- Execution-verified in `test/01_unit/compiler/interp/tiered_jit_negative_cache_and_entry_order_spec.spl`.

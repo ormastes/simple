@@ -29,21 +29,44 @@ var ft_vals: [i64] = []
 var ft_buckets: [i64] = []
 var ft_nexts: [i64] = []
 
-# Caller-aware function ownership.  The historical flat table remains for
+# Caller-aware function ownership. The historical flat table remains for
 # compatibility, but cannot distinguish two modules which define the same
-# bare name.  Keep the authoritative owner and selective-import routes in
-# parallel arrays; these tables are small during interpretation and lookup is
-# off the parser hot path.
+# bare name. Parallel arrays are indexed by HM_SIZE = 256 chained hash buckets
+# so (owner, name), (caller, local_name), (caller, alias), and per-name owner
+# counts resolve in O(1) average time on the call hot path.
 var fto_owners: [text] = []
 var fto_names: [text] = []
 var fto_vals: [i64] = []
+var fto_buckets: [i64] = []
+var fto_nexts: [i64] = []
+
+var fto_name_keys: [text] = []
+var fto_name_counts: [i64] = []
+var fto_name_buckets: [i64] = []
+var fto_name_nexts: [i64] = []
+
 var fib_callers: [text] = []
 var fib_names: [text] = []
 var fib_source_names: [text] = []
 var fib_owners: [text] = []
+var fib_buckets: [i64] = []
+var fib_nexts: [i64] = []
+
 var fmn_callers: [text] = []
 var fmn_aliases: [text] = []
 var fmn_owners: [text] = []
+var fmn_buckets: [i64] = []
+var fmn_nexts: [i64] = []
+var fmn_caller_buckets: [i64] = []
+var fmn_caller_nexts: [i64] = []
+
+# Cached generator-body check indexed by dense decl_id (-1 = uncached, 0 = no, 1 = yes).
+# Cleared on func_table_reset() so recycled decl_ids after ast_reset() never
+# inherit stale generator classifications from an earlier module run.
+var _yield_cache: [i64] = []
+
+# Chain-probe counter for deterministic O(1) lookup verification in unit specs.
+var _eval_table_chain_probes: i64 = 0
 
 # ===== Function Return Types (Hash Map) =====
 var frt_keys: [text] = []
@@ -165,6 +188,12 @@ pub fn func_table_reset():
     fto_owners = []
     fto_names = []
     fto_vals = []
+    fto_buckets = hm_make_global_buckets()
+    fto_nexts = []
+    fto_name_keys = []
+    fto_name_counts = []
+    fto_name_buckets = hm_make_global_buckets()
+    fto_name_nexts = []
     func_import_binding_reset()
     frt_keys = []
     frt_vals = []
@@ -176,6 +205,35 @@ pub fn func_table_reset():
     mu_nexts = []
     must_use_critical_mode = false
     decl_owner_file_reset()
+    yield_cache_reset()
+    _eval_table_chain_probes = 0
+
+fn yield_cache_reset():
+    _yield_cache = []
+
+# reason: core-interpreter dense decl_id arena index and tri-state (-1/0/1) generator cache read
+@allow(primitive_api) # reason: core-interpreter dense decl_id arena index and tri-state (-1/0/1) generator cache read
+pub fn func_yield_cache_get(decl_id: i64) -> i64:
+    if decl_id < 0 or decl_id >= _yield_cache.len():
+        return -1
+    _yield_cache[decl_id]
+
+# reason: core-interpreter dense decl_id arena index and bool generator classification write
+@allow(primitive_api) # reason: core-interpreter dense decl_id arena index and bool generator classification write
+pub fn func_yield_cache_set(decl_id: i64, has_yield: bool):
+    if decl_id < 0:
+        return
+    while _yield_cache.len() <= decl_id:
+        _yield_cache.push(-1)
+    _yield_cache[decl_id] = if has_yield: 1 else: 0
+
+pub fn eval_table_chain_probes_reset():
+    _eval_table_chain_probes = 0
+
+# reason: core-interpreter O(1) hash-chain probe telemetry returns raw i64 step count
+@allow(primitive_api) # reason: core-interpreter O(1) hash-chain probe telemetry returns raw i64 step count
+pub fn eval_table_chain_probes_get() -> i64:
+    _eval_table_chain_probes
 
 # Co-compiled signature-collision detection.
 #
@@ -307,23 +365,74 @@ pub fn func_table_lookup(name: text) -> i64:
         idx = ft_nexts[idx]
     -1
 
-pub fn func_table_register_owned(owner: text, name: text, decl_id: i64):
-    var i = 0
-    while i < fto_names.len():
-        if fto_owners[i] == owner and fto_names[i] == name:
-            fto_vals[i] = decl_id
+fn _hm_pair_bucket(a: text, b: text) -> i64:
+    val ha = hm_hash_text(a)
+    val hb = hm_hash_text(b)
+    var mixed = (ha * 1099511628211) xor (hb + 2654435761)
+    if mixed < 0:
+        mixed = 0 - mixed
+        if mixed < 0:
+            mixed = 0
+    mixed % HM_SIZE
+
+fn _fto_name_owner_count_inc(name: text):
+    if fto_name_buckets.len() == 0:
+        fto_name_buckets = hm_make_global_buckets()
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = fto_name_buckets[bucket]
+    while idx != -1:
+        if fto_name_keys[idx] == name:
+            fto_name_counts[idx] = fto_name_counts[idx] + 1
             return
-        i = i + 1
+        idx = fto_name_nexts[idx]
+    val new_idx = fto_name_keys.len()
+    fto_name_keys.push(name)
+    fto_name_counts.push(1)
+    fto_name_nexts.push(fto_name_buckets[bucket])
+    fto_name_buckets[bucket] = new_idx
+
+# reason: core-interpreter per-name owner count query returns raw i64 count
+@allow(primitive_api) # reason: core-interpreter per-name owner count query returns raw i64 count
+pub fn func_owner_count(name: text) -> i64:
+    if fto_name_buckets.len() == 0:
+        return 0
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = fto_name_buckets[bucket]
+    while idx != -1:
+        _eval_table_chain_probes = _eval_table_chain_probes + 1
+        if fto_name_keys[idx] == name:
+            return fto_name_counts[idx]
+        idx = fto_name_nexts[idx]
+    0
+
+pub fn func_table_register_owned(owner: text, name: text, decl_id: i64):
+    if fto_buckets.len() == 0:
+        fto_buckets = hm_make_global_buckets()
+    val bucket = _hm_pair_bucket(owner, name)
+    var idx = fto_buckets[bucket]
+    while idx != -1:
+        if fto_owners[idx] == owner and fto_names[idx] == name:
+            fto_vals[idx] = decl_id
+            return
+        idx = fto_nexts[idx]
+    val new_idx = fto_names.len()
     fto_owners.push(owner)
     fto_names.push(name)
     fto_vals.push(decl_id)
+    fto_nexts.push(fto_buckets[bucket])
+    fto_buckets[bucket] = new_idx
+    _fto_name_owner_count_inc(name)
 
 pub fn func_table_lookup_owned(owner: text, name: text) -> i64:
-    var i = fto_names.len()
-    while i > 0:
-        i = i - 1
-        if fto_owners[i] == owner and fto_names[i] == name:
-            return fto_vals[i]
+    if fto_buckets.len() == 0:
+        return -1
+    val bucket = _hm_pair_bucket(owner, name)
+    var idx = fto_buckets[bucket]
+    while idx != -1:
+        _eval_table_chain_probes = _eval_table_chain_probes + 1
+        if fto_owners[idx] == owner and fto_names[idx] == name:
+            return fto_vals[idx]
+        idx = fto_nexts[idx]
     -1
 
 pub fn func_import_binding_reset():
@@ -331,29 +440,50 @@ pub fn func_import_binding_reset():
     fib_names = []
     fib_source_names = []
     fib_owners = []
+    fib_buckets = hm_make_global_buckets()
+    fib_nexts = []
     fmn_callers = []
     fmn_aliases = []
     fmn_owners = []
+    fmn_buckets = hm_make_global_buckets()
+    fmn_nexts = []
+    fmn_caller_buckets = hm_make_global_buckets()
+    fmn_caller_nexts = []
 
 fn func_module_namespace_register(caller: text, alias: text, owner: text):
     if alias == "" or owner == "":
         return
-    var i = 0
-    while i < fmn_aliases.len():
-        if fmn_callers[i] == caller and fmn_aliases[i] == alias:
-            fmn_owners[i] = owner
+    if fmn_buckets.len() == 0:
+        fmn_buckets = hm_make_global_buckets()
+    if fmn_caller_buckets.len() == 0:
+        fmn_caller_buckets = hm_make_global_buckets()
+    val bucket = _hm_pair_bucket(caller, alias)
+    var idx = fmn_buckets[bucket]
+    while idx != -1:
+        if fmn_callers[idx] == caller and fmn_aliases[idx] == alias:
+            fmn_owners[idx] = owner
             return
-        i = i + 1
+        idx = fmn_nexts[idx]
+    val new_idx = fmn_aliases.len()
     fmn_callers.push(caller)
     fmn_aliases.push(alias)
     fmn_owners.push(owner)
+    fmn_nexts.push(fmn_buckets[bucket])
+    fmn_buckets[bucket] = new_idx
+    val caller_bucket = hm_hash_text(caller) % HM_SIZE
+    fmn_caller_nexts.push(fmn_caller_buckets[caller_bucket])
+    fmn_caller_buckets[caller_bucket] = new_idx
 
 pub fn func_module_namespace_lookup(caller: text, alias: text) -> text:
-    var i = fmn_aliases.len()
-    while i > 0:
-        i = i - 1
-        if fmn_callers[i] == caller and fmn_aliases[i] == alias:
-            return fmn_owners[i]
+    if alias == "" or fmn_buckets.len() == 0:
+        return ""
+    val bucket = _hm_pair_bucket(caller, alias)
+    var idx = fmn_buckets[bucket]
+    while idx != -1:
+        _eval_table_chain_probes = _eval_table_chain_probes + 1
+        if fmn_callers[idx] == caller and fmn_aliases[idx] == alias:
+            return fmn_owners[idx]
+        idx = fmn_nexts[idx]
     ""
 
 pub fn func_resolve_module_member_for_caller(
@@ -373,19 +503,16 @@ pub val FUNC_LOOKUP_AMBIGUOUS: i64 = -2
 
 # Distinct owner modules that registered a definition of `name`
 # (`func_table_register_owned`), in registration order.
+# Cold diagnostic helper: normal calls query `func_owner_count(name)` without
+# allocating an `owners: [text]` array.
 pub fn func_owners_of(name: text) -> [text]:
+    if func_owner_count(name) == 0:
+        return []
     var owners: [text] = []
     var i = 0
     while i < fto_names.len():
         if fto_names[i] == name:
-            var seen = false
-            var j = 0
-            while j < owners.len():
-                if owners[j] == fto_owners[i]:
-                    seen = true
-                j = j + 1
-            if not seen:
-                owners.push(fto_owners[i])
+            owners.push(fto_owners[i])
         i = i + 1
     owners
 
@@ -396,17 +523,20 @@ pub fn func_flat_lookup_for_caller(caller: text, name: text) -> i64:
     val candidate = func_table_lookup(name)
     if candidate < 0:
         return -1
-    var i = 0
-    while i < fmn_aliases.len():
-        if fmn_callers[i] == caller and
-           func_resolve_for_caller_depth(fmn_owners[i], name, 0) == candidate:
-            return -1
-        i = i + 1
+    if fmn_caller_buckets.len() > 0:
+        val caller_bucket = hm_hash_text(caller) % HM_SIZE
+        var idx = fmn_caller_buckets[caller_bucket]
+        while idx != -1:
+            _eval_table_chain_probes = _eval_table_chain_probes + 1
+            if fmn_callers[idx] == caller and
+               func_resolve_for_caller_depth(fmn_owners[idx], name, 0) == candidate:
+                return -1
+            idx = fmn_caller_nexts[idx]
     # The caller reached this legacy flat lookup because
     # `func_resolve_for_caller` found no owned definition and no import route.
     # With a single owner the flat pick IS that owner's definition; with
     # several it is whichever registered last -- ambiguous, so refuse.
-    if func_owners_of(name).len() >= 2:
+    if func_owner_count(name) >= 2:
         return FUNC_LOOKUP_AMBIGUOUS
     candidate
 
@@ -419,27 +549,37 @@ fn func_import_binding_names(name: text) -> (text, text):
     (name, name)
 
 pub fn func_import_binding_register(caller: text, name: text, owner: text):
+    if fib_buckets.len() == 0:
+        fib_buckets = hm_make_global_buckets()
     val binding_names = func_import_binding_names(name)
     val source_name = binding_names.0
     val local_name = binding_names.1
-    var i = 0
-    while i < fib_names.len():
-        if fib_callers[i] == caller and fib_names[i] == local_name:
-            fib_source_names[i] = source_name
-            fib_owners[i] = owner
+    val bucket = _hm_pair_bucket(caller, local_name)
+    var idx = fib_buckets[bucket]
+    while idx != -1:
+        if fib_callers[idx] == caller and fib_names[idx] == local_name:
+            fib_source_names[idx] = source_name
+            fib_owners[idx] = owner
             return
-        i = i + 1
+        idx = fib_nexts[idx]
+    val new_idx = fib_names.len()
     fib_callers.push(caller)
     fib_names.push(local_name)
     fib_source_names.push(source_name)
     fib_owners.push(owner)
+    fib_nexts.push(fib_buckets[bucket])
+    fib_buckets[bucket] = new_idx
 
 pub fn func_import_binding_route(caller: text, name: text) -> (text, text):
-    var i = fib_names.len()
-    while i > 0:
-        i = i - 1
-        if fib_callers[i] == caller and fib_names[i] == name:
-            return (fib_owners[i], fib_source_names[i])
+    if fib_buckets.len() == 0:
+        return ("", "")
+    val bucket = _hm_pair_bucket(caller, name)
+    var idx = fib_buckets[bucket]
+    while idx != -1:
+        _eval_table_chain_probes = _eval_table_chain_probes + 1
+        if fib_callers[idx] == caller and fib_names[idx] == name:
+            return (fib_owners[idx], fib_source_names[idx])
+        idx = fib_nexts[idx]
     ("", "")
 
 pub fn func_import_binding_lookup(caller: text, name: text) -> text:

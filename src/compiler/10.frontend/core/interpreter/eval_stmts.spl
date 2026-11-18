@@ -29,6 +29,7 @@ use compiler.core.interpreter.eval.{eval_block, eval_break_label, eval_breaking,
 use compiler.core.interpreter.eval.{eval_control_condition, eval_current_decl_id, eval_defer_depth, eval_defer_depths, eval_defer_eids}
 use compiler.core.interpreter.eval.{eval_errdefer_depths, eval_errdefer_eids, eval_expr, eval_had_error, eval_option_binding_value}
 use compiler.core.interpreter.eval.{eval_return_value, eval_returning, eval_set_error, eval_warnings, match_pattern}
+use compiler.core.interpreter.eval.{eval_ignored_return_sid_mark, eval_ignored_return_sid_seen, eval_match_stmt_memo_get, eval_match_stmt_memo_put, match_stmt_memo_found}
 use compiler.core.interpreter.eval.{pattern_is_wildcard_catch, record_control_decision, val_enum_variant_name, val_is_boxed_enum}
 use compiler.core.interpreter.eval_tables.{check_match_exhaustive, func_lookup_return_type, infer_match_enum_type, match_fallthrough_get_abort, must_use_critical_mode}
 use compiler.core.interpreter.eval_tables.{must_use_get_reason, must_use_is_registered, report_match_fallthrough, report_match_wildcard_catch}
@@ -47,6 +48,8 @@ use compiler.core.interpreter.value_places.{eval_mutable_value_place, eval_prepa
 use compiler.core.interpreter.eval_decls.{eval_decl, eval_module, eval_init}
 use compiler.core.interpreter.eval_decls.{eval_await_expr, eval_yield_expr, eval_spawn_expr}
 use compiler.core.interpreter.eval_decls.{eval_labeled_loop, eval_do_block, eval_atom_expr}
+
+extern fn rt_coverage_enabled() -> bool
 
 # ===== Statement Evaluation =====
 
@@ -157,8 +160,8 @@ pub fn eval_stmt(sid: i64) -> i64:
 fn eval_stmt_expr(sid: i64) -> i64:
     val eid = stmt_get_expr(sid)
 
-    # Check if this is a function call with ignored return value
-    if eid >= 0:
+    # Check if this is a function call with ignored return value (deduplicated per sid)
+    if eid >= 0 and not eval_ignored_return_sid_seen(sid):
         val e_node = expr_get(eid)
         val e_tag = e_node.tag
         if e_tag == EXPR_CALL:
@@ -170,7 +173,10 @@ fn eval_stmt_expr(sid: i64) -> i64:
                 val ret_type = func_lookup_return_type(fn_name)
                 val is_void = ret_type == 0
                 val is_unknown = ret_type == -1
+                if is_void:
+                    eval_ignored_return_sid_mark(sid)
                 if is_void == false and is_unknown == false:
+                    eval_ignored_return_sid_mark(sid)
                     if must_use_is_registered(fn_name):
                         val reason = must_use_get_reason(fn_name)
                         val msg = "error[R9]: return value of function '" + fn_name + "' must be used"
@@ -187,6 +193,10 @@ fn eval_stmt_expr(sid: i64) -> i64:
                         val type_name = type_tag_name(ret_type)
                         val warning = "warning: return value of type '" + type_name + "' from function '" + fn_name + "' is ignored"
                         eval_warnings.push(warning)
+            else:
+                eval_ignored_return_sid_mark(sid)
+        else:
+            eval_ignored_return_sid_mark(sid)
 
     eval_expr(eid)
 
@@ -298,11 +308,12 @@ fn eval_stmt_assign(sid: i64) -> i64:
         if ok == false:
             eval_set_error("undefined variable: " + name)
             return -1
-        # LOAD_FAST: also update fast local slot
-        if eval_current_decl_id >= 0:
-            val slot = resolve_is_fast_local(eval_current_decl_id, name)
-            if slot >= 0:
-                env_set_local(slot, new_val)
+        # LOAD_FAST: check pre-resolved expr_owner_int slot first
+        var fast_slot = expr_owner_int(target_eid)
+        if fast_slot < 0 and eval_current_decl_id >= 0:
+            fast_slot = resolve_is_fast_local(eval_current_decl_id, name)
+        if fast_slot >= 0 and env_has_frame():
+            env_set_local(fast_slot, new_val)
         return new_val
 
     if target_tag == EXPR_FIELD_ACCESS:
@@ -416,16 +427,12 @@ fn eval_stmt_return(sid: i64) -> i64:
     ret_val
 
 fn record_stmt_control_decision(sid: i64, taken: bool):
-    val span_id = stmt_get_span(sid)
-    var source_line = 0
-    var source_column = 0
-    if span_is_valid(span_id):
-        source_line = span_line(span_id)
-        source_column = span_col(span_id)
-    if span_is_valid(span_id):
-        record_control_decision(
-            coverage_owner_file(), source_line, source_column,
-            span_start(span_id) + 1, taken)
+    if rt_coverage_enabled():
+        val span_id = stmt_get_span(sid)
+        if span_is_valid(span_id):
+            record_control_decision(
+                coverage_owner_file(), span_line(span_id), span_col(span_id),
+                span_start(span_id) + 1, taken)
 
 fn eval_stmt_if(sid: i64) -> i64:
     val elif_idx = stmt_get_type(sid)
@@ -433,11 +440,15 @@ fn eval_stmt_if(sid: i64) -> i64:
     val then_stmts = elif_get_body(elif_idx)
     val else_stmts = elif_get_else(elif_idx)
 
-    val cond_val = eval_control_condition(cond_eid, coverage_span_decision_id(stmt_get_span(sid)))
+    var decision_id: i64 = -1
+    if rt_coverage_enabled():
+        decision_id = coverage_span_decision_id(stmt_get_span(sid))
+    val cond_val = eval_control_condition(cond_eid, decision_id)
     if eval_had_error: return -1
 
     val taken = val_is_truthy(cond_val)
-    record_stmt_control_decision(sid, taken)
+    if rt_coverage_enabled():
+        record_stmt_control_decision(sid, taken)
     if taken:
         env_push_scope()
         var last_val = val_make_nil()
@@ -649,15 +660,19 @@ fn eval_stmt_while(sid: i64) -> i64:
     val body_stmts = stmt_get_body(sid)
     var last_val = val_make_nil()
     var iterations: i64 = 0
+    var decision_id: i64 = -1
+    if rt_coverage_enabled():
+        decision_id = coverage_span_decision_id(stmt_get_span(sid))
 
     while iterations < 1000000:
         if eval_had_error: break
         if eval_returning: break
         if eval_breaking: break
-        val cond_val = eval_control_condition(cond_eid, coverage_span_decision_id(stmt_get_span(sid)))
+        val cond_val = eval_control_condition(cond_eid, decision_id)
         if eval_had_error: break
         val taken = val_is_truthy(cond_val)
-        record_stmt_control_decision(sid, taken)
+        if rt_coverage_enabled():
+            record_stmt_control_decision(sid, taken)
         if taken == false: break
         eval_continuing = false
         eval_continue_label = ""
@@ -690,9 +705,12 @@ fn eval_stmt_match(sid: i64) -> i64:
     val scrutinee = eval_expr(scrutinee_eid)
     if eval_had_error: return -1
 
-    # Exhaustiveness check: warn if enum variants are not all covered
-    val inferred_type2 = infer_match_enum_type(arm_ids)
-    check_match_exhaustive(arm_ids, inferred_type2)
+    # Exhaustiveness check: warn if enum variants are not all covered (memoized per sid)
+    var inferred_type2 = eval_match_stmt_memo_get(sid)
+    if not match_stmt_memo_found:
+        inferred_type2 = infer_match_enum_type(arm_ids)
+        check_match_exhaustive(arm_ids, inferred_type2)
+        eval_match_stmt_memo_put(sid, inferred_type2)
 
     for arm_id in arm_ids:
         val pattern_eid = arm_get_pattern(arm_id)
@@ -703,21 +721,20 @@ fn eval_stmt_match(sid: i64) -> i64:
         val matched = match_pattern(scrutinee, pattern_eid)
         if matched:
             if guard_eid >= 0:
-                val guard_val = eval_control_condition(guard_eid, coverage_span_decision_id(expr_get(guard_eid).span_id))
+                var guard_decision_id: i64 = -1
+                if rt_coverage_enabled():
+                    guard_decision_id = coverage_span_decision_id(expr_get(guard_eid).span_id)
+                val guard_val = eval_control_condition(guard_eid, guard_decision_id)
                 if eval_had_error:
                     env_pop_scope()
                     return -1
                 val guard_taken = val_is_truthy(guard_val)
-                val guard_span = expr_get(guard_eid).span_id
-                var guard_line: i64 = 0
-                var guard_column: i64 = 0
-                if span_is_valid(guard_span):
-                    guard_line = span_line(guard_span)
-                    guard_column = span_col(guard_span)
-                if span_is_valid(guard_span):
-                    record_control_decision(
-                        coverage_owner_file(), guard_line, guard_column,
-                        span_start(guard_span) + 1, guard_taken)
+                if rt_coverage_enabled():
+                    val guard_span = expr_get(guard_eid).span_id
+                    if span_is_valid(guard_span):
+                        record_control_decision(
+                            coverage_owner_file(), span_line(guard_span), span_col(guard_span),
+                            span_start(guard_span) + 1, guard_taken)
                 if guard_taken == false:
                     env_pop_scope()
                     continue

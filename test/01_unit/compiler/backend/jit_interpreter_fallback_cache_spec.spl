@@ -1,0 +1,315 @@
+# Purpose and audience: executable specification evidence for Wave B4 JIT fallback & negative cache contract.
+# @req REQ-SSPEC-UNIT
+# @cover src/compiler/70.backend/backend/jit_interpreter.spl
+# @cover src/compiler/95.interp/execution/mod.spl
+# @cover src/app/io/jit_sffi.spl
+# @tag: unit, compiler, backend, jit, interpreter, fallback, cache
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_exists}
+use app.io.jit_sffi.{
+    rt_exec_manager_create,
+    rt_exec_manager_cleanup,
+    rt_exec_manager_is_valid,
+    rt_exec_manager_has_function,
+    rt_exec_manager_list_functions,
+    rt_exec_manager_compile_source,
+    rt_exec_manager_compile_mir,
+    rt_exec_manager_execute_checked
+}
+use compiler.interp.execution.mod.{LocalExecutionManager}
+use compiler.backend.jit_interpreter.{
+    JitMode,
+    JitInterpreterConfig,
+    JitInterpreterBackend
+}
+use compiler.backend.backend_types.{Value, backend_value_int_v1}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_serialization.{serialize_mir_function}
+
+fn _lines(xs: [text]) -> text:
+    xs.join("\n") + "\n"
+
+fn _lower_fixture(src: text, mod_name: text) -> HirModule:
+    val vpath = "test/{mod_name}.spl"
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(src, vpath, mod_name, log)
+    var modules: Dict<text, Module> = {}
+    modules[mod_name] = ast
+    val sources = [SourceFile(path: vpath, content: src, module_name: mod_name)]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hl = hirlowering_for_module(vpath, surfaces)
+    hl.lower_module(ast)
+
+fn _find_fn(hir: HirModule, name: text) -> HirFunction:
+    var found: HirFunction? = None
+    for fn_item in hir.functions.values():
+        val f: HirFunction = fn_item
+        if f.name == name:
+            found = Some(f)
+    found.unwrap()
+
+fn _extract_int(v: Value) -> i64:
+    match v:
+        case Value.Int(n): n
+        case _: -999999
+
+describe "jit_sffi handle state, MIR guard, and checked execution":
+    it "allocates monotonic handles and tracks validity and O(1) function membership in memory":
+        val h1 = rt_exec_manager_create("auto")
+        val h2 = rt_exec_manager_create("interpreter")
+        val h_invalid = rt_exec_manager_create("cranelift")
+
+        expect(h1).to_be_greater_than(0)
+        expect(h2).to_equal(h1 + 1)
+        expect(h_invalid).to_equal(0)
+        expect(rt_exec_manager_is_valid(0)).to_be(false)
+        expect(rt_exec_manager_is_valid(-1)).to_be(false)
+        expect(rt_exec_manager_is_valid(h1)).to_be(true)
+        expect(rt_exec_manager_is_valid(h2)).to_be(true)
+
+        val src = _lines([
+            "fn neg_one() -> i64:",
+            "    -1",
+            "",
+            "fn add(a: i64, b: i64) -> i64:",
+            "    a + b"
+        ])
+        expect(rt_exec_manager_compile_source(h1, src)).to_equal("")
+        expect(rt_exec_manager_has_function(h1, "neg_one")).to_be(true)
+        expect(rt_exec_manager_has_function(h1, "add")).to_be(true)
+        expect(rt_exec_manager_has_function(h1, "missing")).to_be(false)
+        expect(rt_exec_manager_list_functions(h1)).to_contain("neg_one")
+
+        expect(rt_exec_manager_cleanup(h1)).to_equal(0)
+        expect(rt_exec_manager_cleanup(h2)).to_equal(0)
+        expect(rt_exec_manager_is_valid(h1)).to_be(false)
+        expect(rt_exec_manager_has_function(h1, "neg_one")).to_be(false)
+
+    it "rejects raw serialized MIR payloads without writing MIR into .spl files":
+        val hir = _lower_fixture(_lines([
+            "fn sample(x: i64) -> i64:",
+            "    x + 1"
+        ]), "wave_b4_mir_guard")
+        var lowering = MirLowering.new(hir.symbols)
+        val mir_fn = lowering.lower_function(_find_fn(hir, "sample"))
+        val mir_json = serialize_mir_function(mir_fn)
+
+        val handle = rt_exec_manager_create("auto")
+        val soft_file = "tmp/jit/simple_soft_jit_{handle}.spl"
+        val err = rt_exec_manager_compile_mir(handle, mir_json)
+
+        expect(err).to_contain("MIR")
+        expect(file_exists(soft_file)).to_be(false)
+        expect(rt_exec_manager_has_function(handle, "sample")).to_be(false)
+        expect(rt_exec_manager_cleanup(handle)).to_equal(0)
+
+    it "distinguishes valid -1 returns from execution failures via rt_exec_manager_execute_checked":
+        val handle = rt_exec_manager_create("auto")
+        val src = _lines([
+            "fn always_minus_one() -> i64:",
+            "    -1",
+            "",
+            "fn sub(a: i64, b: i64) -> i64:",
+            "    a - b"
+        ])
+        expect(rt_exec_manager_compile_source(handle, src)).to_equal("")
+
+        val (ok1, val1, err1) = rt_exec_manager_execute_checked(handle, "always_minus_one", [])
+        expect(ok1).to_be(true)
+        expect(val1).to_equal(-1)
+        expect(err1).to_equal("")
+
+        val (ok2, val2, err2) = rt_exec_manager_execute_checked(handle, "sub", [10, 11])
+        expect(ok2).to_be(true)
+        expect(val2).to_equal(-1)
+        expect(err2).to_equal("")
+
+        val (ok_missing, _, err_missing) = rt_exec_manager_execute_checked(handle, "missing_fn", [])
+        expect(ok_missing).to_be(false)
+        expect(err_missing).to_contain("not found")
+
+        expect(rt_exec_manager_cleanup(handle)).to_equal(0)
+        val (ok_closed, _, err_closed) = rt_exec_manager_execute_checked(handle, "always_minus_one", [])
+        expect(ok_closed).to_be(false)
+        expect(err_closed).to_contain("Invalid")
+
+describe "LocalExecutionManager typed Result contract":
+    it "tracks is_valid, return_types, and preserves Ok(-1) vs Err on execute":
+        val invalid_em = LocalExecutionManager.cranelift()
+        expect(invalid_em.is_valid()).to_be(false)
+
+        var em = LocalExecutionManager.auto_select()
+        expect(em.is_valid()).to_be(true)
+        expect(em.get_return_type("neg")).to_equal("i64")
+        em.set_return_type("neg", "bool")
+        expect(em.get_return_type("neg")).to_equal("bool")
+        em.set_return_type("neg", "i64")
+
+        val compile_res = em.compile(_lines([
+            "fn neg(x: i64) -> i64:",
+            "    x - 1"
+        ]))
+        expect(compile_res.is_ok()).to_be(true)
+        expect(em.has_function("neg")).to_be(true)
+
+        match em.execute("neg", [0]):
+            case Ok(v):
+                expect(v).to_equal(-1)
+            case Err(_):
+                expect(false).to_be(true)
+
+        match em.execute("does_not_exist", []):
+            case Ok(_):
+                expect(false).to_be(true)
+            case Err(msg):
+                expect(msg).to_contain("not found")
+
+        em.cleanup()
+        expect(em.is_valid()).to_be(false)
+        expect(em.execute("neg", [0]).is_err()).to_be(true)
+
+describe "JitInterpreterBackend negative cache and fallback contract":
+    it "rejects invalid execution managers with handle <= 0 in ensure_exec_manager":
+        var backend = JitInterpreterBackend.new(JitInterpreterConfig(
+            mode: JitMode.Auto,
+            backend: "cranelift",
+            jit_threshold: 1,
+            verbose: false
+        ))
+        val res = backend.ensure_exec_manager()
+        expect(res.is_err()).to_be(true)
+        expect(backend.exec_manager.?).to_be(false)
+
+    it "attempts JIT compilation only once across repeated calls in Auto and Hybrid modes when em.compile rejects MIR":
+        val hir = _lower_fixture(_lines([
+            "fn compute(x: i64) -> i64:",
+            "    x * 2 - 1"
+        ]), "wave_b4_auto_cache")
+        val compute_fn = _find_fn(hir, "compute")
+
+        var auto_backend = JitInterpreterBackend.new(JitInterpreterConfig.auto_jit())
+        val ctx = auto_backend.make_eval_context(hir)
+
+        var i = 0
+        while i < 5:
+            val call_res = auto_backend.call_hir_function(
+                compute_fn,
+                [backend_value_int_v1(21)],
+                ctx,
+                hir
+            )
+            expect(call_res.is_ok()).to_be(true)
+            expect(_extract_int(call_res.unwrap())).to_equal(41)
+            i = i + 1
+
+        expect(auto_backend.compile_attempts).to_equal(1)
+        expect(auto_backend.fallback_calls).to_equal(5)
+        expect(auto_backend.jit_failed.has("compute")).to_be(true)
+        expect(auto_backend.should_jit_compile("compute")).to_be(false)
+
+        var hybrid_backend = JitInterpreterBackend.new(JitInterpreterConfig.hybrid(2))
+        val hctx = hybrid_backend.make_eval_context(hir)
+        var j = 0
+        while j < 5:
+            val hres = hybrid_backend.call_hir_function(
+                compute_fn,
+                [backend_value_int_v1(0)],
+                hctx,
+                hir
+            )
+            expect(hres.is_ok()).to_be(true)
+            expect(_extract_int(hres.unwrap())).to_equal(-1)
+            j = j + 1
+
+        expect(hybrid_backend.compile_attempts).to_equal(1)
+        expect(hybrid_backend.fallback_calls).to_equal(5)
+        expect(hybrid_backend.jit_failed.has("compute")).to_be(true)
+        expect(hybrid_backend.should_jit_compile("compute")).to_be(false)
+
+    it "caches @cfg-disabled functions in jit_failed in Auto mode and surfaces Err in AlwaysJit mode":
+        val hir = _lower_fixture(_lines([
+            "fn target_gated() -> i64:",
+            "    77"
+        ]), "wave_b4_cfg_cache")
+        var gated_fn = _find_fn(hir, "target_gated")
+        gated_fn.cfg = ["feature == \"nonexistent_wave_b4_feature\""]
+
+        var auto_backend = JitInterpreterBackend.new(JitInterpreterConfig.auto_jit())
+        val ctx = auto_backend.make_eval_context(hir)
+        var k = 0
+        while k < 4:
+            val r = auto_backend.call_hir_function(gated_fn, [], ctx, hir)
+            expect(r.is_ok()).to_be(true)
+            expect(_extract_int(r.unwrap())).to_equal(77)
+            k = k + 1
+
+        expect(auto_backend.compile_attempts).to_equal(1)
+        expect(auto_backend.fallback_calls).to_equal(4)
+        expect(auto_backend.jit_failed.has("target_gated")).to_be(true)
+        expect(auto_backend.should_jit_compile("target_gated")).to_be(false)
+
+        var strict_backend = JitInterpreterBackend.new(JitInterpreterConfig.always_jit())
+        val strict_ctx = strict_backend.make_eval_context(hir)
+        val strict_res = strict_backend.call_hir_function(gated_fn, [], strict_ctx, hir)
+        expect(strict_res.is_err()).to_be(true)
+
+    it "caches MIR lowering failures in jit_failed in Auto mode and surfaces Err in AlwaysJit mode":
+        val full_hir = _lower_fixture(_lines([
+            "pub enum LocalStage:",
+            "    Cold",
+            "    Warm",
+            "",
+            "fn stage_code(s: LocalStage) -> i64:",
+            "    match s:",
+            "        LocalStage.Cold: 0",
+            "        LocalStage.Warm: 1"
+        ]), "wave_b4_mir_fail")
+        val stage_fn = _find_fn(full_hir, "stage_code")
+        var stripped_hir = full_hir
+        stripped_hir.enums = {}
+
+        var auto_backend = JitInterpreterBackend.new(JitInterpreterConfig(
+            mode: JitMode.Auto,
+            backend: "auto",
+            jit_threshold: 1,
+            verbose: false
+        ))
+        auto_backend.record_call("stage_code")
+        var m = 0
+        while m < 4:
+            val r = auto_backend.try_jit_compile(stage_fn, stripped_hir)
+            expect(r.is_ok()).to_be(true)
+            m = m + 1
+
+        expect(auto_backend.compile_attempts).to_equal(1)
+        expect(auto_backend.jit_failed.has("stage_code")).to_be(true)
+        expect(auto_backend.jit_failed["stage_code"]).to_contain("MIR lowering failed")
+        expect(auto_backend.should_jit_compile("stage_code")).to_be(false)
+
+        var strict_backend = JitInterpreterBackend.new(JitInterpreterConfig.always_jit())
+        val strict_res = strict_backend.try_jit_compile(stage_fn, stripped_hir)
+        expect(strict_res.is_err()).to_be(true)
+        expect(strict_res.unwrap_err().message).to_contain("MIR lowering failed")
+
+    it "surfaces Err in AlwaysJit mode when MIR compilation fails":
+        val hir = _lower_fixture(_lines([
+            "fn must_jit(x: i64) -> i64:",
+            "    x + 10"
+        ]), "wave_b4_always_jit")
+        val fn_ = _find_fn(hir, "must_jit")
+
+        var strict_backend = JitInterpreterBackend.new(JitInterpreterConfig.always_jit())
+        val ctx = strict_backend.make_eval_context(hir)
+        val res = strict_backend.call_hir_function(fn_, [backend_value_int_v1(5)], ctx, hir)
+        expect(res.is_err()).to_be(true)
+        expect(strict_backend.fallback_calls).to_equal(0)

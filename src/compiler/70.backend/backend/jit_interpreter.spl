@@ -1,40 +1,41 @@
+#![allow(primitive_api)]
 # JIT-Enabled Interpreter Backend - Hybrid Interpreter with JIT Compilation
 # (COMPILED-ONLY — requires generics, traits, Result<>)
 #
 # This module implements a hybrid interpreter that can:
 # 1. Use JIT compilation (Cranelift/LLVM) for hot functions
-# 2. Fall back to tree-walking for complex/dynamic code
+# 2. Fall back to tree-walking for complex/dynamic code with a negative cache
 # 3. Share backend infrastructure with the compiler
 #
 # Architecture:
 # - Hot path: Compile HIR → MIR → native code (via ExecutionManager)
-# - Cold path: Tree-walking via core.interpreter (runtime fallback)
-# - For runtime (interpreter mode), use compiler.interp (95.interp layer) instead
+# - Cold/fallback path: Reusable InterpreterBackendImpl + negative `jit_failed` cache
 
 use compiler.hir.hir.*
 use compiler.mir.mir.*
+use compiler.mir.mir_types.{MirType}
 use compiler.backend.backend_types.*
 use compiler.backend.env.{EvalContext, Environment}
-# use backend.interpreter.InterpreterBackendImpl  # DISABLED: Parse error in Cranelift mode
+use compiler.backend.interpreter.{InterpreterBackendImpl}
 use compiler.interp.execution.mod.{LocalExecutionManager, get_jit_backend}
 use compiler.mir.mir_lowering.MirLowering
 use compiler.mir.mir_serialization.serialize_mir_function
 use compiler.backend.backend_helpers.{get_effective_backend_name}
 use compiler.backend.mir_target_context_provider.{backend_mir_target_context}
-use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
+use compiler.hir.hir_types.{HirModule, HirSymbol}  # explicit: a glob is not an import-origin for surface projection
 
 # ============================================================================
 # JIT Interpreter Configuration
 # ============================================================================
 
-enum JitMode:
+pub enum JitMode:
     """JIT compilation mode."""
     Auto                    # Auto-select (JIT when possible, interpret fallback)
-    AlwaysJit              # Always use JIT (error if not possible)
-    AlwaysInterpret        # Never use JIT (pure tree-walking)
-    Hybrid                 # Smart hybrid (JIT hot paths, interpret cold)
+    AlwaysJit               # Always use JIT (error if not possible)
+    AlwaysInterpret         # Never use JIT (pure tree-walking)
+    Hybrid                  # Smart hybrid (JIT hot paths, interpret cold)
 
-struct JitInterpreterConfig:
+pub struct JitInterpreterConfig:
     """Configuration for JIT-enabled interpreter."""
     mode: JitMode
     backend: text          # "auto", "cranelift", "llvm"
@@ -42,8 +43,8 @@ struct JitInterpreterConfig:
     verbose: bool
 
 impl JitInterpreterConfig:
-    static fn default() -> JitInterpreterConfig:
-        """Create default configuration (auto mode, Cranelift backend)."""
+    pub static fn default() -> JitInterpreterConfig:
+        """Create default configuration (auto mode, auto backend)."""
         JitInterpreterConfig(
             mode: JitMode.Auto,
             backend: "auto",
@@ -51,7 +52,7 @@ impl JitInterpreterConfig:
             verbose: false
         )
 
-    static fn auto_jit() -> JitInterpreterConfig:
+    pub static fn auto_jit() -> JitInterpreterConfig:
         """Auto JIT mode - compile when possible, interpret otherwise."""
         JitInterpreterConfig(
             mode: JitMode.Auto,
@@ -60,7 +61,16 @@ impl JitInterpreterConfig:
             verbose: false
         )
 
-    static fn always_jit() -> JitInterpreterConfig:
+    pub static fn hybrid(threshold: i32) -> JitInterpreterConfig:
+        """Hybrid mode - JIT compile after `threshold` calls, interpret cold/failed."""
+        JitInterpreterConfig(
+            mode: JitMode.Hybrid,
+            backend: "auto",
+            jit_threshold: threshold,
+            verbose: false
+        )
+
+    pub static fn always_jit() -> JitInterpreterConfig:
         """Always JIT - error if compilation fails."""
         JitInterpreterConfig(
             mode: JitMode.AlwaysJit,
@@ -69,7 +79,7 @@ impl JitInterpreterConfig:
             verbose: false
         )
 
-    static fn interpret_only() -> JitInterpreterConfig:
+    pub static fn interpret_only() -> JitInterpreterConfig:
         """Never JIT - pure tree-walking interpreter."""
         JitInterpreterConfig(
             mode: JitMode.AlwaysInterpret,
@@ -78,67 +88,102 @@ impl JitInterpreterConfig:
             verbose: false
         )
 
+fn _mir_return_type_name(ret_type: MirType) -> text:
+    match ret_type.kind:
+        case I8 | I16 | I32 | I64 | U8 | U16 | U32 | U64: "i64"
+        case F32 | F64: "f64"
+        case Bool: "bool"
+        case Char: "char"
+        case Unit | Nil: "unit"
+        case _: "i64"
+
 # ============================================================================
 # JIT Interpreter Backend Implementation
 # ============================================================================
 
-struct JitInterpreterBackend:
-    """Hybrid interpreter backend with JIT compilation.
+pub struct JitInterpreterBackend:
+    """Hybrid interpreter backend with JIT compilation and negative caching.
 
     Strategy:
-    1. Start with tree-walking interpretation
+    1. Start with tree-walking interpretation via reusable `self.interp`
     2. Count function calls
-    3. When threshold reached, JIT compile the function
-    4. Subsequent calls use JIT-compiled code
-    5. Fall back to interpretation if JIT fails
+    3. When threshold reached, try to JIT compile the function at most once
+    4. Subsequent calls use JIT-compiled code when available
+    5. Cache failed functions in `jit_failed` in Auto/Hybrid modes so repeated
+       calls skip recompilation (`compile_attempts == 1`)
     """
     config: JitInterpreterConfig
     exec_manager: LocalExecutionManager?
     call_counts: Dict<text, i32>      # Function name → call count
-    jit_compiled: Set<text>            # Functions that are JIT-compiled
+    jit_compiled: Set<text>           # Functions that are JIT-compiled
+    jit_failed: Dict<text, text>      # Negative cache: fn_name → failure reason
+    compile_attempts: i64             # Number of JIT compilation attempts
+    fallback_calls: i64               # Number of calls routed to interpreter fallback
+    interp: InterpreterBackendImpl    # Reusable tree-walking fallback backend
 
 impl JitInterpreterBackend:
-    static fn new(config: JitInterpreterConfig) -> JitInterpreterBackend:
+    pub static fn new(config: JitInterpreterConfig) -> JitInterpreterBackend:
         """Create new JIT interpreter backend."""
         JitInterpreterBackend(
             config: config,
-            exec_manager: nil,
+            exec_manager: None,
             call_counts: {},
-            jit_compiled: {}
+            jit_compiled: {},
+            jit_failed: {},
+            compile_attempts: 0,
+            fallback_calls: 0,
+            interp: InterpreterBackendImpl.new()
         )
 
-    static fn default() -> JitInterpreterBackend:
+    pub static fn default() -> JitInterpreterBackend:
         """Create with default configuration."""
         JitInterpreterBackend.new(JitInterpreterConfig.default())
 
-    me ensure_exec_manager() -> Result<LocalExecutionManager, BackendError>:
-        """Ensure execution manager is initialized."""
+    pub me ensure_exec_manager() -> Result<LocalExecutionManager, BackendError>:
+        """Ensure execution manager is initialized and owns a valid handle (`handle > 0`)."""
         if self.exec_manager.?:
-            Ok(self.exec_manager.unwrap())
-        else:
-            # Create execution manager based on backend config
-            val em = match self.config.backend:
-                case "cranelift": LocalExecutionManager.cranelift()
-                case "llvm": LocalExecutionManager.llvm()
-                case "auto": LocalExecutionManager.auto_select()
-                case _: LocalExecutionManager.auto_select()
+            val existing = self.exec_manager.unwrap()
+            if existing.is_valid():
+                return Ok(existing)
+            self.exec_manager = None
 
-            self.exec_manager = Some(em)
-            Ok(em)
+        # Create execution manager based on backend config
+        val em = match self.config.backend:
+            case "cranelift": LocalExecutionManager.cranelift()
+            case "llvm": LocalExecutionManager.llvm()
+            case "auto": LocalExecutionManager.auto_select()
+            case _: LocalExecutionManager.auto_select()
 
-    me should_jit_compile(fn_name: text) -> bool:
+        if not em.is_valid():
+            return Err(BackendError.compile_error(
+                "JIT execution manager unavailable for backend '{self.config.backend}'",
+                None
+            ))
+
+        self.exec_manager = Some(em)
+        Ok(em)
+
+    # reason: JIT policy predicate checks function symbol name and returns compilation eligibility boolean
+    @allow(primitive_api)
+    pub me should_jit_compile(fn_name: text) -> bool:
         """Check if function should be JIT-compiled."""
+        if self.jit_compiled.contains(fn_name):
+            return false
         match self.config.mode:
             case AlwaysInterpret:
                 false
             case AlwaysJit:
                 true
             case Auto | Hybrid:
+                if self.jit_failed.has(fn_name):
+                    return false
                 # Check call count threshold
                 val count = self.call_counts[fn_name] ?? 0
                 count >= self.config.jit_threshold
 
-    me record_call(fn_name: text):
+    # reason: JIT hotness tracker increments call counter keyed by function symbol name
+    @allow(primitive_api)
+    pub me record_call(fn_name: text):
         """Record a function call for JIT threshold tracking."""
         val count = self.call_counts[fn_name] ?? 0
         self.call_counts[fn_name] = count + 1
@@ -148,21 +193,24 @@ impl JitInterpreterBackend:
             if self.config.verbose:
                 print "[jit] Function {fn_name} reached threshold, will JIT compile"
 
-    me try_jit_compile(fn_: HirFunction, module: HirModule) -> Result<(), BackendError>:
+    pub me try_jit_compile(fn_: HirFunction, module: HirModule) -> Result<(), BackendError>:
         """Try to JIT compile a function.
 
-        Full implementation requires:
-        1. MIR lowering (✅ available via MirLowering)
-        2. MIR serialization (⚠️ placeholder - needs implementation)
-        3. ExecutionManager compilation (✅ available via SFFI)
-
-        For now, this is a framework that will work once MIR serialization is added.
+        In Auto/Hybrid modes, failures in `@cfg` filtering, MIR lowering,
+        execution-manager initialization, or `em.compile` are recorded in
+        `self.jit_failed` so subsequent calls never retry compilation.
+        In AlwaysJit mode, failures surface `Err(BackendError)`.
         """
         if self.jit_compiled.contains(fn_.name):
             return Ok(())  # Already compiled
 
+        if self.config.mode != JitMode.AlwaysJit and self.jit_failed.has(fn_.name):
+            return Ok(())  # Cached negative result
+
         if not self.should_jit_compile(fn_.name):
             return Ok(())  # Not ready yet
+
+        self.compile_attempts = self.compile_attempts + 1
 
         if self.config.verbose:
             print "[jit] Compiling function: {fn_.name}"
@@ -177,24 +225,15 @@ impl JitInterpreterBackend:
         if not lowering.decl_cfg_keep(fn_.name, fn_.cfg, fn_.cfg_group, fn_.cfg_arm, jit_cfg_winners):
             # A malformed guard is an error in every mode, never a silent interpreter fallback.
             if lowering.errors.len() > 0:
-                return Err(BackendError.compile_error("malformed @cfg guard: {lowering.errors[0].message}", Some(fn_.span)))
+                val malformed_msg = "malformed @cfg guard: {lowering.errors[0].message}"
+                self.jit_failed[fn_.name] = malformed_msg
+                return Err(BackendError.compile_error(malformed_msg, Some(fn_.span)))
+            val cfg_msg = "@cfg-disabled function {fn_.name} for this target"
             if self.config.mode == JitMode.AlwaysJit:
-                return Err(BackendError.compile_error("@cfg-disabled function {fn_.name} for this target", Some(fn_.span)))
+                return Err(BackendError.compile_error(cfg_msg, Some(fn_.span)))
+            self.jit_failed[fn_.name] = cfg_msg
             return Ok(())
-        # Registry parity with the AOT lane (driver mir_setup): a fresh
-        # MirLowering owns EMPTY enum-variant and struct-layout registries, and
-        # lower_function -- unlike lower_module -- runs no provider pass that
-        # registers this module's own declarations. A hot function matching on
-        # its OWN module's enum (browser_engine `_level_rank` over
-        # BrowserLogLevel) then degraded every arm to "enum match: unknown
-        # variant" and silently fell back to interpretation -- the same
-        # demand-incomplete registry gap the AOT lane closed with
-        # register_module_enum_inventory_v1 (B5b,
-        # CompilerProfile.to_text). The bootstrap inventory variant also
-        # registers runtime ids and the builtin Option/Result seeds, which
-        # enum construction sites require (stage3 site-19); lower_function
-        # bypasses every provider pass exactly like that lane. The module is
-        # in hand here; the registrations are idempotent with the AOT setup.
+        # Registry parity with the AOT lane (driver mir_setup)
         var jit_registry_modules: Dict<text, HirModule> = {}
         jit_registry_modules["jit"] = module
         lowering.prescan_module_struct_names(jit_registry_modules, "jit")
@@ -204,9 +243,11 @@ impl JitInterpreterBackend:
 
         if lowering.errors.len() > 0:
             val err_msg = lowering.errors[0].message
+            val full_mir_err = "MIR lowering failed: {err_msg}"
             if self.config.mode == JitMode.AlwaysJit:
-                return Err(BackendError.compile_error("MIR lowering failed: {err_msg}", Some(fn_.span)))
+                return Err(BackendError.compile_error(full_mir_err, Some(fn_.span)))
             else:
+                self.jit_failed[fn_.name] = full_mir_err
                 if self.config.verbose:
                     print "[jit] MIR lowering failed for {fn_.name}, will interpret: {err_msg}"
                 return Ok(())
@@ -218,97 +259,92 @@ impl JitInterpreterBackend:
             print "[jit] Serialized MIR for {fn_.name} ({mir_data.len()} bytes)"
 
         # Step 3: Get execution manager and compile
-        val em = self.ensure_exec_manager()?
+        var em = match self.ensure_exec_manager():
+            case Ok(mgr):
+                mgr
+            case Err(err):
+                if self.config.mode == JitMode.AlwaysJit:
+                    return Err(err)
+                self.jit_failed[fn_.name] = err.message
+                if self.config.verbose:
+                    print "[jit] Execution manager unavailable for {fn_.name}, will interpret: {err.message}"
+                return Ok(())
+
         val compile_result = em.compile(mir_data)
 
         match compile_result:
             case Ok(_):
+                em.set_return_type(fn_.name, _mir_return_type_name(mir_fn.signature.return_type))
+                self.exec_manager = Some(em)
                 self.jit_compiled = self.jit_compiled.insert(fn_.name)
                 if self.config.verbose:
                     print "[jit] Successfully compiled: {fn_.name}"
                 Ok(())
             case Err(msg):
+                val full_compile_err = "JIT compilation failed: {msg}"
                 if self.config.mode == JitMode.AlwaysJit:
-                    Err(BackendError.compile_error("JIT compilation failed: {msg}", Some(fn_.span)))
+                    Err(BackendError.compile_error(full_compile_err, Some(fn_.span)))
                 else:
-                    # In Auto/Hybrid mode, just log and continue with interpretation
+                    self.jit_failed[fn_.name] = full_compile_err
                     if self.config.verbose:
                         print "[jit] Compilation failed for {fn_.name}, will interpret: {msg}"
                     Ok(())
 
-    me try_jit_execute(fn_name: text, args: [Value]) -> Option<Result<Value, BackendError>>:
-        """Try to execute via JIT. Returns None if not JIT-compiled.
-
-        Supports the following Simple types for JIT argument/return conversion:
-        1. Int (i64) - passed directly as i64
-        2. Float (f64) - passed as i64 bit pattern (reinterpret cast)
-        3. Bool - passed as i64 (0 = false, 1 = true)
-        4. String (text) - passed as i64 pointer address
-        5. Nil - passed as i64 zero
-        6. Char - passed as i64 (Unicode code point)
-        7. Unit - passed as i64 zero
-
-        Complex types (structs, arrays, dicts) require marshaling and
-        are not yet supported; calls with those types fall back to interpretation.
-        """
+    # reason: JIT dispatch probes compiled symbol by function name and marshals runtime Value arguments
+    @allow(primitive_api)
+    pub me try_jit_execute(fn_name: text, args: [Value]) -> Option<Result<Value, BackendError>>:
+        """Try to execute via JIT. Returns None if not JIT-compiled."""
         if not self.jit_compiled.contains(fn_name):
-            return nil
+            return None
 
         # Execution manager available?
         if not self.exec_manager.?:
-            return nil
+            return None
 
         val em = self.exec_manager.unwrap()
+        if not em.is_valid():
+            return None
 
         if not em.has_function(fn_name):
-            return nil
+            return None
 
         # Convert args to i64 array for JIT calling convention
-        # All values are passed as i64: ints directly, floats as bit patterns,
-        # bools as 0/1, chars as code points, strings as pointer, nil/unit as 0
         var arg_vals: [i64] = []
         for arg in args:
             match arg:
                 case Int(i):
                     arg_vals = arg_vals.push(i)
                 case Float(f):
-                    # Pass float as i64 bit pattern (reinterpret bits)
                     arg_vals = arg_vals.push(f.to_bits())
                 case Bool(b):
                     arg_vals = arg_vals.push(if b: 1 else: 0)
                 case String(s):
-                    # String pointer - pass as i64 address
                     arg_vals = arg_vals.push(s.ptr_as_i64())
                 case Char(c):
-                    # Char as Unicode code point
                     arg_vals = arg_vals.push(c.to_i64())
                 case Nil:
                     arg_vals = arg_vals.push(0)
                 case Unit:
                     arg_vals = arg_vals.push(0)
                 case _:
-                    # Can't handle complex types via JIT yet
-                    # Structs, arrays, dicts need marshaling support
-                    return nil
+                    # Complex types (structs, arrays, dicts) fall back to interpretation
+                    return None
 
         # Execute via JIT
         val exec_result = em.execute(fn_name, arg_vals)
         match exec_result:
             case Ok(result_val):
-                # Determine return type from function signature and convert
-                # the raw i64 result back to the appropriate Value type
                 val ret_type = em.get_return_type(fn_name)
                 val result = match ret_type:
                     case "i64" | "int":
-                        Value.int(result_val)
+                        backend_value_int_v1(result_val)
                     case "f64" | "float":
-                        Value.float(f64.from_bits(result_val))
+                        backend_value_float_v1(f64.from_bits(result_val))
                     case "bool":
-                        Value.bool(result_val != 0)
+                        backend_value_bool_v1(result_val != 0)
                     case "text" | "string":
-                        # Reconstruct string from pointer
                         val s = text.from_ptr(result_val)
-                        Value.string(s)
+                        backend_value_string_v1(s)
                     case "char":
                         Value.Char(char.from_code_point(result_val))
                     case "nil":
@@ -316,87 +352,113 @@ impl JitInterpreterBackend:
                     case "()" | "unit":
                         Value.Nil
                     case _:
-                        # Default: treat as integer
-                        Value.int(result_val)
+                        backend_value_int_v1(result_val)
                 Some(Ok(result))
             case Err(msg):
-                Some(Err(BackendError.runtime_error("JIT execution failed: {msg}", nil)))
+                Some(Err(BackendError.runtime_error("JIT execution failed: {msg}", None)))
 
 impl JitInterpreterBackend:
-    fn name() -> text:
+    # reason: backend trait contract exposes canonical backend identifier text
+    @allow(primitive_api)
+    pub fn name() -> text:
         "jit-interpreter"
 
-    fn kind() -> BackendKind:
+    pub fn kind() -> BackendKind:
         match self.config.mode:
             case AlwaysJit: BackendKind.CraneliftJit
             case _: BackendKind.Interpreter
 
-    fn process_module(module: HirModule) -> Result<BackendResult, BackendError>:
-        # Create evaluation context
+    pub fn make_eval_context(module: HirModule) -> EvalContext:
+        """Build a module evaluation context backed by reusable `self.interp`."""
         val env = Environment.new()
-        val ctx = EvalContext(env: env, module: module, backend: self)
+        var names_map: Dict<i64, text> = {}
+        for nsym_ in module.symbols.symbols.values():
+            val ns: HirSymbol = nsym_
+            val ns_id: i64 = ns.id.id
+            names_map[ns_id] = ns.name
+        var fn_index: Dict<text, HirFunction> = {}
+        for fn_item in module.functions.values():
+            val fn_: HirFunction = fn_item
+            fn_index[fn_.name] = fn_
+            val fv = FunctionValue(symbol: fn_.symbol, name: fn_.name)
+            env.define_global(fn_.name, backend_value_function_v1(fv))
+        EvalContext(
+            env: env,
+            module: module,
+            backend: self.interp,
+            names: names_map,
+            fn_by_name: fn_index,
+            has_fn_index: true,
+            strict_mem: false
+        )
 
-        # Register functions
-        var has_main = false
-        var main_symbol_id: i64 = 0
-        for symbol in module.functions.keys():
-            val fn_ = module.functions[symbol]
-            ctx.env.define_global(symbol, Value.Function(FunctionValue(symbol: symbol, name: fn_.name)))
+    pub me process_module(module: HirModule) -> Result<BackendResult, BackendError>:
+        val ctx = self.make_eval_context(module)
+
+        var main_fn: HirFunction? = None
+        for fn_item in module.functions.values():
+            val fn_: HirFunction = fn_item
             if fn_.name == "main":
-                has_main = true
-                main_symbol_id = symbol.id
+                main_fn = Some(fn_)
 
         # Try to JIT compile main function if configured
-        if has_main and self.should_jit_compile("main"):
-            val main_symbol = SymbolId(id: main_symbol_id)
-            self.try_jit_compile(module.functions[main_symbol], module)?
+        if main_fn.? and self.should_jit_compile("main"):
+            self.try_jit_compile(main_fn.unwrap(), module)?
 
         # Execute main
-        if has_main:
-            val main_symbol = SymbolId(id: main_symbol_id)
-            val result = self.call_hir_function(module.functions[main_symbol], [], ctx, module)?
+        if main_fn.?:
+            val result = self.call_hir_function(main_fn.unwrap(), [], ctx, module)?
             Ok(BackendResult.Value(result))
         else:
             Ok(BackendResult.Unit)
 
-    fn process_function(fn_: HirFunction) -> Result<BackendResult, BackendError>:
+    pub fn process_function(fn_: HirFunction) -> Result<BackendResult, BackendError>:
+        val _ = fn_
         Ok(BackendResult.Unit)
 
-    fn process_class(class_: HirClass) -> Result<BackendResult, BackendError>:
+    pub fn process_class(class_: HirClass) -> Result<BackendResult, BackendError>:
+        val _ = class_
         Ok(BackendResult.Unit)
 
-    fn process_struct(struct_: HirStruct) -> Result<BackendResult, BackendError>:
+    pub fn process_struct(struct_: HirStruct) -> Result<BackendResult, BackendError>:
+        val _ = struct_
         Ok(BackendResult.Unit)
 
-    fn process_enum(enum_: HirEnum) -> Result<BackendResult, BackendError>:
+    pub fn process_enum(enum_: HirEnum) -> Result<BackendResult, BackendError>:
+        val _ = enum_
         Ok(BackendResult.Unit)
 
-    fn process_trait(trait_: HirTrait) -> Result<BackendResult, BackendError>:
+    pub fn process_trait(trait_: HirTrait) -> Result<BackendResult, BackendError>:
+        val _ = trait_
         Ok(BackendResult.Unit)
 
-    fn process_impl(impl_: HirImpl) -> Result<BackendResult, BackendError>:
+    pub fn process_impl(impl_: HirImpl) -> Result<BackendResult, BackendError>:
+        val _ = impl_
         Ok(BackendResult.Unit)
 
-    fn eval_expr(expr: HirExpr, ctx: EvalContext) -> Result<Value, BackendError>:
-        # Delegate to tree-walking interpreter for expressions
-        # (JIT is used for function-level compilation)
-        InterpreterBackendImpl.new().eval_expr(expr, ctx)
+    pub fn eval_expr(expr: HirExpr, ctx: EvalContext) -> Result<Value, BackendError>:
+        # Delegate to reusable tree-walking interpreter for expressions
+        self.interp.eval_expr(expr, ctx)
 
-    fn exec_stmt(stmt: HirStmt, ctx: EvalContext) -> Result<(), BackendError>:
-        # Delegate to tree-walking interpreter for statements
-        InterpreterBackendImpl.new().exec_stmt(stmt, ctx)
+    pub fn exec_stmt(stmt: HirStmt, ctx: EvalContext) -> Result<(), BackendError>:
+        # Delegate to reusable tree-walking interpreter for statements
+        self.interp.exec_stmt(stmt, ctx)
 
-    fn is_allowed(expr: HirExpr) -> bool:
+    # reason: backend policy check returns expression admission boolean
+    @allow(primitive_api)
+    pub fn is_allowed(expr: HirExpr) -> bool:
         val _ = expr
         true
 
-    fn is_allowed_stmt(stmt: HirStmt) -> bool:
+    # reason: backend policy check returns statement admission boolean
+    @allow(primitive_api)
+    pub fn is_allowed_stmt(stmt: HirStmt) -> bool:
         val _ = stmt
         true
 
 impl JitInterpreterBackend:
-    me call_hir_function(fn_: HirFunction, args: [Value], ctx: EvalContext, module: HirModule) -> Result<Value, BackendError>:
-        """Call a HIR function - try JIT first, fall back to interpretation."""
+    pub me call_hir_function(fn_: HirFunction, args: [Value], ctx: EvalContext, module: HirModule) -> Result<Value, BackendError>:
+        """Call a HIR function - try JIT first, fall back to reusable `self.interp`."""
         # Record call for threshold tracking
         self.record_call(fn_.name)
 
@@ -414,11 +476,12 @@ impl JitInterpreterBackend:
             if jit_result2.?:
                 return jit_result2.unwrap()
 
-        # Fall back to tree-walking interpretation
+        # Fall back to reusable tree-walking interpreter
         if self.config.verbose:
             print "[jit] Interpreting function: {fn_.name}"
 
-        InterpreterBackendImpl.new().call_hir_function(fn_, args, ctx)
+        self.fallback_calls = self.fallback_calls + 1
+        self.interp.call_hir_function(fn_, args, ctx)
 
 # ============================================================================
 # Exports

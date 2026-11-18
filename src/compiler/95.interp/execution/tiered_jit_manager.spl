@@ -65,10 +65,12 @@ fn _tiered_jit_time_now_micros_raw() -> i64:
 class TieredJitManager:
     config: TieredJitConfig
     profiles: Dict<text, FunctionProfile>
+    compile_failed: Dict<text, text>
     jit_handle: i64
     jit_creations: i64
     tier1_compilations: i64
     tier2_compilations: i64
+    compile_failures: i64
     total_compile_time_ms: f64
     hotspot_plans: i64
 
@@ -77,13 +79,25 @@ class TieredJitManager:
     # promotion candidate is admitted (_compile_function -> _ensure_jit), so
     # cold/short interpreter programs never pay rt_jit_create().
     static fn create(config: TieredJitConfig) -> TieredJitManager:
-        TieredJitManager(config: config, profiles: {}, jit_handle: 0, jit_creations: 0, tier1_compilations: 0, tier2_compilations: 0, total_compile_time_ms: 0.0, hotspot_plans: 0)
+        TieredJitManager(config: config, profiles: {}, compile_failed: {}, jit_handle: 0, jit_creations: 0, tier1_compilations: 0, tier2_compilations: 0, compile_failures: 0, total_compile_time_ms: 0.0, hotspot_plans: 0)
 
     fn jit_created() -> bool:
         self.jit_handle != 0
 
     fn jit_creation_count() -> i64:
         self.jit_creations
+
+    fn compile_failure_count() -> i64:
+        self.compile_failures
+
+    fn has_compile_failed(name: text) -> bool:
+        self.compile_failed.has(name)
+
+    fn compile_failure_error(name: text) -> text:
+        if self.compile_failed.has(name):
+            self.compile_failed[name]
+        else:
+            ""
 
     me _ensure_jit() -> i64:
         if self.jit_handle == 0:
@@ -126,7 +140,7 @@ class TieredJitManager:
             var compile_ms = p.compile_time_ms
             var updated = FunctionProfile(name: name, call_count: new_count, tier: new_tier, compile_time_ms: compile_ms, source: p.source, typed_mir: p.typed_mir, safe_deopt: p.safe_deopt, hotspot_specialized_source: p.hotspot_specialized_source, hotspot_semantic_proof: p.hotspot_semantic_proof, var_facts: p.var_facts)
             if p.tier == JitTier.Interpreted:
-                if new_count >= self.config.tier1_threshold:
+                if new_count >= self.config.tier1_threshold and not self.compile_failed.has(name):
                     val plan = jit_hotspot_plan_from_profile_var_facts(updated, self.config, p.typed_mir, p.safe_deopt)
                     val provider = if p.hotspot_semantic_proof:
                         jit_hotspot_specialization_provider("tiered-jit-profile-specialization", p.hotspot_specialized_source, true)
@@ -136,14 +150,12 @@ class TieredJitManager:
                     if decision.provider_used:
                         self.hotspot_plans = self.hotspot_plans + 1
                     if jit_hotspot_compile_decision_allows_compile(decision):
-                        compile_ms = self._compile_function(decision.compile_source)
-                        if self.is_native(p.name):
+                        compile_ms = self._compile_function(name, decision.compile_source)
+                        if not self.compile_failed.has(name) and self.is_native(p.name):
                             new_tier = JitTier.Fast
                             self.tier1_compilations = self.tier1_compilations + 1
-            else if p.tier == JitTier.Fast:
-                if new_count >= self.config.tier2_threshold:
-                    new_tier = JitTier.Optimized
-                    self.tier2_compilations = self.tier2_compilations + 1
+            # Honest Tier-2 accounting: no Tier-2 compiler runs in TieredJitManager,
+            # so JitTier.Fast remains Fast and tier2_compilations stays 0.
             updated = FunctionProfile(name: name, call_count: new_count, tier: new_tier, compile_time_ms: compile_ms, source: p.source, typed_mir: p.typed_mir, safe_deopt: p.safe_deopt, hotspot_specialized_source: p.hotspot_specialized_source, hotspot_semantic_proof: p.hotspot_semantic_proof, var_facts: p.var_facts)
             self.profiles[name] = updated
             new_tier
@@ -152,10 +164,17 @@ class TieredJitManager:
             self.profiles[name] = p
             JitTier.Interpreted
 
-    me _compile_function(source: text) -> f64:
+    me _compile_function(name: text, source: text) -> f64:
+        if self.compile_failed.has(name):
+            return 0.0
         if source == "":
             return 0.0
         var handle = self._ensure_jit()
+        if handle <= 0:
+            val handle_err = "E-JIT-UNAVAILABLE: rt_jit_create returned invalid handle " + handle.to_string()
+            self.compile_failed[name] = handle_err
+            self.compile_failures = self.compile_failures + 1
+            return 0.0
         val t0 = _tiered_jit_time_now_micros_raw()
         val raw_err = _tiered_jit_compile_source_raw(handle, source)
         var err = raw_err ?? "E-SFFI-017: JIT compile provider returned null"
@@ -167,8 +186,16 @@ class TieredJitManager:
         if ms >= 0.0:
             self.total_compile_time_ms = self.total_compile_time_ms + ms
         if err != "":
+            self.compile_failed[name] = err
+            self.compile_failures = self.compile_failures + 1
             if self.config.debug_mode:
                 print("  [JIT] compile error: " + err)
+        elif not _tiered_jit_has_function_raw(handle, name):
+            val missing_err = "E-JIT-MISSING-SYMBOL: compiled source did not export '" + name + "'"
+            self.compile_failed[name] = missing_err
+            self.compile_failures = self.compile_failures + 1
+            if self.config.debug_mode:
+                print("  [JIT] compile error: " + missing_err)
         else:
             if self.config.debug_mode:
                 if ms >= 0.0:
@@ -176,6 +203,13 @@ class TieredJitManager:
                 else:
                     print("  [JIT] compiled; timing unavailable")
         ms
+
+    fn call_i64_checked(name: text, arg: i64) -> Result<i64, text>:
+        if self.compile_failed.has(name):
+            return Err("E-JIT-COMPILE-FAILED: " + self.compile_failed[name])
+        if not self.is_native(name):
+            return Err("E-JIT-NOT-NATIVE: function '" + name + "' is not compiled to native code")
+        Ok(_tiered_jit_call_i64_raw(self.jit_handle, name, arg))
 
     fn call_i64(name: text, arg: i64) -> i64:
         if self.is_native(name):
