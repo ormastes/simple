@@ -900,7 +900,9 @@ static REGISTRY_FILTER: [std::sync::atomic::AtomicU64; REGISTRY_FILTER_WORDS] =
 
 fn registry_filter_bit(addr: usize) -> (usize, u64) {
     // Allocation addresses are 16-byte aligned; mix before indexing.
-    let h = (addr >> 4).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32;
+    // Hash in u64 so 32-bit targets (i686, armv7) compile: the 64-bit constant
+    // and the >> 32 overflow usize there. Same result on 64-bit hosts.
+    let h = (((addr as u64) >> 4).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) as usize;
     let bit = h % (REGISTRY_FILTER_WORDS * 64);
     (bit / 64, 1u64 << (bit % 64))
 }
