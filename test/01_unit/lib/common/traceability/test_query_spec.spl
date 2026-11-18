@@ -1,7 +1,7 @@
 # Purpose and audience: read-only TestDB query contract for CLI/MCP facade authors and evidence reviewers.
 # @req TESTDB-001 TESTDB-002 TESTDB-003 TESTDB-004 TESTDB-007 TESTDB-008 TESTDB-010
 use std.spec.*
-use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestEventAtMicros, TestFailureSummary, TestHostTriple, TestBackendName, decode_trace_case_events, encode_trace_case_event}
+use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestEventAtMicros, TestFailureSummary, TestHostTriple, TestBackendName, TestFailureCode, TestDefinitionDigest, TestBinaryDigest, decode_trace_case_events, encode_trace_case_event, classify_test_failure_code, parse_test_failure_code, test_failure_code_name}
 use std.nogc_sync_mut.spec.trace_events.{clip_failure_summary}
 use std.common.traceability.test_query.{
     TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestPlannedCaseId,
@@ -353,13 +353,17 @@ describe "TestDB query attempt facts":
         expect(cells[2]).to_equal("x86_64-windows")
         expect(cells[3]).to_equal("interpreter")
         expect(cells[4]).to_equal("expected 2 got 3")
+        step("Without codes or digests the three new cells are absent markers")
+        expect(cells[5]).to_equal("-")
+        expect(cells[6]).to_equal("-")
+        expect(cells[7]).to_equal("-")
 
     it "leaves every fact absent for events recorded without facts":
         # @req TESTDB-003
         step("Legacy events have no facts")
         val rows = project_run_case_rows(_key("test/a_spec.spl", "adds"), TestRunId(value: "run-1"), _no_plan(), [_started("adds"), _finished("adds", "passed")])
         step("Each fact cell is the explicit absent marker, never a zero")
-        expect(test_query_row_fact_cells(rows[0]).join("|")).to_equal("-|-|-|-|-")
+        expect(test_query_row_fact_cells(rows[0]).join("|")).to_equal("-|-|-|-|-|-|-|-")
 
     it "reports no duration for an unfinished attempt and keeps retries separate":
         # @req TESTDB-007
@@ -395,6 +399,45 @@ describe "TestDB query attempt facts":
         expect(decode_trace_case_events("[{schema: \"simple.trace.case-event/v1\", case_name: \"a\", phase: \"started\", outcome: \"not_finished\", failure: 5}]").?).to_equal(false)
         expect(decode_trace_case_events("[{schema: \"simple.trace.case-event/v1\", case_name: \"a\", phase: \"started\", outcome: \"not_finished\", bogus: \"x\"}]").?).to_equal(false)
         expect(decode_trace_case_events("[{schema: \"simple.trace.case-event/v1\", case_name: \"a\", phase: \"started\", outcome: \"not_finished\", at_micros: \"x\"}]").?).to_equal(false)
+
+describe "TestDB query failure code and digests":
+    it "shows failure code and both digests from the events, taking digests from either event":
+        # @req TESTDB-003
+        val start = TraceCaseFacts(at: Some(TestEventAtMicros(value: 10)), definition_digest: Some(TestDefinitionDigest(value: "d1")), binary_digest: Some(TestBinaryDigest(value: "b1")))
+        val finish = TraceCaseFacts(at: Some(TestEventAtMicros(value: 20)), failure: Some(TestFailureSummary(value: "expected 1")), failure_code: Some(TestFailureCode.Assertion))
+        val events = [
+            TraceCaseEvent(case_name: "adds", phase: "started", outcome: "not_finished", facts: Some(start)),
+            TraceCaseEvent(case_name: "adds", phase: "finished", outcome: "failed", facts: Some(finish))]
+        val rows = project_run_case_rows(_key("test/a_spec.spl", "adds"), TestRunId(value: "run-1"), _no_plan(), events)
+        val cells = test_query_row_fact_cells(rows[0])
+        expect(cells[5]).to_equal("assertion")
+        expect(cells[6]).to_equal("d1")
+        expect(cells[7]).to_equal("b1")
+
+    it "round-trips code and digests through the event codec and rejects an unknown code":
+        # @req TESTDB-003
+        val facts = TraceCaseFacts(failure_code: Some(TestFailureCode.Timeout), definition_digest: Some(TestDefinitionDigest(value: "d1")), binary_digest: Some(TestBinaryDigest(value: "b1")))
+        val encoded = encode_trace_case_event(TraceCaseEvent(case_name: "adds", phase: "finished", outcome: "failed", facts: Some(facts)))
+        val decoded = match decode_trace_case_events("[" + encoded + "]"):
+            case Ok(items): items
+            case Err(reason): fail("decode failed: {reason}")
+        match decoded[0].facts:
+            case Some(found):
+                expect(test_failure_code_name(found.failure_code ?? TestFailureCode.Unknown)).to_equal("timeout")
+                expect((found.definition_digest ?? TestDefinitionDigest(value: "")).value).to_equal("d1")
+                expect((found.binary_digest ?? TestBinaryDigest(value: "")).value).to_equal("b1")
+            case None: fail("facts lost")
+        expect(decode_trace_case_events("[{schema: \"simple.trace.case-event/v1\", case_name: \"a\", phase: \"finished\", outcome: \"failed\", failure_code: \"bogus\"}]").?).to_equal(false)
+        expect(parse_test_failure_code("bogus").?).to_equal(false)
+
+    it "classifies only from real signals and leaves the rest Unknown":
+        # @req TESTDB-003
+        expect(test_failure_code_name(classify_test_failure_code("expected 2 got 3"))).to_equal("assertion")
+        expect(test_failure_code_name(classify_test_failure_code("panic: index out of range"))).to_equal("panic")
+        expect(test_failure_code_name(classify_test_failure_code("timed out after 5s"))).to_equal("timeout")
+        expect(test_failure_code_name(classify_test_failure_code("expected timeout_ms 5 got 6"))).to_equal("assertion")
+        expect(test_failure_code_name(classify_test_failure_code("pending rejected under critical: x"))).to_equal("unknown")
+        expect(test_failure_code_name(classify_test_failure_code(""))).to_equal("unknown")
 
 describe "TestDB scoped query Windows paths":
     it "recognises the level of a backslash path":

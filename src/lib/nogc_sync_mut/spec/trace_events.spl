@@ -3,7 +3,7 @@
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.spec.evidence_path.{test_evidence_path_v1}
 use std.nogc_sync_mut.io.file_ops.{file_append}
-use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestEventAtMicros, TestFailureSummary, TestHostTriple, TestBackendName, encode_trace_case_event}
+use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, classify_test_failure_code, TestEventAtMicros, TestFailureSummary, TestHostTriple, TestBackendName, TestFailureCode, encode_trace_case_event}
 use std.nogc_sync_mut.io.env_ops.{host_arch, host_os}
 use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure}
 use std.nogc_sync_mut.spec.env_detect.{get_runtime_mode}
@@ -22,8 +22,8 @@ pub fn clip_failure_summary(failure: text) -> text:
         out = out + ch
     out
 
-# binary_digest is deliberately not recorded: no cheap helper exists (hashing
-# the running executable per event would dominate small cases).
+# Digests are stamped by the parent runner at record time (test_runner/trace_digests.spl):
+# it knows the spec path and hashes once per file/process, not per event.
 fn _trace_facts(failure: text) -> TraceCaseFacts:
     if _trace_host_cache == "":
         _trace_host_cache = host_arch() + "-" + host_os()
@@ -35,10 +35,12 @@ fn _trace_facts(failure: text) -> TraceCaseFacts:
     if micros >= 0:
         at = Some(TestEventAtMicros(value: micros))
     var summary: TestFailureSummary? = None
+    var code: TestFailureCode? = None
     if failure != "":
         summary = Some(TestFailureSummary(value: clip_failure_summary(failure)))
+        code = Some(classify_test_failure_code(failure))
     TraceCaseFacts(at: at, failure: summary, host: Some(TestHostTriple(value: _trace_host_cache)),
-        backend: Some(TestBackendName(value: _trace_backend_cache)))
+        backend: Some(TestBackendName(value: _trace_backend_cache)), failure_code: code)
 
 # `failure` is the failed attempt's error summary; "" when there is none.
 pub fn emit_trace_case_event(case_name: text, phase: text, outcome: text, failure: text = ""):

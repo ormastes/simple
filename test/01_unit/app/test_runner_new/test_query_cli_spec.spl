@@ -27,9 +27,12 @@ src/app/test_runner_new/test_query_cli.spl.
 use std.spec.{describe, it, expect, step}
 use std.database.test_extended.database.{TestDatabaseExtended}
 use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
+use std.io_runtime.{file_hash_sha256_or_empty}
+use std.common.traceability.case_events.{encode_trace_case_event}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_write, file_modified_time}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, dir_list}
-use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestEventAtMicros, TestFailureSummary, TestHostTriple, TestBackendName}
+use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestEventAtMicros, TestFailureSummary, TestHostTriple, TestBackendName, TestFailureCode, TestDefinitionDigest, TestBinaryDigest}
+use std.database.core.{SdnTable}
 use std.common.traceability.test_query.{
     TestLevel, TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestQueryLimit, TestQueryCursor, TestQuery,
     TestQueryStatus, TestQualification, TestQueryRow, TestQueryPage, TestQueryTruncation,
@@ -47,6 +50,8 @@ use app.test_runner_new.test_query_cli.{
 }
 
 val SCRATCH_DIR = "target/test-query-cli-spec"
+val DEF_DIGEST = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val BIN_DIGEST = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 fn _key() -> TestCaseKey:
     TestCaseKey(path: TestCasePath(value: "test/a_spec.spl"), name: TestCaseName(value: "adds"))
@@ -175,7 +180,7 @@ describe "test query rendering":
         val page = _page([_row(TestQueryStatus.Passed, TestQualification.Pass, _ordinal(0), _planned())],
             TestQueryTruncation.Complete, TestQueryCoverage.Full)
         val out = render_test_query_page(page, TestQueryFormat.Sdn)
-        expect(out).to_contain("test_query_rows |case, level, run, planned_case, attempt, status, qualification, provenance, started_at_micros, duration_micros, host, backend, failure|")
+        expect(out).to_contain("test_query_rows |case, level, run, planned_case, attempt, status, qualification, provenance, started_at_micros, duration_micros, host, backend, failure, failure_code, definition_digest, binary_digest|")
         expect(out).to_contain("    test/a_spec.spl::adds, other, run_1, case_9, 0, passed, pass")
 
     it "announces truncation with a partial marker and the next cursor":
@@ -467,10 +472,13 @@ describe "scoped test query against a real database file":
 
 fn _facts(at: i64, failure: text) -> TraceCaseFacts:
     var summary: TestFailureSummary? = None
+    var code: TestFailureCode? = None
     if failure != "":
         summary = Some(TestFailureSummary(value: failure))
+        code = Some(TestFailureCode.Assertion)
     TraceCaseFacts(at: Some(TestEventAtMicros(value: at)), failure: summary,
-        host: Some(TestHostTriple(value: "x86_64-windows")), backend: Some(TestBackendName(value: "interpreter")))
+        host: Some(TestHostTriple(value: "x86_64-windows")), backend: Some(TestBackendName(value: "interpreter")),
+        failure_code: code, definition_digest: Some(TestDefinitionDigest(value: DEF_DIGEST)), binary_digest: Some(TestBinaryDigest(value: BIN_DIGEST)))
 
 # unit_a carries facts; unit_c is a legacy path recorded without any.
 fn _write_facts_fixture() -> RunnerTestDb:
@@ -504,15 +512,15 @@ describe "test query attempt facts against a real database file":
         val db = TestDbFilePath(value: SCRATCH_DIR + "/test_db.sdn")
         step("Query the facted case from the reloaded file")
         val table = execute_test_query_with_bug_db(_request(["query", "test/01_unit/f_a_spec.spl::adds"]), db, TestScopeBugDbPath(value: SCRATCH_DIR + "/none.sdn"))
-        expect(table.text).to_contain("started_at_micros | duration_micros | host | backend | failure")
-        expect(table.text).to_contain("| 1000 | 3500 | x86_64-windows | interpreter | expected 2 got 3")
+        expect(table.text).to_contain("started_at_micros | duration_micros | host | backend | failure | failure_code | definition_digest | binary_digest")
+        expect(table.text).to_contain("| 1000 | 3500 | x86_64-windows | interpreter | expected 2 got 3 | assertion | {DEF_DIGEST} | {BIN_DIGEST}")
         val sdn = execute_test_query_with_bug_db(_request(["query", "test/01_unit/f_a_spec.spl::adds", "--format", "sdn"]), db, TestScopeBugDbPath(value: SCRATCH_DIR + "/none.sdn"))
-        expect(sdn.text).to_contain(", 1000, 3500, x86_64-windows, interpreter, expected 2 got 3")
+        expect(sdn.text).to_contain(", 1000, 3500, x86_64-windows, interpreter, expected 2 got 3, assertion, {DEF_DIGEST}, {BIN_DIGEST}")
         val explain = execute_test_query_with_bug_db(_request(["explain", "test/01_unit/f_a_spec.spl::adds"]), db, TestScopeBugDbPath(value: SCRATCH_DIR + "/none.sdn"))
-        expect(explain.text).to_contain("facts: started_at_micros=1000 duration_micros=3500 host=x86_64-windows backend=interpreter failure=expected 2 got 3")
+        expect(explain.text).to_contain("facts: started_at_micros=1000 duration_micros=3500 host=x86_64-windows backend=interpreter failure=expected 2 got 3 failure_code=assertion definition_digest={DEF_DIGEST} binary_digest={BIN_DIGEST}")
         step("A legacy case recorded without facts shows the absent marker, not zeros")
         val legacy = execute_test_query_with_bug_db(_request(["query", "test/01_unit/f_c_spec.spl::plain"]), db, TestScopeBugDbPath(value: SCRATCH_DIR + "/none.sdn"))
-        expect(legacy.text).to_contain("| - | - | - | - | -")
+        expect(legacy.text).to_contain("| - | - | - | - | - | - | - | -")
         dir_remove_all(SCRATCH_DIR)
 
     it "reads a run's events grouped by path with one decode and the same result as the per-path read":
@@ -532,6 +540,56 @@ describe "test query attempt facts against a real database file":
             expect(together.len()).to_equal(2)
         step("A path with no events is absent from the grouped read")
         expect(grouped.contains_key("test/01_unit/none_spec.spl")).to_equal(false)
+        dir_remove_all(SCRATCH_DIR)
+
+describe "test query digest columns on a legacy facts table":
+    it "widens a 5-column facts table so new rows keep their digests and old rows stay absent":
+        # @req TESTDB-003
+        dir_remove_all(SCRATCH_DIR)
+        dir_create_all(SCRATCH_DIR)
+        var owner = RunnerTestDb(db: TestDatabaseExtended.create(SCRATCH_DIR + "/test_db.sdn"), current_run_id: "")
+        val run_id = owner.start_run()
+        step("A pre-digest database already holds a 5-column facts table")
+        owner.db.db.set_table("trace_case_event_facts", SdnTable.new("trace_case_event_facts", ["event_id", "at_micros", "failure", "host", "backend"]))
+        val events = [
+            TraceCaseEvent(case_name: "adds", phase: "started", outcome: "not_finished", facts: Some(_facts(1000, ""))),
+            TraceCaseEvent(case_name: "adds", phase: "finished", outcome: "failed", facts: Some(_facts(4500, "expected 2 got 3")))]
+        match owner.db.record_trace_case_events(run_id, "test/01_unit/f_a_spec.spl", events):
+            case Ok(_): pass
+            case Err(reason): fail("record failed: {reason}")
+        match owner.save():
+            case Ok(_): pass
+            case Err(reason): fail("save failed: {reason}")
+        val db = TestDbFilePath(value: SCRATCH_DIR + "/test_db.sdn")
+        val out = execute_test_query_with_bug_db(_request(["query", "test/01_unit/f_a_spec.spl::adds"]), db, TestScopeBugDbPath(value: SCRATCH_DIR + "/none.sdn"))
+        expect(out.text).to_contain("| assertion | {DEF_DIGEST} | {BIN_DIGEST}")
+        dir_remove_all(SCRATCH_DIR)
+
+describe "test query digests stamped by the recording owner":
+    it "stamps the spec file sha256 onto recorded events and shows it in the query":
+        # @req TESTDB-003
+        dir_remove_all(SCRATCH_DIR)
+        dir_create_all(SCRATCH_DIR)
+        val spec_path = "test/01_unit/app/test_runner_new/test_query_cli_spec.spl"
+        var owner = RunnerTestDb(db: TestDatabaseExtended.create(SCRATCH_DIR + "/test_db.sdn"), current_run_id: "")
+        val request = TraceRunRequest(subject_id: "subject", configuration_id: "config", expectation_id: "expect", binary_id: "binary", cases: [
+            TracePlannedCase(case_id: "c1", test_path: spec_path, case_name: "adds", test_definition_id: "d1", lane_id: "lane")])
+        val plan = match owner.prepare_trace_request(request):
+            case Ok(planned): planned
+            case Err(reason): fail("plan rejected: {reason}")
+        val sdn = "[" + encode_trace_case_event(TraceCaseEvent(case_name: "adds", phase: "started", outcome: "not_finished")) + ", " + encode_trace_case_event(TraceCaseEvent(case_name: "adds", phase: "finished", outcome: "passed")) + "]"
+        match owner.record_trace_case_events(plan.run_id, spec_path, sdn):
+            case Ok(_): pass
+            case Err(reason): fail("record failed: {reason}")
+        match owner.save():
+            case Ok(_): pass
+            case Err(reason): fail("save failed: {reason}")
+        step("The query row carries the sha256 of the spec file bytes")
+        val db = TestDbFilePath(value: SCRATCH_DIR + "/test_db.sdn")
+        val out = execute_test_query_with_bug_db(_request(["query", spec_path + "::adds"]), db, TestScopeBugDbPath(value: SCRATCH_DIR + "/none.sdn"))
+        val digest = file_hash_sha256_or_empty(spec_path)
+        expect(digest.len()).to_equal(64)
+        expect(out.text).to_contain("| - | " + digest + " | ")
         dir_remove_all(SCRATCH_DIR)
 
 describe "test query attempt facts integrity":

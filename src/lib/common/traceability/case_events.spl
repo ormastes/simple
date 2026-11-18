@@ -17,11 +17,57 @@ pub struct TestHostTriple:
 pub struct TestBackendName:
     value: text
 
+pub struct TestDefinitionDigest:
+    value: text
+
+pub struct TestBinaryDigest:
+    value: text
+
+# Structured class of a failed attempt, from signals the runner really has.
+pub enum TestFailureCode:
+    Assertion
+    Panic
+    Timeout
+    Unknown
+
+pub fn test_failure_code_name(code: TestFailureCode) -> text:
+    match code:
+        case TestFailureCode.Assertion: "assertion"
+        case TestFailureCode.Panic: "panic"
+        case TestFailureCode.Timeout: "timeout"
+        case TestFailureCode.Unknown: "unknown"
+
+# Unrecognised wire text is rejected, never mapped to Unknown.
+pub fn parse_test_failure_code(name: text) -> TestFailureCode?:
+    if name == "assertion": return Some(TestFailureCode.Assertion)
+    if name == "panic": return Some(TestFailureCode.Panic)
+    if name == "timeout": return Some(TestFailureCode.Timeout)
+    if name == "unknown": return Some(TestFailureCode.Unknown)
+    None
+
+# Everything in the spec framework's failure list comes from fail_assertion, so a
+# message with no other marker is an assertion. The pending-rejected message is
+# not an assertion and stays Unknown; an empty message has no signal at all.
+pub fn classify_test_failure_code(failure: text) -> TestFailureCode:
+    if failure == "":
+        return TestFailureCode.Unknown
+    val lower = failure.lower()
+    if lower.starts_with("panic") or lower.contains("panicked at"):
+        return TestFailureCode.Panic
+    if lower.starts_with("timed out") or lower.starts_with("timeout"):
+        return TestFailureCode.Timeout
+    if lower.starts_with("pending rejected"):
+        return TestFailureCode.Unknown
+    TestFailureCode.Assertion
+
 pub struct TraceCaseFacts:
     at: TestEventAtMicros? = None
     failure: TestFailureSummary? = None
     host: TestHostTriple? = None
     backend: TestBackendName? = None
+    failure_code: TestFailureCode? = None
+    definition_digest: TestDefinitionDigest? = None
+    binary_digest: TestBinaryDigest? = None
 
 pub struct TraceCaseEvent:
     case_name: text
@@ -48,6 +94,15 @@ pub fn encode_trace_case_event(event: TraceCaseEvent) -> text:
                 case None: pass
             match facts.backend:
                 case Some(backend): fields["backend"] = SdnValue.String(backend.value)
+                case None: pass
+            match facts.failure_code:
+                case Some(code): fields["failure_code"] = SdnValue.String(test_failure_code_name(code))
+                case None: pass
+            match facts.definition_digest:
+                case Some(digest): fields["definition_digest"] = SdnValue.String(digest.value)
+                case None: pass
+            match facts.binary_digest:
+                case Some(digest): fields["binary_digest"] = SdnValue.String(digest.value)
                 case None: pass
         case None: pass
     sdn_encode_canonical(SdnValue.Dict(fields))
@@ -91,7 +146,7 @@ fn event_optional_text(fields: Dict<text, SdnValue>, name: text) -> Result<text?
 # error, an absent key is an absent fact.
 fn decode_event_facts(fields: Dict<text, SdnValue>) -> Result<TraceCaseFacts?, text>:
     for key in fields.keys():
-        if key != "schema" and key != "case_name" and key != "phase" and key != "outcome" and key != "at_micros" and key != "failure" and key != "host" and key != "backend":
+        if key != "schema" and key != "case_name" and key != "phase" and key != "outcome" and key != "at_micros" and key != "failure" and key != "host" and key != "backend" and key != "failure_code" and key != "definition_digest" and key != "binary_digest":
             return Err("unsupported case-event field: " + key)
     var at: TestEventAtMicros? = None
     if fields.contains_key("at_micros"):
@@ -116,9 +171,27 @@ fn decode_event_facts(fields: Dict<text, SdnValue>) -> Result<TraceCaseFacts?, t
     match backend_raw:
         case Some(text_value): backend = Some(TestBackendName(value: text_value))
         case None: pass
+    var failure_code: TestFailureCode? = None
+    val code_raw = event_optional_text(fields, "failure_code")?
+    match code_raw:
+        case Some(code_text):
+            match parse_test_failure_code(code_text):
+                case Some(code): failure_code = Some(code)
+                case None: return Err("unknown case-event failure_code: " + code_text)
+        case None: pass
+    var definition_digest: TestDefinitionDigest? = None
+    val definition_raw = event_optional_text(fields, "definition_digest")?
+    match definition_raw:
+        case Some(text_value): definition_digest = Some(TestDefinitionDigest(value: text_value))
+        case None: pass
+    var binary_digest: TestBinaryDigest? = None
+    val binary_raw = event_optional_text(fields, "binary_digest")?
+    match binary_raw:
+        case Some(text_value): binary_digest = Some(TestBinaryDigest(value: text_value))
+        case None: pass
     if fields.len() == 4:
         return Ok(None)
-    Ok(Some(TraceCaseFacts(at: at, failure: failure, host: host, backend: backend)))
+    Ok(Some(TraceCaseFacts(at: at, failure: failure, host: host, backend: backend, failure_code: failure_code, definition_digest: definition_digest, binary_digest: binary_digest)))
 
 pub fn decode_trace_case_events(source: text) -> Result<[TraceCaseEvent], text>:
     if source == "" or source.len() > 4194304:

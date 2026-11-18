@@ -1,7 +1,7 @@
 # Pure read-only TestDB query model: typed rows, qualification and pagination.
 # Rows describe unverified framework observations; only a Passed status can
 # qualify, and every absent identity is an explicit Missing variant.
-use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestFailureSummary, TestHostTriple, TestBackendName}
+use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestFailureSummary, TestHostTriple, TestBackendName, TestFailureCode, TestDefinitionDigest, TestBinaryDigest, test_failure_code_name}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
@@ -98,7 +98,7 @@ pub struct TestScopedQuery:
     cursor: TestQueryCursor?
 
 # Plan 3.5 attempt facts. Absent (None) for events recorded before the runner
-# captured them. binary_digest and test_definition_digest are not recorded.
+# captured them. Digests are stamped by the parent runner when it records events.
 pub struct TestStartedAtMicros:
     value: i64
 
@@ -119,6 +119,9 @@ pub struct TestQueryRow:
     failure: TestFailureSummary? = None
     host: TestHostTriple? = None
     backend: TestBackendName? = None
+    failure_code: TestFailureCode? = None
+    definition_digest: TestDefinitionDigest? = None
+    binary_digest: TestBinaryDigest? = None
 
 pub enum TestQueryTruncation:
     Complete
@@ -270,16 +273,29 @@ fn _row(key: TestCaseKey, run_id: TestRunId, planned: TestPlannedCaseIdentity,
         duration = Some(TestDurationMicros(value: ended - began))
     var failure: TestFailureSummary? = None
     var host: TestHostTriple? = None
+    var failure_code: TestFailureCode? = None
+    var definition_digest: TestDefinitionDigest? = None
+    var binary_digest: TestBinaryDigest? = None
     var backend: TestBackendName? = None
     match finish:
-        case Some(facts): failure = facts.failure
+        case Some(facts):
+            failure = facts.failure
+            failure_code = facts.failure_code
+            definition_digest = facts.definition_digest
+            binary_digest = facts.binary_digest
         case None: pass
     match start:
         case Some(facts):
             host = facts.host
             backend = facts.backend
+            match definition_digest:
+                case Some(_): pass
+                case None: definition_digest = facts.definition_digest
+            match binary_digest:
+                case Some(_): pass
+                case None: binary_digest = facts.binary_digest
         case None: pass
-    TestQueryRow(started_at: started_at, duration: duration, failure: failure, host: host, backend: backend, case_key: key, level: test_level_of_path(key.path), run_id: run_id, planned_case: planned, attempt: attempt,
+    TestQueryRow(started_at: started_at, duration: duration, failure: failure, host: host, backend: backend, failure_code: failure_code, definition_digest: definition_digest, binary_digest: binary_digest, case_key: key, level: test_level_of_path(key.path), run_id: run_id, planned_case: planned, attempt: attempt,
         status: status, qualification: qualify_test_query_status(status),
         provenance: TestEvidenceProvenance.UnverifiedFrameworkObservation)
 
@@ -325,8 +341,8 @@ fn _fact_or_dash(value: text) -> text:
             out = out + ch
     out
 
-# CLI/MCP share these five cells, in order: started_at_micros, duration_micros,
-# host, backend, failure. "-" marks an absent fact.
+# CLI/MCP share these eight cells, in order: started_at_micros, duration_micros,
+# host, backend, failure, failure_code, definition_digest, binary_digest. "-" marks an absent fact.
 pub fn test_query_row_fact_cells(row: TestQueryRow) -> [text]:
     var started = "-"
     match row.started_at:
@@ -348,7 +364,19 @@ pub fn test_query_row_fact_cells(row: TestQueryRow) -> [text]:
     match row.failure:
         case Some(found): failure = _fact_or_dash(found.value)
         case None: pass
-    [started, duration, host, backend, failure]
+    var code = "-"
+    match row.failure_code:
+        case Some(found): code = test_failure_code_name(found)
+        case None: pass
+    var definition = "-"
+    match row.definition_digest:
+        case Some(found): definition = _fact_or_dash(found.value)
+        case None: pass
+    var binary = "-"
+    match row.binary_digest:
+        case Some(found): binary = _fact_or_dash(found.value)
+        case None: pass
+    [started, duration, host, backend, failure, code, definition, binary]
 
 fn _test_query_invalid(detail: text) -> TestQueryError:
     TestQueryError(kind: TestQueryErrorKind.InvalidQuery, detail: detail)
