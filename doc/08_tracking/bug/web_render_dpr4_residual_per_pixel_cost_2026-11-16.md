@@ -1,6 +1,6 @@
 # Web render at device scale 4: residual interpreter per-pixel cost (2026-11-16)
 
-Status: PARTIALLY FIXED 2026-11-17 (items 1 and 3 fixed, pixels byte-identical; items 2 and 4 still open). This is a perf bug, and the output is correct.
+Status: PARTIALLY FIXED 2026-11-18 (items 1, 3, and 4 fixed, pixels byte-identical; item 2 still open). This is a perf bug, and the output is correct.
 
 The k^3 framebuffer-copy-per-span cost is fixed: whole-frame extern marshalling
 was removed from `backend_software.spl`. See the 2026-11-16 note in
@@ -60,3 +60,18 @@ Not done:
 - Shadow falloff bands are still per pixel (2.3 s in the evidence-size case). When the whole region is one colour, rows with equal `cov_y` are identical and could be copied with `write_span`; not done to keep the change small.
 
 Catalog gate, head, `sh scripts/check/check-chrome-catalog-pixel-diff.shs --device-scale 4`: `PASS — 8 page(s) compared, worst=5.56, all within baseline ...Linux-aarch64.dpr4.txt (+0.25)`. The PPM sha256 of all 8 pages equals the base run (`6529dd52212`), so every page is byte-identical; the two rows that differ from the baseline file (animation 4.14 -> 4.17, tab-bar 0.54 -> 0.30) differ identically on base, i.e. they are older drift, not this change. Evidence phases at head (concurrent load): render 204 s, PPM encode 2 s, write under 1 s.
+
+## 2026-11-18 update: item 4 fixed (Wave C6 — contiguous chunked SIMD span fills)
+
+Base: `312a78d4d15`.
+
+- **Root cause (item 4):** `SoftwareBackend.clear` and full-width unmasked opaque `SoftwareBackend.draw_rect_filled` (`not mask_active and start_x == 0 and end_x == self.w`) iterated row-by-row calling `self.sw_fill_raw_span(...)` once per scanline — `3,040` batch builds, kernel lookups, scratch allocations, and native/write-span dispatches per `3600x3040` (`dpr4`) fill, plus `3,040` `mark_span_dirty` calls on full-width `draw_rect_filled` (and `ensure_kernel_table()` re-probed CPU buckets per backend instance rather than once per session).
+- **Fix (`src/lib/gc_async_mut/gpu/engine2d/backend_software.spl`):**
+  - Added private `me sw_fill_contiguous_range(start_offset: i32, total_count: i32, color: u32)` processing `[start_offset .. start_offset + total_count)` via `self.sw_fill_raw_span(pos, chunk, color)` in bounded chunks of `262144` pixels (`1 MiB` scratch cap).
+  - Wired `clear()` and full-width unmasked opaque `draw_rect_filled()` (marking touched tile rows `[start_y / TILE_SIZE ..= (end_y - 1) / TILE_SIZE]` dirty once per tile row) to call `self.sw_fill_contiguous_range(...)`.
+  - Memoized sealed `CpuKernelTable` slot probes at module scope so `ensure_kernel_table()` calibrates once per session while keeping per-backend `kernel_table.lookups` independent.
+- **Measured (`3600x3040`, `cpu_simd`, interpreter mode via `phase1_artifacts\simple.exe`):**
+  - SIMD fill dispatches (`simd_hit_counts().fill_hits` / `kernel_table.lookups`) per `3600x3040` fill: `3,040 -> 42` (`ceil(10,944,000 / 262,144)`); surfaces `<= 512x512` (`<= 262,144` px): `1`.
+  - Steady-state `clear(3600x3040)`: `0.99 s` (`994 ms`); full-width `draw_rect_filled(0, 0, 3600, 3040, ...)`: `1.03 s` (`1034 ms`) — combined `~2.0 s` (down from `~13 s` across `clear()` + page background).
+  - Unit spec `test/01_unit/lib/gpu/engine2d/backend_software_simd_spec.spl`: all 15 fill/blit/fallback/contiguous-chunked/dispatcher examples PASS (asserting pixel-exact output, sparse tile damage parity, X-clip/mask guards, and `fill_hits == ceil(pixels / 262144)`). The 3 remaining failures in that file are pre-existing translucent-dst `alpha blending` mismatches between `color.spl` (`03a967d3736`) and prebuilt `simple.exe` runtime blend externs.
+  - Item 2 (cold 64 px glyph raster / font atlas policy) remains open under its font-renderer owner.

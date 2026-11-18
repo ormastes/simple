@@ -5,7 +5,9 @@ use app.cli.shard_mem_clamp.{shard_threads_parent_cap_for, shard_threads_guarded
 use app.cli.shard_mem_clamp.{shard_cgroup_v1_memory_path_from_proc, shard_cgroup_v1_limit_paths, shard_cgroup_v1_limit_kb_from_fields}
 use app.cli.shard_mem_clamp.{shard_macos_available_kb_from_vm_stat}
 use app.cli.shard_mem_clamp.{SHARD_PARSE_WORKER_KB_V1, SHARD_HIR_WORKER_KB_V1}
-use std.nogc_sync_mut.host_limits.{host_limit_value}
+use app.cli.shard_mem_clamp.{build_host_memory_total_kib, build_host_memory_total_kib_bounded,
+    build_host_physmem_cache_reset_v1, build_host_physmem_cache_peek_kib_v1,
+    build_host_physmem_cache_seed_for_test_v1}
 use std.nogc_sync_mut.host_limits.{host_limit_value}
 
 # Mechanism pin for the MemAvailable-derived shard concurrency clamp.
@@ -349,3 +351,36 @@ describe "shard thread floor under an enforcing RSS guard":
     it "never raises a serial request or an admitted fanout":
         expect(shard_threads_guarded_floor_v1(1, 1, 20971520, 60000000, 25165824, 9000000, -1, "enforce")).to_equal(1)
         expect(shard_threads_guarded_floor_v1(4, 3, 20971520, 60000000, 25165824, 9000000, -1, "enforce")).to_equal(3)
+
+describe "memoized host physical RAM total (build_host_memory_total_kib)":
+    it "populates the positive physical RAM cache once and resets cleanly":
+        build_host_physmem_cache_reset_v1()
+        expect(build_host_physmem_cache_peek_kib_v1()).to_equal(0)
+        val first = build_host_memory_total_kib()
+        val cached_physmem = build_host_physmem_cache_peek_kib_v1()
+        expect(first > 0).to_be_true()
+        expect(cached_physmem > 0).to_be_true()
+        expect(first).to_equal(build_host_memory_total_kib_bounded(cached_physmem, shard_cgroup_memory_max_kb()))
+        expect(build_host_memory_total_kib()).to_equal(first)
+
+    it "reuses memoized physical RAM without re-probing while clamping against live cgroup memory.max":
+        val saved = build_host_physmem_cache_peek_kib_v1()
+        build_host_physmem_cache_seed_for_test_v1(134217728)
+        val got = build_host_memory_total_kib()
+        val cgroup_kb = shard_cgroup_memory_max_kb()
+        if saved > 0:
+            build_host_physmem_cache_seed_for_test_v1(saved)
+        else:
+            build_host_physmem_cache_reset_v1()
+        expect(got).to_equal(build_host_memory_total_kib_bounded(134217728, cgroup_kb))
+
+    it "never memoizes non-positive physical RAM readings":
+        val saved = build_host_physmem_cache_peek_kib_v1()
+        build_host_physmem_cache_seed_for_test_v1(0)
+        expect(build_host_physmem_cache_peek_kib_v1()).to_equal(0)
+        build_host_physmem_cache_seed_for_test_v1(-42)
+        expect(build_host_physmem_cache_peek_kib_v1()).to_equal(0)
+        if saved > 0:
+            build_host_physmem_cache_seed_for_test_v1(saved)
+        else:
+            build_host_physmem_cache_reset_v1()

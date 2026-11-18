@@ -30,6 +30,7 @@ after-the-fact check cannot catch.
 | Header count | exact count accepted | +1 header → 431 | — |
 | Body (Content-Length) | exact size accepted | declared +1 → 413 pre-buffer | rejected before body bytes |
 | Body (chunked) | small body decoded | decoded over limit → 413 | raw accumulation cut off → 413 |
+| Fragmented header ingress | 8 KiB / 16 KiB in 64 B chunks | linear `header_copy_bytes` vs O(N^2) | pipelined body + next request |
 
 ## Examples
 
@@ -73,6 +74,43 @@ fn feed_ok(parser: HttpRequestParser, data: text) -> bool:
     match r:
         Ok(_): true
         Err(_): false
+
+# feed_in_chunks feeds payload in fixed-size byte fragments and returns total consumed bytes (or -1 on error).
+fn feed_in_chunks(parser: HttpRequestParser, payload: text, chunk_bytes: i64) -> i64:
+    var total_consumed: i64 = 0
+    var pos: i64 = 0
+    val total_len = payload.byte_len()
+    while pos < total_len:
+        var next_pos = pos + chunk_bytes
+        if next_pos > total_len:
+            next_pos = total_len
+        val r = parser.feed(payload.slice(pos, next_pos))
+        match r:
+            Ok(n):
+                total_consumed = total_consumed + n
+            Err(_):
+                return -1
+        pos = next_pos
+    total_consumed
+
+# build_multi_header_request constructs a request with `header_count` ~128-byte headers and optional body.
+fn build_multi_header_request(path: text, header_count: i32, pad: text, body: text) -> text:
+    var lines: [text] = []
+    if body.byte_len() > 0:
+        lines.push("POST {path} HTTP/1.1\r\n")
+    else:
+        lines.push("GET {path} HTTP/1.1\r\n")
+    lines.push("Host: example.test\r\n")
+    var idx = 0
+    while idx < header_count:
+        lines.push("X-Hdr-{idx}: {pad}\r\n")
+        idx = idx + 1
+    if body.byte_len() > 0:
+        lines.push("Content-Length: {body.byte_len()}\r\n")
+    lines.push("\r\n")
+    if body.byte_len() > 0:
+        lines.push(body)
+    lines.join("")
 
 use std.spec.step
 
@@ -317,3 +355,135 @@ describe "async parser — well-formed requests still parse":
         expect(req.path).to_equal("/hello")
         expect(req.query).to_equal("x=1")
         expect(req.headers.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+
+describe "async parser — O(N) 64-byte fragmented header ingress and pipelined body":
+    it "keeps header_copy_bytes linear across 8 KiB and 16 KiB 64-byte-fragmented multi-header blocks":
+        # @req: REQ-LIB-NOGC-ASYNC-MUT-001
+        step("Build 8 KiB and 16 KiB multi-header requests and stream each in 64-byte chunks")
+        val pad = repeat_char("v", 116)
+        val req8 = build_multi_header_request("/bench8", 64, pad, "")
+        val req16 = build_multi_header_request("/bench16", 128, pad, "")
+        expect(req8.byte_len()).to_be_greater_than(8192)
+        expect(req16.byte_len()).to_be_greater_than(16384)
+
+        var p8 = HttpRequestParser.with_limits(8192, 512, 16384, 1048576)
+        var p16 = HttpRequestParser.with_limits(8192, 512, 16384, 1048576)
+        expect(feed_in_chunks(p8, req8, 64)).to_equal(req8.byte_len())
+        expect(feed_in_chunks(p16, req16, 64)).to_equal(req16.byte_len())
+        expect(p8.is_complete()).to_be(true)
+        expect(p16.is_complete()).to_be(true)
+        expect(p8.to_request("127.0.0.1").headers.len()).to_equal(65)
+        expect(p16.to_request("127.0.0.1").headers.len()).to_equal(129)
+
+        step("Verify header_copy_bytes stays O(N) and doubles (~2x) instead of quadrupling (~4x O(N^2))")
+        val copy8 = p8.header_copy_bytes
+        val copy16 = p16.header_copy_bytes
+        # Pre-fix O(N^2) concat + per-line slice on 256 x 64 B fragments exceeded 1,000,000 bytes.
+        val quadratic16 = (256 * 257 * 64) / 2
+        expect(copy8).to_be_greater_than(0)
+        expect(copy8).to_be_less_than(req8.byte_len() * 3)
+        expect(copy16).to_be_less_than(req16.byte_len() * 3)
+        expect(copy16 * 10).to_be_less_than( quadratic16 )
+        expect(copy16 * 10).to_be_less_than(copy8 * 25)
+
+    it "keeps header_copy_bytes O(N) on 8 KiB and 16 KiB single large headers fed in 64-byte fragments":
+        step("Stream single 8 KiB and 16 KiB header lines in 64-byte chunks")
+        val big8 = "GET /single8 HTTP/1.1\r\nHost: example.test\r\nX-Blob: " + repeat_char("z", 8192) + "\r\n\r\n"
+        val big16 = "GET /single16 HTTP/1.1\r\nHost: example.test\r\nX-Blob: " + repeat_char("z", 16384) + "\r\n\r\n"
+        var p8 = HttpRequestParser.with_limits(8192, 128, 32768, 1048576)
+        var p16 = HttpRequestParser.with_limits(8192, 128, 32768, 1048576)
+
+        expect(feed_in_chunks(p8, big8, 64)).to_equal(big8.byte_len())
+        expect(feed_in_chunks(p16, big16, 64)).to_equal(big16.byte_len())
+        expect(p8.is_complete()).to_be(true)
+        expect(p16.is_complete()).to_be(true)
+
+        step("Verify partial-line chunks stay queued until newline so header_copy_bytes is ~1x N")
+        expect(p8.header_copy_bytes).to_be_less_than(big8.byte_len() * 2)
+        expect(p16.header_copy_bytes).to_be_less_than(big16.byte_len() * 2)
+        expect(p16.header_copy_bytes * 10).to_be_less_than(p8.header_copy_bytes * 25)
+
+    it "parses 16 KiB 64-byte-fragmented headers with a pipelined Content-Length body and next request":
+        step("Stream a 16 KiB-header POST + 320-byte body + pipelined second POST in 64-byte chunks")
+        val pad = repeat_char("m", 116)
+        val body1 = "START-" + repeat_char("p", 308) + "-FINAL"
+        expect(body1.byte_len()).to_equal(320)
+        val req1 = build_multi_header_request("/upload", 128, pad, body1)
+        val req2 = "POST /pipelined HTTP/1.1\r\nHost: example.test\r\nContent-Length: 12\r\n\r\nsecond-body!"
+        val wire = req1 + req2
+
+        var p = HttpRequestParser.with_limits(8192, 512, 16384, 1048576)
+        var pos: i64 = 0
+        var consumed1: i64 = 0
+        val wire_len = wire.byte_len()
+        while pos < wire_len and not p.is_complete():
+            var next_pos = pos + 64
+            if next_pos > wire_len:
+                next_pos = wire_len
+            val r = p.feed(wire.slice(pos, next_pos))
+            match r:
+                Ok(n):
+                    consumed1 = consumed1 + n
+                Err(_):
+                    expect(false).to_be(true)
+            pos = next_pos
+
+        step("Verify first request headers, body, consumed byte count, and linear header_copy_bytes")
+        expect(p.is_complete()).to_be(true)
+        expect(consumed1).to_equal(req1.byte_len())
+        val parsed1 = p.to_request("127.0.0.1")
+        expect(parsed1.method).to_equal("POST")
+        expect(parsed1.path).to_equal("/upload")
+        expect(parsed1.headers.len()).to_equal(130)
+        expect(parsed1.body).to_equal(body1)
+        expect(p.header_copy_bytes).to_be_less_than(req1.byte_len() * 3)
+
+        step("Reset and finish streaming the pipelined second request")
+        p.reset()
+        var consumed2: i64 = 0
+        if pos >= wire_len:
+            val r0 = p.feed("")
+            match r0:
+                Ok(n):
+                    consumed2 = consumed2 + n
+                Err(_):
+                    expect(false).to_be(true)
+        while pos < wire_len:
+            var next_pos = pos + 64
+            if next_pos > wire_len:
+                next_pos = wire_len
+            val r = p.feed(wire.slice(pos, next_pos))
+            match r:
+                Ok(n):
+                    consumed2 = consumed2 + n
+                Err(_):
+                    expect(false).to_be(true)
+            pos = next_pos
+
+        expect(p.is_complete()).to_be(true)
+        expect(consumed2).to_equal(req2.byte_len())
+        val parsed2 = p.to_request("127.0.0.1")
+        expect(parsed2.method).to_equal("POST")
+        expect(parsed2.path).to_equal("/pipelined")
+        expect(parsed2.body).to_equal("second-body!")
+
+    it "advances buf_pos across 8 KiB and 16 KiB multi-header buffers without per-line re-slicing":
+        step("Feed whole 8 KiB and 16 KiB multi-header requests with pipelined bodies")
+        val pad = repeat_char("k", 116)
+        val body = repeat_char("b", 256)
+        val req8 = build_multi_header_request("/cursor8", 64, pad, body)
+        val req16 = build_multi_header_request("/cursor16", 128, pad, body)
+
+        var p8 = HttpRequestParser.with_limits(8192, 512, 16384, 1048576)
+        var p16 = HttpRequestParser.with_limits(8192, 512, 16384, 1048576)
+        expect(feed_ok(p8, req8)).to_be(true)
+        expect(feed_ok(p16, req16)).to_be(true)
+        expect(p8.is_complete()).to_be(true)
+        expect(p16.is_complete()).to_be(true)
+        expect(p16.to_request("127.0.0.1").body).to_equal(body)
+
+        step("Verify lazy compaction (>= 4 KiB and >= 50%) keeps header_copy_bytes O(N) vs 128x slice")
+        expect(p8.header_copy_bytes).to_be_less_than(req8.byte_len() * 3)
+        expect(p16.header_copy_bytes).to_be_less_than(req16.byte_len() * 3)
+        expect(p16.header_copy_bytes * 10).to_be_less_than(p8.header_copy_bytes * 26)
+

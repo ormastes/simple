@@ -282,6 +282,8 @@ export native_link_receipt_render_v1, native_link_receipt_output_digest_v1
 export native_link_with_receipt_v1, native_shared_link_with_receipt_v1
 export native_shared_link_config_text_v1, native_shared_receipt_render_v1, native_shared_receipt_read_v1
 export native_dynlib_replace_by_rename_v1
+export native_link_nm_batches_v1, native_link_parse_nm_defined_symbols_v1
+export native_link_exports_digest_with_runner_v1
 
 # ---------------------------------------------------------------------------
 # Per-dynlib receipts. A shared library's receipt lives next to it and covers
@@ -327,19 +329,102 @@ pub fn native_shared_receipt_read_v1(content: text, key: text) -> (text, text):
     val exports = content.substring(at + marker.len()).trim()
     (native_link_receipt_output_digest_v1(base, key), exports)
 
+val NATIVE_LINK_NM_MAX_CMD_BYTES_V1: i64 = 16384
+val NATIVE_LINK_NM_MAX_BATCH_LEN_V1: i64 = 128
+
+# Batch object paths for `llvm-nm --defined-only --extern-only -j` up to
+# `max_batch_len` objects and `max_cmd_bytes` UTF-8 command-line bytes (well
+# below the Windows 32 KiB CreateProcessW limit at 16384).
+# reason: OS command-line byte budget and batch-count limits are raw i64 bounds at the process_run_timeout ABI boundary
+@allow(primitive_api) # reason: OS command-line byte budget and batch-count limits are raw i64 bounds at the process_run_timeout ABI boundary
+pub fn native_link_nm_batches_v1(objects: [text], max_cmd_bytes: i64, max_batch_len: i64) -> [[text]]:
+    var batches: [[text]] = []
+    if objects.len() == 0:
+        return batches
+    val batch_cap = if max_batch_len > 0: max_batch_len else: 1
+    val base_bytes = "llvm-nm --defined-only --extern-only -j".byte_len()
+    var current: [text] = []
+    var current_count: i64 = 0
+    var current_bytes: i64 = base_bytes
+    for object in objects:
+        val arg_bytes = 1 + object.byte_len()
+        if current_count > 0 and (current_count >= batch_cap or current_bytes + arg_bytes > max_cmd_bytes):
+            batches.push(current)
+            current = []
+            current_count = 0
+            current_bytes = base_bytes
+        current.push(object)
+        current_count = current_count + 1
+        current_bytes = current_bytes + arg_bytes
+    if current_count > 0:
+        batches.push(current)
+    batches
+
+# Parse defined external symbols from `llvm-nm --defined-only --extern-only -j`
+# stdout, stripping empty lines and multi-object `<object>:` headers emitted
+# when `batch_objects.len() > 1`.
+# reason: raw llvm-nm stdout text and object path strings are parsed directly at the subprocess boundary
+@allow(primitive_api) # reason: raw llvm-nm stdout text and object path strings are parsed directly at the subprocess boundary
+pub fn native_link_parse_nm_defined_symbols_v1(stdout: text, batch_objects: [text]) -> [text]:
+    var headers: Dict<text, bool> = {}
+    if batch_objects.len() > 1:
+        for object in batch_objects:
+            val trimmed_obj = object.trim()
+            if trimmed_obj != "":
+                headers[object + ":"] = true
+                headers[trimmed_obj + ":"] = true
+                headers[trimmed_obj.replace("\\", "/") + ":"] = true
+                headers[trimmed_obj.replace("/", "\\") + ":"] = true
+    var symbols: [text] = []
+    for line in stdout.split("\n"):
+        val name = line.trim()
+        if name == "":
+            continue
+        if headers.contains_key(name):
+            continue
+        symbols.push(name)
+    symbols
+
+# Compute the sorted defined-symbol sha256 across batched `llvm-nm` calls,
+# falling back to per-object `llvm-nm` on a batch only if that batch fails.
+# reason: raw i64 command-line byte budget and batch-count limits match the process_run_timeout subprocess boundary
+@allow(primitive_api) # reason: raw i64 command-line byte budget and batch-count limits match the process_run_timeout subprocess boundary
+pub fn native_link_exports_digest_with_runner_v1(objects: [text], max_cmd_bytes: i64, max_batch_len: i64, run_nm: fn([text]) -> Result<text, text>) -> text:
+    var symbols: [text] = []
+    for batch in native_link_nm_batches_v1(objects, max_cmd_bytes, max_batch_len):
+        match run_nm(batch):
+            case Ok(out):
+                for sym in native_link_parse_nm_defined_symbols_v1(out, batch):
+                    symbols.push(sym)
+            case Err(_):
+                if batch.len() <= 1:
+                    return "unknown"
+                for object in batch:
+                    match run_nm([object]):
+                        case Ok(single_out):
+                            for sym in native_link_parse_nm_defined_symbols_v1(single_out, [object]):
+                                symbols.push(sym)
+                        case Err(_):
+                            return "unknown"
+    sha256_text(action_key_sort_texts(symbols).join("\n"))
+
+fn _run_llvm_nm_batch_v1(batch_objects: [text]) -> Result<text, text>:
+    var args: [text] = ["--defined-only", "--extern-only", "-j"]
+    for object in batch_objects:
+        args.push(object)
+    val (out, _err, code) = process_run_timeout("llvm-nm", args, 30000)
+    if code != 0:
+        return Err("llvm-nm exited with {code}")
+    Ok(out)
+
 # Digest of the defined external symbols of `objects` ("unknown" when no
 # symbol tool is available, which only disables the exports-unchanged report).
 fn _exports_digest_v1(objects: [text]) -> text:
-    var symbols: [text] = []
-    for object in objects:
-        val (out, _err, code) = process_run_timeout("llvm-nm", ["--defined-only", "--extern-only", "-j", object], 30000)
-        if code != 0:
-            return "unknown"
-        for line in out.split("\n"):
-            val name = line.trim()
-            if name != "":
-                symbols.push(name)
-    sha256_text(action_key_sort_texts(symbols).join("\n"))
+    native_link_exports_digest_with_runner_v1(
+        objects,
+        NATIVE_LINK_NM_MAX_CMD_BYTES_V1,
+        NATIVE_LINK_NM_MAX_BATCH_LEN_V1,
+        _run_llvm_nm_batch_v1)
 
 pub fn native_dynlib_replace_by_rename_v1(temp_output: text, output: text) -> bool:
     val old = "{output}.{getpid()}.old"

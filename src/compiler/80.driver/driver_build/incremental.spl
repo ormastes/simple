@@ -1362,6 +1362,29 @@ struct IncrementalCompileResult:
 # Build Cache
 # ============================================================================
 
+fn _incremental_outputs_all_live_v1(outputs: [text]) -> bool:
+    # Empty outputs represent source-only dependency rows (e.g. detect_changes
+    # without artifact paths). Any non-empty outputs list must reference live
+    # files on disk; evicted scope/object paths are pruned so build_cache.sdn
+    # stays bounded to live objects.
+    if outputs.len() == 0:
+        return true
+    for out in outputs:
+        if out == "" or not incremental_file_exists(out):
+            return false
+    true
+
+fn _build_cache_prune_missing_outputs_v1(cache: BuildCache) -> i64:
+    var stale: [text] = []
+    for source in cache.entries.keys():
+        val entry = cache.entries[source]
+        if not _incremental_outputs_all_live_v1(entry.outputs):
+            stale = stale.push(source)
+    for source in stale:
+        cache.entries.remove(source)
+        cache.fingerprints.remove(source)
+    stale.len()
+
 class BuildCache:
     """Persistent build cache with integrity checking.
 
@@ -1485,6 +1508,8 @@ impl BuildCache:
                                         val os = o.as_str()
                                         if val out_text = os:
                                             outs = outs.push(out_text)
+                            if not _incremental_outputs_all_live_v1(outs):
+                                continue
 
                             # deps_iface: absent in pre-2026-08-18 rows -> ""
                             # -> the entry fails closed in has_cached_object.
@@ -2115,6 +2140,7 @@ pub fn build_cache_persist(cache: BuildCache, publish_receipt: bool = true) -> b
     doc/08_tracking/bug/native_codegen_build_cache_save_retention_2026-10-25.md).
     Nothing here writes a persistent object. Inside a caller's scope the save
     runs unscoped, because transient scopes do not nest."""
+    val _pruned = _build_cache_prune_missing_outputs_v1(cache)
     if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
         return build_cache_persist_unscoped_v1(cache, publish_receipt)
     val persisted = build_cache_persist_unscoped_v1(cache, publish_receipt)

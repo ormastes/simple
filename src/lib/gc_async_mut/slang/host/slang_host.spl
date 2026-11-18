@@ -14,6 +14,7 @@
 # and byte reads, sha256.
 
 use std.nogc_async_mut.sosix.host_facade.{sosix_host_os, sosix_env_get_checked, sosix_file_exists, sosix_file_read, sosix_dir_list_checked, sosix_run_bounded_checked}
+use std.nogc_sync_mut.sosix.windows_memory_v1.{sosix_windows_memory_headroom_v1}
 
 # ---------------------------------------------------------------- pure -----
 
@@ -201,6 +202,21 @@ fn host_run_text(cmd: text, args: [text]) -> text:
 fn host_run_int(cmd: text, args: [text]) -> i64:
     parse_int_text(host_run_text(cmd, args))
 
+# Fast Windows available-memory headroom via SOSIX GlobalMemoryStatusEx
+# (`min(ullAvailPhys, ullAvailPageFile)`, <1 ms). Answers 0 off Windows or when
+# the snapshot returns Err or <= 0 so memory_budget can fall back to CIM.
+# reason: returns raw byte headroom from SOSIX GlobalMemoryStatusEx snapshot (0 on Err or <= 0); memory_budget contract is i64 bytes
+@allow(primitive_api)
+pub fn slang_windows_available_bytes_fast() -> i64:
+    if host_os_name() != "windows":
+        return 0
+    match sosix_windows_memory_headroom_v1():
+        case Ok(v):
+            if v > 0:
+                return v
+            0
+        case Err(_): 0
+
 export ggml_lib_default, rocm_bin_default_for, hip_lib_names, hiprtc_lib_names, host_libc_name
 export host_join, parse_meminfo_bytes, parse_int_text, parse_vm_stat_page_size, parse_vm_stat_available_pages, darwin_available_bytes
-export host_os_name, host_env, host_file_exists, host_file_read, host_dir_list, host_run_text, host_run_int
+export host_os_name, host_env, host_file_exists, host_file_read, host_dir_list, host_run_text, host_run_int, slang_windows_available_bytes_fast

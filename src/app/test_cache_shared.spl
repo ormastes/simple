@@ -4,15 +4,59 @@
 # Used by test_runner_new/test_result_cache.spl, test_daemon/cache.spl,
 # test_incremental_state_shared.spl, and test_runner_files.spl.
 
-use std.nogc_sync_mut.io.file_ops.{file_read_text, file_write, file_stat, file_rename}
+use std.nogc_sync_mut.io.file_ops.{file_read_text, file_write, file_stat, file_size, file_exists, file_rename}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
-use std.nogc_sync_mut.io_runtime.{file_hash_sha256_or_empty}
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure}
+use std.nogc_sync_mut.io_runtime.{file_delete, file_hash_sha256_or_empty}
 
 # ============================================================================
-# Version
+# Version & Limits
 # ============================================================================
 
 pub val TEST_RESULT_CACHE_VERSION: i64 = 3
+pub val MAX_SHARED_TEST_CACHE_ENTRIES: i64 = 8192
+val MAX_DEP_HASH_MEMO_ENTRIES: i64 = 16384
+
+# ============================================================================
+# Process-local (mtime, size)-validated SHA-256 memo
+# ============================================================================
+
+var _dep_hash_memo: Dict<text, text> = {}
+var _dep_hash_memo_count: i64 = 0
+var _dep_hash_compute_count: i64 = 0
+var _last_recorded_ms: i64 = 0
+
+fn _memo_key(path: text) -> text:
+    path.replace("\\", "/")
+
+# reason: file-watcher and runner callers pass raw filesystem paths to evict memoized digests
+@allow(primitive_api)
+pub fn shared_cache_invalidate_path(path: text):
+    """Invalidate any memoized SHA-256 fingerprint for path."""
+    if path == "":
+        return
+    val key = _memo_key(path)
+    if _dep_hash_memo.contains_key(key):
+        _dep_hash_memo[key] = ""
+
+# reason: runner and daemon lifecycle callers clear process-local digest memo state
+@allow(primitive_api)
+pub fn shared_cache_clear_memo():
+    """Clear all memoized SHA-256 fingerprints."""
+    _dep_hash_memo = {}
+    _dep_hash_memo_count = 0
+
+# reason: cache telemetry and unit specs read the raw SHA-256 invocation counter
+@allow(primitive_api)
+pub fn shared_cache_hash_compute_count() -> i64:
+    """Return the number of SHA-256 file digests computed in this process."""
+    _dep_hash_compute_count
+
+# reason: cache telemetry and unit specs reset the raw SHA-256 invocation counter
+@allow(primitive_api)
+pub fn shared_cache_reset_hash_compute_count():
+    """Reset the SHA-256 file digest computation counter to zero."""
+    _dep_hash_compute_count = 0
 
 # ============================================================================
 # TestCacheEntry
@@ -29,6 +73,7 @@ struct TestCacheEntry:
     duration_ms: i64
     output: text
     cached_at: i64           # Unix micros when entry was written
+    last_run_ms: i64         # Unix millis when entry was recorded
 
 fn stale_entry(test_path: text) -> TestCacheEntry:
     """Return a sentinel entry representing a stale/missing cache result."""
@@ -41,23 +86,63 @@ fn stale_entry(test_path: text) -> TestCacheEntry:
         skipped: 0,
         duration_ms: 0,
         output: "",
-        cached_at: 0
+        cached_at: 0,
+        last_run_ms: 0
     )
 
 # ============================================================================
 # Helpers
 # ============================================================================
 
+fn _next_run_timestamps() -> (i64, i64):
+    val raw_us = time_sample_unix_micros_or_failure()
+    val now_us = if raw_us > 0: raw_us else: 0
+    var now_ms = now_us / 1000
+    if now_ms <= _last_recorded_ms:
+        now_ms = _last_recorded_ms + 1
+    _last_recorded_ms = now_ms
+    val effective_us = if now_us > now_ms * 1000: now_us else: now_ms * 1000
+    (effective_us, now_ms)
+
+fn _entry_last_run_ms(e: TestCacheEntry) -> i64:
+    if e.last_run_ms > 0:
+        return e.last_run_ms
+    if e.cached_at > 0:
+        return e.cached_at / 1000
+    0
+
 fn _dep_fingerprint(path: text) -> text:
     # mtime alone has one-second resolution, so a same-size rewrite within
     # that second kept the old fingerprint and served a stale cached result.
     # The content digest decides. A missing path, a directory, or an open/read
     # failure has no 64-hex digest; all of those fingerprint as "unreadable",
-    # which never matches a real digest.
+    # which never matches a real digest. Within a process, reuse the digest
+    # when live (mtime > 0, size >= 0) matches the memoized entry.
+    val mtime = file_stat(path)
+    val size = file_size(path)
+    val key = _memo_key(path)
+    if mtime > 0 and size >= 0 and _dep_hash_memo.contains_key(key):
+        val cached = _dep_hash_memo[key]
+        if cached != "":
+            val parts = cached.split(":")
+            if parts.len() == 3 and parts[0] == "{mtime}" and parts[1] == "{size}" and parts[2].len() == 64:
+                return "{mtime}@{parts[2]}"
+    _dep_hash_compute_count = _dep_hash_compute_count + 1
     val digest = file_hash_sha256_or_empty(path)
     if digest.len() != 64:
+        if _dep_hash_memo.contains_key(key):
+            _dep_hash_memo[key] = ""
         return "unreadable"
-    "{file_stat(path)}@{digest}"
+    val live_mtime = if mtime > 0: mtime else: file_stat(path)
+    val live_size = if size >= 0: size else: file_size(path)
+    if live_mtime > 0 and live_size >= 0:
+        if _dep_hash_memo_count >= MAX_DEP_HASH_MEMO_ENTRIES:
+            _dep_hash_memo = {}
+            _dep_hash_memo_count = 0
+        if not _dep_hash_memo.contains_key(key):
+            _dep_hash_memo_count = _dep_hash_memo_count + 1
+        _dep_hash_memo[key] = "{live_mtime}:{live_size}:{digest}"
+    "{live_mtime}@{digest}"
 
 fn _dep_hash(test_path: text, dep_paths: [text]) -> text:
     """Build a fingerprint from file mtimes and content digests."""
@@ -66,13 +151,64 @@ fn _dep_hash(test_path: text, dep_paths: [text]) -> text:
         h = h + ":" + _dep_fingerprint(p)
     h
 
+fn _select_entries_to_save(entries: {text: TestCacheEntry}) -> [TestCacheEntry]:
+    var kept_entries: [TestCacheEntry] = []
+    var kept_ms: [i64] = []
+    var kept_keys: [text] = []
+    for key in entries.keys():
+        val e = entries[key]
+        if e.test_path != "" and not file_exists(e.test_path):
+            continue
+        kept_entries.push(e)
+        kept_ms.push(_entry_last_run_ms(e))
+        kept_keys.push(key)
+    val n = kept_entries.len()
+    if n <= MAX_SHARED_TEST_CACHE_ENTRIES:
+        return kept_entries
+
+    # Shell sort indices descending by last_run_ms (newest first), tie-broken by key.
+    var idx: [i64] = []
+    var i = 0
+    while i < n:
+        idx.push(i)
+        i = i + 1
+    var gap = n / 2
+    while gap > 0:
+        i = gap
+        while i < n:
+            val tmp_idx = idx[i]
+            val tmp_ms = kept_ms[tmp_idx]
+            val tmp_key = kept_keys[tmp_idx]
+            var k = i
+            while k >= gap:
+                val prev_idx = idx[k - gap]
+                val prev_ms = kept_ms[prev_idx]
+                val move_right = if prev_ms != tmp_ms:
+                    prev_ms < tmp_ms
+                else:
+                    kept_keys[prev_idx] > tmp_key
+                if not move_right:
+                    break
+                idx[k] = prev_idx
+                k = k - gap
+            idx[k] = tmp_idx
+            i = i + 1
+        gap = gap / 2
+
+    var capped: [TestCacheEntry] = []
+    var out_i = 0
+    while out_i < MAX_SHARED_TEST_CACHE_ENTRIES:
+        capped.push(kept_entries[idx[out_i]])
+        out_i = out_i + 1
+    capped
+
 # ============================================================================
 # Shared cache operations
 # ============================================================================
 
 fn shared_cache_check_freshness(entries: {text: TestCacheEntry}, test_path: text, dep_paths: [text]) -> TestCacheEntry:
     """Return the cached entry if still fresh, or a stale sentinel."""
-    if not entries.?[test_path]:
+    if not entries.contains_key(test_path):
         return stale_entry(test_path)
     val entry = entries[test_path]
     val current_hash = _dep_hash(test_path, dep_paths)
@@ -82,33 +218,43 @@ fn shared_cache_check_freshness(entries: {text: TestCacheEntry}, test_path: text
 
 fn shared_cache_build_entry(test_path: text, dep_paths: [text], status: i64, passed: i64, failed: i64, skipped: i64, duration_ms: i64, output: text) -> TestCacheEntry:
     """Build a new cache entry for the given test result."""
+    shared_cache_invalidate_path(test_path)
+    val computed_hash = _dep_hash(test_path, dep_paths)
+    shared_cache_invalidate_path(test_path)
+    val (now_us, now_ms) = _next_run_timestamps()
     TestCacheEntry(
         test_path: test_path,
-        dep_hash: _dep_hash(test_path, dep_paths),
+        dep_hash: computed_hash,
         result_status: status,
         passed: passed,
         failed: failed,
         skipped: skipped,
         duration_ms: duration_ms,
         output: output,
-        cached_at: 0
+        cached_at: now_us,
+        last_run_ms: now_ms
     )
 
 fn shared_cache_save(entries: {text: TestCacheEntry}, cache_path: text):
-    """Serialize entries to a line-based cache file."""
+    """Serialize live, bounded entries to a line-based cache file."""
+    val selected = _select_entries_to_save(entries)
     var lines: [text] = []
     lines = lines.push("version:{TEST_RESULT_CACHE_VERSION}")
-    for key in entries.keys():
-        val e = entries[key]
-        val line = "{e.test_path}|{e.dep_hash}|{e.result_status}|{e.passed}|{e.failed}|{e.skipped}|{e.duration_ms}"
+    for e in selected:
+        val run_ms = _entry_last_run_ms(e)
+        val line = "{e.test_path}|{e.dep_hash}|{e.result_status}|{e.passed}|{e.failed}|{e.skipped}|{e.duration_ms}|{run_ms}"
         lines = lines.push(line)
     # Atomic: unique temp file + rename, so concurrent runners never tear the file.
     val tmp = "{cache_path}.tmp.{getpid()}"
     if file_write(tmp, lines.join("\n")):
-        file_rename(tmp, cache_path)
+        if not file_rename(tmp, cache_path):
+            file_delete(tmp)
+    elif file_exists(tmp):
+        file_delete(tmp)
 
 fn shared_cache_load_entries(cache_path: text) -> {text: TestCacheEntry}:
     """Load entries from a cache file. Returns empty dict on any error."""
+    shared_cache_clear_memo()
     var entries: {text: TestCacheEntry} = {}
     val raw = file_read_text(cache_path)
     if raw == "":
@@ -120,6 +266,9 @@ fn shared_cache_load_entries(cache_path: text) -> {text: TestCacheEntry}:
         elif line.len() > 0:
             val parts = line.split("|")
             if parts.len() >= 7:
+                val loaded_run_ms = if parts.len() >= 8: parts[7].to_int() ?? 0 else: 0
+                if loaded_run_ms > _last_recorded_ms:
+                    _last_recorded_ms = loaded_run_ms
                 val entry = TestCacheEntry(
                     test_path: parts[0],
                     dep_hash: parts[1],
@@ -129,7 +278,8 @@ fn shared_cache_load_entries(cache_path: text) -> {text: TestCacheEntry}:
                     skipped: parts[5].to_int() ?? 0,
                     duration_ms: parts[6].to_int() ?? 0,
                     output: "",
-                    cached_at: 0
+                    cached_at: loaded_run_ms * 1000,
+                    last_run_ms: loaded_run_ms
                 )
                 entries[entry.test_path] = entry
     entries

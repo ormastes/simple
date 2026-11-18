@@ -1,8 +1,11 @@
 """Flat cache directories are swept oldest-first past their byte cap."""
 
 use std.spec.*
-use std.nogc_sync_mut.io.disk_bound.{disk_bound_enforce, disk_bound_dir_bytes, disk_bound_cap_bytes, disk_bound_mark_used, disk_bound_sweep, disk_bound_keep_newest_dirs}
-use std.io_runtime.{dir_remove_all, getpid, time_now_unix_micros, file_write, file_exists, dir_create}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_enforce, disk_bound_dir_bytes, disk_bound_cap_bytes, disk_bound_mark_used, disk_bound_sweep, disk_bound_keep_newest_dirs, disk_bound_keep_newest_prefix_dirs}
+use app.cli.native_build_parse_closure_owner.{native_build_parse_closure_retire_request_v1, NATIVE_BUILD_KEEP_CLOSURE_REQUEST_ENV_V1}
+use app.io.env_ops.{env_set}
+use compiler.driver.driver_build.incremental.{build_cache_open, build_cache_record_entry, build_cache_record_entry_at, build_cache_persist, build_cache_entry_is_valid_at}
+use std.io_runtime.{dir_remove_all, getpid, time_now_unix_micros, file_write, file_exists, file_delete, file_read, dir_create, dir_exists}
 
 fn bound_fixture(label: text) -> text:
     val dir = "build/disk_bound_{getpid()}_{time_now_unix_micros()}_{label}"
@@ -73,4 +76,97 @@ describe "disk bound":
         expect(file_exists(root + "/hir/obj/x.o")).to_equal(true)
         expect(file_exists(root + "/s01/obj/x.o")).to_equal(true)
         expect(disk_bound_keep_newest_dirs(root, "s0001", "s", 5, 1, 3600)).to_equal(0)
+        dir_remove_all(root)
+
+    it "evicts oldest variable-length closure-request-* prefix dirs while preserving min_age_s and siblings":
+        val root = "build/disk_bound_{getpid()}_{time_now_unix_micros()}_prefix"
+        val names = [
+            "closure-request-1-10",
+            "closure-request-20-200",
+            "closure-request-300-3000",
+            "closure-request-4000-40000"
+        ]
+        for name in names:
+            dir_create(root + "/" + name, true)
+            file_write(root + "/" + name + "/request.v1", "req")
+        dir_create(root + "/closure-request-", true)
+        file_write(root + "/closure-request-/bare", "keep")
+        dir_create(root + "/hir", true)
+        file_write(root + "/hir/entry.hir", "keep")
+        file_write(root + "/closure-request-file-99", "not-a-dir")
+        # min_age_s protects active concurrent requests from eviction.
+        expect(disk_bound_keep_newest_prefix_dirs(root, "closure-request-", 2, 3600)).to_equal(0)
+        expect(dir_exists(root + "/closure-request-1-10")).to_equal(true)
+        # With min_age_s == 0, variable-length excess dirs are evicted oldest-first.
+        expect(disk_bound_keep_newest_prefix_dirs(root, "closure-request-", 2, 0)).to_equal(2)
+        expect(dir_exists(root + "/closure-request-1-10")).to_equal(false)
+        expect(dir_exists(root + "/closure-request-20-200")).to_equal(false)
+        expect(dir_exists(root + "/closure-request-300-3000")).to_equal(true)
+        expect(dir_exists(root + "/closure-request-4000-40000")).to_equal(true)
+        expect(file_exists(root + "/closure-request-/bare")).to_equal(true)
+        expect(file_exists(root + "/hir/entry.hir")).to_equal(true)
+        expect(file_exists(root + "/closure-request-file-99")).to_equal(true)
+        expect(disk_bound_keep_newest_prefix_dirs(root, "closure-request-/", 1, 0)).to_equal(0)
+        expect(disk_bound_keep_newest_prefix_dirs(root, "closure-request-\\", 1, 0)).to_equal(0)
+        dir_remove_all(root)
+
+    it "prunes stale BuildCache rows with missing outputs on both save and load":
+        val root = "build/disk_bound_{getpid()}_{time_now_unix_micros()}_bcache"
+        dir_create(root, true)
+        val cache_path = root + "/build_cache.sdn"
+        val src_live = root + "/live.spl"
+        val out_live = root + "/live.o"
+        val src_dead = root + "/dead.spl"
+        val out_dead = root + "/dead.o"
+        val src_no_out = root + "/source_only.spl"
+        file_write(src_live, "pub fn live_fn() -> i64: 1\n")
+        file_write(out_live, "obj-live")
+        file_write(src_dead, "pub fn dead_fn() -> i64: 2\n")
+        file_write(out_dead, "obj-dead")
+        file_write(src_no_out, "pub fn source_only_fn() -> i64: 3\n")
+        val cache = build_cache_open(cache_path)
+        expect(build_cache_record_entry(cache, src_live, [], [out_live])).to_equal(true)
+        expect(build_cache_record_entry(cache, src_dead, [], [out_dead])).to_equal(true)
+        expect(build_cache_record_entry(cache, src_no_out, [], [])).to_equal(true)
+        expect(build_cache_persist(cache)).to_equal(true)
+        expect(file_read(cache_path)).to_contain("dead.spl")
+        # Save-time pruning: removing dead.o prunes dead.spl on persist while keeping live and empty-output rows.
+        expect(file_delete(out_dead)).to_equal(true)
+        expect(build_cache_persist(cache)).to_equal(true)
+        val after_save = file_read(cache_path)
+        expect(after_save.contains("dead.spl")).to_equal(false)
+        expect(after_save).to_contain("live.spl")
+        expect(after_save).to_contain("source_only.spl")
+        expect(build_cache_entry_is_valid_at(cache_path, src_live)).to_equal(true)
+        expect(build_cache_entry_is_valid_at(cache_path, src_dead)).to_equal(false)
+        # Load-time pruning: record dead.spl again, delete dead.o, load, then restore dead.o before persist.
+        file_write(out_dead, "obj-dead-2")
+        expect(build_cache_record_entry_at(cache_path, src_dead, [], [out_dead])).to_equal(true)
+        expect(file_read(cache_path)).to_contain("dead.spl")
+        expect(file_delete(out_dead)).to_equal(true)
+        val loaded = build_cache_open(cache_path)
+        file_write(out_dead, "obj-dead-restored")
+        expect(build_cache_persist(loaded)).to_equal(true)
+        expect(file_read(cache_path).contains("dead.spl")).to_equal(false)
+        expect(file_read(cache_path)).to_contain("live.spl")
+        expect(file_read(cache_path)).to_contain("source_only.spl")
+        dir_remove_all(root)
+
+    it "retires current closure-request-* dir after selection.v1 read unless SIMPLE_KEEP_CLOSURE_REQUEST=1":
+        val root = "build/disk_bound_{getpid()}_{time_now_unix_micros()}_retire"
+        val req_dir = root + "/closure-request-777-88888"
+        val foreign_dir = root + "/hir"
+        dir_create(req_dir, true)
+        dir_create(foreign_dir, true)
+        file_write(req_dir + "/selection.v1", "selection")
+        file_write(req_dir + "/request.v1", "request")
+        file_write(foreign_dir + "/selection.v1", "not-a-request")
+        expect(env_set(NATIVE_BUILD_KEEP_CLOSURE_REQUEST_ENV_V1, "1")).to_equal(true)
+        expect(native_build_parse_closure_retire_request_v1(req_dir + "/selection.v1")).to_equal(false)
+        expect(dir_exists(req_dir)).to_equal(true)
+        expect(env_set(NATIVE_BUILD_KEEP_CLOSURE_REQUEST_ENV_V1, "")).to_equal(true)
+        expect(native_build_parse_closure_retire_request_v1(foreign_dir + "/selection.v1")).to_equal(false)
+        expect(dir_exists(foreign_dir)).to_equal(true)
+        expect(native_build_parse_closure_retire_request_v1(req_dir + "/selection.v1")).to_equal(true)
+        expect(dir_exists(req_dir)).to_equal(false)
         dir_remove_all(root)

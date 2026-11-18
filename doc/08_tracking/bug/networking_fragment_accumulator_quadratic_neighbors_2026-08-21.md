@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN
+**Status:** OPEN (Site 2 closed 2026-11-18; Site 1 `ssh_session.spl` remains open in SSH lane)
 **Found:** 2026-08-21
 **Owner:** networking / SSH / HTTP service lanes
 
@@ -34,7 +34,7 @@ fixed-capacity ring, consume by advancing `head`, never copy the remainder.
    self.buffer + data` in `feed()`, the per-socket-read entry point;
    consumption is also full-copy `slice` (122, 185, 201). Bounded by
    `max_header_line`/`max_body`, so worst case is `(max_body/read_size)^2`
-   byte copies.
+   byte copies. *(CLOSED 2026-11-18 — see follow-up below.)*
 3. `src/lib/nogc_async_mut/http_server/parser.spl:200,205` — `self.body =
    self.body + self.buffer` rebuilds the whole accumulated body per feed.
 4. `src/lib/nogc_sync_mut/io/tcp.spl:214,251,306` — `buf = buf + chunk` in
@@ -87,7 +87,7 @@ matching the `ssh_sftp_v3._append` reference shape:
   every feed. `consumed` accounting and the `body` field's observable value are
   unchanged by construction.
 
-**NOT fixed — buffer re-slicing in the same parser.** `self.buffer =
+**NOT fixed — buffer re-slicing in the same parser *(superseded 2026-11-18; fixed below)*.** `self.buffer =
 self.buffer.slice(k, len)` after each consumed line/frame still copies the
 remainder, and `self.buffer = self.buffer + data` still concatenates per feed.
 Removing those needs a read-offset cursor rather than a re-sliced string, which
@@ -160,3 +160,42 @@ deleted. Specs: `test/01_unit/lib/nogc_sync_mut/io/stream_reader_append_shape_sp
 (in-place shape + no array-parameter helper) and
 `test/01_unit/lib/nogc_async_mut/http_server/body_fragment_accumulation_spec.spl`
 (linear copy work as fragment count doubles).
+
+
+## Follow-up 2026-11-18: Site 2 closed — `HttpRequestParser` O(N) chunked ingress & `buf_pos` cursor (Wave C7)
+
+Closed the deferred `self.buffer = self.buffer + data` per-feed concatenation
+and per-line `self.buffer = self.buffer.slice(...)` rewrites in
+`src/lib/nogc_async_mut/http_server/parser.spl` while preserving constructor
+and `consumed`-byte contracts:
+
+- **O(1) fragment ingress (`rx_chunks: [text]`, `rx_pending_bytes: i64`):**
+  non-empty `feed(data)` chunks append to `rx_chunks` in O(1). Partial lines
+  without `"\n"` stay queued without copying while streaming line-length bounds
+  (`431` / `413`) are enforced from `(buffer.byte_len() - buf_pos) + rx_pending_bytes`.
+- **Direct body drain:** when in `ParseState.Body` (`Content-Length`), queued
+  `rx_chunks` drain straight into `body_chunks` without touching `self.buffer`,
+  splitting only a boundary chunk that carries pipelined bytes of the next
+  request.
+- **`buf_pos: i64` cursor + lazy compaction:** `RequestLine` and `Headers` scan
+  from `buf_pos` (`buffer.index_of("\r\n", buf_pos)`) and advance
+  `buf_pos = line_end + 2` without rewriting `self.buffer` per header,
+  compacting only when `buf_pos >= 4096 and buf_pos * 2 >= buffer.byte_len()`
+  (or dropping `buffer = ""` at zero unread bytes) and on `reset()`.
+- **Work counter (`pub header_copy_bytes: i64`):** tracks cumulative bytes
+  materialized/compacted in `self.buffer` during request-line and header
+  framing, proving linear O(N) scaling across 8 KiB and 16 KiB 64-byte
+  fragmented multi-header and single-header streams plus pipelined bodies.
+- **Consistent byte units & nil-free surface:** all text lengths/cuts in
+  `parser.spl` use `byte_len()` (`check-text-len-unit-mix.shs` 0 unit-mix,
+  0 `len()`-bounded rows) and zero `nil` outside `unsafe:`.
+
+### Verification (2026-11-18)
+
+- `TEXT_LEN_BASELINE=/dev/null TEXT_LEN_MIX_BASELINE=/dev/null sh scripts/check/check-text-len-unit-mix.shs src/lib/nogc_async_mut/http_server/parser.spl`
+  -> `PASS — 27 function(s) checked, 0 unit-mix + 0 len()-bounded row(s) all baselined, 0 new, 0 stale`.
+- `SIMPLE_LIB=src phase1_artifacts\simple.exe test test/01_unit/lib/nogc_async_mut/http_server/async_parser_limits_spec.spl --mode=interpreter`
+  -> `32 total, 32 passed, 0 failed` (`outcome=OK`).
+- Regressions (`--mode=interpreter`): `body_fragment_accumulation_spec.spl`,
+  `header_block_reassembly_spec.spl`, `async_header_lexical_contract_spec.spl`,
+  `chunked_body_boundary_spec.spl`, `chunked_size_overflow_spec.spl` -> all `PASS`.
