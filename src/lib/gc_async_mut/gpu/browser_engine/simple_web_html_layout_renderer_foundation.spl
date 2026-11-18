@@ -2496,3 +2496,31 @@ fn svg_view_box_milli(attrs_raw: text) -> [i64]:
 # ---------------------------------------------------------------------------
 # Computed style
 # ---------------------------------------------------------------------------
+
+# Per-codepoint advances with CSS letter-spacing (after every codepoint) and
+# word-spacing (each space/tab/newline) folded in at milli-px. Each advance is
+# the difference of the ROUNDED cumulative pen, so a fractional spacing
+# (`0.1em` = 1.6 px) lands every glyph where Chrome's float pen does and the
+# run width is round(natural + n * spacing); whole-px spacing reduces to
+# `advance + spacing`. An advance never drops under 1 px.
+pub fn spaced_advances_milli(advances: [i32], cps: [i64], letter_milli: i32, word_milli: i32) -> [i32]:
+    var out: [i32] = []
+    var natural: i64 = 0
+    var extra: i64 = 0
+    var placed: i64 = 0
+    var i = 0
+    while i < advances.len():  # cpu-lane-loop-ok: one pass over one text run's per-codepoint advances; bound is its codepoint count
+        natural = natural + advances[i].to_i64()
+        extra = extra + letter_milli.to_i64()
+        val cp = cps[i]
+        if cp == 32 or cp == 9 or cp == 10 or cp == 13:
+            extra = extra + word_milli.to_i64()
+        val pen = natural * 1000 + extra
+        val target = if pen >= 0: (pen + 500) / 1000 else: 0 - ((500 - pen) / 1000)
+        var a = target - placed
+        if a < 1:
+            a = 1
+        placed = placed + a
+        out.push(a.to_i32())
+        i = i + 1
+    out
