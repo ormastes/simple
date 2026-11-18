@@ -1,0 +1,41 @@
+"""
+## Purpose and audience
+Behavioral specification for the riscv64 arch-local Write syscalls (id 32 and
+DebugWrite id 60) used by the SimpleOS sysroot libc `write()`.
+Audience: kernel developers wiring the riscv64 U-mode filesystem launch path.
+Bug: doc/08_tracking/bug/simpleos_user_elf_boot_blocked_aarch64_riscv64_2026-11-19.md (G3).
+"""
+# @req: REQ-TEST-ARCH_RISCV64_SYSCALL_WRITE-001
+use std.spec.{describe, it, expect}
+use std.spec.step
+use os.kernel.arch.riscv64.syscall.{rv64_syscall_handler_state}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+use os.kernel.types.syscall_types.{SyscallArgs}
+
+extern fn unsafe_addr_of(ref: any) -> u64
+
+fn rv64_args(id: u64, arg0: u64, arg1: u64, arg2: u64) -> SyscallArgs:
+    SyscallArgs(id: id, arg0: arg0, arg1: arg1, arg2: arg2, arg3: 0, arg4: 0, arg5: 0)
+
+fn call(args: SyscallArgs) -> i64:
+    rv64_syscall_handler_state(args, Scheduler.new(), IpcManager.new(), KernelLog.new(8)).result.value
+
+# Byte emission (id 32 fd 1/2, id 60) goes through the SBI console, which the
+# hosted interpreter cannot execute; it is covered on real OpenSBI by
+# scripts/check/check-simpleos-riscv64-user-elf-opensbi.shs (hello text rung).
+describe "RV64 arch-local write syscalls":
+    it "Write (id 32) with zero count returns 0":
+        # @req: REQ-TEST-ARCH_RISCV64_SYSCALL_WRITE-001
+        expect(call(rv64_args(32, 1, 0, 0))).to_equal(0)  # oracle: POSIX write of 0 bytes
+
+    it "Write (id 32) to a non-stdio fd fails with EBADF, not ENOSYS":
+        # @req: REQ-TEST-ARCH_RISCV64_SYSCALL_WRITE-001
+        val msg = "x"
+        expect(call(rv64_args(32, 7, unsafe_addr_of(msg), 1))).to_equal(-9)  # oracle: -EBADF (no fd table on this lane)
+
+    it "Write (id 32) with a null buffer and nonzero count fails with EFAULT":
+        # @req: REQ-TEST-ARCH_RISCV64_SYSCALL_WRITE-001
+        expect(call(rv64_args(32, 1, 0, 4))).to_equal(-14)  # oracle: -EFAULT
+

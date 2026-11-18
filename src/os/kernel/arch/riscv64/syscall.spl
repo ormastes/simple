@@ -19,6 +19,28 @@ struct Rv64SyscallState:
     scheduler: Scheduler
     ipc: IpcManager
 
+extern fn rt_copy_user_byte(addr: u64) -> u8
+
+fn _rv64_emit_byte(sched: Scheduler, byte: u8):
+    val current = sched.get_current()
+    _ = rv64_process_stdout_write_byte(current.id as u64, byte)
+    serial_write_byte(byte)
+
+# Write (id 32): libc routes non-stdio fds here. This lane has no fd table, so
+# only stdout/stderr are backed; other fds are EBADF, a null buffer is EFAULT.
+fn _rv64_write_stdio(args: SyscallArgs, sched: Scheduler) -> i64:
+    if args.arg0 != 1u64 and args.arg0 != 2u64:
+        return -9
+    if args.arg2 == 0u64:
+        return 0
+    if args.arg1 == 0u64:
+        return -14
+    var i = 0u64
+    while i < args.arg2:
+        _rv64_emit_byte(sched, rt_copy_user_byte(args.arg1 + i))
+        i = i + 1u64
+    args.arg2.to_i64()
+
 fn rv64_syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klog: KernelLog) -> SyscallResult:
     rv64_syscall_handler_state(args, scheduler, ipc, klog).result
 
@@ -64,10 +86,10 @@ fn rv64_syscall_handler_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcM
         if owner == 0:
             return Rv64SyscallState(result: SyscallResult(value: -1), scheduler: sched, ipc: ipc_mgr)
         return Rv64SyscallState(result: SyscallResult(value: owner.to_i64()), scheduler: sched, ipc: ipc_mgr)
+    if args.id == 32u64:
+        return Rv64SyscallState(result: SyscallResult(value: _rv64_write_stdio(args, sched)), scheduler: sched, ipc: ipc_mgr)
     if args.id == 60u64:
-        val byte = (args.arg0 & 0xFF).to_u8()
-        rv64_process_stdout_write_byte(byte)
-        serial_write_byte(byte)
+        _rv64_emit_byte(sched, (args.arg0 & 0xFF).to_u8())
         return Rv64SyscallState(result: SyscallResult(value: 0), scheduler: sched, ipc: ipc_mgr)
     if args.id == 116u64:
         return Rv64SyscallState(
