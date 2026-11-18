@@ -678,14 +678,22 @@ impl CraneliftCodegenState:
 
     me get_function_ptr(name: text) -> i64:
         """Get pointer to compiled function."""
-        cranelift_get_function_ptr(self.module_handle, name.ptr(), name.len())
+        cranelift_get_function_ptr(self.module_handle, name)
 
     me call_function(name: text, args: [i64]) -> i64:
-        """Call a compiled function."""
+        """Call a compiled zero-argument function."""
+        # rt_cranelift_call_function_ptr(fn_ptr, args_ptr, args_len) has no
+        # argument ABI: the Rust provider calls fn_ptr as `extern "C" fn() -> i64`
+        # and the C bootstrap stub traps. A `[i64]` buffer holds tagged runtime
+        # slots (rt_value_int stores v << 3), not raw words, so its data pointer
+        # is no argument vector either. Refuse arguments instead of dropping them.
+        if args.len() != 0:
+            self.error("call_function: JIT calls with arguments are unsupported", None)
+            return 0
         val ptr = self.get_function_ptr(name)
         if ptr == 0:
             return 0
-        cranelift_call_function_ptr(ptr, args.ptr(), args.len())
+        cranelift_call_function_ptr(ptr, 0, 0)
 
     me emit_object(path: text) -> bool:
         """Emit object file for AOT compilation."""

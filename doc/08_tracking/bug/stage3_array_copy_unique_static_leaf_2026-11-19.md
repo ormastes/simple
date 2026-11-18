@@ -88,3 +88,33 @@ to the receiver-typed builtins (`arr.copy()` -> counted array copy).
   index expressions) still reach the unique-static-leaf recovery.
 - Other static leaves that collide with builtin method names were not audited; the
   Stage 3 binary was only scanned for callers of `MirOperand.copy`.
+
+## 2026-11-19 follow-up: `args.ptr()` in `codegen.spl` bound to `MirType.ptr`
+
+With the guard in place, Phase 3 (Stage 2 from `41efdc0e7ea`) and the full-CLI build
+both stop at `unresolved method call: ptr ... at src/compiler/70.backend/codegen.spl:688:42`,
+`CraneliftCodegenState.call_function`: `cranelift_call_function_ptr(ptr, args.ptr(), args.len())`
+with `args: [i64]`. Arrays have no `ptr()` builtin (only text does, via `rt_string_data`).
+
+Old binding: `lookup_unique_static_method("ptr")` found the only static leaf named `ptr`
+in the source tree, `static fn ptr(pointee: MirType, mutable: bool) -> MirType`
+(`src/compiler/50.mir/mir_types.spl:253`; `MirType` is imported by `codegen.spl`). The
+call was a zero-argument call of a two-parameter static, so `args_ptr` was a `MirType`
+record (or garbage), never the array's data. It did no visible harm only because
+`rt_cranelift_call_function_ptr` ignores its arguments: the Rust provider transmutes
+the pointer to `extern "C" fn() -> i64`, and the C bootstrap stub traps.
+
+Fix: `call_function` is zero-argument only. It refuses a non-empty `args` with a
+codegen error and calls `cranelift_call_function_ptr(ptr, 0, 0)`, as
+`cranelift_codegen_adapter.spl` already does. `rt_array_data_ptr` was rejected: a
+`[i64]` buffer holds tagged runtime slots (`rt_value_int` stores `v << 3`, C callers
+run `rv_to_int` on each element), not raw words. No caller passes arguments.
+
+Also fixed: `get_function_ptr` passed `(module, name.ptr(), name.len())` to the
+two-parameter wrapper `cranelift_get_function_ptr(module: i64, name: text)`. It now
+passes `(module, name)`.
+
+Sweep: in both build logs, `codegen.spl:688` is the only unresolved method call. A
+static scan of `.ptr()` on receivers declared as arrays finds one more site,
+`src/lib/nogc_async_mut/game3d/game_loop.spl:100` (`buf.ptr()` on `[0; size]`,
+wasm-only, outside both closures). It is not fixed here.
