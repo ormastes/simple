@@ -1,6 +1,6 @@
 # Glyph advances come back as whole pixels once a page uses more than 8 (face, size) pairs
 
-- **Status:** open, not fixed. Found by the LCD raster perf lane (2026-11-19), which had to reproduce it to keep its output byte-identical.
+- **Status:** RESOLVED 2026-11-19 (see "Resolution" below). Found by the LCD raster perf lane (2026-11-19), which had to reproduce it to keep its output byte-identical.
 - **Where:** `FontRenderer.get_glyph_advance_milli`, `src/lib/nogc_sync_mut/text_layout/font_renderer.spl`.
 
 ## What happens
@@ -35,3 +35,17 @@ Which of the two renders is closer to Chrome. The layout's own advances go throu
 ## Fix direction
 
 Drop the glyph-cache branch for the selected-outline backend (the index lane below it answers the milli advance from `hmtx` without a raster), or store the milli advance on the cached glyph. Either changes pixels on any page with more than 8 (face, size) pairs, so it needs a Chrome-measured spec and a catalog pass.
+
+## Resolution (2026-11-19)
+
+`get_glyph_advance_milli` no longer answers from the glyph cache when the face has a selected outline blob. The index lane and the direct lane read the exact `hmtx` milli advance (`meta[18]`) without a raster, so a refilled slot holds the same value as a first fill. The cached whole pixel is kept only as the fallback for a glyph neither blob lane can answer, and as the direct answer on backends with no blob (unchanged there).
+
+Which render is closer to Chrome, the open question above: the exact one.
+
+- Chrome 159 `getBoundingClientRect().width` of `H` at 13 px in Liberation Sans is 9.390625 px. After an eviction and a draw the function answered 9000 milli; now 9388.
+- Twelve sizes (12 to 23 px) of `Hamburgefonstiv Qy,.:;19` in one face, 520x340, pixels with a channel more than 8 from Chrome / summed |delta|: 13272 / 1,585,925 before, 5506 / 479,830 after. No line is worse; the 18 px line is unchanged (458 / 42,854).
+- Catalog `html` at 1x: 2.35 % to 1.78 %.
+
+Spec: `test/01_unit/browser_engine/glyph_advance_eviction_exact_chrome159_spec.spl`.
+
+Cost (cpu_simd, interpreter lane, same seed, wall / peak RSS): the twelve-size page is unchanged (16.1 and 17.0 s / 670 MB before, 15.9 and 13.6 s / 674 MB after). A page of 36 paragraphs in nine faces at one size went from 32.1 s / 758 MB to 36.7 s / 729 MB: its glyphs now take the quarter-phase LCD cells that a page with 8 pairs or fewer always took. The dpr4 catalog is unchanged on every page.
