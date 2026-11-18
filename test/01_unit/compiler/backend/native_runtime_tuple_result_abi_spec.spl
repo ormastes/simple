@@ -91,6 +91,43 @@ fn rp_call_module(module_name: text, name: text, argc: i64, origin: MirCallOrigi
         vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false)
     MirModule(name: module_name, functions: {SymbolId(id: 1): func}, statics: {}, constants: {}, types: {})
 
+fn rp_call_module_with_local_fn(module_name: text, name: text, argc: i64, origin: MirCallOrigin) -> MirModule:
+    var args: [MirOperand] = []
+    var local_params: [MirType] = []
+    var local_mir_locals: [MirLocal] = []
+    for i in 0..argc:
+        args = args.push(mir_operand_const_int(i + 1))
+        local_params = local_params.push(MirType.i64())
+        local_mir_locals = local_mir_locals.push(MirLocal(id: LocalId(id: i), name: None, type_: MirType.i64(), kind: LocalKind.Arg(i), is_ghost: false))
+    val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name), rp_fn_ptr(argc)), call_origin: origin)
+    val caller = MirFunction(
+        symbol: SymbolId(id: 1), name: "rp_caller",
+        signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+        locals: [MirLocal(id: LocalId(id: 0), name: None, type_: MirType.i64(), kind: LocalKind.Temp, is_ghost: false)],
+        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"),
+            instructions: [MirInst(kind: MirInstKind.Call(Some(LocalId(id: 0)), callee, args), span: None)],
+            terminator: MirTerminator.Ret(Some(mir_operand_copy(LocalId(id: 0)))))],
+        entry_block: BlockId.entry(), span: Span.empty(), generic_params: [],
+        is_generic_template: false, specialization_of: None, type_bindings: {},
+        layout_phase: None, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: None, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false)
+    val local_target = MirFunction(
+        symbol: SymbolId(id: 2), name: name,
+        signature: MirSignature(params: local_params, return_type: MirType.i64(), is_variadic: false, params_known: true),
+        locals: local_mir_locals,
+        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"),
+            instructions: [],
+            terminator: MirTerminator.Ret(Some(mir_operand_const_int(0))))],
+        entry_block: BlockId.entry(), span: Span.empty(), generic_params: [],
+        is_generic_template: false, specialization_of: None, type_bindings: {},
+        layout_phase: None, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: None, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false)
+    MirModule(name: module_name, functions: {SymbolId(id: 1): caller, SymbolId(id: 2): local_target}, statics: {}, constants: {}, types: {})
+
 fn rp_has_symbol(bytes: [u8], symbol: text) -> bool:
     """True when `symbol` occurs NUL-terminated in the object (a string-table
     entry), so `rt_process_run` does not match inside `rt_process_run_tuple`."""
@@ -164,11 +201,22 @@ describe "stdlib process-run extern call reaches the raw result block":
             expect(rp_ir_calls(ir, case_.2)).to_equal(true)
             expect(rp_ir_calls(ir, case_.0)).to_equal(false)
 
-    it "both backends keep a source-origin callee of the same name":
+    it "both backends keep a source-origin callee when a local body exists":
         # A local Simple function named like an owner is not the C owner.
-        val object = rp_cranelift_object(rp_call_module("rp_source_named", "rt_process_run", 3, MirCallOrigin.Source))
+        val cranelift_module = rp_call_module_with_local_fn("rp_source_named", "rt_process_run", 3, MirCallOrigin.Source)
+        val object = rp_cranelift_object(cranelift_module)
         expect(rp_has_symbol(object, "rt_process_run_tuple")).to_equal(false)
-        var generator = MirToLlvm.create("rp.llvm.source", CodegenTarget.X86_64, nil)
+        var generator = MirToLlvm.create("rp.llvm.source", CodegenTarget.X86_64, None)
         generator.set_group_bootstrap_mode(true)
-        val ir = generator.translate_module(rp_call_module("rp.llvm.source", "rt_process_run", 3, MirCallOrigin.Source))
+        val ir = generator.translate_module(rp_call_module_with_local_fn("rp.llvm.source", "rt_process_run", 3, MirCallOrigin.Source))
         expect(rp_ir_calls(ir, "rt_process_run_tuple")).to_equal(false)
+        expect(rp_ir_calls(ir, "__simple_local_rt_process_run")).to_equal(true)
+
+    it "LLVM selects the tuple facade for non-local source-origin runtime calls":
+        # Projected/cached MIR operands default to MirCallOrigin.Source even for
+        # extern runtime owners when no local Simple definition exists in-module.
+        var generator = MirToLlvm.create("rp.llvm.source.nonlocal", CodegenTarget.X86_64, None)
+        generator.set_group_bootstrap_mode(true)
+        val ir = generator.translate_module(rp_call_module("rp.llvm.source.nonlocal", "rt_process_run", 3, MirCallOrigin.Source))
+        expect(rp_ir_calls(ir, "rt_process_run_tuple")).to_equal(true)
+        expect(rp_ir_calls(ir, "__simple_local_rt_process_run")).to_equal(false)

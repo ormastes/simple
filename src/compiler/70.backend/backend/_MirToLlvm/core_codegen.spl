@@ -63,6 +63,23 @@ extern fn rt_string_builder_push(handle: i64, value: text)
 pub fn llvm_aggregate_trace_operand_count_v1(operands: [MirOperand]) -> i64:
     operands.len()
 
+# reason: internal MirToLlvm tuple-facade selector exported for unit specs
+@allow(primitive_api)
+pub fn llvm_select_runtime_tuple_facade_v1(bare_name: text, arg_count: i64, call_origin: MirCallOrigin, has_local_source_body: bool) -> text:
+    """Select the raw-block runtime tuple facade unless calling a module-local Source body."""
+    if call_origin == MirCallOrigin.Unknown:
+        return ""
+    if call_origin == MirCallOrigin.Source and has_local_source_body:
+        return ""
+    val normalized_name = bare_name.replace("\"", "")
+    runtime_tuple_result_facade(normalized_name, arg_count)
+
+fn llvm_is_owned_alias_or_runtime_name_v1(name: text) -> bool:
+    """True for runtime-owned names or source-facing runtime aliases tracked locally."""
+    (mir_runtime_owned_call_name(name) or name == "env_get" or
+        name == "get_args" or name == "get_cli_args" or
+        name == "sys_get_args" or name == "eprint")
+
 # Decimal spelling crosses enum boundaries; only this scalar backend owner
 # decodes to IEEE bits. LLVM's hexadecimal float syntax uses binary64 bits,
 # including exact widened binary32 bits when the consumer type is float.
@@ -527,10 +544,10 @@ impl MirTextCodegen for MirToLlvm:
             # Remember their identity before emission: callers may sort before
             # definitions. These aliases are not reserved runtime symbols, so
             # llvm_function_symbol_name keeps their normal local names.
-            if (mir_runtime_owned_call_name(fn_owner.name) or fn_owner.name == "env_get" or
-                fn_owner.name == "get_args" or fn_owner.name == "get_cli_args" or
-                fn_owner.name == "sys_get_args" or fn_owner.name == "eprint"):
+            if llvm_is_owned_alias_or_runtime_name_v1(fn_owner.name):
                 self.owned_name_has_local[fn_owner.name] = true
+            if fn_owner.export_name != "" and llvm_is_owned_alias_or_runtime_name_v1(fn_owner.export_name):
+                self.owned_name_has_local[fn_owner.export_name] = true
             # `@export("C", name: "...")`: record the requested ABI symbol so
             # llvm_function_symbol_name can honour it in BOTH mangling modes.
             # Must run BEFORE any function is emitted, since a call site may
@@ -1838,6 +1855,25 @@ impl MirTextCodegen for MirToLlvm:
             return "null"
         value
 
+    me llvm_resolved_tuple_facade_for_call_v1(func: MirOperand, arg_count: i64) -> text:
+        """Select a direct Const(Str) call's tuple facade before target name mangling."""
+        var const_callee_name = ""
+        match func.kind:
+            case Const(value, _):
+                match value:
+                    case Str(name):
+                        const_callee_name = name.replace("\"", "")
+                    case _: ()
+            case _: ()
+        if const_callee_name == "":
+            return ""
+        llvm_select_runtime_tuple_facade_v1(
+            const_callee_name,
+            arg_count,
+            func.call_origin,
+            self.owned_name_has_local.has(const_callee_name)
+        )
+
     me translate_call_target_at(operands: [MirOperand], index: i64) -> text:
         val operand = operands[index]
         match operand.kind:
@@ -2354,7 +2390,8 @@ impl MirTextCodegen for MirToLlvm:
                     val posix_elf_supported = unwind_os == "linux" or unwind_os == "freebsd"
                     if not elf_arch_supported or not posix_elf_supported:
                         self.codegen_error("E-BACKEND-LLVM-UNWIND-ABI: recoverable exceptions are supported only on POSIX ELF x86_64/AArch64/RV64")
-                var func_val = self.translate_call_target_at(func_operands, 0)
+                val terminator_tuple_facade = self.llvm_resolved_tuple_facade_for_call_v1(func, args.len())
+                var func_val = if terminator_tuple_facade != "": "@" + terminator_tuple_facade else: self.translate_call_target_at(func_operands, 0)
                 match func.kind:
                     case Copy(local) | Move(local):
                         func_val = self.value_as_type(func_val, self.get_operand_type_at(func_operands, 0), "ptr")
@@ -2992,8 +3029,9 @@ impl MirTextCodegen for MirToLlvm:
             case _: ()
         if unproven_callee:
             return
+        val early_tuple_facade = self.llvm_resolved_tuple_facade_for_call_v1(func, args.len())
         val callee_operands: [MirOperand] = [func]
-        var func_name = self.translate_call_target_at(callee_operands, 0)
+        var func_name = if early_tuple_facade != "": "@" + early_tuple_facade else: self.translate_call_target_at(callee_operands, 0)
         if bootstrap_debug:
             print "[mir-to-llvm] call:callee index={index}"
         match func.kind:
@@ -3033,8 +3071,9 @@ impl MirTextCodegen for MirToLlvm:
         var call_func_name = if imported_argv: "@rt_get_args" elif imported_env_get and args.len() == 1: "@rt_env_get_value" elif imported_env_get: "@rt_env_get" elif bare_name_for_call == "rt_env_get" and args.len() == 1: "@rt_env_get_value" elif imported_eprint: "@rt_eprint" elif bare_name_for_call == "rt_dict_insert": "@rt_dict_set" elif bare_name_for_call == "rt_process_spawn_guarded": "@rt_process_spawn_guarded_value" elif bare_static_name == "text.from_char_code": "@rt_char_from_code" elif bare_static_name == "text.from_bytes": "@rt_bytes_to_text" else: func_name
         if func.call_origin != MirCallOrigin.Runtime:
             call_func_name = func_name
-        # Tuple-result owners: runtime AND foreign (stdlib extern) origin.
-        val tuple_facade = if func.call_origin == MirCallOrigin.Source: "" else: runtime_tuple_result_facade(bare_name_for_call, args.len())
+        # Tuple-result owners: runtime, foreign (stdlib extern), and non-local
+        # source-origin externs (cached/imported modules without a local body).
+        val tuple_facade = if early_tuple_facade != "": early_tuple_facade else: llvm_select_runtime_tuple_facade_v1(bare_static_name, args.len(), func.call_origin, self.owned_name_has_local.has(bare_static_name))
         if tuple_facade != "":
             call_func_name = "@" + tuple_facade
         call_func_name = self.normalize_call_callee(call_func_name)
