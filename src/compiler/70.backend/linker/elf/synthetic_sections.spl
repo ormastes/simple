@@ -82,6 +82,8 @@ val X64_PLT0_SIZE: i64 = 16
 val X64_PLT_ENTRY_SIZE: i64 = 16
 val GOTPLT_RESERVED: i64 = 3
 val ARM_PLT0_SIZE: i64 = 32
+val RV_PLT0_SIZE: i64 = 32
+val RV_PLT_ENTRY_SIZE: i64 = 16
 val ARM_PLT_ENTRY_SIZE: i64 = 16
 
 # ============================================================================
@@ -90,6 +92,10 @@ val ARM_PLT_ENTRY_SIZE: i64 = 16
 
 fn elf_dyn_relative(target: RelocArch) -> i64:
     match target:
+        case Riscv64:
+            3
+        case Riscv32:
+            3
         case I386:
             8
         case Arm32:
@@ -101,6 +107,10 @@ fn elf_dyn_relative(target: RelocArch) -> i64:
 
 fn elf_dyn_glob_dat(target: RelocArch) -> i64:
     match target:
+        case Riscv64:
+            2
+        case Riscv32:
+            1
         case I386:
             6
         case Arm32:
@@ -112,6 +122,10 @@ fn elf_dyn_glob_dat(target: RelocArch) -> i64:
 
 fn elf_dyn_jump_slot(target: RelocArch) -> i64:
     match target:
+        case Riscv64:
+            5
+        case Riscv32:
+            5
         case I386:
             7
         case Arm32:
@@ -123,6 +137,10 @@ fn elf_dyn_jump_slot(target: RelocArch) -> i64:
 
 fn elf_dyn_abs64(target: RelocArch) -> i64:
     match target:
+        case Riscv64:
+            2
+        case Riscv32:
+            1
         case I386:
             1
         case Arm32:
@@ -134,6 +152,10 @@ fn elf_dyn_abs64(target: RelocArch) -> i64:
 
 fn elf_dyn_copy(target: RelocArch) -> i64:
     match target:
+        case Riscv64:
+            4
+        case Riscv32:
+            4
         case I386:
             5
         case Arm32:
@@ -145,6 +167,10 @@ fn elf_dyn_copy(target: RelocArch) -> i64:
 
 fn elf_dyn_tpoff64(target: RelocArch) -> i64:
     match target:
+        case Riscv64:
+            11
+        case Riscv32:
+            10
         case AArch64:
             1030  # R_AARCH64_TLS_TPREL64
         case X86_64:
@@ -571,8 +597,64 @@ fn elf_build_gotplt_arm(n: i64, plt_addr: i64) -> [i64]:
         i = i + 1
     b
 
+fn elf_gotplt_reserved(target: RelocArch) -> i64:
+    """Header words of .got.plt: two on RISC-V (ld.so fills them), else three."""
+    if target == RelocArch.Riscv64 or target == RelocArch.Riscv32: 2 else: GOTPLT_RESERVED
+
+fn _rv_hi20(x: i64) -> i64:
+    ((x + 0x800) >> 12) & 0xfffff
+
+fn _rv_lo12(x: i64) -> i64:
+    (x - (((x + 0x800) >> 12) << 12)) & 0xfff
+
+fn elf_build_plt_riscv(plt_addr: i64, gotplt_addr: i64, n: i64, rv64: bool) -> [i64]:
+    """ld.lld's RISC-V lazy PLT. PLT0 (32 B): auipc t2,hi(.got.plt); sub t1,t1,t3;
+    l[wd] t3,lo(t2); addi t1,t1,-44; addi t0,t2,lo; srli t1,t1,(2|1);
+    l[wd] t0,ws(t0); jr t3. PLTn (16 B): auipc t3,hi(slot); l[wd] t3,lo(t3);
+    jalr t1,t3; nop."""
+    if n == 0:
+        return []
+    val ws: i64 = if rv64: 8 else: 4
+    val ld3: i64 = if rv64: 0x3000 else: 0x2000
+    val d = gotplt_addr - plt_addr
+    var b = write_u32_le([], 0x397 | (_rv_hi20(d) << 12))
+    b = write_u32_le(b, 0x41c30333)
+    b = write_u32_le(b, 0x38e03 | ld3 | (_rv_lo12(d) << 20))
+    b = write_u32_le(b, 0x30313 | (((0 - RV_PLT0_SIZE - 12) & 0xfff) << 20))
+    b = write_u32_le(b, 0x38293 | (_rv_lo12(d) << 20))
+    b = write_u32_le(b, 0x35313 | ((if rv64: 1 else: 2) << 20))
+    b = write_u32_le(b, 0x28283 | ld3 | (ws << 20))
+    b = write_u32_le(b, 0x000e0067)
+    var i: i64 = 0
+    while i < n:
+        val e = plt_addr + RV_PLT0_SIZE + i * RV_PLT_ENTRY_SIZE
+        val off = gotplt_addr + (2 + i) * ws - e
+        b = write_u32_le(b, 0xe17 | (_rv_hi20(off) << 12))
+        b = write_u32_le(b, 0xe0e03 | ld3 | (_rv_lo12(off) << 20))
+        b = write_u32_le(b, 0x000e0367)
+        b = write_u32_le(b, 0x13)
+        i = i + 1
+    b
+
+fn elf_build_gotplt_riscv(n: i64, plt_addr: i64, rv64: bool) -> [i64]:
+    """RISC-V .got.plt: two zero header words, then one word per PLT entry
+    initialised to PLT0 for lazy binding (ld.lld)."""
+    if n == 0:
+        return []
+    val ws: i64 = if rv64: 8 else: 4
+    var b = write_zeros([], 2 * ws)
+    var i: i64 = 0
+    while i < n:
+        b = if rv64: write_u64_le(b, plt_addr) else: write_u32_le(b, plt_addr)
+        i = i + 1
+    b
+
 fn elf_plt0_size(target: RelocArch) -> i64:
     match target:
+        case Riscv64:
+            RV_PLT0_SIZE
+        case Riscv32:
+            RV_PLT0_SIZE
         case Arm32:
             ARM_PLT0_SIZE
         case AArch64:
@@ -582,6 +664,10 @@ fn elf_plt0_size(target: RelocArch) -> i64:
 
 fn elf_plt_entry_size(target: RelocArch) -> i64:
     match target:
+        case Riscv64:
+            RV_PLT_ENTRY_SIZE
+        case Riscv32:
+            RV_PLT_ENTRY_SIZE
         case Arm32:
             ARM_PLT_ENTRY_SIZE
         case AArch64:
@@ -674,6 +760,7 @@ export elf_build_plt_x64, elf_build_gotplt_x64, elf_build_dynamic, elf_build_int
 export elf_rel_entry32, elf_dyn_rel_entry, elf_build_dynsym_class, elf_gnu_hash_size_class, elf_build_gnu_hash_class
 export elf_build_dynamic_class, elf_gotplt_size_class, elf_build_plt_i386, elf_build_gotplt_i386
 export elf_arm_plt_fits, elf_build_plt_arm, elf_build_gotplt_arm
+export elf_gotplt_reserved, elf_build_plt_riscv, elf_build_gotplt_riscv
 export elf_a64_adrp_ldr_add
 export R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE
 export R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT, R_X86_64_RELATIVE

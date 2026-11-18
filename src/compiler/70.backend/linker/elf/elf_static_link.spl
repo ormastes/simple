@@ -93,6 +93,7 @@ use compiler.backend.linker.elf.synthetic_sections.{
     elf_dyn_rel_entry, elf_build_dynsym_class, elf_gnu_hash_size_class, elf_build_gnu_hash_class,
     elf_build_dynamic_class, elf_gotplt_size_class, elf_build_plt_i386, elf_build_gotplt_i386,
     elf_arm_plt_fits, elf_build_plt_arm, elf_build_gotplt_arm,
+    elf_gotplt_reserved, elf_build_plt_riscv, elf_build_gotplt_riscv,
     DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ,
     DT_RELAENT, DT_STRSZ, DT_SYMENT, DT_INIT, DT_FINI, DT_PLTREL, DT_DEBUG, DT_JMPREL,
     DT_INIT_ARRAY, DT_FINI_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ, DT_RUNPATH,
@@ -550,7 +551,8 @@ fn elf_is_synth(name: text) -> bool:
         name == "__fini_array_start" or name == "__fini_array_end" or
         name == "__preinit_array_start" or name == "__preinit_array_end" or
         name == "__rela_iplt_start" or name == "__rela_iplt_end" or
-        name == "__rel_iplt_start" or name == "__rel_iplt_end"
+        name == "__rel_iplt_start" or name == "__rel_iplt_end" or
+        name == "__global_pointer$"
 
 fn elf_got_base_sec(target: RelocArch) -> text:
     """Section _GLOBAL_OFFSET_TABLE_ marks: .got on ARM (lld gotBaseSymInGotPlt=false), else .got.plt."""
@@ -564,6 +566,10 @@ fn elf_synth_addr(plan: ElfExecPlan, base: i64, name: text, target: RelocArch) -
         if d < 0:
             return Err("undefined symbol: _DYNAMIC (output has no .dynamic)")
         return Ok(plan.vaddrs[d])
+    if name == "__global_pointer$":
+        # ld.lld: .sdata + 0x800 when present, else the ELF header + 0x800
+        val sd = elf_exec_find(plan, ".sdata")
+        return Ok((if sd < 0: base else: plan.vaddrs[sd]) + 0x800)
     if name == "_GLOBAL_OFFSET_TABLE_":
         val gsec = elf_got_base_sec(target)
         val g = elf_exec_find(plan, gsec)
@@ -690,6 +696,8 @@ fn elf_symref(ctx: ElfLinkCtx, oi: i64, sym_idx: i64) -> ElfScanRef:
     elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, "local:{oi}#{sym_idx}", elf_symbol_type(sym), sym.st_size, 1, false)
 
 fn elf_riscv_validate_tls_definition(ctx: ElfLinkCtx, reference: ElfScanRef) -> Result<bool, text>:
+    if reference.kind == SYMREF_WEAK_ZERO:
+        return Ok(true)   # undefined weak TLS: tprel 0 (ld.lld), checked at apply
     if reference.kind != SYMREF_DEFINED or reference.stype != 6:
         return Err("RISC-V TLS relocation requires a defined TLS symbol: {reference.name}")
     val symbol = ctx.inputs.objects[reference.oi].symbols[reference.sym_idx]
@@ -1236,6 +1244,9 @@ fn elf_synth_shndx(plan: ElfExecPlan, name: text, target: RelocArch) -> i64:
     """Header index of the section a linker-defined symbol points into, or -1."""
     if name == "__ehdr_start" or name == "__executable_start":
         return 1
+    if name == "__global_pointer$":
+        val sd = elf_exec_find(plan, ".sdata")
+        return if sd < 0: 1 else: sd + 1
     var sec = ".init_array"
     if name.contains("_iplt_"):
         sec = if name.starts_with("__rela_"): ".rela.iplt" else: ".rel.iplt"
@@ -1890,8 +1901,8 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         (mode == ELF_LINK_DYNAMIC_EXEC or mode == ELF_LINK_DYNAMIC_PIE)
     if w32 and mode != ELF_LINK_STATIC_EXEC and not w32_dynamic:
         return Err("unsupported ELF32 output mode: only static ET_EXEC (plus i386/armv7 dynamic ET_EXEC/PIE) is admitted for i386/armv7/rv32")
-    if target == RelocArch.Riscv64 and mode != ELF_LINK_STATIC_EXEC:
-        return Err("unsupported RISC-V output mode: only static ET_EXEC is admitted (RV64 PLT/GOT/dynamic relocations are not implemented)")
+    if target == RelocArch.Riscv64 and mode == ELF_LINK_STATIC_PIE:
+        return Err("unsupported RISC-V output mode: static PIE is not implemented (static ET_EXEC, dynamic ET_EXEC and PIE are)")
     val dynamic = elf_mode_dynamic(mode)
     val pie = elf_mode_pie(mode)
     if not dynamic and req.shared.len() > 0:
@@ -2184,7 +2195,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         secs = secs.push(elf_sec_with(elf_out_sec(rel_plt_name, sht_rel, SHF_ALLOC | SHF_INFO_LINK_S, got_ws, nplt * relsz, ELF_SEG_R), relsz, ".dynsym", 0))
         secs = secs.push(elf_out_sec(".plt", SHT_PROGBITS_E, SHF_ALLOC | SHF_EXECINSTR, 16, elf_plt_size(target, nplt), ELF_SEG_RX))
     if nplt > 0 or need_got_base:
-        secs = secs.push(elf_out_sec(".got.plt", SHT_PROGBITS_E, SHF_ALLOC | SHF_WRITE, got_ws, elf_gotplt_size_class(nplt, got_ws), ELF_SEG_RW))
+        secs = secs.push(elf_out_sec(".got.plt", SHT_PROGBITS_E, SHF_ALLOC | SHF_WRITE, got_ws, (if nplt == 0: 0 else: (elf_gotplt_reserved(target) + nplt) * got_ws), ELF_SEG_RW))
     if ifunc_ref.len() > 0:
         val nif = ifunc_ref.len()
         val rel_type = if elf_iplt_rela(target): SHT_RELA_S else: 9
@@ -2349,7 +2360,9 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             s = 1 # Main executable/static link unit is module 1 in the Linux TLS ABI.
             a = 0
         else if r.rclass == RC_TLS_LE:
-            if elf_target_is_riscv(target):
+            if elf_target_is_riscv(target) and r.kind == SYMREF_WEAK_ZERO:
+                s = a   # ld.lld: an undefined weak TLS symbol has tprel 0
+            else if elf_target_is_riscv(target):
                 if r.stype != 6 or r.kind != SYMREF_DEFINED:
                     return Err("RISC-V local-exec relocation requires a defined TLS symbol: {r.name}")
                 val tls_offset = elf_tls_tprel(plan, target, s)?
@@ -2556,6 +2569,8 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         else if r.rclass == RC_TLS_IE and r.kind == SYMREF_IMPORT:
             got.extend(elf_got_word(w32, 0))
             rela_sym.extend(elf_dyn_rel_entry(w32, slot, sc.import_idx[r.name], elf_dyn_tpoff64(target), 0))
+        else if r.rclass == RC_TLS_IE and r.kind == SYMREF_WEAK_ZERO and not dynamic:
+            got.extend(elf_got_word(w32, 0))   # undefined weak TLS: tprel 0 (ld.lld)
         else if r.rclass == RC_TLS_IE:
             # slot = tprel(S); A belongs to the GOT(S) + A - P access (ld.lld)
             got.extend(elf_got_word(w32, elf_tls_tprel(plan, target, elf_ref_addr(ctx, lay, r)?)?))
@@ -2591,7 +2606,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     var rela_plt: [i64] = []
     var pi: i64 = 0
     while pi < nplt:
-        rela_plt.extend(elf_dyn_rel_entry(w32, gotplt_v + (GOTPLT_RESERVED + pi) * got_ws, sc.import_idx[sc.plt_names[pi]], elf_dyn_jump_slot(target), 0))
+        rela_plt.extend(elf_dyn_rel_entry(w32, gotplt_v + (elf_gotplt_reserved(target) + pi) * got_ws, sc.import_idx[sc.plt_names[pi]], elf_dyn_jump_slot(target), 0))
         pi = pi + 1
 
     var init_v: i64 = 0
@@ -2661,6 +2676,8 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
                 if not elf_arm_plt_fits(plt_v, gotplt_v, nplt):
                     return Err("unsupported: ARM PLT to .got.plt distance needs ld.lld's long PLT form")
                 out.push(elf_u8_from_i64(elf_build_plt_arm(plt_v, gotplt_v, nplt)))
+            else if elf_target_is_riscv(target):
+                out.push(elf_u8_from_i64(elf_build_plt_riscv(plt_v, gotplt_v, nplt, not w32)))
             else if a64:
                 out.push(elf_u8_from_i64(elf_build_plt_a64(plt_v, gotplt_v, nplt)))
             else:
@@ -2670,6 +2687,8 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
                 out.push(elf_u8_from_i64(elf_build_gotplt_i386(nplt, plt_v, elf_plan_addr(plan, ".dynamic"))))
             else if target == RelocArch.Arm32:
                 out.push(elf_u8_from_i64(elf_build_gotplt_arm(nplt, plt_v)))
+            else if elf_target_is_riscv(target):
+                out.push(elf_u8_from_i64(elf_build_gotplt_riscv(nplt, plt_v, not w32)))
             else if a64:
                 out.push(elf_u8_from_i64(elf_build_gotplt(nplt, plt_v)))
             else:
