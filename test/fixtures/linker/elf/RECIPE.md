@@ -211,3 +211,23 @@ armv7 initial-exec TLS through an R_ARM_TLS_IE32 GOT slot (ld.lld slot = 0xc):
 
     clang --target=armv7-linux-gnueabihf -mtp=cp15 -ffreestanding -fPIC -O1 -c tls_ie_arm.c -o tls_ie_arm.o
     clang --target=armv7-linux-gnueabihf -ffreestanding -fPIC -O1 -c tls_ie_def_arm.c -o tls_ie_def_arm.o
+
+## ifunc_sym_x64.o
+
+Static IFUNC called directly and address-taken (`.quad add_val`); ld.lld makes
+`add_val` STT_FUNC at the `.iplt` entry:
+
+    clang --target=x86_64-linux-gnu -c ifunc_sym_x64.s -o ifunc_sym_x64.o
+
+## thm_call_notype_arm.o / thm_call_notype_def_arm.o
+
+Thumb `bl` to a NOTYPE Thumb label; ld.lld keeps BL (no interworking for non-STT_FUNC):
+
+    clang --target=armv7-linux-gnueabihf -c thm_call_notype_arm.s -o thm_call_notype_arm.o
+    clang --target=armv7-linux-gnueabihf -c thm_call_notype_def_arm.s -o thm_call_notype_def_arm.o
+
+## gottpoff_addend_x64.o
+
+GOTTPOFF with addend -4 on a raw field (no relaxation); slot = tprel(S) = -8:
+
+    clang --target=x86_64-linux-gnu -c gottpoff_addend_x64.s -o gottpoff_addend_x64.o

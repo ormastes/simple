@@ -170,3 +170,48 @@ describe "ELF32 static TLS initial-exec GOT":
         expect(elf_got_base_sec(RelocArch.Arm32)).to_equal(".got")
         expect(elf_got_base_sec(RelocArch.X86_64)).to_equal(".got.plt")
         expect(elf_got_base_sec(RelocArch.I386)).to_equal(".got.plt")
+
+# ELF64 .symtab lookup: [st_info, st_value] of the named symbol, or [].
+fn sym64(b: [i64], name: text) -> [i64]:
+    val st = shdr_by_name(b, ".symtab")
+    val strtab_off = sec_off(b, ".strtab")
+    val off = rd64(b, st + 24)
+    val n = rd64(b, st + 32) / 24
+    var i: i64 = 1
+    while i < n:
+        val e = off + i * 24
+        if cstr(b, strtab_off + rd32(b, e)) == name:
+            return [b[e + 4], rd64(b, e + 8)]
+        i = i + 1
+    []
+
+describe "static IFUNC .symtab":
+    it "an address-taken IFUNC becomes STT_FUNC at its IPLT entry (ld.lld)":
+        # review note on #10254: .symtab kept the resolver value, so &add_val
+        # (via .data) and the symbol table disagreed
+        val out = link_or_empty([load_fixture("ifunc_sym_x64.o")], RelocArch.X86_64)
+        expect(out.len() > 0).to_equal(true)
+        val s = sym64(out, "add_val")
+        expect(s.len()).to_equal(2)
+        expect(s[0] & 15).to_equal(2)
+        expect(s[1]).to_equal(sec_addr(out, ".iplt"))
+
+describe "ARM Thumb BL interworking":
+    it "keeps BL for R_ARM_THM_CALL to a non-STT_FUNC target (ld.lld)":
+        # review note on #10258: BLX was chosen from S alone; a NOTYPE Thumb
+        # label has an even value and must not become BLX into Thumb code
+        val out = link_or_empty([load_fixture("thm_call_notype_arm.o"), load_fixture("thm_call_notype_def_arm.o")], RelocArch.Arm32)
+        expect(out.len() > 0).to_equal(true)
+        val text = rd32(out, shdr32_by_name(out, ".text") + 16)
+        # low half of the BL at _start: bit 12 set = BL, clear = BLX
+        expect(rd16(out, text + 2) & 0x1000).to_equal(0x1000)
+
+describe "x86_64 static TLS initial-exec GOT":
+    it "GOTTPOFF slot holds tprel(S); the -4 bias stays in the G + A - P field":
+        # review note on #10258: the slot used to hold tprel(S + A) = tprel(S - 4)
+        val out = link_or_empty([load_fixture("gottpoff_addend_x64.o")], RelocArch.X86_64)
+        expect(out.len() > 0).to_equal(true)
+        val got = sec_addr(out, ".got")
+        val text = sec_addr(out, ".text")
+        expect(rd64(out, sec_off(out, ".got"))).to_equal(-8)
+        expect(rd32(out, sec_off(out, ".text"))).to_equal(got - 4 - text)

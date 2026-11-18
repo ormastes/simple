@@ -77,7 +77,7 @@ use compiler.backend.linker.elf.reloc_scan.{
     elf_mode_pie, elf_mode_dynamic, elf_target_is_a64, elf_got_key,
     ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE,
     SYMREF_DEFINED, SYMREF_IMPORT, SYMREF_WEAK_ZERO, SYMREF_ABS,
-    RC_NONE, RC_ABS64, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_TLS_LD, RC_TLS_MOD, RC_SIZE, RC_PLTOFF
+    RC_NONE, RC_ABS64, RC_ABS_NARROW, RC_PCREL, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_TLS_LD, RC_TLS_MOD, RC_SIZE, RC_PLTOFF
 }
 use compiler.backend.linker.veneer.{veneer_table_new, ARM_VENEER_SLOT, arm_veneer_kind, arm_veneer_bytes, arm_veneer_entry, arm_veneer_offset, arm_veneer_key}
 use compiler.backend.linker.elf.iplt.{ELF_IPLT_ENTRY, elf_iplt_rela, elf_iplt_rel_size, elf_iplt_rel_section, elf_iplt_thumb_branch, elf_iplt_entry_addr, elf_build_iplt, elf_build_igot, elf_build_irel}
@@ -1245,7 +1245,7 @@ fn elf_synth_shndx(plan: ElfExecPlan, name: text, target: RelocArch) -> i64:
         return -1
     k + 1
 
-fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout, w32: bool) -> Result<ElfSymtabOut, text>:
+fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout, w32: bool, ifunc_at: {text: i64}) -> Result<ElfSymtabOut, text>:
     """ld.lld's .symtab shape: null, then per input file its locals (STT_SECTION
     dropped; symbols in non-allocated sections dropped — they have no output
     section here) followed by the hidden globals it defines (demoted to LOCAL),
@@ -1362,15 +1362,26 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout, w32: bool) -> Result<ElfSym
             rows.add(n, (sym_bind << 4) | typ, 0, SHN_UNDEF, 0, 0)
     val strtab = elf_build_dynstr(rows.names)
     var b: [i64] = []
+    val iplt_sh = elf_exec_find(lay.plan, ".iplt") + 1
     var i: i64 = 0
     while i < rows.names.len():
         var name_off: i64 = 0
         if rows.names[i] != "":
             name_off = strtab.offsets[rows.names[i]]
+        var info = rows.info[i]
+        var shndx = rows.shndx[i]
+        var value = rows.value[i]
+        if (info & 15) == 10 and (info >> 4) != STB_LOCAL and ifunc_at.has(rows.names[i]):
+            # address-taken static IFUNC: the symbol is its IPLT entry (ld.lld).
+            # ponytail: globals only (names unique after resolution); a local
+            # or hidden (demoted) IFUNC row keeps the resolver value. Upgrade: key rows by (oi, si).
+            info = (info & 0xf0) | 2
+            shndx = iplt_sh
+            value = ifunc_at[rows.names[i]]
         if w32:
-            b.extend(elf_sym32_entry(name_off, rows.info[i], rows.other[i], rows.shndx[i], rows.value[i], rows.size[i]))
+            b.extend(elf_sym32_entry(name_off, info, rows.other[i], shndx, value, rows.size[i]))
         else:
-            b.extend(elf_sym_entry(name_off, rows.info[i], rows.other[i], rows.shndx[i], rows.value[i], rows.size[i]))
+            b.extend(elf_sym_entry(name_off, info, rows.other[i], shndx, value, rows.size[i]))
         i = i + 1
     Ok(ElfSymtabOut(symtab: b, strtab: strtab.data, first_global: first_global))
 
@@ -1785,13 +1796,17 @@ fn elf_apply_jobs(input: [[u8]], jobs: [i64], target: RelocArch,
 # Entry points
 # ============================================================================
 
-fn elf_ref_is_ifunc(ctx: ElfLinkCtx, r: ElfScanRef) -> bool:
-    """The reference's winning definition is STT_GNU_IFUNC (10)."""
-    if r.kind != SYMREF_DEFINED or r.sym_idx == 0: return false
+fn elf_ref_def_type(ctx: ElfLinkCtx, r: ElfScanRef) -> i64:
+    """STT_* of the reference's winning definition, or -1 when not defined here."""
+    if r.kind != SYMREF_DEFINED or r.sym_idx == 0: return -1
     val sym = ctx.inputs.objects[r.oi].symbols[r.sym_idx]
     if elf_symbol_binding(sym) != STB_LOCAL and ctx.res.defined.has(sym.name):
-        return ctx.res.defined[sym.name].stype == 10
-    elf_symbol_type(sym) == 10
+        return ctx.res.defined[sym.name].stype
+    elf_symbol_type(sym)
+
+fn elf_ref_is_ifunc(ctx: ElfLinkCtx, r: ElfScanRef) -> bool:
+    """The reference's winning definition is STT_GNU_IFUNC (10)."""
+    elf_ref_def_type(ctx, r) == 10
 
 fn elf_arm_veneer_kind(ctx: ElfLinkCtx, r: ElfScanRef) -> i64:
     """Veneer kind for an ARM branch to a defined STT_FUNC in the other state.
@@ -2268,6 +2283,12 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             val vs = ven_slot[j]
             ven_dest[vs] = s + arm_veneer_offset(r.rtype, a)
             s = arm_veneer_entry(veneer_v + vs * ARM_VENEER_SLOT, veneers.kinds[vs])
+        else if target == RelocArch.Arm32 and r.rtype == 10 and not iplt_slot.has(j):
+            # ld.lld interworks THM_CALL only for STT_FUNC targets: any other
+            # defined target keeps the object's BL/BLX (patched like THM_JUMP24)
+            val dt = elf_ref_def_type(ctx, r)
+            if dt >= 0 and dt != 2 and dt != 10:
+                rtype = 30
         if elf_target_is_riscv(target) and r.rtype == 60:
             if j + 1 >= refs.len(): return Err("RISC-V ULEB128 requires adjacent SET/SUB relocations")
             val sub = refs[j + 1]
@@ -2642,7 +2663,12 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         image[48] = (riscv_flags & 0xff) as u8
     elf_link_trace("image written")
     if not strip_output:
-        val symtab = elf_build_symtab(ctx, lay, w32)?
+        var ifunc_at: {text: i64} = {}
+        for ar in refs:
+            val ak = ar.key
+            if ifunc_idx.has(ak) and ak.starts_with("global:") and (ar.rclass == RC_ABS64 or ar.rclass == RC_ABS_NARROW or ar.rclass == RC_PCREL):
+                ifunc_at[ar.name] = elf_iplt_entry_addr(target, iplt_v, ifunc_idx[ak], false)
+        val symtab = elf_build_symtab(ctx, lay, w32, ifunc_at)?
         image = if w32: elf_append_symtab32(image, symtab)? else: elf_append_symtab(image, symtab)?
     if riscv_attributes.len() > 0:
         image = elf_append_nonalloc_section_bytes(image,
