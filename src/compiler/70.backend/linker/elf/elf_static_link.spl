@@ -38,7 +38,7 @@ use compiler.backend.linker.elf_parser.{
     elf_reloc_sym, elf_reloc_type, elf_section_addralign, elf_section_name,
     SHN_UNDEF, STB_LOCAL, STB_GLOBAL, STB_WEAK, STT_SECTION, SHT_NOBITS, SHT_NOTE, elf_group_signature
 }
-use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_AARCH64, SHT_PROGBITS}
+use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_386, EM_AARCH64, SHT_PROGBITS}
 use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, SymBinding, sym_resolve_objects}
 use compiler.backend.linker.reloc_engine.{
     RelocArch, reloc_patch_width, reloc_patch_range_valid,
@@ -459,12 +459,20 @@ fn elf_static_contents(inputs: ElfStaticInputs) -> [[u8]]:
     # Each buffer is allocated once at its final size and filled with
     # native `write_span` copies straight from the input file bytes: no
     # per-placement slice temporaries and no geometric regrowth.
+    val m = if inputs.objects.len() > 0: inputs.objects[0].header.e_machine else: 0
+    val x86 = m == EM_X86_64 or m == EM_386
     var out: [[u8]] = []
     var k: i64 = 0
     while k < inputs.outs.len():
         var buf: [u8] = []
         if inputs.outs[k].sh_type != SHT_NOBITS_E:
             buf = elf_u8_zeros(inputs.outs[k].size)
+            if x86 and inputs.outs[k].sh_flags & SHF_EXECINSTR != 0:
+                # ld.lld fills gaps in executable sections with int3 (as elf_boot_link).
+                var fi: i64 = 0
+                while fi < buf.len():
+                    buf[fi] = 0xcc
+                    fi = fi + 1
             if inputs.outs[k].name == ".rodata" and inputs.merge.data.len() > 0:
                 buf.write_span(inputs.merge.data, 0, 0, inputs.merge.data.len())
             var pi: i64 = 0
