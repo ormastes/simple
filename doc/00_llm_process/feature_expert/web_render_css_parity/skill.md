@@ -3373,3 +3373,11 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - **Trap fixed:** `letter-spacing:-1px` was parsed with `parse_int` (sign dropped, +1) and `0.1em` as 0; `_decl_signed_spacing_px` reads sign and em.
 - **Still open:** spacing is whole px (`Style.letter_spacing_px: i32`), so `0.1em` floors to 1px (ink x1 154 vs Chrome 163) and `-1px` is 1px off (125 vs 126); needs a milli field. A shaped run's `glyph_run` does not carry spacing. text-shadow unchanged.
 - **Spec:** `test/01_unit/browser_engine/drawir_letter_word_spacing_chrome159_spec.spl` (6 examples; 1 / 6 on base, 6 / 6 on head). `abspos_bare_text_chrome159_spec` AC-8 re-pinned: letter-spacing now Draw IR, text-shadow still raster.
+
+## 2026-11-19: fractional letter-spacing / word-spacing
+
+- **Change:** `Style.letter_spacing_milli` / `word_spacing_milli` (i32, `0.1em` at 16px = 1600) are parsed by `_decl_signed_spacing_milli`; the `_px` fields stay as the truncation for the raster lane. `spaced_advances_milli` (`simple_web_html_layout_renderer_foundation.spl`) folds spacing into per-codepoint advances as differences of the ROUNDED cumulative pen, shared by layout (`core.spl`) and the Draw IR composer, so run width = round(natural + n x spacing) (Chrome 144.953125 -> 145) and wrapping agrees.
+- **Pens:** Draw IR advances stay whole px on the wire. The exact spacing rides as `letter-spacing-milli` / `word-spacing-milli` props (device-scaled) to `FontRenderer._lcd_apply_pen_phases`, which adds it to the exact pen and takes the staged pen from the running sum of `advance_widths`, so each glyph gets its quarter phase and the ink matches Chrome.
+- **Trap:** a negative letter-spacing pulls the box end in past the last glyph's ink; the horizontal band clip in `draw_ir_adv.spl` is widened by that overhang (`-1px` was clipped to 125, Chrome 126).
+- **Chrome 159 measured (ink x1):** `0.1em` 163, `-1px` 126, `0.5px` 147, `word-spacing:2.5px` 74; `0.1em` wrap at w120 = 3 lines (20,32..76,79), w130 = 2 lines (..139,61).
+- **Spec:** `drawir_letter_word_spacing_chrome159_spec` 8 examples (AC-7/8 new; AC-3/4 re-pinned to Chrome).
