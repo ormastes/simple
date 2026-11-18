@@ -4212,6 +4212,16 @@ impl MirLowering:
             self.remember_local_hir_type(local.id, found_type, 0, 0)
             match found_type.kind:
                 case HirTypeKind.Array(element, size):
+                    # A declared `-> [T]` result is a runtime array handle,
+                    # exactly as the stamped-callee path marks a free call
+                    # (lower_call). Instance-method calls reach MIR only
+                    # through here: under SIMPLE_BOOTSTRAP=1 the method's
+                    # HirFunction return is erased to i64, so neither the
+                    # name-keyed shape registry nor struct_method_return_is_array
+                    # carries the array, and `self.raw().slice(..)` fell to the
+                    # runtime fallback.
+                    self.runtime_array_locals[local.id] = true
+                    self.mark_runtime_value_local(local.id)
                     if val present_call_symbol = optional_call_symbol:
                         val call_symbol: HirSymbol = present_call_symbol
                         if val shape = bootstrap_fn_ret_array_element_shape_lookup(call_symbol.name):
@@ -4226,6 +4236,8 @@ impl MirLowering:
                         if array_return_elem_owner != "":
                             self.array_element_struct_syms[local.id] = array_return_elem_owner
                 case HirTypeKind.Slice(element):
+                    self.runtime_array_locals[local.id] = true
+                    self.mark_runtime_value_local(local.id)
                     if val present_call_symbol = optional_call_symbol:
                         val call_symbol: HirSymbol = present_call_symbol
                         if val shape = bootstrap_fn_ret_array_element_shape_lookup(call_symbol.name):
