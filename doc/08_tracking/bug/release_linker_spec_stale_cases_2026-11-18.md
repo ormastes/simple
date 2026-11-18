@@ -11,7 +11,7 @@
 2. `native_linking_internal_spec` "rejects a config field ... (libraries)" asserted
    `libraries` is unsupported, but the internal engine now consumes libraries
    (sibling cases "consumes the configured library list" and "resolves a versioned
-   shared library behind a GNU ld script"). Contradictory case deleted.
+   shared library behind a GNU ld script"). Contradictory case retargeted to `debug=true`, which ELF and COFF both still reject (keeps the rejection path tested on any host).
 
 ## Not fixed: host-requirement cases (need owner decision)
 Five `native_linking_internal_spec` cases (aarch64 hello, wide-str, libm, SIMPLE_LINKER
