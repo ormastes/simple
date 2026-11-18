@@ -6,7 +6,7 @@ test/01_unit/lib/common/traceability/test_query_spec.spl (001 exact query, 002
 status variants, 003 provenance/missing identity, 004 pagination and rejected
 queries, 005 read-only isolation, 006 failed query is an error not an empty
 success, 007 retries stay separate, 008 non-executed never PASS, 009 CLI/MCP
-parity, 010 requirement/bug-scoped queries).
+parity, 010 requirement/bug-scoped queries: --bug, --requirement, --levels).
 
 Executable contract for the read-only `simple test query` and `simple test
 explain` subcommands. Argument parsing and rendering are pure functions over
@@ -31,15 +31,18 @@ use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_write, file_modi
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, dir_list}
 use std.common.traceability.case_events.{TraceCaseEvent}
 use std.common.traceability.test_query.{
-    TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestQueryLimit, TestQueryCursor, TestQuery,
+    TestLevel, TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestQueryLimit, TestQueryCursor, TestQuery,
     TestQueryStatus, TestQualification, TestQueryRow, TestQueryPage, TestQueryTruncation,
     TestQueryCoverage, TestQueryError, TestQueryErrorKind, TestPlannedCaseIdentity,
     TestAttemptIdentity, TestAttemptOrdinal, TestEvidenceProvenance, TestPlannedCaseId
 }
+use app.traceability.test_query_scope_v1.{TestScopeBugDbPath}
+use std.common.traceability.run_request.{TraceRunRequest}
+use std.common.traceability.run_plan.{TracePlannedCase}
 use app.test_runner_new.test_query_cli.{
     TestDbFilePath, TestQueryFormat, TestQueryCommand, TestQueryCliRequest, TestQueryExitDecision,
     parse_test_query_args, render_test_query_page, render_test_explain_page,
-    render_test_query_outcome, test_query_exit_code, execute_test_query,
+    render_test_query_outcome, test_query_exit_code, execute_test_query, execute_test_query_with_bug_db, TestQueryCliOutput,
     test_query_subcommand_args
 }
 
@@ -49,7 +52,7 @@ fn _key() -> TestCaseKey:
     TestCaseKey(path: TestCasePath(value: "test/a_spec.spl"), name: TestCaseName(value: "adds"))
 
 fn _row(status: TestQueryStatus, qualification: TestQualification, attempt: TestAttemptIdentity, planned: TestPlannedCaseIdentity) -> TestQueryRow:
-    TestQueryRow(case_key: _key(), run_id: TestRunId(value: "run_1"), planned_case: planned, attempt: attempt,
+    TestQueryRow(case_key: _key(), level: TestLevel.Other, run_id: TestRunId(value: "run_1"), planned_case: planned, attempt: attempt,
         status: status, qualification: qualification, provenance: TestEvidenceProvenance.UnverifiedFrameworkObservation)
 
 fn _ordinal(n: i64) -> TestAttemptIdentity:
@@ -127,14 +130,29 @@ describe "test query argument parsing":
         expect(test_query_subcommand_args(["test"]).len() > 0).to_equal(false)
         expect(test_query_subcommand_args(["test", "test/query_spec.spl"]).len() > 0).to_equal(false)
 
-    it "rejects the plan's bug and requirement scopes instead of ignoring them":
+    it "parses --bug, --requirement and --levels into one scoped query":
         # @req TESTDB-010
-        # Scoped queries (--bug, --requirement, --levels) are not implemented; see
-        # doc/08_tracking/bug/trace_plan_2026_11_14_remaining_gaps_2026-11-16.md section 4.
-        step("A scope flag the command does not implement is a usage error")
-        expect(_usage_error_of(["query", "a::b", "--bug", "bug-1"])).to_contain("unknown flag: --bug")
-        expect(_usage_error_of(["query", "a::b", "--requirement", "REQ-1"])).to_contain("unknown flag: --requirement")
-        expect(_usage_error_of(["query", "a::b", "--levels", "unit"])).to_contain("unknown flag: --levels")
+        step("A bug scope carries its id, levels, run, limit and no exact case")
+        val bug = _request(["query", "--bug", "b-1", "--levels", "unit,system", "--run", "run_1", "--limit", "7"])
+        val scoped = bug.scoped.unwrap()
+        expect(scoped.limit.value).to_equal(7)
+        expect(scoped.levels.len()).to_equal(2)
+        expect(bug.query.case_key.path.value).to_equal("scope:bug:b-1")
+        step("A requirement scope uses the inline --flag=value form too")
+        val requirement = _request(["explain", "--requirement=REQ-1"])
+        expect(requirement.scoped.?).to_equal(true)
+        expect(requirement.query.case_key.path.value).to_equal("scope:requirement:REQ-1")
+        step("An exact case request is not scoped")
+        expect(_request(["query", "a::b"]).scoped.?).to_equal(false)
+
+    it "rejects contradictory or malformed scope flags":
+        # @req TESTDB-010
+        expect(_usage_error_of(["query", "a::b", "--bug", "b-1"])).to_contain("do not also give a <path>::<case>")
+        expect(_usage_error_of(["query", "--bug", "b-1", "--requirement", "REQ-1"])).to_contain("mutually exclusive")
+        expect(_usage_error_of(["query", "a::b", "--levels", "unit"])).to_contain("--levels needs --bug or --requirement")
+        expect(_usage_error_of(["query", "--bug", "b-1", "--levels", "bogus"])).to_contain("unknown test level: bogus")
+        expect(_usage_error_of(["query", "--bug="])).to_contain("--bug needs a non-empty bug id")
+        expect(_usage_error_of(["query", "--limit", "5"])).to_contain("missing <path>::<case>")
 
 describe "test query rendering":
     it "renders typed rows in table form with qualification":
@@ -157,8 +175,8 @@ describe "test query rendering":
         val page = _page([_row(TestQueryStatus.Passed, TestQualification.Pass, _ordinal(0), _planned())],
             TestQueryTruncation.Complete, TestQueryCoverage.Full)
         val out = render_test_query_page(page, TestQueryFormat.Sdn)
-        expect(out).to_contain("test_query_rows |run, planned_case, attempt, status, qualification, provenance|")
-        expect(out).to_contain("    run_1, case_9, 0, passed, pass")
+        expect(out).to_contain("test_query_rows |case, level, run, planned_case, attempt, status, qualification, provenance|")
+        expect(out).to_contain("    test/a_spec.spl::adds, other, run_1, case_9, 0, passed, pass")
 
     it "announces truncation with a partial marker and the next cursor":
         # @req TESTDB-004
@@ -331,4 +349,118 @@ describe "test query cursor binding":
         expect(test_query_exit_code(other_limit.decision).value).to_equal(2)
         val other_case = execute_test_query(_request(["query", "test/a_spec.spl::other", "--limit", "1", "--cursor", token]), path)
         expect(test_query_exit_code(other_case.decision).value).to_equal(2)
+        dir_remove_all(SCRATCH_DIR)
+
+fn _write_scope_fixture() -> TestDbFilePath:
+    dir_remove_all(SCRATCH_DIR)
+    dir_create_all(SCRATCH_DIR + "/test/01_unit")
+    dir_create_all(SCRATCH_DIR + "/test/03_system")
+    val unit_a = SCRATCH_DIR + "/test/01_unit/req_a_spec.spl"
+    val system_b = SCRATCH_DIR + "/test/03_system/req_b_spec.spl"
+    val unit_c = SCRATCH_DIR + "/test/01_unit/none_spec.spl"
+    expect(file_write(unit_a, "# @req REQ-SC-1\nuse std.spec.*\n")).to_equal(true)
+    expect(file_write(system_b, "# @req REQ-SC-1 REQ-SC-2\nuse std.spec.*\n")).to_equal(true)
+    expect(file_write(unit_c, "use std.spec.*\n")).to_equal(true)
+    expect(file_write(SCRATCH_DIR + "/bug_db.sdn", "bugs_active |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n    b-1, P1, open, \"scoped\", \"\", 0, \"" + unit_a + "\", \"2026-11-18\", \"2026-11-18\", true\n    b-2, P2, open, \"no reproducer\", \"\", 0, \"\", \"2026-11-18\", \"2026-11-18\", true\n    b-3, P2, open, \"none\", \"\", 0, \"NONE\", \"2026-11-18\", \"2026-11-18\", true\n    b-4, P2, open, \"two\", \"\", 0, \"test/a_spec.spl + test/b_spec.spl\", \"2026-11-18\", \"2026-11-18\", true\n    b-5, P2, open, \"cmd\", \"\", 0, \"bin/simple.exe test test/a_spec.spl\", \"2026-11-18\", \"2026-11-18\", true\n")).to_equal(true)
+    val db_path = SCRATCH_DIR + "/test_db.sdn"
+    var owner = RunnerTestDb(db: TestDatabaseExtended.create(db_path), current_run_id: "")
+    val request = TraceRunRequest(subject_id: "subject", configuration_id: "config", expectation_id: "expect", binary_id: "binary", cases: [
+        TracePlannedCase(case_id: "c1", test_path: unit_a, case_name: "adds", test_definition_id: "d1", lane_id: "lane"),
+        TracePlannedCase(case_id: "c2", test_path: system_b, case_name: "subs", test_definition_id: "d2", lane_id: "lane"),
+        TracePlannedCase(case_id: "c3", test_path: unit_c, case_name: "plain", test_definition_id: "d3", lane_id: "lane")])
+    val plan = match owner.prepare_trace_request(request):
+        case Ok(planned): planned
+        case Err(reason): fail("fixture plan rejected: {reason}")
+    for pair in [[unit_a, "adds", "passed"], [system_b, "subs", "failed"], [unit_c, "plain", "passed"]]:
+        match owner.db.record_trace_case_events(plan.run_id, pair[0], [TraceCaseEvent(pair[1], "started", "not_finished"), TraceCaseEvent(pair[1], "finished", pair[2])]):
+            case Ok(_): pass
+            case Err(reason): fail("fixture events rejected: {reason}")
+    match owner.save():
+        case Ok(_): pass
+        case Err(reason): fail("fixture save failed: {reason}")
+    TestDbFilePath(value: db_path)
+
+fn _scoped_output(args: [text], db: TestDbFilePath) -> TestQueryCliOutput:
+    execute_test_query_with_bug_db(_request(args), db, TestScopeBugDbPath(value: SCRATCH_DIR + "/bug_db.sdn"))
+
+describe "scoped test query against a real database file":
+    it "resolves a bug to its reproducer's recorded attempts and nothing else":
+        # @req TESTDB-010
+        val db = _write_scope_fixture()
+        val out = _scoped_output(["query", "--bug", "b-1"], db)
+        expect(test_query_exit_code(out.decision).value).to_equal(0)
+        expect(out.text).to_contain("req_a_spec.spl::adds | unit |")
+        expect(out.text).to_contain("passed | pass")
+        expect(out.text.contains("req_b_spec")).to_equal(false)
+        expect(out.text.contains("none_spec")).to_equal(false)
+        step("A bug with no reproducer path and an unknown bug are typed errors, not empty successes")
+        val unlinked = _scoped_output(["query", "--bug", "b-2"], db)
+        expect(test_query_exit_code(unlinked.decision).value).to_equal(2)
+        expect(unlinked.text).to_contain("records no reproducible_by test path")
+        expect(_scoped_output(["query", "--bug", "nope"], db).text).to_contain("unknown bug id: nope")
+        step("Free-text reproducible_by values (NONE, a + b, a command line) are usage errors, not fake paths")
+        for id in ["b-3", "b-4", "b-5"]:
+            val bad = _scoped_output(["query", "--bug", id], db)
+            expect(test_query_exit_code(bad.decision).value).to_equal(2)
+            expect(bad.text).to_contain("bug " + id + " reproducible_by is not a single test spec path: ")
+        step("A malformed requirement id is a usage error")
+        val bad_req = _scoped_output(["query", "--requirement", "not a valid id"], db)
+        expect(test_query_exit_code(bad_req.decision).value).to_equal(2)
+        expect(bad_req.text).to_contain("requirement id is not a valid identifier")
+        step("An empty --levels is rejected")
+        expect(_usage_error_of(["query", "--bug", "b-1", "--levels", ""])).to_contain("--levels")
+        dir_remove_all(SCRATCH_DIR)
+
+    it "resolves a requirement through spec @req headers and narrows by level":
+        # @req TESTDB-010
+        val db = _write_scope_fixture()
+        step("REQ-SC-1 is claimed by the unit and the system spec, not by the unannotated one")
+        val both = _scoped_output(["query", "--requirement", "REQ-SC-1"], db)
+        expect(both.text).to_contain("req_a_spec.spl::adds | unit |")
+        expect(both.text).to_contain("req_b_spec.spl::subs | system |")
+        expect(both.text).to_contain("failed | not_pass")
+        expect(both.text.contains("none_spec")).to_equal(false)
+        step("--levels system keeps only the system spec; unit keeps only the unit spec")
+        val system = _scoped_output(["query", "--requirement", "REQ-SC-1", "--levels", "system"], db)
+        expect(system.text).to_contain("req_b_spec.spl::subs")
+        expect(system.text.contains("req_a_spec")).to_equal(false)
+        val unit = _scoped_output(["query", "--requirement=req:REQ-SC-1", "--levels", "unit"], db)
+        expect(unit.text).to_contain("req_a_spec.spl::adds")
+        expect(unit.text.contains("req_b_spec")).to_equal(false)
+        step("REQ-SC-2 is claimed only by the system spec")
+        val only_b = _scoped_output(["query", "--requirement", "REQ-SC-2"], db)
+        expect(only_b.text.contains("req_a_spec")).to_equal(false)
+        step("A requirement no spec claims, or a level that excludes everything, is NoRows (exit 1)")
+        expect(test_query_exit_code(_scoped_output(["query", "--requirement", "REQ-NONE"], db).decision).value).to_equal(1)
+        expect(test_query_exit_code(_scoped_output(["query", "--requirement", "REQ-SC-2", "--levels", "unit"], db).decision).value).to_equal(1)
+        dir_remove_all(SCRATCH_DIR)
+
+    it "pages a scoped query with a cursor bound to its scope and levels":
+        # @req TESTDB-004 TESTDB-010
+        val db = _write_scope_fixture()
+        val first = _scoped_output(["query", "--requirement", "REQ-SC-1", "--limit", "1"], db)
+        expect(first.text).to_contain("partial: truncated")
+        val marker = "next cursor: "
+        val at = first.text.index_of(marker) ?? -1
+        expect(at >= 0).to_equal(true)
+        val cursor = first.text.substring(at + marker.byte_len(), first.text.byte_len()).trim()
+        val second = _scoped_output(["query", "--requirement", "REQ-SC-1", "--limit", "1", "--cursor", cursor], db)
+        expect(test_query_exit_code(second.decision).value).to_equal(0)
+        expect(second.text).to_contain("req_b_spec.spl::subs")
+        step("The same cursor under other levels or another requirement is rejected")
+        expect(test_query_exit_code(_scoped_output(["query", "--requirement", "REQ-SC-1", "--levels", "unit,system", "--limit", "1", "--cursor", cursor], db).decision).value).to_equal(2)
+        expect(test_query_exit_code(_scoped_output(["query", "--requirement", "REQ-SC-2", "--limit", "1", "--cursor", cursor], db).decision).value).to_equal(2)
+        dir_remove_all(SCRATCH_DIR)
+
+    it "reads the scoped data without changing the database":
+        # @req TESTDB-005 TESTDB-010
+        val db = _write_scope_fixture()
+        val before = file_read(db.value)
+        val mtime = file_modified_time(db.value)
+        val listing = dir_list(SCRATCH_DIR).len()
+        val out = _scoped_output(["explain", "--requirement", "REQ-SC-1"], db)
+        expect(out.text).to_contain("qualifies as PASS")
+        expect(file_read(db.value) == before).to_equal(true)
+        expect(file_modified_time(db.value)).to_equal(mtime)
+        expect(dir_list(SCRATCH_DIR).len()).to_equal(listing)
         dir_remove_all(SCRATCH_DIR)

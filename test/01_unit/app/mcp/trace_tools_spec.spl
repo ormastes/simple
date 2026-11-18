@@ -1,20 +1,23 @@
 # Purpose and audience: pins the read-only `simple_trace` and `simple_test_query`
 # MCP tool contracts for MCP facade authors and evidence reviewers.
-# @req REQ-TRC-021 TESTDB-001 TESTDB-004 TESTDB-005 TESTDB-006 TESTDB-008 TESTDB-009
+# @req REQ-TRC-021 TESTDB-001 TESTDB-004 TESTDB-005 TESTDB-006 TESTDB-008 TESTDB-009 TESTDB-010
 use std.spec.*
-use app.mcp.main_lazy_trace_tools.{TraceToolBody, TraceToolErrorKind, TraceToolSnapshot, TraceToolFormat, TraceToolStatus, TraceToolOperation, TraceToolExitCode, trace_tool_parse_request, trace_tool_cli_args, trace_tool_run, trace_tool_outcome, trace_tool_outcome_from_exit, trace_tool_status_for, trace_tool_shape_result, test_query_tool_parse_request, test_query_tool_run_at, test_query_shape_result, test_query_error_text}
+use app.mcp.main_lazy_trace_tools.{TraceToolBody, TraceToolErrorKind, TraceToolSnapshot, TraceToolFormat, TraceToolStatus, TraceToolOperation, TraceToolExitCode, trace_tool_parse_request, trace_tool_cli_args, trace_tool_run, trace_tool_outcome, trace_tool_outcome_from_exit, trace_tool_status_for, trace_tool_shape_result, test_query_tool_parse_request, test_query_tool_run_at, test_query_tool_run_with_bug_db, test_query_shape_result, test_query_error_text}
 use app.traceability.query_cmds_main_v1.{trace_cmd_execute_v1}
 use std.common.traceability.query_missing_v1.{TraceGraphCompletenessV1}
 use app.mcp.main_static_tools.{_mcp_static_tools_result}
 use std.io_runtime.{file_exists, dir_create_all, dir_remove_all, dir_list_or_empty}
-use std.nogc_sync_mut.io.file_ops.{file_read, file_modified_time}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_write, file_modified_time}
 use std.database.test_extended.database.{TestDatabaseExtended}
 use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
 use std.common.traceability.case_events.{TraceCaseEvent}
-use app.test_runner_new.test_query_cli.{TestDbFilePath, parse_test_query_args, execute_test_query}
+use app.test_runner_new.test_query_cli.{TestDbFilePath, parse_test_query_args, execute_test_query, execute_test_query_with_bug_db}
+use app.traceability.test_query_scope_v1.{TestScopeBugDbPath, run_scoped_test_query}
+use std.common.traceability.run_request.{TraceRunRequest}
+use std.common.traceability.run_plan.{TracePlannedCase}
 use app.mcp.main_dispatch.{dispatch_tool}
 use std.common.traceability.profile_v1.{TraceProfile}
-use std.common.traceability.test_query.{TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestPlannedCaseIdentity, TestAttemptIdentity, TestAttemptOrdinal, TestQueryStatus, TestQualification, TestEvidenceProvenance, TestQueryRow, TestQueryPage, TestQueryTruncation, TestQueryCursor, TestQueryCoverage, TestQueryError, TestQueryErrorKind}
+use std.common.traceability.test_query.{TestLevel, TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestPlannedCaseIdentity, TestAttemptIdentity, TestAttemptOrdinal, TestQueryStatus, TestQualification, TestEvidenceProvenance, TestQueryRow, TestQueryPage, TestQueryTruncation, TestQueryCursor, TestQueryCoverage, TestQueryError, TestQueryErrorKind}
 
 """
 # MCP traceability tools
@@ -31,7 +34,7 @@ fn _body(args: text) -> TraceToolBody:
     TraceToolBody(value: "{\"arguments\":{" + args + "}}")
 
 fn _row(status: TestQueryStatus, qualification: TestQualification) -> TestQueryRow:
-    TestQueryRow(case_key: TestCaseKey(path: TestCasePath(value: "t/a_spec.spl"), name: TestCaseName(value: "adds")),
+    TestQueryRow(case_key: TestCaseKey(path: TestCasePath(value: "t/a_spec.spl"), name: TestCaseName(value: "adds")), level: TestLevel.Other,
         run_id: TestRunId(value: "run-7"), planned_case: TestPlannedCaseIdentity.Missing,
         attempt: TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: 0)),
         status: status, qualification: qualification, provenance: TestEvidenceProvenance.UnverifiedFrameworkObservation)
@@ -307,3 +310,87 @@ describe "simple_trace input schema":
         val schema = rest.substring(0, end)
         expect(schema.contains("\"enum\":[\"missing\",\"matrix\",\"links\",\"explain\",\"diff\",\"report\"]")).to_equal(true)
         expect(schema.contains("\"enum\":[\"worktree\",\"editor\",\"commit\",\"push\",\"remote\",\"audit\",\"ci\",\"release\"]")).to_equal(true)
+
+describe "simple_test_query scoped by bug, requirement and levels":
+    it "parses the scope fields and keeps the exact-case contract when they are absent":
+        # @req TESTDB-010
+        step("A bug scope needs no path or name")
+        val bug = test_query_tool_parse_request(_body("\"bug\":\"b-1\",\"levels\":\"unit,system\",\"limit\":5")).unwrap()
+        expect(bug.scoped.unwrap().levels.len()).to_equal(2)
+        expect(bug.scoped.unwrap().limit.value).to_equal(5)
+        expect(bug.query.case_key.path.value).to_equal("scope:bug:b-1")
+        val requirement = test_query_tool_parse_request(_body("\"requirement\":\"REQ-1\"")).unwrap()
+        expect(requirement.query.case_key.path.value).to_equal("scope:requirement:REQ-1")
+        step("Contradictory or malformed scope arguments are InvalidArgument, never ignored")
+        expect(test_query_tool_parse_request(_body("\"bug\":\"b\",\"requirement\":\"r\"")).unwrap_err().kind == TraceToolErrorKind.InvalidArgument).to_equal(true)
+        expect(test_query_tool_parse_request(_body("\"bug\":\"b\",\"path\":\"p\",\"name\":\"n\"")).unwrap_err().kind == TraceToolErrorKind.InvalidArgument).to_equal(true)
+        expect(test_query_tool_parse_request(_body("\"path\":\"p\",\"name\":\"n\",\"levels\":\"unit\"")).unwrap_err().kind == TraceToolErrorKind.InvalidArgument).to_equal(true)
+        expect(test_query_tool_parse_request(_body("\"bug\":\"b\",\"levels\":\"bogus\"")).unwrap_err().message).to_contain("unknown test level: bogus")
+        expect(test_query_tool_parse_request(_body("\"bug\":\"b\",\"levels\":\"\"")).unwrap_err().kind == TraceToolErrorKind.InvalidArgument).to_equal(true)
+        expect(test_query_tool_parse_request(_body("\"path\":\"p\",\"name\":\"n\",\"levels\":\"\"")).unwrap_err().kind == TraceToolErrorKind.InvalidArgument).to_equal(true)
+        step("Without a scope, path and name stay required")
+        expect(test_query_tool_parse_request(_body("\"limit\":5")).unwrap_err().kind == TraceToolErrorKind.MissingArgument).to_equal(true)
+
+    it "returns the same scoped rows as the shared owner and the CLI, filtered by level, and never writes":
+        # @req TESTDB-009 TESTDB-010 TESTDB-005
+        step("Save a scratch TestDB planning a unit and a system spec that both claim REQ-P-1")
+        val dir = "build/testdb010_scope_probe"
+        dir_remove_all(dir)
+        dir_create_all(dir + "/test/01_unit")
+        dir_create_all(dir + "/test/03_system")
+        val unit_path = dir + "/test/01_unit/p_unit_spec.spl"
+        val system_path = dir + "/test/03_system/p_system_spec.spl"
+        expect(file_write(unit_path, "# @req REQ-P-1\nuse std.spec.*\n")).to_equal(true)
+        expect(file_write(system_path, "# @req REQ-P-1\nuse std.spec.*\n")).to_equal(true)
+        val bug_db = dir + "/bug_db.sdn"
+        expect(file_write(bug_db, "bugs_active |id, severity, status, title, file, line, reproducible_by, created_at, updated_at, valid|\n    b-1, P1, open, \"scoped\", \"\", 0, \"" + system_path + "\", \"2026-11-18\", \"2026-11-18\", true\n")).to_equal(true)
+        val base = dir + "/test_db"
+        var owner = RunnerTestDb(db: TestDatabaseExtended.create(base + ".sdn"), current_run_id: "")
+        val request = TraceRunRequest(subject_id: "s", configuration_id: "c", expectation_id: "e", binary_id: "b", cases: [
+            TracePlannedCase(case_id: "c1", test_path: unit_path, case_name: "adds", test_definition_id: "d1", lane_id: "l"),
+            TracePlannedCase(case_id: "c2", test_path: system_path, case_name: "subs", test_definition_id: "d2", lane_id: "l")])
+        val plan = match owner.prepare_trace_request(request):
+            case Ok(planned): planned
+            case Err(reason): fail("fixture plan rejected: {reason}")
+        for pair in [[unit_path, "adds", "passed"], [system_path, "subs", "failed"]]:
+            match owner.db.record_trace_case_events(plan.run_id, pair[0], [TraceCaseEvent(pair[1], "started", "not_finished"), TraceCaseEvent(pair[1], "finished", pair[2])]):
+                case Ok(_): pass
+                case Err(reason): fail("fixture events rejected: {reason}")
+        match owner.save():
+            case Ok(_): pass
+            case Err(reason): fail("fixture save failed: {reason}")
+        val bytes_before = file_read(base + ".sdn")
+        val mtime_before = file_modified_time(base + ".sdn")
+        val listing_before = dir_list_or_empty(dir).len()
+        step("A requirement scope returns both attempts; levels=system returns only the system one")
+        val both = test_query_tool_run_with_bug_db(test_query_tool_parse_request(_body("\"requirement\":\"REQ-P-1\"")).unwrap(), base, bug_db).unwrap()
+        expect(both.rows.len()).to_equal(2)
+        val shaped = test_query_shape_result(both)
+        expect(shaped).to_contain("p_unit_spec.spl::adds\tunit\t")
+        expect(shaped).to_contain("p_system_spec.spl::subs\tsystem\t")
+        val system_request = test_query_tool_parse_request(_body("\"requirement\":\"REQ-P-1\",\"levels\":\"system\"")).unwrap()
+        val system_page = test_query_tool_run_with_bug_db(system_request, base, bug_db).unwrap()
+        expect(system_page.rows.len()).to_equal(1)
+        expect(test_query_shape_result(system_page)).to_contain("p_system_spec.spl::subs\tsystem\t")
+        step("Parity: the shared owner returns the identical shaped page, and the CLI the same rows")
+        val loaded = match RunnerTestDb.load_at(base):
+            case Ok(db): db
+            case Err(reason): fail("reload failed: {reason}")
+        val owner_page = match run_scoped_test_query(loaded, system_request.scoped.unwrap(), TestScopeBugDbPath(value: bug_db)):
+            case Ok(found): found
+            case Err(error): fail("owner scoped query failed: {test_query_error_text(error)}")
+        expect(test_query_shape_result(owner_page)).to_equal(test_query_shape_result(system_page))
+        val cli = match parse_test_query_args(["query", "--requirement", "REQ-P-1", "--levels", "system"]):
+            case Ok(cli_request): execute_test_query_with_bug_db(cli_request, TestDbFilePath(value: base + ".sdn"), TestScopeBugDbPath(value: bug_db))
+            case Err(error): fail("cli args rejected: {error.detail}")
+        expect(cli.text).to_contain("p_system_spec.spl::subs | system | " + plan.run_id + " | c2 | 0 | failed | not_pass")
+        expect(cli.text.contains("p_unit_spec")).to_equal(false)
+        step("The bug scope resolves through the injected bug DB to its reproducer")
+        val bug_page = test_query_tool_run_with_bug_db(test_query_tool_parse_request(_body("\"bug\":\"b-1\"")).unwrap(), base, bug_db).unwrap()
+        expect(bug_page.rows.len()).to_equal(1)
+        expect(test_query_shape_result(bug_page)).to_contain("p_system_spec.spl::subs\tsystem\t")
+        step("Nothing wrote to the database or its directory")
+        expect(file_read(base + ".sdn") == bytes_before).to_equal(true)
+        expect(file_modified_time(base + ".sdn")).to_equal(mtime_before)
+        expect(dir_list_or_empty(dir).len()).to_equal(listing_before)
+        dir_remove_all(dir)

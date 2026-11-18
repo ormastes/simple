@@ -1,13 +1,14 @@
 # Purpose and audience: read-only TestDB query contract for CLI/MCP facade authors and evidence reviewers.
-# @req TESTDB-001 TESTDB-002 TESTDB-003 TESTDB-004 TESTDB-007 TESTDB-008
+# @req TESTDB-001 TESTDB-002 TESTDB-003 TESTDB-004 TESTDB-007 TESTDB-008 TESTDB-010
 use std.spec.*
 use std.common.traceability.case_events.{TraceCaseEvent}
 use std.common.traceability.test_query.{
     TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestPlannedCaseId,
     TestPlannedCaseIdentity, TestAttemptIdentity, TestQueryStatus, TestQualification,
     TestEvidenceProvenance, TestQueryLimit, TestQueryCursor, TestQuery, TestQueryRow,
-    TestQueryTruncation, TestQueryCoverage, TestQueryErrorKind,
-    parse_test_query_status, qualify_test_query_status, project_run_case_rows,
+    TestQueryTruncation, TestQueryCoverage, TestQueryErrorKind, TestLevel, TestScopeId, TestQueryScope,
+    TestScopedQuery, test_level_of_path, parse_test_levels, test_level_name, test_path_in_levels,
+    scoped_test_query_identity, parse_test_query_status, qualify_test_query_status, project_run_case_rows,
     paginate_test_query_rows
 }
 
@@ -31,8 +32,8 @@ empty success; TESTDB-007 retries stay separate rows; TESTDB-008 skipped,
 cached or expired outcomes never qualify as PASS; TESTDB-009
 CLI/MCP parity with RunnerTestDb (same run/case/attempt/status for the same
 snapshot); TESTDB-010 requirement/bug-scoped queries (`--bug`, `--requirement`,
-`--levels`), currently unimplemented and recorded in
-doc/08_tracking/bug/trace_plan_2026_11_14_remaining_gaps_2026-11-16.md section 4.
+`--levels`): the level type and scope identity are pinned here, the resolver and
+the filtered query in test_query_cli_spec.spl and trace_tools_spec.spl.
 """
 
 fn _key(path: text, name: text) -> TestCaseKey:
@@ -288,3 +289,42 @@ describe "TestDB query pagination":
         expect(_cursor_rejected(_rows(6), _query(2, Some(genuine)))).to_equal(true)
         step("The genuine token still works on the unchanged query")
         expect(_cursor_rejected(_rows(5), _query(2, Some(genuine)))).to_equal(false)
+
+describe "TestDB scoped query levels":
+    it "derives the level from the numbered test tree and carries it on every row":
+        # @req TESTDB-010
+        step("Numbered trees map to levels; anything else is Other")
+        expect(test_level_of_path(TestCasePath(value: "test/01_unit/app/a_spec.spl"))).to_equal(TestLevel.Unit)
+        expect(test_level_of_path(TestCasePath(value: "test/02_integration/a_spec.spl"))).to_equal(TestLevel.Integration)
+        expect(test_level_of_path(TestCasePath(value: "test/03_system/a_spec.spl"))).to_equal(TestLevel.System)
+        expect(test_level_of_path(TestCasePath(value: "test/05_perf/a_spec.spl"))).to_equal(TestLevel.Perf)
+        expect(test_level_of_path(TestCasePath(value: "contest/01_unit/a_spec.spl"))).to_equal(TestLevel.Other)
+        expect(test_level_of_path(TestCasePath(value: "src/a_spec.spl"))).to_equal(TestLevel.Other)
+        step("Projected rows carry the level of their path")
+        val rows = project_run_case_rows(_key("test/03_system/a_spec.spl", "adds"), TestRunId(value: "run-1"), _no_plan(), [_started("adds"), _finished("adds", "passed")])
+        expect(rows[0].level).to_equal(TestLevel.System)
+
+    it "parses a comma list of levels and rejects unknown or empty ones":
+        # @req TESTDB-010
+        val parsed = parse_test_levels("unit, integration,unit").unwrap()
+        expect(parsed.len()).to_equal(2)
+        expect(test_level_name(parsed[1])).to_equal("integration")
+        expect(parse_test_levels("unit,bogus").unwrap_err()).to_contain("unknown test level: bogus")
+        expect(parse_test_levels("").is_err()).to_equal(true)
+        step("An empty level list admits every path; a list admits only its levels")
+        val unit_path = TestCasePath(value: "test/01_unit/a_spec.spl")
+        expect(test_path_in_levels(unit_path, [])).to_equal(true)
+        expect(test_path_in_levels(unit_path, [TestLevel.Unit])).to_equal(true)
+        expect(test_path_in_levels(unit_path, [TestLevel.System])).to_equal(false)
+
+    it "binds a scoped cursor identity to scope, levels and run":
+        # @req TESTDB-010
+        val base = TestScopedQuery(scope: TestQueryScope.Bug(id: TestScopeId(value: "b1")), levels: [TestLevel.Unit],
+            run_id: None, limit: TestQueryLimit(value: 2), cursor: None)
+        val other_scope = TestScopedQuery(scope: TestQueryScope.Requirement(id: TestScopeId(value: "b1")), levels: [TestLevel.Unit],
+            run_id: None, limit: TestQueryLimit(value: 2), cursor: None)
+        val other_levels = TestScopedQuery(scope: base.scope, levels: [TestLevel.System], run_id: None, limit: TestQueryLimit(value: 2), cursor: None)
+        val a = scoped_test_query_identity(base)
+        expect(a.case_key.path.value).to_equal("scope:bug:b1")
+        expect(scoped_test_query_identity(other_scope).case_key.path.value).to_equal("scope:requirement:b1")
+        expect(scoped_test_query_identity(other_levels).case_key.name.value == a.case_key.name.value).to_equal(false)

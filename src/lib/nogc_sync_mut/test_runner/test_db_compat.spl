@@ -20,7 +20,8 @@ use std.test_runner.test_db_core.{parse_rfc3339_to_micros}
 use std.nogc_sync_mut.test_runner.test_db_record.{TestDbFileRow}
 use std.common.traceability.case_events.{decode_trace_case_events}
 use std.common.traceability.run_plan.{TraceRunPlan}
-use std.common.traceability.test_query.{TestQuery, TestQueryPage, TestQueryRow, TestQueryError, TestQueryErrorKind, TestRunId, TestPlannedCaseId, TestPlannedCaseIdentity, project_run_case_rows, paginate_test_query_rows}
+use std.common.traceability.test_query.{TestQuery, TestQueryPage, TestQueryRow, TestQueryError, TestQueryErrorKind, TestRunId, TestPlannedCaseId, TestPlannedCaseIdentity, TestCasePath, TestCaseName, TestCaseKey, TestScopedQuery, project_run_case_rows, paginate_test_query_rows, scoped_test_query_identity, test_path_in_levels}
+use std.common.traceability.model.{trace_sorted_ids}
 use std.common.traceability.run_request.{TraceRunRequest, validate_trace_run_request, materialize_trace_run_plan}
 use std.common.traceability.run_request_codec.{encode_trace_run_request}
 use std.common.traceability.sspec_inventory.{TraceSspecPlannedRequest}
@@ -253,12 +254,10 @@ class RunnerTestDb:
         # Custom API returns void, unified returns count - discard result
         ()
 
-    # Read-only typed attempt rows for one exact case. Never mutates or saves;
-    # an unreadable trace table is a typed error, never an empty success.
-    fn query_case_attempts(query: TestQuery) -> Result<TestQueryPage, TestQueryError>:
+    fn select_query_run_ids(requested_run: TestRunId?) -> Result<[text], TestQueryError>:
         var run_ids: [text] = []
         val known = self.db.list_runs("")
-        match query.run_id:
+        match requested_run:
             case Some(requested):
                 var found = false
                 for run in known:
@@ -270,6 +269,27 @@ class RunnerTestDb:
             case None:
                 for run in known:
                     run_ids.push(run.run_id)
+        Ok(run_ids)
+
+    fn run_plan_for_query(run_id: text) -> Result<TraceRunPlan?, TestQueryError>:
+        match self.db.get_trace_run_plan(run_id):
+            case Ok(found): Ok(found)
+            case Err(reason): Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: reason))
+
+    fn planned_identity_for(plan: TraceRunPlan?, key: TestCaseKey) -> TestPlannedCaseIdentity:
+        var planned = TestPlannedCaseIdentity.Missing
+        match plan:
+            case Some(frozen):
+                for item in frozen.cases:
+                    if item.test_path == key.path.value and item.case_name == key.name.value:
+                        planned = TestPlannedCaseIdentity.Recorded(id: TestPlannedCaseId(value: item.case_id))
+            case None: pass
+        planned
+
+    # Read-only typed attempt rows for one exact case. Never mutates or saves;
+    # an unreadable trace table is a typed error, never an empty success.
+    fn query_case_attempts(query: TestQuery) -> Result<TestQueryPage, TestQueryError>:
+        val run_ids = self.select_query_run_ids(query.run_id)?
         var rows: [TestQueryRow] = []
         for run_id in run_ids:
             val events = match self.db.get_trace_case_events(run_id, query.case_key.path.value):
@@ -277,19 +297,55 @@ class RunnerTestDb:
                 case Err(reason): return Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: reason))
             if events.len() == 0:
                 continue
-            val plan = match self.db.get_trace_run_plan(run_id):
-                case Ok(found): found
-                case Err(reason): return Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: reason))
-            var planned = TestPlannedCaseIdentity.Missing
-            match plan:
-                case Some(frozen):
-                    for item in frozen.cases:
-                        if item.test_path == query.case_key.path.value and item.case_name == query.case_key.name.value:
-                            planned = TestPlannedCaseIdentity.Recorded(id: TestPlannedCaseId(value: item.case_id))
-                case None: pass
+            val plan = self.run_plan_for_query(run_id)?
+            val planned = self.planned_identity_for(plan, query.case_key)
             for row in project_run_case_rows(query.case_key, TestRunId(value: run_id), planned, events):
                 rows.push(row)
         paginate_test_query_rows(rows, query)
+
+    # Spec paths the TestDB knows for a scoped query: every planned case path of
+    # the selected runs, sorted and unique. A requirement scope is resolved
+    # against these (the test tree is far too large to scan for headers).
+    fn scope_candidate_paths(requested_run: TestRunId?) -> Result<[TestCasePath], TestQueryError>:
+        var seen: Dict<text, bool> = {}
+        var paths: [text] = []
+        for run_id in self.select_query_run_ids(requested_run)?:
+            val plan = self.run_plan_for_query(run_id)?
+            match plan:
+                case Some(frozen):
+                    for item in frozen.cases:
+                        if not seen.contains_key(item.test_path):
+                            seen[item.test_path] = true
+                            paths.push(item.test_path)
+                case None: pass
+        var out: [TestCasePath] = []
+        for path in trace_sorted_ids(paths):
+            out.push(TestCasePath(value: path))
+        Ok(out)
+
+    # Read-only rows for every case recorded under the resolved spec paths,
+    # narrowed by level. Cases keep (path, first-seen) order; attempts of a case
+    # stay separate. Reuses the exact-query projection and paginator.
+    fn query_scoped_attempts(scoped: TestScopedQuery, paths: [TestCasePath]) -> Result<TestQueryPage, TestQueryError>:
+        val run_ids = self.select_query_run_ids(scoped.run_id)?
+        var rows: [TestQueryRow] = []
+        for run_id in run_ids:
+            val plan = self.run_plan_for_query(run_id)?
+            for path in paths:
+                if not test_path_in_levels(path, scoped.levels):
+                    continue
+                val events = match self.db.get_trace_case_events(run_id, path.value):
+                    case Ok(items): items
+                    case Err(reason): return Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: reason))
+                var names: [text] = []
+                for event in events:
+                    if not names.contains(event.case_name):
+                        names.push(event.case_name)
+                for name in names:
+                    val key = TestCaseKey(path: path, name: TestCaseName(value: name))
+                    for row in project_run_case_rows(key, TestRunId(value: run_id), self.planned_identity_for(plan, key), events):
+                        rows.push(row)
+        paginate_test_query_rows(rows, scoped_test_query_identity(scoped))
 
     # Prune old runs
     me prune_runs(keep_count: i64):

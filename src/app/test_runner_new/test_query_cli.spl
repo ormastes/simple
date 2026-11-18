@@ -5,14 +5,17 @@ use std.common.traceability.test_query.{
     TestCasePath, TestCaseName, TestCaseKey, TestRunId, TestQueryLimit, TestQueryCursor, TestQuery,
     TestQueryStatus, TestQualification, TestQueryRow, TestQueryPage, TestQueryTruncation,
     TestQueryCoverage, TestQueryError, TestQueryErrorKind, TestPlannedCaseIdentity,
-    TestAttemptIdentity
+    TestAttemptIdentity, TestScopeId, TestQueryScope, TestScopedQuery, TestLevel, parse_test_levels, test_level_name,
+    scoped_test_query_identity
 }
+use app.traceability.test_query_scope_v1.{TestScopeBugDbPath, run_scoped_test_query}
 use std.database.test_extended.factory.{load_test_database_extended}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
 
 val TEST_QUERY_DEFAULT_LIMIT: i64 = 50
 val TEST_EXPLAIN_LIMIT: i64 = 1000
+val TEST_SCOPE_BUG_DB: text = "doc/08_tracking/bug/bug_db.sdn"
 
 pub struct TestDbFilePath:
     value: text
@@ -28,6 +31,7 @@ pub enum TestQueryCommand:
 pub struct TestQueryCliRequest:
     command: TestQueryCommand
     query: TestQuery
+    scoped: TestScopedQuery?
     format: TestQueryFormat
 
 pub struct TestQueryUsageError:
@@ -115,6 +119,10 @@ pub fn parse_test_query_args(args: [text]) -> Result<TestQueryCliRequest, TestQu
     var limit = if command == TestQueryCommand.Explain: TEST_EXPLAIN_LIMIT else: TEST_QUERY_DEFAULT_LIMIT
     var cursor: TestQueryCursor? = None
     var format = TestQueryFormat.Table
+    var bug: text? = None
+    var requirement: text? = None
+    var levels: [TestLevel] = []
+    var levels_given = false
     var i = 1
     while i < args.len():
         val token = args[i]
@@ -139,6 +147,19 @@ pub fn parse_test_query_args(args: [text]) -> Result<TestQueryCliRequest, TestQu
                     cursor = Some(TestQueryCursor(token: value))
                 case "--format":
                     format = _parse_format(value)?
+                case "--bug":
+                    if value == "":
+                        return Err(_usage("--bug needs a non-empty bug id"))
+                    bug = Some(value)
+                case "--requirement":
+                    if value == "":
+                        return Err(_usage("--requirement needs a non-empty requirement id"))
+                    requirement = Some(value)
+                case "--levels":
+                    levels = match parse_test_levels(value):
+                        case Ok(parsed): parsed
+                        case Err(reason): return Err(_usage("--levels: " + reason))
+                    levels_given = true
                 case _:
                     return Err(_usage("unknown flag: " + flag))
         else:
@@ -146,15 +167,27 @@ pub fn parse_test_query_args(args: [text]) -> Result<TestQueryCliRequest, TestQu
                 case Some(_): return Err(_usage("only one <path>::<case> is allowed, extra: " + token))
                 case None: case_spec = Some(token)
         i = i + 1
-    val spec = match case_spec:
-        case Some(s): s
-        case None: return Err(_usage("missing <path>::<case>"))
     if command == TestQueryCommand.Explain and cursor.?:
         return Err(_usage("explain does not take --cursor"))
+    if bug.? and requirement.?:
+        return Err(_usage("--bug and --requirement are mutually exclusive"))
+    if bug.? or requirement.?:
+        if case_spec.?:
+            return Err(_usage("--bug/--requirement scope the query; do not also give a <path>::<case>"))
+        val scope = match bug:
+            case Some(id): TestQueryScope.Bug(id: TestScopeId(value: id))
+            case None: TestQueryScope.Requirement(id: TestScopeId(value: requirement ?? ""))
+        val scoped = TestScopedQuery(scope: scope, levels: levels, run_id: run_id, limit: TestQueryLimit(value: limit), cursor: cursor)
+        return Ok(TestQueryCliRequest(command: command, query: scoped_test_query_identity(scoped), scoped: Some(scoped), format: format))
+    if levels_given:
+        return Err(_usage("--levels needs --bug or --requirement"))
+    val spec = match case_spec:
+        case Some(s): s
+        case None: return Err(_usage("missing <path>::<case> (or --bug/--requirement)"))
     val key = _parse_case_key(spec)?
     Ok(TestQueryCliRequest(command: command,
         query: TestQuery(case_key: key, run_id: run_id, limit: TestQueryLimit(value: limit), cursor: cursor),
-        format: format))
+        scoped: None, format: format))
 
 fn _status_text(status: TestQueryStatus) -> text:
     match status:
@@ -214,16 +247,16 @@ pub fn render_test_query_page(page: TestQueryPage, format: TestQueryFormat) -> t
     var lines: [text] = []
     match format:
         case TestQueryFormat.Table:
-            lines.push("run | planned_case | attempt | status | qualification | provenance")
+            lines.push("case | level | run | planned_case | attempt | status | qualification | provenance")
             for row in page.rows:
-                lines.push(row.run_id.value + " | " + _planned_text(row.planned_case) + " | " + _attempt_text(row.attempt) + " | " + _status_text(row.status) + " | " + _qualification_text(row.qualification) + " | unverified_framework_observation")
+                lines.push(_key_text(row) + " | " + test_level_name(row.level) + " | " + row.run_id.value + " | " + _planned_text(row.planned_case) + " | " + _attempt_text(row.attempt) + " | " + _status_text(row.status) + " | " + _qualification_text(row.qualification) + " | unverified_framework_observation")
             lines.push("rows: {page.rows.len()}")
             for line in _partial_lines(page):
                 lines.push(line)
         case TestQueryFormat.Sdn:
-            lines.push("test_query_rows |run, planned_case, attempt, status, qualification, provenance|")
+            lines.push("test_query_rows |case, level, run, planned_case, attempt, status, qualification, provenance|")
             for row in page.rows:
-                lines.push("    " + row.run_id.value + ", " + _planned_text(row.planned_case) + ", " + _attempt_text(row.attempt) + ", " + _status_text(row.status) + ", " + _qualification_text(row.qualification) + ", unverified_framework_observation")
+                lines.push("    " + _key_text(row) + ", " + test_level_name(row.level) + ", " + row.run_id.value + ", " + _planned_text(row.planned_case) + ", " + _attempt_text(row.attempt) + ", " + _status_text(row.status) + ", " + _qualification_text(row.qualification) + ", unverified_framework_observation")
             lines.push("row_count: {page.rows.len()}")
             for line in _partial_lines(page):
                 lines.push(line)
@@ -276,7 +309,7 @@ pub fn render_test_query_error(error: TestQueryError) -> text:
     "error: " + label + ": " + error.detail + "\n"
 
 pub fn test_query_usage_text() -> text:
-    "usage: simple test query <path>::<case> [--run <id>] [--limit N] [--cursor C] [--format table|sdn]\n       simple test explain <path>::<case> [--run <id>]\nexit codes: 0 rows found, 1 no rows, 2 usage error or unreadable/corrupt test database\n"
+    "usage: simple test query (<path>::<case> | --bug <id> | --requirement <id> [--levels unit,integration,...]) [--run <id>] [--limit N] [--cursor C] [--format table|sdn]\n       simple test explain (<path>::<case> | --bug <id> | --requirement <id> [--levels ...]) [--run <id>]\n--levels needs --bug or --requirement\nexit codes: 0 rows found, 1 no rows, 2 usage error or unreadable/corrupt test database\n"
 
 # Pure outcome: maps a query result to the text to print and the exit decision.
 pub fn render_test_query_outcome(request: TestQueryCliRequest, result: Result<TestQueryPage, TestQueryError>) -> TestQueryCliOutput:
@@ -288,7 +321,8 @@ pub fn render_test_query_outcome(request: TestQueryCliRequest, result: Result<Te
             TestQueryCliOutput(text: render_test_query_error(error), decision: decision)
         case Ok(page):
             if page.rows.len() == 0:
-                return TestQueryCliOutput(text: "no rows: no recorded attempts for " + request.query.case_key.path.value + "::" + request.query.case_key.name.value + "\n", decision: TestQueryExitDecision.NoRows)
+                val subject = if request.scoped.?: request.query.case_key.path.value + " (" + request.query.case_key.name.value + ")" else: request.query.case_key.path.value + "::" + request.query.case_key.name.value
+                return TestQueryCliOutput(text: "no rows: no recorded attempts for " + subject + "\n", decision: TestQueryExitDecision.NoRows)
             val body = match request.command:
                 case TestQueryCommand.Query: render_test_query_page(page, request.format)
                 case TestQueryCommand.Explain: render_test_explain_page(page)
@@ -304,9 +338,15 @@ pub fn open_test_db_read_only(path: TestDbFilePath) -> Result<RunnerTestDb, Test
         case None: Err(TestQueryError(kind: TestQueryErrorKind.StoreUnreadable, detail: "cannot parse or verify seal of " + path.value))
 
 pub fn execute_test_query(request: TestQueryCliRequest, path: TestDbFilePath) -> TestQueryCliOutput:
+    execute_test_query_with_bug_db(request, path, TestScopeBugDbPath(value: TEST_SCOPE_BUG_DB))
+
+pub fn execute_test_query_with_bug_db(request: TestQueryCliRequest, path: TestDbFilePath, bug_db: TestScopeBugDbPath) -> TestQueryCliOutput:
     match open_test_db_read_only(path):
         case Err(error): render_test_query_outcome(request, Err(error))
-        case Ok(owner): render_test_query_outcome(request, owner.query_case_attempts(request.query))
+        case Ok(owner):
+            match request.scoped:
+                case Some(scoped): render_test_query_outcome(request, run_scoped_test_query(owner, scoped, bug_db))
+                case None: render_test_query_outcome(request, owner.query_case_attempts(request.query))
 
 pub fn run_test_query_cli(args: [text]) -> TestQueryExitCode:
     match parse_test_query_args(test_query_subcommand_args(args)):
