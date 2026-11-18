@@ -47,4 +47,4 @@ fails in the Phase 2-built Stage 3, which points at a difference in how the code
 contents. This is a hypothesis; not confirmed.
 
 ## Status
-Open; cause unknown. Update with the probe result.
+Open. Cause: `phase2_var_reassign_runtime_text_branch_lost_2026-11-17.md` (native probe, 2026-11-18). Source workaround merged in 34d422e9a36; close once a Stage 3 rebuilt with it passes admission.
