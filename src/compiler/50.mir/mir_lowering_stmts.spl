@@ -1962,6 +1962,19 @@ impl MirLowering:
                                     if let_type.? and not mir_let_type_unsettled(let_type_value):
                                         val declared_type: HirType = let_type ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
                                         self.remember_local_hir_type(local.id, declared_type, 0, 0)
+                                        # `val src: [u32] = <untyped>` (a field
+                                        # read off a bootstrap-erased call
+                                        # result): the annotation is the only
+                                        # evidence, so it must also mark the
+                                        # runtime handle, or `src.slice` fell
+                                        # to the runtime fallback.
+                                        val untyped_init_container = self.let_declared_type_override_v1(init_local.id, declared_type)
+                                        if untyped_init_container == 2:
+                                            self.runtime_array_locals[local.id] = true
+                                            self.mark_runtime_value_local(local.id)
+                                        elif untyped_init_container == 3:
+                                            self.runtime_dict_locals[local.id] = true
+                                            self.mark_runtime_value_local(local.id)
                                     else:
                                         # Untyped `var best = 0`: record the
                                         # proven numeric type of the initialiser.
@@ -4036,13 +4049,20 @@ impl MirLowering:
                 # initializer's type; leave that case unchanged.
                 declared_result = not mir_let_type_unsettled(ok) and not mir_let_type_unsettled(err) and not mir_let_type_is_any(ok) and not mir_let_type_is_any(err)
             case _: ()
+        # An initializer with no informative type (none recorded, Infer, or
+        # Error) leaves a container annotation as the only evidence: record
+        # T AND mark the runtime handle (2 / 3), not merely record T.
         match self.find_local_hir_type(init_local_id):
             case Some(init_type):
                 if init_type == None:
-                    return 0
+                    return declared_container
                 match init_type.kind:
-                    case HirTypeKind.Infer(_, _): return 1
-                    case HirTypeKind.Error: return 1
+                    case HirTypeKind.Infer(_, _):
+                        if declared_container > 0: return declared_container
+                        return 1
+                    case HirTypeKind.Error:
+                        if declared_container > 0: return declared_container
+                        return 1
                     case HirTypeKind.Any:
                         if declared_container > 0: return declared_container
                     case HirTypeKind.Int(bits, _):
@@ -4050,7 +4070,7 @@ impl MirLowering:
                     case HirTypeKind.Result(_, _):
                         if declared_result: return 4
                     case _: ()
-            case None: ()
+            case None: return declared_container
         0
 
     me remember_merged_result_ctor_arm_type(dest: LocalId, arm_locals: [LocalId], allow_untyped_ctor_join: bool):
