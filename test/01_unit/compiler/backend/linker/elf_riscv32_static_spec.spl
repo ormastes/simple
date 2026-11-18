@@ -1,0 +1,55 @@
+# Internal ELF linker: riscv32 static output against musl. musl's crt1 refers
+# to a weak hidden _DYNAMIC; ld.lld leaves it undefined-weak (0) in a static
+# ET_EXEC. Fixture: weak_dynamic_rv32.o (RECIPE.md).
+#
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+
+use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_LINK_STATIC_EXEC}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes}
+use std.string_core.{char_from_code}
+
+fn load_path(path: text) -> [i64]:
+    val raw = file_read_bytes(path)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn rd16(b: [i64], o: i64) -> i64:
+    (b[o] & 0xff) | ((b[o + 1] & 0xff) << 8)
+
+fn rd32(b: [i64], o: i64) -> i64:
+    rd16(b, o) | (rd16(b, o + 2) << 16)
+
+fn cstr(b: [i64], o: i64) -> text:
+    var s = ""
+    var i = o
+    while b[i] != 0:
+        s = s + char_from_code(b[i])
+        i = i + 1
+    s
+
+fn sec_off(b: [i64], name: text) -> i64:
+    val shoff = rd32(b, 0x20)
+    val stroff = rd32(b, shoff + rd16(b, 0x32) * 40 + 16)
+    var i: i64 = 0
+    while i < rd16(b, 0x30):
+        val h = shoff + i * 40
+        if cstr(b, stroff + rd32(b, h)) == name:
+            return rd32(b, h + 16)
+        i = i + 1
+    -1
+
+describe "elf_link - riscv32 static":
+    it "resolves a weak _DYNAMIC to 0 when the output has no .dynamic":
+        val r = elf_link(ElfLinkRequest(objects: [load_path("test/fixtures/linker/elf/weak_dynamic_rv32.o")],
+            archives: [], shared: [], entry: "_start", target: RelocArch.Riscv32, mode: ELF_LINK_STATIC_EXEC, interp: ""))
+        if r.is_err(): print "link error: {r.unwrap_err()}"
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        expect(sec_off(b, ".dynamic")).to_equal(-1)
+        val sd = sec_off(b, ".sdata")
+        expect(rd32(b, if sd >= 0: sd else: sec_off(b, ".data"))).to_equal(0)
