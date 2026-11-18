@@ -1,0 +1,43 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Branch veneer (thunk) table + ARM interworking veneers.
+# Repro: armv7 static glibc, R_ARM_JUMP24 from ARM code to Thumb memcpy
+# (bug simple_linker_armv7_i686_hosted_relocs_2026-11-18).
+
+use compiler.backend.linker.veneer.{
+    VeneerTable, veneer_table_new, ARM_VENEER_SLOT, ARM_VENEER_TO_THUMB, ARM_VENEER_TO_ARM,
+    arm_veneer_kind, arm_veneer_bytes, arm_veneer_entry
+}
+
+describe "VeneerTable":
+    it "dedups one slot per (key, kind) in first-use order":
+        var t = veneer_table_new()
+        expect(t.add("memcpy", 1)).to_equal(0)
+        expect(t.add("f", 2)).to_equal(1)
+        expect(t.add("memcpy", 1)).to_equal(0)
+        expect(t.add("memcpy", 2)).to_equal(2)
+        expect(t.slot("f", 2)).to_equal(1)
+        expect(t.slot("g", 1)).to_equal(-1)
+        expect(t.count()).to_equal(3)
+
+describe "ARM interworking veneers":
+    it "classifies which branches need a veneer":
+        expect(arm_veneer_kind(29, true)).to_equal(ARM_VENEER_TO_THUMB)   # JUMP24 -> Thumb
+        expect(arm_veneer_kind(1, true)).to_equal(ARM_VENEER_TO_THUMB)    # PC24 -> Thumb
+        expect(arm_veneer_kind(30, false)).to_equal(ARM_VENEER_TO_ARM)    # THM_JUMP24 -> ARM
+        expect(arm_veneer_kind(29, false)).to_equal(0)
+        expect(arm_veneer_kind(30, true)).to_equal(0)
+        expect(arm_veneer_kind(28, true)).to_equal(0)   # CALL interworks via BLX
+
+    it "ARM->Thumb veneer is ldr pc,[pc,#-4]; .word target|1 padded to a slot":
+        expect(ARM_VENEER_SLOT).to_equal(12)
+        expect(arm_veneer_bytes(ARM_VENEER_TO_THUMB, 0x10235)).to_equal(
+            [0x04, 0xf0, 0x1f, 0xe5, 0x35, 0x02, 0x01, 0x00, 0, 0, 0, 0])
+        expect(arm_veneer_entry(0x2000, ARM_VENEER_TO_THUMB)).to_equal(0x2000)
+
+    it "Thumb->ARM veneer is bx pc; nop; ldr pc,[pc,#-4]; .word target, entered in Thumb":
+        expect(arm_veneer_bytes(ARM_VENEER_TO_ARM, 0x10230)).to_equal(
+            [0x78, 0x47, 0xc0, 0x46, 0x04, 0xf0, 0x1f, 0xe5, 0x30, 0x02, 0x01, 0x00])
+        expect(arm_veneer_entry(0x2000, ARM_VENEER_TO_ARM)).to_equal(0x2001)

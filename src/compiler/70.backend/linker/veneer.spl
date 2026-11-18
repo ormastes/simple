@@ -1,0 +1,70 @@
+# Branch veneers (thunks), shared across ELF targets.
+#
+# A veneer table hands out one fixed-size slot per distinct (target key, kind).
+# The linker sizes a synthetic `.veneer` section from count() before layout,
+# redirects each branch that needs one to its slot, and fills the bytes after
+# layout. Per-arch encoders live below the table (ARM interworking today).
+# ponytail: absolute-address veneers only (static ET_EXEC); a PIC variant
+# (pc-relative literal) is needed once ELF32 PIE lands.
+
+class VeneerTable:
+    var keys: [text]
+    var kinds: [i64]
+    var index: {text: i64}
+
+    me add(key: text, kind: i64) -> i64:
+        val id = "{kind}:{key}"
+        if self.index.has(id): return self.index[id]
+        val slot = self.keys.len()
+        self.keys.push(key)
+        self.kinds.push(kind)
+        self.index[id] = slot
+        slot
+
+    fn slot(key: text, kind: i64) -> i64:
+        val id = "{kind}:{key}"
+        if self.index.has(id): self.index[id] else: -1
+
+    fn count() -> i64:
+        self.keys.len()
+
+fn veneer_table_new() -> VeneerTable:
+    VeneerTable(keys: [], kinds: [], index: {})
+
+# --- ARM (AArch32) interworking ---------------------------------------------
+val ARM_VENEER_SLOT: i64 = 12
+val ARM_VENEER_TO_THUMB: i64 = 1   # ARM B (PC24/JUMP24) to a Thumb function
+val ARM_VENEER_TO_ARM: i64 = 2     # Thumb B.W (THM_JUMP24) to an ARM function
+
+fn arm_veneer_kind(rtype: i64, target_thumb: bool) -> i64:
+    """Veneer kind a branch needs, or 0. CALL/THM_CALL interwork via BLX."""
+    if (rtype == 1 or rtype == 29) and target_thumb: return ARM_VENEER_TO_THUMB
+    if rtype == 30 and not target_thumb: return ARM_VENEER_TO_ARM
+    0
+
+fn _arm_word(out: [i64], w: i64) -> [i64]:
+    var o = out
+    o.push(w & 0xff)
+    o.push((w >> 8) & 0xff)
+    o.push((w >> 16) & 0xff)
+    o.push((w >> 24) & 0xff)
+    o
+
+fn arm_veneer_bytes(kind: i64, target: i64) -> [i64]:
+    """One ARM_VENEER_SLOT-byte veneer jumping to absolute `target`."""
+    var b: [i64] = []
+    if kind == ARM_VENEER_TO_ARM:
+        b = _arm_word(b, 0x46c04778)        # bx pc ; nop   (Thumb -> ARM state)
+        b = _arm_word(b, 0xe51ff004)        # ldr pc, [pc, #-4]
+        return _arm_word(b, target & -2)
+    b = _arm_word(b, 0xe51ff004)            # ldr pc, [pc, #-4] (bit0 -> Thumb)
+    b = _arm_word(b, target | 1)
+    _arm_word(b, 0)
+
+fn arm_veneer_entry(slot_addr: i64, kind: i64) -> i64:
+    """Branch target for a slot: Thumb-entered veneers carry the Thumb bit."""
+    if kind == ARM_VENEER_TO_ARM: slot_addr | 1 else: slot_addr
+
+export VeneerTable, veneer_table_new
+export ARM_VENEER_SLOT, ARM_VENEER_TO_THUMB, ARM_VENEER_TO_ARM
+export arm_veneer_kind, arm_veneer_bytes, arm_veneer_entry
