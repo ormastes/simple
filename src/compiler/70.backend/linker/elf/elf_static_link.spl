@@ -1859,6 +1859,18 @@ fn elf_arm_vfp_args(raw: [u8], start: i64, size: i64) -> i64:
         p = sub_end
     -1
 
+fn elf_arm_first_attributes(objects: [ElfObject]) -> [i64]:
+    """ld.lld keeps the first input .ARM.attributes section verbatim (no merge)."""
+    for obj in objects:
+        var si: i64 = 0
+        while si < obj.sections.len():
+            val sec = obj.sections[si]
+            if sec.sh_type == SHT_ARM_ATTRIBUTES and sec.sh_size > 0:
+                # sections[si].sh_addr is the FILE offset (elf_parser convention)
+                return elf_i64_from_u8(obj.raw[sec.sh_addr:sec.sh_addr + sec.sh_size])
+            si = si + 1
+    []
+
 fn elf_arm_float_flags(objects: [ElfObject]) -> i64:
     """ld.lld's float-ABI e_flags bit: HARD when an input declares
     Tag_ABI_VFP_args = 1 (VFP registers), otherwise SOFT."""
@@ -2198,6 +2210,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     elf_link_trace("archive closure")
     var riscv_flags: i64 = 0
     var riscv_attributes: [i64] = []
+    val arm_attributes: [i64] = if target == RelocArch.Arm32: elf_arm_first_attributes(all) else: []
     if elf_target_is_riscv(target):
         val xlen: i64 = if target == RelocArch.Riscv32: 32 else: 64
         riscv_flags = elf_riscv_flags_xlen(all, xlen)?
@@ -3030,6 +3043,8 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             ".riscv.attributes", 0x70000003, riscv_attributes)?
         if attr_phdrs > 0:
             image = elf_patch_attr_phdr(image, w32, attr_off, riscv_attributes.len())
+    if arm_attributes.len() > 0:
+        image = elf_append_nonalloc_section_bytes(image, ".ARM.attributes", SHT_ARM_ATTRIBUTES, arm_attributes)?
     elf_link_trace("symtab appended")
     val digest = elf_build_id_digest(image)
     val note_off = note_start + 16
