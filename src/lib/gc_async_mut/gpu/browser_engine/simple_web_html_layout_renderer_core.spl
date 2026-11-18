@@ -8,6 +8,7 @@ use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 use common.ui.glyph_bitmap_5x7.{glyph_row_bits, glyph_index_for_char_code}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{decl_get, parse_int, HNODE_ATTR_HREF_BIT, font_milli_of}
+use std.gc_async_mut.gpu.browser_engine.form_control_chrome.{CHROME_FRAME_FIELD, CHROME_FRAME_BUTTON, CHROME_FRAME_FIELD_DISABLED, CHROME_FRAME_BUTTON_DISABLED}
 
 # Chrome 159 system colours of a DISABLED control (light scheme), as the CSS a
 # styled control computes: `Field` / `ButtonFace` and the border at 30 %.
@@ -21,19 +22,31 @@ fn _input_type_is_button(input_type: text) -> bool:
 fn _input_type_is_text_field(input_type: text) -> bool:
     not _input_type_is_button(input_type) and input_type != "range" and input_type != "color" and input_type != "file"
 
-fn form_control_ua_box_decls(node: HNode) -> text:
+fn form_control_ua_box_decls(node: HNode, standards_mode: bool) -> text:
     """UA-sheet box declarations for a form control (Chrome html.css), or ""
     for any other element. The border colour is Chrome's light-scheme control
     border. A control does not inherit `color`: Chrome 159 computes
     `FieldText` / `ButtonText` (rgb(0, 0, 0)) under a coloured parent, #545454
     for a disabled field, rgba(16, 16, 16, 0.3) for a disabled button and
-    GrayText (#808080) at `opacity: 0.7` for a disabled select."""
+    GrayText (#808080) at `opacity: 0.7` for a disabled select.
+
+    `standards_mode`: the document has a doctype. Chrome 159's `box-sizing`
+    for `width:40px;height:16px;padding:2px` (getComputedStyle + rect):
+
+    | control                                   | standards        | quirks          |
+    |-------------------------------------------|------------------|-----------------|
+    | input text, password, email, number, date | content-box 48x24| border-box 40x16|
+    | input range, file                         | content-box      | border-box      |
+    | input search, color                       | border-box 40x16 | border-box      |
+    | input button, submit, reset; `<button>`   | border-box 40x16 | border-box      |
+    | input checkbox, radio; `<select>`         | border-box 40x16 | border-box      |
+    | `<textarea>`                              | content-box 46x22| border-box 40x16|
+    | input image                               | content-box      | content-box     |
+
+    The quirks column is html.css's quirks-only `input:not([type=image]),
+    textarea { box-sizing: border-box }`. Author `box-sizing` wins."""
     val disabled = attr_present(node.attrs_raw, "disabled")
     if node.tag == "input":
-        # Chrome 159 computes `box-sizing: border-box` for every input type
-        # except `image` (content-box): `width:40px;height:16px;padding:2px`
-        # gives a 40x16 rect for text, password, search, button, submit,
-        # checkbox, radio, range, color, file, date. Author box-sizing wins.
         # An image input has no UA border (Chrome 159: border 0, 44x20 for
         # that declaration: 40 + 2*2 padding).
         val input_type = attr_value(node.attrs_raw, "type").trim().lower()
@@ -49,20 +62,17 @@ fn form_control_ua_box_decls(node: HNode) -> text:
             if disabled:
                 return "border:2px solid #767676;box-sizing:border-box;color:rgba(16,16,16,0.3)" + _FORM_CONTROL_DISABLED_BOX
             return "border:2px solid #767676;box-sizing:border-box;color:#000;background-color:#efefef"
+        val sizing = if standards_mode and input_type != "search" and input_type != "color": "" else: ";box-sizing:border-box"
         if not _input_type_is_text_field(input_type):
-            return "border:2px solid #767676;box-sizing:border-box"
+            return "border:2px solid #767676" + sizing
         if disabled:
-            return "border:2px solid #767676;box-sizing:border-box;color:#545454" + _FORM_CONTROL_DISABLED_BOX
-        return "border:2px solid #767676;box-sizing:border-box;color:#000;background-color:#fff"
+            return "border:2px solid #767676" + sizing + ";color:#545454" + _FORM_CONTROL_DISABLED_BOX
+        return "border:2px solid #767676" + sizing + ";color:#000;background-color:#fff"
     if node.tag == "button":
         if disabled:
             return "border:2px solid #767676;color:rgba(16,16,16,0.3)" + _FORM_CONTROL_DISABLED_BOX
         return "border:2px solid #767676;color:#000;background-color:#efefef"
     if node.tag == "select":
-        # Chrome 159 (standards mode, `<!DOCTYPE html>`) computes `box-sizing:
-        # border-box` for `<select>`: `width:40px;height:16px;padding:2px` is a
-        # 40x16 rect. `<textarea>` stays content-box there (46x22); only quirks
-        # mode makes it border-box, and this renderer models standards mode.
         # A listbox (`multiple`, or `size` > 1) is a white `Field`. A menulist
         # gets `background-color: ButtonFace` (Chrome 159 getComputedStyle
         # rgb(239, 239, 239)), but an unstyled one paints its native white
@@ -73,12 +83,13 @@ fn form_control_ua_box_decls(node: HNode) -> text:
             return "border:1px solid #767676;background-color:#fff;box-sizing:border-box;color:#000"
         return "border:1px solid #767676;background-color:#efefef;box-sizing:border-box;color:#000"
     if node.tag == "textarea":
+        val sizing = if standards_mode: "" else: ";box-sizing:border-box"
         if disabled:
-            return "border:1px solid #767676;padding:2px;resize:both;color:#545454" + _FORM_CONTROL_DISABLED_BOX
-        return "border:1px solid #767676;padding:2px;resize:both;color:#000;background-color:#fff"
+            return "border:1px solid #767676;padding:2px;resize:both" + sizing + ";color:#545454" + _FORM_CONTROL_DISABLED_BOX
+        return "border:1px solid #767676;padding:2px;resize:both" + sizing + ";color:#000;background-color:#fff"
     ""
 
-fn _native_look_set_frame(style: Style, color: u32, fill: u32) -> Style:
+fn _native_look_set_frame(style: Style, kind: i32, color: u32, fill: u32) -> Style:
     var st = style
     st.border_w = 1
     st.border_l = 1
@@ -91,6 +102,7 @@ fn _native_look_set_frame(style: Style, color: u32, fill: u32) -> Style:
     st.border_color_r = color
     st.border_color_b = color
     st.bg = fill
+    st.native_frame = kind
     st
 
 # Chrome 159 native (`appearance: auto`) look of a control the author did not
@@ -98,8 +110,9 @@ fn _native_look_set_frame(style: Style, color: u32, fill: u32) -> Style:
 # #767676 frame at the OUTER edge of the UA border area -- a text field's and
 # a button's computed border is 2 px, so the second px is field / face colour
 # -- over white (field, menulist, textarea) or #efefef (button). The content
-# box is unchanged: the hidden border px moves into the padding. Chrome also
-# rounds the frame (outer radius 2.5 px); the corners stay square here.
+# box is unchanged: the hidden border px moves into the padding. Chrome rounds
+# the frame (outer radius 2.5 px): outside widget mode paint draws it from
+# `chrome_frame_spans` (`Style.native_frame`) instead of this square box.
 #
 # Disabled, Chrome composites (on #fff and on #204060) a 244 at 68 % field
 # inside a 128 at 36.7 % frame, and a 216 at 44 % face inside a 152 at 45.7 %
@@ -122,8 +135,12 @@ fn _apply_native_control_look(style: Style, node: HNode) -> Style:
     st.pad_r = st.pad_r + st.border_r - 1
     st.pad_b = st.pad_b + st.border_b - 1
     if button:
-        return _native_look_set_frame(st, if disabled: 0x75ACACACu32 else: 0xFF767676u32, if disabled: 0x70D8D8D8u32 else: 0xFFEFEFEFu32)
-    _native_look_set_frame(st, if disabled: 0x5E8C8C8Cu32 else: 0xFF767676u32, if disabled: 0xADF4F4F4u32 else: 0xFFFFFFFFu32)
+        return _native_look_set_frame(
+            st, if disabled: CHROME_FRAME_BUTTON_DISABLED else: CHROME_FRAME_BUTTON,
+            if disabled: 0x75ACACACu32 else: 0xFF767676u32, if disabled: 0x70D8D8D8u32 else: 0xFFEFEFEFu32)
+    _native_look_set_frame(
+        st, if disabled: CHROME_FRAME_FIELD_DISABLED else: CHROME_FRAME_FIELD,
+        if disabled: 0x5E8C8C8Cu32 else: 0xFF767676u32, if disabled: 0xADF4F4F4u32 else: 0xFFFFFFFFu32)
 
 # Inked pixel width of the built-in 5x7 bitmap cell for one codepoint, at
 # the rasterizer's scale (web_glyph_scale of the font size). The
@@ -606,6 +623,9 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
     # vw/vh declaration exactly as before.
     css_cascade_viewport_set(viewport_w, viewport_h)
     css_cascade_root_font_set(16)
+    # Document mode, for the UA rules that differ in quirks mode (form control
+    # `box-sizing`). The parser records it on the root node.
+    val standards_document = nodes.len() > 0 and nodes[0].standards_mode
     var cpu_material_entry_count: i64 = 0
     var solid_material_entry_count: i64 = 0
     val material_channel_ready = (
@@ -769,7 +789,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         # still win. Chrome 159: `<input>` 185x21, `<select>` 19 tall,
         # `<textarea>` 181x36, checkbox `margin: 3px 3px 3px 4px`, radio
         # `margin: 3px 3px 0 5px`.
-        val ua_control_decls = form_control_ua_box_decls(nd)
+        val ua_control_decls = form_control_ua_box_decls(nd, standards_document)
         if ua_control_decls != "":
             st = apply_decls(st, ua_control_decls, em_base)
         # HTML UA stylesheet, the `dir dir, dir dl, ... ul ul` descendant block

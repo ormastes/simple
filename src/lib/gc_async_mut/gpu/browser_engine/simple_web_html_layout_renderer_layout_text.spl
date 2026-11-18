@@ -233,11 +233,11 @@ fn replaced_default_box_w(tag: text) -> i32:
         return 300
     0
 
-# The UA control font is `13.3333px` = 40/3 px (10 pt). The cascade carries
-# integer px, so a control's `font_size` is 13 (FORM_CONTROL_UA_FONT_SIZE_PX in
-# ..._declarations.spl); a label is MEASURED at the real size by resolving its
-# run at an integer multiple of 40/3 and dividing, which keeps the sub-pixel
-# part that decides `ceil` (`Alpha`: 34.09 px -> 35, 33 at a truncated 13 px).
+# The UA control font is `13.3333px` = 40/3 px (10 pt): `font_size` 13 with
+# `font_size_milli` 13333 (FORM_CONTROL_UA_FONT_SIZE_* in ..._declarations.spl).
+# A label is MEASURED by resolving its run at an integer multiple of 40/3 and
+# dividing, which keeps the sub-pixel part that decides `ceil` (`Alpha`:
+# 34.09 px -> 35, 33 at a truncated 13 px).
 val FORM_CONTROL_UA_FONT_TRUNCATED_PX: i32 = 13
 val FORM_CONTROL_UA_FONT_NUM: i32 = 40
 val FORM_CONTROL_UA_FONT_DEN: i32 = 3
@@ -471,19 +471,26 @@ val TEXTAREA_CONTENT_INTERCEPT_PX: i32 = 17
 # browser constants: Chrome's rule (LayoutTextControl) is
 #
 #   <input size=N>     content = (N - 1) * round(avgCharWidth) + round(maxCharWidth)
-#   <textarea cols=N>  content = N * round(avgCharWidth) + scrollbar(15)
+#   <textarea cols=N>  content = ceil(N * avgCharWidth) + scrollbar(15)
 #
 # with `avgCharWidth` the face's OS/2 xAvgCharWidth and `maxCharWidth` its
-# bounding-box width. On Linux Chrome's `Arial` is Liberation Sans
-# (xAvgCharWidth 1187/2048 em -> 7.73 px at 13.3333 -> 8; bbox 3780/2048 em ->
-# 24.6 -> 25), so `<input>` content is `8N + 17`; its `monospace` is DejaVu
-# Sans Mono (1233/2048 em -> 8.03 -> 8), so `<textarea>` content is `8N + 15`.
-# Chrome 159 fits both exactly on N = 1, 5, 10, 20, 40. This engine has no
-# OS/2 / head table reader, so the two faces are keyed by resolved identity.
-val INPUT_COL_ADVANCE_LIBERATION_SANS_PX: i32 = 8
-val INPUT_CONTENT_INTERCEPT_LIBERATION_SANS_PX: i32 = 17
-val TEXTAREA_COL_ADVANCE_DEJAVU_MONO_PX: i32 = 8
-val TEXTAREA_CONTENT_INTERCEPT_DEJAVU_MONO_PX: i32 = 15
+# bounding-box width, both at the control's font size. On Linux Chrome's
+# `Arial` is Liberation Sans (xAvgCharWidth 1187/2048 em -> 7.73 px at
+# 13.3333 -> 8; bbox 3780/2048 em -> 24.6 -> 25), so `<input>` content is
+# `8N + 17`; its `monospace` is DejaVu Sans Mono (1233/2048 em -> 8.0273 px a
+# column), so `<textarea>` content is `ceil(8.0273 N) + 15`: Chrome 159 has
+# 24 / 56 / 96 / 176 / 337 for N = 1 / 5 / 10 / 20 / 40 (the border box is
+# 30 / 62 / 102 / 182 / 343). Chrome lays out in device px, so at device
+# scale k the same rule runs at k x the font size with a 15k scrollbar: a
+# default `<input>` is 19 x 31 + 98 = 687 device px of content at k = 4
+# (719 with its border and padding, where 4 x 185 is 740) and a default
+# `<textarea>` 643 + 60 (727, 4 x 182 is 728). This engine has no OS/2 / head
+# table reader, so the two faces are keyed by resolved identity.
+val LIBERATION_SANS_AVG_CHAR_UNITS: i64 = 1187
+val LIBERATION_SANS_MAX_CHAR_UNITS: i64 = 3780
+val DEJAVU_MONO_AVG_CHAR_UNITS: i64 = 1233
+val FORM_CONTROL_FACE_UNITS_PER_EM: i64 = 2048
+val TEXTAREA_SCROLLBAR_PX: i32 = 15
 
 fn form_control_face_identity(st: Style) -> text:
     """Resolved identity of the face a text control's own font selects."""
@@ -497,22 +504,39 @@ fn form_control_intrinsic_content_w(node: HNode, st: Style, cols: i32) -> i32:
     intercept. `<textarea>` and `<input>` carry different UA fonts and a
     different intercept, so they are separate arms rather than one formula."""
     form_control_content_w_for_face(
-        node.tag, form_control_face_identity(st), cols, web_glyph_scale(st.font_size)
+        node.tag, form_control_face_identity(st), cols, web_glyph_scale(st.font_size),
+        font_milli_of(st.font_size, st.font_size_milli), 1
     )
 
-fn form_control_content_w_for_face(tag: text, face_identity: text, cols: i32, scale: i32) -> i32:
-    """The face-keyed table behind `form_control_intrinsic_content_w`, split
-    out so it can be checked without loading a font. Liberation Sans and DejaVu
-    Sans Mono (Chrome's Linux control faces) take their own numbers; EVERY
-    other identity -- Helvetica, Menlo, an unresolved face -- keeps the
-    original `7N + 5` / `8N + 17`, so a macOS host is unchanged."""
+# reason: column count and device scale in, device px out; all layout scalars.
+# @allow(primitive_api)
+pub fn form_control_intrinsic_content_device_w(node: HNode, st: Style, cols: i32, k: i32) -> i32:
+    """`form_control_intrinsic_content_w` in DEVICE px at device scale k."""
+    form_control_content_w_for_face(
+        node.tag, form_control_face_identity(st), cols, web_glyph_scale(st.font_size),
+        font_milli_of(st.font_size, st.font_size_milli), k
+    )
+
+fn form_control_content_w_for_face(tag: text, face_identity: text, cols: i32, scale: i32, font_milli: i32, k: i32) -> i32:
+    """The face-keyed rule behind `form_control_intrinsic_content_w`, split
+    out so it can be checked without loading a font. `font_milli` is the
+    control's font size in 1/1000 CSS px and `k` the device scale; the result
+    is in device px (CSS px at k = 1). Liberation Sans and DejaVu Sans Mono
+    (Chrome's Linux control faces) take Chrome's rule on their own metrics;
+    EVERY other identity -- Helvetica, Menlo, an unresolved face -- keeps the
+    original `7N + 5` / `8N + 17` per glyph `scale`, so a macOS host is
+    unchanged."""
+    val units = (font_milli as i64) * (k as i64)
+    val den = FORM_CONTROL_FACE_UNITS_PER_EM * 1000
     if tag == "textarea":
         if face_identity.contains("DejaVuSansMono"):
-            return cols * TEXTAREA_COL_ADVANCE_DEJAVU_MONO_PX * scale + TEXTAREA_CONTENT_INTERCEPT_DEJAVU_MONO_PX * scale
-        return cols * TEXTAREA_COL_ADVANCE_PX * scale + TEXTAREA_CONTENT_INTERCEPT_PX * scale
+            return (((cols as i64) * units * DEJAVU_MONO_AVG_CHAR_UNITS + den - 1) / den) as i32 + TEXTAREA_SCROLLBAR_PX * k
+        return (cols * TEXTAREA_COL_ADVANCE_PX * scale + TEXTAREA_CONTENT_INTERCEPT_PX * scale) * k
     if face_identity.contains("LiberationSans"):
-        return cols * INPUT_COL_ADVANCE_LIBERATION_SANS_PX * scale + INPUT_CONTENT_INTERCEPT_LIBERATION_SANS_PX * scale
-    cols * INPUT_COL_ADVANCE_PX * scale + INPUT_CONTENT_INTERCEPT_PX * scale
+        val avg = ((units * LIBERATION_SANS_AVG_CHAR_UNITS + den / 2) / den) as i32
+        val widest = ((units * LIBERATION_SANS_MAX_CHAR_UNITS + den / 2) / den) as i32
+        return (cols - 1) * avg + widest
+    (cols * INPUT_COL_ADVANCE_PX * scale + INPUT_CONTENT_INTERCEPT_PX * scale) * k
 
 fn form_control_cols(node: HNode) -> i32:
     """Visible character columns of a text control: `size` for <input>, `cols`

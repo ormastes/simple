@@ -1,0 +1,310 @@
+"""
+## Purpose and audience
+Purpose: Pin five follow-ups of the form-control chrome against Chrome 159 on
+Linux: the rounded native frame, the UA `box-sizing` per document mode, the
+13.333px UA control font, the device-px width of a control at device
+scale 4, and the check mark colour on a light accent colour.
+Audience: web renderer form-control layout / paint / device-scale maintainers.
+
+Chrome oracle: Chrome for Testing 159.0.8154.6 aarch64 (Playwright
+chromium-1255), `--headless=new --disable-gpu --hide-scrollbars
+--force-device-scale-factor=K`, `--screenshot` for pixels and `--dump-dom` with
+an inline `getBoundingClientRect` / `getComputedStyle` script for geometry;
+Liberation Sans (`Arial`) and DejaVu Sans Mono (`monospace`), measured
+2026-11-19. Pages A and B are the ones of
+form_control_paint_chrome159_spec. Pixel facts are relative to the control's
+own box (its non-white bounding box in its band).
+
+| fact                                              | Chrome                | base c824eadfdb0   | now      |
+|---------------------------------------------------|-----------------------|--------------------|----------|
+| K=1 text field, px (0,0) (1,0) (0,1) (1,1)        | fff 767676 767676 fff | 767676 x3 fff      | = Chrome |
+| K=1 textarea, px (W-1,H-1) (W-2,H-1) (W-1,H-2)    | fff 767676 767676     | 767676 x3          | = Chrome |
+| K=1 button, px (0,0) (1,0) (2,0) (3,0) (1,1) (2,1)| fff a2 97 76 ab ef    | 76 76 76 76 ef ef  | within 8 |
+| K=4 text field, first ring col of rows 0..7       | 7 5 4 3 2 1 1 0       | 0 x8               | = Chrome |
+| K=4 text field, ring width on row 12              | 4                     | 4                  | 4        |
+| K=1 `Simple` ink columns in a default field       | 5-43                  | 5-42               | = Chrome |
+| K=1 default `<textarea>` box                      | 182x36                | 181x36             | = Chrome |
+| `<textarea>` cols 1 / 5 / 10 / 20 / 40 width      | 30 62 102 182 343     | 29 61 101 181 341  | = Chrome |
+| K=4 default input / textarea / select box         | 719x85 727x150 225x75 | 740x85 724x150 228x75 | = Chrome |
+| K=4 catalog input / textarea / select box         | 759x133 775x198 289x139 | 780x133 772x198 292x139 | = Chrome |
+| standards `width:40px;height:16px;padding:2px` text input | 48x24 content-box | 40x16          | = Chrome |
+| same, search / button input, select, button      | 40x16 border-box      | 40x16              | = Chrome |
+| same, textarea, standards / quirks                | 46x22 / 40x16         | 46x22 / 46x22      | = Chrome |
+| same, text input, quirks (no doctype)             | 40x16 border-box      | 40x16              | = Chrome |
+| check mark on accent #8686ff / #8888ff / #22c55e   | fff / 3b3b3b / 3b3b3b | fff x3             | = Chrome |
+| tab row, `CSS Paint` button                        | 79.5x33 at x 264.97   | 79x33 at 265       | 79x33 at 265 |
+
+Chrome's text-field frame is NOT anti-aliased and its push-button frame is
+(native_theme_base.cc: a `zoom` px stroke whose centre line is `zoom / 2`
+inside the box, with a corner radius). Measured first ring column of the top
+rows of a text field: K=1 `1`, K=2 `3 1 1 0`, K=3 `5 3 2 1 1 0`, K=4
+`7 5 4 3 2 1 1 0` -- a centre-line radius of 2K at K = 1..3 and of 8.5 device
+px at K = 4 (2K = 8 would give `7 5 3 2 2 1 1 0`). At K=3 Chrome's inner edge
+is not symmetric about the diagonal (px (5,3) is ring, (3,5) is fill), so one
+px per corner differs there.
+
+AC-11 is not red on base: it guards the label wrap that the 13.333px font
+would otherwise cause (the label is 62 px in a 61 px content box). A page
+with these controls holds more than 8 (face, size) pairs; before d3ab3e1b873
+(exact refill of an evicted glyph advance slot) the two new 13.333px faces
+shifted the LCD raster of other runs (catalog forms-media 2.27 -> 4.45).
+
+Open (not pinned here): the K=4 button box is 135 device px wide in Chrome
+(135.14, a fractional label) and 136 here; boxes after a control on the same
+line keep their CSS-snapped x, so they sit up to `k x w - device w` px right of
+Chrome's; Chrome's `<input>` / `<textarea>` width at `font-size:16px` is 215 /
+221 and at `18px` the textarea is 241, where the face-metric rule gives 209 /
+214 and 238 (Chrome's average char width is not linear in the size there);
+default controls at K=4 sit 2-3 device rows above Chrome's (text input top 32
+vs 34, select 36 vs 39): the line's device baseline is not applied to an
+inline control's box.
+"""
+
+"""
+Traceability: REQ-WEB-FORM-CHROME-PAINT-001 — native form-control frame, UA box-sizing, UA font size and device width as Chrome 159 has them.
+"""
+# @tag: unit, browser_engine, paint, layout, form_control, device_scale, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/form_control_chrome.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_debug_layout_by_id}
+
+val CSS_W: i32 = 300
+val B_H: i32 = 210
+
+val PAGE_HEAD: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>" +
+    "*{{box-sizing:border-box}}" +
+    "body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans';width:300px;color:#172033}}" +
+    "div{{height:44px;padding:6px 0 0 10px;overflow:hidden}}" +
+    "div.t{{height:70px}}" +
+    ".s input,.s select,.s textarea,.s button{{padding:8px;border:1px solid #94a3b8;border-radius:5px}}" +
+    "</style></head><body>"
+
+# One default control per 44 px band (a textarea band is 70 px).
+val PAGE_A: text = PAGE_HEAD +
+    "<div><select><option>Alpha</option></select></div>" +
+    "<div class=\"t\"><textarea>Editable</textarea></div>" +
+    "<div><input value=\"Simple\"></div>" +
+    "<div><button>Go</button></div>" +
+    "</body></html>"
+
+# The catalog's styled controls.
+val PAGE_B: text = PAGE_HEAD +
+    "<div class=\"s\"><select><option>Alpha</option></select></div>" +
+    "<div class=\"s t\"><textarea>Editable</textarea></div>" +
+    "<div class=\"s\"><input value=\"Simple\"></div>" +
+    "<div class=\"s\"><button>Go</button></div>" +
+    "</body></html>"
+
+val SIZED: text = "<html><head><style>body{{margin:0}}.p *{{width:40px;height:16px;padding:2px}}</style></head><body><div class=\"p\">" +
+    "<input id=\"text\"><input id=\"search\" type=\"search\"><input id=\"push\" type=\"button\" value=\"G\">" +
+    "<textarea id=\"area\"></textarea><select id=\"menu\"><option>A</option></select><button id=\"btn\">G</button>" +
+    "</div></body></html>"
+
+val COLS: text = "<!doctype html><html><head><style>body{{margin:0}}</style></head><body>" +
+    "<textarea id=\"t1\" cols=\"1\"></textarea><textarea id=\"t5\" cols=\"5\"></textarea><textarea id=\"t10\" cols=\"10\"></textarea>" +
+    "<textarea id=\"t20\"></textarea><textarea id=\"t40\" cols=\"40\"></textarea></body></html>"
+
+fn _r(p: u32) -> i32:
+    ((p >> 16) & 0xFFu32) as i32
+
+fn _g(p: u32) -> i32:
+    ((p >> 8) & 0xFFu32) as i32
+
+fn _b(p: u32) -> i32:
+    (p & 0xFFu32) as i32
+
+fn _hex2(v: i32) -> text:
+    val digits = "0123456789abcdef"
+    digits.substring(v / 16, v / 16 + 1) + digits.substring(v % 16, v % 16 + 1)
+
+fn _hex(p: u32) -> text:
+    _hex2(_r(p)) + _hex2(_g(p)) + _hex2(_b(p))
+
+fn _at(px: [u32], w: i32, x: i32, y: i32) -> text:
+    _hex(px[y * w + x])
+
+# Non-white bounding box [x0, y0, x1, y1] (inclusive) of rows y0..y1-1.
+fn _bbox(px: [u32], w: i32, y0: i32, y1: i32) -> [i32]:
+    var out = [w, y1, -1, -1]
+    var y = y0
+    while y < y1:
+        var x = 0
+        while x < w:
+            if (px[y * w + x] & 0xFFFFFFu32) != 0xFFFFFFu32:
+                if x < out[0]: out[0] = x
+                if x > out[2]: out[2] = x
+                if y < out[1]: out[1] = y
+                if y > out[3]: out[3] = y
+            x = x + 1
+        y = y + 1
+    out
+
+fn _size(box: [i32]) -> text:
+    "{box[2] - box[0] + 1}x{box[3] - box[1] + 1}"
+
+# True when the pixel is a grey within 8 of `want`.
+fn _grey_near(px: [u32], w: i32, x: i32, y: i32, want: i32) -> bool:
+    val p = px[y * w + x]
+    val d = _g(p) - want
+    _r(p) == _g(p) and _g(p) == _b(p) and d <= 8 and d >= -8
+
+# First and last column, relative to x0, of the pixels darker than green 97
+# in the block (x0 + 3, y0 + 3)..(x1 - 3, y1 - 3).
+fn _ink_cols(px: [u32], w: i32, box: [i32]) -> text:
+    var first = 99999
+    var last = -1
+    var y = box[1] + 3
+    while y <= box[3] - 3:
+        var x = box[0] + 3
+        while x <= box[2] - 3:
+            if _g(px[y * w + x]) <= 96:
+                if x - box[0] < first: first = x - box[0]
+                if x - box[0] > last: last = x - box[0]
+            x = x + 1
+        y = y + 1
+    "{first}-{last}"
+
+# First #767676 column, relative to the box, of each of rows 0..rows-1.
+fn _ring_starts(px: [u32], w: i32, box: [i32], rows: i32) -> text:
+    var out = ""
+    var row = 0
+    while row < rows:
+        var col = 0
+        while col < 40 and _at(px, w, box[0] + col, box[1] + row) != "767676":
+            col = col + 1
+        out = out + col.to_text() + " "
+        row = row + 1
+    out.trim()
+
+fn _render(page: text, height: i32, k: i32) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, CSS_W, height, k, "cpu_simd")
+
+var g_a1: [u32] = []
+var g_a4: [u32] = []
+var g_b4: [u32] = []
+
+fn _a1() -> [u32]:
+    if g_a1.len() == 0:
+        g_a1 = _render(PAGE_A, 210, 1)
+    g_a1
+
+fn _a4() -> [u32]:
+    if g_a4.len() == 0:
+        g_a4 = _render(PAGE_A, 210, 4)
+    g_a4
+
+fn _b4() -> [u32]:
+    if g_b4.len() == 0:
+        g_b4 = _render(PAGE_B, B_H, 4)
+    g_b4
+
+fn _geo(page: text, id: text) -> text:
+    simple_web_layout_debug_layout_by_id(page, 900, 760, id, "w") + "x" + simple_web_layout_debug_layout_by_id(page, 900, 760, id, "h")
+
+describe "Native frame corners (Chrome 159)":
+    it "AC-1: a text field and a textarea lose their four corner px at device scale 1":
+        val px = _a1()
+        val field = _bbox(px, CSS_W, 114, 158)
+        step("Chrome 159: ffffff 767676 767676 ffffff")
+        expect("{_at(px, CSS_W, field[0], field[1])} {_at(px, CSS_W, field[0] + 1, field[1])} {_at(px, CSS_W, field[0], field[1] + 1)} {_at(px, CSS_W, field[0] + 1, field[1] + 1)}").to_equal("ffffff 767676 767676 ffffff")
+        val area = _bbox(px, CSS_W, 44, 114)
+        expect("{_at(px, CSS_W, area[2], area[3])} {_at(px, CSS_W, area[2] - 1, area[3])} {_at(px, CSS_W, area[2], area[3] - 1)}").to_equal("ffffff 767676 767676")
+
+    it "AC-2: a button's corner is Chrome's anti-aliased hairline at device scale 1":
+        val px = _a1()
+        val btn = _bbox(px, CSS_W, 158, 202)
+        step("Chrome 159 row 0: ffffff a2a2a2 979797 767676; row 1: a2a2a2 ababab efefef")
+        expect(_at(px, CSS_W, btn[0], btn[1])).to_equal("ffffff")
+        expect(_grey_near(px, CSS_W, btn[0] + 1, btn[1], 0xa2)).to_be(true)
+        expect(_grey_near(px, CSS_W, btn[0] + 2, btn[1], 0x97)).to_be(true)
+        expect(_at(px, CSS_W, btn[0] + 3, btn[1])).to_equal("767676")
+        expect(_grey_near(px, CSS_W, btn[0], btn[1] + 1, 0xa2)).to_be(true)
+        expect(_grey_near(px, CSS_W, btn[0] + 1, btn[1] + 1, 0xab)).to_be(true)
+        expect(_at(px, CSS_W, btn[0] + 2, btn[1] + 1)).to_equal("efefef")
+
+    it "AC-3: the text-field frame is an aliased rounded ring at device scale 4":
+        val px = _a4()
+        val field = _bbox(px, CSS_W * 4, 456, 632)
+        step("Chrome 159: 7 5 4 3 2 1 1 0 (centre-line radius 8.5 device px)")
+        expect(_ring_starts(px, CSS_W * 4, field, 8)).to_equal("7 5 4 3 2 1 1 0")
+        step("the ring is 4 device px wide and not anti-aliased")
+        expect("{_at(px, CSS_W * 4, field[0] + 3, field[1] + 12)} {_at(px, CSS_W * 4, field[0] + 4, field[1] + 12)}").to_equal("767676 ffffff")
+        expect("{_at(px, CSS_W * 4, field[0] + 6, field[1])} {_at(px, CSS_W * 4, field[0] + 7, field[1])}").to_equal("ffffff 767676")
+
+describe "UA control font is 13.333px (Chrome 159)":
+    it "AC-4: `Simple` in a default field inks Chrome's columns":
+        val px = _a1()
+        val field = _bbox(px, CSS_W, 114, 158)
+        step("Chrome 159: columns 5-43 of the 185 px field (5-42 at a 13 px font)")
+        expect(_size(field)).to_equal("185x21")
+        expect(_ink_cols(px, CSS_W, field)).to_equal("5-43")
+
+    it "AC-5: a textarea is ceil(cols x 8.0273) + 15 wide plus its padding and border":
+        expect(_size(_bbox(_a1(), CSS_W, 44, 114))).to_equal("182x36")
+        step("Chrome 159: 30 62 102 182 343")
+        expect("{simple_web_layout_debug_layout_by_id(COLS, 900, 760, "t1", "w")} {simple_web_layout_debug_layout_by_id(COLS, 900, 760, "t5", "w")} {simple_web_layout_debug_layout_by_id(COLS, 900, 760, "t10", "w")} {simple_web_layout_debug_layout_by_id(COLS, 900, 760, "t20", "w")} {simple_web_layout_debug_layout_by_id(COLS, 900, 760, "t40", "w")}").to_equal("30 62 102 182 343")
+
+describe "Device-px control width at device scale 4 (Chrome 159)":
+    it "AC-6: default controls take Chrome's device width":
+        val px = _a4()
+        step("Chrome 159: select 225x75, textarea 727x150, text input 719x85")
+        expect(_size(_bbox(px, CSS_W * 4, 0, 176))).to_equal("225x75")
+        expect(_size(_bbox(px, CSS_W * 4, 176, 456))).to_equal("727x150")
+        expect(_size(_bbox(px, CSS_W * 4, 456, 632))).to_equal("719x85")
+
+    it "AC-7: the catalog's styled controls take Chrome's device width":
+        val px = _b4()
+        step("Chrome 159: select 289x139, textarea 775x198, text input 759x133")
+        expect(_size(_bbox(px, CSS_W * 4, 0, 176))).to_equal("289x139")
+        expect(_size(_bbox(px, CSS_W * 4, 176, 456))).to_equal("775x198")
+        expect(_size(_bbox(px, CSS_W * 4, 456, 632))).to_equal("759x133")
+
+describe "UA box-sizing follows the document mode (Chrome 159)":
+    it "AC-8: standards mode keeps a text input and a textarea content-box":
+        val page = "<!doctype html>" + SIZED
+        step("Chrome 159 CSS1Compat: text 48x24, textarea 46x22")
+        expect(_geo(page, "text")).to_equal("48x24")
+        expect(_geo(page, "area")).to_equal("46x22")
+        step("search, button input, select and button are border-box in both modes")
+        expect(_geo(page, "search")).to_equal("40x16")
+        expect(_geo(page, "push")).to_equal("40x16")
+        expect(_geo(page, "menu")).to_equal("40x16")
+        expect(_geo(page, "btn")).to_equal("40x16")
+
+    it "AC-9: quirks mode makes every input and the textarea border-box":
+        step("Chrome 159 BackCompat: text 40x16, textarea 40x16")
+        expect(_geo(SIZED, "text")).to_equal("40x16")
+        expect(_geo(SIZED, "area")).to_equal("40x16")
+        expect(_geo(SIZED, "search")).to_equal("40x16")
+        expect(_geo(SIZED, "menu")).to_equal("40x16")
+
+val MARKS: text = "<html><body><style>html,body{{margin:0;background:#fff}}" +
+    "input{{position:absolute;margin:0;width:14px;height:14px;top:2px}}</style>" +
+    "<input type=\"checkbox\" checked style=\"left:2px\">" +
+    "<input type=\"checkbox\" checked style=\"left:22px;accent-color:#8686ff\">" +
+    "<input type=\"checkbox\" checked style=\"left:42px;accent-color:#8888ff\">" +
+    "<input type=\"checkbox\" checked style=\"left:62px;accent-color:#22c55e\">" +
+    "</body></html>"
+
+describe "Check mark colour follows the accent colour's contrast (Chrome 159)":
+    it "AC-10: an accent colour below 3:1 against white takes a #3b3b3b mark":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(MARKS, 84, 20, 1, "cpu_simd")
+        step("Chrome 159, px (7,7) of each 14 px box: default and #8686ff (3.06:1) white")
+        expect("{_at(px, 84, 9, 9)} {_at(px, 84, 29, 9)}").to_equal("ffffff ffffff")
+        step("#8888ff (2.996:1) and #22c55e (2.28:1): 3b3b3b")
+        expect("{_at(px, 84, 49, 9)} {_at(px, 84, 69, 9)}").to_equal("3b3b3b 3b3b3b")
+
+val TABS: text = "<!doctype html><html><head><style>*{{box-sizing:border-box}}body{{margin:0;font:16px/1.5 sans-serif}}" +
+    ".tabs{{display:flex;gap:8px;padding:10px 24px}}button{{padding:8px;border:1px solid #94a3b8;border-radius:5px}}</style></head><body>" +
+    "<div class=\"tabs\"><button id=\"a\">Overview</button><button id=\"b\">HTML</button><button id=\"c\">CSS Layout</button>" +
+    "<button id=\"d\">CSS Paint</button><button id=\"e\">Forms &amp; Media</button></div></body></html>"
+
+describe "A button label at 13.333px stays on one line (Chrome 159)":
+    it "AC-11: a flex row's whole-px button keeps its fractional-width label unwrapped":
+        step("Chrome 159: `CSS Paint` is 79.5 x 33 at x 264.97 (label 61.5 px); a wrapped label made it 48 tall")
+        expect(_geo(TABS, "d")).to_equal("79x33")
+        expect(simple_web_layout_debug_layout_by_id(TABS, 900, 760, "d", "x")).to_equal("265")
+        expect(_geo(TABS, "e")).to_equal("109x33")
