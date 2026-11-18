@@ -1,0 +1,119 @@
+"""
+## Purpose and audience
+Purpose: Pin CSS `letter-spacing` and `word-spacing` on the Draw IR text lane
+against Chrome 159's headless screenshot. The Draw IR text command's glyph pen
+positions ignored both properties (a page painted the same pixels with and
+without them), so bare-text pages that author them were held on the raster lane.
+Audience: web renderer text maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--force-device-scale-factor=1`, 400x120, `body{margin:0;background:#fff;
+font:16px Liberation Sans;color:#000}`, `<div style="position:absolute;
+left:20px;top:30px;...">`). Range widths are from getBoundingClientRect, "ink"
+is a pixel with a channel under 200.
+
+| text                       | style                         | Range width | lines | ink bbox x0,y0..x1,y1 |
+|----------------------------|-------------------------------|-------------|-------|-----------------------|
+| Hamburgefonstiv            | (none)                        | 120.953125  | 1     | 21,32..140,46         |
+| Hamburgefonstiv            | letter-spacing:2px            | 150.953125  | 1     | 21,32..168,46         |
+| Hamburgefonstiv            |  letter-spacing:0.1em (1.6px)  | 144.953125  | 1     | 21,32..163,46         |
+| Hamburgefonstiv            | letter-spacing:-1px           | 105.953125  | 1     | 21,32..126,46         |
+| a b c d                    | (none)                        | 48.03125    | 1     | 20,32..67,43          |
+| a b c d                    | word-spacing:10px             | 78.03125    | 1     | 20,32..97,43          |
+| abcdef abcdef abcdef, w110 | (none)                        | 100.53125   | 2     | 20,32..120,61         |
+| abcdef abcdef abcdef, w110 | letter-spacing:3px            | 66.046875   | 3     | 20,32..83,79          |
+
+letter-spacing adds its value after every character (15 chars: +30, +24 at
+1.6 px, -15); word-spacing adds to each U+0020 (3 spaces: +30).
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-SPACING-001 — letter-spacing and word-spacing move Draw IR glyph pens as in Chrome.
+"""
+# @tag: unit, browser_engine, text, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_draw_ir.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 400
+val H: i32 = 120
+val HEAD: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\">"
+val TAIL: text = "</body></html>"
+val HAM: text = "Hamburgefonstiv"
+
+fn _page(txt: text, style: text) -> text:
+    HEAD + "<div style=\"position:absolute;left:20px;top:30px;" + style + "\">" + txt + "</div>" + TAIL
+
+fn _chan(px: u32, shift: u32) -> i32:
+    ((px >> shift) & 0xFFu32).to_i32()
+
+fn _ink_bbox(px: [u32]) -> text:
+    var x0 = W
+    var y0 = H
+    var x1 = -1
+    var y1 = -1
+    var y = 0
+    while y < H:
+        var x = 0
+        while x < W:
+            val p = px[y * W + x]
+            if _chan(p, 16u32) < 200 or _chan(p, 8u32) < 200 or _chan(p, 0u32) < 200:
+                if x < x0: x0 = x
+                if x > x1: x1 = x
+                if y < y0: y0 = y
+                if y > y1: y1 = y
+            x = x + 1
+        y = y + 1
+    x0.to_text() + "," + y0.to_text() + ".." + x1.to_text() + "," + y1.to_text()
+
+fn _bbox(txt: text, style: text) -> text:
+    _ink_bbox(simple_web_render_html_to_pixels_with_engine2d_backend(_page(txt, style), W, H, "cpu_simd"))
+
+describe "letter-spacing and word-spacing on the Draw IR text lane against Chrome 159":
+    it "AC-1: no spacing keeps Chrome's ink box":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        step("Chrome 21,32..140,46; a b c d 20,32..67,43")
+        expect(_bbox(HAM, "")).to_equal("21,32..140,46")
+        expect(_bbox("a b c d", "")).to_equal("20,32..67,43")
+
+    it "AC-2: letter-spacing:2px widens the run after every character":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        step("Chrome 21,32..168,46")
+        expect(_bbox(HAM, "letter-spacing:2px")).to_equal("21,32..168,46")
+
+    it "AC-3: letter-spacing in em is read (whole px; Chrome keeps 1.6 px, so 9 px short)":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        step("Chrome 0.1em = 1.6px/char: 21,32..163,46; engine floors to 1px/char (base 22,32..141,47)")
+        expect(_bbox(HAM, "letter-spacing:0.1em")).to_equal("21,32..154,46")
+
+    it "AC-4: a negative letter-spacing tightens the run (1 px off Chrome from whole-px pens)":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        step("Chrome 21,32..126,46; engine 125 (base 22,32..155,47)")
+        expect(_bbox(HAM, "letter-spacing:-1px")).to_equal("21,32..125,46")
+
+    it "AC-5: word-spacing widens each space":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        step("Chrome 20,32..97,43")
+        expect(_bbox("a b c d", "word-spacing:10px")).to_equal("20,32..97,43")
+
+    it "AC-6: letter-spacing makes a run wrap sooner":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        step("Chrome w110: two lines 20,32..120,61 without, three lines 20,32..83,79 with 3px")
+        expect(_bbox("abcdef abcdef abcdef", "width:110px")).to_equal("20,32..120,61")
+        expect(_bbox("abcdef abcdef abcdef", "letter-spacing:3px;width:110px")).to_equal("20,32..83,79")

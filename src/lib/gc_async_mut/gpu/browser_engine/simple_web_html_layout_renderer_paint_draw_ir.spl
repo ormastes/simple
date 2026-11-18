@@ -9,7 +9,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{S
 use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{parse_box_shadow_layers}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{radial_gradient_box_paintable, radial_gradient_box_geometry, BackgroundGradientLayer, background_gradient_layers_paintable, background_gradient_layers, background_gradient_box_rects, background_gradient_clip_shape}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language, resolve_font_metrics_with_language_milli}
-use std.common.encoding.utf8.{text_codepoint_len}
+use std.common.encoding.utf8.{text_codepoint_len, text_codepoints}
 use common.string_builder.{StringBuilder}
 use std.gc_async_mut.io.mod_stub.{env_get}
 use common.ui.draw_ir.{DrawIrCommand, DrawIrRect, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_rect_bounds, draw_ir_rect_clipped, draw_ir_style_prop, draw_ir_text_styled_clipped}
@@ -508,21 +508,37 @@ fn _html_draw_ir_resolved_text_command(
     # flat fallback instead of silently reinterpreting the array. History and
     # the incident this closes:
     # doc/08_tracking/bug/web_drawir_advances_staged_per_byte_kills_render_2026-09-12.md.
-    val cp_advances = _html_draw_ir_codepoint_advances(txt, metrics.advances)
+    var cp_advances = _html_draw_ir_codepoint_advances(txt, metrics.advances)
     if cp_advances.len() == 0:
         return draw_ir_text_styled_clipped(
             cid, tx, ty, txt, st.fg, computed_style, clip_rect
         )
+    # letter-spacing follows EVERY codepoint (the last one too), word-spacing
+    # each space; same fold as layout's `resolved_font_advances`.
+    var run_width = metrics.width
+    if st.letter_spacing_px != 0 or st.word_spacing_px != 0:
+        val spacing_cps = text_codepoints(txt)
+        var spaced: [i32] = []
+        var si = 0
+        run_width = 0
+        while si < cp_advances.len():  # cpu-lane-loop-ok: one pass over THIS text command's per-codepoint advances; bound is its codepoint count
+            var a = cp_advances[si] + st.letter_spacing_px
+            if spacing_cps[si] == 32:
+                a = a + st.word_spacing_px
+            spaced.push(a)
+            run_width = run_width + a
+            si = si + 1
+        cp_advances = spaced
     var resolved = if metrics.shaping_required:
         draw_ir_text_shaped_font(
             cid, tx, ty, txt, st.fg,
-            metrics.family, metrics.identity, cp_advances, metrics.width,
+            metrics.family, metrics.identity, cp_advances, run_width,
             metrics.line_height, st.font_size, metrics.glyph_run
         )
     else:
         draw_ir_text_resolved_font(
             cid, tx, ty, txt, st.fg,
-            metrics.family, metrics.identity, cp_advances, metrics.width,
+            metrics.family, metrics.identity, cp_advances, run_width,
             metrics.line_height, st.font_size
         )
     if resolved.computed_style.len() == 0:
