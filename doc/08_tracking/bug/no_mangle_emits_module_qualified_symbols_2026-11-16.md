@@ -65,6 +65,11 @@ Two layers were at fault:
 
 Spec: `test/01_unit/compiler/70.backend/no_mangle_leaf_symbol_spec.spl`.
 
+## Interpreter spec verification (2026-11-18, `5911a32cab0c3f0c7bf6440a377e7263487c028e`)
+
+- Ran `SIMPLE_LIB=src C:/dev/p3_goal_20261116/phase1_artifacts/simple.exe test test/01_unit/compiler/70.backend/no_mangle_leaf_symbol_spec.spl --mode=interpreter`:
+  `SPEC FILE VERDICT: test/01_unit/compiler/70.backend/no_mangle_leaf_symbol_spec.spl outcome=OK declared>=7 executed=7 passed=7 failed=0 skipped=0 blocked=0 dropped=0` (`7 total, 7 passed, 0 failed`).
+
 ## Verification still needed (native)
 
 Rebuild the phase-2 compiler from this change, then rerun
