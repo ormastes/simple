@@ -1,0 +1,118 @@
+"""
+## Purpose and audience
+Generalization spec for
+doc/08_tracking/bug/agent_v4_source_return_never_completes_after_effect_2026-11-18.md.
+The fix adds a retained-return path; this spec pins that the path did NOT
+widen anything nearby. Generic `close_v1` still refuses after any staging
+effect, generic custody cleanup refuses a retained source instead of
+re-entering `close_v1`, lifecycle close still refuses a retained source, and
+no caller outside the original authority can reach the retained path or
+supply its token, metadata or invocation. Written for owners of the
+workspace source owner and the fresh-epoch machine authority.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
+## Compatibility and limitations
+Structural pins over committed source text: capability owners cannot be built
+in a DATA spec. The native consumer is
+test/fixtures/agent_workspace_retention_v3/scenarios.spl, NOT_RUN.
+## Verification guidance and troubleshooting
+If a refusal pin fails, a generic path gained cleanup or deletion authority
+over a written workspace. That is a retention-policy regression, not a flake.
+"""
+use std.spec.step
+use std.io.file_read_text
+
+fn rf_count(source: text, token: text) -> i64:
+    source.split(token).len() - 1
+
+fn rf_from(source: text, start: text) -> text:
+    val at = source.index_of(start)
+    if at < 0: return ""
+    source.substring(at, source.byte_len())
+
+describe "retained source return refusals":
+    it "still refuses a generic close_v1 after any staging effect":
+        # @req BUG-AGENT-V4-SOURCE-RETURN-2 (doc: generic source close refuses after any attempted staging)
+        val mo = file_read_text("src/lib/nogc_async_mut/container/providers/linux/workspace_mount_owner_v1.spl")
+        val close = rf_from(mo, "    pub fn close_v1() -> LinuxWorkspaceSourceCloseV1:")
+        val refuse = close.index_of("        if state.agent_effect_attempted:\n            return LinuxWorkspaceSourceCloseV1(reader: state.reader, storage: state.storage,\n                lease: state.lease, owner: Some(self), closed: false,\n                error: \"agent-workspace-retention-requires-authorized-cleanup\")")
+        val closing = close.index_of("workspace_source_states_v1[self.slot].phase = \"closing\"")
+        expect(refuse > 0 and closing > refuse).to_equal(true)
+        expect(rf_count(mo, "\"agent-workspace-retention-requires-authorized-cleanup\"")).to_equal(1)
+        step("the new predicate is read-only and grants no close, delete or release")
+        val predicate = rf_from(mo, "    pub fn staging_effect_attempted_v3() -> Result<bool, text>:")
+        expect(predicate.byte_len() > 0).to_equal(true)
+        val end = predicate.index_of("\n\n")
+        val only = predicate.substring(0, end)
+        expect(rf_count(only, "workspace_source_states_v1[")).to_equal(0)
+        expect(rf_count(only, "close")).to_equal(0)
+
+    it "refuses generic custody cleanup of a retained source without re-entering close_v1":
+        # @req BUG-AGENT-V4-SOURCE-RETURN-2 (no automatic deletion or quota release after retention)
+        val cu = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workspace_source_custody_v3.spl")
+        val cleanup = rf_from(cu, "    pub(package) fn cleanup_v3() -> MachineFreshWorkspaceSourceCustodyTurnV3:")
+        val guard = cleanup.index_of("        if self.phase == \"native-retired-retained\" or self.phase == \"retained-returned\": return MachineFreshWorkspaceSourceCustodyTurnV3(retained, \"workspace-source-retained-requires-authorized-cleanup\")")
+        val close = cleanup.index_of("val closed = source.close_v1()")
+        val release = cleanup.index_of("workspace_storage_release_if_absent_v1(")
+        expect(guard > 0 and close > guard and release > guard).to_equal(true)
+        step("a retained custody is never reported as a plain return (which needs lease and source gone)")
+        expect(cu).to_contain("pub(package) fn returned_v3() -> bool: self.phase == \"returned\" and self.source.is_none() and self.lease.is_none()")
+
+    it "still refuses lifecycle close while a retained source holds the root":
+        # @req BUG-AGENT-V4-SOURCE-RETURN-2 (cleanup of a retained root is an owner decision, not this fix)
+        val lc = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_lifecycle_v2.spl")
+        expect(lc).to_contain("if not [\"none\", \"returned\"].contains(state.source_phase): return Err(\"machine-fresh-workspace-source-parent-retained\")")
+        step("the retention preflight reuses close_native_v2's primary-transport and probe-capture refusals")
+        val pre = rf_from(lc, "    pub(package) fn source_retention_preflight_v3() -> Result<(), text>:")
+        expect(pre).to_contain("if state.primary_custody.is_some() and not state.primary_custody.unwrap().retired_v3(): return Err(\"workspace-primary-custody-retained\")")
+        expect(pre).to_contain("if state.probe_custody.is_some() and state.probe_custody.unwrap().retained_v3(): return Err(\"machine-probe-capture-retained\")")
+
+    it "keeps failed staging out of settle: no runtime binding, so no reserved record to settle":
+        # @req BUG-AGENT-V4-SOURCE-RETURN-2 (P3: `retained-failed` cannot reach source-return)
+        val mo = file_read_text("src/lib/nogc_async_mut/container/providers/linux/workspace_mount_owner_v1.spl")
+        val begin = rf_from(mo, "    pub fn begin_binding_v3(")
+        expect(begin).to_contain("if (not state.agent_effect_attempted or state.agent_stage_phase != \"staged\" or state.agent_stage_error != \"\" or")
+        expect(begin).to_contain("return Err(\"agent-binding-actual-staging-not-retained\")")
+        step("a workspace record is reserved only with that binding, and settle needs the reserved record")
+        val lc = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_lifecycle_v2.spl")
+        expect(lc).to_contain("        fresh_workload_states_v2[self.slot].workspace_binding = Some(binding)\n        fresh_workload_states_v2[self.slot].source_phase = \"runtime-active\"")
+        step("and retirement itself refuses anything but a staged runtime binding (fail-closed, named error)")
+        expect(mo).to_contain("return Err(\"agent-retirement-no-staged-runtime-binding\")")
+
+    it "keeps the retained path out of every caller-facing surface":
+        # @req BUG-AGENT-V4-SOURCE-RETURN-3 (an unauthorized caller cannot use the retained path)
+        step("the custody methods are package-private; the authority entry takes no token, metadata or invocation")
+        val cu = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workspace_source_custody_v3.spl")
+        expect(rf_count(cu, "pub fn return_retained_v3")).to_equal(0)
+        expect(rf_count(cu, "pub fn retained_published_v3")).to_equal(0)
+        expect(rf_count(cu, "pub(package) fn retained_published_v3() -> Result<MachineFreshWorkspaceSourceCustodyV3, text>:")).to_equal(1)
+        val tr = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workspace_source_transition_v3.spl")
+        expect(rf_count(tr, "pub fn machine_workspace_source_return_retained_v3")).to_equal(0)
+        expect(rf_count(tr, "pub(package) fn machine_workspace_source_return_retained_v3")).to_equal(0)
+        expect(rf_count(tr, "pub fn machine_workspace_settle_retained_v3")).to_equal(0)
+        expect(rf_count(tr, "pub(package) fn machine_workspace_settle_retained_v3")).to_equal(0)
+        expect(rf_count(tr, "pub fn machine_workspace_settle_retained_resolve_v3")).to_equal(0)
+        val ma = file_read_text("src/lib/nogc_sync_mut/container/machine_authority_v1.spl")
+        expect(ma).to_contain("    pub fn return_settled_workspace_source_v3() -> Result<bool, text>:\n        if self.admission.lifecycle.phase_v1()? != \"workload-transferred-v2\" or self.admission.authority.is_none(): return Err(\"machine-fresh-workspace-source-cleanup-stale\")\n        val epoch = self.epoch_current_v3()?")
+        expect(ma).to_contain("    pub fn settle_workspace_v3() -> Result<(), text>:\n        val epoch = self.epoch_current_v3()?")
+        step("no lent or adapter surface names the retirement or retained-return operations")
+        for path in ["src/lib/nogc_async_mut/container/providers/linux/workspace_source_loan_v3.spl",
+                "src/lib/nogc_async_mut/container/api_v2.spl",
+                "src/lib/nogc_async_mut/container/workspace_api_v3.spl",
+                "src/lib/nogc_async_mut/container/providers/linux/simple_container_adapter_v2.spl",
+                "src/lib/nogc_async_mut/container/providers/linux/fresh_epoch_workload_v2.spl",
+                "src/lib/nogc_sync_mut/orchestration/host_linux_service_agent_v4.spl"]:
+            val source = file_read_text(path)
+            expect(rf_count(source, "retire_native_v3")).to_equal(0)
+            expect(rf_count(source, "return_retained_v3")).to_equal(0)
+            expect(rf_count(source, "retire_workspace_native_v3")).to_equal(0)
+
+    it "settles only CPU and memory: the workspace settle rows never touch the storage lease":
+        # @req BUG-AGENT-V4-SOURCE-RETURN-2 (doc: storage quota remains charged and recoverable)
+        val rec = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workspace_record_v3.spl")
+        val settle = rf_from(rec, "pub fn machine_fresh_workspace_settle_entries_v3(")
+        val end = settle.index_of("\n\n")
+        val only = settle.substring(0, end)
+        expect(only).to_contain("fresh_workspace_charge_v3(record, \"machine-fresh-workspace-charge\", \"released\", 0, 0)?")
+        expect(rf_count(only, "workspace_storage")).to_equal(0)

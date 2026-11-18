@@ -50,6 +50,7 @@ use std.common.web.browser_renderer_protocol.{
 use common.render_scene.scene.{SceneCommand, scene_fill_rect}
 use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_raster.{raster_set_images}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.engine.math2d.{Vec2, Transform2D}
 use std.common.engine.units.{Angle}
@@ -1579,6 +1580,11 @@ pub fn simple_web_layout_render_html_software_decision(
     )
 
 pub fn simple_web_layout_render_html_software_result(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> SimpleWebLayoutPixelResult:
+    simple_web_layout_render_html_software_result_with_images(html, width, height, budget_ms, [])
+
+# reason: raster entry mirrors its no-image sibling (viewport px, budget ms) plus decoded <img> resources
+# @allow(primitive_api)
+pub fn simple_web_layout_render_html_software_result_with_images(html: text, width: i32, height: i32, budget_ms: i64, images: [SimpleOsHostGpuImageResource]) -> SimpleWebLayoutPixelResult:
     # Stage-local budget allocation: a single wall-clock budget is partitioned
     # across style -> layout -> paint so a phase that consumes its whole slice
     # (compute_styles on a hostile/huge real page, in practice) doesn't zero out
@@ -1645,11 +1651,13 @@ pub fn simple_web_layout_render_html_software_result(html: text, width: i32, hei
     # tile_render_culling_plan.md): SIMPLE_WEB_TILE_PAINT=1 routes the paint
     # through the tiled lane. Default off — the flag-off path below is the
     # unmodified classic painter, byte-identical to before this feature.
+    raster_set_images(images)
     var painted = if tile_paint_flag_enabled() and not widget_mode:
         paint_tiled(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode, 0, height)
     else:
         paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
     painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
+    raster_set_images([])
     val material_witness = _simple_web_visible_material_witness(
         material_entries, cpu_material_nodes, solid_material_nodes,
         _html_draw_ir_visible_nodes(
@@ -1674,6 +1682,13 @@ pub fn simple_web_layout_render_html_software_result(html: text, width: i32, hei
 # the seed materialises only call-site-constant defaults for cross-module calls.
 pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, height: i32, budget_ms: i64 = 10000) -> [u32]:
     simple_web_layout_render_html_software_result(html, width, height, budget_ms).pixels
+
+# Raster lane with decoded <img> resources (the direct entries never fetch or
+# decode `data:` URLs; the hosted session supplies resources).
+# reason: raster entry mirrors its no-image sibling (viewport px, budget ms) plus decoded <img> resources
+# @allow(primitive_api)
+pub fn simple_web_layout_render_html_software_pixels_with_images(html: text, width: i32, height: i32, images: [SimpleOsHostGpuImageResource]) -> [u32]:
+    simple_web_layout_render_html_software_result_with_images(html, width, height, 10000, images).pixels
 
 # GPU display-list frame: real solid-fill ops plus a CPU ground-truth
 # framebuffer only when residual paint is required. Solid-only frames leave

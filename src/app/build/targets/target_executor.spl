@@ -7,6 +7,8 @@
 
 use app.build.targets.build_targets.{BuildTarget, TargetSet, find_target, validate_targets}
 use app.build.targets.target_resolve.{ResolvePlan, resolve_target, format_target_plan}
+use app.build.targets.backend_contracts.{vector_length_tier_error}
+use app.build.targets.provider_gate.{provider_gate, provider_host_triple}
 use app.io.cli_compile.{cli_native_build}
 use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{file_exists}
@@ -125,6 +127,9 @@ fn target_cpu_policy(tier: text) -> text:
 
 fn target_action_error(target: BuildTarget) -> text:
     """Refuse a tier native-build cannot honour rather than build it at baseline."""
+    val vl_error = vector_length_tier_error(target.cpu_tier)
+    if vl_error.len() > 0:
+        return vl_error + " (" + target.name + ")"
     if target.cpu_tier.len() > 0 and target_cpu_policy(target.cpu_tier).len() == 0:
         return "target-error: unsupported-cpu_tier: " + target.name + ": " + target.cpu_tier
     ""
@@ -329,6 +334,13 @@ fn execute_target_plan(repo_root: text, ts: TargetSet, name: text) -> TargetExec
             file_delete(candidate_path)
             return TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, target.name,
                 "target-error: fresh-output-invalid: " + target.name + ": " + candidate_path)
+        # Opt-in backend group members publish only after provider admission.
+        val gate_error = provider_gate(ts, target, candidate_path, action.output,
+            provider_host_triple(target), repo_root + "/build/backends/receipts")
+        if gate_error.len() > 0:
+            file_delete(candidate_path)
+            return TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, target.name,
+                gate_error)
         if not file_rename(candidate_path, action.output):
             file_delete(candidate_path)
             return TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, target.name,

@@ -231,6 +231,11 @@ class LayoutResult:
     # Filled by `layout()` from `g_text_device_dy` / `g_text_device_dy_rest`.
     device_dy: [i32] = []
     device_dy_rest: [i32] = []
+    # Per node at device scale k > 1: milli device px from k x by[i] to the true
+    # device top of a block-level box (`box_device_top_record`); paint snaps it
+    # with `box_device_top_px` and moves every command the box owns by it.
+    # DEVICE_TOP_UNSET where the block cursor did not place the node. Empty at k == 1.
+    device_top: [i32] = []
 
 class LayoutSelectedResult:
     layout: LayoutResult
@@ -1267,6 +1272,75 @@ fn text_device_dy_record(node_count: i32, i: i32, first: i32, rest: i32):
         g_text_device_dy_rest = zero_i32_list(node_count)
     g_text_device_dy[i] = first
     g_text_device_dy_rest[i] = rest
+
+# Sub-pixel top of each laid-out block-level box at device scale k > 1 (see
+# LayoutResult.device_top), in milli DEVICE px: k times the block cursor's
+# milli residual. The cursor keeps y rounded to whole CSS px with the residual
+# in `cy_frac`, so a box whose true top is by*1000 + frac paints, like
+# Chrome's pixel-snapped device rect, from
+# round(k * (by*1000 + frac) / 1000) = k*by + `box_device_top_px`(k * frac).
+# DEVICE_TOP_UNSET marks a node the block cursor did not place (text, inline
+# boxes, inline-blocks, floats, abspos):
+# paint takes its nearest recorded ancestor's. Allocated by the first record
+# of a k > 1 layout; always empty at k == 1.
+pub val DEVICE_TOP_UNSET: i32 = -1000000
+var g_box_device_top: [i32] = []
+
+pub fn box_device_top_reset():
+    g_box_device_top = []
+
+# reason: per-node milli-device-px residuals indexed like the layout box arrays.
+# @allow(primitive_api)
+pub fn box_device_top_table() -> [i32]:
+    g_box_device_top
+
+# reason: per-node milli-device-px residuals indexed like the layout box arrays.
+# @allow(primitive_api)
+pub fn box_device_top_restore(top: [i32]):
+    g_box_device_top = top
+
+# Whole device px of a milli-device-px residual. Chrome keeps layout in
+# LayoutUnits (1/64 device px) and pixel-snaps halves up; the cursor's milli
+# residual drifts below that grid (0.67em of 32px is 21.437 here, 21.4375 in
+# Chrome), so it is first put on the 1/64 grid: an h2 at 543.496 device px
+# snaps to 543.5 and then 544, as in Chrome.
+# reason: milli device px in, whole device px out; both are raster-grid scalars.
+# @allow(primitive_api)
+pub fn box_device_top_px(milli_device: i32) -> i32:
+    val sixty_fourths = _floor_div_i32(milli_device * 64 + 500, 1000)
+    _floor_div_i32(sixty_fourths + 32, 64)
+
+# Records the cursor residual the block cursor (or a flex row) hands child i
+# (milli CSS px; k > 1 only). A later
+# pass over the same node overwrites, so the final placement wins.
+# reason: node index, node count and milli residual are layout-array scalars.
+# @allow(primitive_api)
+pub fn box_device_top_record(node_count: i32, i: i32, frac_milli: i32):
+    val k = g_layout_device_scale
+    if k <= 1 or i < 0 or i >= node_count:
+        return
+    if g_box_device_top.len() != node_count:
+        var t: [i32] = []
+        var n = 0
+        while n < node_count:
+            t.push(DEVICE_TOP_UNSET)
+            n = n + 1
+        g_box_device_top = t
+    g_box_device_top[i] = frac_milli * k
+
+# A placed subtree moved by `delta_milli` of cursor residual (a collapsed top
+# margin re-topped it after its own layout): its recorded tops move with it.
+# reason: node index and milli residual delta are layout-array scalars.
+# @allow(primitive_api)
+pub fn box_device_top_shift(child_index: HtmlChildIndex, node_index: i32, delta_milli: i32):
+    if delta_milli == 0 or node_index < 0 or node_index >= g_box_device_top.len():
+        return
+    if g_box_device_top[node_index] != DEVICE_TOP_UNSET:
+        g_box_device_top[node_index] = g_box_device_top[node_index] + delta_milli * g_layout_device_scale
+    var child = child_index.first_child[node_index]
+    while child >= 0:
+        box_device_top_shift(child_index, child, delta_milli)
+        child = child_index.next_sibling[child]
 
 fn _floor_div_i32(a: i32, b: i32) -> i32:
     if a >= 0: a / b else: 0 - ((0 - a + b - 1) / b)

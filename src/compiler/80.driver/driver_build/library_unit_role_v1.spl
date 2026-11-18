@@ -1,0 +1,103 @@
+# SPL-BUILD-ROLE-001 (robust boundaries plan section 7): boundary roles a unit
+# declares in its simple.sdn unit block need a grant; an exception grant expires.
+#
+#   project:
+#     roles:
+#       declared: [sffi_boundary, hal_boundary]
+#       grants:
+#         - role: sffi_boundary              # permanent grant
+#         - role: hal_boundary
+#           exception: true                  # expiring exception
+#           expires: "2027-03-01"            # YYYY-MM-DD, required with exception
+#
+# Approval is ordinary PR review of this block. Pure: the caller supplies the
+# manifest text and today's date (YYYY-MM-DD; lexical order is date order).
+
+use std.common.sdn.parser (parse)
+
+struct LibraryUnitRoleGrantV1:
+    role: text
+    exception: bool
+    expires: text
+
+struct LibraryUnitRolesV1:
+    declared: [text]
+    grants: [LibraryUnitRoleGrantV1]
+
+fn _role_date_ok_v1(d: text) -> bool:
+    if d.len() != 10 or d[4:5] != "-" or d[7:8] != "-":
+        return false
+    var i = 0
+    while i < 10:
+        if i != 4 and i != 7:
+            val c = d[i:i + 1]
+            if c < "0" or c > "9":
+                return false
+        i = i + 1
+    true
+
+pub fn library_unit_roles_parse_v1(manifest_dir: text, content: text) -> Result<LibraryUnitRolesV1, text>:
+    val where = "{manifest_dir}/simple.sdn"
+    val root = match parse(content):
+        case Ok(v): v
+        case Err(e): return Err("{where}: {e}")
+    var declared: [text] = []
+    var grants: [LibraryUnitRoleGrantV1] = []
+    match root.get_path("project.roles.declared"):
+        case Some(node):
+            val items = match node.as_array():
+                case Some(xs): xs
+                case None: return Err("{where}: project.roles.declared is not a list")
+            for item in items:
+                val r = item.as_str() ?? ""
+                if r == "":
+                    return Err("{where}: project.roles.declared has a non-text or empty entry")
+                declared.push(r)
+        case None:
+            pass
+    match root.get_path("project.roles.grants"):
+        case Some(node):
+            val items = match node.as_array():
+                case Some(xs): xs
+                case None: return Err("{where}: project.roles.grants is not a list")
+            for item in items:
+                val role = match item.get("role"):
+                    case Some(v): v.as_str() ?? ""
+                    case None: ""
+                if role == "":
+                    return Err("{where}: a role grant has no `role:`")
+                val is_exc = match item.get("exception"):
+                    case Some(v): v.as_bool() ?? false
+                    case None: false
+                val expires = match item.get("expires"):
+                    case Some(v): v.as_str() ?? ""
+                    case None: ""
+                if is_exc and expires == "":
+                    return Err("{where}: exception grant for role '{role}' needs `expires:`")
+                if expires != "" and not _role_date_ok_v1(expires):
+                    return Err("{where}: expires '{expires}' for role '{role}' must be YYYY-MM-DD")
+                grants.push(LibraryUnitRoleGrantV1(role: role, exception: is_exc, expires: expires))
+        case None:
+            pass
+    Ok(LibraryUnitRolesV1(declared: declared, grants: grants))
+
+# One message per violation: a declared role with no grant, or whose only grants
+# have expired (expiry date < today; the expiry day itself is still valid).
+pub fn library_unit_role_check_v1(roles: LibraryUnitRolesV1, today: text) -> [text]:
+    var out: [text] = []
+    for r in roles.declared:
+        var live = false
+        var granted = false
+        var expired_on = ""
+        for g in roles.grants:
+            if g.role == r:
+                granted = true
+                if g.expires != "" and g.expires < today:
+                    expired_on = g.expires
+                else:
+                    live = true
+        if not granted:
+            out.push("role '{r}' has no grant")
+        elif not live:
+            out.push("grant for role '{r}' expired on {expired_on}")
+    out

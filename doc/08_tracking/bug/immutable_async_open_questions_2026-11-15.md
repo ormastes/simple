@@ -29,7 +29,7 @@ Implemented (`required_field_init_v1.spl`, spec
 local as `local.f` without `await`. Error in every gate mode (the
 `@support_async_immutable` annotation is the opt-in, like `E_ASYNC_INIT_*`).
 Not defined by the plan, so not implemented:
-- "proven readiness" other than `await` (a completion check, a group-ready
+- DONE 2026-11-18: a prior top-level `await local.f` dominates later reads of the same field (write-once cell; branch awaits do not; `attr_not_ready_v1_spec` 8/8). Still open: "proven readiness" other than `await` (a completion check, a group-ready
   barrier, a prior `await` of the same field dominating the read);
 - flow through aliases, `Immutable<T>` views (`b.immutable()`), parameters,
   returns and fields of other nodes;

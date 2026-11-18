@@ -2856,5 +2856,121 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
   - Re-measured after rebasing onto 84ebb6ebf1b, base and head are the same numbers. The dpr4 rows lowered are html, forms-media and animation (to the worse of the two head runs). evidence (-0.01) is not a clear margin, so it is left alone.
   - The two bands that got worse are the bold h1 (overview) and the bold h3 (css-paint): their block tops are still CSS px x 4 (h1 top 66.44 CSS px lands at device row 264; Chrome puts it at 266), so the correct borrow moves the glyph 1 px further from Chrome there. Stage 2 (fractional block y and line-box height in device px) is the follow-up.
 
+## 2026-11-18 — dpr4 snapped block top, stage 2
+
+- **Chrome rule (dpr4):** Chrome lays out in device LayoutUnits (1/64 px) and pixel-snaps each painted edge, rounding halves up.
+  - A block whose true top is 10.61 CSS px paints from round(42.44) = 42.
+  - Simple's block cursor keeps y rounded to whole CSS px (`cursor_advance_px`), with the milli residual in `cy_frac`. Scaling ×4 put that block at 44.
+- **Record:** `box_device_top_record`, k > 1 only, where the block cursor (or a flex row) hands a child its residual (`g_origin_frac_milli = ...`). Inline-blocks, floats, abspos and text are not recorded there, so they take their nearest recorded ancestor's top. Recording at `layout_with_style` entry instead caught inline-blocks with a reset residual 0 and moved them off their line (css-paint 4.43 vs 4.23).
+  - It stores k × `g_origin_frac_milli` (milli device px) in `LayoutResult.device_top`.
+  - Unset nodes hold `DEVICE_TOP_UNSET` and inherit their nearest recorded ancestor's value at paint.
+  - **Trap:** a collapsed top margin re-tops a child after its layout (`corrected_top_milli`). `box_device_top_shift` moves the subtree's recorded residuals by `cy_frac - child_start_frac`, or the h2 under an h1 lands 1 px off.
+- **Snap:** `box_device_top_px` first puts the residual on the 1/64 grid, then rounds halves up.
+  - Simple's em margins truncate: 0.67em of 32px = 21.437, where Chrome has 21.4375.
+  - Without the grid, the overview h2 at 543.496 device px rounded to 543; Chrome paints it at 544.
+- **Paint:** `_html_draw_ir_device_top` (in paint_layout) post-passes `_html_draw_ir_commands` through `owner_nodes`.
+  - Every command moves by its owner's snapped top. For text this adds to the stage-1 `device-y-offset`.
+- **Top only, measured:**
+  - Snapping bottoms from the box's END residual (`end_frac_milli`) moved the overview section's border 1 device px above Chrome (rows 1487-1490 vs 1488-1491), because Simple's container residual drifts from Chrome's.
+  - With top only, a box keeps k × its CSS height. overview went 0.79 → 0.73, against 0.78 on base.
+- **Pin:** `device_px_block_y_chrome159_spec`. Base 1/3, head 3/3.
+  - AC-1: block rows R42-137 G224-415 R438-629 G631-726 R727-742.
+  - AC-2: text baselines 111/507/603/700.
+  - AC-3: guard; 1x rows stay as they are.
+- **Catalog, base 4eaf71809da → head (dpr4):**
+
+  | Page | Base | Head |
+  |---|---|---|
+  | overview | 0.78 | 0.73 |
+  | html | 2.84 | 2.74 |
+  | css-layout | 4.02 | 3.59 |
+  | css-paint | 4.87 | 4.23 |
+  | forms-media | 5.23 | 5.21 |
+  | animation | 3.97 | 3.85 |
+  | evidence | 0.57 | 0.57 |
+  | tab-bar | 0.30 | 0.30 |
+
+  - css-paint is under its 4.49 row, so the release dpr4 gate is green.
+  - 1x is identical to base on every page.
+- **Open:**
+  - Normal line-height line boxes are still k × CSS: DejaVu 16px is 76 device px against Chrome's 74. The catalog uses `16px/1.5` everywhere, so this was not needed for the gate.
+  - Fractional `height` is truncated before layout, at 1x too: `doc/08_tracking/bug/web_render_fractional_height_truncated_1x_2026-11-18.md`.
+  - The Liberation Sans glyph anchoring residual is still open: h1 baseline 404 vs Chrome's 405.
+
 
 - Group layers (2026-11-18): Chrome keeps an opacity-group layer premultiplied in 8 bits. Engine2D stores it straight, so its translucent-destination blend must compute the premultiplied value first (`_blend_premul_over`), then store it straight. The round trip is exact. The rule has 8 twins (C, Rust runtime, seed interpreter, oracle, scalar fallback, Metal, Vulkan GLSL+SPIR-V); change all of them together and rebuild the seed.
+
+- Per-corner borders (2026-11-18): Engine2D paints them with `engine2d_draw_ir_render_typed_border_ring` (outer per-corner mask minus elliptical inner corners, side colour by the outer-to-inner-corner join). The corner mask samples pixel centres. The raster lane keeps its own corner AA; it is unpinned.
+
+## 2026-11-18 — LCD low/mid coverage lift for dark text
+- **Measured:** on forms-media body text (#172033), Simple's LCD mask level per channel against Chrome's, for 76.7k channel samples in rows 476..760 (tool: a per-level histogram of `round((255 - v) * 32 / (255 - L))`).
+  - Chrome is one LCD16 step heavier for engine steps 2..17 of 32 and equal from about step 19 up.
+  - Glyph positions and row offsets already match (see the earlier entry).
+- **Change** (`lcd_s32_tables.spl`): before the colour exponent, `cov + LIFT (1 - L/255) 6.75 c^2 (END - c) / END^3` for c < END.
+  - Two fitted constants: LIFT 7.5 and END 136.
+  - Both are capped by Chrome-exact pins: the 16 px H stem `efbf67` has raw G 65 (< 72), and the 8 px l stem `77bfef` has raw R 133..135 (< 136).
+  - Raw coverage of a pin pixel: `sfnt_render_glyph_lcd(blob, CODEPOINT, cp, size, phase)` `slg_rgb`; the bucket is `raw >> 3`.
+- **Rejected shapes:**
+  - The earlier exponent 0.95 for black: B 149 crosses to bucket 19 and breaks `efbf67`.
+  - A parabola: it inks raw 6..7, so the device-scale 1x ink count went 186 -> 199, away from Chrome's 146.
+  - An unweighted lift: light-on-dark text got worse.
+- **Re-pinned toward Chrome:** in `small_text_vertical_hint_chrome159_spec`, x=4 is now Chrome's exact `CF8F5F` (was `D7975F`), and the H bar is `777777` (was `778787`; Chrome `6F7777`).
+- **Hold-out** (not used to fit LIFT or END, but the `(1 - L/255)` weight was added after its white-on-dark row regressed; serif #000, serif #0f172a, sans/serif #c00000, #ddd on #101820): mismatch 2069/2252/2042/1386/1684 -> 1744/2080/1810/1248/1677.
+- **Catalog 1x:**
+
+  | page | before | after |
+  |---|---|---|
+  | overview | 1.21 | 1.14 |
+  | html | 2.57 | 2.44 |
+  | css-layout | 2.52 | 2.29 |
+  | css-paint | 2.80 | 2.50 |
+  | forms-media | 2.65 | 2.40 |
+  | animation | 2.77 | 2.46 |
+  | evidence | 0.77 | 0.68 |
+
+## 2026-11-18 — Fractional font-size glyph raster (float x scale + float pens)
+- **Was:** after #10100, layout used the float size (18.72 px), but every glyph was still rasterised at the rounded size (19 px) on the run's whole-pixel pens. `_lcd_apply_pen_phases` compared the layout's 18.72 advances with whole-19 px pens, found a mismatch, and silently returned, so the run got no quarter phases at all.
+- **Measured** (Liberation Sans, `line-height:normal`, 320x40, mismatched px > 8 / summed |delta|):
+
+  | page | base | pens only | x scale only | both | whole-px reference |
+  |---|---|---|---|---|---|
+  | sans 18.72 | 1264 / 158k | 1066 / 99k | 933 / 130k | 725 / 70k | 19 px: 379 |
+  | sans 13.28 | 666 / 74k | 535 / 33k | 532 / 71k | 309 / 28k | 13 px: 209 |
+  | serif 18.72 | 1235 / 140k | 1048 / 100k | 1197 / 130k | 814 / 78k | |
+  | serif 13.28 | 687 / 84k | 514 / 37k | 653 / 82k | 369 / 34k | |
+  | sans 10.72 | 567 / 65k | 438 / 31k | 506 / 54k | 252 / 20k | |
+
+  - Pens contribute most of the summed delta; the x scale contributes the most mismatched px at 18.72, because each 19 px glyph is 1.5 % too wide. Neither alone is enough.
+  - **Vertical hinting contributes nothing.** Chrome's 18.72 px rows equal its 19 px rows, and its 13.28 rows equal its 13 rows. FreeType's light autohinter fits the y scale to the whole-pixel x-height. The 18.72 residual after the fix has the same row shape as the whole-19 px residual.
+- **Change:**
+  - The producer emits `font-size-milli` on the text command only when the size is fractional. `draw_ir_device_scale` scales it by k.
+  - `draw_ir_adv` → `Engine2D.draw_text_with_advances(..., size_milli)` (and the `_vulkan_only` twin) → `stage_text_with_advances_configured` → `_lcd_apply_pen_phases`.
+  - **Exact pens:** the paint side rebuilds the layout's model (`resolve_font_metrics_with_language_milli`). It takes exact milli pens at ref = 8 x round(size), capped at 512, and rescales them to `size_milli`. Whole-pixel boundaries use `round(round(ref_pen) * milli / ref)`. On the 18.72 probe the advances match the layout's exactly. A mismatch keeps the float outline at phase 0.
+  - **Raster:** every glyph of a fractional run is swapped for a cell from `sfnt_render_glyph_lcd_milli`. The outline x is scaled by `milli / (size_px * 1000)`. y, the hint knots and the hint cache stay at the whole `size_px`, so the "13.5 rounds down for rows" pin holds.
+  - Cells are keyed `glyph_index = -1 - phase - 4 * size_milli`, and `_lcd_phase_glyphs` includes `x_milli`.
+  - Whole-px runs carry no prop and take the old code path byte for byte.
+- **Pin:** `fractional_glyph_raster_chrome159_spec` (18.72 and 13.28, four Chrome windows). Red 0/2 on base, green 2/2.
+- **Catalog 1x** (base and head measured on the same seed; rows lowered to head):
+
+  | page | base | head |
+  |---|---|---|
+  | html | 2.44 | 2.35 |
+  | css-layout | 2.29 | 2.22 |
+  | css-paint | 2.50 | 2.43 |
+  | forms-media | 2.40 | 2.33 |
+  | animation | 2.39-2.46 | 2.33-2.40 (paired re-runs 2.46 -> 2.33 twice) |
+- **Catalog dpr4:** identical on all 8 pages, base and head (css-paint 4.87 against its 4.49 row is red on base, from the strut lane). No catalog page has a fractional LCD run at dpr4.
+- **Perf** (css-paint 1x, same seed): base 54.5 / 53.2 s, head 55.8 / 52.6 s; RSS 774-791 MB on both.
+- **Not done / found:**
+  - Grayscale glyphs (device size > 48 px, i.e. 18.72 and 13.28 at dpr4) still rasterise at the whole device size.
+  - At dpr4 the layout advances are k x CSS advances, which never equal the device-size model. A fractional LCD run (10.72 x 4) therefore takes the float outline at phase 0.
+  - **Serif bold is not bold** (separate bug, face resolution): `font-family:serif;font-weight:bold`, including the UA serif `<h3>`, paints Liberation Serif Regular on both the LCD and gray paths, even at 19 px. That is 1839 mismatched px per line against Chrome, which dwarfs the fractional effect on serif h3 lines. Sans bold is fine.
+  - **`line-height:1` at a fractional size** puts the baseline one row low. Blink floors the half-leading (-1.14 → -2), and Simple does not. That belongs to the line-box lane.
+
+## Images
+
+- Raster (software) lane paints `<img>` only via `simple_web_layout_render_html_software_pixels_with_images(html, w, h, images)`; the plain entries paint none. The painter (`_fb_paint_img_clip`, paint_raster) runs in document order right after the node's box paint, with Draw IR geometry via the shared `html_image_fit_size`. Nearest-neighbour is exact only for uniform images (`# ponytail:`); overlapping-paint opacity cells (`tg_page` (50,12)) stay un-admitted on the raster. Spec: `test/01_unit/browser_engine/img_raster_chrome159_spec.spl`.
+
+- Raster per-corner borders (2026-11-18): differing radii + solid sides go through `fb_border_ring_per_corner_clip` (pixel-centre outer mask minus elliptical inner corners, same model as Engine2D `typed_border_ring`); uniform radii keep the AA arc painter. Pinned by `border_per_corner_radius_chrome159_spec`.
+
+- Outline phase (2026-11-18): in-flow outlines paint after their context's in-flow members, before positioned children (raster: after pass 1; Draw IR: `<id>#outline` twin flushed at the context boundary).

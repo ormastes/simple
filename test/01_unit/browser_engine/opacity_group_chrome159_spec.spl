@@ -30,7 +30,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
     simple_web_layout_render_html_pixels_engine2d_at_device_scale, simple_web_layout_render_html_pixels_engine2d_with_images
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
-    simple_web_layout_render_html_software_pixels
+    simple_web_layout_render_html_software_pixels, simple_web_layout_render_html_software_pixels_with_images
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_render_html_to_pixels_with_resolved_engine2d_backend
@@ -221,8 +221,8 @@ fn tg_page() -> text:
 # Chrome 159 colours of tg_page() (k=4, `--window-size=64,16`). The raster
 # admits every cell except (34..46, 4) and (50..60, 12), whose two non-opaque
 # paints overlap (Chrome there: B7DBFF E3D994 FFE793 / B8C2FB 9A9FBC BFBFBF).
-# The image pixel (18,12) (Chrome 8829A5) is not pinned: the raster lane does
-# not paint a plain <img> at all, group or not.
+# The image pixel (18,12) (Chrome 8829A5) is pinned on the raster only when the
+# image resource is supplied (simple_web_layout_render_html_software_pixels_with_images).
 val TG_X: [i32] = [2, 8, 13, 18, 24, 29, 50, 50, 54, 56, 61, 8, 13, 24, 29, 33, 37, 41, 45]
 val TG_Y: [i32] = [4, 4, 4, 4, 4, 4, 2, 6, 6, 6, 4, 12, 12, 12, 12, 12, 12, 12, 12]
 val TG_CHROME: [u32] = [
@@ -428,6 +428,24 @@ describe "CSS opacity groups composite as Chrome 159 does":
     it "composites groups with translucent, shadow, gradient and image members on the CPU raster as Chrome does":
         val px = simple_web_layout_render_html_software_pixels(tg_page(), 64, 16)
         expect(tg_mismatches(px, 64, true)).to_equal(0)
+
+    it "composites an <img> group member on the CPU raster as Chrome does when the image resource is supplied":
+        val res = tg_img_resources()
+        expect(res.len()).to_equal(1)
+        val px = simple_web_layout_render_html_software_pixels_with_images(tg_page(), 64, 16, res)
+        var bad = tg_mismatches(px, 64, true)
+        # Only (18,12): the raster does not admit the overlapping-paint cell
+        # holding (50,12)/(54,12) as a group (see the TG_X comment), so those
+        # stay pinned on the Engine2D lanes alone.
+        if px.len() >= 64 * 16:
+            var k = 0
+            while k < 1:
+                val got = px[TG_IMG_Y[k] * 64 + TG_IMG_X[k]]
+                if got != TG_IMG_CHROME[k]:
+                    print "raster image pixel ({TG_IMG_X[k]},{TG_IMG_Y[k]}) got {got} want {TG_IMG_CHROME[k]}"
+                    bad = bad + 1
+                k = k + 1
+        expect(bad).to_equal(0)
 
     it "composites a multi-root page with shadow, translucent, gradient and image members on cpu_simd and Vulkan as Chrome does":
         for lane in ["cpu_simd", "vulkan"]:

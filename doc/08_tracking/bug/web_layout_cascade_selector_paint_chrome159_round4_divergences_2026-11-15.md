@@ -586,3 +586,53 @@ head (13/40 at base).
   - `simd_isa_provider_spec` 24/24: the native kernel matches the oracle at the new hash. `engine2d_color_simd_blend_parity_spec` 5/5.
   - Three pinned random-destination hashes were re-derived by an independent FNV/LCG replica. The replica first reproduces the previous pins under the old rule.
   - Base vs head over 353 specs, run serially: the only new failures were those three hash pins, now updated. `web_draw_ir_engine_reuse` flips between 7 and 9 of 11 on base and head alike.
+
+## 2026-11-18 — Draw IR per-corner-radius borders drawn as a square band (FIXED on cpu_simd / Vulkan)
+
+- **Symptom:** a box with differing corner radii (`border-radius: 8px 0 8px 0`), or a rounded box whose border sides differ, got a square border band on cpu_simd and Vulkan. Outside each arc it painted the border colour where Chrome shows the page; along the arc the ring showed the background. Earlier record: p6, 1705 px.
+- **Cause:** `_engine2d_draw_ir_render_borders` received `radius = 0` for non-uniform corners and fell through to square slivers or the mitred bands.
+- **Fix:** `engine2d_draw_ir_render_typed_border_ring` (`draw_ir_box_effects.spl`) paints the ring between the outer per-corner shape and the inner one.
+  - The outer shape is the same mask as the per-corner background.
+  - Each inner corner is an ellipse with radii `r - side width` per axis. Chrome's ring at (49,6) needs the ellipse.
+  - Each ring pixel takes its side's colour. The join runs from the outer box corner to the inner box corner, with ties going to the vertical side.
+  - It is composited once. The shared corner test now samples pixel centres, not indices; the index test reached half a pixel past the arc.
+  - The uniform-radius, uniform-border case keeps `draw_rounded_rect_outline`.
+- **Evidence:** new `border_per_corner_radius_chrome159_spec`, Chrome 159 k=4, 21 fully covered pixels across two boxes, one with four widths and four colours. cpu_simd and Vulkan were red at base and are now green. Base vs head over 242 border, radius and rounded specs, run serially on the same seed: only these two rows changed. The one other new name, `web_layout_cuda_live`, fails a different row on each rerun with `0 total` (the device child dies) and never reaches the border painter.
+- **Still open:**
+  - The CPU raster misses 6 of the 21 pins. Its corner AA (`_corner_coverage256`) gives partial coverage where Chrome paints full colour, it uses a circular inner corner, and a straight side next to an arc reads `FB0003`. This is the open raster corner-AA item.
+  - The Draw IR ring is not anti-aliased.
+  - Dashed, dotted and double styles on per-corner rings paint solid.
+
+## 2026-11-18 — the CPU raster lane painted nothing for `<img>` (FIXED for supplied resources)
+
+- **Symptom:** `simple_web_layout_render_html_software_pixels` took no images and `paint_raster` only counted `img` as an opacity-group item; the box stayed background-coloured on the software lane while cpu_simd and Vulkan painted it.
+- **Fix:** new entry `simple_web_layout_render_html_software_pixels_with_images(html, w, h, images)` (the no-image entries pass `[]`). The raster painter draws `<img>` right after the node's own box paint in each paint pass, so later siblings paint over it (document order). Geometry is the Draw IR geometry: content box, object-fit (`html_image_fit_size`, now the single implementation, `_html_draw_ir_fit_size` delegates), object-position, content-box clip. Pixels use the image blend rule (`color.spl` `blend`), node opacity folds into the image alpha, and group layers see the image like any other member.
+  - `ponytail:` nearest-neighbour sampling is exact only for a uniform image (the pinned `TG_IMG`); a non-uniform image needs Chrome's filtered resample.
+  - Natural size is not known to layout (it has no resources), so a bare `<img>` keeps the replaced default size; the spec uses explicit 2x2 / 6x4 sizes.
+- **Evidence:**
+  - New `img_raster_chrome159_spec` 3/3 (2x2 and 6x4 `TG_IMG` = `FF7285F6` inside, white outside; no resource paints nothing). With the paint disabled: 1/3 (both painting rows fail).
+  - `opacity_group_chrome159_spec` 18/18 with a raster row feeding the resource: (18,12) = `8829A5`, `tg_mismatches == 0`. Disabled: 17/18.
+  - Not pinned on the raster: (50,12) / (54,12). That cell's two non-opaque paints overlap, so the raster does not admit it as a group (documented at `TG_X`); with the image painted it reads `7285F6` / `39427B` where Chrome has `B8C2FB` / `9A9FBC`. Admitting overlapping groups is separate work.
+- Review note (2026-11-18): an `<img>` carrying its own `opacity:.5` (no group) reads `B8C2FA` on the raster and on cpu_simd alike. Chrome gives `B8C2FB` for the same image inside a 0.5 group: folding the opacity into the image alpha rounds blue one level low. Unpinned. `_raster_images` is module state, so the raster supports one render at a time per process.
+
+## 2026-11-18 — raster per-corner borders (FIXED for solid sides)
+
+- **Symptom:** the CPU raster missed 6 of the 21 `border_per_corner_radius_chrome159_spec` pins: (4,4) `CB1346`, (5,5) `DC0022`, (2,9) `FB0003`, (33,16) `CCFF00`, (48,3) `D63209`, (49,6) `00C100` (want `FF0000`, `FF0000`, `FF0000`, `FF00FF`, `FF0000`, `000000`). Cause: the circular-arc painter (`_fb_border_corner_arc_clip`) anti-aliased, used a circular inner corner, and the straight spans blended with the arc cells.
+- **Fix:** when the four clamped radii differ and every painted side is `solid`, `fb_border_sides_styled_clip` calls the new `fb_border_ring_per_corner_clip`: the outer per-corner mask minus the elliptical inner corners (radii r - side width per axis), sampled at pixel centres, with the side join running from the outer to the inner box corner (tie to the vertical side). Same model as `engine2d_draw_ir_render_typed_border_ring`. Uniform-radius borders and dashed/dotted/double sides keep the old painter.
+  - `ponytail:` whole-pixel ring, no sub-pixel AA on the arcs (Chrome's edge pixels are partial); upgrade by replacing the in/out tests with a coverage ramp.
+- **Evidence:** spec gains `it "on the CPU raster"`: red 2 of 3 passed (6 mismatches above), green 3/3.
+  - Base-vs-head sweep over 40 border/radius browser_engine/web specs, failing test names compared: 0 new failures; only difference is the new raster row (fails on base, passes on head). 71 failing rows are identical pre-existing on both.
+
+## 2026-11-18 — outlines paint in Chrome's outline phase (FIXED on raster, cpu_simd and Vulkan)
+
+- **Symptom:** an in-flow box's outline painted along with its own box, so a following in-flow sibling covered it. At (14,9), (15,10), (8,10) and (2,11), every lane read the sibling's `0000FF` where Chrome 159 shows the outline's `FF0000`.
+- **Chrome rule:** outlines paint in their stacking context's outline phase, after every in-flow member and before positioned child layers. A later positioned box or opacity layer therefore still covers an outline.
+- **Fix, raster:** pass 1 collects the in-flow outlines and paints them after the pass-1 loop, before passes 2-4 (positioned boxes).
+- **Fix, Draw IR (cpu_simd / Vulkan):** `_html_draw_ir_commands` zeroes `outline-width` on the box command. It queues an outline-only twin (`<id>#outline`, with no paint other than the outline and an empty hit rect) and flushes it when paint order leaves the node's context, or at the end. `_html_draw_ir_node_contexts` shares `_html_draw_ir_opens_context` with the paint order.
+- **Evidence:**
+  - New `outline_paint_phase_chrome159_spec`: 13 Chrome pins across three cases (in-flow, positioned, opacity layer). All 3 lanes went from red to green.
+  - `outline_engine2d` stays 4/4 and `opacity_group` 18/18.
+  - Base vs head over 317 outline, opacity, draw_ir, hit-test and retained specs: the only new name was `web_css_background_border_spec`, which read `outline-width` from the box command. It now reads it from `o1#outline` and checks that the box command carries 0.
+- **Still open:**
+  - A box under a fractional-opacity ancestor within its context keeps its outline inline (`ponytail:`), so the opacity group's run stays contiguous.
+  - On the raster, pass 6 text of later siblings still paints over a deferred outline. Chrome paints the outline over that text.

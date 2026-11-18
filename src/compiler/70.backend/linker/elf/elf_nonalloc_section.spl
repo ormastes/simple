@@ -23,8 +23,18 @@ fn elf_append_nonalloc_section_bytes(image: [u8], name: text, kind: i64, payload
         if byte < 0 or byte > 255: return Err("ELF metadata payload contains a non-byte value")
         payload_bytes.push(byte as u8)
     val object = elf_parse_object(image)?
-    if image.len() < 64 or image[4] != 2u8 or image[5] != 1u8:
-        return Err("ELF metadata append requires little-endian ELF64")
+    val w32 = image.len() >= 52 and image[4] == 1u8
+    if (not w32 and (image.len() < 64 or image[4] != 2u8)) or image[5] != 1u8:
+        return Err("ELF metadata append requires little-endian ELF32 or ELF64")
+    # Section-header geometry differs by class: entry size, sh_offset/sh_size/
+    # sh_addralign field positions/widths, and e_shoff/e_shnum header offsets.
+    val sh: i64 = if w32: 40 else: 64
+    val word: i64 = if w32: 4 else: 8
+    val off_field: i64 = if w32: 16 else: 24
+    val size_field: i64 = if w32: 20 else: 32
+    val align_field: i64 = if w32: 32 else: 48
+    val e_shoff_at: i64 = if w32: 32 else: 40
+    val e_shnum_at: i64 = if w32: 48 else: 60
     val count = object.sections.len()
     val strings_index = object.header.e_shstrndx
     if count >= 65279 or strings_index <= 0 or strings_index >= count:
@@ -40,9 +50,9 @@ fn elf_append_nonalloc_section_bytes(image: [u8], name: text, kind: i64, payload
     val payload_offset = image.len()
     val strings_offset = payload_offset + payload_bytes.len()
     var headers_offset = strings_offset + strings.sh_size + name_bytes.len() + 1
-    while headers_offset % 8 != 0: headers_offset = headers_offset + 1
-    val new_header = headers_offset + count * 64
-    var result: [u8] = elf_u8_zeros(new_header + 64)
+    while headers_offset % word != 0: headers_offset = headers_offset + 1
+    val new_header = headers_offset + count * sh
+    var result: [u8] = elf_u8_zeros(new_header + sh)
     result.write_span(image, 0, 0, image.len())
     if payload_bytes.len() > 0: result.write_span(payload_bytes, payload_offset, 0, payload_bytes.len())
     result.write_span(image, strings_offset, strings.sh_addr, strings.sh_size)
@@ -50,10 +60,11 @@ fn elf_append_nonalloc_section_bytes(image: [u8], name: text, kind: i64, payload
     while i < name_bytes.len():
         result[strings_offset + strings.sh_size + i] = name_bytes[i] as u8
         i = i + 1
-    result.write_span(image, headers_offset, object.header.e_shoff, count * 64)
-    val put_at = [headers_offset + strings_index * 64 + 24, headers_offset + strings_index * 64 + 32,
-        new_header, new_header + 4, new_header + 24, new_header + 32, new_header + 48, 40, 60]
-    val put_width = [8, 8, 4, 4, 8, 8, 8, 8, 2]
+    result.write_span(image, headers_offset, object.header.e_shoff, count * sh)
+    val put_at = [headers_offset + strings_index * sh + off_field, headers_offset + strings_index * sh + size_field,
+        new_header, new_header + 4, new_header + off_field, new_header + size_field, new_header + align_field,
+        e_shoff_at, e_shnum_at]
+    val put_width = [word, word, 4, 4, word, word, word, word, 2]
     val put_value = [strings_offset, strings.sh_size + name_bytes.len() + 1, strings.sh_size, kind,
         payload_offset, payload_bytes.len(), 1, headers_offset, count + 1]
     var pi: i64 = 0

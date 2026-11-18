@@ -60,6 +60,7 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_box_effects.{
     engine2d_draw_ir_mask_geometry_safe,
     engine2d_draw_ir_render_legacy_shadow,
     engine2d_draw_ir_render_typed_background,
+    engine2d_draw_ir_render_typed_border_ring,
     engine2d_draw_ir_render_typed_inset_shadows,
     engine2d_draw_ir_render_typed_outer_shadows,
     engine2d_draw_ir_typed_box_shadows,
@@ -457,6 +458,15 @@ fn _engine2d_draw_ir_text_pen_origin_milli(command: DrawIrCommand) -> i64:
         return 0
     raw.to_i64()
 
+# `font-size-milli`: the computed fractional font size in milli-px (device
+# scaled with `font-size`); 0 when absent, which is every whole-px run. The
+# glyph raster scales x to it (Chrome 159 rasterises at the float size).
+fn _engine2d_draw_ir_text_size_milli(command: DrawIrCommand) -> i64:
+    val raw = _engine2d_draw_ir_style_value(command.computed_style, "font-size-milli")
+    if raw == "":
+        return 0
+    raw.to_i64()
+
 # Whole pixels a run's glyphs can move past its command box for that origin.
 fn _engine2d_draw_ir_pen_origin_pad(origin_milli: i64) -> i32:
     val mag = if origin_milli < 0: 0 - origin_milli else: origin_milli
@@ -805,7 +815,7 @@ fn _engine2d_draw_ir_gradient_layer_into(buf: [u32], rx: i32, ry: i32, rw: i32, 
 # otherwise paints per-side slivers with `draw_rect_filled`. Engine2D is
 # value-copied across this free-function boundary, so the caller MUST reassign
 # from the returned engine.
-fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], x: i32, y: i32, w: i32, h: i32, radius: i32) -> Engine2D:
+fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], x: i32, y: i32, w: i32, h: i32, radius: i32, corners: Engine2dDrawIrCornerRadii, nonuniform_corners: bool) -> Engine2D:
     var eng = engine
     val top_w = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-top-width"), 0, 0) as i32
     val right_w = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-right-width"), 0, 0) as i32
@@ -819,6 +829,11 @@ fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], 
     if radius > 0 and uniform and _engine2d_draw_ir_has_visible_alpha(top_c):
         eng.draw_rounded_rect_outline(x, y, w, h, radius, top_c, top_w)
         return eng
+    # Per-corner radii, or a rounded box whose sides differ: the ring follows
+    # each corner's arc (Chrome 159, border_per_corner_radius_chrome159_spec).
+    if (nonuniform_corners or radius > 0) and (top_w > 0 or right_w > 0 or bottom_w > 0 or left_w > 0):
+        return engine2d_draw_ir_render_typed_border_ring(eng, x, y, w, h,
+            [top_w, right_w, bottom_w, left_w], [top_c, right_c, bottom_c, left_c], corners)
     val tl = top_w > 0 and left_w > 0 and top_c != left_c
     val tr = top_w > 0 and right_w > 0 and top_c != right_c
     val bl = bottom_w > 0 and left_w > 0 and bottom_c != left_c
@@ -1138,7 +1153,7 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
             eng = engine2d_draw_ir_render_typed_inset_shadows(
                 eng, typed_shadows.layers, x, y, w, h, effective_corners)
         eng = _engine2d_draw_ir_render_borders(
-            eng, style, x, y, w, h, radius)
+            eng, style, x, y, w, h, radius, effective_corners, typed_nonuniform)
         eng = _engine2d_draw_ir_render_outline(eng, style, x, y, w, h)
         return Engine2dDrawIrBoxOutcome(
             engine: eng, glass_execution: glass.execution)
@@ -1340,7 +1355,7 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
     if shadow_admitted:
         eng = engine2d_draw_ir_render_typed_inset_shadows(
             eng, typed_shadows.layers, x, y, w, h, effective_corners)
-    eng = _engine2d_draw_ir_render_borders(eng, style, x, y, w, h, radius)
+    eng = _engine2d_draw_ir_render_borders(eng, style, x, y, w, h, radius, effective_corners, typed_nonuniform)
     eng = _engine2d_draw_ir_render_outline(eng, style, x, y, w, h)
     Engine2dDrawIrBoxOutcome(
         engine: eng,
@@ -2923,6 +2938,7 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                         # no laid-out width (unstyled producers emit width=0):
                         # an empty clip rect would erase the whole paint.
                         val pen_origin = _engine2d_draw_ir_text_pen_origin_milli(command)
+                        val size_milli = _engine2d_draw_ir_text_size_milli(command)
                         if command.width > 0:
                             # The band widens by the pixels a fractional pen
                             # origin can move the glyphs past the box.
@@ -2931,10 +2947,10 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                                 text_paint_clip,
                                 draw_ir_rect_bounds(x - origin_pad, 0, command.width + 2 * origin_pad, eng.height()))
                             eng.set_clip(band.x, band.y, band.width, band.height)
-                            drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style), pen_origin)
+                            drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style), pen_origin, size_milli)
                             _engine2d_draw_ir_restore_clip(eng, text_paint_clip)
                         else:
-                            drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style), pen_origin)
+                            drawn = eng.draw_text_with_advances(x, y, command.text_value, advances, command.color, _engine2d_draw_ir_text_font_size(command.computed_style), pen_origin, size_milli)
                     if probe_this:
                         _e2d_text_probe_count = _e2d_text_probe_count + 1
                         val branch_kind = if shaped and payload_valid: "shaped" else if not shaped: "resolved" else: "shaped-invalid"
@@ -3796,7 +3812,8 @@ fn _engine2d_draw_ir_execute_strict_vulkan_primitives(engine: Engine2D, composit
                             command.x, command.y, command.text_value, advances,
                             command.color,
                             _engine2d_draw_ir_text_font_size(command.computed_style),
-                            _engine2d_draw_ir_text_pen_origin_milli(command))
+                            _engine2d_draw_ir_text_pen_origin_milli(command),
+                            _engine2d_draw_ir_text_size_milli(command))
                 if drawn:
                     rendered = rendered + 1
                 else:

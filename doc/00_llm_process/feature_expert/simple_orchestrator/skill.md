@@ -431,3 +431,32 @@ available. These source paths and their manuals remain NOT_RUN.
   key material with any issuer/approver key (`AUTHORITY_ROLES_NOT_SEPARATE`), so key separation holds for any snapshot;
   PR-1c must take the execution-host key from the role-scoped snapshot lookup (today's remote_* consumers take
   `host_key` from context).
+
+## Typed V3 workload exit status — milestone_0034 N7 (2026-11-18, specs NOT_RUN)
+- V3 replies carry `RuntimeStateV1.workload_exit: RuntimeExitStatusV1`
+  (`Unobserved | NotExited(status) | Exited(code) | Unknown(reason)`). It defaults
+  to `Unobserved`. The legacy `state.exit_code` stays -1, so never read it.
+- The exit is read once, by the `inspect-exit` stage at the start of V3 `Stop` and
+  `Destroy`, before the engine stop. After a stop, `.State.ExitCode` holds the
+  stop signal. Destroy reuses a completed read.
+  `linux_fresh_workspace_exit_status_v3` returns `Exited` only for status
+  `exited` or `stopped`, pid 0 and a code in 0..255. Podman reports 0 while created or
+  running.
+- A read that the engine fails (non-zero exit) or that cannot be decoded becomes
+  `Unknown`. It is never success and never a step `Err`. A helper timeout or a
+  spawn failure still latches, like any other effect. The read is skipped once
+  any `stop` exists, because the code would then be the stop signal.
+- Trap: V3 `Inspect` has no exit read. The agent reports a self-exit as
+  `failed` until the Destroy reply settles it (`host_agent_destroy_exit_v4`), and
+  only `Exited(0)` succeeds. Bug record:
+  `doc/08_tracking/bug/agent_v4_self_exit_always_failed_2026-11-18.md`.
+- The remote arm (L6c) consumes `RuntimeExitStatusV1` and
+  `runtime_exit_status_text_v1`. `runtime_operation_codec_v2` does not yet
+  encode `workload_exit`.
+
+## Agent V4 source-return after a staged effect (2026-11-18, specs NOT_RUN)
+- A written agent workspace is RETAINED (doc/05_design/agent_workspace_retention_v3.md): retire_native_v3 proves
+  native absence at settle; the retention row commits in the same workload_publish_v3 batch as the CPU/memory
+  settlement (storage stays charged); source-return ends in phase `retained-returned` and never calls close_v1.
+- Trap: final close of a retained workspace still refuses (`machine-fresh-workspace-source-parent-retained`), so
+  release_v4 / epoch close / successor advance stay blocked -- owner decision N9; bug record PARTIAL.

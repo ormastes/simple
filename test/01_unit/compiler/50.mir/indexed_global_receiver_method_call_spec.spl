@@ -1,0 +1,73 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR: method call on an indexed module-global receiver
+
+`var stores: [Store<i64>] = []` at module level, then
+`match stores[0].get(idx): case Ok(v): ... case Err(_): ...` and
+`stores[0].set(i, v)`. The frozen Phase 2 compiler reported "bare variant 'Ok'
+is ambiguous ... unknown receiver.get()". Bug
+phase2_llvm_indexed_global_receiver_method_call_2026-11-16.
+
+Scope: a pin, not a reproduction. This single-module fixture does not reach the
+frozen "unknown receiver.get()" path (the real site imports the class from
+another module); it only checks that HIR and MIR lowering report no error and
+that the entry function is lowered.
+"""
+
+# @tag: unit, compiler, mir, enum, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val store_prefix = "class Store<T>:\n    items: [T]\n\nimpl Store<T>:\n    fn get(i: i64) -> Result<T, text>:\n        if i < 0 or i >= self.items.len():\n            return Err(\"oob\")\n        Ok(self.items[i])\n    me set(i: i64, v: T):\n        self.items[i] = v\n\nvar stores: [Store<i64>] = []\n\n"
+
+fn lower_store_errors(body: text, entry: text) -> text:
+    val source = store_prefix + body
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hir_lowering = hirlowering_for_module("app/main.spl", surfaces)
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["main_hir"] = hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "main_hir")
+    val mir = mir_lowering.lower_module(hir, [hir])
+    var out = ""
+    for e in hir_lowering.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    # Non-vacuity: an empty error list only counts if the entry function was
+    # really lowered (a silently empty module also reports no error).
+    var entries = 0
+    for function in mir.functions.values():
+        if function.name == entry or function.name.ends_with("." + entry):
+            entries = entries + 1
+    if entries != 1:
+        out = out + "mir: expected 1 lowered fn " + entry + ", found " + entries.to_text() + "\n"
+    out
+
+describe "method call on an indexed module-global receiver":
+    it "match over stores[0].get(idx) with bare Ok/Err arms lowers":
+        val all = lower_store_errors("fn probe(idx: i64) -> i64:\n    match stores[0].get(idx):\n        case Ok(v): v\n        case Err(_): -1\n", "probe")
+        expect(all.contains("ambiguous")).to_equal(false)
+        expect(all.contains("unknown receiver")).to_equal(false)
+        expect(all).to_equal("")
+
+    it "stores[0].set(i, v) statement lowers":
+        val all = lower_store_errors("fn put(i: i64, v: i64):\n    stores[0].set(i, v)\n", "put")
+        expect(all).to_equal("")

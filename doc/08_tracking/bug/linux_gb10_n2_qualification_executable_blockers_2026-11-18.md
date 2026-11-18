@@ -48,6 +48,54 @@ What is unknown: whether the build would finish given more time, and where
 the time goes. The seed runs the build as an interpreted Simple driver, and no
 trace output appeared before the cutoff.
 
+### Blocker 1 — retry with `SIMPLE_BOOTSTRAP=1` (2026-11-18, release `cef56f64375`)
+
+Same recipe, run from a detached worktree at `cef56f64375` (which includes
+#10131), with the output under `/home/yoon/skia-n2/artifacts/nb_try/`:
+
+```sh
+SIMPLE_BOOTSTRAP=1 SIMPLE_CACHE_SCOPE=n2-nb-try \
+systemd-run --user --scope -q -p MemoryMax=16G -p MemorySwapMax=0 \
+  -E SIMPLE_BOOTSTRAP=1 -E SIMPLE_CACHE_SCOPE=n2-nb-try \
+  /usr/bin/time -f '%e s %M KB' timeout 10800 \
+  /home/yoon/.cache/cargo-target-webrender-blend/release/simple native-build \
+  --source src/compiler --source src/app --source src/lib \
+  --entry-closure --entry src/app/test/vulkan_2d_qualification/main.spl \
+  --strip --output /home/yoon/skia-n2/artifacts/nb_try/vulkan_2d_qualification
+```
+
+Timeline. Wall times are host clock; worker times come from the worker's own
+`[build] ... elapsed_ms` lines:
+
+| span | wall | measured |
+|---|---|---|
+| driver front end (single thread, ~98 % CPU, RSS ~2.5 GB, log silent after load warnings) | 05:29:50 → ~06:29:30 | ~60 min |
+| worker `source_closure`, 506 files | from ~06:29:30 | 40.6 s |
+| worker `load_sources` | | ends at 93.5 s |
+| worker `parse`, 506 files | → 07:59 | 85.8 min (~10.2 s/file); worker RSS ~3.1 GB |
+| worker `surface_build` | 07:59 → 08:16:35 | 76 of 506 files in ~17 min (~13 s/file) |
+| remaining phases (task 2 of 6 onward) | not reached | — |
+
+The outer `timeout` was removed at 08:00:17, on instruction, so the run could
+continue past 3 h while it kept advancing phases. Its rc 137 is the removal,
+not a build result. The run was then stopped at 08:16:35 by the disk guard
+(`STOP disk below 4 GB, avail_kb=3664704`). That drop was caused by other
+sessions: this build's own footprint was 338 MB of worktree `build/` and
+1.7 MB of artifacts, and free disk kept falling to 3.0 GB after the stop.
+**No binary was produced.**
+
+What `SIMPLE_BOOTSTRAP=1` changed: unknown, and not attributable. This run
+printed per-phase worker progress and spawned the worker at ~60 min (the
+earlier run spawned it at ~65 min and printed nothing), but the release head
+also moved between the two runs. At the measured rates, `surface_build` alone
+would need ~95 more minutes, with four more phases after it, so a complete
+build is plausibly longer than 6 h on this host. That throughput, ~10–13 s
+per file in the interpreted worker, is the measurable target for Blocker 1.
+Caveat for any future binary: under `SIMPLE_BOOTSTRAP=1` the seed weak-stubs
+undefined `rt_*` symbols (`pipeline/native_project/stubs.rs:1101`), so a
+capture extern could become a silent stub. Check a resulting binary's case
+results against the fail-closed identity and receipt gates before using them.
+
 ## Blocker 2 — interpreter rejects the runner: `main.spl:67:9 value is not callable`
 
 This is the fallback of running a worker in-process under the seed, which

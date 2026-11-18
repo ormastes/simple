@@ -1,0 +1,106 @@
+# Executor-side backend provider gate (plan §6 caller wiring).
+#
+# A target that is a member of an opt-in `backends_*` group may only be
+# published once its provider descriptor (a `<artifact>.provider.sdn` sidecar)
+# is admitted: `select_backend_group` must select the target and
+# `admit_provider_with_receipt` must pass. A missing or invalid descriptor
+# refuses with SPL-PROVIDER-ABI-001. Targets outside such groups are untouched.
+
+use app.build.targets.build_targets.{BuildTarget, TargetSet, BackendProviderDescriptor, select_backend_group, admit_backend_provider}
+use app.build.targets.provider_receipt.{admit_provider_with_identity, PROVIDER_RECEIPT_SUPPLIED_KEYS}
+use std.nogc_sync_mut.io_runtime.{file_read, file_exists}
+use std.common.sdn.parser.{parse}
+use std.nogc_sync_mut.platform.{host_os, host_arch}
+
+pub val PROVIDER_GATE_REQUIRED_CAPS: [text] = ["object_emit"]
+
+pub fn provider_sidecar_path(artifact_path: text) -> text:
+    artifact_path + ".provider.sdn"
+
+pub fn provider_gate_group(ts: TargetSet, target_name: text) -> text:
+    """Opt-in `backends_*` group holding `target_name`, or empty."""
+    for g in ts.groups:
+        if g.is_default or not g.name.starts_with("backends_"):
+            continue
+        if g.members.contains(target_name):
+            return g.name
+    ""
+
+fn _refuse(kind: text, group: text, detail: text) -> text:
+    "SPL-PROVIDER-ABI-001: " + kind + ": " + group + ": " + detail
+
+pub fn parse_provider_descriptor(source: text) -> Result<BackendProviderDescriptor, text>:
+    """Fail closed: any missing or mistyped field is an error."""
+    val parsed = parse(source)
+    if parsed.is_err(): return Err(parsed.unwrap_err())
+    val v = parsed.unwrap()
+    val schema = v.get("schema")
+    if not schema.? or schema.unwrap().as_str() != Some("provider_descriptor_v1"):
+        return Err("unknown schema")
+    val group = v.get("group")
+    val triple = v.get("host_triple")
+    val abi = v.get("abi_version")
+    val caps = v.get("capabilities")
+    if not group.? or not triple.? or not abi.? or not caps.?:
+        return Err("missing field")
+    val g = group.unwrap().as_str()
+    val t = triple.unwrap().as_str()
+    val a = abi.unwrap().as_i64()
+    val arr = caps.unwrap().as_array()
+    if not g.? or not t.? or not a.? or not arr.?:
+        return Err("mistyped field")
+    var out: [text] = []
+    for item in arr.unwrap():
+        val s = item.as_str()
+        if not s.?: return Err("mistyped capability")
+        out.push(s.unwrap())
+    Ok(BackendProviderDescriptor(group: g.unwrap(), abi_version: a.unwrap(), host_triple: t.unwrap(), capabilities: out))
+
+pub fn parse_provider_identity(source: text) -> Result<[text], text>:
+    """`key=value` identity the descriptor supplies (absent keys are skipped)."""
+    val parsed = parse(source)
+    if parsed.is_err(): return Err(parsed.unwrap_err())
+    var out: [text] = []
+    for key in PROVIDER_RECEIPT_SUPPLIED_KEYS:
+        val f = parsed.unwrap().get(key)
+        if not f.?: continue
+        val sv = f.unwrap().as_str()
+        if not sv.?: return Err("mistyped identity field: " + key)
+        out.push(key + "=" + sv.unwrap())
+    Ok(out)
+
+pub fn provider_gate(ts: TargetSet, target: BuildTarget, artifact_path: text, declared_output: text, host_triple: text, receipt_dir: text) -> text:
+    """Empty text = no gate applies or provider admitted; otherwise a refusal."""
+    val group = provider_gate_group(ts, target.name)
+    if group == "":
+        return ""
+    val sidecar = provider_sidecar_path(declared_output)
+    if not file_exists(sidecar):
+        return _refuse("provider-missing", group, sidecar)
+    val sidecar_text = file_read(sidecar)
+    val parsed = parse_provider_descriptor(sidecar_text)
+    if parsed.is_err():
+        return _refuse("provider-invalid", group, parsed.unwrap_err())
+    val identity = parse_provider_identity(sidecar_text)
+    if identity.is_err():
+        return _refuse("provider-invalid", group, identity.unwrap_err())
+    val d = parsed.unwrap()
+    val selected = select_backend_group(ts, group, d, host_triple, PROVIDER_GATE_REQUIRED_CAPS)
+    if not selected.contains(target.name):
+        val refusal = admit_backend_provider(d, host_triple, PROVIDER_GATE_REQUIRED_CAPS)
+        if refusal != "":
+            return refusal
+        val named = "descriptor group " + d.group
+        return _refuse("provider-not-selected", group, named)
+    admit_provider_with_identity(d, host_triple, PROVIDER_GATE_REQUIRED_CAPS, artifact_path, receipt_dir, identity.unwrap(), selected)
+
+pub fn provider_host_triple(target: BuildTarget) -> text:
+    """Triple the provider must match: the target's own, else the running host."""
+    if target.triple.len() > 0:
+        return target.triple
+    val arch = host_arch()
+    val os = host_os()
+    if os == "linux": return arch + "-unknown-linux-gnu"
+    if os == "macos": return arch + "-apple-darwin"
+    if os == "windows": return arch + "-pc-windows-gnu"
+    ""

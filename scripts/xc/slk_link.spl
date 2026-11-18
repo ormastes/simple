@@ -1,0 +1,93 @@
+# simplelink survey driver: link ET_REL objects (+ .a archives, + ET_DYN shared
+# objects) with the pure-Simple ELF linker and write the image.
+# usage: simple run slk_link.spl <arch> <entry> <out> <obj>... [-a <archive>]...
+#            [-s <shared.so> <needed-name>]... [-i <interp>] [-m static|dynamic|pie|static-pie]
+#   arch: x86_64 | aarch64 | riscv64 | i386 | arm32 | riscv32
+use std.nogc_sync_mut.sffi.system.{args}
+use std.io_runtime.{file_read_bytes, file_write_bytes}
+use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest,
+    ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+fn arch_of(name: text) -> Result<RelocArch, text>:
+    if name == "x86_64": return Ok(RelocArch.X86_64)
+    if name == "aarch64": return Ok(RelocArch.AArch64)
+    if name == "riscv64": return Ok(RelocArch.Riscv64)
+    if name == "riscv32": return Ok(RelocArch.Riscv32)
+    if name == "arm32": return Ok(RelocArch.Arm32)
+    if name == "i386": return Ok(RelocArch.I386)
+    Err("unknown arch '{name}'")
+
+fn mode_of(name: text) -> Result<i64, text>:
+    if name == "static": return Ok(ELF_LINK_STATIC_EXEC)
+    if name == "static-pie": return Ok(ELF_LINK_STATIC_PIE)
+    if name == "dynamic": return Ok(ELF_LINK_DYNAMIC_EXEC)
+    if name == "pie": return Ok(ELF_LINK_DYNAMIC_PIE)
+    Err("unknown mode '{name}'")
+
+fn read_i64(path: text) -> [i64]:
+    val raw = file_read_bytes(path)
+    var bytes: [i64] = []
+    for b in raw: bytes.push(b as i64)
+    if bytes.len() == 0: print "SLK_WARN empty read: {path}"
+    bytes
+
+fn main() -> i64:
+    val a = args()
+    var i = 0
+    # skip everything up to and including the script path
+    while i < a.len() and not a[i].ends_with("slk_link.spl"):
+        i = i + 1
+    i = i + 1
+    if a.len() - i < 4:
+        print "usage: slk_link.spl <arch> <entry> <out> <obj>... [-a <archive>]... [-s <so> <name>]... [-i <interp>] [-m <mode>]"
+        return 2
+    val arch = arch_of(a[i])
+    if arch.is_err():
+        print "SLK_ERR {arch.unwrap_err()}"
+        return 2
+    val entry = a[i + 1]
+    val out = a[i + 2]
+    var objects: [[i64]] = []
+    var archives: [[i64]] = []
+    var shared: [[i64]] = []
+    var shared_names: [text] = []
+    var interp = ""
+    var mode = ELF_LINK_STATIC_EXEC
+    var j = i + 3
+    while j < a.len():
+        if a[j] == "-a":
+            j = j + 1
+            archives.push(read_i64(a[j]))
+        elif a[j] == "-s":
+            shared.push(read_i64(a[j + 1]))
+            shared_names.push(a[j + 2])
+            j = j + 2
+        elif a[j] == "-i":
+            j = j + 1
+            interp = a[j]
+        elif a[j] == "-m":
+            j = j + 1
+            val m = mode_of(a[j])
+            if m.is_err():
+                print "SLK_ERR {m.unwrap_err()}"
+                return 2
+            mode = m.unwrap()
+        else:
+            objects.push(read_i64(a[j]))
+        j = j + 1
+    val r = elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: shared,
+        entry: entry, target: arch.unwrap(), mode: mode, interp: interp,
+        shared_names: shared_names))
+    if r.is_err():
+        print "SLK_ERR {r.unwrap_err()}"
+        return 1
+    val img = r.unwrap()
+    var bytes: [u8] = []
+    for b in img:
+        bytes.push((b & 0xff) as u8)
+    if not file_write_bytes(out, bytes):
+        print "SLK_ERR write failed: {out}"
+        return 1
+    print "SLK_OK {out} {bytes.len()} bytes"
+    0

@@ -262,6 +262,12 @@ fn _milli_px_to_px_i64(milli: i64) -> i64:
     if milli <= 0: return 0
     (milli + 500) / 1000
 
+# round(value * num / den) for den > 0, half away from zero: the rescale
+# `resolve_font_metrics_with_language_milli` applies to a run's boundaries.
+fn _fr_scale_round(value: i64, num: i64, den: i64) -> i64:
+    if value < 0: return 0 - _fr_scale_round(0 - value, num, den)
+    (value * num + den / 2) / den
+
 fn _adv_cache_lookup(identity: text, font_size: i32, codepoint: i32) -> i32:
     if codepoint >= _ADV_ASCII_LO and codepoint <= _ADV_ASCII_HI:
         val slot = _adv_ascii_slot(identity, font_size)
@@ -346,7 +352,7 @@ use std.nogc_sync_mut.io.time_ops.{rt_time_now_micros}
 # See doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
 use std.common.encoding.utf8.{text_codepoints, utf8_codepoint_byte_len}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
-use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_render_glyph_lcd, SfntLcdGlyph}
+use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_render_glyph_lcd_milli, SfntLcdGlyph}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
 use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px, sfnt_line_metric_units_ascent_descent_device_px}
 use std.common.encoding.utf8.{text_codepoints}
@@ -1541,8 +1547,8 @@ class FontRenderer:
 
     # LCD variant of a selected-outline glyph; `fallback` is returned when the
     # outline cannot be rasterised.
-    fn _lcd_glyph(selector_kind: i64, selector_value: i64, codepoint: i32, glyph_index: i32, face_generation: i64, font_size: i32, fallback: CachedGlyph, phase_q: i64 = 0) -> CachedGlyph:
-        val lcd = sfnt_render_glyph_lcd(self.selected_outline_blob, selector_kind, selector_value, font_size.to_i64(), phase_q)
+    fn _lcd_glyph(selector_kind: i64, selector_value: i64, codepoint: i32, glyph_index: i32, face_generation: i64, font_size: i32, fallback: CachedGlyph, phase_q: i64 = 0, x_milli: i64 = 0) -> CachedGlyph:
+        val lcd = sfnt_render_glyph_lcd_milli(self.selected_outline_blob, selector_kind, selector_value, font_size.to_i64(), x_milli, phase_q)
         if val Some(g) = lcd:
             val w = g.slg_width
             val h = g.slg_height
@@ -1587,9 +1593,15 @@ class FontRenderer:
     # inline content (Chrome 159: `<span>ll</span> l` starts its `l` at
     # 12.5547 while the integer layout says 13 -> origin -445). Each glyph's
     # quarter phase and whole-pixel shift then come from origin + exact pen.
-    me _lcd_apply_pen_phases(content: text, advance_widths: [i32], font_size: i32, pen_origin_milli: i64 = 0):
+    # `size_milli` is the computed fractional size (`font-size: 18.72px`, 0 =
+    # whole px). Chrome 159 lays such a run out at the float size and
+    # rasterises every glyph at it: each glyph is swapped for a cell whose
+    # outline x is scaled to `size_milli` (`sfnt_render_glyph_lcd_milli`), at
+    # the quarter phase of its exact float pen.
+    me _lcd_apply_pen_phases(content: text, advance_widths: [i32], font_size: i32, pen_origin_milli: i64 = 0, size_milli: i64 = 0):
         if not self._lcd_applies(font_size):
             return
+        val frac = size_milli > 0 and size_milli < 512000 and size_milli % 1000 != 0
         # More than ~2 px off means the producer's model disagrees with this
         # layout, not a sub-pixel phase; keep the integer pens.
         val origin = if pen_origin_milli > -2000 and pen_origin_milli < 2000: pen_origin_milli else: 0
@@ -1600,18 +1612,46 @@ class FontRenderer:
         var run_identity: text = ""
         if val run_rasterizer = self.ttf_rasterizer:
             run_identity = run_rasterizer.cache_identity()
-        val pens = self._text_pen_milli(cps, font_size, run_identity)
+        # `pens` are exact milli-px pens; `whole` the whole-pixel pens the quads
+        # were staged at. A fractional run takes both from the layout's model
+        # (`resolve_font_metrics_with_language_milli`): the run is measured at
+        # ref = 8 x round(size) (at most 512), and the snapped reference
+        # boundaries are rescaled to `size_milli`.
+        var pens: [i64] = []
+        var whole: [i64] = [0; n + 1]
+        if frac:
+            var ref: i64 = ((size_milli + 500) / 1000) * 8
+            if ref > 512:
+                ref = 512
+            val ref_pens = self._text_pen_milli(cps, ref.to_i32(), run_identity)
+            pens = [0; n + 1]
+            var k: i64 = 0
+            while k <= n:
+                pens[k] = _fr_scale_round(ref_pens[k], size_milli, ref * 1000)
+                whole[k] = _fr_scale_round(_milli_px_to_px_i64(ref_pens[k]), size_milli, ref * 1000)
+                k = k + 1
+        else:
+            pens = self._text_pen_milli(cps, font_size, run_identity)
+            var k: i64 = 0
+            while k <= n:
+                whole[k] = _milli_px_to_px_i64(pens[k])
+                k = k + 1
         var byte_offsets: [i64] = [0; n]
         var shifts: [i32] = [0; n]
         var round_shifts: [i32] = [0; n]
         var phases: [i64] = [0; n]
-        var any_phase = false
+        var any_phase = frac
+        # A fractional run whose advances are not the layout's model still
+        # takes the float-size outlines, on its integer pens (phase 0).
+        var pens_known = true
         var byte_offset: i64 = 0
         var i: i64 = 0
         while i < n:
-            val px = _milli_px_to_px_i64(pens[i])
-            if advance_widths[i].to_i64() != _milli_px_to_px_i64(pens[i + 1]) - px:
-                return
+            val px = whole[i]
+            if advance_widths[i].to_i64() != whole[i + 1] - px:
+                if not frac:
+                    return
+                pens_known = false
             byte_offsets[i] = byte_offset
             byte_offset = byte_offset + utf8_codepoint_byte_len(cps[i])
             # Nearest quarter of the exact pen (origin included) relative to
@@ -1631,6 +1671,15 @@ class FontRenderer:
             i = i + 1
         if not any_phase:
             return
+        if not pens_known:
+            phases = [0; n]
+            shifts = [0; n]
+            round_shifts = [0; n]
+        # Fractional cells are keyed apart from whole-px ones by the size:
+        # glyph_index -1 - phase - 4 * size_milli (whole-px phase cells keep
+        # -1 - phase). The atlas matches on glyph_index and font_size.
+        val cell_base: i64 = if frac: 4 * size_milli else: 0
+        val x_milli: i64 = if frac: size_milli else: 0
         var quads = self.staged_quads
         var inserted: [FontRenderQuad] = []
         var ci: i64 = 0
@@ -1643,18 +1692,19 @@ class FontRenderer:
                 break
             val phase = phases[ci]
             var replaced = false
-            if phase != 0:
+            if phase != 0 or frac:
                 val cp = cps[ci].to_i32()
                 val base = self.get_glyph(cp, font_size)
                 if base.lcd_pixels.len() > 0:
-                    val key = "{self.atlas_font_identity}|{self.atlas_face_generation}|{cp}|{font_size}|{phase}"
+                    val cell_index = (-1 - phase - cell_base).to_i32()
+                    val key = "{self.atlas_font_identity}|{self.atlas_face_generation}|{cp}|{font_size}|{phase}|{x_milli}"
                     var pg = base
                     if val Some(hit) = _lcd_phase_glyphs.get(key):
                         pg = hit
                     else:
-                        pg = self._lcd_glyph(SFNT_GLYPH_SELECTOR_CODEPOINT, cp.to_i64(), cp, (-1 - phase).to_i32(), 0, font_size, base, phase)
+                        pg = self._lcd_glyph(SFNT_GLYPH_SELECTOR_CODEPOINT, cp.to_i64(), cp, cell_index, 0, font_size, base, phase, x_milli)
                         _lcd_phase_glyphs[key] = pg
-                    if pg.glyph_index == (-1 - phase).to_i32():
+                    if pg.glyph_index == cell_index:
                         var idx = self._lcd_phase_atlas_index(key, pg.glyph_index, cp, font_size)
                         if idx < 0:
                             idx = self._insert_font_atlas_glyph(pg)
@@ -1664,8 +1714,13 @@ class FontRenderer:
                                     dst_x: 0, dst_y: 0, width: self.atlas_widths[idx], height: self.atlas_heights[idx],
                                     atlas_x: self.atlas_xs[idx], atlas_y: self.atlas_ys[idx], color: q.color))
                         if idx >= 0:
+                            # Same baseline: a fractional cell's ink top moves
+                            # with its own bearing (identical rows unless the x
+                            # scale flips a near-horizontal stem run).
+                            val dy = if frac: base.bearing_y + base.height - pg.bearing_y - pg.height else: 0
                             quads[qi] = FontRenderQuad(codepoint: q.codepoint, byte_offset: q.byte_offset,
-                                dst_x: q.dst_x - base.bearing_x + shifts[ci] + pg.bearing_x, dst_y: q.dst_y,
+                                dst_x: q.dst_x - base.bearing_x + shifts[ci] + pg.bearing_x,
+                                dst_y: q.dst_y + dy,
                                 width: self.atlas_widths[idx], height: self.atlas_heights[idx],
                                 atlas_x: self.atlas_xs[idx], atlas_y: self.atlas_ys[idx], color: q.color)
                             replaced = true
@@ -3191,7 +3246,7 @@ class FontRenderer:
             ci = ci + 1
         out
 
-    me stage_text_with_advances_configured(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig, pen_origin_milli: i64 = 0) -> i64:
+    me stage_text_with_advances_configured(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig, pen_origin_milli: i64 = 0, size_milli: i64 = 0) -> i64:
         if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
             return self._stage_invalid_config(config)
         self._activate_render_config(config)
@@ -3218,7 +3273,7 @@ class FontRenderer:
             self.staged_valid = false
         self.staged_quads = quads
         if self.staged_valid:
-            self._lcd_apply_pen_phases(content, advance_widths, config.size, pen_origin_milli)
+            self._lcd_apply_pen_phases(content, advance_widths, config.size, pen_origin_milli, size_milli)
         self._apply_staged_config(config)
         self.staged_quads.len()
 

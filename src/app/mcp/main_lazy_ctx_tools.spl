@@ -253,6 +253,47 @@ fn _ctx_append_chunks(new_chunks: [CtxChunk]) -> bool:
         lines.push(_ctx_chunk_line(c))
     file_append_text(path, lines.join(""))
 
+# Attempts an append makes before reporting failure when a purge keeps
+# replacing the store under it.
+const _CTX_APPEND_MAX_ATTEMPTS: i64 = 4
+
+fn _ctx_noop():
+    pass
+
+# True when the store still contains `rows` (their last line implies the whole
+# single-write block).
+fn _ctx_rows_present(rows: [CtxChunk]) -> bool:
+    if rows.len() == 0:
+        return true
+    file_read(_ctx_chunks_path()).contains(_ctx_chunk_line(rows[rows.len() - 1]))
+
+# Append and then re-check the store generation. A purge commits by atomically
+# renaming a rewritten file over the store; an append that was written to the
+# replaced file between the purge's final key check and its rename is lost.
+# After writing, the store must have grown by exactly the bytes written; any
+# other length means another writer (append or purge rename) moved the
+# generation during the write, so verify the rows survived and, if they did not,
+# re-apply them to the new store (bounded, lock-free). `after_write` runs
+# between the write and the re-check (spec seam; a no-op in production).
+fn _ctx_append_chunks_settled(new_chunks: [CtxChunk], after_write: fn()) -> bool:
+    var added = 0
+    for c in new_chunks:
+        added = added + _ctx_chunk_line(c).byte_len()
+    var attempt = 1
+    while true:
+        val before = file_size_signed(_ctx_chunks_path())
+        if not _ctx_append_chunks(new_chunks):
+            return false
+        after_write()
+        if file_size_signed(_ctx_chunks_path()) == before + added:
+            return true
+        if _ctx_rows_present(new_chunks):
+            return true
+        if attempt >= _CTX_APPEND_MAX_ATTEMPTS:
+            return false
+        attempt = attempt + 1
+    false
+
 fn _ctx_next_id(existing: [CtxChunk]) -> i64:
     var mx: i64 = 0
     for c in existing:
@@ -359,6 +400,11 @@ pub fn ctx_chunk_text(content: text, budget: CtxByteCount) -> [text]:
 
 # Index `content` under `source`; returns number of chunks written.
 pub fn ctx_index_text(raw_content: text, source: text) -> CtxChunkCount:
+    ctx_index_text_observed(raw_content, source, _ctx_noop)
+
+# `ctx_index_text` with a hook that runs between the append write and its
+# generation re-check (spec seam for a purge rename landing in that window).
+fn ctx_index_text_observed(raw_content: text, source: text, after_write: fn()) -> CtxChunkCount:
     # Secrets are masked BEFORE chunking: the raw value is never stored.
     val content = ctx_redact(CtxRawContent(body: raw_content)).body
     if content.trim() == "":
@@ -373,7 +419,7 @@ pub fn ctx_index_text(raw_content: text, source: text) -> CtxChunkCount:
         rows.push(CtxChunk(id: next, source: source, ts: now, bytes: piece.len(), body: piece))
         next = next + 1
     val pre_append = _ctx_cache_key_before_append()
-    if not _ctx_append_chunks(rows):
+    if not _ctx_append_chunks_settled(rows, after_write):
         return CtxChunkCount(count: -1)
     _ctx_cache_extend_after_append(pre_append, rows)
     _ctx_stats_bump("bytes_indexed", content.len())
@@ -1565,9 +1611,14 @@ fn _ctx_retention_rows(chunks: [CtxChunk]) -> [CtxRetentionRow]:
 # commits. A moved store is re-snapshotted (an append that completed before the
 # commit is therefore always included in what is kept); after
 # `_CTX_PURGE_MAX_ATTEMPTS` moved attempts the purge fails closed with nothing
-# deleted. Residual window: an append that lands between the final key check and
-# the rename still targets the replaced file (a few microseconds; the store has
-# no OS-level compare-and-rename). See doc/07_guide/app/mcp/mcp.md.
+# deleted. Residual window (narrowed, NOT closed): the append-side re-check in
+# `_ctx_append_chunks_settled` catches a rename landing between an append's write
+# and its re-check, but an append whose size read, write and re-check all land
+# between `ctx_purge_commit`'s final key check and its rename is still lost (and
+# a purge that shrinks the file by exactly the appended bytes passes the size
+# test). Unblock: OS compare-and-rename, or the purge re-reading the store after
+# its rename and replaying rows appended since its snapshot. See
+# doc/08_tracking/bug/trace_plan_2026_11_14_remaining_gaps_2026-11-16.md.
 pub fn ctx_purge_snapshot(policy: CtxRetentionPolicy) -> CtxPurgeSnapshot:
     val key = _ctx_store_generation_key()
     val chunks = _ctx_load_chunks()

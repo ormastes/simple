@@ -1670,30 +1670,41 @@ fn scan_defined_symbols(
     nm_flags: &[&str],
     defined: &mut std::collections::HashSet<String>,
 ) -> Result<(), String> {
-    for lib_path in paths {
-        if !lib_path.exists() {
-            continue;
-        }
-        let mut nm_cmd = nm_command()?;
-        for flag in nm_flags {
-            nm_cmd.arg(flag);
-        }
-        nm_cmd.arg(external_tool_path(lib_path));
-        if let Ok(output) = nm_cmd.output() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if let [_addr, sym_type, name] = parts.as_slice() {
-                    if *sym_type != "U" {
-                        let base = name.split("@@").next().unwrap_or(name);
-                        defined.insert(base.to_string());
-                        if base != *name {
-                            defined.insert(name.to_string());
+    // One nm per library, independent of each other: run them across the rayon
+    // pool and merge the per-library sets afterwards (no shared mutable state).
+    // Measured 2026-11-18: ~25 serial nm spawns at ~5 s each on a loaded Windows
+    // host were ~120 s of an aarch64-pc-windows-gnullvm "link" (~67 s on x64).
+    use rayon::prelude::*;
+    let per_lib: Vec<Result<Vec<String>, String>> = paths
+        .par_iter()
+        .filter(|lib_path| lib_path.exists())
+        .map(|lib_path| {
+            let mut nm_cmd = nm_command()?;
+            for flag in nm_flags {
+                nm_cmd.arg(flag);
+            }
+            nm_cmd.arg(external_tool_path(lib_path));
+            let mut names = Vec::new();
+            if let Ok(output) = nm_cmd.output() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if let [_addr, sym_type, name] = parts.as_slice() {
+                        if *sym_type != "U" {
+                            let base = name.split("@@").next().unwrap_or(name);
+                            names.push(base.to_string());
+                            if base != *name {
+                                names.push(name.to_string());
+                            }
                         }
                     }
                 }
             }
-        }
+            Ok(names)
+        })
+        .collect();
+    for names in per_lib {
+        defined.extend(names?);
     }
     Ok(())
 }

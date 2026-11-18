@@ -1,6 +1,10 @@
 #!/bin/sh
 # Builds the slang ggml backend shim into build/sffi/libslang_ggml.so
-# (build/sffi/slang_ggml.dll on Windows).
+# (build/sffi/slang_ggml.dll on Windows, libslang_ggml.dylib on macOS). Linux and
+# macOS use clang (never GCC; CC must be clang) with lld on ELF.
+# ELF links use -fuse-ld=lld, so ld.lld must be on PATH: source
+# scripts/setup/llvm-toolchain-env.shs first (it puts the unsuffixed LLVM bin
+# dir ahead of /usr/bin).
 #
 # Not part of the main runtime link: the shim needs llama.h, an external SDK
 # header that is deliberately not vendored (CLAUDE.md Owned-Code Scope). The
@@ -48,8 +52,10 @@ ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
 OUT_DIR=${SLANG_SHIM_OUT_DIR:-$ROOT/build/sffi}
 SRC=$ROOT/src/runtime/slang_ggml_shim.c
 
+IS_DARWIN=0
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1 ;;
+    Darwin) IS_WINDOWS=0; IS_DARWIN=1 ;;
     *) IS_WINDOWS=0 ;;
 esac
 WIN_MSVC=0
@@ -97,6 +103,9 @@ elif [ "$IS_WINDOWS" -eq 1 ]; then
     esac
     READOBJ=$MINGW_BIN/llvm-readobj.exe
     MINGW_RT_DIR=$MINGW_BIN/../x86_64-w64-mingw32/bin
+elif [ "$IS_DARWIN" -eq 1 ]; then
+    OUT=$OUT_DIR/libslang_ggml.dylib
+    LLAMA_LIB=$LLAMA_BUILD_DIR/bin/libllama.dylib
 else
     OUT=$OUT_DIR/libslang_ggml.so
     LLAMA_LIB=$LLAMA_BUILD_DIR/bin/libllama.so
@@ -107,6 +116,10 @@ fi
 list_exports() {
     if [ "$IS_WINDOWS" -eq 1 ]; then
         "${READOBJ:-llvm-readobj}" --coff-exports "$1" 2>/dev/null | sed -n 's/^ *Name: \(.*\)$/0 T \1/p'
+    elif [ "$IS_DARWIN" -eq 1 ]; then
+        # Mach-O nm has no -D and prefixes C symbols with "_"; strip it so the
+        # "<addr> T <name>" checks below match.
+        nm -gU "$1" 2>/dev/null | sed "s/ T _/ T /"
     else
         nm -D --defined-only "$1" 2>/dev/null
     fi
@@ -182,8 +195,14 @@ elif [ "$IS_WINDOWS" -eq 1 ]; then
         done
     fi
 else
-    CC=${CC:-cc}
-    command -v "$CC" >/dev/null 2>&1 || { echo "ERROR -- nothing was built (no C compiler: $CC)"; exit 2; }
+    # Never GCC (repo toolchain policy): default to clang, and refuse a CC that
+    # is not clang -- a bare `cc` is GCC on most Linux distributions.
+    CC=${CC:-clang}
+    command -v "$CC" >/dev/null 2>&1 || { echo "ERROR -- nothing was built (no clang: $CC)"; exit 2; }
+    case "$("$CC" --version 2>/dev/null | head -n 1)" in
+        *clang*) ;;
+        *) echo "ERROR -- nothing was built ($CC is not clang; GCC is not permitted, set CC to clang)"; exit 2 ;;
+    esac
     # Status is captured with `|| cc_rc=$?`, never through a pipe (a
     # pipeline's $? is the last stage's) and never bare under `set -e`
     # (which would exit before the verdict line is printed).
@@ -193,10 +212,19 @@ else
         MM_FLAGS="-DSLANG_WITH_MTMD -I$LLAMA_ROOT/tools/mtmd"
         MM_LIBS="-lmtmd"
     fi
-    "$CC" -O2 -fPIC -shared -o "$OUT" "$SRC" $MM_FLAGS \
-        -I"$LLAMA_ROOT/include" -I"$LLAMA_ROOT/ggml/include" \
-        -L"$LLAMA_BUILD_DIR/bin" -lllama $MM_LIBS \
-        -Wl,-rpath,"$LLAMA_BUILD_DIR/bin" 2>"$OUT_DIR/build.log" || cc_rc=$?
+    if [ "$IS_DARWIN" -eq 1 ]; then
+        # Mach-O: system ld64 via clang (lld is ELF/COFF-first), -dynamiclib.
+        "$CC" -O2 -fPIC -dynamiclib -o "$OUT" "$SRC" $MM_FLAGS \
+            -I"$LLAMA_ROOT/include" -I"$LLAMA_ROOT/ggml/include" \
+            -L"$LLAMA_BUILD_DIR/bin" -lllama $MM_LIBS \
+            -Wl,-rpath,"$LLAMA_BUILD_DIR/bin" 2>"$OUT_DIR/build.log" || cc_rc=$?
+    else
+        # ELF: lld, per the repo toolchain (clang + lld, never GCC / GNU ld).
+        "$CC" -O2 -fPIC -shared -fuse-ld=lld -o "$OUT" "$SRC" $MM_FLAGS \
+            -I"$LLAMA_ROOT/include" -I"$LLAMA_ROOT/ggml/include" \
+            -L"$LLAMA_BUILD_DIR/bin" -lllama $MM_LIBS \
+            -Wl,-rpath,"$LLAMA_BUILD_DIR/bin" 2>"$OUT_DIR/build.log" || cc_rc=$?
+    fi
 fi
 if [ "$cc_rc" -ne 0 ]; then
     echo "compile output:" >&2
@@ -275,7 +303,7 @@ if [ -f "$LLAMA_ROOT/include/llama-slang-paged.h" ]; then
     # lld-link already rejects an unresolved import when linking a DLL, so the
     # ldd -r runtime-resolution check is ELF-only.
     ldd_output=$OUT_DIR/slang_ggml_ldd.txt
-    if [ "$IS_WINDOWS" -eq 1 ]; then
+    if [ "$IS_WINDOWS" -eq 1 ] || [ "$IS_DARWIN" -eq 1 ]; then
         :
     elif ! ldd -r "$OUT" >"$ldd_output" 2>&1; then
         echo "FAIL -- unable to resolve paged shim runtime dependencies"
