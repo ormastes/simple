@@ -41,6 +41,7 @@ val PT_PHDR: i64 = 6
 val PT_TLS: i64 = 7
 val PT_GNU_EH_FRAME: i64 = 0x6474e550
 val PT_GNU_STACK: i64 = 0x6474e551
+val PT_RISCV_ATTRIBUTES: i64 = 0x70000003
 val PT_GNU_RELRO: i64 = 0x6474e552
 val PF_X: i64 = 1
 val PF_W: i64 = 2
@@ -140,8 +141,11 @@ fn elf_exec_plan(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan,
     elf_exec_plan_class(secs, base, page, false)
 
 fn elf_exec_plan_class(secs: [ElfOutSec], base: i64, page: i64, class32: bool) -> Result<ElfExecPlan, text>:
-    """Plan R / RX / RW PT_LOADs; class32 sizes the headers for ELFCLASS32
-    (52-byte Ehdr, 32-byte Phdr) instead of ELF64 (64 / 56)."""
+    elf_exec_plan_class_x(secs, base, page, class32, 0)
+
+fn elf_exec_plan_class_x(secs: [ElfOutSec], base: i64, page: i64, class32: bool, attr_phdrs: i64) -> Result<ElfExecPlan, text>:
+    """elf_exec_plan_class plus attr_phdrs reserved PT_RISCV_ATTRIBUTES slots (last, as
+    ld.lld); the caller patches p_offset/p_filesz once the non-alloc section is appended."""
     val ehsize = if class32: ELF32_EHDR_SIZE else: ELF64_HEADER_SIZE
     val phentsize = if class32: ELF32_PHDR_SIZE else: ELF64_PHDR_SIZE
     var has_seg: [bool] = [false, false, false]
@@ -180,7 +184,7 @@ fn elf_exec_plan_class(secs: [ElfOutSec], base: i64, page: i64, class32: bool) -
             notes = notes + 1
 
     # ld.lld always emits PT_PHDR (static or dynamic, script or not).
-    var phnum: i64 = 3 + notes  # PHDR + R load + GNU_STACK + notes
+    var phnum: i64 = 3 + notes + attr_phdrs  # PHDR + R load + GNU_STACK + notes + attributes
     if has_interp:
         phnum = phnum + 1       # INTERP
     if has_seg[ELF_SEG_RX]:
@@ -329,6 +333,12 @@ fn elf_exec_plan_class(secs: [ElfOutSec], base: i64, page: i64, class32: bool) -
             segs = segs.push(ElfExecSegment(p_type: PT_NOTE, p_flags: PF_R, p_offset: offsets[k],
                 p_vaddr: vaddrs[k], p_paddr: vaddrs[k], p_filesz: secs[k].size, p_memsz: secs[k].size, p_align: secs[k].align))
         k = k + 1
+
+    var ai: i64 = 0
+    while ai < attr_phdrs:
+        segs = segs.push(ElfExecSegment(p_type: PT_RISCV_ATTRIBUTES, p_flags: PF_R, p_offset: 0, p_vaddr: 0, p_paddr: 0,
+            p_filesz: 0, p_memsz: 0, p_align: 1))
+        ai = ai + 1
 
     Ok(ElfExecPlan(secs: secs, offsets: offsets, vaddrs: vaddrs, segments: segs, file_end: file_end))
 
@@ -499,7 +509,7 @@ fn elf_shdr32(buf: [i64], name: i64, sh_type: i64, flags: i64, addr: i64, offset
 # ============================================================================
 
 export ElfOutSec, ElfExecSegment, ElfExecPlan
-export elf_out_sec, elf_exec_plan, elf_exec_plan_class, elf_exec_find, elf_write_image, elf_write_image_bytes
+export elf_out_sec, elf_exec_plan, elf_exec_plan_class, elf_exec_plan_class_x, elf_exec_find, elf_write_image, elf_write_image_bytes
 export elf_write_image32_bytes, ELF32_EHDR_SIZE, ELF32_PHDR_SIZE, ELF32_SHDR_SIZE
 export ELF_SEG_R, ELF_SEG_RX, ELF_SEG_RW
 export PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_NOTE, PT_PHDR, PT_TLS, PT_GNU_EH_FRAME, PT_GNU_STACK, PT_GNU_RELRO, PF_X, PF_W, PF_R
