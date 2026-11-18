@@ -2980,6 +2980,34 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - **Not done:** serif italic is still unrouted (`<em>`/`<i>` in serif paints upright). Bold-italic serif now paints the upright Bold face (was upright Regular); Chrome uses LiberationSerif-BoldItalic.
 - **Trap:** the pure-Simple PNG decoder rejects Chrome's `--screenshot` stream and this host has no `magick`. Decode it in Chrome itself: load the PNG into an `<img>` on a `file://` page, `drawImage` it onto a canvas, and dump `getImageData` as P3 text through `--dump-dom --allow-file-access-from-files`.
 
+## 2026-11-18 — Negative and fractional leading: every inline box floors its half-leading (Chrome 159)
+
+- **Chrome rule (measured, Liberation Sans/Serif, 10 sizes x 5 unitless line-heights):** ascent and descent are rounded to whole px at the float size. The half-leading `(line-height - (ascent + descent)) / 2` is FLOORED for the strut AND for each inline box. A content area taller than the line-height overflows the line; it does not grow it.
+  - `16px/1` (14/3): span top -1, baseline 13, div 16.
+  - `18.72px/1` (17/4): -1.14 -> -2, baseline 15.
+- **Was (three defects, one symptom: text one row off at 1x):**
+  - The text run's own half-leading (`text_half_leading` in `align_inline_line_baselines`) used `/ 2`, which truncates toward zero. An odd negative leading lost a row: `16px/1` baseline 14, `22.4px/1` 19 (Chrome 13 / 18). The strut already floored.
+  - A one-line inline element gave the line its content area (`layout_engine`, inline branch). A `16px/1` div with a `<span>` was 17 px, a `19px/1` one 21 (Chrome 16 / 19).
+  - The `font:` shorthand dropped the size fraction (`font_size_milli_v = 0`). `font:15.5px/1.5` was 15 px with a 22 px line (Chrome 23.25); `17.6px` was 17 px. The `font-size` longhand kept it.
+- **Fix:** `_floor_div_i32` for the run's half-leading. The inline branch keeps the pre-swap box height as the line contribution when the content area is taller. `parse_font_shorthand_size_milli` (replaces `parse_font_shorthand_size_px`) feeds `font_milli_round_px` / `font_milli_store`.
+- **Pin:** `line_height_one_half_leading_chrome159_spec`, base 1/7, head 7/7.
+
+  | probe (Chrome-equal cases) | base | head |
+  |---|---|---|
+  | geometry, `font:` shorthand (b top, span top, span height) | 46 / 99 | 99 / 99 |
+  | geometry, longhands | 81 / 99 | 99 / 99 |
+  | 1x glyph baseline, 50 cells | 35 / 50 | 50 / 50 |
+  | dpr4 glyph baseline, worst cell | 5 rows | 3 rows |
+
+- **Catalog:** 1x and dpr4 equal every baseline row on all 8 pages (the pages use `font: 16px/1.5`: positive leading, whole size), so no row moved. dpr4 animation read 3.82 on base and 3.85 on head, one run each (3.85 is its row; earlier lanes recorded the page as noisy). Matrix unchanged at 85 mismatching cells.
+- **Perf** (css-paint 1x): base 51.29 / 51.28 s, head 50.52 / 50.84 s; max RSS 795-797 MB on both.
+- **Found, not landed (dpr4 fractional size):** `draw_ir_device_scale` scales `font-size` as round(css) x k, so 14.4 px paints at 56 device px and 15.5 at 60 (Chrome 57.6 / 62). Scaling from `font-size-milli` (and reading the painter ascent at that size in `text_device_painter_dy`) makes 20 of the 50 dpr4 cells exact and leaves the other 30 one row high, but the dpr4 catalog got worse on two pages: html 2.74 -> 2.76, forms-media 5.21 -> 5.23. On a UA-size probe the h5 and h6 bands improved (3193 -> 2759, 3069 -> 2827 mismatched px) and the sub/sup band got worse (3481 -> 3702). Two older dpr4 offsets sit under it: `<small>` in a 16px/1.5 line is 5 device rows above Chrome, and `<sub>` 3 rows below. Fix those first.
+- **Consequence at dpr4:** a `font:` shorthand with a fractional size now behaves like the longhand. For 14.4 and 15.5 px that is one device row further from Chrome than the truncated 14 / 15 px was (2 -> 3 rows high at worst). No cell of the other eight sizes is further, and 16, 17.6, 18.72, 22.4 and 10.72 px are up to 5 rows closer.
+- **Still open:** line heights are whole px (`17.6px/1` is 17, Chrome 17.59).
+- **Trap:** the export lists of the `simple_web_html_layout_renderer*` modules name every function on one line. Renaming a function means editing nine of them, and any other lane that adds an export conflicts.
+- **Trap:** a probe script outside the repo cannot import `common.*` or `std.*`; put it under the worktree, untracked, and move it out before committing. `simple run` on a file under `examples/` stops after 10 s unless `SIMPLE_TIMEOUT_SECONDS=0` is set; the output looks like a fast run.
+- **Trap:** `decode_png_to_argb` did decode Chrome's `--screenshot` PNGs here, so a probe can read both sides in one `.spl`.
+
 ## Images
 
 - Raster (software) lane paints `<img>` only via `simple_web_layout_render_html_software_pixels_with_images(html, w, h, images)`; the plain entries paint none. The painter (`_fb_paint_img_clip`, paint_raster) runs in document order right after the node's box paint, with Draw IR geometry via the shared `html_image_fit_size`. Nearest-neighbour is exact only for uniform images (`# ponytail:`); overlapping-paint opacity cells (`tg_page` (50,12)) stay un-admitted on the raster. Spec: `test/01_unit/browser_engine/img_raster_chrome159_spec.spl`.

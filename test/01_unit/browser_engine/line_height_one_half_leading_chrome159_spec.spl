@@ -1,0 +1,203 @@
+"""
+## Purpose and audience
+Purpose: Pin where a line's text sits when the line-height is a unitless number
+and the leading is negative or the font size is fractional. Chrome (Blink
+`FontHeight::AddLeading`) takes the face ascent and descent, each rounded to
+whole px, and FLOORS the half-leading `(line-height - (ascent + descent)) / 2`
+for every inline box, not only for the strut. Three defects sat on that rule:
+the text run's own half-leading was truncated toward zero (`16px/1` Liberation
+Sans, content area 17: -0.5 became 0, baseline 14 where Chrome has 13); an
+inline element with negative leading grew the line to its content area (a
+`16px/1` div holding a span was 17 px, Chrome 16); and the `font:` shorthand
+dropped the size fraction (`font:15.5px/1.5` was laid out as 15 px, line 22
+where Chrome has 23.25).
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159 headless, 2026-11-18, Liberation Sans unless noted).
+
+Geometry (`--dump-dom`, getBoundingClientRect): an absolutely placed 400 px
+`div` at top 0 holding `<span>Hxg</span>` and a 10x10 inline-block `b` whose
+bottom edge is on the baseline. H = div height, st / sh = span top / height:
+
+| font            | H         | b top | st | sh |
+|-----------------|-----------|-------|----|----|
+| 16px/1          | 16        | 3     | -1 | 17 |
+| 16px/0.9        | 14.390625 | 2     | -2 | 17 |
+| 19px/1          | 19        | 6     | -1 | 21 |
+| 16px/1.5        | 24        | 7     | 3  | 17 |
+| 15.5px/1        | 15.5      | 3     | -1 | 17 |
+| 17.6px/1        | 17.59375  | 4     | -2 | 20 |
+| 18.72px/1       | 18.71875  | 5     | -2 | 21 |
+| 22.4px/1        | 22.40625  | 8     | -2 | 25 |
+| 15.5px/1.5      | 23.25     | 7     | 3  | 17 |
+| 13.3px/1.3      | 17.28125  | 3     | 1  | 15 |
+| 18.72px/1.2     | 22.453125 | 7     | 0  | 21 |
+| serif 14.4px/1.5| 21.609375 | 5     | 2  | 16 |
+
+Line heights are whole px here (the fraction is truncated), so H is pinned only
+where Chrome's is whole.
+
+Ink (`--screenshot`, 200x620 window): one `H` per cell in a 30 px wide absolute
+div at left 40 x column, top 50 x row + 20. The value is the glyph baseline (last
+ink row + 1) below the div top. Columns are line-height 1, 0.9, 1.2, 1.3, 1.5.
+
+| size  | 1x             | device scale 4 |
+|-------|----------------|----------------|
+| 13.28 | 11 10 12 13 14 | 44 41 49 52 57 |
+| 14.4  | 12 11 13 14 15 | 47 44 53 56 62 |
+| 15.5  | 13 12 14 15 17 | 51 48 57 60 67 |
+| 16    | 13 12 15 15 17 | 54 50 60 63 70 |
+| 17.6  | 14 13 16 17 19 | 59 56 66 70 77 |
+| 18.72 | 15 14 17 18 20 | 63 59 70 74 82 |
+| 19    | 16 15 17 18 20 | 63 59 71 74 82 |
+| 22.4  | 18 17 20 22 24 | 75 71 84 89 98 |
+| 10.72 | 9 8 10 10 12   | 35 33 39 41 46 |
+| 13.3  | 11 10 12 13 14 | 44 41 49 52 57 |
+
+Base (98c16637b3f) at 1x differed in 15 of the 50 cells; head in none. At
+scale 4 base differed in all 50, by up to 5 rows (16px/1: 57 against 54). Head is within 3
+rows everywhere and within 1 row for the whole-px sizes: a fractional size is
+still painted at round(css) x 4 device px (14.4 px -> 56, Chrome 57.6), and the
+whole sizes keep the one-row Liberation Sans anchoring residual of
+doc/08_tracking/bug/web_render_glyph_baseline_one_row_high_liberation_sans_64px_2026-11-18.md.
+AC-6 therefore pins the 16 px row to within one device row of Chrome.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-LINE-HALF-LEADING-FLOOR-001 -- every inline box floors its half-leading, and the font shorthand keeps a fractional size.
+"""
+# @tag: unit, browser_engine, layout, line_height, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val LHS: [text] = ["1", "0.9", "1.2", "1.3", "1.5"]
+
+fn _geom_page(font: text) -> text:
+    "<!DOCTYPE html><html><head><style>body{{margin:0}}div{{position:absolute;left:0;top:0;width:400px}}" +
+        "i{{display:inline-block;width:10px;height:10px}}</style></head><body>" +
+        "<div id=d style=\"font:" + font + "\"><span id=s>Hxg</span><i id=b></i></div></body></html>"
+
+fn _g(page: text, id: text, prop: text) -> text:
+    simple_web_layout_debug_layout_by_id(page, 900, 600, id, prop)
+
+# "b top,span top,span height".
+fn _bss(font: text) -> text:
+    val page = _geom_page(font)
+    _g(page, "b", "y") + "," + _g(page, "s", "y") + "," + _g(page, "s", "h")
+
+fn _h(font: text) -> text:
+    _g(_geom_page(font), "d", "h")
+
+fn _ink_page(sizes: [text]) -> text:
+    var out = "<!DOCTYPE html><html><head><style>body{{margin:0;background:#fff}}" +
+        "div{{position:absolute;width:30px;margin:0;color:#000}}</style></head><body>"
+    var r = 0
+    while r < sizes.len() as i32:
+        var c = 0
+        while c < 5:
+            out = out + "<div style=\"left:" + (c * 40).to_text() + "px;top:" + (r * 50 + 20).to_text() +
+                "px;font:" + sizes[r] + "px/" + LHS[c] + " 'Liberation Sans'\">H</div>"
+            c = c + 1
+        r = r + 1
+    out + "</body></html>"
+
+fn _is_ink(px: u32) -> bool:
+    (((px >> 8u32) & 0xFFu32) as i32) < 110
+
+# Baseline (last ink row + 1, below the cell's div top) of the five cells of
+# each row, e.g. ["11 10 12 13 14", ...].
+fn _baselines(sizes: [text], k: i32) -> [text]:
+    val rows = sizes.len() as i32
+    val w = 200 * k
+    val h = (rows * 50 + 20) * k
+    val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_ink_page(sizes), 200, rows * 50 + 20, k, "cpu_simd")
+    var out: [text] = []
+    if px.len() != (w * h) as i64:
+        return out
+    var r = 0
+    while r < rows:
+        var line = ""
+        var c = 0
+        while c < 5:
+            var last = -9999
+            var y = r * 50 * k
+            while y < (r + 1) * 50 * k:
+                var x = c * 40 * k
+                while x < (c * 40 + 30) * k:
+                    if _is_ink(px[y * w + x]):
+                        last = y - (r * 50 + 20) * k
+                    x = x + 1
+                y = y + 1
+            line = line + (if c == 0: "" else: " ") + (last + 1).to_text()
+            c = c + 1
+        out.push(line)
+        r = r + 1
+    out
+
+describe "unitless line-height half-leading (Chrome 159)":
+    it "AC-1: an odd negative leading is floored for the text's inline box":
+        step("Chrome 159: 16px/1 Liberation Sans (14/3): half-leading -0.5 -> -1, div 16")
+        expect(_bss("16px/1 'Liberation Sans'")).to_equal("3,-1,17")
+        expect(_h("16px/1 'Liberation Sans'")).to_equal("16")
+        step("Chrome 159: 16px/0.9 -> leading -2.6, half -1.3 -> -2")
+        expect(_bss("16px/0.9 'Liberation Sans'")).to_equal("2,-2,17")
+
+    it "AC-2: an inline box with negative leading does not grow the line":
+        step("Chrome 159: 19px/1 (17/4) -> div 19, span -1..20")
+        expect(_bss("19px/1 'Liberation Sans'")).to_equal("6,-1,21")
+        expect(_h("19px/1 'Liberation Sans'")).to_equal("19")
+
+    it "AC-3: line-height 1 at a fractional size floors the half-leading":
+        step("Chrome 159: 15.5 -> 3,-1,17; 17.6 -> 4,-2,20; 18.72 -> 5,-2,21; 22.4 -> 8,-2,25")
+        expect(_bss("15.5px/1 'Liberation Sans'")).to_equal("3,-1,17")
+        expect(_bss("17.6px/1 'Liberation Sans'")).to_equal("4,-2,20")
+        expect(_bss("18.72px/1 'Liberation Sans'")).to_equal("5,-2,21")
+        expect(_bss("22.4px/1 'Liberation Sans'")).to_equal("8,-2,25")
+
+    it "AC-4: the font shorthand keeps the size fraction for the line and the strut":
+        step("Chrome 159: 15.5px/1.5 -> line 23.25, b 7 (15 px gave 22 / 6)")
+        expect(_bss("15.5px/1.5 'Liberation Sans'")).to_equal("7,3,17")
+        expect(_h("15.5px/1.5 'Liberation Sans'")).to_equal("23")
+        step("Chrome 159: 13.3px/1.3 -> 3,1,15; 18.72px/1.2 -> 7,0,21; serif 14.4px/1.5 -> 5,2,16")
+        expect(_bss("13.3px/1.3 'Liberation Sans'")).to_equal("3,1,15")
+        expect(_bss("18.72px/1.2 'Liberation Sans'")).to_equal("7,0,21")
+        expect(_bss("14.4px/1.5 'Liberation Serif'")).to_equal("5,2,16")
+
+    it "AC-5: glyph baselines at 1x equal Chrome's for ten sizes and five line-heights":
+        val b = _baselines(["13.28", "14.4", "15.5", "16", "17.6", "18.72", "19", "22.4", "10.72", "13.3"], 1)
+        expect(b.len()).to_equal(10)
+        expect(b[0]).to_equal("11 10 12 13 14")
+        expect(b[1]).to_equal("12 11 13 14 15")
+        expect(b[2]).to_equal("13 12 14 15 17")
+        expect(b[3]).to_equal("13 12 15 15 17")
+        expect(b[4]).to_equal("14 13 16 17 19")
+        expect(b[5]).to_equal("15 14 17 18 20")
+        expect(b[6]).to_equal("16 15 17 18 20")
+        expect(b[7]).to_equal("18 17 20 22 24")
+        expect(b[8]).to_equal("9 8 10 10 12")
+        expect(b[9]).to_equal("11 10 12 13 14")
+
+    it "AC-6: at device scale 4 the floored half-leading holds within one device row":
+        step("Chrome 159 dpr4, 16px: baselines 54 50 60 63 70 (base 57 53 59 62 69)")
+        val b = _baselines(["16"], 4)
+        expect(b.len()).to_equal(1)
+        val got = b[0].split(" ")
+        val chrome = [54, 50, 60, 63, 70]
+        expect(got.len()).to_equal(5)
+        var c = 0
+        while c < 5:
+            val d = got[c].to_int() as i32 - chrome[c]
+            expect(if d < 0: 0 - d else: d).to_be_less_than(2)
+            c = c + 1
+
+describe "unitless line-height with positive leading is unchanged":
+    it "AC-7 (guard): 16px/1.5 keeps Chrome's 24 px line and baseline 17":
+        expect(_bss("16px/1.5 'Liberation Sans'")).to_equal("7,3,17")
+        expect(_h("16px/1.5 'Liberation Sans'")).to_equal("24")
