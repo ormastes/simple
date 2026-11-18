@@ -1,0 +1,115 @@
+"""
+Regression: Stage 3 (`phase3-a`) MIR lowering defects in `verify_lowered_mir_v1`,
+`hc_dec_scope` / `hc_dec_hir_function`, and `lower_and_check_retained_owner_impl`
+(2026-11-19).
+
+1. `self.ctx.mir_modules[k]!` and `val m = d[k]; m!` on `Dict<text, Mod>` lowered
+   the unwrapped record local as erased `i64` and called `rt_value_as_int_wide`
+   (`ptr >> 3`), faulting on `module.name`.
+2. `d[opt_key] = v` on `Dict<text, i64>` and `Doc(has_doc: true, doc: opt_doc)`
+   stored the `Option::Some(text)` enum handle when the source local was `text?`.
+3. `val reg: RegClass = if c1: a elif c2: b else: c` skipped `remember_merged_arm_identity`
+   when `expected_type` was present and omitted `Named` provenance on `result`,
+   causing field reads on imported classes to fall back to index 0.
+"""
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn lower_module_json(src: text) -> Dict<text, text>:
+    val module = parse_full_frontend(src, "stage3_mir_fix.spl", "stage3_mir_fix.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("stage3_mir_fix.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var out: Dict<text, text> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.byte_len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+fn count_of(hay: text, needle: text) -> i64:
+    var n = 0
+    var i = 0
+    while i + needle.byte_len() <= hay.byte_len():
+        if hay.substring(i, i + needle.byte_len()) == needle:
+            n = n + 1
+            i = i + needle.byte_len()
+        else:
+            i = i + 1
+    n
+
+val SRC = (
+    "struct ModRec:\n    pad: i64\n    name: text\n\n" +
+    "class Ctx:\n    mods: Dict<text, ModRec>\n\n" +
+    "struct DocHolder:\n    has_doc: bool\n    doc: text\n\n" +
+    "class SurfaceReg:\n    mode: text\n    count: i64\n    names: [text]\n\n" +
+    "fn dict_bang_read(ctx: Ctx, k: text) -> text:\n" +
+    "    val m: ModRec = ctx.mods[k]!\n" +
+    "    m.name\n\n" +
+    "fn dict_local_bang_read(d: Dict<text, ModRec>, k: text) -> text:\n" +
+    "    val m = d[k]\n" +
+    "    val u: ModRec = m!\n" +
+    "    u.name\n\n" +
+    "fn opt_text_dict_key_and_field(raw_nil: bool, s: text) -> i64:\n" +
+    "    var opt_k: text? = None\n" +
+    "    if not raw_nil:\n" +
+    "        opt_k = Some(s)\n" +
+    "    var syms: Dict<text, i64> = {}\n" +
+    "    syms[opt_k] = 7\n" +
+    "    val holder = DocHolder(has_doc: not raw_nil, doc: opt_k)\n" +
+    "    if holder.has_doc: 1 else: 0\n\n" +
+    "fn annotated_if_chain_field(c1: bool, c2: bool, a: SurfaceReg, b: SurfaceReg, c: SurfaceReg) -> i64:\n" +
+    "    val chosen: SurfaceReg = if c1:\n" +
+    "        a\n" +
+    "    elif c2:\n" +
+    "        b\n" +
+    "    else:\n" +
+    "        c\n" +
+    "    chosen.names.len()\n"
+)
+
+describe "Stage 3 MIR force-unwrap, optional text boundary, and annotated if-chain layout":
+    it "never emits rt_value_as_int_wide when force-unwrapping a struct-valued Dict read":
+        val fns = lower_module_json(SRC)
+        val bang_direct = fns["dict_bang_read"] ?? ""
+        expect(bang_direct.byte_len() > 0).to_equal(true)
+        expect(count_of(bang_direct, "rt_dict_get")).to_equal(1)
+        expect(count_of(bang_direct, "rt_value_as_int_wide")).to_equal(0)
+
+        val bang_local = fns["dict_local_bang_read"] ?? ""
+        expect(bang_local.byte_len() > 0).to_equal(true)
+        expect(count_of(bang_local, "rt_value_as_int_wide")).to_equal(0)
+
+    it "unwraps Optional(Str) at Dict<text, V> key and non-optional struct text field boundaries":
+        val fns = lower_module_json(SRC)
+        val j = fns["opt_text_dict_key_and_field"] ?? ""
+        expect(j.byte_len() > 0).to_equal(true)
+        expect(count_of(j, "rt_unwrap_or_self")).to_equal(2)
+
+    it "preserves imported class field offsets across an annotated if/elif/else binding":
+        val module = parse_full_frontend(SRC, "stage3_mir_fix.spl", "stage3_mir_fix.spl", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("stage3_mir_fix.spl")
+        var hir = hir_lowering.lower_module(module)
+        for sym_id in hir.symbols.symbols.keys():
+            if val present_sym = hir.symbols.get_symbol_raw(sym_id):
+                if present_sym.name == "SurfaceReg":
+                    var imported_sym = present_sym
+                    imported_sym.defining_module = "compiler.hir.hir_lowering.module_surface_types"
+                    hir.symbols.symbols[sym_id] = imported_sym
+        hir.classes = {}
+        var mir_lowering = MirLowering.new(hir.symbols)
+        mir_lowering.struct_field_order["compiler.hir.hir_lowering.module_surface_types.SurfaceReg"] = ["mode", "count", "names"]
+        val mir = mir_lowering.lower_module(hir)
+        var j = ""
+        for function in mir.functions.values():
+            if function.name.ends_with("annotated_if_chain_field"):
+                j = serialize_mir_function(function)
+        expect(j.byte_len() > 0).to_equal(true)
+        expect(j).to_contain("\"field\":2")

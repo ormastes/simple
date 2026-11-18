@@ -804,6 +804,9 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         val inner = u.classify(s.a)
         if inner.cat == "node" or inner.cat == "opaque":
             out = out + indent + "    " + target + " = ov{k}\n"
+        elif inner.cat == "prim_text":
+            out = out + indent + "    if val present_ov{k} = ov{k}:\n"
+            out = out + indent + "        " + target + " = Some(present_ov{k})\n"
         else:
             out = out + indent + "    " + target + " = Some(ov{k})\n"
         return out
@@ -812,8 +815,8 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         out = out + indent + "val n{k} = r.next_len()\n"
         out = out + indent + "var i{k} = 0\n"
         out = out + indent + "while i{k} < n{k}:\n"
-        out = out + _emit_dec(u, s.a, "ev{k}", indent + "    ", c)
         val elem_shape = u.classify(s.a)
+        out = out + _emit_dec(u, s.a, "ev{k}", indent + "    ", c, false, elem_shape.cat == "prim_text")
         if elem_shape.cat == "node" or elem_shape.cat == "opaque":
             out = out + indent + "    if val present_ev{k} = ev{k}:\n"
             out = out + indent + "        " + target + ".push(present_ev{k})\n"
@@ -828,10 +831,10 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         out = out + indent + "val n{k} = r.next_len()\n"
         out = out + indent + "var i{k} = 0\n"
         out = out + indent + "while i{k} < n{k}:\n"
-        out = out + _emit_dec(u, s.a, "pa{k}", indent + "    ", c)
-        out = out + _emit_dec(u, s.b, "pb{k}", indent + "    ", c)
         val shape_a = u.classify(s.a)
         val shape_b = u.classify(s.b)
+        out = out + _emit_dec(u, s.a, "pa{k}", indent + "    ", c, false, shape_a.cat == "prim_text")
+        out = out + _emit_dec(u, s.b, "pb{k}", indent + "    ", c, false, shape_b.cat == "prim_text")
         val a_opt_local = shape_a.cat == "node" or shape_a.cat == "opaque"
         val b_opt_local = shape_b.cat == "node" or shape_b.cat == "opaque"
         if a_opt_local and b_opt_local:
@@ -861,7 +864,9 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
         out = out + indent + "val n{k} = r.next_len()\n"
         out = out + indent + "var i{k} = 0\n"
         out = out + indent + "while i{k} < n{k}:\n"
-        out = out + _emit_dec(u, s.a, "dk{k}", indent + "    ", c, required_node)
+        val key_shape = u.classify(s.a)
+        val key_is_opt_node = key_shape.cat == "node" or key_shape.cat == "opaque"
+        out = out + _emit_dec(u, s.a, "dk{k}", indent + "    ", c, required_node, key_shape.cat == "prim_text")
         val value_shape = u.classify(s.b)
         if value_shape.cat == "prim_i64":
             # Keep later emitted local names aligned with scalar _emit_dec.
@@ -870,21 +875,18 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
             out = out + indent + "    val dv{k}: i64 = r.next_i64()\n"
         else:
             out = out + _emit_dec(u, s.b, "dv{k}", indent + "    ", c, required_node)
-        # Store through a presence bind of the decoded optional value, never
-        # the optional itself: dict[key] = T? stores land erased (nil) on
-        # the stage2 LLVM draw -- the decoded module.functions dict holds
-        # nil HirFunction values while the cache blob is complete, and the
-        # first values()/for-in consumer passes a nil declaration into
-        # record_exact_extern_declaration_v1 (SIGSEGV, EXC_BAD_ACCESS at
-        # 0x70, stage2 p2_add sanity smoke). The presence-guarded concrete
-        # bind is the proven-clean shape; absent values are skipped rather
-        # than stored as nil (the cache re-encode selfcheck already rejects
-        # lossy entries). Kept inside the tip's required_node/r.ok rejection
-        # guard so a rejected decode never reaches the dictionary either.
+        # Store through presence binds of optional node keys/values, never the
+        # optionals themselves: `dk{k}`/`dv{k}` for node shapes hold canonical
+        # Option handles on the self-hosted native lane.
         if required_node:
             out = out + indent + "    if r.ok:\n"
-            out = out + indent + "        if val present_v{k} = dv{k}:\n"
-            out = out + indent + "            " + target + "[dk{k}] = present_v{k}\n"
+            if key_is_opt_node:
+                out = out + indent + "        if val present_k{k} = dk{k}:\n"
+                out = out + indent + "            if val present_v{k} = dv{k}:\n"
+                out = out + indent + "                " + target + "[present_k{k}] = present_v{k}\n"
+            else:
+                out = out + indent + "        if val present_v{k} = dv{k}:\n"
+                out = out + indent + "            " + target + "[dk{k}] = present_v{k}\n"
         elif value_shape.cat == "prim_i64":
             # Raw integers are not optional node handles. Preserve 3 and reject
             # nil/malformed tokens even under the legacy unbounded reader.
@@ -892,7 +894,19 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
             out = out + indent + "        if r.lines[value_pos{k}] != \"{{dv{k}}}\":\n"
             out = out + indent + "            r.reject_malformed(\"integer_dictionary_value\")\n"
             out = out + indent + "        else:\n"
-            out = out + indent + "            " + target + "[dk{k}] = dv{k}\n"
+            if key_is_opt_node:
+                out = out + indent + "            if val present_k{k} = dk{k}:\n"
+                out = out + indent + "                " + target + "[present_k{k}] = dv{k}\n"
+                out = out + indent + "            else:\n"
+                out = out + indent + "                r.reject_malformed(\"nil_in_non_optional_dict_key\")\n"
+            else:
+                out = out + indent + "            " + target + "[dk{k}] = dv{k}\n"
+        elif key_is_opt_node:
+            out = out + indent + "    if val present_k{k} = dk{k}:\n"
+            out = out + indent + "        if val present_v{k} = dv{k}:\n"
+            out = out + indent + "            " + target + "[present_k{k}] = present_v{k}\n"
+            out = out + indent + "    elif r.ok:\n"
+            out = out + indent + "        r.reject_malformed(\"nil_in_non_optional_dict_key\")\n"
         else:
             out = out + indent + "    if val present_v{k} = dv{k}:\n"
             out = out + indent + "        " + target + "[dk{k}] = present_v{k}\n"

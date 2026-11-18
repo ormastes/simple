@@ -772,6 +772,15 @@ impl MirLowering:
             case HirTypeKind.Dict(_, value_type): Some(value_type)
             case _: None
 
+    fn runtime_dict_key_hir_type(container_type: HirType) -> HirType?:
+        var dict_type = container_type
+        match dict_type.kind:
+            case HirTypeKind.Ref(inner, _): dict_type = inner
+            case _: ()
+        match dict_type.kind:
+            case HirTypeKind.Dict(key_type, _): Some(key_type)
+            case _: None
+
     fn local_is_runtime_dict(local: LocalId) -> bool:
         if self.runtime_dict_locals.contains(local.id):
             return true
@@ -8471,13 +8480,15 @@ impl MirLowering:
                 # the receiver is in, same struct-name provenance carry-over
                 # via struct_value_syms -- because `!` and `.unwrap()` are the
                 # same runtime operation with different call syntax.
-                val uw_base_local = self.lower_expr(base)
+                val uw_base_local = self.lower_optional_probe_operand(base)
                 if self.is_plain_native_tuple_payload(uw_base_local):
                     return uw_base_local
                 var uw_result_type = MirType.i64()
                 var uw_is_text = false
                 var uw_is_bool = false
-                val uw_inner_type = self.option_inner_hir_type_for_local(base, uw_base_local)
+                var uw_inner_type = self.option_inner_hir_type_for_local(base, uw_base_local)
+                if uw_inner_type == None:
+                    uw_inner_type = self.unwrap_concrete_fallback_hir_type_v1(base, uw_base_local)
                 if uw_inner_type != None:
                     val uw_found_inner = uw_inner_type ?? HirType(kind: HirTypeKind.Error, span: base.span)
                     match uw_found_inner.kind:
@@ -8577,7 +8588,12 @@ impl MirLowering:
                             match self.symbols.get_symbol_raw(bang_owner_symbol.id):
                                 case Some(bang_owner_sym):
                                     if bang_owner_sym.name != "":
-                                        self.struct_value_syms[result_local_uw.id] = self.struct_value_provenance_key(bang_owner_sym)
+                                        var bang_owner_key = self.struct_value_provenance_key(bang_owner_sym)
+                                        if bang_owner_sym.kind == SymbolKind.Class:
+                                            val bang_class_key = mir_class_identity_raw(self.symbols, bang_owner_symbol.id)
+                                            if bang_class_key != "":
+                                                bang_owner_key = bang_class_key
+                                        self.struct_value_syms[result_local_uw.id] = bang_owner_key
                                 case _: ()
                         case _: ()
 
