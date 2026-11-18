@@ -18,16 +18,28 @@ struct CompilerAliasGitPathV1:
     link: bool
     untracked: bool
 
-fn compiler_alias_git_paths_v1(root: text, scopes: [text]) -> [CompilerAliasGitPathV1]?:
+fn _compiler_alias_clean_detail_v1(detail: text) -> text:
+    detail.trim().replace("\r", " ").replace("\n", " ")
+
+fn _compiler_alias_reserved_owner_v1(owner_relative: text) -> bool:
+    (owner_relative == "build" or owner_relative.starts_with("build/") or
+        owner_relative == ".simple" or owner_relative.starts_with(".simple/") or
+        owner_relative == ".git" or owner_relative.starts_with(".git/"))
+
+pub fn compiler_alias_git_paths_checked_v1(root: text, scopes: [text]) -> Result<[CompilerAliasGitPathV1], text>:
     var literal: [text] = []
     for scope in scopes:
-        if not scv_worktree_path_safe(scope): return nil
+        if not scv_worktree_path_safe(scope):
+            return Err("scv_worktree_path_safe: unsafe scope '{scope}'")
         literal.push(":(literal){scope}")
-    val (output, _error, code) = process_run_bounded("git",
+    val (output, stderr_text, code) = process_run_bounded("git",
         ["-C", root, "--no-optional-locks", "-c", "core.quotePath=false",
             "ls-files", "--stage", "--cached", "--others", "--exclude-standard", "--"] + literal,
         300000, 16 * 1024 * 1024)
-    if code != 0: return nil
+    if code != 0:
+        val detail = _compiler_alias_clean_detail_v1(stderr_text)
+        val suffix = if detail == "": "" else: " ({detail})"
+        return Err("git ls-files: exit code {code} for root '{root}'{suffix}")
     var result: [CompilerAliasGitPathV1] = []
     var seen: Dict<text, bool> = {}
     for line in output.split("\n"):
@@ -38,103 +50,135 @@ fn compiler_alias_git_paths_v1(root: text, scopes: [text]) -> [CompilerAliasGitP
         val untracked = separator < 0
         if not untracked:
             val fields = line[:separator].split(" ")
-            if fields.len() != 3 or fields[2] != "0": return nil
+            val entry_path = line[separator + 1:]
+            if fields.len() != 3 or fields[2] != "0":
+                return Err("git ls-files: malformed stage entry '{line[:separator]}' for '{entry_path}'")
             if fields[0] == "160000": continue
-            if fields[0] != "100644" and fields[0] != "100755" and fields[0] != "120000": return nil
+            if fields[0] != "100644" and fields[0] != "100755" and fields[0] != "120000":
+                return Err("git ls-files: unsupported mode '{fields[0]}' for '{entry_path}'")
             link = fields[0] == "120000"
-            path = line[separator + 1:]
-        if not scv_worktree_path_safe(path) or path.starts_with("\"") or path.contains("\r") or path.contains("\t"): return nil
+            path = entry_path
+        if not scv_worktree_path_safe(path):
+            return Err("scv_worktree_path_safe: unsafe listed path '{path}'")
+        if path.starts_with("\"") or path.contains("\r") or path.contains("\t"):
+            return Err("git ls-files: invalid quoted or control path '{path}'")
         if not seen.has(path):
             seen[path] = true
             result.push(CompilerAliasGitPathV1(path, link, untracked))
-    Some(result)
+    Ok(result)
+
+fn compiler_alias_git_paths_v1(root: text, scopes: [text]) -> [CompilerAliasGitPathV1]?:
+    match compiler_alias_git_paths_checked_v1(root, scopes):
+        case Ok(value): Some(value)
+        case Err(_): None
 
 # An index may retain files below a removed directory. Prove absence at the
 # first missing component; an inaccessible parent remains a hard failure.
-fn compiler_alias_present_v1(base: text, relative: text) -> bool?:
-    val leaf = path_entry_present(base + "/" + relative)
-    if leaf.is_ok(): return Some(leaf.unwrap())
+pub fn compiler_alias_present_checked_v1(base: text, relative: text) -> Result<bool, text>:
+    val leaf_err = match path_entry_present(base + "/" + relative):
+        case Ok(present): return Ok(present)
+        case Err(err): err
     var current = base
     for component in relative.split("/"):
         current = current + "/" + component
-        val observed = path_entry_present(current)
-        if observed.is_err(): return nil
-        if not observed.unwrap(): return Some(false)
-    nil
+        match path_entry_present(current):
+            case Ok(present):
+                if not present: return Ok(false)
+            case Err(err):
+                return Err("alias_present: path_entry_present failed at '{current}': {err}")
+    Err("alias_present: path_entry_present failed at '{base}/{relative}': {leaf_err}")
 
-fn compiler_inventory_aliases_v1(root: text, scopes: [text]) -> CompilerInventoryAliasesV1?:
+fn compiler_alias_present_v1(base: text, relative: text) -> bool?:
+    match compiler_alias_present_checked_v1(base, relative):
+        case Ok(value): Some(value)
+        case Err(_): None
+
+pub fn compiler_inventory_aliases_checked_v1(root: text, scopes: [text]) -> Result<CompilerInventoryAliasesV1, text>:
     val checkout = match path_final_existing(root):
         case Ok(value): value
-        case Err(_): return nil
+        case Err(err): return Err("path_final_existing: checkout root '{root}' failed: {err}")
     val base = compile_source_inventory_plain_checkout_v1(checkout.path)
-    val listed = compiler_alias_git_paths_v1(base, scopes)
-    if listed == nil: return nil
+    if base == "":
+        return Err("plain_checkout: invalid normalized checkout root '{checkout.path}'")
+    val listed_entries: [CompilerAliasGitPathV1] = match compiler_alias_git_paths_checked_v1(base, scopes):
+        case Ok(value): value
+        case Err(err): return Err(err)
     var paths: [text] = []
     var events: [CompileSourceEventV1] = []
     var seen: Dict<text, bool> = {}
     # WORKAROUND(#3319): the bootstrap seed loses optional-array loop element types.
     # Keep explicit array and element owners until the compact-form regression passes.
-    val listed_entries: [CompilerAliasGitPathV1] = listed!
     for entry_value in listed_entries:
         val entry: CompilerAliasGitPathV1 = entry_value
         if not entry.link and not entry.untracked: continue
         val alias = base + "/" + entry.path
         if not entry.link and not dir_exists(alias): continue
-        val present = compiler_alias_present_v1(base, entry.path)
-        if present == nil: return nil
-        if not present!: continue
+        val present = match compiler_alias_present_checked_v1(base, entry.path):
+            case Ok(value): value
+            case Err(err): return Err(err)
+        if not present: continue
         # Existing non-directory links are outside this directory adapter.
         # An unresolved tracked link remains fail-closed: it might name a
         # formerly admitted directory, so guessing file-kind loses authority.
         val owner = match path_final_existing(alias):
             case Ok(value): value
-            case Err(_): return nil
+            case Err(err): return Err("owner: path_final_existing failed for alias '{alias}': {err}")
         if not dir_exists(alias): continue
-        if not path_identity_contains(checkout, owner) or path_identity_same(checkout, owner): return nil
+        if not path_identity_contains(checkout, owner):
+            return Err("path_identity_contains: alias '{entry.path}' owner '{owner.path}' outside checkout '{checkout.path}'")
+        if path_identity_same(checkout, owner):
+            return Err("owner: alias '{entry.path}' points to checkout root '{checkout.path}'")
         val physical = compile_source_inventory_plain_checkout_v1(owner.path)
-        if not physical.starts_with(base + "/"): return nil
+        if not physical.starts_with(base + "/"):
+            return Err("owner: plain_checkout '{owner.path}' normalized '{physical}' outside base '{base}/'")
         val owner_relative = physical[base.len() + 1:]
-        if (owner_relative == "build" or owner_relative.starts_with("build/") or
-                owner_relative == ".simple" or owner_relative.starts_with(".simple/") or
-                owner_relative == ".git" or owner_relative.starts_with(".git/")):
-            return nil
+        if _compiler_alias_reserved_owner_v1(owner_relative):
+            return Err("owner: alias '{entry.path}' resolves into reserved path '{owner_relative}'")
         if not dir_exists(physical):
             # Leaf source aliases retain the existing no-follow admission policy.
             continue
-        val children = compiler_alias_git_paths_v1(base, [owner_relative])
-        if children == nil: return nil
-        val child_entries: [CompilerAliasGitPathV1] = children!
+        val child_entries: [CompilerAliasGitPathV1] = match compiler_alias_git_paths_checked_v1(base, [owner_relative]):
+            case Ok(value): value
+            case Err(err): return Err("owner_children: {err}")
         for child_value in child_entries:
             val child: CompilerAliasGitPathV1 = child_value
             # Nested aliases require their own explicit logical mapping; refusing
             # them prevents an incomplete walk or cycles from becoming authority.
-            if child.link: return nil
-            if not child.path.starts_with(owner_relative + "/"): return nil
+            if child.link:
+                return Err("owner: nested alias '{child.path}' under owner '{owner_relative}' is unsupported")
+            if not child.path.starts_with(owner_relative + "/"):
+                return Err("owner: child '{child.path}' does not start with '{owner_relative}/'")
             val suffix = child.path[owner_relative.len() + 1:]
             val identity = entry.path + "/" + suffix
             if not compile_source_inventory_path_valid_v1(identity):
-                if child.untracked and dir_exists(base + "/" + child.path): return nil
+                if child.untracked and dir_exists(base + "/" + child.path):
+                    return Err("owner: alias '{entry.path}' has invalid untracked child directory '{child.path}'")
                 continue
             val source = base + "/" + child.path
-            val source_present = compiler_alias_present_v1(base, child.path)
-            if source_present == nil: return nil
-            if not source_present!: continue
+            val source_present = match compiler_alias_present_checked_v1(base, child.path):
+                case Ok(value): value
+                case Err(err): return Err("alias_present: child '{source}': {err}")
+            if not source_present: continue
             val resolved = match path_final_existing(source):
                 case Ok(value): value
-                case Err(_): return nil
-            if not path_identity_contains(owner, resolved): return nil
+                case Err(err): return Err("path_final_existing: source '{source}' failed: {err}")
+            if not path_identity_contains(owner, resolved):
+                return Err("path_identity_contains: source '{source}' ('{resolved.path}') outside owner '{owner.path}'")
             val content = match file_read_regular_no_follow_bounded(source, 64 * 1024 * 1024):
                 case Ok(value): value
-                case Err(_): return nil
+                case Err(err): return Err("file_read: failed for '{source}': {err}")
             val after = match path_final_existing(alias):
                 case Ok(value): value
-                case Err(_): return nil
-            if not path_identity_same(owner, after): return nil
+                case Err(err): return Err("alias_changed: path_final_existing failed for '{alias}': {err}")
+            if not path_identity_same(owner, after):
+                return Err("alias_changed: alias '{alias}' changed owner from '{owner.path}' to '{after.path}'")
             val source_after = match path_final_existing(source):
                 case Ok(value): value
-                case Err(_): return nil
-            if not path_identity_same(resolved, source_after): return nil
-            if seen.has(identity): return nil
+                case Err(err): return Err("alias_changed: path_final_existing failed for '{source}': {err}")
+            if not path_identity_same(resolved, source_after):
+                return Err("alias_changed: source '{source}' changed identity from '{resolved.path}' to '{source_after.path}'")
+            if seen.has(identity):
+                return Err("owner: duplicate alias logical identity '{identity}'")
             seen[identity] = true
             paths.push(identity)
             events.push(compile_source_inventory_git_event_v1("modify", identity, content))
@@ -145,6 +189,13 @@ fn compiler_inventory_aliases_v1(root: text, scopes: [text]) -> CompilerInventor
     # Stable membership keeps duplicate physical owners under their distinct
     # logical namespaces without order-dependent generations.
     paths.sort()
-    Some(CompilerInventoryAliasesV1(paths, events))
+    Ok(CompilerInventoryAliasesV1(paths, events))
 
-export CompilerInventoryAliasesV1, compiler_inventory_aliases_v1
+fn compiler_inventory_aliases_v1(root: text, scopes: [text]) -> CompilerInventoryAliasesV1?:
+    match compiler_inventory_aliases_checked_v1(root, scopes):
+        case Ok(value): Some(value)
+        case Err(_): None
+
+export CompilerInventoryAliasesV1, CompilerAliasGitPathV1
+export compiler_inventory_aliases_checked_v1, compiler_inventory_aliases_v1
+export compiler_alias_git_paths_checked_v1, compiler_alias_present_checked_v1
