@@ -79,6 +79,7 @@ use compiler.backend.linker.elf.reloc_scan.{
     SYMREF_DEFINED, SYMREF_IMPORT, SYMREF_WEAK_ZERO, SYMREF_ABS,
     RC_NONE, RC_ABS64, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_TLS_LD, RC_TLS_MOD, RC_SIZE, RC_PLTOFF
 }
+use compiler.backend.linker.veneer.{veneer_table_new, ARM_VENEER_SLOT, arm_veneer_kind, arm_veneer_bytes, arm_veneer_entry}
 use compiler.backend.linker.elf.synthetic_sections.{
     ElfDynStr, elf_dyn_relative, elf_dyn_glob_dat, elf_dyn_jump_slot, elf_dyn_abs64, elf_dyn_copy, elf_dyn_tpoff64,
     elf_rela_entry, elf_sym_entry, elf_build_dynstr, elf_build_dynsym, elf_hash_size, elf_build_hash,
@@ -1770,6 +1771,20 @@ fn elf_apply_jobs(input: [[u8]], jobs: [i64], target: RelocArch,
 # Entry points
 # ============================================================================
 
+fn elf_arm_veneer_kind(ctx: ElfLinkCtx, r: ElfScanRef) -> i64:
+    """Veneer kind for an ARM branch to a defined STT_FUNC in the other state.
+    The type and Thumb bit come from the winning definition, not the reference."""
+    if r.kind != SYMREF_DEFINED or r.sym_idx == 0: return 0
+    val sym = ctx.inputs.objects[r.oi].symbols[r.sym_idx]
+    var v = sym.st_value
+    var t = elf_symbol_type(sym)
+    if elf_symbol_binding(sym) != STB_LOCAL and ctx.res.defined.has(sym.name):
+        val e = ctx.res.defined[sym.name]
+        v = e.offset
+        t = e.stype
+    if t != 2: return 0
+    arm_veneer_kind(r.rtype, (v & 1) != 0)
+
 fn elf_static_link(objects: [[u8]], archives: [[u8]], entry: text, target: RelocArch) -> Result<[i64], text>:
     """Link ET_REL objects (+ archives) into a static ET_EXEC; Err on any link error."""
     elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: [], entry: entry,
@@ -1992,6 +2007,18 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     if eh_out >= 0:
         eh_fdes = elf_eh_frame_fde_count(contents[eh_out])?
 
+    # ARM interworking veneers: B/B.W cannot switch state, so a branch whose
+    # target is in the other state goes through a slot of `.veneer`.
+    var veneers = veneer_table_new()
+    var ven_slot: {i64: i64} = {}
+    if target == RelocArch.Arm32:
+        var vj: i64 = 0
+        while vj < refs.len():
+            val vk = elf_arm_veneer_kind(ctx, refs[vj])
+            if vk != 0: ven_slot[vj] = veneers.add(refs[vj].key, vk)
+            vj = vj + 1
+    var ven_dest: [i64] = []
+    while ven_dest.len() < veneers.count(): ven_dest.push(0)
     # --- synthetic section sizes (content comes after layout) ---
     val a64 = elf_target_is_a64(target)
     val nplt = sc.plt_names.len()
@@ -2084,6 +2111,9 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         secs = secs.push(elf_out_sec(".plt", SHT_PROGBITS_E, SHF_ALLOC | SHF_EXECINSTR, 16, elf_plt_size(target, nplt), ELF_SEG_RX))
     if nplt > 0 or need_got_base:
         secs = secs.push(elf_out_sec(".got.plt", SHT_PROGBITS_E, SHF_ALLOC | SHF_WRITE, 8, elf_gotplt_size(nplt), ELF_SEG_RW))
+    if veneers.count() > 0:
+        secs = secs.push(elf_out_sec(".veneer", SHT_PROGBITS_E, SHF_ALLOC | SHF_EXECINSTR, 4,
+            veneers.count() * ARM_VENEER_SLOT, ELF_SEG_RX))
     if sc.got_keys.len() > 0:
         secs = secs.push(elf_out_sec(".got", SHT_PROGBITS_E, SHF_ALLOC | SHF_WRITE, got_ws, sc.got_keys.len() * got_ws, ELF_SEG_RW))
     if pie or dynamic:
@@ -2125,6 +2155,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     val got_v = elf_plan_addr(plan, ".got")
     val plt_v = elf_plan_addr(plan, ".plt")
     val gotplt_v = elf_plan_addr(plan, ".got.plt")
+    val veneer_v = elf_plan_addr(plan, ".veneer")
 
     # --- relocate input sections ---
     var riscv_highs: {text: i64} = {}
@@ -2180,6 +2211,11 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             val ref_value = elf_ref_value(ctx, lay, r)?
             s = ref_value.address
             a = ref_value.addend
+        if ven_slot.has(j):
+            # ARM interworking: branch to the veneer slot, which jumps to S
+            val vs = ven_slot[j]
+            ven_dest[vs] = s
+            s = arm_veneer_entry(veneer_v + vs * ARM_VENEER_SLOT, veneers.kinds[vs])
         if elf_target_is_riscv(target) and r.rtype == 60:
             if j + 1 >= refs.len(): return Err("RISC-V ULEB128 requires adjacent SET/SUB relocations")
             val sub = refs[j + 1]
@@ -2507,6 +2543,13 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
                 out.push(elf_u8_from_i64(elf_build_gotplt_x64(nplt, plt_v, elf_plan_addr(plan, ".dynamic"))))
         else if n == ".got":
             out.push(elf_u8_from_i64(got))
+        else if n == ".veneer":
+            var vb: [i64] = []
+            var vi2: i64 = 0
+            while vi2 < veneers.count():
+                vb.extend(arm_veneer_bytes(veneers.kinds[vi2], ven_dest[vi2]))
+                vi2 = vi2 + 1
+            out.push(elf_u8_from_i64(vb))
         else if n == ".dynamic":
             out.push(elf_u8_from_i64(elf_build_dynamic(elf_dynamic_tags(ctx, sc, dynstr0, n_rela, addrs, arrays, need_versions.len()))))
         else:
