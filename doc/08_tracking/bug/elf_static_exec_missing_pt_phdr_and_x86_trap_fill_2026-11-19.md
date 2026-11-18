@@ -75,3 +75,11 @@ PT_RISCV_ATTRIBUTES and PT_ARM_EXIDX headers). The ELF regression set shows the 
 pass/fail counts as release/1.0.0 (elf_dynamic_link 0/8, elf_exec_writer 19/32,
 elf_x64_dynamic 29/32, elf_gnu_hash 4/6, elf_symtab 6/7 and elf_archive_closure 8/9 were
 already failing). Every other ELF spec is green.
+
+## Fix 2 (x86 int3 fill): verification-pending
+
+`elf_static_contents` now fills executable output sections with 0xCC on EM_386 and
+EM_X86_64 before copying the inputs, the same way `elf_boot_link` does and as ld.lld does.
+The repro is the i686 case in `simpleos_user32_link_spec`: `.text+11..15` is the alignment
+gap before `main`, and it must be 0xCC. The x86 regression counts are unchanged
+(x64_dynamic 29/32 and exec_writer 19/32 were already failing on the base).
