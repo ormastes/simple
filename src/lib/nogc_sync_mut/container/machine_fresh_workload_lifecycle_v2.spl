@@ -279,6 +279,38 @@ pub class MachineFreshWorkloadLifecycleV2:
         fresh_workload_states_v2[self.slot].source_phase = "returned"
         Ok(())
 
+    # Retention doc: the native token proves no transport retirement, so the upper
+    # verifies primary-transport and probe-capture owners first (close_native_v2's gates).
+    pub(package) fn source_retention_preflight_v3() -> Result<(), text>:
+        val state = self.state_v2()?
+        if state.primary_custody.is_some() and not state.primary_custody.unwrap().retired_v3(): return Err("workspace-primary-custody-retained")
+        if state.probe_custody.is_some() and state.probe_custody.unwrap().retained_v3(): return Err("machine-probe-capture-retained")
+        Ok(())
+
+    # A settled source with a written root leaves runtime-active as `retained-returned`
+    # (distinct from the pre-reserve `retained`), never `returned`: root, exclusion and
+    # the storage lease stay in the original custody.
+    pub(package) fn source_retained_v3() -> Result<(), text>:
+        val state = self.state_v2()?
+        if state.source_custody.is_none() or not state.source_custody.unwrap().retained_returned_v3(): return Err("machine-fresh-workspace-source-retention-unproven")
+        fresh_workload_states_v2[self.slot].source_phase = "retained-returned"
+        Ok(())
+
+    # The settle publication was reserved and its commit outcome is unknown.
+    pub(package) fn settlement_publication_uncertain_v3() -> Result<bool, text>:
+        val state = self.state_v2()?
+        Ok(state.uncertain and not state.settled and state.permit == "settlement-reserved")
+
+    # Only after store readback proved the reserved settle batch was NOT committed
+    # (store head == history head): release the reservation so the batch is rebuilt.
+    pub(package) fn settlement_publication_abandoned_v3() -> Result<(), text>:
+        val state = self.state_v2()?
+        if not state.uncertain or state.settled or state.permit != "settlement-reserved": return Err("machine-fresh-workload-settlement-publication-not-pending")
+        fresh_workload_states_v2[self.slot].uncertain = false
+        fresh_workload_states_v2[self.slot].permit = "idle"
+        fresh_workload_states_v2[self.slot].settlement = None
+        Ok(())
+
     pub fn source_begin_v3() -> Result<(), text>:
         val state = self.state_v2()?
         if state.closed or state.record.is_some() or state.source_phase != "none": return Err("machine-fresh-workspace-source-already-attempted")
