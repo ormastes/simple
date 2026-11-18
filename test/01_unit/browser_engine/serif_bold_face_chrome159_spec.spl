@@ -24,6 +24,9 @@ dark = 765 - (r+g+b); extent = columns with dark > 150.
 `H` left stem, dark of x=0..5: h3 row 14 Chrome `0 168 703 765 560 48` (2244),
 base 1347; `<b>` row 50 Chrome `8 312 750 695 152 0` (1917), base 1155.
 Mismatched px (dark delta > 24) vs Chrome: h3 1297 -> 359, `<b>` 1022 -> 249.
+Grayscale path (device size > 48 px), `<b style="font-size:60px">H</b>` at
+0,0: Chrome row 25 x=0..15 dark `0 0 0 0 0 0 705 765x8 225` (7050); base
+`0x7 765x5 573` (4398, the regular stem); head 7074.
 """
 
 """
@@ -43,6 +46,9 @@ val H: i32 = 100
 
 fn _page() -> text:
     "<!doctype html><html><body style=\"margin:0;background:#fff\"><h3 style=\"margin:0;position:absolute;left:0;top:2px;color:#000\">Hamburgefonstiv</h3><b style=\"position:absolute;left:0;top:40px;font-size:16px;color:#000\">Hamburgefonstiv</b><span style=\"position:absolute;left:0;top:70px;font-size:16px;color:#000\">Hamburgefonstiv</span></body></html>"
+
+fn _page_60() -> text:
+    "<!doctype html><html><body style=\"margin:0;background:#fff\"><b style=\"position:absolute;left:0;top:0;font-size:60px;color:#000\">H</b></body></html>"
 
 fn _dark(px: u32) -> i32:
     765 - (((px >> 16) & 0xFFu32) + ((px >> 8) & 0xFFu32) + (px & 0xFFu32)).to_i32()
@@ -72,14 +78,18 @@ fn _band_right(px: [u32], y0: i32, y1: i32) -> i32:
         y = y + 1
     right
 
-# Summed dark of x=0..5 on row y (the `H` left stem).
-fn _stem_dark(px: [u32], y: i32) -> i32:
+# Summed dark of x=0..n-1 on row y.
+fn _row_dark(px: [u32], y: i32, n: i32) -> i32:
     var sum = 0
     var x = 0
-    while x < 6:
+    while x < n:
         sum = sum + _dark(px[y * W + x])
         x = x + 1
     sum
+
+# Summed dark of x=0..5 on row y (the `H` left stem).
+fn _stem_dark(px: [u32], y: i32) -> i32:
+    _row_dark(px, y, 6)
 
 fn _within_pct(ours: i32, chrome: i32, pct: i32) -> bool:
     val d = if ours > chrome: ours - chrome else: chrome - ours
@@ -123,3 +133,12 @@ describe "bold serif face against Chrome 159":
         step("Chrome ink extent x=0..111, band dark 286470, within 3%")
         expect(_band_right(px, 67, 100)).to_equal(111)
         expect(_within_pct(_band_dark(px, 67, 100), 286470, 3)).to_be(true)
+
+    it "AC-4: 60px bold serif (grayscale raster path, > 48 px) paints Liberation Serif Bold":
+        if not file_exists(SERIF_BOLD):
+            skip("no Liberation Serif Bold on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(_page_60(), W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome H stem row 25 x=0..15 `0x6 705 765x8 225` dark 7050 (regular face 4398), within 3%")
+        expect(_within_pct(_row_dark(px, 25, 16), 7050, 3)).to_be(true)
