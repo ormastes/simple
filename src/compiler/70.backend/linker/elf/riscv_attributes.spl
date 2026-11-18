@@ -124,6 +124,7 @@ fn riscv_attr_append_u32(bytes: [i64], value: i64) -> [i64]:
 fn elf_riscv_attributes(objects: [ElfObject]) -> Result<[i64], text>:
     var architectures: [text] = []
     var merged: {i64: i64} = {}
+    var carried: {i64: bool} = {}
     var present = false
     var first = true
     for object in objects:
@@ -131,6 +132,8 @@ fn elf_riscv_attributes(objects: [ElfObject]) -> Result<[i64], text>:
         present = present or attributes.present
         architectures.push(attributes.arch)
         val values = attributes.numbers
+        for key in [4, 6, 8, 10, 12]:
+            if values.has(key): carried[key] = true
         val stack = if values.has(4): values[4] else: 16
         if stack <= 0 or (stack & (stack - 1)) != 0: return Err("invalid RISC-V stack alignment attribute")
         if not first and merged[4] != stack: return Err("incompatible RISC-V stack alignment attributes")
@@ -163,15 +166,17 @@ fn elf_riscv_attributes(objects: [ElfObject]) -> Result<[i64], text>:
     val arch: text = match riscv_isa_merge(architectures):
         case Ok(v): v
         case Err(e): return Err(e)
+    # ld.lld 18 output shape: only int tags some input carried, nonzero, in tag
+    # order, then the arch string. Tags 14/16 are validated above but not
+    # written (lld 18 reports them as "invalid tag" and drops them).
     var body: [i64] = []
-    for key in [4, 5, 6, 8, 10, 12, 14, 16]:
-        if key == 5:
-            body.push(5)
-            for byte in arch.bytes(): body.push(byte as i64)
-            body.push(0)
-        elif merged.has(key):
+    for key in [4, 6, 8, 10, 12]:
+        if carried.has(key) and merged.has(key) and merged[key] != 0:
             body = riscv_attr_append_number(body, key)
             body = riscv_attr_append_number(body, merged[key])
+    body.push(5)
+    for byte in arch.bytes(): body.push(byte as i64)
+    body.push(0)
     var result: [i64] = [65]
     result = riscv_attr_append_u32(result, 15 + body.len())
     for byte in "riscv".bytes(): result.push(byte as i64)
