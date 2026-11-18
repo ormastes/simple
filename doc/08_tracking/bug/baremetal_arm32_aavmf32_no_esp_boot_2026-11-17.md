@@ -1,36 +1,43 @@
-# Baremetal arm32: AAVMF32 does not load the ESP (2026-11-17)
+# Baremetal arm32: AAVMF32 does not boot the freestanding hello (2026-11-17)
 
 - id: `baremetal_arm32_aavmf32_no_esp_boot_2026_11_17`
 - severity: P3
-- status: root-caused (verification-pending)
+- status: verification-pending
 
-## What works
-`native-build examples/09_embedded/freestanding_hello/main.spl --target armv7-unknown-none`
-and `--target arm-unknown-none` each exit 0 (1784-byte objects, phase-2 compiler,
-WSL Ubuntu-24.04).
+## Root causes (two, both found by the xcprep/nbm-arm32 lanes)
+1. `lld-link -machine:arm` writes PE machine `0x01c4` (ARMNT). EDK2 ARM loads
+   only `0x01c2` (ARM Thumb mixed). lld-link has no option to pick `0x01c2`.
+2. `-drive file=fat:rw:<dir>` (QEMU vvfat) is not picked up by AAVMF32. A real
+   vfat image on `virtio-blk-pci` is.
 
-## Blocker (precise)
-`/usr/share/AAVMF/AAVMF32_CODE.fd` is present. Under `qemu-system-arm -machine
-virt`, though, it does not load `EFI/BOOT/BOOTARM.EFI` from the
-`-drive file=fat:rw:<esp>` ESP. That is the same pattern that works for
-AAVMF (aarch64) in `check-baremetal-efi-boot.shs`. So no real-firmware path
-reaches the image. The check also has no `arm32` case, and there is no
-`crt0_arm32.S` (a PL011 at 0x09000000, `ldrb`/`strb`, `wfi`).
+## Fix
+`scripts/check/check-baremetal-efi-boot.shs --arch arm32`:
+- `pe_patch_machine`: checked rewrite of the 2 machine bytes. It refuses unless
+  `MZ` + `PE\0\0` at e_lfanew + machine `0x01c4`, and reads `0x01c2` back.
+  `--selftest` (also run before every scan) proves it on 6 fixtures (good header
+  rewritten, exactly 1 byte changed; re-patch, bad MZ, bad PE sig, amd64 machine
+  and empty file all refused).
+- 64 MiB FAT32 ESP made with `mkfs.vfat` + `mmd`/`mcopy`, attached as
+  `-device virtio-blk-pci`; AAVMF32 pflash unit 0/1; cortex-a15; never `-kernel`.
+- `crt0_arm32.S` (ARM state, PL011 0x09000000, pc-relative, AAPCS i64 pairs).
+- Thumb PE loader stub uses 32-bit UEFI table offsets (BootServices +60,
+  AllocatePages +32) and ARMv7 cache maintenance before jumping to the image.
 
-## Next step
-Find out why AAVMF32 does not use the virtual FAT drive. Try `virtio-blk-device`
-with a real FAT image made by `mkfs.vfat`/`mtools`, not QEMU vvfat. Or use
-U-Boot `qemu_arm_defconfig` (built with clang) as the firmware, with a `bootefi`
-or `go` payload. Never `-kernel`.
+## Status of evidence
+See the PR body for the boot transcript. Board path: the BOOTARM.EFI + crt0 with
+`-DBM_UART=<board PL011 base>` (`BM_A32_UART`); board run not evidenced.
 
-## Root cause (2026-11-17, WSL Ubuntu-24.04, qemu-system-arm 8.2.2)
-The ESP was found. The image was rejected: `BdsDxe: failed to load Boot0001 ...: Unsupported`.
-`lld-link -machine:arm` writes PE Machine `0x01c4` (ARMNT), but EDK2 ARM accepts only
-`0x01c2` (ARMTHUMB_MIXED). Patching the two bytes at `e_lfanew+4` to `c2 01` makes
-AAVMF32 start the app (`BdsDxe: starting Boot0001`, test app printed over ConOut) from
-a `mkfs.vfat` superfloppy image on `-device virtio-blk-pci`. The same unpatched image failed
-on virtio-blk-pci (legacy and modern), nvme, usb-storage and virtio-scsi, so the bus was
-never the problem. Real-firmware path, no U-Boot, no `-kernel`.
-Not yet verified: QEMU vvfat (`fat:rw:`) with the patched image.
-Next: patch Machine to `0x01c2` in the arm32 EFI image build; add the `arm32` case to
-`check-baremetal-efi-boot.shs`. Firmware provisioning: `scripts/setup/provision-xc-firmware.shs`.
+## Third cause: arm32 backend ABI vs i64 runtime (found 2026-11-18)
+After the PE patch the image booted, printed line 1, then took a data abort at the
+next `print`. The native arm32 backend passes pointer/handle args to `rt_*` as
+32-bit values (ptr in r0, i64 len in r2:r3; two handles in r0/r1) while `bm_rt.spl`
+declares them `i64` (r0:r1, r2:r3), so r1 (and the 2nd handle) was garbage.
+Workaround (tagged, in `crt0_arm32.S`): AAPCS shims zero-extend then tail-call the
+`bm32_<name>` bodies. Proper fix (open): backend and runtime must agree on the
+width of handle/pointer params on 32-bit targets (declare them `usize`-width or
+make the backend pass i64 pairs). Repro: remove the shims -> abort at 2nd print.
+
+## Evidence (WSL Ubuntu-24.04, qemu-system-arm, AAVMF32, vfat ESP on virtio-blk-pci)
+`check-baremetal-efi-boot.shs --arch arm32`: `PASS -- 1 arch(es) booted through real
+firmware`; serial: `hello from Simple bare metal | n=42 | ints 0 -7
+9223372036854775807 -9223372036854775808 | panic: boom`, no "after panic".

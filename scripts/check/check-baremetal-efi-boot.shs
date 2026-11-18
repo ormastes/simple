@@ -1,5 +1,5 @@
 #!/bin/sh
-# Baremetal build + REAL-FIRMWARE boot check (x86_64, i686, aarch64, riscv64, riscv32).
+# Baremetal build + REAL-FIRMWARE boot check (x86_64, i686, aarch64, riscv64, riscv32, arm32).
 #
 # Builds examples/09_embedded/freestanding_hello/main.spl (or $BM_SRC) for
 # <arch>-unknown-none with the Simple compiler (--emit-object), links it with
@@ -12,6 +12,9 @@
 #   i686    OVMF32 (IA32) pflash -> FAT ESP BOOTIA32.EFI -> flat image linked at 16 MiB
 #   aarch64 AAVMF pflash  -> FAT ESP BOOTAA64.EFI -> flat image
 #   riscv64 OpenSBI fw_payload (v1.4, built with clang LLVM=1) via -bios
+#   arm32   (opt-in, --arch arm32) AAVMF32 pflash, qemu-system-arm virt/cortex-a15, vfat ESP image
+#           on virtio-blk-pci, BOOTARM.EFI. lld-link emits PE machine 0x01c4 but EDK2 ARM
+#           loads only 0x01c2: pe_patch_machine rewrites it (checked; --selftest proves it).
 #   riscv32 OpenSBI 1.7 fw_payload (XLEN=32, clang LLVM=1) via -bios; uses the
 #           32-bit runtime bm_rt32.spl (bm_rt.spl declares i64 params, which the
 #           32-bit backend does not pass that way)
@@ -40,6 +43,7 @@ set -u
 
 arch_sel=all
 keep=0
+selftest_only=0
 linker=lld
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -47,6 +51,7 @@ while [ $# -gt 0 ]; do
         --linker) linker="$2"; shift 2
             case "$linker" in lld|simple) ;; *) echo "ERROR -- nothing was checked (unsupported --linker $linker)"; exit 2 ;; esac ;;
         --keep) keep=1; shift ;;
+        --selftest) selftest_only=1; shift ;;
         -h|--help) sed -n "2,39p" "$0"; exit 0 ;;
         *) echo "unknown argument: $1"; echo "ERROR -- nothing was checked (bad argument)"; exit 2 ;;
     esac
@@ -71,13 +76,57 @@ n=42
 ints 0 -7 9223372036854775807 -9223372036854775808
 panic: boom"
 
+# pe_patch_machine <file>: lld-link -machine:arm writes IMAGE_FILE_MACHINE_ARMNT
+# (0x01c4) but EDK2 ARM loads only IMAGE_FILE_MACHINE_ARMTHUMB_MIXED (0x01c2);
+# lld-link has no option to choose it. Checked rewrite of the 2 machine bytes:
+# fails unless the file has the DOS 'MZ' magic, a 'PE\0\0' signature at e_lfanew
+# and machine == 0x01c4, and reads 0x01c2 back afterwards.
+pe_patch_machine() {
+    pf=$1
+    [ -s "$pf" ] || return 1
+    [ "$(od -An -tx1 -N2 "$pf" | tr -d ' \n')" = 4d5a ] || return 1
+    lfa=$(od -An -tu4 -j60 -N4 "$pf" | tr -d ' \n')
+    [ -n "$lfa" ] && [ "$lfa" -ge 64 ] || return 1
+    [ "$(od -An -tx1 -j"$lfa" -N4 "$pf" | tr -d ' \n')" = 50450000 ] || return 1
+    [ "$(od -An -tx1 -j$((lfa + 4)) -N2 "$pf" | tr -d ' \n')" = c401 ] || return 1
+    printf '\302\001' | dd of="$pf" bs=1 seek=$((lfa + 4)) conv=notrunc 2>/dev/null || return 1
+    [ "$(od -An -tx1 -j$((lfa + 4)) -N2 "$pf" | tr -d ' \n')" = c201 ]
+}
+
+# Fixture proof: a good ARMNT header is rewritten (and nothing else changes);
+# wrong magic, wrong signature, already-patched and wrong-machine files are all
+# refused. Returns non-zero on any mismatch.
+pe_selftest() {
+    t=$(mktemp -d "${TMPDIR:-/tmp}/bm-pe-selftest.XXXXXX") || return 1
+    mk() { # mk <file> <mz> <sig> <machine-escaped>
+        { printf "$2"; dd if=/dev/zero bs=1 count=58 2>/dev/null; printf '\100\000\000\000'
+          printf "$3$4"; printf 'tail'; } > "$1"
+    }
+    mk "$t/good" 'MZ' 'PE\000\000' '\304\001'
+    cp "$t/good" "$t/good.orig"
+    pe_patch_machine "$t/good" || { echo "selftest: good header refused"; rm -rf "$t"; return 1; }
+    [ "$(od -An -tx1 -j68 -N2 "$t/good" | tr -d ' \n')" = c201 ] || { echo "selftest: not patched"; rm -rf "$t"; return 1; }
+    [ "$(cmp -l "$t/good" "$t/good.orig" | wc -l | tr -d ' ')" = 1 ] || { echo "selftest: more than 1 byte changed"; rm -rf "$t"; return 1; }
+    pe_patch_machine "$t/good" && { echo "selftest: re-patch accepted"; rm -rf "$t"; return 1; }
+    mk "$t/badmz" 'XX' 'PE\000\000' '\304\001'
+    pe_patch_machine "$t/badmz" && { echo "selftest: bad MZ accepted"; rm -rf "$t"; return 1; }
+    mk "$t/badsig" 'MZ' 'XE\000\000' '\304\001'
+    pe_patch_machine "$t/badsig" && { echo "selftest: bad PE signature accepted"; rm -rf "$t"; return 1; }
+    mk "$t/amd64" 'MZ' 'PE\000\000' '\144\206'
+    pe_patch_machine "$t/amd64" && { echo "selftest: amd64 machine accepted"; rm -rf "$t"; return 1; }
+    : > "$t/empty"
+    pe_patch_machine "$t/empty" && { echo "selftest: empty file accepted"; rm -rf "$t"; return 1; }
+    rm -rf "$t"
+    return 0
+}
+
 need_tools="$CLANG ld.lld lld-link llvm-objcopy llvm-nm llvm-readelf timeout"
 for t in $need_tools; do
     if ! command -v "$t" >/dev/null 2>&1; then
         echo "ERROR -- nothing was checked (missing tool: $t)"; exit 2
     fi
 done
-if [ ! -x "$SIMPLE_BIN" ]; then
+if [ $selftest_only -eq 0 ] && [ ! -x "$SIMPLE_BIN" ]; then
     echo "ERROR -- nothing was checked (no compiler at SIMPLE_BIN=$SIMPLE_BIN)"; exit 2
 fi
 
@@ -94,6 +143,10 @@ firmware_for() {
         aarch64)
             c=${AAVMF_CODE:-/usr/share/AAVMF/AAVMF_CODE.fd}; v=${AAVMF_VARS:-/usr/share/AAVMF/AAVMF_VARS.fd}
             q=qemu-system-aarch64 ;;
+        arm32)
+            c=${AAVMF32_CODE:-/usr/share/AAVMF/AAVMF32_CODE.fd}; v=${AAVMF32_VARS:-/usr/share/AAVMF/AAVMF32_VARS.fd}
+            q=qemu-system-arm
+            command -v mkfs.vfat >/dev/null 2>&1 && command -v mcopy >/dev/null 2>&1 && command -v mmd >/dev/null 2>&1 || return ;;
         riscv64)
             command -v qemu-system-riscv64 >/dev/null 2>&1 && command -v make >/dev/null 2>&1 \
                 && echo "opensbi - qemu-system-riscv64"
@@ -106,10 +159,12 @@ firmware_for() {
     [ -f "$c" ] && [ -f "$v" ] && command -v "$q" >/dev/null 2>&1 && echo "$c $v $q"
 }
 
+tgt_for() { if [ "$1" = arm32 ]; then echo armv7-unknown-none; else echo "$1-unknown-none"; fi; }
+
 compile_obj() {
     # compile_obj <src> <arch> <out> <log>
     SIMPLE_FILE_WORKERS=0 timeout 900 "$SIMPLE_BIN" native-build "$1" \
-        --target "$2-unknown-none" --emit-object -o "$3" > "$4" 2>&1
+        --target "$(tgt_for "$2")" --emit-object -o "$3" > "$4" 2>&1
     rc=$?
     [ $rc -eq 0 ] && [ -s "$3" ]
 }
@@ -135,7 +190,7 @@ build_image() {
     for s in $RT_SYMS; do
         m=$(llvm-nm --defined-only "$d/bm_rt.o" | awk -v s="$s" -v m="$rtm" '{ n=$NF; if (n ~ ("\\." m "\\." s "$") || n == (m "." s)) print n }' | head -1)
         [ -n "$m" ] || { why="rt-missing-$s"; return 1; }
-        redef="$redef --redefine-sym $m=$s"
+        if [ "$a" = arm32 ]; then redef="$redef --redefine-sym $m=bm32_$s"; else redef="$redef --redefine-sym $m=$s"; fi
     done
     llvm-objcopy $redef "$d/bm_rt.o" "$d/bm_rt_abi.o" || { why=rt-redefine; return 1; }
     case "$a" in
@@ -144,6 +199,7 @@ build_image() {
         aarch64) cflags="--target=aarch64-unknown-elf -DBM_UART=${BM_A64_UART:-0x09000000}" ;;
         riscv64) cflags="--target=riscv64-unknown-elf -march=rv64imac -mabi=lp64 -DBM_UART=${BM_RV_UART:-0x10000000}" ;;
         riscv32) cflags="--target=riscv32-unknown-elf -march=rv32imac -mabi=ilp32 -DBM_UART=${BM_RV_UART:-0x10000000}" ;;
+        arm32) cflags="--target=armv7-unknown-none-eabi -mfloat-abi=soft -DBM_UART=${BM_A32_UART:-0x09000000}" ;;
     esac
     "$CLANG" $cflags -c "$RT_DIR/crt0_$a.S" -o "$d/crt0.o" > "$d/crt0.log" 2>&1 || { why=crt0; return 1; }
     if [ "$linker" = simple ] && [ "$a" = i686 ]; then
@@ -156,7 +212,7 @@ build_image() {
         return 0
     fi
     printf '%s\n' 'ENTRY(_start)' \
-        "SECTIONS { . = $base; .text : { *(.text.boot) *(.text*) } . = ALIGN(16); .rodata : { *(.rodata*) *(.srodata*) } . = ALIGN(16); .data : { *(.data*) *(.sdata*) *(.bss*) *(.sbss*) *(COMMON) } }" > "$d/image.ld"
+        "SECTIONS { . = $base; .text : { *(.text.boot) *(.text*) } . = ALIGN(16); .rodata : { *(.rodata*) *(.srodata*) } . = ALIGN(16); .data : { *(.data*) *(.sdata*) *(.bss*) *(.sbss*) *(COMMON) } /DISCARD/ : { *(.ARM.exidx*) *(.ARM.extab*) *(.comment) } }" > "$d/image.ld"
     if [ "$linker" = simple ]; then
         # In-house Simple linker; lld links the same inputs only as the
         # section-layout reference (allocated name/addr/size must match).
@@ -194,7 +250,7 @@ build_image() {
     if [ "$a" != riscv64 ] && [ "$a" != riscv32 ]; then
         llvm-readelf -r "$d/crt0.o" "$d/main.o" "$d/bm_rt_abi.o" > "$d/relocs.txt" 2>&1 || {
             why=readelf; return 1; }
-        if grep -E -q 'R_X86_64_(32S?|64) |R_386_(32|16|8) |R_AARCH64_(ABS(16|32|64)|MOVW_UABS)' "$d/relocs.txt"; then
+        if grep -E -q 'R_X86_64_(32S?|64) |R_386_(32|16|8) |R_AARCH64_(ABS(16|32|64)|MOVW_UABS)|R_ARM_(ABS32|MOVW_ABS_NC|MOVT_ABS|THM_MOVW_ABS_NC|THM_MOVT_ABS|TARGET1) ' "$d/relocs.txt"; then
             why=absolute-reloc; return 1
         fi
     fi
@@ -207,6 +263,7 @@ build_efi() {
     case "$a" in
         x86_64) wt=x86_64-unknown-windows; mach=amd64; boot=BOOTX64.EFI; sdef="" ;;
         i686) wt=i686-unknown-windows; mach=x86; boot=BOOTIA32.EFI; sdef="-DIA32 -DIMAGE_BASE=$I686_BASE" ;;
+        arm32) wt=thumbv7-unknown-windows; mach=arm; boot=BOOTARM.EFI; sdef="-DARM32" ;;
         *) wt=aarch64-unknown-windows; mach=arm64; boot=BOOTAA64.EFI; sdef="" ;;
     esac
     mkdir -p "$d/esp/EFI/BOOT"
@@ -225,7 +282,14 @@ build_efi() {
 __asm__(".section .rdata,\"dr\"\n.balign 16\nimage_start:\n.incbin \"image.bin\"\nimage_end:\n.section .text\n");
 extern const unsigned char image_start[], image_end[];
 typedef unsigned long long u64;
-#if defined(IA32)
+#if defined(ARM32)
+/* UEFI ARM 32: UINTN/pointers 32 bit, EFI_PHYSICAL_ADDRESS 64. BootServices at
+ * SystemTable+60, AllocatePages at +32; AnyPages. */
+typedef unsigned int uintn;
+#define ST_BS_OFF 60
+#define BS_ALLOC_OFF 32
+#define ALLOC_TYPE 0
+#elif defined(IA32)
 /* UEFI IA32: UINTN/pointers are 32 bit. SystemTable->BootServices at 60,
  * BootServices->AllocatePages at 32. crt0_i686 is position independent
  * (GOTPC/GOTOFF), so AnyPages works; OVMF IA32 has no free memory at a fixed
@@ -247,6 +311,14 @@ u64 efi_main(void *h, void *st) {
     u64 n = (u64)(image_end - image_start), addr = 0;
     if (alloc(ALLOC_TYPE, 1, (n + 4095) / 4096, &addr) != 0) { for (;;) {} }
     for (u64 i = 0; i < n; i++) ((volatile unsigned char *)(uintn)addr)[i] = image_start[i];
+#if defined(__arm__)
+    /* ARMv7 cache maintenance by MVA: clean D to PoU, invalidate I, flush BP. */
+    for (u64 i = 0; i < n; i += 32) { unsigned long a = (unsigned long)addr + (unsigned long)i; __asm__ volatile("mcr p15, 0, %0, c7, c11, 1" :: "r"(a)); }
+    __asm__ volatile("dsb");
+    for (u64 i = 0; i < n; i += 32) { unsigned long a = (unsigned long)addr + (unsigned long)i; __asm__ volatile("mcr p15, 0, %0, c7, c5, 1" :: "r"(a)); }
+    __asm__ volatile("mcr p15, 0, %0, c7, c5, 6" :: "r"(0));
+    __asm__ volatile("dsb\nisb");
+#endif
 #if defined(__aarch64__)
     for (u64 i = 0; i < n; i += 64) __asm__ volatile("dc cvau, %0" :: "r"(addr + i));
     __asm__ volatile("dsb ish");
@@ -287,12 +359,16 @@ transcript_ok() {
     cmp -s "$1.got" "$1.want" && ! grep -a -q "after panic" "$1"
 }
 
+if ! pe_selftest; then echo "FAIL -- pe_patch_machine selftest"; exit 1; fi
+if [ $selftest_only -eq 1 ]; then echo "PASS -- pe_patch_machine selftest (6 fixtures)"; exit 0; fi
+
 booted=0
 failed=""
 checked=0
 case "$arch_sel" in
-    all) arches="x86_64 aarch64 riscv64" ;;   # riscv32/i686 are opt-in (--arch): need OPENSBI32_SRC / OVMF32 firmware
-    x86_64|i686|aarch64|riscv64|riscv32) arches="$arch_sel" ;;
+    arm32) [ "$linker" = simple ] && { echo "ERROR -- nothing was checked (--linker simple has no arm32 lane yet: needs efi_stub_arm32.S)"; exit 2; }; arches=arm32 ;;
+    all) arches="x86_64 aarch64 riscv64" ;;   # riscv32/i686/arm32 are opt-in (--arch): need OPENSBI32_SRC / OVMF32 firmware
+    x86_64|i686|aarch64|riscv64|riscv32|arm32) arches="$arch_sel" ;;
     *) echo "ERROR -- nothing was checked (unsupported --arch $arch_sel)"; exit 2 ;;
 esac
 
@@ -325,6 +401,22 @@ for a in $arches; do
                 -drive if=pflash,format=raw,readonly=on,file="$d/code.fd" \
                 -drive if=pflash,format=raw,file="$d/vars.fd" \
                 -drive file=fat:rw:"$d/esp",format=raw ;;
+        arm32)
+            build_efi "$a" "$d" || { echo "[$a] EFI wrap failed ($d/efi.log)"; failed="$failed $a(efi)"; continue; }
+            # EDK2 ARM accepts only machine 0x01c2; lld-link emits 0x01c4.
+            pe_patch_machine "$d/esp/EFI/BOOT/BOOTARM.EFI" || { echo "[$a] PE machine patch failed"; failed="$failed $a(pe-patch)"; continue; }
+            # Real vfat ESP image on virtio-blk-pci (AAVMF32 ignores QEMU vvfat).
+            truncate -s 64M "$d/esp.img"
+            mkfs.vfat -F 32 "$d/esp.img" > "$d/mkfs.log" 2>&1 \
+                && mmd -i "$d/esp.img" ::EFI ::EFI/BOOT > "$d/mtools.log" 2>&1 \
+                && mcopy -i "$d/esp.img" "$d/esp/EFI/BOOT/BOOTARM.EFI" ::EFI/BOOT/BOOTARM.EFI >> "$d/mtools.log" 2>&1 \
+                || { echo "[$a] vfat ESP build failed ($d/mkfs.log, $d/mtools.log)"; failed="$failed $a(esp)"; continue; }
+            cp "$fw_vars" "$d/vars.fd"; cp "$fw_code" "$d/code.fd"
+            set -- -machine virt -cpu cortex-a15 -m "${BM_QEMU_MEM:-512M}" \
+                -drive if=pflash,format=raw,unit=0,readonly=on,file="$d/code.fd" \
+                -drive if=pflash,format=raw,unit=1,file="$d/vars.fd" \
+                -drive if=none,id=esp,file="$d/esp.img",format=raw \
+                -device virtio-blk-pci,drive=esp ;;
         riscv64)
             build_opensbi "$d/image.bin" "$d" || { echo "[$a] OpenSBI fw_payload build failed ($d)"; failed="$failed $a(opensbi)"; continue; }
             set -- -machine virt -cpu rv64 -smp 1 -m "${BM_QEMU_MEM:-256M}" \
