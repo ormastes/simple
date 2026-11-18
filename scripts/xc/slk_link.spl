@@ -1,13 +1,15 @@
 # simplelink survey driver: link ET_REL objects (+ .a archives, + ET_DYN shared
 # objects) with the pure-Simple ELF linker and write the image.
 # usage: simple run slk_link.spl <arch> <entry> <out> <obj>... [-a <archive>]...
-#            [-s <shared.so> <needed-name>]... [-i <interp>] [-m static|dynamic|pie|static-pie]
+#            [-s <shared.so> <needed-name>]... [-i <interp>] [-m static|dynamic|pie|static-pie] [-freebsd]
+#   -freebsd: brand the image ELFOSABI_FREEBSD (freebsd_brand_image)
 #   arch: x86_64 | aarch64 | riscv64 | i386 | arm32 | riscv32
 use std.nogc_sync_mut.sffi.system.{args}
 use std.io_runtime.{file_read_bytes, file_write_bytes}
 use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest,
     ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE}
 use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf.freebsd_hosted.{freebsd_brand_image}
 
 fn arch_of(name: text) -> Result<RelocArch, text>:
     if name == "x86_64": return Ok(RelocArch.X86_64)
@@ -54,6 +56,7 @@ fn main() -> i64:
     var shared_names: [text] = []
     var interp = ""
     var mode = ELF_LINK_STATIC_EXEC
+    var freebsd = false
     var j = i + 3
     while j < a.len():
         if a[j] == "-a":
@@ -63,6 +66,8 @@ fn main() -> i64:
             shared.push(read_i64(a[j + 1]))
             shared_names.push(a[j + 2])
             j = j + 2
+        elif a[j] == "-freebsd":
+            freebsd = true
         elif a[j] == "-i":
             j = j + 1
             interp = a[j]
@@ -86,6 +91,12 @@ fn main() -> i64:
     var bytes: [u8] = []
     for b in img:
         bytes.push((b & 0xff) as u8)
+    if freebsd:
+        val br = freebsd_brand_image(bytes)
+        if br.is_err():
+            print "SLK_ERR {br.unwrap_err()}"
+            return 1
+        bytes = br.unwrap()
     if not file_write_bytes(out, bytes):
         print "SLK_ERR write failed: {out}"
         return 1

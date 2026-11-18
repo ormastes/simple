@@ -1,0 +1,69 @@
+# Internal ELF linker: versioned symbol names in relocatable objects.
+# FreeBSD libc.a defines `openat` only as `openat@@FBSD_1.2` (default version)
+# plus `openat@FBSD_1.1`. ld.lld binds a plain `openat` reference to the
+# default-version definition; a non-default `@` name never satisfies it.
+#
+# Also: COMDAT section groups (FreeBSD .freebsd.noteG) keep only the first
+# object's copy.
+#
+# @cover src/compiler/70.backend/linker/elf_parser.spl
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+
+use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_LINK_STATIC_EXEC}
+use compiler.backend.linker.elf_parser.{elf_parse_object}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes}
+
+val FIX: text = "test/fixtures/linker/elf"
+
+fn load_path(path: text) -> [i64]:
+    val raw = file_read_bytes(path)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn rd16(b: [i64], o: i64) -> i64:
+    (b[o] & 0xff) | ((b[o + 1] & 0xff) << 8)
+
+fn rd32(b: [i64], o: i64) -> i64:
+    rd16(b, o) | (rd16(b, o + 2) << 16)
+
+fn rd64(b: [i64], o: i64) -> i64:
+    rd32(b, o) | (rd32(b, o + 4) << 32)
+
+fn note_tag_size(b: [i64]) -> i64:
+    # sum of SHT_NOTE (7) section sizes whose first word is namesz 8 ("FreeBSD")
+    val shoff = rd64(b, 0x28)
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < rd16(b, 0x3c):
+        val h = shoff + i * 64
+        if rd32(b, h + 4) == 7 and rd32(b, rd64(b, h + 24)) == 8:
+            total = total + rd64(b, h + 32)
+        i = i + 1
+    total
+
+describe "ELF COMDAT groups":
+    it "keeps one copy of a COMDAT group present in two objects":
+        val r = elf_link(ElfLinkRequest(objects: [load_path("{FIX}/comdat_note_a_a64.o"), load_path("{FIX}/comdat_note_b_a64.o")],
+            archives: [], shared: [], entry: "_start", target: RelocArch.AArch64, mode: ELF_LINK_STATIC_EXEC, interp: ""))
+        if r.is_err(): print "link error: {r.unwrap_err()}"
+        expect(note_tag_size(r.unwrap())).to_equal(24)
+
+describe "ELF object symbol versions":
+    it "names a default-version definition by its base name":
+        val o = elf_parse_object(file_read_bytes("{FIX}/symver_def_a64.o")).unwrap()
+        var names: [text] = []
+        for s in o.symbols: names.push(s.name)
+        expect(names.contains("foo")).to_equal(true)
+        expect(names.contains("foo@@V_2")).to_equal(false)
+        expect(names.contains("foo@V_1")).to_equal(true)
+
+    it "links a plain reference against name@@version like ld.lld":
+        val r = elf_link(ElfLinkRequest(objects: [load_path("{FIX}/symver_use_a64.o"), load_path("{FIX}/symver_def_a64.o")],
+            archives: [], shared: [], entry: "_start", target: RelocArch.AArch64, mode: ELF_LINK_STATIC_EXEC, interp: ""))
+        if r.is_err(): print "link error: {r.unwrap_err()}"
+        expect(r.is_ok()).to_equal(true)
