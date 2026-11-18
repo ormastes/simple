@@ -1,9 +1,11 @@
-# @req REQ-MIR-MATCH-VALUE-TYPE-001
+# @req REQ-SSPEC-COMPILER
 # @cover src/compiler/50.mir/mir_lowering_stmts.spl
 # @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
 # Regression pins: a value-position `if val ... else: match ...` and an untyped
 # `var x = match ...` whose arms include a diverging `return` must keep the
-# payload type on the bound local (never Unit/void in LLVM).
+# payload type on the bound MIR local (never MirTypeKind.Unit). This spec inspects
+# MIR only; the LLVM half (a void-typed call operand is a recorded codegen error)
+# is test/01_unit/compiler/backend/llvm_void_call_operand_error_spec.spl.
 use std.spec.{describe, it, expect}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.parser_types.{Module}
@@ -16,7 +18,11 @@ use compiler.mir.mir.*
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir.mir_lowering_types.{MirLowering}
 
-# Returns [ret_f64, ret_other, call_args_f64, call_args_unit] for fn `target`.
+# Returns [ret_f64, ret_other, call_args_f64, call_args_unit, field_base_unit,
+# field_base_typed] for fn `target`. The field_base_* slots classify the local
+# each GetField reads from (the match-bound local for `library.handle`): Unit
+# typed, or any other type. MIR let locals carry no source name, so the bound
+# local is reached through the instruction that reads it.
 fn value_type_shape(source: text) -> [i64]:
     val ast = parse_full_frontend(source, "app/main.spl", "app.main", Logger(level: 0))
     var modules: Dict<text, Module> = {}
@@ -33,6 +39,8 @@ fn value_type_shape(source: text) -> [i64]:
     var ret_other = 0
     var args_f64 = 0
     var args_unit = 0
+    var field_base_unit = 0
+    var field_base_typed = 0
     for function in mir.functions.values():
         if function.name == "target" or function.name.ends_with(".target"):
             functions = functions + 1
@@ -50,6 +58,16 @@ fn value_type_shape(source: text) -> [i64]:
                                                 if local.type_.kind == MirTypeKind.Unit:
                                                     args_unit = args_unit + 1
                                     case _: ()
+                        case MirInstKind.GetField(_, base, _):
+                            match base.kind:
+                                case MirOperandKind.Copy(id) | MirOperandKind.Move(id):
+                                    for local in function.locals:
+                                        if local.id.id == id.id:
+                                            if local.type_.kind == MirTypeKind.Unit:
+                                                field_base_unit = field_base_unit + 1
+                                            else:
+                                                field_base_typed = field_base_typed + 1
+                                case _: ()
                         case _: ()
                 match block.terminator:
                     case MirTerminator.Ret(value):
@@ -68,19 +86,20 @@ fn value_type_shape(source: text) -> [i64]:
                                 ret_other = ret_other + 1
                     case _: ()
     expect(functions).to_equal(1)
-    [ret_f64, ret_other, args_f64, args_unit]
+    [ret_f64, ret_other, args_f64, args_unit, field_base_unit, field_base_typed]
 
 describe "match value bound to a local keeps its payload type":
     it "if-val whose else tail is a match with returning arms is not void":
         val src = "enum Reply:\n    Got(value: f64)\n    Bad\n    Empty\n\nfn take(x: f64) -> f64:\n    x\n\nfn target(held: f64?, r: Reply) -> f64:\n    val completion = if val retained = held: retained else:\n        match r:\n            Reply.Got(value): value\n            Reply.Bad: return 1.0\n            _: return 2.0\n    take(completion)\n"
         val shape = value_type_shape(src)
-        expect(shape[1]).to_equal(0)
-        expect(shape[3]).to_equal(0)
-        expect(shape[2]).to_equal(1)
+        # Three valued returns: `return 1.0`, `return 2.0`, and the tail call.
+        expect([shape[0], shape[1], shape[2], shape[3], shape[4]]).to_equal([3, 0, 1, 0, 0])
 
     it "untyped var from a match with a diverging arm keeps field type":
         val src = "struct Lib:\n    handle: f64\n\nenum Loaded:\n    Opened(lib: Lib)\n    Failed(detail: f64)\n\nfn take(x: f64) -> f64:\n    x\n\nfn target(loaded: Loaded) -> f64:\n    var library = match loaded:\n        Loaded.Opened(lib): lib\n        Loaded.Failed(detail): return detail\n    take(library.handle)\n"
         val shape = value_type_shape(src)
-        expect(shape[1]).to_equal(0)
-        expect(shape[3]).to_equal(0)
-        expect(shape[2]).to_equal(1)
+        # Two valued returns: `return detail` and the tail call.
+        expect([shape[0], shape[1], shape[2], shape[3], shape[4]]).to_equal([2, 0, 1, 0, 0])
+        # `library.handle` reads a field off the match-bound local, which must be
+        # a typed local (slot 4 above pins that none of them is Unit).
+        expect(shape[5] > 0).to_equal(true)
