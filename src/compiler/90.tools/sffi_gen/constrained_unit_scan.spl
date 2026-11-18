@@ -10,13 +10,15 @@
 #                                         still honoured (inclusive, either
 #                                         side may be empty)
 #   extern fn rt_net_port(fd: i32) -> Port
+#   extern fn rt_version() -> CStr        borrowed `char*` return: copied to text
+#                                         at once (Option<text>, None on null)
 # Each extern returning a declared unit becomes a facade (checked when the unit
 # has a range, a direct projection otherwise). Externs returning anything else
 # are ignored. The range comes from the declaration itself since 2026-11-17
 # (same `where` predicate the compiler registers); the annotation comment is
 # kept only as a deprecated alias.
 
-use compiler.tools.sffi_gen.constrained_unit_gen.{ConstrainedUnitReturn, UnitReturnFacade, generate_unit_return_facade}
+use compiler.tools.sffi_gen.constrained_unit_gen.{ConstrainedUnitReturn, UnitReturnFacade, BorrowedCStrReturn, generate_unit_return_facade, generate_borrowed_cstr_facade}
 
 struct _UnitDecl:
     name: text
@@ -125,6 +127,10 @@ pub fn generate_constrained_unit_facades(source: text) -> UnitReturnFacade:
             val name = line.replace("extern fn ", "").split("(")[0].trim()
             val params = line.split("(")[1].split(")")[0]
             val ret = line.split(" -> ")[1].split("#")[0].trim()
+            if ret == "CStr":
+                val cspec = BorrowedCStrReturn(extern_name: name, params: params, arg_names: _arg_names(params))
+                out = out + generate_borrowed_cstr_facade(cspec).source + "\n"
+                continue
             val idx = _find_unit(units, ret)
             if idx >= 0:
                 val spec = ConstrainedUnitReturn(extern_name: name, params: params, arg_names: _arg_names(params), unit_name: ret, abi_type: units[idx].abi_type, range_min: units[idx].range_min, range_max: units[idx].range_max)
@@ -132,6 +138,8 @@ pub fn generate_constrained_unit_facades(source: text) -> UnitReturnFacade:
                 if r.diagnostic != "":
                     return UnitReturnFacade(source: "", diagnostic: r.diagnostic)
                 out = out + r.source + "\n"
+    if out.contains("rt_cstring_to_text(ptr)"):
+        out = "extern fn rt_cstring_to_text(ptr: i64) -> text\n\n" + out
     if out.contains("ConstraintError"):
         out = "use std.common.constraint_error.{{ConstraintError}}\n\n" + out
     UnitReturnFacade(source: out, diagnostic: "")

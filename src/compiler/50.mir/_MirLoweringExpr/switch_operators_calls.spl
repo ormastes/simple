@@ -1,4 +1,5 @@
 use compiler.mir.mir_instruction_support.{MirCallOrigin}
+use compiler.frontend.core.unit_constraint.{unit_constraint_find}
 use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol}
 use compiler.mir.mir_target_hir_symbol_writes.{mir_symbol_write_ledger_child, mir_symbol_write_ledger_adopt}
 use compiler.mir._MirLoweringExpr.enum_semantic_capture_v1.*
@@ -6780,6 +6781,14 @@ impl MirLowering:
         word per field, in declared field order. Named args are matched by name;
         otherwise falls back to positional order. Yields a pointer to the
         constructed storage (see backend translate_aggregate Struct branch)."""
+        # `Port(raw)` on a constrained unit: the compiled twin of the
+        # interpreter's boundary check. Only a side-effect-free operand is
+        # re-lowered for the check (the construction lowers it again below).
+        if args.len() == 1 and self.hir_expr_is_pure_name_v1(args[0].value):
+            val unit_decl_name = self.symbols.symbol_name_scalar_raw(symbol.id)
+            if unit_decl_name != "" and unit_constraint_find(unit_decl_name) >= 0:
+                val unit_raw = self.lower_expr(args[0].value)
+                self.emit_unit_range_check_by_name_v1(unit_raw, unit_decl_name)
         var struct_name = fallback_struct_name
         if val declaration = self.symbols.get_symbol_raw(symbol.id):
             if declaration.kind == SymbolKind.Struct:

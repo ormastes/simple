@@ -1,4 +1,7 @@
 use compiler.mir.mir_instruction_support.{MirCallOrigin}
+use compiler.types.units.unit_ops.{unit_op_is_unit}
+use compiler.frontend.core.unit_constraint.{unit_constraint_find, unit_constraint_min_text, unit_constraint_max_text, unit_constraint_predicate, unit_constraint_violation_message}
+use std.common.text.{parse_i64}
 # Explicit payload owners survive import-surface projection.
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_instruction_support.{MirBinOp, MirOperand, MirOperandKind}
@@ -5393,6 +5396,7 @@ impl MirLowering:
     me lower_cast_or_convert(operand: HirExpr, target: HirType, span: Span, conversion_call: bool) -> LocalId:
         """Lower casts, extracting a runtime enum's resolved discriminant."""
         val operand_local = self.lower_expr(operand)
+        self.emit_unit_range_check_v1(operand_local, target)
         # `e as Trait`: a trait object is two words (data, vtable); a raw
         # scalar cast of it drops the trait type and the next method call
         # cannot dispatch (as_cast_trait_to_trait_unsupported_natively).
@@ -5605,6 +5609,109 @@ impl MirLowering:
             eprint("[mir-lower-expr] span-builder-written method={span_method_name} id={span_result.id}\n")
         span_result
 
+    me hir_named_is_declared_unit(sym: SymbolId) -> bool:
+        val unit_name = self.symbols.symbol_name_scalar_raw(sym.id)
+        if unit_name == "":
+            return false
+        unit_op_is_unit(unit_name) or custom_primitive_underlying_type_tag_by_name(unit_name) >= 0
+
+    me local_is_declared_unit(local: LocalId) -> bool:
+        """True when `local` carries a declared `unit` HIR type (SPL-UNIT-002 scope)."""
+        match self.find_local_hir_type(local.id):
+            case Some(found_type):
+                if found_type == None or found_type == 0:
+                    return false
+                match found_type.kind:
+                    case HirTypeKind.Named(unit_sym, _): self.hir_named_is_declared_unit(unit_sym)
+                    case _: false
+            case None:
+                false
+
+    me local_is_integer_scalar_v1(local: LocalId) -> bool:
+        if val t = self.local_mir_type_of(local):
+            match t.kind:
+                case MirTypeKind.I8 | MirTypeKind.U8 | MirTypeKind.I16 | MirTypeKind.U16 | MirTypeKind.I32 | MirTypeKind.U32 | MirTypeKind.I64 | MirTypeKind.U64: return true
+                case _: return false
+        false
+
+    me unit_div_payload_word(local: LocalId) -> LocalId:
+        """Integer payload of a unit operand: a raw integer is itself; a
+        one-field custom-primitive wrapper is read as its i64 word."""
+        if self.local_is_integer_scalar_v1(local):
+            return local
+        var b = self.builder
+        val word = b.emit_bitcast(mir_operand_copy(local), MirType.i64())
+        self.builder = b
+        word
+
+    me emit_unit_panic_if(cond: LocalId, block_label: text, msg: text):
+        """Branch to a panicking block when `cond` holds, else continue."""
+        var b = self.builder
+        val fail_block = b.new_block(Some(block_label))
+        val ok_block = b.new_block(Some("{block_label}_ok"))
+        b.terminate_if(mir_operand_copy(cond), fail_block, ok_block)
+        b.switch_to_block(fail_block)
+        val msg_local = b.new_temp(self.bootstrap_text_type())
+        b.emit_const(msg_local, MirConstValue.Str(msg), self.bootstrap_text_type())
+        val panic_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_panic"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [self.bootstrap_text_type()], return_type: MirType.unit(), is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+        b.emit_call(panic_op, [mir_operand_copy(msg_local)], MirType.unit())
+        b.terminate_abort(msg)
+        b.switch_to_block(ok_block)
+        self.builder = b
+
+    me emit_unit_div_remainder_check(left_local: LocalId, right_local: LocalId):
+        """Native twin of the interpreter's `unit_value_binop` refusal: integer
+        unit division that leaves a remainder aborts with SPL-UNIT-002 instead
+        of silently truncating the ratio."""
+        val left_word = self.unit_div_payload_word(left_local)
+        val right_word = self.unit_div_payload_word(right_local)
+        var b = self.builder
+        val remainder = b.emit_binop(MirBinOp.Rem, mir_operand_copy(left_word), mir_operand_copy(right_word), MirType.i64())
+        val zero = b.emit_const_int(0)
+        val inexact = b.emit_binop(MirBinOp.Ne, mir_operand_copy(remainder), mir_operand_copy(zero), MirType.bool())
+        self.builder = b
+        self.emit_unit_panic_if(inexact, "unit_div_inexact", "SPL-UNIT-002: integer unit division is inexact (remainder is not zero); use an exact ratio")
+
+    me hir_expr_is_pure_name_v1(e: HirExpr) -> bool:
+        match e.kind:
+            case HirExprKind.Var(_): true
+            case HirExprKind.NamedVar(_, _): true
+            case _: false
+
+    me emit_unit_range_check_v1(raw: LocalId, target: HirType):
+        """Compiled-path twin of the interpreter's SPL-UNIT-005 boundary check:
+        `raw as Port` / `Port(raw)` on a non-literal integer checks the
+        declared inclusive bounds before the value becomes the unit."""
+        var unit_name = ""
+        match target.kind:
+            case HirTypeKind.Named(unit_sym, _): unit_name = self.symbols.symbol_name_scalar_raw(unit_sym.id)
+            case _: ()
+        self.emit_unit_range_check_by_name_v1(raw, unit_name)
+
+    me emit_unit_range_check_by_name_v1(raw: LocalId, unit_name: text):
+        if unit_name == "" or unit_constraint_find(unit_name) < 0:
+            return
+        if not self.local_is_integer_scalar_v1(raw):
+            return
+        val min_text = unit_constraint_min_text(unit_name)
+        val max_text = unit_constraint_max_text(unit_name)
+        val msg = unit_constraint_violation_message(unit_name, "<runtime value>", unit_constraint_predicate(unit_name))
+        if min_text != "":
+            var b_lo = self.builder
+            val lo_const = b_lo.emit_const_int(unit_range_bound_i64(min_text))
+            val below = b_lo.emit_binop(MirBinOp.Lt, mir_operand_copy(raw), mir_operand_copy(lo_const), MirType.bool())
+            self.builder = b_lo
+            self.emit_unit_panic_if(below, "unit_range_below", msg)
+        if max_text != "":
+            var b_hi = self.builder
+            val hi_const = b_hi.emit_const_int(unit_range_bound_i64(max_text))
+            val above = b_hi.emit_binop(MirBinOp.Gt, mir_operand_copy(raw), mir_operand_copy(hi_const), MirType.bool())
+            self.builder = b_hi
+            self.emit_unit_panic_if(above, "unit_range_above", msg)
+
     me lower_binary_expr(expr_value: HirExpr, op: HirBinOp, left: HirExpr, right: HirExpr) -> LocalId:
 
         # A qualified enum variant on the RHS of `is` names a PATTERN, not a
@@ -5773,6 +5880,9 @@ impl MirLowering:
                     val erased_pair = self.decode_erased_binop_operands(left_local, right_local)
                     left_local = erased_pair.0
                     right_local = erased_pair.1
+                    if op == HirBinOp.Div and (self.local_is_declared_unit(left_local) or self.local_is_declared_unit(right_local)):
+                        if not self.local_is_float(left_local) and not self.local_is_float(right_local):
+                            self.emit_unit_div_remainder_check(left_local, right_local)
                 else:
                     val eq_negate = match op:
                         case NotEq: true
@@ -9462,3 +9572,6 @@ impl MirLowering:
             self.emit_switch_dispatch(scrut_local, int_cases, default_body_value, default_binding, expected_type)
         else:
             self.emit_if_chain_dispatch(scrut_local, int_cases, default_body_value, default_binding, expected_type)
+
+fn unit_range_bound_i64(bound_text: text) -> i64:
+    parse_i64(bound_text)

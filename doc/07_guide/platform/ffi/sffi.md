@@ -127,6 +127,19 @@ their nullable/sentinel contracts need human review. These mappings are source
 policy only and do not assert ABI compatibility, null safety, ownership,
 provider verification, artifact identity, or signature admission.
 
+### `char*` returns are borrowed (owner decision 2026-11-18)
+
+A C `char*` returned across SFFI is **borrowed by default**: the C side keeps
+ownership, the caller frees nothing, and Simple copies the bytes into `text`
+immediately on return. `sffi_gen` (`ffi-gen --gen-units`) turns
+`extern fn rt_version(major: i32) -> CStr` into a private
+`__raw_rt_version(...) -> i64` plus a facade `pub fn rt_version(...) ->
+Option<text>` that calls `rt_cstring_to_text(ptr)` at once; a null pointer is
+`None`. No pointer ever escapes the facade, and no `free` is emitted. A
+provider that transfers ownership (malloc'd result) needs an explicit,
+separately reviewed adapter; it is not the default. Pinned by
+`test/01_unit/compiler/sffi_gen/sffi_borrowed_cstr_spec.spl`.
+
 ### Return representation is part of the ABI
 
 Names do not authorize a conversion between integer and floating-point return
