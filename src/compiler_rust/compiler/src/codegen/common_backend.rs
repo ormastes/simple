@@ -670,6 +670,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_tuple_get"
             | "rt_tuple_set"
             | "rt_enum_new"
+            | "rt_enum_register_name"
             | "rt_enum_discriminant"
             | "rt_enum_id"
             | "rt_enum_payload"
