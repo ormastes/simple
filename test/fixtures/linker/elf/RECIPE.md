@@ -295,3 +295,8 @@ Built in WSL by `C:/dev/wt/xc-wsl-scripts/slk_rv64_fix.sh` with clang only:
 
     clang --target=riscv32-linux-musl -march=rv32gc -mabi=ilp32d -mno-relax -fno-pic -O1 \
         -ffreestanding -c weak_dynamic_rv32.c -o weak_dynamic_rv32.o
+
+## symver_* / comdat_note_* (elf_symver_object_spec)
+
+    for f in symver_def_a64 symver_use_a64 comdat_note_a_a64 comdat_note_b_a64; do
+        clang --target=aarch64-linux-gnu -c $f.s -o $f.o; done

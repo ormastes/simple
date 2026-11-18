@@ -36,7 +36,7 @@
 use compiler.backend.linker.elf_parser.{
     ElfObject, ElfSymbol, elf_parse_object, elf_symbol_binding, elf_symbol_type,
     elf_reloc_sym, elf_reloc_type, elf_section_addralign, elf_section_name,
-    SHN_UNDEF, STB_LOCAL, STB_GLOBAL, STB_WEAK, STT_SECTION, SHT_NOBITS, SHT_NOTE
+    SHN_UNDEF, STB_LOCAL, STB_GLOBAL, STB_WEAK, STT_SECTION, SHT_NOBITS, SHT_NOTE, elf_group_signature
 }
 use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_AARCH64, SHT_PROGBITS}
 use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, sym_resolve_objects}
@@ -266,6 +266,31 @@ fn elf_find_out(outs: [ElfOutSec], name: text) -> i64:
             return i
         i = i + 1
     -1
+
+fn elf_discard_duplicate_groups(objects: [ElfObject], live: [[bool]]) -> [[bool]]:
+    """ld.lld COMDAT rule: the first object (link order) to provide a group
+    signature owns it; the same group's members in later objects are dropped
+    (e.g. FreeBSD crt1.o/crti.o both carry .note.tag in .freebsd.noteG)."""
+    var out = live
+    var owner: {text: i64} = {}
+    var oi: i64 = 0
+    while oi < objects.len():
+        var row = out[oi]
+        var changed = false
+        var si: i64 = 1
+        while si < objects[oi].sections.len():
+            if objects[oi].sections[si].sh_flags & 0x200 != 0:
+                val sig = elf_group_signature(objects[oi], si)
+                if sig != "":
+                    if not owner.has(sig):
+                        owner[sig] = oi
+                    else if owner[sig] != oi and row[si]:
+                        row[si] = false
+                        changed = true
+            si = si + 1
+        if changed: out[oi] = row
+        oi = oi + 1
+    out
 
 fn elf_static_place(objects: [ElfObject], live: [[bool]]) -> Result<ElfStaticInputs, text>:
     """Assign every allocatable input section to a named output section + offset."""
@@ -2012,9 +2037,10 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     else:
         elf_section_keep_all(all, res)
     elf_link_trace("section gc")
-    val collected = elf_gc_eh_frames(all, gc.live, res)
+    val live = elf_discard_duplicate_groups(all, gc.live)
+    val collected = elf_gc_eh_frames(all, live, res)
     var undef: [text] = []
-    for name in elf_gc_undefined(collected, gc.live, res):
+    for name in elf_gc_undefined(collected, live, res):
         if not elf_is_synth(name) and elf_lib_export(libs, name) < 0:
             undef = undef.push(name)
     if undef.len() > 0:
@@ -2023,7 +2049,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         return Err("entry symbol not defined: {req.entry}")
 
     elf_link_trace("eh gc + undef check")
-    val common = elf_place_common(elf_static_place(collected, gc.live)?, res, gc.common_live)
+    val common = elf_place_common(elf_static_place(collected, live)?, res, gc.common_live)
     val ctx0 = ElfLinkCtx(inputs: common.inputs, res: res, libs: libs, needed_libs: libs,
         target: target, mode: mode,
         common_offsets: common.offsets, common_out: common.out_idx, copy_offsets: {}, copy_out: -1,
