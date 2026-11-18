@@ -53,14 +53,16 @@ Replacing `dos?` / `guid?` with typed matches (cc06d5136da) left the probe outpu
 and the Windows `_path_final_existing` (`src/lib/nogc_sync_mut/io/path_identity.spl`) use
 `val x: text = if ...: ... elif ...: ... else: ...`, the form the probe shows working, tagged
 `# @workaround bug=phase2_var_reassign_runtime_text_branch_lost_2026-11-17`.
+`compile_source_inventory_plain_checkout_v1` also eliminates the trailing-slash `var plain` text
+reassignment by computing an integer `var byte_idx` in the `while` loop and
+slicing `stripped.substring(0, byte_idx)` once into an immutable `val plain: text`.
 
 Not proven natively:
-- `compile_source_inventory_plain_checkout_v1` still reassigns `var plain` in its trailing-slash
-  `while` loop; the probe did not exercise that loop on a final-path text.
 - No Stage 3 has been rebuilt with the workaround yet, so the admission failure is not yet
   shown fixed end to end.
 
-`test/01_unit/lib/scv/plain_checkout_runtime_text_spec.spl` pins behaviour in the interpreter
-only; the interpreter does not reproduce the defect.
+`test/01_unit/lib/scv/plain_checkout_runtime_text_spec.spl` and
+`test/01_unit/lib/scv/alias_inventory_reason_and_plain_checkout_spec.spl` pin behaviour in
+the interpreter only; the interpreter does not reproduce the defect.
 
 Remove the workaround once a fixed compiler replaces the pinned Phase 2.

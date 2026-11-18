@@ -24,7 +24,8 @@ use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
 use app.compiler_entrypoint.inventory_scratch.{compiler_inventory_file_event_cost_v1}
 use app.compiler_entrypoint.inventory_binding_scratch.{compiler_inventory_binding_reason_v1}
 use std.scv.compile_source_inventory_core.{compile_source_inventory_git_event_cost_v1}
-use app.compiler_entrypoint.inventory_aliases.{compiler_inventory_aliases_v1}
+use app.compiler_entrypoint.inventory_aliases.{CompilerInventoryAliasesV1,
+    compiler_inventory_aliases_checked_v1}
 use app.compiler_entrypoint.inventory_families.{compiler_inventory_scope_valid_v1,
     compiler_inventory_family_v1, compiler_inventory_path_selected_v1}
 use std.scv.compile_cost_v1.{ScvCompileCostV1, scv_cost_now_v1, scv_cost_elapsed_v1}
@@ -853,16 +854,17 @@ fn _compiler_inventory_refresh_observed_cost_v1(
             source_roots, cold_init, trace, cost):
         case Some(batch): batch
         case _: return compiler_inventory_invalid_v1("git-event-refresh-failed")
-    val aliases = compiler_inventory_aliases_v1(root, source_roots)
-    if aliases == nil:
-        return compiler_inventory_invalid_v1("directory-alias-inventory-invalid")
+    val aliases: CompilerInventoryAliasesV1 = match compiler_inventory_aliases_checked_v1(root, source_roots):
+        case Ok(value): value
+        case Err(reason):
+            return compiler_inventory_invalid_v1("directory-alias-inventory-invalid ({reason})")
     # Alias children have no Git entries in the logical namespace. Bind them
     # to the same authenticated membership blob as other Git-untracked names,
     # so deletion/retargeting is reconciled before advancing CURRENT.
     var logical_members = direct.untracked_paths
     var logical_seen: Dict<text, bool> = {}
     for path in logical_members: logical_seen[path] = true
-    for path in aliases!.paths:
+    for path in aliases.paths:
         if not logical_seen.has(path):
             logical_seen[path] = true
             logical_members.push(path)
@@ -872,7 +874,7 @@ fn _compiler_inventory_refresh_observed_cost_v1(
     if not logical_digests.valid:
         return compiler_inventory_invalid_v1("directory-alias-membership-invalid")
     val observed = CompilerInventoryGitEventsV1(
-        direct.events + aliases!.events, logical_digests.src_digest,
+        direct.events + aliases.events, logical_digests.src_digest,
         logical_digests.test_digest, logical_digests.paths, logical_digests.examples_tooling_digest)
     if trace != nil:
         trace!.observed(observed.events.len(), observed.untracked_paths.len(),

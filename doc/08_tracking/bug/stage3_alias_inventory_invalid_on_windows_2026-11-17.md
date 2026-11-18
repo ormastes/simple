@@ -46,5 +46,24 @@ fails in the Phase 2-built Stage 3, which points at a difference in how the code
 (Phase 2 binary vs a natively compiled copy of the same source) rather than at repository
 contents. This is a hypothesis; not confirmed.
 
+## Diagnostic & Workaround Follow-up (2026-11-18)
+- `src/app/compiler_entrypoint/inventory_aliases.spl` now provides
+  `compiler_inventory_aliases_checked_v1(root, scopes) -> Result<CompilerInventoryAliasesV1, text>`
+  (plus `compiler_alias_git_paths_checked_v1` and `compiler_alias_present_checked_v1`, using
+  `Option` `None` with zero `nil`s), returning explicit `<stage>: <detail>` errors for every
+  fail-closed condition (`path_final_existing`, `plain_checkout`, `scv_worktree_path_safe`,
+  `git ls-files`, `alias_present`, `owner`, `path_identity_contains`, `owner_children`,
+  `file_read`, `alias_changed`, etc.). `compiler_inventory_aliases_v1` delegates to it.
+- `src/app/compiler_entrypoint/inventory_events.spl` calls
+  `compiler_inventory_aliases_checked_v1(root, source_roots)` and returns
+  `directory-alias-inventory-invalid ({reason})`, surfacing
+  `SCV-E-ADMISSION: directory-alias-inventory-invalid ({reason})` while preserving the
+  `SCV-E-ADMISSION: directory-alias-inventory-invalid` prefix.
+- `src/lib/scv/compile_source_inventory_core.spl` (`compile_source_inventory_plain_checkout_v1`)
+  removed the remaining `var plain` text reassignment in the trailing-slash `while` loop in favor
+  of an integer byte index and a single `val` byte-slice (`stripped.substring(0, byte_idx)`).
+- Interpreter tests: `test/01_unit/lib/scv/alias_inventory_reason_and_plain_checkout_spec.spl` and
+  `test/01_unit/lib/scv/plain_checkout_runtime_text_spec.spl`.
+
 ## Status
-Open. Cause: `phase2_var_reassign_runtime_text_branch_lost_2026-11-17.md` (native probe, 2026-11-18). Source workaround merged in 34d422e9a36; close once a Stage 3 rebuilt with it passes admission.
+Open. Cause: `phase2_var_reassign_runtime_text_branch_lost_2026-11-17.md` (native probe, 2026-11-18). Source workaround merged in 34d422e9a36 and trailing-slash `var` text reassignment + stage-reason diagnostics landed on top; close once a Stage 3 rebuilt with these fixes passes admission.
