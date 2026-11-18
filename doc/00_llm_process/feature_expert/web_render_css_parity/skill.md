@@ -3331,3 +3331,8 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
   - Chrome's average char width is not linear in the font size: an `<input>` / `<textarea>` at `font-size:16px` is 215 / 221 px, here 209 / 214 (the old rule gave 354).
   - The k = 3 frame differs from Chrome by one px per corner (Chrome's inner edge is not symmetric there); a button's anti-aliased corner at k = 4 differs by up to 15 levels on ~6 px per corner; a listbox (`<select multiple>`) frame is anti-aliased in Chrome and aliased here.
   - `simple_web_browser_engine_production_hardening_spec` still expects an `id:stage` hit key; hit keys are `path:` routes since 8282e432b3b.
+
+## display:flow-root (2026-11-19)
+
+- `flow-root` is now a supported display keyword (`is_supported_display_keyword`, `declarations.spl`, `decl_apply.spl`); `st.display == "flow-root"`. Because margin-collapse-through predicates require display block/list-item and `float_ctx_establishes_bfc` treats every non-block display as a BFC root, it blocks parent-child margin collapse, contains floats and is narrowed beside a preceding float with no other change.
+- Spec: `test/01_unit/browser_engine/display_flow_root_chrome159_spec.spl` (6 examples, Chrome 159 measured). Trap: a percent `width` in a Chrome oracle depends on the headless viewport (780 not 900) - use px widths for oracles.
