@@ -88,12 +88,17 @@ fn serialize_smf_dependencies(deps: [SmfDependencyEntry]) -> [u8]:
     buf = bytes_concat_copy_v1(buf, smf_u32_to_bytes(deps.len()))
     for dep in deps:
         val path_bytes = rt_text_to_bytes(dep.module_path)
+        # Build the small per-entry record, then append it in place: folding
+        # every field into `buf` re-copied the whole section three times per
+        # dependency (smf_package_quadratic_assembly_oom_2026-11-18.md).
         # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-        buf = bytes_concat_copy_v1(buf, smf_u32_to_bytes(path_bytes.len()))
+        var entry = bytes_concat_copy_v1(smf_u32_to_bytes(path_bytes.len()), path_bytes)
         # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-        buf = bytes_concat_copy_v1(buf, path_bytes)
-        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-        buf = bytes_concat_copy_v1(buf, smf_u64_to_bytes(dep.content_hash))
+        entry = bytes_concat_copy_v1(entry, smf_u64_to_bytes(dep.content_hash))
+        var index: i64 = 0
+        while index < entry.len():
+            buf.push(entry[index])
+            index = index + 1
     buf
 
 fn deserialize_smf_dependencies(data: [u8]) -> [SmfDependencyEntry]:
