@@ -13,9 +13,10 @@
 ARCHS="x86_64 aarch64"
 EXPECT="hello from simple pe linker"
 
-# fields <readobj output>: structural rows compared against lld.
+# fields <readobj output>: machine, subsystem, header/DLL flags, import DLLs and
+# imported symbols (section layout differs from lld by design; see bug doc).
 fields() {
-    grep -E '^ *(Machine|Subsystem|Characteristics|DLLCharacteristics):|^ *Name: [A-Za-z0-9_.-]+\.(dll|DLL)$' "$1" | sed 's/^ *//' | sort -u
+    grep -E '^ *(Machine|Subsystem): |^ *IMAGE_(FILE|DLL)_[A-Z_0-9]+ \(|^ *Symbol: |^ *Name: [A-Za-z0-9_.-]+\.(dll|DLL)$' "$1" | sed 's/^ *//' | sort -u
 }
 
 # compare <internal fields> <lld fields>: 0 identical, 1 differ (prints diff), 2 empty.
@@ -56,13 +57,14 @@ fi
 cd "$repo" || exit 2
 
 printf '#include <stdio.h>\nint main(void){puts("%s");return 0;}\n' "$EXPECT" > "$OUT/hello.c"
-checked=0; failed=""
+checked=0; failed=""; ran=""
 host_arch=$(uname -m)
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) on_windows=1 ;; *) on_windows=0 ;; esac
 
 for a in $ARCHS; do
     tgt="$a-w64-windows-gnu"; L="$MINGW_ROOT/$a-w64-mingw32/lib"
     RT=$(ls "$MINGW_ROOT"/lib/clang/*/lib/windows/libclang_rt.builtins-$a.a 2>/dev/null | tail -1)
+    [ -n "$RT" ] || { echo "ERROR — nothing was checked (no libclang_rt.builtins-$a.a)"; exit 2; }
     "$MINGW_ROOT/bin/clang" --target="$tgt" -O1 -c "$OUT/hello.c" -o "$OUT/hello.$a.o" || { failed="$failed $a:compile"; continue; }
     "$MINGW_ROOT/bin/clang" --target="$tgt" "$OUT/hello.$a.o" -o "$OUT/lld.$a.exe" || { failed="$failed $a:lld"; continue; }
     inputs="$L/crt2.o,$L/crtbegin.o,$OUT/hello.$a.o,$L/crtend.o,$L/libmingw32.a,$RT,$L/libunwind.a,$L/libmoldname.a,$L/libmingwex.a,$L/libmsvcrt.a,$L/libadvapi32.a,$L/libshell32.a,$L/libuser32.a,$L/libkernel32.a"
@@ -75,15 +77,19 @@ for a in $ARCHS; do
         "$MINGW_ROOT/bin/llvm-readobj" --file-headers --coff-imports "$OUT/$k.$a.exe" > "$OUT/$k.$a.ro" 2>&1
         fields "$OUT/$k.$a.ro" > "$OUT/$k.$a.f"
     done
-    if ! compare "$OUT/int.$a.f" "$OUT/lld.$a.f"; then failed="$failed $a:structure"; continue; fi
+    compare "$OUT/int.$a.f" "$OUT/lld.$a.f"; crc=$?
+    [ "$crc" -eq 2 ] && { echo "ERROR — nothing was checked ($a: empty llvm-readobj fields)"; exit 2; }
+    [ "$crc" -ne 0 ] && { failed="$failed $a:structure"; continue; }
     checked=$((checked + 1))
     echo "$a: structure matches lld ($(wc -l < "$OUT/int.$a.f") fields)"
     run_ok=0
     [ "$on_windows" = 1 ] && { [ "$a" = x86_64 ] || [ "$host_arch" = aarch64 ]; } && run_ok=1
     if [ "$run_ok" = 1 ]; then
-        got=$("$OUT/int.$a.exe"); rc=$?
+        "$OUT/int.$a.exe" > "$OUT/run.$a.txt"; rc=$?
+        got=$(tr -d '\r' < "$OUT/run.$a.txt")
         [ "$rc" -eq 0 ] && [ "$got" = "$EXPECT" ] || { failed="$failed $a:run(rc=$rc)"; continue; }
         echo "$a: native run OK: $got"
+        ran="$ran $a"
     else
         echo "$a: native run skipped (host $(uname -s)/$host_arch)"
     fi
@@ -91,5 +97,5 @@ done
 
 [ -n "$failed" ] && { echo "FAIL —$failed"; exit 1; }
 [ "$checked" -eq 0 ] && { echo "ERROR — nothing was checked"; exit 2; }
-echo "PASS — $checked image(s) linked by the internal PE/COFF linker, structure matches lld"
+echo "PASS — $checked image(s) linked by the internal PE/COFF linker, structure matches lld; native run:${ran:- none (skipped)}"
 exit 0
