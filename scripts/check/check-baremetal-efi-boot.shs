@@ -34,7 +34,7 @@
 # Env:   OPENSBI32_SRC (riscv32, OpenSBI 1.7 tree), SIMPLE_BIN (default bin/simple),
 #        SIMPLE_LINK_BIN (CLI with `run`, default SIMPLE_BIN), BM_SRC, BM_WORK, BM_TIMEOUT_S (30),
 #        CLANG (clang), OVMF_CODE/OVMF_VARS, OVMF32_CODE/OVMF32_VARS (~/.simple/firmware/ovmf-ia32),
-#        AAVMF_CODE/AAVMF_VARS, BM_A64_UART, BM_RV_UART, OPENSBI_SRC (default ~/.cache/simple/opensbi-v1.4).
+#        BM_QEMU_MEM (256M), AAVMF_CODE/AAVMF_VARS, BM_A64_UART, BM_RV_UART, OPENSBI_SRC (default ~/.cache/simple/opensbi-v1.4).
 # Verdict (last line): PASS -- <n> arch(es) booted / FAIL -- ... / ERROR -- nothing was checked
 set -u
 
@@ -313,7 +313,7 @@ for a in $arches; do
         x86_64|i686)
             build_efi "$a" "$d" || { echo "[$a] EFI wrap failed ($d/efi.log)"; failed="$failed $a(efi)"; continue; }
             cp "$fw_vars" "$d/vars.fd"; cp "$fw_code" "$d/code.fd"
-            set -- -machine q35 -m 256M \
+            set -- -machine q35 -m "${BM_QEMU_MEM:-256M}" \
                 -drive if=pflash,format=raw,readonly=on,file="$d/code.fd" \
                 -drive if=pflash,format=raw,file="$d/vars.fd" \
                 -drive file=fat:rw:"$d/esp",format=raw ;;
@@ -322,13 +322,13 @@ for a in $arches; do
             # AAVMF images must fill the 64 MiB virt pflash banks.
             truncate -s 64M "$d/code.fd"; dd if="$fw_code" of="$d/code.fd" conv=notrunc 2>/dev/null
             cp "$fw_vars" "$d/vars.fd"; truncate -s 64M "$d/vars.fd"
-            set -- -machine virt -cpu cortex-a57 -m 256M \
+            set -- -machine virt -cpu cortex-a57 -m "${BM_QEMU_MEM:-256M}" \
                 -drive if=pflash,format=raw,readonly=on,file="$d/code.fd" \
                 -drive if=pflash,format=raw,file="$d/vars.fd" \
                 -drive file=fat:rw:"$d/esp",format=raw ;;
         riscv64)
             build_opensbi "$d/image.bin" "$d" || { echo "[$a] OpenSBI fw_payload build failed ($d)"; failed="$failed $a(opensbi)"; continue; }
-            set -- -machine virt -cpu rv64 -smp 1 -m 256M \
+            set -- -machine virt -cpu rv64 -smp 1 -m "${BM_QEMU_MEM:-256M}" \
                 -bios "$d/opensbi-build/platform/generic/firmware/fw_payload.bin" ;;
         riscv32)
             # OpenSBI 1.7 XLEN=32 fw_payload; rv32 default payload offset 0x400000
@@ -337,7 +337,7 @@ for a in $arches; do
                 FW_PAYLOAD=y FW_PAYLOAD_PATH="$d/image.bin" FW_PAYLOAD_OFFSET=0x400000 -j4 > "$d/opensbi.log" 2>&1 \
                 && [ -s "$d/opensbi-build/platform/generic/firmware/fw_payload.bin" ] \
                 || { echo "[$a] OpenSBI fw_payload build failed ($d/opensbi.log)"; failed="$failed $a(opensbi)"; continue; }
-            set -- -machine virt -smp 1 -m 256M \
+            set -- -machine virt -smp 1 -m "${BM_QEMU_MEM:-256M}" \
                 -bios "$d/opensbi-build/platform/generic/firmware/fw_payload.bin" ;;
     esac
     set -- "$@" -display none -no-reboot -net none -serial file:"$d/serial.log" -monitor none
