@@ -54,3 +54,12 @@ both outputs and the LOAD flags match. On top of the PT_PHDR shift, the engine:
    reference sits in a section that `--gc-sections` drops. No live relocation uses it,
    so it is symtab noise, but a static executable should not list undefined globals.
 5. drops `.comment` (ld.lld keeps the merged one).
+
+## Update 2026-11-19: arm32
+
+6. **`.ARM.exidx` / PT_ARM_EXIDX dropped.** ld.lld keeps `.ARM.exidx` (SHT_ARM_EXIDX, `AL`
+   linked to `.text`) and emits a PT_ARM_EXIDX program header. The static engine writes
+   neither, so a C++/unwinding arm32 user program has no unwind index. A C hello is not
+   affected. `simpleos_user32_link_spec` carries a ponytail note at the spot where the
+   assertion would go.
+7. **`.ARM.attributes` dropped** (non-alloc SHT_ARM_ATTRIBUTES); lld keeps it.
