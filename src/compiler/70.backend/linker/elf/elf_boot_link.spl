@@ -502,6 +502,7 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution,
     var last_segment = ""
     var prev_region = ""
     var prev_lma_region = ""
+    var got_placed = false
 
     for op in plan.ops:
         if op.kind == BOOT_OP_DOT:
@@ -529,6 +530,15 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution,
             var any_member = false
             var flags: i64 = SHF_ALLOC
             var common_align: i64 = 1
+            # A script `.got` output section holds the synthetic GOT at its start,
+            # as ld.lld places its synthetic .got at `*(.got)`.
+            val got_here = got_size > 0 and not got_placed and sec.name == ".got"
+            if got_here:
+                got_placed = true
+                any_member = true
+                any_prog = true
+                flags = flags | SHF_WRITE
+                align = 8
             for bop in sec.body:
                 if _bl_matches_common(bop):
                     for obj in ins.objects:
@@ -548,6 +558,8 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution,
                 var si: i64 = 0
                 while si < obj.sections.len():
                     if ins.out_of[ins.base[oi] + si] == k:
+                        if got_here:
+                            return Err("elf_boot_link: input section {elf_section_name(obj, si)} cannot share the script .got with the synthetic GOT")
                         any_member = true
                         val sh = obj.sections[si]
                         var al = elf_section_addralign(obj, si)
@@ -601,6 +613,8 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution,
 
             # Body, in order.
             var cur: i64 = 0
+            if got_here:
+                cur = got_size
             var has_sym = false
             var bi: i64 = 0
             while bi < sec.body.len():
@@ -664,6 +678,8 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution,
             ins = _BootIn(objects: ins.objects, names: ins.names, base: ins.base, out_of: ins.out_of, op_of: ins.op_of,
                 off_of: off_of, common_plan: ins.common_plan, common_off: ins.common_off,
                 pool_of: ins.pool_of, pools: ins.pools, pool_k: ins.pool_k, pool_off: pool_off)
+            if got_here and cur != got_size:
+                return Err("elf_boot_link: script .got adds {cur - got_size} byte(s) after the synthetic GOT, which is unsupported")
             # lld drops an output section with no bytes and no symbol assignment.
             if cur == 0 and not has_sym:
                 dot = addr
@@ -697,7 +713,7 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution,
                 (not gc_sections or common_live.has(name)) and
                 not ins.common_plan.has(name):
             return Err("elf_boot_link: common symbol {name} is not placed by *(COMMON)")
-    if got_size > 0:
+    if got_size > 0 and not got_placed:
         val gaddr = boot_align_up(dot, 8)
         outs = outs.push(_BootOut(name: ".got", sh_type: SHT_PROGBITS_E, sh_flags: SHF_ALLOC | SHF_WRITE, align: 8,
             vma: gaddr, lma: gaddr + lma_off, size: got_size, segment: last_segment, plan_idx: -1))
@@ -784,6 +800,15 @@ struct _BootSegs:
     seg_of: [i64]           # per outs: program header index, -1 none
     file_end: i64
 
+fn _bl_is_relro(o: _BootOut) -> bool:
+    """ld.lld isRelroSection, for the sections a static boot image can carry."""
+    if o.sh_flags & SHF_WRITE == 0:
+        return false
+    if o.sh_flags & SHF_TLS != 0:
+        return true
+    o.name == ".got" or o.name == ".init_array" or o.name == ".fini_array" or
+        o.name == ".preinit_array" or o.name.starts_with(".data.rel.ro")
+
 fn _bl_seg_flags(outs: [_BootOut], seg_of: [i64], si: i64) -> i64:
     var f = PF_R
     var i: i64 = 0
@@ -822,8 +847,25 @@ fn _bl_segments(plan: BootLayoutPlan, outs: [_BootOut], page: i64, ctx: BootEval
     else:
         # Default: a new PT_LOAD whenever permissions or the lma offset change.
         var prev_key = ""
+        # ld.lld (-z relro, the default) opens a new PT_LOAD at relroEnd: the first
+        # section after the last RELRO one (.got, init/fini arrays, TLS).
+        var relro_end: i64 = -1
+        var oi: i64 = 0
+        while oi < outs.len():
+            if _bl_is_relro(outs[oi]):
+                relro_end = oi + 1
+            oi = oi + 1
+        oi = -1
         for o in outs:
+            oi = oi + 1
+            if oi == relro_end:
+                prev_key = ""
             val key = "{o.sh_flags & (SHF_WRITE | SHF_EXECINSTR)}/{o.lma - o.vma}"
+            # ld.lld gives an empty output section the previous section's flags, so it
+            # never opens a PT_LOAD of its own.
+            if o.size == 0 and types.len() > 0:
+                seg_of = seg_of.push(types.len() - 1)
+                continue
             if key != prev_key:
                 types = types.push(PT_LOAD)
                 fixed_flags = fixed_flags.push(-1)
@@ -1206,7 +1248,11 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
     got_si = si2
     got_tls = tls2
 
-    var got_size = got_keys.len() * 8
+    # ld.lld reserves one RISC-V .got header slot (_DYNAMIC, 0 in a static image).
+    var got_hdr: i64 = 0
+    if rv and (got_keys.len() > 0 or need_got_base):
+        got_hdr = 1
+    var got_size = (got_keys.len() + got_hdr) * 8
     if need_got_base and got_size == 0:
         got_size = 8
     val lay = _bl_layout(plan, ins0, res, defines, got_size,
@@ -1397,7 +1443,7 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
                 var key = "{oi}#{sidx}"
                 if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "":
                     key = sym.name
-                s = got_vma + got_idx[key] * 8
+                s = got_vma + (got_idx[key] + got_hdr) * 8
                 if x86 and (rtype == R_X86_64_GOT32 or
                         rtype == R_X86_64_GOT64 or
                         rtype == R_X86_64_GOTPLT64): s = s - got_vma
@@ -1408,7 +1454,7 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
                 if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "":
                     key = sym.name
                 key = "tls#" + key
-                s = got_vma + got_idx[key] * 8
+                s = got_vma + (got_idx[key] + got_hdr) * 8
                 if a64:
                     a = 0
                     if rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G1 or
@@ -1473,6 +1519,10 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
     # --- .got contents (static: the symbol's link-time address) ---
     if got_out >= 0:
         var got: [i64] = []
+        var hi: i64 = 0
+        while hi < got_hdr:
+            got = write_u64_le(got, 0)
+            hi = hi + 1
         var gi: i64 = 0
         while gi < got_keys.len():
             val key = got_keys[gi]
