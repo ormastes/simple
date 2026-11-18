@@ -39,3 +39,20 @@ Pre-existing failures unrelated to this change (fail identically on the base):
 - i686 static glibc: `__letf2`/`__unordtf2` undefined — compiler-rt i386 builtins ship no TF (binary128) routines; libgcc is not admissible (never GCC).
 - ELF32 dynamic/PIE output (PLT/GOT/.rel.dyn/.dynamic for i386 and ARM) is gated off: "only static ET_EXEC is admitted for i386/armv7".
 - COMDAT group discard (drop the losing group's sections).
+
+## Evidence (2026-11-18, qemu-user via small_slot.sh)
+
+| target | linker | link | run | size |
+|---|---|---|---|---|
+| i686 freestanding | simple | OK | rc=42 "hi" | 784 B (lld 808 B) |
+| armv7 freestanding | simple | OK | rc=42 "hi" | 788 B (lld 1028 B) |
+| aarch64 freestanding | simple | OK | rc=42 "hi" | 1176 B (lld 1256 B) |
+
+ld.lld: 0.04 s, ~56 MB RSS. Simple linker (Windows seed interpreter, includes
+interpreting linker source): ~9 s, ~505 MB peak RSS.
+
+## Follow-up (PR after #10183, Opus review items 2 and 3)
+
+- `sym_resolver`: a strong definition replacing a weak one now updates the COMDAT mark (stale mark could mask a real duplicate).
+- `reloc_engine`: an existing BLX relocated against an ARM-mode target is rewritten to BL.
+- Still open: item 1 (dedup by group signature + discard losing group), item 4 (THM_JUMP19 to ARM-mode target should error), armv7 interworking veneers, ELF32 dynamic/PIE.
