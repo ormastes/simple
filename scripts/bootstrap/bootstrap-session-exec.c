@@ -388,6 +388,7 @@ static int supervise(const options *o) {
      * too coarse to report sampling overhead against a 100 ms cadence. */
     unsigned long long peak = 0, samples = 0, gap_max = 0, dur_max = 0, dur_total = 0, overruns = 0;
     unsigned long members_peak = 0;
+    unsigned sample_misses = 0;
     unsigned long long started = now_us(), previous = 0;
     for (;;) {
         unsigned long long at = now_us();
@@ -395,7 +396,15 @@ static int supervise(const options *o) {
         previous = at;
         unsigned long long kib = 0;
         unsigned long members = 0;
-        if (!sample_job(job, &kib, &members)) { status = "rss-measurement-failed"; code = 89; break; }
+        if (!sample_job(job, &kib, &members)) {
+            /* Transient enumeration/query failures occur on Windows under
+             * process churn (member exit mid-scan, PSAPI hiccup). A single
+             * failed sample must not kill a multi-hour campaign: allow a
+             * short streak of retries before declaring measurement dead. */
+            if (++sample_misses <= 4) { Sleep(25); continue; }
+            status = "rss-measurement-failed"; code = 89; break;
+        }
+        sample_misses = 0;
         ++samples;
         unsigned long long duration = now_us() - at;
         dur_total += duration;
