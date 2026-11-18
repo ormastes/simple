@@ -687,6 +687,17 @@ impl MirLowering:
             case HirExprKind.Field(field_base, _, _): self.hir_place_is_pure_v1(field_base)
             case _: false
 
+    me method_receiver_roots_at_bound_local_v1(receiver: HirExpr) -> bool:
+        """True when the receiver is a function-local binding, or a field
+        chain rooted at one (`xs`, `module.friends`). Such a receiver is a
+        runtime value: it can never be a type name whose identity was lost,
+        so it must not be recovered through a static-method leaf lookup."""
+        match receiver.kind:
+            case HirExprKind.Var(symbol): self.symbol_bound_local(symbol.id).id >= 0
+            case HirExprKind.NamedVar(symbol, _): self.symbol_bound_local(symbol.id).id >= 0
+            case HirExprKind.Field(field_base, _, _): self.method_receiver_roots_at_bound_local_v1(field_base)
+            case _: false
+
     me try_lower_tuple_get_v1(receiver: HirExpr, receiver_local: LocalId, index: HirExpr) -> LocalId?:
         """`t.get(N)` on a tuple with a literal N lowers exactly like `t[N]`.
         Returns nil (caller keeps its loud unresolved path) unless the
@@ -5263,7 +5274,14 @@ impl MirLowering:
                             case _: ()
                 # A proven scalar is a runtime value, never a lost class
                 # name. A globally unique static leaf cannot own this call.
-                if static_method_raw < 0 and static_receiver_name == "" and known_record_owner < 0 and not proven_scalar_receiver:
+                # stage3_array_copy_unique_static_leaf_2026-11-19: neither is a
+                # function-local binding (or a field chain rooted at one). With
+                # `MirOperand.copy` the only static leaf named `copy`,
+                # `friend_modules.copy()` on a `[text]` local lowered to a
+                # zero-argument call of that static and stored its record where
+                # an array handle was expected. Checked before the leaf scan,
+                # so value receivers also skip the whole-table walk.
+                if static_method_raw < 0 and static_receiver_name == "" and known_record_owner < 0 and not proven_scalar_receiver and not self.method_receiver_roots_at_bound_local_v1(receiver):
                     var unique_static_method_raw: i64 = -1
                     match self.symbols.lookup_unique_static_method(method):
                         case Some(unique_static_method):

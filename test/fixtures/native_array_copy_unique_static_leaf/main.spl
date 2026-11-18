@@ -1,0 +1,88 @@
+# `xs.copy()` on an array-valued local must stay the builtin array copy even
+# when some class exposes a static method whose leaf name is `copy`.
+# Regression: doc/08_tracking/bug/stage3_array_copy_unique_static_leaf_2026-11-19.md
+# Expected stdout (seed interpreter == native):
+#   2
+#   a
+#   2
+#   b
+#   3
+#   2
+#   b
+#   1
+#   x
+#   no
+#   7
+class Op:
+    id: i64
+
+    static fn copy(local: i64) -> Op:
+        Op(id: local)
+
+class Holder:
+    name: text
+    items: [text] = []
+    extras: [text] = []
+
+class Policy:
+    name: text
+    items: [text] = []
+    extras: [text] = []
+
+fn load(ok: bool) -> Result<Holder, text>:
+    if ok:
+        Ok(Holder(name: "h", items: ["a", "b"], extras: ["x"]))
+    else:
+        Err("no")
+
+# Typed local receiver, result stored through a field.
+fn copy_typed_local(h: Holder) -> Policy:
+    val p = Policy(name: "p")
+    val xs: [text] = h.items
+    p.items = xs.copy()
+    p
+
+# Parameter receiver.
+fn copy_param(xs: [text]) -> [text]:
+    xs.copy()
+
+# Untyped local receiver; the copy must not alias the source.
+fn copy_untyped_local() -> i64:
+    val source = ["p", "q"]
+    var grown = source.copy()
+    grown.push("r")
+    grown.len() * 10 + source.len() - 29
+
+# Field of a match-bound record (the driver manifest-policy shape).
+fn copy_match_bound_field(ok: bool) -> Result<Policy, text>:
+    val parsed = load(ok)
+    var projected: Result<Policy, text> = Err("unavailable")
+    match parsed:
+        case Err(reason): projected = Err(reason)
+        case Ok(module):
+            val policy = Policy(name: "p")
+            policy.items = module.items.copy()
+            policy.extras = module.extras.copy()
+            projected = Ok(policy)
+    projected
+
+fn main():
+    val h = Holder(name: "h", items: ["a", "b"])
+    val p = copy_typed_local(h)
+    print p.items.len()
+    print p.items[0]
+    val q = copy_param(h.items)
+    print q.len()
+    print q[1]
+    print copy_untyped_local()
+    match copy_match_bound_field(true):
+        case Ok(policy):
+            print policy.items.len()
+            print policy.items[1]
+            print policy.extras.len()
+            print policy.extras[0]
+        case Err(reason): print reason
+    match copy_match_bound_field(false):
+        case Ok(policy): print "bad"
+        case Err(reason): print reason
+    print Op.copy(7).id
