@@ -304,18 +304,24 @@ pub class FileFiberTldrBridgeV1:
     me _drain_completions(table: TldrTableV1) -> Result<(), FileFiberTldrBridgeErrorV1>:
         var drained = 0
         while drained < _FF_WAKE_BATCH:
-            val completion: RingCompletion<i64> = if val retained = self.pending_completion:
-                retained
-            else:
-                # @workaround bug=ctor_mir_2026-10-31 reason=annotate binder; stage2 leaves Cpl unsubstituted in generic-self method Result
-                val taken_completion: Result<RingCompletion<i64>?, SimpleRingError> = self.ring.take_completion_retained(self.owner_id)
-                match taken_completion:
-                    case Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
-                    case Ok(Some(value)):
-                        self.pending_completion = Some(value)
-                        value
-                    # @workaround bug=ctor_mir_2026-10-31 reason=Some-first then Ok(_); nil sub-pattern in Ok(...) unsupported by stage2 MIR; use None
-                    case Ok(_): return Ok(())
+            # @workaround bug=phase2_llvm_if_val_match_value_void_2026-11-16 reason=frozen Phase 2 types an if-val/else-match value with returning arms as void
+            var completion_slot: RingCompletion<i64>? = self.pending_completion
+            match completion_slot:
+                case Some(_): ()
+                case None:
+                    # @workaround bug=ctor_mir_2026-10-31 reason=annotate binder; stage2 leaves Cpl unsubstituted in generic-self method Result
+                    val taken_completion: Result<RingCompletion<i64>?, SimpleRingError> = self.ring.take_completion_retained(self.owner_id)
+                    match taken_completion:
+                        case Err(error): return Err(FileFiberTldrBridgeErrorV1.Ring(error))
+                        case Ok(Some(value)):
+                            self.pending_completion = Some(value)
+                            completion_slot = Some(value)
+                        # @workaround bug=ctor_mir_2026-10-31 reason=Some-first then Ok(_); nil sub-pattern in Ok(...) unsupported by stage2 MIR; use None
+                        case Ok(_): return Ok(())
+            match completion_slot:
+                case None: return Ok(())
+                case Some(_): ()
+            val completion: RingCompletion<i64> = completion_slot.unwrap()
             var found = -1
             for i in 0..self.waits.len():
                 if self._same_token(self.waits[i].token, completion.token):
