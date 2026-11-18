@@ -5168,7 +5168,7 @@ impl MirLowering:
                         match effective_payload_type:
                             case Some(found_payload_type):
                                 val declared_tuple = match found_payload_type.kind:
-                                    case HirTypeKind.Tuple(_): true
+                                    case HirTypeKind.Tuple(elems): elems.len() > 0
                                     case _: false
                                 if result_payload_type != None and declared_tuple:
                                     if val native_tuple = self.wrapper_owned_native_tuple_payload_type(found_payload_type):
@@ -5322,16 +5322,17 @@ impl MirLowering:
                 if val wrapper_payload = self.result_variant_payload_type(scrutinee, enum_variants[ci], scrut_local.id):
                     match wrapper_payload.kind:
                         case HirTypeKind.Tuple(fields):
-                            if val admitted_tuple = wrapper_native_tuple_payload_type(wrapper_payload):
-                                native_tuple_type = Some(admitted_tuple)
-                                native_tuple_fields = fields
-                            elif val try_tuple = self.result_try_tuple_payload_type(wrapper_payload):
-                                # Same slot admission as unwrap and `?`.
-                                native_tuple_type = Some(try_tuple)
-                                native_tuple_fields = fields
-                            else:
-                                # Unadmitted slots (e.g. f32) have no native slot proof.
-                                self.error_fatal("unsupported Result tuple payload element type: {self.result_tuple_rejected_element(wrapper_payload)}", Some(scrutinee.span))
+                            if fields.len() > 0:
+                                if val admitted_tuple = wrapper_native_tuple_payload_type(wrapper_payload):
+                                    native_tuple_type = Some(admitted_tuple)
+                                    native_tuple_fields = fields
+                                elif val try_tuple = self.result_try_tuple_payload_type(wrapper_payload):
+                                    # Same slot admission as unwrap and `?`.
+                                    native_tuple_type = Some(try_tuple)
+                                    native_tuple_fields = fields
+                                else:
+                                    # Unadmitted slots (e.g. f32) have no native slot proof.
+                                    self.error_fatal("unsupported Result tuple payload element type: {self.result_tuple_rejected_element(wrapper_payload)}", Some(scrutinee.span))
                         case _: ()
                 self.builder.enum_semantic_node = semantic_pattern_root
                 var bp = self.builder
@@ -6152,7 +6153,9 @@ impl MirLowering:
                 match base_type.kind:
                     case HirTypeKind.Result(ok_type, _):
                         match ok_type.kind:
-                            case HirTypeKind.Tuple(_): return self.decode_result_tuple_payload(pl, ok_type)
+                            case HirTypeKind.Tuple(elems):
+                                if elems.len() > 0: return self.decode_result_tuple_payload(pl, ok_type)
+                                return pl
                             case _: return self.decode_declared_enum_payload_slot(pl, ok_type)
                     case _: return pl
             # bug=enum_payload_type_mismatch_unresolved_try_2026-10-24:
@@ -6166,7 +6169,9 @@ impl MirLowering:
                 match lowered_type.kind:
                     case HirTypeKind.Result(lowered_ok, _):
                         match lowered_ok.kind:
-                            case HirTypeKind.Tuple(_): return self.decode_result_tuple_payload(pl, lowered_ok)
+                            case HirTypeKind.Tuple(elems):
+                                if elems.len() > 0: return self.decode_result_tuple_payload(pl, lowered_ok)
+                                return pl
                             case _: return self.decode_declared_enum_payload_slot(pl, lowered_ok)
                     case _: ()
             return pl
@@ -6310,7 +6315,7 @@ impl MirLowering:
         var lowered_payload_values: [LocalId] = []
         var payload_index = 0
         while payload_index < payload_values.len():
-            val value = payload_values[payload_index]
+            val value: HirExpr = payload_values[payload_index]
             val local = if generic_payload:
                 self.lower_expr(value)
             else:
@@ -6533,15 +6538,16 @@ impl MirLowering:
         var payload_local = LocalId(id: 0)
         var option_payload_type: HirType? = None
         if args.len() == 1:
+            val arg0_value: HirExpr = args[0].value
             payload_local = if typed_slots:
-                self.lower_declared_enum_payload_expression(self.enum_variant_payload_types[metadata_key][0], args[0].value)
+                self.lower_declared_enum_payload_expression(self.enum_variant_payload_types[metadata_key][0], arg0_value)
             else:
-                self.lower_untyped_enum_payload_expression(if metadata_owner != "": metadata_owner else: enum_name, args[0].value)
+                self.lower_untyped_enum_payload_expression(if metadata_owner != "": metadata_owner else: enum_name, arg0_value)
             if typed_slots:
                 val expected = self.enum_variant_payload_types[metadata_key][0]
-                if not self.enum_payload_local_compatible(expected, args[0].value, payload_local):
-                    self.enum_payload_mismatch_trace(expected, args[0].value, payload_local)
-                    self.error_fatal(self.enum_payload_mismatch_message(metadata_key, 0, expected, args[0].value), Some(args[0].span))
+                if not self.enum_payload_local_compatible(expected, arg0_value, payload_local):
+                    self.enum_payload_mismatch_trace(expected, arg0_value, payload_local)
+                    self.error_fatal(self.enum_payload_mismatch_message(metadata_key, 0, expected, arg0_value), Some(args[0].span))
                     return self.builder.emit_const_int(0)
                 payload_local = self.adapt_declared_enum_payload(expected, payload_local)
             if enum_name == "Option" and variant == "Some":

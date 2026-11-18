@@ -569,20 +569,17 @@ impl SymbolTable:
     me mark_generic_callable(id: SymbolId, type_param_count: i64):
         """Record an explicit generic marker on a callable symbol (imported
         generic functions carry no signature type)."""
-        if id.? and type_param_count > 0:
+        if id.is_valid() and type_param_count > 0 and self.symbols.has(id.id):
             val raw: i64 = id.id
-            val found: HirSymbol? = self.symbols[raw]
-            if val payload = found:
-                var sym: HirSymbol = payload
-                sym.generic_param_count = type_param_count
-                self.symbols[raw] = sym
+            var sym: HirSymbol = self.symbols[raw]
+            sym.generic_param_count = type_param_count
+            self.symbols[raw] = sym
 
     me mark_declared_callable_params_v1(id: SymbolId, params: [HirType]?):
-        if id.is_valid():
-            if val present = self.symbols[id.id]:
-                var symbol: HirSymbol = present
-                symbol.declared_param_types_v1 = params
-                self.symbols[id.id] = symbol
+        if id.is_valid() and self.symbols.has(id.id):
+            var symbol: HirSymbol = self.symbols[id.id]
+            symbol.declared_param_types_v1 = params
+            self.symbols[id.id] = symbol
 
     me rename_symbol(id: SymbolId, new_name: text):
         """Overwrite a symbol's stored `.name` in place, WITHOUT touching its
@@ -592,42 +589,40 @@ impl SymbolTable:
         alias-local name) while `compute_a`/`compute_b` etc. still resolve
         via the original scope entry created by `define()` (bug
         bootstrap_stage2_empty_mir_bodies_2026-07-05, Probe B)."""
-        if id.?:
+        if id.is_valid() and self.symbols.has(id.id):
             val raw: i64 = id.id
-            val found: HirSymbol? = self.symbols[raw]
-            if val payload = found:
-                val sym: HirSymbol = payload
-                val renamed = HirSymbol(
-                    id: sym.id,
-                    name: new_name,
-                    kind: sym.kind,
-                    type_: sym.type_,
-                    scope: sym.scope,
-                    span: sym.span,
-                    visibility: sym.visibility,
-                    is_public: sym.is_public,
-                    is_mutable: sym.is_mutable,
-                    defining_module: sym.defining_module,
-                    builtin_method_tag: hir_builtin_method_tag(new_name),
-                    generic_param_count: sym.generic_param_count,
-                    declaration_modifier_v1: sym.declaration_modifier_v1,
-                    declaration_source_path_v1: sym.declaration_source_path_v1,
-                    declaration_projection_key_v1: sym.declaration_projection_key_v1,
-                    declaration_owner_v1: sym.declaration_owner_v1,
-                    declared_param_types_v1: sym.declared_param_types_v1
-                )
-                self.symbols[raw] = renamed
-                if not self.exact_symbols.has(new_name):
-                    self.exact_symbols[new_name] = raw
-                # MODCALLIDX: the rename changes the name the sweep in
-                # field_module_callable would have matched on, so the
-                # index must follow it. The pre-rename row is left in
-                # place: the old sweep saw only the CURRENT name, but a
-                # stale row can only be reached by a field spelling that
-                # no symbol answers, and dropping it would need a reverse
-                # index for no behavioural gain.
-                if val renamed_module = sym.defining_module:
-                    self.index_module_callable(renamed_module, new_name, raw)
+            val sym: HirSymbol = self.symbols[raw]
+            val renamed = HirSymbol(
+                id: sym.id,
+                name: new_name,
+                kind: sym.kind,
+                type_: sym.type_,
+                scope: sym.scope,
+                span: sym.span,
+                visibility: sym.visibility,
+                is_public: sym.is_public,
+                is_mutable: sym.is_mutable,
+                defining_module: sym.defining_module,
+                builtin_method_tag: hir_builtin_method_tag(new_name),
+                generic_param_count: sym.generic_param_count,
+                declaration_modifier_v1: sym.declaration_modifier_v1,
+                declaration_source_path_v1: sym.declaration_source_path_v1,
+                declaration_projection_key_v1: sym.declaration_projection_key_v1,
+                declaration_owner_v1: sym.declaration_owner_v1,
+                declared_param_types_v1: sym.declared_param_types_v1
+            )
+            self.symbols[raw] = renamed
+            if not self.exact_symbols.has(new_name):
+                self.exact_symbols[new_name] = raw
+            # MODCALLIDX: the rename changes the name the sweep in
+            # field_module_callable would have matched on, so the
+            # index must follow it. The pre-rename row is left in
+            # place: the old sweep saw only the CURRENT name, but a
+            # stale row can only be reached by a field spelling that
+            # no symbol answers, and dropping it would need a reverse
+            # index for no behavioural gain.
+            if val renamed_module = sym.defining_module:
+                self.index_module_callable(renamed_module, new_name, raw)
 
     # ========================================================================
     # Method Resolution Helpers (for UFCS support)
@@ -636,12 +631,11 @@ impl SymbolTable:
     fn lookup_function(name: text) -> SymbolId?:
         """Look up a free function by name."""
         val found_id = self.lookup_or_invalid(name)
-        if found_id.is_valid():
-            val sym: HirSymbol? = self.get_symbol(found_id)
-            if val found = sym:
-                match found.kind:
-                    case SymbolKind.Function: return found_id
-                    case _: pass
+        if found_id.is_valid() and self.symbols.has(found_id.id):
+            val found: HirSymbol = self.symbols[found_id.id]
+            match found.kind:
+                case SymbolKind.Function: return found_id
+                case _: pass
         nil
 
     fn method_symbol_name(type_id: SymbolId, method_name: text) -> text:

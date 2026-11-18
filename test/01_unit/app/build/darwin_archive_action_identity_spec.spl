@@ -1,0 +1,138 @@
+# @req MBH-REQ-002 MBH-REQ-004 MBH-REQ-009
+
+use std.spec.*
+use std.spec.step
+use app.build.targets.action_identity.{
+    NATIVE_ACTION_INPUT_PRODUCER_V1, NativeActionInputIdentityV1,
+    native_action_input_receipt_text_v1, native_action_input_error_v1,
+    load_current_native_action_input_v1,
+    darwin_object_target_identity_digest_v1, darwin_archive_artifact_error_v1,
+    darwin_sdk_identity_v1
+}
+use app.build.targets.artifact_receipt.{
+    ImportedClosureInputV1, publish_dependency_manifest_layer_v1,
+    publish_imported_closure_layer_v1, target_cache_namespace_v1,
+    target_action_key_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use app.io.mod.{file_write, file_hash_sha256, dir_create_all, getpid}
+
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+
+val ARCHIVE_IDENTITY_ROOT = "/tmp/simple-archive-identity-spec-{getpid()}"
+
+fn _archive_fixture_identity() -> NativeActionInputIdentityV1:
+    val cache_dir = ARCHIVE_IDENTITY_ROOT + "/build/target_cache/app"
+    val sdk = ARCHIVE_IDENTITY_ROOT + "/sdk"
+    dir_create_all(ARCHIVE_IDENTITY_ROOT + "/src")
+    dir_create_all(ARCHIVE_IDENTITY_ROOT + "/build/tools")
+    dir_create_all(cache_dir + "/inputs")
+    dir_create_all(sdk)
+    file_write(ARCHIVE_IDENTITY_ROOT + "/src/main.spl", "fn main(): 0\n")
+    file_write(ARCHIVE_IDENTITY_ROOT + "/build/tools/simple", "#!/bin/sh\nexit 0\n")
+    file_write(sdk + "/SDKSettings.json", "archive-fixture-sdk-v1")
+    val tool_artifact = file_hash_sha256(ARCHIVE_IDENTITY_ROOT + "/build/tools/simple").unwrap()
+    val dependency_digest = publish_dependency_manifest_layer_v1(
+        ARCHIVE_IDENTITY_ROOT, cache_dir, "//app:main", []
+    )
+    val closure_digest = publish_imported_closure_layer_v1(
+        ARCHIVE_IDENTITY_ROOT, cache_dir, "//app:main", "src/main.spl",
+        tool_artifact, dependency_digest, [
+            ImportedClosureInputV1(
+                "src/main.spl",
+                file_hash_sha256(ARCHIVE_IDENTITY_ROOT + "/src/main.spl").unwrap()
+            )
+        ]
+    )
+    val sdk_id = darwin_sdk_identity_v1(sdk)
+    val provider = sha256_text("actual-fixture-codegen-provider")
+    val target_identity = darwin_object_target_identity_digest_v1(
+        "aarch64-apple-darwin", "aarch64", "cpu=default|features=default",
+        "13.0.0", sdk_id, "llvm", "opt=0|release=false", "mach-o", provider)
+    val producer_abi = sha256_text("producer-abi-v1")
+    val namespace = target_cache_namespace_v1(
+        producer_abi, target_identity, "debug", "archive")
+    val action_key = target_action_key_v1(
+        "//app:main", "native-build", "native", "llvm", namespace,
+        dependency_digest, closure_digest, tool_artifact, "archive")
+    NativeActionInputIdentityV1(
+        producer: NATIVE_ACTION_INPUT_PRODUCER_V1, target: "//app:main",
+        action: "native-build", entry: "src/main.spl",
+        tool_path: "build/tools/simple", tool_artifact_digest: tool_artifact,
+        tool_behavior_digest: tool_artifact, producer_abi_digest: producer_abi,
+        target_identity_digest: target_identity, profile: "debug",
+        dependency_manifest_digest: dependency_digest,
+        imported_closure_digest: closure_digest,
+        target_triple: "aarch64-apple-darwin", architecture: "aarch64",
+        cpu_features: "cpu=default|features=default",
+        deployment_target: "13.0.0", sdk_identity: sdk_id,
+        backend: "llvm", optimization: "opt=0|release=false",
+        object_format: "mach-o", linker_policy: "darwin-relocatable-object-v1",
+        linker_tool_identity: "", runtime_provider_receipt: provider,
+        runtime_artifact_digest: "", action_key: action_key, errors: []
+    )
+
+fn _macho64_arm64_object_bytes() -> [u8]:
+    [0xcfu8, 0xfau8, 0xedu8, 0xfeu8, 0x0cu8, 0u8, 0u8, 1u8,
+     0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8,
+     0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+     0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]
+
+fn _macho64_arm64_archive_bytes() -> [u8]:
+    # 8-byte `!<arch>\n` magic + 60-byte member header ("m.o", size 32) + 32-byte Mach-O object
+    var out: [u8] = [
+        0x21u8, 0x3cu8, 0x61u8, 0x72u8, 0x63u8, 0x68u8, 0x3eu8, 0x0au8,
+        0x6du8, 0x2eu8, 0x6fu8, 0x20u8, 0x20u8, 0x20u8, 0x20u8, 0x20u8,
+        0x20u8, 0x20u8, 0x20u8, 0x20u8, 0x20u8, 0x20u8, 0x20u8, 0x20u8
+    ]
+    var pad = 0
+    while pad < 32:
+        out.push(0x20u8)
+        pad = pad + 1
+    # ASCII size "32        " (10 bytes) + trailer "`\n"
+    for b in [0x33u8, 0x32u8, 0x20u8, 0x20u8, 0x20u8, 0x20u8, 0x20u8, 0x20u8, 0x20u8, 0x20u8, 0x60u8, 0x0au8]:
+        out.push(b)
+    for b in _macho64_arm64_object_bytes():
+        out.push(b)
+    out
+
+describe "Darwin static archive action identity contract":
+    it "admits archive receipt without executable runtime linkage":
+        val identity = _archive_fixture_identity()
+        val cache_dir = ARCHIVE_IDENTITY_ROOT + "/build/target_cache/app"
+        expect(file_write(
+            cache_dir + "/inputs/current.receipt",
+            native_action_input_receipt_text_v1(identity)
+        )).to_be(true)
+        val loaded = load_current_native_action_input_v1(
+            ARCHIVE_IDENTITY_ROOT, cache_dir, "//app:main", "native", "llvm",
+            "src/main.spl", "archive", identity.tool_artifact_digest,
+            identity.target_triple, identity.architecture, identity.deployment_target,
+            identity.sdk_identity, identity.runtime_provider_receipt,
+            "", ARCHIVE_IDENTITY_ROOT + "/sdk", ""
+        )
+        expect(loaded.errors.len()).to_equal(0)
+
+    it "rejects executable linker fields on archive actions":
+        var identity = _archive_fixture_identity()
+        identity.linker_tool_identity = sha256_text("fabricated-executable-linker")
+        val err = native_action_input_error_v1(
+            ARCHIVE_IDENTITY_ROOT, ARCHIVE_IDENTITY_ROOT + "/build/target_cache/app",
+            "//app:main", "native", "llvm", "src/main.spl", "archive",
+            identity.tool_artifact_digest, identity,
+            identity.target_triple, identity.architecture, identity.deployment_target,
+            identity.sdk_identity, identity.runtime_provider_receipt,
+            "", ARCHIVE_IDENTITY_ROOT + "/sdk", ""
+        )
+        expect(err).to_equal("target-identity-error: object-runtime-linkage-not-applicable")
+
+    it "accepts Mach-O archive bytes and rejects raw relocatable objects":
+        val _identity = _archive_fixture_identity()
+        val ar_path = ARCHIVE_IDENTITY_ROOT + "/libartifact.a"
+        val obj_path = ARCHIVE_IDENTITY_ROOT + "/artifact.o"
+        expect(rt_file_write_bytes(ar_path, _macho64_arm64_archive_bytes())).to_be(true)
+        expect(rt_file_write_bytes(obj_path, _macho64_arm64_object_bytes())).to_be(true)
+        expect(darwin_archive_artifact_error_v1(ar_path, "aarch64")).to_equal("")
+        expect(darwin_archive_artifact_error_v1(ar_path, "x86_64") == "").to_equal(false)
+        expect(darwin_archive_artifact_error_v1(obj_path, "aarch64")).to_equal(
+            "target-identity-error: archive-artifact-kind-mismatch")
