@@ -4,6 +4,7 @@ use std.common.traceability.graph_types_v1.*
 use std.common.traceability.graph_fields_v1.*
 use std.common.traceability.graph_budget_v1.{trace_graph_preflight_v1}
 use std.common.traceability.graph_wire_v1.{trace_graph_tuple_key_v1}
+use std.common.traceability.model.{TraceLocatorKind, locator_kind_name}
 
 fn trace_graph_is_test_v1(kind: text) -> bool:
     kind == "test_case" or kind == "parameterized_case"
@@ -55,6 +56,12 @@ fn trace_graph_acyclic_v1(edges: [TraceGraphEdgeV1], relation: text) -> Result<(
     if cursor != indegree.keys().len():
         return Err(trace_codec_issue_v1("cyclic_relation", "edges", "Cycle in acyclic relation " + relation))
     Ok(())
+
+fn trace_graph_locator_kind_wire_ok_v1(kind: TraceLocatorKind) -> bool:
+    match kind:
+        case TraceLocatorKind.SdnNode: false
+        case TraceLocatorKind.Line: false
+        case _: true
 
 pub fn trace_graph_validate_v1(document: TraceGraphV1, limits: TraceGraphCodecLimitsV1, mode: TraceGraphValidationModeV1 = TraceGraphValidationModeV1.Decoding) -> Result<(), TraceCodecIssueV1>:
     trace_graph_preflight_v1(document, limits, mode)?
@@ -177,17 +184,17 @@ pub fn trace_graph_validate_v1(document: TraceGraphV1, limits: TraceGraphCodecLi
     for item in document.locators:
         val path = "locators." + index.to_text()
         if not nodes.contains_key(item.entity_id): return Err(trace_codec_issue_v1("missing_reference", path + ".entity_id", "Locator entity is absent"))
-        trace_graph_enum_check_v1(item.locator_kind, ["file", "symbol", "scenario", "section", "cas"], path + ".locator_kind")?
+        if not trace_graph_locator_kind_wire_ok_v1(item.locator_kind): return Err(trace_codec_issue_v1("invalid_enum", path + ".locator_kind", "Unknown enum value"))
         if item.path_available != (item.path != ""): return Err(trace_codec_issue_v1("invalid_location", path + ".path", "Path availability contradicts text"))
-        if item.locator_kind == "cas":
+        if item.locator_kind == TraceLocatorKind.Cas:
             if item.path_available or not item.locator.starts_with("sha256:") or trace_graph_digest_valid_v1(item.locator[7:item.locator.len()]) == TraceCodecValidityV1.Invalid:
                 return Err(trace_codec_issue_v1("invalid_location", path, "CAS requires exact SHA256 reference and unavailable path"))
         else:
             if not item.path_available: return Err(trace_codec_issue_v1("invalid_location", path + ".path", "Source locator requires available path"))
             if not inputs.contains_key(item.path): return Err(trace_codec_issue_v1("missing_reference", path + ".path", "Locator path is absent from manifest"))
-            if (item.locator_kind == "file" and item.locator != "") or (item.locator_kind != "file" and item.locator == ""):
+            if (item.locator_kind == TraceLocatorKind.File and item.locator != "") or (item.locator_kind != TraceLocatorKind.File and item.locator == ""):
                 return Err(trace_codec_issue_v1("invalid_location", path + ".locator", "Locator text contradicts its kind"))
-        val key = trace_graph_tuple_key_v1([item.entity_id, item.path_available.to_text(), item.path, item.locator_kind, item.locator])
+        val key = trace_graph_tuple_key_v1([item.entity_id, item.path_available.to_text(), item.path, locator_kind_name(item.locator_kind), item.locator])
         if locator_keys.contains_key(key): return Err(trace_codec_issue_v1("duplicate_record", path, "Duplicate locator record"))
         locator_keys[key] = true
         index = index + 1

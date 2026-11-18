@@ -17,10 +17,8 @@ structs meet the requirement as they stand.
 
 Closed-set `text` field that could become an enum if the exemption is ever
 narrowed: `TraceDiagnostic.severity` (error, warning). `TraceLocator.locator_kind`
-is now the closed enum `TraceLocatorKind` (text only at the SDN boundary via
-`locator_kind_name` / `parse_locator_kind`); the graph wire DTO
-`TraceGraphLocatorV1.locator_kind` stays `text` and is validated by
-`graph_schema_v1.spl`.
+and the graph wire DTO `TraceGraphLocatorV1.locator_kind` are now the closed enum `TraceLocatorKind` (text only at the SDN boundary via
+`locator_kind_name` / `parse_locator_kind`; unknown wire text is rejected `invalid_enum`).
 
 ## 3. MCP / ctx
 
@@ -59,8 +57,6 @@ is now the closed enum `TraceLocatorKind` (text only at the SDN boundary via
   case, attempt, status, qualification and provenance only
   (`std.common.traceability.test_query`). Unblock: the runner must first record
   those facts per attempt.
-- `expired` has no `TestQueryStatus` variant; it parses as `Unknown` and is
-  never PASS (TESTDB-008), which is safe but not a distinct typed outcome.
 
 ## Already recorded elsewhere
 
