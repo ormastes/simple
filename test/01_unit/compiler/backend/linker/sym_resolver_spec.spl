@@ -301,11 +301,30 @@ describe "SymResolver - COMDAT instance dedup":
 # .text.__x86.get_pc_thunk.* section that is a member of a COMDAT group
 # (SHF_GROUP). Repro for bug simple_linker_armv7_i686_hosted_relocs.
 fn make_group_obj(syms: [ElfSymbol], flags: i64) -> ElfObject:
+    make_sig_obj(syms, flags, syms[0].name)
+
+# Section 1 = the defining section; when it carries SHF_GROUP, section 2 is an
+# SHT_GROUP (GRP_COMDAT, member 1) whose sh_info names a signature symbol `sig`.
+fn make_sig_obj(syms: [ElfSymbol], flags: i64, sig: text) -> ElfObject:
     val base = make_obj(syms)
     val null_sec = ElfSectionHeader(sh_name: 0, sh_type: 0, sh_flags: 0, sh_addr: 0, sh_size: 0, sh_info: 0)
     val text_sec = ElfSectionHeader(sh_name: 0, sh_type: 1, sh_flags: flags, sh_addr: 0, sh_size: 4, sh_info: 0)
-    ElfObject(header: base.header, sections: [null_sec, text_sec], symbols: syms,
-        relocations: base.relocations, strtab: base.strtab, shstrtab: base.shstrtab, raw: base.raw)
+    if (flags & 0x200) == 0:
+        return ElfObject(header: base.header, sections: [null_sec, text_sec], symbols: syms,
+            relocations: base.relocations, strtab: base.strtab, shstrtab: base.shstrtab, raw: base.raw)
+    var all = syms
+    all.push(ElfSymbol(st_name: 0, st_info: 3, st_other: 0, st_shndx: 1, st_value: 0, st_size: 0, name: sig))
+    val group_sec = ElfSectionHeader(sh_name: 0, sh_type: 17, sh_flags: 0, sh_addr: 0, sh_size: 8, sh_info: all.len() - 1)
+    # ELF32 image (raw[4]=1), e_shoff 0: shdr[2].sh_offset (byte 96) -> 120,
+    # group words at 120: GRP_COMDAT, member section 1.
+    var raw: [u8] = []
+    for _i in 0..128: raw.push(0u8)
+    raw[4] = 1u8
+    raw[96] = 120u8
+    raw[120] = 1u8
+    raw[124] = 1u8
+    ElfObject(header: base.header, sections: [null_sec, text_sec, group_sec], symbols: all,
+        relocations: base.relocations, strtab: base.strtab, shstrtab: base.shstrtab, raw: raw)
 
 describe "SymResolver - strong COMDAT group members":
     it "strong definitions in SHF_GROUP sections keep the first copy, no error":
@@ -325,3 +344,14 @@ describe "SymResolver - strong COMDAT group members":
         val s = ElfSymbol(st_name: 0, st_info: 18, st_other: 0, st_shndx: 1, st_value: 0, st_size: 4, name: "f")
         val res = sym_resolve_objects([make_group_obj([w], 0x206), make_group_obj([s], 0x6), make_group_obj([s], 0x206)])
         expect(sym_error_count(res)).to_equal(1)
+
+    it "strong definitions in groups with DIFFERENT signatures are still a duplicate":
+        # follow-up to PR #10183 review item 1: lld dedups COMDAT by group signature only
+        val s = ElfSymbol(st_name: 0, st_info: 18, st_other: 0, st_shndx: 1, st_value: 0, st_size: 4, name: "g")
+        val res = sym_resolve_objects([make_sig_obj([s], 0x206, "grp_a"), make_sig_obj([s], 0x206, "grp_b")])
+        expect(sym_error_count(res)).to_equal(1)
+
+    it "strong definitions in groups with the SAME signature keep the first copy":
+        val s = ElfSymbol(st_name: 0, st_info: 18, st_other: 0, st_shndx: 1, st_value: 0, st_size: 4, name: "g")
+        val res = sym_resolve_objects([make_sig_obj([s], 0x206, "grp_a"), make_sig_obj([s], 0x206, "grp_a")])
+        expect(sym_error_count(res)).to_equal(0)

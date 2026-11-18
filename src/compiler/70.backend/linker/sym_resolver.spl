@@ -6,7 +6,7 @@
 
 use compiler.backend.linker.elf_parser.{
     ElfObject, ElfSymbol, elf_symbol_binding, elf_symbol_type,
-    elf_defined_symbols, elf_undefined_symbols,
+    elf_defined_symbols, elf_undefined_symbols, elf_group_signature,
     SHN_UNDEF, STB_LOCAL, STB_GLOBAL, STB_WEAK
 }
 
@@ -101,10 +101,12 @@ fn sym_resolution_new() -> SymResolution:
         local_tables: []
     )
 
-fn sym_in_group_section(obj: ElfObject, sym: ElfSymbol) -> bool:
-    """True when the symbol's defining section carries SHF_GROUP (0x200)."""
-    if sym.st_shndx <= 0 or sym.st_shndx >= obj.sections.len(): return false
-    (obj.sections[sym.st_shndx].sh_flags & 0x200) != 0
+fn sym_group_sig(obj: ElfObject, sym: ElfSymbol) -> text:
+    """COMDAT group signature of the symbol's defining section, or "" when
+    that section is not an SHF_GROUP (0x200) member of a SHT_GROUP."""
+    if sym.st_shndx <= 0 or sym.st_shndx >= obj.sections.len(): return ""
+    if (obj.sections[sym.st_shndx].sh_flags & 0x200) == 0: return ""
+    elf_group_signature(obj, sym.st_shndx)
 
 class SymResolveState:
     """Mutable accumulation for `sym_resolve_objects`. The maps are updated in
@@ -113,7 +115,7 @@ class SymResolveState:
     var defined: {text: SymEntry}
     var errors: [text]
     var local_tables: [[SymEntry]]
-    var grouped: {text: bool}  # winning definition lives in an SHF_GROUP (COMDAT) section
+    var grouped: {text: text}  # name -> COMDAT group signature of the winning definition
 
     me add_object(obj: ElfObject, obj_idx: i64):
         var locals: [SymEntry] = []
@@ -143,17 +145,17 @@ class SymResolveState:
                     if is_weak(existing):
                         self.defined[sym.name] = entry
                 else if is_strong(existing) and is_strong(entry) and
-                        self.grouped.has(sym.name) and sym_in_group_section(obj, sym):
-                    pass  # COMDAT: the first group's definition wins (ld.lld)
+                        self.grouped.has(sym.name) and self.grouped[sym.name] == sym_group_sig(obj, sym):
+                    pass  # same COMDAT signature: first group's definition wins (ld.lld)
                 else if is_strong(existing) and is_strong(entry):
                     self.errors.push("duplicate symbol: {sym.name} (object {existing.obj_idx} and {obj_idx})")
                 else if is_strong(entry) and is_weak(existing):
                     self.defined[sym.name] = entry
-                    if sym_in_group_section(obj, sym): self.grouped[sym.name] = true
+                    if sym_group_sig(obj, sym) != "": self.grouped[sym.name] = sym_group_sig(obj, sym)
                     else if self.grouped.has(sym.name): self.grouped.remove(sym.name)
             else:
                 self.defined[sym.name] = entry
-                if sym_in_group_section(obj, sym): self.grouped[sym.name] = true
+                if sym_group_sig(obj, sym) != "": self.grouped[sym.name] = sym_group_sig(obj, sym)
 
         self.local_tables.push(locals)
 
