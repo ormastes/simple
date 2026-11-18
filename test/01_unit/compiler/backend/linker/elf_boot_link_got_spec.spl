@@ -1,0 +1,94 @@
+# elf_boot_link — synthetic .got honours a script `.got` output section
+#
+# Fixtures: test/fixtures/linker/elf/got_orphan/{got_orphan_a64,got_orphan_rv64}.{s,o}
+# and got_orphan.ld (the SimpleOS user script shape: .data, `.got : { *(.got) }`,
+# an empty .init_array, .bss). Every expected value is llvm-readelf of
+# `ld.lld -static -T got_orphan.ld` (LLD 18; riscv64 adds --no-relax).
+# Before this fix the engine appended .got after .bss, which made .bss file-backed,
+# and the empty .init_array opened its own empty R PT_LOAD.
+# Bug: doc/08_tracking/bug/simpleos_user_elf_boot_blocked_aarch64_riscv64_2026-11-19.md
+#
+# @cover src/compiler/70.backend/linker/elf/elf_boot_link.spl
+
+use compiler.backend.linker.elf.elf_boot_link.{ElfBootImage, elf_boot_link_image}
+use compiler.backend.linker.boot_layout.boot_layout_plan.{BootLayoutPlan, boot_layout_from_text}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use std.io_runtime.{file_read_bytes}
+
+val GO_FIX: text = "test/fixtures/linker/elf/got_orphan"
+
+fn go_bytes(path: text) -> [i64]:
+    val raw = file_read_bytes(path)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < raw.len():
+        out = out.push(raw[i] as i64)
+        i = i + 1
+    out
+
+fn go_text(path: text) -> text:
+    var s = ""
+    for b in file_read_bytes(path):
+        s = s + (b as i64).to_char()
+    s
+
+fn go_u16(b: [i64], off: i64) -> i64:
+    b[off] | (b[off + 1] << 8)
+
+fn go_u32(b: [i64], off: i64) -> i64:
+    go_u16(b, off) | (go_u16(b, off + 2) << 16)
+
+fn go_u64(b: [i64], off: i64) -> i64:
+    go_u32(b, off) | (go_u32(b, off + 4) << 32)
+
+fn go_link(obj: text, arch: RelocArch) -> ElfBootImage:
+    val plan = boot_layout_from_text(go_text("{GO_FIX}/got_orphan.ld")).unwrap()
+    elf_boot_link_image([go_bytes("{GO_FIX}/{obj}")], plan, arch).unwrap()
+
+fn go_idx(im: ElfBootImage, name: text) -> i64:
+    var i: i64 = 0
+    while i < im.sec_names.len():
+        if im.sec_names[i] == name:
+            return i
+        i = i + 1
+    -1
+
+fn go_shdr(im: ElfBootImage, name: text, field: i64) -> i64:
+    val shoff = go_u64(im.bytes, 40)
+    go_u64(im.bytes, shoff + (go_idx(im, name) + 1) * 64 + field)
+
+fn go_shtype(im: ElfBootImage, name: text) -> i64:
+    val shoff = go_u64(im.bytes, 40)
+    go_u32(im.bytes, shoff + (go_idx(im, name) + 1) * 64 + 4)
+
+# "vaddr filesz memsz flags" for each PT_LOAD, in order.
+fn go_loads(im: ElfBootImage) -> [text]:
+    val phoff = go_u64(im.bytes, 32)
+    val phnum = go_u16(im.bytes, 56)
+    var out: [text] = []
+    var i: i64 = 0
+    while i < phnum:
+        val ph = phoff + i * 56
+        if go_u32(im.bytes, ph) == 1:
+            out = out.push("{go_u64(im.bytes, ph + 16)} {go_u64(im.bytes, ph + 32)} {go_u64(im.bytes, ph + 40)} {go_u32(im.bytes, ph + 4)}")
+        i = i + 1
+    out
+
+describe "elf_boot_link - synthetic .got in a script .got section (ld.lld layout)":
+    it "aarch64: places .got after .data, keeps .bss NOBITS, no empty PT_LOAD":
+        val im = go_link("got_orphan_a64.o", RelocArch.AArch64)
+        expect(im.sec_vmas[go_idx(im, ".got")]).to_equal(0x50001008)
+        expect(go_shdr(im, ".got", 32)).to_equal(8)
+        expect(go_u64(im.bytes, go_shdr(im, ".got", 24))).to_equal(0x50001000)
+        expect(go_shtype(im, ".bss")).to_equal(8)
+        expect(go_loads(im)).to_equal(["1342177280 12 12 5", "1342181376 16 16 6", "1342185472 0 64 6"])
+
+    it "riscv64: reserves the .got header slot like ld.lld, then the symbol slot":
+        val im = go_link("got_orphan_rv64.o", RelocArch.Riscv64)
+        expect(im.sec_vmas[go_idx(im, ".got")]).to_equal(0x50001008)
+        expect(go_shdr(im, ".got", 32)).to_equal(16)
+        val got_off = go_shdr(im, ".got", 24)
+        expect(go_u64(im.bytes, got_off)).to_equal(0)
+        expect(go_u64(im.bytes, got_off + 8)).to_equal(0x50001000)
+        expect(go_shtype(im, ".bss")).to_equal(8)
+        expect(go_loads(im)).to_equal(["1342177280 10 10 5", "1342181376 32 32 6", "1342185472 0 64 6"])
