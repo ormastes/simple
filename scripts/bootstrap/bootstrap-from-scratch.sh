@@ -2546,6 +2546,13 @@ bootstrap_stage_sanity() (
     0|1) sanity_file_workers=${SIMPLE_FILE_WORKERS} ;;
     *) sanity_file_workers= ;;
   esac
+  # Interface-only HIR admits a zero-or-one worker estimate as one serial
+  # worker. Preserve that low-memory route with SIMPLE_FILE_WORKERS or the
+  # sanity smoke rejects the pool before compiling its fixture.
+  case "${SIMPLE_MIR_SHARD_INTERFACE_HIR:-}" in
+    0|1) sanity_mir_interface_hir=${SIMPLE_MIR_SHARD_INTERFACE_HIR} ;;
+    *) sanity_mir_interface_hir= ;;
+  esac
   # Explicit whole-program admission is the supported low-memory hosted-runner
   # route. Preserve it across the same environment scrub as SIMPLE_FILE_WORKERS
   # or candidate_frontend_smoke silently falls back to the >=30 GiB pool route.
@@ -2622,6 +2629,10 @@ bootstrap_stage_sanity() (
   if [ -n "${sanity_file_workers}" ]; then
     SIMPLE_FILE_WORKERS=${sanity_file_workers}
     export SIMPLE_FILE_WORKERS
+  fi
+  if [ -n "${sanity_mir_interface_hir}" ]; then
+    SIMPLE_MIR_SHARD_INTERFACE_HIR=${sanity_mir_interface_hir}
+    export SIMPLE_MIR_SHARD_INTERFACE_HIR
   fi
   if [ "$sanity_bootstrap_whole_program_present" = x ]; then
     SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=${sanity_bootstrap_whole_program}
