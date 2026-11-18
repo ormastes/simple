@@ -1,7 +1,7 @@
 # .ARM.exidx in the internal static ELF linker (EM_ARM, ELFCLASS32).
 #
 # Fixtures: test/fixtures/linker/elf/exidx/exidx_{a,b}.{c,o}, built by
-# C:/dev/wt/xc-wsl-scripts/ssos_fxexidx.sh (clang-20 --target=armv7a-none-eabi
+# test/fixtures/linker/elf/exidx/rebuild_fixtures.shs (clang-20 --target=armv7a-none-eabi
 # -marm -mfloat-abi=soft -O1 -funwind-tables -ffunction-sections
 # -fomit-frame-pointer). Every expected value is llvm-readelf of
 #   ld.lld -m armelf -z max-page-size=0x1000 --image-base=0x400000 \
@@ -133,3 +133,60 @@ describe "ARM .ARM.exidx (internal static linker vs ld.lld)":
         expect(ex_prel31(ex_u32(b, t), v)).to_equal(0x401150)        # _start
         expect(ex_prel31(ex_u32(b, t + 8), v + 8)).to_equal(0x401170) # fa
         expect(ex_prel31(ex_u32(b, t + 16), v + 16)).to_equal(0x40118c) # end of .text
+
+fn ex_sym(b: [i64], name: text) -> i64:
+    """st_value of the named .symtab symbol, or -1."""
+    val si = ex_sec_index(b, ".symtab")
+    if si < 0: return -1
+    val shoff = ex_u32(b, 32)
+    val sym_off = ex_u32(b, shoff + si * 40 + 16)
+    val sym_size = ex_u32(b, shoff + si * 40 + 20)
+    val str_idx = ex_u32(b, shoff + si * 40 + 24)
+    val str_off = ex_u32(b, shoff + str_idx * 40 + 16)
+    var k: i64 = 1
+    while k < sym_size / 16:
+        if ex_cstr(b, str_off + ex_u32(b, sym_off + k * 16)) == name:
+            return ex_u32(b, sym_off + k * 16 + 4)
+        k = k + 1
+    -1
+
+fn ex_walk_lookup(b: [i64], t: i64, v: i64, n: i64, pc: i64) -> i64:
+    """Binary search the exidx table (n entries) for pc, as exidx_walk.c's lookup()."""
+    if n == 0: return -1
+    var lo: i64 = 0
+    var hi: i64 = n
+    while hi - lo > 1:
+        val mid = (lo + hi) / 2
+        if ex_prel31(ex_u32(b, t + mid * 8), v + mid * 8) <= pc:
+            lo = mid
+        else:
+            hi = mid
+    lo
+
+# Re-implements exidx_walk.c's check() over the internally linked bytes, so
+# the walk is verified without running the ELF under qemu-arm.
+describe "ARM .ARM.exidx table walk (exidx_walk.o, internal linker)":
+    it "has a sorted table, CANTUNWIND sentinel, and binary search finds helper/check/_start":
+        val r = elf_static_link([ex_load("exidx_walk.o")], [], "_start", RelocArch.Arm32)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        val t = ex_sec(b, ".ARM.exidx", 16)
+        val v = ex_sec(b, ".ARM.exidx", 12)
+        val words = ex_sec(b, ".ARM.exidx", 20) / 4
+        expect(words >= 4).to_equal(true)
+        expect(words % 2).to_equal(0)
+        val n = words / 2
+        var i: i64 = 1
+        while i < n:
+            val prev = ex_prel31(ex_u32(b, t + (i - 1) * 8), v + (i - 1) * 8)
+            val cur = ex_prel31(ex_u32(b, t + i * 8), v + i * 8)
+            expect(cur > prev).to_equal(true)
+            i = i + 1
+        expect(ex_u32(b, t + words * 4 - 4)).to_equal(1)            # EXIDX_CANTUNWIND
+        for name in ["helper", "check", "_start"]:
+            val pc = ex_sym(b, name)
+            expect(pc > 0).to_equal(true)
+            val e = ex_walk_lookup(b, t, v, n, pc)
+            expect(e >= 0).to_equal(true)
+            expect(ex_prel31(ex_u32(b, t + e * 8), v + e * 8) <= pc).to_equal(true)
+            expect(e != n - 1).to_equal(true)                       # not the sentinel

@@ -2,7 +2,7 @@
  * __exidx_end (PREL31 entries), checks strictly increasing addresses, a final
  * EXIDX_CANTUNWIND sentinel, and that a binary search finds this file's own
  * functions. Exits 0 on success, 1 on failure (Linux EABI svc exit, r7 = 1).
- * Built by C:/dev/wt/xc-wsl-scripts/ssos_exwalk.sh. */
+ * Built by test/fixtures/linker/elf/exidx/rebuild_fixtures.shs. */
 extern const unsigned __exidx_start[], __exidx_end[];
 
 static unsigned prel31(const unsigned *at) {

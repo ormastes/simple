@@ -1,0 +1,33 @@
+#!/bin/sh
+# Rebuild the .ARM.exidx linker fixtures (exidx_a.o, exidx_b.o, exidx_walk.o)
+# with clang only, using the exact flags the committed objects were built with.
+#   sh test/fixtures/linker/elf/exidx/rebuild_fixtures.shs            # rebuild
+#   sh test/fixtures/linker/elf/exidx/rebuild_fixtures.shs --oracle   # + ld.lld oracle
+# After a rebuild, `git status` must be clean: the objects are byte-identical.
+set -e
+cd "$(dirname "$0")"
+
+pick() { for t in "$@"; do if command -v "$t" >/dev/null 2>&1; then command -v "$t"; return 0; fi; done; return 1; }
+CC=$(pick clang-20 clang) || { echo "ERROR: clang not found" >&2; exit 2; }
+
+T="--target=armv7a-none-eabi -marm -mfloat-abi=soft -O1 -ffreestanding -fno-pic -funwind-tables -ffunction-sections -fomit-frame-pointer"
+for f in exidx_a exidx_b exidx_walk; do
+    $CC $T -c "$f.c" -o "$f.o"
+    echo "built $f.o"
+done
+
+[ "$1" = "--oracle" ] || exit 0
+
+LD=$(pick ld.lld-20 ld.lld) || { echo "ERROR: ld.lld not found" >&2; exit 2; }
+RE=$(pick llvm-readelf-20 llvm-readelf) || { echo "ERROR: llvm-readelf not found" >&2; exit 2; }
+OUT=$(mktemp -d)
+trap 'rm -rf "$OUT"' EXIT
+LDF="-m armelf -z max-page-size=0x1000 --image-base=0x400000 --build-id=sha1 -static -nostdlib --gc-sections -e _start"
+$LD $LDF exidx_b.o exidx_a.o -o "$OUT/ex.elf"
+$LD $LDF exidx_walk.o -o "$OUT/exwalk.elf"
+for e in ex exwalk; do
+    echo "== oracle $e.elf"
+    $RE -lS "$OUT/$e.elf" | grep -E "EXIDX|exidx|\.text|\.note"
+    $RE -s "$OUT/$e.elf" | grep -E " (fa|fdead|_start|helper|check|__exidx_start|__exidx_end)$" || true
+    $RE -x .ARM.exidx "$OUT/$e.elf" | tail -n +3
+done
