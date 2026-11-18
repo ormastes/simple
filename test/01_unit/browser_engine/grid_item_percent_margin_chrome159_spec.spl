@@ -1,0 +1,106 @@
+"""
+## Purpose and audience
+Purpose: Pin that a grid item's containing block is its GRID AREA (CSS Grid
+6.1 / 11.1): percent margins on all four sides resolve against the area's
+inline size (never the grid container's), the item's margin box fills the
+area, vertical margins grow an implicit row, and a percent `width` resolves
+against the same area. Covers fixed px tracks, `fr` tracks, a
+`1 / span 2` item across a gap, auto-placed second-row items, an explicit
+stretched row and a px-margin contrast.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159 headless, `--dump-dom` + getBoundingClientRect(),
+900x2000, `body{margin:0}`, every `.g{display:grid;width:400px;
+margin-bottom:10px}`, 2026-11-18; x/y are relative to the grid container):
+
+| id | grid / item                                        | Chrome x y w h |
+|----|----------------------------------------------------|----------------|
+| g1 | 100px 300px                                        | h 80           |
+| a1 | margin:10% (of 100)                                | 10 10 80 20    |
+| a2 | margin:10% (of 300)                                | 130 30 240 20  |
+| g2 | 1fr 3fr                                            | h 160          |
+| b1 | margin-top:5% (of 100)                             | 0 5 100 10     |
+| b2 | margin:25% (of 300)                                | 175 75 150 10  |
+| g3 | 100px x3, gap 20px                                 | h 94           |
+| c1 | grid-column:1 / span 2; margin:10% (of 220)            | 22 22 176 10   |
+| c2 | margin-left:10%; margin-bottom:5%                  | 250 0 90 10    |
+| c3 | row 2, margin-top:10%                              | 0 84 100 10    |
+| c4 | row 2                                              | 120 74 100 10  |
+| e1 | width:50% (of 100)                                 | 0 0 50 10      |
+| e2 | width:50%; margin-left:10% (both of 300)           | 130 0 150 10   |
+| f1 | 200px track, 60px row, margin:10%, stretched       | 20 20 160 20   |
+| f2 | margin-bottom:25%                                  | 200 0 200 10   |
+| g8 | 100px 300px, px contrast                           | h 42           |
+| p1 | margin:11px                                        | 11 11 78 20    |
+| p2 | margin:6px 27px                                    | 127 6 246 20   |
+
+Base (release/1.0.0 a5a1b2367fe): percent vertical margins read as bare px,
+horizontal item margins (px and percent) ignored, rows ignored item margins.
+Not covered (open): a bare `grid-column:span N`; percent PADDING, which is
+not parsed anywhere in the engine (see the skill.md entry).
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-GRID-ITEM-MARGIN-001 — grid item margins resolve against and fill the grid area.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PAGE: text = "<html><head><style>body{{margin:0}} .g{{display:grid;width:400px;margin-bottom:10px}}</style></head><body>" +
+    "<div class=g id=g1 style=\"grid-template-columns:100px 300px\"><div id=a1 style=\"margin:10%;height:20px\"></div><div id=a2 style=\"margin:10%;height:20px\"></div></div><div class=g id=g2 style=\"grid-template-columns:1fr 3fr\"><div id=b1 style=\"margin-top:5%;height:10px\"></div><div id=b2 style=\"margin:25%;height:10px\"></div></div><div class=g id=g3 style=\"grid-template-columns:100px 100px 100px;gap:20px\"><div id=c1 style=\"grid-column:1 / span 2;margin:10%;height:10px\"></div><div id=c2 style=\"margin-left:10%;margin-bottom:5%;height:10px\"></div><div id=c3 style=\"margin-top:10%;height:10px\"></div><div id=c4 style=\"height:10px\"></div></div><div class=g id=g5 style=\"grid-template-columns:100px 300px\"><div id=e1 style=\"width:50%;height:10px\"></div><div id=e2 style=\"width:50%;margin-left:10%;height:10px\"></div></div><div class=g id=g6 style=\"grid-template-columns:200px 200px;grid-template-rows:60px\"><div id=f1 style=\"margin:10%\"></div><div id=f2 style=\"margin-bottom:25%;height:10px\"></div></div><div class=g id=g8 style=\"grid-template-columns:100px 300px\"><div id=p1 style=\"margin:11px;height:20px\"></div><div id=p2 style=\"margin:6px 27px;height:20px\"></div></div>" +
+    "</body></html>"
+
+fn _g(id: text, field: text) -> i32:
+    simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, field).to_i32()
+
+# "x y w h" of `id` relative to its grid container `grid`.
+fn _rect(id: text, grid: text) -> text:
+    val x = _g(id, "x") - _g(grid, "x")
+    val y = _g(id, "y") - _g(grid, "y")
+    val w = _g(id, "w")
+    val h = _g(id, "h")
+    "{x} {y} {w} {h}"
+
+describe "grid item margins resolve against the grid area":
+    it "fixed px tracks: margin 10% of each item's own track":
+        step("Chrome 159: a1 10 10 80 20, a2 130 30 240 20, grid h 80")
+        expect(_rect("a1", "g1")).to_equal("10 10 80 20")
+        expect(_rect("a2", "g1")).to_equal("130 30 240 20")
+        expect(_g("g1", "h")).to_equal(80)
+
+    it "fr tracks: margin-top 5% of 100 and margin 25% of 300":
+        step("Chrome 159: b1 0 5 100 10, b2 175 75 150 10, grid h 160")
+        expect(_rect("b1", "g2")).to_equal("0 5 100 10")
+        expect(_rect("b2", "g2")).to_equal("175 75 150 10")
+        expect(_g("g2", "h")).to_equal(160)
+
+    it "span 2 across a gap: margin 10% of the 220 px area":
+        step("Chrome 159: c1 22 22 176 10, c2 250 0 90 10")
+        expect(_rect("c1", "g3")).to_equal("22 22 176 10")
+        expect(_rect("c2", "g3")).to_equal("250 0 90 10")
+
+    it "auto-placed second row sits below the margin-grown first row":
+        step("Chrome 159: c3 0 84 100 10, c4 120 74 100 10, grid h 94")
+        expect(_rect("c3", "g3")).to_equal("0 84 100 10")
+        expect(_rect("c4", "g3")).to_equal("120 74 100 10")
+        expect(_g("g3", "h")).to_equal(94)
+
+    it "percent width resolves against the area, with or without a margin":
+        step("Chrome 159: e1 0 0 50 10, e2 130 0 150 10")
+        expect(_rect("e1", "g5")).to_equal("0 0 50 10")
+        expect(_rect("e2", "g5")).to_equal("130 0 150 10")
+
+    it "explicit row: a stretched item keeps its percent margins inside the row":
+        step("Chrome 159: f1 20 20 160 20, f2 200 0 200 10, grid h 60")
+        expect(_rect("f1", "g6")).to_equal("20 20 160 20")
+        expect(_rect("f2", "g6")).to_equal("200 0 200 10")
+        expect(_g("g6", "h")).to_equal(60)
+
+    it "px margins fill the area the same way":
+        step("Chrome 159: p1 11 11 78 20, p2 127 6 246 20, grid h 42")
+        expect(_rect("p1", "g8")).to_equal("11 11 78 20")
+        expect(_rect("p2", "g8")).to_equal("127 6 246 20")
+        expect(_g("g8", "h")).to_equal(42)
