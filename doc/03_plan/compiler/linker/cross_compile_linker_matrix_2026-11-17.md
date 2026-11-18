@@ -22,9 +22,9 @@ Legend: ✅ linked and ran · ⏳ not done · 🔧 in progress · ❌ unsupporte
 |----|--------|---------------|-------|---------------|---------|---------|
 | Linux | ✅ (3.4 s, #10037; was 4.5 s / 820 MB; target < 2 s / < 500 MB) | ❌ | ⏳ | ❌ (raw only) | ❌ | — |
 | Windows (PE/COFF) | 🔧 (shared PE EFI emitter #10098) | — | 🔧 (#10098) | — | — | — |
-| FreeBSD | ⏳ | — | ⏳ | — | — | — |
+| FreeBSD | 🔧 (cross-link via --sysroot, #10193; run pending) | — | ⏳ | — | — | — |
 | SimpleOS | ⏳ | ❌ | ⏳ | ❌ | ❌ | ❌ |
-| Bare-metal EFI (new row) | 🔧 | 🔧 | ✅ (#10102) | 🔧 | 🔧 | 🔧 |
+| Bare-metal EFI (new row) | 🔧 (--linker simple check, #10165; boot run pending) | 🔧 | ✅ (#10102) | 🔧 | 🔧 | 🔧 |
 
 Notes:
 - Windows (Simple linker) is a new PE/COFF lane covering x64 and arm64.
@@ -64,3 +64,7 @@ AAVMF32 / OpenSBI); see `.claude/rules/board-runnable.md`.
 
 The next p2 blocker is the `stage2_module_path_naming` identity check.
 The HIR snapshot origin skip fix (#10108) has landed.
+
+## Small-job slot
+
+Small-job slot (2026-11-18): while the heavy p2 bootstrap runs, small lane jobs go through xc-wsl-scripts/small_slot.sh — one lane at a time, RAM ≥8 GB, C: ≥25 GB, ulimit 8 GB, nice 10, timeout 1800, QEMU 256M (FreeBSD VM 2 GB).
