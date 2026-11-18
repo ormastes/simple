@@ -1,0 +1,40 @@
+# Shared RISC-V relocation helpers for the in-house ELF linkers
+# (elf_static_link, elf_boot_link; riscv32 and SimpleOS reuse the same rules).
+#
+# Relaxation is OFF: R_RISCV_RELAX (51) is a no-op hint and code is never
+# shrunk, matching `ld.lld --no-relax`.
+#
+# PCREL_LO12_I/S (24/25) do not name the final target. Their symbol is a label
+# on the AUIPC that carries the paired PCREL_HI20 / GOT_HI20 / TLS_GOT_HI20,
+# and the low part is taken from that HI20's (target + addend - hi_place).
+
+use compiler.backend.linker.riscv_static_reloc.{riscv_static_delta}
+
+val RISCV_R_GOT_HI20: i64 = 20
+val RISCV_R_TLS_GOT_HI20: i64 = 21
+val RISCV_R_PCREL_HI20: i64 = 23
+val RISCV_R_PCREL_LO12_I: i64 = 24
+val RISCV_R_PCREL_LO12_S: i64 = 25
+val RISCV_R_LO12_I: i64 = 27
+val RISCV_R_LO12_S: i64 = 28
+
+fn riscv_is_pcrel_hi(rtype: i64) -> bool:
+    rtype == RISCV_R_PCREL_HI20 or rtype == RISCV_R_GOT_HI20 or rtype == RISCV_R_TLS_GOT_HI20
+
+fn riscv_is_pcrel_lo(rtype: i64) -> bool:
+    rtype == RISCV_R_PCREL_LO12_I or rtype == RISCV_R_PCREL_LO12_S
+
+fn riscv_hi_key(object_index: i64, section_index: i64, offset: i64) -> text:
+    """Key of an HI20 site: object, input section, offset in that section."""
+    "{object_index}#{section_index}#{offset}"
+
+fn riscv_pcrel_lo_value(high_target: i64, high_addend: i64, high_place: i64) -> Result<i64, text>:
+    """The value whose low 12 bits a paired PCREL_LO12 encodes (S + A - P of the HI20)."""
+    riscv_static_delta(high_target, high_addend, high_place)
+
+fn riscv_pcrel_lo_as_absolute(rtype: i64) -> i64:
+    """The absolute LO12 type that patches the same field as PCREL_LO12_I/S."""
+    if rtype == RISCV_R_PCREL_LO12_I: RISCV_R_LO12_I else: RISCV_R_LO12_S
+
+export riscv_is_pcrel_hi, riscv_is_pcrel_lo, riscv_hi_key
+export riscv_pcrel_lo_value, riscv_pcrel_lo_as_absolute
