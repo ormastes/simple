@@ -1,0 +1,261 @@
+use std.spec.{describe, it, expect}
+use app.io.env_ops.{env_set}
+use app.io.file_ops.{path_absolute}
+use app.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{dir_create_all, dir_remove_all, file_write, file_exists, env_get_nullable, env_remove_process}
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
+use compiler.driver.driver_entry_closure_core.{
+    driver_detect_git_symlink_stub_text_v1,
+    driver_rewrite_windows_app_symlink_import_v1,
+    _driver_resolve_entry_import,
+    driver_resolve_closure_import_v1
+}
+
+fn _put_fixture_file(path: text, content: text):
+    val slash = path.rfind("/")
+    if slash > 0:
+        expect(dir_create_all(path.substring(0, slash))).to_equal(true)
+    expect(file_write(path, content)).to_equal(true)
+
+fn _restore_snapshot_root(prev_snap: text?):
+    if val saved = prev_snap:
+        expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", saved)).to_equal(true)
+    else:
+        expect(env_remove_process("SIMPLE_SCV_SNAPSHOT_ROOT")).to_equal(true)
+
+fn _create_trace32_targets(root: text):
+    _put_fixture_file(root + "/src/app/cli/main_and_help.spl", "use app.t32_cli.mod.{{t32_cli_main}}\n")
+    _put_fixture_file(root + "/src/compiler/00.common/keep.spl", "pub fn keep() -> i64: 0\n")
+    _put_fixture_file(root + "/src/lib/common/keep.spl", "pub fn keep() -> i64: 0\n")
+    _put_fixture_file(root + "/examples/10_tooling/trace32_tools/t32_cli/mod.spl", "pub fn t32_cli_main() -> i64: 0\n")
+    _put_fixture_file(root + "/examples/10_tooling/trace32_tools/t32_cli/error_codes.spl", "pub val T4010: i64 = 4010\n")
+    _put_fixture_file(root + "/examples/10_tooling/trace32_tools/t32_mcp/__init__.spl", "pub fn mcp_init() -> i64: 0\n")
+    _put_fixture_file(root + "/examples/10_tooling/trace32_tools/t32_mcp/session_state.spl", "pub struct McpT32Session:\n    id: i64\n")
+    _put_fixture_file(root + "/examples/10_tooling/trace32_tools/t32_lsp_mcp/tools.spl", "pub fn lsp_tool() -> i64: 0\n")
+    _put_fixture_file(root + "/examples/10_tooling/trace32_tools/t32_lsp_mcp/json_helpers.spl", "pub fn lsp_Q() -> text: \"\\\"\"\n")
+    _put_fixture_file(root + "/examples/10_tooling/trace32_tools/cmm_lsp/mod.spl", "pub fn cmm_main() -> i64: 0\n")
+    _put_fixture_file(root + "/examples/10_tooling/trace32_tools/cmm_lsp/cmm_parser.spl", "pub fn parse_cmm_source() -> i64: 0\n")
+
+fn _collect_all_four_rewrites(root: text) -> [[text]]:
+    val entry_dir = root + "/src/app/cli"
+    val roots = [root + "/src/compiler", root + "/src/app", root + "/src/lib"]
+
+    val cases: [[text]] = [
+        ["app.t32_cli.mod", root + "/examples/10_tooling/trace32_tools/t32_cli/mod.spl"],
+        ["app.t32_cli.mod.t32_cli_main", root + "/examples/10_tooling/trace32_tools/t32_cli/mod.spl"],
+        ["t32_cli.error_codes", root + "/examples/10_tooling/trace32_tools/t32_cli/error_codes.spl"],
+        ["t32_cli.error_codes.T4010", root + "/examples/10_tooling/trace32_tools/t32_cli/error_codes.spl"],
+        ["app.mcp_t32", root + "/examples/10_tooling/trace32_tools/t32_mcp/__init__.spl"],
+        ["mcp_t32", root + "/examples/10_tooling/trace32_tools/t32_mcp/__init__.spl"],
+        ["app.mcp_t32.session_state", root + "/examples/10_tooling/trace32_tools/t32_mcp/session_state.spl"],
+        ["mcp_t32.session_state.McpT32Session", root + "/examples/10_tooling/trace32_tools/t32_mcp/session_state.spl"],
+        ["app.t32_lsp_mcp.tools", root + "/examples/10_tooling/trace32_tools/t32_lsp_mcp/tools.spl"],
+        ["t32_lsp_mcp.json_helpers", root + "/examples/10_tooling/trace32_tools/t32_lsp_mcp/json_helpers.spl"],
+        ["app.cmm_lsp", root + "/examples/10_tooling/trace32_tools/cmm_lsp/mod.spl"],
+        ["cmm_lsp", root + "/examples/10_tooling/trace32_tools/cmm_lsp/mod.spl"],
+        ["app.cmm_lsp.cmm_parser", root + "/examples/10_tooling/trace32_tools/cmm_lsp/cmm_parser.spl"],
+        ["cmm_lsp.cmm_parser", root + "/examples/10_tooling/trace32_tools/cmm_lsp/cmm_parser.spl"]
+    ]
+    var results: [[text]] = []
+    for item in cases:
+        val spec = item[0]
+        val expected_path = item[1]
+        val resolved = _driver_resolve_entry_import(spec, entry_dir).replace("\\", "/")
+        val exists_flag = if file_exists(resolved): "true" else: "false"
+        val closure_text = match driver_resolve_closure_import_v1(spec, roots, entry_dir):
+            case SourceRootResolutionV1.Found(p): p.replace("\\", "/")
+            case SourceRootResolutionV1.Missing: "MISSING"
+            case SourceRootResolutionV1.Ambiguous(r): "AMBIGUOUS:" + r
+        results.push([resolved, expected_path, exists_flag, closure_text])
+    results
+
+fn _assert_collected_rewrites(results: [[text]]):
+    for row in results:
+        expect(row[0]).to_equal(row[1])
+        expect(row[2]).to_equal("true")
+        expect(row[3]).to_equal(row[1])
+
+describe "Windows app symlink stub rewrite":
+    it "detects git symlink stub text and rejects real source text":
+        expect(driver_detect_git_symlink_stub_text_v1("../../examples/10_tooling/trace32_tools/t32_cli")).to_equal(
+            Some("../../examples/10_tooling/trace32_tools/t32_cli"))
+        expect(driver_detect_git_symlink_stub_text_v1("../../examples/10_tooling/trace32_tools/t32_mcp\n")).to_equal(
+            Some("../../examples/10_tooling/trace32_tools/t32_mcp"))
+        expect(driver_detect_git_symlink_stub_text_v1("../../examples/10_tooling/trace32_tools/t32_lsp_mcp\r\n")).to_equal(
+            Some("../../examples/10_tooling/trace32_tools/t32_lsp_mcp"))
+        expect(driver_detect_git_symlink_stub_text_v1("../../examples/10_tooling/trace32_tools/cmm_lsp")).to_equal(
+            Some("../../examples/10_tooling/trace32_tools/cmm_lsp"))
+
+        expect(driver_detect_git_symlink_stub_text_v1("").is_none()).to_equal(true)
+        expect(driver_detect_git_symlink_stub_text_v1("   \n").is_none()).to_equal(true)
+        expect(driver_detect_git_symlink_stub_text_v1(".").is_none()).to_equal(true)
+        expect(driver_detect_git_symlink_stub_text_v1("..").is_none()).to_equal(true)
+        expect(driver_detect_git_symlink_stub_text_v1("pass").is_none()).to_equal(true)
+        expect(driver_detect_git_symlink_stub_text_v1("fn main():\n    0\n").is_none()).to_equal(true)
+        expect(driver_detect_git_symlink_stub_text_v1("use app.t32_cli.mod.{{t32_cli_main}}\n").is_none()).to_equal(true)
+        expect(driver_detect_git_symlink_stub_text_v1("# ../../examples/10_tooling/trace32_tools/t32_cli").is_none()).to_equal(true)
+        expect(driver_detect_git_symlink_stub_text_v1("val x = 1 / 2").is_none()).to_equal(true)
+        expect(driver_detect_git_symlink_stub_text_v1("../../examples/10_tooling/trace32_tools/t32_cli\nfn extra(): 0").is_none()).to_equal(true)
+        expect(driver_detect_git_symlink_stub_text_v1("..\\..\\examples\\10_tooling\\trace32_tools\\t32_cli").is_none()).to_equal(true)
+
+    it "rewrites all four app.<name> and bare <name> prefixes against the checkout":
+        val direct_cases: [[text]] = [
+            ["app.t32_cli.mod", "examples/10_tooling/trace32_tools/t32_cli/mod.spl"],
+            ["t32_cli.error_codes", "examples/10_tooling/trace32_tools/t32_cli/error_codes.spl"],
+            ["app.mcp_t32", "examples/10_tooling/trace32_tools/t32_mcp/__init__.spl"],
+            ["mcp_t32", "examples/10_tooling/trace32_tools/t32_mcp/__init__.spl"],
+            ["app.mcp_t32.session_state", "examples/10_tooling/trace32_tools/t32_mcp/session_state.spl"],
+            ["mcp_t32.session_state", "examples/10_tooling/trace32_tools/t32_mcp/session_state.spl"],
+            ["app.t32_lsp_mcp.tools", "examples/10_tooling/trace32_tools/t32_lsp_mcp/tools.spl"],
+            ["t32_lsp_mcp.json_helpers", "examples/10_tooling/trace32_tools/t32_lsp_mcp/json_helpers.spl"],
+            ["app.cmm_lsp", "examples/10_tooling/trace32_tools/cmm_lsp/mod.spl"],
+            ["cmm_lsp", "examples/10_tooling/trace32_tools/cmm_lsp/mod.spl"],
+            ["app.cmm_lsp.cmm_parser", "examples/10_tooling/trace32_tools/cmm_lsp/cmm_parser.spl"],
+            ["cmm_lsp.cmm_parser", "examples/10_tooling/trace32_tools/cmm_lsp/cmm_parser.spl"]
+        ]
+        for item in direct_cases:
+            val resolved = driver_rewrite_windows_app_symlink_import_v1(item[0], "src/app/cli").replace("\\", "/")
+            expect(resolved).to_equal(item[1])
+            expect(file_exists(resolved)).to_equal(true)
+
+        expect(driver_rewrite_windows_app_symlink_import_v1("app.t32_cli.mod", "./src/app/cli").replace("\\", "/")).to_equal(
+            "examples/10_tooling/trace32_tools/t32_cli/mod.spl")
+        expect(driver_rewrite_windows_app_symlink_import_v1("t32_cli.error_codes", "./src/app/cli").replace("\\", "/")).to_equal(
+            "examples/10_tooling/trace32_tools/t32_cli/error_codes.spl")
+
+        val bare_entry_cases: [[text]] = [
+            ["t32_cli.error_codes", "examples/10_tooling/trace32_tools/t32_cli/error_codes.spl"],
+            ["mcp_t32.session_state", "examples/10_tooling/trace32_tools/t32_mcp/session_state.spl"],
+            ["t32_lsp_mcp.json_helpers", "examples/10_tooling/trace32_tools/t32_lsp_mcp/json_helpers.spl"],
+            ["cmm_lsp.cmm_parser", "examples/10_tooling/trace32_tools/cmm_lsp/cmm_parser.spl"]
+        ]
+        for bare_item in bare_entry_cases:
+            val via_entry = _driver_resolve_entry_import(bare_item[0], "src/app/cli").replace("\\", "/")
+            expect(via_entry).to_equal(bare_item[1])
+            expect(file_exists(via_entry)).to_equal(true)
+
+        for non_match in [
+            "app.t32_cli_missing.mod", "t32_cli_missing.mod",
+            "app.mcp_t32_missing.session_state", "mcp_t32_missing.session_state",
+            "app.t32_lsp_mcp_missing.tools", "t32_lsp_mcp_missing.tools",
+            "app.cmm_lsp_missing.cmm_parser", "cmm_lsp_missing.cmm_parser",
+            "std.spec"
+        ]:
+            expect(driver_rewrite_windows_app_symlink_import_v1(non_match, "src/app/cli")).to_equal("")
+
+    it "resolves all four namespaces when src/app entries are core.symlinks=false text stubs":
+        val root = path_absolute("build/native_probe/win-app-symlink-stub-" + "{time_now_unix_micros()}").replace("\\", "/")
+        _create_trace32_targets(root)
+        _put_fixture_file(root + "/src/app/t32_cli", "../../examples/10_tooling/trace32_tools/t32_cli")
+        _put_fixture_file(root + "/src/app/mcp_t32", "../../examples/10_tooling/trace32_tools/t32_mcp")
+        _put_fixture_file(root + "/src/app/t32_lsp_mcp", "../../examples/10_tooling/trace32_tools/t32_lsp_mcp")
+        _put_fixture_file(root + "/src/app/cmm_lsp", "../../examples/10_tooling/trace32_tools/cmm_lsp")
+
+        val rewrite_rows = _collect_all_four_rewrites(root)
+        val cli_shell = driver_rewrite_windows_app_symlink_import_v1("app.t32_cli.cli_shell", root + "/src/app/cli")
+        val lsp_main_rw = driver_rewrite_windows_app_symlink_import_v1("app.t32_lsp_mcp.main", root + "/src/app/cli")
+        val bare_lsp_main = _driver_resolve_entry_import("t32_lsp_mcp.main", root + "/src/app/cli")
+
+        val prev_snap = env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT")
+        val snap_ok = env_set("SIMPLE_SCV_SNAPSHOT_ROOT", root)
+        val snap_lsp_main = _driver_resolve_entry_import("app.t32_lsp_mcp.main", root + "/src/app/cli")
+        val snap_t32_mod = _driver_resolve_entry_import("app.t32_cli.mod", root + "/src/app/cli").replace("\\", "/")
+        val snap_mcp_state = _driver_resolve_entry_import("mcp_t32.session_state", root + "/src/app/cli").replace("\\", "/")
+        _restore_snapshot_root(prev_snap)
+        val _cleaned = dir_remove_all(root)
+
+        _assert_collected_rewrites(rewrite_rows)
+        expect(cli_shell).to_equal("")
+        expect(lsp_main_rw).to_equal("")
+        expect(bare_lsp_main).to_equal("")
+        expect(snap_ok).to_equal(true)
+        expect(snap_lsp_main).to_equal("")
+        expect(snap_t32_mod).to_equal(root + "/examples/10_tooling/trace32_tools/t32_cli/mod.spl")
+        expect(snap_mcp_state).to_equal(root + "/examples/10_tooling/trace32_tools/t32_mcp/session_state.spl")
+
+    it "resolves checkouts nested under an ancestor src directory and ./ relative paths":
+        val base = path_absolute("build/native_probe/win-app-symlink-nested-" + "{time_now_unix_micros()}").replace("\\", "/")
+        val repo = base + "/parent/src/repo"
+        _put_fixture_file(base + "/parent/src/ancestor_keep.spl", "pub fn anc() -> i64: 0\n")
+        _create_trace32_targets(repo)
+        _put_fixture_file(repo + "/src/app/t32_cli", "../../examples/10_tooling/trace32_tools/t32_cli")
+        _put_fixture_file(repo + "/src/app/mcp_t32", "../../examples/10_tooling/trace32_tools/t32_mcp")
+        _put_fixture_file(repo + "/src/app/t32_lsp_mcp", "../../examples/10_tooling/trace32_tools/t32_lsp_mcp")
+        _put_fixture_file(repo + "/src/app/cmm_lsp", "../../examples/10_tooling/trace32_tools/cmm_lsp")
+        val nested_rows = _collect_all_four_rewrites(repo)
+
+        val repo_fallback = base + "/parent/src/repo_fallback"
+        _put_fixture_file(repo_fallback + "/src/app/cli/main.spl", "use app.t32_lsp_mcp\n")
+        _put_fixture_file(repo_fallback + "/src/app/t32_lsp_mcp.spl", "pub fn direct_lsp() -> i64: 0\n")
+        _put_fixture_file(repo_fallback + "/examples/10_tooling/trace32_tools/t32_lsp_mcp/tools.spl", "pub fn lsp_tool() -> i64: 0\n")
+        val prev_snap = env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT")
+        val snap_ok = env_set("SIMPLE_SCV_SNAPSHOT_ROOT", repo_fallback)
+        val fallback_direct = _driver_resolve_entry_import("app.t32_lsp_mcp", repo_fallback + "/src/app/cli").replace("\\", "/")
+        _restore_snapshot_root(prev_snap)
+
+        val rel_root = "build/native_probe/win-app-symlink-rel-" + "{time_now_unix_micros()}"
+        _put_fixture_file(rel_root + "/src/app/cli/main.spl", "use app.t32_cli.mod.{{t32_cli_main}}\n")
+        _put_fixture_file(rel_root + "/src/app/t32_cli", "../../examples/custom_trace32/t32_cli")
+        _put_fixture_file(rel_root + "/examples/custom_trace32/t32_cli/mod.spl", "pub fn t32_cli_main() -> i64: 0\n")
+        val rel_dot_resolved = _driver_resolve_entry_import("app.t32_cli.mod", "./" + rel_root + "/src/app/cli").replace("\\", "/")
+        val rel_bare_resolved = _driver_resolve_entry_import("t32_cli.mod", "./" + rel_root + "/src/app/cli").replace("\\", "/")
+
+        val _cleaned_base = dir_remove_all(base)
+        val _cleaned_rel = dir_remove_all(rel_root)
+
+        _assert_collected_rewrites(nested_rows)
+        expect(snap_ok).to_equal(true)
+        expect(fallback_direct).to_equal(repo_fallback + "/src/app/t32_lsp_mcp.spl")
+        expect(rel_dot_resolved).to_equal(rel_root + "/examples/custom_trace32/t32_cli/mod.spl")
+        expect(rel_bare_resolved).to_equal(rel_root + "/examples/custom_trace32/t32_cli/mod.spl")
+
+    it "follows a valid git symlink stub target under examples/ and rejects traversal or dotdir stubs":
+        val base = path_absolute("build/native_probe/win-app-symlink-unsafe-" + "{time_now_unix_micros()}").replace("\\", "/")
+        val repo = base + "/repo"
+        _put_fixture_file(base + "/etc/passwd/mod.spl", "pub fn bad_passwd() -> i64: 0\n")
+        _put_fixture_file(repo + "/.git/config/mod.spl", "pub fn bad_git() -> i64: 0\n")
+        _put_fixture_file(repo + "/src/app/cli/main_and_help.spl", "use app.t32_cli.mod.{{t32_cli_main}}\n")
+        _put_fixture_file(repo + "/src/app/t32_cli", "../../../etc/passwd")
+        _put_fixture_file(repo + "/src/app/mcp_t32", "../../.git/config")
+        _put_fixture_file(repo + "/src/app/cmm_lsp", "../../examples/../../etc/passwd")
+
+        val prev_snap = env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT")
+        val snap_ok = env_set("SIMPLE_SCV_SNAPSHOT_ROOT", repo)
+        val rej_passwd_rw = driver_rewrite_windows_app_symlink_import_v1("app.t32_cli.mod", repo + "/src/app/cli")
+        val rej_passwd_entry = _driver_resolve_entry_import("app.t32_cli.mod", repo + "/src/app/cli")
+        val rej_git_rw = driver_rewrite_windows_app_symlink_import_v1("app.mcp_t32.mod", repo + "/src/app/cli")
+        val rej_git_entry = _driver_resolve_entry_import("app.mcp_t32.mod", repo + "/src/app/cli")
+        val rej_nested_trav_rw = driver_rewrite_windows_app_symlink_import_v1("app.cmm_lsp.mod", repo + "/src/app/cli")
+
+        _put_fixture_file(repo + "/examples/10_tooling/trace32_tools/t32_cli/mod.spl", "pub fn t32_cli_main() -> i64: 0\n")
+        val fallback_default_t32 = _driver_resolve_entry_import("app.t32_cli.mod", repo + "/src/app/cli").replace("\\", "/")
+
+        _put_fixture_file(repo + "/src/app/t32_lsp_mcp", "../../examples/custom_trace32/t32_lsp_mcp")
+        _put_fixture_file(repo + "/examples/custom_trace32/t32_lsp_mcp/tools.spl", "pub fn custom_lsp() -> i64: 0\n")
+        val custom_app = _driver_resolve_entry_import("app.t32_lsp_mcp.tools", repo + "/src/app/cli").replace("\\", "/")
+        val custom_bare = _driver_resolve_entry_import("t32_lsp_mcp.tools", repo + "/src/app/cli").replace("\\", "/")
+        _restore_snapshot_root(prev_snap)
+        val _cleaned = dir_remove_all(base)
+
+        expect(snap_ok).to_equal(true)
+        expect(rej_passwd_rw).to_equal("")
+        expect(rej_passwd_entry).to_equal("")
+        expect(rej_git_rw).to_equal("")
+        expect(rej_git_entry).to_equal("")
+        expect(rej_nested_trav_rw).to_equal("")
+        expect(fallback_default_t32).to_equal(repo + "/examples/10_tooling/trace32_tools/t32_cli/mod.spl")
+        expect(custom_app).to_equal(repo + "/examples/custom_trace32/t32_lsp_mcp/tools.spl")
+        expect(custom_bare).to_equal(repo + "/examples/custom_trace32/t32_lsp_mcp/tools.spl")
+
+    it "resolves all four namespaces when src/app symlink entries are absent":
+        val root = path_absolute("build/native_probe/win-app-symlink-absent-" + "{time_now_unix_micros()}").replace("\\", "/")
+        _create_trace32_targets(root)
+
+        val absent_rows = _collect_all_four_rewrites(root)
+        val cli_shell = driver_rewrite_windows_app_symlink_import_v1("app.t32_cli.cli_shell", root + "/src/app/cli")
+        val bare_lsp_main = _driver_resolve_entry_import("t32_lsp_mcp.main", root + "/src/app/cli")
+        val _cleaned = dir_remove_all(root)
+
+        _assert_collected_rewrites(absent_rows)
+        expect(cli_shell).to_equal("")
+        expect(bare_lsp_main).to_equal("")

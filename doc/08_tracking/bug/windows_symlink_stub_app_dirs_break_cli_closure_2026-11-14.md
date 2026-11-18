@@ -2,7 +2,7 @@
 
 - **ID:** windows_symlink_stub_app_dirs_break_cli_closure_2026-11-14
 - **Severity:** P1 (blocks the Phase 3 full-CLI native build on Windows)
-- **Status:** open
+- **Status:** fixed (entry-closure symlink rewrite; secondary seed-leniency finding below stays open)
 - **Found:** 2026-11-14, Phase 3 LLVM build (`p2.exe native-build --entry src/app/cli/_CliMain/main_and_help.spl`), Windows host, Git Bash, `core.symlinks=false`
 
 ## Symptom
@@ -51,6 +51,34 @@ source tree.
 2. Have the build or SCV snapshot detect a `120000` stub on a `core.symlinks=false` host and
    resolve it to its target, or fail closed with a clear diagnostic. Today the failure surfaces
    much later as an unrelated `unresolved name`.
+
+## Fix
+
+Implemented Windows symlink-stub detection and deterministic import rewriting in
+`src/compiler/80.driver/driver_entry_closure_core.spl`:
+
+- Added `driver_detect_git_symlink_stub_text_v1(content: text) -> text?` to recognize
+  single-line `core.symlinks=false` git symlink relative-path payloads (such as
+  `../../examples/10_tooling/trace32_tools/...`) while rejecting empty strings, multi-line
+  source files, or non-stub text.
+- Unified the four `src/app/` symlink aliases (`t32_cli -> examples/10_tooling/trace32_tools/t32_cli`,
+  `mcp_t32 -> examples/10_tooling/trace32_tools/t32_mcp`,
+  `t32_lsp_mcp -> examples/10_tooling/trace32_tools/t32_lsp_mcp`,
+  `cmm_lsp -> examples/10_tooling/trace32_tools/cmm_lsp`) via `driver_rewrite_windows_app_symlink_import_v1`
+  and `_driver_resolve_rewritten_import` for both `app.<name>` and bare `<name>` imports.
+- When `src/app/<name>` is missing or is a regular file git symlink stub pointing at
+  `../../examples/...`, `_driver_resolve_entry_import_exact` deterministically rewrites to the
+  `examples/10_tooling/trace32_tools/...` target before direct resolution (without short-circuiting
+  away fallback probes when no `examples/` target matches), and also falls back to
+  rewriting for all four aliases after direct/numbered resolution. Supports both
+  `SIMPLE_SCV_SNAPSHOT_ROOT` / CWD checkouts and explicit `<root>/src/...` `entry_dir` prefixes,
+  scanning right-to-left in byte space (`_driver_byte_slice_v1`, `_driver_text_matches_bytes_at_v1`)
+  so checkouts nested under an ancestor `/src/` or `./src/...` prefix resolve cleanly.
+- Removed the obsolete `_driver_resolve_rewritten_import module_path` row from
+  `scripts/check/text_len_bounded_byte_scan_baseline.txt`.
+- Updated `_driver_numbered_child_dir_observed_v1` to require `_driver_resolver_observed_dir_v1`
+  before enumerating numbered subdirectories, avoiding directory-scan probes against stub files.
+- Added regression coverage in `test/01_unit/compiler/80.driver/windows_app_symlink_rewrite_spec.spl`.
 
 ## Second finding from the same build: the seed is more lenient than Phase 2
 
