@@ -1,0 +1,148 @@
+"""
+## Purpose and audience
+Reproduces doc/08_tracking/bug/agent_v4_source_return_never_completes_after_effect_2026-11-18.md.
+The V4 agent stage `source-return` (host_linux_service_agent_v4.spl) calls
+`return_settled_workspace_source_v3`, which used to run the generic
+`cleanup_v3` -> `LinuxWorkspaceSourceOwnerV1.close_v1`. Staging always sets
+`agent_effect_attempted`, so `close_v1` refused with
+`agent-workspace-retention-requires-authorized-cleanup` and the stage retried
+forever: the charge never reached Host settle. The intended design is
+doc/05_design/agent_workspace_retention_v3.md: retain the written root,
+prove native absence through `retire_native_v3` (native-retired-retained),
+publish the retained metadata ATOMICALLY with the execution-only CPU/memory
+settlement, keep storage charged, and let source-return complete. Written for
+owners of the fresh-epoch machine authority and the Linux workspace source owner.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
+## Compatibility and limitations
+Structural pins over committed source text. The behavioural path needs genuine
+native owners (quota slot, fresh-epoch subject, staged root, machine store),
+which a DATA spec cannot construct and which no runtime-free fixture provides.
+The behavioural consumers are
+test/fixtures/agent_workspace_retention_v3/source_return_scenarios.spl and
+`check_retained_return_keeps_written_root_v3` in
+test/fixtures/agent_workspace_retention_v3/scenarios.spl, both NOT_RUN.
+## Verification guidance and troubleshooting
+A failing pin names the missing or misordered wiring. A pin that fails because
+a line moved is a real review signal: re-read the retention doc before
+re-pinning.
+"""
+use std.spec.step
+use std.io.file_read_text
+
+fn rr_count(source: text, token: text) -> i64:
+    source.split(token).len() - 1
+
+fn rr_from(source: text, start: text) -> text:
+    val at = source.index_of(start)
+    if at < 0: return ""
+    source.substring(at, source.byte_len())
+
+fn rr_fn(source: text, start: text) -> text:
+    val body = rr_from(source, start)
+    if body == "": return ""
+    val rest = body.substring(1, body.byte_len())
+    val next = rest.index_of("\n# ")
+    if next < 0: return body
+    body.substring(0, next + 1)
+
+fn rr_transition() -> text:
+    file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workspace_source_transition_v3.spl")
+
+describe "agent source-return after a staging effect completes through the retained path":
+    it "routes the workspace settle through the epoch fence and the retention branch":
+        # @req BUG-AGENT-V4-SOURCE-RETURN-1 (doc: retire, then publish metadata WITH settlement)
+        val ma = file_read_text("src/lib/nogc_sync_mut/container/machine_authority_v1.spl")
+        val settle = rr_from(ma, "    pub fn settle_workspace_v3() -> Result<(), text>:")
+        val fence = settle.index_of("        val epoch = self.epoch_current_v3()?")
+        val call = settle.index_of("        machine_workspace_settle_v3(self.admission.authority.unwrap().storage, self.admission.custody.unwrap(), self.state)")
+        expect(fence > 0 and call > fence).to_equal(true)
+        step("the transition picks the retained settle only for a staged (written) source")
+        val dispatch = rr_fn(rr_transition(), "pub(package) fn machine_workspace_settle_v3(")
+        expect(dispatch).to_contain("    if state.settled_v2()?: return Ok(())")
+        val branch = dispatch.index_of("        return machine_workspace_settle_retained_v3(storage, native, state)")
+        val plain = dispatch.index_of("    machine_fresh_workload_settle_workspace_v3(storage, native, state)")
+        expect(branch > 0 and plain > branch).to_equal(true)
+
+    it "retires native and publishes retention in the SAME batch as the CPU/memory settlement":
+        # @req BUG-AGENT-V4-SOURCE-RETURN-1 (atomicity: no crash window leaves storage charged without a row)
+        val body = rr_fn(rr_transition(), "fn machine_workspace_settle_retained_v3(storage: MachineStorageOwnerV1, native: LinuxFreshEpochSuccessorCustodyV1,")
+        expect(body.byte_len() > 0).to_equal(true)
+        val resolve = body.index_of("    if state.settlement_publication_uncertain_v3()?:")
+        val absence = body.index_of("    val observed = machine_fresh_absence_observe_v3(native, record, Some(binding), command)?")
+        val transport = body.index_of("    val transport = state.source_retention_preflight_v3()?")
+        val skip = body.index_of("    if not (state.source_custody_v3()?).retirement_committed_v3():")
+        val token = body.index_of("        val token = native.retire_workspace_native_v3(binding, LinuxFreshWorkspaceCommandV3(command: command))?")
+        val retention = body.index_of("    val retention = machine_workspace_source_retention_rows_v3(state, epoch_digest, at)?")
+        val settlement = body.index_of("    val settlement = state.prepare_settlement_v2(record, absence, at)?")
+        val publish = body.index_of("    val committed = workload_publish_v3(storage, state, settlement + retention)?")
+        val finish = body.index_of("    machine_workspace_settle_retained_finish_v3(state)")
+        step("an uncertain earlier publication is resolved before any new effect")
+        expect(resolve > 0 and absence > resolve).to_equal(true)
+        step("absence is re-proved, transport/probe owners checked, then the native token is minted once")
+        expect(transport > absence and skip > transport and token > skip).to_equal(true)
+        step("retention rows are built before the settlement permit is reserved, then ONE publish carries both")
+        expect(retention > token and settlement > retention and publish > settlement and finish > publish).to_equal(true)
+        expect(rr_count(body, "workload_publish_v3(")).to_equal(1)
+        step("storage stays charged: nothing here releases quota or closes the source")
+        expect(rr_count(body, "workspace_storage_release_if_absent_v1")).to_equal(0)
+        expect(rr_count(body, "cleanup_v3()")).to_equal(0)
+        expect(rr_count(body, "close_v1()")).to_equal(0)
+
+    it "makes an unknown settle publication retryable by store readback, never permanently uncertain":
+        # @req BUG-AGENT-V4-SOURCE-RETURN-1 (idempotent retry: adopt our committed row or abandon an uncommitted one)
+        val body = rr_fn(rr_transition(), "fn machine_workspace_settle_retained_resolve_v3(")
+        expect(body.byte_len() > 0).to_equal(true)
+        val same = body.index_of("    if head == known:\n        val reset = state.settlement_publication_abandoned_v3()?\n        return Ok(false)")
+        val ours = body.index_of("entry.table_name == \"machine-workspace-retained-returns-v3\" and entry.row_key == key")
+        val foreign = body.index_of("return Err(\"machine-fresh-workspace-settlement-publication-foreign\")")
+        val adopt = body.index_of("    val adopted = state.committed_v2(revision, actual)?")
+        val replay = body.index_of("    val replayed = machine_fresh_workload_history_verify_v2(storage, state.history_v2()?)?")
+        val verified = body.index_of("    val verified = state.publication_verified_v2()?")
+        expect(same > 0 and ours > same and foreign > ours and adopt > foreign and replay > adopt and verified > replay).to_equal(true)
+        step("the lifecycle abandon step only clears an in-flight, unsettled settlement reservation")
+        val lc = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_lifecycle_v2.spl")
+        val abandon = rr_from(lc, "    pub(package) fn settlement_publication_abandoned_v3() -> Result<(), text>:")
+        expect(abandon).to_contain("if not state.uncertain or state.settled or state.permit != \"settlement-reserved\": return Err(\"machine-fresh-workload-settlement-publication-not-pending\")")
+        expect(abandon).to_contain("fresh_workload_states_v2[self.slot].permit = \"idle\"")
+
+    it "lets source-return complete without any new effect once settle committed the retention":
+        # @req BUG-AGENT-V4-SOURCE-RETURN-1 (A:943-947 unchanged; the fix is below the adapter)
+        val tr = rr_transition()
+        val settled = rr_fn(tr, "pub(package) fn machine_workspace_source_return_settled_v3(")
+        val preflight = settled.index_of("val safe = state.source_return_settled_preflight_v3()?")
+        val branch = settled.index_of("    if (state.source_custody_v3()?).staging_effect_attempted_v3()?:\n        return machine_workspace_source_return_retained_v3(state)")
+        val generic = settled.index_of("val closed = (state.source_custody_v3()?).cleanup_v3()")
+        expect(preflight > 0 and branch > preflight and generic > branch).to_equal(true)
+        val retained = rr_fn(tr, "fn machine_workspace_source_return_retained_v3(state: MachineFreshWorkloadLifecycleV2)")
+        expect(retained).to_contain("    val returned = state.source_retained_v3()?")
+        expect(rr_count(retained, "workload_publish_v3(")).to_equal(0)
+        expect(rr_count(retained, "retire_")).to_equal(0)
+        expect(rr_count(retained, "close_v1()")).to_equal(0)
+        step("the return entry is epoch-fenced like the settle")
+        val ma = file_read_text("src/lib/nogc_sync_mut/container/machine_authority_v1.spl")
+        val entry = rr_from(ma, "    pub fn return_settled_workspace_source_v3() -> Result<bool, text>:")
+        val fence = entry.index_of("        val epoch = self.epoch_current_v3()?")
+        val call = entry.index_of("        machine_workspace_source_return_settled_v3(self.admission.authority.unwrap().storage, self.state)")
+        expect(fence > 0 and call > fence).to_equal(true)
+        step("the V4 stage then advances to host-settle")
+        val agent = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_agent_v4.spl")
+        val stage = rr_from(agent, "    if state.stage == \"source-return\":\n        val returned = simple_container_return_settled_workspace_source_v3(state.container.unwrap())")
+        expect(stage.index_of("        state.stage = \"host-settle\"") > 0).to_equal(true)
+
+    it "retires through the source owner with the custody's own invocation and a distinct phase name":
+        # @req BUG-AGENT-V4-SOURCE-RETURN-1 (retire_native_v3 has its caller; no collision with pre-reserve `retained`)
+        val cu = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workspace_source_custody_v3.spl")
+        val method = rr_from(cu, "    pub(package) fn return_retained_v3(token: LinuxFreshWorkspaceNativeRetirementV3) -> MachineFreshWorkspaceSourceRetainedTurnV3:")
+        expect(method).to_contain("val turn = self.source.unwrap().retire_native_v3(token, self.full_invocation)")
+        expect(method).to_contain("retained.phase = \"native-retired-retained\"")
+        val lc = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_lifecycle_v2.spl")
+        val phase = rr_from(lc, "    pub(package) fn source_retained_v3() -> Result<(), text>:")
+        expect(phase).to_contain("fresh_workload_states_v2[self.slot].source_phase = \"retained-returned\"")
+        step("the pre-reserve `retained` source phase keeps exactly one setter")
+        expect(rr_count(lc, "source_phase = \"retained\"\n")).to_equal(1)
+        step("the retention row carries the source-produced canonical metadata, not caller data")
+        val rows = rr_fn(rr_transition(), "fn machine_workspace_source_retention_rows_v3(")
+        expect(rows).to_contain("\"machine-workspace-retained-returns-v3\"")
+        expect(rows).to_contain("linux_workspace_retained_metadata_encode_v3(metadata)")

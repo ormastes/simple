@@ -453,3 +453,10 @@ available. These source paths and their manuals remain NOT_RUN.
 - The remote arm (L6c) consumes `RuntimeExitStatusV1` and
   `runtime_exit_status_text_v1`. `runtime_operation_codec_v2` does not yet
   encode `workload_exit`.
+
+## Agent V4 source-return after a staged effect (2026-11-18, specs NOT_RUN)
+- A written agent workspace is RETAINED (doc/05_design/agent_workspace_retention_v3.md): retire_native_v3 proves
+  native absence at settle; the retention row commits in the same workload_publish_v3 batch as the CPU/memory
+  settlement (storage stays charged); source-return ends in phase `retained-returned` and never calls close_v1.
+- Trap: final close of a retained workspace still refuses (`machine-fresh-workspace-source-parent-retained`), so
+  release_v4 / epoch close / successor advance stay blocked -- owner decision N9; bug record PARTIAL.
