@@ -402,26 +402,23 @@ impl MirLowering:
         if val actual = self.find_local_hir_type(local.id):
             if path_trace:
                 eprint("[enum-payload-path] remembered module={self.current_module_id} local={local.id} expected='{hir_type_shape_key(expected, true)}' actual='{hir_type_shape_key(actual, true)}'\n")
-            match actual.kind:
-                case HirTypeKind.Infer(_, _) | HirTypeKind.Error: ()
-                case _:
-                    # Independent source typing may recover a stale remembered
-                    # row. Erased MIR storage alone cannot refute a concrete
-                    # element/nominal contradiction (Any may also use I64).
-                    if enum_payload_types_alias_compatible(expected, actual, self.symbols):
-                        if path_trace:
-                            eprint("[enum-payload-path] remembered-accept module={self.current_module_id} local={local.id}\n")
-                        return true
-                    if self.enum_payload_present_fills_optional(expected, actual):
-                        return true
-                    remembered_concrete_negative = true
+            if not enum_payload_type_unsettled_v1(actual):
+                # Independent source typing may recover a stale remembered
+                # row. Erased MIR storage alone cannot refute a concrete
+                # element/nominal contradiction (Any may also use I64).
+                if enum_payload_types_alias_compatible(expected, actual, self.symbols):
+                    if path_trace:
+                        eprint("[enum-payload-path] remembered-accept module={self.current_module_id} local={local.id}\n")
+                    return true
+                if self.enum_payload_present_fills_optional(expected, actual):
+                    return true
+                remembered_concrete_negative = true
         else:
             if path_trace:
                 eprint("[enum-payload-path] remembered-miss module={self.current_module_id} local={local.id} expected='{hir_type_shape_key(expected, true)}' line={expression.span.line}\n")
         if val actual = self.enum_match_expr_type(expression):
-            match actual.kind:
-                case HirTypeKind.Infer(_, _) | HirTypeKind.Error: ()
-                case _: return enum_payload_types_alias_compatible(expected, actual, self.symbols)
+            if not enum_payload_type_unsettled_v1(actual):
+                return enum_payload_types_alias_compatible(expected, actual, self.symbols)
         # `R.V(key, worker.field_types[key])`: a declared container read
         # (binding or field chain) proves its element type. Positive only.
         if val read_type = self.declared_container_read_type(expression):
@@ -686,5 +683,12 @@ impl MirLowering:
             case _: ()
         self.remember_local_hir_type(value.id, expected, 0, 0)
         value
+
+fn enum_payload_type_unsettled_v1(t: HirType) -> bool:
+    match t.kind:
+        case HirTypeKind.Infer(_, _) | HirTypeKind.Error: true
+        case HirTypeKind.Array(elem, _) | HirTypeKind.Slice(elem): enum_payload_type_unsettled_v1(elem)
+        case HirTypeKind.Dict(k, v): enum_payload_type_unsettled_v1(k) or enum_payload_type_unsettled_v1(v)
+        case _: false
 
 export enum_payload_types_compatible

@@ -379,6 +379,8 @@ fn mir_hir_let_type_present(k: HirStmtKind) -> bool:
 fn mir_let_type_unsettled(t: HirType) -> bool:
     match t.kind:
         case HirTypeKind.Infer(_, _) | HirTypeKind.Error: true
+        case HirTypeKind.Array(elem, _) | HirTypeKind.Slice(elem): mir_let_type_unsettled(elem)
+        case HirTypeKind.Dict(k, v): mir_let_type_unsettled(k) or mir_let_type_unsettled(v)
         case _: false
 
 fn mir_let_type_is_any(t: HirType) -> bool:
@@ -4051,8 +4053,12 @@ impl MirLowering:
         match declared.kind:
             case HirTypeKind.Infer(_, _): return 0
             case HirTypeKind.Error: return 0
-            case HirTypeKind.Array(_, _): declared_container = 2
-            case HirTypeKind.Dict(_, _): declared_container = 3
+            case HirTypeKind.Array(elem, _):
+                if mir_let_type_unsettled(elem): return 0
+                declared_container = 2
+            case HirTypeKind.Dict(k, v):
+                if mir_let_type_unsettled(k) or mir_let_type_unsettled(v): return 0
+                declared_container = 3
             case HirTypeKind.Result(ok, err):
                 # An `any` payload is not a stronger claim than the
                 # initializer's type; leave that case unchanged.
@@ -4214,6 +4220,46 @@ impl MirLowering:
                     self.option_value_locals[dest.id] = true
                     self.mark_runtime_value_local(dest.id)
                 case _: ()
+
+    me join_untyped_text_arms_v1(dest: LocalId, arm_locals: [LocalId]) -> LocalId:
+        if arm_locals.len() == 0:
+            return dest
+        var saw_tagged = false
+        var saw_raw = false
+        var arm_i = 0
+        while arm_i < arm_locals.len():
+            val arm_local: LocalId = arm_locals[arm_i]
+            if self.nil_locals.contains(arm_local.id) or self.option_none_locals.contains(arm_local.id):
+                return dest
+            if val arm_hir = self.find_local_hir_type(arm_local.id):
+                match arm_hir.kind:
+                    case HirTypeKind.Optional(_): return dest
+                    case _: ()
+            if not self.local_is_str(arm_local):
+                return dest
+            if self.is_tagged_text_local(arm_local.id) or self.is_runtime_value_local(arm_local.id):
+                saw_tagged = true
+            else:
+                saw_raw = true
+            arm_i = arm_i + 1
+        var dest_is_opaque_str = false
+        if val dest_mir = self.local_mir_type_of(dest):
+            match dest_mir.kind:
+                case MirTypeKind.Opaque(opaque_name):
+                    dest_is_opaque_str = opaque_name == "str"
+                case _: ()
+        if (saw_tagged and saw_raw) or (saw_raw and not dest_is_opaque_str):
+            val normalized = self.ensure_tagged_str(dest)
+            self.mark_tagged_text_local(normalized.id)
+            self.mark_runtime_value_local(normalized.id)
+            self.remember_local_hir_type(normalized.id, HirType(kind: HirTypeKind.Str, span: Span.empty()), 0, 0)
+            return normalized
+        if saw_tagged and not saw_raw:
+            self.mark_tagged_text_local(dest.id)
+            self.mark_runtime_value_local(dest.id)
+        if self.find_local_hir_type(dest.id) == None:
+            self.remember_local_hir_type(dest.id, HirType(kind: HirTypeKind.Str, span: Span.empty()), 0, 0)
+        dest
 
     me join_untyped_optional_arms(dest: LocalId, arm_locals: [LocalId]) -> LocalId:
         """Join the arms of an UNTYPED value-position if/elif/match to `T?`.
@@ -4587,6 +4633,8 @@ impl MirLowering:
         if expected_type == None and else_ != None:
             self.remember_merged_arm_identity(result, merged_arm_locals)
             joined_result = self.join_untyped_optional_arms(result, merged_arm_locals)
+            if joined_result.id == result.id:
+                joined_result = self.join_untyped_text_arms_v1(result, merged_arm_locals)
         if val found_expected = expected_type:
             self.remember_local_hir_type(result.id, found_expected, 0, 0)
             match found_expected.kind:
@@ -4778,6 +4826,8 @@ impl MirLowering:
             self.remember_merged_arm_identity(result, merged_arm_locals)
             if chain_has_else:
                 joined_result = self.join_untyped_optional_arms(result, merged_arm_locals)
+                if joined_result.id == result.id:
+                    joined_result = self.join_untyped_text_arms_v1(result, merged_arm_locals)
         if val found_expected = expected_type:
             self.remember_local_hir_type(result.id, found_expected, 0, 0)
             match found_expected.kind:
@@ -5273,7 +5323,7 @@ impl MirLowering:
                                     # (mir_dict_read_bare_struct_provenance_2026-11-07).
                                     if for_elem_info.kind == SymbolKind.Struct:
                                         self.array_element_struct_syms[collection_local.id] = self.struct_value_provenance_key(for_elem_info)
-                                    elif for_elem_info.kind == SymbolKind.Class:
+                                    elif for_elem_info.kind == SymbolKind.Class or for_elem_info.kind == SymbolKind.Enum:
                                         self.array_element_struct_syms[collection_local.id] = for_elem_info.name
                             case _: ()
                 case HirTypeKind.Str:

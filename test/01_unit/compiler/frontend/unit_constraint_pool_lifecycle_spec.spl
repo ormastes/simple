@@ -1,0 +1,53 @@
+# Regression spec for unit_constraint pool initialization, snapshot save/restore,
+# transient-owner promotion, and HostIdentitySshPathsV1 export.
+# @cover src/compiler/10.frontend/core/unit_constraint.spl
+# @cover src/compiler/10.frontend/core/types.spl
+# @cover src/compiler/10.frontend/retained_parse_owners_v1.spl
+# @cover src/lib/nogc_sync_mut/io/host_identity_ssh_projection_types_v1.spl
+
+use std.spec.*
+use compiler.core.unit_constraint.{
+    UnitConstraintPoolSnapshot,
+    unit_constraint_pool_reset,
+    unit_constraint_pool_restore,
+    unit_constraint_find,
+    unit_constraint_register,
+    unit_constraint_count,
+    unit_constraint_predicate,
+    unit_constraint_promote_transient_owner
+}
+use compiler.core.types.{
+    unit_decl_pool_reset,
+    unit_decl_pool_save,
+    unit_decl_pool_restore
+}
+use std.nogc_sync_mut.io.host_identity_ssh_projection_types_v1.{
+    HostIdentitySshPathsV1,
+    host_identity_ssh_projection_roles_valid_v1
+}
+
+describe "unit constraint pool lifecycle and HostIdentitySshPathsV1 export":
+    it "handles uninitialized pool safely and preserves constraints across save, reset, and restore":
+        unit_constraint_pool_restore(UnitConstraintPoolSnapshot(
+            initialized: false, names: [], predicates: [], ref_tags: [], min_texts: [], max_texts: []
+        ))
+        expect(unit_constraint_count()).to_equal(0)
+        expect(unit_constraint_find("Port")).to_equal(-1)
+        expect(unit_constraint_promote_transient_owner()).to_equal(true)
+
+        val idx = unit_constraint_register("Port", "1 <= self and self <= 65535", 7, "1", "65535")
+        expect(idx).to_equal(0)
+        expect(unit_constraint_find("Port")).to_equal(0)
+        val snap = unit_decl_pool_save()
+        unit_decl_pool_reset()
+        expect(unit_constraint_find("Port")).to_equal(-1)
+        unit_decl_pool_restore(snap)
+        expect(unit_constraint_find("Port")).to_equal(0)
+        expect(unit_constraint_predicate("Port")).to_equal("1 <= self and self <= 65535")
+        unit_constraint_pool_reset()
+
+    it "exports HostIdentitySshPathsV1 alongside role validation":
+        val digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val paths = HostIdentitySshPathsV1(identity_path: digest + ".key", known_hosts_path: digest + ".hosts")
+        expect(paths.identity_path).to_end_with(".key")
+        expect(host_identity_ssh_projection_roles_valid_v1(paths.identity_path, paths.known_hosts_path)).to_equal(true)

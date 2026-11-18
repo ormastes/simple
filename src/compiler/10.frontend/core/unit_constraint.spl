@@ -14,11 +14,23 @@
 # 0 (violated) or -1 (predicate shape not supported -> a declaration error,
 # never a silent pass).
 
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+extern fn rt_array_free<T>(array: [T])
+
+var unit_constraint_initialized: bool = false
 var unit_constraint_names: [text] = []
 var unit_constraint_predicates: [text] = []
 var unit_constraint_ref_tags: [i64] = []
 var unit_constraint_min_texts: [text] = []
 var unit_constraint_max_texts: [text] = []
+
+pub struct UnitConstraintPoolSnapshot:
+    initialized: bool
+    names: [text]
+    predicates: [text]
+    ref_tags: [i64]
+    min_texts: [text]
+    max_texts: [text]
 
 # @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
 pub fn unit_constraint_pool_reset():
@@ -27,9 +39,57 @@ pub fn unit_constraint_pool_reset():
     unit_constraint_ref_tags = []
     unit_constraint_min_texts = []
     unit_constraint_max_texts = []
+    unit_constraint_initialized = true
+
+pub fn unit_constraint_pool_save() -> UnitConstraintPoolSnapshot:
+    if not unit_constraint_initialized:
+        return UnitConstraintPoolSnapshot(initialized: false, names: [], predicates: [], ref_tags: [], min_texts: [], max_texts: [])
+    UnitConstraintPoolSnapshot(
+        initialized: true,
+        names: unit_constraint_names,
+        predicates: unit_constraint_predicates,
+        ref_tags: unit_constraint_ref_tags,
+        min_texts: unit_constraint_min_texts,
+        max_texts: unit_constraint_max_texts
+    )
+
+pub fn unit_constraint_pool_restore(snap: UnitConstraintPoolSnapshot):
+    if not snap.initialized:
+        unit_constraint_initialized = false
+        return
+    unit_constraint_names = snap.names
+    unit_constraint_predicates = snap.predicates
+    unit_constraint_ref_tags = snap.ref_tags
+    unit_constraint_min_texts = snap.min_texts
+    unit_constraint_max_texts = snap.max_texts
+    unit_constraint_initialized = true
+
+fn _unit_constraint_promote_text(root: [[text]]) -> bool:
+    val promoted = rt_transient_heap_promote(root)
+    rt_array_free(root)
+    promoted
+
+fn _unit_constraint_promote_i64(root: [[i64]]) -> bool:
+    val promoted = rt_transient_heap_promote(root)
+    rt_array_free(root)
+    promoted
+
+# @allow(primitive_api) frontend unit pool API: transient owner promotion returns status bool like sibling registries
+pub fn unit_constraint_promote_transient_owner() -> bool:
+    if not unit_constraint_initialized:
+        return true
+    var promoted = true
+    promoted = _unit_constraint_promote_text([unit_constraint_names]) and promoted
+    promoted = _unit_constraint_promote_text([unit_constraint_predicates]) and promoted
+    promoted = _unit_constraint_promote_i64([unit_constraint_ref_tags]) and promoted
+    promoted = _unit_constraint_promote_text([unit_constraint_min_texts]) and promoted
+    promoted = _unit_constraint_promote_text([unit_constraint_max_texts]) and promoted
+    promoted
 
 # @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
 pub fn unit_constraint_find(name: text) -> i64:
+    if not unit_constraint_initialized:
+        return -1
     var i = 0
     while i < unit_constraint_names.len():
         if unit_constraint_names[i] == name:
@@ -39,6 +99,8 @@ pub fn unit_constraint_find(name: text) -> i64:
 
 # @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
 pub fn unit_constraint_register(name: text, predicate: text, ref_tag: i64, min_text: text, max_text: text) -> i64:
+    if not unit_constraint_initialized:
+        unit_constraint_pool_reset()
     val existing = unit_constraint_find(name)
     if existing >= 0:
         unit_constraint_predicates[existing] = predicate
@@ -56,6 +118,8 @@ pub fn unit_constraint_register(name: text, predicate: text, ref_tag: i64, min_t
 
 # @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
 pub fn unit_constraint_count() -> i64:
+    if not unit_constraint_initialized:
+        return 0
     unit_constraint_names.len()
 
 # @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
@@ -315,6 +379,7 @@ pub fn unit_constraint_eval_literal(predicate: text, literal: text) -> i64:
     if uc_err: return -1
     unit_constraint_eval(predicate, v)
 
+export UnitConstraintPoolSnapshot, unit_constraint_pool_save, unit_constraint_pool_restore, unit_constraint_promote_transient_owner
 export unit_constraint_pool_reset, unit_constraint_find, unit_constraint_register, unit_constraint_count
 export unit_constraint_predicate, unit_constraint_ref_tag, unit_constraint_min_text, unit_constraint_max_text
 export unit_range_predicate, unit_constraint_violation_message
