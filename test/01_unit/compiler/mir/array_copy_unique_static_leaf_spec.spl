@@ -1,0 +1,88 @@
+# Bug stage3_array_copy_unique_static_leaf_2026-11-19.
+# `xs.copy()` on a function-local array has no MethodResolution on the native
+# lane. The Unresolved arm's unique-static-leaf recovery then matched the only
+# static method named `copy` in the program and lowered the call to that static
+# with zero arguments, dropping the receiver. In the compiler itself this stored
+# a MirOperand record in VisibilityManifestPolicyV1.friend_modules, and Stage 3
+# printed "rejected invalid array handle" at surface_build.
+# Fixture: test/fixtures/native_array_copy_unique_static_leaf/main.spl
+
+use std.spec.*
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+val AC_SOURCE = "class Zq9Owner:\n    id: i64\n\n    static fn copy(local: i64) -> Zq9Owner:\n        Zq9Owner(id: local)\n\nclass Holder:\n    name: text\n    items: [text] = []\n\nfn copy_param(xs: [text]) -> [text]:\n    xs.copy()\n\nfn copy_typed_local(h: Holder) -> [text]:\n    val xs: [text] = h.items\n    xs.copy()\n\nfn copy_untyped_local() -> [text]:\n    val source = [\"p\", \"q\"]\n    source.copy()\n\nfn copy_local_field(h: Holder) -> [text]:\n    val held = h\n    held.items.copy()\n\nfn control_static() -> i64:\n    Zq9Owner.copy(7).id\n\nfn main():\n    print copy_param([\"a\"]).len()\n"
+
+class AcLowered:
+    mir: MirModule
+    errors: text
+
+fn ac_lower() -> AcLowered:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(AC_SOURCE, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: AC_SOURCE, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["main_hir"] = hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "main_hir")
+    val mir = mir_lowering.lower_module(hir, [hir])
+    var out = ""
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    AcLowered(mir: mir, errors: out)
+
+fn ac_function_text(mir: MirModule, name: text) -> text:
+    for fid in mir.functions.keys():
+        val f = mir.functions[fid]
+        if f.name == name or f.name.ends_with("." + name):
+            return "{f.blocks}"
+    ""
+
+describe "Array copy with a unique static leaf named copy":
+    it "lowers the probe without MIR errors":
+        val lowered = ac_lower()
+        expect(lowered.errors).to_equal("")
+
+    it "names the static owner in a real static call (control)":
+        step("proves the owner marker is visible in rendered MIR")
+        val lowered = ac_lower()
+        expect(ac_function_text(lowered.mir, "control_static").contains("Zq9Owner")).to_equal(true)
+
+    it "keeps a parameter receiver on the builtin array copy":
+        val lowered = ac_lower()
+        val body = ac_function_text(lowered.mir, "copy_param")
+        expect(body != "").to_equal(true)
+        expect(body.contains("Zq9Owner")).to_equal(false)
+
+    it "keeps a typed local receiver on the builtin array copy":
+        val lowered = ac_lower()
+        val body = ac_function_text(lowered.mir, "copy_typed_local")
+        expect(body != "").to_equal(true)
+        expect(body.contains("Zq9Owner")).to_equal(false)
+
+    it "keeps an untyped local receiver on the builtin array copy":
+        val lowered = ac_lower()
+        val body = ac_function_text(lowered.mir, "copy_untyped_local")
+        expect(body != "").to_equal(true)
+        expect(body.contains("Zq9Owner")).to_equal(false)
+
+    it "keeps a field of a local on the builtin array copy":
+        val lowered = ac_lower()
+        val body = ac_function_text(lowered.mir, "copy_local_field")
+        expect(body != "").to_equal(true)
+        expect(body.contains("Zq9Owner")).to_equal(false)
