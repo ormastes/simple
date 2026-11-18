@@ -496,25 +496,56 @@ fn gnu_link_line_libraries(cmd: &std::process::Command, cc: &str, driver_target:
     let search_dirs: Vec<PathBuf> = args.iter().filter_map(|a| a.strip_prefix("-L")).map(PathBuf::from).collect();
     let mut names: Vec<&str> = args.iter().filter_map(|a| a.strip_prefix("-l")).collect();
     names.extend(["unwind", "mingw32", "mingwex", "msvcrt", "kernel32"]);
+    resolve_gnu_link_libraries(&names, &search_dirs, |c| {
+        let out = std::process::Command::new(cc)
+            .arg(driver_target)
+            .arg(format!("-print-file-name={c}"))
+            .output()
+            .ok()?;
+        Some(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+    })
+}
+
+/// Resolve `lib<name>.a` / `lib<name>.dll.a` for each name: `-L` dirs first,
+/// then sysroot dirs the driver already answered with, and only then a driver
+/// `-print-file-name` query. Measured 2026-11-18 on an aarch64-pc-windows-gnullvm
+/// cross link: one clang spawn per library (27 spawns, ~6 s each on a loaded
+/// Windows host, ~170 s of a 470 s "link") because none of the target's libs sit
+/// in the x64 `-L` dirs. llvm-mingw keeps every target import/CRT lib in one
+/// `<triple>/lib` dir, so the first answer's directory resolves the rest on disk.
+/// Names are deduplicated; the driver is asked at most once per candidate file.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn resolve_gnu_link_libraries(
+    names: &[&str],
+    search_dirs: &[PathBuf],
+    mut ask_driver: impl FnMut(&str) -> Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut learned_dirs: Vec<PathBuf> = Vec::new();
+    let mut seen_names: Vec<&str> = Vec::new();
     let mut found = Vec::new();
-    for name in names {
+    for &name in names {
+        if seen_names.contains(&name) {
+            continue;
+        }
+        seen_names.push(name);
         let candidates = [format!("lib{name}.a"), format!("lib{name}.dll.a")];
-        let in_dirs = search_dirs
+        let on_disk = search_dirs
             .iter()
+            .chain(learned_dirs.iter())
             .flat_map(|d| candidates.iter().map(move |c| d.join(c)))
             .find(|p| p.is_file());
-        let path = in_dirs.or_else(|| {
+        let path = on_disk.or_else(|| {
             candidates.iter().find_map(|c| {
-                let out = std::process::Command::new(cc)
-                    .arg(driver_target)
-                    .arg(format!("-print-file-name={c}"))
-                    .output()
-                    .ok()?;
-                let p = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+                let p = ask_driver(c)?;
                 (p.is_absolute() && p.is_file()).then_some(p)
             })
         });
         if let Some(p) = path {
+            if let Some(dir) = p.parent() {
+                if !search_dirs.iter().chain(learned_dirs.iter()).any(|d| d == dir) {
+                    learned_dirs.push(dir.to_path_buf());
+                }
+            }
             if !found.contains(&p) {
                 found.push(p);
             }
@@ -3983,6 +4014,66 @@ mod linker_tests {
 
     use crate::pipeline::native_project::tools::hosted_linux_cross_compiler;
     use simple_common::target::{Target, TargetArch, TargetOS};
+
+    /// Fake llvm-mingw sysroot: every lib in one `<triple>/lib` dir, plus one
+    /// lib only reachable through a second driver dir.
+    fn fake_mingw_sysroot() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let lib = root.path().join("aarch64-w64-mingw32").join("lib");
+        let other = root.path().join("resource").join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        for name in ["kernel32", "ws2_32", "ole32", "unwind", "mingw32", "mingwex", "msvcrt"] {
+            std::fs::write(lib.join(format!("lib{name}.a")), b"!<arch>\n").unwrap();
+        }
+        std::fs::write(other.join("libspecial.a"), b"!<arch>\n").unwrap();
+        (root, lib, other)
+    }
+
+    // Repro (2026-11-18, aarch64-pc-windows-gnullvm cross link): one driver
+    // `-print-file-name` spawn per library made the link ~170 s slower.
+    #[test]
+    fn gnu_link_libraries_ask_driver_once_per_sysroot_dir() {
+        let (_root, lib, other) = fake_mingw_sysroot();
+        let mut calls = 0usize;
+        let names = ["kernel32", "ws2_32", "ole32", "unwind", "mingw32", "mingwex", "msvcrt", "kernel32", "msvcrt"];
+        let found = resolve_gnu_link_libraries(&names, &[], |file| {
+            calls += 1;
+            [lib.join(file), other.join(file)].into_iter().find(|p| p.is_file())
+        });
+        assert_eq!(calls, 1, "driver must be asked once, not once per library");
+        let expected: Vec<PathBuf> = ["kernel32", "ws2_32", "ole32", "unwind", "mingw32", "mingwex", "msvcrt"]
+            .iter()
+            .map(|n| lib.join(format!("lib{n}.a")))
+            .collect();
+        assert_eq!(found, expected);
+    }
+
+    // Similar pattern: a lib outside the learned dir still reaches the driver,
+    // and `-L` dirs keep precedence over driver-learned dirs.
+    #[test]
+    fn gnu_link_libraries_keep_l_dir_precedence_and_fall_back_to_driver() {
+        let (_root, lib, other) = fake_mingw_sysroot();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join("libws2_32.a"), b"!<arch>\n").unwrap();
+        let mut asked: Vec<String> = Vec::new();
+        let found = resolve_gnu_link_libraries(
+            &["kernel32", "ws2_32", "special", "missing"],
+            &[user.path().to_path_buf()],
+            |file| {
+                asked.push(file.to_string());
+                [lib.join(file), other.join(file)].into_iter().find(|p| p.is_file())
+            },
+        );
+        assert_eq!(
+            found,
+            vec![lib.join("libkernel32.a"), user.path().join("libws2_32.a"), other.join("libspecial.a")]
+        );
+        assert_eq!(
+            asked,
+            vec!["libkernel32.a", "libspecial.a", "libmissing.a", "libmissing.dll.a"]
+        );
+    }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[test]

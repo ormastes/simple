@@ -31,7 +31,7 @@ use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, Co
     container_host_scope_bytes_v2, container_scope_fence_id_v2}
 use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
 use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeOperationV1, RUNTIME_STATUS_OK,
-    RUNTIME_PHASE_RUNNING, RUNTIME_PHASE_CREATED}
+    RUNTIME_PHASE_RUNNING, RUNTIME_PHASE_CREATED, RuntimeExitStatusV1, runtime_exit_status_text_v1}
 use std.common.contracts.container.execution_input_configuration_v1.container_execution_input_configuration_decode_v1
 use std.common.contracts.orchestration.agent_workspace_invocation_v2.{AgentWorkspaceInvocationManifestV2,
     agent_workspace_invocation_manifest_encode_v2, agent_workspace_invocation_manifest_decode_v2,
@@ -160,6 +160,9 @@ pub struct HostLinuxServiceAgentV4:
     # 14A F2/D3: a stop cause seen while a native step is pending; outcome and exit digest are fixed when this is
     # first set (first cause kept) and begin_stop runs once the step drained.
     stop_requested: bool = false
+    # N7: the first stop cause is the workload's own exit. Its outcome stays failed until the Destroy reply
+    # carries the engine-native exit read taken before Stop (host_agent_destroy_exit_v4).
+    exit_by_workload: bool = false
     # D7: the last `grant_clock` a step saw (monotonic max); cancel, pane io and close read it as `now`.
     clock_ms: i64 = 0
     # milestone_0023 part B: the signed window end the last step saw (manifest `not_after`, re-derived by every
@@ -798,7 +801,8 @@ fn host_agent_observation_v4(agent: HostLinuxServiceAgentV4, input: HostAgentSte
 fn host_agent_digest_fields_v4(kind: text, operation: RuntimeOperationV1) -> text:
     val fields: Dict<text, SdnValue> = {"kind": SdnValue.String(kind), "status": SdnValue.String(operation.status),
         "phase": SdnValue.String(operation.state.phase), "nativeId": SdnValue.String(operation.state.identity.native_id),
-        "exitCode": SdnValue.Int(operation.state.exit_code)}
+        "exitCode": SdnValue.Int(operation.state.exit_code),
+        "workloadExit": SdnValue.String(runtime_exit_status_text_v1(operation.state.workload_exit))}
     sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)))
 
 # Stages stage .. running (V4's own drivers, not V7's native step). After `enable` an agent record exists and,
@@ -899,8 +903,7 @@ fn host_agent_native_step_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapac
         # window end is the other cause (14A F2: its own marker digest, no operation). The first cause is kept;
         # this Inspect has completed (pending false), so begin_stop may run now (D3).
         if operation.state.phase != RUNTIME_PHASE_RUNNING:
-            state = host_agent_stop_cause_v4(state, if operation.state.exit_code == 0: "succeeded" else: "failed",
-                host_agent_digest_fields_v4("linux-host-agent-exit", operation))
+            state = host_agent_workload_exit_cause_v4(state, operation)
         if input.clock.grant_clock >= input.manifest.base.not_after:
             state = host_agent_stop_cause_v4(state, "failed",
                 host_agent_window_end_digest_v4(input.manifest.base.not_after, state.clock_ms))
@@ -925,6 +928,7 @@ fn host_agent_release_step_v4(agent: HostLinuxServiceAgentV4, capacity: HostCapa
         if turn.operation.is_none(): return host_agent_wedged_v4(state, capacity, "linux-host-agent-destroy-missing")
         if turn.operation.unwrap().status != RUNTIME_STATUS_OK:
             return host_agent_wedged_v4(state, capacity, "linux-host-agent-destroy:" + turn.operation.unwrap().reason)
+        state = host_agent_destroy_exit_v4(state, turn.operation.unwrap())
         state.destroy_digest = host_agent_digest_fields_v4("linux-host-agent-destroy", turn.operation.unwrap())
         state.stage = "settle"
         return host_agent_pending_v4(state, capacity)
@@ -1010,6 +1014,28 @@ fn host_agent_stop_cause_v4(agent: HostLinuxServiceAgentV4, outcome: text, exit_
         state.stop_requested = true
         state.outcome = outcome
         state.exit_digest = exit_digest
+    state
+
+# N7 side bug: V3 Inspect carries no exit (its untyped exit_code is always -1), so a self-exit cause is
+# recorded failed here and settled from the Destroy reply. Only the first cause marks exit_by_workload.
+fn host_agent_workload_exit_cause_v4(agent: HostLinuxServiceAgentV4, operation: RuntimeOperationV1) -> HostLinuxServiceAgentV4:
+    var state = agent
+    if not state.stop_requested: state.exit_by_workload = true
+    host_agent_stop_cause_v4(state, "failed", host_agent_digest_fields_v4("linux-host-agent-exit", operation))
+
+# Only an engine-native Exited(0) is success; Unobserved, NotExited, Unknown and Exited(n != 0) fail closed.
+fn host_agent_exit_outcome_v4(exit: RuntimeExitStatusV1) -> text:
+    match exit:
+        case RuntimeExitStatusV1.Exited(code): if code == 0: "succeeded" else: "failed"
+        case _: "failed"
+
+# A self-exit cause takes its outcome and exit evidence from the Destroy reply's pre-Stop read; any other
+# first cause (cancel, window end) keeps its own failed outcome and digest.
+fn host_agent_destroy_exit_v4(agent: HostLinuxServiceAgentV4, destroyed: RuntimeOperationV1) -> HostLinuxServiceAgentV4:
+    if not agent.exit_by_workload: return agent
+    var state = agent
+    state.outcome = host_agent_exit_outcome_v4(destroyed.state.workload_exit)
+    state.exit_digest = host_agent_digest_fields_v4("linux-host-agent-exit", destroyed)
     state
 
 # 13.3 + D1/D3/F4: the ONLY writer of `stopping`/`detach` from `running` (the F1 hook is the only other writer

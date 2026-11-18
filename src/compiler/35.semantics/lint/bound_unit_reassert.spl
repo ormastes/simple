@@ -7,7 +7,8 @@
 # doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md:
 # function-local origin only (unit-typed parameters, `val x = Unit(...)`, plain
 # copies and arithmetic on the erased value). Re-casting to the SAME unit A is
-# allowed. Cross-function summaries come with the typed HIR slice.
+# allowed. Helpers returning an erased primitive are summarised (in-file and via
+# BoundUnitSummary); the as-cast form is covered too.
 
 use compiler.semantics.lint.lint_text.{code_line_snapshot, CodeLine, lint_is_vendor_path}
 
@@ -226,10 +227,89 @@ fn _bur_param_units(header: text, units: [text], names: [text], origins: [text])
                 _bur_set(names, origins, p.substring(0, colon).trim(), ty)
     0
 
+
+# Operand of every `<operand> as Unit` cast (whole-identifier `Unit` after
+# `as`): an optional balanced `(...)` preceded by an identifier/field path.
+fn _bur_as_operands(expr: text, unit_name: text) -> [text]:
+    var ops: [text] = []
+    val needle = " as " + unit_name
+    var from = 0
+    while from < expr.byte_len():
+        val k = expr.substring(from, expr.byte_len()).find(needle)
+        if k < 0:
+            return ops
+        val at = from + k
+        from = at + needle.byte_len()
+        if from < expr.byte_len() and _bur_ident_char(expr.substring(from, from + 1)):
+            continue
+        var start = at
+        if start > 0 and expr.substring(start - 1, start) == ")":
+            var depth = 0
+            while start > 0:
+                val c = expr.substring(start - 1, start)
+                if c == ")":
+                    depth = depth + 1
+                elif c == "(":
+                    depth = depth - 1
+                start = start - 1
+                if depth == 0:
+                    break
+        while start > 0:
+            val c = expr.substring(start - 1, start)
+            if _bur_ident_char(c) or c == ".":
+                start = start - 1
+            else:
+                break
+        ops.push(expr.substring(start, at))
+    ops
+
+# Cross-file summary: `fns[i]` is a `pub fn` of `module` that returns a bare
+# primitive erased from unit `units[i]`.
+pub struct BoundUnitSummary:
+    module: text
+    fns: [text]
+    units: [text]
+
+fn _bur_fn_name(line: text) -> text:
+    var rest = line
+    for prefix in ["pub ", "static ", "async ", "unsafe "]:
+        if rest.starts_with(prefix):
+            rest = rest.substring(prefix.byte_len(), rest.byte_len())
+    if rest.starts_with("fn ") or rest.starts_with("me "):
+        return _bur_leading_ident(rest.substring(3, rest.byte_len()))
+    ""
+
+fn _bur_returns_primitive(header: text) -> bool:
+    val arrow = header.find(" -> ")
+    if arrow < 0:
+        return false
+    var rt = header.substring(arrow + 4, header.byte_len()).trim()
+    if rt.ends_with(":"):
+        rt = rt.substring(0, rt.byte_len() - 1).trim()
+    ["f64", "f32", "i64", "i32", "i16", "i8", "u64", "u32", "u16", "u8"].contains(rt)
+
+# Whole-identifier call `name(` inside `expr`.
+fn _bur_calls(expr: text, name: text) -> bool:
+    val needle = name + "("
+    var from = 0
+    while from < expr.byte_len():
+        val at = expr.substring(from, expr.byte_len()).find(needle)
+        if at < 0:
+            return false
+        val start = from + at
+        val before_ok = start == 0 or
+            (not _bur_ident_char(expr.substring(start - 1, start)) and
+                expr.substring(start - 1, start) != ".")
+        if before_ok:
+            return true
+        from = start + 1
+    false
+
 # Unit that `expr` erased to a primitive, or "" when none. Unit-typed locals
-# erase through an accessor; already-erased locals erase by mention. An origin
-# different from `target` wins so a mixed expression still reports.
-fn _bur_erased_origin(expr: text, unit_names: [text], unit_origins: [text], erased_names: [text], erased_origins: [text], target: text) -> text:
+# erase through an accessor; already-erased locals erase by mention; calls of
+# summarised erasing functions erase their result. An origin different from
+# `target` wins so a mixed expression still reports.
+fn _bur_erased_origin(expr: text, unit_names: [text], unit_origins: [text], erased_names: [text], erased_origins: [text], sum_names: [text], sum_units: [text], target: text) -> text:
     var found = ""
     var i = 0
     while i < unit_names.len():
@@ -245,22 +325,50 @@ fn _bur_erased_origin(expr: text, unit_names: [text], unit_origins: [text], eras
                 return erased_origins[i]
             found = erased_origins[i]
         i = i + 1
+    i = 0
+    while i < sum_names.len():
+        if _bur_calls(expr, sum_names[i]):
+            if sum_units[i] != target:
+                return sum_units[i]
+            found = sum_units[i]
+        i = i + 1
     found
 
-pub fn check_bound_unit_reasserts(source: text, file_path: text) -> [BoundUnitReassertFinding]:
-    var findings: [BoundUnitReassertFinding] = []
-    if lint_is_vendor_path(file_path):
-        return findings
-    val lines = code_line_snapshot(source).lines
-    var units: [text] = []
+# Local names bound by `use <module>.{a, b as c}` whose target is in a
+# dependency summary, seeded as erasing functions.
+fn _bur_seed_imports(lines: [CodeLine], deps: [BoundUnitSummary], sum_names: [text], sum_units: [text]) -> i64:
     for line in lines:
-        val u = _bur_unit_decl_name(line.trimmed)
-        if u != "" and not units.contains(u):
-            units.push(u)
-        units = _bur_unit_imports(line.trimmed, units)
-    if units.len() < 2:
-        return findings
+        val t = line.trimmed
+        if not t.starts_with("use "):
+            continue
+        val open = t.find(".{{")
+        val close = t.find("}")
+        if open < 0 or close <= open:
+            continue
+        val module = t.substring(4, open).trim()
+        for dep in deps:
+            if dep.module != module:
+                continue
+            for part in t.substring(open + 2, close).split(","):
+                var name = part.trim()
+                var local = name
+                val alias_at = name.find(" as ")
+                if alias_at >= 0:
+                    local = name.substring(alias_at + 4, name.byte_len()).trim()
+                    name = name.substring(0, alias_at).trim()
+                val at = _bur_index(dep.fns, name)
+                if at >= 0 and local != "":
+                    _bur_set(sum_names, sum_units, local, dep.units[at])
+    0
 
+struct BurRun:
+    findings: [BoundUnitReassertFinding]
+    sum_names: [text]
+    sum_units: [text]
+    sum_pubs: [text]
+
+fn _bur_walk(lines: [CodeLine], units: [text], sum_names: [text], sum_units: [text], sum_pubs: [text]) -> [BoundUnitReassertFinding]:
+    var findings: [BoundUnitReassertFinding] = []
     var i = 0
     while i < lines.len():
         val header = lines[i]
@@ -273,7 +381,11 @@ pub fn check_bound_unit_reasserts(source: text, file_path: text) -> [BoundUnitRe
         var erased_names: [text] = []
         var erased_origins: [text] = []
         val header_end = _bur_header_end(lines, i)
-        _bur_param_units(_bur_join(lines, i, header_end), units, unit_names, unit_origins)
+        val header_text = _bur_join(lines, i, header_end)
+        _bur_param_units(header_text, units, unit_names, unit_origins)
+        val returns_prim = _bur_returns_primitive(header_text)
+        var ret_unit = ""
+        var tail = ""
         var j = header_end + 1
         while j < lines.len():
             val body = lines[j]
@@ -283,14 +395,18 @@ pub fn check_bound_unit_reasserts(source: text, file_path: text) -> [BoundUnitRe
             if _bur_indent(body.raw) <= header_indent:
                 break
             if not _bur_ascii(body.trimmed):
+                tail = ""
                 j = j + 1
                 continue
             var reported = false
             for unit_name in units:
                 if reported:
                     break
-                for arg in _bur_cast_args(body.trimmed, unit_name):
-                    val from_unit = _bur_erased_origin(arg, unit_names, unit_origins, erased_names, erased_origins, unit_name)
+                var operands = _bur_cast_args(body.trimmed, unit_name)
+                for op in _bur_as_operands(body.trimmed, unit_name):
+                    operands.push(op)
+                for arg in operands:
+                    val from_unit = _bur_erased_origin(arg, unit_names, unit_origins, erased_names, erased_origins, sum_names, sum_units, unit_name)
                     if from_unit != "" and from_unit != unit_name:
                         findings.push(BoundUnitReassertFinding(
                             code: "SPL-BOUND-003",
@@ -302,18 +418,75 @@ pub fn check_bound_unit_reasserts(source: text, file_path: text) -> [BoundUnitRe
                         break
             val bound = _bur_binding(body.trimmed)
             if bound != "":
+                tail = ""
                 val rhs = _bur_rhs(body.trimmed)
                 var rhs_unit = ""
                 for unit_name in units:
                     if rhs.starts_with(unit_name + "("):
                         rhs_unit = unit_name
-                val erased_from = _bur_erased_origin(rhs, unit_names, unit_origins, erased_names, erased_origins, "")
+                val erased_from = _bur_erased_origin(rhs, unit_names, unit_origins, erased_names, erased_origins, sum_names, sum_units, "")
                 # A rebinding replaces the origin of `bound`.
                 _bur_set(unit_names, unit_origins, bound, rhs_unit)
                 if rhs_unit != "":
                     _bur_set(erased_names, erased_origins, bound, "")
                 else:
                     _bur_set(erased_names, erased_origins, bound, erased_from)
+            else:
+                tail = body.trimmed
+                if tail.starts_with("return "):
+                    tail = tail.substring(7, tail.byte_len())
+                    if ret_unit == "":
+                        ret_unit = _bur_erased_origin(tail, unit_names, unit_origins, erased_names, erased_origins, sum_names, sum_units, "")
             j = j + 1
+        if returns_prim:
+            if ret_unit == "" and tail != "":
+                ret_unit = _bur_erased_origin(tail, unit_names, unit_origins, erased_names, erased_origins, sum_names, sum_units, "")
+            val fname = _bur_fn_name(header.trimmed)
+            if ret_unit != "" and fname != "":
+                _bur_set(sum_names, sum_units, fname, ret_unit)
+                if header.trimmed.starts_with("pub ") and not sum_pubs.contains(fname):
+                    sum_pubs.push(fname)
         i = j
     findings
+
+fn _bur_run(source: text, file_path: text, deps: [BoundUnitSummary]) -> BurRun:
+    var run = BurRun(findings: [], sum_names: [], sum_units: [], sum_pubs: [])
+    if lint_is_vendor_path(file_path):
+        return run
+    val lines = code_line_snapshot(source).lines
+    var units: [text] = []
+    for line in lines:
+        val u = _bur_unit_decl_name(line.trimmed)
+        if u != "" and not units.contains(u):
+            units.push(u)
+        units = _bur_unit_imports(line.trimmed, units)
+    if units.len() < 1:
+        return run
+    _bur_seed_imports(lines, deps, run.sum_names, run.sum_units)
+    # Three rounds resolve forward references and helper chains; only the last
+    # round's findings are kept.
+    var round = 0
+    while round < 3:
+        run.findings = _bur_walk(lines, units, run.sum_names, run.sum_units, run.sum_pubs)
+        round = round + 1
+    run
+
+pub fn check_bound_unit_reasserts(source: text, file_path: text) -> [BoundUnitReassertFinding]:
+    _bur_run(source, file_path, []).findings
+
+pub fn check_bound_unit_reasserts_cross(source: text, file_path: text, deps: [BoundUnitSummary]) -> [BoundUnitReassertFinding]:
+    _bur_run(source, file_path, deps).findings
+
+# Exported summary of this module for its importers: `pub fn`s that return a
+# bare primitive erased from a unit. `module` is filled in by the caller.
+pub fn bound_unit_erasure_summary(source: text, file_path: text) -> BoundUnitSummary:
+    val run = _bur_run(source, file_path, [])
+    var fns: [text] = []
+    var us: [text] = []
+    var k = 0
+    while k < run.sum_names.len():
+        if run.sum_pubs.contains(run.sum_names[k]):
+            fns.push(run.sum_names[k])
+            us.push(run.sum_units[k])
+        k = k + 1
+    BoundUnitSummary(module: "", fns: fns, units: us)

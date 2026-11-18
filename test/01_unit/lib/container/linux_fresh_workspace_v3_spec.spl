@@ -3,7 +3,8 @@
 # @req REQ-LINUX-WORKSPACE-NATIVE-001
 # @req REQ-LINUX-WORKSPACE-NATIVE-002
 # @req REQ-LINUX-WORKSPACE-NATIVE-003
-use std.spec.{describe, it, expect, step}
+# @req N7-EXIT-STATUS (milestone_0034: engine-native .State.ExitCode, typed, never defaulted to 0)
+use std.spec.{describe, it, expect, fail, step}
 use std.common.contracts.container.agent_executable_profile_v1.*
 use std.common.contracts.container.linux_agent_workspace_profile_v1.*
 use std.common.contracts.container.linux_agent_workspace_profile_v2.*
@@ -23,6 +24,9 @@ use std.common.sdn.value.SdnValue
 use std.common.crypto.sha256.sha256_text
 use std.common.text_bytes.text_to_utf8_bytes
 use std.common.json.value.*
+use std.common.contracts.container.runtime_v1.{RuntimeExitStatusV1, runtime_exit_status_text_v1}
+use std.common.contracts.container.workspace_action_v3.ContainerWorkspaceActionV3
+use std.nogc_sync_mut.container.machine_fresh_workspace_workflow_v3.workspace_workflow_effect_v3
 
 fn workspace_policy_data_v3() -> LinuxWorkspaceInstalledProfileV1:
     LinuxWorkspaceInstalledProfileV1(machine_policy_digest: "a".repeat(64), provider_policy_digest: "b".repeat(64),
@@ -167,7 +171,8 @@ describe "Explicit Linux workspace policy and request DATA v3":
         expect(format).to_contain("""{{json .HostConfig.UsernsMode}}""")
         expect(format).to_contain("""{{json .Config.Tty}}""")
         expect(format.contains("""{{{{""")).to_equal(false)
-        expect(linux_fresh_workspace_inspect_field_names_v3().len()).to_equal(46)
+        expect(linux_fresh_workspace_inspect_field_names_v3().len()).to_equal(47)
+        expect(format).to_contain("""{{json .State.ExitCode}}""")
         val status = "Uid:\t20001\t20001\t20001\t20001\nGid:\t20001\t20001\t20001\t20001\n"
         val uid = "0 100000 20001\n20001 20001 1\n20002 120001 45535\n"
         val gid = "0 200000 20001\n20001 20001 1\n20002 220001 45535\n"
@@ -227,3 +232,62 @@ describe "Explicit Linux workspace policy and request DATA v3":
         expect(linux_fresh_workspace_mountinfo_validate_v3(suid, "/workspace", 36).is_err()).to_equal(true)
         val dev = "36 35 98:0 / /workspace rw,nosuid,relatime shared:1 - xfs /dev/sda1 rw,attr2"
         expect(linux_fresh_workspace_mountinfo_validate_v3(dev, "/workspace", 36).is_err()).to_equal(true)
+
+fn workspace_exit_data_v3(command: LinuxFreshWorkspaceCommandV3, status: text, code: JsonValue) -> text:
+    val value = json_value_object_set(workspace_created_data_v3(command), "status", JsonValue.Str(status))
+    json_value_serialize(json_value_object_set(value, "exit_code", code))
+
+describe "Engine-native workspace exit status v3 (N7)":
+    it "reads Exited only from an exited container and never defaults a running or created 0 to success":
+        step("Podman reports ExitCode 0 while running or created: only status exited yields a typed exit")
+        var command = workspace_command_data_v3()
+        command.command.action = LinuxFreshWorkloadActionV2.Inspect
+        command.command.native_id = "3".repeat(64)
+        val c = command.command
+        expect(linux_fresh_workspace_exit_status_v3(c, 0, workspace_exit_data_v3(command, "exited", JsonValue.Int(0))).unwrap()).to_equal(RuntimeExitStatusV1.Exited(0))
+        expect(linux_fresh_workspace_exit_status_v3(c, 0, workspace_exit_data_v3(command, "exited", JsonValue.Int(137))).unwrap()).to_equal(RuntimeExitStatusV1.Exited(137))
+        step("Podman 5.2.5 'stopped' (exited, cleanup pending) carries the same conmon exit code")
+        expect(linux_fresh_workspace_exit_status_v3(c, 0, workspace_exit_data_v3(command, "stopped", JsonValue.Int(0))).unwrap()).to_equal(RuntimeExitStatusV1.Exited(0))
+        expect(linux_fresh_workspace_exit_status_v3(c, 0, workspace_exit_data_v3(command, "running", JsonValue.Int(0))).unwrap()).to_equal(RuntimeExitStatusV1.NotExited("running"))
+        expect(linux_fresh_workspace_exit_status_v3(c, 0, workspace_exit_data_v3(command, "created", JsonValue.Int(0))).unwrap()).to_equal(RuntimeExitStatusV1.NotExited("created"))
+        step("Malformed, out-of-range or engine-failed reads stay Unknown: distinguishable from Exited(0), never success")
+        for code in [JsonValue.Null, JsonValue.Str("0"), JsonValue.Int(-1), JsonValue.Int(256)]:
+            match linux_fresh_workspace_exit_status_v3(c, 0, workspace_exit_data_v3(command, "exited", code)).unwrap():
+                case RuntimeExitStatusV1.Unknown(_): pass
+                case _: fail("expected a typed Unknown exit status")
+        match linux_fresh_workspace_exit_status_v3(c, 125, workspace_exit_data_v3(command, "exited", JsonValue.Int(0))).unwrap():
+            case RuntimeExitStatusV1.Unknown(reason): expect(reason).to_equal("fresh-workspace-exit-inspect-engine-failed")
+            case _: fail("expected a typed Unknown exit status")
+        val live_pid = json_value_serialize(json_value_object_set(json_value_object_set(json_value_object_set(workspace_created_data_v3(command),
+            "status", JsonValue.Str("exited")), "exit_code", JsonValue.Int(0)), "pid", JsonValue.Int(22)))
+        match linux_fresh_workspace_exit_status_v3(c, 0, live_pid).unwrap():
+            case RuntimeExitStatusV1.Unknown(_): pass
+            case _: fail("expected a typed Unknown exit status")
+        step("Another container's labels are refused, and only the Inspect projection may carry the read")
+        val foreign = json_value_serialize(json_value_object_set(json_value_object_set(json_value_object_set(workspace_created_data_v3(command),
+            "status", JsonValue.Str("exited")), "exit_code", JsonValue.Int(0)), "operation_id", JsonValue.Str("operation_2")))
+        expect(linux_fresh_workspace_exit_status_v3(c, 0, foreign).is_err()).to_equal(true)
+        var stop = c
+        stop.action = LinuxFreshWorkloadActionV2.Stop
+        expect(linux_fresh_workspace_exit_status_v3(stop, 0, workspace_exit_data_v3(command, "exited", JsonValue.Int(0))).is_err()).to_equal(true)
+        step("The default reply status is Unobserved, never Exited(0), and the text form is unambiguous")
+        expect(runtime_exit_status_text_v1(RuntimeExitStatusV1.Unobserved)).to_equal("unobserved")
+        expect(runtime_exit_status_text_v1(RuntimeExitStatusV1.Exited(0))).to_equal("exited:0")
+        expect(runtime_exit_status_text_v1(RuntimeExitStatusV1.NotExited("running"))).to_equal("not-exited:running")
+        expect(runtime_exit_status_text_v1(RuntimeExitStatusV1.Unknown("x"))).to_equal("unknown:x")
+
+    it "reads the exit once before Stop on both Stop and Destroy, and never after the engine stop":
+        step("Stage 0 is the engine-native exit read; the stop that would overwrite ExitCode follows it")
+        for action in [ContainerWorkspaceActionV3.Stop, ContainerWorkspaceActionV3.Destroy]:
+            val first = workspace_workflow_effect_v3(action, 0).unwrap()
+            expect(first.0).to_equal(LinuxFreshWorkloadActionV2.Inspect)
+            expect(first.1).to_equal("inspect-exit")
+            val second = workspace_workflow_effect_v3(action, 1).unwrap()
+            expect(second.0).to_equal(LinuxFreshWorkloadActionV2.Stop)
+            expect(second.1).to_equal("stop")
+        expect(workspace_workflow_effect_v3(ContainerWorkspaceActionV3.Stop, 2).is_none()).to_equal(true)
+        expect(workspace_workflow_effect_v3(ContainerWorkspaceActionV3.Destroy, 2).unwrap().1).to_equal("remove")
+        expect(workspace_workflow_effect_v3(ContainerWorkspaceActionV3.Destroy, 3).unwrap().1).to_equal("absence")
+        expect(workspace_workflow_effect_v3(ContainerWorkspaceActionV3.Destroy, 4).is_none()).to_equal(true)
+        step("Inspect stays a native population read with no engine effect")
+        expect(workspace_workflow_effect_v3(ContainerWorkspaceActionV3.Inspect, 0).is_none()).to_equal(true)

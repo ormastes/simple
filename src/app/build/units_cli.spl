@@ -1,0 +1,80 @@
+# `simple build units list|show` — the library unit registry, read from the
+# simple.sdn manifests reachable from a root dir (default `.`) through
+# `project.dependencies`, dependencies first. Cycles and missing/invalid
+# manifests exit 2.
+#
+#   simple build units list [<root dir>]            name version kind dir, one per unit
+#   simple build units show <name|dir> [<root dir>] fields of one unit
+
+use app.io.mod.{is_dir, file_exists, file_read}
+use compiler.driver.driver_build.library_unit_manifest_v1.{
+    LibraryUnitManifestV1, library_unit_manifest_closure_v1}
+
+@allow(primitive_api)  # CLI boundary: manifest text keyed by directory
+fn _units_read_manifest(dir: text) -> text:
+    val p = dir + "/simple.sdn"
+    if not file_exists(p):
+        return ""
+    file_read(p) ?? ""
+
+@allow(primitive_api)  # CLI boundary: rendered registry text
+pub fn build_units_list_output(units: [LibraryUnitManifestV1]) -> text:
+    var out = ""
+    for u in units:
+        out = out + "{u.name} {u.version} {u.kind} {u.dir}\n"
+    out
+
+@allow(primitive_api)  # CLI boundary: unit key text in, rendered text out
+pub fn build_units_show_output(units: [LibraryUnitManifestV1], key: text) -> Result<text, text>:
+    for u in units:
+        if u.name == key or u.dir == key:
+            var out = "name: {u.name}\nversion: {u.version}\nkind: {u.kind}\ndir: {u.dir}\n"
+            out = out + "deps: " + u.deps.join(", ") + "\n"
+            out = out + "include: " + u.includes.join(", ") + "\n"
+            out = out + "exclude: " + u.excludes.join(", ") + "\n"
+            return Ok(out)
+    Err("no unit named or located at '{key}'")
+
+@allow(primitive_api)  # CLI argv boundary: argv in, process exit code out
+pub fn run_build_units(args: [text]) -> i64:
+    val usage = "usage: simple build units list [<root dir>] | show <name|dir> [<root dir>]"
+    if args.len() == 0:
+        print(usage)
+        return 2
+    val sub = args[0]
+    var key = ""
+    var rest = args[1:]
+    if sub == "show":
+        if rest.len() == 0:
+            print(usage)
+            return 2
+        key = rest[0]
+        rest = rest[1:]
+    elif sub != "list":
+        print(usage)
+        return 2
+    if rest.len() > 1:
+        print(usage)
+        return 2
+    var root = "."
+    if rest.len() == 1:
+        root = rest[0].replace("\\", "/")
+    if not is_dir(root):
+        print("build-units-error: not a directory: {root}")
+        return 2
+    val units = match library_unit_manifest_closure_v1(root, _units_read_manifest):
+        case Ok(us): us
+        case Err(e):
+            print("build-units-error: {e}")
+            return 2
+    if sub == "list":
+        val text_out = build_units_list_output(units)
+        print(text_out[0:text_out.len() - 1])
+        return 0
+    match build_units_show_output(units, key):
+        case Ok(t):
+            print(t)
+            0
+        case Err(e):
+            print("build-units-error: {e}")
+            2

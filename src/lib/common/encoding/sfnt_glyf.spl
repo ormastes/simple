@@ -1330,6 +1330,15 @@ fn _hstem_knots(commands: [SfntGlyfCommand], knots: [f64], upem: f64) -> [f64]:
         s = s + 1
     cur + [scale, 0.0]
 
+fn _scale_commands_x(commands: [SfntGlyfCommand], ratio: f64) -> [SfntGlyfCommand]:
+    var out: [SfntGlyfCommand] = []
+    for c in commands:
+        if c.verb == SFNT_GLYF_CLOSE:
+            out = out.push(c)
+        else:
+            out = out.push(_command(c.verb, c.x1 * ratio, c.y1, c.x2 * ratio, c.y2))
+    out
+
 fn _hint_commands(commands: [SfntGlyfCommand], knots: [f64], scale: f64) -> [SfntGlyfCommand]:
     var out: [SfntGlyfCommand] = []
     for c in commands:
@@ -1343,7 +1352,22 @@ fn _hint_commands(commands: [SfntGlyfCommand], knots: [f64], scale: f64) -> [Sfn
 # consumed by text_layout/font_renderer.spl, so it must be public.
 # @allow(primitive_api)
 pub fn sfnt_render_glyph_lcd(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, phase_q: i64) -> Option<SfntLcdGlyph>:
+    sfnt_render_glyph_lcd_milli(blob, selector_kind, selector_value, size_px, 0, phase_q)
+
+# Fractional-size twin (`font-size: 18.72px`). `x_milli` is the computed size
+# in milli-px; 0 or a whole `size_px * 1000` is the plain whole-px glyph.
+# Measured against Chrome 159 (Liberation Sans/Serif, 1x): 18.72 px and 19 px
+# ink sit on the same rows, as do 13.28 px and 13 px. FreeType's light
+# autohinter fits the y scale to the whole-pixel x-height, so only x keeps the
+# float size. The outline's x is scaled by `x_milli / (size_px * 1000)`; y,
+# the hint knots and the hint cache stay at the whole `size_px`.
+# reason: SFNT selector/size/phase scalars are the font-table domain;
+# consumed by text_layout/font_renderer.spl, so it must be public.
+# @allow(primitive_api)
+pub fn sfnt_render_glyph_lcd_milli(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, x_milli: i64, phase_q: i64) -> Option<SfntLcdGlyph>:
     if size_px <= 0 or size_px > 512 or phase_q < 0 or phase_q > 3:
+        return None
+    if x_milli < 0 or x_milli > 512000:
         return None
     val font = match parse_offset_table(blob):
         Some(value): value
@@ -1375,7 +1399,9 @@ pub fn sfnt_render_glyph_lcd(blob: [u8], selector_kind: i64, selector_value: i64
     val horizontal = match _hmtx(font, long_metrics, glyph_id):
         Some(value): value
         None: return None
-    val commands = parsed_outline.commands
+    val x_frac = x_milli > 0 and x_milli != size_px * 1000
+    val x_ratio = if x_frac: x_milli as f64 / (size_px * 1000) as f64 else: 1.0
+    val commands = if x_frac: _scale_commands_x(parsed_outline.commands, x_ratio) else: parsed_outline.commands
     val bounds = match _outline_bounds(commands):
         Some(value): value
         None: return None
@@ -1436,7 +1462,7 @@ pub fn sfnt_render_glyph_lcd(blob: [u8], selector_kind: i64, selector_value: i64
         y = y + 1
     Some(SfntLcdGlyph(
         slg_width: width, slg_height: height,
-        slg_advance: _round_glyf_metric(horizontal[0] as f64 * scale),
+        slg_advance: _round_glyf_metric(horizontal[0] as f64 * scale * x_ratio),
         slg_bearing_x: x0,
         slg_bearing_y: bearing_y,
         slg_gray: gray, slg_rgb: rgb))

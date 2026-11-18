@@ -1,5 +1,5 @@
 # Purpose and audience: read-only TestDB query contract for CLI/MCP facade authors and evidence reviewers.
-# @req TESTDB-001 TESTDB-002 TESTDB-003 TESTDB-004
+# @req TESTDB-001 TESTDB-002 TESTDB-003 TESTDB-004 TESTDB-007 TESTDB-008
 use std.spec.*
 use std.common.traceability.case_events.{TraceCaseEvent}
 use std.common.traceability.test_query.{
@@ -20,12 +20,19 @@ absent identity, an unknown status string or a skipped case can never be read
 as a PASS. Audience: authors of the future `simple test query` CLI/MCP facade
 and reviewers of TestDB-backed qualification evidence.
 
-Plan section 3.5 / 9.1 names TESTDB-001..010 without defining each one; this
-spec maps them as: TESTDB-001 exact case query, TESTDB-002 every status variant
-(including Unknown), TESTDB-003 provenance and explicit missing identity,
-TESTDB-004 bounded pagination with typed truncation, partial coverage and
-rejected queries. TESTDB-005..010 are recorded as not covered in
-doc/08_tracking/bug/testdb_query_cli_mcp_not_implemented_2026-11-14.md.
+Plan sections 3.5 / 9.1 name TESTDB-001..010 without defining each one. The
+per-id definitions, taken only from what the plan states, are:
+TESTDB-001 exact case query; TESTDB-002 every status variant (including
+Unknown); TESTDB-003 provenance and explicit missing identity; TESTDB-004
+bounded pagination, partial coverage, rejected and failed queries;
+TESTDB-005 read-only / no-write isolation (no CLI or MCP query modifies the
+TestDB); TESTDB-006 a failed authoritative query is a typed error, never an
+empty success; TESTDB-007 retries stay separate rows; TESTDB-008 skipped,
+cached or expired outcomes never qualify as PASS; TESTDB-009
+CLI/MCP parity with RunnerTestDb (same run/case/attempt/status for the same
+snapshot); TESTDB-010 requirement/bug-scoped queries (`--bug`, `--requirement`,
+`--levels`), currently unimplemented and recorded in
+doc/08_tracking/bug/trace_plan_2026_11_14_remaining_gaps_2026-11-16.md section 4.
 """
 
 fn _key(path: text, name: text) -> TestCaseKey:
@@ -93,7 +100,7 @@ describe "TestDB query rows for one exact case":
             case TestPlannedCaseIdentity.Missing: fail("planned case id was dropped")
 
     it "keeps two attempts of the same case in one run as separate rows":
-        # @req TESTDB-001
+        # @req TESTDB-001 TESTDB-007
         step("Project a stream where the case started, failed, then started and passed")
         val events = [_started("adds"), _finished("adds", "failed"), _started("adds"), _finished("adds", "passed")]
         val rows = project_run_case_rows(_key("test/a_spec.spl", "adds"), TestRunId(value: "run-1"), _no_plan(), events)
@@ -125,7 +132,7 @@ describe "TestDB query status variants":
 
 describe "TestDB query qualification":
     it "qualifies only a Passed status as PASS":
-        # @req TESTDB-002
+        # @req TESTDB-008
         step("Qualify the Passed status")
         expect(_qualifies(TestQueryStatus.Passed)).to_equal("pass")
         step("Every other status, including skipped, gated, blocked, cached and unknown, is not PASS")
@@ -137,7 +144,7 @@ describe "TestDB query qualification":
             expect(_qualifies(status)).to_equal("not-pass")
 
     it "never qualifies a skipped row even when its case also passed elsewhere":
-        # @req TESTDB-002
+        # @req TESTDB-008
         step("Project a pending (skipped-in-run) outcome")
         val rows = project_run_case_rows(_key("test/a_spec.spl", "adds"), TestRunId(value: "run-1"), _no_plan(),
             [_started("adds"), _finished("adds", "pending")])
@@ -146,6 +153,21 @@ describe "TestDB query qualification":
         match rows[0].qualification:
             case TestQualification.Pass: fail("a pending row qualified as PASS")
             case TestQualification.NotPass: expect(_status_name(rows[0].status)).to_equal("pending")
+
+    it "treats an expired outcome as an unrecognised status that is never PASS":
+        # @req TESTDB-008
+        step("Parse the spelling the plan lists for an expired result")
+        val status = parse_test_query_status("expired")
+        step("The store has no Expired variant, so it stays Unknown and NotPass rather than passing")
+        expect(_status_name(status)).to_equal("unknown:expired")
+        expect(_qualifies(status)).to_equal("not-pass")
+        step("A finished event with that outcome yields a NotPass row")
+        val rows = project_run_case_rows(_key("test/a_spec.spl", "adds"), TestRunId(value: "run-1"), _no_plan(),
+            [_started("adds"), _finished("adds", "expired")])
+        expect(rows.len()).to_equal(1)
+        match rows[0].qualification:
+            case TestQualification.Pass: fail("an expired row qualified as PASS")
+            case TestQualification.NotPass: pass
 
 describe "TestDB query provenance and missing identity":
     it "marks a run without a frozen plan and an orphan terminal event as Missing":

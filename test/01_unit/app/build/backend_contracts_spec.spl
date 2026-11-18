@@ -1,0 +1,70 @@
+"""
+## Purpose and audience
+Purpose: Pin the owner-decided backend contracts as DATA plus a check
+(`config/build/backend_contracts.sdn`, `backend_contracts_check`), not prose:
+HIP is the ROCm backend of record, the CUDA PTX ISA version is the one the PTX
+builder emits, and SVE/RVV code is vector-length-agnostic with the length
+queried at runtime. Every `backends_*` group stays opt-in (`default: false`).
+Audience: compiler and tooling engineers who maintain backend build groups.
+"""
+# @req: REQ-APP-BUILD-001 — backend contracts as data (plan §6, owner decisions 2026-11-18).
+
+use app.build.targets.backend_contracts.{
+    load_backend_contracts, backend_contracts_check, check_backend_contracts_text,
+    vector_length_tier_error
+}
+use app.build.targets.target_executor.{target_action_error}
+use app.build.targets.build_targets.{BuildTarget}
+use std.nogc_sync_mut.io_runtime.{file_read}
+use std.spec.step
+
+fn _good() -> text:
+    file_read("config/build/backend_contracts.sdn")
+
+describe "backend contracts as data":
+    it "loads the pinned contracts":
+        val c = load_backend_contracts(_good()).unwrap()
+        expect(c.rocm_backend).to_equal("hip")
+        expect(c.rocm_group).to_equal("backends_rocm")
+        expect(c.ptx_isa_version).to_equal("8.0")
+        expect(c.ptx_default_sm).to_equal("sm_86")
+        expect(c.vl_mode).to_equal("vl_agnostic")
+        expect(c.vl_query).to_equal("runtime")
+
+    it "passes the repo check with zero violations":
+        val v = backend_contracts_check(".")
+        expect(v.len()).to_equal(0)
+
+    it "flags a PTX ISA version that differs from the builder":
+        val bad = _good().replace("isa_version: \"8.0\"", "isa_version: \"7.0\"")
+        val v = check_backend_contracts_text(bad, ".")
+        expect(v.len()).to_be_greater_than(0)
+        expect(v[0]).to_start_with("backend-contract: ptx-isa-version")
+
+    it "flags a non-HIP ROCm backend of record":
+        val bad = _good().replace("backend_of_record: hip", "backend_of_record: rocm_native")
+        val v = check_backend_contracts_text(bad, ".")
+        expect(v[0]).to_start_with("backend-contract: rocm-backend-of-record")
+
+    it "flags a fixed vector length contract":
+        val bad = _good().replace("mode: vl_agnostic", "mode: fixed_256")
+        val v = check_backend_contracts_text(bad, ".")
+        expect(v[0]).to_start_with("backend-contract: vector-length-mode")
+
+    it "refuses unparseable contract data":
+        expect(load_backend_contracts("{{{ nope").is_err()).to_equal(true)
+
+    it "keeps every backends_* group opt-in":
+        step("Verify: the check scans config/build/backends_*.sdn for default: false")
+        expect(backend_contracts_check(".").len()).to_equal(0)
+
+    it "refuses fixed-vector-length SVE/RVV tier spellings":
+        expect(vector_length_tier_error("armv9-a+sve256")).to_start_with("target-error: fixed-vector-length")
+        expect(vector_length_tier_error("rv64gcv_zvl128b")).to_start_with("target-error: fixed-vector-length")
+        expect(vector_length_tier_error("armv9-a+sve")).to_equal("")
+        expect(vector_length_tier_error("rv64gcv")).to_equal("")
+        expect(vector_length_tier_error("x86-64-v3")).to_equal("")
+
+    it "wires the vector-length refusal into the executor tier check":
+        val t = BuildTarget(name: "t", kind: "binary", entry: "e", output: "", deps: [], cpu_tier: "armv9-a+sve256", triple: "aarch64-unknown-linux-gnu")
+        expect(target_action_error(t)).to_start_with("target-error: fixed-vector-length")

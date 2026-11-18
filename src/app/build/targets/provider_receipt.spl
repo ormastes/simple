@@ -3,8 +3,11 @@
 # A successful `admit_backend_provider` yields a receipt; re-admission verifies
 # the presented provider against a stored receipt and refuses with
 # SPL-PROVIDER-ABI-001 on any mismatch. Only fields the current descriptor
-# actually carries are recorded; the rest of the plan §6 field list is listed
-# in `absent_fields` rather than filled with fabricated digests.
+# actually carries are recorded. `features`, `boundary_contract_digest` and
+# (when the caller names the group members) `targets` are derived from the
+# admission inputs; the remaining plan §6 identity fields are recorded only when
+# the provider descriptor supplies them and are otherwise listed in
+# `absent_fields` rather than filled with fabricated digests.
 
 use app.build.targets.build_targets.{BackendProviderDescriptor, admit_backend_provider}
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
@@ -19,6 +22,11 @@ pub val PROVIDER_RECEIPT_ABSENT_FIELDS: [text] = [
     "boundary_contract_digest", "provenance"
 ]
 
+pub val PROVIDER_RECEIPT_SUPPLIED_KEYS: [text] = [
+    "semver", "roles", "toolchain_identity", "foreign_triples",
+    "mir_abi_digest", "semantic_interface_digest", "provenance"
+]
+
 pub struct ProviderAdmissionReceipt:
     group: text
     abi_version: i64
@@ -26,6 +34,7 @@ pub struct ProviderAdmissionReceipt:
     capabilities: [text]
     artifact_sha256: text
     absent_fields: [text]
+    identity: [text]
 
 fn _sorted(values: [text]) -> [text]:
     var out: [text] = []
@@ -54,15 +63,60 @@ fn _join(values: [text]) -> text:
 
 pub fn issue_provider_receipt(d: BackendProviderDescriptor, host_triple: text, required_caps: [text], artifact: text) -> Result<ProviderAdmissionReceipt, text>:
     """Admit `d`; on success return its receipt (artifact hashed with SHA-256)."""
-    _issue_with_sha(d, host_triple, required_caps, sha256_text(artifact))
+    var none: [text] = []
+    _issue_with_sha(d, host_triple, required_caps, sha256_text(artifact), none, none)
 
-fn _issue_with_sha(d: BackendProviderDescriptor, host_triple: text, required_caps: [text], artifact_sha: text) -> Result<ProviderAdmissionReceipt, text>:
+pub fn issue_provider_receipt_with_identity(d: BackendProviderDescriptor, host_triple: text, required_caps: [text], artifact: text, supplied: [text], targets: [text]) -> Result<ProviderAdmissionReceipt, text>:
+    """As `issue_provider_receipt`, recording `key=value` identity `supplied` by the provider and the selected group `targets`."""
+    _issue_with_sha(d, host_triple, required_caps, sha256_text(artifact), supplied, targets)
+
+fn _key_of(kv: text) -> text:
+    var i = 0
+    while i < kv.len():
+        if kv[i:i + 1] == "=": return kv[0:i]
+        i = i + 1
+    kv
+
+fn _identity_of(d: BackendProviderDescriptor, caps: [text], supplied: [text], targets: [text]) -> Result<[text], text>:
+    var out: [text] = []
+    for kv in supplied:
+        val k = _key_of(kv)
+        if not PROVIDER_RECEIPT_SUPPLIED_KEYS.contains(k):
+            return Err("SPL-PROVIDER-ABI-001: provider-invalid: " + d.group + ": unknown-identity-key: " + k)
+        out.push(kv)
+    val feats = _join(caps)
+    out.push("features=" + feats)
+    out.push("boundary_contract_digest=" + sha256_text(d.group + "|" + d.abi_version.to_string() + "|" + d.host_triple + "|" + feats))
+    if targets.len() > 0:
+        out.push("targets=" + _join(_sorted(targets)))
+    Ok(_sorted(out))
+
+fn _absent_of(identity: [text]) -> [text]:
+    var out: [text] = []
+    for f in PROVIDER_RECEIPT_ABSENT_FIELDS:
+        var found = false
+        for kv in identity:
+            if _key_of(kv) == f: found = true
+        if not found: out.push(f)
+    out
+
+pub fn receipt_identity_value(r: ProviderAdmissionReceipt, key: text) -> text:
+    """Value of identity `key`, or empty when the receipt does not carry it."""
+    for kv in r.identity:
+        if _key_of(kv) == key:
+            return kv[key.len() + 1:]
+    ""
+
+fn _issue_with_sha(d: BackendProviderDescriptor, host_triple: text, required_caps: [text], artifact_sha: text, supplied: [text], targets: [text]) -> Result<ProviderAdmissionReceipt, text>:
     val refusal = admit_backend_provider(d, host_triple, required_caps)
     if refusal != "":
         return Err(refusal)
+    val caps = _sorted(d.capabilities)
+    val ident = _identity_of(d, caps, supplied, targets)
+    if ident.is_err(): return Err(ident.unwrap_err())
     Ok(ProviderAdmissionReceipt(group: d.group, abi_version: d.abi_version, host_triple: d.host_triple,
-        capabilities: _sorted(d.capabilities), artifact_sha256: artifact_sha,
-        absent_fields: PROVIDER_RECEIPT_ABSENT_FIELDS))
+        capabilities: caps, artifact_sha256: artifact_sha,
+        absent_fields: _absent_of(ident.unwrap()), identity: ident.unwrap()))
 
 pub fn provider_artifact_file_sha256(path: text) -> Result<text, text>:
     """SHA-256 hex of the provider artifact's bytes as read from disk."""
@@ -86,6 +140,7 @@ pub fn provider_receipt_to_sdn(r: ProviderAdmissionReceipt) -> text:
     m["capabilities"] = _text_array(r.capabilities)
     m["artifact_sha256"] = SdnValue.String(r.artifact_sha256)
     m["absent_fields"] = _text_array(r.absent_fields)
+    m["identity"] = _text_array(r.identity)
     sdn_encode_canonical(SdnValue.Dict(m))
 
 fn _get_text(v: SdnValue, key: text) -> text?:
@@ -118,23 +173,29 @@ pub fn provider_receipt_from_sdn(source: text) -> Result<ProviderAdmissionReceip
     val sha = _get_text(v, "artifact_sha256")
     val caps = _get_texts(v, "capabilities")
     val absent = _get_texts(v, "absent_fields")
+    val identity_f = _get_texts(v, "identity")
     val abi_f = v.get("abi_version")
     if not group.? or not triple.? or not sha.? or not caps.? or not absent.? or not abi_f.?:
         return Err("provider-receipt: missing field")
     val abi = abi_f.unwrap().as_i64()
     if not abi.?: return Err("provider-receipt: abi_version not an integer")
     Ok(ProviderAdmissionReceipt(group: group.unwrap(), abi_version: abi.unwrap(), host_triple: triple.unwrap(),
-        capabilities: caps.unwrap(), artifact_sha256: sha.unwrap(), absent_fields: absent.unwrap()))
+        capabilities: caps.unwrap(), artifact_sha256: sha.unwrap(), absent_fields: absent.unwrap(),
+        identity: if identity_f.?: identity_f.unwrap() else: []))
 
 fn _mismatch(field: text, stored: text, presented: text) -> text:
     "SPL-PROVIDER-ABI-001: receipt-mismatch: " + field + ": " + stored + " != " + presented
 
 pub fn verify_provider_receipt(stored: ProviderAdmissionReceipt, d: BackendProviderDescriptor, host_triple: text, required_caps: [text], artifact: text) -> text:
     """Re-admit `d` and compare with `stored`. Empty text = OK."""
-    _verify_with_sha(stored, d, host_triple, required_caps, sha256_text(artifact))
+    var none: [text] = []
+    _verify_with_sha(stored, d, host_triple, required_caps, sha256_text(artifact), none, none)
 
-fn _verify_with_sha(stored: ProviderAdmissionReceipt, d: BackendProviderDescriptor, host_triple: text, required_caps: [text], artifact_sha: text) -> text:
-    val fresh = _issue_with_sha(d, host_triple, required_caps, artifact_sha)
+pub fn verify_provider_receipt_with_identity(stored: ProviderAdmissionReceipt, d: BackendProviderDescriptor, host_triple: text, required_caps: [text], artifact: text, supplied: [text], targets: [text]) -> text:
+    _verify_with_sha(stored, d, host_triple, required_caps, sha256_text(artifact), supplied, targets)
+
+fn _verify_with_sha(stored: ProviderAdmissionReceipt, d: BackendProviderDescriptor, host_triple: text, required_caps: [text], artifact_sha: text, supplied: [text], targets: [text]) -> text:
+    val fresh = _issue_with_sha(d, host_triple, required_caps, artifact_sha, supplied, targets)
     if fresh.is_err(): return fresh.unwrap_err()
     val r = fresh.unwrap()
     if r.group != stored.group: return _mismatch("group", stored.group, r.group)
@@ -144,9 +205,16 @@ fn _verify_with_sha(stored: ProviderAdmissionReceipt, d: BackendProviderDescript
     val sc = _join(_sorted(stored.capabilities))
     val pc = _join(r.capabilities)
     if sc != pc: return _mismatch("capabilities", sc, pc)
+    val si = _join(_sorted(stored.identity))
+    val pi = _join(r.identity)
+    if si != pi: return _mismatch("identity", si, pi)
     ""
 
 pub fn admit_provider_with_receipt(d: BackendProviderDescriptor, host_triple: text, required_caps: [text], artifact_path: text, receipt_dir: text) -> text:
+    var none: [text] = []
+    admit_provider_with_identity(d, host_triple, required_caps, artifact_path, receipt_dir, none, none)
+
+pub fn admit_provider_with_identity(d: BackendProviderDescriptor, host_triple: text, required_caps: [text], artifact_path: text, receipt_dir: text, supplied: [text], targets: [text]) -> text:
     """Admit `d` against the artifact file on disk. First admission writes
     `<receipt_dir>/<group>.sdn`; later runs verify against it and refuse with
     SPL-PROVIDER-ABI-001 on mismatch. Empty text = admitted."""
@@ -159,8 +227,8 @@ pub fn admit_provider_with_receipt(d: BackendProviderDescriptor, host_triple: te
         val stored = provider_receipt_from_sdn(file_read(receipt_path))
         if stored.is_err():
             return "SPL-PROVIDER-ABI-001: receipt-mismatch: unreadable: " + receipt_path + ": " + stored.unwrap_err()
-        return _verify_with_sha(stored.unwrap(), d, host_triple, required_caps, sha.unwrap())
-    val issued = _issue_with_sha(d, host_triple, required_caps, sha.unwrap())
+        return _verify_with_sha(stored.unwrap(), d, host_triple, required_caps, sha.unwrap(), supplied, targets)
+    val issued = _issue_with_sha(d, host_triple, required_caps, sha.unwrap(), supplied, targets)
     if issued.is_err(): return issued.unwrap_err()
     if not dir_create_all(receipt_dir):
         return "provider-receipt: write failed: cannot create " + receipt_dir

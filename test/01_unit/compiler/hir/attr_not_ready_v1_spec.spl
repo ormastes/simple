@@ -81,14 +81,28 @@ describe "Pending attribute readiness (E_ATTR_NOT_READY)":
         val src = NODE_CLASS + "fn use_it() -> i64:\n    val n = HirNode(id: 1, body: \"b\", inferred: 7)\n    n.inferred\n"
         expect(codes(check(src, "allsync"))).to_equal("")
 
-    it "reports each unawaited read, and only the unawaited ones (neighbouring pattern)":
+    it "treats a read after a dominating top-level await of the same field as ready (write-once cell)":
         # @req REQ-IMM-ASY-02
+        step("Straight-line `await n.f` proves `f` published; later reads of `n.f` need no await")
         val src = NODE_CLASS + ASYNC_STAND_IN + "fn use_it() -> i64:\n" + BOUND +
             "    val a = await n.inferred\n    val b = n.inferred\n    a + b + n.inferred\n"
-        expect(codes(check(src, "mixed"))).to_equal("E_ATTR_NOT_READY:HirNode.inferred;E_ATTR_NOT_READY:HirNode.inferred;")
+        expect(codes(check(src, "dominated"))).to_equal("")
 
-    it "forgets a pending local once it is rebound to a fresh value":
+    it "still reports a read that comes BEFORE the await":
         # @req REQ-IMM-ASY-02
-        val src = NODE_CLASS + ASYNC_STAND_IN + "fn use_it() -> i64:\n    var n = HirNode(id: 1, body: \"b\", inferred: async_init(7))\n" +
-            "    n = HirNode(id: 2, body: \"c\", inferred: 9)\n    n.inferred\n"
-        expect(codes(check(src, "rebound"))).to_equal("")
+        val src = NODE_CLASS + ASYNC_STAND_IN + "fn use_it() -> i64:\n" + BOUND +
+            "    val early = n.inferred\n    val a = await n.inferred\n    early + a\n"
+        expect(codes(check(src, "before"))).to_equal("E_ATTR_NOT_READY:HirNode.inferred;")
+
+    it "does not let an await inside a branch dominate a later read":
+        # @req REQ-IMM-ASY-02
+        val src = NODE_CLASS + ASYNC_STAND_IN + "fn use_it(c: bool) -> i64:\n" + BOUND +
+            "    if c:\n        val a = await n.inferred\n    n.inferred\n"
+        expect(codes(check(src, "branch"))).to_equal("E_ATTR_NOT_READY:HirNode.inferred;")
+
+    it "does not carry readiness from one pending field to another":
+        # @req REQ-IMM-ASY-02
+        val cls = "@support_async_immutable\nclass Two:\n    id: i64\n    a: i64\n    b: i64\n"
+        val src = cls + ASYNC_STAND_IN + "fn use_it() -> i64:\n    val n = Two(id: 1, a: async_init(1), b: async_init(2))\n" +
+            "    val x = await n.a\n    x + n.b\n"
+        expect(codes(check(src, "otherfield"))).to_equal("E_ATTR_NOT_READY:Two.b;")

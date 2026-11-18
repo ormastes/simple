@@ -15,26 +15,52 @@ bare `text` fields or enums, and `TraceReverseIndexV1.by_key` is
 Bare `text` is exempt from the primitive rule (owner decision), so these
 structs meet the requirement as they stand.
 
-Closed-set `text` fields that could become enums if the exemption is ever
-narrowed: `TraceLocator.locator_kind` (file, symbol, scenario, section, cas;
-about 30 string-compare sites, including `graph_schema_v1.spl` and
-`graph_wire_v1.spl`) and `TraceDiagnostic.severity` (error, warning).
+Closed-set `text` field that could become an enum if the exemption is ever
+narrowed: `TraceDiagnostic.severity` (error, warning). `TraceLocator.locator_kind`
+is now the closed enum `TraceLocatorKind` (text only at the SDN boundary via
+`locator_kind_name` / `parse_locator_kind`); the graph wire DTO
+`TraceGraphLocatorV1.locator_kind` stays `text` and is validated by
+`graph_schema_v1.spl`.
 
 ## 3. MCP / ctx
 
-- `simple_ctx_purge` is a compare-and-swap on the store generation key, but an
-  append that lands between the final key check and the rename still targets
-  the replaced file and is lost (`src/app/mcp/main_lazy_ctx_tools.spl`,
-  `ctx_purge_commit`). Unblock: an OS compare-and-rename, or appends that
-  re-check the generation after writing.
+- `simple_ctx_purge` lost-write window is narrowed, not closed. Appends now
+  re-check the store size after writing (`_ctx_append_chunks_settled`,
+  `src/app/mcp/main_lazy_ctx_tools.spl`), which catches a purge rename landing
+  between an append's write and its re-check. Still lost: an append whose size
+  read, write and re-check all land between `ctx_purge_commit`'s final key check
+  and its rename; and a same-size false pass (a purge that shrinks the file by
+  exactly the appended bytes). Unblock: an OS compare-and-rename, or the purge
+  re-reading the store after its rename and replaying rows appended since its
+  snapshot.
 
 ## 4. Test query and harness
 
-- The plan (sections 3.5, 9.1) lists `TESTDB-001`..`TESTDB-010` as one range and
-  defines no per-id rows. Specs now use the mapping in
-  `test_query_spec.spl` (001 exact query, 002 result variants, 003 provenance and
-  missing identity, 004 pagination/rejected/failed queries); 005..010 and an id
-  for read-only/no-write isolation remain undefined by the plan.
+- The plan (sections 3.5, 9.1) lists `TESTDB-001`..`TESTDB-010` as one range with
+  no per-id rows. The per-id definitions, taken only from what the plan states,
+  now live in the header of `test/01_unit/lib/common/traceability/test_query_spec.spl`:
+  001 exact query, 002 status variants, 003 provenance/missing identity, 004
+  pagination and rejected queries, 005 read-only/no-write isolation, 006 failed
+  authoritative query is a typed error not an empty success, 007 retries stay
+  separate, 008 skipped/cached/expired never PASS, 009 CLI/MCP parity
+  with `RunnerTestDb`, 010 requirement/bug-scoped queries. 001-009 each have a
+  tagged scenario.
+- `TESTDB-010` is only defended fail-closed: `simple test query` has no
+  `--bug`, `--requirement` or `--levels` (unknown-flag usage error,
+  `src/app/test_runner_new/test_query_cli.spl:143`), and `simple_test_query` has no
+  bug/requirement/levels field (`src/app/mcp/main_lazy_trace_tools.spl:301`). Plan 3.2 and
+  acceptance item 2 (`--bug=<id>` returns case definitions, run attempts,
+  executable/source identity, missing evidence) are not implemented. Unblock: a
+  bug/requirement -> case resolver over the traceability graph feeding
+  `RunnerTestDb.query_case_attempts`.
+- Plan 3.5 return fields beyond the current row (`test_definition_digest`,
+  `binary_digest`, `host/backend`, `started_at`, `duration`, `failure_code`,
+  `artifact_refs`, `level`) are not in `TestQueryRow`; rows carry run, planned
+  case, attempt, status, qualification and provenance only
+  (`std.common.traceability.test_query`). Unblock: the runner must first record
+  those facts per attempt.
+- `expired` has no `TestQueryStatus` variant; it parses as `Unknown` and is
+  never PASS (TESTDB-008), which is safe but not a distinct typed outcome.
 
 ## Already recorded elsewhere
 

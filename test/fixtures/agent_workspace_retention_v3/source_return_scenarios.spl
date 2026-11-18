@@ -1,0 +1,24 @@
+# Native integration fixture CONSUMER, NOT_RUN. Bug
+# agent_v4_source_return_never_completes_after_effect_2026-11-18: drives the
+# REAL transfer through stage settle and stage source-return for an agent whose
+# staging effect was attempted. The caller must supply a genuine lent transfer
+# whose agent workload reached absence-completed through actual Host gates;
+# there is no runtime-free constructor for it (capabilities, quota slot,
+# fresh-epoch subject and machine store are all native owners).
+use std.nogc_sync_mut.container.machine_authority_v1.MachineFreshWorkloadTransferV2
+
+pub fn check_effect_source_return_completes_v3(transfer: MachineFreshWorkloadTransferV2) -> MachineFreshWorkloadTransferV2:
+    # Stage settle: retire native + ONE publish of CPU/memory settlement and retention.
+    assert(transfer.settle_workspace_v3().is_ok())
+    assert(transfer.settled_v2().unwrap())
+    assert(transfer.released_charge_digest_v3().is_ok())
+    # A repeated settle is idempotent, never a second publication.
+    assert(transfer.settle_workspace_v3().is_ok())
+    # Stage source-return completes on the FIRST call (the old bug retried forever).
+    val returned = transfer.return_settled_workspace_source_v3()
+    assert(returned.is_ok() and returned.unwrap())
+    # The source left runtime-active; a stray retry gets the named preflight refusal, not close_v1's.
+    assert(transfer.return_settled_workspace_source_v3().unwrap_err() == "machine-fresh-workspace-source-return-ineligible")
+    # Remaining owner decision (bug record P1): the retained root still blocks lifecycle close.
+    assert(transfer.close_workload_v3().unwrap_err() == "machine-fresh-workspace-source-parent-retained")
+    transfer

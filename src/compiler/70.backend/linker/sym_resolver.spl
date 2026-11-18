@@ -101,6 +101,11 @@ fn sym_resolution_new() -> SymResolution:
         local_tables: []
     )
 
+fn sym_in_group_section(obj: ElfObject, sym: ElfSymbol) -> bool:
+    """True when the symbol's defining section carries SHF_GROUP (0x200)."""
+    if sym.st_shndx <= 0 or sym.st_shndx >= obj.sections.len(): return false
+    (obj.sections[sym.st_shndx].sh_flags & 0x200) != 0
+
 class SymResolveState:
     """Mutable accumulation for `sym_resolve_objects`. The maps are updated in
     place; threading a SymResolution value through `sym_add_object` copied the
@@ -108,6 +113,7 @@ class SymResolveState:
     var defined: {text: SymEntry}
     var errors: [text]
     var local_tables: [[SymEntry]]
+    var grouped: {text: bool}  # winning definition lives in an SHF_GROUP (COMDAT) section
 
     me add_object(obj: ElfObject, obj_idx: i64):
         var locals: [SymEntry] = []
@@ -136,12 +142,16 @@ class SymResolveState:
                     # A tentative definition overrides a weak regular definition.
                     if is_weak(existing):
                         self.defined[sym.name] = entry
+                else if is_strong(existing) and is_strong(entry) and
+                        self.grouped.has(sym.name) and sym_in_group_section(obj, sym):
+                    pass  # COMDAT: the first group's definition wins (ld.lld)
                 else if is_strong(existing) and is_strong(entry):
                     self.errors.push("duplicate symbol: {sym.name} (object {existing.obj_idx} and {obj_idx})")
                 else if is_strong(entry) and is_weak(existing):
                     self.defined[sym.name] = entry
             else:
                 self.defined[sym.name] = entry
+                if sym_in_group_section(obj, sym): self.grouped[sym.name] = true
 
         self.local_tables.push(locals)
 
@@ -221,7 +231,7 @@ fn sym_collect_undefined(res: SymResolution, objects: [ElfObject]) -> SymResolut
 
 # reason: positional linker sym_resolver API
 fn sym_resolve_objects(objects: [ElfObject]) -> SymResolution:
-    var state = SymResolveState(defined: {}, errors: [], local_tables: [])
+    var state = SymResolveState(defined: {}, errors: [], local_tables: [], grouped: {})
     var idx: i64 = 0
     for obj in objects:
         state.add_object(obj, idx)

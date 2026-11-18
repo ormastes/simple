@@ -1,10 +1,12 @@
 """
 ## Purpose and audience
 Requirement ids: the plan (sections 3.5 and 9.1) names TESTDB-001..010 without
-defining each one; this spec uses the mapping stated in
-test/01_unit/lib/common/traceability/test_query_spec.spl (001 exact query, 002 result
-variants, 003 provenance/missing identity, 004 pagination, rejected and failed
-queries). Read-only/no-write isolation has no individually numbered plan id.
+defining each one; the per-id definitions are recorded in
+test/01_unit/lib/common/traceability/test_query_spec.spl (001 exact query, 002
+status variants, 003 provenance/missing identity, 004 pagination and rejected
+queries, 005 read-only isolation, 006 failed query is an error not an empty
+success, 007 retries stay separate, 008 non-executed never PASS, 009 CLI/MCP
+parity, 010 requirement/bug-scoped queries).
 
 Executable contract for the read-only `simple test query` and `simple test
 explain` subcommands. Argument parsing and rendering are pure functions over
@@ -125,6 +127,15 @@ describe "test query argument parsing":
         expect(test_query_subcommand_args(["test"]).len() > 0).to_equal(false)
         expect(test_query_subcommand_args(["test", "test/query_spec.spl"]).len() > 0).to_equal(false)
 
+    it "rejects the plan's bug and requirement scopes instead of ignoring them":
+        # @req TESTDB-010
+        # Scoped queries (--bug, --requirement, --levels) are not implemented; see
+        # doc/08_tracking/bug/trace_plan_2026_11_14_remaining_gaps_2026-11-16.md section 4.
+        step("A scope flag the command does not implement is a usage error")
+        expect(_usage_error_of(["query", "a::b", "--bug", "bug-1"])).to_contain("unknown flag: --bug")
+        expect(_usage_error_of(["query", "a::b", "--requirement", "REQ-1"])).to_contain("unknown flag: --requirement")
+        expect(_usage_error_of(["query", "a::b", "--levels", "unit"])).to_contain("unknown flag: --levels")
+
 describe "test query rendering":
     it "renders typed rows in table form with qualification":
         # @req TESTDB-002
@@ -224,7 +235,7 @@ describe "test query exit decisions":
 
 describe "test query against a real database file":
     it "leaves the database, its wal and its directory byte-for-byte unchanged":
-        # @req TESTDB-001
+        # @req TESTDB-001 TESTDB-005
         step("Save a scratch database with one run of the queried case")
         dir_remove_all(SCRATCH_DIR)
         dir_create_all(SCRATCH_DIR)
@@ -239,6 +250,8 @@ describe "test query against a real database file":
             case Err(reason): fail("fixture save failed: {reason}")
         val bytes_before = file_read(db_path)
         val mtime_before = file_modified_time(db_path)
+        expect(bytes_before.len() > 0).to_equal(true)
+        expect(mtime_before > 0).to_equal(true)
         val listing_before = dir_list(SCRATCH_DIR)
         val wal_before = file_exists(db_path + ".wal")
         step("Run query and explain through the real command path")
@@ -255,7 +268,7 @@ describe "test query against a real database file":
         dir_remove_all(SCRATCH_DIR)
 
     it "reports a missing or corrupt database as exit 2 and creates nothing":
-        # @req TESTDB-004
+        # @req TESTDB-004 TESTDB-006
         step("A missing database is a typed error and is not cold-started")
         dir_remove_all(SCRATCH_DIR)
         dir_create_all(SCRATCH_DIR)

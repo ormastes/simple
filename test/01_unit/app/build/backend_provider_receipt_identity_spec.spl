@@ -1,0 +1,64 @@
+"""
+## Purpose and audience
+Purpose: Prove the provider admission receipt fills the plan §6 identity
+fields instead of listing all of them as absent: `targets`, `features` and
+`boundary_contract_digest` are derived from admission inputs, the rest
+(`semver`, `roles`, `toolchain_identity`, `foreign_triples`, `mir_abi_digest`,
+`semantic_interface_digest`, `provenance`) come from the provider descriptor
+and stay absent when it does not supply them. Identity round-trips through the
+stored SDN and any change is refused with SPL-PROVIDER-ABI-001.
+Audience: compiler and tooling engineers who maintain backend build groups.
+"""
+# @req: REQ-APP-BUILD-001 — provider receipt identity fields (plan §6).
+
+use app.build.targets.build_targets.{BackendProviderDescriptor, BACKEND_PROVIDER_ABI_VERSION}
+use app.build.targets.provider_receipt.{
+    issue_provider_receipt_with_identity, verify_provider_receipt_with_identity,
+    provider_receipt_to_sdn, provider_receipt_from_sdn, receipt_identity_value
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.spec.step
+
+val HOST = "x86_64-unknown-linux-gnu"
+val ART = "provider-bytes"
+
+fn _desc() -> BackendProviderDescriptor:
+    BackendProviderDescriptor(group: "backends_cuda", abi_version: BACKEND_PROVIDER_ABI_VERSION, host_triple: HOST, capabilities: ["optimization", "object_emit"])
+
+fn _ident() -> [text]:
+    ["semver=1.2.3", "roles=codegen", "toolchain_identity=clang-23.1.0", "mir_abi_digest=" + sha256_text("mir")]
+
+describe "provider receipt identity":
+    it "fills derived and supplied fields and keeps the rest absent":
+        step("Verify: issue with identity")
+        val r = issue_provider_receipt_with_identity(_desc(), HOST, ["object_emit"], ART, _ident(), ["//backend:cuda"]).unwrap()
+        expect(receipt_identity_value(r, "semver")).to_equal("1.2.3")
+        expect(receipt_identity_value(r, "targets")).to_equal("//backend:cuda")
+        expect(receipt_identity_value(r, "features")).to_equal("object_emit,optimization")
+        # oracle: contract digest is sha256 over group|abi|host|sorted caps
+        val want = sha256_text("backends_cuda|" + BACKEND_PROVIDER_ABI_VERSION.to_string() + "|" + HOST + "|object_emit,optimization")
+        expect(receipt_identity_value(r, "boundary_contract_digest")).to_equal(want)
+        expect(r.absent_fields.contains("semver")).to_equal(false)
+        expect(r.absent_fields.contains("targets")).to_equal(false)
+        expect(r.absent_fields.contains("boundary_contract_digest")).to_equal(false)
+        expect(r.absent_fields.contains("provenance")).to_equal(true)
+        expect(r.absent_fields.contains("semantic_interface_digest")).to_equal(true)
+
+    it "refuses an unknown identity key":
+        val r = issue_provider_receipt_with_identity(_desc(), HOST, ["object_emit"], ART, ["colour=blue"], [])
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_equal("SPL-PROVIDER-ABI-001: provider-invalid: backends_cuda: unknown-identity-key: colour")
+
+    it "round-trips identity through the stored SDN":
+        val r = issue_provider_receipt_with_identity(_desc(), HOST, ["object_emit"], ART, _ident(), ["//backend:cuda"]).unwrap()
+        val back = provider_receipt_from_sdn(provider_receipt_to_sdn(r)).unwrap()
+        expect(receipt_identity_value(back, "toolchain_identity")).to_equal("clang-23.1.0")
+        expect(back.absent_fields.len()).to_equal(r.absent_fields.len())
+
+    it "refuses a changed identity field":
+        val stored = issue_provider_receipt_with_identity(_desc(), HOST, ["object_emit"], ART, _ident(), ["//backend:cuda"]).unwrap()
+        val ok = verify_provider_receipt_with_identity(stored, _desc(), HOST, ["object_emit"], ART, _ident(), ["//backend:cuda"])
+        expect(ok).to_equal("")
+        val drift = ["semver=1.2.4", "roles=codegen", "toolchain_identity=clang-23.1.0", "mir_abi_digest=" + sha256_text("mir")]
+        val bad = verify_provider_receipt_with_identity(stored, _desc(), HOST, ["object_emit"], ART, drift, ["//backend:cuda"])
+        expect(bad.starts_with("SPL-PROVIDER-ABI-001: receipt-mismatch: identity")).to_equal(true)

@@ -9,11 +9,19 @@ use compiler.backend.linker.elf_parser.{
     elf_reloc_sym, elf_reloc_type, elf_section_addralign,
     SHN_UNDEF, STB_LOCAL, STB_WEAK, SHT_NOBITS
 }
-use compiler.backend.linker.elf_inspect.{ET_REL, EM_ARM, SHT_PROGBITS}
+use compiler.backend.linker.elf_inspect.{ET_REL, EM_ARM, EM_386, SHT_PROGBITS}
 use compiler.backend.linker.reloc_engine.{
-    RelocArch, reloc_apply, reloc_patch_bytes, R_ARM_NONE,
-    R_ARM_ABS8, R_ARM_ABS16, R_ARM_THM_PC8, R_ARM_THM_JUMP11, R_ARM_THM_JUMP8
+    RelocArch, reloc_apply, reloc_patch_bytes, reloc_patch_width, R_ARM_NONE,
+    R_ARM_ABS8, R_ARM_ABS16, R_ARM_THM_PC8, R_ARM_THM_JUMP11, R_ARM_THM_JUMP8,
+    R_386_NONE, R_386_32, R_386_PC32, R_386_PLT32, R_386_16, R_386_PC16,
+    R_386_8, R_386_PC8
 }
+
+# i386 raw images have no GOT: only direct absolute/PC-relative forms link.
+fn i386_raw_reloc_supported(rtype: i64) -> bool:
+    rtype == R_386_32 or rtype == R_386_PC32 or rtype == R_386_PLT32 or
+        rtype == R_386_16 or rtype == R_386_PC16 or rtype == R_386_8 or
+        rtype == R_386_PC8
 
 val ARM32_RAW_SHF_ALLOC: i64 = 2
 val ARM32_RAW_SHN_ABS: i64 = 0xfff1
@@ -57,7 +65,7 @@ fn arm32_raw_layout(objects: [ElfObject]) -> Result<Arm32RawLayout, text>:
             else:
                 if section.sh_type != SHT_PROGBITS and section.sh_type != SHT_NOBITS and
                         section.sh_type != ARM32_RAW_SHT_EXIDX:
-                    return Err("ARM32 raw link: object {oi} section {si} has unsupported allocatable type {section.sh_type}")
+                    return Err("ELF32 raw link: object {oi} section {si} has unsupported allocatable type {section.sh_type}")
                 var alignment = elf_section_addralign(obj, si)
                 if alignment < 1:
                     alignment = 1
@@ -87,11 +95,11 @@ fn arm32_raw_layout(objects: [ElfObject]) -> Result<Arm32RawLayout, text>:
             var alignment = sym.st_value
             if alignment <= 0: alignment = 1
             if (alignment & (alignment - 1)) != 0:
-                return Err("ARM32 raw link: common symbol '{sym.name}' has non-power-of-two alignment {alignment}")
+                return Err("ELF32 raw link: common symbol '{sym.name}' has non-power-of-two alignment {alignment}")
             if alignment > 0x80000000:
-                return Err("ARM32 raw link: common symbol '{sym.name}' alignment exceeds ARM32 address space")
+                return Err("ELF32 raw link: common symbol '{sym.name}' alignment exceeds the ELF32 address space")
             if sym.st_size < 0 or sym.st_size > 0xffffffff:
-                return Err("ARM32 raw link: common symbol '{sym.name}' size is outside ARM32 range")
+                return Err("ELF32 raw link: common symbol '{sym.name}' size is outside ELF32 range")
             if not common_sizes.has(sym.name):
                 common_names = common_names.push(sym.name)
                 common_sizes[sym.name] = sym.st_size
@@ -105,7 +113,7 @@ fn arm32_raw_layout(objects: [ElfObject]) -> Result<Arm32RawLayout, text>:
     for name in common_names:
         cursor = arm32_raw_align(cursor, common_alignments[name])
         if cursor > 0xffffffff - common_sizes[name]:
-            return Err("ARM32 raw link: common symbol '{name}' exceeds ARM32 image range")
+            return Err("ELF32 raw link: common symbol '{name}' exceeds the ELF32 image range")
         common_offsets[name] = cursor
         cursor = cursor + common_sizes[name]
     Ok(Arm32RawLayout(
@@ -117,15 +125,15 @@ fn arm32_raw_symbol_addr(sym: ElfSymbol, oi: i64, layout: Arm32RawLayout,
         return Ok(sym.st_value)
     if sym.st_shndx == ARM32_RAW_SHN_COMMON:
         if not layout.common_offsets.has(sym.name):
-            return Err("ARM32 raw link: common symbol '{sym.name}' has no allocation")
+            return Err("ELF32 raw link: common symbol '{sym.name}' has no allocation")
         return Ok(base_addr + layout.common_offsets[sym.name])
     if sym.st_shndx == SHN_UNDEF:
-        return Err("ARM32 raw link: symbol '{sym.name}' is undefined")
+        return Err("ELF32 raw link: symbol '{sym.name}' is undefined")
     if sym.st_shndx < 0 or sym.st_shndx >= layout.offsets[oi].len():
-        return Err("ARM32 raw link: symbol '{sym.name}' has invalid section {sym.st_shndx}")
+        return Err("ELF32 raw link: symbol '{sym.name}' has invalid section {sym.st_shndx}")
     val section_offset = layout.offsets[oi][sym.st_shndx]
     if section_offset < 0:
-        return Err("ARM32 raw link: symbol '{sym.name}' names a non-allocatable section")
+        return Err("ELF32 raw link: symbol '{sym.name}' names a non-allocatable section")
     Ok(base_addr + section_offset + sym.st_value)
 
 fn arm32_raw_globals(objects: [ElfObject], layout: Arm32RawLayout,
@@ -143,7 +151,7 @@ fn arm32_raw_globals(objects: [ElfObject], layout: Arm32RawLayout,
             val is_weak = binding == STB_WEAK
             if addresses.has(sym.name):
                 if not weak[sym.name] and not is_weak:
-                    return Err("ARM32 raw link: duplicate strong symbol '{sym.name}'")
+                    return Err("ELF32 raw link: duplicate strong symbol '{sym.name}'")
                 if weak[sym.name] and not is_weak:
                     addresses[sym.name] = address
                     weak[sym.name] = false
@@ -170,7 +178,7 @@ fn arm32_raw_globals(objects: [ElfObject], layout: Arm32RawLayout,
 fn arm32_raw_reloc_symbol(obj: ElfObject, oi: i64, symbol_index: i64,
         layout: Arm32RawLayout, base_addr: i64, globals: {text: i64}) -> Result<i64, text>:
     if symbol_index < 0 or symbol_index >= obj.symbols.len():
-        return Err("ARM32 raw link: relocation has invalid symbol index {symbol_index}")
+        return Err("ELF32 raw link: relocation has invalid symbol index {symbol_index}")
     val sym = obj.symbols[symbol_index]
     if elf_symbol_binding(sym) == STB_LOCAL:
         return arm32_raw_symbol_addr(sym, oi, layout, base_addr)
@@ -182,22 +190,33 @@ fn arm32_raw_reloc_symbol(obj: ElfObject, oi: i64, symbol_index: i64,
         return Ok(globals[sym.name])
     if elf_symbol_binding(sym) == STB_WEAK:
         return Ok(0)
-    Err("ARM32 raw link: undefined symbol '{sym.name}'")
+    Err("ELF32 raw link: undefined symbol '{sym.name}'")
 
 fn elf_arm32_link_parsed(objects: [ElfObject], base_addr: i64,
         entry: text) -> Result<Arm32RawImage, text>:
+    elf32_raw_link_parsed(objects, base_addr, entry, false)
+
+fn elf_i386_link_parsed(objects: [ElfObject], base_addr: i64,
+        entry: text) -> Result<Arm32RawImage, text>:
+    elf32_raw_link_parsed(objects, base_addr, entry, true)
+
+fn elf32_raw_link_parsed(objects: [ElfObject], base_addr: i64,
+        entry: text, is_386: bool) -> Result<Arm32RawImage, text>:
+    val arch = if is_386: RelocArch.I386 else: RelocArch.Arm32
+    val machine = if is_386: EM_386 else: EM_ARM
+    val machine_name = if is_386: "EM_386" else: "EM_ARM"
     if base_addr < 0 or base_addr & 3 != 0:
-        return Err("ARM32 raw link: base address must be non-negative and 4-byte aligned")
+        return Err("ELF32 raw link: base address must be non-negative and 4-byte aligned")
     if entry == "":
-        return Err("ARM32 raw link: entry symbol is required")
+        return Err("ELF32 raw link: entry symbol is required")
     if objects.len() == 0:
-        return Err("ARM32 raw link: at least one object is required")
+        return Err("ELF32 raw link: at least one object is required")
 
     for obj in objects:
-        if obj.header.e_type != ET_REL or obj.header.e_machine != EM_ARM:
-            return Err("ARM32 raw link: input must be an ELF32 EM_ARM relocatable object")
+        if obj.header.e_type != ET_REL or obj.header.e_machine != machine:
+            return Err("ELF32 raw link: input must be an ELF32 {machine_name} relocatable object")
         if obj.raw.len() < 5 or obj.raw[4] != 1:
-            return Err("ARM32 raw link: input must use ELFCLASS32")
+            return Err("ELF32 raw link: input must use ELFCLASS32")
 
     val layout = arm32_raw_layout(objects)?
     val (globals, global_weak) = arm32_raw_globals(objects, layout, base_addr)?
@@ -205,9 +224,9 @@ fn elf_arm32_link_parsed(objects: [ElfObject], base_addr: i64,
     # addresses are needed after duplicate selection.
     val resolved_global_count = global_weak.keys().len()
     if resolved_global_count != globals.keys().len():
-        return Err("ARM32 raw link: inconsistent global symbol resolution")
+        return Err("ELF32 raw link: inconsistent global symbol resolution")
     if not globals.has(entry):
-        return Err("ARM32 raw link: entry symbol '{entry}' is undefined")
+        return Err("ELF32 raw link: entry symbol '{entry}' is undefined")
 
     var image: [i64] = []
     var zi: i64 = 0
@@ -224,7 +243,7 @@ fn elf_arm32_link_parsed(objects: [ElfObject], base_addr: i64,
             val section = obj.sections[si]
             if section_offset >= 0 and section.sh_type != SHT_NOBITS:
                 if section.sh_addr < 0 or section.sh_addr + section.sh_size > obj.raw.len():
-                    return Err("ARM32 raw link: object {oi} section {si} data is out of bounds")
+                    return Err("ELF32 raw link: object {oi} section {si} data is out of bounds")
                 var bi: i64 = 0
                 while bi < section.sh_size:
                     image[section_offset + bi] = obj.raw[section.sh_addr + bi] as i64
@@ -234,23 +253,25 @@ fn elf_arm32_link_parsed(objects: [ElfObject], base_addr: i64,
         for reloc in obj.relocations:
             val target = reloc.target_section_idx
             if target < 0 or target >= obj.sections.len() or layout.offsets[oi][target] < 0:
-                return Err("ARM32 raw link: relocation targets an invalid or non-allocatable section")
+                return Err("ELF32 raw link: relocation targets an invalid or non-allocatable section")
             val section = obj.sections[target]
             if reloc.r_offset < 0 or
-                    reloc.r_offset + arm32_raw_reloc_width(elf_reloc_type(reloc)) > section.sh_size:
-                return Err("ARM32 raw link: relocation offset {reloc.r_offset} is out of bounds")
+                    reloc.r_offset + elf32_raw_reloc_width(is_386, elf_reloc_type(reloc)) > section.sh_size:
+                return Err("ELF32 raw link: relocation offset {reloc.r_offset} is out of bounds")
             val patch_offset = layout.offsets[oi][target] + reloc.r_offset
             val place = base_addr + patch_offset
             val rtype = elf_reloc_type(reloc)
-            if rtype == R_ARM_NONE:
+            if (not is_386 and rtype == R_ARM_NONE) or (is_386 and rtype == R_386_NONE):
                 continue
+            if is_386 and not i386_raw_reloc_supported(rtype):
+                return Err("ELF32 raw link: R_386 type {rtype} needs a GOT, which a raw image does not have")
             val symbol = arm32_raw_reloc_symbol(obj, oi, elf_reloc_sym(reloc),
                 layout, base_addr, globals)?
-            val applied = reloc_apply(RelocArch.Arm32, image, patch_offset,
+            val applied = reloc_apply(arch, image, patch_offset,
                 rtype, symbol, reloc.r_addend, place)
             if not applied.success:
-                return Err("ARM32 raw link: relocation type {rtype} at {place}: {applied.error}")
-            image = reloc_patch_bytes(RelocArch.Arm32, image, patch_offset,
+                return Err("ELF32 raw link: relocation type {rtype} at {place}: {applied.error}")
+            image = reloc_patch_bytes(arch, image, patch_offset,
                 rtype, symbol, reloc.r_addend, place)
         oi = oi + 1
 
@@ -265,3 +286,14 @@ fn elf_arm32_link_raw(objects: [[i64]], base_addr: i64,
         parsed = parsed.push(obj)
         oi = oi + 1
     elf_arm32_link_parsed(parsed, base_addr, entry)
+
+fn elf32_raw_reloc_width(is_386: bool, rtype: i64) -> i64:
+    if is_386: return reloc_patch_width(RelocArch.I386, rtype)
+    arm32_raw_reloc_width(rtype)
+
+fn elf_i386_link_raw(objects: [[i64]], base_addr: i64,
+        entry: text) -> Result<Arm32RawImage, text>:
+    var parsed: [ElfObject] = []
+    for bytes in objects:
+        parsed = parsed.push(elf_parse_object(bytes)?)
+    elf_i386_link_parsed(parsed, base_addr, entry)
