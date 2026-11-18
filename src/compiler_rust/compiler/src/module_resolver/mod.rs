@@ -83,6 +83,22 @@ mod tests {
         assert_eq!(resolved.path, gen.join("trust_cfg.spl"));
     }
 
+    /// Bare names do NOT bind to top-level packages of the main source root
+    /// (`use app` stays unresolved; only extra `--source` roots are searched).
+    #[test]
+    fn single_segment_import_ignores_main_source_root_packages() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        fs::create_dir_all(src.join("os")).unwrap();
+        fs::create_dir_all(src.join("app")).unwrap();
+        fs::write(src.join("app/__init__.spl"), "").unwrap();
+        let importer = src.join("os/a.spl");
+        fs::write(&importer, "use app\n").unwrap();
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec!["app".to_string()]);
+        assert!(resolver.resolve(&path, &importer).is_err());
+    }
+
     /// The importer's own directory still wins over a source root.
     #[test]
     fn single_segment_import_prefers_importer_directory() {

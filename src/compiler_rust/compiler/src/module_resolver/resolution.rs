@@ -862,9 +862,11 @@ impl ModuleResolver {
                 // module passed as `--source <gendir>`. Native discovery already
                 // finds it there (discovery.rs source-root fallback); resolve it the
                 // same way. Runs after the importer-directory attempt, so siblings win.
+                // Only the EXTRA roots (--source dirs): bare `use app`/`use compiler`
+                // must not start binding to top-level packages under the main src/.
                 if segments[0] != "crate" && segments.len() == 1 {
-                    for root in ordered_source_roots(self) {
-                        if let Ok(resolved) = self.resolve_from_base(&root, &segments[..], path) {
+                    for root in &self.extra_source_roots {
+                        if let Ok(resolved) = self.resolve_from_base(root, &segments[..], path) {
                             return Ok(resolved);
                         }
                     }
