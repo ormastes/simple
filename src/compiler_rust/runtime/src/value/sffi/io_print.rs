@@ -774,7 +774,30 @@ fn heap_value_to_display_string(v: RuntimeValue) -> String {
         }
         HeapObjectType::Object => format!("<object@{ptr:p}>"),
         HeapObjectType::Closure => format!("<closure@{ptr:p}>"),
-        HeapObjectType::Enum => format!("<enum@{ptr:p}>"),
+        HeapObjectType::Enum => {
+            let fallback = || format!("<enum@{ptr:p}>");
+            let Some((enum_id, discriminant, payload)) =
+                with_typed_ptr::<crate::value::objects::RuntimeEnum, _>(v, HeapObjectType::Enum, |e| unsafe {
+                    ((*e).enum_id, (*e).discriminant, (*e).payload)
+                })
+            else {
+                return fallback();
+            };
+            let Some((name, arity)) = crate::value::objects::enum_display_name(enum_id, discriminant) else {
+                return fallback();
+            };
+            if arity == 0 {
+                name.to_string()
+            } else if arity == 1 {
+                format!("{name}({})", value_to_display_string(payload))
+            } else {
+                let len = crate::value::collections::rt_array_len(payload).max(0);
+                let parts: Vec<String> = (0..len)
+                    .map(|i| value_to_display_string(crate::value::collections::rt_array_get(payload, i)))
+                    .collect();
+                format!("{name}({})", parts.join(", "))
+            }
+        }
         HeapObjectType::Float => match v.as_heap_float_ptr() {
             Some(fp) => format_float_display(unsafe { (*fp).value }),
             None => format!("<heap@{ptr:p}>"),
@@ -1086,6 +1109,20 @@ pub extern "C" fn stdin_read_char() -> RuntimeValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enum_values_display_as_enum_variant_names() {
+        use crate::value::objects::{register_enum_display_name, rt_enum_new};
+        register_enum_display_name(910_001, 0, "Color", "Red", 0);
+        register_enum_display_name(910_001, 1, "pkg.Color", "Pair", 1);
+        let unit = rt_enum_new(910_001, 0, RuntimeValue::NIL);
+        assert_eq!(value_to_display_string(unit), "Color::Red");
+        let payload = rt_enum_new(910_001, 1, RuntimeValue::from_int(7));
+        assert_eq!(value_to_display_string(payload), "Color::Pair(7)");
+        // Unregistered ids keep the address fallback.
+        let unknown = rt_enum_new(910_002, 0, RuntimeValue::NIL);
+        assert!(value_to_display_string(unknown).starts_with("<enum@"));
+    }
     use crate::value::sffi::io_capture::{
         rt_capture_stdout_start, rt_capture_stdout_stop, rt_capture_stderr_start, rt_capture_stderr_stop, rt_set_stdin,
     };

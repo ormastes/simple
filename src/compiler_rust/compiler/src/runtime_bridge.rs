@@ -110,11 +110,23 @@ fn value_to_runtime_inner(v: &Value) -> RuntimeValue {
             enum_name,
             variant,
             payload,
-        } => simple_runtime::value::rt_enum_new(
-            enum_runtime_type_id(enum_name),
-            crate::interpreter::interpreter_extern::enum_sffi::interpreter_enum_discriminant(enum_name, variant),
-            payload.as_deref().map_or(RuntimeValue::NIL, value_to_runtime),
-        ),
+        } => {
+            let enum_id = enum_runtime_type_id(enum_name);
+            let discriminant =
+                crate::interpreter::interpreter_extern::enum_sffi::interpreter_enum_discriminant(enum_name, variant);
+            simple_runtime::value::register_enum_display_name(
+                enum_id,
+                discriminant,
+                enum_name,
+                variant,
+                u32::from(payload.is_some()),
+            );
+            simple_runtime::value::rt_enum_new(
+                enum_id,
+                discriminant,
+                payload.as_deref().map_or(RuntimeValue::NIL, value_to_runtime),
+            )
+        }
         // A Dict must marshal to a real native `RuntimeDict` heap object (not
         // NIL) so a composite (Dict/Map) return value that is forced through
         // the interpreter bridge (`InterpCall` — e.g. via a TryOperator or
