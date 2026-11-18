@@ -11,6 +11,8 @@ use std.spec.step
 use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use app.io.minimal_runtime_ops.{process_run_bounded}
 use app.traceability.cli_options_v1.{TraceCliOptionsV1, trace_cli_options_parse_v1}
+use std.common.traceability.envelope_types_v1.{TraceCountLimitV1, TraceByteLimitV1}
+use app.traceability.cli_options_v1.{TraceCliFlagV1}
 use app.traceability.capture_v1.{TraceCaptureLimitsV1, trace_capture_worktree_v1, trace_capture_enumeration_v1, TraceCaptureExitCodeV1}
 use app.traceability.structural_report_v1.{trace_qualification_infrastructure_v1, TraceSnapshotCompletenessV1}
 use std.common.traceability.types_v1.{trace_qualification_codec_limits_v1}
@@ -38,7 +40,7 @@ fn options_rejected(args: [text]) -> bool:
         case Ok(_): false
 
 fn enumeration_rejected(out: text, err: text, code: i64, bytes: i64, entries: i64) -> bool:
-    match trace_capture_enumeration_v1(out, err, TraceCaptureExitCodeV1(value: code), TraceCaptureLimitsV1(max_walk_bytes: bytes, max_files: entries)):
+    match trace_capture_enumeration_v1(out, err, TraceCaptureExitCodeV1(value: code), TraceCaptureLimitsV1(max_walk_bytes: TraceByteLimitV1(value: bytes), max_files: TraceCountLimitV1(value: entries))):
         case Err(_): true
         case Ok(_): false
 
@@ -54,7 +56,7 @@ describe "Bound structural capture before accepting a completed snapshot":
         expect(rejected).to_equal(true)
         step("Refuse invalid limits before capture")
         rejected = false
-        match trace_capture_worktree_v1(TraceCliOptionsV1(), TraceCaptureLimitsV1(max_files: -1)):
+        match trace_capture_worktree_v1(TraceCliOptionsV1(), TraceCaptureLimitsV1(max_files: TraceCountLimitV1(value: -1))):
             case Err(issue): rejected = issue.code == "TRC-CAPTURE-LIMIT" and issue.snapshot_id == "worktree-attempt:unavailable"
             case Ok(_): pass
         expect(rejected).to_equal(true)
@@ -75,7 +77,7 @@ describe "Bound structural capture before accepting a completed snapshot":
         expect(options_rejected(["--scope"])).to_equal(true)
         var quiet = false
         match trace_cli_options_parse_v1(["--quiet", "--dots"]):
-            case Ok(options): quiet = options.quiet and options.progress == "none"
+            case Ok(options): quiet = options.quiet == TraceCliFlagV1.Set and options.progress == "none"
             case Err(_): pass
         expect(quiet).to_equal(true)
 
@@ -93,7 +95,7 @@ describe "Bound structural capture before accepting a completed snapshot":
         step("Preserve Unicode and newline names without interpreting marker text")
         var accepted = false
         val name = "test/λ\n[output truncated: legitimate filename]"
-        match trace_capture_enumeration_v1("./" + name + nul, "", TraceCaptureExitCodeV1(value: 0), TraceCaptureLimitsV1(max_walk_bytes: 1000, max_files: 1)):
+        match trace_capture_enumeration_v1("./" + name + nul, "", TraceCaptureExitCodeV1(value: 0), TraceCaptureLimitsV1(max_walk_bytes: TraceByteLimitV1(value: 1000), max_files: TraceCountLimitV1(value: 1))):
             case Ok(paths): accepted = paths.len() == 1 and paths[0] == name
             case Err(_): pass
         expect(accepted).to_equal(true)

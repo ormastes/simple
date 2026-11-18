@@ -22,8 +22,11 @@ use std.common.sdn.parser.{parse_with_spans_and_issues}
 use std.common.sdn.value.{SdnValue}
 use app.traceability.query_options_v1.{trace_query_options_parse_v1}
 use app.traceability.query_snapshot_v1.{trace_query_build_snapshot_v1}
+use app.traceability.extract.snapshot_pipeline.{TraceAdmissionEligibility}
 use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1, query_trace_nodes_v1}
 use app.traceability.snapshot.git_provider.{GitSnapshotRequest, snapshot_git_inputs}
+use app.traceability.snapshot.git_tree.{TraceGitEntryLimitV1}
+use app.traceability.snapshot.git_batch.{TraceGitByteLimitV1}
 
 fn actual_query_cli(args: [text]) -> (text, text, i32):
     val command = env_get("SIMPLE_TRACE_QUERY_TEST_COMMAND")
@@ -77,7 +80,7 @@ describe "Inspect registered facts from captured source":
         expect(build.graph.subject.snapshot_id).to_start_with("worktree:sha256:")
         # Default authored claims resolve against the policy-owned authority registry.
         expect(build.graph.complete).to_be(true)
-        expect(build.admission_eligible).to_be(false)
+        expect(build.admission_eligible == TraceAdmissionEligibility.Eligible).to_be(false)
         val page = query_trace_nodes_v1(build.graph, TraceNodeQueryV1(snapshot_id: build.graph.subject.snapshot_id,
             operation: "show", kind: "features", selected_id: "feature:traceability")).unwrap()
         expect(page.nodes.len()).to_equal(1)
@@ -259,10 +262,10 @@ describe "Inspect registered facts from captured source":
         step("Pin the real HEAD and canonical declaration tree")
         val path = "doc/08_tracking/trace/features/simple_traceability_sdn_slop.sdn"
         val initial = snapshot_git_inputs(GitSnapshotRequest(repository: ".", selector: "HEAD", paths: [path],
-            max_entries: 256, max_blob_bytes: 1048576, max_total_bytes: 2097152)).unwrap()
+            max_entries: TraceGitEntryLimitV1(value: 256), max_blob_bytes: TraceGitByteLimitV1(value: 1048576), max_total_bytes: TraceGitByteLimitV1(value: 2097152))).unwrap()
         step("Use the existing tree OID as both tree and alleged commit")
         # The tree exists and contains the selected path. ls-tree alone, or
         # merely resolving revision^{tree}, would incorrectly accept this pair.
         expect(snapshot_git_inputs(GitSnapshotRequest(repository: ".", selector: "HEAD", paths: [path],
-            max_entries: 256, max_blob_bytes: 1048576, max_total_bytes: 2097152,
+            max_entries: TraceGitEntryLimitV1(value: 256), max_blob_bytes: TraceGitByteLimitV1(value: 1048576), max_total_bytes: TraceGitByteLimitV1(value: 2097152),
             frozen_tree: initial.subject.tree_id, frozen_revision: initial.subject.tree_id)).is_err()).to_be(true)

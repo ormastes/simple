@@ -11,17 +11,26 @@ use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use std.common.crypto.sha256.{sha256_text, sha256_stream_v1_new}
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.traceability.envelope_types_v1.{TraceCountLimitV1, TraceByteLimitV1}
 use app.traceability.cli_options_v1.{TraceCliOptionsV1, trace_cli_options_validate_v1}
 use app.traceability.core.{VirtualFile, TraceabilityConfig, TraceablePathV1, is_traceable_file_path,
     traceability_config_from_captured_text_v1, traceability_config_validate_captured_v1, default_traceability_config}
 
+# Wall-clock budget of one structural capture, in milliseconds.
+pub struct TraceCaptureMsV1:
+    value: i64
+
+# Total bytes actually read by one structural capture.
+pub struct TraceCapturedBytesV1:
+    value: i64
+
 pub struct TraceCaptureLimitsV1:
-    max_files: i64 = 65536
-    max_total_bytes: i64 = 268435456
-    max_file_bytes: i64 = 4194304
-    max_walk_bytes: i64 = 16777216
-    max_processes: i64 = 64
-    max_capture_ms: i64 = 30000
+    max_files: TraceCountLimitV1 = TraceCountLimitV1(value: 65536)
+    max_total_bytes: TraceByteLimitV1 = TraceByteLimitV1(value: 268435456)
+    max_file_bytes: TraceByteLimitV1 = TraceByteLimitV1(value: 4194304)
+    max_walk_bytes: TraceByteLimitV1 = TraceByteLimitV1(value: 16777216)
+    max_processes: TraceCountLimitV1 = TraceCountLimitV1(value: 64)
+    max_capture_ms: TraceCaptureMsV1 = TraceCaptureMsV1(value: 30000)
 
 pub struct TraceCaptureIssueV1:
     code: text
@@ -34,7 +43,7 @@ pub struct TraceCapturedInputsV1:
     root: text
     files: [VirtualFile]
     config: TraceabilityConfig
-    total_bytes: i64
+    total_bytes: TraceCapturedBytesV1
 
 fn capture_issue_v1(code: text, path: text, message: text, id: text) -> TraceCaptureIssueV1:
     TraceCaptureIssueV1(code: code, path: path, message: message, snapshot_id: id)
@@ -87,8 +96,8 @@ pub fn trace_capture_enumeration_v1(stdout: text, stderr: text, code: TraceCaptu
     Incomplete-stream markers end without NUL. Both cases reject even at exit0;
     legitimate filenames are not rejected for resembling marker text.
     """
-    val max_bytes = limits.max_walk_bytes
-    val max_entries = limits.max_files
+    val max_bytes = limits.max_walk_bytes.value
+    val max_entries = limits.max_files.value
     if max_bytes < 0 or max_entries < 0 or code.value != 0 or stderr != "" or stdout.len() < 0 or stdout.len() > max_bytes:
         return Err("directory enumeration failed or capture exceeded its byte budget")
     val valid = validated_utf8_bytes_to_text_linear(stdout.bytes())?
@@ -121,11 +130,11 @@ fn capture_remaining_ms_v1(started: i64, budget: i64) -> i64:
 
 fn capture_walk_v1(root: text, extra: [text], started: i64,
     limits: TraceCaptureLimitsV1) -> Result<[text], text>:
-    val remaining = capture_remaining_ms_v1(started, limits.max_capture_ms)
+    val remaining = capture_remaining_ms_v1(started, limits.max_capture_ms.value)
     if remaining <= 0:
         return Err("input capture time budget exceeded")
     val (out, err, code) = process_run_bounded("find",
-        ["-P", if root == ".": "." else: "./" + root] + extra + ["-print0"], remaining, limits.max_walk_bytes)
+        ["-P", if root == ".": "." else: "./" + root] + extra + ["-print0"], remaining, limits.max_walk_bytes.value)
     trace_capture_enumeration_v1(out, err, TraceCaptureExitCodeV1(value: code), limits)
 
 fn capture_attempt_id_v1(options: TraceCliOptionsV1, root: text) -> text:
@@ -144,10 +153,10 @@ pub fn trace_capture_worktree_v1(options: TraceCliOptionsV1,
     match trace_cli_options_validate_v1(options):
         case Err(reason): return Err(capture_issue_v1("TRC-CAPTURE-OPTIONS", "", reason, "worktree-attempt:unavailable"))
         case Ok(_): pass
-    if limits.max_files < 0 or limits.max_files > 65536 or limits.max_total_bytes < 0 or
-        limits.max_total_bytes > 268435456 or limits.max_file_bytes < 0 or limits.max_file_bytes > 16777216 or
-        limits.max_walk_bytes < 1 or limits.max_walk_bytes > 16777216 or limits.max_processes < 2 or
-        limits.max_processes > 256 or limits.max_capture_ms < 1 or limits.max_capture_ms > 300000:
+    if limits.max_files.value < 0 or limits.max_files.value > 65536 or limits.max_total_bytes.value < 0 or
+        limits.max_total_bytes.value > 268435456 or limits.max_file_bytes.value < 0 or limits.max_file_bytes.value > 16777216 or
+        limits.max_walk_bytes.value < 1 or limits.max_walk_bytes.value > 16777216 or limits.max_processes.value < 2 or
+        limits.max_processes.value > 256 or limits.max_capture_ms.value < 1 or limits.max_capture_ms.value > 300000:
         return Err(capture_issue_v1("TRC-CAPTURE-LIMIT", "", "Invalid input capture limits", "worktree-attempt:unavailable"))
     val root = cwd()
     if root == "" or root.len() > 4096 or root.bytes().contains(0u8):
@@ -157,7 +166,7 @@ pub fn trace_capture_worktree_v1(options: TraceCliOptionsV1,
         case Ok(_): pass
     val attempt = capture_attempt_id_v1(options, root)
     val roots = if options.paths.len() == 0: ["src", "test", "doc"] else: options.paths
-    if roots.len() > limits.max_processes - 2:
+    if roots.len() > limits.max_processes.value - 2:
         return Err(capture_issue_v1("TRC-CAPTURE-LIMIT", "", "Selection exceeds the enumeration process budget", attempt))
     val started = time_now_unix_micros()
     # A successful checked enumeration establishes authorized config absence.
@@ -177,7 +186,7 @@ pub fn trace_capture_worktree_v1(options: TraceCliOptionsV1,
         if entries.len() > 0:
             if entries.len() != 1 or entries[0] != "config/traceability.sdn":
                 return Err(capture_issue_v1("TRC-CONFIG-CAPTURE", "config", "Unexpected configuration path", attempt))
-            match capture_text_v1("config/traceability.sdn", capture_min_v1(1048576, capture_min_v1(limits.max_file_bytes, limits.max_total_bytes))):
+            match capture_text_v1("config/traceability.sdn", capture_min_v1(1048576, capture_min_v1(limits.max_file_bytes.value, limits.max_total_bytes.value))):
                 case Ok(content):
                     config_content = content
                     config_source = "captured"
@@ -215,7 +224,7 @@ pub fn trace_capture_worktree_v1(options: TraceCliOptionsV1,
             if not file_is_regular_no_follow(entry):
                 return Err(capture_issue_v1("TRC-INPUT", entry, "Input must be an observed regular file", attempt))
             if is_traceable_file_path(entry) == TraceablePathV1.Traceable and not selected.contains_key(entry):
-                if selected.len() >= limits.max_files:
+                if selected.len() >= limits.max_files.value:
                     return Err(capture_issue_v1("TRC-CAPTURE-LIMIT", entry, "Captured file count budget exceeded", attempt))
                 selected[entry] = true
         if not observed_root:
@@ -246,11 +255,11 @@ pub fn trace_capture_worktree_v1(options: TraceCliOptionsV1,
     var total = config_content.len()
     var files: [VirtualFile] = []
     for path in paths:
-        if capture_remaining_ms_v1(started, limits.max_capture_ms) <= 0:
+        if capture_remaining_ms_v1(started, limits.max_capture_ms.value) <= 0:
             return Err(capture_issue_v1("TRC-CAPTURE-LIMIT", path, "Input capture time budget exceeded", attempt))
         if not capture_ancestors_v1(path):
             return Err(capture_issue_v1("TRC-INPUT", path, "Observed input ancestor changed before read", attempt))
-        val content = match capture_text_v1(path, capture_min_v1(limits.max_file_bytes, limits.max_total_bytes - total)):
+        val content = match capture_text_v1(path, capture_min_v1(limits.max_file_bytes.value, limits.max_total_bytes.value - total)):
             case Ok(value): value
             case Err(_): return Err(capture_issue_v1("TRC-INPUT-READ", path, "Cannot read complete bounded UTF-8 input", attempt))
         total = total + content.len()
@@ -259,10 +268,10 @@ pub fn trace_capture_worktree_v1(options: TraceCliOptionsV1,
         if not digest.update((sdn_encode_canonical(record) + "\n").bytes()):
             return Err(capture_issue_v1("TRC-CAPTURE-HASH", path, "Cannot hash captured input", attempt))
         files.push(VirtualFile(path: path, content: content))
-    if capture_remaining_ms_v1(started, limits.max_capture_ms) <= 0:
+    if capture_remaining_ms_v1(started, limits.max_capture_ms.value) <= 0:
         return Err(capture_issue_v1("TRC-CAPTURE-LIMIT", "", "Input capture time budget exceeded", attempt))
     val hash = digest.finish_hex() ?? ""
     if hash.len() != 64:
         return Err(capture_issue_v1("TRC-CAPTURE-HASH", "", "Cannot finalize captured input identity", attempt))
     Ok(TraceCapturedInputsV1(snapshot_id: "worktree-input:" + hash,
-        root: root, files: files, config: config, total_bytes: total))
+        root: root, files: files, config: config, total_bytes: TraceCapturedBytesV1(value: total)))
