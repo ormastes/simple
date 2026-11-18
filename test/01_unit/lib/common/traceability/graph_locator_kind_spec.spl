@@ -1,0 +1,52 @@
+# TraceGraphLocatorV1.locator_kind is the typed enum TraceLocatorKind; text only at the wire.
+use std.spec.*
+use std.spec.step
+use std.common.traceability.envelope_types_v1.{TraceSnapshotV1}
+use std.common.traceability.graph_types_v1.*
+use std.common.traceability.model.{TraceLocatorKind, locator_kind_name}
+use std.common.traceability.graph_v1.{trace_graph_decode_v1, trace_graph_encode_v1, trace_graph_validate_v1}
+
+fn digest() -> text:
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn graph_with(kind: TraceLocatorKind, locator: text) -> TraceGraphV1:
+    TraceGraphV1(snapshot: TraceSnapshotV1(id: "snapshot:unit", kind: "worktree", complete: true),
+        manifest: TraceGraphManifestV1(input_set_id: "input:unit", extractor_version: "extract/v1", rules_version: "rules/v1", policy_id: "policy:v1", complete: true),
+        inputs: [TraceGraphInputV1(path: "src/example.spl", sha256: digest(), bytes: 17, role: "source")],
+        nodes: [TraceGraphNodeV1(id: "source:S", kind: "source_file", title: "Source")],
+        test_definitions: [], edges: [], edge_origins: [],
+        locators: [TraceGraphLocatorV1(entity_id: "source:S", path_available: true, path: "src/example.spl", locator_kind: kind, locator: locator)])
+
+fn encoded(document: TraceGraphV1) -> text:
+    match trace_graph_encode_v1(document, trace_graph_codec_limits_v1()):
+        case Ok(value): value
+        case Err(issue): "ERR:" + issue.code
+
+fn decode_code(source: text) -> text:
+    match trace_graph_decode_v1(source, trace_graph_codec_limits_v1()):
+        case Ok(_): "accepted"
+        case Err(issue): issue.code + "@" + issue.path
+
+fn decoded_kind_name(source: text) -> text:
+    match trace_graph_decode_v1(source, trace_graph_codec_limits_v1()):
+        case Ok(value): locator_kind_name(value.locators[0].locator_kind)
+        case Err(issue): "ERR:" + issue.code
+
+describe "graph locator kind":
+    it "round-trips each wire kind through the typed enum":
+        step("Encode then decode and compare the enum name")
+        expect(decoded_kind_name(encoded(graph_with(TraceLocatorKind.File, "")))).to_equal("file")
+        expect(decoded_kind_name(encoded(graph_with(TraceLocatorKind.Symbol, "main")))).to_equal("symbol")
+        expect(decoded_kind_name(encoded(graph_with(TraceLocatorKind.Scenario, "one")))).to_equal("scenario")
+        expect(decoded_kind_name(encoded(graph_with(TraceLocatorKind.Section, "intro")))).to_equal("section")
+
+    it "rejects unknown locator kind text on decode":
+        step("Replace the encoded kind with text that is not a locator kind")
+        val source = encoded(graph_with(TraceLocatorKind.Symbol, "main"))
+        expect(source.contains("symbol")).to_equal(true)
+        expect(decode_code(source.replace("symbol", "bogus"))).to_equal("invalid_enum@locators.0.locator_kind")
+
+    it "rejects model kinds that the graph wire does not carry on encode":
+        step("sdn-node and line parse as kinds but are not valid on the graph wire")
+        val bad = graph_with(TraceLocatorKind.SdnNode, "nodes[0]")
+        expect(encoded(bad)).to_equal("ERR:invalid_enum")
