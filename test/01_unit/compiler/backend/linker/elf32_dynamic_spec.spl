@@ -217,3 +217,20 @@ describe "elf_link - armv7 dynamic":
         val b = link_arm(ELF_LINK_DYNAMIC_PIE)
         expect(rd16(b, 16)).to_equal(3)
         expect(dyn_tag(b, 0x6ffffffb)).to_equal(0x08000000)
+
+describe "elf_link - armv7 Thumb B.W to an import":
+    it "routes the tail call through a PIC Thumb->ARM veneer to the PLT entry":
+        val r = elf_link(ElfLinkRequest(objects: [load_path("{FIX}/dyn_tail_arm.o")], archives: [],
+            shared: [load_path("{FIX}/libadd_arm.so.1")], entry: "_start",
+            target: RelocArch.Arm32, mode: ELF_LINK_DYNAMIC_PIE, interp: "/lib/ld-linux-armhf.so.3"))
+        if r.is_err(): print "link error: {r.unwrap_err()}"
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        val v = sec_addr(b, ".veneer")
+        val vo = sec_off(b, ".veneer")
+        expect(rd32(b, vo)).to_equal(0x46c04778)
+        val w = rd32(b, vo + 4)
+        expect(w >> 24).to_equal(0xea)
+        var imm = w & 0xffffff
+        if imm >= 0x800000: imm = imm - 0x1000000
+        expect(v + 4 + 8 + imm * 4).to_equal(sec_addr(b, ".plt") + 32)

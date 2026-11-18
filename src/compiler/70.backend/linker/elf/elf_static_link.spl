@@ -79,7 +79,8 @@ use compiler.backend.linker.elf.reloc_scan.{
     SYMREF_DEFINED, SYMREF_IMPORT, SYMREF_WEAK_ZERO, SYMREF_ABS,
     RC_NONE, RC_ABS64, RC_ABS_NARROW, RC_PCREL, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_TLS_LD, RC_TLS_MOD, RC_SIZE, RC_PLTOFF
 }
-use compiler.backend.linker.veneer.{veneer_table_new, ARM_VENEER_SLOT, arm_veneer_kind, arm_veneer_bytes, arm_veneer_entry, arm_veneer_offset, arm_veneer_key}
+use compiler.backend.linker.veneer.{veneer_table_new, ARM_VENEER_SLOT, arm_veneer_kind, arm_veneer_bytes, arm_veneer_entry, arm_veneer_offset, arm_veneer_key,
+    ARM_VENEER_TO_ARM_PIC, arm_veneer_bytes_at, arm_veneer_pic_fits}
 use compiler.backend.linker.elf.iplt.{ELF_IPLT_ENTRY, elf_iplt_rela, elf_iplt_rel_size, elf_iplt_rel_section, elf_iplt_thumb_branch, elf_iplt_entry_addr, elf_build_iplt, elf_build_igot, elf_build_irel}
 use compiler.backend.linker.elf.synthetic_sections.{
     ElfDynStr, elf_dyn_relative, elf_dyn_glob_dat, elf_dyn_jump_slot, elf_dyn_abs64, elf_dyn_copy, elf_dyn_tpoff64,
@@ -1817,6 +1818,8 @@ fn elf_ref_is_ifunc(ctx: ElfLinkCtx, r: ElfScanRef) -> bool:
 fn elf_arm_veneer_kind(ctx: ElfLinkCtx, r: ElfScanRef) -> i64:
     """Veneer kind for an ARM branch to a defined STT_FUNC in the other state.
     The type and Thumb bit come from the winning definition, not the reference."""
+    # a Thumb B.W / B<c>.W to an import lands on the ARM-state PLT entry
+    if r.kind == SYMREF_IMPORT and (r.rtype == 30 or r.rtype == 51): return ARM_VENEER_TO_ARM_PIC
     if r.kind != SYMREF_DEFINED or r.sym_idx == 0: return 0
     val sym = ctx.inputs.objects[r.oi].symbols[r.sym_idx]
     var v = sym.st_value
@@ -2404,6 +2407,11 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
                 (r.rclass == RC_BRANCH or r.rclass == RC_PLTOFF or
                     (not pie and (r.stype == 2 or r.stype == 10))):
             s = plt_v + elf_plt0_size(target) + sc.plt_idx[r.name] * elf_plt_entry_size(target)
+            if ven_slot.has(j):
+                # Thumb B.W to the ARM-state PLT entry: go through the PIC veneer
+                val pvs = ven_slot[j]
+                ven_dest[pvs] = s
+                s = arm_veneer_entry(veneer_v + pvs * ARM_VENEER_SLOT, veneers.kinds[pvs])
         else if r.rclass == RC_BRANCH and r.kind == SYMREF_WEAK_ZERO and a64:
             # ld.lld: a branch to an undefined weak symbol targets the next instruction
             s = p + 4 - a
@@ -2657,7 +2665,10 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             var vb: [i64] = []
             var vi2: i64 = 0
             while vi2 < veneers.count():
-                vb.extend(arm_veneer_bytes(veneers.kinds[vi2], ven_dest[vi2]))
+                val vslot = veneer_v + vi2 * ARM_VENEER_SLOT
+                if veneers.kinds[vi2] == ARM_VENEER_TO_ARM_PIC and not arm_veneer_pic_fits(ven_dest[vi2], vslot):
+                    return Err("ARM veneer at {vslot} cannot reach PLT entry {ven_dest[vi2]} with B")
+                vb.extend(arm_veneer_bytes_at(veneers.kinds[vi2], ven_dest[vi2], vslot))
                 vi2 = vi2 + 1
             out.push(elf_u8_from_i64(vb))
         else if n == ".dynamic":
