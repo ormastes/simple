@@ -441,16 +441,15 @@ fn _outline_bounds(commands: [SfntGlyfCommand]) -> Option<_SfntBounds>:
                 index = index + 1
     if first: None else: Some(_SfntBounds(left: left, top: top, right: right, bottom: bottom))
 
-fn _edge(ax: f64, ay: f64, bx: f64, by: f64) -> _SfntEdge:
-    if ay < by:
-        _SfntEdge(y_top: ay, y_bottom: by, x_top: ax, dx_dy: (bx - ax) / (by - ay), direction: 1)
-    else:
-        _SfntEdge(y_top: by, y_bottom: ay, x_top: bx, dx_dy: (ax - bx) / (ay - by), direction: -1)
-
+# The edge is built here rather than through a helper, and there is no
+# `var result = edges` alias: a second live reference makes every push copy the
+# whole array (interpreter lane, 500 edges: 6.8 ms against 3.3 ms, quadratic
+# beyond), and a curve costs 16 of these calls.
 fn _add_edge(edges: [_SfntEdge], ax: f64, ay: f64, bx: f64, by: f64) -> [_SfntEdge]:
-    var result = edges
-    if ay != by: result = result.push(_edge(ax, ay, bx, by))
-    result
+    if ay == by: return edges
+    if ay < by:
+        return edges.push(_SfntEdge(y_top: ay, y_bottom: by, x_top: ax, dx_dy: (bx - ax) / (by - ay), direction: 1))
+    edges.push(_SfntEdge(y_top: by, y_bottom: ay, x_top: bx, dx_dy: (ax - bx) / (ay - by), direction: -1))
 
 fn _quad_edges(edges: [_SfntEdge], ax: f64, ay: f64, cx: f64, cy: f64, bx: f64, by: f64, depth: i64) -> [_SfntEdge]:
     if depth == 0: return _add_edge(edges, ax, ay, bx, by)
@@ -460,10 +459,22 @@ fn _quad_edges(edges: [_SfntEdge], ax: f64, ay: f64, cx: f64, cy: f64, bx: f64, 
     val ry = (cy + by) / 2.0
     val mx = (lx + rx) / 2.0
     val my = (ly + ry) / 2.0
+    # The last split's halves are the two chords a->m and m->b: emitted here,
+    # which halves the recursive calls (31 -> 15 per curve) for the same points.
+    if depth == 1:
+        return _add_edge(_add_edge(edges, ax, ay, mx, my), mx, my, bx, by)
     val left = _quad_edges(edges, ax, ay, lx, ly, mx, my, depth - 1)
     _quad_edges(left, mx, my, rx, ry, bx, by, depth - 1)
 
 fn _outline_edges(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f64) -> [_SfntEdge]:
+    _outline_edges_band(commands, scale, left, top, -1.0e300, 1.0e300)
+
+# `_outline_edges` restricted to the commands whose y extent (raster space)
+# meets [y_lo, y_hi]. A curve's chords stay inside the y range of its three
+# control points (every split point is a midpoint of two of them), so a
+# skipped command has no edge that a scanline inside the band can cross, and
+# the kept edges are the same values in the same order.
+fn _outline_edges_band(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f64, y_lo: f64, y_hi: f64) -> [_SfntEdge]:
     var edges: [_SfntEdge] = []
     var pen_x = 0.0
     var pen_y = 0.0
@@ -478,20 +489,75 @@ fn _outline_edges(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f64) 
             move_x = x1
             move_y = y1
         elif command.verb == SFNT_GLYF_LINE:
-            edges = _add_edge(edges, pen_x, pen_y, x1, y1)
+            if not ((pen_y < y_lo and y1 < y_lo) or (pen_y > y_hi and y1 > y_hi)):
+                edges = _add_edge(edges, pen_x, pen_y, x1, y1)
             pen_x = x1
             pen_y = y1
         elif command.verb == SFNT_GLYF_QUAD:
             val x2 = command.x2 * scale - left
             val y2 = -command.y2 * scale - top
-            edges = _quad_edges(edges, pen_x, pen_y, x1, y1, x2, y2, 4)
+            if not ((pen_y < y_lo and y1 < y_lo and y2 < y_lo) or (pen_y > y_hi and y1 > y_hi and y2 > y_hi)):
+                edges = _quad_edges(edges, pen_x, pen_y, x1, y1, x2, y2, 4)
             pen_x = x2
             pen_y = y2
         elif command.verb == SFNT_GLYF_CLOSE:
-            edges = _add_edge(edges, pen_x, pen_y, move_x, move_y)
+            if not ((pen_y < y_lo and move_y < y_lo) or (pen_y > y_hi and move_y > y_hi)):
+                edges = _add_edge(edges, pen_x, pen_y, move_x, move_y)
             pen_x = move_x
             pen_y = move_y
     edges
+
+# Per-pixel-row edge index for the scanline kernels below. Both kernels used to
+# test EVERY edge for each of a pixel row's 4 sample scanlines; a curve is 16
+# short edges, so a 16 px glyph has about 500 edges of which a row touches a
+# few dozen. The result is one flat array: `rows[r] .. rows[r + 1]` (r <
+# height) is the slice of `rows` holding the indices, ascending, of the edges
+# whose y span can reach a sample in pixel row r. It is a SUPERSET filter only:
+# a sample y in (r, r + 1) is crossed by an edge (`y_top <= sy` and
+# `sy <= y_bottom`, whichever of the two is strict in the kernel) only when
+# floor(y_top) <= r <= floor(y_bottom), which is exactly the range indexed
+# here. The kernels keep their own exact test, and the ascending order keeps
+# the insertion sort's tie order, so every coverage value is unchanged.
+fn _edge_row_index(edges: [_SfntEdge], height: i64) -> [i64]:
+    val count = edges.len()
+    var firsts: [i64] = [0; count]
+    var lasts: [i64] = [0; count]
+    var cursor: [i64] = [0; height + 1]
+    var total: i64 = 0
+    var i: i64 = 0
+    while i < count:
+        val edge = edges[i]
+        var first = _floor_glyf(edge.y_top)
+        var last = _floor_glyf(edge.y_bottom)
+        if first < 0: first = 0
+        if last > height - 1: last = height - 1
+        firsts[i] = first
+        lasts[i] = last
+        var span = first
+        while span <= last:
+            cursor[span] = cursor[span] + 1
+            total = total + 1
+            span = span + 1
+        i = i + 1
+    # counts -> start offsets (absolute positions in the returned array)
+    var rows: [i64] = [0; height + 1 + total]
+    var at: i64 = height + 1
+    var r: i64 = 0
+    while r < height:
+        rows[r] = at
+        at = at + cursor[r]
+        cursor[r] = rows[r]
+        r = r + 1
+    rows[height] = at
+    i = 0
+    while i < count:
+        var k = firsts[i]
+        while k <= lasts[i]:
+            rows[cursor[k]] = i
+            cursor[k] = cursor[k] + 1
+            k = k + 1
+        i = i + 1
+    rows
 
 # Whole-bitmap coverage (4x4 supersample, 17 levels). The old per-pixel kernel
 # tested EVERY edge for each of 16 samples (pixels x 16 x edges, and a
@@ -502,21 +568,29 @@ fn _outline_edges(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f64) 
 # expression, `<=` test, sample positions and integer winding sum as the old
 # kernel, so every coverage byte is unchanged. Returns width*height bytes.
 fn _glyf_raster_alpha(edges: [_SfntEdge], width: i64, height: i64) -> [u8]:
+    _glyf_raster_alpha_rows(edges, width, height, 0, height)
+
+# Rows row_from .. row_end - 1 of `_glyf_raster_alpha`; the other rows stay 0.
+fn _glyf_raster_alpha_rows(edges: [_SfntEdge], width: i64, height: i64, row_from: i64, row_end: i64) -> [u8]:
     var out: [u8] = [0u8; width * height]
     var hits: [i64] = [0; width]
     var xs: [f64] = [0.0; edges.len() + 1]
     var dirs: [i64] = [0; edges.len() + 1]
-    var y: i64 = 0
-    while y < height:
+    val rows = _edge_row_index(edges, height)
+    var y: i64 = row_from
+    while y < row_end:
         var x: i64 = 0
         while x < width:
             hits[x] = 0
             x = x + 1
+        val row_end = rows[y + 1]
         var sample_y: i64 = 0
         while sample_y < 4:
             val sy = y as f64 + (sample_y as f64 * 2.0 + 1.0) / 8.0
             var n: i64 = 0
-            for edge in edges:
+            var k = rows[y]
+            while k < row_end:
+                val edge = edges[rows[k]]
                 if edge.y_top <= sy and sy < edge.y_bottom:
                     val crossing = edge.x_top + edge.dx_dy * (sy - edge.y_top)
                     var at = n
@@ -527,6 +601,7 @@ fn _glyf_raster_alpha(edges: [_SfntEdge], width: i64, height: i64) -> [u8]:
                     xs[at] = crossing
                     dirs[at] = edge.direction
                     n = n + 1
+                k = k + 1
             if n > 0:
                 var p: i64 = 0
                 var winding: i64 = 0
@@ -888,6 +963,50 @@ fn sfnt_render_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, s
     meta[9] = nonzero_alpha
     meta[8] = 310032
 
+# True when the bitmap `sfnt_render_glyph_into` writes for this glyph and size
+# is PROVEN to hold a non-zero coverage byte, from its middle pixel row alone:
+# the same outline, bounds, scale and edge arguments as the render, restricted
+# to the commands that can reach that row, through the same kernel. A caller
+# that needs only the render's "any ink" receipt (`meta[9] > 0`) and not its
+# pixels asks this instead (about a tenth of the work). `false` proves
+# nothing -- the ink may sit in another row -- so the caller then renders.
+# reason: glyph id and pixel size are the sfnt-table domain; consumed by
+# text_layout/font_renderer.spl, so it must be public.
+# @allow(primitive_api)
+pub fn sfnt_glyph_gray_row_has_ink(blob: [u8], glyph_id: i64, size_px: i64) -> bool:
+    if size_px <= 0 or size_px > 512 or glyph_id <= 0 or glyph_id > 4294967295:
+        return false
+    val font = match parse_offset_table(blob):
+        Some(value): value
+        None: return false
+    val head_table = match find_table(font, 1751474532):
+        Some(value): value
+        None: return false
+    val units_per_em = read_u16_be(font.blob, head_table.offset as i64 + 18) as i64
+    if units_per_em == 0:
+        return false
+    val parsed_outline = match parse_sfnt_glyf_outline(font, glyph_id as u32):
+        Some(value): value
+        None: return false
+    val commands = parsed_outline.commands
+    val bounds = match _outline_bounds(commands):
+        Some(value): value
+        None: return false
+    val scale = size_px as f64 / units_per_em as f64
+    val width = _ceil_glyf_dimension((bounds.right - bounds.left) * scale)
+    val height = _ceil_glyf_dimension((bounds.bottom - bounds.top) * scale)
+    if width <= 0 or height <= 0 or width > 4096 or height > 4096:
+        return false
+    val row = height / 2
+    val edges = _outline_edges_band(commands, scale, bounds.left * scale, -bounds.bottom * scale, row as f64, (row + 1) as f64)
+    val alpha = _glyf_raster_alpha_rows(edges, width, height, row, row + 1)
+    var x: i64 = 0
+    while x < width:
+        if alpha[row * width + x] > 0:
+            return true
+        x = x + 1
+    false
+
 # LCD subpixel glyph (Chrome 159 / Skia LCD16 parity, 2026-11-16).
 #
 # Measured against Chrome's headless screenshot (Liberation Sans 16 px, see
@@ -934,11 +1053,16 @@ fn _ceil_glyf(value: f64) -> i64:
 
 # Adds the exact horizontal span coverage of one sample row to `acc`, in
 # subpixel units (one full subpixel = 1.0). Crossings are sorted and walked
-# with the same non-zero winding rule as _glyf_raster_alpha.
-fn _lcd_accumulate_row(edges: [_SfntEdge], sy: f64, subpixels: i64, mut acc: [f64]):
+# with the same non-zero winding rule as _glyf_raster_alpha. `rows` is the
+# `_edge_row_index` of `edges` and `row` the pixel row that holds `sy`.
+fn _lcd_accumulate_row(edges: [_SfntEdge], rows: [i64], row: i64, sy: f64, subpixels: i64, mut acc: [f64]):
     var xs: [f64] = []
     var dirs: [i64] = []
-    for edge in edges:
+    val row_end = rows[row + 1]
+    var k = rows[row]
+    while k < row_end:
+        val edge = edges[rows[k]]
+        k = k + 1
         if edge.y_top < sy and sy <= edge.y_bottom:
             val crossing = edge.x_top + edge.dx_dy * (sy - edge.y_top)
             # insertion sort: a glyph row has a handful of crossings
@@ -1429,6 +1553,7 @@ pub fn sfnt_render_glyph_lcd_milli(blob: [u8], selector_kind: i64, selector_valu
         return None
     val subpixels = width * 3
     val edges = _outline_edges(draw_commands, scale, x0 as f64 - phase, raster_top)
+    val rows = _edge_row_index(edges, height)
     var gray: [u8] = [0u8; width * height]
     var rgb: [u8] = [0u8; width * height * 3]
     var y: i64 = 0
@@ -1437,7 +1562,7 @@ pub fn sfnt_render_glyph_lcd_milli(blob: [u8], selector_kind: i64, selector_valu
         var s: i64 = 0
         while s < _SFNT_LCD_SAMPLE_ROWS:
             val sy = y as f64 + (s as f64 * 2.0 + 1.0) / (2.0 * _SFNT_LCD_SAMPLE_ROWS as f64)
-            _lcd_accumulate_row(edges, sy, subpixels, acc)
+            _lcd_accumulate_row(edges, rows, y, sy, subpixels, acc)
             s = s + 1
         var j: i64 = 0
         while j < subpixels:
