@@ -34,13 +34,16 @@ Setup:
   source size) more than with `use` count (r=0.42). Function bodies dominate.
   - Largest single costs: `hir_codec.spl` 330 MiB, `driver_aot_native_output.spl` 178 MiB.
   - `semantic_prerequisite_hir_observation_v1.spl` costs 157 MiB for a 2.4 KB file. That is a first-touch memo cost,
-    and it is worth its own look.
+    see "Findings after diagnosis".
 - **`heap_live_bytes` in the snapshot cannot be used here.** It counts heap-registry header bytes only
   (`interpreter_extern/memory.rs` bit0). It moved about 1 MB per module.
 - **Model check.** HIR-start floor 7.5 GB + 6 MiB x 1808 = 18.1 GB, against 18.4 GB measured.
-  The 7.5 GB floor is the 3998-module closure, inferred from this check. The 3.59 GB in the table is the 1713-module probe closure. **Projected for 3998 modules: ~31 GB.** Fitting 16 GiB needs a slope of 2.2 MiB per module or less.
+  The 7.5 GB floor is the 3998-module closure, inferred from this check. The 3.59 GB in the table is the 1713-module probe closure. **Projected for 3998 modules: ~31 GB (straight-line extrapolation, unvalidated; see "Findings after diagnosis").** Fitting 16 GiB needs a slope of 2.2 MiB per module or less.
 
 ## Root cause (hypothesis; see "Findings after diagnosis")
+
+Not shown to drive the slope. The target row takes the retained-owner route
+(`lower_retained_surface_module`), not `lower_streaming_surface_source`.
 
 - Every lowered `HirModule` is promoted to the persistent heap, bodies included:
   - `lower_streaming_surface_source` and `lower_retained_surface_module` both call `rt_transient_heap_promote(hir_module)`.
@@ -51,7 +54,10 @@ Setup:
 - The existing interface-only residency (`driver_mir_shard_hir_residency_v1.spl`, `SIMPLE_MIR_SHARD_INTERFACE_HIR=1`)
   applies only on HIR cache **loads**. With a cold cache, the process that lowers HIR keeps every body.
 
-## Fix direction
+## Fix direction (parked, unmeasured; does not reach the target row)
+
+The target row runs with streaming surfaces 0 and residency refuses
+`bootstrap-flat-rows`, so this does not apply there as written.
 
 When residency is armed (or MIR runs in spawned workers), handle each non-entry module whose HIR cache store succeeds like this:
 1. Encode the module and store it to the HIR cache inside the paused transient scope (`hir_module_encode_retained_v1`).
@@ -83,7 +89,8 @@ Nothing below explains that slope, and the budget gate is NOT re-based.
 
 - **Retained bodies alone do not account for it.** A store-then-project fix
   (promote only the interface projection after a cache store) was written but
-  is parked unpushed: it lives in `lower_streaming_surface_source`, while the
+  is parked unpushed: it lives in `lower_streaming_surface_source` (reached only
+  when `SIMPLE_MIR_SHARD_INTERFACE_HIR=1` re-enables streaming surfaces), while the
   target row runs with `SIMPLE_STAGE3_STREAMING_SURFACES=0` (retained-owner
   route) and residency also refuses `bootstrap-flat-rows`. Its benefit is
   unmeasured.
