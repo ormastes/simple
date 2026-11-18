@@ -3277,3 +3277,57 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - **Trap:** never fix this on the consumer by accepting a gap. A gap also means a dirty batch that never reached the backend.
 - **Still open:** the first batch of each owner is a full pack (9 x about 5 s on the nine-face page). See the bug record.
 - **Spec:** `test/02_integration/gpu/vulkan_font_atlas_incremental_repack_spec.spl` (one LCD run is one step and reads INCREMENTAL; nine interleaved owners all restore; the mirror cap covers the park cap). Count with `SIMPLE_VK_TIMING=1`, trace with `SIMPLE_VK_ORDER_TRACE=1`.
+## 2026-11-19 — Form-control follow-ups: rounded native frame, document-mode box-sizing, 13.333px control font, device-px control width
+
+- **Rule (Chrome for Testing 159 on Linux, `--screenshot` at k = 1..4 and `--dump-dom` geometry, Liberation Sans / DejaVu Sans Mono):**
+  - The native frame of an unrestyled text field, menulist, textarea and push button is a k px stroke whose centre line is k/2 inside the box with a corner radius, over a fill of the same rounded rect. Field / menulist / textarea are **not anti-aliased**, a button is. First ring column of the top rows of a text field: k=1 `1`, k=2 `3 1 1 0`, k=3 `5 3 2 1 1 0`, k=4 `7 5 4 3 2 1 1 0`: centre-line radius 2k at k = 1..3 and 8.5 device px at k = 4. A button at k = 1 is a Skia hairline: row 0 `ff a2 97 76`, row 1 `a2 ab ef`.
+  - `box-sizing` depends on the document mode. Standards (a doctype): text, password, email, number, date, range, file inputs and `<textarea>` are content-box (`width:40px;height:16px;padding:2px` is 48x24, textarea 46x22); search, color, button / submit / reset, checkbox, radio, `<select>`, `<button>` are border-box. Quirks (no doctype): html.css adds `input:not([type=image]), textarea { box-sizing: border-box }` (40x16 for both).
+  - The UA control font is 13.3333px. `Simple` in a default field inks columns 5-43 (5-42 at 13 px).
+  - `<textarea cols=N>` content is `ceil(N x avgCharWidth) + 15`: 30 / 62 / 102 / 182 / 343 px boxes for N = 1 / 5 / 10 / 20 / 40 (the old `8N + 15` pins 181 / 101 / 341 and the catalog's 193 were 1-2 px short; Chrome is 182 / 102 / 343 / 194 in both modes).
+  - Chrome lays out in device px: a control's device width is the same rule at k x the font size, not k x its CSS width. k = 4: text input 19 x 31 + 98 + 32 = 719 (4 x 185 = 740), textarea 643 + 60 + 24 = 727 (728), select ceil(136.41) + 88 = 225 (228); catalog-styled 759 / 775 / 289.
+  - A check mark is #3b3b3b instead of white when the accent colour's WCAG contrast against white is below 3 (#8686ff 3.06 white, #8888ff 2.996 dark, #22c55e dark).
+- **Was:** a square frame; every `<input>` border-box and every `<textarea>` content-box whatever the doctype; the control font carried as 13 px; `8N + 15` textarea columns and, at any other font size, the UA numbers times `font_size / 8` (a 16px input was 354 px wide, Chrome 215); k x the CSS width at k > 1; a white check mark on every accent colour.
+- **Fix:**
+  - `form_control_chrome.spl`: `chrome_frame_spans(kind, w, h, k)` builds ring and fill from four corner blocks (aliased for a field, 8 x 8 supersampled for a button, the k = 1 button hairline as a table) plus plain rects for the straight runs; a translucent (disabled) fill stops at the ring's inner edge. `_fcc_accent_needs_dark_mark` picks the mark colour.
+  - `Style.native_frame` (set by `_apply_native_control_look`, copied by `copy_from`) marks the control. Outside widget mode the Draw IR lane suppresses the box (`_html_draw_ir_widget_suppressed_box`) and pushes `_html_draw_ir_native_frame_commands`; the staging raster skips the box's fill / border and blends the same spans. `Style.bg` / border keep their colours for every other reader.
+  - `HNode.standards_mode` on the root node (`html_source_has_doctype`); `form_control_ua_box_decls(node, standards_mode)`. The UA decls are part of the cascade memo key, so the mode needs no key of its own.
+  - `tag_defaults`: controls carry `font_size_milli = 13333` (`font_size` stays 13).
+  - A `<button>` label up to 1 px wider than the button's whole-px content box stays on one line (`label_slack` in the `#text` layout): a flex row snaps `CSS Paint` to 79 px where Chrome has 79.5, and its 61.5 px label is 62 px at the real font. Without it the catalog tab row wrapped (tab-bar 0.42 -> 2.38).
+  - `form_control_content_w_for_face(tag, face, cols, scale, font_milli, k)`: Chrome's rule on the face metrics (Liberation Sans xAvgCharWidth 1187 / bbox 3780, DejaVu Sans Mono 1233, of 2048), in device px.
+  - `g_box_device_extra_w` / `device-extra-width`: the width twin of `device-extra-height`; `draw_ir_device_scale.spl` grows (here: shrinks) the box and its border / content / hit rect; the select arrow and the textarea grip follow the right edge.
+- **Traps:**
+  - A spec page without a doctype measures QUIRKS values in Chrome. `--dump-dom` of `document.compatMode` tells which (`BackCompat` / `CSS1Compat`).
+  - The frame radius is not 2k at k = 4 (8.5). Fitting the outer and the inner edge separately looked like a 0.5 px sampling offset; it is one radius.
+  - `_html_draw_ir_widget_suppressed_box(cmd, true, false)` is the way to make a box command paint nothing while keeping its rects, state props and children.
+  - **More than 8 (face, size) pairs on a page used to evict glyph advance slots**: the two new 13.333px faces (Liberation Sans, DejaVu Sans Mono) then shifted the LCD raster of unrelated runs with byte-identical Draw IR (forms-media 2.27 -> 4.45 at 1x on the old base). Fixed upstream by d3ab3e1b873 (exact hmtx refill) while this lane ran; on it forms-media is 2.17. When text far from a change moves, count the page's (face, size) pairs.
+  - A catalog regression can come from a page with no form control on it: run the catalog before trusting the per-control numbers.
+  - Specs keep reading the files on disk: no source edits while a spec batch runs.
+- **Spec:** `test/01_unit/browser_engine/form_control_frame_metrics_chrome159_spec.spl` (11 cases; AC-1..9 0/9 on base c824eadfdb0, AC-10 red on base by its numbers, AC-11 a wrap guard that is green on base; 11/11 now).
+- **Re-pins (all toward Chrome, measured 2026-11-19):** textarea width 181 -> 182, 101 -> 102, 341 -> 343, 193 -> 194, 113 -> 114, 353 -> 355 (`form_control_chrome159_geometry_spec`, `form_control_authored_size_chrome159_spec`, `form_control_ua_font_reset_chrome159_spec`, `form_control_intrinsic_width_spec`); `form_control_content_w_for_face` unit rows take the new signature (DejaVu 175 -> 176, 335 -> 337).
+- **`browser_checkable_control_rendering_spec` runs again (1/1):** `dispatch_dom_event(author_id, ...)` was removed by 8282e432b3b; the spec now dispatches through `dispatch_dom_event_route(system_dom_route(index, id), ...)`. Hit keys are DOM routes (`path:0` .. `path:2`). The flat-chrome pins are re-pinned to Chrome's pixels for that fixture: corner px page colour, unchecked fill #ffffff (was #f8fafc), disabled #f8f8f8, radio ring top #2abe61 (within 8), check mark on #22c55e #3b3b3b (was the accent colour); the `_checkable_frame` / `_checked_indicator` commands are transparent state carriers and the `_part_<n>` rects paint.
+- **Per-control pixels differing from Chrome by more than 8 (band of the test page; base c824eadfdb0 -> now):**
+
+  | control | 1x | 4x |
+  |---|---|---|
+  | select | 224 -> 64 | 5102 -> 4406 |
+  | select disabled | 220 -> 202 | 4992 -> 4292 |
+  | textarea | 540 -> 295 | 5055 -> 2100 |
+  | textarea disabled | 541 -> 294 | 5054 -> 2047 |
+  | text input | 277 -> 194 | 9023 -> 7848 |
+  | text input disabled | 277 -> 196 | 9028 -> 7843 |
+  | button | 121 -> 64 | 2133 -> 2131 |
+  | button disabled | 75 -> 10 | 2035 -> 2005 |
+  | catalog-styled select | 281 -> 125 | 2506 -> 1473 |
+  | catalog-styled textarea | 620 -> 359 | 5540 -> 2325 |
+  | catalog-styled input | 337 -> 258 | 3230 -> 1617 |
+  | catalog-styled button | 159 -> 126 | 1017 -> 909 |
+
+  Checkbox / radio rows are unchanged (0 / 25 / 0 / 0 / 0 / 26 / 0 / 2 at 1x).
+- **Gates (blend seed):** specs `simple_web_renderer_spec` 123/123, `browser_renderer_spec` 131/131, `layout_renderer_box_geometry_chrome159_spec` 68/68, `web_device_scale_spec` 22/22, `form_control_paint_chrome159_spec` 11/11, `form_control_chrome159_geometry_spec` 42/42, `form_control_frame_metrics_chrome159_spec` 11/11, `device_px_block_height_chrome159_spec` 3/3, the other form / input specs green; `simple_web_html_layout_renderer_coverage_spec` 37/39 with the same two failing names as base (`rasters rounded corners under fractional opacity`, `rasters a text run carrying decoded numeric entities`); matrix PASS, 979 cells, 82 mismatching, 146 ids = 146 baselined (no new, no stale); catalog 1x 1.14 / 1.78 / 2.19 / 2.43 / **2.17** (row 2.27) / 2.33 / 0.68 / **0.34** (row 0.42); catalog dpr4 0.62 / 2.37 / 3.25 / 3.54 / **3.06** (row 3.14) / 3.37 / 0.50 / **0.21** (row 0.26). Rows lowered to the measured values.
+- **Perf** (forms-media at dpr4, 2 runs, wall / peak RSS): base b6d1f929081 118.4 / 118.0 s, 2873 / 2859 MB; head 118.4 / 116.5 s, 2873 / 2867 MB.
+- **Open:**
+  - Default controls at k = 4 sit 2-3 device rows above Chrome's (text input top 32 vs 34, select 36 vs 39, checkbox 40 vs 42): the line's device baseline is not applied to an inline control's box. This is most of what is left of the default-control rows at 4x.
+  - Boxes after a control on the same line keep their CSS-snapped x at k > 1 (up to `k x w - device w` px right of Chrome's); a `<button>`'s fractional device width is not modelled (135 vs 136 at k = 4).
+  - Chrome's average char width is not linear in the font size: an `<input>` / `<textarea>` at `font-size:16px` is 215 / 221 px, here 209 / 214 (the old rule gave 354).
+  - The k = 3 frame differs from Chrome by one px per corner (Chrome's inner edge is not symmetric there); a button's anti-aliased corner at k = 4 differs by up to 15 levels on ~6 px per corner; a listbox (`<select multiple>`) frame is anti-aliased in Chrome and aliased here.
+  - `simple_web_browser_engine_production_hardening_spec` still expects an `id:stage` hit key; hit keys are `path:` routes since 8282e432b3b.

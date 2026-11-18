@@ -871,6 +871,9 @@ class HNode:
     # Where the computed white-space keeps newlines each "\n" in it is a
     # forced break (`html_kept_newlines`); `text_data` keeps its spaces.
     ws_raw: text = ""
+    # On "#root" only: the source starts with a doctype, so the document is in
+    # standards (no-quirks) mode. A document without one is in quirks mode.
+    standards_mode: bool = false
 
 class HtmlChildIndex:
     first_child: [i32]
@@ -1204,6 +1207,29 @@ fn decode_html_entities(s: text) -> text:
     out = out.replace("&#X3e;", ">")
     out.replace("&amp;", "&")
 
+# True when the HTML source begins with a doctype, after any leading
+# whitespace and comments: the document is then in standards (no-quirks) mode,
+# which decides UA rules such as Chrome's quirks-only `input:not([type=image]),
+# textarea { box-sizing: border-box }`. Legacy public identifiers that select
+# quirks mode despite a doctype are not modelled.
+fn html_source_has_doctype(html: text) -> bool:
+    val n = html.byte_len()
+    var i: i64 = 0
+    # cpu-lane-loop-ok: leading whitespace and comments of one document; stops at its first tag
+    while i < n:
+        val ch = html.byte_at(i)
+        if ch == 32 or ch == 9 or ch == 10 or ch == 13 or ch == 12:
+            i = i + 1
+        elif i + 3 < n and ch == 60 and html.byte_at(i + 1) == 33 and html.byte_at(i + 2) == 45 and html.byte_at(i + 3) == 45:
+            var j = i + 4
+            # cpu-lane-loop-ok: one leading comment; bound is its byte length
+            while j + 2 < n and not (html.byte_at(j) == 45 and html.byte_at(j + 1) == 45 and html.byte_at(j + 2) == 62):
+                j = j + 1
+            i = j + 3
+        else:
+            return i + 9 <= n and html.substring(i, i + 9).lower() == "<!doctype"
+    false
+
 fn parse_html(html: text) -> [HNode]:
     _parse_html_with_limits(
         html, SIMPLE_WEB_MAX_HTML_NODES, SIMPLE_WEB_MAX_HTML_BYTES
@@ -1333,6 +1359,8 @@ fn _parse_html_with_limits(
             var element = mk_element_node(
                 tag, parent, tag + flat.normalized_attrs
             )
+            if tag == "#root":
+                element.standards_mode = html_source_has_doctype(html)
             if (
                 tag == "summary" and parent >= 0 and
                 nodes[parent].tag == "details" and

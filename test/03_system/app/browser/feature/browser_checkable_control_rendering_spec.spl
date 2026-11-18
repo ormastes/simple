@@ -44,7 +44,15 @@ val CHECKABLE_WIDTH: i32 = 84
 val CHECKABLE_HEIGHT: i32 = 20
 val CHECKABLE_ACCENT: u32 = 0xFF22C55Eu32
 val CHECKABLE_CARET: u32 = 0xFFEF4444u32
-val CHECKABLE_SURFACE: u32 = 0xFFF8FAFCu32
+# Chrome 159 (Chrome for Testing 159.0.8154.6, --headless=new --screenshot of
+# this fixture, 2026-11-19): an unchecked box is a white Field, the disabled
+# one #f8f8f8, the radio dot is the accent colour, the top centre px of its
+# ring #2abe61, and the check mark on #22c55e (2.28:1 against white, below
+# 3:1) is #3b3b3b. The corner px of every part is page colour.
+val CHECKABLE_SURFACE: u32 = 0xFFFFFFFFu32
+val CHECKABLE_DISABLED_SURFACE: u32 = 0xFFF8F8F8u32
+val CHECKABLE_MARK: u32 = 0xFF3B3B3Bu32
+val CHECKABLE_RING_TOP: u32 = 0xFF2ABE61u32
 val CHECKABLE_PAGE: u32 = 0xFFFFFFFFu32
 
 fn checkable_fixture_html() -> text:
@@ -121,6 +129,16 @@ fn checkable_center_pixel(pixels: [u32], x: i32) -> u32:
 
 fn checkable_pixel(pixels: [u32], x: i32, y: i32) -> u32:
     pixels[y * CHECKABLE_WIDTH + x]
+
+# True when two ARGB pixels agree within 8 per colour channel.
+fn checkable_near(pixel: u32, want: u32) -> bool:
+    var shift = 0
+    while shift <= 16:
+        val delta = (((pixel >> (shift as u32)) & 0xFFu32) as i32) - (((want >> (shift as u32)) & 0xFFu32) as i32)
+        if delta > 8 or delta < -8:
+            return false
+        shift = shift + 8
+    true
 
 fn checkable_pixels_equal(left: [u32], right: [u32]) -> bool:
     if left.len() != right.len():
@@ -248,15 +266,16 @@ describe "Production checkbox and radio rendering":
             initial.hit_index.styles[toggle_index].accent_color ==
             initial.hit_index.styles[toggle_index].caret_color
         ).to_be(false)
+        step("hit keys are DOM routes: the element-child path under <body>")
         expect(simple_web_layout_hit_test_index(
             initial.hit_index, 9, 9
-        )).to_equal("id:toggle")
+        )).to_equal("path:0")
         expect(simple_web_layout_hit_test_index(
             initial.hit_index, 29, 9
-        )).to_equal("id:radio-a")
+        )).to_equal("path:1")
         expect(simple_web_layout_hit_test_index(
             initial.hit_index, 49, 9
-        )).to_equal("id:radio-b")
+        )).to_equal("path:2")
 
         step("Emit canonical Draw IR and event metadata")
         val toggle_frame = checkable_frame(
@@ -266,7 +285,7 @@ describe "Production checkbox and radio rendering":
             toggle_frame.x, toggle_frame.y,
             toggle_frame.width, toggle_frame.height
         ]).to_equal([2, 2, 14, 14])
-        expect(toggle_frame.color).to_equal(CHECKABLE_SURFACE)
+        expect(toggle_frame.color).to_equal(0u32)
         expect(checkable_style(
             toggle_frame, "input-type"
         )).to_equal("checkbox")
@@ -310,16 +329,14 @@ describe "Production checkbox and radio rendering":
             "radio-a_checked_indicator"
         )
         expect(radio_indicator.parent_id).to_equal("radio-a")
-        expect(checkable_style(
-            radio_a_frame, "border-radius"
-        )).to_equal("7")
-        expect(checkable_style(
-            radio_b_frame, "border-radius"
-        )).to_equal("7")
-        expect(checkable_style(
-            radio_indicator, "border-radius"
-        )).to_equal("4")
-        expect(radio_indicator.color).to_equal(CHECKABLE_ACCENT)
+        step("the vector parts paint; the frame and indicator commands carry state only")
+        expect(checkable_has_style(radio_a_frame, "border-radius")).to_be(false)
+        expect(checkable_has_style(radio_b_frame, "border-radius")).to_be(false)
+        expect(checkable_has_command(initial.composition, "toggle_part_0")).to_be(true)
+        expect(checkable_has_command(initial.composition, "radio-a_part_0")).to_be(true)
+        expect(checkable_has_command(initial.composition, "radio-b_part_0")).to_be(true)
+        expect(checkable_has_command(initial.composition, "disabled_part_0")).to_be(true)
+        expect(radio_indicator.color).to_equal(0u32)
         expect([
             radio_indicator.clip_rect.x, radio_indicator.clip_rect.y,
             radio_indicator.clip_rect.width,
@@ -336,15 +353,15 @@ describe "Production checkbox and radio rendering":
         expect(initial_pixels.len()).to_equal(
             CHECKABLE_WIDTH * CHECKABLE_HEIGHT
         )
+        step("Chrome 159: the corner px of a checkbox and of a radio is page colour")
         expect(checkable_pixel(initial_pixels, 2, 2)).to_equal(
-            CHECKABLE_ACCENT
+            CHECKABLE_PAGE
         )
         expect(checkable_pixel(initial_pixels, 22, 2)).to_equal(
             CHECKABLE_PAGE
         )
-        expect(checkable_pixel(initial_pixels, 29, 2)).to_equal(
-            CHECKABLE_ACCENT
-        )
+        step("Chrome 159: the top centre px of the accent ring is #2abe61 (anti-aliased)")
+        expect(checkable_near(checkable_pixel(initial_pixels, 29, 2), CHECKABLE_RING_TOP)).to_be(true)
         expect(checkable_center_pixel(initial_pixels, 9)).to_equal(
             CHECKABLE_SURFACE
         )
@@ -355,9 +372,11 @@ describe "Production checkbox and radio rendering":
             CHECKABLE_SURFACE
         )
 
-        val checked_dispatch = session.dispatch_dom_event(
-            "toggle", "click", true, true
-        )
+        val checked_dispatch = match session.dispatch_dom_event_route(
+            system_dom_route(session_identity_index, "toggle"), "click", true, true
+        ):
+            Ok(value): value
+            Err(reason): fail("click dispatch on toggle failed: {reason}")
         expect(session_identity_index.author_id_for_route(
             checked_dispatch.target_route
         ) ?? "").to_equal("toggle")
@@ -374,12 +393,14 @@ describe "Production checkbox and radio rendering":
             CHECKABLE_WIDTH, CHECKABLE_HEIGHT
         ).pixel_data
         expect(checkable_center_pixel(checked_pixels, 9)).to_equal(
-            CHECKABLE_ACCENT
+            CHECKABLE_MARK
         )
 
-        val unchecked_dispatch = session.dispatch_dom_event(
-            "toggle", "click", true, true
-        )
+        val unchecked_dispatch = match session.dispatch_dom_event_route(
+            system_dom_route(session_identity_index, "toggle"), "click", true, true
+        ):
+            Ok(value): value
+            Err(reason): fail("click dispatch on toggle failed: {reason}")
         expect(session_identity_index.author_id_for_route(
             unchecked_dispatch.target_route
         ) ?? "").to_equal("toggle")
@@ -398,9 +419,11 @@ describe "Production checkbox and radio rendering":
             unchecked_pixels, initial_pixels
         )).to_be(true)
 
-        val radio_dispatch = session.dispatch_dom_event(
-            "radio-b", "click", true, true
-        )
+        val radio_dispatch = match session.dispatch_dom_event_route(
+            system_dom_route(session_identity_index, "radio-b"), "click", true, true
+        ):
+            Ok(value): value
+            Err(reason): fail("click dispatch on radio-b failed: {reason}")
         expect(session_identity_index.author_id_for_route(
             radio_dispatch.target_route
         ) ?? "").to_equal("radio-b")
@@ -429,9 +452,11 @@ describe "Production checkbox and radio rendering":
             selected_pixels, initial_pixels
         )).to_be(false)
 
-        val disabled_dispatch = session.dispatch_dom_event(
-            "disabled", "click", true, true
-        )
+        val disabled_dispatch = match session.dispatch_dom_event_route(
+            system_dom_route(session_identity_index, "disabled"), "click", true, true
+        ):
+            Ok(value): value
+            Err(reason): fail("click dispatch on disabled failed: {reason}")
         expect(session_identity_index.author_id_for_route(
             disabled_dispatch.target_route
         ) ?? "").to_equal("disabled")
@@ -446,7 +471,7 @@ describe "Production checkbox and radio rendering":
             CHECKABLE_WIDTH, CHECKABLE_HEIGHT
         ).pixel_data
         expect(checkable_center_pixel(disabled_pixels, 69)).to_equal(
-            CHECKABLE_SURFACE
+            CHECKABLE_DISABLED_SURFACE
         )
         expect(checkable_pixels_equal(
             disabled_pixels, selected_pixels
