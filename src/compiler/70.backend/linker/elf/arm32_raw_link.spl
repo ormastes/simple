@@ -9,7 +9,9 @@ use compiler.backend.linker.elf_parser.{
     elf_reloc_sym, elf_reloc_type, elf_section_addralign,
     SHN_UNDEF, STB_LOCAL, STB_WEAK, SHT_NOBITS
 }
-use compiler.backend.linker.elf_inspect.{ET_REL, EM_ARM, EM_386, SHT_PROGBITS}
+use compiler.backend.linker.elf_inspect.{ET_REL, EM_ARM, EM_386, EM_RISCV, SHT_PROGBITS}
+use compiler.backend.linker.riscv_reloc.{riscv_is_pcrel_hi, riscv_is_pcrel_lo, riscv_hi_key,
+    riscv_pcrel_lo_value, riscv_pcrel_lo_as_absolute}
 use compiler.backend.linker.reloc_engine.{
     RelocArch, reloc_apply, reloc_patch_bytes, reloc_patch_width, R_ARM_NONE,
     R_ARM_ABS8, R_ARM_ABS16, R_ARM_THM_PC8, R_ARM_THM_JUMP11, R_ARM_THM_JUMP8,
@@ -195,17 +197,36 @@ fn arm32_raw_reloc_symbol(obj: ElfObject, oi: i64, symbol_index: i64,
 
 fn elf_arm32_link_parsed(objects: [ElfObject], base_addr: i64,
         entry: text) -> Result<Arm32RawImage, text>:
-    elf32_raw_link_parsed(objects, base_addr, entry, false)
+    elf32_raw_link_parsed(objects, base_addr, entry, RelocArch.Arm32)
 
 fn elf_i386_link_parsed(objects: [ElfObject], base_addr: i64,
         entry: text) -> Result<Arm32RawImage, text>:
-    elf32_raw_link_parsed(objects, base_addr, entry, true)
+    elf32_raw_link_parsed(objects, base_addr, entry, RelocArch.I386)
+
+fn elf_riscv32_link_parsed(objects: [ElfObject], base_addr: i64,
+        entry: text) -> Result<Arm32RawImage, text>:
+    elf32_raw_link_parsed(objects, base_addr, entry, RelocArch.Riscv32)
+
+fn elf32_raw_is_386(arch: RelocArch) -> bool:
+    match arch:
+        case I386:
+            true
+        case _:
+            false
+
+fn elf32_raw_is_rv32(arch: RelocArch) -> bool:
+    match arch:
+        case Riscv32:
+            true
+        case _:
+            false
 
 fn elf32_raw_link_parsed(objects: [ElfObject], base_addr: i64,
-        entry: text, is_386: bool) -> Result<Arm32RawImage, text>:
-    val arch = if is_386: RelocArch.I386 else: RelocArch.Arm32
-    val machine = if is_386: EM_386 else: EM_ARM
-    val machine_name = if is_386: "EM_386" else: "EM_ARM"
+        entry: text, arch: RelocArch) -> Result<Arm32RawImage, text>:
+    val is_386 = elf32_raw_is_386(arch)
+    val is_rv = elf32_raw_is_rv32(arch)
+    val machine = if is_386: EM_386 else: (if is_rv: EM_RISCV else: EM_ARM)
+    val machine_name = if is_386: "EM_386" else: (if is_rv: "EM_RISCV" else: "EM_ARM")
     if base_addr < 0 or base_addr & 3 != 0:
         return Err("ELF32 raw link: base address must be non-negative and 4-byte aligned")
     if entry == "":
@@ -229,6 +250,13 @@ fn elf32_raw_link_parsed(objects: [ElfObject], base_addr: i64,
     if not globals.has(entry):
         return Err("ELF32 raw link: entry symbol '{entry}' is undefined")
 
+    # RISC-V PCREL_LO12 pairing (shared riscv_reloc module): HI20 sites record
+    # S + A - P by riscv_hi_key; LO12 relocations are applied once all HI20s are known.
+    var rv_hi: {text: i64} = {}
+    var lo_off: [i64] = []
+    var lo_place: [i64] = []
+    var lo_type: [i64] = []
+    var lo_key: [text] = []
     var image: [i64] = []
     var zi: i64 = 0
     while zi < layout.size:
@@ -257,12 +285,17 @@ fn elf32_raw_link_parsed(objects: [ElfObject], base_addr: i64,
                 return Err("ELF32 raw link: relocation targets an invalid or non-allocatable section")
             val section = obj.sections[target]
             if reloc.r_offset < 0 or
-                    reloc.r_offset + elf32_raw_reloc_width(is_386, elf_reloc_type(reloc)) > section.sh_size:
+                    reloc.r_offset + elf32_raw_reloc_width(arch, elf_reloc_type(reloc)) > section.sh_size:
                 return Err("ELF32 raw link: relocation offset {reloc.r_offset} is out of bounds")
             val patch_offset = layout.offsets[oi][target] + reloc.r_offset
             val place = base_addr + patch_offset
             val rtype = elf_reloc_type(reloc)
-            if (not is_386 and rtype == R_ARM_NONE) or (is_386 and rtype == R_386_NONE):
+            if is_rv:
+                # R_RISCV_NONE / RELAX are markers; ALIGN padding cannot be shrunk here.
+                if rtype == 0 or rtype == 51: continue
+                if rtype == 43:
+                    return Err("ELF32 raw link: R_RISCV_ALIGN is unsupported in a raw image (assemble with -mno-relax)")
+            elif (not is_386 and rtype == R_ARM_NONE) or (is_386 and rtype == R_386_NONE):
                 continue
             if is_386 and not i386_raw_reloc_supported(rtype):
                 return Err("ELF32 raw link: R_386 type {rtype} needs a GOT, which a raw image does not have")
@@ -273,6 +306,22 @@ fn elf32_raw_link_parsed(objects: [ElfObject], base_addr: i64,
             val symbol = if got_pc: base_addr else: arm32_raw_reloc_symbol(obj, oi,
                 elf_reloc_sym(reloc), layout, base_addr, globals)?
             val p = if got_off: base_addr else: place
+            if is_rv and riscv_is_pcrel_lo(rtype):
+                if reloc.r_addend != 0:
+                    return Err("ELF32 raw link: RISC-V PCREL_LO12 addend must be zero")
+                val lsym = obj.symbols[elf_reloc_sym(reloc)]
+                if lsym.st_shndx == SHN_UNDEF or lsym.st_shndx >= 0xff00:
+                    return Err("ELF32 raw link: RISC-V PCREL_LO12 label '{lsym.name}' is not a section label")
+                lo_off = lo_off.push(patch_offset)
+                lo_place = lo_place.push(place)
+                lo_type = lo_type.push(rtype)
+                lo_key = lo_key.push(riscv_hi_key(oi, lsym.st_shndx, lsym.st_value))
+                continue
+            if is_rv and riscv_is_pcrel_hi(rtype):
+                val hk = riscv_hi_key(oi, target, reloc.r_offset)
+                if rv_hi.has(hk):
+                    return Err("ELF32 raw link: RISC-V duplicate HI20 relocation at {place}")
+                rv_hi[hk] = riscv_pcrel_lo_value(symbol, reloc.r_addend, p)?
             val applied = reloc_apply(arch, image, patch_offset,
                 rtype, symbol, reloc.r_addend, p)
             if not applied.success:
@@ -280,6 +329,18 @@ fn elf32_raw_link_parsed(objects: [ElfObject], base_addr: i64,
             image = reloc_patch_bytes(arch, image, patch_offset,
                 rtype, symbol, reloc.r_addend, p)
         oi = oi + 1
+
+    var li: i64 = 0
+    while li < lo_off.len():
+        if not rv_hi.has(lo_key[li]):
+            return Err("ELF32 raw link: RISC-V PCREL_LO12 at {lo_place[li]} has no matching HI20")
+        val lt = riscv_pcrel_lo_as_absolute(lo_type[li])
+        val lv = rv_hi[lo_key[li]]
+        val lo_applied = reloc_apply(arch, image, lo_off[li], lt, lv, 0, 0)
+        if not lo_applied.success:
+            return Err("ELF32 raw link: RISC-V PCREL_LO12 at {lo_place[li]}: {lo_applied.error}")
+        image = reloc_patch_bytes(arch, image, lo_off[li], lt, lv, 0, 0)
+        li = li + 1
 
     Ok(Arm32RawImage(bytes: image, base_addr: base_addr, entry_addr: globals[entry]))
 
@@ -293,8 +354,9 @@ fn elf_arm32_link_raw(objects: [[i64]], base_addr: i64,
         oi = oi + 1
     elf_arm32_link_parsed(parsed, base_addr, entry)
 
-fn elf32_raw_reloc_width(is_386: bool, rtype: i64) -> i64:
-    if is_386: return reloc_patch_width(RelocArch.I386, rtype)
+fn elf32_raw_reloc_width(arch: RelocArch, rtype: i64) -> i64:
+    if elf32_raw_is_386(arch): return reloc_patch_width(RelocArch.I386, rtype)
+    if elf32_raw_is_rv32(arch): return reloc_patch_width(RelocArch.Riscv32, rtype)
     arm32_raw_reloc_width(rtype)
 
 fn elf_i386_link_raw(objects: [[i64]], base_addr: i64,
@@ -304,5 +366,13 @@ fn elf_i386_link_raw(objects: [[i64]], base_addr: i64,
         parsed = parsed.push(elf_parse_object(bytes)?)
     elf_i386_link_parsed(parsed, base_addr, entry)
 
+fn elf_riscv32_link_raw(objects: [[i64]], base_addr: i64,
+        entry: text) -> Result<Arm32RawImage, text>:
+    var parsed: [ElfObject] = []
+    for bytes in objects:
+        parsed = parsed.push(elf_parse_object(bytes)?)
+    elf_riscv32_link_parsed(parsed, base_addr, entry)
+
 export Arm32RawImage
 export elf_arm32_link_parsed, elf_arm32_link_raw, elf_i386_link_parsed, elf_i386_link_raw
+export elf_riscv32_link_parsed, elf_riscv32_link_raw
