@@ -93,3 +93,17 @@ Still O(closure) per unit, and not fixed here: `worker_admitted_edges_v1` runs a
 - Do not set `SIMPLE_HIR_CACHE=0`.
 
 This gets the per-file pool admitted. It does not get time-to-first-object under 10 s; that needs Blocker 3 fixed.
+
+## Audit (2026-11-18, `file_worker_pool_refusal.spl` + `parser_preprocessor.spl`)
+
+- Audited `src/app/cli/file_worker_pool_refusal.spl` (`file_worker_pool_mir_budget_kb_v1`, `file_worker_pool_phase_price_kb_v1`, `file_worker_pool_mir_default_price_kb_v1`): Blocker 2 is already resolved on `HEAD` (`5911a32cab0c3f0c7bf6440a377e7263487c028e`, via commits `12e08a583d6`, `01f672340c7`, `00394485c58`).
+  - When `scale == true` (`shard_mode == false`, per-file worker pool via `native_build_pool_mir_worker_budget_kb_v1`), `file_worker_pool_mir_budget_kb_v1` defaults to `FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1` (`= SHARD_HIR_WORKER_KB_V1 = 9000000` kB = 9 GB), ignores the shard-only host key `worker_mem_mib` (`26624` MiB = `27262976` kB), and scales down toward `FILE_WORKER_POOL_SCALED_FLOOR_KB_V1` (`6815744` kB = 6.5 GiB).
+  - When `scale == false` (`shard_mode == true`, two-pass MIR shard mode), it preserves closure-scaled pricing (`file_worker_pool_mir_host_scaled_price_kb_v1` / `SHARD_MIR_WORKER_KB_V1 = 26424115` kB ceiling) pinned by `test/01_unit/compiler/driver/native_build_pool_refusal_spec.spl`.
+- Verified `file_worker_pool_refusal.spl` with `simple.exe test --mode=interpreter`:
+  - `test/01_unit/compiler/driver/native_build_pool_refusal_spec.spl`: 20/20 passed.
+  - `test/01_unit/app/cli/file_worker_pool_host_key_price_spec.spl`: 4/4 passed.
+  - `test/01_unit/app/cli/file_worker_pool_per_file_price_spec.spl`: 4/4 passed.
+  - `test/01_unit/app/cli/file_worker_pool_address_space_spec.spl`: 17/17 passed.
+  - Note: `test/01_unit/app/cli/file_worker_pool_scaled_budget_spec.spl` ran 29/31 (2 pre-existing failures on Windows host where `PROCESSOR_ARCHITECTURE=AMD64` sets `windows_bits=64` even with a nonexistent ELF path).
+- `src/app/cli/file_worker_pool_refusal.spl` also uses `@when(arch=...)` (lines 27–39), now covered by the ADR-005 byte-slice fix in `src/compiler/10.frontend/core/parser_preprocessor.spl`.
+- Status stays `verification-pending` until a full Windows phase-3 native run (with `native-build` and `SIMPLE_FILE_WORKERS` unset) confirms Blocker 3 + end-to-end `objs > 0` and `first_obj_s <= 10s`.

@@ -101,9 +101,10 @@ pub fn _pp_tokenize_condition(condition: text) -> [text]:
     var tokens: [text] = []
     var current: [text] = []
     var i: i64 = 0
+    val cond_len = condition.byte_len()
 
-    while i < condition.len():
-        val ch = condition[i]
+    while i < cond_len:
+        val ch = condition.substring(i, i + 1)
 
         val is_ws = ch == " " or ch == "\t" or ch == "\r"
         if is_ws:
@@ -122,7 +123,7 @@ pub fn _pp_tokenize_condition(condition: text) -> [text]:
             i = i + 1
             continue
 
-        if ch == "&" and i + 1 < condition.len() and condition[i + 1] == "&":
+        if ch == "&" and i + 1 < cond_len and condition.substring(i + 1, i + 2) == "&":
             if current.len() > 0:
                 tokens.push(current.join(""))
                 current = []
@@ -130,7 +131,7 @@ pub fn _pp_tokenize_condition(condition: text) -> [text]:
             i = i + 2
             continue
 
-        if ch == "|" and i + 1 < condition.len() and condition[i + 1] == "|":
+        if ch == "|" and i + 1 < cond_len and condition.substring(i + 1, i + 2) == "|":
             if current.len() > 0:
                 tokens.push(current.join(""))
                 current = []
@@ -152,7 +153,7 @@ pub fn _pp_tokenize_condition(condition: text) -> [text]:
             if current.len() > 0:
                 tokens.push(current.join(""))
                 current = []
-            if i + 1 < condition.len() and condition[i + 1] == "=":
+            if i + 1 < cond_len and condition.substring(i + 1, i + 2) == "=":
                 tokens.push("==")
                 i = i + 2
             else:
@@ -258,30 +259,27 @@ fn _pp_eval_condition(condition: text) -> bool:
 fn _pp_extract_paren_condition(line: text) -> text:
     # Extract condition from @when(condition): or @cfg(condition) etc.
     # Finds '(' and reads until matching ')'.
+    val line_len = line.byte_len()
     var start: i64 = -1
     var i: i64 = 0
-    for _ in line:
-        if i >= line.len(): break
-        if line[i] == "(":
+    while i < line_len:
+        if line.substring(i, i + 1) == "(":
             start = i + 1
             break
         i = i + 1
     if start < 0:
         return ""
     var depth: i64 = 1
-    var chars: [text] = []
     var j: i64 = start
-    for _ in line:
-        if j >= line.len(): break
-        val ch = line[j]
+    while j < line_len:
+        val ch = line.substring(j, j + 1)
         if ch == "(":
             depth = depth + 1
-        if ch == ")":
+        elif ch == ")":
             depth = depth - 1
             if depth == 0: break
-        chars.push(ch)
         j = j + 1
-    chars.join("").trim()
+    line.substring(start, j).trim()
 
 fn _pp_extract_cfg_condition(line: text) -> text:
     # Extract from @cfg(condition) or @cfg("key", "value")
@@ -321,13 +319,28 @@ fn _pp_target_decl_kind(line: text) -> text:
 fn _pp_target_indent(line: text) -> i64:
     var count = 0
     var i = 0
-    while i < line.len():
-        val ch = line[i]
+    val line_len = line.byte_len()
+    while i < line_len:
+        val ch = line.substring(i, i + 1)
         if ch == " ": count = count + 1
         elif ch == "\t": count = count + 4
         else: break
         i = i + 1
     count
+
+fn _pp_line_brace_delta(line: text) -> i64:
+    """Net curly-brace depth change across one line for multi-line @cfg brace skips."""
+    var delta: i64 = 0
+    var i: i64 = 0
+    val line_len = line.byte_len()
+    while i < line_len:
+        val ch = line.substring(i, i + 1)
+        if ch == "{{":
+            delta = delta + 1
+        elif ch == "}":
+            delta = delta - 1
+        i = i + 1
+    delta
 
 # Net bracket-depth change of one source line across (), [] and {}. String
 # literals inside the line are not stripped: decorator/declaration lines do
@@ -389,7 +402,11 @@ fn _pp_cfg_select_flag() -> bool:
 
 fn _pp_leading_ws(line: text) -> text:
     var i = 0
-    while i < line.len() and (line[i] == " " or line[i] == "\t"):
+    val line_len = line.byte_len()
+    while i < line_len:
+        val ch = line.substring(i, i + 1)
+        if ch != " " and ch != "\t":
+            break
         i = i + 1
     line.substring(0, i)
 
@@ -747,18 +764,7 @@ fn _pp_preprocess_conditionals_body(source: text) -> text:
             # `use module.{...}` import) gated by a false @cfg — blank every
             # continuation line until the braces opened by the declaration
             # line close back to depth 0.
-            var opens: i64 = 0
-            var closes: i64 = 0
-            var bi: i64 = 0
-            for _ in ol:
-                if bi >= ol.len(): break
-                val bc = ol[bi]
-                if bc == "{{":
-                    opens = opens + 1
-                elif bc == "}":
-                    closes = closes + 1
-                bi = bi + 1
-            brace_depth = brace_depth + opens - closes
+            brace_depth = brace_depth + _pp_line_brace_delta(ol)
             final_lines.push("")
             i = i + 1
             if brace_depth <= 0:
@@ -773,18 +779,7 @@ fn _pp_preprocess_conditionals_body(source: text) -> text:
                 final_lines.push("")
                 i = i + 1
                 continue
-            var cur_indent: i64 = 0
-            var ci: i64 = 0
-            for _ in ol:
-                if ci >= ol.len(): break
-                val c = ol[ci]
-                if c == " ":
-                    cur_indent = cur_indent + 1
-                elif c == "\t":
-                    cur_indent = cur_indent + 4
-                else:
-                    break
-                ci = ci + 1
+            val cur_indent = _pp_target_indent(ol)
             # Header continuation lines of a multi-line declaration
             # (`pub fn name(` -> `    param: T` -> `) -> R:`) stay excluded
             # while any bracket opened by the declaration remains open,
@@ -873,18 +868,7 @@ fn _pp_preprocess_conditionals_body(source: text) -> text:
                 if declaration_index < out_lines.len():
                     val next_line = out_lines[declaration_index]
                     val next_trimmed = next_line.trim()
-                    var next_indent: i64 = 0
-                    var ni: i64 = 0
-                    for _ in next_line:
-                        if ni >= next_line.len(): break
-                        val nc = next_line[ni]
-                        if nc == " ":
-                            next_indent = next_indent + 1
-                        elif nc == "\t":
-                            next_indent = next_indent + 4
-                        else:
-                            break
-                        ni = ni + 1
+                    val next_indent = _pp_target_indent(next_line)
                     # Blank the declaration line
                     final_lines.push("")
                     # If declaration ends with ':', blank its body too. A
@@ -906,18 +890,7 @@ fn _pp_preprocess_conditionals_body(source: text) -> text:
                         # still see the (now-syntactically-broken) dangling
                         # continuation lines as unconditional imports. Track
                         # brace depth and blank through the matching close.
-                        var opens0: i64 = 0
-                        var closes0: i64 = 0
-                        var oi: i64 = 0
-                        for _ in next_line:
-                            if oi >= next_line.len(): break
-                            val oc = next_line[oi]
-                            if oc == "{{":
-                                opens0 = opens0 + 1
-                            elif oc == "}":
-                                closes0 = closes0 + 1
-                            oi = oi + 1
-                        val depth0 = opens0 - closes0
+                        val depth0 = _pp_line_brace_delta(next_line)
                         if depth0 > 0:
                             skip_until_close_brace = true
                             brace_depth = depth0
