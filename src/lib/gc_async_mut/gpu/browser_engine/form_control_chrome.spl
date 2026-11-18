@@ -1,0 +1,357 @@
+# Chrome 159 (Linux) native form-control parts, as ARGB spans in DEVICE px.
+#
+# Chrome paints a checkbox, a radio, a `<select>` arrow and a `<textarea>`
+# resize grip from vector shapes, not from CSS boxes. The shapes below are the
+# ones measured on Chrome for Testing 159.0.8154.6 at device scale 1 and 4
+# (test/01_unit/browser_engine/form_control_paint_chrome159_spec.spl):
+#
+# - checkbox / radio: a `side` CSS px square scaled by the device scale k.
+#   Unchecked: 1 CSS px #767676 ring over a white fill, the ring's centre line
+#   0.5 px inside the square with corner radius 2 CSS px (checkbox) or a circle
+#   (radio). Checked checkbox: #0075ff rounded square, no ring, and a white
+#   check stroked 0.16 x side wide through (0.2, 0.5) (0.4, 0.7) (0.8, 0.2)
+#   x side. Checked radio: #0075ff ring and a dot of radius 0.3 x side.
+# - select arrow: a chevron (0,0) (4k,4k) (8k,0), stroked 2 DEVICE px at every
+#   scale.
+# - resize grip: two aliased 45 degree lines, (14k, 7k)-(7k, 14k) and
+#   (14k, 10.5k)-(10.5k, 14k), k device px wide, black at 60 %,
+#   each followed by the same line k px lower in white at 60 %.
+#
+# Coverage is exact area by 8 x 8 supersampling of the pixels an edge crosses;
+# all geometry is integer 1/64 px fixed point, so every lane rasterizes the
+# same spans. At k == 1 the ring is 1 device px wide, which Skia draws as an
+# anti-aliased HAIRLINE, not as a filled stroke; those pixels are Chrome's
+# measured coverages (`_fcc_hairline_ring`). The Draw IR producer lowers a
+# span to one rect; the staging raster blends it.
+
+val _FCC_ONE: i64 = 64
+val _FCC_SUB: i64 = 8
+
+# Spans relative to the part's origin, in device px, in paint order.
+struct ChromeSpans:
+    xs: [i32]
+    ys: [i32]
+    ws: [i32]
+    hs: [i32]
+    colors: [u32]
+
+# kind 0: rounded-rect fill (x0 y0 x1 y1, r).
+# kind 1: rounded-rect ring, centre line (x0 y0 x1 y1, r), half width hw.
+# kind 2: stroke of the polyline (x0 y0) (x1 y1) (x2 y2), half width hw, butt
+#         caps and a miter join. `segs` is 1 for a single segment. A sample
+#         exactly on the start cap is inside, one on the end cap is not (the
+#         aliased grip lines at k = 2..4 end one diagonal short).
+struct _FccShape:
+    kind: i32
+    x0: i64
+    y0: i64
+    x1: i64
+    y1: i64
+    x2: i64
+    y2: i64
+    r: i64
+    hw: i64
+    segs: i32
+
+fn _fcc_abs(v: i64) -> i64:
+    if v < 0: 0 - v else: v
+
+fn _fcc_in_strip(px: i64, py: i64, ax: i64, ay: i64, bx: i64, by: i64, hw: i64) -> bool:
+    val dx = bx - ax
+    val dy = by - ay
+    val cross = (px - ax) * dy - (py - ay) * dx
+    cross * cross <= hw * hw * (dx * dx + dy * dy)
+
+fn _fcc_along(px: i64, py: i64, ax: i64, ay: i64, bx: i64, by: i64) -> i64:
+    (px - ax) * (bx - ax) + (py - ay) * (by - ay)
+
+fn _fcc_inside(s: _FccShape, px: i64, py: i64) -> bool:
+    if s.kind == 2:
+        val in0 = _fcc_in_strip(px, py, s.x0, s.y0, s.x1, s.y1, s.hw)
+        val t0 = _fcc_along(px, py, s.x0, s.y0, s.x1, s.y1)
+        val len0 = (s.x1 - s.x0) * (s.x1 - s.x0) + (s.y1 - s.y0) * (s.y1 - s.y0)
+        if in0 and t0 >= 0 and t0 < len0:
+            return true
+        if s.segs < 2:
+            return false
+        val in1 = _fcc_in_strip(px, py, s.x1, s.y1, s.x2, s.y2, s.hw)
+        val t1 = _fcc_along(px, py, s.x1, s.y1, s.x2, s.y2)
+        val len1 = (s.x2 - s.x1) * (s.x2 - s.x1) + (s.y2 - s.y1) * (s.y2 - s.y1)
+        if in1 and t1 >= 0 and t1 < len1:
+            return true
+        return in0 and in1 and t0 >= len0 and t1 < 0
+    val hx = (s.x1 - s.x0) / 2
+    val hy = (s.y1 - s.y0) / 2
+    val qx = _fcc_abs(px * 2 - s.x0 - s.x1) / 2 - (hx - s.r)
+    val qy = _fcc_abs(py * 2 - s.y0 - s.y1) / 2 - (hy - s.r)
+    if qx > 0 and qy > 0:
+        val d2 = qx * qx + qy * qy
+        if s.kind == 0:
+            return d2 <= s.r * s.r
+        val inner = if s.r > s.hw: s.r - s.hw else: 0
+        return d2 <= (s.r + s.hw) * (s.r + s.hw) and d2 >= inner * inner
+    val edge = (if qx > qy: qx else: qy) - s.r
+    if s.kind == 0:
+        return edge <= 0
+    _fcc_abs(edge) <= s.hw
+
+# Alpha (0..255) of the shape over the device pixel (x, y). `aliased` samples
+# the centre only.
+fn _fcc_coverage(s: _FccShape, x: i32, y: i32, aliased: bool) -> i32:
+    val fx = (x as i64) * _FCC_ONE
+    val fy = (y as i64) * _FCC_ONE
+    val centre = _fcc_inside(s, fx + 32, fy + 32)
+    if aliased:
+        return if centre: 255 else: 0
+    var probes = if centre: 1 else: 0
+    # cpu-lane-loop-ok: the 8 corner and edge-midpoint probes of one pixel
+    for probe in [0, 1, 2, 3, 5, 6, 7, 8]:
+        if _fcc_inside(s, fx + ((probe % 3) as i64) * 32, fy + ((probe / 3) as i64) * 32):
+            probes = probes + 1
+    if probes == 9:
+        return 255
+    if probes == 0:
+        return 0
+    var count = 0
+    var sy: i64 = 0
+    # cpu-lane-loop-ok: 8 x 8 subsamples of one edge pixel
+    while sy < _FCC_SUB:
+        var sx: i64 = 0
+        # cpu-lane-loop-ok: 8 subsamples of one row of one edge pixel
+        while sx < _FCC_SUB:
+            if _fcc_inside(s, fx + sx * 8 + 4, fy + sy * 8 + 4):
+                count = count + 1
+            sx = sx + 1
+        sy = sy + 1
+    (count * 255 + 32) / 64
+
+fn _fcc_scale_alpha(color: u32, coverage: i32) -> u32:
+    val alpha = ((color >> 24) & 0xFFu32) as i32
+    val scaled = (alpha * coverage + 127) / 255
+    ((scaled as u32) << 24) | (color & 0x00FFFFFFu32)
+
+# Appends the spans of a `width` x `height` alpha grid (0..255, row major)
+# whose top-left is (x0, y0). A run that repeats the run directly above it
+# (same x, width and colour) grows that span instead of adding one.
+fn _fcc_append_grid(acc: ChromeSpans, alphas: [i32], x0: i32, y0: i32, width: i32, height: i32, color: u32) -> ChromeSpans:
+    var out = acc
+    var above: [i32] = []
+    var row = 0
+    # cpu-lane-loop-ok: rows of one native control part; bound is the part's device height (13k for a default checkbox)
+    while row < height:
+        var current: [i32] = []
+        var run_x = 0
+        var run_alpha = 0
+        var col = 0
+        # cpu-lane-loop-ok: columns of one row of the part; bound is the part's device width
+        while col <= width:
+            val alpha = if col < width: alphas[row * width + col] else: 0
+            if alpha != run_alpha:
+                if run_alpha > 0:
+                    val run_color = _fcc_scale_alpha(color, run_alpha)
+                    var grown = -1
+                    # cpu-lane-loop-ok: spans of the row above; bound is that row's run count (a handful)
+                    for candidate in above:
+                        if out.xs[candidate] == x0 + run_x and out.ws[candidate] == col - run_x and out.colors[candidate] == run_color:
+                            grown = candidate
+                    if grown >= 0:
+                        out.hs[grown] = out.hs[grown] + 1
+                        current.push(grown)
+                    else:
+                        current.push(out.xs.len() as i32)
+                        out.xs.push(x0 + run_x)
+                        out.ys.push(y0 + row)
+                        out.ws.push(col - run_x)
+                        out.hs.push(1)
+                        out.colors.push(run_color)
+                run_x = col
+                run_alpha = alpha
+            col = col + 1
+        above = current
+        row = row + 1
+    out
+
+# Appends the spans of one shape over device rows y0..y1-1, columns x0..x1-1.
+fn _fcc_append(acc: ChromeSpans, s: _FccShape, x0: i32, y0: i32, x1: i32, y1: i32, color: u32, aliased: bool) -> ChromeSpans:
+    var alphas: [i32] = []
+    var y = y0
+    # cpu-lane-loop-ok: rows of one native control part; bound is the part's device height
+    while y < y1:
+        var x = x0
+        # cpu-lane-loop-ok: columns of one row of the part; bound is the part's device width
+        while x < x1:
+            alphas.push(_fcc_coverage(s, x, y, aliased))
+            x = x + 1
+        y = y + 1
+    _fcc_append_grid(acc, alphas, x0, y0, x1 - x0, y1 - y0, color)
+
+fn _fcc_rrect(kind: i32, x0: i64, y0: i64, x1: i64, y1: i64, r: i64, hw: i64) -> _FccShape:
+    val half_w = (x1 - x0) / 2
+    val half_h = (y1 - y0) / 2
+    val limit = if half_w < half_h: half_w else: half_h
+    _FccShape(kind: kind, x0: x0, y0: y0, x1: x1, y1: y1, x2: 0, y2: 0, r: if r > limit: limit else: r, hw: hw, segs: 0)
+
+# Chrome 159 at device scale 1, ring coverage (0..255) of the top-left 7 x 7
+# quadrant of a 13 px radio; the other quadrants mirror it. From the #767676
+# ring on white: f2 af 8f 99 / d4 82 d1 e5 / a1 on rows 0..2.
+val _FCC_RADIO_13_HAIRLINE: [i32] = [
+    0, 0, 0, 24, 149, 208, 190,
+    0, 0, 80, 233, 86, 48, 0,
+    0, 80, 175, 0, 0, 0, 0,
+    24, 233, 0, 0, 0, 0, 0,
+    149, 86, 0, 0, 0, 0, 0,
+    208, 48, 0, 0, 0, 0, 0,
+    190, 0, 0, 0, 0, 0, 0
+]
+
+# Chrome 159 at device scale 1, checkbox ring coverage by distance from the
+# nearest corner along an edge (a3 99 76 on white), and of the one inner
+# corner pixel (b2).
+val _FCC_BOX_HAIRLINE_EDGE: [i32] = [0, 171, 190]
+val _FCC_BOX_HAIRLINE_INNER: i32 = 143
+
+# The 1 device px ring of a `side` px control at k == 1, as an alpha grid.
+fn _fcc_hairline_ring(radio: bool, side: i32) -> [i32]:
+    var alphas: [i32] = []
+    var y = 0
+    # cpu-lane-loop-ok: rows of one control at device scale 1 (13 by default)
+    while y < side:
+        val my = if y < side - 1 - y: y else: side - 1 - y
+        var x = 0
+        # cpu-lane-loop-ok: columns of one control at device scale 1
+        while x < side:
+            val mx = if x < side - 1 - x: x else: side - 1 - x
+            var alpha = 0
+            if radio:
+                alpha = _FCC_RADIO_13_HAIRLINE[my * 7 + mx]
+            elif mx == 0 or my == 0:
+                val along = if mx > my: mx else: my
+                alpha = if along < 3: _FCC_BOX_HAIRLINE_EDGE[along] else: 255
+            elif mx == 1 and my == 1:
+                alpha = _FCC_BOX_HAIRLINE_INNER
+            alphas.push(alpha)
+            x = x + 1
+        y = y + 1
+    alphas
+
+val _FCC_ACCENT: u32 = 0xFF0075FFu32
+val _FCC_BORDER: u32 = 0xFF767676u32
+val _FCC_FILL: u32 = 0xFFFFFFFFu32
+# Disabled parts composite over the page (Chrome 159 on #fff and on #204060):
+# fill 244 at 68 %, ring / checked square 186 at 66.7 %, radio dot 118 at 30 %.
+val _FCC_DISABLED_FILL: u32 = 0xADF4F4F4u32
+val _FCC_DISABLED_BORDER: u32 = 0xAABABABAu32
+val _FCC_DISABLED_DOT: u32 = 0x4D767676u32
+
+var g_fcc_cache_keys: [text] = []
+var g_fcc_cache_vals: [ChromeSpans] = []
+
+fn _fcc_cached(key: text) -> i32:
+    var i = 0
+    # cpu-lane-loop-ok: at most 32 cached parts
+    while i < g_fcc_cache_keys.len():
+        if g_fcc_cache_keys[i] == key:
+            return i
+        i = i + 1
+    -1
+
+fn _fcc_remember(key: text, spans: ChromeSpans) -> ChromeSpans:
+    if g_fcc_cache_keys.len() >= 32:
+        g_fcc_cache_keys = []
+        g_fcc_cache_vals = []
+    g_fcc_cache_keys.push(key)
+    g_fcc_cache_vals.push(spans)
+    spans
+
+# Checkbox or radio of `side_css` CSS px at device scale k, origin at the
+# square's top-left device px. `accent` 0 selects Chrome's #0075ff.
+# reason: side and k are a CSS px count and a dimensionless device ratio; accent is an ARGB word.
+# @allow(primitive_api)
+pub fn chrome_checkable_spans(radio: bool, side_css: i32, k: i32, checked: bool, disabled: bool, accent: u32) -> ChromeSpans:
+    val key = "c{radio}/{side_css}/{k}/{checked}/{disabled}/{accent}"
+    val hit = _fcc_cached(key)
+    if hit >= 0:
+        return g_fcc_cache_vals[hit]
+    val side = side_css * k
+    val full = (side as i64) * _FCC_ONE
+    val bw = (k as i64) * _FCC_ONE
+    val radius = if radio: full else: bw * 2
+    val on = if accent != 0u32: accent else: _FCC_ACCENT
+    val fill = if disabled: _FCC_DISABLED_FILL else: _FCC_FILL
+    val ring_off = if disabled: _FCC_DISABLED_BORDER else: _FCC_BORDER
+    var out = ChromeSpans(xs: [], ys: [], ws: [], hs: [], colors: [])
+    if checked and not radio:
+        out = _fcc_append(out, _fcc_rrect(0, 0, 0, full, full, radius, 0), 0, 0, side, side, if disabled: _FCC_DISABLED_BORDER else: on, false)
+        val mark = _FccShape(
+            kind: 2, x0: full / 5, y0: full / 2, x1: full * 2 / 5, y1: full * 7 / 10,
+            x2: full * 4 / 5, y2: full / 5, r: 0, hw: full * 8 / 100, segs: 2)
+        out = _fcc_append(out, mark, 0, 0, side, side, fill, false)
+        return _fcc_remember(key, out)
+    # An opaque fill runs under half of the ring so no page colour shows at
+    # the seam; a translucent one stops at the ring's inner edge.
+    val fill_inset = if disabled: bw else: bw / 2
+    val fill_radius = if disabled: radius - bw / 2 else: radius
+    out = _fcc_append(out, _fcc_rrect(0, fill_inset, fill_inset, full - fill_inset, full - fill_inset, fill_radius, 0), 0, 0, side, side, fill, false)
+    val ring = if disabled: ring_off elif checked: on else: ring_off
+    if k == 1 and side >= 6 and (not radio or side == 13):
+        out = _fcc_append_grid(out, _fcc_hairline_ring(radio, side), 0, 0, side, side, ring)
+    else:
+        out = _fcc_append(out, _fcc_rrect(1, bw / 2, bw / 2, full - bw / 2, full - bw / 2, radius, bw / 2), 0, 0, side, side, ring, false)
+    if checked:
+        val inset = full / 5
+        out = _fcc_append(out, _fcc_rrect(0, inset, inset, full - inset, full - inset, full, 0), 0, 0, side, side, if disabled: _FCC_DISABLED_DOT else: on, false)
+    _fcc_remember(key, out)
+
+# `<select>` arrow at device scale k. Origin: x = the arrow box's left edge,
+# y = the control's vertical middle; the spans reach 2 px outside the 8k x 4k
+# chevron for the stroke.
+# reason: k is a dimensionless device ratio; color is an ARGB word.
+# @allow(primitive_api)
+pub fn chrome_select_arrow_spans(k: i32, color: u32) -> ChromeSpans:
+    val key = "a{k}/{color}"
+    val hit = _fcc_cached(key)
+    if hit >= 0:
+        return g_fcc_cache_vals[hit]
+    val unit = (k as i64) * _FCC_ONE
+    val chevron = _FccShape(
+        kind: 2, x0: 0, y0: 0 - unit * 2, x1: unit * 4, y1: unit * 2,
+        x2: unit * 8, y2: 0 - unit * 2, r: 0, hw: _FCC_ONE, segs: 2)
+    val out = _fcc_append(ChromeSpans(xs: [], ys: [], ws: [], hs: [], colors: []), chevron, -2, -2 * k - 2, 8 * k + 2, 2 * k + 3, color, false)
+    _fcc_remember(key, out)
+
+# `<textarea>` resize grip at device scale k, origin at the top-left of
+# Chrome's 15k x 15k resizer square.
+# reason: k is a dimensionless device ratio.
+# @allow(primitive_api)
+pub fn chrome_resizer_spans(k: i32) -> ChromeSpans:
+    val key = "r{k}"
+    val hit = _fcc_cached(key)
+    if hit >= 0:
+        return g_fcc_cache_vals[hit]
+    val unit = (k as i64) * _FCC_ONE
+    # The dark pass is not clipped. The light one stops at row 14k - 1 (row 14
+    # at k == 1): its last overlap with the dark line is on row 26 / 40 / 54 at
+    # k = 2 / 3 / 4.
+    val size = 16 * k
+    # The short line starts 10.5k down, rounded half up to a device px (11, 21,
+    # 32, 42 at k = 1..4).
+    val three_quarter = (((21 * k + 1) / 2) as i64) * _FCC_ONE
+    var out = ChromeSpans(xs: [], ys: [], ws: [], hs: [], colors: [])
+    var layer = 0
+    # cpu-lane-loop-ok: the dark and the light pass of the grip
+    while layer < 2:
+        val dy = if layer == 0: 0 else: unit
+        val color = if layer == 0: 0x99000000u32 else: 0x99FFFFFFu32
+        val long_line = _FccShape(
+            kind: 2, x0: unit * 14, y0: unit * 7 + dy, x1: unit * 7, y1: unit * 14 + dy,
+            x2: 0, y2: 0, r: 0, hw: unit / 2, segs: 1)
+        val short_line = _FccShape(
+            kind: 2, x0: unit * 14, y0: three_quarter + dy, x1: three_quarter, y1: unit * 14 + dy,
+            x2: 0, y2: 0, r: 0, hw: unit / 2, segs: 1)
+        val rows = if layer == 0: size elif k == 1: 14 else: 14 * k - 1
+        out = _fcc_append(out, long_line, 0, 0, size, rows, color, true)
+        out = _fcc_append(out, short_line, 0, 0, size, rows, color, true)
+        layer = layer + 1
+    _fcc_remember(key, out)
+
+export ChromeSpans, chrome_checkable_spans, chrome_select_arrow_spans, chrome_resizer_spans

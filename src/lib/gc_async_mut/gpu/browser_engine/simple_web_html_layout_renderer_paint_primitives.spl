@@ -16,6 +16,7 @@ use std.nogc_sync_mut.gpu.engine2d.simd_kernels.{engine2d_simd_fill_rows_u32, en
 use std.nogc_sync_mut.gpu.engine2d.simd_native_rows.{engine2d_simd_blend_span_u32}
 use std.gc_async_mut.gpu.engine2d.backend_emu.{gradient_corner_dir_q16, radial_gradient_pixels, linear_gradient_pixels}
 use std.gpu.engine2d.color.{blend as engine2d_color_blend}
+use std.gc_async_mut.gpu.browser_engine.form_control_chrome.{ChromeSpans, chrome_select_arrow_spans, chrome_resizer_spans}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.*
 use std.common.encoding.sfnt.{
     OtFont, OtTable, parse_offset_table, read_u16_be, read_i16_be,
@@ -1795,30 +1796,55 @@ fn fb_border_sides_styled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w:
         out = _fb_border_corner_arc_clip(out, fbw, fbh, x, y, w, h, 3, bl_rad, bb, bl, cb, cl, sb, sl, clip)
     out
 
-fn fb_select_chevron_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, pad_r: i32, border_r: i32, border_t: i32, border_b: i32, arrow_zone_w: i32, color: u32, clip: ClipRect) -> [u32]:
-    if w < 10 or h < 8 or arrow_zone_w <= 0:
-        return fb
-    var ax1 = x + w - border_r - pad_r
-    if ax1 > x + w - border_r:
-        ax1 = x + w - border_r
-    var ax0 = ax1 - arrow_zone_w
-    if ax0 < x + 2:
-        ax0 = x + 2
-    if ax1 - ax0 < 6:
-        ax1 = x + w - border_r
-        ax0 = ax1 - arrow_zone_w
-        if ax0 < x + 2:
-            ax0 = x + 2
-    if ax1 - ax0 < 5:
-        return fb
-    val cx = (ax0 + ax1) / 2
-    val cy = (y + border_t + y + h - border_b) / 2
-    val chevron_col = if color != 0u32: color else: web_argb(55, 65, 81)
+# Blends native form-control spans (form_control_chrome.spl) whose origin is
+# (ox, oy), clipped to the frame and to `clip`. The staging raster is always
+# device scale 1, so a span is CSS px here.
+fn fb_chrome_spans_clip(fb: [u32], fbw: i32, fbh: i32, spans: ChromeSpans, ox: i32, oy: i32, clip: ClipRect) -> [u32]:
     var out = fb
-    out = fb_rect_clip(out, fbw, fbh, cx - 3, cy - 2, 7, 1, chevron_col, clip)
-    out = fb_rect_clip(out, fbw, fbh, cx - 2, cy - 1, 5, 1, chevron_col, clip)
-    out = fb_rect_clip(out, fbw, fbh, cx - 1, cy, 3, 1, chevron_col, clip)
-    fb_rect_clip(out, fbw, fbh, cx, cy + 1, 1, 1, chevron_col, clip)
+    var n = 0
+    # cpu-lane-loop-ok: one blend per span of one native control part; bound is that part's span count
+    while n < spans.xs.len():
+        var x0 = ox + spans.xs[n]
+        var y0 = oy + spans.ys[n]
+        var x1 = x0 + spans.ws[n]
+        var y1 = y0 + spans.hs[n]
+        if x0 < 0: x0 = 0
+        if y0 < 0: y0 = 0
+        if x1 > fbw: x1 = fbw
+        if y1 > fbh: y1 = fbh
+        if x0 < clip.x0: x0 = clip.x0
+        if y0 < clip.y0: y0 = clip.y0
+        if x1 > clip.x1: x1 = clip.x1
+        if y1 > clip.y1: y1 = clip.y1
+        val color = spans.colors[n]
+        if x1 > x0 and (color >> 24) == 255u32:
+            out = fb_fill_rows_const(out, fbw, x0, y0, x1, y1, color)
+        elif x1 > x0:
+            var row = y0
+            # cpu-lane-loop-ok: rows of one translucent span; bound is the span's height
+            while row < y1:
+                out = fb_blend_image_row(out, row * fbw + x0, x1 - x0, color)
+                row = row + 1
+        n = n + 1
+    out
+
+# Chrome 159 menulist arrow (see _html_draw_ir_select_arrow_commands, the Draw
+# IR twin): the 8 x 4 chevron whose box starts at int(inner right - 11.5).
+fn fb_select_chevron_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, border_r: i32, color: u32, clip: ClipRect) -> [u32]:
+    val arrow_x = ((w - border_r) * 2 - 23) / 2
+    if w < 10 or h < 8 or arrow_x < 0:
+        return fb
+    fb_chrome_spans_clip(
+        fb, fbw, fbh, chrome_select_arrow_spans(1, if color != 0u32: color else: web_argb(0, 0, 0)),
+        x + arrow_x, y + h / 2, clip
+    )
+
+# Chrome 159 textarea resize grip (the Draw IR twin is
+# _html_draw_ir_textarea_grip_commands).
+fn fb_textarea_grip_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, border_l: i32, border_t: i32, border_r: i32, border_b: i32, clip: ClipRect) -> [u32]:
+    if w - border_l - border_r < 16 or h - border_t - border_b < 16:
+        return fb
+    fb_chrome_spans_clip(fb, fbw, fbh, chrome_resizer_spans(1), x + w - border_r - 16, y + h - border_b - 16, clip)
 
 fn fb_outline_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, outline_w: i32, outline_offset: i32, color: u32, clip: ClipRect) -> [u32]:
     if outline_w <= 0 or color == 0u32:

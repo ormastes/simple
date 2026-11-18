@@ -214,12 +214,48 @@ fn _dir_device_y_offset(style: [DrawIrStyleProp]) -> i32:
             return _dir_parse_int(prop.value) as i32
     0
 
-fn _dir_without_device_y_offset(style: [DrawIrStyleProp]) -> [DrawIrStyleProp]:
+
+# `device-rect` = "dx,dy,w,h": a command painted on the DEVICE grid (the vector
+# parts of a native form control). Its x / y are the CSS origin of the control;
+# after scaling the rect is moved by (dx, dy) device px and takes the device
+# size (w, h). Never scaled, always stripped; [] when the command has none.
+fn _dir_device_rect(style: [DrawIrStyleProp]) -> [i32]:
+    for prop in style:
+        if prop.key == "device-rect":
+            var out: [i32] = []
+            for part in prop.value.split(","):
+                out.push(_dir_parse_int(part) as i32)
+            return out
+    []
+
+# `device-extra-height`: device px a box grows AFTER scaling, for a form control
+# whose device-px height is not k x its CSS height. Never scaled, always stripped.
+fn _dir_device_extra_height(style: [DrawIrStyleProp]) -> i32:
+    for prop in style:
+        if prop.key == "device-extra-height":
+            return _dir_parse_int(prop.value) as i32
+    0
+
+fn _dir_is_device_prop(key: text) -> bool:
+    key == "device-y-offset" or key == "device-rect" or key == "device-extra-height"
+
+fn _dir_grow_rect(rect: DrawIrRect, extra_height: i32) -> DrawIrRect:
+    if not rect.present:
+        return rect
+    DrawIrRect(present: true, x: rect.x, y: rect.y, width: rect.width, height: rect.height + extra_height)
+
+fn _dir_without_device_props(style: [DrawIrStyleProp]) -> [DrawIrStyleProp]:
     var out: [DrawIrStyleProp] = []
     for prop in style:
-        if prop.key != "device-y-offset":
+        if not _dir_is_device_prop(prop.key):
             out.push(prop)
     out
+
+fn _dir_has_device_prop(style: [DrawIrStyleProp]) -> bool:
+    for prop in style:
+        if _dir_is_device_prop(prop.key):
+            return true
+    false
 
 fn _dir_scale_command(command: DrawIrCommand, k: i32) -> DrawIrCommand:
     var scaled = command
@@ -233,7 +269,21 @@ fn _dir_scale_command(command: DrawIrCommand, k: i32) -> DrawIrCommand:
     scaled.content_rect = _dir_scale_rect(command.content_rect, k)
     scaled.hit_rect = _dir_scale_rect(command.hit_rect, k)
     scaled.clip_rect = _dir_scale_rect(command.clip_rect, k)
-    scaled.computed_style = _dir_scale_style(if device_dy != 0: _dir_without_device_y_offset(command.computed_style) else: command.computed_style, k)
+    val has_device_prop = _dir_has_device_prop(command.computed_style)
+    if has_device_prop:
+        val device_rect = _dir_device_rect(command.computed_style)
+        if device_rect.len() == 4:
+            scaled.x = scaled.x + device_rect[0]
+            scaled.y = scaled.y + device_rect[1]
+            scaled.width = device_rect[2]
+            scaled.height = device_rect[3]
+        val extra_height = _dir_device_extra_height(command.computed_style)
+        if extra_height != 0:
+            scaled.height = scaled.height + extra_height
+            scaled.border_rect = _dir_grow_rect(scaled.border_rect, extra_height)
+            scaled.content_rect = _dir_grow_rect(scaled.content_rect, extra_height)
+            scaled.hit_rect = _dir_grow_rect(scaled.hit_rect, extra_height)
+    scaled.computed_style = _dir_scale_style(if has_device_prop: _dir_without_device_props(command.computed_style) else: command.computed_style, k)
     scaled.points = _dir_scale_points(command.points, k)
     var run = command.glyph_run
     run.xs = _dir_scale_i32_list(command.glyph_run.xs, k)

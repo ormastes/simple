@@ -8,8 +8,9 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundati
     WEB_BUDGET_SITE_PAINT_SCROLLBARS, WEB_BUDGET_SITE_PAINT_TEXT
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, split_top_level_commas, shadow_length_prefix}
+use std.gc_async_mut.gpu.browser_engine.form_control_chrome.{chrome_checkable_spans}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{
-    fb_border_sides_styled_clip, fb_select_chevron_clip, fb_rounded_rect_corners_opacity_clip,
+    fb_border_sides_styled_clip, fb_select_chevron_clip, fb_textarea_grip_clip, fb_chrome_spans_clip, fb_rounded_rect_corners_opacity_clip,
     fb_text_ttf_available, fb_text_ttf_ascent_px, fb_text_ttf_line_baseline_y,
     fb_text_ttf_aa_clip_range_adv, radial_gradient_box_paintable, canvas_background_extent,
     canvas_gradient_source, canvas_gradient_layers,
@@ -797,51 +798,37 @@ pub fn input_text_paint_plan_with_overlay(
         resolved_view_start_byte: resolved_view_start
     )
 
+# x of a vector-font input value whose glyphs really advance `real_w` px.
+# The plan aligned the run with its fixed-pitch cell width; a centred or
+# end-aligned run is re-anchored on the real width (Chrome 159 centres a
+# `Go` submit label on its 15 px shaped width).
+# reason: px coordinates and widths of one input's content box.
+# @allow(primitive_api)
+pub fn input_value_vector_x(plan: InputTextPaintPlan, content_x: i32, content_w: i32, real_w: i32) -> i32:
+    val flat_slack = content_w - plan.measured_width
+    val flat_offset = plan.baseline_x - content_x
+    if flat_offset != 0 and flat_offset == flat_slack:
+        return content_x + content_w - real_w
+    if flat_offset != 0 and flat_offset == flat_slack / 2:
+        return content_x + (content_w - real_w) / 2
+    plan.baseline_x
+
+# Chrome 159 checkbox / radio (the Draw IR twin is
+# _html_draw_ir_checkable_commands): a square of side min(w, h), centred in
+# the border box, drawn from the vector parts of form_control_chrome.spl.
 fn fb_input_accent_control_clip(
     fb: [u32], fbw: i32, fbh: i32,
     x: i32, y: i32, w: i32, h: i32,
-    input_type: text, checked: bool, accent_color: u32, clip: ClipRect
+    input_type: text, checked: bool, disabled: bool, accent_color: u32, clip: ClipRect
 ) -> [u32]:
-    val accent = if accent_color != 0u32: accent_color else: web_argb(37, 99, 235)
-    # Chrome 159 draws the glyph as a square of side min(w, h), centred in
-    # the border box: a 40x16 checkbox at (4,3) inks columns 16..31, rows
-    # 3..18. A 13x13 box is unchanged.
     val side = if w < h: w else: h
-    val control_w = side
-    val control_h = side
-    val gx = x + (w - side) / 2
-    val gy = y + (h - side) / 2
-    if control_w <= 0 or control_h <= 0:
+    if side <= 0:
         return fb
-    val radio = input_type == "radio"
-    var out = fb
-    if radio:
-        out = fb_rounded_rect_opacity_clip(
-            out, fbw, fbh, gx, gy, control_w, control_h,
-            control_w / 2, accent, 100, clip
-        )
-        if control_w > 2 and control_h > 2:
-            out = fb_rounded_rect_opacity_clip(
-                out, fbw, fbh, gx + 1, gy + 1,
-                control_w - 2, control_h - 2,
-                (control_w - 2) / 2, web_argb(248, 250, 252), 100, clip
-            )
-    else:
-        out = fb_rect_clip(fb, fbw, fbh, gx, gy, control_w, control_h, web_argb(248, 250, 252), clip)
-        out = fb_rect_clip(out, fbw, fbh, gx, gy, control_w, 1, accent, clip)
-        out = fb_rect_clip(out, fbw, fbh, gx, gy + control_h - 1, control_w, 1, accent, clip)
-        out = fb_rect_clip(out, fbw, fbh, gx, gy, 1, control_h, accent, clip)
-        out = fb_rect_clip(out, fbw, fbh, gx + control_w - 1, gy, 1, control_h, accent, clip)
-    if checked and control_w > 6 and control_h > 6:
-        if radio:
-            out = fb_rounded_rect_opacity_clip(
-                out, fbw, fbh, gx + 3, gy + 3,
-                control_w - 6, control_h - 6,
-                (control_w - 6) / 2, accent, 100, clip
-            )
-        else:
-            out = fb_rect_clip(out, fbw, fbh, gx + 3, gy + 3, control_w - 6, control_h - 6, accent, clip)
-    out
+    fb_chrome_spans_clip(
+        fb, fbw, fbh,
+        chrome_checkable_spans(input_type == "radio", side, 1, checked, disabled, accent_color),
+        x + (w - side) / 2, y + (h - side) / 2, clip
+    )
 
 # ---------------------------------------------------------------------------
 # Paint into a staging [u32] framebuffer before Engine2D presentation.
@@ -1787,7 +1774,7 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
             out = fb_input_accent_control_clip(
                 out, fbw, fbh, x, y, w, h,
                 attr_value(nd.attrs_raw, "type").trim().lower(),
-                input_is_checked(nd), st.accent_color, clip
+                input_is_checked(nd), attr_present(nd.attrs_raw, "disabled"), st.accent_color, clip
             )
         if non_widget_mode and visible_node and nd.tag == "img" and nd.has_widget_image_class:
             val clip = paint_clip_at(clip_cache, i)
@@ -1800,9 +1787,11 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
             val clip = paint_clip_at(clip_cache, i)
             out = fb_select_chevron_clip(
                 out, fbw, fbh, x, y, w, h,
-                st.pad_r, st.border_r, st.border_t, st.border_b,
-                SELECT_ARROW_WIDTH_PX, st.fg, clip
+                st.border_r, st.fg, clip
             )
+        if non_widget_mode and visible_node and nd.tag == "textarea" and st.resize != "none" and y < fbh and y + h > 0:
+            val clip = paint_clip_at(clip_cache, i)
+            out = fb_textarea_grip_clip(out, fbw, fbh, x, y, w, h, st.border_l, st.border_t, st.border_r, st.border_b, clip)
         if non_widget_mode and visible_node and nd.tag == "svg" and y < fbh and y + h > 0:
             val clip = paint_clip_at(clip_cache, i)
             out = _fb_paint_svg_rects_clip(out, fbw, fbh, nodes, styles, bx, by, bw, bh, i, clip)
@@ -1829,10 +1818,15 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
                             st.bold, st.font_style_italic
                         )
                         val input_by = style_run_byte_advances(st, plan.text_value)
+                        var input_real_w = 0
+                        # cpu-lane-loop-ok: sums one input value's byte advances; bound is its byte length
+                        for byte_advance in input_by:
+                            input_real_w = input_real_w + byte_advance
+                        val ttf_x = input_value_vector_x(plan, x + st.border_l + st.pad_l, content_w, input_real_w)
                         if st.text_shadow_color != 0u32:
                             out = fb_text_ttf_aa_clip_range_adv(
                                 out, fbw, fbh,
-                                plan.baseline_x + st.text_shadow_x_px,
+                                ttf_x + st.text_shadow_x_px,
                                 ttf_base_y + st.text_shadow_y_px,
                                 plan.text_value, 0, plan.text_value.byte_len(),
                                 st.text_shadow_color, st.font_size,
@@ -1840,7 +1834,7 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
                                 st.font_style_italic, st.bold, plan.clip, input_by
                             )
                         out = fb_text_ttf_aa_clip_range_adv(
-                            out, fbw, fbh, plan.baseline_x, ttf_base_y,
+                            out, fbw, fbh, ttf_x, ttf_base_y,
                             plan.text_value, 0, plan.text_value.byte_len(),
                             plan.color, st.font_size,
                             st.resolved_font_identity, st.font_family,

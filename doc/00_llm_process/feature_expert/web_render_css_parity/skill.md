@@ -3177,3 +3177,62 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - **Still open** (`doc/08_tracking/bug/web_percent_padding_unparsed_and_grid_bare_span_2026-11-18.md`): `display:flow-root` (margin collapsing, float enclosure, float avoidance); an empty inline box opens an 18 px line; an empty block's margin does not collapse through its parent; an empty `<li>` is 0 (Chrome 18, marker line); grid free width is shared in whole px, no `justify-content` track distribution, no auto inline margin on a grid item, paint-side percent padding reads template tracks only; `<input>` / `<select>` / `<button>` padding does not size the control.
 - **Spec:** `test/01_unit/browser_engine/layout_residuals_chrome159_spec.spl` (35 cases; 2/35 on base, the two unchanged-behaviour guards; 35/35 now).
 - **Gates (blend seed):** catalog 1x base rows = head on all 8 pages (1.14 / 2.35 / 2.19 / 2.43 / 2.33 / 2.40 / 0.68 / 0.42); dpr4 measured base = head on all 8 (0.62 / 2.37 / 3.25 / 3.54 / 3.28 / 3.37 / 0.50 / 0.30); the empty-box change alone was measured separately with the same result, and the css-layout 1x frame is byte-identical base vs head. No catalog page has an empty auto-height box that moves a painted pixel, or an implicit grid column, so no row moved. Matrix PASS (979 cells, 82 mismatching, 146 ids, none new, none stale). Mandatory specs 123 / 131 / 68 / 22 green, the four grid / percent / device-px specs green; of 90 more layout specs 10 fail the same 18 names on base and head. css-layout 1x wall / RSS, 2 runs: base 46.5 s / 770 MB, 52.4 s / 767 MB; head 46.4 s / 769 MB, 46.5 s / 766 MB.
+## 2026-11-19 — Form-control chrome paints as Chrome 159 (vector parts, native frame, UA colours, device height)
+
+- **Rule (Chrome for Testing 159 on Linux, screenshots at device scale k = 1 and 4, grip also at 2 and 3):**
+  - Checkbox / radio are vectors on a `side` CSS px square scaled by k: a 1 CSS px #767676 ring whose centre line is 0.5 px inside the square (corner radius 2 px, a circle for a radio) over white; checked checkbox = #0075ff rounded square, no ring, white check stroked 0.16 x side through (0.2, 0.5) (0.4, 0.7) (0.8, 0.2) x side; checked radio = #0075ff ring + dot of radius 0.3 x side.
+  - `<select>` arrow: chevron (0,0) (4k,4k) (8k,0) whose box starts at int(inner right - 11.5k), centred on the control's middle row, stroked **2 device px at every scale**.
+  - `<textarea>` grip: two **aliased** lines (14k,7k)-(7k,14k) and (14k,10.5k)-(10.5k,14k) (10.5k rounds half up: 11, 21, 32, 42), k px wide, black at 60 %, measured from a point 16k px inside the padding box's bottom-right corner; then the same lines k px lower in white at 60 %, clipped at row 14k - 1 (row 14 at k = 1).
+  - An unstyled text field / textarea / menulist is a 1 px #767676 frame at the outer edge of the UA border area over white; a button the same over #efefef. A control does not inherit `color` (FieldText / ButtonText = #000); a button with an author border keeps the #efefef ButtonFace.
+  - Disabled (on #fff): field frame #d0d0d0 over #f8f8f8, text #545454; button #d0d0d0 over #eeeeee, text rgba(16,16,16,.3); select = the field at `opacity: 0.7` with #808080 text and arrow (#a5a5a5 on #fafafa); checkbox ring #d1d1d1 over #f8f8f8.
+- **Was:** a square #2563eb outline with a filled inner square / circle, a 7-px filled triangle, no grip, a 2 px #767676 border on white for every field and button, the parent's `color` inherited into controls, and the painted box k x its CSS height at k > 1.
+- **Fix:**
+  - `form_control_chrome.spl` (new): the parts as ARGB spans in device px. Integer 1/64 px geometry, exact-area coverage by 8 x 8 supersampling of the edge pixels, runs merged horizontally and vertically, a 32-entry cache per (part, size, k, state).
+  - `..._paint_draw_ir.spl`: `_html_draw_ir_chrome_span_commands` lowers a span to one rect. At k > 1 the rect carries `device-rect` = "dx,dy,w,h"; `draw_ir_device_scale.spl` moves the scaled CSS origin by (dx, dy) and sets the device size, so a part is sharp at every scale. `device-extra-height` grows a control's box (and its border / content / hit rect) by `box_device_extra_h_at`.
+  - `..._paint_primitives.spl` / `..._paint_raster.spl`: the staging raster blends the same spans (`fb_chrome_spans_clip`), so the two lanes stay pixel-equal (the legacy widget-mode specs compare them).
+  - `..._core.spl`: `form_control_ua_box_decls` adds the UA colours and `resize: both`; `_apply_native_control_look` replaces the old select-only white fill for every control the author did not restyle (`_select_author_styled`): border 1 px, the hidden border px moved into the padding, so the content box does not move.
+  - Input value text (Draw IR lane): `_html_draw_ir_input_value_command` shapes the value with real advances on a line box centred in the content box, for fonts above 8 px -- the rule the raster already had (`use_ttf`). The Draw IR lane was still on the fixed-pitch cell model: `Simple` in a default field sat 3 rows low and 7 px too wide (rows 9..17, cols 5..50; Chrome 6..17, 5..43).
+- **Traps:**
+  - **A 1 px anti-aliased stroke is a Skia HAIRLINE**, not a filled stroke: at k = 1 the ring pixels are not the exact area of a 1 px ring (top-centre of the radio is 0x99, a full pixel would be 0x76). Those coverages are tables (`_FCC_RADIO_13_HAIRLINE`, `_FCC_BOX_HAIRLINE_EDGE`); from k = 2 the ring is the geometric stroke.
+  - **Engine2D applies a node's opacity to the rects that name it as `parent_id`.** Pre-multiplying the span colour by `opacity_pct` applied it twice (disabled select arrow #bfbfbf, Chrome #a5a5a5). The old chevron did exactly that.
+  - **The Draw IR lane has no `background-clip`** (the prop is emitted, nothing reads it): a translucent fill always runs under a translucent border. The disabled frame colours are therefore solved for a white page; on a coloured page they are off.
+  - **Corner radius differs between the lanes**: `border-radius: 1px` differs by 4-5 px per box between the raster and Engine2D, and the widget-mode specs require 0. The native frame stays square (Chrome: outer radius 2.5 px, the 4 corner px are page colour).
+  - A sample exactly on a stroke's cap: inside at the start cap, outside at the end cap. Without it the aliased grip is one diagonal too long at k = 2..4.
+  - `pass` is a reserved word (a loop variable named `pass` fails to parse with "expected pattern").
+  - `examples/` scripts that write a PPM need `SIMPLE_EXECUTION_MODE=interpreter`; in the default mode `encode_ppm_p6` wrote a broken header.
+- **Spec:** `test/01_unit/browser_engine/form_control_paint_chrome159_spec.spl` (11 cases: 0/11 on base 0251987783a, 11/11 now). It embeds Chrome's 13 x 13 pixels of the four checkable states and of the arrow block, and measures every fact relative to the control's own box.
+- **Per-control pixels differing from Chrome by more than 8 (band of the test page; Chrome / base / now):**
+
+  | control | 1x base -> now | 4x base -> now |
+  |---|---|---|
+  | checkbox | 52 -> 0 | 977 -> 467 |
+  | checkbox checked | 169 -> 25 | 2748 -> 521 |
+  | checkbox disabled | 52 -> 0 | 969 -> 433 |
+  | checkbox checked disabled | 169 -> 0 | 2794 -> 408 |
+  | radio | 76 -> 0 | 863 -> 632 |
+  | radio checked | 143 -> 26 | 1696 -> 877 |
+  | radio disabled | 68 -> 0 | 851 -> 549 |
+  | radio checked disabled | 132 -> 2 | 1679 -> 731 |
+  | select | 279 -> 224 | 5633 -> 5102 |
+  | select disabled | 423 -> 220 | 6618 -> 4992 |
+  | textarea | 545 -> 540 | 11666 -> 5055 |
+  | textarea disabled | 963 -> 541 | 15235 -> 5054 |
+  | text input | 793 -> 277 | 15177 -> 9023 |
+  | text input disabled | 1194 -> 277 | 19083 -> 9028 |
+  | button | 627 -> 121 | 10563 -> 2133 |
+  | button disabled | 714 -> 75 | 11776 -> 2035 |
+  | catalog-styled select | 352 -> 281 | 4207 -> 2506 |
+  | catalog-styled textarea | 625 -> 620 | 12537 -> 5540 |
+  | catalog-styled input | 453 -> 337 | 6591 -> 3230 |
+  | catalog-styled button | 1077 -> 159 | 17091 -> 1017 |
+
+  The 4x rows of the default controls include a 2-row layout offset of the whole band; aligned on the box the parts are checkbox 823 -> 79, checked 2661 -> 81, radio 728 -> 152, checked 1546 -> 282.
+- **Re-pins:** `simple_web_html_layout_renderer_coverage_spec` radio example `_distinct` 3 -> 28 (the Chrome parts are anti-aliased; pixels off Chrome on that page 280 -> 176); `simple_web_renderer_spec` widget-mode input pixel #f5f5f5 -> #ffffff (inside the white Field).
+- **Gates (blend seed):** specs `simple_web_renderer_spec` 123/123, `browser_renderer_spec` 131/131, `layout_renderer_box_geometry_chrome159_spec` 68/68, `web_device_scale_spec` 22/22, `form_control_chrome159_geometry_spec` 42/42, `device_px_block_height_chrome159_spec` 3/3; matrix PASS, 979 cells, 82 mismatching, no new and no stale id; catalog 1x 1.14 / 2.35 / 2.19 / 2.43 / **2.27** (row 2.33) / 2.40 / 0.68 / 0.42; catalog dpr4 0.62 / 2.37 / 3.25 / 3.54 / **3.14** (row 3.28) / 3.37 / 0.50 / **0.26** (row 0.30). Rows lowered to the measured values.
+- **Perf** (forms-media at dpr4, 2 runs, wall / peak RSS): base 114.1 / 126.1 s, 2884 / 2889 MB; head 122.3 / 119.0 s, 2916 / 2944 MB.
+- **Open:**
+  - Native frame corners are square (4 px per control at 1x).
+  - The checked mark / dot differ by 25 / 26 edge px at 1x: Skia's small strokes are ~0.07 px bolder than their exact area.
+  - **Device-px WIDTH of a control at k > 1 is not modelled** (layout): at k = 4 Chrome's default text input is 719 device px wide, here 740; the catalog's styled input 759 vs 780, select 289 vs 292, button 143 vs 144, textarea 775 vs 772. This is most of what is left of forms-media at dpr4.
+  - The UA control font is carried as 13 px, Chrome's is 13.333 px: a textarea's monospace run is 160 px for 20 columns where Chrome has 161, so the textarea is 1 px narrower (181 vs 182 default, 193 vs 194 in the catalog) and its text sits 1 row low.
+  - `test/03_system/app/browser/feature/browser_checkable_control_rendering_spec.spl` does not run on base (`dispatch_dom_event` not found on `BrowserSession`, a semantic error before any example). Its Draw IR pins describe the old flat chrome (frame colour #f8fafc, `border-radius` props, pixel (2,2) = accent); they need re-pinning to the parts when the spec is repaired. The `_checkable_frame` / `_checked_indicator` commands are kept as transparent state carriers.
