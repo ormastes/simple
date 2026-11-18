@@ -15,7 +15,7 @@
 
 use std.common.sdn.parser (parse)
 use std.common.sdn.value.{SdnValue}
-use compiler.driver.driver_build.library_unit_plan_v1.{library_unit_decl_parse_v1}
+use compiler.driver.driver_build.library_unit_plan_v1.{library_unit_decl_parse_v1, library_unit_path_normalize_v1}
 
 struct LibraryUnitManifestV1:
     name: text
@@ -79,3 +79,54 @@ pub fn library_unit_manifest_parse_v1(manifest_dir: text, content: text) -> Resu
             pass
     Ok(LibraryUnitManifestV1(name: decl.name, version: version, kind: decl.kind,
         dir: decl.dir, deps: decl.deps, includes: includes, excludes: excludes))
+
+fn _manifest_closure_cycle_v1(path: [text], dep: text) -> text:
+    var pos = 0
+    var i = 0
+    while i < path.len():
+        if path[i] == dep:
+            pos = i
+        i = i + 1
+    val cycle = path[pos:]
+    cycle.join(" -> ") + " -> " + dep
+
+# Recursively walk `project.dependencies` from `root_dir`. `load` returns the
+# content of `<dir>/simple.sdn` for a normalised unit dir ("" = absent). Result
+# is every reachable unit, dependencies before dependents, each exactly once.
+# Fail closed: a missing or malformed manifest, or a dependency cycle (named by
+# its path), is an Err. Pure: all I/O lives in the caller's `load`.
+pub fn library_unit_manifest_closure_v1(root_dir: text, load: fn(text) -> text) -> Result<[LibraryUnitManifestV1], text>:
+    val root = library_unit_path_normalize_v1(base_dir: root_dir, rel: ".")
+    var manifests: {text: LibraryUnitManifestV1} = {}
+    var state: {text: i64} = {}
+    var out: [LibraryUnitManifestV1] = []
+    var path: [text] = [root]
+    var next_dep: [i64] = [0]
+    while path.len() > 0:
+        val top = path[path.len() - 1]
+        if not manifests.contains_key(top):
+            val content = load(top)
+            if content == "":
+                return Err("{top}/simple.sdn: missing manifest")
+            val parsed = match library_unit_manifest_parse_v1(top, content):
+                case Ok(m): m
+                case Err(e): return Err(e)
+            manifests[top] = parsed
+            state[top] = 1
+        val m = manifests[top]
+        val i = next_dep[next_dep.len() - 1]
+        if i >= m.deps.len():
+            state[top] = 2
+            out.push(m)
+            path.pop()
+            next_dep.pop()
+        else:
+            next_dep[next_dep.len() - 1] = i + 1
+            val dep = m.deps[i]
+            val st = state.get(dep) ?? 0
+            if st == 1:
+                return Err("{dep}/simple.sdn: dependency cycle {_manifest_closure_cycle_v1(path, dep)}")
+            if st == 0:
+                path.push(dep)
+                next_dep.push(0)
+    Ok(out)

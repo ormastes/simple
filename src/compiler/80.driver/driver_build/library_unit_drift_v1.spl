@@ -60,3 +60,42 @@ pub fn library_unit_drift_verdict_v1(d: LibraryUnitDriftV1) -> text:
     if d.removed.len() > 0:
         parts.push("removed: " + d.removed.join(", "))
     "FAIL — {d.checked} checked, {d.added.len()} added, {d.removed.len()} removed; " + parts.join("; ")
+
+# Closure form: one drift result per unit of a manifest dependency closure
+# (`library_unit_manifest_closure_v1`, dependencies first). Any drifting unit
+# fails the whole check; an empty closure or a closure with nothing to compare
+# is ERROR.
+@allow(primitive_api)  # exit code is the process-exit contract (0/1/2)
+pub fn library_unit_drift_closure_exit_code_v1(drifts: [LibraryUnitDriftV1]) -> i64:
+    var checked = 0
+    var worst = 0
+    for d in drifts:
+        checked = checked + d.checked
+        if d.added.len() > 0 or d.removed.len() > 0:
+            worst = 1
+    if drifts.len() == 0 or checked == 0:
+        return 2
+    worst
+
+@allow(primitive_api)  # unit names and rendered verdict line are CLI text
+pub fn library_unit_drift_closure_verdict_v1(names: [text], drifts: [LibraryUnitDriftV1]) -> text:
+    val code = library_unit_drift_closure_exit_code_v1(drifts)
+    if code == 2:
+        return "ERROR — nothing was checked (no unit in the dependency closure has an inventory)"
+    var checked = 0
+    var parts: [text] = []
+    var i = 0
+    while i < drifts.len():
+        val d = drifts[i]
+        checked = checked + d.checked
+        if d.added.len() > 0 or d.removed.len() > 0:
+            var bits: [text] = []
+            if d.added.len() > 0:
+                bits.push("added: " + d.added.join(", "))
+            if d.removed.len() > 0:
+                bits.push("removed: " + d.removed.join(", "))
+            parts.push(names[i] + " (" + bits.join("; ") + ")")
+        i = i + 1
+    if code == 0:
+        return "PASS — {checked} checked across {drifts.len()} unit(s), 0 added, 0 removed"
+    "FAIL — {checked} checked across {drifts.len()} unit(s); drift in " + parts.join("; ")

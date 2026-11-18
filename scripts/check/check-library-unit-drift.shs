@@ -13,7 +13,9 @@
 # Usage: sh scripts/check/check-library-unit-drift.shs [--selftest] <lib dir>
 # Env: SIMPLE_BIN (default bin/simple).
 # Verdict is the last stdout line. Exit 0 PASS / 1 FAIL / 2 ERROR.
-# NOT wired into any push-tier gate.
+# Closure: when <dir>/simple.sdn exists, its `dependencies:` are walked recursively
+# (cycle = ERROR) and every unit in the closure needs its own source_inventory.lock.
+# NOT wired into any push-tier gate (extended CI only).
 
 LC_ALL=C
 export LC_ALL
@@ -69,6 +71,21 @@ selftest() {
     expect nolock-error 2 "$root/nolock" || bad=1
     out=$(check_dir "$root/added")
     case $out in *"added: c.spl"*) ;; *) echo "selftest FAIL: added verdict does not name c.spl ($out)"; bad=1;; esac
+    # Manifest dependency closure: root unit "app" depends on "lib"; both need a lock.
+    sdn() { printf 'project:\n  name: %s\n  version: 1\n  type: library\n' "$2" > "$root/$1/simple.sdn"
+            [ -n "$3" ] && printf '  dependencies:\n    - project: %s\n' "$3" >> "$root/$1/simple.sdn"; return 0; }
+    mk cl/app; mk cl/lib; sdn cl/app APP ../lib; sdn cl/lib LIB ""
+    mk cldrift/app; mk cldrift/lib; sdn cldrift/app APP ../lib; sdn cldrift/lib LIB ""; printf 'x\n' > "$root/cldrift/lib/c.spl"
+    mk clcycle/app; mk clcycle/lib; sdn clcycle/app APP ../lib; sdn clcycle/lib LIB ../app
+    mk clnolock/app; mk clnolock/lib; sdn clnolock/app APP ../lib; sdn clnolock/lib LIB ""; rm "$root/clnolock/lib/source_inventory.lock"
+    mk clmissing/app; sdn clmissing/app APP ../gone
+    expect closure-pass 0 "$root/cl/app" || bad=1
+    expect closure-dep-drift-fail 1 "$root/cldrift/app" || bad=1
+    expect closure-cycle-error 2 "$root/clcycle/app" || bad=1
+    expect closure-dep-nolock-error 2 "$root/clnolock/app" || bad=1
+    expect closure-missing-manifest-error 2 "$root/clmissing/app" || bad=1
+    out=$(check_dir "$root/cldrift/app")
+    case $out in *"LIB (added: c.spl)"*) ;; *) echo "selftest FAIL: closure verdict does not name LIB drift ($out)"; bad=1;; esac
     rm -rf "$root"
     if [ "$bad" -ne 0 ]; then echo "ERROR — selftest failed, nothing was checked"; return 2; fi
     return 0
@@ -85,7 +102,7 @@ done
 
 selftest || exit 2
 if [ "$run_selftest" -eq 1 ] && [ -z "$dir" ]; then
-    echo "PASS — selftest: 5 fixture(s) checked"; exit 0
+    echo "PASS — selftest: 11 fixture(s) checked"; exit 0
 fi
 if [ -z "$dir" ]; then
     echo "ERROR — nothing was checked (usage: check-library-unit-drift.shs [--selftest] <lib dir>)"; exit 2

@@ -1,0 +1,83 @@
+# `simple build units list|show` and `simple build doctor --roles`.
+# @cover src/app/build/units_cli.spl
+# @cover src/app/build/doctor_cli.spl
+use std.spec
+use app.io.mod.{dir_create_all, dir_remove_all, file_write}
+use app.build.units_cli.{build_units_list_output, build_units_show_output, run_build_units}
+use app.build.doctor_cli.{doctor_roles_report, doctor_roles_exit, run_build_doctor}
+use compiler.driver.driver_build.library_unit_manifest_v1.{LibraryUnitManifestV1, library_unit_manifest_parse_v1}
+
+fn unit_of(dir: text, name: text, deps: [text]) -> LibraryUnitManifestV1:
+    var body = "project:\n  name: {name}\n  version: 2.0.0\n  type: library\n"
+    if deps.len() > 0:
+        body = body + "  dependencies:\n"
+        for d in deps:
+            body = body + "    - project: {d}\n"
+    match library_unit_manifest_parse_v1(dir, body):
+        case Ok(m): m
+        case Err(e): panic(e)
+
+describe "build units list/show (pure)":
+    it "lists one line per unit with name, version, kind and dir":
+        val out = build_units_list_output([unit_of("lib", "L", []), unit_of("app", "A", ["../lib"])])
+        expect(out).to_equal("L 2.0.0 library lib\nA 2.0.0 library app\n")
+
+    it "shows a unit by name, with deps and globs":
+        val out = build_units_show_output([unit_of("lib", "L", []), unit_of("app", "A", ["../lib"])], "A").unwrap()
+        expect(out).to_contain("name: A")
+        expect(out).to_contain("dir: app")
+        expect(out).to_contain("deps: lib")
+        expect(out).to_contain("include: **/*.spl")
+
+    it "shows a unit by dir and errors on an unknown key":
+        expect(build_units_show_output([unit_of("lib", "L", [])], "lib").unwrap()).to_contain("name: L")
+        expect(build_units_show_output([unit_of("lib", "L", [])], "nope").is_err()).to_equal(true)
+
+describe "build units CLI (filesystem)":
+    it "rejects usage errors with exit 2":
+        expect(run_build_units([])).to_equal(2)
+        expect(run_build_units(["bogus"])).to_equal(2)
+        expect(run_build_units(["show"])).to_equal(2)
+        expect(run_build_units(["list", "no/such/dir_units_cli"])).to_equal(2)
+
+    it "lists and shows the dependency closure of a root, and fails on a cycle":
+        val root = "build/test_units_cli_fixture"
+        dir_remove_all(root)
+        dir_create_all(root + "/a")
+        dir_create_all(root + "/b")
+        file_write(root + "/a/simple.sdn", "project:\n  name: A\n  version: 1\n  type: library\n  dependencies:\n    - project: ../b\n")
+        file_write(root + "/b/simple.sdn", "project:\n  name: B\n  version: 1\n  type: library\n")
+        expect(run_build_units(["list", root + "/a"])).to_equal(0)
+        expect(run_build_units(["show", "B", root + "/a"])).to_equal(0)
+        expect(run_build_units(["show", "Z", root + "/a"])).to_equal(2)
+        file_write(root + "/b/simple.sdn", "project:\n  name: B\n  version: 1\n  type: library\n  dependencies:\n    - project: ../a\n")
+        expect(run_build_units(["list", root + "/a"])).to_equal(2)
+        dir_remove_all(root)
+
+describe "build doctor --roles":
+    it "reports findings as errors under deny and exits 1":
+        val f = ["u: role 'b' has no grant"]
+        expect(doctor_roles_report(f, 1, "deny")).to_contain("error[SPL-BUILD-ROLE-001] u: role 'b' has no grant")
+        expect(doctor_roles_exit(f, 1, "deny")).to_equal(1)
+
+    it "reports warnings under warn and exits 0":
+        val f = ["u: role 'b' has no grant"]
+        expect(doctor_roles_report(f, 1, "warn")).to_contain("warning[SPL-BUILD-ROLE-001]")
+        expect(doctor_roles_exit(f, 1, "warn")).to_equal(0)
+
+    it "is ERROR (exit 2) when no unit was checked":
+        expect(doctor_roles_exit([], 0, "deny")).to_equal(2)
+        expect(doctor_roles_report([], 0, "deny")).to_start_with("ERROR")
+
+    it "run_build_doctor --roles flags an ungranted and an expired role":
+        val root = "build/test_roles_fixture"
+        dir_remove_all(root)
+        dir_create_all(root + "/ok")
+        dir_create_all(root + "/bad")
+        val head = "project:\n  name: U\n  version: 1\n  type: library\n"
+        file_write(root + "/ok/simple.sdn", head + "  roles:\n    declared: [a]\n    grants:\n      - role: a\n")
+        file_write(root + "/bad/simple.sdn", head + "  roles:\n    declared: [a, b]\n    grants:\n      - role: a\n        exception: true\n        expires: \"2020-01-01\"\n")
+        expect(run_build_doctor(["--roles", "--robust", "--today", "2026-11-18", root + "/ok"])).to_equal(0)
+        expect(run_build_doctor(["--roles", "--robust", "--today", "2026-11-18", root + "/bad"])).to_equal(1)
+        expect(run_build_doctor(["--roles", "--today", "2026-11-18", root + "/bad"])).to_equal(0)
+        dir_remove_all(root)

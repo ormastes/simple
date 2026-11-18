@@ -1,0 +1,87 @@
+#!/bin/sh
+# Library-unit source-ownership gate (SPL-BUILD-SRC-001, robust profile; plan
+# section 4.2/7 of doc/03_plan/release/1.0.0/
+# robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md).
+#
+# Thin wrapper over `simple build doctor --source-ownership --robust` (via
+# scripts/check/source_ownership_entry.spl): every *.spl under a library dir must
+# be owned by exactly one unit (the dir's simple.sdn include/exclude globs).
+# Under --robust an orphan or duplicate owner is an error.
+#
+# Usage: sh scripts/check/check-source-ownership.shs [--selftest] [<lib dir>...]
+# Env: SIMPLE_BIN (default bin/simple).
+# Verdict is the last stdout line. Exit 0 PASS / 1 FAIL / 2 ERROR.
+# NOT wired into any push-tier gate (extended CI only).
+
+LC_ALL=C
+export LC_ALL
+
+script_dir=$(cd "$(dirname "$0")" && pwd)
+entry="$script_dir/source_ownership_entry.spl"
+SIMPLE_BIN=${SIMPLE_BIN:-"$script_dir/../../bin/simple"}
+
+# check <dir>... -> prints verdict, returns 0/1/2. No verdict line = ERROR.
+check_dirs() {
+    if [ ! -f "$entry" ]; then
+        echo "ERROR — nothing was checked (missing entry: $entry)"; return 2
+    fi
+    tmpout=$(mktemp 2>/dev/null) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    "$SIMPLE_BIN" run "$entry" -- "$@" > "$tmpout" 2>/dev/null
+    irc=$?
+    out=$(tr -d '\r' < "$tmpout" | grep -E '^(PASS|FAIL|ERROR) ' | tail -n 1)
+    rm -f "$tmpout"
+    if [ "$irc" -ne 0 ] && [ "$irc" -ne 1 ] && [ "$irc" -ne 2 ]; then
+        echo "ERROR — nothing was checked (interpreter rc=$irc)"; return 2
+    fi
+    case $out in
+        "PASS "*) [ "$irc" -eq 0 ] && { echo "$out"; return 0; } ;;
+        "FAIL "*) [ "$irc" -eq 1 ] && { echo "$out"; return 1; } ;;
+        "ERROR "*) echo "$out"; return 2 ;;
+    esac
+    echo "ERROR — nothing was checked (verdict/rc mismatch or no verdict, rc=$irc)"; return 2
+}
+
+expect() { # name want_rc dir
+    out=$(check_dirs "$3"); rc=$?
+    if [ "$rc" -ne "$2" ]; then
+        echo "selftest FAIL: $1 expected rc=$2 got rc=$rc ($out)"; return 1
+    fi
+    return 0
+}
+
+selftest() {
+    root=$(mktemp -d 2>/dev/null) || { echo "ERROR — nothing was checked (selftest mktemp failed)"; return 2; }
+    bad=0
+    sdn() { printf 'project:\n  name: u\n  version: 1\n  type: library\n  sources:\n    include: ["%s"]\n' "$2" > "$root/$1/simple.sdn"; }
+    mkdir -p "$root/clean/a"; printf 'x\n' > "$root/clean/a/x.spl"; sdn clean 'a/**/*.spl'
+    mkdir -p "$root/orphan/a" "$root/orphan/b"; printf 'x\n' > "$root/orphan/a/x.spl"; printf 'x\n' > "$root/orphan/b/y.spl"; sdn orphan 'a/**/*.spl'
+    mkdir -p "$root/empty"; sdn empty '**/*.spl'
+    expect clean-pass 0 "$root/clean" || bad=1
+    expect orphan-fail 1 "$root/orphan" || bad=1
+    expect empty-error 2 "$root/empty" || bad=1
+    out=$(check_dirs "$root/orphan")
+    case $out in *"1 error finding"*) ;; *) echo "selftest FAIL: orphan verdict has no error finding ($out)"; bad=1;; esac
+    rm -rf "$root"
+    if [ "$bad" -ne 0 ]; then echo "ERROR — selftest failed, nothing was checked"; return 2; fi
+    return 0
+}
+
+run_selftest=0
+dirs=""
+for a in "$@"; do
+    case $a in
+        --selftest) run_selftest=1 ;;
+        *) dirs="$dirs $a" ;;
+    esac
+done
+
+selftest || exit 2
+if [ "$run_selftest" -eq 1 ] && [ -z "$dirs" ]; then
+    echo "PASS — selftest: 4 fixture(s) checked"; exit 0
+fi
+if [ -z "$dirs" ]; then
+    echo "ERROR — nothing was checked (usage: check-source-ownership.shs [--selftest] <lib dir>...)"; exit 2
+fi
+# shellcheck disable=SC2086
+check_dirs $dirs
+exit $?

@@ -16,6 +16,8 @@ use compiler.driver.driver_build.source_inventory_v1.{
 }
 use compiler.driver.driver_build.source_inventory_scan_v1.{source_inventory_scan_v1, source_inventory_scan_resolve_v1}
 use compiler.driver.driver_build.library_unit_manifest_v1.{library_unit_manifest_parse_v1}
+use compiler.driver.driver_build.library_unit_role_v1.{library_unit_roles_parse_v1, library_unit_role_check_v1}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros, timestamp_year, timestamp_month, timestamp_day}
 
 @allow(primitive_api)  # CLI boundary: severity is the policy level name ("warn"/"deny")
 pub fn doctor_source_ownership_report(units: [SourceInventoryUnitV1], scanned: [text], severity: text) -> text:
@@ -40,12 +42,58 @@ pub fn doctor_source_ownership_exit(units: [SourceInventoryUnitV1], scanned: [te
         return 1
     0
 
-fn _doctor_severity(robust: bool) -> text:
+@allow(primitive_api)  # CLI boundary: findings are rendered messages, severity is the policy level name
+pub fn doctor_roles_report(findings: [text], checked: i64, severity: text) -> text:
+    if checked == 0:
+        return "ERROR — nothing was checked (no unit manifest read)\n"
+    val label = if severity == "deny": "error" else: "warning"
+    var out = ""
+    for f in findings:
+        out = out + "{label}[SPL-BUILD-ROLE-001] {f}\n"
+    if findings.len() == 0:
+        return out + "PASS — {checked} unit(s) checked, 0 findings\n"
+    if severity == "deny":
+        return out + "FAIL — {checked} unit(s) checked, {findings.len()} error finding(s)\n"
+    out + "PASS — {checked} unit(s) checked, {findings.len()} warning(s)\n"
+
+@allow(primitive_api)  # CLI boundary: severity is the policy level name ("warn"/"deny")
+pub fn doctor_roles_exit(findings: [text], checked: i64, severity: text) -> i64:
+    if checked == 0:
+        return 2
+    if severity == "deny" and findings.len() > 0:
+        return 1
+    0
+
+fn _doctor_today() -> text:
+    val micros = time_now_unix_micros()
+    "{timestamp_year(micros)}-{timestamp_month(micros):02}-{timestamp_day(micros):02}"
+
+fn _doctor_run_roles(dirs: [text], robust: bool, today: text) -> i64:
+    var findings: [text] = []
+    var checked = 0
+    for dir in dirs:
+        val manifest_path = dir + "/simple.sdn"
+        if not file_exists(manifest_path):
+            print("build-doctor-error: no manifest: {manifest_path}")
+            return 2
+        match library_unit_roles_parse_v1(dir, file_read(manifest_path) ?? ""):
+            case Ok(roles):
+                checked = checked + 1
+                for m in library_unit_role_check_v1(roles, today):
+                    findings.push("{dir}: {m}")
+            case Err(e):
+                print("build-doctor-error: {e}")
+                return 2
+    val severity = _doctor_severity("SPL-BUILD-ROLE-001", robust)
+    print(doctor_roles_report(findings, checked, severity))
+    doctor_roles_exit(findings, checked, severity)
+
+fn _doctor_severity(rule: text, robust: bool) -> text:
     val loaded = load_diagnostic_policy_text(file_read_text(diagnostic_policy_default_path()))
     val profile = if robust: "robust" else: "default"
     match loaded:
         case Ok(s):
-            val r = s.resolve("SPL-BUILD-SRC-001", PolicyResolveContext.new(profile, "2026.11", ""), DiagnosticRuleLevel.Warn)
+            val r = s.resolve(rule, PolicyResolveContext.new(profile, "2026.11", ""), DiagnosticRuleLevel.Warn)
             if r.level.name() == "deny": "deny" else: "warn"
         case Err(_):
             if robust: "deny" else: "warn"
@@ -58,24 +106,44 @@ fn _doctor_strip(dir: text) -> text:
 
 @allow(primitive_api)  # CLI argv boundary: argv in, process exit code out
 pub fn run_build_doctor(args: [text]) -> i64:
+    val usage = "usage: simple build doctor (--source-ownership | --roles [--today YYYY-MM-DD]) [--robust] [<lib dir>...]"
     var source_ownership = false
+    var roles = false
+    var today = ""
     var robust = false
     var dirs: [text] = []
-    for a in args:
+    var i = 0
+    while i < args.len():
+        val a = args[i]
         if a == "--source-ownership":
             source_ownership = true
+        elif a == "--roles":
+            roles = true
+        elif a == "--today":
+            if i + 1 >= args.len():
+                print(usage)
+                return 2
+            today = args[i + 1]
+            i = i + 1
         elif a == "--robust":
             robust = true
         elif a.starts_with("-"):
-            print("usage: simple build doctor --source-ownership [--robust] [<lib dir>...]")
+            print(usage)
             return 2
         else:
             dirs.push(_doctor_strip(a))
-    if not source_ownership:
-        print("usage: simple build doctor --source-ownership [--robust] [<lib dir>...]")
+        i = i + 1
+    if source_ownership == roles:
+        print(usage)
         return 2
     if dirs.len() == 0:
         dirs.push(".")
+    if roles:
+        for d in dirs:
+            if not is_dir(d):
+                print("build-doctor-error: not a directory: {d}")
+                return 2
+        return _doctor_run_roles(dirs, robust, if today == "": _doctor_today() else: today)
     var units: [SourceInventoryUnitV1] = []
     var scanned: [text] = []
     for dir in dirs:
@@ -100,6 +168,6 @@ pub fn run_build_doctor(args: [text]) -> i64:
         units.push(SourceInventoryUnitV1(name: dir, files: files))
         for p in source_inventory_scan_v1(dir):
             scanned.push(prefix + p)
-    val severity = _doctor_severity(robust)
+    val severity = _doctor_severity("SPL-BUILD-SRC-001", robust)
     print(doctor_source_ownership_report(units, scanned, severity))
     doctor_source_ownership_exit(units, scanned, severity)
