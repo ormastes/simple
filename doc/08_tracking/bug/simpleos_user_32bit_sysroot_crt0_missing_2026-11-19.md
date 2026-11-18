@@ -55,3 +55,30 @@ lld), the same as the 64-bit cells (`simpleos_user_elf_boot_blocked_aarch64_risc
 ls src/os/libc | grep -E 'crt0|syscall'      # no i686/arm32/riscv32 files
 ls scripts/os | grep sysroot                 # aarch64 and riscv64 only
 ```
+
+## Update 2026-11-19: i686 built
+
+- crt0 `src/os/libc/simpleos_crt0_i686.S` is 7 instructions: it hands the entry stack to
+  `__simpleos_start32` in `src/os/libc/simpleos_crt0_start32.c`. That C file does the stack
+  admission (argc <= 64, argv/envp bounds, exit 127), bss, environ, `rt_set_args`, startup
+  admission (exit 125), init_array, module inits, main and exit. It is shared by all three
+  32-bit arches.
+- Syscall stub `src/os/libc/simpleos_syscall_i686.S`: the int64 cdecl args' low words go to
+  eax/ebx/ecx/edx/esi/edi, then `int $0x80`, then `cltd`. This is the kernel's
+  `trap_model.spl` map.
+- Sysroot: `sh scripts/os/simpleos-sysroot-32.shs i686` builds `build/os/sysroot-i686`. The
+  whole libc compiles for ILP32 with no errors (item 7). The Simple C runtime is not
+  cross-built yet.
+- Linker script: ENTRY-only. The image base 0x400000 comes from `--image-base` and is inside
+  the x86_32 window (< 0xC0000000).
+- lld args: the `i686` branch in `simpleos_user_link_args_for_arch` adds
+  `-m elf_i386 --image-base=0x400000 --build-id=sha1` and crt0.
+- Simple linker: `internal_link_simpleos` admits i686 and routes it to the static ELF32
+  engine (`elf_link_with_operations`), not `elf_boot_link`. Item 6's ELF32 question was
+  routed around rather than answered. SECTIONS scripts are rejected on 32-bit targets.
+- A C hello links with both linkers. Remaining divergences: PT_PHDR, `__bss_start`, a stale
+  UND `__udivdi3` and `.comment`. They are tracked in
+  `elf_static_exec_missing_pt_phdr_and_x86_trap_fill_2026-11-19.md`.
+- Not booted: there is no i686 user-mode filesystem-launch boot lane yet.
+
+riscv32 and arm32 remain open.

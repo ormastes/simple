@@ -1,0 +1,66 @@
+#!/bin/sh
+# Build a SimpleOS 32-bit user sysroot: build/os/sysroot-<arch>/
+#   lib/crt0.o                 _start -> __simpleos_start32 (simpleos_crt0_start32.c)
+#   lib/libsimpleos_c.a        libc + syscall stub + 32-bit C start
+#   lib/libsimpleos_all.a      same members (the Simple runtime is not cross-built yet)
+#   share/simpleos/simpleos.ld ENTRY-only script; the image base 0x400000 comes from
+#                              --image-base (simpleos_user_link_args_for_arch), inside
+#                              every 32-bit spawn window (x86_32 < 0xC0000000,
+#                              riscv32 4096..0x80000000)
+# Usage: sh scripts/os/simpleos-sysroot-32.shs i686
+# ponytail: libc + crt0 only; add the C runtime objects (see
+# simpleos-sysroot-riscv64.shs) when a Simple program is linked for 32-bit.
+set -eu
+
+ARCH="${1:-}"
+REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$REPO_ROOT"
+case "$ARCH" in
+    i686) ARCH_CFLAGS="--target=i686-unknown-none-elf -march=i686 -fno-pic" ;;
+    *) echo "[sysroot-32] unsupported arch '$ARCH' (i686)" >&2; exit 2 ;;
+esac
+
+SYSROOT="$REPO_ROOT/build/os/sysroot-$ARCH"
+LIBC_DIR="$REPO_ROOT/src/os/libc"
+LIBC_BUILD="$REPO_ROOT/build/os/libc-$ARCH-unknown-simpleos"
+CC="${CC:-clang}"
+AR="${AR:-llvm-ar}"
+CFLAGS="$ARCH_CFLAGS -ffreestanding -nostdlib -fno-builtin -fno-stack-protector -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections -O2 -Wall -Wextra -Wno-unused-parameter -D__simpleos__=1 -I$LIBC_DIR/include"
+
+rm -rf "$LIBC_BUILD"
+mkdir -p "$SYSROOT/lib" "$SYSROOT/share/simpleos" "$LIBC_BUILD"
+printf '%s\n' "$ARCH-unknown-simpleos" > "$SYSROOT/share/simpleos/target-triple.txt"
+
+echo "[sysroot-32] Building SimpleOS libc for $ARCH..."
+for src in \
+    simpleos_libc.c simpleos_cli_args.c simpleos_math.c simpleos_math_ext.c simpleos_fs.c \
+    simpleos_pthread.c simpleos_alloc.c simpleos_process.c \
+    simpleos_string_ext.c simpleos_stdlib_ext.c \
+    simpleos_time.c simpleos_printf_float.c simpleos_cxxabi.c \
+    simpleos_dlmalloc.c simpleos_signal.c simpleos_libc_ext.c \
+    simpleos_poll.c simpleos_process_wait.c \
+    simpleos_pthread_rwlock.c simpleos_pthread_cond.c \
+    simpleos_sched.c simpleos_epoll.c simpleos_eventfd.c \
+    simpleos_timerfd.c simpleos_signalfd.c simpleos_inotify.c \
+    simpleos_fs_walk.c simpleos_glob_stub.c simpleos_pwd_stub.c \
+    simpleos_strfmon.c simpleos_fork.c simpleos_ipc.c \
+    simpleos_socket.c simpleos_filelock.c simpleos_statvfs.c \
+    simpleos_utsname.c simpleos_posix_ext.c \
+    simpleos_softfloat_builtins.c simpleos_crt0_start32.c
+do
+    "$CC" $CFLAGS -c "$LIBC_DIR/$src" -o "$LIBC_BUILD/${src%.c}.o"
+done
+"$CC" $ARCH_CFLAGS -c "$LIBC_DIR/simpleos_syscall_$ARCH.S" -o "$LIBC_BUILD/simpleos_syscall.o"
+"$CC" $ARCH_CFLAGS -c "$LIBC_DIR/simpleos_crt0_$ARCH.S" -o "$SYSROOT/lib/crt0.o"
+
+rm -f "$SYSROOT/lib/libsimpleos_c.a" "$SYSROOT/lib/libsimpleos_all.a"
+"$AR" rcs "$SYSROOT/lib/libsimpleos_c.a" "$LIBC_BUILD"/*.o
+cp "$SYSROOT/lib/libsimpleos_c.a" "$SYSROOT/lib/libsimpleos_all.a"
+
+cat > "$SYSROOT/share/simpleos/simpleos.ld" << 'LDEOF'
+/* SimpleOS 32-bit userspace linker script. Image base 0x400000 is passed as
+ * --image-base; ld.lld's default layout (R headers, RX, RW) is what both lld
+ * and the Simple linker produce. Static linking only. */
+ENTRY(_start)
+LDEOF
+echo "[sysroot-32] Sysroot ready: $SYSROOT"

@@ -1,0 +1,78 @@
+# SimpleOS 32-bit user links through the internal (Simple) linker.
+#
+# Fixtures: test/fixtures/linker/elf/simpleos32/ (i686_start.s, main32.c ->
+# libi686_main32.a, simpleos_user32.ld). Every expected value is llvm-readelf of
+#   ld.lld -m elf_i386 -static -nostdlib --gc-sections --image-base=0x400000 \
+#     -T simpleos_user32.ld i686_start.o libi686_main32.a        (LLD 18.1.3)
+# 0x400000 is inside every 32-bit SimpleOS spawn window (x86_32 < 0xC0000000,
+# riscv32 4096..0x80000000).
+# Bug: doc/08_tracking/bug/simpleos_user_32bit_sysroot_crt0_missing_2026-11-19.md
+#
+# @cover src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl
+
+use std.spec.*
+use compiler.backend.linker.linker_wrapper.{link_simpleos_internal, NativeLinkConfig}
+use std.io_runtime.{file_read_bytes}
+
+val S32_FIX: text = "test/fixtures/linker/elf/simpleos32"
+
+fn s32_u16(b: [u8], off: i64) -> i64:
+    (b[off] as i64) | ((b[off + 1] as i64) << 8)
+
+fn s32_u32(b: [u8], off: i64) -> i64:
+    s32_u16(b, off) | (s32_u16(b, off + 2) << 16)
+
+fn s32_phdr(b: [u8], idx: i64, field: i64) -> i64:
+    s32_u32(b, s32_u32(b, 28) + idx * 32 + field)
+
+fn s32_link(arch: text, out: text) -> Result<text, text>:
+    var cfg = NativeLinkConfig.default()
+    cfg.runtime_path = "none"
+    cfg.libraries = ["{S32_FIX}/lib{arch}_main32.a"]
+    cfg.extra_flags = ["-T", "{S32_FIX}/simpleos_user32.ld", "-nostdlib", "-static",
+        "--gc-sections", "--start-group", "--end-group"]
+    link_simpleos_internal(["{S32_FIX}/{arch}_start.o"], out, "simpleos-{arch}", cfg)
+
+describe "SimpleOS 32-bit user link (internal linker vs ld.lld)":
+    it "links an i686 user ELF32 with ld.lld's segments, entry and .text":
+        # Exact vaddrs differ from lld by 0x20 until the static engine emits
+        # PT_PHDR (doc/08_tracking/bug/elf_static_exec_missing_pt_phdr_and_x86_trap_fill_2026-11-19.md);
+        # tighten to lld's 0x401120 / 0x402140 once that lands.
+        val out = "build/simpleos_user32_i686.elf"
+        val r = s32_link("i686", out)
+        expect(r.is_ok()).to_equal(true)
+        val b = file_read_bytes(out)
+        expect(b[4] as i64).to_equal(1)              # ELFCLASS32
+        expect(s32_u16(b, 16)).to_equal(2)           # ET_EXEC
+        expect(s32_u16(b, 18)).to_equal(3)           # EM_386
+        val text_v = s32_phdr(b, 1, 8)
+        val data_v = s32_phdr(b, 2, 8)
+        expect(s32_phdr(b, 0, 0)).to_equal(1)        # PT_LOAD R headers at the base
+        expect(s32_phdr(b, 0, 8)).to_equal(0x400000)
+        expect(s32_phdr(b, 0, 24)).to_equal(4)
+        expect(s32_phdr(b, 1, 24)).to_equal(5)       # RX
+        expect(s32_phdr(b, 2, 24)).to_equal(6)       # RW
+        expect(s32_phdr(b, 2, 28)).to_equal(0x1000)
+        expect(s32_u32(b, 24)).to_equal(text_v)      # _start opens .text
+        expect(data_v - text_v).to_equal(0x1020)     # lld: 0x402140 - 0x401120
+        # lld's .text: call main; movl %eax,%ebx; xorl %eax,%eax; int $0x80;
+        # pad; main loads `counter` (absolute, = .data vaddr) + 'h'.
+        val t = s32_phdr(b, 1, 4)
+        val lld_text = [232, 11, 0, 0, 0, 137, 195, 49, 192, 205, 128]
+        var i: i64 = 0
+        while i < lld_text.len():
+            expect(b[t + i] as i64).to_equal(lld_text[i])
+            i = i + 1
+        expect(b[t + 16] as i64).to_equal(85)
+        expect(b[t + 19] as i64).to_equal(161)
+        expect(s32_u32(b, t + 20)).to_equal(data_v)
+        expect(b[t + 24] as i64).to_equal(131)
+
+    it "rejects a SECTIONS script on a 32-bit SimpleOS target, naming it":
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = "none"
+        cfg.extra_flags = ["-T", "test/fixtures/linker/elf/got_orphan/got_orphan.ld"]
+        val r = link_simpleos_internal(["{S32_FIX}/i686_start.o"],
+            "build/simpleos_user32_reject.elf", "simpleos-i686", cfg)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err()).to_contain("SECTIONS")
