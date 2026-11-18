@@ -1,0 +1,71 @@
+# Link ELF32 relocatables into a flat bare-metal image with the in-house
+# Simple linker (shared ELF32 raw core: elf/arm32_raw_link.spl).
+# Used by check-baremetal-efi-boot.shs --linker simple for i686.
+#
+# Usage: bin/simple run scripts/check/baremetal-elf32-link.spl -- \
+#            <i686> <base> <entry> <out.bin> <obj.o>...
+# The first object's first allocatable section lands at <base>.
+# Exit 0 on success, 1 on a link error (message on stdout), 2 on bad usage.
+
+use compiler.backend.linker.elf.arm32_raw_link.{elf_i386_link_raw}
+use std.io_runtime.{get_args, file_read_bytes_i64, file_write_bytes}
+
+fn _user_args() -> [text]:
+    val all = get_args()
+    var out: [text] = []
+    var seen = false
+    for a in all:
+        if seen:
+            if not (out.len() == 0 and a == "--"): out = out.push(a)
+        elif a.ends_with("baremetal-elf32-link.spl"):
+            seen = true
+    out
+
+fn _parse_int(s: text) -> i64:
+    var v: i64 = 0
+    var i: i64 = 0
+    var radix: i64 = 10
+    if s.starts_with("0x"):
+        radix = 16
+        i = 2
+    while i < s.len():
+        val c = s[i:i + 1]
+        val d = "0123456789abcdef".index_of(c.lower())
+        if d < 0 or d >= radix: return -1
+        v = v * radix + d
+        i = i + 1
+    v
+
+fn main() -> i64:
+    val args = _user_args()
+    if args.len() < 5 or args[0] != "i686":
+        print("usage: baremetal-elf32-link.spl i686 <base> <entry> <out.bin> <obj.o>...")
+        return 2
+    val base = _parse_int(args[1])
+    if base < 0:
+        print("elf32-link: bad base {args[1]}")
+        return 2
+    var objs: [[i64]] = []
+    var k: i64 = 4
+    while k < args.len():
+        val raw = file_read_bytes_i64(args[k])
+        if raw.len() == 0:
+            print("elf32-link: cannot read {args[k]}")
+            return 1
+        objs = objs.push(raw)
+        k = k + 1
+    val linked = elf_i386_link_raw(objs, base, args[2])
+    if linked.is_err():
+        print("elf32-link: {linked.unwrap_err()}")
+        return 1
+    val image = linked.unwrap()
+    if image.entry_addr != base:
+        print("elf32-link: entry {args[2]} at {image.entry_addr}, expected the image base {base}")
+        return 1
+    var bytes: [u8] = []
+    for b in image.bytes: bytes = bytes.push((b & 0xff) as u8)
+    if not file_write_bytes(args[3], bytes):
+        print("elf32-link: cannot write {args[3]}")
+        return 1
+    print("elf32-link: {bytes.len()} bytes at {base} entry {image.entry_addr}")
+    0
