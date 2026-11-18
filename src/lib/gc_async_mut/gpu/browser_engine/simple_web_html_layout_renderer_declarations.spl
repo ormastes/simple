@@ -164,11 +164,28 @@ fn _padding_decimal_milli(digits: text) -> i64:
         frac_digits = frac_digits + 1
     whole * 1000 + frac
 
-# One padding token -> px. px (integer, as before), 0, em (element font
-# size), rem (root font-size), vw/vh (cascade viewport). -1 rejects the token,
+# Padding slot codec shared by the cascade: >= 0 is whole px, -1 rejects the
+# token, <= -2 is an author percent encoded as -(2 + percent x 1000).
+fn padding_slot(px: i32, pct_milli: i32) -> i32:
+    if pct_milli > 0: 0 - 2 - pct_milli else: px
+
+fn padding_slot_px(slot: i32) -> i32:
+    if slot < 0: 0 else: slot
+
+fn padding_slot_pct_milli(slot: i32) -> i32:
+    if slot <= -2: 0 - 2 - slot else: 0
+
+# One padding token -> slot. px (integer, as before), 0, em (element font
+# size), rem (root font-size), vw/vh (cascade viewport), or a percent (of the
+# containing block inline size, resolved at layout). -1 rejects the token,
 # which drops the whole declaration, as before.
 fn _padding_length_px(token: text, font_px: i32) -> i32:
     val value = token.trim().lower()
+    if value.ends_with("%"):
+        val pct_milli = _padding_decimal_milli(value.substring(0, value.byte_len() - 1))
+        if pct_milli < 0 or pct_milli > 1000000:
+            return -1
+        return (0 - 2 - pct_milli) as i32
     if value.ends_with("px"):
         return _padding_integer_px(value)
     var unit_suffix = ""
@@ -204,7 +221,7 @@ fn _padding_integer_px_values(raw: text, maximum: i32, font_px: i32 = 16) -> [i3
         return values
     for token in tokens:
         val value = _padding_length_px(token, font_px)
-        if value < 0:
+        if value == -1:
             return []
         values.push(value)
     values
@@ -896,12 +913,17 @@ fn _apply_decls_dispatch(
     if css_prop_mask_has(mask, CSS_PROP_PADDING):
         css_probe_note()
         val (resolved_pad_t, resolved_pad_r, resolved_pad_b, resolved_pad_l) = _resolve_authored_padding(
-            decl_tbl, st.pad_t, st.pad_r, st.pad_b, st.pad_l, st.font_size
+            decl_tbl, padding_slot(st.pad_t, st.pad_t_pct), padding_slot(st.pad_r, st.pad_r_pct),
+            padding_slot(st.pad_b, st.pad_b_pct), padding_slot(st.pad_l, st.pad_l_pct), st.font_size
         )
-        st.pad_t = resolved_pad_t
-        st.pad_r = resolved_pad_r
-        st.pad_b = resolved_pad_b
-        st.pad_l = resolved_pad_l
+        st.pad_t = padding_slot_px(resolved_pad_t)
+        st.pad_r = padding_slot_px(resolved_pad_r)
+        st.pad_b = padding_slot_px(resolved_pad_b)
+        st.pad_l = padding_slot_px(resolved_pad_l)
+        st.pad_t_pct = padding_slot_pct_milli(resolved_pad_t)
+        st.pad_r_pct = padding_slot_pct_milli(resolved_pad_r)
+        st.pad_b_pct = padding_slot_pct_milli(resolved_pad_b)
+        st.pad_l_pct = padding_slot_pct_milli(resolved_pad_l)
     var display_decl = ""
     if css_prop_mask_has(mask, CSS_PROP_DISPLAY):
         css_probe_note()
@@ -942,6 +964,10 @@ fn _apply_decls_dispatch(
         st.pad_t = 0
         st.pad_r = 0
         st.pad_b = 0
+        st.pad_l_pct = 0
+        st.pad_t_pct = 0
+        st.pad_r_pct = 0
+        st.pad_b_pct = 0
         st.border_w = 0
         st.border_l = 0
         st.border_t = 0
@@ -1120,6 +1146,22 @@ fn normalized_grid_placement(raw: text) -> text:
         value.substring(0, slash).trim()
     else:
         value
+    # `span N` with an auto start is auto-placed N tracks wide; before an
+    # explicit end line it is the definite range ending there (CSS Grid 8.3).
+    if start_raw.starts_with("span "):
+        val lead_span = normalized_grid_positive_int(
+            start_raw.substring(5, start_raw.byte_len()).trim()
+        )
+        if lead_span <= 0:
+            return ""
+        if slash < 0:
+            return "span {lead_span}"
+        val span_end = normalized_grid_positive_int(
+            value.substring(slash + 1, value.byte_len()).trim()
+        )
+        if span_end > lead_span:
+            return "{span_end - lead_span} / {span_end}"
+        return ""
     val start = normalized_grid_positive_int(start_raw)
     if start <= 0:
         return ""
