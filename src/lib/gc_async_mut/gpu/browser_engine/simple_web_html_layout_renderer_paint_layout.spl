@@ -546,6 +546,80 @@ fn _html_draw_ir_append_context_paint_order(
         )
     result
 
+fn _html_draw_ir_opens_context(st: Style) -> bool:
+    (st.position_absolute or st.position_fixed or st.position_relative) and st.z_index >= 0
+
+# Context id per node, as `_html_draw_ir_node_paint_order` groups them: 0 is
+# the document, a context-opening node i is i + 1.
+fn _html_draw_ir_node_contexts(nodes: [HNode], styles: [Style]) -> [i32]:
+    var ctx: [i32] = [0; nodes.len()]
+    var i: i32 = 0
+    # cpu-lane-loop-ok: one forward pass, parents precede children; bound is node_count
+    while i < nodes.len():
+        val parent = nodes[i].parent
+        ctx[i] = if _html_draw_ir_opens_context(styles[i]):
+            i + 1
+        elif parent >= 0 and parent < i:
+            ctx[parent]
+        else:
+            0
+        i = i + 1
+    ctx
+
+# Chrome paints an in-flow box's outline in its context's outline phase:
+# after every member of the context, before its positioned child contexts.
+# ponytail: a box under a fractional-opacity ancestor (inside its context)
+# keeps its outline inline so the opacity group's command run stays
+# contiguous; upgrade by flushing deferred outlines at the group's end.
+fn _html_draw_ir_outline_deferrable(nodes: [HNode], styles: [Style], i: i32, context: i32) -> bool:
+    val st = styles[i]
+    if nodes[i].tag == "#text" or st.outline_w <= 0 or st.outline_color == 0u32:
+        return false
+    var p = i
+    # cpu-lane-loop-ok: ancestor walk up to the context root; bound is tree depth
+    while p >= 0:
+        if styles[p].opacity_pct < 100:
+            return false
+        if p == context - 1:
+            return true
+        p = nodes[p].parent
+    true
+
+# The outline-phase twin of a box command: no paint but its outline, and no
+# hit area (the box command keeps it).
+fn _html_draw_ir_outline_phase_command(command: DrawIrCommand) -> DrawIrCommand:
+    var out = _html_draw_ir_widget_suppressed_box(command, true, false)
+    var props: [DrawIrStyleProp] = []
+    # cpu-lane-loop-ok: copies one command's prop list restoring outline-width; bound is that list
+    for prop in out.computed_style:
+        if prop.key == "outline-width":
+            props.push(draw_ir_style_prop("outline-width", _html_draw_ir_prop_value(command, "outline-width")))
+        else:
+            props.push(prop)
+    out.computed_style = props
+    out.component_id = command.component_id + "#outline"
+    out.hit_rect = draw_ir_rect_bounds(0, 0, 0, 0)
+    out
+
+fn _html_draw_ir_prop_value(command: DrawIrCommand, key: text) -> text:
+    # cpu-lane-loop-ok: linear lookup in one command's prop list
+    for prop in command.computed_style:
+        if prop.key == key:
+            return prop.value
+    ""
+
+fn _html_draw_ir_without_outline(command: DrawIrCommand) -> DrawIrCommand:
+    var out = command
+    var props: [DrawIrStyleProp] = []
+    # cpu-lane-loop-ok: copies one command's prop list zeroing outline-width; bound is that list
+    for prop in command.computed_style:
+        if prop.key == "outline-width":
+            props.push(draw_ir_style_prop("outline-width", "0"))
+        else:
+            props.push(prop)
+    out.computed_style = props
+    out
+
 fn _html_draw_ir_node_paint_order(
     nodes: [HNode], styles: [Style]
 ) -> [i32]:
@@ -578,9 +652,7 @@ fn _html_draw_ir_node_paint_order(
         # ponytail: a z-auto box is grouped like a context, so a positive-z
         # descendant sorts inside it rather than in the real ancestor context;
         # upgrade by flattening z-auto members into the parent's child list.
-        val st_pos = styles[i]
-        val positioned = st_pos.position_absolute or st_pos.position_fixed or st_pos.position_relative
-        if positioned and st_pos.z_index >= 0:
+        if _html_draw_ir_opens_context(styles[i]):
             child_contexts[parent_context].push(i)
             node_context[i] = i + 1
             members[i + 1].push(i)
@@ -649,6 +721,10 @@ fn _html_draw_ir_commands(
         if st.overflow_auto_y and not widget_mode:
             scrollbar_lowering = true
     val paint_order = _html_draw_ir_node_paint_order(nodes, styles)
+    val node_contexts = _html_draw_ir_node_contexts(nodes, styles)
+    var pending_outlines: [DrawIrCommand] = []
+    var pending_outline_owners: [i32] = []
+    var pending_context: i32 = -1
     # Cache subtree geometry only when a scrollport exists. A clipping child
     # contributes its own border edge, never its hidden descendants.
     var descendant_bottom: [i64] = []
@@ -859,6 +935,15 @@ fn _html_draw_ir_commands(
     # cpu-lane-loop-ok: the Draw IR emission pass: one command group per node in stacking-context paint order. Bound is paint_order.len() == node_count; emitting per node is the whole purpose of this producer
     while paint_index < paint_order.len():
         val i = paint_order[paint_index]
+        if pending_outlines.len() > 0 and node_contexts[i] != pending_context:
+            # cpu-lane-loop-ok: flushes the context's deferred outlines; bound is its outlined members
+            for oc in pending_outlines:
+                commands.push(oc)
+            # cpu-lane-loop-ok: owners paired with the outlines above
+            for oo in pending_outline_owners:
+                owner_nodes.push(oo)
+            pending_outlines = []
+            pending_outline_owners = []
         # Legacy widget mode never paints a #text node as a text run: the
         # generated chrome text or the sparse offset text (both emitted after
         # this loop, as the raster `paint` does) replaces its glyphs.
@@ -918,6 +1003,11 @@ fn _html_draw_ir_commands(
                         nodes, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height)
                     node_command = _html_draw_ir_canvas_radial(
                         node_command, styles[i], boxes.bx[i], boxes.by[i], canvas[0], canvas[1])
+            if not widget_mode and _html_draw_ir_outline_deferrable(nodes, styles, i, node_contexts[i]):
+                pending_outlines.push(_html_draw_ir_outline_phase_command(node_command))
+                pending_outline_owners.push(i)
+                pending_context = node_contexts[i]
+                node_command = _html_draw_ir_without_outline(node_command)
             commands.push(node_command)
             owner_nodes.push(i)
             var text_runs: [DrawIrCommand] = [node_command]
@@ -1113,6 +1203,12 @@ fn _html_draw_ir_commands(
             for scrollbar_owner in scrollbar_owners_at[paint_index]:
                 owner_nodes.push(scrollbar_owner)
         paint_index = paint_index + 1
+    # cpu-lane-loop-ok: flushes the last context's deferred outlines; bound is its outlined members
+    for oc in pending_outlines:
+        commands.push(oc)
+    # cpu-lane-loop-ok: owners paired with the outlines above
+    for oo in pending_outline_owners:
+        owner_nodes.push(oo)
     # Legacy widget overlays, in the raster `paint` order: the frame over every
     # box, then the node text (sparse offset text in document order, unless the
     # generated chrome text replaces it), then the chrome text table. No node

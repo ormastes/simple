@@ -2931,3 +2931,5 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - Raster (software) lane paints `<img>` only via `simple_web_layout_render_html_software_pixels_with_images(html, w, h, images)`; the plain entries paint none. The painter (`_fb_paint_img_clip`, paint_raster) runs in document order right after the node's box paint, with Draw IR geometry via the shared `html_image_fit_size`. Nearest-neighbour is exact only for uniform images (`# ponytail:`); overlapping-paint opacity cells (`tg_page` (50,12)) stay un-admitted on the raster. Spec: `test/01_unit/browser_engine/img_raster_chrome159_spec.spl`.
 
 - Raster per-corner borders (2026-11-18): differing radii + solid sides go through `fb_border_ring_per_corner_clip` (pixel-centre outer mask minus elliptical inner corners, same model as Engine2D `typed_border_ring`); uniform radii keep the AA arc painter. Pinned by `border_per_corner_radius_chrome159_spec`.
+
+- Outline phase (2026-11-18): in-flow outlines paint after their context's in-flow members, before positioned children (raster: after pass 1; Draw IR: `<id>#outline` twin flushed at the context boundary).

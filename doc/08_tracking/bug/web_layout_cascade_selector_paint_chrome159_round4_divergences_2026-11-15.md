@@ -622,3 +622,17 @@ head (13/40 at base).
   - `ponytail:` whole-pixel ring, no sub-pixel AA on the arcs (Chrome's edge pixels are partial); upgrade by replacing the in/out tests with a coverage ramp.
 - **Evidence:** spec gains `it "on the CPU raster"`: red 2 of 3 passed (6 mismatches above), green 3/3.
   - Base-vs-head sweep over 40 border/radius browser_engine/web specs, failing test names compared: 0 new failures; only difference is the new raster row (fails on base, passes on head). 71 failing rows are identical pre-existing on both.
+
+## 2026-11-18 — outlines paint in Chrome's outline phase (FIXED on raster, cpu_simd and Vulkan)
+
+- **Symptom:** an in-flow box's outline painted along with its own box, so a following in-flow sibling covered it. At (14,9), (15,10), (8,10) and (2,11), every lane read the sibling's `0000FF` where Chrome 159 shows the outline's `FF0000`.
+- **Chrome rule:** outlines paint in their stacking context's outline phase, after every in-flow member and before positioned child layers. A later positioned box or opacity layer therefore still covers an outline.
+- **Fix, raster:** pass 1 collects the in-flow outlines and paints them after the pass-1 loop, before passes 2-4 (positioned boxes).
+- **Fix, Draw IR (cpu_simd / Vulkan):** `_html_draw_ir_commands` zeroes `outline-width` on the box command. It queues an outline-only twin (`<id>#outline`, with no paint other than the outline and an empty hit rect) and flushes it when paint order leaves the node's context, or at the end. `_html_draw_ir_node_contexts` shares `_html_draw_ir_opens_context` with the paint order.
+- **Evidence:**
+  - New `outline_paint_phase_chrome159_spec`: 13 Chrome pins across three cases (in-flow, positioned, opacity layer). All 3 lanes went from red to green.
+  - `outline_engine2d` stays 4/4 and `opacity_group` 18/18.
+  - Base vs head over 317 outline, opacity, draw_ir, hit-test and retained specs: the only new name was `web_css_background_border_spec`, which read `outline-width` from the box command. It now reads it from `o1#outline` and checks that the box command carries 0.
+- **Still open:**
+  - A box under a fractional-opacity ancestor within its context keeps its outline inline (`ponytail:`), so the opacity group's run stays contiguous.
+  - On the raster, pass 6 text of later siblings still paints over a deferred outline. Chrome paints the outline over that text.

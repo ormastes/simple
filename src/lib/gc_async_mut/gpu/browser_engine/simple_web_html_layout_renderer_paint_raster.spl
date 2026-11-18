@@ -1487,6 +1487,10 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
     val node_count = nodes.len()
     var i = 0
     var has_absolute_node = false
+    # In-flow outlines paint in Chrome's outline phase: after every in-flow
+    # box of the context, so a later in-flow sibling never covers them, and
+    # before positioned boxes (passes 2-4), which still do.
+    var flow_outlines: [i32] = []
     # cpu-lane-loop-ok: fn paint pass 1 of 6: normal-flow (non-absolute, non-relative-root) box paint - shadow, background, border, outline plus widget panel and button fills, in document order = back to front. Bound is node_count; the CPU lane rasterises per node by design, and the pass is budget-guarded via _web_budget_expired_at
     while i < node_count:
         # Budget guard: stop painting backgrounds on expiry; the framebuffer keeps
@@ -1543,7 +1547,7 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
                 if paint_border:
                     out = _paint_node_border(out, fbw, fbh, x, y, w, h, nd, st, clip)
                 if paint_outline:
-                    out = fb_outline_clip(out, fbw, fbh, x, y, w, h, st.outline_w, st.outline_offset_px, st.outline_color, clip)
+                    flow_outlines.push(i)
             if non_widget_mode and nd.tag == "img" and not nd.has_widget_image_class and _raster_images.len() > 0:
                 out = _fb_paint_img_clip(out, fbw, fbh, nd, st, x, y, w, h, paint_clip_at(clip_cache, i))
         if normal_flow and non_widget_mode and visible_node and nd.has_widget_panel_class and y < fbh:
@@ -1556,6 +1560,13 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
             if st.bg == 0u32 and st.background_gradient_from == 0u32:
                 out = fb_rect(out, fbw, fbh, x, y, w, h, web_argb(203, 213, 225))
         i = i + 1
+    # ponytail: deferred to the end of pass 1, so the outline still sits
+    # under pass 6 text of later siblings (Chrome paints it over that text);
+    # upgrade by moving text into a per-context foreground phase.
+    # cpu-lane-loop-ok: paints the outlines pass 1 deferred, in document order; bound is the number of in-flow outlined boxes
+    for oi in flow_outlines:
+        val ost = styles[oi]
+        out = fb_outline_clip(out, fbw, fbh, bx[oi], by[oi], bw[oi], bh[oi], ost.outline_w, ost.outline_offset_px, ost.outline_color, paint_clip_at(clip_cache, oi))
     i = 0
     # cpu-lane-loop-ok: fn paint pass 2 of 6: the relative-paint-root boxes pass 1 deliberately skipped, painted after normal flow so position:relative subtrees land above it. Disjoint node set from pass 1, so it cannot be fused without breaking paint order. Bound is node_count, budget-guarded
     while i < node_count:
