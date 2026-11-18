@@ -2967,6 +2967,19 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
   - **Serif bold is not bold** (separate bug, face resolution): `font-family:serif;font-weight:bold`, including the UA serif `<h3>`, paints Liberation Serif Regular on both the LCD and gray paths, even at 19 px. That is 1839 mismatched px per line against Chrome, which dwarfs the fractional effect on serif h3 lines. Sans bold is fine.
   - **`line-height:1` at a fractional size** puts the baseline one row low. Blink floors the half-leading (-1.14 → -2), and Simple does not. That belongs to the line-box lane.
 
+
+## 2026-11-18 — Bold serif paints Liberation Serif Bold (Chrome 159)
+
+- **Was:** `browser_font_family_for_weight` (`src/lib/nogc_sync_mut/text_layout/font_provider.spl`) routed bold only for the sans and mono generic families. A serif family, and the default serif face (no name served, #10089), kept the regular face. Every UA heading and `<b>` on a serif page painted Liberation Serif Regular, on both the LCD path and the grayscale path above 48 device px. The `<b>` band was byte-identical to the regular `<span>` band.
+- **Chrome 159** (fontconfig `serif:bold` -> LiberationSerif-Bold.ttf): `<b>Hamburgefonstiv</b>` at 16px is 120.00 px wide; the regular face is 111.69 and the UA h3 at 18.72px is 140.28.
+- **Fix:** `browser_platform_serif_bold_faces()` (Liberation Serif Bold, only when Liberation Serif Regular is also present, so it is never a typeface swap). Routed for `category == "serif"` and for an unserved list whose default is serif. `web_font_face_candidates` goes through the same router, so the grayscale path is fixed too.
+- **Measured** (320x100, dark = 765 - (r+g+b), mismatched px = dark delta > 24 against Chrome): h3 1297 -> 359, `<b>` 1022 -> 249. Ink extent h3 0..130 -> 0..139 (Chrome 0..140), `<b>` 0..111 -> 0..119 (Chrome 0..119). 60px bold `H` stem row dark 4398 -> 7074 (Chrome 7050).
+- **Byte-identical** base vs head: sans regular/bold/italic/bold-italic, mono bold, regular serif, serif italic.
+- **Spec:** `test/01_unit/browser_engine/serif_bold_face_chrome159_spec.spl`, base 1/4 -> head 4/4.
+- **Catalog:** every catalog page declares `font: 16px/1.5 sans-serif`, so 1x and dpr4 are unchanged . 1x head equals every row (overview 1.14, html 2.35, css-layout 2.22, css-paint 2.43, forms-media 2.33, animation 2.40, evidence 0.68, tab-bar 0.42). dpr4 base/head: overview 0.78/0.78, html 2.84/2.84, css-layout 4.02/4.02, css-paint 4.87/4.87 (red against the 4.49 row on base too, from #9951), forms-media 5.23/5.23, animation 3.94/3.97 (all-sans page, capture-timing noise), evidence 0.57/0.57, tab-bar 0.30/0.30. No row changed. Perf on a bold-serif page (2 runs each): base 5.9/4.9 s and 685/691 MB, head 6.0/5.0 s and 684/691 MB.
+- **Not done:** serif italic is still unrouted (`<em>`/`<i>` in serif paints upright). Bold-italic serif now paints the upright Bold face (was upright Regular); Chrome uses LiberationSerif-BoldItalic.
+- **Trap:** the pure-Simple PNG decoder rejects Chrome's `--screenshot` stream and this host has no `magick`. Decode it in Chrome itself: load the PNG into an `<img>` on a `file://` page, `drawImage` it onto a canvas, and dump `getImageData` as P3 text through `--dump-dom --allow-file-access-from-files`.
+
 ## Images
 
 - Raster (software) lane paints `<img>` only via `simple_web_layout_render_html_software_pixels_with_images(html, w, h, images)`; the plain entries paint none. The painter (`_fb_paint_img_clip`, paint_raster) runs in document order right after the node's box paint, with Draw IR geometry via the shared `html_image_fit_size`. Nearest-neighbour is exact only for uniform images (`# ponytail:`); overlapping-paint opacity cells (`tg_page` (50,12)) stay un-admitted on the raster. Spec: `test/01_unit/browser_engine/img_raster_chrome159_spec.spl`.
