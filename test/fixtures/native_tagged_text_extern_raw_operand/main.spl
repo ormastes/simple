@@ -1,0 +1,66 @@
+# Bug stage3_selfbuild_raw_text_strict_extern_2026-11-18.
+# rt_hash_text decodes its operand with rt_core_as_string (strict tagged). A
+# `for key in keys` binder, an indexed local `[text]` element and a `text`
+# parameter fed from either hold a raw char*; natively every such hash was 0,
+# so the selected-export key table of the Stage 3 compiler missed every lookup
+# (`PANIC: bounds_check intrinsic index=-1`). Expected (seed interpreter):
+#   param=3603 literal=3603
+#   for=3603 for_param=3603
+#   index=3603 field_for=3603
+#   table n=7 bad=0 first=0
+
+extern fn rt_hash_text(content: text) -> i64
+
+class Table:
+    names: [text] = []
+    rows: [i64] = []
+    buckets: [i64] = []
+    next: [i64] = []
+    sorted: [text] = []
+
+fn slot_of(key: text) -> i64:
+    rt_hash_text(key) & 4095
+
+fn table_put(table: Table, key: text, row: i64):
+    val bucket = rt_hash_text(key) & 4095
+    table.next = table.next.push(table.buckets[bucket])
+    table.buckets[bucket] = table.names.len()
+    table.names = table.names.push(key)
+    table.rows = table.rows.push(row)
+
+fn table_position(table: Table, key: text) -> i64:
+    var slot = table.buckets[rt_hash_text(key) & 4095]
+    var visited = 0
+    while slot >= 0 and visited < table.names.len():
+        if table.names[slot] == key: return table.rows[slot]
+        slot = table.next[slot]
+        visited = visited + 1
+    -1
+
+fn main():
+    val n = 1
+    var names: [text] = []
+    names = names.push("k:{n}")
+    print "param={slot_of("k:{n}")} literal={slot_of("k:1")}"
+    for key in names:
+        print "for={rt_hash_text(key) & 4095} for_param={slot_of(key)}"
+    val table = Table()
+    table.sorted = names
+    for key in table.sorted:
+        print "index={slot_of(names[0])} field_for={slot_of(key)}"
+    var bucket = 0
+    while bucket < 4096:
+        table.buckets = table.buckets.push(-1)
+        bucket = bucket + 1
+    var i = 0
+    while i < 7:
+        table_put(table, "{i % 3}:0:function:{7 - i}", i)
+        i = i + 1
+    table.sorted = table.names
+    var bad = 0
+    var first = -2
+    for key in table.sorted:
+        val row = table_position(table, key)
+        if first == -2: first = row
+        if row < 0: bad = bad + 1
+    print "table n={table.sorted.len()} bad={bad} first={first}"
