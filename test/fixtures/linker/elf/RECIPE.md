@@ -182,3 +182,26 @@ Same sources (`elf32_hello.c` / `elf32_helper.c`), built soft-float
 
     clang --target=armv7-linux-gnueabihf -mfloat-abi=soft -ffreestanding -fno-pic -O1 -c elf32_hello.c -o elf32_hello_arm_soft.o
     clang --target=armv7-linux-gnueabihf -mfloat-abi=soft -ffreestanding -fno-pic -O1 -c elf32_helper.c -o elf32_helper_arm_soft.o
+
+## Boot-linker SHF_MERGE fixtures (work/boot-link-shf-merge-20261118)
+
+`elf_boot_link_merge_spec.spl` pools SHF_MERGE|SHF_STRINGS through the boot
+linker and byte-compares with ld.lld. From this directory, with the llvm-mingw
+23.1.0 clang/ld.lld:
+
+```
+CF="-c -O1 -ffreestanding -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables -fmerge-all-constants -nostdlib"
+clang --target=aarch64-linux-gnu $CF boot_merge_a_a64.c -o boot_merge_a_a64.o
+clang --target=aarch64-linux-gnu $CF boot_merge_b_a64.c -o boot_merge_b_a64.o
+clang --target=x86_64-linux-gnu $CF merge_strings_a_x64.c -o boot_merge_a_x64.o
+clang --target=x86_64-linux-gnu $CF merge_strings_b_x64.c -o boot_merge_b_x64.o
+ld.lld -m aarch64linux --no-relax -T boot_merge_a64.ld boot_merge_a_a64.o boot_merge_b_a64.o -o ref_a64.elf
+ld.lld -m elf_x86_64 -T boot_merge_x64.ld boot_merge_a_x64.o boot_merge_b_x64.o -o ref_x64.elf
+for a in a64 x64; do for s in text rodata; do
+  llvm-objcopy -O binary --only-section=.$s ref_$a.elf boot_merge_$a.lld.$s.bin; done; done
+```
+
+Reference symbol values (llvm-readelf -s): a64 first_message 0x40000000,
+_start 0x4000000c, other_message 0x4000004c, tail_message 0x40000058,
+string_sink 0x40000098; x64 long_message 0x400000, _start 0x400010,
+short_message 0x400030, string_sink 0x400048.
