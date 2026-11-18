@@ -151,3 +151,18 @@ Remaining non-newtype findings by file (count):
 Not yet scanned for param/return primitives in: ctx_*.spl, test_db_compat.spl,
 test_extended/database.spl, trace_events.spl (0 field/fn hits in this census; the
 checker only sees single-line signatures). main_lazy_ctx_tools.spl has 14 findings.
+
+Batch 2026-11-19 (test_query, case_events, test_query_cli, main_lazy_trace_tools,
+test_db_compat, trace_digests, trace_events, trace parts of test_extended/database):
+census before = after = 0 on the `check-primitive-api-added` counter for all eight
+files (the checker counts only `pub fn|me` lines; these files' trace API was already
+newtyped). A wider scan (any `: bool|iN|uN|fN`, `-> bool|iN`, class methods without
+`pub`) found the only trace-specific public primitive: `RunnerTestDb.trace_run_is_prepared
+-> bool`, now `trace_run_prep_state -> TraceRunPrepState` (enum Prepared|Unprepared).
+Remaining non-trace primitives, deliberately untouched (generic test-DB timing/count
+API with wide caller sets): RunnerTestDb/TestDatabaseExtended `complete_run`
+(test_count/passed/failed/timed_out), `cleanup_stale_runs`, `prune_runs`,
+`record_timing_observation`/`promote_timing_baseline`/`prior_anomaly_warning -> bool`,
+`test_count_by_status -> (i64 x4)`, resource-run ms/bytes params, `get_*_id -> i64?`;
+plus private-by-convention `_trace_prepare_failed: bool`, private consts
+(`*_LIMIT: i64`) and the one-field newtype `value: i64` payloads.

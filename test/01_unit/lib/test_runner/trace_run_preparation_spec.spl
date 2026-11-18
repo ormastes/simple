@@ -5,7 +5,7 @@ use std.io.{dir_create_all, dir_remove, file_delete}
 use std.io_runtime.{getpid, time_now_unix_micros}
 use std.database.core.{SdnRow, SdnTable}
 use std.database.test_extended.database.{TestDatabaseExtended, load_test_database_extended}
-use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb}
+use std.nogc_sync_mut.test_runner.test_db_compat.{RunnerTestDb, TraceRunPrepState}
 use std.common.traceability.case_events.{TraceCaseEvent, encode_trace_case_event}
 use std.common.traceability.run_plan.{TracePlannedCase, TraceRunPlan}
 use std.common.traceability.run_request.{TraceRunRequest}
@@ -64,7 +64,7 @@ describe "runner frozen trace preparation":
             case Ok(plan):
                 expect(plan.run_id != "").to_equal(true)
                 expect(plan.run_id == "unused-template-id").to_equal(false)
-                expect(owner.trace_run_is_prepared(plan.run_id)).to_equal(true)
+                expect(owner.trace_run_prep_state(plan.run_id)).to_equal(TraceRunPrepState.Prepared)
                 expect(owner.prepare_trace_request(request).is_err()).to_equal(true)
 
     it "rejects oversized request transport before allocating a run or changing tables":
@@ -149,9 +149,9 @@ describe "runner frozen trace preparation":
         var owner = RunnerTestDb(db: db, current_run_id: run_id)
         match owner.prepare_trace_run(_preparation_plan(run_id)):
             case Err(reason): fail("valid preparation failed: {reason}")
-            case Ok(_): expect(owner.trace_run_is_prepared(run_id)).to_equal(true)
+            case Ok(_): expect(owner.trace_run_prep_state(run_id)).to_equal(TraceRunPrepState.Prepared)
         owner.complete_run(run_id, 1, 1, 0, 0)
-        expect(owner.trace_run_is_prepared(run_id)).to_equal(false)
+        expect(owner.trace_run_prep_state(run_id)).to_equal(TraceRunPrepState.Unprepared)
         match load_test_database_extended(path):
             case None: fail("prepared database could not be reloaded")
             case Some(reloaded):
@@ -176,7 +176,7 @@ describe "runner frozen trace preparation":
         match owner.prepare_trace_run(_preparation_plan(run_id)):
             case Ok(_): fail("database save unexpectedly replaced the destination directory")
             case Err(reason): expect(reason).to_contain("durably prepared")
-        expect(owner.trace_run_is_prepared(run_id)).to_equal(false)
+        expect(owner.trace_run_prep_state(run_id)).to_equal(TraceRunPrepState.Unprepared)
         expect(owner.prepare_trace_run(_preparation_plan(run_id)).is_err()).to_equal(true)
         expect(owner.save().is_err()).to_equal(true)
         expect(owner.start_run()).to_equal("")
