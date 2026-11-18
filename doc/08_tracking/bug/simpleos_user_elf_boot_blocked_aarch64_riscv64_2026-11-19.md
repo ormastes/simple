@@ -40,3 +40,51 @@ Spec: `elf_boot_link_got_spec` (fixtures `test/fixtures/linker/elf/got_orphan/`)
 both arches 4 PT_LOADs with identical RX/R/RW(data) and NOBITS .bss.
 Still cosmetic: lld starts the .bss PT_LOAD at the empty .tbss boundary (same end
 address); aarch64 .rodata tail padding (0x388 vs 0x385); archive member order.
+
+## Plan: riscv64 U-mode filesystem launch (ready to pick up; kernel side not started)
+Goal: OpenSBI (`-bios` fw_payload, never `-kernel`) -> SimpleOS S-mode kernel -> mount
+NVFS -> load `/bin/hello` (sysroot-linked static ELF, base 0x100000000, Simple linker or
+lld) -> run in U-mode -> its text and exit status on serial.
+
+What exists (survey 2026-11-19, file:line):
+- Spawn: `src/os/kernel/loader/riscv64_fs_exec_spawn.spl:205`
+  (`riscv64_fs_exec_spawn_capture`) -> `fs_exec_spawn.spl:189` `fs_exec_prepare_spawn`
+  -> `dispatch_fs_exec_user_handoff(Architecture.Riscv64)` (`:233`) ->
+  `arch/user_entry_bridge.spl` -> `arch/riscv64/user_entry.spl` -> `_rv64_enter_user`.
+- User context: `arch/riscv64/trap_model.spl:84` `create_rv64_user_context`
+  (used at `context.spl:255`, `scheduler_context_bridge.spl:125`).
+- Traps: `arch/riscv64/trap_vector.spl` saves frame -> `interrupt.spl:520`
+  `rv64_dispatch_trap_frame_ptr`; U-mode ecall -> `syscall.spl:22` handler.
+- Syscall ABI matches the sysroot: exit = id 0 (`syscall.spl:28`; crt0
+  `simpleos-sysroot-riscv64.shs:166,173`), write = id 60 byte-wise
+  (`syscall.spl:67-70`; libc `simpleos_libc.c:293`), id in a7
+  (`src/os/libc/simpleos_syscall_riscv64.S:6,12`).
+- Disk: `scripts/check/check-simpleos-riscv64-nvfs-qemu.shs` already boots OpenSBI ->
+  U-Boot -> kernel with an NVFS root (`src/os/port/mkfs_nvfs.spl`) on virtio-mmio and
+  reads files (`examples/09_embedded/simple_os/arch/riscv64/nvfs_root_entry.spl`).
+
+Gaps:
+- G1 unproven: `fs_exec_prepare_spawn` for Riscv64 maps PT_LOADs as Sv39 U pages at
+  0x100000000 with a user stack (arm64 does it explicitly, `arm64_fs_exec_spawn.spl:101`).
+- G2: no boot entry wires scheduler + stvec + NVFS + spawn on OpenSBI
+  (`build_pid1_kernel_riscv64.shs` stops at `os_main_prepare_pid1`).
+- G3: libc's second write path uses syscall id 32 (`simpleos_libc.c:297`); no id 32 case
+  in `syscall.spl`.
+- G4: no check script for a U-mode ELF on riscv64.
+
+Steps (TDD each):
+1. G1: unit spec feeding `fs_exec_prepare_spawn` a sysroot-linked hello ELF (fixture
+   from this lane) and asserting U-page mappings at 0x100000000 and the user sp; fix the
+   Riscv64 arm if RED.
+2. G3: spec for id 32 -> implement in `syscall.spl` (or route libc to 60); repro both.
+3. G2: new entry `examples/09_embedded/simple_os/arch/riscv64/fs_exec_hello_entry.spl`
+   from `nvfs_root_entry.spl`: mount NVFS, init scheduler, set stvec to trap_vector,
+   `riscv64_fs_exec_spawn_capture("/bin/hello")`, print `[fsexec] rc=<n>`.
+4. Media: build hello with the sysroot (internal link and lld, both), stage at
+   `/bin/hello` with `mkfs_nvfs`.
+5. G4: `scripts/check/check-simpleos-riscv64-user-elf-opensbi.shs` on `-bios`
+   fw_payload + NVFS disk; rungs: OpenSBI banner, hello's own text, `[fsexec] rc=7`;
+   argv self-check bans `-kernel`/isa-debug-exit; selftest fixtures for each rung.
+6. Run it for both linkers; record board path per board-runnable.md (same fw_payload +
+   SD/NVFS image on a JH7110-class board).
+Needs: the Rust seed (`SIMPLE_BIN`) to build the kernel until the self-hosted compiler can.
