@@ -4,6 +4,7 @@
 # fixed sh_entsize records. The plan owns aligned pooled bytes and maps every
 # original entity byte to its pooled offset, so relocation addends remain exact.
 
+use compiler.backend.linker.elf_inspect.{ElfSectionHeader}
 use compiler.backend.linker.elf_parser.{
     ElfObject, elf_section_addralign, elf_section_entsize, elf_section_name
 }
@@ -70,6 +71,29 @@ fn _align_up(value: i64, alignment: i64) -> i64:
 fn elf_merge_flags(flags: i64) -> bool:
     """True for an allocated SHF_MERGE section's sh_flags."""
     flags & SHF_ALLOC_MERGE != 0 and flags & SHF_MERGE_MERGE != 0
+
+fn elf_unmerge_relocated(obj: ElfObject) -> ElfObject:
+    """Clear SHF_MERGE on any section that is itself relocated (e.g. glibc armhf
+    setjmp.o .rodata.cst4 literal pools carrying R_ARM_GOT_BREL): its bytes are
+    not final until relocation, so it is placed as an ordinary section."""
+    var relocated: {i64: bool} = {}
+    for r in obj.relocations:
+        val t = r.target_section_idx
+        if t > 0 and t < obj.sections.len() and elf_merge_flags(obj.sections[t].sh_flags):
+            relocated[t] = true
+    if relocated.len() == 0: return obj
+    var sections: [ElfSectionHeader] = []
+    var i: i64 = 0
+    for s in obj.sections:
+        if relocated.has(i):
+            sections.push(ElfSectionHeader(sh_name: s.sh_name, sh_type: s.sh_type,
+                sh_flags: s.sh_flags - (s.sh_flags & (SHF_MERGE_MERGE | SHF_STRINGS_MERGE)),
+                sh_addr: s.sh_addr, sh_size: s.sh_size, sh_info: s.sh_info))
+        else:
+            sections.push(s)
+        i = i + 1
+    ElfObject(header: obj.header, sections: sections, symbols: obj.symbols,
+        relocations: obj.relocations, strtab: obj.strtab, shstrtab: obj.shstrtab, raw: obj.raw)
 
 fn elf_merge_section(obj: ElfObject, section_idx: i64) -> bool:
     elf_merge_flags(obj.sections[section_idx].sh_flags)
@@ -169,4 +193,4 @@ fn elf_merge_offset(plan: ElfMergePlan, obj_idx: i64, section_idx: i64,
     Err("merge offset {input_offset} is outside an entity in object {obj_idx} section {section_idx}")
 
 export ElfMergeEntry, ElfMergePlan
-export elf_merge_flags, elf_merge_section, elf_merge_sections, elf_merge_offset
+export elf_merge_flags, elf_merge_section, elf_merge_sections, elf_merge_offset, elf_unmerge_relocated

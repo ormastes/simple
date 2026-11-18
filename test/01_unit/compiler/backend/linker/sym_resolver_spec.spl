@@ -296,3 +296,25 @@ describe "SymResolver - COMDAT instance dedup":
         val b = make_obj([ElfSymbol(st_name: 0, st_info: 18, st_other: 0, st_shndx: 1, st_value: 0x20, st_size: 6, name: "Box__get__i64")])
         val res = sym_resolve_objects([a, b])
         expect(sym_error_count(res)).to_equal(1)
+
+# glibc i686 libc.a: __x86.get_pc_thunk.* is STB_GLOBAL (hidden) in a
+# .text.__x86.get_pc_thunk.* section that is a member of a COMDAT group
+# (SHF_GROUP). Repro for bug simple_linker_armv7_i686_hosted_relocs.
+fn make_group_obj(syms: [ElfSymbol], flags: i64) -> ElfObject:
+    val base = make_obj(syms)
+    val null_sec = ElfSectionHeader(sh_name: 0, sh_type: 0, sh_flags: 0, sh_addr: 0, sh_size: 0, sh_info: 0)
+    val text_sec = ElfSectionHeader(sh_name: 0, sh_type: 1, sh_flags: flags, sh_addr: 0, sh_size: 4, sh_info: 0)
+    ElfObject(header: base.header, sections: [null_sec, text_sec], symbols: syms,
+        relocations: base.relocations, strtab: base.strtab, shstrtab: base.shstrtab, raw: base.raw)
+
+describe "SymResolver - strong COMDAT group members":
+    it "strong definitions in SHF_GROUP sections keep the first copy, no error":
+        val s = ElfSymbol(st_name: 0, st_info: 18, st_other: 2, st_shndx: 1, st_value: 0, st_size: 4, name: "__x86.get_pc_thunk.bx")
+        val res = sym_resolve_objects([make_group_obj([s], 0x206), make_group_obj([s], 0x206)])
+        expect(sym_error_count(res)).to_equal(0)
+        expect(sym_get(res, "__x86.get_pc_thunk.bx").unwrap().obj_idx).to_equal(0)
+
+    it "a strong group member vs a strong non-group definition still fails":
+        val s = ElfSymbol(st_name: 0, st_info: 18, st_other: 0, st_shndx: 1, st_value: 0, st_size: 4, name: "dup_fn")
+        val res = sym_resolve_objects([make_group_obj([s], 0x206), make_group_obj([s], 0x6)])
+        expect(sym_error_count(res)).to_equal(1)
