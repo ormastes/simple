@@ -54,6 +54,7 @@ use .main_lazy_log_opt.{log_opt_optimize, log_opt_optimize_recorded, log_opt_plu
 
 use .ctx_index_cache.{CtxStorePath, CtxStoreLength, CtxStoreDigest, CtxGenerationKey, CtxCacheDecision, CtxCacheRebuildCount, ctx_generation_key_missing, ctx_generation_key_present, ctx_cache_decide, ctx_cache_rebuild_count_next}
 use .ctx_postings.{CtxPostings, CtxTerm, CtxNormBodies, CtxBodyLengths, CtxAvgLength, CtxScoreBoard, CtxResultLimit, ctx_postings_build, ctx_postings_append, ctx_scores_by_scan, ctx_scores_by_postings, CtxGenerationHits, CtxPostingsBuildCount, CtxPostingsDecision, ctx_generation_hits_zero, ctx_generation_hits_next, ctx_postings_build_count_next, ctx_postings_decide}
+use .ctx_append_observer.{ctx_append_observer_fire}
 use .ctx_redaction.{CtxRawContent, ctx_redact}
 use .ctx_retention.{CtxChunkId, CtxSourceLabel, CtxUnixSecs, CtxAgeLimit, CtxByteCount, CtxRetentionRow, CtxRetentionPolicy, CtxPolicyCheck, CtxPurgeMode, CtxRetentionPlan, ctx_retention_row, ctx_retention_policy, ctx_retention_check, ctx_retention_decide, ctx_policy_check_label}
 use std.io_runtime.{env_get, file_read, file_write, file_append_text, file_exists, file_delete, dir_create, time_now_unix_micros, file_size_signed, file_hash_sha256_or_empty}
@@ -257,9 +258,6 @@ fn _ctx_append_chunks(new_chunks: [CtxChunk]) -> bool:
 # replacing the store under it.
 const _CTX_APPEND_MAX_ATTEMPTS: i64 = 4
 
-fn _ctx_noop():
-    pass
-
 # True when the store still contains `rows` (their last line implies the whole
 # single-write block).
 fn _ctx_rows_present(rows: [CtxChunk]) -> bool:
@@ -273,9 +271,10 @@ fn _ctx_rows_present(rows: [CtxChunk]) -> bool:
 # After writing, the store must have grown by exactly the bytes written; any
 # other length means another writer (append or purge rename) moved the
 # generation during the write, so verify the rows survived and, if they did not,
-# re-apply them to the new store (bounded, lock-free). `after_write` runs
-# between the write and the re-check (spec seam; a no-op in production).
-fn _ctx_append_chunks_settled(new_chunks: [CtxChunk], after_write: fn()) -> bool:
+# re-apply them to the new store (bounded, lock-free). The observer fires
+# between the write and the re-check via `ctx_append_observer_fire` (no-op unless
+# a spec registered a hook).
+fn _ctx_append_chunks_settled(new_chunks: [CtxChunk]) -> bool:
     var added = 0
     for c in new_chunks:
         added = added + _ctx_chunk_line(c).byte_len()
@@ -284,7 +283,7 @@ fn _ctx_append_chunks_settled(new_chunks: [CtxChunk], after_write: fn()) -> bool
         val before = file_size_signed(_ctx_chunks_path())
         if not _ctx_append_chunks(new_chunks):
             return false
-        after_write()
+        ctx_append_observer_fire()
         if file_size_signed(_ctx_chunks_path()) == before + added:
             return true
         if _ctx_rows_present(new_chunks):
@@ -400,11 +399,6 @@ pub fn ctx_chunk_text(content: text, budget: CtxByteCount) -> [text]:
 
 # Index `content` under `source`; returns number of chunks written.
 pub fn ctx_index_text(raw_content: text, source: text) -> CtxChunkCount:
-    ctx_index_text_observed(raw_content, source, _ctx_noop)
-
-# `ctx_index_text` with a hook that runs between the append write and its
-# generation re-check (spec seam for a purge rename landing in that window).
-fn ctx_index_text_observed(raw_content: text, source: text, after_write: fn()) -> CtxChunkCount:
     # Secrets are masked BEFORE chunking: the raw value is never stored.
     val content = ctx_redact(CtxRawContent(body: raw_content)).body
     if content.trim() == "":
@@ -419,7 +413,7 @@ fn ctx_index_text_observed(raw_content: text, source: text, after_write: fn()) -
         rows.push(CtxChunk(id: next, source: source, ts: now, bytes: piece.len(), body: piece))
         next = next + 1
     val pre_append = _ctx_cache_key_before_append()
-    if not _ctx_append_chunks_settled(rows, after_write):
+    if not _ctx_append_chunks_settled(rows):
         return CtxChunkCount(count: -1)
     _ctx_cache_extend_after_append(pre_append, rows)
     _ctx_stats_bump("bytes_indexed", content.len())
