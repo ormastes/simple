@@ -64,3 +64,14 @@ interpreting linker source): ~9 s, ~505 MB peak RSS.
 - R_ARM_THM_JUMP19 to an even (ARM-mode) target is now an error instead of a
   silent mis-branch. Spec in reloc_engine_spec.
 - Status: verification-pending.
+
+## Follow-up 2026-11-18 (ARM interworking veneers)
+- Shared `linker/veneer.spl` (VeneerTable + ARM encoders); `elf_static_link`
+  emits a synthetic `.veneer` section for ARM B/JUMP24/PC24 -> Thumb and
+  Thumb B.W (THM_JUMP24) -> ARM. Absolute veneers: static ET_EXEC only.
+- Evidence: `slk/vt_a.c` (-marm) + `vt_t.c` (-mthumb) chain with JUMP24 and two
+  THM_JUMP24 cross-state tail calls. Simple linker 1000 B (7 s on the Windows
+  seed) and ld.lld 1372 B (0.09 s, 56 MB) both print "hi" with rc=42 under qemu-arm-static.
+- Finding: armv7 glibc `memcpy` is STT_GNU_IFUNC, so static glibc is blocked
+  on static IFUNC (IPLT + IRELATIVE), tracked as follow-up (b2), not on veneers.
+- Status: verification-pending.
