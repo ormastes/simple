@@ -91,6 +91,7 @@ use compiler.backend.linker.elf.synthetic_sections.{
     elf_build_dynamic, elf_build_interp, elf_build_gnu_build_id,
     elf_dyn_rel_entry, elf_build_dynsym_class, elf_gnu_hash_size_class, elf_build_gnu_hash_class,
     elf_build_dynamic_class, elf_gotplt_size_class, elf_build_plt_i386, elf_build_gotplt_i386,
+    elf_arm_plt_fits, elf_build_plt_arm, elf_build_gotplt_arm,
     DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ,
     DT_RELAENT, DT_STRSZ, DT_SYMENT, DT_INIT, DT_FINI, DT_PLTREL, DT_DEBUG, DT_JMPREL,
     DT_INIT_ARRAY, DT_FINI_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ, DT_RUNPATH,
@@ -1880,11 +1881,12 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     # implemented, so every other mode fails closed here.
     val w32 = target == RelocArch.I386 or target == RelocArch.Arm32 or target == RelocArch.Riscv32
     val got_ws: i64 = if w32: 4 else: 8
-    # i386 additionally admits dynamic ET_EXEC/PIE (REL dynamic relocations,
-    # lazy PLT). armv7 and rv32 dynamic output is not implemented yet.
-    val w32_dynamic = target == RelocArch.I386 and (mode == ELF_LINK_DYNAMIC_EXEC or mode == ELF_LINK_DYNAMIC_PIE)
+    # i386 and armv7 additionally admit dynamic ET_EXEC/PIE (REL dynamic
+    # relocations, lazy PLT). rv32 dynamic output is not implemented.
+    val w32_dynamic = (target == RelocArch.I386 or target == RelocArch.Arm32) and
+        (mode == ELF_LINK_DYNAMIC_EXEC or mode == ELF_LINK_DYNAMIC_PIE)
     if w32 and mode != ELF_LINK_STATIC_EXEC and not w32_dynamic:
-        return Err("unsupported ELF32 output mode: only static ET_EXEC (plus i386 dynamic ET_EXEC/PIE) is admitted for i386/armv7/rv32")
+        return Err("unsupported ELF32 output mode: only static ET_EXEC (plus i386/armv7 dynamic ET_EXEC/PIE) is admitted for i386/armv7/rv32")
     if target == RelocArch.Riscv64 and mode != ELF_LINK_STATIC_EXEC:
         return Err("unsupported RISC-V output mode: only static ET_EXEC is admitted (RV64 PLT/GOT/dynamic relocations are not implemented)")
     val dynamic = elf_mode_dynamic(mode)
@@ -2626,6 +2628,10 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         else if n == ".plt":
             if target == RelocArch.I386:
                 out.push(elf_u8_from_i64(elf_build_plt_i386(plt_v, gotplt_v, nplt, pie)))
+            else if target == RelocArch.Arm32:
+                if not elf_arm_plt_fits(plt_v, gotplt_v, nplt):
+                    return Err("unsupported: ARM PLT to .got.plt distance needs ld.lld's long PLT form")
+                out.push(elf_u8_from_i64(elf_build_plt_arm(plt_v, gotplt_v, nplt)))
             else if a64:
                 out.push(elf_u8_from_i64(elf_build_plt_a64(plt_v, gotplt_v, nplt)))
             else:
@@ -2633,6 +2639,8 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         else if n == ".got.plt":
             if target == RelocArch.I386:
                 out.push(elf_u8_from_i64(elf_build_gotplt_i386(nplt, plt_v, elf_plan_addr(plan, ".dynamic"))))
+            else if target == RelocArch.Arm32:
+                out.push(elf_u8_from_i64(elf_build_gotplt_arm(nplt, plt_v)))
             else if a64:
                 out.push(elf_u8_from_i64(elf_build_gotplt(nplt, plt_v)))
             else:

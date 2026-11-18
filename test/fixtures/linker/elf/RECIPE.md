@@ -251,3 +251,15 @@ ld.lld -shared --soname libadd_i386.so --hash-style=both -o libadd_i386.so.1 dyn
 `elf32_dynamic_spec` checks the output against
 `ld.lld --dynamic-linker /lib/ld-linux.so.2 [-pie] dyn_start_i386.o libadd_i386.so.1`;
 both run under `qemu-i386-static -L /usr/i686-linux-gnu` and print `hi`, exit 42.
+
+## ELF32 dynamic fixtures (armv7 Thumb, lane c)
+
+```
+PIC="-c -O1 -mthumb -ffreestanding -fPIC -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables -nostdlib"
+clang --target=armv7-linux-gnueabihf $PIC dyn_start_arm.c -o dyn_start_arm.o
+clang --target=armv7-linux-gnueabihf $PIC dyn_lib_arm.c -o dyn_lib_arm.o
+ld.lld -shared --soname libadd_arm.so --hash-style=both -o libadd_arm.so.1 dyn_lib_arm.o
+```
+
+dyn_start_arm.o: R_ARM_THM_CALL add_val (import -> ARM PLT, BLX), R_ARM_GOT_PREL msg (GLOB_DAT).
+Runs under `qemu-arm-static -L /usr/arm-linux-gnueabihf`: `hi`, exit 42, same as ld.lld.

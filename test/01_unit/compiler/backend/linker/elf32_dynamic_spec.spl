@@ -167,3 +167,53 @@ describe "elf_link - i386 dynamic PIE":
         expect([b[o], b[o + 1], rd32(b, o + 2)]).to_equal([0xff, 0xb3, 4])
         expect([b[o + 6], b[o + 7], rd32(b, o + 8)]).to_equal([0xff, 0xa3, 8])
         expect([b[o + 16], b[o + 17], rd32(b, o + 18)]).to_equal([0xff, 0xa3, 12])
+
+fn link_arm(mode: i64) -> [i64]:
+    val r = elf_link(ElfLinkRequest(objects: [load_path("{FIX}/dyn_start_arm.o")], archives: [],
+        shared: [load_path("{FIX}/libadd_arm.so.1")], entry: "_start",
+        target: RelocArch.Arm32, mode: mode, interp: "/lib/ld-linux-armhf.so.3"))
+    if r.is_err():
+        print "link error: {r.unwrap_err()}"
+        return []
+    r.unwrap()
+
+describe "elf_link - armv7 dynamic":
+    it "writes ld.lld's ARM PLT0 and PLT1 against .got.plt":
+        val b = link_arm(ELF_LINK_DYNAMIC_EXEC)
+        expect(b.len() > 0).to_equal(true)
+        val gp = sec_addr(b, ".got.plt")
+        val plt = sec_addr(b, ".plt")
+        val o = sec_off(b, ".plt")
+        val h = gp - plt - 4
+        expect(rd32(b, o)).to_equal(0xe52de004)
+        expect(rd32(b, o + 4)).to_equal(0xe28fe600 | ((h >> 20) & 0xff))
+        expect(rd32(b, o + 8)).to_equal(0xe28eea00 | ((h >> 12) & 0xff))
+        expect(rd32(b, o + 12)).to_equal(0xe5bef000 | (h & 0xfff))
+        expect(rd32(b, o + 16)).to_equal(0xd4d4d4d4)
+        val e = gp + 12 - (plt + 32) - 8
+        expect(rd32(b, o + 32)).to_equal(0xe28fc600 | ((e >> 20) & 0xff))
+        expect(rd32(b, o + 36)).to_equal(0xe28cca00 | ((e >> 12) & 0xff))
+        expect(rd32(b, o + 40)).to_equal(0xe5bcf000 | (e & 0xfff))
+
+    it "seeds lazy slots with PLT0 and binds add_val by R_ARM_JUMP_SLOT":
+        val b = link_arm(ELF_LINK_DYNAMIC_EXEC)
+        val gp = sec_addr(b, ".got.plt")
+        val gpo = sec_off(b, ".got.plt")
+        expect(rd32(b, gpo)).to_equal(0)
+        expect(rd32(b, gpo + 12)).to_equal(sec_addr(b, ".plt"))
+        val rp = sec_off(b, ".rel.plt")
+        expect(rd32(b, rp)).to_equal(gp + 12)
+        expect(rd32(b, rp + 4)).to_equal((dynsym_index(b, "add_val") << 8) | 22)
+        val rd = sec_off(b, ".rel.dyn")
+        expect(rd32(b, rd + 4)).to_equal((dynsym_index(b, "msg") << 8) | 21)
+
+    it "turns the Thumb call to the ARM PLT entry into BLX":
+        val b = link_arm(ELF_LINK_DYNAMIC_EXEC)
+        val t = sec_off(b, ".text")
+        # THM_CALL at .text+0x10: low half bit 12 clear = BLX
+        expect(rd16(b, t + 0x12) & 0x1000).to_equal(0)
+
+    it "links a PIE with DF_1_PIE":
+        val b = link_arm(ELF_LINK_DYNAMIC_PIE)
+        expect(rd16(b, 16)).to_equal(3)
+        expect(dyn_tag(b, 0x6ffffffb)).to_equal(0x08000000)
