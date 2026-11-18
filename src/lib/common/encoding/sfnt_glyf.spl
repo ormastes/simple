@@ -413,6 +413,36 @@ class _SfntEdge:
     dx_dy: f64
     direction: i64
 
+# Vertical frame of the grayscale bitmap: its row count, the offset of its
+# bottom edge above the baseline (the consumer's bearing_y: top row = baseline
+# - bearing_y - height) and the outline y, in px, of its top edge.
+# `sfnt_measure_glyph_into`, `sfnt_render_glyph_into` and
+# `sfnt_glyph_gray_row_has_ink` all take it from here, so their receipts agree.
+# Above Skia's LCD limit (48 device px) the frame is BASELINE-anchored: whole
+# rows counted from the baseline, the outline kept at its true y. Chrome 159
+# does the same there (Liberation Serif `H`, 96 device px: bottom row solid,
+# top row partial; 60px at 1x ends on row 53). The old frame hung the bitmap
+# from its own ink top and rounded the height up, so the ink bottom floated up
+# to one row above the baseline, by a different fraction per glyph. At 48 px
+# and below Chrome paints LCD (`sfnt_render_glyph_lcd_milli`, baseline-anchored
+# already); the ink-top frame stays for this raster there, unmeasured.
+val _SFNT_GRAY_BASELINE_ANCHOR_MIN_PX: i64 = 49
+
+class _SfntGrayFrame:
+    height: i64
+    bearing_y: i64
+    top: f64
+
+fn _gray_frame(bounds: _SfntBounds, scale: f64, size_px: i64) -> _SfntGrayFrame:
+    if size_px < _SFNT_GRAY_BASELINE_ANCHOR_MIN_PX:
+        return _SfntGrayFrame(height: _ceil_glyf_dimension((bounds.bottom - bounds.top) * scale), bearing_y: _round_glyf_metric(bounds.top * scale), top: bounds.bottom * scale)
+    # 0.001 px of slack keeps an outline that ends ON a row boundary (a cap
+    # top at a whole px, a foot on the baseline) from claiming an empty row.
+    val bottom_px = _floor_glyf(bounds.top * scale + 0.001)
+    val top_px = _ceil_glyf(bounds.bottom * scale - 0.001)
+    val height: i64 = if top_px > bottom_px: top_px - bottom_px else: 1
+    _SfntGrayFrame(height: height, bearing_y: bottom_px, top: (bottom_px + height) as f64)
+
 fn _outline_bounds(commands: [SfntGlyfCommand]) -> Option<_SfntBounds>:
     if commands.len() == 0: return None
     var first = true
@@ -864,7 +894,8 @@ fn sfnt_measure_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, 
     val raw_w = (bounds.right - bounds.left) * scale
     val raw_h = (bounds.bottom - bounds.top) * scale
     val width = _ceil_glyf_dimension(raw_w)
-    val height = _ceil_glyf_dimension(raw_h)
+    val frame = _gray_frame(bounds, scale, size_px)
+    val height = frame.height
     meta[10] = 201
     meta[11] = raw_w as i64
     meta[12] = raw_h as i64
@@ -889,7 +920,7 @@ fn sfnt_measure_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, 
     meta[2] = _round_glyf_metric(horizontal[0] as f64 * scale)
     meta[18] = _round_glyf_metric(horizontal[0] as f64 * scale * 1000.0)
     meta[3] = _round_glyf_metric(horizontal[1] as f64 * scale)
-    meta[4] = _round_glyf_metric(bounds.top * scale)
+    meta[4] = frame.bearing_y
     meta[5] = width * height
     meta[6] = glyph_id as i64
     meta[15] = selector_kind
@@ -945,12 +976,13 @@ fn sfnt_render_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, s
         None: return
     val scale = size_px as f64 / units_per_em as f64
     val width = _ceil_glyf_dimension((bounds.right - bounds.left) * scale)
-    val height = _ceil_glyf_dimension((bounds.bottom - bounds.top) * scale)
+    val frame = _gray_frame(bounds, scale, size_px)
+    val height = frame.height
     if width != meta[0] or height != meta[1] or width * height != meta[5]:
         return
-    if _round_glyf_metric(horizontal[0] as f64 * scale) != meta[2] or _round_glyf_metric(horizontal[1] as f64 * scale) != meta[3] or _round_glyf_metric(bounds.top * scale) != meta[4]:
+    if _round_glyf_metric(horizontal[0] as f64 * scale) != meta[2] or _round_glyf_metric(horizontal[1] as f64 * scale) != meta[3] or frame.bearing_y != meta[4]:
         return
-    val edges = _outline_edges(commands, scale, bounds.left * scale, -bounds.bottom * scale)
+    val edges = _outline_edges(commands, scale, bounds.left * scale, 0.0 - frame.top)
     val alpha_buf = _glyf_raster_alpha(edges, width, height)
     var nonzero_alpha: i64 = 0
     var i: i64 = 0
@@ -994,11 +1026,12 @@ pub fn sfnt_glyph_gray_row_has_ink(blob: [u8], glyph_id: i64, size_px: i64) -> b
         None: return false
     val scale = size_px as f64 / units_per_em as f64
     val width = _ceil_glyf_dimension((bounds.right - bounds.left) * scale)
-    val height = _ceil_glyf_dimension((bounds.bottom - bounds.top) * scale)
+    val frame = _gray_frame(bounds, scale, size_px)
+    val height = frame.height
     if width <= 0 or height <= 0 or width > 4096 or height > 4096:
         return false
     val row = height / 2
-    val edges = _outline_edges_band(commands, scale, bounds.left * scale, -bounds.bottom * scale, row as f64, (row + 1) as f64)
+    val edges = _outline_edges_band(commands, scale, bounds.left * scale, 0.0 - frame.top, row as f64, (row + 1) as f64)
     val alpha = _glyf_raster_alpha_rows(edges, width, height, row, row + 1)
     var x: i64 = 0
     while x < width:
@@ -1025,7 +1058,7 @@ pub fn sfnt_glyph_gray_row_has_ink(blob: [u8], glyph_id: i64, size_px: i64) -> b
 # phase_q/4 px (Skia's quarter-pixel positions). One padding pixel on each side
 # holds the filter's 2-subpixel spread. Vertically the outline is baseline-anchored and
 # warped by the slight-hinting blue-zone fit (_lcd_hint_knots), so unlike
-# sfnt_render_glyph_into (unhinted, ink-bottom anchored) its rows differ too.
+# sfnt_render_glyph_into (unhinted; hung from its ink top up to 48 px, see `_gray_frame`) its rows differ too.
 class SfntLcdGlyph:
     slg_width: i64
     slg_height: i64

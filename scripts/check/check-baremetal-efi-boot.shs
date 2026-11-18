@@ -61,7 +61,7 @@ BM_TIMEOUT_S=${BM_TIMEOUT_S:-30}
 CLANG=${CLANG:-clang}
 OPENSBI_SRC=${OPENSBI_SRC:-$HOME/.cache/simple/opensbi-v1.4}
 OPENSBI32_SRC=${OPENSBI32_SRC:-$HOME/.simple/firmware/src/opensbi-1.7}
-I686_BASE=0x1000000  # 16 MiB: the IA32 stub allocates exactly this address (AllocateAddress)
+I686_BASE=0x1000000  # link base; the i686 image is position independent and runs where AnyPages puts it
 OPENSBI_TAG=v1.4
 OPENSBI_SHA=a2b255b88918715173942f2c5e1f97ac9e90c877  # same pin as check-simpleos-riscv64-opensbi-guest-boot.shs
 work=${BM_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/bm-efi-boot.XXXXXX")}
@@ -127,7 +127,7 @@ layout_of() {
 build_image() {
     a=$1; d=$2; base=$3
     compile_obj "$BM_SRC" "$a" "$d/main.o" "$d/build.log" || { why=compile; return 1; }
-    rtm=bm_rt; [ "$a" = riscv32 ] && rtm=bm_rt32   # 32-bit ABI widths, see bm_rt32.spl header
+    rtm=bm_rt; case "$a" in riscv32|i686) rtm=bm_rt32 ;; esac   # 32-bit ABI widths, see bm_rt32.spl header
     compile_obj "$RT_DIR/$rtm.spl" "$a" "$d/bm_rt.o" "$d/rt-build.log" || { why=rt-compile; return 1; }
     # The compiler module-prefixes definitions (<module path>.bm_rt.<name>);
     # bind the plain ABI names. Every runtime symbol must be found.
@@ -191,10 +191,10 @@ build_image() {
     # x86_64/aarch64 images are linked at 0 but run wherever AllocatePages put
     # them, so any absolute relocation would point at the wrong address. Fail
     # closed rather than boot a silently mis-relocated image.
-    if [ "$a" != riscv64 ] && [ "$a" != riscv32 ] && [ "$a" != i686 ]; then
+    if [ "$a" != riscv64 ] && [ "$a" != riscv32 ]; then
         llvm-readelf -r "$d/crt0.o" "$d/main.o" "$d/bm_rt_abi.o" > "$d/relocs.txt" 2>&1 || {
             why=readelf; return 1; }
-        if grep -E -q 'R_X86_64_(32S?|64) |R_AARCH64_(ABS(16|32|64)|MOVW_UABS)' "$d/relocs.txt"; then
+        if grep -E -q 'R_X86_64_(32S?|64) |R_386_(32|16|8) |R_AARCH64_(ABS(16|32|64)|MOVW_UABS)' "$d/relocs.txt"; then
             why=absolute-reloc; return 1
         fi
     fi
@@ -227,13 +227,13 @@ extern const unsigned char image_start[], image_end[];
 typedef unsigned long long u64;
 #if defined(IA32)
 /* UEFI IA32: UINTN/pointers are 32 bit. SystemTable->BootServices at 60,
- * BootServices->AllocatePages at 32. The image is linked at IMAGE_BASE (it has
- * absolute 32-bit relocations), so ask for exactly that address
- * (AllocateAddress = 2) instead of AnyPages. */
+ * BootServices->AllocatePages at 32. crt0_i686 is position independent
+ * (GOTPC/GOTOFF), so AnyPages works; OVMF IA32 has no free memory at a fixed
+ * 16 MiB address (AllocateAddress returned EFI_NOT_FOUND). */
 typedef unsigned int uintn;
 #define ST_BS_OFF 60
 #define BS_ALLOC_OFF 32
-#define ALLOC_TYPE 2
+#define ALLOC_TYPE 0
 #else
 typedef u64 uintn;
 #define ST_BS_OFF 96
@@ -245,9 +245,6 @@ u64 efi_main(void *h, void *st) {
     void *bs = *(void **)((char *)st + ST_BS_OFF);
     alloc_pages_fn alloc = *(alloc_pages_fn *)((char *)bs + BS_ALLOC_OFF);
     u64 n = (u64)(image_end - image_start), addr = 0;
-#if defined(IA32)
-    addr = IMAGE_BASE;
-#endif
     if (alloc(ALLOC_TYPE, 1, (n + 4095) / 4096, &addr) != 0) { for (;;) {} }
     for (u64 i = 0; i < n; i++) ((volatile unsigned char *)(uintn)addr)[i] = image_start[i];
 #if defined(__aarch64__)
