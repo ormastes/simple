@@ -88,3 +88,29 @@ Steps (TDD each):
 6. Run it for both linkers; record board path per board-runnable.md (same fw_payload +
    SD/NVFS image on a JH7110-class board).
 Needs: the Rust seed (`SIMPLE_BIN`) to build the kernel until the self-hosted compiler can.
+
+## Update 2026-11-19 (lane ssos-launch): G3 fixed, plan step 3 premise is wrong
+- G3 (verification-pending): `syscall.spl` now backs id 32 Write for fd 1/2 (EBADF for
+  other fds, EFAULT for a null buffer). Separate defect found and fixed in the same
+  change: DebugWrite (id 60) called `rv64_process_stdout_write_byte(byte)` against the
+  two-arg `(child_id, byte)` owner, so the id-60 path the sysroot libc uses for
+  stdout/stderr could not compile. Spec `test/01_unit/os/kernel/arch/riscv64_syscall_write_spec.spl`
+  covers the non-emitting paths (byte emission goes through the SBI console, which the
+  hosted interpreter cannot run); emission must be proven by the OpenSBI rung (step 5).
+- Step 3 cannot work as written: `riscv64_fs_exec_spawn_capture` ->
+  `fs_exec_prepare_spawn` is a fail-closed stub that always returns pid -13, and
+  `fs_exec_prepare_spawn_from_bytes` is also fail-closed (`spawn:auth-required`).
+  This is policy (`smoke_entry.spl`: writable media without a loader-issued token is
+  never entered). The only live route is the authenticated one
+  (`riscv64_fs_exec_spawn_authenticated_capture_with_launch_v1`, driven by
+  `riscv64_authenticated_media_acceptance_v1`), which needs the signed sidecars
+  (`.MAN/.ADM/.SIG/.PUB`, `scripts/os/build_rv64_authenticated_hello.shs`, signing key
+  inputs from `rebuild-sosix-qemu-media.shs`) staged on the boot media. G1 therefore
+  lives in `adopt_authenticated_executable_pid_v1`, not `fs_exec_prepare_spawn`.
+  Revised step 3: stage the sysroot hello plus its signed sidecars and go through the
+  authenticated route; do not add an unauthenticated bypass.
+- Kernel build from WSL via Windows `bin/simple.exe` (winlink.sh): all 753 modules
+  compile (523 s), but the freestanding link fails with Windows os error 206 (command
+  line > 32 KiB). See `windows_seed_freestanding_link_cmdline_too_long_2026-11-19.md`.
+  No riscv64 kernel can be produced on this host until that is fixed and the seed
+  redeployed (or a Linux seed is available in WSL).
