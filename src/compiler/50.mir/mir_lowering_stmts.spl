@@ -766,13 +766,22 @@ impl MirLowering:
 
     me copy_struct_value_recursive(init_local: LocalId, struct_type_name: text, type_symbol: SymbolId, copy_chain: [text]) -> LocalId:
         """Rebuild a value struct, recursively copying nested value structs."""
+        var effective_struct_name = struct_type_name
+        if not effective_struct_name.contains("::") and type_symbol.is_valid():
+            val cand = self.mir_struct_symbol_name(type_symbol)
+            if cand.contains("::") and self.struct_field_order.contains(cand):
+                effective_struct_name = cand
+        if not effective_struct_name.contains("::") and self.current_module_id != "":
+            val mod_cand = self.declared_struct_layout_key("{self.current_module_id}::{effective_struct_name}")
+            if mod_cand.contains("::") and self.struct_field_order.contains(mod_cand):
+                effective_struct_name = mod_cand
         # Fail closed on an ambiguous BARE layout: the name is declared with
         # different field lists in several modules and the bare tier keeps
         # only the first registration, so its field COUNT would size this copy
         # (p3_census_mir_classes_2026-11-13, class 2). Qualified keys and
         # unambiguous bare names are unaffected.
-        if not struct_type_name.contains("::") and self.struct_field_order_conflict_warned.contains(struct_type_name):
-            self.error_fatal("struct copy of ambiguous bare layout '{struct_type_name}': declared with different field lists in several modules and no module-qualified provenance reached this value", None)
+        if not effective_struct_name.contains("::") and self.struct_field_order_conflict_warned.contains(effective_struct_name):
+            self.error_fatal("struct copy of ambiguous bare layout '{effective_struct_name}': declared with different field lists in several modules and no module-qualified provenance reached this value", None)
             return init_local
         val canonical_type_symbol = self.canonical_mir_type_symbol(type_symbol)
         val record_type = MirType(kind: MirTypeKind.Struct(canonical_type_symbol))
@@ -795,10 +804,10 @@ impl MirLowering:
         guard_bldr.terminate_if(mir_operand_copy(has_value), copy_block, merge_block)
         guard_bldr.switch_to_block(copy_block)
         self.builder = guard_bldr
-        val field_names = self.struct_field_order[struct_type_name]
-        val nested_names = self.struct_field_type_name.get(struct_type_name) ?? []
-        val nested_ownership_keys = self.struct_field_type_ownership_key.get(struct_type_name) ?? []
-        val declared_field_types = self.struct_field_hir_type.get(struct_type_name) ?? []
+        val field_names = self.struct_field_order[effective_struct_name]
+        val nested_names = self.struct_field_type_name.get(effective_struct_name) ?? []
+        val nested_ownership_keys = self.struct_field_type_ownership_key.get(effective_struct_name) ?? []
+        val declared_field_types = self.struct_field_hir_type.get(effective_struct_name) ?? []
         var copy_ops: [MirOperand] = []
         var cfi = 0
         while cfi < field_names.len():
@@ -877,7 +886,7 @@ impl MirLowering:
         agg_bldr.switch_to_block(merge_block)
         val result = agg_bldr.emit_load(mir_operand_copy(result_slot), record_type)
         self.builder = agg_bldr
-        self.struct_value_syms[result.id] = struct_type_name
+        self.struct_value_syms[result.id] = effective_struct_name
         self.copy_local_hir_type_metadata(init_local.id, result.id)
         if self.generic_instance_field_types.has(init_local.id):
             self.generic_instance_field_types[result.id] = self.generic_instance_field_types[init_local.id]

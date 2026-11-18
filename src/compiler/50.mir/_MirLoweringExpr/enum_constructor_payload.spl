@@ -286,6 +286,7 @@ impl MirLowering:
         b_none.emit_const(none_word, MirConstValue.Int(3), MirType.i64())
         self.builder = b_none
         self.nil_locals[none_word.id] = true
+        self.option_none_locals[none_word.id] = true
         none_word
 
     me lower_untyped_enum_payload_expression(owner_or_key: text, expression: HirExpr) -> LocalId:
@@ -360,7 +361,16 @@ impl MirLowering:
                 match expression.kind:
                     case HirExprKind.NilLit: return self.unsafe_depth > 0
                     case _: ()
-                if self.enum_payload_is_builtin_none(expression): return true
+                if self.enum_payload_is_builtin_none(expression) or self.option_none_locals.contains(local.id): return true
+            case HirTypeKind.Result(ok_expected, err_expected):
+                if self.untyped_ok_ctor_payload_types.contains(local.id):
+                    val ok_actual: HirType = self.untyped_ok_ctor_payload_types[local.id]
+                    if enum_payload_types_alias_compatible(ok_expected, ok_actual, self.symbols):
+                        return true
+                if self.untyped_err_ctor_payload_types.contains(local.id):
+                    val err_actual: HirType = self.untyped_err_ctor_payload_types[local.id]
+                    if enum_payload_types_alias_compatible(err_expected, err_actual, self.symbols):
+                        return true
             case HirTypeKind.Nil:
                 # The nil singleton payload accepts exactly one value: the nil
                 # literal (the identity rule — a nil-typed slot holds the nil
@@ -670,6 +680,9 @@ impl MirLowering:
                             if self.enum_constructor_symbol_owner(symbol) != "":
                                 self.mark_runtime_value_local(value.id)
                         case _: ()
+            case HirTypeKind.Optional(_):
+                self.option_value_locals[value.id] = true
+                self.mark_runtime_value_local(value.id)
             case _: ()
         self.remember_local_hir_type(value.id, expected, 0, 0)
         value

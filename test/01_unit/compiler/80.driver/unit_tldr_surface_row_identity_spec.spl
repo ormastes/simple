@@ -23,6 +23,10 @@ use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_bind_row_identity,
     module_surface_content_hash}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_blocked_reason_v1}
+use compiler.hir.hir_lowering.module_surface_types.{module_surface_declaration_authority_index_put,
+    module_surface_declaration_authority_lookup_typed_building_v1}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.driver.driver_unit_tldr_imports_v1.{unit_tldr_module_path_for_v1}
 
 describe "module_surface_bind_row_identity":
     it "gives a summary-named surface and a placeholder the same closure-row identity":
@@ -53,3 +57,29 @@ describe "module_surface_bind_row_identity":
     it "is used by the streaming TLDR row registration":
         val stream = file_read("src/compiler/80.driver/driver_source_parse_streaming.spl")
         expect(stream).to_contain("module_surface_bind_row_identity(tldr_surface")
+
+    it "rebinds declaration authority owner and source_path, and resolves common.* to lib.common.*":
+        var summary: ModuleSurface = ModuleSurface.empty("")
+        summary.module_name = "common.plugin.iface_id"
+        summary.logical_name = "common.plugin.iface_id"
+        summary.canonical_name = "common.plugin.iface_id"
+        val put_res = module_surface_declaration_authority_index_put(
+            summary.declaration_authority_index,
+            "IfaceId",
+            "common.plugin.iface_id",
+            "IfaceId",
+            Visibility.Public,
+            "pub",
+            "/synthetic/common/plugin/iface_id.spl",
+            "struct:IfaceId")
+        expect(put_res.is_ok()).to_be(true)
+        val path = "src/lib/common/plugin/iface_id.spl"
+        val bound = module_surface_bind_row_identity(summary, path, "/abs/" + path, "lib.common.plugin.iface_id", 3, "struct IfaceId:\n    v: i64\n")
+        val row = module_surface_declaration_authority_lookup_typed_building_v1(
+            bound.declaration_authority_index, "IfaceId", "struct")
+        expect(row.found).to_be(true)
+        expect(row.declaring_module).to_equal("lib.common.plugin.iface_id")
+        expect(row.source_path).to_equal("/abs/" + path)
+        var mod_paths: Dict<text, text> = {}
+        mod_paths["lib.common.plugin.iface_id"] = "/abs/" + path
+        expect(unit_tldr_module_path_for_v1(mod_paths, "common.plugin.iface_id")).to_equal("/abs/" + path)
