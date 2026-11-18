@@ -9,6 +9,8 @@
 use std.spec.*
 use std.io_runtime.{cwd}
 use app.compiler_schema.codec_gen.{CodecUniverse, emit_codec_file, bare_placeholder_literal_v1}
+use compiler.hir.generated.hir_codec.{hc_dec_hir_block}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
 
 fn body_of(generated: text, fn_name: text) -> text:
     val start = generated.index_of("fn " + fn_name + "(r: FlatPoolReader)")
@@ -21,19 +23,26 @@ fn body_of(generated: text, fn_name: text) -> text:
     rest.substring(0, stop)
 
 describe "HIR codec generation: list/pair Option unwrapping and payload-only enum placeholders":
-    it "unwraps node list elements via presence bind before pushing into bare [T]":
+    it "unwraps node list elements via presence bind and rejects absent elements fail-closed":
         val generated = emit_codec_file(CodecUniverse.load(cwd()))
         val block_dec = body_of(generated, "hc_dec_hir_block")
         expect(block_dec).to_contain("if val present_ev0 = ev0:")
         expect(block_dec).to_contain("f_stmts.push(present_ev0)")
+        expect(block_dec).to_contain("r.reject_malformed(\"nil_in_non_optional_list_element\")")
         expect(block_dec.contains("f_stmts.push(ev0)")).to_equal(false)
 
-    it "unwraps node pair components via presence bind before pushing into [(A, B)]":
+        # Runtime wire test: presence flag 0 in a non-optional [HirStmt] list fails closed on reader.ok
+        var reader = FlatPoolReader.new("1\n0\n0\n0\n0\n0\n")
+        val _decoded = hc_dec_hir_block(reader)
+        expect(reader.ok).to_equal(false)
+
+    it "unwraps node pair components via presence bind and rejects absent elements fail-closed":
         val generated = emit_codec_file(CodecUniverse.load(cwd()))
         val expr_dec = body_of(generated, "hc_dec_hir_expr_kind")
         expect(expr_dec).to_contain("if val present_pa14 = pa14:")
         expect(expr_dec).to_contain("if val present_pb14 = pb14:")
         expect(expr_dec).to_contain("f_entries.push((present_pa14, present_pb14))")
+        expect(expr_dec).to_contain("r.reject_malformed(\"nil_in_non_optional_pair_element\")")
         expect(expr_dec.contains("f_entries.push((pa14, pb14))")).to_equal(false)
 
     it "synthesizes bare placeholders and helpers for payload-only enums HirStmtKind and HirCompClauseKind":
