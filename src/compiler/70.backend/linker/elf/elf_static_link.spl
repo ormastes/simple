@@ -35,7 +35,7 @@
 
 use compiler.backend.linker.elf_parser.{
     ElfObject, ElfSymbol, elf_parse_object, elf_symbol_binding, elf_symbol_type,
-    elf_reloc_sym, elf_reloc_type, elf_section_addralign, elf_section_name,
+    elf_reloc_sym, elf_reloc_type, elf_section_addralign, elf_section_name, elf_section_link,
     SHN_UNDEF, STB_LOCAL, STB_GLOBAL, STB_WEAK, STT_SECTION, SHT_NOBITS, SHT_NOTE, elf_group_signature
 }
 use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_386, EM_AARCH64, SHT_PROGBITS}
@@ -122,6 +122,7 @@ val SHT_INIT_ARRAY: i64 = 14
 val SHT_FINI_ARRAY: i64 = 15
 val SHT_PREINIT_ARRAY: i64 = 16
 val SHT_X86_64_UNWIND: i64 = 0x70000001
+val SHT_ARM_EXIDX: i64 = 0x70000001    # same value, EM_ARM only
 val ET_EXEC_T: i64 = 2
 val ET_DYN_T: i64 = 3
 val SHT_SYMTAB_L: i64 = 2
@@ -326,7 +327,9 @@ fn elf_static_place(objects: [ElfObject], live: [[bool]]) -> Result<ElfStaticInp
                 idxs = idxs.push(-1)
                 offs = offs.push(0)
             else:
-                val oname = elf_out_name(elf_section_name(obj, si), sec.sh_type, sec.sh_flags)
+                # SHT_ARM_EXIDX shares 0x70000001 with SHT_X86_64_UNWIND: branch on EM_ARM.
+                val arm_exidx = obj.header.e_machine == 40 and sec.sh_type == SHT_ARM_EXIDX
+                val oname = if arm_exidx: Ok(".ARM.exidx") else: elf_out_name(elf_section_name(obj, si), sec.sh_type, sec.sh_flags)
                 if oname.is_err():
                     return Err("object {oi}: {oname.unwrap_err()}")
                 val name = oname.unwrap()
@@ -342,6 +345,12 @@ fn elf_static_place(objects: [ElfObject], live: [[bool]]) -> Result<ElfStaticInp
                 if al < 1:
                     al = 1
                 var k = elf_find_out(outs, name)
+                if k < 0 and arm_exidx:
+                    # lld: SHF_ALLOC | SHF_LINK_ORDER, sh_link = .text; contents and
+                    # final size come from elf_arm_exidx_layout.
+                    outs = outs.push(elf_sec_with(elf_out_sec(".ARM.exidx", SHT_ARM_EXIDX, 0x82,
+                        4, 0, ELF_SEG_R), 0, ".text", 0))
+                    k = outs.len() - 1
                 if k < 0:
                     var st = sec.sh_type
                     if st == SHT_X86_64_UNWIND:
@@ -369,6 +378,120 @@ fn elf_static_place(objects: [ElfObject], live: [[bool]]) -> Result<ElfStaticInp
         oi = oi + 1
     Ok(ElfStaticInputs(objects: objects, sec_out: sec_out, sec_off: sec_off,
         outs: outs, merge: merge))
+
+struct ElfArmExidx:
+    inputs: ElfStaticInputs
+    synth: [i64]          # flat (text oi, text si, table offset) per synthesized CANTUNWIND
+    end_oi: i64           # last executable input section: the sentinel covers its end
+    end_si: i64
+
+fn elf_arm_exidx_word(obj: ElfObject, si: i64, at: i64) -> i64:
+    elf_u8_read_le(obj.raw, obj.sections[si].sh_addr + at, 4)
+
+fn elf_arm_exidx_find(inputs: ElfStaticInputs, oi: i64, text_si: i64) -> i64:
+    """Placed .ARM.exidx input of (oi, text_si), or -1."""
+    val obj = inputs.objects[oi]
+    var si: i64 = 1
+    while si < obj.sections.len():
+        if obj.sections[si].sh_type == SHT_ARM_EXIDX and inputs.sec_out[oi][si] >= 0 and
+                elf_section_link(obj, si) == text_si:
+            return si
+        si = si + 1
+    -1
+
+fn elf_arm_exidx_dup(inputs: ElfStaticInputs, prev_oi: i64, prev_ex: i64, oi: i64, ex: i64) -> bool:
+    """lld isDuplicateArmExidxSec: cur repeats prev's last unwind word (inline or
+    CANTUNWIND, never an .ARM.extab reference). ex/prev_ex = -1 is synthesized CANTUNWIND."""
+    var prev: i64 = 1
+    if prev_ex >= 0:
+        val ps = inputs.objects[prev_oi].sections[prev_ex]
+        prev = elf_arm_exidx_word(inputs.objects[prev_oi], prev_ex, ps.sh_size - 4)
+    if prev & 0x80000000 == 0 and prev != 1:
+        return false
+    if ex < 0:
+        return prev == 1
+    val sz = inputs.objects[oi].sections[ex].sh_size
+    var at: i64 = 4
+    while at < sz:
+        val cur = elf_arm_exidx_word(inputs.objects[oi], ex, at)
+        if (cur & 0x80000000 == 0 and cur != 1) or cur != prev:
+            return false
+        at = at + 8
+    true
+
+fn elf_arm_exidx_layout(inputs: ElfStaticInputs) -> ElfArmExidx:
+    """lld ARMExidxSyntheticSection::finalizeContents: one table entry run per
+    executable input section in output order (its exidx input, or a synthesized
+    CANTUNWIND), adjacent duplicates merged, plus an end-of-text sentinel."""
+    val ek = elf_find_out(inputs.outs, ".ARM.exidx")
+    if ek < 0:
+        return ElfArmExidx(inputs: inputs, synth: [], end_oi: -1, end_si: -1)
+    # executable input sections, sorted by (output rank, offset)
+    var keys: [i64] = []
+    var xo: [i64] = []
+    var xs: [i64] = []
+    var oi: i64 = 0
+    while oi < inputs.objects.len():
+        var si: i64 = 1
+        while si < inputs.objects[oi].sections.len():
+            val k = inputs.sec_out[oi][si]
+            if k >= 0 and inputs.outs[k].sh_flags & SHF_EXECINSTR != 0 and
+                    inputs.objects[oi].sections[si].sh_size > 0:
+                keys.push(elf_out_rank(inputs.outs[k]) * 0x100000000 + inputs.sec_off[oi][si])
+                xo.push(oi)
+                xs.push(si)
+                var pos = keys.len() - 1
+                while pos > 0 and keys[pos - 1] > keys[pos]:
+                    val tk = keys[pos]
+                    keys[pos] = keys[pos - 1]
+                    keys[pos - 1] = tk
+                    val to = xo[pos]
+                    xo[pos] = xo[pos - 1]
+                    xo[pos - 1] = to
+                    val ts = xs[pos]
+                    xs[pos] = xs[pos - 1]
+                    xs[pos - 1] = ts
+                    pos = pos - 1
+            si = si + 1
+        oi = oi + 1
+    var sec_out = inputs.sec_out
+    var sec_off = inputs.sec_off
+    var synth: [i64] = []
+    var off: i64 = 0
+    var prev_oi: i64 = -1
+    var prev_ex: i64 = -1
+    var i: i64 = 0
+    while i < xo.len():
+        val ex = elf_arm_exidx_find(inputs, xo[i], xs[i])
+        if i > 0 and elf_arm_exidx_dup(inputs, prev_oi, prev_ex, xo[i], ex):
+            if ex >= 0:
+                var row = sec_out[xo[i]]
+                row[ex] = -1
+                sec_out[xo[i]] = row
+        else:
+            if ex >= 0:
+                var row = sec_off[xo[i]]
+                row[ex] = off
+                sec_off[xo[i]] = row
+                off = off + inputs.objects[xo[i]].sections[ex].sh_size
+            else:
+                synth.push(xo[i])
+                synth.push(xs[i])
+                synth.push(off)
+                off = off + 8
+            prev_oi = xo[i]
+            prev_ex = ex
+        i = i + 1
+    var outs = inputs.outs
+    val o = outs[ek]
+    outs[ek] = elf_sec_with(elf_out_sec(o.name, o.sh_type, o.sh_flags, o.align, off + 8, o.seg), 0, o.link, o.info)
+    val end_oi = if xo.len() > 0: xo[xo.len() - 1] else: -1
+    val end_si = if xs.len() > 0: xs[xs.len() - 1] else: -1
+    ElfArmExidx(inputs: ElfStaticInputs(objects: inputs.objects, sec_out: sec_out, sec_off: sec_off,
+        outs: outs, merge: inputs.merge), synth: synth, end_oi: end_oi, end_si: end_si)
+
+fn elf_arm_prel31(word: i64, s: i64, p: i64) -> i64:
+    (word & 0x80000000) | ((s - p) & 0x7fffffff)
 
 fn elf_place_common(inputs: ElfStaticInputs, res: SymResolution,
         common_live: {text: bool}) -> ElfCommonPlacement:
@@ -512,8 +635,8 @@ fn elf_out_rank(s: ElfOutSec) -> i64:
             return 7
         if n == ".rela.plt" or n == ".rel.plt":
             return 8
-        if n == ".eh_frame_hdr":
-            return 9
+        if n == ".eh_frame_hdr" or n == ".ARM.exidx":
+            return 9   # lld: note, exidx, rodata
         if n == ".rodata":
             return 10
         if n == ".eh_frame":
@@ -589,7 +712,8 @@ fn elf_is_synth(name: text) -> bool:
         name == "__preinit_array_start" or name == "__preinit_array_end" or
         name == "__rela_iplt_start" or name == "__rela_iplt_end" or
         name == "__rel_iplt_start" or name == "__rel_iplt_end" or
-        name == "__global_pointer$" or name == "__bss_start"
+        name == "__global_pointer$" or name == "__bss_start" or
+        name == "__exidx_start" or name == "__exidx_end"
 
 fn elf_got_base_sec(target: RelocArch) -> text:
     """Section _GLOBAL_OFFSET_TABLE_ marks: .got on ARM (lld gotBaseSymInGotPlt=false), else .got.plt."""
@@ -620,6 +744,8 @@ fn elf_synth_addr(plan: ElfExecPlan, base: i64, name: text, target: RelocArch) -
     var sec = ".init_array"
     if name.contains("_iplt_"):
         sec = if name.starts_with("__rela_"): ".rela.iplt" else: ".rel.iplt"
+    else if name.starts_with("__exidx_"):
+        sec = ".ARM.exidx"
     else if name.starts_with("__fini_array"):
         sec = ".fini_array"
     else if name.starts_with("__preinit_array"):
@@ -1040,6 +1166,8 @@ fn elf_collect_obj_refs(ctx: ElfLinkCtx, contents: [[u8]], oi: i64) -> Result<[E
                 continue
             val o = inputs.outs[k]
             val rtype = elf_reloc_type(r)
+            if rtype == 0:
+                continue  # R_*_NONE: a GC edge only (ARM exidx -> personality); no field
             if elf_target_is_riscv(ctx.target) and rtype == 20 and r.r_addend != 0:
                 return Err("object {oi}: RISC-V GOT_HI20 addend must be zero")
             if elf_target_is_riscv(ctx.target) and rtype == 21 and r.r_addend != 0:
@@ -1336,6 +1464,8 @@ fn elf_synth_shndx(plan: ElfExecPlan, name: text, target: RelocArch) -> i64:
         sec = if name.starts_with("__rela_"): ".rela.iplt" else: ".rel.iplt"
     if name == "_DYNAMIC":
         sec = ".dynamic"
+    else if name.starts_with("__exidx_"):
+        sec = ".ARM.exidx"
     else if name == "_GLOBAL_OFFSET_TABLE_":
         sec = elf_got_base_sec(target)
     else if name.starts_with("__fini_array"):
@@ -2111,7 +2241,8 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         return Err("entry symbol not defined: {req.entry}")
 
     elf_link_trace("eh gc + undef check")
-    val common = elf_place_common(elf_static_place(collected, live)?, res, gc.common_live)
+    val exidx = elf_arm_exidx_layout(elf_static_place(collected, live)?)
+    val common = elf_place_common(exidx.inputs, res, gc.common_live)
     val ctx0 = ElfLinkCtx(inputs: common.inputs, res: res, libs: libs, needed_libs: libs,
         target: target, mode: mode,
         common_offsets: common.offsets, common_out: common.out_idx, copy_offsets: {}, copy_out: -1,
@@ -2650,6 +2781,29 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             return Err("object {r.oi}: relocation type {r.rtype} against '{r.name}' at {p}: {why}")
 
     elf_link_trace("relocated")
+    # --- .ARM.exidx: synthesized CANTUNWIND entries + end-of-text sentinel ---
+    val exidx_k = elf_find_out(inputs.outs, ".ARM.exidx")
+    if exidx_k >= 0 and exidx.end_oi >= 0:
+        val xv = plan.vaddrs[in_to_plan[exidx_k]]
+        var rows = exidx.synth
+        rows.push(exidx.end_oi)
+        rows.push(exidx.end_si)
+        rows.push(inputs.outs[exidx_k].size - 8)
+        var xr: i64 = 0
+        while xr < rows.len():
+            var s = elf_in_vaddr(ctx, lay, rows[xr], rows[xr + 1], 0)?
+            if xr + 3 == rows.len():
+                s = s + inputs.objects[rows[xr]].sections[rows[xr + 1]].sh_size
+            val at = rows[xr + 2]
+            val w0 = elf_arm_prel31(0, s, xv + at)
+            var b: i64 = 0
+            while b < 4:
+                contents[exidx_k][at + b] = ((w0 >> (b * 8)) & 0xff) as u8
+                contents[exidx_k][at + 4 + b] = (if b == 0: 1 else: 0) as u8
+                b = b + 1
+            xr = xr + 3
+    elif exidx_k >= 0:
+        return Err(".ARM.exidx without executable input sections")
     # --- synthetic contents ---
     # IFUNC resolver addresses (the definition itself, not the IPLT redirect)
     var ifunc_resolvers: [i64] = []
