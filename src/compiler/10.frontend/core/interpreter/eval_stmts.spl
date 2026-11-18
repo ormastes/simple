@@ -24,7 +24,7 @@ use compiler.core.ast_stmt.{STMT_CONTINUE, STMT_DEFER, STMT_ERRDEFER, STMT_EXPR,
 use compiler.core.ast_stmt.{STMT_IF, STMT_LABELED_LOOP, STMT_MATCH, STMT_RECEIVE, STMT_RETURN}
 use compiler.core.ast_stmt.{STMT_VAL_DECL, STMT_VAR_DECL, STMT_WHILE}
 use compiler.core.{stmt_get_body, stmt_get_expr, stmt_get_name, stmt_get_span, stmt_get_tag, stmt_get_type}
-use compiler.core.interpreter.eval.{EVAL_STMT_COMPTIME, EVAL_STMT_LAZY_VAL_DECL, EVAL_STMT_STATIC_FOR, coverage_owner_file, coverage_span_decision_id}
+use compiler.core.interpreter.eval.{EVAL_STMT_COMPTIME, EVAL_STMT_LAZY_VAL_DECL, EVAL_STMT_STATIC_FOR, coverage_owner_file, coverage_span_decision_id, interp_coverage_enabled}
 use compiler.core.interpreter.eval.{eval_block, eval_break_label, eval_breaking, eval_continue_label, eval_continuing}
 use compiler.core.interpreter.eval.{eval_control_condition, eval_current_decl_id, eval_defer_depth, eval_defer_depths, eval_defer_eids}
 use compiler.core.interpreter.eval.{eval_errdefer_depths, eval_errdefer_eids, eval_expr, eval_had_error, eval_option_binding_value}
@@ -48,8 +48,6 @@ use compiler.core.interpreter.value_places.{eval_mutable_value_place, eval_prepa
 use compiler.core.interpreter.eval_decls.{eval_decl, eval_module, eval_init}
 use compiler.core.interpreter.eval_decls.{eval_await_expr, eval_yield_expr, eval_spawn_expr}
 use compiler.core.interpreter.eval_decls.{eval_labeled_loop, eval_do_block, eval_atom_expr}
-
-extern fn rt_coverage_enabled() -> bool
 
 # ===== Statement Evaluation =====
 
@@ -427,7 +425,7 @@ fn eval_stmt_return(sid: i64) -> i64:
     ret_val
 
 fn record_stmt_control_decision(sid: i64, taken: bool):
-    if rt_coverage_enabled():
+    if interp_coverage_enabled():
         val span_id = stmt_get_span(sid)
         if span_is_valid(span_id):
             record_control_decision(
@@ -441,13 +439,13 @@ fn eval_stmt_if(sid: i64) -> i64:
     val else_stmts = elif_get_else(elif_idx)
 
     var decision_id: i64 = -1
-    if rt_coverage_enabled():
+    if interp_coverage_enabled():
         decision_id = coverage_span_decision_id(stmt_get_span(sid))
     val cond_val = eval_control_condition(cond_eid, decision_id)
     if eval_had_error: return -1
 
     val taken = val_is_truthy(cond_val)
-    if rt_coverage_enabled():
+    if interp_coverage_enabled():
         record_stmt_control_decision(sid, taken)
     if taken:
         env_push_scope()
@@ -661,7 +659,7 @@ fn eval_stmt_while(sid: i64) -> i64:
     var last_val = val_make_nil()
     var iterations: i64 = 0
     var decision_id: i64 = -1
-    if rt_coverage_enabled():
+    if interp_coverage_enabled():
         decision_id = coverage_span_decision_id(stmt_get_span(sid))
 
     while iterations < 1000000:
@@ -671,7 +669,7 @@ fn eval_stmt_while(sid: i64) -> i64:
         val cond_val = eval_control_condition(cond_eid, decision_id)
         if eval_had_error: break
         val taken = val_is_truthy(cond_val)
-        if rt_coverage_enabled():
+        if interp_coverage_enabled():
             record_stmt_control_decision(sid, taken)
         if taken == false: break
         eval_continuing = false
@@ -722,14 +720,14 @@ fn eval_stmt_match(sid: i64) -> i64:
         if matched:
             if guard_eid >= 0:
                 var guard_decision_id: i64 = -1
-                if rt_coverage_enabled():
+                if interp_coverage_enabled():
                     guard_decision_id = coverage_span_decision_id(expr_get(guard_eid).span_id)
                 val guard_val = eval_control_condition(guard_eid, guard_decision_id)
                 if eval_had_error:
                     env_pop_scope()
                     return -1
                 val guard_taken = val_is_truthy(guard_val)
-                if rt_coverage_enabled():
+                if interp_coverage_enabled():
                     val guard_span = expr_get(guard_eid).span_id
                     if span_is_valid(guard_span):
                         record_control_decision(
