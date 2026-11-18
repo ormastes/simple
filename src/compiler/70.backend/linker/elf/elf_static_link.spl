@@ -2341,10 +2341,11 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     # ELF32 images use the class-aware planner and writer directly: the sealed
     # layout/write_image operations validate the ELF64 header contract.
     # ld.lld emits PT_RISCV_ATTRIBUTES over .riscv.attributes: reserve its phdr slot now,
-    # patch it after the section is appended. The builtin layout is the only
-    # operations.layout binding (elf_operation_bindings.spl), so bypassing it is safe.
-    val attr_phdrs: i64 = if riscv_attributes.len() > 0: 1 else: 0
-    val plan = if w32 or attr_phdrs > 0:
+    # patch it after the section is appended. ELF32 only: it already uses the class-aware
+    # planner; ELF64 stays on the sealed operations.layout (with _elf_plan_shape).
+    # ponytail: riscv64 lacks PT_RISCV_ATTRIBUTES until the sealed layout grows a slot.
+    val attr_phdrs: i64 = if w32 and riscv_attributes.len() > 0: 1 else: 0
+    val plan = if w32:
         elf_exec_plan_class_x(secs, base, elf_static_page(target), w32, attr_phdrs)?
     else:
         operations.layout(secs, base, elf_static_page(target))?
@@ -2877,7 +2878,8 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         val attr_off = image.len()
         image = elf_append_nonalloc_section_bytes(image,
             ".riscv.attributes", 0x70000003, riscv_attributes)?
-        image = elf_patch_attr_phdr(image, w32, attr_off, riscv_attributes.len())
+        if attr_phdrs > 0:
+            image = elf_patch_attr_phdr(image, w32, attr_off, riscv_attributes.len())
     elf_link_trace("symtab appended")
     val digest = elf_build_id_digest(image)
     val note_off = note_start + 16

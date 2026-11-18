@@ -98,7 +98,8 @@ unchanged against the base.
 `elf_exec_plan_class_x` reserves a PT_RISCV_ATTRIBUTES slot as the last program header (where
 ld.lld puts it) whenever `.riscv.attributes` is produced. After the non-alloc section is
 appended, `elf_patch_attr_phdr` fills in its file range, before the build-id digest is taken.
-The 64-bit path skips `operations.layout` only in this case; the builtin is the only binding.
+ELF32 only: riscv64 stays on the sealed `operations.layout` (which runs `_elf_plan_shape`) and
+still has no PT_RISCV_ATTRIBUTES. That is filed: the sealed layout needs an extra-phdr slot.
 riscv32 now matches lld exactly: PHDR, 3 LOADs, NOTE and ATTRIBUTES, with .text at 0x401138.
 The repro is the riscv32 case in `simpleos_user32_link_spec`: the phdr range must equal the
 section's sh_offset/sh_size, plus the exact lld .text vaddr.
