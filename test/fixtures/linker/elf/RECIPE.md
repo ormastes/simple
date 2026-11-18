@@ -291,3 +291,7 @@ Built in WSL by `C:/dev/wt/xc-wsl-scripts/slk_rv64_fix.sh` with clang only:
     clang $T -fno-pic -ffreestanding -c dyn_start_rv64.c -o dyn_start_rv64.o
     # oracle: ld.lld --no-relax --dynamic-linker /lib/ld-linux-riscv64-lp64d.so.1 [-pie] \
     #         dyn_start_rv64.o libadd_rv64.so.1   -> prints "hi", exit 42 under qemu-riscv64
+## weak_dynamic_rv32.o (elf_riscv32_static_spec)
+
+    clang --target=riscv32-linux-musl -march=rv32gc -mabi=ilp32d -mno-relax -fno-pic -O1 \
+        -ffreestanding -c weak_dynamic_rv32.c -o weak_dynamic_rv32.o
