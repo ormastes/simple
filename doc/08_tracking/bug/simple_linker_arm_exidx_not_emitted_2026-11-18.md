@@ -60,3 +60,7 @@ segment is missing.
   - `.ARM.extab` table-pointer entries have no fixture.
   - The binding and visibility of `__exidx_start/end` were not compared with lld, which does not list them in its symtab.
   - `.ARM.attributes` and `.comment` are still dropped.
+
+## .ARM.attributes (2026-11-19, PR B)
+
+The engine dropped `.ARM.attributes`. ld.lld 18 keeps the FIRST input's section verbatim and does not merge: the hello output's bytes equal `arm32_start.o`'s, and `arm32_main32.o`'s richer set is ignored. The engine now does the same, appending `.ARM.attributes` (0x70000003) as a non-alloc section. Spec: the `simpleos_user32_link_spec` case "keeps the first input's .ARM.attributes" checks the type, size 0x1a and bytes. Status: verification-pending. `.comment` is still dropped.
