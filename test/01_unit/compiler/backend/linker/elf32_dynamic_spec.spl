@@ -217,3 +217,59 @@ describe "elf_link - armv7 dynamic":
         val b = link_arm(ELF_LINK_DYNAMIC_PIE)
         expect(rd16(b, 16)).to_equal(3)
         expect(dyn_tag(b, 0x6ffffffb)).to_equal(0x08000000)
+
+describe "elf_link - armv7 Thumb B.W to an import":
+    it "routes the tail call through a PIC Thumb->ARM veneer to the PLT entry":
+        val r = elf_link(ElfLinkRequest(objects: [load_path("{FIX}/dyn_tail_arm.o")], archives: [],
+            shared: [load_path("{FIX}/libadd_arm.so.1")], entry: "_start",
+            target: RelocArch.Arm32, mode: ELF_LINK_DYNAMIC_PIE, interp: "/lib/ld-linux-armhf.so.3"))
+        if r.is_err(): print "link error: {r.unwrap_err()}"
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        val v = sec_addr(b, ".veneer")
+        val vo = sec_off(b, ".veneer")
+        expect(rd32(b, vo)).to_equal(0x46c04778)
+        val w = rd32(b, vo + 4)
+        expect(w >> 24).to_equal(0xea)
+        var imm = w & 0xffffff
+        if imm >= 0x800000: imm = imm - 0x1000000
+        expect(v + 4 + 8 + imm * 4).to_equal(sec_addr(b, ".plt") + 32)
+
+fn link_tls_arm(mode: i64) -> [i64]:
+    val r = elf_link(ElfLinkRequest(objects: [load_path("{FIX}/dyn_tls_arm.o")], archives: [],
+        shared: [load_path("{FIX}/libtls_arm.so.1"), load_path("{FIX}/ldstub_arm.so.1")], entry: "_start",
+        target: RelocArch.Arm32, mode: mode, interp: "/lib/ld-linux-armhf.so.3"))
+    if r.is_err():
+        print "link error: {r.unwrap_err()}"
+        return []
+    r.unwrap()
+
+describe "elf_link - armv7 general/local-dynamic TLS":
+    it "binds imported tv through an adjacent DTPMOD32/DTPOFF32 GOT pair":
+        for mode in [ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE]:
+            val b = link_tls_arm(mode)
+            expect(b.len() > 0).to_equal(true)
+            val rd = sec_off(b, ".rel.dyn")
+            val n = rd32(b, shdr32(b, ".rel.dyn") + 20) / 8
+            val tv = dynsym_index(b, "tv")
+            var mod_off: i64 = -1
+            var off_off: i64 = -1
+            var i: i64 = 0
+            while i < n:
+                val info = rd32(b, rd + i * 8 + 4)
+                if info == ((tv << 8) | 17): mod_off = rd32(b, rd + i * 8)
+                if info == ((tv << 8) | 18): off_off = rd32(b, rd + i * 8)
+                i = i + 1
+            expect(mod_off > 0).to_equal(true)
+            expect(off_off).to_equal(mod_off + 4)
+
+    it "fills local GD and LDM pairs statically with module 1 (no dynamic reloc)":
+        val b = link_tls_arm(ELF_LINK_DYNAMIC_EXEC)
+        val gb = sec_off(b, ".got")
+        val gn = rd32(b, shdr32(b, ".got") + 20) / 4
+        var ones: i64 = 0
+        var i: i64 = 0
+        while i < gn:
+            if rd32(b, gb + i * 4) == 1: ones = ones + 1
+            i = i + 1
+        expect(ones).to_equal(2)

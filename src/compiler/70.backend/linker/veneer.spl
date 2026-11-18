@@ -35,6 +35,7 @@ fn veneer_table_new() -> VeneerTable:
 val ARM_VENEER_SLOT: i64 = 12
 val ARM_VENEER_TO_THUMB: i64 = 1   # ARM B (PC24/JUMP24) to a Thumb function
 val ARM_VENEER_TO_ARM: i64 = 2     # Thumb B.W (THM_JUMP24) to an ARM function
+val ARM_VENEER_TO_ARM_PIC: i64 = 3 # Thumb B.W / B<c>.W to an ARM-state PLT entry (PIC)
 
 fn arm_veneer_kind(rtype: i64, target_thumb: bool) -> i64:
     """Veneer kind a branch needs, or 0. CALL/THM_CALL interwork via BLX."""
@@ -45,7 +46,7 @@ fn arm_veneer_kind(rtype: i64, target_thumb: bool) -> i64:
 fn arm_veneer_offset(rtype: i64, addend: i64) -> i64:
     """Byte offset past the symbol the branch really targets: A + PC bias
     (8 for ARM B/BL, 4 for Thumb B.W). 0 for a plain branch to the symbol."""
-    if rtype == 30: addend + 4 else: addend + 8
+    if rtype == 30 or rtype == 51: addend + 4 else: addend + 8
 
 fn arm_veneer_key(key: text, rtype: i64, addend: i64) -> text:
     """Slot identity: target symbol plus offset, so func+N never shares func's veneer."""
@@ -71,10 +72,24 @@ fn arm_veneer_bytes(kind: i64, target: i64) -> [i64]:
     b = _arm_word(b, target | 1)
     _arm_word(b, 0)
 
+fn arm_veneer_bytes_at(kind: i64, target: i64, slot_addr: i64) -> [i64]:
+    """Like arm_veneer_bytes; ARM_VENEER_TO_ARM_PIC is position independent:
+    bx pc; nop (Thumb -> ARM) then ARM `b target` (+-32 MiB), so no absolute
+    word needs a dynamic relocation in a PIE."""
+    if kind != ARM_VENEER_TO_ARM_PIC: return arm_veneer_bytes(kind, target)
+    var b = _arm_word([], 0x46c04778)
+    b = _arm_word(b, 0xea000000 | (((target - (slot_addr + 4) - 8) >> 2) & 0xffffff))
+    _arm_word(b, 0xd4d4d4d4)
+
+fn arm_veneer_pic_fits(target: i64, slot_addr: i64) -> bool:
+    val d = target - (slot_addr + 4) - 8
+    d >= -(1 << 25) and d < (1 << 25)
+
 fn arm_veneer_entry(slot_addr: i64, kind: i64) -> i64:
     """Branch target for a slot: Thumb-entered veneers carry the Thumb bit."""
-    if kind == ARM_VENEER_TO_ARM: slot_addr | 1 else: slot_addr
+    if kind == ARM_VENEER_TO_ARM or kind == ARM_VENEER_TO_ARM_PIC: slot_addr | 1 else: slot_addr
 
 export VeneerTable, veneer_table_new
-export ARM_VENEER_SLOT, ARM_VENEER_TO_THUMB, ARM_VENEER_TO_ARM
+export ARM_VENEER_SLOT, ARM_VENEER_TO_THUMB, ARM_VENEER_TO_ARM, ARM_VENEER_TO_ARM_PIC
+export arm_veneer_bytes_at, arm_veneer_pic_fits
 export arm_veneer_kind, arm_veneer_bytes, arm_veneer_entry, arm_veneer_offset, arm_veneer_key
