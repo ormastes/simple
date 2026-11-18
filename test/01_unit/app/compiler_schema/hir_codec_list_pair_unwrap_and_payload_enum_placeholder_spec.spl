@@ -1,0 +1,49 @@
+# Regression spec: Stage 3 (`phase3-a`) `hir_cache_selfcheck_blob` SIGSEGV in
+# `_hc_enc_hir_block_body` caused by `hc_dec_hir_block` pushing `ev0: HirStmt?`
+# (`Option<HirStmt>`) directly into `f_stmts: [HirStmt]` without `if val`
+# unwrapping, and `hc_dec_hir_stmt` / `hc_dec_hir_comp_clause` falling back to
+# `HirStmtKind?` / `HirCompClauseKind?` for non-optional payload-only enum fields.
+# @cover src/app/compiler_schema/codec_gen.spl
+# @cover src/compiler/20.hir/generated/hir_codec.spl
+
+use std.spec.*
+use std.io_runtime.{cwd}
+use app.compiler_schema.codec_gen.{CodecUniverse, emit_codec_file, bare_placeholder_literal_v1}
+
+fn body_of(generated: text, fn_name: text) -> text:
+    val start = generated.index_of("fn " + fn_name + "(r: FlatPoolReader)")
+    if start < 0:
+        return ""
+    val rest = generated.substring(start, generated.len())
+    val stop = rest.index_of("\nfn hc_enc_")
+    if stop < 0:
+        return rest
+    rest.substring(0, stop)
+
+describe "HIR codec generation: list/pair Option unwrapping and payload-only enum placeholders":
+    it "unwraps node list elements via presence bind before pushing into bare [T]":
+        val generated = emit_codec_file(CodecUniverse.load(cwd()))
+        val block_dec = body_of(generated, "hc_dec_hir_block")
+        expect(block_dec).to_contain("if val present_ev0 = ev0:")
+        expect(block_dec).to_contain("f_stmts.push(present_ev0)")
+        expect(block_dec.contains("f_stmts.push(ev0)")).to_equal(false)
+
+    it "unwraps node pair components via presence bind before pushing into [(A, B)]":
+        val generated = emit_codec_file(CodecUniverse.load(cwd()))
+        val expr_dec = body_of(generated, "hc_dec_hir_expr_kind")
+        expect(expr_dec).to_contain("if val present_pa14 = pa14:")
+        expect(expr_dec).to_contain("if val present_pb14 = pb14:")
+        expect(expr_dec).to_contain("f_entries.push((present_pa14, present_pb14))")
+        expect(expr_dec.contains("f_entries.push((pa14, pb14))")).to_equal(false)
+
+    it "synthesizes bare placeholders and helpers for payload-only enums HirStmtKind and HirCompClauseKind":
+        val u = CodecUniverse.load(cwd())
+        expect(bare_placeholder_literal_v1(u, "HirStmtKind", 0)).to_start_with("HirStmtKind.Expr(")
+        expect(bare_placeholder_literal_v1(u, "HirCompClauseKind", 0)).to_start_with("HirCompClauseKind.For(")
+        val generated = emit_codec_file(u)
+        val stmt_dec = body_of(generated, "hc_dec_hir_stmt")
+        expect(stmt_dec).to_contain("var f_kind: HirStmtKind = hc_placeholder_hir_stmt_kind()")
+        expect(stmt_dec.contains("var f_kind: HirStmtKind?")).to_equal(false)
+        val comp_dec = body_of(generated, "hc_dec_hir_comp_clause")
+        expect(comp_dec).to_contain("var f_kind: HirCompClauseKind = hc_placeholder_hir_comp_clause_kind()")
+        expect(comp_dec.contains("var f_kind: HirCompClauseKind?")).to_equal(false)
