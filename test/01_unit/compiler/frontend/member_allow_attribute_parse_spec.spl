@@ -1,0 +1,58 @@
+# Regression spec: keyword-spelled attribute names such as `@allow(...)` and
+# `@forbid(...)` (tokenized as `TOK_KW_ALLOW` / `TOK_KW_FORBID`, not `TOK_IDENT`)
+# must parse cleanly on class, struct, trait, impl, and nested declarations,
+# while non-identifier tokens after `@` in member bodies continue to report a
+# parse error.
+# @cover src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl
+# @cover src/compiler/10.frontend/core/parser_stmts.spl
+
+use std.spec.*
+use app.io.mod.{file_read}
+use compiler.core.parser.{parse_module_silent_checked}
+
+describe "member and nested keyword attribute parsing":
+    it "accepts @allow(primitive_api) on class, struct, trait, and impl methods":
+        val src = "pub trait TargetGate:\n" +
+            "    @allow(primitive_api)\n" +
+            "    fn supports(name: text) -> bool\n\n" +
+            "pub class SessionGate:\n" +
+            "    enabled: bool\n" +
+            "    @allow(primitive_api)\n" +
+            "    pub fn supports_target(name: text) -> bool:\n" +
+            "        self.enabled and name != \"\"\n\n" +
+            "impl TargetGate for SessionGate:\n" +
+            "    @allow(primitive_api)\n" +
+            "    fn supports(name: text) -> bool:\n" +
+            "        self.supports_target(name)\n\n" +
+            "impl SessionGate:\n" +
+            "    @forbid(unnamed_duplicate_typed_args)\n" +
+            "    fn describe_gate() -> text:\n" +
+            "        \"ok\"\n"
+        expect(parse_module_silent_checked(src, "member_allow_ok.spl")).to_equal(false)
+
+    it "accepts @allow(primitive_api) before a nested declaration in a function body":
+        val src = "fn outer() -> i64:\n" +
+            "    @allow(primitive_api)\n" +
+            "    fn local_pred(flag: bool) -> i64:\n" +
+            "        if flag: 1 else: 0\n" +
+            "    local_pred(true)\n"
+        expect(parse_module_silent_checked(src, "nested_allow_ok.spl")).to_equal(false)
+
+    it "still rejects non-identifier tokens after @ in a class body":
+        val src = "class BrokenGate:\n" +
+            "    @(primitive_api)\n" +
+            "    fn supports() -> bool:\n" +
+            "        true\n"
+        expect(parse_module_silent_checked(src, "member_attr_missing_name.spl")).to_equal(true)
+
+    it "parses backend and execution modules that carry member @allow(primitive_api)":
+        val paths = [
+            "src/compiler/70.backend/backend/static_backend_registry.spl",
+            "src/compiler/70.backend/backend_plugin/session.spl",
+            "src/compiler/70.backend/backend/jit_interpreter.spl",
+            "src/compiler/95.interp/execution/mod.spl"
+        ]
+        for p in paths:
+            val content = file_read(p)
+            expect(content.len()).to_be_greater_than(0)
+            expect(parse_module_silent_checked(content, p)).to_equal(false)
