@@ -1,0 +1,93 @@
+# Static-executable IFUNC support, shared by every ELF target.
+#
+# A reference to a defined STT_GNU_IFUNC goes to an IPLT entry that jumps
+# through an IGOT slot. libc's static startup (apply_irel) walks
+# __rel[a]_iplt_start..end and stores resolver() into each slot.
+# The IGOT slot starts as the resolver address; REL arches (i386, ARM) read it
+# from there, while RELA arches (x86_64, AArch64) take it from the addend.
+# ponytail: static ET_EXEC only. PIE needs PIC stubs plus IRELATIVE in .rela.dyn.
+
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf_writer.{write_u32_le, write_u64_le}
+use compiler.backend.linker.elf.synthetic_sections.{elf_a64_adrp_ldr_add}
+
+val ELF_IPLT_ENTRY: i64 = 16
+
+fn elf_dyn_irelative(target: RelocArch) -> i64:
+    match target:
+        case AArch64: 1032
+        case I386: 42
+        case Arm32: 160
+        case _: 37
+
+fn elf_iplt_rela(target: RelocArch) -> bool:
+    target == RelocArch.X86_64 or target == RelocArch.AArch64
+
+fn elf_iplt_rel_size(target: RelocArch) -> i64:
+    if elf_iplt_rela(target): 24 else: 8
+
+fn elf_iplt_rel_section(target: RelocArch) -> text:
+    if elf_iplt_rela(target): ".rela.iplt" else: ".rel.iplt"
+
+fn elf_iplt_thumb_branch(rtype: i64) -> bool:
+    """ARM Thumb branch relocations (THM_CALL, THM_JUMP24, THM_JUMP19/11/8)."""
+    rtype == 10 or rtype == 30 or rtype == 51 or rtype == 102 or rtype == 103
+
+fn elf_iplt_entry_addr(target: RelocArch, iplt_v: i64, idx: i64, thumb: bool) -> i64:
+    """Address a reference uses. An ARM entry has a 4-byte Thumb prologue at +0
+    (entered with bit 0 set) and its ARM-state code at +4."""
+    val base = iplt_v + idx * ELF_IPLT_ENTRY
+    if target != RelocArch.Arm32: return base
+    if thumb: base | 1 else: base + 4
+
+fn elf_build_iplt(target: RelocArch, iplt_v: i64, igot_v: i64, n: i64) -> [i64]:
+    val ws = if elf_iplt_rela(target): 8 else: 4
+    var b: [i64] = []
+    var i: i64 = 0
+    while i < n:
+        val at = iplt_v + i * ELF_IPLT_ENTRY
+        val slot = igot_v + i * ws
+        if target == RelocArch.AArch64:
+            b = elf_a64_adrp_ldr_add(b, i * ELF_IPLT_ENTRY, at, slot)
+        else if target == RelocArch.Arm32:
+            b = write_u32_le(b, 0x46c04778)   # bx pc ; nop     (Thumb entry)
+            b = write_u32_le(b, 0xe59fc000)   # ldr ip, [pc, #0] (ARM entry)
+            b = write_u32_le(b, 0xe59cf000)   # ldr pc, [ip]
+            b = write_u32_le(b, slot)
+        else:
+            b.push(0xff)
+            b.push(0x25)                      # jmp *slot  (x86_64: rip-relative)
+            val disp = if target == RelocArch.I386: slot else: slot - (at + 6)
+            b = write_u32_le(b, disp & 0xffffffff)
+            var p = 6
+            while p < ELF_IPLT_ENTRY:
+                b.push(0xcc)
+                p = p + 1
+        i = i + 1
+    b
+
+fn elf_build_igot(w32: bool, resolvers: [i64]) -> [i64]:
+    var b: [i64] = []
+    for r in resolvers:
+        b = if w32: write_u32_le(b, r) else: write_u64_le(b, r)
+    b
+
+fn elf_build_irel(target: RelocArch, igot_v: i64, resolvers: [i64]) -> [i64]:
+    val rela = elf_iplt_rela(target)
+    val ws = if rela: 8 else: 4
+    var b: [i64] = []
+    var i: i64 = 0
+    while i < resolvers.len():
+        val slot = igot_v + i * ws
+        if rela:
+            b = write_u64_le(b, slot)
+            b = write_u64_le(b, elf_dyn_irelative(target))
+            b = write_u64_le(b, resolvers[i])
+        else:
+            b = write_u32_le(b, slot)
+            b = write_u32_le(b, elf_dyn_irelative(target))
+        i = i + 1
+    b
+
+export ELF_IPLT_ENTRY, elf_dyn_irelative, elf_iplt_rela, elf_iplt_rel_size, elf_iplt_rel_section
+export elf_iplt_thumb_branch, elf_iplt_entry_addr, elf_build_iplt, elf_build_igot, elf_build_irel

@@ -1,0 +1,54 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# Static IFUNC: IPLT stubs, IGOT slots, IRELATIVE entries (all ELF targets).
+# Repro: static links called an STT_GNU_IFUNC symbol's resolver directly
+# (bug simple_linker_static_ifunc_calls_resolver_2026-11-18).
+
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf.iplt.{
+    ELF_IPLT_ENTRY, elf_dyn_irelative, elf_iplt_rel_size, elf_iplt_rel_section,
+    elf_iplt_entry_addr, elf_build_iplt, elf_build_irel, elf_build_igot, elf_iplt_thumb_branch
+}
+
+describe "static IFUNC tables":
+    it "uses each ABI's IRELATIVE type, REL on ELF32 and RELA on ELF64":
+        expect(elf_dyn_irelative(RelocArch.X86_64)).to_equal(37)
+        expect(elf_dyn_irelative(RelocArch.AArch64)).to_equal(1032)
+        expect(elf_dyn_irelative(RelocArch.I386)).to_equal(42)
+        expect(elf_dyn_irelative(RelocArch.Arm32)).to_equal(160)
+        expect(elf_iplt_rel_size(RelocArch.X86_64)).to_equal(24)
+        expect(elf_iplt_rel_size(RelocArch.Arm32)).to_equal(8)
+        expect(elf_iplt_rel_section(RelocArch.AArch64)).to_equal(".rela.iplt")
+        expect(elf_iplt_rel_section(RelocArch.I386)).to_equal(".rel.iplt")
+
+    it "x86_64 IPLT entry is jmp *slot(%rip) padded with int3":
+        expect(elf_build_iplt(RelocArch.X86_64, 0x401000, 0x404000, 1)).to_equal(
+            [0xff, 0x25, 0xfa, 0x2f, 0x00, 0x00, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc])
+
+    it "i386 IPLT entry is jmp *slot (absolute) padded with int3":
+        expect(elf_build_iplt(RelocArch.I386, 0x8049000, 0x804c000, 1)).to_equal(
+            [0xff, 0x25, 0x00, 0xc0, 0x04, 0x08, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc])
+
+    it "ARM IPLT entry has a Thumb prologue then ldr ip,[pc]; ldr pc,[ip]; .word slot":
+        expect(elf_build_iplt(RelocArch.Arm32, 0x10000, 0x20004, 1)).to_equal(
+            [0x78, 0x47, 0xc0, 0x46, 0x00, 0xc0, 0x9f, 0xe5, 0x00, 0xf0, 0x9c, 0xe5, 0x04, 0x00, 0x02, 0x00])
+        expect(elf_iplt_entry_addr(RelocArch.Arm32, 0x10000, 1, false)).to_equal(0x10014)
+        expect(elf_iplt_entry_addr(RelocArch.Arm32, 0x10000, 1, true)).to_equal(0x10011)
+        expect(elf_iplt_entry_addr(RelocArch.X86_64, 0x401000, 2, false)).to_equal(0x401020)
+        expect(elf_iplt_thumb_branch(30)).to_equal(true)
+        expect(elf_iplt_thumb_branch(10)).to_equal(true)
+        expect(elf_iplt_thumb_branch(29)).to_equal(false)
+
+    it "aarch64 IPLT entry is adrp/ldr/add/br x17, one entry per slot":
+        val b = elf_build_iplt(RelocArch.AArch64, 0x400000, 0x410008, 2)
+        expect(b.len()).to_equal(2 * ELF_IPLT_ENTRY)
+        expect([b[12], b[13], b[14], b[15]]).to_equal([0x20, 0x02, 0x1f, 0xd6])
+
+    it "IGOT slots start as the resolver; IRELATIVE entries carry slot (+resolver for RELA)":
+        expect(elf_build_igot(true, [0x1234])).to_equal([0x34, 0x12, 0, 0])
+        expect(elf_build_irel(RelocArch.Arm32, 0x20000, [0x1234])).to_equal([0x00, 0x00, 0x02, 0x00, 160, 0, 0, 0])
+        val rela = elf_build_irel(RelocArch.X86_64, 0x404000, [0x401234])
+        expect(rela.len()).to_equal(24)
+        expect([rela[8], rela[16], rela[17], rela[18]]).to_equal([37, 0x34, 0x12, 0x40])
