@@ -14,9 +14,9 @@ pub struct GitSnapshotRequest:
     repository: text
     selector: text
     paths: [text]
-    max_entries: i64
-    max_blob_bytes: i64
-    max_total_bytes: i64
+    max_entries: TraceGitEntryLimitV1
+    max_blob_bytes: TraceGitByteLimitV1
+    max_total_bytes: TraceGitByteLimitV1
     snapshot_kind: text = "git_commit"
     frozen_tree: text = ""
     frozen_revision: text = ""
@@ -132,7 +132,7 @@ pub fn snapshot_git_inputs(request: GitSnapshotRequest) -> Result<SnapshotInput,
         return Err("TRACE-SNAPSHOT-INCOMPLETE: unsupported Git snapshot kind")
     if request.frozen_revision != "" and (request.frozen_tree == "" or request.snapshot_kind == "git_index"):
         return Err("TRACE-SNAPSHOT-INCOMPLETE: frozen revision requires a frozen commit tree")
-    if request.repository == "" or request.selector == "" or request.paths.len() == 0 or request.paths.len() > 256 or request.max_entries < 1 or request.max_entries > 40000 or request.max_blob_bytes < 1 or request.max_blob_bytes > 4194304 or request.max_total_bytes < 1 or request.max_total_bytes > 4194304:
+    if request.repository == "" or request.selector == "" or request.paths.len() == 0 or request.paths.len() > 256 or request.max_entries.value < 1 or request.max_entries.value > 40000 or request.max_blob_bytes.value < 1 or request.max_blob_bytes.value > 4194304 or request.max_total_bytes.value < 1 or request.max_total_bytes.value > 4194304:
         return Err("TRACE-SNAPSHOT-INCOMPLETE: invalid snapshot scope")
     var seen: Dict<text, bool> = {}
     for path in request.paths:
@@ -176,7 +176,7 @@ pub fn snapshot_git_inputs(request: GitSnapshotRequest) -> Result<SnapshotInput,
     var inventory_args = ["ls-tree", "-r", "-z", "--full-tree", tree, "--"]
     for path in request.paths: inventory_args.push(":(literal){path}")
     val inventory = git_capture(root, inventory_args, [], TRACE_GIT_OUTPUT_MAX)?
-    val entries = decode_trace_git_tree(TraceGitBytesV1(bytes: inventory), object_format, TraceGitEntryLimitV1(value: request.max_entries),
+    val entries = decode_trace_git_tree(TraceGitBytesV1(bytes: inventory), object_format, request.max_entries,
         TraceGitByteLimitV1(value: TRACE_GIT_OUTPUT_MAX))?
     for selected in request.paths:
         var matched = false
@@ -194,22 +194,22 @@ pub fn snapshot_git_inputs(request: GitSnapshotRequest) -> Result<SnapshotInput,
     var batch_input: [u8] = []
     for oid in expected:
         for b in git_u8_text("{oid}\n"): batch_input.push(b)
-    val batch_limit = request.max_total_bytes + expected.len() * 160 + 1
+    val batch_limit = request.max_total_bytes.value + expected.len() * 160 + 1
     if batch_limit > TRACE_GIT_OUTPUT_MAX:
         return Err("TRACE-SNAPSHOT-INCOMPLETE: selected batch exceeds output budget")
     val batch = git_capture(root, ["cat-file", "--batch"], batch_input, batch_limit)?
-    val blobs = decode_trace_git_batch(TraceGitBytesV1(bytes: batch), expected, TraceGitByteLimitV1(value: request.max_blob_bytes),
+    val blobs = decode_trace_git_batch(TraceGitBytesV1(bytes: batch), expected, request.max_blob_bytes,
         TraceGitByteLimitV1(value: batch.len()))?
     var content_bytes: i64 = 0
     for blob in blobs:
-        content_bytes += blob.byte_size
-        if content_bytes > request.max_total_bytes:
+        content_bytes += blob.byte_size.value
+        if content_bytes > request.max_total_bytes.value:
             return Err("TRACE-SNAPSHOT-INCOMPLETE: selected blob content exceeds scope budget")
     var artifacts: [SnapshotArtifact] = []
     for i in 0..blobs.len():
         val blob = blobs[i]
         val body = git_u8_text(blob.content)
-        if body.len() != blob.byte_size:
+        if body.len() != blob.byte_size.value:
             return Err("TRACE-SNAPSHOT-INCOMPLETE: blob byte roundtrip changed")
         var framed: [u8] = []
         val prefix = git_u8_text("blob {body.len()}")

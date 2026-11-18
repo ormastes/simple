@@ -13,9 +13,17 @@ use std.common.sdn.encode.{sdn_encode_canonical}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.traceability.resolve.{resolve_trace_graph}
 
+pub enum TraceDeclarationOwnership:
+    Declared
+    Undeclared
+
+pub enum TraceInventoryClosure:
+    Closed
+    Open
+
 pub struct TraceSnapshotPartition:
     artifact: SnapshotArtifact
-    declaration_registered: bool
+    declaration_registered: TraceDeclarationOwnership
     facts: TraceFacts
     content_sha256: text
     facts_fingerprint: text
@@ -32,7 +40,7 @@ pub struct TraceSnapshotPartitionSet:
     facts_fingerprint: text
     dependencies: [TraceDependency]
     dependency_fingerprint: text
-    dependency_inventory_complete: bool
+    dependency_inventory_complete: TraceInventoryClosure
 
 pub struct TraceSnapshotPartitionUpdate:
     partition_set: TraceSnapshotPartitionSet
@@ -172,7 +180,7 @@ fn make_partition(subject: SnapshotSubject, artifact: SnapshotArtifact,
                 facts.claims = decoded.claims
                 facts.origins = decoded.origins
                 facts.locators = decoded.locators
-    TraceSnapshotPartition(artifact: artifact, declaration_registered: declaration_registered,
+    TraceSnapshotPartition(artifact: artifact, declaration_registered: if declaration_registered: TraceDeclarationOwnership.Declared else: TraceDeclarationOwnership.Undeclared,
         facts: facts, content_sha256: partition_digest(artifact.content), facts_fingerprint: partition_fact_digest(facts))
 
 fn rebind_partition(partition: TraceSnapshotPartition, subject: SnapshotSubject) -> TraceSnapshotPartition:
@@ -319,7 +327,7 @@ fn compose_partition_facts(subject: SnapshotSubject, artifacts: [SnapshotArtifac
                 rule_id: "snapshot-extraction-v1", entity_id: partition.artifact.path, origin_id: "",
                 message: "extraction policy budget exhausted", severity: TraceDiagnosticSeverity.Error))
             return facts
-        if partition.declaration_registered != declarations.contains(partition.artifact.path):
+        if (partition.declaration_registered == TraceDeclarationOwnership.Declared) != declarations.contains(partition.artifact.path):
             facts.complete = false
             facts.diagnostics.push(TraceDiagnostic(code: "TRACE-SNAPSHOT-INCOMPLETE", subject_id: subject.snapshot_id,
                 rule_id: "declarations", entity_id: partition.artifact.path, origin_id: "",
@@ -434,7 +442,7 @@ pub fn build_trace_snapshot_partition_set(snapshot: SnapshotInput, declaration_p
     Ok(TraceSnapshotPartitionSet(subject: snapshot.subject, extractor_id: extractor_id, schema_id: schema_id,
         policy_binding_id: policy_binding_id, configuration_id: configuration_id, declaration_paths: declaration_paths,
         partitions: partitions, facts: facts, facts_fingerprint: partition_fact_digest(facts), dependencies: dependencies,
-        dependency_fingerprint: dependency_fingerprint(dependencies), dependency_inventory_complete: facts.complete))
+        dependency_fingerprint: dependency_fingerprint(dependencies), dependency_inventory_complete: if facts.complete: TraceInventoryClosure.Closed else: TraceInventoryClosure.Open))
 
 # Plans over the union of both generations: owners and dependency rows of the
 # retained base and of the composed candidate. An inventory that cannot be
@@ -495,7 +503,7 @@ pub fn update_trace_snapshot_partitions(base: TraceSnapshotPartitionSet, candida
             return Err("TRACE-PARTITIONS-INCOMPLETE: invalid or duplicate candidate artifact")
         seen[artifact.path] = true
         val registered = declaration_paths.contains(artifact.path)
-        if bindings_match and old.contains_key(artifact.path) and old[artifact.path].declaration_registered == registered and partition_artifact_equal(old[artifact.path].artifact, artifact) and old[artifact.path].content_sha256 == partition_digest(artifact.content) and old[artifact.path].facts_fingerprint == partition_fact_digest(old[artifact.path].facts):
+        if bindings_match and old.contains_key(artifact.path) and (old[artifact.path].declaration_registered == TraceDeclarationOwnership.Declared) == registered and partition_artifact_equal(old[artifact.path].artifact, artifact) and old[artifact.path].content_sha256 == partition_digest(artifact.content) and old[artifact.path].facts_fingerprint == partition_fact_digest(old[artifact.path].facts):
             partitions.push(rebind_partition(old[artifact.path], candidate.subject))
             reused.push(artifact.path)
         else:
@@ -505,19 +513,19 @@ pub fn update_trace_snapshot_partitions(base: TraceSnapshotPartitionSet, candida
         if not seen.contains_key(partition.artifact.path): changed_paths.push(partition.artifact.path)
     val dependency_rows_valid = base.dependency_fingerprint == dependency_fingerprint(base.dependencies)
     val base_facts_valid = base.facts_fingerprint == partition_fact_digest(base.facts)
-    val complete_deps = base.dependency_inventory_complete and bindings_match and dependency_rows_valid and base_facts_valid and partition_rows_valid
+    val complete_deps = base.dependency_inventory_complete == TraceInventoryClosure.Closed and bindings_match and dependency_rows_valid and base_facts_valid and partition_rows_valid
     val updated = TraceSnapshotPartitionSet(subject: candidate.subject, extractor_id: extractor_id,
         schema_id: schema_id, policy_binding_id: policy_binding_id, configuration_id: configuration_id,
         declaration_paths: declaration_paths, partitions: partitions, facts: TraceFacts(subject: candidate.subject,
             input_manifest_id: manifest_id, nodes: [], test_definitions: [], claims: [], origins: [], locators: [],
             diagnostics: [], generation_id: generation_id, complete: false), dependencies: [], dependency_fingerprint: "",
-        facts_fingerprint: "", dependency_inventory_complete: complete_deps)
+        facts_fingerprint: "", dependency_inventory_complete: if complete_deps: TraceInventoryClosure.Closed else: TraceInventoryClosure.Open)
     val facts = compose_partition_facts(candidate.subject, candidate.artifacts, partitions, declaration_paths, manifest_id, generation_id, policy)
     updated.facts = facts
     updated.facts_fingerprint = partition_fact_digest(facts)
     updated.dependencies = retained_dependencies(facts, partitions, policy, policy_binding_id, extractor_id, schema_id, configuration_id)
     updated.dependency_fingerprint = dependency_fingerprint(updated.dependencies)
-    if not facts.complete: updated.dependency_inventory_complete = false
+    if not facts.complete: updated.dependency_inventory_complete = TraceInventoryClosure.Open
     var identity_changes = changed_identities + changed_identity_keys(base.facts, facts)
     var membership_changes = changed_memberships + changed_paths + changed_membership_keys(base.facts, facts)
     val invalidation = trace_partition_invalidation(base, updated, changed_paths, identity_changes,

@@ -172,10 +172,10 @@ fn _ctx_write_atomic(path: text, content: text) -> bool:
 # ---------------------------------------------------------------------------
 
 pub struct CtxChunk:
-    id: i64
+    id: CtxChunkId
     source: text
-    ts: i64
-    bytes: i64
+    ts: CtxUnixSecs
+    bytes: CtxByteCount
     body: text
 
 # One data row of chunks.sdn: `    id, source, ts, bytes, text`. A cell that
@@ -219,7 +219,7 @@ fn _ctx_parse_chunk_row(line: text) -> CtxChunk?:
     var cell = r2.substring(p4 + 2)
     if cell.len() >= 2 and cell.starts_with("\"") and cell.ends_with("\""):
         cell = cell.substring(1, cell.byte_len() - 1)
-    Some(CtxChunk(id: id, source: source, ts: ts, bytes: bytes, body: ctx_unescape_cell(cell)))
+    Some(CtxChunk(id: CtxChunkId(value: id), source: source, ts: CtxUnixSecs(secs: ts), bytes: CtxByteCount(bytes: bytes), body: ctx_unescape_cell(cell)))
 
 # Linear row reader: one native line split + a handful of `index_of` per
 # row. Replaces the generic SDN table parser, which walked the whole file
@@ -254,7 +254,7 @@ fn _ctx_load_complete_chunks() -> [CtxChunk]:
     out
 
 fn _ctx_chunk_line(c: CtxChunk) -> text:
-    "    " + str(c.id) + ", " + _ctx_cell(c.source) + ", " + str(c.ts) + ", " + str(c.bytes) + ", " + _ctx_cell(c.body) + "\n"
+    "    " + str(c.id.value) + ", " + _ctx_cell(c.source) + ", " + str(c.ts.secs) + ", " + str(c.bytes.bytes) + ", " + _ctx_cell(c.body) + "\n"
 
 fn _ctx_store_header() -> text:
     "# ctx chunk store — written by simple_ctx_* MCP tools. Do not edit by hand.\n# ctx_schema_version: " + str(_CTX_SCHEMA_VERSION) + "\nctx_chunks | id, source, ts, bytes, text |\n"
@@ -323,8 +323,8 @@ fn _ctx_append_chunks_settled(new_chunks: [CtxChunk]) -> bool:
 fn _ctx_next_id(existing: [CtxChunk]) -> i64:
     var mx: i64 = 0
     for c in existing:
-        if c.id > mx:
-            mx = c.id
+        if c.id.value > mx:
+            mx = c.id.value
     mx + 1
 
 # Reserve `count` consecutive ids; the high-water mark lives in stats.sdn so
@@ -437,7 +437,7 @@ pub fn ctx_index_text(raw_content: text, source: text) -> CtxChunkCount:
     val now = _ctx_now_secs()
     var rows: [CtxChunk] = []
     for piece in pieces:
-        rows.push(CtxChunk(id: next, source: source, ts: now, bytes: piece.len(), body: piece))
+        rows.push(CtxChunk(id: CtxChunkId(value: next), source: source, ts: CtxUnixSecs(secs: now), bytes: CtxByteCount(bytes: piece.len()), body: piece))
         next = next + 1
     val pre_append = _ctx_cache_key_before_append()
     if not _ctx_append_chunks_settled(rows):
@@ -515,10 +515,18 @@ pub fn ctx_tokenize(s: text) -> [text]:
             toks.push(t)
     toks
 
+# BM25 score (or substring occurrence count) of one hit.
+pub struct CtxScore:
+    points: f64
+
+# Number of query terms a chunk matched (0 for substring fallback hits).
+pub struct CtxMatchCount:
+    count: i64
+
 pub struct CtxHit:
     chunk: CtxChunk
-    score: f64
-    matched: i64
+    score: CtxScore
+    matched: CtxMatchCount
     mode: text      # "bm25" | "substring"
 
 # Query-side stopwords: common English function words only. Applied to query
@@ -562,7 +570,7 @@ pub fn ctx_query_terms(query: text) -> [text]:
 pub struct CtxIndex:
     docs: [CtxChunk]
     norm: [text]
-    avg_bytes: f64
+    avg_bytes: CtxAvgLength
     postings: CtxPostings?   # built once per cache generation; None for one-shot callers
 
 # Raw substring needles for the zero-hit fallback: whitespace-separated
@@ -588,7 +596,7 @@ fn _ctx_top_k(scored: [CtxHit], limit: i64) -> [CtxHit]:
         var j = 0
         while j < scored.len():
             if not taken[j]:
-                if best < 0 or scored[j].score > scored[best].score:
+                if best < 0 or scored[j].score.points > scored[best].score.points:
                     best = j
             j = j + 1
         if best < 0:
@@ -613,7 +621,7 @@ pub fn ctx_prepare_index(chunks: [CtxChunk], source_prefix: text) -> CtxIndex:
             bodies.push(c.body)
             total_bytes = total_bytes + c.body.len()
     if docs.len() == 0:
-        return CtxIndex(docs: [], norm: [], avg_bytes: 1.0, postings: None)
+        return CtxIndex(docs: [], norm: [], avg_bytes: CtxAvgLength(bytes: 1.0), postings: None)
     var norm = ctx_normalize(bodies.join(" " + _CTX_DOC_SENTINEL + " ")).split(_CTX_DOC_SENTINEL)
     if norm.len() != docs.len():
         # A body contained the sentinel text itself; fall back to per-doc.
@@ -623,7 +631,7 @@ pub fn ctx_prepare_index(chunks: [CtxChunk], source_prefix: text) -> CtxIndex:
     var avg = total_bytes.to_float() / docs.len().to_float()
     if avg < 1.0:
         avg = 1.0
-    CtxIndex(docs: docs, norm: norm, avg_bytes: avg, postings: None)
+    CtxIndex(docs: docs, norm: norm, avg_bytes: CtxAvgLength(bytes: avg), postings: None)
 
 # ---------------------------------------------------------------------------
 # Per-process generation cache (see ctx_index_cache.spl)
@@ -739,7 +747,7 @@ fn _ctx_cache_extend_after_append(before: CtxGenerationKey?, rows: [CtxChunk]):
     for c in rows:
         chunks.push(c)
     _CTX_CACHE_CHUNKS = chunks
-    _CTX_CACHE_INDEX = Some(CtxIndex(docs: docs, norm: norm, avg_bytes: avg, postings: Some(grown)))
+    _CTX_CACHE_INDEX = Some(CtxIndex(docs: docs, norm: norm, avg_bytes: CtxAvgLength(bytes: avg), postings: Some(grown)))
     _CTX_CACHE_KEY = Some(after)
     _CTX_POSTINGS_INCREMENTS = ctx_postings_build_count_next(_CTX_POSTINGS_INCREMENTS)
 
@@ -803,13 +811,13 @@ fn _ctx_search_index_with(idx: CtxIndex, query: text, limit: i64, force_scan: bo
     for t in q_terms:
         terms.push(CtxTerm(word: t))
     val lengths = _ctx_body_lengths(idx)
-    val avg = CtxAvgLength(bytes: idx.avg_bytes)
+    val avg = idx.avg_bytes
     val board = _ctx_score_board(idx, lengths, terms, avg, force_scan)
     var scored: [CtxHit] = []
     var i = 0
     while i < n_docs:
         if board.matched[i] > 0:
-            scored.push(CtxHit(chunk: idx.docs[i], score: board.scores[i], matched: board.matched[i], mode: "bm25"))
+            scored.push(CtxHit(chunk: idx.docs[i], score: CtxScore(points: board.scores[i]), matched: CtxMatchCount(count: board.matched[i]), mode: "bm25"))
         i = i + 1
     if scored.len() > 0:
         return _ctx_top_k(scored, limit)
@@ -828,7 +836,7 @@ fn _ctx_search_index_with(idx: CtxIndex, query: text, limit: i64, force_scan: bo
             if low.contains(nd):
                 hits = hits + low.split(nd).len() - 1
         if hits > 0:
-            scored.push(CtxHit(chunk: idx.docs[i], score: hits.to_float(), matched: 0, mode: "substring"))
+            scored.push(CtxHit(chunk: idx.docs[i], score: CtxScore(points: hits.to_float()), matched: CtxMatchCount(count: 0), mode: "substring"))
         i = i + 1
     _ctx_top_k(scored, limit)
 
@@ -881,7 +889,7 @@ fn ctx_format_hits(query: text, hits: [CtxHit]) -> text:
     lines.push("## query: " + query + " (" + str(hits.len()) + " hit(s))")
     var rank = 1
     for h in hits:
-        lines.push("[" + str(rank) + "] score=" + _ctx_fmt_score(h.score) + " match=" + h.mode + " source=" + h.chunk.source + " chunk=" + str(h.chunk.id) + " ts=" + str(h.chunk.ts))
+        lines.push("[" + str(rank) + "] score=" + _ctx_fmt_score(h.score.points) + " match=" + h.mode + " source=" + h.chunk.source + " chunk=" + str(h.chunk.id.value) + " ts=" + str(h.chunk.ts.secs))
         lines.push(_ctx_snippet(h.chunk.body, query))
         lines.push("")
         rank = rank + 1
@@ -977,15 +985,30 @@ fn _ctx_queries(body: text) -> [text]:
 # Sandboxed execution
 # ---------------------------------------------------------------------------
 
+pub struct CtxExitCode:
+    code: i64
+
+# Wall-clock time one bounded command actually took, in milliseconds.
+pub struct CtxWallMs:
+    ms: i64
+
+pub enum CtxWallBudget:
+    WithinBudget
+    TimedOut
+
+pub enum CtxCaptureCut:
+    Whole
+    Capped
+
 pub struct CtxExecResult:
     stdout: text
     stderr_summary: text
-    exit_code: i64
-    timed_out: bool
-    wall_ms: i64
-    raw_bytes: i64   # stdout + stderr bytes retained (each stream bounded at capture_max)
-    truncated: bool  # stdout hit the per-command capture cap
-    capture_max: i64
+    exit_code: CtxExitCode
+    timed_out: CtxWallBudget
+    wall_ms: CtxWallMs
+    raw_bytes: CtxByteCount   # stdout + stderr bytes retained (each stream bounded at capture_max)
+    truncated: CtxCaptureCut  # stdout hit the per-command capture cap
+    capture_max: CtxByteCount
 
 fn _ctx_summarize_stderr(stderr: text, truncated: bool) -> text:
     val trimmed = stderr.trim()
@@ -1085,12 +1108,12 @@ pub fn ctx_run_bounded(cmd: text, args: [text], timeout: CtxTimeoutMs, capture: 
     CtxExecResult(
         stdout: out,
         stderr_summary: _ctx_summarize_stderr(p.stderr, p.stderr_truncated),
-        exit_code: exit_code,
-        timed_out: timed_out,
-        wall_ms: p.usage.wall_ms,
-        raw_bytes: p.stdout.len() + p.stderr.len(),
-        truncated: truncated,
-        capture_max: capture_max
+        exit_code: CtxExitCode(code: exit_code),
+        timed_out: if timed_out: CtxWallBudget.TimedOut else: CtxWallBudget.WithinBudget,
+        wall_ms: CtxWallMs(ms: p.usage.wall_ms),
+        raw_bytes: CtxByteCount(bytes: p.stdout.len() + p.stderr.len()),
+        truncated: if truncated: CtxCaptureCut.Capped else: CtxCaptureCut.Whole,
+        capture_max: capture
     )
 
 fn _ctx_simple_binary() -> text:
@@ -1213,9 +1236,9 @@ pub fn ctx_cap_exec_stdout(r: CtxExecResult) -> CtxExecResult:
     _ctx_with_stdout(r, kept.replace("[...truncated: see below]", note))
 
 fn ctx_format_exec(label: text, r: CtxExecResult) -> text:
-    var head = "-- " + label + " (exit: " + str(r.exit_code) + ", " + str(r.wall_ms) + "ms) --"
-    if r.timed_out:
-        head = "TIMEOUT: " + label + " exceeded its wall budget (exit: " + str(r.exit_code) + ")"
+    var head = "-- " + label + " (exit: " + str(r.exit_code.code) + ", " + str(r.wall_ms.ms) + "ms) --"
+    if r.timed_out == CtxWallBudget.TimedOut:
+        head = "TIMEOUT: " + label + " exceeded its wall budget (exit: " + str(r.exit_code.code) + ")"
     head + "\n" + r.stdout + "\n" + r.stderr_summary
 
 # ---------------------------------------------------------------------------
@@ -1266,7 +1289,7 @@ fn _ctx_exec_common(id: text, body: text, tool: text, file_path: text) -> text:
             _ctx_stats_bump("bytes_returned", r.stdout.len())
             val out = ctx_format_exec(tool, r)
             val tool_name = if tool.starts_with("simple_ctx_execute_file"): "simple_ctx_execute_file" else: "simple_ctx_execute"
-            tok_record(TOK_FEATURE_CTX, tool_name, r.raw_bytes, out.len(), false)
+            tok_record(TOK_FEATURE_CTX, tool_name, r.raw_bytes.bytes, out.len(), false)
             make_tool_result(id, out)
         nil:
             make_tool_error(id, -32602, tool + ": " + err)
@@ -1309,11 +1332,11 @@ pub fn handle_simple_ctx_batch_execute(id: text, body: text) -> text:
         val text_out = "$ " + cmd + "\n" + r.stdout + "\n" + r.stderr_summary
         val n = ctx_index_text(text_out, label).count
         total_bytes = total_bytes + text_out.len()
-        var status = "exit " + str(r.exit_code)
-        if r.timed_out:
+        var status = "exit " + str(r.exit_code.code)
+        if r.timed_out == CtxWallBudget.TimedOut:
             status = "TIMEOUT"
         var line = "[" + str(idx) + "] " + status + ", " + str(r.stdout.len()) + " stdout byte(s), " + str(n) + " chunk(s) -> source " + label
-        if r.truncated:
+        if r.truncated == CtxCaptureCut.Capped:
             line = line + " [capture truncated at " + str(capture_max) + " bytes]"
         lines.push(line)
         idx = idx + 1
@@ -1416,7 +1439,7 @@ pub fn ctx_stats_text() -> text:
     var sources: Dict<text, i64> = {}
     var stored_bytes: i64 = 0
     for c in chunks:
-        stored_bytes = stored_bytes + c.bytes
+        stored_bytes = stored_bytes + c.bytes.bytes
         if sources.contains_key(c.source):
             sources[c.source] = sources[c.source] + 1
         else:
@@ -1620,7 +1643,7 @@ const _CTX_PURGE_REPLAY_MAX_ROUNDS: i64 = 8
 fn _ctx_retention_rows(chunks: [CtxChunk]) -> [CtxRetentionRow]:
     var rows: [CtxRetentionRow] = []
     for c in chunks:
-        rows.push(ctx_retention_row(CtxChunkId(value: c.id), CtxSourceLabel(value: c.source), CtxUnixSecs(secs: c.ts), CtxByteCount(bytes: c.bytes)))
+        rows.push(ctx_retention_row(c.id, CtxSourceLabel(value: c.source), c.ts, c.bytes))
     rows
 
 # Apply `policy` to the store. `DryRun` never writes. `Apply` rewrites the
@@ -1673,7 +1696,7 @@ pub fn ctx_purge_commit(snap: CtxPurgeSnapshot) -> CtxPurgeCommit:
     var lines: [text] = [_ctx_store_header()]
     for c in snap.chunks:
         seen[_ctx_chunk_line(c)] = true
-        if not dropped_ids.contains_key(c.id):
+        if not dropped_ids.contains_key(c.id.value):
             lines.push(_ctx_chunk_line(c))
     val path = _ctx_chunks_path()
     val tmp = path + ".purge." + str(time_now_unix_micros()) + ".tmp"

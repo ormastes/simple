@@ -1,5 +1,6 @@
 # Local structural inspection through the same graph pipeline as other views.
 # Policy promotion and admission profiles are separate, unfinished adapters.
+use std.common.traceability.query_missing_v1.{TraceGraphCompletenessV1}
 use std.common.traceability.model.*
 use std.common.traceability.trace_ids_v1.{TraceNodeLimitV1, TraceClaimLimitV1}
 use std.common.traceability.trace_ids_v1.{TraceEntityIdV1, TracePathV1, TracePathSuffixV1, TraceRuleVersionV1}
@@ -9,11 +10,13 @@ use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
 use std.common.sdn.parser.{parse_with_spans_and_issues}
 use app.traceability.snapshot.git_provider.{GitSnapshotRequest, snapshot_git_inputs}
+use app.traceability.snapshot.git_tree.{TraceGitEntryLimitV1}
+use app.traceability.snapshot.git_batch.{TraceGitByteLimitV1}
 use app.traceability.extract.snapshot_pipeline.{TraceSnapshotScope, TraceSnapshotBuild, build_snapshot_trace_graph}
 
 pub struct TraceSnapshotPreviewResult:
     document: text
-    complete: bool
+    completeness: TraceGraphCompletenessV1
 
 pub struct TraceSnapshotSelection:
     kind: text
@@ -50,11 +53,11 @@ pub fn inspect_trace_snapshot(repository: text, snapshot_kind: text, selector: t
     if selector == "" or paths.len() == 0:
         return Err("TRACE-SNAPSHOT-INCOMPLETE: snapshot inspection requires explicit selected paths")
     val snapshot = snapshot_git_inputs(GitSnapshotRequest(repository: repository, selector: selector, paths: paths,
-        max_entries: 40000, max_blob_bytes: 1048576, max_total_bytes: 2097152, snapshot_kind: snapshot_kind))?
+        max_entries: TraceGitEntryLimitV1(value: 40000), max_blob_bytes: TraceGitByteLimitV1(value: 1048576), max_total_bytes: TraceGitByteLimitV1(value: 2097152), snapshot_kind: snapshot_kind))?
     val policy = TracePolicy(id: TraceEntityIdV1(value: "policy:local-structural-preview"), authorities: [], max_nodes: TraceNodeLimitV1(value: 40000), max_claims: TraceClaimLimitV1(value: 100000),
         conventions: [TraceConventionRule(id: TraceEntityIdV1(value: "app-unit-v1"), source_root: TracePathV1(value: "src/app/"), target_root: TracePathV1(value: "test/01_unit/app/"),
             source_suffix: TracePathSuffixV1(value: ".spl"), target_suffix: TracePathSuffixV1(value: "_spec.spl"), relation: TraceRelation.Targets, version: TraceRuleVersionV1(value: "1"))])
     val scope = TraceSnapshotScope(selected_roots: paths, authority_id: "", closure_kind: "selected_scope")
     val build = build_snapshot_trace_graph(snapshot, policy, declarations, scope)?
     val encoded = encode_trace_snapshot_preview(build)?
-    Ok(TraceSnapshotPreviewResult(document: encoded, complete: build.graph.complete))
+    Ok(TraceSnapshotPreviewResult(document: encoded, completeness: if build.graph.complete: TraceGraphCompletenessV1.Complete else: TraceGraphCompletenessV1.Incomplete))
