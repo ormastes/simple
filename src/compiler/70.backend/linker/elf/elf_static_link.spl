@@ -89,6 +89,8 @@ use compiler.backend.linker.elf.synthetic_sections.{
     elf_plt_size, elf_plt0_size, elf_plt_entry_size, elf_gotplt_size, elf_build_plt_a64, elf_build_gotplt,
     elf_build_plt_x64, elf_build_gotplt_x64,
     elf_build_dynamic, elf_build_interp, elf_build_gnu_build_id,
+    elf_dyn_rel_entry, elf_build_dynsym_class, elf_gnu_hash_size_class, elf_build_gnu_hash_class,
+    elf_build_dynamic_class, elf_gotplt_size_class, elf_build_plt_i386, elf_build_gotplt_i386,
     DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ,
     DT_RELAENT, DT_STRSZ, DT_SYMENT, DT_INIT, DT_FINI, DT_PLTREL, DT_DEBUG, DT_JMPREL,
     DT_INIT_ARRAY, DT_FINI_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ, DT_RUNPATH,
@@ -468,9 +470,9 @@ fn elf_out_rank(s: ElfOutSec) -> i64:
             return 5
         if n == ".dynstr":
             return 6
-        if n == ".rela.dyn":
+        if n == ".rela.dyn" or n == ".rel.dyn":
             return 7
-        if n == ".rela.plt":
+        if n == ".rela.plt" or n == ".rel.plt":
             return 8
         if n == ".eh_frame_hdr":
             return 9
@@ -1050,6 +1052,9 @@ fn elf_dynamic_tags(ctx: ElfLinkCtx, sc: ElfScan, dynstr: ElfDynStr, n_rela: [i6
     """n_rela = [.rela.dyn entries, of which RELATIVE];
     arrays = [init_array size, fini_array size, preinit_array size] (-1 = absent)."""
     val n_rela_dyn = n_rela[0]
+    # ELF32 (i386/armv7) uses REL tags and Elf32 record sizes.
+    val w32 = ctx.target == RelocArch.I386 or ctx.target == RelocArch.Arm32
+    val relsz: i64 = if w32: 8 else: 24
     var t: [[i64]] = []
     val dynamic = elf_mode_dynamic(ctx.mode)
     if dynamic:
@@ -1079,22 +1084,22 @@ fn elf_dynamic_tags(ctx: ElfLinkCtx, sc: ElfScan, dynstr: ElfDynStr, n_rela: [i6
         t = t.push([DT_STRTAB, a.dynstr])
         t = t.push([DT_SYMTAB, a.dynsym])
         t = t.push([DT_STRSZ, dynstr.data.len()])
-        t = t.push([DT_SYMENT, 24])
+        t = t.push([DT_SYMENT, if w32: 16 else: 24])
         if nverneed > 0:
             t = t.push([DT_VERSYM, a.versym])
             t = t.push([DT_VERNEED, a.verneed])
             t = t.push([DT_VERNEEDNUM, nverneed])
     if n_rela_dyn > 0:
-        t = t.push([DT_RELA, a.rela_dyn])
-        t = t.push([DT_RELASZ, n_rela_dyn * 24])
-        t = t.push([DT_RELAENT, 24])
+        t = t.push([if w32: 17 else: DT_RELA, a.rela_dyn])          # DT_REL = 17
+        t = t.push([if w32: 18 else: DT_RELASZ, n_rela_dyn * relsz])  # DT_RELSZ = 18
+        t = t.push([if w32: 19 else: DT_RELAENT, relsz])             # DT_RELENT = 19
         if n_rela[1] > 0:
-            t = t.push([DT_RELACOUNT, n_rela[1]])
+            t = t.push([if w32: 0x6ffffffa else: DT_RELACOUNT, n_rela[1]])  # DT_RELCOUNT
     if sc.plt_names.len() > 0:
         t = t.push([DT_JMPREL, a.rela_plt])
-        t = t.push([DT_PLTRELSZ, sc.plt_names.len() * 24])
+        t = t.push([DT_PLTRELSZ, sc.plt_names.len() * relsz])
         t = t.push([DT_PLTGOT, a.gotplt])
-        t = t.push([DT_PLTREL, DT_RELA])
+        t = t.push([DT_PLTREL, if w32: 17 else: DT_RELA])
     if dynamic and ctx.bind_now:
         t = t.push([DT_BIND_NOW, 0])
         t = t.push([DT_FLAGS, DF_BIND_NOW])
@@ -1875,8 +1880,11 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     # implemented, so every other mode fails closed here.
     val w32 = target == RelocArch.I386 or target == RelocArch.Arm32 or target == RelocArch.Riscv32
     val got_ws: i64 = if w32: 4 else: 8
-    if w32 and mode != ELF_LINK_STATIC_EXEC:
-        return Err("unsupported ELF32 output mode: only static ET_EXEC is admitted for i386/armv7/rv32")
+    # i386 additionally admits dynamic ET_EXEC/PIE (REL dynamic relocations,
+    # lazy PLT). armv7 and rv32 dynamic output is not implemented yet.
+    val w32_dynamic = target == RelocArch.I386 and (mode == ELF_LINK_DYNAMIC_EXEC or mode == ELF_LINK_DYNAMIC_PIE)
+    if w32 and mode != ELF_LINK_STATIC_EXEC and not w32_dynamic:
+        return Err("unsupported ELF32 output mode: only static ET_EXEC (plus i386 dynamic ET_EXEC/PIE) is admitted for i386/armv7/rv32")
     if target == RelocArch.Riscv64 and mode != ELF_LINK_STATIC_EXEC:
         return Err("unsupported RISC-V output mode: only static ET_EXEC is admitted (RV64 PLT/GOT/dynamic relocations are not implemented)")
     val dynamic = elf_mode_dynamic(mode)
@@ -2135,17 +2143,24 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     var secs: [ElfOutSec] = []
     for o in inputs.outs:
         secs = secs.push(o)
+    # ELF32 record sizes: Elf32_Sym 16, Elf32_Rel 8, Elf32_Dyn 8.
+    val symsz: i64 = if w32: 16 else: 24
+    val relsz: i64 = if w32: 8 else: 24
+    val dynsz: i64 = if w32: 8 else: 16
+    val rel_dyn_name = if w32: ".rel.dyn" else: ".rela.dyn"
+    val rel_plt_name = if w32: ".rel.plt" else: ".rela.plt"
+    val sht_rel: i64 = if w32: 9 else: SHT_RELA_S
     if dynamic:
         secs = secs.push(elf_out_sec(".interp", SHT_PROGBITS_E, SHF_ALLOC, 1, req.interp.len() + 1, ELF_SEG_R))
-        secs = secs.push(elf_sec_with(elf_out_sec(".dynsym", SHT_DYNSYM_S, SHF_ALLOC, 8, (sc.imports.len() + 1) * 24, ELF_SEG_R), 24, ".dynstr", 1))
+        secs = secs.push(elf_sec_with(elf_out_sec(".dynsym", SHT_DYNSYM_S, SHF_ALLOC, got_ws, (sc.imports.len() + 1) * symsz, ELF_SEG_R), symsz, ".dynstr", 1))
         if need_versions.len() > 0:
             secs = secs.push(elf_sec_with(elf_out_sec(".gnu.version", SHT_GNU_VERSYM_S, SHF_ALLOC, 2,
                 (sc.imports.len() + 1) * 2, ELF_SEG_R), 2, ".dynsym", 0))
             secs = secs.push(elf_sec_with(elf_out_sec(".gnu.version_r", SHT_GNU_VERNEED_S, SHF_ALLOC, 4,
                 need_versions.len() * 32, ELF_SEG_R), 0, ".dynstr", need_versions.len()))
         if req.hash_style == "gnu" or req.hash_style == "both":
-            secs = secs.push(elf_sec_with(elf_out_sec(".gnu.hash", SHT_GNU_HASH_S, SHF_ALLOC, 8,
-                elf_gnu_hash_size(sc.copy_names.len()), ELF_SEG_R), 0, ".dynsym", 0))
+            secs = secs.push(elf_sec_with(elf_out_sec(".gnu.hash", SHT_GNU_HASH_S, SHF_ALLOC, got_ws,
+                elf_gnu_hash_size_class(sc.copy_names.len(), w32), ELF_SEG_R), 0, ".dynsym", 0))
         if req.hash_style == "sysv" or req.hash_style == "both":
             secs = secs.push(elf_sec_with(elf_out_sec(".hash", SHT_HASH_S, SHF_ALLOC, 4,
                 elf_hash_size(sc.imports.len() + 1), ELF_SEG_R), 4, ".dynsym", 0))
@@ -2157,12 +2172,12 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         var link = ""
         if dynamic:
             link = ".dynsym"
-        secs = secs.push(elf_sec_with(elf_out_sec(".rela.dyn", SHT_RELA_S, SHF_ALLOC, 8, n_rela_dyn * 24, ELF_SEG_R), 24, link, 0))
+        secs = secs.push(elf_sec_with(elf_out_sec(rel_dyn_name, sht_rel, SHF_ALLOC, got_ws, n_rela_dyn * relsz, ELF_SEG_R), relsz, link, 0))
     if nplt > 0:
-        secs = secs.push(elf_sec_with(elf_out_sec(".rela.plt", SHT_RELA_S, SHF_ALLOC | SHF_INFO_LINK_S, 8, nplt * 24, ELF_SEG_R), 24, ".dynsym", 0))
+        secs = secs.push(elf_sec_with(elf_out_sec(rel_plt_name, sht_rel, SHF_ALLOC | SHF_INFO_LINK_S, got_ws, nplt * relsz, ELF_SEG_R), relsz, ".dynsym", 0))
         secs = secs.push(elf_out_sec(".plt", SHT_PROGBITS_E, SHF_ALLOC | SHF_EXECINSTR, 16, elf_plt_size(target, nplt), ELF_SEG_RX))
     if nplt > 0 or need_got_base:
-        secs = secs.push(elf_out_sec(".got.plt", SHT_PROGBITS_E, SHF_ALLOC | SHF_WRITE, 8, elf_gotplt_size(nplt), ELF_SEG_RW))
+        secs = secs.push(elf_out_sec(".got.plt", SHT_PROGBITS_E, SHF_ALLOC | SHF_WRITE, got_ws, elf_gotplt_size_class(nplt, got_ws), ELF_SEG_RW))
     if ifunc_ref.len() > 0:
         val nif = ifunc_ref.len()
         val rel_type = if elf_iplt_rela(target): SHT_RELA_S else: 9
@@ -2181,13 +2196,13 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         var dlink = ""
         if dynamic:
             dlink = ".dynstr"
-        secs = secs.push(elf_sec_with(elf_out_sec(".dynamic", SHT_DYNAMIC_S, SHF_ALLOC | SHF_WRITE, 8, ntags * 16, ELF_SEG_RW), 16, dlink, 0))
+        secs = secs.push(elf_sec_with(elf_out_sec(".dynamic", SHT_DYNAMIC_S, SHF_ALLOC | SHF_WRITE, got_ws, ntags * dynsz, ELF_SEG_RW), dynsz, dlink, 0))
     secs = elf_sort_outs(secs)
-    # .rela.plt's sh_info names .got.plt (section header index = position + 1)
+    # .rel[a].plt's sh_info names .got.plt (section header index = position + 1)
     var si: i64 = 0
     while si < secs.len():
-        if secs[si].name == ".rela.plt":
-            secs[si] = elf_sec_with(secs[si], 24, ".dynsym", elf_find_out(secs, ".got.plt") + 1)
+        if secs[si].name == rel_plt_name:
+            secs[si] = elf_sec_with(secs[si], relsz, ".dynsym", elf_find_out(secs, ".got.plt") + 1)
         si = si + 1
 
     # --- layout ---
@@ -2509,7 +2524,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         val slot = got_v + gi * got_ws
         if r.rclass == RC_TLS_IE and r.kind == SYMREF_IMPORT:
             got.extend(elf_got_word(w32, 0))
-            rela_sym.extend(elf_rela_entry(slot, sc.import_idx[r.name], elf_dyn_tpoff64(target), 0))
+            rela_sym.extend(elf_dyn_rel_entry(w32, slot, sc.import_idx[r.name], elf_dyn_tpoff64(target), 0))
         else if r.rclass == RC_TLS_IE:
             # slot = tprel(S); A belongs to the GOT(S) + A - P access (ld.lld)
             got.extend(elf_got_word(w32, elf_tls_tprel(plan, target, elf_ref_addr(ctx, lay, r)?)?))
@@ -2517,20 +2532,20 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             got.extend(elf_got_word(w32, elf_ref_addr(ctx, lay, r)?))
         else if r.kind == SYMREF_IMPORT:
             got.extend(elf_got_word(w32, 0))
-            rela_sym.extend(elf_rela_entry(slot, sc.import_idx[r.name], elf_dyn_glob_dat(target), 0))
+            rela_sym.extend(elf_dyn_rel_entry(w32, slot, sc.import_idx[r.name], elf_dyn_glob_dat(target), 0))
         else:
             val v = if iplt_slot.has(sc.got_ref[gi]): elf_iplt_entry_addr(target, iplt_v, iplt_slot[sc.got_ref[gi]], false) else: elf_ref_addr(ctx, lay, r)?
             got.extend(elf_got_word(w32, v))
             if pie and r.kind == SYMREF_DEFINED:
-                rela_rel.extend(elf_rela_entry(slot, 0, elf_dyn_relative(target), v))
+                rela_rel.extend(elf_dyn_rel_entry(w32, slot, 0, elf_dyn_relative(target), v))
         gi = gi + 1
     for jr in sc.relative:
         val r = refs[jr]
         val v = elf_ref_addr(ctx, lay, r)?
-        rela_rel.extend(elf_rela_entry(plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off, 0, elf_dyn_relative(target), v + r.addend))
+        rela_rel.extend(elf_dyn_rel_entry(w32, plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off, 0, elf_dyn_relative(target), v + r.addend))
     for js in sc.sym_abs:
         val r = refs[js]
-        rela_sym.extend(elf_rela_entry(plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off, sc.import_idx[r.name], elf_dyn_abs64(target), r.addend))
+        rela_sym.extend(elf_dyn_rel_entry(w32, plan.vaddrs[in_to_plan[r.out_sec]] + r.out_off, sc.import_idx[r.name], elf_dyn_abs64(target), r.addend))
     for jt in sc.tls_dynamic:
         val r = refs[jt]
         rela_sym.extend(elf_rela_entry(
@@ -2538,14 +2553,14 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
             sc.import_idx[r.name], r.rtype, r.addend))
     for name in sc.copy_names:
         val addr = plan.vaddrs[in_to_plan[ctx.copy_out]] + ctx.copy_offsets[name]
-        rela_sym.extend(elf_rela_entry(addr, sc.import_idx[name], elf_dyn_copy(target), 0))
+        rela_sym.extend(elf_dyn_rel_entry(w32, addr, sc.import_idx[name], elf_dyn_copy(target), 0))
     # workaround: doc/08_tracking/bug/native_array_copy_leaks_2026-10-20.md (tables extend in place)
     var rela_dyn = rela_rel
     rela_dyn.extend(rela_sym)
     var rela_plt: [i64] = []
     var pi: i64 = 0
     while pi < nplt:
-        rela_plt.extend(elf_rela_entry(gotplt_v + (GOTPLT_RESERVED + pi) * 8, sc.import_idx[sc.plt_names[pi]], elf_dyn_jump_slot(target), 0))
+        rela_plt.extend(elf_dyn_rel_entry(w32, gotplt_v + (GOTPLT_RESERVED + pi) * got_ws, sc.import_idx[sc.plt_names[pi]], elf_dyn_jump_slot(target), 0))
         pi = pi + 1
 
     var init_v: i64 = 0
@@ -2557,7 +2572,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     val addrs = ElfDynAddrs(dynsym: elf_plan_addr(plan, ".dynsym"), dynstr: elf_plan_addr(plan, ".dynstr"),
         hash: elf_plan_addr(plan, ".hash"), gnu_hash: elf_plan_addr(plan, ".gnu.hash"),
         versym: elf_plan_addr(plan, ".gnu.version"), verneed: elf_plan_addr(plan, ".gnu.version_r"),
-        rela_dyn: elf_plan_addr(plan, ".rela.dyn"), rela_plt: elf_plan_addr(plan, ".rela.plt"), gotplt: gotplt_v,
+        rela_dyn: elf_plan_addr(plan, rel_dyn_name), rela_plt: elf_plan_addr(plan, rel_plt_name), gotplt: gotplt_v,
         init: init_v, fini: fini_v, init_array: elf_plan_addr(plan, ".init_array"), fini_array: elf_plan_addr(plan, ".fini_array"),
         preinit_array: elf_plan_addr(plan, ".preinit_array"))
 
@@ -2585,16 +2600,16 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         else if n == ".interp":
             out.push(elf_u8_from_i64(elf_build_interp(req.interp)))
         else if n == ".dynsym":
-            out.push(elf_u8_from_i64(elf_build_dynsym(sc.imports, sc.import_weak, sc.import_type, dynstr0,
-                dyn_shndx, dyn_values, dyn_sizes)))
+            out.push(elf_u8_from_i64(elf_build_dynsym_class(sc.imports, sc.import_weak, sc.import_type, dynstr0,
+                dyn_shndx, dyn_values, dyn_sizes, w32)))
         else if n == ".gnu.version":
             out.push(elf_u8_from_i64(elf_build_versym(import_versions)))
         else if n == ".gnu.version_r":
             out.push(elf_u8_from_i64(elf_build_verneed(need_libs, need_versions, dynstr0)))
         else if n == ".gnu.hash":
             val copy_hash_names = elf_gnu_hash_sort(sc.copy_names)
-            out.push(elf_u8_from_i64(elf_build_gnu_hash(copy_hash_names,
-                sc.imports.len() - copy_hash_names.len() + 1)))
+            out.push(elf_u8_from_i64(elf_build_gnu_hash_class(copy_hash_names,
+                sc.imports.len() - copy_hash_names.len() + 1, w32)))
         else if n == ".hash":
             out.push(elf_u8_from_i64(elf_build_hash(sc.imports)))
         else if n == ".dynstr":
@@ -2604,17 +2619,21 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
         else if n == ".eh_frame_hdr":
             out.push(elf_u8_from_i64(elf_build_eh_frame_hdr(contents[eh_out], elf_plan_addr(plan, ".eh_frame"),
                 elf_plan_addr(plan, ".eh_frame_hdr"))?))
-        else if n == ".rela.dyn":
+        else if n == rel_dyn_name:
             out.push(elf_u8_from_i64(rela_dyn))
-        else if n == ".rela.plt":
+        else if n == rel_plt_name:
             out.push(elf_u8_from_i64(rela_plt))
         else if n == ".plt":
-            if a64:
+            if target == RelocArch.I386:
+                out.push(elf_u8_from_i64(elf_build_plt_i386(plt_v, gotplt_v, nplt, pie)))
+            else if a64:
                 out.push(elf_u8_from_i64(elf_build_plt_a64(plt_v, gotplt_v, nplt)))
             else:
                 out.push(elf_u8_from_i64(elf_build_plt_x64(plt_v, gotplt_v, nplt)))
         else if n == ".got.plt":
-            if a64:
+            if target == RelocArch.I386:
+                out.push(elf_u8_from_i64(elf_build_gotplt_i386(nplt, plt_v, elf_plan_addr(plan, ".dynamic"))))
+            else if a64:
                 out.push(elf_u8_from_i64(elf_build_gotplt(nplt, plt_v)))
             else:
                 out.push(elf_u8_from_i64(elf_build_gotplt_x64(nplt, plt_v, elf_plan_addr(plan, ".dynamic"))))
@@ -2634,7 +2653,7 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
                 vi2 = vi2 + 1
             out.push(elf_u8_from_i64(vb))
         else if n == ".dynamic":
-            out.push(elf_u8_from_i64(elf_build_dynamic(elf_dynamic_tags(ctx, sc, dynstr0, n_rela, addrs, arrays, need_versions.len()))))
+            out.push(elf_u8_from_i64(elf_build_dynamic_class(elf_dynamic_tags(ctx, sc, dynstr0, n_rela, addrs, arrays, need_versions.len()), w32)))
         else:
             return Err("internal: no content for output section {n}")
         pk = pk + 1

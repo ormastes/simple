@@ -88,6 +88,10 @@ val GOTPLT_RESERVED: i64 = 3
 
 fn elf_dyn_relative(target: RelocArch) -> i64:
     match target:
+        case I386:
+            8
+        case Arm32:
+            23
         case AArch64:
             R_AARCH64_RELATIVE
         case _:
@@ -95,6 +99,10 @@ fn elf_dyn_relative(target: RelocArch) -> i64:
 
 fn elf_dyn_glob_dat(target: RelocArch) -> i64:
     match target:
+        case I386:
+            6
+        case Arm32:
+            21
         case AArch64:
             R_AARCH64_GLOB_DAT
         case _:
@@ -102,6 +110,10 @@ fn elf_dyn_glob_dat(target: RelocArch) -> i64:
 
 fn elf_dyn_jump_slot(target: RelocArch) -> i64:
     match target:
+        case I386:
+            7
+        case Arm32:
+            22
         case AArch64:
             R_AARCH64_JUMP_SLOT
         case _:
@@ -109,6 +121,10 @@ fn elf_dyn_jump_slot(target: RelocArch) -> i64:
 
 fn elf_dyn_abs64(target: RelocArch) -> i64:
     match target:
+        case I386:
+            1
+        case Arm32:
+            2
         case AArch64:
             257
         case _:
@@ -116,6 +132,10 @@ fn elf_dyn_abs64(target: RelocArch) -> i64:
 
 fn elf_dyn_copy(target: RelocArch) -> i64:
     match target:
+        case I386:
+            5
+        case Arm32:
+            20
         case AArch64:
             1024
         case _:
@@ -127,6 +147,10 @@ fn elf_dyn_tpoff64(target: RelocArch) -> i64:
             1030  # R_AARCH64_TLS_TPREL64
         case X86_64:
             R_X86_64_TPOFF64
+        case I386:
+            14    # R_386_TLS_TPOFF
+        case Arm32:
+            19    # R_ARM_TLS_TPOFF32
         case _:
             0
 
@@ -158,6 +182,15 @@ fn elf_rela_entry(r_offset: i64, sym: i64, rtype: i64, addend: i64) -> [i64]:
     var b = write_u64_le([], r_offset)
     b = write_u64_le(b, (sym << 32) | rtype)
     write_u64_le(b, addend)
+
+fn elf_rel_entry32(r_offset: i64, sym: i64, rtype: i64) -> [i64]:
+    """One Elf32_Rel (8 bytes): the addend is implicit in the relocated word."""
+    write_u32_le(write_u32_le([], r_offset), (sym << 8) | rtype)
+
+fn elf_dyn_rel_entry(w32: bool, r_offset: i64, sym: i64, rtype: i64, addend: i64) -> [i64]:
+    """ELF32 targets (i386, armv7) use REL, so the caller must have written
+    the addend into the relocated word; ELF64 targets use RELA."""
+    if w32: elf_rel_entry32(r_offset, sym, rtype) else: elf_rela_entry(r_offset, sym, rtype, addend)
 
 fn elf_sysv_hash(name: text) -> i64:
     var h: i64 = 0
@@ -203,8 +236,14 @@ fn elf_dynstr_size(names: [text]) -> i64:
 # reason: positional dynsym inputs (imports, binding flags, types, string table)
 fn elf_build_dynsym(imports: [text], weak: [bool], types: [i64], dynstr: ElfDynStr,
         shndx: [i64], values: [i64], sizes: [i64]) -> [i64]:
-    """Null symbol + imported UND entries or executable-defined COPY entries."""
-    var b = write_zeros([], 24)
+    elf_build_dynsym_class(imports, weak, types, dynstr, shndx, values, sizes, false)
+
+# reason: positional dynsym inputs plus the ELF class
+fn elf_build_dynsym_class(imports: [text], weak: [bool], types: [i64], dynstr: ElfDynStr,
+        shndx: [i64], values: [i64], sizes: [i64], w32: bool) -> [i64]:
+    """Null symbol + imported UND entries or executable-defined COPY entries.
+    Elf32_Sym orders name, value, size, info, other, shndx (16 bytes)."""
+    var b = write_zeros([], if w32: 16 else: 24)
     var i: i64 = 0
     while i < imports.len():
         var sym_bind: i64 = 1
@@ -214,12 +253,16 @@ fn elf_build_dynsym(imports: [text], weak: [bool], types: [i64], dynstr: ElfDynS
         if typ == 10:
             typ = 2  # STT_GNU_IFUNC is imported as a plain STT_FUNC
         b = write_u32_le(b, dynstr.offsets[elf_dynsym_name(imports[i])])
+        if w32:
+            b = write_u32_le(b, values[i])
+            b = write_u32_le(b, sizes[i])
         b = b.push((sym_bind << 4) | typ)
         b = b.push(0)
         b = b.push(shndx[i] & 0xff)
         b = b.push((shndx[i] >> 8) & 0xff)
-        b = write_u64_le(b, values[i])
-        b = write_u64_le(b, sizes[i])
+        if not w32:
+            b = write_u64_le(b, values[i])
+            b = write_u64_le(b, sizes[i])
         i = i + 1
     b
 
@@ -305,15 +348,22 @@ fn elf_gnu_hash_nbuckets(n: i64) -> i64:
     1
 
 fn elf_gnu_hash_maskwords(n: i64) -> i64:
-    """ld.lld: NextPowerOf2(n * 12 bits / 64) — the next power of two strictly above."""
-    val x = (n * 12) / 64
+    elf_gnu_hash_maskwords_w(n, 64)
+
+fn elf_gnu_hash_maskwords_w(n: i64, bits: i64) -> i64:
+    """ld.lld: NextPowerOf2(n * 12 bits / word bits) — the next power of two strictly above."""
+    val x = (n * 12) / bits
     var p: i64 = 1
     while p <= x:
         p = p * 2
     p
 
 fn elf_gnu_hash_size(n: i64) -> i64:
-    16 + elf_gnu_hash_maskwords(n) * 8 + elf_gnu_hash_nbuckets(n) * 4 + n * 4
+    elf_gnu_hash_size_class(n, false)
+
+fn elf_gnu_hash_size_class(n: i64, w32: bool) -> i64:
+    val wb: i64 = if w32: 4 else: 8
+    16 + elf_gnu_hash_maskwords_w(n, wb * 8) * wb + elf_gnu_hash_nbuckets(n) * 4 + n * 4
 
 fn elf_gnu_hash_sort(names: [text]) -> [text]:
     """Stable order by bucket: .gnu.hash requires each bucket's symbols to be
@@ -329,14 +379,18 @@ fn elf_gnu_hash_sort(names: [text]) -> [text]:
     out
 
 fn elf_build_gnu_hash(names: [text], symoffset: i64) -> [i64]:
+    elf_build_gnu_hash_class(names, symoffset, false)
+
+fn elf_build_gnu_hash_class(names: [text], symoffset: i64, w32: bool) -> [i64]:
     """.gnu.hash over the hashed .dynsym tail names (already elf_gnu_hash_sort-ed),
     which starts at .dynsym index symoffset. Layout ld.lld writes: header
     [nbuckets, symoffset, maskwords, shift2=26], 64-bit bloom words, buckets
     (first .dynsym index per bucket, 0 = empty), chain values (hash & ~1, bit 0
-    set on a bucket's last symbol)."""
+    set on a bucket's last symbol). ELF32 bloom words are 32 bits."""
     val n = names.len()
+    val wbits: i64 = if w32: 32 else: 64
     val nb = elf_gnu_hash_nbuckets(n)
-    val mw = elf_gnu_hash_maskwords(n)
+    val mw = elf_gnu_hash_maskwords_w(n, wbits)
     var bloom: [i64] = []
     var i: i64 = 0
     while i < mw:
@@ -354,8 +408,8 @@ fn elf_build_gnu_hash(names: [text], symoffset: i64) -> [i64]:
     i = 0
     while i < n:
         val h = hashes[i]
-        val w = (h / 64) % mw
-        bloom[w] = bloom[w] | (1 << (h % 64)) | (1 << ((h >> 26) % 64))
+        val w = (h / wbits) % mw
+        bloom[w] = bloom[w] | (1 << (h % wbits)) | (1 << ((h >> 26) % wbits))
         val bk = h % nb
         if buckets[bk] == 0:
             buckets[bk] = symoffset + i
@@ -369,7 +423,10 @@ fn elf_build_gnu_hash(names: [text], symoffset: i64) -> [i64]:
     b = write_u32_le(b, mw)
     b = write_u32_le(b, 26)
     for x in bloom:
-        b = write_u64_le(b, x)
+        if w32:
+            b = write_u32_le(b, x)
+        else:
+            b = write_u64_le(b, x)
     for x in buckets:
         b = write_u32_le(b, x)
     for x in chain:
@@ -417,6 +474,52 @@ fn elf_build_gotplt(n: i64, plt0_addr: i64) -> [i64]:
     var i: i64 = 0
     while i < n:
         b = write_u64_le(b, plt0_addr)
+        i = i + 1
+    b
+
+fn elf_gotplt_size_class(n: i64, ws: i64) -> i64:
+    if n == 0:
+        return 0
+    (GOTPLT_RESERVED + n) * ws
+
+fn elf_build_plt_i386(plt_addr: i64, gotplt_addr: i64, n: i64, pic: bool) -> [i64]:
+    """ld.lld's i386 lazy PLT. ET_EXEC: PLT0 = pushl GOTPLT+4; jmp *GOTPLT+8;
+    PLTn = jmp *slot. PIE (%ebx = .got.plt): pushl 4(%ebx); jmp *8(%ebx);
+    PLTn = jmp *slot-GOTPLT(%ebx). PLTn continues pushl $<.rel.plt byte
+    offset>; jmp PLT0. 16 bytes each, slot n = .got.plt[3 + n]."""
+    if n == 0:
+        return []
+    var b: [i64] = [0xff, 0x35]
+    if pic: b = [0xff, 0xb3]
+    b = write_u32_le(b, if pic: 4 else: gotplt_addr + 4)
+    b = b.push(0xff)
+    b = b.push(if pic: 0xa3 else: 0x25)
+    b = write_u32_le(b, if pic: 8 else: gotplt_addr + 8)
+    b = write_u32_le(b, 0x90909090)
+    var i: i64 = 0
+    while i < n:
+        val e = plt_addr + X64_PLT0_SIZE + i * X64_PLT_ENTRY_SIZE
+        val slot = (GOTPLT_RESERVED + i) * 4
+        b = b.push(0xff)
+        b = b.push(if pic: 0xa3 else: 0x25)
+        b = write_u32_le(b, if pic: slot else: gotplt_addr + slot)
+        b = b.push(0x68)
+        b = write_u32_le(b, i * 8)
+        b = b.push(0xe9)
+        b = write_u32_le(b, (plt_addr - (e + 16)) & 0xffffffff)
+        i = i + 1
+    b
+
+fn elf_build_gotplt_i386(n: i64, plt_addr: i64, dynamic_addr: i64) -> [i64]:
+    """i386 .got.plt: [0] = _DYNAMIC, [1]/[2] for ld.so, then one word per PLT
+    entry initialised to that entry's `pushl` (PLTn + 6) for lazy binding."""
+    if n == 0:
+        return []
+    var b = write_u32_le([], dynamic_addr)
+    b = write_zeros(b, 8)
+    var i: i64 = 0
+    while i < n:
+        b = write_u32_le(b, plt_addr + X64_PLT0_SIZE + i * X64_PLT_ENTRY_SIZE + 6)
         i = i + 1
     b
 
@@ -481,11 +584,20 @@ fn elf_build_gotplt_x64(n: i64, plt_addr: i64, dynamic_addr: i64) -> [i64]:
     b
 
 fn elf_build_dynamic(tags: [[i64]]) -> [i64]:
-    """tags = [[d_tag, d_val], ...]; DT_NULL is appended."""
+    elf_build_dynamic_class(tags, false)
+
+fn elf_build_dynamic_class(tags: [[i64]], w32: bool) -> [i64]:
+    """tags = [[d_tag, d_val], ...]; DT_NULL is appended. Elf32_Dyn is 8 bytes."""
     var b: [i64] = []
     for t in tags:
-        b = write_u64_le(b, t[0])
-        b = write_u64_le(b, t[1])
+        if w32:
+            b = write_u32_le(b, t[0])
+            b = write_u32_le(b, t[1] & 0xffffffff)
+        else:
+            b = write_u64_le(b, t[0])
+            b = write_u64_le(b, t[1])
+    if w32:
+        return write_zeros(b, 8)
     b = write_u64_le(b, DT_NULL)
     write_u64_le(b, 0)
 
@@ -507,6 +619,8 @@ export elf_dynsym_name, elf_dynsym_version, elf_build_versym, elf_build_verneed
 export elf_hash_size, elf_build_hash, elf_gnu_hash, elf_gnu_hash_sort, elf_gnu_hash_size, elf_build_gnu_hash
 export elf_plt0_size, elf_plt_entry_size, elf_plt_size, elf_gotplt_size, elf_build_plt_a64, elf_build_gotplt
 export elf_build_plt_x64, elf_build_gotplt_x64, elf_build_dynamic, elf_build_interp
+export elf_rel_entry32, elf_dyn_rel_entry, elf_build_dynsym_class, elf_gnu_hash_size_class, elf_build_gnu_hash_class
+export elf_build_dynamic_class, elf_gotplt_size_class, elf_build_plt_i386, elf_build_gotplt_i386
 export elf_a64_adrp_ldr_add
 export R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE
 export R_X86_64_GLOB_DAT, R_X86_64_JUMP_SLOT, R_X86_64_RELATIVE

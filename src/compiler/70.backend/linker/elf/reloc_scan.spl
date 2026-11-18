@@ -228,6 +228,14 @@ fn elf_raw_dynamic_tls_relocation(target: RelocArch, rtype: i64) -> bool:
         case _:
             false
 
+fn elf_reloc_word_abs(target: RelocArch, rclass: i64, rtype: i64) -> bool:
+    """A pointer-width absolute word: R_*_64 on ELF64, R_386_32 and
+    R_ARM_ABS32/TARGET1 on ELF32 (these classify RC_ABS_NARROW by width)."""
+    if rclass == RC_ABS64: return true
+    if target == RelocArch.I386: return rtype == 1
+    if target == RelocArch.Arm32: return rtype == 2 or rtype == 38
+    false
+
 fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<ElfScan, text>:
     val pie = elf_mode_pie(mode)
     val a64 = elf_target_is_a64(target)
@@ -320,7 +328,7 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
                     got_idx[got_key] = got_keys.len()
                     got_keys = got_keys.push(got_key)
                     got_ref = got_ref.push(j)
-            else if c == RC_ABS64:
+            else if elf_reloc_word_abs(target, c, r.rtype):
                 if not r.writable:
                     return Err("UnsupportedFeature: text relocation: {elf_reloc_what(r)} in a read-only section")
                 sym_abs = sym_abs.push(j)
@@ -338,7 +346,7 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
                     got_idx[got_key] = got_keys.len()
                     got_keys = got_keys.push(got_key)
                     got_ref = got_ref.push(j)
-            else if c == RC_ABS64 and pie and r.kind == SYMREF_DEFINED:
+            else if elf_reloc_word_abs(target, c, r.rtype) and pie and r.kind == SYMREF_DEFINED:
                 if mode == ELF_LINK_STATIC_PIE:
                     return Err("{elf_reloc_what(r)}: absolute address needs an R_*_RELATIVE dynamic relocation, which a static PIE without a self-relocating startup cannot apply")
                 if not r.writable:
