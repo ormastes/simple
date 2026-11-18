@@ -25,6 +25,22 @@ fn s32_u32(b: [u8], off: i64) -> i64:
 fn s32_phdr(b: [u8], idx: i64, field: i64) -> i64:
     s32_u32(b, s32_u32(b, 28) + idx * 32 + field)
 
+fn s32_section_names(b: [u8]) -> [text]:
+    val shoff = s32_u32(b, 32)
+    val shnum = s32_u16(b, 48)
+    val str_off = s32_u32(b, shoff + s32_u16(b, 50) * 40 + 16)
+    var names: [text] = []
+    var i: i64 = 1
+    while i < shnum:
+        var p = str_off + s32_u32(b, shoff + i * 40)
+        var s = ""
+        while b[p] != 0:
+            s = s + (b[p] as i64).to_char()
+            p = p + 1
+        names = names.push(s)
+        i = i + 1
+    names
+
 fn s32_link(arch: text, out: text) -> Result<text, text>:
     var cfg = NativeLinkConfig.default()
     cfg.runtime_path = "none"
@@ -76,3 +92,35 @@ describe "SimpleOS 32-bit user link (internal linker vs ld.lld)":
             "build/simpleos_user32_reject.elf", "simpleos-i686", cfg)
         expect(r.is_err()).to_equal(true)
         expect(r.unwrap_err()).to_contain("SECTIONS")
+
+    it "links a riscv32 user ELF32 with ld.lld's segments, flags and .text":
+        # lld oracle: ld.lld -m elf32lriscv --no-relax (same flags as i686), fixtures
+        # built with -march=rv32imac -mabi=ilp32 -mno-relax. All .text references
+        # are PC-relative, so the bytes are exact despite the PT_PHDR shift.
+        val out = "build/simpleos_user32_riscv32.elf"
+        val r = s32_link("riscv32", out)
+        expect(r.is_ok()).to_equal(true)
+        val b = file_read_bytes(out)
+        expect(b[4] as i64).to_equal(1)              # ELFCLASS32
+        expect(s32_u16(b, 16)).to_equal(2)           # ET_EXEC
+        expect(s32_u16(b, 18)).to_equal(243)         # EM_RISCV
+        expect(s32_u32(b, 36)).to_equal(1)           # e_flags: RVC, soft-float ABI
+        val text_v = s32_phdr(b, 1, 8)
+        val data_v = s32_phdr(b, 2, 8)
+        expect(s32_phdr(b, 0, 8)).to_equal(0x400000)
+        expect(s32_phdr(b, 0, 24)).to_equal(4)
+        expect(s32_phdr(b, 1, 24)).to_equal(5)
+        expect(s32_phdr(b, 2, 24)).to_equal(6)
+        expect(s32_u32(b, 24)).to_equal(text_v)
+        expect(data_v - text_v).to_equal(0x101c)     # lld: 0x402154 - 0x401138
+        val t = s32_phdr(b, 1, 4)
+        val lld_text = [151, 0, 0, 0, 231, 128, 224, 0, 129, 72, 115, 0, 0, 0,
+            23, 21, 0, 0, 3, 37, 229, 0, 19, 5, 133, 6, 130, 128]
+        var i: i64 = 0
+        while i < lld_text.len():
+            expect(b[t + i] as i64).to_equal(lld_text[i])
+            i = i + 1
+        # ld.lld keeps RISC-V small data as its own output section (`counter`
+        # lives in .sdata); __global_pointer$ is defined relative to it.
+        expect(s32_section_names(b)).to_contain(".sdata")
+        expect(s32_section_names(b)).not_to_contain(".data")
