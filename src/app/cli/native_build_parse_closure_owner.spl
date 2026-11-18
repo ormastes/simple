@@ -3,7 +3,8 @@
 use app.io.env_ops.{env_set, env_get}
 use app.cli.native_build_env_restore_v1.{native_build_env_saved_v1, native_build_env_restore_v1}
 use compiler.common.library_mode_policy_v1.{library_mode_closure_digest_v1}
-use std.io_runtime.{dir_create_all, getpid, time_now_monotonic_ms}
+use std.io_runtime.{dir_create_all, dir_exists, dir_remove_all, file_exists, getpid, time_now_monotonic_ms}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_keep_newest_prefix_dirs}
 use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
 use std.nogc_sync_mut.fs.host_path.{host_path_release_cached_platform_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
@@ -32,6 +33,9 @@ pub val NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1 = "SIMPLE_PARSE_CLOSURE_CONSU
 # Selected file count of the published request. Diagnostic sizing only: the
 # coordinator clamps shard fan-out with it; it never admits a request.
 pub val NATIVE_BUILD_PARSE_CLOSURE_SELECTED_ENV_V1 = "SIMPLE_PARSE_CLOSURE_SELECTED_COUNT"
+# Opt-in diagnostic retention: when "1", keep request_root on disk after
+# selection.v1 has been read instead of deleting it on retirement.
+pub val NATIVE_BUILD_KEEP_CLOSURE_REQUEST_ENV_V1 = "SIMPLE_KEEP_CLOSURE_REQUEST"
 
 struct NativeBuildParseClosurePublicationV1:
     path: text
@@ -146,9 +150,12 @@ fn native_build_parse_closure_write_v1(source_root: text, roots: [text],
     # dead coordinator's leftover request under a reused pid.
     val request_root = frontend_cache_dir + "/closure-request-" + getpid().to_text() +
         "-" + time_now_monotonic_ms().to_text()
+    val pre_existing_root = frontend_cache_dir != "" and dir_exists(request_root)
     if frontend_cache_dir == "" or not dir_create_all(request_root):
         return NativeBuildParseClosurePublicationV1("", "", 0,
             "parse-shard closure request requires private frontend cache")
+    val _swept = disk_bound_keep_newest_prefix_dirs(frontend_cache_dir, "closure-request-", 8, 3600)
+    val keep_request = (env_get(NATIVE_BUILD_KEEP_CLOSURE_REQUEST_ENV_V1) ?? "") == "1"
     val selection_path = request_root + "/selection.v1"
     # Keep the independent final byte/generation/manifest authentication. Its
     # inventory no longer overlaps the earlier authority, walker or selection
@@ -157,10 +164,14 @@ fn native_build_parse_closure_write_v1(source_root: text, roots: [text],
         authority.source_inventory_digest, authority.inventory_generation,
         selection.binding, selection.records)
     if admitted.is_err():
+        if not pre_existing_root and not keep_request:
+            val _cleaned = dir_remove_all(request_root)
         return NativeBuildParseClosurePublicationV1("", "", 0,
             "parse-shard closure publication rejected: " + admitted.unwrap_err())
     val published = native_entry_closure_publish_records_v1(selection_path, admitted.unwrap())
     if published.is_err():
+        if not pre_existing_root and not keep_request:
+            val _cleaned = dir_remove_all(request_root)
         return NativeBuildParseClosurePublicationV1("", "", 0,
             "parse-shard closure publication rejected: " + published.unwrap_err())
     val request = NativeEntryClosureRequestV1(source_root, authority.snapshot,
@@ -169,6 +180,8 @@ fn native_build_parse_closure_write_v1(source_root: text, roots: [text],
     val request_path = request_root + "/request.v1"
     val request_digest = native_entry_closure_request_publish_v1(request_path, request)
     if request_digest.is_err():
+        if not pre_existing_root and not keep_request:
+            val _cleaned = dir_remove_all(request_root)
         return NativeBuildParseClosurePublicationV1("", "", 0,
             "parse-shard closure request publication failed: " + request_digest.unwrap_err())
     NativeBuildParseClosurePublicationV1(request_path, request_digest.unwrap(), walk.paths.len(), "")
@@ -193,6 +206,47 @@ pub fn native_build_parse_closure_reuse_decision_v1(shard_child: bool,
     if admit_error != "":
         return Err("parse-closure request mismatch: " + admit_error)
     Ok(true)
+
+fn _parse_closure_request_root_from_path_v1(path: text) -> text:
+    val canonical = path.replace("\\", "/")
+    var root = canonical
+    val req_suffix = "/request.v1"
+    val sel_suffix = "/selection.v1"
+    if canonical.ends_with(req_suffix):
+        root = canonical.substring(0, canonical.byte_len() - req_suffix.byte_len())
+    elif canonical.ends_with(sel_suffix):
+        root = canonical.substring(0, canonical.byte_len() - sel_suffix.byte_len())
+    if root == "" or root.contains("..") or root.contains("\n") or root.contains("\r") or root.contains("\0"):
+        return ""
+    val slash = root.last_index_of("/")
+    if slash < 0:
+        return ""
+    val base = root.substring(slash + 1)
+    val prefix = "closure-request-"
+    if not base.starts_with(prefix) or base.byte_len() <= prefix.byte_len():
+        return ""
+    if base.contains("/") or base.contains("\\"):
+        return ""
+    root
+
+# Deletes the current request_root once selection.v1 has been read (unless
+# SIMPLE_KEEP_CLOSURE_REQUEST == "1"). Accepts request_root, request.v1,
+# selection.v1, or "" to resolve from SIMPLE_PARSE_CLOSURE_REQUEST.
+# reason: boolean retirement status matches native_build_publish_parse_closure_v1
+@allow(primitive_api)
+pub fn native_build_parse_closure_retire_request_v1(request_or_selection_path: text) -> bool:
+    if (env_get(NATIVE_BUILD_KEEP_CLOSURE_REQUEST_ENV_V1) ?? "") == "1":
+        return false
+    val candidate = if request_or_selection_path != "":
+        request_or_selection_path
+    else:
+        env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? ""
+    val request_root = _parse_closure_request_root_from_path_v1(candidate)
+    if request_root == "" or not dir_exists(request_root):
+        return false
+    if not file_exists(request_root + "/selection.v1") and not file_exists(request_root + "/request.v1"):
+        return false
+    dir_remove_all(request_root)
 
 fn native_build_parse_closure_clear_v1() -> bool:
     # Evaluate both setters even when the first fails. An absent request path

@@ -3,7 +3,7 @@
 - **Status:** verification-pending
 - **Date:** 2026-11-18
 - **Lane:** winarm-linkperf
-- **Area:** Rust seed native-build link (`src/compiler_rust/compiler/src/pipeline/native_project/{linker,stubs}.rs`)
+- **Area:** Rust seed native-build link (`src/compiler_rust/compiler/src/pipeline/native_project/{linker,stubs}.rs`) + Pure-Simple driver dynlib link receipt (`src/compiler/80.driver/driver_build/native_link_receipt_v1.spl`)
 
 ## Symptom
 
@@ -50,3 +50,12 @@ Same host, before and after runs back to back (2026-11-18 ~09:45; the host was l
 | test_runner_new, arm64 | 59.2 s | 39.6 s | 7025 KB, both |
 
 Each spawn costs more as host load rises (~6 s each under load), so the saving scales with load. Peak working set of the largest sampled process: 2.48 GB before, 0.83 GB after. This is a 2 s-poll sample, so treat it as no-regression evidence, not as a precise figure. RSS: the seed's peak working set is reported from `Win32_Process.PeakWorkingSetSize`. `elf_link_rss_budget.shs` gates the pure-Simple ELF linker, which this change does not touch.
+
+## Follow-up Fix (Wave C4 — Pure-Simple Driver `_exports_digest_v1` Batched `llvm-nm`)
+
+- **Bottleneck (`src/compiler/80.driver/driver_build/native_link_receipt_v1.spl`):** `_exports_digest_v1(objects: [text])` previously invoked `process_run_timeout("llvm-nm", ["--defined-only", "--extern-only", "-j", object], 30000)` serially once per `.o` file (~1,000 serial `llvm-nm` subprocess spawns on Windows shared-library builds).
+- **Fix:**
+  1. `native_link_nm_batches_v1(objects, max_cmd_bytes, max_batch_len)` batches up to `128` objects per `llvm-nm` call while keeping UTF-8 command-line `byte_len() <= 16384` (well below the Windows 32 KiB `CreateProcessW` limit), collapsing ~1,000 spawns to ~8-10 spawns.
+  2. `native_link_parse_nm_defined_symbols_v1(stdout, batch_objects)` strips empty lines and multi-object `<object>:` headers printed by `llvm-nm -j` when `batch_objects.len() > 1`, yielding the exact byte-identical sorted `sha256_text` export digest as per-object `llvm-nm`.
+  3. `native_link_exports_digest_with_runner_v1` / `_exports_digest_v1` runs batched `llvm-nm` and falls back to per-object `llvm-nm` on a batch only if the batch invocation exits non-zero (`code != 0`), preserving partial-failure resilience and `"unknown"` fallback behavior.
+- **Verification:** `test/01_unit/compiler/driver/native_link_receipt_v1_spec.spl` (batching count/UTF-8 byte caps, multi-file `<obj>:` header stripping, byte-identical `sha256_text` digest equivalence, and per-object fallback / `"unknown"` tests) + `scripts/check/check-text-len-unit-mix.shs`.

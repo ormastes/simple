@@ -58,6 +58,7 @@ use std.gpu.engine2d.backend_emu.{
 # ============================================================================
 
 pub val TILE_SIZE: i32 = 64     # Tile width/height in pixels (fits in L1 cache)
+val SW_FILL_CONTIGUOUS_CHUNK_PIXELS: i32 = 262144   # 1 MiB scratch cap (262,144 * 4 B)
 
 # ============================================================================
 # Honest per-bucket kernel-table timing probe (fill_const)
@@ -82,6 +83,11 @@ pub val TILE_SIZE: i32 = 64     # Tile width/height in pixels (fits in L1 cache)
 
 val KERNEL_PROBE_FASTER: i64 = 1   # bit 0: SIMD measured faster than scalar
 val KERNEL_PROBE_EXACT: i64 = 2    # bit 1: SIMD output bit-exact vs the oracle
+
+var _session_kernel_slots: [i64] = []
+var _session_kernel_registrations: i64 = 0
+var _session_kernel_rejections: i64 = 0
+var _session_kernel_ready: bool = false
 
 fn _kernel_probe_fill_bucket(n: i64, iters: i64) -> i64:
     """Measure scalar vs SIMD-ISA fill_const at `n` pixels x `iters` reps and
@@ -365,11 +371,8 @@ impl RenderBackend for SoftwareBackend:
         self.initialized = false
 
     me clear(color: u32):
-        var row = 0
-        # cpu-lane-loop-ok: framebuffer clear walks one scanline per row and delegates each row to sw_fill_raw_span; the per-row bulk fill is already the bulk idiom, a whole-buffer memset is blocked on N5
-        while row < self.h:
-            self.sw_fill_raw_span(row * self.w, self.w, color)
-            row = row + 1
+        if self.w > 0 and self.h > 0:
+            self.sw_fill_contiguous_range(0, self.w * self.h, color)
         val dirty_count = self.dirty_tiles.len()
         var dirty = 0
         while dirty < dirty_count:
@@ -423,6 +426,16 @@ impl RenderBackend for SoftwareBackend:
             if end_y > clip_y_end:
                 end_y = clip_y_end
         if end_x <= start_x or end_y <= start_y:
+            return
+        if not mask_active and start_x == 0 and end_x == self.w:
+            self.sw_fill_contiguous_range(start_y * self.w, (end_y - start_y) * self.w, color)
+            val ty0 = start_y / TILE_SIZE
+            val ty1 = (end_y - 1) / TILE_SIZE
+            var ty = ty0
+            # cpu-lane-loop-ok: marks each touched tile row dirty once for full-width contiguous fill; bounded by tiles_y, not scanlines
+            while ty <= ty1:
+                self.mark_span_dirty(0, ty * TILE_SIZE, self.w)
+                ty = ty + 1
             return
         var row = start_y
         while row < end_y:
@@ -1336,6 +1349,16 @@ impl SoftwareBackend:
         MEASUREMENT coverage, not SIMD wins."""
         if self.kernel_table_ready:
             return
+        if _session_kernel_ready:
+            self.kernel_table = CpuKernelTable(
+                slots: _session_kernel_slots,
+                sealed: true,
+                registrations: _session_kernel_registrations,
+                rejections: _session_kernel_rejections,
+                lookups: 0
+            )
+            self.kernel_table_ready = true
+            return
         # (representative span length, iterations) per bucket. Small spans get
         # more iterations so the wall-clock measurement window is large
         # enough to be above timer-resolution noise. Probes MEASURE only and
@@ -1421,8 +1444,24 @@ impl SoftwareBackend:
                               KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_LARGE,
                               KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
         kernel_table_seal(table)
+        _session_kernel_slots = table.slots
+        _session_kernel_registrations = table.registrations
+        _session_kernel_rejections = table.rejections
+        _session_kernel_ready = true
         self.kernel_table = table
         self.kernel_table_ready = true
+
+    me sw_fill_contiguous_range(start_offset: i32, total_count: i32, color: u32):
+        var remaining = _span_safe_count(self.buf.len(), start_offset, total_count)
+        if remaining <= 0:
+            return
+        var pos = start_offset
+        # cpu-lane-loop-ok: chunks contiguous fill into 262144-pixel (1 MiB) bulk spans; bounded by ceil(pixels / 262144), not scanlines or pixels
+        while remaining > 0:
+            val chunk = if remaining > SW_FILL_CONTIGUOUS_CHUNK_PIXELS: SW_FILL_CONTIGUOUS_CHUNK_PIXELS else: remaining
+            self.sw_fill_raw_span(pos, chunk, color)
+            pos = pos + chunk
+            remaining = remaining - chunk
 
     me sw_fill_raw_span(offset: i32, raw_count: i32, color: u32):
         val count = _span_safe_count(self.buf.len(), offset, raw_count)

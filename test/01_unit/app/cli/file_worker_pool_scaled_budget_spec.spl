@@ -1,5 +1,5 @@
 use std.spec
-use app.io.env_ops.{env_set, env_unset}
+use app.io.env_ops.{env_get, env_set, env_unset}
 use app.io.cli_ops.{cli_kernel_executable_path}
 use std.nogc_sync_mut.host_limits.{host_limit_value}
 use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1,
@@ -221,6 +221,42 @@ describe "file worker pool: scale-to-host pricing uses the admission's effective
         step("the host worker_mem_mib key is a shard figure: the per-file HIR price ignores it")
         expect(got).to_equal(file_worker_pool_phase_budget_kb_v1(SHARD_HIR_WORKER_KB_V1, false, live, file_worker_pool_host_pointer_bits_v1()))
 
+    it "live per-file MIR budget scales with the same admission usable as HIR (no mir_workers=0 asymmetry)":
+        val _uh = env_unset("SIMPLE_HIR_SHARD_WORKER_KB")
+        val _um = env_unset("SIMPLE_MIR_SHARD_WORKER_KB")
+        val _c = env_set("SIMPLE_SHARD_MEM_CLAMP", "0")
+        val _t = env_set("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "32000000")
+        val _r = env_set("SIMPLE_PROCESS_TREE_RSS_CAP_KIB", "16000000")
+        val _b = env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "1073741824")
+        val unscaled_usable = file_worker_pool_live_usable_kb_v1()
+        val live = file_worker_pool_live_admission_usable_kb_v1()
+        val hir_got = file_worker_pool_hir_budget_kb_v1()
+        val mir_got = file_worker_pool_mir_budget_kb_v1(1650, true)
+        val mir_small_got = file_worker_pool_mir_budget_kb_v1(50, true)
+        val mir_shard_got = file_worker_pool_mir_budget_kb_v1(1650, false)
+        val _uc = env_unset("SIMPLE_SHARD_MEM_CLAMP")
+        val _ut = env_unset("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB")
+        val _ur = env_unset("SIMPLE_PROCESS_TREE_RSS_CAP_KIB")
+        val _ub = env_unset("SIMPLE_BUILD_MEMORY_RESERVE_BYTES")
+        val cgroup_kb = shard_cgroup_memory_max_kb()
+        expect(unscaled_usable).to_equal(file_worker_pool_usable_kb_v1(0, shard_tree_budget_kb_for(32000000, cgroup_kb)))
+        expect(live).to_equal(file_worker_pool_admission_usable_kb_v1(0, 32000000, cgroup_kb, 16000000, 1048576))
+        step("per-file MIR budget matches HIR under SIMPLE_PROCESS_TREE_RSS_CAP_KIB and reserve headroom")
+        expect(mir_got).to_equal(hir_got)
+        expect(mir_small_got).to_equal(hir_got)
+        expect(mir_got).to_equal(file_worker_pool_phase_budget_kb_v1(FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1, false, live, file_worker_pool_host_pointer_bits_v1()))
+        if cgroup_kb == 0 and file_worker_pool_host_pointer_bits_v1() == 64:
+            expect(unscaled_usable >= 2 * SHARD_HIR_WORKER_KB_V1).to_be_true()
+            expect(mir_got < SHARD_HIR_WORKER_KB_V1).to_be_true()
+            expect(mir_got >= floor).to_be_true()
+            # At 24 GiB tree cap (15.1 GB usable): unscaled 9 GB clamped to 1 -> mir_workers=0 (refused); scaled admits 2.
+            expect(shard_threads_cap_for(4, SHARD_HIR_WORKER_KB_V1, 25165824)).to_equal(1)
+            expect(shard_threads_cap_for(4, mir_got, 25165824)).to_equal(2)
+            expect(file_worker_pool_refusal_v1(4, 2, 69534052, hir_got, mir_got)).to_equal("")
+        step("MIR shard mode (scale=false) remains closure-scaled and unscaled by pool usable")
+        val host_kb = shard_host_worker_budget_kb(host_limit_value("worker_mem_mib"))
+        expect(mir_shard_got).to_equal(file_worker_pool_phase_budget_kb_v1(file_worker_pool_mir_host_scaled_price_kb_v1(1650, host_kb), host_kb > 0, 0, file_worker_pool_host_pointer_bits_v1()))
+
 # The width must be the running binary's own, never the cross-build target:
 # under source/interpreted execution `@when(arch=...)` follows
 # SIMPLE_NATIVE_BUILD_TARGET, which a cross-build exports to itself and its
@@ -254,16 +290,24 @@ describe "file worker pool: host pointer width comes from the running image":
         expect(file_worker_pool_host_pointer_bits_for_v1(-1, -1, 32, true)).to_equal(-1)
 
     it "SIMPLE_TARGET_ARCH also marks the cfg width as untrusted":
+        val old_arch = env_get("PROCESSOR_ARCHITECTURE") ?? ""
+        val _ua = env_unset("PROCESSOR_ARCHITECTURE")
         val _set = env_set("SIMPLE_TARGET_ARCH", "x86")
         val missing = file_worker_pool_probe_pointer_bits_v1("/nonexistent/simple")
         val _unset = env_unset("SIMPLE_TARGET_ARCH")
+        if old_arch != "":
+            val _ra = env_set("PROCESSOR_ARCHITECTURE", old_arch)
         expect(missing).to_equal(-1)
 
     it "probes this 64-bit host's image as 64 even while a 32-bit cross target is exported":
         val _set = env_set("SIMPLE_NATIVE_BUILD_TARGET", "i686-unknown-linux-gnu")
         val live = file_worker_pool_probe_pointer_bits_v1(cli_kernel_executable_path())
+        val old_arch = env_get("PROCESSOR_ARCHITECTURE") ?? ""
+        val _ua = env_unset("PROCESSOR_ARCHITECTURE")
         val missing = file_worker_pool_probe_pointer_bits_v1("/nonexistent/simple")
         val none = file_worker_pool_probe_pointer_bits_v1("")
+        if old_arch != "":
+            val _ra = env_set("PROCESSOR_ARCHITECTURE", old_arch)
         val _unset = env_unset("SIMPLE_NATIVE_BUILD_TARGET")
         expect(live).to_equal(64)
         expect(missing).to_equal(-1)

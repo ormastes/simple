@@ -13,3 +13,22 @@ Needs a timed breakdown of probe vs `load_model` vs `open_context` to confirm.
 
 Also seen: GPU gemma-3-270m generation (2 tokens) 3271 ms vs 1218 ms on CPU; cold Vulkan
 pipeline compile on the first request after load is the likely reason; no warm-up request was made.
+
+## Resolution (2026-11-18 — Wave C2)
+
+Status: fixed
+
+Confirmed in `llm_engine.spl` (`check_fit(..., default_headroom_bytes())`): every model load on
+Windows spawned two PowerShell CIM processes — `Win32_OperatingSystem.TotalVisibleMemorySize` in
+`mem_total_bytes()` and `Win32_PerfFormattedData_PerfOS_Memory.AvailableBytes` in
+`_win32_available_bytes()` — adding 54-135 s of fixed probe overhead per load under host contention.
+
+Fixes landed:
+1. `src/lib/gc_async_mut/slang/host/slang_host.spl`: added `slang_windows_available_bytes_fast()`
+   backed by SOSIX `sosix_windows_memory_headroom_v1()` (`GlobalMemoryStatusEx`, `<1 ms`),
+   returning `0` off Windows or when the snapshot returns `Err` / `<= 0`.
+2. `src/lib/gc_async_mut/slang/model_executor/model_loader/memory_budget.spl`: routed
+   `_win32_available_bytes()` through `slang_windows_available_bytes_fast()` first with PowerShell
+   CIM retained only as fallback, and memoized positive `mem_total_bytes()` results in
+   `_cached_mem_total_bytes` (with `reset_mem_total_cache_for_test()`).
+3. Regression coverage added in `test/01_unit/lib/gc_async_mut/slang/host/slang_host_spec.spl`.

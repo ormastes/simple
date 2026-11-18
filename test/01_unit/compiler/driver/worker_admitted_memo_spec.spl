@@ -4,8 +4,9 @@
 # Before its first ledger write, every per-file unit child walks the whole
 # admitted graph, and every import edge paid a full resolve + native-owner
 # check, even when another module in the same directory had just resolved the
-# same spelling. SIMPLE_WORKER_ADMITTED_MEMO=1 resolves each
-# (candidate, importer dir) pair once per walk; the graph must be identical.
+# same spelling. SIMPLE_WORKER_ADMITTED_MEMO (default on; 0/false/off rolls
+# back) resolves each (candidate, importer dir) pair once per walk; the graph
+# must be identical.
 use std.spec
 use std.io_runtime.{env_set_process, env_remove_process}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_admitted_edges_v1,
@@ -26,9 +27,9 @@ fn inventory(n: i64, dirs: [text]) -> ([text], [text], [text]):
             k = k + 1
     (paths, contents, names)
 
-fn walk(memo: bool, n: i64, dirs: [text]) -> (i64, [[i64]], [text]):
-    if memo:
-        val _s = env_set_process(WORKER_ADMITTED_MEMO_ENV_V1, "1")
+fn walk_raw(raw: text, has_env: bool, n: i64, dirs: [text]) -> (i64, [[i64]], [text]):
+    if has_env:
+        val _s = env_set_process(WORKER_ADMITTED_MEMO_ENV_V1, raw)
     else:
         val _r = env_remove_process(WORKER_ADMITTED_MEMO_ENV_V1)
     val (paths, contents, names) = inventory(n, dirs)
@@ -38,6 +39,12 @@ fn walk(memo: bool, n: i64, dirs: [text]) -> (i64, [[i64]], [text]):
     val _r2 = env_remove_process(WORKER_ADMITTED_MEMO_ENV_V1)
     if got.is_err(): return (-1, [], [got.unwrap_err()])
     (after - before, got.unwrap().edges, got.unwrap().errors)
+
+fn walk(memo: bool, n: i64, dirs: [text]) -> (i64, [[i64]], [text]):
+    if memo:
+        walk_raw("", false, n, dirs)
+    else:
+        walk_raw("0", true, n, dirs)
 
 describe "worker admitted-graph resolution memo":
     """
@@ -66,3 +73,14 @@ describe "worker admitted-graph resolution memo":
         expect(off_count).to_equal(12)
         expect(on_edges).to_equal(off_edges)
         expect(on_errors).to_equal(off_errors)
+
+    it "is on by default and rolls back on explicit 0, false or off":
+        """
+        # @req P3Z-003: memo is default-ON with explicit opt-out rollback
+        """
+        val (explicit_on, _e1, _r1) = walk_raw("1", true, 4, ["src/lib/common"])
+        val (false_off, _e2, _r2) = walk_raw("false", true, 4, ["src/lib/common"])
+        val (word_off, _e3, _r3) = walk_raw("off", true, 4, ["src/lib/common"])
+        expect(explicit_on).to_equal(2)
+        expect(false_off).to_equal(8)
+        expect(word_off).to_equal(8)

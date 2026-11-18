@@ -15,7 +15,7 @@
 # reports the arithmetic it used. A refusal a caller can read is worth more than
 # a verdict it has to trust.
 
-use std.gc_async_mut.slang.host.slang_host.{host_os_name, host_file_read, host_run_int, host_run_text, parse_meminfo_bytes, parse_vm_stat_page_size, parse_vm_stat_available_pages, darwin_available_bytes}
+use std.gc_async_mut.slang.host.slang_host.{host_os_name, host_file_read, host_run_int, host_run_text, parse_meminfo_bytes, parse_vm_stat_page_size, parse_vm_stat_available_pages, darwin_available_bytes, slang_windows_available_bytes_fast}
 
 # Bytes to leave for the OS, the page cache and whatever else shares this
 # machine. Deliberately generous: the cost of being wrong upward is a refused
@@ -40,15 +40,30 @@ fn default_headroom_bytes() -> i64:
         return floor_bytes
     proportional
 
+var _cached_mem_total_bytes: i64 = 0
+
+# reason: test-only reset of memoized physical memory byte total
+@allow(primitive_api)
+pub fn reset_mem_total_cache_for_test():
+    _cached_mem_total_bytes = 0
+
 # Physical memory. Distinct from mem_available_bytes: this one never changes
-# under load, which is exactly what a reserve should be sized against.
+# under load, which is exactly what a reserve should be sized against. Positive
+# probes are memoized so repeated model loads do not re-spawn PowerShell/sysctl.
 fn mem_total_bytes() -> i64:
+    if _cached_mem_total_bytes > 0:
+        return _cached_mem_total_bytes
     val os = host_os_name()
+    var total: i64 = -1
     if os == "linux":
-        return parse_meminfo_bytes(host_file_read("/proc/meminfo"), "MemTotal")
-    if os == "windows":
-        return _win32_os_kib("TotalVisibleMemorySize")
-    host_run_int("sysctl", ["-n", "hw.memsize"])
+        total = parse_meminfo_bytes(host_file_read("/proc/meminfo"), "MemTotal")
+    elif os == "windows":
+        total = _win32_os_kib("TotalVisibleMemorySize")
+    else:
+        total = host_run_int("sysctl", ["-n", "hw.memsize"])
+    if total > 0:
+        _cached_mem_total_bytes = total
+    total
 
 # Windows has neither /proc/meminfo nor sysctl. Win32_OperatingSystem reports
 # TotalVisibleMemorySize in KiB (same PowerShell/CIM probe the test runner's
@@ -60,18 +75,20 @@ fn _win32_os_kib(field: text) -> i64:
         return -1
     kib * 1024
 
-# MemAvailable analogue on Windows: Win32_PerfFormattedData_PerfOS_Memory
-# AvailableBytes = free + zeroed + STANDBY (file-cache) pages. Win32_OperatingSystem
-# FreePhysicalMemory excludes the standby list, so after a process reads multi-GB
-# model files it collapses while the OS can still hand the memory out: on
-# 2026-11-15 slang refused a 256M-parameter model ("needs 10 GiB ... only 6 GiB
-# available") for 30+ minutes with ~38 GiB available. Measured 2026-11-15 on a
-# heavily loaded host (7B GGUF already cached, so the gap did not reappear):
-# FreePhysicalMemory 26.56 GB (54 s), AvailableBytes 27.05 GB (135 s), Get-Counter
-# 26.29 GB (92 s); after re-reading the file 26.25 / 27.05 / 27.58 GB. Probe wall
-# times are load noise (all three within 54-135 s), so the CIM class is chosen
-# over Get-Counter because it is not localised.
+# MemAvailable analogue on Windows: queries SOSIX GlobalMemoryStatusEx first
+# (`slang_windows_available_bytes_fast`, <1 ms), falling back to PowerShell CIM
+# `Win32_PerfFormattedData_PerfOS_Memory.AvailableBytes` (free + zeroed +
+# STANDBY file-cache pages) only when the fast snapshot is unavailable.
+# Win32_OperatingSystem FreePhysicalMemory excludes the standby list, so after a
+# process reads multi-GB model files it collapses while the OS can still hand
+# the memory out: on 2026-11-15 slang refused a 256M-parameter model ("needs 10
+# GiB ... only 6 GiB available") for 30+ minutes with ~38 GiB available.
+# Measured 2026-11-15 on a heavily loaded host: CIM probes took 54-135 s wall,
+# which caused 64-120 s fixed model-load overhead before the SOSIX fast path.
 fn _win32_available_bytes() -> i64:
+    val fast = slang_windows_available_bytes_fast()
+    if fast > 0:
+        return fast
     val bytes = host_run_int("powershell", ["-NoProfile", "-Command", "(Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).AvailableBytes"])
     if bytes <= 0:
         return -1
@@ -183,4 +200,4 @@ fn estimate_runtime_overhead_bytes(model_bytes: i64, n_ctx: i64) -> i64:
         ctx = 0
     ctx * per_token + compute_slack
 
-export FitVerdict, default_headroom_bytes, mem_available_bytes, mem_total_bytes, check_fit, check_fit_with_available, estimate_runtime_overhead_bytes
+export FitVerdict, default_headroom_bytes, mem_available_bytes, mem_total_bytes, reset_mem_total_cache_for_test, check_fit, check_fit_with_available, estimate_runtime_overhead_bytes

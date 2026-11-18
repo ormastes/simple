@@ -14,10 +14,10 @@ entrypoints must not load any native library (lazy first use).
 use std.spec.step
 use std.spec.{describe, it, expect}
 
-use std.gc_async_mut.slang.host.slang_host.{ggml_lib_default, rocm_bin_default_for, hip_lib_names, hiprtc_lib_names, host_libc_name, host_join, parse_meminfo_bytes, parse_int_text, parse_vm_stat_page_size, parse_vm_stat_available_pages, darwin_available_bytes, host_os_name, host_file_exists}
+use std.gc_async_mut.slang.host.slang_host.{ggml_lib_default, rocm_bin_default_for, hip_lib_names, hiprtc_lib_names, host_libc_name, host_join, parse_meminfo_bytes, parse_int_text, parse_vm_stat_page_size, parse_vm_stat_available_pages, darwin_available_bytes, host_os_name, host_file_exists, slang_windows_available_bytes_fast}
 use std.gc_async_mut.slang.engine.llm_engine.{engine_loaded_model, engine_backend_available, engine_lib_path, engine_set_lib_path}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{dir_byte_size}
-use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit_with_available}
+use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit_with_available, mem_available_bytes, mem_total_bytes, default_headroom_bytes, reset_mem_total_cache_for_test}
 
 val MEMINFO = "MemTotal:       16384000 kB\nMemFree:          100000 kB\nMemAvailable:    8192000 kB\nBuffers:           1000 kB\n"
 val VM_STAT = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                               5000.\nPages active:                            100000.\nPages inactive:                           90000.\nPages speculative:                         3000.\nPages wired down:                         50000.\nPages purgeable:                           7000.\nPages occupied by compressor:             25000.\n"
@@ -103,6 +103,25 @@ describe "slang host wrappers and lazy native loading":
         expect(engine_backend_available()).to_equal(false)
         engine_set_lib_path("")
         expect(engine_loaded_model()).to_equal("")
+
+    it "probes fast Windows available memory via SOSIX GlobalMemoryStatusEx":
+        val os = host_os_name()
+        val fast = slang_windows_available_bytes_fast()
+        if os == "windows":
+            expect(fast).to_be_greater_than(0)
+            expect(mem_available_bytes()).to_be_greater_than(0)
+        else:
+            expect(fast).to_equal(0)
+
+    it "memoizes positive mem_total_bytes across calls and supports test cache reset":
+        reset_mem_total_cache_for_test()
+        val first = mem_total_bytes()
+        expect(first).to_be_greater_than(0)
+        val second = mem_total_bytes()
+        expect(second).to_equal(first)
+        expect(default_headroom_bytes()).to_be_greater_than(0)
+        reset_mem_total_cache_for_test()
+        expect(mem_total_bytes()).to_equal(first)
 
 describe "slang model size is unknown, not zero, when the directory cannot be listed":
     it "reports -1 for a directory that cannot be listed":

@@ -2,13 +2,16 @@
 # unit_child_admission_scans_whole_closure_2026-11-15).
 #
 # Every per-file unit child ran worker_admitted_edges_v1 over the whole
-# inventory just to derive the deps-first pick order. With
-# SIMPLE_UNIT_ORDER_INDEX=1 the first unit publishes the graph once and later
-# units decode it: zero import resolutions, one file read, for any N.
+# inventory just to derive the deps-first pick order. By default
+# (SIMPLE_UNIT_ORDER_INDEX!=0/false/off) the first unit publishes the graph once
+# and later units decode it: zero import resolutions, one file read, for any N.
 use std.spec
-use std.io_runtime.{file_exists, file_write, dir_create_all}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_exists, file_read, file_write, dir_create_all}
+use std.nogc_sync_mut.io_runtime.{getpid, time_now_unix_micros}
 use compiler.driver.driver_worker_surface_closure_v1.{WorkerAdmittedGraphV1, worker_admitted_edges_v1,
-    worker_admitted_order_v1, worker_admitted_sources_scanned_v1}
+    worker_admitted_order_v1, worker_admitted_sources_scanned_v1, worker_unit_pick_v1,
+    worker_unit_pick_lease_v1, worker_unit_drained_path_v1}
 use compiler.driver.driver_unit_order_index_v1.{unit_admitted_graph_v1, unit_order_index_encode_v1,
     unit_order_index_decode_v1, unit_order_index_path_v1, unit_order_index_enabled_v1,
     unit_order_index_stamp_v1}
@@ -150,10 +153,49 @@ describe "per-file unit order index":
         expect(worker_admitted_sources_scanned_v1() - before).to_equal(0)
 
     """
-    # @req UOI-006: switch is explicit opt-in
+    # @req UOI-006: switch is default on with explicit opt-out rollback
     """
-    it "is off unless SIMPLE_UNIT_ORDER_INDEX is exactly 1":
+    it "is on by default unless SIMPLE_UNIT_ORDER_INDEX is 0, false or off":
+        assert_true(unit_order_index_enabled_v1(""))
         assert_true(unit_order_index_enabled_v1("1"))
-        assert_true(not unit_order_index_enabled_v1(""))
+        assert_true(unit_order_index_enabled_v1("true"))
         assert_true(not unit_order_index_enabled_v1("0"))
-        assert_true(not unit_order_index_enabled_v1("true"))
+        assert_true(not unit_order_index_enabled_v1(" 0 "))
+        assert_true(not unit_order_index_enabled_v1("false"))
+        assert_true(not unit_order_index_enabled_v1("off"))
+
+    """
+    # @req UOI-008: in-place DFS stack preserves deps-first post-order on DAGs and cycles
+    """
+    it "orders diamond DAGs, disconnected roots and cycles in-place":
+        expect(worker_admitted_order_v1([])).to_equal([])
+        expect(worker_admitted_order_v1([[1, 2], [3], [3], []])).to_equal([3, 1, 2, 0])
+        expect(worker_admitted_order_v1([[], [2], []])).to_equal([0, 2, 1])
+        val cyc = worker_admitted_order_v1([[1], [0]])
+        expect(cyc.len()).to_equal(2)
+        assert_true(cyc.contains(0) and cyc.contains(1))
+
+    """
+    # @req UOI-009: advisory .pick_cursor advances forward and wraps on short batches
+    """
+    it "advances .pick_cursor across picks, wraps to reclaim dead picks, and proves drained":
+        val q = scratch_queue("cursor_{getpid()}_{time_now_unix_micros()}")
+        val paths = ["m0.spl", "m1.spl", "m2.spl", "m3.spl"]
+        val order = [0, 1, 2, 3]
+        expect(file_write("{q}/{sha256_text("m0.spl")}.claim", "done\nm0.spl\nk\n")).to_equal(true)
+        step("first pick skips claimed m0, picks m1, and advances .pick_cursor to 2")
+        expect(worker_unit_pick_v1(q, "u0", paths, order, 1).unwrap()).to_equal(["m1.spl"])
+        expect(file_read("{q}/.pick_cursor").trim()).to_equal("2")
+        step("second pick starts at cursor 2, picks m2, and advances .pick_cursor to 3")
+        expect(worker_unit_pick_v1(q, "u1", paths, order, 1).unwrap()).to_equal(["m2.spl"])
+        expect(file_read("{q}/.pick_cursor").trim()).to_equal("3")
+        step("mark m1 behind the cursor as a dead-owner lease, then request batch=2 from cursor 3")
+        val live = worker_unit_pick_lease_v1("dead").split("\n")
+        val stale_start = (live[2].to_i64() ?? 0) + 1
+        expect(file_write("{q}/{sha256_text("m1.spl")}.pick", "dead\n{live[1]}\n{stale_start}")).to_equal(true)
+        expect(worker_unit_pick_v1(q, "u2", paths, order, 2).unwrap()).to_equal(["m3.spl", "m1.spl"])
+        expect(file_read("{q}/.pick_cursor").trim()).to_equal("2")
+        step("corrupt .pick_cursor is advisory and full ring scan proves drained")
+        expect(file_write("{q}/.pick_cursor", "garbled")).to_equal(true)
+        expect(worker_unit_pick_v1(q, "u3", paths, order, 2).unwrap().len()).to_equal(0)
+        assert_true(file_exists(worker_unit_drained_path_v1(q, "u3")))

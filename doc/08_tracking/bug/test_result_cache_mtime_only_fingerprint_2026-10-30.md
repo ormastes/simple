@@ -54,3 +54,22 @@ A miss hashes the closure twice: once for `check_freshness` and once for
 overlap heavily. A cold full run therefore pays about 63 x 76 us x 2 per spec.
 A memo would recover most of that. The long-lived test daemon would need to
 invalidate it on file-change events.
+
+## Wave C8 follow-up resolution (2026-11-18)
+
+- Added a `(mtime, size)`-validated process-local SHA-256 memo in
+  `src/app/test_cache_shared.spl` (`_dep_hash_memo: Dict<text, text>` storing
+  `"{mtime}:{size}:{hash}"`, reused when `mtime > 0 and size >= 0` match live
+  `file_stat` / `file_size`).
+- Exposed `shared_cache_invalidate_path(path)` and `shared_cache_clear_memo()`
+  for file-watcher and lifecycle invalidation, invalidated `test_path` inside
+  `shared_cache_build_entry` (and cleared memo on `shared_cache_load_entries`)
+  so same-second, same-size edits still re-hash cleanly, and exposed
+  `shared_cache_hash_compute_count()` / `shared_cache_reset_hash_compute_count()`
+  for deterministic verification.
+- Hardened `shared_cache_save`: deletes orphan `{cache_path}.tmp.{pid}` via
+  `file_delete(tmp)` when `file_rename(tmp, cache_path)` fails, prunes entries
+  whose non-empty `test_path` no longer exists on disk, and caps persisted
+  entries to the newest `MAX_SHARED_TEST_CACHE_ENTRIES = 8192` by `last_run_ms`.
+- Regression coverage: `test/01_unit/app/test_cache_shared_spec.spl` (6/6) plus
+  `test/01_unit/app/test_runner_new/test_result_cache_spec.spl` (6/6).

@@ -1,0 +1,260 @@
+"""
+## Purpose and audience
+Purpose: Verify shared test cache `(mtime, size)` SHA-256 memoization, invalidation,
+orphan `.tmp` cleanup on rename failure, missing-test pruning, and `MAX_SHARED_TEST_CACHE_ENTRIES`
+capping by `last_run_ms` in `app.test_cache_shared`.
+Audience: compiler and tooling engineers maintaining incremental test caching.
+## Operator workflow
+Run with `simple test test/01_unit/app/test_cache_shared_spec.spl --mode=interpreter`.
+## Compatibility and limitations
+Uses workspace-local `build/test_tmp/...` fixtures and removes the temporary directory
+after every scenario.
+"""
+
+use std.spec.{describe, it, expect, after_each, step}
+use app.test_cache_shared.{
+    TestCacheEntry,
+    MAX_SHARED_TEST_CACHE_ENTRIES,
+    shared_cache_check_freshness,
+    shared_cache_build_entry,
+    shared_cache_save,
+    shared_cache_load_entries,
+    shared_cache_invalidate_path,
+    shared_cache_clear_memo,
+    shared_cache_hash_compute_count,
+    shared_cache_reset_hash_compute_count
+}
+use std.nogc_sync_mut.io.file_ops.{file_read_text, file_write, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, is_dir}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io_runtime.{file_delete}
+
+fn _spec_root() -> text:
+    "build/test_tmp/test_cache_shared_spec_{getpid()}"
+
+fn _spec_path(name: text) -> text:
+    "{_spec_root()}/{name}"
+
+fn _cleanup_spec_root():
+    val root = _spec_root()
+    if is_dir(root) or file_exists(root):
+        dir_remove_all(root)
+    shared_cache_clear_memo()
+    shared_cache_reset_hash_compute_count()
+
+describe "app.test_cache_shared":
+    after_each:
+        _cleanup_spec_root()
+
+    it "reuses memoized SHA-256 digests when live (mtime, size) matches including empty files":
+        step("Verify shared dependency digests are computed once when (mtime, size) matches")
+        _cleanup_spec_root()
+        val root = _spec_root()
+        expect(dir_create_all(root)).to_be(true)
+
+        val spec_a = _spec_path("spec_a_spec.spl")
+        val spec_b = _spec_path("spec_b_spec.spl")
+        val dep_1 = _spec_path("dep_1.spl")
+        val dep_2 = _spec_path("dep_2.spl")
+        val dep_empty = _spec_path("dep_empty.spl")
+
+        expect(file_write(spec_a, "describe \"a\":\n    it \"ok\":\n        expect(1).to_equal(1)\n")).to_be(true)
+        expect(file_write(spec_b, "describe \"b\":\n    it \"ok\":\n        expect(2).to_equal(2)\n")).to_be(true)
+        expect(file_write(dep_1, "val dep_one = 1\n")).to_be(true)
+        expect(file_write(dep_2, "val dep_two = 2\n")).to_be(true)
+        expect(file_write(dep_empty, "")).to_be(true)
+
+        shared_cache_clear_memo()
+        shared_cache_reset_hash_compute_count()
+
+        var entries: {text: TestCacheEntry} = {}
+        val deps = [dep_1, dep_2, dep_empty]
+        entries[spec_a] = shared_cache_build_entry(spec_a, deps, 0, 1, 0, 0, 10, "")
+        expect(shared_cache_hash_compute_count()).to_equal(4)
+
+        # Building a second entry sharing all 3 deps only hashes spec_b itself.
+        entries[spec_b] = shared_cache_build_entry(spec_b, deps, 0, 1, 0, 0, 11, "")
+        expect(shared_cache_hash_compute_count()).to_equal(5)
+
+        # First freshness check after build_entry re-hashes spec_a (invalidated by build_entry)
+        # while reusing dep_1, dep_2, and 0-byte dep_empty from the memo.
+        val first_check = shared_cache_check_freshness(entries, spec_a, deps)
+        expect(first_check.result_status).to_equal(0)
+        expect(shared_cache_hash_compute_count()).to_equal(6)
+
+        # Repeated freshness check reuses spec_a as well: zero new SHA-256 computations.
+        val second_check = shared_cache_check_freshness(entries, spec_a, deps)
+        expect(second_check.result_status).to_equal(0)
+        expect(shared_cache_hash_compute_count()).to_equal(6)
+
+    it "bypasses memo when live file size changes and supports path and full memo invalidation":
+        step("Verify size-change miss, shared_cache_invalidate_path, and shared_cache_clear_memo")
+        _cleanup_spec_root()
+        expect(dir_create_all(_spec_root())).to_be(true)
+
+        val spec_a = _spec_path("inv_spec.spl")
+        val dep_1 = _spec_path("dep_alpha.spl")
+        val dep_2 = _spec_path("dep_beta.spl")
+
+        expect(file_write(spec_a, "describe \"inv\"")).to_be(true)
+        expect(file_write(dep_1, "alpha")).to_be(true)
+        expect(file_write(dep_2, "beta-unchanged")).to_be(true)
+
+        var entries: {text: TestCacheEntry} = {}
+        val deps = [dep_1, dep_2]
+        entries[spec_a] = shared_cache_build_entry(spec_a, deps, 0, 1, 0, 0, 5, "")
+
+        # Warm spec_a in memo.
+        expect(shared_cache_check_freshness(entries, spec_a, deps).result_status).to_equal(0)
+
+        # Size-changing edit invalidates automatically without explicit invalidation call.
+        shared_cache_reset_hash_compute_count()
+        expect(file_write(dep_1, "alpha-extended")).to_be(true)
+        val after_size_change = shared_cache_check_freshness(entries, spec_a, deps)
+        expect(after_size_change.result_status).to_equal(-1)
+        expect(shared_cache_hash_compute_count()).to_equal(1)
+
+        # Same-size edit on dep_1 with shared_cache_invalidate_path (using Windows backslash spelling).
+        expect(file_write(dep_1, "alpha")).to_be(true)
+        shared_cache_invalidate_path(dep_1)
+        entries[spec_a] = shared_cache_build_entry(spec_a, deps, 0, 1, 0, 0, 5, "")
+        expect(shared_cache_check_freshness(entries, spec_a, deps).result_status).to_equal(0)
+
+        expect(file_write(dep_1, "omega")).to_be(true)
+        shared_cache_invalidate_path(dep_1.replace("/", "\\"))
+        shared_cache_reset_hash_compute_count()
+        val after_same_size_dep = shared_cache_check_freshness(entries, spec_a, deps)
+        expect(after_same_size_dep.result_status).to_equal(-1)
+        expect(shared_cache_hash_compute_count()).to_equal(1)
+
+        # Full clear_memo forces every path to re-hash on next check.
+        entries[spec_a] = shared_cache_build_entry(spec_a, deps, 0, 1, 0, 0, 5, "")
+        expect(shared_cache_check_freshness(entries, spec_a, deps).result_status).to_equal(0)
+        shared_cache_clear_memo()
+        shared_cache_reset_hash_compute_count()
+        expect(shared_cache_check_freshness(entries, spec_a, deps).result_status).to_equal(0)
+        expect(shared_cache_hash_compute_count()).to_equal(3)
+
+    it "re-hashes same-second same-size test_path edits across shared_cache_build_entry":
+        step("Verify shared_cache_build_entry invalidates test_path so same-size spec edits never serve stale results")
+        _cleanup_spec_root()
+        expect(dir_create_all(_spec_root())).to_be(true)
+
+        val spec_path = _spec_path("same_size_spec.spl")
+        val dep_path = _spec_path("dep_stable.spl")
+        expect(file_write(spec_path, "describe \"aaaa\"")).to_be(true)
+        expect(file_write(dep_path, "stable")).to_be(true)
+
+        var entries: {text: TestCacheEntry} = {}
+        entries[spec_path] = shared_cache_build_entry(spec_path, [dep_path], 0, 1, 0, 0, 8, "")
+        # Warm spec_path in memo, then rewrite spec_path with identical byte size before rebuild.
+        expect(shared_cache_check_freshness(entries, spec_path, [dep_path]).result_status).to_equal(0)
+        val first_hash = entries[spec_path].dep_hash
+
+        expect(file_write(spec_path, "describe \"bbbb\"")).to_be(true)
+        entries[spec_path] = shared_cache_build_entry(spec_path, [dep_path], 0, 1, 0, 0, 8, "")
+        expect(entries[spec_path].dep_hash != first_hash).to_be(true)
+
+        # Immediately rewrite spec_path again with identical byte size and check freshness.
+        expect(file_write(spec_path, "describe \"cccc\"")).to_be(true)
+        val check_after_edit = shared_cache_check_freshness(entries, spec_path, [dep_path])
+        expect(check_after_edit.result_status).to_equal(-1)
+
+    it "deletes orphan .tmp file when file_rename fails during shared_cache_save":
+        step("Verify failed atomic rename cleans up the temporary staging file")
+        _cleanup_spec_root()
+        expect(dir_create_all(_spec_root())).to_be(true)
+
+        val spec_path = _spec_path("live_spec.spl")
+        expect(file_write(spec_path, "describe \"live\"")).to_be(true)
+
+        # Make cache_path an existing directory so file_write(tmp) succeeds and file_rename(tmp, cache_path) fails.
+        val blocking_cache_dir = _spec_path("cache_target_is_dir")
+        expect(dir_create_all(blocking_cache_dir)).to_be(true)
+        val orphan_tmp = "{blocking_cache_dir}.tmp.{getpid()}"
+
+        var entries: {text: TestCacheEntry} = {}
+        entries[spec_path] = shared_cache_build_entry(spec_path, [], 0, 1, 0, 0, 4, "")
+        shared_cache_save(entries, blocking_cache_dir)
+
+        expect(file_exists(orphan_tmp)).to_be(false)
+
+    it "prunes entries whose non-empty test_path no longer exists on disk on save":
+        step("Verify deleted test_path entries are pruned while existing and empty test_path entries remain")
+        _cleanup_spec_root()
+        expect(dir_create_all(_spec_root())).to_be(true)
+
+        val live_spec = _spec_path("kept_spec.spl")
+        val gone_spec = _spec_path("removed_spec.spl")
+        val cache_path = _spec_path("pruned_cache.sdn")
+
+        expect(file_write(live_spec, "describe \"kept\"")).to_be(true)
+        expect(file_write(gone_spec, "describe \"gone\"")).to_be(true)
+
+        var entries: {text: TestCacheEntry} = {}
+        entries[live_spec] = shared_cache_build_entry(live_spec, [], 0, 2, 0, 0, 7, "")
+        entries[gone_spec] = shared_cache_build_entry(gone_spec, [], 0, 3, 0, 0, 9, "")
+        entries[""] = TestCacheEntry(
+            test_path: "",
+            dep_hash: "synthetic_blank_path_hash",
+            result_status: 0,
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            duration_ms: 1,
+            output: "",
+            cached_at: 5000000,
+            last_run_ms: 5000
+        )
+
+        expect(file_delete(gone_spec)).to_be(true)
+        shared_cache_save(entries, cache_path)
+
+        val raw = file_read_text(cache_path)
+        expect(raw).to_contain(live_spec)
+        expect(raw).to_contain("synthetic_blank_path_hash")
+        expect(raw.contains(gone_spec)).to_be(false)
+
+        val loaded = shared_cache_load_entries(cache_path)
+        expect(loaded.contains_key(live_spec)).to_be(true)
+        expect(loaded.contains_key(gone_spec)).to_be(false)
+
+    it "caps saved entries to newest MAX_SHARED_TEST_CACHE_ENTRIES (8192) by last_run_ms":
+        step("Verify shared_cache_save retains the newest 8192 entries ordered by last_run_ms")
+        _cleanup_spec_root()
+        expect(dir_create_all(_spec_root())).to_be(true)
+        expect(MAX_SHARED_TEST_CACHE_ENTRIES).to_equal(8192)
+
+        val cache_path = _spec_path("capped_cache.sdn")
+        val total = MAX_SHARED_TEST_CACHE_ENTRIES + 10
+        var entries: {text: TestCacheEntry} = {}
+        var i = 0
+        while i < total:
+            val key = "synthetic_{i}"
+            entries[key] = TestCacheEntry(
+                test_path: "",
+                dep_hash: "marker_{i}_end",
+                result_status: 0,
+                passed: 1,
+                failed: 0,
+                skipped: 0,
+                duration_ms: 1,
+                output: "",
+                cached_at: (1000 + i) * 1000,
+                last_run_ms: 1000 + i
+            )
+            i = i + 1
+
+        shared_cache_save(entries, cache_path)
+        val raw = file_read_text(cache_path)
+        val lines = raw.split("\n")
+        var entry_lines = 0
+        for line in lines:
+            if line.len() > 0 and not line.starts_with("version:"):
+                entry_lines = entry_lines + 1
+
+        expect(entry_lines).to_equal(MAX_SHARED_TEST_CACHE_ENTRIES)
+        expect(raw.contains("marker_0_end")).to_be(false)
+        expect(raw.contains("marker_9_end")).to_be(false)
+        expect(raw).to_contain("marker_10_end")
+        expect(raw).to_contain("marker_8201_end")

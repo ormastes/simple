@@ -1,8 +1,12 @@
 use std.spec
+use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use compiler.driver.cache.action_key.{action_key_sort_texts}
 use compiler.driver.driver_build.native_link_receipt_v1.{native_link_key_v1,
     native_link_receipt_render_v1, native_link_receipt_output_digest_v1,
-    native_shared_receipt_render_v1, native_shared_receipt_read_v1, native_dynlib_replace_by_rename_v1}
+    native_shared_receipt_render_v1, native_shared_receipt_read_v1, native_dynlib_replace_by_rename_v1,
+    native_link_nm_batches_v1, native_link_parse_nm_defined_symbols_v1,
+    native_link_exports_digest_with_runner_v1}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_read_text(path: text) -> text?
@@ -54,3 +58,126 @@ describe "per-dynlib link receipt":
         expect(rt_file_read_text(dir + "/lib.dll") ?? "").to_equal("new")
         expect(native_dynlib_replace_by_rename_v1(dir + "/.tmp/missing.dll", dir + "/lib.dll")).to_equal(false)
         expect(rt_file_read_text(dir + "/lib.dll") ?? "").to_equal("new")
+
+fn _fake_nm_single_stdout(object: text) -> Result<text, text>:
+    if object.ends_with("corrupt.o"):
+        return Err("corrupt object")
+    if object.ends_with("mod_a.o"):
+        return Ok("sym_zeta\r\nsym_alpha\r\nsym_shared\r\n")
+    if object.ends_with("empty.o"):
+        return Ok("")
+    if object.ends_with("mod_b.o"):
+        return Ok("sym_beta\nsym_shared\n")
+    if object.ends_with("mod_c.o"):
+        return Ok("sym_gamma\n")
+    Ok("")
+
+fn _fake_nm_batch_stdout(batch: [text]) -> Result<text, text>:
+    if batch.len() == 1:
+        return _fake_nm_single_stdout(batch[0])
+    var parts: [text] = []
+    for object in batch:
+        match _fake_nm_single_stdout(object):
+            case Ok(single):
+                parts.push("\r\n" + object + ":\r\n" + single)
+            case Err(e):
+                return Err(e)
+    Ok(parts.join(""))
+
+fn _fake_nm_batch_fails_multi(batch: [text]) -> Result<text, text>:
+    if batch.len() > 1:
+        return Err("multi-object invocation failed")
+    if batch.len() == 1:
+        return _fake_nm_single_stdout(batch[0])
+    Ok("")
+
+fn _reference_per_object_digest(objects: [text]) -> text:
+    var symbols: [text] = []
+    for object in objects:
+        match _fake_nm_single_stdout(object):
+            case Ok(out):
+                for line in out.split("\n"):
+                    val name = line.trim()
+                    if name != "":
+                        symbols.push(name)
+            case Err(_):
+                return "unknown"
+    sha256_text(action_key_sort_texts(symbols).join("\n"))
+
+describe "batched llvm-nm export digest":
+    it "batches up to 128 objects and <= 16384 UTF-8 command-line bytes":
+        expect(native_link_nm_batches_v1([], 16384, 128).len()).to_equal(0)
+        var many: [text] = []
+        var i = 0
+        while i < 260:
+            many.push("build/obj/mod_{i}.o")
+            i = i + 1
+        val by_count = native_link_nm_batches_v1(many, 16384, 128)
+        expect(by_count.len()).to_equal(3)
+        expect(by_count[0].len()).to_equal(128)
+        expect(by_count[1].len()).to_equal(128)
+        expect(by_count[2].len()).to_equal(4)
+        expect(by_count[0][0]).to_equal("build/obj/mod_0.o")
+        expect(by_count[2][3]).to_equal("build/obj/mod_259.o")
+
+        # Multibyte UTF-8 path segments count UTF-8 byte_len(), not code points.
+        val utf8_a = "build/모듈_alpha_0001.o"
+        val utf8_b = "build/모듈_alpha_0002.o"
+        val utf8_c = "build/모듈_alpha_0003.o"
+        val base_bytes = "llvm-nm --defined-only --extern-only -j".byte_len()
+        val two_fit_cap = base_bytes + 1 + utf8_a.byte_len() + 1 + utf8_b.byte_len()
+        val by_bytes = native_link_nm_batches_v1([utf8_a, utf8_b, utf8_c], two_fit_cap, 128)
+        expect(by_bytes.len()).to_equal(2)
+        expect(by_bytes[0]).to_equal([utf8_a, utf8_b])
+        expect(by_bytes[1]).to_equal([utf8_c])
+
+        # An oversized single path still emits as a singleton batch without stalling.
+        val singleton = native_link_nm_batches_v1([utf8_a, utf8_b], 16, 128)
+        expect(singleton.len()).to_equal(2)
+        expect(singleton[0]).to_equal([utf8_a])
+        expect(singleton[1]).to_equal([utf8_b])
+
+    it "strips blank lines and multi-object <obj>: headers only when batch_objects.len() > 1":
+        val single = native_link_parse_nm_defined_symbols_v1("\r\nsym_one\r\n\nsym_two\n", ["C:\\build\\mod_a.o"])
+        expect(single).to_equal(["sym_one", "sym_two"])
+
+        val multi_out = "\r\nC:\\build\\mod_a.o:\r\nsym_one\r\n\r\nC:/build/empty.o:\r\n\r\nC:\\build\\mod_b.o:\r\nsym_two\r\n"
+        val parsed = native_link_parse_nm_defined_symbols_v1(
+            multi_out,
+            ["C:\\build\\mod_a.o", "C:\\build\\empty.o", "C:/build/mod_b.o"])
+        expect(parsed).to_equal(["sym_one", "sym_two"])
+
+    it "produces the exact byte-identical sha256 export digest as per-object llvm-nm":
+        val objects = [
+            "C:\\build\\mod_a.o",
+            "C:\\build\\empty.o",
+            "C:\\build\\mod_b.o",
+            "C:\\build\\mod_c.o"
+        ]
+        val reference_digest = _reference_per_object_digest(objects)
+        val per_object_digest = native_link_exports_digest_with_runner_v1(objects, 16384, 1, _fake_nm_batch_stdout)
+        val batched_all = native_link_exports_digest_with_runner_v1(objects, 16384, 128, _fake_nm_batch_stdout)
+        val batched_pairs = native_link_exports_digest_with_runner_v1(objects, 16384, 2, _fake_nm_batch_stdout)
+        expect(reference_digest.byte_len()).to_equal(64)
+        expect(per_object_digest).to_equal(reference_digest)
+        expect(batched_all).to_equal(reference_digest)
+        expect(batched_pairs).to_equal(reference_digest)
+
+    it "falls back to per-object llvm-nm when a batch fails and preserves unknown on broken objects":
+        val good_objects = [
+            "C:\\build\\mod_a.o",
+            "C:\\build\\empty.o",
+            "C:\\build\\mod_b.o",
+            "C:\\build\\mod_c.o"
+        ]
+        val expected = native_link_exports_digest_with_runner_v1(good_objects, 16384, 128, _fake_nm_batch_stdout)
+        val recovered = native_link_exports_digest_with_runner_v1(good_objects, 16384, 2, _fake_nm_batch_fails_multi)
+        expect(recovered).to_equal(expected)
+
+        val broken_in_batch = [
+            "C:\\build\\mod_a.o",
+            "C:\\build\\corrupt.o",
+            "C:\\build\\mod_b.o"
+        ]
+        expect(native_link_exports_digest_with_runner_v1(broken_in_batch, 16384, 128, _fake_nm_batch_stdout)).to_equal("unknown")
+        expect(native_link_exports_digest_with_runner_v1(["C:\\build\\corrupt.o"], 16384, 128, _fake_nm_batch_stdout)).to_equal("unknown")

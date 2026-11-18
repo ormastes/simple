@@ -132,3 +132,21 @@ incident, so none of these should land without repro across host types:
   it.
 - CI runners are usually non-dynamic VMs, so this is unlikely to bite CI, which
   also means the project's own lanes are unlikely to rediscover it.
+
+## Addendum (2026-11-18 — Wave C3): Memoized Host Physical RAM Probe (`build_host_memory_total_kib`)
+
+- When neither `SIMPLE_BUILD_MEMORY_RESERVE_BYTES` nor `mem_reserve_free_mib` is set, both
+  `build_memory_reserve_kib()` and `shard_tree_headroom_kib_v1()` call
+  `build_host_memory_total_kib()` (`src/app/cli/shard_mem_clamp.spl`). On Windows, each call
+  previously spawned a fresh bounded `powershell.exe ... (Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize`
+  subprocess (`20000` ms timeout), firing 4+ times per `native-build` coordinator invocation
+  (build-start reserve gate, HIR/MIR pool admission-usable scaling, and `shard_threads_mem_cap`
+  headroom checks).
+- Wave C3 memoizes positive physical RAM totals in module-private
+  `var _cached_host_physmem_kib_v1: i64 = 0` inside `src/app/cli/shard_mem_clamp.spl`:
+  - Failed or timed-out (`<= 0`) probes are never cached so subsequent calls still retry.
+  - Enclosing `shard_cgroup_memory_max_kb()` bounds are still applied live on every call via
+    `build_host_memory_total_kib_bounded(_cached_host_physmem_kib_v1, shard_cgroup_memory_max_kb())`.
+  - Test cache helpers (`build_host_physmem_cache_reset_v1`, `build_host_physmem_cache_peek_kib_v1`,
+    `build_host_physmem_cache_seed_for_test_v1`) pin single-probe memoization, live cgroup
+    clamping, and non-positive rejection in `test/01_unit/app/cli/shard_mem_clamp_spec.spl`.

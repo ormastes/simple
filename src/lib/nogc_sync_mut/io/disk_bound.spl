@@ -7,7 +7,7 @@ indexes) and `*.tmp` (in-flight publishes) are never counted or removed.
 """
 
 use std.nogc_sync_mut.io_runtime.{dir_walk, dir_exists, file_size_signed, file_delete, env_get_opt,
-    file_exists, file_write, dir_create, dir_remove}
+    file_exists, file_write, dir_create, dir_remove, dir_list_or_empty}
 use std.nogc_sync_mut.io.dir_ops.{dir_list}
 use std.nogc_sync_mut.io.time_ops.{time_now_seconds}
 use std.nogc_sync_mut.io.file_ops.{file_modified_time}
@@ -152,5 +152,57 @@ pub fn disk_bound_keep_newest_dirs(parent: text, current: text, prefix: text,
         if min_age_s > 0 and used > young_after:
             continue
         if dir_remove(parent + "/" + parts[1], true):
+            removed = removed + 1
+    removed
+
+# Variable-length prefix sibling of disk_bound_keep_newest_dirs (e.g.
+# closure-request-<pid>-<ms>): matches <prefix><non-empty suffix> directories
+# containing no '/' or '\', ranks by newest mtime of the directory or its
+# direct children, keeps `keep` newest, and never evicts entries modified
+# within `min_age_s` seconds (active concurrent builds).
+# reason: retention count, age threshold in seconds, and evicted-directory count are filesystem cache-bound scalars matching disk_bound_keep_newest_dirs
+@allow(primitive_api)
+pub fn disk_bound_keep_newest_prefix_dirs(parent: text, prefix: text, keep: i64, min_age_s: i64) -> i64:
+    if keep <= 0 or prefix == "" or prefix.contains("/") or prefix.contains("\\") or not dir_exists(parent):
+        return 0
+    val young_after = time_now_seconds() - min_age_s
+    var rows: [text] = []
+    for entry in dir_list_or_empty(parent):
+        if entry == "" or entry == "." or entry == ".." or entry.contains("/") or entry.contains("\\"):
+            continue
+        if not entry.starts_with(prefix) or entry.byte_len() <= prefix.byte_len():
+            continue
+        val suffix = entry.substring(prefix.byte_len())
+        if suffix == "" or suffix.contains("/") or suffix.contains("\\"):
+            continue
+        val child = parent + "/" + entry
+        if not dir_exists(child):
+            continue
+        var used = file_modified_time(child)
+        for sub in dir_list_or_empty(child):
+            if sub == "" or sub == "." or sub == ".." or sub.contains("/") or sub.contains("\\"):
+                continue
+            val sub_time = file_modified_time(child + "/" + sub)
+            if sub_time > used:
+                used = sub_time
+        val stamp = if used <= 0: "9999999999999" else: "{used}"
+        val pad_len = if stamp.byte_len() < 13: 13 - stamp.byte_len() else: 0
+        rows.push("0000000000000".substring(0, pad_len) + stamp + "|" + entry)
+    val ordered = rows.sort()
+    var excess = ordered.len() - keep
+    var removed = 0
+    var index = 0
+    while excess > 0 and index < ordered.len():
+        val row_text = ordered[index]
+        val parts = row_text.split("|")
+        index = index + 1
+        excess = excess - 1
+        if parts.len() < 2:
+            continue
+        val used = parts[0].to_i64() ?? 0
+        if min_age_s > 0 and (used <= 0 or used > young_after):
+            continue
+        val dir_name = parts[1:].join("|")
+        if dir_remove(parent + "/" + dir_name, true):
             removed = removed + 1
     removed
