@@ -25,3 +25,9 @@
 ## Fix
 
 Apply the three in the Draw IR run painter (pen advance per glyph and per space; a shadow run under the glyph run), measure against Chrome 159, then delete `_simple_web_engine2d_raster_only_text_property` and the three `letter-spacing: 0px` / `word-spacing: 0px` / `text-shadow: none` plain pages in `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_renderer_spec.spl`.
+
+## Update 2026-11-19: letter-spacing and word-spacing resolved; text-shadow still open
+
+The composer (`_html_draw_ir_resolved_text_command`) now folds `letter-spacing` (every codepoint) and `word-spacing` (each U+0020) into the command's `advance_widths` and width, the same fold layout already did, and both are dropped from `_simple_web_engine2d_raster_only_text_property` (only `text-shadow` stays). Also fixed: `-1px` was read as `+1` (`parse_int` drops the sign) and `0.1em` as 0; both now parse (`_decl_signed_spacing_px`). Pinned by `drawir_letter_word_spacing_chrome159_spec` (Chrome 159 measured).
+
+Still open: letter-spacing is stored as whole px, so `0.1em` (Chrome 1.6 px/char) floors to 1 px (ink x1 154 vs Chrome 163), and `-1px` lands 1 px off Chrome (125 vs 126) from whole-px pens. Fix needs a milli-px spacing field on Style. A shaped run (`shaping_required`) does not carry the spacing in its glyph_run. text-shadow is unchanged.
