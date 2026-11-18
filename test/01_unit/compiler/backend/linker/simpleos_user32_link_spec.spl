@@ -13,6 +13,7 @@
 use std.spec.*
 use compiler.backend.linker.linker_wrapper.{link_simpleos_internal, NativeLinkConfig}
 use std.io_runtime.{file_read_bytes}
+use compiler.backend.linker.elf.elf_comment_section.{elf_merge_comment_strings, ELF_COMMENT_LINKER_IDENT}
 
 val S32_FIX: text = "test/fixtures/linker/elf/simpleos32"
 
@@ -267,3 +268,40 @@ describe "SimpleOS 32-bit user link (internal linker vs ld.lld)":
         expect(b[off] as i64).to_equal(0x41)
         expect(b[off + 24] as i64).to_equal(0x22)
         expect(b[off + 25] as i64).to_equal(0)
+
+    it "keeps the inputs' .comment strings plus its own identity, as ld.lld does":
+        # lld oracle (ssos_cm.sh): .comment PROGBITS, flags MS (0x30), entsize 1,
+        # size 0x42 = "\0" + "Ubuntu clang version 18.1.3 (1ubuntu1)\0"
+        # (from arm32_main32.o) + "Linker: Ubuntu LLD 18.1.3\0". The Simple
+        # linker writes its own identity, never lld's.
+        val out = "build/simpleos_user32_arm32_comment.elf"
+        expect(s32_link("arm32", out).is_ok()).to_equal(true)
+        val b = file_read_bytes(out)
+        expect(s32_sec_field(b, ".comment", 4)).to_equal(1)
+        expect(s32_sec_field(b, ".comment", 8)).to_equal(0x30)
+        expect(s32_sec_field(b, ".comment", 36)).to_equal(1)
+        val off = s32_sec_field(b, ".comment", 16)
+        val size = s32_sec_field(b, ".comment", 20)
+        expect(b[off] as i64).to_equal(0)
+        expect(s32_cstr(b, off + 1)).to_equal("Ubuntu clang version 18.1.3 (1ubuntu1)")
+        expect(s32_cstr(b, off + 40)).to_equal(ELF_COMMENT_LINKER_IDENT)
+        expect(size).to_equal(40 + ELF_COMMENT_LINKER_IDENT.len() + 1)
+
+    it "deduplicates .comment strings across inputs in first-seen order":
+        val a = "clang A\0shared\0".bytes()
+        val c = "shared\0clang C\0clang A\0".bytes()
+        var pa: [i64] = []
+        for x in a: pa.push(x as i64)
+        var pc: [i64] = []
+        for x in c: pc.push(x as i64)
+        val merged = elf_merge_comment_strings([pa, pc])
+        var want: [i64] = [0]
+        for x in "clang A\0shared\0clang C\0{ELF_COMMENT_LINKER_IDENT}\0".bytes(): want.push(x as i64)
+        expect(merged).to_equal(want)
+
+    it "keeps an unterminated trailing .comment string and keys dedup on bytes":
+        # [0xC3 0xA9] and [0xE9] must stay distinct; "tail" lacks its NUL.
+        val merged = elf_merge_comment_strings([[0xC3, 0xA9, 0, 0xE9, 0, 0xC3, 0xA9, 0], [0x74, 0x61, 0x69, 0x6C]])
+        var want: [i64] = [0, 0xC3, 0xA9, 0, 0xE9, 0, 0x74, 0x61, 0x69, 0x6C, 0]
+        for x in "{ELF_COMMENT_LINKER_IDENT}\0".bytes(): want.push(x as i64)
+        expect(merged).to_equal(want)
