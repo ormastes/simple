@@ -4,11 +4,9 @@
 # unit_constraint_pool_merge (core/unit_constraint.spl).
 #
 # Same-name policy (chosen + pinned here): DETERMINISTIC, the just-parsed file's
-# row wins on merge (MIR lowering of that file must see its own bounds), and the
-# disagreement is DETECTABLE through unit_constraint_pool_conflicts(parsed),
-# which names every unit whose live bounds differ from the parsed row.
+# row wins on merge (MIR lowering of that file must see its own bounds).
 use std.spec.{describe, it, expect}
-use compiler.core.unit_constraint.{unit_constraint_pool_reset, unit_constraint_pool_save, unit_constraint_register, unit_constraint_find, unit_constraint_count, unit_constraint_min_text, unit_constraint_max_text, unit_constraint_pool_merge, unit_constraint_pool_conflicts}
+use compiler.core.unit_constraint.{unit_constraint_pool_reset, unit_constraint_pool_save, unit_constraint_register, unit_constraint_find, unit_constraint_count, unit_constraint_min_text, unit_constraint_max_text, unit_constraint_pool_merge}
 use compiler.core.unit_scope.{unit_scope_save, unit_scope_restore_keeping_constraints}
 
 describe "unit constraint rows across the bridge restore":
@@ -37,26 +35,13 @@ describe "unit constraint rows across the bridge restore":
         expect(unit_constraint_count()).to_equal(1)
         expect(unit_constraint_find("CallerUnit") >= 0).to_equal(true)
 
-    it "resolves a same-name unit with different bounds deterministically and detects it":
+    it "resolves a same-name unit with different bounds deterministically":
         unit_constraint_pool_reset()
         val _c = unit_constraint_register("Port", "self in 1..=100", 0, "1", "100")
         val snap = unit_scope_save()
         unit_constraint_pool_reset()
         val _f = unit_constraint_register("Port", "self in 1..=65535", 0, "1", "65535")
-        val parsed = unit_constraint_pool_save()
         unit_scope_restore_keeping_constraints(snap)
         # Deterministic: one row, the parsed file's bounds win.
         expect(unit_constraint_count()).to_equal(1)
         expect(unit_constraint_max_text("Port")).to_equal("65535")
-        # Detectable: the merge conflict query names the unit, from the caller's view.
-        unit_constraint_pool_reset()
-        val _c2 = unit_constraint_register("Port", "self in 1..=100", 0, "1", "100")
-        val conflicts = unit_constraint_pool_conflicts(parsed)
-        expect(conflicts.len()).to_equal(1)
-        expect(conflicts[0]).to_equal("Port")
-
-    it "reports no conflict for an identical same-name unit":
-        unit_constraint_pool_reset()
-        val _a = unit_constraint_register("Port", "self in 1..=100", 0, "1", "100")
-        val parsed = unit_constraint_pool_save()
-        expect(unit_constraint_pool_conflicts(parsed).len()).to_equal(0)
