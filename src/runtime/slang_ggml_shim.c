@@ -902,7 +902,14 @@ static int64_t slang_tree_prepare_locked(struct slang_request *request) {
         int owner = reuse > 0 ? slang_tree_find_terminal(node) : -1;
         if (owner >= 0) {
             llama_memory_t memory = llama_get_memory(g_tree_ctx);
-            llama_memory_seq_cp(memory, g_tree_node[owner].seq, seq, 0, (llama_pos)reuse);
+            /* Per-sequence streams (mode 3) only copy whole sequences; copy the
+             * owner then drop the tail. Unified KV just adds the seq id to cells. */
+            if (g_tree_mode == 3) {
+                llama_memory_seq_cp(memory, g_tree_node[owner].seq, seq, -1, -1);
+                llama_memory_seq_rm(memory, seq, (llama_pos)reuse, -1);
+            } else {
+                llama_memory_seq_cp(memory, g_tree_node[owner].seq, seq, 0, (llama_pos)reuse);
+            }
             if (slang_tree_kv_holds(seq, reuse)) {
                 g_tree_node[owner].pins++;
                 g_tree_node[owner].last_used = ++g_prefix_clock;
