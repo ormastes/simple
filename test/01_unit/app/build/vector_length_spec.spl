@@ -1,0 +1,44 @@
+"""
+## Purpose and audience
+Purpose: Pin the runtime vector-length (VL) query for SVE/RVV required by
+`config/build/backend_contracts.sdn` (`vector_length.query: runtime`): the VL is
+never a build-time constant; it is read from the running host's detected
+capabilities and validated against the architectural rules.
+Audience: compiler and tooling engineers who maintain backend build groups.
+"""
+# @req: REQ-APP-BUILD-001 — runtime vector-length query (plan §6, owner decisions 2026-11-18).
+
+use app.build.targets.vector_length.{vector_length_bits_for, vector_length_valid, vector_length_bits, vector_length_query_contract_error}
+use app.build.targets.backend_contracts.{load_backend_contracts}
+use std.nogc_sync_mut.io_runtime.{file_read}
+use std.spec.step
+
+describe "runtime vector-length query":
+    it "selects the SVE length on aarch64 and the RVV length on riscv64":
+        expect(vector_length_bits_for("aarch64", true, 256, false, 0)).to_equal(256)
+        expect(vector_length_bits_for("riscv64", false, 0, true, 128)).to_equal(128)
+
+    it "reports 0 (unsupported) when the extension is absent or the arch has none":
+        expect(vector_length_bits_for("aarch64", false, 256, false, 0)).to_equal(0)
+        expect(vector_length_bits_for("riscv64", false, 0, false, 128)).to_equal(0)
+        expect(vector_length_bits_for("x86_64", true, 256, true, 128)).to_equal(0)
+
+    it "validates SVE as a multiple of 128 up to 2048 and RVV as a power of two":
+        expect(vector_length_valid("aarch64", 128)).to_equal(true)
+        expect(vector_length_valid("aarch64", 384)).to_equal(true)
+        expect(vector_length_valid("aarch64", 2048)).to_equal(true)
+        expect(vector_length_valid("aarch64", 100)).to_equal(false)
+        expect(vector_length_valid("aarch64", 2176)).to_equal(false)
+        expect(vector_length_valid("riscv64", 256)).to_equal(true)
+        expect(vector_length_valid("riscv64", 192)).to_equal(false)
+        expect(vector_length_valid("riscv64", 0)).to_equal(false)
+
+    it "never reports a VL on a host without the extension":
+        # x86_64 / Apple M test hosts: query is a runtime read and yields 0.
+        expect(vector_length_bits("x86_64")).to_equal(0)
+
+    it "matches the contract data: vl_agnostic and queried at runtime":
+        val c = load_backend_contracts(file_read("config/build/backend_contracts.sdn")).unwrap()
+        expect(vector_length_query_contract_error(c.vl_mode, c.vl_query)).to_equal("")
+        expect(vector_length_query_contract_error("vl_fixed", "runtime")).to_start_with("target-error: vector-length-query")
+        expect(vector_length_query_contract_error("vl_agnostic", "build")).to_start_with("target-error: vector-length-query")
