@@ -396,6 +396,36 @@ fn _html_draw_ir_list_marker_commands(
     ))
     out
 
+# CSS `text-shadow` (offset, blur 0): one copy of the text run per layer under
+# the run itself, in the layer colour and offset by the layer. Layers paint
+# back to front, so the FIRST listed ends up on top. Chrome 159 draws a sharp
+# shadow with the same LCD antialiasing as the text. A blurred layer
+# (blur > 0) is skipped here: no Draw IR blur primitive exists for glyphs, and
+# the bare-text routing hold keeps such pages on the raster lane.
+fn _html_draw_ir_text_shadow_commands(
+    node: HNode, st: Style, run: DrawIrCommand
+) -> [DrawIrCommand]:
+    if node.tag != "#text" or st.text_shadow_raw == "" or run.kind != "text":
+        return []
+    val parsed = parse_box_shadow_layers(st.text_shadow_raw, st.fg)
+    var out: [DrawIrCommand] = []
+    if not parsed.valid:
+        return out
+    val k = layout_device_scale()
+    var li = parsed.layers.len() - 1
+    # cpu-lane-loop-ok: one copy per authored text-shadow layer of this run; bound is that layer list
+    while li >= 0:
+        val layer = parsed.layers[li]
+        if layer.blur_radius_px == 0 and (layer.color_rgba >> 24) != 0u32:
+            var shadow = run
+            shadow.component_id = run.component_id + "_tshadow{li}"
+            shadow.x = run.x + layer.offset_x_px * k
+            shadow.y = run.y + layer.offset_y_px * k
+            shadow.color = layer.color_rgba
+            out.push(shadow)
+        li = li - 1
+    out
+
 # `text-decoration-line: underline` for a #text node's emitted text runs (UA
 # `a:link` and authored underlines). The Draw IR text command carries the
 # decoration only as a style prop, which no Engine2D executor reads, so the
@@ -1024,6 +1054,12 @@ fn _html_draw_ir_commands(
                 pending_outline_owners.push(i)
                 pending_context = node_contexts[i]
                 node_command = _html_draw_ir_without_outline(node_command)
+            # cpu-lane-loop-ok: shadow copies of this #text run; bound is its text-shadow layer list
+            for shadow_command in _html_draw_ir_text_shadow_commands(nodes[i], styles[i], node_command):
+                var shadow = shadow_command
+                shadow.parent_id = parent_id
+                commands.push(shadow)
+                owner_nodes.push(i)
             commands.push(node_command)
             owner_nodes.push(i)
             if native_frame:
@@ -1043,6 +1079,12 @@ fn _html_draw_ir_commands(
             for extra_line_command in _html_draw_ir_wrap_extra_line_commands(
                 nodes, styles, boxes, i, node_clip, vector_fonts
             ):
+                # cpu-lane-loop-ok: shadow copies of this wrapped line; bound is its text-shadow layer list
+                for shadow_command in _html_draw_ir_text_shadow_commands(nodes[i], styles[i], extra_line_command):
+                    var shadow = shadow_command
+                    shadow.parent_id = parent_id
+                    commands.push(shadow)
+                    owner_nodes.push(i)
                 var extra_line = extra_line_command
                 extra_line.parent_id = parent_id
                 commands.push(extra_line)

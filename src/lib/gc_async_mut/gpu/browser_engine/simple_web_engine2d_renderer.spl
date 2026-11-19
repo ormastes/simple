@@ -10,6 +10,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
     simple_web_layout_render_html_readback_engine2d_result
 }
 use std.gc_async_mut.gpu.browser_engine.dom_color.{parse_color_value_checked}
+use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{parse_box_shadow_layers}
 use std.gc_async_mut.gpu.browser_engine.style.animation.{
     BrowserCssAnimationInstance
 }
@@ -1009,12 +1010,32 @@ fn _simple_web_engine2d_has_flow_text(lower: text) -> bool:
         pos = close + 1
     false
 
-# `letter-spacing`, `word-spacing` and `text-shadow` are painted by the raster
-# lane only: the Draw IR text lane ignores all three (measured 2026-11-19, a
-# `<p>` page paints the same pixels with and without them). A bare-text page
-# that authors one keeps the raster lane until Draw IR paints them.
+# `letter-spacing` and `word-spacing` are painted by the Draw IR text lane, and
+# so is a sharp `text-shadow` (blur 0, one text copy per layer). A BLURRED
+# text-shadow has no Draw IR glyph-blur primitive yet, so a bare-text page
+# that authors one keeps the raster lane.
 fn _simple_web_engine2d_raster_only_text_property(lower: text) -> bool:
-    lower.contains("text-shadow")
+    var pos = _find_text_from(lower, "text-shadow", 0)
+    while pos >= 0:
+        var start = pos + 11
+        var end = start
+        val n = lower.byte_len()
+        while end < n:
+            val c = lower.substring(end, end + 1)
+            if c == ";" or c == "\"" or c == "'" or c == "}":
+                break
+            end = end + 1
+        var value = lower.substring(start, end).trim()
+        if value.starts_with(":"):
+            value = value.substring(1, value.byte_len()).trim()
+        val parsed = parse_box_shadow_layers(value, 0u32)
+        if not parsed.valid:
+            return true
+        for layer in parsed.layers:  # cpu-lane-loop-ok: one authored text-shadow layer list
+            if layer.blur_radius_px != 0:
+                return true
+        pos = _find_text_from(lower, "text-shadow", end)
+    false
 
 fn _simple_web_engine2d_bare_text_document(lower: text) -> bool:
     _simple_web_engine2d_has_flow_text(lower) and not _simple_web_engine2d_raster_only_text_property(lower)
