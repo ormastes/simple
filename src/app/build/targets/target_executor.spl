@@ -8,8 +8,7 @@
 use app.build.targets.build_targets.{BuildTarget, TargetSet, find_target, validate_targets}
 use app.build.targets.target_resolve.{ResolvePlan, resolve_target, format_target_plan}
 use app.build.targets.backend_contracts.{vector_length_tier_error}
-use app.build.targets.provider_gate.{provider_gate, provider_gate_group, provider_host_triple}
-use app.build.targets.provider_entry.{emit_provider_sidecar}
+use app.build.targets.provider_gate.{provider_gate, provider_host_triple}
 use app.io.cli_compile.{cli_native_build}
 use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{file_exists}
@@ -336,15 +335,8 @@ fn execute_target_plan(repo_root: text, ts: TargetSet, name: text) -> TargetExec
             return TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, target.name,
                 "target-error: fresh-output-invalid: " + target.name + ": " + candidate_path)
         # Opt-in backend group members publish only after provider admission.
-        val provider_group = provider_gate_group(ts, target.name)
-        if provider_group != "":
-            val emit_error = emit_provider_sidecar(provider_group, action.output, provider_host_triple(target))
-            if emit_error.len() > 0:
-                file_delete(candidate_path)
-                return TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, target.name,
-                    emit_error)
-        val gate_error = provider_gate(ts, target, candidate_path, action.output,
-            provider_host_triple(target), repo_root + "/build/backends/receipts")
+        # The executor only READS the provider-owned sidecar; it never emits one.
+        val gate_error = target_provider_admission(ts, target, candidate_path, action.output, repo_root)
         if gate_error.len() > 0:
             file_delete(candidate_path)
             return TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, target.name,
@@ -355,6 +347,10 @@ fn execute_target_plan(repo_root: text, ts: TargetSet, name: text) -> TargetExec
                 "target-error: output-publish-failed: " + target.name + ": " + action.output)
         i = i + 1
     TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, "", "")
+
+fn target_provider_admission(ts: TargetSet, target: BuildTarget, candidate_path: text, declared_output: text, repo_root: text) -> text:
+    """Empty text = admitted or ungated; else a refusal. Reads the sidecar, never writes it."""
+    provider_gate(ts, target, candidate_path, declared_output, provider_host_triple(target), repo_root + "/build/backends/receipts")
 
 fn format_target_execution(name: text, plan: ResolvePlan, summary: TargetExecutionSummary) -> text:
     format_target_plan(name, plan) + "\n" +
