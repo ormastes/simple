@@ -1,0 +1,76 @@
+"""
+## Purpose and audience
+Purpose: Pin that CSS custom properties resolve on stylesheets larger than
+the old fixed tables, against Chrome 159 at device scale 4 (384 dpi) on
+cpu_simd and the CPU raster. The production theme sheet (`generate_css`) has
+469 `:root` selectors and 489 bare `:root` declarations, so a `var()` whose
+property is declared late in the sheet must still resolve.
+Audience: browser-engine maintainers of the CSS cascade.
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(custom-property table caps).
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+
+# ---------------------------------------------------------------------------
+# Oracle: Chrome 159 (chromium-1255, linux-arm64)
+#   chrome --headless --no-sandbox --hide-scrollbars \
+#     --force-device-scale-factor=4 --window-size=400,300 --screenshot=<png> file://<html>
+# Page 1: 210 non-matching `:root[data-x=vN]` selectors, then a bare `:root`
+# that declares `--late`: the box reads 0058BC (device 80,40), white at 200,40.
+# Page 2: one `:root` block with 451 declarations; the box uses the last one:
+# 2E7D32 at device 80,40.
+# The CPU raster has no device-scale entry: it lays the page out at 4x CSS px.
+# ---------------------------------------------------------------------------
+
+fn cv_variants() -> text:
+    var out = ""
+    var i = 0
+    # cpu-lane-loop-ok: builds 210 selector rules for one test page; bound 210
+    while i < 210:
+        out = out + ":root[data-x=v{i}]{{--late:#ff0000}}\n"
+        i = i + 1
+    out
+
+fn cv_decls() -> text:
+    var out = ""
+    var i = 0
+    # cpu-lane-loop-ok: builds 450 declarations for one test page; bound 450
+    while i < 450:
+        out = out + "--p{i}:#ff0000;"
+        i = i + 1
+    out
+
+fn cv_page(n: i32, k: i32) -> text:
+    val w = 40 * k
+    val h = 20 * k
+    val box = ".b{{width:{w}px;height:{h}px;background:var(" + (if n == 1: "--late" else: "--p449") + ")}}"
+    val sheet = if n == 1: cv_variants() + ":root{{--late:#0058bc}}\n" else: ":root{{" + cv_decls() + "--p449:#2e7d32}}\n"
+    "<!DOCTYPE html><html><head><style>" + sheet + box + "</style></head><body style='margin:0;background:#fff'><div class='b'></div></body></html>"
+
+fn cv_px(px: [u32], x: i32, y: i32) -> u32:
+    if px.len() < 1600 * 1200:
+        return 0xDEADu32
+    px[y * 1600 + x] & 0xFFFFFFu32
+
+describe "CSS custom properties on large sheets (Chrome 159)":
+    it "resolves a :root declared after 200 other :root selectors on cpu_simd":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(cv_page(1, 1), 400, 300, 4, "cpu_simd")
+        expect(cv_px(px, 80, 40)).to_equal(0x0058BCu32)
+        expect(cv_px(px, 200, 40)).to_equal(0xFFFFFFu32)
+
+    it "resolves the 451st declaration of one :root block on cpu_simd":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(cv_page(2, 1), 400, 300, 4, "cpu_simd")
+        expect(cv_px(px, 80, 40)).to_equal(0x2E7D32u32)
+
+    it "resolves both pages on the CPU raster":
+        expect(cv_px(simple_web_layout_render_html_software_pixels(cv_page(1, 4), 1600, 1200, 600000), 80, 40)).to_equal(0x0058BCu32)
+        expect(cv_px(simple_web_layout_render_html_software_pixels(cv_page(2, 4), 1600, 1200, 600000), 80, 40)).to_equal(0x2E7D32u32)
