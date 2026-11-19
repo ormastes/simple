@@ -3024,12 +3024,12 @@ impl RenderBackend for VulkanBackend:
         """GPU-resident box shadow: one recorded dispatch, no readback.
 
         `emu_draw_shadow_rect`'s coverage field is SEPARABLE --
-        `cov = ((prof_x[px] * prof_y[py]) / 255 * shadow_a) / 255` -- where each
-        profile is `_emu_box_blur_1d` run three times over a 1-D step, one
-        truncating division per pass per sample. That is why this is NOT three
-        passes of `blur_rect.comp` over a 2-D coverage image: a 2-D box blur
-        divides by (2r+1)^2 per pass and truncates on a different quantity, so
-        it would be a different integer field and break the twin.
+        `cov = ((prof_x[px] * prof_y[py] + 127) / 255 * shadow_a + 127) / 255` -- where each
+        profile is Skia's blurred step (`engine2d_blur_step_profile`, rounded
+        integer box passes). That is why this is NOT three passes of
+        `blur_rect.comp` over a 2-D coverage image: that kernel rounds a
+        different quantity, so it would be a different integer field and break
+        the twin.
 
         Instead the two profiles are built HOST-side by the very same
         `_emu_shadow_profile` the twin calls -- O(mw + mh) work, two 1-D arrays,
@@ -3085,9 +3085,8 @@ impl RenderBackend for VulkanBackend:
 
         # The SAME profile builder the host twin uses, so the coverage field is
         # identical by construction rather than by re-derivation.
-        val br = if blur_r / 2 < 1: 1 else: blur_r / 2
-        val prof_x = _emu_shadow_profile(mw, pad, w, br)
-        val prof_y = _emu_shadow_profile(mh, pad, h, br)
+        val prof_x = _emu_shadow_profile(mw, pad, w, blur_r)
+        val prof_y = _emu_shadow_profile(mh, pad, h, blur_r)
         var profs: [u32] = [0u32; mw + mh]
         var pi = 0
         while pi < mw:  # cpu-lane-loop-ok: 1-D profile, one iteration per column

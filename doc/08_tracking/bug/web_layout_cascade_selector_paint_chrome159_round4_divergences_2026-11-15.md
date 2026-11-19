@@ -955,7 +955,7 @@ head (13/40 at base).
   - `fb_soft_box_shadow` builds one profile per axis, extends the painted extent to about 3 sigma, and keeps the existing native blend row.
   - `_phi256` is deleted.
 - **Evidence:** the new `box_shadow_raster_falloff_chrome159_spec` checks 12 points against Chrome at k=1, all within ±2; it fails on base and passes on head. Base vs head sweep of 23 shadow, opacity-group, backdrop, Chrome-parity and coverage specs: 0 new failures, 1 fixed.
-- **Not covered:** rounded-corner shadows still use the separable rect profile. Draw IR shadows at k=1 are up to 8 levels off Chrome; at k=4 they are within ±2.
+- **Not covered:** rounded-corner shadows still use the separable rect profile. Draw IR shadows at k=1 were up to 8 levels off Chrome (fixed 2026-11-19, see "Draw IR box-shadow falloff off Chrome at device scale 1").
 
 ## 2026-11-19 — `backdrop-filter` colour functions ignored (FIXED)
 
@@ -991,3 +991,15 @@ head (13/40 at base).
   - y-offset 0.0: mean 0.041, max 0.195.
   - Neither fits. The y/x asymmetry points at Skia's scan converter (supersampled in y, analytic in x), which still needs modelling.
 - **Impact:** absolute corner pixels of every rounded box, on all lanes. The knockout spec above pins only the shadow's share for this reason.
+
+## 2026-11-19 — Draw IR box-shadow falloff off Chrome at device scale 1 (FIXED)
+
+- **Symptom:** the page from the raster falloff entry above (a 60x30 box, `box-shadow: 0 10px 8px rgba(0,0,0,0.8)`) was up to 8 levels off Chrome on cpu_simd and Vulkan at k=1. At k=4 it was within ±2.
+- **Cause:** `_emu_shadow_profile` blurred each axis with three integer box passes of radius `floor(blur / 2)`, truncating each pass. Its effective sigma was `sqrt(r(r+1))`, not `blur / 2`, and an odd blur lost half a pixel. `emu_draw_shadow_rect` and the `shadow_rect.comp` twin then truncated the coverage product twice.
+- **Fix:**
+  - `_emu_shadow_profile` now calls `engine2d_blur_step_profile`, the Skia triple-box profile the raster already uses, with sigma = blur / 2.
+  - The coverage `((px * py + 127) / 255 * a + 127) / 255` is rounded in the CPU twin and in `shadow_rect.comp`. The SPIR-V is regenerated, and `check-shadow-rect-spirv-pinned.shs` passes.
+  - `engine2d_blur_step_profile` and `engine2d_backdrop_blur_pixels` moved to the leaf module `engine2d/helpers/blur_kernel.spl`. The backends can import them without a cycle through `engine`.
+  - `_emu_box_blur_1d` is deleted.
+- **Evidence:** `box_shadow_raster_falloff_chrome159_spec` gains cpu_simd and Vulkan k=1 cases on the same 12 Chrome points. It goes from 1/3 on base to 3/3 on head. Before the rounding change, the remaining miss was (50,56): 94 against Chrome's 91. `engine2d_shadow_rect_twin_formula_spec` passes unchanged. Base vs head sweep of 26 shadow, backdrop, Engine2D, SPIR-V, WM/glass and coverage specs (427 examples): 399 pass on head and 397 on base, with 0 new failures and 2 fixed. Every remaining failure also fails on base.
+- **Not covered:** rounded-corner shadows still use the separable rect profile.
