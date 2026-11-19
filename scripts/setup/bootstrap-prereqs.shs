@@ -258,7 +258,7 @@ platform_tools() {
     fam="$(platform_family "$1")"
     case "$fam" in
         linux)
-            printf '%s' "clang clang++ ld.lld llvm-config llvm-ar llvm-objdump mold rustc cargo git jj cmake ninja timeout perl sha256sum xxd vulkan renderdoc"
+            printf '%s' "clang clang++ ld.lld llvm-config llvm-ar llvm-objdump mold rustc cargo git jj cmake ninja timeout perl sha256sum xxd vulkan renderdoc libsqlite3-dev"
             ;;
         freebsd)
             # MUST-FIX #9 (review 2026-09-25): renderdoc MUST be in this list
@@ -306,7 +306,7 @@ req_min_version() {
         git|jj) printf '%s' "" ;;
         cmake) printf '%s' "3.13.0" ;;
         ninja|timeout|gtimeout|perl|sha256sum|shasum|xxd) printf '%s' "" ;;
-        vulkan|renderdoc) printf '%s' "" ;;
+        vulkan|renderdoc|libsqlite3-dev) printf '%s' "" ;;
         *) printf '%s' "" ;;
     esac
 }
@@ -331,6 +331,7 @@ req_reason() {
         python3) printf '%s' "runs run-process-group-bounded-log-windows.py, the native Windows Cargo launch supervisor (bootstrap-logged-process.shs) — undeclared hard dependency, todo: port to .shs/.spl" ;;
         vulkan) printf '%s' "GPU backend for the renderer/compute lanes (config/llvm_toolchain.sdn adjacent GPU stack)" ;;
         renderdoc) printf '%s' "GPU frame-capture tool used by the RenderDoc diff lanes (.github/workflows/renderdoc-web-diff.yml)" ;;
+        libsqlite3-dev) printf '%s' "Rust seed link only (-lsqlite3; seed-only exception — pure-Simple code never uses external SQLite)" ;;
         *) printf '%s' "" ;;
     esac
 }
@@ -404,6 +405,39 @@ check_vulkan() {
     else
         printf 'vulkan|NO_DEVICE||\n'
     fi
+}
+
+# libsqlite3-dev: needed ONLY for the Rust seed link (-lsqlite3; seed-only
+# exception). PRESENT when the sqlite3.h header is installed.
+check_libsqlite3_dev() {
+    # BOOTSTRAP_PREREQS_SQLITE_INCLUDE_DIRS is for --selftest fixtures only.
+    found=0
+    for d in ${BOOTSTRAP_PREREQS_SQLITE_INCLUDE_DIRS:-/usr/include /usr/local/include}; do
+        [ -f "$d/sqlite3.h" ] && found=1
+    done
+    if [ "$found" = "1" ]; then
+        printf 'libsqlite3-dev|PRESENT|sqlite3.h|\n'
+    else
+        printf 'libsqlite3-dev|MISSING||\n'
+    fi
+}
+
+do_install_libsqlite3_dev() {
+    dry_run="$1"; fam="$2"
+    echo "=== libsqlite3-dev (Rust seed link only) ==="
+    case "$fam" in
+        linux)
+            if ! command -v apt-get >/dev/null 2>&1; then
+                echo "warning: apt-get not found — install your distro's sqlite3 development package manually (Rust seed link needs -lsqlite3)." >&2
+                return 1
+            fi
+            if [ "$dry_run" != "1" ]; then
+                require_sudo_linux "install libsqlite3-dev via apt" || return 1
+            fi
+            run_or_plan "$dry_run" "apt-get install libsqlite3-dev" \
+                sudo apt-get install -y libsqlite3-dev || return 1
+            ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -489,6 +523,7 @@ check_one() {
     fam="$2"
     case "$name" in
         vulkan) check_vulkan; return ;;
+        libsqlite3-dev) check_libsqlite3_dev; return ;;
         renderdoc) check_renderdoc "$fam"; return ;;
     esac
 
@@ -1494,6 +1529,9 @@ run_install() {
                     vulkan_done=1
                 fi
                 ;;
+            libsqlite3-dev)
+                do_install_libsqlite3_dev "$dry_run" "$fam" || true
+                ;;
             renderdoc)
                 if [ "$renderdoc_done" = "0" ]; then
                     do_install_renderdoc "$dry_run" "$fam" || true
@@ -1571,6 +1609,16 @@ selftest_fail() {
 run_selftest() {
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-prereqs-selftest.XXXXXX")"
     trap 'rm -rf "$tmp"' EXIT INT TERM
+
+    # libsqlite3-dev: hermetic header dir (host state must not matter).
+    mkdir -p "$tmp/sqlite_inc" "$tmp/sqlite_empty"
+    : > "$tmp/sqlite_inc/sqlite3.h"
+    row="$(BOOTSTRAP_PREREQS_SQLITE_INCLUDE_DIRS="$tmp/sqlite_empty" check_libsqlite3_dev)"
+    printf '%s\n' "$row" | grep -q '^libsqlite3-dev|MISSING|' || selftest_fail "libsqlite3-dev without header must be MISSING, got: $row"
+    BOOTSTRAP_PREREQS_SQLITE_INCLUDE_DIRS="$tmp/sqlite_inc"; export BOOTSTRAP_PREREQS_SQLITE_INCLUDE_DIRS
+    row="$(check_libsqlite3_dev)"
+    printf '%s\n' "$row" | grep -q '^libsqlite3-dev|PRESENT|' || selftest_fail "libsqlite3-dev with header must be PRESENT, got: $row"
+    case "$(platform_tools linux:ubuntu)" in *libsqlite3-dev*) : ;; *) selftest_fail "linux tools must include libsqlite3-dev" ;; esac
 
     # Fixture 1: version_ge arithmetic
     version_ge "23.1.0" "23.1.0" || selftest_fail "version_ge equal must be true"
