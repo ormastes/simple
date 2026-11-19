@@ -12,7 +12,7 @@ use std.common.crypto.sha256.sha256_text
 use std.common.build_manager.contracts.builder_digest_valid_v1
 use std.nogc_sync_mut.io.windows_command_owner_v2.windows_command_thread_check_v2
 use std.nogc_sync_mut.io.linux_protected_root_reader_v1.{LinuxProtectedRootReaderV1, linux_protected_root_reader_open_v1,
-    linux_protected_root_reader_read_v1, linux_protected_root_reader_require_root_v1, linux_protected_root_reader_close_v1}
+    linux_protected_root_reader_read_v1, linux_protected_root_reader_require_root_v1, linux_protected_root_reader_root_identity_v1, linux_protected_root_reader_close_v1}
 @when(os="linux"):
 use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
 @end
@@ -80,9 +80,11 @@ pub class ControllerLocalRootV3:
         self.installed_current_v3(journal, actual_config, actual_policy)
 
     # Linux: the reader re-pins the actual private root, the journal rechecks its own protected writer, and both
-    # installed records are re-read through the reader (never through a pathname). Named limit: the journal child is
-    # opened by the factory from the pinned path spelling (`<root>/journal`), so its binding to the reader's root is that
-    # spelling plus the 0700 same-principal private root, not an fd-level parent proof as on Windows.
+    # installed records are re-read through the reader (never through a pathname). The journal child is opened by the
+    # factory from the pinned spelling (`<root>/journal`) but its walked parent descriptor must be the very inode the
+    # reader holds (dev/ino pin, refused on mismatch), so a path swap after the reader admitted is refused. Named limit:
+    # the child is not openat'ed from the reader's own fd (the storage cell keeps no fd getter); the pin is an identity
+    # compare on a descriptor held across the open, and later swaps of the journal's own chain are caught by the per-turn name re-check (no ongoing reader-vs-journal compare).
     fn current_linux_v3() -> Result<ControllerDispatchContextV1, text>:
         if self.journal.is_none() or self.workload.is_none() or self.config.is_none():
             return Err("controller-local-root-incomplete")
@@ -224,8 +226,14 @@ fn controller_root_project_v3(original: ControllerLocalRootV3, expected_digest: 
     if authority.is_err(): return controller_root_failed_v3(owner, authority.unwrap_err())
     val nonce = sosix_random_hex(32)
     if nonce.is_none(): return controller_root_failed_v3(owner, "controller-local-entropy-unavailable")
+    var parent_identity: [u8] = []
+    if owner.linux_reader.is_some():
+        val identity = linux_protected_root_reader_root_identity_v1(owner.linux_reader.unwrap())
+        if identity.is_err(): return controller_root_failed_v3(owner, identity.unwrap_err())
+        parent_identity = identity.unwrap()
     val journal_open = if owner.linux_reader.is_some():
-        distributed_operation_journal_open_linux_v3(owner.diagnostic_root + "/journal", authority.unwrap(), nonce.unwrap(), 100000)
+        distributed_operation_journal_open_linux_child_v3(owner.diagnostic_root + "/journal", parent_identity,
+            authority.unwrap(), nonce.unwrap(), 100000)
     else:
         distributed_operation_journal_open_windows_v3(owner.diagnostic_root + "\\journal", owner.native_store.unwrap(),
             authority.unwrap(), nonce.unwrap(), 100000)

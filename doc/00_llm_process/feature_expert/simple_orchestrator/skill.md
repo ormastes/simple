@@ -512,7 +512,9 @@ Windows binds the first caller thread (retained handle, poisoned on exit), Linux
 process MAIN thread (`linux_machine_process_origin_check_v1`: tid==pid, fork/PID-namespace quarantine); both give one
 canonical native thread per registry, origin only, never authority. The Linux root is `LinuxProtectedRootReaderV1` (read-only
 custody of `controller-config-v3.sdn` + `authority-policy.sdn`) plus a child journal `<root>/journal` opened by
-`distributed_operation_journal_open_linux_v3`; `controller_local_root_install_v3` refuses on Linux
+`distributed_operation_journal_open_linux_child_v3` (controller-only sibling of the Host entry; the walked parent descriptor must be the
+same dev/ino the reader holds, else `protected-storage-parent-identity-mismatch`; named limit: an identity pin on a held descriptor, not an openat from
+the reader's own fd, because the storage cell has no fd getter; live swap spec controller_linux_journal_swap_v3_spec.spl is BLOCKED pending); `controller_local_root_install_v3` refuses on Linux
 (`controller-local-install-linux-out-of-band`): provision the two byte-exact records into the 0700 private root, the
 `--config-digest` pin and the config's own policy digest bind them. TRAP: a `linux_storage` journal has no `windows_store`, so
 a `windows_store.is_none()` "legacy path" test silently captured it into pathname IO; every controller object module now asks
