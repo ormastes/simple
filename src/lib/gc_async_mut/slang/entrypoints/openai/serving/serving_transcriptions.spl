@@ -95,6 +95,21 @@ fn _serve_whisper(model: NativeModel, file_b64: text, format: text) -> ApiRespon
         Ok(done):
             transcription_response(done.parts[0].text)
 
+fn _find_model(model_root: text, id: text) -> Option<NativeModel>:
+    for m in scan_model_root(model_root, engine_backend_available()):
+        if m.id == id:
+            return Some(m)
+    None
+
+fn _serve_model(model: NativeModel, model_root: text, body: text, file_b64: text) -> ApiResponse:
+    val limit = json_int_field(body, "max_tokens", -1)
+    val max_tokens = if limit > 0: limit else: DEFAULT_ASR_MAX_TOKENS
+    if model_kind_eq(model.profile.kind, ModelKind.Chat) and _takes_audio(model):
+        return _serve_audio_chat(model, model_root, file_b64, max_tokens)
+    if model_kind_eq(model.profile.kind, ModelKind.Asr):
+        return _serve_whisper(model, file_b64, json_string_field(body, "format"))
+    _wrong_kind(model)
+
 fn serve_transcriptions(model_root: text, body: text) -> ApiResponse:
     val id = json_string_field(body, "model")
     if id == "":
@@ -107,19 +122,10 @@ fn serve_transcriptions(model_root: text, body: text) -> ApiResponse:
     val response_format = json_string_field(body, "response_format")
     if response_format != "" and response_format != "json":
         return openai_error_response(400, "response_format '" + response_format + "' is not supported; only json is served", "invalid_request_error", "invalid_request", "")
-    var found: NativeModel? = nil
-    for m in scan_model_root(model_root, engine_backend_available()):
-        if m.id == id:
-            found = m
-    if found == nil:
-        return model_not_found_response(id)
-    val model = found!
-    val limit = json_int_field(body, "max_tokens", -1)
-    val max_tokens = if limit > 0: limit else: DEFAULT_ASR_MAX_TOKENS
-    if model_kind_eq(model.profile.kind, ModelKind.Chat) and _takes_audio(model):
-        return _serve_audio_chat(model, model_root, file_b64, max_tokens)
-    if model_kind_eq(model.profile.kind, ModelKind.Asr):
-        return _serve_whisper(model, file_b64, json_string_field(body, "format"))
-    _wrong_kind(model)
+    match _find_model(model_root, id):
+        None:
+            model_not_found_response(id)
+        Some(model):
+            _serve_model(model, model_root, body, file_b64)
 
 export serve_transcriptions, strip_asr_prefix, transcription_response
