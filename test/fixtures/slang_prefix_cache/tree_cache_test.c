@@ -1,8 +1,10 @@
 /* Contract test for the radix (tree) prefix-cache modes of slang_ggml_shim.c
  * against the mock llama.cpp in this directory. The mock keeps one length per
- * sequence id, so this checks what the shim asks of llama.cpp: shared prefixes
- * go through llama_memory_seq_cp (counted, never re-decoded), only the suffix
- * is decoded, positions stay consecutive per sequence, eviction frees ids. */
+ * sequence id and honours kv_unified, so this checks what the shim asks of
+ * llama.cpp: shared prefixes go through llama_memory_seq_cp (counted, never
+ * re-decoded), only the suffix is decoded, positions stay consecutive per
+ * sequence, partial seq_cp is never issued on non-unified KV (the mock aborts),
+ * eviction frees ids, and reuse never exceeds the owner's exact span. */
 #include <assert.h>
 #include <stdint.h>
 int64_t slang_ggml_backend_init(void);
@@ -18,6 +20,7 @@ int64_t slang_ggml_prefix_tokens_reused(void);
 int64_t slang_ggml_prefix_tokens_prefilled(void);
 int64_t slang_ggml_prefix_evictions(void);
 int64_t slang_ggml_prefix_resident_entries(void);
+int64_t slang_ggml_prefix_restore_failures(void);
 int64_t slang_ggml_tree_mode(void);
 int64_t slang_ggml_tree_nodes(void);
 int64_t slang_ggml_tree_cached_tokens(void);
@@ -34,7 +37,10 @@ int64_t slang_ggml_request_sample(int64_t);
 int64_t mock_llama_decoded_tokens(void);
 int64_t mock_llama_seq_cp_tokens(void);
 int64_t mock_llama_bad_positions(void);
+int64_t mock_llama_short_first_decodes(void);
 void mock_llama_set_n_ubatch(uint32_t);
+void mock_llama_fail_decode_once(void);
+void mock_llama_fail_seq_cp_once(void);
 
 #define BUSY (-9)
 
@@ -44,30 +50,37 @@ static void text(int64_t h, const char *s) {
 }
 
 /* Tokens are 10+byte (no bos), so a generated token 10+c re-tokenizes to itself. */
-static void begin(int64_t h, const char *s, int64_t expected_reuse) {
+static int64_t prepare(int64_t h, const char *s) {
     text(h, s);
     assert(slang_ggml_request_tokenize(h, 0) > 0);
-    assert(slang_ggml_request_prefix_prepare(h) == expected_reuse);
+    return slang_ggml_request_prefix_prepare(h);
+}
+static void begin(int64_t h, const char *s, int64_t expected_reuse) {
+    assert(prepare(h, s) == expected_reuse);
     assert(slang_ggml_request_eval_prompt(h) > 0);
 }
 
 /* The mock sampler always answers end-of-generation, which ends the request. */
 static void finish(int64_t h) { assert(slang_ggml_request_sample(h) == 2); }
 
-int main(void) {
-    slang_ggml_backend_init();
+static void reload(int64_t n_gpu_layers) {
     slang_ggml_str_reset();
     for (const char *m = "model"; *m; m++) slang_ggml_str_push((unsigned char)*m);
-    assert(slang_ggml_model_load(0) == 0);
+    assert(slang_ggml_model_load(n_gpu_layers) == 0);
+}
+
+int main(void) {
+    slang_ggml_backend_init();
+    reload(0);
     assert(slang_ggml_capabilities() == 31);
     assert(slang_ggml_prefix_cache_mode_configure(4, 0) < 0);
     assert(slang_ggml_prefix_cache_mode_configure(2, -1) < 0);
     assert(slang_ggml_tree_mode() == 0);
-    /* Mode 2 = every matched token (the micro-batch is 1 in the mock). */
+
+    /* ---- mode 2: every matched token (the micro-batch is 1 in the mock) ---- */
     assert(slang_ggml_prefix_cache_mode_configure(2, 0) == 2);
     assert(slang_ggml_tree_mode() == 2);
     assert(slang_ggml_prefix_cache_configure(4, 1024) == 4);
-
     int64_t h = slang_ggml_request_create(64);
     assert(h > 0);
     assert(slang_ggml_prefix_cache_mode_configure(0, 0) < 0);   /* fixed while a request is open */
@@ -93,8 +106,15 @@ int main(void) {
 
     begin(h, "abcdefgh", 7);                       /* exact repeat recomputes the last token */
     finish(h);
-    assert(mock_llama_decoded_tokens() == 11);
     assert(slang_ggml_prefix_resident_entries() == 2);
+
+    /* Restore failure: seq_cp that leaves the new sequence short is detected,
+     * counted, and the request prefills everything. */
+    int64_t failures = slang_ggml_prefix_restore_failures();
+    mock_llama_fail_seq_cp_once();
+    begin(h, "abcdefgh", 0);
+    finish(h);
+    assert(slang_ggml_prefix_restore_failures() == failures + 1);
 
     begin(h, "abcdefgh", 7);                       /* decoded tokens extend the cached path */
     assert(slang_ggml_request_eval(h, 10 + 'Q') == 0);
@@ -105,18 +125,25 @@ int main(void) {
     finish(h);
     assert(slang_ggml_prefix_resident_entries() == 4);
 
-    /* Serialised per model: a second request cannot start while one holds the context. */
+    /* Serialised per model: a second request cannot start while one holds the
+     * context, and refuses a capacity change under the active request. */
     int64_t h2 = slang_ggml_request_create(64);
     assert(h2 > 0);
-    text(h, "abcdefgh");
-    assert(slang_ggml_request_tokenize(h, 0) > 0);
-    assert(slang_ggml_request_prefix_prepare(h) == 7);
-    text(h2, "zzz");
-    assert(slang_ggml_request_tokenize(h2, 0) > 0);
-    assert(slang_ggml_request_prefix_prepare(h2) == BUSY);
+    assert(prepare(h, "abcdefgh") == 7);
+    assert(prepare(h2, "zzz") == BUSY);
+    assert(slang_ggml_prefix_cache_configure(2, 1024) == BUSY);
     assert(slang_ggml_request_eval_prompt(h) > 0);
     finish(h);
     begin(h2, "zzz", 0);
+    finish(h2);
+
+    /* Abandoned request (closed without finishing) releases the context. */
+    assert(prepare(h, "abcdefgh") == 7);
+    assert(prepare(h2, "zzz") == BUSY);
+    assert(slang_ggml_request_close(h) == 0);
+    h = slang_ggml_request_create(64);
+    assert(h > 0);
+    begin(h2, "zzzz", 3);
     finish(h2);
 
     /* Shrinking the entry bound evicts LRU unpinned terminals and frees their ids. */
@@ -128,23 +155,111 @@ int main(void) {
     begin(h2, "qqqq", 0);
     finish(h2);
     assert(slang_ggml_prefix_resident_entries() == 2);
+
+    /* "No KV slot" on a unified KV evicts an unpinned terminal and retries. */
+    evictions = slang_ggml_prefix_evictions();
+    assert(prepare(h, "failcase") == 0);
+    mock_llama_fail_decode_once();
+    assert(slang_ggml_request_eval_prompt(h) > 0);
+    finish(h);
+    assert(slang_ggml_prefix_evictions() > evictions);
+
+    /* Pinned owner survives: with only the pinned owner resident, a "no slot"
+     * result finds nothing to evict, fails the request, and keeps the owner. */
+    assert(slang_ggml_prefix_cache_configure(1, 1024) == 1);
+    begin(h, "pinowner", 0);
+    finish(h);
+    assert(slang_ggml_prefix_resident_entries() == 1);
+    assert(prepare(h, "pinownerX") == 8);
+    mock_llama_fail_decode_once();
+    assert(slang_ggml_request_eval_prompt(h) < 0);
+    assert(slang_ggml_prefix_resident_entries() >= 1);
+    begin(h, "pinowner", 7);                       /* the owner is still there */
+    finish(h);
+
+    /* Capacity 0 keeps nothing, and a request still completes. */
+    assert(slang_ggml_prefix_cache_configure(0, 0) == 0);
+    assert(slang_ggml_prefix_resident_entries() == 0);
+    begin(h, "nothing", 0);
+    finish(h);
+    assert(slang_ggml_prefix_resident_entries() == 0);
+    assert(slang_ggml_tree_nodes() == 0);
     assert(mock_llama_bad_positions() == 0);
     assert(slang_ggml_request_close(h) == 0);
     assert(slang_ggml_request_close(h2) == 0);
 
-    /* Exact modes (1, 3) reuse whole micro-batches only: 6 shared tokens, n_ubatch 4. */
-    assert(slang_ggml_prefix_cache_mode_configure(3, 0) == 3);
+    /* ---- exact modes (1 and 3): reuse stops at the owner's exact span ---- */
     mock_llama_set_n_ubatch(4);
+    for (int mode = 1; mode <= 3; mode += 2) {
+        assert(slang_ggml_prefix_cache_mode_configure(mode, 0) == mode);
+        assert(slang_ggml_prefix_cache_configure(4, 1024) == 4);
+        h = slang_ggml_request_create(64);
+        assert(h > 0);
+        begin(h, "abcdefgh", 0);
+        finish(h);
+        begin(h, "abcdefXY", 4);                   /* 6 shared tokens, whole micro-batches: 4 */
+        finish(h);
+        /* Owner: 10-token prompt, 6 generated tokens (k..p). Its exact span is
+         * (10-1)/4*4 = 8: cells 8..15 came from partial chunks and generation. */
+        begin(h, "ABCDEFGHIJ", 0);
+        for (const char *g = "klmnop"; *g; g++)
+            assert(slang_ggml_request_eval(h, 10 + (unsigned char)*g) == 0);
+        finish(h);
+        /* A follow-up that matches all 16 owner cells may reuse only 8. */
+        begin(h, "ABCDEFGHIJklmnopXY", 8);
+        finish(h);
+        assert(mock_llama_bad_positions() == 0);
+        assert(slang_ggml_request_close(h) == 0);
+    }
+
+    /* Mode 2 has no exact cap: the same follow-up reuses all 16 matched cells. */
+    assert(slang_ggml_prefix_cache_mode_configure(2, 0) == 2);
     assert(slang_ggml_prefix_cache_configure(4, 1024) == 4);
     h = slang_ggml_request_create(64);
-    assert(h > 0);
-    begin(h, "abcdefgh", 0);
+    begin(h, "ABCDEFGHIJ", 0);
+    for (const char *g = "klmnop"; *g; g++)
+        assert(slang_ggml_request_eval(h, 10 + (unsigned char)*g) == 0);
     finish(h);
-    begin(h, "abcdefXY", 4);
+    begin(h, "ABCDEFGHIJklmnopXY", 16);
     finish(h);
-    assert(mock_llama_bad_positions() == 0);
+    assert(slang_ggml_request_close(h) == 0);
+
+    /* Mode 3 decode failure fails fast (no eviction cannot help a per-sequence
+     * stream), releases the context and the sequence id. */
+    assert(slang_ggml_prefix_cache_mode_configure(3, 0) == 3);
+    assert(slang_ggml_prefix_cache_configure(4, 1024) == 4);
+    h = slang_ggml_request_create(64);
+    h2 = slang_ggml_request_create(64);
+    begin(h, "streamone", 0);
+    finish(h);
+    evictions = slang_ggml_prefix_evictions();
+    assert(prepare(h, "streamtwo") == 4);
+    mock_llama_fail_decode_once();
+    assert(slang_ggml_request_eval_prompt(h) < 0);
+    assert(slang_ggml_prefix_evictions() == evictions);   /* nothing wiped */
+    assert(slang_ggml_prefix_resident_entries() >= 1);
+    begin(h2, "streamone", 8);                             /* released: no BUSY; cache intact */
+    finish(h2);
+    assert(slang_ggml_request_close(h) == 0);
+    assert(slang_ggml_request_close(h2) == 0);
+
+    /* free resets the mode and the tree. */
+    assert(slang_ggml_free() == 0);
+    assert(slang_ggml_tree_mode() == 0);
+    assert(slang_ggml_tree_nodes() == 0);
+
+    /* ---- first micro-batch (CUDA workaround) on the persistent context ---- */
+    reload(-1);                                    /* layers requested on the GPU */
+    mock_llama_set_n_ubatch(4);
+    assert(slang_ggml_prefix_cache_mode_configure(3, 0) == 3);
+    assert(slang_ggml_prefix_cache_configure(4, 1024) == 4);
+    h = slang_ggml_request_create(64);
+    int64_t short_before = mock_llama_short_first_decodes();
+    begin(h, "ab", 0);                             /* shorter than one micro-batch */
+    finish(h);
+    assert(mock_llama_short_first_decodes() == short_before);
     assert(slang_ggml_request_close(h) == 0);
     assert(slang_ggml_free() == 0);
-    assert(slang_ggml_tree_nodes() == 0);
+    assert(mock_llama_bad_positions() == 0);
     return 0;
 }
