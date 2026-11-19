@@ -1,0 +1,90 @@
+"""
+## Purpose and audience
+Verify that HIR_CODEC_VERSION advances to v22 for HirFunction.effect_region
+wire serialization and that both hir_module_decode and hir_cache_header reject
+stale v21 frames cleanly without crashing or misaligning trailing fields.
+## Operator workflow
+Run with bin/simple test test/01_unit/compiler/hir/hir_codec_version_effect_region_spec.spl.
+"""
+# @req REQ-HIR-CODEC-EFFECT-REGION-001
+# @cover src/compiler/20.hir/hir_codec.spl
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{
+    HIR_CODEC_VERSION,
+    HIR_CANONICAL_CODEC_VERSION,
+    hir_codec_header,
+    hir_module_encode,
+    hir_module_decode,
+    hir_module_decode_reason
+}
+use compiler.driver.driver_hir_cache.{hir_cache_header}
+use compiler.driver.driver_cache_scope_policy_v1.{hir_cache_header_diff_v1}
+
+val STALE_V21_CODEC_VERSION: text = "spl-hircodec-v21-aspect-owner-declaration-intent-params-binding-versions"
+
+fn lowered_effect_region_module() -> HirModule:
+    val path = "effect_region_codec_probe.spl"
+    val src = "@pure\nfn compute() -> i64:\n    42\n\nfn plain() -> i64:\n    7\n"
+    val parsed = parse_and_build_module(src, path)
+    var lowering = HirLowering.with_filename(path)
+    lowering.lower_module(parsed)
+
+describe "HIR codec v22 effect_region schema guard":
+    it "publishes spl-hircodec-v22 with effect-region in codec and cache headers":
+        """Ensure HIR_CODEC_VERSION, hir_codec_header, and hir_cache_header advance past v21."""
+        step("Verify HIR_CODEC_VERSION and derived headers include spl-hircodec-v22 and effect-region")
+        expect(HIR_CODEC_VERSION).to_start_with("spl-hircodec-v22-")
+        expect(HIR_CODEC_VERSION).to_contain("effect-region")
+        expect(HIR_CANONICAL_CODEC_VERSION).to_start_with("spl-hircodec-canonical-v12-")
+        expect(HIR_CANONICAL_CODEC_VERSION).to_contain("effect-region")
+        expect(hir_codec_header()).to_start_with(HIR_CODEC_VERSION + " ")
+        val cache_hdr = hir_cache_header()
+        expect(cache_hdr).to_contain(HIR_CODEC_VERSION)
+        expect(cache_hdr.contains("spl-hircodec-v21")).to_equal(false)
+
+    it "round-trips HirFunction.effect_region and rejects stale spl-hircodec-v21 frames cleanly":
+        """Round-trip @pure effect_region and refuse v21 headers before touching misaligned function records."""
+        step("Encode and decode a lowered module carrying @pure effect_region")
+        val original = lowered_effect_region_module()
+        val wire = hir_module_encode(original)
+        expect(wire != "").to_equal(true)
+        val decoded_opt = hir_module_decode(wire)
+        expect(decoded_opt.?).to_equal(true)
+        val decoded = decoded_opt.unwrap()
+        var saw_compute = false
+        var saw_plain = false
+        for raw_id in decoded.functions.keys():
+            val fn_def = decoded.functions[raw_id]
+            if fn_def.name == "compute":
+                expect(fn_def.effect_region).to_equal("pure")
+                saw_compute = true
+            elif fn_def.name == "plain":
+                expect(fn_def.effect_region).to_equal("")
+                saw_plain = true
+        expect(saw_compute).to_equal(true)
+        expect(saw_plain).to_equal(true)
+        expect(hir_module_encode(decoded)).to_equal(wire)
+
+        step("Reject stale spl-hircodec-v21 module frames and truncated v21 payloads without crashing")
+        val stale_wire = wire.replace(HIR_CODEC_VERSION, STALE_V21_CODEC_VERSION)
+        expect(stale_wire != wire).to_equal(true)
+        expect(hir_module_decode(stale_wire).?).to_equal(false)
+        expect(hir_module_decode_reason(stale_wire)).to_start_with("header_mismatch")
+
+        val truncated_stale = STALE_V21_CODEC_VERSION + " spl-flatpool-v4\ntruncated-v21-body\n"
+        expect(hir_module_decode(truncated_stale).?).to_equal(false)
+        expect(hir_module_decode_reason(truncated_stale)).to_start_with("header_mismatch")
+
+        val current_cache_hdr = hir_cache_header()
+        val stale_cache_hdr = current_cache_hdr.replace(HIR_CODEC_VERSION, STALE_V21_CODEC_VERSION)
+        expect(stale_cache_hdr != current_cache_hdr).to_equal(true)
+        val diff = hir_cache_header_diff_v1(stale_cache_hdr, current_cache_hdr)
+        expect(diff).to_contain(STALE_V21_CODEC_VERSION)
+        expect(diff).to_contain(HIR_CODEC_VERSION)
