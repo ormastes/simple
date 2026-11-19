@@ -501,8 +501,8 @@ retained reader (`controller_dispatch_remote_*`): status -> associated prepare -
 (`controller_workload_store_admit_remote_build_v1`, single journal writer) -> associated execute (archived no-replace, never
 resent) -> open -> input per file -> start -> collect (poll on the reply stage, 9 min bound, then the controller-signed
 cancel) -> output chunks -> reassemble -> `accept_wire_v3` on the ROOT's journal (`controller_dispatch_remote_edit_v3`).
-A reaped answer (`linux-host-remote-build-reaped-incomplete`) becomes the controller-built `service-restart` receipt
-(`accept_reset_failure_v3`, which now refuses every other stage with `REMOTE_RESET_FAILURE_SIGNATURE_REQUIRED`; see RESET-FAILURE EMITTERS below). One grant lists
+A reaped run is answered by the restarted Host with a HOST-SIGNED `service-restart` receipt (milestone_0045, below); a bare
+reaped refusal (`linux-host-remote-build-reaped-incomplete`) settles `outcome-unknown` (`host-reaped-unsigned`). One grant lists
 {build|test, host_reservation_v1, host_execute_associated_v3, host_agent_cancel_v4}; the approver key must be enrolled for
 those operations. Spec dir: task.sdn, environment.sdn, run.sdn, host-inputs.sdn, inputs/<path> (formats in the author
 module header). Traps: the Host prepare deadline is its MONOTONIC clock (operator-observed value in run.sdn); host-inputs
@@ -544,8 +544,8 @@ part, not an error. A restart reconciles by replay of the committed journal (nev
 the Linux origin latches `quarantined` for the whole process after one failed procfs verify (one transient failure refuses
 remote-run until the process restarts).
 RESET-FAILURE EMITTERS (milestone_0038, AT-RUN-02; all specs NOT_RUN): the receipt V3 has four stages
-(`remote_container_reset_failure_v3.spl`): `service-restart` stays controller-built and UNSIGNED (the Host no longer holds the
-run: the reap record carries no open record and no binding); the three Host stages `destroy-absence` (Destroy not ok after a
+(`remote_container_reset_failure_v3.spl`): `service-restart` (Host-signed since milestone_0045, from the reap record and the
+open archive; no binding); the three Host stages `destroy-absence` (Destroy not ok after a
 normal exit), `cancel-absence` (self-cancel Destroy not ok after Create) and `cancel-identity` (self-cancel stop/destroy not ok
 with no Create) are emitted BY THE HOST. Executor (`host_linux_service_remote_build_v4.spl`): the three Stop/Destroy wedge points
 call `remote_build_reset_wedged_v4`, which maps the failure point with `host_remote_build_reset_stage_v4` (pure: failing step,
@@ -567,15 +567,15 @@ digest, keep `signed-receipt.sdn` beside `receipt.sdn`; an unverifiable/replayed
 files): `enable_workspace_source_v3` -> `LinuxFreshWorkspaceEnableTurnV3` -> `LinuxWorkspaceEnableTurnV3` ->
 `ContainerWorkspaceEnableTurnV3` carry `binding_digest` (it was only visible at the settled read, after settle). NO V3 STAGE (keep
 the generic `host-wedged` settle): Stop failure with no cancel cause or after Create, create/prepare/configuration/start/inspect
-wedges, settle, read, source-return, finalize and enable errors, and any run lost to a service restart AFTER the reap (the
-controller-built `service-restart`).
+wedges, settle, read, source-return, finalize and enable errors. A run lost to a service restart is Host-signed
+`service-restart` since milestone_0045.
 RECEIPT DURABILITY (milestone_0039; specs NOT_RUN): the Host-signed reset-failure REPLY is archived no-replace + read back via
 the held capacity journal (`remote_build_reset_archive_v4`, path `host-remote-build-reset-failure/<sha256(operation id)>.sdn`,
 keyed by operation id because a restarted service knows the operation, not the prior fence) BEFORE it is first answered; an
 archive error is the plain wedge (no receipt). After a restart the startup reap indexes the operation and the collect route, on
 `linux-host-remote-build-reaped-incomplete`, answers `host_remote_build_reset_failure_stored_v4` byte-identically; absent,
-corrupt, foreign, non-canonical or receipt-less archives answer "" and keep the reaped refusal (controller's `service-restart`
-settle). Expiry: replay is transport, not authority (the in-memory wedged-with-receipt arm already precedes the deadline check);
+corrupt, foreign, non-canonical or receipt-less archives answer "" (milestone_0045: the Host then signs a reaped receipt,
+else the refusal settles `outcome-unknown`). Expiry: replay is transport, not authority (the in-memory wedged-with-receipt arm already precedes the deadline check);
 the controller verifies grant/approval/window, and open/transfer/reap still refuse an expired approval after restart.
 A read-back failure also publishes `<sha256(operation id)>.refused` beside it, and the stored reader answers "" while that marker
 exists: an archive that was never answered is never served after a restart (REVIEW_C P3-6; a lost marker keeps the old behaviour).
@@ -617,4 +617,22 @@ binding / Host bug). Specs: `remote_container_reset_failure_stages_v3_spec.spl`,
   once the execute pair's window passes on the GRANT clock (`linux_service_remote_build_unopened_expire_v4`),
   and open is refused past that window.
 - Owner decisions still open (outcome-unknown exit, retained storage, prepared release, quarantined-root
-  settle, signed reaped receipt, unopened cancel): records milestone_0043 `OWNER_DECISIONS.md`.
+  settle, signed reaped receipt, unopened cancel): records milestone_0043 `OWNER_DECISIONS.md`. Decided in
+  milestone_0045 (below) except the quarantined-root settle.
+
+### remote-run completion (milestone_0045, owner decisions 2026-11-19, specs NOT_RUN)
+- LATE-RECEIPT EXCEPTION (decision 5; the ONE narrow exception to "expired approvals are refused"): a reset-failure
+  receipt may be signed by the Host and accepted by the controller after the approval/grant window, ONLY to journal
+  `failed` for that exact op. `remote_container_reset_failure_late_context_v3` re-evaluates the authority at
+  `min(approval.expires_at, grant.expires_at) - 1` once now is past it; `signed_at` must still be <= the real clock and is
+  clamped to that instant. Issuer, snapshot, generation, revocation and key expiry still apply. Completions never take it
+  (`remote_run_context_v1(..., receipt)` uses it only for the reset wire). The deadline cancel-* stages now get receipts.
+- Signed reaped receipt (decision 4): every reset-failure stage is Host-signed; the controller-built constructor,
+  `accept_reset_failure_v3` and `remote_run_service_restart_receipt_v1` are gone. Collect after a restart: stored reply
+  replay -> `host_remote_build_reaped_receipt_v4` (reap index -> reap record task digest -> open archive under the prior
+  fence -> port signs `service-restart` with empty native id/binding at the grant clock -> archived no-replace BEFORE the
+  answer) -> otherwise the typed refusal, settled `outcome-unknown` by the controller.
+- Prepared reservation between prepare and execute (decision 3): no route; it waits for its `prepare_deadline_ms`.
+  No controller cancel of a never-opened slot (decision 6 not chosen).
+- VERSION SKEW: a controller older than milestone_0045 refuses a Host-signed `service-restart` and a late receipt and
+  settles `outcome-unknown`; upgrade the controller first (same rule as #10398/#10399).
