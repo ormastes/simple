@@ -13,7 +13,7 @@
 # script mode (see `unit_profile_apply`'s `script_mode`).
 #
 # NOT covered yet (tracked in the plan's Implementation log): method-call
-# return types (only `@must_use` method NAMES are matched), imported callees,
+# return types (only `@must_use` method NAMES are matched), cross-module scan in the driver (it passes one module),
 # the interpreter consumer (`eval_stmt_expr` still emits its own R9 strings),
 # and TLDR/SMF metadata carrying the obligation.
 
@@ -31,14 +31,13 @@ pub struct MustUseFinding:
 # Per-module resolution scope: callees resolve against THIS module's functions
 # only (by symbol id, else by name inside the module). A bare name is never
 # matched across modules.
-# TODO(ROB-USE-01): resolve imported callees through the module's import table
-# (HirModule.imports) so a discarded imported Result is flagged; until then an
-# unresolved call is not flagged.
+# Imported callees are added to `imported` (see must_use_discard_scan).
 struct MustUseScope:
     owner: text
     names: Dict<i64, text>
     result_like: Dict<text, bool>
     marked: [text]
+    imported: [text]
 
 # `script_mode` true only for interpreted script execution. Severity does not
 # depend on the finding code.
@@ -60,6 +59,8 @@ fn must_use_callee_name(callee: HirExpr, scope: MustUseScope) -> text:
         case HirExprKind.NamedVar(symbol, name):
             if scope.names.contains_key(symbol.id):
                 return scope.names[symbol.id]
+            if scope.imported.contains(name):
+                return name
             if scope.names.values().contains(name):
                 return name
             ""
@@ -176,19 +177,59 @@ fn must_use_nested(block: HirBlock, scope: MustUseScope) -> [MustUseFinding]:
         out = must_use_extend(out, must_use_classify(block.value, scope))
     out
 
+# Module a `use` path names: the map key, the HIR module name, or a dotted
+# path ending in the key. "" when the module is not in the scanned set.
+fn must_use_find_module(modules: Dict<text, HirModule>, path: text) -> text:
+    for key in modules.keys():
+        if key == path or path.ends_with("." + key):
+            return key
+        val m: HirModule = modules[key]
+        if m.name != "" and (m.name == path or path.ends_with("." + m.name)):
+            return key
+    ""
+
 # Scans every function body in `modules` (impl/class methods are merged into
-# `module.functions`). `marked` is the `@must_use` name set.
+# `module.functions`). `marked` is the caller-supplied `@must_use` name set;
+# functions carrying the `@must_use` attribute (FunctionAttr.is_must_use) join
+# it per module. Imported callees resolve through `HirModule.imports` against
+# the other scanned modules (alias-aware); an import whose module is not in
+# `modules`, or whose item the module does not define, is not flagged.
 pub fn must_use_discard_scan(modules: Dict<text, HirModule>, marked: [text]) -> [MustUseFinding]:
     var out: [MustUseFinding] = []
     for key in modules.keys():
         val module: HirModule = modules[key]
         var names: Dict<i64, text> = {}
         var result_like: Dict<text, bool> = {}
+        var local_marked: [text] = marked
         for func in module.functions.values():
             names[func.symbol.id] = func.name
+            if func.func_attr.is_must_use and not local_marked.contains(func.name):
+                local_marked.push(func.name)
             if must_use_is_result_like(func.return_type):
                 result_like[func.name] = true
+        var imported: [text] = []
+        for imp in module.imports:
+            val target_key = must_use_find_module(modules, imp.module_path)
+            if target_key == "" or target_key == key:
+                continue
+            val target: HirModule = modules[target_key]
+            for item in imp.items:
+                var local = item.name
+                if val alias = item.alias:
+                    local = alias
+                if names.values().contains(local):
+                    continue
+                for tf in target.functions.values():
+                    if tf.name != item.name:
+                        continue
+                    if tf.func_attr.is_must_use:
+                        imported.push(local)
+                        if not local_marked.contains(local):
+                            local_marked.push(local)
+                    elif must_use_is_result_like(tf.return_type):
+                        imported.push(local)
+                        result_like[local] = true
         for func in module.functions.values():
-            val scope = MustUseScope(owner: func.name, names: names, result_like: result_like, marked: marked)
+            val scope = MustUseScope(owner: func.name, names: names, result_like: result_like, marked: local_marked, imported: imported)
             out = must_use_extend(out, must_use_block(func.body, scope))
     out
