@@ -644,5 +644,13 @@ binding / Host bug). Specs: `remote_container_reset_failure_stages_v3_spec.spl`,
   Refused at/after `min(approval, grant)` expiry (`remote-run-resume-window-ended`); its bounded wait sends no cancel and
   settles `outcome-unknown` (`resume-wait-bounded`). Runs admitted before this change have no open archive
   (`remote-run-resume-unarchived`).
+- `remote-run abandon --dispatch-root R --config-digest D --key-store K --approver A --operation O --grant-id G
+  --expires-in-ms T` (decision 1, after the window): NO Host contact. Issues a `remote-run-abandon` pair through the
+  host-action class (`controller_host_action_issue_v1`; kind added to `CONTROLLER_HOST_ACTION_KINDS_V1`, never sent to a
+  Host) with payload digest = the row's envelope digest, then `remote_run_abandon_apply_v1` runs on the root's retained
+  store (`controller_workload_store_edit_journal_v1` + `root.retain_v3`): issuer == controller, class, snapshot verify at
+  the grant clock, row digest, archived open record proves `now >= min(approval, grant)` of the RUN, then a create-only
+  `controller-remote-abandon-v1/<digest>.sdn` record and `failed` bound to its digest. `failed` never enters
+  `REMOTE_RUN_SETTLE_STATES_V1`. Approver keys must enroll `remote-run-abandon`.
 - VERSION SKEW: a controller older than milestone_0045 refuses a Host-signed `service-restart` and a late receipt and
   settles `outcome-unknown`; upgrade the controller first (same rule as #10398/#10399).
