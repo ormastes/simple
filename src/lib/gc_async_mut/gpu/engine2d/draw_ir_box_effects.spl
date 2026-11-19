@@ -8,6 +8,7 @@ use std.common.ui.draw_ir.{DrawIrCommand, DrawIrStyleProp}
 use std.common.ui.native_scalar_text.{ui_native_i64_text}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gpu.engine2d.color.{color_a, color_b, color_g, color_r, rgba}
+use std.gc_async_mut.gpu.engine2d.gradient_tiles.{rounded_rect_coverage256}
 use std.common.math.math.{math_exp, math_cos, math_sin, MATH_PI}
 
 val _E2D_BOX_MAX_STYLE_VALUE_BYTES: i64 = 65536
@@ -594,7 +595,8 @@ fn engine2d_draw_ir_has_outer_shadow(
 # box, so a translucent box shows what was under it, not its own shadow.
 # `pre` / `post` are the region (kx, ky, kw, kh) read before / after the
 # shadows; returns `post` with `pre` restored inside the rounded border box
-# (x, y, width, height), one span per row.
+# (x, y, width, height). Corner pixels are mixed by their coverage of the
+# box (Chrome anti-aliases the clip), one span per row elsewhere.
 fn engine2d_draw_ir_shadow_knockout_pixels(
     pre: [u32], post: [u32], kx: i32, ky: i32, kw: i32, kh: i32,
     x: i32, y: i32, width: i32, height: i32,
@@ -603,23 +605,45 @@ fn engine2d_draw_ir_shadow_knockout_pixels(
     var out = post
     if kw <= 0 or kh <= 0 or pre.len() != post.len() or post.len() != (kw as i64) * (kh as i64):
         return out
+    val tl = _e2d_box_corner_radius(corners.top_left, width, height)
+    val tr = _e2d_box_corner_radius(corners.top_right, width, height)
+    val br = _e2d_box_corner_radius(corners.bottom_right, width, height)
+    val bl = _e2d_box_corner_radius(corners.bottom_left, width, height)
+    val left = if tl > bl: tl else: bl
+    val right = if tr > br: tr else: br
     var row = 0
     # cpu-lane-loop-ok: one span copy per row of one shadowed translucent box; bound kh
     while row < kh:
-        var lo = kx
-        val row_end = kx + kw
-        # cpu-lane-loop-ok: walks in from each end only across a corner curve; bound = corner radius
-        while lo < row_end and not _e2d_box_inside_corners(lo - x, ky + row - y, width, height, corners):
-            lo = lo + 1
-        var hi = row_end
-        # cpu-lane-loop-ok: walks in from each end only across a corner curve; bound = corner radius
-        while hi > lo and not _e2d_box_inside_corners(hi - 1 - x, ky + row - y, width, height, corners):
-            hi = hi - 1
-        if hi > lo:
-            val off = (row as i64) * (kw as i64) + ((lo - kx) as i64)
-            out.write_span(pre, off, off, (hi - lo) as i64)
+        val py = ky + row
+        val off = (row as i64) * (kw as i64)
+        out.write_span(pre, off, off, kw as i64)
+        val top_band = py < y + (if tl > tr: tl else: tr)
+        val bottom_band = py >= y + height - (if bl > br: bl else: br)
+        if top_band or bottom_band:
+            var col = 0
+            # cpu-lane-loop-ok: coverage mix across the corner bands only; bound kw
+            while col < kw:
+                val px = kx + col
+                if px < x + left or px >= x + width - right:
+                    val cov = rounded_rect_coverage256(px, py, x, y, width, height, tl, tr, br, bl)
+                    if cov < 256:
+                        out[off + (col as i64)] = engine2d_mix256(pre[off + (col as i64)], post[off + (col as i64)], cov)
+                col = col + 1
         row = row + 1
     out
+
+# a * cov / 256 + b * (256 - cov) / 256 per ARGB channel, rounded.
+# @allow(primitive_api): per-pixel ARGB mix by 8.8 coverage, shared with the raster knockout
+pub fn engine2d_mix256(a: u32, b: u32, cov: i32) -> u32:
+    var o = 0u32
+    var sh = 0u32
+    # cpu-lane-loop-ok: 4 channels; bound 4
+    while sh <= 24u32:
+        val ca = ((a >> sh) & 0xFFu32) as i32
+        val cb = ((b >> sh) & 0xFFu32) as i32
+        o = o | ((((ca * cov + cb * (256 - cov) + 128) / 256) as u32) << sh)
+        sh = sh + 8u32
+    o
 
 
 # The colour functions of a `backdrop-filter` value (grayscale, sepia,
