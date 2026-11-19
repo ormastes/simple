@@ -21,8 +21,8 @@ design document.
 
 | Phase | Work | Exit gate | Status |
 |---|---|---|---|
-| P0 | Truthful capabilities: repair the defects listed in §1 | No unsupported operation reports success | **in progress** |
-| P1 | Protect the baseline: absent/prepared/active profiles, real off-identity comparison | OFF-01..08 evidence | todo |
+| P0 | Truthful capabilities: repair the defects listed in §1 | No unsupported operation reports success | **done** (#10357 #10363 #10366 #10369 #10370 #10371 #10372 + this) |
+| P1 | Protect the baseline: absent/prepared/active profiles, real off-identity comparison | OFF-01..08 evidence | **in progress** |
 | P2 | Failure evidence: assert/fault record, independent broker, deadlines | Real assert and fault, plus a no-debugger test | todo |
 | P3 | Host managed recovery: isolated interpreter worker, state roots, effect fencing | A V2 failure restores a verified V1 without duplicate effects | todo |
 | P4 | Unified native generation lifetime (legacy loader → KPF, retention pin) | Concurrent old/new execution with safe retirement | todo |
@@ -43,11 +43,16 @@ design document.
 | DBG-EVB | `evidence_bundle_writer_v1` imported by `embedded_dump_service_v1` but absent | Restored under `nogc_sync_mut/debug` (file I/O owner) (#10363) | writer 4/4, dump service 2/2 |
 | DBG-OCD | OpenOCD `mdw`/`reg` parsers returned `[]`/`0`; TCL commands printed addresses in decimal after `0x` | Real parsers; `format_hex` in commands | `test/01_unit/os/realtime/openocd_probe_parse_spec.spl` 4/4, adapter spec 5/5 |
 
-## Next (P0 remainder, in order)
+| DBG-WD | `T32Watchdog.guarded_op` ignored `operation_timeout_ms`; `kill_on_hang` ran a machine-wide `pkill` | Post-hoc overrun detection (labelled: not cancellation); global kill removed (#10370) | `t32_watchdog_deadline_spec` 2/2 (real module) |
+| DBG-FC | `FailureCapture` recorded only a cycle while implying a checkpoint/memory capture | Keeps pc/sp or signal/pid, pins event-tail range, states what was not captured (#10371) | `test/01_unit/os/kernel/failure_capture_spec.spl` 3/3 |
+| DBG-T32P | `Trace32Probe` never compiled (absent `t32_break`/`t32_go`, `std.os` path); stale SFFI shapes; unconditional success; `reset` sent `Break` | Ops via `T32_Cmd`, real SFFI shapes, results propagated (#10372) | `t32_probe_sffi_spec` 5/5 |
+| RR-03 | Kernel/realtime Replay mode read the logged schedule decision and discarded it | A different live tid, wrong kind, or end-of-log is a `ScheduleMismatch` divergence. Enforcing the logged tid on the scheduler is P6 | replay_kernel_fail_closed_spec 8/8 |
+| RR-05 | `HardwareReplayController.restore_checkpoint` said "checkpoint restored" | Says registers and watched RAM only; device/IRQ/DMA not restored | — |
 
-1. `os/realtime/replay/hooks.spl`: Replay mode reads the logged schedule/IRQ decisions but never enforces them. The scheduler must consume the forced tid. (Done: io_read/random mismatches now count as divergences.)
-2. `RemoteReplayAdapter.restore_checkpoint` and `reverse_*` truncate the event log. Callers must not treat this as a target state restore.
-3. T32 probe signature does not match SFFI. `t32_watchdog` timeout is not enforced.
-4. `failure_capture.spl`: metadata only. Implement real capture, or reject the capability honestly.
+P0 exit gate met for the §1 defect list. Every listed operation now either works or reports its failure or limit.
 
-Then P1 (off-identity gate beyond scanner self-test), P2, and P3.
+## Next: P1 (protect the baseline)
+
+1. OFF-01: dependency closure. Show that the default bootstrap/release import closure contains no recorder, replay, or debug-provider module (`os.kernel.replay`, `std.replay`, `trace.xray_*`, `debug.remote`). Add a fail-closed check script that walks `use` edges from the bootstrap CLI entry.
+2. OFF-02: run `check-xray-static-off-identity.shs` against a real candidate/baseline pair, not only its self-test, and record the receipt.
+3. Then P2 (assert/fault record → broker) and P3 (host managed recovery on KPF workers).
