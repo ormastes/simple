@@ -1,6 +1,6 @@
 use std.spec
 use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpRequest, HttpMethod, HttpStatus}
-use std.nogc_sync_mut.http_server.parser.{request_body_text}
+use std.nogc_sync_mut.http_server.parser.{request_body_decode}
 use std.nogc_sync_mut.http_server.response.{serialize_response_head_for_body_length}
 use std.nogc_sync_mut.http_server.handler.{MultipartPart, parse_multipart_bytes}
 use std.common.text_bytes.{text_to_utf8_bytes}
@@ -27,9 +27,20 @@ describe "HTTP binary bodies":
         expect(HttpResponse.json("{}").body_bytes.len()).to_equal(0)
         expect(HttpRequest.new(HttpMethod.Post, "/x").body_bytes.len()).to_equal(0)
 
-    it "a non-UTF-8 request body decodes to empty text":
-        expect(request_body_text([0xFFu8, 0xFEu8, 0u8])).to_equal("")
-        expect(request_body_text(text_to_utf8_bytes("é"))).to_equal("é")
+    it "a non-UTF-8 body is admitted as empty text only for binary content types":
+        val raw: [u8] = [0xFFu8, 0xFEu8, 0u8]
+        expect(request_body_decode(raw, "audio/wav").unwrap()).to_equal("")
+        expect(request_body_decode(raw, "multipart/form-data; boundary=x").unwrap()).to_equal("")
+        expect(request_body_decode(raw, "Application/Octet-Stream").unwrap()).to_equal("")
+        expect(request_body_decode(raw, "image/png").unwrap()).to_equal("")
+        expect(request_body_decode(raw, "video/mp4").unwrap()).to_equal("")
+        match request_body_decode(raw, "application/json"):
+            Ok(_): fail("a non-UTF-8 JSON body must stay a 400")
+            Err(e): expect(e.starts_with("400")).to_equal(true)
+        match request_body_decode(raw, ""):
+            Ok(_): fail("a non-UTF-8 body without a content type must stay a 400")
+            Err(e): expect(e.starts_with("400")).to_equal(true)
+        expect(request_body_decode(text_to_utf8_bytes("é"), "application/json").unwrap()).to_equal("é")
 
     it "parses a multipart upload and keeps the file part binary":
         val head = text_to_utf8_bytes("--XyZ\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper\r\n--XyZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\n")

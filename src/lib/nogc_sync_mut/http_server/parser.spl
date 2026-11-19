@@ -109,12 +109,28 @@ fn _scalar_read_body(stream: TcpStream, ahead: HttpScalarReadAheadV1, count: i64
                 return Err("400 Failed to read request body")
     Ok(body)
 
-# UTF-8 view of a request body; a binary body (not valid UTF-8) is "" and
-# stays available raw as HttpRequest.body_bytes.
-fn request_body_text(bytes: [u8]) -> text:
+# Content types whose body may be raw octets (uploads, media).
+fn request_body_binary_allowed(content_type: text) -> bool:
+    val media = content_type.trim().to_lower()
+    media.starts_with("multipart/") or media.starts_with("application/octet-stream") or media.starts_with("audio/") or media.starts_with("image/") or media.starts_with("video/")
+
+fn _request_content_type(headers: [(text, text)]) -> text:
+    for header in headers:
+        if header.0.to_lower() == "content-type":
+            return header.1
+    ""
+
+# UTF-8 view of a request body. A non-UTF-8 body stays a 400 unless its
+# Content-Type is multipart/* or a binary media type; then the text view is ""
+# and handlers read HttpRequest.body_bytes.
+fn request_body_decode(bytes: [u8], content_type: text) -> Result<text, text>:
     match io_legacy_utf8(bytes):
-        Ok(value): value
-        Err(_): ""
+        Ok(value): Ok(value)
+        Err(_):
+            if request_body_binary_allowed(content_type):
+                Ok("")
+            else:
+                Err("400 Failed to read request body")
 
 # =============================================================================
 # Public API
@@ -232,7 +248,9 @@ fn parse_request_with_policy_limits(stream: TcpStream, max_request_line: i32, ma
         match _scalar_read_body(stream, ahead, content_length as i64):
             Ok(data):
                 body_bytes = data
-                body = request_body_text(data)
+                match request_body_decode(data, _request_content_type(headers)):
+                    Ok(decoded): body = decoded
+                    Err(error): return Err(error)
             Err(error): return Err(error)
 
     return Ok(HttpRequest(
@@ -319,5 +337,5 @@ fn to_i32_safe(s: text) -> i32:
 export parse_request, parse_request_with_limits, parse_request_with_policy_limits, parse_request_line
 export request_line_without_terminator
 export to_i32_safe, headers_decision
-export request_host_error, request_body_text
+export request_host_error, request_body_decode, request_body_binary_allowed
 export RUNTIME_READ_LINE_CAP
