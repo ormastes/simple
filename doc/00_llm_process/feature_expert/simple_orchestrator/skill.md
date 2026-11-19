@@ -526,10 +526,13 @@ Host side of the remote container build; the controller half is the `remote-run`
   refusing (`agent-workspace-retention-requires-authorized-cleanup`); retention-release stays remote-build only. Gap
   record: no controller-side terminal row exists for a V4 agent run, and the Host agent outcome hardcodes
   `source_return: returned` although a staged agent source is retained.
-- Trap: `absent-unmeasured` (unchanged, owner decision 2) only on a RESUMED release whose run child is already gone; a
-  first issue with no child refuses (`workspace-retention-release-run-absent`) after journaling the marker, so the
-  re-issue converges. Making a reaped never-staged run settle in one issue needs an owner decision: no durable
-  never-staged fact exists (options: converge reaped evidence on first issue, or journal a stage-intent record first).
+- Trap: `absent-unmeasured` (owner decision 2, amended 2026-11-20 option B, milestone_0049, specs NOT_RUN) on a RESUMED
+  release whose run child is gone, or on the FIRST issue for a reaped run that provably never staged: startup publishes
+  `host-remote-build-stage-regime/<sha(fence)>` and the stage step publishes `host-remote-build-stage-intent/<sha(op)>`
+  (both held writer, no-replace) BEFORE `stage_remote_build_v3`; admit sets `never_staged` only for `reaped` evidence
+  whose prior fence has the regime and no intent. Intent present or no regime (pre-0049 incarnation) refuses
+  (`workspace-retention-release-run-absent`) after journaling the marker, so the re-issue converges. Agent runs write no
+  intent (nothing releases them). Signed record, verification and charge vocabulary unchanged.
 - Trap: journal relative path parts are <= 128 bytes; `<sha>-<sha>.sdn` (133) is invalid -- use `<sha>/<sha>.sdn`.
 ### Controller remote-run (milestone_0030 controller half, specs NOT_RUN)
 `simple orchestrator remote-run --dispatch-root --config-digest --key-store --approver --spec <dir> --out --grant-id --expires-in-ms`

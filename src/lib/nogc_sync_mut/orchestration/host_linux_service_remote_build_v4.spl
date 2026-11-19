@@ -23,6 +23,7 @@ use std.common.contracts.orchestration.host_execution_association_v3.{HostExecut
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1, HostCapacityMutationTurnV3,
     host_capacity_owner_settle_associated_v3}
 use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_reap_v4.host_remote_build_reaped_record_v4
+use std.nogc_sync_mut.orchestration.host_remote_build_retention_release_v1.host_remote_build_stage_intent_publish_v1
 use std.nogc_sync_mut.orchestration.host_linux_completion_evidence_v3.{HostRemoteBuildOutcomeRecordV4,
     host_remote_build_outcome_encode_v4}
 use std.container.{SimpleContainerOwnerV2, simple_container_scope_v2, ContainerWorkspaceActionV3, LinuxWorkspaceSourceLoanV3,
@@ -650,6 +651,10 @@ pub fn host_remote_build_step_v4(executor: HostRemoteBuildExecutorV3, capacity: 
     if state.stage == "stage":
         val files = remote_build_archived_files_v4(state, capacity.journal)
         if files.is_err(): return remote_build_fail_v4(state, capacity, files.unwrap_err())
+        # milestone_0049 (owner decision 2 amended, option B): the stage intent is durable through the held writer BEFORE
+        # the run child can be created; a refused or unreadable intent stages nothing.
+        val intent = host_remote_build_stage_intent_publish_v1(capacity.journal, state.operation_id, state.fence)
+        if intent.is_err(): return remote_build_fail_v4(state, capacity, intent.unwrap_err())
         val staged = state.source.unwrap().stage_remote_build_v3(request.request_bytes, state.workspace_manifest,
             state.invocation_bytes, files.unwrap())
         state.source = Some(staged.loan)
