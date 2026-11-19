@@ -2,12 +2,12 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundati
     HNode, backdrop_blur_milli, web_argb, attr_present, attr_value, object_position_x_pct, object_position_y_pct,
     attr_key_index, parse_html, _web_budget_clock, _web_render_deadline_us,
     _web_budget_rearm, _web_budget_expired_at,
-    parse_color, decl_get, svg_number_milli, svg_view_box_milli, parse_signed_nth_int,
+    parse_color, parse_color_any, text_index_of, find_from, decl_get, svg_number_milli, svg_view_box_milli, parse_signed_nth_int,
     WEB_BUDGET_SITE_PAINT_BACKGROUNDS, WEB_BUDGET_SITE_PAINT_RELATIVE_ROOTS,
     WEB_BUDGET_SITE_PAINT_ABSOLUTE_LOW_Z, WEB_BUDGET_SITE_PAINT_ABSOLUTE_HIGH_Z,
     WEB_BUDGET_SITE_PAINT_SCROLLBARS, WEB_BUDGET_SITE_PAINT_TEXT
 }
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, split_top_level_commas, shadow_length_prefix}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, split_top_level_commas, shadow_length_prefix, shadow_layer_alpha}
 use std.gc_async_mut.gpu.browser_engine.form_control_chrome.{chrome_checkable_spans, chrome_frame_spans}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{
     fb_border_sides_styled_clip, fb_select_chevron_clip, fb_textarea_grip_clip, fb_chrome_spans_clip, fb_rounded_rect_corners_opacity_clip,
@@ -158,22 +158,110 @@ fn _paint_backdrop_blur(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
     val under = _copy_region(fb, fbw, k)
     if _raster_bdr_mode == 0:
         return _restore_inside_box(fb, fbw, k, engine2d_backdrop_color_filter_pixels(engine2d_backdrop_blur_pixels(under, k[2], k[3], sigma), under, mats), x, y, w, h, st)
-    # Inside a backdrop root's layer (admission keeps these blur-only: a
-    # colour matrix on premultiplied layer pixels is not Chrome's) the
-    # filtered backdrop draws src-over the layer with its own alpha.
+    # Inside a backdrop root's layer the filtered backdrop draws src-over the
+    # layer with its own alpha. Admission keeps the colour functions
+    # alpha-preserving, so the alpha pass records the blurred alpha as is;
+    # the colour pass applies them to the unpremultiplied blur (Skia's colour
+    # filter) and re-premultiplies before that one src-over.
     val filtered = engine2d_backdrop_blur_pixels(under, k[2], k[3], sigma)
+    var src: [u32] = filtered
     var alphas: [u32] = filtered
     if _raster_bdr_mode == 1:
         _raster_bdr_alphas.push(filtered)
     else:
         alphas = _raster_bdr_alphas[_raster_bdr_next]
         _raster_bdr_next = _raster_bdr_next + 1
+        if mats.len() > 0:
+            src = _raster_bdr_color_filtered(filtered, alphas, mats)
     var over: [u32] = [0u32; under.len()]
     var p: i64 = 0
     while p < under.len():  # cpu-lane-loop-ok: src-over of one filtered backdrop region onto the layer; bound is that box's clipped pixel count
-        over[p] = _raster_bdr_src_over(filtered[p], 255 - (((alphas[p] >> 8) & 255u32) as i32), under[p])
+        over[p] = _raster_bdr_src_over(src[p], 255 - (((alphas[p] >> 8) & 255u32) as i32), under[p])
         p = p + 1
     _restore_inside_box(fb, fbw, k, over, x, y, w, h, st)
+
+# The colour functions over a premultiplied blurred backdrop `pm` whose alpha
+# is `alphas`' green channel: unpremultiply, apply `mats` (over a transparent
+# `under`, an exact pass-through), premultiply again.
+fn _raster_bdr_color_filtered(pm: [u32], alphas: [u32], mats: [[f64]]) -> [u32]:
+    val n = pm.len()
+    var straight: [u32] = [0u32; n]
+    var p: i64 = 0
+    while p < n:  # cpu-lane-loop-ok: unpremultiply one filtered backdrop region; bound is that box's clipped pixel count
+        val a = ((alphas[p] >> 8) & 255u32) as i32
+        if a > 0:
+            val c = pm[p]
+            straight[p] = ((a as u32) << 24) | ((_raster_group_unpremul(((c >> 16) & 255u32) as i32, a) as u32) << 16) | ((_raster_group_unpremul(((c >> 8) & 255u32) as i32, a) as u32) << 8) | (_raster_group_unpremul((c & 255u32) as i32, a) as u32)
+        p = p + 1
+    val f = engine2d_backdrop_color_filter_pixels(straight, [0u32; n], mats)
+    var out: [u32] = [0xFF000000u32; n]
+    p = 0
+    while p < n:  # cpu-lane-loop-ok: premultiply the same region; bound is that box's clipped pixel count
+        val c = f[p]
+        val a = ((c >> 24) & 255u32) as i32
+        val r = ((((c >> 16) & 255u32) as i32) * a + 127) / 255
+        val g = ((((c >> 8) & 255u32) as i32) * a + 127) / 255
+        val b = (((c & 255u32) as i32) * a + 127) / 255
+        out[p] = 0xFF000000u32 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+        p = p + 1
+    out
+
+# Colour functions that keep alpha (alpha row 0 0 0 1 0): every CSS one but
+# opacity().
+fn _raster_bdr_alpha_preserving(mats: [[f64]]) -> bool:
+    for m in mats:  # cpu-lane-loop-ok: one backdrop-filter's colour function list
+        if m[15] != 0.0 or m[16] != 0.0 or m[17] != 0.0 or m[18] != 1.0 or m[19] != 0.0:
+            return false
+    true
+
+# `raw` (a box-shadow list) with every painted layer's colour forced to white
+# at the same alpha text, or "" when a layer's colour cannot be rewritten
+# exactly (named, hsl, space syntax, or no colour: the painter falls back to
+# a colour that is not in the raw text).
+fn _raster_white_shadow_raw(raw: text) -> text:
+    var out = ""
+    for layer in split_top_level_commas(raw):  # cpu-lane-loop-ok: one node's shadow layer list
+        val white = _raster_white_shadow_layer(layer)
+        if white == "":
+            return ""
+        out = if out == "": white else: out + "," + white
+    out
+
+fn _raster_white_shadow_layer(layer: text) -> text:
+    val lower = layer.trim().lower()
+    if lower == "none" or lower.contains("transparent"):
+        return layer
+    var s = layer
+    val r = text_index_of(layer, "rgb")
+    val h = text_index_of(layer, "#")
+    if r >= 0:
+        val lp = find_from(layer, "(", r)
+        val rp = if lp >= 0: find_from(layer, ")", lp) else: -1
+        if rp < 0:
+            return ""
+        val inner = layer.substring(lp + 1, rp)
+        val c1 = text_index_of(inner, ",")
+        val c2 = if c1 >= 0: find_from(inner, ",", c1 + 1) else: -1
+        if c2 < 0:
+            return ""
+        val c3 = find_from(inner, ",", c2 + 1)
+        val rest = if c3 >= 0: inner.substring(c3, inner.byte_len()) else: ""
+        s = layer.substring(0, lp + 1) + "255,255,255" + rest + layer.substring(rp, layer.byte_len())
+    elif h >= 0:
+        var e = h + 1
+        while e < layer.byte_len() and "0123456789abcdefABCDEF".contains(layer.substring(e, e + 1)):  # cpu-lane-loop-ok: hex digits of one colour token; bound 8
+            e = e + 1
+        val digits = e - h - 1
+        val white = if digits == 3: "fff" elif digits == 4: "fff" + layer.substring(e - 1, e) elif digits == 6: "ffffff" elif digits == 8: "ffffff" + layer.substring(e - 2, e) else: ""
+        if white == "":
+            return ""
+        s = layer.substring(0, h + 1) + white + layer.substring(e, layer.byte_len())
+    if layer.contains("inset"):
+        return s
+    val c = parse_color_any(s)
+    if c == 0u32 or (c & 0x00FFFFFFu32) != 0x00FFFFFFu32 or shadow_layer_alpha(s) != shadow_layer_alpha(layer):
+        return ""
+    s
 
 # Premultiplied src-over on opaque-encoded layer pixels: src + dst * keep / 255.
 fn _raster_bdr_src_over(src: u32, keep: i32, dst: u32) -> u32:
@@ -1231,21 +1319,31 @@ fn _raster_opacity_groups(nodes: [HNode], styles: [Style], bx: [i32], by: [i32],
                         has_z = true
                     if nodes[j].tag == "iframe":
                         reject = true
-                    # A backdrop root's layer replays blur-only backdrops
-                    # once each; a colour matrix or a nested root is not exact.
-                    if bdr_root and j != g and _raster_has_backdrop(st) and (engine2d_backdrop_color_matrices(st.backdrop_filter_raw).len() > 0 or _raster_backdrop_root(nodes, styles, j)):
+                    # A backdrop root's layer replays each nested backdrop
+                    # once; a colour function that changes alpha (opacity())
+                    # or a nested root is not exact.
+                    if bdr_root and j != g and _raster_has_backdrop(st) and (not _raster_bdr_alpha_preserving(engine2d_backdrop_color_matrices(st.backdrop_filter_raw)) or _raster_backdrop_root(nodes, styles, j)):
+                        reject = true
+                    # Widget chrome fills a hard-coded colour that the alpha
+                    # pass cannot whiten.
+                    if bdr_root and (nodes[j].has_widget_panel_class or nodes[j].has_widget_button_class) and st.bg == 0u32 and st.background_gradient_from == 0u32:
                         reject = true
                     val ops = if _raster_group_visible(nodes, styles, j): _raster_group_node_ops(nodes[j], st) else: 0
                     if ops > 0:
                         painted = painted + ops
-                        if not _raster_group_node_layer_safe(nodes[j], st):
+                        # A backdrop root's alpha pass whitens a restyled
+                        # <button>'s Style colours like any box's; an
+                        # unrestyled one paints fixed-colour native chrome.
+                        if not _raster_group_node_layer_safe(nodes[j], st) and not (bdr_root and nodes[j].tag == "button" and st.native_frame == 0):
                             reject = true
                         val sh: [i32] = if _raster_group_has_shadow(st): _raster_group_shadow_extent(st) else: [0, 0, 0, 0]
                         val translucent = _raster_group_node_translucent_items(nodes[j], st)
                         if translucent > 1:
                             overlap = true
                             two_pass = true
-                        if _raster_group_has_shadow(st) or st.bg_layers_raw != "" or st.background_image_uri != "":
+                        # A backdrop root's alpha pass rewrites shadow colours.
+                        val shadow_white = bdr_root and (st.box_shadow_raw == "" or _raster_white_shadow_raw(st.box_shadow_raw) != "")
+                        if (_raster_group_has_shadow(st) and not shadow_white) or st.bg_layers_raw != "" or st.background_image_uri != "":
                             unwhitenable = true
                         if translucent == 1:
                             two_pass = true
@@ -1264,10 +1362,13 @@ fn _raster_opacity_groups(nodes: [HNode], styles: [Style], bx: [i32], by: [i32],
                             tx1.push(rx1)
                             ty1.push(ry1)
                         # Antialiased text needs an opaque backdrop inside the
-                        # layer: only a root with an opaque background gives one.
+                        # layer: only a root with an opaque background gives
+                        # one. A backdrop root's white-forced alpha pass takes
+                        # text alpha from its own coverage (the glyph blend is
+                        # a linear src-over), so its text needs none.
                         if nodes[j].tag == "#text":
                             has_text = true
-                            if _raster_group_alpha(gst.bg) != 255u32:
+                            if _raster_group_alpha(gst.bg) != 255u32 and not bdr_root:
                                 reject = true
                         val pad = if st.outline_w > 0: st.outline_w + _tile_abs_i32(st.outline_offset_px) else: 0
                         val px0 = bx[j] - (if sh[0] > pad: sh[0] else: pad)
@@ -1464,10 +1565,12 @@ fn _raster_white_alpha_pass(nodes: [HNode], styles: [Style], outside: [bool], gr
     var work = styles
     var saved: [[u32]] = []
     var saved_stops: [[u32]] = []
+    var saved_shadows: [text] = []
     var i = 0
     while i < n:  # cpu-lane-loop-ok: whitens each member's colours, saved for the restore below; bound is node_count
         saved.push(_raster_style_colors(work[i]))
         saved_stops.push(work[i].background_gradient_stop_colors)
+        saved_shadows.push(work[i].box_shadow_raw)
         if grp.members[i]:
             var white: [u32] = []
             for c in saved[i]:  # cpu-lane-loop-ok: the fixed set of Style colour fields
@@ -1476,6 +1579,11 @@ fn _raster_white_alpha_pass(nodes: [HNode], styles: [Style], outside: [bool], gr
             for c in saved_stops[i]:  # cpu-lane-loop-ok: one gradient's stop colours
                 stops.push(_raster_white(c))
             work[i] = _raster_style_with_colors(work[i], white, stops)
+            # Admission rejects a shadow list this cannot rewrite.
+            if grp.backdrop_root and saved_shadows[i] != "":
+                var wst = work[i]
+                wst.box_shadow_raw = _raster_white_shadow_raw(saved_shadows[i])
+                work[i] = wst
         i = i + 1
     val prev_images = _raster_images
     var white_images: [SimpleOsHostGpuImageResource] = []
@@ -1490,7 +1598,9 @@ fn _raster_white_alpha_pass(nodes: [HNode], styles: [Style], outside: [bool], gr
     i = 0
     while i < n:  # cpu-lane-loop-ok: restores the colours saved above; bound is node_count
         if grp.members[i]:
-            work[i] = _raster_style_with_colors(work[i], saved[i], saved_stops[i])
+            var rst = _raster_style_with_colors(work[i], saved[i], saved_stops[i])
+            rst.box_shadow_raw = saved_shadows[i]
+            work[i] = rst
         i = i + 1
     out
 
