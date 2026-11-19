@@ -1,0 +1,144 @@
+"""
+## Purpose and audience
+Purpose: Pin CSS `letter-spacing` / `word-spacing` on SHAPED text runs against
+Chrome 159. A run is shaped when `font_renderer._resolved_font_complex_script`
+sees Arabic (or Devanagari) AND the language selects a bundled face the shaper
+accepts (`<html lang="ar">` -> Noto Sans Arabic). Its glyph run carries its own
+pen positions, so the spacing the plain lane folds into per-codepoint advances
+never moved the glyphs, and layout widened the box by one gap per codepoint
+where Chrome adds none between Arabic letters.
+Audience: web renderer text maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--force-device-scale-factor=1`, 400x120, `<html lang="ar">`, body
+`font:16px Liberation Sans, <Noto Sans Arabic via @font-face>`,
+`<div style="position:absolute;left:20px;top:30px;white-space:nowrap;...">`).
+Range widths are from getBoundingClientRect; ink is a pixel with a channel
+under 200.
+
+| text                | style               | Range width | ink x0..x1 |
+|---------------------|---------------------|-------------|------------|
+| مرحبا بالعالم       | (none)              | 77.09375    | 19..96     |
+| مرحبا بالعالم       | letter-spacing:2px  | 79.09375    | 19..98     |
+| مرحبا بالعالم       | letter-spacing:-1px | 76.09375    | -          |
+| مرحبا بالعالم       | word-spacing:10px   | 87.09375    | 19..106    |
+| م ر ح               | (none)              | 32.734375   | -          |
+| م ر ح               | letter-spacing:2px  | 36.734375   | -          |
+| مرحبا abc           | (none)              | 63.921875   | -          |
+| مرحبا abc           | letter-spacing:2px  | 71.921875   | -          |
+
+Chrome adds letter-spacing to every unit EXCEPT Arabic-script letters, joined
+or isolated (the 13-character sentence grows by 2 = its one space; `م ر ح`
+by 4 = two spaces; `مرحبا abc` by 8 = space + a, b, c). Word-spacing adds to
+each space. In an RTL run the gap trails each unit on its visual left, so the
+left word keeps x0 and the part right of the space moves right.
+
+Devanagari (`lang="hi"`) is NOT covered: Chrome spaces per grapheme cluster
+(`नमस्ते दुनिया` 72.90625 -> 88.90625 at 2px, 8 clusters) but Simple does not
+produce a valid glyph run for it here (`glyph_run.valid == false`, unshaped
+per-codepoint fallback, base width 103 vs Chrome 73), a separate defect.
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-SPACING-001 — letter-spacing and word-spacing apply to shaped runs as in Chrome.
+"""
+# @tag: unit, browser_engine, text, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_draw_ir.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir
+}
+
+val W: i32 = 400
+val H: i32 = 120
+val AR: text = "مرحبا بالعالم"
+
+fn _page(txt: text, style: text) -> text:
+    "<!doctype html><html lang=\"ar\"><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\"><div style=\"position:absolute;left:20px;top:30px;white-space:nowrap;" + style + "\">" + txt + "</div></body></html>"
+
+fn _chan(px: u32, shift: u32) -> i32:
+    ((px >> shift) & 0xFFu32).to_i32()
+
+fn _ink_bbox(px: [u32]) -> text:
+    var x0 = W
+    var y0 = H
+    var x1 = -1
+    var y1 = -1
+    var y = 0
+    while y < H:
+        var x = 0
+        while x < W:
+            val p = px[y * W + x]
+            if _chan(p, 16u32) < 200 or _chan(p, 8u32) < 200 or _chan(p, 0u32) < 200:
+                if x < x0: x0 = x
+                if x > x1: x1 = x
+                if y < y0: y0 = y
+                if y > y1: y1 = y
+            x = x + 1
+        y = y + 1
+fn _ink_x(txt: text, style: text) -> [i32]:
+    val px = simple_web_render_html_to_pixels_with_engine2d_backend(_page(txt, style), W, H, "cpu_simd")
+    var x0 = W
+    var x1 = -1
+    var y = 0
+    while y < H:
+        var x = 0
+        while x < W:
+            val p = px[y * W + x]
+            if _chan(p, 16u32) < 200 or _chan(p, 8u32) < 200 or _chan(p, 0u32) < 200:
+                if x < x0: x0 = x
+                if x > x1: x1 = x
+            x = x + 1
+        y = y + 1
+    [x0, x1]
+
+# Width of the single text command and whether its glyph run is shaped.
+fn _run(txt: text, style: text) -> [i32]:
+    val c = simple_web_layout_render_html_draw_ir(_page(txt, style), W, H)
+    var out: [i32] = [0, 0]
+    for b in c.batches:
+        for cmd in b.commands:
+            if cmd.text_value != "":
+                out = [cmd.width, if cmd.glyph_run.valid: 1 else: 0]
+    out
+
+describe "letter-spacing and word-spacing on shaped runs against Chrome 159":
+    it "AC-1: the Arabic run is shaped and keeps Chrome's width and ink x extent":
+        step("Chrome 77.09 wide, ink x 19..96 (engine ink x0 differs by font raster, so only x1 is pinned)")
+        val r = _run(AR, "")
+        expect(r[1]).to_equal(1)
+        expect(r[0]).to_equal(77)
+        expect(_ink_x(AR, "")[1]).to_equal(96)
+
+    it "AC-2: letter-spacing:2px adds only the space's gap (+2), moving the glyph run":
+        step("Chrome 79.09 wide, ink x1 98")
+        expect(_run(AR, "letter-spacing:2px")[0]).to_equal(79)
+        val b = _ink_x(AR, "")
+        val s = _ink_x(AR, "letter-spacing:2px")
+        expect(s[1] - b[1]).to_equal(2)
+        expect(s[0]).to_equal(b[0])
+
+    it "AC-3: a negative letter-spacing tightens only the space":
+        step("Chrome 76.09 wide")
+        expect(_run(AR, "letter-spacing:-1px")[0]).to_equal(76)
+
+    it "AC-4: word-spacing widens the space and moves the glyph run":
+        step("Chrome 87.09 wide, ink x1 106")
+        expect(_run(AR, "word-spacing:10px")[0]).to_equal(87)
+        val b = _ink_x(AR, "")
+        val s = _ink_x(AR, "word-spacing:10px")
+        expect(s[1] - b[1]).to_equal(10)
+        expect(s[0]).to_equal(b[0])
+
+    it "AC-5: isolated Arabic letters take no letter-spacing, spaces do":
+        step("Chrome م ر ح 32.73 -> 36.73 (+4 = 2 spaces)")
+        val d = _run("م ر ح", "letter-spacing:2px")[0] - _run("م ر ح", "")[0]
+        expect(d).to_equal(4)
+
+    it "AC-6: Latin inside an Arabic run still takes letter-spacing":
+        step("Chrome مرحبا abc 63.92 -> 71.92 (+8 = space, a, b, c)")
+        val d = _run("مرحبا abc", "letter-spacing:2px")[0] - _run("مرحبا abc", "")[0]
+        expect(d).to_equal(8)
