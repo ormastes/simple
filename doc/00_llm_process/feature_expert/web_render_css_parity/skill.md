@@ -3410,3 +3410,5 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - `<img>` natural size (2026-11-18): layout reads the supplied resources (`layout_set_images` around `web_html_layout_tree`); auto sides take the natural size or follow the aspect ratio of the given side (`img_resource_auto_outer_w/h`). Pinned by `img_natural_size_chrome159_spec`.
 
 - Dash layout (2026-11-19): `border_dash_runs` gives Chrome's dash runs on a straight side: dash 2t (dotted t), nominal gap t fitted by SelectBestDashGap so both ends are full dashes; L <= 2·dash is solid, 2·dash < L < 2·dash+gap scales two dashes and the gap together. Raster and Draw IR share it. Pinned by `border_dash_layout_chrome159_spec`.
+
+- Opacity groups (2026-11-19): `_simple_web_opacity_root_bounds` counts a box-shadow as a paint item (bg + shadow at 0.5 is a group, `ff7e7e`), matching the raster's `_raster_group_node_ops`. Pinned by `opacity_multi_root_chrome159_spec`.
