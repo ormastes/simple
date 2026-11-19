@@ -1,0 +1,256 @@
+"""
+## Purpose and audience
+Purpose: Prove linear scaling and byte-identical output for `std.common.json.serializer`
+and `std.common.json.value` (control-char escaping, array/object joins, indentation).
+Audience: stdlib maintainers and compiler/tooling engineers.
+
+## Operator workflow
+Run `bin/simple test test/01_unit/lib/common/json_serializer_linear_alloc_spec.spl --mode=interpreter`.
+
+## Compatibility and limitations
+Pure in-memory JSON serialization and parsing. Scaling assertions compare 8x input
+sizes with a floor to remain stable under normal host noise while catching O(N^2) churn.
+"""
+
+use std.spec.{describe, context, it, expect, step}
+use std.common.json.types.{json_null, json_boolean, json_number, json_string, json_array, json_object}
+use std.common.json.parser.{json_parse, json_unescape_string}
+use std.common.json.serializer.{json_serialize, json_format, json_pretty, json_escape_string}
+use std.common.json.value.{JsonValue, json_parse_value, json_value_serialize, json_value_format, json_value_pretty, json_value_escape_string}
+use std.nogc_sync_mut.io.time_ops.{time_now_micros}
+
+fn _make_dyn_str_array(n: i64) -> any:
+    var items: [any] = []
+    var i = 0
+    while i < n:
+        items.push(json_string("v"))
+        i = i + 1
+    json_array(items)
+
+fn _make_typed_int_array(n: i64) -> JsonValue:
+    var items: [JsonValue] = []
+    var i = 0
+    while i < n:
+        items.push(JsonValue.Int(i))
+        i = i + 1
+    JsonValue.Array(items)
+
+fn _ratio_x100(small_us: i64, big_us: i64) -> i64:
+    val floor_us = if small_us < 1000: 1000 else: small_us
+    (big_us * 100) / floor_us
+
+fn _time_escape_dyn_us(payload: text) -> i64:
+    val t0 = time_now_micros()
+    val escaped = json_escape_string(payload)
+    val t1 = time_now_micros()
+    if escaped.byte_len() < payload.byte_len():
+        return -1
+    t1 - t0
+
+fn _time_escape_typed_us(payload: text) -> i64:
+    val t0 = time_now_micros()
+    val escaped = json_value_escape_string(payload)
+    val t1 = time_now_micros()
+    if escaped.byte_len() < payload.byte_len():
+        return -1
+    t1 - t0
+
+fn _time_serialize_dyn_us(n: i64) -> i64:
+    val arr = _make_dyn_str_array(n)
+    val t0 = time_now_micros()
+    val s = json_serialize(arr)
+    val t1 = time_now_micros()
+    if not s.starts_with("["):
+        return -1
+    t1 - t0
+
+fn _time_serialize_typed_us(n: i64) -> i64:
+    val arr = _make_typed_int_array(n)
+    val t0 = time_now_micros()
+    val s = json_value_serialize(arr)
+    val t1 = time_now_micros()
+    if not s.starts_with("["):
+        return -1
+    t1 - t0
+
+fn _time_indent_dyn_us(spaces: i64, reps: i64) -> i64:
+    val arr = json_array([json_number(1), json_number(2)])
+    val t0 = time_now_micros()
+    var i = 0
+    var ok = true
+    while i < reps:
+        val s = json_format(arr, 1, spaces)
+        if not s.contains("1"):
+            ok = false
+        i = i + 1
+    val t1 = time_now_micros()
+    if not ok:
+        return -1
+    t1 - t0
+
+fn _time_format_typed_us(spaces: i64, reps: i64) -> i64:
+    val arr = JsonValue.Array([JsonValue.Int(1), JsonValue.Int(2)])
+    val t0 = time_now_micros()
+    var i = 0
+    var ok = true
+    while i < reps:
+        val s = json_value_format(arr, 1, spaces)
+        if not s.contains("1"):
+            ok = false
+        i = i + 1
+    val t1 = time_now_micros()
+    if not ok:
+        return -1
+    t1 - t0
+
+describe "JSON serializer and JsonValue linear serialization (std.common.json)":
+    """Verify byte-identical JSON serialization parity and O(N) scaling."""
+
+    context "control-character and UTF-8 escaping parity":
+        """Fast path, C0 escapes, and multi-byte UTF-8 passthrough match across both modules."""
+
+        it "preserves plain ASCII and multi-byte UTF-8 unchanged":
+            """Ensure strings without special or control bytes round-trip untouched."""
+            step("Escape plain ASCII and UTF-8 text via both escapers")
+            val sample = "café au lait — 한글 😀"
+            expect(json_escape_string(sample)).to_equal(sample)
+            expect(json_value_escape_string(sample)).to_equal(sample)
+            expect(json_escape_string("").byte_len()).to_equal(0)
+            expect(json_value_escape_string("").byte_len()).to_equal(0)
+
+        it "escapes every C0 control byte identically across dynamic and typed serializers":
+            """Check NUL, BS, FF, TAB, LF, CR, 0x01, 0x0B, 0x1F alongside UTF-8."""
+            step("Construct control-character payload and verify escaped bytes and round-trip")
+            val raw = json_unescape_string("é\\u0000\\u0001\\u0008\\t\\n\\u000b\\u000c\\r\\u001f中\\\"\\\\😀")
+            val dyn_esc = json_escape_string(raw)
+            val val_esc = json_value_escape_string(raw)
+            val expected = "é\\u0000\\u0001\\b\\t\\n\\u000b\\f\\r\\u001f中\\\"\\\\😀"
+            expect(dyn_esc).to_equal(expected)
+            expect(val_esc).to_equal(expected)
+
+            val dyn_json = json_serialize(json_string(raw))
+            val val_json = json_value_serialize(JsonValue.Str(raw))
+            expect(dyn_json).to_equal("\"" + expected + "\"")
+            expect(val_json).to_equal(dyn_json)
+
+            # Note: std.common.json.parser.json_unescape_string leaves \b/\f literal,
+            # so round-trip verifies the remaining C0 controls and UTF-8 bytes through parse.
+            val rt_raw = json_unescape_string("é\\u0000\\u0001\\t\\n\\u000b\\r\\u001f中\\\"\\\\😀")
+            val rt_dyn_json = json_serialize(json_string(rt_raw))
+            val rt_val_json = json_value_serialize(JsonValue.Str(rt_raw))
+            val reparsed_dyn = json_parse(rt_dyn_json)
+            expect(reparsed_dyn.1).to_equal(rt_raw)
+            val reparsed_val = json_parse_value(rt_val_json).unwrap()
+            match reparsed_val:
+                case Str(s):
+                    expect(s).to_equal(rt_raw)
+                case _:
+                    expect("Str").to_equal("parsed")
+
+        it "matches dynamic and typed serializer output byte-for-byte on nested structures":
+            """Compare compact and pretty JSON output on arrays, objects, scalars, and empty nodes."""
+            step("Build equivalent dynamic and typed trees and compare serialized bytes")
+            val dyn_val = json_object({
+                "items": json_array([
+                    json_array([]),
+                    json_object({}),
+                    json_array([json_number(0), json_number(-7), json_number(2.5)]),
+                    json_array([json_boolean(true), json_boolean(false), json_null()]),
+                    json_string("café\nline2")
+                ])
+            })
+            val typed_val = JsonValue.Object(
+                keys: ["items"],
+                values: [
+                    JsonValue.Array([
+                        JsonValue.Array([]),
+                        JsonValue.Object(keys: [], values: []),
+                        JsonValue.Array([JsonValue.Int(0), JsonValue.Int(-7), JsonValue.Float(2.5)]),
+                        JsonValue.Array([JsonValue.Bool(true), JsonValue.Bool(false), JsonValue.Null]),
+                        JsonValue.Str("café\nline2")
+                    ])
+                ]
+            )
+            expect(json_value_serialize(typed_val)).to_equal(json_serialize(dyn_val))
+            expect(json_value_pretty(typed_val)).to_equal(json_pretty(dyn_val))
+            expect(json_value_format(typed_val, 1, 3)).to_equal(json_format(dyn_val, 1, 3))
+
+        it "builds indentation strings cleanly for zero, negative, and positive inputs":
+            """Guard edge cases for formatted dynamic and typed JSON indentation."""
+            step("Verify formatted indent output for zero, negative, and positive sizes")
+            val one = json_array([json_number(1)])
+            val one_typed = JsonValue.Array([JsonValue.Int(1)])
+            expect(json_format(one, 0, 0)).to_equal("[\n1\n]")
+            expect(json_format(one, -2, 4)).to_equal("[\n1\n]")
+            expect(json_format(one, 0, -1)).to_equal("[\n1\n]")
+            expect(json_format(one, 1, 2)).to_equal("[\n    1\n  ]")
+            expect(json_value_format(one_typed, 0, 0)).to_equal("[\n1\n]")
+            expect(json_value_format(one_typed, -2, 4)).to_equal("[\n1\n]")
+            expect(json_value_format(one_typed, 0, -1)).to_equal("[\n1\n]")
+            expect(json_value_format(one_typed, 1, 2)).to_equal("[\n    1\n  ]")
+
+    context "linear scaling under O(N^2) churn regression guard":
+        """Verify 8x larger inputs scale linearly rather than quadratically (~64x)."""
+
+        it "escapes control-character strings linearly in json_escape_string and json_value_escape_string":
+            """Guard against O(N^2) char-by-char concatenation in control-byte escaping."""
+            step("Time 3000-byte vs 24000-byte strings containing leading control byte")
+            val ctrl = json_unescape_string("\\u0008")
+            val warm = ctrl + "a".repeat(500)
+            expect(json_escape_string(warm).byte_len()).to_equal(502)
+            expect(json_value_escape_string(warm).byte_len()).to_equal(502)
+
+            val small_payload = ctrl + "a".repeat(3000)
+            val big_payload = ctrl + "a".repeat(24000)
+
+            val dyn_small = _time_escape_dyn_us(small_payload)
+            val dyn_big = _time_escape_dyn_us(big_payload)
+            expect(dyn_small).to_be_greater_than(-1)
+            expect(dyn_big).to_be_greater_than(-1)
+            expect(_ratio_x100(dyn_small, dyn_big)).to_be_less_than(1600)
+
+            val val_small = _time_escape_typed_us(small_payload)
+            val val_big = _time_escape_typed_us(big_payload)
+            expect(val_small).to_be_greater_than(-1)
+            expect(val_big).to_be_greater_than(-1)
+            expect(_ratio_x100(val_small, val_big)).to_be_less_than(1600)
+
+        it "joins serialized array elements linearly in json_serialize and json_value_serialize":
+            """Guard against O(N^2) separator join loops on large JSON collections."""
+            step("Time 8x array serialization growth for dynamic and typed serializers")
+            expect(json_serialize(_make_dyn_str_array(4)).starts_with("[\"v\",")).to_equal(true)
+            expect(json_value_serialize(_make_typed_int_array(10)).starts_with("[0,")).to_equal(true)
+            val _ = json_serialize(_make_dyn_str_array(100))
+            val _ = json_value_serialize(_make_typed_int_array(100))
+
+            val dyn_small = _time_serialize_dyn_us(1200)
+            val dyn_big = _time_serialize_dyn_us(9600)
+            expect(dyn_small).to_be_greater_than(-1)
+            expect(dyn_big).to_be_greater_than(-1)
+            expect(_ratio_x100(dyn_small, dyn_big)).to_be_less_than(1600)
+
+            val val_small = _time_serialize_typed_us(1000)
+            val val_big = _time_serialize_typed_us(8000)
+            expect(val_small).to_be_greater_than(-1)
+            expect(val_big).to_be_greater_than(-1)
+            expect(_ratio_x100(val_small, val_big)).to_be_less_than(1600)
+
+        it "builds indentation linearly in json_format and json_value_format":
+            """Guard against O(spaces) per-space concatenation loops in indent builders."""
+            step("Compare 4-space repeated format against single 40000-space indent format")
+            expect(json_format(json_array([json_number(1)]), 0, 16).contains("1")).to_equal(true)
+            expect(json_value_format(JsonValue.Array([JsonValue.Int(1)]), 0, 16).contains("1")).to_equal(true)
+            val _ = json_format(json_array([json_number(1)]), 1, 200)
+            val _ = json_value_format(JsonValue.Array([JsonValue.Int(1)]), 1, 200)
+
+            val ind_small = _time_indent_dyn_us(4, 4)
+            val ind_big = _time_indent_dyn_us(40000, 1)
+            expect(ind_small).to_be_greater_than(-1)
+            expect(ind_big).to_be_greater_than(-1)
+            expect(_ratio_x100(ind_small, ind_big)).to_be_less_than(800)
+
+            val fmt_small = _time_format_typed_us(4, 4)
+            val fmt_big = _time_format_typed_us(40000, 1)
+            expect(fmt_small).to_be_greater_than(-1)
+            expect(fmt_big).to_be_greater_than(-1)
+            expect(_ratio_x100(fmt_small, fmt_big)).to_be_less_than(800)

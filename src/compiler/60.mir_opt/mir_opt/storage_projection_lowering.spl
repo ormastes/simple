@@ -184,9 +184,34 @@ fn mir_storage_projection_failure(module: MirModule, rewritten_count: i64,
     MirStorageProjectionLoweringResultV1(ok: false, module: module,
         rewritten_count: rewritten_count, reason: reason)
 
+fn _mir_module_has_storage_project_field_v1(module: MirModule) -> bool:
+    """Read-only fast-path check for MIR_STORAGE_PROJECT_FIELD_V1 intrinsics."""
+    val functions: [MirFunction] = module.functions.values()
+    var function_index = 0
+    while function_index < functions.len():
+        val function: MirFunction = functions[function_index]
+        var block_index = 0
+        while block_index < function.blocks.len():
+            val block = function.blocks[block_index]
+            var instruction_index = 0
+            while instruction_index < block.instructions.len():
+                val instruction = block.instructions[instruction_index]
+                match instruction.kind:
+                    case Intrinsic(_dest, name, _args):
+                        if name == MIR_STORAGE_PROJECT_FIELD_V1:
+                            return true
+                    case _: pass
+                instruction_index = instruction_index + 1
+            block_index = block_index + 1
+        function_index = function_index + 1
+    false
+
 fn lower_mir_storage_project_fields_v1(
     module: MirModule, bindings: [MirStorageViewSiteBindingV1]
 ) -> MirStorageProjectionLoweringResultV1:
+    if not _mir_module_has_storage_project_field_v1(module):
+        return MirStorageProjectionLoweringResultV1(ok: true, module: module,
+            rewritten_count: 0, reason: "ok")
     var rewritten_count = 0
     var rewritten_functions: Dict<SymbolId, MirFunction> = {}
     # The Stage-2 native lowering of nested `for` loops in this owner emitted

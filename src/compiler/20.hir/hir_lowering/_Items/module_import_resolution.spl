@@ -52,12 +52,42 @@ use std.nogc_sync_mut.io_runtime.{file_exists, dir_exists, file_read_nullable}
 # HirLowering exists per module, so the cache lives at module level (same
 # pattern as hir_phase_profile.spl). Scalar hash-chain table, never a Dict:
 # contains_key on a Dict mis-reports under Stage-2 native codegen (BOOT-20).
+extern fn rt_transient_array_scope_state_v1() -> i64
+extern fn rt_transient_array_scope_identity_v1() -> i64
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+extern fn rt_array_free<T>(array: [T])
+extern fn rt_session_heap_id() -> u32
+extern fn rt_session_alloc_begin() -> bool
+extern fn rt_session_alloc_end() -> bool
+
+use compiler.hir.hir_lowering.phase_memo_ownership.{
+    HirPhaseMemoRoot,
+    hir_phase_memo_promote_roots,
+    hir_phase_memo_stage_priv_base_cache,
+    hir_phase_memo_clear_priv_base_staging,
+    hir_phase_memo_priv_base_scope_promoted,
+    hir_phase_memo_stage_priv_dir_cache,
+    hir_phase_memo_clear_priv_dir_staging,
+    hir_phase_memo_priv_dir_scope_promoted
+}
+
 var _priv_import_baseline_root: text = ""
 var _priv_import_baseline_keys: [text] = []
 var _priv_import_baseline_buckets: [i64] = []
 var _priv_import_baseline_next: [i64] = []
+var _priv_import_baseline_scope_id: i64 = 0
+var _priv_import_baseline_session_id: u32 = 0u32
 val PRIV_IMPORT_BASELINE_REL = "scripts/check/private_import_baseline.txt"
 val PRIV_IMPORT_BASELINE_MASK: i64 = 32767
+
+var _priv_import_repo_root: text = ""
+var _priv_import_dir_cache_keys: [text] = []
+var _priv_import_dir_cache_roots: [text] = []
+var _priv_import_dir_cache_buckets: [i64] = []
+var _priv_import_dir_cache_next: [i64] = []
+var _priv_import_dir_cache_scope_id: i64 = 0
+var _priv_import_dir_cache_session_id: u32 = 0u32
+val PRIV_IMPORT_DIR_CACHE_MASK: i64 = 4095
 
 fn private_import_dir_of(path: text) -> text:
     val parts = path.split("/")
@@ -73,40 +103,229 @@ fn private_import_is_test_importer(importer_path: text) -> bool:
         norm = norm.substring(2)
     norm.starts_with("test/") or norm.contains("/test/")
 
+fn private_import_clone_text(value: text) -> text:
+    if value == "":
+        return ""
+    value + ""
+
+fn private_import_dir_cache_ensure_scope():
+    val cur_scope = rt_transient_array_scope_identity_v1()
+    val cur_sess: u32 = rt_session_heap_id()
+    var valid = true
+    if _priv_import_dir_cache_session_id != 0u32 and cur_sess != _priv_import_dir_cache_session_id:
+        valid = false
+    if _priv_import_dir_cache_scope_id != 0:
+        if hir_phase_memo_priv_dir_scope_promoted(_priv_import_dir_cache_scope_id):
+            _priv_import_dir_cache_scope_id = 0
+        elif _priv_import_dir_cache_scope_id != cur_scope:
+            hir_phase_memo_clear_priv_dir_staging(_priv_import_dir_cache_scope_id)
+            valid = false
+    if not valid:
+        val scope_state = rt_transient_array_scope_state_v1()
+        val sess_active = scope_state == 1 and cur_sess != 0u32
+        if sess_active:
+            rt_session_alloc_begin()
+        _priv_import_repo_root = ""
+        _priv_import_dir_cache_keys = []
+        _priv_import_dir_cache_roots = []
+        _priv_import_dir_cache_buckets = []
+        _priv_import_dir_cache_next = []
+        _priv_import_dir_cache_scope_id = 0
+        _priv_import_dir_cache_session_id = 0u32
+        if sess_active:
+            rt_session_alloc_end()
+            _priv_import_dir_cache_session_id = cur_sess
+        elif cur_sess != 0u32:
+            _priv_import_dir_cache_session_id = cur_sess
+        elif scope_state == 1:
+            _priv_import_dir_cache_scope_id = cur_scope
+
+fn private_import_dir_cache_lookup(dir: text) -> i64:
+    if _priv_import_dir_cache_buckets.len() == 0:
+        return -1
+    var index = _priv_import_dir_cache_buckets[hash_text(dir) & PRIV_IMPORT_DIR_CACHE_MASK]
+    while index >= 0:
+        if _priv_import_dir_cache_keys[index] == dir:
+            return index
+        index = _priv_import_dir_cache_next[index]
+    -1
+
+fn private_import_dir_cache_record(visited: [text], found_root: text):
+    if visited.len() == 0:
+        return
+    val scope_state = rt_transient_array_scope_state_v1()
+    val cur_scope = rt_transient_array_scope_identity_v1()
+    val cur_sess: u32 = rt_session_heap_id()
+    val sess_active = scope_state == 1 and cur_sess != 0u32
+    if sess_active:
+        rt_session_alloc_begin()
+    val owned_root = if sess_active: private_import_clone_text(found_root) else: found_root
+    if _priv_import_dir_cache_buckets.len() == 0:
+        var buckets: [i64] = []
+        var fill = 0
+        while fill <= PRIV_IMPORT_DIR_CACHE_MASK:
+            buckets = buckets.push(-1)
+            fill = fill + 1
+        _priv_import_dir_cache_buckets = buckets
+    var i = 0
+    while i < visited.len():
+        val dir = if sess_active: private_import_clone_text(visited[i]) else: visited[i]
+        val bucket = hash_text(dir) & PRIV_IMPORT_DIR_CACHE_MASK
+        _priv_import_dir_cache_next = _priv_import_dir_cache_next.push(_priv_import_dir_cache_buckets[bucket])
+        _priv_import_dir_cache_buckets[bucket] = _priv_import_dir_cache_keys.len()
+        _priv_import_dir_cache_keys = _priv_import_dir_cache_keys.push(dir)
+        _priv_import_dir_cache_roots = _priv_import_dir_cache_roots.push(owned_root)
+        i = i + 1
+    if owned_root != "":
+        _priv_import_repo_root = owned_root
+    if sess_active:
+        rt_session_alloc_end()
+        _priv_import_dir_cache_session_id = cur_sess
+    elif scope_state == 2:
+        val repo_box: [text] = [_priv_import_repo_root]
+        val dir_roots: [HirPhaseMemoRoot] = [
+            HirPhaseMemoRoot.Texts(repo_box),
+            HirPhaseMemoRoot.Texts(_priv_import_dir_cache_keys),
+            HirPhaseMemoRoot.Texts(_priv_import_dir_cache_roots),
+            HirPhaseMemoRoot.Ints(_priv_import_dir_cache_buckets),
+            HirPhaseMemoRoot.Ints(_priv_import_dir_cache_next),
+        ]
+        val ok = hir_phase_memo_promote_roots(dir_roots)
+        rt_array_free(repo_box)
+        if not ok:
+            _priv_import_dir_cache_scope_id = cur_scope
+        elif cur_sess != 0u32:
+            _priv_import_dir_cache_session_id = cur_sess
+    elif scope_state == 1:
+        _priv_import_dir_cache_scope_id = cur_scope
+        hir_phase_memo_stage_priv_dir_cache(
+            cur_scope,
+            _priv_import_repo_root,
+            _priv_import_dir_cache_keys,
+            _priv_import_dir_cache_roots,
+            _priv_import_dir_cache_buckets,
+            _priv_import_dir_cache_next)
+    elif cur_sess != 0u32:
+        _priv_import_dir_cache_session_id = cur_sess
+
 fn private_import_repo_root(module_path: text) -> text:
     """First ancestor directory of `module_path` holding a `.git` entry (a
     directory, or the file a worktree carries), or "" when there is none."""
+    private_import_dir_cache_ensure_scope()
     var dir = private_import_dir_of(module_path)
+    var visited: [text] = []
+    var found_root: text = ""
     while dir != "":
+        if _priv_import_repo_root != "" and dir == _priv_import_repo_root:
+            found_root = _priv_import_repo_root
+            break
+        val cached_slot = private_import_dir_cache_lookup(dir)
+        if cached_slot >= 0:
+            found_root = _priv_import_dir_cache_roots[cached_slot]
+            break
+        visited = visited.push(dir)
         val marker = dir + "/.git"
         if file_exists(marker) or dir_exists(marker):
-            return dir
+            found_root = dir
+            break
         if not dir.contains("/"):
-            return ""
+            break
         dir = private_import_dir_of(dir)
-    ""
+    if visited.len() > 0:
+        private_import_dir_cache_record(visited, found_root)
+    if found_root != "" and _priv_import_repo_root == found_root:
+        return _priv_import_repo_root
+    found_root
+
+fn private_import_baseline_ensure_scope():
+    val cur_scope = rt_transient_array_scope_identity_v1()
+    val cur_sess: u32 = rt_session_heap_id()
+    var valid = true
+    if _priv_import_baseline_session_id != 0u32 and cur_sess != _priv_import_baseline_session_id:
+        valid = false
+    if _priv_import_baseline_scope_id != 0:
+        if hir_phase_memo_priv_base_scope_promoted(_priv_import_baseline_scope_id):
+            _priv_import_baseline_scope_id = 0
+        elif _priv_import_baseline_scope_id != cur_scope:
+            hir_phase_memo_clear_priv_base_staging(_priv_import_baseline_scope_id)
+            valid = false
+    if not valid:
+        val scope_state = rt_transient_array_scope_state_v1()
+        val sess_active = scope_state == 1 and cur_sess != 0u32
+        if sess_active:
+            rt_session_alloc_begin()
+        _priv_import_baseline_root = ""
+        _priv_import_baseline_keys = []
+        _priv_import_baseline_buckets = []
+        _priv_import_baseline_next = []
+        _priv_import_baseline_scope_id = 0
+        _priv_import_baseline_session_id = 0u32
+        if sess_active:
+            rt_session_alloc_end()
+            _priv_import_baseline_session_id = cur_sess
+        elif cur_sess != 0u32:
+            _priv_import_baseline_session_id = cur_sess
+        elif scope_state == 1:
+            _priv_import_baseline_scope_id = cur_scope
 
 fn private_import_baseline_load(root: text):
-    if _priv_import_baseline_root == root:
+    private_import_baseline_ensure_scope()
+    if root == "" or _priv_import_baseline_root == root:
         return
-    _priv_import_baseline_root = root
-    _priv_import_baseline_keys = []
-    _priv_import_baseline_next = []
-    var buckets: [i64] = []
+    val scope_state = rt_transient_array_scope_state_v1()
+    val cur_scope = rt_transient_array_scope_identity_v1()
+    val cur_sess: u32 = rt_session_heap_id()
+    val sess_active = scope_state == 1 and cur_sess != 0u32
+    if sess_active:
+        rt_session_alloc_begin()
+    val local_root: text = if sess_active: private_import_clone_text(root) else: root
+    var local_keys: [text] = []
+    var local_next: [i64] = []
+    var local_buckets: [i64] = []
     var fill = 0
     while fill <= PRIV_IMPORT_BASELINE_MASK:
-        buckets = buckets.push(-1)
+        local_buckets = local_buckets.push(-1)
         fill = fill + 1
-    _priv_import_baseline_buckets = buckets
-    val content = file_read_nullable(root + "/" + PRIV_IMPORT_BASELINE_REL) ?? ""
+    val content = file_read_nullable(local_root + "/" + PRIV_IMPORT_BASELINE_REL) ?? ""
     for raw_line in content.split("\n"):
         val line = raw_line.trim()
         if line == "":
             continue
         val bucket = hash_text(line) & PRIV_IMPORT_BASELINE_MASK
-        _priv_import_baseline_next = _priv_import_baseline_next.push(_priv_import_baseline_buckets[bucket])
-        _priv_import_baseline_buckets[bucket] = _priv_import_baseline_keys.len()
-        _priv_import_baseline_keys = _priv_import_baseline_keys.push(line)
+        local_next = local_next.push(local_buckets[bucket])
+        local_buckets[bucket] = local_keys.len()
+        local_keys = local_keys.push(line)
+    var new_scope_id: i64 = 0
+    var new_sess_id: u32 = 0u32
+    if sess_active:
+        rt_session_alloc_end()
+        new_sess_id = cur_sess
+    elif scope_state == 2:
+        val root_box: [text] = [local_root]
+        val base_roots: [HirPhaseMemoRoot] = [
+            HirPhaseMemoRoot.Texts(root_box),
+            HirPhaseMemoRoot.Texts(local_keys),
+            HirPhaseMemoRoot.Ints(local_buckets),
+            HirPhaseMemoRoot.Ints(local_next),
+        ]
+        val promoted_ok = hir_phase_memo_promote_roots(base_roots)
+        rt_array_free(root_box)
+        if not promoted_ok:
+            new_scope_id = cur_scope
+        elif cur_sess != 0u32:
+            new_sess_id = cur_sess
+    elif scope_state == 1:
+        new_scope_id = cur_scope
+        hir_phase_memo_stage_priv_base_cache(
+            cur_scope, local_root, local_keys, local_buckets, local_next)
+    elif cur_sess != 0u32:
+        new_sess_id = cur_sess
+    _priv_import_baseline_root = local_root
+    _priv_import_baseline_keys = local_keys
+    _priv_import_baseline_buckets = local_buckets
+    _priv_import_baseline_next = local_next
+    _priv_import_baseline_scope_id = new_scope_id
+    _priv_import_baseline_session_id = new_sess_id
 
 fn private_import_is_baselined(module_path: text, name: text) -> bool:
     """`rel|name` is frozen in the baseline at the repository root that

@@ -44,6 +44,18 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_string_len(value: text) -> i64
+extern fn rt_transient_array_scope_state_v1() -> i64
+extern fn rt_transient_array_scope_identity_v1() -> i64
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+extern fn rt_session_heap_id() -> u32
+extern fn rt_session_alloc_begin() -> bool
+extern fn rt_session_alloc_end() -> bool
+
+use compiler.hir.hir_lowering.phase_memo_ownership.{
+    hir_phase_memo_stage_surface_cache,
+    hir_phase_memo_clear_surface_staging,
+    hir_phase_memo_surface_scope_promoted
+}
 
 # `rt_env_get` yields nil for an UNSET variable, so both the extern and this
 # wrapper are OPTIONAL — every call site below already uses the optional-safe
@@ -158,6 +170,22 @@ struct HirMaterializedPayloadOrigin:
     # collision/cycle identity always uses physical module_name above.
     module_key: text
 
+var _hir_surface_name_gen: i64 = -1
+var _hir_surface_name_len: i64 = -1
+var _hir_surface_name_surf_len: i64 = -1
+var _hir_surface_name_first_hash: i64 = 0
+var _hir_surface_name_mid_hash: i64 = 0
+var _hir_surface_name_last_hash: i64 = 0
+var _hir_surface_name_scope_id: i64 = 0
+var _hir_surface_name_session_id: u32 = 0u32
+var _hir_surface_name_buckets: [i64] = []
+var _hir_surface_name_next: [i64] = []
+var _hir_surface_name_mask: i64 = 0
+var _hir_surface_name_build_count: i64 = 0
+
+fn hir_surface_name_index_build_count() -> i64:
+    _hir_surface_name_build_count
+
 fn hir_module_surface_index(surfaces: ModuleSurfacesByName, name: text) -> i64:
     # Native optional class returns and Dict bracket reads can preserve the
     # success discriminator while dropping the ModuleSurface payload. Resolve
@@ -165,14 +193,115 @@ fn hir_module_surface_index(surfaces: ModuleSurfacesByName, name: text) -> i64:
     # explicitly.  Do not materialize Dict keys/values in this hot path.
     val names = surfaces.ordered_names
     val indices = surfaces.ordered_indices
-    var position = 0
-    while position < names.len() and position < indices.len():
-        if names[position] == name:
-            val index = indices[position]
-            if index >= 0 and index < surfaces.surfaces.len():
+    val count = if names.len() < indices.len(): names.len() else: indices.len()
+    if count == 0:
+        return -1
+    if not surfaces.frozen or surfaces.generation <= 0:
+        var position = 0
+        while position < count:
+            if names[position] == name:
+                val index = indices[position]
+                if index >= 0 and index < surfaces.surfaces.len():
+                    return index
+                return -1
+            position = position + 1
+        return -1
+
+    val cur_scope = rt_transient_array_scope_identity_v1()
+    val cur_sess: u32 = rt_session_heap_id()
+    var scope_valid = true
+    if _hir_surface_name_session_id != 0u32 and cur_sess != _hir_surface_name_session_id:
+        scope_valid = false
+    if _hir_surface_name_scope_id != 0:
+        if hir_phase_memo_surface_scope_promoted(_hir_surface_name_scope_id):
+            _hir_surface_name_scope_id = 0
+        elif _hir_surface_name_scope_id != cur_scope:
+            hir_phase_memo_clear_surface_staging(_hir_surface_name_scope_id)
+            scope_valid = false
+    if not scope_valid:
+        _hir_surface_name_gen = -1
+        _hir_surface_name_len = -1
+        _hir_surface_name_surf_len = -1
+        _hir_surface_name_scope_id = 0
+        _hir_surface_name_session_id = 0u32
+        _hir_surface_name_buckets = []
+        _hir_surface_name_next = []
+        _hir_surface_name_mask = 0
+
+    val surf_len = surfaces.surfaces.len()
+    val first_hash = hash_text(names[0])
+    val mid_hash = hash_text(names[count / 2])
+    val last_hash = hash_text(names[count - 1])
+    val cache_hit = (
+        _hir_surface_name_gen == surfaces.generation and
+        _hir_surface_name_len == count and
+        _hir_surface_name_surf_len == surf_len and
+        _hir_surface_name_first_hash == first_hash and
+        _hir_surface_name_mid_hash == mid_hash and
+        _hir_surface_name_last_hash == last_hash and
+        _hir_surface_name_buckets.len() > 0
+    )
+    if not cache_hit:
+        var bucket_count: i64 = 64
+        while bucket_count < count * 2:
+            bucket_count = bucket_count * 2
+        val mask = bucket_count - 1
+        val scope_state = rt_transient_array_scope_state_v1()
+        val sess_active = scope_state == 1 and cur_sess != 0u32
+        if sess_active:
+            rt_session_alloc_begin()
+        var buckets: [i64] = []
+        var fill = 0
+        while fill < bucket_count:
+            buckets = buckets.push(-1)
+            fill = fill + 1
+        var next: [i64] = []
+        var fill_next = 0
+        while fill_next < count:
+            next = next.push(-1)
+            fill_next = fill_next + 1
+        # Insert in reverse order so bucket heads preserve first-occurrence-wins
+        # on duplicate entries in ordered_names.
+        var pos = count - 1
+        while pos >= 0:
+            val bucket = hash_text(names[pos]) & mask
+            next[pos] = buckets[bucket]
+            buckets[bucket] = pos
+            pos = pos - 1
+        var new_scope_id: i64 = 0
+        var new_sess_id: u32 = 0u32
+        if sess_active:
+            rt_session_alloc_end()
+            new_sess_id = cur_sess
+        elif scope_state == 2:
+            val ok_b = rt_transient_heap_promote(buckets)
+            val ok_n = rt_transient_heap_promote(next)
+            if not (ok_b and ok_n):
+                new_scope_id = cur_scope
+        elif scope_state == 1:
+            new_scope_id = cur_scope
+            hir_phase_memo_stage_surface_cache(cur_scope, buckets, next)
+        _hir_surface_name_gen = surfaces.generation
+        _hir_surface_name_len = count
+        _hir_surface_name_surf_len = surf_len
+        _hir_surface_name_first_hash = first_hash
+        _hir_surface_name_mid_hash = mid_hash
+        _hir_surface_name_last_hash = last_hash
+        _hir_surface_name_scope_id = new_scope_id
+        _hir_surface_name_session_id = new_sess_id
+        _hir_surface_name_buckets = buckets
+        _hir_surface_name_next = next
+        _hir_surface_name_mask = mask
+        _hir_surface_name_build_count = _hir_surface_name_build_count + 1
+
+    var slot = _hir_surface_name_buckets[hash_text(name) & _hir_surface_name_mask]
+    while slot >= 0:
+        if names[slot] == name:
+            val index = indices[slot]
+            if index >= 0 and index < surf_len:
                 return index
             return -1
-        position = position + 1
+        slot = _hir_surface_name_next[slot]
     -1
 
 fn hir_export_origin_surface_index(

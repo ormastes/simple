@@ -33,8 +33,12 @@
 # linker strips the prefix (the spec's fixture linker does).
 use std.io_runtime.{file_exists, file_delete, dir_list_optional, file_read}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, host_os}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.backend.llvm_native_link.{NativeLinkOptions, link_llvm_native}
+use compiler.backend.runtime_compiler.{windows_link_flavor_for_target}
+use compiler.backend.linker.linker_wrapper.{native_windows_trial_artifact_unresolved_begin_v1,
+    native_windows_trial_artifact_unresolved_end_v1}
 use compiler.driver.driver_build.go_to_end.{go_to_end_user_output_v1, go_to_end_sdn_quote_v1,
     go_to_end_write_manifest_with_trial_v1, GoToEndLedgerV1, GO_TO_END_UNATTRIBUTED_V1}
 
@@ -61,19 +65,77 @@ pub fn go_to_end_target_is_darwin_v1(target_triple: text) -> bool:
     val lowered = target_triple.to_lower()
     lowered.contains("darwin") or lowered.contains("apple") or lowered.contains("macos")
 
-pub fn go_to_end_trial_adapt_extra_flags_v1(extra_flags: [text], target_triple: text) -> [text]:
-    if not go_to_end_target_is_darwin_v1(target_triple):
-        return extra_flags
+fn _go_to_end_target_is_windows_v1(target_triple: text) -> bool:
+    val lowered = target_triple.to_lower()
+    if lowered == "":
+        return host_os() == "windows"
+    lowered.contains("windows") or lowered.contains("mingw") or lowered.contains("msvc")
+
+fn _go_to_end_windows_flavor_v1(target_triple: text) -> text:
+    val lowered = target_triple.to_lower()
+    val abi_hint = if lowered == "windows-msvc" or lowered == "msvc":
+        "windows-msvc"
+    elif lowered == "windows-gnu" or lowered == "gnu" or lowered == "mingw":
+        "windows-gnu"
+    else:
+        ""
+    windows_link_flavor_for_target(target_triple, abi_hint)
+
+fn _go_to_end_is_report_pass_flags_v1(extra_flags: [text]) -> bool:
+    for flag in extra_flags:
+        val norm = flag.trim().lower()
+        if norm == "-wl,--unresolved-symbols=ignore-all" or norm == "--unresolved-symbols=ignore-all" or
+                norm == "-wl,--warn-unresolved-symbols" or norm == "--warn-unresolved-symbols" or
+                norm == "-wl,-xlink=-force:unresolved" or norm == "-wl,-undefined,dynamic_lookup" or
+                norm == "/force:unresolved" or norm == "-force:unresolved":
+            return false
+    true
+
+fn _go_to_end_strict_or_internal_v1() -> bool:
+    if native_tool_strict_requested_v1():
+        return true
+    if (env_get_nullable("SIMPLE_NATIVE_TOOL_STRICT") ?? "").trim() == "1":
+        return true
+    (env_get_nullable("SIMPLE_LINKER") ?? "").trim().to_lower() == "internal"
+
+fn _go_to_end_adapt_windows_flags_v1(extra_flags: [text], flavor: text) -> [text]:
+    val is_msvc = flavor == "msvc"
+    val error_limit_flag = if is_msvc: "/ERRORLIMIT:0" else: "-Wl,--error-limit=0"
+    val no_gc_flag = if is_msvc: "/OPT:NOREF" else: "-Wl,--no-gc-sections"
+    val unresolved_flag = if is_msvc: "/FORCE:UNRESOLVED" else: "-Wl,-Xlink=-force:unresolved"
     var adapted: [text] = []
     for flag in extra_flags:
-        if flag == "-Wl,--error-limit=0" or flag == "-Wl,--no-gc-sections" or flag == "-Wl,--warn-unresolved-symbols":
+        val norm = flag.trim().lower()
+        if norm == "-wl,--warn-unresolved-symbols" or norm == "--warn-unresolved-symbols":
             continue
-        elif flag == "-Wl,--unresolved-symbols=ignore-all":
-            if not adapted.contains("-Wl,-undefined,dynamic_lookup"):
-                adapted = adapted.push("-Wl,-undefined,dynamic_lookup")
-        elif not adapted.contains(flag):
-            adapted = adapted.push(flag)
+        var mapped = flag
+        if norm == "-wl,--error-limit=0" or norm == "--error-limit=0":
+            mapped = error_limit_flag
+        elif norm == "-wl,--no-gc-sections" or norm == "--no-gc-sections":
+            mapped = no_gc_flag
+        elif norm == "-wl,--unresolved-symbols=ignore-all" or norm == "--unresolved-symbols=ignore-all":
+            mapped = unresolved_flag
+        if not adapted.contains(mapped):
+            adapted = adapted.push(mapped)
     adapted
+
+pub fn go_to_end_trial_adapt_extra_flags_v1(extra_flags: [text], target_triple: text) -> [text]:
+    if _go_to_end_strict_or_internal_v1() and _go_to_end_is_report_pass_flags_v1(extra_flags):
+        return []
+    if go_to_end_target_is_darwin_v1(target_triple):
+        var adapted: [text] = []
+        for flag in extra_flags:
+            if flag == "-Wl,--error-limit=0" or flag == "-Wl,--no-gc-sections" or flag == "-Wl,--warn-unresolved-symbols":
+                continue
+            elif flag == "-Wl,--unresolved-symbols=ignore-all":
+                if not adapted.contains("-Wl,-undefined,dynamic_lookup"):
+                    adapted = adapted.push("-Wl,-undefined,dynamic_lookup")
+            elif not adapted.contains(flag):
+                adapted = adapted.push(flag)
+        return adapted
+    if _go_to_end_target_is_windows_v1(target_triple):
+        return _go_to_end_adapt_windows_flags_v1(extra_flags, _go_to_end_windows_flavor_v1(target_triple))
+    extra_flags
 
 # Identity with a declared Result parameter. A trait-object method call's
 # return type does not reach the caller's local under the self-hosted
@@ -211,7 +273,13 @@ impl GoToEndTrialLinkerV1 for GoToEndHostedTrialLinkerV1:
         for flag in adapted_extra:
             flags = flags.push(flag)
         trial_opts.linker_flags = flags
-        link_llvm_native(objects, output, trial_opts)
+        val allow_unresolved_artifact = output.ends_with(GO_TO_END_TRIAL_SUFFIX_V1) and not _go_to_end_is_report_pass_flags_v1(extra_flags)
+        if allow_unresolved_artifact:
+            native_windows_trial_artifact_unresolved_begin_v1()
+        val link_res = link_llvm_native(objects, output, trial_opts)
+        if allow_unresolved_artifact:
+            native_windows_trial_artifact_unresolved_end_v1()
+        link_res
 
 # Run the two-pass trial link. `output` is the build's (user or temporary)
 # output path; the artifact goes to go_to_end_trial_output_v1(output). Never

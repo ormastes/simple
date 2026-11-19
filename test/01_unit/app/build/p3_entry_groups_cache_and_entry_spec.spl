@@ -1,0 +1,140 @@
+"""
+# P3 entry-groups cache/composition wiring, Phase 4 Windows path validation, and --emit-entry-object in-process bypass
+
+Unit tests for:
+1. `native_build_mir_shard_parallel`: returns `0` immediately when `args`
+   contains `--emit-entry-object` or `SIMPLE_NATIVE_BUILD_EMIT_OBJECT=entry`,
+   while still enabling MIR sharding for normal builds when `SIMPLE_MIR_SHARDING=1`.
+2. `scripts/bootstrap/p3-entry-groups.shs`: executes group launcher generation
+   to verify constant `SIMPLE_P3_RUN="P3-GROUPS"`, `P3_GROUP_NAME`,
+   `SIMPLE_HIR_CACHE_DIR`, `backends_host_only` + `SIMPLE_BACKEND_COMPOSITION`,
+   `SIMPLE_MIR_SHARDING="0"` + `Remove-Item Env:SIMPLE_MIR_SHARD_COUNT` on
+   `entry`, and `P3G_STREAMING_SURFACES` / `P3G_INTERFACE_HIR` passthrough.
+3. `scripts/bootstrap/build-phase4-direct-product.shs`: executes `absolute()`
+   and `reject_symlink_components()` against `[A-Za-z]:/*` Windows drive paths,
+   POSIX paths, and invalid path spellings.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io_runtime.{file_read, file_exists, dir_create_all, dir_remove_all, process_run, getpid, host_os}
+use app.io.env_ops.{env_get, env_set, env_unset}
+use app.cli.native_build_main.{native_build_mir_shard_parallel}
+
+fn _restore_env(name: text, prior: text):
+    if prior == "":
+        env_unset(name)
+    else:
+        env_set(name, prior)
+
+describe "native_build_mir_shard_parallel --emit-entry-object bypass":
+    it "returns 0 immediately for --emit-entry-object even with SIMPLE_MIR_SHARDING=1":
+        val saved_sharding = env_get("SIMPLE_MIR_SHARDING") ?? ""
+        val saved_emit = env_get("SIMPLE_NATIVE_BUILD_EMIT_OBJECT") ?? ""
+        val saved_selective = env_get("SIMPLE_MIR_SELECTIVE") ?? ""
+        env_unset("SIMPLE_MIR_SELECTIVE")
+        env_set("SIMPLE_MIR_SHARDING", "1")
+        env_unset("SIMPLE_NATIVE_BUILD_EMIT_OBJECT")
+
+        expect(native_build_mir_shard_parallel(["--entry", "src/app/cli/bootstrap_main.spl", "--emit-entry-object", "-o", "entry.o"])).to_equal(0)
+
+        env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", "entry")
+        expect(native_build_mir_shard_parallel(["--entry", "src/app/cli/bootstrap_main.spl", "-o", "entry.o"])).to_equal(0)
+
+        env_unset("SIMPLE_NATIVE_BUILD_EMIT_OBJECT")
+        expect(native_build_mir_shard_parallel(["--entry", "src/app/cli/bootstrap_main.spl", "-o", "simple.exe"]) > 0).to_equal(true)
+
+        _restore_env("SIMPLE_MIR_SHARDING", saved_sharding)
+        _restore_env("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", saved_emit)
+        _restore_env("SIMPLE_MIR_SELECTIVE", saved_selective)
+
+describe "p3-entry-groups.shs launcher generation":
+    it "emits shared P3-GROUPS run key, HIR cache dir, host-only composition, and entry MIR opt-out":
+        val script = file_read("scripts/bootstrap/p3-entry-groups.shs")
+        expect(script).to_contain("src/compositions/backends_host_only")
+        expect(script).to_contain("SIMPLE_BACKEND_COMPOSITION")
+        expect(script).to_contain("SIMPLE_P3_RUN=\"P3-GROUPS\"")
+        expect(script.contains("SIMPLE_P3_RUN=\"P3-GROUPS-$name\"")).to_equal(false)
+        expect(script).to_contain("P3_GROUP_NAME=\"$name\"")
+        expect(script).to_contain("SIMPLE_HIR_CACHE_DIR=")
+        expect(script).to_contain("SIMPLE_MIR_SHARDING=\"0\"")
+        expect(script).to_contain("P3G_STREAMING_SURFACES")
+        expect(script).to_contain("SIMPLE_STAGE3_STREAMING_SURFACES")
+        expect(script).to_contain("P3G_INTERFACE_HIR")
+        expect(script).to_contain("SIMPLE_MIR_SHARD_INTERFACE_HIR")
+        expect(script).to_contain("P3G_GO_TO_END_FLAG")
+
+        if host_os() == "windows":
+            step("Execute p3-entry-groups.shs to verify generated group_1.run.ps1 and entry.run.ps1")
+            val out_dir = "build/tmp/p3_entry_groups_spec_{getpid()}"
+            dir_remove_all(out_dir)
+            dir_create_all(out_dir)
+            val saved_stage2 = env_get("P3G_STAGE2") ?? ""
+            val saved_full = env_get("P3G_FULL_BACKENDS") ?? ""
+            val saved_stream = env_get("P3G_STREAMING_SURFACES") ?? ""
+            val saved_iface = env_get("P3G_INTERFACE_HIR") ?? ""
+            val saved_gte = env_get("P3G_GO_TO_END_GROUPS") ?? ""
+            val saved_gte_flag = env_get("P3G_GO_TO_END_FLAG") ?? ""
+            val saved_entry_shards = env_get("P3G_ENTRY_MIR_SHARDS") ?? ""
+
+            env_set("P3G_STAGE2", "C:/Windows/System32/where.exe")
+            env_set("P3G_FULL_BACKENDS", "0")
+            env_unset("P3G_STREAMING_SURFACES")
+            env_unset("P3G_INTERFACE_HIR")
+            env_set("P3G_GO_TO_END_GROUPS", "1")
+            env_unset("P3G_GO_TO_END_FLAG")
+            env_set("P3G_ENTRY_MIR_SHARDS", "0")
+
+            val (_out1, _err1, _rc1) = process_run("sh", ["scripts/bootstrap/p3-entry-groups.shs", ".", out_dir, "1", "1"])
+            val g1_ps1 = file_read("{out_dir}/group_1.run.ps1")
+            val entry_ps1 = file_read("{out_dir}/entry.run.ps1")
+
+            expect(g1_ps1).to_contain("$env:SIMPLE_P3_RUN=\"P3-GROUPS\"")
+            expect(g1_ps1.contains("P3-GROUPS-group_1")).to_equal(false)
+            expect(g1_ps1).to_contain("$env:P3_GROUP_NAME=\"group_1\"")
+            expect(g1_ps1).to_contain("$env:SIMPLE_BACKEND_COMPOSITION=\"host-only\"")
+            expect(g1_ps1).to_contain("$env:SIMPLE_HIR_CACHE_DIR=")
+            expect(g1_ps1).to_contain("\\hir\"")
+            expect(g1_ps1).to_contain("src/compositions/backends_host_only")
+            expect(g1_ps1).to_contain("'--go-to-end'")
+            expect(g1_ps1.contains("SIMPLE_STAGE3_STREAMING_SURFACES")).to_equal(false)
+            expect(g1_ps1.contains("SIMPLE_MIR_SHARD_INTERFACE_HIR")).to_equal(false)
+
+            expect(entry_ps1).to_contain("$env:SIMPLE_P3_RUN=\"P3-GROUPS\"")
+            expect(entry_ps1).to_contain("$env:P3_GROUP_NAME=\"entry\"")
+            expect(entry_ps1).to_contain("$env:SIMPLE_MIR_SHARDING=\"0\"")
+            expect(entry_ps1).to_contain("Remove-Item Env:SIMPLE_MIR_SHARD_COUNT -EA SilentlyContinue")
+
+            step("Verify full_backends=1, streaming/interface-HIR passthrough, and P3G_GO_TO_END_FLAG=0")
+            env_set("P3G_FULL_BACKENDS", "1")
+            env_set("P3G_STREAMING_SURFACES", "1")
+            env_set("P3G_INTERFACE_HIR", "1")
+            env_set("P3G_GO_TO_END_FLAG", "0")
+            val (_out2, _err2, _rc2) = process_run("sh", ["scripts/bootstrap/p3-entry-groups.shs", ".", out_dir, "1", "1"])
+            val g1_full_ps1 = file_read("{out_dir}/group_1.run.ps1")
+            expect(g1_full_ps1).to_contain("$env:SIMPLE_BACKEND_COMPOSITION=\"full\"")
+            expect(g1_full_ps1).to_contain("src/compositions/cuda_static")
+            expect(g1_full_ps1).to_contain("src/plugins")
+            expect(g1_full_ps1).to_contain("$env:SIMPLE_STAGE3_STREAMING_SURFACES=\"1\"")
+            expect(g1_full_ps1).to_contain("$env:SIMPLE_MIR_SHARD_INTERFACE_HIR=\"1\"")
+            expect(g1_full_ps1.contains("'--go-to-end'")).to_equal(false)
+
+            dir_remove_all(out_dir)
+            _restore_env("P3G_STAGE2", saved_stage2)
+            _restore_env("P3G_FULL_BACKENDS", saved_full)
+            _restore_env("P3G_STREAMING_SURFACES", saved_stream)
+            _restore_env("P3G_INTERFACE_HIR", saved_iface)
+            _restore_env("P3G_GO_TO_END_GROUPS", saved_gte)
+            _restore_env("P3G_GO_TO_END_FLAG", saved_gte_flag)
+            _restore_env("P3G_ENTRY_MIR_SHARDS", saved_entry_shards)
+
+describe "build-phase4-direct-product.shs Windows drive path handling":
+    it "accepts [A-Za-z]:/* in absolute() and preserves drive prefixes in reject_symlink_components()":
+        val probe_cmd = "sed -n '/^die()/,/^executor=/p' scripts/bootstrap/build-phase4-direct-product.shs | sed '/^executor=/d' > /tmp/p4dp_helpers_$$.sh && . /tmp/p4dp_helpers_$$.sh && rm -f /tmp/p4dp_helpers_$$.sh && absolute 'C:/dev/wt/wave2-lanes' && absolute 'd:/foo/bar' && absolute '/usr/local' && ! absolute 'relative/path' && ! absolute 'C:relative' && reject_symlink_components 'C:/nonexistent_dir_g1_probe/sub'"
+        val (_out, err, rc) = process_run("sh", ["-c", probe_cmd])
+        expect(rc).to_equal(0)
+
+    it "rejects unsafe Windows drive path spellings in reject_symlink_components()":
+        val bad_cmd = "sed -n '/^die()/,/^executor=/p' scripts/bootstrap/build-phase4-direct-product.shs | sed '/^executor=/d' > /tmp/p4dp_bad_$$.sh && . /tmp/p4dp_bad_$$.sh && rm -f /tmp/p4dp_bad_$$.sh && reject_symlink_components 'C:/dev/../escape'"
+        val (_out, err, rc) = process_run("sh", ["-c", bad_cmd])
+        expect(rc).to_equal(2)
+        expect(err).to_contain("unsafe path spelling")

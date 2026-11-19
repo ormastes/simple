@@ -1,0 +1,241 @@
+"""
+## Purpose and audience
+
+Unit tests for two 30.types fixes in Lane G4:
+1. `HmInferContext.generalize` avoiding $O(F \times L)$ `self.env` rescans via a
+   level early-out (`var_level > self.level`), incremental `module_env_vars` +
+   `env_trail_names` scanning when `self.module_env_vars_ready` is true, and
+   skipping `bound_vars` dictionary allocation when `scheme.vars.is_empty()`.
+2. Indexing `module.functions` safely across all 6 `SymbolId` struct-keyed
+   dictionary hazard sites in `inference_control.spl`, `traits.spl`,
+   `trait_collection.spl`, `api_signature_projection_v1.spl`, and
+   `typed_module_owner_v1.spl`.
+
+## Operator workflow
+
+Run with the pure-Simple interpreter:
+`SIMPLE_LIB=src bin/simple test test/01_unit/compiler/types/type_infer_generalize_and_symbol_id_dict_spec.spl --mode=interpreter`
+"""
+
+use std.spec.{describe, it, expect, step, fail}
+use std.io_runtime.{file_read}
+use compiler.common.config.Logger
+use compiler.common.diagnostics.span.Span
+use compiler.core.ast.{ast_reset}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.types.type_infer_types.{HmInferContext, TypeScheme, TypeInferError}
+use compiler.types.type_infer.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.generalization.*
+use compiler.types.type_infer.traits.*
+use compiler.types.type_infer.trait_collection.*
+use compiler.types.type_infer.api_signature_projection_v1.{project_api_signatures_v1}
+use compiler.types.type_infer.typed_module_owner_v1.{
+    HmTypedModuleLimitsV1, hm_infer_owned_typed_module_v1
+}
+
+fn ti_fn(params: [HirType], ret: HirType) -> HirType:
+    HirType(kind: HirTypeKind.Function(params, ret, []), span: Span.empty())
+
+fn ti_var_id(ty: HirType) -> i64:
+    match ty.kind:
+        case Infer(id, _): id
+        case _: -1
+
+fn ti_lower_source(source: text, owner: text) -> HirModule:
+    ast_reset()
+    val parsed = parse_full_frontend(source, "{owner}.spl", owner, Logger(level: 0))
+    var lowering = HirLowering.with_filename("{owner}.spl")
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    module
+
+fn ti_owned_limits() -> HmTypedModuleLimitsV1:
+    HmTypedModuleLimitsV1(max_functions: 64, max_nodes: 4096, max_depth: 32, max_work: 1000000)
+
+fn ti_primitive_valid_module() -> HirModule:
+    ast_reset()
+    val parsed = parse_full_frontend("fn answer() -> i64:\n    42\n", "src/typed.spl", "typed", Logger(level: 0))
+    var lowering = HirLowering.with_filename("src/typed.spl")
+    lowering.use_explicit_semantic_policy()
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    module
+
+describe "HmInferContext.generalize O(1) level fast-path and incremental env trail scan":
+    it "returns empty scheme immediately when no free variable is deeper than self.level":
+        # @req REQ-G4-GEN-001
+        step("Create a context at level 1 with outer env vars and generalize non-deeper types")
+        var ctx = HmInferContext.new()
+        val lvl0_var = ctx.fresh_var(Span.empty())
+        ctx.bind_mono("global_v", lvl0_var)
+        ctx.enter_level()
+        val lvl1_var = ctx.fresh_var(Span.empty())
+        val i64_ty = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+
+        val concrete_scheme = ctx.generalize(i64_ty)
+        expect(concrete_scheme.vars).to_equal([])
+
+        val shallow_scheme = ctx.generalize(ti_fn([lvl0_var, lvl1_var], i64_ty))
+        expect(shallow_scheme.vars).to_equal([])
+
+    it "seeds from module_env_vars and scans only env_trail_names when module_env_vars_ready is true":
+        # @req REQ-G4-GEN-002
+        step("Seed module_env_vars, enter a function scope with trail bindings and an untracked decoy in self.env")
+        var ctx = HmInferContext.new()
+        val mod_var = ctx.fresh_var(Span.empty())
+        ctx.bind_mono("mod_fn", mod_var)
+        ctx.module_env_vars = ctx.env_free_var_ids()
+        ctx.module_env_vars_ready = true
+
+        ctx.enter_level()
+        val local_mono = ctx.fresh_var(Span.empty())
+        ctx.bind_mono("local_mono", local_mono)
+
+        ctx.enter_level()
+        val deeper = ctx.fresh_var(Span.empty())
+        val poly_bound = ctx.fresh_var(Span.empty())
+        val poly_free = ctx.fresh_var(Span.empty())
+        val decoy_var = ctx.fresh_var(Span.empty())
+        ctx.exit_level()
+
+        val deeper_id = ti_var_id(deeper)
+        val poly_bound_id = ti_var_id(poly_bound)
+        val decoy_id = ti_var_id(decoy_var)
+
+        # Put poly binding onto env_trail_names via bind_poly: bound var is NOT env-free,
+        # while poly_free IS unbound in the scheme and MUST be excluded via env_trail_names.
+        ctx.bind_poly("poly_local", TypeScheme(vars: [poly_bound_id], ty: ti_fn([poly_bound], poly_free)))
+
+        # Insert an untracked entry directly into ctx.env after module_env_vars_ready=true
+        # without touching module_env_vars or env_trail_names.
+        ctx.env["untracked_direct_entry"] = TypeScheme(vars: [], ty: decoy_var)
+
+        val scheme = ctx.generalize(ti_fn([mod_var, local_mono, deeper, poly_bound, poly_free, decoy_var], deeper))
+        expect(scheme.vars).to_equal([deeper_id, poly_bound_id, decoy_id])
+
+    it "retains sound full-env exclusion when module_env_vars_ready is false and matches incremental source contract":
+        # @req REQ-G4-GEN-003
+        step("Verify fallback path and check generalization.spl structural contract")
+        var ctx = HmInferContext.new()
+        ctx.enter_level()
+        val outer_mono = ctx.fresh_var(Span.empty())
+        ctx.bind_mono("outer_mono", outer_mono)
+        ctx.enter_level()
+        val inner_gen = ctx.fresh_var(Span.empty())
+        ctx.exit_level()
+
+        val scheme = ctx.generalize(ti_fn([outer_mono], inner_gen))
+        expect(scheme.vars).to_equal([ti_var_id(inner_gen)])
+
+        val src = file_read("src/compiler/30.types/type_infer/generalization.spl") ?? ""
+        expect(src).to_contain("var has_candidate = false")
+        expect(src).to_contain("if not has_candidate:")
+        expect(src).to_contain("self.module_env_vars_ready")
+        expect(src).to_contain("self.env_trail_names")
+        expect(src).to_contain("scheme.vars.is_empty()")
+
+describe "SymbolId struct-keyed Dict hazards across 30.types/type_infer":
+    it "runs forward-call inference, trait bounds, impl block conversion, and signature projection cleanly":
+        # @req REQ-G4-SYMID-001
+        step("Lower a module with forward call, trait, impl block, and multiple functions")
+        val source = "trait Marked:\n    fn mark(self) -> i64\n\nimpl Marked for i64:\n    fn mark(self) -> i64:\n        self\n\nfn generic_id<T>(x: T) -> T:\n    x\n\nfn caller() -> i64:\n    callee() + 1\n\nfn callee() -> i64:\n    41\n"
+        val module = ti_lower_source(source, "symid_infer")
+
+        var ctx = HmInferContext.with_builtins()
+        ctx.infer_module(module)
+        expect(ctx.errors.len()).to_equal(0)
+
+        var impl_ok_count = 0
+        for hir_impl in module.impls:
+            if hir_impl.has_trait_:
+                val blk = ctx.convert_hir_impl_to_block(hir_impl, module)
+                expect(blk.is_ok()).to_equal(true)
+                impl_ok_count = impl_ok_count + 1
+        expect(impl_ok_count).to_equal(1)
+
+        val facts = project_api_signatures_v1(module, ctx)
+        expect(facts.inference_errors).to_equal(0)
+        expect(facts.callables.len()).to_be_greater_than(2)
+
+    it "matches foreign SymbolId by raw id in hm_infer_owned_typed_module_v1 without struct-key hash failures":
+        # @req REQ-G4-SYMID-002
+        step("Verify slot_by_raw_id matches a fresh SymbolId instance and rejects mismatched raw ids")
+        val ok_module = ti_primitive_valid_module()
+        val orig_key = ok_module.functions.keys()[0]
+        val orig_fn = ok_module.functions[orig_key]
+        var rekeyed: Dict<SymbolId, HirFunction> = {}
+        rekeyed[SymbolId(id: orig_key.id)] = orig_fn
+        var same_id_module = ok_module
+        same_id_module.functions = rekeyed
+        val same_id_res = hm_infer_owned_typed_module_v1(same_id_module, ti_owned_limits())
+        if same_id_res.is_err():
+            val err_msg = same_id_res.unwrap_err()
+            expect(err_msg != "hm-typed-symbol-universe").to_equal(true)
+            expect(err_msg != "hm-typed-external-symbol-universe").to_equal(true)
+            expect(err_msg != "hm-typed-function-symbol-missing").to_equal(true)
+        else:
+            val typed = same_id_res.unwrap()
+            expect(typed.annotated_functions).to_equal(1)
+            expect(typed.annotated_expressions).to_equal(1)
+
+        var wrong_id_fns: Dict<SymbolId, HirFunction> = {}
+        wrong_id_fns[SymbolId(id: orig_key.id + 1)] = orig_fn
+        var wrong_id_module = ok_module
+        wrong_id_module.functions = wrong_id_fns
+        val wrong_id_res = hm_infer_owned_typed_module_v1(wrong_id_module, ti_owned_limits())
+        expect(wrong_id_res.unwrap_err()).to_equal("hm-typed-symbol-universe")
+
+        var bad_module = ti_primitive_valid_module()
+        bad_module.functions = {}
+        val bad_res = hm_infer_owned_typed_module_v1(bad_module, ti_owned_limits())
+        expect(bad_res.unwrap_err()).to_equal("hm-typed-module-profile")
+
+    it "eliminates direct SymbolId struct-key Dict indexing across all 6 audited sites":
+        # @req REQ-G4-SYMID-003
+        step("Inspect the 5 audited type_infer source files for indexed fn_keys and slot_by_raw_id lookups")
+        val ic = file_read("src/compiler/30.types/type_infer/inference_control.spl") ?? ""
+        val tr = file_read("src/compiler/30.types/type_infer/traits.spl") ?? ""
+        val tc = file_read("src/compiler/30.types/type_infer/trait_collection.spl") ?? ""
+        val api = file_read("src/compiler/30.types/type_infer/api_signature_projection_v1.spl") ?? ""
+        val owned = file_read("src/compiler/30.types/type_infer/typed_module_owner_v1.spl") ?? ""
+
+        expect(ic.contains("for dk_11 in module.functions.keys():")).to_equal(false)
+        expect(ic.contains("for dk_10 in module.functions.keys():")).to_equal(false)
+        expect(ic).to_contain("fn_keys")
+
+        expect(tr.contains("for dk_12 in module.functions.keys():")).to_equal(false)
+        expect(tr).to_contain("fn_keys")
+
+        expect(tc.contains("module.functions.has(method_id)")).to_equal(false)
+        expect(tc.contains("module.functions[method_id]")).to_equal(false)
+        expect(tc).to_contain("slot_by_raw_id")
+
+        expect(api.contains("for key in keys:")).to_equal(false)
+        expect(api.contains("module.functions[key]")).to_equal(false)
+        expect(api).to_contain("fn_keys")
+
+        expect(owned.contains("module.functions.has(symbol.id)")).to_equal(false)
+        expect(owned.contains("for key in module.functions.keys():")).to_equal(false)
+        expect(owned).to_contain("slot_by_raw_id")
+
+describe "80.driver G4 scope and surface/retention hardening":
+    it "wraps typecheck and safety warn passes per module and cleans up retained lowering route":
+        # @req REQ-G4-DRV-001
+        step("Verify driver_hir_pipeline_passes.spl and driver_hir_pipeline_lowering.spl contracts")
+        val passes = file_read("src/compiler/80.driver/driver_hir_pipeline_passes.spl") ?? ""
+        val lowering = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl") ?? ""
+
+        expect(passes).to_contain("_hir_pass_scope_open_v1(\"typecheck\"")
+        expect(passes).to_contain("_hir_pass_scope_open_v1(\"safety_warn\"")
+        expect(passes).to_contain("unit_profile_policy()")
+
+        expect(lowering.contains("retained_module_surfaces.index_by_name")).to_equal(false)
+        expect(lowering).to_contain("hir_module_surface_index(retained_module_surfaces, name)")
+        expect(lowering).to_contain("self.ctx.hir_modules = phase_hir_modules\n        self.ctx.modules = {}")

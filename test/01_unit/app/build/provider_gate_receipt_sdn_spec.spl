@@ -1,0 +1,90 @@
+"""
+# Provider gate and provider receipt SDN parsing and MIR-safe SdnValue typing
+
+Unit tests proving that `parse_provider_descriptor` (`provider_gate.spl`) and
+`provider_receipt_from_sdn` (`provider_receipt.spl`) decode SDN string arrays
+using concrete `[SdnValue]` / `SdnValue` typed index loops (eliminating MIR
+lowering `Any` method errors without introducing `nil` outside `unsafe:`) and
+fail closed on malformed or mistyped arrays.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io_runtime.{file_read}
+use app.build.targets.build_targets.{BackendProviderDescriptor, BACKEND_PROVIDER_ABI_VERSION}
+use app.build.targets.provider_gate.{parse_provider_descriptor}
+use app.build.targets.provider_receipt.{
+    ProviderAdmissionReceipt,
+    issue_provider_receipt_with_identity,
+    provider_receipt_to_sdn,
+    provider_receipt_from_sdn
+}
+
+val HOST_TRIPLE = "x86_64-pc-windows-gnu"
+
+describe "provider descriptor SDN array parsing":
+    it "parses empty and multi-element capability arrays":
+        val multi_src = "schema: provider_descriptor_v1\ngroup: backends_cuda\nabi_version: 1\nhost_triple: " + HOST_TRIPLE + "\ncapabilities: [object_emit, optimization, lto]\n"
+        val multi_res = parse_provider_descriptor(multi_src)
+        expect(multi_res.is_ok()).to_equal(true)
+        expect(multi_res.unwrap().capabilities).to_equal(["object_emit", "optimization", "lto"])
+
+        val empty_src = "schema: provider_descriptor_v1\ngroup: backends_cuda\nabi_version: 1\nhost_triple: " + HOST_TRIPLE + "\ncapabilities: []\n"
+        val empty_res = parse_provider_descriptor(empty_src)
+        expect(empty_res.is_ok()).to_equal(true)
+        expect(empty_res.unwrap().capabilities).to_equal([])
+
+    it "fails closed on non-string elements or mistyped capabilities":
+        val bad_elem = "schema: provider_descriptor_v1\ngroup: backends_cuda\nabi_version: 1\nhost_triple: " + HOST_TRIPLE + "\ncapabilities: [object_emit, 42]\n"
+        val bad_elem_res = parse_provider_descriptor(bad_elem)
+        expect(bad_elem_res.is_err()).to_equal(true)
+        expect(bad_elem_res.unwrap_err()).to_equal("mistyped capability")
+
+        val bad_field = "schema: provider_descriptor_v1\ngroup: backends_cuda\nabi_version: 1\nhost_triple: " + HOST_TRIPLE + "\ncapabilities: object_emit\n"
+        val bad_field_res = parse_provider_descriptor(bad_field)
+        expect(bad_field_res.is_err()).to_equal(true)
+        expect(bad_field_res.unwrap_err()).to_equal("mistyped field")
+
+describe "provider receipt SDN array parsing":
+    it "round-trips capabilities, absent_fields, and identity arrays through SDN":
+        val desc = BackendProviderDescriptor(
+            group: "backends_cuda",
+            abi_version: BACKEND_PROVIDER_ABI_VERSION,
+            host_triple: HOST_TRIPLE,
+            capabilities: ["optimization", "object_emit"]
+        )
+        val issued = issue_provider_receipt_with_identity(
+            desc, HOST_TRIPLE, ["object_emit"], "artifact-bytes",
+            ["semver=1.0.0", "roles=codegen"], ["//backend:cuda"]
+        ).unwrap()
+        val sdn = provider_receipt_to_sdn(issued)
+        val decoded = provider_receipt_from_sdn(sdn)
+        expect(decoded.is_ok()).to_equal(true)
+        val r = decoded.unwrap()
+        expect(r.capabilities).to_equal(["object_emit", "optimization"])
+        expect(r.absent_fields.contains("mir_abi_digest")).to_equal(true)
+        expect(r.identity.contains("semver=1.0.0")).to_equal(true)
+        expect(r.identity.contains("targets=//backend:cuda")).to_equal(true)
+
+    it "fails closed when receipt SDN arrays contain non-string items":
+        val bad_caps = "schema: provider_admission_receipt_v1\ngroup: backends_cuda\nabi_version: 1\nhost_triple: " + HOST_TRIPLE + "\ncapabilities: [object_emit, 99]\nartifact_sha256: 0000\nabsent_fields: [semver]\nidentity: []\n"
+        expect(provider_receipt_from_sdn(bad_caps).is_err()).to_equal(true)
+
+        val bad_absent = "schema: provider_admission_receipt_v1\ngroup: backends_cuda\nabi_version: 1\nhost_triple: " + HOST_TRIPLE + "\ncapabilities: [object_emit]\nartifact_sha256: 0000\nabsent_fields: [semver, true]\nidentity: []\n"
+        expect(provider_receipt_from_sdn(bad_absent).is_err()).to_equal(true)
+
+describe "MIR lowering concrete SdnValue typing in provider modules":
+    it "uses imported SdnValue and typed indexed loops instead of untyped arr.unwrap() iteration":
+        step("Verify provider_gate.spl imports SdnValue and binds concrete types")
+        val gate_src = file_read("src/app/build/targets/provider_gate.spl")
+        expect(gate_src).to_contain(r"use std.common.sdn.value.{SdnValue}")
+        expect(gate_src).to_contain("val items: [SdnValue] = arr.unwrap()")
+        expect(gate_src).to_contain("val item: SdnValue = items[i]")
+        expect(gate_src).to_contain("val s: text? = item.as_str()")
+        expect(gate_src.contains("for item in arr.unwrap():")).to_equal(false)
+
+        step("Verify provider_receipt.spl binds concrete SdnValue types in _get_texts")
+        val receipt_src = file_read("src/app/build/targets/provider_receipt.spl")
+        expect(receipt_src).to_contain("val items: [SdnValue] = arr.unwrap()")
+        expect(receipt_src).to_contain("val item: SdnValue = items[i]")
+        expect(receipt_src).to_contain("val s: text? = item.as_str()")
+        expect(receipt_src.contains("for item in arr.unwrap():")).to_equal(false)

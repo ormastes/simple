@@ -67,7 +67,10 @@ case "$threads" in ''|*[!0-9]*) threads=24 ;; esac
 limit=${P3G_LIMIT_S:-7200}
 ptree=${P3G_PTREE_SHADOW:-none}
 go_to_end_groups=${P3G_GO_TO_END_GROUPS:-1}
+go_to_end_flag=${P3G_GO_TO_END_FLAG:-1}
 full_backends=${P3G_FULL_BACKENDS:-0}
+streaming_surfaces=${P3G_STREAMING_SURFACES:-}
+interface_hir=${P3G_INTERFACE_HIR:-}
 parse_worker_kb=${P3G_PARSE_WORKER_KB:-}
 hir_worker_kb=${P3G_HIR_WORKER_KB:-}
 mir_worker_kb=${P3G_MIR_WORKER_KB:-}
@@ -82,7 +85,7 @@ nm="$lm/bin/llvm-nm.exe"; [ -x "$nm" ] || nm="$lm/bin/llvm-nm"
 ps=$(command -v pwsh || command -v powershell || true)
 [ -n "$ps" ] || { echo "error: pwsh/powershell not found" >&2; exit 1; }
 [ -f "$stage2" ] || { echo "error: stage2 missing: $stage2" >&2; exit 1; }
-mkdir -p "$out" "$cache"
+mkdir -p "$out" "$cache" "$cache/hir"
 
 win_path() {
     if command -v cygpath >/dev/null 2>&1; then
@@ -102,12 +105,18 @@ measure_win=""
 
 if [ "$full_backends" = "1" ]; then
     ps_sources="'--source','src/compositions/cuda_static','--source','src/compositions/kernel_llvm_cranelift','--source','src/compiler','--source','src/app','--source','src/lib','--source','src/plugins'"
+    backend_composition="full"
 else
-    ps_sources="'--source','src/compositions/kernel_llvm_cranelift','--source','src/compiler','--source','src/app','--source','src/lib'"
+    ps_sources="'--source','src/compositions/backends_host_only','--source','src/compositions/kernel_llvm_cranelift','--source','src/compiler','--source','src/app','--source','src/lib'"
+    backend_composition="host-only"
 fi
 ps_low_mem=""
 if [ "$low_memory" = "1" ]; then
     ps_low_mem="'--low-memory',"
+fi
+ps_go_to_end=""
+if [ "$go_to_end_flag" = "1" ]; then
+    ps_go_to_end="'--go-to-end',"
 fi
 
 ptree_env_line="Remove-Item Env:SIMPLE_PROJECT_ROOT -EA SilentlyContinue"
@@ -130,7 +139,10 @@ run_stage2() {
     rm -f "$o" "$out/$name.result.txt"
     ps1="$out/$name.run.ps1"
     cat > "$ps1" <<EOF
-\$env:SIMPLE_P3_RUN="P3-GROUPS-$name"
+\$env:SIMPLE_P3_RUN="P3-GROUPS"
+\$env:P3_GROUP_NAME="$name"
+\$env:SIMPLE_BACKEND_COMPOSITION="$backend_composition"
+\$env:SIMPLE_HIR_CACHE_DIR="$cache_win\\hir"
 \$env:KEEP_CACHE="1"
 \$env:PATH="C:\\msys64\\clang64\\bin;"+\$env:PATH
 # per-invocation override for this generated launcher only: p3 entry groups
@@ -158,10 +170,17 @@ EOF
         if [ "$entry_mir_shards" -ge 1 ]; then
             printf '$env:SIMPLE_MIR_SHARD_COUNT="%s"\n' "$entry_mir_shards" >> "$ps1"
         else
+            printf '%s\n' '$env:SIMPLE_MIR_SHARDING="0"' >> "$ps1"
             printf '%s\n' 'Remove-Item Env:SIMPLE_MIR_SHARD_COUNT -EA SilentlyContinue' >> "$ps1"
         fi
     elif [ -n "$mir_shards" ]; then
         printf '$env:SIMPLE_MIR_SHARD_COUNT="%s"\n' "$mir_shards" >> "$ps1"
+    fi
+    if [ "$streaming_surfaces" = "1" ]; then
+        printf '%s\n' '$env:SIMPLE_STAGE3_STREAMING_SURFACES="1"' >> "$ps1"
+    fi
+    if [ "$interface_hir" = "1" ]; then
+        printf '%s\n' '$env:SIMPLE_MIR_SHARD_INTERFACE_HIR="1"' >> "$ps1"
     fi
     cat >> "$ps1" <<EOF
 Remove-Item Env:LIB -EA SilentlyContinue
@@ -175,7 +194,7 @@ Set-Location "$checkout_win"
 EOF
     if [ -n "$measure" ] && [ -f "$measure" ]; then
         cat >> "$ps1" <<EOF
-& "$measure_win" -Exe "$stage2_win" -Cache "$cache_win" -Log "$out_win/$name.build.log" -Limit $limit -CapGB $cap -Rest @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads',$ps_low_mem'--keep-going','--go-to-end','--cache-dir','$cache_win','$emit','-o','$stage_o_win') | Tee-Object "$out_win/$name.result.txt"
+& "$measure_win" -Exe "$stage2_win" -Cache "$cache_win" -Log "$out_win/$name.build.log" -Limit $limit -CapGB $cap -Rest @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads',$ps_low_mem'--keep-going',$ps_go_to_end'--cache-dir','$cache_win','$emit','-o','$stage_o_win') | Tee-Object "$out_win/$name.result.txt"
 EOF
     else
         cat >> "$ps1" <<EOF
@@ -290,7 +309,7 @@ if (\$minCommitBytes -gt 0 -and (([System.Management.Automation.PSTypeName]'P3Pr
         Start-Sleep -Seconds 10
     }
 }
-\$stageArgs = @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads',$ps_low_mem'--keep-going','--go-to-end','--cache-dir','$cache_win','$emit','-o','$stage_o_win')
+\$stageArgs = @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads',$ps_low_mem'--keep-going',$ps_go_to_end'--cache-dir','$cache_win','$emit','-o','$stage_o_win')
 \$proc = Start-Process -FilePath "$stage2_win" -ArgumentList \$stageArgs -NoNewWindow -PassThru -RedirectStandardOutput \$pOut -RedirectStandardError \$pErr
 \$null = \$proc.Handle
 \$sw = [System.Diagnostics.Stopwatch]::StartNew()

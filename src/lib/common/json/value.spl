@@ -345,18 +345,30 @@ fn _json_value_has_control_byte(s: text) -> bool:
     false
 
 fn _json_value_escape_control_chars(s: text) -> text:
-    var out = ""
-    for ch in s.chars():
-        val code = ch.ord()
-        if code >= 32:
-            out = out + ch
-        elif code == 8:
-            out = out + "\\b"
-        elif code == 12:
-            out = out + "\\f"
-        else:
-            out = out + "\\u00" + _JSON_VALUE_HEX_DIGITS[code / 16:code / 16 + 1] + _JSON_VALUE_HEX_DIGITS[code % 16:code % 16 + 1]
-    out
+    if not _json_value_has_control_byte(s):
+        return s
+    val n = s.byte_len()
+    var parts: [text] = []
+    var span_start = 0
+    var i = 0
+    while i < n:
+        val code = s.byte_at(i)
+        if code < 32:
+            if i > span_start:
+                parts.push(s.slice(span_start, i))
+            if code == 8:
+                parts.push("\\b")
+            elif code == 12:
+                parts.push("\\f")
+            else:
+                val hi = code / 16
+                val lo = code % 16
+                parts.push("\\u00" + _JSON_VALUE_HEX_DIGITS.slice(hi, hi + 1) + _JSON_VALUE_HEX_DIGITS.slice(lo, lo + 1))
+            span_start = i + 1
+        i = i + 1
+    if span_start < n:
+        parts.push(s.slice(span_start, n))
+    parts.join("")
 
 pub fn json_value_escape_string(s: text) -> text:
     """Escape `s` for a JSON string literal (same rules as json_escape_string)."""
@@ -370,14 +382,7 @@ pub fn json_value_escape_string(s: text) -> text:
     out
 
 fn _json_value_join(parts: [text], sep: text) -> text:
-    var out = ""
-    var i = 0
-    while i < parts.len():
-        if i > 0:
-            out = out + sep
-        out = out + parts[i]
-        i = i + 1
-    out
+    parts.join(sep)
 
 fn _json_value_float_text(n: f64) -> text:
     # Same rule as the dynamic serializer: integral values print without ".0".
@@ -388,15 +393,9 @@ fn _json_value_float_text(n: f64) -> text:
     "{n}"
 
 fn _json_value_indent(level: i64, size: i64) -> text:
-    if level <= 0:
+    if level <= 0 or size <= 0:
         return ""
-    var out = ""
-    var i = 0
-    val total = level * size
-    while i < total:
-        out = out + " "
-        i = i + 1
-    out
+    " ".repeat(level * size)
 
 pub fn json_value_serialize(value: JsonValue) -> text:
     """Serialize to compact JSON text."""

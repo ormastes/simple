@@ -18,6 +18,7 @@ use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, BuildMod
     compileerror_backend_error}
 use compiler.backend.aot_path_diagnostic.{backend_aot_write_diagnostic}
 use compiler.mir_opt.mod.{TargetOptContext, target_opt_context_default, optimize_module_for_backend, OptLevel}
+use compiler.mir_opt.simd_opt_metadata.{reset_provider_report}
 use compiler.backend.feature_caps.{TargetCapsKind, x86_caps_from_target}
 use compiler.backend.llvm_codegen_adapter.{llvm_compile_module_direct,
     llvm_compile_module_direct_compiled, llvm_compile_module_direct_to_path,
@@ -437,6 +438,8 @@ pub fn compile_module_with_backend_scoped_v1(
     if not scoped:
         return compiled
     val paused = transient_scope_pause()
+    if paused:
+        reset_provider_report()
     val kept = paused and transient_promote<Result<CompiledModule, CompileError>>(compiled)
     val ended = transient_scope_end()
     if paused and kept and ended:
@@ -644,21 +647,45 @@ pub fn compile_llvm_module_to_object_path(
         debug_info: backend_helper_debug_info(is_release),
         emit_assembly: false, emit_llvm_ir: false, emit_mir: false,
         verify_output: true, target_opt_ctx: target_opt_ctx, backend_kind: nil)
-    val storage_lowered = lower_mir_storage_project_fields_v1(
-        module, storage_bindings)
-    if not storage_lowered.ok:
-        backend_aot_write_diagnostic(diagnostic_path,
-            "storage projection lowering failed: {storage_lowered.reason}")
-        return 1
-    if storage_lowered.rewritten_count > 0:
-        backend_aot_write_diagnostic(diagnostic_path,
-            "typed storage projections require the custom native backend")
-        return 1
     if not backend_helper_llc_available():
         backend_aot_write_diagnostic(diagnostic_path, "llc not found")
         return 1
+    var scoped = transient_array_scope_state_v1() == 0 and transient_scope_begin()
+    val storage_lowered = lower_mir_storage_project_fields_v1(
+        module, storage_bindings)
+    if not storage_lowered.ok or storage_lowered.rewritten_count > 0:
+        val diag_msg = if not storage_lowered.ok:
+            "storage projection lowering failed: {storage_lowered.reason}"
+        else:
+            "typed storage projections require the custom native backend"
+        if scoped:
+            val paused = transient_scope_pause()
+            if paused:
+                reset_provider_report()
+            val _ended = transient_scope_end()
+        else:
+            reset_provider_report()
+        backend_aot_write_diagnostic(diagnostic_path, diag_msg)
+        return 1
     val backend_module = optimize_module_for_backend(
         storage_lowered.module, backend_helper_mir_opt_level(opt), "llvm")
+    if scoped:
+        val paused = transient_scope_pause()
+        if paused:
+            reset_provider_report()
+        val promoted = paused and transient_promote<MirModule>(backend_module)
+        val ended = transient_scope_end()
+        if not paused or not promoted or not ended:
+            eprint("[codegen-scope] WARNING llvm opt promotion failed (paused={paused} promoted={promoted} ended={ended}): module={module.name}")
+            val fallback_lowered = lower_mir_storage_project_fields_v1(
+                module, storage_bindings)
+            val fallback_module = optimize_module_for_backend(
+                fallback_lowered.module, backend_helper_mir_opt_level(opt), "llvm")
+            reset_provider_report()
+            return llvm_compile_module_direct_to_path(
+                options, fallback_module, object_path, diagnostic_path, retained_llvm_config)
+    else:
+        reset_provider_report()
     llvm_compile_module_direct_to_path(
         options, backend_module, object_path, diagnostic_path, retained_llvm_config)
 

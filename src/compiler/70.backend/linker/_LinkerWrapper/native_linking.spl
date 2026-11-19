@@ -341,6 +341,8 @@ fn native_link_with_admitted_inputs_and_engine_v1(object_files: [text], output: 
             return Err("Cannot mix SMF and object inputs; convert all to SMF or all to objects")
         return link_smf_bundle_with_engine(smf_inputs, output, config)
 
+    if not output.ends_with(".go-to-end-trial"):
+        _native_windows_trial_artifact_unresolved_v1 = false
     # Platform-specific linking
     if os == "windows-mingw":
         if requested_linker_override().trim().lower() == "internal":
@@ -2631,23 +2633,73 @@ fn internal_coff_runtime_is_msvc(os: text, mingw_env: bool) -> bool:
 fn link_native_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result<text, text>:
     native_link_output_v1(link_native_windows_with_engine(object_files, output, config))
 
-fn native_windows_strict_extra_args_error(extra_flags: [text], allow_duplicate_definitions: bool) -> text:
-    """Reject duplicate-policy overrides before either Windows linker engine runs."""
+var _native_windows_trial_artifact_unresolved_v1: bool = false
+
+pub fn native_windows_trial_artifact_unresolved_begin_v1():
+    _native_windows_trial_artifact_unresolved_v1 = true
+
+pub fn native_windows_trial_artifact_unresolved_end_v1():
+    _native_windows_trial_artifact_unresolved_v1 = false
+
+fn _native_windows_strict_token_error(tok: text, allow_unresolved: bool, allow_xlink_recurse: bool) -> text:
+    if tok == "":
+        return "empty nested linker token"
+    if tok.starts_with("-xlink=") or tok.starts_with("/xlink="):
+        if not allow_xlink_recurse:
+            return "nested xlink argument"
+        val inner = tok.substring(7, tok.byte_len()).trim()
+        return _native_windows_strict_token_error(inner, allow_unresolved, false)
+    if tok == "-xlink" or tok == "/xlink" or tok.starts_with("@") or tok == "-xlinker" or tok.starts_with("-xlinker=") or tok == "/link" or tok.starts_with("/link:"):
+        return "nested linker argument"
+    if tok == "--allow-multiple-definition" or tok == "-allow-multiple-definition" or tok == "muldefs" or tok == "-z" or tok.starts_with("-z"):
+        return "duplicate-definition option"
+    if tok == "/force" or tok == "-force" or tok.starts_with("/force:") or tok.starts_with("-force:"):
+        if allow_unresolved and (tok == "/force:unresolved" or tok == "-force:unresolved"):
+            return ""
+        return "FORCE option"
+    ""
+
+fn _native_windows_strict_extra_args_error_impl(extra_flags: [text], allow_duplicate_definitions: bool, allow_unresolved: bool) -> text:
     if allow_duplicate_definitions: return ""
     for flag in extra_flags:
         # Quotes are command-line syntax, not an escape from policy validation.
         val normalized = flag.replace("\"", "").trim().lower()
         if normalized == "/force" or normalized == "-force" or normalized.starts_with("/force:") or normalized.starts_with("-force:"):
+            if allow_unresolved and (normalized == "/force:unresolved" or normalized == "-force:unresolved"):
+                continue
             return "strict Windows link rejects FORCE option: {flag}"
-        if normalized == "--allow-multiple-definition" or normalized == "muldefs":
+        if normalized == "--allow-multiple-definition" or normalized == "-allow-multiple-definition" or normalized == "muldefs" or normalized == "-z" or normalized.starts_with("-z"):
             return "strict Windows link rejects duplicate-definition option: {flag}"
+        # Split `-Wl,` payloads on `,` so safe diagnostic flags pass while nested
+        # duplicate-definition, FORCE, or response-file tokens are rejected.
+        if normalized.starts_with("-wl,"):
+            val payload = normalized.substring(4, normalized.byte_len())
+            if payload.trim() == "":
+                return "strict Windows link rejects nested linker arguments: {flag}"
+            val parts = payload.split(",")
+            for part in parts:
+                val tok_err = _native_windows_strict_token_error(part.trim(), allow_unresolved, true)
+                if tok_err != "":
+                    return "strict Windows link rejects nested linker arguments: {flag}"
+            continue
+        if normalized.starts_with("-xlink=") or normalized.starts_with("/xlink="):
+            val xlink_err = _native_windows_strict_token_error(normalized, allow_unresolved, true)
+            if xlink_err != "":
+                return "strict Windows link rejects nested linker arguments: {flag}"
+            continue
         # Nested argv cannot be checked as ordinary direct-linker flags.
-        if normalized.starts_with("@") or normalized.starts_with("-wl,") or normalized == "-xlinker" or normalized == "/link":
+        if normalized.starts_with("@") or normalized == "-xlinker" or normalized.starts_with("-xlinker=") or normalized == "/link" or normalized.starts_with("/link:") or normalized == "-xlink" or normalized == "/xlink":
             return "strict Windows link rejects nested linker arguments: {flag}"
     ""
 
+fn native_windows_strict_extra_args_error(extra_flags: [text], allow_duplicate_definitions: bool, allow_unresolved_trial_artifact: bool = false) -> text:
+    """Reject duplicate-policy overrides before either Windows linker engine runs."""
+    val allow_unresolved = allow_unresolved_trial_artifact or _native_windows_trial_artifact_unresolved_v1
+    _native_windows_strict_extra_args_error_impl(extra_flags, allow_duplicate_definitions, allow_unresolved)
+
 fn link_native_windows_with_engine(object_files: [text], output: text, config: NativeLinkConfig) -> Result<NativeLinkSuccessV1, text>:
-    val argument_error = native_windows_strict_extra_args_error(config.extra_flags, config.allow_duplicate_definitions)
+    val allow_unresolved = _native_windows_trial_artifact_unresolved_v1 and output.ends_with(".go-to-end-trial")
+    val argument_error = _native_windows_strict_extra_args_error_impl(config.extra_flags, config.allow_duplicate_definitions, allow_unresolved)
     if argument_error != "": return Err(argument_error)
     if requested_linker_override().trim().lower() == "internal":
         val target_arch = _windows_link_arch(config)
@@ -2868,10 +2920,13 @@ fn _link_native_msvc_with_engine(object_files: [text], output: text, config: Nat
     # compiler can misclassify its host while the selected linker is still
     # unambiguously link.exe.
     var extra = native_retained_symbol_msvc_args(config.retained_symbols)
+    var has_opt_noref = false
     for flag in native_msvc_extra_args(config.extra_flags):
+        if flag.replace("\"", "").trim().lower() == "/opt:noref":
+            has_opt_noref = true
         extra.push(flag)
     # Size optimization: remove unreferenced data + fold identical COMDATs
-    if not config.debug:
+    if not config.debug and not has_opt_noref:
         extra.push("/OPT:REF,ICF")
     if config.strip_output:
         extra.push("/DEBUG:NONE")

@@ -1182,28 +1182,7 @@ fn tagged_add_text(value: i64) -> i64:
 # every u64 bit pattern in the nonnegative i64 range. For n=2*q+r,
 # floor(n/10)=floor(q/5), and n%10=2*(q%5)+r.
 fn tagged_unsigned_decimal(bits: i64) -> i64:
-    val buffer = _sffi_core_string_malloc(32)
-    if buffer < 1: return 3
-    var current = bits
-    var count = 0
-    while true:
-        val half = (current >> 1) & 9223372036854775807
-        val digit = (half % 5) * 2 + (current & 1)
-        _sffi_core_string_spl_store_u8(buffer, count, 48 + digit)
-        count = count + 1
-        current = half / 5
-        if current == 0: break
-    val out = alloc_string(count)
-    val out_ptr = string_ptr(out)
-    if out_ptr < 1:
-        _sffi_core_string_free(buffer)
-        return 3
-    var index = 0
-    while index < count:
-        _sffi_core_string_spl_store_u8(string_data_ptr_value(out_ptr), index, _sffi_core_string_spl_load_u8(buffer, count - index - 1))
-        index = index + 1
-    _sffi_core_string_free(buffer)
-    out
+    rt_raw_u64_to_string(bits)
 
 pub fn rt_tagged_add(left: i64, right: i64) -> i64:
     if registered_string_ptr(left) > 0 or registered_string_ptr(right) > 0:
@@ -1921,110 +1900,75 @@ pub fn rt_to_string(value: i64) -> i64:
         # result. No owned Float text formatter is qualified in this lane.
         return rt_string_new(0, 0)
 
-    var n = value >> 3
-    val buf = _sffi_core_string_malloc(32)
-    if buf < 1:
-        return 3
-    if n < 1 and n > -1:
-        _sffi_core_string_spl_store_u8(buf, 0, 48)
-        return rt_string_new(buf, 1)
-
-    var negative = 0
-    if n < 0:
-        negative = 1
-        n = 0 - n
-
-    var len = 0
-    while n > 0:
-        val digit = n % 10
-        _sffi_core_string_spl_store_u8(buf, len, 48 + digit)
-        len = len + 1
-        n = n / 10
-
-    val out = alloc_string(len + negative)
-    val out_ptr = string_ptr(out)
-    if out_ptr < 1:
-        return 3
-    var out_i = 0
-    if negative > 0:
-        _sffi_core_string_spl_store_u8(string_data_ptr_value(out_ptr), 0, 45)
-        out_i = 1
-    var i = len - 1
-    while i >= 0:
-        _sffi_core_string_spl_store_u8(string_data_ptr_value(out_ptr), out_i, _sffi_core_string_spl_load_u8(buf, i))
-        out_i = out_i + 1
-        i = i - 1
-    return out
+    return rt_raw_i64_to_string(value >> 3)
 
 pub fn rt_value_to_string(value: i64) -> i64:
     rt_to_string(value)
 
 pub fn rt_raw_u64_to_string(raw: i64) -> i64:
-    var n = raw
-    val buf = _sffi_core_string_malloc(32)
-    if buf < 1:
-        return 3
-    if n < 1:
-        _sffi_core_string_spl_store_u8(buf, 0, 48)
-        return rt_string_new(buf, 1)
+    if raw == 0:
+        val out = alloc_string(1)
+        val out_ptr = string_ptr(out)
+        if out_ptr < 1:
+            return 3
+        _sffi_core_string_spl_store_u8(string_data_ptr_value(out_ptr), 0, 48)
+        return out
 
-    var len = 0
-    while n > 0:
-        val digit = n % 10
-        _sffi_core_string_spl_store_u8(buf, len, 48 + digit)
-        len = len + 1
-        n = n / 10
+    var tmp = raw
+    var digits = 0
+    while tmp != 0:
+        val half = (tmp >> 1) & 9223372036854775807
+        digits = digits + 1
+        tmp = half / 5
 
-    val out = alloc_string(len)
+    val out = alloc_string(digits)
     val out_ptr = string_ptr(out)
     if out_ptr < 1:
         return 3
-    var out_i = 0
-    var i = len - 1
-    while i >= 0:
-        _sffi_core_string_spl_store_u8(string_data_ptr_value(out_ptr), out_i, _sffi_core_string_spl_load_u8(buf, i))
-        out_i = out_i + 1
-        i = i - 1
+    val data = string_data_ptr_value(out_ptr)
+    var current = raw
+    var pos = digits - 1
+    while current != 0:
+        val half = (current >> 1) & 9223372036854775807
+        val digit = (half % 5) * 2 + (current & 1)
+        _sffi_core_string_spl_store_u8(data, pos, 48 + digit)
+        pos = pos - 1
+        current = half / 5
     out
 
 pub fn rt_raw_i64_to_string(raw: i64) -> i64:
     # Signed sibling of rt_raw_u64_to_string. Digits are extracted on the
     # negative side (digit = 0 - (n % 10)) so INT64_MIN never overflows.
     if raw == 0:
-        val zbuf = _sffi_core_string_malloc(32)
-        if zbuf < 1:
+        val out = alloc_string(1)
+        val out_ptr = string_ptr(out)
+        if out_ptr < 1:
             return 3
-        _sffi_core_string_spl_store_u8(zbuf, 0, 48)
-        return rt_string_new(zbuf, 1)
+        _sffi_core_string_spl_store_u8(string_data_ptr_value(out_ptr), 0, 48)
+        return out
 
-    var n = raw
     val neg = raw < 0
-    if not neg:
-        n = 0 - n
+    var n = if neg: raw else: 0 - raw
+    var digits = 0
+    var tmp = n
+    while tmp < 0:
+        digits = digits + 1
+        tmp = tmp / 10
 
-    val buf = _sffi_core_string_malloc(32)
-    if buf < 1:
-        return 3
-    var len = 0
-    while n < 0:
-        val digit = 0 - (n % 10)
-        _sffi_core_string_spl_store_u8(buf, len, 48 + digit)
-        len = len + 1
-        n = n / 10
-    if neg:
-        _sffi_core_string_spl_store_u8(buf, len, 45)
-        len = len + 1
-
-    val out = alloc_string(len)
+    val total = digits + (if neg: 1 else: 0)
+    val out = alloc_string(total)
     val out_ptr = string_ptr(out)
     if out_ptr < 1:
         return 3
-    var out_i = 0
-    var i = len - 1
-    while i >= 0:
-        _sffi_core_string_spl_store_u8(string_data_ptr_value(out_ptr), out_i, _sffi_core_string_spl_load_u8(buf, i))
-        out_i = out_i + 1
-        i = i - 1
+    val data = string_data_ptr_value(out_ptr)
+    if neg:
+        _sffi_core_string_spl_store_u8(data, 0, 45)
+    var pos = total - 1
+    while n < 0:
+        val digit = 0 - (n % 10)
+        _sffi_core_string_spl_store_u8(data, pos, 48 + digit)
+        pos = pos - 1
+        n = n / 10
     out
 
 pub fn rt_string_replace(value: i64, old_value: i64, new_value: i64) -> i64:
@@ -2152,7 +2096,15 @@ fn write_null_page_diag(fd: i64) -> i64:
     _sffi_core_string_spl_store_u8(buf, 43, 100)
     _sffi_core_string_spl_store_u8(buf, 44, 10)
     _sffi_core_string_write(fd, buf, 45)
+    _sffi_core_string_free(buf)
     return 0
+
+fn write_newline_to_fd(fd: i64):
+    val nl = _sffi_core_string_malloc(1)
+    if nl > 0:
+        _sffi_core_string_spl_store_u8(nl, 0, 10)
+        _sffi_core_string_write(fd, nl, 1)
+        _sffi_core_string_free(nl)
 
 pub fn rt_print_str(ptr: i64, len: i64) -> i64:
     if ptr != 0 and ptr < 4096:
@@ -2164,18 +2116,12 @@ pub fn rt_print_str(ptr: i64, len: i64) -> i64:
 
 pub fn rt_println_value(value: i64) -> i64:
     write_string_to_fd(1, value)
-    val nl = _sffi_core_string_malloc(1)
-    if nl > 0:
-        _sffi_core_string_spl_store_u8(nl, 0, 10)
-        _sffi_core_string_write(1, nl, 1)
+    write_newline_to_fd(1)
     return 0
 
 pub fn rt_println_str(ptr: i64, len: i64) -> i64:
     rt_print_str(ptr, len)
-    val nl = _sffi_core_string_malloc(1)
-    if nl > 0:
-        _sffi_core_string_spl_store_u8(nl, 0, 10)
-        _sffi_core_string_write(1, nl, 1)
+    write_newline_to_fd(1)
     return 0
 
 pub fn rt_eprint_value(value: i64) -> i64:
@@ -2192,18 +2138,12 @@ pub fn rt_eprint_str(ptr: i64, len: i64) -> i64:
 
 pub fn rt_eprintln_value(value: i64) -> i64:
     write_string_to_fd(2, value)
-    val nl = _sffi_core_string_malloc(1)
-    if nl > 0:
-        _sffi_core_string_spl_store_u8(nl, 0, 10)
-        _sffi_core_string_write(2, nl, 1)
+    write_newline_to_fd(2)
     return 0
 
 pub fn rt_eprintln_str(ptr: i64, len: i64) -> i64:
     rt_eprint_str(ptr, len)
-    val nl = _sffi_core_string_malloc(1)
-    if nl > 0:
-        _sffi_core_string_spl_store_u8(nl, 0, 10)
-        _sffi_core_string_write(2, nl, 1)
+    write_newline_to_fd(2)
     return 0
 
 pub fn stdin_read_char() -> i64:
@@ -2212,8 +2152,11 @@ pub fn stdin_read_char() -> i64:
         return rt_string_new(0, 0)
     val count = _sffi_core_string_read(0, byte, 1)
     if count < 1:
+        _sffi_core_string_free(byte)
         return rt_string_new(0, 0)
-    return rt_string_new(byte, 1)
+    val out = rt_string_new(byte, 1)
+    _sffi_core_string_free(byte)
+    return out
 
 # ---------------------------------------------------------------------------
 # Missing rt_string_* functions ported from the Rust runtime.
@@ -2555,9 +2498,12 @@ pub fn rt_string_to_float(value: i64) -> i64:
 # here, unlike the hosted C twin.
 var g_lexer_source_ptr: i64 = 0
 var g_lexer_source_len: i64 = 0
+var g_lexer_source_ascii: i64 = 0
+var g_lexer_cursor_char: i64 = 0
+var g_lexer_cursor_byte: i64 = 0
 
 pub fn rt_lexer_source_set(source_ptr: i64, source_len: i64) -> i8:
-    if source_ptr < 1 and source_len > 0:
+    if source_len < 0 or (source_ptr < 1 and source_len > 0):
         return 0
     val replacement = _sffi_core_string_malloc(source_len + 1)
     if replacement < 1:
@@ -2565,26 +2511,60 @@ pub fn rt_lexer_source_set(source_ptr: i64, source_len: i64) -> i8:
     if source_len > 0:
         _sffi_core_string_memcpy(replacement, source_ptr, source_len)
     _sffi_core_string_spl_store_u8(replacement, source_len, 0)
+    val is_ascii = text_bytes_ascii(replacement, source_len)
+    var init_byte = 0
+    if is_ascii < 1:
+        while init_byte < source_len and (_sffi_core_string_spl_load_u8(replacement, init_byte) & 192) == 128:
+            init_byte = init_byte + 1
     if g_lexer_source_ptr > 0:
         _sffi_core_string_free(g_lexer_source_ptr)
     g_lexer_source_ptr = replacement
     g_lexer_source_len = source_len
+    g_lexer_source_ascii = is_ascii
+    g_lexer_cursor_char = 0
+    g_lexer_cursor_byte = init_byte
     return 1
 
 fn lexer_source_char_to_byte(target: i64) -> i64:
     """Char index -> byte offset in the cached lexer source, or -1."""
-    var chars = 0
-    var i = 0
-    while i < g_lexer_source_len:
-        val marker = _sffi_core_string_spl_load_u8(g_lexer_source_ptr, i) & 192
-        if marker < 128 or marker > 128:
-            if chars >= target and chars <= target:
-                return i
-            chars = chars + 1
-        i = i + 1
-    if chars >= target and chars <= target:
-        return g_lexer_source_len
-    return -1
+    if target < 0:
+        return -1
+    if g_lexer_source_ascii > 0:
+        if target <= g_lexer_source_len:
+            return target
+        return -1
+    if g_lexer_source_ptr < 1 or g_lexer_source_len < 1:
+        if target == 0:
+            return 0
+        return -1
+    if target == g_lexer_cursor_char:
+        return g_lexer_cursor_byte
+    if target > g_lexer_cursor_char or target <= g_lexer_cursor_char / 2:
+        var chars = if target > g_lexer_cursor_char: g_lexer_cursor_char else: 0
+        var i = if target > g_lexer_cursor_char: g_lexer_cursor_byte else: 0
+        while i < g_lexer_source_len:
+            val marker = _sffi_core_string_spl_load_u8(g_lexer_source_ptr, i) & 192
+            if marker != 128:
+                if chars == target:
+                    g_lexer_cursor_char = chars
+                    g_lexer_cursor_byte = i
+                    return i
+                chars = chars + 1
+            i = i + 1
+        if chars == target:
+            g_lexer_cursor_char = chars
+            g_lexer_cursor_byte = g_lexer_source_len
+            return g_lexer_source_len
+        return -1
+    var chars = g_lexer_cursor_char
+    var i = g_lexer_cursor_byte
+    while chars > target and i > 0:
+        i = i - 1
+        if (_sffi_core_string_spl_load_u8(g_lexer_source_ptr, i) & 192) != 128:
+            chars = chars - 1
+    g_lexer_cursor_char = chars
+    g_lexer_cursor_byte = i
+    return i
 
 pub fn rt_lexer_source_slice(start: i64, end: i64) -> i64:
     if start < 0 or end < start:

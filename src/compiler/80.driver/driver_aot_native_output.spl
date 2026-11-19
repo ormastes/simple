@@ -129,6 +129,7 @@ use compiler.driver.driver_types.{CompileResult, CompileContext, FrozenStorageMo
     FrozenNativeModuleCapsuleV1, FrozenNativeModuleCapsuleBatchV1,
     frozen_native_capsule_batch_find_v1, native_capsule_mir_identity_v1, driver_native_parsed_module_has_no_runtime_body_v1,
     driver_native_parsed_objectless_proof_v1, driver_native_parsed_objectless_proof_valid_v1}
+use compiler.driver.native_capsule_mir_identity.{compute_native_capsule_mir_identity_v1}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.driver.driver_native_prelower_cache.{driver_native_prelower_record_v1,
     driver_native_prelower_mir_fingerprint_v1}
@@ -2777,10 +2778,12 @@ impl CompilerDriver:
                 # bootstrap-path default could never reach the builder at all.
                 # Carry the intent explicitly; build() reports whether it can
                 # actually honour it.
-                # An admitted BackendSession owns a stateful adapter and has no
-                # reentrancy capability yet. Keep its provider lane serial even
-                # though the built-in lane may request multiple workers.
-                val provider_threads = if backend_session.?:
+                # An admitted external/non-LLVM BackendSession owns a stateful
+                # adapter and stays serial. Built-in static LLVM (`plugin_path == ""`
+                # and `effective_backend == "llvm"`) unlocks the concurrent pool.
+                val builtin_llvm_pool_lane = effective_backend == "llvm" and
+                    ctx.options.backend_plugin_path == ""
+                val provider_threads = if backend_session.? and not builtin_llvm_pool_lane:
                     1
                 else:
                     driver_native_build_threads()
@@ -2926,6 +2929,11 @@ impl CompilerDriver:
                         obj_path, ctx.mir_modules[name].functions.keys().len(),
                         ctx.mir_modules[name].statics.keys().len(),
                     driver_native_prelower_mir_fingerprint_v1(ctx, name))
+                    if low_memory:
+                        ctx.mir_modules.remove(name)
+                        if ctx.bootstrap_entry_mir_name != "" and ctx.bootstrap_entry_mir_name == name:
+                            ctx.bootstrap_entry_mir = None
+                            ctx.bootstrap_entry_mir_name = ""
                     module_unit_id = module_unit_id + 1
                     module_outcomes.record(
                         BuildUnitOutcome.ok(module_unit_id, name, 0, 0))
@@ -3627,10 +3635,20 @@ fn _driver_group_pair_mark_started_v1(
         return "native group start marker write failed"
     ""
 
+fn _driver_capsule_lease_failure_reason_v1(capsule: FrozenNativeModuleCapsuleV1) -> text:
+    if capsule.identity_valid():
+        return ""
+    if capsule.mir_identity == "":
+        return "capsule-mir-lease-violated"
+    if compute_native_capsule_mir_identity_v1(capsule.mir_module) == "":
+        return "capsule-mir-identity-recompute-failed"
+    "capsule-mir-lease-violated"
+
 fn _driver_group_pair_finalize_receipt_v1(
     capsule: FrozenNativeModuleCapsuleV1, object_path: text
 ) -> text:
-    if not capsule.identity_valid(): return "capsule-mir-lease-violated"
+    val lease_reason = _driver_capsule_lease_failure_reason_v1(capsule)
+    if lease_reason != "": return lease_reason
     if object_path != capsule.object_path:
         return "capsule-object-path-mismatch"
     val object_fp = FileFingerprint.from_file(object_path)
@@ -3882,8 +3900,9 @@ fn _compile_frozen_module_capsule_prefetched_v1(
             ice_boundary_module_done(name, "codegen")
             if group_member_id != "":
                 log_phase("native_group:codegen:done member={group_member_id} backend={backend_name}")
-            if not capsule.identity_valid():
-                return _aot_compile_failure(name, "capsule-mir-lease-violated")
+            val lease_reason = _driver_capsule_lease_failure_reason_v1(capsule)
+            if lease_reason != "":
+                return _aot_compile_failure(name, lease_reason)
             if object_path != capsule.object_path:
                 return _aot_compile_failure(name, "capsule-object-path-mismatch")
             val object_fp = FileFingerprint.from_file(object_path)
@@ -4550,7 +4569,8 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
         if cc_code != 0:
             return Err("Bootstrap empty object compile failed: {cc_err}")
         return Ok(obj_path)
-    if prefetched_object != "" and not backend_session.?:
+    val builtin_llvm_pool = backend_name == "llvm" or (backend_name == "auto" and not is_release)
+    if prefetched_object != "" and (not backend_session.? or builtin_llvm_pool):
         val pooled_obj_path = native_aot_object_path_v1(output_base, name)
         if _driver_codegen_pool_publish_object_v1(prefetched_object, pooled_obj_path):
             return Ok(pooled_obj_path)
@@ -4728,10 +4748,12 @@ fn _driver_codegen_pool_lane_reason_v1(backend_name: text, is_release: bool,
         backend_session_present: bool, plugin_path: text) -> text:
     if (env_get_nullable(NATIVE_CODEGEN_POOL_ENV_V1) ?? "") == "0":
         return "{NATIVE_CODEGEN_POOL_ENV_V1}=0"
-    if backend_session_present or plugin_path != "":
+    if plugin_path != "":
         return "backend session owns codegen"
     val builtin_llvm = backend_name == "llvm" or (backend_name == "auto" and not is_release)
     if not builtin_llvm:
+        if backend_session_present:
+            return "backend session owns codegen"
         return "backend {backend_name} is not the built-in llvm lane"
     if native_group_request_path_v1() != "":
         return "native group manifest lane"

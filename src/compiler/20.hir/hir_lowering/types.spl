@@ -13,7 +13,11 @@ use compiler.frontend.core.types.{primitive_integer_bit_width_from_name}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.hir.archive.tldr_function_header_v1.{AdmittedTldrFunctionImportV1}
 use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_declares_item}
-use compiler.hir.hir_lowering.phase_memo_ownership.{HirPhaseMemoRoot, hir_phase_memo_promote_roots}
+use compiler.hir.hir_lowering.phase_memo_ownership.{
+    HirPhaseMemoRoot,
+    hir_phase_memo_promote_roots,
+    hir_phase_memo_promote_global_caches
+}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.io_runtime.{env_get_opt}
 
@@ -680,6 +684,16 @@ class HirLowering:
     # declaration-site owner reference, not a use-site annotation, so declared
     # nominal arity does not apply to it.
     nominal_impl_header_owner: bool = false
+    surface_decl_promoted_build_v1: i64 = 0
+    surface_decl_promoted_names_len_v1: i64 = 0
+    surface_decl_promoted_surfaces_len_v1: i64 = 0
+    surface_decl_promoted_buckets_len_v1: i64 = 0
+    surface_decl_promoted_next_len_v1: i64 = 0
+    surface_decl_promote_calls_v1: i64 = 0
+    package_sibling_promoted_build_v1: i64 = 0
+    package_sibling_promoted_names_len_v1: i64 = 0
+    package_sibling_promoted_canons_len_v1: i64 = 0
+    package_sibling_promote_calls_v1: i64 = 0
     # Append-only ABI slot: per-hop full route-array alignment scans run by
     # find_reexport_source_walk (each is quadratic in the facade's export
     # origin count). Work counter for reexport_walk_route_alignment_memo_spec.
@@ -853,6 +867,16 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         package_sibling_canons: empty_package_sibling_canons,
         package_sibling_index_built: false,
         package_sibling_index_build_count: 0,
+        surface_decl_promoted_build_v1: 0,
+        surface_decl_promoted_names_len_v1: 0,
+        surface_decl_promoted_surfaces_len_v1: 0,
+        surface_decl_promoted_buckets_len_v1: 0,
+        surface_decl_promoted_next_len_v1: 0,
+        surface_decl_promote_calls_v1: 0,
+        package_sibling_promoted_build_v1: 0,
+        package_sibling_promoted_names_len_v1: 0,
+        package_sibling_promoted_canons_len_v1: 0,
+        package_sibling_promote_calls_v1: 0,
         surface_index_by_name: empty_surface_index_by_name,
         surface_index_by_name_built: false,
         surface_index_by_name_build_count: 0,
@@ -1071,12 +1095,7 @@ impl HirLowering:
             HirPhaseMemoRoot.Texts(self.surface_package_name_memo_values),
             HirPhaseMemoRoot.Ints(self.surface_package_name_memo_hash_buckets),
             HirPhaseMemoRoot.Ints(self.surface_package_name_memo_hash_next),
-            HirPhaseMemoRoot.Texts(self.surface_decl_pair_names),
-            HirPhaseMemoRoot.Ints(self.surface_decl_pair_surfaces),
-            HirPhaseMemoRoot.Ints(self.surface_decl_pair_hash_buckets),
-            HirPhaseMemoRoot.Ints(self.surface_decl_pair_hash_next),
-            HirPhaseMemoRoot.TextLists(self.package_sibling_names),
-            HirPhaseMemoRoot.TextLists(self.package_sibling_canons),
+            HirPhaseMemoRoot.TraitMap(self.lowered_traits),
             HirPhaseMemoRoot.IndexMap(self.surface_index_by_name),
             HirPhaseMemoRoot.IndexMap(self.explicit_dep_target_memo),
             HirPhaseMemoRoot.TextMap(self.explicit_dep_item_memo),
@@ -1124,7 +1143,50 @@ impl HirLowering:
         # cached policy survives begin_module and must survive reclamation too.
         val match_guard_level_ok = self.match_guard_level == "" or
             rt_transient_heap_promote(self.match_guard_level)
-        memos_ok and glob_importer_owner_ok and match_guard_level_ok
+        val surface_decl_needs_promote = (
+            self.surface_decl_index_build_count != self.surface_decl_promoted_build_v1 or
+            self.surface_decl_pair_names.len() != self.surface_decl_promoted_names_len_v1 or
+            self.surface_decl_pair_surfaces.len() != self.surface_decl_promoted_surfaces_len_v1 or
+            self.surface_decl_pair_hash_buckets.len() != self.surface_decl_promoted_buckets_len_v1 or
+            self.surface_decl_pair_hash_next.len() != self.surface_decl_promoted_next_len_v1
+        )
+        val decl_ok = if surface_decl_needs_promote:
+            val decl_roots: [HirPhaseMemoRoot] = [
+                HirPhaseMemoRoot.Texts(self.surface_decl_pair_names),
+                HirPhaseMemoRoot.Ints(self.surface_decl_pair_surfaces),
+                HirPhaseMemoRoot.Ints(self.surface_decl_pair_hash_buckets),
+                HirPhaseMemoRoot.Ints(self.surface_decl_pair_hash_next),
+            ]
+            hir_phase_memo_promote_roots(decl_roots)
+        else:
+            true
+        if decl_ok and surface_decl_needs_promote:
+            self.surface_decl_promoted_build_v1 = self.surface_decl_index_build_count
+            self.surface_decl_promoted_names_len_v1 = self.surface_decl_pair_names.len()
+            self.surface_decl_promoted_surfaces_len_v1 = self.surface_decl_pair_surfaces.len()
+            self.surface_decl_promoted_buckets_len_v1 = self.surface_decl_pair_hash_buckets.len()
+            self.surface_decl_promoted_next_len_v1 = self.surface_decl_pair_hash_next.len()
+            self.surface_decl_promote_calls_v1 = self.surface_decl_promote_calls_v1 + 1
+        val package_sibling_needs_promote = (
+            self.package_sibling_index_build_count != self.package_sibling_promoted_build_v1 or
+            self.package_sibling_names.len() != self.package_sibling_promoted_names_len_v1 or
+            self.package_sibling_canons.len() != self.package_sibling_promoted_canons_len_v1
+        )
+        val sibling_ok = if package_sibling_needs_promote:
+            val sibling_roots: [HirPhaseMemoRoot] = [
+                HirPhaseMemoRoot.TextLists(self.package_sibling_names),
+                HirPhaseMemoRoot.TextLists(self.package_sibling_canons),
+            ]
+            hir_phase_memo_promote_roots(sibling_roots)
+        else:
+            true
+        if sibling_ok and package_sibling_needs_promote:
+            self.package_sibling_promoted_build_v1 = self.package_sibling_index_build_count
+            self.package_sibling_promoted_names_len_v1 = self.package_sibling_names.len()
+            self.package_sibling_promoted_canons_len_v1 = self.package_sibling_canons.len()
+            self.package_sibling_promote_calls_v1 = self.package_sibling_promote_calls_v1 + 1
+        val globals_ok = hir_phase_memo_promote_global_caches()
+        memos_ok and glob_importer_owner_ok and match_guard_level_ok and decl_ok and sibling_ok and globals_ok
 
     me lower_type(t: Type) -> HirType:
         # Streaming-surface/unstub modules present nil type annotations at

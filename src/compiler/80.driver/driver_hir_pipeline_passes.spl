@@ -1,7 +1,9 @@
 # CompilerDriver HIR resolution and type checking passes.
 
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.common.api_signature_facts_v1.{ApiSignatureFactsV1, ApiCallableFactV1, ApiSignatureNodeV1}
 use compiler.driver.hir_typecheck_consumer_v1.{HirTypecheckReceiptV1, collect_module_typecheck_receipt_v1}
+use compiler.driver.driver_unit_profile.{unit_profile_policy, unit_profile_apply, unit_profile_drain_diagnostics}
 use compiler.driver.hir_semantic_consumer_v1.{collect_module_safety_receipt_v1,
     collect_module_any_escape_receipt_v1, collect_module_enum_contract_receipt_v1,
     collect_module_representation_receipt_v1}
@@ -161,9 +163,16 @@ pub fn run_typecheck_warn_pass(
     var out: [text] = []
     # Script (interpreted) execution is the only SPL-UNIT-002 relaxation.
     val script_mode = ctx.options.mode == CompileMode.Interpret
+    # Warm lazy unit-profile policy and edition resolution before per-module
+    # transient scopes begin so neither the global snapshot nor
+    # _EDITION_UNKNOWN_WARN_COUNTS is allocated inside module 0's scratch heap.
+    if hir_modules.len() > 0:
+        val _warm_unit_policy = unit_profile_policy()
+        unit_profile_apply(env_get("SIMPLE_TYPECHECK_PROFILE") ?? "", script_mode)
+        val _warm_unit_notices = unit_profile_drain_diagnostics("<warm>")
     for name in hir_modules.keys():
         val collect_signatures = not ctx.api_signature_retention_exhausted
-        var receipt = collect_module_typecheck_receipt_v1(name, hir_modules[name], severity, collect_signatures, script_mode)
+        var receipt = _typecheck_receipt_scoped_v1(name, hir_modules[name], severity, collect_signatures, script_mode)
         if val registry = surfaces:
             if val facts = receipt.api_signatures:
                 receipt.api_signatures = Some(bind_api_signature_surface_v1(facts, registry))
@@ -187,7 +196,7 @@ pub fn run_safety_warn_pass(ctx: CompileContext,
     val parallel_policy = ResolvedParallelPolicyV1.for_assurance(ctx.assurance_policy.strictness)
     var out: [text] = []
     for name in hir_modules.keys():
-        val receipt = collect_module_safety_receipt_v1(name, hir_modules[name], severity, parallel_policy)
+        val receipt = _safety_receipt_scoped_v1(name, hir_modules[name], severity, parallel_policy)
         for message in receipt.messages: out.push(message)
         publish_module_typecheck_receipt_v1(ctx, receipt)
     out
@@ -233,6 +242,59 @@ fn _hir_pass_scope_open_v1(pass_name: text, name: text) -> bool:
 # Re-promoting an already-immortal child is a documented no-op success.
 fn _hir_pass_scope_failed_v1(pass_name: text, name: text, paused: bool, owned: bool, ended: bool):
     eprint("[hir-pass-scope] WARNING receipt promotion failed (paused={paused} owned={owned} ended={ended}); re-running {pass_name} UNSCOPED: module={name}")
+
+fn _typecheck_receipt_scoped_v1(name: text, module: HirModule,
+        severity: TypecheckPassSeverity, collect_signatures: bool,
+        script_mode: bool) -> HirTypecheckReceiptV1:
+    if not _hir_pass_scope_open_v1("typecheck", name):
+        return collect_module_typecheck_receipt_v1(name, module, severity, collect_signatures, script_mode)
+    val receipt: HirTypecheckReceiptV1 = collect_module_typecheck_receipt_v1(
+        name, module, severity, collect_signatures, script_mode)
+    # @workaround bug=mono_generic_field_access_arg_unspecialized_2026-10-23 reason=stage2 compiler cannot infer T from a field-access argument to transient_promote<T>; typed locals carry the same handles
+    val messages_v: [text] = receipt.messages
+    val warnings_v: [text] = receipt.warnings
+    val errors_v: [text] = receipt.errors
+    val api_opt_v: ApiSignatureFactsV1? = receipt.api_signatures
+    val paused = transient_scope_pause()
+    var owned = paused and transient_promote(receipt) and transient_promote(messages_v) and
+        transient_promote(warnings_v) and transient_promote(errors_v)
+    if owned:
+        if val facts_v = api_opt_v:
+            val callables_v: [ApiCallableFactV1] = facts_v.callables
+            val nodes_v: [ApiSignatureNodeV1] = facts_v.nodes
+            val reasons_v: [text] = facts_v.unknown_reasons
+            val mod_name_v: text = facts_v.module_name
+            val mod_path_v: text = facts_v.module_path
+            val surf_path_v: text = facts_v.surface_path
+            val bind_reason_v: text = facts_v.surface_binding_reason
+            owned = transient_promote(api_opt_v) and transient_promote(facts_v) and
+                transient_promote(callables_v) and transient_promote(nodes_v) and
+                transient_promote(reasons_v) and transient_promote(mod_name_v) and
+                transient_promote(mod_path_v) and transient_promote(surf_path_v) and
+                transient_promote(bind_reason_v)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return receipt
+    _hir_pass_scope_failed_v1("typecheck", name, paused, owned, ended)
+    collect_module_typecheck_receipt_v1(name, module, severity, collect_signatures, script_mode)
+
+fn _safety_receipt_scoped_v1(name: text, module: HirModule,
+        severity: SafetyPassSeverity,
+        parallel_policy: ResolvedParallelPolicyV1) -> HirTypecheckReceiptV1:
+    if not _hir_pass_scope_open_v1("safety_warn", name):
+        return collect_module_safety_receipt_v1(name, module, severity, parallel_policy)
+    val receipt: HirTypecheckReceiptV1 = collect_module_safety_receipt_v1(
+        name, module, severity, parallel_policy)
+    # @workaround bug=mono_generic_field_access_arg_unspecialized_2026-10-23 reason=stage2 compiler cannot infer T from a field-access argument to transient_promote<T>; typed locals carry the same handles
+    val messages_v: [text] = receipt.messages
+    val warnings_v: [text] = receipt.warnings
+    val errors_v: [text] = receipt.errors
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(receipt) and transient_promote(messages_v) and
+        transient_promote(warnings_v) and transient_promote(errors_v)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return receipt
+    _hir_pass_scope_failed_v1("safety_warn", name, paused, owned, ended)
+    collect_module_safety_receipt_v1(name, module, severity, parallel_policy)
 
 fn _any_escape_receipt_scoped_v1(name: text, module: HirModule,
         strictness: AssuranceStrictness) -> HirTypecheckReceiptV1:
