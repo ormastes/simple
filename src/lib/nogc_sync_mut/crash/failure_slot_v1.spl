@@ -8,9 +8,12 @@
 #   - the valid marker is set LAST, so a reader never sees a half-written record;
 #   - no allocation beyond the caller-provided text, no I/O, no callbacks.
 # First consumer: os.smf.kernel_plugin.recovery_worker (worker failure exits).
-# Not wired into the C signal handler or the interpreter assert yet: those need
-# the externs in doc/08_tracking/bug/crash_signal_bundle_extern_gap_2026-07-29.md
-# and a self-hosted binary to verify against.
+# Second consumer: the interpreter assert hook (publish_assert_failure below),
+# behind the `dhr` build feature (SIMPLE_FEATURES=dhr). The C signal handler is
+# not wired yet: it needs the externs in
+# doc/08_tracking/bug/crash_signal_bundle_extern_gap_2026-07-29.md.
+
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
 pub enum FailureKindV1:
     Assert
@@ -67,3 +70,32 @@ class FailureSlotV1:
         self.valid = false
         self.nested_faults = 0
         Some(record)
+
+# Process-wide slot fed by the interpreter assert hook. Only reachable when a
+# compiler file imports this module, which it does only under
+# `@when(feature = "dhr")`, so the default closure never holds it (DHR OFF-01).
+var _process_failure_slot: FailureSlotV1 = FailureSlotV1.create()
+
+pub fn dhr_profile_active() -> bool:
+    """True when SIMPLE_FEATURES lists `dhr`. Same comma/space separated,
+    case-insensitive parse as the compiler's cfg_feature_enabled, so the build
+    feature and the runtime profile are one switch."""
+    val raw = env_get_opt("SIMPLE_FEATURES") ?? ""
+    for part in raw.replace(",", " ").split(" "):
+        if part.trim().to_lower() == "dhr":
+            return true
+    false
+
+# @allow(primitive_api) site/message are the interpreter's own assert text; no KPF identity exists there
+pub fn publish_assert_failure(site: text, message: text) -> bool:
+    """Assert hook: record a failing assert in the process slot before the
+    normal failure path continues. A no-op returning false when the dhr profile
+    is off. Generation and epoch are 0: an interpreted program has no KPF
+    module generation."""
+    if not dhr_profile_active():
+        return false
+    _process_failure_slot.publish(FailureKindV1.Assert, site, message, 0, 0)
+
+pub fn take_process_failure() -> Option<FailureRecordV1>:
+    """Broker side of the process slot."""
+    _process_failure_slot.take()

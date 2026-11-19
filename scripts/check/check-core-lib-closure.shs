@@ -182,11 +182,24 @@ AWKEOF
             return ""
         }
 
-        function scan_file(path,    line, m, imp, targets, n, i, t) {
+        function scan_file(path,    line, m, imp, targets, n, i, t, skip) {
             if (path in scanned) return
             scanned[path] = 1
             full = root_dir "/" path
+            skip = 0
             while ((getline line < full) > 0) {
+                # A block guarded by a feature tag ALONE (`@when(feature = "x"):`)
+                # is absent from the default build: no SIMPLE_FEATURES tag is on
+                # by default (cfg_feature_enabled). Its imports are not part of
+                # the default closure, up to its `@else:` or matching `@end`.
+                # Mixed guards (`os = ... or feature = ...`) are still scanned.
+                if (skip > 0) {
+                    if (line ~ /^[[:space:]]*@when[[:space:]]*\(/) skip++
+                    else if (line ~ /^[[:space:]]*@end[[:space:]]*$/) skip--
+                    else if (skip == 1 && line ~ /^[[:space:]]*@else[[:space:]]*:/) skip = 0
+                    continue
+                }
+                if (line ~ /^[[:space:]]*@when[[:space:]]*\([[:space:]]*feature[[:space:]]*=[[:space:]]*"[^"]*"[[:space:]]*\)[[:space:]]*:[[:space:]]*$/) { skip = 1; continue }
                 if (line ~ /^[[:space:]]*(pub[[:space:]]+|export[[:space:]]+)?use[[:space:]]+std\.[A-Za-z0-9_.]+/) {
                     imp = line
                     sub(/^[[:space:]]*(pub[[:space:]]+|export[[:space:]]+)?use[[:space:]]+std\./, "", imp)
@@ -388,6 +401,15 @@ run_selftest() {
     out=$(run_check "$fixture" "$fixture/core.sdn" "$fixture/kernel.sdn" 2>&1) && { echo "self-test: optional replay provider in kernel closure went undetected"; return 1; }
     printf '%s\n' "$out" | grep -q 'DHR-OFF-01' || { echo "self-test: DHR-OFF-01 not reported: $out"; return 1; }
     printf '%s\n' "$out" | grep -q 'src/lib/nogc_sync_mut/replay/recorder.spl' || { echo "self-test: DHR-OFF-01 did not name the provider: $out"; return 1; }
+    reset_fixture
+
+    # --- DHR OFF-01: the same provider behind a feature-only `@when` guard is
+    # absent from the default build, so it stays out of the closure; the code
+    # after the block is still scanned. ---
+    printf '%s\n' '@when(feature = "dhr"):' 'use std.nogc_sync_mut.replay.recorder.{rec}' '@end' 'use std.common.util.{util}' >> "$fixture/src/compiler/10.frontend/entry.spl"
+    out=$(run_check "$fixture" "$fixture/core.sdn" "$fixture/kernel.sdn" 2>&1) || { echo "self-test: feature-gated provider import was counted in the default closure: $out"; return 1; }
+    printf '%s\n' "$out" | grep -q 'DHR-OFF-01' && { echo "self-test: feature-gated provider reported as DHR-OFF-01: $out"; return 1; }
+    printf '%s\n' "$out" | grep -qE '^PASS — 1 reached' || { echo "self-test: code after the feature block was not scanned: $out"; return 1; }
     rm -rf "$fixture/src/lib/nogc_sync_mut"
     reset_fixture
 
@@ -395,7 +417,7 @@ run_selftest() {
     rm -f "$fixture/src/compiler/10.frontend/entry.spl"
     if run_check "$fixture" "$fixture/core.sdn" "$fixture/kernel.sdn" >/dev/null 2>&1; then echo "self-test: empty fixture unexpectedly passed"; return 1; fi
 
-    echo "core-lib closure self-test OK (7 fixtures)"
+    echo "core-lib closure self-test OK (8 fixtures)"
 }
 
 # The selftest runs fatally before EVERY scan, not only under --selftest --
