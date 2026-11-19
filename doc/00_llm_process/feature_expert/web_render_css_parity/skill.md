@@ -3402,3 +3402,5 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - **Routing:** `_simple_web_engine2d_raster_only_text_property` now holds only a BLURRED (or unparsable) text-shadow on the raster lane. The raster lane does not paint the blur either (ink 839 px vs Chrome 2466), so blur is a known gap: it needs a glyph blur primitive (Gaussian on the glyph mask, sigma = blur/2), not yet in Engine2D.
 - **Trap:** the shadow bbox x1 is 1px short of Chrome for the same reason plain text is (166 vs 165); pin it within 1px.
 - **Spec:** `drawir_text_shadow_chrome159_spec` (5 examples, 0 / 5 on base, 5 / 5 on head); `abspos_bare_text_chrome159_spec` AC-8 re-pinned (sharp shadow -> Draw IR, blurred -> raster).
+
+- Double borders (2026-11-18): stripe = `(w+1)/3`; uniform-width double = two solid rings (outer on border box, inner inset `w-stripe`, radii `max(r-inset,0)`). Draw IR `<id>_d0`/`_d1`, raster via `fb_border_ring_per_corner_clip`. Engine2D sends all rounded borders to the typed ring. Pinned by `border_double_radius_chrome159_spec`.
