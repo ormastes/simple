@@ -17,6 +17,7 @@ use os.kernel.replay.mode.{replay_is_off, replay_is_recording, replay_is_verifyi
 use os.kernel.replay.event_kinds.{ReplayEntry, EventKind}
 use os.kernel.replay.log_buffer.{replay_log_event, replay_read_next}
 use os.kernel.replay.divergence.{DivergenceKind, report_divergence}
+use os.kernel.errno.{EIO}
 use std.replay.portable_replay.{
     PR_MODE_RECORD, PR_MODE_REPLAY, PR_KIND_TIMER_READ, PR_KIND_RANDOM_READ,
     PR_DIV_NONE, PR_DIV_LOG_EXHAUSTED,
@@ -35,6 +36,9 @@ val KERNEL_PR_KIND_SYSCALL_EXIT: i64 = 5
 val KERNEL_PR_KIND_IRQ: i64 = 6
 val KERNEL_PR_KIND_IPC_SEND: i64 = 7
 val KERNEL_PR_KIND_IPC_RECV: i64 = 8
+# Syscall result reported on a Replay divergence: a negative errno, so the
+# caller never sees success.
+val KERNEL_SYSCALL_REPLAY_DIVERGED: i64 = -(EIO as i64)
 
 fn replay_portable_sync():
     """Mirror the (non-Off) kernel mode onto the portable replay session.
@@ -170,7 +174,9 @@ fn replay_hook_syscall_enter(task_id: i64, syscall_id: i64, arg0: i64, arg1: i64
 
 # Returns the result the syscall must report. Replay returns the logged retval
 # for this syscall; a different syscall, a wrong event or an exhausted log is a
-# SyscallMismatch divergence and returns the fail-closed value, never `retval`.
+# SyscallMismatch divergence and returns KERNEL_SYSCALL_REPLAY_DIVERGED
+# (-EIO), never `retval` — not the core's generic fail-closed value, which is
+# 0 and would read as a successful syscall.
 @allow(primitive_api)  # kernel replay ABI: syscall ids and results are raw i64 log payloads
 fn replay_hook_syscall_exit(task_id: i64, syscall_id: i64, retval: i64) -> i64:
     if replay_is_off():
@@ -180,7 +186,11 @@ fn replay_hook_syscall_exit(task_id: i64, syscall_id: i64, retval: i64) -> i64:
     val logged = portable_replay_event(kind, KERNEL_PR_SCOPE, retval)
     if replay_is_recording():
         return retval
-    replay_portable_resolve(DivergenceKind.SyscallMismatch, logged, retval, syscall_id)
+    val diverged = portable_replay_last_divergence() != PR_DIV_NONE
+    val result = replay_portable_resolve(DivergenceKind.SyscallMismatch, logged, retval, syscall_id)
+    if diverged and not replay_is_verifying():
+        return KERNEL_SYSCALL_REPLAY_DIVERGED
+    result
 
 # ============================================================================
 # Interrupt Hook
