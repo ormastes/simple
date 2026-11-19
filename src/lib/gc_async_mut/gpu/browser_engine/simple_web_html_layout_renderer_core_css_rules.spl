@@ -47,13 +47,15 @@ fn _css_collect_custom_props(css: text, root_attrs: text) -> text:
     # Bare :root declarations have lower specificity than matching
     # :root[attr] declarations. Keep the two groups separate, preserving
     # source order within each, then concatenate base before variants.
-    var base_entries: [text] = [""; 400]
-    var variant_entries: [text] = [""; 400]
-    var base_entry_i = 0
-    var variant_entry_i = 0
+    # Growable: the production theme sheet has 469 `:root` selectors and 489
+    # bare `:root` declarations, past the old fixed 200-selector / 400-entry
+    # caps, so its late `:root` blocks were silently dropped.
+    var base_entries: [text] = []
+    var variant_entries: [text] = []
     var pos = 0
     var guard = 0
-    while guard < 200:  # cpu-lane-loop-ok: walks the `:root` blocks located by native find_from in one stylesheet, hard-capped at 200 blocks; once per style invalidation
+    val css_blen = css.byte_len()
+    while guard <= css_blen:  # cpu-lane-loop-ok: walks the `:root` occurrences located by native find_from in one stylesheet; each iteration advances pos, so the sheet's byte length bounds it; once per style invalidation
         guard = guard + 1
         val rp = find_from(css, ":root", pos)
         if rp < 0:
@@ -96,7 +98,7 @@ fn _css_collect_custom_props(css: text, root_attrs: text) -> text:
         val body_len = body.byte_len()
         var bp: i64 = 0
         var bg = 0
-        while bp < body_len and bg < 400:  # cpu-lane-loop-ok: walks the `--name: value` declarations inside one small `:root` block body via native find_from, capped at 400 declarations per block
+        while bp < body_len and bg <= body_len:  # cpu-lane-loop-ok: walks the `--name: value` declarations inside one `:root` block body via native find_from; bp advances every iteration, so the body's byte length bounds it
             bg = bg + 1
             val dd = find_from(body, "--", bp)
             if dd < 0:
@@ -112,17 +114,13 @@ fn _css_collect_custom_props(css: text, root_attrs: text) -> text:
             val prop_val = body.substring(colon + 1, val_end).trim()
             if name.len() > 2:
                 val entry = name + ":" + prop_val + "\n"
-                if between.len() == 0 and base_entry_i < base_entries.len():
-                    base_entries[base_entry_i] = entry
-                    base_entry_i = base_entry_i + 1
-                elif between.len() > 0 and variant_entry_i < variant_entries.len():
-                    variant_entries[variant_entry_i] = entry
-                    variant_entry_i = variant_entry_i + 1
+                if between.len() == 0:
+                    base_entries.push(entry)
+                else:
+                    variant_entries.push(entry)
             bp = if semi >= 0: semi + 1 else: body_len
         pos = close + 1
-    if base_entry_i == 0 and variant_entry_i == 0:
-        return ""
-    text_list_prefix(base_entries, base_entry_i).join("") + text_list_prefix(variant_entries, variant_entry_i).join("")
+    base_entries.join("") + variant_entries.join("")
 
 fn _css_props_contains_name(props: text, name: text) -> bool:
     """True when `props` (the "--name:value\n" pool) already defines `name`."""
@@ -142,13 +140,12 @@ fn _css_collect_scoped_custom_props(css: text, existing: text) -> text:
     keeps winning exactly as before, and this pass is purely additive for
     names that were previously unresolvable.
     """
-    var entries: [text] = [""; 400]
-    var entry_i = 0
+    var entries: [text] = []
     var pool = existing
     var pos: i64 = 0
     var guard = 0
     val css_len = css.byte_len()
-    while pos < css_len and guard < 400:  # cpu-lane-loop-ok: walks `--name:` declarations located by native find_from, hard-capped at 400; once per style invalidation
+    while pos < css_len and guard <= css_len:  # cpu-lane-loop-ok: walks `--name:` declarations located by native find_from; pos advances every iteration, so the sheet's byte length bounds it; once per style invalidation
         guard = guard + 1
         val dd = find_from(css, "--", pos)
         if dd < 0:
@@ -173,12 +170,11 @@ fn _css_collect_scoped_custom_props(css: text, existing: text) -> text:
         val prop_val = css.substring(colon + 1, val_end).trim()
         if (
             name.byte_len() > 2 and prop_val.len() > 0 and
-            name.index_of(" ") < 0 and entry_i < entries.len() and
+            name.index_of(" ") < 0 and
             not _css_props_contains_name(pool, name)
         ):
             val entry = name + ":" + prop_val + "\n"
-            entries[entry_i] = entry
-            entry_i = entry_i + 1
+            entries.push(entry)
             pool = pool + entry
             pos = val_end + 1
         else:
@@ -187,9 +183,7 @@ fn _css_collect_scoped_custom_props(css: text, existing: text) -> text:
             # declaration's colon and semicolon, so skipping to val_end would
             # swallow a real declaration (`div { color: var(--c); --c: red; }`).
             pos = dd + 2
-    if entry_i == 0:
-        return ""
-    text_list_prefix(entries, entry_i).join("")
+    entries.join("")
 
 fn _css_resolve_vars(
     css: text, state: CssVarResolutionState, resolution_depth: i32,
@@ -279,7 +273,7 @@ fn _css_resolve_vars(
         # custom property instead of being silently ignored.
         var prop_idx = -1
         var prop_scan = state.prop_count - 1
-        while prop_scan >= 0:  # cpu-lane-loop-ok: backward last-wins lookup of one custom-property name in the <=200-entry :root property table; searched backwards on purpose so a later :root variant overrides an earlier declaration
+        while prop_scan >= 0:  # cpu-lane-loop-ok: backward last-wins lookup of one custom-property name in the :root property table (one slot per pool line); searched backwards on purpose so a later :root variant overrides an earlier declaration
             if state.prop_names[prop_scan] == prop_name:
                 prop_idx = prop_scan
                 break

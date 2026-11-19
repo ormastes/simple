@@ -848,3 +848,19 @@ head (13/40 at base).
 - **Fix:** `gradient_rem_stops_to_px` (`foundation_values`) rewrites every `<number>rem` in a gradient value to px at cascade time, against `css_cascade_root_font_px()`. `apply_decls` applies it to `background` and `background-image`. A `rem` with no digit before it, or with a name character after it (`url(a2rem.png)`), is left alone.
 - **Evidence:** new `gradient_rem_stops_chrome159_spec` (Chrome k=4, 16 points per page, ±2), 0/4 -> 4/4 on raster, cpu_simd, Vulkan and the helper's edge cases.
 - **Not covered:** a `rem` stop on `<html>` itself still resolves against 16px, because the root font size is set after the root's own declarations.
+
+## 2026-11-19 — custom properties past fixed table sizes are dropped (FIXED)
+
+- **Symptom:** in the production widget-shell window (`gui_window_widget_html`, the `generate_css` theme), every `.widget-button` and `.widget-panel` override written with `var()` was lost. Buttons painted the first rule's `#89b4fa` with square corners instead of `var(--ui-accent)` and `var(--radius-md)`. With text made transparent in both engines, cpu_simd at k=4 agreed with Chrome on 38.1% of pixels (per channel <= 8).
+- **Cause:** three fixed caps in the custom-property path:
+  - `_css_collect_custom_props` stops after 200 `:root` selectors. The theme sheet has 469, and its three large bare `:root` blocks start at byte 291845.
+  - It keeps at most 400 entries per group, and `_css_collect_scoped_custom_props` stops after 400 `--` occurrences.
+  - `CssVarResolutionState.new` has a 200-line table.
+
+  With `SIMPLE_WEB_STYLE_TRACE=1` the trace showed `css-var-unresolved count=157 props=81`. With the bare blocks gone, a `--late` from a non-matching `:root[data-x]` variant even leaked in through the scoped collector.
+- **Fix:** the collectors push into growable lists, bounded by the sheet's byte length. The resolver table has one slot per pool line. Lookup is unchanged (backwards, last wins).
+- **Evidence:**
+  - New `css_custom_property_table_size_chrome159_spec` covers 210 `:root[...]` variants followed by a late `:root`, and one `:root` with 451 declarations. It went 0/3 -> 3/3 on cpu_simd and the raster.
+  - The window fixture improved from 38.1% to 47.0% agreement with Chrome. Rounded panels and buttons and the accent blue now match.
+  - Base-vs-head sweep of 33 theme-sheet and `var(--` specs: no new failures. The 18 failing specs fail identically on base.
+- **Still open on that fixture:** the outer glass panel paints opaque white where Chrome shows the translucent gradient over the blurred backdrop. The button sheen gradient is also flat. A prior probe showing "gradient over `var()` colour dropped" was a probe bug: an unescaped `{--a:...}` in a Simple string literal. That case matches Chrome exactly.
