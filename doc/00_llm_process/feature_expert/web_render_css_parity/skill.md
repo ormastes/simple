@@ -3381,3 +3381,11 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - **Trap:** a negative letter-spacing pulls the box end in past the last glyph's ink; the horizontal band clip in `draw_ir_adv.spl` is widened by that overhang (`-1px` was clipped to 125, Chrome 126).
 - **Chrome 159 measured (ink x1):** `0.1em` 163, `-1px` 126, `0.5px` 147, `word-spacing:2.5px` 74; `0.1em` wrap at w120 = 3 lines (20,32..76,79), w130 = 2 lines (..139,61).
 - **Spec:** `drawir_letter_word_spacing_chrome159_spec` 8 examples (AC-7/8 new; AC-3/4 re-pinned to Chrome).
+
+## Shaped-run letter/word-spacing (2026-11-19)
+
+- **Which text is shaped:** only Arabic/Devanagari (`_resolved_font_complex_script`) with a `lang` the font registry maps to an accepted bundled face. `lang="ar"` -> Noto Sans Arabic gives `glyph_run.valid`; `lang="hi"` currently does NOT (unshaped fallback, width 103 vs Chrome 73). Latin ligatures/kerning never take this path.
+- **Chrome 159 rule (measured, Range widths):** letter-spacing is added after every unit except Arabic-script letters (joined or isolated); spaces, digits and Latin in the run take it. `مرحبا بالعالم` 77.09 -> 79.09 at 2px, `م ر ح` +4, `مرحبا abc` +8. Devanagari spaces per grapheme cluster (+16 for 8 clusters).
+- **Change:** `spaced_advances_milli` skips the letter gap for `Script.Arabic`. Engine2D paints shaped runs from the command advances, so the glyph run needed no edit.
+- **Trap:** ink bbox y/x0 for Arabic differ from Chrome on base (font raster/line box), so the spec pins width (`cmd.width`) and ink x1/x0 DELTAS vs the unspaced render, not absolute ink boxes.
+- **Spec:** `shaped_run_spacing_chrome159_spec` 6 examples.
