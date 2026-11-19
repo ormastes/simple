@@ -8,7 +8,7 @@ use std.common.layout.text_metrics.{codepoint_cells, text_cell_width}
 use std.common.encoding.utf8.{text_codepoints}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_is_monospace}
 use std.nogc_sync_mut.text_layout.font_renderer.{browser_normal_line_height_px, browser_normal_line_height_milli_px}
-use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
+use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language, resolve_font_metrics_with_language_milli}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{svg_view_box_milli, font_milli_of}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style}
@@ -1253,10 +1253,12 @@ fn compute_style_wrap_ranges_float_band(txt: text, full_w: i32, line_boxes: [i32
             # As in the normal wrap: break at the last space that fits; with
             # no break opportunity on the line the whole word is taken and
             # OVERFLOWS (overflow-wrap: normal), it is not chopped.
-            if endv < n and last_space > start:
+            val space_hangs = endv < n and endv > start and tb[endv] == 32
+            if not space_hangs and endv < n and last_space > start:
                 endv = last_space
-            elif not may_break_in_word and endv < n:
+            elif not space_hangs and not may_break_in_word and endv < n:
                 endv = word_end_byte(tb, start, n)
+            endv = wrap_back_off_exact(txt, tb, by, start, endv, max_width, st)
             if endv == start:
                 endv = next_codepoint_start(txt, start)
         else:
@@ -1331,6 +1333,34 @@ fn _lay_compute_style_wrap_ranges_inner(txt: text, max_width: i32, st: Style, fa
 fn compute_style_wrap_ranges_first_line(txt: text, first_width: i32, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
     _lay_compute_style_wrap_ranges_first_inner(txt, first_width, max_width, st, fallback_cpl)
 
+# Chrome 159 fits a line when its exact run width, rounded up to a LayoutUnit
+# (1/64 px), is at most the available width. The byte advances are whole px
+# whose sums are within 1 px of the exact width, so only a line whose whole-px
+# sum EQUALS `width` can be wider than it: `The quick brown` at 16 px sums to
+# 117 but is 117.39 px, and Chrome breaks it in a 117 px box. Such a line is
+# measured exactly and, if it overflows, ends at its previous space instead.
+fn wrap_back_off_exact(txt: text, tb: [u8], by: [i32], start: i32, endv: i32, width: i32, st: Style) -> i32:
+    if st.resolved_font_width_milli < 0 or endv <= start:
+        return endv
+    var used = 0
+    var k = start
+    while k < endv:
+        used = used + by[k]
+        k = k + 1
+    if used != width:
+        return endv
+    val family = browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic)
+    val m = resolve_font_metrics_with_language_milli(family, txt.slice(start, endv), font_milli_of(st.font_size, st.font_size_milli), "")
+    if not m.valid or m.identity != st.resolved_font_identity or m.width_milli < 0:
+        return endv
+    val lu64 = (m.width_milli * 64 + 999) / 1000
+    if lu64 <= (width as i64) * 64:
+        return endv
+    var p = endv - 1
+    while p > start and tb[p] != 32:
+        p = p - 1
+    if p > start: p else: endv
+
 fn _lay_compute_style_wrap_ranges_first_inner(txt: text, first_width: i32, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
     # Cheap gates first: building `by` decodes the whole run, so it must not run
     # for a style that cannot use it anyway.
@@ -1372,12 +1402,17 @@ fn _lay_compute_style_wrap_ranges_first_inner(txt: text, first_width: i32, max_w
         # `anywhere`, `word-break: break-all`), which is why this is a
         # condition and not a deletion.
         val may_break_in_word = st.overflow_wrap == "break-word" or st.overflow_wrap == "anywhere" or st.word_break == "break-all"
-        if endv < n and last_space > start:
+        # The loop stopped AT a space: the word before it fits and the space
+        # HANGS (CSS Text 3 4.1.3: a collapsible space at the line end is not
+        # counted), so the line ends here, not one word earlier.
+        val space_hangs = endv < n and endv > start and tb[endv] == 32
+        if not space_hangs and endv < n and last_space > start:
             endv = last_space
-        elif not may_break_in_word and endv < n:
+        elif not space_hangs and not may_break_in_word and endv < n:
             # No break opportunity inside this line: take the whole word, even
             # though it overflows, and break at the space that ends it.
             endv = word_end_byte(tb, start, n)
+        endv = wrap_back_off_exact(txt, tb, by, start, endv, line_width, st)
         if endv == start:
             # Progress guard: `start` is a space whose own advance already
             # exceeds `max_width` (a pen remainder of a pixel or two), so the
