@@ -888,7 +888,7 @@ head (13/40 at base).
 - **Fix:** for a typed linear gradient on a rounded box, `paint_draw_ir.spl` emits one `BackgroundGradientLayer` from the typed stops and angle: `linear_gradient_line_q10_at_angle` over the positioning (origin) box, tiled on that box and repeating, because Chrome repeats it under a transparent border plus `background-gradient-layer-clip-radii`. The existing rounded layer branch paints and clips it. This is the same construction the raster uses for a typed canvas gradient (`canvas_gradient_layers`).
 - **Evidence:** new `rounded_typed_gradient_chrome159_spec` checks interior and corner points against Chrome ±2 for an opaque and a translucent base colour, a first stop at `10px`, and `border:4px solid transparent; padding:3px` (repeat under the border). Raster runs the first three; cpu_simd and Vulkan run all four. Before: raster green, cpu_simd and Vulkan red. After: 3/3.
 - **Related, not changed:** the base-failing `decl_apply_coverage_closure` example ("records from/to and the stop model") is about the same typed routing.
-- **Open (raster):** with `border:4px solid transparent; padding:3px`, the raster leaves the border area at the box colour (`0058BC` at (45,9) and (45,59)). Chrome repeats the gradient there (`4D4187` and `4D87CD`), and Draw IR now does too.
+- **Raster (fixed, see "raster repeating background starts at the clip box" below):** with `border:4px solid transparent; padding:3px`, the raster leaves the border area at the box colour (`0058BC` at (45,9) and (45,59)). Chrome repeats the gradient there (`4D4187` and `4D87CD`), and Draw IR now does too.
 
 ## 2026-11-19 — Vulkan box shadow wipes the destination alpha (FIXED)
 
@@ -910,3 +910,10 @@ head (13/40 at base).
   - `box_shadow_falloff_spec` AC-1 asserted the shadow centre showing THROUGH a transparent box, which contradicts Chrome (`FFFFFF` there). It now probes the fully covered centre of a shadow offset 70px below the box (Chrome `000000`), and a new AC-1b pins the transparent interior at 255.
   - Perf: an 800x600 frame with a 600x400 translucent shadowed box, 3 renders. Head against base was 13.8 s vs 14.3 s on cpu_simd and 13.0 s vs 14.8 s on Vulkan (lavapipe), with RSS 1.66 GB vs 1.67 GB. Binary: `cargo-target-webrender-premul/release/simple`, 54131896 bytes, 2026-11-19 17:24.
 - **Not covered:** the knockout edge is a binary pixel-centre test, whereas Chrome anti-aliases the clip, so edge pixels along the curve can differ. On a real GPU the readback is a device sync, which only gated boxes pay.
+
+## 2026-11-19 — raster repeating background starts at the clip box (FIXED)
+
+- **Symptom:** a rounded box with a typed linear gradient and `border:4px solid transparent; padding:3px`. The raster left the border area at the box colour (`0058BC` at (45,9) and (45,59)), while Chrome 159 repeats the gradient there (`4D4187` and `4D87CD`).
+- **Cause:** `fb_style_background_opacity_clip` (`paint_primitives.spl`) started the tile grid at the positioning-area origin and painted only right and down from it. The painting area is the border box, which begins before that origin, so the strip between them stayed unpainted.
+- **Fix:** with `background-repeat: repeat` (and not `fixed`), the grid now starts at the first tile edge at or before the clip box, so tiles cover the whole painting area as CSS Backgrounds 3 requires.
+- **Evidence:** the raster example in `rounded_typed_gradient_chrome159_spec` gains the border/padding check, red -> green. Base vs head sweep of 33 gradient, background and coverage specs: 0 new failures, 1 fixed.
