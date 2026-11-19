@@ -574,3 +574,14 @@ archive error is the plain wedge (no receipt). After a restart the startup reap 
 corrupt, foreign, non-canonical or receipt-less archives answer "" and keep the reaped refusal (controller's `service-restart`
 settle). Expiry: replay is transport, not authority (the in-memory wedged-with-receipt arm already precedes the deadline check);
 the controller verifies grant/approval/window, and open/transfer/reap still refuse an expired approval after restart.
+RESET-FAILURE STAGES (milestone_0040; specs NOT_RUN): the Host-signed stage set grew, on the same SIMPLE-REMOTE-RESET-FAILURE-3 wire and
+SIGNATURE_V3 domain, from 3 to 10 Host stages via one closed table in `remote_container_reset_failure_v3.spl` (reason / reap /
+has-native): `prepare-wedge`, `create-wedge` (reap identity-unresolved, no native id), `configuration-wedge`, `start-wedge`,
+`inspect-wedge` (incl. the running poll), `stop-absence` (Stop not ok, no cancel cause) and `cancel-stop-absence` (self-cancel Stop not
+ok after Create) (reap incomplete, native id). `host_remote_build_reset_stage_v4` stays total and fail-closed on impossible Create
+states; `remote_build_native_step_v4` now takes the port and routes 9 wedge sites through `remote_build_reset_wedged_v4` (sign, archive
+durably per #10399, reply; any failure = plain wedge). Compatibility: the stage set is CLOSED, so an older controller fails the signed
+decode on a newer stage and falls back to the generic `wedged:reset-receipt-refused` settle: refused, never misclassified. Kept generic
+and why: enable error (the binding digest only exists after a successful enable), settle / source-return / host-settle (retried turn
+errors, not wedges), read / finalize (self-cancel causes settled `cancelled`, not wedges), transfer-missing / stage-invalid (before the
+binding / Host bug). Specs: `remote_container_reset_failure_stages_v3_spec.spl`, `host_remote_build_reset_stages_v4_spec.spl`.
