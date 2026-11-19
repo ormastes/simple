@@ -133,6 +133,15 @@ struct slang_request {
     int warm;
     int physical_only;
     int64_t context_limit;
+    /* Tree prefix-cache mode: ctx is the shared persistent context, seq is this
+     * requests sequence id (-1 none), path = prompt + decoded tokens,
+     * tree_owner = pinned terminal the prefix was copied from (-1 none). */
+    int tree;
+    int seq;
+    int tree_owner;
+    llama_token *path;
+    int64_t path_len;
+    int64_t path_cap;
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
     float *paged_logits;
     int paged_logits_valid;
@@ -526,6 +535,510 @@ int64_t slang_ggml_context_profile_configure(int64_t matched_cpu, int64_t thread
     return 0;
 }
 
+static void slang_request_release_lease(struct slang_request *request);
+static void slang_prefix_clear_all(int count_eviction);
+
+/* ---- radix (tree) prefix cache: one persistent multi-sequence context -----
+ *
+ * Mode 1 of slang_ggml_prefix_cache_mode_configure. Instead of one llama_context
+ * per request plus whole-state snapshots, every request runs on ONE persistent
+ * llama_context created with n_seq_max = SLANG_TREE_MAX_SEQS and kv_unified.
+ * A token radix tree maps cached paths to llama sequence ids: each TERMINAL
+ * node owns one seq id whose KV holds exactly its full path. A new request
+ * matches its longest cached prefix, takes a free seq id, llama_memory_seq_cp's
+ * the matched cells from the owner (unified mode only adds the new seq id to
+ * the existing cells: shared prefix cells are stored once, no KV bytes copied),
+ * decodes only the suffix with its own seq id, and when it finishes its path
+ * (prompt plus decoded tokens) is inserted. Eviction of an unpinned terminal is
+ * llama_memory_seq_rm of its seq id: cells shared with other seqs survive.
+ *
+ * Concurrency contract (unchanged from snapshot mode): requests are serialised
+ * per model. The shared context has one logits buffer, so exactly one tree
+ * request may be between prefix_prepare and its release; a second gets
+ * SLANG_ERR_BUSY (g_tree_active). All tree state is guarded by g_state_lock,
+ * the lock that already guards the snapshot cache; no new lock is introduced.
+ * Decodes run outside the lock, as in snapshot mode. */
+#define SLANG_TREE_MAX_SEQS  16
+#define SLANG_TREE_MAX_NODES 1024
+
+struct slang_tree_node {
+    int used;
+    llama_token *tok;      /* edge label */
+    int64_t n;
+    int64_t start;         /* position of the first edge token */
+    int parent, first_child, next_sibling;
+    int seq;               /* >= 0: terminal, owns this seq id */
+    int64_t pins;
+    uint64_t last_used;
+};
+
+static struct slang_tree_node g_tree_node[SLANG_TREE_MAX_NODES];
+static int g_tree_seq_used[SLANG_TREE_MAX_SEQS];
+static int g_tree_mode = 0;
+static struct llama_context *g_tree_ctx = NULL;
+static int64_t g_tree_limit = 0;      /* per-request context limit of g_tree_ctx */
+static int64_t g_tree_cells_cfg = 0;  /* 0 = 4 x the first request's n_ctx */
+static int64_t g_tree_cells = 0;
+static int64_t g_tree_active = 0;     /* handle of the request on the context */
+
+static int64_t slang_tree_capacity(void) {
+    return g_prefix_capacity < SLANG_TREE_MAX_SEQS - 1 ? g_prefix_capacity
+                                                      : SLANG_TREE_MAX_SEQS - 1;
+}
+
+static void slang_tree_node_init(int i) {
+    memset(&g_tree_node[i], 0, sizeof(g_tree_node[i]));
+    g_tree_node[i].used = 1;
+    g_tree_node[i].parent = -1; g_tree_node[i].first_child = -1;
+    g_tree_node[i].next_sibling = -1; g_tree_node[i].seq = -1;
+}
+
+static void slang_tree_reset_root(void) {
+    memset(g_tree_node, 0, sizeof(g_tree_node));
+    slang_tree_node_init(0);
+}
+
+static int slang_tree_node_alloc(void) {
+    for (int i = 1; i < SLANG_TREE_MAX_NODES; i++) {
+        if (!g_tree_node[i].used) { slang_tree_node_init(i); return i; }
+    }
+    return -1;
+}
+
+static int slang_tree_free_nodes(void) {
+    int free_nodes = 0;
+    for (int i = 1; i < SLANG_TREE_MAX_NODES; i++) if (!g_tree_node[i].used) free_nodes++;
+    return free_nodes;
+}
+
+static int64_t slang_tree_terminals(void) {
+    int64_t count = 0;
+    for (int i = 1; i < SLANG_TREE_MAX_NODES; i++)
+        if (g_tree_node[i].used && g_tree_node[i].seq >= 0) count++;
+    return count;
+}
+
+static int64_t slang_tree_node_count(void) {
+    int64_t count = 0;
+    for (int i = 1; i < SLANG_TREE_MAX_NODES; i++) if (g_tree_node[i].used) count++;
+    return count;
+}
+
+/* Tokens held by the tree: each shared prefix counted once. */
+static int64_t slang_tree_cached_tokens(void) {
+    int64_t total = 0;
+    for (int i = 1; i < SLANG_TREE_MAX_NODES; i++)
+        if (g_tree_node[i].used) total += g_tree_node[i].n;
+    return total;
+}
+
+/* Tokens that sharing saved: sum of terminal path lengths minus unique tokens. */
+static int64_t slang_tree_shared_tokens(void) {
+    int64_t paths = 0;
+    for (int i = 1; i < SLANG_TREE_MAX_NODES; i++)
+        if (g_tree_node[i].used && g_tree_node[i].seq >= 0)
+            paths += g_tree_node[i].start + g_tree_node[i].n;
+    int64_t shared = paths - slang_tree_cached_tokens();
+    return shared > 0 ? shared : 0;
+}
+
+static int slang_tree_child_for(int parent, llama_token first) {
+    for (int c = g_tree_node[parent].first_child; c >= 0; c = g_tree_node[c].next_sibling)
+        if (g_tree_node[c].tok[0] == first) return c;
+    return -1;
+}
+
+static void slang_tree_unlink(int node) {
+    int parent = g_tree_node[node].parent;
+    int *link = &g_tree_node[parent].first_child;
+    while (*link >= 0 && *link != node) link = &g_tree_node[*link].next_sibling;
+    if (*link == node) *link = g_tree_node[node].next_sibling;
+}
+
+/* Longest cached prefix of tok[0..len). Returns the matched length and the node
+ * whose edge holds the last matched token (root when nothing matched). */
+static int64_t slang_tree_match(const llama_token *tok, int64_t len, int *node_out) {
+    int cur = 0;
+    int64_t pos = 0;
+    *node_out = 0;
+    while (pos < len) {
+        int child = slang_tree_child_for(cur, tok[pos]);
+        if (child < 0) break;
+        struct slang_tree_node *c = &g_tree_node[child];
+        int64_t k = 0;
+        while (k < c->n && pos + k < len && c->tok[k] == tok[pos + k]) k++;
+        pos += k;
+        *node_out = child;
+        if (k < c->n) break;
+        cur = child;
+    }
+    return pos;
+}
+
+/* Most recently used terminal in the subtree rooted at node, or -1. */
+static int slang_tree_find_terminal(int node) {
+    int best = g_tree_node[node].seq >= 0 ? node : -1;
+    for (int c = g_tree_node[node].first_child; c >= 0; c = g_tree_node[c].next_sibling) {
+        int t = slang_tree_find_terminal(c);
+        if (t >= 0 && (best < 0 || g_tree_node[t].last_used > g_tree_node[best].last_used))
+            best = t;
+    }
+    return best;
+}
+
+/* Splits node's edge at k (0 < k < n): a new non-terminal parent keeps the
+ * first k tokens, node keeps its index, seq and pins and the remaining tail. */
+static int slang_tree_split(int node, int64_t k) {
+    int p = slang_tree_node_alloc();
+    if (p < 0) return -1;
+    struct slang_tree_node *x = &g_tree_node[node];
+    struct slang_tree_node *np = &g_tree_node[p];
+    np->tok = (llama_token *)malloc((size_t)k * sizeof(llama_token));
+    if (np->tok == NULL) { np->used = 0; return -1; }
+    memcpy(np->tok, x->tok, (size_t)k * sizeof(llama_token));
+    np->n = k; np->start = x->start;
+    np->parent = x->parent;
+    np->next_sibling = x->next_sibling;
+    int *link = &g_tree_node[x->parent].first_child;
+    while (*link >= 0 && *link != node) link = &g_tree_node[*link].next_sibling;
+    *link = p;
+    memmove(x->tok, x->tok + k, (size_t)(x->n - k) * sizeof(llama_token));
+    x->n -= k; x->start += k;
+    x->parent = p; x->next_sibling = -1;
+    np->first_child = node;
+    np->last_used = x->last_used;
+    return p;
+}
+
+/* Inserts a full path whose KV lives on seq. Returns 1 when seq became a
+ * terminal, 0 when the tree was left untouched (duplicate path or no room). */
+static int slang_tree_insert(const llama_token *path, int64_t len, int seq) {
+    if (len <= 0 || slang_tree_free_nodes() < 2) return 0;
+    int cur = 0;
+    int64_t pos = 0;
+    while (pos < len) {
+        int child = slang_tree_child_for(cur, path[pos]);
+        if (child < 0) {
+            int leaf = slang_tree_node_alloc();
+            if (leaf < 0) return 0;
+            struct slang_tree_node *l = &g_tree_node[leaf];
+            l->n = len - pos;
+            l->tok = (llama_token *)malloc((size_t)l->n * sizeof(llama_token));
+            if (l->tok == NULL) { l->used = 0; return 0; }
+            memcpy(l->tok, path + pos, (size_t)l->n * sizeof(llama_token));
+            l->start = pos; l->parent = cur;
+            l->next_sibling = g_tree_node[cur].first_child;
+            g_tree_node[cur].first_child = leaf;
+            cur = leaf;
+            pos = len;
+            break;
+        }
+        struct slang_tree_node *c = &g_tree_node[child];
+        int64_t k = 0;
+        while (k < c->n && pos + k < len && c->tok[k] == path[pos + k]) k++;
+        if (k < c->n) {
+            int p = slang_tree_split(child, k);
+            if (p < 0) return 0;
+            child = p;
+        }
+        pos += k;
+        cur = child;
+    }
+    if (g_tree_node[cur].seq >= 0) {
+        g_tree_node[cur].last_used = ++g_prefix_clock;
+        return 0;
+    }
+    g_tree_node[cur].seq = seq;
+    g_tree_node[cur].last_used = ++g_prefix_clock;
+    return 1;
+}
+
+/* Keeps the tree radix after a terminal is cleared: drops an empty leaf chain,
+ * and folds a non-terminal single-child node into that child (the child keeps
+ * its index, so a pinned terminal's index is stable). */
+static void slang_tree_compact(int node) {
+    while (node > 0 && g_tree_node[node].seq < 0 && g_tree_node[node].first_child < 0) {
+        int parent = g_tree_node[node].parent;
+        slang_tree_unlink(node);
+        free(g_tree_node[node].tok);
+        memset(&g_tree_node[node], 0, sizeof(g_tree_node[node]));
+        node = parent;
+    }
+    if (node > 0 && g_tree_node[node].seq < 0) {
+        int child = g_tree_node[node].first_child;
+        if (child >= 0 && g_tree_node[child].next_sibling < 0) {
+            struct slang_tree_node *p = &g_tree_node[node];
+            struct slang_tree_node *c = &g_tree_node[child];
+            llama_token *merged = (llama_token *)malloc((size_t)(p->n + c->n) * sizeof(llama_token));
+            if (merged == NULL) return;
+            memcpy(merged, p->tok, (size_t)p->n * sizeof(llama_token));
+            memcpy(merged + p->n, c->tok, (size_t)c->n * sizeof(llama_token));
+            free(c->tok);
+            c->tok = merged; c->n += p->n; c->start = p->start;
+            c->parent = p->parent; c->next_sibling = p->next_sibling;
+            int *link = &g_tree_node[p->parent].first_child;
+            while (*link >= 0 && *link != node) link = &g_tree_node[*link].next_sibling;
+            *link = child;
+            free(p->tok);
+            memset(p, 0, sizeof(*p));
+        }
+    }
+}
+
+static int slang_tree_alloc_seq(void) {
+    for (int i = 0; i < SLANG_TREE_MAX_SEQS; i++)
+        if (!g_tree_seq_used[i]) { g_tree_seq_used[i] = 1; return i; }
+    return -1;
+}
+
+static void slang_tree_free_seq(int seq) {
+    if (g_tree_ctx != NULL)
+        llama_memory_seq_rm(llama_get_memory(g_tree_ctx), seq, -1, -1);
+    if (seq >= 0 && seq < SLANG_TREE_MAX_SEQS) g_tree_seq_used[seq] = 0;
+}
+
+/* Evicts the least recently used unpinned terminal. Returns 1 if one went. */
+static int slang_tree_evict_lru(void) {
+    int victim = -1;
+    for (int i = 1; i < SLANG_TREE_MAX_NODES; i++) {
+        struct slang_tree_node *n = &g_tree_node[i];
+        if (!n->used || n->seq < 0 || n->pins > 0) continue;
+        if (victim < 0 || n->last_used < g_tree_node[victim].last_used) victim = i;
+    }
+    if (victim < 0) return 0;
+    slang_tree_free_seq(g_tree_node[victim].seq);
+    g_tree_node[victim].seq = -1;
+    slang_tree_compact(victim);
+    g_prefix_evictions++;
+    return 1;
+}
+
+static void slang_tree_evict_to(int64_t capacity) {
+    while (slang_tree_terminals() > capacity && slang_tree_evict_lru()) {}
+}
+
+/* Drops the whole tree and its context. Callers guarantee no live request. */
+static void slang_tree_destroy(void) {
+    for (int i = 1; i < SLANG_TREE_MAX_NODES; i++)
+        if (g_tree_node[i].used) free(g_tree_node[i].tok);
+    slang_tree_reset_root();
+    memset(g_tree_seq_used, 0, sizeof(g_tree_seq_used));
+    if (g_tree_ctx != NULL) { llama_free(g_tree_ctx); g_tree_ctx = NULL; }
+    g_tree_limit = 0; g_tree_cells = 0; g_tree_active = 0;
+}
+
+static int slang_tree_kv_holds(int seq, int64_t count) {
+    llama_memory_t memory = llama_get_memory(g_tree_ctx);
+    return llama_memory_seq_pos_min(memory, seq) == 0 &&
+           (int64_t)llama_memory_seq_pos_max(memory, seq) == count - 1;
+}
+
+/* Ends a tree request: unpins its owner, inserts prompt+decoded path as a new
+ * terminal (or frees its seq id when it cannot be kept) and frees the context
+ * for the next request. Idempotent. */
+static void slang_tree_release_locked(struct slang_request *request) {
+    if (request->tree_owner >= 0) {
+        struct slang_tree_node *o = &g_tree_node[request->tree_owner];
+        if (o->used && o->pins > 0) o->pins--;
+        request->tree_owner = -1;
+    }
+    if (request->seq < 0) return;
+    int seq = request->seq;
+    int inserted = 0;
+    if (g_tree_ctx != NULL && slang_tree_capacity() > 0 && request->path_len > 0 &&
+        slang_tree_kv_holds(seq, request->path_len))
+        inserted = slang_tree_insert(request->path, request->path_len, seq);
+    if (inserted) {
+        g_prefix_admissions++;
+        slang_tree_evict_to(slang_tree_capacity());
+    } else {
+        slang_tree_free_seq(seq);
+    }
+    request->seq = -1;
+    request->path_len = 0;
+    g_tree_active = 0;
+}
+
+static int slang_tree_path_reserve(struct slang_request *request, int64_t need) {
+    if (need <= request->path_cap) return 1;
+    int64_t cap = request->path_cap > 0 ? request->path_cap : 256;
+    while (cap < need) cap *= 2;
+    llama_token *grown = (llama_token *)realloc(request->path, (size_t)cap * sizeof(llama_token));
+    if (grown == NULL) return 0;
+    request->path = grown; request->path_cap = cap;
+    return 1;
+}
+
+/* Starts a tree request: longest-prefix match, seq id, shared-cell copy. Returns
+ * the number of reused prompt tokens (>= 0) or a negative error. */
+static int64_t slang_tree_prepare_locked(struct slang_request *request) {
+    int64_t handle = slang_request_handle((int64_t)(request - g_requests), request->generation);
+    if (g_tree_active != 0 && g_tree_active != handle) return SLANG_ERR_BUSY;
+    slang_tree_release_locked(request);
+    request->eval_start = 0;
+    request->path_len = 0;
+    while (g_tree_cells > 0 &&
+           slang_tree_cached_tokens() + request->context_limit > g_tree_cells &&
+           slang_tree_evict_lru()) {}
+    int seq = slang_tree_alloc_seq();
+    if (seq < 0 && slang_tree_evict_lru()) seq = slang_tree_alloc_seq();
+    if (seq < 0) return SLANG_ERR_BUSY;
+    int64_t reuse = 0;
+    int node = 0;
+    int64_t matched = request->tok_len > 1
+        ? slang_tree_match(request->tok, request->tok_len, &node) : 0;
+    if (matched > 0) {
+        /* At least one trailing token is recomputed so the backend produces
+         * fresh boundary logits, as in snapshot mode. */
+        reuse = matched < request->tok_len - 1 ? matched : request->tok_len - 1;
+        /* Modes 1 and 3 reuse whole micro-batches only: llama.cpp does not keep
+         * K/V bit-identical across micro-batch shapes, and a cold prompt
+         * decodes full n_ubatch chunks from position 0, so resuming on a chunk
+         * boundary reproduces those chunks. Mode 2 reuses every matched token. */
+        if (g_tree_mode != 2) {
+            int64_t ubatch = (int64_t)llama_n_ubatch(g_tree_ctx);
+            if (ubatch > 1) reuse = reuse / ubatch * ubatch;
+        }
+        int owner = reuse > 0 ? slang_tree_find_terminal(node) : -1;
+        if (owner >= 0) {
+            llama_memory_t memory = llama_get_memory(g_tree_ctx);
+            /* Per-sequence streams (mode 3) only copy whole sequences; copy the
+             * owner then drop the tail. Unified KV just adds the seq id to cells. */
+            if (g_tree_mode == 3) {
+                llama_memory_seq_cp(memory, g_tree_node[owner].seq, seq, -1, -1);
+                llama_memory_seq_rm(memory, seq, (llama_pos)reuse, -1);
+            } else {
+                llama_memory_seq_cp(memory, g_tree_node[owner].seq, seq, 0, (llama_pos)reuse);
+            }
+            if (slang_tree_kv_holds(seq, reuse)) {
+                g_tree_node[owner].pins++;
+                g_tree_node[owner].last_used = ++g_prefix_clock;
+                request->tree_owner = owner;
+            } else {
+                llama_memory_seq_rm(memory, seq, -1, -1);
+                g_prefix_restore_failures++;
+                reuse = 0;
+            }
+        } else {
+            reuse = 0;
+        }
+    }
+    if (!slang_tree_path_reserve(request, request->tok_len + 1)) {
+        if (request->tree_owner >= 0 && g_tree_node[request->tree_owner].pins > 0)
+            g_tree_node[request->tree_owner].pins--;
+        request->tree_owner = -1;
+        slang_tree_free_seq(seq);
+        return SLANG_ERR_NO_CTX;
+    }
+    memcpy(request->path, request->tok, (size_t)reuse * sizeof(llama_token));
+    request->path_len = reuse;
+    request->seq = seq;
+    request->eval_start = reuse;
+    g_tree_active = handle;
+    if (reuse > 0) {
+        g_prefix_hits++;
+        g_prefix_tokens_reused += reuse;
+    } else {
+        g_prefix_misses++;
+    }
+    return reuse;
+}
+
+/* One decode of n tokens at consecutive positions on the request's seq id,
+ * logits only for the last. On "no KV slot" it evicts unpinned terminals and
+ * retries. Runs outside the lock like every other decode. */
+static int slang_tree_decode(struct slang_request *request, const llama_token *tok, int64_t n) {
+    if (n <= 0) return 0;
+    if (request->path_len + n > request->context_limit) return -1;
+    if (!slang_tree_path_reserve(request, request->path_len + n)) return -1;
+    struct llama_batch batch = llama_batch_init((int32_t)n, 0, 1);
+    for (int64_t i = 0; i < n; i++) {
+        batch.token[i] = tok[i];
+        batch.pos[i] = (llama_pos)(request->path_len + i);
+        batch.n_seq_id[i] = 1;
+        batch.seq_id[i][0] = request->seq;
+        batch.logits[i] = i == n - 1;
+    }
+    batch.n_tokens = (int32_t)n;
+    int rc = llama_decode(request->ctx, batch);
+    while (rc == 1) {
+        SLANG_LOCK();
+        int evicted = slang_tree_evict_lru();
+        SLANG_UNLOCK();
+        if (!evicted) break;
+        rc = llama_decode(request->ctx, batch);
+    }
+    llama_batch_free(batch);
+    if (rc != 0) return -1;
+    memcpy(request->path + request->path_len, tok, (size_t)n * sizeof(llama_token));
+    request->path_len += n;
+    return 0;
+}
+
+/* Tree-mode prefill: decodes only the suffix after the shared prefix. The last
+ * prompt token is decoded alone, exactly as the snapshot lane does. */
+static int64_t slang_tree_eval_prompt(struct slang_request *request) {
+    if (request->tok_len > request->context_limit) return SLANG_ERR_OVERFLOW;
+    if (request->seq < 0) {
+        SLANG_LOCK();
+        int64_t prepared = slang_tree_prepare_locked(request);
+        SLANG_UNLOCK();
+        if (prepared < 0) return prepared;
+    }
+    if (request->eval_start < 0 || request->eval_start > request->tok_len)
+        return SLANG_ERR_DECODE;
+    int64_t suffix_len = request->tok_len - request->eval_start;
+    if (suffix_len > 0) {
+        int64_t head = suffix_len > 1 ? suffix_len - 1 : suffix_len;
+        const llama_token *from = request->tok + request->eval_start;
+        if (slang_tree_decode(request, from, head) != 0 ||
+            (head < suffix_len &&
+             slang_tree_decode(request, request->tok + request->tok_len - 1, 1) != 0)) {
+            slang_request_release_lease(request);
+            return SLANG_ERR_DECODE;
+        }
+    }
+    SLANG_LOCK();
+    if (suffix_len > 0) g_prefix_tokens_prefilled += suffix_len;
+    SLANG_UNLOCK();
+    request->eval_start = request->tok_len;
+    request->legacy_logits_valid = 1;
+    return request->tok_len;
+}
+
+/* Configures the prefix-cache mode: 0 = snapshot (default); 1 = radix tree over a
+ * unified KV, reusing whole micro-batches; 2 = unified, reusing every matched
+ * token; 3 = per-sequence KV streams (not unified), whole micro-batches. All tree
+ * modes run on
+ * one persistent multi-sequence context. cells is the unified KV size in
+ * tokens (0 = 4 x the first request's n_ctx). The capacity bound is the
+ * prefix-cache entry count (slang_ggml_prefix_cache_configure), at most
+ * SLANG_TREE_MAX_SEQS - 1. Only while no request is open. */
+int64_t slang_ggml_prefix_cache_mode_configure(int64_t mode, int64_t cells) {
+    if (mode < 0 || mode > 3 || cells < 0 || cells > INT32_MAX)
+        return SLANG_ERR_INVALID;
+    SLANG_LOCK();
+    int64_t result;
+    if (g_request_count != 0) {
+        result = SLANG_ERR_BUSY;
+    } else {
+        if (mode != g_tree_mode || cells != g_tree_cells_cfg) {
+            slang_tree_destroy();
+            if (mode != 0) slang_prefix_clear_all(0);
+        }
+        g_tree_mode = (int)mode;
+        g_tree_cells_cfg = cells;
+        result = mode;
+    }
+    SLANG_UNLOCK();
+    return result;
+}
+
+int64_t slang_ggml_tree_mode(void) { return g_tree_mode; }
+int64_t slang_ggml_tree_nodes(void) { return slang_tree_node_count(); }
+int64_t slang_ggml_tree_cached_tokens(void) { return slang_tree_cached_tokens(); }
+int64_t slang_ggml_tree_shared_tokens(void) { return slang_tree_shared_tokens(); }
+
 static int64_t slang_request_create_locked(int64_t n_ctx, int physical_only) {
     if (g_model == NULL) return SLANG_ERR_NO_MODEL;
     if (n_ctx <= 0 || n_ctx > INT32_MAX) return SLANG_ERR_INVALID;
@@ -542,7 +1055,34 @@ static int64_t slang_request_create_locked(int64_t n_ctx, int physical_only) {
     struct llama_context *ctx = NULL;
     struct llama_sampler *smpl = NULL;
     struct llama_sampler *greedy = NULL;
-    if (!physical_only) {
+    int tree = g_tree_mode && !physical_only;
+    if (tree) {
+        if (g_tree_ctx == NULL) {
+            int64_t cells = g_tree_cells_cfg > 0 ? g_tree_cells_cfg : n_ctx * 4;
+            if (cells < n_ctx * 2) cells = n_ctx * 2;
+            /* Mode 3 (not unified) splits n_ctx evenly over the sequences. */
+            if (g_tree_mode == 3) cells = n_ctx * SLANG_TREE_MAX_SEQS;
+            if (cells > INT32_MAX) return SLANG_ERR_INVALID;
+            struct llama_context_params tp = llama_context_default_params();
+            tp.n_ctx = (uint32_t)cells;
+            tp.n_batch = (uint32_t)n_ctx;
+            tp.n_seq_max = SLANG_TREE_MAX_SEQS;
+            tp.kv_unified = g_tree_mode != 3;
+            if (g_context_threads > 0) {
+                tp.n_threads = g_context_threads;
+                tp.n_threads_batch = g_context_threads;
+            }
+            g_tree_ctx = llama_init_from_model(g_model, tp);
+            if (g_tree_ctx == NULL) return SLANG_ERR_NO_CTX;
+            g_tree_limit = n_ctx;
+            g_tree_cells = cells;
+        } else if (n_ctx > g_tree_limit) {
+            return SLANG_ERR_INVALID;
+        }
+        ctx = g_tree_ctx;
+        smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
+        greedy = llama_sampler_init_greedy();
+    } else if (!physical_only) {
         struct llama_context_params cp = llama_context_default_params();
         cp.n_ctx = (uint32_t)n_ctx;
         cp.n_batch = cp.n_ctx;
@@ -572,7 +1112,7 @@ static int64_t slang_request_create_locked(int64_t n_ctx, int physical_only) {
     if ((!physical_only && (smpl == NULL || greedy == NULL)) || str == NULL || out == NULL || tok == NULL) {
         if (greedy) llama_sampler_free(greedy);
         if (smpl) llama_sampler_free(smpl);
-        llama_free(ctx);
+        if (!tree) llama_free(ctx);
         free(str); free(out); free(tok);
         return SLANG_ERR_NO_CTX;
     }
@@ -582,6 +1122,7 @@ static int64_t slang_request_create_locked(int64_t n_ctx, int physical_only) {
     old->ctx = ctx; old->smpl = smpl;
     old->str = str; old->out = out; old->tok = tok;
     old->eval_start = 0; old->selected_prefix = -1; old->lease_slot = -1;
+    old->tree = tree; old->seq = -1; old->tree_owner = -1;
     old->physical_only = physical_only;
     old->context_limit = n_ctx;
     old->generation = generation; old->model_generation = g_model_generation;
@@ -666,6 +1207,13 @@ static int64_t slang_prefix_cache_configure_locked(int64_t entries, int64_t byte
     if (entries < 0 || entries > SLANG_PREFIX_CACHE_MAX_ENTRIES || bytes < 0)
         return SLANG_ERR_OVERFLOW;
     if ((uint64_t)bytes > (uint64_t)SIZE_MAX) return SLANG_ERR_OVERFLOW;
+    if (g_tree_mode) {
+        /* Tree mode bounds terminals (one seq id each), not snapshot bytes. */
+        g_prefix_capacity = entries;
+        g_prefix_byte_limit = (size_t)bytes;
+        slang_tree_evict_to(slang_tree_capacity());
+        return g_prefix_capacity;
+    }
     int64_t pinned_entries = 0;
     size_t pinned_bytes = 0;
     for (int64_t i = 0; i < SLANG_PREFIX_CACHE_MAX_ENTRIES; i++) {
@@ -697,6 +1245,7 @@ int64_t slang_ggml_prefix_cache_configure(int64_t entries, int64_t bytes) {
 }
 
 static void slang_request_release_lease_locked(struct slang_request *request) {
+    if (request->tree) { slang_tree_release_locked(request); return; }
     if (request->lease_slot < 0) return;
     struct slang_prefix_entry *entry = &g_prefix[request->lease_slot];
     if (entry->pins > 0) entry->pins--;
@@ -720,14 +1269,16 @@ static int64_t slang_request_close_locked(int64_t handle) {
 #endif
     slang_request_release_lease_locked(request);
     if (request->smpl) llama_sampler_free(request->smpl);
-    if (request->ctx) llama_free(request->ctx);
+    if (request->ctx && !request->tree) llama_free(request->ctx);
     free(request->str); free(request->out); free(request->tok);
+    free(request->path);
     uint64_t next_generation = request->generation < SLANG_REQUEST_MAX_GENERATION
         ? request->generation + 1 : SLANG_REQUEST_MAX_GENERATION;
     memset(request, 0, sizeof(*request));
     request->generation = next_generation;
     request->selected_prefix = -1;
     request->lease_slot = -1;
+    request->seq = -1; request->tree_owner = -1;
     if (g_request_count > 0) g_request_count--;
     if (g_compat_handle == handle) g_compat_handle = 0;
     return 0;
@@ -756,6 +1307,7 @@ static int64_t slang_free_locked(void) {
     int compat_active = slang_compat_request() != NULL;
     if (g_request_count > (compat_active ? 1 : 0)) return SLANG_ERR_BUSY;
     if (compat_active) slang_request_close_locked(g_compat_handle);
+    slang_tree_destroy();
     if (g_model) { llama_model_free(g_model);  g_model = NULL; }
     slang_prefix_clear_all(0);
     g_prefix_capacity = SLANG_PREFIX_CACHE_DEFAULT_ENTRIES;
@@ -799,6 +1351,9 @@ int64_t slang_ggml_request_tokenize(int64_t handle, int64_t add_bos) {
     request->legacy_logits_valid = 0;
     if (request->cancelled) return SLANG_ERR_CANCELLED;
     if (g_model == NULL) return SLANG_ERR_NO_MODEL;
+    /* A reused tree request finishes its previous prompt before request->tok
+     * is overwritten. */
+    if (request->tree) slang_request_release_lease(request);
     const struct llama_vocab *vocab = llama_model_get_vocab(g_model);
     int32_t n = llama_tokenize(vocab, request->str, (int32_t)request->str_len,
                                request->tok, SLANG_TOK_CAP, add_bos != 0, true);
@@ -862,7 +1417,8 @@ int64_t slang_ggml_request_kv_clear(int64_t handle) {
     if (request == NULL) return SLANG_ERR_INVALID;
     if (request->ctx == NULL) return SLANG_ERR_INVALID;
     slang_request_release_lease(request);
-    llama_memory_clear(llama_get_memory(request->ctx), true);
+    /* The tree context is shared: its other sequences must survive. */
+    if (!request->tree) llama_memory_clear(llama_get_memory(request->ctx), true);
     request->eval_start = 0;
     request->legacy_logits_valid = 0;
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
@@ -909,7 +1465,7 @@ static int slang_request_kv_holds(struct slang_request *request, int64_t count) 
  * model with layers offloaded, whose micro-batch is smaller than its context
  * (the matched-CPU profile sets n_ubatch = n_ctx). */
 static int64_t slang_request_first_ubatch(struct slang_request *request) {
-    if (request->warm || !g_model_offloaded) return 0;
+    if (request->warm || request->tree || !g_model_offloaded) return 0;
     int64_t ubatch = (int64_t)llama_n_ubatch(request->ctx);
     return ubatch > 0 && ubatch < request->context_limit ? ubatch : 0;
 }
@@ -940,6 +1496,7 @@ static int64_t slang_request_prefix_prepare_locked(int64_t handle) {
     if (request == NULL) return SLANG_ERR_INVALID;
     if (request->ctx == NULL) return SLANG_ERR_INVALID;
     if (request->cancelled) return SLANG_ERR_CANCELLED;
+    if (request->tree) return slang_tree_prepare_locked(request);
     slang_request_release_lease_locked(request);
     request->eval_start = 0;
     request->selected_prefix = -1;
@@ -1020,7 +1577,9 @@ int64_t slang_ggml_prefix_tokens_reused(void) { return g_prefix_tokens_reused; }
 int64_t slang_ggml_prefix_tokens_prefilled(void) { return g_prefix_tokens_prefilled; }
 int64_t slang_ggml_prefix_admissions(void) { return g_prefix_admissions; }
 int64_t slang_ggml_prefix_evictions(void) { return g_prefix_evictions; }
-int64_t slang_ggml_prefix_resident_entries(void) { return g_prefix_resident_entries; }
+int64_t slang_ggml_prefix_resident_entries(void) {
+    return g_tree_mode ? slang_tree_terminals() : g_prefix_resident_entries;
+}
 int64_t slang_ggml_prefix_resident_bytes(void) { return (int64_t)g_prefix_resident_bytes; }
 int64_t slang_ggml_prefix_rejected_bytes(void) { return g_prefix_rejected_bytes; }
 int64_t slang_ggml_prefix_restore_failures(void) { return g_prefix_restore_failures; }
@@ -1106,6 +1665,7 @@ int64_t slang_ggml_request_eval_prompt(int64_t handle) {
 #endif
     request->legacy_logits_valid = 0;
     if (request->tok_len == 0) return SLANG_ERR_TOKENIZE;
+    if (request->tree) return slang_tree_eval_prompt(request);
     if (request->eval_start < 0 || request->eval_start > request->tok_len)
         return SLANG_ERR_DECODE;
     int64_t suffix_len = request->tok_len - request->eval_start;
@@ -1151,7 +1711,8 @@ int64_t slang_ggml_request_eval_prompt(int64_t handle) {
 int64_t slang_ggml_eval_prompt(void) {
     int64_t result = slang_ggml_request_eval_prompt(g_compat_handle);
     struct slang_request *request = slang_compat_request();
-    if (result >= 0 && request != NULL) slang_request_release_lease(request);
+    /* A tree request keeps its sequence until generation ends. */
+    if (result >= 0 && request != NULL && !request->tree) slang_request_release_lease(request);
     return result;
 }
 
@@ -1167,6 +1728,14 @@ int64_t slang_ggml_request_eval(int64_t handle, int64_t token) {
 #endif
     request->legacy_logits_valid = 0;
     llama_token t = (llama_token)token;
+    if (request->tree) {
+        if (request->seq < 0 || slang_tree_decode(request, &t, 1) != 0) {
+            slang_request_release_lease(request);
+            return SLANG_ERR_DECODE;
+        }
+        request->legacy_logits_valid = 1;
+        return 0;
+    }
     struct llama_batch batch = llama_batch_get_one(&t, 1);
     if (llama_decode(request->ctx, batch) != 0) {
         slang_request_release_lease(request);
@@ -1833,7 +2402,7 @@ int64_t slang_ggml_request_mm_tokenize(int64_t handle) {
 int64_t slang_ggml_request_mm_eval_prompt(int64_t handle) {
     struct slang_request *request = slang_request_get(handle);
     if (request == NULL) return SLANG_ERR_INVALID;
-    if (request->ctx == NULL || g_mm_ctx == NULL) return SLANG_ERR_INVALID;
+    if (request->ctx == NULL || g_mm_ctx == NULL || request->tree) return SLANG_ERR_INVALID;
     if (request->cancelled) return SLANG_ERR_CANCELLED;
     struct slang_mm_slot *slot = &g_mm_slots[(int64_t)(request - g_requests)];
     if (slot->generation != request->generation || slot->chunks == NULL) return SLANG_ERR_INVALID;

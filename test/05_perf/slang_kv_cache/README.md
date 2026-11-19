@@ -91,3 +91,59 @@ the recomputed suffix is 1-7 tokens. That is ggml batch-shape
 non-invariance, not KV corruption; see
 `doc/08_tracking/bug/slang_prefix_cache_hit_output_drift_2026-11-14.md` and the
 in-development `slang_kv_cache_live_exact_output_spec.spl`.
+
+## Tree (radix) prefix cache vs snapshot vs none, Windows mingw CPU, 2026-11-19
+
+Opt-in shim modes (`engine_set_prefix_cache_mode`, snapshot stays the default):
+1 = unified KV tree, whole-micro-batch reuse; 2 = unified, every matched token;
+3 = per-sequence KV streams, whole-micro-batch reuse (`seq_cp` of the whole owner
+sequence, then `seq_rm` of the tail). Driver `slang_kv_tree_workload.spl`; one
+fresh process per cell, lanes `none`, `snapshot`, `tree_stream` (mode 3), 16
+greedy tokens, n_ctx 4096, one repetition, shared and loaded host (wall times are
+noisy; free memory per cell is the first line of each log). Logs:
+`C:/dev/slang-logs/shimtree/diag_<model>_<workload>_<lane>.log`.
+`branching` = 4 users on one ~700-token system prompt, then the same 4 with a
+follow-up; `multiturn` = 6 turns, each prompt = previous + reply + next line.
+
+| model | workload | lane | prefilled | reused | wall ms | digest (12) | restore_failures |
+|---|---|---|---|---|---|---|---|
+| gemma-3-270m Q8 | branching | none | 6652 | 0 | 31979 | 139fec2ec5a6 | 0 |
+| | | snapshot | 6652 | 0 | 32884 | 139fec2ec5a6 | 4 |
+| | | tree (mode 3) | 3068 | 3584 | 20324 | 139fec2ec5a6 | 0 |
+| | multiturn | none | 5295 | 0 | 24736 | 695f3acdc604 | 0 |
+| | | snapshot | 5295 | 0 | 25339 | 695f3acdc604 | 5 |
+| | | tree (mode 3) | 2735 | 2560 | 16579 | 695f3acdc604 | 0 |
+| Qwen2.5-1.5B Q4_K_M | branching | none | 6704 | 0 | 336731 | 77e3124da91b | 0 |
+| | | snapshot | 5873 | 831 | 311928 | 77e3124da91b | 0 |
+| | | tree (mode 3) | 3120 | 3584 | 166708 | 77e3124da91b | 0 |
+| | multiturn | none | 5325 | 0 | 263060 | b6822c7bf939 | 0 |
+| | | snapshot | 948 | 4377 | 54628 | b6822c7bf939 | 0 |
+| | | tree (mode 3) | 2765 | 2560 | 144376 | b6822c7bf939 | 0 |
+
+Every digest equals the no-cache digest in all six cells. Prefill tokens drop
+about 2x on branching for both models; on Qwen multiturn snapshot reuses more
+(4377 vs 2560 tokens) because it reuses every token of an exact-prefix hit while
+exact tree mode rounds reuse down to a multiple of n_ubatch (512). Gemma-3
+snapshot restores fail (`restore_failures` 4-5) so snapshot gives no reuse there.
+
+Exactness root cause (measured, not a position/seq bug): modes 1 and 2 share one
+unified KV, and llama.cpp then attends over cells of all sequences (padded n_kv),
+which changes float reduction shapes; greedy output diverged from no-cache even
+with whole-batch reuse (mode 1 digests differ in all three Gemma workloads; mode
+2 differs as well). Mode 3 keeps each sequence in its own stream, so shapes
+match a cold run. Mode 3 pays a real KV copy per hit (whole owner sequence).
+Not measured: TTFT (not exposed), repetitions beyond one, max RSS.
+Contract: `test/02_integration/lib/slang_prefix_cache_shim_contract_test.shs`.
+
+### Second repetition (Gemma branching, Qwen multiturn), logs `C:/dev/slang-logs/shimtree/rep2/`
+
+Same digests as repetition 1 in all six cells (equal to no-cache). Wall ms:
+Gemma branching none 33867 / snapshot 31971 / tree 19818 (prefilled 6652 / 6652 /
+3068); Qwen multiturn none 263202 / snapshot 56155 / tree 144429 (prefilled 5325 /
+948 / 2765). Repetition 1 vs 2 agree within about 6 percent on every cell.
+
+Live spec on the final shim, Qwen2.5-1.5B (`slang_kv_cache_live_spec.spl`,
+SLANG_LIVE=1, `simple-release.exe`): PASS, exact_repeat 48398 -> 1189 ms (40.7x),
+prefix_extension 49008 -> 1543 ms (31.8x); log `live_spec.log`. Gates against
+origin/release/1.0.0: primitive-api-added PASS, nil-outside-unsafe-added PASS
+(after replacing `== nil` in two accessors), text-len-unit-mix 0 new.
