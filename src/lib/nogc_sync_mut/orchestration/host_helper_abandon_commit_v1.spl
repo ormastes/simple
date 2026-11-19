@@ -14,7 +14,8 @@ use std.nogc_sync_mut.io.local_authority_policy_v1.LocalAuthorityPolicyV1
 use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
 use std.common.contracts.orchestration.host_helper_abandon_v1.{HostHelperAbandonV1, HostHelperAbandonProofV1,
-    host_helper_abandon_proof_decode_v1, host_helper_abandon_match_v1}
+    host_helper_abandon_proof_decode_v1, host_helper_abandon_match_v1, host_helper_abandon_bytes_v1,
+    HOST_HELPER_ABANDON_WIRE_V1, HOST_HELPER_ABANDON_CUSTODY_V1}
 use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
@@ -47,7 +48,9 @@ pub fn host_helper_abandon_verify_v1(policy: LocalAuthorityPolicyV1, controller_
 # (executing or outcome-unknown) is abandoned; every digest is the journal's own; the operator voids only the marker
 # state they observed. milestone_0043 (REVIEW_B P2-1): a digest or observed-text refusal echoes the journal-derived
 # expected value beside the given one (digests and marker tokens only, never a secret), and only after the signed command
-# verified, so the operator can re-sign exactly what this service will accept.
+# verified, so the operator can re-sign exactly what this service will accept. milestone_0046: the read-only inspect
+# (host_helper_abandon_inspect_v1) now returns the same expected values unsigned, over the authenticated V6 channel only;
+# they are journal digests and marker tokens, never secrets, and grant nothing.
 pub fn host_helper_abandon_check_v1(abandon: HostHelperAbandonV1, operation: OperationEnvelopeV2, row_state: text,
         helper_kind: text, request_digest: text, prepared_receipt_digest: text, observed: text) -> Result<(), text>:
     if operation.operation != "host_helper_reservation_v1" or helper_kind != "attach-broker":
@@ -142,24 +145,49 @@ fn helper_abandon_reply_v1(operation_id: text, digest: text) -> text:
         "operationId": SdnValue.String(operation_id), "digest": SdnValue.String(digest)}
     sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
 
+# milestone_0046: ONE derivation of the abandon record this service accepts for a helper row right now, used by the
+# signed command (host_helper_abandon_v1) and by the read-only inspect the controller reads before the operator signs.
+# The row's kind and state gate run on the derived record itself, so an inspect of a row no abandon can release refuses
+# with the same code the command would. Unsigned DATA: it grants nothing; the command re-derives it after verification.
+pub struct HostHelperAbandonExpectedV1:
+    operation: OperationEnvelopeV2
+    row_state: text
+    helper_kind: text
+    record: HostHelperAbandonV1
+
+pub fn host_helper_abandon_expected_v1(journal: DistributedOperationJournalV2, operation_id: text,
+        host_id: text) -> Result<HostHelperAbandonExpectedV1, text>:
+    val state = distributed_operation_journal_lookup_v2(journal, operation_id)?
+    val operation = distributed_decode_operation_v2(state.envelope)?
+    val expected = host_linux_helper_attach_expected_v1(journal, operation)?
+    val record = HostHelperAbandonV1(wire_version: HOST_HELPER_ABANDON_WIRE_V1, operation_id: operation.id,
+        operation_digest: sha256_text(distributed_encode_operation_v2(operation)?), request_digest: expected.request_digest,
+        prepared_receipt_digest: expected.prepared_receipt_digest,
+        observed: host_helper_abandon_observed_v1(journal, operation.id, state.state), custody: HOST_HELPER_ABANDON_CUSTODY_V1,
+        physical_host_id: host_id)
+    host_helper_abandon_check_v1(record, operation, state.state, expected.plan.helper_kind, record.request_digest,
+        record.prepared_receipt_digest, record.observed)?
+    Ok(HostHelperAbandonExpectedV1(operation: operation, row_state: state.state, helper_kind: expected.plan.helper_kind,
+        record: record))
+
+# The read-only inspect reply: the canonical record bytes (host_helper_abandon_decode_v1 accepts exactly these).
+pub fn host_helper_abandon_inspect_v1(journal: DistributedOperationJournalV2, operation_id: text, host_id: text) -> Result<text, text>:
+    host_helper_abandon_bytes_v1((host_helper_abandon_expected_v1(journal, operation_id, host_id)?).record)
+
 # The operator command. `owner` is the held capacity owner (single journal writer); it is returned on every path.
 pub fn host_helper_abandon_v1(owner: HostCapacityOwnerV1, policy: LocalAuthorityPolicyV1, controller_ref: text,
         context: HostReservationAuthorizationContextV1, host_id: text, source: text) -> HostHelperAbandonTurnV1:
     val proof = host_helper_abandon_verify_v1(policy, controller_ref, context, host_id, source)
     if proof.is_err(): return HostHelperAbandonTurnV1(owner, "", proof.unwrap_err(), false)
     val abandon = proof.unwrap().abandon
-    val state = distributed_operation_journal_lookup_v2(owner.journal, abandon.operation_id)
-    if state.is_err(): return HostHelperAbandonTurnV1(owner, "", state.unwrap_err(), false)
-    val operation = distributed_decode_operation_v2(state.unwrap().envelope)
-    if operation.is_err(): return HostHelperAbandonTurnV1(owner, "", operation.unwrap_err(), false)
-    val expected = host_linux_helper_attach_expected_v1(owner.journal, operation.unwrap())
-    if expected.is_err(): return HostHelperAbandonTurnV1(owner, "", expected.unwrap_err(), false)
-    val observed = host_helper_abandon_observed_v1(owner.journal, operation.unwrap().id, state.unwrap().state)
-    val checked = host_helper_abandon_check_v1(abandon, operation.unwrap(), state.unwrap().state, expected.unwrap().plan.helper_kind,
-        expected.unwrap().request_digest, expected.unwrap().prepared_receipt_digest, observed)
+    val derived = host_helper_abandon_expected_v1(owner.journal, abandon.operation_id, host_id)
+    if derived.is_err(): return HostHelperAbandonTurnV1(owner, "", derived.unwrap_err(), false)
+    val expected = derived.unwrap()
+    val checked = host_helper_abandon_check_v1(abandon, expected.operation, expected.row_state, expected.helper_kind,
+        expected.record.request_digest, expected.record.prepared_receipt_digest, expected.record.observed)
     if checked.is_err(): return HostHelperAbandonTurnV1(owner, "", checked.unwrap_err(), false)
     val marker = host_helper_abandon_record_publish_v1(owner.journal, proof.unwrap(), source)
     if marker.is_err(): return HostHelperAbandonTurnV1(owner, "", marker.unwrap_err(), true)
-    val committed = host_helper_abandon_commit_v1(owner, operation.unwrap())
+    val committed = host_helper_abandon_commit_v1(owner, expected.operation)
     if committed.error != "": return HostHelperAbandonTurnV1(committed.owner, "", committed.error, true)
     HostHelperAbandonTurnV1(committed.owner, helper_abandon_reply_v1(abandon.operation_id, sha256_text(marker.unwrap())), "", true)

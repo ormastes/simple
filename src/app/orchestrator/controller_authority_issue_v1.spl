@@ -71,6 +71,17 @@ pub fn controller_authority_issue_v1(context: ControllerDispatchContextV1,
     # D1 class (shared with the Host remote-build route); refused before any key is read.
     if remote_build_task_class_v1(approver, grant, request, requested, approval_expires_at, now) != "":
         return Err("controller-approval-outside-task-class")
+    controller_authority_sign_pair_v1(context, read_key, issuer, approver, grant, request, approval_expires_at, now)
+
+# The shared issue-then-verify tail of every class: nothing is returned unless the pair verifies from the installed
+# snapshot at `now`. The class predicate already ran; the issuer is the configured controller's grant-issuer key.
+fn controller_authority_sign_pair_v1(context: ControllerDispatchContextV1,
+        read_key: fn(DistributedAuthorityKeyV2) -> Result<[u8], text>, issuer: DistributedAuthorityKeyV2,
+        approver: DistributedAuthorityKeyV2, grant: ExecutionGrantV2, request: OperationEnvelopeV2,
+        approval_expires_at: i64, now: i64) -> Result<ControllerIssuedAuthorityV1, text>:
+    val snapshot = context.policy.snapshot
+    val issuer_id = issuer.identity
+    val approver_id = approver.identity
     var signed = DistributedSignedGrantV2(grant: grant, issuer_id: issuer_id, key_revision: issuer.revision, signature: [])
     var approval = DistributedSignedApprovalV2(approver_id: approver_id, key_revision: approver.revision,
         grant_digest: distributed_grant_digest_v2(grant)?, request_digest: sha256_text(distributed_encode_operation_v2(request)?),
@@ -92,5 +103,65 @@ pub fn controller_authority_issue_v1(context: ControllerDispatchContextV1,
         snapshot.generation, snapshot.policy_revision, snapshot.revocation_epoch, context.policy.session_generation)?
     Ok(ControllerIssuedAuthorityV1(signed: signed, approval: approval))
 
+# milestone_0046 (owner decision 2026-11-19 "Both"): controller-signed Host service actions. The allow-list is exactly the
+# two operator abandons; a policy key must also be enrolled for the kind (installed policy, AUTHORITY_OPERATION_DENIED
+# otherwise). Same issuer (controller grant-issuer) and approver (human-approver) keys and store as the remote-build
+# class: no new key, no new custody.
+pub val CONTROLLER_HOST_ACTION_KINDS_V1: [text] = ["helper-abandon", "service-handoff-abandon"]
+val CONTROLLER_HOST_ACTION_MAX_TTL_MS_V1: i64 = 86400000
+
+pub struct ControllerHostActionAuthorityV1:
+    operation: OperationEnvelopeV2
+    authority: ControllerIssuedAuthorityV1
+
+# An abandon runs no workload: the environment digest only binds the kind (grant and request carry the same value) and
+# the budget is the minimum the verifier accepts (1 byte, 1 ms).
+pub fn controller_host_action_environment_digest_v1(kind: text) -> text:
+    sha256_text("simple-host-service-action-v1\n" + kind)
+
+# The host-action class: one allow-listed kind on both grant and request, an unrevoked human-approver key whose scope and
+# operations cover the grant, and an approval that is live and cannot outlive the grant. Returns "" when admitted.
+pub fn controller_host_action_class_v1(approver: DistributedAuthorityKeyV2, grant: ExecutionGrantV2,
+        request: OperationEnvelopeV2, approval_expires_at: i64, now: i64) -> text:
+    if approver.role != "human-approver" or approver.revoked: return "controller-host-action-approver-key"
+    if not CONTROLLER_HOST_ACTION_KINDS_V1.contains(request.operation): return "controller-host-action-kind"
+    if grant.operations.len() != 1 or grant.operations[0] != request.operation: return "controller-host-action-grant-operations"
+    if (grant.environment_digest != controller_host_action_environment_digest_v1(request.operation) or
+            request.environment_digest != grant.environment_digest):
+        return "controller-host-action-environment"
+    if approver.principal != grant.principal or approver.project != grant.project or approver.host_id != grant.host_id:
+        return "controller-host-action-approver-scope"
+    if not approver.operations.contains(request.operation): return "controller-host-action-approver-operations"
+    if grant.expires_at > approver.expires_at: return "controller-host-action-approver-budget"
+    if approval_expires_at <= now or approval_expires_at > grant.expires_at: return "controller-host-action-approval-expiry"
+    ""
+
+# Builds the `kind` envelope for the record digest `payload_digest` on `host_id` (the installed binding's physical host),
+# then issue-then-verify. Every refusal before the signatures happens before any key is read.
+pub fn controller_host_action_issue_v1(context: ControllerDispatchContextV1,
+        read_key: fn(DistributedAuthorityKeyV2) -> Result<[u8], text>, approver_id: text, kind: text, operation_id: text,
+        payload_digest: text, host_id: text, grant_id: text, ttl_ms: i64, now: i64) -> Result<ControllerHostActionAuthorityV1, text>:
+    if now <= 0: return Err("dispatch-wall-clock-unavailable")
+    if not CONTROLLER_HOST_ACTION_KINDS_V1.contains(kind): return Err("controller-host-action-kind")
+    if ttl_ms <= 0 or ttl_ms > CONTROLLER_HOST_ACTION_MAX_TTL_MS_V1: return Err("controller-host-action-ttl")
+    val snapshot = context.policy.snapshot
+    val issuer = distributed_authority_snapshot_key_v2(snapshot, "grant-issuer", context.config.controller_id)?
+    val approver = distributed_authority_snapshot_key_v2(snapshot, "human-approver", approver_id)?
+    val expires = now + ttl_ms
+    val environment = controller_host_action_environment_digest_v1(kind)
+    val grant = ExecutionGrantV2(id: grant_id, principal: approver.principal, project: approver.project, host_id: host_id,
+        operations: [kind], environment_digest: environment, policy_revision: snapshot.policy_revision,
+        revocation_epoch: snapshot.revocation_epoch, expires_at: expires, maximum_memory_bytes: 1, maximum_duration_ms: 1)
+    val request = OperationEnvelopeV2(version: 2, id: operation_id, payload_digest: payload_digest, principal: approver.principal,
+        project: approver.project, host_id: host_id, operation: kind, environment_digest: environment,
+        policy_revision: snapshot.policy_revision, revocation_epoch: snapshot.revocation_epoch,
+        session_generation: context.policy.session_generation, memory_bytes: 1, duration_ms: 1)
+    val refused = controller_host_action_class_v1(approver, grant, request, expires, now)
+    if refused != "": return Err(refused)
+    val authority = controller_authority_sign_pair_v1(context, read_key, issuer, approver, grant, request, expires, now)?
+    Ok(ControllerHostActionAuthorityV1(operation: request, authority: authority))
+
 export ControllerIssuedAuthorityV1, controller_authority_key_leaf_v1, controller_authority_store_reader_v1
 export controller_authority_issue_v1
+export ControllerHostActionAuthorityV1, CONTROLLER_HOST_ACTION_KINDS_V1, controller_host_action_environment_digest_v1
+export controller_host_action_class_v1, controller_host_action_issue_v1
