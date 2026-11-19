@@ -700,11 +700,65 @@ fn engine2d_draw_ir_render_typed_border_ring(
     val rw = widths[1]
     val bw = widths[2]
     val lw = widths[3]
-    var pixels: [u32] = [0u32; ((width as i64) * (height as i64)) as i32]
-    var row = 0
-    while row < height:
-        var column = 0
-        while column < width:
+    # Interior: past every side width and every corner radius a pixel is inside
+    # the inner shape (`_e2d_box_inner_corner_ok` is true once ux or uy >= r),
+    # so it is never ring. Only the four strips around it are classified and
+    # blended -- cost is the ring area, not the box area (the html catalog page
+    # went 41 s -> >1200 s when every rounded border took this path).
+    val r_tl = _e2d_box_corner_radius(corners.top_left, width, height)
+    val r_tr = _e2d_box_corner_radius(corners.top_right, width, height)
+    val r_br = _e2d_box_corner_radius(corners.bottom_right, width, height)
+    val r_bl = _e2d_box_corner_radius(corners.bottom_left, width, height)
+    val r_left = if r_tl > r_bl: r_tl else: r_bl
+    val r_right = if r_tr > r_br: r_tr else: r_br
+    val r_top = if r_tl > r_tr: r_tl else: r_tr
+    val r_bottom = if r_bl > r_br: r_bl else: r_br
+    val skip_x0 = if lw > r_left: lw else: r_left
+    val skip_x1 = width - (if rw > r_right: rw else: r_right)
+    val skip_y0 = if tw > r_top: tw else: r_top
+    val skip_y1 = height - (if bw > r_bottom: bw else: r_bottom)
+    if skip_x0 >= skip_x1 or skip_y0 >= skip_y1:
+        return _e2d_box_ring_strip(eng, x, y, width, height, widths, colors, corners, 0, 0, width, height)
+    # Corner blocks: per-pixel arcs and joins.
+    eng = _e2d_box_ring_strip(eng, x, y, width, height, widths, colors, corners, 0, 0, skip_x0, skip_y0)
+    eng = _e2d_box_ring_strip(eng, x, y, width, height, widths, colors, corners, skip_x1, 0, width - skip_x1, skip_y0)
+    eng = _e2d_box_ring_strip(eng, x, y, width, height, widths, colors, corners, 0, skip_y1, skip_x0, height - skip_y1)
+    eng = _e2d_box_ring_strip(eng, x, y, width, height, widths, colors, corners, skip_x1, skip_y1, width - skip_x1, height - skip_y1)
+    # Straight sides between the corner blocks: past the radii and the other
+    # side's width every ring pixel is its own side's colour (the join test
+    # `uy * vw < ux * hw` holds since uy < hw and ux > vw), so it is a rect.
+    eng = _e2d_box_ring_side(eng, x + skip_x0, y, skip_x1 - skip_x0, tw, colors[0])
+    eng = _e2d_box_ring_side(eng, x + skip_x0, y + height - bw, skip_x1 - skip_x0, bw, colors[2])
+    eng = _e2d_box_ring_side(eng, x, y + skip_y0, lw, skip_y1 - skip_y0, colors[3])
+    _e2d_box_ring_side(eng, x + width - rw, y + skip_y0, rw, skip_y1 - skip_y0, colors[1])
+
+fn _e2d_box_ring_side(engine: Engine2D, x: i32, y: i32, w: i32, h: i32, color: u32) -> Engine2D:
+    var eng = engine
+    if w <= 0 or h <= 0:
+        return eng
+    val pixels: [u32] = [color; ((w as i64) * (h as i64)) as i32]
+    eng.draw_image_blend(x, y, w, h, pixels)
+    eng
+
+# Classify and blend the ring pixels of the sub-rect (sx, sy, sw, sh) of the
+# border box (box-relative coordinates).
+fn _e2d_box_ring_strip(
+    engine: Engine2D, x: i32, y: i32, width: i32, height: i32,
+    widths: [i32], colors: [u32], corners: Engine2dDrawIrCornerRadii,
+    sx: i32, sy: i32, sw: i32, sh: i32
+) -> Engine2D:
+    var eng = engine
+    if sw <= 0 or sh <= 0:
+        return eng
+    val tw = widths[0]
+    val rw = widths[1]
+    val bw = widths[2]
+    val lw = widths[3]
+    var pixels: [u32] = [0u32; ((sw as i64) * (sh as i64)) as i32]
+    var row = sy
+    while row < sy + sh:
+        var column = sx
+        while column < sx + sw:
             if _e2d_box_inside_corners(column, row, width, height, corners) and
                 not _e2d_box_inside_inner(column, row, width, height, lw, tw, rw, bw, corners):
                 val cx = column.to_f64() + 0.5
@@ -716,13 +770,13 @@ fn engine2d_draw_ir_render_typed_border_ring(
                 val hw = if top_half: tw else: bw
                 val vw = if left_half: lw else: rw
                 val horizontal = vw <= 0 or (hw > 0 and _e2d_box_horizontal_side(ux, uy, hw, vw))
-                pixels[row * width + column] = if horizontal:
+                pixels[(row - sy) * sw + (column - sx)] = if horizontal:
                     (if top_half: colors[0] else: colors[2])
                 else:
                     (if left_half: colors[3] else: colors[1])
             column = column + 1
         row = row + 1
-    eng.draw_image_blend(x, y, width, height, pixels)
+    eng.draw_image_blend(x + sx, y + sy, sw, sh, pixels)
     eng
 
 fn engine2d_draw_ir_render_typed_background(
