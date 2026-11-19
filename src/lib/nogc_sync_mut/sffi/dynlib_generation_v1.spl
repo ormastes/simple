@@ -84,3 +84,81 @@ class DynlibGenerationHostV1:
         unsafe(capabilities: [ffi]):
             lib.close()
         KpfSyncStatus.Ok
+
+# Opt-in reload path for DynLoader-style path-keyed providers (DHR P4).
+#
+# DynLoader caches one DynLib per path and never replaces it. This loader keeps
+# one DynlibGenerationHostV1 per path instead: `reload(path)` loads a fresh
+# mapping and publishes it as that path's active generation, calls take a
+# lease for their whole duration, and `unload` closes a retired mapping only
+# after its last lease has ended. It lives here, not on DynLoader itself,
+# because sffi/dynamic.spl is imported by this module; it shares no state with
+# the DynLoader singleton, so callers that never use it see no change.
+class DynLoaderReloadV1:
+    generation_capacity: u32
+    pin_capacity: u32
+    var hosts: {text: DynlibGenerationHostV1}
+    var revisions: {text: u64}
+
+    static fn create(generation_capacity: u32, pin_capacity: u32) -> DynLoaderReloadV1:
+        DynLoaderReloadV1(generation_capacity: generation_capacity, pin_capacity: pin_capacity, hosts: {}, revisions: {})
+
+    # Load `path` again and publish it as the path's active generation. The
+    # previous generation is retired but stays mapped until `unload` collects
+    # it. A failed publish closes the fresh mapping and reports the status.
+    @allow(primitive_api)  # path is the same text provider key DynLoader uses
+    @unsafe(reason: "loads an unverified dynamic provider as a new generation", capabilities: [ffi])
+    me reload(path: text, provider_id: KpfId128, composition_digest: KpfDigest256) -> Result<KpfGenerationPublication, text>:
+        val loaded = unsafe(capabilities: [ffi]):
+            DynLib.load_checked(path)
+        match loaded:
+            case Ok(lib):
+                if not self.hosts.contains(path):
+                    self.hosts[path] = DynlibGenerationHostV1.create(KpfGenerationTable.create(self.generation_capacity, self.pin_capacity))
+                    self.revisions[path] = 0u64
+                val revision = self.revisions[path] + 1u64
+                self.revisions[path] = revision
+                val host = self.hosts[path]
+                val publication = host.publish(lib, provider_id, composition_digest, revision)
+                if publication.status != KpfSyncStatus.Ok:
+                    unsafe(capabilities: [ffi]):
+                        lib.close()
+                    return Err("E-SFFI-019: reload publish refused for {path}")
+                Ok(publication)
+            case Err(error): Err(error)
+
+    # Lease the active generation of `path` for one caller operation.
+    @allow(primitive_api)  # path is the same text provider key DynLoader uses
+    me begin_call(path: text) -> Result<DynlibGenerationLeaseV1, KpfSyncStatus>:
+        if not self.hosts.contains(path): return Err(KpfSyncStatus.GenerationNotActive)
+        val host = self.hosts[path]
+        host.begin_call()
+
+    @allow(primitive_api)  # path is the same text provider key DynLoader uses
+    me end_call(path: text, lease: DynlibGenerationLeaseV1) -> KpfSyncStatus:
+        if not self.hosts.contains(path): return KpfSyncStatus.StaleHandle
+        val host = self.hosts[path]
+        host.end_call(lease)
+
+    # Checked dispatch through the active generation; the lease covers the
+    # whole call, so a concurrent reload cannot close this mapping under it.
+    @allow(primitive_api)  # path and func mirror DynLoader.call_checked
+    @unsafe(reason: "checked transport cannot verify the provider artifact or all-i64 ABI", capabilities: [ffi, raw_ptr])
+    me call_checked(path: text, func: text, args: [i64]) -> Result<i64, text>:
+        match self.begin_call(path):
+            case Ok(lease):
+                val result = unsafe(capabilities: [ffi, raw_ptr]):
+                    lease.lib.call_checked(func, args)
+                _ = self.end_call(path, lease)
+                result
+            case Err(_): Err("E-SFFI-019: no active generation for {path}")
+
+    # Collect a retired generation of `path`; its mapping is closed only when
+    # no lease still pins it.
+    @allow(primitive_api)  # path is the same text provider key DynLoader uses
+    @unsafe(reason: "closes a retired generation's native provider mapping", capabilities: [ffi])
+    me unload(path: text, generation: KpfGenerationHandle) -> KpfSyncStatus:
+        if not self.hosts.contains(path): return KpfSyncStatus.StaleHandle
+        val host = self.hosts[path]
+        unsafe(capabilities: [ffi]):
+            host.unload(generation)
