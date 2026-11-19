@@ -66,7 +66,8 @@ use std.common.build_manager.remote_build_input_manifest_v3.{RemoteBuildInputEnt
     remote_build_input_manifest_digest_v3}
 use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
 use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
-    distributed_operation_journal_publish_v3, distributed_operation_journal_read_required_v3}
+    distributed_operation_journal_publish_v3, distributed_operation_journal_read_required_v3,
+    distributed_operation_journal_read_v3}
 use std.nogc_sync_mut.container.machine_authority_v1.MachineFreshEpochAdmissionOwnerV1
 use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentityBorrowV3
 use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
@@ -282,6 +283,50 @@ fn host_remote_build_reset_reply_v4(executor: HostRemoteBuildExecutorV3) -> text
         "receipt": SdnValue.String(executor.reset_receipt)}
     sdn_encode_canonical(SdnValue.Dict(fields))
 
+# milestone_0039: the durable copy of the Host-signed reset-failure reply, keyed by the operation id alone (like the startup
+# reap index: the restarted service knows the operation, not the prior fence; operation ids are unique per run, and a reused
+# id meets the no-replace conflict and keeps the plain wedge). Replaying it is transport, not authority.
+pub fn host_remote_build_reset_failure_relative_v4(operation_id: text) -> text:
+    "host-remote-build-reset-failure/" + sha256_text(operation_id) + ".sdn"
+
+fn remote_build_reset_archive_v4(journal: DistributedOperationJournalV2, operation_id: text, reply: text) -> Result<(), text>:
+    val relative = host_remote_build_reset_failure_relative_v4(operation_id)
+    distributed_operation_journal_publish_v3(journal, relative, reply)?
+    if distributed_operation_journal_read_required_v3(journal, relative, 262144)? != reply:
+        return Err("linux-host-remote-build-reset-failure-conflict")
+    Ok(())
+
+fn remote_build_reset_text_v4(fields: Dict<text, SdnValue>, name: text) -> text:
+    match fields[name]:
+        case SdnValue.String(value): value
+        case _: ""
+
+# The archived reply of `operation_id`, or "" when it is absent, unreadable, for another operation, not a wedged
+# reset-failure reply with a receipt, or not canonical bytes: every doubt keeps the caller's existing refusal.
+pub fn host_remote_build_reset_failure_stored_v4(journal: DistributedOperationJournalV2, operation_id: text) -> text:
+    val stored = distributed_operation_journal_read_v3(journal, host_remote_build_reset_failure_relative_v4(operation_id), 262144)
+    if stored.is_err() or stored.unwrap().is_none(): return ""
+    val source = stored.unwrap().unwrap()
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 262144, max_depth: 2, max_nodes: 32,
+        max_rows: 0, max_cells: 0, max_columns: 16))
+    if parsed.is_err(): return ""
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return ""
+    if fields.len() != 5: return ""
+    for name in ["kind", "operationId", "stage", "cause", "receipt"]:
+        if not fields.contains_key(name): return ""
+    val receipt = remote_build_reset_text_v4(fields, "receipt")
+    val cause = remote_build_reset_text_v4(fields, "cause")
+    if receipt == "" or remote_build_reset_text_v4(fields, "operationId") != operation_id: return ""
+    if remote_build_reset_text_v4(fields, "kind") != "linux-host-remote-build-reset-failure": return ""
+    if remote_build_reset_text_v4(fields, "stage") != "wedged": return ""
+    val canonical: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-remote-build-reset-failure"),
+        "operationId": SdnValue.String(operation_id), "stage": SdnValue.String("wedged"),
+        "cause": SdnValue.String(cause), "receipt": SdnValue.String(receipt)}
+    if sdn_encode_canonical(SdnValue.Dict(canonical)) != source: return ""
+    source
+
 # Open (pre-transfer, no effect but the no-replace archive): the app port admits the record's app types, then the
 # lane B open authority (snapshot-verified pair, task class, execution-host key), then the task and request pins.
 # Any refusal leaves the row executing for the caller's no-workload settle (r4.1b). Exact-bytes retry is answered
@@ -480,7 +525,12 @@ fn remote_build_reset_wedged_v4(executor: HostRemoteBuildExecutorV3, capacity: H
     state.stage = "wedged"
     state.error = error
     state.reset_receipt = signed.unwrap()
-    remote_build_turn_v4(state, capacity, host_remote_build_reset_reply_v4(state), "", true)
+    # milestone_0039: the reply is durable (no-replace, read back, through the single capacity journal writer) BEFORE it is
+    # first answered, so a restart before the controller collects still has it. An archive error is the plain wedge.
+    val reply = host_remote_build_reset_reply_v4(state)
+    if remote_build_reset_archive_v4(capacity.journal, state.operation_id, reply).is_err():
+        return remote_build_wedged_v4(executor, capacity, error)
+    remote_build_turn_v4(state, capacity, reply, "", true)
 
 # s5 / T-04: after the transfer and before a record is reserved a failure is a held `failed` executor (consumed; the
 # restart reap drains its executing row); after, it is wedged. Never a no-workload settle: the source may be open.
@@ -887,4 +937,5 @@ export host_remote_build_bundle_relative_v4, host_remote_build_exit_outcome_v4, 
 export host_remote_build_open_v4, host_remote_build_input_v4, host_remote_build_transfer_v4
 export host_remote_build_request_cancel_v4, host_remote_build_step_v4, host_remote_build_close_v4, host_remote_build_release_v4
 export host_remote_build_profile_gate_v4, host_remote_build_failed_cause_v4, host_remote_build_epoch_v4, HostRemoteBuildFrameV4
+export host_remote_build_reset_failure_relative_v4, host_remote_build_reset_failure_stored_v4
 export host_remote_build_frame_encode_v4, host_remote_build_frame_decode_v4, host_remote_build_output_v4

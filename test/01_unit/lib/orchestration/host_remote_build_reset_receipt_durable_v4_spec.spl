@@ -1,0 +1,152 @@
+"""
+## Purpose and audience
+Pins milestone_0039 in `src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl` and the collect route in
+`host_linux_service_current_v4.spl`: the Host-signed reset-failure reply (milestone_0038) is archived, no-replace and read
+back, through the held capacity journal (the single writer, the store that already owns this operation's open record and
+bundle) BEFORE it is first answered. After a service restart the startup reap has indexed the operation, and the collect
+answers the stored reply byte-identically; a missing, corrupt, foreign or non-canonical stored reply answers nothing and
+the route keeps the existing `linux-host-remote-build-reaped-incomplete` refusal (the controller's generic wedged settle).
+Written for owners of the Linux Host service.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary).
+## Compatibility and limitations
+Replaying a signed receipt is transport, not authority: the Host re-signs nothing and the controller verifies the receipt
+(grant, approval, issuer, host key, request pin, window) exactly as for an in-memory replay, which the Host already
+answers past the approval's expiry (the wedged-with-receipt arm precedes the deadline check). Open, transfer and the
+startup reap keep refusing an expired approval after restart; this change touches none of them.
+## Verification guidance and troubleshooting
+A changed archive path or error string is a contract change.
+"""
+use std.spec.{step, fail}
+use std.io.file_read_text
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.*
+# Tests reach private module gates directly (repo rule: tests may access private).
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.{host_remote_build_reset_reply_v4,
+    remote_build_reset_archive_v4}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_open_cleanup_v2,
+    distributed_operation_journal_publish_v3}
+use std.common.contracts.orchestration.host_capacity_v1.HostCapacityV1
+
+val RD_SOURCE: text = "src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl"
+val RD_SERVICE: text = "src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl"
+
+fn rd_count(source: text, needle: text) -> i64:
+    source.split(needle).len() - 1
+
+fn rd_from(source: text, start: text, end: text) -> text:
+    val at = source.index_of(start)
+    if at < 0: return ""
+    val tail = source.substring(at, source.byte_len())
+    val stop = tail.index_of(end)
+    if stop < 0: return tail
+    tail.substring(0, stop)
+
+fn rd_open(root: text) -> HostCapacityOwnerV1:
+    var opened: [HostCapacityOwnerV1] = []
+    match host_capacity_owner_open_owned_v2(root, HostCapacityV1("worker_1", "host-authority", "current-fence", 41, 2000, 536870912, []),
+            "9".repeat(64), 64, true):
+        case HostCapacityOpenV2.Ready(owner): opened.push(owner)
+        case HostCapacityOpenV2.Rejected(reason): fail(reason)
+        case HostCapacityOpenV2.CleanupRequired(cleanup, reason):
+            val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+            expect(closed.error).to_equal("")
+            fail(reason)
+    opened[0]
+
+fn rd_executor(operation_id: text) -> HostRemoteBuildExecutorV3:
+    var executor = HostRemoteBuildExecutorV3(operation_id: operation_id, fence: "fence_1", association_digest: "a".repeat(64),
+        task_digest: "d".repeat(64), open_record: "", inputs: [], invocation_bytes: "", invocation_digest: "",
+        workspace_manifest: "", deadline: 0)
+    executor.stage = "wedged"
+    executor.error = "linux-host-remote-build-destroy:not-ok"
+    executor.reset_receipt = "SIMPLE_REMOTE_RESET_FAILURE_ENVELOPE_V3\nline\n"
+    executor
+
+describe "Host reset-failure receipt durability (milestone_0039)":
+    it "archives the reply before it is answered and answers the identical bytes after a restart":
+        # @req M0039-DUR-01
+        val root = secure_temp_dir("/tmp", "m0039-durable").unwrap()
+        val reply = host_remote_build_reset_reply_v4(rd_executor("operation_2"))
+        val first = rd_open(root + "/journal")
+        step("the archive is written no-replace and read back through the held journal")
+        expect(remote_build_reset_archive_v4(first.journal, "operation_2", reply)).to_equal(Ok(()))
+        expect(host_remote_build_reset_failure_stored_v4(first.journal, "operation_2")).to_equal(reply)
+        step("an identical re-archive is accepted and changes nothing")
+        expect(remote_build_reset_archive_v4(first.journal, "operation_2", reply)).to_equal(Ok(()))
+        val closed = host_capacity_owner_close_owned_v2(first)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        step("a restarted service reopens the journal and reads the byte-identical reply")
+        val second = rd_open(root + "/journal")
+        expect(host_remote_build_reset_failure_stored_v4(second.journal, "operation_2")).to_equal(reply)
+        val closed_again = host_capacity_owner_close_owned_v2(second)
+        expect(closed_again.closed and closed_again.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "answers nothing for a missing, foreign, corrupt or non-canonical stored reply":
+        # @req M0039-DUR-02
+        val root = secure_temp_dir("/tmp", "m0039-corrupt").unwrap()
+        val opened = rd_open(root + "/journal")
+        val journal = opened.journal
+        step("nothing archived")
+        expect(host_remote_build_reset_failure_stored_v4(journal, "operation_2")).to_equal("")
+        val reply = host_remote_build_reset_reply_v4(rd_executor("operation_2"))
+        step("garbage bytes at the archive path")
+        expect(distributed_operation_journal_publish_v3(journal, host_remote_build_reset_failure_relative_v4("operation_2"),
+            "not sdn at all {")).to_equal(Ok(true))
+        expect(host_remote_build_reset_failure_stored_v4(journal, "operation_2")).to_equal("")
+        step("a reply for another operation at this operation's path")
+        expect(distributed_operation_journal_publish_v3(journal, host_remote_build_reset_failure_relative_v4("operation_3"),
+            reply)).to_equal(Ok(true))
+        expect(host_remote_build_reset_failure_stored_v4(journal, "operation_3")).to_equal("")
+        step("a non-canonical spelling and an empty receipt")
+        expect(distributed_operation_journal_publish_v3(journal, host_remote_build_reset_failure_relative_v4("operation_4"),
+            reply + "\n")).to_equal(Ok(true))
+        expect(host_remote_build_reset_failure_stored_v4(journal, "operation_4")).to_equal("")
+        var empty = rd_executor("operation_5")
+        empty.reset_receipt = ""
+        expect(distributed_operation_journal_publish_v3(journal, host_remote_build_reset_failure_relative_v4("operation_5"),
+            host_remote_build_reset_reply_v4(empty))).to_equal(Ok(true))
+        expect(host_remote_build_reset_failure_stored_v4(journal, "operation_5")).to_equal("")
+        val closed = host_capacity_owner_close_owned_v2(opened)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "refuses to archive over different bytes (the caller then keeps the plain wedge)":
+        # @req M0039-DUR-03
+        val root = secure_temp_dir("/tmp", "m0039-conflict").unwrap()
+        val opened = rd_open(root + "/journal")
+        val journal = opened.journal
+        val reply = host_remote_build_reset_reply_v4(rd_executor("operation_2"))
+        expect(distributed_operation_journal_publish_v3(journal, host_remote_build_reset_failure_relative_v4("operation_2"),
+            "other bytes")).to_equal(Ok(true))
+        expect(remote_build_reset_archive_v4(journal, "operation_2", reply)).to_equal(
+            Err("linux-host-remote-build-reset-failure-conflict"))
+        val closed = host_capacity_owner_close_owned_v2(opened)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "archives before answering and wires the stored reply into the reaped collect only":
+        # @req M0039-DUR-04
+        val source = file_read_text(RD_SOURCE)
+        val wedge = rd_from(source, "fn remote_build_reset_wedged_v4(", "\nfn ")
+        step("the reply is archived through the capacity journal before it is answered; an archive error is the plain wedge")
+        expect(rd_count(wedge, "remote_build_reset_archive_v4(capacity.journal,")).to_equal(1)
+        expect(wedge.index_of("remote_build_reset_archive_v4(") < wedge.index_of("remote_build_turn_v4(state, capacity, reply")).to_equal(true)
+        expect(rd_count(wedge, "return remote_build_wedged_v4(")).to_equal(3)
+        step("the archive writes no-replace and reads back; the reader fails closed to the empty string")
+        val archive = rd_from(source, "fn remote_build_reset_archive_v4(", "\nfn ")
+        expect(rd_count(archive, "distributed_operation_journal_publish_v3(")).to_equal(1)
+        expect(rd_count(archive, "distributed_operation_journal_read_required_v3(")).to_equal(1)
+        val service = file_read_text(RD_SERVICE)
+        val collect = rd_from(service, "pub fn host_linux_service_remote_build_collect_v4(", "\npub fn ")
+        step("only a reaped operation consults the archive, and only the reaped-incomplete refusal is replaced")
+        expect(rd_count(collect, "host_remote_build_reset_failure_stored_v4(owner.capacity.unwrap().journal,")).to_equal(1)
+        expect(collect.index_of("host_remote_build_reset_failure_stored_v4(") > collect.index_of("linux_service_remote_build_reaped_v4("))
+            .to_equal(true)
+        expect(collect.index_of("host_remote_build_reset_failure_stored_v4(") < collect.index_of("linux_service_remote_build_held_v4("))
+            .to_equal(true)
+        expect(rd_count(collect, "linux-host-remote-build-reaped-incomplete")).to_equal(1)
