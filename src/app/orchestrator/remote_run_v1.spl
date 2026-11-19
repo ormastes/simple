@@ -46,14 +46,15 @@ use app.orchestrator.remote_build_service_port_v3.{RemoteBuildOpenRecordV3, remo
 use app.buildrunner.remote_context_v1.{RemoteAuthorityContextV1, remote_context_from_snapshot_v1}
 use app.buildrunner.remote_session_v1.remote_database_session_open_v1
 use app.buildrunner.remote_container_session_v3.{RemoteContainerDatabaseSessionV3, remote_container_session_v3}
-use app.buildrunner.remote_container_reset_failure_v3.RemoteContainerResetFailureV3
+use app.buildrunner.remote_container_reset_failure_v3.{RemoteContainerResetFailureV3, remote_container_reset_failure_digest_v3}
+use app.buildrunner.remote_container_reset_failure_signed_v3.remote_container_reset_failure_signed_decode_v3
 use app.io.file_ops.file_atomic_write
 use std.nogc_sync_mut.io.dir_ops.dir_create_all
 use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostAgentCancelRequestV4, host_agent_cancel_operation_v4,
     host_agent_cancel_request_encode_v4}
 use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{DistributedAuthoritySnapshotV2,
     distributed_verify_grant_approval_from_snapshot_v2}
-use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalV2
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_lookup_v2}
 use std.nogc_sync_mut.orchestration.workload_store_v1.ControllerJournalEditV1
 use std.common.contracts.container.runtime_v1.RuntimeExitStatusV1
 use std.common.task_runner.journal.task_runner_journal_release_v1
@@ -232,6 +233,18 @@ fn remote_run_host_reset_apply_v1(authored: RemoteRunAuthoredV1, execution: Cont
     val accepted = session.accept_host_reset_failure_v3(authored.task, wire, context)
     val released = task_runner_journal_release_v1(session.parent.database.journal)
     val advanced = session.parent.operations
+    if accepted.is_err() and accepted.unwrap_err() == "REMOTE_COMPLETION_REPLAY":
+        # REVIEW_C P3-5: a second collect of a receipt already journaled (the session verified its signature before it
+        # found the terminal row) is the recorded failure, but only when the row holds THIS receipt's digest.
+        val decoded = remote_container_reset_failure_signed_decode_v3(wire)
+        if decoded.is_ok():
+            val digest = remote_container_reset_failure_digest_v3(decoded.unwrap().receipt)
+            val row = distributed_operation_journal_lookup_v2(advanced, authored.policy.operation_id)
+            if digest.is_ok() and row.is_ok() and
+                    row.unwrap().state == "failed" and row.unwrap().outcome_digest == digest.unwrap():
+                val again = "ERROR:" + digest.unwrap() + ":" + decoded.unwrap().receipt.stage
+                return ControllerJournalEditV1(journal: advanced,
+                    result: if released.is_err(): again + REMOTE_RUN_RELEASE_FAILED_V1 else: again, error: "")
     if accepted.is_err(): return ControllerJournalEditV1(journal: advanced, result: "", error: accepted.unwrap_err())
     val result = "ERROR:" + accepted.unwrap().digest + ":" + accepted.unwrap().stage
     ControllerJournalEditV1(journal: advanced, result: if released.is_err(): result + REMOTE_RUN_RELEASE_FAILED_V1 else: result, error: "")
