@@ -3411,6 +3411,59 @@ mod linux_owned_pin_tests {
             );
         }
     }
+
+    /// A dynamic system ELF padded to `len` bytes (padding after the last
+    /// segment leaves the ELF headers valid), mode 0755, in a private temp dir.
+    fn padded_dynamic_fixture(tag: &str, len: u64) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "simple-pin-image-cap-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("image");
+        std::fs::copy(dynamic_fixture(), &path).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(len).unwrap();
+        drop(file);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// Repro (doc/08_tracking/bug/linux_owned_pin_rejects_images_over_64mib_2026-11-20.md):
+    /// a statically LLVM-linked Stage 2 compiler is ~177 MB, and a 64 MiB image
+    /// cap made every profile HIR worker report "owned executable pin was
+    /// rejected". Pin AND acquire must both admit an image above 64 MiB.
+    #[test]
+    fn owned_pin_admits_image_larger_than_64_mib() {
+        let path = padded_dynamic_fixture("large", 200 * 1024 * 1024);
+        let text = path.to_str().unwrap();
+        unsafe {
+            let handle = rt_process_pin_executable_owned_value(text.as_ptr(), text.len() as u64);
+            assert!(handle > 0, "owned pin of 200 MiB dynamic ELF returned {handle}");
+            let fd = rt_process_acquire_pinned_executable(handle);
+            assert!(fd >= 3, "acquire of 200 MiB pinned image returned {fd}");
+            libc::close(fd as i32);
+            let digest = rt_process_pinned_executable_sha256_value(handle);
+            assert!(!digest.is_nil(), "pinned digest of large image is nil");
+            assert_eq!(rt_process_close_pinned_executable_owned_value(handle), 1);
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Similar pattern: the image bound still exists, so an image above it is
+    /// refused rather than copied into a memfd.
+    #[test]
+    fn owned_pin_refuses_image_above_bound() {
+        let path = padded_dynamic_fixture("over", (1u64 << 30) + 1);
+        let text = path.to_str().unwrap();
+        unsafe {
+            let handle = rt_process_pin_executable_owned_value(text.as_ptr(), text.len() as u64);
+            assert!(handle <= 0, "image above the pin bound was admitted: {handle}");
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 }
 
 /// Rust-lane counterpart for platforms where the canonical C OwnedProcess V3

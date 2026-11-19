@@ -5332,6 +5332,12 @@ static pthread_mutex_t s_pinned_executables_lock = PTHREAD_MUTEX_INITIALIZER;
  *
  * `loader_out` (PATH_MAX bytes, may be NULL) receives the admitted PT_INTERP
  * path, or "" for the static class. */
+/* Upper bound on a pinned main image (pin, acquire and digest all apply it).
+ * It was 64 MiB, which refused every statically LLVM-linked Stage 2 compiler
+ * (~177 MB), so every profile HIR worker reported "owned executable pin was
+ * rejected" (doc/08_tracking/bug/linux_owned_pin_rejects_images_over_64mib_2026-11-20.md).
+ * The bound only limits the sealed memfd copy; 1 GiB leaves headroom. */
+#define RT_HAL_PIN_IMAGE_MAX_BYTES ((off_t)1024 * 1024 * 1024)
 #define RT_HAL_ELF_MAX_LOADS 64
 #define RT_HAL_ELF_MAX_DYN_ENTRIES 4096
 #define RT_HAL_ELF_MAX_NEEDED 256
@@ -5494,7 +5500,7 @@ int64_t rt_process_acquire_pinned_executable(int64_t handle) {
     struct stat st;
     int seals = fcntl(duplicate, F_GET_SEALS);
     if (fstat(duplicate, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
-        st.st_size > (off_t)(64 * 1024 * 1024) || seals < 0 ||
+        st.st_size > RT_HAL_PIN_IMAGE_MAX_BYTES || seals < 0 ||
         (seals & (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)) !=
         (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) ||
         !hal_pinnable_elf_fd(duplicate, st.st_size, NULL)) {
@@ -5511,7 +5517,7 @@ SplArray* rt_process_pinned_executable_sha256_value(int64_t handle) {
     int fd = (int)rt_process_acquire_pinned_executable(handle);
     if (fd < 0) return NULL;
     struct stat image;
-    if (fstat(fd, &image) != 0 || image.st_size <= 0 || image.st_size > (off_t)(64 * 1024 * 1024)) {
+    if (fstat(fd, &image) != 0 || image.st_size <= 0 || image.st_size > RT_HAL_PIN_IMAGE_MAX_BYTES) {
         close(fd); return NULL;
     }
     uint32_t state[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
@@ -5567,10 +5573,18 @@ int64_t rt_process_pin_executable(const char* canonical_path) {
     int source = open(canonical_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (source < 0) return -1;
     struct stat st;
+    memset(&st, 0, sizeof(st));
     if (fstat(source, &st) != 0 || !S_ISREG(st.st_mode) ||
-        st.st_size <= 0 || st.st_size > (off_t)(64 * 1024 * 1024) ||
+        st.st_size <= 0 || st.st_size > RT_HAL_PIN_IMAGE_MAX_BYTES ||
         (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0 ||
         !hal_pinnable_elf_fd(source, st.st_size, NULL)) {
+        /* Say why, mirroring the admission line: a bare "pin was rejected"
+         * upstream gives no clue which rule refused the image. */
+        fprintf(stderr, "[rt-pin] refused: %s (size %lld, limit %lld, or not an admissible "
+                "executable ELF): %s\n",
+                (S_ISREG(st.st_mode) && st.st_size > RT_HAL_PIN_IMAGE_MAX_BYTES) ? "image too large"
+                                                                                  : "image not admissible",
+                (long long)st.st_size, (long long)RT_HAL_PIN_IMAGE_MAX_BYTES, canonical_path);
         close(source);
         return -1;
     }
