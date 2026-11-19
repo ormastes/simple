@@ -13,7 +13,7 @@
 #   POST /v1/completions      -> legacy text completion (raw prompt, no chat template)
 #   GET  /health              -> 200 {"status":"ok"}
 #   POST /v1/audio/transcriptions, /v1/audio/speech, /v1/images/generations,
-#        /v1/embeddings, /v1/rerank -> serving/ modules (kind_routes below)
+#        /v1/embeddings, /v1/rerank -> serving/ modules (kind_route_paths below)
 # A route asked for a model of another kind answers 400 wrong_model_kind.
 # Anything else is 404; a known path with the wrong method is 405.
 # stream=true is served by serving_stream.spl over a socket; this transport-free
@@ -59,20 +59,10 @@ fn serve_models(model_root: text) -> ApiResponse:
             natives.push(m)
     models_list_response(discover_models(model_root), natives, "slang")
 
-# The route table: path -> the model kind it serves. Chat routes are handled
-# above it by serving_chat; each other route has one serving/ module.
-struct KindRoute:
-    path: text
-    kind: ModelKind
-
-fn kind_routes() -> [KindRoute]:
-    [KindRoute(path: "/v1/chat/completions", kind: ModelKind.Chat),
-     KindRoute(path: "/v1/completions", kind: ModelKind.Chat),
-     KindRoute(path: "/v1/audio/transcriptions", kind: ModelKind.Asr),
-     KindRoute(path: "/v1/audio/speech", kind: ModelKind.Tts),
-     KindRoute(path: "/v1/images/generations", kind: ModelKind.ImageGen),
-     KindRoute(path: "/v1/embeddings", kind: ModelKind.Embedding),
-     KindRoute(path: "/v1/rerank", kind: ModelKind.Rerank)]
+# The non-chat kind routes, each served by one serving/ module that checks the
+# requested model's kind itself (serving_models.model_for_kind).
+fn kind_route_paths() -> [text]:
+    ["/v1/audio/transcriptions", "/v1/audio/speech", "/v1/images/generations", "/v1/embeddings", "/v1/rerank"]
 
 fn _serve_kind_route(route: text, model_root: text, body: text) -> ApiResponse:
     if route == "/v1/audio/transcriptions":
@@ -83,7 +73,9 @@ fn _serve_kind_route(route: text, model_root: text, body: text) -> ApiResponse:
         return serve_images(model_root, body)
     if route == "/v1/embeddings":
         return serve_embeddings(model_root, body)
-    serve_rerank(model_root, body)
+    if route == "/v1/rerank":
+        return serve_rerank(model_root, body)
+    openai_error_response(404, "unknown route " + route, "invalid_request_error", "not_found", "")
 
 # 400 wrong_model_kind before a chat route runs a model of another kind.
 fn _chat_kind_check(model_root: text, body: text, route: text) -> Result<(), ApiResponse>:
@@ -131,8 +123,8 @@ fn slang_api_dispatch(method: text, path: text, body: text, model_root: text) ->
                 return refusal
             Ok(_): ()
         return serve_completions(model_root, body)
-    for r in kind_routes():
-        if r.path == route:
+    for kind_path in kind_route_paths():
+        if kind_path == route:
             if verb != "POST":
                 return openai_error_response(405, "method " + verb + " is not allowed on " + route, "invalid_request_error", "method_not_allowed", "")
             return _serve_kind_route(route, model_root, body)
@@ -142,4 +134,4 @@ fn slang_api_dispatch(method: text, path: text, body: text, model_root: text) ->
         return ApiResponse(status: 200, body: "{\"status\":\"ok\"}")
     openai_error_response(404, "unknown route " + route, "invalid_request_error", "not_found", "")
 
-export serve_models, serve_completions, slang_api_dispatch, KindRoute, kind_routes
+export serve_models, serve_completions, slang_api_dispatch, kind_route_paths
