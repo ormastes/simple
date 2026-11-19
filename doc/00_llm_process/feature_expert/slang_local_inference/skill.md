@@ -124,7 +124,7 @@ the former `..._in_development_spec.spl` cases 2/3/5 moved into it when they wen
   (`serialize_response` gives "" for a non-UTF-8 binary body).
   `http_server.handler.parse_multipart_bytes(body, content_type)` returns
   `MultipartPart{name, filename, content_type, data: [u8]}`. The slang server sets
-  `policy.max_body` to 64 MiB (library default stays 10 MiB). FFI byte helpers:
+  `policy.max_body` and `max_response_bytes` to 64 MiB (library defaults stay 10 MiB / 16 MiB). FFI byte helpers:
   `std.nogc_sync_mut.sffi.dynamic` exports `spl_wffi_call_i64_with_bytes`,
   `spl_wffi_call_i64_into_bytes` and `bytes_zeroed(n) -> [u8]?` (packed, n <= 256 MiB);
   `std.nogc_sync_mut.io_runtime.file_read_bytes_at(path, offset, size) -> [u8]?`;
