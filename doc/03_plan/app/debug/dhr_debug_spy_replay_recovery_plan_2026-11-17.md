@@ -21,10 +21,10 @@ design document.
 
 | Phase | Work | Exit gate | Status |
 |---|---|---|---|
-| P0 | Truthful capabilities: repair the defects listed in §1 | No unsupported operation reports success | **done** (#10357 #10363 #10366 #10369 #10370 #10371 #10372 + this) |
-| P1 | Protect the baseline: absent/prepared/active profiles, real off-identity comparison | OFF-01..08 evidence | **in progress** |
+| P0 | Truthful capabilities: repair the defects listed in §1 | No unsupported operation reports success | **done** (#10357 #10363 #10366 #10369 #10370 #10371 #10372 #10373) |
+| P1 | Protect the baseline: absent/prepared/active profiles, real off-identity comparison | OFF-01..08 evidence | **partial**: OFF-01 measured clean; OFF-02 blocked on host |
 | P2 | Failure evidence: assert/fault record, independent broker, deadlines | Real assert and fault, plus a no-debugger test | todo |
-| P3 | Host managed recovery: isolated interpreter worker, state roots, effect fencing | A V2 failure restores a verified V1 without duplicate effects | todo |
+| P3 | Host managed recovery: isolated interpreter worker, state roots, effect fencing | A V2 failure restores a verified V1 without duplicate effects | **in progress** |
 | P4 | Unified native generation lifetime (legacy loader → KPF, retention pin) | Concurrent old/new execution with safe retirement | todo |
 | P5 | Shared Spy plus bare-metal emitter, with a separate replay event family | Bounded operation, disclosed loss | todo |
 | P6 | Portable semantic replay | Scoped deterministic replay with no live fallback | todo |
@@ -51,8 +51,16 @@ design document.
 
 P0 exit gate met for the §1 defect list. Every listed operation now either works or reports its failure or limit.
 
-## Next: P1 (protect the baseline)
+## P1 progress (protect the baseline)
 
-1. OFF-01: dependency closure. Show that the default bootstrap/release import closure contains no recorder, replay, or debug-provider module (`os.kernel.replay`, `std.replay`, `trace.xray_*`, `debug.remote`). Add a fail-closed check script that walks `use` edges from the bootstrap CLI entry.
-2. OFF-02: run `check-xray-static-off-identity.shs` against a real candidate/baseline pair, not only its self-test, and record the receipt.
-3. Then P2 (assert/fault record → broker) and P3 (host managed recovery on KPF workers).
+| Gate | Result | Evidence / blocker |
+|---|---|---|
+| OFF-01 dependency closure | **0 optional providers in the compiler-kernel closure** (370 files reached at release tip `5e13df306b1`+) | DHR-OFF-01 assertion added to `scripts/check/check-core-lib-closure.shs` (BFS over every reached file, CORE or not; selftest fixture 7/7). The containing row `push-core-lib-closure` is advisory and already red for an unrelated reason: 83 non-core files beyond its 177-entry baseline. So the assertion reports, but does not yet block. |
+| OFF-02 generated output | **blocked on this host** | `check-xray-static-off-identity.shs` refuses Rust-seed compilers by design and needs a pure-Simple compiler. None is deployed on the Windows host. Its own selftest also fails here (`clean-pair expected rc=0 got rc=1`). Needs a Linux run with a deployed self-hosted binary. |
+| OFF-03..08 | not run | Bootstrap stages, runtime behaviour, prepared-idle budget, toggle, PE/Mach-O/firmware parity |
+
+## Next
+
+1. P3 core: `KpfRecoveryTransaction` over the existing `KpfGenerationTable`. It needs a retention pin, an execution-epoch fence, and effect-aware rollback that blocks on acknowledged or unknown writes.
+2. P3 worker: drive the transaction from the KPF real-worker lifecycle (`real_worker_process.spl`), so a V2 worker crash restarts V1.
+3. P2: a bounded failure record. The interpreter assert and the native fault path must feed it before the frame is lost.
