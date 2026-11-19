@@ -134,3 +134,16 @@ with whole-batch reuse (mode 1 digests differ in all three Gemma workloads; mode
 match a cold run. Mode 3 pays a real KV copy per hit (whole owner sequence).
 Not measured: TTFT (not exposed), repetitions beyond one, max RSS.
 Contract: `test/02_integration/lib/slang_prefix_cache_shim_contract_test.shs`.
+
+### Second repetition (Gemma branching, Qwen multiturn), logs `C:/dev/slang-logs/shimtree/rep2/`
+
+Same digests as repetition 1 in all six cells (equal to no-cache). Wall ms:
+Gemma branching none 33867 / snapshot 31971 / tree 19818 (prefilled 6652 / 6652 /
+3068); Qwen multiturn none 263202 / snapshot 56155 / tree 144429 (prefilled 5325 /
+948 / 2765). Repetition 1 vs 2 agree within about 6 percent on every cell.
+
+Live spec on the final shim, Qwen2.5-1.5B (`slang_kv_cache_live_spec.spl`,
+SLANG_LIVE=1, `simple-release.exe`): PASS, exact_repeat 48398 -> 1189 ms (40.7x),
+prefix_extension 49008 -> 1543 ms (31.8x); log `live_spec.log`. Gates against
+origin/release/1.0.0: primitive-api-added PASS, nil-outside-unsafe-added PASS
+(after replacing `== nil` in two accessors), text-len-unit-mix 0 new.

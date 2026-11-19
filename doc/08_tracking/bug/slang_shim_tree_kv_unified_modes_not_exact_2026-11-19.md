@@ -18,3 +18,10 @@ so snapshot yields no reuse there (still correct output). Gaps: single repetitio
 no TTFT, no RSS; text only; tree contexts need `n_ctx x 16` cells in mode 3; modes
 are exclusive with the physical paged lane. Requests stay serialised per model; a
 second concurrent tree request gets SLANG_ERR_BUSY; no new lock (g_state_lock).
+
+## Follow-up (not in this change)
+Hybrid policy: use the snapshot on an exact-prefix hit (reuses every token, wins on
+Qwen multiturn: 948 prefilled vs 2765) and the mode-3 tree for shared-prefix
+branching (snapshot reuses nothing there). Also open: mode 3 copies the whole owner
+sequence per hit; a live tree system spec (slang_kv_tree_cache_live_spec) was not
+re-created after the worktree loss; max RSS and TTFT unmeasured.
