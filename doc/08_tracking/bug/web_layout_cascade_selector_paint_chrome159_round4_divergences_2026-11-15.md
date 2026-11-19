@@ -681,3 +681,11 @@ head (13/40 at base).
 - **Evidence:**
   - New `border_dash_layout_chrome159_spec`: 1202 pins plus 3268 short-side pins (uniform 4x4 device blocks inside the border bands). At base each lane has 509 mismatches; at head the result is 3/3.
   - Base vs head over the 97 specs that mention `dashed`/`dotted`: 0 new failures.
+
+## 2026-11-19 — box-shadow is an opacity-group item on cpu_simd/Vulkan (FIXED)
+
+- **Symptom:** on cpu_simd/Vulkan an `opacity:.5` box with a background and a box-shadow faded per element (`ff7f7f`); Chrome 159 restores one group (`ff7e7e`). The CPU raster already counted the shadow (`_raster_group_node_ops`).
+- **Re-measured (correcting the 2026-11-17 "Still open" note):** shadow, outline, bg+border and text roots on one page no longer lose their opacity. With the shadow counted, all four composite as Chrome's groups, alone and together. Probed on cpu_simd: outline `7eff7e`, bg+border `ff7e7e`, and text root bg `ffff7e` already matched before this fix.
+- **Fix:** `_simple_web_opacity_root_bounds` counts a box-shadow as its own paint item, beside the border and outline.
+- **Evidence:** new `opacity_multi_root_chrome159_spec`, 1335 Chrome pins (four roots at 0.5, text the colour of its background). Raster passes on both; cpu_simd/Vulkan red at base (327 mismatches), 3/3 at head.
+  - Base vs head over the 150 specs that mention `opacity`/`box-shadow`: 0 new failures; only the new spec's cpu_simd and Vulkan rows changed.
