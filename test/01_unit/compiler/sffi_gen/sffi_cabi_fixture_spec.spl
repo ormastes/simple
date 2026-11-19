@@ -1,0 +1,71 @@
+# @req: RB-SFFI-01..04
+# Real C ABI fixture (clang only): sizes/values of int, int32_t, bool, enum and
+# borrowed char* are measured from a compiled C program, checked against the
+# target ABI table, and the generated facades for bool/enum validate the
+# discriminant.
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{process_run}
+use compiler.types.custom_primitive_info.{c_scalar_underlying}
+use compiler.tools.sffi_gen.constrained_unit_gen.{generate_bool_return_facade, generate_enum_return_facade, BoolReturn, EnumReturn}
+
+val FIXTURE = "test/fixtures/sffi_cabi/cabi_fixture.c"
+val OUT = "build/test-artifacts/sffi_cabi_fixture.exe"
+
+fn build_and_run() -> text:
+    val cmd = "mkdir -p build/test-artifacts && clang -O0 -o " + OUT + " " + FIXTURE + " && ./" + OUT
+    process_run("sh", ["-c", cmd + " 2>&1"]).0
+
+fn host_triple() -> text:
+    process_run("sh", ["-c", "clang -dumpmachine"]).0.trim()
+
+describe "SFFI C ABI fixture (clang)":
+    it "matches the target ABI table for int and int32_t":
+        step("Compile and run the C fixture")
+        val out = build_and_run()
+        val t = host_triple()
+        expect(out).to_contain("sizeof int=4")
+        expect(out).to_contain("sizeof int32_t=4")
+        expect(c_scalar_underlying("int", t)).to_equal("i32")
+        expect(c_scalar_underlying("int32_t", t)).to_equal("i32")
+        expect(out).to_contain("int=-7")
+        expect(out).to_contain("int32=2147483647")
+
+    it "bool and enum have the representations the facades validate":
+        step("Read bool/enum sizes and values")
+        val out = build_and_run()
+        expect(out).to_contain("sizeof bool=1")
+        expect(out).to_contain("sizeof enum=4")
+        expect(out).to_contain("bool=1")
+        expect(out).to_contain("enum=2")
+
+    it "char* is borrowed static text and null is representable":
+        step("Read borrowed char* results")
+        val out = build_and_run()
+        expect(out).to_contain("cstr=borrowed-text")
+        expect(out).to_contain("cstr_null=1")
+
+    it "bool facade rejects representations other than 0 and 1":
+        step("Generate a bool facade")
+        val f = generate_bool_return_facade(BoolReturn(extern_name: "fx_bool", params: "", arg_names: ""))
+        expect(f.diagnostic).to_equal("")
+        expect(f.source).to_contain("extern fn __raw_fx_bool() -> u8")
+        expect(f.source).to_contain("pub fn fx_bool() -> Result<bool, ConstraintError>:")
+        expect(f.source).to_contain("if raw > 1:")
+        expect(f.source).to_contain("Ok(raw == 1)")
+
+    it "enum facade validates the discriminant range":
+        step("Generate an enum facade")
+        val f = generate_enum_return_facade(EnumReturn(extern_name: "fx_enum", params: "", arg_names: "", enum_name: "Color", first: "0", last: "2"))
+        expect(f.diagnostic).to_equal("")
+        expect(f.source).to_contain("extern fn __raw_fx_enum() -> i32")
+        expect(f.source).to_contain("pub fn fx_enum() -> Result<Color, ConstraintError>:")
+        expect(f.source).to_contain("if raw < 0 or raw > 2:")
+        expect(f.source).to_contain("Ok(raw as Color)")
+
+    it "enum facade rejects a non-integer or inverted range":
+        step("Generate enum facades with bad bounds")
+        val a = generate_enum_return_facade(EnumReturn(extern_name: "f", params: "", arg_names: "", enum_name: "Color", first: "x", last: "2"))
+        expect(a.diagnostic).to_contain("SPL-SFFI-RANGE-001")
+        val b = generate_enum_return_facade(EnumReturn(extern_name: "f", params: "", arg_names: "", enum_name: "Color", first: "3", last: "2"))
+        expect(b.diagnostic).to_contain("SPL-SFFI-RANGE-001")

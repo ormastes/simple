@@ -132,3 +132,39 @@ pub fn generate_borrowed_cstr_facade(spec: BorrowedCStrReturn) -> UnitReturnFaca
     out = out + "        return None\n"
     out = out + "    Some(rt_cstring_to_text(ptr))\n"
     UnitReturnFacade(source: out, diagnostic: "")
+
+# C `_Bool` return: only 0 and 1 are valid representations. The raw extern is
+# read as `u8`; any other value is a ConstraintError, never silently `true`.
+pub struct BoolReturn:
+    extern_name: text
+    params: text
+    arg_names: text
+
+pub fn generate_bool_return_facade(spec: BoolReturn) -> UnitReturnFacade:
+    val raw_name = "__raw_{spec.extern_name}"
+    var out = ""
+    out = out + "extern fn {raw_name}({spec.params}) -> u8\n\n"
+    out = out + "pub fn {spec.extern_name}({spec.params}) -> Result<bool, ConstraintError>:\n"
+    out = out + "    val raw = {raw_name}({spec.arg_names})\n"
+    out = out + "    if raw > 1:\n"
+    out = out + "        return Err(ConstraintError.out_of_range(\"bool\", raw, \"0\", \"1\"))\n"
+    out = out + "    Ok(raw == 1)\n"
+    UnitReturnFacade(source: out, diagnostic: "")
+
+# C enum return: the discriminant is validated against the declared inclusive
+# range [first, last] before it is trusted. Enums are read as `i32` (clang's
+# representation for a non-negative-only enum on the supported targets).
+pub struct EnumReturn:
+    extern_name: text
+    params: text
+    arg_names: text
+    enum_name: text
+    first: text
+    last: text
+
+pub fn generate_enum_return_facade(spec: EnumReturn) -> UnitReturnFacade:
+    val as_unit = ConstrainedUnitReturn(extern_name: spec.extern_name, params: spec.params, arg_names: spec.arg_names, unit_name: spec.enum_name, abi_type: "i32", range_min: spec.first, range_max: spec.last)
+    if not _is_int_literal(spec.first) or not _is_int_literal(spec.last):
+        return _range_error(as_unit, "enum discriminant bounds are not integer literals")
+    # Constrained generation emits both bound checks and the `raw as Name` origin cast.
+    generate_unit_return_facade(as_unit)
