@@ -872,3 +872,11 @@ head (13/40 at base).
 - **Cause:** `emu_draw_shadow_rect` (`engine2d/backend_emu_adv.spl`) splits each shadow row into falloff bands and a constant interior. When the blur is wide for its box, no column is fully covered (`ia >= ib`), so the interior starts at the unclamped `nz1`. When the frame also cuts the region on the right, the clamps ran in an order that raised `i1` to that unclamped `i0` and only then lowered `i0` to `rw`. The result was an interior run `[rw, i1)` past the row end.
 - **Fix:** the clamps now run in order, so 0 <= nz0 <= i0 <= i1 <= nz1 <= rw.
 - **Evidence:** new `box_shadow_frame_clip_spec`: the 100x70 frame must equal the top-left of the same page at 200x200. Before: crash. After: 0 mismatches.
+
+## 2026-11-19 — cpu_simd box shadow wipes the destination alpha (FIXED)
+
+- **Symptom:** on cpu_simd, a translucent box with a box-shadow painted opaque white. With `background: rgba(255,255,255,0.72)` on `#1e1e2e` and `box-shadow: 0 28px 76px rgba(0,68,160,0.16)`, (40,30) read `FFFFFF`, where Chrome 159 gives `C3C3C7`. Without the shadow it read `C0C0C4`.
+- **Cause:** `emu_draw_shadow_rect` (`engine2d/backend_emu_adv.spl`) composited RGB and wrote every shadowed pixel with alpha 0 (interior span, per-pixel interior and falloff bands). The box then painted over a "transparent" destination and came out opaque white.
+- **Fix:** the three writes keep the destination alpha (`dst & 0xFF000000`).
+- **Evidence:** new `box_shadow_keeps_dest_alpha_spec`: the interior must keep the no-shadow colour's red channel (±2) and must not be white. Before: red, `FFFFFF`. After: green, `BFC2CA`.
+- **Still open:** the Draw IR outer shadow paints under the box with no knockout, so the interior is tinted by the shadow (`BFC2CA` against Chrome `C3C3C7`).
