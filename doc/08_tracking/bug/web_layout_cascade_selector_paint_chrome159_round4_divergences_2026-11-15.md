@@ -689,3 +689,12 @@ head (13/40 at base).
 - **Fix:** `_simple_web_opacity_root_bounds` counts a box-shadow as its own paint item, beside the border and outline.
 - **Evidence:** new `opacity_multi_root_chrome159_spec`, 1335 Chrome pins (four roots at 0.5, text the colour of its background). Raster passes on both; cpu_simd/Vulkan red at base (327 mismatches), 3/3 at head.
   - Base vs head over the 150 specs that mention `opacity`/`box-shadow`: 0 new failures; only the new spec's cpu_simd and Vulkan rows changed.
+
+## 2026-11-19 — dotted borders paint round dots (FIXED on raster, cpu_simd and Vulkan)
+
+- **Symptom:** every lane painted a `dotted` border's dots as t x t squares. Chrome 159 paints round dots (the circle inscribed in each dash cell, anti-aliased) at every width; dot placement already matched after the dash-layout fix (#10359).
+- **Fix:** `border_dot_row_spans(d)` (`paint_primitives`) gives one span per dot row: the pixels whose centre lies in the inscribed circle. `_fb_border_span_clip` (raster) and `_html_draw_ir_styled_span_commands` (Draw IR) paint full-size dots with it. A short-side dot that the dash layout scaled below t stays a rect.
+  - `ponytail:` the dot edge is not anti-aliased (pixel-centre coverage). Upgrade with a coverage ramp when partial edge pixels get pinned.
+- **Trap:** headless Chrome with a small `--window-size` (160x90) left everything below the first CSS row unpainted, whether the borders were `dotted` or `solid`. Capture at 400x300 and pin only the rendered region.
+- **Evidence:** new `border_dotted_round_chrome159_spec`, 4950 pins (widths 6/8/10/12, uniform 4x4 device blocks inside the border bands). Base: 256 mismatches per lane, 0/3. Head: 3/3.
+  - Base vs head over the 98 specs that mention `dashed`/`dotted`: 0 new failures.

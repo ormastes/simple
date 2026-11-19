@@ -3412,3 +3412,5 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - Dash layout (2026-11-19): `border_dash_runs` gives Chrome's dash runs on a straight side: dash 2t (dotted t), nominal gap t fitted by SelectBestDashGap so both ends are full dashes; L <= 2·dash is solid, 2·dash < L < 2·dash+gap scales two dashes and the gap together. Raster and Draw IR share it. Pinned by `border_dash_layout_chrome159_spec`.
 
 - Opacity groups (2026-11-19): `_simple_web_opacity_root_bounds` counts a box-shadow as a paint item (bg + shadow at 0.5 is a group, `ff7e7e`), matching the raster's `_raster_group_node_ops`. Pinned by `opacity_multi_root_chrome159_spec`.
+
+- Round dots (2026-11-19): `dotted` dots are the circle inscribed in each t x t dash cell (`border_dot_row_spans`, pixel-centre test), on raster and Draw IR. Capture Chrome oracles at 400x300: small headless windows can leave rows unpainted. Pinned by `border_dotted_round_chrome159_spec`.
