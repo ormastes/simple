@@ -29,10 +29,25 @@ Evidence: replaying the seed's `freestanding_link.rsp` with the recompiled
 objects (seed flags `-ffunction-sections -fdata-sections -fno-pie`) drops the
 undefined set from 47 to 36 with no duplicate definitions.
 
-## Remaining (36)
+## Batch 2 — arch HAL routing (verification-pending)
+
+- `src/os/kernel/arch_adapt/console_byte.spl` (new): `hal_console_{read,write}_byte`
+  with one `@cfg` body per target; `sosix/io_rw.spl` calls it instead of
+  `x86_com1_*`.
+- `drivers/pci/pci.spl`: port-I/O config access is `@cfg(x86_64)`/`@cfg(x86)`
+  only; arm64/riscv64 read and write via ECAM (all-ones / dropped while no ECAM
+  base is wired).
+- `kernel/memory/vmm.spl`: `_invlpg` is per-arch; riscv64 uses
+  `sfence_vma_addr`, riscv32 `sfence_vma`; x86/arm keep `rt_invlpg`.
+- Contract spec: `test/01_unit/os/kernel/arch_adapt/hal_arch_gating_contract_spec.spl`
+  (4/4 red on the base, 4/4 green with the change).
+- Link-count delta not yet measured: the WSL distro failed to start
+  (`Wsl/Service/CreateInstance/E_FAIL`, code 5) when this landed.
+
+## Remaining (36 before batch 2)
 
 - x86 port I/O live via `sosix/io_rw.spl` -> `x86_com1_read_byte`; `rt_invlpg`
-  via `kernel/memory/vmm.spl`. Route through the arch HAL.
+  via `kernel/memory/vmm.spl`. Route through the arch HAL. (Batch 2.)
 - Core runtime helpers absent from the examples runtime: typed words/bytes,
   `rt_array_{fill_span,is_byte_packed,get_text,set_text,repeat,new_with_cap_u64}`,
   `rt_text_{find,is_ascii}`, `rt_slice_text_bytes`, `rt_string_{char_count,from_byte_array}`,
