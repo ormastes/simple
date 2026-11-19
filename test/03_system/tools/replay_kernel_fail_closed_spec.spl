@@ -1,0 +1,75 @@
+# @cover src/os/kernel/replay/hooks.spl 40%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-DHR-05
+# plan: doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md
+
+# RR-02: kernel replay must fail closed. A Replay-mode timer/random read that
+# meets an exhausted log or a mismatched event reports a divergence instead of
+# silently returning the live value.
+
+use std.spec.*
+use os.kernel.replay.mode.{KernelReplayMode, replay_set_mode}
+use os.kernel.replay.log_buffer.{replay_buffer_reset}
+use os.kernel.replay.divergence.{clear_divergences, get_divergence_count}
+use os.kernel.replay.hooks.{replay_hook_timer_read, replay_hook_random_read}
+
+fn _reset():
+    replay_set_mode(KernelReplayMode.Off)
+    replay_buffer_reset()
+    clear_divergences()
+
+describe "kernel replay fail-closed (RR-02)":
+    it "timer replay returns the recorded value with no divergence":
+        _reset()
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_timer_read(3, 777)
+        replay_set_mode(KernelReplayMode.Replay)
+        expect(replay_hook_timer_read(3, 1)).to_equal(777)
+        expect(get_divergence_count()).to_equal(0)
+
+    it "timer replay at end-of-log reports a divergence":
+        _reset()
+        replay_set_mode(KernelReplayMode.Replay)
+        replay_hook_timer_read(3, 1)
+        expect(get_divergence_count()).to_equal(1)
+
+    it "timer replay from a different source reports a divergence":
+        _reset()
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_timer_read(3, 777)
+        replay_set_mode(KernelReplayMode.Replay)
+        replay_hook_timer_read(4, 1)
+        expect(get_divergence_count()).to_equal(1)
+
+    it "random replay meeting a timer event reports a divergence":
+        _reset()
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_timer_read(3, 777)
+        replay_set_mode(KernelReplayMode.Replay)
+        replay_hook_random_read(1, 5)
+        expect(get_divergence_count()).to_equal(1)
+
+# RR-04: hardware reverse operations must not report success when the
+# target executor did not move backward.
+use std.nogc_sync_mut.debug.remote.replay.hardware_replay_controller.{HardwareReplayController}
+
+fn _rd_reg(i: i32) -> Result<i64, text>:
+    Ok(0)
+
+fn _wr_reg(i: i32, v: i64) -> Result<text, text>:
+    Ok("ok")
+
+fn _rd_mem(a: i64, n: i32) -> Result<[i32], text>:
+    Ok([])
+
+fn _wr_mem(a: i64, d: [i32]) -> Result<text, text>:
+    Ok("ok")
+
+describe "hardware reverse ops are truthful (RR-04)":
+    it "reverse_step reports unsupported":
+        var c = HardwareReplayController.create(4, _rd_reg, _wr_reg, _rd_mem, _wr_mem)
+        expect(c.reverse_step().is_err()).to_equal(true)
+
+    it "reverse_continue reports unsupported":
+        var c = HardwareReplayController.create(4, _rd_reg, _wr_reg, _rd_mem, _wr_mem)
+        expect(c.reverse_continue().is_err()).to_equal(true)
