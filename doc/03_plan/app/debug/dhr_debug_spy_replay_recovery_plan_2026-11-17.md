@@ -25,8 +25,8 @@ design document.
 | P1 | Protect the baseline: absent/prepared/active profiles, real off-identity comparison | OFF-01..08 evidence | **partial**: OFF-01 measured clean; OFF-02 blocked on host |
 | P2 | Failure evidence: assert/fault record, independent broker, deadlines | Real assert and fault, plus a no-debugger test | **in progress** |
 | P3 | Host managed recovery: isolated interpreter worker, state roots, effect fencing | A V2 failure restores a verified V1 without duplicate effects | **in progress** |
-| P4 | Unified native generation lifetime (legacy loader → KPF, retention pin) | Concurrent old/new execution with safe retirement | todo |
-| P5 | Shared Spy plus bare-metal emitter, with a separate replay event family | Bounded operation, disclosed loss | todo |
+| P4 | Unified native generation lifetime (legacy loader → KPF, retention pin) | Concurrent old/new execution with safe retirement | **in progress**: `share_pin` (#10379) |
+| P5 | Shared Spy plus bare-metal emitter, with a separate replay event family | Bounded operation, disclosed loss | **in progress**: replay-ring loss disclosed (#10378) |
 | P6 | Portable semantic replay | Scoped deterministic replay with no live fallback | todo |
 | P7 | rr / TTD / QEMU / TRACE32 backends | Per-target capability receipts | todo |
 | P8 | Caret / IDE recovery and replay UI | Session-preserving upgrades | todo |
@@ -67,10 +67,10 @@ P0 exit gate met for the §1 defect list. Every listed operation now either work
 | P3 worker exit → transaction (#10376) | crash, deadline, or protocol violation of the candidate worker fails the candidate; a clean close does not | `recovery_worker_spec` 6/6 (pure policy). **Real-subprocess receipt pending:** `real_worker_integration_spec` spawns `/bin/sh` and fails 0/3 on Windows |
 | P2 failure slot (`FailureSlotV1`) | bounded first-fault-wins record with the valid marker set last; broker `take()`; first consumer is the worker-exit path (capture before restart) | `failure_slot_v1_spec` 4/4 (DBG-06 nested fault) |
 | P2 interpreter assert / native signal → slot | **not wired** | Assert hook is compiler code, and the seed runs specs through the Rust interpreter, so it can't be verified here. The native signal path needs the externs in `doc/08_tracking/bug/crash_signal_bundle_extern_gap_2026-07-29.md` |
-| Phase-3 build | Windows Stage-2 bootstrap from release tip `b7214ff88aa` (cranelift, dynload) | running; result recorded on completion |
+| Phase-3 build | Windows Stage-2 bootstrap from release tip `b7214ff88aa` (cranelift, dynload) | **failed at Stage 2 link**: the seed and Stage 1 built; 20+ imported `A64_*` constants are undefined under the `bootstrap_main` prefix. Not caused by DHR; filed as `doc/08_tracking/bug/windows_stage2_imported_a64_consts_undefined_2026-11-19.md` |
 
 ## Next
 
-1. Record the Stage-2 bootstrap result. If a pure-Simple binary results, rerun OFF-02 and the DHR specs on it.
+1. Fix or route the Stage-2 link bug above, then rerun the build. Once a pure-Simple binary exists, rerun OFF-02 and the DHR specs on it.
 2. Real-subprocess P3 receipt on a POSIX host (EMB-01 with `fake_real_worker.shs`).
 3. P2 assert hook behind an explicit debug profile, so the default closure stays unchanged (OFF-01).
