@@ -1,0 +1,116 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+"""
+An erased generic `-> T` tail `.unwrap()` keeps the producer's tagged word.
+
+Bug: doc/08_tracking/bug/stage2_generic_tail_unwrap_reboxes_record_2026-11-19.md
+
+A free generic call whose `T?` result's `T` is also carried by an encoded
+parameter slot (`first(xs: [T]) -> T?`) stores the tagged `T` word as its
+Some payload. The `.unwrap()` arm left that word unmarked, so the `-> T`
+tail re-boxed it with `rt_value_int_wide`: an integer came back tagged twice
+and a record handle came back shifted. A `T?` parameter or closure result
+(raw payload from a concrete caller) and a forwarder with no encoded `T`
+slot (`tuple_at<T>(t, i)` returns an enum payload tuple's raw scalar words)
+keep the tail box: their payload encoding is not provable in the body.
+
+HIR is lowered with SIMPLE_BOOTSTRAP=1 and SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1
+(how native-build lowers a module). The native oracle is
+test/fixtures/native_generic_tail_unwrap_record/main.spl.
+"""
+
+use std.spec
+use std.io_runtime.{env_set}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+val SOURCE: text = "class Bag2<T>:\n    xs: [T]\n\nimpl Bag2<T>:\n    fn top() -> T:\n        first(self.xs).unwrap()\n\n" +
+    "fn use_first_rec() -> i64:\n    val p: Pair = first([Pair(a: 1, b: \"x\")]).unwrap()\n    p.a\n\n" +
+    "fn use_first_text() -> text:\n    first([\"x\"]).unwrap()\n\nstruct Pair:\n    a: i64\n    b: text\n\n" +
+    "fn req<T>(v: T?) -> T:\n    v.unwrap()\n\n" +
+    "fn req_if<T>(v: T?) -> T:\n    if val p = v:\n        return p\n    panic(\"none\")\n\n" +
+    "fn use_rec() -> i64:\n    val p: Pair = req(Some(Pair(a: 1, b: \"x\")))\n    p.a\n\n" +
+    "fn use_int() -> i64:\n    req(Some(5))\n\n" +
+    "fn use_int_if() -> i64:\n    req_if(Some(5))\n\n" +
+    "@unsafe(reason: \"fixture raw tuple ABI\", capabilities: [ffi])\nextern fn rt_tuple_get<TElement>(tuple: i64, index: i64) -> TElement?\n\n" +
+    "fn tuple_at<TElement>(tuple: i64, index: i64) -> TElement?:\n    unsafe(capabilities: [ffi]):\n        rt_tuple_get<TElement>(tuple, index)\n\n" +
+    "fn get_req<T>(tuple: i64, index: i64) -> T:\n    tuple_at<T>(tuple, index).unwrap()\n\n" +
+    "fn first<T>(xs: [T]) -> T?:\n    Some(xs[0])\n\n" +
+    "fn head<T>(xs: [T]) -> T:\n    first(xs).unwrap()\n\n" +
+    "fn use_get_rec(t: i64) -> i64:\n    val p: Pair = get_req<Pair>(t, 0)\n    p.a\n\n" +
+    "fn use_get_int(t: i64) -> i64:\n    get_req<i64>(t, 0)\n\n" +
+    "fn use_head_int() -> i64:\n    head([5])\n\n" +
+    "fn use_first_int() -> i64:\n    first([5]).unwrap()\n\n" +
+    "fn get_or<T>(f: fn() -> T?) -> T:\n    f().unwrap()\n"
+
+fn lower_bootstrap_mir() -> Dict<text, text>:
+    val module = parse_and_build_module(SOURCE, "gtu.spl")
+    var hir_lowering = HirLowering.with_filename("gtu.spl")
+    env_set("SIMPLE_BOOTSTRAP", "1")
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+    val hir = hir_lowering.lower_module(module)
+    env_set("SIMPLE_BOOTSTRAP", "")
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "")
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var out: Dict<text, text> = {}
+    var errors = ""
+    for error in mir_lowering.errors:
+        errors = errors + error.message + "\n"
+    out["__errors__"] = errors
+    for function in mir.functions.values():
+        val prefix = "gtu."
+        val short = if function.name.starts_with(prefix): function.name.substring(prefix.len(), function.name.len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+describe "erased generic tail unwrap (bootstrap HIR)":
+    it "lowers the probe module without MIR errors":
+        expect(lower_bootstrap_mir()["__errors__"] ?? "missing").to_equal("")
+
+    it "keeps the tail box for a forwarder with no encoded T slot (raw tuple words)":
+        # tuple_at<T>(t, i) forwards an enum payload tuple's RAW scalar words
+        # (rt_tuple_set stores 7, not 56), so the body cannot tell a raw i64
+        # from a record handle. Known-ambiguous shape: see the bug record.
+        val mir = lower_bootstrap_mir()["get_req"] ?? ""
+        expect(mir).to_contain("rt_value_int_wide")
+
+    it "does not re-box the tagged payload of an erased generic-call unwrap":
+        val mir = lower_bootstrap_mir()["head"] ?? ""
+        expect(mir).to_contain("rt_unwrap_or_self")
+        expect(mir.contains("rt_value_int_wide")).to_equal(false)
+
+    it "still boxes the raw payload of a T? parameter unwrap at the tail":
+        val mir = lower_bootstrap_mir()["req"] ?? ""
+        expect(mir).to_contain("rt_value_int_wide")
+
+    it "still boxes the raw payload of a closure-call unwrap at the tail":
+        val mir = lower_bootstrap_mir()["get_or"] ?? ""
+        expect(mir).to_contain("rt_value_int_wide")
+
+    it "concrete callers still decode the erased -> T result":
+        val fns = lower_bootstrap_mir()
+        expect(fns["use_int"] ?? "").to_contain("rt_value_as_int_wide")
+        expect(fns["use_get_int"] ?? "").to_contain("rt_value_as_int_wide")
+        expect(fns["use_head_int"] ?? "").to_contain("rt_value_as_int_wide")
+        expect((fns["use_get_rec"] ?? "").contains("rt_value_as_int_wide")).to_equal(false)
+
+    it "a generic-class method (plain T) keeps the tail box":
+        val mir = lower_bootstrap_mir()["Bag2.top"] ?? ""
+        expect(mir).to_contain("rt_value_int_wide")
+
+    it "concrete record and text first(xs).unwrap() never int-box":
+        val fns = lower_bootstrap_mir()
+        expect((fns["use_first_rec"] ?? "missing").contains("rt_value_int_wide")).to_equal(false)
+        expect((fns["use_first_rec"] ?? "").contains("rt_value_as_int_wide")).to_equal(false)
+        expect((fns["use_first_text"] ?? "missing").contains("rt_value_int_wide")).to_equal(false)
+
+    it "a concrete first(xs).unwrap() keeps its decode":
+        val mir = lower_bootstrap_mir()["use_first_int"] ?? ""
+        expect(mir).to_contain("rt_value_as_int_wide")
+        expect(mir).to_contain("rt_unwrap_or_self")
+

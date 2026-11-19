@@ -8610,6 +8610,20 @@ impl MirLowering:
         if record != "" and not self.struct_value_syms.contains(result.id):
             self.struct_value_syms[result.id] = record
 
+    fn erased_encoded_slot_param_v1(declared_param: HirType) -> text:
+        """The type parameter a free generic parameter slot carries ENCODED:
+        a bare `T` (boxed by the call), `[T]` elements and `Dict<K, T>`
+        values (encoded by the container; a free body keeps them encoded).
+        "" for any other slot."""
+        match declared_param.kind:
+            case HirTypeKind.TypeParam(param_name, _): return param_name
+            case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element) | HirTypeKind.Dict(_, element):
+                match element.kind:
+                    case HirTypeKind.TypeParam(param_name, _): return param_name
+                    case _: ()
+            case _: ()
+        ""
+
     me decode_erased_scalar_call_payload(result: LocalId, callee: SymbolId, args: [HirCallArg], call_param_types: [HirType], source_locals: Dict<i64, i64>) -> LocalId:
         """Decode the `T` payload of a free generic call's `T?` /
         `Result<T, E>` result into the caller's raw scalar layout.
@@ -8669,17 +8683,7 @@ impl MirLowering:
         while index < args.len() and index < call_param_types.len():
             val call_arg: HirCallArg = args[index]
             val declared_param: HirType = call_param_types[index]
-            # Only the slots whose word reaches the body ENCODED: a bare `T`
-            # (boxed by this call), `[T]` elements and `Dict<K, T>` values
-            # (encoded by the container; a free body keeps them encoded).
-            var slot_param = ""
-            match declared_param.kind:
-                case HirTypeKind.TypeParam(param_name, _): slot_param = param_name
-                case HirTypeKind.Array(element, _) | HirTypeKind.Slice(element) | HirTypeKind.Dict(_, element):
-                    match element.kind:
-                        case HirTypeKind.TypeParam(param_name, _): slot_param = param_name
-                        case _: ()
-                case _: ()
+            val slot_param = self.erased_encoded_slot_param_v1(declared_param)
             match declared_param.kind:
                 case HirTypeKind.Dict(_, dict_value):
                     match dict_value.kind:
