@@ -1,4 +1,4 @@
-# @cover src/os/realtime/replay/hooks.spl 20%
+# @cover src/os/realtime/replay/hooks.spl 60%
 # Purpose and audience: executable specification evidence for the owning engineering team.
 # @req REQ-DHR-05
 # plan: doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md
@@ -14,7 +14,8 @@ use std.spec.*
 use std.replay.bm_replay_core.{bm_ring_init, bm_ring_count}
 use std.replay.portable_replay.{portable_replay_reset, portable_replay_pending, PR_FAIL_CLOSED_VALUE}
 use os.realtime.replay.mode.{rtos_replay_set_mode, rtos_replay_next_seq}
-use os.realtime.replay.hooks.{rr_hook_random, rr_hook_io_read, rr_divergence_count, rr_reset_divergences, rr_event_count}
+use os.realtime.replay.hooks.{rr_hook_random, rr_hook_io_read, rr_hook_schedule, rr_hook_timer_tick, rr_hook_irq,
+    rr_divergence_count, rr_reset_divergences, rr_event_count}
 
 val OFF: i32 = 0
 val RECORD: i32 = 1
@@ -142,3 +143,129 @@ describe "realtime io read hook on the portable replay core":
         expect(rr_event_count()).to_equal(0)
         expect(rr_hook_io_read(0x48, 13)).to_equal(13)
         expect(rr_divergence_count()).to_equal(2)
+
+# DHR P6: the realtime schedule, timer and IRQ hooks moved off the bare-metal
+# ring onto the portable core in the same realtime scope. Replay follows the
+# log (logged tid / logged tick / only the logged vector) and fails closed on a
+# wrong event or an exhausted log; it never hands back the live decision.
+describe "realtime schedule hook on the portable replay core":
+    it "Record returns the live pick and logs it on the core, not the ring":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        expect(rr_hook_schedule(0, 3, 10)).to_equal(3)
+        expect(portable_replay_pending()).to_equal(1)
+        expect(bm_ring_count()).to_equal(0)
+
+    it "Replay returns the logged tid, not the live pick":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        rr_hook_schedule(0, 3, 10)
+        rr_hook_schedule(3, 5, 11)
+        rtos_replay_set_mode(REPLAY)
+        expect(rr_hook_schedule(0, 7, 10)).to_equal(3)
+        expect(rr_hook_schedule(3, 7, 11)).to_equal(5)
+        expect(rr_divergence_count()).to_equal(0)
+        expect(rr_event_count()).to_equal(0)
+
+    it "Replay against a logged random read fails closed, dispatching nothing":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        rr_hook_random(42)
+        rtos_replay_set_mode(REPLAY)
+        expect(rr_hook_schedule(0, 3, 10)).to_equal(-1)
+        expect(rr_divergence_count()).to_equal(1)
+
+    it "Replay of an exhausted log fails closed, dispatching nothing":
+        _reset()
+        rtos_replay_set_mode(REPLAY)
+        expect(rr_hook_schedule(0, 3, 10)).to_equal(-1)
+        expect(rr_divergence_count()).to_equal(1)
+
+    it "Verify returns the live pick and reports a different one":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        rr_hook_schedule(0, 3, 10)
+        rr_hook_schedule(3, 5, 11)
+        rtos_replay_set_mode(VERIFY)
+        expect(rr_hook_schedule(0, 3, 10)).to_equal(3)
+        expect(rr_divergence_count()).to_equal(0)
+        expect(rr_hook_schedule(3, 6, 11)).to_equal(6)
+        expect(rr_divergence_count()).to_equal(1)
+
+describe "realtime timer tick hook on the portable replay core":
+    it "Record returns the live tick and logs it on the core, not the ring":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        expect(rr_hook_timer_tick(100)).to_equal(100)
+        expect(portable_replay_pending()).to_equal(1)
+        expect(bm_ring_count()).to_equal(0)
+
+    it "Replay returns the logged ticks in order, not the live ones":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        rr_hook_timer_tick(100)
+        rr_hook_timer_tick(101)
+        rtos_replay_set_mode(REPLAY)
+        expect(rr_hook_timer_tick(900)).to_equal(100)
+        expect(rr_hook_timer_tick(901)).to_equal(101)
+        expect(rr_divergence_count()).to_equal(0)
+
+    it "Replay against a logged schedule decision fails closed, never live":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        rr_hook_schedule(0, 3, 10)
+        rtos_replay_set_mode(REPLAY)
+        expect(rr_hook_timer_tick(900)).to_equal(PR_FAIL_CLOSED_VALUE)
+        expect(rr_divergence_count()).to_equal(1)
+
+    it "Replay of an exhausted log fails closed, never live":
+        _reset()
+        rtos_replay_set_mode(REPLAY)
+        expect(rr_hook_timer_tick(900)).to_equal(PR_FAIL_CLOSED_VALUE)
+        expect(rr_divergence_count()).to_equal(1)
+
+describe "realtime IRQ hook on the portable replay core":
+    it "Record delivers and logs the vector on the core, not the ring":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        expect(rr_hook_irq(32, 10)).to_equal(true)
+        expect(portable_replay_pending()).to_equal(1)
+        expect(bm_ring_count()).to_equal(0)
+
+    it "Replay delivers only the logged vector":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        rr_hook_irq(32, 10)
+        rtos_replay_set_mode(REPLAY)
+        expect(rr_hook_irq(32, 99)).to_equal(true)
+        expect(rr_divergence_count()).to_equal(0)
+
+    it "Replay rejects a different vector and counts a divergence":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        rr_hook_irq(32, 10)
+        rtos_replay_set_mode(REPLAY)
+        expect(rr_hook_irq(33, 10)).to_equal(false)
+        expect(rr_divergence_count()).to_equal(1)
+
+    it "Replay against a logged timer tick rejects the interrupt":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        rr_hook_timer_tick(100)
+        rtos_replay_set_mode(REPLAY)
+        expect(rr_hook_irq(32, 10)).to_equal(false)
+        expect(rr_divergence_count()).to_equal(1)
+
+    it "Replay of an exhausted log rejects the interrupt":
+        _reset()
+        rtos_replay_set_mode(REPLAY)
+        expect(rr_hook_irq(32, 10)).to_equal(false)
+        expect(rr_divergence_count()).to_equal(1)
+
+    it "Verify delivers and reports a different vector":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        rr_hook_irq(32, 10)
+        rtos_replay_set_mode(VERIFY)
+        expect(rr_hook_irq(33, 10)).to_equal(true)
+        expect(rr_divergence_count()).to_equal(1)
