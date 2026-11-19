@@ -1,10 +1,12 @@
 """
 ## Purpose and audience
-Purpose: Pin the raster soft box-shadow falloff against Chrome 159 at device
-scale 1. Chrome blurs the shadow's rect mask with sigma = blur / 2 using
-Skia's triple-box kernel. The raster used a truncated erf product measured
-from pixel edges, and was up to 11 levels dark near the shadow's edge.
-Audience: maintainers of the raster paint path.
+Purpose: Pin the soft box-shadow falloff against Chrome 159 at device scale 1
+on the raster, cpu_simd and Vulkan lanes. Chrome blurs the shadow's rect
+mask with sigma = blur / 2 using Skia's triple-box kernel. The raster used a
+truncated erf product measured from pixel edges (up to 11 levels dark); the
+Engine2D lanes used three integer boxes of radius floor(blur / 2) (up to 8
+levels off).
+Audience: maintainers of the raster and Engine2D shadow paths.
 """
 
 """
@@ -12,6 +14,9 @@ Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_ro
 (raster shadow falloff).
 """
 use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_software_pixels
 }
@@ -25,8 +30,7 @@ val RSF_PTS: [i32] = [50, 50, 50, 52, 50, 54, 50, 56, 50, 58, 50, 60, 50, 62, 50
 # Chrome 159 at device scale 1 (grey: R = G = B).
 val RSF_CHROME: [i32] = [0x34, 0x39, 0x45, 0x5B, 0x7D, 0xA2, 0xC6, 0xE2, 0xC6, 0xE2, 0xF4, 0xFC]
 
-fn rsf_mismatches() -> i32:
-    val px = simple_web_layout_render_html_software_pixels(RSF_PAGE, 120, 90, 600000)
+fn rsf_mismatches(px: [u32]) -> i32:
     if px.len() != 120 * 90:
         return -1
     var bad = 0
@@ -44,6 +48,12 @@ fn rsf_mismatches() -> i32:
         i = i + 1
     bad
 
-describe "raster box-shadow falloff (Chrome 159, device scale 1)":
-    it "matches Chrome's blurred rect mask below and beside the box":
-        expect(rsf_mismatches()).to_equal(0)
+describe "box-shadow falloff (Chrome 159, device scale 1)":
+    it "raster matches Chrome's blurred rect mask below and beside the box":
+        expect(rsf_mismatches(simple_web_layout_render_html_software_pixels(RSF_PAGE, 120, 90, 600000))).to_equal(0)
+
+    it "cpu_simd matches Chrome's blurred rect mask below and beside the box":
+        expect(rsf_mismatches(simple_web_layout_render_html_pixels_engine2d_at_device_scale(RSF_PAGE, 120, 90, 1, "cpu_simd"))).to_equal(0)
+
+    it "vulkan matches Chrome's blurred rect mask below and beside the box":
+        expect(rsf_mismatches(simple_web_layout_render_html_pixels_engine2d_at_device_scale(RSF_PAGE, 120, 90, 1, "vulkan"))).to_equal(0)
