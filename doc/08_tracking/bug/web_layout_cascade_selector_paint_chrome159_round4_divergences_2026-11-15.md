@@ -1078,7 +1078,7 @@ head (13/40 at base).
   - `_raster_restore_group` paints the root's own backdrop on the main frame first. It then runs the white-alpha pass (`_raster_bdr_mode` 1), which records each filtered alpha in paint order, and the colour pass (mode 2), which replays those alphas for a premultiplied src-over in `_paint_backdrop_blur`. The layer composites at 255.
   - `backdrop_root_nested_glass_raster_chrome159_spec` (white, tinted and no-root control, ±2): 1/3 -> 3/3. Head-first sweep of 12 backdrop, opacity-group, coverage and glass specs: 0 new failures; `decl_apply_coverage_closure` 165/166 and `glass_feature_gap` 2/13 have the same ✗ lines on base.
   - Window fixture (raster, 480x300): agreement 555‰ on both base and head, so its panes are not admitted (text on a non-opaque root, shadows). Wall 277-287 s base vs 241-280 s head. Max RSS is bimodal on both sides (267 MB or 1.02 GB per run, the same binary `cargo-target-webrender-premul` 54131896 B), so there is no measured memory change.
-- **OPEN, raster admission:** glass with text on a non-opaque background, or with a shadow, still reads the whole frame. That is the window fixture's case.
+- **RESOLVED 2026-11-20 (see "raster window glass admitted" below), raster admission:** glass with text on a non-opaque background, or with a shadow, still reads the whole frame. That is the window fixture's case.
 - **OPEN, Vulkan:** the CSS `backdrop-filter` blur should use the device blur kernel instead of readback + host blur.
 - **Not covered:** a Backdrop Root under an opacity < 100 ancestor still bails to the flat path, as before. Nested Backdrop Roots have no spec.
 
@@ -1097,9 +1097,31 @@ head (13/40 at base).
   - `backdrop_root_glass_gradient_saturate_chrome159_spec` (cpu_simd, ±2): halo blur-only, saturate, the halo+gradient+saturate window shape, tinted, and a no-root control. 1/5 on base (only the control passed), 5/5 on head.
   - `backdrop_root_glass_gradient_saturate_vulkan_chrome159_spec`: the window shape and tinted, each asserting ≥1 Vulkan readback. 0/2 on base, 2/2 on head. The CSS backdrop blur is still host-side over a readback, as above.
   - Window fixture (480x300): cpu_simd 556 -> 933‰, Vulkan 556 -> 933‰, raster 555 -> 555‰. (240,99) is now 250 vs Chrome 250. The bad rows 60-140 fell from about 420 px per row to 0-12.
-- **OPEN, raster:** the raster lane keeps 555‰, so the window panes are still not admitted by `_raster_opacity_groups`. The fixture has several features that admission rejects: text on the non-opaque root, members with shadows and gradient layers, and a colour-matrix backdrop. Which check fires first was not probed.
+- **RESOLVED 2026-11-20 (see the next entry), raster:** the raster lane keeps 555‰, so the window panes are still not admitted by `_raster_opacity_groups`. The fixture has several features that admission rejects: text on the non-opaque root, members with shadows and gradient layers, and a colour-matrix backdrop. Which check fires first was not probed.
 - **Cost (not cleanly measured):** a backdrop root whose group fills the viewport now pays one full-viewport offscreen plus a composite per frame. The 3-lane window probe took 524 s on base and 583 s on head, but both runs overlapped other probes on a shared host, so this is not an A/B. Metal shares the `fills_target_exactly` gate and was not exercised, since there is no macOS host.
 - **OPEN, residual on Engine2D:** agreement is 933‰, not 1000. Rows 19-59 still have 12-22 bad px per row, and the outer pane edge at (14,99) is 193 vs Chrome 197.
+
+## 2026-11-20 — raster window glass admitted as a Backdrop Root (FIXED)
+
+- **Probe (temporary prints in `_raster_opacity_groups`, window fixture 480x300):** the root (node 4, group 0,0 480x300 from the halo) was rejected by five separate checks. A fix to any subset leaves it at 555‰.
+  - Unwhitenable shadows on the root, the panel (node 8, incl. an inset layer) and both buttons (14, 16): `box_shadow_raw` colours are not Style colour fields.
+  - Text on a non-opaque root: nodes 7, 10, 13, 15, 17.
+  - A colour-matrix backdrop inside the root: the panel's `saturate`.
+  - `<button>` fails `_raster_group_node_layer_safe` (nodes 14, 16).
+  - Not a cause: gradients. Every flagged node had empty `bg_layers_raw` and `background_image_uri`; `gradient, colour` lands in `background_gradient_from/to` and the stop colours, which the white-alpha pass already whitens.
+- **Fix (`simple_web_html_layout_renderer_paint_raster.spl`, Backdrop Root groups only):**
+  - Colour functions: mode 1 (alpha pass) still records the blurred alpha. Mode 2 (colour pass) unpremultiplies the blurred premultiplied backdrop by that alpha, applies the matrices (`engine2d_backdrop_color_filter_pixels` over a transparent `under`, an exact pass-through), premultiplies again and does the one src-over (`_raster_bdr_color_filtered`). Admission keeps only alpha-preserving functions (`_raster_bdr_alpha_preserving`; `opacity()` still rejects).
+  - Shadows: `_raster_white_shadow_raw` rewrites each layer's `rgb()/rgba()` (comma form) or `#hex` colour to white, keeping the alpha text, and the alpha pass uses it. A layer it cannot rewrite exactly (named, `hsl`, space syntax, no colour) keeps the reject.
+  - Text: allowed on a non-opaque root. The raster glyph blend (`composite_over_base`) is a linear src-over, so the white-forced pass gives text alpha from its coverage.
+  - `<button>`: allowed when restyled (`native_frame == 0`); an unrestyled one paints fixed-colour `chrome_frame_spans` and rejects. Widget panels and buttons with no Style background (the hard-coded `fb_rect` fallback colours) reject.
+  - Fractional opacity groups, opaque frames (mode 0) and blur-only nested backdrops run the same code as before.
+- **Evidence (binary `cargo-target-webrender-premul` 54131896 B, 2026-11-19 17:24):**
+  - New specs `backdrop_root_glass_raster_window_shape{,_tint,_content}_chrome159_spec` (±2, Chrome pixels from the cpu_simd spec's pages plus a text page and a 100x40 `<button>` with `0 12px 28px rgba(0,0,0,0.2)`): 8 cases, 2/8 on base (the two controls) -> 8/8 on head; the six non-control cases go 0/6 -> 6/6. One control is the same button over an opaque page, green on base and head, so the button-shadow probes measure admission, not shadow falloff. The shape and tint base reds come from the original single 7-case file (identical case bodies), which took 866 s on base, hence the split; head 310 s, 422 s, 314 s.
+  - Window fixture raster: 555 -> 932‰ (Engine2D 933‰). (240,99) is 250 vs Chrome 250 (base 240). Rows 79-139 fell from about 422 bad px per row to 0-11 (every 20th row sampled). Wall 300 s base vs 268 s head, one run each on a shared host; head max RSS 1.0 GB, inside the 267 MB / 1.02 GB bimodal range recorded above.
+  - Head-first sweep of 18 backdrop, opacity-group, box-shadow, coverage, device-scale and glass specs: 0 new failures. `decl_apply_coverage_closure` 165/166 and `glass_feature_gap` 2/13 have the same ✗ lines on base. `translucent_blend` failed once on head at its Vulkan readback-count assertion (6/6 on base) and passed 6/6 on two head reruns; that case does not reach the raster painter.
+- **Limits:** glyph pixels are not pinned (our TTF rasteriser is not Chrome's). Measured: Chrome's glass pixels around the text are the same with and without the text (the text page equals the window-shape page at every probe point), and the text case pins those. Chrome's text AA mode inside a non-opaque layer was not measured.
+- **OPEN, residual:** 932‰, not 1000. Rows 19-59 keep 12-21 bad px per row, the same rows Engine2D leaves.
+- **Not covered:** `bg_layers_raw` / `background-image` members and named or `hsl` shadow colours inside a Backdrop Root still reject; there is no exact white rewrite for them yet.
 
 ## 2026-11-20 — `<button>` content sits at the top of a tall button (FIXED)
 
