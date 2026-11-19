@@ -191,6 +191,9 @@ fn unknown_reason(dir: text) -> text:
 fn _unknown_reason_in(files: [GgufFile]) -> text:
     if _gguf_names_in(files, true).len() > 0:
         return "only a multimodal projector (architecture clip) was found; it needs a text model GGUF beside it"
+    for f in files:
+        if gguf_facts_are_vocoder(f.facts):
+            return "only a WavTokenizer vocoder (wavtokenizer-dec) was found; it needs a TTS model GGUF beside it"
     "no manifest.sdn, no file carrying GGUF magic, and no safetensors header"
 
 # Describes one directory. `ggml_available` is passed in rather than probed
@@ -202,6 +205,11 @@ fn _unknown_reason_in(files: [GgufFile]) -> text:
 # Every model also carries its resolved kind profile (modality/kind_registry):
 # a Chat profile's reason is the model's own not-runnable reason; another
 # kind's reason says why that kind is not served yet.
+#
+# `runnable` is the chat path's question (llm_engine loads only runnable
+# models), so a model of any other kind is never runnable, and neither is a
+# Chat model whose profile carries a reason (an invalid slang_kind.sdn, or no
+# kind resolved): that reason is kept, never replaced by the format's "".
 fn describe_model(dir: text, ggml_available: bool) -> NativeModel:
     val files = gguf_files(dir)
     var m = _describe_format(dir, files, ggml_available)
@@ -213,9 +221,14 @@ fn describe_model(dir: text, ggml_available: bool) -> NativeModel:
                 RunnerKind.Pure:
                     reason = pure_runner_unsupported_reason(dir)
                 _:
+                    if p.reason != "" and m.format != "unknown":
+                        m.runnable = false
+                        m.reason = p.reason
                     reason = m.reason
         _:
-            pass
+            if m.runnable:
+                m.runnable = false
+                m.reason = p.reason
     m.profile = kind_profile(p.kind, p.inputs, p.runner, reason)
     if m.format == "unknown":
         val ggml_file = ggml_magic_file(dir)

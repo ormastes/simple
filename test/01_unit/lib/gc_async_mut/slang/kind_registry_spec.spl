@@ -285,6 +285,36 @@ describe "resolve_kind":
         file_write_bytes(s + "/sd_turbo.safetensors", st)
         expect(kind_of(s)).to_equal("image_gen [\"text\"]->[\"image\"] stable-diffusion")
 
+describe "describe_model and the chat path":
+    it "keeps an invalid slang_kind.sdn reason and refuses to run the model":
+        step("Verify: a `kind: embeddings` typo is not silently a runnable chat model")
+        val d = fixture_dir("bad_override")
+        file_write_bytes(d + "/m.gguf", gguf([kv_str("general.architecture", "llama")]))
+        write_file(d + "/slang_kind.sdn", "kind: embeddings\n")
+        val m = describe_model(d, true)
+        expect(m.runnable).to_equal(false)
+        expect(m.reason.contains("slang_kind.sdn")).to_equal(true)
+        expect(m.profile.reason.contains("slang_kind.sdn")).to_equal(true)
+
+    it "never marks a model of another kind runnable on the chat path":
+        step("Verify: an embedder is described but not runnable; a decoder stays runnable")
+        val e = fixture_dir("emb_not_runnable")
+        file_write_bytes(e + "/m.gguf", gguf([kv_str("general.architecture", "bert")]))
+        val em = describe_model(e, true)
+        expect(em.runnable).to_equal(false)
+        expect(em.reason.contains("embedding serving")).to_equal(true)
+        val c = fixture_dir("chat_runnable")
+        file_write_bytes(c + "/m.gguf", gguf([kv_str("general.architecture", "llama")]))
+        expect(describe_model(c, true).runnable).to_equal(true)
+
+    it "names a vocoder-only directory as such":
+        step("Verify: a lone WavTokenizer GGUF is not reported as 'no file carrying GGUF magic'")
+        val d = fixture_dir("vocoder_only")
+        file_write_bytes(d + "/voc.gguf", gguf([kv_str("general.architecture", "wavtokenizer-dec")]))
+        val m = describe_model(d, true)
+        expect(m.runnable).to_equal(false)
+        expect(m.reason.contains("WavTokenizer vocoder")).to_equal(true)
+
 describe "the HTTP surface":
     it "reports slang_kind and modalities on /v1/models":
         step("Verify: each entry names its kind and modality sets")
