@@ -1310,8 +1310,11 @@ fn _hint_zone_knots(ref_y: f64, shoot_y: f64, is_top: bool, scale: f64) -> [f64]
     else if is_top: [ref_y, fit, shoot_y, shoot_fit]
     else: [shoot_y, shoot_fit, ref_y, fit]
 
-fn _lcd_hint_knots(font: OtFont, units_per_em: i64, size_px: i64) -> [f64]:
-    val scale0 = size_px as f64 / units_per_em as f64
+fn _lcd_hint_knots(font: OtFont, units_per_em: i64, size_px: i64, size_milli: i64) -> [f64]:
+    # FreeType scales at the float size; only the 6..14 ppem x-height rule
+    # reads the whole ppem (`size_px`).
+    val size_f = size_milli as f64 / 1000.0
+    val scale0 = size_f / units_per_em as f64
     val xe = _hint_glyph_y_extent(font, 120)
     val oe = _hint_glyph_y_extent(font, 111)
     val he = _hint_glyph_y_extent(font, 72)
@@ -1332,7 +1335,7 @@ fn _lcd_hint_knots(font: OtFont, units_per_em: i64, size_px: i64) -> [f64]:
     # max_height of about 1.6 em). 10 px grows 1.19 px and rounds up (x-height
     # 6 rows); 8 px would grow 1.33 px and 6 px 1.46 px, and Chrome fits those
     # down instead (8 px `l` / `H` / x are 5 / 5 / 4 rows, 6 px 4 / 4 / 3).
-    if threshold64 == 52 and size_px as f64 * (fitted64 as f64 / scaled64 as f64 - 1.0) >= 1.25:
+    if threshold64 == 52 and size_f * (fitted64 as f64 / scaled64 as f64 - 1.0) >= 1.25:
         threshold64 = 40
         fitted64 = (scaled64 + threshold64) / 64 * 64
     val fitted = fitted64 as f64 / 64.0
@@ -1402,11 +1405,11 @@ fn _hint_map_y(knots: [f64], y: f64) -> f64:
     val t1 = knots[(j + 1) * 2 + 1]
     t0 + (y - f0) * (t1 - t0) / (f1 - f0)
 
-fn _lcd_hint_knots_cached(font: OtFont, head_offset: i64, units_per_em: i64, size_px: i64) -> [f64]:
-    val key = "{font.blob.len()}|{blob_u32(font.blob, head_offset + 8)}|{size_px}"
+fn _lcd_hint_knots_cached(font: OtFont, head_offset: i64, units_per_em: i64, size_px: i64, size_milli: i64) -> [f64]:
+    val key = "{font.blob.len()}|{blob_u32(font.blob, head_offset + 8)}|{size_px}|{size_milli}"
     if val Some(hit) = _lcd_hint_cache.get(key):
         return hit
-    val knots = _lcd_hint_knots(font, units_per_em, size_px)
+    val knots = _lcd_hint_knots(font, units_per_em, size_px, size_milli)
     _lcd_hint_cache[key] = knots
     knots
 
@@ -1655,9 +1658,10 @@ pub fn sfnt_render_glyph_lcd(blob: [u8], selector_kind: i64, selector_value: i64
 # in milli-px; 0 or a whole `size_px * 1000` is the plain whole-px glyph.
 # Measured against Chrome 159 (Liberation Sans/Serif, 1x): 18.72 px and 19 px
 # ink sit on the same rows, as do 13.28 px and 13 px. FreeType's light
-# autohinter fits the y scale to the whole-pixel x-height, so only x keeps the
-# float size. The outline's x is scaled by `x_milli / (size_px * 1000)`; y,
-# the hint knots and the hint cache stay at the whole `size_px`.
+# autohinter scales at the float size and fits the x-height to the pixel grid,
+# so the hint knots and their cache key take the milli size (13.3333 px mono
+# caps are 10 rows, as in Chrome); the outline's x is scaled by
+# `x_milli / (size_px * 1000)`.
 # reason: SFNT selector/size/phase scalars are the font-table domain;
 # consumed by text_layout/font_renderer.spl, so it must be public.
 # @allow(primitive_api)
@@ -1733,7 +1737,7 @@ pub fn sfnt_lcd_glyph_outline(blob: [u8], selector_kind: i64, selector_value: i6
     var raster_top = -bounds.bottom * scale
     var bearing_y = _round_glyf_metric(bounds.top * scale)
     var draw_commands = commands
-    val knots = _lcd_hint_knots_cached(font, head_table.offset as i64, units_per_em, size_px)
+    val knots = _lcd_hint_knots_cached(font, head_table.offset as i64, units_per_em, size_px, if x_frac: x_milli else: size_px * 1000)
     if knots.len() > 0:
         draw_commands = _hint_commands(commands, _hstem_knots(commands, knots, units_per_em as f64), scale)
         val hinted = match _outline_bounds(draw_commands):
