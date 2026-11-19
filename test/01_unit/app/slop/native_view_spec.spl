@@ -7,6 +7,7 @@ use app.slop.projection.{slop_aliases, slop_draw_edges, slop_scope_label}
 use app.slop.session.{SlopSession}
 use app.slop.source.{slop_source_slice, slop_source_path_valid}
 use common.ui.widget.{UIEvent, WidgetNode}
+use std.common.traceability.envelope_types_v1.*
 
 fn viewer_subject() -> SnapshotSubject:
     SnapshotSubject(repository_id: "fixture", snapshot_id: "snapshot-a", kind: "committed",
@@ -25,7 +26,7 @@ fn viewer_graph() -> TraceGraph:
             TraceEdge(id: "edge-a", from_id: "F-a", relation: TraceRelation.Contains, to_id: "SRC-shared"),
             TraceEdge(id: "edge-b", from_id: "F-b", relation: TraceRelation.Contains, to_id: "SRC-shared")],
         edge_origins: [], origins: [], locators: [viewer_locator()], diagnostics: [],
-        generation_id: "generation-a", complete: true)
+        generation_id: "generation-a", complete: TraceCompletenessV1.Complete)
 
 fn viewer_page(graph: TraceGraph) -> TraceQueryResult:
     query_trace_graph(graph, TraceQuery(snapshot_id: TraceSnapshotIdV1(value: "snapshot-a"), selected_id: None,
@@ -33,7 +34,7 @@ fn viewer_page(graph: TraceGraph) -> TraceQueryResult:
 
 fn viewer_snapshot() -> SnapshotInput:
     SnapshotInput(subject: viewer_subject(), artifacts: [
-        SnapshotArtifact(path: "src/shared.spl", blob_id: "blob-a", content: "old header\nold implementation\nold footer", visibility: "public")], complete: true)
+        SnapshotArtifact(path: "src/shared.spl", blob_id: "blob-a", content: "old header\nold implementation\nold footer", visibility: "public")], complete: TraceCompletenessV1.Complete)
 
 describe "REQ-TRC-015 native Slop projections and session":
     it "selects the same canonical source through both feature aliases":
@@ -84,9 +85,9 @@ describe "REQ-TRC-015 native Slop projections and session":
 
     it "keeps page completeness separate from graph completeness":
         var graph = viewer_graph()
-        graph.complete = false
+        graph.complete = TraceCompletenessV1.Incomplete
         val page = viewer_page(graph)
-        expect(slop_scope_label(page, graph.complete)).to_contain("INCOMPLETE INPUT")
+        expect(slop_scope_label(page, graph.complete == TraceCompletenessV1.Complete)).to_contain("INCOMPLETE INPUT")
         val limited = query_trace_graph(viewer_graph(), TraceQuery(snapshot_id: TraceSnapshotIdV1(value: "snapshot-a"),
             selected_id: None, direction: TraceQueryDirectionV1.All, limit: TracePageLimitV1(value: 1), cursor: None))
         expect(limited.nodes.len()).to_equal(1)
@@ -122,8 +123,8 @@ describe "REQ-TRC-020 pinned source inspection":
             case Ok(slice):
                 expect(slice.content).to_equal("old implementation")
                 expect(slice.blob_id).to_equal("blob-a")
-                expect(slice.start_line).to_equal(2)
-                expect(slice.end_line).to_equal(2)
+                expect(slice.start_line.value).to_equal(2)
+                expect(slice.end_line.value).to_equal(2)
             case Err(message): expect(message).to_equal("unexpected source error")
 
     it "rejects another snapshot and a missing pinned blob":
@@ -151,7 +152,7 @@ describe "REQ-TRC-020 pinned source inspection":
             if alias.canonical_id == "F-a":
                 session.select_alias(alias.widget_id)
         val source = SourceSlice(snapshot_id: "snapshot-a", blob_id: "blob-a", path: "src/shared.spl",
-            start_line: 2, end_line: 2, content: "old implementation")
+            start_line: TraceLineNumberV1(value: 2), end_line: TraceLineNumberV1(value: 2), content: "old implementation")
         match session.accept_source("SRC-shared", source):
             case Err(message): expect(message).to_equal("stale source response")
             case Ok(value): expect(value).to_equal("unexpected accepted source")

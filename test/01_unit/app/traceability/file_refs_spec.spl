@@ -10,6 +10,8 @@ use app.traceability.extract.snapshot_pipeline.{TraceSnapshotScope, build_snapsh
 use app.traceability.query_file_refs_v1.{trace_query_file_refs_v1}
 use app.traceability.query_options_v1.{trace_query_options_parse_v1, TraceQueryOptionsV1}
 use std.common.traceability.query_missing_v1.{TraceRequirementCountV1}
+use std.common.traceability.envelope_types_v1.*
+use std.common.traceability.trace_ids_v1.*
 
 fn file_query(path: text, limit: i64) -> TraceQueryOptionsV1:
     TraceQueryOptionsV1(operation: "refs", kind: "file", selected_id: path, limit: TraceRequirementCountV1(value: limit))
@@ -23,7 +25,7 @@ fn file_refs_build() -> Result<TraceSnapshotBuild, text>:
     val source = SnapshotArtifact(path: "src/app/parser.spl", blob_id: "blob:source", content: "fn parse(): 1", visibility: "selected_content")
     val spec = SnapshotArtifact(path: "test/01_unit/app/parser_spec.spl", blob_id: "blob:test", content: "# fixture spec", visibility: "selected_content")
     val snapshot = SnapshotInput(subject: SnapshotSubject(repository_id: "repo:fixture", snapshot_id: "snapshot:tree:a",
-        kind: "worktree_preview", revision_id: "", tree_id: "tree:a", object_format: "sha256"), artifacts: [source, spec], complete: true)
+        kind: "worktree_preview", revision_id: "", tree_id: "tree:a", object_format: "sha256"), artifacts: [source, spec], complete: TraceCompletenessV1.Complete)
     val policy = TracePolicy(id: TraceEntityIdV1(value: "policy:fixture"), authorities: [], max_nodes: TraceNodeLimitV1(value: 100), max_claims: TraceClaimLimitV1(value: 100),
         conventions: [TraceConventionRule(id: TraceEntityIdV1(value: "app-unit-v1"), source_root: TracePathV1(value: "src/app/"), target_root: TracePathV1(value: "test/01_unit/app/"),
             source_suffix: TracePathSuffixV1(value: ".spl"), target_suffix: TracePathSuffixV1(value: "_spec.spl"), relation: TraceRelation.Targets, version: TraceRuleVersionV1(value: "1"))])
@@ -42,19 +44,19 @@ describe "File-centred references":
         val page = trace_query_file_refs_v1(build, file_query("src/app/parser.spl", 100)).unwrap()
         expect(page.selected.kind).to_equal(TraceNodeKind.SourceFile)
         expect(page.selected.title).to_equal("src/app/parser.spl")
-        expect(page.total_count).to_equal(1)
+        expect(page.total_count.value).to_equal(1)
         expect(page.references[0].relation).to_equal("targets")
         expect(page.references[0].direction).to_equal("incoming")
         expect(page.references[0].authority).to_equal("registered-edge")
         expect(page.references[0].other_paths).to_equal(["test/01_unit/app/parser_spec.spl"])
         expect(page.locators.len()).to_equal(1)
-        expect(page.complete).to_be(true)
+        expect(page.complete == TracePageCompletenessV1.Complete).to_be(true)
 
     it "answers an uncaptured path from sidecar rows alone and rejects an unknown one":
         # @ac AC-TRC-041
         val build = file_refs_build().unwrap()
         val page = trace_query_file_refs_v1(build, file_query("src/compiler/g.spl", 100)).unwrap()
-        expect(page.total_count).to_equal(0)
+        expect(page.total_count.value).to_equal(0)
         expect(page.locators.len()).to_equal(0)
         expect(page.selected.title).to_contain("not captured")
         expect(trace_query_file_refs_v1(build, file_query("src/none.spl", 100)).is_err()).to_be(true)

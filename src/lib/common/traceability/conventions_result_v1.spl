@@ -5,21 +5,22 @@ use std.common.traceability.codec_order_v1.{trace_codec_row_order_v1}
 use std.common.traceability.codec_text_budget_v1.{TraceCodecTextBudgetV1}
 use std.common.traceability.qualification_types_v1.{TraceDiagnosticV1}
 use std.common.traceability.envelope_types_v1.{TraceCodecIssueV1, trace_codec_issue_v1}
+use std.common.traceability.envelope_types_v1.*
 
 pub class TraceConventionResultBuilderV1:
     limits: TraceConventionLimitsV1
     result: TraceConventionResolutionV1
     text_budget: TraceCodecTextBudgetV1
-    used_work: i64 = 0
+    used_work: TraceUsedCountV1 = TraceUsedCountV1(value: 0)
     seen_claims: Dict<text, bool> = {}
     seen_lookups: Dict<text, bool> = {}
     claim_keys: [text] = []
     diagnostic_keys: [text] = []
     lookup_keys: [text] = []
     me work(amount: i64 = 1) -> Result<bool, TraceCodecIssueV1>:
-        if amount < 0 or amount > self.limits.max_work.value - self.used_work:
+        if amount < 0 or amount > self.limits.max_work.value - self.used_work.value:
             return Err(trace_codec_issue_v1("work_limit", "", "Convention evaluation exhausted bounded work"))
-        self.used_work = self.used_work + amount
+        self.used_work = TraceUsedCountV1(value: self.used_work.value + amount)
         Ok(true)
     me claim(from_id: text, relation: text, to_id: text, rule_id: text, source_path: text, target_path: text) -> Result<bool, TraceCodecIssueV1>:
         self.work()?
@@ -40,7 +41,7 @@ pub class TraceConventionResultBuilderV1:
         val fields = [code, "error", entity, path, (path != "").to_text(), "false", "0", "0", message, self.result.snapshot_id, self.result.rules_version, origin, repair]
         self.text_budget.charge(fields, "diagnostics")?
         self.diagnostic_keys.push(trace_graph_tuple_key_v1(fields))
-        self.result.diagnostics.push(TraceDiagnosticV1(code: code, severity: "error", entity: entity, path: path, path_available: path != "", span_available: false, line: 0, column: 0, message: message, snapshot_id: self.result.snapshot_id, rule_version: self.result.rules_version, origin: origin, repair: repair))
+        self.result.diagnostics.push(TraceDiagnosticV1(code: code, severity: "error", entity: entity, path: path, path_available: (if path != "": TraceAvailabilityV1.Available else: TraceAvailabilityV1.Absent), span_available: TraceAvailabilityV1.Absent, line: TraceLineNumberV1(value: 0), column: TraceColumnNumberV1(value: 0), message: message, snapshot_id: self.result.snapshot_id, rule_version: self.result.rules_version, origin: origin, repair: repair))
         Ok(true)
     me lookup(kind: text, entity: text, group: text, rule: text, path: text, ids: [text]) -> Result<bool, TraceCodecIssueV1>:
         self.work(ids.len() + 1)?
@@ -59,7 +60,7 @@ pub class TraceConventionResultBuilderV1:
         if self.seen_lookups.contains_key(key): return Ok(true)
         self.seen_lookups[key] = true
         self.lookup_keys.push(key)
-        self.result.lookups.push(TraceConventionLookupV1(kind: kind, entity_id: entity, group_id: group, rule_id: rule, path: path, found: candidates.len() > 0, candidate_ids: candidates))
+        self.result.lookups.push(TraceConventionLookupV1(kind: kind, entity_id: entity, group_id: group, rule_id: rule, path: path, found: (if candidates.len() > 0: TraceLookupOutcomeV1.Found else: TraceLookupOutcomeV1.NotFound), candidate_ids: candidates))
         Ok(true)
     me finish() -> TraceConventionResolutionV1:
         var claims: [TraceConventionClaimV1] = []
@@ -71,7 +72,7 @@ pub class TraceConventionResultBuilderV1:
         self.result.claims = claims
         self.result.diagnostics = diagnostics
         self.result.lookups = lookups
-        self.result.complete = true
+        self.result.complete = TraceCompletenessV1.Complete
         self.result
 
 export TraceConventionResultBuilderV1

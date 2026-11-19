@@ -9,12 +9,13 @@ use std.common.traceability.model.*
 use std.common.traceability.trace_ids_v1.{TraceNodeLimitV1, TraceClaimLimitV1}
 use std.common.traceability.resolve.*
 use std.common.traceability.trace_ids_v1.{TracePathSuffixV1, TraceRuleVersionV1, TraceOriginIdV1, TraceEntityIdV1, TracePathV1, TraceOverridePermissionV1, TraceReviewIdV1, TraceSnapshotIdV1}
+use std.common.traceability.envelope_types_v1.*
 
 fn resolution_facts() -> TraceFacts:
     val subject = SnapshotSubject(repository_id: "simple", snapshot_id: "snapshot:resolver", kind: "git_tree", revision_id: "commit:r", tree_id: "tree:r", object_format: "sha256")
     val nodes = [TraceNode(id: "source:foo", kind: TraceNodeKind.SourceFile, title: "Foo"), TraceNode(id: "test:foo", kind: TraceNodeKind.TestSuite, title: "Foo spec"), TraceNode(id: "test:shared", kind: TraceNodeKind.TestSuite, title: "Shared spec")]
     val locators = [TraceLocator(entity_id: "source:foo", path: "src/app/foo.spl", locator_kind: TraceLocatorKind.File, locator: "", blob_id: "blob:foo"), TraceLocator(entity_id: "test:foo", path: "test/01_unit/app/foo_spec.spl", locator_kind: TraceLocatorKind.File, locator: "", blob_id: "blob:spec"), TraceLocator(entity_id: "test:shared", path: "test/support/shared_spec.spl", locator_kind: TraceLocatorKind.File, locator: "", blob_id: "blob:shared")]
-    TraceFacts(subject: subject, input_manifest_id: "inputs:r", nodes: nodes, test_definitions: [], claims: [], origins: [], locators: locators, diagnostics: [], generation_id: "generation:r", complete: true)
+    TraceFacts(subject: subject, input_manifest_id: "inputs:r", nodes: nodes, test_definitions: [], claims: [], origins: [], locators: locators, diagnostics: [], generation_id: "generation:r", complete: TraceCompletenessV1.Complete)
 
 fn resolution_rule() -> TraceConventionRule:
     TraceConventionRule(id: TraceEntityIdV1(value: "app-unit-v1"), source_root: TracePathV1(value: "src/app/"), target_root: TracePathV1(value: "test/01_unit/app/"), source_suffix: TracePathSuffixV1(value: ".spl"), target_suffix: TracePathSuffixV1(value: "_spec.spl"), relation: TraceRelation.Targets, version: TraceRuleVersionV1(value: "1"))
@@ -41,7 +42,7 @@ describe "Attributable conventional and explicit trace resolution":
         # @ac AC-TRC-003
         step("Resolve source and conventional unit spec locators")
         val graph = resolve_trace_graph(resolution_facts(), resolution_policy())
-        expect(graph.complete).to_equal(true)
+        expect(graph.complete).to_equal(TraceCompletenessV1.Complete)
         expect(graph.edges.len()).to_equal(1)
         expect(graph.edges[0].from_id).to_equal("test:foo")
         expect(graph.edges[0].to_id).to_equal("source:foo")
@@ -57,7 +58,7 @@ describe "Attributable conventional and explicit trace resolution":
         locations.push(TraceLocator(entity_id: "test:shared", path: "test/01_unit/app/foo_spec.spl", locator_kind: TraceLocatorKind.File, locator: "", blob_id: "blob:other"))
         facts.locators = locations
         val graph = resolve_trace_graph(facts, resolution_policy())
-        expect(graph.complete).to_equal(false)
+        expect(graph.complete).to_equal(TraceCompletenessV1.Incomplete)
         expect(graph.edges.len()).to_equal(0)
         expect(has_resolution_code(graph, "TRACE-AMBIGUOUS-MAPPING")).to_equal(true)
 
@@ -71,7 +72,7 @@ describe "Attributable conventional and explicit trace resolution":
         var policy = resolution_policy()
         policy.authorities = [override_authority()]
         val graph = resolve_trace_graph(facts, policy)
-        expect(graph.complete).to_equal(true)
+        expect(graph.complete).to_equal(TraceCompletenessV1.Complete)
         expect(graph.edges.len()).to_equal(1)
         expect(graph.edges[0].from_id).to_equal("test:shared")
         expect(graph.edge_origins[0].origin_id.value).to_equal("origin:shared")
@@ -87,7 +88,7 @@ describe "Attributable conventional and explicit trace resolution":
         policy.authorities = [override_authority()]
         val graph = resolve_trace_graph(facts, policy)
         expect(has_resolution_code(graph, "TRACE-STALE-OVERRIDE")).to_equal(true)
-        expect(graph.complete).to_equal(false)
+        expect(graph.complete).to_equal(TraceCompletenessV1.Incomplete)
         expect(graph.edges[0].from_id).to_equal("test:foo")
         var expired = override_authority()
         expired.expires_snapshot_id = Some(TraceSnapshotIdV1(value: "snapshot:old"))
@@ -105,7 +106,7 @@ describe "Attributable conventional and explicit trace resolution":
         var policy = resolution_policy()
         policy.authorities = [override_authority()]
         val graph = resolve_trace_graph(facts, policy)
-        expect(graph.complete).to_equal(true)
+        expect(graph.complete).to_equal(TraceCompletenessV1.Complete)
         expect(graph.edges.len()).to_equal(1)
         expect(graph.edge_origins.len()).to_equal(2)
 
@@ -122,7 +123,7 @@ describe "Attributable conventional and explicit trace resolution":
         policy.authorities = [override_authority()]
         val missing = resolve_trace_graph(facts, policy)
         expect(has_resolution_code(missing, "TRACE-MISSING-ENDPOINT")).to_equal(true)
-        expect(missing.complete).to_equal(false)
+        expect(missing.complete).to_equal(TraceCompletenessV1.Incomplete)
 
     it "retains reviewed suppression provenance without inventing verification":
         # @req REQ-TRC-019
@@ -133,7 +134,7 @@ describe "Attributable conventional and explicit trace resolution":
         var policy = resolution_policy()
         policy.authorities = [override_authority()]
         val graph = resolve_trace_graph(facts, policy)
-        expect(graph.complete).to_equal(true)
+        expect(graph.complete).to_equal(TraceCompletenessV1.Complete)
         expect(graph.edges.len()).to_equal(0)
         expect(graph.claims[0].operation).to_equal(TraceClaimOperation.Suppress)
 
@@ -146,7 +147,7 @@ describe "Attributable conventional and explicit trace resolution":
         var policy = resolution_policy()
         policy.authorities = [override_authority()]
         val graph = resolve_trace_graph(facts, policy)
-        expect(graph.complete).to_equal(false)
+        expect(graph.complete).to_equal(TraceCompletenessV1.Incomplete)
         expect(has_resolution_code(graph, "TRACE-AUTHORITY-CONFLICT")).to_equal(true)
         expect(graph.edges[0].from_id).to_equal("test:foo")
 
@@ -162,7 +163,7 @@ describe "Attributable conventional and explicit trace resolution":
         var policy = resolution_policy()
         policy.max_nodes = TraceNodeLimitV1(value: 1)
         val bounded = resolve_trace_graph(resolution_facts(), policy)
-        expect(bounded.complete).to_equal(false)
+        expect(bounded.complete).to_equal(TraceCompletenessV1.Incomplete)
         expect(bounded.edges.len()).to_equal(0)
 
     it "rejects authored convention impersonation":
@@ -173,7 +174,7 @@ describe "Attributable conventional and explicit trace resolution":
         origin.kind = TraceOriginKind.Convention
         facts.origins = [origin]
         val graph = resolve_trace_graph(facts, resolution_policy())
-        expect(graph.complete).to_equal(false)
+        expect(graph.complete).to_equal(TraceCompletenessV1.Incomplete)
         expect(graph.edges.len()).to_equal(0)
         expect(has_resolution_code(graph, "TRACE-AUTHORITY-CONFLICT")).to_equal(true)
 
@@ -191,7 +192,7 @@ describe "Attributable conventional and explicit trace resolution":
         policy.conventions = []
         policy.authorities = [override_authority()]
         val graph = resolve_trace_graph(facts, policy)
-        expect(graph.complete).to_equal(true)
+        expect(graph.complete).to_equal(TraceCompletenessV1.Complete)
         expect(graph.edges.len()).to_equal(2)
         expect(graph.nodes.len()).to_equal(4)
         expect(graph.edges[0].from_id).to_equal("test:shared")
@@ -212,7 +213,7 @@ describe "Attributable conventional and explicit trace resolution":
         policy.conventions = []
         policy.authorities = [authority]
         val aliases = resolve_trace_graph(facts, policy)
-        expect(aliases.complete).to_equal(false)
+        expect(aliases.complete).to_equal(TraceCompletenessV1.Incomplete)
         expect(has_resolution_code(aliases, "TRACE-FORBIDDEN-CYCLE")).to_equal(true)
         step("Use the same topology for allowed dependency relations")
         var first = facts.claims[0]
@@ -223,5 +224,5 @@ describe "Attributable conventional and explicit trace resolution":
         authority.relation = TraceRelation.DependsOn
         policy.authorities = [authority]
         val dependencies = resolve_trace_graph(facts, policy)
-        expect(dependencies.complete).to_equal(true)
+        expect(dependencies.complete).to_equal(TraceCompletenessV1.Complete)
         expect(dependencies.edges.len()).to_equal(2)

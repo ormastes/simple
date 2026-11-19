@@ -10,6 +10,7 @@ use std.common.traceability.incremental.*
 use std.common.traceability.resolve.{resolve_trace_graph}
 use app.traceability.extract.snapshot_facts.{extract_snapshot_trace_facts, extract_snapshot_trace_facts_cold}
 use app.traceability.extract.snapshot_partitions.*
+use std.common.traceability.envelope_types_v1.*
 
 fn partition_subject(snapshot_id: text) -> SnapshotSubject:
     SnapshotSubject(repository_id: "repo:partition", snapshot_id: snapshot_id, kind: "git_tree",
@@ -18,7 +19,7 @@ fn partition_subject(snapshot_id: text) -> SnapshotSubject:
 fn partition_snapshot(snapshot_id: text, with_test: bool) -> SnapshotInput:
     var artifacts = [SnapshotArtifact(path: "src/app/a.spl", blob_id: "blob:source", content: "fn a(): 1", visibility: "selected_content")]
     if with_test: artifacts.push(SnapshotArtifact(path: "test/01_unit/app/a_spec.spl", blob_id: "blob:test", content: "# test", visibility: "selected_content"))
-    SnapshotInput(subject: partition_subject(snapshot_id), artifacts: artifacts, complete: true)
+    SnapshotInput(subject: partition_subject(snapshot_id), artifacts: artifacts, complete: TraceCompletenessV1.Complete)
 
 fn partition_policy() -> TracePolicy:
     TracePolicy(id: TraceEntityIdV1(value: "policy:partition"), conventions: [TraceConventionRule(id: TraceEntityIdV1(value: "app-unit"), source_root: TracePathV1(value: "src/app/"),
@@ -116,7 +117,7 @@ describe "Retained owner-local snapshot fact partitions (in-development)":
         val old = partition_snapshot("snap:old", true)
         val membership = SnapshotArtifact(path: "doc/suites.trace.sdn", blob_id: "blob:suites",
             content: declaration_with_duplicate_target_membership(), visibility: "selected_content")
-        val candidate = SnapshotInput(subject: partition_subject("snap:new"), artifacts: old.artifacts + [membership], complete: true)
+        val candidate = SnapshotInput(subject: partition_subject("snap:new"), artifacts: old.artifacts + [membership], complete: TraceCompletenessV1.Complete)
         match partition_set(old, []):
             case Err(reason): fail(reason)
             case Ok(base):
@@ -132,10 +133,10 @@ describe "Retained owner-local snapshot fact partitions (in-development)":
         val missing = "requirement:new"
         val owner = SnapshotArtifact(path: "doc/a.trace.sdn", blob_id: "blob:owner",
             content: declaration_with_missing_requirement(missing), visibility: "selected_content")
-        val old = SnapshotInput(subject: partition_subject("snap:old"), artifacts: [owner], complete: true)
+        val old = SnapshotInput(subject: partition_subject("snap:old"), artifacts: [owner], complete: TraceCompletenessV1.Complete)
         val newcomer = SnapshotArtifact(path: "doc/b.trace.sdn", blob_id: "blob:new",
             content: declaration_with_requirement(missing, "doc/b.trace.sdn"), visibility: "selected_content")
-        val candidate = SnapshotInput(subject: partition_subject("snap:new"), artifacts: [owner, newcomer], complete: true)
+        val candidate = SnapshotInput(subject: partition_subject("snap:new"), artifacts: [owner, newcomer], complete: TraceCompletenessV1.Complete)
         match partition_set(old, ["doc/a.trace.sdn"]):
             case Err(reason): fail(reason)
             case Ok(base):
@@ -151,10 +152,10 @@ describe "Retained owner-local snapshot fact partitions (in-development)":
         val identity = "requirement:duplicate"
         val owner = SnapshotArtifact(path: "doc/a.trace.sdn", blob_id: "blob:owner",
             content: declaration_with_existing_requirement(identity), visibility: "selected_content")
-        val old = SnapshotInput(subject: partition_subject("snap:old"), artifacts: [owner], complete: true)
+        val old = SnapshotInput(subject: partition_subject("snap:old"), artifacts: [owner], complete: TraceCompletenessV1.Complete)
         val second = SnapshotArtifact(path: "doc/b.trace.sdn", blob_id: "blob:b",
             content: declaration_with_requirement(identity, "doc/b.trace.sdn"), visibility: "selected_content")
-        val candidate = SnapshotInput(subject: partition_subject("snap:new"), artifacts: [owner, second], complete: true)
+        val candidate = SnapshotInput(subject: partition_subject("snap:new"), artifacts: [owner, second], complete: TraceCompletenessV1.Complete)
         match partition_set(old, ["doc/a.trace.sdn"]):
             case Err(reason): fail(reason)
             case Ok(base):
@@ -186,19 +187,19 @@ describe "Retained owner-local snapshot fact partitions (in-development)":
     it "retains malformed owner diagnostics and refuses dependency-complete reuse":
         val broken = SnapshotArtifact(path: "doc/broken.trace.sdn", blob_id: "blob:broken",
             content: "{schema: [malformed]", visibility: "selected_content")
-        val snapshot = SnapshotInput(subject: partition_subject("snap:broken"), artifacts: [broken], complete: true)
+        val snapshot = SnapshotInput(subject: partition_subject("snap:broken"), artifacts: [broken], complete: TraceCompletenessV1.Complete)
         match partition_set(snapshot, ["doc/broken.trace.sdn"]):
             case Err(reason): fail(reason)
             case Ok(base):
-                expect(base.facts.complete).to_equal(false)
+                expect(base.facts.complete).to_equal(TraceCompletenessV1.Incomplete)
                 expect(base.dependency_inventory_complete == TraceInventoryClosure.Closed).to_equal(false)
                 match update_trace_snapshot_partitions(base, snapshot, ["doc/broken.trace.sdn"], "extractor:v1",
                     "schema:v1", partition_policy(), partition_policy_binding(), "config:v1", "manifest:snap:broken",
                     "generation:snap:broken", [], [], [], TraceAffectedLimitV1(value: 100)):
                     case Err(reason): fail(reason)
                     case Ok(updated):
-                        expect(updated.facts.complete).to_equal(false)
-                        expect(updated.invalidation.full_rebuild).to_equal(true)
+                        expect(updated.facts.complete).to_equal(TraceCompletenessV1.Incomplete)
+                        expect(updated.invalidation.full_rebuild).to_equal(TraceRebuildScopeV1.Full)
 
     it "forces a full rebuild when retained dependency rows fail their fingerprint":
         val snapshot = partition_snapshot("snap:deps", false)
@@ -212,7 +213,7 @@ describe "Retained owner-local snapshot fact partitions (in-development)":
                     "generation:snap:deps", [], [], [], TraceAffectedLimitV1(value: 100)):
                     case Err(reason): fail(reason)
                     case Ok(updated):
-                        expect(updated.invalidation.full_rebuild).to_equal(true)
+                        expect(updated.invalidation.full_rebuild).to_equal(TraceRebuildScopeV1.Full)
                         expect(updated.partition_set.dependency_inventory_complete == TraceInventoryClosure.Closed).to_equal(false)
 
     it "binds policy contents and refuses a caller-supplied mismatched binding":
@@ -246,7 +247,7 @@ describe "Retained owner-local snapshot fact partitions (in-development)":
                     case Err(reason): fail(reason)
                     case Ok(updated):
                         expect(updated.reused_paths.len()).to_equal(0)
-                        expect(updated.invalidation.full_rebuild).to_equal(true)
+                        expect(updated.invalidation.full_rebuild).to_equal(TraceRebuildScopeV1.Full)
                         partition_graph_equal(updated.graph, resolve_trace_graph(extract_snapshot_trace_facts_cold(candidate,
                             changed_policy, [], "manifest:snap:new", "generation:snap:new"), changed_policy))
 
@@ -262,7 +263,7 @@ fn oracle_snapshot(snapshot_id: text) -> SnapshotInput:
     val broken = SnapshotArtifact(path: "doc/broken.trace.sdn", blob_id: "blob:broken", content: "{schema: [malformed]", visibility: "selected_content")
     val good = SnapshotArtifact(path: "doc/b.trace.sdn", blob_id: "blob:b", content: declaration_with_requirement("requirement:x", "doc/b.trace.sdn"), visibility: "selected_content")
     val base = partition_snapshot(snapshot_id, true)
-    SnapshotInput(subject: partition_subject(snapshot_id), artifacts: [broken, good, base.artifacts[0], base.artifacts[1]], complete: true)
+    SnapshotInput(subject: partition_subject(snapshot_id), artifacts: [broken, good, base.artifacts[0], base.artifacts[1]], complete: TraceCompletenessV1.Complete)
 
 describe "Partition review blockers (in-development)":
     it "invalidates an identity consumer when only the identity's declared locator moves":
@@ -270,8 +271,8 @@ describe "Partition review blockers (in-development)":
         val before = SnapshotArtifact(path: "doc/b.trace.sdn", blob_id: "blob:b1", content: declaration_with_requirement("requirement:x", "doc/b.trace.sdn"), visibility: "selected_content")
         val after = SnapshotArtifact(path: "doc/b.trace.sdn", blob_id: "blob:b2", content: declaration_with_requirement("requirement:x", "src/app/a.spl"), visibility: "selected_content")
         val source = partition_snapshot("snap:old", false).artifacts[0]
-        val old = SnapshotInput(subject: partition_subject("snap:old"), artifacts: [owner, before, source], complete: true)
-        val candidate = SnapshotInput(subject: partition_subject("snap:new"), artifacts: [owner, after, source], complete: true)
+        val old = SnapshotInput(subject: partition_subject("snap:old"), artifacts: [owner, before, source], complete: TraceCompletenessV1.Complete)
+        val candidate = SnapshotInput(subject: partition_subject("snap:new"), artifacts: [owner, after, source], complete: TraceCompletenessV1.Complete)
         val decls = ["doc/a.trace.sdn", "doc/b.trace.sdn"]
         match partition_set(old, decls):
             case Err(reason): fail(reason)
@@ -286,8 +287,8 @@ describe "Partition review blockers (in-development)":
     it "invalidates a consumer of a fallback artifact identity when that artifact is deleted":
         val fallback = "artifact:746573742f30315f756e69742f6170702f615f737065632e73706c"
         val owner = SnapshotArtifact(path: "doc/a.trace.sdn", blob_id: "blob:owner", content: declaration_with_claim_to(fallback), visibility: "selected_content")
-        val old = SnapshotInput(subject: partition_subject("snap:old"), artifacts: partition_snapshot("snap:old", true).artifacts + [owner], complete: true)
-        val candidate = SnapshotInput(subject: partition_subject("snap:new"), artifacts: partition_snapshot("snap:new", false).artifacts + [owner], complete: true)
+        val old = SnapshotInput(subject: partition_subject("snap:old"), artifacts: partition_snapshot("snap:old", true).artifacts + [owner], complete: TraceCompletenessV1.Complete)
+        val candidate = SnapshotInput(subject: partition_subject("snap:new"), artifacts: partition_snapshot("snap:new", false).artifacts + [owner], complete: TraceCompletenessV1.Complete)
         match partition_set(old, ["doc/a.trace.sdn"]):
             case Err(reason): fail(reason)
             case Ok(base):
@@ -299,7 +300,7 @@ describe "Partition review blockers (in-development)":
 
     it "reports an incomplete full rebuild when the dependency inventory cannot be classified":
         val broken = SnapshotArtifact(path: "doc/broken.trace.sdn", blob_id: "blob:broken", content: "{schema: [malformed]", visibility: "selected_content")
-        val snapshot = SnapshotInput(subject: partition_subject("snap:broken"), artifacts: [broken], complete: true)
+        val snapshot = SnapshotInput(subject: partition_subject("snap:broken"), artifacts: [broken], complete: TraceCompletenessV1.Complete)
         match partition_set(snapshot, ["doc/broken.trace.sdn"]):
             case Err(reason): fail(reason)
             case Ok(base):
@@ -307,8 +308,8 @@ describe "Partition review blockers (in-development)":
                     partition_policy(), partition_policy_binding(), "config:v1", "manifest:snap:broken", "generation:snap:broken", [], [], [], TraceAffectedLimitV1(value: 100)):
                     case Err(reason): fail(reason)
                     case Ok(updated):
-                        expect(updated.invalidation.full_rebuild).to_equal(true)
-                        expect(updated.invalidation.complete).to_equal(false)
+                        expect(updated.invalidation.full_rebuild).to_equal(TraceRebuildScopeV1.Full)
+                        expect(updated.invalidation.complete).to_equal(TraceCompletenessV1.Incomplete)
 
     it "rebinds and fully rebuilds when a policy differs only by a duplicated rule":
         var dup = partition_policy()
@@ -326,7 +327,7 @@ describe "Partition review blockers (in-development)":
                     case Err(reason): fail(reason)
                     case Ok(updated):
                         expect(updated.reused_paths.len()).to_equal(0)
-                        expect(updated.invalidation.full_rebuild).to_equal(true)
+                        expect(updated.invalidation.full_rebuild).to_equal(TraceRebuildScopeV1.Full)
 
     it "matches full cold TraceFacts on error branches (malformed and missing declarations)":
         val snapshot = oracle_snapshot("snap:err")
@@ -349,7 +350,7 @@ describe "Partition review blockers (in-development)":
         val snapshot = oracle_snapshot("snap:budget")
         val decls = ["doc/broken.trace.sdn", "doc/b.trace.sdn"]
         val cold = extract_snapshot_trace_facts_cold(snapshot, tight_policy(), decls, "manifest:snap:budget", "generation:snap:budget")
-        expect(cold.complete).to_equal(false)
+        expect(cold.complete).to_equal(TraceCompletenessV1.Incomplete)
         match build_trace_snapshot_partition_set(snapshot, decls, "extractor:v1", "schema:v1", tight_policy(),
             trace_snapshot_policy_binding(tight_policy()), "config:v1", "manifest:snap:budget", "generation:snap:budget"):
             case Err(reason): fail(reason)

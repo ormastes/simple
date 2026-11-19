@@ -113,29 +113,29 @@ fn trace_diagnostic_decode_v1(value: SdnValue, path: text, snapshot_id: text) ->
     if (span_available and column < 1) or (not span_available and column != 0):
         return Err(trace_codec_issue_v1("invalid_location", path + ".column", "Column coordinate contradicts availability"))
     Ok(TraceDiagnosticV1(code: code, severity: severity, entity: entity,
-        path: source_path, path_available: path_available, span_available: span_available,
-        line: line, column: column, message: message, snapshot_id: subject,
+        path: source_path, path_available: (if path_available: TraceAvailabilityV1.Available else: TraceAvailabilityV1.Absent), span_available: (if span_available: TraceAvailabilityV1.Available else: TraceAvailabilityV1.Absent),
+        line: TraceLineNumberV1(value: line), column: TraceColumnNumberV1(value: column), message: message, snapshot_id: subject,
         rule_version: rule_version, origin: origin, repair: repair))
 
 fn trace_qualification_consistency_v1(document: TraceQualificationV1) -> Result<bool, TraceCodecIssueV1>:
     val evaluation = document.evaluation
-    if not document.snapshot.complete and evaluation.complete:
+    if document.snapshot.complete == TraceCompletenessV1.Incomplete and evaluation.complete == TraceCompletenessV1.Complete:
         return Err(trace_codec_issue_v1("inconsistent_result", "evaluation.complete", "Incomplete snapshot cannot complete evaluation"))
-    if evaluation.complete:
-        if evaluation.exit_code != 0 and evaluation.exit_code != 1:
+    if evaluation.complete == TraceCompletenessV1.Complete:
+        if evaluation.exit_code.value != 0 and evaluation.exit_code.value != 1:
             return Err(trace_codec_issue_v1("inconsistent_result", "evaluation.exit_code", "Completed evaluation requires exit 0 or 1"))
     else:
-        if evaluation.exit_code != 2 and evaluation.exit_code != 130:
+        if evaluation.exit_code.value != 2 and evaluation.exit_code.value != 130:
             return Err(trace_codec_issue_v1("inconsistent_result", "evaluation.exit_code", "Incomplete evaluation requires exit 2 or 130"))
         if evaluation.qualification != "incomplete":
             return Err(trace_codec_issue_v1("inconsistent_result", "evaluation.qualification", "Incomplete evaluation cannot claim a terminal qualification"))
-    if (evaluation.qualification == "satisfied" or evaluation.qualification == "not_applicable_reviewed") and evaluation.exit_code != 0:
+    if (evaluation.qualification == "satisfied" or evaluation.qualification == "not_applicable_reviewed") and evaluation.exit_code.value != 0:
         return Err(trace_codec_issue_v1("inconsistent_result", "evaluation.qualification", "Claimed successful qualification requires exit zero"))
-    if evaluation.qualification == "unsatisfied" and evaluation.exit_code != 1:
+    if evaluation.qualification == "unsatisfied" and evaluation.exit_code.value != 1:
         return Err(trace_codec_issue_v1("inconsistent_result", "evaluation.qualification", "Claimed unsatisfied qualification requires exit one"))
-    if evaluation.exit_code == 1 and document.diagnostics.len() == 0:
+    if evaluation.exit_code.value == 1 and document.diagnostics.len() == 0:
         return Err(trace_codec_issue_v1("inconsistent_result", "diagnostics", "Violation result requires diagnostic reasons"))
-    if evaluation.exit_code == 0:
+    if evaluation.exit_code.value == 0:
         for diagnostic in document.diagnostics:
             if diagnostic.severity == "error":
                 return Err(trace_codec_issue_v1("inconsistent_result", "diagnostics", "Exit zero contradicts an error diagnostic"))
@@ -162,7 +162,7 @@ fn trace_qualification_value_decode_v1(value: SdnValue, limits: TraceQualificati
     val snapshot = TraceSnapshotV1(
         id: trace_identifier_v1(snapshot_fields["id"], "snapshot.id")?,
         kind: trace_enum_v1(snapshot_fields["kind"], "snapshot.kind", ["worktree", "index", "git", "sj"])?,
-        complete: trace_bool_v1(snapshot_fields["complete"], "snapshot.complete")?)
+        complete: (if trace_bool_v1(snapshot_fields["complete"], "snapshot.complete")?: TraceCompletenessV1.Complete else: TraceCompletenessV1.Incomplete))
     val selection_fields = trace_exact_dict_v1(root["selection"], "selection", ["paths", "full_repository"])?
     val selected = trace_array_v1(selection_fields["paths"], "selection.paths")?
     if selected.len() > limits.max_selectors.value:
@@ -174,15 +174,15 @@ fn trace_qualification_value_decode_v1(value: SdnValue, limits: TraceQualificati
         paths.push(path)
         index = index + 1
     val selection = TraceSelectionV1(paths: paths,
-        full_repository: trace_bool_v1(selection_fields["full_repository"], "selection.full_repository")?)
+        full_repository: (if trace_bool_v1(selection_fields["full_repository"], "selection.full_repository")?: TraceSelectionScopeV1.FullRepository else: TraceSelectionScopeV1.SelectedPaths))
     val evaluation_fields = trace_exact_dict_v1(root["evaluation"], "evaluation",
         ["scope", "profile", "kind", "complete", "exit_code", "qualification"])?
     val evaluation = TraceEvaluationV1(
         scope: trace_enum_v1(evaluation_fields["scope"], "evaluation.scope", ["all", "src", "spec", "doc"])?,
         profile: trace_enum_v1(evaluation_fields["profile"], "evaluation.profile", trace_profile_names_v1())?,
         kind: trace_enum_v1(evaluation_fields["kind"], "evaluation.kind", ["structural", "evidence"])?,
-        complete: trace_bool_v1(evaluation_fields["complete"], "evaluation.complete")?,
-        exit_code: trace_int_v1(evaluation_fields["exit_code"], "evaluation.exit_code")?,
+        complete: (if trace_bool_v1(evaluation_fields["complete"], "evaluation.complete")?: TraceCompletenessV1.Complete else: TraceCompletenessV1.Incomplete),
+        exit_code: TraceEvaluationExitCodeV1(value: trace_int_v1(evaluation_fields["exit_code"], "evaluation.exit_code")?),
         qualification: trace_enum_v1(evaluation_fields["qualification"], "evaluation.qualification",
             ["satisfied", "unsatisfied", "incomplete", "not_applicable_reviewed"])?)
     val entries = trace_array_v1(root["diagnostics"], "diagnostics")?
@@ -217,15 +217,15 @@ pub fn trace_qualification_decode_v1(source: text, limits: TraceQualificationCod
         case Err(issue):
             val located = issue.code != "invalid_limits" and issue.code != "source_limit"
             return Err(TraceCodecIssueV1(code: issue.code, path: "", message: issue.message,
-                location_available: located, offset: issue.offset,
-                line: if located: issue.line else: 0, column: if located: issue.column else: 0))
+                location_available: (if located: TraceAvailabilityV1.Available else: TraceAvailabilityV1.Absent), offset: TraceByteOffsetV1(value: issue.offset),
+                line: TraceLineNumberV1(value: if located: issue.line else: 0), column: TraceColumnNumberV1(value: if located: issue.column else: 0)))
     trace_qualification_from_value_v1(value, limits)
 
 fn trace_diagnostic_value_v1(item: TraceDiagnosticV1) -> SdnValue:
     SdnValue.Dict({"code": SdnValue.String(item.code), "severity": SdnValue.String(item.severity),
         "entity": SdnValue.String(item.entity), "path": SdnValue.String(item.path),
-        "path_available": SdnValue.Bool(item.path_available), "span_available": SdnValue.Bool(item.span_available),
-        "line": SdnValue.Int(item.line), "column": SdnValue.Int(item.column), "message": SdnValue.String(item.message),
+        "path_available": SdnValue.Bool(item.path_available == TraceAvailabilityV1.Available), "span_available": SdnValue.Bool(item.span_available == TraceAvailabilityV1.Available),
+        "line": SdnValue.Int(item.line.value), "column": SdnValue.Int(item.column.value), "message": SdnValue.String(item.message),
         "snapshot_id": SdnValue.String(item.snapshot_id), "rule_version": SdnValue.String(item.rule_version),
         "origin": SdnValue.String(item.origin), "repair": SdnValue.String(item.repair)})
 
@@ -234,10 +234,10 @@ fn trace_qualification_value_v1(document: TraceQualificationV1, diagnostics: [Sd
     for path in document.selection.paths: selectors.push(SdnValue.String(path))
     SdnValue.Dict({
         "schema": SdnValue.Dict({"name": SdnValue.String("simple.trace.qualification"), "version": SdnValue.Int(1)}),
-        "snapshot": SdnValue.Dict({"id": SdnValue.String(document.snapshot.id), "kind": SdnValue.String(document.snapshot.kind), "complete": SdnValue.Bool(document.snapshot.complete)}),
-        "selection": SdnValue.Dict({"paths": SdnValue.Array(selectors), "full_repository": SdnValue.Bool(document.selection.full_repository)}),
+        "snapshot": SdnValue.Dict({"id": SdnValue.String(document.snapshot.id), "kind": SdnValue.String(document.snapshot.kind), "complete": SdnValue.Bool(document.snapshot.complete == TraceCompletenessV1.Complete)}),
+        "selection": SdnValue.Dict({"paths": SdnValue.Array(selectors), "full_repository": SdnValue.Bool(document.selection.full_repository == TraceSelectionScopeV1.FullRepository)}),
         "evaluation": SdnValue.Dict({"scope": SdnValue.String(document.evaluation.scope), "profile": SdnValue.String(document.evaluation.profile), "kind": SdnValue.String(document.evaluation.kind),
-            "complete": SdnValue.Bool(document.evaluation.complete), "exit_code": SdnValue.Int(document.evaluation.exit_code), "qualification": SdnValue.String(document.evaluation.qualification)}),
+            "complete": SdnValue.Bool(document.evaluation.complete == TraceCompletenessV1.Complete), "exit_code": SdnValue.Int(document.evaluation.exit_code.value), "qualification": SdnValue.String(document.evaluation.qualification)}),
         "diagnostics": SdnValue.Array(diagnostics)})
 
 fn trace_qualification_output_cap_v1(limits: TraceQualificationCodecLimitsV1) -> i64:
