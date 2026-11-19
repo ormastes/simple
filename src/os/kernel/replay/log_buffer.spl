@@ -17,6 +17,7 @@ var replay_ring: [ReplayEntry] = []
 var replay_head: i64 = 0       # next write position
 var replay_tail: i64 = 0       # next read position (replay mode)
 var replay_count: i64 = 0      # total events written
+var replay_dropped: i64 = 0    # oldest events trimmed away (window is incomplete when > 0)
 var replay_initialized: bool = false
 
 # ============================================================================
@@ -30,6 +31,7 @@ fn replay_buffer_init():
     replay_head = 0
     replay_tail = 0
     replay_count = 0
+    replay_dropped = 0
     replay_initialized = true
 
 # ============================================================================
@@ -54,6 +56,7 @@ fn replay_log_event(entry: ReplayEntry) -> i64:
     if replay_ring.len() > REPLAY_BUFFER_SIZE:
         var trimmed: [ReplayEntry] = []
         val start = replay_ring.len() - REPLAY_BUFFER_SIZE
+        replay_dropped = replay_dropped + start
         var i = start
         while i < replay_ring.len():
             trimmed.push(replay_ring[i])
@@ -104,6 +107,18 @@ fn replay_buffer_reset():
     replay_head = 0
     replay_tail = 0
     replay_count = 0
+    replay_dropped = 0
 
 fn replay_get_events() -> [ReplayEntry]:
     replay_ring
+
+# A trimmed ring no longer starts at event 0, so replaying it from the start
+# would replay a suffix with its prefix missing. Callers must treat the
+# window as incomplete instead of advertising a full replay (DHR RR-05).
+# @allow(primitive_api) event counter, same unit as replay_event_count
+pub fn replay_dropped_count() -> i64:
+    replay_dropped
+
+# @allow(primitive_api) predicate; bool is the predicate result
+pub fn replay_window_complete() -> bool:
+    replay_dropped == 0
