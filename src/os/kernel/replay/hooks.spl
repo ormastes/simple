@@ -14,9 +14,14 @@ use os.kernel.replay.divergence.{DivergenceKind, report_divergence}
 # Schedule Hook
 # ============================================================================
 
-fn replay_hook_schedule(old_tid: i64, new_tid: i64, tick: i64):
+# Returns the tid the scheduler must run. Off/Record/Verify return the live
+# pick `new_tid`. Replay returns the logged tid so the scheduler follows the
+# recording; a wrong event or an exhausted log is a divergence and returns -1
+# (fail closed: the caller must not fall back to the live pick).
+@allow(primitive_api)  # kernel replay ABI: tids and ticks are raw i64 log payloads
+fn replay_hook_schedule(old_tid: i64, new_tid: i64, tick: i64) -> i64:
     if replay_is_off():
-        return
+        return new_tid
 
     if replay_is_recording():
         var entry = ReplayEntry.create(EventKind.Schedule, old_tid, 0, 0)
@@ -24,29 +29,31 @@ fn replay_hook_schedule(old_tid: i64, new_tid: i64, tick: i64):
         entry.payload_b = new_tid
         entry.payload_c = tick
         replay_log_event(entry)
-        return
+        return new_tid
 
-    # Replay/Verify: consume the schedule event from the log
     match replay_mode():
         case KernelReplayMode.Replay:
             match replay_read_next():
                 case Some(entry):
-                    # The scheduler does not yet obey the logged tid (DHR P6), so a
-                    # different live choice must surface as a divergence, not pass.
-                    if entry.kind != EventKind.Schedule.to_i32() or entry.payload_b != new_tid:
-                        report_divergence(DivergenceKind.ScheduleMismatch, entry.event_id, entry.payload_b, new_tid)
+                    if entry.kind == EventKind.Schedule.to_i32():
+                        return entry.payload_b
+                    report_divergence(DivergenceKind.ScheduleMismatch, entry.event_id, entry.kind.to_i64(), new_tid)
+                    return -1
                 case None:
                     report_divergence(DivergenceKind.ScheduleMismatch, -1, -1, new_tid)
+                    return -1
         case KernelReplayMode.Verify:
             match replay_read_next():
                 case Some(entry):
                     # Verify recorded schedule matches live decision
                     if entry.payload_b != new_tid:
                         report_divergence(DivergenceKind.ScheduleMismatch, entry.event_id, entry.payload_b, new_tid)
+                    return new_tid
                 case None:
-                    pass_dn
+                    return new_tid
         case _:
-            pass_dn
+            return new_tid
+    new_tid
 
 # ============================================================================
 # Syscall Hooks

@@ -46,7 +46,7 @@ design document.
 | DBG-WD | `T32Watchdog.guarded_op` ignored `operation_timeout_ms`; `kill_on_hang` ran a machine-wide `pkill` | Post-hoc overrun detection (labelled: not cancellation); global kill removed (#10370) | `t32_watchdog_deadline_spec` 2/2 (real module) |
 | DBG-FC | `FailureCapture` recorded only a cycle while implying a checkpoint/memory capture | Keeps pc/sp or signal/pid, pins event-tail range, states what was not captured (#10371) | `test/01_unit/os/kernel/failure_capture_spec.spl` 3/3 |
 | DBG-T32P | `Trace32Probe` never compiled (absent `t32_break`/`t32_go`, `std.os` path); stale SFFI shapes; unconditional success; `reset` sent `Break` | Ops via `T32_Cmd`, real SFFI shapes, results propagated (#10372) | `t32_probe_sffi_spec` 5/5 |
-| RR-03 | Kernel/realtime Replay mode read the logged schedule decision and discarded it | A different live tid, wrong kind, or end-of-log is a `ScheduleMismatch` divergence. Enforcing the logged tid on the scheduler is P6 | replay_kernel_fail_closed_spec 8/8 |
+| RR-03 | Kernel/realtime Replay mode read the logged schedule decision and discarded it | `replay_hook_schedule` now returns the tid to run; `Scheduler.schedule_on_cpu` dispatches the logged tid in Replay (live pick stays queued). Wrong kind, end-of-log, or a non-runnable logged tid is a `ScheduleMismatch` divergence and nothing is dispatched (P6 follow-up) | replay_kernel_fail_closed_spec 13/13 |
 | RR-05 | `HardwareReplayController.restore_checkpoint` said "checkpoint restored" | Says registers and watched RAM only; device/IRQ/DMA not restored | — |
 
 P0 exit gate met for the §1 defect list. Every listed operation now either works or reports its failure or limit.
