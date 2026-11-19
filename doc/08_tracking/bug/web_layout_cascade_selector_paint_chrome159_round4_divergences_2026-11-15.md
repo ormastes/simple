@@ -1177,3 +1177,29 @@ head (13/40 at base).
   - `pointer-events:none` is now honored;
   - fixed-position containing block, over-constrained insets and the empty-inline margin all follow Chrome.
   - The hosted DOM (`BeDomNode`: querySelector, children, textContent, forms) is a separate tree and is untouched.
+- **Follow-up 2026-11-20 — the overlay knocked the window glass off the Backdrop Root path (Engine2D):**
+  - **Symptom:** release with #10538 scored 933‰ on cpu_simd and Vulkan; release plus this lane scored 588‰.
+  - **Probe** (temporary prints in `_simple_web_layout_compose_retained`):
+    - With the overlay, the page has 2 top-level surfaces: root 19 is the `::before`, opacity 90, `group=false painted=1` at 480x300; root 4 is the window glass backdrop root, `group=true painted=21` at 480x300. The result is `supported=false`.
+    - Without the overlay there is 1 root and `supported=true`.
+    - Both roots are `translate=true`, so the only clause that fires is the admission budget (`surface_pixel_work > width*height`). That clause disables every surface, the backdrop root included.
+    - The glass root alone already uses the whole budget, so any other fractional-opacity element on that page disabled the glass before this lane too.
+  - **Fix** (`_simple_web_opacity_demote_for_budget`, in the admission block of `simple_web_html_layout_renderer.spl`):
+    - On budget overflow, top-level fractional-opacity roots fall to root -1 and backdrop-root chains keep their layers.
+    - It bails as before only if the kept layers alone are over budget.
+    - The budget itself is unchanged.
+  - **Evidence:**
+    - Window: cpu_simd 588 → 962‰, Vulkan 588 → 962‰, raster 587‰.
+    - Nested glass with the overlay: glass point (160,120) is 252,250,250 in Chrome and 254,249,249 here.
+    - All pass: `backdrop_root_nested_glass` 4/4, `glass_gradient_saturate` 5/5, its Vulkan twin 2/2, `opacity_group` 21/21, `layout_renderer_selector_helpers` 13/13.
+  - **Root -1 drops opacity:** a command on root -1 paints with no CSS opacity, because Engine2D applies opacity only through an embedding surface. `filter:opacity()` folds into the same `opacity_pct`. Every fractional-opacity element painted at 100% whenever the budget tripped before this lane. Chrome: `rgb(200,0,0)` at opacity 0.5 over #2d2f45 is 122,23,34; we painted 200,0,0.
+  - **Fixed for the exact case** (owner decision: carry opacity on a single command, budget unchanged):
+    - `_simple_web_opacity_fold_demoted` applies when a demoted top root (no nested root, `group=false`, `painted=1`) emitted exactly one command that is not an image, glyph run or WM material box.
+    - It folds the root's opacity into that command's alpha: the command colour, `background-color`, the 2-stop `background-image`, `background-gradient-stops`, and every `background-gradient-layer-stops` colour.
+    - A group of one item equals that item at alpha × opacity, so this is exact.
+  - **Evidence:**
+    - The overlay tests turned green unchanged (122,23,34 / 218,190,193), and `before_after_generated_content` is 24/24.
+    - Also passing: `opacity_group` 21/21, `opacity_multi_root` 3/3, `img_opacity` 3/3, `translucent_blend` 6/6, `fractional_subtree_opacity` 2/2.
+    - Window: cpu_simd and Vulkan 962‰, raster 587‰.
+  - **Raster, same page:** overlay 122,23,34 and outer 218,190,193 are correct. The inner glass is 245,237,238, which is Chrome's value without the outer backdrop root (Chrome 252,250,250). The raster backdrop-root admission does not take this page. That is the paint_raster owner's area and was not changed here.
+- **OPEN:** a demoted root with more than one painted item (or command), an image, a glyph run or a nested root still paints at 100% when the surface budget is exceeded. It needs a real layer. `# ponytail:` note on `_simple_web_opacity_demote_for_budget`.
