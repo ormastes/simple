@@ -55,3 +55,47 @@ describe "HTTP binary bodies":
         match parse_multipart_bytes(body, "multipart/form-data; boundary=\"B\""):
             Ok(_): fail("unterminated multipart must not parse")
             Err(e): expect(e.contains("closing boundary")).to_equal(true)
+
+    it "matches name only at a parameter boundary, not inside filename":
+        val body = text_to_utf8_bytes("--B\r\nContent-Disposition: form-data; filename=\"a.wav\"; name=\"file\"\r\n\r\nxy\r\n--B--\r\n")
+        match parse_multipart_bytes(body, "multipart/form-data; boundary=B"):
+            Ok(parts):
+                expect(parts.len()).to_equal(1)
+                expect(parts[0].name).to_equal("file")
+                expect(parts[0].filename).to_equal("a.wav")
+            Err(e): fail("parse failed: {e}")
+
+    it "accepts unquoted parameter values and a case-insensitive boundary":
+        val body = text_to_utf8_bytes("--Zz\r\nContent-Disposition: form-data; name=field\r\n\r\nv\r\n--Zz--")
+        match parse_multipart_bytes(body, "multipart/form-data; BOUNDARY=Zz"):
+            Ok(parts):
+                expect(parts.len()).to_equal(1)
+                expect(parts[0].name).to_equal("field")
+                expect(parts[0].data.len()).to_equal(1)
+            Err(e): fail("parse failed: {e}")
+
+    it "keeps a part with an empty header block as its own part":
+        val body = text_to_utf8_bytes("--B\r\n\r\nabc\r\n--B\r\nContent-Disposition: form-data; name=\"n\"\r\n\r\nd\r\n--B--\r\n")
+        match parse_multipart_bytes(body, "multipart/form-data; boundary=B"):
+            Ok(parts):
+                expect(parts.len()).to_equal(2)
+                expect(parts[0].name).to_equal("")
+                expect(parts[0].data.len()).to_equal(3)
+                expect(parts[1].name).to_equal("n")
+                expect(parts[1].data.len()).to_equal(1)
+            Err(e): fail("parse failed: {e}")
+
+    it "anchors delimiters to line starts and allows transport padding":
+        val body = text_to_utf8_bytes("pre--B\r\n--B  \r\nContent-Disposition: form-data; name=\"p\"\r\n\r\nx--B y\r\n--B--\r\n")
+        match parse_multipart_bytes(body, "multipart/form-data; boundary=B"):
+            Ok(parts):
+                expect(parts.len()).to_equal(1)
+                expect(parts[0].name).to_equal("p")
+                expect(parts[0].data.len()).to_equal(6)
+            Err(e): fail("parse failed: {e}")
+
+    it "rejects a header block that contains the delimiter":
+        val body = text_to_utf8_bytes("--B\r\nContent-Disposition: form-data; name=\"a\"\r\n--B\r\nX: y\r\n\r\nz\r\n--B--\r\n")
+        match parse_multipart_bytes(body, "multipart/form-data; boundary=B"):
+            Ok(_): fail("a delimiter inside the header block must not parse")
+            Err(e): expect(e.contains("header block contains the boundary")).to_equal(true)

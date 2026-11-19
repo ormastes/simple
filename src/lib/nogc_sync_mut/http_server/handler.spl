@@ -123,17 +123,10 @@ fn requires_content_type(method: text) -> bool:
 # Multipart Form Data Parsing
 # =============================================================================
 
-# Parse multipart boundary from Content-Type header
+# Multipart boundary from a Content-Type header: case-insensitive `boundary=`
+# parameter, quoted or bare; "" when absent.
 fn parse_multipart_boundary(content_type: text) -> text:
-    var boundary = ""
-    var boundary_prefix = "boundary="
-    var idx = content_type.index_of(boundary_prefix)
-
-    if idx >= 0:
-        var start = idx + boundary_prefix.length()
-        boundary = content_type.substring(start, content_type.byte_len())
-
-    boundary
+    header_param(content_type, "boundary")
 
 # Parse form field from multipart part
 fn parse_form_field(part: text) -> list:
@@ -313,6 +306,57 @@ pub struct MultipartPart:
     content_type: text
     data: [u8]
 
+# `;`-separated `key=value` parameters of a header value (quote-aware, so a
+# `;` inside "..." stays in the value). Keys are lower-cased; quoted values are
+# unquoted; a segment without `=` (the media type itself) is skipped.
+fn header_params(value: text) -> [(text, text)]:
+    var segments: [text] = []
+    var current = ""
+    var quoted = false
+    for ch in value.chars():
+        if ch == "\"":
+            quoted = not quoted
+            current = current + ch
+        elif ch == ";" and not quoted:
+            segments.push(current)
+            current = ""
+        else:
+            current = current + ch
+    segments.push(current)
+    var params: [(text, text)] = []
+    for segment in segments:
+        var key = ""
+        var raw = ""
+        var seen_eq = false
+        for ch in segment.chars():
+            if seen_eq:
+                raw = raw + ch
+            elif ch == "=":
+                seen_eq = true
+            else:
+                key = key + ch
+        if not seen_eq:
+            continue
+        var item = raw.trim()
+        val count = item.chars().len()
+        if count >= 2 and item.starts_with("\"") and item.ends_with("\""):
+            var inner = ""
+            var index = 0
+            for ch in item.chars():
+                if index > 0 and index < count - 1:
+                    inner = inner + ch
+                index = index + 1
+            item = inner
+        params.push((key.trim().to_lower(), item))
+    params
+
+fn header_param(value: text, key: text) -> text:
+    val wanted = key.to_lower()
+    for pair in header_params(value):
+        if pair.0 == wanted:
+            return pair.1
+    ""
+
 fn _multipart_find(hay: [u8], needle: [u8], from: i64) -> i64:
     val n = needle.len()
     if n == 0:
@@ -330,68 +374,97 @@ fn _multipart_find(hay: [u8], needle: [u8], from: i64) -> i64:
         i = i + 1
     -1
 
-fn _multipart_param(header_line: text, key: text) -> text:
-    val marker = "{key}=\""
-    val start = header_line.index_of(marker)
-    if start < 0:
-        return ""
-    val value_start = start + marker.byte_len()
-    val value_end = header_line.index_of("\"", value_start)
-    if value_end < value_start:
-        return ""
-    header_line.slice(value_start, value_end)
+# Just past a delimiter line (`--B` + transport padding + CRLF) whose boundary
+# text ends at `at`; -2 for the close delimiter (`--B--`); -1 when the bytes
+# at `at` do not finish a delimiter line.
+fn _multipart_delimiter_end(body: [u8], at: i64) -> i64:
+    var cursor = at
+    if cursor + 2 <= body.len() and body[cursor] == 45 and body[cursor + 1] == 45:
+        return -2
+    while cursor < body.len() and (body[cursor] == 32 or body[cursor] == 9):
+        cursor = cursor + 1
+    if cursor + 2 <= body.len() and body[cursor] == 13 and body[cursor + 1] == 10:
+        return cursor + 2
+    -1
 
-fn _multipart_boundary(content_type: text) -> text:
-    var boundary = parse_multipart_boundary(content_type)
-    val semi = boundary.index_of(";")
-    if semi >= 0:
-        boundary = boundary.slice(0, semi)
-    boundary = boundary.trim()
-    if boundary.starts_with("\"") and boundary.ends_with("\"") and boundary.byte_len() >= 2:
-        boundary = boundary.slice(1, boundary.byte_len() - 1)
-    boundary
+# Next line-anchored delimiter (`CRLF--B` then `--`, padding or CRLF) at or
+# after `from`; the position of its CRLF, or -1.
+fn _multipart_next_delimiter(body: [u8], crlf_dash_boundary: [u8], from: i64) -> i64:
+    var at = from
+    while true:
+        val found = _multipart_find(body, crlf_dash_boundary, at)
+        if found < 0:
+            return -1
+        if _multipart_delimiter_end(body, found + crlf_dash_boundary.len()) != -1:
+            return found
+        at = found + 1
+    -1
 
 # Split a multipart/form-data body (HttpRequest.body_bytes) into parts whose
 # data stays raw bytes, so binary uploads (wav, png) survive unchanged.
 pub fn parse_multipart_bytes(body: [u8], content_type: text) -> Result<[MultipartPart], text>:
-    val boundary = _multipart_boundary(content_type)
+    val boundary = parse_multipart_boundary(content_type)
     if boundary == "":
         return Err("multipart: missing boundary")
-    val delimiter = text_to_utf8_bytes("--{boundary}")
-    val next_delimiter = text_to_utf8_bytes("\r\n--{boundary}")
+    val dash_boundary = text_to_utf8_bytes("--{boundary}")
+    val crlf_dash_boundary = text_to_utf8_bytes("\r\n--{boundary}")
     val header_end = text_to_utf8_bytes("\r\n\r\n")
+    # The first delimiter starts the body or a line; any preamble is ignored.
+    var cursor: i64 = -1
+    if _multipart_find(body, dash_boundary, 0) == 0:
+        cursor = _multipart_delimiter_end(body, dash_boundary.len())
+    if cursor == -1:
+        val found = _multipart_next_delimiter(body, crlf_dash_boundary, 0)
+        if found < 0:
+            return Err("multipart: boundary not found")
+        cursor = _multipart_delimiter_end(body, found + crlf_dash_boundary.len())
     var parts: [MultipartPart] = []
-    var cursor = _multipart_find(body, delimiter, 0)
-    if cursor < 0:
-        return Err("multipart: boundary not found")
-    cursor = cursor + delimiter.len()
     while true:
-        if cursor + 2 <= body.len() and body[cursor] == 45 and body[cursor + 1] == 45:
+        if cursor == -2:
             return Ok(parts)
-        if cursor + 2 > body.len() or body[cursor] != 13 or body[cursor + 1] != 10:
+        if cursor < 0:
             return Err("multipart: malformed delimiter line")
-        val headers_start = cursor + 2
-        val headers_stop = _multipart_find(body, header_end, headers_start)
-        if headers_stop < 0:
-            return Err("multipart: unterminated part headers")
-        val header_text = match io_legacy_utf8(body.slice(headers_start, headers_stop)):
-            Ok(value): value
-            Err(_): return Err("multipart: part headers are not UTF-8")
-        val data_start = headers_stop + header_end.len()
-        val data_stop = _multipart_find(body, next_delimiter, data_start)
+        var header_text = ""
+        var data_start: i64 = 0
+        if cursor + 2 <= body.len() and body[cursor] == 13 and body[cursor + 1] == 10:
+            # Empty header block: the part starts with its blank line.
+            data_start = cursor + 2
+        else:
+            val headers_stop = _multipart_find(body, header_end, cursor)
+            if headers_stop < 0:
+                return Err("multipart: unterminated part headers")
+            val inner = _multipart_next_delimiter(body, crlf_dash_boundary, cursor)
+            if inner >= 0 and inner < headers_stop:
+                return Err("multipart: part header block contains the boundary")
+            header_text = match io_legacy_utf8(body.slice(cursor, headers_stop)):
+                Ok(value): value
+                Err(_): return Err("multipart: part headers are not UTF-8")
+            data_start = headers_stop + header_end.len()
+        # An empty body leaves the delimiter's CRLF right at data_start.
+        val data_stop = _multipart_next_delimiter(body, crlf_dash_boundary, data_start)
         if data_stop < 0:
             return Err("multipart: missing closing boundary")
         var name = ""
         var filename = ""
         var part_type = ""
         for line in header_text.split("\r\n"):
-            val lower = line.to_lower()
-            if lower.starts_with("content-disposition:"):
-                name = _multipart_param(line, "name")
-                filename = _multipart_param(line, "filename")
-            elif lower.starts_with("content-type:"):
-                part_type = line.slice(13, line.byte_len()).trim()
+            var field = ""
+            var field_value = ""
+            var past_colon = false
+            for ch in line.chars():
+                if past_colon:
+                    field_value = field_value + ch
+                elif ch == ":":
+                    past_colon = true
+                else:
+                    field = field + ch
+            val field_name = field.trim().to_lower()
+            if field_name == "content-disposition":
+                name = header_param(field_value, "name")
+                filename = header_param(field_value, "filename")
+            elif field_name == "content-type":
+                part_type = field_value.trim()
         parts.push(MultipartPart(name: name, filename: filename, content_type: part_type,
             data: body.slice(data_start, data_stop)))
-        cursor = data_stop + next_delimiter.len()
+        cursor = _multipart_delimiter_end(body, data_stop + crlf_dash_boundary.len())
     Ok(parts)
