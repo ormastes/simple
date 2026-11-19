@@ -726,3 +726,17 @@ head (13/40 at base).
 - **Re-measured, both on current `release/1.0.0` (correcting older "Still open" notes):**
   - The raster per-corner-radius ring (`border_per_corner_radius_chrome159_spec`) passes 3/3.
   - The "slow typed single-gradient path" is not slow in isolation. A 200x150 CSS box with a typed `linear-gradient(90deg, ...)` at k=4 took 16 s on cpu_simd, against 39 s for the same gradient forced onto the list path. On the raster at 4x it took 5 s against 6 s (seed run time, one run each).
+
+## 2026-11-19 — Vulkan grayscale glyphs blend with the pre-Chrome rule (FIXED in the packed font kernel)
+
+- **Symptom:** `direction_rtl_bidi_order_chrome159_spec` AC-6/AC-7 red on `release/1.0.0`. The Vulkan device frame of `#111827` text over white differed from the Engine2D CPU frame by one level in R/G: 279 px with LCD off, 61 px with it on (edge quads drawn gray). Example: device `2E3442`, CPU `2F3542`.
+- **Cause:** the gray branch of `shaders/font_atlas_batch.comp` still used the old flooring straight-alpha mix, `(s*sa + d*da*(255-sa)/255) / oa`. The CPU composites glyph pixels through `color.spl` `blend()`, the Chrome 159 image rule (11-17, `57106fd810f`), and `_glsl_blit` was moved to that rule at the same time; the font kernel was missed.
+  - It surfaced on 11-19 when bare `<div>` text started taking the Draw IR text lane (`0b4dc33c48b`). Before that, this page's text never reached the font kernel.
+- **Fix:** the kernel's gray branch computes exactly what `blend()` does:
+  - opaque destination: `round(s*a/255) + div255r(d*(255-a))`;
+  - translucent destination: Skia's premultiplied value stored straight;
+  - transparent destination or opaque source: the source.
+  - SPIR-V regenerated (16700 bytes, sha256 `296f9c5b...`). `check-font-atlas-batch-spirv-pinned.shs` passes.
+- **Evidence:** `direction_rtl_bidi_order_chrome159_spec` 5/7 -> 7/7.
+  - Base vs head over the 68 Vulkan text / font-atlas specs, serial on the same seed: 0 new failures; the only change is the two `direction_rtl_bidi_order` rows (AC-6, AC-7) going green.
+- **Still open (same old rule, not changed here):** the Metal, CUDA and legacy GLSL strings in `common/gpu/font_atlas_composite.spl`. CUDA is pinned to its PTX and Metal cannot be verified on this Linux host. Move them to the image rule when those lanes can be re-pinned.

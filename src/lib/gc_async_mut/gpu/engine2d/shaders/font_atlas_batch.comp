@@ -106,13 +106,29 @@ void main() {
                 int b=db+(((sb-db)*int(p.words[tbl+512u+cb]))>>5);
                 dst[di]=0xFF000000u|(uint(r)<<16u)|(uint(g)<<8u)|uint(b);
             } else {
+                // CPU parity: color.spl blend() (Chrome 159 image rule), as
+                // _glsl_blit. Opaque dst: round(s*a/255) + div255r(d*(255-a));
+                // translucent dst: Skia's premultiplied layer value stored
+                // straight; transparent dst or opaque src: the source.
                 uint sa=((cell>>24u)*(color>>24u)+127u)/255u;
                 if(sa==0u)continue;
-                uint da=d>>24u,dwgt=da*(255u-sa)/255u,oa=sa+dwgt;
-                uint r=(((color>>16u)&255u)*sa+((d>>16u)&255u)*dwgt)/oa;
-                uint g=(((color>>8u)&255u)*sa+((d>>8u)&255u)*dwgt)/oa;
-                uint b=((color&255u)*sa+(d&255u)*dwgt)/oa;
-                dst[di]=(oa<<24u)|(r<<16u)|(g<<8u)|b;
+                uint da=d>>24u,inv=255u-sa;
+                uint cr=(color>>16u)&255u,cg=(color>>8u)&255u,cb=color&255u;
+                uint dr=(d>>16u)&255u,dg=(d>>8u)&255u,db=d&255u;
+                if(sa==255u||da==0u){dst[di]=(sa<<24u)|(color&0xFFFFFFu);continue;}
+                if(da!=255u){
+                    uint oa=sa+(da*inv+127u)/255u,ho=oa/2u;
+                    uint pr=(cr*sa+127u)/255u+(((dr*da+127u)/255u)*inv+127u)/255u;
+                    uint pg=(cg*sa+127u)/255u+(((dg*da+127u)/255u)*inv+127u)/255u;
+                    uint pb=(cb*sa+127u)/255u+(((db*da+127u)/255u)*inv+127u)/255u;
+                    dst[di]=(oa<<24u)|(min((pr*255u+ho)/oa,255u)<<16u)|(min((pg*255u+ho)/oa,255u)<<8u)|min((pb*255u+ho)/oa,255u);
+                    continue;
+                }
+                uint vr=dr*inv+128u,vg=dg*inv+128u,vb=db*inv+128u;
+                uint r=(cr*sa+127u)/255u+((vr+(vr>>8u))>>8u);
+                uint g=(cg*sa+127u)/255u+((vg+(vg>>8u))>>8u);
+                uint b=(cb*sa+127u)/255u+((vb+(vb>>8u))>>8u);
+                dst[di]=0xFF000000u|(r<<16u)|(g<<8u)|b;
             }
         }
         if (chain > 1u) {
