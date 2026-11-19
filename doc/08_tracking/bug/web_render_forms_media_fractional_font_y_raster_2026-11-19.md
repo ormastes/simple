@@ -1,5 +1,7 @@
 # forms-media 1x (2.16%): fractional font sizes raster y at the integer size
 
+
+**Status (2026-11-19): FIXED** for #3. `_lcd_hint_knots` and its cache key now take the milli size (`sfnt_lcd_glyph_outline` passes `x_milli` when fractional); only the 6..14 ppem x-height rule reads the whole ppem. 13.3333 px mono caps are 10 rows, 21.3333 px sans starts on Chrome's row, whole sizes unchanged. forms-media 1x 2.16 -> 2.15; dpr4 unchanged. Pinned by `test/01_unit/browser_engine/fractional_font_y_raster_chrome159_spec.spl` (cpu_simd + vulkan). #1 (bold 18.72 px h3) is LCD AA, not rows: its ink rows already matched.
 Date: 2026-11-19. Page: `examples/06_io/ui/web_catalog/forms-media.html`, 900x760 crop, Chrome 159, 1x.
 Base: origin/release/1.0.0 32ddc119ffc, seed `cargo-target-webrender-blend`.
 

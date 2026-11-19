@@ -3457,3 +3457,8 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - 2026-11-19 raster `fb_soft_box_shadow`: the shadow's rect mask is blurred with Skia's triple box (sigma = blur / 2) as one `engine2d_blur_step_profile` per axis, over about 3 sigma. The old pixel-edge erf product stopped at 1 x blur and was up to 11 levels dark. Pinned by `box_shadow_raster_falloff_chrome159_spec` (k=1).
 
 - 2026-11-19 `backdrop-filter` colour functions: Filter Effects 1 sRGB matrices in order, clamped after each (grayscale/sepia use 0.2126, saturate/hue-rotate 0.213), composited over the unfiltered backdrop, with blur first. Helpers `engine2d_backdrop_color_matrices` / `engine2d_backdrop_color_filter_pixels`; pinned by `backdrop_filter_color_functions_chrome159_spec`.
+## 2026-11-19 — fractional font sizes: hint knots at the float size
+
+- **Cause** (`src/lib/common/encoding/sfnt_glyf.spl`, `_lcd_hint_knots`): the y hint knots were built from the whole `size_px`, so 13.3333 px (UA textarea/`<small>` mono) drew 9-row caps where Chrome draws 10, and 21.3333 px sans started one row low. FreeType's light autohinter scales at the float size; only the 6..14 ppem x-height round-up rule reads the whole ppem.
+- **Fix:** `_lcd_hint_knots(…, size_milli)` scales at `size_milli / 1000`; the cache key carries `size_milli`. Whole sizes pass `size_px * 1000`, so their raster is byte-identical (bands 13/16/19 px unchanged).
+- **Evidence:** forms-media 1x 2.16 -> 2.15, other 1x and all dpr4 rows unchanged. Spec `test/01_unit/browser_engine/fractional_font_y_raster_chrome159_spec.spl` pins first/last ink rows of 9 bands (fractional + whole) against Chrome on cpu_simd and vulkan.
