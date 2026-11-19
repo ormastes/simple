@@ -1,0 +1,97 @@
+"""
+## Purpose and audience
+Purpose: pin the exact (milli-px) text width of FRACTIONAL font sizes against
+Chrome 159. Chrome hands FreeType the size in 26.6 fixed point, so a
+10.6667 px run is measured at 682/64 = 10.65625 px and 13.3333 px at 853/64
+(`v`, 1024 of 2048 units in the Arial-metric face Chrome resolves for
+sans-serif here -- 8.000 px at 16 px, although `fc-match sans-serif` names
+DejaVu Sans -- is 341/64 px at 10.6667). Simple carried
+no exact width for a fractional size at all (`resolved_font_width_milli` was
+only set for whole px), so the row flex and table column split fell back to
+whole-px text widths and an edge landed one px off.
+Audience: text metrics and browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless, `--hide-scrollbars
+--force-device-scale-factor=1 --window-size=400,300`, host default
+sans-serif, text `color:transparent` so only box backgrounds and borders are
+probed). Item right edges from getBoundingClientRect:
+
+| row | content                                       | Chrome right edges (CSS px)                   |
+|-----|-----------------------------------------------|-----------------------------------------------|
+| 0   | flex, 13.3333px                               | 55.5469 110.3906 169.6719 214.1406 291.9063 328.2031 |
+| 1   | flex, bold 18.72px                            | 83.1875 165.3281 256.7656 322.9375            |
+| 2   | flex, 10.6667px, border 1px, gap 3px          | 46.4219 95.2656 147.6563 188.2031 223.4063    |
+| 3   | table, collapse, 13.3333px cells, padding 0   | 55.5469 110.3906 169.6719 214.1406 291.9063   |
+
+Base (2b56492e5c5) drew row 0 and the table with `Evidence` ending at 111
+(Chrome 110) and row 2 with `Animation` ending at 146 (Chrome 147).
+Known residual, not pinned here: regular 18.72px words measure 0.03..0.06 px
+under the 26.6 model in Chrome; row 1's edges agree either way.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-FRACTIONAL-FONT-SIZE-002 -- fractional computed font sizes carry an exact text width measured at the 26.6 font size.
+"""
+# @cover src/lib/nogc_sync_mut/text_layout/font_renderer.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_resolved_engine2d_backend}
+
+val FS_W: i32 = 400
+val FS_H: i32 = 300
+val FS_PAGE: text = "<!DOCTYPE html><html><body style=\"margin:0;background:#fff;font:16px sans-serif;color:transparent\"><div style=\"display:flex;height:20px;font-size:13.3333px\"><div style=\"background:#f00\">Overview</div><div style=\"background:#0f0\">Evidence</div><div style=\"background:#00f\">Animation</div><div style=\"background:#ff0\">Tab bar</div><div style=\"background:#0ff\">Forms media</div><div style=\"background:#f00\">HTML</div></div><div style=\"display:flex;height:20px;font-size:18.72px;font-weight:bold\"><div style=\"background:#f00\">Overview</div><div style=\"background:#0f0\">Evidence</div><div style=\"background:#00f\">Animation</div><div style=\"background:#ff0\">Tab bar</div></div><div style=\"display:flex;height:20px;font-size:10.6667px;gap:3px\"><div style=\"background:#f00;border:1px solid #000\">Overview</div><div style=\"background:#0f0;border:1px solid #000\">Evidence</div><div style=\"background:#00f;border:1px solid #000\">Animation</div><div style=\"background:#ff0;border:1px solid #000\">Tab bar</div><div style=\"background:#0ff;border:1px solid #000\">Forms</div></div><table style=\"border-collapse:collapse;font-size:13.3333px\"><tr><td style=\"background:#f00;padding:0\">Overview</td><td style=\"background:#0f0;padding:0\">Evidence</td><td style=\"background:#00f;padding:0\">Animation</td><td style=\"background:#ff0;padding:0\">Tab bar</td><td style=\"background:#0ff;padding:0\">Forms media</td></tr></table></body></html>"
+
+val FS_ROWS: [i32] = [10, 30, 50, 67]
+# Chrome 159 colour runs at each probed row (x:colour; R/G/B/Y/C item
+# backgrounds, k border, w page).
+val FS_RUNS: [text] = [
+    "0:R 56:G 110:B 170:Y 214:C 292:R 328:w",
+    "0:R 83:G 165:B 257:Y 323:w",
+    "0:k 1:R 45:k 46:w 49:k 50:G 94:k 95:w 98:k 99:B 147:k 148:w 151:k 152:Y 187:k 188:w 191:k 192:C 222:k 223:w",
+    "0:R 56:G 110:B 170:Y 214:C 292:w"
+]
+
+fn fs_key(p: u32) -> text:
+    val r = ((p >> 16) & 255u32) as i32
+    val g = ((p >> 8) & 255u32) as i32
+    val b = (p & 255u32) as i32
+    if r > 200 and g > 200 and b > 200: return "w"
+    if r > 200 and g > 200: return "Y"
+    if g > 200 and b > 200: return "C"
+    if r > 200: return "R"
+    if g > 200: return "G"
+    if b > 200: return "B"
+    if r < 60 and g < 60 and b < 60: return "k"
+    "?"
+
+fn fs_runs(px: [u32], y: i32) -> text:
+    var out = ""
+    var prev = ""
+    var x = 0
+    while x < FS_W:
+        val k = fs_key(px[y * FS_W + x])
+        if k != prev:
+            out = out + (if out == "": "" else: " ") + x.to_string() + ":" + k
+            prev = k
+        x = x + 1
+    out
+
+fn fs_mismatches(px: [u32]) -> i32:
+    if px.len() != FS_W * FS_H:
+        print "frame {px.len()} px"
+        return 99
+    var bad = 0
+    var i = 0
+    while i < FS_ROWS.len():
+        val got = fs_runs(px, FS_ROWS[i])
+        if got != FS_RUNS[i]:
+            print "y={FS_ROWS[i]}: {got}"
+            print "  Chrome {FS_RUNS[i]}"
+            bad = bad + 1
+        i = i + 1
+    bad
+
+describe "fractional font size exact text width (Chrome 159)":
+    it "AC-1: flex items and table cells at 13.3333 / 18.72 / 10.6667 px snap to Chrome's edges":
+        step("Evidence ends at 110 (13.3333px flex and table); Animation ends at 147 (10.6667px bordered row)")
+        expect(fs_mismatches(simple_web_render_html_to_pixels_with_resolved_engine2d_backend(FS_PAGE, FS_W, FS_H, "cpu_simd"))).to_equal(0)
