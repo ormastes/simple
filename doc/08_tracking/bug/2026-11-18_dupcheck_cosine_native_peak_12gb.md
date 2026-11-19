@@ -1,6 +1,6 @@
 # duplicate-check cosine: native build peaks at 12 GB (seed 2.4 GB)
 
-- Status: open
+- Status: verification-pending
 - Date: 2026-11-18
 - Component: src/compiler/90.tools/duplicate_check (cosine mode), native runtime
 
@@ -36,3 +36,23 @@ Sample PeakWorkingSet64 every 200 ms.
 
 Seed-interpreted cosine is ~1.7x slower than native and was seen to stall
 on the full tree earlier in the session; the native build is the usable path.
+
+## Fix (2026-11-19)
+
+Root cause was native-runtime leaks in the candidate-generation pattern, isolated
+with micro-benchmarks: read-copy-push-write on `{text: [i64]}` (5.6 GB / 60k
+pushes), a fresh `"{i}-{j}"` text key per pair (463 MB vs 40 MB with i64 keys),
+and `dict.keys()` per cosine call.
+
+- `similarity.spl`: `KeyBuckets` (slot dict + in-place `members[slot].push`),
+  `seen_pairs` keyed by `lo * (n+1) + hi` (i64) instead of text.
+- `features.spl`: `FeatureVec.tokens` cached at build time; `cosine_similarity`
+  iterates it instead of calling `keys()`.
+
+| native cosine | wall | peak | output |
+|---|---|---|---|
+| before | 321 s | 12,585 MB | baseline |
+| after | 309 s | **5,402 MB** | byte-identical (28,311 lines) |
+
+Token mode unchanged: 129 s / 519 MB, byte-identical. The underlying runtime
+leaks (dict-of-array copy, per-call `keys()`) remain and are tracked separately.
