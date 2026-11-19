@@ -1,0 +1,69 @@
+# std.nogc_sync_mut.crash.failure_slot_v1 — bounded first-fault record (DHR P2).
+#
+# Plan: doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md §7.2.
+# A fault path writes ONE fixed record into this slot before frames are lost;
+# an independent broker later take()s it. Rules:
+#   - first fault wins: a nested fault never overwrites a valid record, it only
+#     bumps nested_faults (DBG-06);
+#   - the valid marker is set LAST, so a reader never sees a half-written record;
+#   - no allocation beyond the caller-provided text, no I/O, no callbacks.
+# First consumer: os.smf.kernel_plugin.recovery_worker (worker failure exits).
+# Not wired into the C signal handler or the interpreter assert yet: those need
+# the externs in doc/08_tracking/bug/crash_signal_bundle_extern_gap_2026-07-29.md
+# and a self-hosted binary to verify against.
+
+pub enum FailureKindV1:
+    Assert
+    Panic
+    Signal
+    Deadline
+    WorkerExit
+
+pub struct FailureRecordV1:
+    kind: FailureKindV1
+    site: text
+    message: text
+    module_generation: u64
+    execution_epoch: u64
+    sequence: u64
+    nested_faults: u64
+
+class FailureSlotV1:
+    var valid: bool
+    var kind: FailureKindV1
+    var site: text
+    var message: text
+    var module_generation: u64
+    var execution_epoch: u64
+    var sequence: u64
+    var nested_faults: u64
+
+    static fn create() -> FailureSlotV1:
+        FailureSlotV1(valid: false, kind: FailureKindV1.Panic, site: "", message: "",
+            module_generation: 0, execution_epoch: 0, sequence: 0, nested_faults: 0)
+
+    # @allow(primitive_api) generation/epoch are the KPF identities current at the fault
+    me publish(kind: FailureKindV1, site: text, message: text, module_generation: u64, execution_epoch: u64) -> bool:
+        """Record a fault; returns false (and counts it) if a fault is already held."""
+        if self.valid:
+            self.nested_faults = self.nested_faults + 1
+            return false
+        self.kind = kind
+        self.site = site
+        self.message = message
+        self.module_generation = module_generation
+        self.execution_epoch = execution_epoch
+        self.sequence = self.sequence + 1
+        self.valid = true
+        true
+
+    me take() -> Option<FailureRecordV1>:
+        """Hand the held record to the broker and free the slot."""
+        if not self.valid:
+            return None
+        val record = FailureRecordV1(kind: self.kind, site: self.site, message: self.message,
+            module_generation: self.module_generation, execution_epoch: self.execution_epoch,
+            sequence: self.sequence, nested_faults: self.nested_faults)
+        self.valid = false
+        self.nested_faults = 0
+        Some(record)

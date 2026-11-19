@@ -14,6 +14,7 @@ use std.nogc_sync_mut.kernel_plugin.recovery_transaction.{
 }
 use os.smf.kernel_plugin.worker_protocol.{KpfWorkerOutcome}
 use os.smf.kernel_plugin.real_worker_process.{KpfRealWorkerExitV1}
+use std.nogc_sync_mut.crash.failure_slot_v1.{FailureSlotV1, FailureKindV1}
 use os.smf.kernel_plugin.recovery_worker.{kpf_recover_on_worker_exit}
 
 fn id(value: u64) -> KpfId128: KpfId128(hi: value, lo: value + 1)
@@ -33,22 +34,37 @@ fn _in_probation() -> KpfRecoveryTransaction:
 describe "worker exit recovery policy":
     it "EMB-01: a crashed candidate worker restores V1":
         val tx = _in_probation()
-        val receipt = kpf_recover_on_worker_exit(tx, _exit(KpfWorkerOutcome.WorkerCrashed))
+        val receipt = kpf_recover_on_worker_exit(tx, _exit(KpfWorkerOutcome.WorkerCrashed), FailureSlotV1.create())
         expect(receipt.verdict == KpfRecoveryVerdict.Applied).to_equal(true)
         expect(receipt.phase == KpfRecoveryPhase.Restored).to_equal(true)
 
     it "a deadline kill is a candidate failure":
         val tx = _in_probation()
-        expect(kpf_recover_on_worker_exit(tx, _exit(KpfWorkerOutcome.TimedOut)).phase == KpfRecoveryPhase.Restored).to_equal(true)
+        expect(kpf_recover_on_worker_exit(tx, _exit(KpfWorkerOutcome.TimedOut), FailureSlotV1.create()).phase == KpfRecoveryPhase.Restored).to_equal(true)
+
+    it "a failure exit records evidence before rollback advances the epoch":
+        val tx = _in_probation()
+        val epoch_at_failure = tx.execution_epoch
+        val slot = FailureSlotV1.create()
+        kpf_recover_on_worker_exit(tx, _exit(KpfWorkerOutcome.WorkerCrashed), slot)
+        val record = slot.take().unwrap()
+        expect(record.kind == FailureKindV1.WorkerExit).to_equal(true)
+        expect(record.execution_epoch).to_equal(epoch_at_failure)
+
+    it "a clean close records no failure evidence":
+        val tx = _in_probation()
+        val slot = FailureSlotV1.create()
+        kpf_recover_on_worker_exit(tx, _exit(KpfWorkerOutcome.Closed), slot)
+        expect(slot.take().is_none()).to_equal(true)
 
     it "a clean close does not roll back":
         val tx = _in_probation()
-        val receipt = kpf_recover_on_worker_exit(tx, _exit(KpfWorkerOutcome.Closed))
+        val receipt = kpf_recover_on_worker_exit(tx, _exit(KpfWorkerOutcome.Closed), FailureSlotV1.create())
         expect(receipt.verdict == KpfRecoveryVerdict.Rejected).to_equal(true)
         expect(tx.phase == KpfRecoveryPhase.Probation).to_equal(true)
 
     it "a crash after acknowledged writes is blocked, not rolled back":
         val tx = _in_probation()
         tx.record_effect(tx.execution_epoch, KpfEffectOutcome.Acknowledged)
-        val receipt = kpf_recover_on_worker_exit(tx, _exit(KpfWorkerOutcome.WorkerCrashed))
+        val receipt = kpf_recover_on_worker_exit(tx, _exit(KpfWorkerOutcome.WorkerCrashed), FailureSlotV1.create())
         expect(receipt.verdict == KpfRecoveryVerdict.Blocked).to_equal(true)
