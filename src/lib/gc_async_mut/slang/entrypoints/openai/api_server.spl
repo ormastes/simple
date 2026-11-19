@@ -12,6 +12,9 @@
 #   POST /v1/chat/completions -> 400 / 404 / 503, see serving_chat.spl
 #   POST /v1/completions      -> legacy text completion (raw prompt, no chat template)
 #   GET  /health              -> 200 {"status":"ok"}
+#   POST /v1/audio/transcriptions, /v1/audio/speech, /v1/images/generations,
+#        /v1/embeddings, /v1/rerank -> serving/ modules (kind_route_paths below)
+# A route asked for a model of another kind answers 400 wrong_model_kind.
 # Anything else is 404; a known path with the wrong method is 405.
 # stream=true is served by serving_stream.spl over a socket; this transport-free
 # dispatcher returns whole bodies, so it answers stream=true with a 400.
@@ -21,6 +24,14 @@ use std.gc_async_mut.slang.entrypoints.openai.serving_models.{discover_models, m
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{scan_model_root}
 use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available, engine_complete_text_stops}
 use std.gc_async_mut.slang.entrypoints.openai.serving_chat.{serve_chat_completions, model_not_found_response, engine_refusal_response}
+use std.gc_async_mut.slang.entrypoints.openai.serving_models.{models_list_response, kind_mismatch}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{json_string_field}
+use std.gc_async_mut.slang.entrypoints.openai.serving.serving_transcriptions.{serve_transcriptions}
+use std.gc_async_mut.slang.entrypoints.openai.serving.serving_speech.{serve_speech}
+use std.gc_async_mut.slang.entrypoints.openai.serving.serving_images.{serve_images}
+use std.gc_async_mut.slang.entrypoints.openai.serving.serving_pooling.{serve_embeddings, serve_rerank}
+use std.gc_async_mut.slang.modality.kinds.{ModelKind}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
 
 fn _strip_query(path: text) -> text:
     val at = path.find("?")
@@ -40,12 +51,35 @@ fn _normalize(path: text) -> text:
 # which is exactly what /v1/models did before, silently, for real HuggingFace
 # checkouts. The reason a model is not runnable is reported by
 # /v1/chat/completions, which is where a client asks for one.
+# Each entry carries slang_kind, input_modalities and output_modalities.
 fn serve_models(model_root: text) -> ApiResponse:
-    var ids = model_ids(discover_models(model_root))
+    var natives: [NativeModel] = []
     for m in scan_model_root(model_root, engine_backend_available()):
         if m.format != "slang-pack" and m.format != "unknown":
-            ids.push(m.id)
-    openai_models_response(ids, "slang")
+            natives.push(m)
+    models_list_response(discover_models(model_root), natives, "slang")
+
+# The non-chat kind routes, each served by one serving/ module that checks the
+# requested model's kind itself (serving_models.model_for_kind).
+fn kind_route_paths() -> [text]:
+    ["/v1/audio/transcriptions", "/v1/audio/speech", "/v1/images/generations", "/v1/embeddings", "/v1/rerank"]
+
+fn _serve_kind_route(route: text, model_root: text, body: text) -> ApiResponse:
+    if route == "/v1/audio/transcriptions":
+        return serve_transcriptions(model_root, body)
+    if route == "/v1/audio/speech":
+        return serve_speech(model_root, body)
+    if route == "/v1/images/generations":
+        return serve_images(model_root, body)
+    if route == "/v1/embeddings":
+        return serve_embeddings(model_root, body)
+    if route == "/v1/rerank":
+        return serve_rerank(model_root, body)
+    openai_error_response(404, "unknown route " + route, "invalid_request_error", "not_found", "")
+
+# 400 wrong_model_kind before a chat route runs a model of another kind.
+fn _chat_kind_check(model_root: text, body: text, route: text) -> Result<(), ApiResponse>:
+    kind_mismatch(model_root, json_string_field(body, "model"), ModelKind.Chat, route)
 
 fn serve_completions(model_root: text, body: text) -> ApiResponse:
     match parse_completion_request(body):
@@ -76,15 +110,28 @@ fn slang_api_dispatch(method: text, path: text, body: text, model_root: text) ->
     if route == "/v1/chat/completions":
         if verb != "POST":
             return openai_error_response(405, "method " + verb + " is not allowed on /v1/chat/completions", "invalid_request_error", "method_not_allowed", "")
+        match _chat_kind_check(model_root, body, route):
+            Err(refusal):
+                return refusal
+            Ok(_): ()
         return serve_chat_completions(model_root, body)
     if route == "/v1/completions":
         if verb != "POST":
             return openai_error_response(405, "method " + verb + " is not allowed on /v1/completions", "invalid_request_error", "method_not_allowed", "")
+        match _chat_kind_check(model_root, body, route):
+            Err(refusal):
+                return refusal
+            Ok(_): ()
         return serve_completions(model_root, body)
+    for kind_path in kind_route_paths():
+        if kind_path == route:
+            if verb != "POST":
+                return openai_error_response(405, "method " + verb + " is not allowed on " + route, "invalid_request_error", "method_not_allowed", "")
+            return _serve_kind_route(route, model_root, body)
     if route == "/health":
         if verb != "GET":
             return openai_error_response(405, "method " + verb + " is not allowed on /health", "invalid_request_error", "method_not_allowed", "")
         return ApiResponse(status: 200, body: "{\"status\":\"ok\"}")
     openai_error_response(404, "unknown route " + route, "invalid_request_error", "not_found", "")
 
-export serve_models, serve_completions, slang_api_dispatch
+export serve_models, serve_completions, slang_api_dispatch, kind_route_paths

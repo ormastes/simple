@@ -1559,6 +1559,54 @@ fn _fb_border_side_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
     val alpha = ((color >> 24) & 255u32) as i32
     fb_rect_opacity_clip(fb, fbw, fbh, x, y, w, h, color | 0xFF000000u32, (alpha * 100 + 127) / 255, clip)
 
+# Chrome 159 at 1x draws 2px / 3px dots as square pixel runs on a pitch of 2t
+# (measured 50..89px sides): n = (length - t + 2) / 2t + 1 dots, interior gaps
+# exactly t; the leftover e = length - t - 2t (n - 1) goes to the end gaps, one
+# px at most each (first end first); past that (3px, e = 3) both end dots grow
+# by the px that no gap took. Empty when fewer than three dots fit.
+# 1px (measured 50..60, 100, 200): full-black dots on pitch 2, n = (length + 1) / 2
+# ending flush at the last px; an even length widens the first dot to 2px.
+# reason: geometry helper shared by the raster and Draw IR border lanes
+# @allow(primitive_api)
+fn _border_square_dot_runs(length: i32, t: i32) -> [i32]:
+    if t == 1:
+        val n1 = (length + 1) / 2
+        var r1: [i32] = []
+        var j = 0
+        # cpu-lane-loop-ok: one run per dot of one side; bound is length / 2
+        while j < n1:
+            r1.push(length - 1 - 2 * (n1 - 1 - j))
+            r1.push(1)
+            j = j + 1
+        if length % 2 == 0:
+            r1[0] = 0
+            r1[1] = 2
+        return r1
+    val n = (length - t + 2) / (2 * t) + 1
+    if n < 3:
+        return []
+    val e = length - t - 2 * t * (n - 1)
+    val first = if e > 1: 1 else: (if e < -1: -1 else: e)
+    val rest = e - first
+    val last = if rest > 1: 1 else: (if rest < -1: -1 else: rest)
+    val grow = e - first - last
+    var runs: [i32] = []
+    var pos = 0
+    var i = 0
+    # cpu-lane-loop-ok: one run per dot of one side; bound is n <= length / 2t + 1
+    while i < n:
+        val ends = i == 0 or i == n - 1
+        runs.push(pos)
+        runs.push(if ends: t + grow else: t)
+        var step = 2 * t
+        if i == 0:
+            step = step + first
+        if i == n - 2:
+            step = step + last
+        pos = pos + step
+        i = i + 1
+    runs
+
 # Dash runs [start, len, start, len, ...] along one straight border side of
 # `length` px and `thickness` px, as Chrome 159 lays them out
 # (StrokeData::SelectBestDashGap, open path): a dash of 2t (dotted: t) at both
@@ -1581,6 +1629,10 @@ pub fn border_dash_runs(length: i32, thickness: i32, dotted: bool, device_k: i32
     if length < 2 * dash + gap:
         val short_dash = (length * dash * 2 + (2 * dash + gap)) / ((2 * dash + gap) * 2)
         return [0, short_dash, length - short_dash, short_dash]
+    if dotted and device_k == 1 and (t == 1 or t == 2 or t == 3):
+        val dots = _border_square_dot_runs(length, t)
+        if dots.len() > 0:
+            return dots
     val min_n = (length + gap) / (dash + gap)
     val max_n = min_n + 1
     val min_gap_milli = ((length - min_n * dash) * 1000) / (min_n - 1)

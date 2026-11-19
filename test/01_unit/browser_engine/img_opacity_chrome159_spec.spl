@@ -1,0 +1,66 @@
+"""
+## Purpose and audience
+Purpose: Pin an `<img>` that carries its own `opacity` to Chrome 159. Chrome
+paints such an image as a one-member opacity group: the image into a layer,
+the layer composited at alpha round(opacity * 255).
+Audience: browser-engine maintainers.
+
+Chrome 159 (arm64 headless, --force-device-scale-factor=4,
+--window-size=400,300). The 2x2 test image is uniform RGBA (30,60,240,160), so
+each 10x8 box is one colour; the pins are whole 4x4 device blocks.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-IMG-OPACITY-CHROME159-001 — an <img> with its own opacity paints as Chrome 159 does.
+"""
+use std.spec.*
+use std.common.image.png_decode.{decode_png_to_argb}
+use std.common.base_encoding.base64.{base64_decode_bytes}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource, simpleos_host_gpu_image_resource}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_pixels_with_images}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d_with_images}
+
+val IO_IMG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR4nGOUs/mwgIGBgYGJAQoAHMQB7tXVXUgAAAAASUVORK5CYII="
+
+fn io_resources() -> [SimpleOsHostGpuImageResource]:
+    val png = decode_png_to_argb(base64_decode_bytes(IO_IMG.substring(22, IO_IMG.len())))
+    if val Err(reason) = png:
+        print "decode failed: {reason}"
+        return []
+    val img = png.unwrap()
+    [simpleos_host_gpu_image_resource(IO_IMG, img.width, img.height, img.pixels)]
+
+fn io_img(left: i32, op: text) -> text:
+    "<img src=\"" + IO_IMG + "\" style=\"position:absolute;left:" + "{left}" + "px;top:0;width:10px;height:8px" + op + "\">"
+
+# opacity .5 and .3 over white, .6 over rgb(200,30,120), and no opacity.
+fn io_page() -> text:
+    "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\">" + io_img(0, ";opacity:0.5") + io_img(16, ";opacity:0.3") +
+        "<div style=\"position:absolute;left:32px;top:0;width:10px;height:8px;background:rgb(200,30,120)\">" + io_img(0, ";opacity:0.6") + "</div>" +
+        io_img(48, "") + "</body></html>"
+
+val IO_X: [i32] = [4, 20, 36, 52]
+val IO_CHROME: [u32] = [0xFFB8C2FBu32, 0xFFD4DAFDu32, 0xFF8829A5u32, 0xFF7285F6u32]
+
+fn io_mismatches(px: [u32], lane: text) -> i32:
+    if px.len() < 64 * 16:
+        return 999
+    var bad = 0
+    var n = 0
+    while n < IO_X.len():
+        val got = px[4 * 64 + IO_X[n]]
+        if got != IO_CHROME[n]:
+            print "{lane} ({IO_X[n]},4) got {got} want {IO_CHROME[n]}"
+            bad = bad + 1
+        n = n + 1
+    bad
+
+describe "<img> with its own opacity (Chrome 159)":
+    it "on the CPU raster":
+        expect(io_mismatches(simple_web_layout_render_html_software_pixels_with_images(io_page(), 64, 16, io_resources()), "raster")).to_equal(0)
+
+    it "on cpu_simd":
+        expect(io_mismatches(simple_web_layout_render_html_pixels_engine2d_with_images(io_page(), 64, 16, "cpu_simd", io_resources()), "cpu_simd")).to_equal(0)
+
+    it "on Vulkan":
+        expect(io_mismatches(simple_web_layout_render_html_pixels_engine2d_with_images(io_page(), 64, 16, "vulkan", io_resources()), "vulkan")).to_equal(0)

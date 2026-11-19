@@ -1,0 +1,50 @@
+# @gc — module uses GC runtime
+#
+# Kind dispatch — which runner module serves a non-chat kind.
+# Design: doc/05_design/ml/slang/slang_pluggable_modalities.md §3.4.
+#
+# Every runner module exposes the same four free functions:
+#   <r>_available() -> bool                  path of its library exists
+#   <r>_open(NativeModel) -> Result<(), text>  the ONLY place a native library
+#                                               is dlopened
+#   <r>_run(KindRequest) -> Result<KindResult, text>
+#   <r>_close()
+# This module selects one with a plain `match` on RunnerKind: no inheritance,
+# no trait objects. Chat stays on engine/llm_engine.spl. A runner arm that is
+# not built yet answers Err naming what is missing; nothing is loaded here.
+
+use std.gc_async_mut.slang.engine.runner_dispatch.{RunnerKind, runner_kind_text}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
+use std.gc_async_mut.slang.modality.kinds.{model_kind_text}
+use std.gc_async_mut.slang.host.slang_host.{host_env, host_file_exists}
+
+# The environment variable naming the runner's native library.
+fn kind_runner_lib_env(runner: RunnerKind) -> text:
+    match runner:
+        RunnerKind.Ggml: "SLANG_GGML_LIB"
+        RunnerKind.Pure: ""
+        RunnerKind.Whisper: "SLANG_WHISPER_LIB"
+        RunnerKind.StableDiffusion: "SLANG_SD_LIB"
+
+# True when the runner's library path is configured and exists. Never opens it.
+fn kind_runner_available(runner: RunnerKind) -> bool:
+    match runner:
+        RunnerKind.Ggml: engine_backend_available()
+        RunnerKind.Pure: true
+        _:
+            val path = host_env(kind_runner_lib_env(runner))
+            path != "" and host_file_exists(path)
+
+fn _not_built(model: NativeModel) -> text:
+    val runner = model.profile.runner
+    val lib = if kind_runner_lib_env(runner) == "": "" else: " (" + kind_runner_lib_env(runner) + " library present: " + (if kind_runner_available(runner): "yes" else: "no") + ")"
+    "no " + runner_kind_text(runner) + " runner for kind " + model_kind_text(model.profile.kind) + " is built into this slang yet" + lib
+
+# Opens the runner of `model`'s kind. The run/close arms join this match as
+# each runner module lands.
+fn kind_open(model: NativeModel) -> Result<(), text>:
+    match model.profile.runner:
+        _: Err(_not_built(model))
+
+export kind_runner_lib_env, kind_runner_available, kind_open

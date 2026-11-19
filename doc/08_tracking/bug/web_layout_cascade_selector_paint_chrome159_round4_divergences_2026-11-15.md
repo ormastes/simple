@@ -613,7 +613,7 @@ head (13/40 at base).
   - New `img_raster_chrome159_spec` 3/3 (2x2 and 6x4 `TG_IMG` = `FF7285F6` inside, white outside; no resource paints nothing). With the paint disabled: 1/3 (both painting rows fail).
   - `opacity_group_chrome159_spec` 18/18 with a raster row feeding the resource: (18,12) = `8829A5`, `tg_mismatches == 0`. Disabled: 17/18.
   - Not pinned on the raster: (50,12) / (54,12). That cell's two non-opaque paints overlap, so the raster does not admit it as a group (documented at `TG_X`); with the image painted it reads `7285F6` / `39427B` where Chrome has `B8C2FB` / `9A9FBC`. Admitting overlapping groups is separate work. (FIXED 2026-11-19, see the raster overlapping-paint entry.)
-- Review note (2026-11-18): an `<img>` carrying its own `opacity:.5` (no group) reads `B8C2FA` on the raster and on cpu_simd alike. Chrome gives `B8C2FB` for the same image inside a 0.5 group: folding the opacity into the image alpha rounds blue one level low. Unpinned. `_raster_images` is module state, so the raster supports one render at a time per process.
+- Review note (2026-11-18, FIXED 2026-11-19, see the `<img>` opacity entry): an `<img>` carrying its own `opacity:.5` (no group) reads `B8C2FA` on the raster and on cpu_simd alike. Chrome gives `B8C2FB` for the same image inside a 0.5 group: folding the opacity into the image alpha rounds blue one level low. Unpinned. `_raster_images` is module state, so the raster supports one render at a time per process.
 
 ## 2026-11-18 — raster per-corner borders (FIXED for solid sides)
 
@@ -804,3 +804,47 @@ head (13/40 at base).
 - **Chrome's path:** the GPU capture and the `--disable-gpu` capture are byte-identical. Chrome's corner coverage is not symmetric across the corner diagonal (up to 15 levels apart, mean 4). That is the signature of Skia's CPU scanline analytic AA, which snaps edges to sub-scanlines.
 - **Formulas that do not fit:** exact pixel-area coverage, distance-to-circle, gradient-normalised distance, and exact area under an N-chord polygon (N = 2..32). All are symmetric, so none can fit; the best leaves a maximum error of 22-29 levels.
 - **Order of work:** port Skia's conic -> quad -> line flattening and its AAA edge-coverage accumulation, then pin full k=4 frames within 2 levels (the `opacity_group` precedent). A spec with a wider tolerance pins nothing.
+
+## 2026-11-19 — `<img>` with its own opacity is composited as a layer (FIXED on raster, cpu_simd and Vulkan)
+
+- **Symptom:** every lane folded an image's own `opacity` into its pixels' alpha. On a uniform RGBA (30,60,240,160) image:
+  | opacity, backdrop | Simple | Chrome 159 |
+  |---|---|---|
+  | 0.5 over white | `B8C2FA` | `B8C2FB` |
+  | 0.3 over white | `D5DAFC` | `D4DAFD` |
+  | 0.6 over rgb(200,30,120) | `882AA5` | `8829A5` |
+- **Chrome rule:** even a lone `<img>` is a one-member opacity layer. The layer pixel is the image pixel, restored by SkBlendARGB32 at round(opacity * 255). That is the same arithmetic as the image inside a group, already pinned at `tg_page` (18,12).
+- **Fix:**
+  - Raster: `_fb_paint_img_clip` composites each pixel with `css_opacity_group_composite_pixel` when opacity < 100. The fold helper `_raster_img_alpha` is deleted.
+  - Engine2D (`_simple_web_opacity_root_bounds`): an image command counts as two paint items, so an image alone forms a group instead of taking the single-item fold.
+- **Evidence:**
+  - New `img_opacity_chrome159_spec`: four 10x8 boxes (0.5, 0.3, 0.6 over magenta, and no opacity) on the raster, cpu_simd and Vulkan. Base 0/3, three cells each; head 3/3.
+  - Base vs head over the 164 specs mentioning opacity or `<img>`, serial on the same seed: 0 new failures. The only change is the three new-spec rows going green; 425 failing rows are pre-existing and identical on both.
+
+## 2026-11-19 — dashed corners with a radius below the border width (measured, still on the per-side path)
+
+- **Scope today:** the rounded-dash path takes differing radii only when every corner has r >= t. A smaller corner keeps the per-side painter, so this entry changes no pixel.
+- **Measured** (Chrome 159, k=4, a 56x40 `#c02020` dashed box with one small corner and the other three at 16; compared with the closed-path model, using corner offset max(r, t/2), over every uniform cell):
+
+  | t | small corner | r -> mismatched cells |
+  |---|---|---|
+  | 6 | top-left | 0->16, 2->15, 3->15, 4->4, 5..10->0 |
+  | 6 | top-right | 3->7, 5->0, 7->0 |
+  | 8 | top-left | 0->29, 2..4->26, 5->7, 6->4, 7..10->0 |
+  | 8 | top-right | 3->16, 5->0, 7->0 |
+
+- **What holds:**
+  - The dash layout stays on the closed path.
+  - The first top dash starts at x = max(r, t/2).
+  - The errors are local to the small corner.
+  - Every tested box with all r >= t-1 matched exactly.
+- **What does not fit:** when r < t/2, Chrome paints the leg after the corner only on its inner half (t=6, r=0: x 3..5, y 3..8), joined by a diagonal triangle. The closed-path stroke would paint the full band width there. This looks like Chrome's per-side clip rather than a stroke join. Earlier, a box with several small corners (t=8, radii 5/7/16/6) laid its top dashes out per side: runs (0,16),(20,16),(40,15), 403 mismatches.
+- **Next:** find the switch to the per-side layout, which needs a box with several small corners. Then model the inner-half leg. Widening the admission to r >= t-1 alone gains one radius value per width, so it was not done.
+
+## 2026-11-19 — gradient `rem` stops are unpositioned (FIXED on raster, cpu_simd and Vulkan)
+
+- **Symptom:** a gradient stop given in `rem` read as having no position, so the stops spread evenly. On a 48px-wide `linear-gradient(to right, #ff0000 0.5rem, #0000ff 2rem)`, (3,7) read `FC0003`, where Chrome reads `FF0000`. The worst channel error was 78 on that page and 102 on a three-stop page whose root font size is 10px.
+- **Cause:** `gradient_stop_token` knows only `px`, `em` and `%`. The root font size is set during the cascade and reset to 16 when the cascade ends, so the paint step, which parses stops, cannot resolve `rem`.
+- **Fix:** `gradient_rem_stops_to_px` (`foundation_values`) rewrites every `<number>rem` in a gradient value to px at cascade time, against `css_cascade_root_font_px()`. `apply_decls` applies it to `background` and `background-image`. A `rem` with no digit before it, or with a name character after it (`url(a2rem.png)`), is left alone.
+- **Evidence:** new `gradient_rem_stops_chrome159_spec` (Chrome k=4, 16 points per page, ±2), 0/4 -> 4/4 on raster, cpu_simd, Vulkan and the helper's edge cases.
+- **Not covered:** a `rem` stop on `<html>` itself still resolves against 16px, because the root font size is set after the root's own declarations.
