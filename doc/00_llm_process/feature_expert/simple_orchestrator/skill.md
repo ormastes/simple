@@ -419,6 +419,7 @@ available. These source paths and their manuals remain NOT_RUN.
   controller. Keys: OpenSSH Ed25519 files in the protected identity store, leaf
   `sha256("simple-controller-authority-key-v1\n" + role + "\n" + identity + "\n" + revision) + ".key"`; read only
   through a cleanly opened store; signed via domain-pinned `host_identity_private_sign_{grant,approval}_v1`.
+  The private-file parser (`host_identity_private_run_v1`) parses armour+base64 on `[u8]` (no text copy) and wipes raw, seed and `pair.0` on every post-decode exit (NOT_RUN spec `host_identity_private_wipe_v1_spec.spl`).
 - `distributed_authority_snapshot_key_v2`: role-scoped lookup; never resolves a key under another role.
 - `orchestrator remote-run-plan`: prints only operationId/grantDigest/planDigest; never prints or writes the signed
   pair; starts no run. The remote run itself (V4 slot kind, V3 executor, chunked route) is blocked on owner decision
