@@ -3422,6 +3422,7 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - Corner AA (2026-11-19): Chrome's corner AA is Skia CPU scanline AAA (diagonal-asymmetric, GPU == --disable-gpu); no coverage formula fits, and a port of Skia's flattening + AAA is required. Check diagonal symmetry before fitting any AA model.
 
 - Raster opacity group layer alpha (2026-11-19): B/W two-pass alpha is exact only for one non-opaque paint per pixel; where paints overlap, paint a third pass over opaque black with all member colours (and image pixels) forced to white at their alpha and read its channel as the layer alpha (`_raster_white_alpha_pass`). Pinned by `opacity_group_chrome159_spec` raster rows.
+- `<img>` opacity (2026-11-19): even a lone `<img>` with opacity is a one-member layer in Chrome; composite its pixels with `css_opacity_group_composite_pixel`, never fold opacity into the pixel alpha (one level off). Pinned by `img_opacity_chrome159_spec`.
 
 - Vulkan gray text (2026-11-19): `font_atlas_batch.comp` gray branch = `color.spl` `blend()` image rule (div255r), the `_glsl_blit` twin; regenerate with `glslangValidator -V` + `scripts/tool/spirv-to-spl-words.shs`, split head/tail halves, and pass `check-font-atlas-batch-spirv-pinned.shs`. Metal/CUDA/legacy strings in `common/gpu/font_atlas_composite.spl` still use the old flooring rule.
 
