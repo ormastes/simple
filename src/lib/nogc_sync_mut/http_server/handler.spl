@@ -400,6 +400,10 @@ fn _multipart_next_delimiter(body: [u8], crlf_dash_boundary: [u8], from: i64) ->
         at = found + 1
     -1
 
+# Cap on one part's header block (octets between its delimiter line and the
+# blank line that ends it).
+val MULTIPART_PART_HEADER_LIMIT: i64 = 16384
+
 # Split a multipart/form-data body (HttpRequest.body_bytes) into parts whose
 # data stays raw bytes, so binary uploads (wav, png) survive unchanged.
 pub fn parse_multipart_bytes(body: [u8], content_type: text) -> Result<[MultipartPart], text>:
@@ -410,6 +414,8 @@ pub fn parse_multipart_bytes(body: [u8], content_type: text) -> Result<[Multipar
     val crlf_dash_boundary = text_to_utf8_bytes("\r\n--{boundary}")
     val header_end = text_to_utf8_bytes("\r\n\r\n")
     # The first delimiter starts the body or a line; any preamble is ignored.
+    # _multipart_next_delimiter only returns real delimiter lines, so from
+    # here on cursor is a part start (>= 0) or the close delimiter (-2).
     var cursor: i64 = -1
     if _multipart_find(body, dash_boundary, 0) == 0:
         cursor = _multipart_delimiter_end(body, dash_boundary.len())
@@ -419,20 +425,30 @@ pub fn parse_multipart_bytes(body: [u8], content_type: text) -> Result<[Multipar
             return Err("multipart: boundary not found")
         cursor = _multipart_delimiter_end(body, found + crlf_dash_boundary.len())
     var parts: [MultipartPart] = []
-    while true:
-        if cursor == -2:
-            return Ok(parts)
-        if cursor < 0:
-            return Err("multipart: malformed delimiter line")
+    while cursor != -2:
+        # A delimiter line right after a delimiter line: an empty part.
+        if _multipart_find(body, dash_boundary, cursor) == cursor:
+            val next = _multipart_delimiter_end(body, cursor + dash_boundary.len())
+            if next != -1:
+                parts.push(MultipartPart(name: "", filename: "", content_type: "", data: []))
+                cursor = next
+                continue
         var header_text = ""
         var data_start: i64 = 0
+        var data_stop: i64 = 0
         if cursor + 2 <= body.len() and body[cursor] == 13 and body[cursor + 1] == 10:
-            # Empty header block: the part starts with its blank line.
-            data_start = cursor + 2
+            # Empty header block: the part starts with its blank line. With an
+            # empty body that CRLF is also the next delimiter's CRLF.
+            data_stop = _multipart_next_delimiter(body, crlf_dash_boundary, cursor)
+            if data_stop < 0:
+                return Err("multipart: missing closing boundary")
+            data_start = if data_stop == cursor: cursor else: cursor + 2
         else:
             val headers_stop = _multipart_find(body, header_end, cursor)
             if headers_stop < 0:
                 return Err("multipart: unterminated part headers")
+            if headers_stop - cursor > MULTIPART_PART_HEADER_LIMIT:
+                return Err("multipart: part header block exceeds {MULTIPART_PART_HEADER_LIMIT} bytes")
             val inner = _multipart_next_delimiter(body, crlf_dash_boundary, cursor)
             if inner >= 0 and inner < headers_stop:
                 return Err("multipart: part header block contains the boundary")
@@ -440,25 +456,19 @@ pub fn parse_multipart_bytes(body: [u8], content_type: text) -> Result<[Multipar
                 Ok(value): value
                 Err(_): return Err("multipart: part headers are not UTF-8")
             data_start = headers_stop + header_end.len()
-        # An empty body leaves the delimiter's CRLF right at data_start.
-        val data_stop = _multipart_next_delimiter(body, crlf_dash_boundary, data_start)
-        if data_stop < 0:
-            return Err("multipart: missing closing boundary")
+            # An empty body leaves the delimiter's CRLF right at data_start.
+            data_stop = _multipart_next_delimiter(body, crlf_dash_boundary, data_start)
+            if data_stop < 0:
+                return Err("multipart: missing closing boundary")
         var name = ""
         var filename = ""
         var part_type = ""
         for line in header_text.split("\r\n"):
-            var field = ""
-            var field_value = ""
-            var past_colon = false
-            for ch in line.chars():
-                if past_colon:
-                    field_value = field_value + ch
-                elif ch == ":":
-                    past_colon = true
-                else:
-                    field = field + ch
-            val field_name = field.trim().to_lower()
+            val colon = line.index_of(":")
+            if colon <= 0:
+                continue
+            val field_name = line.slice(0, colon).trim().to_lower()
+            val field_value = line.slice(colon + 1, line.byte_len())
             if field_name == "content-disposition":
                 name = header_param(field_value, "name")
                 filename = header_param(field_value, "filename")

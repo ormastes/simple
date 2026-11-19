@@ -153,3 +153,31 @@ describe "HTTP binary bodies":
         val headers = [("Content-Type", "audio/wav"), ("content-type", "application/json")]
         expect(request_content_type(headers)).to_equal("audio/wav")
         expect(http_vector_request_body_v1([0xFFu8], headers).unwrap()).to_equal("")
+
+    it "parses a part with neither headers nor body as one empty part":
+        match parse_multipart_bytes(text_to_utf8_bytes("--B\r\n\r\n--B--"), "multipart/form-data; boundary=B"):
+            Ok(parts):
+                expect(parts.len()).to_equal(1)
+                expect(parts[0].name).to_equal("")
+                expect(parts[0].data.len()).to_equal(0)
+            Err(e): fail("parse failed: {e}")
+
+    it "parses back-to-back delimiters as an empty part before the next one":
+        match parse_multipart_bytes(text_to_utf8_bytes("--B\r\n--B\r\nX: y\r\n\r\nz\r\n--B--"), "multipart/form-data; boundary=B"):
+            Ok(parts):
+                expect(parts.len()).to_equal(2)
+                expect(parts[0].data.len()).to_equal(0)
+                expect(parts[1].data.len()).to_equal(1)
+                expect(parts[1].data[0]).to_equal(122)
+            Err(e): fail("parse failed: {e}")
+
+    it "caps a part header block at 16 KiB":
+        var big = "X-Pad: "
+        var i = 0
+        while i < 2100:
+            big = big + "abcdefgh"
+            i = i + 1
+        val body = text_to_utf8_bytes("--B\r\n{big}\r\n\r\nz\r\n--B--")
+        match parse_multipart_bytes(body, "multipart/form-data; boundary=B"):
+            Ok(_): fail("an oversized part header block must be refused")
+            Err(e): expect(e.contains("exceeds 16384")).to_equal(true)
