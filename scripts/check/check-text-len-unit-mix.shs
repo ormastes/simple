@@ -37,7 +37,24 @@ set -u
 scan_file() {
   # prints "file:line receiver" for each byte_len() line whose enclosing fn
   # also applies `recv[` ; prints "FNCOUNT <n>" on stderr-free channel last
-  awk -v F="$1" '
+  fm=""
+  if grep -Eq '[.][ \t]*[A-Za-z_][A-Za-z_0-9]*[.]len\(\)' "$1"; then fm=$(mktemp); build_fieldmap "$1" > "$fm"; fi
+  awk -v F="$1" -v FM="$fm" '
+    BEGIN {
+      # Struct field types ("name<TAB>u8|other"); see build_fieldmap.
+      if (FM != "") {
+        while ((getline fline < FM) > 0) {
+          split(fline, fpart, "\t")
+          if (fpart[2] == "u8") fu8[fpart[1]] = 1; else foth[fpart[1]] = 1
+        }
+        close(FM)
+      }
+    }
+    function field_bytes(name) {
+      # A dotted receiver counts bytes only when its field name is declared
+      # [u8] and never declared with another type: ambiguous names stay flagged.
+      return (name in fu8) && !(name in foth)
+    }
     function binding_code(text,   i, c, quote, escaped, result) {
       # Binding keywords/backslashes inside quoted values are not syntax.
       result = ""; quote = ""; escaped = 0
@@ -62,13 +79,15 @@ scan_file() {
     }
     function byte_receiver(text, start, name,   i, previous, prefix) {
       # Inline conditional/pattern/lambda bodies may shadow on this line.
-      if (binding_header_here) return 0
-      # Do not mistake object.bytes.len() for a local parameter named bytes.
+      # Do not mistake object.bytes.len() for a local parameter named bytes;
+      # a dotted receiver is typed only by its declared struct field name.
       previous = start > 1 ? substr(text, start - 1, 1) : ""
-      if (previous ~ /[A-Za-z_0-9.]/) return 0
+      if (previous == ".") return field_bytes(name)
+      if (previous ~ /[A-Za-z_0-9]/) return 0
       prefix = substr(text, 1, start - 1)
       sub(/[ \t]+$/, "", prefix)
-      if (substr(prefix, length(prefix), 1) == ".") return 0
+      if (substr(prefix, length(prefix), 1) == ".") return field_bytes(name)
+      if (binding_header_here) return 0
       for (i = binding_count; i > 0; i--)
         if (binding_name[i] == name) return binding_byte[i]
       return 0
@@ -289,6 +308,74 @@ scan_file() {
     }
     END { flush(); printf "FNCOUNT %d\n", fncount }
   ' "$1"
+  [ -z "$fm" ] || rm -f "$fm"
+  return 0
+}
+
+# build_fieldmap ROOT... — pre-pass: "name<TAB>u8|other" for every field
+# declared in a struct/class/mixin body under the scan set (or, in committed
+# mode, at the range tip). Unreadable sources yield an empty map (fail closed).
+fieldmap_awk='
+  /^[ \t]*$/ { next }
+  /^[ \t]*#/ { next }
+  {
+    ind = match($0, /[^ \t]/) - 1
+    if (ind == 0) {
+      inblock = ($0 ~ /^(pub |export )?(struct|class|mixin)[ \t]+[A-Za-z_]/); bind = -1
+      if (inblock && KEEP != "" && KEEP != "*") {
+        sname = $0; sub(/^(pub |export )?(struct|class|mixin)[ \t]+/, "", sname); sub(/[^A-Za-z_0-9].*$/, "", sname)
+        if (index(" " KEEP " ", " " sname " ") == 0) inblock = 0
+      }
+      next
+    }
+    if (!inblock) next
+    if (bind < 0) bind = ind
+    if (ind != bind) next
+    line = $0; sub(/#.*$/, "", line)
+    sub(/^[ \t]+(pub[ \t]+)?((val|var)[ \t]+)?/, "", line)
+    if (line !~ /^[A-Za-z_][A-Za-z_0-9]*[ \t]*:[ \t]*[^ \t]/) next
+    name = line; sub(/[ \t]*:.*$/, "", name)
+    ty = line; sub(/^[^:]*:[ \t]*/, "", ty); sub(/[ \t]*=.*$/, "", ty); sub(/[ \t]+$/, "", ty)
+    print name "\t" (ty ~ /^\[[ \t]*u8[ \t]*\]$/ ? "u8" : "other")
+  }'
+# use_paths FILE — "<repo-relative .spl path> <imported items|*>" for FILE's
+# `use` imports (std.* -> src/lib, app.*/compiler.* -> src/): the module
+# itself, and its parent when the last segment is an imported item. Only the
+# named items' structs contribute fields (see fieldmap_awk KEEP).
+use_paths() {
+  awk '
+    /^[ \t]*use[ \t]+/ || collecting {
+      line = $0; sub(/#.*$/, "", line)
+      if (!collecting) sub(/^[ \t]*use[ \t]+/, "", line)
+      acc = collecting ? acc " " line : line
+      collecting = (acc ~ /[{]/ && acc !~ /[}]/)
+      if (collecting) next
+      items = "*"; mod = acc
+      if (acc ~ /[{]/) {
+        items = acc; sub(/^[^{]*[{]/, "", items); sub(/[}].*$/, "", items); gsub(/,/, " ", items)
+        sub(/[ \t]*[{].*$/, "", mod)
+      } else sub(/[ \t].*$/, "", mod)
+      sub(/[.]$/, "", mod); gsub(/[.]/, "/", mod)
+      if (mod ~ /^std\//) sub(/^std\//, "src/lib/", mod)
+      else if (mod ~ /^(app|compiler)\//) mod = "src/" mod
+      else next
+      print mod ".spl " items
+      n = split(mod, seg, "/"); q = seg[1]
+      for (i = 2; i < n; i++) q = q "/" seg[i]
+      print q ".spl " seg[n]
+    }' "$1"
+}
+read_source() {
+  if [ -n "$scope_tip" ]; then git -C "$use_base" show "$scope_tip:$1" 2>/dev/null
+  elif [ -f "$use_base/$1" ]; then cat "$use_base/$1"; fi
+  echo
+}
+# build_fieldmap FILE — field map of FILE plus the structs it imports by name.
+# Fail closed: an unresolvable import contributes nothing.
+build_fieldmap() {
+  { awk "$fieldmap_awk" "$1"
+    use_paths "$1" | while read -r up items; do read_source "$up" | awk -v KEEP="$items" "$fieldmap_awk"; done
+  } | sort -u
 }
 
 # cmp_set HITS BASELINE LABEL — ratchet one hit set against its baseline.
@@ -353,7 +440,7 @@ run_scan() {
   return 0
 }
 
-tmp_out=$(mktemp); tmp_r4=$(mktemp); tmp_base=$(mktemp); tmp_mix=$(mktemp); scope_files=""; scope_tip=""
+tmp_out=$(mktemp); tmp_r4=$(mktemp); tmp_base=$(mktemp); tmp_mix=$(mktemp); scope_files=""; use_base=$(pwd); scope_tip=""
 trap 'rm -f "$tmp_out" "$tmp_r4" "$tmp_base" "$tmp_mix" ${scope_files:+"$scope_files"}; rm -rf "${fx:-}"' EXIT
 baseline="${TEXT_LEN_BASELINE:-scripts/check/text_len_bounded_byte_scan_baseline.txt}"
 mix_baseline="${TEXT_LEN_MIX_BASELINE:-scripts/check/text_len_unit_mix_baseline.txt}"
@@ -572,6 +659,26 @@ FIXTURE
   done
   hits=$(printf '%s\n' "$v" | grep -c '(NEW byte/code-point unit mix)' || true)
   [ "$hits" -eq 18 ] || { echo "selftest: expected exactly 18 unsafe typed-binding fixtures, got $hits: $v"; exit 2; }
+  # [u8] struct field receivers count bytes with len(); a text field, an
+  # ambiguous name (u8 in one struct, text in another) and an unknown name
+  # stay flagged. The field map spans every scanned file.
+  mkdir -p "$fx/h" "$fx/i" "$fx/j" "$fx/k"
+  printf 'struct Streams:\n    stdout: [u8]\n    stderr: [u8] = []\n\nfn ok(a: text, s: Streams) -> bool:\n    a.byte_len() == s.stdout.len() + s.stderr.len()\n' > "$fx/h/u8_field.spl"
+  printf 'struct Doc:\n    content: text\n\nfn bad(a: text, d: Doc) -> bool:\n    a.byte_len() == d.content.len()\n' > "$fx/i/text_field.spl"
+  printf 'struct Raw:\n    data: [u8]\n\nstruct Cooked:\n    data: text\n\nfn bad(a: text, c: Cooked) -> bool:\n    a.byte_len() == c.data.len()\n' > "$fx/j/ambiguous.spl"
+  mkdir -p "$fx/k/src/app/k"
+  printf 'struct Streams:\n    stdout: [u8]\n\nstruct Other:\n    stdout: text\n' > "$fx/k/src/app/k/types.spl"
+  printf 'use app.k.types.Streams\n\nfn ok(a: text, s: Streams) -> bool:\n    a.byte_len() == s.stdout.len()\n\nfn unknown(a: text, s: Streams) -> bool:\n    a.byte_len() == s.mystery.len()\n' > "$fx/k/src/app/k/use.spl"
+  v=$(run_scan "$fx/h"); rc=$?; [ $rc -eq 0 ] || { echo "selftest: [u8] field len() beside byte_len() must PASS, got rc=$rc: $v"; exit 2; }
+  v=$(run_scan "$fx/i"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: text field len() beside byte_len() must FAIL, got rc=$rc: $v"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'text_field.spl content (len() as byte width)' || { echo "selftest: text-field fixture must name content: $v"; exit 2; }
+  v=$(run_scan "$fx/j"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: ambiguous field name must FAIL, got rc=$rc: $v"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'ambiguous.spl data (len() as byte width)' || { echo "selftest: ambiguous fixture must name data: $v"; exit 2; }
+  printf 'fn lost(a: text, s: Streams) -> bool:\n    a.byte_len() == s.stdout.len()\n' > "$fx/k/src/app/k/noimport.spl"
+  v=$(use_base="$fx/k"; run_scan "$fx/k/src"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: cross-file [u8] field must PASS and undeclared field must FAIL, got rc=$rc: $v"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'use.spl mystery (len() as byte width)' || { echo "selftest: undeclared field must be named: $v"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'noimport.spl stdout (len() as byte width)' || { echo "selftest: [u8] field from a non-imported file must stay flagged: $v"; exit 2; }
+  printf '%s\n' "$v" | grep -q 'k/use.spl stdout' && { echo "selftest: cross-file [u8] field wrongly flagged: $v"; exit 2; }
   echo "selftest: existing ratchets and 26 typed-binding cases OK"
 }
 
