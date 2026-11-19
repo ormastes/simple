@@ -1,0 +1,44 @@
+"""
+## Purpose and audience
+Purpose: Pin that a `background-color` declared after a `background`
+shorthand overrides only the colour and keeps the shorthand's image layers,
+as Chrome 159 does (CSS Backgrounds 3: the shorthand sets every longhand).
+Audience: maintainers of the web style cascade.
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(`background-color` after `background` dropped the gradient).
+Chrome pixel: headless Chromium 1255, a 68x204 box with
+`linear-gradient(rgba(255,255,255,0.18), rgba(255,255,255,0.07))` over
+#0058bc, sampled at (30, 12): (44, 117, 200).
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+
+val BCS_GRAD = "linear-gradient(rgba(255,255,255,0.18),rgba(255,255,255,0.07))"
+
+fn bcs_mismatches(bg_decls: text) -> i32:
+    val html = "<!DOCTYPE html><html><body style='margin:0;background:#fff'><div style='width:68px;height:204px;" + bg_decls + "'></div></body></html>"
+    val px = simple_web_layout_render_html_software_pixels(html, 100, 220, 600000)
+    if px.len() < 100 * 220:
+        return -1
+    val p = px[12 * 100 + 30]
+    val want = [44, 117, 200]
+    var bad = 0
+    var c = 0
+    while c < 3:
+        val d = ((p >> ((16 - c * 8) as u32)) & 0xFFu32) as i32 - want[c]
+        if d > 2 or d < -2:
+            bad = bad + 1
+        c = c + 1
+    bad
+
+describe "background-color after the background shorthand (Chrome 159)":
+    it "keeps a single gradient layer":
+        expect(bcs_mismatches("background:" + BCS_GRAD + ";background-color:#0058bc;")).to_equal(0)
+
+    it "keeps a gradient layer list ending in none":
+        expect(bcs_mismatches("background:" + BCS_GRAD + ",none;background-color:#0058bc;")).to_equal(0)
