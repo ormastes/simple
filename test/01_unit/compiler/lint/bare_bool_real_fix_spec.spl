@@ -1,0 +1,40 @@
+"""
+SPL-BOOL-001 EasyFix (`L:bare_bool`): a top-level `pub fn` bool parameter gets a
+REAL edit (type token -> `<Name>Flag` plus an inserted `unit <Name>Flag: bool`),
+never a line replaced by itself. Methods in a body and `@allow` stay edit-free.
+Run: bin/simple test test/01_unit/compiler/lint/bare_bool_real_fix_spec.spl
+"""
+
+use std.spec.*
+use std.tooling.easy_fix.types.{FixApplicator}
+use compiler.tools.fix.rules.impl_.lint_bool.{check_bare_bool}
+
+fn _applied(src: text) -> text:
+    val fixes = check_bare_bool(src, "s.spl")
+    match FixApplicator.apply(fixes, {"s.spl": src}):
+        case Ok(m): m["s.spl"]
+        case Err(e): "ERR " + e
+
+describe "L:bare_bool real fix":
+    it "rewrites the param type and declares the unit":
+        val out = _applied("pub fn set(enabled: bool):\n    pass\n")
+        expect(out).to_equal("unit EnabledFlag: bool\n\npub fn set(enabled: EnabledFlag):\n    pass\n")
+
+    it "never emits a replacement that leaves the text unchanged":
+        val src = "pub fn set(enabled: bool, verbose: bool):\n    pass\n"
+        for fix in check_bare_bool(src, "s.spl"):
+            for rep in fix.replacements:
+                expect(src.slice(rep.start, rep.end) != rep.new_text).to_equal(true)
+
+    it "offers two fixes for two bool params and applies cleanly":
+        val src = "pub fn set(enabled: bool, verbose: bool):\n    pass\n"
+        expect(check_bare_bool(src, "s.spl").len()).to_equal(2)
+        val out = _applied(src)
+        expect(out.contains("enabled: EnabledFlag, verbose: VerboseFlag")).to_equal(true)
+        expect(out.contains("unit EnabledFlag: bool")).to_equal(true)
+        expect(out.contains("unit VerboseFlag: bool")).to_equal(true)
+
+    it "offers no edit for a return type, a method, or an allowed fn":
+        expect(check_bare_bool("pub fn ok() -> bool:\n    true\n", "s.spl").len()).to_equal(0)
+        expect(check_bare_bool("class C:\n    pub fn m(flag: bool):\n        pass\n", "s.spl").len()).to_equal(0)
+        expect(check_bare_bool("@allow(primitive_api)\npub fn f(flag: bool):\n    pass\n", "s.spl").len()).to_equal(0)
