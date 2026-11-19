@@ -1,0 +1,31 @@
+# @req REQ-TEST-DB-REPORT-001
+use std.database.test_extended.{create_test_database_extended, TestRowId, TestRunCount, TestRunAgeHours, TestRunKeepCount, TestStageMs, TestByteCount, TestProcessCount, TestSignalNumber, TestExitCode, TestAnomalyWarning, TestTimingOutcome}
+
+fn _db():
+    create_test_database_extended("/tmp/test_extended_primitive_types_spec.sdn")
+
+describe "TestDatabaseExtended typed public API":
+    it "reports Quiet then Warned from prior_anomaly_warning":
+        var db = _db()
+        expect(db.prior_anomaly_warning("test/a_spec.spl", "c1") == TestAnomalyWarning.Quiet).to_equal(true)
+        db.record_resource_run("run_1", "test/a_spec.spl", "unit", "c1", TestStageMs(value: 1), TestStageMs(value: 2), TestStageMs(value: 3), TestStageMs(value: 4), TestStageMs(value: 5), TestByteCount(value: 6), TestByteCount(value: 7), TestByteCount(value: 8), TestByteCount(value: 9), TestProcessCount(value: 1), "measured", "exited", TestSignalNumber(value: 0), TestExitCode(value: 0), "ok", "warning")
+        expect(db.prior_anomaly_warning("test/a_spec.spl", "c1") == TestAnomalyWarning.Warned).to_equal(true)
+        expect(db.prior_anomaly_warning("test/a_spec.spl", "other") == TestAnomalyWarning.Quiet).to_equal(true)
+
+    it "refuses promotion for an empty cohort and for a cohort without samples":
+        var db = _db()
+        val run_id = db.start_run()
+        db.update_test_result(file_path: "test/a_spec.spl", suite_name: "spec", test_name: "test/a_spec.spl", status: "passed", duration_ms: 12.0, run_id: run_id, cohort_id: "c1")
+        val id = db.get_test_id("test/a_spec.spl", "spec", "test/a_spec.spl") ?? TestRowId(value: -1)
+        expect(id.value >= 0).to_equal(true)
+        expect(db.promote_timing_baseline(id, "") == TestTimingOutcome.Refused).to_equal(true)
+        expect(db.promote_timing_baseline(id, "no_such_cohort") == TestTimingOutcome.Refused).to_equal(true)
+
+    it "counts and prunes runs with typed counts":
+        var db = _db()
+        val run_id = db.start_run()
+        db.complete_run(run_id, TestRunCount(value: 3), TestRunCount(value: 2), TestRunCount(value: 1), TestRunCount(value: 0))
+        val pruned = db.prune_runs(TestRunKeepCount(value: 0))
+        expect(pruned.value).to_equal(1)
+        val cleaned = db.cleanup_stale_runs(TestRunAgeHours(value: 2))
+        expect(cleaned.value).to_equal(0)
