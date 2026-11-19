@@ -710,3 +710,19 @@ head (13/40 at base).
   - Chrome makes text inputs and textareas border-box in quirks mode only (html.css `input:not([type=image]), textarea`). Each 11-17 pin was taken in the other mode.
   - The engine already models the document mode (`standards_mode`, `simple_web_html_layout_renderer_core.spl` table) and matched Chrome on both pages.
 - **Fix:** both rows re-pinned to the mode their page is actually in, with the oracle recipe in the spec comment. 15/15 and 12/12. Tolerances are unchanged.
+
+## 2026-11-19 — dashed / dotted borders follow rounded corners (FIXED for uniform borders on raster, cpu_simd and Vulkan)
+
+- **Symptom:** a rounded box with a uniform `dashed` or `dotted` border dashed only its straight runs. The Draw IR lanes left the arcs empty, the raster painted them with the solid arc painter, and dots on a rounded box stayed square.
+  - Chrome 159 strokes the border as ONE closed path: the centre line (inset t/2, radius r - t/2), started where the top-left arc ends and run clockwise.
+  - The dashes and round dots bend round the arcs. The gap comes from `SelectBestDashGap` on a closed path (as many gaps as dashes): dash 2t (dotted: a dot every pitch, the first centred on the start), nominal gap t.
+  - Worked check: 48x32, t=4, r=10 gives perimeter 130.27, 11 dashes and gap 3.84. Every dash edge on the top and bottom sides lands on Chrome's partial cells.
+- **Fix:** `border_rounded_dash_spans(w, h, t, r, dotted)` (`paint_primitives`) returns the row spans of the pixels whose centre a dash covers (ring distance <= t/2 and arc length inside a dash) or a dot covers (within t/2 of a dot centre). The raster (`fb_border_sides_styled_clip`) and Draw IR (`_html_draw_ir_styled_border_commands`) paint those spans. It applies to uniform style, width, colour and circular radius only; anything else keeps the per-side path.
+  - `ponytail:` no AA, and mixed sides are not handled. The upgrade is to clip this path to each side's polygon, as Chrome does.
+- **Evidence:**
+  - A Python model of the rule matched all 7505 uniform Chrome cells (0 mismatches) before the port.
+  - New `border_dashed_rounded_chrome159_spec`: 7505 pins, four boxes (dashed 4px r10 on a background, dotted 4px r10, dashed 6px r16, dotted 8px r20).
+  - Base: raster 1369, cpu_simd 1256 and Vulkan 1256 mismatches (0/3). Head: 3/3.
+- **Re-measured, both on current `release/1.0.0` (correcting older "Still open" notes):**
+  - The raster per-corner-radius ring (`border_per_corner_radius_chrome159_spec`) passes 3/3.
+  - The "slow typed single-gradient path" is not slow in isolation. A 200x150 CSS box with a typed `linear-gradient(90deg, ...)` at k=4 took 16 s on cpu_simd, against 39 s for the same gradient forced onto the list path. On the raster at 4x it took 5 s against 6 s (seed run time, one run each).
