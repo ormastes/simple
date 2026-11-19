@@ -1,0 +1,105 @@
+"""
+## Purpose and audience
+Pins milestone_0040 in `src/app/buildrunner/remote_container_reset_failure_v3.spl`: the reset-failure receipt V3 stage set
+is extended, on the same wire and signature domain, with the Host-observable wedge stages (`prepare-wedge`, `create-wedge`,
+`configuration-wedge`, `start-wedge`, `inspect-wedge`, `stop-absence`, `cancel-stop-absence`). Each has a typed reason, a reap
+state and a runtime-id rule; every one needs the enable-time binding digest; none is accepted unsigned. An unknown stage is
+refused (never reinterpreted), which is how an older controller treats a newer Host. Written for owners of the remote build route.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary).
+## Compatibility and limitations
+Pure data. The signed envelope and the controller accept path are unchanged and are pinned by
+`remote_container_reset_failure_signed_v3_spec.spl` and `remote_container_session_v3_spec.spl`.
+## Verification guidance and troubleshooting
+Each refusal names the exact error string; a changed stage, reason or reap string is a contract change.
+"""
+use std.spec.{step, expect}
+use std.common.crypto.sha256.sha256_text
+use app.buildrunner.remote_container_reset_failure_v3.*
+use app.buildrunner.remote_container_reset_failure_signed_v3.*
+use test.fixtures.buildrunner.remote_container_parent_v2.{RemoteContainerParentFixtureV2, container_parent_fixture_v2}
+use std.nogc_sync_mut.io.dir_ops.dir_remove_all
+
+fn rs_host(fixture: RemoteContainerParentFixtureV2, stage: text, native: text) -> Result<RemoteContainerResetFailureV3, text>:
+    remote_container_reset_failure_host_new_v3(fixture.task, fixture.policy, sha256_text("request"), sha256_text("grant"),
+        "5".repeat(64), stage, native)
+
+fn rs_zero_signature() -> [u8]:
+    var bytes: [u8] = []
+    for _ in 0..64: bytes.push(0 as u8)
+    bytes
+
+describe "Reset-failure receipt V3 Host wedge stages (milestone_0040)":
+    it "builds each pre-Create wedge stage with no runtime id and an unresolved identity":
+        # @req M0040-STAGE-01
+        val fixture = container_parent_fixture_v2()
+        for pair in [["prepare-wedge", "REMOTE_CONTAINER_PREPARE_WEDGED"], ["create-wedge", "REMOTE_CONTAINER_CREATE_WEDGED"]]:
+            val receipt = rs_host(fixture, pair[0], "").unwrap()
+            expect(receipt.reason).to_equal(pair[1])
+            expect(receipt.reap).to_equal("identity-unresolved")
+            expect(receipt.native_id).to_equal("")
+            expect(receipt.workspace_binding_digest).to_equal("5".repeat(64))
+            step("a runtime id on a stage where no Create was accepted is refused")
+            expect(rs_host(fixture, pair[0], "c".repeat(64))).to_equal(Err("REMOTE_RESET_FAILURE_RUNTIME_INVALID"))
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "builds each post-Create wedge and stop stage with the created runtime id and an incomplete reap":
+        # @req M0040-STAGE-02
+        val fixture = container_parent_fixture_v2()
+        val native = "c".repeat(64)
+        val table = [["configuration-wedge", "REMOTE_CONTAINER_CONFIGURATION_WEDGED"], ["start-wedge", "REMOTE_CONTAINER_START_WEDGED"],
+            ["inspect-wedge", "REMOTE_CONTAINER_INSPECT_WEDGED"], ["stop-absence", "REMOTE_CONTAINER_STOP_ABSENCE_UNRESOLVED"],
+            ["cancel-stop-absence", "REMOTE_CONTAINER_CANCEL_STOP_ABSENCE_UNRESOLVED"]]
+        for pair in table:
+            val receipt = rs_host(fixture, pair[0], native).unwrap()
+            expect(receipt.reason).to_equal(pair[1])
+            expect(receipt.reap).to_equal("incomplete")
+            expect(receipt.native_id).to_equal(native)
+            step("without a runtime id, or with a non-digest one, the receipt is refused")
+            expect(rs_host(fixture, pair[0], "")).to_equal(Err("REMOTE_RESET_FAILURE_RUNTIME_INVALID"))
+            expect(rs_host(fixture, pair[0], "native_1")).to_equal(Err("REMOTE_RESET_FAILURE_RUNTIME_INVALID"))
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "requires the enable-time binding digest for every new stage and keeps the wire canonical":
+        # @req M0040-STAGE-03
+        val fixture = container_parent_fixture_v2()
+        for stage in ["prepare-wedge", "create-wedge", "configuration-wedge", "start-wedge", "inspect-wedge", "stop-absence",
+                "cancel-stop-absence"]:
+            val native = if stage == "prepare-wedge" or stage == "create-wedge": "" else: "c".repeat(64)
+            expect(remote_container_reset_failure_host_new_v3(fixture.task, fixture.policy, sha256_text("request"),
+                sha256_text("grant"), "", stage, native)).to_equal(Err("REMOTE_RESET_FAILURE_IDENTITY_INVALID"))
+            val receipt = rs_host(fixture, stage, native).unwrap()
+            val wire = remote_container_reset_failure_encode_v3(receipt).unwrap()
+            expect(wire).to_start_with("SIMPLE-REMOTE-RESET-FAILURE-3\n")
+            expect(remote_container_reset_failure_digest_v3(receipt).unwrap()).to_equal(sha256_text(wire))
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "refuses a mismatched reason or reap and every stage name outside the closed set (older-controller behaviour)":
+        # @req M0040-STAGE-04
+        val fixture = container_parent_fixture_v2()
+        val good = rs_host(fixture, "start-wedge", "c".repeat(64)).unwrap()
+        var reason = good
+        reason.reason = "REMOTE_CONTAINER_ABSENCE_UNRESOLVED"
+        expect(remote_container_reset_failure_encode_v3(reason)).to_equal(Err("REMOTE_RESET_FAILURE_STAGE_INVALID"))
+        var reap = good
+        reap.reap = "identity-unresolved"
+        expect(remote_container_reset_failure_encode_v3(reap)).to_equal(Err("REMOTE_RESET_FAILURE_REAP_INVALID"))
+        for unknown in ["", "enable-wedge", "settle-wedge", "read-wedge", "finalize-wedge", "wedged", "stop-failure"]:
+            expect(rs_host(fixture, unknown, "c".repeat(64))).to_equal(Err("REMOTE_RESET_FAILURE_STAGE_INVALID"))
+        step("service-restart stays controller-built: no Host constructor and no signed envelope for it")
+        expect(rs_host(fixture, "service-restart", "")).to_equal(Err("REMOTE_RESET_FAILURE_STAGE_INVALID"))
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "refuses a signed envelope carrying a stage outside the closed set at decode":
+        # @req M0040-STAGE-05
+        val fixture = container_parent_fixture_v2()
+        val receipt = rs_host(fixture, "start-wedge", "c".repeat(64)).unwrap()
+        val envelope = RemoteContainerResetFailureSignedV3(receipt: receipt, signer_id: "execution_host_1", key_revision: 1,
+            signed_at: 10, signature: rs_zero_signature())
+        val wire = remote_container_reset_failure_signed_encode_v3(envelope).unwrap()
+        expect(remote_container_reset_failure_signed_decode_v3(wire).is_ok()).to_equal(true)
+        val forged = wire.replace("\nstart-wedge\n", "\nenable-wedge\n")
+        expect(forged != wire).to_equal(true)
+        expect(remote_container_reset_failure_signed_decode_v3(forged).is_err()).to_equal(true)
+        expect(dir_remove_all(fixture.root)).to_equal(true)

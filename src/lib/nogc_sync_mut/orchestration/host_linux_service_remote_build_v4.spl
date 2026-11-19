@@ -494,10 +494,11 @@ fn remote_build_wedged_v4(executor: HostRemoteBuildExecutorV3, capacity: HostCap
     state.error = error
     remote_build_turn_v4(state, capacity, "", error, true)
 
-# milestone_0038: the reset-failure receipt stage of a Stop/Destroy failure, from what the executor itself observed: `failed`
+# milestone_0038/0040: the reset-failure receipt stage of a Host-observed wedge, from what the executor itself observed: `failed`
 # is the failing step, `cancel_cause` the self-cancel cause (empty for a normal run), `created` whether Create returned an
-# identity and `exited` whether the engine-native exit was read. Everything else (a Stop failure with a Create or without a
-# cancel, settle/read/source-return/finalize/enable errors, every earlier step) has no V3 stage and keeps the plain wedge.
+# identity and `exited` whether the engine-native exit was read. Each stage implies its Create state; an impossible combination
+# is "" (fail closed, the plain wedge). Settle, source-return and host-settle errors are retried (not wedges), read and
+# finalize errors are self-cancel causes, and an enable error has no binding digest: none of those has a stage.
 fn host_remote_build_reset_stage_v4(failed: text, cancel_cause: text, created: bool, exited: bool) -> text:
     if failed == "destroy":
         if cancel_cause == "":
@@ -505,10 +506,23 @@ fn host_remote_build_reset_stage_v4(failed: text, cancel_cause: text, created: b
             return ""
         if created: return "cancel-absence"
         return "cancel-identity"
-    if failed == "stop" and cancel_cause != "" and not created: return "cancel-identity"
+    if failed == "stop":
+        if cancel_cause == "":
+            if created: return "stop-absence"
+            return ""
+        if created: return "cancel-stop-absence"
+        return "cancel-identity"
+    if failed == "prepare" or failed == "create":
+        if created: return ""
+        return failed + "-wedge"
+    if failed == "configuration" or failed == "start" or failed == "inspect":
+        if not created: return ""
+        return failed + "-wedge"
+    if failed == "running" and created: return "inspect-wedge"
     ""
 
-# A Stop/Destroy effect failure. The receipt is built and signed by the port from the open record and this executor's own
+# A Host-observed effect failure after the record is reserved (native step or Stop/Destroy). The receipt is built and signed
+# by the port from the open record and this executor's own
 # observations; the executor is ALWAYS wedged (the record stays reserved and charged, the close still refuses), and a port
 # error, an unmapped stage or a missing binding digest changes nothing but the absence of the receipt.
 fn remote_build_reset_wedged_v4(executor: HostRemoteBuildExecutorV3, capacity: HostCapacityOwnerV1, port: HostRemoteBuildPortV4,
@@ -603,7 +617,7 @@ pub fn host_remote_build_step_v4(executor: HostRemoteBuildExecutorV3, capacity: 
         return remote_build_pending_v4(state, capacity)
     if ["stop", "destroy", "settle", "read", "source-return", "finalize", "host-settle"].contains(state.stage):
         return remote_build_release_step_v4(state, capacity, journal_operation, association, port, clock)
-    remote_build_native_step_v4(state, capacity, request, clock)
+    remote_build_native_step_v4(state, capacity, request, port, clock)
 
 # Every archived input, re-decoded against the signed digest (the archive is not trusted over the task).
 fn remote_build_archived_files_v4(executor: HostRemoteBuildExecutorV3,
@@ -631,7 +645,8 @@ fn remote_build_runtime_match_v4(executor: HostRemoteBuildExecutorV3, request: C
 
 # prepare .. running. A build is non-interactive: the effective configuration must have no tty and no open stdin.
 fn remote_build_native_step_v4(executor: HostRemoteBuildExecutorV3, capacity: HostCapacityOwnerV1,
-        request: ContainerExecutionRequestV2, clock: HostReservationAuthorizationContextV1) -> HostRemoteBuildTurnV4:
+        request: ContainerExecutionRequestV2, port: HostRemoteBuildPortV4,
+        clock: HostReservationAuthorizationContextV1) -> HostRemoteBuildTurnV4:
     var state = executor
     val action = match state.stage:
         case "prepare": ContainerWorkspaceActionV3.Prepare
@@ -643,46 +658,47 @@ fn remote_build_native_step_v4(executor: HostRemoteBuildExecutorV3, capacity: Ho
         case _: return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-stage-invalid")
     val deadline = container_effect_deadline_v1(request.plan.request_digest, request.plan.operation_id, ["create", "start"],
         state.deadline)
-    if deadline.is_err(): return remote_build_wedged_v4(state, capacity, deadline.unwrap_err())
+    if deadline.is_err(): return remote_build_reset_wedged_v4(state, capacity, port, clock, deadline.unwrap_err())
     val turn = if state.pending: simple_container_workspace_step_v3(state.container.unwrap(), request)
         else: simple_container_workspace_begin_v3(state.container.unwrap(), action, request,
             if state.stage == "running": None else: Some(deadline.unwrap()))
     state.container = Some(turn.owner)
     state.pending = turn.pending
-    if turn.error != "": return remote_build_wedged_v4(state, capacity, turn.error)
+    if turn.error != "": return remote_build_reset_wedged_v4(state, capacity, port, clock, turn.error)
     if state.pending: return remote_build_pending_v4(state, capacity)
-    if turn.operation.is_none(): return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-operation-missing")
+    if turn.operation.is_none(): return remote_build_reset_wedged_v4(state, capacity, port, clock, "linux-host-remote-build-operation-missing")
     val operation = turn.operation.unwrap()
     if operation.status != RUNTIME_STATUS_OK:
-        return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-" + state.stage + ":" + operation.reason)
+        return remote_build_reset_wedged_v4(state, capacity, port, clock, "linux-host-remote-build-" + state.stage + ":" + operation.reason)
     if state.stage == "prepare": state.stage = "create"
     elif state.stage == "create":
         if operation.state.phase != RUNTIME_PHASE_CREATED or not remote_build_runtime_match_v4(state, request, operation.state.identity):
-            return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-created-identity")
+            return remote_build_reset_wedged_v4(state, capacity, port, clock, "linux-host-remote-build-created-identity")
         state.created = Some(operation.state.identity)
         state.stage = "configuration"
     elif state.stage == "configuration":
         val decoded = container_execution_input_configuration_decode_v1(operation.stdout)
-        if decoded.is_err(): return remote_build_wedged_v4(state, capacity, decoded.unwrap_err())
+        if decoded.is_err(): return remote_build_reset_wedged_v4(state, capacity, port, clock, decoded.unwrap_err())
         val observed = decoded.unwrap()
         if (state.created.is_none() or observed.configuration.runtime != state.created.unwrap() or
                 observed.configuration.scope != simple_container_scope_v2(state.container.unwrap()) or
                 observed.configuration.request_digest != request.plan.request_digest or
                 not observed.configuration.readonly_rootfs or observed.open_stdin or observed.tty):
-            return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-effective-configuration-mismatch")
+            return remote_build_reset_wedged_v4(state, capacity, port, clock, "linux-host-remote-build-effective-configuration-mismatch")
         state.stage = "start"
     elif state.stage == "start":
         if not remote_build_runtime_match_v4(state, request, operation.state.identity):
-            return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-started-identity")
+            return remote_build_reset_wedged_v4(state, capacity, port, clock, "linux-host-remote-build-started-identity")
         state.stage = "inspect"
     else:
         if not remote_build_runtime_match_v4(state, request, operation.state.identity):
-            return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-inspect-identity")
+            return remote_build_reset_wedged_v4(state, capacity, port, clock, "linux-host-remote-build-inspect-identity")
         # The workload left `running`: Stop (always run) reads its engine-native exit before stopping.
         state.stage = if operation.state.phase != RUNTIME_PHASE_RUNNING: "stop" else: "running"
     remote_build_pending_v4(state, capacity)
 
-# stop .. host-settle. A cancel skips `read` and `finalize`. Destroy/settle errors are wedged (Q3, 13.5 receipt).
+# stop .. host-settle. A cancel skips `read` and `finalize`. Stop/Destroy effect failures wedge (with a receipt where staged);
+# settle, source-return and host-settle errors are retried; read and finalize errors become self-cancel causes.
 fn remote_build_release_step_v4(executor: HostRemoteBuildExecutorV3, capacity: HostCapacityOwnerV1,
         journal_operation: OperationEnvelopeV2, association: HostExecutionAssociationV3, port: HostRemoteBuildPortV4,
         clock: HostReservationAuthorizationContextV1) -> HostRemoteBuildTurnV4:

@@ -7,6 +7,13 @@
 #   destroy-absence  the HOST emits it: Destroy not ok after a normal exit (reap `incomplete`, native id set)
 #   cancel-absence   the HOST emits it: a self-cancel's Destroy not ok after Create (reap `incomplete`, native id set)
 #   cancel-identity  the HOST emits it: a self-cancel's stop/destroy not ok with no Create (reap `identity-unresolved`)
+# milestone_0040 adds the other Host-observable wedge points (all HOST-emitted, same V3 wire, same signature domain):
+#   prepare-wedge, create-wedge                       (reap `identity-unresolved`, no native id: no Create was accepted)
+#   configuration-wedge, start-wedge, inspect-wedge   (reap `incomplete`, native id set)
+#   stop-absence, cancel-stop-absence                 (Stop not ok with no cancel cause / after Create; `incomplete`, native id)
+# The stage set is CLOSED: an unknown stage is refused, so an older controller refuses a newer Host's receipt and the run
+# settles by the generic wedged verdict instead of being misread. Enable errors (no binding digest exists before a successful
+# enable), settle/source-return/host-settle (retried, not wedges) and read/finalize (self-cancel causes) have no stage.
 # A Host stage always carries `workspace_binding_digest`, the enable-time binding of the fresh epoch, and travels inside the
 # execution-host-signed envelope of remote_container_reset_failure_signed_v3.spl; the unsigned receipt of such a stage is
 # refused at accept. No PID, signal or synthetic tree-reap observation is carried.
@@ -30,16 +37,32 @@ struct RemoteContainerResetFailureV3:
     reap: text
     native_id: text
 
+# The closed stage set: ONE table for reason, reap and runtime-id rule, so validate, the Host constructor and the encoder
+# cannot drift. A stage outside it has no reason and is refused everywhere (an older controller refuses a newer Host's stage
+# the same way, which falls back to the generic wedged settle).
 fn remote_container_reset_reason_v3(stage: text) -> text:
     if stage == "destroy-absence": return "REMOTE_CONTAINER_ABSENCE_UNRESOLVED"
     if stage == "cancel-identity": return "REMOTE_CONTAINER_CANCEL_IDENTITY_UNRESOLVED"
     if stage == "cancel-absence": return "REMOTE_CONTAINER_CANCEL_ABSENCE_UNRESOLVED"
     if stage == "service-restart": return "REMOTE_CONTAINER_SERVICE_RESTART_RUN_LOST"
+    if stage == "stop-absence": return "REMOTE_CONTAINER_STOP_ABSENCE_UNRESOLVED"
+    if stage == "cancel-stop-absence": return "REMOTE_CONTAINER_CANCEL_STOP_ABSENCE_UNRESOLVED"
+    if stage == "prepare-wedge": return "REMOTE_CONTAINER_PREPARE_WEDGED"
+    if stage == "create-wedge": return "REMOTE_CONTAINER_CREATE_WEDGED"
+    if stage == "configuration-wedge": return "REMOTE_CONTAINER_CONFIGURATION_WEDGED"
+    if stage == "start-wedge": return "REMOTE_CONTAINER_START_WEDGED"
+    if stage == "inspect-wedge": return "REMOTE_CONTAINER_INSPECT_WEDGED"
     ""
+
+# A runtime id exists only where Create returned an identity; the pre-Create stages and the restart have none.
+fn remote_container_reset_stage_has_native_v3(stage: text) -> bool:
+    if stage == "service-restart" or stage == "cancel-identity" or stage == "prepare-wedge" or stage == "create-wedge":
+        return false
+    true
 
 fn remote_container_reset_reap_v3(stage: text) -> text:
     if stage == "service-restart": return "absent-run-lost"
-    if stage == "cancel-identity": return "identity-unresolved"
+    if stage == "cancel-identity" or stage == "prepare-wedge" or stage == "create-wedge": return "identity-unresolved"
     "incomplete"
 
 fn remote_container_reset_failure_validate_v3(receipt: RemoteContainerResetFailureV3) -> Result<(), text>:
@@ -55,9 +78,7 @@ fn remote_container_reset_failure_validate_v3(receipt: RemoteContainerResetFailu
         if receipt.workspace_binding_digest != "": return Err("REMOTE_RESET_FAILURE_IDENTITY_INVALID")
     elif not builder_digest_valid_v1(receipt.workspace_binding_digest):
         return Err("REMOTE_RESET_FAILURE_IDENTITY_INVALID")
-    # A runtime id exists only where Create happened; only cancel-identity and service-restart have none.
-    val has_native = not restart and receipt.stage != "cancel-identity"
-    if has_native:
+    if remote_container_reset_stage_has_native_v3(receipt.stage):
         if not builder_digest_valid_v1(receipt.native_id): return Err("REMOTE_RESET_FAILURE_RUNTIME_INVALID")
     elif receipt.native_id != "":
         return Err("REMOTE_RESET_FAILURE_RUNTIME_INVALID")

@@ -1,0 +1,89 @@
+"""
+## Purpose and audience
+Pins milestone_0040 in `src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl`: every Host-observable
+wedge of a reserved remote build (prepare, create, configuration, start and inspect effects; Stop with no cancel cause or after
+Create) is classified to a typed reset-failure stage and goes through the SAME sign -> durable archive -> reply helper as the
+Stop/Destroy receipts. The points that are not observable receipts (enable error: no binding digest; settle, source-return and
+host-settle: retried, not wedged; read and finalize: self-cancel causes, not wedges) keep their existing behaviour. Written
+for owners of the Linux Host service.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary).
+## Compatibility and limitations
+Effects need a live provider, so the CLASSIFIER is data-tested and the wiring is pinned structurally, like the neighbouring
+executor specs.
+## Verification guidance and troubleshooting
+A changed stage mapping or a wedge that bypasses the helper is a contract change.
+"""
+use std.spec.step
+use std.io.file_read_text
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.{host_remote_build_reset_stage_v4}
+
+val RS_SOURCE: text = "src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl"
+
+fn rs_count(source: text, needle: text) -> i64:
+    source.split(needle).len() - 1
+
+fn rs_from(source: text, start: text, end: text) -> text:
+    val at = source.index_of(start)
+    if at < 0: return ""
+    val tail = source.substring(at, source.byte_len())
+    val stop = tail.index_of(end)
+    if stop < 0: return tail
+    tail.substring(0, stop)
+
+describe "Host remote-build wedge reset-failure stages (milestone_0040)":
+    it "maps each native-step wedge to its stage, requiring the Create state each stage implies":
+        # @req M0040-HOST-01
+        step("prepare and create wedge before any Create was accepted")
+        expect(host_remote_build_reset_stage_v4("prepare", "", false, false)).to_equal("prepare-wedge")
+        expect(host_remote_build_reset_stage_v4("create", "", false, false)).to_equal("create-wedge")
+        step("configuration, start and inspect (and the running poll) wedge after Create")
+        expect(host_remote_build_reset_stage_v4("configuration", "", true, false)).to_equal("configuration-wedge")
+        expect(host_remote_build_reset_stage_v4("start", "", true, false)).to_equal("start-wedge")
+        expect(host_remote_build_reset_stage_v4("inspect", "", true, false)).to_equal("inspect-wedge")
+        expect(host_remote_build_reset_stage_v4("running", "", true, false)).to_equal("inspect-wedge")
+        step("an impossible Create state fails closed to the generic wedge")
+        expect(host_remote_build_reset_stage_v4("prepare", "", true, false)).to_equal("")
+        expect(host_remote_build_reset_stage_v4("create", "", true, false)).to_equal("")
+        for failed in ["configuration", "start", "inspect", "running"]:
+            expect(host_remote_build_reset_stage_v4(failed, "", false, false)).to_equal("")
+
+    it "maps a Stop failure with no cancel cause, or after Create, to its absence stage":
+        # @req M0040-HOST-02
+        expect(host_remote_build_reset_stage_v4("stop", "", true, false)).to_equal("stop-absence")
+        expect(host_remote_build_reset_stage_v4("stop", "deadline", true, false)).to_equal("cancel-stop-absence")
+        expect(host_remote_build_reset_stage_v4("stop", "controller-cancel", true, false)).to_equal("cancel-stop-absence")
+        step("the identity-less self-cancel Stop keeps its existing stage; a normal Stop with no Create is impossible")
+        expect(host_remote_build_reset_stage_v4("stop", "controller-cancel", false, false)).to_equal("cancel-identity")
+        expect(host_remote_build_reset_stage_v4("stop", "", false, false)).to_equal("")
+
+    it "keeps the Destroy stages and gives no stage to the points that are not terminal wedges":
+        # @req M0040-HOST-03
+        expect(host_remote_build_reset_stage_v4("destroy", "", true, true)).to_equal("destroy-absence")
+        expect(host_remote_build_reset_stage_v4("destroy", "deadline", true, false)).to_equal("cancel-absence")
+        expect(host_remote_build_reset_stage_v4("destroy", "deadline", false, false)).to_equal("cancel-identity")
+        for failed in ["enable", "settle", "read", "source-return", "finalize", "host-settle", "source", "stage", "inputs", ""]:
+            expect(host_remote_build_reset_stage_v4(failed, "", true, true)).to_equal("")
+            expect(host_remote_build_reset_stage_v4(failed, "deadline", false, false)).to_equal("")
+
+    it "routes every native-step wedge through the helper and leaves the unobservable points generic":
+        # @req M0040-HOST-04
+        val source = file_read_text(RS_SOURCE)
+        val native = rs_from(source, "fn remote_build_native_step_v4(", "# stop .. host-settle")
+        step("the step takes the port so the helper can sign; only the invalid-stage guard stays a plain wedge")
+        expect(rs_count(native, "port: HostRemoteBuildPortV4")).to_equal(1)
+        expect(rs_count(native, "remote_build_reset_wedged_v4(")).to_equal(9)
+        expect(rs_count(native, "remote_build_wedged_v4(")).to_equal(1)
+        expect(rs_count(native, "return remote_build_wedged_v4(state, capacity, \"linux-host-remote-build-stage-invalid\")")).to_equal(1)
+        step("the dispatcher hands the port to the native step")
+        expect(rs_count(source, "remote_build_native_step_v4(state, capacity, request, port, clock)")).to_equal(1)
+        step("enable keeps the plain wedge (no binding digest exists before a successful enable)")
+        val head = rs_from(source, "pub fn host_remote_build_step_v4(", "# Every archived input")
+        expect(rs_count(head, "if enabled.error != \"\": return remote_build_wedged_v4(")).to_equal(1)
+        expect(rs_count(head, "remote_build_reset_wedged_v4(")).to_equal(0)
+        step("settle, source-return, host-settle keep returning a retryable turn error; read and finalize stay self-cancel causes")
+        val release = rs_from(source, "fn remote_build_release_step_v4(", "# The port finalize")
+        expect(rs_count(release, "remote_build_reset_wedged_v4(")).to_equal(3)
+        expect(rs_count(release, "remote_build_wedged_v4(")).to_equal(0)
+        expect(rs_count(release, "state.cancel_cause = host_remote_build_failed_cause_v4(")).to_equal(2)
