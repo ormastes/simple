@@ -344,21 +344,42 @@ Design: `doc/05_design/ml/slang/slang_pluggable_modalities.md`.
 - `kind_registry.resolve_kind(dir)` chain: `slang_kind.sdn` (`kind:`, `vocoder:`)
   -> one projector (inputs from `clip.has_vision_encoder` / `has_audio_encoder`)
   -> vocoder companion = Tts -> `<arch>.pooling_type` (4 rerank, 1-3 embedding)
-  -> arch table (bert, nomic-bert, jina-bert-v2 = embedding) -> magic (`lmgg` =
-  Asr/whisper, `model.diffusion_model.` safetensors = ImageGen) -> LlamaForCausalLM
-  = Chat/pure. `NativeModel.profile` carries it (default: Chat [text] ggml).
-- **Trap:** the KV walk stops at the first `tokenizer.` key (reading the vocab
-  through `external_file_read_bytes_at` costs ~2 s/MiB on the seed). Keys written
-  after the tokenizer block are not seen; use `slang_kind.sdn`.
+  -> no pooling type on an embedding-table arch: a `cls.output.weight` /
+  `cls.weight` tensor in the tensor-info table = Rerank -> arch table (bert,
+  nomic-bert, jina-bert-v2 = embedding) -> magic (`lmgg` = Asr/whisper,
+  `model.diffusion_model.` safetensors = ImageGen) -> LlamaForCausalLM =
+  Chat/pure. `NativeModel.profile` carries it (default: Chat [text] ggml).
+- **Real reranker:** `bge-reranker-v2-m3-Q8_0.gguf` writes NO `bert.pooling_type`
+  and no classifier KV (35 keys dumped); only its `cls.*` tensors mark it.
+  `bge-small-en-v1.5` has `pooling_type 2` and no `cls.*`. The cheap KV walk
+  stops at the first `tokenizer.` key; an embedding-arch model without a pooling
+  type gets a second, FULL walk (vocab + tensor table, 6.8 MB header for the
+  reranker): real file -> `arch=bert pooling=-1 cls_head=true`, whole
+  `simple-release.exe run` probe 1.9 s. A failed full walk keeps the cheap facts.
+- **Hostile GGUF:** every key/string/array/tensor-name length and
+  `kv_count`/`tensor_count` is bounded by the bytes left in the FILE
+  (`_fits`; arrays divide before multiplying); past the file = Malformed, past
+  the bytes in hand = NeedMore (growing read). A top-bit u64 is a negative i64
+  and is refused. A Malformed GGUF with the magic is still kept (Chat, empty facts).
+- **Chat-path runnable:** `describe_model` marks any non-Chat kind not runnable
+  (reason = why the kind is not served) and keeps a Chat profile's reason (an
+  invalid `slang_kind.sdn`, e.g. `kind: embeddings`) as a not-runnable reason, so
+  `llm_engine` / `entrypoints/llm` never load an embedder or a typo'd model as chat.
+- Model-root `slang_kind.sdn` overrides are NOT in git (model dirs live outside
+  the repo); `C:/dev/model/bge-reranker-v2-m3-GGUF/slang_kind.sdn` = `kind: rerank`.
 - `/v1/models` entries add `slang_kind`, `input_modalities`, `output_modalities`
   (`scan_model_root(C:/dev/model)` 573 ms vs 229 ms before kinds, 12 dirs, seed;
   each describe walks every GGUF header once, first read 4 KiB). `ApiResponse` gained `content_type`
   (default `application/json`) and `body_bytes` (default empty = text body).
-- Route table `api_server.kind_routes`; `entrypoints/openai/serving/` holds one
+- Kind paths `api_server.kind_route_paths` (non-chat only; any other path 404);
+  `entrypoints/openai/serving/` holds one
   stub per family (`serve_transcriptions`, `serve_speech`, `serve_images`,
   `serve_embeddings`, `serve_rerank`): wrong kind = 400 `wrong_model_kind` (chat
   routes too, by describing only the named directory; `kind_serves` also lets a Chat model with Audio input serve Asr), right kind = 501 `not_implemented` naming the runner
   (`engine/kind_dispatch.kind_open`, which loads nothing yet).
+- L1 file/dir/env access goes through `slang/host/slang_host` (`host_file_exists`,
+  `host_file_read`, `host_dir_list`, `host_env`); raw GGUF bytes still use
+  `external_file_read_bytes_at` (no host byte-range read yet).
 - Spec: `test/01_unit/lib/gc_async_mut/slang/kind_registry_spec.spl`.
 
 ## Model variety live spec (2026-11-15, Windows, llvm-mingw shim)
