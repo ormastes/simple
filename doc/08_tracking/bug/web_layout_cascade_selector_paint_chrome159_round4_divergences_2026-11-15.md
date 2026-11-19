@@ -636,3 +636,17 @@ head (13/40 at base).
 - **Still open:**
   - A box under a fractional-opacity ancestor within its context keeps its outline inline (`ponytail:`), so the opacity group's run stays contiguous.
   - On the raster, pass 6 text of later siblings still paints over a deferred outline. Chrome paints the outline over that text.
+
+## 2026-11-18 — double borders (FIXED for uniform width on raster, cpu_simd and Vulkan)
+
+- **Symptom:** a `double` border drew stripes one pixel too wide at widths 4, 7 and 10 (`(w+2)/3` instead of Chrome's `(w+1)/3`). Rounded double borders followed the outer radius only, and square corners did not end each stripe at the other side's stripe. On cpu_simd/Vulkan a uniform rounded border also went through `draw_rounded_rect_outline`, which drew a thicker arc than Chrome. Pre-fix, the lanes had 58-148 mismatches on the full probe map.
+- **Chrome rule:** stripe = `(w+1)/3`, and the gap takes the rest. The border renders as two solid rings: the outer ring on the border box, and the inner ring inset by `w - stripe` with radii `max(r - inset, 0)`.
+- **Fix:**
+  - Draw IR: `_html_draw_ir_styled_border_commands` emits `<id>_d0` / `<id>_d1` ring commands (`_html_draw_ir_ring_command`) when all four sides are double with equal width ≥ 3.
+  - Raster: `fb_border_sides_styled_clip` paints the two rings with `fb_border_ring_per_corner_clip`.
+  - Engine2D `_engine2d_draw_ir_render_borders` sends every rounded border to `engine2d_draw_ir_render_typed_border_ring`; the uniform `draw_rounded_rect_outline` branch is gone.
+  - `ponytail:` mixed-width double borders keep the old per-side spans; upgrade by giving each ring per-side widths.
+- **Evidence:**
+  - New `border_double_radius_chrome159_spec`: 139 Chrome pins, 3 rows (raster, cpu_simd, Vulkan). Red 0/3 at base, green 3/3 at head.
+  - Base vs head over 284 border/radius/rounded/double specs, failing test names compared: 0 new failures; the only difference is the new spec.
+- **Still open:** background AA bleeding past rounded corner tips (the corner-AA item).
