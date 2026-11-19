@@ -1,0 +1,63 @@
+# @cover src/os/realtime/spy_hook.spl
+# @session:mutating
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# plan: doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md
+#
+# DHR P5 target-side producer: the realtime timer ISR hooks feed the bare-metal
+# Spy ring. The gate is the `dhr` build feature, resolved by the preprocessor
+# from SIMPLE_FEATURES when this spec's modules are parsed, so ONE run proves
+# ONE side: a default run proves the OFF side (nothing emitted), a
+# `SIMPLE_FEATURES=dhr` run proves the ON side (Entry/Exit drained to
+# TraceEventV1). dhr_profile_active() reads the same variable, so it names the
+# side this run compiled. timer_isr itself (MMIO acks, cross-file sched_tick)
+# is not executed here; these examples call the hooks it calls.
+
+use std.spec.*
+use std.spy.bm_spy_emitter.{bm_spy_init, bm_spy_count, bm_spy_capacity, bm_spy_lost_total}
+use std.nogc_sync_mut.trace.bm_spy_drain_v1.{BmSpyDrainV1}
+use std.common.trace.observer_contract_v1.{TraceEventV1, TraceEventKindV1}
+use std.nogc_sync_mut.crash.failure_slot_v1.{dhr_profile_active}
+use os.realtime.spy_hook.{spy_isr_enter, spy_isr_exit, SPY_SITE_TIMER_ISR}
+
+fn drain_all() -> [TraceEventV1]:
+    var d = BmSpyDrainV1(generation: 1u64, module_instance: 1u64, context_id: 1u64, next_sequence: 1u64)
+    match d.drain():
+        case Ok(events): events
+        case Err(_): []
+
+describe "realtime timer ISR Spy hook":
+    it "one ISR pass drains to Entry then Exit at the timer site with dhr, and to nothing without":
+        bm_spy_init()
+        spy_isr_enter(SPY_SITE_TIMER_ISR, 41)
+        spy_isr_exit(SPY_SITE_TIMER_ISR, 42)
+        val events = drain_all()
+        if dhr_profile_active():
+            expect(events.len()).to_equal(2)
+            expect(events[0].kind == TraceEventKindV1.Entry).to_equal(true)
+            expect(events[1].kind == TraceEventKindV1.Exit).to_equal(true)
+            expect(events[0].function_id).to_equal(1u32)
+            expect(events[0].site_id).to_equal(1u32)
+            expect(events[1].site_id).to_equal(1u32)
+            expect(events[0].timestamp).to_equal(41u64)
+            expect(events[1].timestamp).to_equal(42u64)
+            expect(events[0].sequence).to_equal(1u64)
+            expect(events[1].sequence).to_equal(2u64)
+        else:
+            expect(events.len()).to_equal(0)
+        expect(bm_spy_count()).to_equal(0)
+
+    it "the hooks stay inside the bounded ring with dhr, and touch nothing without":
+        bm_spy_init()
+        val passes = bm_spy_capacity() / 2
+        var i = 0
+        while i < passes:
+            spy_isr_enter(SPY_SITE_TIMER_ISR, i)
+            spy_isr_exit(SPY_SITE_TIMER_ISR, i + 1)
+            i = i + 1
+        spy_isr_enter(SPY_SITE_TIMER_ISR, passes)
+        if dhr_profile_active():
+            expect(bm_spy_count()).to_equal(bm_spy_capacity())
+            expect(bm_spy_lost_total()).to_equal(1)
+        else:
+            expect(bm_spy_count()).to_equal(0)
+            expect(bm_spy_lost_total()).to_equal(0)
