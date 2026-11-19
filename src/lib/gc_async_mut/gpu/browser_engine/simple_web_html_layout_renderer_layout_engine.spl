@@ -18,7 +18,7 @@ use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, renderer_default_style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{absolute_margin_t, box_device_extra_h_reset, box_device_top_px, box_device_extra_h_record, box_device_extra_w_record, select_device_extra_w, input_type_is_column_sized, form_control_device_extra_h, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{absolute_margin_t, box_frac_w_reset, item_frac_w_hand_over, box_frac_w_take, box_frac_w_at, BOX_FRAC_W_UNSET, flex_item_text_frac_delta_milli_px, text_run_exact_width_milli_px, box_device_extra_h_reset, box_device_top_px, box_device_extra_h_record, box_device_extra_w_record, select_device_extra_w, input_type_is_column_sized, form_control_device_extra_h, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale}
 
 
 # --- Float context (CSS 2.2 section 9.5) -----------------------------------
@@ -785,6 +785,7 @@ pub fn web_html_layout_tree(nodes: [HNode], styles: [Style], child_index: HtmlCh
     text_device_dy_reset()
     box_device_top_reset()
     box_device_extra_h_reset()
+    box_frac_w_reset()
     val flow = layout_with_style(nodes, styles, child_index, i, x, y, w, viewport_w, viewport_h, bx, by, bw, bh, wrap_starts, wrap_ends, intrinsic_widths, styles[i])
     # ::marker box post-pass (bug browser_engine_no_list_marker_boxes_
     # 2026-08-19). list-style-position outside default: the marker box sits
@@ -1329,6 +1330,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     var out_intrinsic_widths = intrinsic_widths
     val origin_frac = g_origin_frac_milli
     g_origin_frac_milli = 0
+    box_frac_w_take(nodes.len() as i32, i)
     out_bx[i] = x
     out_by[i] = y
     val node = nodes[i]
@@ -1459,6 +1461,14 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         # 61.5 px `CSS Paint` on one line of its 79.5 px button, here it is 62
         # px in a 79 px one. Less than 1 px over is rounding, not overflow.
         val label_slack = if node.parent >= 0 and nodes[node.parent].tag == "button": 1 else: 0
+        # A row flex item placed at its exact (LayoutUnit) width hands its
+        # remainder over the whole-px box: `CSS Paint` is 73.8125 px in a 73 px
+        # box (44..117) and stays on one line in Chrome. Compare exact widths.
+        val parent_frac_w = box_frac_w_at(node.parent as i32)
+        val run_fits = if parent_frac_w == BOX_FRAC_W_UNSET:
+            full_adv <= node_w + label_slack
+        else:
+            text_run_exact_width_milli_px(nodes, i, st, txt, full_adv) <= node_w * 1000 + parent_frac_w
         # First-line inset handed over by the inline run loop: this run
         # starts mid-line, so line 0 only has `node_w - first_dx` and every
         # later line the whole line box. Consumed here, for this node only.
@@ -1490,7 +1500,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             val band_ranges = compute_style_wrap_ranges_float_band(txt, node_w, band_boxes, st)
             out_wrap_starts[i] = band_ranges.starts
             out_wrap_ends[i] = band_ranges.ends
-        elif full_adv <= node_w + label_slack:
+        elif run_fits:
             out_wrap_starts[i] = [0; 1]
             out_wrap_ends[i] = [txt_len; 1]
         else:
@@ -2911,6 +2921,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         remaining_w = intrinsic_w
                         if nodes[fc].tag == "button":
                             item_frac_delta_milli = form_control_button_frac_delta_milli_px(nodes, styles, child_index, fc)
+                        else:
+                            item_frac_delta_milli = flex_item_text_frac_delta_milli_px(nodes, styles, child_index, fc, cst, intrinsic_w)
                     elif auto_weight > 0:
                         val grow = 1
                         val cumulative_target = (auto_avail * (flex_weight_used + grow) + auto_weight - 1) / auto_weight
@@ -3020,10 +3032,14 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     val exact_left_milli = cx * 1000 + frac_adj_milli
                     val exact_right_milli = exact_left_milli + remaining_w * 1000 + item_frac_delta_milli
                     draw_x = (exact_left_milli + 500) / 1000
-                    draw_w = (exact_right_milli + 500) / 1000 - draw_x
-                    if draw_w < 1:
-                        draw_w = 1
-                    frac_snapped = true
+                    # Only an item with its own remainder has a known exact
+                    # width; any other (an `<img>` sized by its own layout)
+                    # keeps its whole-px width, so only its left edge moves.
+                    if item_frac_delta_milli != 0:
+                        draw_w = (exact_right_milli + 500) / 1000 - draw_x
+                        if draw_w < 1:
+                            draw_w = 1
+                        frac_snapped = true
                 # Fractional block-axis start (Chrome LayoutUnit): a plainly placed item
                 # starts at the container start fraction plus its top margin in milli-px,
                 # and hands that fraction to its own cursor. Aligned items keep whole px.
@@ -3036,6 +3052,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     item_origin = cursor_advance_frac(origin_frac, item_top_milli)
                 g_origin_frac_milli = item_origin
                 box_device_top_record(nodes.len() as i32, fc, item_origin)
+                if frac_snapped:
+                    item_frac_w_hand_over(remaining_w * 1000 + item_frac_delta_milli - draw_w * 1000)
                 val child = layout_with_style(nodes, styles, child_index, fc, draw_x, child_y, draw_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_cst)
                 out_bx = child.bx
                 out_by = child.by
