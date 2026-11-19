@@ -14,7 +14,10 @@ use std.spec.{describe, it, expect}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
-use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_types.{HirModule, HirImport, HirImportItem}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.diagnostics.span.{Span}
 use compiler.common.config.{Logger}
 use compiler.semantics.must_use_discard.{must_use_discard_scan, must_use_finding_severity, MUST_USE_CODE_RESULT, MUST_USE_CODE_MARKED}
 
@@ -104,3 +107,54 @@ describe "ROB-USE must_use discard check":
         val b = "fn f() -> Result<i64, text>:\n    Ok(1)\n"
         expect(scan_mods([a, b]).len()).to_equal(0)
         expect(scan_mods([b, a]).len()).to_equal(0)
+
+# Cross-module HIR without a module loader: lower `a_src` with a local stub of
+# `stub` so the call resolves to a named callee, then turn that stub into an
+# import of `stub` (optionally aliased) from module "m1" holding `b_src`.
+fn scan_import(a_src: text, stub: text, b_src: text, alias: text?) -> [text]:
+    val pa = parse_full_frontend(a_src, "m0.spl", "m0", Logger(level: 0))
+    var la = HirLowering.with_filename("m0.spl")
+    var ha = la.lower_module(pa)
+    var kept: Dict<SymbolId, HirFunction> = {}
+    for fkey in ha.functions.keys():
+        if ha.functions[fkey].name != stub:
+            kept[fkey] = ha.functions[fkey]
+    ha.functions = kept
+    ha.imports = [HirImport(module_path: "m1", items: [HirImportItem(name: stub, alias: alias, resolved: nil)], is_lazy: false, span: Span.empty())]
+    val pb = parse_full_frontend(b_src, "m1.spl", "m1", Logger(level: 0))
+    var lb = HirLowering.with_filename("m1.spl")
+    val hb = lb.lower_module(pb)
+    val modules = {"m0": ha, "m1": hb}
+    var out: [text] = []
+    for fd in must_use_discard_scan(modules, []):
+        out = out.push(fd.code + ":" + fd.function + ":" + fd.callee)
+    out
+
+describe "ROB-USE @must_use attribute and imported callees":
+    it "a function carrying @must_use is flagged without a supplied name set":
+        val src = "@must_use\nfn plain() -> i64:\n    2\nfn caller():\n    plain()\n"
+        expect(scan_mods([src])).to_equal(["SPL-USE-002:caller:plain"])
+
+    it "an unmarked sibling is still not flagged":
+        val src = "@must_use\nfn plain() -> i64:\n    2\nfn other() -> i64:\n    3\nfn caller():\n    other()\n"
+        expect(scan_mods([src]).len()).to_equal(0)
+
+    it "an imported Result-returning function is flagged":
+        val a = "fn risky():\n    val q = 1\nfn caller():\n    risky()\n"
+        val b = "fn risky() -> Result<i64, text>:\n    Ok(1)\n"
+        expect(scan_import(a, "risky", b, nil)).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "an imported @must_use function is flagged":
+        val a = "fn plain():\n    val q = 1\nfn caller():\n    plain()\n"
+        val b = "@must_use\nfn plain() -> i64:\n    2\n"
+        expect(scan_import(a, "plain", b, nil)).to_equal(["SPL-USE-002:caller:plain"])
+
+    it "an import of a name the module does not define is not flagged":
+        val a = "fn missing():\n    val q = 1\nfn caller():\n    missing()\n"
+        val b = "fn risky() -> Result<i64, text>:\n    Ok(1)\n"
+        expect(scan_import(a, "missing", b, nil).len()).to_equal(0)
+
+    it "an imported plain unit function is not flagged":
+        val a = "fn quiet():\n    val q = 1\nfn caller():\n    quiet()\n"
+        val b = "fn quiet():\n    val z = 2\n"
+        expect(scan_import(a, "quiet", b, nil).len()).to_equal(0)
