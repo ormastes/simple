@@ -9,6 +9,15 @@
 
 use std.gc_async_mut.slang.model_executor.model_loader.manifest.{parse_manifest}
 use std.gc_async_mut.slang.host.slang_host.{host_file_exists, host_file_read, host_dir_list}
+use std.io_runtime.{is_dir}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, json_text_literal, openai_error_response}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
+use std.gc_async_mut.slang.modality.kinds.{KindProfile, ModelKind, Modality, kind_profile, model_kind_text, model_kind_eq, modalities_json}
+use std.gc_async_mut.slang.engine.runner_dispatch.{RunnerKind}
+use std.gc_async_mut.slang.engine.kind_dispatch.{kind_open}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{describe_model}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{json_string_field}
 
 # A model the loader can see. `id` is the manifest's own model_id, so what the
 # API advertises is exactly what the loader would be asked to load.
@@ -69,4 +78,93 @@ fn find_model(entries: [SlangModelEntry], id: text) -> SlangModelEntry?:
             return e
     nil
 
+# A slang pack is a text Chat model with no runner of its own yet.
+fn pack_profile() -> KindProfile:
+    kind_profile(ModelKind.Chat, [Modality.Text], RunnerKind.Pure, "slang pack recognised; slang has no engine of its own yet (master plan A3/A4/A5)")
+
+fn _model_json(id: text, owner: text, p: KindProfile) -> text:
+    "{\"id\":" + json_text_literal(id) + ",\"object\":\"model\",\"created\":0,\"owned_by\":" + json_text_literal(owner) + ",\"slang_kind\":\"" + model_kind_text(p.kind) + "\",\"input_modalities\":" + modalities_json(p.inputs) + ",\"output_modalities\":" + modalities_json(p.outputs) + "}"
+
+# GET /v1/models: every slang pack plus every recognised native model, each
+# with its slang_kind and input/output modalities.
+fn models_list_response(packs: [SlangModelEntry], natives: [NativeModel], owner: text) -> ApiResponse:
+    var data = ""
+    for e in packs:
+        if data != "":
+            data = data + ","
+        data = data + _model_json(e.id, owner, pack_profile())
+    for m in natives:
+        if data != "":
+            data = data + ","
+        data = data + _model_json(m.id, owner, m.profile)
+    ApiResponse(status: 200, body: "{\"object\":\"list\",\"data\":[" + data + "]}")
+
+# The native model directory named `id` directly under `model_root`, described
+# alone (no root scan). `id` is matched against the directory listing, never
+# joined into a path unchecked.
+fn native_model_named(model_root: text, id: text) -> NativeModel?:
+    if id == "" or model_root.trim() == "":
+        return None
+    match host_dir_list(model_root):
+        case Some(names):
+            for name in names:
+                if name == id:
+                    val dir = _join(model_root, name)
+                    if is_dir(dir):
+                        return Some(describe_model(dir, engine_backend_available()))
+        case None:
+            pass
+    None
+
+# True when a model with profile `p` can serve a `want` route. A kind serves
+# its own route; a Chat model whose inputs include Audio also serves Asr
+# (design §2: ASR path (a), an audio-LLM with a transcription prompt).
+fn kind_serves(p: KindProfile, want: ModelKind) -> bool:
+    if model_kind_eq(p.kind, want):
+        return true
+    if model_kind_eq(want, ModelKind.Asr) and model_kind_eq(p.kind, ModelKind.Chat):
+        for m in p.inputs:
+            match m:
+                Modality.Audio: return true
+                _: ()
+    false
+
+# 400 wrong_model_kind when the native model `id` resolves to a kind other than
+# `want`; Ok when it matches or is not a native model (the route handler
+# reports a missing model itself).
+fn kind_mismatch(model_root: text, id: text, want: ModelKind, route: text) -> Result<(), ApiResponse>:
+    match native_model_named(model_root, id):
+        case Some(m):
+            if not kind_serves(m.profile, want):
+                return Err(openai_error_response(400, "model '" + id + "' is a " + model_kind_text(m.profile.kind) + " model; " + route + " needs a " + model_kind_text(want) + " model", "invalid_request_error", "wrong_model_kind", ""))
+        case None:
+            pass
+    Ok(())
+
+# The native model a kind route is asked for: 400 when the body names none,
+# 404 when it is not under the model root, 400 wrong_model_kind when it
+# resolves to another kind.
+fn model_for_kind(model_root: text, body: text, want: ModelKind, route: text) -> Result<NativeModel, ApiResponse>:
+    val id = json_string_field(body, "model")
+    if id == "":
+        return Err(openai_error_response(400, "missing or empty required field: model", "invalid_request_error", "invalid_request", ""))
+    match native_model_named(model_root, id):
+        case Some(m):
+            if not kind_serves(m.profile, want):
+                return Err(openai_error_response(400, "model '" + id + "' is a " + model_kind_text(m.profile.kind) + " model; " + route + " needs a " + model_kind_text(want) + " model", "invalid_request_error", "wrong_model_kind", ""))
+            return Ok(m)
+        case None:
+            pass
+    Err(openai_error_response(404, "model '" + id + "' was not found under the configured slang model root", "invalid_request_error", "model_not_found", ""))
+
+# 501 for a kind route whose serving is not built yet. The reason is the kind
+# runner's own refusal, so it names what is missing.
+fn kind_not_implemented_response(model: NativeModel, route: text) -> ApiResponse:
+    match kind_open(model):
+        Err(reason):
+            openai_error_response(501, route + " is not implemented in this slang build: " + reason, "server_error", "not_implemented", "")
+        Ok(_):
+            openai_error_response(501, route + " is not implemented in this slang build: the " + model_kind_text(model.profile.kind) + " runner opened but no serving module answers this route yet", "server_error", "not_implemented", "")
+
 export SlangModelEntry, read_model_entry, discover_models, model_ids, find_model
+export pack_profile, models_list_response, native_model_named, kind_serves, kind_mismatch, model_for_kind, kind_not_implemented_response

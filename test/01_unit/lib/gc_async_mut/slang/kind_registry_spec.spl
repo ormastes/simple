@@ -1,0 +1,371 @@
+"""
+## Purpose and audience
+Purpose: Pin the kind resolver chain (design slang_pluggable_modalities.md
+§3.2): override, projector companion, vocoder companion, pooling type,
+architecture table and magic sniff, plus the binary GGUF KV walk it reads.
+Audience: engineers adding a model kind or a model family to slang.
+
+## Compatibility and limitations
+Fixtures are tiny hand-built headers, not real models. The walk ends at the
+first `tokenizer.` key; a file that writes decisive keys after it needs a
+slang_kind.sdn override.
+"""
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+
+use std.gc_async_mut.slang.modality.kinds.{ModelKind, model_kind_text, modalities_json}
+use std.gc_async_mut.slang.modality.kind_registry.{gguf_facts, resolve_kind}
+use std.gc_async_mut.slang.engine.runner_dispatch.{runner_kind_text}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{describe_model, gguf_entry_shard}
+use std.gc_async_mut.slang.entrypoints.openai.api_server.{slang_api_dispatch}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{json_string_field}
+use std.io_runtime.{dir_create_all, file_write_bytes, dir_remove_all, write_file}
+
+fn _le(out: [u8], n: i64, width: i64) -> [u8]:
+    var o = out
+    var v = n
+    var i = 0
+    while i < width:
+        o.push((v % 256) as u8)
+        v = v / 256
+        i = i + 1
+    o
+
+fn _str(out: [u8], s: text) -> [u8]:
+    var o = _le(out, s.byte_len(), 8)
+    for b in s.bytes():
+        o.push(b)
+    o
+
+# One GGUF KV entry of the fixture writer.
+struct Kv:
+    key: text
+    kind: text
+    s: text
+    n: i64
+
+fn kv_str(key: text, s: text) -> Kv:
+    Kv(key: key, kind: "str", s: s, n: 0)
+
+fn kv_u32(key: text, n: i64) -> Kv:
+    Kv(key: key, kind: "u32", s: "", n: n)
+
+fn kv_bool(key: text, on: bool) -> Kv:
+    Kv(key: key, kind: "bool", s: "", n: if on: 1 else: 0)
+
+# A string array of `n` entries: the walker must skip it element by element.
+fn kv_str_array(key: text, n: i64) -> Kv:
+    Kv(key: key, kind: "strs", s: "", n: n)
+
+fn gguf(kvs: [Kv]) -> [u8]:
+    gguf_t(kvs, [])
+
+# A GGUF with tensor-info entries (1-D, f32, offset 0) after the KV block.
+fn gguf_t(kvs: [Kv], tensors: [text]) -> [u8]:
+    var o: [u8] = []
+    for b in "GGUF".bytes():
+        o.push(b)
+    o = _le(o, 3, 4)
+    o = _le(o, tensors.len(), 8)
+    o = _le(o, kvs.len(), 8)
+    for kv in kvs:
+        o = _str(o, kv.key)
+        if kv.kind == "str":
+            o = _le(o, 8, 4)
+            o = _str(o, kv.s)
+        elif kv.kind == "u32":
+            o = _le(o, 4, 4)
+            o = _le(o, kv.n, 4)
+        elif kv.kind == "bool":
+            o = _le(o, 7, 4)
+            o.push(kv.n as u8)
+        else:
+            o = _le(o, 9, 4)
+            o = _le(o, 8, 4)
+            o = _le(o, kv.n, 8)
+            var i = 0
+            while i < kv.n:
+                o = _str(o, "tok" + i.to_text())
+                i = i + 1
+    for name in tensors:
+        o = _str(o, name)
+        o = _le(o, 1, 4)
+        o = _le(o, 4, 8)
+        o = _le(o, 0, 4)
+        o = _le(o, 0, 8)
+    o
+
+# A raw GGUF header: magic, version 3, tensor_count, kv_count, then `rest`.
+fn raw_header(tensor_count: [u8], kv_count: [u8], rest: [u8]) -> [u8]:
+    var o: [u8] = []
+    for b in "GGUF".bytes():
+        o.push(b)
+    o = _le(o, 3, 4)
+    for b in tensor_count:
+        o.push(b)
+    for b in kv_count:
+        o.push(b)
+    for b in rest:
+        o.push(b)
+    o
+
+# Eight 0xff bytes: a u64 with the top bit set, i.e. -1 as i64.
+fn all_ones() -> [u8]:
+    var o: [u8] = []
+    var i = 0
+    while i < 8:
+        o.push(255 as u8)
+        i = i + 1
+    o
+
+fn fixture_dir(name: text) -> text:
+    val dir = "build/test/slang_kind_registry/" + name
+    dir_remove_all(dir)
+    dir_create_all(dir)
+    dir
+
+fn kind_of(dir: text) -> text:
+    val p = resolve_kind(dir)
+    model_kind_text(p.kind) + " " + modalities_json(p.inputs) + "->" + modalities_json(p.outputs) + " " + runner_kind_text(p.runner)
+
+describe "the binary GGUF KV walk":
+    it "reads a key written after a string array":
+        step("Verify: value lengths are read as u64, so a skipped array keeps the walk aligned")
+        val d = fixture_dir("walk")
+        file_write_bytes(d + "/m.gguf", gguf([kv_str("general.architecture", "bert"), kv_str_array("general.tags", 40), kv_u32("bert.pooling_type", 2)]))
+        match gguf_facts(d + "/m.gguf"):
+            Ok(f):
+                expect(f.arch).to_equal("bert")
+                expect(f.pooling_type).to_equal(2)
+            Err(why):
+                expect(why).to_equal("")
+
+    it "refuses a file without GGUF magic":
+        step("Verify: the magic is checked before any length is trusted")
+        val d = fixture_dir("nomagic")
+        write_file(d + "/m.gguf", "NOPE and some more bytes to pass twenty-four")
+        expect(gguf_facts(d + "/m.gguf").is_err()).to_equal(true)
+
+    it "keeps a GGUF whose KV block cannot be walked as the model entry":
+        step("Verify: the magic is evidence; a truncated header is never silently dropped")
+        val d = fixture_dir("truncated")
+        var b: [u8] = []
+        for x in "GGUF".bytes():
+            b.push(x)
+        b = _le(b, 3, 4)
+        b = _le(b, 0, 8)
+        b = _le(b, 5, 8)
+        b = _le(b, 200, 8)
+        file_write_bytes(d + "/model.gguf", b)
+        val m = describe_model(d, true)
+        expect(m.format).to_equal("gguf")
+        expect(m.entry_path.ends_with("model.gguf")).to_equal(true)
+        expect(model_kind_text(m.profile.kind)).to_equal("chat")
+
+describe "hostile GGUF headers":
+    it "rejects a negative key length as malformed":
+        step("Verify: a u64 length with the top bit set is refused, not looped on")
+        val d = fixture_dir("neg_key")
+        file_write_bytes(d + "/m.gguf", raw_header(_le([], 0, 8), _le([], 1, 8), _le(all_ones(), 0, 16)))
+        match gguf_facts(d + "/m.gguf"):
+            Ok(_):
+                expect("walked").to_equal("refused")
+            Err(why):
+                expect(why.contains("out of range")).to_equal(true)
+
+    it "rejects a kv_count the file cannot hold without walking it":
+        step("Verify: kv_count is capped by the bytes left in the file; the walk returns at once")
+        val d = fixture_dir("huge_kv")
+        file_write_bytes(d + "/m.gguf", raw_header(_le([], 0, 8), _le([], 4611686018427387904, 8), _le([], 0, 16)))
+        match gguf_facts(d + "/m.gguf"):
+            Ok(_):
+                expect("walked").to_equal("refused")
+            Err(why):
+                expect(why.contains("kv_count")).to_equal(true)
+
+    it "rejects an array count whose byte size overflows":
+        step("Verify: count * elem_width is checked by division, so a 2^61 u32 array cannot wrap")
+        val d = fixture_dir("arr_overflow")
+        var rest: [u8] = []
+        rest = _str(rest, "general.tags")
+        rest = _le(rest, 9, 4)
+        rest = _le(rest, 4, 4)
+        rest = _le(rest, 2305843009213693952, 8)
+        file_write_bytes(d + "/m.gguf", raw_header(_le([], 0, 8), _le([], 1, 8), rest))
+        match gguf_facts(d + "/m.gguf"):
+            Ok(_):
+                expect("walked").to_equal("refused")
+            Err(why):
+                expect(why.contains("array count")).to_equal(true)
+
+    it "rejects a string value longer than the file":
+        step("Verify: a string length past the end of the file is malformed, not a larger read")
+        val d = fixture_dir("long_str")
+        var rest: [u8] = []
+        rest = _str(rest, "general.architecture")
+        rest = _le(rest, 8, 4)
+        rest = _le(rest, 1000000, 8)
+        file_write_bytes(d + "/m.gguf", raw_header(_le([], 0, 8), _le([], 1, 8), rest))
+        match gguf_facts(d + "/m.gguf"):
+            Ok(_):
+                expect("walked").to_equal("refused")
+            Err(why):
+                expect(why.contains("string length")).to_equal(true)
+
+describe "resolve_kind":
+    it "reads a classification head past the tokenizer block as rerank":
+        step("Verify: bge-reranker-v2-m3 writes no pooling_type; cls.output.weight in the tensor table makes it rerank")
+        val r = fixture_dir("cls_rerank")
+        file_write_bytes(r + "/m.gguf", gguf_t([kv_str("general.architecture", "bert"), kv_str_array("tokenizer.ggml.tokens", 30)], ["cls.weight", "cls.output.weight", "token_embd.weight"]))
+        expect(kind_of(r)).to_equal("rerank [\"text\"]->[\"text\"] ggml")
+        val e = fixture_dir("no_cls_embed")
+        file_write_bytes(e + "/m.gguf", gguf_t([kv_str("general.architecture", "bert"), kv_str_array("tokenizer.ggml.tokens", 30)], ["token_embd.weight"]))
+        expect(kind_of(e)).to_equal("embedding [\"text\"]->[\"text\"] ggml")
+
+    it "maps pooling_type 4 to rerank and 2 to embedding":
+        step("Verify: <arch>.pooling_type decides before the architecture table")
+        val r = fixture_dir("rerank")
+        file_write_bytes(r + "/m.gguf", gguf([kv_str("general.architecture", "bert"), kv_u32("bert.pooling_type", 4)]))
+        expect(kind_of(r)).to_equal("rerank [\"text\"]->[\"text\"] ggml")
+        val e = fixture_dir("embed")
+        file_write_bytes(e + "/m.gguf", gguf([kv_str("general.architecture", "qwen2"), kv_u32("qwen2.pooling_type", 2)]))
+        expect(kind_of(e)).to_equal("embedding [\"text\"]->[\"text\"] ggml")
+
+    it "uses the architecture table when no pooling type is written":
+        step("Verify: bert is an embedder, an unlisted decoder is chat")
+        val b = fixture_dir("bert")
+        file_write_bytes(b + "/m.gguf", gguf([kv_str("general.architecture", "bert")]))
+        expect(kind_of(b)).to_equal("embedding [\"text\"]->[\"text\"] ggml")
+        val q = fixture_dir("qwen")
+        file_write_bytes(q + "/m.gguf", gguf([kv_str("general.architecture", "qwen2"), kv_str_array("tokenizer.ggml.tokens", 5)]))
+        expect(kind_of(q)).to_equal("chat [\"text\"]->[\"text\"] ggml")
+
+    it "takes chat input modalities from the projector's clip flags":
+        step("Verify: vision -> image, audio -> audio")
+        val v = fixture_dir("vlm")
+        file_write_bytes(v + "/model.gguf", gguf([kv_str("general.architecture", "llama")]))
+        file_write_bytes(v + "/mmproj-model.gguf", gguf([kv_str("general.architecture", "clip"), kv_bool("clip.has_vision_encoder", true), kv_bool("clip.has_audio_encoder", false)]))
+        expect(kind_of(v)).to_equal("chat [\"text\",\"image\"]->[\"text\"] ggml")
+        val a = fixture_dir("alm")
+        file_write_bytes(a + "/model.gguf", gguf([kv_str("general.architecture", "llama")]))
+        file_write_bytes(a + "/proj.gguf", gguf([kv_str("general.architecture", "clip"), kv_bool("clip.has_audio_encoder", true)]))
+        expect(kind_of(a)).to_equal("chat [\"text\",\"audio\"]->[\"text\"] ggml")
+
+    it "treats a WavTokenizer companion as tts and never as the entry":
+        step("Verify: the vocoder makes the directory tts and is excluded from the entry shard")
+        val d = fixture_dir("tts")
+        file_write_bytes(d + "/a-vocoder.gguf", gguf([kv_str("general.architecture", "wavtokenizer-dec")]))
+        file_write_bytes(d + "/outetts.gguf", gguf([kv_str("general.architecture", "llama")]))
+        expect(kind_of(d)).to_equal("tts [\"text\"]->[\"audio\"] ggml")
+        expect(gguf_entry_shard(d).ends_with("outetts.gguf")).to_equal(true)
+
+    it "honours a slang_kind.sdn override":
+        step("Verify: the override wins over metadata; tts needs its vocoder file")
+        val d = fixture_dir("override")
+        file_write_bytes(d + "/m.gguf", gguf([kv_str("general.architecture", "llama")]))
+        write_file(d + "/slang_kind.sdn", "kind: tts\nvocoder: voc.gguf\n")
+        expect(model_kind_text(resolve_kind(d).kind)).to_equal("tts")
+        expect(resolve_kind(d).reason.contains("voc.gguf")).to_equal(true)
+        file_write_bytes(d + "/voc.gguf", gguf([kv_str("general.architecture", "wavtokenizer-dec")]))
+        expect(resolve_kind(d).reason.contains("voc.gguf")).to_equal(false)
+
+    it "sniffs whisper ggml magic and SD UNet safetensors":
+        step("Verify: lmgg -> asr on whisper; model.diffusion_model. -> image_gen on stable-diffusion")
+        val w = fixture_dir("whisper")
+        write_file(w + "/ggml-tiny.en.bin", "lmgg-rest-of-header")
+        expect(kind_of(w)).to_equal("asr [\"audio\"]->[\"text\"] whisper")
+        expect(describe_model(w, true).format).to_equal("ggml")
+        val s = fixture_dir("sd")
+        val header = "{\"model.diffusion_model.input_blocks.0.0.weight\":{}}"
+        var st: [u8] = []
+        st = _le(st, header.byte_len(), 8)
+        for b in header.bytes():
+            st.push(b)
+        file_write_bytes(s + "/sd_turbo.safetensors", st)
+        expect(kind_of(s)).to_equal("image_gen [\"text\"]->[\"image\"] stable-diffusion")
+
+describe "describe_model and the chat path":
+    it "keeps an invalid slang_kind.sdn reason and refuses to run the model":
+        step("Verify: a `kind: embeddings` typo is not silently a runnable chat model")
+        val d = fixture_dir("bad_override")
+        file_write_bytes(d + "/m.gguf", gguf([kv_str("general.architecture", "llama")]))
+        write_file(d + "/slang_kind.sdn", "kind: embeddings\n")
+        val m = describe_model(d, true)
+        expect(m.runnable).to_equal(false)
+        expect(m.reason.contains("slang_kind.sdn")).to_equal(true)
+        expect(m.profile.reason.contains("slang_kind.sdn")).to_equal(true)
+
+    it "never marks a model of another kind runnable on the chat path":
+        step("Verify: an embedder is described but not runnable; a decoder stays runnable")
+        val e = fixture_dir("emb_not_runnable")
+        file_write_bytes(e + "/m.gguf", gguf([kv_str("general.architecture", "bert")]))
+        val em = describe_model(e, true)
+        expect(em.runnable).to_equal(false)
+        expect(em.reason.contains("embedding serving")).to_equal(true)
+        val c = fixture_dir("chat_runnable")
+        file_write_bytes(c + "/m.gguf", gguf([kv_str("general.architecture", "llama")]))
+        expect(describe_model(c, true).runnable).to_equal(true)
+
+    it "names a vocoder-only directory as such":
+        step("Verify: a lone WavTokenizer GGUF is not reported as 'no file carrying GGUF magic'")
+        val d = fixture_dir("vocoder_only")
+        file_write_bytes(d + "/voc.gguf", gguf([kv_str("general.architecture", "wavtokenizer-dec")]))
+        val m = describe_model(d, true)
+        expect(m.runnable).to_equal(false)
+        expect(m.reason.contains("WavTokenizer vocoder")).to_equal(true)
+
+describe "the HTTP surface":
+    it "reports slang_kind and modalities on /v1/models":
+        step("Verify: each entry names its kind and modality sets")
+        val root = fixture_dir("root")
+        dir_create_all(root + "/vlm")
+        file_write_bytes(root + "/vlm/model.gguf", gguf([kv_str("general.architecture", "llama")]))
+        file_write_bytes(root + "/vlm/mmproj.gguf", gguf([kv_str("general.architecture", "clip"), kv_bool("clip.has_vision_encoder", true)]))
+        val r = slang_api_dispatch("GET", "/v1/models", "", root)
+        expect(r.status).to_equal(200)
+        expect(r.content_type).to_equal("application/json")
+        expect(r.body_bytes.len()).to_equal(0)
+        expect(r.body.contains("\"slang_kind\":\"chat\",\"input_modalities\":[\"text\",\"image\"],\"output_modalities\":[\"text\"]")).to_equal(true)
+
+    it "answers 400 wrong_model_kind and 501 not_implemented on kind routes":
+        step("Verify: a chat model on /v1/embeddings is refused by kind; an embedder gets the stub 501")
+        val root = fixture_dir("routes")
+        dir_create_all(root + "/chat")
+        file_write_bytes(root + "/chat/m.gguf", gguf([kv_str("general.architecture", "llama")]))
+        dir_create_all(root + "/emb")
+        file_write_bytes(root + "/emb/m.gguf", gguf([kv_str("general.architecture", "bert")]))
+        val wrong = slang_api_dispatch("POST", "/v1/embeddings", "{\"model\":\"chat\",\"input\":\"x\"}", root)
+        expect(wrong.status).to_equal(400)
+        expect(json_string_field(wrong.body, "code")).to_equal("wrong_model_kind")
+        val stub = slang_api_dispatch("POST", "/v1/embeddings", "{\"model\":\"emb\",\"input\":\"x\"}", root)
+        expect(stub.status).to_equal(501)
+        expect(json_string_field(stub.body, "code")).to_equal("not_implemented")
+        val chat = slang_api_dispatch("POST", "/v1/chat/completions", "{\"model\":\"emb\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", root)
+        expect(chat.status).to_equal(400)
+        expect(json_string_field(chat.body, "code")).to_equal("wrong_model_kind")
+
+    it "lets an audio-input chat model serve /v1/audio/transcriptions but not a text-only one":
+        step("Verify: ASR path (a) — Chat [text, audio] is accepted for Asr; Chat [text] is wrong_model_kind")
+        val root = fixture_dir("asr_chat")
+        dir_create_all(root + "/alm")
+        file_write_bytes(root + "/alm/model.gguf", gguf([kv_str("general.architecture", "qwen3")]))
+        file_write_bytes(root + "/alm/proj.gguf", gguf([kv_str("general.architecture", "clip"), kv_bool("clip.has_audio_encoder", true)]))
+        dir_create_all(root + "/txt")
+        file_write_bytes(root + "/txt/model.gguf", gguf([kv_str("general.architecture", "qwen2")]))
+        val alm = slang_api_dispatch("POST", "/v1/audio/transcriptions", "{\"model\":\"alm\"}", root)
+        expect(alm.status).to_equal(501)
+        val txt = slang_api_dispatch("POST", "/v1/audio/transcriptions", "{\"model\":\"txt\"}", root)
+        expect(txt.status).to_equal(400)
+        expect(json_string_field(txt.body, "code")).to_equal("wrong_model_kind")
+
+    it "routes each kind path to its own module and 404s anything else":
+        step("Verify: /v1/rerank is served by serve_rerank, a GET on it is 405, an unlisted path is 404")
+        val root = fixture_dir("route_table")
+        dir_create_all(root + "/emb")
+        file_write_bytes(root + "/emb/m.gguf", gguf([kv_str("general.architecture", "bert")]))
+        val rr = slang_api_dispatch("POST", "/v1/rerank", "{\"model\":\"emb\"}", root)
+        expect(rr.status).to_equal(400)
+        expect(json_string_field(rr.body, "code")).to_equal("wrong_model_kind")
+        expect(slang_api_dispatch("GET", "/v1/rerank", "", root).status).to_equal(405)
+        expect(slang_api_dispatch("POST", "/v1/rerankx", "{}", root).status).to_equal(404)

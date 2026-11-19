@@ -21,6 +21,9 @@
 use std.io_runtime.{file_size, is_dir, file_read_text_at_nullable}
 use std.gc_async_mut.slang.host.slang_host.{host_file_exists, host_file_read, host_dir_list}
 use std.gc_async_mut.slang.model_executor.model_loader.manifest.{parse_manifest}
+use std.gc_async_mut.slang.modality.kinds.{KindProfile, ModelKind, kind_profile, default_kind_profile}
+use std.gc_async_mut.slang.engine.runner_dispatch.{RunnerKind, pure_runner_unsupported_reason}
+use std.gc_async_mut.slang.modality.kind_registry.{GgufFile, gguf_facts, gguf_files, gguf_file_is_projector, gguf_facts_are_vocoder, ggml_magic_file, resolve_kind_from}
 
 # What kind of artifact a directory holds, and therefore which loader — if any
 # — can consume it.
@@ -53,6 +56,8 @@ struct NativeModel:
     runnable: bool
     reason: text
     mmproj_path: text
+    # The resolved kind and input/output modalities (modality/kind_registry).
+    profile: KindProfile = default_kind_profile()
 
 fn _join(root: text, name: text) -> text:
     if root.ends_with("/"):
@@ -88,38 +93,41 @@ fn has_safetensors_header(path: text) -> bool:
     (file_read_text_at_nullable(path, 8, 1) ?? "") == "{"
 
 # True when `path` is a multimodal projector (CLIP-style encoder), not a text
-# model. The reliable test is GGUF metadata `general.architecture == "clip"`.
-# llama.cpp's writer emits that key FIRST, so it is read at fixed offsets: the
-# header is magic(4) version(4) tensor_count(8) kv_count(8), then the first KV
-# is key_len(8) "general.architecture"(20) type(4) value_len(8) value. Only the
-# ASCII runs are read as text. A file whose first key is something else cannot
-# be classified from metadata cheaply; for those, and only those, the `mmproj`
-# filename prefix is the fallback hint.
+# model. GGUF metadata decides (`general.architecture == "clip"` or
+# `general.type == "mmproj"`), read by walking the KV block as binary; only a
+# file whose metadata names neither falls back to the `mmproj` filename prefix.
 fn gguf_is_projector(path: text) -> bool:
-    val first_key = file_read_text_at_nullable(path, 32, 20) ?? ""
-    if first_key == "general.architecture":
-        return (file_read_text_at_nullable(path, 64, 4) ?? "") == "clip"
-    _basename(path).starts_with("mmproj")
+    match gguf_facts(path):
+        Ok(facts):
+            gguf_file_is_projector(GgufFile(name: _basename(path), facts: facts))
+        Err(_):
+            _basename(path).starts_with("mmproj")
 
-# `.gguf` files in `dir` that carry the magic, split by role.
+# `.gguf` files in `dir` that carry the magic, split by role. A WavTokenizer
+# vocoder is neither: it is a companion of a TTS model, never its entry.
 fn _gguf_names(dir: text, projectors: bool) -> [text]:
+    _gguf_names_in(gguf_files(dir), projectors)
+
+# The same split over an already-walked file list, so one describe reads each
+# header once.
+fn _gguf_names_in(files: [GgufFile], projectors: bool) -> [text]:
     var out: [text] = []
-    match host_dir_list(dir):
-        case Some(names):
-            for name in names:
-                if name.ends_with(".gguf"):
-                    val p = _join(dir, name)
-                    if has_gguf_magic(p) and gguf_is_projector(p) == projectors:
-                        out.push(name)
-        case nil:
-            pass
+    for f in files:
+        if gguf_file_is_projector(f):
+            if projectors:
+                out.push(f.name)
+        elif not projectors and not gguf_facts_are_vocoder(f.facts):
+            out.push(f.name)
     out
 
 # The lowest-numbered GGUF shard of the TEXT model in `dir`, which is the one a
 # GGUF reader is given (it finds its siblings itself). Projector files are never
 # the entry. Empty text when the directory holds no such file.
 fn gguf_entry_shard(dir: text) -> text:
-    val names = _gguf_names(dir, false)
+    _entry_in(dir, gguf_files(dir))
+
+fn _entry_in(dir: text, files: [GgufFile]) -> text:
+    val names = _gguf_names_in(files, false)
     if names.len() == 0:
         return ""
     _join(dir, _lowest(names))
@@ -133,7 +141,10 @@ fn _lowest(names: [text]) -> text:
 
 # The multimodal projector path next to the text model, or empty when there is# none. More than one projector is ambiguous: see `gguf_projector_count`.
 fn gguf_mmproj_path(dir: text) -> text:
-    val names = _gguf_names(dir, true)
+    _mmproj_in(dir, gguf_files(dir))
+
+fn _mmproj_in(dir: text, files: [GgufFile]) -> text:
+    val names = _gguf_names_in(files, true)
     if names.len() != 1:
         return ""
     _join(dir, names[0])
@@ -156,6 +167,9 @@ fn _first_safetensors(dir: text) -> text:
     _join(dir, best)
 
 fn detect_format(dir: text) -> ModelFormat:
+    _detect_format_in(dir, gguf_files(dir))
+
+fn _detect_format_in(dir: text, files: [GgufFile]) -> ModelFormat:
     val manifest_path = _join(dir, "manifest.sdn")
     if host_file_exists(manifest_path):
         match parse_manifest(host_file_read(manifest_path)):
@@ -163,7 +177,7 @@ fn detect_format(dir: text) -> ModelFormat:
                 ()
             Ok(_):
                 return ModelFormat.SlangPack
-    if gguf_entry_shard(dir) != "":
+    if _entry_in(dir, files) != "":
         return ModelFormat.Gguf
     val st = _first_safetensors(dir)
     if st != "" and has_safetensors_header(st):
@@ -173,8 +187,14 @@ fn detect_format(dir: text) -> ModelFormat:
 # Why a directory with no model is unknown. A directory holding only a
 # projector is a different mistake from an empty one, and says so.
 fn unknown_reason(dir: text) -> text:
-    if gguf_projector_count(dir) > 0:
+    _unknown_reason_in(gguf_files(dir))
+
+fn _unknown_reason_in(files: [GgufFile]) -> text:
+    if _gguf_names_in(files, true).len() > 0:
         return "only a multimodal projector (architecture clip) was found; it needs a text model GGUF beside it"
+    for f in files:
+        if gguf_facts_are_vocoder(f.facts):
+            return "only a WavTokenizer vocoder (wavtokenizer-dec) was found; it needs a TTS model GGUF beside it"
     "no manifest.sdn, no file carrying GGUF magic, and no safetensors header"
 
 # Describes one directory. `ggml_available` is passed in rather than probed
@@ -182,9 +202,46 @@ fn unknown_reason(dir: text) -> text:
 # this module's — and a detector that silently reported "not runnable" on a host
 # that simply had not been told where its backend lives would be the same
 # silence-by-omission bug in a new place.
+#
+# Every model also carries its resolved kind profile (modality/kind_registry):
+# a Chat profile's reason is the model's own not-runnable reason; another
+# kind's reason says why that kind is not served yet.
+#
+# `runnable` is the chat path's question (llm_engine loads only runnable
+# models), so a model of any other kind is never runnable, and neither is a
+# Chat model whose profile carries a reason (an invalid slang_kind.sdn, or no
+# kind resolved): that reason is kept, never replaced by the format's "".
 fn describe_model(dir: text, ggml_available: bool) -> NativeModel:
+    val files = gguf_files(dir)
+    var m = _describe_format(dir, files, ggml_available)
+    val p = resolve_kind_from(dir, files)
+    var reason = p.reason
+    match p.kind:
+        ModelKind.Chat:
+            match p.runner:
+                RunnerKind.Pure:
+                    reason = pure_runner_unsupported_reason(dir)
+                _:
+                    if p.reason != "" and m.format != "unknown":
+                        m.runnable = false
+                        m.reason = p.reason
+                    reason = m.reason
+        _:
+            if m.runnable:
+                m.runnable = false
+                m.reason = p.reason
+    m.profile = kind_profile(p.kind, p.inputs, p.runner, reason)
+    if m.format == "unknown":
+        val ggml_file = ggml_magic_file(dir)
+        if ggml_file != "":
+            m.format = "ggml"
+            m.entry_path = ggml_file
+            m.reason = reason
+    m
+
+fn _describe_format(dir: text, files: [GgufFile], ggml_available: bool) -> NativeModel:
     val name = _basename(dir)
-    val fmt = detect_format(dir)
+    val fmt = _detect_format_in(dir, files)
     val bytes = dir_byte_size(dir)
     match fmt:
         ModelFormat.SlangPack:
@@ -192,12 +249,13 @@ fn describe_model(dir: text, ggml_available: bool) -> NativeModel:
                 entry_path: _join(dir, "manifest.sdn"), runnable: false,
                 reason: "slang pack recognised; slang has no engine of its own yet (master plan A3/A4/A5)", mmproj_path: "")
         ModelFormat.Gguf:
-            val shard = gguf_entry_shard(dir)
-            val mmproj = gguf_mmproj_path(dir)
-            if gguf_projector_count(dir) > 1:
+            val shard = _entry_in(dir, files)
+            val mmproj = _mmproj_in(dir, files)
+            val projector_count = _gguf_names_in(files, true).len()
+            if projector_count > 1:
                 return NativeModel(id: name, root: dir, format: "gguf", bytes: bytes,
                     entry_path: shard, runnable: false,
-                    reason: "ambiguous multimodal projector: the directory holds " + gguf_projector_count(dir).to_text() + " projector (architecture clip) files, keep exactly one", mmproj_path: "")
+                    reason: "ambiguous multimodal projector: the directory holds " + projector_count.to_text() + " projector (architecture clip) files, keep exactly one", mmproj_path: "")
             if ggml_available:
                 NativeModel(id: name, root: dir, format: "gguf", bytes: bytes,
                     entry_path: shard, runnable: true, reason: "", mmproj_path: mmproj)
@@ -212,7 +270,7 @@ fn describe_model(dir: text, ggml_available: bool) -> NativeModel:
         ModelFormat.Unknown:
             NativeModel(id: name, root: dir, format: "unknown", bytes: bytes,
                 entry_path: "", runnable: false,
-                reason: unknown_reason(dir), mmproj_path: "")
+                reason: _unknown_reason_in(files), mmproj_path: "")
 
 fn _basename(path: text) -> text:
     var trimmed = path
