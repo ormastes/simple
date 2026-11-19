@@ -1060,7 +1060,7 @@ head (13/40 at base).
 - **Fix:** the shorthand is applied whenever it is declared; a later `background-color` then overrides `bg` and the `currentColor` flag only.
 - **Evidence:** `background_color_after_shorthand_chrome159_spec` (single gradient layer, and a layer list ending in `none`, Chrome (44,117,200) at (30,12) ±2) 0/2 -> 2/2. A sweep of the 60 specs that declare both `background:` and `background-color` and render or lay out has 0 new failures.
 
-## 2026-11-20 — nested glass ignores the Backdrop Root (Engine2D FIXED; raster OPEN)
+## 2026-11-20 — nested glass ignores the Backdrop Root (FIXED on all lanes)
 
 - **Rule (Filter Effects 2, Chrome 159):** an element with `backdrop-filter` is a Backdrop Root. A descendant's backdrop is only what was painted inside that root's group, not the page under it. Chrome draws the descendant's filtered backdrop src-over the group, so alpha compounds.
 - **Chrome evidence:** an outer `rgba(255,255,255,0.72)` panel over #2d2f45 holds an inner panel, both with `blur(8px)`. The white inner panel is (250,250,251), and (239,239,241) without the outer filter. The tinted inner `rgba(80,160,255,0.72)` is (124,181,251), and (113,170,241) without. With outer `opacity:0.99` it is 248. Hand check, 8-bit premultiplied: group 184 -> backdrop src-over 235 -> inner background 249 -> over the page 250.
@@ -1073,12 +1073,11 @@ head (13/40 at base).
   - `backdrop_root_nested_glass_chrome159_spec`: cpu_simd white, tinted and no-root control, plus Vulkan white and tinted, all ±2. Nested was red on base.
   - The Vulkan case asserts ≥2 device readbacks. As for every CSS `backdrop-filter` box, the blur itself runs on the host over a device region readback: `vulkan_device_blur_rect_count` stays 0 on base and head, and the device blur kernel serves only the WM glass material.
   - Head-first sweep of 15 backdrop, glass, opacity-group, device-scale and Engine2D specs: 0 new failures, with the same ✗ lines on base in `draw_ir_adv` 68/70, `backend_vulkan_device_glass_blur` 14/15 and `glass_feature_gap` 2/13.
-- **OPEN, raster:** `_paint_backdrop_blur` replaces over an opaque frame, and the black/white two-pass layer recovery cannot express a src-over whose weight is the layer's own alpha. Planned fix:
-  - admit Backdrop Roots as white-alpha groups;
-  - run the white-alpha pass first and record each filtered alpha;
-  - replay those alphas for a src-over in the colour pass;
-  - paint the root's own backdrop on the main frame before the composite.
-  
-  Text on a non-opaque root and shadows/gradients under overlap are still rejected by the group admission.
+- **Raster (FIXED 2026-11-20):** the black/white two-pass layer recovery cannot express a src-over weighted by the layer's own alpha, so:
+  - `_raster_opacity_groups` admits a Backdrop Root (`_raster_backdrop_root`: opacity 100, a backdrop filter, and a backdrop-filtered descendant) as a white-alpha group. Nested roots, colour-matrix backdrops inside the root, nested opacity groups, and unwhitenable members (shadows, background layers) are rejected and paint as before.
+  - `_raster_restore_group` paints the root's own backdrop on the main frame first. It then runs the white-alpha pass (`_raster_bdr_mode` 1), which records each filtered alpha in paint order, and the colour pass (mode 2), which replays those alphas for a premultiplied src-over in `_paint_backdrop_blur`. The layer composites at 255.
+  - `backdrop_root_nested_glass_raster_chrome159_spec` (white, tinted and no-root control, ±2): 1/3 -> 3/3. Head-first sweep of 12 backdrop, opacity-group, coverage and glass specs: 0 new failures; `decl_apply_coverage_closure` 165/166 and `glass_feature_gap` 2/13 have the same ✗ lines on base.
+  - Window fixture (raster, 480x300): agreement 555‰ on both base and head, so its panes are not admitted (text on a non-opaque root, shadows). Wall 277-287 s base vs 241-280 s head. Max RSS is bimodal on both sides (267 MB or 1.02 GB per run, the same binary `cargo-target-webrender-premul` 54131896 B), so there is no measured memory change.
+- **OPEN, raster admission:** glass with text on a non-opaque background, or with a shadow, still reads the whole frame. That is the window fixture's case.
 - **OPEN, Vulkan:** the CSS `backdrop-filter` blur should use the device blur kernel instead of readback + host blur.
 - **Not covered:** a Backdrop Root under an opacity < 100 ancestor still bails to the flat path, as before. Nested Backdrop Roots have no spec.
