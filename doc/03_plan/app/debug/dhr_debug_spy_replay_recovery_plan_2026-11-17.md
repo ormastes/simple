@@ -26,7 +26,7 @@ design document.
 | P2 | Failure evidence: assert/fault record, independent broker, deadlines | Real assert and fault, plus a no-debugger test | **in progress** |
 | P3 | Host managed recovery: isolated interpreter worker, state roots, effect fencing | A V2 failure restores a verified V1 without duplicate effects | **in progress** |
 | P4 | Unified native generation lifetime (legacy loader → KPF, retention pin) | Concurrent old/new execution with safe retirement | **in progress**: `share_pin` (#10379) |
-| P5 | Shared Spy plus bare-metal emitter, with a separate replay event family | Bounded operation, disclosed loss | **in progress**: replay-ring loss disclosed (#10378) |
+| P5 | Shared Spy plus bare-metal emitter, with a separate replay event family | Bounded operation, disclosed loss | **in progress**: replay-ring loss disclosed (#10378); bounded bare-metal Spy emitter `std.spy.bm_spy_emitter` (observer-contract kinds, drop-newest, in-stream Loss record, separate from the replay ring; `spy_baremetal_emitter_spec` 10/10). Not yet wired to XraySpyV1 or a target hook |
 | P6 | Portable semantic replay | Scoped deterministic replay with no live fallback | todo |
 | P7 | rr / TTD / QEMU / TRACE32 backends | Per-target capability receipts | todo |
 | P8 | Caret / IDE recovery and replay UI | Session-preserving upgrades | todo |
