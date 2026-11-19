@@ -15474,13 +15474,15 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     FILE* f = RT_FOPEN_READ_SHARED(path);
     if (!f) {
         /* DIAGNOSTIC (bug-linked: stage2_sanity_scv_snapshot_entry_zero_sources_2026-10-22):
-         * ungated dump of the fopen failure on the candidate's actual read path. */
-        fprintf(stderr,
-            "[rt_file_read_text-diag] errno=%d path_len=%llu path_bytes=",
-            errno, (unsigned long long)path_len);
-        for (uint64_t i = 0; i < path_len && i < 200; i++)
-            fprintf(stderr, "%02x", (unsigned)path_ptr[i]);
-        fprintf(stderr, " converted='%s'\n", path);
+         * gated behind SIMPLE_RT_FILE_READ_TEXT_DIAG=1 so missing-file probes stay silent. */
+        if (rt_env_flag_is("SIMPLE_RT_FILE_READ_TEXT_DIAG", '1')) {
+            fprintf(stderr,
+                "[rt_file_read_text-diag] errno=%d path_len=%llu path_bytes=",
+                errno, (unsigned long long)path_len);
+            for (uint64_t i = 0; i < path_len && i < 200; i++)
+                fprintf(stderr, "%02x", (unsigned)path_ptr[i]);
+            fprintf(stderr, " converted='%s'\n", path);
+        }
         return rt_nil;
     }
     return rt_file_slurp_text_close(f);
@@ -17450,6 +17452,9 @@ int64_t rt_env_get_value(int64_t key) {
 static atomic_flag rt_lexer_source_lock = ATOMIC_FLAG_INIT;
 static uint8_t* rt_lexer_source_bytes = NULL;
 static uint64_t rt_lexer_source_length = 0;
+static bool rt_lexer_source_ascii = true;
+static uint64_t rt_lexer_cursor_char = 0;
+static uint64_t rt_lexer_cursor_byte = 0;
 
 static void rt_lexer_source_acquire(void) {
     while (atomic_flag_test_and_set_explicit(&rt_lexer_source_lock, memory_order_acquire)) {}
@@ -17459,36 +17464,86 @@ static void rt_lexer_source_release(void) {
     atomic_flag_clear_explicit(&rt_lexer_source_lock, memory_order_release);
 }
 
+static uint64_t rt_lexer_first_char_byte(const uint8_t* bytes, uint64_t len) {
+    uint64_t i = 0;
+    while (i < len && (bytes[i] & 0xC0) == 0x80) {
+        i++;
+    }
+    return i;
+}
+
 bool rt_lexer_source_set(const uint8_t* source_ptr, uint64_t source_len) {
     if (!source_ptr && source_len != 0) return false;
+    if (source_len > (uint64_t)(SIZE_MAX - 1)) return false;
     uint8_t* replacement = (uint8_t*)rt_observed_malloc_v1((size_t)source_len + 1);
     if (!replacement) return false;
     if (source_len != 0) memcpy(replacement, source_ptr, (size_t)source_len);
     replacement[source_len] = 0;
+    bool is_ascii = (source_len == 0) || spl_text_bytes_ascii(replacement, source_len);
+    uint64_t first_byte = is_ascii ? 0 : rt_lexer_first_char_byte(replacement, source_len);
     rt_lexer_source_acquire();
     uint8_t* previous = rt_lexer_source_bytes;
     rt_lexer_source_bytes = replacement;
     rt_lexer_source_length = source_len;
+    rt_lexer_source_ascii = is_ascii;
+    rt_lexer_cursor_char = 0;
+    rt_lexer_cursor_byte = first_byte;
     rt_lexer_source_release();
     free(previous);
     return true;
 }
 
 static bool rt_lexer_source_char_to_byte(uint64_t target, uint64_t* byte_offset) {
-    uint64_t chars = 0;
-    for (uint64_t i = 0; i < rt_lexer_source_length; i++) {
-        if ((rt_lexer_source_bytes[i] & 0xC0) != 0x80) {
-            if (chars == target) {
-                *byte_offset = i;
-                return true;
-            }
-            chars++;
-        }
-    }
-    if (chars == target) {
-        *byte_offset = rt_lexer_source_length;
+    if (rt_lexer_source_ascii) {
+        if (target > rt_lexer_source_length) return false;
+        *byte_offset = target;
         return true;
     }
+    uint64_t chars = rt_lexer_cursor_char;
+    uint64_t i = rt_lexer_cursor_byte;
+    if (target == chars) {
+        *byte_offset = i;
+        return true;
+    }
+    if (target < chars) {
+        /* Seek backward if target is closer to cursor than 0; otherwise restart from byte 0. */
+        if (chars - target <= target) {
+            while (chars > target && i > 0) {
+                i--;
+                while (i > 0 && (rt_lexer_source_bytes[i] & 0xC0) == 0x80) {
+                    i--;
+                }
+                chars--;
+            }
+            rt_lexer_cursor_char = chars;
+            rt_lexer_cursor_byte = i;
+            *byte_offset = i;
+            return true;
+        }
+        chars = 0;
+        i = rt_lexer_first_char_byte(rt_lexer_source_bytes, rt_lexer_source_length);
+        if (target == 0) {
+            rt_lexer_cursor_char = 0;
+            rt_lexer_cursor_byte = i;
+            *byte_offset = i;
+            return true;
+        }
+    }
+    while (i < rt_lexer_source_length) {
+        i++;
+        while (i < rt_lexer_source_length && (rt_lexer_source_bytes[i] & 0xC0) == 0x80) {
+            i++;
+        }
+        chars++;
+        if (chars == target) {
+            rt_lexer_cursor_char = chars;
+            rt_lexer_cursor_byte = i;
+            *byte_offset = i;
+            return true;
+        }
+    }
+    rt_lexer_cursor_char = chars;
+    rt_lexer_cursor_byte = i;
     return false;
 }
 
@@ -18668,28 +18723,59 @@ bool rt_dir_create(const uint8_t* path_ptr, uint64_t path_len, bool recursive) {
     return rt_dir_create_cpath(path, recursive);
 }
 
-static char* rt_core_shell_quote(const char* s) {
-    if (!s) return spl_strdup("''");
-    size_t extra = 2;
+#if !defined(_WIN32)
+static size_t rt_core_shell_quoted_len(const char* s) {
+    size_t len = 2;
+    if (!s) return len;
     for (const char* p = s; *p; p++) {
-        extra += (*p == '\'') ? 4 : 1;
+        len += (*p == '\'') ? 4 : 1;
     }
-    char* out = (char*)rt_observed_malloc_v1(extra + 1);
-    if (!out) return spl_strdup("''");
-    char* w = out;
-    *w++ = '\'';
-    for (const char* p = s; *p; p++) {
-        if (*p == '\'') {
-            memcpy(w, "'\\''", 4);
-            w += 4;
-        } else {
-            *w++ = *p;
+    return len;
+}
+
+static char* rt_core_write_shell_quoted(char* dst, const char* s) {
+    *dst++ = '\'';
+    if (s) {
+        for (const char* p = s; *p; p++) {
+            if (*p == '\'') {
+                memcpy(dst, "'\\''", 4);
+                dst += 4;
+            } else {
+                *dst++ = *p;
+            }
         }
     }
-    *w++ = '\'';
-    *w = '\0';
-    return out;
+    *dst++ = '\'';
+    return dst;
 }
+
+static char* rt_slurp_stream_bytes(FILE* stream, size_t* out_len) {
+    *out_len = 0;
+    if (!stream) return NULL;
+    size_t cap = 4096;
+    size_t len = 0;
+    char* buf = (char*)rt_observed_malloc_v1(cap);
+    if (!buf) return NULL;
+    for (;;) {
+        size_t avail = cap - len;
+        if (avail <= 1) {
+            if (cap > SIZE_MAX / 2) break;
+            size_t next_cap = cap * 2;
+            char* grown = (char*)rt_observed_realloc_v1(buf, next_cap);
+            if (!grown) break;
+            buf = grown;
+            cap = next_cap;
+            avail = cap - len;
+        }
+        size_t got = fread(buf + len, 1, avail - 1, stream);
+        if (got == 0) break;
+        len += got;
+    }
+    buf[len] = '\0';
+    *out_len = len;
+    return buf;
+}
+#endif
 
 /* (cmd_ptr, cmd_len, args) -> RuntimeValue (array), per runtime_sffi.rs:1419.
  *
@@ -18731,24 +18817,22 @@ static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArra
     memcpy(cmd_c, cmd, (size_t)cmd_len);
     cmd_c[cmd_len] = '\0';
 
-    char* command = rt_core_shell_quote(cmd_c);
-    free(cmd_c);
-    int64_t argc = rt_array_len(args);
+    size_t total_len = rt_core_shell_quoted_len(cmd_c);
+    int64_t argc = args ? rt_array_len(args) : 0;
+    if (argc < 0) argc = 0;
     for (int64_t i = 0; i < argc; i++) {
         int64_t arg = rt_array_get(args, i);
         const uint8_t* arg_data = rt_string_data(arg);
         const char* arg_s = arg_data ? (const char*)arg_data : "";
-        char* quoted = rt_core_shell_quote(arg_s);
-        size_t new_len = strlen(command) + strlen(quoted) + 2;
-        char* joined = (char*)rt_observed_malloc_v1(new_len);
-        if (!joined) {
-            free(quoted);
-            continue;
+        size_t qlen = rt_core_shell_quoted_len(arg_s);
+        if (qlen > SIZE_MAX - 2 - total_len) {
+            free(cmd_c);
+            rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
+            rt_array_push(result, rt_string_new((const uint8_t*)"command too long", 16));
+            rt_array_push(result, rt_value_int(-1));
+            return result;
         }
-        snprintf(joined, new_len, "%s %s", command, quoted);
-        free(command);
-        free(quoted);
-        command = joined;
+        total_len += 1 + qlen;
     }
 
     /* stderr goes to a per-call mkstemp file that is read back after pclose.
@@ -18759,22 +18843,62 @@ static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArra
      * falling back to a shared path. */
     char err_path[] = "/tmp/simple_process_run_stderr_XXXXXX";
     int err_fd = mkstemp(err_path);
-    char* redirected = NULL;
     if (err_fd >= 0) {
         close(err_fd);
-        char* quoted_err = rt_core_shell_quote(err_path);
-        char* redirect = spl_str_concat(" 2>", quoted_err ? quoted_err : err_path);
-        if (quoted_err) free(quoted_err);
-        if (redirect) {
-            redirected = spl_str_concat(command, redirect);
-            free(redirect);
+        size_t qerr_len = rt_core_shell_quoted_len(err_path);
+        if (qerr_len > SIZE_MAX - 4 - total_len) {
+            unlink(err_path);
+            free(cmd_c);
+            rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
+            rt_array_push(result, rt_string_new((const uint8_t*)"command too long", 16));
+            rt_array_push(result, rt_value_int(-1));
+            return result;
         }
+        total_len += 3 + qerr_len;
     } else {
-        redirected = spl_str_concat(command, " 2>/dev/null");
+        const size_t suffix_len = sizeof(" 2>/dev/null") - 1;
+        if (suffix_len > SIZE_MAX - 1 - total_len) {
+            free(cmd_c);
+            rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
+            rt_array_push(result, rt_string_new((const uint8_t*)"command too long", 16));
+            rt_array_push(result, rt_value_int(-1));
+            return result;
+        }
+        total_len += suffix_len;
     }
-    FILE* pipe = popen(redirected ? redirected : command, "r");
-    free(command);
-    if (redirected) free(redirected);
+
+    char* full_command = (char*)rt_observed_malloc_v1(total_len + 1);
+    if (!full_command) {
+        if (err_fd >= 0) unlink(err_path);
+        free(cmd_c);
+        rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
+        rt_array_push(result, rt_string_new((const uint8_t*)"process spawn failed", 20));
+        rt_array_push(result, rt_value_int(-1));
+        return result;
+    }
+
+    char* w = rt_core_write_shell_quoted(full_command, cmd_c);
+    free(cmd_c);
+    for (int64_t i = 0; i < argc; i++) {
+        int64_t arg = rt_array_get(args, i);
+        const uint8_t* arg_data = rt_string_data(arg);
+        const char* arg_s = arg_data ? (const char*)arg_data : "";
+        *w++ = ' ';
+        w = rt_core_write_shell_quoted(w, arg_s);
+    }
+    if (err_fd >= 0) {
+        memcpy(w, " 2>", 3);
+        w += 3;
+        w = rt_core_write_shell_quoted(w, err_path);
+    } else {
+        const size_t suffix_len = sizeof(" 2>/dev/null") - 1;
+        memcpy(w, " 2>/dev/null", suffix_len);
+        w += suffix_len;
+    }
+    *w = '\0';
+
+    FILE* pipe = popen(full_command, "r");
+    free(full_command);
     if (!pipe) {
         if (err_fd >= 0) unlink(err_path);
         rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
@@ -18783,23 +18907,8 @@ static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArra
         return result;
     }
 
-    size_t cap = 4096;
-    size_t len = 0;
-    char* stdout_buf = (char*)rt_observed_malloc_v1(cap);
-    if (!stdout_buf) stdout_buf = spl_strdup("");
-    if (stdout_buf) stdout_buf[0] = '\0';
-    char chunk[512];
-    while (fgets(chunk, sizeof(chunk), pipe)) {
-        size_t chunk_len = strlen(chunk);
-        if (len + chunk_len + 1 > cap) {
-            while (len + chunk_len + 1 > cap) cap *= 2;
-            stdout_buf = (char*)rt_observed_realloc_v1(stdout_buf, cap);
-            if (!stdout_buf) break;
-        }
-        memcpy(stdout_buf + len, chunk, chunk_len);
-        len += chunk_len;
-        stdout_buf[len] = '\0';
-    }
+    size_t stdout_len = 0;
+    char* stdout_buf = rt_slurp_stream_bytes(pipe, &stdout_len);
     int status = pclose(pipe);
     int exit_code = status == -1 ? -1 : (status >> 8);
 
@@ -18808,30 +18917,17 @@ static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArra
     if (err_fd >= 0) {
         FILE* err_file = fopen(err_path, "rb");
         if (err_file) {
-            size_t err_cap = 4096;
-            stderr_buf = (char*)rt_observed_malloc_v1(err_cap);
-            while (stderr_buf) {
-                size_t got = fread(stderr_buf + stderr_len, 1, err_cap - stderr_len, err_file);
-                if (got == 0) break;
-                stderr_len += got;
-                if (stderr_len == err_cap) {
-                    char* grown = (char*)rt_observed_realloc_v1(stderr_buf, err_cap * 2);
-                    if (!grown) break;
-                    stderr_buf = grown;
-                    err_cap *= 2;
-                }
-            }
+            stderr_buf = rt_slurp_stream_bytes(err_file, &stderr_len);
             fclose(err_file);
         }
         unlink(err_path);
     }
 
-    const char* stdout_text = stdout_buf ? stdout_buf : "";
-    rt_array_push(result, rt_string_new((const uint8_t*)stdout_text, (uint64_t)strlen(stdout_text)));
-    rt_array_push(result, rt_string_new((const uint8_t*)(stderr_buf ? stderr_buf : ""), (uint64_t)(stderr_buf ? stderr_len : 0)));
+    rt_array_push(result, rt_string_new((const uint8_t*)(stdout_buf ? stdout_buf : ""), (uint64_t)stdout_len));
+    if (stdout_buf) free(stdout_buf);
+    rt_array_push(result, rt_string_new((const uint8_t*)(stderr_buf ? stderr_buf : ""), (uint64_t)stderr_len));
     if (stderr_buf) free(stderr_buf);
     rt_array_push(result, rt_value_int(exit_code));
-    if (stdout_buf) free(stdout_buf);
     return result;
 #endif
 }
@@ -19054,21 +19150,54 @@ int64_t rt_file_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
     FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return rt_core_nil();
-    if (fseek(f, 0, SEEK_END) != 0) {
+#if defined(_WIN32)
+    if (_fseeki64(f, 0, SEEK_END) != 0) {
         fclose(f);
         return rt_core_nil();
     }
-    long file_len = ftell(f);
-    if (file_len < 0 || fseek(f, 0, SEEK_SET) != 0) {
+    __int64 file_len_i64 = _ftelli64(f);
+    if (file_len_i64 < 0 || _fseeki64(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return rt_core_nil();
+    }
+#else
+    if (fseeko(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return rt_core_nil();
+    }
+    off_t file_len_off = ftello(f);
+    if (file_len_off < 0 || fseeko(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return rt_core_nil();
+    }
+    int64_t file_len_i64 = (int64_t)file_len_off;
+    if ((off_t)file_len_i64 != file_len_off) {
+        fclose(f);
+        return rt_core_nil();
+    }
+#endif
+    uint64_t file_len = (uint64_t)file_len_i64;
+    if (file_len > (uint64_t)SIZE_MAX || file_len > (uint64_t)INT64_MAX) {
         fclose(f);
         return rt_core_nil();
     }
 
-    SplArray* result = rt_byte_array_new_len((uint64_t)file_len);
+    SplArray* result = rt_byte_array_new_len(file_len);
     RtCoreArray* array = rt_core_array_ptr(result);
-    if (!array || (file_len > 0 && fread(array->data, 1, (size_t)file_len, f) != (size_t)file_len)) {
+    if (!array) {
+        if (result) rt_array_free(result);
         fclose(f);
         return rt_core_nil();
+    }
+    size_t total_read = 0;
+    while (total_read < (size_t)file_len) {
+        size_t got = fread((uint8_t*)array->data + total_read, 1, (size_t)file_len - total_read, f);
+        if (got == 0) {
+            rt_array_free(result);
+            fclose(f);
+            return rt_core_nil();
+        }
+        total_read += got;
     }
     fclose(f);
     return (int64_t)(uintptr_t)result;

@@ -1,6 +1,8 @@
 # Dependency-free carrier for the exact retained phase-memo owner types.
 # The native walker follows array slots and enum payloads without copying
 # dictionaries or arrays. This mirrors module_surface_promote_roots.
+use compiler.hir.hir_definitions.{HirTrait}
+
 enum HirPhaseMemoRoot:
     IndexMap({text: i64})
     TextMap({text: text})
@@ -9,6 +11,7 @@ enum HirPhaseMemoRoot:
     FlagMap({text: bool})
     Texts([text])
     Ints([i64])
+    TraitMap({text: HirTrait})
 
 @unsafe(reason: "raw transient-owner promotion; false is provider failure", capabilities: [ffi])
 extern fn rt_transient_heap_promote<T>(value: T) -> bool
@@ -25,3 +28,134 @@ fn hir_phase_memo_promote_roots(roots: [HirPhaseMemoRoot]) -> bool:
     # either result. Enum wrappers are retained, as in the surface pattern.
     rt_array_free(roots)
     promoted
+
+var _surface_pending_scope_id: i64 = 0
+var _surface_promoted_scope_id: i64 = 0
+var _surface_pending_buckets: [i64] = []
+var _surface_pending_next: [i64] = []
+
+var _priv_base_pending_scope_id: i64 = 0
+var _priv_base_promoted_scope_id: i64 = 0
+var _priv_base_pending_root: text = ""
+var _priv_base_pending_keys: [text] = []
+var _priv_base_pending_buckets: [i64] = []
+var _priv_base_pending_next: [i64] = []
+
+var _priv_dir_pending_scope_id: i64 = 0
+var _priv_dir_promoted_scope_id: i64 = 0
+var _priv_dir_pending_root: text = ""
+var _priv_dir_pending_keys: [text] = []
+var _priv_dir_pending_roots: [text] = []
+var _priv_dir_pending_buckets: [i64] = []
+var _priv_dir_pending_next: [i64] = []
+
+pub(package) fn hir_phase_memo_stage_surface_cache(scope_id: i64, buckets: [i64], next: [i64]):
+    _surface_pending_scope_id = scope_id
+    _surface_pending_buckets = buckets
+    _surface_pending_next = next
+
+pub(package) fn hir_phase_memo_clear_surface_staging(scope_id: i64):
+    if _surface_pending_scope_id == scope_id:
+        _surface_pending_scope_id = 0
+        _surface_pending_buckets = []
+        _surface_pending_next = []
+
+pub(package) fn hir_phase_memo_surface_scope_promoted(scope_id: i64) -> bool:
+    scope_id == 0 or scope_id == _surface_promoted_scope_id
+
+pub(package) fn hir_phase_memo_stage_priv_base_cache(
+    scope_id: i64, root: text, keys: [text], buckets: [i64], next: [i64]
+):
+    _priv_base_pending_scope_id = scope_id
+    _priv_base_pending_root = root
+    _priv_base_pending_keys = keys
+    _priv_base_pending_buckets = buckets
+    _priv_base_pending_next = next
+
+pub(package) fn hir_phase_memo_clear_priv_base_staging(scope_id: i64):
+    if _priv_base_pending_scope_id == scope_id:
+        _priv_base_pending_scope_id = 0
+        _priv_base_pending_root = ""
+        _priv_base_pending_keys = []
+        _priv_base_pending_buckets = []
+        _priv_base_pending_next = []
+
+pub(package) fn hir_phase_memo_priv_base_scope_promoted(scope_id: i64) -> bool:
+    scope_id == 0 or scope_id == _priv_base_promoted_scope_id
+
+pub(package) fn hir_phase_memo_stage_priv_dir_cache(
+    scope_id: i64, root: text, keys: [text], roots: [text], buckets: [i64], next: [i64]
+):
+    _priv_dir_pending_scope_id = scope_id
+    _priv_dir_pending_root = root
+    _priv_dir_pending_keys = keys
+    _priv_dir_pending_roots = roots
+    _priv_dir_pending_buckets = buckets
+    _priv_dir_pending_next = next
+
+pub(package) fn hir_phase_memo_clear_priv_dir_staging(scope_id: i64):
+    if _priv_dir_pending_scope_id == scope_id:
+        _priv_dir_pending_scope_id = 0
+        _priv_dir_pending_root = ""
+        _priv_dir_pending_keys = []
+        _priv_dir_pending_roots = []
+        _priv_dir_pending_buckets = []
+        _priv_dir_pending_next = []
+
+pub(package) fn hir_phase_memo_priv_dir_scope_promoted(scope_id: i64) -> bool:
+    scope_id == 0 or scope_id == _priv_dir_promoted_scope_id
+
+pub(package) fn hir_phase_memo_promote_global_caches() -> bool:
+    if _surface_pending_scope_id != 0 and _surface_pending_scope_id != _surface_promoted_scope_id:
+        val surf_roots: [HirPhaseMemoRoot] = [
+            HirPhaseMemoRoot.Ints(_surface_pending_buckets),
+            HirPhaseMemoRoot.Ints(_surface_pending_next),
+        ]
+        if not hir_phase_memo_promote_roots(surf_roots):
+            return false
+        _surface_promoted_scope_id = _surface_pending_scope_id
+        _surface_pending_scope_id = 0
+        _surface_pending_buckets = []
+        _surface_pending_next = []
+
+    if _priv_base_pending_scope_id != 0 and _priv_base_pending_scope_id != _priv_base_promoted_scope_id:
+        val root_box: [text] = [_priv_base_pending_root]
+        val priv_roots: [HirPhaseMemoRoot] = [
+            HirPhaseMemoRoot.Texts(root_box),
+            HirPhaseMemoRoot.Texts(_priv_base_pending_keys),
+            HirPhaseMemoRoot.Ints(_priv_base_pending_buckets),
+            HirPhaseMemoRoot.Ints(_priv_base_pending_next),
+        ]
+        val priv_ok = hir_phase_memo_promote_roots(priv_roots)
+        rt_array_free(root_box)
+        if not priv_ok:
+            return false
+        _priv_base_promoted_scope_id = _priv_base_pending_scope_id
+        _priv_base_pending_scope_id = 0
+        _priv_base_pending_root = ""
+        _priv_base_pending_keys = []
+        _priv_base_pending_buckets = []
+        _priv_base_pending_next = []
+
+    if _priv_dir_pending_scope_id != 0 and _priv_dir_pending_scope_id != _priv_dir_promoted_scope_id:
+        val repo_box: [text] = [_priv_dir_pending_root]
+        val dir_roots: [HirPhaseMemoRoot] = [
+            HirPhaseMemoRoot.Texts(repo_box),
+            HirPhaseMemoRoot.Texts(_priv_dir_pending_keys),
+            HirPhaseMemoRoot.Texts(_priv_dir_pending_roots),
+            HirPhaseMemoRoot.Ints(_priv_dir_pending_buckets),
+            HirPhaseMemoRoot.Ints(_priv_dir_pending_next),
+        ]
+        val dir_ok = hir_phase_memo_promote_roots(dir_roots)
+        rt_array_free(repo_box)
+        if not dir_ok:
+            return false
+        _priv_dir_promoted_scope_id = _priv_dir_pending_scope_id
+        _priv_dir_pending_scope_id = 0
+        _priv_dir_pending_root = ""
+        _priv_dir_pending_keys = []
+        _priv_dir_pending_roots = []
+        _priv_dir_pending_buckets = []
+        _priv_dir_pending_next = []
+
+    true

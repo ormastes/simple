@@ -199,27 +199,23 @@ fn _single_last_slash(s: text) -> i64:
         i = i + 1
     idx
 
-fn preprocess_infix_for_child(file_path: text) -> text:
-    if not file_path.ends_with("_spec.spl"):
+fn preprocess_infix_from_source(file_path: text, content: text) -> text:
+    """Rewrite legacy infix/paren-subject expectations in-memory using preloaded source."""
+    if not file_path.ends_with("_spec.spl") or content == "":
         return file_path
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
-    if content == "":
+    if not content.contains("expect ") and not (content.contains("expect(") and content.contains(" to_")):
         return file_path
     val lines = content.split("\n")
-    var joined = ""
-    var first = true
+    var out_lines: [text] = []
     var changed = false
     for raw_line in lines:
         val rewritten = _single_rewrite_infix_expect_line(raw_line)
         if rewritten != raw_line:
             changed = true
-        if first:
-            joined = rewritten
-            first = false
-        else:
-            joined = joined + "\n" + rewritten
+        out_lines.push(rewritten)
     if not changed:
         return file_path
+    val joined = out_lines.join("\n")
     val slash = _single_last_slash(file_path)
     val dir = if slash >= 0: file_path.substring(0, slash + 1) else: ""
     val base = if slash >= 0: file_path.substring(slash + 1) else: file_path
@@ -228,6 +224,12 @@ fn preprocess_infix_for_child(file_path: text) -> text:
     if not ok:
         return file_path
     tmp
+
+fn preprocess_infix_for_child(file_path: text) -> text:
+    if not file_path.ends_with("_spec.spl"):
+        return file_path
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
+    preprocess_infix_from_source(file_path, content)
 
 struct ChildRun:
     path: text
@@ -450,27 +452,20 @@ fn find_simple_binary() -> text:
         return ""
     configured
 
-fn file_has_di_test_tag(file_path: text) -> bool:
-    """Check if file has # @di_test tag, allowing DI modifications in system tests.
+fn spec_platform_skip_from_source(content: text, os_name: text) -> text:
+    """Return skip reason when @platform tags in `content` exclude `os_name`, else empty."""
+    platform_os_skip_reason(file_get_platform_tags(content), os_name)
 
-    Mirrors std.test_runner.test_runner_files.file_has_di_test_tag. Duplicated
-    here (rather than imported) so this child runner stays independent of
-    std.test_runner.* per the file-level design note above."""
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
-    content.contains("# @di_test")
+fn spec_has_slow_it_from_source(content: text) -> bool:
+    """True when `content` declares a `slow_it ` block."""
+    content.contains("slow_it ")
 
-fn spec_exec_limit_directive(file_path: text) -> i64:
-    """Parse `# @exec_limit <N>` from a spec header (0 when absent/invalid).
-
-    Specs whose honest interpreter run exceeds the driver's default
-    10M-operation cap declare the cap they need; run_spec forwards it into
-    the child env (raise-only) because the driver reads
-    SIMPLE_EXECUTION_LIMIT once at startup and in-process arming is inert."""
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
-    val idx = find_raw(content, "# @exec_limit ")
+fn _single_parse_directive_i64(content: text, prefix: text) -> i64:
+    """Parse non-negative integer immediately following `prefix` (0 when absent/invalid)."""
+    val idx = find_raw(content, prefix)
     if idx < 0:
         return 0
-    var pos = idx + 14
+    var pos = idx + prefix.byte_len()
     val n = content.byte_len()
     var value: i64 = 0
     var digits = 0
@@ -485,6 +480,37 @@ fn spec_exec_limit_directive(file_path: text) -> i64:
     if digits == 0:
         return 0
     value
+
+fn file_has_di_test_tag_from_source(content: text) -> bool:
+    """Pure variant of `file_has_di_test_tag` operating on preloaded source."""
+    content.contains("# @di_test")
+
+fn file_has_di_test_tag(file_path: text) -> bool:
+    """Check if file has # @di_test tag, allowing DI modifications in system tests.
+
+    Mirrors std.test_runner.test_runner_files.file_has_di_test_tag. Duplicated
+    here (rather than imported) so this child runner stays independent of
+    std.test_runner.* per the file-level design note above."""
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
+    file_has_di_test_tag_from_source(content)
+
+fn spec_exec_limit_from_source(content: text) -> i64:
+    """Pure variant of `spec_exec_limit_directive` operating on preloaded source."""
+    _single_parse_directive_i64(content, "# @exec_limit ")
+
+fn spec_exec_limit_directive(file_path: text) -> i64:
+    """Parse `# @exec_limit <N>` from a spec header (0 when absent/invalid).
+
+    Specs whose honest interpreter run exceeds the driver's default
+    10M-operation cap declare the cap they need; run_spec forwards it into
+    the child env (raise-only) because the driver reads
+    SIMPLE_EXECUTION_LIMIT once at startup and in-process arming is inert."""
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
+    spec_exec_limit_from_source(content)
+
+fn spec_jit_spec_entry_from_source(content: text) -> bool:
+    """Pure variant of `spec_jit_spec_entry_directive` operating on preloaded source."""
+    content.starts_with("# @jit_spec_entry\n") or find_raw(content, "\n# @jit_spec_entry\n") >= 0
 
 fn spec_jit_spec_entry_directive(file_path: text) -> bool:
     """True when the spec header carries `# @jit_spec_entry`.
@@ -505,7 +531,11 @@ fn spec_jit_spec_entry_directive(file_path: text) -> bool:
     dropped the opt-in (measured). They therefore reach processes the spec
     spawns: use the directive on self-contained specs only."""
     val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
-    content.starts_with("# @jit_spec_entry\n") or find_raw(content, "\n# @jit_spec_entry\n") >= 0
+    spec_jit_spec_entry_from_source(content)
+
+fn spec_timeout_secs_from_source(content: text) -> i64:
+    """Pure variant of `spec_timeout_secs_directive` operating on preloaded source."""
+    _single_parse_directive_i64(content, "# @timeout_secs ")
 
 fn spec_timeout_secs_directive(file_path: text) -> i64:
     """Parse `# @timeout_secs <N>` from a spec header (0 when absent/invalid).
@@ -518,24 +548,7 @@ fn spec_timeout_secs_directive(file_path: text) -> i64:
     fail-open hole, because a spec that cannot report a verdict can never
     report a failure either. Raise-only, same shape as @exec_limit."""
     val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
-    val idx = find_raw(content, "# @timeout_secs ")
-    if idx < 0:
-        return 0
-    var pos = idx + 16
-    val n = content.byte_len()
-    var value: i64 = 0
-    var digits = 0
-    while pos < n:
-        val c = content.char_code_at(pos)
-        if c >= 48 and c <= 57:
-            value = value * 10 + (c - 48)
-            digits = digits + 1
-            pos = pos + 1
-        else:
-            break
-    if digits == 0:
-        return 0
-    value
+    spec_timeout_secs_from_source(content)
 
 fn print_test_file_summary(path: text, passed: i64, failed: i64, skipped: i64, pending: i64, duration_ms: i64, unverified: text, process_error: bool = false, blocked: i64 = 0, blocked_reason: text = ""):
     print ""
@@ -1155,6 +1168,15 @@ fn _cov_report_for_file(path: text, hits: dict<text, bool>, called: dict<text, b
     "coverage: {path} {pct}% ({hit}/{total} lines)"
 
 fn _cov_print_report(spec_path: text, sdn: text):
+    val spec_src = unsafe(capabilities: [ffi]): rt_file_read_text(spec_path) ?? ""
+    _cov_print_report_from_source(spec_src, sdn)
+
+fn _cov_print_report_from_source(spec_src: text, sdn: text):
+    if spec_src == "":
+        return
+    val targets = _cov_targets(spec_src)
+    if targets.len() == 0:
+        return
     var hits: dict<text, bool> = {}
     var called: dict<text, bool> = {}
     var seen_files: dict<text, bool> = {}
@@ -1222,12 +1244,6 @@ fn _cov_print_report(spec_path: text, sdn: text):
                 if not seen_dec_files.contains_key(f):
                     seen_dec_files[f] = true
                     dec_files.push(f)
-    val spec_src = unsafe(capabilities: [ffi]): rt_file_read_text(spec_path) ?? ""
-    if spec_src == "":
-        return
-    val targets = _cov_targets(spec_src)
-    if targets.len() == 0:
-        return
     print ""
     for tpath in targets:
         print _cov_report_for_file(tpath, hits, called, files)
@@ -1253,11 +1269,11 @@ fn _cov_branch_report_for_file(path: text, dec_total: dict<text, i64>,
 # spec imports are refreshed through the SAME `simple tldr` producer contract
 # native-build uses (compiler.driver.cache.module_artifacts_v1). Advisory:
 # a refresh failure is reported and never changes the test verdict.
-fn _refresh_tldr_companions(binary: text, spec_path: text):
+fn _refresh_tldr_companions_from_source(binary: text, spec_src: text):
+    """Refresh TLDR companions using preloaded spec source."""
     val root = env_get("SIMPLE_TLDR_ROOT") ?? ""
     if root == "":
         return
-    val spec_src = file_read_nullable(spec_path) ?? ""
     val targets = _cov_targets(spec_src)
     if targets.len() == 0:
         return
@@ -1267,6 +1283,13 @@ fn _refresh_tldr_companions(binary: text, spec_path: text):
     val (_out, err, code) = process_run_bounded(binary, args, 120000, TEST_OUTPUT_CAPTURE_BYTES)
     if code != 0:
         print "warning: test-runner: tldr refresh failed (exit {code}) {err.trim()}"
+
+fn _refresh_tldr_companions(binary: text, spec_path: text):
+    val root = env_get("SIMPLE_TLDR_ROOT") ?? ""
+    if root == "":
+        return
+    val spec_src = file_read_nullable(spec_path) ?? ""
+    _refresh_tldr_companions_from_source(binary, spec_src)
 
 fn _single_run_spl_doctest(args: [text]) -> i64:
     # `--no-session-daemon` routes every `simple test` here (driver main.rs
@@ -1538,8 +1561,9 @@ fn run_single_target(args: [text]) -> i64:
     if run.list_only:
         print run.path
         return 0
+    val spec_source = unsafe(capabilities: [ffi]): rt_file_read_text(run.path) ?? ""
     # Host-OS @platform tag: counted, reasoned skip, never a failure.
-    val os_skip = platform_os_skip_reason(file_get_platform_tags(file_read_nullable(run.path) ?? ""), host_os())
+    val os_skip = spec_platform_skip_from_source(spec_source, host_os())
     if os_skip != "":
         _single_platform_skips = _single_platform_skips + 1
         print platform_skip_line(run.path, os_skip)
@@ -1559,16 +1583,15 @@ fn run_single_target(args: [text]) -> i64:
     if mcdc_error != "":
         print mcdc_error
         return 2
-    val spec_text_for_slow_it = unsafe(capabilities: [ffi]): rt_file_read_text(run.path) ?? ""
-    if spec_text_for_slow_it.contains("slow_it ") and run.timeout_secs < 600:
+    if spec_has_slow_it_from_source(spec_source) and run.timeout_secs < 600:
         run.timeout_secs = 600
-    val declared_timeout = spec_timeout_secs_directive(run.path)
+    val declared_timeout = spec_timeout_secs_from_source(spec_source)
     if declared_timeout > run.timeout_secs:
         run.timeout_secs = declared_timeout
 
     env_set("SIMPLE_RUNTIME_MODE", "interpreter")
     env_set("SIMPLE_EXECUTION_MODE", "interpret")
-    if spec_jit_spec_entry_directive(run.path):
+    if spec_jit_spec_entry_from_source(spec_source):
         env_set("SIMPLE_RUNTIME_MODE", "jit")
         env_set("SIMPLE_EXECUTION_MODE", "jit")
         env_set("SIMPLE_JIT_SPEC_ENTRY", "1")
@@ -1590,7 +1613,7 @@ fn run_single_target(args: [text]) -> i64:
     # SIMPLE_EXECUTION_LIMIT once at startup (driver/src/cli/init.rs), so a
     # spec cannot raise its own op cap in-process — the runner must forward
     # it into the child env. Raise-only: an existing higher env value wins.
-    val exec_limit = spec_exec_limit_directive(run.path)
+    val exec_limit = spec_exec_limit_from_source(spec_source)
     if exec_limit > 0:
         val cur = env_get("SIMPLE_EXECUTION_LIMIT") ?? ""
         if cur == "" or (cur.to_i64() ?? 0) < exec_limit:
@@ -1600,7 +1623,7 @@ fn run_single_target(args: [text]) -> i64:
         env_set("SIMPLE_SYSTEM_TEST", "1")
     else:
         env_set("SIMPLE_SYSTEM_TEST", "0")
-    if is_system and file_has_di_test_tag(run.path):
+    if is_system and file_has_di_test_tag_from_source(spec_source):
         env_set("SIMPLE_DI_TEST", "1")
     else:
         env_set("SIMPLE_DI_TEST", "0")
@@ -1645,7 +1668,7 @@ fn run_single_target(args: [text]) -> i64:
         if env_get("SIMPLE_PHASE7_TRACE") == "1":
             print "phase7-coverage-source-rewrite=0"
     else:
-        exec_path = preprocess_infix_for_child(run.path)
+        exec_path = preprocess_infix_from_source(run.path, spec_source)
     val assert_ran = env_get("SIMPLE_TEST_ASSERT_RAN") == "1"
     var runtime_coverage_path = ""
     var previous_coverage_output = ""
@@ -1683,7 +1706,7 @@ fn run_single_target(args: [text]) -> i64:
             return 1
         if env_get("SIMPLE_PHASE7_TRACE") == "1":
             print "phase7-apk-runner: pid={getpid()}"
-    _refresh_tldr_companions(binary, run.path)
+    _refresh_tldr_companions_from_source(binary, spec_source)
     val start = time_now_unix_micros()
     # The child runs from the spec's project root so `src/...` reads resolve
     # the way its imports do, whatever directory the runner was started in.
@@ -2051,14 +2074,14 @@ fn run_single_target(args: [text]) -> i64:
     # it is fixed and removed from that file. Live only on this runner: the
     # Rust seed evaluates describe/it/expect as intrinsics and writes no
     # sidecar, so under the seed the tally is unknown and nothing fires.
-    if failed == 0 and passed > 0 and evidence_expectations == 0 and unverified_error == "" and not spec_source_has_raw_assert(file_read_nullable(run.path) ?? ""):
+    if failed == 0 and passed > 0 and evidence_expectations == 0 and unverified_error == "" and not spec_source_has_raw_assert(spec_source):
         print vacuous_verdict_line(run.path, passed)
         if vacuous_strict_enabled() and not vacuous_baselined(run.path):
             failed = 1
             print "error: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated"
         else:
             print "warning: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated (advisory; SIMPLE_TEST_VACUOUS_STRICT=1 fails it)"
-    if source_is_in_development(rt_file_read_text(run.path) ?? ""):
+    if source_is_in_development(spec_source):
         print in_development_explicit_line(run.path)
     if mcdc_mode == "on" or mcdc_mode == "dynamic":
         if not _single_mcdc_attempt(args, run.path, mcdc_mode, binary, run.timeout_secs) and failed == 0 and unverified_error == "":
@@ -2077,7 +2100,7 @@ fn run_single_target(args: [text]) -> i64:
         if failed == 0: unverified_error else: "", process_error,
         if is_blocked: blocked_count else: 0, blocked_reason)
     if cov_on and cov_sdn != "":
-        _cov_print_report(run.path, cov_sdn)
+        _cov_print_report_from_source(spec_source, cov_sdn)
     if failed == 0 and unverified_error != "":
         # TERMINATED / TIMEOUT: not a failure (earlyoom is SIGTERMing `simple`
         # on this host, so a signal death says nothing about the code under

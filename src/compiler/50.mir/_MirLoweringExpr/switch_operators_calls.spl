@@ -90,12 +90,42 @@ fn _sffi_enum_discriminant<T>(value: T) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(value)
 
-# Monotonic counter for lambda-lift synthesized top-level function names. A
-# non-capturing `Lambda` used as a first-class VALUE (passed to a HOF) is lifted
-# to a synthesized top-level MIR function `__lambda_lift_<n>`; this counter keeps
-# each lift's name (and thus each fnptr constant) unique so two different lambdas
-# in one program do not collide onto the same address.
-var _mir_lambda_lift_counter: i64 = 0
+# Deterministic per-module counter and hash tag for lambda-lift synthesized
+# top-level function names. Each module's lifted functions carry both its owner
+# module identity and a deterministic module-key hash/fold tag so parallel MIR
+# shard workers never vary by module claim order or collide on lifted symbols.
+var _mir_lambda_lift_counters_by_module: Dict<text, i64> = {}
+
+fn _mir_lambda_lift_module_key(module_id: text) -> text:
+    if module_id != "":
+        return module_id
+    "__anon"
+
+fn _mir_lambda_lift_module_hash_tag(module_key: text) -> text:
+    var h: i64 = 2166136261
+    var idx = 0
+    val len = module_key.byte_len()
+    while idx < len:
+        h = ((h ^ module_key.byte_at(idx)) * 16777619) & 0x7FFFFFFF
+        idx = idx + 1
+    val digits = "0123456789abcdef"
+    var hex = "h"
+    var shift = 28
+    while shift >= 0:
+        val nib = (h >> shift) & 15
+        hex = hex + digits.substring(nib, nib + 1)
+        shift = shift - 4
+    hex
+
+fn _mir_lambda_lift_peek_index(module_id: text) -> i64:
+    val key = _mir_lambda_lift_module_key(module_id)
+    _mir_lambda_lift_counters_by_module[key] ?? 0
+
+fn _mir_lambda_lift_take_index(module_id: text) -> i64:
+    val key = _mir_lambda_lift_module_key(module_id)
+    val cur = _mir_lambda_lift_counters_by_module[key] ?? 0
+    _mir_lambda_lift_counters_by_module[key] = cur + 1
+    cur
 
 # NOTE (bug #9 fix): print(x.contains(y)) etc. used to rely on a hardcoded
 # method-name allow-list here (print_arg_is_bool_method_call) because the
@@ -8226,7 +8256,8 @@ impl MirLowering:
                         if not self.any_callable_scalar_type_supported(params[index]):
                             self.error_fatal("dynamic callback parameter type has no admitted tagged scalar adapter", Some(value.span))
                             return None
-                        val symbol = SymbolId(id: 1060000000 + _mir_lambda_lift_counter * 1024 + index)
+                        val lift_peek = _mir_lambda_lift_peek_index(self.current_module_id)
+                        val symbol = SymbolId(id: 1060000000 + lift_peek * 1024 + index)
                         val arg_expr = HirExpr(kind: HirExprKind.Var(symbol), has_type_: true, type_: params[index], span: value.span)
                         adapter_params = adapter_params.push(HirParam(symbol: symbol, name: "__any_arg_{index}", type_: params[index], has_default: false, default: arg_expr, span: value.span, is_mutable: false))
                         adapter_args = adapter_args.push(HirCallArg(has_name: false, name: "", value: arg_expr, span: value.span))
@@ -8945,15 +8976,15 @@ impl MirLowering:
                     mpi = mpi + 1
                 val return_type = if val typed_return = declared_return: self.lower_type(typed_return) else: MirType.i64()
                 val sig = MirSignature(params: mir_params, return_type: return_type, is_variadic: false)
-                val lift_n = _mir_lambda_lift_counter
+                val lift_n = _mir_lambda_lift_take_index(self.current_module_id)
+                val mod_key = _mir_lambda_lift_module_key(self.current_module_id)
+                val mod_tag = _mir_lambda_lift_module_hash_tag(mod_key)
+                val gen_owner = if self.current_module_id != "": self.current_module_id else: mod_tag
                 # Owner-qualified exactly like an ordinary module function
-                # (`<module>.<name>`, mir_provider_callable_identity). The counter
-                # restarts in every compiler process (per-module native workers,
-                # MIR shard forks), so a bare `__lambda_lift_<n>` was defined by
-                # several objects and the link bound every module to whichever
-                # definition came first -- a silent cross-module miscompile.
-                val gen_name = mir_provider_callable_identity(self.current_module_id, "__lambda_lift_{lift_n}") + ""
-                _mir_lambda_lift_counter = _mir_lambda_lift_counter + 1
+                # (`<module>.<name>`, mir_provider_callable_identity), plus a
+                # deterministic per-module counter and module hash tag so shard
+                # workers produce identical symbols independent of claim order.
+                val gen_name = mir_provider_callable_identity(gen_owner, "__lambda_lift_{lift_n}_{mod_tag}") + ""
                 # Unique synthesized symbol id, high enough to never collide with
                 # a real program symbol or another lift (module.functions is
                 # keyed by symbol; a shared id would drop all but one lift).

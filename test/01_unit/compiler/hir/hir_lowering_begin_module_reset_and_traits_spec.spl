@@ -1,0 +1,156 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+Verifies G3 `HirLowering.begin_module` per-module field resets (all 11 module-local
+fields), `lowered_traits` transient-scope promotion via `TraitMap`, and once-per-build
+promotion tracking for `surface_decl_pair_*` and `package_sibling_*`.
+Audience: compiler engineers maintaining HIR lowering reuse and transient arenas.
+"""
+
+# @tag: unit, compiler, hir, native-safe
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{SymbolId, TypeId, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirTrait}
+use compiler.hir.hir_lowering.types.{HirLowering, HirDeclaredPatternEnumSlots, hirlowering_for_module}
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_lowering._Items.module_lowering.*
+use compiler.hir.hir_lowering.module_surface.{
+    ModuleSurface,
+    ModuleSurfacesByName
+}
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+fn make_test_trait(name: text) -> HirTrait:
+    HirTrait(
+        symbol: SymbolId(id: 501),
+        name: name,
+        type_params: [],
+        methods: [],
+        supertraits: [],
+        defaults: [],
+        where_clause: [],
+        assoc_types: [],
+        visibility: Visibility.Public,
+        is_public: true,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: Span.empty())
+
+fn make_decl_and_sibling_registry(suffix: text) -> ModuleSurfacesByName:
+    var mod_a = ModuleSurface.empty("g3pkg.alpha_{suffix}")
+    mod_a.content_hash = 201
+    mod_a.callable_names = ["fn_alpha_{suffix}", "fn_beta_{suffix}"]
+    var mod_b = ModuleSurface.empty("g3pkg.beta_{suffix}")
+    mod_b.content_hash = 202
+    mod_b.callable_names = ["fn_gamma_{suffix}"]
+    ModuleSurfacesByName.from_parts(
+        [mod_a, mod_b],
+        {"g3pkg.alpha_{suffix}": 0, "g3pkg.beta_{suffix}": 1},
+        ["g3pkg.alpha_{suffix}", "g3pkg.beta_{suffix}"],
+        [0, 1]).unwrap()
+
+describe "G3 HirLowering.begin_module full module-local reset":
+    it "resets all 11 module-local fields without clearing persistent surface registry":
+        step("Populate all module-local fields before begin_module")
+        val reg = make_decl_and_sibling_registry("reset")
+        var lowering = hirlowering_for_module("first.spl", reg)
+        lowering.immutable_view_symbols[10] = "FrozenBox"
+        lowering.accessor_warned_keys = ["Point.x"]
+        lowering.local_annotation_provenance[11] = true
+        lowering.impl_textual_method_keys = ["Widget.render"]
+        lowering.call_arity_symbol_ids = [77]
+        lowering.call_arity_rows = ["77|1|2"]
+        lowering.declared_pattern_enum_slots["Color.Rgb"] = HirDeclaredPatternEnumSlots(
+            tuple_types: [HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())],
+            field_names: ["r"],
+            field_types: [HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())],
+            is_struct: false,
+            type_parameters: [],
+            declaring_owner: "Color")
+        lowering.enum_payload_slot_rows["Color.Rgb"] = ["i64"]
+        lowering.written_any_unsafe_depth = 3
+        lowering.unsafe_block_depth = 2
+        lowering.nominal_impl_header_owner = true
+        lowering.lowered_traits["Show"] = make_test_trait("Show")
+        lowering.lowered_trait_count_value = 1
+
+        step("Call begin_module for next file")
+        lowering.begin_module("second.spl")
+
+        step("All 11 module-local fields are reset while surface registry survives")
+        expect(lowering.module_filename).to_equal("second.spl")
+        expect(lowering.immutable_view_symbols.len()).to_equal(0)
+        expect(lowering.accessor_warned_keys.len()).to_equal(0)
+        expect(lowering.local_annotation_provenance.len()).to_equal(0)
+        expect(lowering.impl_textual_method_keys.len()).to_equal(0)
+        expect(lowering.call_arity_symbol_ids.len()).to_equal(0)
+        expect(lowering.call_arity_rows.len()).to_equal(0)
+        expect(lowering.declared_pattern_enum_slots.len()).to_equal(0)
+        expect(lowering.enum_payload_slot_rows.len()).to_equal(0)
+        expect(lowering.written_any_unsafe_depth).to_equal(0)
+        expect(lowering.unsafe_block_depth).to_equal(0)
+        expect(lowering.nominal_impl_header_owner).to_equal(false)
+        expect(lowering.lowered_traits.len()).to_equal(0)
+        expect(lowering.lowered_trait_count_value).to_equal(0)
+        expect(lowering.module_surfaces.surfaces.len()).to_equal(2)
+
+describe "G3 lowered_traits and once-per-build index transient promotion":
+    it "promotes lowered_traits across paused transient scope end":
+        step("Insert a lowered trait during transient scope and promote owners")
+        val reg = make_decl_and_sibling_registry("traits")
+        var lowering = hirlowering_for_module("traits_mod.spl", reg)
+        expect(rt_transient_array_scope_begin()).to_equal(true)
+        lowering.lowered_traits["Display"] = make_test_trait("Display")
+        lowering.lowered_trait_count_value = 1
+        expect(rt_transient_array_scope_pause()).to_equal(true)
+        expect(lowering.promote_phase_memo_transient_owners()).to_equal(true)
+        expect(rt_transient_array_scope_end()).to_equal(true)
+
+        step("Retained lowered_traits entry stays intact after scope teardown")
+        expect(lowering.lowered_traits.contains_key("Display")).to_equal(true)
+        expect(lowering.lowered_traits["Display"].name).to_equal("Display")
+
+    it "promotes immutable surface_decl and package_sibling indices once and skips re-walks":
+        step("Build surface_decl and package_sibling indices once")
+        val reg = make_decl_and_sibling_registry("once")
+        var lowering = hirlowering_for_module("m0.spl", reg)
+        lowering.build_surface_decl_index()
+        lowering.build_package_sibling_index()
+        expect(lowering.surface_decl_pair_names.len()).to_equal(3)
+        expect(lowering.package_sibling_names.len() > 0).to_equal(true)
+
+        step("Outside paused scope promote returns false and does not mark promoted")
+        expect(lowering.promote_phase_memo_transient_owners()).to_equal(false)
+        expect(lowering.surface_decl_promote_calls_v1).to_equal(0)
+        expect(lowering.package_sibling_promote_calls_v1).to_equal(0)
+
+        step("Run 5 module scopes without rebuilding indices; promote runs once")
+        var step_idx = 0
+        while step_idx < 5:
+            lowering.begin_module("m{step_idx + 1}.spl")
+            expect(rt_transient_array_scope_begin()).to_equal(true)
+            expect(rt_transient_array_scope_pause()).to_equal(true)
+            expect(lowering.promote_phase_memo_transient_owners()).to_equal(true)
+            expect(rt_transient_array_scope_end()).to_equal(true)
+            step_idx = step_idx + 1
+        expect(lowering.surface_decl_promote_calls_v1).to_equal(1)
+        expect(lowering.package_sibling_promote_calls_v1).to_equal(1)
+
+        step("Rebuilding indices advances promote count on next paused promotion")
+        lowering.build_surface_decl_index()
+        lowering.build_package_sibling_index()
+        expect(rt_transient_array_scope_begin()).to_equal(true)
+        expect(rt_transient_array_scope_pause()).to_equal(true)
+        expect(lowering.promote_phase_memo_transient_owners()).to_equal(true)
+        expect(rt_transient_array_scope_end()).to_equal(true)
+        expect(lowering.surface_decl_promote_calls_v1).to_equal(2)
+        expect(lowering.package_sibling_promote_calls_v1).to_equal(2)

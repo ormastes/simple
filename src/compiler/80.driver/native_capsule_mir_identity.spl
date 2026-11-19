@@ -8,7 +8,8 @@ use compiler.common._Attributes.decl_attrs.{DriverManifestAttrKind,
     VhdlResetPolarity, VhdlResetSynchrony}
 use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type,
     serialize_const_value}
-use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.sha256.{sha256_text, Sha256StreamV1, sha256_stream_v1_new}
+use std.common.text_bytes.{text_to_utf8_bytes}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
     transient_scope_pause, transient_scope_end, transient_promote}
 
@@ -305,20 +306,73 @@ pub fn compute_native_capsule_mir_identity_v1(module: MirModule) -> text:
     if not retained or not ended: return ""
     digest
 
+class _MirIdentityStreamHasherV1:
+    """Bounded chunked incremental SHA-256 hasher avoiding giant row-join buffers."""
+    stream: Sha256StreamV1
+    has_row: bool
+    failed: bool
+
+    static fn create() -> _MirIdentityStreamHasherV1:
+        _MirIdentityStreamHasherV1(
+            stream: sha256_stream_v1_new(),
+            has_row: false,
+            failed: false
+        )
+
+    me feed_chunked(value: text):
+        if self.failed:
+            return
+        val raw = text_to_utf8_bytes(value)
+        val total = raw.len()
+        if total <= 4096:
+            if not self.stream.update(raw):
+                self.failed = true
+            return
+        var off = 0
+        while off < total:
+            val rem = total - off
+            val take = if rem < 4096: rem else: 4096
+            var chunk: [u8] = [0u8; take]
+            var i = 0
+            while i < take:
+                chunk[i] = raw[off + i]
+                i = i + 1
+            if not self.stream.update(chunk):
+                self.failed = true
+                return
+            off = off + take
+
+    me feed_row(row: text):
+        if self.failed:
+            return
+        if self.has_row:
+            if not self.stream.update_byte(10u8):
+                self.failed = true
+                return
+        else:
+            self.has_row = true
+        self.feed_chunked(row)
+
+    me finish_digest() -> text:
+        if self.failed:
+            return ""
+        self.stream.finish_hex() ?? ""
+
 fn native_capsule_mir_identity_unscoped_v1(module: MirModule) -> text:
-    var rows: [text] = ["module|{storage_identity_text_v1(module.name)}"]
+    var hasher = _MirIdentityStreamHasherV1.create()
+    hasher.feed_row("module|{storage_identity_text_v1(module.name)}")
     for symbol in native_capsule_sorted_symbol_ids_v1(module.functions.keys()):
         val function = module.functions[symbol]
-        rows.push("fn|{symbol.id}|{storage_identity_text_v1(serialize_mir_function(function))}|{storage_identity_text_v1(native_capsule_function_metadata_identity_v1(function))}")
+        hasher.feed_row("fn|{symbol.id}|{storage_identity_text_v1(serialize_mir_function(function))}|{storage_identity_text_v1(native_capsule_function_metadata_identity_v1(function))}")
     for symbol in native_capsule_sorted_symbol_ids_v1(module.constants.keys()):
         val constant = module.constants[symbol]
-        rows.push("const|{symbol.id}|{storage_identity_text_v1(constant.name)}|{serialize_mir_type(constant.type_)}|{storage_identity_text_v1(serialize_const_value(constant.value))}")
+        hasher.feed_row("const|{symbol.id}|{storage_identity_text_v1(constant.name)}|{serialize_mir_type(constant.type_)}|{storage_identity_text_v1(serialize_const_value(constant.value))}")
     for symbol in native_capsule_sorted_symbol_ids_v1(module.statics.keys()):
         val static_value = module.statics[symbol]
         var init_identity = "none"
         if val init = static_value.init:
             init_identity = "{init.symbol.id}|{storage_identity_text_v1(init.name)}|{serialize_mir_type(init.type_)}|{storage_identity_text_v1(serialize_const_value(init.value))}"
-        rows.push("static|{symbol.id}|{storage_identity_text_v1(static_value.name)}|{serialize_mir_type(static_value.type_)}|{static_value.is_mutable}|{storage_identity_text_v1(init_identity)}")
+        hasher.feed_row("static|{symbol.id}|{storage_identity_text_v1(static_value.name)}|{serialize_mir_type(static_value.type_)}|{static_value.is_mutable}|{storage_identity_text_v1(init_identity)}")
     for symbol in native_capsule_sorted_symbol_ids_v1(module.types.keys()):
-        rows.push("type|{native_capsule_type_def_identity_v1(module.types[symbol])}")
-    sha256_text(rows.join("\n"))
+        hasher.feed_row("type|{native_capsule_type_def_identity_v1(module.types[symbol])}")
+    hasher.finish_digest()

@@ -77,6 +77,8 @@ extern fn rt_array_new(cap: i64) -> i64
 extern fn rt_array_push(array: i64, value: i64) -> i8
 @unsafe(reason: "raw owned byte-array handle allocation ABI; nonpositive return is failure", capabilities: [ffi])
 extern fn rt_byte_array_new_len(len: i64) -> i64
+@unsafe(reason: "raw owned tagged-array release ABI", capabilities: [ffi])
+extern fn rt_array_free(array: i64)
 @unsafe(reason: "raw libc path resolution ABI; NULL resolved buffer requests a malloc'd result, NULL return is failure", capabilities: [ffi, raw_ptr])
 extern fn realpath(path: i64, resolved: i64) -> i64
 @unsafe(reason: "raw tagged nil value ABI", capabilities: [ffi])
@@ -286,6 +288,11 @@ fn _sffi_core_fs_rt_byte_array_new_len(len: i64) -> i64:
         rt_byte_array_new_len(len)
 
 @always_inline
+fn _sffi_core_fs_rt_array_free(array: i64):
+    unsafe(capabilities: [ffi]):
+        rt_array_free(array)
+
+@always_inline
 fn _sffi_core_fs_load_i64(ptr: i64, offset: i64) -> i64:
     unsafe(capabilities: [ffi, raw_ptr]):
         spl_load_i64(ptr, offset)
@@ -414,15 +421,25 @@ pub fn rt_file_read_text(path_ptr_raw: i64, path_len: i64) -> i64:
     if fd < 0:
         return _sffi_core_fs_rt_string_new(0, 0)
     val size = _sffi_core_fs_lseek(fd, 0, 2)
-    if size < 1:
+    if size < 1 or _sffi_core_fs_lseek(fd, 0, 0) < 0:
         _sffi_core_fs_close(fd)
         return _sffi_core_fs_rt_string_new(0, 0)
-    _sffi_core_fs_lseek(fd, 0, 0)
     val buf = _sffi_core_fs_malloc(size)
     if buf < 1:
         _sffi_core_fs_close(fd)
         return _sffi_core_fs_rt_string_new(0, 0)
-    val bytes_read = _sffi_core_fs_read(fd, buf, size)
+    var bytes_read = 0
+    var reading = true
+    while reading and bytes_read < size:
+        val got = _sffi_core_fs_read(fd, buf + bytes_read, size - bytes_read)
+        if got < 0:
+            _sffi_core_fs_free(buf)
+            _sffi_core_fs_close(fd)
+            return _sffi_core_fs_rt_string_new(0, 0)
+        if got == 0:
+            reading = false
+        else:
+            bytes_read = bytes_read + got
     _sffi_core_fs_close(fd)
     if bytes_read < 1:
         _sffi_core_fs_free(buf)
@@ -491,8 +508,7 @@ pub fn rt_file_read_bytes(path_ptr_raw: i64, path_len: i64) -> i64:
     if fd < 0:
         return 3
     val size = _sffi_core_fs_lseek(fd, 0, 2)
-    _sffi_core_fs_lseek(fd, 0, 0)
-    if size < 0:
+    if size < 0 or _sffi_core_fs_lseek(fd, 0, 0) < 0:
         _sffi_core_fs_close(fd)
         return 3
     val out = _sffi_core_fs_rt_byte_array_new_len(size)
@@ -511,6 +527,7 @@ pub fn rt_file_read_bytes(path_ptr_raw: i64, path_len: i64) -> i64:
             val got = _sffi_core_fs_read(fd, data + bytes_read, size - bytes_read)
             if got < 0:
                 _sffi_core_fs_close(fd)
+                _sffi_core_fs_rt_array_free(out)
                 return 3
             if got == 0:
                 reading = false

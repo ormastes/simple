@@ -1527,7 +1527,9 @@ fn native_build_pool_mir_worker_budget_kb_v1() -> i64:
 fn native_build_hir_worker_budget_kb_v1() -> i64:
     file_worker_pool_hir_budget_kb_v1()
 
-fn native_build_mir_shard_parallel(args: [text]) -> i64:
+# reason: MIR shard parallelism preflight queried by build coordinator and specs
+@allow(primitive_api)
+pub fn native_build_mir_shard_parallel(args: [text]) -> i64:
     if (env_get("SIMPLE_MIR_SHARD") ?? "") != "" or (env_get("SIMPLE_HIR_SHARD") ?? "") != "" or
             (env_get("SIMPLE_PARSE_SHARD") ?? "") != "":
         return 0      # already a shard child; never recurse
@@ -1537,6 +1539,10 @@ fn native_build_mir_shard_parallel(args: [text]) -> i64:
     if (env_get("SIMPLE_MIR_SELECTIVE") ?? "") == "1":
         eprint "[mir-shard] SIMPLE_MIR_SELECTIVE=1: the selective MIR lane was removed (no specialization pass exists); unset it"
         return -1
+    # --emit-entry-object produces a single entry object and does not benefit
+    # from MIR worker sharding; a 1-worker child wastes startup + re-load RSS.
+    if args.contains("--emit-entry-object") or (env_get("SIMPLE_NATIVE_BUILD_EMIT_OBJECT") ?? "") == "entry":
+        return 0
     # Ad-hoc lanes (hand-driven native-build outside the managed bootstrap
     # stages) default to MIR sharding: each shard worker lowers its claimed
     # modules, emits their objects, records terminals and EXITS, returning

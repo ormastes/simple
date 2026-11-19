@@ -2,6 +2,8 @@
 
 use compiler.borrow.borrow_check.*
 use compiler.mir_opt.mod.{OptLevel, optimize_module_for_backend}
+use compiler.mir_opt.simd_opt_metadata.{reset_provider_report}
+use compiler.mir.mir_instructions.{MirModule}
 use compiler.mir_opt.optimizer_plugin.{
     optimizer_plugin_builtin_registry, optimizer_plugin_registry_names,
     optimizer_plugin_registry_select_kernel, optimizer_plugin_registry_run_selected_on_module
@@ -80,6 +82,31 @@ impl CompilerDriver:
         # implementation into the kernel closure for dead work.
         0
 
+    fn optimize_mir_module_scoped_v1(
+        name: text, mir_module: MirModule, selected_level: OptLevel,
+        backend_name: text
+    ) -> MirModule:
+        if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+            eprint("[mir-opt-scope] WARNING transient scope refused; optimizing UNSCOPED, arena retained: module={name}")
+            val unscoped = optimize_module_for_backend(
+                mir_module, selected_level, backend_name)
+            reset_provider_report()
+            return unscoped
+        val scoped_module = optimize_module_for_backend(
+            mir_module, selected_level, backend_name)
+        val paused = transient_scope_pause()
+        if paused:
+            reset_provider_report()
+        val owned = paused and transient_promote<MirModule>(scoped_module)
+        val ended = transient_scope_end()
+        if paused and owned and ended:
+            return scoped_module
+        eprint("[mir-opt-scope] WARNING module promotion failed (paused={paused} owned={owned} ended={ended}); re-optimizing UNSCOPED: module={name}")
+        val fallback = optimize_module_for_backend(
+            mir_module, selected_level, backend_name)
+        reset_provider_report()
+        fallback
+
     me optimize_mir_level(level: i64):
         if level <= 0:
             return
@@ -95,8 +122,8 @@ impl CompilerDriver:
         val requested_kernel = env_get_opt("SIMPLE_OPTIMIZER_KERNEL") ?? ""
         if requested_kernel == "":
             for name in self.ctx.mir_modules.keys():
-                val optimized = optimize_module_for_backend(
-                    self.ctx.mir_modules[name], selected_level, backend_name)
+                val optimized = self.optimize_mir_module_scoped_v1(
+                    name, self.ctx.mir_modules[name], selected_level, backend_name)
                 self.ctx.mir_modules[name] = optimized
             return
 
@@ -111,8 +138,38 @@ impl CompilerDriver:
             Ok(selection):
                 for name in self.ctx.mir_modules.keys():
                     val mir_module = self.ctx.mir_modules[name]
-                    match optimizer_plugin_registry_run_selected_on_module(registry, selection, mir_module):
-                        Ok(selected_module): self.ctx.mir_modules[name] = selected_module
-                        Err(message): self.ctx.add_error(message)
+                    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+                        eprint("[mir-opt-scope] WARNING plugin transient scope refused; optimizing UNSCOPED, arena retained: module={name}")
+                        match optimizer_plugin_registry_run_selected_on_module(registry, selection, mir_module):
+                            Ok(selected_module): self.ctx.mir_modules[name] = selected_module
+                            Err(message): self.ctx.add_error(message)
+                        reset_provider_report()
+                    else:
+                        val scoped_res = optimizer_plugin_registry_run_selected_on_module(registry, selection, mir_module)
+                        val paused = transient_scope_pause()
+                        if paused:
+                            reset_provider_report()
+                        var promoted_module = mir_module
+                        var promoted_ok = false
+                        var scoped_err = ""
+                        match scoped_res:
+                            case Ok(selected_module):
+                                promoted_module = selected_module
+                                promoted_ok = paused and transient_promote<MirModule>(promoted_module)
+                            case Err(message):
+                                scoped_err = message
+                                promoted_ok = paused
+                        val ended = transient_scope_end()
+                        if paused and promoted_ok and ended:
+                            if scoped_err != "":
+                                self.ctx.add_error(scoped_err)
+                            else:
+                                self.ctx.mir_modules[name] = promoted_module
+                        else:
+                            eprint("[mir-opt-scope] WARNING plugin promotion failed (paused={paused} owned={promoted_ok} ended={ended}); re-optimizing UNSCOPED: module={name}")
+                            match optimizer_plugin_registry_run_selected_on_module(registry, selection, mir_module):
+                                Ok(selected_module): self.ctx.mir_modules[name] = selected_module
+                                Err(message): self.ctx.add_error(message)
+                            reset_provider_report()
             Err(message): self.ctx.add_error(message)
 use compiler.common.diagnostics.span.{Span}

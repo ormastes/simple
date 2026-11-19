@@ -75,6 +75,12 @@ fn _hm_typed_preflight_v1(module: HirModule, limits: HmTypedModuleLimitsV1) -> t
     val table = module.symbols
     if table.symbols.len() > limits.max_nodes or table.scopes.len() > limits.max_nodes: return "hm-typed-symbol-budget"
     if table.symbols.len() != module.functions.len(): return "hm-typed-external-symbol-universe"
+    val fn_keys: [SymbolId] = module.functions.keys()
+    var slot_by_raw_id: Dict<i64, i64> = {}
+    var fn_slot = 0
+    while fn_slot < fn_keys.len():
+        slot_by_raw_id[fn_keys[fn_slot].id] = fn_slot
+        fn_slot = fn_slot + 1
     if (table.gpu_function_targets.len() != 0 or table.gpu_function_backend_orders.len() != 0 or
             table.qualified_functions.len() != 0 or table.qualified_types.len() != 0 or
             table.structural_union_symbols.len() != 0 or table.structural_union_owners.len() != 0): return "hm-typed-symbol-profile"
@@ -83,7 +89,7 @@ fn _hm_typed_preflight_v1(module: HirModule, limits: HmTypedModuleLimitsV1) -> t
         val symbol = table.symbols[key]
         if key != symbol.id.id: return "hm-typed-symbol-key-mismatch"
         if (symbol.name.len() > 256 or symbol.span.file.len() > 256 or symbol.generic_param_count != 0): return "hm-typed-symbol-metadata"
-        if symbol.kind != SymbolKind.Function or not module.functions.has(symbol.id): return "hm-typed-symbol-universe"
+        if symbol.kind != SymbolKind.Function or not slot_by_raw_id.has(symbol.id.id): return "hm-typed-symbol-universe"
         if val owner = symbol.defining_module:
             if owner.len() > 256: return "hm-typed-symbol-metadata"
         if val type_ = symbol.type_:
@@ -107,8 +113,10 @@ fn _hm_typed_preflight_v1(module: HirModule, limits: HmTypedModuleLimitsV1) -> t
         for name in names.keys():
             if name.len() > 256: return "hm-typed-index-metadata"
             work = work + 1
-    for key in module.functions.keys():
-        val function_ = module.functions[key]
+    var fn_idx = 0
+    while fn_idx < fn_keys.len():
+        val key: SymbolId = fn_keys[fn_idx]
+        val function_: HirFunction = module.functions[fn_keys[fn_idx]]
         if not table.symbols.has(key.id) or table.symbols[key.id].kind != SymbolKind.Function:
             return "hm-typed-function-symbol-missing"
         val attr = function_.func_attr
@@ -146,6 +154,7 @@ fn _hm_typed_preflight_v1(module: HirModule, limits: HmTypedModuleLimitsV1) -> t
                 case _: return "hm-typed-statement-profile"
         work = work + 8
         if work > limits.max_nodes or work > limits.max_work / 16: return "hm-typed-work-budget"
+        fn_idx = fn_idx + 1
     ""
 
 # New container owners; the original module's functions/blocks/expressions and
@@ -187,8 +196,11 @@ pub fn hm_infer_owned_typed_module_v1(module: HirModule,
     if context.errors.len() != 0: return Err("hm-typed-inference-rejected")
     var functions: Dict<SymbolId, HirFunction> = {}
     var occurrences = 0
-    for key in module.functions.keys():
-        val original = module.functions[key]
+    val fn_keys: [SymbolId] = module.functions.keys()
+    var fn_idx = 0
+    while fn_idx < fn_keys.len():
+        val key: SymbolId = fn_keys[fn_idx]
+        val original: HirFunction = module.functions[fn_keys[fn_idx]]
         # Exact existing function symbol plus structural body occurrence; no
         # span IDs, caller occurrence map or caller-supplied inferred types.
         context.current_function_symbol = Some(original.symbol)
@@ -229,8 +241,9 @@ pub fn hm_infer_owned_typed_module_v1(module: HirModule,
         val body = HirBlock(..original.body, stmts: statements, unsafe_caps: [],
             value: if original.body.has: typed_expression else:
                 HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: original.body.span))
-        functions[key] = HirFunction(..original, body: body, type_params: [], params: [], effects: [],
+        functions[fn_keys[fn_idx]] = HirFunction(..original, body: body, type_params: [], params: [], effects: [],
             cfg: [], cfg_group: 0, cfg_arm: -1, extern_runtime_value_abi: 0)
+        fn_idx = fn_idx + 1
     if context.errors.len() != 0: return Err("hm-typed-final-diagnostics")
     val typed = HirModule(..module, functions: functions, symbols: _hm_copy_symbols_v1(module.symbols),
         local_annotation_provenance: hir_local_annotation_copy(module.local_annotation_provenance),

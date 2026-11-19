@@ -1,0 +1,295 @@
+"""
+# Driver capsule identity, parallel codegen pool, HIR residency, determinism, and cache memory
+
+Tests five invariants across driver and MIR lowering:
+1. `compute_native_capsule_mir_identity_v1` streams SHA-256 incrementally without
+   a giant `rows.join("\n")` transient buffer, matches canonical row-join SHA-256
+   byte-for-byte, and `driver_aot_native_output` distinguishes empty recompute
+   failure from actual MIR mutation.
+2. `_driver_codegen_pool_lane_reason_v1` unlocks the parallel codegen pool for
+   built-in static `llvm` even when `backend_session` is open (`plugin_path == ""`),
+   while keeping custom plugins and non-LLVM backends serial; eviction preserves
+   `--output-format both`.
+3. `hir_function_keeps_body_in_module_v1` preserves function bodies on per-module
+   `nogc_strict` modules while keeping `mir_shard_hir_residency_refusal_v1`
+   spec-compatible.
+4. Lambda lifting in `switch_operators_calls.spl` uses a deterministic per-module
+   counter and module hash/fold tag so parallel MIR shard claim orders never alter
+   lifted names or collide.
+5. `hir_source_text_hash_cache` keys on content digests instead of raw source text,
+   and `driver_entry_scan_cache_reset` / `driver_entry_scan_cache_release` release
+   `_g_entry_scan_content_by_path` after closure sources are scanned.
+"""
+# @req REQ-DRIVER-CODEGEN-POOL-AND-RESIDENCY
+# @cover src/compiler/80.driver/native_capsule_mir_identity.spl
+# @cover src/compiler/80.driver/driver_aot_native_output.spl
+# @cover src/compiler/80.driver/driver_mir_shard_hir_residency_v1.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+# @cover src/compiler/80.driver/driver_hir_cache.spl
+# @cover src/compiler/80.driver/driver_entry_closure_core.spl
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_write}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
+use compiler.common.driver_core_modes.{
+    driver_mir_eviction_enabled,
+    driver_output_format_native,
+    driver_output_format_both
+}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_types.{MirConstant, MirStatic, MirTypeDef, MirTypeDefKind, MirConstValue, MirFieldDef}
+use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type, serialize_const_value}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.driver.native_capsule_mir_identity.{
+    compute_native_capsule_mir_identity_v1,
+    native_capsule_sorted_symbol_ids_v1,
+    native_capsule_function_metadata_identity_v1,
+    native_capsule_type_def_identity_v1
+}
+use compiler.driver.driver_aot_native_output.{_driver_codegen_pool_lane_reason_v1}
+use compiler.driver.driver_mir_shard_hir_residency_v1.{
+    hir_function_keeps_body_in_module_v1,
+    hir_module_interface_only_v1,
+    mir_shard_hir_residency_refusal_v1
+}
+use compiler.driver.driver_hir_cache.{hir_cache_side_table_counts_v1}
+use compiler.driver.driver_entry_closure_core.{
+    _driver_cached_entry_source_scan,
+    driver_entry_scan_cache_reset,
+    driver_entry_scan_cache_release,
+    driver_entry_scan_cache_scan_count,
+    driver_entry_scan_cache_hit_count,
+    _entry_scan_reset,
+    _driver_entry_scan_cache_counts_v1
+}
+
+fn _mir_fn(id: i64, name: text) -> MirFunction:
+    val block = MirBlock(
+        id: BlockId.new(0),
+        label: None,
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(id), MirType.i64()),
+                span: Span(0, 0, 1, 1))
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))))))
+    MirFunction(
+        symbol: SymbolId(id: id),
+        name: name,
+        signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+        locals: [],
+        blocks: [block],
+        entry_block: BlockId.new(0),
+        span: Span(0, 0, 1, 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: None,
+        type_bindings: {},
+        layout_phase: None,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: DriverManifestAttr(DriverManifestAttrKind.Driver, 0, 0, [], "", ""),
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false,
+        unroll_factor: 0,
+        pipeline_ii: 0,
+        memory_banks: 0,
+        verification_contract: None
+    )
+
+fn _legacy_join_digest(module: MirModule) -> text:
+    var rows: [text] = ["module|{module.name.len()}:{module.name}"]
+    for symbol in native_capsule_sorted_symbol_ids_v1(module.functions.keys()):
+        val function = module.functions[symbol]
+        val fn_json = serialize_mir_function(function)
+        val fn_meta = native_capsule_function_metadata_identity_v1(function)
+        rows.push("fn|{symbol.id}|{fn_json.len()}:{fn_json}|{fn_meta.len()}:{fn_meta}")
+    for symbol in native_capsule_sorted_symbol_ids_v1(module.constants.keys()):
+        val constant = module.constants[symbol]
+        val val_str = serialize_const_value(constant.value)
+        rows.push("const|{symbol.id}|{constant.name.len()}:{constant.name}|{serialize_mir_type(constant.type_)}|{val_str.len()}:{val_str}")
+    for symbol in native_capsule_sorted_symbol_ids_v1(module.statics.keys()):
+        val static_value = module.statics[symbol]
+        var init_identity = "none"
+        if val init = static_value.init:
+            val init_val = serialize_const_value(init.value)
+            init_identity = "{init.symbol.id}|{init.name.len()}:{init.name}|{serialize_mir_type(init.type_)}|{init_val.len()}:{init_val}"
+        rows.push("static|{symbol.id}|{static_value.name.len()}:{static_value.name}|{serialize_mir_type(static_value.type_)}|{static_value.is_mutable}|{init_identity.len()}:{init_identity}")
+    for symbol in native_capsule_sorted_symbol_ids_v1(module.types.keys()):
+        rows.push("type|{native_capsule_type_def_identity_v1(module.types[symbol])}")
+    sha256_text(rows.join("\n"))
+
+fn _lifted_names(file: text, src: text) -> ([text], [i64]):
+    val ast = parse_full_frontend(src, file, file, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var names: [text] = []
+    var ids: [i64] = []
+    for sym in mir.functions.keys():
+        val function = mir.functions[sym]
+        if function.name.contains("__lambda_lift_"):
+            names.push(function.name)
+            ids.push(sym.id)
+    (names, ids)
+
+describe "native_capsule_mir_identity incremental streaming":
+    it "matches exact SHA-256 of canonical rows and hashes large modules without rows.join":
+        step("Build a MirModule populated with functions, constants, statics, and types")
+        var funcs: Dict<SymbolId, MirFunction> = {}
+        funcs[SymbolId(id: 2)] = _mir_fn(2, "fn_two")
+        funcs[SymbolId(id: 1)] = _mir_fn(1, "fn_one")
+        var consts: Dict<SymbolId, MirConstant> = {}
+        consts[SymbolId(id: 10)] = MirConstant(
+            symbol: SymbolId(id: 10), name: "C_VAL",
+            type_: MirType.i64(), value: MirConstValue.Int(42))
+        var statics: Dict<SymbolId, MirStatic> = {}
+        statics[SymbolId(id: 20)] = MirStatic(
+            symbol: SymbolId(id: 20), name: "G_VAL",
+            type_: MirType.i64(), init: Some(consts[SymbolId(id: 10)]),
+            is_mutable: true, alignment: 8)
+        var types: Dict<SymbolId, MirTypeDef> = {}
+        types[SymbolId(id: 30)] = MirTypeDef(
+            symbol: SymbolId(id: 30), name: "Pair",
+            kind: MirTypeDefKind.Struct([]),
+            is_export_c: false, export_name: "")
+        val rich = MirModule(
+            name: "stream_probe", functions: funcs, statics: statics,
+            constants: consts, types: types)
+
+        expect(compute_native_capsule_mir_identity_v1(rich)).to_equal(_legacy_join_digest(rich))
+        expect(transient_array_scope_state_v1()).to_equal(0)
+
+        step("Verify many-function module produces valid digest cleanly")
+        var many_funcs: Dict<SymbolId, MirFunction> = {}
+        var idx = 0
+        while idx < 50:
+            many_funcs[SymbolId(id: 100 + idx)] = _mir_fn(100 + idx, "fn_{idx}")
+            idx = idx + 1
+        val large_mod = MirModule(
+            name: "large_stream_probe", functions: many_funcs,
+            statics: {}, constants: {}, types: {})
+        val large_digest = compute_native_capsule_mir_identity_v1(large_mod)
+        expect(large_digest.len()).to_equal(64)
+        expect(large_digest).to_equal(_legacy_join_digest(large_mod))
+
+        step("Verify source uses streaming SHA-256 without rows.join and distinguishes empty recompute")
+        val id_src = file_read("src/compiler/80.driver/native_capsule_mir_identity.spl")
+        expect(id_src).to_contain("sha256_stream_v1_new")
+        expect(id_src).to_contain("_MirIdentityStreamHasherV1")
+        expect(id_src.contains("sha256_text(rows.join")).to_equal(false)
+
+        val aot_src = file_read("src/compiler/80.driver/driver_aot_native_output.spl")
+        expect(aot_src).to_contain("capsule-mir-identity-recompute-failed")
+        expect(aot_src).to_contain("capsule-mir-lease-violated")
+
+describe "native parallel codegen pool admission and MIR eviction":
+    it "unlocks built-in static llvm pool when backend_session is present without plugin":
+        step("Check lane admission with backend_session present and plugin_path empty for built-in llvm")
+        val builtin_reason = _driver_codegen_pool_lane_reason_v1("llvm", false, true, "")
+        expect(builtin_reason == "backend session owns codegen").to_equal(false)
+
+        step("Keep external plugin sessions and non-llvm backends serial")
+        expect(_driver_codegen_pool_lane_reason_v1("llvm", false, true, "/tmp/custom_backend.so")).to_equal("backend session owns codegen")
+        expect(_driver_codegen_pool_lane_reason_v1("cranelift", false, true, "")).to_equal("backend session owns codegen")
+
+        step("Verify thread gating preserves spec anchor while unlocking built-in llvm")
+        val aot_src = file_read("src/compiler/80.driver/driver_aot_native_output.spl")
+        expect(aot_src).to_contain("val provider_threads = if backend_session.?")
+        expect(aot_src).to_contain("driver_mir_eviction_enabled")
+        expect(driver_mir_eviction_enabled(true, driver_output_format_native())).to_equal(true)
+        expect(driver_mir_eviction_enabled(true, driver_output_format_both())).to_equal(false)
+
+fn _lower_hir_residency_probe(src: text, path: text, module_name: text) -> (HirModule, HirFunction, SymbolId):
+    val ast = parse_full_frontend(src, path, module_name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(ast)
+    val sym = hir.functions.keys()[0]
+    (hir, hir.functions[sym], sym)
+
+describe "MIR shard HIR residency per-module nogc_strict body retention":
+    it "retains function bodies in nogc_strict modules while keeping refusal rule intact":
+        step("Lower strict and plain HirModules with an ordinary non-empty function body")
+        val (strict_mod, fn_strict, sym_strict) = _lower_hir_residency_probe(
+            "@no_gc(strict)\npub fn strict_body() -> i64:\n    1\n",
+            "app/probe/strict.spl", "app.probe.strict")
+        val (plain_mod, fn_plain, sym_plain) = _lower_hir_residency_probe(
+            "pub fn plain_body() -> i64:\n    1\n",
+            "app/probe/plain.spl", "app.probe.plain")
+
+        expect(strict_mod.nogc_strict).to_equal(true)
+        expect(plain_mod.nogc_strict).to_equal(false)
+        expect(hir_function_keeps_body_in_module_v1(fn_strict, strict_mod, {})).to_equal(true)
+        expect(hir_function_keeps_body_in_module_v1(fn_plain, plain_mod, {})).to_equal(false)
+
+        val (strict_proj, strict_dropped) = hir_module_interface_only_v1(strict_mod)
+        expect(strict_dropped).to_equal(0)
+        expect(strict_proj.functions[sym_strict].body.has or strict_proj.functions[sym_strict].body.stmts.len() > 0).to_equal(true)
+
+        val (_plain_proj, plain_dropped) = hir_module_interface_only_v1(plain_mod)
+        expect(plain_dropped).to_equal(1)
+
+        step("Verify mir_shard_hir_residency_refusal_v1 remains spec-compatible")
+        expect(mir_shard_hir_residency_refusal_v1("1", "0/2", "", "", "", "", false, false, false, true, true)).to_equal("nogc-strict-module")
+
+describe "deterministic per-module lambda lifting":
+    it "produces order-independent per-module counters and deterministic hash tags":
+        val src = "fn apply(f: fn(i64) -> i64, x: i64) -> i64:\n    f(x)\nfn run() -> i64:\n    apply(\\v: v + 1, 10) + apply(\\w: w + 2, 20)\n"
+        step("Lower module A then module B")
+        val (names_a, ids_a) = _lifted_names("lam_det_a.spl", src)
+        val (names_b, ids_b) = _lifted_names("lam_det_b.spl", src)
+
+        expect(names_a.len()).to_equal(2)
+        expect(names_b.len()).to_equal(2)
+        expect(names_a[0]).to_contain("lam_det_a.__lambda_lift_0_")
+        expect(names_a[1]).to_contain("lam_det_a.__lambda_lift_1_")
+        expect(names_b[0]).to_contain("lam_det_b.__lambda_lift_0_")
+        expect(names_b[1]).to_contain("lam_det_b.__lambda_lift_1_")
+        expect(ids_a[0]).to_equal(1073741824)
+        expect(ids_b[0]).to_equal(1073741824)
+        expect(names_a[0] == names_b[0]).to_equal(false)
+
+describe "HIR cache key digests and entry scan cache release":
+    it "keys hir_source_text_hash_cache on digests and releases scan content on reset/release":
+        step("Check driver_hir_cache keys hash table on source_digest, not raw text")
+        val cache_src = file_read("src/compiler/80.driver/driver_hir_cache.spl")
+        expect(cache_src).to_contain("hir_source_text_hash_cache[source_digest]")
+        val counts = hir_cache_side_table_counts_v1()
+        expect(counts.len()).to_equal(2)
+
+        step("Verify entry scan cache releases content map cleanly after scan")
+        val _mk = dir_create_all("build/test_tmp/g2_scan_release")
+        val sample_path = "build/test_tmp/g2_scan_release/sample.spl"
+        val _wr = file_write(sample_path, "use std.text\nfn probe() -> i64:\n    1\n")
+        driver_entry_scan_cache_reset()
+        val (_c1, _i1, _s1, hit1) = _driver_cached_entry_source_scan(sample_path)
+        expect(hit1).to_equal(false)
+        expect(_driver_entry_scan_cache_counts_v1()).to_equal([1, 1, 1])
+        val (_c2, _i2, _s2, hit2) = _driver_cached_entry_source_scan(sample_path)
+        expect(hit2).to_equal(true)
+        expect(driver_entry_scan_cache_hit_count()).to_equal(1)
+
+        driver_entry_scan_cache_release()
+        expect(_driver_entry_scan_cache_counts_v1()).to_equal([0, 0, 0])
+        val (_c3, _i3, _s3, hit3) = _driver_cached_entry_source_scan(sample_path)
+        expect(hit3).to_equal(false)
+        expect(_driver_entry_scan_cache_counts_v1()).to_equal([1, 1, 1])
+        expect(driver_entry_scan_cache_scan_count()).to_equal(2)
+        _entry_scan_reset()
+        expect(_driver_entry_scan_cache_counts_v1()).to_equal([0, 0, 0])

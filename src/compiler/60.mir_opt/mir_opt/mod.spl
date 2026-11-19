@@ -1773,6 +1773,95 @@ fn run_pass_on_module(pass_name: text, module: MirModule) -> MirModule:
                 return module
     run_typed_pass_on_module(descriptor.unwrap().kind, module)
 
+fn _mir_opt_sorted_order(keys: [SymbolId]) -> [i64]:
+    """Deterministic ascending order of SymbolId indices without copying keys."""
+    val n = keys.len()
+    var ids: [i64] = []
+    var order: [i64] = []
+    var i = 0
+    while i < n:
+        ids.push(keys[i].id)
+        order.push(i)
+        i = i + 1
+    var width = 1
+    while width < n:
+        var merged: [i64] = []
+        var lo = 0
+        while lo < n:
+            var mid = lo + width
+            if mid > n:
+                mid = n
+            var hi = lo + 2 * width
+            if hi > n:
+                hi = n
+            var left = lo
+            var right = mid
+            while left < mid and right < hi:
+                if ids[order[right]] < ids[order[left]]:
+                    merged.push(order[right])
+                    right = right + 1
+                else:
+                    merged.push(order[left])
+                    left = left + 1
+            while left < mid:
+                merged.push(order[left])
+                left = left + 1
+            while right < hi:
+                merged.push(order[right])
+                right = right + 1
+            lo = lo + 2 * width
+        order = merged
+        width = width * 2
+    order
+
+fn _mir_opt_module_with_functions(
+    module: MirModule, functions: Dict<SymbolId, MirFunction>
+) -> MirModule:
+    MirModule(
+        name: module.name,
+        functions: functions,
+        statics: module.statics,
+        constants: module.constants,
+        types: module.types,
+        external_layout_traces: module.external_layout_traces,
+        collection_plan_explanations: module.collection_plan_explanations,
+        enum_semantic_declarations: module.enum_semantic_declarations,
+        attr_sites: module.attr_sites,
+        initializer_plan_v1: module.initializer_plan_v1,
+        xray_ring_wrap: module.xray_ring_wrap
+    )
+
+fn _mir_opt_clone_module_functions(module: MirModule) -> MirModule:
+    """Copy module.functions into a fresh Dict preserving exact SymbolId keys."""
+    val orig_keys = module.functions.keys()
+    var cloned: Dict<SymbolId, MirFunction> = {}
+    var i = 0
+    while i < orig_keys.len():
+        val fn_val: MirFunction = module.functions[orig_keys[i]]
+        cloned[orig_keys[i]] = fn_val
+        i = i + 1
+    _mir_opt_module_with_functions(module, cloned)
+
+pub fn mir_opt_module_with_replaced_function(
+    module: MirModule, target_symbol: SymbolId, updated_fn: MirFunction
+) -> MirModule:
+    """Return a new MirModule with target_symbol replaced without mutating module.functions."""
+    val orig_keys = module.functions.keys()
+    var cloned: Dict<SymbolId, MirFunction> = {}
+    var replaced = false
+    var i = 0
+    while i < orig_keys.len():
+        if orig_keys[i].id == target_symbol.id:
+            cloned[orig_keys[i]] = updated_fn
+            replaced = true
+        else:
+            val fn_val: MirFunction = module.functions[orig_keys[i]]
+            cloned[orig_keys[i]] = fn_val
+        i = i + 1
+    if not replaced:
+        cloned[target_symbol] = updated_fn
+    _mir_opt_module_with_functions(module, cloned)
+
 fn run_pass_on_module_checked(
     pass_name: text, module: MirModule
 ) -> Result<MirModule, text>:
@@ -1787,161 +1876,155 @@ fn run_pass_on_module_checked(
     val found: MirPassDescriptor = descriptor.unwrap()
     if not pass_status_allows_transform(found.status): return Ok(module)
 
-    var updated = module
+    var next_module = module
     # @workaround bug=pass_scope_enum_owner_projection_2026_10_19 reason=retain declared record and enum subject before qualified match
     val selected_scope: PassScope = found.scope
     match selected_scope:
         case PassScope.Function | PassScope.FsDriver:
-            var symbol_ids: [i64] = []
-            for symbol in module.functions.keys(): symbol_ids.push(symbol.id)
-            symbol_ids.sort()
-            for symbol_id in symbol_ids:
-                val symbol = SymbolId(id: symbol_id)
+            val orig_keys = module.functions.keys()
+            val order = _mir_opt_sorted_order(orig_keys)
+            var results: [MirFunction] = []
+            var any_changed = false
+            var order_pos = 0
+            while order_pos < order.len():
+                val idx = order[order_pos]
+                val orig_func: MirFunction = module.functions[orig_keys[idx]]
                 val outcome = run_named_pass_with_record(
-                    found.stable_name, updated.functions[symbol])
+                    found.stable_name, orig_func)
                 if outcome.is_err(): return Err(outcome.err().unwrap())
-                updated.functions[symbol] = outcome.ok().unwrap().function
+                val next_func = outcome.ok().unwrap().function
+                if serialize_mir_function(next_func) != serialize_mir_function(orig_func):
+                    any_changed = true
+                results.push(next_func)
+                order_pos = order_pos + 1
+            if any_changed:
+                var updated_functions: Dict<SymbolId, MirFunction> = {}
+                var write_pos = 0
+                while write_pos < order.len():
+                    val idx = order[write_pos]
+                    updated_functions[orig_keys[idx]] = results[write_pos]
+                    write_pos = write_pos + 1
+                next_module = _mir_opt_module_with_functions(module, updated_functions)
         case PassScope.Module:
-            updated = run_typed_pass_on_module(found.kind, module)
+            next_module = run_typed_pass_on_module(found.kind, module)
 
-    val after = mir_module_structural_verification_receipt(updated)
+    val after = mir_module_structural_verification_receipt(next_module)
     if not after.valid:
         return Err(
             "invalid MIR module after pass " + found.stable_name + " [" +
             after.error_codes.join(",") + "]: " + after.errors.join("; "))
-    Ok(updated)
+    Ok(next_module)
 
-fn _mir_module_function_snapshot(module: MirModule) -> [MirFunction]:
-    """Stable pre-pass function snapshot for function-scoped module dispatch."""
-    val raw_functions = module.functions.values()
-    var functions: [MirFunction] = []
-    var function_index = 0
-    while function_index < raw_functions.len():
-        val typed_func: MirFunction = raw_functions[function_index]
-        functions.push(typed_func)
-        function_index = function_index + 1
-    functions
+fn _run_fresh_typed_function_pass(kind: PassKind, func: MirFunction) -> MirFunction:
+    """Execute one fresh function-scoped pass instance on a single MirFunction."""
+    match kind:
+        case DeadCodeElimination:
+            var p = create_dce_pass()
+            dce_run_on_function(p, func)
+        case ConstantFolding:
+            var p = create_const_fold_pass()
+            cf_run_on_function(p, func)
+        case CopyPropagation:
+            var p = create_copy_prop_pass()
+            copypropagation_run_on_function(p, func)
+        case CommonSubexprElim:
+            var p = create_cse_pass()
+            cse_run_on_function(p, func)
+        case LoopInvariantMotion:
+            var p = create_loop_opt_conservative()
+            loop_opt_run_on_function(p, func)
+        case LoopUnroll:
+            var p = create_loop_opt_pass()
+            loop_opt_run_on_function(p, func)
+        case BoundsCheckElimination:
+            var p = create_bounds_check_elim_pass()
+            bounds_check_elim_run_on_function(p, func)
+        case StrengthReduction:
+            var p = create_strength_reduction_pass()
+            strength_reduction_run_on_function(p, func)
+        case CollectionOpt:
+            var p = create_collection_opt_pass()
+            collection_opt_run_on_function(p, func)
+        case StringBuilderOpt:
+            var p = create_string_builder_opt_pass()
+            string_builder_opt_run_on_function(p, func)
+        case GeneratorStateMachine:
+            var p = create_generator_sm_pass()
+            generator_sm_run_on_function(p, func)
+        case TailCallOptimization:
+            var p = create_tco_pass()
+            tco_run_on_function(p, func)
+        case GlobalValueNumbering:
+            var p = create_gvn_pass()
+            gvn_run_on_function(p, func)
+        case WriteCoalesce:
+            var wc_stats = OptimizationStats.create()
+            optimize_write_coalesce(func, wc_stats)
+        case ReadAheadHoist:
+            var rah_stats = OptimizationStats.create()
+            optimize_read_ahead_hoist(func, rah_stats)
+        case SyscallBatch:
+            var sb_stats = OptimizationStats.create()
+            optimize_syscall_batch(func, sb_stats)
+        case TypedByteCanon:
+            var tbc = create_typed_byte_canon_pass()
+            typed_byte_canon_run_on_function(tbc, func)
+        case _:
+            func
+
+fn _run_typed_function_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
+    """Run a per-function pass immutably, preserving original SymbolId keys."""
+    val orig_keys = module.functions.keys()
+    var next_funcs: [MirFunction] = []
+    var any_changed = false
+    var i = 0
+    while i < orig_keys.len():
+        val orig_func: MirFunction = module.functions[orig_keys[i]]
+        val updated: MirFunction = _run_fresh_typed_function_pass(kind, orig_func)
+        if serialize_mir_function(updated) != serialize_mir_function(orig_func):
+            any_changed = true
+        next_funcs.push(updated)
+        i = i + 1
+    if not any_changed:
+        return module
+    var updated_functions: Dict<SymbolId, MirFunction> = {}
+    var write_idx = 0
+    while write_idx < orig_keys.len():
+        updated_functions[orig_keys[write_idx]] = next_funcs[write_idx]
+        write_idx = write_idx + 1
+    _mir_opt_module_with_functions(module, updated_functions)
 
 fn run_typed_pass_on_module(kind: PassKind, module: MirModule) -> MirModule:
     """Typed module-level pass runner.  Dispatches on PassKind, not strings."""
     if not pass_status_allows_transform(pass_status(kind)):
         return module
-    var result_module = module
     match kind:
-        case DeadCodeElimination:
-            for func in _mir_module_function_snapshot(module):
-                var p = create_dce_pass()
-                val updated = dce_run_on_function(p, func)
-                result_module.functions[updated.symbol] = updated
-        case ConstantFolding:
-            for func in _mir_module_function_snapshot(module):
-                var p = create_const_fold_pass()
-                val updated = cf_run_on_function(p, func)
-                result_module.functions[updated.symbol] = updated
-        case CopyPropagation:
-            for func in _mir_module_function_snapshot(module):
-                var p = create_copy_prop_pass()
-                val updated = copypropagation_run_on_function(p, func)
-                result_module.functions[updated.symbol] = updated
-        case CommonSubexprElim:
-            for func in _mir_module_function_snapshot(module):
-                var p = create_cse_pass()
-                val updated = cse_run_on_function(p, func)
-                result_module.functions[updated.symbol] = updated
         case InlineSmallFunctions:
             var p = create_inline_small_pass()
-            result_module = inline_run_on_module(p, result_module)
+            inline_run_on_module(p, _mir_opt_clone_module_functions(module))
         case InlineFunctions:
             var p = create_inline_pass()
-            result_module = inline_run_on_module(p, result_module)
+            inline_run_on_module(p, _mir_opt_clone_module_functions(module))
         case InlineAggressive:
             var p = create_inline_aggressive_pass()
-            result_module = inline_run_on_module(p, result_module)
-        case LoopInvariantMotion:
-            for func in _mir_module_function_snapshot(module):
-                var p = create_loop_opt_conservative()
-                val updated = loop_opt_run_on_function(p, func)
-                result_module.functions[updated.symbol] = updated
-        case LoopUnroll:
-            for func in _mir_module_function_snapshot(module):
-                var p = create_loop_opt_pass()
-                val updated = loop_opt_run_on_function(p, func)
-                result_module.functions[updated.symbol] = updated
-        case BoundsCheckElimination:
-            for func in _mir_module_function_snapshot(module):
-                var p = create_bounds_check_elim_pass()
-                val updated = bounds_check_elim_run_on_function(p, func)
-                result_module.functions[updated.symbol] = updated
-        case StrengthReduction:
-            for func in _mir_module_function_snapshot(module):
-                var p = create_strength_reduction_pass()
-                val updated = strength_reduction_run_on_function(p, func)
-                result_module.functions[updated.symbol] = updated
-        case CollectionOpt:
-            for func in _mir_module_function_snapshot(module):
-                var p = create_collection_opt_pass()
-                val updated = collection_opt_run_on_function(p, func)
-                result_module.functions[updated.symbol] = updated
-        case StringBuilderOpt:
-            for func in _mir_module_function_snapshot(module):
-                var p = create_string_builder_opt_pass()
-                val updated = string_builder_opt_run_on_function(p, func)
-                result_module.functions[updated.symbol] = updated
+            inline_run_on_module(p, _mir_opt_clone_module_functions(module))
         case BodyOutlining:
             # Module-level pass: outlining creates new functions
             var ol = create_outline_pass()
-            result_module = outline_run_on_module(ol, result_module)
-        case GeneratorStateMachine:
-            for func in _mir_module_function_snapshot(module):
-                var p = create_generator_sm_pass()
-                val updated = generator_sm_run_on_function(p, func)
-                result_module.functions[updated.symbol] = updated
-        case TailCallOptimization:
-            for func in _mir_module_function_snapshot(module):
-                var p = create_tco_pass()
-                val updated = tco_run_on_function(p, func)
-                result_module.functions[updated.symbol] = updated
-        case GlobalValueNumbering:
-            for func in _mir_module_function_snapshot(module):
-                var p = create_gvn_pass()
-                val updated = gvn_run_on_function(p, func)
-                result_module.functions[updated.symbol] = updated
+            outline_run_on_module(ol, _mir_opt_clone_module_functions(module))
         case PredicatePromote:
-            result_module = run_predicate_promote(result_module)
+            run_predicate_promote(_mir_opt_clone_module_functions(module))
         case AutoVectorize:
-            # Module-level pass: pattern-match + log; no MIR rewrite in Wave K3.
-            # See: doc/05_design/simd_auto_vectorize_design.md §2, §10
-            result_module = run_auto_vectorize(result_module)
+            # Clone functions Dict before invoking rewrite pass so module_modified never mutates input.
+            run_auto_vectorize(_mir_opt_clone_module_functions(module))
         case PatternIdiom:
-            # Match the canonical pipeline's default target route.  A public
-            # active-pass dispatcher must not silently substitute an empty
-            # PatternRulePass that can never activate its positive witness.
             val default_ctx = target_opt_context_default()
-            result_module = run_pattern_idiom_pass_x86(result_module, default_ctx.x86_caps, default_ctx.cipher_remark)
+            run_pattern_idiom_pass_x86(_mir_opt_clone_module_functions(module), default_ctx.x86_caps, default_ctx.cipher_remark)
         case TargetNarrowForm:
             val default_ctx = target_opt_context_default()
-            result_module = run_narrow_form_pass(result_module, default_ctx.caps_kind)
-        case WriteCoalesce:
-            for func in _mir_module_function_snapshot(module):
-                var wc_stats = OptimizationStats.create()
-                val updated = optimize_write_coalesce(func, wc_stats)
-                result_module.functions[updated.symbol] = updated
-        case ReadAheadHoist:
-            for func in _mir_module_function_snapshot(module):
-                var rah_stats = OptimizationStats.create()
-                val updated = optimize_read_ahead_hoist(func, rah_stats)
-                result_module.functions[updated.symbol] = updated
-        case SyscallBatch:
-            for func in _mir_module_function_snapshot(module):
-                var sb_stats = OptimizationStats.create()
-                val updated = optimize_syscall_batch(func, sb_stats)
-                result_module.functions[updated.symbol] = updated
-        case TypedByteCanon:
-            for func in _mir_module_function_snapshot(module):
-                var tbc = create_typed_byte_canon_pass()
-                val updated = typed_byte_canon_run_on_function(tbc, func)
-                result_module.functions[updated.symbol] = updated
-    result_module
+            run_narrow_form_pass(_mir_opt_clone_module_functions(module), default_ctx.caps_kind)
+        case _:
+            _run_typed_function_pass_on_module(kind, module)
 
 # ============================================================================
 # Exports
@@ -1979,6 +2062,6 @@ export pass_status_kind_name, pass_status_reason, pass_expectation_name, mir_pas
 export mir_pass_provider_registry, mir_pass_provider_name, mir_pass_uses_pipeline_provider
 export mir_pass_stable_name_integrity_error, mir_pass_registry_integrity_errors
 export run_named_pass, run_typed_pass_on_function
-export run_pass_on_module, run_typed_pass_on_module
+export run_pass_on_module, run_typed_pass_on_module, mir_opt_module_with_replaced_function
 export pipeline_optimize
 export optimizationpipeline_report_json

@@ -1,0 +1,338 @@
+"""
+## Purpose and audience
+Purpose: Prove linear scaling, exact canonical round-trip byte equality, and edge-case
+preservation across `std.common.sdn.encode`, `std.common.sdn.parser`, and `std.common.sdn.lexer`.
+Audience: stdlib maintainers and compiler/tooling engineers.
+
+## Operator workflow
+Run `bin/simple test test/01_unit/lib/common/sdn_table_linear_roundtrip_spec.spl --mode=interpreter`.
+
+## Compatibility and limitations
+Pure in-memory SDN lexing, parsing, and canonical encoding. Scaling assertions compare
+8x input sizes with a time floor to tolerate normal host scheduling noise while catching
+O(N^2) string and byte-array churn.
+"""
+
+use std.spec.{describe, context, it, expect, step}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical, sdn_encoded_text_size_v1}
+use std.common.sdn.parser.{parse, parse_with_spans_and_issues}
+use std.common.sdn.lexer.{TokenKind, Lexer, tokenize}
+use std.nogc_sync_mut.io.time_ops.{time_now_micros}
+
+fn _ratio_x100(small_us: i64, big_us: i64) -> i64:
+    val floor_us = if small_us < 1000: 1000 else: small_us
+    (big_us * 100) / floor_us
+
+fn _make_named_table_doc(rows: i64) -> text:
+    var parts: [text] = ["records |id, tier, active, note|"]
+    var i = 0
+    while i < rows:
+        parts.push("    r_{i}, local, true, row_{i}")
+        i = i + 1
+    parts.join("\n") + "\n"
+
+fn _make_commented_doc(body_lines: i64) -> text:
+    val pad = "v".repeat(200)
+    var parts: [text] = ["# leading comment line with metadata", "# second header comment"]
+    var i = 0
+    while i < body_lines:
+        parts.push("k_{i}: {pad}")
+        i = i + 1
+    parts.join("\n") + "\n"
+
+fn _make_multiline_array_doc(entries: i64) -> text:
+    var parts: [text] = ["entries: ["]
+    var i = 0
+    while i < entries:
+        parts.push("  {{" + "id: {i}, label: \"item_{i}\"" + "}}")
+        i = i + 1
+    parts.push("]")
+    parts.push("tail: ok")
+    parts.join("\n") + "\n"
+
+fn _time_table_roundtrip_us(rows: i64) -> i64:
+    val doc = _make_named_table_doc(rows)
+    val t0 = time_now_micros()
+    val parsed = parse(doc)
+    val ok = match parsed:
+        case Ok(SdnValue.Dict(d)):
+            match d["records"]:
+                case SdnValue.Table(headers, body):
+                    val enc = sdn_encode_canonical(SdnValue.Table(headers, body))
+                    body.len() == rows and enc.starts_with("|id, tier, active, note|")
+                case _:
+                    false
+        case _:
+            false
+    val t1 = time_now_micros()
+    if not ok:
+        return -1
+    t1 - t0
+
+fn _time_table_encode_us(rows: i64) -> i64:
+    val headers: [text] = ["id", "payload"]
+    val pad = "p".repeat(80)
+    var body: [[SdnValue]] = []
+    var i = 0
+    while i < rows:
+        body.push([SdnValue.string("r_{i}"), SdnValue.string(pad)])
+        i = i + 1
+    val tbl = SdnValue.Table(headers, body)
+    val t0 = time_now_micros()
+    val enc = sdn_encode_canonical(tbl)
+    val t1 = time_now_micros()
+    if not enc.starts_with("|id, payload|"):
+        return -1
+    t1 - t0
+
+fn _time_comment_strip_us(body_lines: i64) -> i64:
+    val doc = _make_commented_doc(body_lines)
+    val t0 = time_now_micros()
+    val parsed = parse(doc)
+    val ok = match parsed:
+        case Ok(SdnValue.Dict(d)):
+            d.len() == body_lines
+        case _:
+            false
+    val t1 = time_now_micros()
+    if not ok:
+        return -1
+    t1 - t0
+
+fn _time_multiline_collection_us(entries: i64) -> i64:
+    val doc = _make_multiline_array_doc(entries)
+    val t0 = time_now_micros()
+    val parsed = parse(doc)
+    val ok = match parsed:
+        case Ok(SdnValue.Dict(d)):
+            val arr_ok = match d["entries"]:
+                case SdnValue.Array(items): items.len() == entries
+                case _: false
+            val tail_ok = match d["tail"]:
+                case SdnValue.String(s): s == "ok"
+                case _: false
+            arr_ok and tail_ok
+        case _:
+            false
+    val t1 = time_now_micros()
+    if not ok:
+        return -1
+    t1 - t0
+
+fn _time_lex_long_word_us(word_len: i64) -> i64:
+    val src = "k: " + "a".repeat(word_len)
+    val t0 = time_now_micros()
+    val toks = tokenize(src)
+    val t1 = time_now_micros()
+    if toks.len() != 3 or toks[2].text.byte_len() != word_len:
+        return -1
+    t1 - t0
+
+describe "SDN linear round-trip and churn guards (std.common.sdn)":
+    """Verify canonical byte-equality, edge-case fidelity, and linear scaling."""
+
+    context "canonical multi-table round-trip byte-equality":
+        """Canonical encoding and parsing remain byte-for-byte identical across tables and dicts."""
+
+        it "round-trips a canonical top-level table byte-for-byte":
+            """Verify headers, mixed scalar/quoted/UTF-8 rows, and canonical re-encoding."""
+            step("Encode a multi-row table and verify parse -> encode byte equality")
+            val headers: [text] = ["id", "tier", "active", "weight", "notes"]
+            val rows: [[SdnValue]] = [
+                [SdnValue.string("gate_1"), SdnValue.string("push"), SdnValue.bool(true), SdnValue.float(1.5), SdnValue.string("plain_ok")],
+                [SdnValue.string("gate_2"), SdnValue.string("local"), SdnValue.bool(false), SdnValue.int(-42), SdnValue.string("comma, \"quoted\" and\nnewline")],
+                [SdnValue.string("gate_3"), SdnValue.string("42"), SdnValue.null(), SdnValue.float(2.0), SdnValue.string("café — 漢字")]
+            ]
+            val table = SdnValue.Table(headers, rows)
+            val enc = sdn_encode_canonical(table)
+            val expected = "|id, tier, active, weight, notes|\n" +
+                "gate_1, push, true, 1.5, plain_ok\n" +
+                "gate_2, local, false, -42, \"comma, \\\"quoted\\\" and\\nnewline\"\n" +
+                "gate_3, \"42\", null, 2.0, \"café — 漢字\""
+            expect(enc).to_equal(expected)
+
+            match parse(enc):
+                case Ok(reparsed):
+                    expect(reparsed.is_table()).to_equal(true)
+                    expect(sdn_encode_canonical(reparsed)).to_equal(enc)
+                case Err(e):
+                    expect(e).to_equal("")
+
+        it "parses a multi-table document and reproduces exact canonical table bytes":
+            """Parse a realistic document with leading comments and two named tables."""
+            step("Parse a multi-table SDN sample and verify canonical output per table")
+            val doc = "# Registry sample\n" +
+                "# second header comment\n\n" +
+                "schema: simple.multi-table/v1\n" +
+                "gates |id, tier, blocking, description|\n" +
+                "    push-crc32, push, false, \"sealed, canonical \\\"table\\\"\"\n" +
+                "    push-shape, push, true, row_shape_ok\n" +
+                "\n" +
+                "metrics |name, samples, ratio|\n" +
+                "    json_esc, 2000, 1.25\n" +
+                "    sdn_tbl, 1200, 2.0\n"
+            match parse(doc):
+                case Ok(SdnValue.Dict(root)):
+                    expect(root["schema"].as_str().unwrap()).to_equal("simple.multi-table/v1")
+                    val gates_tbl = root["gates"]
+                    val metrics_tbl = root["metrics"]
+                    expect(gates_tbl.is_table()).to_equal(true)
+                    expect(metrics_tbl.is_table()).to_equal(true)
+                    val gates_canon = sdn_encode_canonical(gates_tbl)
+                    val metrics_canon = sdn_encode_canonical(metrics_tbl)
+                    expect(gates_canon).to_equal(
+                        "|id, tier, blocking, description|\n" +
+                        "push-crc32, push, false, \"sealed, canonical \\\"table\\\"\"\n" +
+                        "push-shape, push, true, row_shape_ok"
+                    )
+                    expect(metrics_canon).to_equal(
+                        "|name, samples, ratio|\n" +
+                        "json_esc, 2000, 1.25\n" +
+                        "sdn_tbl, 1200, 2.0"
+                    )
+                    expect(sdn_encode_canonical(parse(gates_canon).unwrap())).to_equal(gates_canon)
+                    expect(sdn_encode_canonical(parse(metrics_canon).unwrap())).to_equal(metrics_canon)
+                case Ok(_):
+                    expect("Dict").to_equal("parsed")
+                case Err(e):
+                    expect(e).to_equal("")
+
+        it "sorts dict keys bytewise ascending and matches encoded text byte sizes":
+            """Verify bytewise key sorting without bytes() array allocations."""
+            step("Encode dict with mixed case, prefix, underscore, and UTF-8 keys")
+            var m: Dict<text, SdnValue> = {}
+            m["b"] = SdnValue.int(1)
+            m["ab"] = SdnValue.int(2)
+            m["a"] = SdnValue.int(3)
+            m["aa"] = SdnValue.int(4)
+            m["_"] = SdnValue.int(5)
+            m["Z"] = SdnValue.int(6)
+            m["café"] = SdnValue.int(7)
+            m["cafe"] = SdnValue.int(8)
+            val enc = sdn_encode_canonical(SdnValue.Dict(m))
+            expect(enc).to_equal("{" + "Z: 6, _: 5, a: 3, aa: 4, ab: 2, b: 1, cafe: 8, \"café\": 7" + "}")
+            expect(sdn_encoded_text_size_v1("plain")).to_equal(sdn_encode_canonical(SdnValue.String("plain")).byte_len())
+            expect(sdn_encoded_text_size_v1("a\"b\nc")).to_equal(sdn_encode_canonical(SdnValue.String("a\"b\nc")).byte_len())
+
+    context "leading comment stripping and edge cases":
+        """Preserve exact behavior on empty, whitespace, all-comment, and trailing-newline inputs."""
+
+        it "handles empty, whitespace-only, and all-comment documents":
+            """Verify every degenerate leading-comment document resolves to Null."""
+            step("Parse empty, blank, and comment-only documents")
+            expect(parse("").unwrap().is_null()).to_equal(true)
+            expect(parse("   \n\t\n").unwrap().is_null()).to_equal(true)
+            expect(parse("# comment only").unwrap().is_null()).to_equal(true)
+            expect(parse("# first\n  # indented\n\n").unwrap().is_null()).to_equal(true)
+
+        it "preserves block structure, trailing newlines, and UTF-8 after leading comments":
+            """Verify offset-based comment stripping retains nested block indentation."""
+            step("Parse commented nested mapping and commented UTF-8 inline dict")
+            val doc = "# café ☕ header\n  # second\n\nouter:\n  inner: 42\n  list:\n    - one\n"
+            match parse(doc):
+                case Ok(v):
+                    expect(v.get_path("outer.inner").unwrap().as_i64().unwrap()).to_equal(42)
+                case Err(e):
+                    expect(e).to_equal("")
+            val inline_doc = "# header\n  {" + "k: \"héllo 中\"" + "}\n"
+            match parse(inline_doc):
+                case Ok(v):
+                    expect(v.get("k").unwrap().as_str().unwrap()).to_equal("héllo 中")
+                case Err(e):
+                    expect(e).to_equal("")
+
+    context "multiline inline collections and lexer byte-span slicing":
+        """Verify incremental multiline collection parsing and byte-span tokenization."""
+
+        it "parses multiline collections with escaped quotes and nested braces":
+            """Check quoted delimiters, trailing backslashes, sibling keys, and error paths."""
+            step("Parse valid multiline collection followed by sibling key")
+            val ok_doc = "items: [\n" +
+                "  {" + "note: \"keep \\\" ] } inside\", nums: [1, 2]" + "}\n" +
+                "  {" + "note: \"second\", nums: [3]" + "}\n" +
+                "]\n" +
+                "after: kept\n"
+            match parse_with_spans_and_issues(ok_doc):
+                case Ok(res):
+                    expect(res.0.get_path("items.0.note").unwrap().as_str().unwrap()).to_equal("keep \" ] } inside")
+                    expect(res.0.get_path("items.1.nums.0").unwrap().as_i64().unwrap()).to_equal(3)
+                    expect(res.0.get("after").unwrap().as_str().unwrap()).to_equal("kept")
+                case Err(e):
+                    expect(e).to_equal("")
+
+            step("Reject unterminated and mismatched multiline collections")
+            match parse("items: [\n  1\n"):
+                case Err(e): expect(e).to_contain("unterminated collection")
+                case Ok(_): expect("Err").to_equal("Ok")
+            match parse("items: [\n  1\n}\n"):
+                case Err(e): expect(e).to_contain("mismatched collection closer")
+                case Ok(_): expect("Err").to_equal("Ok")
+
+        it "tokenizes whitespace, punctuation, and UTF-8 words via byte-span slicing":
+            """Check empty, whitespace-only, punctuation, and UTF-8 tokens in tokenize and Lexer."""
+            step("Tokenize sample containing UTF-8 words and every punctuation kind")
+            expect(tokenize("").len()).to_equal(0)
+            expect(tokenize("  \t  ").len()).to_equal(0)
+            val toks = Lexer.new("café: [héllo, 中, 😀]\n").run()
+            expect(toks.len()).to_equal(10)
+            expect(toks[0].text).to_equal("café")
+            expect(toks[1].text).to_equal(":")
+            expect(toks[2].text).to_equal("[")
+            expect(toks[3].text).to_equal("héllo")
+            expect(toks[4].text).to_equal(",")
+            expect(toks[5].text).to_equal("中")
+            expect(toks[6].text).to_equal(",")
+            expect(toks[7].text).to_equal("😀")
+            expect(toks[8].text).to_equal("]")
+            expect(toks[9].text).to_equal("\n")
+
+    context "linear scaling under O(N^2) churn regression guard":
+        """Verify 8x larger inputs scale linearly rather than quadratically (~64x)."""
+
+        it "parses and encodes named tables linearly as row count grows 8x":
+            """Guard against O(R^2) join-then-resplit in _sdn_block_table and row concat in _sdn_enc_table."""
+            step("Time 500-row vs 4000-row canonical table encode and 150-row vs 1200-row parse+encode")
+            expect(_time_table_encode_us(20)).to_be_greater_than(-1)
+            val enc_small = _time_table_encode_us(500)
+            val enc_big = _time_table_encode_us(4000)
+            expect(enc_small).to_be_greater_than(-1)
+            expect(enc_big).to_be_greater_than(-1)
+            expect(_ratio_x100(enc_small, enc_big)).to_be_less_than(1600)
+
+            expect(_time_table_roundtrip_us(10)).to_be_greater_than(-1)
+            val small = _time_table_roundtrip_us(150)
+            val big = _time_table_roundtrip_us(1200)
+            expect(small).to_be_greater_than(-1)
+            expect(big).to_be_greater_than(-1)
+            expect(_ratio_x100(small, big)).to_be_less_than(1600)
+
+        it "strips leading comment lines linearly as document size grows 8x":
+            """Guard against O(L^2) line concatenation in _sdn_strip_leading_comment_lines."""
+            step("Time 400-line vs 3200-line document parse after leading comments")
+            expect(_time_comment_strip_us(10)).to_be_greater_than(-1)
+            val small = _time_comment_strip_us(400)
+            val big = _time_comment_strip_us(3200)
+            expect(small).to_be_greater_than(-1)
+            expect(big).to_be_greater_than(-1)
+            expect(_ratio_x100(small, big)).to_be_less_than(1600)
+
+        it "parses multiline collections linearly as line count grows 8x":
+            """Guard against O(L^2) value_source concat + full depth rescan per line."""
+            step("Time 150-line vs 1200-line multiline inline collection parsing")
+            expect(_time_multiline_collection_us(10)).to_be_greater_than(-1)
+            val small = _time_multiline_collection_us(150)
+            val big = _time_multiline_collection_us(1200)
+            expect(small).to_be_greater_than(-1)
+            expect(big).to_be_greater_than(-1)
+            expect(_ratio_x100(small, big)).to_be_less_than(1600)
+
+        it "tokenizes long words linearly in sdn lexer without cur = cur + ch":
+            """Guard against O(N^2) per-char word accumulation in tokenize."""
+            step("Time 4000-byte vs 32000-byte word tokenization")
+            expect(_time_lex_long_word_us(64)).to_be_greater_than(-1)
+            val small = _time_lex_long_word_us(4000)
+            val big = _time_lex_long_word_us(32000)
+            expect(small).to_be_greater_than(-1)
+            expect(big).to_be_greater_than(-1)
+            expect(_ratio_x100(small, big)).to_be_less_than(1600)

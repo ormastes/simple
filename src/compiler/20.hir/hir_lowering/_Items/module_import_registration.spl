@@ -1515,20 +1515,26 @@ impl HirLowering:
                 val verify_state: HirReexportWalkState = HirReexportWalkState.fresh()
                 val verify: HirReexportSource = self.find_reexport_source_walk(facade_index, wanted, 0, verify_state)
                 val verify_index = if verify.found: verify.module_index else: -1
-                if verify_index != terminal_index:
+                val normalized_terminal = if terminal_index < 0: -1 else: terminal_index
+                if verify_index != normalized_terminal:
                     eprint("[rexmemo-mismatch] facade={facade_index} wanted={wanted} memo={terminal_index} walk={verify_index} complete={verify_state.complete} valid={verify_state.valid}")
+            if terminal_index == -2:
+                return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
             if terminal_index < 0:
                 # CHAINTABLE-HARDEN (cycle-36 sweep): a memoized NEGATIVE can
                 # itself be the false negative (the memo tables share the
                 # stage2 chain-table corruption family), and it poisons every
-                # later chase for this key. A negative hit is therefore
-                # revalidated with one fresh walk; a found result replaces the
-                # memo entry (record appends; readers scan newest-first via the
-                # bucket chain -- see reexport_root_memo_lookup) and a
-                # confirmed negative stays retryable-cheap only until the next
+                # later chase for this key. An unverified negative (-1) is
+                # revalidated ONCE with a fresh walk; a found result replaces
+                # the memo entry (record appends; readers scan newest-first via
+                # the bucket chain -- see reexport_root_memo_lookup), while a
+                # verified complete+valid negative promotes the slot to -2 so
+                # subsequent queries short-circuit in O(1) until the next
                 # registry generation resets the table.
                 val recheck_state: HirReexportWalkState = HirReexportWalkState.fresh()
                 val recheck: HirReexportSource = self.find_reexport_source_walk(facade_index, wanted, 0, recheck_state)
+                self.reexport_walk_complete = recheck_state.complete
+                self.reexport_walk_valid = recheck_state.valid
                 if recheck.found:
                     self.reexport_root_memo_record(memo_key, recheck.module_index, recheck.item_name)
                     return HirReexportSource(
@@ -1536,6 +1542,8 @@ impl HirLowering:
                         module_index: recheck.module_index,
                         module_name: self.module_surfaces.surfaces[recheck.module_index].preferred_registry_name,
                         item_name: recheck.item_name)
+                if recheck_state.complete and recheck_state.valid:
+                    self.reexport_root_memo_index_values[memo_slot] = -2
                 return HirReexportSource(found: false, module_index: -1, module_name: "", item_name: "")
             if terminal_index >= self.module_surfaces.surfaces.len():
                 self.reexport_walk_valid = false

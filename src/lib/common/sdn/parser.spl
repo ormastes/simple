@@ -90,20 +90,29 @@ pub fn parse(source: text) -> Result<SdnValue, text>:
 # and whose body was an inline dict/array/table/scalar fell through to the
 # shape heuristics with `#` as its first byte and parsed as one bare String.
 fn _sdn_strip_leading_comment_lines(source: text) -> text:
-    val lines = _sdn_split_lines(source)
-    var first = 0
-    while first < lines.len():
-        val t = lines[first].trim()
-        if t != "" and not t.starts_with("#"): break
-        first = first + 1
-    if first == 0: return source
-    var out = ""
-    var i = first
-    while i < lines.len():
-        out = out + lines[i]
-        if i + 1 < lines.len(): out = out + "\n"
-        i = i + 1
-    out
+    val n = source.byte_len()
+    var pos = 0
+    while pos < n:
+        val line_start = pos
+        var line_end = pos
+        while line_end < n and source.byte_at(line_end) != 10:
+            line_end = line_end + 1
+        var k = line_start
+        while k < line_end:
+            val b = source.byte_at(k)
+            if b == 32 or b == 9 or b == 13 or b == 11 or b == 12:
+                k = k + 1
+            else:
+                break
+        if k < line_end and source.byte_at(k) != 35:
+            if line_start == 0:
+                return source
+            return source.slice(line_start, n)
+        if line_end < n:
+            pos = line_end + 1
+        else:
+            pos = n
+    ""
 
 fn _looks_like_float(s: text) -> bool:
     if s.len() == 0:
@@ -228,15 +237,10 @@ fn _sdn_parse_mapping(source: text) -> Result<SdnValue, text>:
 
 # Count leading-space indentation of a line.
 fn _sdn_indent(line: text) -> i64:
-    val b = text_to_bytes(line)
+    val n = line.byte_len()
     var i = 0
-    var counting = true
-    while counting and i < b.len():
-        # @workaround bug=native_byte_to_i64_text_dispatch_2026_10_21 reason=old645 dispatches numeric byte methods as text; remove after rebuilt producer passes byte and SDN regressions
-        if (b[i] as i64) == 32:
-            i = i + 1
-        else:
-            counting = false
+    while i < n and line.byte_at(i) == 32:
+        i = i + 1
     i
 
 # Parse a block of `key: value` / `key = value` lines whose indentation is
@@ -305,29 +309,18 @@ fn _sdn_parse_block(lines: [text], start: i64, indent: i64) -> Result<(SdnValue,
                                 case Err(e):
                                     return Err(e)
                     else:
-                        var value_source = valstr
-                        if valstr.starts_with("[") or valstr.starts_with("{{"):
-                            match _sdn_collection_depth(value_source):
-                                case Err(e):
-                                    return Err(e)
-                                case Ok(initial_depth):
-                                    var depth = initial_depth
-                                    while depth > 0:
-                                        i = i + 1
-                                        if i >= lines.len():
-                                            return Err("unterminated collection for key '" + key + "'")
-                                        value_source = value_source + "\n" + lines[i].trim()
-                                        match _sdn_collection_depth(value_source):
-                                            case Err(e):
-                                                return Err(e)
-                                            case Ok(next_depth):
-                                                depth = next_depth
-                        match parse(value_source):
-                            case Ok(v):
-                                m[key] = v
+                        match _sdn_value_span_lines(lines, i, valstr, key):
                             case Err(e):
                                 return Err(e)
-                        i = i + 1
+                            case Ok(sp):
+                                val value_source = sp.0
+                                i = sp.1
+                                match parse(value_source):
+                                    case Ok(v):
+                                        m[key] = v
+                                    case Err(e):
+                                        return Err(e)
+                                i = i + 1
     Ok((SdnValue.Dict(m), i))
 
 # True when the first non-blank line at or beyond `start` is indented >= `indent`
@@ -408,16 +401,21 @@ fn _sdn_parse_seq(lines: [text], start: i64, indent: i64) -> Result<([SdnValue],
 # Return the number of unclosed collection delimiters, rejecting mismatched
 # closers. Delimiters inside quoted strings, including after escaped quotes,
 # are data rather than structure.
-fn _sdn_collection_depth(s: text, complete: bool = false) -> Result<i64, text>:
-    val b = text_to_bytes(s)
-    var stack: [i64] = []
-    var in_str = false
-    var escaped = false
-    var root_end = -1
+struct _SdnScanState:
+    stack: [i64]
+    in_str: bool
+    escaped: bool
+    root_end: i64
+
+fn _sdn_scan_collection_segment(s: text, state: _SdnScanState, base_offset: i64, complete: bool) -> Result<_SdnScanState, text>:
+    val n = s.byte_len()
+    var stack: [i64] = state.stack
+    var in_str = state.in_str
+    var escaped = state.escaped
+    var root_end = state.root_end
     var i = 0
-    while i < b.len():
-        # @workaround bug=native_byte_to_i64_text_dispatch_2026_10_21 reason=old645 dispatches numeric byte methods as text; remove after rebuilt producer passes byte and SDN regressions
-        val c = (b[i] as i64)
+    while i < n:
+        val c = s.byte_at(i)
         if in_str:
             if escaped:
                 escaped = false
@@ -442,11 +440,21 @@ fn _sdn_collection_depth(s: text, complete: bool = false) -> Result<i64, text>:
                             return Err("mismatched collection closer")
                         stack.pop()
                         if complete and stack.len() == 0 and root_end < 0:
-                            root_end = i
+                            root_end = base_offset + i
         i = i + 1
-    if complete and stack.len() == 0 and root_end != b.len() - 1:
-        return Err("text after collection")
-    Ok(stack.len())
+    Ok(_SdnScanState(stack: stack, in_str: in_str, escaped: escaped, root_end: root_end))
+
+fn _sdn_collection_depth(s: text, complete: bool = false) -> Result<i64, text>:
+    val init = _SdnScanState(stack: [], in_str: false, escaped: false, root_end: -1)
+    match _sdn_scan_collection_segment(s, init, 0, complete):
+        case Err(e):
+            return Err(e)
+        case Ok(st):
+            val depth = st.stack.len()
+            val expected_end = s.byte_len() - 1
+            if complete and depth == 0 and st.root_end != expected_end:
+                return Err("text after collection")
+            Ok(depth)
 
 # Index of the first top-level `=` or `:` separator, skipping any that sit
 # inside an inline {}/[] collection or a "" string. Returns -1 if none.
@@ -637,7 +645,7 @@ fn _sdn_block_table(lines: [text], start: i64, indent: i64, header: text) -> (Sd
     val name = header.slice(0, bar).trim()
     if name == "":
         return none_result
-    var src = header.slice(bar, header.byte_len())
+    val table_header = header.slice(bar, header.byte_len())
     var j = start + 1
     var running = true
     while running and j < lines.len():
@@ -645,19 +653,17 @@ fn _sdn_block_table(lines: [text], start: i64, indent: i64, header: text) -> (Sd
             running = false
         else:
             if _sdn_indent(lines[j]) > indent:
-                src = src + "\n" + lines[j].trim()
                 j = j + 1
             else:
                 running = false
-    match _sdn_parse_table(src):
+    match _sdn_parse_table_lines(table_header, lines, start + 1, j):
         case Ok(v): (v, j, name)
         case Err(_): none_result
 
-# Parse a table: first line `|h1, h2|`, each following non-empty line is a
-# comma-separated row of scalar values.
-fn _sdn_parse_table(source: text) -> Result<SdnValue, text>:
-    val lines = _sdn_split_lines(source)
-    val first = lines[0].trim()
+# Parse a table: header line `|h1, h2|` plus rows[row_start..row_end], each
+# non-empty line a comma-separated row of scalar values.
+fn _sdn_parse_table_lines(header_line: text, lines: [text], row_start: i64, row_end: i64) -> Result<SdnValue, text>:
+    val first = header_line.trim()
     if first.byte_len() < 2:
         return Err("malformed table header")
     val header_inner = first.slice(1, first.byte_len() - 1)
@@ -665,8 +671,8 @@ fn _sdn_parse_table(source: text) -> Result<SdnValue, text>:
     for part in _sdn_split_top_commas(header_inner):
         headers.push(part)
     var rows: [[SdnValue]] = []
-    var i = 1
-    while i < lines.len():
+    var i = row_start
+    while i < row_end:
         val t = lines[i].trim()
         if t != "":
             var row: [SdnValue] = []
@@ -679,6 +685,10 @@ fn _sdn_parse_table(source: text) -> Result<SdnValue, text>:
             rows.push(row)
         i = i + 1
     Ok(SdnValue.Table(headers, rows))
+
+fn _sdn_parse_table(source: text) -> Result<SdnValue, text>:
+    val lines = _sdn_split_lines(source)
+    _sdn_parse_table_lines(lines[0], lines, 1, lines.len())
 
 # ---- span / issue walkers ----
 
@@ -694,25 +704,38 @@ fn _sdn_list_has(xs: [text], k: text) -> bool:
 # Collect a multi-line inline collection value starting at lines[start].
 # Returns (full value source, index of the last consumed line).
 fn _sdn_value_span_lines(lines: [text], start: i64, first: text, key: text) -> Result<(text, i64), text>:
-    var value_source = first
     var i = start
-    if first.starts_with("[") or first.starts_with("{{"):
-        match _sdn_collection_depth(value_source):
+    if not (first.starts_with("[") or first.starts_with("{{")):
+        return Ok((first, i))
+    val init = _SdnScanState(stack: [], in_str: false, escaped: false, root_end: -1)
+    var state = init
+    match _sdn_scan_collection_segment(first, init, 0, false):
+        case Err(e):
+            return Err(e)
+        case Ok(st):
+            state = st
+    if state.stack.len() == 0:
+        return Ok((first, i))
+    var parts: [text] = [first]
+    while state.stack.len() > 0:
+        i = i + 1
+        if i >= lines.len():
+            return Err("unterminated collection for key '" + key + "'")
+        val line = lines[i].trim()
+        parts.push(line)
+        # Newline separator consumes any trailing backslash escape before the next line.
+        val next_init = _SdnScanState(
+            stack: state.stack,
+            in_str: state.in_str,
+            escaped: false,
+            root_end: state.root_end
+        )
+        match _sdn_scan_collection_segment(line, next_init, 0, false):
             case Err(e):
                 return Err(e)
-            case Ok(initial_depth):
-                var depth = initial_depth
-                while depth > 0:
-                    i = i + 1
-                    if i >= lines.len():
-                        return Err("unterminated collection for key '" + key + "'")
-                    value_source = value_source + "\n" + lines[i].trim()
-                    match _sdn_collection_depth(value_source):
-                        case Err(e):
-                            return Err(e)
-                        case Ok(next_depth):
-                            depth = next_depth
-    Ok((value_source, i))
+            case Ok(st):
+                state = st
+    Ok((parts.join("\n"), i))
 
 # 1-based column at which the value part of a `key: value` line begins.
 fn _sdn_value_col(line: text, ind: i64, ci: i64) -> i64:

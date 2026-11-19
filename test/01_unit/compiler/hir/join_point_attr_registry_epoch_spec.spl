@@ -1,0 +1,168 @@
+"""
+## Purpose and audience
+
+Unit tests for Lane G4 Join-Point Attribute Registry partitioning, empty-attribute
+non-retention, stale entry removal, epoch lifecycle, transient heap promotion
+wiring via `frontend_promote_parse_registry_owners_v1()`, and zero-allocation
+empty recording from `declaration_lowering.spl`.
+
+## Operator workflow
+
+Run with the pure-Simple interpreter:
+`SIMPLE_LIB=src bin/simple test test/01_unit/compiler/hir/join_point_attr_registry_epoch_spec.spl --mode=interpreter`
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.retained_parse_owners_v1.{frontend_promote_parse_registry_owners_v1, frontend_promote_retained_parse_owners_v1}
+use compiler.frontend.join_point_attr_registry.{
+    join_point_attr_begin_epoch_v2,
+    join_point_attr_epoch_matches_v2,
+    join_point_attr_record,
+    join_point_attr_record_empty,
+    join_point_attr_names_of,
+    join_point_attr_reset,
+    join_point_attr_promote_transient_owner
+}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+
+describe "Join-Point Attribute Registry partitioning and epoch lifecycle":
+    it "partitions by normalized path, skips empty names, and evicts stale entries on empty re-record":
+        # @req REQ-G4-JP-001
+        step("Reset registry, start an epoch, and record attributes across normalized paths and empty re-records")
+        join_point_attr_reset()
+        val epoch = join_point_attr_begin_epoch_v2()
+        expect(epoch).to_be_greater_than(0)
+
+        join_point_attr_record("src\\mod_a.spl", "shared_fn", ["trace"])
+        join_point_attr_record("src/mod_b.spl", "shared_fn", ["audit"])
+        join_point_attr_record("src/mod_a.spl", "dropped_fn", ["instrument"])
+        expect(join_point_attr_names_of("src/mod_a.spl", "shared_fn")).to_equal(["trace"])
+        expect(join_point_attr_names_of("src/mod_b.spl", "shared_fn")).to_equal(["audit"])
+        expect(join_point_attr_names_of("src\\mod_a.spl", "dropped_fn")).to_equal(["instrument"])
+
+        # Re-recording [] and using join_point_attr_record_empty removes stale attrs while recording epoch proof.
+        join_point_attr_record("src/mod_a.spl", "dropped_fn", [])
+        join_point_attr_record_empty("src\\mod_a.spl", "plain_fn")
+
+        expect(join_point_attr_names_of("src/mod_a.spl", "dropped_fn")).to_equal([])
+        expect(join_point_attr_names_of("src/mod_a.spl", "plain_fn")).to_equal([])
+        expect(join_point_attr_epoch_matches_v2("src/mod_a.spl", "shared_fn", epoch)).to_equal(true)
+        expect(join_point_attr_epoch_matches_v2("src/mod_a.spl", "dropped_fn", epoch)).to_equal(true)
+        expect(join_point_attr_epoch_matches_v2("src/mod_a.spl", "plain_fn", epoch)).to_equal(true)
+        expect(join_point_attr_epoch_matches_v2("src/mod_b.spl", "plain_fn", epoch)).to_equal(false)
+
+    it "resets proof epochs cleanly on begin_epoch_v2 while reset clears both names and epochs":
+        # @req REQ-G4-JP-002
+        step("Compare begin_epoch_v2 (legacy getter kept, proofs reset) against join_point_attr_reset")
+        join_point_attr_reset()
+        val epoch1 = join_point_attr_begin_epoch_v2()
+        join_point_attr_record("src/keep_a.spl", "f", ["trace"])
+
+        val epoch2 = join_point_attr_begin_epoch_v2()
+        expect(epoch2).to_be_greater_than(epoch1)
+        expect(join_point_attr_epoch_matches_v2("src/keep_a.spl", "f", epoch1)).to_equal(false)
+        expect(join_point_attr_epoch_matches_v2("src/keep_a.spl", "f", epoch2)).to_equal(false)
+        # Legacy getter cache stays intact across begin_epoch_v2 per snapshot contract.
+        expect(join_point_attr_names_of("src/keep_a.spl", "f")).to_equal(["trace"])
+
+        # Full reset clears both names and epochs cleanly without allowing stale epoch matches.
+        join_point_attr_reset()
+        expect(join_point_attr_names_of("src/keep_a.spl", "f")).to_equal([])
+        expect(join_point_attr_epoch_matches_v2("src/keep_a.spl", "f", epoch1)).to_equal(false)
+        expect(join_point_attr_epoch_matches_v2("src/keep_a.spl", "f", epoch2)).to_equal(false)
+
+    it "promotes dirty entries and path epochs across consecutive transient scopes via frontend owner wiring":
+        # @req REQ-G4-JP-003
+        step("Record attributes in two consecutive transient scopes and promote via registry and frontend owner hooks")
+        join_point_attr_reset()
+        val epoch = join_point_attr_begin_epoch_v2()
+
+        expect(transient_scope_begin()).to_equal(true)
+        join_point_attr_record("src\\scope_a.spl", "fn_first", ["trace", "metric"])
+        join_point_attr_record_empty("src\\scope_a.spl", "fn_empty")
+        expect(transient_scope_pause()).to_equal(true)
+        expect(join_point_attr_promote_transient_owner()).to_equal(true)
+        expect(transient_scope_end()).to_equal(true)
+
+        # Second scope modifies the already-promoted path AND invokes frontend_promote_parse_registry_owners_v1().
+        expect(transient_scope_begin()).to_equal(true)
+        join_point_attr_record("src/scope_a.spl", "fn_second", ["audit"])
+        join_point_attr_record("src/scope_b.spl", "fn_other", ["log"])
+        expect(transient_scope_pause()).to_equal(true)
+        expect(frontend_promote_parse_registry_owners_v1()).to_equal(true)
+        expect(transient_scope_end()).to_equal(true)
+
+        expect(join_point_attr_names_of("src/scope_a.spl", "fn_first")).to_equal(["trace", "metric"])
+        expect(join_point_attr_names_of("src/scope_a.spl", "fn_empty")).to_equal([])
+        expect(join_point_attr_names_of("src/scope_a.spl", "fn_second")).to_equal(["audit"])
+        expect(join_point_attr_names_of("src/scope_b.spl", "fn_other")).to_equal(["log"])
+        expect(join_point_attr_epoch_matches_v2("src/scope_a.spl", "fn_first", epoch)).to_equal(true)
+        expect(join_point_attr_epoch_matches_v2("src/scope_a.spl", "fn_empty", epoch)).to_equal(true)
+        expect(join_point_attr_epoch_matches_v2("src/scope_a.spl", "fn_second", epoch)).to_equal(true)
+        expect(join_point_attr_epoch_matches_v2("src/scope_b.spl", "fn_other", epoch)).to_equal(true)
+
+    it "lowers attributeless functions without empty list allocation and matches partitioned registry contract":
+        # @req REQ-G4-JP-004
+        step("Lower a module with attributed and plain functions, then verify registry and source contracts")
+        join_point_attr_reset()
+        val epoch = join_point_attr_begin_epoch_v2()
+        val source = "@pure\nfn attributed_fn() -> i64:\n    42\n\nfn plain_fn() -> i64:\n    7\n"
+        val parsed = parse_full_frontend(source, "src/lowered_jp.spl", "lowered_jp", Logger(level: 0))
+        var lowering = HirLowering.with_filename("src/lowered_jp.spl")
+        val _module = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+
+        expect(join_point_attr_epoch_matches_v2("src/lowered_jp.spl", "plain_fn", epoch)).to_equal(true)
+        expect(join_point_attr_names_of("src/lowered_jp.spl", "plain_fn")).to_equal([])
+        expect(join_point_attr_epoch_matches_v2("src/lowered_jp.spl", "attributed_fn", epoch)).to_equal(true)
+
+        val reg_src = file_read("src/compiler/10.frontend/join_point_attr_registry.spl") ?? ""
+        val owners_src = file_read("src/compiler/10.frontend/retained_parse_owners_v1.spl") ?? ""
+        val decl_src = file_read("src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl") ?? ""
+
+        expect(reg_src).to_contain("Dict<text, Dict<text, [text]>>")
+        expect(reg_src).to_contain("Dict<text, Dict<text, i64>>")
+        expect(reg_src).to_contain("pub fn join_point_attr_promote_transient_owner() -> bool:")
+        expect(reg_src).to_contain("pub fn join_point_attr_record_empty(")
+        expect(reg_src).to_contain("pub fn join_point_attr_reset():")
+        expect(owners_src).to_contain("join_point_attr_promote_transient_owner")
+        expect(decl_src).to_contain("join_point_attr_record_empty(")
+
+    it "promotes join_point_attr entries on parse-cache hit (parser_entered=false) and fast-paths when dirty is empty":
+        # @req REQ-G4-JP-005
+        step("Empty dirty map short-circuits O(1) even outside a paused transient scope")
+        join_point_attr_reset()
+        expect(join_point_attr_promote_transient_owner()).to_equal(true)
+
+        step("Non-empty dirty map still fails closed outside a paused transient scope")
+        join_point_attr_record("src/unpaused_dirty.spl", "dirty_fn", ["trace"])
+        expect(join_point_attr_promote_transient_owner()).to_equal(false)
+
+        step("Parse-cache hit (parser_entered=false) promotes dirty join_point_attr entries across scope end")
+        join_point_attr_reset()
+        val epoch_hit = join_point_attr_begin_epoch_v2()
+        expect(transient_scope_begin()).to_equal(true)
+        join_point_attr_record("src\\parse_cache_hit.spl", "attr_fn", ["pure", "trace"])
+        join_point_attr_record_empty("src/parse_cache_hit.spl", "plain_fn")
+        expect(transient_scope_pause()).to_equal(true)
+        expect(frontend_promote_retained_parse_owners_v1(false)).to_equal(true)
+        expect(transient_scope_end()).to_equal(true)
+
+        expect(join_point_attr_names_of("src/parse_cache_hit.spl", "attr_fn")).to_equal(["pure", "trace"])
+        expect(join_point_attr_names_of("src/parse_cache_hit.spl", "plain_fn")).to_equal([])
+        expect(join_point_attr_epoch_matches_v2("src/parse_cache_hit.spl", "attr_fn", epoch_hit)).to_equal(true)
+        expect(join_point_attr_epoch_matches_v2("src/parse_cache_hit.spl", "plain_fn", epoch_hit)).to_equal(true)
+        # Dirty set was cleared during frontend_promote_retained_parse_owners_v1(false).
+        expect(join_point_attr_promote_transient_owner()).to_equal(true)
+
+        step("Untouched module with parser_entered=false (e.g. HIR cache hit) promotes cleanly")
+        expect(transient_scope_begin()).to_equal(true)
+        expect(transient_scope_pause()).to_equal(true)
+        expect(frontend_promote_retained_parse_owners_v1(false)).to_equal(true)
+        expect(transient_scope_end()).to_equal(true)
+        expect(join_point_attr_promote_transient_owner()).to_equal(true)
