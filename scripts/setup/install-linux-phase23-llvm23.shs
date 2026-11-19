@@ -40,6 +40,19 @@ tar -xJf "$archive" --strip-components=1 -C "$staging"
 [ -f "$staging/lib/libPollyISL.a" ] || fail 'authenticated archive lacks static PollyISL'
 set -- "$staging"/lib/libLLVM*.a
 [ -f "$1" ] || fail 'authenticated archive lacks static LLVM libraries'
+# The official tarball's lld/ld.lld is linked against ICU 70 (jammy); on newer
+# distros (e.g. Ubuntu 24.04 noble) it cannot run and fails at first link.
+# Execute it now and fail closed. Nothing is auto-installed.
+lld_rc=0
+"$staging/bin/ld.lld" --version >/dev/null 2>"$tmp/lld-err" || lld_rc=$?
+if [ "$lld_rc" -ne 0 ]; then
+    missing=""
+    if command -v ldd >/dev/null 2>&1; then
+        missing=$(ldd "$staging/bin/ld.lld" 2>&1 | grep 'not found' || true)
+    fi
+    [ -n "$missing" ] || missing=$(cat "$tmp/lld-err")
+    fail "ld.lld cannot run (exit $lld_rc); missing shared library: ${missing:-unknown}. The official tarball links ICU 70 (libicui18n.so.70, a jammy library). Remediation: provide ICU 70 libs (e.g. under /usr/local/lib/icu70), add that dir to /etc/ld.so.conf.d/icu70.conf and run ldconfig, then re-run."
+fi
 printf '%s\n' "$required_sha" >"$staging/.simple-llvm-release-sha256"
 if [ "$archive" != "$cache/$asset" ]; then mv "$archive" "$cache/$asset"; fi
 mv "$staging" "$prefix"
