@@ -3,7 +3,7 @@
 - **Found:** 2026-11-19, during the DHR phase-3 build (`doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md`)
 - **Tree:** `release/1.0.0` @ `b7214ff88aa`
 - **Host:** Windows 11, x86_64-pc-windows-gnu, pinned llvm-mingw 20260922
-- **Status:** open
+- **Status:** fixed (seed codegen, `work/seed-skip-unreferenced-imports-20261119`)
 
 ## Command
 
@@ -42,3 +42,16 @@ The DHR changes merged before this build (#10357 through #10379) touch only `src
 ## Next step
 
 Reproduce with a two-module fixture: module A has `pub const K = 1`, module B imports `{K}` and uses it in an expression, and the entry imports B. Build it with the Stage 1 compiler's `native-build` on Windows gnu/cranelift. Then compare the emitted symbol name for `K` against the Linux lane before changing the mangler.
+
+## Root cause and fix
+
+The seed's `declare_globals` (`src/compiler_rust/compiler/src/codegen/common_backend.rs`) declared every imported global of the module being compiled. When a name resolved through neither `use_map` nor `import_map`, it fell back to the module's own prefix. `bootstrap_main` re-exports names it never reads, so the result was 769 undefined imports with zero relocations against them. The fix collects the names that `GlobalLoad`/`GlobalStore` actually reference across the MIR functions, and skips an unresolved import nothing references. Covered by the unit test `unresolved_unreferenced_import_is_not_declared`.
+
+Verified with the same command at `6807e15d6f2`:
+
+```
+Linked: .../stage2/x86_64-pc-windows-gnu/simple.exe (84576 KB) via ...llvm-mingw-20260922-ucrt-x86_64\bin\clang.exe
+Build complete: 1588 compiled, 0 cached, 0 failed
+```
+
+The run then stopped at Stage 2 sanity. That was a different cause: `build refused: 6903 MiB of RAM/commit headroom free, below the 16208 MiB reserve`. The host had too little commit headroom, and the candidate never ran.
