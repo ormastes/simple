@@ -1,0 +1,95 @@
+# @cover src/lib/nogc_async_mut_noalloc/replay/portable_replay.spl 80%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-DHR-05
+# plan: doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md
+
+# DHR P6: kernel hooks (scope PR_SCOPE_KERNEL) and realtime hooks (scope
+# PR_SCOPE_REALTIME) run on separate portable-core sessions, so both layers
+# record and replay in the same process: each replays its own logged values,
+# and a reset, divergence or overflow in one leaves the other intact.
+
+use std.spec.*
+use std.replay.bm_replay_core.{bm_ring_init, bm_ring_complete}
+use std.replay.portable_replay.{
+    PR_FAIL_CLOSED_VALUE, PR_SCOPE_REALTIME, PR_SCOPE_KERNEL, PR_KIND_RANDOM_READ,
+    portable_replay_reset, portable_replay_pending, portable_replay_divergence_count,
+    portable_replay_event
+}
+use os.kernel.replay.mode.{KernelReplayMode, replay_set_mode}
+use os.kernel.replay.log_buffer.{replay_buffer_reset, replay_window_complete}
+use os.kernel.replay.divergence.{clear_divergences, get_divergence_count}
+use os.kernel.replay.hooks.{replay_hook_random_read, replay_hook_timer_read}
+use os.realtime.replay.mode.{rtos_replay_set_mode}
+use os.realtime.replay.hooks.{rr_hook_random, rr_divergence_count, rr_reset_divergences}
+
+val RT_OFF: i32 = 0
+val RT_RECORD: i32 = 1
+val RT_REPLAY: i32 = 2
+
+fn _reset_both():
+    portable_replay_reset()
+    replay_set_mode(KernelReplayMode.Off)
+    replay_buffer_reset()
+    clear_divergences()
+    rtos_replay_set_mode(RT_OFF)
+    bm_ring_init()
+    rr_reset_divergences()
+
+describe "kernel scope 2 and realtime scope 1 replay in one process":
+    it "interleaved records replay to each layer's own logged values":
+        _reset_both()
+        replay_set_mode(KernelReplayMode.Record)
+        rtos_replay_set_mode(RT_RECORD)
+        replay_hook_random_read(1, 11)
+        rr_hook_random(21)
+        replay_hook_timer_read(3, 12)
+        rr_hook_random(22)
+        expect(portable_replay_pending(PR_SCOPE_KERNEL)).to_equal(2)
+        expect(portable_replay_pending(PR_SCOPE_REALTIME)).to_equal(2)
+        replay_set_mode(KernelReplayMode.Replay)
+        rtos_replay_set_mode(RT_REPLAY)
+        expect(rr_hook_random(900)).to_equal(21)
+        expect(replay_hook_random_read(1, 901)).to_equal(11)
+        expect(rr_hook_random(902)).to_equal(22)
+        expect(replay_hook_timer_read(3, 903)).to_equal(12)
+        expect(get_divergence_count()).to_equal(0)
+        expect(rr_divergence_count()).to_equal(0)
+
+    it "a realtime divergence leaves the kernel replay and its count untouched":
+        _reset_both()
+        replay_set_mode(KernelReplayMode.Record)
+        rtos_replay_set_mode(RT_RECORD)
+        replay_hook_random_read(1, 11)
+        replay_set_mode(KernelReplayMode.Replay)
+        rtos_replay_set_mode(RT_REPLAY)
+        expect(rr_hook_random(5)).to_equal(PR_FAIL_CLOSED_VALUE)
+        expect(rr_divergence_count()).to_equal(1)
+        expect(portable_replay_divergence_count(PR_SCOPE_REALTIME)).to_equal(1)
+        expect(portable_replay_divergence_count(PR_SCOPE_KERNEL)).to_equal(0)
+        expect(replay_hook_random_read(1, 99)).to_equal(11)
+        expect(get_divergence_count()).to_equal(0)
+
+    it "a kernel log reset keeps the realtime session's log":
+        _reset_both()
+        replay_set_mode(KernelReplayMode.Record)
+        rtos_replay_set_mode(RT_RECORD)
+        replay_hook_random_read(1, 11)
+        rr_hook_random(21)
+        replay_buffer_reset()
+        expect(portable_replay_pending(PR_SCOPE_KERNEL)).to_equal(0)
+        expect(portable_replay_pending(PR_SCOPE_REALTIME)).to_equal(1)
+        rtos_replay_set_mode(RT_REPLAY)
+        expect(rr_hook_random(900)).to_equal(21)
+
+    it "a realtime core overflow is disclosed only on the realtime side":
+        _reset_both()
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_random_read(1, 11)
+        rtos_replay_set_mode(RT_RECORD)
+        rr_hook_random(0)
+        var i: i64 = 0
+        while i < 4096:
+            portable_replay_event(PR_KIND_RANDOM_READ, PR_SCOPE_REALTIME, i)
+            i = i + 1
+        expect(bm_ring_complete()).to_equal(false)
+        expect(replay_window_complete()).to_equal(true)

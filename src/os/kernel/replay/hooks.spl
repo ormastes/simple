@@ -20,12 +20,12 @@ use os.kernel.replay.divergence.{DivergenceKind, report_divergence}
 use os.kernel.errno.{EIO}
 use std.replay.portable_replay.{
     PR_MODE_RECORD, PR_MODE_REPLAY, PR_KIND_TIMER_READ, PR_KIND_RANDOM_READ,
-    PR_DIV_NONE, PR_DIV_LOG_EXHAUSTED,
+    PR_DIV_NONE, PR_DIV_LOG_EXHAUSTED, PR_SCOPE_KERNEL,
     portable_replay_set_mode, portable_replay_mode, portable_replay_open_scope,
     portable_replay_scope_is_open, portable_replay_event, portable_replay_last_divergence
 }
 
-val KERNEL_PR_SCOPE: i64 = 2
+val KERNEL_PR_SCOPE: i64 = PR_SCOPE_KERNEL
 # Keyed events fold their key into a layer-defined kind
 # (base + key * stride): the timer source, the syscall id, the IPC port. A
 # different key than the recorded one is then a kind mismatch. Every derived
@@ -47,9 +47,9 @@ fn replay_portable_sync():
     var want = PR_MODE_REPLAY
     if replay_is_recording():
         want = PR_MODE_RECORD
-    if portable_replay_mode() != want:
-        portable_replay_set_mode(want)
-    if not portable_replay_scope_is_open():
+    if portable_replay_mode(KERNEL_PR_SCOPE) != want:
+        portable_replay_set_mode(KERNEL_PR_SCOPE, want)
+    if not portable_replay_scope_is_open(KERNEL_PR_SCOPE):
         portable_replay_open_scope(KERNEL_PR_SCOPE)
 
 # Shared Replay/Verify tail of the value-returning hooks (timer, random,
@@ -61,7 +61,7 @@ fn replay_portable_sync():
 # carry event_id -1 and, on a core divergence, the PR_DIV_* reason as expected.
 @allow(primitive_api)  # kernel replay ABI: values and divergence codes are raw i64 log payloads
 fn replay_portable_resolve(kind: DivergenceKind, logged: i64, live: i64, actual: i64) -> i64:
-    val reason = portable_replay_last_divergence()
+    val reason = portable_replay_last_divergence(KERNEL_PR_SCOPE)
     if replay_is_verifying():
         if reason == PR_DIV_NONE:
             if logged != live:
@@ -80,7 +80,7 @@ fn replay_portable_resolve(kind: DivergenceKind, logged: i64, live: i64, actual:
 # from `live`, which it reports; it never accepts the live event on divergence.
 @allow(primitive_api)  # kernel replay ABI: values are raw i64 log payloads
 fn replay_portable_accept(kind: DivergenceKind, logged: i64, live: i64) -> bool:
-    val diverged = portable_replay_last_divergence() != PR_DIV_NONE
+    val diverged = portable_replay_last_divergence(KERNEL_PR_SCOPE) != PR_DIV_NONE
     val resolved = replay_portable_resolve(kind, logged, live, live)
     if replay_is_verifying():
         return true
@@ -186,7 +186,7 @@ fn replay_hook_syscall_exit(task_id: i64, syscall_id: i64, retval: i64) -> i64:
     val logged = portable_replay_event(kind, KERNEL_PR_SCOPE, retval)
     if replay_is_recording():
         return retval
-    val diverged = portable_replay_last_divergence() != PR_DIV_NONE
+    val diverged = portable_replay_last_divergence(KERNEL_PR_SCOPE) != PR_DIV_NONE
     val result = replay_portable_resolve(DivergenceKind.SyscallMismatch, logged, retval, syscall_id)
     if diverged and not replay_is_verifying():
         return KERNEL_SYSCALL_REPLAY_DIVERGED
