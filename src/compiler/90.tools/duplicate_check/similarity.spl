@@ -150,12 +150,12 @@ pub fn similar_pairs(engine: SimilarityEngine, features: [SimilarityFeatures], e
     score_candidates(engine, features, engine.candidates(features, excluded), threshold)
 
 pub fn empty_features() -> SimilarityFeatures:
-    SimilarityFeatures(key: "", sparse: FeatureVec(block_id: 0, features: {}, magnitude: 0.0), dense: [])
+    SimilarityFeatures(key: "", sparse: FeatureVec(block_id: 0, features: {}, tokens: [], magnitude: 0.0), dense: [])
 
 # ---------------------------------------------------------------- featurize
 
 fn featurize_exact_text(input: SimilarityInput) -> SimilarityFeatures:
-    SimilarityFeatures(key: input.text_val, sparse: FeatureVec(block_id: 0, features: {}, magnitude: 0.0), dense: [])
+    SimilarityFeatures(key: input.text_val, sparse: FeatureVec(block_id: 0, features: {}, tokens: [], magnitude: 0.0), dense: [])
 
 fn featurize_token_frequencies(input: SimilarityInput) -> SimilarityFeatures:
     var freq: {text: i64} = {}
@@ -168,7 +168,7 @@ fn featurize_doc_words(input: SimilarityInput) -> SimilarityFeatures:
     SimilarityFeatures(key: "", sparse: build_feature_vector(0, doc_word_frequencies(input.text_val)), dense: [])
 
 fn featurize_embedding(input: SimilarityInput) -> SimilarityFeatures:
-    SimilarityFeatures(key: input.text_val, sparse: FeatureVec(block_id: 0, features: {}, magnitude: 0.0), dense: input.embedding)
+    SimilarityFeatures(key: input.text_val, sparse: FeatureVec(block_id: 0, features: {}, tokens: [], magnitude: 0.0), dense: input.embedding)
 
 fn doc_word_frequencies(text_val: text) -> {text: i64}:
     """Lower-cased alphanumeric words of length >= 2."""
@@ -262,23 +262,39 @@ fn max_i64(a: i64, b: i64) -> i64:
 fn is_skipped(excluded: [bool], i: i64) -> bool:
     i < excluded.len() and excluded[i]
 
+struct KeyBuckets:
+    slot_of: {text: i64}
+    keys: [text]
+    members: [[i64]]
+
+fn key_buckets_new() -> KeyBuckets:
+    KeyBuckets(slot_of: {}, keys: [], members: [])
+
+fn key_buckets_add(buckets: KeyBuckets, key: text, index: i64):
+    # Push in place through the slot index. Reading a dict's array, pushing and
+    # writing it back copies the array per push (12 GB native cosine peak,
+    # doc/08_tracking/bug/2026-11-18_dupcheck_cosine_native_peak_12gb.md).
+    val slot = buckets.slot_of.get(key) ?? -1
+    if slot < 0:
+        buckets.slot_of[key] = buckets.members.len()
+        buckets.keys.push(key)
+        buckets.members.push([index])
+    else:
+        buckets.members[slot].push(index)
+
 fn exact_key_candidates(features: [SimilarityFeatures], excluded: [bool]) -> SimilarityCandidates:
     """Pairs that share an identical key (hash buckets, never all-pairs)."""
-    var buckets: {text: [i64]} = {}
+    var buckets = key_buckets_new()
     var i = 0
     while i < features.len():
         if not is_skipped(excluded, i):
-            val k = features[i].key
-            if buckets.has(k):
-                var members = buckets[k]
-                members.push(i)
-                buckets[k] = members
-            else:
-                buckets[k] = [i]
+            key_buckets_add(buckets, features[i].key, i)
         i = i + 1
     var pairs: [SimilarityPair] = []
-    for k in buckets.keys():
-        val members = buckets[k]
+    var slot = 0
+    while slot < buckets.members.len():
+        val members = buckets.members[slot]
+        slot = slot + 1
         var a = 0
         while a < members.len():
             var b = a + 1
@@ -291,27 +307,28 @@ fn exact_key_candidates(features: [SimilarityFeatures], excluded: [bool]) -> Sim
 fn signature_bucket_candidates(features: [SimilarityFeatures], excluded: [bool]) -> SimilarityCandidates:
     """Inverted index over each vector's top-N signature tokens; only pairs that
     share a bucket are candidates (near-linear instead of all-pairs)."""
-    var token_to_indices: {text: [i64]} = {}
+    var token_buckets = key_buckets_new()
     var gi = 0
     while gi < features.len():
         val fv = features[gi].sparse
         if fv.magnitude != 0.0 and not is_skipped(excluded, gi):
             for tok in feature_signature(fv, SIGNATURE_TOP_N).split(","):
                 if tok.len() > 0:
-                    if token_to_indices.has(tok):
-                        var indices = token_to_indices[tok]
-                        indices.push(gi)
-                        token_to_indices[tok] = indices
-                    else:
-                        token_to_indices[tok] = [gi]
+                    key_buckets_add(token_buckets, tok, gi)
         gi = gi + 1
 
     var pairs: [SimilarityPair] = []
     var skipped: [text] = []
     var dropped = 0
-    var seen_pairs: {text: bool} = {}
-    for tok in token_to_indices.keys():
-        val indices = token_to_indices[tok]
+    # Integer pair keys: a "{lo}-{hi}" text key per visited pair leaked a
+    # string per iteration under native codegen (most of the 12 GB peak).
+    val pair_stride = features.len() + 1
+    var seen_pairs: {i64: bool} = {}
+    var slot = 0
+    while slot < token_buckets.members.len():
+        val tok = token_buckets.keys[slot]
+        val indices = token_buckets.members[slot]
+        slot = slot + 1
         if indices.len() > MAX_BUCKET_SIZE:
             skipped.push("'{tok}' ({indices.len()} blocks, cap {MAX_BUCKET_SIZE})")
             dropped = dropped + indices.len()
@@ -324,7 +341,7 @@ fn signature_bucket_candidates(features: [SimilarityFeatures], excluded: [bool])
                 val j = indices[pj]
                 val lo = if i < j: i else: j
                 val hi = if i < j: j else: i
-                val pair_key = "{lo}-{hi}"
+                val pair_key = lo * pair_stride + hi
                 if not seen_pairs.has(pair_key):
                     seen_pairs[pair_key] = true
                     pairs.push(SimilarityPair(left: i, right: j))
