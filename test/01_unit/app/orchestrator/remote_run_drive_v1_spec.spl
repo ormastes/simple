@@ -28,7 +28,10 @@ use app.orchestrator.remote_run_v1.{RemoteRunFactsV1, RemoteRunLinkV1, RemoteRun
     remote_run_result_parts_v1, remote_run_resume_v1}
 use app.orchestrator.remote_run_author_v1.RemoteRunAuthoredV1
 use app.orchestrator.remote_run_command_v1.remote_run_command_v1
-use app.orchestrator.controller_authority_issue_v1.{ControllerIssuedAuthorityV1, controller_authority_issue_v1}
+use app.orchestrator.controller_authority_issue_v1.{ControllerIssuedAuthorityV1, controller_authority_issue_v1,
+    ControllerHostActionAuthorityV1, controller_host_action_issue_v1}
+use app.orchestrator.remote_run_abandon_v1.{RemoteRunAbandonFactsV1, remote_run_abandon_apply_v1}
+use app.orchestrator.remote_run_settle_v1.REMOTE_RUN_SETTLE_STATES_V1
 use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2, ExecutionEnvironmentV2}
 use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
 use std.common.contracts.distributed_control_codec_v2.distributed_environment_digest_v2
@@ -81,7 +84,8 @@ fn rr_file_v1(offset: i64) -> [u8]:
 fn rr_key_v1(identity: text, role: text, offset: i64) -> DistributedAuthorityKeyV2:
     DistributedAuthorityKeyV2(identity: identity, role: role, revision: 1,
         public_key: pure_ed25519_keypair_from_seed(rr_seed_v1(offset)).1, principal: "user_1", project: "project_1",
-        host_id: "worker_1", operations: ["build", "host_reservation_v1", "host_execute_associated_v3", "host_agent_cancel_v4"],
+        host_id: "worker_1", operations: ["build", "host_reservation_v1", "host_execute_associated_v3", "host_agent_cancel_v4",
+            "remote-run-abandon", "helper-abandon"],
         maximum_memory_bytes: 1073741824, maximum_duration_ms: 4000, policy_revision: 4, revocation_epoch: 2,
         expires_at: 100000000, revoked: false)
 
@@ -656,6 +660,78 @@ describe "remote-run resume (milestone_0045, owner decision 1)":
         expect(resume.contains("remote_run_collect_v1(authored, facts, link, None, admitted,")).to_equal(true)
         val collect = source.substring(source.index_of("fn remote_run_collect_v1("), source.index_of("fn remote_run_flow_v1("))
         expect(collect.index_of("if timed_out and issue.is_none():") < collect.index_of("remote_run_cancel_v1(")).to_equal(true)
+
+# milestone_0045: a controller-signed `remote-run-abandon` pair for the unproven row, issued at `now`.
+fn rs_abandon_pair_v1(payload_digest: text, kind: text, grant_id: text, now: i64) -> ControllerHostActionAuthorityV1:
+    controller_host_action_issue_v1(rr_context_v1(), rr_read_key_v1, "approver_1", kind, "operation_a", payload_digest,
+        "worker_1", grant_id, 60000, now).unwrap()
+
+fn rs_abandon_v1(log: RsLogV1, pair: ControllerHostActionAuthorityV1, now: i64) -> text:
+    val context = rr_context_v1()
+    val edited = remote_run_abandon_apply_v1(RemoteRunAbandonFactsV1(snapshot: context.policy.snapshot,
+        session_generation: context.policy.session_generation, controller_id: "controller_1"), pair.authority.signed,
+        pair.authority.approval, pair.operation, now, log.journal.unwrap())
+    log.journal = Some(edited.journal)
+    if edited.error != "": return "ERR:" + edited.error
+    edited.result
+
+describe "remote-run abandon (milestone_0045, owner decision 1)":
+    it "settles an unproven row failed only after its signed window ended, through a verified controller-signed edit":
+        # @req M0045-ABANDON-01
+        val log = rs_unproven_v1()
+        val envelope = distributed_operation_journal_lookup_v2(log.journal.unwrap(), "operation_a").unwrap().envelope_digest
+        step("while the run's own grant could still be resumed the abandon is refused and the row stays unproven")
+        expect(rs_abandon_v1(log, rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_1", 2000), 2000)).to_equal(
+            "ERR:remote-run-abandon-window-open")
+        expect(rs_row_state_v1(log)).to_equal("outcome-unknown")
+        step("at the window's end it journals `failed` bound to the abandon record's digest; a repeat answers the same")
+        val end = 1000 + RR_TTL
+        val pair = rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_2", end)
+        val first = rs_abandon_v1(log, pair, end)
+        expect(first.starts_with("failed:")).to_equal(true)
+        val row = distributed_operation_journal_lookup_v2(log.journal.unwrap(), "operation_a").unwrap()
+        expect(row.state).to_equal("failed")
+        expect("failed:" + row.outcome_digest).to_equal(first)
+        expect(rs_abandon_v1(log, pair, end + 1)).to_equal(first)
+        step("a retry with a FRESH pair (the reply was lost) answers the same abandon, never a refusal")
+        expect(rs_abandon_v1(log, rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_2b", end + 2), end + 2)).to_equal(first)
+        step("a row another path made terminal is refused; first terminal wins")
+        val other = rs_unproven_v1()
+        val live = distributed_operation_journal_lookup_v2(other.journal.unwrap(), "operation_a").unwrap()
+        other.journal = Some(distributed_operation_journal_commit_v2(other.journal.unwrap(),
+            distributed_operation_transition_v2(live, "failed", "e".repeat(64)).unwrap()).unwrap())
+        expect(rs_abandon_v1(other, rs_abandon_pair_v1(live.envelope_digest, "remote-run-abandon", "abandon_3", end), end)).to_equal(
+            "ERR:remote-run-abandon-row-state")
+        rs_cleanup_v1(other)
+        rs_cleanup_v1(log)
+
+    it "refuses a pair for another row, another kind, or one verified past its own approval":
+        # @req M0045-ABANDON-02
+        val log = rs_unproven_v1()
+        val envelope = distributed_operation_journal_lookup_v2(log.journal.unwrap(), "operation_a").unwrap().envelope_digest
+        val end = 1000 + RR_TTL
+        expect(rs_abandon_v1(log, rs_abandon_pair_v1("c".repeat(64), "remote-run-abandon", "abandon_4", end), end)).to_equal(
+            "ERR:remote-run-abandon-row-digest")
+        expect(rs_abandon_v1(log, rs_abandon_pair_v1(envelope, "helper-abandon", "abandon_5", end), end)).to_equal(
+            "ERR:remote-run-abandon-kind")
+        expect(rs_abandon_v1(log, rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_6", end), end + 60000).starts_with(
+            "ERR:")).to_equal(true)
+        expect(rs_row_state_v1(log)).to_equal("outcome-unknown")
+        rs_cleanup_v1(log)
+
+    it "never contacts the Host and never widens the settle states (source pins)":
+        # @req M0045-ABANDON-03
+        val source = file_read_text("src/app/orchestrator/remote_run_abandon_v1.spl")
+        for forbidden in ["controller_dispatch_remote_", "controller_dispatch_host_action_", "controller_dispatch_step_v3(",
+                "(link.", "remote_run_settle_apply_v1("]:
+            expect(source.contains(forbidden)).to_equal(false)
+        expect(source.contains("distributed_verify_grant_approval_from_snapshot_v2(")).to_equal(true)
+        expect(source.contains("if signed.issuer_id != facts.controller_id:")).to_equal(true)
+        expect(source.contains("val retained = root.retain_v3(edited.store)")).to_equal(true)
+        expect(REMOTE_RUN_SETTLE_STATES_V1).to_equal(["cancelled", "outcome-unknown"])
+        val command = file_read_text("src/app/orchestrator/remote_run_command_v1.spl")
+        expect(command.contains("if args.len() > 1 and args[1] == \"abandon\": return remote_run_abandon_command_v1(args)")).to_equal(true)
+        expect(remote_run_command_v1(["remote-run", "abandon"]).exit_code).to_equal(2)
 
 describe "remote-run edit result parts":
     it "splits the release-failed third part off one edit result and leaves every other result alone":
