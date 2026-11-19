@@ -46,7 +46,8 @@ use app.orchestrator.remote_run_frames_v1.{RemoteRunReplyV1, remote_run_reply_de
 use app.orchestrator.controller_authority_issue_v1.ControllerIssuedAuthorityV1
 use app.orchestrator.remote_run_settle_v1.{REMOTE_RUN_SETTLE_STATES_V1, remote_run_settle_apply_v1, remote_run_unbundled_reason_v1,
     remote_run_settle_before_execute_apply_v1}
-use app.orchestrator.remote_build_service_port_v3.{RemoteBuildOpenRecordV3, remote_build_open_record_encode_v3}
+use app.orchestrator.remote_build_service_port_v3.{RemoteBuildOpenRecordV3, remote_build_open_record_encode_v3,
+    remote_build_open_record_decode_v3}
 use app.buildrunner.remote_context_v1.{RemoteAuthorityContextV1, remote_context_from_snapshot_v1}
 use app.buildrunner.remote_session_v1.remote_database_session_open_v1
 use app.buildrunner.remote_container_session_v3.{RemoteContainerDatabaseSessionV3, remote_container_session_v3}
@@ -59,13 +60,16 @@ use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostAgentCancel
     host_agent_cancel_request_encode_v4}
 use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{DistributedAuthoritySnapshotV2,
     distributed_verify_grant_approval_from_snapshot_v2}
-use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_lookup_v2}
-use std.nogc_sync_mut.orchestration.workload_store_v1.ControllerJournalEditV1
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_lookup_v2,
+    distributed_operation_journal_read_v3}
+use std.nogc_sync_mut.orchestration.workload_store_v1.{ControllerJournalEditV1, controller_workload_store_remote_open_key_v1}
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.controller_dispatch_remote_execute_key_v3
+use std.common.contracts.container.build_workspace_manifest_v1.build_workspace_invocation_decode_v1
 use std.common.contracts.container.runtime_v1.RuntimeExitStatusV1
 use std.common.task_runner.journal.task_runner_journal_release_v1
 use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2}
 use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
-use std.common.contracts.distributed_control_codec_v2.distributed_environment_digest_v2
+use std.common.contracts.distributed_control_codec_v2.{distributed_environment_digest_v2, distributed_encode_operation_v2}
 use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerExecutionRequestV2, container_execution_plan_digest_v2,
     container_scope_fence_id_v2}
 use std.common.contracts.container.execution_draft_v3.container_execution_draft_bind_v3
@@ -76,7 +80,7 @@ use std.common.contracts.orchestration.host_prepare_associated_v3.{HostPrepareAs
 use std.common.contracts.orchestration.host_execution_association_v3.{HostPreparedAssociatedReplyV3, host_prepared_associated_reply_decode_v3,
     host_execution_association_digest_v3}
 use std.common.contracts.orchestration.host_execute_associated_v3.{HostExecuteAssociatedRequestV3,
-    host_execute_associated_operation_v3, host_execute_associated_encode_v3}
+    host_execute_associated_operation_v3, host_execute_associated_encode_v3, host_execute_associated_decode_v3}
 use std.common.contracts.orchestration.host_controller_status_v3.host_controller_status_decode_v3
 use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
 
@@ -107,7 +111,8 @@ pub struct RemoteRunFactsV1:
 pub struct RemoteRunLinkV1:
     begin: fn() -> Result<text, text>
     send: fn(text, text) -> Result<text, text>
-    admit: fn(DistributedSignedGrantV2, DistributedSignedApprovalV2, OperationEnvelopeV2) -> Result<bool, text>
+    # Admits the build row and archives the run's open record create-only in the same turn (milestone_0045 resume source).
+    admit: fn(DistributedSignedGrantV2, DistributedSignedApprovalV2, OperationEnvelopeV2, text) -> Result<bool, text>
     edit: fn(fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>
     # The post-failure settle edit: reaches the root's single writer on a ready, failed or timed-out owner.
     settle: fn(fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>
@@ -306,8 +311,10 @@ struct RemoteRunAdmittedV1:
     association_digest: text
     execution: ContainerExecutionRequestV2
 
+# `issue` is None for `remote-run resume` (milestone_0045): a resume never makes a new Host effect, so its bounded wait ends
+# without the controller-signed cancel.
 fn remote_run_collect_v1(authored: RemoteRunAuthoredV1, facts: RemoteRunFactsV1, link: RemoteRunLinkV1,
-        issue: RemoteRunIssuerV1, admitted: RemoteRunAdmittedV1,
+        issue: Option<RemoteRunIssuerV1>, admitted: RemoteRunAdmittedV1,
         first: RemoteRunReplyV1) -> Result<RemoteRunOutcomeV1, text>:
     val operation_id = authored.policy.operation_id
     var reply = first
@@ -338,8 +345,11 @@ fn remote_run_collect_v1(authored: RemoteRunAuthoredV1, facts: RemoteRunFactsV1,
             else:
                 return Err(collected.unwrap_err())
     if phase == "invalid": return Err("remote-run-reply-stage")
+    if timed_out and issue.is_none():
+        val settled = remote_run_settle_v1(link, admitted.build_request, "outcome-unknown", "resume-wait-bounded")
+        return Ok(remote_run_outcome_v1(2, "resume-wait-bounded", operation_id, "", "", settled))
     if timed_out:
-        val cancelled = remote_run_cancel_v1(authored, facts, link, issue, admitted.grant, admitted.execute_operation,
+        val cancelled = remote_run_cancel_v1(authored, facts, link, issue.unwrap(), admitted.grant, admitted.execute_operation,
             admitted.association_digest)
         # The cancel frame only REQUESTS a cancel: the Host's outcome stays unproven, so the row is outcome-unknown.
         val settled = remote_run_settle_v1(link, admitted.build_request, "outcome-unknown",
@@ -422,7 +432,7 @@ fn remote_run_flow_v1(authored: RemoteRunAuthoredV1, facts: RemoteRunFactsV1, li
             approval: reservation_pair.approval), draft: authored.draft, service_scope: scope))?
     # The controller's build row is admitted (verified pair, single journal writer) BEFORE any Host request (milestone_0043
     # P2-4): a refused admit leaves no Host reservation behind. From here every failure settles the row.
-    val _admitted = (link.admit)(build_pair.signed, build_pair.approval, build_request)?
+    val _admitted = (link.admit)(build_pair.signed, build_pair.approval, build_request, open_record)?
     val ready = remote_run_before_execute_v1(authored, facts, link, issue, grant, scope, environment_digest, prepare_wire)
     if ready.is_err():
         # Nothing was executed by THIS run; the settle closure decides from the controller's own execute archive.
@@ -481,7 +491,7 @@ fn remote_run_after_execute_v1(authored: RemoteRunAuthoredV1, facts: RemoteRunFa
     val admitted = RemoteRunAdmittedV1(grant: grant, scope: scope, build_pair: build_pair, build_request: build_request,
         execute_operation: ready.execute_operation, association_digest: ready.association_digest,
         execution: ready.prepared.association.execution)
-    remote_run_collect_v1(authored, facts, link, issue, admitted, started)
+    remote_run_collect_v1(authored, facts, link, Some(issue), admitted, started)
 
 pub fn remote_run_drive_v1(authored: RemoteRunAuthoredV1, facts: RemoteRunFactsV1, link: RemoteRunLinkV1,
         issue: RemoteRunIssuerV1) -> RemoteRunOutcomeV1:
@@ -489,5 +499,70 @@ pub fn remote_run_drive_v1(authored: RemoteRunAuthoredV1, facts: RemoteRunFactsV
     if flow.is_err(): return remote_run_outcome_v1(1, "refused", authored.policy.operation_id, "", flow.unwrap_err())
     flow.unwrap()
 
+# milestone_0045 (owner decision 1): `remote-run resume` of a run whose outcome is unknown (the command died, the wait
+# ran out, a reaped refusal). It makes NO new Host effect: begin (status), then only collect/output frames and the
+# idempotent accept (a bundle or a Host-signed reset-failure receipt) on the root's single writer, under the SAME signed
+# pair, read back from the controller's own create-only archives: the open record (archived in the admit turn) and the
+# execute (archived before it was sent). The operator spec is re-authored with the ARCHIVED not_after and must reproduce the
+# archived record byte for byte; nothing signed is ever re-authored. Refused once the signed window ended (the row then
+# needs the controller-signed abandon). A refusal before the collect leaves the row as it is.
+fn remote_run_archive_read_apply_v1(key: text, journal: DistributedOperationJournalV2) -> ControllerJournalEditV1:
+    val read = distributed_operation_journal_read_v3(journal, key, 2097152)
+    if read.is_err(): return ControllerJournalEditV1(journal: journal, result: "", error: read.unwrap_err())
+    if read.unwrap().is_none(): return ControllerJournalEditV1(journal: journal, result: "", error: "remote-run-resume-unarchived")
+    ControllerJournalEditV1(journal: journal, result: read.unwrap().unwrap(), error: "")
+
+# The open record, read in the single writer's turn together with the row it belongs to: only a live row (executing or
+# outcome-unknown) whose envelope is the archived request may be resumed; anything else sends no frame.
+fn remote_run_resume_open_apply_v1(operation_id: text, journal: DistributedOperationJournalV2) -> ControllerJournalEditV1:
+    val read = remote_run_archive_read_apply_v1(controller_workload_store_remote_open_key_v1(operation_id), journal)
+    if read.error != "": return read
+    val record = remote_build_open_record_decode_v3(read.result)
+    val row = distributed_operation_journal_lookup_v2(journal, operation_id)
+    if record.is_err() or row.is_err(): return ControllerJournalEditV1(journal: journal, result: "", error: "remote-run-resume-row")
+    val envelope = distributed_encode_operation_v2(record.unwrap().request)
+    if (envelope.is_err() or row.unwrap().envelope != envelope.unwrap() or
+            (row.unwrap().state != "executing" and row.unwrap().state != "outcome-unknown")):
+        return ControllerJournalEditV1(journal: journal, result: "", error: "remote-run-resume-row")
+    read
+
+fn remote_run_resume_flow_v1(operation_id: text, author: fn(i64) -> Result<RemoteRunAuthoredV1, text>, facts: RemoteRunFactsV1,
+        link: RemoteRunLinkV1) -> Result<RemoteRunOutcomeV1, text>:
+    val status = host_controller_status_decode_v3((link.begin)()?)?
+    val open_text = (link.edit)(\journal: remote_run_resume_open_apply_v1(operation_id, journal))?
+    val record = remote_build_open_record_decode_v3(open_text)?
+    if record.request.id != operation_id or record.policy.operation_id != operation_id: return Err("remote-run-resume-operation")
+    val invocation = build_workspace_invocation_decode_v1(record.invocation)?
+    val authored = author(invocation.not_after)?
+    val again = remote_build_open_record_encode_v3(RemoteBuildOpenRecordV3(task: authored.task, policy: authored.policy,
+        signed: record.signed, approval: record.approval, request: record.request, environment: authored.environment_text,
+        invocation: authored.invocation_bytes))?
+    if again != open_text or authored.task_digest != record.request.payload_digest: return Err("remote-run-resume-spec-differs")
+    var end = record.approval.expires_at
+    if record.signed.grant.expires_at < end: end = record.signed.grant.expires_at
+    if (link.clock)()? >= end: return Err("remote-run-resume-window-ended")
+    val execute = host_execute_associated_decode_v3((link.edit)(\journal: remote_run_archive_read_apply_v1(
+        controller_dispatch_remote_execute_key_v3(operation_id), journal))?)?
+    val association = execute.association
+    if execute.operation.id != operation_id or association.remote_build_task_digest != authored.task_digest:
+        return Err("remote-run-resume-execute-differs")
+    # The association is checked against ITS OWN service scope (the draft binding and the native plan rules): a restarted
+    # Host has a new incarnation, so only the physical host is compared with the live status. The accept itself is bound
+    # by the Host's signature and the archived pair, never by this scope.
+    val _bound = remote_run_association_check_v1(authored.draft, association, association.service_scope)?
+    if status.scope.physical_host_id != association.service_scope.physical_host_id: return Err("remote-run-host-mismatch")
+    val admitted = RemoteRunAdmittedV1(grant: record.signed.grant, scope: association.service_scope,
+        build_pair: ControllerIssuedAuthorityV1(signed: record.signed, approval: record.approval), build_request: record.request,
+        execute_operation: execute.operation, association_digest: host_execution_association_digest_v3(association)?,
+        execution: association.execution)
+    remote_run_collect_v1(authored, facts, link, None, admitted, RemoteRunReplyV1(operation_id: operation_id, stage: "",
+        inputs: 0, received: 0, outcome: "", bundle_digest: "", cancel_cause: ""))
+
+pub fn remote_run_resume_v1(operation_id: text, author: fn(i64) -> Result<RemoteRunAuthoredV1, text>, facts: RemoteRunFactsV1,
+        link: RemoteRunLinkV1) -> RemoteRunOutcomeV1:
+    val flow = remote_run_resume_flow_v1(operation_id, author, facts, link)
+    if flow.is_err(): return remote_run_outcome_v1(1, "refused", operation_id, "", flow.unwrap_err())
+    flow.unwrap()
+
 export RemoteRunFactsV1, RemoteRunLinkV1, RemoteRunIssuerV1, RemoteRunOutcomeV1
-export remote_run_grant_v1, remote_run_intent_v1, remote_run_drive_v1, remote_run_result_parts_v1
+export remote_run_grant_v1, remote_run_intent_v1, remote_run_drive_v1, remote_run_resume_v1, remote_run_result_parts_v1

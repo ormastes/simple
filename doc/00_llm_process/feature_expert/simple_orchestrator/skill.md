@@ -635,5 +635,14 @@ binding / Host bug). Specs: `remote_container_reset_failure_stages_v3_spec.spl`,
   answer) -> otherwise the typed refusal, settled `outcome-unknown` by the controller.
 - Prepared reservation between prepare and execute (decision 3): no route; it waits for its `prepare_deadline_ms`.
   No controller cancel of a never-opened slot (decision 6 not chosen).
+- `remote-run resume --dispatch-root R --config-digest D --spec DIR --out OUT` (decision 1, while the signed window
+  is open): no new Host effect. Sequence: begin (status) -> read the controller's create-only open record
+  (`controller-remote-open-v3/<sha(op)>.sdn`, archived INSIDE the admit turn by
+  `controller_workload_store_admit_remote_build_v1(..., open_record, now)`) and execute archive -> collect/output frames
+  only -> the same accept / reset-receipt edits. The spec dir is re-authored with the ARCHIVED `not_after` and must
+  reproduce the archived record byte for byte (`remote-run-resume-spec-differs`); the pair/request are never re-authored.
+  Refused at/after `min(approval, grant)` expiry (`remote-run-resume-window-ended`); its bounded wait sends no cancel and
+  settles `outcome-unknown` (`resume-wait-bounded`). Runs admitted before this change have no open archive
+  (`remote-run-resume-unarchived`).
 - VERSION SKEW: a controller older than milestone_0045 refuses a Host-signed `service-restart` and a late receipt and
   settles `outcome-unknown`; upgrade the controller first (same rule as #10398/#10399).

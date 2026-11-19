@@ -2,10 +2,11 @@
 # loads the spec directory (formats: remote_run_author_v1.spl header), opens the controller local root through the
 # pinned config digest, builds the production LINK over ONE retained dispatch reader (controller_dispatch_remote_*) and
 # the ISSUER over the protected key store, and hands both to the pure driver (remote_run_v1.spl). It prints digests only.
-use app.orchestrator.remote_run_v1.{RemoteRunFactsV1, RemoteRunLinkV1, RemoteRunIssuerV1, RemoteRunOutcomeV1, remote_run_drive_v1}
+use app.orchestrator.remote_run_v1.{RemoteRunFactsV1, RemoteRunLinkV1, RemoteRunIssuerV1, RemoteRunOutcomeV1, remote_run_drive_v1,
+    remote_run_resume_v1}
 use app.orchestrator.remote_run_frames_v1.remote_run_refused_reply_v1
-use app.orchestrator.remote_run_author_v1.{remote_run_spec_decode_v1, remote_run_host_inputs_decode_v1,
-    remote_run_author_v1}
+use app.orchestrator.remote_run_author_v1.{RemoteRunSpecV1, RemoteRunHostInputsV1, RemoteRunAuthoredV1,
+    remote_run_spec_decode_v1, remote_run_host_inputs_decode_v1, remote_run_author_v1}
 use app.orchestrator.controller_authority_issue_v1.{ControllerIssuedAuthorityV1, controller_authority_issue_v1,
     controller_authority_store_reader_v1}
 use app.orchestrator.validation.OrchestratorValidationReplyV1
@@ -23,7 +24,8 @@ use std.common.task_runner.distributed_operation_journal_v2.DistributedOperation
 use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2, ExecutionEnvironmentV2}
 use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
 use std.common.build_manager.codec.builder_decode_task_v1
-use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1, builder_relative_path_valid_v1}
+use std.common.build_manager.contracts.{BuildTaskV1, builder_identifier_valid_v1, builder_digest_valid_v1,
+    builder_relative_path_valid_v1}
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
 use std.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms}
@@ -115,9 +117,10 @@ fn remote_run_link_send_v1(box: RemoteRunBoxV1, action: text, payload: text) -> 
     remote_run_wait_v1(box, controller_dispatch_remote_send_v3(box.owner.unwrap(), action, payload))
 
 fn remote_run_link_admit_v1(box: RemoteRunBoxV1, signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2,
-        request: OperationEnvelopeV2) -> Result<bool, text>:
+        request: OperationEnvelopeV2, open_record: text) -> Result<bool, text>:
     if box.owner.is_none(): return Err("remote-run-link-closed")
-    val _done = remote_run_wait_v1(box, controller_dispatch_remote_admit_v3(box.owner.unwrap(), signed, approval, request))?
+    val _done = remote_run_wait_v1(box, controller_dispatch_remote_admit_v3(box.owner.unwrap(), signed, approval, request,
+        open_record))?
     Ok(true)
 
 # The edit turn always ends ready with the closure's verdict in the response (controller_dispatch_remote_edit_v3): a
@@ -177,52 +180,38 @@ fn remote_run_refusal_root_v1(code: text, root: ControllerLocalRootV3) -> Orches
     reply.controller_root_cleanup = Some(root)
     reply
 
-pub fn remote_run_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
-    val parsed = remote_run_options_v1(args)
-    if parsed.is_err(): return remote_run_refusal_v1(2, parsed.unwrap_err())
-    val options = parsed.unwrap()
-    val ttl = remote_run_millis_v1(options["--expires-in-ms"])
-    if ttl.is_err(): return remote_run_refusal_v1(2, ttl.unwrap_err())
-    val spec_dir = options["--spec"]
+# The operator spec directory, read and decoded (formats: remote_run_author_v1.spl header).
+struct RemoteRunSpecFilesV1:
+    spec: RemoteRunSpecV1
+    host_inputs: RemoteRunHostInputsV1
+    task: BuildTaskV1
+    environment_text: text
+    files: Dict<text, [u8]>
+
+fn remote_run_spec_load_v1(spec_dir: text) -> Result<RemoteRunSpecFilesV1, text>:
     val task_text = remote_run_text_file_v1(spec_dir + "/task.sdn", 1048576)
     val environment_text = remote_run_text_file_v1(spec_dir + "/environment.sdn", 16384)
     val run_text = remote_run_text_file_v1(spec_dir + "/run.sdn", 65536)
     val inputs_text = remote_run_text_file_v1(spec_dir + "/host-inputs.sdn", 65536)
     if task_text.is_err() or environment_text.is_err() or run_text.is_err() or inputs_text.is_err():
-        return remote_run_refusal_v1(1, "remote-run-spec-unreadable")
+        return Err("remote-run-spec-unreadable")
     val task = builder_decode_task_v1(task_text.unwrap())
-    val spec = remote_run_spec_decode_v1(run_text.unwrap())
-    val host_inputs = remote_run_host_inputs_decode_v1(inputs_text.unwrap())
-    if task.is_err(): return remote_run_refusal_v1(1, "remote-run-task-invalid")
-    if spec.is_err(): return remote_run_refusal_v1(1, spec.unwrap_err())
-    if host_inputs.is_err(): return remote_run_refusal_v1(1, host_inputs.unwrap_err())
+    if task.is_err(): return Err("remote-run-task-invalid")
+    val spec = remote_run_spec_decode_v1(run_text.unwrap())?
+    val host_inputs = remote_run_host_inputs_decode_v1(inputs_text.unwrap())?
     var paths: [text] = [task.unwrap().program]
     for input in task.unwrap().inputs: paths.push(input.path)
-    val files = remote_run_input_files_v1(spec_dir, paths)
-    if files.is_err(): return remote_run_refusal_v1(1, files.unwrap_err())
-    val opened = controller_local_root_open_v3(options["--dispatch-root"], options["--config-digest"])
-    if not opened.ready or opened.owner.is_none() or opened.error != "":
-        return remote_run_refusal_v1(1, if opened.error != "": opened.error else: "remote-run-root-unavailable")
-    val root = opened.owner.unwrap()
-    val current = root.current_v3()
-    if current.is_err(): return remote_run_refusal_root_v1(current.unwrap_err(), root)
-    val context = current.unwrap()
-    # Fixed bound: the Host reads `not_after` as a grant-clock (wall) deadline.
-    val now = controller_dispatch_grant_clock_v1()
-    if now.is_err(): return remote_run_refusal_root_v1(now.unwrap_err(), root)
-    val authored = remote_run_author_v1(spec.unwrap(), host_inputs.unwrap(), task.unwrap(), environment_text.unwrap(),
-        files.unwrap(), context.config.controller_id, context.config.controller_epoch, now.unwrap() + ttl.unwrap())
-    if authored.is_err(): return remote_run_refusal_root_v1(authored.unwrap_err(), root)
-    val box = RemoteRunBoxV1()
-    val operation_id = spec.unwrap().operation_id
-    val key_store = options["--key-store"]
-    val approver = options["--approver"]
-    val requested = authored.unwrap().environment
-    val link = RemoteRunLinkV1(
+    val files = remote_run_input_files_v1(spec_dir, paths)?
+    Ok(RemoteRunSpecFilesV1(spec: spec, host_inputs: host_inputs, task: task.unwrap(), environment_text: environment_text.unwrap(),
+        files: files))
+
+fn remote_run_link_v1(box: RemoteRunBoxV1, root: ControllerLocalRootV3, operation_id: text) -> RemoteRunLinkV1:
+    RemoteRunLinkV1(
         begin: fn() -> Result<text, text>: remote_run_wait_v1(box, controller_dispatch_remote_begin_v3(root, operation_id)),
         send: fn(action: text, payload: text) -> Result<text, text>: remote_run_link_send_v1(box, action, payload),
-        admit: fn(signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2) -> Result<bool, text>:
-            remote_run_link_admit_v1(box, signed, approval, request),
+        admit: fn(signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2,
+                open_record: text) -> Result<bool, text>:
+            remote_run_link_admit_v1(box, signed, approval, request, open_record),
         edit: fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
             remote_run_link_edit_v1(box, edit),
         settle: fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
@@ -230,13 +219,9 @@ pub fn remote_run_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
         clock: fn() -> Result<i64, text>: controller_dispatch_grant_clock_v1(),
         monotonic_ms: fn() -> i64: sosix_time_now_monotonic_ms(),
         pause: fn(ms: i64) -> bool: remote_run_sleep_v1(ms))
-    val issuer = RemoteRunIssuerV1(issue: fn(grant: ExecutionGrantV2, request: OperationEnvelopeV2) -> Result<ControllerIssuedAuthorityV1, text>:
-        remote_run_issue_v1(context, key_store, approver, requested, grant, request))
-    val facts = RemoteRunFactsV1(snapshot: context.policy.snapshot, session_generation: context.policy.session_generation,
-        controller_epoch: context.config.controller_epoch, controller_id: context.config.controller_id,
-        grant_id: options["--grant-id"], ttl_ms: ttl.unwrap(), state_root: options["--out"])
-    val outcome = remote_run_drive_v1(authored.unwrap(), facts, link, issuer)
-    # Local cleanup only: closing never sends another Host request and never re-executes.
+
+# Local cleanup only: closing never sends another Host request and never re-executes.
+fn remote_run_finish_v1(box: RemoteRunBoxV1, outcome: RemoteRunOutcomeV1) -> OrchestratorValidationReplyV1:
     var cleanup_pending = false
     var close_steps = 0
     while box.owner.is_some() and close_steps < 64:
@@ -249,5 +234,76 @@ pub fn remote_run_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
     reply.controller_dispatch_cleanup = box.owner
     reply.controller_root_cleanup = box.root_cleanup
     reply
+
+fn remote_run_facts_v1(context: ControllerDispatchContextV1, grant_id: text, ttl: i64, state_root: text) -> RemoteRunFactsV1:
+    RemoteRunFactsV1(snapshot: context.policy.snapshot, session_generation: context.policy.session_generation,
+        controller_epoch: context.config.controller_epoch, controller_id: context.config.controller_id,
+        grant_id: grant_id, ttl_ms: ttl, state_root: state_root)
+
+# milestone_0045 (owner decision 1): `remote-run resume --dispatch-root R --config-digest D --spec DIR --out OUT`. No
+# key store, approver or grant: a resume issues nothing and sends only collect/output frames (remote_run_resume_v1).
+val REMOTE_RUN_RESUME_OPTIONS_V1 = ["--dispatch-root", "--config-digest", "--spec", "--out"]
+
+fn remote_run_resume_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
+    if args.len() != 2 + 2 * REMOTE_RUN_RESUME_OPTIONS_V1.len(): return remote_run_refusal_v1(2, "remote-run-usage")
+    var options: Dict<text, text> = {}
+    var index = 2
+    while index + 1 < args.len():
+        val name = args[index]
+        if not REMOTE_RUN_RESUME_OPTIONS_V1.contains(name) or options.contains_key(name) or args[index + 1].starts_with("--"):
+            return remote_run_refusal_v1(2, "remote-run-usage")
+        options[name] = args[index + 1]
+        index = index + 2
+    if not builder_digest_valid_v1(options["--config-digest"]): return remote_run_refusal_v1(2, "remote-run-usage")
+    val loaded = remote_run_spec_load_v1(options["--spec"])
+    if loaded.is_err(): return remote_run_refusal_v1(1, loaded.unwrap_err())
+    val opened = controller_local_root_open_v3(options["--dispatch-root"], options["--config-digest"])
+    if not opened.ready or opened.owner.is_none() or opened.error != "":
+        return remote_run_refusal_v1(1, if opened.error != "": opened.error else: "remote-run-root-unavailable")
+    val root = opened.owner.unwrap()
+    val current = root.current_v3()
+    if current.is_err(): return remote_run_refusal_root_v1(current.unwrap_err(), root)
+    val context = current.unwrap()
+    val box = RemoteRunBoxV1()
+    val files = loaded.unwrap()
+    val operation_id = files.spec.operation_id
+    val outcome = remote_run_resume_v1(operation_id, fn(not_after: i64) -> Result<RemoteRunAuthoredV1, text>:
+            remote_run_author_v1(files.spec, files.host_inputs, files.task, files.environment_text, files.files,
+                context.config.controller_id, context.config.controller_epoch, not_after),
+        remote_run_facts_v1(context, "", 0, options["--out"]), remote_run_link_v1(box, root, operation_id))
+    remote_run_finish_v1(box, outcome)
+
+pub fn remote_run_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
+    if args.len() > 1 and args[1] == "resume": return remote_run_resume_command_v1(args)
+    val parsed = remote_run_options_v1(args)
+    if parsed.is_err(): return remote_run_refusal_v1(2, parsed.unwrap_err())
+    val options = parsed.unwrap()
+    val ttl = remote_run_millis_v1(options["--expires-in-ms"])
+    if ttl.is_err(): return remote_run_refusal_v1(2, ttl.unwrap_err())
+    val loaded = remote_run_spec_load_v1(options["--spec"])
+    if loaded.is_err(): return remote_run_refusal_v1(1, loaded.unwrap_err())
+    val files = loaded.unwrap()
+    val opened = controller_local_root_open_v3(options["--dispatch-root"], options["--config-digest"])
+    if not opened.ready or opened.owner.is_none() or opened.error != "":
+        return remote_run_refusal_v1(1, if opened.error != "": opened.error else: "remote-run-root-unavailable")
+    val root = opened.owner.unwrap()
+    val current = root.current_v3()
+    if current.is_err(): return remote_run_refusal_root_v1(current.unwrap_err(), root)
+    val context = current.unwrap()
+    # Fixed bound: the Host reads `not_after` as a grant-clock (wall) deadline.
+    val now = controller_dispatch_grant_clock_v1()
+    if now.is_err(): return remote_run_refusal_root_v1(now.unwrap_err(), root)
+    val authored = remote_run_author_v1(files.spec, files.host_inputs, files.task, files.environment_text,
+        files.files, context.config.controller_id, context.config.controller_epoch, now.unwrap() + ttl.unwrap())
+    if authored.is_err(): return remote_run_refusal_root_v1(authored.unwrap_err(), root)
+    val box = RemoteRunBoxV1()
+    val key_store = options["--key-store"]
+    val approver = options["--approver"]
+    val requested = authored.unwrap().environment
+    val issuer = RemoteRunIssuerV1(issue: fn(grant: ExecutionGrantV2, request: OperationEnvelopeV2) -> Result<ControllerIssuedAuthorityV1, text>:
+        remote_run_issue_v1(context, key_store, approver, requested, grant, request))
+    val outcome = remote_run_drive_v1(authored.unwrap(), remote_run_facts_v1(context, options["--grant-id"], ttl.unwrap(),
+        options["--out"]), remote_run_link_v1(box, root, files.spec.operation_id), issuer)
+    remote_run_finish_v1(box, outcome)
 
 export remote_run_options_v1, remote_run_command_v1
