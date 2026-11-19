@@ -142,6 +142,37 @@ pub fn driver_mir_excluded_owner_v1(row_path: text, logical: text) -> text:
         return logical
     row_path
 
+# go-to-end: inventory rows that alias a failed module. Exclusion is keyed by
+# logical name, but one physical file can be reached under several names
+# (`lib.X` and `std.X`, `pkg` and `pkg.__init__`). HIR poisons one spelling;
+# an alias left un-excluded has no HIR, and MIR setup then stopped the whole
+# phase with "MIR physical ownership missing HIR for <alias>". Returns, in row
+# order and once each, every row name whose physical key equals the key of a
+# `failed` row and that is not itself in `failed`. Rows with an empty key never
+# match. `row_names[i]` is held at `row_keys[i]` (already normalised).
+pub fn driver_go_to_end_alias_rows_v1(row_names: [text], row_keys: [text],
+        failed: [text]) -> [text]:
+    var failed_names: Dict<text, bool> = {}
+    for name in failed:
+        failed_names[name] = true
+    var failed_keys: Dict<text, bool> = {}
+    var row = 0
+    while row < row_names.len() and row < row_keys.len():
+        if row_keys[row] != "" and failed_names.contains_key(row_names[row]):
+            failed_keys[row_keys[row]] = true
+        row = row + 1
+    var seen: Dict<text, bool> = {}
+    var aliases: [text] = []
+    row = 0
+    while row < row_names.len() and row < row_keys.len():
+        val name = row_names[row]
+        if row_keys[row] != "" and failed_keys.contains_key(row_keys[row]) and
+                not failed_names.contains_key(name) and not seen.contains_key(name):
+            seen[name] = true
+            aliases = aliases.push(name)
+        row = row + 1
+    aliases
+
 # Placeholders are sound only because the unit's SIMPLE_MIR_SHARD_ONLY_PATHS
 # skip never lowers them, and that skip runs only with an active MIR shard
 # queue. Without one the gates keep their whole-inventory demand.

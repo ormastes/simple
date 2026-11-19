@@ -1,7 +1,7 @@
 use std.spec.*
 use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1, driver_mir_feed_is_identity_v1,
     driver_mir_owner_disposition_v1, driver_mir_schedule_name_v1, driver_mir_placeholder_owner_v1,
-    driver_mir_unit_scoped_v1, driver_mir_excluded_owner_v1}
+    driver_mir_unit_scoped_v1, driver_mir_excluded_owner_v1, driver_go_to_end_alias_rows_v1}
 
 val MIR_ALIAS_DIGEST = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 val MIR_OTHER_DIGEST = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -187,3 +187,40 @@ describe "go-to-end excluded alias rows share one physical owner":
 
     it "keeps the logical name when the row has no admitted path":
         expect(driver_mir_excluded_owner_v1("", "app.io")).to_equal("app.io")
+
+describe "go-to-end HIR failure excludes every alias row of the failed file":
+    # `lib.X` failed at HIR; `std.X` names the same file. Left un-excluded it
+    # had no HIR and MIR setup stopped with "missing HIR for std.X".
+    it "returns the std alias of a failed lib row":
+        val aliases = driver_go_to_end_alias_rows_v1(
+            ["lib.nogc_sync_mut.sffi.dynamic_versioned", "std.nogc_sync_mut.sffi.dynamic_versioned", "app.main"],
+            ["src/lib/nogc_sync_mut/sffi/dynamic_versioned.spl", "src/lib/nogc_sync_mut/sffi/dynamic_versioned.spl", "src/app/main.spl"],
+            ["lib.nogc_sync_mut.sffi.dynamic_versioned"])
+        expect(aliases.len()).to_equal(1)
+        expect(aliases[0]).to_equal("std.nogc_sync_mut.sffi.dynamic_versioned")
+
+    it "returns the package row of a failed __init__ row":
+        val path = "src/app/p4probe/__init__.spl"
+        val aliases = driver_go_to_end_alias_rows_v1(
+            ["app.p4probe.__init__", "app.p4probe", "app.p4probe.good"],
+            [path, path, "src/app/p4probe/good.spl"], ["app.p4probe.__init__"])
+        expect(aliases.len()).to_equal(1)
+        expect(aliases[0]).to_equal("app.p4probe")
+
+    it "reports an alias once even when it appears in two inventories":
+        val path = "src/app/p4probe/__init__.spl"
+        val aliases = driver_go_to_end_alias_rows_v1(
+            ["app.p4probe.__init__", "app.p4probe", "app.p4probe.__init__", "app.p4probe"],
+            [path, path, path, path], ["app.p4probe.__init__"])
+        expect(aliases.len()).to_equal(1)
+        expect(aliases[0]).to_equal("app.p4probe")
+
+    it "returns nothing when the failed file has no alias row":
+        val aliases = driver_go_to_end_alias_rows_v1(
+            ["app.bad", "app.good"], ["src/app/bad.spl", "src/app/good.spl"], ["app.bad"])
+        expect(aliases.len()).to_equal(0)
+
+    it "never matches rows with an empty physical key":
+        val aliases = driver_go_to_end_alias_rows_v1(
+            ["app.bad", "gen.provider"], ["", ""], ["app.bad"])
+        expect(aliases.len()).to_equal(0)
