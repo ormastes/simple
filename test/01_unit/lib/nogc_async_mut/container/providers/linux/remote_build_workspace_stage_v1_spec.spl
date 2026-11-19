@@ -1,0 +1,186 @@
+# AUTHORED_NOT_RUN. milestone_0030 op (i) admission matrix (DESIGN 13.3.4, 14.8 step 5) and the
+# op (ii) read budget. Pure admission DATA only: the live source sample, retained-root identity,
+# empty-root and phase-marker checks need genuine source custody and are not faked here.
+# @req REQ-M0030-OP-I-BUILD-STAGING
+# @req REQ-M0030-OP-II-SETTLED-READ
+use std.spec.{describe, it, expect, step}
+use std.io.file_read_text
+use std.common.contracts.container.linux_workspace_profile_v1.*
+use std.common.contracts.container.build_workspace_profile_v1.*
+use std.common.contracts.container.build_workspace_manifest_v1.*
+use std.common.contracts.container.settled_workspace_read_v3.*
+use std.common.contracts.container.execution_v2.ContainerMountProjectionV2
+use std.common.build_manager.remote_build_input_manifest_v3.*
+use std.nogc_async_mut.container.providers.linux.remote_build_workspace_stage_v1.*
+use std.nogc_async_mut.container.providers.linux.request_v1.LinuxOciRequestV1
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.text_bytes.text_to_utf8_bytes
+
+fn st_profile_v1() -> LinuxBuildWorkspaceProfileV1:
+    LinuxBuildWorkspaceProfileV1(machine_policy_digest: "a".repeat(64), workspace_profile_digest: "b".repeat(64),
+        image: "registry.example/build@sha256:" + "d".repeat(64), image_config_id: "e".repeat(64),
+        launcher_program: "/opt/simple/build-launcher", producer_path: "inputs/producer", stdout_leaf: "stdout.log",
+        stderr_leaf: "stderr.log", output_root: "outputs", max_input_bytes: 4096, max_output_bytes: 2048,
+        memory_minimum_bytes: 268435456, preparation_budget_ms: 60000)
+
+fn st_file_v1(path: text, content: text) -> LinuxRemoteBuildStageFileV3:
+    val bytes = text_to_utf8_bytes(content)
+    LinuxRemoteBuildStageFileV3(path: path, digest: sha256_u8_hex(bytes), bytes: bytes)
+
+fn st_files_v1() -> [LinuxRemoteBuildStageFileV3]:
+    [st_file_v1("inputs/producer", "#!/bin/producer\n"), st_file_v1("inputs/src/main.spl", "fn main(): 0\n"),
+        st_file_v1("inputs/src/lib.spl", "fn lib(): 1\n")]
+
+fn st_entries_digest_v1(files: [LinuxRemoteBuildStageFileV3]) -> text:
+    var entries: [RemoteBuildInputEntryV3] = []
+    for file in files: entries.push(RemoteBuildInputEntryV3(path: file.path, digest: file.digest))
+    remote_build_input_manifest_entries_digest_v3(entries).unwrap()
+
+fn st_manifest_bytes_v1(files: [LinuxRemoteBuildStageFileV3]) -> text:
+    build_workspace_manifest_encode_v1(BuildWorkspaceManifestV1(
+        profile_digest: sha256_text(linux_build_workspace_profile_encode_v1(st_profile_v1()).unwrap()),
+        slot_binding_digest: "1".repeat(64), task_digest: "2".repeat(64),
+        input_manifest_digest: st_entries_digest_v1(files), producer_digest: files[0].digest)).unwrap()
+
+fn st_invocation_bytes_v1(manifest_bytes: text) -> text:
+    val manifest = build_workspace_manifest_decode_v1(manifest_bytes).unwrap()
+    build_workspace_invocation_encode_v1(BuildWorkspaceInvocationV1(workspace_manifest: manifest_bytes,
+        task_digest: manifest.task_digest, input_manifest_digest: manifest.input_manifest_digest,
+        preparation_budget_ms: 45000, not_after: 1900000000000)).unwrap()
+
+fn st_request_v1(invocation_bytes: text) -> LinuxOciRequestV1:
+    LinuxOciRequestV1(pod_uid: "job_1", attempt: 1, operation_id: "operation_1", image: "registry.example/build@sha256:" + "d".repeat(64),
+        bundle_path: "", command: ["/opt/simple/build-launcher"], args: ["--build-invocation-sha256", sha256_text(invocation_bytes)],
+        timeout_ms: 30000, cpu_limit_millis: 1000, memory_limit_bytes: 1342177280, pid_limit: 128,
+        network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true, working_directory: "/workspace",
+        terminal_mode: "none", user_uid: 20001, user_gid: 20001, user_namespace_mode: "keep-id",
+        containment_profile_digest: "c".repeat(64),
+        mounts: [ContainerMountProjectionV2(host_root: "/srv/workspaces/slot_1", guest_root: "/workspace", read_only: false)])
+
+fn st_admit_v1(files: [LinuxRemoteBuildStageFileV3], manifest_bytes: text, request: LinuxOciRequestV1) -> text:
+    val result = linux_remote_build_stage_admit_v1(st_profile_v1(), linux_build_workspace_profile_encode_v1(st_profile_v1()).unwrap(),
+        "a".repeat(64), "b".repeat(64), "1".repeat(64), request, manifest_bytes, st_invocation_bytes_v1(manifest_bytes), files)
+    if result.is_ok(): return "admitted"
+    result.unwrap_err()
+
+describe "Remote-build staging admission (milestone_0030 op i)":
+    it "admits exactly the task-pinned producer and inputs by digest":
+        step("Manifest, invocation, request and files all bind the same task")
+        val files = st_files_v1()
+        val manifest = st_manifest_bytes_v1(files)
+        expect(st_admit_v1(files, manifest, st_request_v1(st_invocation_bytes_v1(manifest)))).to_equal("admitted")
+
+    it "refuses a reordered, extra, missing or tampered input before any write":
+        val files = st_files_v1()
+        val manifest = st_manifest_bytes_v1(files)
+        val request = st_request_v1(st_invocation_bytes_v1(manifest))
+        step("Reorder the inputs (producer still first)")
+        expect(st_admit_v1([files[0], files[2], files[1]], manifest, request)).to_equal("remote-build-stage-input-manifest-differs")
+        step("Add an input that the manifest does not pin")
+        expect(st_admit_v1(files + [st_file_v1("inputs/extra.spl", "x\n")], manifest, request)).to_equal("remote-build-stage-input-manifest-differs")
+        step("Drop a pinned input")
+        expect(st_admit_v1([files[0], files[1]], manifest, request)).to_equal("remote-build-stage-input-manifest-differs")
+        step("Change the bytes but keep the claimed digest")
+        var tampered = files
+        tampered[1] = LinuxRemoteBuildStageFileV3(path: files[1].path, digest: files[1].digest, bytes: text_to_utf8_bytes("evil\n"))
+        expect(st_admit_v1(tampered, manifest, request)).to_equal("remote-build-stage-file-digest")
+
+    it "requires the installed producer first under the manifest producer digest":
+        val files = st_files_v1()
+        val manifest = st_manifest_bytes_v1(files)
+        val request = st_request_v1(st_invocation_bytes_v1(manifest))
+        expect(st_admit_v1([files[1], files[0], files[2]], manifest, request)).to_equal("remote-build-stage-producer-first")
+        val moved = [st_file_v1("inputs/other-producer", "#!/bin/producer\n"), files[1], files[2]]
+        expect(st_admit_v1(moved, st_manifest_bytes_v1(moved), st_request_v1(st_invocation_bytes_v1(st_manifest_bytes_v1(moved))))).to_equal("remote-build-stage-producer-first")
+
+    it "refuses escaping, duplicate, reserved and prefix-colliding paths":
+        val producer = st_file_v1("inputs/producer", "#!/bin/producer\n")
+        for path in ["../escape", "/abs/path", "inputs/./x", "inputs//x", "inputs/bad name"]:
+            val files = [producer, st_file_v1(path, "x\n")]
+            expect(st_admit_v1(files, st_manifest_bytes_v1(files), st_request_v1(st_invocation_bytes_v1(st_manifest_bytes_v1(files))))).to_equal("remote-build-stage-path")
+        val duplicate = [producer, st_file_v1("inputs/a", "1\n"), st_file_v1("inputs/a", "1\n")]
+        expect(st_admit_v1(duplicate, st_manifest_bytes_v1(duplicate), st_request_v1(st_invocation_bytes_v1(st_manifest_bytes_v1(duplicate))))).to_equal("remote-build-stage-path")
+        for path in ["outputs/pre-seeded", "stdout.log", "stderr.log"]:
+            val files = [producer, st_file_v1(path, "x\n")]
+            expect(st_admit_v1(files, st_manifest_bytes_v1(files), st_request_v1(st_invocation_bytes_v1(st_manifest_bytes_v1(files))))).to_equal("remote-build-stage-reserved-path")
+        val collide = [producer, st_file_v1("inputs/dir", "1\n"), st_file_v1("inputs/dir/child", "2\n")]
+        expect(st_admit_v1(collide, st_manifest_bytes_v1(collide), st_request_v1(st_invocation_bytes_v1(st_manifest_bytes_v1(collide))))).to_equal("remote-build-stage-path-prefix-collision")
+
+    it "bounds the total input bytes by the installed profile":
+        val big = [st_file_v1("inputs/producer", "p".repeat(3000)), st_file_v1("inputs/data", "d".repeat(2000))]
+        expect(st_admit_v1(big, st_manifest_bytes_v1(big), st_request_v1(st_invocation_bytes_v1(st_manifest_bytes_v1(big))))).to_equal("remote-build-stage-input-bytes")
+
+    it "refuses a request that is not the installed launcher bound to this invocation":
+        val files = st_files_v1()
+        val manifest = st_manifest_bytes_v1(files)
+        var request = st_request_v1(st_invocation_bytes_v1(manifest))
+        request.args = ["--build-invocation-sha256", "0".repeat(64)]
+        expect(st_admit_v1(files, manifest, request)).to_equal("remote-build-stage-launcher-request")
+        request = st_request_v1(st_invocation_bytes_v1(manifest))
+        request.command = ["/opt/simple/bootstrap"]
+        expect(st_admit_v1(files, manifest, request)).to_equal("remote-build-stage-launcher-request")
+        request = st_request_v1(st_invocation_bytes_v1(manifest))
+        request.terminal_mode = "tty"
+        expect(st_admit_v1(files, manifest, request)).to_equal("remote-build-stage-launcher-request")
+        request = st_request_v1(st_invocation_bytes_v1(manifest))
+        request.memory_limit_bytes = 1024
+        expect(st_admit_v1(files, manifest, request)).to_equal("remote-build-stage-memory-not-admitted")
+
+    it "refuses a broken installed-profile chain or another slot":
+        val files = st_files_v1()
+        val manifest = st_manifest_bytes_v1(files)
+        val request = st_request_v1(st_invocation_bytes_v1(manifest))
+        val source = linux_build_workspace_profile_encode_v1(st_profile_v1()).unwrap()
+        val wrong_policy = linux_remote_build_stage_admit_v1(st_profile_v1(), source, "9".repeat(64), "b".repeat(64), "1".repeat(64),
+            request, manifest, st_invocation_bytes_v1(manifest), files)
+        expect(wrong_policy.unwrap_err()).to_equal("remote-build-stage-installed-profile-binding")
+        val wrong_slot = linux_remote_build_stage_admit_v1(st_profile_v1(), source, "a".repeat(64), "b".repeat(64), "9".repeat(64),
+            request, manifest, st_invocation_bytes_v1(manifest), files)
+        expect(wrong_slot.unwrap_err()).to_equal("remote-build-stage-slot-binding")
+
+describe "Settled remote-build read budget (milestone_0030 op ii)":
+    it "takes the smaller of the task maximum and the profile maximum":
+        expect(container_settled_workspace_budget_v3(st_profile_v1(), ContainerSettledWorkspaceBoundsV3(maximum_bytes: 100, output_paths: [])).unwrap()).to_equal(100)
+        expect(container_settled_workspace_budget_v3(st_profile_v1(), ContainerSettledWorkspaceBoundsV3(maximum_bytes: 999999, output_paths: [])).unwrap()).to_equal(2048)
+
+    it "refuses an empty budget and escaping or duplicate declared outputs":
+        expect(container_settled_workspace_budget_v3(st_profile_v1(), ContainerSettledWorkspaceBoundsV3(maximum_bytes: 0, output_paths: [])).is_err()).to_equal(true)
+        for path in ["../x", "/abs", "a//b"]:
+            expect(container_settled_workspace_budget_v3(st_profile_v1(), ContainerSettledWorkspaceBoundsV3(maximum_bytes: 10, output_paths: [path])).unwrap_err()).to_equal("settled-workspace-read-output-path")
+        expect(container_settled_workspace_budget_v3(st_profile_v1(), ContainerSettledWorkspaceBoundsV3(maximum_bytes: 10, output_paths: ["a", "a"])).unwrap_err()).to_equal("settled-workspace-read-output-path")
+
+# lane A review P2-2: the owner path of op (i). A LinuxWorkspaceSourceOwnerV1 needs a real installed reader, root and
+# lease, so its gates are pinned by source order here; the real-root mechanism is covered by
+# test/02_integration/lib/container/remote_build_read_v1_spec.spl (fixture-gated).
+fn st_owner_source_v1() -> text:
+    file_read_text("src/lib/nogc_async_mut/container/providers/linux/workspace_mount_owner_v1.spl")
+
+fn st_between_v1(source: text, start: text, end: text) -> text:
+    val from = source.index_of(start)
+    source.substring(from, from + source.substring(from, source.byte_len()).index_of(end))
+
+describe "stage_remote_build_v3 owner path (milestone_0030 op i, lane A review P2-2)":
+    it "admits, then refuses a restage by phase marker, then agent staging, then a non-empty root, before any effect":
+        # @req M0030-LANEA-STAGE-01
+        val body = st_between_v1(st_owner_source_v1(), "pub fn stage_remote_build_v3(", "pub fn read_settled_build_v3(")
+        val admitted = body.index_of("workspace_build_installed_v1(self, request_bytes")
+        val staged_marker = body.index_of("\"remote-build-stage-already-retained\"")
+        val any_marker = body.index_of("\"remote-build-stage-retained-or-in-progress\"")
+        val exclusive = body.index_of("\"remote-build-stage-source-holds-agent-staging\"")
+        val empty = body.index_of("\"remote-build-stage-dedicated-root-not-empty\"")
+        val effect = body.index_of("build_effect_attempted = true")
+        val write = body.index_of("linux_remote_build_stage_bytes_v1(")
+        expect(admitted > 0 and admitted < staged_marker and staged_marker < any_marker and any_marker < exclusive).to_equal(true)
+        expect(exclusive < empty and empty < effect and effect < write).to_equal(true)
+        step("the agent arm refuses a source that holds remote-build staging (exclusivity both ways)")
+        expect(st_owner_source_v1()).to_contain("if state.build_effect_attempted: return workspace_agent_turn_v1(self, \"agent-stage-source-holds-remote-build-staging\", false)")
+        step("the live re-check after the write keeps a changed policy a retained failure, never staged")
+        expect(body.index_of("val current = workspace_build_installed_v1(") > write).to_equal(true)
+
+    it "refuses a plain close once a remote-build effect was attempted (retained, cleanup needs authority)":
+        # @req M0030-LANEA-STAGE-02
+        val close = st_between_v1(st_owner_source_v1(), "pub fn close_v1()", "workspace_source_states_v1[self.slot].phase = \"closing\"")
+        val build = close.index_of("if state.build_effect_attempted:")
+        expect(build > 0).to_equal(true)
+        expect(close.index_of("\"remote-build-workspace-retention-requires-authorized-cleanup\"") > build).to_equal(true)
+        expect(close.index_of("closed: false") > 0).to_equal(true)

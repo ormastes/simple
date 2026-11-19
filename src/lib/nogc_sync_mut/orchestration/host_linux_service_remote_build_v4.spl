@@ -1,0 +1,834 @@
+# milestone_0030 remote-build workload of the V4 Linux service (DESIGN s5, 13.2, 14.2, r4.1, r4.1b).
+# SOURCE_AUTHORED / NOT_RUN. Lib layer: never imports the service module (C) or any `app.` module (F5).
+#
+# This file holds the pre-transfer settle (r4.1b), the open authority (14.4) and the executor `HostRemoteBuildExecutorV3`
+# with its port (F5). The service module (C) holds the executor and drives it; a pre-transfer failure settles here.
+#
+# r4.1b: before the admission transfer nothing has run (no container, no source opened), but the execute already
+# begun the row and committed the charge. A pre-transfer failure (an open-side `request_bytes` mismatch, a refused
+# open authority, an expired deadline before start) therefore settles the executing row `cancelled` / `no-workload`
+# through the 14.2 settle arm, which releases the charge on the single journal writer. `agent_consumed` is set only at
+# the transfer, so the incarnation stays usable; the caller then drops the build holder and the slot clears through
+# the existing ended path of the slot check.
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2, ExecutionEnvironmentV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.DistributedAuthorityKeyV2
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{distributed_authority_snapshot_key_v2,
+    distributed_verify_grant_approval_from_snapshot_v2}
+use std.nogc_sync_mut.daemon_sdk.remote_build_task_class_v1.remote_build_task_class_v1
+use std.nogc_sync_mut.io.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.common.contracts.orchestration.host_execution_association_v3.{HostExecutionAssociationV3,
+    host_execution_association_digest_v3}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1, HostCapacityMutationTurnV3,
+    host_capacity_owner_settle_associated_v3}
+use std.nogc_sync_mut.orchestration.host_linux_completion_evidence_v3.{HostRemoteBuildOutcomeRecordV4,
+    host_remote_build_outcome_encode_v4}
+use std.container.{SimpleContainerOwnerV2, simple_container_scope_v2, ContainerWorkspaceActionV3, LinuxWorkspaceSourceLoanV3,
+    simple_container_workspace_source_open_installed_v3, simple_container_enable_workspace_v3,
+    simple_container_workspace_begin_v3, simple_container_workspace_step_v3}
+use std.container.{simple_container_open_lent_v4, simple_container_take_workspace_root_v3,
+    simple_container_end_workspace_root_loan_v3, simple_container_end_service_loan_v3,
+    simple_container_adopt_lent_workspace_reader_v3, simple_container_set_lifecycle_root_v3, simple_container_epoch_current_v3,
+    simple_container_validate_helper_template_v3, simple_container_settle_workspace_v3,
+    simple_container_released_charge_digest_v3, simple_container_return_settled_workspace_source_v3,
+    simple_container_close_workload_v3, simple_container_close_epoch_v3}
+use std.container.{LinuxFreshWorkloadOwnerV2, LinuxWorkspaceRootBorrowV3}
+# Op (ii) is not re-exported by std.container (IMPL_LANE_C); read it from its defining module.
+use std.nogc_async_mut.container.api_v2.simple_container_read_settled_workspace_v3
+use std.nogc_async_mut.container.providers.linux.remote_build_workspace_stage_v1.{LinuxRemoteBuildStageFileV3,
+    linux_remote_build_stage_file_cap_v1}
+use std.common.contracts.container.settled_workspace_read_v3.{ContainerSettledWorkspaceBoundsV3,
+    ContainerSettledWorkspaceReadV3, ContainerSettledWorkspaceFileV3}
+use std.common.contracts.container.workspace_measurement_v3.{RemoteContainerMeasurementsV3, ContainerWorkspaceOpFieldsV3,
+    container_workspace_op_fields_v3, container_workspace_op_digest_v3, container_exit_status_succeeded_v3}
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeExitStatusV1, RUNTIME_STATUS_OK,
+    RUNTIME_PHASE_RUNNING, RUNTIME_PHASE_CREATED}
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerHostScopeV2,
+    container_scope_fence_id_v2, container_execution_request_encode_v2}
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_decode_v1
+use std.nogc_async_mut.container.providers.linux.request_v1.linux_oci_request_digest_v1
+use std.common.contracts.container.execution_input_configuration_v1.container_execution_input_configuration_decode_v1
+use std.common.contracts.container.build_workspace_manifest_v1.build_workspace_invocation_decode_v1
+use std.common.contracts.orchestration.host_remote_build_chunk_v4.{host_remote_build_chunk_decode_v4,
+    host_remote_build_chunk_encode_v4, host_remote_build_chunk_split_v4, host_remote_build_chunk_manifest_v4,
+    host_remote_build_chunk_manifest_digest_v4}
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.MachineFreshEpochRecordV1
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.text_bytes.text_to_utf8_bytes
+use std.common.contracts.orchestration.host_service_operation_v6.host_service_hex_shape_v6
+use std.common.build_manager.contracts.{BuildTaskV1, builder_digest_valid_v1}
+use std.common.contracts.container.build_workspace_profile_v1.linux_build_workspace_profile_decode_v1
+use std.common.build_manager.codec.builder_encode_task_v1
+use std.common.build_manager.remote_build_input_manifest_v3.{RemoteBuildInputEntryV3, remote_build_input_manifest_entries_v3,
+    remote_build_input_manifest_digest_v3}
+use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_publish_v3, distributed_operation_journal_read_required_v3}
+use std.nogc_sync_mut.container.machine_authority_v1.MachineFreshEpochAdmissionOwnerV1
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentityBorrowV3
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+# The exact `cancelled` / `no-workload` evidence of a pre-transfer failure: no exit, destroy, machine settle or
+# bundle digest, and a never-opened source.
+pub fn host_remote_build_no_workload_record_v4(operation_id: text, fence: text, association_digest: text,
+        task_digest: text, cause: text) -> Result<text, text>:
+    if task_digest == "": return Err("host-remote-build-pretransfer-not-build")
+    host_remote_build_outcome_encode_v4(HostRemoteBuildOutcomeRecordV4(operation_id: operation_id, fence: fence,
+        association_digest: association_digest, task_digest: task_digest, outcome: "cancelled", exit_digest: "",
+        destroy_digest: "", absence_result: "no-workload", machine_settle_digest: "", source_return: "never-opened",
+        bundle_digest: "", cancel_cause: cause))
+
+# Settles a pre-transfer failure. `capacity` is the held capacity owner (borrowed writer: capacity.journal, which
+# the settle arm publishes on as owner.journal); the returned turn's owner MUST be adopted on every path.
+pub fn host_remote_build_settle_no_workload_v4(capacity: HostCapacityOwnerV1, operation: OperationEnvelopeV2,
+        association: HostExecutionAssociationV3, fence: text, cause: text) -> HostCapacityMutationTurnV3:
+    val digest = host_execution_association_digest_v3(association)
+    if digest.is_err(): return HostCapacityMutationTurnV3(owner: capacity, effect_attempted: false, error: digest.unwrap_err())
+    val evidence = host_remote_build_no_workload_record_v4(operation.id, fence, digest.unwrap(),
+        association.remote_build_task_digest, cause)
+    if evidence.is_err(): return HostCapacityMutationTurnV3(owner: capacity, effect_attempted: false, error: evidence.unwrap_err())
+    host_capacity_owner_settle_associated_v3(capacity, operation, association, "cancelled", evidence.unwrap())
+
+# 14.4: the verified authority of an open frame. `host_key` is the snapshot execution-host key of the enrolled host
+# identity: the required public key of the completion signer; never a frame value.
+pub struct HostRemoteBuildOpenAuthorityV4:
+    grant: ExecutionGrantV2
+    host_key: DistributedAuthorityKeyV2
+
+# 14.4 host open authority, before any staging or effect. Inputs: the installed policy, the installed controller_ref,
+# the enrollment binding's host identity, the slot's association (the executing row's archived association), the
+# signed task, build pair and request and the requested environment from the open frame, and the service grant clock.
+# Order (each refusal is final; the caller settles it cancelled/no-workload, r4.1b):
+#   1. request.operation in {build, test} (the landed class predicate alone would admit a route action);
+#   2. the slot binding: request.id == the slot operation (association.execution.plan.operation_id), and
+#      request.payload_digest == association.remote_build_task_digest == sha256(builder_encode_task_v1(task));
+#   3. the plan pin (14.5, 14.10 N8-a): the task pins sha256 of the slot's full execution request at
+#      remote-container/<id>.sdn, the same pin remote_container_request_bind_v3 checks at the controller; the full
+#      request covers the scope-free core and the controller-authored request_bytes. The exact N6-a projection of those
+#      bytes needs the host-installed profiles, which no pre-transfer reader exposes; op (i) enforces it at staging;
+#   4. issuer == controller_ref, then distributed_verify_grant_approval_from_snapshot_v2 (C:648 pattern; an expired
+#      approval is refused here, also after a restart, since the clock and policy are re-read per call);
+#   5. remote_build_task_class_v1 with the snapshot `human-approver` key of approval.approver_id;
+#   6. the execution-host key by role from the same snapshot (key separation is the snapshot invariant).
+pub fn host_remote_build_open_authority_v4(policy: LocalAuthorityPolicyV1, controller_ref: text, host_identity: text,
+        association: HostExecutionAssociationV3, task: BuildTaskV1,
+        signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2,
+        requested: ExecutionEnvironmentV2, context: HostReservationAuthorizationContextV1) -> Result<HostRemoteBuildOpenAuthorityV4, text>:
+    if request.operation != "build" and request.operation != "test": return Err("linux-host-remote-build-operation")
+    if request.id != association.execution.plan.operation_id: return Err("linux-host-remote-build-slot-operation")
+    val task_digest = sha256_text(builder_encode_task_v1(task))
+    if (association.remote_build_task_digest == "" or task_digest != association.remote_build_task_digest or
+            request.payload_digest != task_digest):
+        return Err("linux-host-remote-build-request-differs")
+    val request_digest = sha256_text(container_execution_request_encode_v2(association.execution)?)
+    var pinned = false
+    for input in task.inputs:
+        if input.path == "remote-container/" + task.id + ".sdn" and input.digest == request_digest: pinned = true
+    if not pinned: return Err("linux-host-remote-build-request-differs")
+    if signed.issuer_id != controller_ref: return Err("linux-host-service-controller-mismatch")
+    val grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, signed, approval, request,
+        context.grant_clock, policy.snapshot.generation, context.policy_revision, context.revocation_epoch,
+        context.session_generation)?
+    val approver = distributed_authority_snapshot_key_v2(policy.snapshot, "human-approver", approval.approver_id)?
+    val task_class = remote_build_task_class_v1(approver, grant, request, requested, approval.expires_at, context.grant_clock)
+    if task_class != "": return Err(task_class)
+    val host_key = distributed_authority_snapshot_key_v2(policy.snapshot, "execution-host", host_identity)?
+    Ok(HostRemoteBuildOpenAuthorityV4(grant: grant, host_key: host_key))
+
+# ---- the executor (integration item 4): open, inputs, transfer, stage driver, cancel, close ----
+#
+# Stage order (DESIGN 13.4, deviation: op ii precedes the retained source-return, IMPL_INTEG.md):
+#   inputs -> [transfer, C glue] -> source -> stage (op i) -> enable -> prepare -> create -> configuration -> start ->
+#   inspect -> running -> stop -> destroy -> settle -> read (op ii) -> source-return -> finalize (port) ->
+#   host-settle -> settled.
+# A cancel (controller, deadline, finalize failure) skips read and finalize and settles `cancelled`. Every effect error
+# after `enable` is `wedged` (the record is reserved: the row stays charged, Q3). Each call advances one bounded step.
+
+# One staged-input frame carries one whole file: the staged-file cap (1 MiB, gap h) is below the request chunk.
+pub struct HostRemoteBuildAdmittedV3:
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+    request: OperationEnvelopeV2
+    requested: ExecutionEnvironmentV2
+    task: BuildTaskV1
+    invocation_bytes: text
+    bounds: ContainerSettledWorkspaceBoundsV3
+
+pub struct HostRemoteBuildObservedV3:
+    operation_id: text
+    fence: text
+    # The pinned execution request (the association's), which the controller freeze binds to the task.
+    request: ContainerExecutionRequestV2
+    measurements: RemoteContainerMeasurementsV3
+    stdout: [u8]
+    stderr: [u8]
+    outputs: [ContainerSettledWorkspaceFileV3]
+
+# F5: the app half, supplied by the service composition. admit_open decodes the open record's app types (task, policy,
+# environment) and runs remote_context_admit_v1 over the snapshot-built context; finalize freezes, signs (host
+# identity key) and encodes the bundle. Neither is an authority source for this module: the open authority and the
+# request pin are re-verified here.
+pub struct HostRemoteBuildPortV4:
+    admit_open: fn(text, i64) -> Result<HostRemoteBuildAdmittedV3, text>
+    finalize: fn(text, HostRemoteBuildObservedV3) -> Result<text, text>
+
+pub struct HostRemoteBuildExecutorV3:
+    operation_id: text
+    fence: text
+    association_digest: text
+    task_digest: text
+    open_record: text
+    inputs: [RemoteBuildInputEntryV3]
+    invocation_bytes: text
+    invocation_digest: text
+    workspace_manifest: text
+    deadline: i64
+    input_manifest_digest: text = ""
+    bounds: ContainerSettledWorkspaceBoundsV3 = ContainerSettledWorkspaceBoundsV3(maximum_bytes: 0, output_paths: [])
+    received: i64 = 0
+    stage: text = "inputs"
+    pending: bool = false
+    error: text = ""
+    root_nonce: text = ""
+    container: Option<SimpleContainerOwnerV2> = None
+    fresh: Option<LinuxFreshWorkloadOwnerV2> = None
+    root: Option<LinuxWorkspaceRootBorrowV3> = None
+    source: Option<LinuxWorkspaceSourceLoanV3> = None
+    reserved: bool = false
+    created: Option<RuntimeIdentityV1> = None
+    exit: Option<ContainerWorkspaceOpFieldsV3> = None
+    destroy: Option<ContainerWorkspaceOpFieldsV3> = None
+    machine_settle: text = ""
+    read: Option<ContainerSettledWorkspaceReadV3> = None
+    cancel_cause: text = ""
+    outcome: text = ""
+    bundle_digest: text = ""
+    lifecycle_closed: bool = false
+    workload_closed: bool = false
+    loan_ended: bool = false
+
+pub struct HostRemoteBuildTurnV4:
+    executor: HostRemoteBuildExecutorV3
+    capacity: HostCapacityOwnerV1
+    response: text
+    error: text
+    effect_attempted: bool
+
+pub struct HostRemoteBuildCancelV4:
+    executor: HostRemoteBuildExecutorV3
+    pretransfer: bool
+    error: text
+
+pub struct HostRemoteBuildOpenV4:
+    executor: Option<HostRemoteBuildExecutorV3> = None
+    admission: Option<MachineFreshEpochAdmissionOwnerV1> = None
+    root: Option<LinuxWorkspaceRootBorrowV3> = None
+    error: text = ""
+
+# allow(primitive_api): reviewed signed-window clock DATA words (13.4)
+pub fn host_remote_build_deadline_v4(approval_expires_at: i64, grant_expires_at: i64, not_after: i64) -> i64:
+    var deadline = approval_expires_at
+    if grant_expires_at < deadline: deadline = grant_expires_at
+    if not_after < deadline: deadline = not_after
+    deadline
+
+fn remote_build_key_v4(fence: text, operation_id: text) -> text:
+    "host-remote-build/" + sha256_text(fence + "\n" + operation_id)
+
+pub fn host_remote_build_open_relative_v4(fence: text, operation_id: text) -> text:
+    remote_build_key_v4(fence, operation_id) + ".open.sdn"
+
+# @allow(primitive_api) index is the manifest input position in the journal-relative path
+pub fn host_remote_build_input_relative_v4(fence: text, operation_id: text, index: i64) -> text:
+    remote_build_key_v4(fence, operation_id) + ".input-" + index.to_text() + ".sdn"
+
+pub fn host_remote_build_bundle_relative_v4(fence: text, operation_id: text) -> text:
+    remote_build_key_v4(fence, operation_id) + ".bundle.sdn"
+
+# L10: only an engine-native Exited(0) is success.
+pub fn host_remote_build_exit_outcome_v4(exit: RuntimeExitStatusV1) -> text:
+    if container_exit_status_succeeded_v3(exit): "succeeded" else: "failed"
+
+pub fn host_remote_build_reply_v4(executor: HostRemoteBuildExecutorV3) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-remote-build"),
+        "operationId": SdnValue.String(executor.operation_id), "stage": SdnValue.String(executor.stage),
+        "received": SdnValue.Int(executor.received), "inputs": SdnValue.Int(executor.inputs.len()),
+        "outcome": SdnValue.String(executor.outcome), "bundleDigest": SdnValue.String(executor.bundle_digest),
+        "cancelCause": SdnValue.String(executor.cancel_cause)}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+# Open (pre-transfer, no effect but the no-replace archive): the app port admits the record's app types, then the
+# lane B open authority (snapshot-verified pair, task class, execution-host key), then the task and request pins.
+# Any refusal leaves the row executing for the caller's no-workload settle (r4.1b). Exact-bytes retry is answered
+# from the archive; different bytes are `linux-host-remote-build-open-conflict`.
+pub fn host_remote_build_open_v4(journal: DistributedOperationJournalV2, port: HostRemoteBuildPortV4,
+        policy: LocalAuthorityPolicyV1, controller_ref: text, host_identity: text, association: HostExecutionAssociationV3,
+        fence: text, open_record: text, context: HostReservationAuthorizationContextV1) -> Result<HostRemoteBuildExecutorV3, text>:
+    val association_digest = host_execution_association_digest_v3(association)?
+    val admitted = (port.admit_open)(open_record, context.grant_clock)?
+    # 13.3(c)1: the authority binds the slot operation, the task marker, the payload digest and the request pin.
+    val _authority = host_remote_build_open_authority_v4(policy, controller_ref, host_identity, association, admitted.task,
+        admitted.signed, admitted.approval, admitted.request, admitted.requested, context)?
+    remote_build_request_identity_v4(association.execution)?
+    val task = admitted.task
+    val task_digest = association.remote_build_task_digest
+    val invocation = build_workspace_invocation_decode_v1(admitted.invocation_bytes)?
+    val manifest_digest = remote_build_input_manifest_digest_v3(task)?
+    if invocation.task_digest != task_digest or invocation.input_manifest_digest != manifest_digest:
+        return Err("linux-host-remote-build-invocation-differs")
+    val deadline = host_remote_build_deadline_v4(admitted.approval.expires_at, admitted.signed.grant.expires_at,
+        invocation.not_after)
+    if context.grant_clock >= deadline: return Err("linux-host-remote-build-deadline")
+    val relative = host_remote_build_open_relative_v4(fence, association.execution.plan.operation_id)
+    distributed_operation_journal_publish_v3(journal, relative, open_record)?
+    if distributed_operation_journal_read_required_v3(journal, relative, 2097152)? != open_record:
+        return Err("linux-host-remote-build-open-conflict")
+    Ok(HostRemoteBuildExecutorV3(operation_id: association.execution.plan.operation_id, fence: fence,
+        association_digest: association_digest, task_digest: task_digest, open_record: open_record,
+        inputs: remote_build_input_manifest_entries_v3(task), invocation_bytes: admitted.invocation_bytes,
+        invocation_digest: sha256_text(admitted.invocation_bytes), workspace_manifest: invocation.workspace_manifest,
+        deadline: deadline, input_manifest_digest: manifest_digest, bounds: admitted.bounds))
+
+# milestone_0030 P2-a: the part of the N6-a build projection that the installed build profile ALONE determines, checked
+# at prepare against a non-consuming profile read, before the slot record and the charge. uid, gid, the workspace mount
+# and the containment digest need the lent workspace reader and stay at enable; the invocation digest is bound at open.
+pub fn host_remote_build_profile_gate_v4(request_bytes: text, profile_source: text) -> Result<(), text>:
+    val retained = linux_oci_retained_request_decode_v1(request_bytes)
+    if retained.is_err(): return Err("linux-host-remote-build-request-bytes-mismatch:" + retained.unwrap_err())
+    val profile = linux_build_workspace_profile_decode_v1(profile_source)
+    if profile.is_err(): return Err("linux-host-remote-build-profile-invalid")
+    val request = retained.unwrap()
+    val build = profile.unwrap()
+    if request.image != build.image: return Err("linux-host-remote-build-profile-image")
+    if request.command != [build.launcher_program] or not request.replace_entrypoint:
+        return Err("linux-host-remote-build-profile-launcher")
+    if request.args.len() != 2 or request.args[0] != "--build-invocation-sha256" or not builder_digest_valid_v1(request.args[1]):
+        return Err("linux-host-remote-build-profile-args")
+    if request.terminal_mode != "none": return Err("linux-host-remote-build-profile-terminal")
+    if request.memory_limit_bytes < build.memory_minimum_bytes: return Err("linux-host-remote-build-profile-memory")
+    Ok(())
+
+# Re-review P3-1: the profile-independent part of the N6-a projection, checked at open through the landed decoder (the
+# full projection needs the installed profiles, readable only after the transfer). As the agent arm
+# (host_agent_workspace_execution_v2.spl:211): operation, workload uid, attempt, request digest vs the plan, a workspace
+# (the adapter's has_workspace); the Linux retained request has no device field, so `no devices` holds by construction.
+fn remote_build_request_identity_v4(request: ContainerExecutionRequestV2) -> Result<(), text>:
+    val mismatch = "linux-host-remote-build-request-bytes-mismatch"
+    val retained = linux_oci_retained_request_decode_v1(request.request_bytes)
+    if retained.is_err(): return Err(mismatch + ":" + retained.unwrap_err())
+    val decoded = retained.unwrap()
+    val digest = linux_oci_request_digest_v1(decoded)
+    if digest.is_err(): return Err(mismatch + ":" + digest.unwrap_err())
+    val plan = request.plan
+    val workspace = decoded.bundle_path != "" or decoded.build_input_root != "" or decoded.build_output_root != "" or decoded.mounts.len() > 0
+    if (digest.unwrap() != plan.request_digest or decoded.pod_uid != plan.workload_uid or
+            decoded.attempt != plan.attempt or decoded.operation_id != plan.operation_id or not workspace):
+        return Err(mismatch)
+    Ok(())
+
+# One input frame (stage `inputs`): input `index` in manifest order, one whole file as one canonical chunk. The chunk
+# is archived no-replace (the archive is the only copy; nothing is buffered here). An exact retry of an archived
+# input is idempotent; a digest other than the signed task's is refused before the archive.
+pub fn host_remote_build_input_v4(executor: HostRemoteBuildExecutorV3, journal: DistributedOperationJournalV2,
+        index: i64, payload: text) -> Result<HostRemoteBuildExecutorV3, text>:
+    var state = executor
+    if state.stage != "inputs": return Err("linux-host-remote-build-input-stage:" + state.stage)
+    if index < 0 or index >= state.inputs.len() or index > state.received: return Err("linux-host-remote-build-input-index")
+    val bytes = host_remote_build_chunk_decode_v4(payload, state.inputs[index].digest, false)?
+    if bytes.len() > linux_remote_build_stage_file_cap_v1(): return Err("linux-host-remote-build-input-too-large")
+    val relative = host_remote_build_input_relative_v4(state.fence, state.operation_id, index)
+    distributed_operation_journal_publish_v3(journal, relative, payload)?
+    if distributed_operation_journal_read_required_v3(journal, relative, 2097152)? != payload:
+        return Err("linux-host-remote-build-input-conflict")
+    if index == state.received: state.received = state.received + 1
+    Ok(state)
+
+# The transfer (C glue holds the admission, as the agent invoke): requires every input archived. The admission
+# moves whole into the factory; a pre-transfer refusal returns it (the caller then settles no-workload).
+pub fn host_remote_build_transfer_v4(executor: HostRemoteBuildExecutorV3, admission: MachineFreshEpochAdmissionOwnerV1,
+        native: LinuxServiceNativeIdentityBorrowV3, template: GroupProcessStreamLaunchV2) -> HostRemoteBuildOpenV4:
+    var state = executor
+    if state.stage != "inputs" or state.received != state.inputs.len():
+        return HostRemoteBuildOpenV4(admission: Some(admission), error: "linux-host-remote-build-inputs-incomplete")
+    val nonce = sosix_random_hex(8) ?? ""
+    if not host_service_hex_shape_v6(nonce, 16):
+        return HostRemoteBuildOpenV4(admission: Some(admission), error: "linux-host-remote-build-entropy-unavailable")
+    val opened = simple_container_open_lent_v4(admission, native, template)
+    if opened.admission_cleanup.is_some():
+        return HostRemoteBuildOpenV4(admission: opened.admission_cleanup, root: opened.root,
+            error: if opened.error != "": opened.error else: "linux-host-remote-build-transfer-refused")
+    state.root_nonce = nonce
+    if opened.fresh_cleanup.is_some():
+        state.fresh = opened.fresh_cleanup
+        state.root = opened.root
+        state.stage = "failed"
+        state.error = if opened.error != "": opened.error else: "linux-host-remote-build-transfer-failed"
+        return HostRemoteBuildOpenV4(executor: Some(state), error: state.error)
+    if opened.owner.is_none():
+        return HostRemoteBuildOpenV4(root: opened.root,
+            error: if opened.error != "": opened.error else: "linux-host-remote-build-transfer-owner-missing")
+    state.container = opened.owner
+    var bound = template
+    bound.root = template.root + "-" + nonce + "-w0"
+    val rooted = simple_container_set_lifecycle_root_v3(state.container.unwrap(), bound.root)
+    state.container = Some(rooted.owner)
+    if rooted.error != "": return remote_build_open_failed_v4(state, rooted.error)
+    val valid = simple_container_validate_helper_template_v3(state.container.unwrap(), bound)
+    if valid.is_err(): return remote_build_open_failed_v4(state, "linux-host-remote-build-helper-template-invalid:" + valid.unwrap_err())
+    state.stage = "source"
+    HostRemoteBuildOpenV4(executor: Some(state))
+
+fn remote_build_open_failed_v4(executor: HostRemoteBuildExecutorV3, error: text) -> HostRemoteBuildOpenV4:
+    var state = executor
+    state.stage = "failed"
+    state.error = error
+    HostRemoteBuildOpenV4(executor: Some(state), error: error)
+
+# Self-cancel (13.4): `inputs` is pre-transfer (the caller settles no-workload, r4.1b). Between the transfer and the
+# reserved record (`source`, `stage`, `enable`) a cancel is refused, as the agent refuses before `running`; a reserved,
+# idle executor goes to `stop`. The first cause is kept; a pending native step is refused; teardown is a no-op.
+pub fn host_remote_build_request_cancel_v4(executor: HostRemoteBuildExecutorV3, cause: text) -> HostRemoteBuildCancelV4:
+    var state = executor
+    if state.stage == "wedged" or state.stage == "failed":
+        return HostRemoteBuildCancelV4(executor: state, pretransfer: false, error: "linux-host-remote-build-" + state.stage)
+    if state.stage == "inputs":
+        state.cancel_cause = cause
+        return HostRemoteBuildCancelV4(executor: state, pretransfer: true, error: "")
+    if state.cancel_cause != "" or ["stop", "destroy", "settle", "read", "source-return", "finalize", "host-settle",
+            "settled"].contains(state.stage):
+        return HostRemoteBuildCancelV4(executor: state, pretransfer: false, error: "")
+    if not state.reserved:
+        return HostRemoteBuildCancelV4(executor: state, pretransfer: false, error: "linux-host-remote-build-cancel-stage:" + state.stage)
+    if state.pending: return HostRemoteBuildCancelV4(executor: state, pretransfer: false, error: "linux-host-remote-build-cancel-pending")
+    state.cancel_cause = cause
+    state.outcome = "cancelled"
+    state.stage = "stop"
+    HostRemoteBuildCancelV4(executor: state, pretransfer: false, error: "")
+
+# 13.4 cause `failed:<code>`, bounded at the record's 160 bytes (error codes are ASCII).
+pub fn host_remote_build_failed_cause_v4(error: text) -> text:
+    val cause = "failed:" + error
+    if cause.byte_len() <= 160: return cause
+    cause.substring(0, 160)
+
+fn remote_build_turn_v4(executor: HostRemoteBuildExecutorV3, capacity: HostCapacityOwnerV1, response: text, error: text,
+        effect: bool) -> HostRemoteBuildTurnV4:
+    HostRemoteBuildTurnV4(executor: executor, capacity: capacity, response: response, error: error, effect_attempted: effect)
+
+fn remote_build_pending_v4(executor: HostRemoteBuildExecutorV3, capacity: HostCapacityOwnerV1) -> HostRemoteBuildTurnV4:
+    remote_build_turn_v4(executor, capacity, host_remote_build_reply_v4(executor), "", true)
+
+fn remote_build_wedged_v4(executor: HostRemoteBuildExecutorV3, capacity: HostCapacityOwnerV1, error: text) -> HostRemoteBuildTurnV4:
+    var state = executor
+    state.stage = "wedged"
+    state.error = error
+    remote_build_turn_v4(state, capacity, "", error, true)
+
+# s5 / T-04: after the transfer and before a record is reserved a failure is a held `failed` executor (consumed; the
+# restart reap drains its executing row); after, it is wedged. Never a no-workload settle: the source may be open.
+fn remote_build_fail_v4(executor: HostRemoteBuildExecutorV3, capacity: HostCapacityOwnerV1, error: text) -> HostRemoteBuildTurnV4:
+    if executor.reserved: return remote_build_wedged_v4(executor, capacity, error)
+    var state = executor
+    state.stage = "failed"
+    state.error = error
+    remote_build_turn_v4(state, capacity, "", error, true)
+
+# One bounded step. `request` is the association's execution (the pinned request), `operation` the Host row's.
+pub fn host_remote_build_step_v4(executor: HostRemoteBuildExecutorV3, capacity: HostCapacityOwnerV1,
+        journal_operation: OperationEnvelopeV2, association: HostExecutionAssociationV3, port: HostRemoteBuildPortV4,
+        template: GroupProcessStreamLaunchV2, clock: HostReservationAuthorizationContextV1) -> HostRemoteBuildTurnV4:
+    var state = executor
+    if state.stage == "wedged" or state.stage == "failed":
+        return remote_build_turn_v4(state, capacity, "", if state.error != "": state.error else: "linux-host-remote-build-" + state.stage, true)
+    if state.stage == "settled": return remote_build_turn_v4(state, capacity, host_remote_build_reply_v4(state), "", false)
+    # s6 / 13.4: the signed window end is a self-cancel cause, checked before every step.
+    if clock.grant_clock >= state.deadline and not state.pending:
+        if state.stage == "inputs":
+            # r4.1b: nothing ran; settle cancelled/no-workload on the single journal writer (the caller drops the holder).
+            val settled = host_remote_build_settle_no_workload_v4(capacity, journal_operation, association, state.fence, "deadline")
+            if settled.error != "": return remote_build_turn_v4(state, settled.owner, "", settled.error, true)
+            state.cancel_cause = "deadline"
+            state.outcome = "cancelled"
+            state.stage = "settled"
+            return remote_build_turn_v4(state, settled.owner, host_remote_build_reply_v4(state), "", true)
+        val cancelled = host_remote_build_request_cancel_v4(state, "deadline")
+        # Between the transfer and the reserved record a cancel is refused: the next effect is refused instead (T-04).
+        if cancelled.error != "" and not state.reserved:
+            return remote_build_fail_v4(state, capacity, "linux-host-remote-build-deadline")
+        state = cancelled.executor
+    if state.stage == "inputs": return remote_build_turn_v4(state, capacity, "", "linux-host-remote-build-inputs-incomplete", false)
+    if state.container.is_none() and state.stage != "host-settle": return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-transfer-missing")
+    val request = association.execution
+    if state.stage == "source":
+        val adopted = simple_container_adopt_lent_workspace_reader_v3(state.container.unwrap())
+        state.container = Some(adopted.owner)
+        if adopted.error != "": return remote_build_fail_v4(state, capacity, adopted.error)
+        val rooted = simple_container_set_lifecycle_root_v3(state.container.unwrap(), template.root + "-" + state.root_nonce + "-w1")
+        state.container = Some(rooted.owner)
+        if rooted.error != "": return remote_build_fail_v4(state, capacity, rooted.error)
+        val opened = simple_container_workspace_source_open_installed_v3(state.container.unwrap(), request)
+        state.container = Some(opened.owner)
+        if opened.error != "" or opened.pending or opened.source.is_none():
+            return remote_build_fail_v4(state, capacity, if opened.error != "": opened.error else: "linux-host-remote-build-source-open-pending")
+        state.source = opened.source
+        state.stage = "stage"
+        return remote_build_pending_v4(state, capacity)
+    if state.stage == "stage":
+        val files = remote_build_archived_files_v4(state, capacity.journal)
+        if files.is_err(): return remote_build_fail_v4(state, capacity, files.unwrap_err())
+        val staged = state.source.unwrap().stage_remote_build_v3(request.request_bytes, state.workspace_manifest,
+            state.invocation_bytes, files.unwrap())
+        state.source = Some(staged.loan)
+        if staged.error != "" or not staged.ready:
+            return remote_build_fail_v4(state, capacity, if staged.error != "": staged.error else: "linux-host-remote-build-stage-incomplete")
+        state.stage = "enable"
+        return remote_build_pending_v4(state, capacity)
+    if state.stage == "enable":
+        val enabled = simple_container_enable_workspace_v3(state.container.unwrap(), request, state.workspace_manifest,
+            state.invocation_digest, state.invocation_bytes)
+        state.container = Some(enabled.owner)
+        if enabled.error != "": return remote_build_wedged_v4(state, capacity, enabled.error)
+        state.reserved = true
+        state.stage = "prepare"
+        return remote_build_pending_v4(state, capacity)
+    if ["stop", "destroy", "settle", "read", "source-return", "finalize", "host-settle"].contains(state.stage):
+        return remote_build_release_step_v4(state, capacity, journal_operation, association, port, clock)
+    remote_build_native_step_v4(state, capacity, request, clock)
+
+# Every archived input, re-decoded against the signed digest (the archive is not trusted over the task).
+fn remote_build_archived_files_v4(executor: HostRemoteBuildExecutorV3,
+        journal: DistributedOperationJournalV2) -> Result<[LinuxRemoteBuildStageFileV3], text>:
+    var files: [LinuxRemoteBuildStageFileV3] = []
+    var index: i64 = 0
+    for input in executor.inputs:
+        val payload = distributed_operation_journal_read_required_v3(journal,
+            host_remote_build_input_relative_v4(executor.fence, executor.operation_id, index), 2097152)?
+        val bytes = host_remote_build_chunk_decode_v4(payload, input.digest, false)?
+        files.push(LinuxRemoteBuildStageFileV3(path: input.path, digest: input.digest, bytes: bytes))
+        index = index + 1
+    Ok(files)
+
+fn remote_build_runtime_match_v4(executor: HostRemoteBuildExecutorV3, request: ContainerExecutionRequestV2,
+        runtime: RuntimeIdentityV1) -> bool:
+    val plan = request.plan
+    val fence = container_scope_fence_id_v2(ContainerHostScopeV2(physical_host_id: plan.physical_host_id,
+        service_scope_id: plan.service_scope_id, boot_id: plan.boot_id, provider_generation: plan.provider_generation,
+        native_machine_id: plan.native_machine_id, continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id))
+    (fence.is_ok() and runtime.pod_uid == plan.workload_uid and runtime.attempt == plan.attempt and
+        runtime.operation_id == plan.operation_id and runtime.provider_generation == plan.provider_generation and
+        runtime.engine == "podman" and builder_digest_valid_v1(runtime.native_id) and runtime.node_boot_id == fence.unwrap() and
+        (executor.created.is_none() or runtime == executor.created.unwrap()))
+
+# prepare .. running. A build is non-interactive: the effective configuration must have no tty and no open stdin.
+fn remote_build_native_step_v4(executor: HostRemoteBuildExecutorV3, capacity: HostCapacityOwnerV1,
+        request: ContainerExecutionRequestV2, clock: HostReservationAuthorizationContextV1) -> HostRemoteBuildTurnV4:
+    var state = executor
+    val action = match state.stage:
+        case "prepare": ContainerWorkspaceActionV3.Prepare
+        case "create": ContainerWorkspaceActionV3.Create
+        case "configuration": ContainerWorkspaceActionV3.InputConfiguration
+        case "start": ContainerWorkspaceActionV3.Start
+        case "inspect": ContainerWorkspaceActionV3.Inspect
+        case "running": ContainerWorkspaceActionV3.Inspect
+        case _: return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-stage-invalid")
+    val deadline = container_effect_deadline_v1(request.plan.request_digest, request.plan.operation_id, ["create", "start"],
+        state.deadline)
+    if deadline.is_err(): return remote_build_wedged_v4(state, capacity, deadline.unwrap_err())
+    val turn = if state.pending: simple_container_workspace_step_v3(state.container.unwrap(), request)
+        else: simple_container_workspace_begin_v3(state.container.unwrap(), action, request,
+            if state.stage == "running": None else: Some(deadline.unwrap()))
+    state.container = Some(turn.owner)
+    state.pending = turn.pending
+    if turn.error != "": return remote_build_wedged_v4(state, capacity, turn.error)
+    if state.pending: return remote_build_pending_v4(state, capacity)
+    if turn.operation.is_none(): return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-operation-missing")
+    val operation = turn.operation.unwrap()
+    if operation.status != RUNTIME_STATUS_OK:
+        return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-" + state.stage + ":" + operation.reason)
+    if state.stage == "prepare": state.stage = "create"
+    elif state.stage == "create":
+        if operation.state.phase != RUNTIME_PHASE_CREATED or not remote_build_runtime_match_v4(state, request, operation.state.identity):
+            return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-created-identity")
+        state.created = Some(operation.state.identity)
+        state.stage = "configuration"
+    elif state.stage == "configuration":
+        val decoded = container_execution_input_configuration_decode_v1(operation.stdout)
+        if decoded.is_err(): return remote_build_wedged_v4(state, capacity, decoded.unwrap_err())
+        val observed = decoded.unwrap()
+        if (state.created.is_none() or observed.configuration.runtime != state.created.unwrap() or
+                observed.configuration.scope != simple_container_scope_v2(state.container.unwrap()) or
+                observed.configuration.request_digest != request.plan.request_digest or
+                not observed.configuration.readonly_rootfs or observed.open_stdin or observed.tty):
+            return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-effective-configuration-mismatch")
+        state.stage = "start"
+    elif state.stage == "start":
+        if not remote_build_runtime_match_v4(state, request, operation.state.identity):
+            return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-started-identity")
+        state.stage = "inspect"
+    else:
+        if not remote_build_runtime_match_v4(state, request, operation.state.identity):
+            return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-inspect-identity")
+        # The workload left `running`: Stop (always run) reads its engine-native exit before stopping.
+        state.stage = if operation.state.phase != RUNTIME_PHASE_RUNNING: "stop" else: "running"
+    remote_build_pending_v4(state, capacity)
+
+# stop .. host-settle. A cancel skips `read` and `finalize`. Destroy/settle errors are wedged (Q3, 13.5 receipt).
+fn remote_build_release_step_v4(executor: HostRemoteBuildExecutorV3, capacity: HostCapacityOwnerV1,
+        journal_operation: OperationEnvelopeV2, association: HostExecutionAssociationV3, port: HostRemoteBuildPortV4,
+        clock: HostReservationAuthorizationContextV1) -> HostRemoteBuildTurnV4:
+    var state = executor
+    val request = association.execution
+    if state.stage == "stop" or state.stage == "destroy":
+        # F21: the source loan aliases custody that the source return releases; never used after this point.
+        state.source = None
+        val action = if state.stage == "stop": ContainerWorkspaceActionV3.Stop else: ContainerWorkspaceActionV3.Destroy
+        val turn = if state.pending: simple_container_workspace_step_v3(state.container.unwrap(), request)
+            else: simple_container_workspace_begin_v3(state.container.unwrap(), action, request, None)
+        state.container = Some(turn.owner)
+        state.pending = turn.pending
+        if turn.error != "": return remote_build_wedged_v4(state, capacity, turn.error)
+        if state.pending: return remote_build_pending_v4(state, capacity)
+        if turn.operation.is_none(): return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-" + state.stage + "-missing")
+        val operation = turn.operation.unwrap()
+        if operation.status != RUNTIME_STATUS_OK:
+            return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-" + state.stage + ":" + operation.reason)
+        if state.stage == "stop":
+            # L10: the Stop reply carries the engine-native exit read taken before the stop was issued.
+            # G4: the V3 measurements pin the legacy exitCode to -1 (never the runtime's state exit code).
+            if state.cancel_cause == "":
+                var exit = container_workspace_op_fields_v3("linux-host-remote-build-exit", operation)
+                exit.exit_code = -1
+                state.exit = Some(exit)
+            state.stage = "destroy"
+        else:
+            var destroy = container_workspace_op_fields_v3("linux-host-remote-build-destroy", operation)
+            destroy.exit_code = -1
+            state.destroy = Some(destroy)
+            state.stage = "settle"
+        return remote_build_pending_v4(state, capacity)
+    if state.stage == "settle":
+        val settled = simple_container_settle_workspace_v3(state.container.unwrap())
+        if settled.is_err(): return remote_build_turn_v4(state, capacity, "", settled.unwrap_err(), true)
+        val charge = simple_container_released_charge_digest_v3(state.container.unwrap())
+        if charge.is_err(): return remote_build_turn_v4(state, capacity, "", charge.unwrap_err(), true)
+        state.machine_settle = charge.unwrap()
+        state.stage = if state.cancel_cause != "": "source-return" else: "read"
+        return remote_build_pending_v4(state, capacity)
+    if state.stage == "read":
+        # Op (ii) before the return (it needs the observed, staged source).
+        val read = simple_container_read_settled_workspace_v3(state.container.unwrap(), state.bounds)
+        if read.is_err():
+            state.cancel_cause = host_remote_build_failed_cause_v4(read.unwrap_err())
+            state.outcome = "cancelled"
+        else: state.read = Some(read.unwrap())
+        state.stage = "source-return"
+        return remote_build_pending_v4(state, capacity)
+    if state.stage == "source-return":
+        val returned = simple_container_return_settled_workspace_source_v3(state.container.unwrap())
+        if returned.is_err(): return remote_build_turn_v4(state, capacity, "", returned.unwrap_err(), true)
+        state.stage = if state.cancel_cause != "": "host-settle" else: "finalize"
+        return remote_build_pending_v4(state, capacity)
+    if state.stage == "finalize":
+        val bundle = remote_build_finalize_v4(state, capacity.journal, port, request, clock)
+        if bundle.is_err():
+            # 13.3: a finalize error is a self-cancel cause.
+            state.cancel_cause = host_remote_build_failed_cause_v4(bundle.unwrap_err())
+            state.outcome = "cancelled"
+        else:
+            state.bundle_digest = bundle.unwrap()
+            state.outcome = host_remote_build_exit_outcome_v4(state.exit.unwrap().workload_exit)
+        state.stage = "host-settle"
+        return remote_build_pending_v4(state, capacity)
+    remote_build_host_settle_v4(state, capacity, journal_operation, association)
+
+# The port finalize, then the no-replace bundle archive; returns sha256(bundle).
+fn remote_build_finalize_v4(executor: HostRemoteBuildExecutorV3, journal: DistributedOperationJournalV2,
+        port: HostRemoteBuildPortV4, request: ContainerExecutionRequestV2,
+        clock: HostReservationAuthorizationContextV1) -> Result<text, text>:
+    if executor.exit.is_none() or executor.destroy.is_none() or executor.created.is_none() or executor.read.is_none():
+        return Err("linux-host-remote-build-finalize-unproven")
+    val read = executor.read.unwrap()
+    val epoch = simple_container_epoch_current_v3(executor.container.unwrap())?
+    val measurements = RemoteContainerMeasurementsV3(task_digest: executor.task_digest,
+        input_manifest_digest: executor.input_manifest_digest, request_digest: request.plan.request_digest,
+        provider_identity_digest: epoch.provider_identity_digest, workspace_binding_digest: read.binding_digest,
+        runtime: executor.created.unwrap(), exit: executor.exit.unwrap(), destroy: executor.destroy.unwrap(),
+        machine_settle_digest: executor.machine_settle, settled_unix_ms: clock.grant_clock)
+    val bundle = (port.finalize)(executor.open_record, HostRemoteBuildObservedV3(operation_id: executor.operation_id,
+        fence: executor.fence, request: request, measurements: measurements, stdout: read.stdout, stderr: read.stderr, outputs: read.outputs))?
+    val relative = host_remote_build_bundle_relative_v4(executor.fence, executor.operation_id)
+    distributed_operation_journal_publish_v3(journal, relative, bundle)?
+    if distributed_operation_journal_read_required_v3(journal, relative, 16777216)? != bundle:
+        return Err("linux-host-remote-build-bundle-conflict")
+    Ok(sha256_text(bundle))
+
+fn remote_build_host_settle_v4(executor: HostRemoteBuildExecutorV3, capacity: HostCapacityOwnerV1,
+        journal_operation: OperationEnvelopeV2, association: HostExecutionAssociationV3) -> HostRemoteBuildTurnV4:
+    var state = executor
+    val evidence = host_remote_build_outcome_encode_v4(HostRemoteBuildOutcomeRecordV4(operation_id: state.operation_id,
+        fence: state.fence, association_digest: state.association_digest, task_digest: state.task_digest,
+        outcome: state.outcome, exit_digest: if state.exit.is_some(): container_workspace_op_digest_v3(state.exit.unwrap()) else: "",
+        destroy_digest: if state.destroy.is_some(): container_workspace_op_digest_v3(state.destroy.unwrap()) else: "",
+        absence_result: "absent", machine_settle_digest: state.machine_settle,
+        source_return: "retained-returned", bundle_digest: state.bundle_digest,
+        cancel_cause: state.cancel_cause))
+    if evidence.is_err(): return remote_build_turn_v4(state, capacity, "", evidence.unwrap_err(), true)
+    val settled = host_capacity_owner_settle_associated_v3(capacity, journal_operation, association, state.outcome,
+        evidence.unwrap())
+    # The returned journal owner is the single writer: adopted even on error.
+    if settled.error != "": return remote_build_turn_v4(state, settled.owner, "", settled.error, true)
+    state.stage = "settled"
+    remote_build_turn_v4(state, settled.owner, host_remote_build_reply_v4(state), "", true)
+
+# Close (3.7 analogue, no collector or attachment): a wedged or reserved-unsettled executor keeps everything (fail
+# closed, the next start's reconcile drains); otherwise end the root loan, then close the workload.
+pub fn host_remote_build_close_v4(executor: HostRemoteBuildExecutorV3) -> Result<HostRemoteBuildExecutorV3, text>:
+    var state = executor
+    if state.workload_closed: return Ok(state)
+    if state.stage == "wedged": return Err("linux-host-remote-build-wedged")
+    if state.reserved and state.stage != "settled": return Err("linux-host-remote-build-settle-pending")
+    if val held = state.container:
+        val taken = simple_container_take_workspace_root_v3(held)
+        state.container = Some(taken.owner)
+        if taken.root.is_some(): state.root = taken.root
+    if val root = state.root:
+        if val held = state.container:
+            val ended = simple_container_end_workspace_root_loan_v3(held, root)
+            state.container = Some(ended.owner)
+            if ended.error != "": return Err(ended.error)
+        elif val held = state.fresh:
+            val ended = held.end_workspace_root_loan_v3(root)
+            state.fresh = Some(ended.owner)
+            if ended.error != "": return Err(ended.error)
+        state.root = None
+    if not state.lifecycle_closed:
+        var closed: Result<(), text> = Err("linux-host-remote-build-transfer-missing")
+        if state.container.is_some(): closed = simple_container_close_workload_v3(state.container.unwrap())
+        elif state.fresh.is_some(): closed = state.fresh.unwrap().close_workload_v3()
+        if closed.is_err(): return Err(closed.unwrap_err())
+        state.lifecycle_closed = true
+    state.workload_closed = true
+    Ok(state)
+
+pub struct HostRemoteBuildReleaseV4:
+    executor: Option<HostRemoteBuildExecutorV3>
+    native: Option<LinuxServiceNativeIdentityBorrowV3>
+    error: text
+
+# Service close steps 3-4 (as host_linux_service_agent_release_v4): the service loan once, then the epoch close.
+pub fn host_remote_build_release_v4(executor: HostRemoteBuildExecutorV3,
+        native: Option<LinuxServiceNativeIdentityBorrowV3>) -> HostRemoteBuildReleaseV4:
+    var state = executor
+    if not state.workload_closed: return HostRemoteBuildReleaseV4(executor: Some(state), native: native, error: "linux-host-remote-build-close-pending")
+    if not state.loan_ended:
+        if native.is_none(): return HostRemoteBuildReleaseV4(executor: Some(state), native: None, error: "linux-host-service-loan-borrow-missing")
+        var ended_error = "linux-host-remote-build-transfer-missing"
+        if val held = state.container:
+            val ended = simple_container_end_service_loan_v3(held, native.unwrap())
+            state.container = Some(ended.owner)
+            ended_error = ended.error
+        elif val held = state.fresh:
+            val ended = held.end_service_loan_v3(native.unwrap())
+            state.fresh = Some(ended.owner)
+            ended_error = ended.error
+        if ended_error != "": return HostRemoteBuildReleaseV4(executor: Some(state), native: native, error: ended_error)
+        state.loan_ended = true
+    var closed = false
+    var error = ""
+    if val held = state.container:
+        val turn = simple_container_close_epoch_v3(held)
+        state.container = turn.owner
+        closed = turn.closed and turn.owner.is_none()
+        error = turn.error
+    elif val held = state.fresh:
+        val turn = held.close_v2()
+        state.fresh = turn.owner
+        closed = turn.closed and turn.owner.is_none()
+        error = turn.error
+    if not closed:
+        return HostRemoteBuildReleaseV4(executor: Some(state), native: None,
+            error: if error != "": error else: "linux-host-remote-build-epoch-close-pending")
+    HostRemoteBuildReleaseV4(executor: None, native: None, error: "")
+
+
+# ---- route support (integration item 7): the transferred epoch, the frame codec, the output chunk ----
+
+# 3.5 analogue: after the transfer the epoch is read through whichever holder has it.
+pub fn host_remote_build_epoch_v4(executor: HostRemoteBuildExecutorV3) -> Result<MachineFreshEpochRecordV1, text>:
+    if val held = executor.container: return simple_container_epoch_current_v3(held)
+    if val held = executor.fresh: return held.epoch_current_v3()
+    Err("linux-host-remote-build-transfer-missing")
+
+# One request frame of every route action: the operation id, an index (input / output chunk) and a payload (open
+# record / input chunk / cancel packet). Strict and canonical; the payload stays untrusted until its own check.
+pub struct HostRemoteBuildFrameV4:
+    operation_id: text
+    index: i64 = 0
+    payload: text = ""
+
+pub fn host_remote_build_frame_encode_v4(frame: HostRemoteBuildFrameV4) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("host-remote-build-frame"), "version": SdnValue.Int(4),
+        "operationId": SdnValue.String(frame.operation_id), "index": SdnValue.Int(frame.index),
+        "payload": SdnValue.String(frame.payload)}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+pub fn host_remote_build_frame_decode_v4(source: text) -> Result<HostRemoteBuildFrameV4, text>:
+    if source.byte_len() < 1 or source.byte_len() > 2097152: return Err("linux-host-remote-build-frame-size")
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 2097152, max_depth: 2, max_nodes: 16,
+        max_rows: 0, max_cells: 0, max_columns: 8))
+    if parsed.is_err(): return Err("linux-host-remote-build-frame-syntax")
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return Err("linux-host-remote-build-frame-object")
+    if fields.len() != 5 or not fields.contains_key("operationId") or not fields.contains_key("index") or
+            not fields.contains_key("payload"):
+        return Err("linux-host-remote-build-frame-fields")
+    val operation_id = match fields["operationId"]:
+        case SdnValue.String(value): value
+        case _: return Err("linux-host-remote-build-frame-fields")
+    val index = match fields["index"]:
+        case SdnValue.Int(value): value
+        case _: return Err("linux-host-remote-build-frame-fields")
+    val payload = match fields["payload"]:
+        case SdnValue.String(value): value
+        case _: return Err("linux-host-remote-build-frame-fields")
+    val frame = HostRemoteBuildFrameV4(operation_id: operation_id, index: index, payload: payload)
+    if host_remote_build_frame_encode_v4(frame) != source: return Err("linux-host-remote-build-frame-noncanonical")
+    Ok(frame)
+
+# Output chunk `index` of the archived bundle (<= 576 KiB raw, so the V6 reply stays under 1 MiB) with the whole manifest;
+# the controller reassembles and checks the manifest digest.
+pub fn host_remote_build_output_v4(journal: DistributedOperationJournalV2, executor: HostRemoteBuildExecutorV3,
+        index: i64) -> Result<text, text>:
+    if executor.stage != "settled" or executor.bundle_digest == "": return Err("linux-host-remote-build-output-unavailable")
+    val bundle = distributed_operation_journal_read_required_v3(journal,
+        host_remote_build_bundle_relative_v4(executor.fence, executor.operation_id), 16777216)?
+    if sha256_text(bundle) != executor.bundle_digest: return Err("linux-host-remote-build-bundle-conflict")
+    val bytes = text_to_utf8_bytes(bundle)
+    val manifest = host_remote_build_chunk_manifest_v4(bytes, true)?
+    val chunks = host_remote_build_chunk_split_v4(bytes, true)
+    if index < 0 or index >= chunks.len(): return Err("linux-host-remote-build-output-index")
+    var digests: [SdnValue] = []
+    for digest in manifest.chunk_digests: digests.push(SdnValue.String(digest))
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("host-remote-build-output"),
+        "operationId": SdnValue.String(executor.operation_id), "totalBytes": SdnValue.Int(manifest.total_bytes),
+        "contentDigest": SdnValue.String(manifest.content_digest), "chunkDigests": SdnValue.Array(digests),
+        "manifestDigest": SdnValue.String(host_remote_build_chunk_manifest_digest_v4(manifest)),
+        "index": SdnValue.Int(index), "chunk": SdnValue.String(host_remote_build_chunk_encode_v4(chunks[index], true)?)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+export host_remote_build_no_workload_record_v4, host_remote_build_settle_no_workload_v4
+export HostRemoteBuildOpenAuthorityV4, host_remote_build_open_authority_v4
+export HostRemoteBuildAdmittedV3, HostRemoteBuildObservedV3, HostRemoteBuildPortV4, HostRemoteBuildExecutorV3
+export HostRemoteBuildTurnV4, HostRemoteBuildCancelV4, HostRemoteBuildOpenV4, HostRemoteBuildReleaseV4
+export host_remote_build_deadline_v4, host_remote_build_open_relative_v4, host_remote_build_input_relative_v4
+export host_remote_build_bundle_relative_v4, host_remote_build_exit_outcome_v4, host_remote_build_reply_v4
+export host_remote_build_open_v4, host_remote_build_input_v4, host_remote_build_transfer_v4
+export host_remote_build_request_cancel_v4, host_remote_build_step_v4, host_remote_build_close_v4, host_remote_build_release_v4
+export host_remote_build_profile_gate_v4, host_remote_build_failed_cause_v4, host_remote_build_epoch_v4, HostRemoteBuildFrameV4
+export host_remote_build_frame_encode_v4, host_remote_build_frame_decode_v4, host_remote_build_output_v4

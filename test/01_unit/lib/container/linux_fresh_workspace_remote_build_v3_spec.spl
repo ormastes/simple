@@ -1,0 +1,440 @@
+# AUTHORED_NOT_RUN. milestone_0030 N5 + N6-a (DESIGN 13.3, 14.3, 14.8 steps 2-4): the build profile,
+# manifest and invocation contracts, the input-manifest digest, explicit arm selection, the
+# remote-build request projection / created-config / Create argv, the binding digest (agent golden +
+# build kind/key), the enable window and the machine-policy fixed-child allow-list. DATA only:
+# no native custody, owner or grant is fabricated here.
+# @req REQ-M0030-N5-BUILD-PROFILE
+# @req REQ-M0030-N6A-REMOTE-BUILD-ARM
+use std.io.file_read_text
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.container.linux_workspace_profile_v1.*
+use std.common.contracts.container.linux_agent_workspace_profile_v1.*
+use std.common.contracts.container.build_workspace_profile_v1.*
+use std.common.contracts.container.build_workspace_manifest_v1.*
+use std.common.contracts.container.linux_fresh_workspace_v3.*
+use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.common.contracts.container.linux_fresh_workspace_inspect_v3.*
+use std.common.contracts.container.linux_fresh_epoch_v1.LinuxFreshEpochProfileV1
+use std.common.contracts.container.execution_v2.*
+use std.common.build_manager.remote_build_input_manifest_v3.*
+use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1}
+use std.nogc_sync_mut.io.linux_fresh_workspace_launch_v3.linux_fresh_workspace_argv_v3
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.linux_machine_fixed_child_allowed_v1
+use std.nogc_sync_mut.container.machine_fresh_workspace_source_transition_v3.machine_workspace_enable_window_v3
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.remote_build_request_identity_v4
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.common.json.value.*
+use std.common.contracts.container.agent_workspace_manifest_v1.agent_workspace_manifest_decode_v1
+use std.common.contracts.orchestration.agent_workspace_invocation_v2.{AgentWorkspaceInvocationManifestV2,
+    agent_workspace_invocation_manifest_encode_v2}
+use std.common.contracts.container.agent_executable_profile_v1.AgentExecutableProfileV1
+use test.fixtures.orchestration.agent_workspace_invocation_fixture_v1.agent_workspace_invocation_fixture_v1
+
+fn rb_policy_v3() -> LinuxWorkspaceInstalledProfileV1:
+    LinuxWorkspaceInstalledProfileV1(machine_policy_digest: "a".repeat(64), provider_policy_digest: "b".repeat(64),
+        containment_profile_digest: "c".repeat(64), protected_parent: "/srv/workspaces", leaf_name: "slot_1",
+        expected_pool_id: "xfs:1:2:3:4", expected_workspace_id: "inode:1:2:3:20001", quota_id: 17,
+        hard_bytes: 1073741824, guest_root: "/workspace", read_only: false)
+
+fn rb_build_v3() -> LinuxBuildWorkspaceProfileV1:
+    LinuxBuildWorkspaceProfileV1(machine_policy_digest: "a".repeat(64),
+        workspace_profile_digest: sha256_text(linux_workspace_installed_profile_encode_v1(rb_policy_v3()).unwrap()),
+        image: "registry.example/build@sha256:" + "d".repeat(64), image_config_id: "e".repeat(64),
+        launcher_program: "/opt/simple/build-launcher", producer_path: "inputs/producer", stdout_leaf: "stdout.log",
+        stderr_leaf: "stderr.log", output_root: "outputs", max_input_bytes: 67108864, max_output_bytes: 8388608,
+        memory_minimum_bytes: 268435456, preparation_budget_ms: 60000)
+
+fn rb_manifest_v3() -> BuildWorkspaceManifestV1:
+    BuildWorkspaceManifestV1(profile_digest: sha256_text(linux_build_workspace_profile_encode_v1(rb_build_v3()).unwrap()),
+        slot_binding_digest: "1".repeat(64), task_digest: "2".repeat(64), input_manifest_digest: "3".repeat(64),
+        producer_digest: "4".repeat(64))
+
+fn rb_invocation_v3() -> BuildWorkspaceInvocationV1:
+    val manifest = rb_manifest_v3()
+    BuildWorkspaceInvocationV1(workspace_manifest: build_workspace_manifest_encode_v1(manifest).unwrap(),
+        task_digest: manifest.task_digest, input_manifest_digest: manifest.input_manifest_digest,
+        preparation_budget_ms: 45000, not_after: 1900000000000)
+
+fn rb_primary_v3() -> LinuxWorkspacePrimaryV3:
+    LinuxWorkspacePrimaryV3.RemoteBuild(rb_build_v3())
+
+fn rb_native_v3(terminal_mode: text) -> LinuxOciRequestV1:
+    LinuxOciRequestV1(pod_uid: "job_1", attempt: 1, operation_id: "operation_1", image: "registry.example/build@sha256:" + "d".repeat(64),
+        bundle_path: "", command: ["/opt/simple/build-launcher"], args: ["--build-invocation-sha256", "8".repeat(64)],
+        timeout_ms: 30000, cpu_limit_millis: 1000, memory_limit_bytes: 1342177280, pid_limit: 128,
+        network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true, working_directory: "/workspace",
+        terminal_mode: terminal_mode, user_uid: 20001, user_gid: 20001, user_namespace_mode: "keep-id",
+        containment_profile_digest: "c".repeat(64),
+        mounts: [ContainerMountProjectionV2(host_root: "/srv/workspaces/slot_1", guest_root: "/workspace", read_only: false)])
+
+fn rb_scope_v3() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "host_1", service_scope_id: "epoch-" + "9".repeat(64),
+        boot_id: "boot_1", provider_generation: 7, native_machine_id: "f".repeat(32), continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot_1")
+
+fn rb_request_v3(native: LinuxOciRequestV1) -> ContainerExecutionRequestV2:
+    val scope = rb_scope_v3()
+    val plan = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: native.pod_uid, attempt: native.attempt,
+        operation_id: native.operation_id, request_digest: linux_oci_request_digest_v1(native).unwrap(), physical_host_id: scope.physical_host_id,
+        service_scope_id: scope.service_scope_id, boot_id: scope.boot_id, provider_generation: scope.provider_generation,
+        native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id)
+    ContainerExecutionRequestV2(plan, linux_oci_retained_request_encode_v1(native).unwrap())
+
+fn rb_command_v3(action: LinuxFreshWorkloadActionV2, native_id: text) -> LinuxFreshWorkspaceCommandV3:
+    LinuxFreshWorkspaceCommandV3(command: LinuxFreshWorkloadCommandV2(request: rb_request_v3(rb_native_v3("none")),
+        scope: rb_scope_v3(), action: action, native_id: native_id, image: "registry.example/build@sha256:" + "d".repeat(64),
+        entrypoint: ["/opt/simple/build-launcher"], args: ["--build-invocation-sha256", "8".repeat(64)],
+        cpu_millis: 1000, memory_bytes: 1342177280, pid_limit: 128, timeout_ms: 30000,
+        helper_cpu_millis: 500, helper_memory_bytes: 134217728))
+
+fn rb_epoch_v3() -> LinuxFreshEpochProfileV1:
+    LinuxFreshEpochProfileV1(fields: {"graphRoot": SdnValue.String("/srv/provider/graph"), "runRoot": SdnValue.String("/srv/provider/run"),
+        "delegatedCgroup": SdnValue.String("/simple/containers"), "serviceUid": SdnValue.Int(20001), "serviceGid": SdnValue.Int(20001),
+        "subuidStart": SdnValue.Int(100000), "subuidCount": SdnValue.Int(65536), "subgidStart": SdnValue.Int(200000), "subgidCount": SdnValue.Int(65536)})
+
+fn rb_created_v3(command: LinuxFreshWorkspaceCommandV3) -> JsonValue:
+    var value = JsonValue.Object([], [])
+    for key in linux_fresh_workspace_inspect_field_names_v3(): value = json_value_object_set(value, key, JsonValue.Null)
+    val c = command.command
+    for pair in [("id", c.native_id), ("pod_uid", "job_1"), ("attempt", "1"),
+            ("node_boot_id", container_scope_fence_id_v2(c.scope).unwrap()), ("provider_generation", "7"),
+            ("operation_id", "operation_1"), ("cgroup", ""), ("status", "created"), ("runtime", "crun"), ("manager", "cgroupfs"),
+            ("cgroup_mode", "private"), ("pid_mode", "private"), ("cgroups", "default"), ("network_mode", "none"), ("userns_mode", "private"),
+            ("image_digest", "sha256:" + "d".repeat(64)), ("image_name", "registry.example/build@sha256:" + "d".repeat(64)),
+            ("path", "/opt/simple/build-launcher"), ("workdir", "/workspace"), ("configured_user", "20001:20001"), ("cgroup_parent", "/simple/containers")]:
+        value = json_value_object_set(value, pair.0, JsonValue.Str(pair.1))
+    for pair in [("pid", 0), ("effective_caps", 0), ("bounding_caps", 0), ("cpu_period", 100000), ("cpu_quota", 100000),
+            ("memory_bytes", 1342177280), ("memory_swap", 1342177280), ("pids_limit", 128)]:
+        value = json_value_object_set(value, pair.0, JsonValue.Int(pair.1))
+    for pair in [("privileged", false), ("readonly_rootfs", true), ("no_new_privileges", true), ("tty", false), ("open_stdin", false), ("stdin_once", false)]:
+        value = json_value_object_set(value, pair.0, JsonValue.Bool(pair.1))
+    value = json_value_object_set(value, "args", json_value_str_array(["--build-invocation-sha256", "8".repeat(64)]))
+    value = json_value_object_set(value, "environment", json_value_str_array(["PATH=/usr/bin"]))
+    value = json_value_object_set(value, "security_options", json_value_str_array(["no-new-privileges"]))
+    value = json_value_object_set(value, "create_command", json_value_str_array(["/usr/bin/podman", "create"]))
+    var mount = JsonValue.Object([], [])
+    for pair in [("Type", "bind"), ("Source", "/srv/workspaces/slot_1"), ("Destination", "/workspace"), ("Driver", ""), ("Mode", ""), ("Propagation", "rprivate")]:
+        mount = json_value_object_set(mount, pair.0, JsonValue.Str(pair.1))
+    mount = json_value_object_set(mount, "Options", json_value_str_array(["rbind", "nosuid", "nodev"]))
+    mount = json_value_object_set(mount, "RW", JsonValue.Bool(true))
+    value = json_value_object_set(value, "mounts", JsonValue.Array([mount]))
+    value = json_value_object_set(value, "binds", json_value_str_array(["/srv/workspaces/slot_1:/workspace:rw,rbind,rprivate,nosuid,nodev"]))
+    value
+
+fn rb_kind_only_v3(kind: text) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String(kind), "version": SdnValue.Int(1)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn rb_snapshot_v3() -> LinuxFreshWorkspaceBindingSnapshotV3:
+    LinuxFreshWorkspaceBindingSnapshotV3(binding_digest: "", machine_policy_digest: "a".repeat(64), provider_policy_digest: "b".repeat(64),
+        workspace_profile_digest: "c".repeat(64), agent_profile_digest: "d".repeat(64), request_digest: "e".repeat(64),
+        manifest_digest: "f".repeat(64), invocation_digest: "1".repeat(64), lease_binding_digest: "2".repeat(64),
+        workspace_identity_digest: "3".repeat(64), directory_binding_digest: "4".repeat(64), source_manifest_digest: "5".repeat(64),
+        bootstrap_digest: "6".repeat(64), git_digest: "7".repeat(64), agent_digest: "8".repeat(64), image_config_id: "9".repeat(64),
+        service_uid: 20001, service_gid: 20001)
+
+describe "Remote-build workspace contracts (milestone_0030 N5)":
+    it "round-trips the build profile canonically and refuses unknown keys and overlaps":
+        step("Encode, decode and re-encode the installed build profile")
+        val source = linux_build_workspace_profile_encode_v1(rb_build_v3()).unwrap()
+        expect(linux_build_workspace_profile_decode_v1(source).unwrap()).to_equal(rb_build_v3())
+        val extra: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-build-workspace-profile"), "version": SdnValue.Int(1),
+            "unknown": SdnValue.String("x")}
+        expect(linux_build_workspace_profile_decode_v1(sdn_encode_canonical(SdnValue.Dict(extra)) + "\n").is_err()).to_equal(true)
+        step("Refuse reserved-path overlaps, an absolute producer and an unpinned image")
+        var changed = rb_build_v3()
+        changed.producer_path = "outputs/producer"
+        expect(linux_build_workspace_profile_encode_v1(changed).unwrap_err()).to_equal("build-profile-producer-under-outputs")
+        changed = rb_build_v3()
+        changed.stderr_leaf = changed.stdout_leaf
+        expect(linux_build_workspace_profile_encode_v1(changed).unwrap_err()).to_equal("build-profile-stream-leaf")
+        changed = rb_build_v3()
+        changed.producer_path = "/inputs/producer"
+        expect(linux_build_workspace_profile_encode_v1(changed).unwrap_err()).to_equal("build-profile-path")
+        changed = rb_build_v3()
+        changed.producer_path = "inputs/../producer"
+        expect(linux_build_workspace_profile_encode_v1(changed).unwrap_err()).to_equal("build-profile-path")
+        changed = rb_build_v3()
+        changed.image = "registry.example/build:latest"
+        expect(linux_build_workspace_profile_encode_v1(changed).unwrap_err()).to_equal("build-profile-image")
+        changed = rb_build_v3()
+        changed.preparation_budget_ms = 0
+        expect(linux_build_workspace_profile_encode_v1(changed).unwrap_err()).to_equal("build-profile-bounds")
+
+    it "round-trips the manifest and invocation and binds the invocation to its manifest":
+        step("The invocation must carry the manifest's task and input-manifest digests")
+        val manifest = build_workspace_manifest_encode_v1(rb_manifest_v3()).unwrap()
+        expect(build_workspace_manifest_decode_v1(manifest).unwrap()).to_equal(rb_manifest_v3())
+        val invocation = build_workspace_invocation_encode_v1(rb_invocation_v3()).unwrap()
+        expect(build_workspace_invocation_decode_v1(invocation).unwrap()).to_equal(rb_invocation_v3())
+        var changed = rb_invocation_v3()
+        changed.task_digest = "9".repeat(64)
+        expect(build_workspace_invocation_encode_v1(changed).unwrap_err()).to_equal("build-invocation-manifest-binding")
+        changed = rb_invocation_v3()
+        changed.not_after = 0
+        expect(build_workspace_invocation_encode_v1(changed).unwrap_err()).to_equal("build-invocation-bounds")
+        var bad = rb_manifest_v3()
+        bad.producer_digest = "short"
+        expect(build_workspace_manifest_encode_v1(bad).unwrap_err()).to_equal("build-manifest-digest")
+
+    it "hashes the input manifest in order so a reorder or digest change is a different manifest":
+        step("Producer first, then inputs; order is part of the digest")
+        val producer = RemoteBuildInputEntryV3(path: "inputs/producer", digest: "4".repeat(64))
+        val input = RemoteBuildInputEntryV3(path: "inputs/a.spl", digest: "5".repeat(64))
+        val digest = remote_build_input_manifest_entries_digest_v3([producer, input]).unwrap()
+        expect(digest.byte_len()).to_equal(64)
+        expect(remote_build_input_manifest_entries_digest_v3([input, producer]).unwrap() != digest).to_equal(true)
+        expect(remote_build_input_manifest_entries_digest_v3([producer, RemoteBuildInputEntryV3(path: "inputs/a.spl", digest: "6".repeat(64))]).unwrap() != digest).to_equal(true)
+        expect(remote_build_input_manifest_entries_digest_v3([]).is_err()).to_equal(true)
+
+    it "derives the task-level input manifest from the signed task: producer (task.program) first, then inputs":
+        # @req M0030-INTEG-2 (lane B G9, lane A gap k: one task-level wrapper for host and controller)
+        val task = BuildTaskV1(id: "t1", attempt: 1, phase: "build", producer_digest: "4".repeat(64),
+            source_digest: "7".repeat(64), toolchain_digest: "8".repeat(64), dependencies: [], program: "inputs/producer",
+            args: [], inputs: [BuildInputV1(path: "inputs/a.spl", digest: "5".repeat(64))], outputs: [], cache_key: "",
+            timeout_ms: 1000, memory_limit_bytes: 0, links: [])
+        val expected = remote_build_input_manifest_entries_digest_v3([RemoteBuildInputEntryV3(path: "inputs/producer", digest: "4".repeat(64)),
+            RemoteBuildInputEntryV3(path: "inputs/a.spl", digest: "5".repeat(64))]).unwrap()
+        expect(remote_build_input_manifest_digest_v3(task).unwrap()).to_equal(expected)
+        expect(remote_build_input_manifest_entries_v3(task).len()).to_equal(2)
+        expect(remote_build_input_manifest_entries_v3(task)[0].path).to_equal("inputs/producer")
+        step("an empty producer path is refused, never defaulted")
+        var bad = task
+        bad.program = ""
+        expect(remote_build_input_manifest_digest_v3(bad).unwrap_err()).to_equal("remote-build-input-manifest-entry")
+
+    it "allows build-workspace-profile.sdn beside the agent profile and nothing unlisted":
+        step("The fixed-child allow-list is closed")
+        for name in ["supervisor-profile.sdn", "workspace-profile.sdn", "fresh-epoch-profile.sdn", "agent-workspace-profile.sdn",
+                "build-workspace-profile.sdn"]:
+            expect(linux_machine_fixed_child_allowed_v1(name)).to_equal(true)
+        for name in ["machine-policy.sdn", "remote-build-helper-template.sdn", "../agent-workspace-profile.sdn", "build-workspace-profile"]:
+            expect(linux_machine_fixed_child_allowed_v1(name)).to_equal(false)
+
+describe "Explicit workload-kind arm selection (milestone_0030 N6-a)":
+    it "selects the arm from the manifest kind only and refuses unknown kinds":
+        step("Agent kind -> Agent, build kind -> RemoteBuild, anything else refused")
+        expect(linux_workspace_manifest_arm_v3(rb_kind_only_v3("agent-workspace-manifest")).unwrap()).to_equal(LinuxWorkspaceArmV3.Agent)
+        expect(linux_workspace_manifest_arm_v3(build_workspace_manifest_encode_v1(rb_manifest_v3()).unwrap()).unwrap()).to_equal(LinuxWorkspaceArmV3.RemoteBuild)
+        expect(linux_workspace_manifest_arm_v3(rb_kind_only_v3("remote-build-workspace-invocation")).unwrap_err()).to_equal("fresh-workspace-manifest-kind-unsupported")
+        val no_kind: Dict<text, SdnValue> = {"version": SdnValue.Int(1)}
+        expect(linux_workspace_manifest_arm_v3(sdn_encode_canonical(SdnValue.Dict(no_kind)) + "\n").unwrap_err()).to_equal("fresh-workspace-manifest-kind-missing")
+
+    it "never lets one arm's manifest be decoded as the other's":
+        step("A build manifest is not an agent manifest and vice versa")
+        val build_manifest = build_workspace_manifest_encode_v1(rb_manifest_v3()).unwrap()
+        expect(build_workspace_manifest_decode_v1(rb_kind_only_v3("agent-workspace-manifest")).is_err()).to_equal(true)
+        expect(linux_workspace_manifest_arm_v3(build_manifest).unwrap() != LinuxWorkspaceArmV3.Agent).to_equal(true)
+        step("lane A review P3: the real build manifest bytes are refused by the agent manifest decoder")
+        expect(agent_workspace_manifest_decode_v1(build_manifest).is_err()).to_equal(true)
+        step("and a real agent manifest is refused by the build decoder")
+        val agent_manifest = agent_workspace_invocation_fixture_v1().packet.manifest.workspace_manifest
+        expect(build_workspace_manifest_decode_v1(agent_manifest).is_err()).to_equal(true)
+
+describe "Remote-build request projection, created config and argv (milestone_0030 N6-a)":
+    it "projects the build image, launcher entrypoint, build-invocation args and terminal mode none":
+        step("The exact installed build projection is accepted")
+        val projected = linux_fresh_workspace_request_v3(rb_request_v3(rb_native_v3("none")), rb_policy_v3(), rb_primary_v3(),
+            "8".repeat(64), 20001, 20001).unwrap()
+        expect(projected.image).to_equal("registry.example/build@sha256:" + "d".repeat(64))
+        expect(projected.entrypoint).to_equal(["/opt/simple/build-launcher"])
+        expect(projected.args).to_equal(["--build-invocation-sha256", "8".repeat(64)])
+        step("A TTY-mode request is not the build projection")
+        expect(linux_fresh_workspace_request_v3(rb_request_v3(rb_native_v3("tty")), rb_policy_v3(), rb_primary_v3(),
+            "8".repeat(64), 20001, 20001).unwrap_err()).to_equal("fresh-workspace-request-not-exact-installed-projection")
+        step("The build request is not admitted on the agent arm")
+        val agent = LinuxAgentWorkspaceProfileV1(machine_policy_digest: "a".repeat(64), workspace_profile_digest: rb_build_v3().workspace_profile_digest,
+            assets_root: "/srv/approved-assets", repository_ref: "repo_1", revision_oid: "1".repeat(40), object_format: "sha1",
+            source_manifest_digest: "2".repeat(64), bootstrap_digest: "3".repeat(64), git_digest: "4".repeat(64), agent_digest: "5".repeat(64),
+            bootstrap_program: "/opt/simple/bootstrap", image: "registry.example/agent@sha256:" + "6".repeat(64),
+            agent_program: "/usr/bin/codex", image_config_id: "7".repeat(64))
+        expect(linux_fresh_workspace_request_v3(rb_request_v3(rb_native_v3("none")), rb_policy_v3(), LinuxWorkspacePrimaryV3.Agent(agent),
+            "8".repeat(64), 20001, 20001).is_err()).to_equal(true)
+
+    it "refuses a guest root that would shadow the build launcher outside the fixed system paths":
+        step("Only the launcher protection, not /usr or /opt, catches this mount")
+        var policy = rb_policy_v3()
+        policy.guest_root = "/srv/tools"
+        var build = rb_build_v3()
+        build.workspace_profile_digest = sha256_text(linux_workspace_installed_profile_encode_v1(policy).unwrap())
+        build.launcher_program = "/srv/tools/launcher"
+        expect(linux_fresh_workspace_request_v3(rb_request_v3(rb_native_v3("none")), policy, LinuxWorkspacePrimaryV3.RemoteBuild(build),
+            "8".repeat(64), 20001, 20001).unwrap_err()).to_equal("fresh-workspace-image-assets-shadowed")
+
+    it "accepts the non-TTY build created config and refuses TTY or launcher drift":
+        step("tty/open_stdin false and the launcher path come from the build arm")
+        val command = rb_command_v3(LinuxFreshWorkloadActionV2.Inspect, "3".repeat(64))
+        val original = rb_created_v3(command)
+        expect(linux_fresh_workspace_created_config_validate_v3(rb_policy_v3(), rb_primary_v3(), "8".repeat(64), 20001, 20001,
+            command, json_value_serialize(original)).is_ok()).to_equal(true)
+        val tty = json_value_object_set(original, "tty", JsonValue.Bool(true))
+        expect(linux_fresh_workspace_created_config_validate_v3(rb_policy_v3(), rb_primary_v3(), "8".repeat(64), 20001, 20001,
+            command, json_value_serialize(tty)).unwrap_err()).to_equal("fresh-workspace-created-security-tty-correspondence")
+        val path = json_value_object_set(original, "path", JsonValue.Str("/opt/simple/bootstrap"))
+        expect(linux_fresh_workspace_created_config_validate_v3(rb_policy_v3(), rb_primary_v3(), "8".repeat(64), 20001, 20001,
+            command, json_value_serialize(path)).unwrap_err()).to_equal("fresh-workspace-created-config-correspondence")
+        val args = json_value_object_set(original, "args", json_value_str_array(["--invocation-manifest-sha256", "8".repeat(64)]))
+        expect(linux_fresh_workspace_created_config_validate_v3(rb_policy_v3(), rb_primary_v3(), "8".repeat(64), 20001, 20001,
+            command, json_value_serialize(args)).unwrap_err()).to_equal("fresh-workspace-created-bootstrap-argv")
+
+    it "emits a Create argv without TTY flags that ends in the launcher and build-invocation args":
+        val args = linux_fresh_workspace_argv_v3(rb_epoch_v3(), rb_policy_v3(), rb_primary_v3(), "8".repeat(64), 20001, 20001,
+            rb_command_v3(LinuxFreshWorkloadActionV2.Create, "")).unwrap()
+        expect(args.contains("--tty")).to_equal(false)
+        expect(args.contains("--interactive")).to_equal(false)
+        for item in ["--userns=keep-id", "--user=20001:20001", "--read-only", "--cap-drop=ALL", "--network=none",
+                "type=bind,src=/srv/workspaces/slot_1,dst=/workspace,rw,nosuid,nodev,bind-propagation=rprivate"]:
+            expect(args.contains(item)).to_equal(true)
+        expect(args[args.len() - 5]).to_equal("/opt/simple/build-launcher")
+        expect(args[args.len() - 3]).to_equal("registry.example/build@sha256:" + "d".repeat(64))
+        expect(args[args.len() - 2]).to_equal("--build-invocation-sha256")
+        expect(args[args.len() - 1]).to_equal("8".repeat(64))
+
+describe "Workspace binding digest per arm (milestone_0030 N6-a)":
+    it "hashes the agent arm exactly as the pre-N6 field set":
+        step("Golden: the original agent dict, copied literally")
+        val s = rb_snapshot_v3()
+        val original: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-fresh-workspace-binding"), "version": SdnValue.Int(3),
+            "machine": SdnValue.String(s.machine_policy_digest), "provider": SdnValue.String(s.provider_policy_digest),
+            "workspace": SdnValue.String(s.workspace_profile_digest), "agent": SdnValue.String(s.agent_profile_digest),
+            "request": SdnValue.String("REQUEST-BYTES"), "manifest": SdnValue.String("MANIFEST-BYTES"),
+            "invocation": SdnValue.String(s.invocation_digest), "lease": SdnValue.String(s.lease_binding_digest),
+            "nativeRoot": SdnValue.String(s.workspace_identity_digest), "directories": SdnValue.String(s.directory_binding_digest),
+            "uid": SdnValue.Int(s.service_uid), "gid": SdnValue.Int(s.service_gid)}
+        expect(linux_fresh_workspace_binding_digest_v3(LinuxWorkspaceArmV3.Agent, s, "REQUEST-BYTES", "MANIFEST-BYTES")).to_equal(
+            sha256_text(sdn_encode_canonical(SdnValue.Dict(original)) + "\n"))
+
+    it "hashes the build arm under its own kind and key":
+        val s = rb_snapshot_v3()
+        val build: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-fresh-remote-build-binding"), "version": SdnValue.Int(3),
+            "machine": SdnValue.String(s.machine_policy_digest), "provider": SdnValue.String(s.provider_policy_digest),
+            "workspace": SdnValue.String(s.workspace_profile_digest), "build": SdnValue.String(s.agent_profile_digest),
+            "request": SdnValue.String("REQUEST-BYTES"), "manifest": SdnValue.String("MANIFEST-BYTES"),
+            "invocation": SdnValue.String(s.invocation_digest), "lease": SdnValue.String(s.lease_binding_digest),
+            "nativeRoot": SdnValue.String(s.workspace_identity_digest), "directories": SdnValue.String(s.directory_binding_digest),
+            "uid": SdnValue.Int(s.service_uid), "gid": SdnValue.Int(s.service_gid)}
+        val digest = linux_fresh_workspace_binding_digest_v3(LinuxWorkspaceArmV3.RemoteBuild, s, "REQUEST-BYTES", "MANIFEST-BYTES")
+        expect(digest).to_equal(sha256_text(sdn_encode_canonical(SdnValue.Dict(build)) + "\n"))
+        expect(digest != linux_fresh_workspace_binding_digest_v3(LinuxWorkspaceArmV3.Agent, s, "REQUEST-BYTES", "MANIFEST-BYTES")).to_equal(true)
+
+describe "Enable preparation window per arm (milestone_0030 N6-a)":
+    it "takes the build budget and not_after from the build invocation bound to the manifest":
+        val manifest = build_workspace_manifest_encode_v1(rb_manifest_v3()).unwrap()
+        val invocation = build_workspace_invocation_encode_v1(rb_invocation_v3()).unwrap()
+        val window = machine_workspace_enable_window_v3(manifest, sha256_text(invocation), invocation).unwrap()
+        expect(window.0).to_equal(45000)
+        expect(window.1).to_equal(1900000000000)
+
+    it "refuses a digest mismatch, a foreign manifest and an agent invocation on the build arm":
+        val manifest = build_workspace_manifest_encode_v1(rb_manifest_v3()).unwrap()
+        val invocation = build_workspace_invocation_encode_v1(rb_invocation_v3()).unwrap()
+        expect(machine_workspace_enable_window_v3(manifest, "0".repeat(64), invocation).unwrap_err()).to_equal("linux-workspace-full-invocation-digest")
+        var other = rb_manifest_v3()
+        other.slot_binding_digest = "9".repeat(64)
+        val foreign = build_workspace_manifest_encode_v1(other).unwrap()
+        expect(machine_workspace_enable_window_v3(foreign, sha256_text(invocation), invocation).unwrap_err()).to_equal("linux-workspace-full-invocation-canonical-binding")
+        val agent_like = rb_kind_only_v3("agent-workspace-native-invocation")
+        expect(machine_workspace_enable_window_v3(manifest, sha256_text(agent_like), agent_like).is_err()).to_equal(true)
+        step("On the agent arm a build invocation is not decoded as the agent's")
+        expect(machine_workspace_enable_window_v3(rb_kind_only_v3("agent-workspace-manifest"), sha256_text(invocation), invocation).is_err()).to_equal(true)
+
+describe "Agent enable window golden (lane A review P2-1)":
+    it "takes the agent budget and not_after from the agent full invocation exactly as before N6-a":
+        # @req M0030-LANEA-GOLDEN-01: fixture literals preparation_budget_ms 1, not_after 170
+        # (test/fixtures/orchestration/agent_workspace_invocation_fixture_v1.spl:49)
+        val base = agent_workspace_invocation_fixture_v1().packet.manifest
+        val full = AgentWorkspaceInvocationManifestV2(base: base, executable_profile: AgentExecutableProfileV1(
+            architecture: "linux-x86_64", image_size_bytes: 1, max_image_bytes: 1, bootstrap_memory_bytes: 1, agent_memory_bytes: 1))
+        val invocation = agent_workspace_invocation_manifest_encode_v2(full).unwrap()
+        expect(linux_workspace_manifest_arm_v3(base.workspace_manifest).unwrap()).to_equal(LinuxWorkspaceArmV3.Agent)
+        val window = machine_workspace_enable_window_v3(base.workspace_manifest, sha256_text(invocation), invocation).unwrap()
+        expect(window.0).to_equal(1)
+        expect(window.1).to_equal(170)
+        step("the agent arm refuses a digest mismatch and an invocation bound to another manifest")
+        expect(machine_workspace_enable_window_v3(base.workspace_manifest, "0".repeat(64), invocation).unwrap_err()).to_equal(
+            "linux-workspace-full-invocation-digest")
+        val build_manifest = build_workspace_manifest_encode_v1(rb_manifest_v3()).unwrap()
+        expect(machine_workspace_enable_window_v3(build_manifest, sha256_text(invocation), invocation).is_err()).to_equal(true)
+
+describe "Build profile image config id (lane A review P3)":
+    it "refuses a non-digest image_config_id at decode":
+        # @req M0030-LANEA-PROFILE-01
+        val bytes = linux_build_workspace_profile_encode_v1(rb_build_v3()).unwrap()
+        expect(linux_build_workspace_profile_decode_v1(bytes).unwrap().image_config_id).to_equal("e".repeat(64))
+        expect(linux_build_workspace_profile_decode_v1(bytes.replace("e".repeat(64), "not-a-digest")).unwrap_err()).to_equal(
+            "build-profile-image-config")
+        var short = rb_build_v3()
+        short.image_config_id = "e".repeat(63)
+        expect(linux_build_workspace_profile_encode_v1(short).unwrap_err()).to_equal("build-profile-image-config")
+
+describe "remote-build op (i) preparation budget (integration item 10, gap e)":
+    it "refuses an invocation whose preparation budget exceeds the installed profile's":
+        # @req M0030-INTEG-10 (gap e: invocation preparation_budget_ms <= profile preparation_budget_ms, before any write)
+        val source = file_read_text("src/lib/nogc_async_mut/container/providers/linux/remote_build_workspace_stage_v1.spl")
+        val binding = source.index_of("return Err(\"remote-build-stage-invocation-manifest-binding\")")
+        val budget = source.index_of("if invocation.preparation_budget_ms > profile.preparation_budget_ms: return Err(\"remote-build-stage-preparation-budget\")")
+        expect(binding > 0 and budget > binding).to_equal(true)
+
+describe "One 1 MiB bound for the remote-build arm (lane A review P3)":
+    it "derives the stage file cap, the stage invocation bound and the build retire bound from one constant":
+        # @req M0030-LANEA-MIB-01: container_settled_workspace_file_cap_v3 is the single literal
+        val stage = file_read_text("src/lib/nogc_async_mut/container/providers/linux/remote_build_workspace_stage_v1.spl")
+        expect(stage.contains("1048576")).to_equal(false)
+        expect(stage).to_contain("pub fn linux_remote_build_stage_file_cap_v1() -> i64: container_settled_workspace_file_cap_v3()")
+        expect(stage).to_contain("invocation_bytes.byte_len() > linux_remote_build_stage_file_cap_v1()")
+        val owner = file_read_text("src/lib/nogc_async_mut/container/providers/linux/workspace_mount_owner_v1.spl")
+        expect(owner).to_contain("invocation_source.byte_len() > linux_remote_build_stage_file_cap_v1() or sha256_text(invocation_source) != state.build_invocation_digest")
+
+describe "Gap m: build values in the shared snapshot fields (lane A review P2-4)":
+    it "keeps the agent record bytes and makes every agent-semantic reader refuse a build binding":
+        # @req M0030-LANEA-GAPM-01. Choice: the shared field layout stays (agent bytes unchanged); the build arm maps
+        # task->bootstrap, profile->git, producer->agent, inputs->sourceManifest under its own binding kind. Readers that
+        # interpret those fields as agent values must pass workspace_binding_agent_v3 first.
+        val source = file_read_text("src/lib/nogc_sync_mut/io/linux_fresh_workspace_binding_v3.spl")
+        step("the only reader of snapshot.agent_digest is validate_primary_v3, and it is arm-gated before the read")
+        expect(source.split("snapshot.agent_digest").len() - 1).to_equal(1)
+        val body = source.substring(source.index_of("pub fn validate_primary_v3("), source.index_of("pub fn validate_guest_identity_v3("))
+        val gate = body.index_of("workspace_binding_agent_v3(actual)?")
+        expect(gate > 0 and gate < body.index_of("snapshot.agent_digest")).to_equal(true)
+        step("no other module reads the snapshot's agent-named digests as agent values")
+        for path in ["src/lib/nogc_async_mut/container/providers/linux/agent_workspace_bootstrap_v1.spl",
+                "src/lib/nogc_sync_mut/container/machine_fresh_workspace_record_v3.spl"]:
+            expect(file_read_text(path).contains("snapshot.agent_digest")).to_equal(false)
+        step("integration review P3-b: the arm gates bind nothing (no unused agent_only value)")
+        expect(source.contains("val agent_only")).to_equal(false)
+        expect(source.split("val _ = workspace_binding_agent_v3(").len() - 1).to_equal(3)
+
+    it "refuses at open the profile-independent request_bytes mismatches (re-review P3-1)":
+        # @req M0030-LANEA-OPENID-01. The full N6-a projection needs the installed profiles (only after the transfer);
+        # these fields need none: operation, workload uid, attempt, request digest vs plan, a workspace, no devices.
+        val good = rb_request_v3(rb_native_v3("none"))
+        expect(remote_build_request_identity_v4(good).is_ok()).to_equal(true)
+        val mismatch = Err("linux-host-remote-build-request-bytes-mismatch")
+        step("plan identity differs from the request bytes")
+        var operation = good
+        operation.plan.operation_id = "operation_2"
+        expect(remote_build_request_identity_v4(operation)).to_equal(mismatch)
+        var uid = good
+        uid.plan.workload_uid = "job_2"
+        expect(remote_build_request_identity_v4(uid)).to_equal(mismatch)
+        var attempt = good
+        attempt.plan.attempt = 2
+        expect(remote_build_request_identity_v4(attempt)).to_equal(mismatch)
+        var digest = good
+        digest.plan.request_digest = "e".repeat(64)
+        expect(remote_build_request_identity_v4(digest)).to_equal(mismatch)
+        step("no workspace in the request bytes")
+        var bare = rb_native_v3("none")
+        bare.mounts = []
+        var unmounted = rb_request_v3(bare)
+        unmounted.plan = good.plan
+        expect(remote_build_request_identity_v4(unmounted).is_err()).to_equal(true)
+        step("bytes that are not the retained request are refused by the existing decoder")
+        var opaque = good
+        opaque.request_bytes = "opaque-codec-DATA\n"
+        expect(remote_build_request_identity_v4(opaque).is_err()).to_equal(true)
+        step("decoder and digest errors carry the uniform code, raw cause as a suffix (re-review P3-2)")
+        expect(remote_build_request_identity_v4(opaque).unwrap_err().starts_with("linux-host-remote-build-request-bytes-mismatch:")).to_equal(true)

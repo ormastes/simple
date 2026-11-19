@@ -1,0 +1,35 @@
+# Remote-build input manifest digest (milestone_0030 DESIGN 13.3.2). The manifest is
+# [(producer path, task.producer_digest)] ++ [(input path, input digest)], in that order.
+# Host staging (op i) and the controller both hash it through this one function. The task-level
+# wrapper names the producer by the signed task's own `program` path (the path the producer is
+# staged at; op (i) requires it to equal the installed profile's `producer_path`).
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.{BuildTaskV1, builder_digest_valid_v1}
+
+pub struct RemoteBuildInputEntryV3:
+    path: text
+    digest: text
+
+pub fn remote_build_input_manifest_entries_digest_v3(entries: [RemoteBuildInputEntryV3]) -> Result<text, text>:
+    if entries.len() < 1 or entries.len() > 4097: return Err("remote-build-input-manifest-count")
+    var rows: [SdnValue] = []
+    for entry in entries:
+        if entry.path == "" or entry.path.byte_len() > 1024 or not builder_digest_valid_v1(entry.digest):
+            return Err("remote-build-input-manifest-entry")
+        # @workaround bug=mir_enum_payload_inline_dict_literal_key_annotation_mismatch_2026-11-14
+        val row: Dict<text, SdnValue> = {"path": SdnValue.String(entry.path), "digest": SdnValue.String(entry.digest)}
+        rows.push(SdnValue.Dict(row))
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("remote-build-input-manifest"), "version": SdnValue.Int(3),
+        "entries": SdnValue.Array(rows)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"))
+
+# [(task.program, task.producer_digest)] ++ [(input.path, input.digest)], in task order.
+pub fn remote_build_input_manifest_entries_v3(task: BuildTaskV1) -> [RemoteBuildInputEntryV3]:
+    var entries: [RemoteBuildInputEntryV3] = [RemoteBuildInputEntryV3(path: task.program, digest: task.producer_digest)]
+    for input in task.inputs: entries.push(RemoteBuildInputEntryV3(path: input.path, digest: input.digest))
+    entries
+
+pub fn remote_build_input_manifest_digest_v3(task: BuildTaskV1) -> Result<text, text>:
+    remote_build_input_manifest_entries_digest_v3(remote_build_input_manifest_entries_v3(task))

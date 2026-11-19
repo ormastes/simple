@@ -1,0 +1,49 @@
+# milestone_0030 13.1 / 14.11 (G4): structural transport of the V3 bundle (own header). The measurements travel as
+# their canonical SDN, whose workload exit is L10's `runtime_exit_status_text_v1` form. The controller-side decode lands
+# with the controller driver (remote-run); the Host only encodes.
+use app.buildrunner.remote_container_evidence_v3.{RemoteContainerBundleV3, remote_container_byte_count_v3}
+use app.buildrunner.remote_container_authority_v3.remote_container_completion_encode_v3
+use app.buildrunner.remote_bundle_codec_v1.remote_bundle_blob_lines_v1
+use std.common.contracts.container.workspace_measurement_v3.remote_container_measurements_encode_v3
+use std.common.build_manager.codec.{builder_wire_line_v1, builder_encode_result_v1}
+use std.common.build_manager.contracts.builder_relative_path_valid_v1
+use std.common.text_bytes.text_to_utf8_bytes
+
+pub val REMOTE_CONTAINER_BUNDLE_BYTES_MAX_V3: i64 = 4194304
+pub val REMOTE_CONTAINER_BUNDLE_WIRE_MAX_V3: i64 = 16777216
+
+fn remote_container_bundle_encode_v3(bundle: RemoteContainerBundleV3) -> Result<text, text>:
+    val result_wire = builder_encode_result_v1(bundle.result)
+    if result_wire == "": return Err("REMOTE_CONTAINER_BUNDLE_RESULT_INVALID")
+    val completion_wire = remote_container_completion_encode_v3(bundle.completion)?
+    val measurement_wire = remote_container_measurements_encode_v3(bundle.evidence.measurements)?
+    if bundle.evidence.outputs.len() > 4096: return Err("REMOTE_CONTAINER_BUNDLE_OUTPUT_COUNT_INVALID")
+    val result_bytes = text_to_utf8_bytes(result_wire)
+    val completion_bytes = text_to_utf8_bytes(completion_wire)
+    val measurement_bytes = text_to_utf8_bytes(measurement_wire)
+    var remaining = REMOTE_CONTAINER_BUNDLE_BYTES_MAX_V3
+    for size in [result_bytes.len(), completion_bytes.len(), measurement_bytes.len(),
+            bundle.evidence.stdout.len(), bundle.evidence.stderr.len()]:
+        if size > remaining: return Err("REMOTE_CONTAINER_BUNDLE_BYTES_EXCEEDED")
+        remaining = remaining - size
+    var seen: Dict<text, bool> = {}
+    for output in bundle.evidence.outputs:
+        if not builder_relative_path_valid_v1(output.path) or seen.contains_key(output.path):
+            return Err("REMOTE_CONTAINER_BUNDLE_OUTPUT_PATH_INVALID")
+        seen[output.path] = true
+        for size in [output.path.byte_len(), remote_container_byte_count_v3(output.content)]:
+            if size > remaining: return Err("REMOTE_CONTAINER_BUNDLE_BYTES_EXCEEDED")
+            remaining = remaining - size
+    var lines: [text] = [builder_wire_line_v1("SIMPLE_REMOTE_CONTAINER_BUNDLE_V3")]
+    for content in [result_bytes, completion_bytes, measurement_bytes, bundle.evidence.stdout, bundle.evidence.stderr]:
+        for line in remote_bundle_blob_lines_v1(content): lines.push(line)
+    lines.push(builder_wire_line_v1(str(bundle.evidence.outputs.len())))
+    for output in bundle.evidence.outputs:
+        lines.push(builder_wire_line_v1(output.path))
+        for line in remote_bundle_blob_lines_v1(output.content): lines.push(line)
+    val wire = lines.join("")
+    if wire.byte_len() > REMOTE_CONTAINER_BUNDLE_WIRE_MAX_V3:
+        return Err("REMOTE_CONTAINER_BUNDLE_WIRE_TOO_LARGE")
+    Ok(wire)
+
+export remote_container_bundle_encode_v3

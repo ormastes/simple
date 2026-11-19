@@ -1,0 +1,123 @@
+"""
+## Purpose and audience
+milestone_0030 owner decision N11: the Host remote-build port is installed by
+the authenticated-service composition itself, and the existing host identity
+profile (the protected identity store beside the installed anchor) supplies the
+execution-host completion-signing key and the host's own execution environment.
+The policy snapshot and host identity come from the service's own re-verified
+records; nothing comes from a caller-supplied path or argument. Written for
+owners of the Linux service composition.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-19).
+## Compatibility and limitations
+A host with no readable profile installs no port: a remote-build prepare then
+refuses `linux-host-remote-build-port-missing` before the slot or the charge.
+The key bytes are read, used to sign and wiped; no path or error detail is
+logged. Store I/O is pinned structurally (a data spec cannot build a protected
+store).
+## Verification guidance and troubleshooting
+A changed refusal string is a contract change.
+"""
+use std.spec.step
+use std.io.file_read_text
+use std.common.contracts.distributed_control_v2.ExecutionEnvironmentV2
+use app.orchestrator.remote_build_port_install_v3.{remote_build_profile_root_v3, remote_build_environment_admit_v3,
+    remote_build_environment_leaf_v3, remote_build_environment_install_options_v3}
+use std.common.crypto.sha256.sha256_text
+
+fn pi_anchor() -> text:
+    "/srv/simple/host-root-" + "a".repeat(64)
+
+fn pi_env(host: text, isolation: text) -> ExecutionEnvironmentV2:
+    ExecutionEnvironmentV2(host_id: host, execution_platform: "linux", target_platform: "linux", test_runtime: "native",
+        isolation_class: isolation, toolchain_digest: "b".repeat(64), sdk_digest: "c".repeat(64), abi: "gnu", isa: "x86_64",
+        optimization: "release")
+
+fn pi_from(source: text, start: text) -> text:
+    val at = source.index_of(start)
+    if at < 0: return ""
+    source.substring(at, source.byte_len())
+
+describe "the remote-build port is installed from the host identity profile":
+    it "locates the profile as a sibling of the installed anchor":
+        # @req M0030-N11-01
+        expect(remote_build_profile_root_v3(pi_anchor())).to_equal(Ok("/srv/simple/host-identity-profile"))
+        expect(remote_build_profile_root_v3("/srv/simple/not-an-anchor").is_err()).to_equal(true)
+        expect(remote_build_profile_root_v3("relative/host-root-" + "a".repeat(64)).is_err()).to_equal(true)
+
+    it "keeps the environment under a valid identity-store profile leaf keyed by the host":
+        # @req M0030-N11-05
+        val leaf = remote_build_environment_leaf_v3("host-1")
+        expect(leaf).to_equal(sha256_text("simple-remote-build-environment-v1\nhost-1") + ".profile")
+        step("the store accepts exactly 64 lowercase hex characters plus .key, .hosts or .profile")
+        expect(leaf.byte_len()).to_equal(72)
+        expect(leaf.ends_with(".profile")).to_equal(true)
+        expect(remote_build_environment_leaf_v3("host-2") != leaf).to_equal(true)
+        val key = file_read_text("src/app/orchestrator/controller_authority_issue_v1.spl")
+        expect(key).to_contain("str(key.revision)) + \".key\"")
+        step("the read uses that leaf, never a free-form name")
+        val install = file_read_text("src/app/orchestrator/remote_build_port_install_v3.spl")
+        expect(install).to_contain("host_identity_store_read_v1(opened.owner.unwrap(), remote_build_environment_leaf_v3(host_identity), 16384)")
+        expect(install.contains("remote-build-environment.sdn")).to_equal(false)
+
+    it "provisions the environment leaf through one admin command with exactly three options":
+        # @req M0030-N11-06
+        val good = remote_build_environment_install_options_v3(["remote-build-environment-install", "--store-root", "/s",
+            "--host", "host-1", "--environment", "/e.sdn"])
+        expect(good.is_ok()).to_equal(true)
+        expect(good.unwrap()["--host"]).to_equal("host-1")
+        expect(remote_build_environment_install_options_v3(["remote-build-environment-install", "--store-root", "/s"])).to_equal(Err("remote-build-environment-install-usage"))
+        expect(remote_build_environment_install_options_v3(["remote-build-environment-install", "--store-root", "/s", "--store-root", "/t",
+            "--host", "h", "--environment", "/e"])).to_equal(Err("remote-build-environment-install-usage"))
+        expect(remote_build_environment_install_options_v3(["remote-build-environment-install", "--store-root", "/s",
+            "--host", "bad host", "--environment", "/e"])).to_equal(Err("remote-build-environment-install-host"))
+        step("the command validates the environment against the host before publishing, publishes no-replace, and is dispatched")
+        val install = file_read_text("src/app/orchestrator/remote_build_port_install_v3.spl")
+        val from_install = pi_from(install, "fn remote_build_environment_install_v3(")
+        expect(from_install.byte_len() > 0).to_equal(true)
+        val body = from_install.substring(0, from_install.index_of("pub fn remote_build_environment_install_command_v3("))
+        expect(body.index_of("remote_build_environment_admit_v3(") < body.index_of("host_identity_store_publish_v1(")).to_equal(true)
+        expect(body).to_contain("HostIdentityStorePublicationV1.Published")
+        val command = file_read_text("src/app/orchestrator/command.spl")
+        expect(command).to_contain("args[0] == \"remote-build-environment-install\"")
+
+    it "admits only an environment that is this host's and the native-container class":
+        # @req M0030-N11-02
+        expect(remote_build_environment_admit_v3(pi_env("host-1", "native-container"), "host-1").is_ok()).to_equal(true)
+        expect(remote_build_environment_admit_v3(pi_env("host-2", "native-container"), "host-1")).to_equal(Err("remote-build-profile-environment-host"))
+        expect(remote_build_environment_admit_v3(pi_env("host-1", "vm"), "host-1")).to_equal(Err("remote-build-profile-environment-isolation"))
+
+    it "takes the snapshot and host identity from the service's own verified records":
+        # @req M0030-N11-03
+        val install = file_read_text("src/app/orchestrator/remote_build_port_install_v3.spl")
+        val tail = pi_from(install, "pub fn remote_build_port_install_v3(")
+        expect(tail.byte_len() > 0).to_equal(true)
+        val body = tail.substring(0, tail.index_of("# Admin provisioning of the environment leaf"))
+        expect(body).to_contain("host_service_domain_remote_build_facts_v3(")
+        expect(body).to_contain("remote_build_service_port_v3(")
+        expect(body).to_contain("host_service_domain_install_remote_build_port_v3(")
+        step("the key comes from the protected store through the sign-only reader, never a caller path")
+        expect(body).to_contain("controller_authority_store_reader_v1(root.unwrap())")
+        step("no file read from an argument and no environment variable is consulted")
+        expect(body.contains("file_read_regular_no_follow_bounded")).to_equal(false)
+        expect(body.contains("env_get")).to_equal(false)
+        val facts = file_read_text("src/lib/nogc_sync_mut/orchestration/host_service_domain_v3.spl")
+        val accessor = pi_from(facts, "pub fn host_service_domain_remote_build_facts_v3(")
+        expect(accessor).to_contain("remote_build_facts_v4()")
+        val current = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl")
+        val method = pi_from(current, "    pub fn remote_build_facts_v4()")
+        expect(method).to_contain("self.current_v4()?")
+        expect(method).to_contain("self.records.unwrap().binding.physical_host_id")
+
+    it "installs after the domain opens ready and only for the signed-enrollment Linux service":
+        # @req M0030-N11-04
+        val command = file_read_text("src/app/orchestrator/host_authenticated_service_v6.spl")
+        val ready = pi_from(command, "        case HostServiceDomainOpenV3.Ready(domain):")
+        expect(ready.byte_len() > 0).to_equal(true)
+        expect(ready).to_contain("remote_build_port_install_v3(args[1], args[2], domain)")
+        expect(ready.index_of("remote_build_port_install_v3(") < ready.index_of("smux_server_serve_runtime_authenticated_v6(")).to_equal(true)
+        expect(ready).to_contain("smux_server_serve_runtime_authenticated_v6(args[6], args[7], installed, args[5])")
+        step("the installer is the identity for any other backend and for a host without a readable profile")
+        val install = file_read_text("src/app/orchestrator/remote_build_port_install_v3.spl")
+        expect(install).to_contain("if backend != \"linux-service\": return domain")

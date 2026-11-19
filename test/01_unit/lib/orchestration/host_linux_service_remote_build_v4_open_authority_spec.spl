@@ -1,0 +1,207 @@
+"""
+## Purpose and audience
+Pins milestone_0030 DESIGN 14.4 (P1-3): the Host open authority of a remote build in
+`src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl`, run before any staging or effect.
+Written for owners of the Linux Host service.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
+## Compatibility and limitations
+Authority is issued by the landed controller issuer with deterministic, published test seeds (never real keys). The
+open frame that calls this check arrives with the route (PR-1b+1c), so the frame decode is not exercised here.
+## Verification guidance and troubleshooting
+Each refusal names the exact error string; a changed string is a contract change.
+"""
+use std.spec.{step, fail}
+use std.io.file_read_text
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2, ExecutionEnvironmentV2}
+use std.common.contracts.distributed_control_codec_v2.distributed_environment_digest_v2
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.DistributedAuthorityKeyV2
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_authority_snapshot_create_v2
+use std.nogc_sync_mut.io.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.{ControllerDispatchConfigV1, ControllerDispatchContextV1}
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.*
+use std.common.crypto.ed25519.pure_ed25519_keypair_from_seed
+use app.orchestrator.host_identity_key_v1.host_identity_private_encode_v1
+use app.orchestrator.controller_authority_issue_v1.{ControllerIssuedAuthorityV1, controller_authority_issue_v1}
+use std.common.contracts.orchestration.host_execution_association_v3.HostExecutionAssociationV3
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerExecutionPlanV2, ContainerHostScopeV2,
+    container_execution_request_encode_v2}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1}
+use std.common.build_manager.codec.builder_encode_task_v1
+use std.common.crypto.sha256.sha256_text
+
+fn oa_seed(offset: i64) -> [u8]:
+    var seed: [u8] = []
+    for i in 0..32: seed.push((i + offset) as u8)
+    seed
+
+fn oa_key(identity: text, role: text, offset: i64) -> DistributedAuthorityKeyV2:
+    DistributedAuthorityKeyV2(identity: identity, role: role, revision: 1,
+        public_key: pure_ed25519_keypair_from_seed(oa_seed(offset)).1, principal: "user_1", project: "project_1",
+        host_id: "worker_1", operations: ["build", "host_reservation_v1", "host_execute_v1"],
+        maximum_memory_bytes: 4096, maximum_duration_ms: 4000, policy_revision: 4, revocation_epoch: 2,
+        expires_at: 10000, revoked: false)
+
+fn oa_policy() -> LocalAuthorityPolicyV1:
+    val snapshot = distributed_authority_snapshot_create_v2([oa_key("controller_1", "grant-issuer", 1),
+        oa_key("approver_1", "human-approver", 65), oa_key("worker_1", "execution-host", 129)], 9, 4, 2).unwrap()
+    LocalAuthorityPolicyV1(snapshot: snapshot, session_generation: 3, source_digest: "f".repeat(64))
+
+fn oa_env() -> ExecutionEnvironmentV2:
+    ExecutionEnvironmentV2(host_id: "worker_1", execution_platform: "linux-x86_64", target_platform: "linux-x86_64",
+        test_runtime: "none", isolation_class: "native-container", toolchain_digest: "c".repeat(64), sdk_digest: "d".repeat(64),
+        abi: "sysv", isa: "x86_64", optimization: "release")
+
+fn oa_scope() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "worker_1", service_scope_id: "epoch-" + "c".repeat(64), boot_id: "native-boot",
+        provider_generation: 41, native_machine_id: "0123456789abcdef0123456789abcdef",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "native-boot")
+
+# The slot's pinned execution (what prepare projected): its operation id is the slot operation.
+fn oa_execution() -> ContainerExecutionRequestV2:
+    val scope = oa_scope()
+    ContainerExecutionRequestV2(plan: ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: "task_1", attempt: 1,
+        operation_id: "operation_1", request_digest: "a".repeat(64), physical_host_id: scope.physical_host_id,
+        service_scope_id: scope.service_scope_id, boot_id: scope.boot_id, provider_generation: scope.provider_generation,
+        native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id),
+        request_bytes: "opaque-codec-DATA\n")
+
+# The signed task pins the full execution request at remote-container/<id>.sdn (the plan pin the controller freeze reads).
+fn oa_task(pin: text) -> BuildTaskV1:
+    BuildTaskV1(id: "task_1", attempt: 1, phase: "build", producer_digest: "1".repeat(64), source_digest: "2".repeat(64),
+        toolchain_digest: "3".repeat(64), dependencies: [], program: "bin/producer", args: [],
+        inputs: [BuildInputV1(path: "remote-container/task_1.sdn", digest: pin)], outputs: ["out/a"], cache_key: "4".repeat(64),
+        timeout_ms: 1000, memory_limit_bytes: 0, links: [])
+
+fn oa_pinned_task() -> BuildTaskV1:
+    oa_task(sha256_text(container_execution_request_encode_v2(oa_execution()).unwrap()))
+
+fn oa_task_digest(task: BuildTaskV1) -> text:
+    sha256_text(builder_encode_task_v1(task))
+
+fn oa_association(marker: text) -> HostExecutionAssociationV3:
+    HostExecutionAssociationV3(enrollment_digest: "5".repeat(64), service_scope: oa_scope(), intent_digest: "6".repeat(64),
+        prepared_receipt_digest: "7".repeat(64), prepared_revision: 2, epoch_record_digest: "8".repeat(64),
+        service_process_identity_digest: "9".repeat(64), execution: oa_execution(), remote_build_task_digest: marker)
+
+fn oa_request(operation: text) -> OperationEnvelopeV2:
+    oa_request_for(operation, "operation_1", oa_task_digest(oa_pinned_task()))
+
+fn oa_request_for(operation: text, id: text, payload: text) -> OperationEnvelopeV2:
+    OperationEnvelopeV2(version: 2, id: id, payload_digest: payload, principal: "user_1",
+        project: "project_1", host_id: "worker_1", operation: operation,
+        environment_digest: distributed_environment_digest_v2(oa_env()).unwrap(), policy_revision: 4, revocation_epoch: 2,
+        session_generation: 3, memory_bytes: 1024, duration_ms: 1000)
+
+fn oa_reader(key: DistributedAuthorityKeyV2) -> Result<[u8], text>:
+    val offset = if key.role == "grant-issuer": 1 else: 65
+    val seed = oa_seed(offset)
+    host_identity_private_encode_v1(seed, pure_ed25519_keypair_from_seed(seed).1, [9, 8, 7, 6], "public-test-fixture")
+
+fn oa_context(now: i64) -> HostReservationAuthorizationContextV1:
+    HostReservationAuthorizationContextV1(grant_clock: now, monotonic_ms: 1, policy_revision: 4, revocation_epoch: 2,
+        session_generation: 3)
+
+fn oa_issued(request: OperationEnvelopeV2) -> ControllerIssuedAuthorityV1:
+    val config = ControllerDispatchConfigV1(controller_id: "controller_1", controller_epoch: 7,
+        target: "retained-host-service-v1", host_root: "/var/lib/simple/host", host_authority_id: "host_authority_1",
+        provider_identity_digest: "e".repeat(64), authority_policy_digest: "f".repeat(64))
+    val grant = ExecutionGrantV2(id: "grant_1", principal: "user_1", project: "project_1", host_id: "worker_1",
+        operations: ["build", "host_execute_v1"], environment_digest: distributed_environment_digest_v2(oa_env()).unwrap(),
+        policy_revision: 4, revocation_epoch: 2, expires_at: 5000, maximum_memory_bytes: 2048, maximum_duration_ms: 2000)
+    match controller_authority_issue_v1(ControllerDispatchContextV1(config: config, policy: oa_policy()), oa_reader,
+            "controller_1", "approver_1", grant, request, oa_env(), 4000, 100):
+        case Err(reason): fail("fixture issuance: {reason}")
+        case Ok(value): return value
+    fail("unreachable")
+
+describe "Remote-build open authority V4 (milestone_0030 14.4)":
+    it "admits a controller-signed build and takes the host key from the snapshot by role":
+        # @req M0030-OPEN-01
+        val request = oa_request("build")
+        val issued = oa_issued(request)
+        val admitted = host_remote_build_open_authority_v4(oa_policy(), "controller_1", "worker_1", oa_association(oa_task_digest(oa_pinned_task())),
+            oa_pinned_task(), issued.signed, issued.approval,
+            request, oa_env(), oa_context(100)).unwrap()
+        expect(admitted.grant.id).to_equal("grant_1")
+        expect(admitted.host_key.role).to_equal("execution-host")
+        expect(admitted.host_key.public_key).to_equal(pure_ed25519_keypair_from_seed(oa_seed(129)).1)
+
+    it "refuses a route action as the build request before any verification":
+        # @req M0030-OPEN-02
+        val issued = oa_issued(oa_request("build"))
+        expect(host_remote_build_open_authority_v4(oa_policy(), "controller_1", "worker_1", oa_association(oa_task_digest(oa_pinned_task())),
+            oa_pinned_task(), issued.signed, issued.approval,
+            oa_request("host_execute_v1"), oa_env(), oa_context(100))).to_equal(Err("linux-host-remote-build-operation"))
+
+    it "refuses an issuer other than the installed controller_ref":
+        # @req M0030-OPEN-03
+        val request = oa_request("build")
+        val issued = oa_issued(request)
+        expect(host_remote_build_open_authority_v4(oa_policy(), "controller_2", "worker_1", oa_association(oa_task_digest(oa_pinned_task())),
+            oa_pinned_task(), issued.signed, issued.approval,
+            request, oa_env(), oa_context(100))).to_equal(Err("linux-host-service-controller-mismatch"))
+
+    it "refuses an expired approval and an unenrolled execution-host identity":
+        # @req M0030-OPEN-04
+        val request = oa_request("build")
+        val issued = oa_issued(request)
+        step("past the approval expiry (4000) the snapshot verifier refuses")
+        expect(host_remote_build_open_authority_v4(oa_policy(), "controller_1", "worker_1", oa_association(oa_task_digest(oa_pinned_task())),
+            oa_pinned_task(), issued.signed, issued.approval,
+            request, oa_env(), oa_context(4500)).is_err()).to_equal(true)
+        step("the host key is never a frame value: an identity absent from the snapshot is refused")
+        expect(host_remote_build_open_authority_v4(oa_policy(), "controller_1", "worker_9", oa_association(oa_task_digest(oa_pinned_task())),
+            oa_pinned_task(), issued.signed, issued.approval,
+            request, oa_env(), oa_context(100))).to_equal(Err("AUTHORITY_KEY_UNAVAILABLE"))
+
+    it "refuses a requested environment outside the native-container class":
+        # @req M0030-OPEN-05
+        val request = oa_request("build")
+        val issued = oa_issued(request)
+        var process = oa_env()
+        process.isolation_class = "native-process"
+        expect(host_remote_build_open_authority_v4(oa_policy(), "controller_1", "worker_1", oa_association(oa_task_digest(oa_pinned_task())),
+            oa_pinned_task(), issued.signed, issued.approval,
+            request, process, oa_context(100))).to_equal(Err("remote-build-isolation-class"))
+
+    it "binds the open to the slot's association: operation id, task marker, payload digest and the request pin":
+        # @req M0030-OPEN-06 (lane B review P2-1)
+        val task = oa_pinned_task()
+        val marker = oa_task_digest(task)
+        step("a request for another operation than the slot's is refused")
+        val other = oa_request_for("build", "operation_9", marker)
+        val issued_other = oa_issued(other)
+        expect(host_remote_build_open_authority_v4(oa_policy(), "controller_1", "worker_1", oa_association(marker), task,
+            issued_other.signed, issued_other.approval, other, oa_env(), oa_context(100))).to_equal(Err("linux-host-remote-build-slot-operation"))
+        step("a signed payload digest other than the association's remote-build marker is refused")
+        val foreign = oa_request_for("build", "operation_1", "b".repeat(64))
+        val issued_foreign = oa_issued(foreign)
+        expect(host_remote_build_open_authority_v4(oa_policy(), "controller_1", "worker_1", oa_association(marker), task,
+            issued_foreign.signed, issued_foreign.approval, foreign, oa_env(), oa_context(100))).to_equal(
+            Err("linux-host-remote-build-request-differs"))
+        step("an agent association (no marker) never admits a build open")
+        val request = oa_request("build")
+        val issued = oa_issued(request)
+        expect(host_remote_build_open_authority_v4(oa_policy(), "controller_1", "worker_1", oa_association(""), task,
+            issued.signed, issued.approval, request, oa_env(), oa_context(100))).to_equal(Err("linux-host-remote-build-request-differs"))
+        step("a task whose encoding is not the marker is refused")
+        val altered = oa_task("e".repeat(64))
+        expect(host_remote_build_open_authority_v4(oa_policy(), "controller_1", "worker_1", oa_association(marker), altered,
+            issued.signed, issued.approval, request, oa_env(), oa_context(100))).to_equal(Err("linux-host-remote-build-request-differs"))
+        step("a task that is the marker but does not pin the slot's execution request is refused (plan pin)")
+        val unpinned = oa_task("e".repeat(64))
+        val unpinned_marker = oa_task_digest(unpinned)
+        val unpinned_request = oa_request_for("build", "operation_1", unpinned_marker)
+        val issued_unpinned = oa_issued(unpinned_request)
+        expect(host_remote_build_open_authority_v4(oa_policy(), "controller_1", "worker_1", oa_association(unpinned_marker), unpinned,
+            issued_unpinned.signed, issued_unpinned.approval, unpinned_request, oa_env(), oa_context(100))).to_equal(
+            Err("linux-host-remote-build-request-differs"))
+        step("the open caller runs no second copy of these pins (they live in the authority only)")
+        val source = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl")
+        val open = source.substring(source.index_of("pub fn host_remote_build_open_v4("), source.byte_len())
+        val body = open.substring(0, open.index_of("\npub fn "))
+        expect(body.contains("remote-container/")).to_equal(false)
+        expect(body.contains("admitted.request.payload_digest")).to_equal(false)

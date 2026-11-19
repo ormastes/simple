@@ -1,0 +1,269 @@
+"""
+## Purpose and audience
+Pins milestone_0030 DESIGN r4.1 / r4.1b: a remote-build executor failure BEFORE the admission transfer (for example an
+open whose `request_bytes` differ from the build projection) settles the executing row `cancelled` / `no-workload`
+through the 14.2 settle arm on the single journal writer, which releases the charge; the incarnation is not consumed,
+so the slot is reusable. Module: `src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl`.
+Written for owners of the Linux Host service.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
+## Compatibility and limitations
+The settle needs a Linux-protected journal and the open frame arrives with the route (PR-1b+1c), so the end-to-end
+"prepare -> execute -> open with mismatched request_bytes" case is on the route spec (pending caller). Here: the exact
+record the settle publishes, its refusals, the settle call shape, and the slot clearing once the row is Released.
+## Verification guidance and troubleshooting
+Each refusal names the exact error string; a changed string is a contract change.
+"""
+use std.spec.{step, fail}
+use std.io.file_read_text
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.*
+use std.common.contracts.container.runtime_v1.RuntimeExitStatusV1
+use std.nogc_sync_mut.orchestration.host_linux_completion_evidence_v3.host_remote_build_outcome_decode_v4
+# Tests reach private module gates directly (repo rule: tests may access private).
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{HostLinuxServiceCurrentV4, linux_service_agent_slot_v4}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_open_cleanup_v2
+use std.common.contracts.orchestration.host_capacity_v1.*
+
+val PT_TASK: text = "d".repeat(64)
+val PT_ASSOCIATION: text = "a".repeat(64)
+
+fn pt_open(root: text) -> HostCapacityOwnerV1:
+    var opened: [HostCapacityOwnerV1] = []
+    match host_capacity_owner_open_owned_v2(root, HostCapacityV1("worker_1", "host-authority", "fence_1", 41, 2000, 536870912, []),
+            "9".repeat(64), 64, true):
+        case HostCapacityOpenV2.Ready(owner): opened.push(owner)
+        case HostCapacityOpenV2.Rejected(reason): fail(reason)
+        case HostCapacityOpenV2.CleanupRequired(cleanup, reason):
+            val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+            expect(closed.error).to_equal("")
+            fail(reason)
+    opened[0]
+
+fn pt_count(source: text, needle: text) -> i64:
+    source.split(needle).len() - 1
+
+describe "Remote-build pre-transfer settle V4 (milestone_0030 r4.1b)":
+    it "builds the exact cancelled / no-workload record for a pre-transfer failure":
+        # @req M0030-PRETRANSFER-01
+        val bytes = host_remote_build_no_workload_record_v4("operation_2", "fence_1", PT_ASSOCIATION, PT_TASK,
+            "failed:linux-host-remote-build-request-differs").unwrap()
+        val record = host_remote_build_outcome_decode_v4(bytes).unwrap()
+        expect(record.outcome).to_equal("cancelled")
+        expect(record.absence_result).to_equal("no-workload")
+        expect(record.source_return).to_equal("never-opened")
+        expect(record.exit_digest + record.destroy_digest + record.machine_settle_digest + record.bundle_digest).to_equal("")
+        expect(record.task_digest).to_equal(PT_TASK)
+        step("a non-build association (no marker) and an unknown cause are refused")
+        expect(host_remote_build_no_workload_record_v4("operation_2", "fence_1", PT_ASSOCIATION, "", "deadline")).to_equal(
+            Err("host-remote-build-pretransfer-not-build"))
+        expect(host_remote_build_no_workload_record_v4("operation_2", "fence_1", PT_ASSOCIATION, PT_TASK, "whim")).to_equal(
+            Err("host-remote-build-outcome-invalid"))
+
+    it "settles through the single-writer settle arm with outcome cancelled and adopts the returned owner":
+        # @req M0030-PRETRANSFER-02
+        val source = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl")
+        expect(pt_count(source, "host_capacity_owner_settle_associated_v3(capacity, operation, association, \"cancelled\", evidence.unwrap())")).to_equal(1)
+        expect(pt_count(source, "use std.nogc_sync_mut.orchestration.host_linux_service_current_v4")).to_equal(0)
+        expect(pt_count(source, "continuity_proven =")).to_equal(0)
+
+    it "leaves the slot reusable once the settled row is Released (the incarnation is not consumed)":
+        # @req M0030-PRETRANSFER-03
+        val root = secure_temp_dir("/tmp", "m0030-pretransfer").unwrap()
+        var capacity = pt_open(root + "/journal")
+        step("the settle released the row; agent_consumed was never set (it is set only at the transfer)")
+        capacity.ledger.reservations = [HostReservationV1("reservation_operation_2", "operation_2", "0".repeat(64), "service_1", 1,
+            "nonce", 500, 4096, [], 0, HostReservationStateV1.Released)]
+        val owner = HostLinuxServiceCurrentV4(root: root, capacity: Some(capacity), agent_operation_id: "operation_2",
+            slot_kind: "remote-build", agent_consumed: false)
+        val turn = linux_service_agent_slot_v4(owner, "operation_3", 0)
+        expect(turn.error).to_equal("")
+        expect(turn.owner.agent_operation_id).to_equal("")
+        expect(turn.owner.slot_kind).to_equal("")
+        val closed = host_capacity_owner_close_owned_v2(turn.owner.capacity.unwrap())
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+# ---- milestone_0030 integration item 4: the executor (HostRemoteBuildExecutorV3) ----
+# DATA pins over the pure helpers, and order pins over the stage driver source (the native path needs owners a
+# DATA spec cannot construct). Status: AUTHORED, NOT_RUN.
+
+fn ex_module() -> text:
+    file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl")
+
+fn ex_from(source: text, start: text) -> text:
+    val at = source.index_of(start)
+    if at < 0: return ""
+    source.substring(at, source.byte_len())
+
+fn ex_executor(stage: text) -> HostRemoteBuildExecutorV3:
+    var executor = HostRemoteBuildExecutorV3(operation_id: "op_1", fence: "fence_1", association_digest: PT_ASSOCIATION,
+        task_digest: PT_TASK, open_record: "open", inputs: [], invocation_bytes: "", invocation_digest: "",
+        workspace_manifest: "", deadline: 1000)
+    executor.stage = stage
+    executor.reserved = not ["inputs", "source", "stage", "enable"].contains(stage)
+    executor
+
+describe "remote-build executor (integration item 4)":
+    it "takes the earliest of approval, grant and invocation window as its deadline":
+        # @req M0030-INTEG-4 (s6 / 13.4: every step checks min(approval, grant))
+        expect(host_remote_build_deadline_v4(30, 20, 40)).to_equal(20)
+        expect(host_remote_build_deadline_v4(10, 20, 40)).to_equal(10)
+        expect(host_remote_build_deadline_v4(30, 20, 5)).to_equal(5)
+
+    it "keys open, input, bundle and cancel archives by fence and operation":
+        # @req M0030-INTEG-4 (P2-4: frames are archived on the journal, never buffered in the holder)
+        val open = host_remote_build_open_relative_v4("fence_1", "op_1")
+        expect(open.starts_with("host-remote-build/")).to_equal(true)
+        expect(open.ends_with(".open.sdn")).to_equal(true)
+        expect(host_remote_build_input_relative_v4("fence_1", "op_1", 3).ends_with(".input-3.sdn")).to_equal(true)
+        expect(host_remote_build_bundle_relative_v4("fence_1", "op_1").ends_with(".bundle.sdn")).to_equal(true)
+        expect(host_remote_build_open_relative_v4("fence_2", "op_1") != open).to_equal(true)
+
+    it "classifies only an engine-native Exited(0) as succeeded":
+        # @req M0030-INTEG-4 (L10: never read state.exit_code on V3)
+        expect(host_remote_build_exit_outcome_v4(RuntimeExitStatusV1.Exited(0))).to_equal("succeeded")
+        expect(host_remote_build_exit_outcome_v4(RuntimeExitStatusV1.Exited(2))).to_equal("failed")
+        expect(host_remote_build_exit_outcome_v4(RuntimeExitStatusV1.Unobserved)).to_equal("failed")
+
+    it "routes a pre-transfer cancel to the no-workload settle and a running cancel to stop":
+        # @req M0030-INTEG-4 (r4.1b pre-transfer; 13.4 self-cancel; first cause kept)
+        val inputs = host_remote_build_request_cancel_v4(ex_executor("inputs"), "controller-cancel")
+        expect(inputs.error).to_equal("")
+        expect(inputs.pretransfer).to_equal(true)
+        val running = host_remote_build_request_cancel_v4(ex_executor("running"), "deadline")
+        expect(running.executor.stage).to_equal("stop")
+        expect(running.executor.cancel_cause).to_equal("deadline")
+        val again = host_remote_build_request_cancel_v4(running.executor, "controller-cancel")
+        expect(again.executor.cancel_cause).to_equal("deadline")
+        var pending = ex_executor("start")
+        pending.pending = true
+        expect(host_remote_build_request_cancel_v4(pending, "deadline").error).to_equal("linux-host-remote-build-cancel-pending")
+        expect(host_remote_build_request_cancel_v4(ex_executor("wedged"), "deadline").error).to_equal("linux-host-remote-build-wedged")
+
+    it "tears down stop -> destroy -> settle -> read -> source-return -> finalize -> host-settle":
+        # @req M0030-INTEG-4 (13.4 teardown; deviation: op ii read precedes the retained source-return)
+        val body = ex_from(ex_module(), "fn remote_build_release_step_v4(")
+        val stop = body.index_of("ContainerWorkspaceActionV3.Stop")
+        val destroy = body.index_of("ContainerWorkspaceActionV3.Destroy")
+        val settle = body.index_of("simple_container_settle_workspace_v3(")
+        val read = body.index_of("simple_container_read_settled_workspace_v3(")
+        val returned = body.index_of("simple_container_return_settled_workspace_source_v3(")
+        val finalize = body.index_of("(port.finalize)(")
+        expect(stop > 0 and destroy > stop and settle > destroy and read > settle).to_equal(true)
+        expect(returned > read and finalize > returned).to_equal(true)
+        step("the exit fields come from the Stop reply and are classified by L10's typed status only")
+        expect(body).to_contain("container_workspace_op_fields_v3(\"linux-host-remote-build-exit\", operation)")
+        expect(body.contains("state.exit_code")).to_equal(false)
+
+    it "verifies the open authority and the pinned request before archiving the open record":
+        # @req M0030-INTEG-4 (14.4 open authority; 13.3(c)1 request pin; r4.1 mismatched request_bytes refused)
+        val body = ex_from(ex_module(), "pub fn host_remote_build_open_v4(")
+        # lane B P2-1: the pins moved into the authority, which takes the slot's association and the task.
+        val authority = body.index_of("host_remote_build_open_authority_v4(policy, controller_ref, host_identity, association, admitted.task,")
+        val archive = body.index_of("distributed_operation_journal_publish_v3(")
+        expect(authority > 0 and archive > authority).to_equal(true)
+
+    it "settles through the outcome record with the host-settle owner adopted":
+        # @req M0030-INTEG-4 (14.2 settle arm; single journal writer)
+        val body = ex_from(ex_module(), "fn remote_build_host_settle_v4(")
+        expect(body).to_contain("host_remote_build_outcome_encode_v4(")
+        expect(body).to_contain("host_capacity_owner_settle_associated_v3(")
+        expect(body).to_contain("remote_build_turn_v4(state, settled.owner,")
+
+    it "refuses a cancel between the transfer and enable and fails a transferred run there (s5 / T-04)":
+        # @req M0030-INTEG-4 (post-transfer failure is a held `failed` executor, never a no-workload settle)
+        for stage in ["source", "stage", "enable"]:
+            expect(host_remote_build_request_cancel_v4(ex_executor(stage), "deadline").error).to_equal("linux-host-remote-build-cancel-stage:" + stage)
+        val body = ex_from(ex_module(), "fn remote_build_fail_v4(")
+        val end = body.index_of("\n\n")
+        val own = if end > 0: body.substring(0, end) else: body
+        expect(own).to_contain("state.stage = \"failed\"")
+        expect(own.contains("host_remote_build_request_cancel_v4(")).to_equal(false)
+
+fn ex_service() -> text:
+    file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl")
+
+fn ex_body(source: text, start: text) -> text:
+    val body = ex_from(source, start)
+    val end = body.index_of("\n\n")
+    if end > 0: body.substring(0, end) else: body
+
+describe "remote-build deadline (integration review P2-b)":
+    it "DL-01 settles cancelled/no-workload at start when the window ended before the transfer":
+        # @req M0030-INTEG-4 (r4.1b: an expired deadline before start settles no-workload; slot reusable)
+        val body = ex_body(ex_service(), "pub fn host_linux_service_remote_build_start_v4(")
+        val check = body.index_of(".grant_clock >= owner.build.unwrap().deadline")
+        val settle = body.index_of("host_remote_build_settle_no_workload_v4(")
+        val dropped = body.index_of("owner.build = None")
+        val transfer = body.index_of("host_remote_build_transfer_v4(")
+        expect(check > 0 and settle > check and dropped > settle and transfer > dropped).to_equal(true)
+        expect(body).to_contain("owner.build.unwrap().fence, \"deadline\")")
+
+    it "DL-02 checks the deadline in `inputs` before the step returns, and the service drops the settled holder":
+        # @req M0030-INTEG-4 (s6 / 13.4: the deadline is checked before every step, `inputs` included)
+        val body = ex_body(ex_module(), "pub fn host_remote_build_step_v4(")
+        val check = body.index_of("if clock.grant_clock >= state.deadline")
+        val settle = body.index_of("host_remote_build_settle_no_workload_v4(capacity, journal_operation, association, state.fence, \"deadline\")")
+        val incomplete = body.index_of("\"linux-host-remote-build-inputs-incomplete\"")
+        expect(check > 0 and settle > check and incomplete > settle).to_equal(true)
+        val collect = ex_body(ex_service(), "pub fn host_linux_service_remote_build_collect_v4(")
+        expect(collect).to_contain("if turn.executor.stage == \"settled\" and not owner.agent_consumed: owner.build = None")
+
+    it "DL-03 refuses the next effect after the transfer once the window ended (source, stage, enable)":
+        # @req M0030-INTEG-4 (cancel stays refused there; the run fails held, the reap drains it; single writer)
+        val body = ex_body(ex_module(), "pub fn host_remote_build_step_v4(")
+        val refuse = body.index_of("if cancelled.error != \"\" and not state.reserved:")
+        val failed = body.index_of("return remote_build_fail_v4(state, capacity, \"linux-host-remote-build-deadline\")")
+        val source = body.index_of("if state.stage == \"source\":")
+        expect(refuse > 0 and failed > refuse and source > failed).to_equal(true)
+
+    it "DL-04 marks the record reserved only after enable succeeded":
+        # @req M0030-INTEG-4 (a failed enable is wedged without claiming a reserved record)
+        val body = ex_body(ex_module(), "pub fn host_remote_build_step_v4(")
+        val enable = ex_from(body, "if state.stage == \"enable\":")
+        val error = enable.index_of("if enabled.error != \"\": return remote_build_wedged_v4(")
+        val reserved = enable.index_of("state.reserved = true")
+        expect(error > 0 and reserved > error).to_equal(true)
+
+    it "DL-05 settles a refused transfer cancelled/no-workload only when the admission came back":
+        # @req M0030-INTEG-4 (r4.1b: a returned admission proves nothing ran; a lost one may have transferred)
+        val body = ex_body(ex_service(), "pub fn host_linux_service_remote_build_start_v4(")
+        val transfer = body.index_of("host_remote_build_transfer_v4(")
+        val tail = body.substring(transfer, body.byte_len())
+        val split = tail.index_of("if refused == \"linux-host-remote-build-inputs-incomplete\":")
+        val settle = tail.index_of("execute.unwrap().association, owner.build.unwrap().fence, host_remote_build_failed_cause_v4(refused))")
+        val dropped = tail.index_of("owner.build = None")
+        expect(split > 0 and settle > split and dropped > settle).to_equal(true)
+
+    it "DL-06 holds a lost-admission start as a consumed `failed` run, so no path settles it no-workload":
+        # @req M0030-INTEG-4 (re-review P1-1: T-04 shape, drained by the restart reap; never cancelled/no-workload)
+        val body = ex_body(ex_service(), "pub fn host_linux_service_remote_build_start_v4(")
+        val tail = body.substring(body.index_of("host_remote_build_transfer_v4("), body.byte_len())
+        val lost = tail.index_of("if opened.admission.is_none():")
+        expect(lost > 0).to_equal(true)
+        # Searched from the lost branch: the executor branch above sets agent_consumed too (re-review P2-1).
+        val branch = tail.substring(lost, tail.byte_len())
+        val failed = branch.index_of("lost_build.stage = \"failed\"")
+        val consumed = branch.index_of("owner.agent_consumed = true")
+        val settle = branch.index_of("host_remote_build_settle_no_workload_v4(")
+        expect(failed > 0 and consumed > failed and settle > consumed).to_equal(true)
+        step("no epoch holder is kept: the comment names the fail-closed close, not T-04 (re-review P3-1)")
+        expect(tail.contains("T-04")).to_equal(false)
+        expect(tail).to_contain("transfer-missing")
+        step("incomplete inputs ran nothing: the reply claims no effect (re-review P3-3)")
+        expect(branch).to_contain("if refused == \"linux-host-remote-build-inputs-incomplete\": return linux_service_reply_v4(owner, \"\", refused, false)")
+        step("start: a consumed holder answers its replay before the deadline settle")
+        val replay = body.index_of("if owner.agent_consumed: return")
+        expect(replay > 0 and replay < body.index_of(".grant_clock >= owner.build.unwrap().deadline")).to_equal(true)
+        step("step: a failed executor answers its error before the deadline arm")
+        val step_body = ex_body(ex_module(), "pub fn host_remote_build_step_v4(")
+        val terminal = step_body.index_of("if state.stage == \"wedged\" or state.stage == \"failed\":")
+        expect(terminal > 0 and terminal < step_body.index_of("if clock.grant_clock >= state.deadline")).to_equal(true)
+        step("cancel route: a failed executor is refused, never pre-transfer")
+        val cancelled = host_remote_build_request_cancel_v4(ex_executor("failed"), "controller-cancel")
+        expect(cancelled.error).to_equal("linux-host-remote-build-failed")
+        expect(cancelled.pretransfer).to_equal(false)

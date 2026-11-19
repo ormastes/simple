@@ -12,9 +12,9 @@ use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
 use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2}
 
 pub fn linux_fresh_workspace_project_launch_v3(epoch: LinuxFreshEpochProfileV1, workspace: LinuxWorkspaceInstalledProfileV1,
-        agent: LinuxAgentWorkspaceProfileV1, invocation_digest: text, uid: i64, gid: i64,
+        primary: LinuxWorkspacePrimaryV3, invocation_digest: text, uid: i64, gid: i64,
         base: GroupProcessStreamLaunchV2, value: LinuxFreshWorkspaceCommandV3) -> Result<GroupProcessStreamLaunchV2, text>:
-    linux_fresh_workspace_command_validate_v3(value, workspace, agent, invocation_digest, uid, gid)?
+    linux_fresh_workspace_command_validate_v3(value, workspace, primary, invocation_digest, uid, gid)?
     val command = value.command
     if base.profile_v3.is_none(): return Err("fresh-workspace-helper-profile-required")
     val profile = base.profile_v3.unwrap()
@@ -25,7 +25,7 @@ pub fn linux_fresh_workspace_project_launch_v3(epoch: LinuxFreshEpochProfileV1, 
     if (command.helper_cpu_millis > cpu or command.cpu_millis > cpu - command.helper_cpu_millis or
             command.helper_memory_bytes > memory or command.memory_bytes > memory - command.helper_memory_bytes):
         return Err("fresh-workspace-request-plus-helper-exceeds-usable")
-    val args = linux_fresh_workspace_argv_v3(epoch, workspace, agent, invocation_digest, uid, gid, value)?
+    val args = linux_fresh_workspace_argv_v3(epoch, workspace, primary, invocation_digest, uid, gid, value)?
     var result = base
     var request = base.request
     request.args = args
@@ -35,9 +35,11 @@ pub fn linux_fresh_workspace_project_launch_v3(epoch: LinuxFreshEpochProfileV1, 
     Ok(result)
 
 pub fn linux_fresh_workspace_argv_v3(epoch: LinuxFreshEpochProfileV1, workspace: LinuxWorkspaceInstalledProfileV1,
-        agent: LinuxAgentWorkspaceProfileV1, invocation_digest: text, uid: i64, gid: i64,
+        primary: LinuxWorkspacePrimaryV3, invocation_digest: text, uid: i64, gid: i64,
         value: LinuxFreshWorkspaceCommandV3) -> Result<[text], text>:
-    linux_fresh_workspace_command_validate_v3(value, workspace, agent, invocation_digest, uid, gid)?
+    linux_fresh_workspace_command_validate_v3(value, workspace, primary, invocation_digest, uid, gid)?
+    # `--tty --interactive` only for a TTY arm (agent); the remote-build arm is terminalMode none.
+    val terminal: [text] = if linux_workspace_primary_terminal_mode_v3(primary) == "tty": ["--tty", "--interactive"] else: []
     val command = value.command
     val plan = command.request.plan
     val fence = container_scope_fence_id_v2(command.scope)?
@@ -54,8 +56,8 @@ pub fn linux_fresh_workspace_argv_v3(epoch: LinuxFreshEpochProfileV1, workspace:
                 "--memory=" + str(command.memory_bytes), "--memory-swap=" + str(command.memory_bytes),
                 "--pids-limit=" + str(command.pid_limit), "--network=none", "--read-only", "--read-only-tmpfs=false",
                 "--security-opt=no-new-privileges", "--cap-drop=ALL", "--cgroups=enabled", "--cgroupns=private", "--pid=private",
-                "--privileged=false", "--http-proxy=false", "--cgroup-parent=" + epoch.text_v1("delegatedCgroup")?,
-                "--tty", "--interactive", "--userns=keep-id", "--user=" + str(uid) + ":" + str(gid),
+                "--privileged=false", "--http-proxy=false", "--cgroup-parent=" + epoch.text_v1("delegatedCgroup")?] + terminal + [
+                "--userns=keep-id", "--user=" + str(uid) + ":" + str(gid),
                 "--workdir", workspace.guest_root, "--mount", "type=bind,src=" + linux_workspace_source_root_v1(workspace) +
                     ",dst=" + workspace.guest_root + ",rw,nosuid,nodev,bind-propagation=rprivate",
                 "--entrypoint", command.entrypoint[0], "--", command.image]

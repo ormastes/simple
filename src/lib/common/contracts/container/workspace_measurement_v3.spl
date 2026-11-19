@@ -1,0 +1,170 @@
+# milestone_0030 13.1 / 14.1 / 14.11 (G4): the V3 workspace measurements a remote-build host signs and the
+# controller re-checks. The workload exit crosses the wire only as L10's `runtime_exit_status_text_v1` form;
+# decode accepts exactly those canonical forms. Only Exited(0) is success; the legacy `exit_code` (-1 on V3) is a
+# digest field, never a decision input.
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeOperationV1, RuntimeExitStatusV1,
+    runtime_exit_status_text_v1}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.crypto.sha256.sha256_text
+
+pub val REMOTE_CONTAINER_MEASUREMENTS_MAX_V3: i64 = 65536
+
+pub struct ContainerWorkspaceOpFieldsV3:
+    kind: text
+    status: text
+    phase: text
+    native_id: text
+    exit_code: i64
+    workload_exit: RuntimeExitStatusV1
+
+pub struct RemoteContainerMeasurementsV3:
+    task_digest: text
+    input_manifest_digest: text
+    request_digest: text
+    provider_identity_digest: text
+    workspace_binding_digest: text
+    runtime: RuntimeIdentityV1
+    exit: ContainerWorkspaceOpFieldsV3
+    destroy: ContainerWorkspaceOpFieldsV3
+    machine_settle_digest: text
+    settled_unix_ms: i64
+
+# @allow(primitive_api) success predicate over the typed exit status; bool is the predicate result
+pub fn container_exit_status_succeeded_v3(status: RuntimeExitStatusV1) -> bool:
+    match status:
+        case RuntimeExitStatusV1.Exited(code): code == 0
+        case _: false
+
+# Strict inverse of runtime_exit_status_text_v1: parse, re-encode, require byte equality.
+pub fn container_exit_status_decode_v3(wire: text) -> Result<RuntimeExitStatusV1, text>:
+    if wire.byte_len() == 0 or wire.byte_len() > 256: return Err("container-exit-status-form")
+    var parsed = RuntimeExitStatusV1.Unobserved
+    if wire == "unobserved":
+        parsed = RuntimeExitStatusV1.Unobserved
+    elif wire.starts_with("not-exited:") and wire.byte_len() > 11:
+        parsed = RuntimeExitStatusV1.NotExited(wire.substring(11, wire.byte_len()))
+    elif wire.starts_with("unknown:") and wire.byte_len() > 8:
+        parsed = RuntimeExitStatusV1.Unknown(wire.substring(8, wire.byte_len()))
+    elif wire.starts_with("exited:") and wire.byte_len() > 7 and wire.byte_len() <= 10:
+        var code = 0
+        for c in wire.substring(7, wire.byte_len()).chars():
+            if c < '0' or c > '9': return Err("container-exit-status-form")
+            code = code * 10 + (c.ord() - '0'.ord())
+        if code > 255: return Err("container-exit-status-form")
+        parsed = RuntimeExitStatusV1.Exited(code)
+    else:
+        return Err("container-exit-status-form")
+    if runtime_exit_status_text_v1(parsed) != wire: return Err("container-exit-status-form")
+    Ok(parsed)
+
+pub fn container_workspace_op_fields_v3(kind: text, operation: RuntimeOperationV1) -> ContainerWorkspaceOpFieldsV3:
+    ContainerWorkspaceOpFieldsV3(kind: kind, status: operation.status, phase: operation.state.phase,
+        native_id: operation.state.identity.native_id, exit_code: operation.state.exit_code,
+        workload_exit: operation.state.workload_exit)
+
+fn container_workspace_op_sdn_v3(value: ContainerWorkspaceOpFieldsV3) -> Dict<text, SdnValue>:
+    {"kind": SdnValue.String(value.kind), "status": SdnValue.String(value.status), "phase": SdnValue.String(value.phase),
+        "nativeId": SdnValue.String(value.native_id), "exitCode": SdnValue.Int(value.exit_code),
+        "workloadExit": SdnValue.String(runtime_exit_status_text_v1(value.workload_exit))}
+
+# Byte-identical to the pre-move private V4 agent digest (A: host_agent_digest_fields_v4), now its implementation.
+pub fn container_workspace_op_digest_v3(value: ContainerWorkspaceOpFieldsV3) -> text:
+    sha256_text(sdn_encode_canonical(SdnValue.Dict(container_workspace_op_sdn_v3(value))))
+
+fn remote_container_measurements_validate_v3(value: RemoteContainerMeasurementsV3) -> Result<(), text>:
+    for digest in [value.task_digest, value.input_manifest_digest, value.request_digest, value.provider_identity_digest,
+            value.workspace_binding_digest, value.machine_settle_digest]:
+        if not builder_digest_valid_v1(digest): return Err("remote-container-measurements-invalid")
+    val runtime = value.runtime
+    if runtime.pod_uid == "" or runtime.operation_id == "" or runtime.engine == "" or runtime.native_id == "" or
+            runtime.node_boot_id == "" or runtime.attempt < 0 or runtime.provider_generation < 0:
+        return Err("remote-container-measurements-invalid")
+    if value.exit.kind != "linux-host-remote-build-exit" or value.destroy.kind != "linux-host-remote-build-destroy":
+        return Err("remote-container-measurements-invalid")
+    # G4: the legacy exitCode is pinned to -1 on V3; the runtime's state.exit_code never crosses the wire.
+    if value.exit.exit_code != -1 or value.destroy.exit_code != -1: return Err("remote-container-measurements-invalid")
+    if value.settled_unix_ms <= 0: return Err("remote-container-measurements-invalid")
+    Ok(())
+
+fn remote_container_identity_sdn_v3(value: RuntimeIdentityV1) -> Dict<text, SdnValue>:
+    {"podUid": SdnValue.String(value.pod_uid), "attempt": SdnValue.Int(value.attempt),
+        "providerGeneration": SdnValue.Int(value.provider_generation), "operationId": SdnValue.String(value.operation_id),
+        "engine": SdnValue.String(value.engine), "nativeId": SdnValue.String(value.native_id),
+        "nodeBootId": SdnValue.String(value.node_boot_id)}
+
+pub fn remote_container_measurements_encode_v3(value: RemoteContainerMeasurementsV3) -> Result<text, text>:
+    remote_container_measurements_validate_v3(value)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("simple-remote-container-measurements"),
+        "taskDigest": SdnValue.String(value.task_digest), "inputManifestDigest": SdnValue.String(value.input_manifest_digest),
+        "requestDigest": SdnValue.String(value.request_digest),
+        "providerIdentityDigest": SdnValue.String(value.provider_identity_digest),
+        "workspaceBindingDigest": SdnValue.String(value.workspace_binding_digest),
+        "runtime": SdnValue.Dict(remote_container_identity_sdn_v3(value.runtime)),
+        "exit": SdnValue.Dict(container_workspace_op_sdn_v3(value.exit)),
+        "destroy": SdnValue.Dict(container_workspace_op_sdn_v3(value.destroy)),
+        "machineSettleDigest": SdnValue.String(value.machine_settle_digest), "settledUnixMs": SdnValue.Int(value.settled_unix_ms)}
+    val bytes = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if bytes.byte_len() > REMOTE_CONTAINER_MEASUREMENTS_MAX_V3: return Err("remote-container-measurements-invalid")
+    Ok(bytes)
+
+fn remote_container_measurements_dict_v3(value: SdnValue, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    val fields = match value:
+        case SdnValue.Dict(found): found
+        case _: return Err("remote-container-measurements-object")
+    if fields.len() != names.len(): return Err("remote-container-measurements-fields")
+    for name in names:
+        if not fields.contains_key(name): return Err("remote-container-measurements-fields")
+    Ok(fields)
+
+fn remote_container_measurements_text_v3(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(found): Ok(found)
+        case _: Err("remote-container-measurements-field:" + name)
+
+fn remote_container_measurements_int_v3(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    match fields[name]:
+        case SdnValue.Int(found): Ok(found)
+        case _: Err("remote-container-measurements-field:" + name)
+
+fn remote_container_op_decode_v3(value: SdnValue) -> Result<ContainerWorkspaceOpFieldsV3, text>:
+    val fields = remote_container_measurements_dict_v3(value, ["kind", "status", "phase", "nativeId", "exitCode", "workloadExit"])?
+    Ok(ContainerWorkspaceOpFieldsV3(kind: remote_container_measurements_text_v3(fields, "kind")?,
+        status: remote_container_measurements_text_v3(fields, "status")?,
+        phase: remote_container_measurements_text_v3(fields, "phase")?,
+        native_id: remote_container_measurements_text_v3(fields, "nativeId")?,
+        exit_code: remote_container_measurements_int_v3(fields, "exitCode")?,
+        workload_exit: container_exit_status_decode_v3(remote_container_measurements_text_v3(fields, "workloadExit")?)?))
+
+pub fn remote_container_measurements_decode_v3(source: text) -> Result<RemoteContainerMeasurementsV3, text>:
+    if source.byte_len() > REMOTE_CONTAINER_MEASUREMENTS_MAX_V3: return Err("remote-container-measurements-invalid")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: REMOTE_CONTAINER_MEASUREMENTS_MAX_V3,
+            max_depth: 3, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(found): found
+        case Err(issue): return Err("remote-container-measurements-syntax:" + issue.code)
+    val fields = remote_container_measurements_dict_v3(parsed.value, ["version", "kind", "taskDigest", "inputManifestDigest",
+        "requestDigest", "providerIdentityDigest", "workspaceBindingDigest", "runtime", "exit", "destroy",
+        "machineSettleDigest", "settledUnixMs"])?
+    val runtime = remote_container_measurements_dict_v3(fields["runtime"], ["podUid", "attempt", "providerGeneration",
+        "operationId", "engine", "nativeId", "nodeBootId"])?
+    val value = RemoteContainerMeasurementsV3(task_digest: remote_container_measurements_text_v3(fields, "taskDigest")?,
+        input_manifest_digest: remote_container_measurements_text_v3(fields, "inputManifestDigest")?,
+        request_digest: remote_container_measurements_text_v3(fields, "requestDigest")?,
+        provider_identity_digest: remote_container_measurements_text_v3(fields, "providerIdentityDigest")?,
+        workspace_binding_digest: remote_container_measurements_text_v3(fields, "workspaceBindingDigest")?,
+        runtime: RuntimeIdentityV1(pod_uid: remote_container_measurements_text_v3(runtime, "podUid")?,
+            attempt: remote_container_measurements_int_v3(runtime, "attempt")?,
+            provider_generation: remote_container_measurements_int_v3(runtime, "providerGeneration")?,
+            operation_id: remote_container_measurements_text_v3(runtime, "operationId")?,
+            engine: remote_container_measurements_text_v3(runtime, "engine")?,
+            native_id: remote_container_measurements_text_v3(runtime, "nativeId")?,
+            node_boot_id: remote_container_measurements_text_v3(runtime, "nodeBootId")?),
+        exit: remote_container_op_decode_v3(fields["exit"])?, destroy: remote_container_op_decode_v3(fields["destroy"])?,
+        machine_settle_digest: remote_container_measurements_text_v3(fields, "machineSettleDigest")?,
+        settled_unix_ms: remote_container_measurements_int_v3(fields, "settledUnixMs")?)
+    # Canonical bytes only (version and kind included).
+    if remote_container_measurements_encode_v3(value)? != source: return Err("remote-container-measurements-noncanonical")
+    Ok(value)

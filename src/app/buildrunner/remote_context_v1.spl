@@ -10,6 +10,9 @@ use std.common.build_manager.contracts.{BuildTaskV1}
 use std.common.build_manager.codec.builder_encode_task_v1
 use std.common.crypto.sha256.sha256_text
 use app.buildrunner.remote_evidence_v1.{RemoteEvidencePolicyV1, remote_policy_bind_v1}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{DistributedAuthoritySnapshotV2,
+    distributed_authority_snapshot_key_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{DistributedAuthorityKeyV2 as SnapshotAuthorityKeyV2}
 
 struct RemoteAuthorityContextV1:
     signed: DistributedSignedGrantV2
@@ -61,4 +64,29 @@ fn remote_context_admit_v1(context: RemoteAuthorityContextV1, task: BuildTaskV1,
         return Err("REMOTE_RESOURCE_BINDING_DIFFERS")
     Ok(true)
 
-export RemoteAuthorityContextV1, remote_context_admit_v1
+# The snapshot key type and this module's verifier key type are field-identical twins (lib daemon_sdk vs
+# app.llm_caret); this is a field copy, never a widening.
+fn remote_context_key_v1(key: SnapshotAuthorityKeyV2) -> DistributedAuthorityKeyV2:
+    DistributedAuthorityKeyV2(identity: key.identity, role: key.role, revision: key.revision, public_key: key.public_key,
+        principal: key.principal, project: key.project, host_id: key.host_id, operations: key.operations,
+        maximum_memory_bytes: key.maximum_memory_bytes, maximum_duration_ms: key.maximum_duration_ms,
+        policy_revision: key.policy_revision, revocation_epoch: key.revocation_epoch, expires_at: key.expires_at,
+        revoked: key.revoked)
+
+# milestone_0030 integration item 6 (G12): the context is filled ONLY from role-scoped lookups in the installed
+# snapshot (grant-issuer, human-approver, execution-host); the revision/epoch are the snapshot's own. `observed` is
+# the host's own environment, `now` the trusted grant clock, assignment/epoch from the protected dispatch binding.
+pub fn remote_context_from_snapshot_v1(snapshot: DistributedAuthoritySnapshotV2, session_generation: i64,
+        signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, host_identity: text,
+        request: OperationEnvelopeV2, requested: ExecutionEnvironmentV2, observed: ExecutionEnvironmentV2, now: i64,
+        assignment_digest: text, controller_epoch: i64) -> Result<RemoteAuthorityContextV1, text>:
+    val issuer = distributed_authority_snapshot_key_v2(snapshot, "grant-issuer", signed.issuer_id)?
+    val approver = distributed_authority_snapshot_key_v2(snapshot, "human-approver", approval.approver_id)?
+    val host_key = distributed_authority_snapshot_key_v2(snapshot, "execution-host", host_identity)?
+    Ok(RemoteAuthorityContextV1(signed: signed, approval: approval, issuer: remote_context_key_v1(issuer),
+        approver: remote_context_key_v1(approver), host_key: remote_context_key_v1(host_key), request: request,
+        requested: requested, observed: observed, now: now,
+        policy_revision: snapshot.policy_revision, revocation_epoch: snapshot.revocation_epoch,
+        session_generation: session_generation, assignment_digest: assignment_digest, controller_epoch: controller_epoch))
+
+export RemoteAuthorityContextV1, remote_context_admit_v1, remote_context_from_snapshot_v1

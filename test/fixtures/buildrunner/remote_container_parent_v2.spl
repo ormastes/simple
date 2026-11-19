@@ -79,7 +79,9 @@ fn container_parent_user_fixture_v2(execution: ContainerExecutionEvidenceV2) -> 
         evidence_digest: container_runtime_observation_digest_v2(observation).unwrap(),
         proof_kind: "exact-native-execution-user-v1")
 
-fn container_parent_fixture_v2(exit_code: i64 = 0) -> RemoteContainerParentFixtureV2:
+# `version` 3 adds the milestone_0030 G11 task-version input `remote-container-version/<id>.sdn` = sha256("3\n");
+# the V2 freeze then refuses the task, so the V3 fixture's V2 completion is left unsigned and unused.
+fn container_parent_fixture_v2(exit_code: i64 = 0, version: i64 = 2) -> RemoteContainerParentFixtureV2:
     val root = secure_temp_dir("/tmp", "remote-container-parent-v2").unwrap()
     val body = "synthetic opaque provider request\n"
     val execution = container_execution_fixture_v2(exit_code, 1, sha256_text(body))
@@ -112,7 +114,8 @@ fn container_parent_fixture_v2(exit_code: i64 = 0) -> RemoteContainerParentFixtu
             BuildInputV1("task-context/task_a.sdn", sha256_text(context_payload)),
             BuildInputV1("remote-container/task_a.sdn", sha256_text(request_payload)),
             BuildInputV1("remote-workspace/task_a.nonce", sha256_text(nonce + "\n")),
-            BuildInputV1("remote-container-provider/task_a.sdn", sha256_text(provider + "\n"))],
+            BuildInputV1("remote-container-provider/task_a.sdn", sha256_text(provider + "\n"))] +
+            (if version == 3: [BuildInputV1("remote-container-version/task_a.sdn", sha256_text("3\n"))] else: []),
         outputs: ["artifact/program.bin", "remote-workspace/task_a.probe.sdn"], cache_key: sha256_text("container cache"),
         timeout_ms: 500, memory_limit_bytes: 512, links: [], memory_policy: "enforce")
     val grant_wire = "DBC_EXECUTION_GRANT_V2\ngrant_1\nuser_1\nproject_1\nhost_a\n" +
@@ -159,15 +162,20 @@ fn container_parent_fixture_v2(exit_code: i64 = 0) -> RemoteContainerParentFixtu
         outputs: result_outputs, cache_hits: -1, cache_misses: -1, cache_stores: -1)
     val bytes = RemoteContainerBytesV2(execution: execution, stdout: [1u8, 0u8, 255u8], stderr: [], outputs: outputs,
         selected_user: container_parent_user_fixture_v2(execution), workspace_probe: probe)
-    val frozen = remote_container_evidence_freeze_v2(task, result, policy, request, provider, bytes).unwrap()
-    val completion = container_parent_completion_resign_v2(RemoteContainerCompletionV2(version: 2,
-        task_identity: builder_task_identity_v1(task), host_id: policy.host_id,
-        assignment_digest: policy.assignment_digest, controller_epoch: policy.controller_epoch,
+    var completion = RemoteContainerCompletionV2(version: 2, task_identity: builder_task_identity_v1(task),
+        host_id: policy.host_id, assignment_digest: policy.assignment_digest, controller_epoch: policy.controller_epoch,
         operation_id: policy.operation_id, request_digest: sha256_text(request_wire), grant_digest: sha256_text(grant_wire),
-        result_digest: frozen.result_digest, execution_digest: frozen.execution_digest,
-        stdout_digest: frozen.stdout_digest, stderr_digest: frozen.stderr_digest,
-        output_inventory_digest: frozen.output_inventory_digest, tests_digest: frozen.tests_digest,
-        signer_id: "host_signer_1", key_revision: 1, completed_at: 1099, signature: []))
+        result_digest: "", execution_digest: "", stdout_digest: "", stderr_digest: "", output_inventory_digest: "",
+        tests_digest: "", signer_id: "host_signer_1", key_revision: 1, completed_at: 1099, signature: [])
+    if version == 2:
+        val frozen = remote_container_evidence_freeze_v2(task, result, policy, request, provider, bytes).unwrap()
+        completion.result_digest = frozen.result_digest
+        completion.execution_digest = frozen.execution_digest
+        completion.stdout_digest = frozen.stdout_digest
+        completion.stderr_digest = frozen.stderr_digest
+        completion.output_inventory_digest = frozen.output_inventory_digest
+        completion.tests_digest = frozen.tests_digest
+        completion = container_parent_completion_resign_v2(completion)
     val host = BuildHostV1(id: policy.host_id, transport: "ssh", endpoint: "fixture-container-host",
         workspace: "/fixture/work", worker_program: "/fixture/buildrunner",
         worker_digest: sha256_text("container fixture worker"), slots: 1)

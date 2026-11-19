@@ -3,6 +3,7 @@ use std.common.contracts.container.execution_v2.*
 use std.common.contracts.container.linux_fresh_workload_v2.*
 use std.common.contracts.container.linux_workspace_profile_v1.*
 use std.common.contracts.container.linux_agent_workspace_profile_v1.*
+use std.common.contracts.container.build_workspace_profile_v1.{LinuxBuildWorkspaceProfileV1, linux_build_workspace_profile_encode_v1}
 use std.common.build_manager.contracts.builder_digest_valid_v1
 use std.common.sdn.value.SdnValue
 use std.common.crypto.sha256.sha256_text
@@ -71,6 +72,77 @@ pub struct LinuxFreshWorkspaceNativeRetirementSnapshotV3:
     subject_generation: i64
     provider_generation: i64
 
+# The workspace's primary workload, selected by an explicit workload kind (milestone_0030 N6-a).
+# The Agent arm is the pre-N6 behaviour byte for byte; RemoteBuild is projected from the
+# administrator-installed build profile. DATA only, never a grant.
+pub enum LinuxWorkspacePrimaryV3:
+    Agent(profile: LinuxAgentWorkspaceProfileV1)
+    RemoteBuild(profile: LinuxBuildWorkspaceProfileV1)
+
+# The arm named by a workspace manifest's `kind` key. Only the kind is read; it never
+# falls back from one decode to the other.
+pub enum LinuxWorkspaceArmV3:
+    Agent
+    RemoteBuild
+
+pub fn linux_workspace_manifest_arm_v3(manifest_bytes: text) -> Result<LinuxWorkspaceArmV3, text>:
+    val parsed = match sdn_parse_strict_v1(manifest_bytes, SdnStrictLimitsV1(max_source_bytes: 65536,
+            max_depth: 4, max_nodes: 512, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value.value
+        case Err(_): return Err("fresh-workspace-manifest-kind-syntax")
+    val fields = match parsed:
+        case SdnValue.Dict(value): value
+        case _: return Err("fresh-workspace-manifest-kind-shape")
+    if not fields.contains_key("kind"): return Err("fresh-workspace-manifest-kind-missing")
+    if fields["kind"] == SdnValue.String("agent-workspace-manifest"): return Ok(LinuxWorkspaceArmV3.Agent)
+    if fields["kind"] == SdnValue.String("remote-build-workspace-manifest"): return Ok(LinuxWorkspaceArmV3.RemoteBuild)
+    Err("fresh-workspace-manifest-kind-unsupported")
+
+# Per-arm projection inputs. Agent: bootstrap entrypoint, invocation-manifest arg, TTY.
+# RemoteBuild: launcher entrypoint, build-invocation arg, terminalMode none (precedent
+# linux_fresh_workload_v2.spl:138 and oci_runtime_v1 `--tty` only for "tty").
+struct WorkspacePrimaryProjectionV3:
+    image: text
+    entrypoint: [text]
+    args: [text]
+    terminal_mode: text
+    protected_programs: [text]
+
+fn workspace_primary_projection_v3(primary: LinuxWorkspacePrimaryV3, invocation_digest: text) -> Result<WorkspacePrimaryProjectionV3, text>:
+    match primary:
+        case LinuxWorkspacePrimaryV3.Agent(agent):
+            val installed = linux_agent_workspace_profile_encode_v1(agent)?
+            Ok(WorkspacePrimaryProjectionV3(image: agent.image, entrypoint: [agent.bootstrap_program],
+                args: ["--invocation-manifest-sha256", invocation_digest], terminal_mode: "tty",
+                protected_programs: [agent.bootstrap_program, agent.agent_program]))
+        case LinuxWorkspacePrimaryV3.RemoteBuild(build):
+            val installed = linux_build_workspace_profile_encode_v1(build)?
+            Ok(WorkspacePrimaryProjectionV3(image: build.image, entrypoint: [build.launcher_program],
+                args: ["--build-invocation-sha256", invocation_digest], terminal_mode: "none",
+                protected_programs: [build.launcher_program]))
+
+pub fn linux_workspace_primary_terminal_mode_v3(primary: LinuxWorkspacePrimaryV3) -> text:
+    match primary:
+        case LinuxWorkspacePrimaryV3.Agent(_): "tty"
+        case LinuxWorkspacePrimaryV3.RemoteBuild(_): "none"
+
+# The binding snapshot digest. The Agent arm hashes exactly the pre-N6 field set under kind
+# `linux-fresh-workspace-binding` with key `agent`; RemoteBuild hashes the same shape under kind
+# `linux-fresh-remote-build-binding` with key `build` (DESIGN 14.3 item 4).
+pub fn linux_fresh_workspace_binding_digest_v3(arm: LinuxWorkspaceArmV3, snapshot: LinuxFreshWorkspaceBindingSnapshotV3,
+        request_source: text, manifest_source: text) -> text:
+    val kind = if arm == LinuxWorkspaceArmV3.Agent: "linux-fresh-workspace-binding" else: "linux-fresh-remote-build-binding"
+    val primary_key = if arm == LinuxWorkspaceArmV3.Agent: "agent" else: "build"
+    var fields: Dict<text, SdnValue> = {"kind": SdnValue.String(kind), "version": SdnValue.Int(3),
+        "machine": SdnValue.String(snapshot.machine_policy_digest), "provider": SdnValue.String(snapshot.provider_policy_digest),
+        "workspace": SdnValue.String(snapshot.workspace_profile_digest),
+        "request": SdnValue.String(request_source), "manifest": SdnValue.String(manifest_source),
+        "invocation": SdnValue.String(snapshot.invocation_digest), "lease": SdnValue.String(snapshot.lease_binding_digest),
+        "nativeRoot": SdnValue.String(snapshot.workspace_identity_digest), "directories": SdnValue.String(snapshot.directory_binding_digest),
+        "uid": SdnValue.Int(snapshot.service_uid), "gid": SdnValue.Int(snapshot.service_gid)}
+    fields[primary_key] = SdnValue.String(snapshot.agent_profile_digest)
+    sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
 pub struct LinuxFreshWorkspaceRequestV3:
     image: text
     entrypoint: [text]
@@ -98,10 +170,10 @@ fn workspace_strings_v3(values: [text]) -> SdnValue:
     SdnValue.Array(result)
 
 pub fn linux_fresh_workspace_request_v3(request: ContainerExecutionRequestV2, profile: LinuxWorkspaceInstalledProfileV1,
-        agent: LinuxAgentWorkspaceProfileV1, invocation_digest: text, uid: i64, gid: i64) -> Result<LinuxFreshWorkspaceRequestV3, text>:
+        primary: LinuxWorkspacePrimaryV3, invocation_digest: text, uid: i64, gid: i64) -> Result<LinuxFreshWorkspaceRequestV3, text>:
     val outer = container_execution_request_encode_v2(request)?
     linux_workspace_installed_profile_validate_v1(profile)?
-    val installed = linux_agent_workspace_profile_encode_v1(agent)?
+    val arm = workspace_primary_projection_v3(primary, invocation_digest)?
     if profile.read_only or uid <= 0 or gid <= 0 or not builder_digest_valid_v1(invocation_digest):
         return Err("fresh-workspace-supported-profile-required")
     if profile.guest_root.byte_len() > 4095: return Err("fresh-workspace-guest-path-bound")
@@ -110,7 +182,7 @@ pub fn linux_fresh_workspace_request_v3(request: ContainerExecutionRequestV2, pr
     for component in components:
         if component == "" or component == "." or component == ".." or component.byte_len() > 255:
             return Err("fresh-workspace-guest-path-component")
-    for protected in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/etc", "/proc", "/sys", "/dev", "/run", agent.bootstrap_program, agent.agent_program]:
+    for protected in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/etc", "/proc", "/sys", "/dev", "/run"] + arm.protected_programs:
         if linux_workspace_paths_overlap_v1(profile.guest_root, protected):
             return Err("fresh-workspace-image-assets-shadowed")
     if linux_workspace_source_root_v1(profile).contains(":") or profile.guest_root.contains(":"):
@@ -128,33 +200,33 @@ pub fn linux_fresh_workspace_request_v3(request: ContainerExecutionRequestV2, pr
     val timeout = workspace_number_v3(fields, "timeoutMs")?
     if cpu < 1 or cpu > 64000 or memory < 1 or memory > 1125899906842624 or pids < 1 or pids > 4096 or timeout < 1 or timeout > 30000:
         return Err("fresh-workspace-request-budget")
-    linux_fresh_workload_registry_image_v2(agent.image)?
+    linux_fresh_workload_registry_image_v2(arm.image)?
     val plan = request.plan
     val mount: Dict<text, SdnValue> = {"hostRoot": SdnValue.String(linux_workspace_source_root_v1(profile)),
         "guestRoot": SdnValue.String(profile.guest_root), "readOnly": SdnValue.Bool(false)}
-    val entrypoint = [agent.bootstrap_program]
-    val args = ["--invocation-manifest-sha256", invocation_digest]
+    val entrypoint = arm.entrypoint
+    val args = arm.args
     val expected: Dict<text, SdnValue> = {"version": SdnValue.Int(5), "kind": SdnValue.String("linux-oci-retained-request"),
         "podUid": SdnValue.String(plan.workload_uid), "attempt": SdnValue.Int(plan.attempt),
         "operationId": SdnValue.String(plan.operation_id), "requestDigest": SdnValue.String(plan.request_digest),
-        "image": SdnValue.String(agent.image), "bundlePath": SdnValue.String(""),
+        "image": SdnValue.String(arm.image), "bundlePath": SdnValue.String(""),
         "command": workspace_strings_v3(entrypoint), "args": workspace_strings_v3(args),
         "timeoutMs": SdnValue.Int(timeout), "cpuLimitMillis": SdnValue.Int(cpu), "memoryLimitBytes": SdnValue.Int(memory),
         "pidLimit": SdnValue.Int(pids), "networkPolicy": SdnValue.String("none"), "filesystemPolicy": SdnValue.String("read-only"),
         "buildInputRoot": SdnValue.String(""), "buildOutputRoot": SdnValue.String(""), "replaceEntrypoint": SdnValue.Bool(true),
         "environment": SdnValue.Array([]), "workingDirectory": SdnValue.String(profile.guest_root),
-        "terminalMode": SdnValue.String("tty"), "userUid": SdnValue.Int(uid), "userGid": SdnValue.Int(gid),
+        "terminalMode": SdnValue.String(arm.terminal_mode), "userUid": SdnValue.Int(uid), "userGid": SdnValue.Int(gid),
         "userNamespaceMode": SdnValue.String("keep-id"), "containmentProfileDigest": SdnValue.String(profile.containment_profile_digest),
         "mounts": SdnValue.Array([SdnValue.Dict(mount)])}
     if sdn_encode_canonical(SdnValue.Dict(expected)) + "\n" != request.request_bytes:
         return Err("fresh-workspace-request-not-exact-installed-projection")
-    Ok(LinuxFreshWorkspaceRequestV3(image: agent.image, entrypoint: entrypoint, args: args,
+    Ok(LinuxFreshWorkspaceRequestV3(image: arm.image, entrypoint: entrypoint, args: args,
         cpu_millis: cpu, memory_bytes: memory, pid_limit: pids, timeout_ms: timeout))
 
 pub fn linux_fresh_workspace_command_validate_v3(value: LinuxFreshWorkspaceCommandV3, profile: LinuxWorkspaceInstalledProfileV1,
-        agent: LinuxAgentWorkspaceProfileV1, invocation_digest: text, uid: i64, gid: i64) -> Result<(), text>:
+        primary: LinuxWorkspacePrimaryV3, invocation_digest: text, uid: i64, gid: i64) -> Result<(), text>:
     val command = value.command
-    val request = linux_fresh_workspace_request_v3(command.request, profile, agent, invocation_digest, uid, gid)?
+    val request = linux_fresh_workspace_request_v3(command.request, profile, primary, invocation_digest, uid, gid)?
     val plan = command.request.plan
     val actual = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
         boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,

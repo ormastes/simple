@@ -1,0 +1,132 @@
+"""
+## Purpose and audience
+Pins milestone_0030 DESIGN 14.2 (and r4.1 P2-1, P3-2): the remote-build workload-kind arm of the host settle, the
+`HostRemoteBuildOutcomeRecordV4` in `src/lib/nogc_sync_mut/orchestration/host_linux_completion_evidence_v3.spl` and
+its dispatch in `host_capacity_owner_v1.spl`. Written for owners of the Linux Host service.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
+## Compatibility and limitations
+The record is a field-shape matrix: `succeeded`/`failed` need bundle, exit, destroy and settle digests; classifying
+Exited(0) belongs to the finalize that builds it (L10 exit status). The settle itself needs a
+Linux-protected journal, so the dispatch (arm chosen by the association marker, agent lines unchanged, kind
+cross-check, ambiguity refusal) is pinned by source shape; the codec matrix runs here.
+## Verification guidance and troubleshooting
+Each refusal names the exact error string; a changed string is a contract change.
+"""
+use std.spec.step
+use std.io.file_read_text
+use std.nogc_sync_mut.orchestration.host_linux_completion_evidence_v3.*
+use std.common.crypto.sha256.sha256_text
+
+fn ro_no_workload() -> HostRemoteBuildOutcomeRecordV4:
+    HostRemoteBuildOutcomeRecordV4(operation_id: "operation_2", fence: "fence_1", association_digest: "a".repeat(64),
+        task_digest: "d".repeat(64), outcome: "cancelled", exit_digest: "", destroy_digest: "", absence_result: "no-workload",
+        machine_settle_digest: "", source_return: "never-opened", bundle_digest: "",
+        cancel_cause: "failed:linux-host-remote-build-request-differs")
+
+fn ro_absent() -> HostRemoteBuildOutcomeRecordV4:
+    var record = ro_no_workload()
+    record.cancel_cause = "deadline"
+    record.destroy_digest = "1".repeat(64)
+    record.absence_result = "absent"
+    record.machine_settle_digest = "2".repeat(64)
+    record.source_return = "retained-returned"
+    record
+
+fn ro_count(source: text, needle: text) -> i64:
+    source.split(needle).len() - 1
+
+describe "Remote-build outcome record V4 and settle arm (milestone_0030 14.2)":
+    it "round-trips a pre-transfer cancelled / no-workload record canonically":
+        # @req M0030-OUTCOME-01
+        val bytes = host_remote_build_outcome_encode_v4(ro_no_workload()).unwrap()
+        expect(bytes).to_contain("linux-host-remote-build-outcome")
+        val back = host_remote_build_outcome_decode_v4(bytes).unwrap()
+        expect(back.absence_result).to_equal("no-workload")
+        expect(back.cancel_cause).to_equal("failed:linux-host-remote-build-request-differs")
+        expect(host_remote_build_outcome_relative_v4("operation_2")).to_equal(
+            "host-remote-build-outcomes-v4/" + sha256_text("operation_2") + ".sdn")
+        step("a post-transfer cancel carries destroy, machine settle and the returned source")
+        expect(host_remote_build_outcome_decode_v4(host_remote_build_outcome_encode_v4(ro_absent()).unwrap()).unwrap().source_return).to_equal("retained-returned")
+
+    it "refuses every record outside the validation matrix":
+        # @req M0030-OUTCOME-02
+        step("no-workload with any digest is refused")
+        var digests = ro_no_workload()
+        digests.destroy_digest = "1".repeat(64)
+        expect(host_remote_build_outcome_encode_v4(digests)).to_equal(Err("host-remote-build-outcome-invalid"))
+        var opened = ro_no_workload()
+        opened.source_return = "retained-returned"
+        expect(host_remote_build_outcome_encode_v4(opened)).to_equal(Err("host-remote-build-outcome-invalid"))
+        step("cancelled with a bundle, or without a cause, is refused")
+        var bundled = ro_no_workload()
+        bundled.bundle_digest = "3".repeat(64)
+        expect(host_remote_build_outcome_encode_v4(bundled)).to_equal(Err("host-remote-build-outcome-invalid"))
+        var causeless = ro_no_workload()
+        causeless.cancel_cause = ""
+        expect(host_remote_build_outcome_encode_v4(causeless)).to_equal(Err("host-remote-build-outcome-invalid"))
+        var unknown = ro_no_workload()
+        unknown.cancel_cause = "operator-whim"
+        expect(host_remote_build_outcome_encode_v4(unknown)).to_equal(Err("host-remote-build-outcome-invalid"))
+        step("an absent cancel needs destroy and machine settle digests")
+        var undestroyed = ro_absent()
+        undestroyed.destroy_digest = ""
+        expect(host_remote_build_outcome_encode_v4(undestroyed)).to_equal(Err("host-remote-build-outcome-invalid"))
+        step("the exit digest is opaque but must be 64 hex when set")
+        var exit = ro_absent()
+        exit.exit_digest = "short"
+        expect(host_remote_build_outcome_encode_v4(exit)).to_equal(Err("host-remote-build-outcome-invalid"))
+        exit.exit_digest = "4".repeat(64)
+        expect(host_remote_build_outcome_encode_v4(exit).is_ok()).to_equal(true)
+        step("succeeded and failed need a bundle, exit, destroy and settle digests, absent, returned and no cause")
+        for outcome in ["succeeded", "failed"]:
+            var settled = ro_absent()
+            settled.outcome = outcome
+            settled.cancel_cause = ""
+            settled.exit_digest = "4".repeat(64)
+            settled.bundle_digest = "3".repeat(64)
+            expect(host_remote_build_outcome_decode_v4(host_remote_build_outcome_encode_v4(settled).unwrap()).unwrap().outcome).to_equal(outcome)
+            var no_bundle = settled
+            no_bundle.bundle_digest = ""
+            expect(host_remote_build_outcome_encode_v4(no_bundle)).to_equal(Err("host-remote-build-outcome-invalid"))
+            var no_exit = settled
+            no_exit.exit_digest = ""
+            expect(host_remote_build_outcome_encode_v4(no_exit)).to_equal(Err("host-remote-build-outcome-invalid"))
+            var no_settle = settled
+            no_settle.machine_settle_digest = ""
+            expect(host_remote_build_outcome_encode_v4(no_settle)).to_equal(Err("host-remote-build-outcome-invalid"))
+            var caused = settled
+            caused.cancel_cause = "deadline"
+            expect(host_remote_build_outcome_encode_v4(caused)).to_equal(Err("host-remote-build-outcome-invalid"))
+            var never = settled
+            never.absence_result = "no-workload"
+            never.source_return = "never-opened"
+            expect(host_remote_build_outcome_encode_v4(never)).to_equal(Err("host-remote-build-outcome-invalid"))
+        step("an unknown key, a missing key and non-canonical bytes are refused")
+        val bytes = host_remote_build_outcome_encode_v4(ro_no_workload()).unwrap()
+        expect(host_remote_build_outcome_decode_v4(bytes.replace("outcome:", "extra: \"x\"\n  outcome:")).is_err()).to_equal(true)
+        expect(host_remote_build_outcome_decode_v4(bytes + "\n").is_err()).to_equal(true)
+
+    it "dispatches the settle by the association marker and leaves the agent arm unchanged":
+        # @req M0030-OUTCOME-03
+        val owner = file_read_text("src/lib/nogc_sync_mut/orchestration/host_capacity_owner_v1.spl")
+        step("the agent publish/readback and decode lines are present verbatim")
+        expect(ro_count(owner, "val published = distributed_operation_journal_publish_v3(owner.journal, host_agent_outcome_relative_v4(operation.id), evidence)")).to_equal(1)
+        expect(ro_count(owner, "val stored = distributed_operation_journal_read_required_v3(owner.journal, host_agent_outcome_relative_v4(operation.id), 65536)")).to_equal(1)
+        expect(ro_count(owner, "val record = host_agent_outcome_decode_v4(evidence)?")).to_equal(1)
+        step("the remote-build arm is chosen by the marker, in both the settle and its check")
+        expect(ro_count(owner, "association.remote_build_task_digest != \"\"")).to_equal(2)
+        expect(ro_count(owner, "host_remote_build_outcome_relative_v4(operation.id)")).to_equal(2)
+        expect(owner).to_contain("host_remote_build_settle_check_v4(owner.journal, operation, association, outcome, evidence)?")
+
+    it "cross-checks the record kind against the association marker on reopen":
+        # @req M0030-OUTCOME-04 (r4.1 P2-1)
+        val evidence = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_completion_evidence_v3.spl")
+        val agent_read = evidence.index_of("val agent = distributed_operation_journal_read_v3(journal, host_agent_outcome_relative_v4(operation.id)")
+        val build_read = evidence.index_of("val build = distributed_operation_journal_read_v3(journal, host_remote_build_outcome_relative_v4(operation.id)")
+        val ambiguous = evidence.index_of("return Err(\"host-outcome-kind-ambiguous\")")
+        val agent_arm = evidence.index_of("if agent.is_some(): return host_agent_outcome_evidence_v4(")
+        expect(agent_read < build_read and build_read < ambiguous and ambiguous < agent_arm).to_equal(true)
+        step("each arm refuses a record whose kind differs from the archived association's marker")
+        expect(ro_count(evidence, "Err(\"host-outcome-kind-mismatch\")")).to_equal(2)

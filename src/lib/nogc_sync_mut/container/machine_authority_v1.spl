@@ -7,6 +7,7 @@ use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.io.machine_storage_owner_v1.*
 use std.nogc_sync_mut.io.machine_local_process_principal_v1.*
 use std.common.contracts.container.local_principal_v1.MachineLocalPrincipalSnapshotV1
+use std.common.contracts.container.settled_workspace_read_v3.{ContainerSettledWorkspaceBoundsV3, ContainerSettledWorkspaceReadV3}
 use std.nogc_sync_mut.container.machine_authority_cleanup_v1.*
 use std.nogc_async_mut.container.providers.linux.engine_policy_v1.linux_oci_engine_policy_decode_v1
 use std.nogc_sync_mut.container.machine_claim_record_v1.*
@@ -394,6 +395,12 @@ pub class MachineFreshEpochAdmissionOwnerV1:
         val current = self.current_v1()?
         val process = self.lifecycle.process_current_v1()?
         Ok(current)
+
+    # milestone_0030 P2-a: a NON-CONSUMING read of the installed build workspace profile through the retained
+    # service reader (no loan is taken or ended; the reader stays here until close_v1).
+    pub fn read_build_workspace_profile_v3() -> Result<text, text>:
+        if not self.service_loaned or self.service_reader.is_none(): return Err("machine-fresh-epoch-service-reader-required")
+        self.service_reader.unwrap().read_build_workspace_profile_v1()
 
     # Lends this admitted epoch's actual native identity to ONE Linux service
     # incarnation. No ownership moves: the lend opens its own second
@@ -990,6 +997,13 @@ pub class MachineFreshWorkloadTransferV2:
         val epoch = self.epoch_current_v3()?
         machine_workspace_source_return_settled_v3(self.admission.authority.unwrap().storage, self.state)
 
+    # milestone_0030 op (ii): bounded read of the settled, reserved, not-yet-returned source
+    # (same stale gate as return_settled_workspace_source_v3; it must run before that return).
+    pub fn read_settled_workspace_v3(bounds: ContainerSettledWorkspaceBoundsV3) -> Result<ContainerSettledWorkspaceReadV3, text>:
+        if self.admission.lifecycle.phase_v1()? != "workload-transferred-v2" or self.admission.authority.is_none(): return Err("machine-fresh-workspace-source-read-stale")
+        val epoch = self.epoch_current_v3()?
+        machine_workspace_source_read_settled_v3(self.state, bounds)
+
     # milestone_0021 PR3 (D19): the evidence digest of the CURRENT lifecycle's released machine-charge row. Read
     # only after the store replays this lifecycle's history exactly, so it names a committed row, never a constant.
     pub fn released_charge_digest_v3() -> Result<text, text>:
@@ -1004,7 +1018,7 @@ pub class MachineFreshWorkloadTransferV2:
     # reserved agent source must already be `returned`, and lc2's close_native_v2 stays the authority for that.
     pub fn close_workload_v3() -> Result<(), text>:
         val phase = self.state.source_phase_v3()?
-        if not ["none", "returned"].contains(phase) and self.state.installed_record_v3().is_err():
+        if not ["none", "returned", "retained-returned"].contains(phase) and self.state.installed_record_v3().is_err():
             val cleaned = self.cleanup_workspace_source_v3()?
         self.state.close_native_v2()?
         self.state.closed_v2()

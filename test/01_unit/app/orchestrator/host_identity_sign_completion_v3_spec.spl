@@ -1,0 +1,53 @@
+"""
+## Purpose and audience
+Pins milestone_0030 DESIGN 13.1: the fourth domain-pinned sign entry `host_identity_private_sign_completion_v3` in
+`src/app/orchestrator/host_identity_key_v1.spl`. The execution-host key signs only V3 completion messages
+(`SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V3`), never grants, approvals or V2 completions. Written for owners of
+the host identity store.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
+## Compatibility and limitations
+The seed is RFC 8032 test-1: published, deliberately public fixture material. No new crypto.
+## Verification guidance and troubleshooting
+Each refusal names the exact error string; a changed string is a contract change.
+"""
+use std.spec.step
+use app.orchestrator.host_identity_key_v1.{host_identity_private_encode_v1, host_identity_private_sign_completion_v3,
+    host_identity_private_sign_grant_v1}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_verify}
+
+fn sc3_seed() -> [u8]:
+    [157, 97, 177, 157, 239, 253, 90, 96, 186, 132, 74, 244, 146, 236, 44, 196, 68, 73, 197, 105, 123, 50, 105, 25, 112, 59, 172, 3, 28, 174, 127, 96]
+
+fn sc3_file() -> [u8]:
+    val seed = sc3_seed()
+    host_identity_private_encode_v1(seed, pure_ed25519_keypair_from_seed(seed).1, [1, 2, 3, 4], "public-rfc8032-fixture").unwrap()
+
+describe "Host identity completion V3 sign entry (milestone_0030 13.1)":
+    it "signs a V3 completion message that verifies under the required key":
+        # @req M0030-SIGN3-01
+        val public_key = pure_ed25519_keypair_from_seed(sc3_seed()).1
+        val message = "SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V3\n3\n".bytes()
+        val signed = host_identity_private_sign_completion_v3(sc3_file(), public_key, message).unwrap()
+        expect(pure_ed25519_verify(public_key, message, signed)).to_equal(true)
+
+    it "refuses every other domain, and the other entries refuse a V3 completion":
+        # @req M0030-SIGN3-02
+        val public_key = pure_ed25519_keypair_from_seed(sc3_seed()).1
+        expect(host_identity_private_sign_completion_v3(sc3_file(), public_key,
+            "SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V2\nx\n".bytes())).to_equal(Err("host-identity-sign-domain"))
+        expect(host_identity_private_sign_completion_v3(sc3_file(), public_key, "DBC_GRANT_SIGNATURE_V2\nx\n".bytes())).to_equal(
+            Err("host-identity-sign-domain"))
+        expect(host_identity_private_sign_completion_v3(sc3_file(), public_key,
+            "SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V3\n".bytes())).to_equal(Err("host-identity-sign-domain"))
+        step("the grant entry refuses a V3 completion message")
+        expect(host_identity_private_sign_grant_v1(sc3_file(), public_key,
+            "SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V3\nx\n".bytes())).to_equal(Err("host-identity-sign-domain"))
+
+    it "refuses when the required public key is another key":
+        # @req M0030-SIGN3-03
+        var other = sc3_seed()
+        other[0] = 158
+        expect(host_identity_private_sign_completion_v3(sc3_file(), pure_ed25519_keypair_from_seed(other).1,
+            "SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V3\nx\n".bytes())).to_equal(Err("host-identity-sign-key-differs"))

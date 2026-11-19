@@ -1,0 +1,164 @@
+# milestone_0030 ops (i) and (ii) mechanism: remote-build staging under, and settled evidence reads
+# from, the ORIGINAL source-owned retained root. No Git, launch, exit observation or grant here; the
+# caller (LinuxWorkspaceSourceOwnerV1) holds the installed policy and the live native custody.
+# AUTHORED_NOT_RUN.
+use std.nogc_sync_mut.io.retained_file.RetainedDirectoryOwnerV1
+use std.nogc_async_mut.container.providers.linux.request_v1.LinuxOciRequestV1
+use std.common.contracts.container.build_workspace_profile_v1.{LinuxBuildWorkspaceProfileV1,
+    linux_build_workspace_relative_v1, linux_build_workspace_under_v1}
+use std.common.contracts.container.build_workspace_manifest_v1.{BuildWorkspaceManifestV1, build_workspace_manifest_decode_v1,
+    build_workspace_invocation_decode_v1, build_workspace_invocation_encode_v1}
+use std.common.contracts.container.settled_workspace_read_v3.{ContainerSettledWorkspaceBoundsV3, ContainerSettledWorkspaceReadV3,
+    ContainerSettledWorkspaceFileV3, container_settled_workspace_budget_v3, container_settled_workspace_file_cap_v3}
+use std.common.build_manager.remote_build_input_manifest_v3.{RemoteBuildInputEntryV3, remote_build_input_manifest_entries_digest_v3}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+
+# One task-pinned file to stage: the producer first, then the task inputs, in manifest order.
+pub struct LinuxRemoteBuildStageFileV3:
+    path: text
+    digest: text
+    bytes: [u8]
+
+pub struct LinuxRemoteBuildStageResultV1:
+    # Workspace-relative paths actually created (directories and files), in creation order.
+    creations: [text]
+    error: text
+
+# A single staged file is bounded by the retained exclusive-write primitive
+# (retained_stage_file_bytes_v1: 1 MiB).
+# @allow(primitive_api) fixed byte-count cap accessor (1 MiB); a count, not a domain value
+pub fn linux_remote_build_stage_file_cap_v1() -> i64: container_settled_workspace_file_cap_v3()
+
+# Pure op (i) admission (DESIGN 13.3.4, 14.3.1). Every check runs before any write. The caller
+# supplies the LIVE installed digests and request it sampled from genuine source custody.
+pub fn linux_remote_build_stage_admit_v1(profile: LinuxBuildWorkspaceProfileV1, profile_source: text,
+        machine_policy_digest: text, workspace_profile_digest: text, slot_binding_digest: text,
+        request: LinuxOciRequestV1, manifest_bytes: text, invocation_bytes: text,
+        files: [LinuxRemoteBuildStageFileV3]) -> Result<BuildWorkspaceManifestV1, text>:
+    val manifest = build_workspace_manifest_decode_v1(manifest_bytes)?
+    if (sha256_text(profile_source) != manifest.profile_digest or profile.workspace_profile_digest != workspace_profile_digest or
+            profile.machine_policy_digest != machine_policy_digest): return Err("remote-build-stage-installed-profile-binding")
+    if manifest.slot_binding_digest != slot_binding_digest: return Err("remote-build-stage-slot-binding")
+    if invocation_bytes.byte_len() < 1 or invocation_bytes.byte_len() > linux_remote_build_stage_file_cap_v1(): return Err("remote-build-stage-invocation-bytes")
+    val invocation = build_workspace_invocation_decode_v1(invocation_bytes)?
+    if build_workspace_invocation_encode_v1(invocation)? != invocation_bytes or invocation.workspace_manifest != manifest_bytes:
+        return Err("remote-build-stage-invocation-manifest-binding")
+    # Gap e: the signed preparation window never exceeds what the installed profile allows.
+    if invocation.preparation_budget_ms > profile.preparation_budget_ms: return Err("remote-build-stage-preparation-budget")
+    val invocation_digest = sha256_text(invocation_bytes)
+    if (request.command != [profile.launcher_program] or request.args != ["--build-invocation-sha256", invocation_digest] or
+            request.image != profile.image or request.terminal_mode != "none"): return Err("remote-build-stage-launcher-request")
+    if request.memory_limit_bytes < profile.memory_minimum_bytes: return Err("remote-build-stage-memory-not-admitted")
+    if files.len() < 1 or files.len() > 4097: return Err("remote-build-stage-file-count")
+    if files[0].path != profile.producer_path or files[0].digest != manifest.producer_digest:
+        return Err("remote-build-stage-producer-first")
+    var paths: [text] = []
+    var entries: [RemoteBuildInputEntryV3] = []
+    var total: i64 = 0
+    for file in files:
+        if not linux_build_workspace_relative_v1(file.path) or paths.contains(file.path): return Err("remote-build-stage-path")
+        if (linux_build_workspace_under_v1(file.path, profile.output_root) or linux_build_workspace_under_v1(file.path, profile.stdout_leaf) or
+                linux_build_workspace_under_v1(file.path, profile.stderr_leaf)): return Err("remote-build-stage-reserved-path")
+        if file.bytes.len() > linux_remote_build_stage_file_cap_v1(): return Err("remote-build-stage-file-bound")
+        if not builder_digest_valid_v1(file.digest) or sha256_u8_hex(file.bytes) != file.digest: return Err("remote-build-stage-file-digest")
+        total = total + file.bytes.len()
+        if total > profile.max_input_bytes: return Err("remote-build-stage-input-bytes")
+        paths.push(file.path)
+        entries.push(RemoteBuildInputEntryV3(path: file.path, digest: file.digest))
+    # A file may not also be a directory prefix of another staged path.
+    for path in paths:
+        for other in paths:
+            if other != path and linux_build_workspace_under_v1(other, path): return Err("remote-build-stage-path-prefix-collision")
+    if remote_build_input_manifest_entries_digest_v3(entries)? != manifest.input_manifest_digest:
+        return Err("remote-build-stage-input-manifest-differs")
+    Ok(manifest)
+
+fn remote_build_stage_fail_v1(result: LinuxRemoteBuildStageResultV1, reason: text) -> LinuxRemoteBuildStageResultV1:
+    LinuxRemoteBuildStageResultV1(creations: result.creations, error: if result.error == "": reason else: result.error)
+
+# Exclusive staging of already-admitted files. Directories created here are reopened (never
+# re-created) for later files; every opened child is closed. Partial trees stay retained.
+pub fn linux_remote_build_stage_bytes_v1(root: RetainedDirectoryOwnerV1, files: [LinuxRemoteBuildStageFileV3]) -> LinuxRemoteBuildStageResultV1:
+    var result = LinuxRemoteBuildStageResultV1(creations: [], error: "")
+    var created: [text] = []
+    for file in files:
+        if result.error != "": break
+        val parts = file.path.split("/")
+        var opened: [RetainedDirectoryOwnerV1] = []
+        var prefix = ""
+        var index = 0
+        while index < parts.len() - 1 and result.error == "":
+            val name = parts[index]
+            prefix = if prefix == "": name else: prefix + "/" + name
+            val create = not created.contains(prefix)
+            val parent = if opened.len() == 0: root else: opened[opened.len() - 1]
+            val child = parent.stage_directory_v1(name, create)
+            if child.is_err(): result = remote_build_stage_fail_v1(result, child.unwrap_err())
+            else:
+                opened.push(child.unwrap())
+                if create:
+                    created.push(prefix)
+                    result = LinuxRemoteBuildStageResultV1(creations: result.creations + [prefix], error: result.error)
+            index = index + 1
+        if result.error == "":
+            val parent = if opened.len() == 0: root else: opened[opened.len() - 1]
+            val written = parent.stage_file_v1(parts[parts.len() - 1], file.bytes)
+            if written.is_err(): result = remote_build_stage_fail_v1(result, written.unwrap_err())
+            else: result = LinuxRemoteBuildStageResultV1(creations: result.creations + [file.path], error: result.error)
+        var close_at = opened.len() - 1
+        while close_at >= 0:
+            var directory = opened[close_at]
+            if not directory.close(): result = remote_build_stage_fail_v1(result, "remote-build-stage-directory-close-consumed-error")
+            close_at = close_at - 1
+    result
+
+# Reads one regular, single-link, unchanged file at `parts` beneath `root`. Directories open with
+# O_NOFOLLOW|O_DIRECTORY and the leaf with O_NOFOLLOW, so a symlink anywhere is refused.
+fn remote_build_read_file_v1(root: RetainedDirectoryOwnerV1, parts: [text], remaining: i64) -> Result<[u8], text>:
+    var opened: [RetainedDirectoryOwnerV1] = []
+    var failure = ""
+    var bytes: [u8] = []
+    var index = 0
+    while index < parts.len() - 1 and failure == "":
+        val parent = if opened.len() == 0: root else: opened[opened.len() - 1]
+        val child = parent.stage_directory_v1(parts[index], false)
+        if child.is_err(): failure = child.unwrap_err()
+        else: opened.push(child.unwrap())
+        index = index + 1
+    if failure == "":
+        val cap_bound = if remaining < container_settled_workspace_file_cap_v3(): remaining else: container_settled_workspace_file_cap_v3()
+        val cap = if cap_bound < 1: 1 else: cap_bound
+        val parent = if opened.len() == 0: root else: opened[opened.len() - 1]
+        val file = parent.open_file(parts[parts.len() - 1], cap as u64)
+        if file.is_err(): failure = file.unwrap_err()
+        else:
+            var handle = file.unwrap()
+            val read = handle.read_stage_input_v1(cap)
+            val closed = handle.close()
+            if read.is_err(): failure = read.unwrap_err()
+            elif not closed: failure = "settled-workspace-read-file-close-consumed-error"
+            else: bytes = read.unwrap()
+    var close_at = opened.len() - 1
+    while close_at >= 0:
+        var directory = opened[close_at]
+        if not directory.close() and failure == "": failure = "settled-workspace-read-directory-close-consumed-error"
+        close_at = close_at - 1
+    if failure != "": return Err(failure)
+    if bytes.len() > remaining: return Err("settled-workspace-read-budget-exceeded")
+    Ok(bytes)
+
+# Pure-mechanism op (ii) read: stdout, stderr, then each declared output, within one byte budget.
+pub fn linux_remote_build_read_v1(root: RetainedDirectoryOwnerV1, profile: LinuxBuildWorkspaceProfileV1,
+        bounds: ContainerSettledWorkspaceBoundsV3, binding_digest: text) -> Result<ContainerSettledWorkspaceReadV3, text>:
+    val budget = container_settled_workspace_budget_v3(profile, bounds)?
+    val stdout = remote_build_read_file_v1(root, [profile.stdout_leaf], budget)?
+    var used: i64 = stdout.len()
+    val stderr = remote_build_read_file_v1(root, [profile.stderr_leaf], budget - used)?
+    used = used + stderr.len()
+    var outputs: [ContainerSettledWorkspaceFileV3] = []
+    for path in bounds.output_paths:
+        val bytes = remote_build_read_file_v1(root, profile.output_root.split("/") + path.split("/"), budget - used)?
+        used = used + bytes.len()
+        outputs.push(ContainerSettledWorkspaceFileV3(path: path, bytes: bytes))
+    Ok(ContainerSettledWorkspaceReadV3(binding_digest: binding_digest, stdout: stdout, stderr: stderr, outputs: outputs))

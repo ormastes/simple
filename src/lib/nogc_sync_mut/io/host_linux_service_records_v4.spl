@@ -29,6 +29,8 @@ pub struct HostLinuxServiceRecordsV4:
     authorized_at: i64
     # milestone_0021 F15 (B): the statically checked, enrollment-pinned agent helper template.
     agent_helper_template: Option<GroupProcessStreamLaunchV2> = None
+    # milestone_0030 N5: present only when the signed enrollment pins a remote-build template.
+    remote_build_template: Option<GroupProcessStreamLaunchV2> = None
 
 # Exact installed bytes, already acquired by the caller's protected reader.
 pub struct HostLinuxServiceRecordSourcesV4:
@@ -42,6 +44,7 @@ pub struct HostLinuxServiceRecordSourcesV4:
     claim: text
     root_record: text
     agent_helper_template: text
+    remote_build_template: text = ""
 
 fn service_record_fields_v4(source: text, names: [text]) -> Result<Dict<text, SdnValue>, text>:
     if source.byte_len() == 0 or source.byte_len() > 16384: return Err("linux-host-service-record-size")
@@ -131,6 +134,8 @@ pub fn host_linux_service_records_verify_v4(root: text,
     var records = HostLinuxServiceRecordsV4(binding, metadata, credential, claim_digest.0, claim_digest.1)
     host_linux_service_enrollment_authorize_v4(records)?
     records.agent_helper_template = Some(host_linux_service_agent_helper_template_v4(binding, sources.agent_helper_template)?)
+    if binding.remote_build_template_digest != "":
+        records.remote_build_template = Some(host_linux_service_remote_build_template_v4(binding, sources.remote_build_template)?)
     Ok(records)
 
 pub(package) fn host_linux_service_enrollment_authorize_v4(records: HostLinuxServiceRecordsV4) -> Result<(), text>:
@@ -197,30 +202,42 @@ fn host_linux_service_broker_template_v4(binding: HostLinuxServiceEnrollmentBind
 # checked by the HELD epoch after the factory (validate_helper_template_v3), never guessed here.
 pub fn host_linux_service_agent_helper_template_v4(binding: HostLinuxServiceEnrollmentBindingV3,
         source: text) -> Result<GroupProcessStreamLaunchV2, text>:
-    if source.byte_len() == 0 or source.byte_len() > 1048576 or sha256_text(source) != binding.agent_helper_template_digest:
-        return Err("linux-host-service-agent-helper-template-pin")
+    host_linux_service_helper_template_v4(binding.agent_helper_template_digest, source,
+        "linux-host-service-agent-helper-template", "linux-host-agent-helper-template-invalid")
+
+# milestone_0030 N5 (13.3.6): the remote-build helper template, the same static checks under its own kind and pin.
+# The held epoch validates it for the lent open (simple_container_validate_helper_template_v3), as the agent's.
+pub fn host_linux_service_remote_build_template_v4(binding: HostLinuxServiceEnrollmentBindingV3,
+        source: text) -> Result<GroupProcessStreamLaunchV2, text>:
+    host_linux_service_helper_template_v4(binding.remote_build_template_digest, source,
+        "linux-host-service-remote-build-helper-template", "linux-host-remote-build-template-invalid")
+
+fn host_linux_service_helper_template_v4(digest: text, source: text, kind: text,
+        invalid: text) -> Result<GroupProcessStreamLaunchV2, text>:
+    if source.byte_len() == 0 or source.byte_len() > 1048576 or sha256_text(source) != digest:
+        return Err(kind + "-pin")
     val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 1048576, max_depth: 2,
             max_nodes: 8, max_rows: 0, max_cells: 0, max_columns: 4)):
         case Ok(value): value
-        case Err(issue): return Err("linux-host-service-agent-helper-template-syntax:" + issue.code)
+        case Err(issue): return Err(kind + "-syntax:" + issue.code)
     val fields = match parsed.value:
         case SdnValue.Dict(value): value
-        case _: return Err("linux-host-service-agent-helper-template-object")
-    if fields.len() != 3 or not fields.contains_key("template"): return Err("linux-host-service-agent-helper-template-fields")
+        case _: return Err(kind + "-object")
+    if fields.len() != 3 or not fields.contains_key("template"): return Err(kind + "-fields")
     val template_bytes = match fields["template"]:
         case SdnValue.String(value): value
-        case _: return Err("linux-host-service-agent-helper-template-fields")
-    val expected: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("linux-host-service-agent-helper-template"),
+        case _: return Err(kind + "-fields")
+    val expected: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String(kind),
         "template": SdnValue.String(template_bytes)}
-    if sdn_encode_canonical(SdnValue.Dict(expected)) + "\n" != source: return Err("linux-host-service-agent-helper-template-canonical")
+    if sdn_encode_canonical(SdnValue.Dict(expected)) + "\n" != source: return Err(kind + "-canonical")
     val template = group_process_stream_template_decode_v3(template_bytes)?
     if group_process_stream_template_encode_v3(template)? != template_bytes or template.profile_v3.is_none():
-        return Err("linux-host-agent-helper-template-invalid")
+        return Err(invalid)
     val root = template.root
     val slash = root.last_index_of("/")
     if (template.request.args != ["version"] or not root.starts_with("/") or slash < 0 or
             root.byte_len() - slash - 1 <= 0 or root.byte_len() - slash - 1 > 200):
-        return Err("linux-host-agent-helper-template-invalid")
+        return Err(invalid)
     Ok(template)
 
 # Sealed proof of one verified signed enrollment association. Every field is

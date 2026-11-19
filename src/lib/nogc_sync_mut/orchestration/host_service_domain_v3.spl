@@ -4,9 +4,12 @@ use std.common.contracts.container.pre_start_constraint_v1.ContainerPreStartCons
 # One service request vocabulary and one retained Host writer. Platform startup
 # differs; Linux V2 dispatch and Windows signed preparation share their owners.
 use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.io.local_authority_policy_v1.LocalAuthorityPolicyV1
 use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{HostLinuxServiceCurrentV4, host_linux_service_close_v4,
     host_linux_service_dispatch_installed_v4,
-    host_linux_service_open_installed_v4, host_linux_service_attachment_lease_v4, host_linux_service_pane_io_v4}
+    host_linux_service_open_installed_v4, host_linux_service_attachment_lease_v4, host_linux_service_pane_io_v4,
+    host_linux_service_install_remote_build_port_v4}
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.{HostRemoteBuildPortV4, host_remote_build_frame_decode_v4}
 use std.common.contracts.container.primary_attach_v1.HostAgentPaneBindingV4
 use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneLeaseV4, HostAgentPaneOpV4, HostAgentPaneIoResultV4,
     host_agent_pane_io_refused_v4}
@@ -223,6 +226,25 @@ fn host_service_agent_attachment_request_error_v3(request: HostServiceRequestV2)
     if named != request.operation_id: return "host-service-agent-attachment-operation-mismatch"
     ""
 
+# milestone_0030 s4 wire table: route action -> V4 dispatch action.
+val HOST_REMOTE_BUILD_ACTIONS_V3: Dict<text, text> = {"host-remote-build-open": "host_remote_build_open_v4",
+    "host-remote-build-input": "host_remote_build_input_v4", "host-remote-build-start": "host_remote_build_start_v4",
+    "host-remote-build-collect": "host_remote_build_collect_v4", "host-remote-build-output": "host_remote_build_output_v4",
+    "host-remote-build-cancel": "host_remote_build_cancel_v4"}
+
+# milestone_0030 N11: the verified policy snapshot and physical host identity the port is built from (Linux service only).
+pub fn host_service_domain_remote_build_facts_v3(owner: HostServiceDomainV3) -> Result<(LocalAuthorityPolicyV1, text), text>:
+    match owner.local:
+        case HostLocalRootV3.LinuxService(local): local.remote_build_facts_v4()
+        case _: Err("linux-host-remote-build-linux-service-required")
+
+# F5: the composition installs the app half of the remote-build port before serving (Linux service only).
+pub fn host_service_domain_install_remote_build_port_v3(owner: HostServiceDomainV3, port: HostRemoteBuildPortV4) -> HostServiceDomainV3:
+    match owner.local:
+        case HostLocalRootV3.LinuxService(local):
+            HostServiceDomainV3(HostLocalRootV3.LinuxService(host_linux_service_install_remote_build_port_v4(local, port)))
+        case _: owner
+
 # EFFECT actions (invoke, and the PR3 cancel): an effect-attempted refusal maps to exit 2 with the recovery flag in
 # the error payload (as service_linux_prepare_v3); a plain refusal is 1.
 fn service_linux_agent_action_v3(local: HostLinuxServiceCurrentV4, request: HostServiceRequestV2, action: text) -> HostServiceTurnV3:
@@ -299,6 +321,17 @@ pub fn host_service_domain_turn_v3(owner: HostServiceDomainV3, request: HostServ
                 val abandon_recheck = local.current_v4()
                 if abandon_recheck.is_err(): return HostServiceTurnV3(owner, 2, host_service_error_payload_v2(request, abandon_recheck.unwrap_err(), true))
                 return service_linux_agent_action_v3(local, request, "host_service_handoff_abandon_v1")
+            # milestone_0030 s4: the remote-build route; each frame names the request's operation.
+            if HOST_REMOTE_BUILD_ACTIONS_V3.contains_key(request.action):
+                var build_invalid = host_service_agent_frame_error_v3(request)
+                if build_invalid == "":
+                    val frame = host_remote_build_frame_decode_v4(request.payload)
+                    if frame.is_err(): build_invalid = frame.unwrap_err()
+                    elif frame.unwrap().operation_id != request.operation_id: build_invalid = "host-service-remote-build-operation-mismatch"
+                if build_invalid != "": return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request, build_invalid, false))
+                val build_recheck = local.current_v4()
+                if build_recheck.is_err(): return HostServiceTurnV3(owner, 2, host_service_error_payload_v2(request, build_recheck.unwrap_err(), true))
+                return service_linux_agent_action_v3(local, request, HOST_REMOTE_BUILD_ACTIONS_V3[request.action])
             if request.action == "host-agent-attach" or request.action == "host-agent-detach" or request.action == "host-agent-inspect":
                 val attachment_invalid = host_service_agent_attachment_request_error_v3(request)
                 if attachment_invalid != "": return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request, attachment_invalid, false))

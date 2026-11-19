@@ -1,0 +1,120 @@
+# milestone_0030 13.1 / 14.1 / 14.11 (G4): controller freeze of the host-signed V3 measurements. The measurements are
+# re-checked against the signed task, the pinned request and its plan; nothing is trusted from the frame. The workload
+# exit is L10's typed status: only Exited(0) is success, Exited(n) must equal the result exit code, and any other
+# status is an ERROR result with exit code -1. The legacy `exit_code` fields are never read.
+use app.buildrunner.remote_evidence_v1.{RemoteEvidencePolicyV1, RemoteOutputBytesV1, remote_policy_bind_v1,
+    remote_outputs_freeze_v1}
+use app.buildrunner.remote_container_authority_v3.RemoteContainerCompletionV3
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerHostScopeV2,
+    container_execution_request_encode_v2, container_scope_fence_id_v2}
+use std.common.contracts.container.runtime_v1.RuntimeExitStatusV1
+use std.common.contracts.container.workspace_measurement_v3.{RemoteContainerMeasurementsV3,
+    remote_container_measurements_encode_v3}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildResultV1, BuildInputV1, builder_validate_result_v1,
+    builder_digest_valid_v1}
+use std.common.build_manager.codec.{builder_encode_result_v1, builder_encode_task_v1, builder_wire_line_v1}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.build_manager.remote_build_input_manifest_v3.remote_build_input_manifest_digest_v3
+
+struct RemoteContainerBytesV3:
+    measurements: RemoteContainerMeasurementsV3
+    stdout: [u8]
+    stderr: [u8]
+    outputs: [RemoteOutputBytesV1]
+
+struct RemoteContainerBundleV3:
+    result: BuildResultV1
+    evidence: RemoteContainerBytesV3
+    completion: RemoteContainerCompletionV3
+
+struct RemoteContainerFrozenV3:
+    bytes: RemoteContainerBytesV3
+    observed: [BuildInputV1]
+    result_digest: text
+    measurement_digest: text
+    measurement_wire: text
+    stdout_digest: text
+    stderr_digest: text
+    output_inventory_digest: text
+    tests_digest: text
+
+# Byte count of a raw byte array. The explicit [u8] parameter makes len() a byte count, never a code-point count.
+fn remote_container_byte_count_v3(data: [u8]) -> i64:
+    data.len()
+
+fn remote_container_measurement_digest_v3(measurement_wire: text) -> text:
+    sha256_text("SIMPLE-REMOTE-CONTAINER-MEASUREMENTS-3\n" + builder_wire_line_v1(measurement_wire))
+
+# 14.11 G11: a V3 task carries exactly one input `remote-container-version/<id>.sdn` whose digest is sha256("3\n").
+# No marker = a V2 task; any other digest or a second marker is refused. Both binds check it, so the V2 and V3
+# sessions refuse each other's tasks.
+fn remote_container_task_version_v3(task: BuildTaskV1) -> Result<i64, text>:
+    var markers = 0
+    var version = 2
+    for input in task.inputs:
+        if input.path == "remote-container-version/" + task.id + ".sdn":
+            markers = markers + 1
+            if input.digest != sha256_text("3\n"): return Err("REMOTE_CONTAINER_TASK_VERSION_INVALID")
+            version = 3
+    if markers > 1: return Err("REMOTE_CONTAINER_TASK_VERSION_INVALID")
+    Ok(version)
+
+# 13.1 B rows kept: policy bind, request pinned at remote-container/<id>.sdn, plan == task/policy. The V2 provider pin
+# and the nonce/probe contract are dropped (the signed provider/binding digests and the fresh epoch replace them).
+fn remote_container_request_bind_v3(task: BuildTaskV1, policy: RemoteEvidencePolicyV1,
+        request: ContainerExecutionRequestV2) -> Result<bool, text>:
+    if remote_container_task_version_v3(task)? != 3: return Err("REMOTE_CONTAINER_TASK_VERSION_DIFFERS")
+    val _policy = remote_policy_bind_v1(task, policy)?
+    val payload = container_execution_request_encode_v2(request)?
+    var found = false
+    for input in task.inputs:
+        if input.path == "remote-container/" + task.id + ".sdn" and input.digest == sha256_text(payload): found = true
+    if not found: return Err("REMOTE_CONTAINER_REQUEST_NOT_PINNED")
+    if request.plan.workload_uid != task.id or request.plan.attempt != task.attempt or
+            request.plan.operation_id != policy.operation_id or request.plan.physical_host_id != policy.host_id:
+        return Err("REMOTE_CONTAINER_PLAN_DIFFERS")
+    Ok(true)
+
+fn remote_container_evidence_freeze_v3(task: BuildTaskV1, result: BuildResultV1, policy: RemoteEvidencePolicyV1,
+        request: ContainerExecutionRequestV2, bytes: RemoteContainerBytesV3) -> Result<RemoteContainerFrozenV3, text>:
+    val _bound = remote_container_request_bind_v3(task, policy, request)?
+    val invalid = builder_validate_result_v1(task, result)
+    if invalid != "": return Err(invalid)
+    val measurements = bytes.measurements
+    val measurement_wire = remote_container_measurements_encode_v3(measurements)?
+    if measurements.task_digest != sha256_text(builder_encode_task_v1(task)): return Err("REMOTE_CONTAINER_TASK_DIGEST_DIFFERS")
+    if measurements.input_manifest_digest != remote_build_input_manifest_digest_v3(task)?:
+        return Err("REMOTE_CONTAINER_INPUT_MANIFEST_DIFFERS")
+    if measurements.request_digest != request.plan.request_digest: return Err("REMOTE_CONTAINER_REQUEST_DIFFERS")
+    val plan = request.plan
+    val fence = container_scope_fence_id_v2(ContainerHostScopeV2(physical_host_id: plan.physical_host_id,
+        service_scope_id: plan.service_scope_id, boot_id: plan.boot_id, provider_generation: plan.provider_generation,
+        native_machine_id: plan.native_machine_id, continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id))
+    val runtime = measurements.runtime
+    if fence.is_err() or runtime.pod_uid != plan.workload_uid or runtime.attempt != plan.attempt or
+            runtime.operation_id != plan.operation_id or runtime.provider_generation != plan.provider_generation or
+            runtime.engine != "podman" or not builder_digest_valid_v1(runtime.native_id) or
+            runtime.node_boot_id != fence.unwrap() or measurements.exit.native_id != runtime.native_id or
+            measurements.destroy.native_id != runtime.native_id:
+        return Err("REMOTE_CONTAINER_RUNTIME_DIFFERS")
+    if measurements.exit.status != "ok" or measurements.exit.phase != "stopped" or measurements.destroy.status != "ok":
+        return Err("REMOTE_CONTAINER_LIFECYCLE_UNPROVEN")
+    match measurements.exit.workload_exit:
+        case RuntimeExitStatusV1.Exited(code):
+            if result.exit_code != code: return Err("REMOTE_CONTAINER_EXIT_DIFFERS")
+            val expected_status = if code == 0: "OK" else: "ERROR"
+            if result.status != expected_status: return Err("REMOTE_CONTAINER_OUTCOME_UNPROVEN")
+        case _:
+            if result.status != "ERROR" or result.exit_code != -1: return Err("REMOTE_CONTAINER_OUTCOME_UNPROVEN")
+    var remaining = policy.maximum_bytes
+    for count in [measurement_wire.byte_len(), remote_container_byte_count_v3(bytes.stdout),
+            remote_container_byte_count_v3(bytes.stderr)]:
+        if count > remaining: return Err("REMOTE_EVIDENCE_EXCEEDS_BOUND")
+        remaining = remaining - count
+    val outputs = remote_outputs_freeze_v1(task, result, policy, bytes.outputs, remaining)?
+    Ok(RemoteContainerFrozenV3(bytes, outputs.observed, sha256_text(builder_encode_result_v1(result)),
+        remote_container_measurement_digest_v3(measurement_wire), measurement_wire,
+        sha256_u8_hex(bytes.stdout), sha256_u8_hex(bytes.stderr), outputs.output_inventory_digest, outputs.tests_digest))
+
+export RemoteContainerBytesV3, RemoteContainerBundleV3, RemoteContainerFrozenV3
+export remote_container_byte_count_v3, remote_container_task_version_v3, remote_container_request_bind_v3, remote_container_evidence_freeze_v3, remote_container_measurement_digest_v3

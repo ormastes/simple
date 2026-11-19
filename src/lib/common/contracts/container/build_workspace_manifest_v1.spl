@@ -1,0 +1,84 @@
+# Remote-build workspace manifest and invocation DATA (milestone_0030 DESIGN 13.3.3, 14.3).
+# The invocation digest is what the build request args pin (`--build-invocation-sha256`), so the
+# WorkspaceV3 binding covers the task and its inputs. Decoding grants nothing. AUTHORED_NOT_RUN.
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.build_manager.contracts.builder_digest_valid_v1
+
+pub struct BuildWorkspaceManifestV1:
+    profile_digest: text
+    slot_binding_digest: text
+    task_digest: text
+    input_manifest_digest: text
+    producer_digest: text
+
+pub struct BuildWorkspaceInvocationV1:
+    workspace_manifest: text
+    task_digest: text
+    input_manifest_digest: text
+    preparation_budget_ms: i64
+    not_after: i64
+
+fn build_manifest_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("build-manifest-field:" + key)
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("build-manifest-text:" + key)
+
+fn build_manifest_int_v1(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    if not fields.contains_key(key): return Err("build-manifest-field:" + key)
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("build-manifest-number:" + key)
+
+fn build_manifest_fields_v1(source: text, count: i64, kind: text) -> Result<Dict<text, SdnValue>, text>:
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 65536,
+            max_depth: 2, max_nodes: 32, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(_): return Err("build-manifest-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("build-manifest-object")
+    if fields.len() != count or not fields.contains_key("kind") or not fields.contains_key("version"): return Err("build-manifest-fields")
+    if fields["kind"] != SdnValue.String(kind) or fields["version"] != SdnValue.Int(1): return Err("build-manifest-kind-version")
+    Ok(fields)
+
+pub fn build_workspace_manifest_encode_v1(value: BuildWorkspaceManifestV1) -> Result<text, text>:
+    for digest in [value.profile_digest, value.slot_binding_digest, value.task_digest, value.input_manifest_digest, value.producer_digest]:
+        if not builder_digest_valid_v1(digest): return Err("build-manifest-digest")
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("remote-build-workspace-manifest"), "version": SdnValue.Int(1),
+        "profileDigest": SdnValue.String(value.profile_digest), "slotBindingDigest": SdnValue.String(value.slot_binding_digest),
+        "taskDigest": SdnValue.String(value.task_digest), "inputManifestDigest": SdnValue.String(value.input_manifest_digest),
+        "producerDigest": SdnValue.String(value.producer_digest)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn build_workspace_manifest_decode_v1(source: text) -> Result<BuildWorkspaceManifestV1, text>:
+    val fields = build_manifest_fields_v1(source, 7, "remote-build-workspace-manifest")?
+    val value = BuildWorkspaceManifestV1(profile_digest: build_manifest_text_v1(fields, "profileDigest")?,
+        slot_binding_digest: build_manifest_text_v1(fields, "slotBindingDigest")?, task_digest: build_manifest_text_v1(fields, "taskDigest")?,
+        input_manifest_digest: build_manifest_text_v1(fields, "inputManifestDigest")?,
+        producer_digest: build_manifest_text_v1(fields, "producerDigest")?)
+    if build_workspace_manifest_encode_v1(value)? != source: return Err("build-manifest-noncanonical")
+    Ok(value)
+
+pub fn build_workspace_invocation_encode_v1(value: BuildWorkspaceInvocationV1) -> Result<text, text>:
+    val manifest = build_workspace_manifest_decode_v1(value.workspace_manifest)?
+    if manifest.task_digest != value.task_digest or manifest.input_manifest_digest != value.input_manifest_digest:
+        return Err("build-invocation-manifest-binding")
+    if value.preparation_budget_ms < 1 or value.preparation_budget_ms > 86400000 or value.not_after <= 0:
+        return Err("build-invocation-bounds")
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("remote-build-workspace-invocation"), "version": SdnValue.Int(1),
+        "workspaceManifest": SdnValue.String(value.workspace_manifest), "taskDigest": SdnValue.String(value.task_digest),
+        "inputManifestDigest": SdnValue.String(value.input_manifest_digest),
+        "preparationBudgetMs": SdnValue.Int(value.preparation_budget_ms), "notAfter": SdnValue.Int(value.not_after)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn build_workspace_invocation_decode_v1(source: text) -> Result<BuildWorkspaceInvocationV1, text>:
+    val fields = build_manifest_fields_v1(source, 7, "remote-build-workspace-invocation")?
+    val value = BuildWorkspaceInvocationV1(workspace_manifest: build_manifest_text_v1(fields, "workspaceManifest")?,
+        task_digest: build_manifest_text_v1(fields, "taskDigest")?, input_manifest_digest: build_manifest_text_v1(fields, "inputManifestDigest")?,
+        preparation_budget_ms: build_manifest_int_v1(fields, "preparationBudgetMs")?, not_after: build_manifest_int_v1(fields, "notAfter")?)
+    if build_workspace_invocation_encode_v1(value)? != source: return Err("build-invocation-noncanonical")
+    Ok(value)

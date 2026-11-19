@@ -19,7 +19,8 @@ use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.{HostLinuxHelperD
 use std.common.crypto.sha256.sha256_text
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
 use std.common.contracts.orchestration.host_execute_associated_v3.host_execute_associated_decode_v3
-use std.common.contracts.orchestration.host_execution_association_v3.host_execution_association_digest_v3
+use std.common.contracts.orchestration.host_execution_association_v3.{HostExecutionAssociationV3,
+    host_execution_association_digest_v3}
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
 use std.common.sdn.strict_v1.sdn_parse_strict_v1
@@ -62,7 +63,12 @@ pub fn host_linux_completion_evidence_v3(journal: DistributedOperationJournalV2,
     # milestone_0021 3.6 reopen arm: a V4 agent run is bound by host-execute-associated/ and leaves no
     # host-execute-packets/ entry; its release evidence is the published agent outcome record.
     val agent = distributed_operation_journal_read_v3(journal, host_agent_outcome_relative_v4(operation.id), 65536)?
+    # milestone_0030 14.2 / r4.1 P2-1: the remote-build arm; both records present is refused (fail closed), and each
+    # arm cross-checks its kind against the archived association's marker.
+    val build = distributed_operation_journal_read_v3(journal, host_remote_build_outcome_relative_v4(operation.id), 65536)?
+    if agent.is_some() and build.is_some(): return Err("host-outcome-kind-ambiguous")
     if agent.is_some(): return host_agent_outcome_evidence_v4(journal, operation, agent.unwrap())
+    if build.is_some(): return host_remote_build_outcome_evidence_v4(journal, operation, build.unwrap())
     val receipt = host_cleanup_receipt_decode_v1(distributed_operation_journal_read_required_v3(journal,
         "host-cleanup-receipts-v1/" + key, 131072)?)?
     if receipt.operation_id != operation.id: return Err("host-cleanup-operation-mismatch")
@@ -183,9 +189,14 @@ pub fn host_agent_outcome_decode_v4(source: text) -> Result<HostAgentOutcomeReco
 
 # The association a V4 agent run was admitted under, read through the SAME journal at the fence the record names.
 pub fn host_agent_associated_digest_v4(journal: DistributedOperationJournalV2, fence: text, operation_id: text) -> Result<text, text>:
+    host_execution_association_digest_v3(host_associated_association_v4(journal, fence, operation_id)?)
+
+# milestone_0030: the archived signed association itself (its workload marker decides the outcome kind).
+pub fn host_associated_association_v4(journal: DistributedOperationJournalV2, fence: text,
+        operation_id: text) -> Result<HostExecutionAssociationV3, text>:
     val packet = distributed_operation_journal_read_required_v3(journal,
         "host-execute-associated/" + sha256_text(fence + "\n" + operation_id) + ".sdn", 2097152)?
-    host_execution_association_digest_v3((host_execute_associated_decode_v3(packet)?).association)
+    Ok((host_execute_associated_decode_v3(packet)?).association)
 
 # Reopen arm: the record must be canonical, name this operation, satisfy every settle field (absence, machine
 # settle, source return, destroy digest) and carry the association digest of the archived associated packet.
@@ -193,6 +204,118 @@ fn host_agent_outcome_evidence_v4(journal: DistributedOperationJournalV2, operat
         source: text) -> Result<text, text>:
     val record = host_agent_outcome_decode_v4(source)?
     if record.operation_id != operation.id: return Err("host-agent-outcome-operation")
+    val association = host_associated_association_v4(journal, record.fence, operation.id)?
+    if association.remote_build_task_digest != "": return Err("host-outcome-kind-mismatch")
     if host_agent_associated_digest_v4(journal, record.fence, operation.id)? != record.association_digest:
         return Err("host-agent-outcome-association")
+    Ok(source)
+
+# ---- milestone_0030 14.2: V4 remote-build outcome record (the workload-kind arm beside the agent record). ----
+# Keyed by sha256(operation id) like the agent record; the fence is a field. A field-shape matrix: classifying
+# `succeeded` (only RuntimeExitStatusV1.Exited(0)) is the finalize's job; `exit_digest` is opaque 64 hex here.
+pub struct HostRemoteBuildOutcomeRecordV4:
+    operation_id: text
+    fence: text
+    association_digest: text
+    task_digest: text
+    outcome: text
+    exit_digest: text
+    destroy_digest: text
+    absence_result: text
+    machine_settle_digest: text
+    source_return: text
+    bundle_digest: text
+    cancel_cause: text
+
+pub fn host_remote_build_outcome_relative_v4(operation_id: text) -> text:
+    "host-remote-build-outcomes-v4/" + sha256_text(operation_id) + ".sdn"
+
+fn host_remote_build_outcome_names_v4() -> [text]:
+    ["version", "kind", "operationId", "fence", "associationDigest", "taskDigest", "outcome", "exitDigest", "destroyDigest",
+        "absenceResult", "machineSettleDigest", "sourceReturn", "bundleDigest", "cancelCause"]
+
+# Self-cancel causes (13.4): deadline, controller-cancel, drain, failed:<code>.
+fn host_remote_build_cancel_cause_valid_v4(cause: text) -> bool:
+    if cause == "deadline" or cause == "controller-cancel" or cause == "drain": return true
+    cause.starts_with("failed:") and cause.byte_len() > 7 and cause.byte_len() <= 160
+
+fn host_remote_build_outcome_validate_v4(value: HostRemoteBuildOutcomeRecordV4) -> Result<(), text>:
+    if not builder_identifier_valid_v1(value.operation_id) or value.fence == "": return Err("host-remote-build-outcome-invalid")
+    if not builder_digest_valid_v1(value.association_digest) or not builder_digest_valid_v1(value.task_digest):
+        return Err("host-remote-build-outcome-invalid")
+    for digest in [value.exit_digest, value.destroy_digest, value.machine_settle_digest, value.bundle_digest]:
+        if digest != "" and not builder_digest_valid_v1(digest): return Err("host-remote-build-outcome-invalid")
+    if value.outcome == "succeeded" or value.outcome == "failed":
+        if value.bundle_digest == "" or value.exit_digest == "" or value.destroy_digest == "" or
+                value.machine_settle_digest == "" or value.cancel_cause != "" or value.absence_result != "absent" or
+                value.source_return != "retained-returned":
+            return Err("host-remote-build-outcome-invalid")
+        return Ok(())
+    if value.outcome != "cancelled": return Err("host-remote-build-outcome-invalid")
+    if value.bundle_digest != "" or not host_remote_build_cancel_cause_valid_v4(value.cancel_cause):
+        return Err("host-remote-build-outcome-invalid")
+    if value.absence_result == "no-workload":
+        if (value.exit_digest != "" or value.destroy_digest != "" or value.machine_settle_digest != "" or
+                value.source_return != "never-opened"):
+            return Err("host-remote-build-outcome-invalid")
+        return Ok(())
+    if value.absence_result != "absent" or value.source_return != "retained-returned": return Err("host-remote-build-outcome-invalid")
+    if value.destroy_digest == "" or value.machine_settle_digest == "": return Err("host-remote-build-outcome-invalid")
+    Ok(())
+
+pub fn host_remote_build_outcome_encode_v4(value: HostRemoteBuildOutcomeRecordV4) -> Result<text, text>:
+    host_remote_build_outcome_validate_v4(value)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-remote-build-outcome"),
+        "operationId": SdnValue.String(value.operation_id), "fence": SdnValue.String(value.fence),
+        "associationDigest": SdnValue.String(value.association_digest), "taskDigest": SdnValue.String(value.task_digest),
+        "outcome": SdnValue.String(value.outcome), "exitDigest": SdnValue.String(value.exit_digest),
+        "destroyDigest": SdnValue.String(value.destroy_digest), "absenceResult": SdnValue.String(value.absence_result),
+        "machineSettleDigest": SdnValue.String(value.machine_settle_digest), "sourceReturn": SdnValue.String(value.source_return),
+        "bundleDigest": SdnValue.String(value.bundle_digest), "cancelCause": SdnValue.String(value.cancel_cause)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn host_remote_build_outcome_text_v4(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-remote-build-outcome-field:" + name)
+
+pub fn host_remote_build_outcome_decode_v4(source: text) -> Result<HostRemoteBuildOutcomeRecordV4, text>:
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 65536, max_depth: 2,
+            max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(issue): return Err("host-remote-build-outcome-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("host-remote-build-outcome-object")
+    val names = host_remote_build_outcome_names_v4()
+    if fields.len() != names.len(): return Err("host-remote-build-outcome-fields")
+    for name in names:
+        if not fields.contains_key(name): return Err("host-remote-build-outcome-fields")
+    val value = HostRemoteBuildOutcomeRecordV4(operation_id: host_remote_build_outcome_text_v4(fields, "operationId")?,
+        fence: host_remote_build_outcome_text_v4(fields, "fence")?,
+        association_digest: host_remote_build_outcome_text_v4(fields, "associationDigest")?,
+        task_digest: host_remote_build_outcome_text_v4(fields, "taskDigest")?,
+        outcome: host_remote_build_outcome_text_v4(fields, "outcome")?,
+        exit_digest: host_remote_build_outcome_text_v4(fields, "exitDigest")?,
+        destroy_digest: host_remote_build_outcome_text_v4(fields, "destroyDigest")?,
+        absence_result: host_remote_build_outcome_text_v4(fields, "absenceResult")?,
+        machine_settle_digest: host_remote_build_outcome_text_v4(fields, "machineSettleDigest")?,
+        source_return: host_remote_build_outcome_text_v4(fields, "sourceReturn")?,
+        bundle_digest: host_remote_build_outcome_text_v4(fields, "bundleDigest")?,
+        cancel_cause: host_remote_build_outcome_text_v4(fields, "cancelCause")?)
+    # Canonical bytes only: a re-encode must reproduce the record exactly (version/kind included).
+    if host_remote_build_outcome_encode_v4(value)? != source: return Err("host-remote-build-outcome-noncanonical")
+    Ok(value)
+
+# Reopen arm: canonical record for this operation; the archived association must carry the remote-build marker equal
+# to the record's task digest, and the record must name that association's digest.
+fn host_remote_build_outcome_evidence_v4(journal: DistributedOperationJournalV2, operation: OperationEnvelopeV2,
+        source: text) -> Result<text, text>:
+    val record = host_remote_build_outcome_decode_v4(source)?
+    if record.operation_id != operation.id: return Err("host-remote-build-outcome-operation")
+    val association = host_associated_association_v4(journal, record.fence, operation.id)?
+    if association.remote_build_task_digest == "": return Err("host-outcome-kind-mismatch")
+    if association.remote_build_task_digest != record.task_digest: return Err("host-remote-build-outcome-task")
+    if host_execution_association_digest_v3(association)? != record.association_digest:
+        return Err("host-remote-build-outcome-association")
     Ok(source)
