@@ -68,3 +68,44 @@ it before deeper instrumentation.
 
 Evidence: c43full/stage2-compiler-tests/x86_64-pc-windows-msvc/verification/
 {campaign.RvYGFa/process.env, logs/compiler_cli_build.log} in the v8 lane tree.
+
+## Update 2026-11-19 — native_staged retention audit (source-level)
+
+Full audit: build/native-staged-retention-audit.md in the v9 lane tree
+(361 lines, file:line evidence for every claim).
+
+1. **PR #10334 does NOT cover this phase's retention.** Its rt_array_free
+   guards are HIR module-surface fixes; native_staged has NO rt_array_free
+   calls. Worse, its new default `P3G_ENTRY_MIR_SHARDS=0` (was 1) REMOVES the
+   process-isolation option by default, making the unbounded in-process route
+   more likely. Cycle 8 (c44full) therefore still runs unsharded.
+2. **Eviction is reference-only.** driver_types.spl:1460-1475: "The three
+   evictions below drop references only. With no GC and no refcounting that
+   reclaims NOTHING…" Promoted MirModules + capsule/backend graphs survive
+   every batch. native_staged_codegen.spl:31-36: "Staging does not lower peak
+   RSS … process-level MIR sharding … is the memory fix."
+3. **Designed mitigation = MIR process shards** (worker exit returns memory to
+   the OS): SIMPLE_MIR_SHARDING=1 (managed bootstrap defaults OFF),
+   SIMPLE_MIR_SHARD_COUNT=4 (~1/4 closure per worker). Do NOT set
+   SIMPLE_MIR_SHARD_INPROCESS_FALLBACK=1 (unbounded fallback after retries).
+   Batch-size reduction does NOT cap commit.
+4. **Second growth source:** whole-closure HIR + single MirLowering owner
+   (cross-module registries intentionally survive all batches;
+   driver_pipeline_lowering.spl:1220). Partial cap:
+   SIMPLE_MIR_RETRACT_PROVIDER_TYPES=1 (~955 KiB/module,
+   mir_lowering_types.spl:860-872).
+5. **Third amplifier:** every batch reloads + reparses the ENTIRE accumulated
+   build_cache.sdn (driver_aot_native_output.spl:2232-2235) into fresh native
+   objects; prior loads abandoned. ~Quadratic cache work. Best small code fix:
+   carry one BuildCache across staged batches.
+6. **Concrete AV mechanism:** rt_alloc returns NULL on allocation failure
+   (runtime_memory.c:367-399); generated struct/tuple construction emits GEP
+   + store with NO null check (aggregate_intrinsics.spl:175-193, :220-237) →
+   commit exhaustion becomes a near-null write = 0xC0000005, not a clean OOM.
+   Plausible, not proven without a dump.
+7. Minor: malformed-storage early return (driver_aot_pipeline.spl:666-669)
+   skips batch eviction (coverage bug; would not reclaim memory anyway).
+
+Cycle-9 relaunch script now sets the shard + retract knobs on the authorized
+run. If the AV recurs WITH sharding, next: WER dump + BuildCache reuse fix +
+generated-allocation null checks.
