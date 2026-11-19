@@ -3,9 +3,19 @@ use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpRequest, HttpMethod, 
 use std.nogc_sync_mut.http_server.parser.{request_body_decode, request_content_type}
 use std.nogc_sync_mut.http_server.vector_parser.{http_vector_request_body_v1}
 use std.nogc_sync_mut.http_server.response.{serialize_response_head_for_body_length, serialize_response, response_wire_size, response_body_octets}
-use std.nogc_sync_mut.http_server.h2_server.{h2_response_body_len}
+use std.nogc_sync_mut.http_server.h2_server.{h2_response_body_len, h2_request_from_hpack_v1}
+use std.common.hpack.encoder.{HpackHeader, hpack_encoder_new, hpack_encode}
 use std.nogc_sync_mut.http_server.handler.{MultipartPart, parse_multipart_bytes}
 use std.common.text_bytes.{text_to_utf8_bytes}
+
+fn _h2_block(content_type: text) -> [u8]:
+    val headers = [
+        HpackHeader(name: ":method", value: "POST", sensitive: false),
+        HpackHeader(name: ":path", value: "/upload", sensitive: false),
+        HpackHeader(name: ":scheme", value: "https", sensitive: false),
+        HpackHeader(name: "content-type", value: content_type, sensitive: false)
+    ]
+    hpack_encode(headers, hpack_encoder_new(4096, true)).0
 
 fn _concat(a: [u8], b: [u8]) -> [u8]:
     var out: [u8] = []
@@ -186,3 +196,18 @@ describe "HTTP binary bodies":
         val resp = HttpResponse.ok("x").with_header("X-Title", "café 한글")
         val wire = serialize_response(resp)
         expect(response_wire_size(resp)).to_equal(text_to_utf8_bytes(wire).len())
+
+    it "h2 decodes a UTF-8 body as text and keeps its octets":
+        match h2_request_from_hpack_v1(_h2_block("application/json"), text_to_utf8_bytes("{\"a\":\"é\"}")):
+            Some(req):
+                expect(req.body).to_equal("{\"a\":\"é\"}")
+                expect(req.body_bytes.len()).to_equal(10)
+            None: fail("header block must decode")
+
+    it "h2 keeps a binary body raw with an empty text view":
+        match h2_request_from_hpack_v1(_h2_block("audio/wav"), [0xFFu8, 0u8, 0x80u8]):
+            Some(req):
+                expect(req.body).to_equal("")
+                expect(req.body_bytes.len()).to_equal(3)
+                expect(req.body_bytes[0]).to_equal(255)
+            None: fail("header block must decode")
