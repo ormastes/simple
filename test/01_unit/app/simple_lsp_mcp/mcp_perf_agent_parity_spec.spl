@@ -1,0 +1,457 @@
+"""
+## Purpose and audience
+Purpose: Prove that `simple_lsp_mcp` exposes structured performance diagnostics
+(`cost`, `sizes`, `assumptions`, `obligations`, `tradeoff`, `semantic_fingerprint`)
+and the 8 agent operations (`explain_diagnostic`, `get_cost_summary`,
+`get_cost_contributions`, `list_fix_candidates`, `resolve_fix`, `preview_fix`,
+`apply_fix`, `validate_fix`) while keeping zero `compiler.*` and zero `app.io.mod`
+imports and maintaining 100% CLI / LSP / MCP parity on rule IDs, severities, and
+`VerifiedSafe | ReviewRequired | Unavailable` applicability (`§11.4`, `§11.5`, `I01`, `I02`, `I09`).
+Audience: Tooling and agent-infrastructure engineers maintaining `simple_lsp_mcp` and LSP.
+## Operator workflow
+Run with `simple test test/01_unit/app/simple_lsp_mcp/mcp_perf_agent_parity_spec.spl`
+and verify every scenario passes with zero skipped or placeholder checks.
+"""
+# @req REQ-PERF-MCP-001
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{
+    lsp_document_open_for_client_v1,
+    lsp_document_close_for_client_v1
+}
+use std.nogc_sync_mut.lsp.lsp_diag_action_store.{lsp_diag_action_store_clear_for_client_v1}
+use std.nogc_sync_mut.lsp.lsp_code_action_handler.{lsp_code_action_response_for_client_v1}
+use std.nogc_sync_mut.lsp.lsp_handlers.{
+    lsp_check_json_parse_v1,
+    lsp_diag_record_batch_for_client_v1
+}
+use app.simple_lsp_mcp.protocol.{make_tools_list}
+use app.simple_lsp_mcp.tools.{handle_tool_call}
+use app.simple_lsp_mcp.lsp_diagnostics_structured_v1.{
+    lsp_json_lb_v1,
+    lsp_json_rb_v1,
+    lsp_json_sbl_v1,
+    lsp_json_sbr_v1,
+    lsp_json_pair_v1,
+    lsp_json_str_v1,
+    lsp_fast_extract_field_v1,
+    lsp_snapshot_hash_for_text_v1,
+    lsp_policy_digest_from_text_v1,
+    lsp_parse_admitted_batch_json_v1,
+    lsp_render_structured_envelope_json_v1
+}
+use app.simple_lsp_mcp.lsp_perf_agent_ops_v1.{
+    lsp_perf_agent_reset_v1,
+    lsp_perf_agent_register_snapshot_v1,
+    lsp_perf_agent_set_semantic_fingerprint_v1,
+    lsp_perf_cli_batch_parity_rows_v1,
+    explain_diagnostic,
+    get_cost_summary,
+    get_cost_contributions,
+    list_fix_candidates,
+    resolve_fix,
+    preview_fix,
+    apply_fix,
+    validate_fix
+}
+
+fn _sp_lb() -> text:
+    lsp_json_lb_v1()
+
+fn _sp_rb() -> text:
+    lsp_json_rb_v1()
+
+fn _sp_sbl() -> text:
+    lsp_json_sbl_v1()
+
+fn _sp_sbr() -> text:
+    lsp_json_sbr_v1()
+
+fn _sp_jp(k: text, v: text) -> text:
+    lsp_json_pair_v1(k, v)
+
+fn _sp_js(v: text) -> text:
+    lsp_json_str_v1(v)
+
+fn _sp_jo1(p1: text) -> text:
+    _sp_lb() + p1 + _sp_rb()
+
+fn _sp_jo2(p1: text, p2: text) -> text:
+    _sp_lb() + p1 + "," + p2 + _sp_rb()
+
+fn _sp_jo3(p1: text, p2: text, p3: text) -> text:
+    _sp_lb() + p1 + "," + p2 + "," + p3 + _sp_rb()
+
+fn build_canonical_parity_batch_json(
+    file_path: text,
+    snap_hash: text,
+    policy_digest: text,
+    sem_fp: text,
+    old_loop: text,
+    new_loop: text,
+    span_start: i64,
+    span_end: i64
+) -> text:
+    val span_obj = _sp_lb() + _sp_jp("start", str(span_start)) + "," + _sp_jp("end", str(span_end)) + "," + _sp_jp("line", "2") + "," + _sp_jp("col", "5") + _sp_rb()
+    val rep_style = _sp_lb() + _sp_jp("file", _sp_js(file_path)) + "," + _sp_jp("span", span_obj) + "," + _sp_jp("new_text", _sp_js(new_loop)) + "," + _sp_jp("expected_text", _sp_js(old_loop)) + _sp_rb()
+    val ob_ok1 = _sp_jo3(_sp_jp("kind", _sp_js("collection_identity")), _sp_jp("discharged", "true"), _sp_jp("reason", _sp_js("fresh local builder")))
+    val ob_ok2 = _sp_jo3(_sp_jp("kind", _sp_js("aliasing")), _sp_jp("discharged", "true"), _sp_jp("reason", _sp_js("disjoint input and output")))
+    val fix_style = _sp_lb() +
+        _sp_jp("id", _sp_js("act-style-001")) + "," +
+        _sp_jp("rule_id", _sp_js("PERF-STYLE-001")) + "," +
+        _sp_jp("title", _sp_js("Rewrite loop with iter().filter(valid).map(transform).collect()")) + "," +
+        _sp_jp("description", _sp_js("Equivalent collection pipeline; modeled traversal cost unchanged")) + "," +
+        _sp_jp("kind", _sp_js("Refactor")) + "," +
+        _sp_jp("confidence", _sp_js("safe")) + "," +
+        _sp_jp("applicability", _sp_js("VerifiedSafe")) + "," +
+        _sp_jp("semantic_fingerprint", _sp_js(sem_fp)) + "," +
+        _sp_jp("tradeoff", _sp_js("Modeled traversal cost: unchanged; result materialization still required")) + "," +
+        _sp_jp("obligations", _sp_sbl() + ob_ok1 + "," + ob_ok2 + _sp_sbr()) + "," +
+        _sp_jp("replacements", _sp_sbl() + rep_style + _sp_sbr()) +
+        _sp_rb()
+    val d_style = _sp_lb() +
+        _sp_jp("id", _sp_js("PERF-STYLE-001@src/orders.spl#loop1/0")) + "," +
+        _sp_jp("severity", _sp_js("hint")) + "," +
+        _sp_jp("code", _sp_js("PERF-STYLE-001")) + "," +
+        _sp_jp("category", _sp_js("loop_idiom")) + "," +
+        _sp_jp("message", _sp_js("Equivalent refactor available; runtime improvement has not been established.")) + "," +
+        _sp_jp("file", _sp_js(file_path)) + "," +
+        _sp_jp("line", "2") + "," +
+        _sp_jp("col", "5") + "," +
+        _sp_jp("semantic_fingerprint", _sp_js(sem_fp)) + "," +
+        _sp_jp("fixes", _sp_sbl() + fix_style + _sp_sbr()) +
+        _sp_rb()
+
+    val cost_obj = _sp_lb() +
+        _sp_jp("expression", _sp_js("n*m")) + "," +
+        _sp_jp("resource", _sp_js("key_comparisons")) + "," +
+        _sp_jp("relation", _sp_js("Exact")) + "," +
+        _sp_jp("regime", _sp_js("WorstCase")) + "," +
+        _sp_jp("model", _sp_js("full_scan_example_v1")) + "," +
+        _sp_jp("status", _sp_js("Complete")) + "," +
+        _sp_jp("origin", _sp_js("Inferred")) +
+        _sp_rb()
+    val sizes_obj = _sp_jo2(_sp_jp("n", _sp_js("length(keys)")), _sp_jp("m", _sp_js("length(records)")))
+    val assumptions_arr = _sp_sbl() +
+        _sp_js("Each helper invocation scans every record") + "," +
+        _sp_js("Input lengths remain stable") +
+        _sp_sbr()
+    val contrib1 = _sp_lb() + _sp_jp("node_id", _sp_js("c1")) + "," + _sp_jp("role", _sp_js("caller_loop")) + "," + _sp_jp("file", _sp_js(file_path)) + "," + _sp_jp("line", "2") + "," + _sp_jp("col", "5") + "," + _sp_jp("summary", _sp_js("outer traversal: n calls")) + _sp_rb()
+    val contrib2 = _sp_lb() + _sp_jp("node_id", _sp_js("c2")) + "," + _sp_jp("role", _sp_js("callee_loop")) + "," + _sp_jp("file", _sp_js("src/records.spl")) + "," + _sp_jp("line", "8") + "," + _sp_jp("col", "5") + "," + _sp_jp("summary", _sp_js("count_matches: m comparisons per call")) + _sp_rb()
+    val ob_rev = _sp_jo3(_sp_jp("kind", _sp_js("output_shape_duplicates")), _sp_jp("discharged", "false"), _sp_jp("reason", _sp_js("key hash/equality laws and extra O(distinct_keys) memory require review")))
+    val rep_alg = _sp_lb() + _sp_jp("file", _sp_js(file_path)) + "," + _sp_jp("span", span_obj) + "," + _sp_jp("new_text", _sp_js("val counts = records.count_by_key()\n    keys.map(k -> counts.get_or_zero(k))")) + "," + _sp_jp("expected_text", _sp_js(old_loop)) + _sp_rb()
+    val fix_alg = _sp_lb() +
+        _sp_jp("id", _sp_js("act-alg-index-001")) + "," +
+        _sp_jp("rule_id", _sp_js("PERF-COST-001")) + "," +
+        _sp_jp("title", _sp_js("Build key counts once before lookup")) + "," +
+        _sp_jp("description", _sp_js("Reduces expected work to O(m+n) with extra O(distinct_keys) auxiliary memory")) + "," +
+        _sp_jp("kind", _sp_js("AlgorithmChange")) + "," +
+        _sp_jp("confidence", _sp_js("likely")) + "," +
+        _sp_jp("applicability", _sp_js("ReviewRequired")) + "," +
+        _sp_jp("semantic_fingerprint", _sp_js(sem_fp)) + "," +
+        _sp_jp("tradeoff", _sp_js("Additional O(distinct_keys) storage and hash/equality consistency assumptions")) + "," +
+        _sp_jp("obligations", _sp_sbl() + ob_rev + _sp_sbr()) + "," +
+        _sp_jp("replacements", _sp_sbl() + rep_alg + _sp_sbr()) +
+        _sp_rb()
+    val d_cost = _sp_lb() +
+        _sp_jp("id", _sp_js("PERF-COST-001@src/orders.spl#call1/0")) + "," +
+        _sp_jp("symbol", _sp_js("count_for_all")) + "," +
+        _sp_jp("severity", _sp_js("warning")) + "," +
+        _sp_jp("code", _sp_js("PERF-COST-001")) + "," +
+        _sp_jp("category", _sp_js("repeated_scan")) + "," +
+        _sp_jp("message", _sp_js("Modeled comparison count is n*m under the listed assumptions.")) + "," +
+        _sp_jp("file", _sp_js(file_path)) + "," +
+        _sp_jp("line", "2") + "," +
+        _sp_jp("col", "5") + "," +
+        _sp_jp("semantic_fingerprint", _sp_js(sem_fp)) + "," +
+        _sp_jp("cost", cost_obj) + "," +
+        _sp_jp("sizes", sizes_obj) + "," +
+        _sp_jp("assumptions", assumptions_arr) + "," +
+        _sp_jp("contributions", _sp_sbl() + contrib1 + "," + contrib2 + _sp_sbr()) + "," +
+        _sp_jp("fixes", _sp_sbl() + fix_alg + _sp_sbr()) +
+        _sp_rb()
+
+    val ob_alias = _sp_jo3(_sp_jp("kind", _sp_js("aliasing")), _sp_jp("discharged", "false"), _sp_jp("reason", _sp_js("S03: input aliases output builder")))
+    val pre_blocked = _sp_lb() + _sp_jp("file", _sp_js(file_path)) + "," + _sp_jp("span", span_obj) + "," + _sp_jp("expected_text", _sp_js(old_loop)) + _sp_rb()
+    val fix_blocked = _sp_lb() +
+        _sp_jp("id", _sp_js("act-fix-blocked-001")) + "," +
+        _sp_jp("rule_id", _sp_js("PERF-FIX-001")) + "," +
+        _sp_jp("title", _sp_js("Convert aliased loop to pipeline")) + "," +
+        _sp_jp("description", _sp_js("Blocked by S03 aliasing precondition")) + "," +
+        _sp_jp("kind", _sp_js("Refactor")) + "," +
+        _sp_jp("confidence", _sp_js("uncertain")) + "," +
+        _sp_jp("applicability", _sp_js("Unavailable")) + "," +
+        _sp_jp("disabled_reason", _sp_js("S03: input aliases output builder")) + "," +
+        _sp_jp("semantic_fingerprint", _sp_js(sem_fp)) + "," +
+        _sp_jp("tradeoff", _sp_js("Original imperative loop preserved")) + "," +
+        _sp_jp("obligations", _sp_sbl() + ob_alias + _sp_sbr()) + "," +
+        _sp_jp("preconditions", _sp_sbl() + pre_blocked + _sp_sbr()) + "," +
+        _sp_jp("replacements", _sp_sbl() + _sp_sbr()) +
+        _sp_rb()
+    val d_blocked = _sp_lb() +
+        _sp_jp("id", _sp_js("PERF-FIX-001@src/orders.spl#loop2/0")) + "," +
+        _sp_jp("severity", _sp_js("hint")) + "," +
+        _sp_jp("code", _sp_js("PERF-FIX-001")) + "," +
+        _sp_jp("category", _sp_js("blocked_refactor")) + "," +
+        _sp_jp("message", _sp_js("Candidate blocked by semantic or revision preconditions.")) + "," +
+        _sp_jp("file", _sp_js(file_path)) + "," +
+        _sp_jp("line", "2") + "," +
+        _sp_jp("col", "5") + "," +
+        _sp_jp("semantic_fingerprint", _sp_js(sem_fp)) + "," +
+        _sp_jp("fixes", _sp_sbl() + fix_blocked + _sp_sbr()) +
+        _sp_rb()
+
+    val tp_obj = _sp_lb() + _sp_jp("target", _sp_js(file_path)) + "," + _sp_jp("profile", _sp_js("perf")) + "," + _sp_jp("scope", _sp_js("document")) + "," + _sp_jp("policy_digest", _sp_js(policy_digest)) + _sp_rb()
+    _sp_lb() +
+        _sp_jp("schema_version", "1") + "," +
+        _sp_jp("producer", _sp_js("simple-lint-perf")) + "," +
+        _sp_jp("file_id", _sp_js(file_path)) + "," +
+        _sp_jp("uri", _sp_js("file:///" + file_path)) + "," +
+        _sp_jp("document_version", "1") + "," +
+        _sp_jp("source_hash", _sp_js(snap_hash)) + "," +
+        _sp_jp("semantic_fingerprint", _sp_js(sem_fp)) + "," +
+        _sp_jp("status", _sp_js("complete")) + "," +
+        _sp_jp("incomplete_reason", "null") + "," +
+        _sp_jp("diagnostics", _sp_sbl() + d_style + "," + d_cost + "," + d_blocked + _sp_sbr()) + "," +
+        _sp_jp("related_files", _sp_sbl() + _sp_js("src/records.spl") + _sp_sbr()) + "," +
+        _sp_jp("target_profile", tp_obj) +
+        _sp_rb()
+
+fn has_non_comment_line_containing(source: text, needle: text) -> bool:
+    for raw_line in source.split("\n"):
+        val trimmed = raw_line.trim()
+        if trimmed != "" and not trimmed.starts_with("#"):
+            if trimmed.contains(needle):
+                return true
+    false
+
+describe "Wave F5: simple_lsp_mcp structured perf diagnostics, 8 agent operations, and CLI/LSP/MCP parity (I09)":
+    """
+    Verifies startup-closure import hygiene, structured cost/sizes/obligations/tradeoff
+    fields, full 8-operation agent workflow with I01/I02 guards, and CLI/LSP/MCP parity.
+    """
+
+    context "startup-closure import and direct-runtime hygiene":
+        """
+        Enforces zero compiler.* and zero app.io.mod imports and zero raw rt_env_get/rt_process_run.
+        """
+
+        it "keeps simple_lsp_mcp structured/perf/protocol modules free of compiler.* and app.io.mod imports":
+            """
+            Protects simple_lsp_mcp source-mode startup closure and process-facade invariants.
+            """
+            step("Inspect non-comment code lines of owned simple_lsp_mcp modules")
+            val s_diag = file_read("src/app/simple_lsp_mcp/lsp_diagnostics_structured_v1.spl")
+            val s_ops = file_read("src/app/simple_lsp_mcp/lsp_perf_agent_ops_v1.spl")
+            val s_proto = file_read("src/app/simple_lsp_mcp/protocol.spl")
+            val s_tools = file_read("src/app/simple_lsp_mcp/tools.spl")
+
+            expect(has_non_comment_line_containing(s_diag, "use compiler.")).to_equal(false)
+            expect(has_non_comment_line_containing(s_diag, "use app.io.mod")).to_equal(false)
+            expect(has_non_comment_line_containing(s_ops, "use compiler.")).to_equal(false)
+            expect(has_non_comment_line_containing(s_ops, "use app.io.mod")).to_equal(false)
+            expect(has_non_comment_line_containing(s_proto, "use compiler.")).to_equal(false)
+            expect(has_non_comment_line_containing(s_proto, "use app.io.mod")).to_equal(false)
+            expect(has_non_comment_line_containing(s_tools, "use app.io.mod")).to_equal(false)
+
+            expect(has_non_comment_line_containing(s_ops, "rt_env_get")).to_equal(false)
+            expect(has_non_comment_line_containing(s_ops, "rt_process_run")).to_equal(false)
+            expect(has_non_comment_line_containing(s_tools, "rt_env_get")).to_equal(false)
+            expect(has_non_comment_line_containing(s_tools, "rt_process_run")).to_equal(false)
+
+    context "structured perf fields and 8 agent operations (explain, cost, list, resolve, preview, apply, validate)":
+        """
+        Exercises §11.4 and §11.5 end-to-end with I01 document and I02 semantic_fingerprint guards.
+        """
+
+        it "exposes cost, sizes, assumptions, obligations, tradeoff, and semantic_fingerprint in structured envelopes":
+            """
+            Admitted DiagnosticBatchV1 JSON renders §11.5 perf metadata and canonical applicability.
+            """
+            step("Parse canonical perf DiagnosticBatchV1 JSON into LspStructuredDiagnosticsEnvelopeV1")
+            val old_loop = "for k in keys: out.push(count_matches(records, k))"
+            val new_loop = "val out = keys.iter().map(k -> count_matches(records, k)).collect()"
+            val src = "fn count_for_all(keys, records):\n    " + old_loop + "\n"
+            val snap = lsp_snapshot_hash_for_text_v1(src)
+            val pol = lsp_policy_digest_from_text_v1("PERF-COST-001: warn\n")
+            val sem_fp = "sem-fp-orders-v1"
+            val batch_json = build_canonical_parity_batch_json("src/orders.spl", snap, pol, sem_fp, old_loop, new_loop, 37, 37 + old_loop.byte_len())
+
+            val parsed = lsp_parse_admitted_batch_json_v1("src/orders.spl", snap, pol, batch_json, true)
+            expect(parsed.?).to_equal(true)
+            val env = parsed.unwrap()
+            expect(env.diagnostics.len()).to_equal(3)
+            expect(env.ranked_fixes.len()).to_equal(3)
+
+            val rendered = lsp_render_structured_envelope_json_v1(env)
+            expect(rendered).to_contain("\"expression\":\"n*m\"")
+            expect(rendered).to_contain("\"resource\":\"key_comparisons\"")
+            expect(rendered).to_contain("\"relation\":\"Exact\"")
+            expect(rendered).to_contain("\"regime\":\"WorstCase\"")
+            expect(rendered).to_contain("\"model\":\"full_scan_example_v1\"")
+            expect(rendered).to_contain("\"n\":\"length(keys)\"")
+            expect(rendered).to_contain("\"m\":\"length(records)\"")
+            expect(rendered).to_contain("\"semantic_fingerprint\":\"sem-fp-orders-v1\"")
+            expect(rendered).to_contain("\"VerifiedSafe\"")
+            expect(rendered).to_contain("\"ReviewRequired\"")
+            expect(rendered).to_contain("\"Unavailable\"")
+            expect(rendered).to_contain("Additional O(distinct_keys) storage")
+
+        it "executes all 8 agent operations via tools/call and enforces I01, I02, S03, and ReviewRequired gates":
+            """
+            Verifies explain_diagnostic, get_cost_summary, get_cost_contributions,
+            list_fix_candidates, resolve_fix, preview_fix, apply_fix, and validate_fix.
+            """
+            lsp_perf_agent_reset_v1()
+            val old_loop = "for k in keys: out.push(count_matches(records, k))"
+            val new_loop = "val out = keys.iter().map(k -> count_matches(records, k)).collect()"
+            val src = "fn count_for_all(keys, records):\n    " + old_loop + "\n"
+            val snap = lsp_snapshot_hash_for_text_v1(src)
+            val pol = lsp_policy_digest_from_text_v1("PERF-COST-001: warn\n")
+            val sem_fp = "sem-fp-orders-v1"
+            val batch_json = build_canonical_parity_batch_json("src/orders.spl", snap, pol, sem_fp, old_loop, new_loop, 37, 37 + old_loop.byte_len())
+            lsp_perf_agent_register_snapshot_v1("src/orders.spl", 1, src, snap, sem_fp, batch_json)
+
+            step("1. Advertise agent operations in tools/list while keeping existing 13 tools green")
+            val tools_json = make_tools_list("1")
+            expect(tools_json).to_contain("\"explain_diagnostic\"")
+            expect(tools_json).to_contain("\"get_cost_summary\"")
+            expect(tools_json).to_contain("\"get_cost_contributions\"")
+            expect(tools_json).to_contain("\"list_fix_candidates\"")
+            expect(tools_json).to_contain("\"resolve_fix\"")
+            expect(tools_json).to_contain("\"preview_fix\"")
+            expect(tools_json).to_contain("\"apply_fix\"")
+            expect(tools_json).to_contain("\"validate_fix\"")
+
+            step("2. Call explain_diagnostic, get_cost_summary, and get_cost_contributions")
+            val exp_json = explain_diagnostic("PERF-COST-001@src/orders.spl#call1/0")
+            expect(exp_json).to_contain("\"rule\":\"PERF-COST-001\"")
+            expect(exp_json).to_contain("\"expression\":\"n*m\"")
+            expect(exp_json).to_contain("Each helper invocation scans every record")
+
+            val cost_json = get_cost_summary("count_for_all", sem_fp)
+            expect(cost_json).to_contain("\"symbol\":\"count_for_all\"")
+            expect(cost_json).to_contain("\"expression\":\"n*m\"")
+            expect(cost_json).to_contain("\"n\":\"length(keys)\"")
+            expect(cost_json).to_contain("\"m\":\"length(records)\"")
+
+            val contrib_json = get_cost_contributions("count_for_all", sem_fp)
+            expect(contrib_json).to_contain("outer traversal: n calls")
+            expect(contrib_json).to_contain("count_matches: m comparisons per call")
+
+            step("3. Call list_fix_candidates and preview_fix without mutating source")
+            val cands_json = list_fix_candidates("src/orders.spl")
+            expect(cands_json).to_contain("act-style-001")
+            expect(cands_json).to_contain("act-alg-index-001")
+            expect(cands_json).to_contain("act-fix-blocked-001")
+            expect(cands_json).to_contain("S03: input aliases output builder")
+
+            val prev_json = preview_fix("act-style-001")
+            expect(prev_json).to_contain(old_loop)
+            expect(prev_json).to_contain(new_loop)
+            expect(prev_json).to_contain("Modeled traversal cost: unchanged")
+
+            step("4. Verify resolve_fix and apply_fix block Unavailable (S03), ReviewRequired, I01, and I02")
+            val blocked_res = resolve_fix("act-fix-blocked-001", snap)
+            expect(blocked_res).to_contain("\"Unavailable\"")
+            expect(blocked_res).to_contain("S03: input aliases output builder")
+
+            val review_refused = apply_fix("act-alg-index-001", snap, false)
+            expect(review_refused).to_contain("\"status\":\"review_required\"")
+
+            val stale_rev = resolve_fix("act-style-001", "s1-stale-hash")
+            expect(stale_rev).to_contain("\"status\":\"stale_revision\"")
+
+            lsp_perf_agent_set_semantic_fingerprint_v1("src/orders.spl", "sem-fp-callee-mutated-v2")
+            val stale_sem = resolve_fix("act-style-001", snap)
+            expect(stale_sem).to_contain("\"status\":\"stale_semantic_fingerprint\"")
+            val apply_sem_blocked = apply_fix("act-style-001", snap, false)
+            expect(apply_sem_blocked).to_contain("\"status\":\"stale_semantic_fingerprint\"")
+
+            step("5. Restore semantic_fingerprint, resolve + apply VerifiedSafe fix via MCP tools/call, and validate_fix")
+            lsp_perf_agent_set_semantic_fingerprint_v1("src/orders.spl", sem_fp)
+            val resolved_ok = resolve_fix("act-style-001", snap)
+            expect(resolved_ok).to_contain("\"status\":\"resolved\"")
+            expect(resolved_ok).to_contain("\"VerifiedSafe\"")
+
+            val mcp_apply_args = _sp_jo2(_sp_jp("action_id", _sp_js("act-style-001")), _sp_jp("expected_revision", _sp_js(snap)))
+            val mcp_apply_req = _sp_lb() + _sp_jp("jsonrpc", _sp_js("2.0")) + "," + _sp_jp("id", "88") + "," + _sp_jp("method", _sp_js("tools/call")) + "," + _sp_jp("params", _sp_jo2(_sp_jp("name", _sp_js("apply_fix")), _sp_jp("arguments", mcp_apply_args))) + _sp_rb()
+            val mcp_apply_resp = handle_tool_call("88", mcp_apply_req)
+            val apply_sc = lsp_fast_extract_field_v1(lsp_fast_extract_field_v1(mcp_apply_resp, "result"), "structuredContent")
+            expect(apply_sc).to_contain("\"status\":\"applied\"")
+            val change_id = lsp_fast_extract_field_v1(apply_sc, "change_id")
+            expect(change_id).to_start_with("perf-change-")
+
+            val val_ok = validate_fix(change_id)
+            expect(val_ok).to_contain("\"status\":\"validated\"")
+            expect(val_ok).to_contain("\"rule\":\"PERF-STYLE-001\"")
+
+            lsp_perf_agent_set_semantic_fingerprint_v1("src/orders.spl", "sem-fp-drifted-after-apply")
+            val val_drifted = validate_fix(change_id)
+            expect(val_drifted).to_contain("\"status\":\"invalidated\"")
+
+    context "cross-surface CLI, LSP, and MCP parity (I09)":
+        """
+        Feeds the exact same DiagnosticBatchV1 snapshot to CLI, LSP, and MCP adapters.
+        """
+
+        it "agrees 100% across CLI, LSP, and MCP on rule IDs, severities, and VerifiedSafe/ReviewRequired/Unavailable applicability":
+            """
+            Guarantees I09: one shared batch produces identical diagnostic identities,
+            severities, and applicability verdicts across every consumer surface.
+            """
+            lsp_perf_agent_reset_v1()
+            val client = "i09-parity-client"
+            val uri = "file:///w/orders.spl"
+            val old_loop = "for k in keys: out.push(count_matches(records, k))"
+            val new_loop = "val out = keys.iter().map(k -> count_matches(records, k)).collect()"
+            val src = "fn count_for_all(keys, records):\n    " + old_loop + "\n"
+            val mcp_snap = lsp_snapshot_hash_for_text_v1(src)
+            val pol = lsp_policy_digest_from_text_v1("PERF-COST-001: warn\n")
+            val sem_fp = "sem-fp-i09-shared"
+            val batch_json = build_canonical_parity_batch_json("/w/orders.spl", mcp_snap, pol, sem_fp, old_loop, new_loop, 37, 37 + old_loop.byte_len())
+
+            step("Project CLI batch rows")
+            val cli_rows = lsp_perf_cli_batch_parity_rows_v1(batch_json)
+            expect(cli_rows.len()).to_equal(3)
+
+            step("Project MCP structured envelope + fix candidates")
+            lsp_perf_agent_register_snapshot_v1("/w/orders.spl", 1, src, mcp_snap, sem_fp, batch_json)
+            val mcp_env = lsp_parse_admitted_batch_json_v1("/w/orders.spl", mcp_snap, pol, batch_json, true).unwrap()
+            expect(mcp_env.diagnostics.len()).to_equal(3)
+            expect(mcp_env.ranked_fixes.len()).to_equal(3)
+
+            step("Project LSP check batch + live codeAction surface")
+            expect(lsp_document_open_for_client_v1(client, uri, 1, src)).to_equal(true)
+            val lsp_batch = lsp_check_json_parse_v1(batch_json, "/w/orders.spl", 1)
+            expect(lsp_batch.valid).to_equal(true)
+            expect(lsp_batch.items.len()).to_equal(3)
+            lsp_diag_record_batch_for_client_v1(client, uri, lsp_batch)
+
+            val ca_req = _sp_lb() + _sp_jp("textDocument", _sp_jo1(_sp_jp("uri", _sp_js(uri)))) + "," + _sp_jp("range", _sp_jo2(_sp_jp("start", _sp_jo2(_sp_jp("line", "1"), _sp_jp("character", "4"))), _sp_jp("end", _sp_jo2(_sp_jp("line", "1"), _sp_jp("character", "4"))))) + _sp_rb()
+            val lsp_ca_json = lsp_code_action_response_for_client_v1(client, "90", ca_req, "")
+
+            step("Assert 100% CLI == MCP == LSP parity on rule codes, severities, and applicability")
+            expect(cli_rows[0]).to_equal("PERF-STYLE-001|hint|VerifiedSafe")
+            expect(cli_rows[1]).to_equal("PERF-COST-001|warning|ReviewRequired")
+            expect(cli_rows[2]).to_equal("PERF-FIX-001|hint|Unavailable")
+
+            expect(mcp_env.diagnostics[0].code + "|" + mcp_env.diagnostics[0].severity + "|" + mcp_env.ranked_fixes[0].applicability).to_equal(cli_rows[0])
+            expect(mcp_env.diagnostics[1].code + "|" + mcp_env.diagnostics[1].severity + "|" + mcp_env.ranked_fixes[1].applicability).to_equal(cli_rows[1])
+            expect(mcp_env.diagnostics[2].code + "|" + mcp_env.diagnostics[2].severity + "|" + mcp_env.ranked_fixes[2].applicability).to_equal(cli_rows[2])
+
+            expect(lsp_batch.items[0]).to_contain("\"code\":\"PERF-STYLE-001\"")
+            expect(lsp_batch.items[0]).to_contain("\"severity\":4")
+            expect(lsp_batch.items[1]).to_contain("\"code\":\"PERF-COST-001\"")
+            expect(lsp_batch.items[1]).to_contain("\"severity\":2")
+            expect(lsp_batch.items[2]).to_contain("\"code\":\"PERF-FIX-001\"")
+            expect(lsp_batch.items[2]).to_contain("\"severity\":4")
+
+            expect(lsp_ca_json).to_contain("\"kind\":\"refactor.rewrite\"")
+            expect(lsp_ca_json).to_contain("S03: input aliases output builder")
+
+            lsp_diag_action_store_clear_for_client_v1(client, uri)
+            expect(lsp_document_close_for_client_v1(client, uri)).to_equal(true)

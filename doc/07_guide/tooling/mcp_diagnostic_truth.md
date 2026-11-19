@@ -39,3 +39,22 @@ To preserve `simple_lsp_mcp`'s lightweight startup closure (importing only `.jso
 ### Never Summarize Non-Complete Statuses as Clean
 
 An envelope with `status` or `completeness` in `incomplete`, `timed_out`, `failed`, `pending`, or `unavailable` must **never** be summarized or formatted as `"clean"`, `"pass"`, or `"0 issues"` — even when `diagnostics` is empty (`ED-07`, `ED-T05`). Only `status == "complete"` over the requested scope with zero policy-violating findings constitutes a clean diagnostic verdict.
+
+<!-- wave-f-perf-analysis-collection-refactoring-2026-11-19 -->
+
+## Performance cost summaries, machine-readable obligations, and scoped write authorization (`PERF-*`, 2026-11-18)
+
+Canonical plan: [Simple Performance Analysis and Collection Refactoring](../../03_plan/compiler/performance_analysis_and_collection_refactoring_2026-11-18.md) (`D07`, `D10`, §9.2–§9.3, §10.1, §11.4–§11.5, §16.2; contracts in `src/compiler/35.semantics/perf/perf_analysis_contracts_v1.spl`).
+
+### Shared Agent Operations Over Canonical Perf & Fix Services
+
+MCP/LLM adapters (`src/app/simple_lsp_mcp/`) route performance inspection and refactoring requests through the same shared semantic analysis and `EditTransaction` services used by CLI lint and LSP (`I09`):
+
+- **Read-only inspection:** `list_diagnostics(scope, profile)`, `explain_diagnostic(diagnostic_id)`, `get_cost_summary(symbol, revision)`, `get_cost_contributions(symbol, revision)`, `list_fix_candidates(diagnostic_or_range)`, `resolve_fix(action_id, expected_revision)`, and `preview_fix(action_id)`. None of these operations may modify workspace files.
+- **Authorized write & post-edit validation:** `apply_fix(action_id, expected_revision)` and `validate_fix(change_id)` execute only on explicit user write authorization, enforcing `EditTransaction` triple preconditions (`version`, `source_hash`, `expected_text`) plus `dependency_fingerprint` currency (`I01`, `I02`).
+
+### Machine-Readable Obligations, Resource Tradeoffs, and Honest Coverage
+
+- **Structured obligations instead of prose-only hints:** Candidate responses carry structured `SafetyObligationStatusV1` lists (`kind`, `discharged`, `reason`), `PerfFixKind` (`Refactor | CorrectnessFix | AlgorithmChange`), `PerfFixApplicability` (`VerifiedSafe | ReviewRequired | Unavailable`), and explicit `resource_tradeoff_note` metadata so an agent can distinguish a `VerifiedSafe` local `FilterMap` refactor from a `ReviewRequired` hash-index redesign (`PERF-ALG-001`) that trades `O(distinct_keys)` auxiliary memory for `O(m+n)` expected lookups, or a `PERF-FIX-001` candidate blocked by `aliasing` / `collection_identity`.
+- **No self-granted `VerifiedSafe` status:** An LLM agent may draft an `AlgorithmChange` patch and accompanying SSpec tests, but the candidate remains `ReviewRequired` until the compiler/lint verification mechanism discharges every required obligation (`D10`, §10.1).
+- **Three-valued contracts and non-complete coverage truth:** Contract checks preserve `Verified | Refuted | Unproved` (`PERF-CONTRACT-001` vs `PERF-CONTRACT-002`), and unknown callees, unsupported SFFI calls, or budget expirations surface explicitly as `PERF-ANALYSIS-001` / `AnalysisResultStatus.Unknown` / `Partial` / `Cancelled` — never summarized as zero cost, proven linear behavior, or a clean pass.

@@ -33,16 +33,21 @@ fn ctx_at(profile: text, edition: text, release_date: text) -> PolicyResolveCont
 
 # @manual_section: diagnostic_rule_policy
 describe "DiagnosticRulePolicy load (plan §4)":
-    it "loads the fourteen seeded rules with their schedule fields and a sha256 digest":
+    it "loads the twenty-three seeded rules with their schedule fields and a sha256 digest":
+        """Verifies all 23 seeded rules (14 SPL-* plus 9 PERF-*) load with deterministic sha256 digest."""
         # @req REQ-DIAG-POLICY-001
         # @capture(value): rule count, SPL-TYPE-001 schedule, digest prefix
         step("Load config/policy/diagnostic_policy.sdn")
         val s = shipped()
         step("Inspect the dense table and one rule's lifecycle fields")
-        expect(s.rule_count()).to_equal(14)
+        expect(s.rule_count()).to_equal(23)
         expect(s.has_rule("SPL-PAT-001")).to_equal(true)
         expect(s.has_rule("SPL-UNIT-001")).to_equal(true)
         expect(s.has_rule("SPL-UNIT-002")).to_equal(true)
+        expect(s.has_rule("PERF-STYLE-001")).to_equal(true)
+        expect(s.has_rule("PERF-COST-001")).to_equal(true)
+        expect(s.has_rule("PERF-CONTRACT-001")).to_equal(true)
+        expect(s.has_rule("PERF-FIX-001")).to_equal(true)
         val r = s.rule("SPL-TYPE-001")
         expect(r.error_not_before_date).to_equal("")
         expect(r.error_since_lang_version).to_equal("2027.2")
@@ -283,3 +288,42 @@ describe "Robust-boundary rules (robust_boundaries plan section 7)":
                 expect(rob_proj.lint_level_name).to_equal("deny")
                 expect(rob_proj.driver_severity_name).to_equal("deny")
             Err(e): expect(e).to_equal("loaded")
+
+describe "Performance analysis diagnostic policy rules (PERF-*, section 9.2)":
+    """Verifies the 9 PERF-* rule rows, profile severity baselines, and exception policies."""
+
+    it "keeps PERF-STYLE-001 and PERF-ALG-001 advisory and PERF-FIX-001 silent across all profiles":
+        """Checks style/redesign rules stay advisory and blocked-fix carrier never warns."""
+        val s = shipped()
+        for mode in ["default", "moderate", "strict", "robust", "critical", "verified"]:
+            expect(s.resolve("PERF-STYLE-001", ctx_at(mode, "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("advisory")
+            expect(s.resolve("PERF-ALG-001", ctx_at(mode, "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("advisory")
+            expect(s.resolve("PERF-FIX-001", ctx_at(mode, "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("allow")
+        expect(s.rule("PERF-STYLE-001").exception_policy).to_equal("allowed")
+        expect(s.rule("PERF-FIX-001").exception_policy).to_equal("allowed")
+
+    it "warns on PERF-COST-001/002 with reason_required and downgrades PERF-ALLOC-001 in moderate":
+        """Checks cost warnings require suppression rationale and materialization is advisory in moderate."""
+        val s = shipped()
+        for code in ["PERF-COST-001", "PERF-COST-002"]:
+            expect(s.rule(code).exception_policy).to_equal("reason_required")
+            expect(s.resolve(code, ctx_at("default", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")
+            expect(s.resolve(code, ctx_at("robust", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")
+        expect(s.resolve("PERF-ALLOC-001", ctx_at("moderate", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("advisory")
+        expect(s.resolve("PERF-ALLOC-001", ctx_at("default", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")
+        expect(s.resolve("PERF-ALLOC-001", ctx_at("strict", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")
+
+    it "enforces refuted vs unproved resource contracts and coverage notes selectively by profile":
+        """Checks PERF-CONTRACT-001 denies in strict..verified, PERF-CONTRACT-002 denies only in verified, and PERF-ANALYSIS-001 warns in verified."""
+        val s = shipped()
+        expect(s.rule("PERF-CONTRACT-001").exception_policy).to_equal("reason_required")
+        expect(s.rule("PERF-CONTRACT-002").exception_policy).to_equal("reason_required")
+        expect(s.resolve("PERF-CONTRACT-001", ctx_at("default", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")
+        expect(s.resolve("PERF-CONTRACT-001", ctx_at("moderate", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")
+        for mode in ["strict", "robust", "critical", "verified"]:
+            expect(s.resolve("PERF-CONTRACT-001", ctx_at(mode, "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("deny")
+        for mode in ["default", "moderate", "strict", "robust", "critical"]:
+            expect(s.resolve("PERF-CONTRACT-002", ctx_at(mode, "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")
+        expect(s.resolve("PERF-CONTRACT-002", ctx_at("verified", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("deny")
+        expect(s.resolve("PERF-ANALYSIS-001", ctx_at("default", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("advisory")
+        expect(s.resolve("PERF-ANALYSIS-001", ctx_at("verified", "2026.11", "2026-11-18"), DiagnosticRuleLevel.Warn).level.name()).to_equal("warn")

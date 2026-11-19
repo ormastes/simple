@@ -1,0 +1,522 @@
+# LSP Deferred CodeAction Resolve, Disabled Perf Reasons & Cost Hover Specification
+# @req REQ-PERF-LSP-001
+# @cover src/lib/nogc_sync_mut/lsp/main.spl
+# @cover src/lib/nogc_sync_mut/lsp/lsp_handlers.spl
+# @cover src/lib/nogc_sync_mut/lsp/lsp_code_action_handler.spl
+# @cover src/lib/nogc_sync_mut/lsp/lsp_diag_code_action.spl
+# @cover src/lib/nogc_sync_mut/lsp/lsp_diag_action_store.spl
+# @cover src/lib/nogc_sync_mut/lsp/lsp_perf_presentation_v1.spl
+"""
+## Purpose and audience
+
+Executable TDD specification for Wave F5 (`§9.2`, `§10.2`, `§11.1`, `§11.2`,
+`§15.3` `C07`, `I01`, `I02`): verifies that Simple LSP advertises deferred
+`codeAction/resolve` and `refactor.rewrite`, negotiates client capabilities
+gracefully, surfaces blocked `PERF-FIX-001` / `Unavailable` candidates with
+exact `disabled.reason` preconditions (`S03` aliasing, `nogc` restrictions),
+offers `PERF-STYLE-001` assists as `refactor.rewrite`, revalidates BOTH
+document `(version, source_hash)` (`I01`) and server-side `semantic_fingerprint`
+(`I02`) during `codeAction/resolve` without mutating files, and formats sparse
+multi-parameter cost hover blocks plus caller-to-callee `relatedInformation`
+provenance chains (`C07`).
+"""
+
+use std.spec
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use std.common.json.value.{
+    JsonValue,
+    json_parse_value_strict,
+    json_value_field,
+    json_value_items,
+    json_value_has,
+    json_value_text_or,
+    json_value_object_from,
+    json_value_serialize
+}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{
+    lsp_document_open_for_client_v1,
+    lsp_document_change_for_client_v1,
+    lsp_document_close_for_client_v1,
+    lsp_document_snapshot_for_client_v1
+}
+use std.nogc_sync_mut.lsp.lsp_diag_action_store.{
+    lsp_diag_action_store_lookup_for_client_v1,
+    lsp_diag_action_store_clear_for_client_v1,
+    lsp_perf_set_semantic_fingerprint_for_client_v1,
+    lsp_perf_clear_semantic_fingerprint_for_client_v1
+}
+use std.nogc_sync_mut.lsp.lsp_code_action_handler.{
+    lsp_code_action_response_for_client_v1,
+    lsp_handle_code_action_resolve_for_client_v1,
+    lsp_handle_code_action_resolve
+}
+use std.nogc_sync_mut.lsp.lsp_handlers.{
+    lsp_handle_initialize_with_body,
+    lsp_check_json_parse_v1,
+    lsp_diag_record_batch_for_client_v1,
+    lsp_handle_hover
+}
+use std.nogc_sync_mut.lsp.lsp_perf_presentation_v1.{
+    LspPerfSizeBindingV1,
+    LspPerfCostHoverSummaryV1,
+    LspPerfProvenanceSpanV1,
+    lsp_negotiate_client_code_action_caps_v1,
+    lsp_set_client_code_action_caps_for_client_v1,
+    lsp_clear_client_code_action_caps_for_client_v1,
+    lsp_format_perf_cost_hover_markdown_v1,
+    lsp_render_perf_cost_hover_json_v1,
+    lsp_render_perf_related_information_json_v1,
+    lsp_perf_hover_register_for_client_v1,
+    lsp_perf_hover_clear_for_client_v1
+}
+
+fn span_jv(start: i64, end: i64, line_no: i64, col_no: i64) -> JsonValue:
+    json_value_object_from([
+        ("start", JsonValue.Int(start)),
+        ("end", JsonValue.Int(end)),
+        ("line", JsonValue.Int(line_no)),
+        ("col", JsonValue.Int(col_no))
+    ])
+
+fn obligation_jv(kind: text, discharged: bool, reason: text) -> JsonValue:
+    json_value_object_from([
+        ("kind", JsonValue.Str(kind)),
+        ("discharged", JsonValue.Bool(discharged)),
+        ("reason", JsonValue.Str(reason))
+    ])
+
+fn build_init_request(client_id: text, resolve_edit: bool, disabled_support: bool, doc_changes: bool) -> text:
+    var ca_fields: [(text, JsonValue)] = [
+        ("disabledSupport", JsonValue.Bool(disabled_support)),
+        ("dataSupport", JsonValue.Bool(true))
+    ]
+    if resolve_edit:
+        ca_fields.push((
+            "resolveSupport",
+            json_value_object_from([("properties", JsonValue.Array([JsonValue.Str("edit")]))])
+        ))
+    val td_caps = json_value_object_from([("codeAction", json_value_object_from(ca_fields))])
+    val ws_caps = json_value_object_from([
+        ("workspaceEdit", json_value_object_from([("documentChanges", JsonValue.Bool(doc_changes))]))
+    ])
+    val caps = json_value_object_from([("textDocument", td_caps), ("workspace", ws_caps)])
+    val params = json_value_object_from([("clientId", JsonValue.Str(client_id)), ("capabilities", caps)])
+    json_value_serialize(json_value_object_from([
+        ("jsonrpc", JsonValue.Str("2.0")),
+        ("id", JsonValue.Int(1)),
+        ("method", JsonValue.Str("initialize")),
+        ("params", params)
+    ]))
+
+fn build_code_action_req(client_id: text, uri: text, line0: i64) -> text:
+    val doc = json_value_object_from([("uri", JsonValue.Str(uri))])
+    val pos = json_value_object_from([("line", JsonValue.Int(line0)), ("character", JsonValue.Int(4))])
+    val rng = json_value_object_from([("start", pos), ("end", pos)])
+    val params = json_value_object_from([
+        ("clientId", JsonValue.Str(client_id)),
+        ("textDocument", doc),
+        ("range", rng)
+    ])
+    json_value_serialize(json_value_object_from([
+        ("jsonrpc", JsonValue.Str("2.0")),
+        ("id", JsonValue.Int(10)),
+        ("method", JsonValue.Str("textDocument/codeAction")),
+        ("params", params)
+    ]))
+
+fn build_resolve_req(client_id: text, action: JsonValue) -> text:
+    json_value_serialize(json_value_object_from([
+        ("jsonrpc", JsonValue.Str("2.0")),
+        ("id", JsonValue.Int(11)),
+        ("clientId", JsonValue.Str(client_id)),
+        ("method", JsonValue.Str("codeAction/resolve")),
+        ("params", action)
+    ]))
+
+fn build_perf_batch_json(
+    file_path: text,
+    source_hash: text,
+    sem_fp: text,
+    old_loop: text,
+    new_expr: text,
+    span_start: i64,
+    span_end: i64,
+    line1: i64
+) -> text:
+    val rep_safe = json_value_object_from([
+        ("file", JsonValue.Str(file_path)),
+        ("span", span_jv(span_start, span_end, line1, 5)),
+        ("new_text", JsonValue.Str(new_expr)),
+        ("expected_text", JsonValue.Str(old_loop))
+    ])
+    val fix_style = json_value_object_from([
+        ("id", JsonValue.Str("act-style-map-1")),
+        ("rule_id", JsonValue.Str("PERF-STYLE-001")),
+        ("title", JsonValue.Str("Convert loop to items.iter().map(...).collect()")),
+        ("description", JsonValue.Str("Equivalent collection refactor available; runtime improvement not established")),
+        ("kind", JsonValue.Str("Refactor")),
+        ("confidence", JsonValue.Str("safe")),
+        ("applicability", JsonValue.Str("VerifiedSafe")),
+        ("semantic_fingerprint", JsonValue.Str(sem_fp)),
+        ("tradeoff", JsonValue.Str("Modeled traversal cost: unchanged; terminal collect() preserves eager allocation")),
+        ("obligations", JsonValue.Array([
+            obligation_jv("collection_identity", true, "fresh non-escaping local builder"),
+            obligation_jv("aliasing", true, "input items does not alias result"),
+            obligation_jv("revision_currency", true, "matches snapshot and callee summary")
+        ])),
+        ("replacements", JsonValue.Array([rep_safe]))
+    ])
+    val diag_style = json_value_object_from([
+        ("id", JsonValue.Str("PERF-STYLE-001@caller.spl#loop0/0")),
+        ("severity", JsonValue.Str("hint")),
+        ("code", JsonValue.Str("PERF-STYLE-001")),
+        ("message", JsonValue.Str("Equivalent collection refactor available; runtime improvement has not been established.")),
+        ("line", JsonValue.Int(line1)),
+        ("col", JsonValue.Int(5)),
+        ("semantic_fingerprint", JsonValue.Str(sem_fp)),
+        ("fixes", JsonValue.Array([fix_style]))
+    ])
+
+    val fix_blocked = json_value_object_from([
+        ("id", JsonValue.Str("act-blocked-alias-1")),
+        ("rule_id", JsonValue.Str("PERF-FIX-001")),
+        ("title", JsonValue.Str("Convert in-place loop to iter().map().collect()")),
+        ("description", JsonValue.Str("Blocked by aliasing and nogc restrictions")),
+        ("kind", JsonValue.Str("Refactor")),
+        ("confidence", JsonValue.Str("uncertain")),
+        ("applicability", JsonValue.Str("Unavailable")),
+        ("disabled_reason", JsonValue.Str("S03 aliasing: input collection aliases output builder; nogc scope forbids temporary buffer")),
+        ("semantic_fingerprint", JsonValue.Str(sem_fp)),
+        ("tradeoff", JsonValue.Str("Automatic conversion withheld")),
+        ("obligations", JsonValue.Array([
+            obligation_jv("aliasing", false, "S03 aliasing: input collection aliases output builder"),
+            obligation_jv("resource_restrictions", false, "nogc scope forbids temporary buffer")
+        ])),
+        ("preconditions", JsonValue.Array([
+            json_value_object_from([
+                ("file", JsonValue.Str(file_path)),
+                ("span", span_jv(span_start, span_end, line1, 5)),
+                ("expected_text", JsonValue.Str(old_loop))
+            ])
+        ])),
+        ("replacements", JsonValue.Array([]))
+    ])
+    val diag_blocked = json_value_object_from([
+        ("id", JsonValue.Str("PERF-FIX-001@caller.spl#loop0/1")),
+        ("severity", JsonValue.Str("hint")),
+        ("code", JsonValue.Str("PERF-FIX-001")),
+        ("message", JsonValue.Str("Loop refactor candidate blocked by semantic safety preconditions.")),
+        ("line", JsonValue.Int(line1)),
+        ("col", JsonValue.Int(5)),
+        ("semantic_fingerprint", JsonValue.Str(sem_fp)),
+        ("fixes", JsonValue.Array([fix_blocked]))
+    ])
+
+    val related_chain = JsonValue.Array([
+        json_value_object_from([
+            ("node_id", JsonValue.Str("prov-caller-loop")),
+            ("role", JsonValue.Str("caller_loop")),
+            ("file", JsonValue.Str(file_path)),
+            ("line", JsonValue.Int(line1)),
+            ("col", JsonValue.Int(5)),
+            ("end_line", JsonValue.Int(line1)),
+            ("end_col", JsonValue.Int(20)),
+            ("summary_line", JsonValue.Str("outer traversal executes n = length(keys) iterations"))
+        ]),
+        json_value_object_from([
+            ("node_id", JsonValue.Str("prov-callee-scan")),
+            ("role", JsonValue.Str("callee_loop")),
+            ("file", JsonValue.Str("/w/records_helper.spl")),
+            ("line", JsonValue.Int(4)),
+            ("col", JsonValue.Int(5)),
+            ("end_line", JsonValue.Int(6)),
+            ("end_col", JsonValue.Int(22)),
+            ("summary_line", JsonValue.Str("count_matches scans all m = length(records) entries per call"))
+        ])
+    ])
+    val diag_cost = json_value_object_from([
+        ("id", JsonValue.Str("PERF-COST-001@caller.spl#call0/0")),
+        ("severity", JsonValue.Str("warning")),
+        ("code", JsonValue.Str("PERF-COST-001")),
+        ("message", JsonValue.Str("Modeled comparison count is n*m under the listed assumptions.")),
+        ("line", JsonValue.Int(line1)),
+        ("col", JsonValue.Int(5)),
+        ("semantic_fingerprint", JsonValue.Str(sem_fp)),
+        ("related_locations", related_chain)
+    ])
+
+    json_value_serialize(json_value_object_from([
+        ("schema_version", JsonValue.Int(1)),
+        ("status", JsonValue.Str("complete")),
+        ("source_hash", JsonValue.Str(source_hash)),
+        ("semantic_fingerprint", JsonValue.Str(sem_fp)),
+        ("diagnostics", JsonValue.Array([diag_style, diag_blocked, diag_cost]))
+    ]))
+
+describe "Wave F5: LSP deferred codeAction/resolve, disabled PERF-FIX-001 reasons, and cost hover":
+    """
+    Verifies capability negotiation, disabled FixCandidate surfacing, refactor.rewrite
+    style assists, I01/I02 revision + semantic_fingerprint revalidation during
+    codeAction/resolve, and read-only cost hover + C07 relatedInformation formatting.
+    """
+
+    context "when negotiating initialize capabilities":
+        """
+        Ensures server advertises resolveProvider + refactor.rewrite and respects client flags.
+        """
+
+        it "advertises resolveProvider true and quickfix, refactor, refactor.rewrite kinds":
+            """
+            LSP initialize response must expose deferred resolution and rewrite code action kinds.
+            """
+            step("Send initialize with modern 3.17 client capabilities and inspect server capabilities")
+            val req = build_init_request("caps-modern", true, true, true)
+            val resp = lsp_handle_initialize_with_body("1", req)
+            expect(resp).to_contain("\"codeActionProvider\"")
+            expect(resp).to_contain("\"resolveProvider\":true")
+            expect(resp).to_contain("\"quickfix\"")
+            expect(resp).to_contain("\"refactor\"")
+            expect(resp).to_contain("\"refactor.rewrite\"")
+
+            val negotiated = lsp_negotiate_client_code_action_caps_v1(req)
+            expect(negotiated.resolve_support).to_equal(true)
+            expect(negotiated.disabled_support).to_equal(true)
+            expect(negotiated.document_changes_support).to_equal(true)
+
+            val minimal = lsp_negotiate_client_code_action_caps_v1("")
+            expect(minimal.resolve_support).to_equal(false)
+            expect(minimal.disabled_support).to_equal(true)
+            expect(minimal.document_changes_support).to_equal(true)
+            lsp_clear_client_code_action_caps_for_client_v1("caps-modern")
+
+    context "when discovering and resolving perf code actions (PERF-STYLE-001, PERF-FIX-001, I01, I02)":
+        """
+        Verifies deferred discovery, disabled PERF-FIX-001 explanations, and I01/I02 guards.
+        """
+
+        it "surfaces PERF-STYLE-001 as refactor.rewrite and PERF-FIX-001 with disabled.reason without eager edits":
+            """
+            Clients supporting resolveSupport receive lightweight actions during discovery,
+            blocked PERF-FIX-001 actions retain exact unmet preconditions, and codeAction/resolve
+            emits versioned WorkspaceEdit.documentChanges without mutating buffers.
+            """
+            val client = "f5-resolve-ok"
+            val uri = "file:///w/caller.spl"
+            val old_loop = "for x in items: out.push(f(x))"
+            val new_expr = "val out = items.iter().map(f).collect()"
+            val src_v1 = "fn transform(items):\n    " + old_loop + "\n"
+            val start_off = 25
+            val end_off = start_off + old_loop.byte_len()
+            val hash_v1 = sha256_text(src_v1)
+            val sem_v1 = "sem-fp-callee-pure-v1"
+
+            step("Initialize client with resolveSupport for edit and open caller.spl at v1")
+            val _ = lsp_handle_initialize_with_body("1", build_init_request(client, true, true, true))
+            expect(lsp_document_open_for_client_v1(client, uri, 1, src_v1)).to_equal(true)
+            val batch_json = build_perf_batch_json("/w/caller.spl", hash_v1, sem_v1, old_loop, new_expr, start_off, end_off, 2)
+            val batch = lsp_check_json_parse_v1(batch_json, "/w/caller.spl", 1)
+            expect(batch.valid).to_equal(true)
+            lsp_diag_record_batch_for_client_v1(client, uri, batch)
+
+            val stored = lsp_diag_action_store_lookup_for_client_v1(client, uri, 1)
+            expect(stored.?).to_equal(true)
+            expect(stored.unwrap().semantic_fingerprint).to_equal(sem_v1)
+            expect(stored.unwrap().expected_semantic_fingerprint).to_equal(sem_v1)
+            expect(stored.unwrap().obligations_summary.len()).to_be_greater_than(0)
+            expect(stored.unwrap().resource_tradeoff).to_contain("unchanged")
+
+            step("Run textDocument/codeAction discovery: verify deferred style action + disabled PERF-FIX-001 action")
+            val disc_raw = lsp_code_action_response_for_client_v1(client, "10", build_code_action_req(client, uri, 1), "")
+            val disc_msg = json_parse_value_strict(disc_raw).unwrap()
+            val actions = json_value_items(json_value_field(disc_msg, "result"))
+            expect(actions.len()).to_equal(2)
+
+            var style_action = JsonValue.Null
+            var blocked_action = JsonValue.Null
+            for a in actions:
+                val title = json_value_text_or(json_value_field(a, "title"), "")
+                if title.contains("items.iter().map"):
+                    style_action = a
+                elif title.contains("in-place loop"):
+                    blocked_action = a
+
+            expect(json_value_text_or(json_value_field(style_action, "kind"), "")).to_equal("refactor.rewrite")
+            expect(json_value_has(style_action, "edit")).to_equal(false)
+            expect(json_value_has(style_action, "data")).to_equal(true)
+
+            expect(json_value_has(blocked_action, "disabled")).to_equal(true)
+            expect(json_value_has(blocked_action, "edit")).to_equal(false)
+            val dis_reason = json_value_text_or(json_value_field(json_value_field(blocked_action, "disabled"), "reason"), "")
+            expect(dis_reason).to_contain("S03 aliasing")
+            expect(dis_reason).to_contain("nogc")
+
+            step("Resolve style_action via codeAction/resolve and verify versioned documentChanges without mutating snapshot")
+            val res_raw = lsp_handle_code_action_resolve_for_client_v1(client, "11", build_resolve_req(client, style_action))
+            expect(res_raw).to_contain("\"documentChanges\"")
+            expect(res_raw).to_contain("\"version\":1")
+            expect(res_raw).to_contain(new_expr)
+            expect(lsp_document_snapshot_for_client_v1(client, uri).unwrap().content).to_equal(src_v1)
+
+            lsp_diag_action_store_clear_for_client_v1(client, uri)
+            lsp_perf_clear_semantic_fingerprint_for_client_v1(client, uri)
+            lsp_clear_client_code_action_caps_for_client_v1(client)
+            expect(lsp_document_close_for_client_v1(client, uri)).to_equal(true)
+
+        it "rejects stale document edits (I01) and stale callee semantic_fingerprint changes (I02) during codeAction/resolve":
+            """
+            I01: editing caller.spl after action discovery invalidates codeAction/resolve.
+            I02: changing callee effect summary (semantic_fingerprint) without editing caller.spl
+            also invalidates codeAction/resolve so stale safety proofs never emit WorkspaceEdit.
+            """
+            val client = "f5-stale-guards"
+            val uri = "file:///w/caller_guard.spl"
+            val old_loop = "for x in items: out.push(f(x))"
+            val new_expr = "val out = items.iter().map(f).collect()"
+            val src_v1 = "fn transform(items):\n    " + old_loop + "\n"
+            val start_off = 25
+            val end_off = start_off + old_loop.byte_len()
+            val hash_v1 = sha256_text(src_v1)
+            val sem_v1 = "sem-fp-callee-pure-v1"
+
+            lsp_set_client_code_action_caps_for_client_v1(client, lsp_negotiate_client_code_action_caps_v1(build_init_request(client, true, true, true)))
+            expect(lsp_document_open_for_client_v1(client, uri, 1, src_v1)).to_equal(true)
+            val batch = lsp_check_json_parse_v1(
+                build_perf_batch_json("/w/caller_guard.spl", hash_v1, sem_v1, old_loop, new_expr, start_off, end_off, 2),
+                "/w/caller_guard.spl",
+                1
+            )
+            lsp_diag_record_batch_for_client_v1(client, uri, batch)
+
+            val disc_msg = json_parse_value_strict(
+                lsp_code_action_response_for_client_v1(client, "20", build_code_action_req(client, uri, 1), "")
+            ).unwrap()
+            var style_action = JsonValue.Null
+            for a in json_value_items(json_value_field(disc_msg, "result")):
+                if json_value_text_or(json_value_field(a, "title"), "").contains("items.iter().map"):
+                    style_action = a
+
+            step("I02: keep caller text at exact v1/hash_v1, advance callee semantic_fingerprint, and verify resolve disables action")
+            lsp_perf_set_semantic_fingerprint_for_client_v1(client, uri, "sem-fp-callee-impure-io-v2")
+            val res_i02 = lsp_handle_code_action_resolve("21", build_resolve_req(client, style_action))
+            expect(res_i02).to_contain("\"disabled\"")
+            expect(res_i02).to_contain("stale document or semantic dependency revision")
+            expect(res_i02.contains("\"documentChanges\"")).to_equal(false)
+
+            step("I01: restore semantic_fingerprint, edit caller buffer to v2, and verify resolve disables stale v1 action")
+            lsp_perf_set_semantic_fingerprint_for_client_v1(client, uri, sem_v1)
+            val src_v2 = "fn transform(items):\n    # edited\n    " + old_loop + "\n"
+            expect(lsp_document_change_for_client_v1(client, uri, 2, src_v2)).to_equal(true)
+            val res_i01 = lsp_handle_code_action_resolve("22", build_resolve_req(client, style_action))
+            expect(res_i01).to_contain("\"disabled\"")
+            expect(res_i01).to_contain("stale document or semantic dependency revision")
+            expect(res_i01.contains("\"documentChanges\"")).to_equal(false)
+            expect(lsp_document_snapshot_for_client_v1(client, uri).unwrap().content).to_equal(src_v2)
+
+            lsp_diag_action_store_clear_for_client_v1(client, uri)
+            lsp_perf_clear_semantic_fingerprint_for_client_v1(client, uri)
+            lsp_clear_client_code_action_caps_for_client_v1(client)
+            expect(lsp_document_close_for_client_v1(client, uri)).to_equal(true)
+
+    context "when formatting cost hover summaries and C07 provenance relatedInformation":
+        """
+        Verifies multi-size parameter preservation, bound evidence metadata, and C07 related spans.
+        """
+
+        it "formats explicit input-size cost hover and serves hover without disk mutation":
+            """
+            Hover retains separate n and m size variables, relation, regime, status, model,
+            contributions, and assumptions rather than collapsing to O(n^2).
+            """
+            step("Render LspPerfCostHoverSummaryV1 markdown + LSP Hover JSON and query lsp_handle_hover")
+            val summary = LspPerfCostHoverSummaryV1(
+                function_id: "count_for_all",
+                resource: "key_comparisons",
+                expression: "n*m",
+                relation: "Exact",
+                regime: "WorstCase",
+                model_id: "full_scan_example_v1",
+                status: "Complete",
+                origin: "Inferred",
+                sizes: [
+                    LspPerfSizeBindingV1(symbol: "n", definition: "length(keys)"),
+                    LspPerfSizeBindingV1(symbol: "m", definition: "length(records)")
+                ],
+                assumptions: [
+                    "Each helper invocation scans every record",
+                    "Input lengths remain stable"
+                ],
+                contributions: [
+                    "outer traversal: n calls",
+                    "count_matches: m comparisons per call"
+                ]
+            )
+            val md = lsp_format_perf_cost_hover_markdown_v1(summary)
+            expect(md).to_contain("count_for_all")
+            expect(md).to_contain("n = length(keys), m = length(records)")
+            expect(md).to_contain("`n*m`")
+            expect(md).to_contain("Exact")
+            expect(md).to_contain("WorstCase")
+            expect(md).to_contain("Complete")
+            expect(md).to_contain("full_scan_example_v1")
+            expect(md).to_contain("count_matches: m comparisons per call")
+
+            val hover_uri = "file:///w/perf_hover_demo.spl"
+            lsp_perf_hover_register_for_client_v1("default", hover_uri, 4, summary)
+            val hover_req = json_value_serialize(json_value_object_from([
+                ("jsonrpc", JsonValue.Str("2.0")),
+                ("id", JsonValue.Int(30)),
+                ("method", JsonValue.Str("textDocument/hover")),
+                ("params", json_value_object_from([
+                    ("textDocument", json_value_object_from([("uri", JsonValue.Str(hover_uri))])),
+                    ("position", json_value_object_from([("line", JsonValue.Int(4)), ("character", JsonValue.Int(3))]))
+                ]))
+            ]))
+            val hover_resp = lsp_handle_hover("30", hover_req)
+            expect(hover_resp).to_contain("n = length(keys), m = length(records)")
+            expect(hover_resp).to_contain("key_comparisons")
+            lsp_perf_hover_clear_for_client_v1("default", hover_uri)
+
+        it "projects caller-to-callee provenance chains (C07) onto LSP relatedInformation spans":
+            """
+            Both standalone provenance rendering and _parse_json_diagnostic emit navigable
+            LSP relatedInformation arrays with 0-based ranges and role-tagged messages.
+            """
+            step("Render provenance chain and parse PERF-COST-001 diagnostic batch item")
+            val chain = [
+                LspPerfProvenanceSpanV1(
+                    node_id: "p1",
+                    role: "caller_loop",
+                    file: "/w/caller.spl",
+                    line: 10,
+                    col: 5,
+                    end_line: 12,
+                    end_col: 30,
+                    summary_line: "outer traversal over keys (n calls)"
+                ),
+                LspPerfProvenanceSpanV1(
+                    node_id: "p2",
+                    role: "callee_loop",
+                    file: "/w/records_helper.spl",
+                    line: 3,
+                    col: 5,
+                    end_line: 6,
+                    end_col: 18,
+                    summary_line: "count_matches scans records (m comparisons)"
+                )
+            ]
+            val rel_json = lsp_render_perf_related_information_json_v1(chain)
+            expect(rel_json).to_contain("file:///w/caller.spl")
+            expect(rel_json).to_contain("file:///w/records_helper.spl")
+            expect(rel_json).to_contain("[caller_loop] outer traversal over keys (n calls)")
+            expect(rel_json).to_contain("[callee_loop] count_matches scans records (m comparisons)")
+
+            val batch = lsp_check_json_parse_v1(
+                build_perf_batch_json("/w/caller.spl", "h-c07", "sem-c07", "for k in keys: pass", "keys", 0, 19, 2),
+                "/w/caller.spl",
+                1
+            )
+            expect(batch.items.len()).to_equal(3)
+            expect(batch.items[2]).to_contain("\"relatedInformation\"")
+            expect(batch.items[2]).to_contain("records_helper.spl")
+            expect(batch.items[2]).to_contain("count_matches scans all m = length(records)")

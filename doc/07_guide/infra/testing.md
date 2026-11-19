@@ -1479,3 +1479,31 @@ example could not be produced from the repo DB. When rows exist, the source
 adds a reason per status (skipped, cached, blocked and unknown never qualify as
 a pass) and an `identity missing:` line. Rows are unverified framework
 observations, not admitted evidence. MCP twin: `simple_test_query`.
+
+<!-- wave-f-perf-analysis-collection-refactoring-2026-11-19 -->
+
+## Performance Analysis and Collection Refactoring SSpec Methodology (2026-11-18)
+
+Canonical plan: [Simple Performance Analysis and Collection Refactoring](../../03_plan/compiler/performance_analysis_and_collection_refactoring_2026-11-18.md) (§14, §15, §16.2).
+
+Reference system and overhead specs:
+- Executable system spec: `test/03_system/app/compiler/feature/perf_analysis_collection_refactoring_spec.spl`
+- Scenario manual: `doc/06_spec/03_system/app/compiler/feature/perf_analysis_collection_refactoring_spec.md`
+- Analyzer overhead & feature-off guard: `test/05_perf/compiler/perf_analyzer_overhead_guard_spec.spl`
+
+### Required Fixture Matrix per `PERF-*` Rule (§15.1–§15.4)
+
+Every symbolic complexity, resource-contract, or collection-refactoring rule requires modern SSpec coverage (`use std.spec.*`, triple-quoted `"""` docstrings, built-in matchers only, zero `pass_todo` or tautological assertions) spanning:
+
+1. **Positive and negative recognition fixtures (`C01..C16`, `S01`, `S13`):** Verify that sequential scans add (`O(n)`), fixed small bounds (`<= 16`) stay `O(n)`, independent traversals retain `n*m` (`PERF-COST-001`), grouped traversals retain `AggregateSize(group_count, total_elements)`, loose quadratic upper bounds yield `Unproved` rather than `Refuted` for linear contracts (`C15`), and user-defined `append`/`sum` lookalikes are never matched by method spelling alone (`S13`).
+2. **13-point legality precondition fixtures (`S01..S18`):** Pair each `VerifiedSafe` local refactor (`Map`, `Filter`, `FilterMap`, `OrderedFold`, `Any`/`All`, `Find`) with negative fixtures that must downgrade to `PERF-FIX-001` (`Unavailable`) or `ReviewRequired` when input/output alias (`S03`), callbacks observe partial prefixes (`S04`) or fail mid-loop (`S05`), external references observe builder identity (`S06`), or I/O/MMIO/lock/async effects are present (`S11`).
+3. **Behavioral trace comparison tests:** Compare before-and-after execution traces across:
+   - final output values and visible state mutations;
+   - exact callback invocation order and count;
+   - short-circuit iterator consumption (`any`, `all`, `find` stopping immediately on match, `S12`);
+   - empty-input behavior with non-identity `fold` seeds (`S07`);
+   - non-associative recurrence order (e.g., left-to-right subtraction `fold` vs invalid reassociation, `S08`, and cancellation-sensitive floating-point order, `S09`);
+   - mid-loop error propagation and scope cleanup (`S05`, `S18`).
+   Tests validate the rule implementation; passing tests alone never promote an unproved patch to `VerifiedSafe` (`D10`).
+4. **Cardinality, duplicate-key, and memory-growth validation (`C10`, `C12`, `S16`, `S17`):** Algorithmic redesign fixtures (`PERF-ALG-001`, `PERF-ALLOC-001`) must test duplicate-heavy and collision-sensitive keys (where all-pairs matches yield `k = n*m`), verify `group_join` per-key collection shape vs flat `join`, and track auxiliary memory growth separately from unique-key happy paths.
+5. **Revision, cache, and analyzer overhead guards (`I01..I12`):** Exercise stale `EditTransaction` rejection (`StaleVersion`, `StaleHash`, `OverlappingEdits`), callee/plugin `implementation_digest` invalidation, CLI/LSP/MCP agreement on the same snapshot, single-pass linear `nodes_scanned` scaling on nested HIR without subtree re-walking (`I11`), and `T0` feature-off zero-side-table isolation (`D11`, `D12`, `I10`).

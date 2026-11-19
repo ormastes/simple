@@ -1,0 +1,673 @@
+# Parameterized Function Cost Summarizer (V1)
+#
+# Single-pass iterative cost summarization over both typed structural models
+# (`PerfFunctionModelV1`) and real typed HIR functions (`HirFunction` +
+# `CollectionOperationRegistry`) without recursive blowup or quadratic subtree
+# rescanning (D01, D02, D03, C08, C09, I11).
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{
+    HirFunction, HirBlock, HirStmt, HirStmtKind, HirExpr, HirExprKind
+}
+use compiler.semantics.perf_facts.{
+    CollectionOperationRegistry, HirPerfCostClass,
+    hir_perf_receiver_kind, hir_perf_resolved_method_symbol,
+    hir_perf_receiver_matches, hir_perf_iteration_is_fixed_small
+}
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    PerfResourceDimension, BoundRelation, BoundRegime, AnalysisResultStatus,
+    PerfAnalysisTier, SizeMeasureKind, CostExprV1, BoundEvidenceV1,
+    SizeParameterV1, SizeRelationV1, ProvenanceEdgeV1, FunctionCostSummaryV1,
+    LoopIdiomFamily, PerfFixKind, PerfFixApplicability, LoopIdiomCandidateV1,
+    PerfFindingRecordV1
+}
+use compiler.semantics.perf.cost_domain_v1.{
+    cost_expr_has_unknown_v1, collect_unknown_reasons_v1,
+    normalize_cost_expr_with_relations_v1, render_cost_expr_with_params_v1,
+    render_big_o_with_params_v1, make_inferred_bound_v1,
+    compose_sequential_v1, compose_branch_max_v1,
+    compose_loop_constant_bound_v1, compose_loop_independent_v1,
+    compose_triangular_loop_v1, compose_monotone_two_pointer_v1,
+    compose_grouped_traversal_v1, bound_is_confirmed_superlinear_risk_v1
+}
+
+enum PerfLoopShapeV1:
+    LinearScan(size_expr: CostExprV1)
+    ConstantTrip(count: i64)
+    TriangularBound(outer_size: CostExprV1)
+    MonotoneTwoPointer(outer_size: CostExprV1, inner_limit: CostExprV1, invariant_proved: bool)
+    GroupedElements(group_count: CostExprV1, total_elements: CostExprV1)
+    WhileUnbounded(reason: text)
+
+struct PerfCallArgBindingV1:
+    formal_param: text
+    actual_size: CostExprV1
+
+struct PerfCallbackBindingV1:
+    formal_callback_param: text
+    is_known: bool
+    body_cost: CostExprV1
+    captured_sizes: [SizeParameterV1]
+    unknown_reason: text
+
+enum PerfBodyNodeV1:
+    StepWork(cost: CostExprV1, description: text, span: Span)
+    AllocStep(count: CostExprV1, bytes: CostExprV1, span: Span)
+    Seq(children: [PerfBodyNodeV1], span: Span)
+    Branch(cond_cost: CostExprV1, then_node: PerfBodyNodeV1, else_node: PerfBodyNodeV1, span: Span)
+    LoopRegion(shape: PerfLoopShapeV1, body: PerfBodyNodeV1, span: Span)
+    CalleeCall(
+        callee_id: text, callee_symbol_id: i64, arg_bindings: [PerfCallArgBindingV1],
+        callback_bindings: [PerfCallbackBindingV1], key_op_cost: CostExprV1, span: Span
+    )
+    CallbackInvoke(callback_param: text, invocations: CostExprV1, span: Span)
+    UnknownRegion(reason: text, span: Span)
+
+struct PerfFunctionModelV1:
+    function_id: text
+    function_symbol_id: i64
+    file: text
+    primary_span: Span
+    semantic_revision: text
+    size_parameters: [SizeParameterV1]
+    size_relations: [SizeRelationV1]
+    callback_cost_parameters: [text]
+    effects_summary_id: text
+    output_cardinality: CostExprV1
+    body: PerfBodyNodeV1
+
+struct PerfSummarizerConfigV1:
+    analyzer_version: text
+    model_version: text
+    configuration_fingerprint: text
+    tier: PerfAnalysisTier
+
+struct PerfSummaryResultV1:
+    summary: FunctionCostSummaryV1
+    findings: [PerfFindingRecordV1]
+    nodes_visited: i64
+
+struct RegionValueV1:
+    work: BoundEvidenceV1
+    alloc_count: BoundEvidenceV1
+    alloc_bytes: BoundEvidenceV1
+    prov_id: text
+    has_loop_amplified_scan: bool
+
+enum EvalStackOpV1:
+    Enter(node: PerfBodyNodeV1, loop_depth: i64)
+    CombineSeq(count: i64, span: Span)
+    CombineBranch(cond_cost: CostExprV1, span: Span)
+    CombineLoop(shape: PerfLoopShapeV1, loop_depth: i64, span: Span)
+
+pub fn default_perf_summarizer_config_v1() -> PerfSummarizerConfigV1:
+    PerfSummarizerConfigV1(
+        analyzer_version: "perf-analyzer-1.0.0", model_version: "perf-model-v1",
+        configuration_fingerprint: "cfg-default-v1", tier: PerfAnalysisTier.T2Compositional)
+
+pub fn find_resource_bound_v1(
+    summary: FunctionCostSummaryV1, resource: PerfResourceDimension
+) -> Option<BoundEvidenceV1>:
+    for b in summary.resource_bounds:
+        if b.resource.name() == resource.name(): return Some(b)
+    None
+
+pub fn substitute_cost_expr_for_call_v1(
+    expr: CostExprV1, callee_summary: FunctionCostSummaryV1,
+    arg_bindings: [PerfCallArgBindingV1], callback_bindings: [PerfCallbackBindingV1]
+) -> CostExprV1:
+    match expr:
+        case CostExprV1.Const(v): CostExprV1.Const(v)
+        case CostExprV1.UnknownTerm(r): CostExprV1.UnknownTerm(r)
+        case CostExprV1.Size(param_name, measure):
+            if param_name.starts_with("callback:"):
+                val cb_name = param_name.slice(9, param_name.byte_len())
+                for cb in callback_bindings:
+                    if cb.formal_callback_param == cb_name:
+                        if cb.is_known: return cb.body_cost
+                        val reason = if cb.unknown_reason != "": cb.unknown_reason else: "unknown_callback_" + cb_name
+                        return CostExprV1.UnknownTerm(reason)
+                return CostExprV1.UnknownTerm("unbound_callback_" + cb_name)
+            for ab in arg_bindings:
+                if ab.formal_param == param_name: return ab.actual_size
+            for sp in callee_summary.size_parameters:
+                if sp.canonical_var == param_name:
+                    for ab in arg_bindings:
+                        if ab.formal_param == sp.param_name: return ab.actual_size
+            CostExprV1.Size(param_name, measure)
+        case CostExprV1.Add(terms):
+            var sub: [CostExprV1] = []
+            for t in terms: sub.push(substitute_cost_expr_for_call_v1(t, callee_summary, arg_bindings, callback_bindings))
+            CostExprV1.Add(sub)
+        case CostExprV1.Multiply(factors):
+            var sub: [CostExprV1] = []
+            for f in factors: sub.push(substitute_cost_expr_for_call_v1(f, callee_summary, arg_bindings, callback_bindings))
+            CostExprV1.Multiply(sub)
+        case CostExprV1.Maximum(branches):
+            var sub: [CostExprV1] = []
+            for b in branches: sub.push(substitute_cost_expr_for_call_v1(b, callee_summary, arg_bindings, callback_bindings))
+            CostExprV1.Maximum(sub)
+        case CostExprV1.LogBound(inner):
+            CostExprV1.LogBound(substitute_cost_expr_for_call_v1(inner, callee_summary, arg_bindings, callback_bindings))
+        case CostExprV1.TriangularSum(outer):
+            CostExprV1.TriangularSum(substitute_cost_expr_for_call_v1(outer, callee_summary, arg_bindings, callback_bindings))
+        case CostExprV1.AggregateSize(g, total):
+            CostExprV1.AggregateSize(
+                substitute_cost_expr_for_call_v1(g, callee_summary, arg_bindings, callback_bindings),
+                substitute_cost_expr_for_call_v1(total, callee_summary, arg_bindings, callback_bindings))
+        case CostExprV1.KnownCalleeCost(cid, inner):
+            CostExprV1.KnownCalleeCost(cid, substitute_cost_expr_for_call_v1(inner, callee_summary, arg_bindings, callback_bindings))
+        case CostExprV1.CallbackTerm(cb_param, inv, body):
+            val sub_inv = substitute_cost_expr_for_call_v1(inv, callee_summary, arg_bindings, callback_bindings)
+            for cb in callback_bindings:
+                if cb.formal_callback_param == cb_param:
+                    if cb.is_known: return CostExprV1.Multiply([sub_inv, cb.body_cost])
+                    val reason = if cb.unknown_reason != "": cb.unknown_reason else: "unknown_callback_" + cb_param
+                    return CostExprV1.Multiply([sub_inv, CostExprV1.UnknownTerm(reason)])
+            CostExprV1.CallbackTerm(cb_param, sub_inv, substitute_cost_expr_for_call_v1(body, callee_summary, arg_bindings, callback_bindings))
+
+fn _zero_alloc_bound(resource: PerfResourceDimension, model_version: text, prov: text) -> BoundEvidenceV1:
+    make_inferred_bound_v1(resource, CostExprV1.Const(0), BoundRelation.Exact, BoundRegime.WorstCase, model_version, [], prov)
+
+fn _work_only_region(wb: BoundEvidenceV1, model_version: text, prov: text, amp: bool) -> RegionValueV1:
+    RegionValueV1(
+        work: wb,
+        alloc_count: _zero_alloc_bound(PerfResourceDimension.AllocCount, model_version, prov),
+        alloc_bytes: _zero_alloc_bound(PerfResourceDimension.AllocBytesTotal, model_version, prov),
+        prov_id: prov, has_loop_amplified_scan: amp)
+
+fn _expr_is_nonconstant_scan(expr: CostExprV1) -> bool:
+    match expr:
+        case CostExprV1.Const(_): false
+        case CostExprV1.UnknownTerm(_): false
+        case _: true
+
+# reason: computes deterministic SHA-256 hex digest of semantic summary surface (excluding line spans I04)
+@allow(primitive_api)
+pub fn cost_summary_exported_digest_v1(summary: FunctionCostSummaryV1) -> text:
+    var payload = "PERF-SUMMARY-EXPORT-V1|" + summary.function_id + "|" + summary.effects_summary_id + "|" + summary.model_version + "|"
+    for sp in summary.size_parameters:
+        payload = payload + sp.param_name + ":" + sp.measure.name() + ":" + sp.canonical_var + ";"
+    payload = payload + "|"
+    for sr in summary.size_relations:
+        payload = payload + sr.lhs_var + sr.relation_op + sr.rhs_var + ";"
+    payload = payload + "|"
+    for rb in summary.resource_bounds:
+        payload = payload + rb.resource.name() + "=" + rb.rendered_expression + ":" + rb.relation.name() + ":" + rb.regime.name() + ":" + rb.status.name() + ";"
+    payload = payload + "|out=" + render_cost_expr_with_params_v1(
+        summary.output_cardinality, summary.size_parameters, summary.size_relations)
+    payload = payload + "|cb=" + summary.callback_cost_parameters.join(",")
+    payload = payload + "|unk=" + summary.unresolved_terms.join(",")
+    sha256_text(payload)
+
+fn _merge_size_param(params: [SizeParameterV1], candidate: SizeParameterV1) -> [SizeParameterV1]:
+    for existing in params:
+        if existing.param_name == candidate.param_name and existing.measure.name() == candidate.measure.name():
+            return params
+    var out = params
+    out.push(candidate)
+    out
+
+pub fn summarize_function_model_v1(
+    model: PerfFunctionModelV1,
+    callee_summaries: Dict<text, FunctionCostSummaryV1>,
+    config: PerfSummarizerConfigV1
+) -> PerfSummaryResultV1:
+    var stack: [EvalStackOpV1] = [EvalStackOpV1.Enter(model.body, 0)]
+    var values: [RegionValueV1] = []
+    var prov_nodes: [ProvenanceEdgeV1] = []
+    var dep_hashes: [text] = []
+    var effective_params = model.size_parameters
+    var findings: [PerfFindingRecordV1] = []
+    var amplified_callees: [text] = []
+    var amplified_call_spans: [Span] = []
+    var outer_loop_spans: [Span] = []
+    var nodes_visited = 0
+
+    while stack.len() > 0:
+        val op = stack.pop()
+        match op:
+            case EvalStackOpV1.Enter(node, loop_depth):
+                nodes_visited = nodes_visited + 1
+                val prov_id = model.function_id + ":n" + nodes_visited.to_text()
+                match node:
+                    case PerfBodyNodeV1.StepWork(cost, desc, span):
+                        val wb = make_inferred_bound_v1(
+                            PerfResourceDimension.Work, cost, BoundRelation.Exact,
+                            BoundRegime.WorstCase, config.model_version, ["normal_completion"], prov_id)
+                        prov_nodes.push(ProvenanceEdgeV1(
+                            node_id: prov_id, role: "step_work", file: model.file,
+                            span: span, summary_line: desc, child_ids: []))
+                        values.push(_work_only_region(wb, config.model_version, prov_id, false))
+                    case PerfBodyNodeV1.AllocStep(count, bytes, _):
+                        val wb = make_inferred_bound_v1(
+                            PerfResourceDimension.Work, CostExprV1.Const(1), BoundRelation.Exact,
+                            BoundRegime.WorstCase, config.model_version, ["allocation_step"], prov_id)
+                        val ac = make_inferred_bound_v1(
+                            PerfResourceDimension.AllocCount, count, BoundRelation.Exact,
+                            BoundRegime.WorstCase, config.model_version, ["allocation_step"], prov_id)
+                        val ab = make_inferred_bound_v1(
+                            PerfResourceDimension.AllocBytesTotal, bytes, BoundRelation.UpperBound,
+                            BoundRegime.WorstCase, config.model_version, ["allocation_step"], prov_id)
+                        values.push(RegionValueV1(
+                            work: wb, alloc_count: ac, alloc_bytes: ab,
+                            prov_id: prov_id, has_loop_amplified_scan: false))
+                    case PerfBodyNodeV1.UnknownRegion(reason, span):
+                        val wb = make_inferred_bound_v1(
+                            PerfResourceDimension.Work, CostExprV1.UnknownTerm(reason), BoundRelation.UpperBound,
+                            BoundRegime.WorstCase, config.model_version, [], prov_id)
+                        prov_nodes.push(ProvenanceEdgeV1(
+                            node_id: prov_id, role: "unknown_region", file: model.file,
+                            span: span, summary_line: "unknown: " + reason, child_ids: []))
+                        values.push(_work_only_region(wb, config.model_version, prov_id, false))
+                    case PerfBodyNodeV1.CallbackInvoke(cb_param, invocations, _):
+                        val cb_factor = if model.callback_cost_parameters.contains(cb_param):
+                            CostExprV1.Size("callback:" + cb_param, SizeMeasureKind.Length)
+                        else:
+                            CostExprV1.UnknownTerm("unresolved_callback_" + cb_param)
+                        val cb_expr = CostExprV1.Add([
+                            CostExprV1.Const(1), CostExprV1.Multiply([invocations, cb_factor])])
+                        val wb = make_inferred_bound_v1(
+                            PerfResourceDimension.Work, cb_expr, BoundRelation.UpperBound,
+                            BoundRegime.WorstCase, config.model_version, ["callback_invocation"], prov_id)
+                        values.push(_work_only_region(wb, config.model_version, prov_id, false))
+                    case PerfBodyNodeV1.CalleeCall(callee_id, _, arg_bindings, cb_bindings, key_op_cost, span):
+                        for cb in cb_bindings:
+                            for cap_sp in cb.captured_sizes:
+                                effective_params = _merge_size_param(effective_params, cap_sp)
+                        if callee_summaries.contains_key(callee_id):
+                            val callee_sum = callee_summaries[callee_id]
+                            val callee_digest = cost_summary_exported_digest_v1(callee_sum)
+                            if not dep_hashes.contains(callee_digest): dep_hashes.push(callee_digest)
+                            val callee_work_opt = find_resource_bound_v1(callee_sum, PerfResourceDimension.Work)
+                            val callee_work_expr = if callee_work_opt.?:
+                                callee_work_opt.unwrap().expression
+                            else:
+                                CostExprV1.UnknownTerm("missing_callee_work_" + callee_id)
+                            val substituted = substitute_cost_expr_for_call_v1(
+                                callee_work_expr, callee_sum, arg_bindings, cb_bindings)
+                            val scaled_by_key = CostExprV1.Multiply([substituted, key_op_cost])
+                            val total_call_expr = if loop_depth > 0 and cost_expr_has_unknown_v1(scaled_by_key):
+                                CostExprV1.Add([CostExprV1.Const(1), scaled_by_key])
+                            else:
+                                scaled_by_key
+                            val wb = make_inferred_bound_v1(
+                                PerfResourceDimension.Work, total_call_expr, BoundRelation.UpperBound,
+                                BoundRegime.WorstCase, config.model_version, ["callee_summary:" + callee_id], prov_id)
+                            val is_amp = loop_depth > 0 and _expr_is_nonconstant_scan(substituted)
+                            if is_amp:
+                                amplified_callees.push(callee_id)
+                                amplified_call_spans.push(span)
+                            var child_ids: [text] = []
+                            if callee_sum.provenance_root != "": child_ids.push(callee_sum.provenance_root)
+                            prov_nodes.push(ProvenanceEdgeV1(
+                                node_id: prov_id, role: "call_site", file: model.file,
+                                span: span, summary_line: "calls " + callee_id, child_ids: child_ids))
+                            values.push(_work_only_region(wb, config.model_version, prov_id, is_amp))
+                        else:
+                            val unk_wb = make_inferred_bound_v1(
+                                PerfResourceDimension.Work, CostExprV1.UnknownTerm("unresolved_callee_" + callee_id),
+                                BoundRelation.UpperBound, BoundRegime.WorstCase, config.model_version, [], prov_id)
+                            prov_nodes.push(ProvenanceEdgeV1(
+                                node_id: prov_id, role: "unresolved_call", file: model.file,
+                                span: span, summary_line: "unresolved callee " + callee_id, child_ids: []))
+                            values.push(_work_only_region(unk_wb, config.model_version, prov_id, false))
+                    case PerfBodyNodeV1.Seq(children, span):
+                        if children.len() == 0:
+                            val zero_w = make_inferred_bound_v1(
+                                PerfResourceDimension.Work, CostExprV1.Const(0), BoundRelation.Exact,
+                                BoundRegime.WorstCase, config.model_version, [], prov_id)
+                            values.push(_work_only_region(zero_w, config.model_version, prov_id, false))
+                        else:
+                            stack.push(EvalStackOpV1.CombineSeq(children.len(), span))
+                            var idx = children.len() - 1
+                            while idx >= 0:
+                                stack.push(EvalStackOpV1.Enter(children[idx], loop_depth))
+                                idx = idx - 1
+                    case PerfBodyNodeV1.Branch(cond_cost, then_node, else_node, span):
+                        stack.push(EvalStackOpV1.CombineBranch(cond_cost, span))
+                        stack.push(EvalStackOpV1.Enter(else_node, loop_depth))
+                        stack.push(EvalStackOpV1.Enter(then_node, loop_depth))
+                    case PerfBodyNodeV1.LoopRegion(shape, body, span):
+                        val next_depth = match shape:
+                            case PerfLoopShapeV1.ConstantTrip(c):
+                                if c <= 16: loop_depth else: loop_depth + 1
+                            case _: loop_depth + 1
+                        if next_depth > loop_depth: outer_loop_spans.push(span)
+                        stack.push(EvalStackOpV1.CombineLoop(shape, loop_depth, span))
+                        stack.push(EvalStackOpV1.Enter(body, next_depth))
+            case EvalStackOpV1.CombineSeq(count, _):
+                var items: [RegionValueV1] = []
+                var k = 0
+                while k < count:
+                    items.push(values.pop())
+                    k = k + 1
+                var acc = items[items.len() - 1]
+                var idx = items.len() - 2
+                while idx >= 0:
+                    val nxt = items[idx]
+                    acc = RegionValueV1(
+                        work: compose_sequential_v1(acc.work, nxt.work),
+                        alloc_count: compose_sequential_v1(acc.alloc_count, nxt.alloc_count),
+                        alloc_bytes: compose_sequential_v1(acc.alloc_bytes, nxt.alloc_bytes),
+                        prov_id: acc.prov_id,
+                        has_loop_amplified_scan: acc.has_loop_amplified_scan or nxt.has_loop_amplified_scan)
+                    idx = idx - 1
+                values.push(acc)
+            case EvalStackOpV1.CombineBranch(cond_cost, _):
+                val right_v = values.pop()
+                val left_v = values.pop()
+                values.push(RegionValueV1(
+                    work: compose_branch_max_v1(cond_cost, left_v.work, right_v.work),
+                    alloc_count: compose_branch_max_v1(CostExprV1.Const(0), left_v.alloc_count, right_v.alloc_count),
+                    alloc_bytes: compose_branch_max_v1(CostExprV1.Const(0), left_v.alloc_bytes, right_v.alloc_bytes),
+                    prov_id: left_v.prov_id,
+                    has_loop_amplified_scan: left_v.has_loop_amplified_scan or right_v.has_loop_amplified_scan))
+            case EvalStackOpV1.CombineLoop(shape, loop_depth, span):
+                val body_v = values.pop()
+                val loop_prov = model.function_id + ":loop@" + span.line.to_text()
+                var loop_w = body_v.work
+                var loop_ac = body_v.alloc_count
+                var loop_ab = body_v.alloc_bytes
+                var amp = body_v.has_loop_amplified_scan
+                match shape:
+                    case PerfLoopShapeV1.LinearScan(size_expr):
+                        if loop_depth > 0 and _expr_is_nonconstant_scan(size_expr): amp = true
+                        loop_w = compose_loop_independent_v1(size_expr, body_v.work, true)
+                        loop_ac = compose_loop_independent_v1(size_expr, body_v.alloc_count, true)
+                        loop_ab = compose_loop_independent_v1(size_expr, body_v.alloc_bytes, true)
+                    case PerfLoopShapeV1.ConstantTrip(count):
+                        loop_w = compose_loop_constant_bound_v1(count, body_v.work)
+                        loop_ac = compose_loop_constant_bound_v1(count, body_v.alloc_count)
+                        loop_ab = compose_loop_constant_bound_v1(count, body_v.alloc_bytes)
+                    case PerfLoopShapeV1.TriangularBound(outer_size):
+                        amp = true
+                        loop_w = compose_triangular_loop_v1(outer_size, body_v.work)
+                        loop_ac = compose_triangular_loop_v1(outer_size, body_v.alloc_count)
+                        loop_ab = compose_triangular_loop_v1(outer_size, body_v.alloc_bytes)
+                    case PerfLoopShapeV1.MonotoneTwoPointer(outer_size, inner_limit, proved):
+                        loop_w = compose_monotone_two_pointer_v1(
+                            outer_size, inner_limit, body_v.work.expression, proved, loop_prov)
+                    case PerfLoopShapeV1.GroupedElements(g_count, total_elems):
+                        loop_w = compose_grouped_traversal_v1(
+                            g_count, total_elems, CostExprV1.Const(1), body_v.work.expression, loop_prov)
+                    case PerfLoopShapeV1.WhileUnbounded(reason):
+                        loop_w = make_inferred_bound_v1(
+                            PerfResourceDimension.Work, CostExprV1.UnknownTerm(reason),
+                            BoundRelation.UpperBound, BoundRegime.WorstCase, config.model_version, [], loop_prov)
+                prov_nodes.push(ProvenanceEdgeV1(
+                    node_id: loop_prov, role: "outer_loop", file: model.file,
+                    span: span, summary_line: "loop traversal in " + model.function_id,
+                    child_ids: [body_v.prov_id]))
+                values.push(RegionValueV1(
+                    work: loop_w, alloc_count: loop_ac, alloc_bytes: loop_ab,
+                    prov_id: loop_prov, has_loop_amplified_scan: amp))
+
+    val final_v = values.pop()
+    val norm_work_expr = normalize_cost_expr_with_relations_v1(
+        final_v.work.expression, effective_params, model.size_relations)
+    val rendered_work = render_cost_expr_with_params_v1(
+        norm_work_expr, effective_params, model.size_relations)
+    val unresolved = collect_unknown_reasons_v1(norm_work_expr)
+    var final_status = final_v.work.status
+    if unresolved.len() > 0:
+        final_status = match norm_work_expr:
+            case CostExprV1.UnknownTerm(_): AnalysisResultStatus.Unknown
+            case _: AnalysisResultStatus.Partial
+
+    val final_work_bound = BoundEvidenceV1(
+        resource: PerfResourceDimension.Work, expression: norm_work_expr,
+        rendered_expression: rendered_work, relation: final_v.work.relation,
+        regime: final_v.work.regime, model_id: config.model_version,
+        assumptions: final_v.work.assumptions, status: final_status,
+        origin: final_v.work.origin, provenance_id: final_v.prov_id)
+
+    val root_prov_id = model.function_id + ":root"
+    prov_nodes.push(ProvenanceEdgeV1(
+        node_id: root_prov_id, role: "function_summary", file: model.file,
+        span: model.primary_span, summary_line: model.function_id + " work <= " + rendered_work,
+        child_ids: [final_v.prov_id]))
+
+    var tmp_summary = FunctionCostSummaryV1(
+        function_id: model.function_id, function_symbol_id: model.function_symbol_id,
+        semantic_revision: model.semantic_revision, size_parameters: effective_params,
+        size_relations: model.size_relations,
+        resource_bounds: [final_work_bound, final_v.alloc_count, final_v.alloc_bytes],
+        output_cardinality: model.output_cardinality,
+        callback_cost_parameters: model.callback_cost_parameters,
+        effects_summary_id: model.effects_summary_id, assumptions: final_work_bound.assumptions,
+        unresolved_terms: unresolved, dependency_summary_hashes: dep_hashes,
+        implementation_digest: "", provenance_root: root_prov_id, provenance_nodes: prov_nodes,
+        analyzer_version: config.analyzer_version, model_version: config.model_version,
+        configuration_fingerprint: config.configuration_fingerprint)
+    val exp_digest = cost_summary_exported_digest_v1(tmp_summary)
+    tmp_summary.implementation_digest = exp_digest
+
+    if unresolved.len() > 0:
+        findings.push(PerfFindingRecordV1(
+            rule_code: "PERF-ANALYSIS-001", stable_occurrence_id: model.function_id + ":PERF-ANALYSIS-001",
+            function_id: model.function_id, file: model.file, primary_span: model.primary_span,
+            related_locations: prov_nodes,
+            message: "Incomplete cost coverage in " + model.function_id + ": unresolved terms [" + unresolved.join(", ") + "]",
+            evidence: Some(final_work_bound), tier: config.tier,
+            semantic_fingerprint: exp_digest, fix_candidates: []))
+
+    if final_v.has_loop_amplified_scan and bound_is_confirmed_superlinear_risk_v1(
+        final_work_bound, effective_params, model.size_relations
+    ):
+        val big_o = render_big_o_with_params_v1(norm_work_expr, effective_params, model.size_relations)
+        var related: [ProvenanceEdgeV1] = []
+        if outer_loop_spans.len() > 0:
+            related.push(ProvenanceEdgeV1(
+                node_id: model.function_id + ":cause:loop", role: "outer_traversal",
+                file: model.file, span: outer_loop_spans[0],
+                summary_line: "outer traversal multiplies inner scan cost", child_ids: []))
+        if amplified_callees.len() > 0:
+            val cid = amplified_callees[0]
+            related.push(ProvenanceEdgeV1(
+                node_id: model.function_id + ":cause:call:" + cid, role: "amplified_call",
+                file: model.file, span: amplified_call_spans[0],
+                summary_line: "per-iteration linear scan in " + cid, child_ids: []))
+            if callee_summaries.contains_key(cid):
+                for pn in callee_summaries[cid].provenance_nodes:
+                    if pn.role == "outer_loop" or pn.role == "function_summary":
+                        related.push(pn)
+        else:
+            related.push(ProvenanceEdgeV1(
+                node_id: model.function_id + ":cause:nested", role: "inner_scan",
+                file: model.file, span: model.primary_span,
+                summary_line: "nested scan inside loop body", child_ids: []))
+        val redesign_candidate = LoopIdiomCandidateV1(
+            rule_id: "PERF-ALG-001", action_id: model.function_id + ":preindex_redesign",
+            function_id: model.function_id, semantic_revision: model.semantic_revision,
+            dependency_fingerprint: exp_digest, file: model.file, source_span: model.primary_span,
+            family: LoopIdiomFamily.OrderedFold,
+            replacement_preview: "Build key lookup/count index once before outer traversal",
+            expected_old_text: "", applicability: PerfFixApplicability.ReviewRequired,
+            fix_kind: PerfFixKind.AlgorithmChange, obligations: [],
+            resource_tradeoff_note: "Expected linear work under hash/equality assumptions; requires O(distinct_keys) auxiliary memory",
+            disabled_reason: Some("algorithm_replacement_requires_key_and_memory_review"))
+        findings.push(PerfFindingRecordV1(
+            rule_code: "PERF-COST-001", stable_occurrence_id: model.function_id + ":PERF-COST-001",
+            function_id: model.function_id, file: model.file, primary_span: model.primary_span,
+            related_locations: related,
+            message: "Repeated full scan inside a traversal in " + model.function_id + ": inferred work upper bound is " + big_o + " (" + rendered_work + ")",
+            evidence: Some(final_work_bound), tier: config.tier,
+            semantic_fingerprint: exp_digest, fix_candidates: [redesign_candidate]))
+
+    PerfSummaryResultV1(summary: tmp_summary, findings: findings, nodes_visited: nodes_visited)
+
+enum HirToModelTaskV1:
+    VisitBlock(block: HirBlock)
+    VisitStmt(stmt: HirStmt)
+    VisitExpr(expr: HirExpr)
+    BuildSeq(count: i64, span: Span)
+    BuildFor(shape: PerfLoopShapeV1, span: Span)
+    BuildBranch(span: Span)
+
+fn _hir_param_measure(type_: HirType) -> Option<SizeMeasureKind>:
+    match type_.kind:
+        case HirTypeKind.Array(_, _): Some(SizeMeasureKind.Length)
+        case HirTypeKind.Slice(_): Some(SizeMeasureKind.Length)
+        case HirTypeKind.Dict(_, _): Some(SizeMeasureKind.Length)
+        case HirTypeKind.Str: Some(SizeMeasureKind.ByteLength)
+        case HirTypeKind.Ref(inner, _): _hir_param_measure(inner)
+        case HirTypeKind.Isolated(inner): _hir_param_measure(inner)
+        case _: None
+
+fn _hir_type_is_callable(type_: HirType) -> bool:
+    match type_.kind:
+        case HirTypeKind.Function(_, _, _): true
+        case _: false
+
+fn _hir_expr_size_ref(expr: HirExpr, sym_names: Dict<i64, text>) -> CostExprV1:
+    match expr.kind:
+        case HirExprKind.NamedVar(_, name): CostExprV1.Size(name, SizeMeasureKind.Length)
+        case HirExprKind.Var(sym):
+            if sym_names.contains_key(sym.id): CostExprV1.Size(sym_names[sym.id], SizeMeasureKind.Length)
+            else: CostExprV1.Size("sym_" + sym.id.to_text(), SizeMeasureKind.Length)
+        case _: CostExprV1.UnknownTerm("unmodeled_collection_expr")
+
+# reason: file and semantic_revision identify the source snapshot of the summarized HirFunction
+@allow(primitive_api)
+pub fn summarize_hir_function_v1(
+    function: HirFunction, file: text, semantic_revision: text,
+    registry: CollectionOperationRegistry,
+    callee_summaries: Dict<text, FunctionCostSummaryV1>,
+    config: PerfSummarizerConfigV1
+) -> PerfSummaryResultV1:
+    var size_params: [SizeParameterV1] = []
+    var cb_params: [text] = []
+    var sym_names: Dict<i64, text> = {}
+
+    for param in function.params:
+        sym_names[param.symbol.id] = param.name
+        val m_opt = _hir_param_measure(param.type_)
+        if m_opt.?:
+            size_params.push(SizeParameterV1(param_name: param.name, measure: m_opt.unwrap(), canonical_var: ""))
+        if _hir_type_is_callable(param.type_):
+            cb_params.push(param.name)
+
+    var tasks: [HirToModelTaskV1] = [HirToModelTaskV1.VisitBlock(function.body)]
+    var built: [PerfBodyNodeV1] = []
+
+    while tasks.len() > 0:
+        val task = tasks.pop()
+        match task:
+            case HirToModelTaskV1.VisitBlock(block):
+                var total_children = block.stmts.len() + (if block.has: 1 else: 0)
+                if total_children == 0:
+                    built.push(PerfBodyNodeV1.StepWork(CostExprV1.Const(0), "empty_block", block.span))
+                else:
+                    tasks.push(HirToModelTaskV1.BuildSeq(total_children, block.span))
+                    if block.has: tasks.push(HirToModelTaskV1.VisitExpr(block.value))
+                    var idx = block.stmts.len() - 1
+                    while idx >= 0:
+                        tasks.push(HirToModelTaskV1.VisitStmt(block.stmts[idx]))
+                        idx = idx - 1
+            case HirToModelTaskV1.VisitStmt(stmt):
+                match stmt.kind:
+                    case HirStmtKind.Expr(e): tasks.push(HirToModelTaskV1.VisitExpr(e))
+                    case HirStmtKind.Let(_, _, init): tasks.push(HirToModelTaskV1.VisitExpr(init))
+                    case HirStmtKind.Assign(_, _, val_expr): tasks.push(HirToModelTaskV1.VisitExpr(val_expr))
+                    case HirStmtKind.Block(b): tasks.push(HirToModelTaskV1.VisitBlock(b))
+                    case _: built.push(PerfBodyNodeV1.StepWork(CostExprV1.Const(1), "stmt", stmt.span))
+            case HirToModelTaskV1.VisitExpr(expr):
+                match expr.kind:
+                    case HirExprKind.For(_, iter_expr, body_block, _):
+                        val shape = if hir_perf_iteration_is_fixed_small(iter_expr):
+                            var fixed_count = 1
+                            match iter_expr.kind:
+                                case HirExprKind.ArrayLit(elems, _): fixed_count = elems.len()
+                                case _: fixed_count = 1
+                            PerfLoopShapeV1.ConstantTrip(fixed_count)
+                        else:
+                            PerfLoopShapeV1.LinearScan(_hir_expr_size_ref(iter_expr, sym_names))
+                        tasks.push(HirToModelTaskV1.BuildFor(shape, expr.span))
+                        tasks.push(HirToModelTaskV1.VisitBlock(body_block))
+                    case HirExprKind.While(_, body_block, _):
+                        tasks.push(HirToModelTaskV1.BuildFor(PerfLoopShapeV1.WhileUnbounded("unbounded_while_condition"), expr.span))
+                        tasks.push(HirToModelTaskV1.VisitBlock(body_block))
+                    case HirExprKind.Loop(body_block, _):
+                        tasks.push(HirToModelTaskV1.BuildFor(PerfLoopShapeV1.WhileUnbounded("unbounded_loop_expr"), expr.span))
+                        tasks.push(HirToModelTaskV1.VisitBlock(body_block))
+                    case HirExprKind.If(_, then_b, else_opt):
+                        tasks.push(HirToModelTaskV1.BuildBranch(expr.span))
+                        if else_opt.?: tasks.push(HirToModelTaskV1.VisitBlock(else_opt.unwrap()))
+                        else: built.push(PerfBodyNodeV1.StepWork(CostExprV1.Const(0), "no_else", expr.span))
+                        tasks.push(HirToModelTaskV1.VisitBlock(then_b))
+                    case HirExprKind.MethodCall(receiver, method_name, args, resolution):
+                        val recv_size = _hir_expr_size_ref(receiver, sym_names)
+                        val resolved_sym = hir_perf_resolved_method_symbol(resolution)
+                        val recv_kind = hir_perf_receiver_kind(receiver)
+                        if registry.is_structurally_valid() and resolved_sym.?:
+                            val op_opt = registry.lookup(resolved_sym.unwrap())
+                            if op_opt.?:
+                                val op_sum = op_opt.unwrap()
+                                if op_sum.explicit_argument_count == args.len() and hir_perf_receiver_matches(op_sum.expected_receiver, recv_kind):
+                                    match op_sum.cost:
+                                        case HirPerfCostClass.Constant:
+                                            built.push(PerfBodyNodeV1.StepWork(CostExprV1.Const(1), op_sum.stable_name, expr.span))
+                                        case HirPerfCostClass.AmortizedConstant:
+                                            built.push(PerfBodyNodeV1.StepWork(CostExprV1.Const(1), op_sum.stable_name, expr.span))
+                                        case HirPerfCostClass.ExpectedConstant:
+                                            built.push(PerfBodyNodeV1.StepWork(CostExprV1.Const(1), op_sum.stable_name, expr.span))
+                                        case HirPerfCostClass.LinearReceiver:
+                                            built.push(PerfBodyNodeV1.LoopRegion(
+                                                PerfLoopShapeV1.LinearScan(recv_size),
+                                                PerfBodyNodeV1.StepWork(CostExprV1.Const(1), op_sum.stable_name, expr.span),
+                                                expr.span))
+                                        case HirPerfCostClass.NLogNReceiver:
+                                            built.push(PerfBodyNodeV1.StepWork(
+                                                CostExprV1.Multiply([recv_size, CostExprV1.LogBound(recv_size)]),
+                                                op_sum.stable_name, expr.span))
+                                        case HirPerfCostClass.Unknown(r):
+                                            built.push(PerfBodyNodeV1.UnknownRegion(r, expr.span))
+                                else:
+                                    built.push(PerfBodyNodeV1.UnknownRegion("method_contract_mismatch_" + method_name, expr.span))
+                            else:
+                                built.push(PerfBodyNodeV1.UnknownRegion("unregistered_method_" + method_name, expr.span))
+                        else:
+                            built.push(PerfBodyNodeV1.UnknownRegion("unresolved_method_" + method_name, expr.span))
+                    case HirExprKind.Binary(_, left_e, right_e):
+                        tasks.push(HirToModelTaskV1.BuildSeq(2, expr.span))
+                        tasks.push(HirToModelTaskV1.VisitExpr(right_e))
+                        tasks.push(HirToModelTaskV1.VisitExpr(left_e))
+                    case _:
+                        built.push(PerfBodyNodeV1.StepWork(CostExprV1.Const(1), "expr", expr.span))
+            case HirToModelTaskV1.BuildSeq(count, span):
+                var children: [PerfBodyNodeV1] = []
+                var k = 0
+                while k < count:
+                    children.push(built.pop())
+                    k = k + 1
+                var ordered: [PerfBodyNodeV1] = []
+                var r_idx = children.len() - 1
+                while r_idx >= 0:
+                    ordered.push(children[r_idx])
+                    r_idx = r_idx - 1
+                built.push(PerfBodyNodeV1.Seq(ordered, span))
+            case HirToModelTaskV1.BuildFor(shape, span):
+                built.push(PerfBodyNodeV1.LoopRegion(shape, built.pop(), span))
+            case HirToModelTaskV1.BuildBranch(span):
+                val else_node = built.pop()
+                val then_node = built.pop()
+                built.push(PerfBodyNodeV1.Branch(CostExprV1.Const(1), then_node, else_node, span))
+
+    val root_body = if built.len() > 0: built.pop() else: PerfBodyNodeV1.StepWork(CostExprV1.Const(0), "empty", function.span)
+    val fn_model = PerfFunctionModelV1(
+        function_id: function.name, function_symbol_id: function.symbol.id,
+        file: file, primary_span: function.span, semantic_revision: semantic_revision,
+        size_parameters: size_params, size_relations: [],
+        callback_cost_parameters: cb_params, effects_summary_id: "hir_effects:" + function.effect_region,
+        output_cardinality: CostExprV1.Const(1), body: root_body)
+    summarize_function_model_v1(fn_model, callee_summaries, config)
+
+export PerfLoopShapeV1, PerfCallArgBindingV1, PerfCallbackBindingV1
+export PerfBodyNodeV1, PerfFunctionModelV1, PerfSummarizerConfigV1, PerfSummaryResultV1
+export default_perf_summarizer_config_v1
+export find_resource_bound_v1, substitute_cost_expr_for_call_v1
+export cost_summary_exported_digest_v1
+export summarize_function_model_v1, summarize_hir_function_v1

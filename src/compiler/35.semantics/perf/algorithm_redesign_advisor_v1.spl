@@ -1,0 +1,795 @@
+# Algorithm Redesign Advisor V1 (§5.3, §5.4, §7.5, C10..C12, S16, S17)
+#
+# Detects superlinear patterns that persist even in functional collection syntax
+# and produces review-required algorithmic redesign guidance:
+#   - C10: Ordered fold or loop copying a growing accumulator (1 + 2 + ... + n)
+#          -> PERF-ALLOC-001 with TriangularSum work and alloc_bytes_total bounds.
+#   - C11: Repeated enumeration of a lazy iter()/view() pipeline
+#          -> PERF-COST-001 / PERF-ALLOC-001 charging repeated stage work.
+#   - C12, S16, S17: Nested key-matching scan (imperative or functional
+#          .map(...filter(...)...)) -> PERF-ALG-001 with PerfFixKind.AlgorithmChange
+#          and ReviewRequired (never VerifiedSafe bulk fix), preserving grouped
+#          per-outer shape (group_by / group_join, never accidental flat join),
+#          preserving duplicate keys & stable order, including output match count
+#          k in O(n + m + k), and disclosing O(distinct_keys) auxiliary memory +
+#          hash/equality laws + robust/critical collision cautions.
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, MethodResolution}
+use compiler.hir.hir_definitions.{
+    HirFunction, HirParam, HirBlock, HirStmt, HirStmtKind,
+    HirExpr, HirExprKind, HirCallArg, HirBinOp
+}
+use compiler.semantics.perf_facts.types.{
+    CollectionOperationRegistry, HirPerfOperationKind
+}
+use compiler.semantics.perf_facts.collector.{hir_perf_resolved_method_symbol}
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    PerfResourceDimension, BoundRelation, BoundRegime, AnalysisResultStatus,
+    BoundOrigin, PerfAnalysisTier, SizeMeasureKind, CostExprV1,
+    BoundEvidenceV1, ProvenanceEdgeV1, LoopIdiomFamily, SafetyObligationKind,
+    SafetyObligationStatusV1, PerfFixKind, PerfFixApplicability,
+    LoopIdiomCandidateV1, PerfFindingRecordV1
+}
+
+struct GrowingAccumulatorDescriptorV1:
+    function_id: text
+    semantic_revision: text
+    dependency_fingerprint: text
+    file: text
+    primary_span: Span
+    input_param: text
+    accumulator_var: text
+    container_kind: text
+    is_functional_fold: bool
+    copies_entire_accumulator_each_step: bool
+    expected_old_text: text
+
+struct GrowingAccumulatorAdviceV1:
+    finding: PerfFindingRecordV1
+    work_bound: BoundEvidenceV1
+    alloc_bytes_bound: BoundEvidenceV1
+    candidate: LoopIdiomCandidateV1
+
+struct RepeatedLazyViewDescriptorV1:
+    function_id: text
+    semantic_revision: text
+    dependency_fingerprint: text
+    file: text
+    primary_span: Span
+    view_binding: text
+    source_param: text
+    enumeration_count: i64
+    enumerated_inside_loop_param: Option<text>
+    has_expensive_transform_or_filter: bool
+    stage_allocates_each_pass: bool
+    stage_has_observable_effects: bool
+    in_nogc_scope: bool
+    expected_old_text: text
+
+struct RepeatedLazyViewAdviceV1:
+    findings: [PerfFindingRecordV1]
+    recomputed_work_bound: BoundEvidenceV1
+    candidate: LoopIdiomCandidateV1
+
+enum NestedScanSyntaxStyle:
+    ImperativeLoops
+    FunctionalMapFilter
+
+enum JoinResultShapeKind:
+    GroupedPerOuter
+    FlatPairs
+    CountsPerOuter
+
+enum RecommendedJoinStrategyKind:
+    HashGroupByLookup
+    HashCountByLookup
+    HashEquiJoin
+    SortedIndexLookup
+    RetainBoundedLinearScan
+
+struct NestedKeyJoinDescriptorV1:
+    function_id: text
+    semantic_revision: text
+    dependency_fingerprint: text
+    file: text
+    primary_span: Span
+    outer_param: text
+    inner_param: text
+    outer_key_expr: text
+    inner_key_expr: text
+    syntax_style: NestedScanSyntaxStyle
+    result_shape: JoinResultShapeKind
+    duplicate_keys_possible: bool
+    requires_stable_order: bool
+    key_equality_consistent_with_hash: bool
+    key_orderable: bool
+    inputs_mutated_during_traversal: bool
+    key_extraction_has_effects: bool
+    complexity_policy: text
+    in_nogc_or_fixed_memory_scope: bool
+    expected_old_text: text
+
+struct RedesignResourceTradeoffV1:
+    original_work_bound: BoundEvidenceV1
+    proposed_work_bound: BoundEvidenceV1
+    extra_aux_memory_bound: BoundEvidenceV1
+    includes_output_match_term_k: bool
+    can_duplicate_keys_cause_quadratic_output: bool
+    preserves_grouped_shape: bool
+    flat_join_rejected_for_shape: bool
+    preserves_duplicate_keys: bool
+    preserves_stable_order: bool
+    hash_worst_case_collision_caution: bool
+    hash_equality_assumptions: [text]
+
+struct NestedKeyJoinAdviceV1:
+    recommended_strategy: RecommendedJoinStrategyKind
+    finding: PerfFindingRecordV1
+    candidate: LoopIdiomCandidateV1
+    tradeoff: RedesignResourceTradeoffV1
+
+fn _inferred_bound(
+    resource: PerfResourceDimension, expr: CostExprV1, rendered: text,
+    regime: BoundRegime, model_id: text, assumptions: [text], provenance_id: text
+) -> BoundEvidenceV1:
+    BoundEvidenceV1(
+        resource: resource, expression: expr, rendered_expression: rendered,
+        relation: BoundRelation.UpperBound, regime: regime, model_id: model_id,
+        assumptions: assumptions, status: AnalysisResultStatus.Complete,
+        origin: BoundOrigin.Inferred, provenance_id: provenance_id
+    )
+
+fn _make_finding_v1(
+    rule_code: text, occ_id: text, fn_id: text, file: text, span: Span,
+    msg: text, ev: BoundEvidenceV1, tier: PerfAnalysisTier, rev: text, dep: text, cand: LoopIdiomCandidateV1
+) -> PerfFindingRecordV1:
+    PerfFindingRecordV1(
+        rule_code: rule_code, stable_occurrence_id: occ_id, function_id: fn_id,
+        file: file, primary_span: span, related_locations: [], message: msg,
+        evidence: Some(ev), tier: tier, semantic_fingerprint: rev + ":" + dep,
+        fix_candidates: [cand]
+    )
+
+fn _review_required_obligations(primary_gap_kind: SafetyObligationKind, primary_reason: text, rev_ok: bool) -> [SafetyObligationStatusV1]:
+    val all_kinds: [SafetyObligationKind] = [
+        SafetyObligationKind.CollectionIdentity, SafetyObligationKind.Aliasing,
+        SafetyObligationKind.Mutation, SafetyObligationKind.EvaluationOrder,
+        SafetyObligationKind.TimingEagerness, SafetyObligationKind.FailurePrefixCleanup,
+        SafetyObligationKind.ControlFlowExits, SafetyObligationKind.CaptureLifetime,
+        SafetyObligationKind.NumericSemantics, SafetyObligationKind.OutputShapeDuplicates,
+        SafetyObligationKind.RuntimeEffects, SafetyObligationKind.ResourceRestrictions,
+        SafetyObligationKind.RevisionCurrency
+    ]
+    var out: [SafetyObligationStatusV1] = []
+    for k in all_kinds:
+        if k == primary_gap_kind:
+            out.push(SafetyObligationStatusV1(kind: k, discharged: false, reason: primary_reason))
+        elif k == SafetyObligationKind.RevisionCurrency:
+            out.push(SafetyObligationStatusV1(kind: k, discharged: rev_ok, reason: if rev_ok: "current snapshot" else: "missing revision metadata"))
+        else:
+            out.push(SafetyObligationStatusV1(kind: k, discharged: false, reason: "algorithmic redesign requires explicit human/policy review"))
+    out
+
+# ============================================================================
+# C10: Growing Accumulator Copy Advisor
+# ============================================================================
+
+fn analyze_growing_accumulator_v1(desc: GrowingAccumulatorDescriptorV1) -> Option<GrowingAccumulatorAdviceV1>:
+    if not desc.copies_entire_accumulator_each_step:
+        return None
+    val tri_expr = CostExprV1.TriangularSum(CostExprV1.Size(desc.input_param, SizeMeasureKind.Length))
+    val rendered = "1 + 2 + ... + n = O(n^2) where n = length(" + desc.input_param + ")"
+    val assumptions = [
+        "Each step copies the growing " + desc.container_kind + " accumulator '" + desc.accumulator_var + "'",
+        "Input '" + desc.input_param + "' has finite length n"
+    ]
+    val prov_id = "prov:growing_acc:" + desc.function_id
+    val work_bound = _inferred_bound(PerfResourceDimension.Work, tri_expr, rendered, BoundRegime.WorstCase, "growing_accumulator_v1", assumptions, prov_id)
+    val alloc_bound = _inferred_bound(PerfResourceDimension.AllocBytesTotal, tri_expr, rendered, BoundRegime.WorstCase, "growing_accumulator_v1", assumptions, prov_id)
+    val note = "Growing accumulator copy allocates and copies 1 + 2 + ... + n elements (O(n^2) work and alloc_bytes_total). Mutate a single local builder in-place and materialize once if intermediate snapshots are unobservable."
+    val preview = "var " + desc.accumulator_var + " = []\nfor item in " + desc.input_param + ":\n    " + desc.accumulator_var + ".append(item)"
+    val rev_ok = desc.semantic_revision != "" and desc.dependency_fingerprint != ""
+    val cand = LoopIdiomCandidateV1(
+        rule_id: "PERF-ALLOC-001", action_id: "perf.redesign.growing_accumulator:" + desc.function_id,
+        function_id: desc.function_id, semantic_revision: desc.semantic_revision,
+        dependency_fingerprint: desc.dependency_fingerprint, file: desc.file,
+        source_span: desc.primary_span, family: LoopIdiomFamily.OrderedFold,
+        replacement_preview: preview, expected_old_text: desc.expected_old_text,
+        applicability: PerfFixApplicability.ReviewRequired, fix_kind: PerfFixKind.AlgorithmChange,
+        obligations: _review_required_obligations(SafetyObligationKind.CollectionIdentity, "verify no callback retains intermediate accumulator snapshots", rev_ok),
+        resource_tradeoff_note: note, disabled_reason: None
+    )
+    val style_label = if desc.is_functional_fold: "Ordered fold" else: "Loop"
+    val finding = _make_finding_v1(
+        "PERF-ALLOC-001", "PERF-ALLOC-001:growing_acc:" + desc.function_id + ":" + desc.primary_span.line.to_text(),
+        desc.function_id, desc.file, desc.primary_span,
+        style_label + " copies growing accumulator '" + desc.accumulator_var + "' on each step (" + rendered + ").",
+        alloc_bound, PerfAnalysisTier.T1FastLocal, desc.semantic_revision, desc.dependency_fingerprint, cand
+    )
+    Some(GrowingAccumulatorAdviceV1(finding: finding, work_bound: work_bound, alloc_bytes_bound: alloc_bound, candidate: cand))
+
+# ============================================================================
+# C11: Repeated Lazy View Enumeration Advisor
+# ============================================================================
+
+fn analyze_repeated_lazy_view_v1(desc: RepeatedLazyViewDescriptorV1) -> Option<RepeatedLazyViewAdviceV1>:
+    if desc.enumeration_count < 2 and (not desc.enumerated_inside_loop_param.?):
+        return None
+    val src_size = CostExprV1.Size(desc.source_param, SizeMeasureKind.Length)
+    val pass_expr = match desc.enumerated_inside_loop_param:
+        case Some(loop_p):
+            if desc.enumeration_count > 1:
+                CostExprV1.Multiply([CostExprV1.Const(desc.enumeration_count), CostExprV1.Size(loop_p, SizeMeasureKind.Length)])
+            else:
+                CostExprV1.Size(loop_p, SizeMeasureKind.Length)
+        case None:
+            CostExprV1.Const(desc.enumeration_count)
+
+    val recomputed_expr = CostExprV1.Multiply([pass_expr, src_size])
+    val rendered = match desc.enumerated_inside_loop_param:
+        case Some(loop_p): desc.enumeration_count.to_text() + " * length(" + loop_p + ") * length(" + desc.source_param + ")"
+        case None: desc.enumeration_count.to_text() + " * length(" + desc.source_param + ")"
+
+    val work_bound = _inferred_bound(
+        PerfResourceDimension.Work, recomputed_expr, rendered, BoundRegime.WorstCase,
+        "repeated_lazy_view_v1",
+        ["Lazy view '" + desc.view_binding + "' re-runs upstream filter/map stages per terminal enumeration"],
+        "prov:lazy_view:" + desc.function_id
+    )
+    val blocked = desc.stage_has_observable_effects or desc.in_nogc_scope
+    val applicability = if blocked: PerfFixApplicability.Unavailable else: PerfFixApplicability.ReviewRequired
+    val disabled_reason: Option<text> = if desc.stage_has_observable_effects:
+        Some("PERF-FIX-001: lazy view stage has observable side effects whose repetition count would change on single materialization")
+    elif desc.in_nogc_scope:
+        Some("PERF-FIX-001: single materialization requires heap allocation inside nogc scope")
+    else:
+        None
+
+    val note = "Enumerating lazy view '" + desc.view_binding + "' multiple times recomputes its pipeline (" + rendered + "). Materializing once trades O(length(" + desc.source_param + ")) auxiliary storage."
+    val rev_ok = desc.semantic_revision != "" and desc.dependency_fingerprint != ""
+    val cand = LoopIdiomCandidateV1(
+        rule_id: if blocked: "PERF-FIX-001" else: "PERF-ALLOC-001",
+        action_id: "perf.redesign.materialize_lazy_once:" + desc.function_id + ":" + desc.view_binding,
+        function_id: desc.function_id, semantic_revision: desc.semantic_revision,
+        dependency_fingerprint: desc.dependency_fingerprint, file: desc.file,
+        source_span: desc.primary_span, family: LoopIdiomFamily.Map,
+        replacement_preview: "val " + desc.view_binding + "_materialized = " + desc.view_binding + ".collect()",
+        expected_old_text: desc.expected_old_text, applicability: applicability,
+        fix_kind: PerfFixKind.AlgorithmChange,
+        obligations: _review_required_obligations(SafetyObligationKind.ResourceRestrictions, "materializing lazy view once adds O(n) peak live buffer", rev_ok),
+        resource_tradeoff_note: note, disabled_reason: disabled_reason
+    )
+
+    var findings: [PerfFindingRecordV1] = []
+    if desc.has_expensive_transform_or_filter or desc.enumerated_inside_loop_param.?:
+        findings.push(_make_finding_v1("PERF-COST-001", "PERF-COST-001:lazy_view:" + desc.function_id + ":" + desc.view_binding, desc.function_id, desc.file, desc.primary_span, "Repeated enumeration of lazy view '" + desc.view_binding + "' recomputes upstream stages (" + rendered + ").", work_bound, PerfAnalysisTier.T1FastLocal, desc.semantic_revision, desc.dependency_fingerprint, cand))
+    if desc.stage_allocates_each_pass or desc.enumeration_count >= 2:
+        findings.push(_make_finding_v1("PERF-ALLOC-001", "PERF-ALLOC-001:lazy_view:" + desc.function_id + ":" + desc.view_binding, desc.function_id, desc.file, desc.primary_span, "Avoidable repeated lazy-view traversal/allocation on '" + desc.view_binding + "' (" + rendered + ").", work_bound, PerfAnalysisTier.T1FastLocal, desc.semantic_revision, desc.dependency_fingerprint, cand))
+    Some(RepeatedLazyViewAdviceV1(findings: findings, recomputed_work_bound: work_bound, candidate: cand))
+
+# ============================================================================
+# C12, S16, S17: Nested Key-Matching Scan & Grouped Join / Index Advisor
+# ============================================================================
+
+fn analyze_nested_key_join_v1(desc: NestedKeyJoinDescriptorV1) -> Option<NestedKeyJoinAdviceV1>:
+    if desc.outer_param.trim() == "" or desc.inner_param.trim() == "":
+        return None
+    val n_expr = CostExprV1.Size(desc.outer_param, SizeMeasureKind.Length)
+    val m_expr = CostExprV1.Size(desc.inner_param, SizeMeasureKind.Length)
+    val k_expr = CostExprV1.Size("matches", SizeMeasureKind.OutputMatches)
+    val distinct_expr = CostExprV1.Size(desc.inner_param, SizeMeasureKind.DistinctKeys)
+
+    val orig_work_expr = CostExprV1.Multiply([n_expr, m_expr])
+    val orig_rendered = "O(n * m) where n = length(" + desc.outer_param + "), m = length(" + desc.inner_param + ")"
+    val orig_bound = _inferred_bound(
+        PerfResourceDimension.Work, orig_work_expr, orig_rendered, BoundRegime.WorstCase,
+        "nested_key_scan_v1",
+        ["Outer visits n = length(" + desc.outer_param + ")", "Inner scans m = length(" + desc.inner_param + ") per outer item"],
+        "prov:nested_join_orig:" + desc.function_id
+    )
+
+    val needs_worst_case = desc.complexity_policy == "robust" or desc.complexity_policy == "critical"
+    val collision_caution = needs_worst_case or desc.in_nogc_or_fixed_memory_scope or (not desc.key_equality_consistent_with_hash)
+    val strategy = if desc.in_nogc_or_fixed_memory_scope:
+        RecommendedJoinStrategyKind.RetainBoundedLinearScan
+    elif needs_worst_case or (not desc.key_equality_consistent_with_hash):
+        if desc.key_orderable: RecommendedJoinStrategyKind.SortedIndexLookup else: RecommendedJoinStrategyKind.RetainBoundedLinearScan
+    else:
+        match desc.result_shape:
+            case JoinResultShapeKind.GroupedPerOuter: RecommendedJoinStrategyKind.HashGroupByLookup
+            case JoinResultShapeKind.CountsPerOuter: RecommendedJoinStrategyKind.HashCountByLookup
+            case JoinResultShapeKind.FlatPairs: RecommendedJoinStrategyKind.HashEquiJoin
+
+    val includes_k = match desc.result_shape:
+        case JoinResultShapeKind.CountsPerOuter: false
+        case _: true
+
+    val prop_prov = "prov:nested_join_prop:" + desc.function_id
+    val proposed_work_bound = match strategy:
+        case RecommendedJoinStrategyKind.HashCountByLookup:
+            _inferred_bound(
+                PerfResourceDimension.Work, CostExprV1.Add([n_expr, m_expr]),
+                "O(n + m) expected where n = length(" + desc.outer_param + "), m = length(" + desc.inner_param + ")",
+                BoundRegime.Expected, "hash_count_by_v1", ["Consistent constant-time key hash and equality"], prop_prov
+            )
+        case RecommendedJoinStrategyKind.SortedIndexLookup:
+            val sort_plus_k = if includes_k:
+                CostExprV1.Add([CostExprV1.Multiply([CostExprV1.Add([n_expr, m_expr]), CostExprV1.LogBound(m_expr)]), k_expr])
+            else:
+                CostExprV1.Multiply([CostExprV1.Add([n_expr, m_expr]), CostExprV1.LogBound(m_expr)])
+            val sort_text = if includes_k:
+                "O((n + m) * log(m) + k) worst-case where k = output_matches (hash O(n + m + k) rejected due to worst-case collision policy)"
+            else:
+                "O((n + m) * log(m)) worst-case"
+            _inferred_bound(
+                PerfResourceDimension.Work, sort_plus_k, sort_text, BoundRegime.WorstCase,
+                "sorted_index_join_v1", ["Total key ordering consistent with equality", "Output match count k can reach n * m on duplicate keys (C12)"], prop_prov
+            )
+        case RecommendedJoinStrategyKind.RetainBoundedLinearScan:
+            val scan_with_k = if includes_k: CostExprV1.Add([orig_work_expr, k_expr]) else: orig_work_expr
+            _inferred_bound(
+                PerfResourceDimension.Work, scan_with_k,
+                "O(n * m + k) worst-case (bounded linear scan retained under memory/collision constraints)",
+                BoundRegime.WorstCase, "bounded_scan_retained_v1", ["Fixed-memory or non-orderable/non-hashable key constraint"], prop_prov
+            )
+        case _:
+            _inferred_bound(
+                PerfResourceDimension.Work, CostExprV1.Add([n_expr, m_expr, k_expr]),
+                "O(n + m + k) expected where n = length(" + desc.outer_param + "), m = length(" + desc.inner_param + "), k = output_matches",
+                BoundRegime.Expected, "hash_group_join_v1",
+                ["Key equality consistent with hash (a == b => hash(a) == hash(b))", "Output match count k included: duplicate keys can yield k = n * m (C12)"],
+                prop_prov
+            )
+
+    val aux_bound = _inferred_bound(
+        PerfResourceDimension.AuxPeakBytes, CostExprV1.Add([distinct_expr, m_expr]),
+        "O(distinct_keys(" + desc.inner_param + ") + m) extra auxiliary index memory",
+        BoundRegime.WorstCase, "index_aux_memory_v1",
+        ["Prebuilt multi-value bucket index over " + desc.inner_param], "prov:nested_join_aux:" + desc.function_id
+    )
+    val hash_laws: [text] = [
+        "Key equality (" + desc.inner_key_expr + " == " + desc.outer_key_expr + ") must be pure and consistent with hash (a == b => hash(a) == hash(b))",
+        "Inputs '" + desc.outer_param + "' and '" + desc.inner_param + "' must remain unmutated across index construction and lookup",
+        "Multi-value buckets preserve duplicate keys and original insertion order (S17)"
+    ]
+    val is_grouped = desc.result_shape == JoinResultShapeKind.GroupedPerOuter
+    val preview = match strategy:
+        case RecommendedJoinStrategyKind.HashGroupByLookup:
+            "val by_key = " + desc.inner_param + ".iter().group_by(inner -> " + desc.inner_key_expr + ")\n" + desc.outer_param + ".iter().map(outer -> by_key.get_or_empty(" + desc.outer_key_expr + ")).collect()"
+        case RecommendedJoinStrategyKind.HashCountByLookup:
+            "val counts = " + desc.inner_param + ".iter().count_by(inner -> " + desc.inner_key_expr + ")\n" + desc.outer_param + ".iter().map(outer -> counts.get_or_zero(" + desc.outer_key_expr + ")).collect()"
+        case RecommendedJoinStrategyKind.HashEquiJoin:
+            "val by_key = " + desc.inner_param + ".iter().group_by(inner -> " + desc.inner_key_expr + ")\n" + desc.outer_param + ".iter().flat_map(outer -> by_key.get_or_empty(" + desc.outer_key_expr + ").iter().map(inner -> (outer, inner))).collect()"
+        case RecommendedJoinStrategyKind.SortedIndexLookup:
+            if is_grouped:
+                "val sorted_by_key = " + desc.inner_param + ".iter().stable_sort_by_key(inner -> " + desc.inner_key_expr + ")\n" + desc.outer_param + ".iter().map(outer -> sorted_by_key.equal_range(" + desc.outer_key_expr + ")).collect()"
+            else:
+                "val sorted_by_key = " + desc.inner_param + ".iter().stable_sort_by_key(inner -> " + desc.inner_key_expr + ")"
+        case RecommendedJoinStrategyKind.RetainBoundedLinearScan:
+            desc.expected_old_text
+
+    val illegal_precompute = desc.inputs_mutated_during_traversal or desc.key_extraction_has_effects
+    val applicability = if illegal_precompute: PerfFixApplicability.Unavailable else: PerfFixApplicability.ReviewRequired
+    val disabled_reason: Option<text> = if desc.inputs_mutated_during_traversal:
+        Some("PERF-FIX-001: input collection is mutated during traversal; prebuilding a snapshot index changes observed elements")
+    elif desc.key_extraction_has_effects:
+        Some("PERF-FIX-001: key extraction/comparison has observable effects whose evaluation count changes from n*m to n+m")
+    else:
+        None
+
+    var note_parts: [text] = []
+    if is_grouped:
+        note_parts.push("Preserves grouped per-outer shape via group_by / group_join; accidental flat join is rejected because it flattens per-user sublists and drops unmatched outer items (S16).")
+    note_parts.push("Multi-value buckets preserve duplicate keys and deterministic stable order (S17).")
+    if includes_k:
+        note_parts.push("Proposed work is " + proposed_work_bound.rendered_expression + "; output match count k is retained because all-pairs duplicate keys yield k = n * m and cannot materialize in linear total work (C12).")
+    note_parts.push("Requires extra auxiliary memory O(distinct_keys(" + desc.inner_param + ") + m) and hash/equality law consistency.")
+    if collision_caution:
+        note_parts.push("Worst-case hash collision caution active under policy '" + desc.complexity_policy + "': unbounded hash table probe chains do not establish a hard worst-case linear bound.")
+    val full_note = note_parts.join(" ")
+
+    val rev_ok = desc.semantic_revision != "" and desc.dependency_fingerprint != ""
+    val cand = LoopIdiomCandidateV1(
+        rule_id: if applicability == PerfFixApplicability.Unavailable: "PERF-FIX-001" else: "PERF-ALG-001",
+        action_id: "perf.redesign.nested_key_join:" + desc.function_id,
+        function_id: desc.function_id, semantic_revision: desc.semantic_revision,
+        dependency_fingerprint: desc.dependency_fingerprint, file: desc.file,
+        source_span: desc.primary_span, family: LoopIdiomFamily.Map,
+        replacement_preview: preview, expected_old_text: desc.expected_old_text,
+        applicability: applicability, fix_kind: PerfFixKind.AlgorithmChange,
+        obligations: _review_required_obligations(SafetyObligationKind.OutputShapeDuplicates, "verify hash/equality law, duplicate bucket ordering, and O(distinct_keys) memory", rev_ok),
+        resource_tradeoff_note: full_note, disabled_reason: disabled_reason
+    )
+    val syntax_note = match desc.syntax_style:
+        case NestedScanSyntaxStyle.FunctionalMapFilter: "functional .map(...filter(...)...) pipeline"
+        case NestedScanSyntaxStyle.ImperativeLoops: "nested loop traversal"
+
+    val finding = _make_finding_v1(
+        "PERF-ALG-001", "PERF-ALG-001:nested_key_join:" + desc.function_id + ":" + desc.primary_span.line.to_text(),
+        desc.function_id, desc.file, desc.primary_span,
+        "Nested key-matching scan in " + syntax_note + " performs " + orig_rendered + " comparisons; consider indexed group_by / group_join redesign (" + proposed_work_bound.rendered_expression + ").",
+        orig_bound, PerfAnalysisTier.T2Compositional, desc.semantic_revision, desc.dependency_fingerprint, cand
+    )
+    val tradeoff = RedesignResourceTradeoffV1(
+        original_work_bound: orig_bound, proposed_work_bound: proposed_work_bound,
+        extra_aux_memory_bound: aux_bound, includes_output_match_term_k: includes_k,
+        can_duplicate_keys_cause_quadratic_output: includes_k and desc.duplicate_keys_possible,
+        preserves_grouped_shape: is_grouped, flat_join_rejected_for_shape: is_grouped,
+        preserves_duplicate_keys: true, preserves_stable_order: true,
+        hash_worst_case_collision_caution: collision_caution, hash_equality_assumptions: hash_laws
+    )
+    Some(NestedKeyJoinAdviceV1(recommended_strategy: strategy, finding: finding, candidate: cand, tradeoff: tradeoff))
+
+# ============================================================================
+# Typed HIR Detectors (C10, C11, C12 / S16 / S17)
+# ============================================================================
+
+fn _hir_var_id_and_name(expr: HirExpr, names: Dict<i64, text>) -> (i64, text):
+    match expr.kind:
+        case HirExprKind.Var(sym):
+            (sym.id, if names.contains_key(sym.id): names[sym.id] else: "v" + sym.id.to_text())
+        case HirExprKind.NamedVar(sym, nm): (sym.id, nm)
+        case _: (-1, "")
+
+fn _unwrap_iter_or_collect_receiver(expr: HirExpr, names: Dict<i64, text>) -> (i64, text):
+    val direct = _hir_var_id_and_name(expr, names)
+    if direct.0 >= 0:
+        return direct
+    match expr.kind:
+        case HirExprKind.MethodCall(recv, method, args, _):
+            if (method == "iter" or method == "view" or method == "collect") and args.len() == 0:
+                return _unwrap_iter_or_collect_receiver(recv, names)
+        case _: pass_do_nothing
+    (-1, "")
+
+fn _hir_key_access_for_param(expr: HirExpr, target_sym_id: i64, param_name: text) -> Option<text>:
+    match expr.kind:
+        case HirExprKind.Var(sym):
+            if sym.id == target_sym_id: return Some(param_name)
+        case HirExprKind.NamedVar(sym, nm):
+            if sym.id == target_sym_id: return Some(nm)
+        case HirExprKind.Field(base, field, _):
+            match _hir_key_access_for_param(base, target_sym_id, param_name):
+                case Some(prefix): return Some(prefix + "." + field)
+                case None: return None
+        case _: return None
+    None
+
+fn _match_eq_keys_between_params(
+    cond: HirExpr, outer_sym_id: i64, outer_name: text, inner_sym_id: i64, inner_name: text
+) -> Option<(text, text)>:
+    match cond.kind:
+        case HirExprKind.Binary(op, lhs, rhs):
+            if op != HirBinOp.Eq:
+                return None
+            val l_in = _hir_key_access_for_param(lhs, inner_sym_id, inner_name)
+            val r_out = _hir_key_access_for_param(rhs, outer_sym_id, outer_name)
+            if l_in.? and r_out.?:
+                return Some((r_out.unwrap(), l_in.unwrap()))
+            val l_out = _hir_key_access_for_param(lhs, outer_sym_id, outer_name)
+            val r_in = _hir_key_access_for_param(rhs, inner_sym_id, inner_name)
+            if l_out.? and r_in.?:
+                return Some((l_out.unwrap(), r_in.unwrap()))
+            None
+        case _: None
+
+fn _extract_inner_filter_scan(
+    expr: HirExpr, outer_sym_id: i64, outer_name: text,
+    names: Dict<i64, text>, registry: CollectionOperationRegistry
+) -> Option<(text, text, text)>:
+    var cur = expr
+    match cur.kind:
+        case HirExprKind.MethodCall(recv, mname, cargs, _):
+            if mname == "collect" and cargs.len() == 0:
+                cur = recv
+        case _: pass_do_nothing
+    match cur.kind:
+        case HirExprKind.MethodCall(filter_recv, fmethod, fargs, f_res):
+            var is_filter = fmethod == "filter" and fargs.len() == 1
+            if val sid = hir_perf_resolved_method_symbol(f_res):
+                if registry.contains(sid):
+                    val sum = registry.lookup(sid).unwrap()
+                    is_filter = sum.operation == HirPerfOperationKind.Filter and fargs.len() == 1
+            if not is_filter:
+                return None
+            val inner_src = _unwrap_iter_or_collect_receiver(filter_recv, names)
+            if inner_src.0 < 0 or inner_src.0 == outer_sym_id:
+                return None
+            match fargs[0].value.kind:
+                case HirExprKind.Lambda(lparams, lbody, _):
+                    if lparams.len() != 1:
+                        return None
+                    val inner_p = lparams[0]
+                    match _match_eq_keys_between_params(lbody, outer_sym_id, outer_name, inner_p.symbol.id, inner_p.name):
+                        case Some(keys): return Some((inner_src.1, keys.0, keys.1))
+                        case None: return None
+                case _: return None
+        case _: None
+
+class _NestedJoinScanStateV1:
+    items: [NestedKeyJoinAdviceV1]
+
+fn _push_detected_join(
+    state: _NestedJoinScanStateV1, function_id: text, rev: text, dep: text, file: text,
+    span: Span, outer_p: text, inner_p: text, outer_k: text, inner_k: text,
+    style: NestedScanSyntaxStyle, shape: JoinResultShapeKind, policy: text, is_nogc: bool, old_text: text
+):
+    val desc = NestedKeyJoinDescriptorV1(function_id: function_id, semantic_revision: rev, dependency_fingerprint: dep, file: file, primary_span: span, outer_param: outer_p, inner_param: inner_p, outer_key_expr: outer_k, inner_key_expr: inner_k, syntax_style: style, result_shape: shape, duplicate_keys_possible: true, requires_stable_order: true, key_equality_consistent_with_hash: true, key_orderable: true, inputs_mutated_during_traversal: false, key_extraction_has_effects: false, complexity_policy: policy, in_nogc_or_fixed_memory_scope: is_nogc, expected_old_text: old_text)
+    if val adv = analyze_nested_key_join_v1(desc):
+        state.items.push(adv)
+
+fn _scan_expr_for_nested_joins(
+    expr: HirExpr, function_id: text, semantic_revision: text, dependency_fingerprint: text,
+    file: text, complexity_policy: text, is_nogc: bool, names: Dict<i64, text>,
+    registry: CollectionOperationRegistry, state: _NestedJoinScanStateV1, depth: i64
+):
+    if depth > 128:
+        return
+    var core = expr
+    match core.kind:
+        case HirExprKind.MethodCall(recv, mname, cargs, _):
+            if mname == "collect" and cargs.len() == 0:
+                core = recv
+        case _: pass_do_nothing
+
+    match core.kind:
+        case HirExprKind.MethodCall(map_recv, mmethod, margs, m_res):
+            var is_map = mmethod == "map" and margs.len() == 1
+            if val sid = hir_perf_resolved_method_symbol(m_res):
+                if registry.contains(sid):
+                    val sum = registry.lookup(sid).unwrap()
+                    is_map = sum.operation == HirPerfOperationKind.Map and margs.len() == 1
+            if is_map:
+                val outer_src = _unwrap_iter_or_collect_receiver(map_recv, names)
+                if outer_src.0 >= 0:
+                    match margs[0].value.kind:
+                        case HirExprKind.Lambda(oparams, obody, _):
+                            if oparams.len() == 1:
+                                val outer_p = oparams[0]
+                                match _extract_inner_filter_scan(obody, outer_p.symbol.id, outer_p.name, names, registry):
+                                    case Some(found):
+                                        if found.0 != outer_src.1:
+                                            _push_detected_join(state, function_id, semantic_revision, dependency_fingerprint, file, expr.span, outer_src.1, found.0, found.1, found.2, NestedScanSyntaxStyle.FunctionalMapFilter, JoinResultShapeKind.GroupedPerOuter, complexity_policy, is_nogc, outer_src.1 + ".map(" + outer_p.name + " -> " + found.0 + ".filter(...))")
+                                            return
+                                    case None: pass_do_nothing
+                        case _: pass_do_nothing
+            _scan_expr_for_nested_joins(map_recv, function_id, semantic_revision, dependency_fingerprint, file, complexity_policy, is_nogc, names, registry, state, depth + 1)
+            for a in margs:
+                _scan_expr_for_nested_joins(a.value, function_id, semantic_revision, dependency_fingerprint, file, complexity_policy, is_nogc, names, registry, state, depth + 1)
+
+        case HirExprKind.For(outer_sym, outer_iter, outer_body, _):
+            val outer_src = _unwrap_iter_or_collect_receiver(outer_iter, names)
+            val outer_vname = if names.contains_key(outer_sym.id): names[outer_sym.id] else: "outer"
+            if outer_src.0 >= 0:
+                for st in outer_body.stmts:
+                    match st.kind:
+                        case HirStmtKind.Expr(inner_e):
+                            match inner_e.kind:
+                                case HirExprKind.For(inner_sym, inner_iter, inner_body, _):
+                                    val inner_src = _unwrap_iter_or_collect_receiver(inner_iter, names)
+                                    val inner_vname = if names.contains_key(inner_sym.id): names[inner_sym.id] else: "inner"
+                                    if inner_src.0 >= 0 and inner_src.1 != outer_src.1 and inner_body.stmts.len() >= 1:
+                                        match inner_body.stmts[0].kind:
+                                            case HirStmtKind.Expr(if_e):
+                                                match if_e.kind:
+                                                    case HirExprKind.If(cond, _, _):
+                                                        match _match_eq_keys_between_params(cond, outer_sym.id, outer_vname, inner_sym.id, inner_vname):
+                                                            case Some(keys):
+                                                                _push_detected_join(state, function_id, semantic_revision, dependency_fingerprint, file, expr.span, outer_src.1, inner_src.1, keys.0, keys.1, NestedScanSyntaxStyle.ImperativeLoops, JoinResultShapeKind.FlatPairs, complexity_policy, is_nogc, "for " + outer_vname + " in " + outer_src.1 + ":\n    for " + inner_vname + " in " + inner_src.1)
+                                                                return
+                                                            case None: pass_do_nothing
+                                                    case _: pass_do_nothing
+                                            case _: pass_do_nothing
+                                case _: pass_do_nothing
+                        case _: pass_do_nothing
+            _scan_block_for_nested_joins(outer_body, function_id, semantic_revision, dependency_fingerprint, file, complexity_policy, is_nogc, names, registry, state, depth + 1)
+
+        case HirExprKind.Block(b):
+            _scan_block_for_nested_joins(b, function_id, semantic_revision, dependency_fingerprint, file, complexity_policy, is_nogc, names, registry, state, depth + 1)
+        case _:
+            pass_do_nothing
+
+fn _scan_block_for_nested_joins(
+    block: HirBlock, function_id: text, semantic_revision: text, dependency_fingerprint: text,
+    file: text, complexity_policy: text, is_nogc: bool, names: Dict<i64, text>,
+    registry: CollectionOperationRegistry, state: _NestedJoinScanStateV1, depth: i64
+):
+    for st in block.stmts:
+        match st.kind:
+            case HirStmtKind.Let(_, _, init):
+                _scan_expr_for_nested_joins(init, function_id, semantic_revision, dependency_fingerprint, file, complexity_policy, is_nogc, names, registry, state, depth + 1)
+            case HirStmtKind.Assign(_, _, rhs):
+                _scan_expr_for_nested_joins(rhs, function_id, semantic_revision, dependency_fingerprint, file, complexity_policy, is_nogc, names, registry, state, depth + 1)
+            case HirStmtKind.Expr(e):
+                _scan_expr_for_nested_joins(e, function_id, semantic_revision, dependency_fingerprint, file, complexity_policy, is_nogc, names, registry, state, depth + 1)
+            case HirStmtKind.Block(b):
+                _scan_block_for_nested_joins(b, function_id, semantic_revision, dependency_fingerprint, file, complexity_policy, is_nogc, names, registry, state, depth + 1)
+            case _: pass_do_nothing
+    if block.has:
+        _scan_expr_for_nested_joins(block.value, function_id, semantic_revision, dependency_fingerprint, file, complexity_policy, is_nogc, names, registry, state, depth + 1)
+
+fn detect_hir_growing_accumulators_v1(
+    function: HirFunction, semantic_revision: text, dependency_fingerprint: text, file: text
+) -> [GrowingAccumulatorAdviceV1]:
+    var names: Dict<i64, text> = {}
+    for p in function.params:
+        names[p.symbol.id] = p.name
+    var out: [GrowingAccumulatorAdviceV1] = []
+    val stmts = function.body.stmts
+    var idx = 0
+    while idx < stmts.len():
+        match stmts[idx].kind:
+            case HirStmtKind.Let(acc_sym, acc_ty, _):
+                val container_kind = match acc_ty.kind:
+                    case HirTypeKind.Str: "Text"
+                    case HirTypeKind.Array(_, _): "Array"
+                    case _: ""
+                if container_kind != "" and idx + 1 < stmts.len():
+                    match stmts[idx + 1].kind:
+                        case HirStmtKind.Expr(loop_e):
+                            match loop_e.kind:
+                                case HirExprKind.For(_, iter_e, body, _):
+                                    val src = _hir_var_id_and_name(iter_e, names)
+                                    val src_name = if src.1 != "": src.1 else: "items"
+                                    if body.stmts.len() == 1:
+                                        match body.stmts[0].kind:
+                                            case HirStmtKind.Assign(target_e, op_opt, rhs_e):
+                                                val tgt = _hir_var_id_and_name(target_e, names)
+                                                if tgt.0 == acc_sym.id:
+                                                    var copies = op_opt.?
+                                                    if not copies:
+                                                        match rhs_e.kind:
+                                                            case HirExprKind.Binary(bop, lhs, _):
+                                                                val l = _hir_var_id_and_name(lhs, names)
+                                                                if l.0 == acc_sym.id and (bop == HirBinOp.Concat or bop == HirBinOp.Add):
+                                                                    copies = true
+                                                            case _: pass_do_nothing
+                                                    if copies:
+                                                        val acc_nm = if tgt.1 != "": tgt.1 else: "acc"
+                                                        val desc = GrowingAccumulatorDescriptorV1(
+                                                            function_id: function.name, semantic_revision: semantic_revision,
+                                                            dependency_fingerprint: dependency_fingerprint, file: file,
+                                                            primary_span: loop_e.span, input_param: src_name,
+                                                            accumulator_var: acc_nm, container_kind: container_kind,
+                                                            is_functional_fold: false, copies_entire_accumulator_each_step: true,
+                                                            expected_old_text: acc_nm + " = " + acc_nm + " ++ [item]"
+                                                        )
+                                                        if val adv = analyze_growing_accumulator_v1(desc):
+                                                            out.push(adv)
+                                            case _: pass_do_nothing
+                                case _: pass_do_nothing
+                        case _: pass_do_nothing
+            case _: pass_do_nothing
+        idx = idx + 1
+    out
+
+fn _count_direct_or_nested_view(target: HirExpr, view_sym_id: i64, in_loop: bool) -> (i64, bool, text):
+    match target.kind:
+        case HirExprKind.Var(s):
+            if s.id == view_sym_id: return (1, in_loop, "")
+            (0, false, "")
+        case HirExprKind.NamedVar(s, nm):
+            if s.id == view_sym_id: return (1, in_loop, nm)
+            (0, false, "")
+        case _:
+            _count_view_enumerations_in_expr(target, view_sym_id, in_loop)
+
+fn _merge_view_counts(a: (i64, bool, text), b: (i64, bool, text)) -> (i64, bool, text):
+    (a.0 + b.0, a.1 or b.1, if b.2 != "": b.2 else: a.2)
+
+fn _count_view_enumerations_in_expr(expr: HirExpr, view_sym_id: i64, in_loop: bool) -> (i64, bool, text):
+    match expr.kind:
+        case HirExprKind.MethodCall(recv, _, args, _):
+            var acc = _count_direct_or_nested_view(recv, view_sym_id, in_loop)
+            for a in args:
+                acc = _merge_view_counts(acc, _count_view_enumerations_in_expr(a.value, view_sym_id, in_loop))
+            acc
+        case HirExprKind.For(_, iter_e, body, _):
+            var acc = _count_direct_or_nested_view(iter_e, view_sym_id, in_loop)
+            for st in body.stmts:
+                match st.kind:
+                    case HirStmtKind.Expr(be):
+                        acc = _merge_view_counts(acc, _count_view_enumerations_in_expr(be, view_sym_id, true))
+                    case _: pass_do_nothing
+            acc
+        case _: (0, false, "")
+
+fn detect_hir_repeated_lazy_views_v1(
+    function: HirFunction, semantic_revision: text, dependency_fingerprint: text,
+    file: text, registry: CollectionOperationRegistry
+) -> [RepeatedLazyViewAdviceV1]:
+    var names: Dict<i64, text> = {}
+    for p in function.params:
+        names[p.symbol.id] = p.name
+    var out: [RepeatedLazyViewAdviceV1] = []
+    val stmts = function.body.stmts
+    var idx = 0
+    while idx < stmts.len():
+        match stmts[idx].kind:
+            case HirStmtKind.Let(view_sym, _, init_e):
+                var is_lazy_view = false
+                var src_name = "items"
+                match init_e.kind:
+                    case HirExprKind.MethodCall(recv, mname, _, res):
+                        val base_src = _unwrap_iter_or_collect_receiver(recv, names)
+                        if base_src.1 != "": src_name = base_src.1
+                        if val sid = hir_perf_resolved_method_symbol(res):
+                            if registry.contains(sid):
+                                val sum = registry.lookup(sid).unwrap()
+                                if sum.operation == HirPerfOperationKind.Enumerate or (not sum.materializes):
+                                    is_lazy_view = true
+                        elif mname == "iter" or mname == "view":
+                            is_lazy_view = true
+                    case _: pass_do_nothing
+                if is_lazy_view:
+                    var total_uses: i64 = 0
+                    var in_loop_use = false
+                    var vname = "view_" + view_sym.id.to_text()
+                    var j = idx + 1
+                    while j < stmts.len():
+                        match stmts[j].kind:
+                            case HirStmtKind.Expr(e):
+                                val u = _count_view_enumerations_in_expr(e, view_sym.id, false)
+                                total_uses = total_uses + u.0
+                                in_loop_use = in_loop_use or u.1
+                                if u.2 != "": vname = u.2
+                            case HirStmtKind.Let(_, _, ie):
+                                val u = _count_view_enumerations_in_expr(ie, view_sym.id, false)
+                                total_uses = total_uses + u.0
+                                in_loop_use = in_loop_use or u.1
+                                if u.2 != "": vname = u.2
+                            case _: pass_do_nothing
+                        j = j + 1
+                    val loop_opt: Option<text> = if in_loop_use: Some("outer_loop") else: None
+                    if total_uses >= 2 or in_loop_use:
+                        val desc = RepeatedLazyViewDescriptorV1(
+                            function_id: function.name, semantic_revision: semantic_revision,
+                            dependency_fingerprint: dependency_fingerprint, file: file,
+                            primary_span: stmts[idx].span, view_binding: vname, source_param: src_name,
+                            enumeration_count: total_uses, enumerated_inside_loop_param: loop_opt,
+                            has_expensive_transform_or_filter: true, stage_allocates_each_pass: true,
+                            stage_has_observable_effects: false, in_nogc_scope: function.effect_region == "nogc",
+                            expected_old_text: "val " + vname + " = " + src_name + ".iter()"
+                        )
+                        if val adv = analyze_repeated_lazy_view_v1(desc):
+                            out.push(adv)
+            case _: pass_do_nothing
+        idx = idx + 1
+    out
+
+fn detect_hir_nested_key_joins_v1(
+    function: HirFunction, semantic_revision: text, dependency_fingerprint: text,
+    file: text, complexity_policy: text, registry: CollectionOperationRegistry
+) -> [NestedKeyJoinAdviceV1]:
+    var names: Dict<i64, text> = {}
+    for p in function.params:
+        names[p.symbol.id] = p.name
+    var state = _NestedJoinScanStateV1(items: [])
+    _scan_block_for_nested_joins(
+        function.body, function.name, semantic_revision, dependency_fingerprint,
+        file, complexity_policy, function.effect_region == "nogc", names, registry, state, 0
+    )
+    state.items
+
+fn analyze_hir_algorithm_redesigns_v1(
+    function: HirFunction, semantic_revision: text, dependency_fingerprint: text,
+    file: text, complexity_policy: text, registry: CollectionOperationRegistry
+) -> [PerfFindingRecordV1]:
+    var findings: [PerfFindingRecordV1] = []
+    for g in detect_hir_growing_accumulators_v1(function, semantic_revision, dependency_fingerprint, file):
+        findings.push(g.finding)
+    for rv in detect_hir_repeated_lazy_views_v1(function, semantic_revision, dependency_fingerprint, file, registry):
+        for f in rv.findings:
+            findings.push(f)
+    for nj in detect_hir_nested_key_joins_v1(function, semantic_revision, dependency_fingerprint, file, complexity_policy, registry):
+        findings.push(nj.finding)
+    findings
+
+export GrowingAccumulatorDescriptorV1, GrowingAccumulatorAdviceV1
+export RepeatedLazyViewDescriptorV1, RepeatedLazyViewAdviceV1
+export NestedScanSyntaxStyle, JoinResultShapeKind, RecommendedJoinStrategyKind
+export NestedKeyJoinDescriptorV1, RedesignResourceTradeoffV1, NestedKeyJoinAdviceV1
+export analyze_growing_accumulator_v1, analyze_repeated_lazy_view_v1, analyze_nested_key_join_v1
+export detect_hir_growing_accumulators_v1, detect_hir_repeated_lazy_views_v1
+export detect_hir_nested_key_joins_v1, analyze_hir_algorithm_redesigns_v1

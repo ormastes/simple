@@ -6,7 +6,7 @@
 # High (fail closed: unknown cost is never run on the fast path).
 
 use compiler.tools.lint._LintMain.config_and_model.{
-    LintConfig, LintLevel, all_lint_names, map_lint_code_to_config_name
+    LintConfig, LintLevel, PerfLintProfile, all_lint_names, map_lint_code_to_config_name
 }
 
 pub enum LintCostTier:
@@ -25,6 +25,9 @@ pub enum LintCompleteness:
 pub enum LintTierProfile:
     NormalBuild
     DefaultLint
+    PerfFast
+    PerfStandard
+    PerfDeep
 
 # Execution ledger (Stage-1 safe `var` globals, zero `nil`).
 var _RULE_INVOCATION_COUNTS_V1: Dict<text, i64> = {}
@@ -65,7 +68,9 @@ fn _medium_cost_rules() -> [text]:
      "variant_shadow_binding", "written_any_decl", "wm_lane_boundary",
      "robust_option_surface", "nil_return_non_optional",
      "option_me_call", "undeclared_derived_unit",
-     "source_inventory_drift", "boundary_role_grant"]
+     "source_inventory_drift", "boundary_role_grant",
+     "perf_loop_idiom_style", "perf_avoidable_materialization",
+     "perf_analysis_coverage_note", "perf_fix_blocked_precondition"]
 
 # Flow / cross-function / typed analyses that can dominate a build.
 fn _high_cost_rules() -> [text]:
@@ -78,7 +83,10 @@ fn _high_cost_rules() -> [text]:
      "cow_alias_hotpath", "nogc_ownership",
      "illegal_unit_arithmetic", "bound_raw_escape",
      "provider_abi_mismatch", "sffi_constrained_return",
-     "non_option_pattern_match"]
+     "non_option_pattern_match",
+     "perf_repeated_scan_cost", "perf_complexity_bound_increase",
+     "perf_algorithm_redesign", "perf_resource_contract_refuted",
+     "perf_resource_contract_unproved"]
 
 fn _low_cost_producer_aliases() -> [text]:
     ["L:print_in_test_spec", "L:spipe_missing_docstrings",
@@ -98,7 +106,32 @@ fn _medium_cost_producer_aliases() -> [text]:
      "param_tag", "raw_sffi", "riscv_debuggability",
      "windows_c_compiler_selection", "semantic_api_exported_graph",
      "theme_package", "SPL-UNIT-004",
-     "SPL-BUILD-SRC-001", "SPL-BUILD-ROLE-001"]
+     "SPL-BUILD-SRC-001", "SPL-BUILD-ROLE-001",
+     "PERF-STYLE-001", "PERF-ALLOC-001",
+     "PERF-ANALYSIS-001", "PERF-FIX-001"]
+
+# reason: rule identifiers are plain strings at the lint registry boundary
+@allow(primitive_api)
+pub fn lint_perf_t1_rule_names() -> [text]:
+    ["perf_loop_idiom_style", "perf_avoidable_materialization",
+     "perf_analysis_coverage_note", "perf_fix_blocked_precondition"]
+
+# reason: rule identifiers are plain strings at the lint registry boundary
+@allow(primitive_api)
+pub fn lint_perf_t2_rule_names() -> [text]:
+    ["perf_repeated_scan_cost", "perf_complexity_bound_increase",
+     "perf_algorithm_redesign", "perf_resource_contract_refuted",
+     "perf_resource_contract_unproved"]
+
+# reason: rule identifiers are plain strings at the lint registry boundary
+@allow(primitive_api)
+pub fn lint_perf_rule_names() -> [text]:
+    var out: [text] = []
+    for n in lint_perf_t1_rule_names():
+        out.push(n)
+    for n in lint_perf_t2_rule_names():
+        out.push(n)
+    out
 
 fn _strip_easyfix_prefix(rule_id: text) -> text:
     if rule_id.starts_with("L:") or rule_id.starts_with("E:"):
@@ -158,6 +191,12 @@ pub fn lint_tier_admits(profile: LintTierProfile, tier: LintCostTier) -> bool:
             true
         case NormalBuild:
             tier == LintCostTier.Low
+        case PerfFast:
+            tier != LintCostTier.High
+        case PerfStandard:
+            true
+        case PerfDeep:
+            true
 
 # Hard cost ceiling FIRST (`lint_tier_admits`), then effective `LintLevel`.
 # reason: rule_id is a canonical text key and admission returns a boolean gate verdict
@@ -182,7 +221,8 @@ pub fn lint_rule_admitted_for_config(config: LintConfig, rule_id: text) -> bool:
         return true
     config.get_level(canon) != LintLevel.Allow
 
-# Pure rule selection. NormalBuild keeps Low only; DefaultLint keeps all.
+# Pure rule selection. NormalBuild keeps Low only; DefaultLint keeps all;
+# PerfFast keeps T1 perf rules; PerfStandard/PerfDeep keep T1+T2 perf rules.
 # reason: rule names are plain identifiers at the lint registry boundary
 @allow(primitive_api)
 pub fn lint_rules_for_profile(profile: LintTierProfile, names: [text]) -> [text]:
@@ -195,6 +235,20 @@ pub fn lint_rules_for_profile(profile: LintTierProfile, names: [text]) -> [text]
                 if lint_rule_cost_tier(n) == LintCostTier.Low:
                     picked.push(n)
             picked
+        case PerfFast:
+            val t1 = lint_perf_t1_rule_names()
+            var picked_fast: [text] = []
+            for n in names:
+                if t1.contains(n):
+                    picked_fast.push(n)
+            picked_fast
+        case PerfStandard | PerfDeep:
+            val perf_all = lint_perf_rule_names()
+            var picked_perf: [text] = []
+            for n in names:
+                if perf_all.contains(n):
+                    picked_perf.push(n)
+            picked_perf
 
 # Reduce per-rule results to one status. An exhausted budget can never yield
 # Pass: a clean-looking run that was cut short is Incomplete.
@@ -242,11 +296,32 @@ pub fn lint_completeness_name(c: LintCompleteness) -> text:
 # `lint --fast`: bind config to NormalBuild ceiling AND silence non-Low levels.
 pub fn lint_apply_fast_profile(config: LintConfig):
     config.tier_profile = LintTierProfile.NormalBuild
+    config.perf_profile = None
     val all = all_lint_names()
     val keep = lint_rules_for_profile(LintTierProfile.NormalBuild, all)
     for name in all:
         if not keep.contains(name):
             config.set_level(name, LintLevel.Allow)
+
+# `lint --profile perf-fast|perf|perf-deep`: bind config to the selected perf
+# tier ceiling, silence unrelated non-perf rules, enable admitted perf rules,
+# and keep `perf_fix_blocked_precondition` silent (disabled action carrier).
+pub fn lint_apply_perf_profile(config: LintConfig, perf_profile: PerfLintProfile):
+    config.perf_profile = Some(perf_profile)
+    val tier_p = match perf_profile:
+        case PerfLintProfile.PerfFast: LintTierProfile.PerfFast
+        case PerfLintProfile.Perf: LintTierProfile.PerfStandard
+        case PerfLintProfile.PerfDeep: LintTierProfile.PerfDeep
+    config.tier_profile = tier_p
+    val all = all_lint_names()
+    val keep = lint_rules_for_profile(tier_p, all)
+    for name in all:
+        if not keep.contains(name):
+            config.set_level(name, LintLevel.Allow)
+        elif name == "perf_fix_blocked_precondition":
+            config.set_level(name, LintLevel.Allow)
+        elif config.get_level(name) == LintLevel.Allow:
+            config.set_level(name, LintLevel.Warn)
 
 # ---------------------------------------------------------------------------
 # Pre-execution invocation & cost-skip ledger

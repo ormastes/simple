@@ -1,0 +1,943 @@
+"""
+# Performance Analysis and Collection Refactoring System Specification
+
+**Status:** Implementing
+**Feature IDs:** PERF-COST-001, PERF-COST-002, PERF-STYLE-001, PERF-ALG-001, PERF-ALLOC-001, PERF-CONTRACT-001, PERF-CONTRACT-002, PERF-ANALYSIS-001, PERF-FIX-001
+**Keywords:** performance-analysis, collection-refactoring, caller-propagation, loop-idiom, edit-transaction, resource-contract
+
+## Overview
+System-level BDD scenarios verifying shared `perf_analysis_contracts_v1` side-table
+contracts, `CollectionOperationRegistry` and `builtin_collection` identity admission,
+`collect_hir_perf_facts` caller/callee fact extraction, `DiagnosticBatchV1` and
+revision-bound `EditTransaction` safe-fix gates, three-valued resource contract
+outcomes (`Verified | Refuted | Unproved`), baseline model-migration separation,
+and behavioral trace equivalence across imperative loops and collection pipelines.
+
+Canonical plan: `doc/03_plan/compiler/performance_analysis_and_collection_refactoring_2026-11-18.md`
+Scenario manual: `doc/06_spec/03_system/app/compiler/feature/perf_analysis_collection_refactoring_spec.md`
+"""
+
+use std.spec.*
+use std.common.diagnostics.span.{Span}
+use std.common.diagnostics.severity.{Severity}
+use std.common.diagnostics.diagnostic_v1.{
+    DiagnosticV1, DiagnosticFixConfidence, FixReplacement
+}
+use std.common.diagnostics.diagnostic_batch.{
+    BatchStatus, BatchTargetProfileV1, CoverageReceiptV1, DiagnosticBatchV1,
+    FixCandidate, diagnostic_stable_id
+}
+use std.common.diagnostics.fix_transaction.{
+    ApplyStatus, DocumentSnapshot, EditTransaction
+}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{
+    FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind,
+    vhdl_hardware_metadata_default
+}
+use compiler.hir.hir_types.{
+    HirModule, HirType, HirTypeKind, SymbolId, SymbolTable,
+    MethodResolution, CollectionBuiltinOperation
+}
+use compiler.hir.hir_definitions.{
+    HirFunction, HirParam, HirBlock, HirStmt, HirStmtKind,
+    HirExpr, HirExprKind, HirCallArg
+}
+use compiler.semantics.perf.perf_analysis_contracts_v1.*
+use compiler.semantics.perf_facts.*
+use compiler.semantics.perf_facts.builtin_collection.{
+    resolve_builtin_collection_operation
+}
+
+# ============================================================================
+# Typed HIR & Contract Fixture Builders (strict Option `None`/`Some`)
+# ============================================================================
+
+fn sys_span(start: i64, end: i64, line: i64, col: i64) -> Span:
+    Span.new(start, end, line, col)
+
+fn sys_unit_type() -> HirType:
+    HirType(kind: HirTypeKind.Unit, span: sys_span(0, 0, 1, 1))
+
+fn sys_bool_type() -> HirType:
+    HirType(kind: HirTypeKind.Bool, span: sys_span(0, 0, 1, 1))
+
+fn sys_i64_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: sys_span(0, 0, 1, 1))
+
+fn sys_i64_array_type() -> HirType:
+    HirType(kind: HirTypeKind.Array(sys_i64_type(), None), span: sys_span(0, 0, 1, 1))
+
+fn sys_expr(kind: HirExprKind, type_: HirType, line: i64) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: type_, span: sys_span(line * 10, line * 10 + 8, line, 5))
+
+fn sys_unit_expr() -> HirExpr:
+    sys_expr(HirExprKind.UnitLit, sys_unit_type(), 1)
+
+fn sys_param(sym_id: i64, name: text, type_: HirType, line: i64) -> HirParam:
+    HirParam(
+        symbol: SymbolId(id: sym_id),
+        name: name,
+        type_: type_,
+        has_default: false,
+        default: sys_unit_expr(),
+        span: sys_span(line * 10, line * 10 + 4, line, 1),
+        is_mutable: false
+    )
+
+fn sys_function(sym_id: i64, name: text, stmts: [HirStmt], line: i64) -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: sym_id),
+        name: name,
+        type_params: [],
+        params: [],
+        return_type: sys_i64_array_type(),
+        body: HirBlock(
+            stmts: stmts,
+            has: false,
+            value: sys_unit_expr(),
+            span: sys_span(line * 10, line * 10 + 20, line, 1)
+        ),
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: ExportAttr(is_export_c: false, export_name: ""),
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: DriverManifestAttr(
+            kind: DriverManifestAttrKind.Driver,
+            driver_class: 0,
+            vendor: 0,
+            device_ids: [],
+            version: "",
+            abi: ""
+        ),
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_doc_comment: false,
+        doc_comment: "",
+        span: sys_span(line * 10, line * 10 + 20, line, 1),
+        is_gpu_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        verification_contract: None,
+        is_generic_template: false
+    )
+
+fn sys_module_with_functions(funcs: [HirFunction]) -> HirModule:
+    var fn_map: Dict<SymbolId, HirFunction> = {}
+    for f in funcs:
+        fn_map[f.symbol] = f
+    HirModule(
+        name: "count_for_all_fixture",
+        path: "src/app/demo/count_for_all_fixture.spl",
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        symbols: SymbolTable.new(),
+        functions: fn_map,
+        gpu_function_targets: {},
+        gpu_function_backend_orders: {},
+        classes: {},
+        structs: {},
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: [],
+        types: []
+    )
+
+fn sys_collection_registry() -> CollectionOperationRegistry:
+    var registry = CollectionOperationRegistry.new("stdlib-cost-v1")
+    registry.register(CollectionOperationSummary(
+        symbol_id: 301,
+        stable_name: "Array.contains",
+        operation: HirPerfOperationKind.ContainsLookup,
+        cost: HirPerfCostClass.LinearReceiver,
+        output_cardinality: HirPerfCardinality.Exact(1),
+        enumeration: HirPerfEnumerationClass.Once,
+        expected_receiver: HirPerfReceiverKind.Array,
+        signature_fingerprint: "Array<T>.contains(T)->bool",
+        explicit_argument_count: 1,
+        effects: HirPerfEffectFacts(
+            reads: true, writes: false, allocates: false, throws: false,
+            suspends: false, observable: false, unknown: false
+        ),
+        allocation: HirPerfAllocationClass.None,
+        preserves_order: true,
+        materializes: false,
+        metadata_version: "stdlib-cost-v1",
+        provenance: "stdlib/array.spl",
+        evidence_receipt: "verified-array-contains-v1"
+    ))
+    registry.register(CollectionOperationSummary(
+        symbol_id: 302,
+        stable_name: "Array.push",
+        operation: HirPerfOperationKind.Append,
+        cost: HirPerfCostClass.AmortizedConstant,
+        output_cardinality: HirPerfCardinality.Exact(1),
+        enumeration: HirPerfEnumerationClass.None,
+        expected_receiver: HirPerfReceiverKind.Array,
+        signature_fingerprint: "Array<T>.push(T)->Unit",
+        explicit_argument_count: 1,
+        effects: HirPerfEffectFacts(
+            reads: true, writes: true, allocates: true, throws: false,
+            suspends: false, observable: false, unknown: false
+        ),
+        allocation: HirPerfAllocationClass.BoundedPool,
+        preserves_order: true,
+        materializes: false,
+        metadata_version: "stdlib-cost-v1",
+        provenance: "stdlib/array.spl",
+        evidence_receipt: "verified-array-push-v1"
+    ))
+    registry
+
+fn sys_all_13_obligations(aliasing_ok: bool, identity_ok: bool) -> [SafetyObligationStatusV1]:
+    [
+        SafetyObligationStatusV1(
+            kind: SafetyObligationKind.CollectionIdentity,
+            discharged: identity_ok,
+            reason: if identity_ok: "fresh nonescaping local builder" else: "external alias observes builder identity"
+        ),
+        SafetyObligationStatusV1(
+            kind: SafetyObligationKind.Aliasing,
+            discharged: aliasing_ok,
+            reason: if aliasing_ok: "items and result are distinct locals" else: "input items may alias output builder"
+        ),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.Mutation, discharged: true, reason: "callbacks read-only"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.EvaluationOrder, discharged: true, reason: "sequential filter then map"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.TimingEagerness, discharged: true, reason: "terminal collect() preserves eager point"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.FailurePrefixCleanup, discharged: true, reason: "nonescaping prefix on error"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.ControlFlowExits, discharged: true, reason: "single fallthrough exit"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.CaptureLifetime, discharged: true, reason: "no escaping mutable capture"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.NumericSemantics, discharged: true, reason: "order preserved"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.OutputShapeDuplicates, discharged: true, reason: "preserves order and duplicates"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.RuntimeEffects, discharged: true, reason: "no I/O, MMIO, lock, or async effect"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.ResourceRestrictions, discharged: true, reason: "same result materialization class"),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.RevisionCurrency, discharged: true, reason: "matches snapshot rev-7 and callee fingerprint")
+    ]
+
+fn sys_all_obligations_discharged(obligations: [SafetyObligationStatusV1]) -> bool:
+    if obligations.len() != 13:
+        return false
+    for ob in obligations:
+        if not ob.discharged:
+            return false
+    true
+
+fn sys_verify_linear_contract(
+    function_id: text,
+    bound: BoundEvidenceV1,
+    strict_verification: bool
+) -> ResourceContractCheckV1:
+    val declared = CostExprV1.Size("items", SizeMeasureKind.Length)
+    match bound.status:
+        case AnalysisResultStatus.Complete:
+            match bound.expression:
+                case CostExprV1.Size(_, _):
+                    return ResourceContractCheckV1(
+                        function_id: function_id,
+                        resource: PerfResourceDimension.Work,
+                        declared_bound: declared,
+                        declared_regime: BoundRegime.WorstCase,
+                        strict_verification: strict_verification,
+                        verdict: ContractVerificationVerdict.Verified,
+                        rule_code: "",
+                        explanation: "Verified linear work upper bound against declared linear contract.",
+                        witness_or_reason: bound.rendered_expression
+                    )
+                case CostExprV1.Multiply(_):
+                    match bound.relation:
+                        case BoundRelation.TightBound:
+                            return ResourceContractCheckV1(
+                                function_id: function_id,
+                                resource: PerfResourceDimension.Work,
+                                declared_bound: declared,
+                                declared_regime: BoundRegime.WorstCase,
+                                strict_verification: strict_verification,
+                                verdict: ContractVerificationVerdict.Refuted,
+                                rule_code: "PERF-CONTRACT-001",
+                                explanation: "Refuted declared linear work contract with tight superlinear bound.",
+                                witness_or_reason: bound.rendered_expression
+                            )
+                        case BoundRelation.Exact:
+                            return ResourceContractCheckV1(
+                                function_id: function_id,
+                                resource: PerfResourceDimension.Work,
+                                declared_bound: declared,
+                                declared_regime: BoundRegime.WorstCase,
+                                strict_verification: strict_verification,
+                                verdict: ContractVerificationVerdict.Refuted,
+                                rule_code: "PERF-CONTRACT-001",
+                                explanation: "Refuted declared linear work contract with exact superlinear count.",
+                                witness_or_reason: bound.rendered_expression
+                            )
+                        case _:
+                            return ResourceContractCheckV1(
+                                function_id: function_id,
+                                resource: PerfResourceDimension.Work,
+                                declared_bound: declared,
+                                declared_regime: BoundRegime.WorstCase,
+                                strict_verification: strict_verification,
+                                verdict: ContractVerificationVerdict.Unproved,
+                                rule_code: "PERF-CONTRACT-002",
+                                explanation: "Required linear work contract is unproved: inferred loose upper bound does not refute O(n).",
+                                witness_or_reason: bound.rendered_expression
+                            )
+                case CostExprV1.UnknownTerm(reason):
+                    return ResourceContractCheckV1(
+                        function_id: function_id,
+                        resource: PerfResourceDimension.Work,
+                        declared_bound: declared,
+                        declared_regime: BoundRegime.WorstCase,
+                        strict_verification: strict_verification,
+                        verdict: ContractVerificationVerdict.Unproved,
+                        rule_code: "PERF-CONTRACT-002",
+                        explanation: "Required linear work contract is unproved due to unknown term.",
+                        witness_or_reason: reason
+                    )
+                case _:
+                    return ResourceContractCheckV1(
+                        function_id: function_id,
+                        resource: PerfResourceDimension.Work,
+                        declared_bound: declared,
+                        declared_regime: BoundRegime.WorstCase,
+                        strict_verification: strict_verification,
+                        verdict: ContractVerificationVerdict.Unproved,
+                        rule_code: "PERF-CONTRACT-002",
+                        explanation: "Required linear work contract is unproved under current symbolic form.",
+                        witness_or_reason: bound.rendered_expression
+                    )
+        case _:
+            ResourceContractCheckV1(
+                function_id: function_id,
+                resource: PerfResourceDimension.Work,
+                declared_bound: declared,
+                declared_regime: BoundRegime.WorstCase,
+                strict_verification: strict_verification,
+                verdict: ContractVerificationVerdict.Unproved,
+                rule_code: "PERF-CONTRACT-002",
+                explanation: "Required linear work contract is unproved because analysis did not complete.",
+                witness_or_reason: bound.status.name()
+            )
+
+fn sys_classify_baseline_diff(
+    baseline: FunctionCostSummaryV1,
+    current: FunctionCostSummaryV1
+) -> text:
+    if baseline.analyzer_version != current.analyzer_version or baseline.model_version != current.model_version:
+        return "model_related"
+    if baseline.semantic_revision != current.semantic_revision:
+        val base_expr = baseline.resource_bounds[0].rendered_expression
+        val curr_expr = current.resource_bounds[0].rendered_expression
+        if base_expr != curr_expr:
+            return "source_related:PERF-COST-002"
+    "unchanged"
+
+# ============================================================================
+# Behavioral Trace Reference Runners (§15.4)
+# ============================================================================
+
+struct FilterMapTraceResult:
+    values: [i64]
+    events: [text]
+
+fn run_imperative_filter_map(items: [i64]) -> FilterMapTraceResult:
+    var result: [i64] = []
+    var events: [text] = []
+    for item in items:
+        events.push("pred:" + item.to_text())
+        if item % 2 == 0:
+            events.push("map:" + item.to_text())
+            result.push(item * 10)
+    FilterMapTraceResult(values: result, events: events)
+
+fn run_pipeline_filter_map_collect(items: [i64]) -> FilterMapTraceResult:
+    # Models eager terminal `items.iter().filter(valid).map(transform).collect()`:
+    # fused single-pass lazy adapters preserve interleaved per-element pred->map order!
+    var collected: [i64] = []
+    var events: [text] = []
+    var idx = 0
+    while idx < items.len():
+        val elem = items[idx]
+        events.push("pred:" + elem.to_text())
+        if elem % 2 == 0:
+            events.push("map:" + elem.to_text())
+            collected.push(elem * 10)
+        idx = idx + 1
+    FilterMapTraceResult(values: collected, events: events)
+
+struct ShortCircuitSearchResult:
+    found: Option<i64>
+    consumed: i64
+    events: [text]
+
+fn run_imperative_find_first_even(items: [i64]) -> ShortCircuitSearchResult:
+    var consumed = 0
+    var events: [text] = []
+    for item in items:
+        consumed = consumed + 1
+        events.push("check:" + item.to_text())
+        if item % 2 == 0:
+            return ShortCircuitSearchResult(found: Some(item), consumed: consumed, events: events)
+    ShortCircuitSearchResult(found: None, consumed: consumed, events: events)
+
+fn run_terminal_find_first_even(items: [i64]) -> ShortCircuitSearchResult:
+    var consumed = 0
+    var events: [text] = []
+    var i = 0
+    while i < items.len():
+        val candidate = items[i]
+        consumed = consumed + 1
+        events.push("check:" + candidate.to_text())
+        if candidate % 2 == 0:
+            return ShortCircuitSearchResult(found: Some(candidate), consumed: consumed, events: events)
+        i = i + 1
+    ShortCircuitSearchResult(found: None, consumed: consumed, events: events)
+
+fn run_imperative_ordered_sub(seed: i64, items: [i64]) -> i64:
+    var acc = seed
+    for item in items:
+        acc = acc - item
+    acc
+
+fn run_ordered_fold_sub(seed: i64, items: [i64]) -> i64:
+    var acc = seed
+    var i = 0
+    while i < items.len():
+        acc = acc - items[i]
+        i = i + 1
+    acc
+
+fn run_right_associated_sub(seed: i64, items: [i64]) -> i64:
+    if items.len() == 0:
+        return seed
+    var idx = items.len() - 1
+    var rhs = items[idx]
+    while idx > 0:
+        idx = idx - 1
+        rhs = items[idx] - rhs
+    seed - rhs
+
+# ============================================================================
+# Executable BDD Scenarios
+# ============================================================================
+
+describe "Performance analysis and collection refactoring system scenarios":
+    """
+    ## End-to-end verification of `PERF-*` contracts, HIR facts, safe edits, and traces
+    Exercises the motivating `count_for_all` -> `count_matches` caller propagation
+    scenario, builtin collection identity admission, 13-point safe refactoring gates
+    over `DiagnosticBatchV1` + `EditTransaction`, three-valued resource contracts,
+    and behavioral trace equivalence.
+    """
+
+    context "Scenario 1: Caller cost propagation and builtin identity admission (C03, C07, C12, S13)":
+        it "collects typed HIR loop facts across count_matches and count_for_all and composes O(n*m) PERF-COST-001 provenance":
+            step("Build a two-function HIR module modeling count_matches(records, key) and count_for_all(keys, records)")
+            val records_var = sys_expr(HirExprKind.NamedVar(SymbolId(id: 101), "records"), sys_i64_array_type(), 3)
+            val key_arg = HirCallArg(
+                has_name: false,
+                name: "",
+                value: sys_expr(HirExprKind.NamedVar(SymbolId(id: 102), "key"), sys_i64_type(), 4),
+                span: sys_span(40, 43, 4, 9)
+            )
+            val linear_scan_call = sys_expr(
+                HirExprKind.MethodCall(
+                    records_var,
+                    "contains",
+                    [key_arg],
+                    MethodResolution.InstanceMethod(SymbolId(id: 10), SymbolId(id: 301))
+                ),
+                sys_bool_type(),
+                4
+            )
+            val callee_loop = sys_expr(
+                HirExprKind.For(
+                    SymbolId(id: 103),
+                    records_var,
+                    HirBlock(
+                        stmts: [HirStmt(kind: HirStmtKind.Expr(linear_scan_call), span: sys_span(40, 55, 4, 5))],
+                        has: false,
+                        value: sys_unit_expr(),
+                        span: sys_span(38, 56, 4, 1)
+                    ),
+                    None
+                ),
+                sys_unit_type(),
+                3
+            )
+            val count_matches_fn = sys_function(
+                201,
+                "count_matches",
+                [HirStmt(kind: HirStmtKind.Expr(callee_loop), span: sys_span(30, 56, 3, 1))],
+                2
+            )
+
+            val result_var = sys_expr(HirExprKind.NamedVar(SymbolId(id: 104), "result"), sys_i64_array_type(), 11)
+            val append_call = sys_expr(
+                HirExprKind.MethodCall(
+                    result_var,
+                    "push",
+                    [HirCallArg(
+                        has_name: false,
+                        name: "",
+                        value: sys_expr(HirExprKind.IntLit(1, None), sys_i64_type(), 12),
+                        span: sys_span(120, 128, 12, 9)
+                    )],
+                    MethodResolution.InstanceMethod(SymbolId(id: 10), SymbolId(id: 302))
+                ),
+                sys_unit_type(),
+                12
+            )
+            val keys_var = sys_expr(HirExprKind.NamedVar(SymbolId(id: 105), "keys"), sys_i64_array_type(), 10)
+            val caller_loop = sys_expr(
+                HirExprKind.For(
+                    SymbolId(id: 106),
+                    keys_var,
+                    HirBlock(
+                        stmts: [HirStmt(kind: HirStmtKind.Expr(append_call), span: sys_span(120, 136, 12, 5))],
+                        has: false,
+                        value: sys_unit_expr(),
+                        span: sys_span(115, 138, 12, 1)
+                    ),
+                    None
+                ),
+                sys_unit_type(),
+                10
+            )
+            val count_for_all_fn = sys_function(
+                202,
+                "count_for_all",
+                [HirStmt(kind: HirStmtKind.Expr(caller_loop), span: sys_span(100, 138, 10, 1))],
+                9
+            )
+
+            step("Run one-pass collect_hir_perf_facts against the verified CollectionOperationRegistry")
+            val registry = sys_collection_registry()
+            expect(registry.is_structurally_valid()).to_equal(true)
+            val module = sys_module_with_functions([count_matches_fn, count_for_all_fn])
+            val facts = collect_hir_perf_facts(module, registry)
+            expect(facts.functions_scanned).to_equal(2)
+            expect(facts.collection_ops.len()).to_equal(2)
+            expect(facts.collection_ops[0].loop_depth).to_equal(1)
+            expect(facts.collection_ops[1].loop_depth).to_equal(1)
+            expect(facts.coverage_complete).to_equal(true)
+
+            step("Compose FunctionCostSummaryV1 and PerfFindingRecordV1 preserving independent n = length(keys) and m = length(records)")
+            val n_expr = CostExprV1.Size("keys", SizeMeasureKind.Length)
+            val m_expr = CostExprV1.Size("records", SizeMeasureKind.Length)
+            val nm_expr = CostExprV1.Multiply([
+                n_expr,
+                CostExprV1.KnownCalleeCost("count_matches", m_expr)
+            ])
+            val evidence = BoundEvidenceV1(
+                resource: PerfResourceDimension.Work,
+                expression: nm_expr,
+                rendered_expression: "n*m",
+                relation: BoundRelation.Exact,
+                regime: BoundRegime.WorstCase,
+                model_id: "full_scan_example_v1",
+                assumptions: [
+                    "Each count_matches call scans all m records",
+                    "Input lengths n = length(keys) and m = length(records) remain stable"
+                ],
+                status: AnalysisResultStatus.Complete,
+                origin: BoundOrigin.Inferred,
+                provenance_id: "prov:count_for_all:0"
+            )
+            val prov_edges = [
+                ProvenanceEdgeV1(
+                    node_id: "prov:count_for_all:0",
+                    role: "outer_traversal",
+                    file: module.path,
+                    span: sys_span(100, 138, 10, 1),
+                    summary_line: "outer traversal executes n = length(keys) iterations",
+                    child_ids: ["prov:count_matches:0"]
+                ),
+                ProvenanceEdgeV1(
+                    node_id: "prov:count_matches:0",
+                    role: "callee_linear_scan",
+                    file: module.path,
+                    span: sys_span(30, 56, 3, 1),
+                    summary_line: "count_matches performs m = length(records) key comparisons per call",
+                    child_ids: []
+                )
+            ]
+            val caller_summary = FunctionCostSummaryV1(
+                function_id: "count_for_all",
+                function_symbol_id: 202,
+                semantic_revision: "rev-1",
+                size_parameters: [
+                    SizeParameterV1(param_name: "keys", measure: SizeMeasureKind.Length, canonical_var: "n"),
+                    SizeParameterV1(param_name: "records", measure: SizeMeasureKind.Length, canonical_var: "m")
+                ],
+                size_relations: [],
+                resource_bounds: [evidence],
+                output_cardinality: n_expr,
+                callback_cost_parameters: [],
+                effects_summary_id: "eff:pure_alloc_output",
+                assumptions: evidence.assumptions,
+                unresolved_terms: [],
+                dependency_summary_hashes: ["sha256:count_matches:v1"],
+                implementation_digest: "impl:demo:v1",
+                provenance_root: "prov:count_for_all:0",
+                provenance_nodes: prov_edges,
+                analyzer_version: "perf-analyzer-v1",
+                model_version: registry.metadata_version,
+                configuration_fingerprint: "cfg:perf-default"
+            )
+            val redesign_candidate = LoopIdiomCandidateV1(
+                rule_id: "PERF-ALG-001",
+                action_id: "act:index_counts_once",
+                function_id: "count_for_all",
+                semantic_revision: "rev-1",
+                dependency_fingerprint: "sha256:count_matches:v1",
+                file: module.path,
+                source_span: sys_span(100, 138, 10, 1),
+                family: LoopIdiomFamily.Map,
+                replacement_preview: "val counts = records.count_by(\\r: r.key)\nkeys.iter().map(\\k: counts.get_or(k, 0)).collect()",
+                expected_old_text: "for key in keys:\n    result.push(count_matches(records, key))",
+                applicability: PerfFixApplicability.ReviewRequired,
+                fix_kind: PerfFixKind.AlgorithmChange,
+                obligations: sys_all_13_obligations(true, true),
+                resource_tradeoff_note: "Expected O(m+n) work with O(distinct_keys) auxiliary memory under key hash/equality laws; group_join retains O(n+m+k) output matches.",
+                disabled_reason: None
+            )
+            val finding = PerfFindingRecordV1(
+                rule_code: "PERF-COST-001",
+                stable_occurrence_id: diagnostic_stable_id("PERF-COST-001", "file:demo", "fn:count_for_all/loop:0", 0),
+                function_id: caller_summary.function_id,
+                file: module.path,
+                primary_span: sys_span(100, 138, 10, 1),
+                related_locations: caller_summary.provenance_nodes,
+                message: "Repeated full scan inside a traversal: modeled comparisons n*m under worst-case completion.",
+                evidence: Some(evidence),
+                tier: PerfAnalysisTier.T2Compositional,
+                semantic_fingerprint: "fp:count_for_all:rev-1",
+                fix_candidates: [redesign_candidate]
+            )
+            expect(finding.rule_code).to_equal("PERF-COST-001")
+            expect(finding.tier.name()).to_equal("T2")
+            expect(caller_summary.size_parameters.len()).to_equal(2)
+            expect(caller_summary.size_parameters[0].canonical_var).to_equal("n")
+            expect(caller_summary.size_parameters[1].canonical_var).to_equal("m")
+            expect(finding.related_locations.len()).to_equal(2)
+            expect(finding.fix_candidates[0].applicability.name()).to_equal("ReviewRequired")
+            expect(finding.fix_candidates[0].fix_kind.name()).to_equal("AlgorithmChange")
+            expect(finding.fix_candidates[0].resource_tradeoff_note).to_contain("O(distinct_keys)")
+
+        it "admits builtin Array.map/filter lambda identities and rejects lookalike or captured-filter shapes (S13)":
+            step("Construct typed Array receiver, single-param lambdas, and lookalike user method calls")
+            val array_recv = sys_expr(HirExprKind.NamedVar(SymbolId(id: 400), "items"), sys_i64_array_type(), 20)
+            val lambda_param = sys_param(401, "x", sys_i64_type(), 20)
+            val pure_lambda = sys_expr(
+                HirExprKind.Lambda([lambda_param], sys_expr(HirExprKind.NamedVar(SymbolId(id: 401), "x"), sys_i64_type(), 20), []),
+                sys_i64_type(),
+                20
+            )
+            val captured_lambda = sys_expr(
+                HirExprKind.Lambda([lambda_param], sys_expr(HirExprKind.BoolLit(true), sys_bool_type(), 21), [SymbolId(id: 499)]),
+                sys_bool_type(),
+                21
+            )
+            val map_res = resolve_builtin_collection_operation(
+                array_recv,
+                "map",
+                [HirCallArg(has_name: false, name: "", value: pure_lambda, span: sys_span(200, 210, 20, 5))]
+            )
+            val filter_no_cap = resolve_builtin_collection_operation(
+                array_recv,
+                "filter",
+                [HirCallArg(has_name: false, name: "", value: pure_lambda, span: sys_span(210, 220, 21, 5))]
+            )
+            val filter_with_cap = resolve_builtin_collection_operation(
+                array_recv,
+                "filter",
+                [HirCallArg(has_name: false, name: "", value: captured_lambda, span: sys_span(220, 230, 22, 5))]
+            )
+            val lookalike_append = resolve_builtin_collection_operation(
+                array_recv,
+                "append",
+                [HirCallArg(has_name: false, name: "", value: pure_lambda, span: sys_span(230, 240, 23, 5))]
+            )
+            expect(map_res.?).to_equal(true)
+            expect(filter_no_cap.?).to_equal(true)
+            expect(filter_with_cap.?).to_equal(false)
+            expect(lookalike_append.?).to_equal(false)
+            match map_res:
+                case Some(MethodResolution.BuiltinCollection(CollectionBuiltinOperation.ArrayMap)):
+                    expect(PerfResourceDimension.Work.name()).to_equal("work")
+                case _:
+                    expect("unexpected map resolution").to_equal("ArrayMap")
+
+    context "Scenario 2: 13-point legality proof, PERF-STYLE-001 vs PERF-FIX-001, and revision-bound EditTransaction (S01..S06, I01, I02, I07)":
+        it "applies a VerifiedSafe local FilterMap refactor with terminal collect() and rejects aliasing, stale versions, stale hashes, and overlaps":
+            step("Evaluate 13 obligations for a fresh local FilterMap loop and project into DiagnosticBatchV1")
+            val file_path = "C:/dev/wt/wave2-lanes/src/app/demo/filter_map.spl"
+            val old_loop = "var result = []\nfor item in items:\n    if valid(item):\n        result.push(transform(item))"
+            val source_body = "fn build(items: [i64]) -> [i64]:\n" + old_loop + "\nresult\n"
+            val loop_start = "fn build(items: [i64]) -> [i64]:\n".byte_len()
+            val loop_end = loop_start + old_loop.byte_len()
+            val loop_span = Span.new(loop_start, loop_end, 2, 1)
+            val replacement_text = "val result = items.iter()\n    .filter(valid)\n    .map(transform)\n    .collect()"
+
+            val verified_obs = sys_all_13_obligations(true, true)
+            expect(sys_all_obligations_discharged(verified_obs)).to_equal(true)
+
+            val safe_candidate = LoopIdiomCandidateV1(
+                rule_id: "PERF-STYLE-001",
+                action_id: "act:filter_map_safe:1",
+                function_id: "build",
+                semantic_revision: "rev-7",
+                dependency_fingerprint: "deps:valid+transform:v1",
+                file: file_path,
+                source_span: loop_span,
+                family: LoopIdiomFamily.FilterMap,
+                replacement_preview: replacement_text,
+                expected_old_text: old_loop,
+                applicability: PerfFixApplicability.VerifiedSafe,
+                fix_kind: PerfFixKind.Refactor,
+                obligations: verified_obs,
+                resource_tradeoff_note: "Equivalent collection refactor; modeled traversal cost unchanged; terminal collect() preserves eager materialization; runtime improvement not established.",
+                disabled_reason: None
+            )
+            expect(safe_candidate.family.name()).to_equal("filter_map")
+            expect(safe_candidate.replacement_preview).to_end_with(".collect()")
+            expect(safe_candidate.resource_tradeoff_note).to_contain("runtime improvement not established")
+
+            val diag = DiagnosticV1.new(
+                Severity.Help,
+                "PERF-STYLE-001",
+                "Equivalent collection refactor available; runtime improvement has not been established."
+            )
+            val batch_res = DiagnosticBatchV1.complete(
+                "simple-perf-lint",
+                "file:filter_map",
+                "file:///C:/dev/wt/wave2-lanes/src/app/demo/filter_map.spl",
+                7,
+                "sha256:filter_map:v7",
+                1
+            )
+                .push(diagnostic_stable_id("PERF-STYLE-001", "file:filter_map", "loop:0", 0), diag)
+                .with_target_profile(BatchTargetProfileV1.new("x86_64-pc-windows-msvc", "perf", "file", "p1-perf"))
+                .with_coverage(CoverageReceiptV1.complete(9, 9, 0))
+                .finalize()
+
+            expect(batch_res.is_ok()).to_equal(true)
+            val sealed_batch = batch_res.unwrap()
+            expect(sealed_batch.verdict_name()).to_equal("findings")
+            expect(sealed_batch.matches_document(7, "sha256:filter_map:v7")).to_equal(true)
+
+            step("Apply the VerifiedSafe FixCandidate through EditTransaction at matching revision 7")
+            val fix_candidate = FixCandidate.new(
+                safe_candidate.action_id,
+                "Convert loop to iter().filter().map().collect()",
+                safe_candidate.resource_tradeoff_note,
+                DiagnosticFixConfidence.Safe,
+                7
+            ).with_replacement(file_path, loop_span, replacement_text, old_loop)
+
+            val tx_ok = EditTransaction.new("C:/dev/wt/wave2-lanes", "sha256:filter_map:v7")
+                .with_document(DocumentSnapshot.new(file_path, 7, "sha256:filter_map:v7", source_body))
+            val applied = tx_ok.apply(fix_candidate)
+            expect(applied.status.name()).to_equal("applied")
+            expect(applied.applied()).to_equal(true)
+            expect(applied.text_of(file_path)).to_contain(".filter(valid)")
+            expect(applied.text_of(file_path)).to_contain(".collect()")
+
+            step("Block aliasing candidate as PERF-FIX-001 DisabledCandidate and preserve original source (S03)")
+            val alias_obs = sys_all_13_obligations(false, false)
+            expect(sys_all_obligations_discharged(alias_obs)).to_equal(false)
+            val disabled_fix = fix_candidate.disabled("PERF-FIX-001: unmet obligations aliasing, collection_identity")
+            val blocked_res = tx_ok.apply(disabled_fix)
+            expect(blocked_res.status.name()).to_equal("disabled_candidate")
+            expect(blocked_res.applied()).to_equal(false)
+            expect(blocked_res.text_of(file_path)).to_equal(source_body)
+
+            step("Reject stale document version (I01), stale callee/source hash (I02), and overlapping batch spans (I07)")
+            val tx_stale_ver = EditTransaction.new("C:/dev/wt/wave2-lanes", "sha256:filter_map:v7")
+                .with_document(DocumentSnapshot.new(file_path, 8, "sha256:filter_map:v7", source_body))
+            expect(tx_stale_ver.apply(fix_candidate).status.name()).to_equal("stale_version")
+
+            val tx_stale_hash = EditTransaction.new("C:/dev/wt/wave2-lanes", "sha256:filter_map:v7")
+                .with_document(DocumentSnapshot.new(file_path, 7, "sha256:callee_changed:v8", source_body))
+            expect(tx_stale_hash.apply(fix_candidate).status.name()).to_equal("stale_hash")
+
+            val overlapping_candidate = fix_candidate.with_replacement(
+                file_path,
+                Span.new(loop_start + 4, loop_start + 18, 2, 5),
+                "var conflict = []",
+                byte_Text_slice_helper(source_body, loop_start + 4, loop_start + 18)
+            )
+            expect(tx_ok.apply(overlapping_candidate).status.name()).to_equal("overlapping_edits")
+
+    context "Scenario 3: Three-valued resource contracts and model-migration separation (C15, C16)":
+        it "distinguishes Verified, Refuted (PERF-CONTRACT-001), and Unproved (PERF-CONTRACT-002) without refuting O(n) from a loose O(n^2) upper bound":
+            step("Check a linear upper bound, a tight quadratic bound, and a loose quadratic upper bound against a linear contract")
+            val linear_ev = BoundEvidenceV1(
+                resource: PerfResourceDimension.Work,
+                expression: CostExprV1.Size("items", SizeMeasureKind.Length),
+                rendered_expression: "n",
+                relation: BoundRelation.UpperBound,
+                regime: BoundRegime.WorstCase,
+                model_id: "cost-v1",
+                assumptions: ["constant-cost step"],
+                status: AnalysisResultStatus.Complete,
+                origin: BoundOrigin.Inferred,
+                provenance_id: "p1"
+            )
+            val tight_quad_ev = BoundEvidenceV1(
+                resource: PerfResourceDimension.Work,
+                expression: CostExprV1.Multiply([
+                    CostExprV1.Size("items", SizeMeasureKind.Length),
+                    CostExprV1.Size("items", SizeMeasureKind.Length)
+                ]),
+                rendered_expression: "n*n",
+                relation: BoundRelation.TightBound,
+                regime: BoundRegime.WorstCase,
+                model_id: "cost-v1",
+                assumptions: ["all pairs visited"],
+                status: AnalysisResultStatus.Complete,
+                origin: BoundOrigin.Inferred,
+                provenance_id: "p2"
+            )
+            val loose_quad_ev = BoundEvidenceV1(
+                resource: PerfResourceDimension.Work,
+                expression: CostExprV1.Multiply([
+                    CostExprV1.Size("items", SizeMeasureKind.Length),
+                    CostExprV1.Size("items", SizeMeasureKind.Length)
+                ]),
+                rendered_expression: "n*n",
+                relation: BoundRelation.UpperBound,
+                regime: BoundRegime.WorstCase,
+                model_id: "cost-v1",
+                assumptions: ["monotone inner pointer invariant not discharged in T1"],
+                status: AnalysisResultStatus.Complete,
+                origin: BoundOrigin.Inferred,
+                provenance_id: "p3"
+            )
+
+            val verified_check = sys_verify_linear_contract("scan_once", linear_ev, false)
+            val refuted_check = sys_verify_linear_contract("all_pairs", tight_quad_ev, true)
+            val loose_unproved_check = sys_verify_linear_contract("two_pointer_linear", loose_quad_ev, false)
+
+            expect(verified_check.verdict.name()).to_equal("Verified")
+            expect(refuted_check.verdict.name()).to_equal("Refuted")
+            expect(refuted_check.rule_code).to_equal("PERF-CONTRACT-001")
+            expect(loose_unproved_check.verdict.name()).to_equal("Unproved")
+            expect(loose_unproved_check.rule_code).to_equal("PERF-CONTRACT-002")
+            expect(loose_unproved_check.explanation).to_contain("unproved")
+
+            step("Separate analyzer/model version migration from source complexity regression (C16)")
+            val base_summary = FunctionCostSummaryV1(
+                function_id: "process",
+                function_symbol_id: 500,
+                semantic_revision: "rev-10",
+                size_parameters: [SizeParameterV1(param_name: "items", measure: SizeMeasureKind.Length, canonical_var: "n")],
+                size_relations: [],
+                resource_bounds: [linear_ev],
+                output_cardinality: CostExprV1.Size("items", SizeMeasureKind.Length),
+                callback_cost_parameters: [],
+                effects_summary_id: "eff:pure",
+                assumptions: [],
+                unresolved_terms: [],
+                dependency_summary_hashes: [],
+                implementation_digest: "impl:v1",
+                provenance_root: "p1",
+                provenance_nodes: [],
+                analyzer_version: "perf-analyzer-v1",
+                model_version: "stdlib-cost-v1",
+                configuration_fingerprint: "cfg:default"
+            )
+            val model_upgraded_summary = FunctionCostSummaryV1(
+                function_id: "process",
+                function_symbol_id: 500,
+                semantic_revision: "rev-10",
+                size_parameters: base_summary.size_parameters,
+                size_relations: [],
+                resource_bounds: [loose_quad_ev],
+                output_cardinality: base_summary.output_cardinality,
+                callback_cost_parameters: [],
+                effects_summary_id: "eff:pure",
+                assumptions: [],
+                unresolved_terms: [],
+                dependency_summary_hashes: [],
+                implementation_digest: "impl:v1",
+                provenance_root: "p3",
+                provenance_nodes: [],
+                analyzer_version: "perf-analyzer-v1",
+                model_version: "stdlib-cost-v2",
+                configuration_fingerprint: "cfg:default"
+            )
+            val source_regressed_summary = FunctionCostSummaryV1(
+                function_id: "process",
+                function_symbol_id: 500,
+                semantic_revision: "rev-11",
+                size_parameters: base_summary.size_parameters,
+                size_relations: [],
+                resource_bounds: [tight_quad_ev],
+                output_cardinality: base_summary.output_cardinality,
+                callback_cost_parameters: [],
+                effects_summary_id: "eff:pure",
+                assumptions: [],
+                unresolved_terms: [],
+                dependency_summary_hashes: [],
+                implementation_digest: "impl:v1",
+                provenance_root: "p2",
+                provenance_nodes: [],
+                analyzer_version: "perf-analyzer-v1",
+                model_version: "stdlib-cost-v1",
+                configuration_fingerprint: "cfg:default"
+            )
+            expect(sys_classify_baseline_diff(base_summary, model_upgraded_summary)).to_equal("model_related")
+            expect(sys_classify_baseline_diff(base_summary, source_regressed_summary)).to_equal("source_related:PERF-COST-002")
+
+    context "Scenario 4: Behavioral trace equivalence for FilterMap, short-circuit search, fold seeds, and subtraction order (S01, S02, S07, S08, S12)":
+        it "preserves exact values, callback invocation order, short-circuit consumption, non-identity empty seeds, and left-to-right subtraction":
+            step("Compare imperative FilterMap loop against fused iter().filter().map().collect() trace")
+            val imp_trace = run_imperative_filter_map([1, 2, 3, 4])
+            val pipe_trace = run_pipeline_filter_map_collect([1, 2, 3, 4])
+            expect(pipe_trace.values).to_equal([20, 40])
+            expect(pipe_trace.values).to_equal(imp_trace.values)
+            expect(pipe_trace.events).to_equal(["pred:1", "pred:2", "map:2", "pred:3", "pred:4", "map:4"])
+            expect(pipe_trace.events).to_equal(imp_trace.events)
+
+            step("Verify short-circuit find stops immediately on the matching item without over-consuming (S12)")
+            val imp_find = run_imperative_find_first_even([3, 4, 5, 6])
+            val pipe_find = run_terminal_find_first_even([3, 4, 5, 6])
+            expect(pipe_find.consumed).to_equal(2)
+            expect(pipe_find.consumed).to_equal(imp_find.consumed)
+            expect(pipe_find.events).to_equal(["check:3", "check:4"])
+            expect(pipe_find.found.unwrap()).to_equal(4)
+
+            step("Preserve non-identity fold seed on empty input (S07) and sequential left-to-right subtraction order (S08)")
+            val empty_items: [i64] = []
+            expect(run_ordered_fold_sub(100, empty_items)).to_equal(100)
+            expect(run_ordered_fold_sub(100, empty_items)).to_equal(run_imperative_ordered_sub(100, empty_items))
+
+            val sub_items = [10, 20, 5]
+            val imp_sub = run_imperative_ordered_sub(100, sub_items)
+            val fold_sub = run_ordered_fold_sub(100, sub_items)
+            val wrong_reassoc = run_right_associated_sub(100, sub_items)
+            expect(imp_sub).to_equal(65)
+            expect(fold_sub).to_equal(65)
+            expect(wrong_reassoc).to_equal(105)
+
+fn byte_Text_slice_helper(s: text, start: i64, end: i64) -> text:
+    s.substring(start, end)

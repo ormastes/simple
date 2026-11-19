@@ -162,3 +162,19 @@ the previous incremental state. State is saved only after a successful build.
 - The remaining 20-lane allocation, slot mutexes, release-selector config,
   provenance/admission, and the manual-debug transport from the plan are not
   implemented yet.
+
+<!-- wave-f-perf-analysis-collection-refactoring-2026-11-19 -->
+
+## Performance Analyzer Bootstrap Staging and Feature-Off Isolation (2026-11-18)
+
+Canonical plan: [Simple Performance Analysis and Collection Refactoring](../../../03_plan/compiler/performance_analysis_and_collection_refactoring_2026-11-18.md) (`D11`, `D12`, §8.3–§8.4, §13.3, §16.2; guard spec: `test/05_perf/compiler/perf_analyzer_overhead_guard_spec.spl`).
+
+To keep early CPU bootstrap fast, deterministic, and free of solver or whole-program dependencies, the phase ladder enforces strict staging for `PERF-*` symbolic analysis and collection refactoring (`src/compiler/35.semantics/perf/`):
+
+| Ladder Stage | Performance Analyzer Policy |
+|--------------|-----------------------------|
+| **Rungs 1–3 (Phase 1 -> Phase 3 bootstrap)** | **Feature-off (`T0` existing facts only, `D12`, `I10`):** No mandatory symbolic cost analyzer, recurrence/AARA solver, analyzer plugin load, or source/MIR collection pipeline rewrite runs on the bootstrap compile path. Disabled analysis allocates zero `perf_analysis_contracts_v1` side tables and leaves emitted code identical. |
+| **Phase 4 full-CLI & CI validation** | Builds and tests `T1`/`T2` lint/LSP/MCP perf analyzers alongside debug/release artifacts, runs `simple perf compare --baseline --current` differential checks (`C16`), and executes `perf_analysis_collection_refactoring_spec.spl` and `perf_analyzer_overhead_guard_spec.spl`. |
+| **Optional `T3` deep analyzer plugins** | Packaged statically or loaded dynamically only through the audited plugin boundary (`I12`); a missing optional plugin reduces `T3` diagnostic coverage (`PERF-ANALYSIS-001`) without affecting normal compilation (`§14.3`). |
+
+File-based incremental caching remains the compiler scheduling boundary across all rungs: per-function `FunctionCostSummaryV1` caches operate inside semantic lint/query sessions without introducing a mandatory whole-project HIR/MIR phase barrier (§13.3).

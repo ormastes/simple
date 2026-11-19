@@ -5,13 +5,20 @@
 use std.tooling.easy_fix.types.{FixConfidence}
 use lazy compiler.tools.formatter.main.{make_formatter, check_formatting, format_file_inplace, fmt_read_file, print_diff}
 use compiler.tools.lint.main.{
-    Linter, LintCliPolicy, LintProfile, LintReadFileResult, lint_read_file,
+    Linter, LintCliPolicy, LintProfile, PerfLintProfile, LintReadFileResult, lint_read_file,
+    set_active_cli_perf_profile_v1,
     semantic_markdown_authority_option_v1,
     run_lint_source_with_linter_policy,
     simple_lint_verdict_name, simple_lint_human_summary,
     LintRunBudgetV1, LintEvaluatedRunReceiptV1, LintParsedChildStatsV1,
     lint_parse_child_stats_v1, lint_evaluate_run_receipt_v1,
     lint_baseline_config_for_policy_v1, lint_collect_exempted_rule_masks_v1}
+use compiler.tools.lint.rules.perf_analysis_rule.{
+    collect_perf_profile_findings_v1, perf_rule_explanation_v1,
+    format_perf_rule_explanation_text_v1, format_perf_rule_explanation_json_v1,
+    parse_git_status_changed_spl_files_v1
+}
+use lazy compiler.tools.fix.perf_safe_edit_service_v1.{commit_perf_safe_edits_for_file_v1}
 use lazy compiler.tools.fix.main.{collect_fixes_from_source, FixToolApplicator, apply_fixes_to_disk, fix_read_source}
 use lazy compiler.tools.fix.engine.{fix_filter_by_code, fix_validate, fix_outcome_diff, snapshots_from_sources}
 use lazy compiler.tools.fix.rules.impl_.lint_simd.{check_simd_opportunities, easyfix_id_text, easyfix_description_text}
@@ -37,12 +44,38 @@ use common.text.{escape_json}
 fn _lint_positive_int_ok(raw: text) -> bool:
     (raw.trim().to_i64() ?? 0) > 0
 
+fn _args_requests_json(args: [text]) -> bool:
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "--json" or a.lower() == "--format=json":
+            return true
+        if a == "--format" and i + 1 < args.len() and args[i + 1].lower() == "json":
+            return true
+        i = i + 1
+    false
+
+# Discover git-modified / untracked `.spl` files via `_cli_process_run` facade.
+# reason: CLI boundary helper returning relative `.spl` file paths
+@allow(primitive_api)
+pub fn discover_changed_spl_files_v1() -> Result<[text], text>:
+    val (stdout, stderr, code) = _cli_process_run("git", ["status", "--porcelain", "--untracked-files=all"])
+    if code != 0:
+        return Err("git status failed: " + stderr.trim())
+    var existing: [text] = []
+    for rel_path in parse_git_status_changed_spl_files_v1(stdout):
+        if file_exists(rel_path):
+            existing.push(rel_path)
+    Ok(existing)
+
 # reason: CLI option validator operates directly on raw argv text slices
 @allow(primitive_api)
 pub fn lint_option_error(args: [text]) -> text:
     var help_count = 0
     var other_count = 0
     var expect_profile_tier = false
+    var expect_format_val = false
+    var expect_explain_code = false
     var expect_semantic_value = false
     var expect_jobs_value = false
     var expect_budget_opt = ""
@@ -58,6 +91,19 @@ pub fn lint_option_error(args: [text]) -> text:
             continue
         if expect_jobs_value:
             expect_jobs_value = false
+            other_count = other_count + 1
+            continue
+        if expect_format_val:
+            val fl = arg.lower()
+            if fl != "json" and fl != "text":
+                return "unknown format: {arg} (expected 'json' or 'text')"
+            expect_format_val = false
+            other_count = other_count + 1
+            continue
+        if expect_explain_code:
+            if arg == "" or arg.starts_with("-"):
+                return "--explain requires a rule code"
+            expect_explain_code = false
             other_count = other_count + 1
             continue
         if arg == "--jobs":
@@ -109,7 +155,22 @@ pub fn lint_option_error(args: [text]) -> text:
         other_count = other_count + 1
         # --wm-lane enables the default-off WM/GUI/web/2D portable-lane
         # dependency boundary rule (wm_lane_boundary) and nothing else.
-        if arg == "--deny-all" or arg == "--warn-all" or arg == "--json" or arg == "--fix" or arg == "--fix-all" or arg == "--fix-dry-run" or arg == "--mcp-perf" or arg == "--all" or arg == "--simd" or arg == "--fast" or arg == "--wm-lane" or arg == "--gpu-2d-perf":
+        if arg == "--deny-all" or arg == "--warn-all" or arg == "--json" or arg == "--fix" or arg == "--fix-all" or arg == "--fix-dry-run" or arg == "--fix-safe" or arg == "--changed" or arg == "--mcp-perf" or arg == "--all" or arg == "--simd" or arg == "--fast" or arg == "--wm-lane" or arg == "--gpu-2d-perf":
+            continue
+        if arg == "--format":
+            expect_format_val = true
+            continue
+        if arg.starts_with("--format="):
+            val fv = arg.slice(9).lower()
+            if fv != "json" and fv != "text":
+                return "unknown format: {fv} (expected 'json' or 'text')"
+            continue
+        if arg == "--explain":
+            expect_explain_code = true
+            continue
+        if arg.starts_with("--explain="):
+            if arg.slice(10) == "":
+                return "--explain requires a rule code"
             continue
         # Assurance WARNING PHASE: drop every diagnostic this profile raises by
         # exactly one severity level (error -> warning), still reporting all of
@@ -128,6 +189,10 @@ pub fn lint_option_error(args: [text]) -> text:
             return "unknown option: {arg}"
     if expect_budget_opt != "":
         return "{expect_budget_opt} requires a positive integer"
+    if expect_format_val:
+        return "--format requires 'json' or 'text'"
+    if expect_explain_code:
+        return "--explain requires a rule code"
     if expect_semantic_value:
         return "semantic source authority requires a value"
     if expect_profile_tier:
@@ -207,9 +272,10 @@ fn lint_fanout_workers(requested: i64, files: [text]) -> i64:
 # reason: CLI command handler returns process exit code for raw argv
 @allow(primitive_api)
 pub fn run_lint_command(args: [text]) -> i64:
+    val req_json = _args_requests_json(args)
     val option_error = lint_option_error(args)
     if option_error != "":
-        if args.contains("--json"):
+        if req_json:
             print "{{\"type\":\"lint-error\",\"message\":\"{escape_json(option_error)}\"}"
         else:
             _cli_eprint("Error: {option_error}")
@@ -224,14 +290,13 @@ pub fn run_lint_command(args: [text]) -> i64:
         val _wp_set = rt_env_set(warning_phase_env_var_name(), "1")
 
     if args.contains("--help") or args.contains("-h"):
-        print "Usage: simple lint <file-or-directory> [more-targets...] [--deny-all] [--warn-all] [--profile=TIER] [--assurance-warning-phase] [--mcp-perf] [--simd] [--fast]"
+        print "Usage: simple lint <file-or-directory> [more-targets...] [--deny-all] [--warn-all] [--profile=TIER] [--changed] [--format=json|text] [--explain=RULE_CODE] [--fix-safe] [--assurance-warning-phase] [--mcp-perf] [--simd] [--fast]"
         return 0
 
     var files: [text] = []
     var run_mcp_perf = false
     var run_repo_gates = false
     var run_simd = false
-    val json_output = args.contains("--json")
     var normalized_args: [text] = []
     var child_opts: [text] = []
     var child_stats_mode = false
@@ -239,6 +304,8 @@ pub fn run_lint_command(args: [text]) -> i64:
     var expect_jobs_value = false
     var expect_budget_value = false
     var expect_profile_tier = false
+    var expect_format_val = false
+    var expect_explain_code = false
     var expect_semantic_value = false
     for arg in args:
         if expect_budget_value:
@@ -246,6 +313,17 @@ pub fn run_lint_command(args: [text]) -> i64:
             continue
         if expect_jobs_value:
             expect_jobs_value = false
+            continue
+        if expect_format_val:
+            val fl = arg.lower()
+            normalized_args.push("--format=" + fl)
+            if fl == "json":
+                child_opts.push("--json")
+            expect_format_val = false
+            continue
+        if expect_explain_code:
+            normalized_args.push("--explain=" + arg)
+            expect_explain_code = false
             continue
         if arg == "--jobs":
             expect_jobs_value = true
@@ -276,8 +354,25 @@ pub fn run_lint_command(args: [text]) -> i64:
         if arg == "--profile":
             expect_profile_tier = true
             continue
+        if arg == "--format":
+            expect_format_val = true
+            continue
+        if arg.starts_with("--format="):
+            val fv = arg.slice(9).lower()
+            normalized_args.push("--format=" + fv)
+            if fv == "json":
+                child_opts.push("--json")
+            continue
+        if arg == "--explain":
+            expect_explain_code = true
+            continue
+        if arg.starts_with("--explain="):
+            normalized_args.push(arg)
+            continue
         normalized_args.push(arg)
         if arg == "lint":
+            val _ = 0
+        elif arg == "--changed" or arg == "--fix-safe":
             val _ = 0
         elif arg == "--mcp-perf":
             run_mcp_perf = true
@@ -291,6 +386,53 @@ pub fn run_lint_command(args: [text]) -> i64:
             files.push(arg)
         else:
             child_opts.push(arg)
+
+    val lint_policy = LintCliPolicy.from_args(normalized_args)
+    val json_output = lint_policy.json_output
+    if lint_policy.error != "":
+        if json_output:
+            print "{{\"type\":\"lint-error\",\"message\":\"{escape_json(lint_policy.error)}\"}"
+        else:
+            _cli_eprint("Error: {lint_policy.error}")
+        return 2
+
+    if lint_policy.explain_code != "":
+        match perf_rule_explanation_v1(lint_policy.explain_code):
+            case Some(exp):
+                if json_output:
+                    print(format_perf_rule_explanation_json_v1(exp))
+                else:
+                    print(format_perf_rule_explanation_text_v1(exp))
+                return 0
+            case None:
+                val exp_err = "unknown rule code for --explain: " + lint_policy.explain_code
+                if json_output:
+                    print "{{\"type\":\"lint-error\",\"message\":\"{escape_json(exp_err)}\"}"
+                else:
+                    _cli_eprint("Error: {exp_err}")
+                return 2
+
+    var changed_filter_identities: {text: bool} = {}
+    if lint_policy.changed_only:
+        match discover_changed_spl_files_v1():
+            case Err(git_err):
+                if json_output:
+                    print "{{\"type\":\"lint-error\",\"message\":\"{escape_json(git_err)}\"}"
+                else:
+                    _cli_eprint("Error: {git_err}")
+                return 1
+            case Ok(changed_paths):
+                if files.len() == 0:
+                    if changed_paths.len() == 0:
+                        if json_output:
+                            print "{{\"type\":\"lint-summary\",\"status\":\"clean\",\"failed_files\":0,\"not_linted_files\":0,\"completed_files\":0,\"completeness\":\"not_applicable\"}"
+                        else:
+                            print "Lint passed: 0 changed Simple file(s)"
+                        return 0
+                    files = changed_paths
+                else:
+                    for cp in changed_paths:
+                        changed_filter_identities[source_path_identity(cp)] = true
 
     var exit_code = 0
     if json_output and (run_repo_gates or run_mcp_perf):
@@ -381,18 +523,26 @@ pub fn run_lint_command(args: [text]) -> i64:
             failed_files = failed_files + 1
             hard_failed_files = hard_failed_files + 1u32
 
+    if lint_policy.changed_only and changed_filter_identities.len() >= 0 and files.len() > 0:
+        if changed_filter_identities.len() > 0:
+            var filtered_changed: [text] = []
+            for lf in lint_files:
+                if changed_filter_identities.contains_key(source_path_identity(lf)):
+                    filtered_changed.push(lf)
+            lint_files = filtered_changed
+            if lint_files.len() == 0:
+                if json_output:
+                    print "{{\"type\":\"lint-summary\",\"status\":\"clean\",\"failed_files\":0,\"not_linted_files\":0,\"completed_files\":0,\"completeness\":\"not_applicable\"}"
+                else:
+                    print "Lint passed: 0 changed Simple file(s) matched targets"
+                return 0
+
+    set_active_cli_perf_profile_v1(lint_policy.perf_profile)
     # Command-scoped linter and invariant CLI policy parsed once per run.
     var lint_session = Linter.new(false)
-    val lint_policy = LintCliPolicy.from_args(normalized_args)
-    if lint_policy.error != "":
-        if json_output:
-            print "{{\"type\":\"lint-error\",\"message\":\"{escape_json(lint_policy.error)}\"}"
-        else:
-            _cli_eprint("Error: {lint_policy.error}")
-        return 2
     # Fan out one child per file under per-child timeout; exit 124 marks timeout.
     val baseline_cfg = lint_baseline_config_for_policy_v1(lint_policy)
-    val fan_exe = if child_stats_mode or lint_files.len() < 2: "" else: cli_kernel_executable_path()
+    val fan_exe = if child_stats_mode or lint_policy.fix_safe or lint_files.len() < 2: "" else: cli_kernel_executable_path()
     val fan_workers = if fan_exe == "": 1 else: lint_fanout_workers(jobs_requested, lint_files)
     var serial_files: [text] = lint_files
     if fan_workers > 1:
@@ -514,6 +664,24 @@ pub fn run_lint_command(args: [text]) -> i64:
             if file_exit != 3:
                 hard_failed_files = hard_failed_files + 1u32
 
+        if lint_policy.fix_safe and file_path.ends_with(".spl") and file_exit != 3:
+            val safe_prof = match lint_policy.perf_profile:
+                case Some(pp): pp
+                case None: PerfLintProfile.Perf
+            val perf_findings = collect_perf_profile_findings_v1(file_path, source, safe_prof)
+            match commit_perf_safe_edits_for_file_v1(file_path, source, perf_findings):
+                case Ok(fix_res):
+                    if json_output:
+                        print "{{\"type\":\"lint-safe-fix-summary\",\"file\":\"{escape_json(file_path)}\",\"applied\":{fix_res.applied_action_ids.len()},\"skipped\":{fix_res.skipped_action_ids.len()}}"
+                    elif fix_res.applied_action_ids.len() > 0 or fix_res.skipped_action_ids.len() > 0:
+                        print "Safe-fix summary for {file_path}: applied={fix_res.applied_action_ids.len()}, skipped={fix_res.skipped_action_ids.len()}"
+                case Err(fix_err):
+                    if json_output:
+                        print "{{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"{escape_json(fix_err)}\"}"
+                    else:
+                        _cli_eprint("Error: {fix_err}")
+                    exit_code = 1
+
         if run_simd:
             val simd_fixes = check_simd_opportunities(source, file_path)
             var si = 0
@@ -534,6 +702,7 @@ pub fn run_lint_command(args: [text]) -> i64:
     if child_stats_mode:
         val bud_flag = if budget_exhausted: 1 else: 0
         print "{LINT_CHILD_STATS_PREFIX} {diagnostic_files} {error_files} {warning_files} {completed_files} {not_linted_files} {failed_files} {exit_code} {exempt_mask_lo} {exempt_mask_hi} {timed_out_files} {bud_flag}"
+        set_active_cli_perf_profile_v1(None)
         return exit_code
 
     val receipt = cli_lint_evaluate_run_receipt_v1(
@@ -543,6 +712,7 @@ pub fn run_lint_command(args: [text]) -> i64:
         diagnostic_files, error_files, warning_files,
         exempt_mask_lo, exempt_mask_hi, budget_exhausted, lint_files.join("|")
     )
+    set_active_cli_perf_profile_v1(None)
     if receipt.exit_code != 0 and exit_code == 0:
         exit_code = receipt.exit_code
     val completeness = receipt.completeness

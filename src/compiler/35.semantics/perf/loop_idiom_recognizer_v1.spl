@@ -1,0 +1,793 @@
+# Lightweight Loop-Idiom Recognizer V1 (§6, D01, D05, D06, D09)
+#
+# Single bounded bottom-up pass (linear in node count, zero repeated nested-subtree
+# rescans) over typed HIR functions/blocks and source-anchored loop region trees
+# for the six conservative families: Map, Filter, FilterMap, OrderedFold (incl.
+# conditional count), AnySearch, and AllSearch / FindSearch (preserving fallback).
+# Matches ONLY resolved SymbolId identities in CollectionOperationRegistry (S13).
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, MethodResolution}
+use compiler.hir.hir_definitions.{
+    HirFunction, HirParam, HirBlock, HirStmt, HirStmtKind,
+    HirExpr, HirExprKind, HirCallArg, HirBinOp, HirUnaryOp, HirAssignOp
+}
+use compiler.semantics.perf_facts.types.{
+    CollectionOperationRegistry, CollectionOperationSummary,
+    HirPerfReceiverKind, HirPerfOperationKind
+}
+use compiler.semantics.perf_facts.collector.{
+    hir_perf_receiver_kind, hir_perf_receiver_matches,
+    hir_perf_resolved_method_symbol
+}
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    PerfAnalysisTier, LoopIdiomFamily, SafetyObligationKind,
+    SafetyObligationStatusV1, PerfFixKind, PerfFixApplicability,
+    LoopIdiomCandidateV1, PerfFindingRecordV1
+}
+
+fn eager_equivalent_tradeoff_note_v1() -> text:
+    "Equivalent refactor available; modeled traversal cost unchanged; result materialization still required; runtime improvement has not been established."
+
+fn perf_style_default_severity_v1() -> text:
+    "hint"
+
+enum SourceLoopBodyShapeV1:
+    BuilderAppend(builder_var: text, transform_expr: text, is_identity_item: bool)
+    ConditionalBuilderAppend(builder_var: text, predicate_expr: text, transform_expr: text, is_identity_item: bool)
+    AccumulatorStep(acc_var: text, seed_expr: text, step_expr: text)
+    ConditionalCountStep(acc_var: text, seed_expr: text, predicate_expr: text, increment_expr: text)
+    EarlyReturnBool(predicate_expr: text, early_return_value: bool, fallback_value: bool, predicate_is_negated: bool)
+    EarlyReturnFind(predicate_expr: text, hit_expr: text, fallback_expr: text)
+    Unsupported(reason: text)
+
+struct SourceLoopRegionNodeV1:
+    region_id: text
+    function_id: text
+    semantic_revision: text
+    dependency_fingerprint: text
+    file: text
+    source_span: Span
+    expected_old_text: text
+    iterator_source_expr: text
+    induction_var: text
+    receiver_kind: HirPerfReceiverKind
+    operation_method_name: text
+    resolved_operation_symbol_id: Option<i64>
+    is_loop_region: bool
+    body_shape: SourceLoopBodyShapeV1
+    children: [SourceLoopRegionNodeV1]
+
+struct RecognizedLoopIdiomV1:
+    region_id: text
+    function_id: text
+    semantic_revision: text
+    dependency_fingerprint: text
+    file: text
+    source_span: Span
+    family: LoopIdiomFamily
+    iterator_source_expr: text
+    induction_var: text
+    target_binding: text
+    predicate_preview: Option<text>
+    transform_preview: Option<text>
+    seed_preview: Option<text>
+    step_preview: Option<text>
+    fallback_preview: Option<text>
+    replacement_preview: text
+    expected_old_text: text
+    requires_eager_collect: bool
+    has_terminal_consumer: bool
+    resolved_operation_symbol_id: Option<i64>
+    body_references_target_binding: bool
+    source_aliases_target_binding: bool
+    has_inner_return: bool
+    has_break_or_continue: bool
+    has_throw_or_try: bool
+    has_await_or_yield: bool
+
+struct LoopRecognitionReportV1:
+    raw_idioms: [RecognizedLoopIdiomV1]
+    candidates: [LoopIdiomCandidateV1]
+    findings: [PerfFindingRecordV1]
+    nodes_visited: i64
+    loop_regions_summarized: i64
+    rejected_reasons: [text]
+
+struct _SourceWalkFrameV1:
+    expanded: bool
+    node: SourceLoopRegionNodeV1
+
+fn _pending_obligations_for_recognition() -> [SafetyObligationStatusV1]:
+    val kinds: [SafetyObligationKind] = [
+        SafetyObligationKind.CollectionIdentity, SafetyObligationKind.Aliasing,
+        SafetyObligationKind.Mutation, SafetyObligationKind.EvaluationOrder,
+        SafetyObligationKind.TimingEagerness, SafetyObligationKind.FailurePrefixCleanup,
+        SafetyObligationKind.ControlFlowExits, SafetyObligationKind.CaptureLifetime,
+        SafetyObligationKind.NumericSemantics, SafetyObligationKind.OutputShapeDuplicates,
+        SafetyObligationKind.RuntimeEffects, SafetyObligationKind.ResourceRestrictions,
+        SafetyObligationKind.RevisionCurrency
+    ]
+    var out: [SafetyObligationStatusV1] = []
+    for k in kinds:
+        out.push(SafetyObligationStatusV1(kind: k, discharged: false, reason: "awaiting safety evaluation"))
+    out
+
+fn _make_idiom(
+    region_id: text, function_id: text, semantic_revision: text, dependency_fingerprint: text, file: text, source_span: Span, family: LoopIdiomFamily, iterator_source_expr: text, induction_var: text, target_binding: text, predicate_preview: Option<text>, transform_preview: Option<text>, seed_preview: Option<text>, step_preview: Option<text>, fallback_preview: Option<text>, replacement_preview: text, expected_old_text: text, requires_eager_collect: bool, resolved_operation_symbol_id: Option<i64>, body_references_target_binding: bool, source_aliases_target_binding: bool, has_inner_return: bool, has_break_or_continue: bool, has_throw_or_try: bool, has_await_or_yield: bool
+) -> RecognizedLoopIdiomV1:
+    RecognizedLoopIdiomV1(region_id: region_id, function_id: function_id, semantic_revision: semantic_revision, dependency_fingerprint: dependency_fingerprint, file: file, source_span: source_span, family: family, iterator_source_expr: iterator_source_expr, induction_var: induction_var, target_binding: target_binding, predicate_preview: predicate_preview, transform_preview: transform_preview, seed_preview: seed_preview, step_preview: step_preview, fallback_preview: fallback_preview, replacement_preview: replacement_preview, expected_old_text: expected_old_text, requires_eager_collect: requires_eager_collect, has_terminal_consumer: true, resolved_operation_symbol_id: resolved_operation_symbol_id, body_references_target_binding: body_references_target_binding, source_aliases_target_binding: source_aliases_target_binding, has_inner_return: has_inner_return, has_break_or_continue: has_break_or_continue, has_throw_or_try: has_throw_or_try, has_await_or_yield: has_await_or_yield)
+
+fn _admitted_array_append_symbol(
+    symbol_opt: Option<i64>, receiver_kind: HirPerfReceiverKind,
+    method_spelling: text, registry: CollectionOperationRegistry
+) -> Result<i64, text>:
+    if not registry.is_structurally_valid():
+        return Err("collection operation registry is invalid; refusing spelling match for '" + method_spelling + "'")
+    val sym_id = match symbol_opt:
+        case Some(id): id
+        case None: return Err("operation '" + method_spelling + "' lacks a resolved SymbolId (S13)")
+    if not registry.contains(sym_id):
+        return Err("resolved SymbolId " + sym_id.to_text() + " for '" + method_spelling + "' is not admitted in CollectionOperationRegistry (S13)")
+    val summary_opt = registry.lookup(sym_id)
+    if not summary_opt.?:
+        return Err("resolved SymbolId " + sym_id.to_text() + " lookup failed in registry (S13)")
+    val summary = summary_opt.unwrap()
+    if summary.operation != HirPerfOperationKind.Append:
+        return Err("resolved SymbolId " + sym_id.to_text() + " is not HirPerfOperationKind.Append (S13)")
+    if not hir_perf_receiver_matches(summary.expected_receiver, receiver_kind):
+        return Err("receiver kind mismatch for resolved SymbolId " + sym_id.to_text() + " (S13)")
+    if summary.explicit_argument_count != 1 or not summary.preserves_order or summary.evidence_receipt == "":
+        return Err("admitted append summary contract incomplete for SymbolId " + sym_id.to_text())
+    Ok(sym_id)
+
+fn _build_candidate_and_finding(idiom: RecognizedLoopIdiomV1) -> (LoopIdiomCandidateV1, PerfFindingRecordV1):
+    val action_id = "perf.loop_idiom." + idiom.family.name() + ":" + idiom.function_id + ":" + idiom.region_id
+    val note = eager_equivalent_tradeoff_note_v1()
+    val cand = LoopIdiomCandidateV1(
+        rule_id: "PERF-STYLE-001", action_id: action_id, function_id: idiom.function_id,
+        semantic_revision: idiom.semantic_revision, dependency_fingerprint: idiom.dependency_fingerprint,
+        file: idiom.file, source_span: idiom.source_span, family: idiom.family,
+        replacement_preview: idiom.replacement_preview, expected_old_text: idiom.expected_old_text,
+        applicability: PerfFixApplicability.ReviewRequired, fix_kind: PerfFixKind.Refactor,
+        obligations: _pending_obligations_for_recognition(), resource_tradeoff_note: note,
+        disabled_reason: None
+    )
+    val finding = PerfFindingRecordV1(
+        rule_code: "PERF-STYLE-001",
+        stable_occurrence_id: "PERF-STYLE-001:" + idiom.function_id + ":" + idiom.region_id,
+        function_id: idiom.function_id, file: idiom.file, primary_span: idiom.source_span,
+        related_locations: [], message: note, evidence: None, tier: PerfAnalysisTier.T1FastLocal,
+        semantic_fingerprint: idiom.semantic_revision + ":" + idiom.dependency_fingerprint,
+        fix_candidates: [cand]
+    )
+    (cand, finding)
+
+fn _make_src_idiom(
+    node: SourceLoopRegionNodeV1, family: LoopIdiomFamily, src: text, ind: text,
+    target_binding: text, pred: Option<text>, tf: Option<text>, seed: Option<text>,
+    step: Option<text>, fb: Option<text>, repl: text, eager: bool, sym: Option<i64>,
+    refs_target: bool, aliases_target: bool, inner_ret: bool
+) -> RecognizedLoopIdiomV1:
+    _make_idiom(
+        node.region_id, node.function_id, node.semantic_revision, node.dependency_fingerprint,
+        node.file, node.source_span, family, src, ind, target_binding, pred, tf, seed, step,
+        fb, repl, node.expected_old_text, eager, sym, refs_target, aliases_target, inner_ret,
+        false, false, false
+    )
+
+fn _recognize_single_source_node(
+    node: SourceLoopRegionNodeV1, registry: CollectionOperationRegistry
+) -> Result<RecognizedLoopIdiomV1, text>:
+    val src = node.iterator_source_expr.trim()
+    val ind = node.induction_var.trim()
+    if src == "" or ind == "":
+        return Err("loop region missing iterator source or induction variable")
+    match node.body_shape:
+        case SourceLoopBodyShapeV1.BuilderAppend(builder_var, transform_expr, _):
+            val admitted_id = match _admitted_array_append_symbol(node.resolved_operation_symbol_id, node.receiver_kind, node.operation_method_name, registry):
+                case Ok(id): id
+                case Err(e): return Err(e)
+            val preview = "{builder_var} = {src}.iter().map({ind} -> {transform_expr}).collect()"
+            Ok(_make_src_idiom(node, LoopIdiomFamily.Map, src, ind, builder_var, None, Some(transform_expr), None, None, None, preview, true, Some(admitted_id), transform_expr.contains(builder_var), builder_var == src, false))
+
+        case SourceLoopBodyShapeV1.ConditionalBuilderAppend(builder_var, predicate_expr, transform_expr, is_identity_item):
+            val admitted_id = match _admitted_array_append_symbol(node.resolved_operation_symbol_id, node.receiver_kind, node.operation_method_name, registry):
+                case Ok(id): id
+                case Err(e): return Err(e)
+            val is_filter_only = is_identity_item or transform_expr.trim() == ind
+            val fam = if is_filter_only: LoopIdiomFamily.Filter else: LoopIdiomFamily.FilterMap
+            val preview = if is_filter_only:
+                "{builder_var} = {src}.iter().filter({ind} -> {predicate_expr}).collect()"
+            else:
+                "{builder_var} = {src}.iter().filter({ind} -> {predicate_expr}).map({ind} -> {transform_expr}).collect()"
+            val tf_opt = if is_filter_only: None else: Some(transform_expr)
+            val refs_t = predicate_expr.contains(builder_var) or transform_expr.contains(builder_var)
+            Ok(_make_src_idiom(node, fam, src, ind, builder_var, Some(predicate_expr), tf_opt, None, None, None, preview, true, Some(admitted_id), refs_t, builder_var == src, false))
+
+        case SourceLoopBodyShapeV1.AccumulatorStep(acc_var, seed_expr, step_expr):
+            if node.operation_method_name != "":
+                val sym_id = match node.resolved_operation_symbol_id:
+                    case Some(id): id
+                    case None: return Err("accumulator method '" + node.operation_method_name + "' lacks resolved SymbolId (S13)")
+                if not registry.contains(sym_id):
+                    return Err("accumulator method '" + node.operation_method_name + "' SymbolId " + sym_id.to_text() + " is not admitted in registry (S13)")
+            val preview = "{acc_var} = {src}.iter().fold({seed_expr}, ({acc_var}, {ind}) -> {step_expr})"
+            Ok(_make_src_idiom(node, LoopIdiomFamily.OrderedFold, src, ind, acc_var, None, None, Some(seed_expr), Some(step_expr), None, preview, false, node.resolved_operation_symbol_id, true, acc_var == src, false))
+
+        case SourceLoopBodyShapeV1.ConditionalCountStep(acc_var, seed_expr, predicate_expr, increment_expr):
+            val step = "if {predicate_expr}: {acc_var} + {increment_expr} else: {acc_var}"
+            val preview = "{acc_var} = {src}.iter().fold({seed_expr}, ({acc_var}, {ind}) -> {step})"
+            Ok(_make_src_idiom(node, LoopIdiomFamily.OrderedFold, src, ind, acc_var, Some(predicate_expr), None, Some(seed_expr), Some(step), None, preview, false, node.resolved_operation_symbol_id, true, acc_var == src, false))
+
+        case SourceLoopBodyShapeV1.EarlyReturnBool(predicate_expr, early_return_value, fallback_value, predicate_is_negated):
+            if early_return_value and not fallback_value:
+                val pred = if predicate_is_negated: "not ({predicate_expr})" else: predicate_expr
+                return Ok(_make_src_idiom(node, LoopIdiomFamily.AnySearch, src, ind, "", Some(pred), None, None, None, Some("false"), "return {src}.iter().any({ind} -> {pred})", false, None, false, false, true))
+            if (not early_return_value) and fallback_value:
+                val pred = if predicate_is_negated: predicate_expr else: "not ({predicate_expr})"
+                return Ok(_make_src_idiom(node, LoopIdiomFamily.AllSearch, src, ind, "", Some(pred), None, None, None, Some("true"), "return {src}.iter().all({ind} -> {pred})", false, None, false, false, true))
+            Err("boolean early-return pattern has non-complementary return values")
+
+        case SourceLoopBodyShapeV1.EarlyReturnFind(predicate_expr, hit_expr, fallback_expr):
+            val preview = "match {src}.iter().find({ind} -> {predicate_expr}): case Some({ind}): {hit_expr} case None: {fallback_expr}"
+            Ok(_make_src_idiom(node, LoopIdiomFamily.FindSearch, src, ind, "", Some(predicate_expr), Some(hit_expr), None, None, Some(fallback_expr), preview, false, None, false, false, true))
+
+        case SourceLoopBodyShapeV1.Unsupported(reason):
+            Err(reason)
+
+fn recognize_source_loop_tree_v1(
+    root: SourceLoopRegionNodeV1, registry: CollectionOperationRegistry
+) -> LoopRecognitionReportV1:
+    var stack: [_SourceWalkFrameV1] = [_SourceWalkFrameV1(expanded: false, node: root)]
+    var raw_idioms: [RecognizedLoopIdiomV1] = []
+    var candidates: [LoopIdiomCandidateV1] = []
+    var findings: [PerfFindingRecordV1] = []
+    var rejected: [text] = []
+    var visited: i64 = 0
+    var loops_summarized: i64 = 0
+    while stack.len() > 0:
+        if visited >= 16384:
+            rejected.push("recognition traversal node budget exceeded")
+            break
+        val top = stack.pop()
+        if not top.expanded:
+            stack.push(_SourceWalkFrameV1(expanded: true, node: top.node))
+            var idx = top.node.children.len() - 1
+            while idx >= 0:
+                stack.push(_SourceWalkFrameV1(expanded: false, node: top.node.children[idx]))
+                idx = idx - 1
+        else:
+            visited = visited + 1
+            if top.node.is_loop_region:
+                loops_summarized = loops_summarized + 1
+                match _recognize_single_source_node(top.node, registry):
+                    case Ok(idiom):
+                        raw_idioms.push(idiom)
+                        val built = _build_candidate_and_finding(idiom)
+                        candidates.push(built.0)
+                        findings.push(built.1)
+                    case Err(reason):
+                        rejected.push(reason)
+    LoopRecognitionReportV1(
+        raw_idioms: raw_idioms, candidates: candidates, findings: findings,
+        nodes_visited: visited, loop_regions_summarized: loops_summarized, rejected_reasons: rejected
+    )
+
+# ============================================================================
+# Typed HIR Single-Pass Bottom-Up Summarizer
+# ============================================================================
+
+struct _HirMethodShallowV1:
+    valid: bool
+    recv_var_id: i64
+    recv_var_name: text
+    recv_kind: HirPerfReceiverKind
+    method_name: text
+    resolved_symbol_id: Option<i64>
+    arg_count: i64
+    arg0_var_id: i64
+    arg0_preview: text
+    arg0_refs: [i64]
+
+struct _HirAssignShallowV1:
+    valid: bool
+    target_var_id: i64
+    target_var_name: text
+    op_symbol: text
+    rhs_preview: text
+    rhs_refs: [i64]
+
+struct _HirReturnShallowV1:
+    valid: bool
+    is_bool_lit: bool
+    bool_value: bool
+    value_preview: text
+
+struct _HirIfShallowV1:
+    valid: bool
+    cond_preview: text
+    cond_is_negated: bool
+    cond_inner_preview: text
+    cond_refs: [i64]
+    then_method: _HirMethodShallowV1
+    then_assign: _HirAssignShallowV1
+    then_return: _HirReturnShallowV1
+
+struct _HirForShallowV1:
+    valid: bool
+    span: Span
+    induction_id: i64
+    induction_name: text
+    iter_var_id: i64
+    iter_preview: text
+    iter_receiver_kind: HirPerfReceiverKind
+    body_method: _HirMethodShallowV1
+    body_assign: _HirAssignShallowV1
+    body_if: _HirIfShallowV1
+    body_has_break_continue: bool
+    body_has_throw_try: bool
+    body_has_await_yield: bool
+
+struct _HirLetShallowV1:
+    valid: bool
+    sym_id: i64
+    var_name: text
+    is_empty_array_lit: bool
+    init_preview: text
+    span: Span
+
+struct _HirNodeSummaryV1:
+    preview: text
+    var_id: i64
+    var_name: text
+    is_empty_array_lit: bool
+    is_bool_lit: bool
+    bool_value: bool
+    refs: [i64]
+    has_return: bool
+    has_break_continue: bool
+    has_throw_try: bool
+    has_await_yield: bool
+    let_info: _HirLetShallowV1
+    assign_info: _HirAssignShallowV1
+    method_info: _HirMethodShallowV1
+    return_info: _HirReturnShallowV1
+    if_info: _HirIfShallowV1
+    for_info: _HirForShallowV1
+
+class _HirRecognitionWalkStateV1:
+    function_id: text
+    semantic_revision: text
+    dependency_fingerprint: text
+    file: text
+    registry: CollectionOperationRegistry
+    symbol_names: Dict<i64, text>
+    nodes_visited: i64
+    loop_regions_summarized: i64
+    raw_idioms: [RecognizedLoopIdiomV1]
+    candidates: [LoopIdiomCandidateV1]
+    findings: [PerfFindingRecordV1]
+    rejected_reasons: [text]
+    ordinal: i64
+
+fn _empty_method_shallow() -> _HirMethodShallowV1:
+    _HirMethodShallowV1(valid: false, recv_var_id: -1, recv_var_name: "", recv_kind: HirPerfReceiverKind.Unknown("none"), method_name: "", resolved_symbol_id: None, arg_count: 0, arg0_var_id: -1, arg0_preview: "", arg0_refs: [])
+
+fn _empty_assign_shallow() -> _HirAssignShallowV1:
+    _HirAssignShallowV1(valid: false, target_var_id: -1, target_var_name: "", op_symbol: "", rhs_preview: "", rhs_refs: [])
+
+fn _empty_return_shallow() -> _HirReturnShallowV1:
+    _HirReturnShallowV1(valid: false, is_bool_lit: false, bool_value: false, value_preview: "")
+
+fn _empty_if_shallow() -> _HirIfShallowV1:
+    _HirIfShallowV1(valid: false, cond_preview: "", cond_is_negated: false, cond_inner_preview: "", cond_refs: [], then_method: _empty_method_shallow(), then_assign: _empty_assign_shallow(), then_return: _empty_return_shallow())
+
+fn _empty_for_shallow() -> _HirForShallowV1:
+    _HirForShallowV1(valid: false, span: Span.empty(), induction_id: -1, induction_name: "", iter_var_id: -1, iter_preview: "", iter_receiver_kind: HirPerfReceiverKind.Unknown("none"), body_method: _empty_method_shallow(), body_assign: _empty_assign_shallow(), body_if: _empty_if_shallow(), body_has_break_continue: false, body_has_throw_try: false, body_has_await_yield: false)
+
+fn _empty_let_shallow() -> _HirLetShallowV1:
+    _HirLetShallowV1(valid: false, sym_id: -1, var_name: "", is_empty_array_lit: false, init_preview: "", span: Span.empty())
+
+fn _base_expr_summary(preview: text) -> _HirNodeSummaryV1:
+    _HirNodeSummaryV1(preview: preview, var_id: -1, var_name: "", is_empty_array_lit: false, is_bool_lit: false, bool_value: false, refs: [], has_return: false, has_break_continue: false, has_throw_try: false, has_await_yield: false, let_info: _empty_let_shallow(), assign_info: _empty_assign_shallow(), method_info: _empty_method_shallow(), return_info: _empty_return_shallow(), if_info: _empty_if_shallow(), for_info: _empty_for_shallow())
+
+fn _merge_refs_bounded(a: [i64], b: [i64]) -> [i64]:
+    var out: [i64] = []
+    for x in a:
+        if out.len() < 32 and not out.contains(x): out.push(x)
+    for y in b:
+        if out.len() < 32 and not out.contains(y): out.push(y)
+    out
+
+fn _binop_symbol(op: HirBinOp) -> text:
+    match op:
+        case HirBinOp.Add: "+"
+        case HirBinOp.Sub: "-"
+        case HirBinOp.Mul: "*"
+        case HirBinOp.Div: "/"
+        case HirBinOp.Mod: "%"
+        case HirBinOp.Eq: "=="
+        case HirBinOp.NotEq: "!="
+        case HirBinOp.Lt: "<"
+        case HirBinOp.LtEq: "<="
+        case HirBinOp.Gt: ">"
+        case HirBinOp.GtEq: ">="
+        case HirBinOp.And: "and"
+        case HirBinOp.Or: "or"
+        case HirBinOp.Concat: "++"
+        case _: "op"
+
+fn _assign_op_symbol(op_opt: Option<HirAssignOp>) -> text:
+    match op_opt:
+        case None: ""
+        case Some(op):
+            match op:
+                case HirAssignOp.Add: "+"
+                case HirAssignOp.Sub: "-"
+                case HirAssignOp.Mul: "*"
+                case HirAssignOp.Div: "/"
+                case _: "op"
+
+fn _resolve_var_name(state: _HirRecognitionWalkStateV1, sym_id: i64, fallback: text) -> text:
+    if state.symbol_names.contains_key(sym_id): state.symbol_names[sym_id] else: fallback
+
+fn _absorb_expr_flags(dst: _HirNodeSummaryV1, child: _HirNodeSummaryV1) -> _HirNodeSummaryV1:
+    var out = dst
+    out.refs = _merge_refs_bounded(out.refs, child.refs)
+    out.has_return = out.has_return or child.has_return
+    out.has_break_continue = out.has_break_continue or child.has_break_continue
+    out.has_throw_try = out.has_throw_try or child.has_throw_try
+    out.has_await_yield = out.has_await_yield or child.has_await_yield
+    out
+
+fn _summarize_expr_once(expr: HirExpr, state: _HirRecognitionWalkStateV1, depth: i64) -> _HirNodeSummaryV1:
+    state.nodes_visited = state.nodes_visited + 1
+    if depth > 192:
+        return _base_expr_summary("...")
+    match expr.kind:
+        case HirExprKind.IntLit(v, _):
+            return _base_expr_summary(v.to_text())
+        case HirExprKind.BoolLit(b):
+            var s = _base_expr_summary(if b: "true" else: "false")
+            s.is_bool_lit = true
+            s.bool_value = b
+            return s
+        case HirExprKind.StringLit(v, _):
+            return _base_expr_summary("\"" + v + "\"")
+        case HirExprKind.UnitLit:
+            return _base_expr_summary("()")
+        case HirExprKind.Var(sym):
+            val nm = _resolve_var_name(state, sym.id, "v" + sym.id.to_text())
+            var s = _base_expr_summary(nm)
+            s.var_id = sym.id
+            s.var_name = nm
+            s.refs = [sym.id]
+            return s
+        case HirExprKind.NamedVar(sym, name):
+            state.symbol_names[sym.id] = name
+            var s = _base_expr_summary(name)
+            s.var_id = sym.id
+            s.var_name = name
+            s.refs = [sym.id]
+            return s
+        case HirExprKind.Field(base, field, _):
+            val bs = _summarize_expr_once(base, state, depth + 1)
+            return _absorb_expr_flags(_base_expr_summary(bs.preview + "." + field), bs)
+        case HirExprKind.ArrayLit(elements, _):
+            var parts: [text] = []
+            var s = _base_expr_summary("")
+            for el in elements:
+                val es = _summarize_expr_once(el, state, depth + 1)
+                parts.push(es.preview)
+                s = _absorb_expr_flags(s, es)
+            s.preview = "[" + parts.join(", ") + "]"
+            s.is_empty_array_lit = elements.len() == 0
+            return s
+        case HirExprKind.Unary(op, operand):
+            val os = _summarize_expr_once(operand, state, depth + 1)
+            val is_not = match op:
+                case HirUnaryOp.Not: true
+                case _: false
+            var s = _absorb_expr_flags(_base_expr_summary(if is_not: "not (" + os.preview + ")" else: "-" + os.preview), os)
+            if is_not:
+                var neg_if = _empty_if_shallow()
+                neg_if.cond_is_negated = true
+                neg_if.cond_inner_preview = os.preview
+                s.if_info = neg_if
+            return s
+        case HirExprKind.Binary(op, left, right):
+            val ls = _summarize_expr_once(left, state, depth + 1)
+            val rs = _summarize_expr_once(right, state, depth + 1)
+            return _absorb_expr_flags(_absorb_expr_flags(_base_expr_summary(ls.preview + " " + _binop_symbol(op) + " " + rs.preview), ls), rs)
+        case HirExprKind.Call(callee, args, _):
+            val cs = _summarize_expr_once(callee, state, depth + 1)
+            var arg_texts: [text] = []
+            var s = _absorb_expr_flags(_base_expr_summary(""), cs)
+            for a in args:
+                val as_ = _summarize_expr_once(a.value, state, depth + 1)
+                arg_texts.push(as_.preview)
+                s = _absorb_expr_flags(s, as_)
+            s.preview = cs.preview + "(" + arg_texts.join(", ") + ")"
+            return s
+        case HirExprKind.MethodCall(receiver, method, args, resolution):
+            val rs = _summarize_expr_once(receiver, state, depth + 1)
+            var arg_texts: [text] = []
+            var s = _absorb_expr_flags(_base_expr_summary(""), rs)
+            var arg0_id: i64 = -1
+            var arg0_prev = ""
+            var arg0_refs: [i64] = []
+            var idx = 0
+            for a in args:
+                val as_ = _summarize_expr_once(a.value, state, depth + 1)
+                arg_texts.push(as_.preview)
+                s = _absorb_expr_flags(s, as_)
+                if idx == 0 and not a.has_name:
+                    arg0_id = as_.var_id
+                    arg0_prev = as_.preview
+                    arg0_refs = as_.refs
+                idx = idx + 1
+            val resolved_opt: Option<i64> = match hir_perf_resolved_method_symbol(resolution):
+                case Some(sid): Some(sid)
+                case None: None
+            s.preview = rs.preview + "." + method + "(" + arg_texts.join(", ") + ")"
+            s.method_info = _HirMethodShallowV1(
+                valid: true, recv_var_id: rs.var_id, recv_var_name: rs.var_name,
+                recv_kind: hir_perf_receiver_kind(receiver), method_name: method,
+                resolved_symbol_id: resolved_opt, arg_count: args.len(),
+                arg0_var_id: arg0_id, arg0_preview: arg0_prev, arg0_refs: arg0_refs
+            )
+            return s
+        case HirExprKind.Return(val_opt):
+            var s = _base_expr_summary("return")
+            s.has_return = true
+            match val_opt:
+                case Some(v):
+                    val vs = _summarize_expr_once(v, state, depth + 1)
+                    s = _absorb_expr_flags(s, vs)
+                    s.preview = "return " + vs.preview
+                    s.has_return = true
+                    s.return_info = _HirReturnShallowV1(valid: true, is_bool_lit: vs.is_bool_lit, bool_value: vs.bool_value, value_preview: vs.preview)
+                case None:
+                    s.return_info = _HirReturnShallowV1(valid: true, is_bool_lit: false, bool_value: false, value_preview: "()")
+            return s
+        case HirExprKind.Break(_, val_opt):
+            var s = _base_expr_summary("break")
+            s.has_break_continue = true
+            if val v = val_opt: s.refs = _summarize_expr_once(v, state, depth + 1).refs
+            return s
+        case HirExprKind.Continue(_):
+            var s = _base_expr_summary("continue")
+            s.has_break_continue = true
+            return s
+        case HirExprKind.Throw(v):
+            val vs = _summarize_expr_once(v, state, depth + 1)
+            var s = _absorb_expr_flags(_base_expr_summary("throw " + vs.preview), vs)
+            s.has_throw_try = true
+            return s
+        case HirExprKind.Try(v):
+            val vs = _summarize_expr_once(v, state, depth + 1)
+            var s = _absorb_expr_flags(_base_expr_summary(vs.preview + "?"), vs)
+            s.has_throw_try = true
+            return s
+        case HirExprKind.Await(v):
+            val vs = _summarize_expr_once(v, state, depth + 1)
+            var s = _absorb_expr_flags(_base_expr_summary("await " + vs.preview), vs)
+            s.has_await_yield = true
+            return s
+        case HirExprKind.Yield(val_opt):
+            var s = _base_expr_summary("yield")
+            s.has_await_yield = true
+            if val v = val_opt: s.refs = _summarize_expr_once(v, state, depth + 1).refs
+            return s
+        case HirExprKind.If(cond, then_b, else_opt):
+            val cs = _summarize_expr_once(cond, state, depth + 1)
+            val then_pair = _summarize_block_once(then_b, state, depth + 1)
+            var s = _absorb_expr_flags(_absorb_expr_flags(_base_expr_summary("if " + cs.preview), cs), then_pair.1)
+            val has_else = else_opt.?
+            if val eb = else_opt: s = _absorb_expr_flags(s, _summarize_block_once(eb, state, depth + 1).1)
+            if (not has_else) and (not then_b.has) and then_pair.0.len() == 1:
+                val single_stmt = then_pair.0[0]
+                s.if_info = _HirIfShallowV1(valid: true, cond_preview: cs.preview, cond_is_negated: cs.if_info.cond_is_negated, cond_inner_preview: cs.if_info.cond_inner_preview, cond_refs: cs.refs, then_method: single_stmt.method_info, then_assign: single_stmt.assign_info, then_return: single_stmt.return_info)
+            return s
+        case HirExprKind.For(induction, iter, body, label):
+            state.loop_regions_summarized = state.loop_regions_summarized + 1
+            val is_ = _summarize_expr_once(iter, state, depth + 1)
+            val bp = _summarize_block_once(body, state, depth + 1)
+            var s = _absorb_expr_flags(_base_expr_summary("for in " + is_.preview), is_)
+            s.refs = _merge_refs_bounded(s.refs, bp.1.refs)
+            s.has_return = s.has_return or bp.1.has_return
+            s.has_throw_try = s.has_throw_try or bp.1.has_throw_try
+            s.has_await_yield = s.has_await_yield or bp.1.has_await_yield
+            if (not label.?) and (not body.has) and bp.0.len() == 1:
+                val bstmt = bp.0[0]
+                s.for_info = _HirForShallowV1(valid: true, span: expr.span, induction_id: induction.id, induction_name: _resolve_var_name(state, induction.id, "item"), iter_var_id: is_.var_id, iter_preview: is_.preview, iter_receiver_kind: hir_perf_receiver_kind(iter), body_method: bstmt.method_info, body_assign: bstmt.assign_info, body_if: bstmt.if_info, body_has_break_continue: bp.1.has_break_continue, body_has_throw_try: bp.1.has_throw_try, body_has_await_yield: bp.1.has_await_yield)
+            return s
+        case HirExprKind.While(cond, body, _):
+            state.loop_regions_summarized = state.loop_regions_summarized + 1
+            val cs = _summarize_expr_once(cond, state, depth + 1)
+            val bp = _summarize_block_once(body, state, depth + 1)
+            var s = _absorb_expr_flags(_base_expr_summary("while " + cs.preview), cs)
+            s.refs = _merge_refs_bounded(s.refs, bp.1.refs)
+            s.has_return = s.has_return or bp.1.has_return
+            s.has_throw_try = s.has_throw_try or bp.1.has_throw_try
+            s.has_await_yield = s.has_await_yield or bp.1.has_await_yield
+            return s
+        case HirExprKind.Block(inner):
+            return _summarize_block_once(inner, state, depth + 1).1
+        case _:
+            return _base_expr_summary("expr")
+
+fn _summarize_stmt_once(stmt: HirStmt, state: _HirRecognitionWalkStateV1, depth: i64) -> _HirNodeSummaryV1:
+    state.nodes_visited = state.nodes_visited + 1
+    var out = _base_expr_summary("")
+    match stmt.kind:
+        case HirStmtKind.Let(sym, _, init):
+            val init_s = _summarize_expr_once(init, state, depth + 1)
+            out = _absorb_expr_flags(out, init_s)
+            out.let_info = _HirLetShallowV1(valid: true, sym_id: sym.id, var_name: _resolve_var_name(state, sym.id, "local_" + sym.id.to_text()), is_empty_array_lit: init_s.is_empty_array_lit, init_preview: init_s.preview, span: stmt.span)
+        case HirStmtKind.Assign(target, op_opt, val_expr):
+            val ts = _summarize_expr_once(target, state, depth + 1)
+            val vs = _summarize_expr_once(val_expr, state, depth + 1)
+            out = _absorb_expr_flags(_absorb_expr_flags(out, ts), vs)
+            out.assign_info = _HirAssignShallowV1(valid: ts.var_id >= 0, target_var_id: ts.var_id, target_var_name: ts.var_name, op_symbol: _assign_op_symbol(op_opt), rhs_preview: vs.preview, rhs_refs: vs.refs)
+        case HirStmtKind.Expr(e):
+            out = _summarize_expr_once(e, state, depth + 1)
+        case HirStmtKind.Block(b):
+            out = _summarize_block_once(b, state, depth + 1).1
+        case _:
+            pass_do_nothing
+    out
+
+fn _record_hir_for_idiom(
+    state: _HirRecognitionWalkStateV1, reg_id: text, span: Span, family: LoopIdiomFamily,
+    for_i: _HirForShallowV1, ind_name: text, target_binding: text,
+    pred: Option<text>, tf: Option<text>, seed: Option<text>, step: Option<text>,
+    fb: Option<text>, repl: text, old_text: text, eager: bool, sym: Option<i64>,
+    refs_target: bool, aliases_target: bool, inner_ret: bool
+):
+    val idiom = _make_idiom(
+        reg_id, state.function_id, state.semantic_revision, state.dependency_fingerprint,
+        state.file, span, family, for_i.iter_preview, ind_name, target_binding,
+        pred, tf, seed, step, fb, repl, old_text, eager, sym, refs_target, aliases_target,
+        inner_ret, for_i.body_has_break_continue, for_i.body_has_throw_try, for_i.body_has_await_yield
+    )
+    state.raw_idioms.push(idiom)
+    val built = _build_candidate_and_finding(idiom)
+    state.candidates.push(built.0)
+    state.findings.push(built.1)
+
+fn _match_adjacent_hir_idioms_in_block(stmts: [_HirNodeSummaryV1], has_tail_val: bool, tail_val: _HirNodeSummaryV1, state: _HirRecognitionWalkStateV1):
+    var idx = 0
+    while idx < stmts.len():
+        val cur = stmts[idx]
+        if cur.let_info.valid and idx + 1 < stmts.len() and stmts[idx + 1].for_info.valid:
+            val let_i = cur.let_info
+            val for_i = stmts[idx + 1].for_info
+            val builder_name = _resolve_var_name(state, let_i.sym_id, let_i.var_name)
+            val ind_name = _resolve_var_name(state, for_i.induction_id, for_i.induction_name)
+            val combined_span = let_i.span.merge(for_i.span)
+            state.ordinal = state.ordinal + 1
+            val reg_id = "hir-loop-" + state.ordinal.to_text()
+
+            if for_i.body_method.valid and for_i.body_method.recv_var_id == let_i.sym_id and let_i.is_empty_array_lit:
+                match _admitted_array_append_symbol(for_i.body_method.resolved_symbol_id, for_i.body_method.recv_kind, for_i.body_method.method_name, state.registry):
+                    case Ok(admitted_sym):
+                        if for_i.body_method.arg_count == 1:
+                            val tf = for_i.body_method.arg0_preview
+                            val repl = "{builder_name} = {for_i.iter_preview}.iter().map({ind_name} -> {tf}).collect()"
+                            _record_hir_for_idiom(state, reg_id, combined_span, LoopIdiomFamily.Map, for_i, ind_name, builder_name, None, Some(tf), None, None, None, repl, "{builder_name} = []\nfor {ind_name} in {for_i.iter_preview}", true, Some(admitted_sym), for_i.body_method.arg0_refs.contains(let_i.sym_id), for_i.iter_var_id == let_i.sym_id, false)
+                    case Err(reason): state.rejected_reasons.push(reason)
+
+            elif for_i.body_if.valid and for_i.body_if.then_method.valid and for_i.body_if.then_method.recv_var_id == let_i.sym_id and let_i.is_empty_array_lit:
+                val m = for_i.body_if.then_method
+                match _admitted_array_append_symbol(m.resolved_symbol_id, m.recv_kind, m.method_name, state.registry):
+                    case Ok(admitted_sym):
+                        if m.arg_count == 1:
+                            val is_filter_only = m.arg0_var_id == for_i.induction_id
+                            val fam = if is_filter_only: LoopIdiomFamily.Filter else: LoopIdiomFamily.FilterMap
+                            val pred = for_i.body_if.cond_preview
+                            val tf = m.arg0_preview
+                            val repl = if is_filter_only: "{builder_name} = {for_i.iter_preview}.iter().filter({ind_name} -> {pred}).collect()" else: "{builder_name} = {for_i.iter_preview}.iter().filter({ind_name} -> {pred}).map({ind_name} -> {tf}).collect()"
+                            val refs_target = for_i.body_if.cond_refs.contains(let_i.sym_id) or m.arg0_refs.contains(let_i.sym_id)
+                            _record_hir_for_idiom(state, reg_id, combined_span, fam, for_i, ind_name, builder_name, Some(pred), if is_filter_only: None else: Some(tf), None, None, None, repl, "{builder_name} = []\nfor {ind_name} in {for_i.iter_preview}", true, Some(admitted_sym), refs_target, for_i.iter_var_id == let_i.sym_id, false)
+                    case Err(reason): state.rejected_reasons.push(reason)
+
+            elif for_i.body_assign.valid and for_i.body_assign.target_var_id == let_i.sym_id:
+                val asg = for_i.body_assign
+                val step = if asg.op_symbol == "": asg.rhs_preview else: "{builder_name} {asg.op_symbol} {asg.rhs_preview}"
+                val repl = "{builder_name} = {for_i.iter_preview}.iter().fold({let_i.init_preview}, ({builder_name}, {ind_name}) -> {step})"
+                _record_hir_for_idiom(state, reg_id, combined_span, LoopIdiomFamily.OrderedFold, for_i, ind_name, builder_name, None, None, Some(let_i.init_preview), Some(step), None, repl, "{builder_name} = {let_i.init_preview}\nfor {ind_name} in {for_i.iter_preview}", false, None, true, for_i.iter_var_id == let_i.sym_id, false)
+
+            elif for_i.body_if.valid and for_i.body_if.then_assign.valid and for_i.body_if.then_assign.target_var_id == let_i.sym_id:
+                val asg = for_i.body_if.then_assign
+                val pred = for_i.body_if.cond_preview
+                val inner_step = if asg.op_symbol == "": asg.rhs_preview else: "{builder_name} {asg.op_symbol} {asg.rhs_preview}"
+                val step = "if {pred}: {inner_step} else: {builder_name}"
+                val repl = "{builder_name} = {for_i.iter_preview}.iter().fold({let_i.init_preview}, ({builder_name}, {ind_name}) -> {step})"
+                _record_hir_for_idiom(state, reg_id, combined_span, LoopIdiomFamily.OrderedFold, for_i, ind_name, builder_name, Some(pred), None, Some(let_i.init_preview), Some(step), None, repl, "{builder_name} = {let_i.init_preview}\nfor {ind_name} in {for_i.iter_preview}", false, None, true, for_i.iter_var_id == let_i.sym_id, false)
+
+        if cur.for_info.valid and cur.for_info.body_if.valid and cur.for_info.body_if.then_return.valid:
+            val for_i = cur.for_info
+            val early_ret = for_i.body_if.then_return
+            var has_fallback = false
+            var fb_is_bool = false
+            var fb_bool_val = false
+            var fb_preview = ""
+            if idx + 1 < stmts.len() and stmts[idx + 1].return_info.valid:
+                val nxt_ret = stmts[idx + 1].return_info
+                has_fallback = true
+                fb_is_bool = nxt_ret.is_bool_lit
+                fb_bool_val = nxt_ret.bool_value
+                fb_preview = nxt_ret.value_preview
+            elif idx == stmts.len() - 1 and has_tail_val:
+                has_fallback = true
+                fb_is_bool = tail_val.is_bool_lit
+                fb_bool_val = tail_val.bool_value
+                fb_preview = tail_val.preview
+
+            if has_fallback:
+                state.ordinal = state.ordinal + 1
+                val reg_id = "hir-search-" + state.ordinal.to_text()
+                val ind_name = _resolve_var_name(state, for_i.induction_id, for_i.induction_name)
+                if early_ret.is_bool_lit and fb_is_bool and early_ret.bool_value and not fb_bool_val:
+                    val pred = for_i.body_if.cond_preview
+                    _record_hir_for_idiom(state, reg_id, for_i.span, LoopIdiomFamily.AnySearch, for_i, ind_name, "", Some(pred), None, None, None, Some("false"), "return {for_i.iter_preview}.iter().any({ind_name} -> {pred})", "for {ind_name} in {for_i.iter_preview}", false, None, false, false, true)
+                elif early_ret.is_bool_lit and fb_is_bool and (not early_ret.bool_value) and fb_bool_val:
+                    val pred = if for_i.body_if.cond_is_negated: for_i.body_if.cond_inner_preview else: "not (" + for_i.body_if.cond_preview + ")"
+                    _record_hir_for_idiom(state, reg_id, for_i.span, LoopIdiomFamily.AllSearch, for_i, ind_name, "", Some(pred), None, None, None, Some("true"), "return {for_i.iter_preview}.iter().all({ind_name} -> {pred})", "for {ind_name} in {for_i.iter_preview}", false, None, false, false, true)
+                else:
+                    val pred = for_i.body_if.cond_preview
+                    val hit = early_ret.value_preview
+                    val repl = "match {for_i.iter_preview}.iter().find({ind_name} -> {pred}): case Some({ind_name}): {hit} case None: {fb_preview}"
+                    _record_hir_for_idiom(state, reg_id, for_i.span, LoopIdiomFamily.FindSearch, for_i, ind_name, "", Some(pred), Some(hit), None, None, Some(fb_preview), repl, "for {ind_name} in {for_i.iter_preview}", false, None, false, false, true)
+        idx = idx + 1
+
+fn _summarize_block_once(block: HirBlock, state: _HirRecognitionWalkStateV1, depth: i64) -> ([_HirNodeSummaryV1], _HirNodeSummaryV1):
+    state.nodes_visited = state.nodes_visited + 1
+    var stmts_out: [_HirNodeSummaryV1] = []
+    var block_expr_s = _base_expr_summary("()")
+    for st in block.stmts:
+        val ss = _summarize_stmt_once(st, state, depth + 1)
+        stmts_out.push(ss)
+        block_expr_s = _absorb_expr_flags(block_expr_s, ss)
+
+    var tail_summary = _base_expr_summary("()")
+    if block.has:
+        tail_summary = _summarize_expr_once(block.value, state, depth + 1)
+        block_expr_s = _absorb_expr_flags(block_expr_s, tail_summary)
+        block_expr_s.preview = tail_summary.preview
+        block_expr_s.var_id = tail_summary.var_id
+        block_expr_s.var_name = tail_summary.var_name
+        block_expr_s.is_bool_lit = tail_summary.is_bool_lit
+        block_expr_s.bool_value = tail_summary.bool_value
+
+    _match_adjacent_hir_idioms_in_block(stmts_out, block.has, tail_summary, state)
+    (stmts_out, block_expr_s)
+
+fn _run_hir_recognition(block: HirBlock, function_id: text, params: [HirParam], semantic_revision: text, dependency_fingerprint: text, file: text, registry: CollectionOperationRegistry) -> LoopRecognitionReportV1:
+    var state = _HirRecognitionWalkStateV1(function_id: function_id, semantic_revision: semantic_revision, dependency_fingerprint: dependency_fingerprint, file: file, registry: registry, symbol_names: {}, nodes_visited: 0, loop_regions_summarized: 0, raw_idioms: [], candidates: [], findings: [], rejected_reasons: [], ordinal: 0)
+    for p in params:
+        state.symbol_names[p.symbol.id] = p.name
+    val _ = _summarize_block_once(block, state, 0)
+    LoopRecognitionReportV1(raw_idioms: state.raw_idioms, candidates: state.candidates, findings: state.findings, nodes_visited: state.nodes_visited, loop_regions_summarized: state.loop_regions_summarized, rejected_reasons: state.rejected_reasons)
+
+fn recognize_hir_block_loop_idioms_v1(
+    block: HirBlock, function_id: text, function_symbol_id: i64,
+    semantic_revision: text, dependency_fingerprint: text, file: text, registry: CollectionOperationRegistry
+) -> LoopRecognitionReportV1:
+    if function_symbol_id < 0:
+        return LoopRecognitionReportV1(raw_idioms: [], candidates: [], findings: [], nodes_visited: 0, loop_regions_summarized: 0, rejected_reasons: ["invalid negative function_symbol_id"])
+    _run_hir_recognition(block, function_id, [], semantic_revision, dependency_fingerprint, file, registry)
+
+fn recognize_hir_function_loop_idioms_v1(
+    function: HirFunction, semantic_revision: text, dependency_fingerprint: text,
+    file: text, registry: CollectionOperationRegistry
+) -> LoopRecognitionReportV1:
+    _run_hir_recognition(function.body, function.name, function.params, semantic_revision, dependency_fingerprint, file, registry)
+
+export SourceLoopBodyShapeV1, SourceLoopRegionNodeV1
+export RecognizedLoopIdiomV1, LoopRecognitionReportV1
+export eager_equivalent_tradeoff_note_v1, perf_style_default_severity_v1
+export recognize_source_loop_tree_v1
+export recognize_hir_block_loop_idioms_v1, recognize_hir_function_loop_idioms_v1
