@@ -59,7 +59,7 @@ fn workspace_mount_options_v3(values: [text], binds: bool) -> Result<(), text>:
     if binds and (not seen.contains("rw") or not seen.contains("rprivate")): return Err("fresh-workspace-private-writable-bind-required")
     Ok(())
 
-fn workspace_created_mount_v3(value: JsonValue, workspace: LinuxWorkspaceInstalledProfileV1) -> Result<(), text>:
+fn workspace_created_mount_v3(value: JsonValue, workspace: LinuxWorkspaceInstalledProfileV1, operation_id: text) -> Result<(), text>:
     val values = match linux_fresh_workload_inspect_member_v2(value, "mounts")?:
         case JsonValue.Array(found): found
         case _: return Err("fresh-workspace-mount-array-required")
@@ -72,7 +72,8 @@ fn workspace_created_mount_v3(value: JsonValue, workspace: LinuxWorkspaceInstall
         if not keys.contains(key): return Err("fresh-workspace-created-mount-fields")
     if keys.len() == 9 and (not keys.contains("Name") or linux_fresh_workload_inspect_text_v2(mount, "Name")? != ""):
         return Err("fresh-workspace-named-volume-unavailable")
-    val source = linux_workspace_source_root_v1(workspace)
+    # milestone_0047: the run's own child of the provisioned leaf.
+    val source = linux_workspace_run_root_v1(workspace, operation_id)
     for pair in [("Type", "bind"), ("Source", source), ("Destination", workspace.guest_root), ("Driver", ""), ("Mode", ""), ("Propagation", "rprivate")]:
         if linux_fresh_workload_inspect_text_v2(mount, pair.0)? != pair.1: return Err("fresh-workspace-created-mount-mapping")
     if linux_fresh_workload_inspect_member_v2(mount, "RW")? != JsonValue.Bool(true): return Err("fresh-workspace-created-mount-not-writable")
@@ -118,7 +119,7 @@ pub fn linux_fresh_workspace_created_config_validate_v3(workspace: LinuxWorkspac
     if linux_fresh_workload_inspect_strings_v2(observed, "args", 2)? != command.args:
         return Err("fresh-workspace-created-bootstrap-argv")
     val env = linux_fresh_workload_inspect_strings_v2(observed, "environment", 256)?
-    workspace_created_mount_v3(observed, workspace)?
+    workspace_created_mount_v3(observed, workspace, plan.operation_id)?
     workspace_empty_array_v3(observed, "volumes_from")?
     match linux_fresh_workload_inspect_member_v2(observed, "tmpfs")?:
         case JsonValue.Null: pass

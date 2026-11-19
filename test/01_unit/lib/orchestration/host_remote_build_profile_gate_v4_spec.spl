@@ -20,6 +20,7 @@ use std.spec.step
 use std.io.file_read_text
 use std.common.contracts.container.build_workspace_profile_v1.{LinuxBuildWorkspaceProfileV1, linux_build_workspace_profile_encode_v1}
 use std.common.contracts.container.execution_v2.ContainerMountProjectionV2
+use std.common.contracts.container.linux_workspace_profile_v1.linux_workspace_run_leaf_v1
 use std.nogc_async_mut.container.providers.linux.request_v1.LinuxOciRequestV1
 use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
 use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.host_remote_build_profile_gate_v4
@@ -39,7 +40,8 @@ fn pg_request() -> LinuxOciRequestV1:
         network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true, working_directory: "/workspace",
         terminal_mode: "none", user_uid: 20001, user_gid: 20001, user_namespace_mode: "keep-id",
         containment_profile_digest: "c".repeat(64),
-        mounts: [ContainerMountProjectionV2(host_root: "/srv/workspaces/slot_1", guest_root: "/workspace", read_only: false)])
+        mounts: [ContainerMountProjectionV2(host_root: "/srv/workspaces/slot_1/" + linux_workspace_run_leaf_v1("operation_1"),
+            guest_root: "/workspace", read_only: false)])
 
 fn pg_gate(request: LinuxOciRequestV1) -> Result<(), text>:
     host_remote_build_profile_gate_v4(linux_oci_retained_request_encode_v1(request).unwrap(),
@@ -78,6 +80,19 @@ describe "the build profile gate refuses a mismatching draft before the slot":
         var small = pg_request()
         small.memory_limit_bytes = 1048576
         expect(pg_gate(small)).to_equal(Err("linux-host-remote-build-profile-memory"))
+
+    it "refuses a draft whose one mount is not this run's own child of the provisioned leaf":
+        # @req M47-PER-RUN-WORKSPACE (milestone_0047: per-run path checked at prepare, the full path at enable)
+        var shared = pg_request()
+        shared.mounts = [ContainerMountProjectionV2(host_root: "/srv/workspaces/slot_1", guest_root: "/workspace", read_only: false)]
+        expect(pg_gate(shared)).to_equal(Err("linux-host-remote-build-profile-run-root"))
+        var sibling = pg_request()
+        sibling.mounts = [ContainerMountProjectionV2(host_root: "/srv/workspaces/slot_1/" + linux_workspace_run_leaf_v1("operation_2"),
+            guest_root: "/workspace", read_only: false)]
+        expect(pg_gate(sibling)).to_equal(Err("linux-host-remote-build-profile-run-root"))
+        var none = pg_request()
+        none.mounts = []
+        expect(pg_gate(none)).to_equal(Err("linux-host-remote-build-profile-run-root"))
 
     it "refuses undecodable request bytes and an undecodable profile":
         # @req M0030-P2A-03

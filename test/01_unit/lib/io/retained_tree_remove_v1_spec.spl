@@ -2,7 +2,8 @@
 ## Purpose and audience
 milestone_0045 (owner decision 2, 2026-11-19): the no-follow recursive removal BENEATH one held directory descriptor
 that the Host's controller-signed `retention-release` uses to delete a remote build's retained workspace tree
-(`src/lib/nogc_sync_mut/io/retained_tree_remove_v1.spl`, reached through `RetainedDirectoryOwnerV1`). Every child is
+(`src/lib/nogc_sync_mut/io/retained_tree_remove_v1.spl`, reached through `RetainedDirectoryOwnerV1.remove_child_tree_v1`;
+since milestone_0047 one per-run child of the provisioned leaf is removed with its tree, the leaf and siblings stay). Every child is
 reached by openat/unlinkat relative to a held directory fd (O_DIRECTORY|O_NOFOLLOW), statx'ed no-follow, and must carry
 the root's st_dev AND mount id and the expected owner uid; a symlink is unlinked, never followed.
 ## Operator workflow
@@ -77,8 +78,8 @@ describe "Retained tree removal decision (milestone_0045 retention release)":
         expect(retained_tree_dot_v1([46u8, 46u8, 46u8])).to_equal(false)
         expect(retained_tree_dot_v1(text_to_utf8_bytes(".hidden"))).to_equal(false)
 
-describe "Retained tree removal on a private temp tree (milestone_0045)":
-    it "removes a nested tree with read-only dirs and a symlink whose target outside the root survives":
+describe "Retained tree removal on a private temp tree (milestone_0045, per child since milestone_0047)":
+    it "removes a nested child tree with read-only dirs and a symlink whose target outside the child survives":
         # @req M45-RETENTION-RELEASE (no-follow: a symlink is unlinked, its target never touched)
         if anchored_linux_directory_flags_v1() == 0: return
         val base = tree_base_v1("nested")
@@ -96,56 +97,50 @@ describe "Retained tree removal on a private temp tree (milestone_0045)":
         step("a guest-made read-only directory (0555) is made writable by its owner before its entries are removed")
         expect(package_chmod(leaf + "/a/b", 365)).to_equal(0)
         val parent = retained_directory_open_trusted_v1(base).unwrap()
-        val root = retained_directory_open_trusted_v1(leaf).unwrap()
-        val removed = root.remove_tree_contents_v1(tree_euid_v1())
+        val removed = parent.remove_child_tree_v1("workspace", tree_euid_v1())
         expect(removed.is_ok()).to_equal(true)
-        expect(removed.unwrap()).to_equal(7)
-        expect(root.directory_is_empty_v1().unwrap()).to_equal(true)
-        step("the leaf itself is removed through the held parent, bound to the held root identity")
-        expect(parent.remove_child_directory_v1("workspace", root).is_ok()).to_equal(true)
+        step("seven entries beneath the child plus the child itself; the sibling outside the child stays")
+        expect(removed.unwrap()).to_equal(8)
         expect(parent.child_absent_v1("workspace").unwrap()).to_equal(true)
         expect(dir_exists(leaf)).to_equal(false)
         expect(file_exists(outside + "/sentinel")).to_equal(true)
-        var held = root
-        expect(held.close()).to_equal(true)
         var holder = parent
         expect(holder.close()).to_equal(true)
         expect(dir_remove_all(base)).to_equal(true)
 
-    it "refuses a root the owner uid does not own and leaves the tree retained":
+    it "refuses a child the owner uid does not own, a non-directory and an invalid name, and keeps them":
         # @req M45-RETENTION-RELEASE (fail closed: nothing beyond the refusal point is removed)
         if anchored_linux_directory_flags_v1() == 0: return
         val base = tree_base_v1("foreign")
         expect(dir_create(base + "/workspace/sub", true)).to_equal(true)
         expect(file_write(base + "/workspace/sub/kept.txt", "z\n")).to_equal(true)
-        val root = retained_directory_open_trusted_v1(base + "/workspace").unwrap()
-        step("an owner uid the held root does not carry refuses before any entry is touched (entries: decision case above)")
-        expect(root.remove_tree_contents_v1(tree_euid_v1() + 1).unwrap_err()).to_equal("retained-tree-root")
-        expect(file_exists(base + "/workspace/sub/kept.txt")).to_equal(true)
-        step("removing the leaf of a non-empty directory is refused by the kernel and keeps it")
+        expect(file_write(base + "/plain", "p\n")).to_equal(true)
         val parent = retained_directory_open_trusted_v1(base).unwrap()
-        expect(parent.remove_child_directory_v1("workspace", root).unwrap_err()).to_equal("retained-tree-leaf-remove")
-        expect(dir_exists(base + "/workspace/sub")).to_equal(true)
-        step("a leaf name that is not the held root is refused before any unlink")
-        expect(dir_create(base + "/other", false)).to_equal(true)
-        expect(parent.remove_child_directory_v1("other", root).unwrap_err()).to_equal("retained-tree-leaf-identity")
-        expect(dir_exists(base + "/other")).to_equal(true)
-        var held = root
-        expect(held.close()).to_equal(true)
+        step("an owner uid the child does not carry refuses before any entry is touched (entries: decision case above)")
+        expect(parent.remove_child_tree_v1("workspace", tree_euid_v1() + 1).unwrap_err()).to_equal("retained-tree-foreign-owner")
+        expect(file_exists(base + "/workspace/sub/kept.txt")).to_equal(true)
+        step("a non-directory child and a name outside the stage-leaf alphabet are refused, never unlinked")
+        expect(parent.remove_child_tree_v1("plain", tree_euid_v1()).unwrap_err()).to_equal("retained-tree-leaf-identity")
+        expect(file_exists(base + "/plain")).to_equal(true)
+        expect(parent.remove_child_tree_v1("../workspace", tree_euid_v1()).unwrap_err()).to_equal("retained-tree-leaf-name")
         var holder = parent
         expect(holder.close()).to_equal(true)
         expect(dir_remove_all(base)).to_equal(true)
 
 describe "Retained tree removal on a provisioned XFS workspace (milestone_0045, live root)":
-    it "removes a provisioned workspace tree without crossing its mount":
+    it "removes a run child beneath a provisioned workspace leaf without crossing its mount":
         # @req M45-RETENTION-RELEASE (live root; BLOCKED unless the provisioned fixture is configured)
         val missing = tree_live_missing_v1()
         if missing != "":
             pending("BLOCKED: provisioned XFS workspace fixture env unset: " + missing)
             return
         val path = env_get_opt("SIMPLE_RETENTION_WORKSPACE_FIXTURE_ROOT") ?? ""
-        val root = retained_directory_open_trusted_v1(path).unwrap()
-        expect(root.remove_tree_contents_v1(tree_euid_v1()).is_ok()).to_equal(true)
-        expect(root.directory_is_empty_v1().unwrap()).to_equal(true)
-        var held = root
+        val child = env_get_opt("SIMPLE_RETENTION_WORKSPACE_FIXTURE_CHILD") ?? ""
+        if child == "":
+            pending("BLOCKED: provisioned run child fixture env unset: SIMPLE_RETENTION_WORKSPACE_FIXTURE_CHILD")
+            return
+        val leaf = retained_directory_open_trusted_v1(path).unwrap()
+        expect(leaf.remove_child_tree_v1(child, tree_euid_v1()).is_ok()).to_equal(true)
+        expect(leaf.child_absent_v1(child).unwrap()).to_equal(true)
+        var held = leaf
         expect(held.close()).to_equal(true)

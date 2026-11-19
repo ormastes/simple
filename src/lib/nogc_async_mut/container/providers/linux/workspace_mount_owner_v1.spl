@@ -66,7 +66,8 @@ pub fn linux_workspace_source_request_match_v1(profile: LinuxWorkspaceInstalledP
     val digest = linux_oci_request_digest_v1(request)?
     if request.mounts.len() != 1: return Err("workspace-source-one-exact-root-required")
     val mount = request.mounts[0]
-    if (mount.host_root != linux_workspace_source_root_v1(profile) or mount.guest_root != profile.guest_root or
+    # milestone_0047: the run's own child of the provisioned leaf, never the shared leaf or another run's child.
+    if (mount.host_root != linux_workspace_run_root_v1(profile, request.operation_id) or mount.guest_root != profile.guest_root or
             mount.read_only != profile.read_only): return Err("workspace-source-request-mapping-mismatch")
     if request.containment_profile_digest != profile.containment_profile_digest:
         return Err("workspace-source-containment-binding-mismatch")
@@ -153,6 +154,9 @@ struct LinuxWorkspaceSourceStateV1:
     var exclusion: LinuxMachineWorkspaceExclusionV1? = None
     var parent_directory: RetainedDirectoryOwnerV1? = None
     var root_directory: RetainedDirectoryOwnerV1? = None
+    # milestone_0047: this run's own child of the provisioned leaf (root_directory), created at staging AFTER the
+    # effect is recorded (workspace_run_directory_create_v1). The leaf stays the native quota root.
+    var run_directory: Option<RetainedDirectoryOwnerV1> = None
     var phase: text = "opening"
     var cleanup_error: text = ""
     # NEW writable staging mode: actual installed profile plus exact Host-admitted invocation.
@@ -297,10 +301,6 @@ pub class LinuxWorkspaceSourceOwnerV1:
                     agent_executable_profile_encode_v1(invocation.executable_profile).unwrap() !=
                     agent_executable_profile_encode_v1(executable.unwrap()).unwrap()):
                 return workspace_agent_turn_v1(self, "agent-stage-full-v2-profile-differs", false)
-            val empty = state.root_directory.unwrap().directory_is_empty_v1()
-            if empty.is_err(): return workspace_agent_turn_v1(self, empty.unwrap_err(), false)
-            if not empty.unwrap(): return workspace_agent_turn_v1(self, "agent-stage-dedicated-root-not-empty", false)
-            workspace_source_states_v1[self.slot].agent_dedicated_empty_observed = true
         # Actual protected asset root is separate from guest-writable storage.
         val opened = retained_directory_open_trusted_v1(profile.assets_root)
         if opened.is_err(): return workspace_agent_turn_v1(self, opened.unwrap_err(), false)
@@ -313,8 +313,17 @@ pub class LinuxWorkspaceSourceOwnerV1:
         # Record potential effect BEFORE exclusive mkdir/write or fallible post-effect observation.
         workspace_source_states_v1[self.slot].agent_creation_plan = linux_agent_workspace_creation_plan_v1(manifest)
         workspace_source_states_v1[self.slot].agent_effect_attempted = true
-        val root = state.root_directory.unwrap()
-        val staged = linux_agent_workspace_stage_bytes_v1(root, assets, manifest, invocation_bytes)
+        # milestone_0047: the run's own child of the provisioned leaf, created exclusive after the effect is recorded.
+        val created = workspace_run_directory_create_v1(self, request_bytes)
+        if created.is_err():
+            var create_failure = created.unwrap_err()
+            if not assets.close(): create_failure = create_failure + ";agent-stage-assets-close-consumed-error"
+            workspace_source_states_v1[self.slot].agent_stage_phase = "retained-failed"
+            workspace_source_states_v1[self.slot].agent_stage_error = create_failure
+            return workspace_agent_turn_v1(self, create_failure, false)
+        val run = created.unwrap()
+        if version == 2: workspace_source_states_v1[self.slot].agent_dedicated_empty_observed = true
+        val staged = linux_agent_workspace_stage_bytes_v1(run, assets, manifest, invocation_bytes)
         val asset_closed = assets.close()
         workspace_source_states_v1[self.slot].agent_creations = staged.creations
         var failure = staged.error
@@ -339,10 +348,6 @@ pub class LinuxWorkspaceSourceOwnerV1:
         if state.build_stage_phase != "": return workspace_build_turn_v1(self, "remote-build-stage-retained-or-in-progress", false)
         if state.agent_stage_phase != "" or state.agent_effect_attempted:
             return workspace_build_turn_v1(self, "remote-build-stage-source-holds-agent-staging", false)
-        val empty = state.root_directory.unwrap().directory_is_empty_v1()
-        if empty.is_err(): return workspace_build_turn_v1(self, empty.unwrap_err(), false)
-        if not empty.unwrap(): return workspace_build_turn_v1(self, "remote-build-stage-dedicated-root-not-empty", false)
-        workspace_source_states_v1[self.slot].build_dedicated_empty_observed = true
         val (profile, manifest, profile_source) = admitted.unwrap()
         workspace_source_states_v1[self.slot].build_profile_source = profile_source
         workspace_source_states_v1[self.slot].build_manifest_digest = sha256_text(manifest_bytes)
@@ -351,7 +356,15 @@ pub class LinuxWorkspaceSourceOwnerV1:
         workspace_source_states_v1[self.slot].build_stage_phase = "staging"
         # Record potential effect BEFORE exclusive mkdir/write or fallible post-effect observation.
         workspace_source_states_v1[self.slot].build_effect_attempted = true
-        val staged = linux_remote_build_stage_bytes_v1(state.root_directory.unwrap(), files)
+        # milestone_0047: the run's own EMPTY child of the provisioned leaf, created exclusive after the effect is recorded.
+        val created = workspace_run_directory_create_v1(self, request_bytes)
+        if created.is_err():
+            workspace_source_states_v1[self.slot].build_stage_phase = "retained-failed"
+            workspace_source_states_v1[self.slot].build_stage_error = created.unwrap_err()
+            return workspace_build_turn_v1(self, created.unwrap_err(), false)
+        val run = created.unwrap()
+        workspace_source_states_v1[self.slot].build_dedicated_empty_observed = true
+        val staged = linux_remote_build_stage_bytes_v1(run, files)
         workspace_source_states_v1[self.slot].build_creations = staged.creations
         var failure = staged.error
         if failure == "":
@@ -369,13 +382,14 @@ pub class LinuxWorkspaceSourceOwnerV1:
         val state = workspace_source_state_v1(self.slot, self.generation)?
         if (not state.build_effect_attempted or
                 (state.build_stage_phase != "staged" and state.build_stage_phase != "native-retired-retained") or
-                state.build_stage_error != "" or state.build_runtime_binding.is_none() or state.root_directory.is_none()):
+                state.build_stage_error != "" or state.build_runtime_binding.is_none() or state.run_directory.is_none()):
             return Err("remote-build-read-no-staged-runtime-binding")
         val source = self.reader.read_build_workspace_profile_v1()?
         if source != state.build_profile_source: return Err("remote-build-read-profile-changed")
         val profile = linux_build_workspace_profile_decode_v1(source)?
+        # The binding observation re-proves the run child beneath the leaf before the read.
         val binding = state.build_runtime_binding.unwrap().current_v3()?
-        linux_remote_build_read_v1(state.root_directory.unwrap(), profile, bounds, binding.binding_digest)
+        linux_remote_build_read_v1(state.run_directory.unwrap(), profile, bounds, binding.binding_digest)
 
     pub fn agent_invocation_projection_v2(request_bytes: text, manifest_bytes: text,
             invocation_digest: text) -> Result<ContainerRequestProjectionV2, text>:
@@ -417,7 +431,7 @@ pub class LinuxWorkspaceSourceOwnerV1:
             val observed = binding.current_v3()?
             return Ok(binding)
         val binding = linux_fresh_workspace_binding_open_v3(state.reader, state.storage, state.lease,
-            state.exclusion.unwrap(), state.parent_directory.unwrap(), state.root_directory.unwrap(),
+            state.exclusion.unwrap(), state.parent_directory.unwrap(), state.root_directory.unwrap(), state.run_directory.unwrap(),
             request, manifest_bytes, invocation_digest)?
         workspace_source_states_v1[self.slot].agent_runtime_binding = Some(binding)
         workspace_source_states_v1[self.slot].agent_runtime_request = request_source
@@ -480,12 +494,19 @@ pub class LinuxWorkspaceSourceOwnerV1:
             return Err("workspace-source-inspect-provider-policy-mismatch")
         linux_workspace_mount_inspect_observation_v1(observed, policy, expected, sample.request)
 
-    # milestone_0045 retention release (owner decision 2): deletes the retained workspace tree INSIDE the build's own
-    # user-namespace mapping. The current sample re-proves the archived request is keep-id with user_uid == this process's
-    # euid, so every guest-created inode carries that uid and the owner removes it with no new privilege. Only a FRESH
-    # observed source (no staging effect) may remove; the walk is no-follow and fd-relative beneath the held root, never
-    # crosses a mount, and the leaf is removed through the held parent bound to the held root's identity. The phase then
-    # forbids any further use; close_v1 still releases every descriptor and the exclusion. Returns entries removed.
+    # milestone_0047: whether the archived request's run child is absent beneath the held provisioned leaf (no-follow).
+    pub fn retained_run_absent_v1(request_bytes: text) -> Result<bool, text>:
+        val sample = self.current_v1(request_bytes)?
+        val state = workspace_source_state_v1(self.slot, self.generation)?
+        state.root_directory.unwrap().child_absent_v1(linux_workspace_run_leaf_v1(sample.request.operation_id))
+
+    # milestone_0045 retention release (owner decision 2), per run since milestone_0047 (owner decision 1): deletes the
+    # retained RUN CHILD of the provisioned leaf INSIDE the run's own user-namespace mapping. The current sample re-proves
+    # the archived request is keep-id with user_uid == this process's euid, so every guest-created inode carries that uid
+    # and the owner removes it with no new privilege. Only a FRESH observed source (no staging effect) may remove; the walk
+    # is no-follow and fd-relative beneath the held leaf, never crosses a mount, and removes ONLY the child named from the
+    # archived request's operation id: the leaf, its native lease and every other run's child stay. The phase then forbids
+    # any further use; close_v1 still releases every descriptor and the exclusion. Returns entries removed (child included).
     # allow(primitive_api): reviewed removed-entry count of the fd-level walk (milestone_0045)
     pub fn remove_retained_tree_v1(request_bytes: text) -> Result<i64, text>:
         val sample = self.current_v1(request_bytes)?
@@ -496,13 +517,11 @@ pub class LinuxWorkspaceSourceOwnerV1:
         val request = sample.request
         if request.user_namespace_mode != "keep-id" or sample.request.user_uid != sample.process.effective_uid:
             return Err("workspace-retention-release-mapping")
-        val root = state.root_directory.unwrap()
-        val parent = state.parent_directory.unwrap()
+        val leaf = state.root_directory.unwrap()
         workspace_source_states_v1[self.slot].phase = "retention-removing"
-        val removed = root.remove_tree_contents_v1(sample.process.effective_uid)?
-        parent.remove_child_directory_v1(sample.profile.leaf_name, root)?
+        val removed = leaf.remove_child_tree_v1(linux_workspace_run_leaf_v1(sample.request.operation_id), sample.process.effective_uid)?
         workspace_source_states_v1[self.slot].phase = "retention-removed"
-        Ok(removed + 1)
+        Ok(removed)
 
     # Borrowed capabilities stay available even before safe registry access.
     pub fn close_v1() -> LinuxWorkspaceSourceCloseV1:
@@ -678,6 +697,22 @@ fn workspace_retained_root_current_v1(owner: LinuxWorkspaceSourceOwnerV1, sample
             retained_identity != retained_after): return Err(changed_error)
     Ok(())
 
+# milestone_0047 (owner decision 1, 2026-11-19, "use worktree"): the run's OWN child of the provisioned leaf, named from
+# the request's operation id. Callers record their staging effect FIRST (a failure here still leaves an effect: the
+# child may exist). Created exclusive (EEXIST is never adoption) and opened no-follow RELATIVE to the held leaf fd; the
+# stage primitive proves it private (0700), owned by this euid (the keep-id build user) and the named inode; the leaf's
+# XFS project inherits onto it. It must be empty. Retained in the slot for staging, binding and the settled read.
+fn workspace_run_directory_create_v1(owner: LinuxWorkspaceSourceOwnerV1, request_bytes: text) -> Result<RetainedDirectoryOwnerV1, text>:
+    val sample = owner.current_v1(request_bytes)?
+    val state = workspace_source_state_v1(owner.slot, owner.generation)?
+    if state.run_directory.is_some(): return Err("workspace-run-directory-already-created")
+    workspace_retained_root_current_v1(owner, sample, "workspace-run-directory-leaf-changed")?
+    val run = state.root_directory.unwrap().stage_directory_v1(linux_workspace_run_leaf_v1(sample.request.operation_id), true)?
+    workspace_source_states_v1[owner.slot].run_directory = Some(run)
+    val empty = run.directory_is_empty_v1()?
+    if not empty: return Err("workspace-run-directory-not-empty")
+    Ok(run)
+
 # milestone_0030 op (i) admission (DESIGN 13.3.4 / 12a): the ADMIN-INSTALLED build workspace
 # profile read through the lent reader, the live source sample and the retained root.
 fn workspace_build_installed_v1(owner: LinuxWorkspaceSourceOwnerV1, request_bytes: text, manifest_bytes: text,
@@ -722,7 +757,7 @@ fn workspace_begin_build_binding_v3(owner: LinuxWorkspaceSourceOwnerV1, request:
         val observed = binding.current_v3()?
         return Ok(binding)
     val binding = linux_fresh_workspace_binding_open_v3(state.reader, state.storage, state.lease,
-        state.exclusion.unwrap(), state.parent_directory.unwrap(), state.root_directory.unwrap(),
+        state.exclusion.unwrap(), state.parent_directory.unwrap(), state.root_directory.unwrap(), state.run_directory.unwrap(),
         request, manifest_bytes, invocation_digest)?
     workspace_source_states_v1[owner.slot].build_runtime_binding = Some(binding)
     workspace_source_states_v1[owner.slot].build_runtime_request = request_source

@@ -500,16 +500,27 @@ Host side of the remote container build; the controller half is the `remote-run`
   state (completed|failed|cancelled; `outcome-unknown` needs remote-run-abandon first). Host order
   (host_remote_build_retention_release_v1.spl + `linux_service_retention_release_v4`): verify -> archived? -> derive ->
   check -> proof + no-replace marker -> lend root -> provider effect (workspace_retention_release_v1.spl: recover lease,
-  fresh source, `remove_retained_tree_v1` no-follow fd-relative walk `retained_tree_remove_v1.spl` (same st_dev AND
-  mnt_id, owner uid == euid under keep-id, symlinks unlinked never followed), close every fd, `release_if_absent`) -> end
-  loan -> archive `host-retention-released/` -> forget native lease. Slot must be free (later incarnation).
-- Trap: the leaf is SHARED by every remote build of the profile: a release is admitted only for the ONE unreleased row
-  that may hold its tree (outcome `source_return: retained-returned`, or reaped); `never-opened` outcomes retain nothing;
-  two unreleased holders refuse both (`retention-release-ambiguous:*`, named gap). `absent-unmeasured` only on a RESUMED
-  release (marker already journaled); a first issue with no leaf refuses.
-- Trap: a crash after the leaf is removed loses the in-process lease; the re-issued release archives `absent-unmeasured`
-  (leaf proven absent, quota NOT re-measured) -- stated decision, option (a) a native recover-absent entry is an owner
-  call. Release DELETES the provisioned leaf: the admin re-provisions before the next workspace build.
+  fresh source, `remove_retained_tree_v1` removes the RUN CHILD via the no-follow fd-relative walk
+  `retained_tree_remove_v1.spl` (same st_dev AND mnt_id, owner uid == euid under keep-id, symlinks unlinked never
+  followed), close every fd, observe the still-retained leaf lease) -> end loan -> archive `host-retention-released/`.
+  Slot must be free (later incarnation).
+- Per-run workspace (milestone_0047, owner decision 1 "use worktree", 2026-11-19, specs NOT_RUN): every workspace run
+  (remote build AND agent) stages into its OWN child `run-<sha256(op id)>` (68 bytes) of the admin-provisioned leaf
+  (`linux_workspace_run_leaf_v1` / `linux_workspace_run_root_v1`, linux_workspace_profile_v1.spl). The request's ONE mount
+  must be that child (source request match, `linux_fresh_workspace_request_v3`, launch `--mount src=`, created-config
+  inspect, and P2-a `linux-host-remote-build-profile-run-root` at prepare). `remote-run` host-inputs `hostRoot` names the
+  LEAF; the author appends the child. The child is created exclusive + no-follow beneath the held leaf fd AFTER the
+  effect is recorded (`workspace_run_directory_create_v1`), proven empty, and its identity is in
+  `directory_binding_digest` (binding holds parent, leaf, run). The leaf, its XFS project lease and quota stay: the admin
+  provisions ONCE; release deletes only the run child (`remove_child_tree_v1`), never the leaf.
+- Trap: the XFS project quota (hard_bytes) is SHARED by every retained run child: a full project refuses new staging
+  until releases happen (fail closed). `run-removed` archives the remaining project usage, not zero.
+- Trap: the native owner admits ONE lease per scope (second admit = EBUSY). A retention release recovers the leaf's lease
+  and it stays in-process, so `retention_lease_held` refuses every later workload prepare in that incarnation
+  (`linux-host-retention-lease-held`) until restart; further releases reuse it. Release also needs an empty slot row.
+- Trap: `absent-unmeasured` (unchanged, owner decision 2) only on a RESUMED release whose run child is already gone; a
+  first issue with no child refuses (`workspace-retention-release-run-absent`) after journaling the marker, so the
+  re-issue converges.
 - Trap: journal relative path parts are <= 128 bytes; `<sha>-<sha>.sdn` (133) is invalid -- use `<sha>/<sha>.sdn`.
 ### Controller remote-run (milestone_0030 controller half, specs NOT_RUN)
 `simple orchestrator remote-run --dispatch-root --config-digest --key-store --approver --spec <dir> --out --grant-id --expires-in-ms`

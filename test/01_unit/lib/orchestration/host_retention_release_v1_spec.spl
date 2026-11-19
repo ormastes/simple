@@ -3,9 +3,9 @@
 milestone_0045 (owner decision 2, 2026-11-19): the controller-signed `retention-release` of a remote build's retained
 workspace. The Host verifies the signed record (issuer == controller_ref, V4 signatures at its own clock, policy
 generation, revocation and session), checks it against its own archived outcome or reap record of that run, records the
-proof and a no-replace marker through the single journal writer, deletes the retained tree inside the build's keep-id
-mapping through the container provider (no-follow, fd-relative), releases the native storage lease, archives the
-outcome, and only then forgets the native lease. Written for owners of the Host service and the Linux provider.
+proof and a no-replace marker through the single journal writer, deletes the run's own retained child of the provisioned
+leaf inside the build's keep-id mapping through the container provider (no-follow, fd-relative; milestone_0047), and
+archives the outcome. The leaf and its native lease stay. Written for owners of the Host service and the Linux provider.
 ## Operator workflow
 Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
 Status: AUTHORED, NOT_RUN (no runnable `simple` binary on this host, 2026-11-19).
@@ -183,41 +183,44 @@ describe "Retention-release journal records (milestone_0045)":
             .to_equal("retention-release-exists")
         step("the outcome archive is no-replace: a repeat with the same facts answers the stored bytes")
         expect(host_retention_release_archived_v1(journal, "build_op_1").unwrap().is_none()).to_equal(true)
-        val effect = HostRetentionReleaseEffectV1(charge: "native-released", used_bytes: 0, used_inodes: 0, removed: 12)
+        val effect = HostRetentionReleaseEffectV1(charge: "run-removed", used_bytes: 4096, used_inodes: 3, removed: 12)
         val archived = host_retention_release_archive_v1(journal, "build_op_1", sha256_text(marker), effect, 1700000000000).unwrap()
         expect(host_retention_release_archived_v1(journal, "build_op_1").unwrap().unwrap()).to_equal(archived)
         expect(host_retention_release_archive_v1(journal, "build_op_1", sha256_text(marker), effect, 1700000009999).unwrap())
             .to_equal(archived)
-        step("a restart that finds the leaf gone and no native lease converges with the weaker, named evidence")
+        step("a resumed release that finds the run child already gone converges with the weaker, named evidence")
         val absent = HostRetentionReleaseEffectV1(charge: "absent-unmeasured", used_bytes: -1, used_inodes: -1, removed: -1)
         val converged = host_retention_release_archive_v1(journal, "build_op_9", "6".repeat(64), absent, 1700000000000).unwrap()
         expect(host_retention_released_decode_v1(converged).unwrap().charge).to_equal("absent-unmeasured")
-        step("an archive with an unknown charge class or a measured release that left usage is refused")
+        step("an archive with an unknown or retired charge class, or a run removal that removed nothing, is refused")
         expect(host_retention_release_archive_v1(journal, "build_op_8", "6".repeat(64),
             HostRetentionReleaseEffectV1(charge: "guess", used_bytes: 0, used_inodes: 0, removed: 0), 1).is_err()).to_equal(true)
         expect(host_retention_release_archive_v1(journal, "build_op_8", "6".repeat(64),
-            HostRetentionReleaseEffectV1(charge: "native-released", used_bytes: 4096, used_inodes: 1, removed: 0), 1).is_err()).to_equal(true)
+            HostRetentionReleaseEffectV1(charge: "native-released", used_bytes: 0, used_inodes: 0, removed: 1), 1).is_err()).to_equal(true)
+        expect(host_retention_release_archive_v1(journal, "build_op_8", "6".repeat(64),
+            HostRetentionReleaseEffectV1(charge: "run-removed", used_bytes: 0, used_inodes: 0, removed: 0), 1).is_err()).to_equal(true)
         val closed = host_capacity_owner_close_owned_v2(opened[0])
         expect(closed.closed and closed.error == "").to_equal(true)
         expect(dir_remove(root, true)).to_equal(true)
 
 describe "Retention-release order and wiring (milestone_0045)":
-    it "verifies, derives, checks and records before any effect, and forgets the native lease only after the archive":
-        # @req M45-RETENTION-RELEASE (decision recorded before the delete; the charge is released through the journal)
+    it "verifies, derives, checks and records before any effect, and archives after the effect":
+        # @req M45-RETENTION-RELEASE (decision recorded before the delete; milestone_0047: the leaf's lease is never released)
         val handler = rr_body(RR_SERVICE, "fn linux_service_retention_release_v4(", "\n# milestone_0045 retention-release inspect")
         val verify = handler.index_of("host_retention_release_admit_v1(")
         val lend = handler.index_of("lend_workspace_root_v1()")
         val effect = handler.index_of("linux_workspace_retention_release_v1(")
         val end_loan = handler.index_of("end_workspace_root_loan_v1(")
         val archive = handler.index_of("host_retention_release_archive_v1(")
-        val forget = handler.index_of("workspace_storage_forget_released_v1(")
         expect(verify >= 0 and lend > verify and effect > lend and end_loan > effect).to_equal(true)
-        expect(archive > effect and forget > archive).to_equal(true)
+        expect(archive > effect).to_equal(true)
+        expect(handler.contains("workspace_storage_forget_released_v1")).to_equal(false)
         step("journal writes go through the held capacity journal (borrowed, never taken out of the owner)")
         expect(handler.contains("owner.capacity.unwrap().journal")).to_equal(true)
         expect(handler.contains("continuity_proven = true")).to_equal(false)
-        step("the slot must be free: no agent, no build, no consumed incarnation, no retained root loan")
-        for gate in ["owner.agent.is_some()", "owner.build.is_some()", "owner.agent_consumed", "owner.agent_root.is_some()"]:
+        step("the slot must be free: no agent, no build, no admitted slot row, no consumed incarnation, no retained root loan")
+        for gate in ["owner.agent.is_some()", "owner.build.is_some()", "owner.agent_consumed", "owner.agent_root.is_some()",
+                "owner.agent_operation_id != \"\""]:
             expect(handler.contains(gate)).to_equal(true)
         val admit = rr_body(RR_HOST, "pub fn host_retention_release_admit_v1(", "\npub fn ")
         val v = admit.index_of("host_retention_release_verify_v1(")
@@ -226,31 +229,33 @@ describe "Retention-release order and wiring (milestone_0045)":
         val check = admit.index_of("host_retention_release_check_v1(")
         val publish = admit.index_of("host_retention_release_record_publish_v1(")
         expect(v >= 0 and archived > v and derive > archived and check > derive and publish > check).to_equal(true)
-        step("the shared leaf: only the ONE unreleased row that may hold its tree is releasable; no-workload outcomes retain nothing")
+        step("milestone_0047: each run has its own child, so no shared-holder admission; no-workload outcomes retain nothing")
         val derivation = rr_body(RR_HOST, "pub fn host_retention_release_expected_v1(", "\npub fn ")
-        expect(derivation.contains("retention-release-ambiguous:unreleased=")).to_equal(true)
-        expect(derivation.contains("retention-release-ambiguous:live=")).to_equal(true)
+        expect(derivation.contains("retention-release-ambiguous")).to_equal(false)
         expect(derivation.contains("retention-release-nothing-retained")).to_equal(true)
         expect(file_read_text(RR_HOST).contains("source_return != \"retained-returned\"")).to_equal(true)
 
-    it "deletes inside the keep-id mapping through the provider, closes every fd, then proves the release":
-        # @req M45-RETENTION-RELEASE (no-follow fd-relative delete; release_if_absent only after every fd is closed)
+    it "deletes only the run child inside the keep-id mapping through the provider and closes every fd":
+        # @req M45-RETENTION-RELEASE (no-follow fd-relative delete; milestone_0047: the provisioned leaf and its lease stay)
         val effect = rr_body(RR_PROVIDER, "pub fn linux_workspace_retention_release_v1(", "\nexport ")
         val recover = effect.index_of("root.recover_lease_v3()")
         val open = effect.index_of("root.open_source_v3(")
+        val absent = effect.index_of(".retained_run_absent_v1(")
         val remove = effect.index_of(".remove_retained_tree_v1(")
-        val close = effect.index_of(".close_v1()")
-        val release = effect.index_of("workspace_storage_release_if_absent_v1(")
-        expect(recover >= 0 and open > recover and remove > open and close > remove and release > close).to_equal(true)
+        val close = effect.index_of("val closed = source.close_v1()")
+        val observe = effect.index_of("workspace_storage_observe_v1(lease)")
+        expect(recover >= 0 and open > recover and absent > open and remove > absent and close > remove and observe > close)
+            .to_equal(true)
+        expect(effect.contains("workspace_storage_release_if_absent_v1")).to_equal(false)
         expect(effect.contains("workspace_storage_forget_released_v1")).to_equal(false)
         expect(effect.contains("absent-unmeasured")).to_equal(true)
-        step("a first issue that finds no leaf refuses; only a resumed (already journaled) release converges absent-unmeasured")
-        expect(effect.contains("if not resumed: return retention_release_failed_v1(\"workspace-retention-release-leaf-absent\")")).to_equal(true)
+        step("a first issue that finds no run child refuses; only a resumed (already journaled) release converges absent-unmeasured")
+        expect(effect.contains("if not resumed: return retention_release_failed_v1(\"workspace-retention-release-run-absent\")")).to_equal(true)
         val mount = rr_body(RR_MOUNT, "    pub fn remove_retained_tree_v1(", "\n    pub fn ")
         expect(mount.contains("request.user_namespace_mode != \"keep-id\"")).to_equal(true)
         expect(mount.contains("sample.request.user_uid != sample.process.effective_uid")).to_equal(true)
-        expect(mount.contains(".remove_tree_contents_v1(sample.process.effective_uid)")).to_equal(true)
-        expect(mount.contains(".remove_child_directory_v1(")).to_equal(true)
+        expect(mount.contains(".remove_child_tree_v1(linux_workspace_run_leaf_v1(sample.request.operation_id), sample.process.effective_uid)"))
+            .to_equal(true)
         expect(mount.contains("phase = \"retention-removed\"")).to_equal(true)
 
     it "routes host-control `retention-inspect` / `retention-release` to the owner through the full recheck":
