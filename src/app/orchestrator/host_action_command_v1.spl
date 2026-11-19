@@ -2,6 +2,10 @@
 # service actions, over the shared authenticated control exchange (V6 `host-control`, dispatch mode `host-action`):
 #   helper-abandon  - release one charged V4 attach-broker helper row the deadline reap cannot prove (milestone_0036 A)
 #   handoff-abandon - void the one OPS-01 pending handoff a successor cannot verify (AT-OPS-01 recovery a)
+#   retention-release - release a remote build's retained workspace (milestone_0045, owner decision 2): the Host inspect
+#                     returns its own part of the record; the controller adds ITS terminal state of the same run from its
+#                     own journal (completed, failed or cancelled; anything else refuses, `outcome-unknown` needs
+#                     remote-run-abandon first) and the full record is what is confirmed and signed.
 # Phase 1 (no --confirm) reads the Host's read-only inspect, checks it names the requested row and the installed host,
 # prints the exact canonical record and its sha256, and signs nothing. Phase 2 (--confirm <sha256> plus the signing
 # options) re-reads it, refuses unless the digest is the confirmed one, issues the grant+approval with the controller's
@@ -21,6 +25,9 @@ use std.common.contracts.orchestration.host_helper_abandon_v1.{HostHelperAbandon
     host_helper_abandon_proof_encode_v1}
 use std.common.contracts.orchestration.host_service_handoff_v1.{HostServiceHandoffAbandonProofV1,
     host_service_handoff_abandon_decode_v1, host_service_handoff_abandon_proof_encode_v1}
+use std.common.contracts.orchestration.host_retention_release_v1.{HostRetentionReleaseProofV1, HOST_RETENTION_RELEASE_STATES_V1,
+    host_retention_release_decode_v1, host_retention_release_bytes_v1, host_retention_release_proof_encode_v1}
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
@@ -29,6 +36,7 @@ use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
 use std.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms}
 
+val HOST_ACTION_COMMANDS_V1 = ["helper-abandon", "handoff-abandon", "retention-release"]
 val HOST_ACTION_BASE_OPTIONS_V1 = ["--dispatch-root", "--config-digest", "--abandon-id"]
 val HOST_ACTION_SIGN_OPTIONS_V1 = ["--confirm", "--key-store", "--approver", "--grant-id", "--expires-in-ms"]
 # One authenticated exchange never waits longer than this (same bound as remote-run).
@@ -38,12 +46,12 @@ class HostActionBoxV1:
     var owner: Option<ControllerDispatchOwnerV3> = None
     var root_cleanup: Option<ControllerLocalRootV3> = None
 
-# `helper-abandon` needs --operation (the charged helper row); `handoff-abandon` names none (the Host's current pending
-# sequence). The five signing options are all present (phase 2) or all absent (phase 1). Each option once.
+# `helper-abandon` needs --operation (the charged helper row), `retention-release` too (the remote-build row);
+# `handoff-abandon` names none (the Host's current pending sequence). The five signing options are all present (phase 2) or all absent (phase 1). Each option once.
 pub fn host_action_options_v1(args: [text]) -> Result<Dict<text, text>, text>:
-    if args.len() < 1 or not ["helper-abandon", "handoff-abandon"].contains(args[0]): return Err("host-action-usage")
+    if args.len() < 1 or not HOST_ACTION_COMMANDS_V1.contains(args[0]): return Err("host-action-usage")
     var allowed: [text] = HOST_ACTION_BASE_OPTIONS_V1 + HOST_ACTION_SIGN_OPTIONS_V1
-    if args[0] == "helper-abandon": allowed = allowed + ["--operation"]
+    if args[0] != "handoff-abandon": allowed = allowed + ["--operation"]
     if args.len() % 2 != 1: return Err("host-action-usage")
     var options: Dict<text, text> = {}
     var index = 1
@@ -55,7 +63,7 @@ pub fn host_action_options_v1(args: [text]) -> Result<Dict<text, text>, text>:
         index = index + 2
     for name in HOST_ACTION_BASE_OPTIONS_V1:
         if not options.contains_key(name): return Err("host-action-usage")
-    if args[0] == "helper-abandon" and not options.contains_key("--operation"): return Err("host-action-usage")
+    if args[0] != "handoff-abandon" and not options.contains_key("--operation"): return Err("host-action-usage")
     var signing = 0
     for name in HOST_ACTION_SIGN_OPTIONS_V1:
         if options.contains_key(name): signing = signing + 1
@@ -70,11 +78,19 @@ pub fn host_action_options_v1(args: [text]) -> Result<Dict<text, text>, text>:
 
 pub fn host_action_inspect_payload_v1(command: text, operation_id: text) -> Result<text, text>:
     if command == "helper-abandon": return host_control_sub_encode_v6(HostControlSubRequestV6(sub: "helper-inspect", frame: operation_id))
+    if command == "retention-release":
+        return host_control_sub_encode_v6(HostControlSubRequestV6(sub: "retention-inspect", frame: operation_id))
     host_control_sub_encode_v6(HostControlSubRequestV6(sub: "handoff-inspect", frame: "pending"))
 
 # The inspected bytes must be the canonical record of this command's kind, name the requested helper row (helper only)
 # and the installed binding's physical host. Returns sha256 of the bytes: the record digest the envelope binds.
 pub fn host_action_record_check_v1(command: text, source: text, operation_id: text, host_id: text) -> Result<text, text>:
+    if command == "retention-release":
+        val part = host_retention_release_decode_v1(source)?
+        if part.operation_id != operation_id: return Err("host-action-record-operation")
+        if part.physical_host_id != host_id: return Err("host-action-record-host")
+        if part.controller_state != "": return Err("host-action-record-controller")
+        return Ok(sha256_text(source))
     if command == "helper-abandon":
         val record = host_helper_abandon_decode_v1(source)?
         if record.operation_id != operation_id: return Err("host-action-record-operation")
@@ -83,6 +99,16 @@ pub fn host_action_record_check_v1(command: text, source: text, operation_id: te
     val record = host_service_handoff_abandon_decode_v1(source)?
     if record.physical_host_id != host_id: return Err("host-action-record-host")
     Ok(sha256_text(source))
+
+# retention-release: the controller's OWN terminal state of the run completes the Host part (checked above). A row that is
+# not completed, failed or cancelled refuses; the returned full record is what is confirmed and signed.
+pub fn host_action_retention_record_v1(part_source: text, state: text, row_digest: text, outcome_digest: text) -> Result<text, text>:
+    if not HOST_RETENTION_RELEASE_STATES_V1.contains(state): return Err("host-action-retention-run-unsettled:" + state)
+    var record = host_retention_release_decode_v1(part_source)?
+    record.controller_state = state
+    record.controller_row_digest = row_digest
+    record.controller_outcome_digest = outcome_digest
+    host_retention_release_bytes_v1(record)
 
 pub fn host_action_confirm_v1(confirmed: text, digest: text) -> Result<(), text>:
     if confirmed != digest: return Err("host-action-confirm-mismatch:expected=" + digest)
@@ -131,6 +157,10 @@ fn host_action_send_v1(box: HostActionBoxV1, payload: text) -> Result<text, text
 
 fn host_action_abandon_payload_v1(command: text, record: text, operation: OperationEnvelopeV2,
         signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2) -> Result<text, text>:
+    if command == "retention-release":
+        val release = host_retention_release_proof_encode_v1(HostRetentionReleaseProofV1(release: host_retention_release_decode_v1(record)?,
+            operation: operation, signed: signed, approval: approval))?
+        return host_control_sub_encode_v6(HostControlSubRequestV6(sub: "retention-release", frame: release))
     if command == "helper-abandon":
         val proof = host_helper_abandon_proof_encode_v1(HostHelperAbandonProofV1(abandon: host_helper_abandon_decode_v1(record)?,
             operation: operation, signed: signed, approval: approval))?
@@ -187,6 +217,18 @@ pub fn host_action_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
         return host_action_finish_v1(box, 1, host_action_output_v1(command, "refused", abandon_id, "", "",
             if context.is_err(): context.unwrap_err() else: config.unwrap_err()))
     val host_id = config.unwrap().host_binding.physical_host_id
+    # retention-release: the controller's own row of the run, read before the root is lent to the exchange.
+    var controller_row: [text] = []
+    if command == "retention-release":
+        val store = root.workload_v3()
+        var row_error = if store.is_err(): store.unwrap_err() else: ""
+        if row_error == "":
+            val row = distributed_operation_journal_lookup_v2(store.unwrap().journal, helper_operation)
+            if row.is_err(): row_error = "host-action-retention-row-missing"
+            else: controller_row = [row.unwrap().state, row.unwrap().envelope_digest, row.unwrap().outcome_digest]
+        if row_error != "":
+            box.root_cleanup = Some(root)
+            return host_action_finish_v1(box, 1, host_action_output_v1(command, "refused", abandon_id, "", "", row_error))
     val begun = host_action_wait_v1(box, controller_dispatch_host_action_begin_v3(root, abandon_id))
     if begun.is_err(): return host_action_finish_v1(box, 1, host_action_output_v1(command, "refused", abandon_id, "", "", begun.unwrap_err()))
     val inspect = host_action_inspect_payload_v1(command, helper_operation)
@@ -194,9 +236,14 @@ pub fn host_action_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
     val inspected = host_action_send_v1(box, inspect.unwrap())
     if inspected.is_err():
         return host_action_finish_v1(box, 1, host_action_output_v1(command, "host-refused", abandon_id, "", "", inspected.unwrap_err()))
-    val record = inspected.unwrap()
-    val digest = host_action_record_check_v1(command, record, helper_operation, host_id)
+    var record = inspected.unwrap()
+    var digest = host_action_record_check_v1(command, record, helper_operation, host_id)
     if digest.is_err(): return host_action_finish_v1(box, 1, host_action_output_v1(command, "refused", abandon_id, "", "", digest.unwrap_err()))
+    if command == "retention-release":
+        val full = host_action_retention_record_v1(record, controller_row[0], controller_row[1], controller_row[2])
+        if full.is_err(): return host_action_finish_v1(box, 1, host_action_output_v1(command, "refused", abandon_id, record, "", full.unwrap_err()))
+        record = full.unwrap()
+        digest = Ok(sha256_text(record))
     # Phase 1: print exactly what phase 2 would sign; nothing is signed or sent.
     if not options.contains_key("--confirm"):
         return host_action_finish_v1(box, 0, host_action_output_v1(command, "plan", abandon_id, record, digest.unwrap(), ""))
@@ -207,7 +254,7 @@ pub fn host_action_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
     if ttl.is_err(): return host_action_finish_v1(box, 2, host_action_output_v1(command, "refused", abandon_id, record, digest.unwrap(), ttl.unwrap_err()))
     val now = controller_dispatch_grant_clock_v1()
     if now.is_err(): return host_action_finish_v1(box, 1, host_action_output_v1(command, "refused", abandon_id, record, digest.unwrap(), now.unwrap_err()))
-    val kind = if command == "helper-abandon": "helper-abandon" else: "service-handoff-abandon"
+    val kind = if command == "handoff-abandon": "service-handoff-abandon" else: command
     val issued = controller_host_action_issue_v1(context.unwrap(), controller_authority_store_reader_v1(options["--key-store"]),
         options["--approver"], kind, abandon_id, digest.unwrap(), host_id, options["--grant-id"], ttl.unwrap(), now.unwrap())
     if issued.is_err():
@@ -220,7 +267,8 @@ pub fn host_action_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
     val sent = host_action_send_v1(box, payload.unwrap())
     if sent.is_err():
         return host_action_finish_v1(box, 1, host_action_output_v1(command, "host-refused", abandon_id, record, digest.unwrap(), sent.unwrap_err()))
-    host_action_finish_v1(box, 0, host_action_output_v1(command, "abandoned", abandon_id, record, digest.unwrap(), sent.unwrap()))
+    val done = if command == "retention-release": "released" else: "abandoned"
+    host_action_finish_v1(box, 0, host_action_output_v1(command, done, abandon_id, record, digest.unwrap(), sent.unwrap()))
 
 export host_action_options_v1, host_action_inspect_payload_v1, host_action_record_check_v1, host_action_confirm_v1
-export host_action_refused_detail_v1, host_action_command_v1
+export host_action_refused_detail_v1, host_action_retention_record_v1, host_action_command_v1

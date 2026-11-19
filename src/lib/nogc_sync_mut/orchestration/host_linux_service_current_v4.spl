@@ -89,7 +89,11 @@ use std.nogc_sync_mut.orchestration.host_helper_owner_v1.host_helper_prepare_che
 use std.nogc_sync_mut.orchestration.host_helper_request_v1.{HostHelperRequestV1, host_helper_request_decode_v1}
 use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.HostHelperStoreV1
 use std.nogc_sync_mut.orchestration.host_primary_attach_owner_v1.host_primary_attach_open_entry_check_v1
-use std.container.LinuxWorkspaceRootBorrowV3
+use std.container.{LinuxWorkspaceRootBorrowV3, linux_workspace_retention_release_v1}
+use std.nogc_sync_mut.storage_roots.workspace_storage_owner_v1.workspace_storage_forget_released_v1
+use std.nogc_sync_mut.orchestration.host_remote_build_retention_release_v1.{host_retention_release_admit_v1,
+    host_retention_release_archive_v1, host_retention_release_inspect_v1}
+use std.common.contracts.orchestration.host_retention_release_v1.HostRetentionReleaseEffectV1
 use std.nogc_sync_mut.orchestration.host_linux_service_reconcile_v4.host_linux_service_reconcile_flip_v4
 use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_reap_v4.{host_remote_build_reap_v4,
     host_remote_build_prepare_reaped_gate_v4, host_remote_build_reap_index_relative_v4, host_remote_build_published_answer_v4}
@@ -1672,6 +1676,8 @@ pub fn host_linux_service_dispatch_v4(owner: HostLinuxServiceCurrentV4, action: 
     if action == "host_service_handoff_abandon_v1": return linux_service_handoff_abandon_v4(owner, source)
     if action == "host_helper_abandon_v1": return linux_service_helper_abandon_v4(owner, source)
     if action == "host_helper_inspect_v1": return linux_service_helper_inspect_v4(owner, source)
+    if action == "host_retention_release_v1": return linux_service_retention_release_v4(owner, source)
+    if action == "host_retention_inspect_v1": return linux_service_retention_inspect_v4(owner, source)
     if action == "host_service_handoff_inspect_v1": return linux_service_handoff_inspect_v4(owner)
     if action == "host_prepare_associated_v3": return host_linux_service_prepare_v4(owner, source, project)
     if action == "host_execute_associated_v3": return host_linux_service_execute_v4(owner, source)
@@ -1771,6 +1777,61 @@ fn linux_service_helper_inspect_v4(owner: HostLinuxServiceCurrentV4, source: tex
     val live = linux_service_helper_attachment_guard_v4(owner, source)
     if live != "": return linux_service_reply_v4(owner, "", live, false)
     val record = host_helper_abandon_inspect_v1(owner.capacity.unwrap().journal, source, owner.scope.unwrap().physical_host_id)
+    if record.is_err(): return linux_service_reply_v4(owner, "", record.unwrap_err(), false)
+    linux_service_reply_v4(owner, record.unwrap(), "", false)
+
+# milestone_0045 retention release (owner decision 2): the controller-signed release of a remote build's retained
+# workspace. Runs only in an incarnation with a free slot (no agent, no build, nothing consumed, no root loan held) after
+# continuity and reconcile: each incarnation runs one workload, so a retained tree is released by a later incarnation.
+# Admission (verify, derive, check, record proof + marker) is journaled BEFORE any effect; the root loan is lent for the
+# provider effect only and ended before the archive; the native lease is forgotten only after the archive is durable.
+# A re-issued release converges after any crash (host_remote_build_retention_release_v1). Never a continuity flip.
+fn linux_service_retention_release_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    val ready = linux_service_remote_build_ready_v4(owner)
+    if ready != "": return linux_service_reply_v4(owner, "", ready, false)
+    if owner.agent.is_some() or owner.build.is_some() or owner.agent_consumed or owner.agent_root.is_some():
+        return linux_service_reply_v4(owner, "", "linux-host-retention-release-slot-busy", false)
+    if owner.admission.is_none() or owner.admission.unwrap().owner.is_none():
+        return linux_service_reply_v4(owner, "", "linux-host-service-admission-missing", false)
+    val policy = metadata.unwrap().policy
+    val admitted = host_retention_release_admit_v1(owner.capacity.unwrap().journal, owner.capacity.unwrap().ledger, policy,
+        metadata.unwrap().configuration.controller_ref, host_local_context_v1(policy), owner.scope.unwrap().physical_host_id, source)
+    # A refusal after verification may have left the proof or the marker behind (both harmless and idempotent).
+    if admitted.is_err(): return linux_service_reply_v4(owner, "", admitted.unwrap_err(), true)
+    if admitted.unwrap().archived != "": return linux_service_reply_v4(owner, admitted.unwrap().archived, "", true)
+    var admission = owner.admission.unwrap()
+    val lent = admission.owner.unwrap().lend_workspace_root_v1()
+    admission.owner = Some(lent.owner)
+    owner.admission = Some(admission)
+    if lent.error != "" or lent.root.is_none():
+        return linux_service_reply_v4(owner, "", if lent.error != "": lent.error else: "linux-host-retention-release-root-missing", true)
+    val effect = linux_workspace_retention_release_v1(lent.root.unwrap(), admitted.unwrap().request_bytes, admitted.unwrap().resumed)
+    val ended = admission.owner.unwrap().end_workspace_root_loan_v1(lent.root.unwrap())
+    admission.owner = Some(ended.owner)
+    owner.admission = Some(admission)
+    # A refused loan end keeps the borrow here; the close path ends it first (3.3 N-05).
+    if ended.error != "": owner.agent_root = lent.root
+    if effect.error != "": return linux_service_reply_v4(owner, "", effect.error, true)
+    val archived = host_retention_release_archive_v1(owner.capacity.unwrap().journal, admitted.unwrap().operation_id,
+        sha256_text(admitted.unwrap().marker), HostRetentionReleaseEffectV1(charge: effect.charge, used_bytes: effect.used_bytes,
+        used_inodes: effect.used_inodes, removed: effect.removed), host_local_context_v1(policy).grant_clock)
+    if archived.is_err(): return linux_service_reply_v4(owner, "", archived.unwrap_err(), true)
+    if val lease = effect.lease:
+        val forgotten = workspace_storage_forget_released_v1(lease)
+        if forgotten.is_err(): return linux_service_reply_v4(owner, archived.unwrap(), forgotten.unwrap_err(), true)
+    if ended.error != "": return linux_service_reply_v4(owner, archived.unwrap(), ended.error, true)
+    linux_service_reply_v4(owner, archived.unwrap(), "", true)
+
+# milestone_0045 retention-release inspect: the canonical Host part of the record (no controller fields) the controller's
+# `retention-release` command reads before it adds its own terminal state and the operator signs. Read-only DATA.
+fn linux_service_retention_inspect_v4(owner: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    val record = host_retention_release_inspect_v1(owner.capacity.unwrap().journal, owner.capacity.unwrap().ledger, source,
+        owner.scope.unwrap().physical_host_id)
     if record.is_err(): return linux_service_reply_v4(owner, "", record.unwrap_err(), false)
     linux_service_reply_v4(owner, record.unwrap(), "", false)
 

@@ -1,0 +1,151 @@
+"""
+## Purpose and audience
+milestone_0045 (owner decision 2, 2026-11-19): the no-follow recursive removal BENEATH one held directory descriptor
+that the Host's controller-signed `retention-release` uses to delete a remote build's retained workspace tree
+(`src/lib/nogc_sync_mut/io/retained_tree_remove_v1.spl`, reached through `RetainedDirectoryOwnerV1`). Every child is
+reached by openat/unlinkat relative to a held directory fd (O_DIRECTORY|O_NOFOLLOW), statx'ed no-follow, and must carry
+the root's st_dev AND mount id and the expected owner uid; a symlink is unlinked, never followed.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable `simple` binary on this host, 2026-11-19).
+## Compatibility and limitations
+Linux only. The temp-tree cases use a private directory under /tmp owned by the runner (no privilege). The
+provisioned-workspace case needs a real XFS project workspace and is BLOCKED unless its fixture env is set (B-10).
+## Verification guidance and troubleshooting
+A refusal leaves the remaining tree retained; the codes are `retained-tree-*`. The temp-tree cases skip silently where
+`anchored_linux_directory_flags_v1() == 0` (unsupported architecture).
+"""
+use std.spec.{step, fail, pending}
+use std.io_runtime.env_get_opt
+use std.nogc_sync_mut.io.retained_tree_remove_v1.*
+use std.nogc_sync_mut.io.retained_file.retained_directory_open_trusted_v1
+use std.nogc_sync_mut.io.anchored_io_linux_v1.anchored_linux_directory_flags_v1
+use std.nogc_sync_mut.io.dir_entry_ops.directory_create_private
+use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_remove_all}
+use std.nogc_sync_mut.io_runtime.{file_write, file_exists, dir_exists, process_run}
+use std.nogc_sync_mut.io.file_ops.package_chmod
+use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
+use std.common.text_bytes.text_to_utf8_bytes
+use std.common.string_core.string_to_int
+
+fn tree_base_v1(tag: text) -> text:
+    val base = "/tmp/simple-retained-tree-spec-" + tag + "-" + str(time_sample_monotonic_nanos_or_failure())
+    expect(directory_create_private(base)).to_equal(true)
+    base
+
+fn tree_entry_v1(kind: text, uid: i64, device: [u8] = [1u8, 0u8, 0u8, 0u8, 2u8, 0u8, 0u8, 0u8],
+        mount_id: i64 = 7) -> RetainedTreeEntryV1:
+    RetainedTreeEntryV1(kind: kind, identity: [9u8], device: device, mount_id: mount_id, uid: uid, mode: 16832)
+
+fn tree_euid_v1() -> i64:
+    val (out, _err, code) = process_run("id", ["-u"])
+    if code != 0: fail("id -u failed")
+    string_to_int(out.trim())
+
+# Fixture-environment gate (owner decision 2026-11-16, OPEN_ISSUE B-10): BLOCKED (counted, never a pass) and returns
+# before any native step when the provisioned workspace fixture is not configured.
+fn tree_live_missing_v1() -> text:
+    if (env_get_opt("SIMPLE_RETENTION_WORKSPACE_FIXTURE_ROOT") ?? "") == "": return "SIMPLE_RETENTION_WORKSPACE_FIXTURE_ROOT"
+    ""
+
+describe "Retained tree removal decision (milestone_0045 retention release)":
+    it "unlinks non-directories, descends into directories, and refuses foreign owners, mounts and depth":
+        # @req M45-RETENTION-RELEASE (no-follow, same st_dev + mount id, owner uid only)
+        val root = tree_entry_v1("directory", 1000)
+        expect(retained_tree_entry_action_v1(tree_entry_v1("other", 1000), root, 1000, 1).unwrap()).to_equal("unlink")
+        expect(retained_tree_entry_action_v1(tree_entry_v1("directory", 1000), root, 1000, 1).unwrap()).to_equal("descend")
+        step("an entry the guest could not have created under keep-id (another uid) is refused, never removed")
+        expect(retained_tree_entry_action_v1(tree_entry_v1("other", 0), root, 1000, 1).unwrap_err()).to_equal("retained-tree-foreign-owner")
+        expect(retained_tree_entry_action_v1(tree_entry_v1("other", 100999), root, 1000, 1).unwrap_err())
+            .to_equal("retained-tree-foreign-owner")
+        step("another device or another mount id (a bind mount on the same device) is a mount crossing")
+        expect(retained_tree_entry_action_v1(tree_entry_v1("directory", 1000, [3u8, 0u8, 0u8, 0u8, 2u8, 0u8, 0u8, 0u8]), root, 1000, 1)
+            .unwrap_err()).to_equal("retained-tree-mount-crossing")
+        expect(retained_tree_entry_action_v1(tree_entry_v1("other", 1000, [1u8, 0u8, 0u8, 0u8, 2u8, 0u8, 0u8, 0u8], 8), root, 1000, 1)
+            .unwrap_err()).to_equal("retained-tree-mount-crossing")
+        step("descending past the bound is refused (the bound fd stack never overflows)")
+        expect(retained_tree_entry_action_v1(tree_entry_v1("directory", 1000), root, 1000, RETAINED_TREE_DEPTH_V1).unwrap_err())
+            .to_equal("retained-tree-depth")
+
+    it "classifies only the statx file-type bits and rejects the dot names":
+        # @req M45-RETENTION-RELEASE (d_type is never trusted)
+        expect(retained_tree_kind_v1(16877)).to_equal("directory")
+        expect(retained_tree_kind_v1(33188)).to_equal("other")
+        expect(retained_tree_kind_v1(41471)).to_equal("other")
+        expect(retained_tree_dot_v1([46u8])).to_equal(true)
+        expect(retained_tree_dot_v1([46u8, 46u8])).to_equal(true)
+        expect(retained_tree_dot_v1([46u8, 46u8, 46u8])).to_equal(false)
+        expect(retained_tree_dot_v1(text_to_utf8_bytes(".hidden"))).to_equal(false)
+
+describe "Retained tree removal on a private temp tree (milestone_0045)":
+    it "removes a nested tree with read-only dirs and a symlink whose target outside the root survives":
+        # @req M45-RETENTION-RELEASE (no-follow: a symlink is unlinked, its target never touched)
+        if anchored_linux_directory_flags_v1() == 0: return
+        val base = tree_base_v1("nested")
+        val outside = base + "/outside"
+        expect(dir_create(outside, false)).to_equal(true)
+        expect(file_write(outside + "/sentinel", "keep\n")).to_equal(true)
+        val leaf = base + "/workspace"
+        expect(dir_create(leaf + "/a/b/c", true)).to_equal(true)
+        expect(file_write(leaf + "/top.txt", "x\n")).to_equal(true)
+        expect(file_write(leaf + "/a/b/c/deep.txt", "y\n")).to_equal(true)
+        val (_o1, _e1, linked) = process_run("ln", ["-s", outside, leaf + "/a/escape"])
+        expect(linked).to_equal(0)
+        val (_o2, _e2, linked_file) = process_run("ln", ["-s", outside + "/sentinel", leaf + "/a/b/file-escape"])
+        expect(linked_file).to_equal(0)
+        step("a guest-made read-only directory (0555) is made writable by its owner before its entries are removed")
+        expect(package_chmod(leaf + "/a/b", 365)).to_equal(0)
+        val parent = retained_directory_open_trusted_v1(base).unwrap()
+        val root = retained_directory_open_trusted_v1(leaf).unwrap()
+        val removed = root.remove_tree_contents_v1(tree_euid_v1())
+        expect(removed.is_ok()).to_equal(true)
+        expect(removed.unwrap()).to_equal(7)
+        expect(root.directory_is_empty_v1().unwrap()).to_equal(true)
+        step("the leaf itself is removed through the held parent, bound to the held root identity")
+        expect(parent.remove_child_directory_v1("workspace", root).is_ok()).to_equal(true)
+        expect(parent.child_absent_v1("workspace").unwrap()).to_equal(true)
+        expect(dir_exists(leaf)).to_equal(false)
+        expect(file_exists(outside + "/sentinel")).to_equal(true)
+        var held = root
+        expect(held.close()).to_equal(true)
+        var holder = parent
+        expect(holder.close()).to_equal(true)
+        expect(dir_remove_all(base)).to_equal(true)
+
+    it "refuses a root the owner uid does not own and leaves the tree retained":
+        # @req M45-RETENTION-RELEASE (fail closed: nothing beyond the refusal point is removed)
+        if anchored_linux_directory_flags_v1() == 0: return
+        val base = tree_base_v1("foreign")
+        expect(dir_create(base + "/workspace/sub", true)).to_equal(true)
+        expect(file_write(base + "/workspace/sub/kept.txt", "z\n")).to_equal(true)
+        val root = retained_directory_open_trusted_v1(base + "/workspace").unwrap()
+        step("an owner uid the held root does not carry refuses before any entry is touched (entries: decision case above)")
+        expect(root.remove_tree_contents_v1(tree_euid_v1() + 1).unwrap_err()).to_equal("retained-tree-root")
+        expect(file_exists(base + "/workspace/sub/kept.txt")).to_equal(true)
+        step("removing the leaf of a non-empty directory is refused by the kernel and keeps it")
+        val parent = retained_directory_open_trusted_v1(base).unwrap()
+        expect(parent.remove_child_directory_v1("workspace", root).unwrap_err()).to_equal("retained-tree-leaf-remove")
+        expect(dir_exists(base + "/workspace/sub")).to_equal(true)
+        step("a leaf name that is not the held root is refused before any unlink")
+        expect(dir_create(base + "/other", false)).to_equal(true)
+        expect(parent.remove_child_directory_v1("other", root).unwrap_err()).to_equal("retained-tree-leaf-identity")
+        expect(dir_exists(base + "/other")).to_equal(true)
+        var held = root
+        expect(held.close()).to_equal(true)
+        var holder = parent
+        expect(holder.close()).to_equal(true)
+        expect(dir_remove_all(base)).to_equal(true)
+
+describe "Retained tree removal on a provisioned XFS workspace (milestone_0045, live root)":
+    it "removes a provisioned workspace tree without crossing its mount":
+        # @req M45-RETENTION-RELEASE (live root; BLOCKED unless the provisioned fixture is configured)
+        val missing = tree_live_missing_v1()
+        if missing != "":
+            pending("BLOCKED: provisioned XFS workspace fixture env unset: " + missing)
+            return
+        val path = env_get_opt("SIMPLE_RETENTION_WORKSPACE_FIXTURE_ROOT") ?? ""
+        val root = retained_directory_open_trusted_v1(path).unwrap()
+        expect(root.remove_tree_contents_v1(tree_euid_v1()).is_ok()).to_equal(true)
+        expect(root.directory_is_empty_v1().unwrap()).to_equal(true)
+        var held = root
+        expect(held.close()).to_equal(true)

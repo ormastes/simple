@@ -8,6 +8,8 @@ use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
 use std.nogc_sync_mut.io.retained_directory_stage_v1.{retained_stage_directory_fd_v1, retained_stage_file_bytes_v1, retained_stage_leaf_v1}
 use std.nogc_sync_mut.io.anchored_io_linux_v1.anchored_linux_metadata_v1
 use std.nogc_sync_mut.io.retained_directory_empty_v1.retained_directory_empty_fd_v1
+use std.nogc_sync_mut.io.retained_tree_remove_v1.{retained_tree_remove_contents_v1, retained_tree_remove_child_directory_v1,
+    retained_tree_child_absent_v1}
 use std.nogc_sync_mut.io.retained_directory_process_cwd_v1.{retained_directory_birth_v1, retained_directory_cwd_duplicate_v1, retained_directory_cwd_enter_v1}
 @end
 use std.nogc_sync_mut.io.retained_file_flags_v1.{retained_linux_directory_flags_v1 as _retained_linux_directory_flags_v1, retained_linux_file_flags_v1 as _retained_linux_file_flags_v1}
@@ -200,6 +202,35 @@ pub class RetainedDirectoryOwnerV1:
         retained_directory_empty_fd_v1(self.handle)
         @else:
         Err("directory-empty-host-unsupported")
+        @end
+
+    # milestone_0045 retention release: no-follow removal of everything BENEATH this held directory, whose entries
+    # must all carry `owner_uid` and this directory's device and mount (retained_tree_remove_v1). Mechanism only.
+    # allow(primitive_api): reviewed owner uid / removed-entry count of the fd-level walk (milestone_0045)
+    pub fn remove_tree_contents_v1(owner_uid: i64) -> Result<i64, text>:
+        if self.closed or self.handle < 0: return Err("SCVDB_DIR_CLOSED")
+        @when(os="linux"):
+        retained_tree_remove_contents_v1(self.handle, owner_uid)
+        @else:
+        Err("retained-tree-host-unsupported")
+        @end
+
+    # Removes the emptied held `child` named `name` beneath this held parent (identity-bound, AT_REMOVEDIR).
+    pub fn remove_child_directory_v1(name: text, child: RetainedDirectoryOwnerV1) -> Result<(), text>:
+        if self.closed or self.handle < 0 or child.closed or child.handle < 0: return Err("SCVDB_DIR_CLOSED")
+        @when(os="linux"):
+        retained_tree_remove_child_directory_v1(self.handle, name, child.handle)
+        @else:
+        Err("retained-tree-host-unsupported")
+        @end
+
+    # Whether `name` is absent beneath this held parent (no-follow); any other failure is an error.
+    pub fn child_absent_v1(name: text) -> Result<bool, text>:
+        if self.closed or self.handle < 0: return Err("SCVDB_DIR_CLOSED")
+        @when(os="linux"):
+        retained_tree_child_absent_v1(self.handle, name)
+        @else:
+        Err("retained-tree-host-unsupported")
         @end
 
     # Identity DATA only, never writable policy or a raw descriptor accessor.
