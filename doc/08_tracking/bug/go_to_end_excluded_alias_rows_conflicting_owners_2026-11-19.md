@@ -1,6 +1,6 @@
 # go-to-end: one HIR failure in a package kills the whole MIR phase ("conflicting owners") + stale `Module` import in app.io.jit_sffi
 
-- Status: fix-implemented (source fix verified natively; compiler fix unit-specified, not yet proven in a rebuilt Stage 2)
+- Status: fix-implemented (A: verified natively; B and C: unit-specified, not yet proven in a rebuilt Stage 2)
 - Severity: P1 (blocked the Phase 4 full-CLI native build: 0 objects)
 - Found: 2026-11-19, Phase 4 run `cli-i15` (source `9f89b7d0b55`, 4032 modules, entry
   `src/app/cli/_CliMain/main_and_help.spl`, cranelift, `--go-to-end`)
@@ -61,15 +61,46 @@ Fix: `driver_mir_excluded_owner_v1(row_path, logical)` stands the row path in
 (both the checked-entry-projection and the admitted-inventory route). Spec:
 `test/01_unit/compiler/driver/mir_physical_owners_spec.spl`.
 
-## Open: sibling variant
+## C. Sibling variant: own-stage HIR failure leaves its alias rows un-excluded
 
-Same repro with the unresolved type in `bad_fn`'s SIGNATURE: `app.p4probe.__init__`
-fails at stage `hir` and is excluded, but its alias `app.p4probe` is not, and
-MIR setup stops with
+Status: fix-implemented 2026-11-19 (unit-specified; NOT proven in a rebuilt Stage 2).
+
+Same repro with the unresolved type in `bad_fn`'s SIGNATURE
+(`fn bad_fn(m: NoSuchTypeP4) -> i64`): `app.p4probe.__init__` fails at stage
+`hir` and is excluded, but its alias `app.p4probe` is not. Reproduced on Stage 2
+`pinned-cbff0ece9e84/.../stage2-admitted/simple` (`p4_s2.sh`, cranelift,
+THREADS=1, rc=1, 0 objects):
 
 ```
-MIR physical ownership missing HIR for app.p4probe
+[go-to-end] failed stage=hir module=app.p4probe.bad
+[go-to-end] failed stage=hir module=app.p4probe.__init__
+[go-to-end] failed stage=hir module=app.p4probe_main
+[ERROR] MIR error: MIR physical ownership missing HIR for app.p4probe
+[go-to-end] failed stage=mir module=(unattributed)
 ```
 
-The exclusion set records one spelling of a failed module, not every inventory
-row of that file. Not fixed here.
+Full-CLI instance (`p4/cli-i16`): `lib.nogc_sync_mut.sffi.dynamic_versioned`
+failed at `hir`; MIR stopped with `missing HIR for std.nogc_sync_mut.sffi.dynamic_versioned`.
+
+Root cause: `go_to_end_recover_hir_v1` (`src/compiler/80.driver/driver_aot_pipeline.spl`)
+excluded only the poisoned spelling. Exclusion is keyed by logical name, so
+every MIR-setup gate (`driver_pipeline_lowering.spl` projected/admitted/feed
+loops) met the alias row with no HIR and no exclusion. Importers of the alias
+spelling were also never blocked, since the blocked-dependents fixed point was
+seeded with the failed spelling only.
+
+Fix: `driver_go_to_end_alias_rows_v1(row_names, row_keys, failed)`
+(`driver_mir_physical_owners.spl`) returns every inventory row sharing a failed
+row's physical source key. Recovery builds rows from `ctx.sources` plus
+`source_module_names_owner`/`source_paths_owner` (keys via
+`_driver_physical_source_key`), excludes each alias (no second `record`: the
+failure is reported once), removes it from `hir_modules` if held, seeds the
+blocked computation with failed + aliases, and does the same for alias rows of
+blocked dependents. Spec: `test/01_unit/compiler/driver/mir_physical_owners_spec.spl`.
+
+Not proven: (1) no seed on the host loads the tip tree, so the spec cases were
+not executed; (2) the native green needs a Stage 2 built from this change.
+
+Still open (same class, other stages): MIR-stage (`driver_pipeline_lowering.spl`
+`self.go_to_end.exclude(name)`) and borrow-stage (`driver_pipeline_passes.spl`)
+exclusions still key by one spelling.

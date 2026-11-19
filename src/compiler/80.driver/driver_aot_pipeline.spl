@@ -53,6 +53,8 @@ use compiler.driver.driver_build.build_outcome.{BuildUnitOutcome}
 use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1, go_to_end_write_manifest_with_trial_v1,
     go_to_end_blocked_modules_v1, go_to_end_emit_format_v1,
     GO_TO_END_UNATTRIBUTED_V1}
+use compiler.driver.driver_mir_physical_owners.{driver_go_to_end_alias_rows_v1}
+use compiler.driver.driver_source_loading.{_driver_physical_source_key}
 use std.io_runtime.{exit}
 use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_mir_done_publish_v1}
 use std.io_runtime.{time_now_monotonic_ms}
@@ -507,12 +509,49 @@ impl CompilerDriver:
                     "HIR lowering/type-check failed (diagnostics not attributable by path; see the unattributed rows)")
             self.go_to_end.exclude(failed_name)
             self.ctx.hir_modules.remove(failed_name)
-        val blocked = go_to_end_blocked_modules_v1(candidates, edge_from, edge_to, failed)
+        # One file can be reached under several inventory names (`lib.X` and
+        # `std.X`, `pkg` and `pkg.__init__`); HIR poisons one spelling. Exclude
+        # every alias row of a failed file too (recorded once, under the failed
+        # name), or MIR setup stops the whole phase with "MIR physical
+        # ownership missing HIR for <alias>", and importers of the alias
+        # spelling are never blocked. Bug:
+        # doc/08_tracking/bug/go_to_end_excluded_alias_rows_conflicting_owners_2026-11-19.md
+        var alias_row_names: [text] = []
+        var alias_row_keys: [text] = []
+        for alias_source in self.ctx.sources:
+            alias_row_names = alias_row_names.push(alias_source.module_name)
+            alias_row_keys = alias_row_keys.push(_driver_physical_source_key(alias_source.path))
+        var owner_row = 0
+        while owner_row < self.ctx.source_module_names_owner.len() and
+                owner_row < self.ctx.source_paths_owner.len():
+            alias_row_names = alias_row_names.push(self.ctx.source_module_names_owner[owner_row])
+            alias_row_keys = alias_row_keys.push(_driver_physical_source_key(self.ctx.source_paths_owner[owner_row]))
+            owner_row = owner_row + 1
+        var failed_rows: [text] = []
+        for failed_row_name in failed:
+            failed_rows = failed_rows.push(failed_row_name)
+        for alias_name in driver_go_to_end_alias_rows_v1(alias_row_names, alias_row_keys, failed):
+            log_phase("aot:go_to_end:hir_alias_excluded module={alias_name}")
+            self.go_to_end.exclude(alias_name)
+            if self.ctx.hir_modules.has(alias_name):
+                self.ctx.hir_modules.remove(alias_name)
+            failed_rows = failed_rows.push(alias_name)
+        val blocked = go_to_end_blocked_modules_v1(candidates, edge_from, edge_to, failed_rows)
+        var dropped_rows: [text] = []
+        for failed_row in failed_rows:
+            dropped_rows = dropped_rows.push(failed_row)
         for blocked_name in blocked:
             self.go_to_end.record("hir_dependency", blocked_name,
                 "not lowered: imports (transitively) a module whose HIR failed")
             self.go_to_end.exclude(blocked_name)
             self.ctx.hir_modules.remove(blocked_name)
+            dropped_rows = dropped_rows.push(blocked_name)
+        # Same for alias rows of an excluded dependent.
+        for blocked_alias in driver_go_to_end_alias_rows_v1(alias_row_names, alias_row_keys, dropped_rows):
+            log_phase("aot:go_to_end:hir_alias_excluded module={blocked_alias}")
+            self.go_to_end.exclude(blocked_alias)
+            if self.ctx.hir_modules.has(blocked_alias):
+                self.ctx.hir_modules.remove(blocked_alias)
         self.go_to_end_absorb_errors_v1("hir")
         self.ctx.poisoned_modules = []
         self.ctx.poisoned_module_count_value = 0
