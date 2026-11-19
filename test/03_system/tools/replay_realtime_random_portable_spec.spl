@@ -1,0 +1,79 @@
+# @cover src/os/realtime/replay/hooks.spl 20%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-DHR-05
+# plan: doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md
+
+# DHR P6 portability proof: the realtime random hook runs on the portable
+# semantic replay core (std.replay.portable_replay). These pins were taken on
+# the pre-P6 ring implementation and must hold unchanged on the core (the
+# last example pins the routing itself and is P6-only).
+
+use std.spec.*
+use std.replay.bm_replay_core.{bm_ring_init, bm_ring_count}
+use std.replay.portable_replay.{portable_replay_reset, portable_replay_pending}
+use os.realtime.replay.mode.{rtos_replay_set_mode, rtos_replay_next_seq}
+use os.realtime.replay.hooks.{rr_hook_random, rr_divergence_count, rr_reset_divergences, rr_event_count}
+
+val OFF: i32 = 0
+val RECORD: i32 = 1
+val REPLAY: i32 = 2
+val VERIFY: i32 = 3
+val CHAOS: i32 = 4
+
+fn _reset():
+    rtos_replay_set_mode(OFF)
+    bm_ring_init()
+    portable_replay_reset()
+    rr_reset_divergences()
+
+describe "realtime random hook on the portable replay core":
+    it "Off returns the live value and logs nothing":
+        _reset()
+        expect(rr_hook_random(17)).to_equal(17)
+        expect(rr_event_count()).to_equal(0)
+
+    it "Record returns the live value, logs one event and consumes one seq":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        expect(rr_hook_random(42)).to_equal(42)
+        expect(rr_event_count()).to_equal(1)
+        expect(rtos_replay_next_seq()).to_equal(2)
+
+    it "ChaosRecord records like Record":
+        _reset()
+        rtos_replay_set_mode(CHAOS)
+        expect(rr_hook_random(5)).to_equal(5)
+        expect(rr_event_count()).to_equal(1)
+
+    it "Replay returns the recorded values in order with no divergence":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        rr_hook_random(42)
+        rr_hook_random(43)
+        rtos_replay_set_mode(REPLAY)
+        expect(rr_hook_random(900)).to_equal(42)
+        expect(rr_hook_random(901)).to_equal(43)
+        expect(rr_divergence_count()).to_equal(0)
+        expect(rr_event_count()).to_equal(0)
+
+    it "Replay of an exhausted log counts a divergence":
+        _reset()
+        rtos_replay_set_mode(REPLAY)
+        expect(rr_hook_random(77)).to_equal(77)
+        expect(rr_divergence_count()).to_equal(1)
+
+    it "Verify returns the live value without divergence or consumption":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        rr_hook_random(42)
+        rtos_replay_set_mode(VERIFY)
+        expect(rr_hook_random(8)).to_equal(8)
+        expect(rr_divergence_count()).to_equal(0)
+        expect(rr_event_count()).to_equal(1)
+
+    it "random reads are logged by the portable core, not the bare-metal ring":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        rr_hook_random(42)
+        expect(portable_replay_pending()).to_equal(1)
+        expect(bm_ring_count()).to_equal(0)

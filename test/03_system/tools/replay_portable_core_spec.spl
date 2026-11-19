@@ -1,0 +1,154 @@
+# @cover src/lib/nogc_async_mut_noalloc/replay/portable_replay.spl 80%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-DHR-05
+# plan: doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md
+
+# DHR P6: the portable, layer-neutral semantic replay core. Record appends
+# in-scope events; Replay returns the logged value for the matching
+# (kind, scope) and never the live one; kind/scope mismatch and an exhausted
+# log are divergences that fail closed; outside an explicitly opened scope
+# events are live and unlogged.
+
+use std.spec.*
+use std.replay.portable_replay.{
+    PR_MODE_OFF, PR_MODE_RECORD, PR_MODE_REPLAY,
+    PR_KIND_TIMER_READ, PR_KIND_RANDOM_READ, PR_KIND_SCHEDULE, PR_KIND_IO_READ,
+    PR_DIV_NONE, PR_DIV_KIND_MISMATCH, PR_DIV_SCOPE_MISMATCH, PR_DIV_LOG_EXHAUSTED,
+    PR_FAIL_CLOSED_VALUE,
+    portable_replay_reset, portable_replay_set_mode, portable_replay_mode,
+    portable_replay_open_scope, portable_replay_close_scope, portable_replay_scope_is_open,
+    portable_replay_event, portable_replay_last_divergence, portable_replay_divergence_count,
+    portable_replay_pending, portable_replay_dropped, portable_replay_complete
+}
+
+val SCOPE_A: i64 = 7
+val SCOPE_B: i64 = 9
+
+fn _record_one(kind: i64, scope: i64, value: i64):
+    portable_replay_reset()
+    portable_replay_open_scope(scope)
+    portable_replay_set_mode(PR_MODE_RECORD)
+    portable_replay_event(kind, scope, value)
+
+describe "portable replay core: record (1)":
+    it "appends in-scope events and returns the live value":
+        portable_replay_reset()
+        expect(portable_replay_open_scope(SCOPE_A)).to_equal(true)
+        portable_replay_set_mode(PR_MODE_RECORD)
+        expect(portable_replay_event(PR_KIND_TIMER_READ, SCOPE_A, 1000)).to_equal(1000)
+        expect(portable_replay_event(PR_KIND_RANDOM_READ, SCOPE_A, 42)).to_equal(42)
+        expect(portable_replay_event(PR_KIND_SCHEDULE, SCOPE_A, 3)).to_equal(3)
+        expect(portable_replay_event(PR_KIND_IO_READ, SCOPE_A, 255)).to_equal(255)
+        expect(portable_replay_pending()).to_equal(4)
+        expect(portable_replay_divergence_count()).to_equal(0)
+
+describe "portable replay core: replay returns logged, never live (2)":
+    it "returns each logged value in order for the matching (kind, scope)":
+        portable_replay_reset()
+        portable_replay_open_scope(SCOPE_A)
+        portable_replay_set_mode(PR_MODE_RECORD)
+        portable_replay_event(PR_KIND_TIMER_READ, SCOPE_A, 1000)
+        portable_replay_event(PR_KIND_RANDOM_READ, SCOPE_A, 42)
+        portable_replay_set_mode(PR_MODE_REPLAY)
+        expect(portable_replay_event(PR_KIND_TIMER_READ, SCOPE_A, 5555)).to_equal(1000)
+        expect(portable_replay_last_divergence()).to_equal(PR_DIV_NONE)
+        expect(portable_replay_event(PR_KIND_RANDOM_READ, SCOPE_A, 7777)).to_equal(42)
+        expect(portable_replay_divergence_count()).to_equal(0)
+        expect(portable_replay_pending()).to_equal(0)
+
+    it "switching mode keeps the log; Off is the only mode that is live":
+        _record_one(PR_KIND_RANDOM_READ, SCOPE_A, 11)
+        portable_replay_set_mode(PR_MODE_OFF)
+        expect(portable_replay_mode()).to_equal(PR_MODE_OFF)
+        expect(portable_replay_event(PR_KIND_RANDOM_READ, SCOPE_A, 99)).to_equal(99)
+        portable_replay_set_mode(PR_MODE_REPLAY)
+        expect(portable_replay_event(PR_KIND_RANDOM_READ, SCOPE_A, 99)).to_equal(11)
+
+describe "portable replay core: divergence fails closed (3)":
+    it "kind mismatch is a divergence and returns the fail-closed value, not live":
+        _record_one(PR_KIND_TIMER_READ, SCOPE_A, 1000)
+        portable_replay_set_mode(PR_MODE_REPLAY)
+        val got = portable_replay_event(PR_KIND_RANDOM_READ, SCOPE_A, 4242)
+        expect(got).to_equal(PR_FAIL_CLOSED_VALUE)
+        expect(got == 4242).to_equal(false)
+        expect(portable_replay_last_divergence()).to_equal(PR_DIV_KIND_MISMATCH)
+        expect(portable_replay_divergence_count()).to_equal(1)
+
+    it "scope mismatch is a divergence and returns the fail-closed value, not live":
+        _record_one(PR_KIND_RANDOM_READ, SCOPE_A, 42)
+        portable_replay_close_scope()
+        portable_replay_open_scope(SCOPE_B)
+        portable_replay_set_mode(PR_MODE_REPLAY)
+        val got = portable_replay_event(PR_KIND_RANDOM_READ, SCOPE_B, 4242)
+        expect(got).to_equal(PR_FAIL_CLOSED_VALUE)
+        expect(portable_replay_last_divergence()).to_equal(PR_DIV_SCOPE_MISMATCH)
+        expect(portable_replay_divergence_count()).to_equal(1)
+
+    it "an exhausted log is a divergence and returns the fail-closed value, not live":
+        _record_one(PR_KIND_TIMER_READ, SCOPE_A, 1000)
+        portable_replay_set_mode(PR_MODE_REPLAY)
+        expect(portable_replay_event(PR_KIND_TIMER_READ, SCOPE_A, 1)).to_equal(1000)
+        val got = portable_replay_event(PR_KIND_TIMER_READ, SCOPE_A, 4242)
+        expect(got).to_equal(PR_FAIL_CLOSED_VALUE)
+        expect(portable_replay_last_divergence()).to_equal(PR_DIV_LOG_EXHAUSTED)
+        expect(portable_replay_divergence_count()).to_equal(1)
+
+    it "a matching event after a divergence clears the last-divergence reason":
+        portable_replay_reset()
+        portable_replay_open_scope(SCOPE_A)
+        portable_replay_set_mode(PR_MODE_RECORD)
+        portable_replay_event(PR_KIND_TIMER_READ, SCOPE_A, 1)
+        portable_replay_event(PR_KIND_RANDOM_READ, SCOPE_A, 2)
+        portable_replay_set_mode(PR_MODE_REPLAY)
+        portable_replay_event(PR_KIND_IO_READ, SCOPE_A, 9)
+        expect(portable_replay_last_divergence()).to_equal(PR_DIV_KIND_MISMATCH)
+        expect(portable_replay_event(PR_KIND_RANDOM_READ, SCOPE_A, 9)).to_equal(2)
+        expect(portable_replay_last_divergence()).to_equal(PR_DIV_NONE)
+        expect(portable_replay_divergence_count()).to_equal(1)
+
+    it "a record that overflows the ring is disclosed and replay fails closed at the gap":
+        portable_replay_reset()
+        portable_replay_open_scope(SCOPE_A)
+        portable_replay_set_mode(PR_MODE_RECORD)
+        var i: i64 = 0
+        while i < 4097:
+            portable_replay_event(PR_KIND_TIMER_READ, SCOPE_A, i)
+            i = i + 1
+        expect(portable_replay_dropped()).to_equal(1)
+        expect(portable_replay_complete()).to_equal(false)
+        portable_replay_reset()
+        expect(portable_replay_complete()).to_equal(true)
+
+describe "portable replay core: explicit scope (4)":
+    it "without an open scope events are live and unlogged in Record and Replay":
+        portable_replay_reset()
+        expect(portable_replay_scope_is_open()).to_equal(false)
+        portable_replay_set_mode(PR_MODE_RECORD)
+        expect(portable_replay_event(PR_KIND_TIMER_READ, SCOPE_A, 1000)).to_equal(1000)
+        expect(portable_replay_pending()).to_equal(0)
+        portable_replay_set_mode(PR_MODE_REPLAY)
+        expect(portable_replay_event(PR_KIND_TIMER_READ, SCOPE_A, 2000)).to_equal(2000)
+        expect(portable_replay_divergence_count()).to_equal(0)
+
+    it "an event naming a different scope than the open one is live and unlogged":
+        portable_replay_reset()
+        portable_replay_open_scope(SCOPE_A)
+        portable_replay_set_mode(PR_MODE_RECORD)
+        expect(portable_replay_event(PR_KIND_RANDOM_READ, SCOPE_B, 5)).to_equal(5)
+        expect(portable_replay_pending()).to_equal(0)
+
+    it "events after close_scope are live, and the log replays only in scope":
+        _record_one(PR_KIND_RANDOM_READ, SCOPE_A, 42)
+        portable_replay_close_scope()
+        portable_replay_set_mode(PR_MODE_REPLAY)
+        expect(portable_replay_event(PR_KIND_RANDOM_READ, SCOPE_A, 8)).to_equal(8)
+        expect(portable_replay_pending()).to_equal(1)
+        portable_replay_open_scope(SCOPE_A)
+        expect(portable_replay_event(PR_KIND_RANDOM_READ, SCOPE_A, 8)).to_equal(42)
+
+    it "opening a second scope while one is open fails closed":
+        portable_replay_reset()
+        expect(portable_replay_open_scope(SCOPE_A)).to_equal(true)
+        expect(portable_replay_open_scope(SCOPE_B)).to_equal(false)
+        portable_replay_close_scope()
+        expect(portable_replay_open_scope(SCOPE_B)).to_equal(true)
