@@ -83,6 +83,16 @@ pub fn with_owner_scope<R>(owner: Option<&str>, f: impl FnOnce() -> R) -> R {
     r
 }
 
+/// Module whose unit scope governs a unit literal being evaluated now: the
+/// module that WROTE the running code. A closure body inherits
+/// `CURRENT_EXEC_MODULE` from whoever invokes it, so a lambda written in
+/// module A and called from module B must still see A's imports; the closure
+/// origin stamp (`private_call_caller`) names A, and is the executing owner
+/// outside a closure body.
+pub(crate) fn literal_scope_owner() -> Option<String> {
+    Some(crate::interpreter::interpreter_module::private_call_caller().to_string())
+}
+
 /// Point lookups at an explicit unit library root (`None` restores auto).
 pub fn unit_library_root_set(root: Option<PathBuf>) {
     UNIT_LIBRARY_ROOT_OVERRIDE.with(|c| *c.borrow_mut() = root);
@@ -538,6 +548,34 @@ mod module_scope_tests {
         assert!(seen, "defining-module scope applies while its function runs");
         assert!(!in_scope("kmph"), "caller scope restored");
         assert!(!with_owner_scope(Some("other"), || in_scope("kmph")));
+        unit_scope_reset();
+    }
+
+    #[test]
+    fn closure_literal_resolves_in_writing_module_scope() {
+        use std::sync::Arc;
+        unit_scope_reset();
+        {
+            let _g = UnitScopeGuard::enter_module(Some("mod_a"));
+            unit_scope_record_use(&use_group(&["kmph"]));
+        }
+        // A closure written in mod_a runs while mod_b's frame is executing
+        // (a lambda handed to a function of another module).
+        let mut written = crate::value::Env::new();
+        written.set_closure_caller(Some(Arc::from("mod_a")));
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = Some(Arc::from("mod_b")));
+        {
+            let _c = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&written);
+            let owner = literal_scope_owner();
+            assert!(
+                with_owner_scope(owner.as_deref(), || in_scope("kmph")),
+                "closure body uses the writing module's unit scope"
+            );
+        }
+        // Outside the closure, mod_b's own frame does not gain mod_a's scope.
+        let owner = literal_scope_owner();
+        assert!(!with_owner_scope(owner.as_deref(), || in_scope("kmph")));
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = None);
         unit_scope_reset();
     }
 }
