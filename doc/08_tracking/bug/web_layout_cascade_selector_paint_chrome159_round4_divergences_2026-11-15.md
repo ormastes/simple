@@ -667,3 +667,17 @@ head (13/40 at base).
 - **Fix:** `layout_set_images` hands the renderer's resource list to layout around `web_html_layout_tree` (compose, retained re-layout, software result). `img_resource_auto_outer_w/h` (`layout_text`) feed `replaced_auto_box_w`, the inline pen prediction and the block `img_auto_h`. No resource means sizing is unchanged.
   - `ponytail:` `_layout_images` is module state, so one layout runs at a time per process (same contract as `_raster_images`). Upgrade by threading `images` through `web_html_layout_tree`.
 - **Evidence:** new `img_natural_size_chrome159_spec`: 12 cases (11 Chrome-pinned boxes plus a no-resource row). Red at base, green 12/12 at head. Base vs head over 73 img/replaced/inline specs: 0 new failures. Three pins were re-derived from Chrome 159 during review (height=6, height=15, block width=10).
+
+## 2026-11-19 — square dashed/dotted dash layout (FIXED on raster, cpu_simd and Vulkan)
+
+- **Symptom:** every lane laid out dashes as 3t dash / 2t gap (dotted t / t) from the side's start and cut the last dash at the end. Chrome 159 starts and ends every side on a full dash. 509 of 1202 Chrome pins mismatched on each lane.
+- **Chrome rule (measured, device scale 4):**
+  - A dash is 2t long (dotted: t), and the nominal gap is t.
+  - The gap is then fitted with `StrokeData::SelectBestDashGap` (open path): take n = floor((L+gap)/(dash+gap)) or n+1 dashes, whichever gap is closer to t.
+  - A side of length L ≤ 2·dash paints solid.
+  - When 2·dash < L < 2·dash + gap, two dashes and the gap scale together. For t=5, L=22 the measured runs are 8.75 / 4.5 / 8.75; for t=2, L=10 they are 4 / 2 / 4.
+- **Fix:** `border_dash_runs` (`paint_primitives`) returns whole-pixel runs. Both `_fb_border_span_clip` (raster) and `_html_draw_ir_styled_span_commands` (Draw IR) use it.
+  - `ponytail:` dots stay square at every width; Chrome draws round dots (anti-aliased even at 2px). Rounded-corner dashes keep the old arc painter.
+- **Evidence:**
+  - New `border_dash_layout_chrome159_spec`: 1202 pins plus 3268 short-side pins (uniform 4x4 device blocks inside the border bands). At base each lane has 509 mismatches; at head the result is 3/3.
+  - Base vs head over the 97 specs that mention `dashed`/`dotted`: 0 new failures.

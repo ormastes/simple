@@ -1558,6 +1558,48 @@ fn _fb_border_side_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
     val alpha = ((color >> 24) & 255u32) as i32
     fb_rect_opacity_clip(fb, fbw, fbh, x, y, w, h, color | 0xFF000000u32, (alpha * 100 + 127) / 255, clip)
 
+# Dash runs [start, len, start, len, ...] along one straight border side of
+# `length` px and `thickness` px, as Chrome 159 lays them out
+# (StrokeData::SelectBestDashGap, open path): a dash of 2t (dotted: t) at both
+# ends, the gap stretched or shrunk from t to the count that fits best, starts
+# rounded to whole px. A side no longer than two dashes is solid; one shorter
+# than two dashes and a gap keeps two dashes and scales dash and gap together
+# (measured: t=5, L=22 gives 8.75 / 4.5 / 8.75).
+# ponytail: square dots for every width; Chrome draws round dots above 3px.
+# reason: geometry helper shared by the raster and Draw IR border lanes
+# @allow(primitive_api)
+pub fn border_dash_runs(length: i32, thickness: i32, dotted: bool) -> [i32]:
+    if length <= 0:
+        return []
+    val t = if thickness > 0: thickness else: 1
+    val dash = if dotted: t else: t * 2
+    val gap = t
+    if length <= 2 * dash:
+        return [0, length]
+    if length < 2 * dash + gap:
+        val short_dash = (length * dash * 2 + (2 * dash + gap)) / ((2 * dash + gap) * 2)
+        return [0, short_dash, length - short_dash, short_dash]
+    val min_n = (length + gap) / (dash + gap)
+    val max_n = min_n + 1
+    val min_gap_milli = ((length - min_n * dash) * 1000) / (min_n - 1)
+    val max_gap_milli = ((length - max_n * dash) * 1000) / (max_n - 1)
+    var n = min_n
+    var gap_milli = min_gap_milli
+    val d_min = if min_gap_milli > gap * 1000: min_gap_milli - gap * 1000 else: gap * 1000 - min_gap_milli
+    val d_max = if max_gap_milli > gap * 1000: max_gap_milli - gap * 1000 else: gap * 1000 - max_gap_milli
+    if max_gap_milli > 0 and d_max <= d_min:
+        n = max_n
+        gap_milli = max_gap_milli
+    var runs: [i32] = []
+    var i = 0
+    # cpu-lane-loop-ok: one run per dash of one side; bound is n <= length / dash + 1
+    while i < n:
+        val start = (i * (dash * 1000 + gap_milli) + 500) / 1000
+        runs.push(start)
+        runs.push(if start + dash > length: length - start else: dash)
+        i = i + 1
+    runs
+
 fn _fb_border_span_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, is_horiz: bool, style: text, color: u32, clip: ClipRect) -> [u32]:
     if w <= 0 or h <= 0 or color == 0u32 or _border_style_disabled(style):
         return fb
@@ -1572,18 +1614,15 @@ fn _fb_border_span_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
         out = _fb_border_side_clip(out, fbw, fbh, x, y, line_t, h, color, clip)
         return _fb_border_side_clip(out, fbw, fbh, x + w - line_t, y, line_t, h, color, clip)
     if style == "dashed" or style == "dotted":
-        val stroke_t = if t > 0: t else: 1
-        val dash_len = if style == "dotted": stroke_t else: stroke_t * 3
-        val gap_len = if style == "dotted": stroke_t else: stroke_t * 2
-        val total_len = if is_horiz: w else: h
-        var p = 0
-        while p < total_len:
-            val seg = if p + dash_len > total_len: total_len - p else: dash_len
+        val runs = border_dash_runs(if is_horiz: w else: h, t, style == "dotted")
+        var r = 0
+        # cpu-lane-loop-ok: one rect per dash of one border side; bound is the run count
+        while r + 1 < runs.len():
             if is_horiz:
-                out = _fb_border_side_clip(out, fbw, fbh, x + p, y, seg, h, color, clip)
+                out = _fb_border_side_clip(out, fbw, fbh, x + runs[r], y, runs[r + 1], h, color, clip)
             else:
-                out = _fb_border_side_clip(out, fbw, fbh, x, y + p, w, seg, color, clip)
-            p = p + dash_len + gap_len
+                out = _fb_border_side_clip(out, fbw, fbh, x, y + runs[r], w, runs[r + 1], color, clip)
+            r = r + 2
         return out
     _fb_border_side_clip(out, fbw, fbh, x, y, w, h, color, clip)
 

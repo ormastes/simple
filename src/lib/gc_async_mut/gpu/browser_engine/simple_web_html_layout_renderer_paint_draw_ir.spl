@@ -7,7 +7,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_ra
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{spaced_advances_milli, HNode, font_milli_of, web_argb, attr_value, parse_color, parse_color_any, parse_int, decl_get, svg_number_milli, svg_view_box_milli, simple_web_backdrop_admission, _wsc_on, _wsc_now_us, _wlay_add, attr_present}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, SIMPLE_WEB_STICKY_TOP_AUTO, _html_text_language, split_top_level_commas}
 use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{parse_box_shadow_layers}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{radial_gradient_box_paintable, radial_gradient_box_geometry, BackgroundGradientLayer, background_gradient_layers_paintable, background_gradient_layers, background_gradient_box_rects, background_gradient_clip_shape}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{radial_gradient_box_paintable, radial_gradient_box_geometry, BackgroundGradientLayer, background_gradient_layers_paintable, background_gradient_layers, background_gradient_box_rects, background_gradient_clip_shape, border_dash_runs}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language, resolve_font_metrics_with_language_milli}
 use std.common.encoding.utf8.{text_codepoint_len, text_codepoints}
 use common.string_builder.{StringBuilder}
@@ -1131,25 +1131,16 @@ fn _html_draw_ir_styled_span_commands(
         cmds.push(_html_draw_ir_overlay_rect(base_id + "_s0", ClipRect(x0: x, y0: y, x1: x + w, y1: y + h), color, clip))
         return cmds
     if style_name == "dashed" or style_name == "dotted":
-        val thickness = if horizontal: h else: w
-        val stroke_t = if thickness > 0: thickness else: 1
-        val dash_len = if style_name == "dotted": stroke_t else: stroke_t * 3
-        val gap_len = if style_name == "dotted": stroke_t else: stroke_t * 2
-        val span_len = if horizontal: w else: h
-        var p = 0
-        var idx = 0
-        # cpu-lane-loop-ok: emits bounded per-dash overlay rects along one border edge; bound is span_len / (dash_len + gap_len)
-        while p < span_len and idx < 4096:
-            var seg = dash_len
-            if p + seg > span_len:
-                seg = span_len - p
+        val runs = border_dash_runs(if horizontal: w else: h, if horizontal: h else: w, style_name == "dotted")
+        var r = 0
+        # cpu-lane-loop-ok: emits one overlay rect per dash along one border edge; bound is the run count
+        while r + 1 < runs.len():
             val seg_rect = if horizontal:
-                ClipRect(x0: x + p, y0: y, x1: x + p + seg, y1: y + h)
+                ClipRect(x0: x + runs[r], y0: y, x1: x + runs[r] + runs[r + 1], y1: y + h)
             else:
-                ClipRect(x0: x, y0: y + p, x1: x + w, y1: y + p + seg)
-            cmds.push(_html_draw_ir_overlay_rect("{base_id}_{idx}", seg_rect, color, clip))
-            p = p + dash_len + gap_len
-            idx = idx + 1
+                ClipRect(x0: x, y0: y + runs[r], x1: x + w, y1: y + runs[r] + runs[r + 1])
+            cmds.push(_html_draw_ir_overlay_rect("{base_id}_{r / 2}", seg_rect, color, clip))
+            r = r + 2
     cmds
 
 # A paint-only box command carrying a solid border ring of `width` px on

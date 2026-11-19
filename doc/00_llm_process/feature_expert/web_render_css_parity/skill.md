@@ -3408,3 +3408,5 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - Raster outline over text (2026-11-19): deferred in-flow outlines that no positioned box overlaps paint after pass 6 (Chrome paints them over later in-flow text); overlapped ones keep the pre-pass-2 flush. Pinned by `outline_over_text_chrome159_spec`.
 
 - `<img>` natural size (2026-11-18): layout reads the supplied resources (`layout_set_images` around `web_html_layout_tree`); auto sides take the natural size or follow the aspect ratio of the given side (`img_resource_auto_outer_w/h`). Pinned by `img_natural_size_chrome159_spec`.
+
+- Dash layout (2026-11-19): `border_dash_runs` gives Chrome's dash runs on a straight side: dash 2t (dotted t), nominal gap t fitted by SelectBestDashGap so both ends are full dashes; L <= 2·dash is solid, 2·dash < L < 2·dash+gap scales two dashes and the gap together. Raster and Draw IR share it. Pinned by `border_dash_layout_chrome159_spec`.
