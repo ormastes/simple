@@ -123,45 +123,23 @@ static spl_i64 simpleos_atomic_core_compare_exchange(
     return result;
 }
 
-static spl_i64 simpleos_atomic_core_fetch_add(spl_i64 handle, spl_i64 value) {
-    SimpleOSAtomicSlot *slot = simpleos_atomic_core_acquire(handle);
-    if (!slot) return 0;
-    spl_i64 result = __atomic_fetch_add(&slot->value, value, __ATOMIC_SEQ_CST);
-    simpleos_atomic_core_release(slot);
-    return result;
-}
-
-static spl_i64 simpleos_atomic_core_fetch_sub(spl_i64 handle, spl_i64 value) {
-    SimpleOSAtomicSlot *slot = simpleos_atomic_core_acquire(handle);
-    if (!slot) return 0;
-    spl_i64 result = __atomic_fetch_sub(&slot->value, value, __ATOMIC_SEQ_CST);
-    simpleos_atomic_core_release(slot);
-    return result;
-}
-
-static spl_i64 simpleos_atomic_core_fetch_and(spl_i64 handle, spl_i64 value) {
-    SimpleOSAtomicSlot *slot = simpleos_atomic_core_acquire(handle);
-    if (!slot) return 0;
-    spl_i64 result = __atomic_fetch_and(&slot->value, value, __ATOMIC_SEQ_CST);
-    simpleos_atomic_core_release(slot);
-    return result;
-}
-
-static spl_i64 simpleos_atomic_core_fetch_or(spl_i64 handle, spl_i64 value) {
-    SimpleOSAtomicSlot *slot = simpleos_atomic_core_acquire(handle);
-    if (!slot) return 0;
-    spl_i64 result = __atomic_fetch_or(&slot->value, value, __ATOMIC_SEQ_CST);
-    simpleos_atomic_core_release(slot);
-    return result;
-}
-
-static spl_i64 simpleos_atomic_core_fetch_xor(spl_i64 handle, spl_i64 value) {
-    SimpleOSAtomicSlot *slot = simpleos_atomic_core_acquire(handle);
-    if (!slot) return 0;
-    spl_i64 result = __atomic_fetch_xor(&slot->value, value, __ATOMIC_SEQ_CST);
-    simpleos_atomic_core_release(slot);
-    return result;
-}
+/* fetch_<op>: admit the slot, apply one __atomic_fetch_<op>, release. */
+#define SIMPLEOS_ATOMIC_FETCH_OP(op)                                          \
+    static spl_i64 simpleos_atomic_core_fetch_##op(spl_i64 handle,            \
+                                                   spl_i64 value) {           \
+        SimpleOSAtomicSlot *slot = simpleos_atomic_core_acquire(handle);      \
+        if (!slot) return 0;                                                  \
+        spl_i64 result = __atomic_fetch_##op(&slot->value, value,             \
+                                             __ATOMIC_SEQ_CST);               \
+        simpleos_atomic_core_release(slot);                                   \
+        return result;                                                        \
+    }
+SIMPLEOS_ATOMIC_FETCH_OP(add)
+SIMPLEOS_ATOMIC_FETCH_OP(sub)
+SIMPLEOS_ATOMIC_FETCH_OP(and)
+SIMPLEOS_ATOMIC_FETCH_OP(or)
+SIMPLEOS_ATOMIC_FETCH_OP(xor)
+#undef SIMPLEOS_ATOMIC_FETCH_OP
 
 static void simpleos_atomic_core_free(spl_i64 handle) {
     SimpleOSAtomicSlot *slot = simpleos_atomic_core_acquire(handle);
