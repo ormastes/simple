@@ -1,6 +1,7 @@
 use std.spec
 use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpRequest, HttpMethod, HttpStatus}
-use std.nogc_sync_mut.http_server.parser.{request_body_decode}
+use std.nogc_sync_mut.http_server.parser.{request_body_decode, request_content_type}
+use std.nogc_sync_mut.http_server.vector_parser.{http_vector_request_body_v1}
 use std.nogc_sync_mut.http_server.response.{serialize_response_head_for_body_length, serialize_response, response_wire_size, response_body_octets}
 use std.nogc_sync_mut.http_server.h2_server.{h2_response_body_len}
 use std.nogc_sync_mut.http_server.handler.{MultipartPart, parse_multipart_bytes}
@@ -30,18 +31,18 @@ describe "HTTP binary bodies":
 
     it "a non-UTF-8 body is admitted as empty text only for binary content types":
         val raw: [u8] = [0xFFu8, 0xFEu8, 0u8]
-        expect(request_body_decode(raw, "audio/wav").unwrap()).to_equal("")
-        expect(request_body_decode(raw, "multipart/form-data; boundary=x").unwrap()).to_equal("")
-        expect(request_body_decode(raw, "Application/Octet-Stream").unwrap()).to_equal("")
-        expect(request_body_decode(raw, "image/png").unwrap()).to_equal("")
-        expect(request_body_decode(raw, "video/mp4").unwrap()).to_equal("")
-        match request_body_decode(raw, "application/json"):
+        expect(request_body_decode(raw, "audio/wav", false).unwrap()).to_equal("")
+        expect(request_body_decode(raw, "multipart/form-data; boundary=x", false).unwrap()).to_equal("")
+        expect(request_body_decode(raw, "Application/Octet-Stream", false).unwrap()).to_equal("")
+        expect(request_body_decode(raw, "image/png", false).unwrap()).to_equal("")
+        expect(request_body_decode(raw, "video/mp4", false).unwrap()).to_equal("")
+        match request_body_decode(raw, "application/json", false):
             Ok(_): fail("a non-UTF-8 JSON body must stay a 400")
             Err(e): expect(e.starts_with("400")).to_equal(true)
-        match request_body_decode(raw, ""):
+        match request_body_decode(raw, "", false):
             Ok(_): fail("a non-UTF-8 body without a content type must stay a 400")
             Err(e): expect(e.starts_with("400")).to_equal(true)
-        expect(request_body_decode(text_to_utf8_bytes("é"), "application/json").unwrap()).to_equal("é")
+        expect(request_body_decode(text_to_utf8_bytes("é"), "application/json", false).unwrap()).to_equal("é")
 
     it "parses a multipart upload and keeps the file part binary":
         val head = text_to_utf8_bytes("--XyZ\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper\r\n--XyZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\n")
@@ -130,3 +131,25 @@ describe "HTTP binary bodies":
         expect(h2_response_body_len(wav)).to_equal(3)
         val head = serialize_response_head_for_body_length(wav, 3)
         expect(response_wire_size(wav)).to_equal(head.len() + 3)
+
+    it "treats every non-text media type as binary-capable":
+        val raw: [u8] = [0xFFu8, 0xFEu8, 0u8]
+        for media in ["application/zip", "application/pdf", "application/gzip", "application/wasm", "application/x-protobuf", "application/cbor", "application/msgpack", "font/woff2"]:
+            expect(request_body_decode(raw, media, false).unwrap()).to_equal("")
+        for media in ["text/plain", "application/x-www-form-urlencoded", "application/ld+json", "application/soap+xml"]:
+            match request_body_decode(raw, media, false):
+                Ok(_): fail("{media} is text-ish and must stay a 400 on the scalar path")
+                Err(e): expect(e.starts_with("400")).to_equal(true)
+
+    it "the vector path keeps its lossy decode for text-ish bodies":
+        val form: [u8] = [110u8, 97u8, 109u8, 101u8, 61u8, 99u8, 97u8, 102u8, 0xE9u8]
+        val decoded = http_vector_request_body_v1(form, [("Content-Type", "application/x-www-form-urlencoded")])
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().starts_with("name=caf")).to_equal(true)
+        expect(http_vector_request_body_v1([0xFFu8], [("Content-Type", "audio/wav")]).unwrap()).to_equal("")
+        expect(http_vector_request_body_v1(text_to_utf8_bytes("{}"), []).unwrap()).to_equal("{}")
+
+    it "both parsers take the first of duplicate Content-Type headers":
+        val headers = [("Content-Type", "audio/wav"), ("content-type", "application/json")]
+        expect(request_content_type(headers)).to_equal("audio/wav")
+        expect(http_vector_request_body_v1([0xFFu8], headers).unwrap()).to_equal("")

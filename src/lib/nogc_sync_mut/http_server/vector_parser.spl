@@ -10,7 +10,7 @@ use std.nogc_sync_mut.io.tcp_read_span.{
 use std.nogc_sync_mut.http_server.types.{HttpRequest, http_method_from_text}
 use std.nogc_sync_mut.http_server.parser.{
     parse_request_line, request_line_without_terminator, headers_decision,
-    request_host_error, request_body_decode, RUNTIME_READ_LINE_CAP
+    request_host_error, request_body_decode, request_content_type, RUNTIME_READ_LINE_CAP
 }
 use std.nogc_sync_mut.http_server.request_parser.{
     HttpRequestParserV1, HttpRequestParseOwnedV1,
@@ -460,6 +460,11 @@ fn _http_vector_failure(reader: HttpVectorBufferedReaderV1,
         provider_used: reader.provider_successes > 0,
         parser: http_vector_request_parser_new_v1(reader.session))
 
+# Text view of a vector-parsed body: same decision as the scalar parser for
+# non-text types; text-ish types keep this lane's historical lossy decode.
+fn http_vector_request_body_v1(bytes: [u8], headers: [(text, text)]) -> Result<text, text>:
+    request_body_decode(bytes, request_content_type(headers), true)
+
 fn _http_vector_parse_request(reader: HttpVectorBufferedReaderV1,
         max_request_line: i32, max_header_count: i32,
         max_header_line: i32, max_body: i32,
@@ -548,11 +553,7 @@ fn _http_vector_parse_request(reader: HttpVectorBufferedReaderV1,
         out = body_read.reader
         if not body_read.complete: return _http_vector_failure(out, body_read.error)
         body_bytes = body_read.bytes
-        var content_type = ""
-        for header in headers:
-            if header.0.to_lower() == "content-type":
-                content_type = header.1
-        match request_body_decode(body_read.bytes, content_type):
+        match http_vector_request_body_v1(body_read.bytes, headers):
             Ok(decoded): body = decoded
             Err(error): return _http_vector_failure(out, error)
     val request = HttpRequest(
@@ -595,3 +596,4 @@ export HttpVectorParserSessionCloseOwnedV1, HttpVectorRequestParserV1
 export http_vector_parser_session_open_owned_v1
 export http_vector_parser_session_close_owned_v1
 export http_vector_request_parser_new_v1
+export http_vector_request_body_v1
