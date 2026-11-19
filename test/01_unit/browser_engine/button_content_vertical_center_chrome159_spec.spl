@@ -1,0 +1,48 @@
+"""
+## Purpose and audience
+Purpose: Pin that a `<button>` taller than its content centres the content
+vertically in its content box, as Chrome 159 does (the button's anonymous
+content box is centred). Covers a block button with an explicit height and
+a flex item stretched by its row.
+Audience: maintainers of the web layout engine.
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(button labels sit at the top).
+The content is a 10x10 inline-block under `font-size:0; line-height:0`, so
+its position does not depend on font metrics. Chrome boxes come from
+headless Chromium 1255 (`getBoundingClientRect`).
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_geometry.{simple_web_layout_element_geometry_lines}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d_at_device_scale}
+
+val BVC_SPAN = "<span style='display:inline-block;width:10px;height:10px;background:red'></span>"
+val BVC_HTML = "<!DOCTYPE html><html><body style='margin:0'><button style='display:block;width:80px;height:100px;padding:12px 16px;border:none;font-size:0;line-height:0'>" + BVC_SPAN + "</button><div style='display:flex;height:120px'><button style='width:80px;padding:12px 16px;border:none;font-size:0;line-height:0'>" + BVC_SPAN + "</button></div></body></html>"
+
+# "path=x:y " for each span, from our GEOM lines.
+fn bvc_spans() -> text:
+    var out = ""
+    for l in simple_web_layout_element_geometry_lines(BVC_HTML, 200, 240):
+        val f = l.split("|")
+        if f.len() >= 7 and f[2] == "span":
+            out = out + f[1].replace("path:", "") + "=" + f[3] + ":" + f[4] + " "
+    out
+
+# 1 per probe whose pixel is pure red: the span centre (40,50) and (40,160)
+# must be red; the old top-aligned spots (40,20) and (40,130) must not be.
+fn bvc_ink(lane: text) -> text:
+    val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(BVC_HTML, 200, 240, 1, lane)
+    var out = ""
+    for p in [[40, 50], [40, 160], [40, 20], [40, 130]]:
+        out = out + (if px[p[1] * 200 + p[0]] == 0xFFFF0000u32: "1" else: "0")
+    out
+
+describe "button content is centred vertically (Chrome 159)":
+    it "block button with a height and a row-stretched flex button":
+        expect(bvc_spans()).to_equal("0/0=35:45 1/0/0=35:155 ")
+
+    it "paints the centred content on cpu_simd and Vulkan":
+        expect(bvc_ink("cpu_simd")).to_equal("1100")
+        expect(bvc_ink("vulkan")).to_equal("1100")

@@ -783,6 +783,45 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
 fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, x: i32, y: i32, w: i32, viewport_w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32]) -> LayoutResult:
     web_html_layout_tree(nodes, styles, child_index, i, x, y, w, viewport_w, viewport_h, bx, by, bw, bh, wrap_starts, wrap_ends, intrinsic_widths)
 
+# Chrome 159 centres a `<button>`'s content vertically in its content box (the
+# anonymous content box is centred). Runs after layout, so a height from CSS
+# or from a flex row's stretch is already final. Content taller than the box
+# keeps its top-aligned place. A flex or grid button lays its items out itself.
+fn button_content_centre_pass(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, bx: [i32], by: [i32], bh: [i32]) -> PositionOffsetResult:
+    var out_bx = bx
+    var out_by = by
+    var b = 0
+    val n = nodes.len() as i32
+    while b < n:  # cpu-lane-loop-ok: one pass per full layout over the node list; each button walks only its direct children; bound is node_count
+        val st = styles[b]
+        val d = st.display
+        if nodes[b].tag == "button" and d != "none" and d != "contents" and d != "flex" and d != "inline-flex" and d != "grid" and d != "inline-grid":
+            var top = 0
+            var bottom = 0
+            var any = false
+            var c = child_index.first_child[b]
+            while c >= 0:
+                val cst = styles[c]
+                if not cst.position_absolute and cst.display != "none" and bh[c] > 0:
+                    if not any or out_by[c] < top:
+                        top = out_by[c]
+                    if not any or out_by[c] + bh[c] > bottom:
+                        bottom = out_by[c] + bh[c]
+                    any = true
+                c = child_index.next_sibling[c]
+            val content_top = out_by[b] + st.border_t + st.pad_t
+            val content_h = bh[b] - st.border_t - st.border_b - st.pad_t - st.pad_b
+            val dy = content_top + (content_h - (bottom - top)) / 2 - top
+            if any and dy > 0:
+                var k = child_index.first_child[b]
+                while k >= 0:
+                    val moved = offset_layout_subtree(child_index, k, 0, dy, out_bx, out_by)
+                    out_bx = moved.bx
+                    out_by = moved.by
+                    k = child_index.next_sibling[k]
+        b = b + 1
+    PositionOffsetResult(bx: out_bx, by: out_by)
+
 # @allow(primitive_api): internal sibling-module layout pass over flat i32 box coordinate arrays
 pub fn web_html_layout_tree(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, x: i32, y: i32, w: i32, viewport_w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32]) -> LayoutResult:
     # Fresh layout pass: no float carries over from a previous document.
@@ -818,6 +857,9 @@ pub fn web_html_layout_tree(nodes: [HNode], styles: [Style], child_index: HtmlCh
                 out_bw[marker_i] = if marker_ordered: 16 else: 6
                 out_bh[marker_i] = out_bh[marker_li]
         marker_i = marker_i + 1
+    val centred = button_content_centre_pass(nodes, styles, child_index, out_bx, out_by, out_bh)
+    out_bx = centred.bx
+    out_by = centred.by
     LayoutResult(bx: out_bx, by: out_by, bw: out_bw, bh: out_bh, wrap_starts: flow.wrap_starts, wrap_ends: flow.wrap_ends, intrinsic_widths: flow.intrinsic_widths, height: flow.height, first_line_dx: g_text_first_line_dx, line_boxes: g_text_line_boxes, pen_origin_milli: g_text_pen_origin_milli, device_dy: text_device_dy_first_table(), device_dy_rest: text_device_dy_rest_table(), device_top: box_device_top_table())
 
 # =========================================================================
@@ -944,9 +986,12 @@ pub fn layout_selected(
                 retained.wrap_starts, retained.wrap_ends, retained.intrinsic_widths, bst
             )
             if sub.bw[boundary] == retained.bw[boundary] and sub.bh[boundary] == retained.bh[boundary]:
+                # Same post-layout pass as `web_html_layout_tree`; it is
+                # idempotent, so retained (already centred) buttons stay put.
+                val centred = button_content_centre_pass(nodes, styles, child_index, sub.bx, sub.by, sub.bh)
                 return LayoutSelectedResult(
                     layout: LayoutResult(
-                        bx: sub.bx, by: sub.by, bw: sub.bw, bh: sub.bh,
+                        bx: centred.bx, by: centred.by, bw: sub.bw, bh: sub.bh,
                         wrap_starts: sub.wrap_starts, wrap_ends: sub.wrap_ends,
                         intrinsic_widths: sub.intrinsic_widths, height: sub.height,
                         trailing_margin_b: sub.trailing_margin_b,
