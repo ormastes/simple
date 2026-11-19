@@ -587,3 +587,24 @@ decode on a newer stage and falls back to the generic `wedged:reset-receipt-refu
 and why: enable error (the binding digest only exists after a successful enable), settle / source-return / host-settle (retried turn
 errors, not wedges), read / finalize (self-cancel causes settled `cancelled`, not wedges), transfer-missing / stage-invalid (before the
 binding / Host bug). Specs: `remote_container_reset_failure_stages_v3_spec.spl`, `host_remote_build_reset_stages_v4_spec.spl`.
+
+### remote-run settle and unopened-slot hardening (milestone_0043 opus re-review, 2026-11-19, specs NOT_RUN)
+- Settle seam: `RemoteRunLinkV1.settle` -> `controller_dispatch_remote_settle_v3`. It is one turn, never
+  sends, never changes phase, and reaches the root's single journal writer on a FAILED (cleanup) owner too.
+  `link.edit` (`dispatch_remote_ready_v3`) is ready-only, so a settle after a failed send must never use it.
+  Trap: `remote_run_wait_v1` returns the owner's sticky error first, so the settle reads `turn.response` directly.
+- Flow order: open record encoded and sized -> admit -> prepare -> execute. A refused admit has zero Host
+  effect. A pre-execute failure settles via `remote_run_settle_before_execute_apply_v1`: `cancelled` only
+  when the controller's create-only execute archive (`controller_dispatch_remote_execute_key_v3`) is
+  absent, otherwise `outcome-unknown`.
+- Unsigned Host text never ends a row. A settled reply with no bundle (`unbundled`) and a refused reset
+  receipt both settle `outcome-unknown`. A `failed`/`wedged` stage reply is `invalid` (the Host never
+  sends one). Reaped matches only the exact typed `host_service_error_payload_v2` for this operation's
+  collect.
+- Accept and reset authority: `issuer == controller_id` plus `distributed_verify_grant_approval_from_snapshot_v2`.
+- Grant TTL must cover task timeout + collect bound + 120 s. Checked at grant issuance and again before execute.
+- Host: an executing remote-build slot with no opened build is settled cancelled/no-workload `deadline`
+  once the execute pair's window passes on the GRANT clock (`linux_service_remote_build_unopened_expire_v4`),
+  and open is refused past that window.
+- Owner decisions still open (outcome-unknown exit, retained storage, prepared release, quarantined-root
+  settle, signed reaped receipt, unopened cancel): records milestone_0043 `OWNER_DECISIONS.md`.
