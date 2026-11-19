@@ -45,7 +45,7 @@ use std.common.contracts.container.workspace_measurement_v3.{RemoteContainerMeas
 use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeExitStatusV1, RUNTIME_STATUS_OK,
     RUNTIME_PHASE_RUNNING, RUNTIME_PHASE_CREATED}
 use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerHostScopeV2,
-    container_scope_fence_id_v2, container_execution_request_encode_v2}
+    container_scope_fence_id_v2}
 use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
 use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_decode_v1
 use std.nogc_async_mut.container.providers.linux.request_v1.linux_oci_request_digest_v1
@@ -108,10 +108,9 @@ pub struct HostRemoteBuildOpenAuthorityV4:
 #   1. request.operation in {build, test} (the landed class predicate alone would admit a route action);
 #   2. the slot binding: request.id == the slot operation (association.execution.plan.operation_id), and
 #      request.payload_digest == association.remote_build_task_digest == sha256(builder_encode_task_v1(task));
-#   3. the plan pin (14.5, 14.10 N8-a): the task pins sha256 of the slot's full execution request at
-#      remote-container/<id>.sdn, the same pin remote_container_request_bind_v3 checks at the controller; the full
-#      request covers the scope-free core and the controller-authored request_bytes. The exact N6-a projection of those
-#      bytes needs the host-installed profiles, which no pre-transfer reader exposes; op (i) enforces it at staging;
+#   3. no request pin (owner decision N12-a): a task->request pin is a hash cycle with the invocation digest, so the
+#      execute-signed association marker binds request to task and the controller binds task to request after prepare.
+#      The exact N6-a projection of request_bytes needs the host-installed profiles; op (i) enforces it at staging;
 #   4. issuer == controller_ref, then distributed_verify_grant_approval_from_snapshot_v2 (C:648 pattern; an expired
 #      approval is refused here, also after a restart, since the clock and policy are re-read per call);
 #   5. remote_build_task_class_v1 with the snapshot `human-approver` key of approval.approver_id;
@@ -126,11 +125,6 @@ pub fn host_remote_build_open_authority_v4(policy: LocalAuthorityPolicyV1, contr
     if (association.remote_build_task_digest == "" or task_digest != association.remote_build_task_digest or
             request.payload_digest != task_digest):
         return Err("linux-host-remote-build-request-differs")
-    val request_digest = sha256_text(container_execution_request_encode_v2(association.execution)?)
-    var pinned = false
-    for input in task.inputs:
-        if input.path == "remote-container/" + task.id + ".sdn" and input.digest == request_digest: pinned = true
-    if not pinned: return Err("linux-host-remote-build-request-differs")
     if signed.issuer_id != controller_ref: return Err("linux-host-service-controller-mismatch")
     val grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, signed, approval, request,
         context.grant_clock, policy.snapshot.generation, context.policy_revision, context.revocation_epoch,

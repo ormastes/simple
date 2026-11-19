@@ -6,7 +6,7 @@ use app.buildrunner.remote_evidence_v1.{RemoteEvidencePolicyV1, RemoteOutputByte
     remote_outputs_freeze_v1}
 use app.buildrunner.remote_container_authority_v3.RemoteContainerCompletionV3
 use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerHostScopeV2,
-    container_execution_request_encode_v2, container_scope_fence_id_v2}
+    container_scope_fence_id_v2}
 use std.common.contracts.container.runtime_v1.RuntimeExitStatusV1
 use std.common.contracts.container.workspace_measurement_v3.{RemoteContainerMeasurementsV3,
     remote_container_measurements_encode_v3}
@@ -59,17 +59,12 @@ fn remote_container_task_version_v3(task: BuildTaskV1) -> Result<i64, text>:
     if markers > 1: return Err("REMOTE_CONTAINER_TASK_VERSION_INVALID")
     Ok(version)
 
-# 13.1 B rows kept: policy bind, request pinned at remote-container/<id>.sdn, plan == task/policy. The V2 provider pin
+# 13.1 B rows kept: policy bind, plan == task/policy. N12-a: no task->request pin (hash cycle); the driver compares the prepare association with its own draft. The V2 provider pin
 # and the nonce/probe contract are dropped (the signed provider/binding digests and the fresh epoch replace them).
 fn remote_container_request_bind_v3(task: BuildTaskV1, policy: RemoteEvidencePolicyV1,
         request: ContainerExecutionRequestV2) -> Result<bool, text>:
     if remote_container_task_version_v3(task)? != 3: return Err("REMOTE_CONTAINER_TASK_VERSION_DIFFERS")
     val _policy = remote_policy_bind_v1(task, policy)?
-    val payload = container_execution_request_encode_v2(request)?
-    var found = false
-    for input in task.inputs:
-        if input.path == "remote-container/" + task.id + ".sdn" and input.digest == sha256_text(payload): found = true
-    if not found: return Err("REMOTE_CONTAINER_REQUEST_NOT_PINNED")
     if request.plan.workload_uid != task.id or request.plan.attempt != task.attempt or
             request.plan.operation_id != policy.operation_id or request.plan.physical_host_id != policy.host_id:
         return Err("REMOTE_CONTAINER_PLAN_DIFFERS")

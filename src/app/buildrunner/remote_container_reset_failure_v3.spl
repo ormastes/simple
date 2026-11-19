@@ -1,0 +1,89 @@
+# milestone_0030 DESIGN 13.5 (reduced, owner decision 2026-11-19): the L6 reset-failure receipt under V3. A run a service
+# restart lost is NOT a passed run: the Host answers a reaped run with the error code
+# `linux-host-remote-build-reaped-incomplete`, and the CONTROLLER builds the one receipt it can (stage `service-restart`,
+# reap `absent-run-lost`, empty native id and empty binding digest) from its OWN admitted task, policy and authority
+# digests. The session journals the operation `failed` bound to the receipt digest; a receipt can never yield `completed`.
+# The other stages (destroy-absence, cancel-identity, cancel-absence) need a Host emitter that does not exist: they stay
+# refused here (named gap). The receipt is never decoded from the wire (the Host sends none).
+use app.buildrunner.remote_evidence_v1.RemoteEvidencePolicyV1
+use std.common.build_manager.contracts.{BuildTaskV1, builder_task_identity_v1, builder_identifier_valid_v1,
+    builder_digest_valid_v1}
+use std.common.build_manager.codec.builder_wire_line_v1
+use std.common.crypto.sha256.sha256_text
+
+struct RemoteContainerResetFailureV3:
+    task_identity: text
+    host_id: text
+    assignment_digest: text
+    controller_epoch: i64
+    operation_id: text
+    request_digest: text
+    grant_digest: text
+    workspace_binding_digest: text
+    stage: text
+    reason: text
+    reap: text
+    native_id: text
+
+fn remote_container_reset_failure_validate_v3(receipt: RemoteContainerResetFailureV3) -> Result<(), text>:
+    if not builder_digest_valid_v1(receipt.task_identity) or not builder_identifier_valid_v1(receipt.host_id) or
+            not builder_digest_valid_v1(receipt.assignment_digest) or receipt.controller_epoch < 1 or
+            not builder_identifier_valid_v1(receipt.operation_id) or
+            not builder_digest_valid_v1(receipt.request_digest) or not builder_digest_valid_v1(receipt.grant_digest) or
+            receipt.workspace_binding_digest != "":
+        return Err("REMOTE_RESET_FAILURE_IDENTITY_INVALID")
+    if receipt.stage != "service-restart" or receipt.reason != "REMOTE_CONTAINER_SERVICE_RESTART_RUN_LOST":
+        return Err("REMOTE_RESET_FAILURE_STAGE_INVALID")
+    if receipt.native_id != "" or receipt.reap != "absent-run-lost": return Err("REMOTE_RESET_FAILURE_RUNTIME_INVALID")
+    Ok(())
+
+# Constructed only from the admitted task/policy and the controller's own operation/grant digests, never from arriving
+# claims: the service-restart receipt, with an empty runtime identity and an empty workspace binding.
+fn remote_container_reset_failure_new_v3(task: BuildTaskV1, policy: RemoteEvidencePolicyV1, request_digest: text,
+        grant_digest: text) -> Result<RemoteContainerResetFailureV3, text>:
+    val receipt = RemoteContainerResetFailureV3(task_identity: builder_task_identity_v1(task), host_id: policy.host_id,
+        assignment_digest: policy.assignment_digest, controller_epoch: policy.controller_epoch,
+        operation_id: policy.operation_id, request_digest: request_digest, grant_digest: grant_digest,
+        workspace_binding_digest: "", stage: "service-restart", reason: "REMOTE_CONTAINER_SERVICE_RESTART_RUN_LOST",
+        reap: "absent-run-lost", native_id: "")
+    remote_container_reset_failure_validate_v3(receipt)?
+    Ok(receipt)
+
+fn remote_container_reset_failure_encode_v3(receipt: RemoteContainerResetFailureV3) -> Result<text, text>:
+    remote_container_reset_failure_validate_v3(receipt)?
+    var wire = builder_wire_line_v1("SIMPLE-REMOTE-RESET-FAILURE-3")
+    for field in [receipt.task_identity, receipt.host_id, receipt.assignment_digest, str(receipt.controller_epoch),
+            receipt.operation_id, receipt.request_digest, receipt.grant_digest, receipt.workspace_binding_digest,
+            receipt.stage, receipt.reason, receipt.reap, receipt.native_id]:
+        wire = wire + builder_wire_line_v1(field)
+    Ok(wire)
+
+fn remote_container_reset_failure_digest_v3(receipt: RemoteContainerResetFailureV3) -> Result<text, text>:
+    Ok(sha256_text(remote_container_reset_failure_encode_v3(receipt)?))
+
+# The parent compares the receipt to its own admitted task, policy and the currently verified operation/grant
+# digests before anything is journaled. The binding digest is host-attested (the controller cannot know it).
+fn remote_container_reset_failure_bind_v3(task: BuildTaskV1, policy: RemoteEvidencePolicyV1,
+        receipt: RemoteContainerResetFailureV3, request_digest: text, grant_digest: text) -> Result<(), text>:
+    remote_container_reset_failure_validate_v3(receipt)?
+    if receipt.task_identity != builder_task_identity_v1(task) or receipt.host_id != policy.host_id or
+            receipt.assignment_digest != policy.assignment_digest or
+            receipt.controller_epoch != policy.controller_epoch or receipt.operation_id != policy.operation_id:
+        return Err("REMOTE_RESET_FAILURE_BINDING_DIFFERS")
+    if receipt.request_digest != request_digest or receipt.grant_digest != grant_digest:
+        return Err("REMOTE_RESET_FAILURE_AUTHORITY_DIFFERS")
+    Ok(())
+
+# Controller result of accept_reset_failure_v3: always an ERROR outcome bound to the receipt digest.
+struct RemoteResetFailedResultV3:
+    status: text
+    stage: text
+    reason: text
+    reap: text
+    root: text
+    digest: text
+
+export RemoteContainerResetFailureV3, RemoteResetFailedResultV3
+export remote_container_reset_failure_new_v3, remote_container_reset_failure_encode_v3
+export remote_container_reset_failure_digest_v3
+export remote_container_reset_failure_bind_v3

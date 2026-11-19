@@ -68,12 +68,17 @@ fn oa_execution() -> ContainerExecutionRequestV2:
         native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id),
         request_bytes: "opaque-codec-DATA\n")
 
-# The signed task pins the full execution request at remote-container/<id>.sdn (the plan pin the controller freeze reads).
+# Legacy shape with a pin input (inert after N12-a: the host no longer reads it).
 fn oa_task(pin: text) -> BuildTaskV1:
     BuildTaskV1(id: "task_1", attempt: 1, phase: "build", producer_digest: "1".repeat(64), source_digest: "2".repeat(64),
         toolchain_digest: "3".repeat(64), dependencies: [], program: "bin/producer", args: [],
         inputs: [BuildInputV1(path: "remote-container/task_1.sdn", digest: pin)], outputs: ["out/a"], cache_key: "4".repeat(64),
         timeout_ms: 1000, memory_limit_bytes: 0, links: [])
+
+fn oa_task_no_pin() -> BuildTaskV1:
+    BuildTaskV1(id: "task_1", attempt: 1, phase: "build", producer_digest: "1".repeat(64), source_digest: "2".repeat(64),
+        toolchain_digest: "3".repeat(64), dependencies: [], program: "bin/producer", args: [],
+        inputs: [], outputs: ["out/a"], cache_key: "4".repeat(64), timeout_ms: 1000, memory_limit_bytes: 0, links: [])
 
 fn oa_pinned_task() -> BuildTaskV1:
     oa_task(sha256_text(container_execution_request_encode_v2(oa_execution()).unwrap()))
@@ -167,7 +172,7 @@ describe "Remote-build open authority V4 (milestone_0030 14.4)":
             oa_pinned_task(), issued.signed, issued.approval,
             request, process, oa_context(100))).to_equal(Err("remote-build-isolation-class"))
 
-    it "binds the open to the slot's association: operation id, task marker, payload digest and the request pin":
+    it "binds the open to the slot's association: operation id, task marker, payload digest (no request pin, N12-a)":
         # @req M0030-OPEN-06 (lane B review P2-1)
         val task = oa_pinned_task()
         val marker = oa_task_digest(task)
@@ -191,14 +196,22 @@ describe "Remote-build open authority V4 (milestone_0030 14.4)":
         val altered = oa_task("e".repeat(64))
         expect(host_remote_build_open_authority_v4(oa_policy(), "controller_1", "worker_1", oa_association(marker), altered,
             issued.signed, issued.approval, request, oa_env(), oa_context(100))).to_equal(Err("linux-host-remote-build-request-differs"))
-        step("a task that is the marker but does not pin the slot's execution request is refused (plan pin)")
-        val unpinned = oa_task("e".repeat(64))
-        val unpinned_marker = oa_task_digest(unpinned)
-        val unpinned_request = oa_request_for("build", "operation_1", unpinned_marker)
-        val issued_unpinned = oa_issued(unpinned_request)
-        expect(host_remote_build_open_authority_v4(oa_policy(), "controller_1", "worker_1", oa_association(unpinned_marker), unpinned,
-            issued_unpinned.signed, issued_unpinned.approval, unpinned_request, oa_env(), oa_context(100))).to_equal(
+        step("N12-a: a task WITHOUT a remote-container/<id>.sdn pin input is admitted (the association marker binds request to task)")
+        val no_pin = oa_task_no_pin()
+        val no_pin_marker = oa_task_digest(no_pin)
+        val no_pin_request = oa_request_for("build", "operation_1", no_pin_marker)
+        val issued_no_pin = oa_issued(no_pin_request)
+        expect(host_remote_build_open_authority_v4(oa_policy(), "controller_1", "worker_1", oa_association(no_pin_marker), no_pin,
+            issued_no_pin.signed, issued_no_pin.approval, no_pin_request, oa_env(), oa_context(100)).is_ok()).to_equal(true)
+        step("a task unlike the association marker is still refused without a pin")
+        expect(host_remote_build_open_authority_v4(oa_policy(), "controller_1", "worker_1", oa_association(marker), no_pin,
+            issued_no_pin.signed, issued_no_pin.approval, no_pin_request, oa_env(), oa_context(100))).to_equal(
             Err("linux-host-remote-build-request-differs"))
+        step("the authority source holds no request pin loop")
+        val authority_source = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl")
+        val authority_fn = authority_source.substring(authority_source.index_of("pub fn host_remote_build_open_authority_v4("), authority_source.byte_len())
+        val authority_body = authority_fn.substring(0, authority_fn.index_of("\n# ---- the executor"))
+        expect(authority_body.contains("remote-container/")).to_equal(false)
         step("the open caller runs no second copy of these pins (they live in the authority only)")
         val source = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl")
         val open = source.substring(source.index_of("pub fn host_remote_build_open_v4("), source.byte_len())

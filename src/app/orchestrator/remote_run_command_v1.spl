@@ -1,0 +1,227 @@
+# milestone_0030 controller half (DESIGN_CTRL.md C4): the `remote-run` command shell. It parses the exact option set,
+# loads the spec directory (formats: remote_run_author_v1.spl header), opens the controller local root through the
+# pinned config digest, builds the production LINK over ONE retained dispatch reader (controller_dispatch_remote_*) and
+# the ISSUER over the protected key store, and hands both to the pure driver (remote_run_v1.spl). It prints digests only.
+use app.orchestrator.remote_run_v1.{RemoteRunFactsV1, RemoteRunLinkV1, RemoteRunIssuerV1, RemoteRunOutcomeV1, remote_run_drive_v1}
+use app.orchestrator.remote_run_frames_v1.remote_run_refused_reply_v1
+use app.orchestrator.remote_run_author_v1.{remote_run_spec_decode_v1, remote_run_host_inputs_decode_v1,
+    remote_run_author_v1}
+use app.orchestrator.controller_authority_issue_v1.{ControllerIssuedAuthorityV1, controller_authority_issue_v1,
+    controller_authority_store_reader_v1}
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use app.io.mod.{file_read_regular_no_follow_bounded, file_is_regular_no_follow}
+use std.nogc_sync_mut.io_runtime.file_read_bytes_result
+use std.nogc_sync_mut.orchestration.controller_local_root_v3.{ControllerLocalRootV3, controller_local_root_open_v3}
+use std.nogc_sync_mut.io.dir_ops.dir_is_real_no_follow
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.{ControllerDispatchOwnerV3, ControllerDispatchOwnedTurnV3,
+    controller_dispatch_remote_begin_v3, controller_dispatch_remote_send_v3, controller_dispatch_remote_admit_v3,
+    controller_dispatch_remote_edit_v3, controller_dispatch_step_v3, controller_dispatch_close_v3}
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.{ControllerDispatchContextV1, controller_dispatch_grant_clock_v1}
+use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalV2
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2, ExecutionEnvironmentV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.build_manager.codec.builder_decode_task_v1
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1, builder_relative_path_valid_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms}
+
+val REMOTE_RUN_OPTIONS_V1 = ["--dispatch-root", "--config-digest", "--key-store", "--approver", "--spec", "--out",
+    "--grant-id", "--expires-in-ms"]
+# One authenticated exchange (prepare/execute included) never waits more than this (the rule is per wait; the collect
+# poll has its own 9 minute bound in remote_run_v1.spl).
+val REMOTE_RUN_EXCHANGE_MS_V1: i64 = 120000
+
+class RemoteRunBoxV1:
+    var owner: Option<ControllerDispatchOwnerV3> = None
+    # A refusal at begin (e.g. a non-Windows native origin) hands the still-open root back instead of a handle.
+    var root_cleanup: Option<ControllerLocalRootV3> = None
+
+# Exactly the eight `--name value` options, each once (same shape rule as remote-run-plan).
+pub fn remote_run_options_v1(args: [text]) -> Result<Dict<text, text>, text>:
+    if args.len() != 1 + 2 * REMOTE_RUN_OPTIONS_V1.len(): return Err("remote-run-usage")
+    var options: Dict<text, text> = {}
+    var index = 1
+    while index + 1 < args.len():
+        val name = args[index]
+        if not REMOTE_RUN_OPTIONS_V1.contains(name) or options.contains_key(name) or args[index + 1].starts_with("--"):
+            return Err("remote-run-usage")
+        options[name] = args[index + 1]
+        index = index + 2
+    if not builder_digest_valid_v1(options["--config-digest"]) or not builder_identifier_valid_v1(options["--approver"]) or
+            not builder_identifier_valid_v1(options["--grant-id"]):
+        return Err("remote-run-usage")
+    Ok(options)
+
+fn remote_run_millis_v1(value: text) -> Result<i64, text>:
+    if value.byte_len() < 1 or value.byte_len() > 9: return Err("remote-run-expiry-invalid")
+    val digits = "0123456789"
+    var total: i64 = 0
+    for index in 0..value.byte_len():
+        val digit = digits.index_of(value.substring(index, index + 1))
+        if digit < 0: return Err("remote-run-expiry-invalid")
+        total = total * 10 + digit
+    Ok(total)
+
+fn remote_run_text_file_v1(path: text, maximum: i64) -> Result<text, text>:
+    val read = file_read_regular_no_follow_bounded(path, maximum)
+    if read.is_err(): return Err("remote-run-spec-unreadable")
+    Ok(read.unwrap())
+
+# Producer and operator inputs by task path; relative, regular, no-follow files under `<spec>/inputs/`.
+fn remote_run_input_files_v1(spec_dir: text, paths: [text]) -> Result<Dict<text, [u8]>, text>:
+    var files: Dict<text, [u8]> = {}
+    for path in paths:
+        if not builder_relative_path_valid_v1(path): return Err("remote-run-input-path")
+        val full = spec_dir + "/inputs/" + path
+        # Every directory component under inputs/ must be a real directory (a symlinked directory is never followed).
+        var parent = spec_dir + "/inputs"
+        val parts = path.split("/")
+        if not dir_is_real_no_follow(parent): return Err("remote-run-input-parent-unsafe")
+        for index in 0..parts.len() - 1:
+            parent = parent + "/" + parts[index]
+            if not dir_is_real_no_follow(parent): return Err("remote-run-input-parent-unsafe")
+        if not file_is_regular_no_follow(full): return Err("remote-run-input-not-regular")
+        val read = file_read_bytes_result(full)
+        if read.is_err(): return Err("remote-run-input-unreadable")
+        files[path] = read.unwrap()
+    Ok(files)
+
+fn remote_run_wait_v1(box: RemoteRunBoxV1, first: ControllerDispatchOwnedTurnV3) -> Result<text, text>:
+    var turn = first
+    val started = sosix_time_now_monotonic_ms()
+    var steps = 0
+    while steps < 100000:
+        box.owner = turn.owner
+        if turn.root_cleanup.is_some(): box.root_cleanup = turn.root_cleanup
+        if turn.error != "": return Err(turn.error + "\n" + turn.response)
+        # An authenticated Host refusal of a route frame leaves the owner ready: it is the CALLER's data (the reaped
+        # answer to collect drives the recovery edit), so it is an Err text here, not a dead link.
+        if turn.phase == "ready" and turn.owner.is_some() and turn.outcome == "host-refused":
+            return Err(remote_run_refused_reply_v1(turn.response))
+        if turn.phase == "ready" and turn.owner.is_some(): return Ok(turn.response)
+        if turn.owner.is_none() or turn.completed: return Err("remote-run-link-closed")
+        if started >= 0 and sosix_time_now_monotonic_ms() - started > REMOTE_RUN_EXCHANGE_MS_V1:
+            return Err("remote-run-link-timeout")
+        sosix_sleep_ms(5)
+        turn = controller_dispatch_step_v3(turn.owner.unwrap())
+        steps = steps + 1
+    Err("remote-run-link-steps")
+
+fn remote_run_link_send_v1(box: RemoteRunBoxV1, action: text, payload: text) -> Result<text, text>:
+    if box.owner.is_none(): return Err("remote-run-link-closed")
+    remote_run_wait_v1(box, controller_dispatch_remote_send_v3(box.owner.unwrap(), action, payload))
+
+fn remote_run_link_admit_v1(box: RemoteRunBoxV1, signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2,
+        request: OperationEnvelopeV2) -> Result<bool, text>:
+    if box.owner.is_none(): return Err("remote-run-link-closed")
+    val _done = remote_run_wait_v1(box, controller_dispatch_remote_admit_v3(box.owner.unwrap(), signed, approval, request))?
+    Ok(true)
+
+fn remote_run_link_edit_v1(box: RemoteRunBoxV1,
+        edit: fn(DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>) -> Result<text, text>:
+    if box.owner.is_none(): return Err("remote-run-link-closed")
+    remote_run_wait_v1(box, controller_dispatch_remote_edit_v3(box.owner.unwrap(), edit))
+
+fn remote_run_sleep_v1(ms: i64) -> bool:
+    sosix_sleep_ms(ms)
+    true
+
+fn remote_run_issue_v1(context: ControllerDispatchContextV1, key_store: text, approver: text, requested: ExecutionEnvironmentV2,
+        grant: ExecutionGrantV2, request: OperationEnvelopeV2) -> Result<ControllerIssuedAuthorityV1, text>:
+    val now = controller_dispatch_grant_clock_v1()?
+    controller_authority_issue_v1(context, controller_authority_store_reader_v1(key_store), context.config.controller_id,
+        approver, grant, request, requested, grant.expires_at, now)
+
+fn remote_run_reply_v1(outcome: RemoteRunOutcomeV1, cleanup_pending: bool) -> OrchestratorValidationReplyV1:
+    var detail = outcome.detail
+    val line = detail.index_of("\n")
+    if line >= 0: detail = detail.substring(0, line)
+    if detail.byte_len() > 256: detail = detail.substring(0, 256)
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("remote-run"),
+        "state": SdnValue.String(outcome.state), "operationId": SdnValue.String(outcome.operation_id),
+        "digest": SdnValue.String(outcome.digest), "detail": SdnValue.String(detail),
+        "cleanupPending": SdnValue.Bool(cleanup_pending)}
+    OrchestratorValidationReplyV1(exit_code: outcome.exit_code, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn remote_run_refusal_v1(exit_code: i64, code: text) -> OrchestratorValidationReplyV1:
+    remote_run_reply_v1(RemoteRunOutcomeV1(exit_code: exit_code, state: "refused", operation_id: "", digest: "", detail: code), false)
+
+# A refusal after the controller root opened hands the root to the caller for cleanup (never leaked).
+fn remote_run_refusal_root_v1(code: text, root: ControllerLocalRootV3) -> OrchestratorValidationReplyV1:
+    var reply = remote_run_refusal_v1(1, code)
+    reply.controller_root_cleanup = Some(root)
+    reply
+
+pub fn remote_run_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
+    val parsed = remote_run_options_v1(args)
+    if parsed.is_err(): return remote_run_refusal_v1(2, parsed.unwrap_err())
+    val options = parsed.unwrap()
+    val ttl = remote_run_millis_v1(options["--expires-in-ms"])
+    if ttl.is_err(): return remote_run_refusal_v1(2, ttl.unwrap_err())
+    val spec_dir = options["--spec"]
+    val task_text = remote_run_text_file_v1(spec_dir + "/task.sdn", 1048576)
+    val environment_text = remote_run_text_file_v1(spec_dir + "/environment.sdn", 16384)
+    val run_text = remote_run_text_file_v1(spec_dir + "/run.sdn", 65536)
+    val inputs_text = remote_run_text_file_v1(spec_dir + "/host-inputs.sdn", 65536)
+    if task_text.is_err() or environment_text.is_err() or run_text.is_err() or inputs_text.is_err():
+        return remote_run_refusal_v1(1, "remote-run-spec-unreadable")
+    val task = builder_decode_task_v1(task_text.unwrap())
+    val spec = remote_run_spec_decode_v1(run_text.unwrap())
+    val host_inputs = remote_run_host_inputs_decode_v1(inputs_text.unwrap())
+    if task.is_err(): return remote_run_refusal_v1(1, "remote-run-task-invalid")
+    if spec.is_err(): return remote_run_refusal_v1(1, spec.unwrap_err())
+    if host_inputs.is_err(): return remote_run_refusal_v1(1, host_inputs.unwrap_err())
+    var paths: [text] = [task.unwrap().program]
+    for input in task.unwrap().inputs: paths.push(input.path)
+    val files = remote_run_input_files_v1(spec_dir, paths)
+    if files.is_err(): return remote_run_refusal_v1(1, files.unwrap_err())
+    val opened = controller_local_root_open_v3(options["--dispatch-root"], options["--config-digest"])
+    if not opened.ready or opened.owner.is_none() or opened.error != "":
+        return remote_run_refusal_v1(1, if opened.error != "": opened.error else: "remote-run-root-unavailable")
+    val root = opened.owner.unwrap()
+    val current = root.current_v3()
+    if current.is_err(): return remote_run_refusal_root_v1(current.unwrap_err(), root)
+    val context = current.unwrap()
+    # Fixed bound: the Host reads `not_after` as a grant-clock (wall) deadline.
+    val now = controller_dispatch_grant_clock_v1()
+    if now.is_err(): return remote_run_refusal_root_v1(now.unwrap_err(), root)
+    val authored = remote_run_author_v1(spec.unwrap(), host_inputs.unwrap(), task.unwrap(), environment_text.unwrap(),
+        files.unwrap(), context.config.controller_id, context.config.controller_epoch, now.unwrap() + ttl.unwrap())
+    if authored.is_err(): return remote_run_refusal_root_v1(authored.unwrap_err(), root)
+    val box = RemoteRunBoxV1()
+    val operation_id = spec.unwrap().operation_id
+    val key_store = options["--key-store"]
+    val approver = options["--approver"]
+    val requested = authored.unwrap().environment
+    val link = RemoteRunLinkV1(
+        begin: fn() -> Result<text, text>: remote_run_wait_v1(box, controller_dispatch_remote_begin_v3(root, operation_id)),
+        send: fn(action: text, payload: text) -> Result<text, text>: remote_run_link_send_v1(box, action, payload),
+        admit: fn(signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2) -> Result<bool, text>:
+            remote_run_link_admit_v1(box, signed, approval, request),
+        edit: fn(edit: fn(DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>) -> Result<text, text>:
+            remote_run_link_edit_v1(box, edit),
+        clock: fn() -> Result<i64, text>: controller_dispatch_grant_clock_v1(),
+        monotonic_ms: fn() -> i64: sosix_time_now_monotonic_ms(),
+        pause: fn(ms: i64) -> bool: remote_run_sleep_v1(ms))
+    val issuer = RemoteRunIssuerV1(issue: fn(grant: ExecutionGrantV2, request: OperationEnvelopeV2) -> Result<ControllerIssuedAuthorityV1, text>:
+        remote_run_issue_v1(context, key_store, approver, requested, grant, request))
+    val facts = RemoteRunFactsV1(snapshot: context.policy.snapshot, session_generation: context.policy.session_generation,
+        controller_epoch: context.config.controller_epoch,
+        grant_id: options["--grant-id"], ttl_ms: ttl.unwrap(), state_root: options["--out"])
+    val outcome = remote_run_drive_v1(authored.unwrap(), facts, link, issuer)
+    # Local cleanup only: closing never sends another Host request and never re-executes.
+    var cleanup_pending = false
+    var close_steps = 0
+    while box.owner.is_some() and close_steps < 64:
+        val closed = controller_dispatch_close_v3(box.owner.unwrap())
+        box.owner = closed.owner
+        close_steps = close_steps + 1
+        if closed.error != "": cleanup_pending = true
+    if box.owner.is_some(): cleanup_pending = true
+    var reply = remote_run_reply_v1(outcome, cleanup_pending)
+    reply.controller_dispatch_cleanup = box.owner
+    reply.controller_root_cleanup = box.root_cleanup
+    reply
+
+export remote_run_options_v1, remote_run_command_v1

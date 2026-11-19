@@ -5,7 +5,7 @@
 # The V3 verify shares the V2 authority body (remote_container_completion_authority_v2) and then checks the V3
 # observation digests and the Ed25519 signature over the V3 message. No new crypto.
 use std.common.build_manager.contracts.{BuildTaskV1, builder_identifier_valid_v1, builder_digest_valid_v1}
-use std.common.build_manager.codec.builder_wire_line_v1
+use std.common.build_manager.codec.{builder_wire_line_v1, BuilderWireReaderV1}
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
 use app.llm_caret.workbench.distributed_grant_verification_v2.DistributedAuthorityKeyV2
@@ -80,6 +80,12 @@ fn remote_container_completion_signature_hex_v3(signature: [u8]) -> text:
         hex = hex + digits.substring(number / 16, number / 16 + 1) + digits.substring(number % 16, number % 16 + 1)
     hex
 
+fn remote_container_completion_hex_digit_v3(value: text) -> i64:
+    val digits = "0123456789abcdef"
+    for index in 0..16:
+        if value == digits.substring(index, index + 1): return index
+    -1
+
 fn remote_container_completion_encode_v3(value: RemoteContainerCompletionV3) -> Result<text, text>:
     val message = remote_container_completion_signature_text_v3(value)?
     if value.signature.len() != 64: return Err("CONTAINER_COMPLETION_SIGNATURE_INVALID")
@@ -88,6 +94,49 @@ fn remote_container_completion_encode_v3(value: RemoteContainerCompletionV3) -> 
     if wire.byte_len() > REMOTE_CONTAINER_COMPLETION_MAX_BYTES_V3:
         return Err("CONTAINER_COMPLETION_WIRE_TOO_LARGE")
     Ok(wire)
+
+fn remote_container_completion_decode_v3(wire: text) -> Result<RemoteContainerCompletionV3, text>:
+    if wire.byte_len() > REMOTE_CONTAINER_COMPLETION_MAX_BYTES_V3:
+        return Err("CONTAINER_COMPLETION_WIRE_TOO_LARGE")
+    if not wire.ends_with("\n"): return Err("CONTAINER_COMPLETION_WIRE_INVALID")
+    var reader = BuilderWireReaderV1.create(wire)
+    if reader.scalar() != "SIMPLE_REMOTE_CONTAINER_COMPLETION_ENVELOPE_V3" or
+            reader.scalar() != "SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V3":
+        return Err("CONTAINER_COMPLETION_WIRE_VERSION_INVALID")
+    val version = reader.number(REMOTE_CONTAINER_COMPLETION_INTEGER_MAX_V3, false)
+    val task_identity = reader.scalar()
+    val host_id = reader.scalar()
+    val assignment_digest = reader.scalar()
+    val controller_epoch = reader.number(REMOTE_CONTAINER_COMPLETION_INTEGER_MAX_V3, false)
+    val operation_id = reader.scalar()
+    val request_digest = reader.scalar()
+    val grant_digest = reader.scalar()
+    val result_digest = reader.scalar()
+    val measurement_digest = reader.scalar()
+    val stdout_digest = reader.scalar()
+    val stderr_digest = reader.scalar()
+    val output_inventory_digest = reader.scalar()
+    val tests_digest = reader.scalar()
+    val signer_id = reader.scalar()
+    val key_revision = reader.number(REMOTE_CONTAINER_COMPLETION_INTEGER_MAX_V3, false)
+    val completed_at = reader.number(REMOTE_CONTAINER_COMPLETION_INTEGER_MAX_V3, false)
+    val signature_hex = reader.scalar()
+    if reader.complete_error() != "": return Err("CONTAINER_COMPLETION_WIRE_INVALID")
+    if signature_hex.byte_len() != 128: return Err("CONTAINER_COMPLETION_SIGNATURE_INVALID")
+    var signature: [u8] = []
+    for index in 0..64:
+        val high = remote_container_completion_hex_digit_v3(signature_hex.substring(index * 2, index * 2 + 1))
+        val low = remote_container_completion_hex_digit_v3(signature_hex.substring(index * 2 + 1, index * 2 + 2))
+        if high < 0 or low < 0: return Err("CONTAINER_COMPLETION_SIGNATURE_INVALID")
+        signature.push((high * 16 + low) as u8)
+    val value = RemoteContainerCompletionV3(version: version, task_identity: task_identity, host_id: host_id,
+        assignment_digest: assignment_digest, controller_epoch: controller_epoch, operation_id: operation_id,
+        request_digest: request_digest, grant_digest: grant_digest, result_digest: result_digest,
+        measurement_digest: measurement_digest, stdout_digest: stdout_digest, stderr_digest: stderr_digest,
+        output_inventory_digest: output_inventory_digest, tests_digest: tests_digest, signer_id: signer_id,
+        key_revision: key_revision, completed_at: completed_at, signature: signature)
+    if remote_container_completion_encode_v3(value)? != wire: return Err("CONTAINER_COMPLETION_WIRE_NONCANONICAL")
+    Ok(value)
 
 # Built only from the protected assignment and the controller's own freeze, never from arriving claims.
 struct RemoteContainerBindingV3:
@@ -134,4 +183,4 @@ fn remote_container_verify_completion_v3(value: RemoteContainerCompletionV3,
 export RemoteContainerCompletionV3, RemoteContainerBindingV3, REMOTE_CONTAINER_COMPLETION_MAX_BYTES_V3
 export remote_container_verify_completion_v3
 export remote_container_completion_signature_text_v3, remote_container_completion_signature_message_v3
-export remote_container_completion_encode_v3
+export remote_container_completion_encode_v3, remote_container_completion_decode_v3

@@ -8,7 +8,7 @@ build route.
 Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
 Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
 ## Compatibility and limitations
-Codec only here; the V3 verify, freeze and bundle codec are pinned by their own specs.
+Codec only here; the V3 verify, freeze, bundle codec and accept_wire_v3 are pinned by remote_container_session_v3_spec.
 ## Verification guidance and troubleshooting
 Each refusal names the exact error string; a changed string is a contract change.
 """
@@ -28,17 +28,19 @@ fn c3_completion() -> RemoteContainerCompletionV3:
         tests_digest: "a".repeat(64), signer_id: "worker_1", key_revision: 1, completed_at: 100, signature: c3_signature())
 
 describe "Remote container completion V3 codec (milestone_0030 13.1)":
-    it "encodes a canonical V3 completion under the V3 headers":
+    it "round-trips a canonical V3 completion under the V3 headers":
         # @req M0030-COMPLETION3-01
         val wire = remote_container_completion_encode_v3(c3_completion()).unwrap()
         expect(wire).to_start_with("SIMPLE_REMOTE_CONTAINER_COMPLETION_ENVELOPE_V3\nSIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V3\n")
-        expect(wire.contains("6".repeat(64))).to_equal(true)
+        val back = remote_container_completion_decode_v3(wire).unwrap()
+        expect(back.measurement_digest).to_equal("6".repeat(64))
+        expect(back.signature).to_equal(c3_signature())
         step("the signed message is the signature block alone, starting with its domain line")
         val message = remote_container_completion_signature_text_v3(c3_completion()).unwrap()
         expect(message).to_start_with("SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V3\n3\n")
         expect(wire.contains(message)).to_equal(true)
 
-    it "refuses another version, a bad digest and a short signature":
+    it "refuses another version, a bad digest, a short signature and a V2 envelope":
         # @req M0030-COMPLETION3-02
         var version = c3_completion()
         version.version = 2
@@ -50,4 +52,6 @@ describe "Remote container completion V3 codec (milestone_0030 13.1)":
         short.signature = [1u8]
         expect(remote_container_completion_encode_v3(short)).to_equal(Err("CONTAINER_COMPLETION_SIGNATURE_INVALID"))
         val wire = remote_container_completion_encode_v3(c3_completion()).unwrap()
-        expect(wire.contains("_V2")).to_equal(false)
+        expect(remote_container_completion_decode_v3(wire.replace("_V3\n", "_V2\n"))).to_equal(Err("CONTAINER_COMPLETION_WIRE_VERSION_INVALID"))
+        step("trailing bytes are not canonical")
+        expect(remote_container_completion_decode_v3(wire + "x\n").is_err()).to_equal(true)

@@ -27,6 +27,8 @@ use std.common.contracts.orchestration.assignment_v1.controller_assignment_bytes
 use std.common.contracts.orchestration.workload_fence_v1.controller_workload_create_v1
 use std.common.contracts.container.execution_v2.*
 use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
 use std.common.build_manager.contracts.builder_identifier_valid_v1
 use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.io.windows_command_owner_v2.windows_command_thread_check_v2
@@ -76,6 +78,8 @@ class ControllerDispatchStateV3:
     var outcome: text = "not-sent"
     var error: text = ""
     var remote_started: bool = false
+    # milestone_0030 C3: the Host operation id of a REMOTE-mode run (no packet is bound in that mode).
+    var remote_op: text = ""
 
 struct ControllerDispatchStateTurnV3:
     owner: Option<ControllerDispatchStateV3>
@@ -185,7 +189,7 @@ fn dispatch_request_v3(owner: ControllerDispatchStateV3, action: text, payload: 
     val incarnation = host_service_ready_reader_incarnation_v1(owner.reader.unwrap())?
     if action == "status": return Ok(HostServiceOperationRequestV6(action, incarnation, "", "", "", ""))
     if action == "service-stop": return Ok(HostServiceOperationRequestV6(action, incarnation, "", owner.scope_digest, "", ""))
-    val op = owner.packet.unwrap().binding.host_operation.id
+    val op = if owner.packet.is_some(): owner.packet.unwrap().binding.host_operation.id else: owner.remote_op
     val digest = if ["inspect", "progress", "cancel"].contains(action): owner.execute_digest
         else: host_service_operation_request_digest_v6(op, payload)?
     Ok(HostServiceOperationRequestV6(action, incarnation, op, owner.scope_digest, digest, payload))
@@ -301,6 +305,84 @@ fn dispatch_state_service_begin_v3(root: ControllerLocalRootV3, action: text) ->
     val owner = ControllerDispatchStateV3(root: Some(root), uid: "", mode: action)
     if not ["status", "service-stop"].contains(action): return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-service-action"))
     dispatch_turn_v3(dispatch_reader_v3(owner))
+
+# milestone_0030 C3: REMOTE mode. One retained reader carries many frames: begin ends in phase "ready" after the
+# installed-binding status check; each send/step cycle ends in "ready" with the reply payload in `response`. No packet is
+# bound and no Windows scope match runs. Cancel/close never resend (dispatch_state_close_v3 is unchanged).
+fn dispatch_state_remote_begin_v3(root: ControllerLocalRootV3, operation_id: text) -> ControllerDispatchStateTurnV3:
+    var owner = ControllerDispatchStateV3(root: Some(root), uid: operation_id, mode: "remote")
+    if not builder_identifier_valid_v1(operation_id): return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-remote-operation-id"))
+    owner.remote_op = operation_id
+    dispatch_turn_v3(dispatch_reader_v3(owner))
+
+fn dispatch_remote_ready_v3(owner: ControllerDispatchStateV3) -> bool:
+    owner.mode == "remote" and owner.phase == "ready" and owner.exchange.is_none() and owner.root.is_some()
+
+fn dispatch_state_remote_send_v3(original: ControllerDispatchStateV3, action: text,
+        payload: text) -> ControllerDispatchStateTurnV3:
+    var owner = original
+    if owner.mode != "remote" or owner.phase != "ready" or owner.exchange.is_some():
+        return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-remote-not-ready"))
+    if not ["prepare", "execute", "remote-build"].contains(action) or payload == "":
+        return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-remote-action"))
+    owner.response = ""
+    if action == "execute":
+        val store = owner.root.unwrap().workload_v3()
+        if store.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, store.unwrap_err()))
+        val digest = host_service_operation_request_digest_v6(owner.remote_op, payload)
+        if digest.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, digest.unwrap_err()))
+        val key = "controller-remote-execute-v3/" + sha256_text(owner.remote_op) + ".sdn"
+        # Atomic create-only return is the gate. Existing bytes NEVER grant resend, identical or not.
+        val published = distributed_operation_journal_publish_v3(store.unwrap().journal, key, payload)
+        if published.is_err():
+            owner.remote_started = true
+            return dispatch_turn_v3(dispatch_fail_v3(owner, published.unwrap_err()))
+        val readback = distributed_operation_journal_read_required_v3(store.unwrap().journal, key, 2097152)
+        if readback.is_err() or readback.unwrap() != payload:
+            owner.remote_started = true
+            return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-execute-archive-conflict-or-readback"))
+        if not published.unwrap():
+            owner.remote_started = true
+            return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-execute-already-recorded-inspect-required"))
+        owner.execute_source = payload
+        owner.execute_digest = digest.unwrap()
+        owner.remote_started = true
+        owner.outcome = "unknown"
+    dispatch_turn_v3(dispatch_send_v3(owner, action, payload))
+
+# The admit-build-row step (C5) through the root's single journal writer, authority re-verified at the grant clock.
+fn dispatch_state_remote_admit_v3(original: ControllerDispatchStateV3, signed: DistributedSignedGrantV2,
+        approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2) -> ControllerDispatchStateTurnV3:
+    var owner = original
+    if not dispatch_remote_ready_v3(owner): return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-remote-not-ready"))
+    if request.id != owner.remote_op: return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-remote-admit-operation"))
+    val context = owner.root.unwrap().current_v3()
+    if context.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, context.unwrap_err()))
+    val now = controller_dispatch_grant_clock_v1()
+    if now.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, now.unwrap_err()))
+    val store = owner.root.unwrap().workload_v3()
+    if store.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, store.unwrap_err()))
+    owner.response = ""
+    # The returned store is adopted even on an error: a failed second commit leaves the first one published.
+    val admitted = controller_workload_store_admit_remote_build_v1(store.unwrap(),
+        context.unwrap().policy.snapshot, context.unwrap().policy.session_generation, signed, approval, request, now.unwrap())
+    owner = dispatch_retain_v3(owner, Ok(admitted.store))
+    if owner.error == "" and admitted.error != "": owner = dispatch_fail_v3(owner, admitted.error)
+    dispatch_turn_v3(owner)
+
+# The session accept runs on THE root journal. A refusal fails the run (cleanup only); a journal the closure advanced
+# before refusing is not adopted, so the root's stale writer then refuses further work rather than forking history.
+fn dispatch_state_remote_edit_v3(original: ControllerDispatchStateV3,
+        edit: fn(DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>) -> ControllerDispatchStateTurnV3:
+    var owner = original
+    if not dispatch_remote_ready_v3(owner): return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-remote-not-ready"))
+    val store = owner.root.unwrap().workload_v3()
+    if store.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, store.unwrap_err()))
+    val edited = controller_workload_store_edit_journal_v1(store.unwrap(), edit)
+    if edited.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, edited.unwrap_err()))
+    owner = dispatch_retain_v3(owner, Ok(edited.unwrap().0))
+    if owner.error == "": owner.response = edited.unwrap().1
+    dispatch_turn_v3(owner)
 
 fn dispatch_prepare_v3(original: ControllerDispatchStateV3) -> ControllerDispatchStateV3:
     var owner = original
@@ -440,6 +522,14 @@ fn dispatch_accept_v3(original: ControllerDispatchStateV3, reply: HostServiceOpe
         if reply.error != "" or reply.exit_code != 0:
             return dispatch_fail_v3(owner, if reply.error != "": reply.error else: "dispatch-host-nonzero")
         return dispatch_send_v3(owner, "progress", "")
+    if owner.mode == "remote" and owner.phase == "remote-build" and (reply.error != "" or reply.exit_code != 0):
+        # An authenticated Host refusal of a route frame (e.g. a reaped run answering collect) is DATA for the driver,
+        # which decodes the encoded reply: the owner stays ready so the recovery edit can still run. Prepare/execute
+        # refusals, and every transport error, keep failing the owner.
+        owner.response = encoded.unwrap()
+        owner.outcome = "host-refused"
+        owner.phase = "ready"
+        return owner
     if reply.error != "" or reply.exit_code != 0:
         owner.response = encoded.unwrap()
         return dispatch_fail_v3(owner, if reply.error != "": reply.error else: "dispatch-host-nonzero")
@@ -453,6 +543,12 @@ fn dispatch_accept_v3(original: ControllerDispatchStateV3, reply: HostServiceOpe
         val scope = container_scope_fence_id_v2(status.unwrap().scope)
         if scope.is_err(): return dispatch_fail_v3(owner, scope.unwrap_err())
         owner.scope_digest = scope.unwrap()
+        if owner.mode == "remote":
+            # C3: the installed-binding status check above is the whole gate; the Windows packet match never runs here.
+            owner.response = reply.payload
+            owner.outcome = "authenticated-reply"
+            owner.phase = "ready"
+            return owner
         if owner.mode == "status":
             owner.response = reply.payload
             owner.outcome = "authenticated-reply"
@@ -470,6 +566,12 @@ fn dispatch_accept_v3(original: ControllerDispatchStateV3, reply: HostServiceOpe
         val source = container_execution_request_encode_v2(owner.packet.unwrap().execution)
         if source.is_err(): return dispatch_fail_v3(owner, source.unwrap_err())
         return dispatch_send_v3(owner, "validate", source.unwrap())
+    if owner.mode == "remote":
+        # Every later remote reply (prepare, execute after its progress polls, remote-build) is handed to the caller.
+        owner.response = reply.payload
+        owner.outcome = "authenticated-reply"
+        owner.phase = "ready"
+        return owner
     if owner.phase == "validate":
         val validated = controller_dispatch_validation_match_v2(owner.packet.unwrap(), reply.payload)
         if validated.is_err(): return dispatch_fail_v3(owner, validated.unwrap_err())
@@ -696,6 +798,7 @@ fn dispatch_start_v3(root: ControllerLocalRootV3, uid: text, packet: Option<Cont
     val claim = claimed.unwrap()
     val actual = claim.state.root.unwrap()
     val turn = if mode == "dispatch": dispatch_state_begin_v3(actual, uid, packet.unwrap(), resume)
+        elif mode == "remote": dispatch_state_remote_begin_v3(actual, uid)
         elif mode.starts_with("service:"): dispatch_state_service_begin_v3(actual, mode[8:])
         else: dispatch_state_control_begin_v3(actual, uid, mode[8:])
     dispatch_publish_v3(claim, turn)
@@ -713,6 +816,35 @@ pub fn controller_dispatch_inspect_begin_v3(root: ControllerLocalRootV3, uid: te
 
 pub fn controller_dispatch_service_begin_v3(root: ControllerLocalRootV3, action: text) -> ControllerDispatchOwnedTurnV3:
     dispatch_start_v3(root, "", nil, "service:" + action)
+
+# milestone_0030 C3 entry points. begin ends in phase "ready" (turn.response = the V3 status payload); after each send
+# the caller steps controller_dispatch_step_v3 until turn.phase == "ready" (response = the reply payload) or an error.
+pub fn controller_dispatch_remote_begin_v3(root: ControllerLocalRootV3, operation_id: text) -> ControllerDispatchOwnedTurnV3:
+    dispatch_start_v3(root, operation_id, None, "remote")
+
+fn dispatch_remote_turn_v3(handle: ControllerDispatchOwnerV3,
+        run: fn(ControllerDispatchStateV3) -> ControllerDispatchStateTurnV3) -> ControllerDispatchOwnedTurnV3:
+    val admitted = dispatch_origin_v3()
+    if admitted.is_err(): return dispatch_origin_failure_v3(Some(handle), admitted.unwrap_err())
+    if handle.unregistered.is_some(): return dispatch_unregistered_close_v3(handle)
+    val claimed = dispatch_claim_v3(handle, false)
+    if claimed.is_err(): return dispatch_handle_failure_v3(handle, claimed.unwrap_err())
+    val claim = claimed.unwrap()
+    dispatch_publish_v3(claim, run(claim.state))
+
+pub fn controller_dispatch_remote_send_v3(handle: ControllerDispatchOwnerV3, action: text, payload: text) -> ControllerDispatchOwnedTurnV3:
+    dispatch_remote_turn_v3(handle, fn(state: ControllerDispatchStateV3) -> ControllerDispatchStateTurnV3:
+        dispatch_state_remote_send_v3(state, action, payload))
+
+pub fn controller_dispatch_remote_admit_v3(handle: ControllerDispatchOwnerV3, signed: DistributedSignedGrantV2,
+        approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2) -> ControllerDispatchOwnedTurnV3:
+    dispatch_remote_turn_v3(handle, fn(state: ControllerDispatchStateV3) -> ControllerDispatchStateTurnV3:
+        dispatch_state_remote_admit_v3(state, signed, approval, request))
+
+pub fn controller_dispatch_remote_edit_v3(handle: ControllerDispatchOwnerV3,
+        edit: fn(DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>) -> ControllerDispatchOwnedTurnV3:
+    dispatch_remote_turn_v3(handle, fn(state: ControllerDispatchStateV3) -> ControllerDispatchStateTurnV3:
+        dispatch_state_remote_edit_v3(state, edit))
 
 pub fn controller_dispatch_step_v3(handle: ControllerDispatchOwnerV3, cancel: bool = false) -> ControllerDispatchOwnedTurnV3:
     val admitted = dispatch_origin_v3()
@@ -736,5 +868,6 @@ export ControllerDispatchOwnerV3, ControllerDispatchOwnedTurnV3
 export controller_dispatch_revision_advance_v3
 export ControllerDispatchCloseDispositionV3, controller_dispatch_close_disposition_v3
 export controller_dispatch_begin_v3, controller_dispatch_control_begin_v3, controller_dispatch_inspect_begin_v3
+export controller_dispatch_remote_begin_v3, controller_dispatch_remote_send_v3, controller_dispatch_remote_admit_v3, controller_dispatch_remote_edit_v3
 export controller_dispatch_service_begin_v3, controller_dispatch_step_v3, controller_dispatch_close_v3
 export controller_dispatch_host_status_match_v3, controller_dispatch_execute_archive_key_v3, controller_dispatch_original_execute_match_v3

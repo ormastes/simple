@@ -1,0 +1,277 @@
+# milestone_0030 controller half (DESIGN_CTRL.md C4): the PURE authoring of one remote build/test run. Nothing here
+# opens a socket, a key or a journal; every value the Host will later re-verify is derived from the operator's spec
+# directory and the controller's own installed facts.
+#
+# Spec directory (operator-authored, no secrets; `remote-run --spec <dir>`):
+#   task.sdn          BuildTaskV1 builder wire (builder_encode_task_v1). Carries NO `remote-policy/`,
+#                     `remote-container-version/`, `task-context/` or `remote-container/` input: the controller appends the
+#                     first three (their files are generated) and the request pin no longer exists (N12-a).
+#   environment.sdn   the remote-run environment document (remote_run_environment_decode_v1).
+#   run.sdn           {version:1, kind:"remote-run-spec", principal, project, operationId, actionKind: build|test,
+#                      expectedTests:[...], testReportPath, maximumBytes, toolchainInputs:[<task input paths>],
+#                      prepareDeadlineMs, reservationNonce, backend: llvm|cranelift|analysis, runtimeDigest}
+#                      (backend/runtimeDigest feed the buildrunner task context; prepareDeadlineMs is the HOST's
+#                      monotonic deadline, operator-observed: the controller cannot read the Host clock)
+#   host-inputs.sdn   {version:1, kind:"remote-run-host-inputs", image, launcherProgram, guestRoot, hostRoot,
+#                      containmentDigest, uid, gid, cpuMillis, memoryBytes, pidLimit, timeoutMs, profileDigest,
+#                      slotBindingDigest, preparationBudgetMs}. These are the host-installed N6-a projection inputs the
+#                      controller cannot observe. They are NOT trusted: a wrong value yields a byte mismatch the Host
+#                      refuses at enable (DESIGN 14.10 r4.3, a named limit).
+#   inputs/<path>     the bytes of the producer (`task.program`) and of every operator input, by task path. The
+#                      policy file and the version marker are generated, never read.
+#
+# Digest order (acyclic, N12-a): policy -> task (policy pin + version pin) -> task digest -> manifest -> invocation ->
+# D -> request_bytes -> draft. The assignment digest is deliberately plan-independent.
+use app.buildrunner.remote_evidence_v1.{RemoteEvidencePolicyV1, remote_policy_encode_v1, remote_policy_bind_v1}
+use app.orchestrator.remote_run_plan_v1.remote_run_environment_decode_v1
+use app.buildrunner.task_context.{BuildRunnerTaskContextV1, build_runner_context_encode_v1}
+use std.common.contracts.distributed_control_codec_v2.distributed_environment_digest_v2
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+use std.common.contracts.container.execution_v2.ContainerMountProjectionV2
+use std.common.contracts.container.execution_draft_v3.ContainerExecutionDraftV3
+use std.common.contracts.container.build_workspace_manifest_v1.{BuildWorkspaceManifestV1, BuildWorkspaceInvocationV1,
+    build_workspace_manifest_encode_v1, build_workspace_invocation_encode_v1}
+use std.common.contracts.distributed_control_v2.ExecutionEnvironmentV2
+use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1, BuildRunV1, BuildHostV1, builder_identifier_valid_v1,
+    builder_digest_valid_v1}
+use std.common.build_manager.codec.builder_encode_task_v1
+use std.common.build_manager.remote_build_input_manifest_v3.{remote_build_input_manifest_digest_v3,
+    remote_build_input_manifest_entries_v3}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.text_bytes.text_to_utf8_bytes
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct RemoteRunSpecV1:
+    principal: text
+    project: text
+    operation_id: text
+    action_kind: text
+    expected_tests: [text]
+    test_report_path: text
+    maximum_bytes: i64
+    toolchain_inputs: [text]
+    prepare_deadline_ms: i64
+    reservation_nonce: text
+    backend: text
+    runtime_digest: text
+
+pub struct RemoteRunHostInputsV1:
+    image: text
+    launcher_program: text
+    guest_root: text
+    host_root: text
+    containment_digest: text
+    uid: i64
+    gid: i64
+    cpu_millis: i64
+    memory_bytes: i64
+    pid_limit: i64
+    timeout_ms: i64
+    profile_digest: text
+    slot_binding_digest: text
+    preparation_budget_ms: i64
+
+# One file the Host stages, in the Host's manifest order (index 0 = the producer, then task.inputs in order).
+pub struct RemoteRunFileV1:
+    path: text
+    bytes: [u8]
+
+pub struct RemoteRunAuthoredV1:
+    task: BuildTaskV1
+    policy: RemoteEvidencePolicyV1
+    environment: ExecutionEnvironmentV2
+    files: [RemoteRunFileV1]
+    request_bytes: text
+    draft: ContainerExecutionDraftV3
+    invocation_bytes: text
+    task_digest: text
+    assignment_digest: text
+    run: BuildRunV1
+    spec: RemoteRunSpecV1
+    inputs: RemoteRunHostInputsV1
+    environment_text: text
+    task_context: text
+
+fn remote_run_dict_v1(source: text, kind: text, count: i64) -> Result<Dict<text, SdnValue>, text>:
+    if source.byte_len() < 1 or source.byte_len() > 65536: return Err("remote-run-spec-size:" + kind)
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 65536, max_depth: 3,
+            max_nodes: 256, max_rows: 0, max_cells: 0, max_columns: 32)):
+        case Ok(value): value
+        case Err(_): return Err("remote-run-spec-syntax:" + kind)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("remote-run-spec-object:" + kind)
+    if fields.len() != count or not fields.contains_key("version") or not fields.contains_key("kind"):
+        return Err("remote-run-spec-fields:" + kind)
+    if fields["version"] != SdnValue.Int(1) or fields["kind"] != SdnValue.String(kind):
+        return Err("remote-run-spec-kind:" + kind)
+    Ok(fields)
+
+fn remote_run_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("remote-run-spec-field:" + key)
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("remote-run-spec-text:" + key)
+
+fn remote_run_int_v1(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    if not fields.contains_key(key): return Err("remote-run-spec-field:" + key)
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("remote-run-spec-number:" + key)
+
+fn remote_run_texts_v1(fields: Dict<text, SdnValue>, key: text) -> Result<[text], text>:
+    if not fields.contains_key(key): return Err("remote-run-spec-field:" + key)
+    val items = match fields[key]:
+        case SdnValue.Array(value): value
+        case _: return Err("remote-run-spec-array:" + key)
+    var out: [text] = []
+    for item in items:
+        match item:
+            case SdnValue.String(value): out.push(value)
+            case _: return Err("remote-run-spec-array:" + key)
+    Ok(out)
+
+pub fn remote_run_spec_decode_v1(source: text) -> Result<RemoteRunSpecV1, text>:
+    val fields = remote_run_dict_v1(source, "remote-run-spec", 14)?
+    val spec = RemoteRunSpecV1(principal: remote_run_text_v1(fields, "principal")?, project: remote_run_text_v1(fields, "project")?,
+        operation_id: remote_run_text_v1(fields, "operationId")?, action_kind: remote_run_text_v1(fields, "actionKind")?,
+        expected_tests: remote_run_texts_v1(fields, "expectedTests")?, test_report_path: remote_run_text_v1(fields, "testReportPath")?,
+        maximum_bytes: remote_run_int_v1(fields, "maximumBytes")?, toolchain_inputs: remote_run_texts_v1(fields, "toolchainInputs")?,
+        prepare_deadline_ms: remote_run_int_v1(fields, "prepareDeadlineMs")?,
+        reservation_nonce: remote_run_text_v1(fields, "reservationNonce")?, backend: remote_run_text_v1(fields, "backend")?,
+        runtime_digest: remote_run_text_v1(fields, "runtimeDigest")?)
+    if not builder_identifier_valid_v1(spec.principal) or not builder_identifier_valid_v1(spec.project) or
+            not builder_identifier_valid_v1(spec.operation_id) or not builder_identifier_valid_v1(spec.reservation_nonce):
+        return Err("remote-run-spec-identity")
+    if spec.action_kind != "build" and spec.action_kind != "test": return Err("remote-run-spec-action")
+    if not builder_digest_valid_v1(spec.runtime_digest): return Err("remote-run-spec-runtime-digest")
+    if spec.maximum_bytes < 1 or spec.maximum_bytes > 16777216 or spec.prepare_deadline_ms < 1:
+        return Err("remote-run-spec-bounds")
+    Ok(spec)
+
+pub fn remote_run_host_inputs_decode_v1(source: text) -> Result<RemoteRunHostInputsV1, text>:
+    val fields = remote_run_dict_v1(source, "remote-run-host-inputs", 16)?
+    val inputs = RemoteRunHostInputsV1(image: remote_run_text_v1(fields, "image")?,
+        launcher_program: remote_run_text_v1(fields, "launcherProgram")?, guest_root: remote_run_text_v1(fields, "guestRoot")?,
+        host_root: remote_run_text_v1(fields, "hostRoot")?, containment_digest: remote_run_text_v1(fields, "containmentDigest")?,
+        uid: remote_run_int_v1(fields, "uid")?, gid: remote_run_int_v1(fields, "gid")?,
+        cpu_millis: remote_run_int_v1(fields, "cpuMillis")?, memory_bytes: remote_run_int_v1(fields, "memoryBytes")?,
+        pid_limit: remote_run_int_v1(fields, "pidLimit")?, timeout_ms: remote_run_int_v1(fields, "timeoutMs")?,
+        profile_digest: remote_run_text_v1(fields, "profileDigest")?,
+        slot_binding_digest: remote_run_text_v1(fields, "slotBindingDigest")?,
+        preparation_budget_ms: remote_run_int_v1(fields, "preparationBudgetMs")?)
+    if (not builder_digest_valid_v1(inputs.containment_digest) or not builder_digest_valid_v1(inputs.profile_digest) or
+            not builder_digest_valid_v1(inputs.slot_binding_digest) or inputs.uid <= 0 or inputs.gid <= 0 or
+            inputs.image == "" or inputs.launcher_program == "" or inputs.guest_root == "" or inputs.host_root == ""):
+        return Err("remote-run-host-inputs-invalid")
+    # The N6-a projection bounds (linux_fresh_workspace_v3.spl budget check), refused here instead of at enable.
+    if (inputs.cpu_millis < 1 or inputs.cpu_millis > 64000 or inputs.memory_bytes < 1 or inputs.pid_limit < 1 or
+            inputs.pid_limit > 4096 or inputs.timeout_ms < 1 or inputs.timeout_ms > 30000):
+        return Err("remote-run-host-inputs-invalid")
+    Ok(inputs)
+
+# Plan-independent on purpose: the plan digest depends on request_bytes, which depend on the invocation, which depends
+# on the task, which pins the policy, which carries this digest (a plan-derived value would close a hash cycle).
+# @allow(primitive_api) controller epoch is a fenced DATA word bound into the assignment digest
+pub fn remote_run_assignment_digest_v1(controller_id: text, controller_epoch: i64, operation_id: text, task_id: text) -> text:
+    sha256_text("simple-remote-run-assignment-v1\n" + controller_id + "\n" + str(controller_epoch) + "\n" + operation_id +
+        "\n" + task_id + "\n")
+
+fn remote_run_input_v1(task: BuildTaskV1, path: text) -> Option<BuildInputV1>:
+    for input in task.inputs:
+        if input.path == path: return Some(input)
+    None
+
+# Authors request_bytes for the build arm exactly as the Host's N6-a projection expects
+# (linux_fresh_workspace_v3 expected request): launcher entrypoint, `--build-invocation-sha256 D`, terminal none,
+# keep-id uid/gid, containment digest and ONE read-write mount of the installed workspace root.
+pub fn remote_run_request_bytes_v1(task: BuildTaskV1, operation_id: text, inputs: RemoteRunHostInputsV1,
+        invocation_digest: text) -> Result<(text, text), text>:
+    val mount = ContainerMountProjectionV2(host_root: inputs.host_root, guest_root: inputs.guest_root, read_only: false)
+    val request = LinuxOciRequestV1(pod_uid: task.id, attempt: task.attempt, operation_id: operation_id, image: inputs.image,
+        bundle_path: "", command: [inputs.launcher_program], args: ["--build-invocation-sha256", invocation_digest],
+        timeout_ms: inputs.timeout_ms, cpu_limit_millis: inputs.cpu_millis, memory_limit_bytes: inputs.memory_bytes,
+        pid_limit: inputs.pid_limit, network_policy: "none", filesystem_policy: "read-only", build_input_root: "",
+        build_output_root: "", replace_entrypoint: true, environment: [], working_directory: inputs.guest_root,
+        terminal_mode: "none", user_uid: inputs.uid, user_gid: inputs.gid, user_namespace_mode: "keep-id",
+        containment_profile_digest: inputs.containment_digest, mounts: [mount])
+    Ok((linux_oci_retained_request_encode_v1(request)?, linux_oci_request_digest_v1(request)?))
+
+pub fn remote_run_author_v1(spec: RemoteRunSpecV1, inputs: RemoteRunHostInputsV1, operator_task: BuildTaskV1,
+        environment_text: text, operator_files: Dict<text, [u8]>, controller_id: text, controller_epoch: i64,
+        not_after: i64) -> Result<RemoteRunAuthoredV1, text>:
+    val environment = remote_run_environment_decode_v1(environment_text)?
+    if environment.isolation_class != "native-container": return Err("remote-run-isolation-class")
+    # remote_context_admit_v1 refuses a differing toolchain digest at accept; the reservation, the grant and the
+    # container must cover the same memory (the Host ledger reserves the TASK limit).
+    if environment.toolchain_digest != operator_task.toolchain_digest: return Err("remote-run-toolchain-digest")
+    if inputs.memory_bytes != operator_task.memory_limit_bytes: return Err("remote-run-memory-binding")
+    for input in operator_task.inputs:
+        if (input.path == "remote-policy/" + operator_task.id + ".sdn" or
+                input.path == "remote-container-version/" + operator_task.id + ".sdn" or
+                input.path == "task-context/" + operator_task.id + ".sdn" or
+                input.path.starts_with("remote-container/")):
+            return Err("remote-run-task-reserved-input")
+    if operator_task.program == "" or not operator_files.contains_key(operator_task.program):
+        return Err("remote-run-producer-file-missing")
+    var tools: [BuildInputV1] = []
+    for path in spec.toolchain_inputs:
+        val found = remote_run_input_v1(operator_task, path)
+        if found.is_none(): return Err("remote-run-toolchain-input-undeclared")
+        tools.push(found.unwrap())
+    val assignment = remote_run_assignment_digest_v1(controller_id, controller_epoch, spec.operation_id, operator_task.id)
+    val policy = RemoteEvidencePolicyV1(host_id: environment.host_id, assignment_digest: assignment,
+        controller_epoch: controller_epoch, operation_id: spec.operation_id, action_kind: spec.action_kind,
+        expected_tests: spec.expected_tests, test_report_path: spec.test_report_path, maximum_bytes: spec.maximum_bytes,
+        toolchain_inputs: tools)
+    val policy_text = remote_policy_encode_v1(policy)?
+    val version_text = "3\n"
+    val context_text = build_runner_context_encode_v1(BuildRunnerTaskContextV1(backend: spec.backend,
+        runtime_digest: spec.runtime_digest, policy_digest: sha256_text(policy_text),
+        environment_digest: distributed_environment_digest_v2(environment)?))?
+    var task = operator_task
+    task.inputs = operator_task.inputs + [BuildInputV1(path: "remote-policy/" + task.id + ".sdn", digest: sha256_text(policy_text)),
+        BuildInputV1(path: "remote-container-version/" + task.id + ".sdn", digest: sha256_text(version_text)),
+        BuildInputV1(path: "task-context/" + task.id + ".sdn", digest: sha256_text(context_text))]
+    val bound = remote_policy_bind_v1(task, policy)?
+    # The Host's manifest order: the producer first, then every task input in order.
+    var files: [RemoteRunFileV1] = []
+    val producer = operator_files[task.program]
+    if sha256_u8_hex(producer) != task.producer_digest: return Err("remote-run-producer-digest")
+    files.push(RemoteRunFileV1(path: task.program, bytes: producer))
+    for input in task.inputs:
+        var bytes: [u8] = []
+        if input.path == "remote-policy/" + task.id + ".sdn": bytes = text_to_utf8_bytes(policy_text)
+        elif input.path == "remote-container-version/" + task.id + ".sdn": bytes = text_to_utf8_bytes(version_text)
+        elif input.path == "task-context/" + task.id + ".sdn": bytes = text_to_utf8_bytes(context_text)
+        elif operator_files.contains_key(input.path): bytes = operator_files[input.path]
+        else: return Err("remote-run-input-file-missing")
+        if sha256_u8_hex(bytes) != input.digest: return Err("remote-run-input-digest")
+        files.push(RemoteRunFileV1(path: input.path, bytes: bytes))
+    val manifest_entries = remote_build_input_manifest_entries_v3(task)
+    if manifest_entries.len() != files.len(): return Err("remote-run-input-manifest-count")
+    val task_digest = sha256_text(builder_encode_task_v1(task))
+    val manifest_digest = remote_build_input_manifest_digest_v3(task)?
+    val manifest = build_workspace_manifest_encode_v1(BuildWorkspaceManifestV1(profile_digest: inputs.profile_digest,
+        slot_binding_digest: inputs.slot_binding_digest, task_digest: task_digest, input_manifest_digest: manifest_digest,
+        producer_digest: task.producer_digest))?
+    val invocation = build_workspace_invocation_encode_v1(BuildWorkspaceInvocationV1(workspace_manifest: manifest,
+        task_digest: task_digest, input_manifest_digest: manifest_digest, preparation_budget_ms: inputs.preparation_budget_ms,
+        not_after: not_after))?
+    val request = remote_run_request_bytes_v1(task, spec.operation_id, inputs, sha256_text(invocation))?
+    val draft = ContainerExecutionDraftV3(backend: "linux-podman", workload_uid: task.id, attempt: task.attempt,
+        operation_id: spec.operation_id, request_digest: request.1, request_bytes: request.0, readonly_rootfs: false,
+        agent_invocation_manifest_digest: "", agent_probe_list_digest: "", remote_build_task_digest: task_digest)
+    # Constants for the buildrunner session's run inventory: the host is remote, this entry only names it.
+    val host = BuildHostV1(id: environment.host_id, transport: "local", endpoint: "", workspace: "/remote-run",
+        worker_program: "remote-build", worker_digest: sha256_text("remote-run-worker-v1"), slots: 1)
+    val run = BuildRunV1(tasks: [task], hosts: [host], keep_going: false, max_attempts: task.attempt)
+    Ok(RemoteRunAuthoredV1(task: task, policy: policy, environment: environment, files: files, request_bytes: request.0,
+        draft: draft, invocation_bytes: invocation, task_digest: task_digest, assignment_digest: assignment, run: run, spec: spec, inputs: inputs, environment_text: environment_text, task_context: context_text))
+
+export RemoteRunSpecV1, RemoteRunHostInputsV1, RemoteRunFileV1, RemoteRunAuthoredV1
+export remote_run_spec_decode_v1, remote_run_host_inputs_decode_v1, remote_run_assignment_digest_v1
+export remote_run_request_bytes_v1, remote_run_author_v1

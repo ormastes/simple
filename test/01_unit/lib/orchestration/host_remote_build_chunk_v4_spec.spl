@@ -8,7 +8,7 @@ of the V4 route transport.
 Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
 Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
 ## Compatibility and limitations
-The codec adds no trust: the chunk bytes must match the manifest digest that the signed task or the signed bundle
+The codec adds no trust: the assembled bytes must match the manifest digest that the signed task or the signed bundle
 pins. The envelope caps (2 MiB request, 1 MiB V6 reply) are checked as arithmetic on the base64 length.
 ## Verification guidance and troubleshooting
 Each refusal names the exact error string; a changed string is a contract change.
@@ -17,6 +17,7 @@ use std.spec.step
 use std.common.contracts.orchestration.host_remote_build_chunk_v4.*
 use std.common.base_encoding.base64.base64_encode_bytes
 use std.common.crypto.sha256.sha256_u8_hex
+use std.io.file_read_text
 
 fn ch_bytes(count: i64) -> [u8]:
     var out: [u8] = []
@@ -53,7 +54,7 @@ describe "Chunked V4 remote-build frames (milestone_0030 s4, s11 F3)":
         val reply_big = ch_bytes(589825)
         expect(host_remote_build_chunk_decode_v4(base64_encode_bytes(reply_big), sha256_u8_hex(reply_big), true)).to_equal(Err("host-remote-build-chunk-too-large"))
 
-    it "splits and binds by a manifest":
+    it "splits, binds by a manifest and reassembles exactly":
         # @req M0030-CHUNK-03
         val raw = ch_bytes(2500000)
         val manifest = host_remote_build_chunk_manifest_v4(raw, false).unwrap()
@@ -63,8 +64,13 @@ describe "Chunked V4 remote-build frames (milestone_0030 s4, s11 F3)":
         val chunks = host_remote_build_chunk_split_v4(raw, false)
         expect(chunks.len()).to_equal(3)
         expect(chunks[0].len()).to_equal(1228800)
+        expect(host_remote_build_chunk_assemble_v4(manifest, chunks).unwrap()).to_equal(raw)
+        step("a missing, reordered or altered chunk is refused")
+        expect(host_remote_build_chunk_assemble_v4(manifest, [chunks[0], chunks[1]])).to_equal(Err("host-remote-build-chunk-count"))
+        expect(host_remote_build_chunk_assemble_v4(manifest, [chunks[1], chunks[0], chunks[2]])).to_equal(Err("host-remote-build-chunk-digest"))
         var altered = chunks[2]
         altered[0] = altered[0] + 1u8
+        expect(host_remote_build_chunk_assemble_v4(manifest, [chunks[0], chunks[1], altered])).to_equal(Err("host-remote-build-chunk-digest"))
         step("the manifest digest changes with any chunk digest")
         val original = host_remote_build_chunk_manifest_digest_v4(manifest)
         var digests = manifest.chunk_digests
@@ -72,3 +78,26 @@ describe "Chunked V4 remote-build frames (milestone_0030 s4, s11 F3)":
         val other = HostRemoteBuildChunkManifestV4(total_bytes: manifest.total_bytes, content_digest: manifest.content_digest,
             chunk_digests: digests)
         expect(host_remote_build_chunk_manifest_digest_v4(other) != original).to_equal(true)
+
+    it "bounds the manifest total before assembling and appends whole chunks":
+        # @req M0030-CHUNK-04 (lane B review P2-3)
+        step("the reply total mirrors the bundle wire cap REMOTE_CONTAINER_BUNDLE_WIRE_MAX_V3 (16 MiB)")
+        expect(HOST_REMOTE_BUILD_REPLY_TOTAL_MAX_V4).to_equal(16777216)
+        val raw = ch_bytes(1000)
+        val manifest = host_remote_build_chunk_manifest_v4(raw, true).unwrap()
+        val chunks = host_remote_build_chunk_split_v4(raw, true)
+        step("a total over the cap, zero or negative is refused before any chunk is read")
+        for total in [HOST_REMOTE_BUILD_REPLY_TOTAL_MAX_V4 + 1, 0, -1]:
+            val forged = HostRemoteBuildChunkManifestV4(total_bytes: total, content_digest: manifest.content_digest,
+                chunk_digests: manifest.chunk_digests)
+            expect(host_remote_build_chunk_assemble_v4(forged, chunks)).to_equal(Err("host-remote-build-chunk-total"))
+        step("the cap itself passes the total gate (it then fails only on the real length), and an honest manifest assembles")
+        val at_cap = HostRemoteBuildChunkManifestV4(total_bytes: HOST_REMOTE_BUILD_REPLY_TOTAL_MAX_V4,
+            content_digest: manifest.content_digest, chunk_digests: manifest.chunk_digests)
+        expect(host_remote_build_chunk_assemble_v4(at_cap, chunks)).to_equal(Err("host-remote-build-chunk-digest"))
+        expect(host_remote_build_chunk_assemble_v4(manifest, chunks).unwrap()).to_equal(raw)
+        step("source shape: no per-byte push in the assemble loop")
+        val source = file_read_text("src/lib/common/contracts/orchestration/host_remote_build_chunk_v4.spl")
+        val body = source.substring(source.index_of("pub fn host_remote_build_chunk_assemble_v4("), source.byte_len())
+        expect(body.contains("for byte in")).to_equal(false)
+        expect(body.index_of("host-remote-build-chunk-total") < body.index_of("for index in")).to_equal(true)
