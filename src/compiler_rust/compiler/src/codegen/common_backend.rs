@@ -88,6 +88,24 @@ fn emit_module_init_trace<M: Module>(
     Ok(())
 }
 
+/// Names of globals the given functions load or store.
+pub(crate) fn referenced_global_names(functions: &[MirFunction]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for func in functions {
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    MirInst::GlobalLoad { global_name, .. } | MirInst::GlobalStore { global_name, .. } => {
+                        names.insert(global_name.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    names
+}
+
 pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String> {
     let mut names = HashSet::new();
     for func in functions {
@@ -826,6 +844,14 @@ pub struct CodegenBackend<M: Module> {
     /// These names keep their raw (unmangled) symbol name to avoid breaking
     /// cross-module resolution when the import map can't disambiguate.
     pub ambiguous_names: std::sync::Arc<std::collections::HashSet<String>>,
+    /// Global names this module's code actually loads or stores (set by
+    /// compile_all). An imported global that resolves through neither
+    /// use_map nor import_map and is not in this set is NOT declared: the
+    /// own-prefix fallback would name a symbol nothing defines, and COFF
+    /// links fail on every undefined external even when unreferenced
+    /// (doc/08_tracking/bug/windows_stage2_imported_a64_consts_undefined_2026-11-19.md).
+    /// `None` keeps the old declare-everything behaviour.
+    pub referenced_globals: Option<std::collections::HashSet<String>>,
     /// Per-module use map: local imported name → mangled name.
     /// Built from the current file's `use` statements. Used to resolve
     /// ambiguous cross-module imports that the global import map can't handle.
@@ -1367,6 +1393,7 @@ impl<M: Module> CodegenBackend<M> {
             is_entry_module: false,
             import_map: std::sync::Arc::new(std::collections::HashMap::new()),
             ambiguous_names: std::sync::Arc::new(std::collections::HashSet::new()),
+            referenced_globals: None,
             use_map: std::collections::HashMap::new(),
             data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
             fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
@@ -1811,6 +1838,18 @@ impl<M: Module> CodegenBackend<M> {
                         "ambiguous private global `{name}` must be imported explicitly"
                     )));
                 }
+                if use_hit.is_none()
+                    && import_hit.is_none()
+                    && self
+                        .referenced_globals
+                        .as_ref()
+                        .is_some_and(|referenced| !referenced.contains(name.as_str()))
+                {
+                    if trace_global {
+                        eprintln!("[declare-globals] skip unresolved unreferenced import name={}", name);
+                    }
+                    continue;
+                }
                 // Level-gated developer probe, DEFAULT OFF. Opt in with
                 // SIMPLE_TRACE_DECLARE_GLOBALS=1, the same knob that governs the
                 // `[declare-globals]` traces earlier in this function. It used to be
@@ -2235,6 +2274,7 @@ impl<M: Module> CodegenBackend<M> {
         runtime_init_globals.extend(mir.global_init_functions.keys().cloned());
         runtime_init_globals.extend(mir.global_init_structs.keys().cloned());
         runtime_init_globals.extend(mir.dynamic_init_globals.iter().cloned());
+        self.referenced_globals = Some(referenced_global_names(&functions));
         self.declare_globals(
             &mir.globals,
             &mir.extern_fn_names,
@@ -3305,6 +3345,29 @@ mod tests {
         assert!(!backend
             .global_ids
             .contains_key("frontend__core__interpreter__module_loader_core___yield_cache"));
+    }
+
+    #[test]
+    fn unresolved_unreferenced_import_is_not_declared() {
+        // COFF fails on every undefined external, referenced or not; an
+        // unresolved import must only be declared when code uses it.
+        let mut backend = test_backend();
+        backend.set_module_prefix("app__cli__bootstrap_main".to_string());
+        backend.referenced_globals = Some(std::collections::HashSet::from(["USED_K".to_string()]));
+        backend
+            .declare_globals(
+                &[
+                    ("A64_OP_ADD".to_string(), TypeId::I64, false),
+                    ("USED_K".to_string(), TypeId::I64, false),
+                ],
+                &std::collections::HashSet::new(),
+                &std::collections::HashMap::new(),
+                &std::collections::HashSet::new(),
+                &std::collections::HashSet::new(),
+            )
+            .unwrap();
+        assert!(!backend.global_ids.contains_key("A64_OP_ADD"));
+        assert!(backend.global_ids.contains_key("USED_K"));
     }
 
     #[test]
