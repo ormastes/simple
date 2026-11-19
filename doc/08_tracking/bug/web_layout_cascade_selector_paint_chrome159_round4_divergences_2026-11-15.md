@@ -1042,7 +1042,7 @@ head (13/40 at base).
 - **Sweep:** the 25 specs that read the two changed files have 0 new failures.
 - **Hack sites left alone:** `..._layout_foundation.spl:700,741` exclude `widget-panel` from margin collapse; `gpu_web/layout/adapter.spl:306` only sets the `LAYOUT_GPU_ADMISSION_VIEWPORT_FILL` admission bit.
 - **RESOLVED 2026-11-20 (see the next entry): not the button gradient but a neighbouring panel's gradient tiles painted over it.** Was recorded as "raster button gradient is lighter than Chrome". Row 60: raster (59,127,204), Vulkan (44,117,200), Chrome (44,117,199). Row 200: raster (34,110,197), Vulkan and Chrome (25,104,195). It was there before; with 204 px buttons it now covers many more pixels, which is the raster drop above.
-- **OPEN — button labels sit at the top.** Chrome centres a button's label vertically in its box; every lane draws it at the top.
+- **FIXED 2026-11-20 — button labels sit at the top.** Chrome centres a button's label vertically in its box; see the 2026-11-20 entry below.
 
 ## 2026-11-20 — repeating gradient tiles bleed out of a bordered box on the raster lane (FIXED)
 
@@ -1081,3 +1081,18 @@ head (13/40 at base).
 - **OPEN, raster admission:** glass with text on a non-opaque background, or with a shadow, still reads the whole frame. That is the window fixture's case.
 - **OPEN, Vulkan:** the CSS `backdrop-filter` blur should use the device blur kernel instead of readback + host blur.
 - **Not covered:** a Backdrop Root under an opacity < 100 ancestor still bails to the flat path, as before. Nested Backdrop Roots have no spec.
+
+## 2026-11-20 — `<button>` content sits at the top of a tall button (FIXED)
+
+- **Rule (Chrome 159):** a `<button>` centres its anonymous content box vertically in its content box. Content taller than the box keeps the top.
+- **Chrome evidence:** a 10x10 inline-block (font-free: `font-size:0; line-height:0`) sits at y=45 in a 100px block button with 12px padding. In a flex-row button stretched to 120px it sits at y=155. We drew 14 and 114.
+- **Fix:** `button_content_centre_pass` (`..._layout_engine.spl`) runs after layout in `web_html_layout_tree`. A CSS height or a flex stretch is final by then.
+  - For each non-flex/grid button it offsets the direct in-flow children so their extent is centred.
+  - The `layout_selected` `contain: layout` fast path runs the same pass. It is idempotent, so retained buttons stay put.
+- **Evidence:**
+  - `button_content_vertical_center_chrome159_spec`: geometry red on base (`35:14 / 35:114`), green on head. A second case checks the span ink at the centred spot, and not the old one, on cpu_simd and Vulkan.
+  - Head-first sweep of 73 button, form-control, flex, inline and renderer specs: 0 new failures.
+  - `browser_dom_identity_generation` fails the same assertion on base. The first base run was killed by a signal, and a rerun showed the same ✗.
+  - The contain/`layout_selected` specs pass. `cpu_execution_port_line_boxes` is 0/4 on base as well.
+- **Window fixture attribution (raster 564 -> 555‰):** caused by #10502 (tile clip), a correct change. A page-background tile copy no longer spills, and the page centre now matches Chrome (27,33,56 vs 27,32,55). That exposed the next item.
+- **OPEN — body top radial highlights underpainted:** Chrome's top band is lighter (row 5, x=60: Chrome 57, ours 45).
