@@ -3436,3 +3436,10 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 ## Trap: `animation` page flipped 2.33/2.40 = Chrome `--virtual-time-budget` vs media controls (2026-11-19)
 The Chrome capture, not Simple, varied. Simple PPMs and a fixed Chrome state were byte-identical across runs; Chrome PNGs alternated between two states ~5% of runs (2/40, 2/12 with `--virtual-time-budget=3000`), differing in one 404x48 box at (304,280): the `<audio controls>` shadow UI, either fully laid out (play, 0:00 / 0:00, volume) or collapsed to the slider (8.5k px, which is the 2.33 vs 2.39 gap). Under virtual time the media-controls ResizeObserver layout lands at a racy virtual instant. `--run-all-compositor-stages-before-draw` and `--mute-audio` do not help (3/150, 1/40). Dropping the budget from the CAPTURE gave 150/150 identical (catalog pages have no scripts/timers). The viewport probe keeps the budget (its script is synchronous). Do not add the flag back; to detect this class capture a page 40x and `md5sum`.
 - 2026-11-19 `backend_emu_adv.spl` `emu_draw_shadow_rect`: zone clamps run in order (0 <= nz0 <= i0 <= i1 <= nz1 <= rw). A blur wide for its box (no fully covered column) cut by the frame's right edge left an interior run past the row end — wrong pixels, or an index-out-of-bounds on the last row. `box_shadow_frame_clip_spec` crash -> green. Trap: clamp the outer zone first, then the inner one inside it.
+
+## 2026-11-19 layout census: html / css-layout / overview (no layout offsets)
+
+At 1x, all 97 mismatch clusters on html (1.78), css-layout (2.13) and overview (1.13) have
+equal Chrome/Simple ink boxes (+-1px heading-top deltas = fractional font y-raster); +-3px
+shift search gains nothing in any cluster. Remaining residual is glyph raster, not layout.
+Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout_overview_2026-11-19.md`.
