@@ -147,17 +147,17 @@ fn _entry_for_live_catalog_launch(id: u64) -> RootServiceCatalogEntry?:
     """Build the runtime entry after trusted PID1 authorization succeeds."""
     if id == ROOT_SERVICE_VFS:
         val lease = root_device_broker_storage_lease()
-        if lease == nil:
-            return nil
+        if lease.is_none():
+            return None
         return Some(_with_device_lease(_vfs_entry(), lease.unwrap()))
     if id == ROOT_SERVICE_NET:
         val lease = root_device_broker_network_lease()
-        if lease == nil:
-            return nil
+        if lease.is_none():
+            return None
         return Some(_with_device_lease(_net_entry(), lease.unwrap()))
     if id == ROOT_SERVICE_HTTP:
         return Some(_http_entry())
-    nil
+    None
 
 pub fn root_service_catalog_lookup(id: u64) -> RootServiceCatalogEntry?:
     if id == ROOT_SERVICE_VFS:
@@ -166,7 +166,7 @@ pub fn root_service_catalog_lookup(id: u64) -> RootServiceCatalogEntry?:
         return Some(_net_entry())
     if id == ROOT_SERVICE_HTTP:
         return Some(_http_entry())
-    nil
+    None
 
 fn _root_token(kind: CapabilityKind, owner: u64, token_id: u64) -> CapabilityToken:
     CapabilityToken(
@@ -191,12 +191,12 @@ fn _mint_parent_cspace(entry: RootServiceCatalogEntry, owner: u64) -> Capability
 
 fn _root_mint_context(task_id: TaskId, entry: RootServiceCatalogEntry, scheduler: Scheduler) -> KernelCallContext?:
     if not scheduler.has_root_mint_authority(task_id):
-        return nil
+        return None
     if scheduler.get_current().id != task_id.id:
-        return nil
+        return None
     val task = scheduler.get_task(task_id)
-    if task == nil:
-        return nil
+    if task.is_none():
+        return None
     var context = kernel_call_context_from_task(task)
     context.capabilities = _mint_parent_cspace(entry, task_id.id)
     Some(context)
@@ -236,7 +236,7 @@ pub fn root_service_catalog_launch_from_bytes(
 ) -> FsExecPrepareResult:
     """Launch one catalog entry from verified bytes under live PID1 authority."""
     val entry = root_service_catalog_lookup(catalog_id)
-    if entry == nil:
+    if entry.is_none():
         return FsExecPrepareResult(scheduler: scheduler, pid: -2, entry: 0)
     val task_id = scheduler.get_current()
     val definition = entry.unwrap()
@@ -252,7 +252,7 @@ fn _root_service_catalog_launch_entry_from_bytes(
     """Shared launch path after a static or broker-enriched entry is chosen."""
     val task_id = scheduler.get_current()
     val context = _root_mint_context(task_id, definition, scheduler)
-    if context == nil:
+    if context.is_none():
         return FsExecPrepareResult(scheduler: scheduler, pid: -13, entry: 0)
     val spec = SpawnSpec(
         image_hash: workload_image_blake3_hash(bytes), grants: definition.grants,
@@ -292,11 +292,11 @@ pub fn root_service_catalog_launch(
 ) -> FsExecPrepareResult:
     """Resolve the catalog-owned executable path and launch it under PID1."""
     val static_entry = root_service_catalog_lookup(catalog_id)
-    if static_entry == nil:
+    if static_entry.is_none():
         return FsExecPrepareResult(scheduler: scheduler, pid: -2, entry: 0)
     # Fail before touching the executable source. A non-PID1 process must not
     # turn this operation into a filesystem existence/timing oracle.
-    if _root_mint_context(scheduler.get_current(), static_entry.unwrap(), scheduler) == nil:
+    if _root_mint_context(scheduler.get_current(), static_entry.unwrap(), scheduler).is_none():
         return FsExecPrepareResult(scheduler: scheduler, pid: -13, entry: 0)
     # Resolve the fixed image before consulting a device broker. An absent or
     # unreadable service image must fail without a PCI policy scan, lease
@@ -310,7 +310,7 @@ pub fn root_service_catalog_launch(
     # boot/service failure, never a permissive launch with generic hardware
     # authority.
     val entry = _entry_for_live_catalog_launch(catalog_id)
-    if entry == nil:
+    if entry.is_none():
         return FsExecPrepareResult(scheduler: scheduler, pid: -19, entry: 0)
     val definition = entry.unwrap()
     _root_service_catalog_launch_entry_from_bytes(
@@ -343,12 +343,12 @@ pub fn root_service_catalog_stop(
         return RootServiceCatalogStopResult(scheduler: scheduler, ipc: ipc, result: -1)
     val target = TaskId(id: target_pid)
     val child = scheduler.get_task(target)
-    if child == nil:
+    if child.is_none():
         return RootServiceCatalogStopResult(scheduler: scheduler, ipc: ipc, result: -3)
     val task = child.unwrap()
     if task.state == TaskState.Zombie:
         return RootServiceCatalogStopResult(scheduler: scheduler, ipc: ipc, result: -10)
-    if task.parent == nil or task.parent.unwrap().id != caller.id:
+    if task.parent.is_none() or task.parent.unwrap().id != caller.id:
         return RootServiceCatalogStopResult(scheduler: scheduler, ipc: ipc, result: -1)
     var live_scheduler = scheduler
     val members = live_scheduler.terminate_direct_child_job(caller, target, exit_code)
