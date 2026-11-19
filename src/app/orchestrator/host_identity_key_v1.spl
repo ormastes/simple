@@ -55,25 +55,52 @@ pub fn host_identity_public_wire_v1(public_key: [u8]) -> Result<[u8], text>:
     if public_key.len() != 32: return Err("host-identity-key-size")
     Ok(host_identity_ssh_string_v1("ssh-ed25519".bytes()) + host_identity_ssh_string_v1(public_key))
 
-# This pure codec accepts explicit material for interoperability regression
-# vectors; the CLI generator obtains material only from the OS entropy owner.
-pub fn host_identity_private_encode_v1(seed: [u8], public_key: [u8], check: [u8],
-        label: text) -> Result<[u8], text>:
+struct HostIdentityEncodeRunV1:
+    outcome: Result<[u8], text>
+    # Count of owned private buffers (body, raw) whose wipe was verified.
+    wiped: i64
+
+fn host_identity_encode_refuse_v1(code: text) -> HostIdentityEncodeRunV1:
+    HostIdentityEncodeRunV1(outcome: Err(code), wiped: 0)
+
+# This pure codec accepts explicit material for interoperability regression vectors; the CLI generator obtains
+# material only from the OS entropy owner. The OpenSSH private body (check words, seed + public key, label, padding)
+# and the raw container are each allocated once at their exact size and written by index: no concatenated secret
+# temporary and no push, so no reallocation can leave a partial private copy. Only public parts are concatenated.
+# Both owned buffers are wiped on the single exit after they exist. The caller owns `seed` and `check`.
+pub fn host_identity_private_encode_run_v1(seed: [u8], public_key: [u8], check: [u8],
+        label: text) -> HostIdentityEncodeRunV1:
     if seed.len() != 32 or public_key.len() != 32 or check.len() != 4 or label.byte_len() > 96:
-        return Err("host-identity-key-size")
+        return host_identity_encode_refuse_v1("host-identity-key-size")
     for scalar in label.chars():
-        if scalar < " " or scalar > "~": return Err("host-identity-key-label")
-    val wire = host_identity_public_wire_v1(public_key)?
-    var body = (check + check + host_identity_ssh_string_v1("ssh-ed25519".bytes()) +
-        host_identity_ssh_string_v1(public_key) + host_identity_ssh_string_v1(seed + public_key) +
-        host_identity_ssh_string_v1(label.bytes()))
-    var padding = 1
-    while body.len() % 8 != 0:
-        body.push(padding as u8)
-        padding = padding + 1
-    var raw = ("openssh-key-v1".bytes() + [0u8] + host_identity_ssh_string_v1("none".bytes()) +
+        if scalar < " " or scalar > "~": return host_identity_encode_refuse_v1("host-identity-key-label")
+    val wire_result = host_identity_public_wire_v1(public_key)
+    if wire_result.is_err(): return host_identity_encode_refuse_v1(wire_result.unwrap_err())
+    val wire = wire_result.unwrap()
+    val label_bytes = label.bytes()
+    val unpadded = 131 + label_bytes.len()
+    val body_len = (unpadded + 7) / 8 * 8
+    var body: [u8] = [0u8; body_len]
+    for index in 0..4:
+        body[index] = check[index]
+        body[4 + index] = check[index]
+    val algorithm_and_key = (host_identity_ssh_string_v1("ssh-ed25519".bytes()) +
+        host_identity_ssh_string_v1(public_key))
+    for index in 0..51: body[8 + index] = algorithm_and_key[index]
+    body[62] = 64u8
+    for index in 0..32:
+        body[63 + index] = seed[index]
+        body[95 + index] = public_key[index]
+    val label_head = host_identity_u32_v1(label_bytes.len())
+    for index in 0..4: body[127 + index] = label_head[index]
+    for index in 0..label_bytes.len(): body[131 + index] = label_bytes[index]
+    for index in 0..body_len - unpadded: body[unpadded + index] = (index + 1) as u8
+    val head = ("openssh-key-v1".bytes() + [0u8] + host_identity_ssh_string_v1("none".bytes()) +
         host_identity_ssh_string_v1("none".bytes()) + host_identity_ssh_string_v1([]) +
-        host_identity_u32_v1(1) + host_identity_ssh_string_v1(wire) + host_identity_ssh_string_v1(body))
+        host_identity_u32_v1(1) + host_identity_ssh_string_v1(wire) + host_identity_u32_v1(body_len))
+    var raw: [u8] = [0u8; 98 + body_len]
+    for index in 0..98: raw[index] = head[index]
+    for index in 0..body_len: raw[98 + index] = body[index]
     val encoded = base64_encode_bytes(raw)
     var pem = "-----BEGIN OPENSSH PRIVATE KEY-----\n"
     var offset = 0
@@ -86,9 +113,15 @@ pub fn host_identity_private_encode_v1(seed: [u8], public_key: [u8], check: [u8]
     # crypto-internal temporaries do not have a RAM erasure guarantee.
     val body_wipe = secure_zero_u8_slots(body)
     val raw_wipe = secure_zero_u8_slots(raw)
-    if not body_wipe.verified() or not raw_wipe.verified():
-        return Err("host-identity-key-buffer-wipe")
-    Ok(pem.bytes())
+    var wiped = 0
+    if body_wipe.verified(): wiped = wiped + 1
+    if raw_wipe.verified(): wiped = wiped + 1
+    if wiped != 2: return HostIdentityEncodeRunV1(outcome: Err("host-identity-key-buffer-wipe"), wiped: wiped)
+    HostIdentityEncodeRunV1(outcome: Ok(pem.bytes()), wiped: wiped)
+
+pub fn host_identity_private_encode_v1(seed: [u8], public_key: [u8], check: [u8],
+        label: text) -> Result<[u8], text>:
+    host_identity_private_encode_run_v1(seed, public_key, check, label).outcome
 
 struct HostIdentityPrivateRunV1:
     outcome: Result<HostIdentityPrivateUseV1, text>
@@ -323,19 +356,18 @@ pub fn host_identity_entropy_valid_v1(hex: text) -> bool:
         if index < 64 and code != 48: seed_nonzero = true
     seed_nonzero
 
-fn host_identity_entropy_bytes_v1(hex: text) -> Result<[u8], text>:
-    if not host_identity_entropy_valid_v1(hex): return Err("host-identity-entropy-unavailable")
+# Decodes the validated 72-hex entropy into 36 bytes, written by index into a single pre-sized buffer. Invalid
+# input returns [] before any buffer exists, so no partial secret buffer can be returned on an error path.
+fn host_identity_entropy_bytes_v1(hex: text) -> [u8]:
+    if not host_identity_entropy_valid_v1(hex): return []
     var result: [u8] = [0u8; 36]
     var high = 0
     for index in 0..72:
         val code = hex.char_code_at(index)
-        var digit = -1
-        if code >= 48 and code <= 57: digit = code - 48
-        elif code >= 97 and code <= 102: digit = code - 97 + 10
-        if digit < 0: return Err("host-identity-entropy-unavailable")
+        val digit = if code <= 57: code - 48 else: code - 97 + 10
         if index % 2 == 0: high = digit * 16
         else: result[index / 2] = (high + digit) as u8
-    Ok(result)
+    result
 
 # Raw user text, including controls, becomes a hash fragment in a public label.
 pub fn host_identity_label_v1(user_text: text, unix_micros: i64) -> Result<text, text>:
@@ -351,6 +383,45 @@ pub fn host_identity_generation_label_v1(name: Option<text>, unix_micros: i64) -
     if unix_micros < 0: return Err("host-identity-name-invalid")
     Ok("host-" + unix_micros.to_text())
 
+struct HostIdentityGenerateRunV1:
+    outcome: Result<HostIdentityGeneratedKeyV1, text>
+    # Count of owned private buffers (seed, check, entropy bytes, plus the encoder's body and raw) wiped and verified.
+    wiped: i64
+
+fn host_identity_generate_refuse_v1(code: text, wiped: i64) -> HostIdentityGenerateRunV1:
+    HostIdentityGenerateRunV1(outcome: Err(code), wiped: wiped)
+
+fn host_identity_generated_public_v1(derived_public: [u8]) -> Result<HostPublicKeyV1, text>:
+    val wire = host_identity_public_wire_v1(derived_public)?
+    host_identity_public_parse_v1("ssh-ed25519 " + base64_encode_bytes(wire))
+
+# Key generation from explicit entropy hex (the OS entropy owner supplies it in production). The entropy bytes, seed
+# slice and check slice are each allocated once, never grown, and all wiped on the single exit after they exist
+# (including when a later step refuses); a failed wipe overrides the outcome.
+pub fn host_identity_key_generate_from_entropy_run_v1(entropy: text, label: text) -> HostIdentityGenerateRunV1:
+    var bytes = host_identity_entropy_bytes_v1(entropy)
+    if bytes.len() != 36: return host_identity_generate_refuse_v1("host-identity-entropy-unavailable", 0)
+    var seed = host_identity_slice_v1(bytes, 0, 32)
+    var check = host_identity_slice_v1(bytes, 32, 4)
+    val derived_public = ed25519_pubkey(seed)
+    val encoded = host_identity_private_encode_run_v1(seed, derived_public, check, label)
+    val public_result = host_identity_generated_public_v1(derived_public)
+    val seed_wipe = secure_zero_u8_slots(seed)
+    val check_wipe = secure_zero_u8_slots(check)
+    val bytes_wipe = secure_zero_u8_slots(bytes)
+    var wiped = encoded.wiped
+    if seed_wipe.verified(): wiped = wiped + 1
+    if check_wipe.verified(): wiped = wiped + 1
+    if bytes_wipe.verified(): wiped = wiped + 1
+    if not seed_wipe.verified() or not check_wipe.verified() or not bytes_wipe.verified():
+        return host_identity_generate_refuse_v1("host-identity-key-buffer-wipe", wiped)
+    if encoded.outcome.is_err(): return host_identity_generate_refuse_v1(encoded.outcome.unwrap_err(), wiped)
+    if public_result.is_err(): return host_identity_generate_refuse_v1(public_result.unwrap_err(), wiped)
+    HostIdentityGenerateRunV1(
+        outcome: Ok(HostIdentityGeneratedKeyV1(public_key: public_result.unwrap(), private_file: encoded.outcome.unwrap(),
+            label: label)),
+        wiped: wiped)
+
 # Caller must admit/retain its private store BEFORE calling this function.
 # Name/time affect only a bounded public comment; the seed/check come from the
 # existing checked OS CSPRNG owner, never from text, time, hashes or a password.
@@ -358,20 +429,10 @@ pub fn host_identity_key_generate_v1(name: Option<text>, unix_micros: i64) -> Re
     val label = host_identity_generation_label_v1(name, unix_micros)?
     val entropy = sosix_random_hex(36)
     if entropy == nil: return Err("host-identity-entropy-unavailable")
-    var bytes = host_identity_entropy_bytes_v1(entropy.unwrap())?
-    var seed = host_identity_slice_v1(bytes, 0, 32)
-    val check = host_identity_slice_v1(bytes, 32, 4)
-    val derived_public = ed25519_pubkey(seed)
-    val wire = host_identity_public_wire_v1(derived_public)?
-    val public_key = host_identity_public_parse_v1("ssh-ed25519 " + base64_encode_bytes(wire))?
-    val encoded = host_identity_private_encode_v1(seed, derived_public, check, label)
-    val seed_wipe = secure_zero_u8_slots(seed)
-    val bytes_wipe = secure_zero_u8_slots(bytes)
-    if not seed_wipe.verified() or not bytes_wipe.verified(): return Err("host-identity-key-buffer-wipe")
-    val private_file = encoded?
-    Ok(HostIdentityGeneratedKeyV1(public_key: public_key, private_file: private_file, label: label))
+    host_identity_key_generate_from_entropy_run_v1(entropy.unwrap(), label).outcome
 
 export HostIdentityGeneratedKeyV1, host_identity_public_wire_v1, host_identity_private_encode_v1
+export host_identity_private_encode_run_v1, host_identity_key_generate_from_entropy_run_v1
 export host_identity_private_public_v1, host_identity_key_generate_v1
 export host_identity_private_sign_grant_v1, host_identity_private_sign_approval_v1
 export host_identity_private_sign_completion_v3, host_identity_private_sign_reset_failure_v3
