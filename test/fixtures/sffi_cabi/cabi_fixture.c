@@ -13,6 +13,11 @@ color_t fx_enum(void) { return COLOR_BLUE; }
 const char *fx_cstr(void) { return "borrowed-text"; }
 const char *fx_cstr_null(void) { return NULL; }
 
+/* Representations a hostile or buggy C library could return. */
+unsigned char fx_bool_bad(void) { return 2; }
+color_t fx_enum_oob(void) { return (color_t)7; }
+
+#ifndef SFFI_FIXTURE_NO_MAIN
 int main(void) {
     printf("sizeof int=%zu\n", sizeof(int));
     printf("sizeof int32_t=%zu\n", sizeof(int32_t));
@@ -26,3 +31,4 @@ int main(void) {
     printf("cstr_null=%d\n", fx_cstr_null() == NULL);
     return 0;
 }
+#endif
