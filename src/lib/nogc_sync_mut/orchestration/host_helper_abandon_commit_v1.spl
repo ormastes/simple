@@ -7,7 +7,8 @@ use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1,
     host_capacity_completion_evidence_owned_v2}
 use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.HostHelperCancelTurnV1
 use std.nogc_sync_mut.orchestration.host_helper_abandon_record_v1.{HostHelperAbandonedV1, host_helper_abandoned_encode_v1,
-    host_helper_abandoned_relative_v1, host_helper_abandon_proof_relative_v1, host_helper_abandon_observed_v1}
+    host_helper_abandoned_decode_v1, host_helper_abandoned_relative_v1, host_helper_abandon_proof_relative_v1,
+    host_helper_abandon_observed_v1}
 use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.host_linux_helper_attach_expected_v1
 use std.nogc_sync_mut.io.local_authority_policy_v1.LocalAuthorityPolicyV1
 use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
@@ -35,16 +36,18 @@ pub fn host_helper_abandon_verify_v1(policy: LocalAuthorityPolicyV1, controller_
         context: HostReservationAuthorizationContextV1, host_id: text, source: text) -> Result<HostHelperAbandonProofV1, text>:
     val proof = host_helper_abandon_proof_decode_v1(source)?
     if proof.signed.issuer_id != controller_ref: return Err("linux-host-service-controller-mismatch")
-    val matched = host_helper_abandon_match_v1(proof.abandon, proof.operation)?
+    val _matched = host_helper_abandon_match_v1(proof.abandon, proof.operation)?
     if proof.abandon.physical_host_id != host_id: return Err("helper-abandon-operation-mismatch")
-    val grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, proof.signed, proof.approval, proof.operation,
+    val _grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, proof.signed, proof.approval, proof.operation,
         context.grant_clock, policy.snapshot.generation, context.policy_revision, context.revocation_epoch,
         context.session_generation)?
     Ok(proof)
 
 # PURE precondition table over the journal-derived facts. Only an attach-broker helper row that is charged and live
 # (executing or outcome-unknown) is abandoned; every digest is the journal's own; the operator voids only the marker
-# state they observed.
+# state they observed. milestone_0043 (REVIEW_B P2-1): a digest or observed-text refusal echoes the journal-derived
+# expected value beside the given one (digests and marker tokens only, never a secret), and only after the signed command
+# verified, so the operator can re-sign exactly what this service will accept.
 pub fn host_helper_abandon_check_v1(abandon: HostHelperAbandonV1, operation: OperationEnvelopeV2, row_state: text,
         helper_kind: text, request_digest: text, prepared_receipt_digest: text, observed: text) -> Result<(), text>:
     if operation.operation != "host_helper_reservation_v1" or helper_kind != "attach-broker":
@@ -53,13 +56,18 @@ pub fn host_helper_abandon_check_v1(abandon: HostHelperAbandonV1, operation: Ope
         return Err("helper-abandon-operation-mismatch")
     if row_state != "executing" and row_state != "outcome-unknown": return Err("helper-abandon-row-state")
     if abandon.request_digest != request_digest or abandon.prepared_receipt_digest != prepared_receipt_digest:
-        return Err("helper-abandon-request-mismatch")
-    if abandon.observed != observed: return Err("helper-abandon-observed-mismatch")
+        return Err("helper-abandon-request-mismatch:expected-request=" + request_digest + ";given-request=" +
+            abandon.request_digest + ";expected-receipt=" + prepared_receipt_digest + ";given-receipt=" +
+            abandon.prepared_receipt_digest)
+    if abandon.observed != observed:
+        return Err("helper-abandon-observed-mismatch:expected=" + observed + "|given=" + abandon.observed)
     Ok(())
 
 # Proof first (keyed by its digest: an orphan left by a crash before the marker is harmless and a freshly signed abandon
-# writes its own), then the marker, no-replace and read back. A marker already present is accepted only for the same
-# proof; the marker bytes are returned.
+# writes its own), then the marker, no-replace and read back; the marker bytes are returned. milestone_0043 (REVIEW_B
+# P3-5, P2-4): a marker already present for the SAME helper binding (operation, operation/request/receipt digests) is
+# accepted and returned unchanged, so a freshly signed, live-verified abandon finishes a settle that failed or whose
+# recorded approval expired; the fresh proof stays retained beside it by its own digest. Any other marker is refused.
 pub fn host_helper_abandon_record_publish_v1(journal: DistributedOperationJournalV2, proof: HostHelperAbandonProofV1,
         source: text) -> Result<text, text>:
     val abandon = proof.abandon
@@ -76,11 +84,44 @@ pub fn host_helper_abandon_record_publish_v1(journal: DistributedOperationJourna
     val saved = distributed_operation_journal_publish_v3(journal, marker_path, marker)?
     if not saved:
         val existing = distributed_operation_journal_read_required_v3(journal, marker_path, 4096)?
-        if existing != marker: return Err("helper-abandon-exists")
+        val recorded = host_helper_abandoned_decode_v1(existing)?
+        if (recorded.operation_id != abandon.operation_id or recorded.operation_digest != abandon.operation_digest or
+                recorded.request_digest != abandon.request_digest or
+                recorded.prepared_receipt_digest != abandon.prepared_receipt_digest):
+            return Err("helper-abandon-exists")
         return Ok(existing)
     val readback = distributed_operation_journal_read_required_v3(journal, marker_path, 4096)?
     if readback != marker: return Err("helper-abandon-readback")
     Ok(marker)
+
+# milestone_0043 (REVIEW_B P2-4): what the start resume needs to re-verify a recorded abandon, from the service's own
+# verified records and its live clock (the same inputs the in-incarnation command verifies against).
+pub struct HostHelperAbandonRecheckV1:
+    policy: LocalAuthorityPolicyV1
+    controller_ref: text
+    context: HostReservationAuthorizationContextV1
+    host_id: text
+
+fn helper_abandon_recorded_v1(journal: DistributedOperationJournalV2, operation: OperationEnvelopeV2,
+        recheck: HostHelperAbandonRecheckV1) -> Result<(), text>:
+    val marker = distributed_operation_journal_read_required_v3(journal, host_helper_abandoned_relative_v1(operation.id), 4096)?
+    val record = host_helper_abandoned_decode_v1(marker)?
+    val source = distributed_operation_journal_read_required_v3(journal,
+        host_helper_abandon_proof_relative_v1(operation.id, record.abandon_digest), 262144)?
+    if sha256_text(source) != record.abandon_digest: return Err("helper-abandoned-proof-digest")
+    val proof = host_helper_abandon_verify_v1(recheck.policy, recheck.controller_ref, recheck.context, recheck.host_id, source)?
+    if proof.abandon.operation_id != operation.id: return Err("helper-abandoned-proof-mismatch")
+    Ok(())
+
+# The start resume's re-verification of a recorded abandon before its settle, like the service-handoff twin: the retained
+# signed proof must verify again at THIS clock, policy generation, revocation epoch and session. An approval that expired
+# or was revoked since it was recorded is an Err: the row stays held (never settled on a stale decision) and the error is
+# reported; a freshly signed abandon then finishes it on the same marker (host_helper_abandon_record_publish_v1).
+pub fn host_helper_abandon_recorded_verify_v1(journal: DistributedOperationJournalV2, operation: OperationEnvelopeV2,
+        recheck: HostHelperAbandonRecheckV1) -> Result<(), text>:
+    val verified = helper_abandon_recorded_v1(journal, operation, recheck)
+    if verified.is_err(): return Err("helper-abandon-recorded-unverified:" + verified.unwrap_err())
+    Ok(())
 
 # Release on the recorded marker evidence: the evidence arm returns the marker bytes verbatim, so sha256(outcome) is the
 # recorded outcome digest. A row already completed with that outcome is an idempotent Ok.

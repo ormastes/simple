@@ -1,28 +1,34 @@
 # milestone_0037: the controller-side SETTLE of a remote-run build row that ends without a signed bundle (Host settled
-# without a bundle, failed, wedged, cancelled, never answered, or the exchange broke after the row was admitted).
-# Before this the row stayed `executing` forever. The settle runs as a journal edit through the ROOT's single writer
-# (controller_dispatch_remote_edit_v3): it publishes a typed, content-addressed record
+# without a bundle, the exchange broke, the wait ran out, the accept or a reset receipt was refused). Before this the row
+# stayed `executing` forever. The settle runs as a journal edit through the ROOT's single writer (controller_dispatch_remote_settle_v3,
+# reachable on a failed owner too): it publishes a typed, content-addressed record
 #   SIMPLE-REMOTE-RUN-SETTLE-1 | operation id | request envelope digest | state | reason | typed exit status
-# and moves the row to `failed`, `cancelled` or the honest non-terminal `outcome-unknown` (a local timeout or a broken
-# exchange proves nothing about the Host). The terminal outcome digest is sha256 of that record.
-# Success is never recorded here: there is no signed completion, so the exit status can only be Unobserved, NotExited,
-# Unknown or a non-zero Exited; Exited(0) and `completed` are refused. Only accept_wire_v3 over a verified bundle completes
-# a row (RuntimeExitStatusV1 Exited(0)). First terminal wins: a terminal row is never overwritten.
+# milestone_0043 (opus re-review P2-1/P2-2): unsigned Host text never makes a row terminal. Every Host-derived reason
+# settles the honest non-terminal `outcome-unknown`; the ONLY terminal settle is `cancelled` with reason
+# `controller-never-executed`, proven from the controller's own journal: no create-only execute archive exists for the
+# operation id (controller_dispatch_remote_execute_key_v3), so no run of it ever sent an execute. Each reason is paired
+# with exactly one state. Success is never recorded here: Exited(0) and `completed` are refused; only accept_wire_v3 over
+# a verified bundle completes a row. First terminal wins: a terminal row is never overwritten.
 use std.nogc_sync_mut.orchestration.workload_store_v1.ControllerJournalEditV1
 use std.common.contracts.container.runtime_v1.RuntimeExitStatusV1
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
 use std.common.contracts.distributed_operation_state_v2.distributed_operation_transition_v2
 use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_lookup_v2,
-    distributed_operation_journal_commit_v2, distributed_operation_journal_publish_v3, distributed_operation_journal_read_required_v3}
+    distributed_operation_journal_commit_v2, distributed_operation_journal_publish_v3, distributed_operation_journal_read_required_v3,
+    distributed_operation_journal_read_v3}
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.controller_dispatch_remote_execute_key_v3
 use std.common.build_manager.codec.builder_wire_line_v1
 use std.common.build_manager.contracts.builder_identifier_valid_v1
 use std.common.crypto.sha256.sha256_text
 
-val REMOTE_RUN_SETTLE_STATES_V1 = ["failed", "cancelled", "outcome-unknown"]
-# Typed reasons only: no free text ever reaches the record.
-val REMOTE_RUN_SETTLE_REASONS_V1 = ["host-failed", "host-wedged", "host-settled-without-bundle", "host-cancelled",
-    "wait-bounded-cancel-sent", "wait-bounded-cancel-unsent", "exchange-failed-after-admit", "accept-refused"]
+val REMOTE_RUN_SETTLE_STATES_V1 = ["cancelled", "outcome-unknown"]
+# Typed reasons only (no free text ever reaches the record), each paired with the ONE state it may settle.
+val REMOTE_RUN_SETTLE_REASONS_V1: Dict<text, text> = {"controller-never-executed": "cancelled",
+    "prior-execute-archived": "outcome-unknown", "host-cancelled": "outcome-unknown",
+    "host-settled-without-bundle": "outcome-unknown", "reset-receipt-refused": "outcome-unknown",
+    "wait-bounded-cancel-sent": "outcome-unknown", "wait-bounded-cancel-unsent": "outcome-unknown",
+    "exchange-failed-after-admit": "outcome-unknown", "accept-refused": "outcome-unknown"}
 
 pub fn remote_run_exit_text_v1(exit: RuntimeExitStatusV1) -> text:
     match exit:
@@ -39,24 +45,26 @@ pub fn remote_run_settle_record_v1(request: OperationEnvelopeV2, state: text, re
         wire = wire + builder_wire_line_v1(field)
     Ok(wire)
 
-# What a Host reply that ended the run WITHOUT a bundle means for the row. Only a settled run carrying a cancel cause is
-# cancelled; a wedged run keeps its reserved record charged and a failed or bundle-less settled run is failed.
-pub fn remote_run_terminal_settle_v1(stage: text, cancel_cause: text) -> (text, text):
-    if stage == "settled" and cancel_cause != "": return ("cancelled", "host-cancelled")
-    if stage == "wedged": return ("failed", "host-wedged")
-    if stage == "failed": return ("failed", "host-failed")
-    ("failed", "host-settled-without-bundle")
+# The reason for a Host stage reply that ended the run WITHOUT a bundle (`settled`, no bundle digest). The reply is
+# authenticated but unsigned Host text, so it only names WHY the row stays `outcome-unknown`; it never ends the row.
+pub fn remote_run_unbundled_reason_v1(cancel_cause: text) -> text:
+    if cancel_cause != "": "host-cancelled" else: "host-settled-without-bundle"
 
 fn remote_run_settle_refused_v1(journal: DistributedOperationJournalV2, code: text) -> ControllerJournalEditV1:
     ControllerJournalEditV1(journal: journal, result: "", error: code)
 
-# The journal edit: result `state:record-digest` (`outcome-unknown:` carries no digest). The returned journal is always the
-# most advanced one. A Host `wedged` run is settled failed on purpose: the Host itself ended it (reserved record stays
-# charged, a started run never survives), unlike a local timeout, which proves nothing and stays outcome-unknown.
+# @allow(primitive_api) presence verdict of the create-only execute archive of one operation id
+fn remote_run_execute_archived_v1(journal: DistributedOperationJournalV2, operation_id: text) -> Result<bool, text>:
+    val read = distributed_operation_journal_read_v3(journal, controller_dispatch_remote_execute_key_v3(operation_id), 2097152)?
+    Ok(read.is_some())
+
+# The journal edit: result `state:record-digest` (a repeated `outcome-unknown` settle answers `outcome-unknown:`). The
+# returned journal is always the most advanced one.
 pub fn remote_run_settle_apply_v1(request: OperationEnvelopeV2, state: text, reason: text, exit: RuntimeExitStatusV1,
         journal: DistributedOperationJournalV2) -> ControllerJournalEditV1:
     if not REMOTE_RUN_SETTLE_STATES_V1.contains(state): return remote_run_settle_refused_v1(journal, "remote-run-settle-state")
-    if not REMOTE_RUN_SETTLE_REASONS_V1.contains(reason): return remote_run_settle_refused_v1(journal, "remote-run-settle-reason")
+    if not REMOTE_RUN_SETTLE_REASONS_V1.contains_key(reason) or REMOTE_RUN_SETTLE_REASONS_V1[reason] != state:
+        return remote_run_settle_refused_v1(journal, "remote-run-settle-reason")
     # Only typed exit facts reach the record: Exited(0) is success and needs a bundle; the free-text variants must be
     # identifiers (no verbatim Host text, no size surprise).
     match exit:
@@ -67,6 +75,10 @@ pub fn remote_run_settle_apply_v1(request: OperationEnvelopeV2, state: text, rea
         case RuntimeExitStatusV1.Unknown(why):
             if not builder_identifier_valid_v1(why): return remote_run_settle_refused_v1(journal, "remote-run-settle-exit")
         case _: pass
+    if reason == "controller-never-executed":
+        val archived = remote_run_execute_archived_v1(journal, request.id)
+        if archived.is_err(): return remote_run_settle_refused_v1(journal, archived.unwrap_err())
+        if archived.unwrap(): return remote_run_settle_refused_v1(journal, "remote-run-settle-execute-archived")
     val encoded = distributed_encode_operation_v2(request)
     if encoded.is_err(): return remote_run_settle_refused_v1(journal, encoded.unwrap_err())
     val record = remote_run_settle_record_v1(request, state, reason, exit)
@@ -100,4 +112,16 @@ pub fn remote_run_settle_apply_v1(request: OperationEnvelopeV2, state: text, rea
     if committed.is_err(): return remote_run_settle_refused_v1(journal, committed.unwrap_err())
     ControllerJournalEditV1(journal: committed.unwrap(), result: state + ":" + digest, error: "")
 
-export REMOTE_RUN_SETTLE_STATES_V1, remote_run_exit_text_v1, remote_run_settle_record_v1, remote_run_terminal_settle_v1, remote_run_settle_apply_v1
+# milestone_0043: the settle of a run that failed BEFORE its execute was sent (the row is admitted before prepare). The
+# controller's own create-only execute archive decides, read inside this single-writer edit: absent, no run of this
+# operation id ever sent an execute, so the row ends `cancelled`; present (an earlier run executed), it stays unproven.
+pub fn remote_run_settle_before_execute_apply_v1(request: OperationEnvelopeV2,
+        journal: DistributedOperationJournalV2) -> ControllerJournalEditV1:
+    val archived = remote_run_execute_archived_v1(journal, request.id)
+    if archived.is_err(): return remote_run_settle_refused_v1(journal, archived.unwrap_err())
+    if archived.unwrap():
+        return remote_run_settle_apply_v1(request, "outcome-unknown", "prior-execute-archived", RuntimeExitStatusV1.Unobserved, journal)
+    remote_run_settle_apply_v1(request, "cancelled", "controller-never-executed", RuntimeExitStatusV1.Unobserved, journal)
+
+export REMOTE_RUN_SETTLE_STATES_V1, remote_run_exit_text_v1, remote_run_settle_record_v1, remote_run_unbundled_reason_v1
+export remote_run_settle_apply_v1, remote_run_settle_before_execute_apply_v1

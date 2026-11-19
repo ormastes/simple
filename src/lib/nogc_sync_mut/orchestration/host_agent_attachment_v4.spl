@@ -51,7 +51,7 @@ use std.nogc_sync_mut.orchestration.host_primary_attach_settlement_v1.{HostPrima
     host_primary_attach_quiesce_fallback_core_v3, host_primary_attach_settle_retired_core_v3}
 use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.{host_linux_helper_journal_relative_v1,
     host_linux_helper_attach_expected_v1, host_linux_helper_attach_binding_check_v1, host_primary_attach_refusal_decode_v1,
-    host_linux_helper_refusal_publish_v1}
+    host_linux_helper_refusal_publish_v1, host_linux_helper_reap_mark_v1}
 use std.container.SimpleContainerOwnerV2
 use std.nogc_async_mut.container.terminal_session_v1.{ContainerPrimaryAttachSessionV1, ContainerOwnedTerminalSessionV1}
 use std.nogc_async_mut.container.terminal_session_v2.{ContainerOwnedTerminalSessionV2, container_primary_output_read_v1,
@@ -408,6 +408,12 @@ fn host_agent_open_begin_v4(call: HostAgentAttachmentPortCallV4, context: HostAg
         request.unwrap().operation.id, att.stream_policy.unwrap(), open.execution, call.runtime.unwrap())
     if checked.error != "":
         return host_agent_open_failed_v4(call, att, checked.error, false, checked.capacity, Some(checked.container))
+    # milestone_0043 (REVIEW_B P1-1): mark the row reapable BEFORE begin. Begin and this open core run in one call, and
+    # the open core journals its consume intent before PA, so a marked row's "no PA" is checked against the journal.
+    # A refusal holds only the prepared receipt, like the precheck.
+    val reap_marked = host_linux_helper_reap_mark_v1(checked.capacity.journal, context.store.root, request.unwrap().operation.id)
+    if reap_marked.is_err():
+        return host_agent_open_failed_v4(call, att, reap_marked.unwrap_err(), false, checked.capacity, Some(checked.container))
     val begun = host_helper_begin_v1(checked.capacity, request.unwrap(), receipt.unwrap(), att.helper_execute_signed.unwrap(),
         att.helper_execute_approval.unwrap(), open.policy, open.scope, open.context, refresh)
     if begun.lease.is_none():

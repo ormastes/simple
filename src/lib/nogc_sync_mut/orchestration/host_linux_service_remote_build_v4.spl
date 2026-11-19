@@ -289,12 +289,22 @@ fn host_remote_build_reset_reply_v4(executor: HostRemoteBuildExecutorV3) -> text
 pub fn host_remote_build_reset_failure_relative_v4(operation_id: text) -> text:
     "host-remote-build-reset-failure/" + sha256_text(operation_id) + ".sdn"
 
+# REVIEW_C P3-6: the marker of an operation whose archive failed its read-back. That reply was never answered (the caller
+# plain-wedges), so a restart must not serve whatever the archive path holds; a lost marker only keeps the old behaviour.
+# A reused operation id that meets the marker also stops serving the earlier run's reply: the restarted collect then
+# answers the reaped refusal, which still settles `failed`.
+fn host_remote_build_reset_failure_refused_relative_v4(operation_id: text) -> text:
+    "host-remote-build-reset-failure/" + sha256_text(operation_id) + ".refused"
+
 fn remote_build_reset_archive_v4(journal: DistributedOperationJournalV2, operation_id: text, reply: text) -> Result<(), text>:
     val relative = host_remote_build_reset_failure_relative_v4(operation_id)
     distributed_operation_journal_publish_v3(journal, relative, reply)?
-    if distributed_operation_journal_read_required_v3(journal, relative, 262144)? != reply:
-        return Err("linux-host-remote-build-reset-failure-conflict")
-    Ok(())
+    val back = distributed_operation_journal_read_required_v3(journal, relative, 262144)
+    if back.is_ok() and back.unwrap() == reply: return Ok(())
+    val _marked = distributed_operation_journal_publish_v3(journal, host_remote_build_reset_failure_refused_relative_v4(operation_id),
+        operation_id)
+    if back.is_err(): return Err(back.unwrap_err())
+    Err("linux-host-remote-build-reset-failure-conflict")
 
 fn remote_build_reset_text_v4(fields: Dict<text, SdnValue>, name: text) -> text:
     match fields[name]:
@@ -304,6 +314,8 @@ fn remote_build_reset_text_v4(fields: Dict<text, SdnValue>, name: text) -> text:
 # The archived reply of `operation_id`, or "" when it is absent, unreadable, for another operation, not a wedged
 # reset-failure reply with a receipt, or not canonical bytes: every doubt keeps the caller's existing refusal.
 pub fn host_remote_build_reset_failure_stored_v4(journal: DistributedOperationJournalV2, operation_id: text) -> text:
+    val refused = distributed_operation_journal_read_v3(journal, host_remote_build_reset_failure_refused_relative_v4(operation_id), 1024)
+    if refused.is_err() or refused.unwrap().is_some(): return ""
     val stored = distributed_operation_journal_read_v3(journal, host_remote_build_reset_failure_relative_v4(operation_id), 262144)
     if stored.is_err() or stored.unwrap().is_none(): return ""
     val source = stored.unwrap().unwrap()
@@ -658,7 +670,8 @@ fn remote_build_native_step_v4(executor: HostRemoteBuildExecutorV3, capacity: Ho
         case _: return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-stage-invalid")
     val deadline = container_effect_deadline_v1(request.plan.request_digest, request.plan.operation_id, ["create", "start"],
         state.deadline)
-    if deadline.is_err(): return remote_build_reset_wedged_v4(state, capacity, port, clock, deadline.unwrap_err())
+    # REVIEW_C P3-4: a deadline that cannot be computed is no issued effect, so it has no reset-failure stage to sign.
+    if deadline.is_err(): return remote_build_wedged_v4(state, capacity, deadline.unwrap_err())
     val turn = if state.pending: simple_container_workspace_step_v3(state.container.unwrap(), request)
         else: simple_container_workspace_begin_v3(state.container.unwrap(), action, request,
             if state.stage == "running": None else: Some(deadline.unwrap()))

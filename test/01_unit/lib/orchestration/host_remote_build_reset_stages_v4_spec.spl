@@ -17,7 +17,8 @@ A changed stage mapping or a wedge that bypasses the helper is a contract change
 """
 use std.spec.step
 use std.io.file_read_text
-use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.{host_remote_build_reset_stage_v4}
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.{host_remote_build_reset_stage_v4,
+    host_remote_build_deadline_v4}
 
 val RS_SOURCE: text = "src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl"
 
@@ -58,6 +59,22 @@ describe "Host remote-build wedge reset-failure stages (milestone_0040)":
         expect(host_remote_build_reset_stage_v4("stop", "controller-cancel", false, false)).to_equal("cancel-identity")
         expect(host_remote_build_reset_stage_v4("stop", "", false, false)).to_equal("")
 
+    it "classifies a deadline cancel, but a receipt for it exists only when not_after ends the window first":
+        # @req M0040-HOST-05
+        # REVIEW_C P2-1: the stage map is a classifier, not a delivery promise. The port signs at the Host clock and
+        # self-verifies like the controller, which refuses `approval.expires_at <= now` and a grant whose window has ended.
+        # The deadline cancel fires at `min(approval, grant, not_after)`, so a `deadline` receipt is signable only when
+        # `not_after` is strictly earlier than both expiries; otherwise it is the plain wedge (`failed`, no receipt).
+        # Accepting a receipt after the approval expired would be a new authority rule (owner decision), not done here.
+        step("not_after first: the cancel can fire inside both windows, the only case a deadline receipt is signable at all")
+        expect(host_remote_build_deadline_v4(1000, 2000, 500)).to_equal(500)
+        step("approval or grant first: the cancel fires at the expiry itself, so the port refuses to sign")
+        expect(host_remote_build_deadline_v4(1000, 2000, 3000)).to_equal(1000)
+        expect(host_remote_build_deadline_v4(3000, 2000, 2500)).to_equal(2000)
+        step("a deadline-compute error is not an issued effect: it stays the plain wedge (REVIEW_C P3-4)")
+        val native = rs_from(file_read_text(RS_SOURCE), "fn remote_build_native_step_v4(", "# stop .. host-settle")
+        expect(rs_count(native, "if deadline.is_err(): return remote_build_wedged_v4(state, capacity, deadline.unwrap_err())")).to_equal(1)
+
     it "keeps the Destroy stages and gives no stage to the points that are not terminal wedges":
         # @req M0040-HOST-03
         expect(host_remote_build_reset_stage_v4("destroy", "", true, true)).to_equal("destroy-absence")
@@ -71,10 +88,10 @@ describe "Host remote-build wedge reset-failure stages (milestone_0040)":
         # @req M0040-HOST-04
         val source = file_read_text(RS_SOURCE)
         val native = rs_from(source, "fn remote_build_native_step_v4(", "# stop .. host-settle")
-        step("the step takes the port so the helper can sign; only the invalid-stage guard stays a plain wedge")
+        step("the step takes the port so the helper can sign; only the invalid-stage guard and the deadline-compute error stay plain")
         expect(rs_count(native, "port: HostRemoteBuildPortV4")).to_equal(1)
-        expect(rs_count(native, "remote_build_reset_wedged_v4(")).to_equal(9)
-        expect(rs_count(native, "remote_build_wedged_v4(")).to_equal(1)
+        expect(rs_count(native, "remote_build_reset_wedged_v4(")).to_equal(8)
+        expect(rs_count(native, "remote_build_wedged_v4(")).to_equal(2)
         expect(rs_count(native, "return remote_build_wedged_v4(state, capacity, \"linux-host-remote-build-stage-invalid\")")).to_equal(1)
         step("the dispatcher hands the port to the native step")
         expect(rs_count(source, "remote_build_native_step_v4(state, capacity, request, port, clock)")).to_equal(1)

@@ -10,16 +10,20 @@ Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-19).
 ## Compatibility and limitations
 The seed is RFC 8032 test-1: published, deliberately public fixture material. Records expose only counts of verified
 wipes. The entropy decoder returns [] on invalid input before allocating, so no partial buffer exists on an error
-path. Immutable text (PEM, base64) and std ed25519 internals carry no erasure guarantee (bug doc
-host_identity_ed25519_std_temporaries_unwiped_2026-11-19).
+path. milestone_0043 (REVIEW_B P2-3): the base64 body and PEM armour are written straight into ONE pre-sized [u8] (no
+base64 text, no growing PEM text), byte-identical to the previous text encoder. What is still NOT wiped, stated plainly:
+the generator's entropy arrives as immutable hex TEXT from the OS entropy owner (`sosix_random_hex`, the only entropy
+API; it holds the seed and check in hex and cannot be erased), the returned private file is the caller's buffer, and
+std ed25519 internals carry no erasure guarantee (bug doc host_identity_ed25519_std_temporaries_unwiped_2026-11-19).
 ## Verification guidance and troubleshooting
 Encode wipes 2 buffers (body, raw). Generate wipes 5 on success (seed, check, entropy bytes, body, raw) and 0 when the
 entropy is refused before any buffer exists.
 """
+use std.spec.{step}
 use app.orchestrator.host_identity_key_v1.{host_identity_private_encode_v1, host_identity_private_encode_run_v1,
     host_identity_key_generate_from_entropy_run_v1, host_identity_private_public_v1}
 use std.common.crypto.ed25519.pure_ed25519_keypair_from_seed
-use std.common.base_encoding.base64.base64_decode_bytes
+use std.common.base_encoding.base64.{base64_decode_bytes, base64_encode_bytes}
 use std.common.text_bytes.bytes_to_text
 
 fn ew_seed() -> [u8]:
@@ -111,3 +115,24 @@ describe "Host identity encode and generate wipe owned secret buffers":
         val run = host_identity_key_generate_from_entropy_run_v1(ew_entropy(), "bad\nlabel")
         expect(run.outcome.unwrap_err()).to_equal("host-identity-key-label")
         expect(run.wiped).to_equal(3)
+
+    it "writes armour byte-identical to base64 text wrapped at 70 columns":
+        # @req ENCWIPE-08 (REVIEW_B P2-3: no base64 or PEM text temporary, same file bytes)
+        # 0..16 cover every length residue; 78 gives a 420-character body (exactly 6 x 70: no doubled final LF).
+        for length in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 78]:
+            val file = host_identity_private_encode_v1(ew_seed(), ew_public(), [9, 8, 7, 6], ew_label(length)).unwrap()
+            val encoded = base64_encode_bytes(ew_decoded(file))
+            var reference = "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+            var at = 0
+            while at < encoded.len():
+                val end = if at + 70 < encoded.len(): at + 70 else: encoded.len()
+                reference = reference + encoded.substring(at, end) + "\n"
+                at = end
+            reference = reference + "-----END OPENSSH PRIVATE KEY-----\n"
+            expect(file).to_equal(reference.bytes())
+            step("the decoded container is the independently known layout, so a valid-but-wrong sextet stream fails")
+            val raw = ew_decoded(file)
+            for index in 0..32:
+                expect(raw[161 + index]).to_equal(ew_seed()[index])
+                expect(raw[193 + index]).to_equal(ew_public()[index])
+            expect(raw[98]).to_equal(9u8)

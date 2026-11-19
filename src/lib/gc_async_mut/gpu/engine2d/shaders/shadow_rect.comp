@@ -43,6 +43,14 @@ layout(push_constant) uniform PushConstants {
     int prof_off;
 } pc;
 
+// color.spl `_blend_premul_over`: one channel of straight-alpha src over a
+// translucent dst, through premultiplied space.
+int premul_over(int s, int sa, int d, int da, int inv, int oa) {
+    int p = (s * sa + 127) / 255 + (((d * da + 127) / 255) * inv + 127) / 255;
+    int v = (p * 255 + oa / 2) / oa;
+    return v > 255 ? 255 : v;
+}
+
 void main() {
     int px = int(gl_GlobalInvocationID.x);
     int py = int(gl_GlobalInvocationID.y);
@@ -62,16 +70,31 @@ void main() {
     int cov = ((cov_x * cov_y) / 255 * pc.shadow_a) / 255;
 
     uint outv = dstv;
-    if (cov > 0) {
+    uint da = (dstv >> 24u) & 255u;
+    if (cov > 0 && da != 255u) {
+        // A translucent destination (an opacity group or other transparent
+        // offscreen): Chrome's src-over, as the twin's `_emu_shadow_px` does
+        // through color.spl `blend_solid`.
+        if (cov >= 255 || da == 0u) {
+            outv = (uint(cov >= 255 ? 255 : cov) << 24u) | (uint(pc.sr) << 16u) | (uint(pc.sg) << 8u) | uint(pc.sb);
+        } else {
+            int ida = int(da);
+            int inv = 255 - cov;
+            int oa = cov + (ida * inv + 127) / 255;
+            int rr = premul_over(pc.sr, cov, int((dstv >> 16u) & 255u), ida, inv, oa);
+            int rg = premul_over(pc.sg, cov, int((dstv >> 8u) & 255u), ida, inv, oa);
+            int rb = premul_over(pc.sb, cov, int(dstv & 255u), ida, inv, oa);
+            outv = (uint(oa) << 24u) | (uint(rr) << 16u) | (uint(rg) << 8u) | uint(rb);
+        }
+    } else if (cov > 0) {
         int dr = int((dstv >> 16u) & 255u);
         int dg = int((dstv >> 8u) & 255u);
         int db = int(dstv & 255u);
         int rr = (pc.sr * cov + dr * (255 - cov)) / 255;
         int rg = (pc.sg * cov + dg * (255 - cov)) / 255;
         int rb = (pc.sb * cov + db * (255 - cov)) / 255;
-        // Keep the destination alpha, as the twin does (a 0 alpha made a
-        // translucent box over its shadow composite onto "transparent").
-        outv = (dstv & 0xFF000000u) | (uint(rr) << 16u) | (uint(rg) << 8u) | uint(rb);
+        // Opaque destination: the twin's integer formula.
+        outv = 0xFF000000u | (uint(rr) << 16u) | (uint(rg) << 8u) | uint(rb);
     }
     dst.data[uint(py * pc.mw + px)] = outv;
 }

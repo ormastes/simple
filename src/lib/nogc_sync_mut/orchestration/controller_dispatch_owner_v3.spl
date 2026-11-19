@@ -314,6 +314,11 @@ fn dispatch_state_remote_begin_v3(root: ControllerLocalRootV3, operation_id: tex
     owner.remote_op = operation_id
     dispatch_turn_v3(dispatch_reader_v3(owner))
 
+# The create-only archive of a remote run's signed execute (published BEFORE the execute is sent, never replaced). Its
+# absence in the root journal is the controller's own proof that no run of this operation id ever sent an execute.
+pub fn controller_dispatch_remote_execute_key_v3(operation_id: text) -> text:
+    "controller-remote-execute-v3/" + sha256_text(operation_id) + ".sdn"
+
 fn dispatch_remote_ready_v3(owner: ControllerDispatchStateV3) -> bool:
     owner.mode == "remote" and owner.phase == "ready" and owner.exchange.is_none() and owner.root.is_some()
 
@@ -330,7 +335,7 @@ fn dispatch_state_remote_send_v3(original: ControllerDispatchStateV3, action: te
         if store.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, store.unwrap_err()))
         val digest = host_service_operation_request_digest_v6(owner.remote_op, payload)
         if digest.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, digest.unwrap_err()))
-        val key = "controller-remote-execute-v3/" + sha256_text(owner.remote_op) + ".sdn"
+        val key = controller_dispatch_remote_execute_key_v3(owner.remote_op)
         # Atomic create-only return is the gate. Existing bytes NEVER grant resend, identical or not.
         val published = distributed_operation_journal_publish_v3(store.unwrap().journal, key, payload)
         if published.is_err():
@@ -387,6 +392,47 @@ fn dispatch_state_remote_edit_v3(original: ControllerDispatchStateV3,
     owner = dispatch_retain_v3(owner, Ok(edited.store))
     if owner.error == "":
         owner.response = if edited.error == "": CONTROLLER_DISPATCH_EDIT_OK_V3 + edited.result else: CONTROLLER_DISPATCH_EDIT_REFUSED_V3 + edited.error
+    dispatch_turn_v3(owner)
+
+# milestone_0043 (opus re-review P1-1): the SETTLE of an admitted remote-run row after ANY failure. A failed send (Host
+# refusal of prepare/execute, transport error, a refused archive) leaves the owner in `cleanup`, where the ready-only edit
+# above is refused, so the row would stay `executing` forever. The settle gate is phase-independent; it needs only the
+# remote owner's root. Root health stays the root's own gate: workload_v3() refuses a closing or quarantined root and
+# changed installed bytes (a policy change mid-run), so those refuse the settle honestly, never bypassed.
+fn dispatch_remote_settle_gate_v3(owner: ControllerDispatchStateV3) -> text:
+    if owner.mode != "remote": return "dispatch-remote-settle-mode"
+    if owner.root.is_none(): return "dispatch-remote-settle-root"
+    if owner.remote_op == "": return "dispatch-remote-settle-operation"
+    ""
+
+# A still-pending exchange (an exchange that outlived the command's per-wait bound) is ABANDONED first: closed, never
+# resent, its outcome folded into the owner exactly as the local close does; an unconfirmed abandon refuses the settle.
+# Then the edit runs through the root's single writer and the journal it ended with is always retained, like the ready
+# edit. A completed edit never changes the phase (a ready owner stays ready, a failed one stays in cleanup); a refused
+# root read or retain fails a ready owner like any other root failure, and a failed owner keeps its first error. The
+# settle verdict is the response (`edit-ok:` / `edit-refused:`, "" when no edit ran).
+fn dispatch_state_remote_settle_v3(original: ControllerDispatchStateV3,
+        edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> ControllerDispatchStateTurnV3:
+    var owner = original
+    owner.response = ""
+    val gate = dispatch_remote_settle_gate_v3(owner)
+    if gate != "": return dispatch_turn_v3(dispatch_fail_v3(owner, gate))
+    if val exchange = owner.exchange:
+        val closed = host_service_auth_exchange_close_v6(exchange)
+        owner.exchange = closed.owner
+        val disposition = controller_dispatch_close_disposition_v3(owner.outcome,
+            closed.outcome, closed.error, closed.completed, closed.owner.is_some())
+        owner.outcome = disposition.outcome
+        if disposition.error != "": owner = dispatch_fail_v3(owner, disposition.error)
+        if owner.exchange.is_some(): return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-remote-settle-exchange-open"))
+    val store = owner.root.unwrap().workload_v3()
+    if store.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, store.unwrap_err()))
+    val edited = controller_workload_store_edit_journal_v1(store.unwrap(), edit)
+    var root = owner.root.unwrap()
+    val retained = root.retain_v3(edited.store)
+    owner.root = Some(root)
+    if retained.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, retained.unwrap_err()))
+    owner.response = if edited.error == "": CONTROLLER_DISPATCH_EDIT_OK_V3 + edited.result else: CONTROLLER_DISPATCH_EDIT_REFUSED_V3 + edited.error
     dispatch_turn_v3(owner)
 
 fn dispatch_prepare_v3(original: ControllerDispatchStateV3) -> ControllerDispatchStateV3:
@@ -847,6 +893,12 @@ pub fn controller_dispatch_remote_edit_v3(handle: ControllerDispatchOwnerV3,
     dispatch_remote_turn_v3(handle, fn(state: ControllerDispatchStateV3) -> ControllerDispatchStateTurnV3:
         dispatch_state_remote_edit_v3(state, edit))
 
+# milestone_0043 P1-1: the settle edit, reachable on a ready, failed or timed-out remote owner (one turn, no exchange).
+pub fn controller_dispatch_remote_settle_v3(handle: ControllerDispatchOwnerV3,
+        edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> ControllerDispatchOwnedTurnV3:
+    dispatch_remote_turn_v3(handle, fn(state: ControllerDispatchStateV3) -> ControllerDispatchStateTurnV3:
+        dispatch_state_remote_settle_v3(state, edit))
+
 pub fn controller_dispatch_step_v3(handle: ControllerDispatchOwnerV3, cancel: bool = false) -> ControllerDispatchOwnedTurnV3:
     val admitted = dispatch_origin_v3()
     if admitted.is_err(): return dispatch_origin_failure_v3(Some(handle), admitted.unwrap_err())
@@ -871,5 +923,6 @@ export ControllerDispatchCloseDispositionV3, controller_dispatch_close_dispositi
 export controller_dispatch_begin_v3, controller_dispatch_control_begin_v3, controller_dispatch_inspect_begin_v3
 export CONTROLLER_DISPATCH_EDIT_OK_V3, CONTROLLER_DISPATCH_EDIT_REFUSED_V3
 export controller_dispatch_remote_begin_v3, controller_dispatch_remote_send_v3, controller_dispatch_remote_admit_v3, controller_dispatch_remote_edit_v3
+export controller_dispatch_remote_settle_v3, controller_dispatch_remote_execute_key_v3
 export controller_dispatch_service_begin_v3, controller_dispatch_step_v3, controller_dispatch_close_v3
 export controller_dispatch_host_status_match_v3, controller_dispatch_execute_archive_key_v3, controller_dispatch_original_execute_match_v3

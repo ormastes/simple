@@ -33,7 +33,8 @@ use std.common.contracts.distributed_control_codec_v2.distributed_decode_operati
 use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.{HostHelperCancelTurnV1,
     host_helper_cancel_unconsumed_v1}
 use std.nogc_sync_mut.orchestration.host_helper_abandon_record_v1.host_helper_abandoned_pending_v1
-use std.nogc_sync_mut.orchestration.host_helper_abandon_commit_v1.{host_helper_abandon_v1, host_helper_abandon_commit_v1}
+use std.nogc_sync_mut.orchestration.host_helper_abandon_commit_v1.{host_helper_abandon_v1, host_helper_abandon_commit_v1,
+    HostHelperAbandonRecheckV1, host_helper_abandon_recorded_verify_v1}
 use std.nogc_sync_mut.orchestration.host_helper_deadline_v1.HostHelperReapFactsV1
 use std.nogc_sync_mut.orchestration.host_helper_deadline_reap_v1.host_helper_deadline_reap_v1
 use std.common.contracts.orchestration.host_helper_abandon_v1.host_helper_abandon_proof_decode_v1
@@ -96,7 +97,7 @@ use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.{HostRemo
     host_remote_build_open_v4, host_remote_build_profile_gate_v4, host_remote_build_input_v4, host_remote_build_transfer_v4, host_remote_build_step_v4,
     host_remote_build_request_cancel_v4, host_remote_build_settle_no_workload_v4, host_remote_build_failed_cause_v4,
     host_remote_build_reply_v4, host_remote_build_frame_decode_v4, host_remote_build_output_v4, host_remote_build_epoch_v4,
-    host_remote_build_close_v4, host_remote_build_release_v4, host_remote_build_reset_failure_stored_v4}
+    host_remote_build_close_v4, host_remote_build_release_v4, host_remote_build_reset_failure_stored_v4, host_remote_build_deadline_v4}
 use std.nogc_sync_mut.orchestration.host_service_handoff_v1.{host_service_handoff_commit_v1, host_service_handoff_verify_v1,
     host_service_handoff_consume_v1, host_service_handoff_abandon_v1, HOST_SERVICE_HANDOFF_UNVERIFIED_V1}
 use std.nogc_sync_mut.io.linux_fresh_epoch_store_inventory_v1.LinuxFreshEpochStoreInventoryBorrowV1
@@ -462,18 +463,29 @@ pub struct HostLinuxServiceResumeTurnV4:
 
 # Ok(None): not a resumable row (another operation, another state, or no journal R).
 fn linux_service_helper_cancel_row_v4(capacity: HostCapacityOwnerV1, store_root: text,
-        operation_id: text, reap: Option<HostHelperReapFactsV1>) -> Result<Option<HostHelperCancelTurnV1>, text>:
+        operation_id: text, reap: Option<HostHelperReapFactsV1>,
+        recheck: Option<HostHelperAbandonRecheckV1>) -> Result<Option<HostHelperCancelTurnV1>, text>:
     val row = distributed_operation_journal_lookup_v2(capacity.journal, operation_id)?
     if row.state != "executing" and row.state != "outcome-unknown": return Ok(None)
     val operation = distributed_decode_operation_v2(row.envelope)?
     if operation.operation != "host_helper_reservation_v1": return Ok(None)
     # milestone_0036: a recorded controller-signed abandon whose settle did not complete is finished first (DESIGN A6).
-    if host_helper_abandoned_pending_v1(capacity.journal, operation)?:
+    # milestone_0043 (REVIEW_B P2-4/P3-1, REVIEW_PRA_R1 P3-1, REVIEW_PRA_R2 P2-1): its approval is re-verified first. An
+    # expired or revoked approval, an unreadable marker or missing verify facts keep the row charged and are the resume
+    # error, so the startup quarantine names the reason (a charged unresolved row quarantines through the drain anyway).
+    # A marked row never reaches the reap or R.
+    val pending = host_helper_abandoned_pending_v1(capacity.journal, operation)
+    if pending.is_err(): return Err("helper-abandon-marker-unreadable:" + pending.unwrap_err())
+    if pending.unwrap():
+        val checked = match recheck:
+            case Some(facts): facts
+            case None: return Err("helper-abandon-recheck-unavailable")
+        host_helper_abandon_recorded_verify_v1(capacity.journal, operation, checked)?
         return Ok(Some(host_helper_abandon_commit_v1(capacity, operation)))
     # milestone_0036 deadline reap: when the signed deadline passed and the helper spawn is proven dead, the refusal R is
     # written here (single writer) and the read below finds it; any condition not met leaves the row untouched.
     if val facts = reap:
-        val reaped = host_helper_deadline_reap_v1(capacity.journal, store_root, operation, facts)?
+        val _reaped = host_helper_deadline_reap_v1(capacity.journal, store_root, operation, facts)
     val refusal_bytes = distributed_operation_journal_read_v3(capacity.journal,
         host_linux_helper_journal_relative_v1("primary-refusal", operation.id), 65536)?
     if refusal_bytes.is_none(): return Ok(None)
@@ -496,13 +508,17 @@ pub fn host_linux_service_helper_cancel_resume_v4(original: HostLinuxServiceCurr
     # milestone_0036: the facts the reap needs come from the service's own verified records and clock; without records
     # the reap is simply not offered when they are absent.
     var reap: Option<HostHelperReapFactsV1> = None
+    var recheck: Option<HostHelperAbandonRecheckV1> = None
     if val records = owner.records:
         val policy = records.metadata.policy
         reap = Some(HostHelperReapFactsV1(policy_generation: policy.snapshot.generation,
             policy_revision: policy.snapshot.policy_revision, revocation_epoch: policy.snapshot.revocation_epoch,
             now_ms: host_local_context_v1(policy).grant_clock))
+        if val scope = owner.scope:
+            recheck = Some(HostHelperAbandonRecheckV1(policy: policy, controller_ref: records.metadata.configuration.controller_ref,
+                context: host_local_context_v1(policy), host_id: scope.physical_host_id))
     for operation_id in operation_ids:
-        val row = linux_service_helper_cancel_row_v4(capacity, store_root, operation_id, reap)
+        val row = linux_service_helper_cancel_row_v4(capacity, store_root, operation_id, reap, recheck)
         if row.is_err():
             if error == "": error = row.unwrap_err()
             continue
@@ -947,6 +963,43 @@ fn linux_service_agent_slot_exact_v4(slot: Option<OperationEnvelopeV2>, operatio
     if slot.is_none(): return false
     slot.unwrap() == operation
 
+# milestone_0043 (opus re-review P1-2): the window of an executed-but-never-opened remote-build slot is the execute pair's
+# own (the earlier of its approval and grant expiry, host_remote_build_deadline_v4). The open glue refuses after it too, so
+# once it ended no open can ever be admitted and nothing can have run in that slot.
+fn linux_service_remote_build_unopened_deadline_v4(approval_expires_at: i64, grant_expires_at: i64) -> i64:
+    host_remote_build_deadline_v4(approval_expires_at, grant_expires_at, grant_expires_at)
+
+# Settles that slot cancelled/no-workload on the single journal writer once the service GRANT clock passed the window, checks
+# the ledger row reads Released and clears the slot. Anything it cannot prove (no current record, no archived execute, the window
+# still open) keeps the slot busy: never a guessed release. The returned capacity owner is adopted on every path.
+fn linux_service_remote_build_unopened_expire_v4(original: HostLinuxServiceCurrentV4, slot: text) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val busy = "linux-host-agent-incarnation-busy"
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", busy, false)
+    val execute = linux_service_remote_build_execute_v4(owner, slot)
+    if execute.is_err(): return linux_service_reply_v4(owner, "", busy, false)
+    val window = linux_service_remote_build_unopened_deadline_v4(execute.unwrap().approval.expires_at,
+        execute.unwrap().signed.grant.expires_at)
+    if host_local_context_v1(metadata.unwrap().policy).grant_clock < window: return linux_service_reply_v4(owner, "", busy, false)
+    val fence = container_scope_fence_id_v2(owner.scope.unwrap())
+    if fence.is_err(): return linux_service_reply_v4(owner, "", busy, false)
+    val operation = execute.unwrap().prepare.prepare.operation
+    val settled = host_remote_build_settle_no_workload_v4(owner.capacity.unwrap(), operation, execute.unwrap().association,
+        fence.unwrap(), "deadline")
+    owner.capacity = Some(settled.owner)
+    if settled.error != "": return linux_service_reply_v4(owner, "", settled.error, true)
+    # The no-workload settle commits the daemon row `completed` (the cancelled outcome is in its published record) and
+    # releases the charge: the ledger row must now read Released, else the slot is kept.
+    var released = false
+    for row in owner.capacity.unwrap().ledger.reservations:
+        if row.operation_id == slot and row.state == HostReservationStateV1.Released: released = true
+    if not released: return linux_service_reply_v4(owner, "", "linux-host-remote-build-unopened-expiry-readback", true)
+    owner.agent_operation_id = ""
+    owner.agent_operation = None
+    owner.slot_kind = ""
+    linux_service_reply_v4(owner, "", "", true)
+
 # N-06/T-08/U-05 slot check for an agent-draft prepare, before any charge. Busy when the incarnation's agent
 # is consumed, or the slot names an admitted (unexpired) or executing row of another operation. An admitted
 # slot row past its prepare deadline (the hco:288-290 monotonic rule) is expired through the SAME journal
@@ -968,6 +1021,10 @@ fn linux_service_agent_slot_v4(original: HostLinuxServiceCurrentV4, operation_id
             deadline = row.prepare_deadline_ms
         elif row.state == HostReservationStateV1.Executing: state = "executing"
         else: state = "ended"
+    # milestone_0043 P1-2: an executed remote-build slot that was never opened holds no build, so no cancel, collect or step
+    # deadline can reach it; once its signed window ended it is settled here instead of blocking until a restart.
+    if state == "executing" and owner.slot_kind == "remote-build" and owner.build.is_none() and not owner.agent_consumed:
+        return linux_service_remote_build_unopened_expire_v4(owner, slot)
     if state == "executing": return linux_service_reply_v4(owner, "", "linux-host-agent-incarnation-busy", false)
     if state == "admitted":
         if now_ms < deadline: return linux_service_reply_v4(owner, "", "linux-host-agent-incarnation-busy", false)
@@ -1189,6 +1246,16 @@ pub fn host_linux_service_remote_build_open_v4(original: HostLinuxServiceCurrent
     val scope = owner.scope.unwrap()
     val fence = container_scope_fence_id_v2(scope)
     if fence.is_err(): return linux_service_reply_v4(owner, "", fence.unwrap_err(), false)
+    # milestone_0043 P1-2: never open after the execute pair's own window (the same bound the slot expiry settles on), so an
+    # unopened slot's outcome never depends on whether a later prepare happened to arrive first.
+    val window = linux_service_remote_build_unopened_deadline_v4(execute.unwrap().approval.expires_at,
+        execute.unwrap().signed.grant.expires_at)
+    if host_local_context_v1(metadata.policy).grant_clock >= window:
+        val expired = host_remote_build_settle_no_workload_v4(owner.capacity.unwrap(), execute.unwrap().prepare.prepare.operation,
+            execute.unwrap().association, fence.unwrap(), "deadline")
+        owner.capacity = Some(expired.owner)
+        if expired.error != "": return linux_service_reply_v4(owner, "", "linux-host-remote-build-deadline;settle:" + expired.error, true)
+        return linux_service_reply_v4(owner, "", "linux-host-remote-build-deadline", true)
     val opened = host_remote_build_open_v4(owner.capacity.unwrap().journal, owner.remote_build_port.unwrap(),
         metadata.policy, metadata.configuration.controller_ref, owner.records.unwrap().binding.physical_host_id,
         execute.unwrap().association, fence.unwrap(), frame.unwrap().payload, host_local_context_v1(metadata.policy))
@@ -1285,7 +1352,7 @@ pub fn host_linux_service_remote_build_collect_v4(original: HostLinuxServiceCurr
     val reaped = linux_service_remote_build_reaped_v4(owner, frame.unwrap().operation_id)
     if reaped == "linux-host-remote-build-reaped-incomplete":
         # milestone_0039: a Host-signed reset-failure reply archived before the restart is answered byte-identically; no
-        # valid archive keeps the refusal below (the controller's generic wedged settle). A replay makes no effect.
+        # valid archive keeps the refusal below (the typed reaped refusal). A replay makes no effect.
         val stored = host_remote_build_reset_failure_stored_v4(owner.capacity.unwrap().journal, frame.unwrap().operation_id)
         if stored != "": return linux_service_reply_v4(owner, stored, "", false)
     if reaped != "": return linux_service_reply_v4(owner, "", reaped, false)

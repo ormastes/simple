@@ -1,6 +1,6 @@
 # Internal OpenSSH private-file codec. Private bytes never enter SDN or logs.
 use app.orchestrator.host_identity_public_v1.{HostPublicKeyV1, host_identity_public_parse_v1}
-use std.common.base_encoding.base64.{base64_decode_bytes, base64_encode_bytes}
+use std.common.base_encoding.base64.base64_encode_bytes
 use std.common.crypto.ed25519.{ed25519_pubkey, pure_ed25519_sign, pure_ed25519_verify}
 use std.common.crypto.sha256.sha256_text
 use std.common.crypto.secure_memory.secure_zero_u8_slots
@@ -63,11 +63,51 @@ struct HostIdentityEncodeRunV1:
 fn host_identity_encode_refuse_v1(code: text) -> HostIdentityEncodeRunV1:
     HostIdentityEncodeRunV1(outcome: Err(code), wiped: 0)
 
+# Standard padded base64 of `raw` wrapped at 70 columns (every line LF-terminated) between the OpenSSH armour lines,
+# written by index into one buffer sized up front: byte-identical to base64 text cut into 70-character lines, without
+# any text copy of the private body. Sextets are local integers, never a collection.
+fn host_identity_pem_encode_v1(raw: [u8]) -> [u8]:
+    val header = "-----BEGIN OPENSSH PRIVATE KEY-----\n".bytes()
+    val footer = "-----END OPENSSH PRIVATE KEY-----\n".bytes()
+    val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".bytes()
+    val encoded_len = (raw.len() + 2) / 3 * 4
+    val lines = (encoded_len + 69) / 70
+    var pem: [u8] = [0u8; header.len() + encoded_len + lines + footer.len()]
+    for index in 0..header.len(): pem[index] = header[index]
+    var at = header.len()
+    var column = 0
+    var group = 0
+    while group < raw.len():
+        val b0 = raw[group] as i64
+        val b1 = if group + 1 < raw.len(): raw[group + 1] as i64 else: 0
+        val b2 = if group + 2 < raw.len(): raw[group + 2] as i64 else: 0
+        for slot in 0..4:
+            var sextet = -1
+            if slot == 0: sextet = b0 >> 2
+            elif slot == 1: sextet = ((b0 & 3) << 4) | (b1 >> 4)
+            elif slot == 2 and group + 1 < raw.len(): sextet = ((b1 & 15) << 2) | (b2 >> 6)
+            elif slot == 3 and group + 2 < raw.len(): sextet = b2 & 63
+            pem[at] = if sextet < 0: 61u8 else: alphabet[sextet]
+            at = at + 1
+            column = column + 1
+            if column == 70:
+                pem[at] = 10u8
+                at = at + 1
+                column = 0
+        group = group + 3
+    if column > 0:
+        pem[at] = 10u8
+        at = at + 1
+    for index in 0..footer.len(): pem[at + index] = footer[index]
+    pem
+
 # This pure codec accepts explicit material for interoperability regression vectors; the CLI generator obtains
 # material only from the OS entropy owner. The OpenSSH private body (check words, seed + public key, label, padding)
-# and the raw container are each allocated once at their exact size and written by index: no concatenated secret
-# temporary and no push, so no reallocation can leave a partial private copy. Only public parts are concatenated.
-# Both owned buffers are wiped on the single exit after they exist. The caller owns `seed` and `check`.
+# and the raw container are each allocated once at their exact size and written by index: no push, so no
+# reallocation can leave a partial private copy. Only public parts are concatenated. The base64 body and the PEM
+# armour are written straight into ONE pre-sized [u8] (host_identity_pem_encode_v1): no base64 text and no growing
+# PEM text holds the seed. Body and raw are wiped on the single exit after they exist. The returned private file is
+# the caller's buffer (it IS the key file); the caller owns `seed` and `check`.
 pub fn host_identity_private_encode_run_v1(seed: [u8], public_key: [u8], check: [u8],
         label: text) -> HostIdentityEncodeRunV1:
     if seed.len() != 32 or public_key.len() != 32 or check.len() != 4 or label.byte_len() > 96:
@@ -101,23 +141,19 @@ pub fn host_identity_private_encode_run_v1(seed: [u8], public_key: [u8], check: 
     var raw: [u8] = [0u8; 98 + body_len]
     for index in 0..98: raw[index] = head[index]
     for index in 0..body_len: raw[98 + index] = body[index]
-    val encoded = base64_encode_bytes(raw)
-    var pem = "-----BEGIN OPENSSH PRIVATE KEY-----\n"
-    var offset = 0
-    while offset < encoded.len():
-        val end = if offset + 70 < encoded.len(): offset + 70 else: encoded.len()
-        pem = pem + encoded.substring(offset, end) + "\n"
-        offset = end
-    pem = pem + "-----END OPENSSH PRIVATE KEY-----\n"
-    # These reports cover the owned mutable buffers only; immutable text and
-    # crypto-internal temporaries do not have a RAM erasure guarantee.
+    var pem = host_identity_pem_encode_v1(raw)
+    # These reports cover the owned mutable buffers only; crypto-internal temporaries do not have a RAM erasure
+    # guarantee (bug doc host_identity_ed25519_std_temporaries_unwiped_2026-11-19).
     val body_wipe = secure_zero_u8_slots(body)
     val raw_wipe = secure_zero_u8_slots(raw)
     var wiped = 0
     if body_wipe.verified(): wiped = wiped + 1
     if raw_wipe.verified(): wiped = wiped + 1
-    if wiped != 2: return HostIdentityEncodeRunV1(outcome: Err("host-identity-key-buffer-wipe"), wiped: wiped)
-    HostIdentityEncodeRunV1(outcome: Ok(pem.bytes()), wiped: wiped)
+    if wiped != 2:
+        # The private file is never handed out on a refusal; its own wipe result cannot change the refusal.
+        val _pem_wipe = secure_zero_u8_slots(pem)
+        return HostIdentityEncodeRunV1(outcome: Err("host-identity-key-buffer-wipe"), wiped: wiped)
+    HostIdentityEncodeRunV1(outcome: Ok(pem), wiped: wiped)
 
 pub fn host_identity_private_encode_v1(seed: [u8], public_key: [u8], check: [u8],
         label: text) -> Result<[u8], text>:
@@ -125,7 +161,8 @@ pub fn host_identity_private_encode_v1(seed: [u8], public_key: [u8], check: [u8]
 
 struct HostIdentityPrivateRunV1:
     outcome: Result<HostIdentityPrivateUseV1, text>
-    # Count of owned private buffers (decoded body, seed slice) whose wipe was verified.
+    # Count of the decoded body and seed slice wipes that were verified. Decoder refusals report 0: the decoder wipes
+    # its own sextet and output buffers internally and reports a failed wipe as host-identity-key-buffer-wipe.
     wiped: i64
 
 fn host_identity_b64_value_v1(byte: u8) -> i64:
@@ -138,9 +175,13 @@ fn host_identity_b64_value_v1(byte: u8) -> i64:
     -1
 
 # Strict canonical base64 over the armour body, read straight from the [u8] (no text copy of the private
-# section exists): lines of at most 70 characters, padding only in the final quad, zero leftover bits. The decoded
+# section exists). Canonical layout (REVIEW_B P3-7): every line is exactly 70 characters except a non-empty last line,
+# and every line, the last included, ends in LF (the OpenSSH ssh-keygen layout; a file wrapped at another width, e.g.
+# 64-column PEM writers, is refused by contract: this codec's files and ssh-keygen's 70-column layout decode); padding
+# only in the final quad, zero leftover bits. The decoded
 # length follows from the character count and padding, so the output is allocated once and written by index (no
-# push, hence no reallocation leaving a partial private copy). Returns the decoded bytes, or [] after wiping.
+# push, hence no reallocation leaving a partial private copy). The four pending sextets live in ONE 4-byte [u8] that
+# is reset in place after every quad and wiped (and the wipe checked) on every exit (REVIEW_B P2-2, P3-6).
 fn host_identity_pem_decoded_len_v1(file: [u8], start: i64, end: i64) -> i64:
     var chars = 0
     var pads = 0
@@ -150,26 +191,41 @@ fn host_identity_pem_decoded_len_v1(file: [u8], start: i64, end: i64) -> i64:
     if chars == 0 or chars % 4 != 0 or pads > 2: return 0
     chars / 4 * 3 - pads
 
-fn host_identity_pem_decode_v1(file: [u8], start: i64, end: i64) -> [u8]:
+struct HostIdentityPemDecodedV1:
+    # The decoded body on success; [] on any refusal (every decoder buffer was then wiped, or `error` says it was not).
+    raw: [u8]
+    # "" on success, else `host-identity-private-format` or `host-identity-key-buffer-wipe`.
+    error: text
+
+fn host_identity_pem_refused_v1(mut out: [u8], mut values: [u8]) -> HostIdentityPemDecodedV1:
+    val out_wiped = out.len() == 0 or secure_zero_u8_slots(out).verified()
+    val values_wiped = secure_zero_u8_slots(values).verified()
+    if not out_wiped or not values_wiped: return HostIdentityPemDecodedV1(raw: [], error: "host-identity-key-buffer-wipe")
+    HostIdentityPemDecodedV1(raw: [], error: "host-identity-private-format")
+
+fn host_identity_pem_decode_v1(file: [u8], start: i64, end: i64) -> HostIdentityPemDecodedV1:
+    var values: [u8] = [0u8; 4]
     val out_len = host_identity_pem_decoded_len_v1(file, start, end)
-    if out_len <= 0: return []
+    if out_len <= 0: return host_identity_pem_refused_v1([], values)
     var out: [u8] = [0u8; out_len]
     var written = 0
-    var values = [0, 0, 0, 0]
     var count = 0
     var pad = 0
     var ended = false
     var line = 0
+    var last_line = false
     var failed = false
     var index = start
     while index < end and not failed:
         val byte = file[index]
         index = index + 1
         if byte == 10u8:
+            if line == 0 or last_line: failed = true
+            elif line < 70: last_line = true
             line = 0
         else:
             line = line + 1
-            if line > 70 or ended: failed = true
+            if line > 70 or ended or last_line: failed = true
             elif byte == 61u8:
                 if count < 2: failed = true
                 else:
@@ -179,30 +235,34 @@ fn host_identity_pem_decode_v1(file: [u8], start: i64, end: i64) -> [u8]:
                 val value = host_identity_b64_value_v1(byte)
                 if value < 0 or pad > 0: failed = true
                 else:
-                    values[count] = value
+                    values[count] = value as u8
                     count = count + 1
             if not failed and count == 4:
+                val v0 = values[0] as i64
+                val v1 = values[1] as i64
+                val v2 = values[2] as i64
+                val v3 = values[3] as i64
                 if written + 3 - pad > out_len: failed = true
                 else:
-                    out[written] = ((values[0] << 2) | (values[1] >> 4)) as u8
+                    out[written] = ((v0 << 2) | (v1 >> 4)) as u8
                     written = written + 1
-                    if pad == 2 and (values[1] & 15) != 0: failed = true
+                    if pad == 2 and (v1 & 15) != 0: failed = true
                     if pad < 2:
-                        out[written] = (((values[1] & 15) << 4) | (values[2] >> 2)) as u8
+                        out[written] = (((v1 & 15) << 4) | (v2 >> 2)) as u8
                         written = written + 1
-                    if pad == 1 and (values[2] & 3) != 0: failed = true
+                    if pad == 1 and (v2 & 3) != 0: failed = true
                     if pad == 0:
-                        out[written] = (((values[2] & 3) << 6) | values[3]) as u8
+                        out[written] = (((v2 & 3) << 6) | v3) as u8
                         written = written + 1
                     if pad > 0: ended = true
                 count = 0
                 pad = 0
-                values = [0, 0, 0, 0]
-    if count != 0 or written != out_len: failed = true
-    if failed:
-        secure_zero_u8_slots(out)
-        return []
-    out
+                for slot in 0..4: values[slot] = 0u8
+    if count != 0 or written != out_len or line != 0: failed = true
+    if failed: return host_identity_pem_refused_v1(out, values)
+    if not secure_zero_u8_slots(values).verified():
+        return host_identity_pem_refused_v1(out, values)
+    HostIdentityPemDecodedV1(raw: out, error: "")
 
 fn host_identity_private_ascii_v1(prefix: [u8], file: [u8], at: i64) -> bool:
     if at < 0 or at + prefix.len() > file.len(): return false
@@ -284,9 +344,10 @@ fn host_identity_private_run_v1(private_file: [u8], sign: bool, required_public_
     if (not host_identity_private_ascii_v1(header, private_file, 0) or
             not host_identity_private_ascii_v1(footer, private_file, private_file.len() - footer.len())):
         return host_identity_private_refuse_v1("host-identity-private-format", 0)
-    var raw = host_identity_pem_decode_v1(private_file, header.len(), private_file.len() - footer.len())
+    val decoded = host_identity_pem_decode_v1(private_file, header.len(), private_file.len() - footer.len())
+    if decoded.error != "": return host_identity_private_refuse_v1(decoded.error, 0)
+    var raw = decoded.raw
     if raw.len() < 234 or raw.len() > 512:
-        if raw.len() == 0: return host_identity_private_refuse_v1("host-identity-private-format", 0)
         val short_wipe = secure_zero_u8_slots(raw)
         if not short_wipe.verified(): return host_identity_private_refuse_v1("host-identity-key-buffer-wipe", 0)
         return host_identity_private_refuse_v1("host-identity-private-format", 1)
@@ -397,7 +458,8 @@ fn host_identity_generated_public_v1(derived_public: [u8]) -> Result<HostPublicK
 
 # Key generation from explicit entropy hex (the OS entropy owner supplies it in production). The entropy bytes, seed
 # slice and check slice are each allocated once, never grown, and all wiped on the single exit after they exist
-# (including when a later step refuses); a failed wipe overrides the outcome.
+# (including when a later step refuses); a failed wipe overrides the outcome. The `entropy` hex text itself is an
+# immutable plaintext copy of the seed and check that this function cannot erase (REVIEW_B P2-3).
 pub fn host_identity_key_generate_from_entropy_run_v1(entropy: text, label: text) -> HostIdentityGenerateRunV1:
     var bytes = host_identity_entropy_bytes_v1(entropy)
     if bytes.len() != 36: return host_identity_generate_refuse_v1("host-identity-entropy-unavailable", 0)
@@ -413,18 +475,29 @@ pub fn host_identity_key_generate_from_entropy_run_v1(entropy: text, label: text
     if seed_wipe.verified(): wiped = wiped + 1
     if check_wipe.verified(): wiped = wiped + 1
     if bytes_wipe.verified(): wiped = wiped + 1
+    # A refusal never hands out the private file: it is wiped here (its wipe result cannot change the refusal), and a
+    # failed seed/check/entropy wipe still overrides every other outcome.
     if not seed_wipe.verified() or not check_wipe.verified() or not bytes_wipe.verified():
+        if encoded.outcome.is_ok():
+            var dropped = encoded.outcome.unwrap()
+            val _dropped_wipe = secure_zero_u8_slots(dropped)
         return host_identity_generate_refuse_v1("host-identity-key-buffer-wipe", wiped)
     if encoded.outcome.is_err(): return host_identity_generate_refuse_v1(encoded.outcome.unwrap_err(), wiped)
-    if public_result.is_err(): return host_identity_generate_refuse_v1(public_result.unwrap_err(), wiped)
+    var private_file = encoded.outcome.unwrap()
+    if public_result.is_err():
+        val _file_wipe = secure_zero_u8_slots(private_file)
+        return host_identity_generate_refuse_v1(public_result.unwrap_err(), wiped)
     HostIdentityGenerateRunV1(
-        outcome: Ok(HostIdentityGeneratedKeyV1(public_key: public_result.unwrap(), private_file: encoded.outcome.unwrap(),
+        outcome: Ok(HostIdentityGeneratedKeyV1(public_key: public_result.unwrap(), private_file: private_file,
             label: label)),
         wiped: wiped)
 
 # Caller must admit/retain its private store BEFORE calling this function.
 # Name/time affect only a bounded public comment; the seed/check come from the
 # existing checked OS CSPRNG owner, never from text, time, hashes or a password.
+# Residue stated plainly (REVIEW_B P2-3): that owner's only API returns the 36 entropy bytes as immutable hex TEXT,
+# so `entropy` is a plaintext copy of the seed and check that cannot be wiped. Removing it needs a bytes-returning
+# entropy extern (a runtime change); tracked in host_identity_ed25519_std_temporaries_unwiped_2026-11-19.
 pub fn host_identity_key_generate_v1(name: Option<text>, unix_micros: i64) -> Result<HostIdentityGeneratedKeyV1, text>:
     val label = host_identity_generation_label_v1(name, unix_micros)?
     val entropy = sosix_random_hex(36)

@@ -21,6 +21,9 @@
 # Exit 0 / 1 / 2. --selftest runs regression fixtures first and is fatal.
 # Explicit [u8] parameters/local bindings have byte-count len(); their simple
 # receiver uses are excluded, with lexical shadowing and per-function reset.
+# A dotted root.field receiver is excluded only when root is a plain binding
+# with a declared struct type (parameter, `val x: T`, `val x = T(...)`) and
+# that struct, declared in the file or imported by name, gives field [u8].
 #
 # Rule 4 (len()-bounded byte scan, bug
 # doc/08_tracking/bug/len_bounded_byte_scanners_non_ascii_2026_11_14.md):
@@ -37,23 +40,72 @@ set -u
 scan_file() {
   # prints "file:line receiver" for each byte_len() line whose enclosing fn
   # also applies `recv[` ; prints "FNCOUNT <n>" on stderr-free channel last
+  # The field map can only change a verdict when the file has a dotted len()
+  # AND a call that makes a len() a byte width (rules 2 and 4).
   fm=""
-  if grep -Eq '[.][ \t]*[A-Za-z_][A-Za-z_0-9]*[.]len\(\)' "$1"; then fm=$(mktemp); build_fieldmap "$1" > "$fm"; fi
+  if grep -Eq '[.][ \t]*[A-Za-z_][A-Za-z_0-9]*[.]len\(\)' "$1" &&
+      grep -Eq '(byte_len|substring|slice|byte_at|index_of|find|char_code_at)\(' "$1"; then
+    fm="$work/fm"; build_fieldmap "$1" > "$fm"
+  fi
   awk -v F="$1" -v FM="$fm" '
     BEGIN {
-      # Struct field types ("name<TAB>u8|other"); see build_fieldmap.
+      # Struct field types ("Struct<TAB>field<TAB>u8|other"); see build_fieldmap.
       if (FM != "") {
         while ((getline fline < FM) > 0) {
           split(fline, fpart, "\t")
-          if (fpart[2] == "u8") fu8[fpart[1]] = 1; else foth[fpart[1]] = 1
+          if (fpart[3] == "u8") fu8[fpart[1], fpart[2]] = 1; else foth[fpart[1], fpart[2]] = 1
         }
         close(FM)
       }
     }
-    function field_bytes(name) {
-      # A dotted receiver counts bytes only when its field name is declared
-      # [u8] and never declared with another type: ambiguous names stay flagged.
-      return (name in fu8) && !(name in foth)
+    function field_bytes(type, name) {
+      # root.name counts bytes only when root has a declared struct type whose
+      # visible declaration(s) give `name` the type [u8]. A field name alone
+      # proves nothing: unknown, unresolved or conflicting types stay flagged.
+      return type != "" && ((type, name) in fu8) && !((type, name) in foth) && !((type, "*") in foth)
+    }
+    function pattern_text(text, stop,   i, c, depth, out) {
+      # A binding pattern up to its first top-level stop character. `label:`
+      # inside parentheses names a field (`Wrap(doc: d)` binds d, not doc).
+      depth = 0; out = ""
+      for (i = 1; i <= length(text); i++) {
+        c = substr(text, i, 1)
+        if (c == "(" || c == "[") depth++
+        else if ((c == ")" || c == "]") && depth > 0) depth--
+        else if (depth == 0 && index(stop, c) > 0) break
+        out = out c
+      }
+      gsub(/[A-Za-z_][A-Za-z_0-9]*[ \t]*:/, " ", out)
+      return out
+    }
+    function header_ids(text,   out) {
+      out = ""
+      while (match(text, /[A-Za-z_][A-Za-z_0-9]*/)) {
+        out = out substr(text, RSTART, RLENGTH) " "
+        text = substr(text, RSTART + RLENGTH)
+      }
+      return out
+    }
+    function header_binds(text,   declaration, names) {
+      # Names a for/case/if-val/while-val header binds on its own line: their
+      # type is not known here, so they never count bytes on this line.
+      names = " "
+      if (text ~ /^[ \t]*(for|case)[ \t]+/) {
+        declaration = text
+        sub(/^[ \t]*(for|case)[ \t]+/, "", declaration)
+        sub(/[ \t]+in[ \t].*/, "", declaration)
+        names = names header_ids(pattern_text(declaration, ":"))
+      }
+      if (match(text, /(^|[^A-Za-z_0-9])(if|elif|while)[ \t]+(val|var)[ \t]+/)) {
+        declaration = pattern_text(substr(text, RSTART + RLENGTH), "=:")
+        names = names header_ids(declaration)
+      }
+      return names
+    }
+    function binding_of(name,   i) {
+      if (header_lambda || index(header_names, " " name " ") > 0) return 0
+      for (i = binding_count; i > 0; i--) if (binding_name[i] == name) return i
+      return 0
     }
     function binding_code(text,   i, c, quote, escaped, result) {
       # Binding keywords/backslashes inside quoted values are not syntax.
@@ -71,34 +123,63 @@ scan_file() {
       }
       return result
     }
-    function bind_type(name, depth, byte_array) {
+    function bind_type(name, depth, byte_array, type) {
       binding_count++
       binding_name[binding_count] = name
       binding_depth[binding_count] = depth
       binding_byte[binding_count] = byte_array
+      binding_type[binding_count] = type
     }
-    function byte_receiver(text, start, name,   i, previous, prefix) {
+    function byte_receiver(text, start, name,   saved_start, saved_length, result) {
+      # Callers keep using RSTART/RLENGTH of their own match().
+      saved_start = RSTART; saved_length = RLENGTH
+      result = receiver_counts_bytes(text, start, name)
+      RSTART = saved_start; RLENGTH = saved_length
+      return result
+    }
+    function receiver_counts_bytes(text, start, name,   i, previous, prefix) {
       # Inline conditional/pattern/lambda bodies may shadow on this line.
       # Do not mistake object.bytes.len() for a local parameter named bytes;
-      # a dotted receiver is typed only by its declared struct field name.
+      # a dotted receiver root.name is typed by the declared struct of root.
       previous = start > 1 ? substr(text, start - 1, 1) : ""
-      if (previous == ".") return field_bytes(name)
       if (previous ~ /[A-Za-z_0-9]/) return 0
       prefix = substr(text, 1, start - 1)
       sub(/[ \t]+$/, "", prefix)
-      if (substr(prefix, length(prefix), 1) == ".") return field_bytes(name)
-      if (binding_header_here) return 0
-      for (i = binding_count; i > 0; i--)
-        if (binding_name[i] == name) return binding_byte[i]
-      return 0
+      if (substr(prefix, length(prefix), 1) == ".") {
+        prefix = substr(prefix, 1, length(prefix) - 1)
+        # Only a plain binding root: not a call result, index or a.b chain.
+        if (!match(prefix, /[A-Za-z_][A-Za-z_0-9]*$/)) return 0
+        if (RSTART > 1 && substr(prefix, RSTART - 1, 1) ~ /[.A-Za-z_0-9]/) return 0
+        i = binding_of(substr(prefix, RSTART))
+        return i > 0 && field_bytes(binding_type[i], name)
+      }
+      i = binding_of(name)
+      return i > 0 && binding_byte[i]
     }
-    function byte_annotations(text, depth,   item, name) {
-      while (match(text, /[A-Za-z_][A-Za-z_0-9]*[ \t]*:[ \t]*\[[ \t]*u8[ \t]*\]([ \t]*[,=)]|[ \t]*$)/)) {
+    function byte_annotations(text, depth,   item, name, type) {
+      # `name: [u8]` grants byte len(); `name: Struct` records the type a
+      # dotted receiver needs. Generic or other types record nothing.
+      while (match(text, /[A-Za-z_][A-Za-z_0-9]*[ \t]*:[ \t]*(\[[ \t]*u8[ \t]*\]|[A-Z][A-Za-z_0-9]*)([ \t]*[,=)]|[ \t]*$)/)) {
         item = substr(text, RSTART, RLENGTH)
         name = item; sub(/[ \t]*:.*/, "", name)
-        bind_type(name, depth, 1)
+        type = item; sub(/^[^:]*:[ \t]*/, "", type); sub(/[ \t,=)]*$/, "", type)
+        if (type ~ /^\[/) bind_type(name, depth, 1, "")
+        else bind_type(name, depth, 0, type)
         text = substr(text, RSTART + RLENGTH)
       }
+    }
+    function literal_type(init,   type, i, c, depth) {
+      # `T(...)` with nothing after its closing paren is a struct literal of T.
+      if (!match(init, /^[ \t]*[A-Z][A-Za-z_0-9]*[ \t]*\(/)) return ""
+      type = substr(init, RSTART, RLENGTH); sub(/^[ \t]*/, "", type); sub(/[ \t]*\($/, "", type)
+      depth = 0
+      for (i = RSTART + RLENGTH - 1; i <= length(init); i++) {
+        c = substr(init, i, 1)
+        if (c == "(") depth++
+        else if (c == ")") { depth--; if (depth == 0) break }
+      }
+      if (depth != 0 || substr(init, i + 1) !~ /^[ \t]*$/) return ""
+      return type
     }
     function signature_types(text, depth,   i, c, part) {
       # Only the parameter list, including continued lines, grants a type.
@@ -122,16 +203,22 @@ scan_file() {
       }
       byte_annotations(part, depth + 1)
     }
-    function local_types(text, depth,   declaration, name, explicit_byte, i, prior) {
+    function local_types(text, depth,   declaration, name, explicit_byte, i, prior, init, type) {
       # A new local binding shadows a parameter even when its type is inferred.
       # Install after scanning its initializer, where an outer name may occur.
       if (text ~ /^[ \t]*(val|var)[ \t]+/) {
         declaration = text
         sub(/^[ \t]*(val|var)[ \t]+/, "", declaration)
+        init = declaration
         sub(/=.*/, "", declaration)
-        explicit_byte = declaration ~ /^[A-Za-z_][A-Za-z_0-9]*[ \t]*:[ \t]*\[[ \t]*u8[ \t]*\][ \t]*$/
+        type = ""
+        if (sub(/^[^=]*=/, "", init) && declaration ~ /^[A-Za-z_][A-Za-z_0-9]*[ \t]*$/) type = literal_type(init)
+        explicit_byte = declaration ~ /^[A-Za-z_][A-Za-z_0-9]*[ \t]*:[ \t]*(\[[ \t]*u8[ \t]*\]|[A-Z][A-Za-z_0-9]*)[ \t]*$/
         if (explicit_byte) byte_annotations(declaration, depth)
-        else {
+        else if (type != "") {
+          name = declaration; sub(/[ \t]*$/, "", name)
+          bind_type(name, depth, 0, type)
+        } else {
           # Includes tuple destructuring; unknown types never grant exemption.
           sub(/:.*/, "", declaration)
           while (match(declaration, /[A-Za-z_][A-Za-z_0-9]*/)) {
@@ -143,7 +230,8 @@ scan_file() {
       } else if (text ~ /^[ \t]*for[ \t]+/ || text ~ /^[ \t]*case[ \t]+/) {
         declaration = text
         sub(/^[ \t]*(for|case)[ \t]+/, "", declaration)
-        sub(/[ \t]+in[ \t].*|:.*/, "", declaration)
+        sub(/[ \t]+in[ \t].*/, "", declaration)
+        declaration = pattern_text(declaration, ":")
         while (match(declaration, /[A-Za-z_][A-Za-z_0-9]*/)) {
           name = substr(declaration, RSTART, RLENGTH)
           bind_type(name, depth + 1, 0)
@@ -152,8 +240,7 @@ scan_file() {
       }
       # Conditional bindings are body-local, including expression/inline forms.
       if (match(text, /(^|[^A-Za-z_0-9])(if|elif|while)[ \t]+(val|var)[ \t]+/)) {
-        declaration = substr(text, RSTART + RLENGTH)
-        sub(/[=:].*/, "", declaration)
+        declaration = pattern_text(substr(text, RSTART + RLENGTH), "=:")
         while (match(declaration, /[A-Za-z_][A-Za-z_0-9]*/)) {
           name = substr(declaration, RSTART, RLENGTH)
           bind_type(name, depth + 1, 0)
@@ -165,7 +252,7 @@ scan_file() {
       if (index(text, "\\") > 0) {
         prior = binding_count
         for (i = 1; i <= prior; i++)
-          if (binding_byte[i]) bind_type(binding_name[i], depth + 1, 0)
+          if (binding_byte[i] || binding_type[i] != "") bind_type(binding_name[i], depth + 1, 0, "")
       }
     }
     function flush(   r, l, x, scanned) {
@@ -200,7 +287,7 @@ scan_file() {
       if (!fnbl) for (r in lb) if ((r) in bop) print "R4 " F " " fname " " r
       delete bl; delete ix; delete bf; delete argref; delete lu; delete alias; delete sameline
       delete lb; delete bop; fnbl = 0
-      delete binding_name; delete binding_depth; delete binding_byte; binding_count = 0
+      delete binding_name; delete binding_depth; delete binding_byte; delete binding_type; binding_count = 0
       signature_active = 0; signature_started = 0; signature_depth = 0
       signature_quote = 0; signature_escape = 0
     }
@@ -224,8 +311,8 @@ scan_file() {
       if (!signature_active)
         while (binding_count > 0 && binding_depth[binding_count] > indent) binding_count--
       binding_line = binding_code(line)
-      binding_header_here = binding_line ~ /^[ \t]*(for|case)[ \t]+/ ||
-        binding_line ~ /(^|[^A-Za-z_0-9])(if|elif|while)[ \t]+(val|var)[ \t]+/ || index(binding_line, "\\") > 0
+      header_names = header_binds(binding_line)
+      header_lambda = index(binding_line, "\\") > 0
       if (signature_active) signature_types(line, signature_indent)
       if (line ~ /\.byte_len\(\)/) fnbl = 1
       tmp = line
@@ -308,42 +395,48 @@ scan_file() {
     }
     END { flush(); printf "FNCOUNT %d\n", fncount }
   ' "$1"
-  [ -z "$fm" ] || rm -f "$fm"
   return 0
 }
 
-# build_fieldmap ROOT... — pre-pass: "name<TAB>u8|other" for every field
-# declared in a struct/class/mixin body under the scan set (or, in committed
-# mode, at the range tip). Unreadable sources yield an empty map (fail closed).
-fieldmap_awk='
-  /^[ \t]*$/ { next }
-  /^[ \t]*#/ { next }
-  {
-    ind = match($0, /[^ \t]/) - 1
-    if (ind == 0) {
-      inblock = ($0 ~ /^(pub |export )?(struct|class|mixin)[ \t]+[A-Za-z_]/); bind = -1
-      if (inblock && KEEP != "" && KEEP != "*") {
-        sname = $0; sub(/^(pub |export )?(struct|class|mixin)[ \t]+/, "", sname); sub(/[^A-Za-z_0-9].*$/, "", sname)
-        if (index(" " KEEP " ", " " sname " ") == 0) inblock = 0
+# build_fieldmap FILE — "Struct<TAB>field<TAB>u8|other" for every field
+# declared in a struct/class/mixin body of FILE and of the structs FILE
+# imports BY NAME (`use std.*` -> src/lib, `app.*`/`compiler.*` -> src/; the
+# module itself, and its parent when the last segment is an imported item).
+# Each imported source is parsed once per run (memoised under $memo) and read
+# at the range tip in committed mode. Fail closed: an unreadable import
+# contributes nothing, and an imported Capitalised name that no resolved
+# source declares is emitted as "Name<TAB>*<TAB>other", which poisons every
+# field of that type (scan_file's field_bytes), so a local same-named struct
+# can never vouch for it.
+build_fieldmap() {
+  awk -v MEMO="$memo" -v BASE="$use_base" -v TIP="$scope_tip" '
+    function fm_feed(line, out,   ind, name, ty) {
+      if (line ~ /^[ \t]*$/ || line ~ /^[ \t]*#/) return
+      ind = match(line, /[^ \t]/) - 1
+      if (ind == 0) {
+        inblock = (line ~ /^(pub |export )?(struct|class|mixin)[ \t]+[A-Za-z_]/); bind = -1
+        if (inblock) {
+          sname = line; sub(/^(pub |export )?(struct|class|mixin)[ \t]+/, "", sname); sub(/[^A-Za-z_0-9].*$/, "", sname)
+        }
+        return
       }
-      next
+      if (!inblock) return
+      if (bind < 0) bind = ind
+      if (ind != bind) return
+      sub(/#.*$/, "", line)
+      sub(/^[ \t]+(pub[ \t]+)?((val|var)[ \t]+)?/, "", line)
+      if (line !~ /^[A-Za-z_][A-Za-z_0-9]*[ \t]*:[ \t]*[^ \t]/) return
+      name = line; sub(/[ \t]*:.*$/, "", name)
+      ty = line; sub(/^[^:]*:[ \t]*/, "", ty); sub(/[ \t]*=.*$/, "", ty); sub(/[ \t]+$/, "", ty)
+      ty = sname "\t" name "\t" (ty ~ /^\[[ \t]*u8[ \t]*\]$/ ? "u8" : "other")
+      if (out == "") print ty; else print ty > out
     }
-    if (!inblock) next
-    if (bind < 0) bind = ind
-    if (ind != bind) next
-    line = $0; sub(/#.*$/, "", line)
-    sub(/^[ \t]+(pub[ \t]+)?((val|var)[ \t]+)?/, "", line)
-    if (line !~ /^[A-Za-z_][A-Za-z_0-9]*[ \t]*:[ \t]*[^ \t]/) next
-    name = line; sub(/[ \t]*:.*$/, "", name)
-    ty = line; sub(/^[^:]*:[ \t]*/, "", ty); sub(/[ \t]*=.*$/, "", ty); sub(/[ \t]+$/, "", ty)
-    print name "\t" (ty ~ /^\[[ \t]*u8[ \t]*\]$/ ? "u8" : "other")
-  }'
-# use_paths FILE — "<repo-relative .spl path> <imported items|*>" for FILE's
-# `use` imports (std.* -> src/lib, app.*/compiler.* -> src/): the module
-# itself, and its parent when the last segment is an imported item. Only the
-# named items' structs contribute fields (see fieldmap_awk KEEP).
-use_paths() {
-  awk '
+    function quoted(word,   q) {
+      q = sprintf("%c", 39); gsub(q, q "\\" q q, word)
+      return q word q
+    }
+    function add_use(path, items) { nuse++; use_path[nuse] = path; use_items[nuse] = items }
+    { fm_feed($0, "") }
     /^[ \t]*use[ \t]+/ || collecting {
       line = $0; sub(/#.*$/, "", line)
       if (!collecting) sub(/^[ \t]*use[ \t]+/, "", line)
@@ -359,23 +452,41 @@ use_paths() {
       if (mod ~ /^std\//) sub(/^std\//, "src/lib/", mod)
       else if (mod ~ /^(app|compiler)\//) mod = "src/" mod
       else next
-      print mod ".spl " items
+      add_use(mod ".spl", items)
       n = split(mod, seg, "/"); q = seg[1]
       for (i = 2; i < n; i++) q = q "/" seg[i]
-      print q ".spl " seg[n]
+      add_use(q ".spl", seg[n])
+    }
+    END {
+      for (u = 1; u <= nuse; u++) {
+        cache = use_path[u]; gsub(/\//, "%", cache); cache = MEMO "/" cache
+        if ((getline row < cache) < 0) {
+          printf "" > cache
+          inblock = 0; bind = -1
+          if (TIP != "") {
+            cmd = "git -C " quoted(BASE) " show " quoted(TIP ":" use_path[u]) " 2>/dev/null"
+            while ((cmd | getline row) > 0) fm_feed(row, cache)
+            close(cmd)
+          } else {
+            src = BASE "/" use_path[u]
+            while ((getline row < src) > 0) fm_feed(row, cache)
+            close(src)
+          }
+        }
+        close(cache)
+        delete keep; all = (use_items[u] == "*")
+        if (!all) {
+          k = split(use_items[u], parts, /[ \t]+/)
+          for (i = 1; i <= k; i++) if (parts[i] ~ /^[A-Z]/) { keep[parts[i]] = 1; wanted[parts[i]] = 1 }
+        }
+        while ((getline row < cache) > 0) {
+          split(row, cell, "\t")
+          if (all || (cell[1] in keep)) { print row; found[cell[1]] = 1 }
+        }
+        close(cache)
+      }
+      for (t in wanted) if (!(t in found)) print t "\t*\tother"
     }' "$1"
-}
-read_source() {
-  if [ -n "$scope_tip" ]; then git -C "$use_base" show "$scope_tip:$1" 2>/dev/null
-  elif [ -f "$use_base/$1" ]; then cat "$use_base/$1"; fi
-  echo
-}
-# build_fieldmap FILE — field map of FILE plus the structs it imports by name.
-# Fail closed: an unresolvable import contributes nothing.
-build_fieldmap() {
-  { awk "$fieldmap_awk" "$1"
-    use_paths "$1" | while read -r up items; do read_source "$up" | awk -v KEEP="$items" "$fieldmap_awk"; done
-  } | sort -u
 }
 
 # cmp_set HITS BASELINE LABEL — ratchet one hit set against its baseline.
@@ -398,8 +509,9 @@ cmp_set() {
 }
 
 run_scan() {
+  rm -rf "$memo"; mkdir "$memo"
   if [ -n "$scope_files" ] && [ -n "$scope_tip" ]; then
-    sc=$(mktemp -d)
+    sc="$work/sc"; rm -rf "$sc"; mkdir "$sc"
     while read -r f; do mkdir -p "$sc/$(dirname "$f")"; git show "$scope_tip:$f" > "$sc/$f" 2>/dev/null || rm -f "$sc/$f"; done < "$scope_files"
     (cd "$sc" && while read -r f; do [ -f "$f" ] && scan_file "$f"; done) < "$scope_files"
     rm -rf "$sc"; echo "FNCOUNT 0"
@@ -441,7 +553,12 @@ run_scan() {
 }
 
 tmp_out=$(mktemp); tmp_r4=$(mktemp); tmp_base=$(mktemp); tmp_mix=$(mktemp); scope_files=""; use_base=$(pwd); scope_tip=""
-trap 'rm -f "$tmp_out" "$tmp_r4" "$tmp_base" "$tmp_mix" ${scope_files:+"$scope_files"}; rm -rf "${fx:-}"' EXIT
+# $work holds the per-file field map, the import memo and the committed-mode
+# scan copy; INT/TERM (the push-tier timeout) exit through the EXIT trap.
+work=$(mktemp -d); memo="$work/memo"
+trap 'rm -f "$tmp_out" "$tmp_r4" "$tmp_base" "$tmp_mix" ${scope_files:+"$scope_files"}; rm -rf "$work" "${fx:-}"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 baseline="${TEXT_LEN_BASELINE:-scripts/check/text_len_bounded_byte_scan_baseline.txt}"
 mix_baseline="${TEXT_LEN_MIX_BASELINE:-scripts/check/text_len_unit_mix_baseline.txt}"
 gen_baseline=0
@@ -675,11 +792,55 @@ FIXTURE
   v=$(run_scan "$fx/j"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: ambiguous field name must FAIL, got rc=$rc: $v"; exit 2; }
   printf '%s\n' "$v" | grep -q 'ambiguous.spl data (len() as byte width)' || { echo "selftest: ambiguous fixture must name data: $v"; exit 2; }
   printf 'fn lost(a: text, s: Streams) -> bool:\n    a.byte_len() == s.stdout.len()\n' > "$fx/k/src/app/k/noimport.spl"
+  printf 'pub struct Frames:\n    pub payload: [u8]\n' > "$fx/k/src/app/k/frames.spl"
+  printf 'use app.k.frames.{\n    Frames\n}\n\nfn ok(a: text, f: Frames) -> bool:\n    a.byte_len() == f.payload.len()\n' > "$fx/k/src/app/k/multi.spl"
   v=$(use_base="$fx/k"; run_scan "$fx/k/src"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: cross-file [u8] field must PASS and undeclared field must FAIL, got rc=$rc: $v"; exit 2; }
   printf '%s\n' "$v" | grep -q 'use.spl mystery (len() as byte width)' || { echo "selftest: undeclared field must be named: $v"; exit 2; }
   printf '%s\n' "$v" | grep -q 'noimport.spl stdout (len() as byte width)' || { echo "selftest: [u8] field from a non-imported file must stay flagged: $v"; exit 2; }
   printf '%s\n' "$v" | grep -q 'k/use.spl stdout' && { echo "selftest: cross-file [u8] field wrongly flagged: $v"; exit 2; }
-  echo "selftest: existing ratchets and 26 typed-binding cases OK"
+  printf '%s\n' "$v" | grep -q 'k/multi.spl' && { echo "selftest: multi-line use of a pub [u8] field wrongly flagged: $v"; exit 2; }
+  # REVIEW_C P1-1: a field name is not a type. A same-named [u8] field elsewhere
+  # in the map must not exempt a receiver whose type the gate cannot see: a
+  # package import, a call result, an unannotated or chained root all FAIL.
+  mkdir -p "$fx/l/src/lib/pkg" "$fx/l/src/app/m"
+  printf 'struct Doc:\n    data: text\n' > "$fx/l/src/lib/pkg/__init__.spl"
+  printf 'struct Doc:\n    data: text\nfn load() -> Doc:\n    Doc(data: "x")\n' > "$fx/l/src/app/m/docs.spl"
+  printf 'use std.pkg.{Doc}\n\nstruct Raw:\n    data: [u8]\n\nfn bad(a: text, d: Doc) -> bool:\n    a.byte_len() == d.data.len()\n' > "$fx/l/src/app/m/case1.spl"
+  printf 'use app.m.docs.{load}\n\nstruct Raw:\n    data: [u8]\n\nfn bad(a: text) -> bool:\n    a.byte_len() == load().data.len()\n' > "$fx/l/src/app/m/case2.spl"
+  printf 'struct Raw:\n    data: [u8]\n\nfn bad(a: text, d: Doc) -> text:\n    a.substring(0, d.data.len())\n' > "$fx/l/src/app/m/case4.spl"
+  printf 'struct Raw:\n    data: [u8]\n\nfn untyped(a: text, items: [Raw]) -> bool:\n    for r in items:\n        if a.byte_len() == r.data.len(): return true\n    false\n' > "$fx/l/src/app/m/case5.spl"
+  printf 'struct Raw:\n    data: [u8]\n\nstruct Wrap:\n    raw: Raw\n\nfn chained(a: text, w: Wrap) -> bool:\n    a.byte_len() == w.raw.data.len()\n' > "$fx/l/src/app/m/case6.spl"
+  printf 'struct Raw:\n    data: [u8]\n\nfn literal_chain(a: text, b: [u8]) -> bool:\n    val r = Raw(data: b).data\n    a.byte_len() == r.data.len()\n' > "$fx/l/src/app/m/case7.spl"
+  v=$(use_base="$fx/l"; run_scan "$fx/l/src"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: unresolved receiver types must FAIL, got rc=$rc: $v"; exit 2; }
+  for fixture in case1 case2 case4 case5 case6 case7; do
+    printf '%s\n' "$v" | grep -Fq "$fixture.spl data (len() as byte width) (NEW" || { echo "selftest: $fixture unresolved-type field must stay flagged: $v"; exit 2; }
+  done
+  # The receiver type is known: a parameter, a `val x: T` annotation, a
+  # struct literal, also on a `for ... in [..]` header (that header binds
+  # only its loop name). These [u8] fields count bytes and PASS.
+  mkdir -p "$fx/n"
+  printf 'struct Streams:\n    stdout: [u8]\n\nfn header(v: text, s: Streams) -> i64:\n    var total = 0\n    for size in [v.byte_len(), s.stdout.len()]:\n        total = total + size\n    total\n\nfn literal(v: text, b: [u8]) -> bool:\n    val s = Streams(stdout: b)\n    v.byte_len() == s.stdout.len()\n\nfn annotated(v: text) -> bool:\n    val s: Streams = make()\n    v.byte_len() == s.stdout.len()\n' > "$fx/n/known.spl"
+  v=$(run_scan "$fx/n"); rc=$?; [ $rc -eq 0 ] || { echo "selftest: [u8] field on a typed receiver must PASS, got rc=$rc: $v"; exit 2; }
+  # A named-field pattern (`Wrap(doc: d)`) binds d, not doc: it shadows the
+  # typed parameter d, so d's [u8] field (or [u8] type) no longer applies.
+  mkdir -p "$fx/o"
+  printf 'struct Raw:\n    data: [u8]\n\nfn arm(a: text, d: Raw, m: Msg) -> bool:\n    match m:\n        case Wrap(doc: d):\n            a.byte_len() == d.data.len()\n        case _: false\n' > "$fx/o/arm.spl"
+  printf 'struct Raw:\n    data: [u8]\n\nfn arm(a: text, d: Raw, m: Msg) -> bool:\n    match m:\n        case Wrap(doc: d): a.byte_len() == d.data.len()\n        case _: false\n' > "$fx/o/arm_inline.spl"
+  printf 'struct Raw:\n    data: [u8]\n\nfn conditional(a: text, d: Raw, m: Msg) -> bool:\n    if val Wrap(doc: d) = m:\n        return a.byte_len() == d.data.len()\n    false\n' > "$fx/o/ifval.spl"
+  printf 'fn arm(a: text, bytes: [u8], m: Msg) -> bool:\n    match m:\n        case Wrap(doc: bytes): a.byte_len() == bytes.len()\n        case _: false\n' > "$fx/o/plain.spl"
+  v=$(run_scan "$fx/o"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: named-field pattern shadowing must FAIL, got rc=$rc: $v"; exit 2; }
+  for fixture in arm.spl arm_inline.spl ifval.spl; do
+    printf '%s\n' "$v" | grep -Fq "/o/$fixture data (len() as byte width) (NEW" || { echo "selftest: $fixture named-field shadow must stay flagged: $v"; exit 2; }
+  done
+  printf '%s\n' "$v" | grep -Fq "/o/plain.spl bytes (len() as byte width) (NEW" || { echo "selftest: plain.spl named-field shadow must stay flagged: $v"; exit 2; }
+  # Committed mode reads the IMPORTED struct at the range tip too.
+  printf 'struct Raw:\n    data: text\n' > "$gr/src/lib/ty.spl"
+  printf 'use std.ty.Raw\n\nfn bad(a: text, r: Raw) -> bool:\n    a.byte_len() == r.data.len()\n' > "$gr/src/lib/t2.spl"
+  (cd "$gr" && git add -A && git -c user.name=t -c user.email=t@t commit -qm e)
+  printf 'struct Raw:\n    data: [u8]\n' > "$gr/src/lib/ty.spl"
+  printf 'src/lib/t2.spl\n' > "$fx/scope_t2"
+  v=$(cd "$gr" && use_base="$gr"; scope_tip=HEAD; scope_files="$fx/scope_t2"; run_scan); rc=$?; [ $rc -eq 1 ] || { echo "selftest: committed import (text at tip, [u8] in working copy) must FAIL, got rc=$rc: $v"; exit 2; }
+  echo "selftest: existing ratchets, 18 unsafe typed-binding fixtures, 17 struct-field receiver fixtures and 4 named-field pattern fixtures OK"
 }
 
 do_selftest=0

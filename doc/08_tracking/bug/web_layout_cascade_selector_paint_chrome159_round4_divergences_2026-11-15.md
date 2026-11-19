@@ -917,3 +917,31 @@ head (13/40 at base).
 - **Cause:** `fb_style_background_opacity_clip` (`paint_primitives.spl`) started the tile grid at the positioning-area origin and painted only right and down from it. The painting area is the border box, which begins before that origin, so the strip between them stayed unpainted.
 - **Fix:** with `background-repeat: repeat` (and not `fixed`), the grid now starts at the first tile edge at or before the clip box, so tiles cover the whole painting area as CSS Backgrounds 3 requires.
 - **Evidence:** the raster example in `rounded_typed_gradient_chrome159_spec` gains the border/padding check, red -> green. Base vs head sweep of 33 gradient, background and coverage specs: 0 new failures, 1 fixed.
+
+## 2026-11-19 — box-shadow inside an opacity group vanishes on cpu_simd and Vulkan (FIXED)
+
+- **Symptom:** a 60x30 `#2050c0` box with `box-shadow: 0 10px 8px rgba(0,0,0,0.8)` inside an `opacity:0.5` parent on white. cpu_simd and Vulkan read `FFFFFF` below the box at (50,60) and beside it at (85,40). Chrome 159 gives `D2D2D2` and `F6F6F6`; the raster gives `CCCCCC` and `F4F4F4`.
+- **Cause:** the group paints into a transparent offscreen. The shadow pixel formula (`emu_draw_shadow_rect` and its Vulkan twin `shaders/shadow_rect.comp`) mixed the shadow colour with the destination RGB and kept the destination alpha. Over an alpha-0 destination, that left the whole shadow at alpha 0, so the group composite dropped it.
+- **Fix:** for a destination that is not opaque, both painters now use Chrome src-over. On the CPU, `_emu_shadow_px` calls `_emu_blend_over(..., true)`. In the kernel, a new `premul_over` branch writes the source at alpha `cov` over alpha 0, and premultiplied src-over otherwise. Opaque destinations keep the integer twin formula. SPIR-V was regenerated with `scripts/tool/gen-shadow-rect-spirv.shs`, and `check-shadow-rect-spirv-pinned.shs` passes.
+- **Evidence:** the new `box_shadow_opacity_group_chrome159_spec` pins the box, (50,60) and (85,40) against Chrome ±2 on cpu_simd and Vulkan, red -> green. After the fix both lanes read `8EA6DF B1B1B1 D1D1D1 F5F5F5` at (50,35), (50,56), (50,60) and (85,40); Chrome reads `8EA6DF AEAEAE D2D2D2 F6F6F6`. Base vs head sweep of 20 shadow, opacity-group, glass and SPIR-V specs: 0 new failures, 2 fixed.
+- **Not covered:** (50,56) is 3 levels off Chrome, so it is not pinned. The raster's shadow falloff in this case is about 6 levels off Chrome, which is a separate falloff issue.
+
+## 2026-11-19 — `backdrop-filter: blur()` ignored outside the WM glass material (FIXED for blur)
+
+- **Symptom:** a transparent 100x50 box with `backdrop-filter: blur(4px)` over a red stripe left the stripe edge hard on every lane (`FF0000` / `FFFFFF`). Chrome 159 blurs it (`FF7070` at the edge at k=4).
+- **Chrome model (measured):**
+  - Only the backdrop inside the border box is blurred. Red just outside the box does not bleed in, and red inside reaches the box edge unchanged.
+  - The box edge is mirrored. A 2px stripe on the box edge reads `9E` at k=4, against `5C` under clamp.
+  - The result is clipped to the rounded box: corner pixels stay unblurred.
+  - The kernel is Skia's raster blur: for sigma >= 2, the SVG triple box of size `d = floor(sigma * 3 * sqrt(2 pi) / 4 + 0.5)` over 8-bit premultiplied channels. A true Gaussian is up to 8 levels off Chrome at k=1; the triple box matches it exactly.
+- **Cause:** the only consumer of `backdrop-filter` was the WM glass material path (`simple_web_backdrop_admission`, blur capped at 4). Plain pages never blurred.
+- **Fix:**
+  - **Shared kernel:** `engine2d_backdrop_blur_pixels` (`draw_ir_box_effects.spl`) implements the model above. It is the triple box for sigma >= 2, with sliding windows so the cost does not grow with sigma, and a Gaussian kernel below that.
+  - **Draw IR:** the producer emits a typed `backdrop-filter-blur-milli`, which is device-scaled in `draw_ir_device_scale.spl`, when the material path is not ready. `_engine2d_draw_ir_render_box` reads the box region back, blurs it and writes it inside the rounded box, before the shadow knockout and the background.
+  - **Raster:** `_paint_backdrop_blur` (`paint_raster.spl`) does the same at the 4 box-paint sites, sharing `_box_clip_region` / `_copy_region` / `_restore_inside_box` with the shadow knockout.
+- **Evidence:** the new `backdrop_filter_blur_chrome159_spec` checks 19 points across a wide stripe, an edge stripe (mirror) and a rounded box (corner clip). Raster is compared with Chrome at k=1; cpu_simd and Vulkan with Chrome at k=4; all within ±2. Red -> green on all three lanes. Base vs head sweep of 57 backdrop, glass, shadow, opacity-group and coverage specs: 0 new failures, 3 fixed.
+- **Not covered:**
+  - `saturate()`, `brightness()` and the other filter functions are still ignored.
+  - The backdrop root is the whole frame painted so far. Inside an opacity group or other offscreen it is the group's surface.
+  - Sigma below 2 uses a true Gaussian; Chrome there was not measured.
+  - On a real GPU, the readback is a device sync that only blurred boxes pay.

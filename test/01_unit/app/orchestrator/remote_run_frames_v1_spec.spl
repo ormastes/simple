@@ -31,6 +31,15 @@ use std.common.text_bytes.bytes_to_text
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
 use test.fixtures.orchestration.remote_run_fixture_v1.rr_authored_v1
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.{HostServiceRequestV2, host_service_error_payload_v2}
+
+# The REAL Host refusal payload of a remote-build route action (host_service_domain_v3 service_linux_agent_action_v3).
+fn rf_error_payload_v1(action: text, operation_id: text, code: text) -> text:
+    host_service_error_payload_v2(HostServiceRequestV2(action: action, operation_id: operation_id, payload: "frame"), code, false)
+
+# What the command link hands the driver for it (remote_run_refused_reply_v1 over the V6 reply).
+fn rf_refused_text_v1(action: text, operation_id: text, code: text) -> text:
+    "runtime-host-request-refused\n" + rf_error_payload_v1(action, operation_id, code)
 
 fn rf_service_scope_v1() -> ContainerHostScopeV2:
     ContainerHostScopeV2(physical_host_id: "worker_1", service_scope_id: "svc_1", boot_id: "", provider_generation: 1,
@@ -144,9 +153,10 @@ describe "remote-run frames (milestone_0030 controller half)":
     it "decodes the executor stage reply strictly and classifies the phase":
         expect(remote_run_reply_phase_v1(remote_run_reply_decode_v1(rf_reply_v1("start", ""), "operation_a").unwrap())).to_equal("poll")
         expect(remote_run_reply_phase_v1(remote_run_reply_decode_v1(rf_reply_v1("settled", "a".repeat(64)), "operation_a").unwrap())).to_equal("done")
-        expect(remote_run_reply_phase_v1(remote_run_reply_decode_v1(rf_reply_v1("settled", ""), "operation_a").unwrap())).to_equal("terminal")
-        expect(remote_run_reply_phase_v1(remote_run_reply_decode_v1(rf_reply_v1("failed", ""), "operation_a").unwrap())).to_equal("terminal")
-        expect(remote_run_reply_phase_v1(remote_run_reply_decode_v1(rf_reply_v1("wedged", ""), "operation_a").unwrap())).to_equal("terminal")
+        expect(remote_run_reply_phase_v1(remote_run_reply_decode_v1(rf_reply_v1("settled", ""), "operation_a").unwrap())).to_equal("unbundled")
+        step("milestone_0043 P2-2: the Host never answers wedged or failed as a stage reply (it refuses), so neither is a phase")
+        expect(remote_run_reply_phase_v1(remote_run_reply_decode_v1(rf_reply_v1("failed", ""), "operation_a").unwrap())).to_equal("invalid")
+        expect(remote_run_reply_phase_v1(remote_run_reply_decode_v1(rf_reply_v1("wedged", ""), "operation_a").unwrap())).to_equal("invalid")
         expect(remote_run_reply_decode_v1(rf_reply_v1("start", ""), "operation_b")).to_equal(Err("remote-run-reply-operation"))
         expect(remote_run_reply_decode_v1(rf_reply_v1("start", "").replace("stage", "stagf"), "operation_a").is_err()).to_equal(true)
 
@@ -167,9 +177,15 @@ describe "remote-run frames (milestone_0030 controller half)":
         expect(remote_run_output_decode_v1(rf_output_v1(bytes, 0), "operation_b")).to_equal(Err("remote-run-output-operation"))
 
     it "recognises the reaped refusal and builds the service-restart receipt from its own digests":
-        expect(remote_run_reaped_v1("linux-host-remote-build-reaped-incomplete")).to_equal(true)
-        expect(remote_run_reaped_v1("runtime-host-request-refused\n{error: \"linux-host-remote-build-reaped-incomplete\"}")).to_equal(true)
-        expect(remote_run_reaped_v1("linux-host-remote-build-deadline")).to_equal(false)
+        step("milestone_0043 P2-1: only the exact typed error field of the real Host refusal payload counts, never a substring")
+        expect(remote_run_reaped_v1(rf_refused_text_v1("host-remote-build-collect", "operation_a", "linux-host-remote-build-reaped-incomplete"), "operation_a")).to_equal(true)
+        expect(remote_run_reaped_v1("linux-host-remote-build-reaped-incomplete", "operation_a")).to_equal(false)
+        expect(remote_run_reaped_v1("runtime-host-request-refused\n{error: \"linux-host-remote-build-reaped-incomplete\"}", "operation_a")).to_equal(false)
+        expect(remote_run_reaped_v1(rf_refused_text_v1("host-remote-build-collect", "operation_a", "linux-host-remote-build-reaped-incomplete;x"), "operation_a")).to_equal(false)
+        expect(remote_run_reaped_v1(rf_refused_text_v1("host-remote-build-collect", "operation_b", "linux-host-remote-build-reaped-incomplete"), "operation_a")).to_equal(false)
+        expect(remote_run_reaped_v1(rf_refused_text_v1("host-remote-build-output", "operation_a", "linux-host-remote-build-reaped-incomplete"), "operation_a")).to_equal(false)
+        expect(remote_run_reaped_v1(rf_refused_text_v1("host-remote-build-collect", "operation_a", "linux-host-remote-build-deadline"), "operation_a")).to_equal(false)
+        expect(remote_run_reaped_v1("dispatch-host-nonzero\n" + rf_error_payload_v1("host-remote-build-collect", "operation_a", "linux-host-remote-build-reaped-incomplete"), "operation_a")).to_equal(false)
         val authored = rr_authored_v1().unwrap()
         val receipt = remote_run_service_restart_receipt_v1(authored.task, authored.policy, "a".repeat(64), "b".repeat(64)).unwrap()
         expect(receipt.stage).to_equal("service-restart")
@@ -192,10 +208,10 @@ describe "remote-run frames (milestone_0030 controller half)":
     it "turns an encoded V6 Host refusal into error + payload text the reaped detector reads":
         val reply = HostServiceOperationReplyV6(action: "remote-build", service_incarnation: "1".repeat(32), operation_id: "operation_a",
             scope_digest: "2".repeat(64), request_digest: "3".repeat(64), pending: false, exit_code: 2,
-            payload: "{error: \"linux-host-remote-build-reaped-incomplete\"}", error: "runtime-host-request-refused")
+            payload: rf_error_payload_v1("host-remote-build-collect", "operation_a", "linux-host-remote-build-reaped-incomplete"), error: "runtime-host-request-refused")
         val text_form = remote_run_refused_reply_v1(host_service_operation_reply_encode_v6(reply).unwrap())
         expect(text_form.starts_with("runtime-host-request-refused\n")).to_equal(true)
-        expect(remote_run_reaped_v1(text_form)).to_equal(true)
+        expect(remote_run_reaped_v1(text_form, "operation_a")).to_equal(true)
         var bare = reply
         bare.error = ""
         bare.payload = ""
