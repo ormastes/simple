@@ -7,7 +7,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_ra
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{spaced_advances_milli, HNode, font_milli_of, web_argb, attr_value, parse_color, parse_color_any, parse_int, decl_get, svg_number_milli, svg_view_box_milli, simple_web_backdrop_admission, _wsc_on, _wsc_now_us, _wlay_add, attr_present}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, SIMPLE_WEB_STICKY_TOP_AUTO, _html_text_language, split_top_level_commas}
 use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{parse_box_shadow_layers}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{radial_gradient_box_paintable, radial_gradient_box_geometry, BackgroundGradientLayer, background_gradient_layers_paintable, background_gradient_layers, background_gradient_box_rects, background_gradient_clip_shape, border_dash_runs, border_dot_row_spans, border_rounded_dash_spans, _rounded_dash_style, _rounded_solid_sides}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{radial_gradient_box_paintable, radial_gradient_box_geometry, BackgroundGradientLayer, background_gradient_layers_paintable, background_gradient_layers, background_gradient_box_rects, linear_gradient_line_q10_at_angle, background_gradient_clip_shape, border_dash_runs, border_dot_row_spans, border_rounded_dash_spans, _rounded_dash_style, _rounded_solid_sides}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language, resolve_font_metrics_with_language_milli}
 use std.common.encoding.utf8.{text_codepoint_len, text_codepoints}
 use common.string_builder.{StringBuilder}
@@ -715,6 +715,25 @@ fn _html_draw_ir_command(
             # Rounded clip of the painting area (lengths, device-scaled).
             val shape = background_gradient_clip_shape(st, r[4], r[5], r[6], r[7])
             if shape.len() == 8:
+                val rtl = shape[4]
+                val rtr = shape[5]
+                val rbr = shape[6]
+                val rbl = shape[7]
+                computed_style.push(draw_ir_style_prop("background-gradient-layer-clip-radii", "{rtl},{rtr},{rbr},{rbl}"))
+    elif not st.background_gradient_is_radial and st.background_gradient_stop_colors.len() >= 2 and st.background_image_uri == "":
+        # A typed linear gradient (its raw list was cleared by the typed
+        # projection) on a rounded box: Draw IR has no rounded clip for the
+        # typed gradient, so emit it as one layer tiled over the positioning
+        # area and repeating (Chrome repeats it under a transparent border),
+        # as canvas_gradient_layers does, and let the layer branch clip it.
+        val r = background_gradient_box_rects(st, x, y, w, h)
+        if r.len() == 8:
+            val shape = background_gradient_clip_shape(st, r[4], r[5], r[6], r[7])
+            if shape.len() == 8:
+                val geom = linear_gradient_line_q10_at_angle(st.background_gradient_angle_deg, r[0], r[1], r[2], r[3])
+                val layer = BackgroundGradientLayer(radial: false, geom: geom, colors: st.background_gradient_stop_colors, positions: st.background_gradient_stop_positions, tile: [(r[0] as i64) * 1024, (r[1] as i64) * 1024, (r[2] as i64) * 1024, (r[3] as i64) * 1024], repeat_x: true, repeat_y: true)
+                for prop in _html_draw_ir_gradient_layer_props([layer], x, y, r[4], r[5], r[6], r[7]):
+                    computed_style.push(prop)
                 val rtl = shape[4]
                 val rtr = shape[5]
                 val rbr = shape[6]

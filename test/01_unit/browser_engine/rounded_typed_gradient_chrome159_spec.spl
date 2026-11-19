@@ -1,0 +1,82 @@
+"""
+## Purpose and audience
+Purpose: Pin a rounded box whose background is one linear gradient over a
+colour (`linear-gradient(...), <color>`) against Chrome 159 on the raster,
+cpu_simd and Vulkan lanes. The typed linear projection clears the raw layer
+list, and Draw IR had no rounded-gradient clip for it, so cpu_simd and Vulkan
+painted the box colour alone.
+Audience: Web-render maintainers of the Draw IR gradient producer.
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(rounded typed gradient on Draw IR).
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+
+# A 60x40 box at (8,8), border-radius 12px, on #1e1e2e; `extra` adds
+# declarations, `first` is the first stop.
+fn rtg_page(first: text, base: text, extra: text) -> text:
+    "<!DOCTYPE html><html><body style='margin:0;background:#1e1e2e'><div style='margin:8px;width:60px;height:40px;" + extra + "border-radius:12px;background:linear-gradient(180deg, " + first + ", rgba(255,0,0,0.3)), " + base + "'></div></body></html>"
+
+fn rtg_near(a: u32, b: u32) -> bool:
+    var sh = 0u32
+    while sh <= 16u32:
+        val d = ((a >> sh) & 0xFFu32) as i32 - ((b >> sh) & 0xFFu32) as i32
+        if d > 2 or d < -2:
+            return false
+        sh = sh + 8u32
+    true
+
+fn rtg_mismatches(px: [u32], fw: i32, fh: i32, points: [i32], want: [u32]) -> i32:
+    if px.len() != fw * fh or points.len() != want.len() * 2:
+        return -1
+    var bad = 0
+    var i = 0
+    while i < want.len():
+        if not rtg_near(px[points[i * 2 + 1] * fw + points[i * 2]], want[i]):
+            bad = bad + 1
+        i = i + 1
+    bad
+
+# Points (x, y) and Chrome 159 colours (k=4 capture, pixel centres).
+# Plain stops: the gradient at top / middle / bottom, inside the top-left
+# curve, outside the top-left and bottom-right curves.
+val RTG_POINTS: [i32] = [38, 10, 38, 28, 38, 46, 12, 12, 10, 10, 66, 46]
+val RTG_OPAQUE: [u32] = [0x4D85CBu32, 0x4D62A8u32, 0x4D4085u32, 0x4D81C7u32, 0x1E1E2Eu32, 0x1E1E2Eu32]
+val RTG_TRANSLUCENT: [u32] = [0xD3CED1u32, 0xD3ABAEu32, 0xD3898Cu32, 0xD3CACDu32, 0x1E1E2Eu32, 0x1E1E2Eu32]
+# A first stop at 10px: flat to y=18, then the ramp.
+val RTG_PX_POINTS: [i32] = [38, 10, 38, 14, 38, 18, 38, 20, 38, 28, 38, 46, 12, 12, 10, 10]
+val RTG_PX: [u32] = [0x4D8AD0u32, 0x4D8AD0u32, 0x4D88CEu32, 0x4D83C9u32, 0x4D6FB5u32, 0x4D4186u32, 0x4D8AD0u32, 0x1E1E2Eu32]
+# `border:4px solid transparent; padding:3px`: the gradient is positioned on
+# the padding box and repeats under the border (y=9 shows its bottom, y=59 its
+# top).
+val RTG_BP_POINTS: [i32] = [45, 9, 45, 12, 45, 20, 45, 35, 45, 50, 45, 59, 13, 13, 9, 9, 79, 59]
+val RTG_BP: [u32] = [0x4D4187u32, 0x4D89CFu32, 0x4D7BC1u32, 0x4D62A8u32, 0x4D498Fu32, 0x4D87CDu32, 0x4D87CDu32, 0x1E1E2Eu32, 0x1E1E2Eu32]
+val RTG_WHITE = "rgba(255,255,255,0.3)"
+val RTG_BP_EXTRA = "border:4px solid transparent;padding:3px;"
+
+fn rtg_engine(page: text, fw: i32, fh: i32, lane: text) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, fw, fh, 1, lane)
+
+fn rtg_lane(lane: text) -> i32:
+    var bad = rtg_mismatches(rtg_engine(rtg_page(RTG_WHITE, "#0058bc", ""), 80, 60, lane), 80, 60, RTG_POINTS, RTG_OPAQUE)
+    bad = bad + rtg_mismatches(rtg_engine(rtg_page(RTG_WHITE, "rgba(255,255,255,0.72)", ""), 80, 60, lane), 80, 60, RTG_POINTS, RTG_TRANSLUCENT)
+    bad = bad + rtg_mismatches(rtg_engine(rtg_page(RTG_WHITE + " 10px", "#0058bc", ""), 80, 60, lane), 80, 60, RTG_PX_POINTS, RTG_PX)
+    bad + rtg_mismatches(rtg_engine(rtg_page(RTG_WHITE, "#0058bc", RTG_BP_EXTRA), 90, 70, lane), 90, 70, RTG_BP_POINTS, RTG_BP)
+
+describe "rounded box: linear gradient over a colour (Chrome 159)":
+    it "raster paints the gradient inside the rounded clip":
+        expect(rtg_mismatches(simple_web_layout_render_html_software_pixels(rtg_page(RTG_WHITE, "#0058bc", ""), 80, 60, 600000), 80, 60, RTG_POINTS, RTG_OPAQUE)).to_equal(0)
+        expect(rtg_mismatches(simple_web_layout_render_html_software_pixels(rtg_page(RTG_WHITE, "rgba(255,255,255,0.72)", ""), 80, 60, 600000), 80, 60, RTG_POINTS, RTG_TRANSLUCENT)).to_equal(0)
+        expect(rtg_mismatches(simple_web_layout_render_html_software_pixels(rtg_page(RTG_WHITE + " 10px", "#0058bc", ""), 80, 60, 600000), 80, 60, RTG_PX_POINTS, RTG_PX)).to_equal(0)
+    it "cpu_simd paints the gradient inside the rounded clip":
+        expect(rtg_lane("cpu_simd")).to_equal(0)
+    it "vulkan paints the gradient inside the rounded clip":
+        expect(rtg_lane("vulkan")).to_equal(0)

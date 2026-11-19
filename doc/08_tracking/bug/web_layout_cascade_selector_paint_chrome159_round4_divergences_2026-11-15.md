@@ -880,3 +880,12 @@ head (13/40 at base).
 - **Fix:** the three writes keep the destination alpha (`dst & 0xFF000000`).
 - **Evidence:** new `box_shadow_keeps_dest_alpha_spec`: the interior must keep the no-shadow colour's red channel (±2) and must not be white. Before: red, `FFFFFF`. After: green, `BFC2CA`.
 - **Still open:** the Draw IR outer shadow paints under the box with no knockout, so the interior is tinted by the shadow (`BFC2CA` against Chrome `C3C3C7`).
+
+## 2026-11-19 — Draw IR drops a typed linear gradient on a rounded box (FIXED)
+
+- **Symptom:** a rounded box with `background: linear-gradient(180deg, rgba(255,255,255,0.3), rgba(255,0,0,0.3)), #0058bc` painted flat `0058BC` on cpu_simd and Vulkan. Chrome 159 gives `4D85CB` / `4D62A8` / `4D4085` at the top, middle and bottom. With a translucent base colour it painted `C0C0C4` against `D3CED1`. The raster was already correct.
+- **Cause:** the typed linear projection in `decl_apply` clears `bg_layers_raw`, so the producer's layer branch (`background_gradient_layers_paintable`) never fires. The consumer's typed-gradient fallback for `radius > 0` draws a solid rounded rect, because no backend owns a rounded clip for the typed gradient.
+- **Fix:** for a typed linear gradient on a rounded box, `paint_draw_ir.spl` emits one `BackgroundGradientLayer` from the typed stops and angle: `linear_gradient_line_q10_at_angle` over the positioning (origin) box, tiled on that box and repeating, because Chrome repeats it under a transparent border plus `background-gradient-layer-clip-radii`. The existing rounded layer branch paints and clips it. This is the same construction the raster uses for a typed canvas gradient (`canvas_gradient_layers`).
+- **Evidence:** new `rounded_typed_gradient_chrome159_spec` checks interior and corner points against Chrome ±2 for an opaque and a translucent base colour, a first stop at `10px`, and `border:4px solid transparent; padding:3px` (repeat under the border). Raster runs the first three; cpu_simd and Vulkan run all four. Before: raster green, cpu_simd and Vulkan red. After: 3/3.
+- **Related, not changed:** the base-failing `decl_apply_coverage_closure` example ("records from/to and the stop model") is about the same typed routing.
+- **Open (raster):** with `border:4px solid transparent; padding:3px`, the raster leaves the border area at the box colour (`0058BC` at (45,9) and (45,59)). Chrome repeats the gradient there (`4D4187` and `4D87CD`), and Draw IR now does too.
