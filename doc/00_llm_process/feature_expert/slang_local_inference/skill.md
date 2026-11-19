@@ -111,7 +111,8 @@ the former `..._in_development_spec.spl` cases 2/3/5 moved into it when they wen
   so its logits come from one batch shape (fixed drift,
   `doc/08_tracking/bug/slang_prefix_cache_hit_output_drift_2026-11-14.md`).
   The physical paged-KV lane needs a llama.cpp with `include/llama-slang-paged.h`.
-- Tree (radix) prefix cache, opt-in (2026-11-19): `engine_set_prefix_cache_mode(3, 0)` before load = one persistent multi-sequence context, per-sequence KV streams, byte-identical to no-cache greedy (modes 1/2 use unified KV and are NOT exact). Telemetry `engine_tree_cache_stats()`. Numbers + logs: `test/05_perf/slang_kv_cache/README.md`; bug `slang_shim_tree_kv_unified_modes_not_exact_2026-11-19.md`. Snapshot remains default; requests serialised per model (second tree request gets BUSY).
+- Tree (radix) prefix cache, opt-in (2026-11-19): `engine_set_prefix_cache_mode(3, 0)` before load = one persistent multi-sequence context, per-sequence KV streams, byte-identical to no-cache greedy (modes 1/2 use unified KV and are NOT exact). Telemetry `engine_tree_cache_stats()`. Numbers + logs: `test/05_perf/slang_kv_cache/README.md`; bug `slang_shim_tree_kv_unified_modes_not_exact_2026-11-19.md`. Snapshot remains default; requests serialised per model (second tree request gets BUSY). Review fixes 2026-11-20: reuse capped by the owner's exact span, first-micro-batch warm-up, `BackendError.Busy`, refused mode fails the load (bug record).
+
 
 - The HTTP path is unreachable on the bootstrap seed; see
   `doc/08_tracking/bug/seed_jit_cannot_resolve_text_dot_from_char_code_2026-09-04.md`
