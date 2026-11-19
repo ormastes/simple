@@ -4,4 +4,4 @@
 - **Symptom:** at device scale 1, the 3px `dotted` box in that spec puts its dots at different x positions than Chrome. The earlier pins came from a dpr4 Chrome render but ran at 1x, and they matched Simple rather than Chrome, which hid the difference.
 - **Coverage removed:** 46 pins for the 3px dotted case were dropped from the spec because they asserted non-Chrome values. No spec covers 3px dotted at 1x now.
 - **Next:** measure Chrome's 1x dot centres for a 3px dotted edge (200px box, `--force-device-scale-factor=1`), compare them with `border_dot_row_spans` / dot-gap fitting, and re-add pins measured from Chrome.
-- **Status:** open.
+- **Status:** resolved 2026-11-19. Chrome 1x draws 2px/3px dots as square runs on pitch 2t with end gaps absorbing the leftover (`_border_square_dot_runs`); pins re-added in `border_dash_layout_chrome159_spec` (3px 200x100, 2px 200x100, 3px sides 50-60, 2px sides 51-56). 1px dotted at 1x (pitch 2, n=(L+1)/2) is measured but not implemented; 4px/5px unchanged.
