@@ -51,19 +51,49 @@ fn _bof_fn_name(line: text) -> text:
         return _bof_leading_ident(rest.substring(3, rest.byte_len()))
     ""
 
+fn _bof_paren_depth(s: text) -> i64:
+    var depth = 0
+    var i = 0
+    while i < s.byte_len():
+        val c = s.substring(i, i + 1)
+        if c == "(":
+            depth = depth + 1
+        elif c == ")":
+            depth = depth - 1
+        i = i + 1
+    depth
+
+# Parameter names of a signature that may have been joined from several lines.
+# Splits on top-level commas only, so tuple-typed params do not fragment.
 fn _bof_params(line: text) -> [text]:
     val open = line.find("(")
     if open < 0:
         return []
-    val rest = line.substring(open + 1, line.byte_len())
-    val close = rest.find(")")
-    if close < 0:
-        return []
     var names: [text] = []
-    for part in rest.substring(0, close).split(","):
-        val name = _bof_leading_ident(part.trim())
-        if name != "" and name != "self":
-            names.push(name)
+    var depth = 0
+    var part = ""
+    var i = open + 1
+    while i < line.byte_len():
+        val c = line.substring(i, i + 1)
+        if c == "(" or c == "[":
+            depth = depth + 1
+        elif c == "]":
+            depth = depth - 1
+        if c == ")" and depth == 0:
+            break
+        if c == ")":
+            depth = depth - 1
+        if c == "," and depth == 0:
+            val name = _bof_leading_ident(part.trim())
+            if name != "" and name != "self":
+                names.push(name)
+            part = ""
+        else:
+            part = part + c
+        i = i + 1
+    val last = _bof_leading_ident(part.trim())
+    if last != "" and last != "self":
+        names.push(last)
     names
 
 fn _bof_all_ident(s: text) -> bool:
@@ -95,19 +125,34 @@ fn _bof_rhs_origin(rhs: text, externs: [text]) -> text:
         return "call"
     "expr"
 
-fn _bof_binding(trimmed: text) -> (text, text):
+# Names bound by `val`/`var` (one, or several for a tuple pattern) and the rhs.
+# `_` placeholders bind nothing and are skipped.
+fn _bof_binding(trimmed: text) -> ([text], text):
     var rest = ""
     if trimmed.starts_with("val "):
         rest = trimmed.substring(4, trimmed.byte_len())
     elif trimmed.starts_with("var "):
         rest = trimmed.substring(4, trimmed.byte_len())
     else:
-        return ("", "")
-    val name = _bof_leading_ident(rest)
+        return ([], "")
     val eq = rest.find(" = ")
-    if name == "" or eq < 0:
-        return ("", "")
-    (name, rest.substring(eq + 3, rest.byte_len()).trim())
+    if eq < 0:
+        return ([], "")
+    var names: [text] = []
+    if rest.starts_with("("):
+        val close = rest.find(")")
+        if close < 0 or close > eq:
+            return ([], "")
+        for part in rest.substring(1, close).split(","):
+            val n = _bof_leading_ident(part.trim())
+            if n != "" and n != "_":
+                names.push(n)
+    else:
+        val name = _bof_leading_ident(rest)
+        if name == "":
+            return ([], "")
+        names.push(name)
+    (names, rest.substring(eq + 3, rest.byte_len()).trim())
 
 pub fn bound_origin_facts(source: text, file_path: text) -> [BoundOriginFact]:
     val lines = code_line_snapshot(source).lines
@@ -121,11 +166,21 @@ pub fn bound_origin_facts(source: text, file_path: text) -> [BoundOriginFact]:
     var fn_indent = 0
     var boundary = false
     var ann = ""
+    var in_sig = false
+    var sig = ""
+    var sig_line = 0
     for cl in lines:
         val t = cl.trimmed
         if t == "":
             continue
         val ind = _bof_indent(cl.raw)
+        if in_sig:
+            sig = sig + " " + t
+            if _bof_paren_depth(sig) <= 0:
+                in_sig = false
+                for p in _bof_params(sig):
+                    facts.push(BoundOriginFact(line_num: sig_line, function: fn_name, subject: p, origin: "param", boundary: boundary))
+            continue
         if t.starts_with("@") or (ann != "" and not t.contains("fn ") and (t.ends_with(",") or t.ends_with(")"))):
             ann = ann + " " + t
             continue
@@ -140,8 +195,13 @@ pub fn bound_origin_facts(source: text, file_path: text) -> [BoundOriginFact]:
             fn_indent = ind
             boundary = ann.contains("capabilities") and ann.contains("ffi")
             ann = ""
-            for p in _bof_params(t):
-                facts.push(BoundOriginFact(line_num: cl.line_num, function: fn_name, subject: p, origin: "param", boundary: boundary))
+            sig = t
+            sig_line = cl.line_num
+            if _bof_paren_depth(sig) > 0:
+                in_sig = true
+            else:
+                for p in _bof_params(sig):
+                    facts.push(BoundOriginFact(line_num: sig_line, function: fn_name, subject: p, origin: "param", boundary: boundary))
             continue
         ann = ""
         if fn_name != "" and ind <= fn_indent:
@@ -149,8 +209,8 @@ pub fn bound_origin_facts(source: text, file_path: text) -> [BoundOriginFact]:
             boundary = false
         if fn_name == "":
             continue
-        val (bname, rhs) = _bof_binding(t)
-        if bname != "":
+        val (bnames, rhs) = _bof_binding(t)
+        for bname in bnames:
             facts.push(BoundOriginFact(line_num: cl.line_num, function: fn_name, subject: bname, origin: _bof_rhs_origin(rhs, externs), boundary: boundary))
     facts
 
