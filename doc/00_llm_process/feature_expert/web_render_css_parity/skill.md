@@ -3389,3 +3389,9 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - **Change:** `spaced_advances_milli` skips the letter gap for `Script.Arabic`. Engine2D paints shaped runs from the command advances, so the glyph run needed no edit.
 - **Trap:** ink bbox y/x0 for Arabic differ from Chrome on base (font raster/line box), so the spec pins width (`cmd.width`) and ink x1/x0 DELTAS vs the unspaced render, not absolute ink boxes.
 - **Spec:** `shaped_run_spacing_chrome159_spec` 6 examples.
+## 2026-11-19: empty inline opens no line box
+
+- **Change:** `inline_subtree_is_empty` (layout_engine.spl) classifies an inline child; the block child loop tracks `inline_run_has_content` and skips the line-box cursor advance when a run is all empty inlines / collapsible whitespace (CSS 2.1 9.4.2). A 0-height block then self-collapses, so 20px margins collapse through `<div><span></span></div>`.
+- **Chrome 159 measured (div height):** `<span></span>` 0, `<span> </span>` 0, `<b></b><i></i>` 0, `padding-left:4px` span 18, `border-left:1px` span 18, `<span>x</span>` 18; `p{margin:20px 0}` + empty div + `p`: second p top = first bottom + 20.
+- **Content test:** text, `br`, replaced/atomic box, non-zero horizontal margin/padding/border (nonzero vertical-only padding still counts as empty, unmeasured).
+- **Spec:** `empty_inline_line_box_chrome159_spec` (7 examples; 3 / 7 on base, 7 / 7 on head).

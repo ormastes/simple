@@ -257,6 +257,27 @@ fn line_boxes_prefix(pairs: [i32], lines: i32) -> [i32]:
         k = k + 1
     out
 
+# CSS 2.1 9.4.2: an inline subtree with no text, no preserved white space, no
+# replaced/atomic box and no non-zero horizontal margin/padding/border opens no
+# line box (Chrome 159: `<div><span></span></div>` is 0 tall).
+fn inline_subtree_is_empty(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, c: i32) -> bool:
+    val n = nodes[c]
+    val st = styles[c]
+    if n.tag == "#text":
+        return n.text_trimmed == "" and not st.white_space_pre
+    if st.display != "inline" or n.tag == "br" or grid_item_is_replaced(n):
+        return false
+    if st.pad_l != 0 or st.pad_r != 0 or st.border_l != 0 or st.border_r != 0:
+        return false
+    if st.margin_l != 0 or st.margin_r != 0:
+        return false
+    var k = child_index.first_child[c]
+    while k >= 0:
+        if not inline_subtree_is_empty(nodes, styles, child_index, k):
+            return false
+        k = child_index.next_sibling[k]
+    true
+
 # Width the first unbreakable piece of inline child `c` needs on a line: the
 # first word of a text run (the whole run under nowrap), descending into
 # plain inline elements; `atomic_w` for an atomic box.
@@ -3304,6 +3325,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     var trailing_margin_b = 0
     var leading_margin_t = 0
     var in_inline_run = false
+    var inline_run_has_content = false
     val inline_base_x = if (
         node.is_details_summary and st.display == "list-item"
     ):
@@ -3670,6 +3692,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     line_iw = float_ctx_right_edge(cy, cy + line_probe_h, ix + iw) - ix
                     inline_x = inline_start_x
                     inline_line_h = style_line_h(cst)
+                if not inline_subtree_is_empty(nodes, styles, child_index, c):
+                    inline_run_has_content = true
                 val intrinsic = intrinsic_text_width(nodes, styles, child_index, c, out_intrinsic_widths)
                 out_intrinsic_widths = intrinsic.widths
                 var inline_w = intrinsic.width
@@ -4165,9 +4189,11 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 )
                 out_bx = aligned.bx
                 out_by = aligned.by
-                cy = cy + aligned.height + cursor_advance_px(cy_frac, aligned.height_frac_milli)
-                cy_frac = cursor_advance_frac(cy_frac, aligned.height_frac_milli)
+                if inline_run_has_content:
+                    cy = cy + aligned.height + cursor_advance_px(cy_frac, aligned.height_frac_milli)
+                    cy_frac = cursor_advance_frac(cy_frac, aligned.height_frac_milli)
                 in_inline_run = false
+                inline_run_has_content = false
                 inline_start_x = float_ctx_left_edge(cy, cy + line_probe_h, ix + inline_base_x) - ix
                 line_iw = float_ctx_right_edge(cy, cy + line_probe_h, ix + iw) - ix
                 inline_x = inline_start_x
@@ -4470,8 +4496,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             )
             out_bx = aligned.bx
             out_by = aligned.by
-            cy = cy + aligned.height + cursor_advance_px(cy_frac, aligned.height_frac_milli)
-            cy_frac = cursor_advance_frac(cy_frac, aligned.height_frac_milli)
+            if inline_run_has_content:
+                cy = cy + aligned.height + cursor_advance_px(cy_frac, aligned.height_frac_milli)
+                cy_frac = cursor_advance_frac(cy_frac, aligned.height_frac_milli)
         if block_bottom_margin_collapses_through(nodes, styles, i, st):
             trailing_margin_b = prev_margin_b
         else:
