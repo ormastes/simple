@@ -311,3 +311,43 @@ Collection loop-invariant hoisting is disabled and contains no dormant header-re
 body. The compatibility entrypoints return the original blocks. A future implementation
 must consume a real preheader plus dominance, alias/memory, effects, zero-trip, and
 speculatability proofs; analysis-only scalar predicates do not authorize movement.
+
+<!-- wave-f-perf-analysis-collection-refactoring-2026-11-19 -->
+
+## Symbolic Performance Diagnostics, Orthogonal Evidence, and Resource Contracts (`PERF-*`)
+
+Canonical plan: [Simple Performance Analysis and Collection Refactoring](../../03_plan/compiler/performance_analysis_and_collection_refactoring_2026-11-18.md) (§3, §4, §9, §16.2, §19; contracts in `src/compiler/35.semantics/perf/perf_analysis_contracts_v1.spl`).
+
+### `PERF-*` Rule Family and Default Severity Policy
+
+`PERF-*` diagnostics share the canonical `DiagnosticV1` / `DiagnosticBatchV1` infrastructure (`src/lib/common/diagnostics/`) alongside legacy `COLL001`–`COLL019` rules without duplicating language soundness errors:
+
+| Code | Finding | Default Severity | Escalation and Autofix Policy |
+|------|---------|------------------|-------------------------------|
+| `PERF-STYLE-001` | Equivalent `map`/`filter`/`fold`/`any`/`all`/`find` expression available | Hint / Contextual assist | Never an Error merely because an imperative loop was used (`D09`). `VerifiedSafe` fix only when all 13 legality obligations hold. |
+| `PERF-COST-001` | Repeated full scan or superlinear composition across loop/callee edges (e.g., `O(n*m)`) | Warning | Displays explicit input-size variables, provenance DAG contributions, and assumptions; algorithmic redesigns remain `ReviewRequired`. |
+| `PERF-COST-002` | Inferred symbolic complexity bound increased relative to baseline | Warning | Separated from analyzer/model version changes (`C16`); never worded as a confirmed wall-clock regression without empirical evidence. |
+| `PERF-ALLOC-001` | Avoidable intermediate materialization or growing-accumulator copy in `fold` | Info / Warning | Safe rewrite offered only when intermediate collection identity and partial prefix state are unobservable. |
+| `PERF-ALG-001` | Prebuilt index, `group_join`, or single-pass aggregation opportunity | Info / Review action | `ReviewRequired`; discloses auxiliary memory (`O(distinct_keys)`), output cardinality (`O(n+m+k)`), and key hash/equality assumptions. |
+| `PERF-CONTRACT-001` | Declared `@cost` / resource contract refuted | Error (in contract enforcement profile) | Requires a valid lower-bound proof or concrete operation-budget counterexample witness. |
+| `PERF-CONTRACT-002` | Required resource contract could not be verified within model/budget | Warning (Error in strict-verification profile) | Diagnostic wording must state `"unproved"`, never `"violated"`. |
+| `PERF-ANALYSIS-001` | Unknown callee/callback/SFFI cost, unsupported loop/SCC, or exhausted budget | Info / Coverage note (Warning when verification required) | Explicit `UnknownTerm(reason)` / `Partial` / `Cancelled`; never fabricates zero or infinite cost. |
+| `PERF-FIX-001` | Candidate loop refactor blocked by unmet semantic or revision obligations | Disabled code action (`isPreferred=false`) | Reports unmet `SafetyObligationKind` without warning that the original valid loop is defective. |
+
+### Orthogonal `BoundEvidenceV1` Dimensions
+
+Every symbolic resource bound (`work`, `alloc_count`, `alloc_bytes_total`, `aux_peak_bytes`, `output_bytes`, `io_calls`, `io_bytes`, `lock_ops`, `gpu_transfer_bytes`) records orthogonal `BoundEvidenceV1` fields rather than collapsing certainty into a scalar confidence score:
+
+- `relation`: `UpperBound | LowerBound | Exact | TightBound | Estimate` (a product of maxima is a sound `UpperBound`, never labeled `TightBound`).
+- `regime`: `WorstCase | Expected | Amortized | ExpectedAmortized` (hash lookups require `Expected` with stated collision/equality models; dynamic-array `push` uses `Amortized`).
+- `status` and `origin`: `Complete | Partial | Unknown | Cancelled` paired with `Inferred | ImportedContract | Measured | Heuristic`, `model_id`, `assumptions[]`, and `provenance_id`.
+
+### Three-Valued Contract Verification (`Verified | Refuted | Unproved`)
+
+Structured `@cost(...)` checks (`ResourceContractCheckV1`) distinguish three outcomes (`ContractVerificationVerdict`):
+
+1. `Verified` — inferred bounds and trusted assumptions establish the declared bound.
+2. `Refuted` (`PERF-CONTRACT-001`) — a valid lower-bound derivation or concrete operation-count witness exceeds the contract. An inferred loose `O(n^2)` `UpperBound` on a linear implementation **never** refutes a linear asymptotic contract (`C15`), because a linear function also satisfies `O(n^2)` as an upper bound.
+3. `Unproved` (`PERF-CONTRACT-002`) — unknown calls, recursion widening, loose upper bounds, or exhausted analysis budgets prevent proof. Strict verification profiles reject `Unproved` as a verification-policy gate, not as proof of slow runtime behavior.
+
+Scoped suppressions follow the repository rule `@allow(named_rule) # reason: <description>` (`LINTALLOW001` rejects blanket or reasonless suppressions), with owner/review references retained for policy-critical contract overrides.

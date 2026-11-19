@@ -1,0 +1,656 @@
+"""
+## Purpose and audience
+Unit specification for symbolic cost-domain composition (`cost_domain_v1.spl`),
+single-pass function cost summarization (`cost_summary_v1.spl`), and
+compositional caller propagation (`caller_propagation_v1.spl`).
+
+Covers design decisions `D01`..`D04`, complexity scenarios `C01`..`C09`, `C13`,
+`C14`, and single-pass deep-traversal budget `I11`.
+"""
+
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{
+    FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind,
+    vhdl_hardware_metadata_default
+}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.semantics.perf_facts.*
+use compiler.semantics.perf.perf_analysis_contracts_v1.*
+use compiler.semantics.perf.cost_domain_v1.*
+use compiler.semantics.perf.cost_summary_v1.*
+use compiler.semantics.perf.caller_propagation_v1.*
+
+fn pcp_span(line: i64) -> Span:
+    Span.at(line, line, 1)
+
+fn pcp_size_n() -> CostExprV1:
+    CostExprV1.Size("n", SizeMeasureKind.Length)
+
+fn pcp_size_m() -> CostExprV1:
+    CostExprV1.Size("m", SizeMeasureKind.Length)
+
+fn pcp_unit_work(prov: text) -> BoundEvidenceV1:
+    make_inferred_bound_v1(
+        PerfResourceDimension.Work,
+        CostExprV1.Const(1),
+        BoundRelation.Exact,
+        BoundRegime.WorstCase,
+        "perf-model-v1",
+        ["normal_completion"],
+        prov
+    )
+
+fn pcp_hir_unit_type() -> HirType:
+    HirType(kind: HirTypeKind.Unit, span: pcp_span(1))
+
+fn pcp_hir_bool_type() -> HirType:
+    HirType(kind: HirTypeKind.Bool, span: pcp_span(1))
+
+fn pcp_hir_i64_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: pcp_span(1))
+
+fn pcp_hir_array_type() -> HirType:
+    HirType(
+        kind: HirTypeKind.Array(pcp_hir_i64_type(), None),
+        span: pcp_span(1)
+    )
+
+fn pcp_hir_expr(kind: HirExprKind, type_: HirType, line: i64) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: type_, span: pcp_span(line))
+
+fn pcp_build_hir_nested_lookup_fn() -> (HirFunction, CollectionOperationRegistry):
+    var registry = CollectionOperationRegistry.new("stdlib-cost-v1")
+    registry.register(CollectionOperationSummary(
+        symbol_id: 300,
+        stable_name: "Array.contains",
+        operation: HirPerfOperationKind.ContainsLookup,
+        cost: HirPerfCostClass.LinearReceiver,
+        output_cardinality: HirPerfCardinality.Exact(1),
+        enumeration: HirPerfEnumerationClass.Once,
+        expected_receiver: HirPerfReceiverKind.Array,
+        signature_fingerprint: "Array<i64>.contains(i64)->bool",
+        explicit_argument_count: 1,
+        effects: HirPerfEffectFacts(
+            reads: true, writes: false, allocates: false, throws: false,
+            suspends: false, observable: false, unknown: false
+        ),
+        allocation: HirPerfAllocationClass.None,
+        preserves_order: true,
+        materializes: false,
+        metadata_version: "stdlib-cost-v1",
+        provenance: "stdlib-admitted-v1",
+        evidence_receipt: "verified-receipt-300"
+    ))
+    val queries_param = HirParam(
+        symbol: SymbolId(id: 101),
+        name: "queries",
+        type_: pcp_hir_array_type(),
+        has_default: false,
+        default: pcp_hir_expr(HirExprKind.UnitLit, pcp_hir_unit_type(), 1),
+        span: pcp_span(1),
+        is_mutable: false
+    )
+    val items_param = HirParam(
+        symbol: SymbolId(id: 102),
+        name: "items",
+        type_: pcp_hir_array_type(),
+        has_default: false,
+        default: pcp_hir_expr(HirExprKind.UnitLit, pcp_hir_unit_type(), 1),
+        span: pcp_span(1),
+        is_mutable: false
+    )
+    val receiver = pcp_hir_expr(
+        HirExprKind.NamedVar(SymbolId(id: 102), "items"),
+        pcp_hir_array_type(),
+        4
+    )
+    val arg = HirCallArg(
+        has_name: false,
+        name: "",
+        value: pcp_hir_expr(HirExprKind.NamedVar(SymbolId(id: 103), "q"), pcp_hir_i64_type(), 4),
+        span: pcp_span(4)
+    )
+    val contains_call = pcp_hir_expr(
+        HirExprKind.MethodCall(
+            receiver,
+            "contains",
+            [arg],
+            MethodResolution.InstanceMethod(SymbolId(id: 10), SymbolId(id: 300))
+        ),
+        pcp_hir_bool_type(),
+        4
+    )
+    val loop_body = HirBlock(
+        stmts: [HirStmt(kind: HirStmtKind.Expr(contains_call), span: pcp_span(4))],
+        has: false,
+        value: pcp_hir_expr(HirExprKind.UnitLit, pcp_hir_unit_type(), 4),
+        span: pcp_span(4)
+    )
+    val iter_expr = pcp_hir_expr(
+        HirExprKind.NamedVar(SymbolId(id: 101), "queries"),
+        pcp_hir_array_type(),
+        3
+    )
+    val for_expr = pcp_hir_expr(
+        HirExprKind.For(SymbolId(id: 103), iter_expr, loop_body, None),
+        pcp_hir_unit_type(),
+        3
+    )
+    val fn_node = HirFunction(
+        symbol: SymbolId(id: 200),
+        name: "check_all_queries",
+        type_params: [],
+        params: [queries_param, items_param],
+        return_type: pcp_hir_unit_type(),
+        body: HirBlock(
+            stmts: [HirStmt(kind: HirStmtKind.Expr(for_expr), span: pcp_span(3))],
+            has: false,
+            value: pcp_hir_expr(HirExprKind.UnitLit, pcp_hir_unit_type(), 3),
+            span: pcp_span(2)
+        ),
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: ExportAttr(is_export_c: false, export_name: ""),
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: DriverManifestAttr(
+            kind: DriverManifestAttrKind.Driver,
+            driver_class: 0,
+            vendor: 0,
+            device_ids: []
+        ),
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_doc_comment: false,
+        doc_comment: "",
+        span: pcp_span(1),
+        is_gpu_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        verification_contract: None,
+        is_generic_template: false
+    )
+    (fn_node, registry)
+
+describe "Symbolic Cost Domain V1 (D03, D04, C01..C06, C13)":
+    """Verifies bounded symbolic cost composition, multi-variable preservation, and orthogonal evidence."""
+
+    context "orthogonal evidence and separate resource dimensions (D03, D04)":
+        """Ensures resource dimensions do not conflate peak memory with work and never flatten evidence."""
+
+        it "preserves orthogonal BoundEvidenceV1 metadata and takes max over sequential AuxPeakBytes (D04)":
+            """Sequential peak auxiliary memory takes Maximum rather than summing transient peaks."""
+            val peak_a = make_inferred_bound_v1(
+                PerfResourceDimension.AuxPeakBytes,
+                pcp_size_n(),
+                BoundRelation.UpperBound,
+                BoundRegime.WorstCase,
+                "perf-model-v1",
+                ["arena_a_scoped"],
+                "prov:a"
+            )
+            val peak_b = make_inferred_bound_v1(
+                PerfResourceDimension.AuxPeakBytes,
+                pcp_size_m(),
+                BoundRelation.TightBound,
+                BoundRegime.Expected,
+                "perf-model-v1",
+                ["arena_b_scoped"],
+                "prov:b"
+            )
+            val combined = compose_sequential_v1(peak_a, peak_b)
+            expect(combined.resource.name()).to_equal("aux_peak_bytes")
+            expect(combined.relation.name()).to_equal("UpperBound")
+            expect(combined.regime.name()).to_equal("Expected")
+            expect(combined.status.name()).to_equal("Complete")
+            expect(combined.origin.name()).to_equal("Inferred")
+            expect(combined.assumptions.len()).to_equal(2)
+            expect(render_cost_expr_v1(combined.expression)).to_contain("max(")
+
+        it "keeps distinct size variables and measures separate unless an explicit SizeRelationV1 equates them (D03)":
+            """Separate inputs n and m stay distinct until equated by an explicit SizeRelationV1."""
+            val prod = CostExprV1.Multiply([pcp_size_n(), pcp_size_m()])
+            val byte_vs_char = CostExprV1.Add([
+                CostExprV1.Size("payload", SizeMeasureKind.ByteLength),
+                CostExprV1.Size("payload", SizeMeasureKind.CharCount)
+            ])
+            expect(render_big_o_v1(prod)).to_equal("O(n*m)")
+            expect(render_cost_expr_v1(byte_vs_char)).to_contain("bytes(payload)")
+            expect(render_cost_expr_v1(byte_vs_char)).to_contain("chars(payload)")
+
+            val params = [
+                SizeParameterV1(param_name: "n", measure: SizeMeasureKind.Length, canonical_var: "n"),
+                SizeParameterV1(param_name: "m", measure: SizeMeasureKind.Length, canonical_var: "m")
+            ]
+            val eq_rel = [SizeRelationV1(lhs_var: "m", relation_op: "==", rhs_var: "n")]
+            expect(render_big_o_with_params_v1(prod, params, eq_rel)).to_equal("O(n^2)")
+
+    context "canonical loop and key-operation complexity shapes (C01..C06, C13)":
+        """Exercises sequential, constant-bounded, nested, triangular, two-pointer, grouped, and key-cost bounds."""
+
+        it "composes two sequential n scans as linear O(n) rather than O(n^2) (C01)":
+            """Two consecutive full traversals of size n sum to 2*n which is O(n)."""
+            val scan1 = compose_loop_independent_v1(pcp_size_n(), pcp_unit_work("scan1"), true)
+            val scan2 = compose_loop_independent_v1(pcp_size_n(), pcp_unit_work("scan2"), true)
+            val total = compose_sequential_v1(scan1, scan2)
+            expect(render_cost_expr_v1(total.expression)).to_equal("2*n")
+            expect(render_big_o_v1(total.expression)).to_equal("O(n)")
+
+        it "reduces outer n traversal with constant inner bound 8 to linear O(n) (C02)":
+            """A fixed inner bound of 8 iterations scales linearly with the outer size n."""
+            val inner8 = compose_loop_constant_bound_v1(8, pcp_unit_work("inner8"))
+            val outer_n = compose_loop_independent_v1(pcp_size_n(), inner8, true)
+            expect(render_cost_expr_v1(outer_n.expression)).to_equal("8*n")
+            expect(render_big_o_v1(outer_n.expression)).to_equal("O(n)")
+
+        it "preserves O(n*m) for nested traversals over independent inputs n and m (C03)":
+            """Independent inner m scan inside outer n scan yields Exact/Tight O(n*m) work."""
+            val inner_m = compose_loop_independent_v1(pcp_size_m(), pcp_unit_work("inner_m"), true)
+            val nested = compose_loop_independent_v1(pcp_size_n(), inner_m, true)
+            expect(render_cost_expr_v1(nested.expression)).to_equal("n*m")
+            expect(render_big_o_v1(nested.expression)).to_equal("O(n*m)")
+
+        it "models triangular dependent inner bound 0..i as quadratic O(n^2) via TriangularSum (C04)":
+            """Dependent loop 0..i sums to TriangularSum(n) with quadratic O(n^2) growth."""
+            val tri = compose_triangular_loop_v1(pcp_size_n(), pcp_unit_work("tri_step"))
+            expect(render_cost_expr_v1(tri.expression)).to_contain("triangular(n)")
+            expect(render_big_o_v1(tri.expression)).to_equal("O(n^2)")
+
+        it "proves linear O(n) for monotone two-pointer progress and qualifies unproved fallback as loose UpperBound (C05)":
+            """Monotone non-resetting inner pointer yields O(n); unproved invariant stays unconfirmed loose UpperBound."""
+            val proved = compose_monotone_two_pointer_v1(
+                pcp_size_n(),
+                pcp_size_n(),
+                CostExprV1.Const(1),
+                true,
+                "prov:two_ptr_ok"
+            )
+            expect(render_big_o_v1(proved.expression)).to_equal("O(n)")
+            expect(proved.status.name()).to_equal("Complete")
+            expect(bound_is_confirmed_superlinear_risk_v1(proved, [], [])).to_equal(false)
+
+            val unproved = compose_monotone_two_pointer_v1(
+                pcp_size_n(),
+                pcp_size_n(),
+                CostExprV1.Const(1),
+                false,
+                "prov:two_ptr_loose"
+            )
+            expect(unproved.relation.name()).to_equal("UpperBound")
+            expect(unproved.status.name()).to_equal("Partial")
+            expect(bound_is_confirmed_superlinear_risk_v1(unproved, [], [])).to_equal(false)
+
+        it "preserves O(group_count + N) for grouped aggregate traversal via AggregateSize (C06)":
+            """Traversing groups whose total element count is N yields O(group_count + N), not group_count * max_group."""
+            val g_count = CostExprV1.Size("group_count", SizeMeasureKind.GroupCount)
+            val total_elems = CostExprV1.Size("N", SizeMeasureKind.TotalElements)
+            val grouped = compose_grouped_traversal_v1(
+                g_count,
+                total_elems,
+                CostExprV1.Const(1),
+                CostExprV1.Const(1),
+                "prov:groups"
+            )
+            expect(render_big_o_v1(grouped.expression)).to_equal("O(group_count + N)")
+            expect(grouped.relation.name()).to_equal("TightBound")
+
+        it "includes expensive key hashing and equality costs in binary search and hash lookups (C13)":
+            """Lookup bounds multiply or add representation-aware key comparison and hashing costs."""
+            val key_bytes = CostExprV1.Size("key", SizeMeasureKind.ByteLength)
+            val single_bsearch = compose_log_search_with_key_cost_v1(pcp_size_m(), key_bytes, "prov:bsearch")
+            val repeated_bsearch = compose_loop_independent_v1(pcp_size_n(), single_bsearch, true)
+            expect(render_big_o_v1(repeated_bsearch.expression)).to_equal("O(n*log(m)*bytes(key))")
+            expect(repeated_bsearch.regime.name()).to_equal("WorstCase")
+
+            val single_hash = compose_hash_lookup_with_key_cost_v1(key_bytes, key_bytes, "prov:hash")
+            val repeated_hash = compose_loop_independent_v1(pcp_size_n(), single_hash, true)
+            expect(render_big_o_v1(repeated_hash.expression)).to_equal("O(n*bytes(key))")
+            expect(repeated_hash.regime.name()).to_equal("Expected")
+            expect(repeated_hash.assumptions).to_contain("uniform_hashing_distribution")
+
+describe "Function Cost Summary & Caller Propagation V1 (D01, D02, C07..C09, C14, I11)":
+    """Verifies real HirFunction summarization, interprocedural caller propagation, callbacks, SCCs, and single-pass scaling."""
+
+    context "real HirFunction summarization and single-pass deep traversal (D01, D02, I11)":
+        """Summarizes typed HIR functions and verifies iterative non-quadratic traversal over deep AST/IR."""
+
+        it "summarizes a real HirFunction with CollectionOperationRegistry linear lookup inside a for loop (D01, D02)":
+            """Extracts queries.length * items.length work bound and PERF-COST-001 from a typed HirFunction."""
+            val pair = pcp_build_hir_nested_lookup_fn()
+            val fn_node = pair.0
+            val registry = pair.1
+            val empty_callees: Dict<text, FunctionCostSummaryV1> = {}
+            val res = summarize_hir_function_v1(
+                fn_node,
+                "src/demo/queries.spl",
+                "rev-hir-1",
+                registry,
+                empty_callees,
+                default_perf_summarizer_config_v1()
+            )
+            expect(res.summary.size_parameters.len()).to_equal(2)
+            val work_opt = find_resource_bound_v1(res.summary, PerfResourceDimension.Work)
+            expect(work_opt.?).to_equal(true)
+            val work = work_opt.unwrap()
+            expect(work.rendered_expression).to_contain("queries.length")
+            expect(work.rendered_expression).to_contain("items.length")
+            expect(res.findings.len()).to_equal(1)
+            expect(res.findings[0].rule_code).to_equal("PERF-COST-001")
+
+        it "traverses a deeply nested 120-node loop/sequence structure in one linear iterative pass (I11)":
+            """Visits each node exactly once without recursive blowup or quadratic subtree rescanning."""
+            var current = PerfBodyNodeV1.StepWork(CostExprV1.Const(1), "leaf", pcp_span(120))
+            var depth = 0
+            while depth < 119:
+                current = PerfBodyNodeV1.LoopRegion(
+                    PerfLoopShapeV1.ConstantTrip(1),
+                    current,
+                    pcp_span(depth + 1)
+                )
+                depth = depth + 1
+            val model = PerfFunctionModelV1(
+                function_id: "deep_nested_fn",
+                function_symbol_id: 901,
+                file: "src/deep.spl",
+                primary_span: pcp_span(1),
+                semantic_revision: "rev-deep-1",
+                size_parameters: [],
+                size_relations: [],
+                callback_cost_parameters: [],
+                effects_summary_id: "eff:pure",
+                output_cardinality: CostExprV1.Const(1),
+                body: current
+            )
+            val empty_callees: Dict<text, FunctionCostSummaryV1> = {}
+            val res = summarize_function_model_v1(model, empty_callees, default_perf_summarizer_config_v1())
+            expect(res.nodes_visited).to_equal(120)
+            val work = find_resource_bound_v1(res.summary, PerfResourceDimension.Work).unwrap()
+            expect(render_big_o_v1(work.expression)).to_equal("O(1)")
+
+    context "caller cost propagation, callbacks, captures, and recursive SCCs (C07, C08, C09, C14)":
+        """Propagates parameterized summaries across call graphs with provenance and cascade deduplication."""
+
+        it "propagates linear helper count_matches(m) into count_for_all(n) as O(n*m) with cause chain and deduplicates pass-through callers (C07)":
+            """Emits PERF-COST-001 at count_for_all with ProvenanceEdgeV1 chain and suppresses duplicate pass-through cascade."""
+            val m_param = SizeParameterV1(param_name: "records", measure: SizeMeasureKind.Length, canonical_var: "m")
+            val n_param = SizeParameterV1(param_name: "keys", measure: SizeMeasureKind.Length, canonical_var: "n")
+
+            val count_matches_model = PerfFunctionModelV1(
+                function_id: "count_matches",
+                function_symbol_id: 10,
+                file: "src/match.spl",
+                primary_span: pcp_span(10),
+                semantic_revision: "rev-1",
+                size_parameters: [m_param],
+                size_relations: [],
+                callback_cost_parameters: [],
+                effects_summary_id: "eff:read_only",
+                output_cardinality: CostExprV1.Const(1),
+                body: PerfBodyNodeV1.LoopRegion(
+                    PerfLoopShapeV1.LinearScan(CostExprV1.Size("records", SizeMeasureKind.Length)),
+                    PerfBodyNodeV1.StepWork(CostExprV1.Const(1), "record.key == key", pcp_span(12)),
+                    pcp_span(11)
+                )
+            )
+
+            val count_for_all_model = PerfFunctionModelV1(
+                function_id: "count_for_all",
+                function_symbol_id: 20,
+                file: "src/match.spl",
+                primary_span: pcp_span(20),
+                semantic_revision: "rev-1",
+                size_parameters: [n_param, m_param],
+                size_relations: [],
+                callback_cost_parameters: [],
+                effects_summary_id: "eff:alloc_result",
+                output_cardinality: CostExprV1.Size("keys", SizeMeasureKind.Length),
+                body: PerfBodyNodeV1.LoopRegion(
+                    PerfLoopShapeV1.LinearScan(CostExprV1.Size("keys", SizeMeasureKind.Length)),
+                    PerfBodyNodeV1.CalleeCall(
+                        "count_matches",
+                        10,
+                        [PerfCallArgBindingV1(
+                            formal_param: "records",
+                            actual_size: CostExprV1.Size("records", SizeMeasureKind.Length)
+                        )],
+                        [],
+                        CostExprV1.Const(1),
+                        pcp_span(23)
+                    ),
+                    pcp_span(22)
+                )
+            )
+
+            val passthrough_caller = PerfFunctionModelV1(
+                function_id: "render_match_report",
+                function_symbol_id: 30,
+                file: "src/report.spl",
+                primary_span: pcp_span(40),
+                semantic_revision: "rev-1",
+                size_parameters: [n_param, m_param],
+                size_relations: [],
+                callback_cost_parameters: [],
+                effects_summary_id: "eff:alloc_result",
+                output_cardinality: CostExprV1.Size("keys", SizeMeasureKind.Length),
+                body: PerfBodyNodeV1.CalleeCall(
+                    "count_for_all",
+                    20,
+                    [
+                        PerfCallArgBindingV1(
+                            formal_param: "keys",
+                            actual_size: CostExprV1.Size("keys", SizeMeasureKind.Length)
+                        ),
+                        PerfCallArgBindingV1(
+                            formal_param: "records",
+                            actual_size: CostExprV1.Size("records", SizeMeasureKind.Length)
+                        )
+                    ],
+                    [],
+                    CostExprV1.Const(1),
+                    pcp_span(42)
+                )
+            )
+
+            val prop = propagate_call_graph_v1(
+                [count_matches_model, count_for_all_model, passthrough_caller],
+                default_perf_summarizer_config_v1()
+            )
+            val caller_summary = prop.summaries["count_for_all"]
+            val caller_work = find_resource_bound_v1(caller_summary, PerfResourceDimension.Work).unwrap()
+            expect(render_big_o_with_params_v1(
+                caller_work.expression,
+                caller_summary.size_parameters,
+                caller_summary.size_relations
+            )).to_equal("O(n*m)")
+
+            var cost_findings_for_root = 0
+            var cost_findings_for_passthrough = 0
+            for f in prop.findings:
+                if f.rule_code == "PERF-COST-001":
+                    if f.function_id == "count_for_all":
+                        cost_findings_for_root = cost_findings_for_root + 1
+                        expect(f.related_locations.len()).to_be_greater_than(1)
+                        expect(f.message).to_contain("O(n*m)")
+                        expect(f.fix_candidates.len()).to_equal(1)
+                        expect(f.fix_candidates[0].applicability.name()).to_equal("ReviewRequired")
+                    if f.function_id == "render_match_report":
+                        cost_findings_for_passthrough = cost_findings_for_passthrough + 1
+            expect(cost_findings_for_root).to_equal(1)
+            expect(cost_findings_for_passthrough).to_equal(0)
+
+        it "retains outer traversal plus UnknownTerm callback cost and emits PERF-ANALYSIS-001 for unknown callbacks (C08)":
+            """Never treats an unknown callback inside a traversal as zero or constant cost."""
+            val items_param = SizeParameterV1(param_name: "items", measure: SizeMeasureKind.Length, canonical_var: "n")
+            val apply_each = PerfFunctionModelV1(
+                function_id: "apply_each_unknown",
+                function_symbol_id: 40,
+                file: "src/cb.spl",
+                primary_span: pcp_span(50),
+                semantic_revision: "rev-cb-1",
+                size_parameters: [items_param],
+                size_relations: [],
+                callback_cost_parameters: ["pred"],
+                effects_summary_id: "eff:callback",
+                output_cardinality: CostExprV1.Size("items", SizeMeasureKind.Length),
+                body: PerfBodyNodeV1.LoopRegion(
+                    PerfLoopShapeV1.LinearScan(CostExprV1.Size("items", SizeMeasureKind.Length)),
+                    PerfBodyNodeV1.CallbackInvoke("pred", CostExprV1.Const(1), pcp_span(52)),
+                    pcp_span(51)
+                )
+            )
+            val caller_unknown_cb = PerfFunctionModelV1(
+                function_id: "run_with_opaque_cb",
+                function_symbol_id: 41,
+                file: "src/cb.spl",
+                primary_span: pcp_span(60),
+                semantic_revision: "rev-cb-1",
+                size_parameters: [items_param],
+                size_relations: [],
+                callback_cost_parameters: [],
+                effects_summary_id: "eff:unknown",
+                output_cardinality: CostExprV1.Size("items", SizeMeasureKind.Length),
+                body: PerfBodyNodeV1.CalleeCall(
+                    "apply_each_unknown",
+                    40,
+                    [PerfCallArgBindingV1(
+                        formal_param: "items",
+                        actual_size: CostExprV1.Size("items", SizeMeasureKind.Length)
+                    )],
+                    [PerfCallbackBindingV1(
+                        formal_callback_param: "pred",
+                        is_known: false,
+                        body_cost: CostExprV1.UnknownTerm("opaque_callback_pred"),
+                        captured_sizes: [],
+                        unknown_reason: "opaque_callback_pred"
+                    )],
+                    CostExprV1.Const(1),
+                    pcp_span(62)
+                )
+            )
+            val prop = propagate_call_graph_v1([apply_each, caller_unknown_cb], default_perf_summarizer_config_v1())
+            val summary = prop.summaries["run_with_opaque_cb"]
+            val work = find_resource_bound_v1(summary, PerfResourceDimension.Work).unwrap()
+            expect(cost_expr_has_unknown_v1(work.expression)).to_equal(true)
+            expect(work.rendered_expression).to_contain("n")
+            expect(work.rendered_expression).to_contain("unknown(")
+            expect(summary.unresolved_terms.len()).to_be_greater_than(0)
+
+            var has_analysis_note = false
+            for f in prop.findings:
+                if f.function_id == "run_with_opaque_cb" and f.rule_code == "PERF-ANALYSIS-001":
+                    has_analysis_note = true
+            expect(has_analysis_note).to_equal(true)
+
+        it "includes captured collection size and callback scan cost when a callback scans a capture (C09)":
+            """Mapping a closure that scans captured orders(m) over users(n) propagates m and yields O(n*m)."""
+            val users_param = SizeParameterV1(param_name: "users", measure: SizeMeasureKind.Length, canonical_var: "n")
+            val orders_capture = SizeParameterV1(param_name: "orders", measure: SizeMeasureKind.Length, canonical_var: "m")
+            val map_helper = PerfFunctionModelV1(
+                function_id: "map_users",
+                function_symbol_id: 50,
+                file: "src/capture.spl",
+                primary_span: pcp_span(70),
+                semantic_revision: "rev-cap-1",
+                size_parameters: [users_param],
+                size_relations: [],
+                callback_cost_parameters: ["mapper"],
+                effects_summary_id: "eff:pure",
+                output_cardinality: CostExprV1.Size("users", SizeMeasureKind.Length),
+                body: PerfBodyNodeV1.LoopRegion(
+                    PerfLoopShapeV1.LinearScan(CostExprV1.Size("users", SizeMeasureKind.Length)),
+                    PerfBodyNodeV1.CallbackInvoke("mapper", CostExprV1.Const(1), pcp_span(72)),
+                    pcp_span(71)
+                )
+            )
+            val caller_with_capture = PerfFunctionModelV1(
+                function_id: "match_captured_orders",
+                function_symbol_id: 51,
+                file: "src/capture.spl",
+                primary_span: pcp_span(80),
+                semantic_revision: "rev-cap-1",
+                size_parameters: [users_param],
+                size_relations: [],
+                callback_cost_parameters: [],
+                effects_summary_id: "eff:pure",
+                output_cardinality: CostExprV1.Size("users", SizeMeasureKind.Length),
+                body: PerfBodyNodeV1.CalleeCall(
+                    "map_users",
+                    50,
+                    [PerfCallArgBindingV1(
+                        formal_param: "users",
+                        actual_size: CostExprV1.Size("users", SizeMeasureKind.Length)
+                    )],
+                    [PerfCallbackBindingV1(
+                        formal_callback_param: "mapper",
+                        is_known: true,
+                        body_cost: CostExprV1.Size("orders", SizeMeasureKind.Length),
+                        captured_sizes: [orders_capture],
+                        unknown_reason: ""
+                    )],
+                    CostExprV1.Const(1),
+                    pcp_span(82)
+                )
+            )
+            val prop = propagate_call_graph_v1([map_helper, caller_with_capture], default_perf_summarizer_config_v1())
+            val summary = prop.summaries["match_captured_orders"]
+            expect(summary.size_parameters.len()).to_equal(2)
+            val work = find_resource_bound_v1(summary, PerfResourceDimension.Work).unwrap()
+            expect(render_big_o_with_params_v1(
+                work.expression,
+                summary.size_parameters,
+                summary.size_relations
+            )).to_equal("O(n*m)")
+
+        it "bounds mutual recursion SCCs via Tarjan cycle detection and emits UnknownTerm(recursive_scc) + PERF-ANALYSIS-001 (C14)":
+            """Mutual recursion ping <-> pong terminates cleanly with explicit recursive_scc unknown status."""
+            val ping = PerfFunctionModelV1(
+                function_id: "ping",
+                function_symbol_id: 60,
+                file: "src/rec.spl",
+                primary_span: pcp_span(90),
+                semantic_revision: "rev-rec-1",
+                size_parameters: [],
+                size_relations: [],
+                callback_cost_parameters: [],
+                effects_summary_id: "eff:rec",
+                output_cardinality: CostExprV1.Const(1),
+                body: PerfBodyNodeV1.CalleeCall("pong", 61, [], [], CostExprV1.Const(1), pcp_span(91))
+            )
+            val pong = PerfFunctionModelV1(
+                function_id: "pong",
+                function_symbol_id: 61,
+                file: "src/rec.spl",
+                primary_span: pcp_span(95),
+                semantic_revision: "rev-rec-1",
+                size_parameters: [],
+                size_relations: [],
+                callback_cost_parameters: [],
+                effects_summary_id: "eff:rec",
+                output_cardinality: CostExprV1.Const(1),
+                body: PerfBodyNodeV1.CalleeCall("ping", 60, [], [], CostExprV1.Const(1), pcp_span(96))
+            )
+            val prop = propagate_call_graph_v1([ping, pong], default_perf_summarizer_config_v1())
+            expect(prop.recursive_sccs.len()).to_equal(1)
+            val ping_summary = prop.summaries["ping"]
+            expect(ping_summary.unresolved_terms).to_contain("recursive_scc")
+            val ping_work = find_resource_bound_v1(ping_summary, PerfResourceDimension.Work).unwrap()
+            expect(ping_work.rendered_expression).to_contain("recursive_scc")
+            expect(ping_work.status.name()).to_equal("Unknown")
+
+            var rec_notes = 0
+            for f in prop.findings:
+                if f.rule_code == "PERF-ANALYSIS-001" and (f.function_id == "ping" or f.function_id == "pong"):
+                    rec_notes = rec_notes + 1
+            expect(rec_notes).to_equal(2)

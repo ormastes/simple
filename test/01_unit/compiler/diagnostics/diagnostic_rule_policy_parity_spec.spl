@@ -48,7 +48,7 @@ describe "DiagnosticRulePolicy completeness and cross-layer parity (ED-T26, ED-T
     """Verifies seeded rule coverage, deterministic resolution, digest exposure, and lint/driver parity."""
 
     context "ED-T26: complete seeded policy bindings, deterministic resolve inputs, and digest accessors":
-        """Proves lint_policy_rule_ids covers all 14 seeded rules and resolves via snapshot.resolve."""
+        """Proves lint_policy_rule_ids covers all 23 seeded rules and resolves via snapshot.resolve."""
 
         it "binds every seeded rule in config/policy/diagnostic_policy.sdn into lint_policy_rule_ids and build_default_levels":
             """Verifies 100% coverage of shipped DiagnosticRulePolicy rules in lint configuration."""
@@ -60,10 +60,42 @@ describe "DiagnosticRulePolicy completeness and cross-layer parity (ED-T26, ED-T
                 expect(defaults.contains_key(lint_name)).to_be(true)
                 bound_codes.push(bindings[lint_name])
 
+            expect(snapshot.rule_count()).to_equal(23)
             expect(bound_codes.len()).to_equal(snapshot.rule_count())
             for rule in snapshot.rules:
                 expect(bound_codes).to_contain(rule.rule_id)
                 expect(lint_policy_code_for_rule(rule.rule_id)).to_equal(rule.rule_id)
+
+        it "binds all nine PERF-* rules bijectively and overlays contract/fix levels accurately":
+            """Verifies PERF-STYLE/COST/ALLOC/ALG/CONTRACT/ANALYSIS/FIX bindings and mode overlays."""
+            val snapshot = shipped_policy()
+            val bindings = lint_policy_rule_ids()
+            expect(bindings["perf_loop_idiom_style"]).to_equal("PERF-STYLE-001")
+            expect(bindings["perf_repeated_scan_cost"]).to_equal("PERF-COST-001")
+            expect(bindings["perf_complexity_bound_increase"]).to_equal("PERF-COST-002")
+            expect(bindings["perf_avoidable_materialization"]).to_equal("PERF-ALLOC-001")
+            expect(bindings["perf_algorithm_redesign"]).to_equal("PERF-ALG-001")
+            expect(bindings["perf_resource_contract_refuted"]).to_equal("PERF-CONTRACT-001")
+            expect(bindings["perf_resource_contract_unproved"]).to_equal("PERF-CONTRACT-002")
+            expect(bindings["perf_analysis_coverage_note"]).to_equal("PERF-ANALYSIS-001")
+            expect(bindings["perf_fix_blocked_precondition"]).to_equal("PERF-FIX-001")
+
+            val strict_levels = policy_overlay_levels_with_context(
+                profile_table_levels(LintProfile.Strict),
+                Some(snapshot), "strict", "2026.11", false,
+                "x86_64-unknown-linux-gnu", "src/app/demo.spl")
+            val verified_levels = policy_overlay_levels_with_context(
+                profile_table_levels(LintProfile.Critical),
+                Some(snapshot), "verified", "2026.11", false,
+                "x86_64-unknown-linux-gnu", "src/app/demo.spl")
+
+            expect(strict_levels["perf_resource_contract_refuted"]).to_equal("deny")
+            expect(strict_levels["perf_resource_contract_unproved"]).to_equal("warn")
+            expect(strict_levels["perf_fix_blocked_precondition"]).to_equal("allow")
+            expect(verified_levels["perf_resource_contract_refuted"]).to_equal("deny")
+            expect(verified_levels["perf_resource_contract_unproved"]).to_equal("deny")
+            expect(verified_levels["perf_analysis_coverage_note"]).to_equal("warn")
+            expect(verified_levels["perf_fix_blocked_precondition"]).to_equal("allow")
 
         it "resolves edition promotions, profile baselines, and security non-downgrade deterministically without wall-clock dates":
             """Proves policy_overlay_levels_with_context and LintConfig honour edition 2026.11 vs 2027.2 and security rules."""

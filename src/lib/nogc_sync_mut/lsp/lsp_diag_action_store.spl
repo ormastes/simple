@@ -1,7 +1,8 @@
 # Per-client, per-URI fix-candidate and last-valid diagnostic batch store
-# (REQ-DIAG-011). The live codeAction handler answers from this store when it
-# holds complete candidates for that client's CURRENT document version; failed,
-# timed-out, malformed, or stale batches never overwrite a valid entry.
+# (REQ-DIAG-011, Wave F5 §11.2 / I01 / I02). The live codeAction and
+# codeAction/resolve handlers answer from this store when it holds complete
+# candidates for that client's CURRENT document version and semantic_fingerprint;
+# failed, timed-out, malformed, or stale batches never overwrite a valid entry.
 use std.common.diagnostics.diagnostic_batch.{DiagnosticActionIndex}
 
 pub struct LspDiagActionFileRevV1:
@@ -9,6 +10,17 @@ pub struct LspDiagActionFileRevV1:
     version: i64
     source_hash: text
     from_overlay: bool = true
+
+pub struct LspDiagActionCandidateMetaV1:
+    candidate_id: text
+    diagnostic_id: text = ""
+    rule_code: text = ""
+    fix_kind: text = ""
+    applicability: text = ""
+    expected_semantic_fingerprint: text = ""
+    obligations_summary: [text] = []
+    resource_tradeoff: text = ""
+    line_hint: i64 = -1
 
 pub struct LspDiagActionEntry:
     client_id: text = "default"
@@ -21,12 +33,126 @@ pub struct LspDiagActionEntry:
     index: DiagnosticActionIndex
     ids: [text]
     file_revisions: [LspDiagActionFileRevV1] = []
+    semantic_fingerprint: text = ""
+    expected_semantic_fingerprint: text = ""
+    obligations_summary: [text] = []
+    resource_tradeoff: text = ""
+    candidate_meta: [LspDiagActionCandidateMetaV1] = []
+
+struct _LspSemanticFingerprintEntryV1:
+    client_id: text
+    uri: text
+    semantic_fingerprint: text
 
 var LSP_DIAG_ACTION_ENTRIES: [LspDiagActionEntry] = []
+var _LSP_SEMANTIC_FINGERPRINTS: [_LspSemanticFingerprintEntryV1] = []
 
 fn _store_client_id(client_id: text) -> text:
     val t = client_id.trim()
     if t == "": "default" else: t
+
+# reason: updates server-side active semantic dependency fingerprint for client_id and URI (I02)
+@allow(primitive_api)
+pub fn lsp_perf_set_semantic_fingerprint_for_client_v1(client_id: text, uri: text, semantic_fingerprint: text):
+    val norm_client = _store_client_id(client_id)
+    var kept: [_LspSemanticFingerprintEntryV1] = []
+    for f in _LSP_SEMANTIC_FINGERPRINTS:
+        if not (f.client_id == norm_client and f.uri == uri):
+            kept.push(f)
+    if kept.len() >= 128:
+        var trimmed: [_LspSemanticFingerprintEntryV1] = []
+        var ti = 1
+        while ti < kept.len():
+            trimmed.push(kept[ti])
+            ti = ti + 1
+        kept = trimmed
+    kept.push(_LspSemanticFingerprintEntryV1(
+        client_id: norm_client,
+        uri: uri,
+        semantic_fingerprint: semantic_fingerprint
+    ))
+    _LSP_SEMANTIC_FINGERPRINTS = kept
+
+    var updated_entries: [LspDiagActionEntry] = []
+    for e in LSP_DIAG_ACTION_ENTRIES:
+        if e.client_id == norm_client and e.uri == uri:
+            var copy = e
+            copy.semantic_fingerprint = semantic_fingerprint
+            updated_entries.push(copy)
+        else:
+            updated_entries.push(e)
+    LSP_DIAG_ACTION_ENTRIES = updated_entries
+
+# reason: queries server-side active semantic dependency fingerprint for client_id and URI
+@allow(primitive_api)
+pub fn lsp_perf_get_semantic_fingerprint_for_client_v1(client_id: text, uri: text) -> text:
+    val norm_client = _store_client_id(client_id)
+    for f in _LSP_SEMANTIC_FINGERPRINTS:
+        if f.client_id == norm_client and f.uri == uri:
+            return f.semantic_fingerprint
+    ""
+
+# reason: clears server-side semantic dependency fingerprint for client_id and URI
+@allow(primitive_api)
+pub fn lsp_perf_clear_semantic_fingerprint_for_client_v1(client_id: text, uri: text):
+    val norm_client = _store_client_id(client_id)
+    var kept: [_LspSemanticFingerprintEntryV1] = []
+    for f in _LSP_SEMANTIC_FINGERPRINTS:
+        if not (f.client_id == norm_client and f.uri == uri):
+            kept.push(f)
+    _LSP_SEMANTIC_FINGERPRINTS = kept
+
+# reason: looks up candidate perf metadata by candidate_id on an LspDiagActionEntry
+@allow(primitive_api)
+pub fn lsp_diag_candidate_meta_lookup_v1(entry: LspDiagActionEntry, candidate_id: text) -> Option<LspDiagActionCandidateMetaV1>:
+    for m in entry.candidate_meta:
+        if m.candidate_id == candidate_id:
+            return Some(m)
+    None
+
+# reason: records per-client diagnostic action store entry with perf semantic fingerprint, obligations, and candidate metadata
+@allow(primitive_api)
+pub fn lsp_diag_action_store_record_perf_for_client_v1(
+    client_id: text,
+    uri: text,
+    version: i64,
+    source_hash: text,
+    status: text,
+    valid: bool,
+    items: [text],
+    index: DiagnosticActionIndex,
+    ids: [text],
+    file_revisions: [LspDiagActionFileRevV1],
+    semantic_fingerprint: text,
+    expected_semantic_fingerprint: text,
+    obligations_summary: [text],
+    resource_tradeoff: text,
+    candidate_meta: [LspDiagActionCandidateMetaV1]
+):
+    val norm_client = _store_client_id(client_id)
+    if not valid or status != "complete":
+        return
+    lsp_diag_action_store_clear_for_client_v1(norm_client, uri)
+    val resolved_expected = if expected_semantic_fingerprint != "": expected_semantic_fingerprint else: semantic_fingerprint
+    if semantic_fingerprint != "":
+        lsp_perf_set_semantic_fingerprint_for_client_v1(norm_client, uri, semantic_fingerprint)
+    LSP_DIAG_ACTION_ENTRIES.push(LspDiagActionEntry(
+        client_id: norm_client,
+        uri: uri,
+        version: version,
+        source_hash: source_hash,
+        status: status,
+        valid: valid,
+        items: items,
+        index: index,
+        ids: ids,
+        file_revisions: file_revisions,
+        semantic_fingerprint: semantic_fingerprint,
+        expected_semantic_fingerprint: resolved_expected,
+        obligations_summary: obligations_summary,
+        resource_tradeoff: resource_tradeoff,
+        candidate_meta: candidate_meta
+    ))
 
 # reason: records per-client diagnostic action store entry with protocol URI, version, hash, and status
 @allow(primitive_api)
@@ -42,22 +168,10 @@ pub fn lsp_diag_action_store_record_for_client_v1(
     ids: [text],
     file_revisions: [LspDiagActionFileRevV1]
 ):
-    val norm_client = _store_client_id(client_id)
-    if not valid or status != "complete":
-        return
-    lsp_diag_action_store_clear_for_client_v1(norm_client, uri)
-    LSP_DIAG_ACTION_ENTRIES.push(LspDiagActionEntry(
-        client_id: norm_client,
-        uri: uri,
-        version: version,
-        source_hash: source_hash,
-        status: status,
-        valid: valid,
-        items: items,
-        index: index,
-        ids: ids,
-        file_revisions: file_revisions
-    ))
+    lsp_diag_action_store_record_perf_for_client_v1(
+        client_id, uri, version, source_hash, status, valid, items, index, ids, file_revisions,
+        "", "", [], "", []
+    )
 
 # reason: records default-client diagnostic action store entry at document version and hash
 @allow(primitive_api)
@@ -102,7 +216,12 @@ pub fn lsp_diag_action_store_last_valid_for_client_v1(client_id: text, uri: text
             return Some(e)
     None
 
-export LspDiagActionFileRevV1, LspDiagActionEntry
+export LspDiagActionFileRevV1, LspDiagActionCandidateMetaV1, LspDiagActionEntry
+export lsp_perf_set_semantic_fingerprint_for_client_v1
+export lsp_perf_get_semantic_fingerprint_for_client_v1
+export lsp_perf_clear_semantic_fingerprint_for_client_v1
+export lsp_diag_candidate_meta_lookup_v1
+export lsp_diag_action_store_record_perf_for_client_v1
 export lsp_diag_action_store_record_for_client_v1, lsp_diag_action_store_record
 export lsp_diag_action_store_clear_for_client_v1, lsp_diag_action_store_clear
 export lsp_diag_action_store_lookup_for_client_v1, lsp_diag_action_store_lookup

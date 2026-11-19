@@ -1,0 +1,519 @@
+# Typed-HIR Function Context, Callback Purity, and Builder-Escape Verifier for PERF-* Lint Rules
+#
+# Provides read-only HIR verification helpers used by `perf_analysis_rule.spl`
+# to eliminate spelling-based `VerifiedSafe` loop rewrites (D06, D10, S01..S06,
+# S11, S13, S18) and spelling-based `PERF-COST-001` receiver false positives (D02, S13).
+
+use compiler.hir.hir_definitions.{
+    HirBlock, HirExpr, HirExprKind, HirFunction, HirModule, HirStmt, HirStmtKind
+}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.semantics.perf_facts.types.{
+    CollectionOperationRegistry, CollectionOperationSummary,
+    HirPerfAllocationClass, HirPerfCardinality, HirPerfCostClass,
+    HirPerfEffectFacts, HirPerfEnumerationClass, HirPerfOperationKind,
+    HirPerfReceiverKind
+}
+
+pub val PERF_LINT_ARRAY_APPEND_SYM: i64 = 9001
+
+pub struct HirFnPerfContextV1:
+    function: HirFunction
+    is_nogc: bool
+    sym_names: Dict<i64, text>
+    sym_mutable: Dict<i64, bool>
+    sym_types: Dict<i64, HirType>
+    binding_types: Dict<text, HirType>
+    ambiguous_names: Dict<text, bool>
+
+pub struct HirExprPurityScanV1:
+    refs_builder: bool
+    reads_mutable_or_unknown_var: bool
+    has_unknown_call_effect: bool
+    has_try_or_throw: bool
+    has_await_or_yield: bool
+    has_inner_return: bool
+    has_break_or_continue: bool
+
+pub struct HirBuilderSiteCheckV1:
+    matched_hir_pair: bool
+    builder_is_fresh_array: bool
+    iter_is_linear_seq: bool
+    aliases_input: bool
+    post_or_other_mutation: bool
+    purity: HirExprPurityScanV1
+
+pub fn default_perf_lint_registry_v1() -> CollectionOperationRegistry:
+    var reg = CollectionOperationRegistry.new("stdlib-perf-v1")
+    reg.register(CollectionOperationSummary(
+        symbol_id: PERF_LINT_ARRAY_APPEND_SYM,
+        stable_name: "Array.push",
+        operation: HirPerfOperationKind.Append,
+        cost: HirPerfCostClass.AmortizedConstant,
+        output_cardinality: HirPerfCardinality.SameAsReceiver,
+        enumeration: HirPerfEnumerationClass.None,
+        expected_receiver: HirPerfReceiverKind.Array,
+        signature_fingerprint: "Array<T>.push(T)->Unit",
+        explicit_argument_count: 1,
+        effects: HirPerfEffectFacts(
+            reads: true, writes: true, allocates: true, throws: false,
+            suspends: false, observable: false, unknown: false
+        ),
+        allocation: HirPerfAllocationClass.BoundedPool,
+        preserves_order: true,
+        materializes: false,
+        metadata_version: "stdlib-perf-v1",
+        provenance: "stdlib/array.spl",
+        evidence_receipt: "receipt-array-push-v1"
+    ))
+    reg
+
+# reason: returns boolean classification of resolved HIR sequence receiver kind
+@allow(primitive_api)
+pub fn hir_type_is_linear_seq_v1(t: HirType) -> bool:
+    match t.kind:
+        case HirTypeKind.Array(_, _): true
+        case HirTypeKind.Slice(_): true
+        case HirTypeKind.Ref(inner, _): hir_type_is_linear_seq_v1(inner)
+        case HirTypeKind.Isolated(inner): hir_type_is_linear_seq_v1(inner)
+        case _: false
+
+fn _hir_type_is_pure_scalar(t: HirType) -> bool:
+    match t.kind:
+        case HirTypeKind.Int(_, _): true
+        case HirTypeKind.Float(_): true
+        case HirTypeKind.Bool: true
+        case HirTypeKind.Char: true
+        case HirTypeKind.Str: true
+        case HirTypeKind.Ref(inner, mutable): (not mutable) and _hir_type_is_pure_scalar(inner)
+        case _: false
+
+fn _hir_expr_var_sym_id(expr: HirExpr) -> i64:
+    match expr.kind:
+        case HirExprKind.Var(sym): sym.id
+        case HirExprKind.NamedVar(sym, _): sym.id
+        case _: -1
+
+enum _HirCollectItemV1:
+    BlockItem(block: HirBlock)
+    ExprItem(expr: HirExpr)
+
+# reason: nogc_from_src is a boolean annotation presence flag from the declaration header
+@allow(primitive_api)
+pub fn build_hir_fn_perf_context_v1(hir_mod: HirModule, fn_hir: HirFunction, nogc_from_src: bool) -> HirFnPerfContextV1:
+    var sym_names: Dict<i64, text> = {}
+    var sym_mutable: Dict<i64, bool> = {}
+    var sym_types: Dict<i64, HirType> = {}
+    var binding_types: Dict<text, HirType> = {}
+    var ambiguous: Dict<text, bool> = {}
+
+    for sym in hir_mod.symbols.symbols.values():
+        sym_names[sym.id.id] = sym.name
+        sym_mutable[sym.id.id] = sym.is_mutable
+
+    for p in fn_hir.params:
+        sym_names[p.symbol.id] = p.name
+        sym_mutable[p.symbol.id] = p.is_mutable
+        sym_types[p.symbol.id] = p.type_
+        binding_types[p.name] = p.type_
+
+    var work: [_HirCollectItemV1] = [_HirCollectItemV1.BlockItem(fn_hir.body)]
+    while work.len() > 0:
+        val item = work.pop()
+        match item:
+            case _HirCollectItemV1.BlockItem(block):
+                if block.has:
+                    work.push(_HirCollectItemV1.ExprItem(block.value))
+                var si = block.stmts.len() - 1
+                while si >= 0:
+                    val st = block.stmts[si]
+                    match st.kind:
+                        case HirStmtKind.Let(lsym, let_ty, init):
+                            sym_types[lsym.id] = let_ty
+                            if sym_names.contains_key(lsym.id):
+                                val nm = sym_names[lsym.id]
+                                if nm != "":
+                                    if binding_types.contains_key(nm):
+                                        ambiguous[nm] = true
+                                    else:
+                                        binding_types[nm] = let_ty
+                            work.push(_HirCollectItemV1.ExprItem(init))
+                        case HirStmtKind.Assign(_, _, rhs):
+                            work.push(_HirCollectItemV1.ExprItem(rhs))
+                        case HirStmtKind.Expr(e):
+                            work.push(_HirCollectItemV1.ExprItem(e))
+                        case HirStmtKind.Block(inner):
+                            work.push(_HirCollectItemV1.BlockItem(inner))
+                        case _:
+                            pass_do_nothing
+                    si = si - 1
+            case _HirCollectItemV1.ExprItem(expr):
+                match expr.kind:
+                    case HirExprKind.For(_, iter_e, body_b, _):
+                        work.push(_HirCollectItemV1.BlockItem(body_b))
+                        work.push(_HirCollectItemV1.ExprItem(iter_e))
+                    case HirExprKind.While(cond_e, body_b, _):
+                        work.push(_HirCollectItemV1.BlockItem(body_b))
+                        work.push(_HirCollectItemV1.ExprItem(cond_e))
+                    case HirExprKind.Loop(body_b, _):
+                        work.push(_HirCollectItemV1.BlockItem(body_b))
+                    case HirExprKind.If(cond_e, then_b, else_opt):
+                        match else_opt:
+                            case Some(eb): work.push(_HirCollectItemV1.BlockItem(eb))
+                            case None: pass_do_nothing
+                        work.push(_HirCollectItemV1.BlockItem(then_b))
+                        work.push(_HirCollectItemV1.ExprItem(cond_e))
+                    case HirExprKind.Block(inner_b):
+                        work.push(_HirCollectItemV1.BlockItem(inner_b))
+                    case _:
+                        pass_do_nothing
+
+    HirFnPerfContextV1(
+        function: fn_hir,
+        is_nogc: fn_hir.effect_region == "nogc" or nogc_from_src,
+        sym_names: sym_names,
+        sym_mutable: sym_mutable,
+        sym_types: sym_types,
+        binding_types: binding_types,
+        ambiguous_names: ambiguous
+    )
+
+fn _clean_purity_scan() -> HirExprPurityScanV1:
+    HirExprPurityScanV1(
+        refs_builder: false,
+        reads_mutable_or_unknown_var: false,
+        has_unknown_call_effect: false,
+        has_try_or_throw: false,
+        has_await_or_yield: false,
+        has_inner_return: false,
+        has_break_or_continue: false
+    )
+
+fn _merge_purity_scan(a: HirExprPurityScanV1, b: HirExprPurityScanV1) -> HirExprPurityScanV1:
+    HirExprPurityScanV1(
+        refs_builder: a.refs_builder or b.refs_builder,
+        reads_mutable_or_unknown_var: a.reads_mutable_or_unknown_var or b.reads_mutable_or_unknown_var,
+        has_unknown_call_effect: a.has_unknown_call_effect or b.has_unknown_call_effect,
+        has_try_or_throw: a.has_try_or_throw or b.has_try_or_throw,
+        has_await_or_yield: a.has_await_or_yield or b.has_await_or_yield,
+        has_inner_return: a.has_inner_return or b.has_inner_return,
+        has_break_or_continue: a.has_break_or_continue or b.has_break_or_continue
+    )
+
+fn _analyze_hir_var_purity(
+    sym_id: i64,
+    ind_sym_id: i64,
+    builder_sym_id: i64,
+    ctx: HirFnPerfContextV1
+) -> HirExprPurityScanV1:
+    var res = _clean_purity_scan()
+    if sym_id == builder_sym_id:
+        res.refs_builder = true
+    elif sym_id == ind_sym_id:
+        pass_do_nothing
+    elif ctx.sym_mutable.contains_key(sym_id) and (not ctx.sym_mutable[sym_id]) and ctx.sym_types.contains_key(sym_id) and _hir_type_is_pure_scalar(ctx.sym_types[sym_id]):
+        pass_do_nothing
+    else:
+        res.reads_mutable_or_unknown_var = true
+    res
+
+fn _analyze_hir_transform_purity(
+    expr: HirExpr,
+    ind_sym_id: i64,
+    builder_sym_id: i64,
+    ctx: HirFnPerfContextV1
+) -> HirExprPurityScanV1:
+    var res = _clean_purity_scan()
+    match expr.kind:
+        case HirExprKind.IntLit(_, _):
+            return res
+        case HirExprKind.FloatLit(_, _):
+            return res
+        case HirExprKind.BoolLit(_):
+            return res
+        case HirExprKind.CharLit(_):
+            return res
+        case HirExprKind.StringLit(_, interp_opt):
+            match interp_opt:
+                case Some(interps):
+                    for it in interps:
+                        res = _merge_purity_scan(res, _analyze_hir_transform_purity(it.expr, ind_sym_id, builder_sym_id, ctx))
+                case None:
+                    pass_do_nothing
+            return res
+        case HirExprKind.Var(sym):
+            return _analyze_hir_var_purity(sym.id, ind_sym_id, builder_sym_id, ctx)
+        case HirExprKind.NamedVar(sym, _):
+            return _analyze_hir_var_purity(sym.id, ind_sym_id, builder_sym_id, ctx)
+        case HirExprKind.Unary(_, inner):
+            return _analyze_hir_transform_purity(inner, ind_sym_id, builder_sym_id, ctx)
+        case HirExprKind.Binary(_, left, right):
+            val lp = _analyze_hir_transform_purity(left, ind_sym_id, builder_sym_id, ctx)
+            val rp = _analyze_hir_transform_purity(right, ind_sym_id, builder_sym_id, ctx)
+            return _merge_purity_scan(lp, rp)
+        case HirExprKind.Try(inner):
+            res.has_try_or_throw = true
+            return _merge_purity_scan(res, _analyze_hir_transform_purity(inner, ind_sym_id, builder_sym_id, ctx))
+        case HirExprKind.Throw(inner):
+            res.has_try_or_throw = true
+            return _merge_purity_scan(res, _analyze_hir_transform_purity(inner, ind_sym_id, builder_sym_id, ctx))
+        case HirExprKind.Unwrap(inner):
+            res.has_try_or_throw = true
+            return _merge_purity_scan(res, _analyze_hir_transform_purity(inner, ind_sym_id, builder_sym_id, ctx))
+        case HirExprKind.Await(inner):
+            res.has_await_or_yield = true
+            return _merge_purity_scan(res, _analyze_hir_transform_purity(inner, ind_sym_id, builder_sym_id, ctx))
+        case HirExprKind.Yield(val_opt):
+            res.has_await_or_yield = true
+            match val_opt:
+                case Some(inner):
+                    res = _merge_purity_scan(res, _analyze_hir_transform_purity(inner, ind_sym_id, builder_sym_id, ctx))
+                case None:
+                    pass_do_nothing
+            return res
+        case HirExprKind.Return(val_opt):
+            res.has_inner_return = true
+            match val_opt:
+                case Some(inner):
+                    res = _merge_purity_scan(res, _analyze_hir_transform_purity(inner, ind_sym_id, builder_sym_id, ctx))
+                case None:
+                    pass_do_nothing
+            return res
+        case HirExprKind.Break(_, _):
+            res.has_break_or_continue = true
+            return res
+        case HirExprKind.Continue(_):
+            res.has_break_or_continue = true
+            return res
+        case HirExprKind.Call(callee, args, _):
+            res.has_unknown_call_effect = true
+            res = _merge_purity_scan(res, _analyze_hir_transform_purity(callee, ind_sym_id, builder_sym_id, ctx))
+            for a in args:
+                res = _merge_purity_scan(res, _analyze_hir_transform_purity(a.value, ind_sym_id, builder_sym_id, ctx))
+            return res
+        case HirExprKind.MethodCall(recv, _, args, _):
+            res.has_unknown_call_effect = true
+            res = _merge_purity_scan(res, _analyze_hir_transform_purity(recv, ind_sym_id, builder_sym_id, ctx))
+            for a in args:
+                res = _merge_purity_scan(res, _analyze_hir_transform_purity(a.value, ind_sym_id, builder_sym_id, ctx))
+            return res
+        case _:
+            res.has_unknown_call_effect = true
+            return res
+
+fn _expr_mutates_or_escapes_sym(expr: HirExpr, target_sym_id: i64) -> bool:
+    match expr.kind:
+        case HirExprKind.MethodCall(recv, mname, args, _):
+            if _hir_expr_var_sym_id(recv) == target_sym_id:
+                if mname != "len" and mname != "is_empty" and mname != "iter":
+                    return true
+            if _expr_mutates_or_escapes_sym(recv, target_sym_id):
+                return true
+            for a in args:
+                if _hir_expr_var_sym_id(a.value) == target_sym_id or _expr_mutates_or_escapes_sym(a.value, target_sym_id):
+                    return true
+            return false
+        case HirExprKind.Call(callee, args, _):
+            if _expr_mutates_or_escapes_sym(callee, target_sym_id):
+                return true
+            for a in args:
+                if _hir_expr_var_sym_id(a.value) == target_sym_id or _expr_mutates_or_escapes_sym(a.value, target_sym_id):
+                    return true
+            return false
+        case HirExprKind.Lambda(_, _, captures):
+            for cap in captures:
+                if cap.id == target_sym_id:
+                    return true
+            return false
+        case HirExprKind.Binary(_, l, r):
+            return _expr_mutates_or_escapes_sym(l, target_sym_id) or _expr_mutates_or_escapes_sym(r, target_sym_id)
+        case HirExprKind.Unary(_, inner):
+            return _expr_mutates_or_escapes_sym(inner, target_sym_id)
+        case HirExprKind.If(c, tb, eb_opt):
+            if _expr_mutates_or_escapes_sym(c, target_sym_id) or _block_mutates_or_escapes_sym(tb, target_sym_id, -1, -1, false):
+                return true
+            match eb_opt:
+                case Some(eb):
+                    if _block_mutates_or_escapes_sym(eb, target_sym_id, -1, -1, false):
+                        return true
+                case None:
+                    pass_do_nothing
+            return false
+        case HirExprKind.For(_, it_e, b, _):
+            return _expr_mutates_or_escapes_sym(it_e, target_sym_id) or _block_mutates_or_escapes_sym(b, target_sym_id, -1, -1, false)
+        case HirExprKind.While(c, b, _):
+            return _expr_mutates_or_escapes_sym(c, target_sym_id) or _block_mutates_or_escapes_sym(b, target_sym_id, -1, -1, false)
+        case HirExprKind.Block(b):
+            return _block_mutates_or_escapes_sym(b, target_sym_id, -1, -1, false)
+        case _:
+            return false
+
+fn _block_mutates_or_escapes_sym(
+    block: HirBlock,
+    target_sym_id: i64,
+    skip_idx_a: i64,
+    skip_idx_b: i64,
+    skip_tail_val: bool
+) -> bool:
+    var i = 0
+    while i < block.stmts.len():
+        if i != skip_idx_a and i != skip_idx_b:
+            val st = block.stmts[i]
+            match st.kind:
+                case HirStmtKind.Assign(lhs, _, rhs):
+                    if _hir_expr_var_sym_id(lhs) == target_sym_id or _expr_mutates_or_escapes_sym(lhs, target_sym_id) or _expr_mutates_or_escapes_sym(rhs, target_sym_id):
+                        return true
+                case HirStmtKind.Let(_, _, init):
+                    if _hir_expr_var_sym_id(init) == target_sym_id or _expr_mutates_or_escapes_sym(init, target_sym_id):
+                        return true
+                case HirStmtKind.Expr(e):
+                    if _expr_mutates_or_escapes_sym(e, target_sym_id):
+                        return true
+                case HirStmtKind.Block(inner):
+                    if _block_mutates_or_escapes_sym(inner, target_sym_id, -1, -1, false):
+                        return true
+                case _:
+                    pass_do_nothing
+        i = i + 1
+    if block.has and (not skip_tail_val):
+        if _expr_mutates_or_escapes_sym(block.value, target_sym_id):
+            return true
+    false
+
+fn _single_loop_body_expr(loop_body: HirBlock) -> Option<HirExpr>:
+    if loop_body.has and loop_body.stmts.len() == 0:
+        return Some(loop_body.value)
+    if (not loop_body.has) and loop_body.stmts.len() == 1:
+        match loop_body.stmts[0].kind:
+            case HirStmtKind.Expr(be): return Some(be)
+            case _: return None
+    None
+
+fn _check_let_for_pair(
+    block: HirBlock,
+    ctx: HirFnPerfContextV1,
+    let_idx: i64,
+    for_stmt_idx: i64,
+    for_is_tail_val: bool,
+    b_sym_id: i64,
+    b_ty: HirType,
+    b_init: HirExpr,
+    for_outer: HirExpr,
+    builder_name: text,
+    loop_var: text,
+    iter_src: text
+) -> Option<HirBuilderSiteCheckV1>:
+    match for_outer.kind:
+        case HirExprKind.For(ind_sym, iter_expr, loop_body, label_opt):
+            val has_label = label_opt.?
+            val ind_nm = if ctx.sym_names.contains_key(ind_sym.id): ctx.sym_names[ind_sym.id] else: ""
+            if ind_nm != loop_var or has_label:
+                return None
+            val is_arr_ty = match b_ty.kind:
+                case HirTypeKind.Array(_, _): true
+                case _: false
+            val is_empty_lit = match b_init.kind:
+                case HirExprKind.ArrayLit(elems, _): elems.len() == 0
+                case _: false
+            val iter_sym_id = _hir_expr_var_sym_id(iter_expr)
+            val iter_nm = if iter_sym_id >= 0 and ctx.sym_names.contains_key(iter_sym_id): ctx.sym_names[iter_sym_id] else: ""
+            val iter_linear = (
+                iter_sym_id >= 0 and
+                iter_nm == iter_src and
+                ctx.sym_types.contains_key(iter_sym_id) and
+                hir_type_is_linear_seq_v1(ctx.sym_types[iter_sym_id])
+            )
+            val aliases_in = (iter_sym_id == b_sym_id) or (iter_src == builder_name)
+            var body_ok = false
+            var purity = _clean_purity_scan()
+            match _single_loop_body_expr(loop_body):
+                case Some(be):
+                    match be.kind:
+                        case HirExprKind.MethodCall(recv, mname, margs, _):
+                            if _hir_expr_var_sym_id(recv) == b_sym_id and (mname == "push" or mname == "append") and margs.len() == 1 and (not margs[0].has_name):
+                                body_ok = true
+                                purity = _analyze_hir_transform_purity(margs[0].value, ind_sym.id, b_sym_id, ctx)
+                        case _:
+                            pass_do_nothing
+                case None:
+                    pass_do_nothing
+            if not body_ok:
+                purity.has_unknown_call_effect = true
+            val post_mut = _block_mutates_or_escapes_sym(block, b_sym_id, let_idx, for_stmt_idx, for_is_tail_val)
+            Some(HirBuilderSiteCheckV1(
+                matched_hir_pair: body_ok,
+                builder_is_fresh_array: is_arr_ty and is_empty_lit,
+                iter_is_linear_seq: iter_linear,
+                aliases_input: aliases_in,
+                post_or_other_mutation: post_mut,
+                purity: purity
+            ))
+        case _:
+            None
+
+# reason: builder_name, loop_var, and iter_src are local identifier tokens matched against HIR SymbolIds
+@allow(primitive_api)
+pub fn verify_hir_builder_in_block_v1(
+    block: HirBlock,
+    ctx: HirFnPerfContextV1,
+    builder_name: text,
+    loop_var: text,
+    iter_src: text
+) -> Option<HirBuilderSiteCheckV1>:
+    var idx = 0
+    while idx < block.stmts.len():
+        val st0 = block.stmts[idx]
+        match st0.kind:
+            case HirStmtKind.Let(b_sym, b_ty, b_init):
+                val b_nm = if ctx.sym_names.contains_key(b_sym.id): ctx.sym_names[b_sym.id] else: ""
+                if b_nm == builder_name:
+                    if idx + 1 < block.stmts.len():
+                        match block.stmts[idx + 1].kind:
+                            case HirStmtKind.Expr(for_outer):
+                                val hit = _check_let_for_pair(
+                                    block, ctx, idx, idx + 1, false,
+                                    b_sym.id, b_ty, b_init, for_outer,
+                                    builder_name, loop_var, iter_src
+                                )
+                                match hit:
+                                    case Some(ok_hit): return Some(ok_hit)
+                                    case None: pass_do_nothing
+                            case _:
+                                pass_do_nothing
+                    elif block.has:
+                        val hit_tail = _check_let_for_pair(
+                            block, ctx, idx, -1, true,
+                            b_sym.id, b_ty, b_init, block.value,
+                            builder_name, loop_var, iter_src
+                        )
+                        match hit_tail:
+                            case Some(ok_tail): return Some(ok_tail)
+                            case None: pass_do_nothing
+            case HirStmtKind.Block(inner_b):
+                val sub = verify_hir_builder_in_block_v1(inner_b, ctx, builder_name, loop_var, iter_src)
+                match sub:
+                    case Some(ok_sub): return Some(ok_sub)
+                    case None: pass_do_nothing
+            case _:
+                pass_do_nothing
+        idx = idx + 1
+    None
+
+# reason: recv_name is a candidate receiver identifier checked against resolved HIR parameter/local types
+@allow(primitive_api)
+pub fn fn_ctx_has_linear_seq_binding_v1(ctx_opt: Option<HirFnPerfContextV1>, recv_name: text) -> bool:
+    match ctx_opt:
+        case None:
+            false
+        case Some(ctx):
+            if ctx.ambiguous_names.contains_key(recv_name):
+                return false
+            if not ctx.binding_types.contains_key(recv_name):
+                return false
+            hir_type_is_linear_seq_v1(ctx.binding_types[recv_name])
+
+export PERF_LINT_ARRAY_APPEND_SYM
+export HirFnPerfContextV1, HirExprPurityScanV1, HirBuilderSiteCheckV1
+export default_perf_lint_registry_v1, hir_type_is_linear_seq_v1
+export build_hir_fn_perf_context_v1, verify_hir_builder_in_block_v1
+export fn_ctx_has_linear_seq_binding_v1

@@ -63,6 +63,14 @@ fn make_tools_list(id: text) -> text:
     tools = tools + "," + make_tool_schema("lsp_type_definition", "Navigate to the type definition of a symbol.")
     tools = tools + "," + make_tool_schema("lsp_incoming_calls", "Callers of the function at a position, with resolution labels.")
     tools = tools + "," + make_tool_schema("lsp_outgoing_calls", "Callees of the function at a position, with resolution labels.")
+    tools = tools + "," + make_tool_schema("explain_diagnostic", "Explain a diagnostic with rule rationale, symbolic cost evidence, assumptions, and fix candidates.")
+    tools = tools + "," + make_tool_schema("get_cost_summary", "Get the parameterized symbolic cost summary and input sizes for a symbol and semantic revision.")
+    tools = tools + "," + make_tool_schema("get_cost_contributions", "Get the caller-to-callee cost provenance chain (C07) for a symbol and semantic revision.")
+    tools = tools + "," + make_tool_schema("list_fix_candidates", "List ranked fix candidates (including disabled Unavailable PERF-FIX-001 entries) for a diagnostic or file.")
+    tools = tools + "," + make_tool_schema("resolve_fix", "Revalidate document revision (I01) and semantic_fingerprint (I02) to resolve an edit plan without modifying source.")
+    tools = tools + "," + make_tool_schema("preview_fix", "Preview minimal unified diff, cost delta claim, obligations, and resource tradeoff without modifying source.")
+    tools = tools + "," + make_tool_schema("apply_fix", "Apply a VerifiedSafe fix (or authorized ReviewRequired fix) to a matching revisioned snapshot and return change_id.")
+    tools = tools + "," + make_tool_schema("validate_fix", "Validate post-apply snapshot hash, obligations, and semantic_fingerprint currency for a change_id.")
     tools = tools + SB_R()
     val result = jo1(jp("tools", tools))
     _PROTOCOL_TOOLS_CACHE = result
@@ -85,9 +93,44 @@ fn make_tool_schema(name: text, description: text) -> text:
         ))
         dp = dp + "," + jp("include_fixes", jo2(jp("type", js("boolean")), jp("description", js("Include preconditioned ranked fix candidates"))))
         dp = dp + "," + jp("task_handle", jo2(jp("type", js("string")), jp("description", js("Optional task handle from a timed_out or incomplete diagnostics response"))))
+        dp = dp + "," + jp("operation", jo2(jp("type", js("string")), jp("description", js("Optional perf agent operation: explain_diagnostic, get_cost_summary, get_cost_contributions, list_fix_candidates, resolve_fix, preview_fix, apply_fix, validate_fix"))))
         dp = dp + RB()
         props = dp
         req = SB_L() + SB_R()
+    elif name == "explain_diagnostic":
+        props = jo1(jp("diagnostic_id", jo2(jp("type", js("string")), jp("description", js("Stable diagnostic ID or PERF-* rule code")))))
+        req = SB_L() + js("diagnostic_id") + SB_R()
+    elif name == "get_cost_summary" or name == "get_cost_contributions":
+        props = jo2(
+            jp("symbol", jo2(jp("type", js("string")), jp("description", js("Function or symbol identifier")))),
+            jp("revision", jo2(jp("type", js("string")), jp("description", js("Optional semantic revision or snapshot hash"))))
+        )
+        req = SB_L() + js("symbol") + SB_R()
+    elif name == "list_fix_candidates":
+        props = jo2(
+            jp("diagnostic_or_range", jo2(jp("type", js("string")), jp("description", js("Diagnostic ID, rule code, or file path")))),
+            jp("file", jo2(jp("type", js("string")), jp("description", js("Optional fallback file path"))))
+        )
+        req = SB_L() + SB_R()
+    elif name == "resolve_fix":
+        props = jo2(
+            jp("action_id", jo2(jp("type", js("string")), jp("description", js("Stable fix candidate action ID")))),
+            jp("expected_revision", jo2(jp("type", js("string")), jp("description", js("Expected snapshot hash or document version"))))
+        )
+        req = SB_L() + js("action_id") + SB_R()
+    elif name == "preview_fix":
+        props = jo1(jp("action_id", jo2(jp("type", js("string")), jp("description", js("Stable fix candidate action ID")))))
+        req = SB_L() + js("action_id") + SB_R()
+    elif name == "apply_fix":
+        props = jo3(
+            jp("action_id", jo2(jp("type", js("string")), jp("description", js("Stable fix candidate action ID")))),
+            jp("expected_revision", jo2(jp("type", js("string")), jp("description", js("Expected snapshot hash or document version")))),
+            jp("allow_review_required", jo2(jp("type", js("boolean")), jp("description", js("Explicitly authorize applying a ReviewRequired change"))))
+        )
+        req = SB_L() + js("action_id") + SB_R()
+    elif name == "validate_fix":
+        props = jo1(jp("change_id", jo2(jp("type", js("string")), jp("description", js("Change receipt ID returned by apply_fix")))))
+        req = SB_L() + js("change_id") + SB_R()
     else:
         # All position-based tools: definition, references, hover, completion, type_at, signature_help, implementation, document_highlight, type_definition
         var p = LB()
@@ -104,10 +147,11 @@ fn make_tool_schema(name: text, description: text) -> text:
     schema = schema + "," + jp("required", req)
     schema = schema + RB()
 
+    val is_mutating = name == "apply_fix"
     var annotations = LB()
-    annotations = annotations + jp("readOnlyHint", "true")
+    annotations = annotations + jp("readOnlyHint", if is_mutating: "false" else: "true")
     annotations = annotations + "," + jp("destructiveHint", "false")
-    annotations = annotations + "," + jp("idempotentHint", "true")
+    annotations = annotations + "," + jp("idempotentHint", if is_mutating: "false" else: "true")
     annotations = annotations + "," + jp("openWorldHint", "false")
     annotations = annotations + RB()
 
@@ -118,3 +162,5 @@ fn make_tool_schema(name: text, description: text) -> text:
     tool_obj = tool_obj + "," + jp("annotations", annotations)
     tool_obj = tool_obj + RB()
     tool_obj
+
+export make_init_response, make_tools_list, make_tool_schema

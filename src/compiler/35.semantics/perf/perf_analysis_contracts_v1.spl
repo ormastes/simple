@@ -1,0 +1,343 @@
+# Performance Analysis and Collection Refactoring — Shared V1 Contracts
+#
+# Immutable side-table contracts shared across symbolic cost summaries,
+# caller propagation, conservative loop-idiom recognition, 13-point refactor
+# safety verification, resource contract verification, baseline comparison,
+# lint batch projection, and LSP/CLI/MCP adapters.
+#
+# All records are read-only evidence/candidate structures. Normal compilation
+# (T0) neither constructs nor depends on them unless an explicit lint/perf
+# profile requests T1..T4 analysis.
+
+use compiler.common.diagnostics.span.{Span}
+
+enum PerfResourceDimension:
+    Work
+    AllocCount
+    AllocBytesTotal
+    AuxPeakBytes
+    OutputBytes
+    IoCalls
+    IoBytes
+    LockOps
+    GpuTransferBytes
+
+impl PerfResourceDimension:
+    fn name() -> text:
+        match self:
+            case PerfResourceDimension.Work: "work"
+            case PerfResourceDimension.AllocCount: "alloc_count"
+            case PerfResourceDimension.AllocBytesTotal: "alloc_bytes_total"
+            case PerfResourceDimension.AuxPeakBytes: "aux_peak_bytes"
+            case PerfResourceDimension.OutputBytes: "output_bytes"
+            case PerfResourceDimension.IoCalls: "io_calls"
+            case PerfResourceDimension.IoBytes: "io_bytes"
+            case PerfResourceDimension.LockOps: "lock_ops"
+            case PerfResourceDimension.GpuTransferBytes: "gpu_transfer_bytes"
+
+enum BoundRelation:
+    UpperBound
+    LowerBound
+    Exact
+    TightBound
+    Estimate
+
+impl BoundRelation:
+    fn name() -> text:
+        match self:
+            case BoundRelation.UpperBound: "UpperBound"
+            case BoundRelation.LowerBound: "LowerBound"
+            case BoundRelation.Exact: "Exact"
+            case BoundRelation.TightBound: "TightBound"
+            case BoundRelation.Estimate: "Estimate"
+
+enum BoundRegime:
+    WorstCase
+    Expected
+    Amortized
+    ExpectedAmortized
+
+impl BoundRegime:
+    fn name() -> text:
+        match self:
+            case BoundRegime.WorstCase: "WorstCase"
+            case BoundRegime.Expected: "Expected"
+            case BoundRegime.Amortized: "Amortized"
+            case BoundRegime.ExpectedAmortized: "ExpectedAmortized"
+
+enum AnalysisResultStatus:
+    Complete
+    Partial
+    Unknown
+    Cancelled
+
+impl AnalysisResultStatus:
+    fn name() -> text:
+        match self:
+            case AnalysisResultStatus.Complete: "Complete"
+            case AnalysisResultStatus.Partial: "Partial"
+            case AnalysisResultStatus.Unknown: "Unknown"
+            case AnalysisResultStatus.Cancelled: "Cancelled"
+
+enum BoundOrigin:
+    Inferred
+    ImportedContract
+    Measured
+    Heuristic
+
+impl BoundOrigin:
+    fn name() -> text:
+        match self:
+            case BoundOrigin.Inferred: "Inferred"
+            case BoundOrigin.ImportedContract: "ImportedContract"
+            case BoundOrigin.Measured: "Measured"
+            case BoundOrigin.Heuristic: "Heuristic"
+
+enum PerfAnalysisTier:
+    T0ExistingFacts
+    T1FastLocal
+    T2Compositional
+    T3DeepOptional
+    T4Empirical
+
+impl PerfAnalysisTier:
+    fn name() -> text:
+        match self:
+            case PerfAnalysisTier.T0ExistingFacts: "T0"
+            case PerfAnalysisTier.T1FastLocal: "T1"
+            case PerfAnalysisTier.T2Compositional: "T2"
+            case PerfAnalysisTier.T3DeepOptional: "T3"
+            case PerfAnalysisTier.T4Empirical: "T4"
+
+enum SizeMeasureKind:
+    Length
+    ByteLength
+    CharCount
+    NodeCount
+    TreeDepth
+    VertexCount
+    EdgeCount
+    GroupCount
+    TotalElements
+    DistinctKeys
+    OutputMatches
+
+impl SizeMeasureKind:
+    fn name() -> text:
+        match self:
+            case SizeMeasureKind.Length: "length"
+            case SizeMeasureKind.ByteLength: "bytes"
+            case SizeMeasureKind.CharCount: "chars"
+            case SizeMeasureKind.NodeCount: "nodes"
+            case SizeMeasureKind.TreeDepth: "depth"
+            case SizeMeasureKind.VertexCount: "vertices"
+            case SizeMeasureKind.EdgeCount: "edges"
+            case SizeMeasureKind.GroupCount: "group_count"
+            case SizeMeasureKind.TotalElements: "total_elements"
+            case SizeMeasureKind.DistinctKeys: "distinct_keys"
+            case SizeMeasureKind.OutputMatches: "output_matches"
+
+enum CostExprV1:
+    Const(value: i64)
+    Size(param_name: text, measure: SizeMeasureKind)
+    Add(terms: [CostExprV1])
+    Multiply(factors: [CostExprV1])
+    Maximum(branches: [CostExprV1])
+    LogBound(inner: CostExprV1)
+    TriangularSum(outer: CostExprV1)
+    AggregateSize(group_count: CostExprV1, total_elements: CostExprV1)
+    KnownCalleeCost(callee_id: text, substituted: CostExprV1)
+    CallbackTerm(callback_param: text, invocations: CostExprV1, body_cost: CostExprV1)
+    UnknownTerm(reason: text)
+
+struct BoundEvidenceV1:
+    resource: PerfResourceDimension
+    expression: CostExprV1
+    rendered_expression: text
+    relation: BoundRelation
+    regime: BoundRegime
+    model_id: text
+    assumptions: [text]
+    status: AnalysisResultStatus
+    origin: BoundOrigin
+    provenance_id: text
+
+struct SizeParameterV1:
+    param_name: text
+    measure: SizeMeasureKind
+    canonical_var: text
+
+struct SizeRelationV1:
+    lhs_var: text
+    relation_op: text
+    rhs_var: text
+
+struct ProvenanceEdgeV1:
+    node_id: text
+    role: text
+    file: text
+    span: Span
+    summary_line: text
+    child_ids: [text]
+
+struct FunctionCostSummaryV1:
+    function_id: text
+    function_symbol_id: i64
+    semantic_revision: text
+    size_parameters: [SizeParameterV1]
+    size_relations: [SizeRelationV1]
+    resource_bounds: [BoundEvidenceV1]
+    output_cardinality: CostExprV1
+    callback_cost_parameters: [text]
+    effects_summary_id: text
+    assumptions: [text]
+    unresolved_terms: [text]
+    dependency_summary_hashes: [text]
+    implementation_digest: text
+    provenance_root: text
+    provenance_nodes: [ProvenanceEdgeV1]
+    analyzer_version: text
+    model_version: text
+    configuration_fingerprint: text
+
+enum LoopIdiomFamily:
+    Map
+    Filter
+    FilterMap
+    OrderedFold
+    AnySearch
+    AllSearch
+    FindSearch
+
+impl LoopIdiomFamily:
+    fn name() -> text:
+        match self:
+            case LoopIdiomFamily.Map: "map"
+            case LoopIdiomFamily.Filter: "filter"
+            case LoopIdiomFamily.FilterMap: "filter_map"
+            case LoopIdiomFamily.OrderedFold: "ordered_fold"
+            case LoopIdiomFamily.AnySearch: "any"
+            case LoopIdiomFamily.AllSearch: "all"
+            case LoopIdiomFamily.FindSearch: "find"
+
+enum SafetyObligationKind:
+    CollectionIdentity
+    Aliasing
+    Mutation
+    EvaluationOrder
+    TimingEagerness
+    FailurePrefixCleanup
+    ControlFlowExits
+    CaptureLifetime
+    NumericSemantics
+    OutputShapeDuplicates
+    RuntimeEffects
+    ResourceRestrictions
+    RevisionCurrency
+
+impl SafetyObligationKind:
+    fn name() -> text:
+        match self:
+            case SafetyObligationKind.CollectionIdentity: "collection_identity"
+            case SafetyObligationKind.Aliasing: "aliasing"
+            case SafetyObligationKind.Mutation: "mutation"
+            case SafetyObligationKind.EvaluationOrder: "evaluation_order"
+            case SafetyObligationKind.TimingEagerness: "timing_eagerness"
+            case SafetyObligationKind.FailurePrefixCleanup: "failure_prefix_cleanup"
+            case SafetyObligationKind.ControlFlowExits: "control_flow_exits"
+            case SafetyObligationKind.CaptureLifetime: "capture_lifetime"
+            case SafetyObligationKind.NumericSemantics: "numeric_semantics"
+            case SafetyObligationKind.OutputShapeDuplicates: "output_shape_duplicates"
+            case SafetyObligationKind.RuntimeEffects: "runtime_effects"
+            case SafetyObligationKind.ResourceRestrictions: "resource_restrictions"
+            case SafetyObligationKind.RevisionCurrency: "revision_currency"
+
+struct SafetyObligationStatusV1:
+    kind: SafetyObligationKind
+    discharged: bool
+    reason: text
+
+enum PerfFixKind:
+    Refactor
+    CorrectnessFix
+    AlgorithmChange
+
+impl PerfFixKind:
+    fn name() -> text:
+        match self:
+            case PerfFixKind.Refactor: "Refactor"
+            case PerfFixKind.CorrectnessFix: "CorrectnessFix"
+            case PerfFixKind.AlgorithmChange: "AlgorithmChange"
+
+enum PerfFixApplicability:
+    VerifiedSafe
+    ReviewRequired
+    Unavailable
+
+impl PerfFixApplicability:
+    fn name() -> text:
+        match self:
+            case PerfFixApplicability.VerifiedSafe: "VerifiedSafe"
+            case PerfFixApplicability.ReviewRequired: "ReviewRequired"
+            case PerfFixApplicability.Unavailable: "Unavailable"
+
+struct LoopIdiomCandidateV1:
+    rule_id: text
+    action_id: text
+    function_id: text
+    semantic_revision: text
+    dependency_fingerprint: text
+    file: text
+    source_span: Span
+    family: LoopIdiomFamily
+    replacement_preview: text
+    expected_old_text: text
+    applicability: PerfFixApplicability
+    fix_kind: PerfFixKind
+    obligations: [SafetyObligationStatusV1]
+    resource_tradeoff_note: text
+    disabled_reason: Option<text>
+
+enum ContractVerificationVerdict:
+    Verified
+    Refuted
+    Unproved
+
+impl ContractVerificationVerdict:
+    fn name() -> text:
+        match self:
+            case ContractVerificationVerdict.Verified: "Verified"
+            case ContractVerificationVerdict.Refuted: "Refuted"
+            case ContractVerificationVerdict.Unproved: "Unproved"
+
+struct ResourceContractCheckV1:
+    function_id: text
+    resource: PerfResourceDimension
+    declared_bound: CostExprV1
+    declared_regime: BoundRegime
+    strict_verification: bool
+    verdict: ContractVerificationVerdict
+    rule_code: text
+    explanation: text
+    witness_or_reason: text
+
+struct PerfFindingRecordV1:
+    rule_code: text
+    stable_occurrence_id: text
+    function_id: text
+    file: text
+    primary_span: Span
+    related_locations: [ProvenanceEdgeV1]
+    message: text
+    evidence: Option<BoundEvidenceV1>
+    tier: PerfAnalysisTier
+    semantic_fingerprint: text
+    fix_candidates: [LoopIdiomCandidateV1]
+
+export PerfResourceDimension, BoundRelation, BoundRegime, AnalysisResultStatus
+export BoundOrigin, PerfAnalysisTier, SizeMeasureKind, CostExprV1
+export BoundEvidenceV1, SizeParameterV1, SizeRelationV1, ProvenanceEdgeV1
+export FunctionCostSummaryV1, LoopIdiomFamily, SafetyObligationKind
+export SafetyObligationStatusV1, PerfFixKind, PerfFixApplicability
+export LoopIdiomCandidateV1, ContractVerificationVerdict, ResourceContractCheckV1
+export PerfFindingRecordV1

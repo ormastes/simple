@@ -13,6 +13,7 @@ use .visibility_state.{lsp_mcp_view_serve, lsp_mcp_view_set, lsp_mcp_view_line_f
 use .lsp_command_metrics.{lsp_note_command_start}
 use .lsp_query_inproc.{lsp_query_inproc_dispatch_v1, lsp_query_inproc_command_text_v1}
 use .lsp_diagnostics_structured_v1.{lsp_collect_structured_diagnostics_v1, lsp_make_structured_tool_response_v1}
+use .lsp_perf_agent_ops_v1.{lsp_handle_perf_agent_tool_call_v1}
 use compiler.common.cache_contract.virtual_source_read_registry_v1.{VirtualSourceRegistrationStatusV1, lsp_virtual_source_read_registered_v1}
 
 extern fn rt_bytes_to_text(data: [u8]) -> text
@@ -361,12 +362,19 @@ fn parse_nonnegative_int_or_minus_one(value: text) -> i64:
         return -1
     result
 
+fn _is_perf_agent_tool(name: text) -> bool:
+    name == "explain_diagnostic" or name == "get_cost_summary" or name == "get_cost_contributions" or
+        name == "list_fix_candidates" or name == "resolve_fix" or name == "preview_fix" or
+        name == "apply_fix" or name == "validate_fix"
+
 fn detect_tool_name(body: text) -> text:
     val params = extract_field(json: body, key: "params")
     val requested = extract_field(json: params, key: "name")
     if requested == "":
         val direct = arg_field(args: body, key: "name")
         if direct != "":
+            if _is_perf_agent_tool(direct):
+                return direct
             if direct == "lsp_definition":
                 return "lsp_definition"
             if direct == "lsp_references":
@@ -433,6 +441,8 @@ fn detect_tool_name(body: text) -> text:
         return "simple_set_visibility"
     if requested == "lsp_visibility":
         return "lsp_visibility"
+    if _is_perf_agent_tool(requested):
+        return requested
 
     # Legacy direct-call clients may still put the tool name in method.
     # Original 5 tools
@@ -504,6 +514,9 @@ fn diagnostics_result(id: text, file: text, raw: text) -> text:
     command_result(id, raw)
 
 fn handle_lsp_diagnostics(id: text, args_body: text) -> text:
+    val op = arg_field(args: args_body, key: "operation")
+    if op != "":
+        return lsp_handle_perf_agent_tool_call_v1(id, op, args_body)
     val file = arg_field(args: args_body, key: "file")
     val task_handle = arg_field(args: args_body, key: "task_handle")
     if file == "" and task_handle == "":
@@ -569,10 +582,13 @@ fn handle_tool_call(id: text, body: text) -> text:
             return make_tool_error(id, "lsp_visibility: no requester (none given, no position tool called yet) and no file")
         return command_result(id, run_visibility_sets(file, requester, source))
 
+    if _is_perf_agent_tool(tool_name):
+        return lsp_handle_perf_agent_tool_call_v1(id, tool_name, args_body)
+
     if tool_name == "lsp_diagnostics":
         val diag_args = if arguments == "": body else: arguments
         val merged_file = arg_field(args: diag_args, key: "file")
-        val target_args = if merged_file != "" or arg_field(args: diag_args, key: "task_handle") != "": diag_args else: body
+        val target_args = if merged_file != "" or arg_field(args: diag_args, key: "task_handle") != "" or arg_field(args: diag_args, key: "operation") != "": diag_args else: body
         return handle_lsp_diagnostics(id, target_args)
 
     # File-only tools
@@ -597,7 +613,7 @@ fn handle_tool_call(id: text, body: text) -> text:
         val (error, status) = lsp_mcp_view_set(arg_field(args: args_body, key: "visibility"), arg_field(args: args_body, key: "feature"), arg_field(args: args_body, key: "layer"))
         if error != "":
             return make_tool_error(id, error)
-        return view_result(id, "{\"view\":\"" + escape_json(status) + "\"}", status)
+        return view_result(id, jo1(jp("view", js(status))), status)
 
     jsonrpc_error(id, -32602, "Unknown tool: " + tool_name)
 

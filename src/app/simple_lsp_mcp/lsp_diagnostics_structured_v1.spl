@@ -4,7 +4,7 @@
 # lsp_command_metrics, and app.io.minimal_runtime_ops — never app.io.mod or
 # compiler.* modules.
 
-use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, jo3, extract_field, escape_json, find_simple_binary, clean_command_output, strip_ansi, make_tool_result, make_tool_error, jsonrpc_result, _char_at, _char_len, _slice_text, _is_ws, _find_json_value_start}
+use .json_helpers.{Q, LB, RB, SB_L, SB_R, jp, js, jo1, jo2, jo3, escape_json, find_simple_binary, clean_command_output, strip_ansi, make_tool_result, make_tool_error, jsonrpc_result, _char_at, _char_len, _slice_text, _is_ws}
 use app.io.minimal_runtime_ops.{env_get, file_exists, process_run_bounded, time_now_unix_micros}
 use .lsp_command_metrics.{lsp_note_command_start}
 
@@ -13,6 +13,32 @@ extern fn rt_file_read_text(path: text) -> text?
 
 @unsafe(reason: "detect interpreted source-wrapper execution so diagnostics avoids nested CLI check deadlock", capabilities: [ffi])
 extern fn rt_is_interpreter_runtime() -> bool
+
+pub struct LspPerfCostPayloadV1:
+    expression: text = ""
+    resource: text = ""
+    relation: text = ""
+    regime: text = ""
+    model: text = ""
+    status: text = ""
+    origin: text = ""
+
+pub struct LspPerfSizeEntryV1:
+    symbol: text
+    definition: text
+
+pub struct LspPerfContribEntryV1:
+    node_id: text
+    role: text
+    file: text
+    line: i64
+    col: i64
+    summary: text
+
+pub struct LspPerfObligationEntryV1:
+    kind: text
+    discharged: bool
+    reason: text
 
 pub struct LspStructuredDiagItemV1:
     id: text
@@ -25,6 +51,14 @@ pub struct LspStructuredDiagItemV1:
     end_line: i64
     end_col: i64
     source: text
+    symbol: text = ""
+    category: text = ""
+    semantic_fingerprint: text = ""
+    has_cost: bool = false
+    cost: LspPerfCostPayloadV1 = LspPerfCostPayloadV1()
+    sizes: [LspPerfSizeEntryV1] = []
+    assumptions: [text] = []
+    contributions: [LspPerfContribEntryV1] = []
 
 pub struct LspRankedFixV1:
     id: text
@@ -39,6 +73,14 @@ pub struct LspRankedFixV1:
     expected_text: text
     new_text: text
     required_snapshot_hash: text
+    rule_code: text = ""
+    kind: text = "Refactor"
+    semantic_fingerprint: text = ""
+    obligations: [LspPerfObligationEntryV1] = []
+    tradeoff: text = ""
+    disabled_reason: text = ""
+    span_start: i64 = -1
+    span_end: i64 = -1
 
 pub struct LspNextActionV1:
     kind: text
@@ -310,16 +352,177 @@ fn _parse_int_or_default(raw: text, fallback: i64) -> i64:
         return fallback
     result
 
+fn _chars_of_text(s: text) -> [text]:
+    var out: [text] = []
+    for ch in s:
+        out.push(ch)
+    out
+
+fn _join_char_range(chars: [text], start: i64, end: i64) -> text:
+    var parts: [text] = []
+    var i = start
+    while i < end and i < chars.len():
+        if i >= 0:
+            parts.push(chars[i])
+        i = i + 1
+    parts.join("")
+
+# reason: O(n) single-pass JSON field extractor for large structured diagnostics payloads
+@allow(primitive_api)
+pub fn lsp_fast_extract_field_v1(json: text, key: text) -> text:
+    extract_field(json, key)
+
+pub fn lsp_json_q_v1() -> text:
+    "\""
+
+pub fn lsp_json_lb_v1() -> text:
+    "{{"
+
+pub fn lsp_json_rb_v1() -> text:
+    "}}"
+
+pub fn lsp_json_sbl_v1() -> text:
+    "["
+
+pub fn lsp_json_sbr_v1() -> text:
+    "]"
+
+# reason: Exported JSON string escape wrapper for sibling simple_lsp_mcp modules
+@allow(primitive_api)
+pub fn lsp_json_str_v1(value: text) -> text:
+    js(value)
+
+# reason: Exported JSON key-value pair wrapper for sibling simple_lsp_mcp modules
+@allow(primitive_api)
+pub fn lsp_json_pair_v1(key: text, value: text) -> text:
+    jp(key, value)
+
+# reason: Exported JSON-RPC result wrapper for sibling simple_lsp_mcp modules
+@allow(primitive_api)
+pub fn lsp_json_rpc_result_v1(id: text, result: text) -> text:
+    jsonrpc_result(id, result)
+
+# reason: Exported MCP tool error wrapper for sibling simple_lsp_mcp modules
+@allow(primitive_api)
+pub fn lsp_json_tool_error_v1(id: text, message: text) -> text:
+    make_tool_error(id, message)
+
+# O(n) single-pass JSON field extractor (avoids O(n^2) repeated _char_at scans on large batches)
+fn extract_field(json: text, key: text) -> text:
+    val chars = _chars_of_text(json)
+    val search = _chars_of_text(Q() + key + Q())
+    val json_n = chars.len()
+    val search_n = search.len()
+    if search_n == 0 or json_n < search_n:
+        return ""
+    var start = -1
+    var offset = 0
+    while offset + search_n <= json_n:
+        var matched = true
+        var k = 0
+        while k < search_n:
+            if chars[offset + k] != search[k]:
+                matched = false
+                break
+            k = k + 1
+        if not matched:
+            offset = offset + 1
+            continue
+        var vs = offset + search_n
+        while vs < json_n and _is_ws(chars[vs]):
+            vs = vs + 1
+        if vs < json_n and chars[vs] == ":":
+            vs = vs + 1
+            while vs < json_n and _is_ws(chars[vs]):
+                vs = vs + 1
+            start = vs
+            break
+        offset = offset + search_n
+    if start < 0 or start >= json_n:
+        return ""
+    val first = chars[start]
+    if first == Q():
+        var i = start + 1
+        var escaped = false
+        while i < json_n:
+            val ch = chars[i]
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                return _join_char_range(chars, start + 1, i)
+            i = i + 1
+        return ""
+    if first == LB():
+        var depth = 1
+        var i = start + 1
+        var in_str = false
+        var escaped = false
+        while i < json_n:
+            val ch = chars[i]
+            if in_str:
+                if escaped:
+                    escaped = false
+                elif ch == "\\":
+                    escaped = true
+                elif ch == Q():
+                    in_str = false
+            else:
+                if ch == Q():
+                    in_str = true
+                elif ch == LB():
+                    depth = depth + 1
+                elif ch == RB():
+                    depth = depth - 1
+                    if depth == 0:
+                        return _join_char_range(chars, start, i + 1)
+            i = i + 1
+        return ""
+    if first == SB_L():
+        var depth = 1
+        var i = start + 1
+        var in_str = false
+        var escaped = false
+        while i < json_n:
+            val ch = chars[i]
+            if in_str:
+                if escaped:
+                    escaped = false
+                elif ch == "\\":
+                    escaped = true
+                elif ch == Q():
+                    in_str = false
+            else:
+                if ch == Q():
+                    in_str = true
+                elif ch == SB_L():
+                    depth = depth + 1
+                elif ch == SB_R():
+                    depth = depth - 1
+                    if depth == 0:
+                        return _join_char_range(chars, start, i + 1)
+            i = i + 1
+        return ""
+    var end = start
+    while end < json_n:
+        val ch = chars[end]
+        if ch == "," or ch == RB() or ch == SB_R() or _is_ws(ch):
+            break
+        end = end + 1
+    _join_char_range(chars, start, end)
+
 fn _split_top_level_json_objects_char(arr_json: text) -> [text]:
     var objs: [text] = []
-    val n = _char_len(arr_json)
+    val chars = _chars_of_text(arr_json)
+    val n = chars.len()
     var depth = 0
     var obj_start = -1
     var in_str = false
     var escaped = false
     var i = 0
     while i < n:
-        val ch = _char_at(arr_json, i)
+        val ch = chars[i]
         if in_str:
             if escaped:
                 escaped = false
@@ -338,7 +541,7 @@ fn _split_top_level_json_objects_char(arr_json: text) -> [text]:
         elif ch == RB():
             depth = depth - 1
             if depth == 0 and obj_start >= 0:
-                objs.push(_slice_text(arr_json, obj_start, i + 1))
+                objs.push(_join_char_range(chars, obj_start, i + 1))
                 obj_start = -1
         i = i + 1
     objs
@@ -595,6 +798,67 @@ pub fn lsp_build_structured_diagnostics_envelope_v1(
 fn _bool_json(v: bool) -> text:
     if v: "true" else: "false"
 
+fn _render_cost_json(c: LspPerfCostPayloadV1) -> text:
+    var out = LB()
+    out = out + jp("expression", js(c.expression))
+    out = out + "," + jp("resource", js(c.resource))
+    out = out + "," + jp("relation", js(c.relation))
+    out = out + "," + jp("regime", js(c.regime))
+    out = out + "," + jp("model", js(c.model))
+    if c.status != "":
+        out = out + "," + jp("status", js(c.status))
+    if c.origin != "":
+        out = out + "," + jp("origin", js(c.origin))
+    out = out + RB()
+    out
+
+fn _render_sizes_json(sizes: [LspPerfSizeEntryV1]) -> text:
+    var pairs: [text] = []
+    var i = 0
+    while i < sizes.len():
+        pairs.push(jp(sizes[i].symbol, js(sizes[i].definition)))
+        i = i + 1
+    LB() + pairs.join(",") + RB()
+
+fn _render_assumptions_json(assumptions: [text]) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < assumptions.len():
+        parts.push(js(assumptions[i]))
+        i = i + 1
+    SB_L() + parts.join(",") + SB_R()
+
+fn _render_contribs_json(contribs: [LspPerfContribEntryV1]) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < contribs.len():
+        val c = contribs[i]
+        var obj = LB()
+        obj = obj + jp("node_id", js(c.node_id))
+        obj = obj + "," + jp("role", js(c.role))
+        obj = obj + "," + jp("file", js(c.file))
+        obj = obj + "," + jp("line", str(c.line))
+        obj = obj + "," + jp("col", str(c.col))
+        obj = obj + "," + jp("summary", js(c.summary))
+        obj = obj + RB()
+        parts.push(obj)
+        i = i + 1
+    SB_L() + parts.join(",") + SB_R()
+
+fn _render_obligations_json(obs: [LspPerfObligationEntryV1]) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < obs.len():
+        val ob = obs[i]
+        val obj = jo3(
+            jp("kind", js(ob.kind)),
+            jp("discharged", _bool_json(ob.discharged)),
+            jp("reason", js(ob.reason))
+        )
+        parts.push(obj)
+        i = i + 1
+    SB_L() + parts.join(",") + SB_R()
+
 fn _render_diag_item_json(d: LspStructuredDiagItemV1) -> text:
     var out = LB()
     out = out + jp("id", js(d.id))
@@ -607,6 +871,22 @@ fn _render_diag_item_json(d: LspStructuredDiagItemV1) -> text:
     out = out + "," + jp("end_line", str(d.end_line))
     out = out + "," + jp("end_col", str(d.end_col))
     out = out + "," + jp("source", js(d.source))
+    if d.code.starts_with("PERF-") or d.has_cost or d.semantic_fingerprint != "" or d.category != "":
+        out = out + "," + jp("rule", js(d.code))
+    if d.symbol != "":
+        out = out + "," + jp("symbol", js(d.symbol))
+    if d.category != "":
+        out = out + "," + jp("category", js(d.category))
+    if d.semantic_fingerprint != "":
+        out = out + "," + jp("semantic_fingerprint", js(d.semantic_fingerprint))
+    if d.has_cost:
+        out = out + "," + jp("cost", _render_cost_json(d.cost))
+    if d.sizes.len() > 0:
+        out = out + "," + jp("sizes", _render_sizes_json(d.sizes))
+    if d.assumptions.len() > 0:
+        out = out + "," + jp("assumptions", _render_assumptions_json(d.assumptions))
+    if d.contributions.len() > 0:
+        out = out + "," + jp("contributions", _render_contribs_json(d.contributions))
     out = out + RB()
     out
 
@@ -631,8 +911,19 @@ fn _render_ranked_fix_json(f: LspRankedFixV1) -> text:
     out = out + "," + jp("diagnostic_id", js(f.diagnostic_id))
     out = out + "," + jp("rank", str(f.rank))
     out = out + "," + jp("title", js(f.title))
+    out = out + "," + jp("kind", js(f.kind))
     out = out + "," + jp("confidence", js(f.confidence))
     out = out + "," + jp("applicability", js(f.applicability))
+    if f.rule_code != "":
+        out = out + "," + jp("rule", js(f.rule_code))
+    if f.semantic_fingerprint != "":
+        out = out + "," + jp("semantic_fingerprint", js(f.semantic_fingerprint))
+    if f.obligations.len() > 0:
+        out = out + "," + jp("obligations", _render_obligations_json(f.obligations))
+    if f.tradeoff != "":
+        out = out + "," + jp("tradeoff", js(f.tradeoff))
+    if f.disabled_reason != "":
+        out = out + "," + jp("disabled_reason", js(f.disabled_reason))
     out = out + "," + jp("required_snapshot_hash", js(f.required_snapshot_hash))
     out = out + "," + jp("preconditions", SB_L() + pre + SB_R())
     out = out + "," + jp("replacement", rep)
@@ -755,14 +1046,309 @@ pub fn lsp_render_diagnostics_text_v1(envelope: LspStructuredDiagnosticsEnvelope
         return header + "\n" + block
     header
 
+fn _split_json_string_array_char(arr_json: text) -> [text]:
+    var items: [text] = []
+    val chars = _chars_of_text(arr_json)
+    val n = chars.len()
+    var i = 0
+    var in_str = false
+    var escaped = false
+    var str_start = -1
+    var nested_depth = 0
+    while i < n:
+        val ch = chars[i]
+        if in_str:
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == Q():
+                if nested_depth == 1 and str_start >= 0:
+                    items.push(_join_char_range(chars, str_start, i))
+                in_str = false
+                str_start = -1
+            i = i + 1
+            continue
+        if ch == SB_L() or ch == LB():
+            nested_depth = nested_depth + 1
+        elif ch == SB_R() or ch == RB():
+            nested_depth = nested_depth - 1
+        elif ch == Q():
+            in_str = true
+            str_start = i + 1
+        i = i + 1
+    items
+
+fn _parse_sizes_field(sizes_raw: text) -> [LspPerfSizeEntryV1]:
+    var out: [LspPerfSizeEntryV1] = []
+    val trimmed = sizes_raw.trim()
+    if trimmed == "":
+        return out
+    val chars = _chars_of_text(trimmed)
+    val n = chars.len()
+    if n == 0:
+        return out
+    if chars[0] == SB_L():
+        val objs = _split_top_level_json_objects_char(trimmed)
+        var oi = 0
+        while oi < objs.len():
+            val sym = extract_field(objs[oi], "symbol")
+            val defn = extract_field(objs[oi], "definition")
+            if sym != "":
+                out.push(LspPerfSizeEntryV1(symbol: sym, definition: defn))
+            oi = oi + 1
+        return out
+    if chars[0] != LB():
+        return out
+    # Top-level key: "value" scanner inside { ... }
+    var i = 1
+    while i < n:
+        while i < n and (_is_ws(chars[i]) or chars[i] == ","):
+            i = i + 1
+        if i >= n or chars[i] == RB():
+            break
+        if chars[i] != Q():
+            break
+        var k_end = i + 1
+        var k_esc = false
+        while k_end < n:
+            val kc = chars[k_end]
+            if k_esc:
+                k_esc = false
+            elif kc == "\\":
+                k_esc = true
+            elif kc == Q():
+                break
+            k_end = k_end + 1
+        val key_name = _join_char_range(chars, i + 1, k_end)
+        i = k_end + 1
+        while i < n and _is_ws(chars[i]):
+            i = i + 1
+        if i >= n or chars[i] != ":":
+            break
+        i = i + 1
+        while i < n and _is_ws(chars[i]):
+            i = i + 1
+        if i < n and chars[i] == Q():
+            var v_end = i + 1
+            var v_esc = false
+            while v_end < n:
+                val vc = chars[v_end]
+                if v_esc:
+                    v_esc = false
+                elif vc == "\\":
+                    v_esc = true
+                elif vc == Q():
+                    break
+                v_end = v_end + 1
+            val val_str = _join_char_range(chars, i + 1, v_end)
+            if key_name != "":
+                out.push(LspPerfSizeEntryV1(symbol: key_name, definition: val_str))
+            i = v_end + 1
+        else:
+            while i < n and chars[i] != "," and chars[i] != RB():
+                i = i + 1
+    out
+
+fn _parse_cost_field(cost_raw: text) -> (bool, LspPerfCostPayloadV1):
+    val trimmed = cost_raw.trim()
+    if trimmed == "" or _char_at(trimmed, 0) != LB():
+        return (false, LspPerfCostPayloadV1())
+    val expr = extract_field(trimmed, "expression")
+    val res = extract_field(trimmed, "resource")
+    val rel = extract_field(trimmed, "relation")
+    val reg = extract_field(trimmed, "regime")
+    val mod_a = extract_field(trimmed, "model")
+    val mod_b = extract_field(trimmed, "model_id")
+    val model = if mod_a != "": mod_a else: mod_b
+    val status = extract_field(trimmed, "status")
+    val origin = extract_field(trimmed, "origin")
+    (true, LspPerfCostPayloadV1(
+        expression: expr,
+        resource: res,
+        relation: rel,
+        regime: reg,
+        model: model,
+        status: status,
+        origin: origin
+    ))
+
+fn _parse_contribs_field(arr_raw: text) -> [LspPerfContribEntryV1]:
+    var out: [LspPerfContribEntryV1] = []
+    val trimmed = arr_raw.trim()
+    if trimmed == "" or _char_at(trimmed, 0) != SB_L():
+        return out
+    val objs = _split_top_level_json_objects_char(trimmed)
+    var i = 0
+    while i < objs.len():
+        val o = objs[i]
+        val sum_a = extract_field(o, "summary")
+        val sum_b = extract_field(o, "summary_line")
+        out.push(LspPerfContribEntryV1(
+            node_id: extract_field(o, "node_id"),
+            role: extract_field(o, "role"),
+            file: extract_field(o, "file"),
+            line: _parse_int_or_default(extract_field(o, "line"), 1),
+            col: _parse_int_or_default(extract_field(o, "col"), 1),
+            summary: if sum_a != "": sum_a else: sum_b
+        ))
+        i = i + 1
+    out
+
+fn _parse_obligations_field(arr_raw: text) -> [LspPerfObligationEntryV1]:
+    var out: [LspPerfObligationEntryV1] = []
+    val trimmed = arr_raw.trim()
+    if trimmed == "" or _char_at(trimmed, 0) != SB_L():
+        return out
+    val objs = _split_top_level_json_objects_char(trimmed)
+    var i = 0
+    while i < objs.len():
+        val o = objs[i]
+        val dis_raw = extract_field(o, "discharged")
+        out.push(LspPerfObligationEntryV1(
+            kind: extract_field(o, "kind"),
+            discharged: dis_raw == "true",
+            reason: extract_field(o, "reason")
+        ))
+        i = i + 1
+    out
+
+# reason: Normalizes canonical fix applicability string across CLI, LSP, and MCP (I09)
+@allow(primitive_api)
+pub fn lsp_normalize_perf_applicability_v1(raw_applicability: text, disabled_reason: text, confidence: text) -> text:
+    if disabled_reason != "" or raw_applicability == "Unavailable" or raw_applicability == "unavailable":
+        return "Unavailable"
+    if raw_applicability == "VerifiedSafe" or raw_applicability == "verified_safe" or raw_applicability == "Automatic" or raw_applicability == "automatic":
+        return "VerifiedSafe"
+    if raw_applicability == "ReviewRequired" or raw_applicability == "review_required":
+        return "ReviewRequired"
+    if confidence == "safe":
+        return "VerifiedSafe"
+    "ReviewRequired"
+
+fn _parse_explicit_fixes_from_diag_json(
+    default_file: text,
+    snapshot_hash: text,
+    batch_sem_fp: text,
+    diag_item: LspStructuredDiagItemV1,
+    obj_json: text,
+    start_rank: i64
+) -> [LspRankedFixV1]:
+    val nested = extract_field(obj_json, "diagnostic")
+    val body = if nested != "" and _char_at(nested, 0) == LB(): nested else: obj_json
+    val fixes_a = extract_field(body, "fixes")
+    val fixes_b = extract_field(body, "fix_candidates")
+    val fixes_raw = if fixes_a != "" and _char_at(fixes_a, 0) == SB_L(): fixes_a else: fixes_b
+    if fixes_raw == "" or _char_at(fixes_raw, 0) != SB_L():
+        return []
+    val objs = _split_top_level_json_objects_char(fixes_raw)
+    var out: [LspRankedFixV1] = []
+    var i = 0
+    while i < objs.len():
+        val fx = objs[i]
+        val fx_id_raw = extract_field(fx, "id")
+        val fx_act_raw = extract_field(fx, "action_id")
+        val fx_id = if fx_id_raw != "": fx_id_raw elif fx_act_raw != "": fx_act_raw else: "fix-" + str(start_rank + i) + "-" + diag_item.code
+        val raw_title = extract_field(fx, "title")
+        val raw_desc = extract_field(fx, "description")
+        val title = if raw_title != "": raw_title else: raw_desc
+        val conf_raw = extract_field(fx, "confidence")
+        val conf = if conf_raw != "": conf_raw else: "needs_review"
+        val raw_dis = extract_field(fx, "disabled_reason")
+        val dis_reason = if raw_dis == "null": "" else: raw_dis
+        val obs = _parse_obligations_field(extract_field(fx, "obligations"))
+        var synth_dis = dis_reason
+        if synth_dis == "" and (extract_field(fx, "applicability") == "Unavailable" or extract_field(fx, "applicability") == "unavailable"):
+            var unmet: [text] = []
+            var obi = 0
+            while obi < obs.len():
+                if not obs[obi].discharged and obs[obi].reason != "":
+                    unmet.push(obs[obi].reason)
+                obi = obi + 1
+            synth_dis = if unmet.len() > 0: unmet.join("; ") else: "fix candidate blocked by safety preconditions"
+        val app = lsp_normalize_perf_applicability_v1(extract_field(fx, "applicability"), synth_dis, conf)
+        val kind_raw = extract_field(fx, "kind")
+        val kind = if kind_raw != "": kind_raw else: "Refactor"
+        val rule_raw = extract_field(fx, "rule_id")
+        val rule_code = if rule_raw != "": rule_raw else: diag_item.code
+        val sem_a = extract_field(fx, "semantic_fingerprint")
+        val sem_b = extract_field(fx, "dependency_fingerprint")
+        val sem_fp = if sem_a != "": sem_a elif sem_b != "": sem_b elif diag_item.semantic_fingerprint != "": diag_item.semantic_fingerprint else: batch_sem_fp
+        val tr_a = extract_field(fx, "tradeoff")
+        val tr_b = extract_field(fx, "resource_tradeoff")
+        val tradeoff = if tr_a != "": tr_a else: tr_b
+
+        var rep_file = diag_item.file
+        var rep_line = diag_item.line
+        var rep_col = diag_item.col
+        var rep_new = ""
+        var rep_expected = ""
+        var span_s = -1
+        var span_e = -1
+
+        val reps_raw = extract_field(fx, "replacements")
+        if reps_raw != "" and _char_at(reps_raw, 0) == SB_L():
+            val rep_objs = _split_top_level_json_objects_char(reps_raw)
+            if rep_objs.len() > 0:
+                val r0 = rep_objs[0]
+                val rf = extract_field(r0, "file")
+                if rf != "": rep_file = rf
+                rep_new = extract_field(r0, "new_text")
+                rep_expected = extract_field(r0, "expected_text")
+                val rspan = extract_field(r0, "span")
+                if rspan != "" and _char_at(rspan, 0) == LB():
+                    span_s = _parse_int_or_default(extract_field(rspan, "start"), -1)
+                    span_e = _parse_int_or_default(extract_field(rspan, "end"), -1)
+                    rep_line = _parse_int_or_default(extract_field(rspan, "line"), rep_line)
+                    rep_col = _parse_int_or_default(extract_field(rspan, "col"), rep_col)
+
+        val pres_raw = extract_field(fx, "preconditions")
+        if pres_raw != "" and _char_at(pres_raw, 0) == SB_L():
+            val pre_objs = _split_top_level_json_objects_char(pres_raw)
+            if pre_objs.len() > 0:
+                val p0 = pre_objs[0]
+                if rep_expected == "":
+                    rep_expected = extract_field(p0, "expected_text")
+                val pspan = extract_field(p0, "span")
+                if span_s < 0 and pspan != "" and _char_at(pspan, 0) == LB():
+                    span_s = _parse_int_or_default(extract_field(pspan, "start"), -1)
+                    span_e = _parse_int_or_default(extract_field(pspan, "end"), -1)
+
+        out.push(LspRankedFixV1(
+            id: fx_id,
+            diagnostic_id: diag_item.id,
+            rank: start_rank + i,
+            title: title,
+            confidence: conf,
+            applicability: app,
+            file: if rep_file != "": rep_file else: default_file,
+            line: rep_line,
+            col: rep_col,
+            expected_text: rep_expected,
+            new_text: rep_new,
+            required_snapshot_hash: snapshot_hash,
+            rule_code: rule_code,
+            kind: kind,
+            semantic_fingerprint: sem_fp,
+            obligations: obs,
+            tradeoff: tradeoff,
+            disabled_reason: synth_dis,
+            span_start: span_s,
+            span_end: span_e
+        ))
+        i = i + 1
+    out
+
 fn _parse_diag_json_object(default_file: text, obj_json: text, index: i64) -> LspStructuredDiagItemV1:
     val outer_id = extract_field(obj_json, "id")
     val nested = extract_field(obj_json, "diagnostic")
     val body = if nested != "" and _char_at(nested, 0) == LB(): nested else: obj_json
 
     val raw_code = extract_field(body, "code")
+    val raw_rule = extract_field(body, "rule")
     val sev = _normalize_severity_name(extract_field(body, "severity"))
-    val code = if raw_code != "" and raw_code != "null": raw_code else: (if sev == "warning": "W-CHECK" else: "E-CHECK")
+    val chosen_code = if raw_code != "" and raw_code != "null": raw_code else: raw_rule
+    val code = if chosen_code != "" and chosen_code != "null": chosen_code else: (if sev == "warning": "W-CHECK" else: "E-CHECK")
     val msg = extract_field(body, "message")
     val raw_file = extract_field(body, "file")
     val span_obj = extract_field(body, "span")
@@ -786,6 +1372,19 @@ fn _parse_diag_json_object(default_file: text, obj_json: text, index: i64) -> Ls
         outer_id
     else:
         code + "@" + item_file + "#" + str(line_num) + ":" + str(col_num) + "/" + str(index)
+    val sym_a = extract_field(body, "symbol")
+    val sym_b = extract_field(body, "function_id")
+    val sym = if sym_a != "" and sym_a != "null": sym_a elif sym_b != "" and sym_b != "null": sym_b else: ""
+    val cat_raw = extract_field(body, "category")
+    val cat = if cat_raw != "null": cat_raw else: ""
+    val sem_raw = extract_field(body, "semantic_fingerprint")
+    val sem_fp = if sem_raw != "null": sem_raw else: ""
+    val (has_cost, cost_val) = _parse_cost_field(extract_field(body, "cost"))
+    val sizes_val = _parse_sizes_field(extract_field(body, "sizes"))
+    val assumptions_val = _split_json_string_array_char(extract_field(body, "assumptions"))
+    val contribs_a = _parse_contribs_field(extract_field(body, "contributions"))
+    val contribs_b = if contribs_a.len() > 0: contribs_a else: _parse_contribs_field(extract_field(body, "related_locations"))
+
     LspStructuredDiagItemV1(
         id: stable_id,
         code: code,
@@ -796,7 +1395,15 @@ fn _parse_diag_json_object(default_file: text, obj_json: text, index: i64) -> Ls
         col: col_num,
         end_line: end_line,
         end_col: end_col,
-        source: if src_tag != "" and src_tag != "null": src_tag else: "simple-check"
+        source: if src_tag != "" and src_tag != "null": src_tag else: "simple-check",
+        symbol: sym,
+        category: cat,
+        semantic_fingerprint: sem_fp,
+        has_cost: has_cost,
+        cost: cost_val,
+        sizes: sizes_val,
+        assumptions: assumptions_val,
+        contributions: contribs_b
     )
 
 # reason: Admitted batch parser validates wire JSON text against expected file path and snapshot hash
@@ -829,6 +1436,8 @@ pub fn lsp_parse_admitted_batch_json_v1(
     val raw_batch_status = extract_field(trimmed, "status")
     val raw_reason = extract_field(trimmed, "incomplete_reason")
     val clean_reason = if raw_reason == "null": "" else: raw_reason
+    val raw_batch_sem = extract_field(trimmed, "semantic_fingerprint")
+    val batch_sem_fp = if raw_batch_sem == "null": "" else: raw_batch_sem
 
     val tp_raw = extract_field(trimmed, "target_profile")
     val tp_pol = if tp_raw != "" and _char_at(tp_raw, 0) == LB():
@@ -844,11 +1453,25 @@ pub fn lsp_parse_admitted_batch_json_v1(
 
     val diag_arr = extract_field(trimmed, "diagnostics")
     var items: [LspStructuredDiagItemV1] = []
+    var explicit_fixes: [LspRankedFixV1] = []
+    var unfixed_items: [LspStructuredDiagItemV1] = []
     if diag_arr != "" and _char_at(diag_arr, 0) == SB_L():
         val raw_objs = _split_top_level_json_objects_char(diag_arr)
         var i = 0
         while i < raw_objs.len():
-            items.push(_parse_diag_json_object(file, raw_objs[i], i))
+            var parsed_item = _parse_diag_json_object(file, raw_objs[i], i)
+            if parsed_item.semantic_fingerprint == "" and batch_sem_fp != "":
+                parsed_item.semantic_fingerprint = batch_sem_fp
+            items.push(parsed_item)
+            if include_fixes:
+                val parsed_fx = _parse_explicit_fixes_from_diag_json(file, expected_hash, batch_sem_fp, parsed_item, raw_objs[i], explicit_fixes.len() + 1)
+                if parsed_fx.len() > 0:
+                    var fxi = 0
+                    while fxi < parsed_fx.len():
+                        explicit_fixes.push(parsed_fx[fxi])
+                        fxi = fxi + 1
+                else:
+                    unfixed_items.push(parsed_item)
             i = i + 1
 
     var status = "complete"
@@ -870,10 +1493,20 @@ pub fn lsp_parse_admitted_batch_json_v1(
         completeness = "fail"
 
     val source_content = _lsp_read_file_safe(file)
-    val fixes = if include_fixes and items.len() > 0:
-        _synthesize_ranked_fixes(file, source_content, expected_hash, items)
-    else:
-        []
+    var fixes: [LspRankedFixV1] = []
+    if include_fixes and items.len() > 0:
+        var ef = 0
+        while ef < explicit_fixes.len():
+            fixes.push(explicit_fixes[ef])
+            ef = ef + 1
+        if unfixed_items.len() > 0:
+            val synth = _synthesize_ranked_fixes(file, source_content, expected_hash, unfixed_items)
+            var si = 0
+            while si < synth.len():
+                var s_copy = synth[si]
+                s_copy.rank = fixes.len() + 1
+                fixes.push(s_copy)
+                si = si + 1
     val cov = LspDiagCoverageV1(
         syntax_checked: status == "complete" or status == "incomplete",
         semantic_checked: status == "complete",
@@ -1344,8 +1977,13 @@ pub fn lsp_make_structured_tool_response_v1(
     result = result + RB()
     jsonrpc_result(id, result)
 
+export LspPerfCostPayloadV1
+export LspPerfSizeEntryV1
+export LspPerfContribEntryV1
+export LspPerfObligationEntryV1
 export LspStructuredDiagItemV1
 export LspRankedFixV1
+export lsp_normalize_perf_applicability_v1
 export LspNextActionV1
 export LspDiagCoverageV1
 export LspDiagCommandPlanV1
@@ -1369,3 +2007,6 @@ export lsp_render_diagnostics_text_v1
 export lsp_envelope_from_command_output_v1
 export lsp_collect_structured_diagnostics_v1
 export lsp_make_structured_tool_response_v1
+export lsp_fast_extract_field_v1
+export lsp_json_q_v1, lsp_json_lb_v1, lsp_json_rb_v1, lsp_json_sbl_v1, lsp_json_sbr_v1
+export lsp_json_str_v1, lsp_json_pair_v1, lsp_json_rpc_result_v1, lsp_json_tool_error_v1

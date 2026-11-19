@@ -1,0 +1,221 @@
+"""
+## Purpose and audience
+End-to-end typed-HIR stitch specification verifying `run_hir_perf_analysis_pipeline_v1`
+unites Wave F1 (`summarize_hir_function_v1`, `run_optional_deep_analysis_v1`),
+Wave F2 (`recognize_hir_function_loop_idioms_v1`, 13-point `evaluate_loop_refactor_safety_v1`,
+`detect_hir_growing_accumulators_v1`, `detect_hir_nested_key_joins_v1`),
+Wave F3 (`verify_function_resource_contract_v1`), and Wave F4 (`build_perf_diagnostic_batch_v1`)
+over a single read-only `HirFunction` snapshot while keeping `T0ExistingFacts` a zero-work no-op.
+"""
+
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{
+    FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind,
+    vhdl_hardware_metadata_default
+}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, MethodResolution}
+use compiler.hir.hir_definitions.{
+    HirFunction, HirParam, HirBlock, HirStmt, HirStmtKind,
+    HirExpr, HirExprKind, HirCallArg, HirBinOp
+}
+use compiler.semantics.perf_facts.types.{
+    CollectionOperationRegistry, CollectionOperationSummary,
+    HirPerfReceiverKind, HirPerfOperationKind, HirPerfCostClass,
+    HirPerfCardinality, HirPerfEnumerationClass, HirPerfAllocationClass,
+    HirPerfEffectFacts
+}
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    PerfAnalysisTier, PerfResourceDimension, BoundRegime, SizeMeasureKind,
+    CostExprV1, PerfFixApplicability, ContractVerificationVerdict
+}
+use compiler.semantics.perf.cost_summary_v1.{default_perf_summarizer_config_v1}
+use compiler.semantics.perf.deep_analyzer_hook_v1.{
+    DeepPluginPackagingKindV1, DeepSolverKindV1, DeepAnalyzerPluginV1,
+    default_deep_analyzer_hook_v1
+}
+use compiler.semantics.perf.resource_contract_verifier_v1.{DeclaredResourceContractV1}
+use compiler.semantics.perf.perf_hir_pipeline_v1.{
+    HirPerfPipelineRequestV1, run_hir_perf_analysis_pipeline_v1
+}
+use compiler.tools.fix.perf_safe_edit_service_v1.{build_perf_diagnostic_batch_v1}
+
+val STITCH_APPEND_SYM: i64 = 701
+
+fn st_span(line: i64) -> Span:
+    Span.new(line * 10, line * 10 + 8, line, 1)
+
+fn st_i64_t() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: st_span(1))
+
+fn st_unit_t() -> HirType:
+    HirType(kind: HirTypeKind.Unit, span: st_span(1))
+
+fn st_array_i64_t() -> HirType:
+    HirType(kind: HirTypeKind.Array(st_i64_t(), None), span: st_span(1))
+
+fn st_expr(kind: HirExprKind, t: HirType, line: i64) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: t, span: st_span(line))
+
+fn st_registry() -> CollectionOperationRegistry:
+    var reg = CollectionOperationRegistry.new("stdlib-perf-v1")
+    reg.register(CollectionOperationSummary(
+        symbol_id: STITCH_APPEND_SYM, stable_name: "Array.append",
+        operation: HirPerfOperationKind.Append, cost: HirPerfCostClass.AmortizedConstant,
+        output_cardinality: HirPerfCardinality.SameAsReceiver,
+        enumeration: HirPerfEnumerationClass.None, expected_receiver: HirPerfReceiverKind.Array,
+        signature_fingerprint: "Array<T>.append(T)->Unit", explicit_argument_count: 1,
+        effects: HirPerfEffectFacts(
+            reads: true, writes: true, allocates: true, throws: false,
+            suspends: false, observable: false, unknown: false),
+        allocation: HirPerfAllocationClass.BoundedPool, preserves_order: true,
+        materializes: false, metadata_version: "stdlib-perf-v1",
+        provenance: "stdlib verified contract", evidence_receipt: "receipt-array-append-v1"
+    ))
+    reg
+
+fn st_map_loop_fn(fn_name: text, effect_reg: text) -> HirFunction:
+    val items_param = HirParam(
+        symbol: SymbolId(id: 11), name: "items", type_: st_array_i64_t(),
+        has_default: false, default: st_expr(HirExprKind.UnitLit, st_unit_t(), 1),
+        span: st_span(1), is_mutable: false
+    )
+    val builder_id: i64 = 20
+    val item_var = st_expr(HirExprKind.NamedVar(SymbolId(id: 12), "x"), st_i64_t(), 3)
+    val plus_one = st_expr(
+        HirExprKind.Binary(HirBinOp.Add, item_var, st_expr(HirExprKind.IntLit(1, None), st_i64_t(), 3)),
+        st_i64_t(), 3
+    )
+    val recv = st_expr(HirExprKind.NamedVar(SymbolId(id: builder_id), "result"), st_array_i64_t(), 3)
+    val append_expr = st_expr(HirExprKind.MethodCall(
+        recv, "append",
+        [HirCallArg(has_name: false, name: "", value: plus_one, span: st_span(3))],
+        MethodResolution.InstanceMethod(st_array_i64_t(), SymbolId(id: STITCH_APPEND_SYM))
+    ), st_unit_t(), 3)
+    val loop_expr = st_expr(HirExprKind.For(
+        SymbolId(id: 12),
+        st_expr(HirExprKind.NamedVar(SymbolId(id: 11), "items"), st_array_i64_t(), 2),
+        HirBlock(stmts: [HirStmt(kind: HirStmtKind.Expr(append_expr), span: st_span(3))], has: false, value: st_expr(HirExprKind.UnitLit, st_unit_t(), 3), span: st_span(3)),
+        None
+    ), st_unit_t(), 2)
+    val body = HirBlock(
+        stmts: [
+            HirStmt(kind: HirStmtKind.Let(SymbolId(id: builder_id), st_array_i64_t(), st_expr(HirExprKind.ArrayLit([], None), st_array_i64_t(), 1)), span: st_span(1)),
+            HirStmt(kind: HirStmtKind.Expr(loop_expr), span: st_span(2))
+        ],
+        has: true,
+        value: st_expr(HirExprKind.NamedVar(SymbolId(id: builder_id), "result"), st_array_i64_t(), 4),
+        span: st_span(1)
+    )
+    var f = HirFunction(
+        symbol: SymbolId(id: 70), name: fn_name, type_params: [], params: [items_param],
+        return_type: st_array_i64_t(), body: body, effects: [],
+        visibility: Visibility.Private, is_async: false, is_static: false,
+        is_public: false, is_method: false, is_mutable: false, is_const: false,
+        is_extern: false, func_attr: FunctionAttr.default(), has_export_attr: false,
+        export_attr: ExportAttr(is_export_c: false, export_name: ""),
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: DriverManifestAttr(kind: DriverManifestAttrKind.Driver, driver_class: 0, vendor: 0, device_ids: []),
+        has_suspension: false, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_doc_comment: false,
+        doc_comment: "", span: st_span(1), is_gpu_kernel: false, gpu_target: "",
+        gpu_backend_order: "", verification_contract: None, is_generic_template: false
+    )
+    f.effect_region = effect_reg
+    f
+
+describe "Unified Typed-HIR Performance Analysis Pipeline (Wave F1..F4 Stitch)":
+    """Verifies T0 feature-off isolation, T1+T2 VerifiedSafe & contract verification, nogc restriction, and T3 deep cancellation."""
+
+    it "performs zero analysis work and emits zero findings under T0ExistingFacts (D12, I10)":
+        """Ensures normal-compile T0 tier returns immediately with empty findings and no deep plugin invocation."""
+        val fn_hir = st_map_loop_fn("map_inc", "")
+        val req = HirPerfPipelineRequestV1(
+            function: fn_hir, file: "src/demo.spl", semantic_revision: "rev-1",
+            dependency_fingerprint: "dep-1", tier: PerfAnalysisTier.T0ExistingFacts,
+            complexity_policy: "default", registry: st_registry(), callee_summaries: {},
+            summarizer_config: default_perf_summarizer_config_v1(), contracts: [],
+            empirical_samples: [], deep_hook: default_deep_analyzer_hook_v1(),
+            deep_budget_ms: 50, deep_max_steps: 16, cancelled: false
+        )
+        val res = run_hir_perf_analysis_pipeline_v1(req)
+        expect(res.summary).to_be_nil()
+        expect(res.idiom_candidates.len()).to_equal(0)
+        expect(res.findings.len()).to_equal(0)
+        expect(res.invoked_deep_plugin).to_be(false)
+
+    it "produces VerifiedSafe PERF-STYLE-001, linear FunctionCostSummaryV1, Verified @cost contract, and canonical DiagnosticBatchV1 at T2":
+        """Verifies F1 + F2 + F3 + F4 compose cleanly on a clean fresh-builder map loop and downgrade under nogc."""
+        val fn_hir = st_map_loop_fn("map_inc", "")
+        val linear_contract = DeclaredResourceContractV1(
+            function_id: "map_inc",
+            resource: PerfResourceDimension.Work,
+            max_bound: CostExprV1.Size(param_name: "items", measure: SizeMeasureKind.Length),
+            max_degree: 1,
+            concrete_op_limit: None,
+            required_regime: BoundRegime.WorstCase,
+            strict_verification: true
+        )
+        val req = HirPerfPipelineRequestV1(
+            function: fn_hir, file: "src/demo.spl", semantic_revision: "rev-1",
+            dependency_fingerprint: "dep-1", tier: PerfAnalysisTier.T2Compositional,
+            complexity_policy: "default", registry: st_registry(), callee_summaries: {},
+            summarizer_config: default_perf_summarizer_config_v1(), contracts: [linear_contract],
+            empirical_samples: [], deep_hook: default_deep_analyzer_hook_v1(),
+            deep_budget_ms: 50, deep_max_steps: 16, cancelled: false
+        )
+        val res = run_hir_perf_analysis_pipeline_v1(req)
+        expect(res.summary.?).to_be(true)
+        expect(res.idiom_candidates.len()).to_equal(1)
+        expect(res.idiom_candidates[0].applicability == PerfFixApplicability.VerifiedSafe).to_be(true)
+        expect(res.idiom_candidates[0].replacement_preview).to_contain(".collect()")
+        expect(res.contract_checks.len()).to_equal(1)
+        expect(res.contract_checks[0].verdict == ContractVerificationVerdict.Verified).to_be(true)
+
+        val (batch, _) = build_perf_diagnostic_batch_v1(
+            "simple-perf-hir", "src/demo.spl", "file:///src/demo.spl", 1, "hash-1", res.findings, false
+        )
+        expect(batch.diagnostics.len()).to_equal(1)
+        expect(batch.diagnostics[0].diagnostic.code).to_equal("PERF-STYLE-001")
+
+        # Verify S18: nogc function withholds VerifiedSafe!
+        val fn_nogc = st_map_loop_fn("map_nogc", "nogc")
+        val res_nogc = run_hir_perf_analysis_pipeline_v1(HirPerfPipelineRequestV1(
+            function: fn_nogc, file: "src/demo.spl", semantic_revision: "rev-1",
+            dependency_fingerprint: "dep-1", tier: PerfAnalysisTier.T1FastLocal,
+            complexity_policy: "default", registry: st_registry(), callee_summaries: {},
+            summarizer_config: default_perf_summarizer_config_v1(), contracts: [],
+            empirical_samples: [], deep_hook: default_deep_analyzer_hook_v1(),
+            deep_budget_ms: 50, deep_max_steps: 16, cancelled: false
+        ))
+        expect(res_nogc.idiom_candidates.len()).to_equal(1)
+        expect(res_nogc.idiom_candidates[0].applicability == PerfFixApplicability.VerifiedSafe).to_be(false)
+
+    it "handles T3 deep plugin cancellation safely with PERF-ANALYSIS-001 and zero false proofs (I06)":
+        """Verifies T3 optional deep plugin emits PERF-ANALYSIS-001 coverage note when cancelled."""
+        val fn_hir = st_map_loop_fn("map_deep", "")
+        val base_cfg = default_perf_summarizer_config_v1()
+        val plugin = DeepAnalyzerPluginV1(
+            plugin_id: "loopus_v1",
+            packaging: DeepPluginPackagingKindV1.StaticLinked,
+            analyzer_version: base_cfg.analyzer_version,
+            model_version: base_cfg.model_version,
+            supported_config_fingerprint: base_cfg.configuration_fingerprint,
+            implementation_identity: "impl-1",
+            solver_kind: DeepSolverKindV1.DifferenceConstraintLoopBound,
+            simulated_step_cost_ms: 5
+        )
+        val res = run_hir_perf_analysis_pipeline_v1(HirPerfPipelineRequestV1(
+            function: fn_hir, file: "src/demo.spl", semantic_revision: "rev-1",
+            dependency_fingerprint: "dep-1", tier: PerfAnalysisTier.T3DeepOptional,
+            complexity_policy: "default", registry: st_registry(), callee_summaries: {},
+            summarizer_config: base_cfg, contracts: [],
+            empirical_samples: [], deep_hook: Some(plugin),
+            deep_budget_ms: 0, deep_max_steps: 16, cancelled: true
+        ))
+        expect(res.invoked_deep_plugin).to_be(true)
+        var codes: [text] = []
+        for f in res.findings:
+            codes.push(f.rule_code)
+        expect(codes).to_contain("PERF-ANALYSIS-001")

@@ -1,0 +1,257 @@
+# Optional Deep Analyzer P6 Hook & Bootstrap Isolation (V1)
+#
+# Provides an optional `Option<DeepAnalyzerPluginV1>` hook (`None` by default)
+# so feature-off and Phase-3 bootstrap runs incur zero plugin allocations or
+# solver work (I10), guarantees safe `AnalysisResultStatus.Cancelled` behavior
+# with zero source writes and zero false `VerifiedSafe` proofs on timeout or
+# cancellation (I06), and preserves exact semantic summary parity across static
+# and dynamic plugin packaging under matching versions and configuration (I12).
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    PerfResourceDimension, BoundRelation, BoundRegime, AnalysisResultStatus,
+    BoundOrigin, PerfAnalysisTier, SizeMeasureKind, CostExprV1, BoundEvidenceV1,
+    FunctionCostSummaryV1, PerfFindingRecordV1
+}
+use compiler.semantics.perf.cost_domain_v1.{
+    compose_monotone_two_pointer_v1, render_cost_expr_with_params_v1
+}
+use compiler.semantics.perf.cost_summary_v1.{cost_summary_exported_digest_v1}
+
+enum DeepPluginPackagingKindV1:
+    StaticLinked
+    DynamicLoaded(library_path: text, abi_version: text)
+
+enum DeepSolverKindV1:
+    DifferenceConstraintLoopBound
+    RecurrenceBound
+
+struct DeepAnalyzerPluginV1:
+    plugin_id: text
+    packaging: DeepPluginPackagingKindV1
+    analyzer_version: text
+    model_version: text
+    supported_config_fingerprint: text
+    implementation_identity: text
+    solver_kind: DeepSolverKindV1
+    simulated_step_cost_ms: i64 = 1
+
+struct DeepAnalyzerRequestV1:
+    function_id: text
+    semantic_revision: text
+    file: text
+    primary_span: Span
+    tier: PerfAnalysisTier
+    base_summary: FunctionCostSummaryV1
+    budget_ms: i64
+    max_solver_steps: i64
+    cancelled: bool
+    configuration_fingerprint: text
+
+struct DeepAnalyzerOutcomeV1:
+    invoked_plugin: bool
+    status: AnalysisResultStatus
+    summary: FunctionCostSummaryV1
+    plugin_allocations: i64
+    solver_steps_used: i64
+    source_writes_performed: i64
+    verified_safe_fixes_granted: i64
+    coverage_finding: Option<PerfFindingRecordV1>
+
+pub fn default_deep_analyzer_hook_v1() -> Option<DeepAnalyzerPluginV1>:
+    None
+
+# reason: compares two FunctionCostSummaryV1 values for target-neutral semantic equivalence (I12)
+@allow(primitive_api)
+pub fn summaries_semantically_equal_v1(
+    left: FunctionCostSummaryV1,
+    right: FunctionCostSummaryV1
+) -> bool:
+    if (left.function_id != right.function_id or
+            left.semantic_revision != right.semantic_revision or
+            left.analyzer_version != right.analyzer_version or
+            left.model_version != right.model_version or
+            left.configuration_fingerprint != right.configuration_fingerprint):
+        return false
+    cost_summary_exported_digest_v1(left) == cost_summary_exported_digest_v1(right)
+
+fn _cancelled_summary(base: FunctionCostSummaryV1) -> FunctionCostSummaryV1:
+    var updated_bounds: [BoundEvidenceV1] = []
+    for rb in base.resource_bounds:
+        updated_bounds.push(BoundEvidenceV1(
+            resource: rb.resource,
+            expression: rb.expression,
+            rendered_expression: rb.rendered_expression,
+            relation: BoundRelation.UpperBound,
+            regime: rb.regime,
+            model_id: rb.model_id,
+            assumptions: rb.assumptions,
+            status: AnalysisResultStatus.Cancelled,
+            origin: rb.origin,
+            provenance_id: rb.provenance_id
+        ))
+    var out = base
+    out.resource_bounds = updated_bounds
+    out.implementation_digest = cost_summary_exported_digest_v1(out)
+    out
+
+fn _unknown_version_summary(base: FunctionCostSummaryV1, reason: text) -> FunctionCostSummaryV1:
+    val unk = CostExprV1.UnknownTerm(reason)
+    val rendered = render_cost_expr_with_params_v1(unk, base.size_parameters, base.size_relations)
+    val wb = BoundEvidenceV1(
+        resource: PerfResourceDimension.Work,
+        expression: unk,
+        rendered_expression: rendered,
+        relation: BoundRelation.UpperBound,
+        regime: BoundRegime.WorstCase,
+        model_id: base.model_version,
+        assumptions: [],
+        status: AnalysisResultStatus.Unknown,
+        origin: BoundOrigin.Inferred,
+        provenance_id: base.provenance_root
+    )
+    var out = base
+    out.resource_bounds = [wb]
+    out.unresolved_terms = [reason]
+    out.implementation_digest = cost_summary_exported_digest_v1(out)
+    out
+
+pub fn run_optional_deep_analysis_v1(
+    hook: Option<DeepAnalyzerPluginV1>,
+    request: DeepAnalyzerRequestV1
+) -> DeepAnalyzerOutcomeV1:
+    if not hook.? or request.tier.name() != "T3":
+        return DeepAnalyzerOutcomeV1(
+            invoked_plugin: false,
+            status: AnalysisResultStatus.Complete,
+            summary: request.base_summary,
+            plugin_allocations: 0,
+            solver_steps_used: 0,
+            source_writes_performed: 0,
+            verified_safe_fixes_granted: 0,
+            coverage_finding: None
+        )
+
+    val plugin = hook.unwrap()
+
+    if (request.cancelled or
+            request.budget_ms <= 0 or
+            request.max_solver_steps <= 0 or
+            plugin.simulated_step_cost_ms > request.budget_ms):
+        val c_sum = _cancelled_summary(request.base_summary)
+        val c_finding = PerfFindingRecordV1(
+            rule_code: "PERF-ANALYSIS-001",
+            stable_occurrence_id: request.function_id + ":PERF-ANALYSIS-001:deep_cancelled",
+            function_id: request.function_id,
+            file: request.file,
+            primary_span: request.primary_span,
+            related_locations: [],
+            message: "Optional T3 deep analysis cancelled or budget exhausted for " + request.function_id + "; retaining conservative bound without proof",
+            evidence: None,
+            tier: PerfAnalysisTier.T3DeepOptional,
+            semantic_fingerprint: c_sum.implementation_digest,
+            fix_candidates: []
+        )
+        return DeepAnalyzerOutcomeV1(
+            invoked_plugin: true,
+            status: AnalysisResultStatus.Cancelled,
+            summary: c_sum,
+            plugin_allocations: 0,
+            solver_steps_used: 0,
+            source_writes_performed: 0,
+            verified_safe_fixes_granted: 0,
+            coverage_finding: Some(c_finding)
+        )
+
+    if (plugin.model_version != request.base_summary.model_version or
+            plugin.analyzer_version != request.base_summary.analyzer_version or
+            plugin.supported_config_fingerprint != request.configuration_fingerprint):
+        val u_sum = _unknown_version_summary(request.base_summary, "deep_plugin_version_or_config_mismatch")
+        val u_finding = PerfFindingRecordV1(
+            rule_code: "PERF-ANALYSIS-001",
+            stable_occurrence_id: request.function_id + ":PERF-ANALYSIS-001:deep_version_mismatch",
+            function_id: request.function_id,
+            file: request.file,
+            primary_span: request.primary_span,
+            related_locations: [],
+            message: "Optional T3 deep plugin version/configuration mismatch for " + request.function_id + "; downgrading to unknown",
+            evidence: None,
+            tier: PerfAnalysisTier.T3DeepOptional,
+            semantic_fingerprint: u_sum.implementation_digest,
+            fix_candidates: []
+        )
+        return DeepAnalyzerOutcomeV1(
+            invoked_plugin: true,
+            status: AnalysisResultStatus.Unknown,
+            summary: u_sum,
+            plugin_allocations: 0,
+            solver_steps_used: 0,
+            source_writes_performed: 0,
+            verified_safe_fixes_granted: 0,
+            coverage_finding: Some(u_finding)
+        )
+
+    var refined_bounds: [BoundEvidenceV1] = []
+    var steps_used = 0
+    for rb in request.base_summary.resource_bounds:
+        match plugin.solver_kind:
+            case DeepSolverKindV1.DifferenceConstraintLoopBound:
+                if (rb.assumptions.contains("two_pointer_monotone_invariant_unproved_loose_upper_bound") and
+                        request.base_summary.size_parameters.len() > 0):
+                    val sp0 = request.base_summary.size_parameters[0]
+                    val size_expr = CostExprV1.Size(sp0.param_name, sp0.measure)
+                    val proven = compose_monotone_two_pointer_v1(
+                        size_expr,
+                        size_expr,
+                        CostExprV1.Const(1),
+                        true,
+                        rb.provenance_id
+                    )
+                    val rendered = render_cost_expr_with_params_v1(
+                        proven.expression,
+                        request.base_summary.size_parameters,
+                        request.base_summary.size_relations
+                    )
+                    refined_bounds.push(BoundEvidenceV1(
+                        resource: rb.resource,
+                        expression: proven.expression,
+                        rendered_expression: rendered,
+                        relation: proven.relation,
+                        regime: proven.regime,
+                        model_id: plugin.model_version,
+                        assumptions: proven.assumptions,
+                        status: AnalysisResultStatus.Complete,
+                        origin: BoundOrigin.Inferred,
+                        provenance_id: rb.provenance_id
+                    ))
+                    steps_used = steps_used + 1
+                else:
+                    refined_bounds.push(rb)
+            case DeepSolverKindV1.RecurrenceBound:
+                steps_used = steps_used + 1
+                refined_bounds.push(rb)
+
+    if steps_used == 0:
+        steps_used = 1
+
+    var refined_summary = request.base_summary
+    refined_summary.resource_bounds = refined_bounds
+    if refined_bounds.len() > 0:
+        refined_summary.assumptions = refined_bounds[0].assumptions
+    refined_summary.implementation_digest = cost_summary_exported_digest_v1(refined_summary)
+
+    DeepAnalyzerOutcomeV1(
+        invoked_plugin: true,
+        status: AnalysisResultStatus.Complete,
+        summary: refined_summary,
+        plugin_allocations: 1,
+        solver_steps_used: steps_used,
+        source_writes_performed: 0,
+        verified_safe_fixes_granted: 0,
+        coverage_finding: None
+    )
+
+export DeepPluginPackagingKindV1, DeepSolverKindV1
+export DeepAnalyzerPluginV1, DeepAnalyzerRequestV1, DeepAnalyzerOutcomeV1
+export default_deep_analyzer_hook_v1, summaries_semantically_equal_v1
+export run_optional_deep_analysis_v1

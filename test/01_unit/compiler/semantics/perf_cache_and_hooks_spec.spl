@@ -1,0 +1,387 @@
+"""
+## Purpose and audience
+Unit specification for cache identity & library model admission
+(`perf_cache_key_v1.spl`), incremental reverse-dependency invalidation
+(`caller_propagation_v1.spl`), and optional deep-analysis P6 plugin hooks
+(`deep_analyzer_hook_v1.spl`).
+
+Covers `§12.1` (`AnalysisKeyV1` bridge) and infrastructure scenarios `I03`,
+`I04`, `I06`, `I08`, `I10`, and `I12`.
+"""
+
+use std.spec.*
+use std.common.task_runner.contracts.{analysis_key_error_v1, analysis_key_digest_v1}
+use compiler.common.diagnostics.span.{Span}
+use compiler.semantics.perf.perf_analysis_contracts_v1.*
+use compiler.semantics.perf.cost_domain_v1.*
+use compiler.semantics.perf.cost_summary_v1.*
+use compiler.semantics.perf.caller_propagation_v1.*
+use compiler.semantics.perf.perf_cache_key_v1.*
+use compiler.semantics.perf.deep_analyzer_hook_v1.*
+
+fn pch_span(line: i64) -> Span:
+    Span.at(line, line, 1)
+
+fn pch_base_cache_key() -> PerfCacheKeyV1:
+    PerfCacheKeyV1(
+        function_semantic_revision: "sem-rev-101",
+        type_instantiation: "Array<User>",
+        callee_summary_hashes: ["callee_hash_a", "callee_hash_b"],
+        library_implementation_identity: "stdlib-abi-v1:hash-index-fast-001",
+        analyzer_version: "perf-analyzer-1.0.0",
+        model_version: SUPPORTED_PERF_MODEL_VERSION_V1,
+        effect_numeric_policy: "checked_int:strict_float",
+        target_config: "x86_64-unknown-linux-gnu:cpu",
+        analysis_profile: "perf-compositional-t2",
+        function_id: "user_lookup"
+    )
+
+fn pch_sample_summary(revision: text, loose_two_pointer: bool) -> FunctionCostSummaryV1:
+    val n_expr = CostExprV1.Size("n", SizeMeasureKind.Length)
+    val bound = if loose_two_pointer:
+        compose_monotone_two_pointer_v1(n_expr, n_expr, CostExprV1.Const(1), false, "prov:loose")
+    else:
+        compose_loop_independent_v1(n_expr, make_inferred_bound_v1(
+            PerfResourceDimension.Work,
+            CostExprV1.Const(1),
+            BoundRelation.Exact,
+            BoundRegime.WorstCase,
+            SUPPORTED_PERF_MODEL_VERSION_V1,
+            ["normal_completion"],
+            "prov:linear"
+        ), true)
+    FunctionCostSummaryV1(
+        function_id: "target_fn",
+        function_symbol_id: 500,
+        semantic_revision: revision,
+        size_parameters: [SizeParameterV1(param_name: "n", measure: SizeMeasureKind.Length, canonical_var: "n")],
+        size_relations: [],
+        resource_bounds: [bound],
+        output_cardinality: n_expr,
+        callback_cost_parameters: [],
+        effects_summary_id: "eff:pure",
+        assumptions: bound.assumptions,
+        unresolved_terms: [],
+        dependency_summary_hashes: [],
+        implementation_digest: "impl-digest-1",
+        provenance_root: "prov:root",
+        provenance_nodes: [],
+        analyzer_version: "perf-analyzer-1.0.0",
+        model_version: SUPPORTED_PERF_MODEL_VERSION_V1,
+        configuration_fingerprint: "cfg-default-v1"
+    )
+
+describe "PerfCacheKeyV1, Library Model Admission & Incremental Invalidation (I03, I04, I08)":
+    """Verifies cache key completeness, dynamic implementation invalidation, model version fail-closed, and incremental reuse."""
+
+    context "PerfCacheKeyV1 to AnalysisKeyV1 bridge and dynamic library invalidation (§12.1, I03)":
+        """Binds all nine semantic, implementation, model, policy, target, and profile dimensions."""
+
+        it "maps PerfCacheKeyV1 cleanly to AnalysisKeyV1 and changes digest on every bound dimension (§12.1)":
+            """Mutating any single field of PerfCacheKeyV1 produces a valid and distinct AnalysisKeyV1 digest."""
+            val base = pch_base_cache_key()
+            val ak = base.to_analysis_key_v1()
+            expect(analysis_key_error_v1(ak)).to_equal("")
+            val base_digest = analysis_key_digest_v1(ak).unwrap()
+            expect(base_digest.len()).to_equal(64)
+
+            var c_rev = base
+            c_rev.function_semantic_revision = "sem-rev-102"
+            var c_type = base
+            c_type.type_instantiation = "Array<Order>"
+            var c_callee = base
+            c_callee.callee_summary_hashes = ["callee_hash_a", "callee_hash_CHANGED"]
+            var c_lib = base
+            c_lib.library_implementation_identity = "stdlib-abi-v1:linear-scan-slow-002"
+            var c_aver = base
+            c_aver.analyzer_version = "perf-analyzer-1.1.0"
+            var c_mver = base
+            c_mver.model_version = "perf-model-v2"
+            var c_pol = base
+            c_pol.effect_numeric_policy = "wrapping_int:fast_float"
+            var c_tgt = base
+            c_tgt.target_config = "aarch64-apple-darwin:cpu"
+            var c_prof = base
+            c_prof.analysis_profile = "perf-deep-t3"
+
+            for variant in [c_rev, c_type, c_callee, c_lib, c_aver, c_mver, c_pol, c_tgt, c_prof]:
+                val v_ak = variant.to_analysis_key_v1()
+                expect(analysis_key_error_v1(v_ak)).to_equal("")
+                val v_digest = analysis_key_digest_v1(v_ak).unwrap()
+                expect(v_digest == base_digest).to_equal(false)
+
+        it "invalidates cached summary when an ABI-compatible plugin changes library_implementation_identity (I03)":
+            """Same ABI and signature with a slower dynamic implementation misses the old cache entry."""
+            var cache = PerfSummaryCacheV1.new()
+            val fast_key = pch_base_cache_key()
+            val summary = pch_sample_summary("sem-rev-101", false)
+            expect(cache.put(fast_key, summary).is_ok()).to_equal(true)
+            expect(cache.get(fast_key).?).to_equal(true)
+
+            var swapped_plugin_key = fast_key
+            swapped_plugin_key.library_implementation_identity = "stdlib-abi-v1:linear-fallback-999"
+            expect(cache.get(swapped_plugin_key).?).to_equal(false)
+
+    context "fail-closed library model version validation (I08)":
+        """Rejects unsupported or mismatched library model metadata without crashing or trusting claimed O(1) bounds."""
+
+        it "downgrades unsupported library model_version to AnalysisResultStatus.Unknown with PERF-ANALYSIS-001 (I08)":
+            """Mismatched model version produces explicit UnknownTerm rather than trusting Const(1)."""
+            val bad_descriptor = LibraryCostModelDescriptorV1(
+                library_symbol: "ext.plugin.lookup",
+                abi_version: "1.0",
+                signature_fingerprint: "lookup(Key)->Option<Val>",
+                library_implementation_identity: "plugin-impl-v1",
+                model_version: "unsupported-model-v99",
+                claimed_work_bound: CostExprV1.Const(1),
+                claimed_regime: BoundRegime.WorstCase,
+                assumptions: ["constant_lookup"],
+                file: "src/ext_client.spl",
+                span: pch_span(15)
+            )
+            val admission = admit_library_cost_model_v1(bad_descriptor, SUPPORTED_PERF_MODEL_VERSION_V1)
+            expect(admission.admitted).to_equal(false)
+            expect(admission.bound.status.name()).to_equal("Unknown")
+            expect(cost_expr_has_unknown_v1(admission.bound.expression)).to_equal(true)
+            expect(admission.finding.?).to_equal(true)
+            expect(admission.finding.unwrap().rule_code).to_equal("PERF-ANALYSIS-001")
+
+    context "incremental reverse-dependency invalidation (I04)":
+        """Reuses unaffected summaries on unrelated or cost-preserving edits and revisits callers only on digest change."""
+
+        it "reuses caller and unrelated summaries on unrelated edits, and recomputes callers only when callee cost digest changes (I04)":
+            """Verifies minimal reverse-dependency recomputation across two incremental steps."""
+            val m_param = SizeParameterV1(param_name: "items", measure: SizeMeasureKind.Length, canonical_var: "m")
+            val n_param = SizeParameterV1(param_name: "queries", measure: SizeMeasureKind.Length, canonical_var: "n")
+
+            val helper_v1 = PerfFunctionModelV1(
+                function_id: "lookup_helper",
+                function_symbol_id: 70,
+                file: "src/helper.spl",
+                primary_span: pch_span(5),
+                semantic_revision: "rev-1",
+                size_parameters: [m_param],
+                size_relations: [],
+                callback_cost_parameters: [],
+                effects_summary_id: "eff:read",
+                output_cardinality: CostExprV1.Const(1),
+                body: PerfBodyNodeV1.StepWork(CostExprV1.Const(1), "indexed lookup", pch_span(6))
+            )
+            val caller_model = PerfFunctionModelV1(
+                function_id: "batch_caller",
+                function_symbol_id: 71,
+                file: "src/caller.spl",
+                primary_span: pch_span(20),
+                semantic_revision: "rev-1",
+                size_parameters: [n_param, m_param],
+                size_relations: [],
+                callback_cost_parameters: [],
+                effects_summary_id: "eff:read",
+                output_cardinality: CostExprV1.Size("queries", SizeMeasureKind.Length),
+                body: PerfBodyNodeV1.LoopRegion(
+                    PerfLoopShapeV1.LinearScan(CostExprV1.Size("queries", SizeMeasureKind.Length)),
+                    PerfBodyNodeV1.CalleeCall(
+                        "lookup_helper",
+                        70,
+                        [PerfCallArgBindingV1(
+                            formal_param: "items",
+                            actual_size: CostExprV1.Size("items", SizeMeasureKind.Length)
+                        )],
+                        [],
+                        CostExprV1.Const(1),
+                        pch_span(22)
+                    ),
+                    pch_span(21)
+                )
+            )
+            val unrelated_v1 = PerfFunctionModelV1(
+                function_id: "unrelated_math",
+                function_symbol_id: 72,
+                file: "src/other.spl",
+                primary_span: pch_span(1),
+                semantic_revision: "rev-1",
+                size_parameters: [],
+                size_relations: [],
+                callback_cost_parameters: [],
+                effects_summary_id: "eff:pure",
+                output_cardinality: CostExprV1.Const(1),
+                body: PerfBodyNodeV1.StepWork(CostExprV1.Const(2), "add", pch_span(2))
+            )
+
+            val cfg = default_perf_summarizer_config_v1()
+            val initial = propagate_call_graph_v1([helper_v1, caller_model, unrelated_v1], cfg)
+
+            var unrelated_v2 = unrelated_v1
+            unrelated_v2.semantic_revision = "rev-2"
+            val step_unrelated = propagate_incremental_update_v1(
+                initial,
+                [helper_v1, caller_model, unrelated_v2],
+                ["unrelated_math"],
+                cfg
+            )
+            expect(step_unrelated.recomputed_ids).to_contain("unrelated_math")
+            expect(step_unrelated.reused_ids).to_contain("lookup_helper")
+            expect(step_unrelated.reused_ids).to_contain("batch_caller")
+            expect(step_unrelated.invalidated_caller_ids.len()).to_equal(0)
+
+            var helper_span_only = helper_v1
+            helper_span_only.semantic_revision = "rev-3"
+            helper_span_only.primary_span = pch_span(12)
+            val step_same_digest = propagate_incremental_update_v1(
+                step_unrelated.snapshot,
+                [helper_span_only, caller_model, unrelated_v2],
+                ["lookup_helper"],
+                cfg
+            )
+            expect(step_same_digest.recomputed_ids).to_contain("lookup_helper")
+            expect(step_same_digest.reused_ids).to_contain("batch_caller")
+            expect(step_same_digest.invalidated_caller_ids.len()).to_equal(0)
+
+            var helper_linear = helper_v1
+            helper_linear.semantic_revision = "rev-4"
+            helper_linear.body = PerfBodyNodeV1.LoopRegion(
+                PerfLoopShapeV1.LinearScan(CostExprV1.Size("items", SizeMeasureKind.Length)),
+                PerfBodyNodeV1.StepWork(CostExprV1.Const(1), "linear scan", pch_span(8)),
+                pch_span(7)
+            )
+            val step_changed_cost = propagate_incremental_update_v1(
+                step_same_digest.snapshot,
+                [helper_linear, caller_model, unrelated_v2],
+                ["lookup_helper"],
+                cfg
+            )
+            expect(step_changed_cost.invalidated_caller_ids).to_contain("batch_caller")
+            expect(step_changed_cost.recomputed_ids).to_contain("batch_caller")
+            expect(step_changed_cost.reused_ids).to_contain("unrelated_math")
+            val updated_caller = step_changed_cost.snapshot.summaries["batch_caller"]
+            val updated_work = find_resource_bound_v1(updated_caller, PerfResourceDimension.Work).unwrap()
+            expect(render_big_o_with_params_v1(
+                updated_work.expression,
+                updated_caller.size_parameters,
+                updated_caller.size_relations
+            )).to_equal("O(n*m)")
+
+describe "DeepAnalyzerPluginV1 Optional P6 Hook (I06, I10, I12)":
+    """Verifies zero-overhead feature-off bootstrap default, cancellation safety, and static/dynamic parity."""
+
+    context "feature-off bootstrap and timeout/cancellation guarantees (I06, I10)":
+        """Ensures None default hook is a zero-allocation no-op and cancelled runs never write source or grant proofs."""
+
+        it "defaults DeepAnalyzerPluginV1 hook to None with zero allocations and unchanged summary (I10)":
+            """Feature-off bootstrap neither loads plugins nor allocates solver state."""
+            val hook = default_deep_analyzer_hook_v1()
+            expect(hook.?).to_equal(false)
+            val base_summary = pch_sample_summary("rev-boot-1", true)
+            val req = DeepAnalyzerRequestV1(
+                function_id: "target_fn",
+                semantic_revision: "rev-boot-1",
+                file: "src/boot.spl",
+                primary_span: pch_span(1),
+                tier: PerfAnalysisTier.T1FastLocal,
+                base_summary: base_summary,
+                budget_ms: 50,
+                max_solver_steps: 64,
+                cancelled: false,
+                configuration_fingerprint: "cfg-default-v1"
+            )
+            val outcome = run_optional_deep_analysis_v1(hook, req)
+            expect(outcome.invoked_plugin).to_equal(false)
+            expect(outcome.plugin_allocations).to_equal(0)
+            expect(outcome.solver_steps_used).to_equal(0)
+            expect(outcome.source_writes_performed).to_equal(0)
+            expect(outcome.verified_safe_fixes_granted).to_equal(0)
+            expect(summaries_semantically_equal_v1(outcome.summary, base_summary)).to_equal(true)
+
+        it "returns AnalysisResultStatus.Cancelled with zero source writes and zero false proofs on timeout or cancellation (I06)":
+            """Exhausted budget_ms <= 0 or cancelled flag fails safely without crashing or granting proofs."""
+            val plugin = DeepAnalyzerPluginV1(
+                plugin_id: "loopus-diff-v1",
+                packaging: DeepPluginPackagingKindV1.StaticLinked,
+                analyzer_version: "perf-analyzer-1.0.0",
+                model_version: SUPPORTED_PERF_MODEL_VERSION_V1,
+                supported_config_fingerprint: "cfg-default-v1",
+                implementation_identity: "deep-static-v1",
+                solver_kind: DeepSolverKindV1.DifferenceConstraintLoopBound,
+                simulated_step_cost_ms: 10
+            )
+            val base_summary = pch_sample_summary("rev-cancel-1", true)
+            val timeout_req = DeepAnalyzerRequestV1(
+                function_id: "target_fn",
+                semantic_revision: "rev-cancel-1",
+                file: "src/deep_target.spl",
+                primary_span: pch_span(10),
+                tier: PerfAnalysisTier.T3DeepOptional,
+                base_summary: base_summary,
+                budget_ms: 0,
+                max_solver_steps: 32,
+                cancelled: false,
+                configuration_fingerprint: "cfg-default-v1"
+            )
+            val timeout_out = run_optional_deep_analysis_v1(Some(plugin), timeout_req)
+            expect(timeout_out.status.name()).to_equal("Cancelled")
+            expect(timeout_out.source_writes_performed).to_equal(0)
+            expect(timeout_out.verified_safe_fixes_granted).to_equal(0)
+            expect(timeout_out.coverage_finding.?).to_equal(true)
+            expect(timeout_out.coverage_finding.unwrap().rule_code).to_equal("PERF-ANALYSIS-001")
+
+            var cancelled_req = timeout_req
+            cancelled_req.budget_ms = 100
+            cancelled_req.cancelled = true
+            val cancel_out = run_optional_deep_analysis_v1(Some(plugin), cancelled_req)
+            expect(cancel_out.status.name()).to_equal("Cancelled")
+            expect(cancel_out.source_writes_performed).to_equal(0)
+            expect(cancel_out.verified_safe_fixes_granted).to_equal(0)
+
+    context "static versus dynamic plugin packaging parity (I12)":
+        """Confirms identical semantic summaries when analyzer_version, model_version, and config match."""
+
+        it "produces identical semantic summaries for static and dynamic plugin packaging under matching versions and config (I12)":
+            """Packaging transport differs while semantic summary and exported digest match identically."""
+            val static_plugin = DeepAnalyzerPluginV1(
+                plugin_id: "loopus-diff-v1",
+                packaging: DeepPluginPackagingKindV1.StaticLinked,
+                analyzer_version: "perf-analyzer-1.0.0",
+                model_version: SUPPORTED_PERF_MODEL_VERSION_V1,
+                supported_config_fingerprint: "cfg-default-v1",
+                implementation_identity: "deep-core-impl-v1",
+                solver_kind: DeepSolverKindV1.DifferenceConstraintLoopBound,
+                simulated_step_cost_ms: 2
+            )
+            val dynamic_plugin = DeepAnalyzerPluginV1(
+                plugin_id: "loopus-diff-v1",
+                packaging: DeepPluginPackagingKindV1.DynamicLoaded(
+                    "plugins/libsimple_perf_deep.so",
+                    "plugin-abi-v1"
+                ),
+                analyzer_version: "perf-analyzer-1.0.0",
+                model_version: SUPPORTED_PERF_MODEL_VERSION_V1,
+                supported_config_fingerprint: "cfg-default-v1",
+                implementation_identity: "deep-core-impl-v1",
+                solver_kind: DeepSolverKindV1.DifferenceConstraintLoopBound,
+                simulated_step_cost_ms: 2
+            )
+            val base_summary = pch_sample_summary("rev-parity-1", true)
+            val req = DeepAnalyzerRequestV1(
+                function_id: "target_fn",
+                semantic_revision: "rev-parity-1",
+                file: "src/parity.spl",
+                primary_span: pch_span(30),
+                tier: PerfAnalysisTier.T3DeepOptional,
+                base_summary: base_summary,
+                budget_ms: 50,
+                max_solver_steps: 32,
+                cancelled: false,
+                configuration_fingerprint: "cfg-default-v1"
+            )
+            val static_out = run_optional_deep_analysis_v1(Some(static_plugin), req)
+            val dynamic_out = run_optional_deep_analysis_v1(Some(dynamic_plugin), req)
+            expect(static_out.invoked_plugin).to_equal(true)
+            expect(dynamic_out.invoked_plugin).to_equal(true)
+            expect(static_out.status.name()).to_equal("Complete")
+            expect(dynamic_out.status.name()).to_equal("Complete")
+            expect(summaries_semantically_equal_v1(static_out.summary, dynamic_out.summary)).to_equal(true)
+            expect(cost_summary_exported_digest_v1(static_out.summary)).to_equal(
+                cost_summary_exported_digest_v1(dynamic_out.summary)
+            )
+            val refined_work = find_resource_bound_v1(static_out.summary, PerfResourceDimension.Work).unwrap()
+            expect(render_big_o_v1(refined_work.expression)).to_equal("O(n)")

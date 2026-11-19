@@ -1,0 +1,456 @@
+# Resource Contract 3-Valued Verifier (V1)
+#
+# Implements structured resource contract verification (design §§9.2-9.4, 14.1;
+# decisions D04, D09, D11; scenario C15):
+#   - Verified: available UpperBound/Exact/TightBound under a compatible regime
+#     and Complete status establishes the declared contract.
+#   - Refuted (PERF-CONTRACT-001): ONLY when a valid LowerBound/Exact/TightBound
+#     exceeds the declared asymptotic class/concrete limit OR an explicitly
+#     enabled Measured OperationCounterSampleV1 (T4, D11) exceeds concrete_op_limit.
+#   - Unproved (PERF-CONTRACT-002): loose upper bounds (C15), UnknownTerm,
+#     Expected bounds for a WorstCase contract, or missing evidence report
+#     honest "unproved" wording and NEVER "violated" or Refuted.
+
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    PerfResourceDimension, BoundRelation, BoundRegime, AnalysisResultStatus,
+    BoundOrigin, SizeMeasureKind, CostExprV1, BoundEvidenceV1,
+    FunctionCostSummaryV1, ContractVerificationVerdict, ResourceContractCheckV1
+}
+
+struct DeclaredResourceContractV1:
+    function_id: text
+    resource: PerfResourceDimension
+    max_bound: CostExprV1
+    max_degree: i64
+    concrete_op_limit: Option<i64>
+    required_regime: BoundRegime
+    strict_verification: bool
+
+struct OperationCounterSampleV1:
+    function_id: text
+    resource: PerfResourceDimension
+    counter_name: text
+    workload_label: text
+    observed_ops: i64
+    origin: BoundOrigin
+    opt_in_enabled: bool
+
+fn _rcv_join_texts(items: [text], sep: text) -> text:
+    var out = ""
+    var first = true
+    for item in items:
+        if not first:
+            out = out + sep
+        out = out + item
+        first = false
+    out
+
+fn cost_expr_has_unknown_v1(expr: CostExprV1) -> bool:
+    match expr:
+        case CostExprV1.Const(_): false
+        case CostExprV1.Size(_, _): false
+        case CostExprV1.Add(terms):
+            for t in terms:
+                if cost_expr_has_unknown_v1(t):
+                    return true
+            false
+        case CostExprV1.Multiply(factors):
+            for f in factors:
+                if cost_expr_has_unknown_v1(f):
+                    return true
+            false
+        case CostExprV1.Maximum(branches):
+            for b in branches:
+                if cost_expr_has_unknown_v1(b):
+                    return true
+            false
+        case CostExprV1.LogBound(inner):
+            cost_expr_has_unknown_v1(inner)
+        case CostExprV1.TriangularSum(outer):
+            cost_expr_has_unknown_v1(outer)
+        case CostExprV1.AggregateSize(group_count, total_elements):
+            cost_expr_has_unknown_v1(group_count) or cost_expr_has_unknown_v1(total_elements)
+        case CostExprV1.KnownCalleeCost(_, substituted):
+            cost_expr_has_unknown_v1(substituted)
+        case CostExprV1.CallbackTerm(_, invocations, body_cost):
+            cost_expr_has_unknown_v1(invocations) or cost_expr_has_unknown_v1(body_cost)
+        case CostExprV1.UnknownTerm(_): true
+
+fn cost_expr_degree_v1(expr: CostExprV1) -> i64:
+    match expr:
+        case CostExprV1.Const(_): 0
+        case CostExprV1.Size(_, _): 1
+        case CostExprV1.Add(terms):
+            var best = 0
+            for t in terms:
+                val d = cost_expr_degree_v1(t)
+                if d > best:
+                    best = d
+            best
+        case CostExprV1.Multiply(factors):
+            var sum_deg = 0
+            for f in factors:
+                sum_deg = sum_deg + cost_expr_degree_v1(f)
+            sum_deg
+        case CostExprV1.Maximum(branches):
+            var best = 0
+            for b in branches:
+                val d = cost_expr_degree_v1(b)
+                if d > best:
+                    best = d
+            best
+        case CostExprV1.LogBound(_): 0
+        case CostExprV1.TriangularSum(outer):
+            val od = cost_expr_degree_v1(outer)
+            if od <= 0: 0 else: od * 2
+        case CostExprV1.AggregateSize(group_count, total_elements):
+            val gd = cost_expr_degree_v1(group_count)
+            val td = cost_expr_degree_v1(total_elements)
+            if gd > td: gd else: td
+        case CostExprV1.KnownCalleeCost(_, substituted):
+            cost_expr_degree_v1(substituted)
+        case CostExprV1.CallbackTerm(_, invocations, body_cost):
+            cost_expr_degree_v1(invocations) + cost_expr_degree_v1(body_cost)
+        case CostExprV1.UnknownTerm(_): 0
+
+fn cost_expr_log_power_v1(expr: CostExprV1) -> i64:
+    match expr:
+        case CostExprV1.Const(_): 0
+        case CostExprV1.Size(_, _): 0
+        case CostExprV1.Add(terms):
+            val max_deg = cost_expr_degree_v1(expr)
+            var best_log = 0
+            for t in terms:
+                if cost_expr_degree_v1(t) == max_deg:
+                    val lp = cost_expr_log_power_v1(t)
+                    if lp > best_log:
+                        best_log = lp
+            best_log
+        case CostExprV1.Multiply(factors):
+            var sum_log = 0
+            for f in factors:
+                sum_log = sum_log + cost_expr_log_power_v1(f)
+            sum_log
+        case CostExprV1.Maximum(branches):
+            val max_deg = cost_expr_degree_v1(expr)
+            var best_log = 0
+            for b in branches:
+                if cost_expr_degree_v1(b) == max_deg:
+                    val lp = cost_expr_log_power_v1(b)
+                    if lp > best_log:
+                        best_log = lp
+            best_log
+        case CostExprV1.LogBound(inner):
+            if cost_expr_degree_v1(inner) > 0 or cost_expr_log_power_v1(inner) > 0:
+                1
+            else:
+                0
+        case CostExprV1.TriangularSum(outer):
+            cost_expr_log_power_v1(outer) * 2
+        case CostExprV1.AggregateSize(group_count, total_elements):
+            val gl = cost_expr_log_power_v1(group_count)
+            val tl = cost_expr_log_power_v1(total_elements)
+            if gl > tl: gl else: tl
+        case CostExprV1.KnownCalleeCost(_, substituted):
+            cost_expr_log_power_v1(substituted)
+        case CostExprV1.CallbackTerm(_, invocations, body_cost):
+            cost_expr_log_power_v1(invocations) + cost_expr_log_power_v1(body_cost)
+        case CostExprV1.UnknownTerm(_): 0
+
+fn cost_expr_const_value_v1(expr: CostExprV1) -> Option<i64>:
+    match expr:
+        case CostExprV1.Const(value): Option.Some(value)
+        case CostExprV1.Size(_, _): Option.None
+        case CostExprV1.Add(terms):
+            var total = 0
+            for t in terms:
+                match cost_expr_const_value_v1(t):
+                    case Option.Some(v): total = total + v
+                    case Option.None: return Option.None
+            Option.Some(total)
+        case CostExprV1.Multiply(factors):
+            var prod = 1
+            for f in factors:
+                match cost_expr_const_value_v1(f):
+                    case Option.Some(v): prod = prod * v
+                    case Option.None: return Option.None
+            Option.Some(prod)
+        case CostExprV1.Maximum(branches):
+            if branches.len() == 0:
+                return Option.Some(0)
+            var best = 0
+            var initialized = false
+            for b in branches:
+                match cost_expr_const_value_v1(b):
+                    case Option.Some(v):
+                        if not initialized or v > best:
+                            best = v
+                            initialized = true
+                    case Option.None: return Option.None
+            Option.Some(best)
+        case CostExprV1.KnownCalleeCost(_, substituted):
+            cost_expr_const_value_v1(substituted)
+        case _: Option.None
+
+fn render_cost_expr_v1(expr: CostExprV1) -> text:
+    match expr:
+        case CostExprV1.Const(value): value.to_string()
+        case CostExprV1.Size(param_name, measure):
+            measure.name() + "(" + param_name + ")"
+        case CostExprV1.Add(terms):
+            if terms.len() == 0:
+                return "0"
+            var rendered: [text] = []
+            for t in terms:
+                rendered.push(render_cost_expr_v1(t))
+            _rcv_join_texts(rendered, " + ")
+        case CostExprV1.Multiply(factors):
+            if factors.len() == 0:
+                return "1"
+            var rendered: [text] = []
+            for f in factors:
+                rendered.push(render_cost_expr_v1(f))
+            _rcv_join_texts(rendered, " * ")
+        case CostExprV1.Maximum(branches):
+            var rendered: [text] = []
+            for b in branches:
+                rendered.push(render_cost_expr_v1(b))
+            "max(" + _rcv_join_texts(rendered, ", ") + ")"
+        case CostExprV1.LogBound(inner):
+            "log(" + render_cost_expr_v1(inner) + ")"
+        case CostExprV1.TriangularSum(outer):
+            "triangular_sum(" + render_cost_expr_v1(outer) + ")"
+        case CostExprV1.AggregateSize(group_count, total_elements):
+            render_cost_expr_v1(group_count) + " + " + render_cost_expr_v1(total_elements)
+        case CostExprV1.KnownCalleeCost(callee_id, substituted):
+            callee_id + "[" + render_cost_expr_v1(substituted) + "]"
+        case CostExprV1.CallbackTerm(callback_param, invocations, body_cost):
+            render_cost_expr_v1(invocations) + " * callback(" + callback_param + ": " + render_cost_expr_v1(body_cost) + ")"
+        case CostExprV1.UnknownTerm(reason):
+            "unknown(" + reason + ")"
+
+fn asymptotic_class_label_v1(degree: i64, log_power: i64) -> text:
+    if degree <= 0 and log_power <= 0:
+        return "constant"
+    if degree == 0 and log_power == 1:
+        return "logarithmic"
+    if degree == 1 and log_power == 0:
+        return "linear"
+    if degree == 1 and log_power == 1:
+        return "linearithmic"
+    if degree == 2 and log_power == 0:
+        return "quadratic"
+    if degree == 3 and log_power == 0:
+        return "cubic"
+    if log_power == 0:
+        return "polynomial(degree=" + degree.to_string() + ")"
+    "polynomial(degree=" + degree.to_string() + ",log=" + log_power.to_string() + ")"
+
+fn regime_satisfies_upper_contract_v1(evidence_regime: BoundRegime, required_regime: BoundRegime) -> bool:
+    match required_regime:
+        case BoundRegime.WorstCase:
+            evidence_regime == BoundRegime.WorstCase
+        case BoundRegime.Amortized:
+            evidence_regime == BoundRegime.WorstCase or evidence_regime == BoundRegime.Amortized
+        case BoundRegime.Expected:
+            evidence_regime == BoundRegime.WorstCase or evidence_regime == BoundRegime.Expected
+        case BoundRegime.ExpectedAmortized:
+            true
+
+fn regime_refutes_lower_contract_v1(evidence_regime: BoundRegime, required_regime: BoundRegime) -> bool:
+    match required_regime:
+        case BoundRegime.WorstCase:
+            true
+        case BoundRegime.Expected:
+            evidence_regime == BoundRegime.Expected or evidence_regime == BoundRegime.ExpectedAmortized
+        case BoundRegime.Amortized:
+            evidence_regime == BoundRegime.Amortized or evidence_regime == BoundRegime.ExpectedAmortized
+        case BoundRegime.ExpectedAmortized:
+            evidence_regime == BoundRegime.ExpectedAmortized
+
+fn _rcv_is_trusted_static_origin(origin: BoundOrigin) -> bool:
+    origin == BoundOrigin.Inferred or origin == BoundOrigin.ImportedContract
+
+fn _rcv_is_upper_relation(relation: BoundRelation) -> bool:
+    relation == BoundRelation.UpperBound or relation == BoundRelation.Exact or relation == BoundRelation.TightBound
+
+fn _rcv_is_lower_relation(relation: BoundRelation) -> bool:
+    relation == BoundRelation.LowerBound or relation == BoundRelation.Exact or relation == BoundRelation.TightBound
+
+fn _rcv_sample_refutes_regime(required_regime: BoundRegime) -> bool:
+    # A single deterministic operation-counter run exceeding concrete_op_limit
+    # directly witnesses failure of a WorstCase concrete budget.
+    required_regime == BoundRegime.WorstCase
+
+fn contract_check_severity_v1(check: ResourceContractCheckV1) -> text:
+    match check.verdict:
+        case ContractVerificationVerdict.Verified: "ok"
+        case ContractVerificationVerdict.Refuted: "error"
+        case ContractVerificationVerdict.Unproved:
+            if check.strict_verification: "error" else: "warning"
+
+fn _rcv_unproved_reason(contract: DeclaredResourceContractV1, matching_bounds: [BoundEvidenceV1]) -> text:
+    if matching_bounds.len() == 0:
+        return "no modeled " + contract.resource.name() + " bound evidence available"
+    var reasons: [text] = []
+    for ev in matching_bounds:
+        if cost_expr_has_unknown_v1(ev.expression) or ev.status != AnalysisResultStatus.Complete:
+            reasons.push("incomplete or unknown term in " + ev.rendered_expression + " (status=" + ev.status.name() + ")")
+        elif not regime_satisfies_upper_contract_v1(ev.regime, contract.required_regime):
+            reasons.push("available " + ev.regime.name() + " bound " + ev.rendered_expression + " does not establish " + contract.required_regime.name())
+        elif ev.relation == BoundRelation.UpperBound:
+            reasons.push("available UpperBound " + ev.rendered_expression + " is looser than required bound and does not constitute a lower-bound counterexample")
+        else:
+            reasons.push("available evidence " + ev.rendered_expression + " (" + ev.relation.name() + ", " + ev.origin.name() + ") is insufficient")
+    _rcv_join_texts(reasons, "; ")
+
+fn verify_resource_contract_v1(
+    contract: DeclaredResourceContractV1,
+    bounds: [BoundEvidenceV1],
+    empirical_samples: [OperationCounterSampleV1]
+) -> ResourceContractCheckV1:
+    val decl_log = cost_expr_log_power_v1(contract.max_bound)
+    val class_label = asymptotic_class_label_v1(contract.max_degree, decl_log)
+    val res_name = contract.resource.name()
+
+    # 1. Opt-in T4 empirical counter refutation for concrete operation budgets (D11).
+    match contract.concrete_op_limit:
+        case Option.Some(limit):
+            if _rcv_sample_refutes_regime(contract.required_regime):
+                for sample in empirical_samples:
+                    if (sample.opt_in_enabled and
+                            sample.origin == BoundOrigin.Measured and
+                            sample.function_id == contract.function_id and
+                            sample.resource == contract.resource and
+                            sample.observed_ops > limit):
+                        return ResourceContractCheckV1(
+                            function_id: contract.function_id,
+                            resource: contract.resource,
+                            declared_bound: contract.max_bound,
+                            declared_regime: contract.required_regime,
+                            strict_verification: contract.strict_verification,
+                            verdict: ContractVerificationVerdict.Refuted,
+                            rule_code: "PERF-CONTRACT-001",
+                            explanation: "Measured operation counter '" + sample.counter_name + "' exceeded concrete " + res_name + " limit (" + sample.observed_ops.to_string() + " > " + limit.to_string() + ")",
+                            witness_or_reason: "workload=" + sample.workload_label + " counter=" + sample.counter_name + " observed=" + sample.observed_ops.to_string() + " limit=" + limit.to_string()
+                        )
+        case Option.None: pass_do_nothing
+
+    var matching_bounds: [BoundEvidenceV1] = []
+    for ev in bounds:
+        if ev.resource == contract.resource:
+            matching_bounds.push(ev)
+
+    # 2. Static lower/exact/tight bound refutation (PERF-CONTRACT-001).
+    for ev in matching_bounds:
+        if (ev.status == AnalysisResultStatus.Complete and
+                not cost_expr_has_unknown_v1(ev.expression) and
+                _rcv_is_trusted_static_origin(ev.origin) and
+                _rcv_is_lower_relation(ev.relation) and
+                regime_refutes_lower_contract_v1(ev.regime, contract.required_regime)):
+            val ev_deg = cost_expr_degree_v1(ev.expression)
+            val ev_log = cost_expr_log_power_v1(ev.expression)
+            val exceeds_asymptotic = (ev_deg > contract.max_degree) or (ev_deg == contract.max_degree and ev_log > decl_log)
+            if exceeds_asymptotic:
+                val shown = if ev.rendered_expression != "": ev.rendered_expression else: render_cost_expr_v1(ev.expression)
+                return ResourceContractCheckV1(
+                    function_id: contract.function_id,
+                    resource: contract.resource,
+                    declared_bound: contract.max_bound,
+                    declared_regime: contract.required_regime,
+                    strict_verification: contract.strict_verification,
+                    verdict: ContractVerificationVerdict.Refuted,
+                    rule_code: "PERF-CONTRACT-001",
+                    explanation: "Modeled " + ev.relation.name() + " " + shown + " exceeds declared " + class_label + " " + res_name + " contract",
+                    witness_or_reason: "relation=" + ev.relation.name() + " regime=" + ev.regime.name() + " bound=" + shown + " provenance=" + ev.provenance_id
+                )
+            match contract.concrete_op_limit:
+                case Option.Some(limit):
+                    match cost_expr_const_value_v1(ev.expression):
+                        case Option.Some(cval):
+                            if cval > limit:
+                                return ResourceContractCheckV1(
+                                    function_id: contract.function_id,
+                                    resource: contract.resource,
+                                    declared_bound: contract.max_bound,
+                                    declared_regime: contract.required_regime,
+                                    strict_verification: contract.strict_verification,
+                                    verdict: ContractVerificationVerdict.Refuted,
+                                    rule_code: "PERF-CONTRACT-001",
+                                    explanation: "Modeled " + ev.relation.name() + " constant " + cval.to_string() + " exceeds concrete " + res_name + " limit " + limit.to_string(),
+                                    witness_or_reason: "relation=" + ev.relation.name() + " constant=" + cval.to_string() + " limit=" + limit.to_string()
+                                )
+                        case Option.None: pass_do_nothing
+                case Option.None: pass_do_nothing
+
+    # 3. Static upper/exact/tight bound verification (Verified).
+    for ev in matching_bounds:
+        if (ev.status == AnalysisResultStatus.Complete and
+                not cost_expr_has_unknown_v1(ev.expression) and
+                _rcv_is_trusted_static_origin(ev.origin) and
+                _rcv_is_upper_relation(ev.relation) and
+                regime_satisfies_upper_contract_v1(ev.regime, contract.required_regime)):
+            val ev_deg = cost_expr_degree_v1(ev.expression)
+            val ev_log = cost_expr_log_power_v1(ev.expression)
+            val fits_asymptotic = (ev_deg < contract.max_degree) or (ev_deg == contract.max_degree and ev_log <= decl_log)
+            val fits_concrete = match contract.concrete_op_limit:
+                case Option.None: true
+                case Option.Some(limit):
+                    match cost_expr_const_value_v1(ev.expression):
+                        case Option.Some(cval): cval <= limit
+                        case Option.None: false
+            if fits_asymptotic and fits_concrete:
+                val shown = if ev.rendered_expression != "": ev.rendered_expression else: render_cost_expr_v1(ev.expression)
+                return ResourceContractCheckV1(
+                    function_id: contract.function_id,
+                    resource: contract.resource,
+                    declared_bound: contract.max_bound,
+                    declared_regime: contract.required_regime,
+                    strict_verification: contract.strict_verification,
+                    verdict: ContractVerificationVerdict.Verified,
+                    rule_code: "",
+                    explanation: "Verified " + class_label + " " + res_name + " bound under " + ev.regime.name() + " model (" + shown + ")",
+                    witness_or_reason: "relation=" + ev.relation.name() + " regime=" + ev.regime.name() + " bound=" + shown + " provenance=" + ev.provenance_id
+                )
+
+    # 4. Unproved (PERF-CONTRACT-002) — C15 honest wording, never "violated".
+    val reason = _rcv_unproved_reason(contract, matching_bounds)
+    ResourceContractCheckV1(
+        function_id: contract.function_id,
+        resource: contract.resource,
+        declared_bound: contract.max_bound,
+        declared_regime: contract.required_regime,
+        strict_verification: contract.strict_verification,
+        verdict: ContractVerificationVerdict.Unproved,
+        rule_code: "PERF-CONTRACT-002",
+        explanation: "Cannot verify the required " + class_label + " " + res_name + " bound (unproved under current model)",
+        witness_or_reason: reason
+    )
+
+fn verify_function_resource_contract_v1(
+    contract: DeclaredResourceContractV1,
+    summary: FunctionCostSummaryV1,
+    empirical_samples: [OperationCounterSampleV1]
+) -> ResourceContractCheckV1:
+    if summary.function_id != contract.function_id:
+        val decl_log = cost_expr_log_power_v1(contract.max_bound)
+        val class_label = asymptotic_class_label_v1(contract.max_degree, decl_log)
+        return ResourceContractCheckV1(
+            function_id: contract.function_id,
+            resource: contract.resource,
+            declared_bound: contract.max_bound,
+            declared_regime: contract.required_regime,
+            strict_verification: contract.strict_verification,
+            verdict: ContractVerificationVerdict.Unproved,
+            rule_code: "PERF-CONTRACT-002",
+            explanation: "Cannot verify the required " + class_label + " " + contract.resource.name() + " bound (unproved under current model)",
+            witness_or_reason: "summary function_id '" + summary.function_id + "' does not match contract '" + contract.function_id + "'"
+        )
+    verify_resource_contract_v1(contract, summary.resource_bounds, empirical_samples)
+
+export DeclaredResourceContractV1, OperationCounterSampleV1
+export cost_expr_has_unknown_v1, cost_expr_degree_v1, cost_expr_log_power_v1
+export cost_expr_const_value_v1, render_cost_expr_v1, asymptotic_class_label_v1
+export regime_satisfies_upper_contract_v1, regime_refutes_lower_contract_v1
+export contract_check_severity_v1
+export verify_resource_contract_v1, verify_function_resource_contract_v1

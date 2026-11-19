@@ -1,0 +1,569 @@
+"""
+## Resource Contract 3-Valued Verifier and Complexity Baseline Diff Specification
+
+Validates structured 3-valued resource contract verification (`Verified`,
+`Refuted`, `Unproved`), loose upper-bound soundness (`C15`), opt-in `T4`
+empirical operation counters (`D11`), SDN/JSON baseline snapshot round-tripping,
+and differential complexity comparison (`PERF-COST-002` vs `C16` model changes).
+"""
+
+use std.spec.{describe, context, it, step, expect}
+use std.common.string_core.{char_from_code}
+use compiler.common.diagnostics.span.{Span}
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    PerfResourceDimension, BoundRelation, BoundRegime, AnalysisResultStatus,
+    BoundOrigin, SizeMeasureKind, CostExprV1, BoundEvidenceV1, SizeParameterV1,
+    FunctionCostSummaryV1, ContractVerificationVerdict
+}
+use compiler.semantics.perf.resource_contract_verifier_v1.{
+    DeclaredResourceContractV1, OperationCounterSampleV1,
+    cost_expr_degree_v1, cost_expr_log_power_v1, cost_expr_has_unknown_v1,
+    render_cost_expr_v1, contract_check_severity_v1,
+    verify_resource_contract_v1, verify_function_resource_contract_v1
+}
+use compiler.semantics.perf.complexity_baseline_diff_v1.{
+    PerfBaselineEntryV1, PerfBaselineSnapshotV1, BaselineDeltaKindV1,
+    baseline_entry_from_summary_v1,
+    serialize_baseline_sdn_v1, parse_baseline_sdn_v1,
+    serialize_baseline_json_v1, parse_baseline_json_v1,
+    parse_baseline_auto_v1, compare_complexity_baselines_v1,
+    format_diff_report_sdn_v1, format_diff_report_json_v1,
+    format_diff_report_text_v1
+}
+
+fn _linear_items_expr() -> CostExprV1:
+    CostExprV1.Size(param_name: "items", measure: SizeMeasureKind.Length)
+
+fn _quadratic_items_expr() -> CostExprV1:
+    val n = _linear_items_expr()
+    CostExprV1.Multiply(factors: [n, _linear_items_expr()])
+
+fn _nm_expr() -> CostExprV1:
+    CostExprV1.Multiply(factors: [
+        CostExprV1.Size(param_name: "keys", measure: SizeMeasureKind.Length),
+        CostExprV1.Size(param_name: "records", measure: SizeMeasureKind.Length)
+    ])
+
+fn _linear_worst_case_contract(strict_mode: bool) -> DeclaredResourceContractV1:
+    DeclaredResourceContractV1(
+        function_id: "pkg.process_items",
+        resource: PerfResourceDimension.Work,
+        max_bound: _linear_items_expr(),
+        max_degree: 1,
+        concrete_op_limit: Option.None,
+        required_regime: BoundRegime.WorstCase,
+        strict_verification: strict_mode
+    )
+
+fn _work_evidence(
+    expr: CostExprV1,
+    rendered: text,
+    relation: BoundRelation,
+    regime: BoundRegime,
+    status: AnalysisResultStatus,
+    origin: BoundOrigin
+) -> BoundEvidenceV1:
+    BoundEvidenceV1(
+        resource: PerfResourceDimension.Work,
+        expression: expr,
+        rendered_expression: rendered,
+        relation: relation,
+        regime: regime,
+        model_id: "cost-model-v1.0",
+        assumptions: ["finite replayable input"],
+        status: status,
+        origin: origin,
+        provenance_id: "prov-root-1"
+    )
+
+fn _sample_entry(
+    fn_id: text,
+    sem_rev: text,
+    callees: [text],
+    bound_text: text,
+    degree: i64,
+    log_pow: i64,
+    relation: BoundRelation,
+    regime: BoundRegime,
+    status: AnalysisResultStatus
+) -> PerfBaselineEntryV1:
+    PerfBaselineEntryV1(
+        function_id: fn_id,
+        resource: PerfResourceDimension.Work,
+        function_semantic_revision: sem_rev,
+        callee_summary_hashes: callees,
+        bound_expression: bound_text,
+        max_degree: degree,
+        log_power: log_pow,
+        relation: relation,
+        regime: regime,
+        status: status,
+        origin: BoundOrigin.Inferred,
+        unresolved_terms: [],
+        is_hot_path: true
+    )
+
+fn _sample_snapshot(
+    source_rev: text,
+    analyzer_ver: text,
+    model_ver: text,
+    numeric_policy: text,
+    target_cfg: text,
+    entries: [PerfBaselineEntryV1]
+) -> PerfBaselineSnapshotV1:
+    PerfBaselineSnapshotV1(
+        schema_version: 1,
+        source_revision: source_rev,
+        analyzer_version: analyzer_ver,
+        model_version: model_ver,
+        numeric_policy: numeric_policy,
+        target_config: target_cfg,
+        analysis_profile: "perf",
+        entries: entries
+    )
+
+describe "Resource contract 3-valued verifier (v1)":
+    """Verify Verified, Refuted, and Unproved contract outcomes under D04, D09, D11, and C15."""
+
+    context "Verified contract outcomes":
+        """Establish contracts when upper/exact/tight bounds and regimes satisfy obligations."""
+
+        it "verifies a linear worst-case contract from a complete WorstCase UpperBound":
+            """Prove O(n) worst-case work when complete WorstCase UpperBound has degree 1."""
+            step("Construct linear worst-case contract and matching complete UpperBound")
+            val contract = _linear_worst_case_contract(false)
+            val evidence = _work_evidence(
+                _linear_items_expr(), "O(n)", BoundRelation.UpperBound,
+                BoundRegime.WorstCase, AnalysisResultStatus.Complete, BoundOrigin.Inferred
+            )
+            val samples: [OperationCounterSampleV1] = []
+            val check = verify_resource_contract_v1(contract, [evidence], samples)
+            expect(check.verdict).to_equal(ContractVerificationVerdict.Verified)
+            expect(check.rule_code).to_equal("")
+            expect(contract_check_severity_v1(check)).to_equal("ok")
+
+        it "verifies a quadratic contract when inferred TightBound is strictly lower degree":
+            """Accept O(n) TightBound as establishing an O(n^2) contract."""
+            step("Verify strictly smaller polynomial degree satisfies declared max_degree")
+            val contract = DeclaredResourceContractV1(
+                function_id: "pkg.process_items",
+                resource: PerfResourceDimension.Work,
+                max_bound: _quadratic_items_expr(),
+                max_degree: 2,
+                concrete_op_limit: Option.None,
+                required_regime: BoundRegime.Amortized,
+                strict_verification: true
+            )
+            val evidence = _work_evidence(
+                _linear_items_expr(), "O(n)", BoundRelation.TightBound,
+                BoundRegime.WorstCase, AnalysisResultStatus.Complete, BoundOrigin.Inferred
+            )
+            val samples: [OperationCounterSampleV1] = []
+            val check = verify_resource_contract_v1(contract, [evidence], samples)
+            expect(check.verdict).to_equal(ContractVerificationVerdict.Verified)
+            expect(check.rule_code).to_equal("")
+
+        it "verifies a concrete operation limit when static constant upper bound is within budget":
+            """Establish concrete_op_limit when constant WorstCase UpperBound is <= limit."""
+            step("Check constant bound 64 against concrete_op_limit 128")
+            val contract = DeclaredResourceContractV1(
+                function_id: "pkg.fixed_header",
+                resource: PerfResourceDimension.Work,
+                max_bound: CostExprV1.Const(value: 128),
+                max_degree: 0,
+                concrete_op_limit: Option.Some(128),
+                required_regime: BoundRegime.WorstCase,
+                strict_verification: true
+            )
+            val evidence = _work_evidence(
+                CostExprV1.Const(value: 64), "64", BoundRelation.UpperBound,
+                BoundRegime.WorstCase, AnalysisResultStatus.Complete, BoundOrigin.Inferred
+            )
+            val samples: [OperationCounterSampleV1] = []
+            val check = verify_resource_contract_v1(contract, [evidence], samples)
+            expect(check.verdict).to_equal(ContractVerificationVerdict.Verified)
+
+    context "Unproved outcomes and C15 loose upper-bound soundness":
+        """Never confuse an unproved or loose upper bound with a contract violation."""
+
+        it "returns Unproved PERF-CONTRACT-002 and never Refuted on a loose quadratic UpperBound (C15)":
+            """Critical C15: an O(n^2) UpperBound on a linear implementation must yield Unproved, never Refuted or 'violated'."""
+            step("Verify loose quadratic UpperBound against linear contract yields Unproved")
+            val contract = _linear_worst_case_contract(false)
+            val loose_quad = _work_evidence(
+                CostExprV1.TriangularSum(outer: _linear_items_expr()),
+                "O(n^2)",
+                BoundRelation.UpperBound,
+                BoundRegime.WorstCase,
+                AnalysisResultStatus.Complete,
+                BoundOrigin.Inferred
+            )
+            val samples: [OperationCounterSampleV1] = []
+            val check = verify_resource_contract_v1(contract, [loose_quad], samples)
+            expect(check.verdict).to_equal(ContractVerificationVerdict.Unproved)
+            expect(check.rule_code).to_equal("PERF-CONTRACT-002")
+            expect(check.explanation).to_contain("Cannot verify the required linear work bound (unproved under current model)")
+            expect(check.explanation.contains("violated")).to_equal(false)
+            expect(check.witness_or_reason.contains("violated")).to_equal(false)
+            expect(contract_check_severity_v1(check)).to_equal("warning")
+
+        it "rejects Expected regime evidence for a WorstCase contract as Unproved":
+            """Expected O(n) hash-lookup bound does not establish a WorstCase O(n) contract."""
+            step("Check Expected UpperBound against WorstCase contract")
+            val contract = _linear_worst_case_contract(true)
+            val expected_ev = _work_evidence(
+                _linear_items_expr(), "O(n)", BoundRelation.UpperBound,
+                BoundRegime.Expected, AnalysisResultStatus.Complete, BoundOrigin.Inferred
+            )
+            val samples: [OperationCounterSampleV1] = []
+            val check = verify_resource_contract_v1(contract, [expected_ev], samples)
+            expect(check.verdict).to_equal(ContractVerificationVerdict.Unproved)
+            expect(check.rule_code).to_equal("PERF-CONTRACT-002")
+            expect(check.explanation.contains("violated")).to_equal(false)
+            expect(contract_check_severity_v1(check)).to_equal("error")
+
+        it "returns Unproved PERF-CONTRACT-002 when cost expression contains UnknownTerm":
+            """Unknown SFFI or callback cost leaves contract unproved rather than refuted."""
+            step("Check UnknownTerm inside Add expression")
+            val contract = _linear_worst_case_contract(false)
+            val unknown_expr = CostExprV1.Add(terms: [
+                _linear_items_expr(),
+                CostExprV1.UnknownTerm(reason: "unmodeled_sffi_call")
+            ])
+            expect(cost_expr_has_unknown_v1(unknown_expr)).to_equal(true)
+            val evidence = _work_evidence(
+                unknown_expr, "O(n) + unknown", BoundRelation.Exact,
+                BoundRegime.WorstCase, AnalysisResultStatus.Partial, BoundOrigin.Inferred
+            )
+            val samples: [OperationCounterSampleV1] = []
+            val check = verify_resource_contract_v1(contract, [evidence], samples)
+            expect(check.verdict).to_equal(ContractVerificationVerdict.Unproved)
+            expect(check.rule_code).to_equal("PERF-CONTRACT-002")
+            expect(check.explanation.contains("violated")).to_equal(false)
+
+    context "Refuted outcomes (PERF-CONTRACT-001) and opt-in T4 empirical counters (D11)":
+        """Refute contracts only from valid lower/exact/tight bounds or opt-in Measured concrete counter breaches."""
+
+        it "refutes a linear contract with PERF-CONTRACT-001 when a valid LowerBound is quadratic":
+            """Complete WorstCase LowerBound of degree 2 refutes max_degree 1."""
+            step("Provide quadratic LowerBound witness against linear contract")
+            val contract = _linear_worst_case_contract(false)
+            val lower_quad = _work_evidence(
+                _quadratic_items_expr(), "Omega(n^2)", BoundRelation.LowerBound,
+                BoundRegime.WorstCase, AnalysisResultStatus.Complete, BoundOrigin.Inferred
+            )
+            val samples: [OperationCounterSampleV1] = []
+            val check = verify_resource_contract_v1(contract, [lower_quad], samples)
+            expect(check.verdict).to_equal(ContractVerificationVerdict.Refuted)
+            expect(check.rule_code).to_equal("PERF-CONTRACT-001")
+            expect(contract_check_severity_v1(check)).to_equal("error")
+
+        it "refutes an O(n) contract when an Exact O(n log n) bound exceeds log factor":
+            """Distinguish O(n log n) from pure linear O(n) when relation is Exact."""
+            step("Construct n * log(n) Exact bound against degree-1 log-0 contract")
+            val nlogn = CostExprV1.Multiply(factors: [
+                _linear_items_expr(),
+                CostExprV1.LogBound(inner: _linear_items_expr())
+            ])
+            expect(cost_expr_degree_v1(nlogn)).to_equal(1)
+            expect(cost_expr_log_power_v1(nlogn)).to_equal(1)
+            val contract = _linear_worst_case_contract(false)
+            val exact_ev = _work_evidence(
+                nlogn, "O(n log n)", BoundRelation.Exact,
+                BoundRegime.WorstCase, AnalysisResultStatus.Complete, BoundOrigin.Inferred
+            )
+            val samples: [OperationCounterSampleV1] = []
+            val check = verify_resource_contract_v1(contract, [exact_ev], samples)
+            expect(check.verdict).to_equal(ContractVerificationVerdict.Refuted)
+            expect(check.rule_code).to_equal("PERF-CONTRACT-001")
+
+        it "refutes a concrete operation limit from an opt-in Measured counter sample (D11, T4)":
+            """Exceeding concrete_op_limit in an explicitly enabled Measured sample yields PERF-CONTRACT-001."""
+            step("Provide Measured opt-in counter sample exceeding concrete_op_limit 100")
+            val contract = DeclaredResourceContractV1(
+                function_id: "pkg.process_items",
+                resource: PerfResourceDimension.Work,
+                max_bound: _linear_items_expr(),
+                max_degree: 1,
+                concrete_op_limit: Option.Some(100),
+                required_regime: BoundRegime.WorstCase,
+                strict_verification: false
+            )
+            val sample = OperationCounterSampleV1(
+                function_id: "pkg.process_items",
+                resource: PerfResourceDimension.Work,
+                counter_name: "key_comparisons",
+                workload_label: "adversarial_dups_32",
+                observed_ops: 240,
+                origin: BoundOrigin.Measured,
+                opt_in_enabled: true
+            )
+            val bounds: [BoundEvidenceV1] = []
+            val check = verify_resource_contract_v1(contract, bounds, [sample])
+            expect(check.verdict).to_equal(ContractVerificationVerdict.Refuted)
+            expect(check.rule_code).to_equal("PERF-CONTRACT-001")
+            expect(check.witness_or_reason).to_contain("240")
+            expect(check.witness_or_reason).to_contain("100")
+
+        it "ignores disabled or non-Measured samples and never refutes a pure asymptotic class from finite counters":
+            """Finite samples cannot refute an asymptotic class without concrete_op_limit, and non-opt-in samples are ignored."""
+            step("Check disabled sample on concrete contract and enabled sample on asymptotic contract")
+            val concrete_contract = DeclaredResourceContractV1(
+                function_id: "pkg.process_items",
+                resource: PerfResourceDimension.Work,
+                max_bound: CostExprV1.Const(value: 50),
+                max_degree: 0,
+                concrete_op_limit: Option.Some(50),
+                required_regime: BoundRegime.WorstCase,
+                strict_verification: false
+            )
+            val disabled_sample = OperationCounterSampleV1(
+                function_id: "pkg.process_items",
+                resource: PerfResourceDimension.Work,
+                counter_name: "ops",
+                workload_label: "w1",
+                observed_ops: 999,
+                origin: BoundOrigin.Measured,
+                opt_in_enabled: false
+            )
+            val heuristic_sample = OperationCounterSampleV1(
+                function_id: "pkg.process_items",
+                resource: PerfResourceDimension.Work,
+                counter_name: "ops",
+                workload_label: "w2",
+                observed_ops: 999,
+                origin: BoundOrigin.Heuristic,
+                opt_in_enabled: true
+            )
+            val no_bounds: [BoundEvidenceV1] = []
+            val c1 = verify_resource_contract_v1(concrete_contract, no_bounds, [disabled_sample, heuristic_sample])
+            expect(c1.verdict).to_equal(ContractVerificationVerdict.Unproved)
+
+            val asymptotic_contract = _linear_worst_case_contract(false)
+            val huge_sample = OperationCounterSampleV1(
+                function_id: "pkg.process_items",
+                resource: PerfResourceDimension.Work,
+                counter_name: "ops",
+                workload_label: "large_n",
+                observed_ops: 5000000,
+                origin: BoundOrigin.Measured,
+                opt_in_enabled: true
+            )
+            val c2 = verify_resource_contract_v1(asymptotic_contract, no_bounds, [huge_sample])
+            expect(c2.verdict).to_equal(ContractVerificationVerdict.Unproved)
+
+        it "verifies through FunctionCostSummaryV1 wrapper and renders structured CostExprV1":
+            """Check verify_function_resource_contract_v1 and render_cost_expr_v1 helpers."""
+            step("Build FunctionCostSummaryV1 and verify matching function_id")
+            val ev = _work_evidence(
+                _linear_items_expr(), "length(items)", BoundRelation.Exact,
+                BoundRegime.WorstCase, AnalysisResultStatus.Complete, BoundOrigin.Inferred
+            )
+            val summary = FunctionCostSummaryV1(
+                function_id: "pkg.process_items",
+                function_symbol_id: 11,
+                semantic_revision: "sem-1",
+                size_parameters: [SizeParameterV1(param_name: "items", measure: SizeMeasureKind.Length, canonical_var: "n")],
+                size_relations: [],
+                resource_bounds: [ev],
+                output_cardinality: _linear_items_expr(),
+                callback_cost_parameters: [],
+                effects_summary_id: "eff-1",
+                assumptions: [],
+                unresolved_terms: [],
+                dependency_summary_hashes: ["dep-a"],
+                implementation_digest: "impl-1",
+                provenance_root: "prov-root-1",
+                provenance_nodes: [],
+                analyzer_version: "perf-analyzer-v1.0",
+                model_version: "cost-model-v1.0",
+                configuration_fingerprint: "cfg-1"
+            )
+            val samples: [OperationCounterSampleV1] = []
+            val check = verify_function_resource_contract_v1(_linear_worst_case_contract(true), summary, samples)
+            expect(check.verdict).to_equal(ContractVerificationVerdict.Verified)
+            expect(render_cost_expr_v1(_nm_expr())).to_contain("length(keys)")
+            expect(render_cost_expr_v1(_nm_expr())).to_contain("length(records)")
+            val entry = baseline_entry_from_summary_v1(summary, PerfResourceDimension.Work, true)
+            expect(entry.function_id).to_equal("pkg.process_items")
+            expect(entry.max_degree).to_equal(1)
+
+describe "Complexity baseline serialization and differential comparison (v1)":
+    """Validate SDN/JSON snapshot serialization and differential classification (PERF-COST-002, C16)."""
+
+    context "SDN and JSON snapshot serialization and parsing":
+        """Round-trip snapshots cleanly and reject malformed or unsupported schema inputs."""
+
+        it "round-trips PerfBaselineSnapshotV1 through SDN and rejects malformed documents":
+            """Serialize snapshot to SDN, parse back, and verify every field."""
+            step("Round-trip multi-entry snapshot through SDN")
+            val e1 = _sample_entry(
+                "count_for_all", "sem-1", ["callee-h1", "callee-h2"], "O(n)",
+                1, 0, BoundRelation.UpperBound, BoundRegime.WorstCase, AnalysisResultStatus.Complete
+            )
+            val snap = _sample_snapshot(
+                "git-rev-100", "perf-analyzer-v1.0", "cost-model-v1.0",
+                "checked-i64", "x86_64-linux", [e1]
+            )
+            val sdn_text = serialize_baseline_sdn_v1(snap)
+            val parsed_res = parse_baseline_sdn_v1(sdn_text)
+            expect(parsed_res.is_ok()).to_equal(true)
+            val parsed = parsed_res.unwrap()
+            expect(parsed.schema_version).to_equal(1)
+            expect(parsed.source_revision).to_equal("git-rev-100")
+            expect(parsed.analyzer_version).to_equal("perf-analyzer-v1.0")
+            expect(parsed.model_version).to_equal("cost-model-v1.0")
+            expect(parsed.entries.len()).to_equal(1)
+            expect(parsed.entries[0].function_id).to_equal("count_for_all")
+            expect(parsed.entries[0].callee_summary_hashes.len()).to_equal(2)
+            expect(parsed.entries[0].bound_expression).to_equal("O(n)")
+            expect(parse_baseline_sdn_v1("schema_version: 99\n").is_err()).to_equal(true)
+            expect(parse_baseline_sdn_v1("").is_err()).to_equal(true)
+
+        it "round-trips PerfBaselineSnapshotV1 through JSON and auto-detects format":
+            """Serialize snapshot to JSON with char_from_code braces and parse back identically."""
+            step("Round-trip snapshot through JSON and parse_baseline_auto_v1")
+            val e1 = _sample_entry(
+                "count_for_all", "sem-1", ["callee-h1"], "O(n*m)",
+                2, 0, BoundRelation.UpperBound, BoundRegime.WorstCase, AnalysisResultStatus.Complete
+            )
+            val snap = _sample_snapshot(
+                "git-rev-101", "perf-analyzer-v1.0", "cost-model-v1.0",
+                "checked-i64", "x86_64-linux", [e1]
+            )
+            val json_text = serialize_baseline_json_v1(snap)
+            expect(json_text).to_start_with(char_from_code(123))
+            expect(json_text).to_end_with(char_from_code(125))
+            val parsed_res = parse_baseline_json_v1(json_text)
+            expect(parsed_res.is_ok()).to_equal(true)
+            val parsed = parsed_res.unwrap()
+            expect(parsed.source_revision).to_equal("git-rev-101")
+            expect(parsed.entries.len()).to_equal(1)
+            expect(parsed.entries[0].bound_expression).to_equal("O(n*m)")
+            expect(parsed.entries[0].max_degree).to_equal(2)
+            expect(parse_baseline_auto_v1(json_text, "report.json").is_ok()).to_equal(true)
+            expect(parse_baseline_json_v1("not-json").is_err()).to_equal(true)
+
+        it "preserves multi-byte UTF-8 function identifiers, bounds, and assumption text across SDN and JSON round-trips":
+            """Ensure byte-clean escaping in _cbd_escape_string never truncates or corrupts multi-byte UTF-8 text."""
+            step("Round-trip multi-byte UTF-8 baseline metadata through SDN and JSON")
+            var utf8_entry = _sample_entry(
+                "pkg.λ_αβ_계산_v1", "sem-utf8-한글", ["callee-αβ-1"], "O(n) — UTF-8 αβγ 한글",
+                1, 0, BoundRelation.UpperBound, BoundRegime.WorstCase, AnalysisResultStatus.Complete
+            )
+            utf8_entry.unresolved_terms = ["가정: α ≤ β", "escape\t\"quote\"\\slash\nline2"]
+            val utf8_snap = _sample_snapshot(
+                "git-rev-한글-αβ", "perf-analyzer-v1.0", "cost-model-v1.0",
+                "checked-i64", "x86_64-linux", [utf8_entry]
+            )
+
+            val sdn_text = serialize_baseline_sdn_v1(utf8_snap)
+            val sdn_parsed_res = parse_baseline_sdn_v1(sdn_text)
+            expect(sdn_parsed_res.is_ok()).to_equal(true)
+            if sdn_parsed_res.is_ok():
+                val sdn_parsed = sdn_parsed_res.unwrap()
+                expect(sdn_parsed.source_revision).to_equal("git-rev-한글-αβ")
+                expect(sdn_parsed.entries[0].function_id).to_equal("pkg.λ_αβ_계산_v1")
+                expect(sdn_parsed.entries[0].function_semantic_revision).to_equal("sem-utf8-한글")
+                expect(sdn_parsed.entries[0].bound_expression).to_equal("O(n) — UTF-8 αβγ 한글")
+                expect(sdn_parsed.entries[0].unresolved_terms[0]).to_equal("가정: α ≤ β")
+                expect(sdn_parsed.entries[0].unresolved_terms[1]).to_equal("escape\t\"quote\"\\slash\nline2")
+
+            val json_text = serialize_baseline_json_v1(utf8_snap)
+            val json_parsed_res = parse_baseline_json_v1(json_text)
+            expect(json_parsed_res.is_ok()).to_equal(true)
+            if json_parsed_res.is_ok():
+                val json_parsed = json_parsed_res.unwrap()
+                expect(json_parsed.source_revision).to_equal("git-rev-한글-αβ")
+                expect(json_parsed.entries[0].function_id).to_equal("pkg.λ_αβ_계산_v1")
+                expect(json_parsed.entries[0].function_semantic_revision).to_equal("sem-utf8-한글")
+                expect(json_parsed.entries[0].bound_expression).to_equal("O(n) — UTF-8 αβγ 한글")
+                expect(json_parsed.entries[0].unresolved_terms[0]).to_equal("가정: α ≤ β")
+                expect(json_parsed.entries[0].unresolved_terms[1]).to_equal("escape\t\"quote\"\\slash\nline2")
+
+    context "Differential classification (PERF-COST-002 and C16 model change separation)":
+        """Separate genuine source/callee bound increases from analyzer, model, coverage, and config changes."""
+
+        it "emits PERF-COST-002 SourceRegression with honest upper-bound wording when callee hash increases bound":
+            """Detect newly quadratic caller bound from callee change with honest upper-bound phrasing."""
+            step("Compare O(n) baseline against O(n*m) current with changed callee_summary_hashes")
+            val base = _sample_snapshot(
+                "rev-1", "perf-analyzer-v1.0", "cost-model-v1.0", "checked-i64", "x86_64",
+                [_sample_entry("count_for_all", "fn-rev-1", ["callee-v1"], "O(n)", 1, 0, BoundRelation.UpperBound, BoundRegime.WorstCase, AnalysisResultStatus.Complete)]
+            )
+            val curr = _sample_snapshot(
+                "rev-2", "perf-analyzer-v1.0", "cost-model-v1.0", "checked-i64", "x86_64",
+                [_sample_entry("count_for_all", "fn-rev-1", ["callee-v2"], "O(n*m)", 2, 0, BoundRelation.UpperBound, BoundRegime.WorstCase, AnalysisResultStatus.Complete)]
+            )
+            val report = compare_complexity_baselines_v1(base, curr)
+            expect(report.source_regression_count).to_equal(1)
+            expect(report.warnings.len()).to_equal(1)
+            val delta = report.deltas[0]
+            expect(delta.kind).to_equal(BaselineDeltaKindV1.SourceRegression)
+            expect(delta.rule_code).to_equal("PERF-COST-002")
+            expect(delta.root_dependency_changed).to_equal(true)
+            expect(delta.message).to_contain("Inferred work upper bound increased from O(n) to O(n*m)")
+            expect(delta.message.contains("wall-clock")).to_equal(false)
+            expect(delta.message.contains("confirmed")).to_equal(false)
+
+        it "classifies model or analyzer updates with unchanged source and callees as ModelOrAnalyzerChange with zero PERF-COST-002 (C16)":
+            """Critical C16: unchanged function_semantic_revision and callee_summary_hashes under a new model_version emits model_change and zero PERF-COST-002."""
+            step("Upgrade model_version while keeping source and callee hashes identical")
+            val base = _sample_snapshot(
+                "rev-1", "perf-analyzer-v1.0", "cost-model-v1.0", "checked-i64", "x86_64",
+                [_sample_entry("count_for_all", "fn-rev-same", ["callee-same"], "O(n)", 1, 0, BoundRelation.UpperBound, BoundRegime.WorstCase, AnalysisResultStatus.Complete)]
+            )
+            val curr = _sample_snapshot(
+                "rev-1", "perf-analyzer-v1.0", "cost-model-v2.0", "checked-i64", "x86_64",
+                [_sample_entry("count_for_all", "fn-rev-same", ["callee-same"], "O(n^2)", 2, 0, BoundRelation.UpperBound, BoundRegime.WorstCase, AnalysisResultStatus.Complete)]
+            )
+            val report = compare_complexity_baselines_v1(base, curr)
+            expect(report.source_regression_count).to_equal(0)
+            expect(report.warnings.len()).to_equal(0)
+            expect(report.model_change_count).to_equal(1)
+            val delta = report.deltas[0]
+            expect(delta.kind).to_equal(BaselineDeltaKindV1.ModelOrAnalyzerChange)
+            expect(delta.category_label).to_equal("model_change")
+            expect(delta.rule_code).to_equal("")
+            expect(format_diff_report_sdn_v1(report)).to_contain("model_change")
+            expect(format_diff_report_json_v1(report)).to_contain("model_change")
+            expect(format_diff_report_text_v1(report)).to_contain("model_change")
+
+        it "distinguishes Improved, Unchanged, CoverageChange, and ConfigChange accurately":
+            """Classify bound reductions, identical entries, unknown-status transitions, and target config shifts."""
+            step("Verify Improved, Unchanged, and CoverageChange in one compatible diff")
+            val base = _sample_snapshot(
+                "rev-1", "perf-analyzer-v1.0", "cost-model-v1.0", "checked-i64", "x86_64",
+                [
+                    _sample_entry("fn_improved", "r1", ["c1"], "O(n^2)", 2, 0, BoundRelation.UpperBound, BoundRegime.WorstCase, AnalysisResultStatus.Complete),
+                    _sample_entry("fn_same", "r1", ["c1"], "O(n)", 1, 0, BoundRelation.UpperBound, BoundRegime.WorstCase, AnalysisResultStatus.Complete),
+                    _sample_entry("fn_cov", "r1", ["c1"], "O(n)", 1, 0, BoundRelation.UpperBound, BoundRegime.WorstCase, AnalysisResultStatus.Complete)
+                ]
+            )
+            val curr = _sample_snapshot(
+                "rev-2", "perf-analyzer-v1.0", "cost-model-v1.0", "checked-i64", "x86_64",
+                [
+                    _sample_entry("fn_improved", "r2", ["c1"], "O(n)", 1, 0, BoundRelation.UpperBound, BoundRegime.WorstCase, AnalysisResultStatus.Complete),
+                    _sample_entry("fn_same", "r1", ["c1"], "O(n)", 1, 0, BoundRelation.UpperBound, BoundRegime.WorstCase, AnalysisResultStatus.Complete),
+                    _sample_entry("fn_cov", "r2", ["c1"], "unknown", 0, 0, BoundRelation.UpperBound, BoundRegime.WorstCase, AnalysisResultStatus.Unknown)
+                ]
+            )
+            val report = compare_complexity_baselines_v1(base, curr)
+            expect(report.source_regression_count).to_equal(0)
+            expect(report.improved_count).to_equal(1)
+            expect(report.unchanged_count).to_equal(1)
+            expect(report.coverage_change_count).to_equal(1)
+
+            step("Verify target_config mismatch produces ConfigChange without PERF-COST-002")
+            val diff_cfg = _sample_snapshot(
+                "rev-2", "perf-analyzer-v1.0", "cost-model-v1.0", "checked-i64", "riscv64-baremetal",
+                [_sample_entry("fn_same", "r2", ["c2"], "O(n^2)", 2, 0, BoundRelation.UpperBound, BoundRegime.WorstCase, AnalysisResultStatus.Complete)]
+            )
+            val cfg_report = compare_complexity_baselines_v1(
+                _sample_snapshot("rev-1", "perf-analyzer-v1.0", "cost-model-v1.0", "checked-i64", "x86_64",
+                    [_sample_entry("fn_same", "r1", ["c1"], "O(n)", 1, 0, BoundRelation.UpperBound, BoundRegime.WorstCase, AnalysisResultStatus.Complete)]),
+                diff_cfg
+            )
+            expect(cfg_report.config_change_count).to_equal(1)
+            expect(cfg_report.source_regression_count).to_equal(0)
+            expect(cfg_report.deltas[0].kind).to_equal(BaselineDeltaKindV1.ConfigChange)

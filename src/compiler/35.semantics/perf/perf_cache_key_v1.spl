@@ -1,0 +1,230 @@
+# Incremental Perf Cache Key & Library Model Version Admission (V1)
+#
+# Binds all nine semantic, implementation, analyzer/model, policy, target, and
+# profile dimensions into `PerfCacheKeyV1` (§12.1), bridges directly to
+# `AnalysisKeyV1` (`std.common.task_runner.contracts`), invalidates cached
+# summaries on ABI-compatible dynamic plugin replacement (I03), and fails
+# closed on unsupported library `model_version` metadata (I08).
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.task_runner.contracts.{AnalysisKeyV1, analysis_key_digest_v1}
+use compiler.common.diagnostics.span.{Span}
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    PerfResourceDimension, BoundRelation, BoundRegime, AnalysisResultStatus,
+    BoundOrigin, PerfAnalysisTier, CostExprV1, BoundEvidenceV1,
+    FunctionCostSummaryV1, PerfFindingRecordV1
+}
+use compiler.semantics.perf.cost_domain_v1.{
+    normalize_cost_expr_v1, render_cost_expr_v1, cost_expr_has_unknown_v1
+}
+
+pub val SUPPORTED_PERF_MODEL_VERSION_V1: text = "perf-model-v1"
+
+fn _len_prefixed(value: text) -> text:
+    value.len().to_text() + ":" + value + "|"
+
+fn _len_prefixed_list(values: [text]) -> text:
+    var out = values.len().to_text() + "["
+    for v in values:
+        out = out + _len_prefixed(v)
+    out + "]"
+
+struct PerfCacheKeyV1:
+    function_semantic_revision: text
+    type_instantiation: text
+    callee_summary_hashes: [text]
+    library_implementation_identity: text
+    analyzer_version: text
+    model_version: text
+    effect_numeric_policy: text
+    target_config: text
+    analysis_profile: text
+    function_id: text = "anonymous"
+
+impl PerfCacheKeyV1:
+    pub fn to_analysis_key_v1() -> AnalysisKeyV1:
+        val snap_payload = "PERF-CACHE-SNAP-V1|" +
+            _len_prefixed(self.function_semantic_revision) +
+            _len_prefixed_list(self.callee_summary_hashes) +
+            _len_prefixed(self.library_implementation_identity)
+        val scope_payload = "PERF-CACHE-SCOPE-V1|" +
+            _len_prefixed(self.function_id) +
+            _len_prefixed(self.type_instantiation)
+        val target_payload = "PERF-CACHE-TARGET-V1|" +
+            _len_prefixed(self.target_config)
+        val policy_payload = "PERF-CACHE-POLICY-V1|" +
+            _len_prefixed(self.analyzer_version) +
+            _len_prefixed(self.model_version) +
+            _len_prefixed(self.effect_numeric_policy) +
+            _len_prefixed(self.library_implementation_identity) +
+            _len_prefixed_list(self.callee_summary_hashes) +
+            _len_prefixed(self.target_config)
+        val profile_payload = "PERF-CACHE-PROFILE-V1|" +
+            _len_prefixed(self.analysis_profile) +
+            _len_prefixed(self.analyzer_version) +
+            _len_prefixed(self.model_version)
+        AnalysisKeyV1(
+            snapshot_id: sha256_text(snap_payload),
+            scope_id: sha256_text(scope_payload),
+            target_id: sha256_text(target_payload),
+            policy_digest: sha256_text(policy_payload),
+            analyzer_profile: sha256_text(profile_payload)
+        )
+
+    # reason: returns validated 64-hex AnalysisKeyV1 digest or validation error message
+    @allow(primitive_api)
+    pub fn digest_v1() -> Result<text, text>:
+        if self.function_semantic_revision == "":
+            return Err("missing function_semantic_revision")
+        if self.analyzer_version == "" or self.model_version == "":
+            return Err("missing analyzer or model version")
+        if self.analysis_profile == "":
+            return Err("missing analysis_profile")
+        analysis_key_digest_v1(self.to_analysis_key_v1())
+
+class PerfSummaryCacheV1:
+    entries: Dict<text, FunctionCostSummaryV1>
+
+impl PerfSummaryCacheV1:
+    pub static fn new() -> PerfSummaryCacheV1:
+        PerfSummaryCacheV1(entries: {})
+
+    # reason: returns stored cache digest text on success or key validation error text
+    @allow(primitive_api)
+    pub me put(key: PerfCacheKeyV1, summary: FunctionCostSummaryV1) -> Result<text, text>:
+        val dig = match key.digest_v1():
+            case Ok(d): d
+            case Err(e): return Err(e)
+        self.entries[dig] = summary
+        Ok(dig)
+
+    pub fn get(key: PerfCacheKeyV1) -> Option<FunctionCostSummaryV1>:
+        val dig = match key.digest_v1():
+            case Ok(d): d
+            case Err(_): return None
+        if self.entries.contains_key(dig):
+            return Some(self.entries[dig])
+        None
+
+    # reason: returns count of cached function summaries
+    @allow(primitive_api)
+    pub fn size() -> i64:
+        self.entries.keys().len()
+
+struct LibraryCostModelDescriptorV1:
+    library_symbol: text
+    abi_version: text
+    signature_fingerprint: text
+    library_implementation_identity: text
+    model_version: text
+    claimed_work_bound: CostExprV1
+    claimed_regime: BoundRegime
+    assumptions: [text]
+    file: text
+    span: Span
+
+struct LibraryModelAdmissionResultV1:
+    admitted: bool
+    bound: BoundEvidenceV1
+    finding: Option<PerfFindingRecordV1>
+
+# reason: expected_model_version specifies the active analyzer model schema to enforce fail-closed admission (I08)
+@allow(primitive_api)
+pub fn admit_library_cost_model_v1(
+    descriptor: LibraryCostModelDescriptorV1,
+    expected_model_version: text
+) -> LibraryModelAdmissionResultV1:
+    val prov_id = "lib_model:" + descriptor.library_symbol + ":" + descriptor.library_implementation_identity
+    if (descriptor.library_symbol == "" or
+            descriptor.library_implementation_identity == "" or
+            expected_model_version == "" or
+            descriptor.model_version == "" or
+            descriptor.model_version != expected_model_version):
+        val reason = "unsupported_model_version_" + descriptor.model_version
+        val unk_expr = CostExprV1.UnknownTerm(reason)
+        val unk_bound = BoundEvidenceV1(
+            resource: PerfResourceDimension.Work,
+            expression: unk_expr,
+            rendered_expression: render_cost_expr_v1(unk_expr),
+            relation: BoundRelation.UpperBound,
+            regime: BoundRegime.WorstCase,
+            model_id: expected_model_version,
+            assumptions: [],
+            status: AnalysisResultStatus.Unknown,
+            origin: BoundOrigin.ImportedContract,
+            provenance_id: prov_id
+        )
+        val finding = PerfFindingRecordV1(
+            rule_code: "PERF-ANALYSIS-001",
+            stable_occurrence_id: descriptor.library_symbol + ":PERF-ANALYSIS-001:model_version",
+            function_id: descriptor.library_symbol,
+            file: descriptor.file,
+            primary_span: descriptor.span,
+            related_locations: [],
+            message: "Library cost model for " + descriptor.library_symbol + " uses unsupported model_version '" + descriptor.model_version + "' (expected '" + expected_model_version + "'); downgrading to unknown",
+            evidence: Some(unk_bound),
+            tier: PerfAnalysisTier.T2Compositional,
+            semantic_fingerprint: sha256_text(prov_id + "|" + descriptor.model_version),
+            fix_candidates: []
+        )
+        return LibraryModelAdmissionResultV1(
+            admitted: false,
+            bound: unk_bound,
+            finding: Some(finding)
+        )
+
+    val norm = normalize_cost_expr_v1(descriptor.claimed_work_bound)
+    if cost_expr_has_unknown_v1(norm):
+        val unk_bound = BoundEvidenceV1(
+            resource: PerfResourceDimension.Work,
+            expression: norm,
+            rendered_expression: render_cost_expr_v1(norm),
+            relation: BoundRelation.UpperBound,
+            regime: descriptor.claimed_regime,
+            model_id: expected_model_version,
+            assumptions: descriptor.assumptions,
+            status: AnalysisResultStatus.Unknown,
+            origin: BoundOrigin.ImportedContract,
+            provenance_id: prov_id
+        )
+        val finding = PerfFindingRecordV1(
+            rule_code: "PERF-ANALYSIS-001",
+            stable_occurrence_id: descriptor.library_symbol + ":PERF-ANALYSIS-001:incomplete_model",
+            function_id: descriptor.library_symbol,
+            file: descriptor.file,
+            primary_span: descriptor.span,
+            related_locations: [],
+            message: "Library cost model for " + descriptor.library_symbol + " contains unresolved terms",
+            evidence: Some(unk_bound),
+            tier: PerfAnalysisTier.T2Compositional,
+            semantic_fingerprint: sha256_text(prov_id + "|incomplete"),
+            fix_candidates: []
+        )
+        return LibraryModelAdmissionResultV1(
+            admitted: false,
+            bound: unk_bound,
+            finding: Some(finding)
+        )
+
+    val admitted_bound = BoundEvidenceV1(
+        resource: PerfResourceDimension.Work,
+        expression: norm,
+        rendered_expression: render_cost_expr_v1(norm),
+        relation: BoundRelation.UpperBound,
+        regime: descriptor.claimed_regime,
+        model_id: expected_model_version,
+        assumptions: descriptor.assumptions,
+        status: AnalysisResultStatus.Complete,
+        origin: BoundOrigin.ImportedContract,
+        provenance_id: prov_id
+    )
+    LibraryModelAdmissionResultV1(
+        admitted: true,
+        bound: admitted_bound,
+        finding: None
+    )
+
+export SUPPORTED_PERF_MODEL_VERSION_V1
+export PerfCacheKeyV1, PerfSummaryCacheV1
+export LibraryCostModelDescriptorV1, LibraryModelAdmissionResultV1
+export admit_library_cost_model_v1

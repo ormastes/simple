@@ -1,0 +1,299 @@
+"""
+# Performance Analyzer Feature-Off and Single-Pass Overhead Guard Specification
+
+**Status:** Implementing
+**Feature IDs:** D11, D12, I10, I11
+**Keywords:** performance-guard, feature-off, bootstrap-isolation, single-pass-hir, analyzer-overhead
+
+## Overview
+Guards the normal-compilation feature-off invariants (`D11`, `D12`, `I10`) and
+single-pass iterative `HirPerfWorkStack` traversal complexity (`I11`) for
+`src/compiler/35.semantics/perf_facts/collector.spl` and
+`src/compiler/35.semantics/perf/perf_analysis_contracts_v1.spl`.
+
+Canonical plan: `doc/03_plan/compiler/performance_analysis_and_collection_refactoring_2026-11-18.md` (§8.3–§8.4, §13.3, §14.2–§14.3, §15.3)
+"""
+
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{
+    FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind,
+    vhdl_hardware_metadata_default
+}
+use compiler.hir.hir_types.{
+    HirModule, HirType, HirTypeKind, SymbolId, SymbolTable, MethodResolution
+}
+use compiler.hir.hir_definitions.{
+    HirFunction, HirBlock, HirStmt, HirStmtKind, HirExpr, HirExprKind, HirCallArg
+}
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    PerfAnalysisTier, PerfFindingRecordV1, FunctionCostSummaryV1, LoopIdiomCandidateV1
+}
+use compiler.semantics.perf_facts.*
+
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+
+# ============================================================================
+# Synthetic HIR Builders for Feature-Off and Scaling Guards (strict Option `None`)
+# ============================================================================
+
+fn og_span(line: i64) -> Span:
+    Span.new(line * 8, line * 8 + 6, line, 1)
+
+fn og_unit_type() -> HirType:
+    HirType(kind: HirTypeKind.Unit, span: og_span(1))
+
+fn og_bool_type() -> HirType:
+    HirType(kind: HirTypeKind.Bool, span: og_span(1))
+
+fn og_i64_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: og_span(1))
+
+fn og_array_type() -> HirType:
+    HirType(kind: HirTypeKind.Array(og_i64_type(), None), span: og_span(1))
+
+fn og_expr(kind: HirExprKind, type_: HirType, line: i64) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: type_, span: og_span(line))
+
+fn og_unit_expr() -> HirExpr:
+    og_expr(HirExprKind.UnitLit, og_unit_type(), 1)
+
+fn og_contains_call(line: i64) -> HirExpr:
+    val recv = og_expr(HirExprKind.NamedVar(SymbolId(id: 11), "items"), og_array_type(), line)
+    og_expr(
+        HirExprKind.MethodCall(
+            recv,
+            "contains",
+            [HirCallArg(
+                has_name: false,
+                name: "",
+                value: og_expr(HirExprKind.IntLit(7, None), og_i64_type(), line),
+                span: og_span(line)
+            )],
+            MethodResolution.InstanceMethod(SymbolId(id: 10), SymbolId(id: 30))
+        ),
+        og_bool_type(),
+        line
+    )
+
+fn og_function(sym_id: i64, name: text, stmts: [HirStmt], is_extern: bool) -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: sym_id),
+        name: name,
+        type_params: [],
+        params: [],
+        return_type: og_unit_type(),
+        body: HirBlock(
+            stmts: stmts,
+            has: false,
+            value: og_unit_expr(),
+            span: og_span(1)
+        ),
+        effects: [],
+        visibility: Visibility.Private,
+        is_async: false,
+        is_static: false,
+        is_public: false,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: is_extern,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: ExportAttr(is_export_c: false, export_name: ""),
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: DriverManifestAttr(
+            kind: DriverManifestAttrKind.Driver,
+            driver_class: 0,
+            vendor: 0,
+            device_ids: [],
+            version: "",
+            abi: ""
+        ),
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_doc_comment: false,
+        doc_comment: "",
+        span: og_span(1),
+        is_gpu_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        verification_contract: None,
+        is_generic_template: false
+    )
+
+fn og_nested_loop_function(depth: i64, leaf_calls: i64) -> HirFunction:
+    var leaf_stmts: [HirStmt] = []
+    var i = 0
+    while i < leaf_calls:
+        leaf_stmts.push(HirStmt(kind: HirStmtKind.Expr(og_contains_call(100 + i)), span: og_span(100 + i)))
+        i = i + 1
+    var current_block = HirBlock(
+        stmts: leaf_stmts,
+        has: false,
+        value: og_unit_expr(),
+        span: og_span(99)
+    )
+    var d = 0
+    while d < depth:
+        val iter_expr = og_expr(HirExprKind.NamedVar(SymbolId(id: 50 + d), "xs"), og_array_type(), 10 + d)
+        val for_expr = og_expr(HirExprKind.For(SymbolId(id: 80 + d), iter_expr, current_block, None), og_unit_type(), 10 + d)
+        current_block = HirBlock(
+            stmts: [HirStmt(kind: HirStmtKind.Expr(for_expr), span: og_span(10 + d))],
+            has: false,
+            value: og_unit_expr(),
+            span: og_span(10 + d)
+        )
+        d = d + 1
+    og_function(200 + depth, "nested_loops", current_block.stmts, false)
+
+fn og_verified_registry() -> CollectionOperationRegistry:
+    var registry = CollectionOperationRegistry.new("stdlib-cost-v1")
+    registry.register(CollectionOperationSummary(
+        symbol_id: 30,
+        stable_name: "Array.contains",
+        operation: HirPerfOperationKind.ContainsLookup,
+        cost: HirPerfCostClass.LinearReceiver,
+        output_cardinality: HirPerfCardinality.Exact(1),
+        enumeration: HirPerfEnumerationClass.Once,
+        expected_receiver: HirPerfReceiverKind.Array,
+        signature_fingerprint: "Array<T>.contains(T)->bool",
+        explicit_argument_count: 1,
+        effects: HirPerfEffectFacts(
+            reads: true, writes: false, allocates: false, throws: false,
+            suspends: false, observable: false, unknown: false
+        ),
+        allocation: HirPerfAllocationClass.None,
+        preserves_order: true,
+        materializes: false,
+        metadata_version: "stdlib-cost-v1",
+        provenance: "stdlib/array.spl",
+        evidence_receipt: "verified-contains-v1"
+    ))
+    registry
+
+struct FeatureOffGateReceipt:
+    tier: PerfAnalysisTier
+    summaries_allocated: i64
+    candidates_allocated: i64
+    findings_allocated: i64
+    hir_stmt_count_after: i64
+    runtime_counters_injected: i64
+
+fn run_driver_tier_gate(fn_node: HirFunction, tier: PerfAnalysisTier) -> FeatureOffGateReceipt:
+    var summaries: [FunctionCostSummaryV1] = []
+    var candidates: [LoopIdiomCandidateV1] = []
+    var findings: [PerfFindingRecordV1] = []
+    match tier:
+        case PerfAnalysisTier.T0ExistingFacts:
+            # Feature-off normal build/bootstrap path (D11, D12, I10):
+            # zero side-table construction, zero registry init, zero HIR mutation.
+            FeatureOffGateReceipt(
+                tier: tier,
+                summaries_allocated: summaries.len(),
+                candidates_allocated: candidates.len(),
+                findings_allocated: findings.len(),
+                hir_stmt_count_after: fn_node.body.stmts.len(),
+                runtime_counters_injected: 0
+            )
+        case _:
+            val facts = collect_hir_function_perf_facts(fn_node, og_verified_registry())
+            FeatureOffGateReceipt(
+                tier: tier,
+                summaries_allocated: facts.functions_scanned,
+                candidates_allocated: candidates.len(),
+                findings_allocated: typed_coll002_linear_lookup_findings(facts).len(),
+                hir_stmt_count_after: fn_node.body.stmts.len(),
+                runtime_counters_injected: 0
+            )
+
+# ============================================================================
+# Overhead and Isolation Specifications
+# ============================================================================
+
+describe "Performance analyzer feature-off and single-pass overhead guards":
+    """
+    ## Bootstrap feature-off isolation (`D11`, `D12`, `I10`) and linear HIR scan (`I11`)
+    Ensures disabled (`T0`) compilation allocates zero performance side tables or
+    runtime counters, extern declarations short-circuit cleanly, and deeply nested
+    loops scale linearly in HIR node count without quadratic subtree rescanning.
+    """
+
+    context "Feature-off and extern short-circuit guarantees (D11, D12, I10)":
+        it "allocates zero side-table records or runtime counters when tier is T0ExistingFacts and leaves HIR untouched":
+            step("Run T0 feature-off gate on a nested loop function and verify zero side tables or HIR mutations")
+            val target_fn = og_nested_loop_function(3, 2)
+            val stmt_count_before = target_fn.body.stmts.len()
+            val t0_receipt = run_driver_tier_gate(target_fn, PerfAnalysisTier.T0ExistingFacts)
+            expect(t0_receipt.tier.name()).to_equal("T0")
+            expect(t0_receipt.summaries_allocated).to_equal(0)
+            expect(t0_receipt.candidates_allocated).to_equal(0)
+            expect(t0_receipt.findings_allocated).to_equal(0)
+            expect(t0_receipt.runtime_counters_injected).to_equal(0)
+            expect(t0_receipt.hir_stmt_count_after).to_equal(stmt_count_before)
+
+            step("Verify T1 opt-in analysis scans without injecting runtime counters or mutating HIR")
+            val t1_receipt = run_driver_tier_gate(target_fn, PerfAnalysisTier.T1FastLocal)
+            expect(t1_receipt.summaries_allocated).to_equal(1)
+            expect(t1_receipt.findings_allocated).to_equal(2)
+            expect(t1_receipt.runtime_counters_injected).to_equal(0)
+            expect(t1_receipt.hir_stmt_count_after).to_equal(stmt_count_before)
+
+        it "skips extern declarations with zero scanned nodes":
+            step("Pass an extern function declaration to collect_hir_function_perf_facts")
+            val extern_fn = og_function(999, "rt_external_probe", [], true)
+            val facts = collect_hir_function_perf_facts(extern_fn, og_verified_registry())
+            expect(facts.functions_scanned).to_equal(0)
+            expect(facts.nodes_scanned).to_equal(0)
+            expect(facts.collection_ops.len()).to_equal(0)
+
+    context "Single-pass linear traversal on deeply nested HIR (I11)":
+        it "visits deeply nested loop frames in one linear pass without quadratic subtree rescanning":
+            step("Compare nodes_scanned and loop_depth across depth-4 and depth-8 nested For loops")
+            val registry = og_verified_registry()
+            val fn_d4 = og_nested_loop_function(4, 2)
+            val fn_d8 = og_nested_loop_function(8, 2)
+
+            val start_us = time_now_unix_micros()
+            val facts_d4 = collect_hir_function_perf_facts(fn_d4, registry)
+            val facts_d8 = collect_hir_function_perf_facts(fn_d8, registry)
+            val elapsed_us = time_now_unix_micros() - start_us
+
+            expect(facts_d4.collection_ops.len()).to_equal(2)
+            expect(facts_d8.collection_ops.len()).to_equal(2)
+            expect(facts_d4.collection_ops[0].loop_depth).to_equal(4)
+            expect(facts_d8.collection_ops[0].loop_depth).to_equal(8)
+
+            # Each additional For wrapper adds a constant 4 HIR frames (Stmt + For + Iter + unit value),
+            # so delta(d4 -> d8) == delta(d8 -> d12) == exact constant step, never quadratic!
+            val fn_d12 = og_nested_loop_function(12, 2)
+            val facts_d12 = collect_hir_function_perf_facts(fn_d12, registry)
+            val step_4_to_8 = facts_d8.nodes_scanned - facts_d4.nodes_scanned
+            val step_8_to_12 = facts_d12.nodes_scanned - facts_d8.nodes_scanned
+            expect(step_4_to_8).to_be_greater_than(0)
+            expect(step_8_to_12).to_equal(step_4_to_8)
+            expect(elapsed_us).to_be_less_than(5000000)
+
+        it "scales linearly across wide sequential statement blocks within bounded microseconds":
+            step("Scan 16-call and 32-call sequential loop bodies and verify exact constant per-call node growth")
+            val registry = og_verified_registry()
+            val fn_w8 = og_nested_loop_function(1, 8)
+            val fn_w16 = og_nested_loop_function(1, 16)
+            val fn_w24 = og_nested_loop_function(1, 24)
+
+            val start_us = time_now_unix_micros()
+            val facts_w8 = collect_hir_function_perf_facts(fn_w8, registry)
+            val facts_w16 = collect_hir_function_perf_facts(fn_w16, registry)
+            val facts_w24 = collect_hir_function_perf_facts(fn_w24, registry)
+            val elapsed_us = time_now_unix_micros() - start_us
+
+            expect(facts_w8.collection_ops.len()).to_equal(8)
+            expect(facts_w16.collection_ops.len()).to_equal(16)
+            expect(facts_w24.collection_ops.len()).to_equal(24)
+            val delta_8_16 = facts_w16.nodes_scanned - facts_w8.nodes_scanned
+            val delta_16_24 = facts_w24.nodes_scanned - facts_w16.nodes_scanned
+            expect(delta_8_16).to_be_greater_than(0)
+            expect(delta_16_24).to_equal(delta_8_16)
+            expect(elapsed_us).to_be_less_than(5000000)

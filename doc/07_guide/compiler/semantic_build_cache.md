@@ -117,3 +117,28 @@ The ones most likely to bite:
 - Frozen field contract: `doc/03_plan/compiler/cache/c0_schema_freeze_2026-08-09.md`
 - Agent/LLM notes: `doc/00_llm_process/feature_expert/cache_tiering/skill.md`,
   `doc/00_llm_process/layer_expert/driver_cache/skill.md`
+
+<!-- wave-f-perf-analysis-collection-refactoring-2026-11-19 -->
+
+## Performance Summary Cache Identity, Dynamic Implementation Changes, and Unknown Handling (2026-11-18)
+
+Canonical plan: [Simple Performance Analysis and Collection Refactoring](../../03_plan/compiler/performance_analysis_and_collection_refactoring_2026-11-18.md) (§12, §13.3, §16.2; contracts in `src/compiler/35.semantics/perf/perf_analysis_contracts_v1.spl` and `src/compiler/35.semantics/perf_facts/registry.spl`).
+
+### `PerfCacheKeyV1` Identity for Cost Summaries and Refactoring Proofs
+
+Cached `FunctionCostSummaryV1` records and `LoopIdiomCandidateV1` safety proofs are keyed by every semantic input that can alter resource bounds or rewrite legality — never by function name, file mtime, or ABI signature alone (§12.1):
+
+1. `function_semantic_revision` — canonical digest of the function's typed HIR body and local bindings.
+2. `type_and_representation_instantiation` — concrete generic/monomorphized element, key, equality, and hash representations.
+3. `relevant_callee_summary_hashes` — exported cost/effect summary digests of resolved callees (`dependency_summary_hashes`; insignificant formatting edits in a callee that preserve its summary do not cascade-invalidate callers, whereas an effect or bound change invalidates both caller bounds and caller `VerifiedSafe` fix proofs, `I02`, `I04`).
+4. `library_implementation_identity` (`implementation_digest`) — identity of the analyzed library/plugin implementation or verified interface contract.
+5. `analyzer_and_model_versions` — `analyzer_version` + `model_version` (`CollectionOperationRegistry.metadata_version`).
+6. `language_effect_numeric_policy` — active `nogc`, checked-overflow, floating-point, and strict-contract policy digest.
+7. `target_configuration_if_relevant` — target/backend dimensions when backend-refined cost models are queried.
+8. `analysis_profile_and_precision` — tier (`T1`..`T3`) and budget configuration (`configuration_fingerprint`).
+
+### Static Linking, Dynamic Plugins, SFFI, and Fail-Closed Metadata (`I03`, `I08`)
+
+- **Static and closed target sets:** Known static callees substitute their exact summary; closed finite dispatch sets combine all feasible targets conservatively while retaining assumptions.
+- **Open dispatch, SFFI, and dynamic plugin replacement (`I03`):** Open trait/interface dispatch uses an enforced interface contract or emits an explicit `UnknownTerm`. Unmodeled SFFI/native calls keep cost and effects `Unknown`. Replacing a dynamic plugin or shared module with an ABI-compatible implementation that has a different `implementation_digest` (for example, changing an `O(1)` lookup to an `O(n)` scan) invalidates implementation-specific cost and safety summaries; cost-contract load rejection occurs only when an explicit verified-resource profile is enabled (§12.4).
+- **Bounded versioned metadata and non-poisoning timeouts (`I06`, `I08`):** Library cost registries (`collection_registry_parse` in `src/compiler/35.semantics/perf_facts/registry.spl`) enforce size/depth caps, schema/version checks, and duplicate-key rejection. Malformed or unsupported model versions downgrade cleanly to `Unknown` (`PERF-ANALYSIS-001`) without crashing compilation or silently trusting unverified claims. Budget-exhausted or cancelled `T2`/`T3` runs record `Partial`/`Cancelled` status without permanently poisoning subsequent higher-budget runs, and file-based build caching remains the normal compiler scheduling boundary (§13.3).
