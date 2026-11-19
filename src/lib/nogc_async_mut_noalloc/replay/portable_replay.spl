@@ -1,0 +1,162 @@
+# @platform: baremetal
+#
+# Portable semantic replay core (DHR P6) — one layer-neutral record/replay
+# session that kernel, realtime and bare-metal code can all share instead of
+# each carrying its own event encoding and replay logic.
+#
+# An event is (kind, scope, value): kind says WHAT was observed (timer read,
+# random read, schedule decision, io read, or any layer-defined kind), scope
+# says WHERE (the explicitly opened replay scope it was issued in), value is
+# the observed result.
+#
+#   Record  — an in-scope event is appended; the live value is returned.
+#   Replay  — an in-scope event returns the LOGGED value for the matching
+#             (kind, scope). It never returns the live value: a kind
+#             mismatch, scope mismatch or exhausted log is a divergence and
+#             returns PR_FAIL_CLOSED_VALUE.
+#   Scope   — replay applies only while a scope is explicitly open and the
+#             event names that scope. Anything else is live and unlogged.
+#
+# Storage is a fixed-capacity ring allocated once by portable_replay_reset();
+# the record and replay paths only index into it (no allocation). A record
+# that finds the ring full drops the event and counts it, so the log is
+# disclosed incomplete and replay fails closed where the gap starts.
+
+pub val PR_MODE_OFF: i64 = 0
+pub val PR_MODE_RECORD: i64 = 1
+pub val PR_MODE_REPLAY: i64 = 2
+
+pub val PR_KIND_TIMER_READ: i64 = 1
+pub val PR_KIND_RANDOM_READ: i64 = 2
+pub val PR_KIND_SCHEDULE: i64 = 3
+pub val PR_KIND_IO_READ: i64 = 4
+
+pub val PR_DIV_NONE: i64 = 0
+pub val PR_DIV_KIND_MISMATCH: i64 = 1
+pub val PR_DIV_SCOPE_MISMATCH: i64 = 2
+pub val PR_DIV_LOG_EXHAUSTED: i64 = 3
+
+pub val PR_FAIL_CLOSED_VALUE: i64 = 0
+
+val PR_CAP: i64 = 4096
+
+var pr_kinds: [i64] = []
+var pr_scopes: [i64] = []
+var pr_values: [i64] = []
+var pr_head: i64 = 0
+var pr_count: i64 = 0
+var pr_dropped: i64 = 0
+var pr_mode: i64 = 0
+var pr_scope_open: bool = false
+var pr_scope_id: i64 = 0
+var pr_divergences: i64 = 0
+var pr_last_divergence: i64 = 0
+
+pub fn portable_replay_reset():
+    """Allocate the ring once and clear mode, scope, log and divergences."""
+    portable_replay_alloc_ring()
+    pr_head = 0
+    pr_count = 0
+    pr_dropped = 0
+    pr_mode = PR_MODE_OFF
+    pr_scope_open = false
+    pr_scope_id = 0
+    pr_divergences = 0
+    pr_last_divergence = PR_DIV_NONE
+
+@allow(primitive_api)  # layer-neutral replay ABI: modes are raw i64 codes shared by kernel/realtime/bare-metal
+pub fn portable_replay_set_mode(mode: i64):
+    """Switch Off/Record/Replay. The log and replay cursor are kept."""
+    pr_mode = mode
+
+@allow(primitive_api)  # layer-neutral replay ABI: modes are raw i64 codes shared by kernel/realtime/bare-metal
+pub fn portable_replay_mode() -> i64:
+    pr_mode
+
+@allow(primitive_api)  # layer-neutral replay ABI: scope ids are raw i64 codes chosen by each layer
+pub fn portable_replay_open_scope(scope: i64) -> bool:
+    """Open the replay scope. Fails closed (false) if one is already open."""
+    if pr_scope_open:
+        return false
+    pr_scope_open = true
+    pr_scope_id = scope
+    true
+
+pub fn portable_replay_close_scope():
+    pr_scope_open = false
+    pr_scope_id = 0
+
+@allow(primitive_api)  # layer-neutral replay ABI: predicate over the raw session state
+pub fn portable_replay_scope_is_open() -> bool:
+    pr_scope_open
+
+@allow(primitive_api)  # layer-neutral replay ABI: (kind, scope, value) are raw i64 codes from any layer
+pub fn portable_replay_event(kind: i64, scope: i64, live: i64) -> i64:
+    """Record or replay one semantic event; see the module header."""
+    pr_last_divergence = PR_DIV_NONE
+    if pr_mode == PR_MODE_OFF or not pr_scope_open or scope != pr_scope_id:
+        return live
+    if pr_mode == PR_MODE_RECORD:
+        if pr_kinds.len() == 0:
+            portable_replay_alloc_ring()
+        if pr_count >= PR_CAP:
+            pr_dropped = pr_dropped + 1
+            return live
+        val tail = (pr_head + pr_count) % PR_CAP
+        pr_kinds[tail] = kind
+        pr_scopes[tail] = scope
+        pr_values[tail] = live
+        pr_count = pr_count + 1
+        return live
+    if pr_mode == PR_MODE_REPLAY:
+        if pr_count == 0:
+            return portable_replay_diverge(PR_DIV_LOG_EXHAUSTED)
+        val slot = pr_head
+        pr_head = (pr_head + 1) % PR_CAP
+        pr_count = pr_count - 1
+        if pr_kinds[slot] != kind:
+            return portable_replay_diverge(PR_DIV_KIND_MISMATCH)
+        if pr_scopes[slot] != scope:
+            return portable_replay_diverge(PR_DIV_SCOPE_MISMATCH)
+        return pr_values[slot]
+    live
+
+fn portable_replay_alloc_ring():
+    pr_kinds = []
+    pr_scopes = []
+    pr_values = []
+    var i: i64 = 0
+    while i < PR_CAP:
+        pr_kinds.push(0)
+        pr_scopes.push(0)
+        pr_values.push(0)
+        i = i + 1
+
+@allow(primitive_api)  # internal: records a raw divergence code and returns the fail-closed value
+fn portable_replay_diverge(reason: i64) -> i64:
+    pr_divergences = pr_divergences + 1
+    pr_last_divergence = reason
+    PR_FAIL_CLOSED_VALUE
+
+@allow(primitive_api)  # layer-neutral replay ABI: divergence reason is a raw i64 code
+pub fn portable_replay_last_divergence() -> i64:
+    """Divergence reason of the most recent event (PR_DIV_NONE if it matched)."""
+    pr_last_divergence
+
+@allow(primitive_api)  # layer-neutral replay ABI: raw counter
+pub fn portable_replay_divergence_count() -> i64:
+    pr_divergences
+
+@allow(primitive_api)  # layer-neutral replay ABI: raw counter
+pub fn portable_replay_pending() -> i64:
+    """Logged events not yet consumed by replay."""
+    pr_count
+
+@allow(primitive_api)  # layer-neutral replay ABI: raw counter
+pub fn portable_replay_dropped() -> i64:
+    pr_dropped
+
+@allow(primitive_api)  # layer-neutral replay ABI: predicate over the raw session state
+pub fn portable_replay_complete() -> bool:
+    """False once a record dropped an event: the log is no longer whole."""
+    pr_dropped == 0

@@ -7,21 +7,32 @@
 # Event kind encoding (fits in bm_ring_push kind field):
 #   0 = schedule, 1 = timer_tick, 2 = irq, 3 = io_write,
 #   4 = io_read, 5 = random, 6 = checkpoint, 7 = task_create, 8 = task_exit
+#
+# Random reads (kind 5 above is no longer written to the ring) run on the
+# portable semantic replay core std.replay.portable_replay (DHR P6), in
+# replay scope RR_PORTABLE_SCOPE.
 
 use std.replay.bm_replay_core (
     bm_ring_push, bm_ring_pop_kind, bm_ring_pop_val_a, bm_ring_pop_val_b,
     bm_ring_count
 )
+use std.replay.portable_replay.{
+    PR_MODE_OFF, PR_MODE_RECORD, PR_MODE_REPLAY, PR_KIND_RANDOM_READ, PR_DIV_NONE,
+    portable_replay_set_mode, portable_replay_mode, portable_replay_open_scope,
+    portable_replay_scope_is_open, portable_replay_event, portable_replay_last_divergence,
+    portable_replay_pending
+}
 
 val RR_SCHEDULE: i64 = 0
 val RR_TIMER_TICK: i64 = 1
 val RR_IRQ: i64 = 2
 val RR_IO_WRITE: i64 = 3
 val RR_IO_READ: i64 = 4
-val RR_RANDOM: i64 = 5
 val RR_CHECKPOINT: i64 = 6
 val RR_TASK_CREATE: i64 = 7
 val RR_TASK_EXIT: i64 = 8
+
+val RR_PORTABLE_SCOPE: i64 = 1
 
 var divergence_count: i32 = 0
 
@@ -107,18 +118,29 @@ fn rr_hook_random(value: u64) -> u64:
     """Record/replay random number. In replay, returns logged value."""
     if rtos_replay_is_off():
         return value
+    rr_portable_sync()
     if rtos_replay_is_recording():
-        bm_ring_push(RR_RANDOM, rtos_replay_next_seq(), value.to_i64(), 0)
+        rtos_replay_next_seq()  # keep the shared seq numbering of the other hooks
+    val replayed = portable_replay_event(PR_KIND_RANDOM_READ, RR_PORTABLE_SCOPE, value.to_i64())
+    if portable_replay_last_divergence() != PR_DIV_NONE:
+        # Wrong event or end-of-log: counted. The realtime layer still returns
+        # the live value here, as before P6 (the core itself never does).
+        divergence_count = divergence_count + 1
         return value
+    replayed.to_u64()
 
-    if rtos_replay_is_replaying():
-        val logged_kind = bm_ring_pop_kind()
-        if logged_kind == RR_RANDOM:
-            return bm_ring_pop_val_a().to_u64()
-        divergence_count = divergence_count + 1  # wrong event or end-of-log: fail closed
-        return value
-
-    value
+fn rr_portable_sync():
+    """Mirror the RTOS mode onto the portable replay session (DHR P6).
+    Verify does not replay random reads, so it maps to Off."""
+    var want = PR_MODE_OFF
+    if rtos_replay_is_recording():
+        want = PR_MODE_RECORD
+    elif rtos_replay_is_replaying():
+        want = PR_MODE_REPLAY
+    if portable_replay_mode() != want:
+        portable_replay_set_mode(want)
+    if not portable_replay_scope_is_open():
+        portable_replay_open_scope(RR_PORTABLE_SCOPE)
 
 fn rr_hook_checkpoint(checkpoint_id: i32):
     """Insert a named checkpoint into the event log."""
@@ -150,5 +172,5 @@ fn rr_reset_divergences():
     divergence_count = 0
 
 fn rr_event_count() -> i64:
-    """Return number of events in the ring buffer."""
-    bm_ring_count()
+    """Return number of logged events not yet replayed (ring + portable core)."""
+    bm_ring_count() + portable_replay_pending()
