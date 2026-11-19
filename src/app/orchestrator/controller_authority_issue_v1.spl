@@ -36,13 +36,14 @@ fn controller_authority_store_read_v1(store_root: text, key: DistributedAuthorit
         return Err("controller-key-store-unavailable")
     val read = host_identity_store_read_v1(opened.owner.unwrap(), controller_authority_key_leaf_v1(key), 4096)
     val closed = host_identity_store_close_v1(read.owner)
-    # No second local copy of the key bytes: a refusal wipes the buffer the store returned, success hands that
-    # same buffer to the caller (which wipes it after signing).
-    if read.error != "" or read.absent or read.cleanup_pending or read.bytes.is_none() or not closed.completed or
-            closed.error != "":
-        if val leftover = read.bytes: secure_zero_u8_slots(leftover)
-        return Err("controller-key-unavailable")
-    Ok(read.bytes.unwrap())
+    # Exactly one binding of the returned buffer exists after this point: `held` is wiped on a refusal and is the
+    # value returned on success (the caller wipes it after signing). No second unwrap or copy is taken.
+    if val held = read.bytes:
+        if read.error != "" or read.absent or read.cleanup_pending or not closed.completed or closed.error != "":
+            if held.len() > 0 and not secure_zero_u8_slots(held).verified(): return Err("controller-key-buffer-wipe")
+            return Err("controller-key-unavailable")
+        return Ok(held)
+    Err("controller-key-unavailable")
 
 pub fn controller_authority_store_reader_v1(store_root: text) -> fn(DistributedAuthorityKeyV2) -> Result<[u8], text>:
     \key: controller_authority_store_read_v1(store_root, key)
