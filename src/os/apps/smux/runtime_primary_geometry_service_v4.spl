@@ -18,23 +18,26 @@ pub struct SmuxPrimaryGeometryServiceTurnV4:
     owner: SmuxRuntimeControlOwnerV1
     reply: text
 
+fn text_or_empty_v4(value: Result<text, text>) -> text:
+    if value.is_ok(): value.unwrap() else: ""
+
 fn geometry_reply_v4(owner: SmuxRuntimeControlOwnerV1, request: SmuxPrimaryControlRequestV4,
         status: text, code: text, nonce: text = "", target: text = "") -> SmuxPrimaryGeometryServiceTurnV4:
     val entry = smux_runtime_control_find_v1(owner, request.control.binding_uid, SessionRuntimeControlKindV1.Geometry)
     val index = smux_primary_geometry_index_v4(owner.geometry_records, request.control.binding_uid)
     var revision: i64 = 0
     var target_digest = target
-    if entry != nil:
+    if entry.is_some():
         revision = entry.unwrap().lease.revision
-        if target_digest == "": target_digest = session_runtime_control_target_digest_v1(entry.unwrap().lease.target) ?? ""
+        if target_digest == "": target_digest = text_or_empty_v4(session_runtime_control_target_digest_v1(entry.unwrap().lease.target))
     val disposition = if index < 0: "none" else: owner.geometry_records[index].disposition
-    val pending = index >= 0 and owner.geometry_records[index].exchange != nil
+    val pending = index >= 0 and owner.geometry_records[index].exchange.is_some()
     val receipt_revision: i64 = if index < 0: 0 else: owner.geometry_records[index].revision
-    val capable = entry != nil and entry.unwrap().active and entry.unwrap().lease.expires_monotonic_ms > sosix_time_now_monotonic_ms() and
+    val capable = entry.is_some() and entry.unwrap().active and entry.unwrap().lease.expires_monotonic_ms > sosix_time_now_monotonic_ms() and
         disposition == "acknowledged" and not pending and receipt_revision == revision
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("smux-primary-geometry-reply"),
         "bindingUid": SdnValue.String(request.control.binding_uid), "serviceIncarnation": SdnValue.String(owner.service_incarnation),
-        "requestDigest": SdnValue.String(smux_primary_control_request_digest_v4(request) ?? ""),
+        "requestDigest": SdnValue.String(text_or_empty_v4(smux_primary_control_request_digest_v4(request))),
         "status": SdnValue.String(status), "code": SdnValue.String(code), "revision": SdnValue.Int(revision),
         "nonce": SdnValue.String(nonce), "targetDigest": SdnValue.String(target_digest), "geometrySupported": SdnValue.Bool(capable),
         "inputSupported": SdnValue.Bool(false), "interactive": SdnValue.Bool(false),
@@ -67,20 +70,20 @@ pub fn smux_primary_geometry_service_v4(binding: SmuxRuntimeBindingOwnerV3,
     if operation.action == "resolve":
         val resolved = smux_runtime_control_target_v1(binding, operation.binding_uid, operation.client_id, operation.attachment_token)
         if resolved.is_err(): return geometry_reply_v4(current, request, "rejected", resolved.unwrap_err())
-        return geometry_reply_v4(current, request, "resolved", "", "", session_runtime_control_target_digest_v1(resolved.unwrap().target) ?? "")
+        return geometry_reply_v4(current, request, "resolved", "", "", text_or_empty_v4(session_runtime_control_target_digest_v1(resolved.unwrap().target)))
     if operation.action == "issue": return geometry_reply_v4(current, request, authorized.status, authorized.reason, authorized.nonce)
-    if operation.action != "resize" or authorized.checked == nil:
+    if operation.action != "resize" or authorized.checked.is_none():
         return geometry_reply_v4(current, request, "rejected", "primary-geometry-not-authorized")
     val holder = smux_runtime_control_find_v1(current, operation.binding_uid, SessionRuntimeControlKindV1.Geometry)
-    if holder == nil or not holder.unwrap().active: return geometry_reply_v4(current, request, "rejected", "primary-geometry-holder-retired")
+    if holder.is_none() or not holder.unwrap().active: return geometry_reply_v4(current, request, "rejected", "primary-geometry-holder-retired")
     val resolved = smux_runtime_control_target_v1(binding, operation.binding_uid, holder.unwrap().lease.target.client_id, holder.unwrap().attachment_token)
-    if resolved.is_err() or resolved.unwrap().primary == nil: return geometry_reply_v4(current, request, "rejected", "primary-geometry-session-unavailable")
+    if resolved.is_err() or resolved.unwrap().primary.is_none(): return geometry_reply_v4(current, request, "rejected", "primary-geometry-session-unavailable")
     val session = resolved.unwrap().primary.unwrap()
     if container_primary_attach_plan_v1(session).terminal_mode != "tty": return geometry_reply_v4(current, request, "rejected", "primary-geometry-tty-required")
     val checked = smux_runtime_control_check_v1(current, operation.binding_uid, SessionRuntimeControlKindV1.Geometry,
         operation.nonce, operation.expected_revision, resolved.unwrap().target, sosix_time_now_monotonic_ms())
     current = checked.owner
-    if checked.error != "" or checked.lease == nil: return geometry_reply_v4(current, request, "rejected", checked.error)
+    if checked.error != "" or checked.lease.is_none(): return geometry_reply_v4(current, request, "rejected", checked.error)
     val digest = smux_primary_control_request_digest_v4(request)
     if digest.is_err(): return geometry_reply_v4(current, request, "rejected", digest.unwrap_err())
     val identity = container_primary_attach_identity_v1(session)
