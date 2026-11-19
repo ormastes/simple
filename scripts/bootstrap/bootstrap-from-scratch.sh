@@ -5322,7 +5322,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       exit "${stage2_status}"
     fi
     echo "  warning: stage2 native-build failed (exit ${stage2_status}); Stage 3/full CLI unavailable" >&2
-    echo "  warning: see doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md" >&2
+    echo "  warning: see the stage2 logs above; a sanity \"frontend smoke exited 124\" is a slow 1-module build, not empty MIR bodies (raise COMPILER_BUILD_TIMEOUT_SECONDS; doc/08_tracking/bug/stage2_one_module_build_276s_vs_10s_first_object_2026-11-19.md). Empty-MIR stubs: doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md" >&2
   fi
 
   if [ "${stage2_status}" -eq 0 ]; then
