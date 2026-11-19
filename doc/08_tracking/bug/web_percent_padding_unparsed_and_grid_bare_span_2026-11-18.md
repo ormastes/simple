@@ -257,8 +257,7 @@ Free width is shared in whole px: three `1fr` implicit columns of 380 px are
 ## Residue still open
 
 - `display:flow-root` is FIXED (2026-11-19, `display_flow_root_chrome159_spec`: parsed as a display keyword; margin-collapse, float containment and float avoidance now follow the existing BFC predicates). `contain:layout` still does not stop margin collapsing.
-- `<div><span></span></div>`: the empty inline box opens an 18 px line
-  (Chrome 0).
+- `<div><span></span></div>` is FIXED (2026-11-19, `empty_inline_line_box_chrome159_spec`): an inline run with no text, replaced box, or non-zero horizontal margin/padding/border no longer advances the cursor (Chrome 0).  Inline padding/border still open a line (Chrome 18).
 - An empty block with `margin:7px 0` after an empty block: its margin should
   collapse through the parent (Chrome: next sibling at y 0), Simple keeps it
   inside (y 7).
