@@ -110,10 +110,26 @@ fn native_model_named(model_root: text, id: text) -> NativeModel?:
                 if name == id:
                     val dir = _join(model_root, name)
                     if host_is_dir(dir):
-                        return Some(describe_model(dir, engine_backend_available()))
+                        val m = describe_model(dir, engine_backend_available())
+                        # An empty or unrecognised directory is not a model:
+                        # /v1/models does not list it, so a route says 404.
+                        if m.format == "unknown":
+                            return None
+                        return Some(m)
         case None:
             pass
     None
+
+# True when a slang pack under `model_root` advertises `id` as its manifest
+# model_id (the id /v1/models lists for it, which need not be the dir name).
+fn _pack_named(model_root: text, id: text) -> bool:
+    for e in discover_models(model_root):
+        if e.id == id:
+            return true
+    false
+
+fn _wrong_kind_response(id: text, have: ModelKind, want: ModelKind, route: text) -> ApiResponse:
+    openai_error_response(400, "model '" + id + "' is a " + model_kind_text(have) + " model; " + route + " needs a " + model_kind_text(want) + " model", "invalid_request_error", "wrong_model_kind", "")
 
 # True when a model with profile `p` can serve a `want` route. A kind serves
 # its own route; a Chat model whose inputs include Audio also serves Asr
@@ -135,9 +151,10 @@ fn kind_mismatch(model_root: text, id: text, want: ModelKind, route: text) -> Re
     match native_model_named(model_root, id):
         case Some(m):
             if not kind_serves(m.profile, want):
-                return Err(openai_error_response(400, "model '" + id + "' is a " + model_kind_text(m.profile.kind) + " model; " + route + " needs a " + model_kind_text(want) + " model", "invalid_request_error", "wrong_model_kind", ""))
+                return Err(_wrong_kind_response(id, m.profile.kind, want, route))
         case None:
-            pass
+            if id != "" and _pack_named(model_root, id) and not kind_serves(pack_profile(), want):
+                return Err(_wrong_kind_response(id, pack_profile().kind, want, route))
     Ok(())
 
 # The native model a kind route is asked for: 400 when the body names none,
@@ -150,10 +167,13 @@ fn model_for_kind(model_root: text, body: text, want: ModelKind, route: text) ->
     match native_model_named(model_root, id):
         case Some(m):
             if not kind_serves(m.profile, want):
-                return Err(openai_error_response(400, "model '" + id + "' is a " + model_kind_text(m.profile.kind) + " model; " + route + " needs a " + model_kind_text(want) + " model", "invalid_request_error", "wrong_model_kind", ""))
+                return Err(_wrong_kind_response(id, m.profile.kind, want, route))
             return Ok(m)
         case None:
-            pass
+            # A pack is listed by its manifest model_id; it is a Chat model, so
+            # a kind route asked for it is the wrong kind, not a missing model.
+            if _pack_named(model_root, id):
+                return Err(_wrong_kind_response(id, pack_profile().kind, want, route))
     Err(openai_error_response(404, "model '" + id + "' was not found under the configured slang model root", "invalid_request_error", "model_not_found", ""))
 
 # 501 for a kind route whose serving is not built yet. The reason is the kind
