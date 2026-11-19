@@ -78,3 +78,22 @@ describe "KPF recovery transaction":
         val table = KpfGenerationTable.create(2, 2)
         val tx = KpfRecoveryTransaction.create(table)
         expect(tx.begin_upgrade(id(2), digest(2), 2, 10).verdict == KpfRecoveryVerdict.Rejected).to_equal(true)
+
+describe "KPF lease sharing (GEN-02/03)":
+    it "a suspended continuation keeps a retired generation alive via share_pin":
+        val table = _with_v1()
+        val request = table.pin_active()
+        table.publish(id(2), digest(2), 2)
+        expect(table.pin(table.rollback_candidate).status == KpfSyncStatus.GenerationNotActive).to_equal(true)
+        val continuation = table.share_pin(request.handle)
+        expect(continuation.status == KpfSyncStatus.Ok).to_equal(true)
+        table.release_pin(request.handle)
+        expect(table.collect(table.rollback_candidate) == KpfSyncStatus.GenerationStillPinned).to_equal(true)
+        table.release_pin(continuation.handle)
+        expect(table.collect(table.rollback_candidate) == KpfSyncStatus.Ok).to_equal(true)
+
+    it "a released pin cannot be shared":
+        val table = _with_v1()
+        val request = table.pin_active()
+        table.release_pin(request.handle)
+        expect(table.share_pin(request.handle).status == KpfSyncStatus.StaleHandle).to_equal(true)
