@@ -1638,16 +1638,20 @@ pub fn border_dot_row_spans(d: i32) -> [i32]:
 # where the top-left arc ends and run clockwise. SelectBestDashGap (closed
 # path: as many gaps as dashes) fits the gap so whole dashes close the loop:
 # dash 2t, nominal gap t; dotted: round dots of diameter t, one per pitch,
-# the first centred on the start. Returns [row, x0, len] spans (box-relative)
-# of the pixels whose centre a dash or dot covers; empty when the shape does
-# not apply (r <= t/2, a side shorter than its arcs, or a loop too short to
-# dash), so the caller keeps its per-side path.
-# ponytail: uniform width, colour and circular radius only, pixel-centre
-# coverage (no AA); upgrade per side by clipping this path to each side's
-# polygon, as Chrome does.
-# reason: geometry helper shared by the raster and Draw IR border lanes; box size, width and radius in px
+# the first centred on the start. Sides may differ in colour, and some may be
+# solid: Chrome keeps the one pattern and paints each pixel with its nearest
+# side (the diagonal from the outer to the inner corner splits a corner, ties
+# to the vertical side); a side set in `solid_sides` (bit 1 top, 2 right,
+# 4 bottom, 8 left) fills its part of the ring. Returns [row, x0, len, side]
+# spans (box-relative; side 0 top, 1 right, 2 bottom, 3 left) of the pixels
+# whose centre is covered; empty when the shape does not apply (r <= t/2, a
+# side shorter than its arcs, or a loop too short to dash), so the caller
+# keeps its per-side path.
+# ponytail: uniform width and circular radius only, pixel-centre coverage (no
+# AA); upgrade with per-side widths (Chrome insets the centre line per side).
+# reason: geometry helper shared by the raster and Draw IR border lanes; box size, width and radius in px, side bit mask
 # @allow(primitive_api)
-pub fn border_rounded_dash_spans(w: i32, h: i32, t: i32, r: i32, dotted: bool) -> [i32]:
+pub fn border_rounded_dash_spans(w: i32, h: i32, t: i32, r: i32, dotted: bool, solid_sides: i32) -> [i32]:
     var out: [i32] = []
     if t <= 0 or 2 * r <= t or 2 * r > w or 2 * r > h:
         return out
@@ -1680,26 +1684,34 @@ pub fn border_rounded_dash_spans(w: i32, h: i32, t: i32, r: i32, dotted: bool) -
     while py < h:
         val y = (py as f64) + 0.5
         var run0 = -1
+        var run_side = -1
         var px = 0
         # cpu-lane-loop-ok: pixels of one row of the border box; interior rows jump the padding span
         while px <= w:
-            var hit = false
+            var side = -1
             if px < w:
                 val x = (px as f64) + 0.5
                 val sd = _rounded_dash_param(x, y, wf, hf, rf, rc, c, seg)
-                if dotted:
+                val near = _rounded_nearest_side(x, y, wf, hf)
+                var hit = false
+                if (solid_sides >> near) & 1 == 1:
+                    hit = sd[1] <= c
+                elif dotted:
                     hit = _rounded_dot_hit(x, y, sd[0], pitch, total, wf, hf, rf, rc, c, seg)
                 else:
                     val k = ((sd[0] / pitch) as i64) as f64
                     hit = sd[1] <= c and sd[0] - k * pitch < dash
-            if hit:
-                if run0 < 0:
-                    run0 = px
-            elif run0 >= 0:
+                if hit:
+                    side = near
+            if run0 >= 0 and side != run_side:
                 out.push(py)
                 out.push(run0)
                 out.push(px - run0)
+                out.push(run_side)
                 run0 = -1
+            if side >= 0 and run0 < 0:
+                run0 = px
+                run_side = side
             if px == t and py >= r and py < h - r and w - t > px:
                 px = w - t
             else:
@@ -1731,6 +1743,43 @@ fn _rounded_dash_param(x: f64, y: f64, w: f64, h: f64, r: f64, rc: f64, c: f64, 
         dm = y
         s = x - r
     [s, _abs_f64(dm - c)]
+
+# The one dash style ("dashed" / "dotted") of a rounded border whose sides are
+# each that style or solid, at least one not solid; "" otherwise.
+# reason: border-style keyword helper shared by the raster and Draw IR border lanes
+# @allow(primitive_api)
+pub fn _rounded_dash_style(st: text, sr: text, sb: text, sl: text) -> text:
+    var style = ""
+    for s in [st, sr, sb, sl]:
+        if s == "dashed" or s == "dotted":
+            if style != "" and style != s:
+                return ""
+            style = s
+        elif s != "solid":
+            return ""
+    style
+
+# `solid_sides` bit mask for `border_rounded_dash_spans` (1 top, 2 right,
+# 4 bottom, 8 left).
+# reason: border-style keyword helper shared by the raster and Draw IR border lanes
+# @allow(primitive_api)
+pub fn _rounded_solid_sides(st: text, sr: text, sb: text, sl: text) -> i32:
+    (if st == "solid": 1 else: 0) + (if sr == "solid": 2 else: 0) + (if sb == "solid": 4 else: 0) + (if sl == "solid": 8 else: 0)
+
+# The side (0 top, 1 right, 2 bottom, 3 left) nearest a point; ties go to the
+# vertical side, as Chrome's corner diagonals do for equal widths.
+fn _rounded_nearest_side(x: f64, y: f64, w: f64, h: f64) -> i32:
+    var side = 3
+    var dm = x
+    if w - x < dm:
+        side = 1
+        dm = w - x
+    if y < dm:
+        side = 0
+        dm = y
+    if h - y < dm:
+        side = 2
+    side
 
 fn _abs_f64(v: f64) -> f64:
     if v < 0.0: 0.0 - v else: v
@@ -1995,15 +2044,19 @@ fn fb_border_sides_styled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w:
         val ins = bt - stripe
         val outer = fb_border_ring_per_corner_clip(fb, fbw, fbh, x, y, w, h, stripe, stripe, stripe, stripe, cl, ct, cr, cb, tl, tr, br_rad, bl_rad, clip)
         return fb_border_ring_per_corner_clip(outer, fbw, fbh, x + ins, y + ins, w - 2 * ins, h - 2 * ins, stripe, stripe, stripe, stripe, cl, ct, cr, cb, _ring_inset_radius(tl, ins), _ring_inset_radius(tr, ins), _ring_inset_radius(br_rad, ins), _ring_inset_radius(bl_rad, ins), clip)
-    if (sl == "dashed" or sl == "dotted") and st_top == sl and sr == sl and sb == sl and bl == bt and bt == br and br == bb and cl == ct and ct == cr and cr == cb and cl != 0u32 and tl > 0 and tl == tr and tr == br_rad and br_rad == bl_rad:
-        val spans = border_rounded_dash_spans(w, h, bt, tl, sl == "dotted")
+    val dash_style = _rounded_dash_style(st_top, sr, sb, sl)
+    if dash_style != "" and bl == bt and bt == br and br == bb and tl > 0 and tl == tr and tr == br_rad and br_rad == bl_rad:
+        val spans = border_rounded_dash_spans(w, h, bt, tl, dash_style == "dotted", _rounded_solid_sides(st_top, sr, sb, sl))
         if spans.len() > 0:
+            val side_colors = [ct, cr, cb, cl]
             var dashed_out = fb
             var k = 0
             # cpu-lane-loop-ok: one row span per covered run of the rounded dash path; bound is the span count
-            while k + 2 < spans.len():
-                dashed_out = _fb_border_side_clip(dashed_out, fbw, fbh, x + spans[k + 1], y + spans[k], spans[k + 2], 1, cl, clip)
-                k = k + 3
+            while k + 3 < spans.len():
+                val sc = side_colors[spans[k + 3]]
+                if sc != 0u32:
+                    dashed_out = _fb_border_side_clip(dashed_out, fbw, fbh, x + spans[k + 1], y + spans[k], spans[k + 2], 1, sc, clip)
+                k = k + 4
             return dashed_out
     if (tl != tr or tr != br_rad or br_rad != bl_rad) and _ring_style_plain(sl, bl) and _ring_style_plain(st_top, bt) and _ring_style_plain(sr, br) and _ring_style_plain(sb, bb):
         return fb_border_ring_per_corner_clip(fb, fbw, fbh, x, y, w, h, bl, bt, br, bb, cl, ct, cr, cb, tl, tr, br_rad, bl_rad, clip)
