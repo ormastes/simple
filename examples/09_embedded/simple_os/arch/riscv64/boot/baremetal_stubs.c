@@ -2783,3 +2783,33 @@ int64_t rt_pool_safepoint(void)
 {
     return 0;
 }
+
+/* ---- riscv64_virtio_blk_adapter.spl providers -------------------------------
+ * Thin wrappers over the existing virtio-blk MMIO driver in
+ * arch/common/riscv_common.h (the same driver the rv64 fs-exec media lane
+ * mounts with). No second driver instance: this TU owns g_blk_mmio. */
+RuntimeValue rt_riscv64_virtio_blk_fat32_init(void)
+{
+    return (RuntimeValue)(virtio_blk_init() ? 0 : 1);
+}
+
+RuntimeValue rt_riscv64_virtio_blk_fat32_capacity_sectors(void)
+{
+    if (!g_blk_mmio && !virtio_blk_init()) return 0;
+    /* virtio-mmio device config starts at 0x100; blk capacity is le64 sectors. */
+    uint64_t lo = g_blk_mmio[0x100 / 4];
+    uint64_t hi = g_blk_mmio[0x104 / 4];
+    return (RuntimeValue)((hi << 32) | lo);
+}
+
+RuntimeValue rt_riscv64_virtio_blk_fat32_read_sector_bytes(RuntimeValue lba)
+{
+    RuntimeValue arr = rt_array_new((RuntimeValue)512);
+    if (arr == NIL_VALUE) return NIL_VALUE;
+    if ((uint64_t)lba > 0xffffffffULL || !virtio_blk_read_sector((uint32_t)lba)) return arr;
+    const unsigned char *data = sector_data();
+    for (int i = 0; i < 512; i++) {
+        if (!rt_array_push(arr, ENCODE_INT(data[i]))) return NIL_VALUE;
+    }
+    return arr;
+}
