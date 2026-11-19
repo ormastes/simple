@@ -19,7 +19,7 @@ gap tracked separately in
 
 | file | error | cause | fix |
 |---|---|---|---|
-| `src/os/kernel/abi/syscall_shim.spl` | `llvm global load referenced undeclared symbol spl_handle_debug_write` (Cranelift: NULL function value) | a local `extern fn spl_handle_debug_write` shadowed the definition imported from `syscall_shim_process`; every other keepalive handler resolves through that import | delete the local extern |
+| `src/os/kernel/abi/syscall_shim.spl` | `llvm global load referenced undeclared symbol spl_handle_debug_write` (Cranelift: NULL function value) | **Diagnosis corrected 2026-11-19:** the local extern deletion was cleanup only (error byte-identical after it). Real cause: 95 address-taken providers reached through module-form `use` were never declared in LLVM | see `compiled_hir_module_form_use_bare_names_2026-11-19.md` |
 | `src/os/kernel/boot/boot_fs_mount.spl` | `undeclared symbol NVFS_BOOT_ARENA_BASE_LBA_V1` | constant used without an import (the cross-module `pub val` itself resolves — probe: imported value is 4) | import it from `nvfs_root_mount_transaction` |
 | `src/lib/nogc_async_mut_noalloc/baremetal/riscv/semihost.spl` | `cannot resolve method call Array.as_ptr` | riscv64 kernel arch files imported the `baremetal.riscv` package root, whose `__init__.spl` forwards `semihost`, `startup`, `plic`, ... so the closure compiled the M-mode semihost module into an S-mode SBI kernel | import the owning submodules (`.cmo`, `.sbi`) in `hal_cache`, `hal_smp`, `user_entry` |
 | `src/os/userlib/fs.spl` | `cannot resolve method call str.parse_u8` | `text.parse_u8()` has no native lowering | decode the already-validated single ASCII digit (`byte_at(0) - 48`) |

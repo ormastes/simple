@@ -10398,3 +10398,36 @@ fn file_phase_timer_only_advances_when_enabled() {
     on.mark("parse");
     assert!(on.last_for_tests() > on_start);
 }
+
+/// compiled_hir_module_form_use_bare_names_2026-11-19: an imported
+/// function named by a symbol-form `use` and only address-taken (the
+/// syscall_shim.spl workaround shape) must compile under LLVM.
+#[cfg(feature = "llvm")]
+#[test]
+fn llvm_address_taken_symbol_form_import_compiles() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("provider.spl"),
+        "@export(\"C\", name: \"ga_provider_fn\")\nfn ga_provider_fn() -> i64:\n    42\n",
+    )
+    .unwrap();
+    fs::write(
+        src.join("consumer.spl"),
+        "use provider.{ga_provider_fn}\nfn keep() -> u64:\n    ga_provider_fn as u64\n",
+    )
+    .unwrap();
+    let archive = temp.path().join("probe.a");
+    let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive)
+        .source_dir(src)
+        .config(NativeBuildConfig {
+            emit_archive: true,
+            backend: "llvm".to_string(),
+            num_threads: Some(1),
+            ..Default::default()
+        })
+        .build()
+        .expect("address-taken import must compile under LLVM");
+    assert_eq!(result.failed, 0);
+}
