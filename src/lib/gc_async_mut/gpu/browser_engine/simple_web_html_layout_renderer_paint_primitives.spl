@@ -43,6 +43,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundati
     background_position_spec, background_repeat_spec
 }
 use std.gc_async_mut.gpu.engine2d.gradient_tiles.{gradient_tile_spans, gradient_pixels_round_clip, gradient_layer_stack_over}
+use std.common.math.special.{atan2_f64, sqrt_f64, sin_f64, cos_f64}
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_gradients_text.{ClipRect, composite_over_base, gradient_angle_sin_cos_q16, fb_radial_gradient_clip, BackgroundGradientLayer, fb_gradient_layer_clip, fb_gradient_layers_round_clip, _fb_blend_pixels, gradient_layer_tiled_pixels, _gradient_layer_kernel, background_gradient_box_rects, linear_gradient_line_q10, linear_gradient_line_q10_at_angle, BACKGROUND_GRADIENT_TILE_CAP, background_gradient_layers_paintable, background_gradient_clip_shape, _inset_radius, _gradient_layers_default_position, fb_gradient_layers_clip, radial_gradient_box_paintable, canvas_background_extent, canvas_gradient_source, _canvas_gradient_paintable, _fb_border_translucent, _border_style_disabled, text_decoration_rects, fb_glyph_thin_scaled_clip, fb_text_thin_scaled_clip_range, fb_text_thin_scaled_clip_range_adv, _TtfFaceEntry, _TtfGlyphBitmap, _TtfEdge, _TTF_BLOB_CACHE_LIMIT, _TTF_FACE_CACHE_LIMIT, _TTF_RESOLVE_CACHE_LIMIT, _TTF_GLYPH_DM_SIZE, _ttf_empty_cmap12, _ttf_empty_cmap4, _ttf_empty_glyph_bitmap, _ttf_floor_i32, _ttf_ceil_i32, _ttf_spec_has_bold, _ttf_spec_has_italic, _ttf_cmap_glyph, _ttf_hmtx_advance_px, _ttf_rasterize_glyph, apply_text_transform_for_paint, reverse_text_for_paint, _bidi_cp_is_rtl, _bidi_cp_is_neutral, text_has_rtl_strong, bidi_visual_text_for_rtl, WidgetChromeRects, widget_chrome_rects_concat, fb_widget_chrome_rects, widget_frame_rects, sparse_text_rects, fb_text_sparse_range, fb_px, WidgetChromeTextPixels, widget_chrome_text_fits, widget_chrome_text_active, fb_generated_widget_chrome_text, generated_widget_chrome_text_pixels, WidgetPaintFlags, compute_widget_paint_flags, is_text_flow_fixture, fb_text_flow_chrome_overlay, _fb_border_mitred, _fb_mitre_cut, _fb_text_px}
 
 fn web_glyph_scale(fs: i32) -> i32:
@@ -1632,6 +1633,148 @@ pub fn border_dot_row_spans(d: i32) -> [i32]:
         row = row + 1
     spans
 
+# Chrome 159 strokes a uniform dashed / dotted border on a rounded box as ONE
+# closed path: the border's centre line (inset t/2, radius r - t/2), started
+# where the top-left arc ends and run clockwise. SelectBestDashGap (closed
+# path: as many gaps as dashes) fits the gap so whole dashes close the loop:
+# dash 2t, nominal gap t; dotted: round dots of diameter t, one per pitch,
+# the first centred on the start. Returns [row, x0, len] spans (box-relative)
+# of the pixels whose centre a dash or dot covers; empty when the shape does
+# not apply (r <= t/2, a side shorter than its arcs, or a loop too short to
+# dash), so the caller keeps its per-side path.
+# ponytail: uniform width, colour and circular radius only, pixel-centre
+# coverage (no AA); upgrade per side by clipping this path to each side's
+# polygon, as Chrome does.
+# reason: geometry helper shared by the raster and Draw IR border lanes; box size, width and radius in px
+# @allow(primitive_api)
+pub fn border_rounded_dash_spans(w: i32, h: i32, t: i32, r: i32, dotted: bool) -> [i32]:
+    var out: [i32] = []
+    if t <= 0 or 2 * r <= t or 2 * r > w or 2 * r > h:
+        return out
+    val tf = t as f64
+    val rf = r as f64
+    val wf = w as f64
+    val hf = h as f64
+    val c = tf / 2.0
+    val rc = rf - c
+    val a = wf - 2.0 * rf
+    val b = hf - 2.0 * rf
+    val q = 3.141592653589793 * rc / 2.0
+    val total = 2.0 * a + 2.0 * b + 4.0 * q
+    val dash = if dotted: tf else: 2.0 * tf
+    val nominal = tf
+    if total <= 2.0 * dash:
+        return out
+    val min_n = ((total / (dash + nominal)) as i64) as f64
+    if min_n < 1.0:
+        return out
+    val min_gap = (total - min_n * dash) / min_n
+    val max_gap = (total - (min_n + 1.0) * dash) / (min_n + 1.0)
+    val d_min = if min_gap > nominal: min_gap - nominal else: nominal - min_gap
+    val d_max = if max_gap > nominal: max_gap - nominal else: nominal - max_gap
+    val gap = if max_gap <= 0.0 or d_min < d_max: min_gap else: max_gap
+    val pitch = dash + gap
+    val seg = [a, a + q, a + q + b, a + 2.0 * q + b, 2.0 * a + 2.0 * q + b, 2.0 * a + 3.0 * q + b, 2.0 * a + 3.0 * q + 2.0 * b]
+    var py = 0
+    # cpu-lane-loop-ok: rows of one rounded border box; bound is the box height
+    while py < h:
+        val y = (py as f64) + 0.5
+        var run0 = -1
+        var px = 0
+        # cpu-lane-loop-ok: pixels of one row of the border box; interior rows jump the padding span
+        while px <= w:
+            var hit = false
+            if px < w:
+                val x = (px as f64) + 0.5
+                val sd = _rounded_dash_param(x, y, wf, hf, rf, rc, c, seg)
+                if dotted:
+                    hit = _rounded_dot_hit(x, y, sd[0], pitch, total, wf, hf, rf, rc, c, seg)
+                else:
+                    val k = ((sd[0] / pitch) as i64) as f64
+                    hit = sd[1] <= c and sd[0] - k * pitch < dash
+            if hit:
+                if run0 < 0:
+                    run0 = px
+            elif run0 >= 0:
+                out.push(py)
+                out.push(run0)
+                out.push(px - run0)
+                run0 = -1
+            if px == t and py >= r and py < h - r and w - t > px:
+                px = w - t
+            else:
+                px = px + 1
+        py = py + 1
+    out
+
+# [s, d] for a point: its arc-length parameter on the closed centre line
+# (see `border_rounded_dash_spans`) and its distance from that line.
+fn _rounded_dash_param(x: f64, y: f64, w: f64, h: f64, r: f64, rc: f64, c: f64, seg: [f64]) -> [f64]:
+    if x < r and y < r:
+        return [seg[6] + rc * (atan2_f64(y - r, x - r) + 3.141592653589793), _abs_f64(sqrt_f64((x - r) * (x - r) + (y - r) * (y - r)) - rc)]
+    if x > w - r and y < r:
+        return [rc * (atan2_f64(y - r, x - (w - r)) + 1.5707963267948966) + seg[0], _abs_f64(sqrt_f64((x - (w - r)) * (x - (w - r)) + (y - r) * (y - r)) - rc)]
+    if x > w - r and y > h - r:
+        return [seg[2] + rc * atan2_f64(y - (h - r), x - (w - r)), _abs_f64(sqrt_f64((x - (w - r)) * (x - (w - r)) + (y - (h - r)) * (y - (h - r))) - rc)]
+    if x < r and y > h - r:
+        return [seg[4] + rc * (atan2_f64(y - (h - r), x - r) - 1.5707963267948966), _abs_f64(sqrt_f64((x - r) * (x - r) + (y - (h - r)) * (y - (h - r))) - rc)]
+    # Nearest straight side; ties go bottom, left, right, top.
+    var dm = h - y
+    var s = seg[3] + (w - r - x)
+    if x < dm:
+        dm = x
+        s = seg[5] + (h - r - y)
+    if w - x < dm:
+        dm = w - x
+        s = seg[1] + (y - r)
+    if y < dm:
+        dm = y
+        s = x - r
+    [s, _abs_f64(dm - c)]
+
+fn _abs_f64(v: f64) -> f64:
+    if v < 0.0: 0.0 - v else: v
+
+# Whether (x, y) lies in a dot of diameter 2c centred on the centre line at a
+# multiple of `pitch` (the nearest dots by arc length, wrapping the loop).
+fn _rounded_dot_hit(x: f64, y: f64, s: f64, pitch: f64, total: f64, w: f64, h: f64, r: f64, rc: f64, c: f64, seg: [f64]) -> bool:
+    val k = (s / pitch) as i64
+    var kk = k - 1
+    # cpu-lane-loop-ok: tests the four dots nearest one pixel; fixed bound
+    while kk <= k + 2:
+        var sp = (kk as f64) * pitch
+        if sp < 0.0:
+            sp = sp + total
+        if sp >= total:
+            sp = sp - total
+        val p = _rounded_dash_point(sp, w, h, r, rc, c, seg)
+        if (x - p[0]) * (x - p[0]) + (y - p[1]) * (y - p[1]) <= c * c:
+            return true
+        kk = kk + 1
+    false
+
+# The centre-line point at arc length `s` (0 <= s < perimeter).
+fn _rounded_dash_point(s: f64, w: f64, h: f64, r: f64, rc: f64, c: f64, seg: [f64]) -> [f64]:
+    if s < seg[0]:
+        return [r + s, c]
+    if s < seg[1]:
+        val f = (s - seg[0]) / rc - 1.5707963267948966
+        return [w - r + rc * cos_f64(f), r + rc * sin_f64(f)]
+    if s < seg[2]:
+        return [w - c, r + (s - seg[1])]
+    if s < seg[3]:
+        val f = (s - seg[2]) / rc
+        return [w - r + rc * cos_f64(f), h - r + rc * sin_f64(f)]
+    if s < seg[4]:
+        return [w - r - (s - seg[3]), h - c]
+    if s < seg[5]:
+        val f = (s - seg[4]) / rc + 1.5707963267948966
+        return [r + rc * cos_f64(f), h - r + rc * sin_f64(f)]
+    if s < seg[6]:
+        return [c, h - r - (s - seg[5])]
+    val f = (s - seg[6]) / rc + 3.141592653589793
+    [r + rc * cos_f64(f), r + rc * sin_f64(f)]
+
 fn _fb_border_span_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, is_horiz: bool, style: text, color: u32, clip: ClipRect) -> [u32]:
     if w <= 0 or h <= 0 or color == 0u32 or _border_style_disabled(style):
         return fb
@@ -1852,6 +1995,16 @@ fn fb_border_sides_styled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w:
         val ins = bt - stripe
         val outer = fb_border_ring_per_corner_clip(fb, fbw, fbh, x, y, w, h, stripe, stripe, stripe, stripe, cl, ct, cr, cb, tl, tr, br_rad, bl_rad, clip)
         return fb_border_ring_per_corner_clip(outer, fbw, fbh, x + ins, y + ins, w - 2 * ins, h - 2 * ins, stripe, stripe, stripe, stripe, cl, ct, cr, cb, _ring_inset_radius(tl, ins), _ring_inset_radius(tr, ins), _ring_inset_radius(br_rad, ins), _ring_inset_radius(bl_rad, ins), clip)
+    if (sl == "dashed" or sl == "dotted") and st_top == sl and sr == sl and sb == sl and bl == bt and bt == br and br == bb and cl == ct and ct == cr and cr == cb and cl != 0u32 and tl > 0 and tl == tr and tr == br_rad and br_rad == bl_rad:
+        val spans = border_rounded_dash_spans(w, h, bt, tl, sl == "dotted")
+        if spans.len() > 0:
+            var dashed_out = fb
+            var k = 0
+            # cpu-lane-loop-ok: one row span per covered run of the rounded dash path; bound is the span count
+            while k + 2 < spans.len():
+                dashed_out = _fb_border_side_clip(dashed_out, fbw, fbh, x + spans[k + 1], y + spans[k], spans[k + 2], 1, cl, clip)
+                k = k + 3
+            return dashed_out
     if (tl != tr or tr != br_rad or br_rad != bl_rad) and _ring_style_plain(sl, bl) and _ring_style_plain(st_top, bt) and _ring_style_plain(sr, br) and _ring_style_plain(sb, bb):
         return fb_border_ring_per_corner_clip(fb, fbw, fbh, x, y, w, h, bl, bt, br, bb, cl, ct, cr, cb, tl, tr, br_rad, bl_rad, clip)
     var out = fb

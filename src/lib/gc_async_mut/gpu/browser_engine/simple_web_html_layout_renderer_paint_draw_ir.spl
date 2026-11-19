@@ -7,7 +7,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_ra
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{spaced_advances_milli, HNode, font_milli_of, web_argb, attr_value, parse_color, parse_color_any, parse_int, decl_get, svg_number_milli, svg_view_box_milli, simple_web_backdrop_admission, _wsc_on, _wsc_now_us, _wlay_add, attr_present}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, SIMPLE_WEB_STICKY_TOP_AUTO, _html_text_language, split_top_level_commas}
 use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{parse_box_shadow_layers}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{radial_gradient_box_paintable, radial_gradient_box_geometry, BackgroundGradientLayer, background_gradient_layers_paintable, background_gradient_layers, background_gradient_box_rects, background_gradient_clip_shape, border_dash_runs, border_dot_row_spans}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{radial_gradient_box_paintable, radial_gradient_box_geometry, BackgroundGradientLayer, background_gradient_layers_paintable, background_gradient_layers, background_gradient_box_rects, background_gradient_clip_shape, border_dash_runs, border_dot_row_spans, border_rounded_dash_spans}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language, resolve_font_metrics_with_language_milli}
 use std.common.encoding.utf8.{text_codepoint_len, text_codepoints}
 use common.string_builder.{StringBuilder}
@@ -1235,8 +1235,23 @@ fn _html_draw_ir_styled_border_commands(
             [_html_draw_ir_non_negative(tl - ins), _html_draw_ir_non_negative(tr - ins),
              _html_draw_ir_non_negative(br_rad - ins), _html_draw_ir_non_negative(bl_rad - ins)], colors, clip))
         return cmds
+    # Uniform dashed / dotted on a rounded box: Chrome's one closed path round
+    # the arcs (`border_rounded_dash_spans`, the raster's twin), a rect per span.
+    if ((eff_t == "dashed" or eff_t == "dotted") and eff_r == eff_t and eff_b == eff_t and eff_l == eff_t and
+            st.border_l == st.border_t and st.border_t == st.border_r and st.border_r == st.border_b and
+            st.border_color_l == st.border_color_t and st.border_color_t == st.border_color_r and st.border_color_r == st.border_color_b and
+            st.border_color_t != 0u32 and tl > 0 and tl == tr and tr == br_rad and br_rad == bl_rad):
+        val spans = border_rounded_dash_spans(w, h, st.border_t, tl, eff_t == "dotted")
+        if spans.len() > 0:
+            val color = _html_draw_ir_scale_color_opacity(st.border_color_t, st.opacity_pct)
+            var k = 0
+            # cpu-lane-loop-ok: one overlay rect per covered run of the rounded dash path; bound is the span count
+            while k + 2 < spans.len():
+                cmds.push(_html_draw_ir_overlay_rect("{base_id}_rd{k / 3}", ClipRect(x0: x + spans[k + 1], y0: y + spans[k], x1: x + spans[k + 1] + spans[k + 2], y1: y + spans[k] + 1), color, clip))
+                k = k + 3
+            return cmds
     if _html_draw_ir_side_is_custom_style(eff_t) and st.border_t > 0 and st.border_color_t != 0u32:
-        val ct = _html_draw_ir_scale_color_opacity(st.border_color_t, st.opacity_pct)
+        val ct =_html_draw_ir_scale_color_opacity(st.border_color_t, st.opacity_pct)
         for cmd in _html_draw_ir_styled_span_commands(base_id + "_t", x + tl, y, w - tl - tr, st.border_t, true, eff_t, ct, clip):
             cmds.push(cmd)
     if _html_draw_ir_side_is_custom_style(eff_b) and st.border_b > 0 and st.border_color_b != 0u32:
