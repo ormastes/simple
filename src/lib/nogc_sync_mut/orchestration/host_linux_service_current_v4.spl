@@ -96,7 +96,7 @@ use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.{HostRemo
     host_remote_build_open_v4, host_remote_build_profile_gate_v4, host_remote_build_input_v4, host_remote_build_transfer_v4, host_remote_build_step_v4,
     host_remote_build_request_cancel_v4, host_remote_build_settle_no_workload_v4, host_remote_build_failed_cause_v4,
     host_remote_build_reply_v4, host_remote_build_frame_decode_v4, host_remote_build_output_v4, host_remote_build_epoch_v4,
-    host_remote_build_close_v4, host_remote_build_release_v4, host_remote_build_reset_failure_stored_v4}
+    host_remote_build_close_v4, host_remote_build_release_v4, host_remote_build_reset_failure_stored_v4, host_remote_build_deadline_v4}
 use std.nogc_sync_mut.orchestration.host_service_handoff_v1.{host_service_handoff_commit_v1, host_service_handoff_verify_v1,
     host_service_handoff_consume_v1, host_service_handoff_abandon_v1, HOST_SERVICE_HANDOFF_UNVERIFIED_V1}
 use std.nogc_sync_mut.io.linux_fresh_epoch_store_inventory_v1.LinuxFreshEpochStoreInventoryBorrowV1
@@ -947,6 +947,43 @@ fn linux_service_agent_slot_exact_v4(slot: Option<OperationEnvelopeV2>, operatio
     if slot.is_none(): return false
     slot.unwrap() == operation
 
+# milestone_0043 (opus re-review P1-2): the window of an executed-but-never-opened remote-build slot is the execute pair's
+# own (the earlier of its approval and grant expiry, host_remote_build_deadline_v4). The open glue refuses after it too, so
+# once it ended no open can ever be admitted and nothing can have run in that slot.
+fn linux_service_remote_build_unopened_deadline_v4(approval_expires_at: i64, grant_expires_at: i64) -> i64:
+    host_remote_build_deadline_v4(approval_expires_at, grant_expires_at, grant_expires_at)
+
+# Settles that slot cancelled/no-workload on the single journal writer once the service GRANT clock passed the window, checks
+# the ledger row reads Released and clears the slot. Anything it cannot prove (no current record, no archived execute, the window
+# still open) keeps the slot busy: never a guessed release. The returned capacity owner is adopted on every path.
+fn linux_service_remote_build_unopened_expire_v4(original: HostLinuxServiceCurrentV4, slot: text) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val busy = "linux-host-agent-incarnation-busy"
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", busy, false)
+    val execute = linux_service_remote_build_execute_v4(owner, slot)
+    if execute.is_err(): return linux_service_reply_v4(owner, "", busy, false)
+    val window = linux_service_remote_build_unopened_deadline_v4(execute.unwrap().approval.expires_at,
+        execute.unwrap().signed.grant.expires_at)
+    if host_local_context_v1(metadata.unwrap().policy).grant_clock < window: return linux_service_reply_v4(owner, "", busy, false)
+    val fence = container_scope_fence_id_v2(owner.scope.unwrap())
+    if fence.is_err(): return linux_service_reply_v4(owner, "", busy, false)
+    val operation = execute.unwrap().prepare.prepare.operation
+    val settled = host_remote_build_settle_no_workload_v4(owner.capacity.unwrap(), operation, execute.unwrap().association,
+        fence.unwrap(), "deadline")
+    owner.capacity = Some(settled.owner)
+    if settled.error != "": return linux_service_reply_v4(owner, "", settled.error, true)
+    # The no-workload settle commits the daemon row `completed` (the cancelled outcome is in its published record) and
+    # releases the charge: the ledger row must now read Released, else the slot is kept.
+    var released = false
+    for row in owner.capacity.unwrap().ledger.reservations:
+        if row.operation_id == slot and row.state == HostReservationStateV1.Released: released = true
+    if not released: return linux_service_reply_v4(owner, "", "linux-host-remote-build-unopened-expiry-readback", true)
+    owner.agent_operation_id = ""
+    owner.agent_operation = None
+    owner.slot_kind = ""
+    linux_service_reply_v4(owner, "", "", true)
+
 # N-06/T-08/U-05 slot check for an agent-draft prepare, before any charge. Busy when the incarnation's agent
 # is consumed, or the slot names an admitted (unexpired) or executing row of another operation. An admitted
 # slot row past its prepare deadline (the hco:288-290 monotonic rule) is expired through the SAME journal
@@ -968,6 +1005,10 @@ fn linux_service_agent_slot_v4(original: HostLinuxServiceCurrentV4, operation_id
             deadline = row.prepare_deadline_ms
         elif row.state == HostReservationStateV1.Executing: state = "executing"
         else: state = "ended"
+    # milestone_0043 P1-2: an executed remote-build slot that was never opened holds no build, so no cancel, collect or step
+    # deadline can reach it; once its signed window ended it is settled here instead of blocking until a restart.
+    if state == "executing" and owner.slot_kind == "remote-build" and owner.build.is_none() and not owner.agent_consumed:
+        return linux_service_remote_build_unopened_expire_v4(owner, slot)
     if state == "executing": return linux_service_reply_v4(owner, "", "linux-host-agent-incarnation-busy", false)
     if state == "admitted":
         if now_ms < deadline: return linux_service_reply_v4(owner, "", "linux-host-agent-incarnation-busy", false)
@@ -1189,6 +1230,16 @@ pub fn host_linux_service_remote_build_open_v4(original: HostLinuxServiceCurrent
     val scope = owner.scope.unwrap()
     val fence = container_scope_fence_id_v2(scope)
     if fence.is_err(): return linux_service_reply_v4(owner, "", fence.unwrap_err(), false)
+    # milestone_0043 P1-2: never open after the execute pair's own window (the same bound the slot expiry settles on), so an
+    # unopened slot's outcome never depends on whether a later prepare happened to arrive first.
+    val window = linux_service_remote_build_unopened_deadline_v4(execute.unwrap().approval.expires_at,
+        execute.unwrap().signed.grant.expires_at)
+    if host_local_context_v1(metadata.policy).grant_clock >= window:
+        val expired = host_remote_build_settle_no_workload_v4(owner.capacity.unwrap(), execute.unwrap().prepare.prepare.operation,
+            execute.unwrap().association, fence.unwrap(), "deadline")
+        owner.capacity = Some(expired.owner)
+        if expired.error != "": return linux_service_reply_v4(owner, "", "linux-host-remote-build-deadline;settle:" + expired.error, true)
+        return linux_service_reply_v4(owner, "", "linux-host-remote-build-deadline", true)
     val opened = host_remote_build_open_v4(owner.capacity.unwrap().journal, owner.remote_build_port.unwrap(),
         metadata.policy, metadata.configuration.controller_ref, owner.records.unwrap().binding.physical_host_id,
         execute.unwrap().association, fence.unwrap(), frame.unwrap().payload, host_local_context_v1(metadata.policy))
@@ -1285,7 +1336,7 @@ pub fn host_linux_service_remote_build_collect_v4(original: HostLinuxServiceCurr
     val reaped = linux_service_remote_build_reaped_v4(owner, frame.unwrap().operation_id)
     if reaped == "linux-host-remote-build-reaped-incomplete":
         # milestone_0039: a Host-signed reset-failure reply archived before the restart is answered byte-identically; no
-        # valid archive keeps the refusal below (the controller's generic wedged settle). A replay makes no effect.
+        # valid archive keeps the refusal below (the typed reaped refusal). A replay makes no effect.
         val stored = host_remote_build_reset_failure_stored_v4(owner.capacity.unwrap().journal, frame.unwrap().operation_id)
         if stored != "": return linux_service_reply_v4(owner, stored, "", false)
     if reaped != "": return linux_service_reply_v4(owner, "", reaped, false)
