@@ -8,16 +8,16 @@
 #   0 = schedule, 1 = timer_tick, 2 = irq, 3 = io_write,
 #   4 = io_read, 5 = random, 6 = checkpoint, 7 = task_create, 8 = task_exit
 #
-# Random reads (kind 5 above is no longer written to the ring) run on the
-# portable semantic replay core std.replay.portable_replay (DHR P6), in
-# replay scope RR_PORTABLE_SCOPE.
+# Random and io reads (kinds 5 and 4 above are no longer written to the
+# ring) run on the portable semantic replay core std.replay.portable_replay
+# (DHR P6), in replay scope RR_PORTABLE_SCOPE.
 
 use std.replay.bm_replay_core (
     bm_ring_push, bm_ring_pop_kind, bm_ring_pop_val_a, bm_ring_pop_val_b,
     bm_ring_count
 )
 use std.replay.portable_replay.{
-    PR_MODE_OFF, PR_MODE_RECORD, PR_MODE_REPLAY, PR_KIND_RANDOM_READ, PR_DIV_NONE,
+    PR_MODE_OFF, PR_MODE_RECORD, PR_MODE_REPLAY, PR_KIND_RANDOM_READ, PR_KIND_IO_READ, PR_DIV_NONE,
     portable_replay_set_mode, portable_replay_mode, portable_replay_open_scope,
     portable_replay_scope_is_open, portable_replay_event, portable_replay_last_divergence,
     portable_replay_pending
@@ -27,7 +27,6 @@ val RR_SCHEDULE: i64 = 0
 val RR_TIMER_TICK: i64 = 1
 val RR_IRQ: i64 = 2
 val RR_IO_WRITE: i64 = 3
-val RR_IO_READ: i64 = 4
 val RR_CHECKPOINT: i64 = 6
 val RR_TASK_CREATE: i64 = 7
 val RR_TASK_EXIT: i64 = 8
@@ -91,24 +90,32 @@ fn rr_hook_io_write(addr: u64, value: u64):
         bm_ring_push(RR_IO_WRITE, rtos_replay_next_seq(), addr.to_i64(), value.to_i64())
 
 fn rr_hook_io_read(addr: u64, value: u64) -> u64:
-    """Record/replay an I/O read. In replay, returns logged value."""
+    """Record/replay an I/O read on the portable core (the value only; addr
+    was never checked on replay). Replay returns the logged value, or the
+    core's fail-closed value on divergence (never the live one). Verify
+    consumes the logged value, reports a mismatch, and returns live."""
     if rtos_replay_is_off():
         return value
+    rr_portable_sync()
     if rtos_replay_is_recording():
-        bm_ring_push(RR_IO_READ, rtos_replay_next_seq(), addr.to_i64(), value.to_i64())
+        rtos_replay_next_seq()  # keep the shared seq numbering of the other hooks
+        portable_replay_event(PR_KIND_IO_READ, RR_PORTABLE_SCOPE, value.to_i64())
         return value
 
     if rtos_replay_is_replaying():
-        val logged_kind = bm_ring_pop_kind()
-        if logged_kind == RR_IO_READ:
-            return bm_ring_pop_val_b().to_u64()
-        divergence_count = divergence_count + 1  # wrong event or end-of-log: fail closed
-        return value
+        val replayed = portable_replay_event(PR_KIND_IO_READ, RR_PORTABLE_SCOPE, value.to_i64())
+        if portable_replay_last_divergence() != PR_DIV_NONE:
+            divergence_count = divergence_count + 1  # wrong event or end-of-log: fail closed
+        return replayed.to_u64()
 
     if rtos_replay_is_verifying():
-        val logged_kind = bm_ring_pop_kind()
-        val logged_value = bm_ring_pop_val_b()
-        if logged_value != value.to_i64():
+        # The session is Off in Verify (random reads are not replayed there);
+        # io reads step the core in Replay for this one event to read the log.
+        portable_replay_set_mode(PR_MODE_REPLAY)
+        val logged = portable_replay_event(PR_KIND_IO_READ, RR_PORTABLE_SCOPE, value.to_i64())
+        val diverged = portable_replay_last_divergence() != PR_DIV_NONE
+        portable_replay_set_mode(PR_MODE_OFF)
+        if diverged or logged != value.to_i64():
             divergence_count = divergence_count + 1
         return value
 

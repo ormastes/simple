@@ -14,7 +14,7 @@ use std.spec.*
 use std.replay.bm_replay_core.{bm_ring_init, bm_ring_count}
 use std.replay.portable_replay.{portable_replay_reset, portable_replay_pending, PR_FAIL_CLOSED_VALUE}
 use os.realtime.replay.mode.{rtos_replay_set_mode, rtos_replay_next_seq}
-use os.realtime.replay.hooks.{rr_hook_random, rr_divergence_count, rr_reset_divergences, rr_event_count}
+use os.realtime.replay.hooks.{rr_hook_random, rr_hook_io_read, rr_divergence_count, rr_reset_divergences, rr_event_count}
 
 val OFF: i32 = 0
 val RECORD: i32 = 1
@@ -92,3 +92,53 @@ describe "realtime random hook on the portable replay core":
         rr_hook_random(42)
         expect(portable_replay_pending()).to_equal(1)
         expect(bm_ring_count()).to_equal(0)
+
+# DHR P6: io reads moved off the bare-metal ring onto the portable core in
+# the same realtime scope. Replay has no live fallback; Verify keeps its
+# contract (live value + divergence report), reading the log from the core.
+describe "realtime io read hook on the portable replay core":
+    it "Record returns the live value and logs it on the core, not the ring":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        expect(rr_hook_io_read(0x40, 10)).to_equal(10)
+        expect(portable_replay_pending()).to_equal(1)
+        expect(bm_ring_count()).to_equal(0)
+
+    it "Replay returns the logged values in order, not the live ones":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        rr_hook_io_read(0x40, 10)
+        rr_hook_io_read(0x44, 11)
+        rtos_replay_set_mode(REPLAY)
+        expect(rr_hook_io_read(0x40, 900)).to_equal(10)
+        expect(rr_hook_io_read(0x44, 901)).to_equal(11)
+        expect(rr_divergence_count()).to_equal(0)
+        expect(rr_event_count()).to_equal(0)
+
+    it "Replay against a logged random read fails closed, never live":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        rr_hook_random(42)
+        rtos_replay_set_mode(REPLAY)
+        expect(rr_hook_io_read(0x40, 77)).to_equal(PR_FAIL_CLOSED_VALUE)
+        expect(rr_divergence_count()).to_equal(1)
+
+    it "Replay of an exhausted log fails closed, never live":
+        _reset()
+        rtos_replay_set_mode(REPLAY)
+        expect(rr_hook_io_read(0x40, 77)).to_equal(PR_FAIL_CLOSED_VALUE)
+        expect(rr_divergence_count()).to_equal(1)
+
+    it "Verify returns live, consumes the logged value and reports a mismatch":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        rr_hook_io_read(0x40, 10)
+        rr_hook_io_read(0x44, 11)
+        rtos_replay_set_mode(VERIFY)
+        expect(rr_hook_io_read(0x40, 10)).to_equal(10)
+        expect(rr_divergence_count()).to_equal(0)
+        expect(rr_hook_io_read(0x44, 12)).to_equal(12)
+        expect(rr_divergence_count()).to_equal(1)
+        expect(rr_event_count()).to_equal(0)
+        expect(rr_hook_io_read(0x48, 13)).to_equal(13)
+        expect(rr_divergence_count()).to_equal(2)
