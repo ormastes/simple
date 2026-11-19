@@ -499,11 +499,11 @@ Host side of the remote container build; the controller half is the `remote-run`
   (association digest + evidence `outcome`|`reaped` digest, re-derived from the Host journal) + the controller's OWN terminal
   state (completed|failed|cancelled; `outcome-unknown` needs remote-run-abandon first). Host order
   (host_remote_build_retention_release_v1.spl + `linux_service_retention_release_v4`): verify -> archived? -> derive ->
-  check -> proof + no-replace marker -> lend root -> provider effect (workspace_retention_release_v1.spl: recover lease,
+  check -> proof + no-replace marker -> lend root -> provider effect (workspace_retention_release_v1.spl: ADMIT own lease,
   fresh source, `remove_retained_tree_v1` removes the RUN CHILD via the no-follow fd-relative walk
   `retained_tree_remove_v1.spl` (same st_dev AND mnt_id, owner uid == euid under keep-id, symlinks unlinked never
-  followed), close every fd, observe the still-retained leaf lease) -> end loan -> archive `host-retention-released/`.
-  Slot must be free (later incarnation).
+  followed), close every fd, observe the leaf lease, drop the hold after a confirmed close) -> end loan -> archive
+  `host-retention-released/`. Slot must be free and no workload run in this incarnation.
 - Per-run workspace (milestone_0047, owner decision 1 "use worktree", 2026-11-19, specs NOT_RUN): every workspace run
   (remote build AND agent) stages into its OWN child `run-<sha256(op id)>` (68 bytes) of the admin-provisioned leaf
   (`linux_workspace_run_leaf_v1` / `linux_workspace_run_root_v1`, linux_workspace_profile_v1.spl). The request's ONE mount
@@ -511,13 +511,21 @@ Host side of the remote container build; the controller half is the `remote-run`
   inspect, and P2-a `linux-host-remote-build-profile-run-root` at prepare). `remote-run` host-inputs `hostRoot` names the
   LEAF; the author appends the child. The child is created exclusive + no-follow beneath the held leaf fd AFTER the
   effect is recorded (`workspace_run_directory_create_v1`), proven empty, and its identity is in
-  `directory_binding_digest` (binding holds parent, leaf, run). The leaf, its XFS project lease and quota stay: the admin
+  `directory_binding_digest` (binding holds parent, leaf, run). The leaf, its XFS project and quota stay: the admin
   provisions ONCE; release deletes only the run child (`remove_child_tree_v1`), never the leaf.
 - Trap: the XFS project quota (hard_bytes) is SHARED by every retained run child: a full project refuses new staging
   until releases happen (fail closed). `run-removed` archives the remaining project usage, not zero.
-- Trap: the native owner admits ONE lease per scope (second admit = EBUSY). A retention release recovers the leaf's lease
-  and it stays in-process, so `retention_lease_held` refuses every later workload prepare in that incarnation
-  (`linux-host-retention-lease-held`) until restart; further releases reuse it. Release also needs an empty slot row.
+- Trap: the native owner admits ONE lease per scope (second admit = EBUSY). A retention release therefore ADMITS its own
+  lease (only in an incarnation where no workload ran: slot free, `agent_consumed` false) and drops that hold on every
+  exit with `workspace_storage_close_retained_v1` (`rt_workspace_storage_close_retained_v1`: closes the native fds like
+  process exit, refuses a loaned or released slot, never touches project/quota), so the next prepare admits afresh with
+  no restart (the milestone_0047 `retention_lease_held` restart gate was a bug, removed). A failed drop fails the turn
+  and the next admission fails closed (EBUSY) until restart. Never adopt an in-process token via recover: recover skips
+  re-proof on reuse.
+- Agent workspace close (owner decision 3): DEFERRED by owner 2026-11-19 ("not now"). The agent close path keeps
+  refusing (`agent-workspace-retention-requires-authorized-cleanup`); retention-release stays remote-build only. Gap
+  record: no controller-side terminal row exists for a V4 agent run, and the Host agent outcome hardcodes
+  `source_return: returned` although a staged agent source is retained.
 - Trap: `absent-unmeasured` (unchanged, owner decision 2) only on a RESUMED release whose run child is already gone; a
   first issue with no child refuses (`workspace-retention-release-run-absent`) after journaling the marker, so the
   re-issue converges.

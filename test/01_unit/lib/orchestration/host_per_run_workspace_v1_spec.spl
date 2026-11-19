@@ -158,7 +158,7 @@ describe "Per-run retention release (milestone_0047)":
         expect(derivation.contains("retention-release-ambiguous")).to_equal(false)
         expect(derivation.contains("retention-release-nothing-retained")).to_equal(true)
 
-    it "deletes only the run child beneath the held leaf and never releases the provisioned leaf's lease":
+    it "deletes only the run child beneath the held leaf and never native-releases the provisioned leaf":
         # @req M47-PER-RUN-WORKSPACE (retention-release deletes only that run's child; the leaf stays provisioned)
         val effect = pr_body(PR_PROVIDER, "pub fn linux_workspace_retention_release_v1(", "\nexport ")
         val open = effect.index_of("root.open_source_v3(")
@@ -169,7 +169,9 @@ describe "Per-run retention release (milestone_0047)":
         expect(effect.contains("workspace_storage_release_if_absent_v1")).to_equal(false)
         expect(effect.contains("workspace_storage_forget_released_v1")).to_equal(false)
         expect(effect.contains("\"run-removed\"")).to_equal(true)
-        expect(effect.contains("if not resumed: return retention_release_failed_v1(\"workspace-retention-release-run-absent\")"))
+        expect(effect.contains("retention_release_absent_v1(resumed)")).to_equal(true)
+        val absent_turn = pr_body(PR_PROVIDER, "fn retention_release_absent_v1(", "\n\n")
+        expect(absent_turn.contains("if not resumed: return retention_release_failed_v1(\"workspace-retention-release-run-absent\")"))
             .to_equal(true)
         val mount = pr_body(PR_MOUNT, "    pub fn remove_retained_tree_v1(", "\n    pub fn ")
         expect(mount.contains(".remove_child_tree_v1(linux_workspace_run_leaf_v1(sample.request.operation_id), sample.process.effective_uid)"))
@@ -181,17 +183,45 @@ describe "Per-run retention release (milestone_0047)":
         expect(child.contains("retained_tree_open_directory_v1(parent_fd, bytes, entry, parent)")).to_equal(true)
         expect(child.contains("retained_tree_child_v1(")).to_equal(false)
 
-    it "holds the recovered lease for the incarnation so no workload admits a second native lease":
-        # @req M47-PER-RUN-WORKSPACE (one native lease per scope: a release consumes workload admission until restart)
+    it "admits its own lease and drops the hold on every exit, so the next workload prepare needs no restart":
+        # @req M47-LEASE-DROP (bug: a release kept the leaf lease in-process and refused every later prepare until restart)
+        val effect = pr_body(PR_PROVIDER, "pub fn linux_workspace_retention_release_v1(", "\nexport ")
+        step("a fresh admission (full native re-proof of the leaf), never adoption of an in-process token")
+        expect(effect.contains("root.admit_lease_v3()")).to_equal(true)
+        expect(effect.contains("recover_lease_v3")).to_equal(false)
+        step("every exit after the admission drops the hold; a source exit drops only after a CONFIRMED close")
+        expect(effect.contains("workspace_storage_close_retained_v1")).to_equal(false)
+        val drop = pr_body(PR_PROVIDER, "fn retention_release_drop_v1(", "\n\n")
+        expect(drop.contains("workspace_storage_close_retained_v1(lease)")).to_equal(true)
+        val after = pr_body(PR_PROVIDER, "fn retention_release_after_close_v1(", "\n\n")
+        val unconfirmed = after.index_of("    if not closed.closed:")
+        val kept = after.index_of("workspace-retention-release-hold-kept")
+        val dropping = after.index_of("retention_release_drop_v1(lease")
+        expect(unconfirmed >= 0 and kept > unconfirmed and dropping > kept).to_equal(true)
+        var direct = 0
+        var via_close = 0
+        var via_drop = 0
+        for line in effect.split("\n"):
+            if line.contains("return retention_release_failed_v1("): direct = direct + 1
+            if line.contains("return retention_release_after_close_v1(lease, "): via_close = via_close + 1
+            if line.contains("return retention_release_drop_v1(lease, "): via_drop = via_drop + 1
+        expect(direct).to_equal(1)
+        expect(effect.contains("if admitted.is_err(): return retention_release_failed_v1(admitted.unwrap_err())")).to_equal(true)
+        expect(via_close).to_equal(5)
+        expect(via_drop).to_equal(3)
+        val closed = effect.index_of("val closed = source.close_v1()")
+        val observe = effect.index_of("workspace_storage_observe_v1(lease)")
+        val success = effect.index_of("retention_release_drop_v1(lease, LinuxWorkspaceRetentionReleaseTurnV1(charge: \"run-removed\"")
+        expect(closed >= 0 and observe > closed and success > observe).to_equal(true)
+        step("the service keeps no in-process hold and no restart gate")
+        expect(file_read_text(PR_SERVICE).contains("retention_lease_held")).to_equal(false)
+        expect(file_read_text(PR_SERVICE).contains("linux-host-retention-lease-held")).to_equal(false)
         val handler = pr_body(PR_SERVICE, "fn linux_service_retention_release_v4(", "\n# milestone_0045 retention-release inspect")
-        val held = handler.index_of("owner.retention_lease_held = true")
-        val effect = handler.index_of("linux_workspace_retention_release_v1(")
-        expect(held >= 0 and effect > held).to_equal(true)
-        expect(handler.contains("workspace_storage_forget_released_v1")).to_equal(false)
         expect(handler.contains("owner.agent_operation_id != \"\"")).to_equal(true)
-        val slot = pr_body(PR_SERVICE, "fn linux_service_agent_slot_v4(", "\nfn ")
-        expect(slot.contains("if owner.retention_lease_held: return linux_service_reply_v4(owner, \"\", \"linux-host-retention-lease-held\", false)"))
-            .to_equal(true)
+        step("the native drop refuses a loaned or released slot and touches no quota")
+        val native = file_read_text("src/runtime/runtime_workspace_storage_v1.c")
+        expect(native.contains("int64_t rt_workspace_storage_close_retained_v1(int64_t token) {")).to_equal(true)
+        expect(native.contains("else if(slot->busy||slot->released)error=EBUSY;")).to_equal(true)
 
     it "archives the run removal with the shared project usage and refuses the retired leaf-release class":
         # @req M47-PER-RUN-WORKSPACE (charge vocabulary describes what happened: the run child was removed)

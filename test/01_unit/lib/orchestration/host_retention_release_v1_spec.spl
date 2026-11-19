@@ -11,7 +11,7 @@ Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
 Status: AUTHORED, NOT_RUN (no runnable `simple` binary on this host, 2026-11-19).
 ## Compatibility and limitations
 Real Ed25519 signatures from the verifier fixture seeds and a real temporary capacity journal for the record publish and
-archive. The native effect (root loan, lease recovery, tree removal, quota release) needs an installed Host with a
+archive. The native effect (root loan, lease admission, run-child removal, hold drop) needs an installed Host with a
 provisioned XFS workspace: its order is pinned structurally and the live case is BLOCKED unless its fixture env is set.
 ## Verification guidance and troubleshooting
 `APPROVAL_EXPIRED` for the expired fixture is the restart-expiry rule, not a flake. A refusal names `retention-release-*`.
@@ -236,21 +236,23 @@ describe "Retention-release order and wiring (milestone_0045)":
         expect(file_read_text(RR_HOST).contains("source_return != \"retained-returned\"")).to_equal(true)
 
     it "deletes only the run child inside the keep-id mapping through the provider and closes every fd":
-        # @req M45-RETENTION-RELEASE (no-follow fd-relative delete; milestone_0047: the provisioned leaf and its lease stay)
+        # @req M45-RETENTION-RELEASE (no-follow fd-relative delete; milestone_0047: the provisioned leaf and its quota stay)
         val effect = rr_body(RR_PROVIDER, "pub fn linux_workspace_retention_release_v1(", "\nexport ")
-        val recover = effect.index_of("root.recover_lease_v3()")
+        val admit = effect.index_of("root.admit_lease_v3()")
         val open = effect.index_of("root.open_source_v3(")
         val absent = effect.index_of(".retained_run_absent_v1(")
         val remove = effect.index_of(".remove_retained_tree_v1(")
         val close = effect.index_of("val closed = source.close_v1()")
         val observe = effect.index_of("workspace_storage_observe_v1(lease)")
-        expect(recover >= 0 and open > recover and absent > open and remove > absent and close > remove and observe > close)
+        expect(admit >= 0 and open > admit and absent > open and remove > absent and close > remove and observe > close)
             .to_equal(true)
         expect(effect.contains("workspace_storage_release_if_absent_v1")).to_equal(false)
         expect(effect.contains("workspace_storage_forget_released_v1")).to_equal(false)
-        expect(effect.contains("absent-unmeasured")).to_equal(true)
+        expect(effect.contains("retention_release_absent_v1(resumed)")).to_equal(true)
         step("a first issue that finds no run child refuses; only a resumed (already journaled) release converges absent-unmeasured")
-        expect(effect.contains("if not resumed: return retention_release_failed_v1(\"workspace-retention-release-run-absent\")")).to_equal(true)
+        val absent_turn = rr_body(RR_PROVIDER, "fn retention_release_absent_v1(", "\n\n")
+        expect(absent_turn.contains("absent-unmeasured")).to_equal(true)
+        expect(absent_turn.contains("if not resumed: return retention_release_failed_v1(\"workspace-retention-release-run-absent\")")).to_equal(true)
         val mount = rr_body(RR_MOUNT, "    pub fn remove_retained_tree_v1(", "\n    pub fn ")
         expect(mount.contains("request.user_namespace_mode != \"keep-id\"")).to_equal(true)
         expect(mount.contains("sample.request.user_uid != sample.process.effective_uid")).to_equal(true)

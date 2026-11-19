@@ -24,6 +24,7 @@
 #define rt_workspace_storage_observe_v1 fork_fixture_storage_observe_v1
 #define rt_workspace_storage_release_if_absent_v1 fork_fixture_storage_release_v1
 #define rt_workspace_storage_forget_released_v1 fork_fixture_storage_forget_v1
+#define rt_workspace_storage_close_retained_v1 fork_fixture_storage_close_retained_v1
 #define rt_linux_container_user_open_v1 fork_fixture_user_open_v1
 #define rt_linux_container_user_observe_v1 fork_fixture_user_observe_v1
 #define rt_linux_container_user_close_v1 fork_fixture_user_close_v1
@@ -121,6 +122,7 @@ static void child_calls(int64_t text,int64_t digest,int64_t invalid_text) {
     child_empty(rt_workspace_storage_observe_v1(1));
     CHILD_CHECK(rt_workspace_storage_release_if_absent_v1(1)==-ECHILD);
     CHILD_CHECK(rt_workspace_storage_forget_released_v1(1)==-ECHILD);
+    CHILD_CHECK(rt_workspace_storage_close_retained_v1(1)==-ECHILD);
     CHILD_CHECK(rt_linux_container_user_open_v1(getpid(),text,digest)==-ECHILD);
     child_empty(rt_linux_container_user_observe_v1(1,digest));
     CHILD_CHECK(rt_linux_container_user_close_v1(1,digest)==-ECHILD);
@@ -211,6 +213,7 @@ int main(void) {
     CHECK(ws_lock_acquire_v1()==0);ws_lock_release_v1();
     CHECK(rt_workspace_storage_release_if_absent_v1(1)==-ESTALE);
     CHECK(rt_workspace_storage_forget_released_v1(1)==-ESTALE);
+    CHECK(rt_workspace_storage_close_retained_v1(1)==-ESTALE);
     CHECK(rt_string_len(rt_workspace_storage_observe_v1(1))==0);
     CHECK(rt_linux_container_user_close_v1(1,digest)==-ESTALE);
     CHECK(rt_string_len(rt_linux_container_user_observe_v1(1,digest))==0);
@@ -240,6 +243,7 @@ int main(void) {
     CHECK(rt_workspace_storage_recover_v1(text,text,text,text,text,1,4096,digest)==-EIO);
     CHECK(rt_workspace_storage_release_if_absent_v1(1)==-EIO);
     CHECK(rt_workspace_storage_forget_released_v1(1)==-EIO);
+    CHECK(rt_workspace_storage_close_retained_v1(1)==-EIO);
     CHECK(rt_linux_container_user_open_v1(getpid(),text,digest)==-EIO);
     CHECK(rt_linux_container_user_close_v1(1,digest)==-EIO);
     CHECK(rt_workspace_storage_observe_v1(1)==ws_origin_empty_v1());
