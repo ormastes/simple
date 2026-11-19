@@ -7,6 +7,13 @@
 # Replay (DHR P6): every delivery is gated by rr_hook_irq. Off/Record/Verify
 # deliver; Replay delivers only the logged vector, so a mismatched vector or
 # an exhausted log wakes nothing.
+#
+# Trap routing: the RV32 machine trap entry (context/riscv32.spl) sends a
+# machine external interrupt through the PLIC claim -> irq_dispatch_claimed
+# -> PLIC complete; the decode and claim handling live here so they run
+# without MMIO. Cortex-M (NVIC: one vector per IRQ, no claim register) and
+# x86_64 (only the APIC timer vector has an ISR) have no external-interrupt
+# entry to route yet.
 
 use os.realtime.replay.hooks.{rr_hook_irq}
 
@@ -52,4 +59,26 @@ fn irq_dispatch(vector: i32) -> bool:
     val i = irq_find(vector)
     if i >= 0:
         sched_unblock(irq_tasks[i])
+    true
+
+# RV32 mcause: bit 31 marks an interrupt; the low bits are the cause code.
+val RV32_MCAUSE_INTERRUPT: u32 = 0x80000000u32
+val RV32_MCAUSE_CODE_MASK: u32 = 0x7FFFFFFFu32
+val RV_IRQ_M_EXTERNAL: u32 = 11u32
+
+@allow(primitive_api)  # reason: raw RV32 mcause CSR value read by the trap entry
+fn irq_rv32_mcause_is_external(mcause: u32) -> bool:
+    """True only for a machine external interrupt (PLIC). Every other cause,
+    the machine timer included, stays on the trap entry's timer path."""
+    (mcause & RV32_MCAUSE_INTERRUPT) != 0u32 and (mcause & RV32_MCAUSE_CODE_MASK) == RV_IRQ_M_EXTERNAL
+
+@allow(primitive_api)  # reason: raw PLIC claim id from the trap entry; returns whether the claim must be completed
+fn irq_dispatch_claimed(claim: i32) -> bool:
+    """Dispatch one interrupt-controller claim. Claim 0 means nothing was
+    pending: nothing is dispatched and there is nothing to complete. Any other
+    claim goes to irq_dispatch (an unbound vector wakes nothing) and must be
+    completed whether or not it was delivered."""
+    if claim == 0:
+        return false
+    val _ = irq_dispatch(claim)
     true
