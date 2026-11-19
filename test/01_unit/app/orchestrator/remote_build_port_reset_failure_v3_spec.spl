@@ -4,7 +4,9 @@ Pins milestone_0038 in `src/app/orchestrator/remote_build_service_port_v3.spl`: 
 signs the reset-failure envelope for one teardown failure the Host observed. Everything but the observation (stage, runtime id,
 enable-time binding digest) is re-derived from the controller-authored open record under the INSTALLED snapshot (the same
 context rebuild finalize does), the execution-host key signs under its OWN domain, the key buffer is wiped, and the envelope
-leaves only if the controller's own verifier accepts it. Written for owners of the Linux service composition.
+leaves only if the controller's own verifier accepts it. milestone_0045 (owner decision 5): the authority is admitted in the
+late-receipt context, so a receipt is still signed after the approval/grant expired (deadline cancel-*, service-restart after a
+restart); it can only ever journal `failed`. Written for owners of the Linux service composition.
 ## Operator workflow
 Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
 Status: AUTHORED, NOT_RUN (no runnable binary). Store and key I/O are pinned structurally (a data spec cannot build the
@@ -30,8 +32,15 @@ describe "Host remote-build port reset_failure (milestone_0038)":
         # @req M0038-PORT-01
         val body = rp_body(file_read_text("src/app/orchestrator/remote_build_service_port_v3.spl"))
         expect(rp_count(body, "remote_build_open_record_decode_v3(wire)?")).to_equal(1)
-        expect(rp_count(body, "remote_build_port_context_v3(config, record, now)?")).to_equal(1)
+        step("milestone_0045 late receipt: the context keeps the real clock; ONLY the admit runs in the late-receipt context")
+        expect(rp_count(body, "remote_build_port_context_v3(config, record, now, true)?")).to_equal(1)
         expect(body.index_of("remote_build_port_context_v3(") < body.index_of("remote_container_reset_failure_host_new_v3(")).to_equal(true)
+        val source = file_read_text("src/app/orchestrator/remote_build_service_port_v3.spl")
+        step("the late admit is the helper's `late` arm; admit and finalize pass false (a completion never gets it)")
+        expect(rp_count(source, "remote_context_admit_v1(if late: remote_container_reset_failure_late_context_v3(context) else: context,")).to_equal(1)
+        expect(rp_count(source, "remote_build_port_context_v3(config, record, now, false)?")).to_equal(2)
+        step("the envelope is signed at the real clock and self-verified through the receipt verifier (which applies the exception)")
+        expect(rp_count(body, "signed_at: now, signature: [])")).to_equal(1)
         step("the observation is compared with the record's own operation and task digest before anything is built")
         expect(rp_count(body, "remote-build-reset-observation-differs")).to_equal(1)
         expect(body.index_of("remote-build-reset-observation-differs") < body.index_of("remote_container_reset_failure_host_new_v3(")).to_equal(true)

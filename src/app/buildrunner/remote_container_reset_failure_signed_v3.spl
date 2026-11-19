@@ -5,8 +5,18 @@
 # can never be read as a completion and a completion signature can never stand for a receipt. Verification reuses the shared
 # completion authority body (snapshot grant/approval/issuer/approver, role-scoped `execution-host` key and revision, request
 # and grant digests, signed window) and then the Ed25519 signature over the message; the receipt itself is bound to the
-# controller's own task/policy/digests by remote_container_reset_failure_bind_v3 at accept. `service-restart` is controller-
-# built and never signed: it is refused here at every entry.
+# controller's own task/policy/digests by remote_container_reset_failure_bind_v3 at accept. milestone_0045 (owner decision 4):
+# `service-restart` is Host-signed too (the restarted Host signs the reaped outcome of a run its startup reap indexed); there
+# is no controller-built receipt any more.
+#
+# LATE-RECEIPT EXCEPTION (milestone_0045, owner decision 5) -- the ONE explicit, narrow exception to "an expired approval is
+# refused": a reset-failure receipt may be signed by the Host and accepted by the controller after the approval and/or grant
+# expired, ONLY so the controller can journal `failed` for that exact operation (a receipt can never produce `completed`,
+# open, cancel, collect or any other effect). It is implemented by evaluating the receipt's authority at the LAST INSTANT of
+# the signed window, min(approval.expires_at, grant.expires_at) - 1, whenever the real clock is past it
+# (remote_container_reset_failure_late_context_v3). Nothing else changes: issuer/approver/execution-host keys by role from
+# the snapshot, key revocation and revocation epoch, policy revision, session generation, request and grant digests, the
+# Ed25519 signature, and `signed_at <= real now` are all still checked. A completion never takes this path.
 use app.buildrunner.remote_container_reset_failure_v3.{RemoteContainerResetFailureV3,
     remote_container_reset_failure_validate_v3, remote_container_reset_failure_encode_v3}
 use app.buildrunner.remote_container_authority_v2.{RemoteContainerAuthorityClaimV2, RemoteContainerAuthorityExpectedV2,
@@ -30,7 +40,6 @@ struct RemoteContainerResetFailureSignedV3:
     signature: [u8]
 
 fn remote_container_reset_failure_signed_metadata_v3(value: RemoteContainerResetFailureSignedV3) -> Result<(), text>:
-    if value.receipt.stage == "service-restart": return Err("REMOTE_RESET_FAILURE_SIGNED_STAGE_INVALID")
     remote_container_reset_failure_validate_v3(value.receipt)?
     if (not builder_identifier_valid_v1(value.signer_id) or value.key_revision < 1 or
             value.key_revision > REMOTE_RESET_FAILURE_SIGNED_INTEGER_MAX_V3 or value.signed_at < 0 or
@@ -101,22 +110,43 @@ fn remote_container_reset_failure_signed_decode_v3(wire: text) -> Result<RemoteC
     if remote_container_reset_failure_signed_encode_v3(value)? != wire: return Err("REMOTE_RESET_FAILURE_SIGNED_WIRE_NONCANONICAL")
     Ok(value)
 
+# The late-receipt exception (header): the context a RECEIPT's authority is evaluated in. Inside the signed window it is the
+# context unchanged; past it, only `now` moves back to the window's last instant. Never used for a completion.
+fn remote_container_reset_failure_late_context_v3(context: RemoteAuthorityContextV1) -> RemoteAuthorityContextV1:
+    var end = context.approval.expires_at
+    if context.signed.grant.expires_at < end: end = context.signed.grant.expires_at
+    if context.now < end: return context
+    var late = context
+    late.now = end - 1
+    late
+
 # G12: issuer/approver/host_key come only from the role-scoped snapshot lookups inside `context`. The signature is the LAST
-# check so every authority refusal is reported as itself.
+# check so every authority refusal is reported as itself. `context.now` is the verifier's REAL clock: a receipt signed after
+# it is refused; the authority body then runs in the late-receipt context (header), with the signed time capped at the
+# window's last instant, so a receipt signed after expiry verifies while every non-time check stays; key expiry is checked
+# at the real clock first (the late instant can never see an expired key).
 fn remote_container_reset_failure_verify_v3(value: RemoteContainerResetFailureSignedV3, task: BuildTaskV1,
         policy: RemoteEvidencePolicyV1, context: RemoteAuthorityContextV1) -> Result<RemoteContainerResetFailureSignedV3, text>:
     remote_container_reset_failure_signed_metadata_v3(value)?
     if value.signature.len() != 64: return Err("REMOTE_RESET_FAILURE_SIGNATURE_INVALID")
+    if value.signed_at > context.now: return Err("CONTAINER_COMPLETION_TIME_INVALID")
+    # The exception moves only the grant/approval window: every authority key (issuer, approver, signing Host) must still
+    # be unexpired at the REAL clock, which (signed_at <= now) also covers the signing instant.
+    if (context.now >= context.issuer.expires_at or context.now >= context.approver.expires_at or
+            context.now >= context.host_key.expires_at):
+        return Err("REMOTE_RESET_FAILURE_KEY_EXPIRED")
+    val late = remote_container_reset_failure_late_context_v3(context)
+    val signed_at = if value.signed_at > late.now: late.now else: value.signed_at
     val receipt = value.receipt
     val _authority = remote_container_completion_authority_v2(RemoteContainerAuthorityClaimV2(
         task_identity: receipt.task_identity, host_id: receipt.host_id, assignment_digest: receipt.assignment_digest,
         controller_epoch: receipt.controller_epoch, operation_id: receipt.operation_id, request_digest: receipt.request_digest,
         grant_digest: receipt.grant_digest, signer_id: value.signer_id, key_revision: value.key_revision,
-        completed_at: value.signed_at), context.signed, context.approval, context.issuer, context.approver, context.host_key,
-        context.request, task, RemoteContainerAuthorityExpectedV2(task_identity: builder_task_identity_v1(task),
+        completed_at: signed_at), late.signed, late.approval, late.issuer, late.approver, late.host_key,
+        late.request, task, RemoteContainerAuthorityExpectedV2(task_identity: builder_task_identity_v1(task),
         host_id: policy.host_id, assignment_digest: policy.assignment_digest, controller_epoch: policy.controller_epoch,
-        operation_id: policy.operation_id), context.now, context.policy_revision, context.revocation_epoch,
-        context.session_generation)?
+        operation_id: policy.operation_id), late.now, late.policy_revision, late.revocation_epoch,
+        late.session_generation)?
     val message = remote_container_reset_failure_signature_message_v3(value)?
     if not pure_ed25519_verify(context.host_key.public_key, message, value.signature):
         return Err("REMOTE_RESET_FAILURE_SIGNATURE_INVALID")
@@ -125,3 +155,4 @@ fn remote_container_reset_failure_verify_v3(value: RemoteContainerResetFailureSi
 export RemoteContainerResetFailureSignedV3
 export remote_container_reset_failure_signature_message_v3, remote_container_reset_failure_signed_encode_v3
 export remote_container_reset_failure_signed_decode_v3, remote_container_reset_failure_verify_v3
+export remote_container_reset_failure_late_context_v3

@@ -43,6 +43,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundati
     background_position_spec, background_repeat_spec
 }
 use std.gc_async_mut.gpu.engine2d.gradient_tiles.{gradient_tile_spans, gradient_pixels_round_clip, gradient_layer_stack_over}
+use std.gc_async_mut.gpu.engine2d.draw_ir_box_effects.{engine2d_blur_step_profile}
 use std.common.math.special.{atan2_f64, sqrt_f64, sin_f64, cos_f64}
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_gradients_text.{ClipRect, composite_over_base, gradient_angle_sin_cos_q16, fb_radial_gradient_clip, BackgroundGradientLayer, fb_gradient_layer_clip, fb_gradient_layers_round_clip, _fb_blend_pixels, gradient_layer_tiled_pixels, _gradient_layer_kernel, background_gradient_box_rects, linear_gradient_line_q10, linear_gradient_line_q10_at_angle, BACKGROUND_GRADIENT_TILE_CAP, background_gradient_layers_paintable, background_gradient_clip_shape, _inset_radius, _gradient_layers_default_position, fb_gradient_layers_clip, radial_gradient_box_paintable, canvas_background_extent, canvas_gradient_source, _canvas_gradient_paintable, _fb_border_translucent, _border_style_disabled, text_decoration_rects, fb_glyph_thin_scaled_clip, fb_text_thin_scaled_clip_range, fb_text_thin_scaled_clip_range_adv, _TtfFaceEntry, _TtfGlyphBitmap, _TtfEdge, _TTF_BLOB_CACHE_LIMIT, _TTF_FACE_CACHE_LIMIT, _TTF_RESOLVE_CACHE_LIMIT, _TTF_GLYPH_DM_SIZE, _ttf_empty_cmap12, _ttf_empty_cmap4, _ttf_empty_glyph_bitmap, _ttf_floor_i32, _ttf_ceil_i32, _ttf_spec_has_bold, _ttf_spec_has_italic, _ttf_cmap_glyph, _ttf_hmtx_advance_px, _ttf_rasterize_glyph, apply_text_transform_for_paint, reverse_text_for_paint, _bidi_cp_is_rtl, _bidi_cp_is_neutral, text_has_rtl_strong, bidi_visual_text_for_rtl, WidgetChromeRects, widget_chrome_rects_concat, fb_widget_chrome_rects, widget_frame_rects, sparse_text_rects, fb_text_sparse_range, fb_px, WidgetChromeTextPixels, widget_chrome_text_fits, widget_chrome_text_active, fb_generated_widget_chrome_text, generated_widget_chrome_text_pixels, WidgetPaintFlags, compute_widget_paint_flags, is_text_flow_fixture, fb_text_flow_chrome_overlay, _fb_border_mitred, _fb_mitre_cut, _fb_text_px}
 
@@ -606,62 +607,6 @@ fn fb_rounded_rect_corners_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y
 fn fb_style_rounded_rect_opacity_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, st: Style, color: u32, opacity_pct: i32, clip: ClipRect) -> [u32]:
     fb_rounded_rect_corners_opacity_clip(fb, fbw, fbh, x, y, w, h, st.border_radius_tl_px, st.border_radius_tr_px, st.border_radius_br_px, st.border_radius_bl_px, color, opacity_pct, clip)
 
-# Soft (blurred) drop shadow. The blurred rounded-rect silhouette is
-# approximated by a separable edge ramp (a fast, buffer-free stand-in for a
-# 3-pass box blur of the silhouette): coverage falls linearly across a band of
-# +/- `blur` px centered on each edge (=> ~0.5 at the edge, matching a gaussian
-# with sigma ~ blur). `alpha` (0..255) scales the peak opacity; the shadow color
-# is composited src-over onto the existing framebuffer (integer math).
-# Piecewise-linear standard-normal CDF scaled to 0..256; z is in 1/256 units.
-# Knots every z=0.5 from -3 to +3 (max interp error ~2/256, inside tol).
-fn _phi256(z256: i32) -> i32:
-    if z256 <= -768:
-        return 0
-    if z256 >= 768:
-        return 256
-    val t = z256 + 768
-    val seg = t / 128
-    val frac = t - seg * 128
-    var a = 0
-    var b = 0
-    if seg == 0:
-        a = 0
-        b = 2
-    elif seg == 1:
-        a = 2
-        b = 6
-    elif seg == 2:
-        a = 6
-        b = 17
-    elif seg == 3:
-        a = 17
-        b = 41
-    elif seg == 4:
-        a = 41
-        b = 79
-    elif seg == 5:
-        a = 79
-        b = 128
-    elif seg == 6:
-        a = 128
-        b = 177
-    elif seg == 7:
-        a = 177
-        b = 215
-    elif seg == 8:
-        a = 215
-        b = 239
-    elif seg == 9:
-        a = 239
-        b = 250
-    elif seg == 10:
-        a = 250
-        b = 254
-    else:
-        a = 254
-        b = 256
-    a + ((b - a) * frac) / 128
-
 # One soft-shadow row through the native coverage-span kernel.
 #
 # The shadow's coverage is SEPARABLE — colcov[x] * cov_y / 256 — so a whole row
@@ -685,7 +630,7 @@ fn fb_blend_cov_row(fb: [u32], offset: i32, colcov: [i32], count: i32, cov_y: i3
     if n <= 0 or colcov.len() < n:
         return _scalar_blend_cov_row(fb, offset, colcov, count, cov_y, alpha, color)
     # cov_y and alpha are packed to keep the extern at six arguments; both are
-    # bounded well below 1024 by construction (cov_y <= 256 from _phi256,
+    # bounded well below 1024 by construction (cov_y <= 256 from the blurred-step profile,
     # alpha <= 255).
     val packed = (cov_y.to_i64() * 1024) + alpha.to_i64()
     val kernel = rt_engine2d_blend_cov_span_u32(
@@ -736,6 +681,10 @@ fn _scalar_blend_cov_row(fb: [u32], offset: i32, colcov: [i32], count: i32, cov_
         i = i + 1
     out
 
+# Soft (blurred) drop shadow: the rect mask blurred as Skia does for Chrome
+# 159 (sigma = blur / 2, the backdrop blur kernel), one separable profile per
+# axis. `alpha` (0..255) scales the peak opacity; the colour is composited
+# src-over onto the framebuffer.
 fn fb_soft_box_shadow(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, color: u32, blur: i32, alpha: i32, clip: ClipRect) -> [u32]:
     if blur <= 0 or alpha <= 0 or w <= 0 or h <= 0:
         return fb
@@ -744,10 +693,13 @@ fn fb_soft_box_shadow(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: 
     val y0 = y
     val x1 = x + w
     val y1 = y + h
-    var rx0 = x0 - blur
-    var ry0 = y0 - blur
-    var rx1 = x1 + blur
-    var ry1 = y1 + blur
+    # Skia (Chrome 159) blurs the rect mask with sigma = blur / 2, which
+    # reaches about 3 sigma.
+    val reach = (3 * blur + 1) / 2 + 2
+    var rx0 = x0 - reach
+    var ry0 = y0 - reach
+    var rx1 = x1 + reach
+    var ry1 = y1 + reach
     if rx0 < 0:
         rx0 = 0
     if ry0 < 0:
@@ -775,23 +727,18 @@ fn fb_soft_box_shadow(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: 
     # covA = Phi(dist_to_near_edge/sigma) * Phi(dist_to_far_edge/sigma).
     # (The old linear edge ramp over-darkened the whole halo and made drop
     # shadows read as broad gray bands.) z*256 = dist*256/sigma = dist*512/blur.
-    val span = rx1 - rx0
-    var colcov: [i32] = [0; span]
+    # The blurred rect separates: one blurred-step profile per axis (0..255,
+    # the backdrop blur kernel), scaled to the 0..256 coverage the blend uses.
+    var colcov = engine2d_blur_step_profile(x0, x1, rx0, rx1, blur * 500)
     var k = 0
-    while k < span:
-        # distinct name from the row-loop `var px`: a `val` here would
-        # const-poison the later `var` on interpreters without the
-        # CONST_NAMES scoping fix (the deployed self-hosted binary).
-        val col_px = rx0 + k
-        val cxl = _phi256(((col_px - x0) * 512) / blur)
-        val cxr = _phi256(((x1 - col_px) * 512) / blur)
-        colcov[k] = (cxl * cxr) / 256
+    # cpu-lane-loop-ok: rescale one profile entry per column; bound rx1 - rx0
+    while k < colcov.len():
+        colcov[k] = (colcov[k] * 256 + 127) / 255
         k = k + 1
+    val rowcov = engine2d_blur_step_profile(y0, y1, ry0, ry1, blur * 500)
     var py = ry0
     while py < ry1:
-        val cyl = _phi256(((py - y0) * 512) / blur)
-        val cyr = _phi256(((y1 - py) * 512) / blur)
-        val cov_y = (cyl * cyr) / 256
+        val cov_y = (rowcov[py - ry0] * 256 + 127) / 255
         if cov_y > 0:
             # One native call per row, replacing ~15 interpreted integer ops
             # per pixel. `colcov` is already built once per shadow above.

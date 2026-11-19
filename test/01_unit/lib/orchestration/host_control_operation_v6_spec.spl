@@ -1,0 +1,92 @@
+"""
+## Purpose and audience
+milestone_0046: the shared control exchange for controller-signed Host service actions. One authenticated V6 action,
+`host-control`, carries a canonical sub request whose closed table names the Host domain route (helper abandon and the
+OPS-01 handoff abandon, plus their read-only inspects). Written for owners of the V6 contract, the smux Host route and
+the controller `helper-abandon` / `handoff-abandon` commands.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`. Status: AUTHORED, NOT_RUN (no runnable
+binary when written, 2026-11-19).
+## Compatibility and limitations
+Pure codec scenarios plus source pins of the smux route (the native exchange needs an installed Host).
+## Verification guidance and troubleshooting
+A failed scenario names the moved contract: the sub table, canonical bytes, the V6 vocabulary or the smux gates.
+"""
+use std.spec.{describe, it, expect, fail}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.common.contracts.orchestration.host_control_operation_v6.{HostControlSubRequestV6, HOST_CONTROL_SUBS_V6,
+    host_control_sub_domain_action_v6, host_control_sub_encode_v6, host_control_sub_decode_v6}
+use std.common.contracts.orchestration.host_service_operation_v6.{HostServiceOperationRequestV6,
+    host_service_operation_validate_v6, host_service_operation_request_digest_v6}
+use std.common.contracts.orchestration.host_service_operation_reply_v6.{HostServiceOperationReplyV6,
+    host_service_operation_reply_validate_v6}
+
+fn control_source_v6(path: text) -> text:
+    file_read_regular_no_follow_bounded(path, 4194304).unwrap()
+
+fn control_fn_body_v6(source: text, header: text) -> text:
+    val start = source.index_of(header)
+    expect(start >= 0).to_equal(true)
+    val rest = source.substring(start + header.byte_len(), source.byte_len())
+    var end = rest.byte_len()
+    for marker in ["\nfn ", "\npub fn ", "\nstruct ", "\nclass ", "\nexport ", "\nvar ", "\nval "]:
+        val at = rest.index_of(marker)
+        if at >= 0 and at < end: end = at
+    rest.substring(0, end)
+
+describe "host-control sub request (milestone_0046)":
+    it "maps exactly the four subs to their Host domain routes":
+        expect(HOST_CONTROL_SUBS_V6.len()).to_equal(4)
+        expect(host_control_sub_domain_action_v6("helper-inspect").unwrap()).to_equal("host-helper-inspect")
+        expect(host_control_sub_domain_action_v6("helper-abandon").unwrap()).to_equal("host-helper-abandon")
+        expect(host_control_sub_domain_action_v6("handoff-inspect").unwrap()).to_equal("host-service-handoff-inspect")
+        expect(host_control_sub_domain_action_v6("handoff-abandon").unwrap()).to_equal("host-service-handoff-abandon")
+        step("Nothing else is routable: no remote-build, no agent action, no service handoff itself")
+        for sub in ["open", "remote-build-open", "service-handoff", "agent-attach", "", "helper-abandon "]:
+            expect(host_control_sub_domain_action_v6(sub).is_err()).to_equal(true)
+
+    it "round-trips canonical bytes and refuses non-canonical or unknown input":
+        val request = HostControlSubRequestV6(sub: "helper-inspect", frame: "helper_op_1")
+        val encoded = host_control_sub_encode_v6(request).unwrap()
+        val decoded = host_control_sub_decode_v6(encoded).unwrap()
+        expect(decoded.sub).to_equal("helper-inspect")
+        expect(decoded.frame).to_equal("helper_op_1")
+        expect(host_control_sub_decode_v6(encoded + " ").is_err()).to_equal(true)
+        expect(host_control_sub_encode_v6(HostControlSubRequestV6(sub: "helper-inspect", frame: "")).is_err()).to_equal(true)
+        expect(host_control_sub_encode_v6(HostControlSubRequestV6(sub: "build", frame: "x")).is_err()).to_equal(true)
+        val other = encoded.replace("host-control-sub", "host-remote-build-sub")
+        expect(host_control_sub_decode_v6(other).is_err()).to_equal(true)
+
+describe "V6 vocabulary carries host-control (milestone_0046)":
+    it "accepts a host-control request only with a payload bound by the request digest":
+        val payload = host_control_sub_encode_v6(HostControlSubRequestV6(sub: "handoff-inspect", frame: "pending")).unwrap()
+        val digest = host_service_operation_request_digest_v6("abandon_1", payload).unwrap()
+        val good = HostServiceOperationRequestV6("host-control", "a".repeat(32), "abandon_1", "b".repeat(64), digest, payload)
+        expect(host_service_operation_validate_v6(good).is_ok()).to_equal(true)
+        val unbound = HostServiceOperationRequestV6("host-control", "a".repeat(32), "abandon_1", "b".repeat(64), "c".repeat(64), payload)
+        expect(host_service_operation_validate_v6(unbound).unwrap_err()).to_equal("host-operation-request-digest-mismatch")
+        val empty = HostServiceOperationRequestV6("host-control", "a".repeat(32), "abandon_1", "b".repeat(64), digest, "")
+        expect(host_service_operation_validate_v6(empty).is_err()).to_equal(true)
+
+    it "accepts a host-control reply":
+        val reply = HostServiceOperationReplyV6("host-control", "a".repeat(32), "abandon_1", "b".repeat(64), "c".repeat(64),
+            false, 0, "x", "")
+        expect(host_service_operation_reply_validate_v6(reply).is_ok()).to_equal(true)
+
+describe "smux host-control route (milestone_0046)":
+    it "routes host-control through the same pending gates as remote-build":
+        val source = control_source_v6("src/os/apps/smux/runtime_host_continuation_v6.spl")
+        val query = control_fn_body_v6(source, "pub fn smux_host_continuation_query_v6(")
+        expect(query.contains("if request.action == \"host-control\": return host_control_query_v6(domain, state, request, context)")).to_equal(true)
+        val route = control_fn_body_v6(source, "fn host_control_query_v6(")
+        expect(route.contains("host_control_sub_decode_v6(request.payload)")).to_equal(true)
+        expect(route.contains("host_control_sub_domain_action_v6(")).to_equal(true)
+        for gate in ["runtime-controller-inspection-pending", "runtime-host-execution-pending", "runtime-connection-opening",
+                "runtime-geometry-pending"]:
+            expect(route.contains(gate)).to_equal(true)
+        val gates_at = route.index_of("runtime-geometry-pending")
+        val turn_at = route.index_of("host_service_domain_turn_v3(")
+        expect(gates_at >= 0 and turn_at > gates_at).to_equal(true)
+        step("The Host reply is returned as the V6 reply payload; smux keeps no control state")
+        expect(route.contains("state.execution =")).to_equal(false)
+        expect(route.contains("operation_reply_v6(turn.owner, state, request, false, turn.exit_code, turn.response,")).to_equal(true)

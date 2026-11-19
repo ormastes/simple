@@ -92,3 +92,13 @@ Owner decision: both. Design: `.spipe/simple_orchestrator/continuation_20261116/
 - Still open: a controller-side command that authors, signs and sends `helper-abandon` (owner decision: no controller
   transport carries host-service domain actions, and `controller_authority_issue_v1` signs only the remote-build task
   class, so it needs new signing authority; same gap as `service-handoff-abandon`).
+
+## Update 2026-11-19 (milestone_0046): controller sender (source-authored, NOT_RUN)
+- The "Still open" controller gap above is closed in source: `helper-abandon` (and the OPS-01 `handoff-abandon`, which had
+  no controller transport either) are controller commands over a shared authenticated control exchange (V6 `host-control`,
+  dispatch mode `host-action`). Phase 1 prints the Host's inspected record and its sha256 without signing; phase 2
+  (`--confirm <sha256>`) signs exactly that record with the existing controller issuer + approver keys and sends it. The
+  Host still verifies with `distributed_verify_grant_approval_from_snapshot_v2`; refusals echo expected vs given.
+- The control exchange's status gate drops only `ready` (a quarantined Host); every installed-identity check remains.
+- Policy: the installed controller keys must list `helper-abandon` / `service-handoff-abandon` in `operations`, or issuance
+  fails closed before any key read. Specs NOT_RUN (no runnable binary).

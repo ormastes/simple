@@ -406,7 +406,8 @@ available. These source paths and their manuals remain NOT_RUN.
 Bug `v4_attach_helper_charge_held_without_records_2026-11-17` (partially fixed; see its status). Two release paths for a charged V4 attach-broker helper row:
 - Deadline reap (automatic, at service start inside `host_linux_service_helper_cancel_resume_v4`, before the flip). `host_helper_begin_checked_v1` publishes `host-helper-deadlines/<sha(op)>.sdn` (attach-broker only) after the signed proof is stored and BEFORE the executing commit: deadline = min of the four controller-signed expiries (recomputed at reap from the retained proofs, never re-verified: expired or prior-session grants cannot verify), proof digest, policy generation/revision/revocation epoch. `host_helper_deadline_reap_v1` acts only when the clock is STRICTLY past the deadline, generations match, markers are exactly `{}` or `{PA}` and death is proven: no PA = no spawn (the consume publish precedes the only spawn); PA + absent `broker.claim` at the consumed plan's launch root = never forked; PA + present claim = the matching broker's own terminal/unlaunched receipt (`group_process_stream_cleanup_proof_v2`). Proof only (no cancel, no N record). It then writes R (journal first, mirror second) and the EXISTING cancel releases. Anything unmet = Ok(false), row untouched.
 - Signed operator abandon: operation kind `helper-abandon` (add it to the controller key's policy `operations` list), route `host-helper-abandon`, dispatch `host_helper_abandon_v1`, NOT gated on the quarantine, refused while draining and while the agent holds that helper's attachment in a stage other than `release-blocked`. Payload `HostHelperAbandonV1` names the helper op, its journal-derived request/receipt digests, the observed marker text (`state=..;pc=..;pa=..;n=..;r=..;x=..;o=..;rm=..;xm=..;store=valid|unusable`, `?` = unreadable) and the custody attestation. The service verifies (issuer == controller_ref, V4 signatures at this clock), checks the row, records proof `host-helper-abandon-proof/<sha(op)>-<digest>.sdn` then marker `host-helper-primary-abandoned/<sha(op)>.sdn` (single writer, no-replace) and settles through the capacity owner. The evidence arm (`host_helper_abandoned_evidence_v1`) sits in `host_linux_completion_evidence_v3` BEFORE the store check and reads no store/R/X/mirror. A start finishes a recorded-but-unsettled abandon first.
-- milestone_0043 (Opus re-review B): "never consumed" is a journal fact. The agent publishes `host-helper-reap-markers/<sha(op)>.sdn` before `host_helper_begin_v1`; the open core publishes `host-helper-consume-intents/<sha(op)>.sdn` (PA digest) before PA. The reap (`host_helper_reap_intent_gate_v1`) reaps `{}` only with no intent and `{PA}` only with a digest-matching intent, so a PA lost from the store holds the row. A recorded abandon is re-verified at restart; failure keeps the row charged and names the reason in the startup quarantine (charged unresolved rows quarantine via the reconcile drain). Controller `helper-abandon` sender: owner decision (new signing authority). NOT_RUN specs: `host_helper_deadline_reap_v1_spec.spl`, `host_helper_abandon_v1_spec.spl`.
+- milestone_0043 (Opus re-review B): "never consumed" is a journal fact. The agent publishes `host-helper-reap-markers/<sha(op)>.sdn` before `host_helper_begin_v1`; the open core publishes `host-helper-consume-intents/<sha(op)>.sdn` (PA digest) before PA. The reap (`host_helper_reap_intent_gate_v1`) reaps `{}` only with no intent and `{PA}` only with a digest-matching intent, so a PA lost from the store holds the row. A recorded abandon is re-verified at restart; failure keeps the row charged and names the reason in the startup quarantine (charged unresolved rows quarantine via the reconcile drain). NOT_RUN specs: `host_helper_deadline_reap_v1_spec.spl`, `host_helper_abandon_v1_spec.spl`.
+- milestone_0046 controller half (both abandons now reachable): commands `helper-abandon --operation <helper op>` and `handoff-abandon` (`src/app/orchestrator/host_action_command_v1.spl`). Without `--confirm` they print the Host's exact canonical record + sha256 and sign nothing; with `--confirm <sha256> --key-store --approver --grant-id --expires-in-ms` they re-read it, require that digest, issue via `controller_host_action_issue_v1` (allow-list `CONTROLLER_HOST_ACTION_KINDS_V1` = helper-abandon, service-handoff-abandon; same issuer/approver keys; env digest `sha256("simple-host-service-action-v1\n"+kind)`, budget 1/1) and send. Transport: new V6 action `host-control` (sub table `host_control_operation_v6.spl`: helper-inspect/helper-abandon/handoff-inspect/handoff-abandon -> `host-helper-inspect`/`host-helper-abandon`/`host-service-handoff-inspect`/`host-service-handoff-abandon`), smux `host_control_query_v6`, dispatch mode `host-action` (`controller_dispatch_host_action_begin_v3`/`_send_v3`) whose status gate keeps every identity check but NOT `ready` (the target Host is quarantined). Abandon frames archived create-only at `controller-host-action-v1/<sha(op)>.sdn`; a Host refusal is data; nothing is settled on the controller from Host text. Inspects (`host_helper_abandon_inspect_v1`, `host_service_handoff_abandon_inspect_v1`) share ONE derivation with the commands, are read-only and refused while draining. NOT_RUN specs: `host_control_operation_v6_spec.spl`, `host_control_inspect_v1_spec.spl`, `controller_dispatch_host_action_v3_spec.spl`, `controller_authority_host_action_v1_spec.spl`, `host_action_command_v1_spec.spl`.
 - Still held: legacy rows without a deadline record, `{PA}` with a possibly live group or no operator command, `{PA,N}`, a permanent capacity-settle failure, and the agent's own release-blocked attachment object. Design: `.spipe/simple_orchestrator/continuation_20261116/milestone_0036_attach_charge_recovery/DESIGN.md`. Specs: `test/01_unit/lib/orchestration/host_helper_abandon_v1_spec.spl`, `host_helper_deadline_reap_v1_spec.spl`.
 
 ### PR4 LinuxService agent-terminal rights (milestone_0025, AUTHORED, NOT_RUN)
@@ -501,8 +502,8 @@ retained reader (`controller_dispatch_remote_*`): status -> associated prepare -
 (`controller_workload_store_admit_remote_build_v1`, single journal writer) -> associated execute (archived no-replace, never
 resent) -> open -> input per file -> start -> collect (poll on the reply stage, 9 min bound, then the controller-signed
 cancel) -> output chunks -> reassemble -> `accept_wire_v3` on the ROOT's journal (`controller_dispatch_remote_edit_v3`).
-A reaped answer (`linux-host-remote-build-reaped-incomplete`) becomes the controller-built `service-restart` receipt
-(`accept_reset_failure_v3`, which now refuses every other stage with `REMOTE_RESET_FAILURE_SIGNATURE_REQUIRED`; see RESET-FAILURE EMITTERS below). One grant lists
+A reaped run is answered by the restarted Host with a HOST-SIGNED `service-restart` receipt (milestone_0045, below); a bare
+reaped refusal (`linux-host-remote-build-reaped-incomplete`) settles `outcome-unknown` (`host-reaped-unsigned`). One grant lists
 {build|test, host_reservation_v1, host_execute_associated_v3, host_agent_cancel_v4}; the approver key must be enrolled for
 those operations. Spec dir: task.sdn, environment.sdn, run.sdn, host-inputs.sdn, inputs/<path> (formats in the author
 module header). Traps: the Host prepare deadline is its MONOTONIC clock (operator-observed value in run.sdn); host-inputs
@@ -544,8 +545,8 @@ part, not an error. A restart reconciles by replay of the committed journal (nev
 the Linux origin latches `quarantined` for the whole process after one failed procfs verify (one transient failure refuses
 remote-run until the process restarts).
 RESET-FAILURE EMITTERS (milestone_0038, AT-RUN-02; all specs NOT_RUN): the receipt V3 has four stages
-(`remote_container_reset_failure_v3.spl`): `service-restart` stays controller-built and UNSIGNED (the Host no longer holds the
-run: the reap record carries no open record and no binding); the three Host stages `destroy-absence` (Destroy not ok after a
+(`remote_container_reset_failure_v3.spl`): `service-restart` (Host-signed since milestone_0045, from the reap record and the
+open archive; no binding); the three Host stages `destroy-absence` (Destroy not ok after a
 normal exit), `cancel-absence` (self-cancel Destroy not ok after Create) and `cancel-identity` (self-cancel stop/destroy not ok
 with no Create) are emitted BY THE HOST. Executor (`host_linux_service_remote_build_v4.spl`): the three Stop/Destroy wedge points
 call `remote_build_reset_wedged_v4`, which maps the failure point with `host_remote_build_reset_stage_v4` (pure: failing step,
@@ -567,15 +568,15 @@ digest, keep `signed-receipt.sdn` beside `receipt.sdn`; an unverifiable/replayed
 files): `enable_workspace_source_v3` -> `LinuxFreshWorkspaceEnableTurnV3` -> `LinuxWorkspaceEnableTurnV3` ->
 `ContainerWorkspaceEnableTurnV3` carry `binding_digest` (it was only visible at the settled read, after settle). NO V3 STAGE (keep
 the generic `host-wedged` settle): Stop failure with no cancel cause or after Create, create/prepare/configuration/start/inspect
-wedges, settle, read, source-return, finalize and enable errors, and any run lost to a service restart AFTER the reap (the
-controller-built `service-restart`).
+wedges, settle, read, source-return, finalize and enable errors. A run lost to a service restart is Host-signed
+`service-restart` since milestone_0045.
 RECEIPT DURABILITY (milestone_0039; specs NOT_RUN): the Host-signed reset-failure REPLY is archived no-replace + read back via
 the held capacity journal (`remote_build_reset_archive_v4`, path `host-remote-build-reset-failure/<sha256(operation id)>.sdn`,
 keyed by operation id because a restarted service knows the operation, not the prior fence) BEFORE it is first answered; an
 archive error is the plain wedge (no receipt). After a restart the startup reap indexes the operation and the collect route, on
 `linux-host-remote-build-reaped-incomplete`, answers `host_remote_build_reset_failure_stored_v4` byte-identically; absent,
-corrupt, foreign, non-canonical or receipt-less archives answer "" and keep the reaped refusal (controller's `service-restart`
-settle). Expiry: replay is transport, not authority (the in-memory wedged-with-receipt arm already precedes the deadline check);
+corrupt, foreign, non-canonical or receipt-less archives answer "" (milestone_0045: the Host then signs a reaped receipt,
+else the refusal settles `outcome-unknown`). Expiry: replay is transport, not authority (the in-memory wedged-with-receipt arm already precedes the deadline check);
 the controller verifies grant/approval/window, and open/transfer/reap still refuse an expired approval after restart.
 A read-back failure also publishes `<sha256(operation id)>.refused` beside it, and the stored reader answers "" while that marker
 exists: an archive that was never answered is never served after a restart (REVIEW_C P3-6; a lost marker keeps the old behaviour).
@@ -617,4 +618,22 @@ binding / Host bug). Specs: `remote_container_reset_failure_stages_v3_spec.spl`,
   once the execute pair's window passes on the GRANT clock (`linux_service_remote_build_unopened_expire_v4`),
   and open is refused past that window.
 - Owner decisions still open (outcome-unknown exit, retained storage, prepared release, quarantined-root
-  settle, signed reaped receipt, unopened cancel): records milestone_0043 `OWNER_DECISIONS.md`.
+  settle, signed reaped receipt, unopened cancel): records milestone_0043 `OWNER_DECISIONS.md`. Decided in
+  milestone_0045 (below) except the quarantined-root settle.
+
+### remote-run completion (milestone_0045, owner decisions 2026-11-19, specs NOT_RUN)
+- LATE-RECEIPT EXCEPTION (decision 5; the ONE narrow exception to "expired approvals are refused"): a reset-failure
+  receipt may be signed by the Host and accepted by the controller after the approval/grant window, ONLY to journal
+  `failed` for that exact op. `remote_container_reset_failure_late_context_v3` re-evaluates the authority at
+  `min(approval.expires_at, grant.expires_at) - 1` once now is past it; `signed_at` must still be <= the real clock and is
+  clamped to that instant. Issuer, snapshot, generation, revocation and key expiry still apply. Completions never take it
+  (`remote_run_context_v1(..., receipt)` uses it only for the reset wire). The deadline cancel-* stages now get receipts.
+- Signed reaped receipt (decision 4): every reset-failure stage is Host-signed; the controller-built constructor,
+  `accept_reset_failure_v3` and `remote_run_service_restart_receipt_v1` are gone. Collect after a restart: stored reply
+  replay -> `host_remote_build_reaped_receipt_v4` (reap index -> reap record task digest -> open archive under the prior
+  fence -> port signs `service-restart` with empty native id/binding at the grant clock -> archived no-replace BEFORE the
+  answer) -> otherwise the typed refusal, settled `outcome-unknown` by the controller.
+- Prepared reservation between prepare and execute (decision 3): no route; it waits for its `prepare_deadline_ms`.
+  No controller cancel of a never-opened slot (decision 6 not chosen).
+- VERSION SKEW: a controller older than milestone_0045 refuses a Host-signed `service-restart` and a late receipt and
+  settles `outcome-unknown`; upgrade the controller first (same rule as #10398/#10399).

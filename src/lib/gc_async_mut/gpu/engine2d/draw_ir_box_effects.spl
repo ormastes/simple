@@ -750,6 +750,50 @@ fn _e2d_box_line(buf: [i64], d: i32, lo: i32) -> [i64]:
         sum = sum - buf[(if leave < 0: 0 elif leave >= len: len - 1 else: leave) as i64] + buf[(if enter < 0: 0 elif enter >= len: len - 1 else: enter) as i64]
         i = i + 1
     out
+
+# One axis of a blurred rect (it separates): coverage 0..255 of the step
+# [start, end) after the backdrop blur kernel, sampled at lo .. hi - 1.
+# @allow(primitive_api): 1-D device-px step and coverage profile shared with the raster shadow painter
+pub fn engine2d_blur_step_profile(start: i32, end: i32, lo: i32, hi: i32, sigma_milli: i32) -> [i32]:
+    var out: [i32] = []
+    if hi <= lo:
+        return out
+    val sigma = sigma_milli.to_f64() / 1000.0
+    val d = (sigma * 3.0 * 2.5066282746310002 / 4.0 + 0.5) as i32
+    val m = (sigma * 3.0).ceil() as i32 + 3 * (d / 2 + 1) + 1
+    val ext = hi - lo + 2 * m
+    var buf: [i64] = [0; ext]
+    var i = 0
+    # cpu-lane-loop-ok: the step over the extended axis; bound hi - lo + 2m
+    while i < ext:
+        val p = lo - m + i
+        buf[i as i64] = if p >= start and p < end: 255 else: 0
+        i = i + 1
+    var r = buf
+    if sigma >= 2.0:
+        val lo_a = if d % 2 == 0: d / 2 else: (d - 1) / 2
+        val lo_b = if d % 2 == 0: d / 2 - 1 else: (d - 1) / 2
+        val d_c = if d % 2 == 0: d + 1 else: d
+        r = _e2d_box_line(_e2d_box_line(_e2d_box_line(buf, d, lo_a), d, lo_b), d_c, d_c / 2)
+    elif sigma_milli > 0:
+        val one = engine2d_backdrop_blur_pixels(_e2d_step_pixels(buf), ext, 1, sigma_milli)
+        i = 0
+        # cpu-lane-loop-ok: alpha channel of the blurred step; bound ext
+        while i < ext:
+            r[i as i64] = ((one[i as i64] >> 24) & 0xFFu32) as i64
+            i = i + 1
+    i = 0
+    # cpu-lane-loop-ok: crop the extension; bound hi - lo
+    while i < hi - lo:
+        out.push(r[(i + m) as i64] as i32)
+        i = i + 1
+    out
+
+fn _e2d_step_pixels(buf: [i64]) -> [u32]:
+    var px: [u32] = []
+    for v in buf:
+        px.push((v as u32) << 24)
+    px
 # Mirror index for Skia's kMirror tile mode: -1 -> 0, len -> len - 1.
 fn _e2d_mirror(i: i32, len: i32) -> i32:
     val period = 2 * len

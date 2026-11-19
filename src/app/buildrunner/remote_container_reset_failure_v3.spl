@@ -1,16 +1,17 @@
 # milestone_0030 DESIGN 13.5, completed by milestone_0038: the L6 reset-failure receipt under V3. A run a service restart
 # lost, or whose teardown failed, is NOT a passed run: the operation is journaled `failed` bound to the receipt digest and a
-# receipt can never yield `completed`. Stages and who builds them:
-#   service-restart  the Host answers a reaped run with the error code `linux-host-remote-build-reaped-incomplete`; the
-#                    CONTROLLER builds the receipt (reap `absent-run-lost`, empty native id and binding digest) from its OWN
-#                    admitted task, policy and authority digests. Unsigned: the Host no longer holds the run.
+# receipt can never yield `completed`. Every stage is HOST-built and travels only inside the execution-host-signed envelope:
+#   service-restart  milestone_0045 (owner decision 4): the RESTARTED Host signs it for a run its startup reap indexed (the
+#                    reap proved the run absent; reap `absent-run-lost`, empty native id and binding digest: a restarted Host
+#                    holds neither). It replaces the controller-built unsigned receipt, which no longer exists; a bare reaped
+#                    refusal with no signed receipt settles the controller row `outcome-unknown`, never `failed`.
 #   destroy-absence  the HOST emits it: Destroy not ok after a normal exit (reap `incomplete`, native id set)
 #   cancel-absence   the HOST emits it: a self-cancel's Destroy not ok after Create (reap `incomplete`, native id set)
 #   cancel-identity  the HOST emits it: a self-cancel's stop/destroy not ok with no Create (reap `identity-unresolved`)
-#   A `deadline` self-cancel is signable only inside the approval and grant windows: it fires at min(approval, grant,
-#   not_after), the Host signs at its own clock and the port self-verifies like the controller (expired approval or ended
-#   grant refused). So only a `not_after` strictly earlier than both expiries yields a deadline cancel-* receipt; a cancel at
-#   either expiry carries none and settles by the generic wedged verdict (REVIEW_C P2-1, an owner decision to change).
+#   A `deadline` self-cancel fires at min(approval, grant, not_after), often AT an expiry. milestone_0045 (owner decision 5,
+#   the late-receipt exception of remote_container_reset_failure_signed_v3.spl) lets the Host sign and the controller accept
+#   a receipt after the approval/grant expired, only to journal `failed` for that exact op, so the deadline cancel-* stages
+#   now produce receipts too (REVIEW_C P2-1 closed).
 # milestone_0040 adds the other Host-observable wedge points (all HOST-emitted, same V3 wire, same signature domain):
 #   prepare-wedge, create-wedge                       (reap `identity-unresolved`, no native id: no Create was accepted)
 #   configuration-wedge, start-wedge, inspect-wedge   (reap `incomplete`, native id set)
@@ -89,24 +90,11 @@ fn remote_container_reset_failure_validate_v3(receipt: RemoteContainerResetFailu
     if receipt.reap != remote_container_reset_reap_v3(receipt.stage): return Err("REMOTE_RESET_FAILURE_REAP_INVALID")
     Ok(())
 
-# Constructed only from the admitted task/policy and the controller's own operation/grant digests, never from arriving
-# claims: the service-restart receipt, with an empty runtime identity and an empty workspace binding.
-fn remote_container_reset_failure_new_v3(task: BuildTaskV1, policy: RemoteEvidencePolicyV1, request_digest: text,
-        grant_digest: text) -> Result<RemoteContainerResetFailureV3, text>:
-    val receipt = RemoteContainerResetFailureV3(task_identity: builder_task_identity_v1(task), host_id: policy.host_id,
-        assignment_digest: policy.assignment_digest, controller_epoch: policy.controller_epoch,
-        operation_id: policy.operation_id, request_digest: request_digest, grant_digest: grant_digest,
-        workspace_binding_digest: "", stage: "service-restart", reason: "REMOTE_CONTAINER_SERVICE_RESTART_RUN_LOST",
-        reap: "absent-run-lost", native_id: "")
-    remote_container_reset_failure_validate_v3(receipt)?
-    Ok(receipt)
-
-# The Host's constructor (called by the Host port from its verified open record and its own observations): a Host stage
-# only, with the enable-time binding digest and the runtime id Create returned (empty for cancel-identity).
+# The Host's constructor (called by the Host port from its verified open record and its own observations): the enable-time
+# binding digest and the runtime id Create returned (both empty for service-restart; the id empty for cancel-identity).
 fn remote_container_reset_failure_host_new_v3(task: BuildTaskV1, policy: RemoteEvidencePolicyV1, request_digest: text,
         grant_digest: text, workspace_binding_digest: text, stage: text,
         native_id: text) -> Result<RemoteContainerResetFailureV3, text>:
-    if stage == "service-restart": return Err("REMOTE_RESET_FAILURE_STAGE_INVALID")
     val receipt = RemoteContainerResetFailureV3(task_identity: builder_task_identity_v1(task), host_id: policy.host_id,
         assignment_digest: policy.assignment_digest, controller_epoch: policy.controller_epoch,
         operation_id: policy.operation_id, request_digest: request_digest, grant_digest: grant_digest,
@@ -140,7 +128,7 @@ fn remote_container_reset_failure_bind_v3(task: BuildTaskV1, policy: RemoteEvide
         return Err("REMOTE_RESET_FAILURE_AUTHORITY_DIFFERS")
     Ok(())
 
-# Controller result of accept_reset_failure_v3: always an ERROR outcome bound to the receipt digest.
+# Controller result of accept_host_reset_failure_v3: always an ERROR outcome bound to the receipt digest.
 struct RemoteResetFailedResultV3:
     status: text
     stage: text
@@ -150,6 +138,6 @@ struct RemoteResetFailedResultV3:
     digest: text
 
 export RemoteContainerResetFailureV3, RemoteResetFailedResultV3
-export remote_container_reset_failure_new_v3, remote_container_reset_failure_host_new_v3, remote_container_reset_failure_encode_v3
+export remote_container_reset_failure_host_new_v3, remote_container_reset_failure_encode_v3
 export remote_container_reset_failure_digest_v3
 export remote_container_reset_failure_bind_v3, remote_container_reset_failure_validate_v3
