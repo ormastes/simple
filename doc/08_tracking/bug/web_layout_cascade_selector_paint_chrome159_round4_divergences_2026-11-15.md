@@ -718,7 +718,7 @@ head (13/40 at base).
   - The dashes and round dots bend round the arcs. The gap comes from `SelectBestDashGap` on a closed path (as many gaps as dashes): dash 2t (dotted: a dot every pitch, the first centred on the start), nominal gap t.
   - Worked check: 48x32, t=4, r=10 gives perimeter 130.27, 11 dashes and gap 3.84. Every dash edge on the top and bottom sides lands on Chrome's partial cells.
 - **Fix:** `border_rounded_dash_spans(w, h, t, r, dotted)` (`paint_primitives`) returns the row spans of the pixels whose centre a dash covers (ring distance <= t/2 and arc length inside a dash) or a dot covers (within t/2 of a dot centre). The raster (`fb_border_sides_styled_clip`) and Draw IR (`_html_draw_ir_styled_border_commands`) paint those spans. It applies to uniform style, width, colour and circular radius only; anything else keeps the per-side path.
-  - `ponytail:` no AA, and mixed sides are not handled. The upgrade is to clip this path to each side's polygon, as Chrome does.
+  - `ponytail:` no AA. Mixed sides: see the 2026-11-19 mixed-sides entry below.
 - **Evidence:**
   - A Python model of the rule matched all 7505 uniform Chrome cells (0 mismatches) before the port.
   - New `border_dashed_rounded_chrome159_spec`: 7505 pins, four boxes (dashed 4px r10 on a background, dotted 4px r10, dashed 6px r16, dotted 8px r20).
@@ -740,3 +740,21 @@ head (13/40 at base).
 - **Evidence:** `direction_rtl_bidi_order_chrome159_spec` 5/7 -> 7/7.
   - Base vs head over the 68 Vulkan text / font-atlas specs, serial on the same seed: 0 new failures; the only change is the two `direction_rtl_bidi_order` rows (AC-6, AC-7) going green.
 - **Still open (same old rule, not changed here):** the Metal, CUDA and legacy GLSL strings in `common/gpu/font_atlas_composite.spl`. CUDA is pinned to its PTX and Metal cannot be verified on this Linux host. Move them to the image rule when those lanes can be re-pinned.
+
+## 2026-11-19 — rounded borders mixing dash colours or dashed and solid sides (FIXED on raster, cpu_simd and Vulkan)
+
+- **Symptom:** a rounded box whose sides share one width but differ in colour, or mix `dashed`/`dotted` with `solid`, fell off the uniform rounded-dash path. Its arcs were left undashed or painted solid.
+- **Chrome rule (proven in a Python model, 0 mismatches over 7322 uniform Chrome cells):**
+  - The dash pattern is the same single closed path as the uniform case.
+  - Each pixel takes the colour of its nearest side. The corner is split by its diagonal; ties go to the vertical side.
+  - A solid side fills its part of the ring (centre-line distance <= t/2), with no gaps.
+- **Fix:**
+  - `border_rounded_dash_spans(w, h, t, r, dotted, solid_sides)` now returns `[row, x0, len, side]`.
+  - `_rounded_dash_style` and `_rounded_solid_sides` pick the case: one dash style, the other sides solid.
+  - The raster paints every span in its side's colour.
+  - The Draw IR now emits the solid sides as spans too, and the box command's border widths are zeroed for such a box (`_html_draw_ir_rounded_dash_box`). Before this, the box command painted the solid sides over the top dashes' corner gaps (6 px off on cpu_simd and Vulkan).
+  - `ponytail:` one width and one circular radius only. Per-side widths need per-side insets of the path.
+- **Evidence:**
+  - New `border_rounded_mixed_sides_chrome159_spec`: 4262 pins over three boxes (four-colour dashed 4px r10; solid blue with a red dashed top r10; four-colour dotted 6px r16).
+  - Base: raster 658, cpu_simd 563 and Vulkan 563 mismatches (0/3). Head: 3/3.
+  - Base vs head over the 100 dashed/dotted specs, serial on the same seed: 0 new failures. The only change is the three new-spec rows going green; 58 failing rows are pre-existing and identical on both.

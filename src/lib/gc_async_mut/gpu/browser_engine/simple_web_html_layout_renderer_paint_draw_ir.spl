@@ -7,7 +7,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_ra
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{spaced_advances_milli, HNode, font_milli_of, web_argb, attr_value, parse_color, parse_color_any, parse_int, decl_get, svg_number_milli, svg_view_box_milli, simple_web_backdrop_admission, _wsc_on, _wsc_now_us, _wlay_add, attr_present}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, SIMPLE_WEB_STICKY_TOP_AUTO, _html_text_language, split_top_level_commas}
 use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{parse_box_shadow_layers}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{radial_gradient_box_paintable, radial_gradient_box_geometry, BackgroundGradientLayer, background_gradient_layers_paintable, background_gradient_layers, background_gradient_box_rects, background_gradient_clip_shape, border_dash_runs, border_dot_row_spans, border_rounded_dash_spans}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{radial_gradient_box_paintable, radial_gradient_box_geometry, BackgroundGradientLayer, background_gradient_layers_paintable, background_gradient_layers, background_gradient_box_rects, background_gradient_clip_shape, border_dash_runs, border_dot_row_spans, border_rounded_dash_spans, _rounded_dash_style, _rounded_solid_sides}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language, resolve_font_metrics_with_language_milli}
 use std.common.encoding.utf8.{text_codepoint_len, text_codepoints}
 use common.string_builder.{StringBuilder}
@@ -162,10 +162,13 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
     val eff_style_t = _html_draw_ir_effective_border_style(node, st.border_style_t, st.border_t)
     val eff_style_r = _html_draw_ir_effective_border_style(node, st.border_style_r, st.border_r)
     val eff_style_b = _html_draw_ir_effective_border_style(node, st.border_style_b, st.border_b)
-    val ir_border_l = _html_draw_ir_rendered_border_width(eff_style_l, st.border_l)
-    val ir_border_t = _html_draw_ir_rendered_border_width(eff_style_t, st.border_t)
-    val ir_border_r = _html_draw_ir_rendered_border_width(eff_style_r, st.border_r)
-    val ir_border_b = _html_draw_ir_rendered_border_width(eff_style_b, st.border_b)
+    # A rounded dashed / dotted border paints all its sides (solid ones too)
+    # as styled spans, so the box command paints none of them.
+    val rounded_dash = _html_draw_ir_rounded_dash_box(st, eff_style_t, eff_style_r, eff_style_b, eff_style_l)
+    val ir_border_l = if rounded_dash: 0 else: _html_draw_ir_rendered_border_width(eff_style_l, st.border_l)
+    val ir_border_t = if rounded_dash: 0 else: _html_draw_ir_rendered_border_width(eff_style_t, st.border_t)
+    val ir_border_r = if rounded_dash: 0 else: _html_draw_ir_rendered_border_width(eff_style_r, st.border_r)
+    val ir_border_b = if rounded_dash: 0 else: _html_draw_ir_rendered_border_width(eff_style_b, st.border_b)
     var props = [
         draw_ir_style_prop("background-gradient-stop-count", "{gradient_stop_count}"),
         draw_ir_style_prop("background-gradient-stops", gradient_stops_raw),
@@ -1080,6 +1083,14 @@ fn _html_draw_ir_effective_border_style(node: HNode, raw_style: text, width: i32
         return "solid"
     raw_style
 
+# A box whose border takes the rounded dash path: sides of one width, each
+# dashed / dotted (one style) or solid, one non-zero radius on every corner.
+fn _html_draw_ir_rounded_dash_box(st: Style, eff_t: text, eff_r: text, eff_b: text, eff_l: text) -> bool:
+    (_rounded_dash_style(eff_t, eff_r, eff_b, eff_l) != "" and
+        st.border_l == st.border_t and st.border_t == st.border_r and st.border_r == st.border_b and
+        st.border_radius_tl_px > 0 and st.border_radius_tl_px == st.border_radius_tr_px and
+        st.border_radius_tr_px == st.border_radius_br_px and st.border_radius_br_px == st.border_radius_bl_px)
+
 fn _html_draw_ir_rendered_border_width(effective_style: text, width: i32) -> i32:
     if width <= 0:
         return 0
@@ -1235,20 +1246,27 @@ fn _html_draw_ir_styled_border_commands(
             [_html_draw_ir_non_negative(tl - ins), _html_draw_ir_non_negative(tr - ins),
              _html_draw_ir_non_negative(br_rad - ins), _html_draw_ir_non_negative(bl_rad - ins)], colors, clip))
         return cmds
-    # Uniform dashed / dotted on a rounded box: Chrome's one closed path round
-    # the arcs (`border_rounded_dash_spans`, the raster's twin), a rect per span.
-    if ((eff_t == "dashed" or eff_t == "dotted") and eff_r == eff_t and eff_b == eff_t and eff_l == eff_t and
-            st.border_l == st.border_t and st.border_t == st.border_r and st.border_r == st.border_b and
-            st.border_color_l == st.border_color_t and st.border_color_t == st.border_color_r and st.border_color_r == st.border_color_b and
-            st.border_color_t != 0u32 and tl > 0 and tl == tr and tr == br_rad and br_rad == bl_rad):
-        val spans = border_rounded_dash_spans(w, h, st.border_t, tl, eff_t == "dotted")
+    # Dashed / dotted on a rounded box (sides of one width, each that style or
+    # solid): Chrome's one closed path round the arcs, each pixel by its nearest
+    # side (`border_rounded_dash_spans`, the raster's twin), a rect per span.
+    # The box command paints no side of such a border (`_html_draw_ir_rounded_dash_box`).
+    if _html_draw_ir_rounded_dash_box(st, eff_t, eff_r, eff_b, eff_l) and tl > 0:
+        val dash_style = _rounded_dash_style(eff_t, eff_r, eff_b, eff_l)
+        val spans = border_rounded_dash_spans(w, h, st.border_t, tl, dash_style == "dotted", _rounded_solid_sides(eff_t, eff_r, eff_b, eff_l))
         if spans.len() > 0:
-            val color = _html_draw_ir_scale_color_opacity(st.border_color_t, st.opacity_pct)
+            val side_colors = [
+                _html_draw_ir_scale_color_opacity(st.border_color_t, st.opacity_pct),
+                _html_draw_ir_scale_color_opacity(st.border_color_r, st.opacity_pct),
+                _html_draw_ir_scale_color_opacity(st.border_color_b, st.opacity_pct),
+                _html_draw_ir_scale_color_opacity(st.border_color_l, st.opacity_pct)
+            ]
             var k = 0
             # cpu-lane-loop-ok: one overlay rect per covered run of the rounded dash path; bound is the span count
-            while k + 2 < spans.len():
-                cmds.push(_html_draw_ir_overlay_rect("{base_id}_rd{k / 3}", ClipRect(x0: x + spans[k + 1], y0: y + spans[k], x1: x + spans[k + 1] + spans[k + 2], y1: y + spans[k] + 1), color, clip))
-                k = k + 3
+            while k + 3 < spans.len():
+                val side = spans[k + 3]
+                if side_colors[side] != 0u32:
+                    cmds.push(_html_draw_ir_overlay_rect("{base_id}_rd{k / 4}", ClipRect(x0: x + spans[k + 1], y0: y + spans[k], x1: x + spans[k + 1] + spans[k + 2], y1: y + spans[k] + 1), side_colors[side], clip))
+                k = k + 4
             return cmds
     if _html_draw_ir_side_is_custom_style(eff_t) and st.border_t > 0 and st.border_color_t != 0u32:
         val ct =_html_draw_ir_scale_color_opacity(st.border_color_t, st.opacity_pct)
