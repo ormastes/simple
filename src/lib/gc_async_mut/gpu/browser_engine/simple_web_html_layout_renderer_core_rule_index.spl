@@ -244,6 +244,50 @@ fn selector_rightmost_part(parts: [text]) -> text:
         right = right - 1
     ""
 
+# A selector group whose rightmost compound ends in `::before` / `::after`
+# (or legacy `:before` / `:after`) targets the GENERATED box, not the element.
+# It is rewritten to `<origin compound> > ::before`: the generated node (tag
+# "::before", parent = its originating element, see
+# _html_append_generated_content) then matches through the ordinary
+# child-combinator path, and the rule buckets under the "::before" tag so no
+# parsed element ever sees it. Any other group is returned unchanged.
+fn selector_group_generated_parts(parts: [text]) -> [text]:
+    var right = parts.len() - 1
+    while right >= 0 and (parts[right].len() == 0 or _comb_code_of_part(parts[right]) >= 0):  # cpu-lane-loop-ok: skips trailing combinator tokens of ONE selector group; bound is its part count
+        right = right - 1
+    if right < 0 or text_index_of(parts[right], ":") < 0:
+        return parts
+    val part = parts[right]
+    val lower = part.lower()
+    var kind = ""
+    var cut = 0
+    if lower.ends_with("::before"):
+        kind = "::before"
+        cut = part.byte_len() - 8
+    elif lower.ends_with("::after"):
+        kind = "::after"
+        cut = part.byte_len() - 7
+    elif lower.ends_with(":before"):
+        kind = "::before"
+        cut = part.byte_len() - 7
+    elif lower.ends_with(":after"):
+        kind = "::after"
+        cut = part.byte_len() - 6
+    if kind == "":
+        return parts
+    var origin = part.substring(0, cut)
+    if origin == "":
+        origin = "*"
+    var out: [text] = []
+    var k = 0
+    while k < right:  # cpu-lane-loop-ok: copies the parts left of the rightmost compound of ONE selector group; bound is its part count
+        out.push(parts[k])
+        k = k + 1
+    out.push(origin)
+    out.push(">")
+    out.push(kind)
+    out
+
 fn selector_bucket_base(part: text) -> text:
     var base = part
     val colon = text_index_of(base, ":")
@@ -531,10 +575,11 @@ fn build_rule_buckets(rules: Rules, trace_stages: bool = false) -> RuleBuckets:
         if trace_stages:
             print "[layout-trace] bucket_stage=rule-start rule={r} groups={group_count}"
         while g < group_count:  # cpu-lane-loop-ok: walks the selector comma-groups of ONE rule (<=CSS_SELECTOR_GROUP_CAP), assigning each to its id/class/tag/attr bucket
-            val right = selector_rightmost_part(groups[g])
-            val base = selector_bucket_base(right)
-            val kind = selector_bucket_kind_from_base(base)
-            val key = selector_bucket_value_from_base(base)
+            val right = selector_rightmost_part(selector_group_generated_parts(groups[g]))
+            val generated = right == "::before" or right == "::after"
+            val base = if generated: right else: selector_bucket_base(right)
+            val kind = if generated: "tag" else: selector_bucket_kind_from_base(base)
+            val key = if generated: right else: selector_bucket_value_from_base(base)
             if kind == "id" and key.len() > 0:
                 var idx = dict_key_index_count(id_key_dict, id_keys_raw, key, id_key_count)
                 if idx < 0:
@@ -649,7 +694,7 @@ fn build_rule_buckets(rules: Rules, trace_stages: bool = false) -> RuleBuckets:
         var pg = 0
         val pgroup_count = pgroups.len()
         while pg < pgroup_count:  # cpu-lane-loop-ok: pre-parses the comma-groups of ONE rule (<=CSS_SELECTOR_GROUP_CAP)
-            parsed_rule.push(parse_selector_group(pgroups[pg]))
+            parsed_rule.push(parse_selector_group(selector_group_generated_parts(pgroups[pg])))
             pg = pg + 1
         parsed_groups.push(parsed_rule)
         pr = pr + 1
@@ -683,6 +728,11 @@ fn style_rule_candidates(node: HNode, buckets: RuleBuckets) -> [i32]:
     val has_attr_buckets = node.attr_mask != 0u32 and attr_bucket_count > 0
     if class_count == 0 and node.id_attr.len() == 0 and not has_attr_buckets:
         val tag_idx = dict_key_index(buckets.tag_key_dict, buckets.tag_keys, node.tag)
+        # A generated box is matched only by its own `::before`/`::after`
+        # rules: `*` and the other fallback rules select elements, never
+        # pseudo-elements (`* {margin:0}` leaves `::before` alone).
+        if node.tag == "::before" or node.tag == "::after":
+            return if tag_idx < 0: [] else: buckets.tag_rules[tag_idx]
         if tag_idx < 0:
             return buckets.fallback_rules
         return merge_two_sorted_rule_lists_unique(buckets.fallback_rules, buckets.tag_rules[tag_idx])
@@ -730,6 +780,10 @@ fn _part_specificity(
 ) -> i32:
     if recursion_depth > 32:
         return -1000000
+    # The generated-box subject of selector_group_generated_parts: a
+    # pseudo-element counts like a type selector (Selectors 4 17).
+    if part == "::before" or part == "::after":
+        return 1
     var base = part
     val colon = text_index_of(base, ":")
     var pseudo_specificity = 0
@@ -856,9 +910,10 @@ fn _group_specificity(
         return -1000000
     var total = 0
     var i = 0
-    val part_count = parts.len()
+    val subject_parts = selector_group_generated_parts(parts)
+    val part_count = subject_parts.len()
     while i < part_count:  # cpu-lane-loop-ok: sums per-part specificity over ONE selector group's parts; bound is that group's part count. Computed once at extract time and cached in Rules.group_specificities, never recomputed per node
-        val p = parts[i]
+        val p = subject_parts[i]
         if p.len() > 0 and _comb_code_of_part(p) < 0:
             val part_specificity = _part_specificity(
                 p, recursion_depth
@@ -932,7 +987,10 @@ fn _z_index_sort_before(left: i32, right: i32, styles: [Style]) -> bool:
         return true
     if left_z > right_z:
         return false
-    left <= right
+    # Equal z keeps the input order (the merge takes the left run first): the
+    # callers pass tree order, which is not index order once generated
+    # `::before`/`::after` nodes are appended after the parsed arena.
+    true
 
 fn _sort_positive_z_indices(indices: [i32], count: i32, styles: [Style]) -> [i32]:
     if count <= 0:

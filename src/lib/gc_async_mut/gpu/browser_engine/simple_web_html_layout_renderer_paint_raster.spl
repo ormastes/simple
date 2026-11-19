@@ -1,5 +1,5 @@
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
-    HNode, backdrop_blur_milli, web_argb, attr_present, attr_value, object_position_x_pct, object_position_y_pct,
+    HNode, backdrop_blur_milli, web_argb, build_child_index, html_generated_start, html_tree_order, attr_present, attr_value, object_position_x_pct, object_position_y_pct,
     attr_key_index, parse_html, _web_budget_clock, _web_render_deadline_us,
     _web_budget_rearm, _web_budget_expired_at,
     parse_color, parse_color_any, text_index_of, find_from, decl_get, svg_number_milli, svg_view_box_milli, parse_signed_nth_int,
@@ -1845,6 +1845,10 @@ fn _outline_overlaps_positioned(nodes: [HNode], styles: [Style], bx: [i32], by: 
         j = j + 1
     false
 
+# A positioned z<=0 generated (::before/::after) box: pass 2 paints it in tree order.
+fn _raster_generated_low_z(styles: [Style], i: i32, gen_start: i32) -> bool:
+    gen_start >= 0 and i >= gen_start and styles[i].position_absolute and styles[i].z_index <= 0
+
 fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_cache: TextWrapCache, fb: [u32], fbw: i32, fbh: i32, widget_mode: bool) -> [u32]:
     var out = fb
     # Reserve roughly half of whatever time remains in the paint stage for the
@@ -1966,9 +1970,16 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
             out = fb_outline_clip(out, fbw, fbh, bx[oi], by[oi], bw[oi], bh[oi], ost.outline_w, ost.outline_offset_px, ost.outline_color, paint_clip_at(clip_cache, oi))
         else:
             late_outlines.push(oi)
-    i = 0
+    # Generated ::before/::after boxes sit after the parsed arena. When a page
+    # has any, pass 2 walks tree order and also paints a positioned z<=0
+    # generated box there, at its tree position among the relative roots
+    # (Chrome's z-0/auto layer), instead of over all of them in pass 3.
+    val gen_start = html_generated_start(nodes)
+    val pass2_order: [i32] = if gen_start >= 0: html_tree_order(nodes, build_child_index(nodes)) else: []
+    val pass2_count = if gen_start >= 0: pass2_order.len() else: node_count
+    var k = 0
     # cpu-lane-loop-ok: fn paint pass 2 of 6: the relative-paint-root boxes pass 1 deliberately skipped, painted after normal flow so position:relative subtrees land above it. Disjoint node set from pass 1, so it cannot be fused without breaking paint order. Bound is node_count, budget-guarded
-    while i < node_count:
+    while k < pass2_count:
         # Budget guard: stop scanning for relative-paint-root nodes on expiry.
         # This pass was completely unguarded — unlike every other O(node_count)
         # paint pass — so on a large real page it silently burned the rest of
@@ -1977,9 +1988,10 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
         # why a degraded render still came out fully blank.
         if _web_budget_expired_at(WEB_BUDGET_SITE_PAINT_RELATIVE_ROOTS):
             break
+        i = if gen_start >= 0: pass2_order[k] else: k
         val nd = nodes[i]
         val st = styles[i]
-        if has_relative_paint_root(nodes, styles, i) and not st.position_absolute:
+        if (has_relative_paint_root(nodes, styles, i) and not st.position_absolute) or _raster_generated_low_z(styles, i, gen_start):
             val x = bx[i]
             val y = by[i]
             val w = bw[i]
@@ -2023,7 +2035,7 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
             if non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh:
                 if st.bg == 0u32 and st.background_gradient_from == 0u32:
                     out = fb_rect(out, fbw, fbh, x, y, w, h, web_argb(203, 213, 225))
-        i = i + 1
+        k = k + 1
     var positive_z_indices: [i32] = []
     var positive_z_count = 0
     var positive_z_sorted = true
@@ -2041,7 +2053,7 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
                 break
             val nd = nodes[i]
             val st = styles[i]
-            if st.position_absolute and st.z_index <= 0:
+            if st.position_absolute and st.z_index <= 0 and not _raster_generated_low_z(styles, i, gen_start):
                 val x = bx[i]
                 val y = by[i]
                 val w = bw[i]
