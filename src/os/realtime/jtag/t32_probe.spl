@@ -4,8 +4,18 @@
 
 use std.debug.remote.t32_sffi.t32_memory (t32_read_memory, t32_write_memory)
 use std.debug.remote.t32_sffi.t32_register (t32_read_register_by_name, t32_write_register_by_name)
-use std.debug.remote.t32_sffi.t32_core (t32_break, t32_go, t32_get_state)
-use std.os.realtime.jtag.t32_watchdog (T32Watchdog, T32WatchdogConfig)
+use std.debug.remote.t32_sffi.t32_core (t32_cmd, t32_get_state)
+use os.realtime.jtag.t32_watchdog (T32Watchdog, T32WatchdogConfig)
+
+# T32_ReadMemory/T32_WriteMemory access class 0 = data memory (D:).
+val T32_ACCESS_DATA: i64 = 0
+# T32_GetState: 0 down, 1 halted, 2 stopped (break), 3 running.
+val T32_STATE_STOPPED: i64 = 2
+
+fn _t32_cmd_ok(command: text) -> bool:
+    match t32_cmd(command):
+        Ok(_): true
+        Err(_): false
 
 class Trace32Probe:
     """TRACE32 JTAG probe with watchdog-guarded T32 remote API."""
@@ -52,8 +62,7 @@ class Trace32Probe:
         if not self.connected:
             return false
         self.watchdog.guarded_op("halt", fn() -> bool:
-            t32_break()
-            true
+            _t32_cmd_ok("Break")
         )
 
     me resume() -> bool:
@@ -61,8 +70,7 @@ class Trace32Probe:
         if not self.connected:
             return false
         self.watchdog.guarded_op("resume", fn() -> bool:
-            t32_go()
-            true
+            _t32_cmd_ok("Go")
         )
 
     me reset() -> bool:
@@ -70,8 +78,7 @@ class Trace32Probe:
         if not self.connected:
             return false
         self.watchdog.guarded_op("reset", fn() -> bool:
-            t32_break()
-            true
+            _t32_cmd_ok("SYStem.ResetTarget")
         )
 
     me read_region(addr: u64, len: i32) -> [u8]:
@@ -82,7 +89,12 @@ class Trace32Probe:
         if not self.watchdog.is_alive():
             self.watchdog.check_alive()
             return result
-        result = t32_read_memory(addr, len)
+        match t32_read_memory(addr.to_i64(), T32_ACCESS_DATA, len.to_i64()):
+            Ok(words):
+                for w in words:
+                    result.push(w as u8)
+            Err(_):
+                self.watchdog.check_alive()
         result
 
     me write_region(addr: u64, data: [u8]) -> bool:
@@ -92,8 +104,12 @@ class Trace32Probe:
         if not self.watchdog.is_alive():
             self.watchdog.check_alive()
             return false
-        t32_write_memory(addr, data)
-        true
+        var bytes: [i64] = []
+        for b in data:
+            bytes.push(b as i64)
+        match t32_write_memory(addr.to_i64(), T32_ACCESS_DATA, bytes):
+            Ok(_): true
+            Err(_): false
 
     me read_register(name: text) -> u64:
         """Read a named CPU register with watchdog liveness check."""
@@ -102,7 +118,9 @@ class Trace32Probe:
         if not self.watchdog.is_alive():
             self.watchdog.check_alive()
             return 0u64
-        t32_read_register_by_name(name)
+        match t32_read_register_by_name(name):
+            Ok(pair): pair.0.to_u64()
+            Err(_): 0u64
 
     me write_register(name: text, value: u64) -> bool:
         """Write a named CPU register with watchdog liveness check."""
@@ -111,8 +129,9 @@ class Trace32Probe:
         if not self.watchdog.is_alive():
             self.watchdog.check_alive()
             return false
-        t32_write_register_by_name(name, value)
-        true
+        match t32_write_register_by_name(name, value.to_i64(), 0):
+            Ok(_): true
+            Err(_): false
 
     me read_all_registers() -> [u64]:
         """Read all registers for the current architecture."""
@@ -142,8 +161,9 @@ class Trace32Probe:
         """Check if target is in halted state."""
         if not self.connected:
             return false
-        val state = t32_get_state()
-        state == 0
+        match t32_get_state():
+            Ok(state): state == T32_STATE_STOPPED
+            Err(_): false
 
     fn is_connected() -> bool:
         """Check connection status including watchdog liveness."""
