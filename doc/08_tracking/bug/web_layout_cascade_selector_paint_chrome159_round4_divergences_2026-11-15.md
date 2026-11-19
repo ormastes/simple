@@ -612,7 +612,7 @@ head (13/40 at base).
 - **Evidence:**
   - New `img_raster_chrome159_spec` 3/3 (2x2 and 6x4 `TG_IMG` = `FF7285F6` inside, white outside; no resource paints nothing). With the paint disabled: 1/3 (both painting rows fail).
   - `opacity_group_chrome159_spec` 18/18 with a raster row feeding the resource: (18,12) = `8829A5`, `tg_mismatches == 0`. Disabled: 17/18.
-  - Not pinned on the raster: (50,12) / (54,12). That cell's two non-opaque paints overlap, so the raster does not admit it as a group (documented at `TG_X`); with the image painted it reads `7285F6` / `39427B` where Chrome has `B8C2FB` / `9A9FBC`. Admitting overlapping groups is separate work.
+  - Not pinned on the raster: (50,12) / (54,12). That cell's two non-opaque paints overlap, so the raster does not admit it as a group (documented at `TG_X`); with the image painted it reads `7285F6` / `39427B` where Chrome has `B8C2FB` / `9A9FBC`. Admitting overlapping groups is separate work. (FIXED 2026-11-19, see the raster overlapping-paint entry.)
 - Review note (2026-11-18): an `<img>` carrying its own `opacity:.5` (no group) reads `B8C2FA` on the raster and on cpu_simd alike. Chrome gives `B8C2FB` for the same image inside a 0.5 group: folding the opacity into the image alpha rounds blue one level low. Unpinned. `_raster_images` is module state, so the raster supports one render at a time per process.
 
 ## 2026-11-18 — raster per-corner borders (FIXED for solid sides)
@@ -758,3 +758,24 @@ head (13/40 at base).
   - New `border_rounded_mixed_sides_chrome159_spec`: 4262 pins over three boxes (four-colour dashed 4px r10; solid blue with a red dashed top r10; four-colour dotted 6px r16).
   - Base: raster 658, cpu_simd 563 and Vulkan 563 mismatches (0/3). Head: 3/3.
   - Base vs head over the 100 dashed/dotted specs, serial on the same seed: 0 new failures. The only change is the three new-spec rows going green; 58 failing rows are pre-existing and identical on both.
+
+## 2026-11-19 — raster opacity groups whose non-opaque paints overlap (FIXED)
+
+- **Symptom:** the CPU raster declined to treat a group as a layer when two of its non-opaque paints overlapped, so it painted each element at the group opacity instead. At `tg_page` it read (40,4) `D6CA66` against Chrome `E3D994`, and with the image supplied (54,12) `39427B` against `9A9FBC`. Seven cells were affected: (34,4), (37,4), (40,4), (46,4), (60,12), (50,12) and (54,12).
+- **Cause:** a two-pass layer takes its alpha from the difference between the white and black passes, 255 - (W - B). That is exact for one non-opaque paint per pixel. Where two overlap, the rounding of the second paint over a white backdrop does not cancel against the same paint over black, so the alpha comes out ±1. Admission therefore rejected such groups.
+- **Fix:** an overlapping group now takes its alpha from a third pass, `_raster_white_alpha_pass`.
+  - That pass paints over opaque black with every member's Style colours, gradient stops and image pixels forced to white at their own alpha. Each write's channel is then the blend rule's own alpha composite, `a + rule(d, 255 - a)`, which is the alpha Skia's premultiplied layer keeps.
+  - Colour still comes from the black pass's premultiplied value.
+  - Members whose colour does not live in Style colour fields (shadows, `bg_layers_raw`, background images) still decline.
+  - A single member carrying two non-opaque items (a translucent background under a translucent border) also takes this path; it sets `two_pass` as well, so it never composites as an opaque layer.
+- **Also fixed (Draw IR, cpu_simd and Vulkan):** a square border whose sides share a colour was drawn as four full rects, so each translucent corner blended twice. Measured at opacity 1, the corner (1,1) read `3F1FDF` while the mid-edge read `7F3FBF`. The left and right runs in `_engine2d_draw_ir_render_borders` (`draw_ir_adv.spl`) now stop short of the top and bottom rows.
+- **Evidence:** in `opacity_group_chrome159_spec` the raster rows now pin the `TG_DEV_*` cells and all three `TG_IMG_*` cells. Before the fix both raster rows failed (7 cells).
+  - New `ti_page` rows (one member: `rgba(255,0,0,.5)` background, 3px `rgba(0,0,255,.5)` border, in a 0.5 group; Chrome border `BE9EDE`, interior `FFBFBF`) on the raster, cpu_simd and Vulkan. Before the fix the raster and cpu_simd rows were red. The spec now passes 21/21.
+  - Base vs head over 131 specs (every opacity spec plus every border spec with a translucent colour), serial on the same seed: 0 new failures. The only change is these five `opacity_group` rows going green; 221 failing rows are pre-existing and identical on both.
+
+## 2026-11-19 — CUDA text kernel on the old blend rule is latent, not live
+
+- The CUDA, Metal and legacy GLSL font-atlas strings in `common/gpu/font_atlas_composite.spl` still use the old flooring straight-alpha mix. **No CUDA pixel reaches them today:**
+  - the pinned PTX (`backend_cuda_font_ptx.spl`) is deliberately distrusted (semantics 1 against common 2, asserted by `cuda_generated_font_handoff_spec`);
+  - the web `cuda` backend is rejected at resolve on this GB10 host (`[backend-resolve] cuda rejected: readback_unproven source=cpu_fallback`), because clipped and masked ops take `_begin_cpu_path` and latch `cpu_fallback_used`.
+- **Order of work:** first the CUDA backend's `cpu_fallback` latch (clip and mask on the device), then a trusted regenerated PTX (semantics v3, emitter change in `src/compiler/70.backend/backend/gpu_portable_compute.spl`), then the image blend rule, with a device-readback test against `color.spl` `blend()`. Changing the rule first would alter no visible pixel.
