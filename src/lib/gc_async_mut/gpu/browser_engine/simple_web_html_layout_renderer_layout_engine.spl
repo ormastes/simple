@@ -18,7 +18,7 @@ use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, renderer_default_style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{absolute_margin_t, box_frac_w_reset, item_frac_w_hand_over, box_frac_w_take, box_frac_w_at, BOX_FRAC_W_UNSET, flex_item_text_frac_delta_milli_px, text_run_exact_width_milli_px, box_device_extra_h_reset, box_device_top_px, box_device_extra_h_record, box_device_extra_w_record, select_device_extra_w, input_type_is_column_sized, form_control_device_extra_h, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{absolute_margin_t, inline_sole_text_run, box_frac_w_reset, item_frac_w_hand_over, box_frac_w_take, box_frac_w_at, BOX_FRAC_W_UNSET, flex_item_text_frac_delta_milli_px, text_run_exact_width_milli_px, box_device_extra_h_reset, box_device_top_px, box_device_extra_h_record, box_device_extra_w_record, select_device_extra_w, input_type_is_column_sized, form_control_device_extra_h, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale}
 
 
 # --- Float context (CSS 2.2 section 9.5) -----------------------------------
@@ -3931,29 +3931,46 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                             line_iw = float_ctx_right_edge(cy, cy + line_probe_h, ix + iw) - ix
                             inline_x = inline_start_x
                             line_drop_guard = line_drop_guard - 1
+                # The text run this inline item wraps: a `#text` itself, or the
+                # one text run of a plain inline element that adds nothing
+                # horizontal (Chrome 159: `Before text <span>a long span …
+                # </span>` in 200 px breaks INSIDE the span, line 0 at x=81.83,
+                # then the following line boxes from x=0). Such an element
+                # wraps like its run: its box becomes the line box and the run
+                # inside it takes the first-line inset.
+                val run_node = if nodes[c].tag == "#text":
+                    c
+                elif inline_margin_l == 0 and inline_margin_r == 0:
+                    inline_sole_text_run(nodes, styles, c)
+                else:
+                    -1
+                val rst = if run_node >= 0: styles[run_node] else: cst
                 var text_first_dx = 0
                 if (
-                    nodes[c].tag == "#text" and
+                    run_node >= 0 and
                     not cst.white_space_nowrap and
                     not cst.white_space_pre and
+                    not rst.white_space_nowrap and
+                    not rst.white_space_pre and
                     inline_x > inline_start_x and
                     text_run_aligns_line_left(cst) and
+                    text_run_aligns_line_left(rst) and
                     inline_start_x == inline_base_x and line_iw == iw
                 ):
-                    val run_lead_space = if text_starts_with_collapsible_space(nodes[c].text_data):
+                    val run_lead_space = if text_starts_with_collapsible_space(nodes[run_node].text_data):
                         resolved_space_advance(
-                            cst, text_codepoints(nodes[c].text_trimmed)
+                            rst, text_codepoints(nodes[run_node].text_trimmed)
                         )
                     else:
                         0
                     val line_remainder = line_iw - inline_x - run_lead_space
-                    val run_trimmed = nodes[c].text_trimmed
+                    val run_trimmed = nodes[run_node].text_trimmed
                     if (
                         run_trimmed.byte_len() > 0 and
-                        style_measured_run_advance(run_trimmed, run_trimmed.byte_len(), cst) > line_remainder and
-                        style_run_byte_advances(cst, run_trimmed).len() == run_trimmed.byte_len()
+                        style_measured_run_advance(run_trimmed, run_trimmed.byte_len(), rst) > line_remainder and
+                        style_run_byte_advances(rst, run_trimmed).len() == run_trimmed.byte_len()
                     ):
-                        if first_word_advance_width(nodes[c], cst) > line_remainder:
+                        if first_word_advance_width(nodes[run_node], rst) > line_remainder:
                             val broken_h = align_inline_line_horizontal(
                                 child_index, st, line_nodes, line_iw, inline_x,
                                 out_bx, out_by
@@ -4119,6 +4136,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     run_pen_err as i32
                 else:
                     0
+                # The first-line inset this `#text` takes: its own, or the one
+                # its plain inline parent handed down for it (see run_node).
+                val run_first_dx = if nodes[c].tag == "#text": g_text_first_line_dx_pending else: 0
                 val child = layout_with_style(nodes, styles, child_index, c, inline_box_x, inline_y, inline_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, resolved_inline_style)
                 out_bx = child.bx
                 out_by = child.by
@@ -4130,22 +4150,26 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # What this box adds to the line height: its own box, except a
                 # one-line inline element with negative leading (below).
                 var inline_line_part_h = -1
-                if nodes[c].tag == "#text":
+                # A plain inline element whose one text run wrapped: content
+                # after it continues on its last line, as after a bare run.
+                val span_run_wrapped = run_node >= 0 and run_node != c and out_wrap_starts[run_node].len() > 1
+                if nodes[c].tag == "#text" or span_run_wrapped:
                     # Reserve the WRAPPED height: a text node that wraps to N
                     # lines occupies N*line-height, not one line. Collapsing it to
                     # a single line under-counts the inline run height, so cy
                     # advances too little and the next block overlaps the wrapped
                     # tail (see web_render_line_height_overlap_at_bottom).
-                    val wrap_lines = out_wrap_starts[c].len()
+                    val wrap_lines = out_wrap_starts[run_node].len()
                     val text_lines = if wrap_lines > 0: wrap_lines else: 1
-                    out_bh[c] = text_lines * style_line_h(cst)
-                    if collapsed_space_run:
-                        out_bw[c] = 0
-                    g_text_first_line_dx_pending = 0
-                    text_first_line_dx_record(nodes.len() as i32, c, text_first_dx)
-                    text_pen_origin_record(nodes.len() as i32, c, run_pen_origin)
-                    g_text_line_boxes_pending = []
-                    text_line_boxes_record(nodes.len() as i32, c, line_boxes_prefix(text_line_boxes, text_lines))
+                    if nodes[c].tag == "#text":
+                        out_bh[c] = text_lines * style_line_h(cst)
+                        if collapsed_space_run:
+                            out_bw[c] = 0
+                        g_text_first_line_dx_pending = 0
+                        text_first_line_dx_record(nodes.len() as i32, c, run_first_dx)
+                        text_pen_origin_record(nodes.len() as i32, c, run_pen_origin)
+                        g_text_line_boxes_pending = []
+                        text_line_boxes_record(nodes.len() as i32, c, line_boxes_prefix(text_line_boxes, text_lines))
                     # Inline content FOLLOWING a wrapped run continues on the
                     # run's LAST line, after its tail (Chrome, 300 px `<p>`:
                     # `<b>Bold</b> some … here <b>tail</b> end` puts `tail`
@@ -4157,7 +4181,10 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         text_lines > 1 and run_next >= 0 and
                         not cst.white_space_nowrap and
                         not cst.white_space_pre and
+                        not rst.white_space_nowrap and
+                        not rst.white_space_pre and
                         text_run_aligns_line_left(cst) and
+                        text_run_aligns_line_left(rst) and
                         ((inline_start_x == inline_base_x and line_iw == iw) or text_line_boxes.len() > 0)
                     ):
                         val run_line_h = style_line_h(cst)
@@ -4178,12 +4205,12 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         cy = cy + run_first.height + (text_lines - 2) * run_line_h + cursor_advance_px(cy_frac, run_first.height_frac_milli)
                         cy_frac = cursor_advance_frac(cy_frac, run_first.height_frac_milli)
                         var run_tail_x = text_last_line_advance(
-                            nodes[c].text_trimmed, cst,
-                            out_wrap_starts[c], out_wrap_ends[c]
+                            nodes[run_node].text_trimmed, rst,
+                            out_wrap_starts[run_node], out_wrap_ends[run_node]
                         )
-                        if text_ends_with_collapsible_space(nodes[c].text_data):
+                        if text_ends_with_collapsible_space(nodes[run_node].text_data):
                             run_tail_x = run_tail_x + resolved_space_advance(
-                                cst, text_codepoints(nodes[c].text_trimmed)
+                                rst, text_codepoints(nodes[run_node].text_trimmed)
                             )
                         inline_start_x = float_ctx_left_edge(cy, cy + line_probe_h, ix + inline_base_x) - ix
                         line_iw = float_ctx_right_edge(cy, cy + line_probe_h, ix + iw) - ix

@@ -352,6 +352,26 @@ fn inline_line_baseline_descent(st: Style) -> i32:
 fn inline_box_is_plain_element(node: HNode, st: Style) -> bool:
     node.tag != "#text" and st.display == "inline" and not grid_item_is_replaced(node)
 
+# The text run of plain inline element `c` when that run is its only child and
+# the element adds no horizontal padding or border, else -1. Chrome wraps such
+# an element exactly like the run inside it, one fragment per line. Nodes are
+# in document order, so that child is `c + 1` and no later node is `c`'s.
+# reason: node indices are the layout tables' own i32 keys
+# @allow(primitive_api)
+pub fn inline_sole_text_run(nodes: [HNode], styles: [Style], c: i32) -> i32:
+    val st = styles[c]
+    if not inline_box_is_plain_element(nodes[c], st):
+        return -1
+    if st.pad_l != 0 or st.pad_r != 0 or st.border_l != 0 or st.border_r != 0:
+        return -1
+    val t = c + 1
+    val n = nodes.len() as i32
+    if t >= n or nodes[t].parent != (c as i64) or nodes[t].tag != "#text":
+        return -1
+    if t + 1 < n and nodes[t + 1].parent == (c as i64):
+        return -1
+    t
+
 # Baseline shift of `vertical-align: sub | super`, positive = DOWN, rounded to
 # the nearest pixel. Chrome (Blink) lowers a `sub` box by a fifth of the
 # PARENT's font size plus 1 px and raises a `super` box by a third plus 1 px.
@@ -766,7 +786,9 @@ class TextWrapCache:
 
 # Content area of an inline box = the face's rounded ascent + descent (Chrome 159:
 # 17px for Liberation Serif 16px, where the estimate below gives 18).
-fn inline_content_area_height(st: Style) -> i32:
+# reason: a pixel height in the layout tables' own i32 units
+# @allow(primitive_api)
+pub fn inline_content_area_height(st: Style) -> i32:
     val ad = style_face_ascent_descent(st)
     if ad.len() == 2 and ad[0] > 0:
         return ad[0] + ad[1]

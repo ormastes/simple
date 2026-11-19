@@ -13,7 +13,7 @@ use std.common.encoding.utf8.{text_codepoint_len, text_codepoints}
 use common.string_builder.{StringBuilder}
 use std.gc_async_mut.io.mod_stub.{env_get}
 use common.ui.draw_ir.{DrawIrCommand, DrawIrRect, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_rect_bounds, draw_ir_rect_clipped, draw_ir_style_prop, draw_ir_text_styled_clipped}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_at, layout_device_scale}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_at, layout_device_scale, inline_sole_text_run, inline_content_area_height}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
 use std.gc_async_mut.gpu.browser_engine.form_control_chrome.{ChromeSpans, chrome_checkable_spans, chrome_select_arrow_spans, chrome_resizer_spans, chrome_frame_spans}
 
@@ -971,6 +971,47 @@ fn _html_draw_ir_wrap_extra_line_commands(
             vector_fonts
         ), boxes, i, line_i))
         line_i = line_i + 1
+    out
+
+# A plain inline element whose one text run wrapped paints its box once per
+# line FRAGMENT, not as one strip over the run's whole line box (Chrome 159,
+# 200 px block, line-height 20: `Before text <span style=background:#0f0>a
+# long span that wraps …</span>` fills 82..195, 0..187 and 0..31 on three
+# lines, each 17 px tall). Each fragment is that line's text width by the
+# element's content area, from the run's own (content-area) top on that line.
+# `box` is the element's own
+# command; its style props carry over. Empty when the element did not wrap.
+fn _html_draw_ir_inline_fragment_boxes(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32, box: DrawIrCommand
+) -> [DrawIrCommand]:
+    var out: [DrawIrCommand] = []
+    val run = inline_sole_text_run(nodes, styles, i)
+    if run < 0 or boxes.wrap_starts[run].len() <= 1:
+        return out
+    val st = styles[i]
+    val tst = styles[run]
+    if st.border_t != 0 or st.border_b != 0 or tst.white_space_nowrap:
+        return out
+    val txt = nodes[run].text_trimmed
+    val starts = boxes.wrap_starts[run]
+    val ends = boxes.wrap_ends[run]
+    val advances = style_run_byte_advances(tst, txt)
+    val lh = style_line_h(tst)
+    val area_h = inline_content_area_height(st)
+    var k = 0
+    # cpu-lane-loop-ok: one box per wrapped line of this element's run; bound is its layout line count
+    while k < starts.len():
+        val fx = boxes.bx[run] + text_line_box_dx(boxes.first_line_dx, boxes.line_boxes, run, k)
+        val fy = boxes.by[run] + k * lh
+        val fw = style_text_line_advance_width_with(
+            advances, txt, starts[k], ends[k], style_text_advance(tst), style_space_advance(tst)
+        )
+        val rect = draw_ir_rect_bounds(fx, fy, fw, area_h)
+        out.push(draw_ir_box_with_style(
+            box.component_id + "_frag{k}", fx, fy, fw, area_h, box.color,
+            rect, rect, rect, box.clip_rect, box.computed_style
+        ))
+        k = k + 1
     out
 
 fn _html_draw_ir_image_index(
