@@ -218,9 +218,9 @@ fn tg_page() -> text:
     body = body + grp_cell(48, 8, "rgb(255,255,255)", grp_group("0.5", tg_img(0, 10) + tg_box(6, 10, 8, "background:rgba(0,0,0,0.5)")))
     "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\">" + body + "</body></html>"
 
-# Chrome 159 colours of tg_page() (k=4, `--window-size=64,16`). The raster
-# admits every cell except (34..46, 4) and (50..60, 12), whose two non-opaque
-# paints overlap (Chrome there: B7DBFF E3D994 FFE793 / B8C2FB 9A9FBC BFBFBF).
+# Chrome 159 colours of tg_page() (k=4, `--window-size=64,16`). The cells
+# (34..46, 4) and (50..60, 12), whose two non-opaque paints overlap (Chrome
+# there: B7DBFF E3D994 FFE793 / B8C2FB 9A9FBC BFBFBF), are TG_DEV_* / TG_IMG_*.
 # The image pixel (18,12) (Chrome 8829A5) is pinned on the raster only when the
 # image resource is supplied (simple_web_layout_render_html_software_pixels_with_images).
 val TG_X: [i32] = [2, 8, 13, 18, 24, 29, 50, 50, 54, 56, 61, 8, 13, 24, 29, 33, 37, 41, 45]
@@ -306,8 +306,7 @@ fn mr_mismatches(px: [u32], fw: i32) -> i32:
         n = n + 1
     bad
 
-# Chrome colours of tg_page() cells the raster declines: the Engine2D lanes
-# composite layers with real alpha. (40,4) is two translucent paints
+# Chrome colours of tg_page()'s overlapping-paint cells. (40,4) is two translucent paints
 # overlapping inside the group layer (Chrome E3D994): the layer pixel follows
 # Skia's premultiplied 8-bit value (color.spl `_blend_premul_over`). The direct
 # html->pixels entries resolve no resources, so the <img> is absent there and
@@ -318,7 +317,10 @@ val TG_DEV_Y: [i32] = [4, 4, 4, 4, 12]
 val TG_DEV_CHROME: [u32] = [0xFFB7DBFFu32, 0xFFB7DBFFu32, 0xFFE3D994u32, 0xFFFFE793u32, 0xFFBFBFBFu32]
 
 fn tg_dev_mismatches(px: [u32], fw: i32) -> i32:
-    var bad = tg_mismatches(px, fw, false)
+    tg_mismatches(px, fw, false) + tg_dev_cells(px, fw)
+
+fn tg_dev_cells(px: [u32], fw: i32) -> i32:
+    var bad = 0
     if px.len() < fw * 16:
         return 999
     var n = 0
@@ -347,6 +349,32 @@ fn tg_img_resources() -> [SimpleOsHostGpuImageResource]:
 val TG_IMG_X: [i32] = [18, 50, 54]
 val TG_IMG_Y: [i32] = [12, 12, 12]
 val TG_IMG_CHROME: [u32] = [0xFF8829A5u32, 0xFFB8C2FBu32, 0xFF9A9FBCu32]
+
+# One member with two overlapping non-opaque items (translucent background
+# under a translucent 3px border) in a 0.5 group over white. Chrome 159 k=4
+# (`--window-size=400,300`), uniform 4x4 device blocks.
+fn ti_page() -> text:
+    "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\">" +
+        grp_cell(0, 0, "rgb(255,255,255)", grp_group("0.5",
+            tg_box(0, 12, 8, "box-sizing:border-box;background:rgba(255,0,0,0.5);border:3px solid rgba(0,0,255,0.5)") +
+            tg_box(13, 3, 8, "background:rgb(0,160,0)"))) + "</body></html>"
+
+val TI_X: [i32] = [1, 10, 5, 8, 12, 14]
+val TI_Y: [i32] = [1, 6, 3, 4, 4, 4]
+val TI_CHROME: [u32] = [0xFFBE9EDEu32, 0xFFBE9EDEu32, 0xFFFFBFBFu32, 0xFFFFBFBFu32, 0xFFFFFFFFu32, 0xFF7ECF7Eu32]
+
+fn ti_mismatches(px: [u32]) -> i32:
+    if px.len() < 16 * 8:
+        return 999
+    var bad = 0
+    var n = 0
+    while n < TI_X.len():
+        val got = px[TI_Y[n] * 16 + TI_X[n]]
+        if got != TI_CHROME[n]:
+            print "two-item cell ({TI_X[n]},{TI_Y[n]}) got {got} want {TI_CHROME[n]}"
+            bad = bad + 1
+        n = n + 1
+    bad
 
 describe "CSS opacity groups composite as Chrome 159 does":
     it "restores an opaque layer pixel with SkBlendARGB32 at alpha round(opacity*255)":
@@ -427,19 +455,25 @@ describe "CSS opacity groups composite as Chrome 159 does":
 
     it "composites groups with translucent, shadow, gradient and image members on the CPU raster as Chrome does":
         val px = simple_web_layout_render_html_software_pixels(tg_page(), 64, 16)
-        expect(tg_mismatches(px, 64, true)).to_equal(0)
+        expect(tg_mismatches(px, 64, true) + tg_dev_cells(px, 64)).to_equal(0)
+
+    it "composites a member with two overlapping translucent items on the CPU raster as Chrome does":
+        expect(ti_mismatches(simple_web_layout_render_html_software_pixels(ti_page(), 16, 8))).to_equal(0)
+
+    it "composites a member with two overlapping translucent items on cpu_simd as Chrome does":
+        expect(ti_mismatches(simple_web_render_html_to_pixels_with_resolved_engine2d_backend(ti_page(), 16, 8, "cpu_simd"))).to_equal(0)
+
+    it "composites a member with two overlapping translucent items on Vulkan as Chrome does":
+        expect(ti_mismatches(simple_web_render_html_to_pixels_with_resolved_engine2d_backend(ti_page(), 16, 8, "vulkan"))).to_equal(0)
 
     it "composites an <img> group member on the CPU raster as Chrome does when the image resource is supplied":
         val res = tg_img_resources()
         expect(res.len()).to_equal(1)
         val px = simple_web_layout_render_html_software_pixels_with_images(tg_page(), 64, 16, res)
         var bad = tg_mismatches(px, 64, true)
-        # Only (18,12): the raster does not admit the overlapping-paint cell
-        # holding (50,12)/(54,12) as a group (see the TG_X comment), so those
-        # stay pinned on the Engine2D lanes alone.
         if px.len() >= 64 * 16:
             var k = 0
-            while k < 1:
+            while k < TG_IMG_X.len():
                 val got = px[TG_IMG_Y[k] * 64 + TG_IMG_X[k]]
                 if got != TG_IMG_CHROME[k]:
                     print "raster image pixel ({TG_IMG_X[k]},{TG_IMG_Y[k]}) got {got} want {TG_IMG_CHROME[k]}"
