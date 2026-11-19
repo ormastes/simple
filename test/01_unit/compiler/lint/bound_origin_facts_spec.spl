@@ -1,0 +1,75 @@
+"""
+## Purpose and audience
+Purpose: Prove the boundary origin-facts scan records, for each bound value in
+a module, where it came from (literal, param, extern return, cast, copy, call)
+and that the `simple robust inventory` text rendering is deterministic.
+Audience: compiler and tooling engineers maintaining robust-boundary lints.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Text-level facts (same slice as SPL-BOUND-001..003); typed HIR facts remain open.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.semantics.lint.bound_origin_facts.{bound_origin_facts, bound_origin_inventory_text, BoundOriginFact}
+use app.cli.robust_command.{run_robust}
+
+val SRC = "extern fn c_read() -> i32\n@unsafe(reason: \"adapter\", capabilities: [ffi])\nfn adapter(n: i64) -> i32:\n    val raw = c_read()\n    val k = 5\n    val c = raw as i64\n    val d = raw\n    val e = helper(k)\n    raw\n"
+
+fn origin_of(fs: [BoundOriginFact], subject: text) -> text:
+    for f in fs:
+        if f.subject == subject:
+            return f.origin
+    ""
+
+# @manual_section: bound_origin_facts
+describe "boundary origin facts":
+    """Each boundary value records its origin kind."""
+
+    it "classifies extern, param, literal, cast, copy and call origins":
+        # @req: REQ-DIAG-POLICY-001
+        step("Scan the sample module")
+        val fs = bound_origin_facts(SRC, "m.spl")
+        expect(origin_of(fs, "c_read")).to_equal("extern_decl")
+        expect(origin_of(fs, "n")).to_equal("param")
+        expect(origin_of(fs, "raw")).to_equal("extern_return")
+        expect(origin_of(fs, "k")).to_equal("literal")
+        expect(origin_of(fs, "c")).to_equal("cast")
+        expect(origin_of(fs, "d")).to_equal("copy")
+        expect(origin_of(fs, "e")).to_equal("call")
+
+    it "marks facts inside an ffi adapter as boundary":
+        # @req: REQ-DIAG-POLICY-001
+        step("Scan and check the boundary flag")
+        val fs = bound_origin_facts(SRC, "m.spl")
+        var adapter_facts = 0
+        for f in fs:
+            if f.function == "adapter" and f.boundary:
+                adapter_facts = adapter_facts + 1
+        expect(adapter_facts > 0).to_equal(true)
+
+    it "renders a deterministic inventory":
+        # @req: REQ-DIAG-POLICY-001
+        step("Render twice")
+        val a = bound_origin_inventory_text(SRC, "m.spl")
+        val b = bound_origin_inventory_text(SRC, "m.spl")
+        expect(a).to_equal(b)
+        expect(a.contains("m.spl:4 adapter raw extern_return boundary")).to_equal(true)
+        expect(a.contains("summary: ")).to_equal(true)
+
+describe "simple robust inventory":
+    """The CLI entry validates arguments and prints the inventory."""
+
+    it "fails with usage on missing args and missing files":
+        # @req: REQ-DIAG-POLICY-001
+        step("Call run_robust with bad input")
+        expect(run_robust([])).to_equal(2)
+        expect(run_robust(["inventory"])).to_equal(2)
+        expect(run_robust(["inventory", "no/such/file.spl"])).to_equal(2)
+
+    it "succeeds on a real file":
+        # @req: REQ-DIAG-POLICY-001
+        step("Inventory the origin-facts module itself")
+        expect(run_robust(["inventory", "src/compiler/35.semantics/lint/bound_origin_facts.spl"])).to_equal(0)
