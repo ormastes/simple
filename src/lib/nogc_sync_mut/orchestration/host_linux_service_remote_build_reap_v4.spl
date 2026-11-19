@@ -226,6 +226,30 @@ pub fn host_remote_build_prepare_reaped_gate_v4(journal: DistributedOperationJou
     if index.unwrap().is_some(): return "host-remote-build-operation-reaped"
     ""
 
+# milestone_0045 (owner decision 4): the reap record of an operation the startup reap indexed, found through the index (the
+# restarted service knows the operation id, not the prior fence). Ok(None) when the operation was never indexed. The index
+# must be the canonical bytes for THIS operation and the record must name the same operation and fence; anything else is an
+# error (the caller then answers the typed refusal, never a receipt). Read-only.
+pub fn host_remote_build_reaped_record_v4(journal: DistributedOperationJournalV2,
+        operation_id: text) -> Result<Option<HostRemoteBuildReapRecordV4>, text>:
+    val index = distributed_operation_journal_read_v3(journal, host_remote_build_reap_index_relative_v4(operation_id),
+        HOST_REMOTE_BUILD_REAP_MAX_BYTES_V4)?
+    if index.is_none(): return Ok(None)
+    val parsed = match sdn_parse_strict_v1(index.unwrap(), SdnStrictLimitsV1(max_source_bytes: HOST_REMOTE_BUILD_REAP_MAX_BYTES_V4,
+            max_depth: 2, max_nodes: 16, max_rows: 0, max_cells: 0, max_columns: 8)):
+        case Ok(value): value
+        case Err(_): return Err("linux-host-remote-build-reap-index-invalid")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("linux-host-remote-build-reap-index-invalid")
+    if not fields.contains_key("priorFence"): return Err("linux-host-remote-build-reap-index-invalid")
+    val prior_fence = remote_build_reap_text_v4(fields, "priorFence")?
+    if remote_build_reap_index_encode_v4(operation_id, prior_fence) != index.unwrap(): return Err("linux-host-remote-build-reap-index-invalid")
+    val record = host_remote_build_reap_record_decode_v4(distributed_operation_journal_read_required_v3(journal,
+        host_remote_build_reap_relative_v4(prior_fence, operation_id), HOST_REMOTE_BUILD_REAP_MAX_BYTES_V4)?)?
+    if record.operation_id != operation_id or record.prior_fence != prior_fence: return Err("linux-host-remote-build-reap-record-conflict")
+    Ok(Some(record))
+
 # Integration review P3-a: a run the reap skipped because its outcome is already published (outcome before `completed`,
 # then a restart) answers terminal over the route; its bundle is reached through the completion-evidence reopen arm
 # (host_linux_completion_evidence_v3.spl:68). Read-only: the record's prior fence is not checked against this one.
@@ -239,7 +263,7 @@ pub fn host_remote_build_published_answer_v4(journal: DistributedOperationJourna
     "linux-host-remote-build-completed:" + record.unwrap().outcome
 
 export HostRemoteBuildReapRowV4, HostRemoteBuildReapRecordV4, HostRemoteBuildReapTurnV4
-export host_remote_build_prepare_reaped_gate_v4, host_remote_build_published_answer_v4
+export host_remote_build_prepare_reaped_gate_v4, host_remote_build_published_answer_v4, host_remote_build_reaped_record_v4
 export host_remote_build_reap_index_relative_v4, host_remote_build_reap_relative_v4
 export host_remote_build_reap_record_encode_v4, host_remote_build_reap_record_decode_v4
 export host_remote_build_reap_select_v4, host_remote_build_reap_v4
