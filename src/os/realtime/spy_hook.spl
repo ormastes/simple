@@ -1,0 +1,39 @@
+# @platform: baremetal
+#
+# Realtime Spy instrumentation point (DHR P5): the target-side producer for
+# the bare-metal Spy ring (std.spy.bm_spy_emitter). The timer ISR brackets its
+# body with spy_isr_enter / spy_isr_exit, which write one Entry and one Exit
+# observer edge carrying a stable site id and the scheduler tick.
+#
+# Gate: the `dhr` build feature (SIMPLE_FEATURES lists `dhr`), the same switch
+# as the P2 assert hook. Without it the spy imports below are blanked by the
+# preprocessor and each hook compiles to a no-op: no buffer is touched,
+# nothing is emitted, and the default closure holds no spy module (DHR OFF-01).
+#
+# Bounded: the hooks only call bm_spy_emit, which never allocates (a full ring
+# drops the edge and discloses it as an in-stream Loss record); the host
+# drains the ring with std.nogc_sync_mut.trace.bm_spy_drain_v1.BmSpyDrainV1.
+@when(feature = "dhr"):
+use std.spy.bm_spy_emitter.{bm_spy_emit}
+use std.common.trace.observer_contract_v1.{TraceEventKindV1, trace_event_kind_code_v1}
+@end
+
+# Stable site ids. A drained trace names its site by this number, so a value
+# is never renumbered or reused once shipped.
+pub val SPY_SITE_TIMER_ISR: i64 = 1
+
+@allow(primitive_api)  # reason: ISR hot path; raw site id and tick count, no allocation for a domain wrapper
+pub fn spy_isr_enter(site: i64, tick: i64):
+    @when(feature = "dhr"):
+    bm_spy_emit(trace_event_kind_code_v1(TraceEventKindV1.Entry) as i64, site, tick)
+    @else:
+    pass_do_nothing("dhr feature off: Spy ISR hook compiled out")
+    @end
+
+@allow(primitive_api)  # reason: ISR hot path; raw site id and tick count, no allocation for a domain wrapper
+pub fn spy_isr_exit(site: i64, tick: i64):
+    @when(feature = "dhr"):
+    bm_spy_emit(trace_event_kind_code_v1(TraceEventKindV1.Exit) as i64, site, tick)
+    @else:
+    pass_do_nothing("dhr feature off: Spy ISR hook compiled out")
+    @end
