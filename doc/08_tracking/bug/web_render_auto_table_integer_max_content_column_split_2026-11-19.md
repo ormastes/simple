@@ -45,3 +45,5 @@ table_collapsed_border_paint_chrome159_spec 170.38 case still holds).
 5. h3 "Feature examples and support" + heading region: 809 px, x64-352 y288-320
 Remainder (~390 px each, 4 bands) are the repeated "No complete rendering claim..." lines: LCD text AA only, no layout offset.
 Items 2-5 and the rest are text antialiasing deltas (glyph geometry matches visually), not layout shifts.
+
+- 2026-11-19 re-probe at 1x (release/1.0.0 5876e8e16b6): css-paint first table inner column rule is at x=416 in both Chrome 159 and Simple (edges 416/417 identical, rule rows 122-347 identical); the x=417 offset is gone. Remaining css-paint mismatch in that table box (~6.1k px, 2.38% page) is vertical/text, not the column split.
