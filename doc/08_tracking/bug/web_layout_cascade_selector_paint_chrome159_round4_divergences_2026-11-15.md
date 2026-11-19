@@ -945,3 +945,14 @@ head (13/40 at base).
   - The backdrop root is the whole frame painted so far. Inside an opacity group or other offscreen it is the group's surface.
   - Sigma below 2 uses a true Gaussian; Chrome there was not measured.
   - On a real GPU, the readback is a device sync that only blurred boxes pay.
+
+## 2026-11-19 — raster soft box-shadow falloff up to 11 levels off Chrome (FIXED)
+
+- **Symptom:** a 60x30 box with `box-shadow: 0 10px 8px rgba(0,0,0,0.8)` on white, sampled down x=50 and along y=40 at device scale 1. The raster was up to 11 levels darker near the shadow edge: `99` at (50,60) against Chrome's `A2`, and `72` against `7D` at (50,58).
+- **Cause:** `fb_soft_box_shadow` used a piecewise-linear erf product with sigma = blur / 2. It measured distances from pixel edges rather than centres, and cut the shadow off at 1 x blur, although the blur reaches about 1.5 x blur.
+- **Fix:** Chrome blurs the shadow's rect mask with Skia's raster kernel. That is the same triple box `backdrop-filter` uses, and on a rect it separates into one blurred-step profile per axis.
+  - `engine2d_blur_step_profile` (`draw_ir_box_effects.spl`) computes a profile with that kernel.
+  - `fb_soft_box_shadow` builds one profile per axis, extends the painted extent to about 3 sigma, and keeps the existing native blend row.
+  - `_phi256` is deleted.
+- **Evidence:** the new `box_shadow_raster_falloff_chrome159_spec` checks 12 points against Chrome at k=1, all within ±2; it fails on base and passes on head. Base vs head sweep of 23 shadow, opacity-group, backdrop, Chrome-parity and coverage specs: 0 new failures, 1 fixed.
+- **Not covered:** rounded-corner shadows still use the separable rect profile. Draw IR shadows at k=1 are up to 8 levels off Chrome; at k=4 they are within ±2.
