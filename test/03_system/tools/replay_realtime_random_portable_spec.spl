@@ -5,12 +5,14 @@
 
 # DHR P6 portability proof: the realtime random hook runs on the portable
 # semantic replay core (std.replay.portable_replay). These pins were taken on
-# the pre-P6 ring implementation and must hold unchanged on the core (the
-# last example pins the routing itself and is P6-only).
+# the pre-P6 ring implementation and must hold unchanged on the core, except
+# the divergence return value: P6 removed the live fallback, so a diverging
+# Replay read now returns the core's fail-closed value (the routing and
+# fail-closed examples are P6-only).
 
 use std.spec.*
 use std.replay.bm_replay_core.{bm_ring_init, bm_ring_count}
-use std.replay.portable_replay.{portable_replay_reset, portable_replay_pending}
+use std.replay.portable_replay.{portable_replay_reset, portable_replay_pending, PR_FAIL_CLOSED_VALUE}
 use os.realtime.replay.mode.{rtos_replay_set_mode, rtos_replay_next_seq}
 use os.realtime.replay.hooks.{rr_hook_random, rr_divergence_count, rr_reset_divergences, rr_event_count}
 
@@ -56,11 +58,24 @@ describe "realtime random hook on the portable replay core":
         expect(rr_divergence_count()).to_equal(0)
         expect(rr_event_count()).to_equal(0)
 
-    it "Replay of an exhausted log counts a divergence":
+    it "Replay of an exhausted log counts a divergence and fails closed":
+        # Changed contract (DHR P6 "no live fallback"): this example used to
+        # pin the live value 77 being returned on divergence. Replay must never
+        # hand the live value back, so it now returns the core's fail-closed value.
         _reset()
         rtos_replay_set_mode(REPLAY)
-        expect(rr_hook_random(77)).to_equal(77)
+        expect(rr_hook_random(77)).to_equal(PR_FAIL_CLOSED_VALUE)
         expect(rr_divergence_count()).to_equal(1)
+
+    it "Replay past the recorded values fails closed, never live (P6)":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        rr_hook_random(42)
+        rtos_replay_set_mode(REPLAY)
+        expect(rr_hook_random(900)).to_equal(42)
+        expect(rr_hook_random(901)).to_equal(PR_FAIL_CLOSED_VALUE)
+        expect(rr_divergence_count()).to_equal(1)
+        expect(rr_event_count()).to_equal(0)
 
     it "Verify returns the live value without divergence or consumption":
         _reset()

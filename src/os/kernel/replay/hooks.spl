@@ -4,11 +4,61 @@
 # Called from kernel subsystems (scheduler, syscall, IPC, interrupts, timer).
 # Each hook checks replay_is_off() first — single load + branch, zero cost
 # when replay is disabled.
+#
+# Timer and random reads run on the portable semantic replay core
+# std.replay.portable_replay (DHR P6), in replay scope KERNEL_PR_SCOPE; they
+# are no longer written to the kernel log ring. The other hooks still use the
+# ring.
 
-use os.kernel.replay.mode.{replay_is_off, replay_is_recording, replay_mode, KernelReplayMode}
+use os.kernel.replay.mode.{replay_is_off, replay_is_recording, replay_is_verifying, replay_mode, KernelReplayMode}
 use os.kernel.replay.event_kinds.{ReplayEntry, EventKind}
 use os.kernel.replay.log_buffer.{replay_log_event, replay_read_next}
 use os.kernel.replay.divergence.{DivergenceKind, report_divergence}
+use std.replay.portable_replay.{
+    PR_MODE_RECORD, PR_MODE_REPLAY, PR_KIND_TIMER_READ, PR_KIND_RANDOM_READ,
+    PR_DIV_NONE, PR_DIV_LOG_EXHAUSTED,
+    portable_replay_set_mode, portable_replay_mode, portable_replay_open_scope,
+    portable_replay_scope_is_open, portable_replay_event, portable_replay_last_divergence
+}
+
+val KERNEL_PR_SCOPE: i64 = 2
+# Each timer source gets its own layer-defined kind
+# (PR_KIND_TIMER_READ + source_id * stride), so a read from a different source
+# than the recorded one is a kind mismatch. The stride keeps every derived
+# kind congruent to PR_KIND_TIMER_READ, disjoint from the other core kinds.
+val KERNEL_PR_TIMER_SOURCE_STRIDE: i64 = 16
+
+fn replay_portable_sync():
+    """Mirror the (non-Off) kernel mode onto the portable replay session.
+    Record/ChaosRecord record; Replay and Verify both read the core's log
+    (Verify then compares against the live value and returns it)."""
+    var want = PR_MODE_REPLAY
+    if replay_is_recording():
+        want = PR_MODE_RECORD
+    if portable_replay_mode() != want:
+        portable_replay_set_mode(want)
+    if not portable_replay_scope_is_open():
+        portable_replay_open_scope(KERNEL_PR_SCOPE)
+
+# Shared Replay/Verify tail of the timer and random hooks. `logged` is what the
+# core returned for this event. Replay returns it — the logged value, or the
+# core's fail-closed value on divergence, never `live`. Verify returns `live`
+# and reports a changed or mismatched event; an exhausted log is not reported
+# in Verify (as before P6). The core keeps no kernel event id, so reports
+# carry event_id -1 and, on a core divergence, the PR_DIV_* reason as expected.
+@allow(primitive_api)  # kernel replay ABI: values and divergence codes are raw i64 log payloads
+fn replay_portable_resolve(kind: DivergenceKind, logged: i64, live: i64, actual: i64) -> i64:
+    val reason = portable_replay_last_divergence()
+    if replay_is_verifying():
+        if reason == PR_DIV_NONE:
+            if logged != live:
+                report_divergence(kind, -1, logged, live)
+        elif reason != PR_DIV_LOG_EXHAUSTED:
+            report_divergence(kind, -1, reason, live)
+        return live
+    if reason != PR_DIV_NONE:
+        report_divergence(kind, -1, reason, actual)
+    logged
 
 # ============================================================================
 # Schedule Hook
@@ -215,42 +265,18 @@ fn replay_hook_ipc_recv(dst_task: i64, src_port: i64, msg_len: i64):
 # Timer Hook
 # ============================================================================
 
+# Replay returns the logged counter for this source instead of the hardware
+# read; a different source, a wrong event or an exhausted log is a
+# TimerMismatch divergence and returns the fail-closed value, never `value`.
 fn replay_hook_timer_read(source_id: i64, value: i64) -> i64:
     if replay_is_off():
         return value
-
+    replay_portable_sync()
+    val kind = PR_KIND_TIMER_READ + source_id * KERNEL_PR_TIMER_SOURCE_STRIDE
+    val logged = portable_replay_event(kind, KERNEL_PR_SCOPE, value)
     if replay_is_recording():
-        var entry = ReplayEntry.create(EventKind.TimerRead, 0, 0, 0)
-        entry.payload_a = source_id
-        entry.payload_b = value
-        replay_log_event(entry)
         return value
-
-    match replay_mode():
-        case KernelReplayMode.Replay:
-            # Return logged value instead of hardware read. A wrong event or an
-            # exhausted log is a divergence, never a silent live fallback.
-            match replay_read_next():
-                case Some(entry):
-                    if entry.kind == EventKind.TimerRead.to_i32() and entry.payload_a == source_id:
-                        return entry.payload_b
-                    report_divergence(DivergenceKind.TimerMismatch, entry.event_id, entry.payload_a, source_id)
-                    return value
-                case None:
-                    report_divergence(DivergenceKind.TimerMismatch, -1, source_id, value)
-                    return value
-        case KernelReplayMode.Verify:
-            # Compare live value against logged, return live
-            match replay_read_next():
-                case Some(entry):
-                    if entry.payload_b != value:
-                        report_divergence(DivergenceKind.TimerMismatch, entry.event_id, entry.payload_b, value)
-                    return value
-                case None:
-                    return value
-        case _:
-            return value
-    value
+    replay_portable_resolve(DivergenceKind.TimerMismatch, logged, value, source_id)
 
 # ============================================================================
 # Thread Lifecycle Hooks
@@ -316,41 +342,17 @@ fn replay_hook_thread_exit(task_id: i64, exit_code: i64):
 # Random/Entropy Hook
 # ============================================================================
 
+# Replay returns the logged entropy instead of the hardware RNG; a wrong event
+# or an exhausted log is a RandomMismatch divergence and returns the
+# fail-closed value, never `value`.
 fn replay_hook_random_read(task_id: i64, value: i64) -> i64:
     if replay_is_off():
         return value
-
+    replay_portable_sync()
+    val logged = portable_replay_event(PR_KIND_RANDOM_READ, KERNEL_PR_SCOPE, value)
     if replay_is_recording():
-        var entry = ReplayEntry.create(EventKind.RandomSeed, task_id, 0, 0)
-        entry.payload_a = value
-        replay_log_event(entry)
         return value
-
-    match replay_mode():
-        case KernelReplayMode.Replay:
-            # Return logged entropy instead of hardware RNG; a wrong event or an
-            # exhausted log is a divergence, never a silent live fallback.
-            match replay_read_next():
-                case Some(entry):
-                    if entry.kind == EventKind.RandomSeed.to_i32():
-                        return entry.payload_a
-                    report_divergence(DivergenceKind.RandomMismatch, entry.event_id, entry.kind.to_i64(), value)
-                    return value
-                case None:
-                    report_divergence(DivergenceKind.RandomMismatch, -1, 0, value)
-                    return value
-        case KernelReplayMode.Verify:
-            # Compare live entropy against logged, return live
-            match replay_read_next():
-                case Some(entry):
-                    if entry.payload_a != value:
-                        report_divergence(DivergenceKind.RandomMismatch, entry.event_id, entry.payload_a, value)
-                    return value
-                case None:
-                    return value
-        case _:
-            return value
-    value
+    replay_portable_resolve(DivergenceKind.RandomMismatch, logged, value, value)
 
 # ============================================================================
 # Checkpoint Marker
