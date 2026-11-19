@@ -1,0 +1,33 @@
+# Worker-exit → recovery policy (DHR P3, plan:
+# doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md).
+#
+# Maps a real KPF worker's terminal exit onto the one KpfRecoveryTransaction.
+# A crash, deadline kill, or protocol violation of the candidate worker fails
+# the candidate (rollback, or Blocked when effects forbid it); a clean close is
+# not a failure. The caller restarts the V1 worker only when the receipt is
+# Applied with phase Restored — this module never spawns or kills processes.
+
+use os.smf.kernel_plugin.worker_protocol.{KpfWorkerOutcome}
+use os.smf.kernel_plugin.real_worker_process.{KpfRealWorkerExitV1}
+use std.nogc_sync_mut.kernel_plugin.status.KpfSyncStatus
+use std.nogc_sync_mut.kernel_plugin.recovery_transaction.{
+    KpfRecoveryTransaction, KpfRecoveryReceipt, KpfRecoveryVerdict,
+}
+
+# @allow(primitive_api) predicate over a worker outcome; bool is the predicate result
+pub fn kpf_worker_exit_is_failure(outcome: KpfWorkerOutcome) -> bool:
+    match outcome:
+        case KpfWorkerOutcome.WorkerCrashed: true
+        case KpfWorkerOutcome.TimedOut: true
+        case KpfWorkerOutcome.MalformedFrame: true
+        case KpfWorkerOutcome.ProtocolMismatch: true
+        case KpfWorkerOutcome.FrameTooLarge: true
+        case _: false
+
+pub fn kpf_recover_on_worker_exit(tx: KpfRecoveryTransaction, exit: KpfRealWorkerExitV1) -> KpfRecoveryReceipt:
+    if kpf_worker_exit_is_failure(exit.outcome):
+        return tx.fail_candidate()
+    KpfRecoveryReceipt(verdict: KpfRecoveryVerdict.Rejected, phase: tx.phase,
+        status: KpfSyncStatus.Ok, execution_epoch: tx.execution_epoch,
+        state_revision: tx.baseline_state_revision,
+        reason: "worker exit is not a candidate failure")

@@ -1,0 +1,54 @@
+# @cover src/os/smf/kernel_plugin/recovery_worker.spl 100%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-DHR-02
+# plan: doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md
+
+# Pure policy spec: exit records are constructed directly. Real-subprocess
+# evidence needs a POSIX host (real_worker_integration_spec spawns /bin/sh).
+
+use std.spec.*
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.nogc_sync_mut.kernel_plugin.generation.{KpfGenerationTable}
+use std.nogc_sync_mut.kernel_plugin.recovery_transaction.{
+    KpfRecoveryTransaction, KpfRecoveryPhase, KpfRecoveryVerdict, KpfEffectOutcome,
+}
+use os.smf.kernel_plugin.worker_protocol.{KpfWorkerOutcome}
+use os.smf.kernel_plugin.real_worker_process.{KpfRealWorkerExitV1}
+use os.smf.kernel_plugin.recovery_worker.{kpf_recover_on_worker_exit}
+
+fn id(value: u64) -> KpfId128: KpfId128(hi: value, lo: value + 1)
+fn digest(value: u64) -> KpfDigest256: KpfDigest256(w0: value, w1: value + 1, w2: value + 2, w3: value + 3)
+
+fn _exit(outcome: KpfWorkerOutcome) -> KpfRealWorkerExitV1:
+    KpfRealWorkerExitV1(outcome: outcome, native_exit_code: -1,
+        native_exit_code_known: false, clean_protocol_close: false)
+
+fn _in_probation() -> KpfRecoveryTransaction:
+    val table = KpfGenerationTable.create(4, 4)
+    table.publish(id(1), digest(1), 1)
+    val tx = KpfRecoveryTransaction.create(table)
+    tx.begin_upgrade(id(2), digest(2), 2, 7)
+    tx
+
+describe "worker exit recovery policy":
+    it "EMB-01: a crashed candidate worker restores V1":
+        val tx = _in_probation()
+        val receipt = kpf_recover_on_worker_exit(tx, _exit(KpfWorkerOutcome.WorkerCrashed))
+        expect(receipt.verdict == KpfRecoveryVerdict.Applied).to_equal(true)
+        expect(receipt.phase == KpfRecoveryPhase.Restored).to_equal(true)
+
+    it "a deadline kill is a candidate failure":
+        val tx = _in_probation()
+        expect(kpf_recover_on_worker_exit(tx, _exit(KpfWorkerOutcome.TimedOut)).phase == KpfRecoveryPhase.Restored).to_equal(true)
+
+    it "a clean close does not roll back":
+        val tx = _in_probation()
+        val receipt = kpf_recover_on_worker_exit(tx, _exit(KpfWorkerOutcome.Closed))
+        expect(receipt.verdict == KpfRecoveryVerdict.Rejected).to_equal(true)
+        expect(tx.phase == KpfRecoveryPhase.Probation).to_equal(true)
+
+    it "a crash after acknowledged writes is blocked, not rolled back":
+        val tx = _in_probation()
+        tx.record_effect(tx.execution_epoch, KpfEffectOutcome.Acknowledged)
+        val receipt = kpf_recover_on_worker_exit(tx, _exit(KpfWorkerOutcome.WorkerCrashed))
+        expect(receipt.verdict == KpfRecoveryVerdict.Blocked).to_equal(true)
