@@ -942,7 +942,7 @@ head (13/40 at base).
 - **Evidence:** the new `backdrop_filter_blur_chrome159_spec` checks 19 points across a wide stripe, an edge stripe (mirror) and a rounded box (corner clip). Raster is compared with Chrome at k=1; cpu_simd and Vulkan with Chrome at k=4; all within ±2. Red -> green on all three lanes. Base vs head sweep of 57 backdrop, glass, shadow, opacity-group and coverage specs: 0 new failures, 3 fixed.
 - **Not covered:**
   - The colour functions (`saturate()`, `brightness()` and others) are fixed in the entry below; `drop-shadow()` and `url()` are still ignored.
-  - The backdrop root is the whole frame painted so far. Inside an opacity group or other offscreen it is the group's surface.
+  - The backdrop root is the whole frame painted so far. Inside an opacity group or other offscreen it is the group's surface. Nested Backdrop Roots: see the 2026-11-20 entry.
   - Sigma below 2 uses a true Gaussian; Chrome there was not measured.
   - On a real GPU, the readback is a device sync that only blurred boxes pay.
 
@@ -1059,3 +1059,26 @@ head (13/40 at base).
 - **Was:** in `..._decl_apply.spl` the shorthand was applied only when it came after `background-color`. Otherwise the `else` branch set the colour and zeroed every gradient field, as if the shorthand had not been declared. `background: linear-gradient(white 0.18 -> 0.07); background-color: #0058bc` painted flat (0,88,188). A trailing `, none` layer made no difference; setting `background-image` directly already worked.
 - **Fix:** the shorthand is applied whenever it is declared; a later `background-color` then overrides `bg` and the `currentColor` flag only.
 - **Evidence:** `background_color_after_shorthand_chrome159_spec` (single gradient layer, and a layer list ending in `none`, Chrome (44,117,200) at (30,12) ±2) 0/2 -> 2/2. A sweep of the 60 specs that declare both `background:` and `background-color` and render or lay out has 0 new failures.
+
+## 2026-11-20 — nested glass ignores the Backdrop Root (Engine2D FIXED; raster OPEN)
+
+- **Rule (Filter Effects 2, Chrome 159):** an element with `backdrop-filter` is a Backdrop Root. A descendant's backdrop is only what was painted inside that root's group, not the page under it. Chrome draws the descendant's filtered backdrop src-over the group, so alpha compounds.
+- **Chrome evidence:** an outer `rgba(255,255,255,0.72)` panel over #2d2f45 holds an inner panel, both with `blur(8px)`. The white inner panel is (250,250,251), and (239,239,241) without the outer filter. The tinted inner `rgba(80,160,255,0.72)` is (124,181,251), and (113,170,241) without. With outer `opacity:0.99` it is 248. Hand check, 8-bit premultiplied: group 184 -> backdrop src-over 235 -> inner background 249 -> over the page 250.
+- **Was:** the inner backdrop read the whole frame. Window-fixture glass panes were 241 where Chrome shows 251.
+- **Fix (Engine2D, cpu_simd + Vulkan):**
+  - `_simple_web_backdrop_root_flags` (`..._compose_support.spl`) marks each opacity-100 element with a backdrop filter and a backdrop-filtered descendant. Such an element becomes an opacity root, so its subtree is a group.
+  - `_simple_web_backdrop_root_split` (`simple_web_html_layout_renderer.spl`) splits the root's box command. A backdrop-only command paints in the parent surface before the group opens; the in-group command has its backdrop removed. WM material boxes are not split.
+  - `_engine2d_draw_ir_render_box` (`draw_ir_adv.spl`) keeps the replace write over opaque pixels, which is byte-identical to before. Over non-opaque pixels it draws the filtered backdrop src-over.
+- **Evidence:**
+  - `backdrop_root_nested_glass_chrome159_spec`: cpu_simd white, tinted and no-root control, plus Vulkan white and tinted, all ±2. Nested was red on base.
+  - The Vulkan case asserts ≥2 device readbacks. As for every CSS `backdrop-filter` box, the blur itself runs on the host over a device region readback: `vulkan_device_blur_rect_count` stays 0 on base and head, and the device blur kernel serves only the WM glass material.
+  - Head-first sweep of 15 backdrop, glass, opacity-group, device-scale and Engine2D specs: 0 new failures, with the same ✗ lines on base in `draw_ir_adv` 68/70, `backend_vulkan_device_glass_blur` 14/15 and `glass_feature_gap` 2/13.
+- **OPEN, raster:** `_paint_backdrop_blur` replaces over an opaque frame, and the black/white two-pass layer recovery cannot express a src-over whose weight is the layer's own alpha. Planned fix:
+  - admit Backdrop Roots as white-alpha groups;
+  - run the white-alpha pass first and record each filtered alpha;
+  - replay those alphas for a src-over in the colour pass;
+  - paint the root's own backdrop on the main frame before the composite.
+  
+  Text on a non-opaque root and shadows/gradients under overlap are still rejected by the group admission.
+- **OPEN, Vulkan:** the CSS `backdrop-filter` blur should use the device blur kernel instead of readback + host blur.
+- **Not covered:** a Backdrop Root under an opacity < 100 ancestor still bails to the flat path, as before. Nested Backdrop Roots have no spec.

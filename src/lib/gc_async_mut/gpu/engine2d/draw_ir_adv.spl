@@ -1160,11 +1160,20 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
     if ((backdrop_sigma > 0 or backdrop_mats.len() > 0) and kw > 0 and kh > 0 and
         _engine2d_draw_ir_style_value(style, "wm-material-request") == ""):
         val under = _engine2d_read_pixels_region(eng, kx, ky, kw, kh).pixels
-        eng.draw_image(kx, ky, kw, kh, engine2d_draw_ir_shadow_knockout_pixels(
-            engine2d_backdrop_color_filter_pixels(
-                engine2d_backdrop_blur_pixels(under, kw, kh, backdrop_sigma), under, backdrop_mats),
-            under,
-            kx, ky, kw, kh, x, y, w, h, effective_corners))
+        val filtered = engine2d_backdrop_color_filter_pixels(
+            engine2d_backdrop_blur_pixels(under, kw, kh, backdrop_sigma), under, backdrop_mats)
+        if _engine2d_draw_ir_pixels_opaque(under):
+            eng.draw_image(kx, ky, kw, kh, engine2d_draw_ir_shadow_knockout_pixels(
+                filtered, under,
+                kx, ky, kw, kh, x, y, w, h, effective_corners))
+        else:
+            # Inside a transparent group (a backdrop root's layer) the
+            # filtered backdrop draws src-over the group content, as Chrome
+            # does (alpha compounds). Outside the box shape it is
+            # transparent; the corner coverage scales alpha only.
+            eng.draw_image_blend(kx, ky, kw, kh, engine2d_draw_ir_shadow_knockout_pixels(
+                filtered, _engine2d_draw_ir_pixels_alpha_zero(filtered),
+                kx, ky, kw, kh, x, y, w, h, effective_corners))
     var knockout_pre: [u32] = []
     if knockout and kw > 0 and kh > 0:
         knockout_pre = _engine2d_read_pixels_region(eng, kx, ky, kw, kh).pixels
@@ -3285,6 +3294,20 @@ fn _engine2d_read_pixels_region(engine: Engine2D, x: i32, y: i32, width: i32, he
     var eng = engine
     eng.read_pixels_region(x, y, width, height)
 
+fn _engine2d_draw_ir_pixels_opaque(pixels: [u32]) -> bool:
+    for p in pixels:  # cpu-lane-loop-ok: one backdrop-filter box's readback region; bound is that box's clipped pixel count, scanned once beside its blur
+        if (p >> 24) != 0xFFu32:
+            return false
+    true
+
+fn _engine2d_draw_ir_pixels_alpha_zero(pixels: [u32]) -> [u32]:
+    var out = pixels
+    var i: i64 = 0
+    while i < out.len():  # cpu-lane-loop-ok: one backdrop-filter box's region inside a transparent group; bound is that box's clipped pixel count
+        out[i] = out[i] & 0x00FFFFFFu32
+        i = i + 1
+    out
+
 fn _engine2d_draw_ir_parent_material_padding(batch: DrawIrBatch) -> i32:
     var padding = 0
     for command in batch.commands:
@@ -3444,7 +3467,9 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
     # a garbage instruction pointer on the freestanding cranelift codegen path
     # for a `SoftwareBackend` boxed this way -- a compiler/codegen defect
     # filed for follow-up, not something fixable at this call site.
-    val needs_real_offscreen = embedding.opacity_milli < 1000 or eng.backend_name() == "vulkan" or eng.backend_name() == "metal"
+    # (c) A CSS group (incl. a backdrop root at opacity 100%) is an isolated
+    # layer: its backdrop-filter descendants must sample only the group.
+    val needs_real_offscreen = embedding.opacity_milli < 1000 or eng.backend_name() == "vulkan" or eng.backend_name() == "metal" or css_opacity_group_surface(embedding.surface_id)
     # Opaque baremetal batches can render directly into the MMIO parent: the
     # command loop already applies embedding offsets, and no opacity surface
     # or device-shared target is needed. This avoids one full-frame software
