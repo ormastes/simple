@@ -4,6 +4,7 @@ use std.common.contracts.container.pre_start_constraint_v1.{ContainerPreStartCon
 use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
 use std.common.contracts.orchestration.host_service_operation_v6.{HostServiceOperationRequestV6, host_service_operation_validate_v6}
 use std.common.contracts.orchestration.host_service_operation_reply_v6.HostServiceOperationReplyV6
+use std.common.contracts.orchestration.host_remote_build_operation_v6.{host_remote_build_sub_decode_v6, host_remote_build_sub_domain_action_v6}
 use std.common.contracts.orchestration.host_controller_status_v3.host_controller_status_encode_v3
 use std.nogc_sync_mut.orchestration.host_controller_observation_v3.{host_controller_retained_origin_v3, host_controller_status_v3}
 use std.nogc_sync_mut.orchestration.host_controller_inspection_session_v3.*
@@ -295,6 +296,24 @@ fn operation_reply_v6(domain: HostServiceDomainV3, state: SmuxHostContinuationV6
         request.operation_id, request.scope_digest, request.request_digest, pending,
         if error != "" and code == 0: 2 else: code, payload, error))
 
+# milestone_0030 N10: the ONE V6 `remote-build` action. The payload names the sub-operation and carries the route
+# frame; the matching Host-domain route action runs through the same gates as every other Host request (nothing may
+# run while an execution, planning, geometry or connection step is pending).
+fn remote_build_query_v6(domain: HostServiceDomainV3, state: SmuxHostContinuationV6,
+        request: HostServiceOperationRequestV6, context: SmuxHostContextV6) -> SmuxHostOperationTurnV6:
+    val sub = host_remote_build_sub_decode_v6(request.payload)
+    if sub.is_err(): return operation_reply_v6(domain, state, request, false, 2, "", sub.unwrap_err())
+    val action = host_remote_build_sub_domain_action_v6(sub.unwrap().sub)
+    if action.is_err(): return operation_reply_v6(domain, state, request, false, 2, "", action.unwrap_err())
+    if state.inspection_pending_v6(): return operation_reply_v6(domain, state, request, false, 2, "", "runtime-controller-inspection-pending")
+    if state.execution.is_some() or context.planning_pending:
+        return operation_reply_v6(domain, state, request, false, 2, "", "runtime-host-execution-pending")
+    if context.connection_pending: return operation_reply_v6(domain, state, request, false, 2, "", "runtime-connection-opening")
+    if context.geometry_pending: return operation_reply_v6(domain, state, request, false, 2, "", "runtime-geometry-pending")
+    val turn = host_service_domain_turn_v3(domain, HostServiceRequestV2(action.unwrap(), request.operation_id, sub.unwrap().frame))
+    operation_reply_v6(turn.owner, state, request, false, turn.exit_code, turn.response,
+        if turn.exit_code == 0: "" else: "runtime-host-request-refused")
+
 pub fn smux_host_continuation_query_v6(domain: HostServiceDomainV3,
         original: SmuxHostContinuationV6, request: HostServiceOperationRequestV6,
         context: SmuxHostContextV6) -> SmuxHostOperationTurnV6:
@@ -312,6 +331,7 @@ pub fn smux_host_continuation_query_v6(domain: HostServiceDomainV3,
     if context.scope_digest != scope.unwrap() or (request.action != "status" and request.scope_digest != scope.unwrap()):
         return operation_reply_v6(domain, original, request, false, 2, "", "runtime-host-scope-mismatch")
     var state = original
+    if request.action == "remote-build": return remote_build_query_v6(domain, state, request, context)
     if request.action == "status":
         val status = host_controller_status_v3(domain)
         if status.is_err(): return operation_reply_v6(domain, state, request, false, 2, "", status.unwrap_err())

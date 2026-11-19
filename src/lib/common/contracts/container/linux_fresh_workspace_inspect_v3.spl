@@ -91,10 +91,12 @@ fn workspace_created_mount_v3(value: JsonValue, workspace: LinuxWorkspaceInstall
     Ok(())
 
 pub fn linux_fresh_workspace_created_config_validate_v3(workspace: LinuxWorkspaceInstalledProfileV1,
-        agent: LinuxAgentWorkspaceProfileV1, invocation_digest: text, uid: i64, gid: i64,
+        primary: LinuxWorkspacePrimaryV3, invocation_digest: text, uid: i64, gid: i64,
         value: LinuxFreshWorkspaceCommandV3, raw: text) -> Result<(), text>:
-    linux_fresh_workspace_command_validate_v3(value, workspace, agent, invocation_digest, uid, gid)?
+    linux_fresh_workspace_command_validate_v3(value, workspace, primary, invocation_digest, uid, gid)?
     val command = value.command
+    # Arm-derived expectations: the command already equals the arm projection (validated above).
+    val tty = linux_workspace_primary_terminal_mode_v3(primary) == "tty"
     if command.action != LinuxFreshWorkloadActionV2.Inspect: return Err("fresh-workspace-created-inspect-required")
     val observed = linux_fresh_workspace_inspect_fields_v3(raw)?
     val plan = command.request.plan
@@ -103,17 +105,17 @@ pub fn linux_fresh_workspace_created_config_validate_v3(workspace: LinuxWorkspac
             ("operation_id", plan.operation_id), ("status", "created"), ("manager", "cgroupfs"), ("cgroup_mode", "private"),
             ("pid_mode", "private"), ("cgroups", "default"), ("network_mode", "none"), ("userns_mode", "private"),
             ("workdir", workspace.guest_root), ("configured_user", str(uid) + ":" + str(gid)),
-            ("image_name", agent.image), ("image_digest", "sha256:" + agent.image.split("@sha256:")[1]), ("path", agent.bootstrap_program)]:
+            ("image_name", command.image), ("image_digest", "sha256:" + command.image.split("@sha256:")[1]), ("path", command.entrypoint[0])]:
         if linux_fresh_workload_inspect_text_v2(observed, pair.0)? != pair.1: return Err("fresh-workspace-created-config-correspondence")
     for pair in [("pid", 0), ("effective_caps", 0), ("bounding_caps", 0), ("cpu_period", 100000),
             ("cpu_quota", command.cpu_millis * 100), ("memory_bytes", command.memory_bytes),
             ("memory_swap", command.memory_bytes), ("pids_limit", command.pid_limit)]:
         if linux_fresh_workload_inspect_integer_v2(observed, pair.0)? != pair.1: return Err("fresh-workspace-created-resource-correspondence")
-    for pair in [("privileged", false), ("readonly_rootfs", true), ("no_new_privileges", true), ("tty", true), ("open_stdin", true), ("stdin_once", false)]:
+    for pair in [("privileged", false), ("readonly_rootfs", true), ("no_new_privileges", true), ("tty", tty), ("open_stdin", tty), ("stdin_once", false)]:
         if linux_fresh_workload_inspect_member_v2(observed, pair.0)? != JsonValue.Bool(pair.1): return Err("fresh-workspace-created-security-tty-correspondence")
     if not ["crun", "runc", "/usr/bin/crun", "/usr/bin/runc"].contains(linux_fresh_workload_inspect_text_v2(observed, "runtime")?):
         return Err("fresh-workspace-qualified-runtime-required")
-    if linux_fresh_workload_inspect_strings_v2(observed, "args", 2)? != ["--invocation-manifest-sha256", invocation_digest]:
+    if linux_fresh_workload_inspect_strings_v2(observed, "args", 2)? != command.args:
         return Err("fresh-workspace-created-bootstrap-argv")
     val env = linux_fresh_workload_inspect_strings_v2(observed, "environment", 256)?
     workspace_created_mount_v3(observed, workspace)?

@@ -1,0 +1,112 @@
+"""
+## Purpose and audience
+milestone_0030 owner decision P2-a: the installed build workspace profile is read
+NON-CONSUMINGLY (through the admission owner's retained service reader, which no
+workspace loan takes) at prepare, so a remote-build draft whose request bytes do
+not match the build projection is refused BEFORE the slot record and the charge.
+The enable-time check stays. Written for owners of the Linux service prepare path.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-19).
+## Compatibility and limitations
+The gate checks only what the build profile alone determines (image, launcher
+entrypoint, build-invocation arg shape, terminal mode, memory floor). uid, gid,
+the workspace mount and the containment digest need the lent workspace reader and
+stay at enable. The invocation digest in the args is bound at open.
+## Verification guidance and troubleshooting
+A changed refusal string is a contract change.
+"""
+use std.spec.step
+use std.io.file_read_text
+use std.common.contracts.container.build_workspace_profile_v1.{LinuxBuildWorkspaceProfileV1, linux_build_workspace_profile_encode_v1}
+use std.common.contracts.container.execution_v2.ContainerMountProjectionV2
+use std.nogc_async_mut.container.providers.linux.request_v1.LinuxOciRequestV1
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.host_remote_build_profile_gate_v4
+
+fn pg_profile() -> LinuxBuildWorkspaceProfileV1:
+    LinuxBuildWorkspaceProfileV1(machine_policy_digest: "a".repeat(64), workspace_profile_digest: "b".repeat(64),
+        image: "registry.example/build@sha256:" + "d".repeat(64), image_config_id: "e".repeat(64),
+        launcher_program: "/opt/simple/build-launcher", producer_path: "inputs/producer", stdout_leaf: "stdout.log",
+        stderr_leaf: "stderr.log", output_root: "outputs", max_input_bytes: 67108864, max_output_bytes: 8388608,
+        memory_minimum_bytes: 268435456, preparation_budget_ms: 60000)
+
+fn pg_request() -> LinuxOciRequestV1:
+    LinuxOciRequestV1(pod_uid: "job_1", attempt: 1, operation_id: "operation_1",
+        image: "registry.example/build@sha256:" + "d".repeat(64), bundle_path: "",
+        command: ["/opt/simple/build-launcher"], args: ["--build-invocation-sha256", "8".repeat(64)],
+        timeout_ms: 30000, cpu_limit_millis: 1000, memory_limit_bytes: 1342177280, pid_limit: 128,
+        network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true, working_directory: "/workspace",
+        terminal_mode: "none", user_uid: 20001, user_gid: 20001, user_namespace_mode: "keep-id",
+        containment_profile_digest: "c".repeat(64),
+        mounts: [ContainerMountProjectionV2(host_root: "/srv/workspaces/slot_1", guest_root: "/workspace", read_only: false)])
+
+fn pg_gate(request: LinuxOciRequestV1) -> Result<(), text>:
+    host_remote_build_profile_gate_v4(linux_oci_retained_request_encode_v1(request).unwrap(),
+        linux_build_workspace_profile_encode_v1(pg_profile()).unwrap())
+
+fn pg_from(source: text, start: text) -> text:
+    val at = source.index_of(start)
+    if at < 0: return ""
+    source.substring(at, source.byte_len())
+
+describe "the build profile gate refuses a mismatching draft before the slot":
+    it "passes the exact build projection":
+        # @req M0030-P2A-01
+        expect(pg_gate(pg_request()).is_ok()).to_equal(true)
+
+    it "refuses a wrong image, launcher, arg shape, terminal or memory floor":
+        # @req M0030-P2A-02
+        var image = pg_request()
+        image.image = "registry.example/other@sha256:" + "d".repeat(64)
+        expect(pg_gate(image)).to_equal(Err("linux-host-remote-build-profile-image"))
+        var launcher = pg_request()
+        launcher.command = ["/bin/sh"]
+        expect(pg_gate(launcher)).to_equal(Err("linux-host-remote-build-profile-launcher"))
+        var kept = pg_request()
+        kept.replace_entrypoint = false
+        expect(pg_gate(kept)).to_equal(Err("linux-host-remote-build-profile-launcher"))
+        var flag = pg_request()
+        flag.args = ["--invocation-manifest-sha256", "8".repeat(64)]
+        expect(pg_gate(flag)).to_equal(Err("linux-host-remote-build-profile-args"))
+        var digest = pg_request()
+        digest.args = ["--build-invocation-sha256", "not-a-digest"]
+        expect(pg_gate(digest)).to_equal(Err("linux-host-remote-build-profile-args"))
+        var tty = pg_request()
+        tty.terminal_mode = "tty"
+        expect(pg_gate(tty)).to_equal(Err("linux-host-remote-build-profile-terminal"))
+        var small = pg_request()
+        small.memory_limit_bytes = 1048576
+        expect(pg_gate(small)).to_equal(Err("linux-host-remote-build-profile-memory"))
+
+    it "refuses undecodable request bytes and an undecodable profile":
+        # @req M0030-P2A-03
+        val bad = host_remote_build_profile_gate_v4("not a request", linux_build_workspace_profile_encode_v1(pg_profile()).unwrap())
+        expect(bad.is_err()).to_equal(true)
+        expect(bad.unwrap_err().starts_with("linux-host-remote-build-request-bytes-mismatch")).to_equal(true)
+        val noprofile = host_remote_build_profile_gate_v4(linux_oci_retained_request_encode_v1(pg_request()).unwrap(), "not a profile")
+        expect(noprofile.is_err()).to_equal(true)
+
+    it "reads the profile without consuming a loan and runs before the slot record":
+        # @req M0030-P2A-04
+        val authority = file_read_text("src/lib/nogc_sync_mut/container/machine_authority_v1.spl")
+        val read = pg_from(authority, "    pub fn read_build_workspace_profile_v3()")
+        expect(read.byte_len() > 0).to_equal(true)
+        expect(read).to_contain("self.service_reader.unwrap().read_build_workspace_profile_v1()")
+        val body = read.substring(0, read.index_of("\n\n"))
+        step("a read: nothing is taken, cleared or closed")
+        expect(body.contains("= nil")).to_equal(false)
+        expect(body.contains("close_v1")).to_equal(false)
+        val current = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl")
+        val prepare = pg_from(current, "pub fn host_linux_service_prepare_v4(")
+        val gate = prepare.index_of("linux_service_remote_build_profile_gate_v4(")
+        val reaped = prepare.index_of("val reaped_gate = host_remote_build_prepare_reaped_gate_v4(")
+        val slot = prepare.index_of("val slot = linux_service_agent_slot_v4(")
+        step("after the reaped/published-answer refusal, before the slot record and the charge")
+        expect(reaped > 0 and gate > reaped and slot > gate).to_equal(true)
+        step("a same-id re-prepare whose slot already holds this operation skips it (the admission moved at transfer)")
+        val wrapper = pg_from(current, "fn linux_service_remote_build_profile_gate_v4(")
+        expect(wrapper).to_contain("linux_service_agent_slot_exact_v4(owner.agent_operation, operation)")
+        step("the open-time identity check and the enable-time projection are kept")
+        val build = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl")
+        expect(build).to_contain("remote_build_request_identity_v4(association.execution)?")

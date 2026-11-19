@@ -99,3 +99,24 @@ describe "Explicit static Linux service enrollment DATA":
         changed = binding
         changed.policy_revision = binding.policy_revision + 1
         assert(host_linux_service_enrollment_digest_v3(changed).unwrap() != original)
+
+    it "carries the optional N5 remote-build template digest without changing legacy bytes":
+        # @req M0030-INTEG-3 (N5: remoteBuildTemplateDigest emitted only when set)
+        step("an enrollment with no remote-build template keeps its exact legacy bytes and digest")
+        val legacy = linux_enrollment_fixture_v3()
+        val source = host_linux_service_enrollment_encode_v3(legacy).unwrap()
+        expect(source.contains("remoteBuildTemplateDigest")).to_equal(false)
+        expect(host_linux_service_enrollment_decode_v3(source).unwrap().remote_build_template_digest).to_equal("")
+        step("a set digest is signed, round-trips and changes the enrollment digest")
+        var enrolled = legacy
+        enrolled.remote_build_template_digest = "8".repeat(64)
+        val with_template = host_linux_service_enrollment_encode_v3(enrolled).unwrap()
+        expect(with_template.contains("remoteBuildTemplateDigest")).to_equal(true)
+        expect(host_linux_service_enrollment_decode_v3(with_template).unwrap().remote_build_template_digest).to_equal("8".repeat(64))
+        expect(host_linux_service_enrollment_digest_v3(enrolled).unwrap() != host_linux_service_enrollment_digest_v3(legacy).unwrap()).to_equal(true)
+        step("a malformed digest and an explicitly empty key are refused")
+        var bad = legacy
+        bad.remote_build_template_digest = "short"
+        expect(host_linux_service_enrollment_encode_v3(bad).unwrap_err()).to_equal("linux-host-service-enrollment-digest-invalid")
+        expect(host_linux_service_enrollment_decode_v3(linux_enrollment_changed_field_v3("remoteBuildTemplateDigest",
+            SdnValue.String(""))).is_err()).to_equal(true)

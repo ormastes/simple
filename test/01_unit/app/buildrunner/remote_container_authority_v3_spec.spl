@@ -1,0 +1,53 @@
+"""
+## Purpose and audience
+Pins milestone_0030 DESIGN 13.1 (kept by 14.7): the V3 remote-container completion codec in
+`src/app/buildrunner/remote_container_authority_v3.spl`. V3 = the V2 fields with version 3 and `execution_digest`
+replaced by `measurement_digest`, under its own signature and envelope headers. Written for owners of the remote
+build route.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
+## Compatibility and limitations
+Codec only here; the V3 verify, freeze and bundle codec are pinned by their own specs.
+## Verification guidance and troubleshooting
+Each refusal names the exact error string; a changed string is a contract change.
+"""
+use std.spec.step
+use app.buildrunner.remote_container_authority_v3.*
+
+fn c3_signature() -> [u8]:
+    var signature: [u8] = []
+    for i in 0..64: signature.push(i as u8)
+    signature
+
+fn c3_completion() -> RemoteContainerCompletionV3:
+    RemoteContainerCompletionV3(version: 3, task_identity: "1".repeat(64), host_id: "worker_1",
+        assignment_digest: "2".repeat(64), controller_epoch: 7, operation_id: "operation_1", request_digest: "3".repeat(64),
+        grant_digest: "4".repeat(64), result_digest: "5".repeat(64), measurement_digest: "6".repeat(64),
+        stdout_digest: "7".repeat(64), stderr_digest: "8".repeat(64), output_inventory_digest: "9".repeat(64),
+        tests_digest: "a".repeat(64), signer_id: "worker_1", key_revision: 1, completed_at: 100, signature: c3_signature())
+
+describe "Remote container completion V3 codec (milestone_0030 13.1)":
+    it "encodes a canonical V3 completion under the V3 headers":
+        # @req M0030-COMPLETION3-01
+        val wire = remote_container_completion_encode_v3(c3_completion()).unwrap()
+        expect(wire).to_start_with("SIMPLE_REMOTE_CONTAINER_COMPLETION_ENVELOPE_V3\nSIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V3\n")
+        expect(wire.contains("6".repeat(64))).to_equal(true)
+        step("the signed message is the signature block alone, starting with its domain line")
+        val message = remote_container_completion_signature_text_v3(c3_completion()).unwrap()
+        expect(message).to_start_with("SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V3\n3\n")
+        expect(wire.contains(message)).to_equal(true)
+
+    it "refuses another version, a bad digest and a short signature":
+        # @req M0030-COMPLETION3-02
+        var version = c3_completion()
+        version.version = 2
+        expect(remote_container_completion_encode_v3(version)).to_equal(Err("CONTAINER_COMPLETION_VERSION_UNSUPPORTED"))
+        var digest = c3_completion()
+        digest.measurement_digest = "short"
+        expect(remote_container_completion_encode_v3(digest)).to_equal(Err("CONTAINER_COMPLETION_DIGEST_INVALID"))
+        var short = c3_completion()
+        short.signature = [1u8]
+        expect(remote_container_completion_encode_v3(short)).to_equal(Err("CONTAINER_COMPLETION_SIGNATURE_INVALID"))
+        val wire = remote_container_completion_encode_v3(c3_completion()).unwrap()
+        expect(wire.contains("_V2")).to_equal(false)

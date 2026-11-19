@@ -155,6 +155,63 @@ fn remote_container_completion_decode_v2(wire: text) -> Result<RemoteContainerCo
         return Err("CONTAINER_COMPLETION_WIRE_NONCANONICAL")
     Ok(value)
 
+# milestone_0030 13.1: the V2 completion authority body, extracted once and shared by the V2 and V3 verify
+# (grant+approval, execution-host key, separate roles, operation, task, resources, host, operation id, assignment,
+# authorization digests, time). Same checks in the same order as before the extraction.
+struct RemoteContainerAuthorityClaimV2:
+    task_identity: text
+    host_id: text
+    assignment_digest: text
+    controller_epoch: i64
+    operation_id: text
+    request_digest: text
+    grant_digest: text
+    signer_id: text
+    key_revision: i64
+    completed_at: i64
+
+struct RemoteContainerAuthorityExpectedV2:
+    task_identity: text
+    host_id: text
+    assignment_digest: text
+    controller_epoch: i64
+    operation_id: text
+
+fn remote_container_completion_authority_v2(claim: RemoteContainerAuthorityClaimV2,
+        signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2,
+        issuer: DistributedAuthorityKeyV2, approver: DistributedAuthorityKeyV2,
+        host_key: DistributedAuthorityKeyV2, request: OperationEnvelopeV2,
+        task: BuildTaskV1, expected: RemoteContainerAuthorityExpectedV2, now: i64,
+        policy_revision: i64, revocation_epoch: i64, session_generation: i64) -> Result<bool, text>:
+    val grant = distributed_verify_grant_approval_v2(signed, approval, issuer, approver,
+        request, now, policy_revision, revocation_epoch, session_generation)?
+    val host_error = distributed_authority_key_check_v2(host_key, "execution-host",
+        claim.signer_id, claim.key_revision, grant, now, policy_revision, revocation_epoch)
+    if host_error != "": return Err(host_error)
+    if host_key.public_key == issuer.public_key or host_key.public_key == approver.public_key:
+        return Err("CONTAINER_COMPLETION_ROLES_NOT_SEPARATE")
+    if request.operation != "build" and request.operation != "test":
+        return Err("CONTAINER_COMPLETION_OPERATION_DENIED")
+    if builder_validate_task_v1(task) != "": return Err("CONTAINER_COMPLETION_TASK_INVALID")
+    if request.payload_digest != sha256_text(builder_encode_task_v1(task)) or
+            claim.task_identity != builder_task_identity_v1(task) or claim.task_identity != expected.task_identity:
+        return Err("CONTAINER_COMPLETION_TASK_MISMATCH")
+    if task.timeout_ms != request.duration_ms or task.memory_limit_bytes != request.memory_bytes or
+            task.memory_policy != "enforce": return Err("CONTAINER_COMPLETION_RESOURCE_MISMATCH")
+    if claim.host_id != request.host_id or claim.host_id != expected.host_id:
+        return Err("CONTAINER_COMPLETION_HOST_MISMATCH")
+    if claim.operation_id != request.id or claim.operation_id != expected.operation_id:
+        return Err("CONTAINER_COMPLETION_OPERATION_MISMATCH")
+    if claim.assignment_digest != expected.assignment_digest or claim.controller_epoch != expected.controller_epoch:
+        return Err("CONTAINER_COMPLETION_ASSIGNMENT_STALE")
+    val request_wire = distributed_encode_operation_v2(request)?
+    val grant_digest = distributed_grant_digest_v2(grant)?
+    if claim.request_digest != sha256_text(request_wire) or claim.grant_digest != grant_digest:
+        return Err("CONTAINER_COMPLETION_AUTHORIZATION_MISMATCH")
+    if claim.completed_at > now or claim.completed_at >= grant.expires_at:
+        return Err("CONTAINER_COMPLETION_TIME_INVALID")
+    Ok(true)
+
 fn remote_container_verify_completion_v2(value: RemoteContainerCompletionV2,
         signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2,
         issuer: DistributedAuthorityKeyV2, approver: DistributedAuthorityKeyV2,
@@ -165,33 +222,14 @@ fn remote_container_verify_completion_v2(value: RemoteContainerCompletionV2,
     val invalid = remote_container_completion_metadata_error_v2(value)
     if invalid != "": return Err(invalid)
     if value.signature.len() != 64: return Err("CONTAINER_COMPLETION_SIGNATURE_INVALID")
-    val grant = distributed_verify_grant_approval_v2(signed, approval, issuer, approver,
-        request, now, policy_revision, revocation_epoch, session_generation)?
-    val host_error = distributed_authority_key_check_v2(host_key, "execution-host",
-        value.signer_id, value.key_revision, grant, now, policy_revision, revocation_epoch)
-    if host_error != "": return Err(host_error)
-    if host_key.public_key == issuer.public_key or host_key.public_key == approver.public_key:
-        return Err("CONTAINER_COMPLETION_ROLES_NOT_SEPARATE")
-    if request.operation != "build" and request.operation != "test":
-        return Err("CONTAINER_COMPLETION_OPERATION_DENIED")
-    if builder_validate_task_v1(task) != "": return Err("CONTAINER_COMPLETION_TASK_INVALID")
-    if request.payload_digest != sha256_text(builder_encode_task_v1(task)) or
-            value.task_identity != builder_task_identity_v1(task) or value.task_identity != expected.task_identity:
-        return Err("CONTAINER_COMPLETION_TASK_MISMATCH")
-    if task.timeout_ms != request.duration_ms or task.memory_limit_bytes != request.memory_bytes or
-            task.memory_policy != "enforce": return Err("CONTAINER_COMPLETION_RESOURCE_MISMATCH")
-    if value.host_id != request.host_id or value.host_id != expected.host_id:
-        return Err("CONTAINER_COMPLETION_HOST_MISMATCH")
-    if value.operation_id != request.id or value.operation_id != expected.operation_id:
-        return Err("CONTAINER_COMPLETION_OPERATION_MISMATCH")
-    if value.assignment_digest != expected.assignment_digest or value.controller_epoch != expected.controller_epoch:
-        return Err("CONTAINER_COMPLETION_ASSIGNMENT_STALE")
-    val request_wire = distributed_encode_operation_v2(request)?
-    val grant_digest = distributed_grant_digest_v2(grant)?
-    if value.request_digest != sha256_text(request_wire) or value.grant_digest != grant_digest:
-        return Err("CONTAINER_COMPLETION_AUTHORIZATION_MISMATCH")
-    if value.completed_at > now or value.completed_at >= grant.expires_at:
-        return Err("CONTAINER_COMPLETION_TIME_INVALID")
+    val _authority = remote_container_completion_authority_v2(RemoteContainerAuthorityClaimV2(task_identity: value.task_identity,
+        host_id: value.host_id, assignment_digest: value.assignment_digest, controller_epoch: value.controller_epoch,
+        operation_id: value.operation_id, request_digest: value.request_digest, grant_digest: value.grant_digest,
+        signer_id: value.signer_id, key_revision: value.key_revision, completed_at: value.completed_at),
+        signed, approval, issuer, approver, host_key, request, task, RemoteContainerAuthorityExpectedV2(
+        task_identity: expected.task_identity, host_id: expected.host_id, assignment_digest: expected.assignment_digest,
+        controller_epoch: expected.controller_epoch, operation_id: expected.operation_id), now, policy_revision,
+        revocation_epoch, session_generation)?
     if value.result_digest != expected.result_digest or value.execution_digest != expected.execution_digest or
             value.stdout_digest != expected.stdout_digest or value.stderr_digest != expected.stderr_digest or
             value.output_inventory_digest != expected.output_inventory_digest or value.tests_digest != expected.tests_digest:
@@ -204,3 +242,4 @@ fn remote_container_verify_completion_v2(value: RemoteContainerCompletionV2,
 export RemoteContainerCompletionV2, RemoteContainerBindingV2
 export remote_container_completion_encode_v2, remote_container_completion_decode_v2
 export remote_container_completion_signature_message_v2, remote_container_verify_completion_v2
+export RemoteContainerAuthorityClaimV2, RemoteContainerAuthorityExpectedV2, remote_container_completion_authority_v2

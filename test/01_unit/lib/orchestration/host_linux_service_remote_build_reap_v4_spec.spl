@@ -1,0 +1,358 @@
+"""
+## Purpose and audience
+Pins the milestone_0030 PR-2 startup reap WRITER in
+`src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_reap_v4.spl` (DESIGN s6, 13.4, 14.6 P3-3,
+14.10 P2-2). Written for owners of the Linux Host service.
+A started remote build does not survive a service restart. After the reconcile flip and the handoff consume, and
+before the first admit, the new incarnation writes for every `executing` remote-build row of a prior incarnation:
+first the index `host-remote-build-reap-index/<sha256(operation id)>.sdn` = {operationId, priorFence}, then the record
+`host-remote-build-reap/<sha256(prior fence + "\n" + operation id)>.sdn`. Both go through the ONE capacity journal
+writer, no-replace, read back.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
+## Compatibility and limitations
+A row reaches `executing` only through the Linux-protected journal, so the row selector is pure over DATA rows (as
+the reconcile spec S40-RECONCILE-12 does) and the writer runs on a real temporary owned-lock journal.
+`host_linux_service_start_v4` needs genuine native borrows, so its call order is pinned by source shape.
+The collect-side reader (`linux-host-remote-build-reaped-incomplete`) is NOT here; it lands with PR-1b+1c.
+## Verification guidance and troubleshooting
+Each refusal names the exact error string; a changed string is a contract change.
+"""
+use std.spec.{step, fail}
+use std.io.file_read_text
+use test.fixtures.orchestration.host_linux_service_verifier_fixture_v1.*
+# Tests reach private module gates directly (repo rule: tests may access private).
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_reap_v4.*
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_reap_v4.{remote_build_reap_rows_v4,
+    remote_build_reap_write_v4, remote_build_reap_index_encode_v4}
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{linux_service_scope_v4, linux_service_association_v4,
+    linux_service_prepare_authorize_v4}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_linux_completion_evidence_v3.host_remote_build_outcome_relative_v4
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.host_remote_build_no_workload_record_v4
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentitySnapshotV3
+use std.nogc_sync_mut.io.local_authority_policy_v1.{local_authority_policy_decode_v1, host_local_context_v1}
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_open_cleanup_v2,
+    distributed_operation_journal_publish_v3, distributed_operation_journal_read_v3}
+use std.common.contracts.orchestration.host_prepare_associated_v3.HostPrepareAssociatedRequestV3
+use std.common.contracts.orchestration.host_prepare_request_v1.HostPrepareRequestV1
+use std.common.contracts.orchestration.host_execution_association_v3.{host_execution_association_encode_v3,
+    host_execution_association_digest_v3}
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.container.execution_draft_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2}
+use std.common.crypto.sha256.sha256_text
+
+val RB_FAR: i64 = 4102444800000
+val RB_OPERATIONS: [text] = ["host_enroll_v1", "host_reservation_v1", "host_execute_associated_v3"]
+val RB_TASK: text = "d".repeat(64)
+val RB_PRIOR: text = "prior-fence"
+val RB_ASSOCIATION: text = "a".repeat(64)
+
+fn rb_fixture() -> LinuxServiceVerifierFixtureV1:
+    linux_service_verifier_fixture_ops_v1(1, 65, RB_FAR, "/var/lib/simple/hosts", RB_OPERATIONS)
+
+fn rb_native(fixture: LinuxServiceVerifierFixtureV1) -> LinuxServiceNativeIdentitySnapshotV3:
+    LinuxServiceNativeIdentitySnapshotV3(native_machine_id: fixture.binding.native_machine_id, native_boot_id: "native-boot",
+        architecture: "x86_64", owner_generation: 41, process_identity_digest: "e".repeat(64), process_generation: 2,
+        authority_namespace_id: "namespace_1")
+
+fn rb_native_scope(native: LinuxServiceNativeIdentitySnapshotV3) -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "worker_1", service_scope_id: "epoch-" + "c".repeat(64), boot_id: native.native_boot_id,
+        provider_generation: native.owner_generation, native_machine_id: native.native_machine_id,
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: native.native_boot_id)
+
+fn rb_prepare(scope: ContainerHostScopeV2, deadline_ms: i64) -> HostPrepareAssociatedRequestV3:
+    val draft = ContainerExecutionDraftV3("linux-podman", "workload", 1, "operation_2", "a".repeat(64), "opaque-codec-DATA")
+    val bound = container_execution_draft_bind_v3(draft, scope).unwrap()
+    val intent = host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: "worker_1",
+        fence: HostLedgerFenceV1("host-authority", container_scope_fence_id_v2(scope).unwrap(), 41, 1),
+        plan_digest: container_execution_plan_digest_v2(bound.plan).unwrap(),
+        reservation: HostReservationV1("reservation_operation_2", "operation_2", "0".repeat(64), "service_1", 1, "nonce",
+            500, 4096, [], deadline_ms, HostReservationStateV1.Prepared))).unwrap()
+    val operation = OperationEnvelopeV2(2, intent.reservation.operation_id, intent.reservation.payload_digest, "user_1", "project_1",
+        "worker_1", "host_reservation_v1", "a".repeat(64), 4, 2, 3, 4096, 100)
+    val grant = ExecutionGrantV2("grant_2", "user_1", "project_1", "worker_1", ["host_reservation_v1"], "a".repeat(64), 4, 2, RB_FAR, 536870912, 1000)
+    val proof = linux_service_verifier_sign_v1(operation, grant, 1, 65, RB_FAR)
+    HostPrepareAssociatedRequestV3(HostPrepareRequestV1(intent, operation, proof.0, proof.1), draft, scope)
+
+fn rb_open(root: text, capacity: HostCapacityV1) -> HostCapacityOwnerV1:
+    var opened: [HostCapacityOwnerV1] = []
+    match host_capacity_owner_open_owned_v2(root, capacity, "9".repeat(64), 64, true):
+        case HostCapacityOpenV2.Ready(owner): opened.push(owner)
+        case HostCapacityOpenV2.Rejected(reason): fail(reason)
+        case HostCapacityOpenV2.CleanupRequired(cleanup, reason):
+            val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+            expect(closed.error).to_equal("")
+            fail(reason)
+    opened[0]
+
+fn rb_row(state: text, task: text = RB_TASK, fence: text = RB_PRIOR) -> HostRemoteBuildReapRowV4:
+    HostRemoteBuildReapRowV4(operation_id: "operation_2", prior_fence: fence, journal_state: state,
+        association_digest: RB_ASSOCIATION, task_digest: task)
+
+fn rb_record() -> HostRemoteBuildReapRecordV4:
+    HostRemoteBuildReapRecordV4(operation_id: "operation_2", prior_fence: RB_PRIOR, association_digest: RB_ASSOCIATION,
+        task_digest: RB_TASK, reason: "service-restart", observed_at: 1700000000000)
+
+fn rb_count(source: text, needle: text) -> i64:
+    source.split(needle).len() - 1
+
+describe "Linux service remote-build reap writer V4 (milestone_0030 PR-2)":
+    it "selects only executing remote-build rows of a prior incarnation":
+        # @req M0030-REAP-01
+        step("an executing row with the marker and a prior fence is reaped")
+        val selected = host_remote_build_reap_select_v4([rb_row("executing")], "current-fence").unwrap()
+        expect(selected.len()).to_equal(1)
+        expect(selected[0].prior_fence).to_equal(RB_PRIOR)
+        step("a never-begun row and an agent/plain row are not")
+        expect(host_remote_build_reap_select_v4([rb_row("admitted")], "current-fence").unwrap().len()).to_equal(0)
+        expect(host_remote_build_reap_select_v4([rb_row("executing", "")], "current-fence").unwrap().len()).to_equal(0)
+        step("an executing remote-build row already carrying THIS incarnation's fence is an explicit error, never a silent skip")
+        expect(host_remote_build_reap_select_v4([rb_row("executing")], RB_PRIOR)).to_equal(Err("linux-host-remote-build-reap-current-fence"))
+        step("a non-executing or unmarked row of this fence is still not selected (no error)")
+        expect(host_remote_build_reap_select_v4([rb_row("admitted")], RB_PRIOR).unwrap().len()).to_equal(0)
+        expect(host_remote_build_reap_select_v4([rb_row("executing", "")], RB_PRIOR).unwrap().len()).to_equal(0)
+
+    it "encodes a canonical reap record and refuses every malformed one":
+        # @req M0030-REAP-02
+        val bytes = host_remote_build_reap_record_encode_v4(rb_record()).unwrap()
+        expect(bytes).to_contain("linux-host-remote-build-reap")
+        val back = host_remote_build_reap_record_decode_v4(bytes).unwrap()
+        expect(back.task_digest).to_equal(RB_TASK)
+        expect(back.observed_at).to_equal(1700000000000)
+        step("only the service-restart reason is admitted")
+        var other = rb_record()
+        other.reason = "drain"
+        expect(host_remote_build_reap_record_encode_v4(other)).to_equal(Err("linux-host-remote-build-reap-invalid"))
+        step("a bad digest, an empty fence and a non-identifier operation are refused")
+        var digest = rb_record()
+        digest.task_digest = "short"
+        expect(host_remote_build_reap_record_encode_v4(digest)).to_equal(Err("linux-host-remote-build-reap-invalid"))
+        var fence = rb_record()
+        fence.prior_fence = ""
+        expect(host_remote_build_reap_record_encode_v4(fence)).to_equal(Err("linux-host-remote-build-reap-invalid"))
+        step("an unknown key and a non-canonical spelling are refused at decode")
+        expect(host_remote_build_reap_record_decode_v4(bytes.replace("reason:", "extra: 1\n  reason:")).is_err()).to_equal(true)
+        expect(host_remote_build_reap_record_decode_v4(bytes + "\n").is_err()).to_equal(true)
+
+    it "writes the index first, then the record, through the held journal writer":
+        # @req M0030-REAP-03
+        val root = secure_temp_dir("/tmp", "m0030-reap-write").unwrap()
+        val opened = rb_open(root + "/journal", HostCapacityV1("worker_1", "host-authority", "current-fence", 41, 2000, 536870912, []))
+        val journal = opened.journal
+        expect(remote_build_reap_write_v4(journal, rb_row("executing"), 1700000000000).unwrap()).to_equal(true)
+        val index = distributed_operation_journal_read_v3(journal, host_remote_build_reap_index_relative_v4("operation_2"), 4096).unwrap()
+        expect(index.unwrap()).to_equal(remote_build_reap_index_encode_v4("operation_2", RB_PRIOR))
+        val record = distributed_operation_journal_read_v3(journal, host_remote_build_reap_relative_v4(RB_PRIOR, "operation_2"), 4096).unwrap()
+        expect(host_remote_build_reap_record_decode_v4(record.unwrap()).unwrap().association_digest).to_equal(RB_ASSOCIATION)
+        step("the next restart sees the same row again (the flip is in memory only): idempotent, the record is kept")
+        expect(remote_build_reap_write_v4(journal, rb_row("executing"), 1800000000000).unwrap()).to_equal(false)
+        val kept = distributed_operation_journal_read_v3(journal, host_remote_build_reap_relative_v4(RB_PRIOR, "operation_2"), 4096).unwrap()
+        expect(host_remote_build_reap_record_decode_v4(kept.unwrap()).unwrap().observed_at).to_equal(1700000000000)
+        step("a stored record for different facts is a conflict, never overwritten")
+        var foreign = rb_row("executing")
+        foreign.association_digest = "b".repeat(64)
+        expect(remote_build_reap_write_v4(journal, foreign, 1800000000000)).to_equal(Err("linux-host-remote-build-reap-record-conflict"))
+        step("an index naming another prior fence is a conflict")
+        expect(remote_build_reap_write_v4(journal, rb_row("executing", RB_TASK, "other-fence"), 1800000000000)).to_equal(
+            Err("linux-host-remote-build-reap-index-conflict"))
+        val closed = host_capacity_owner_close_owned_v2(opened)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "completes a crash between the index and the record on the next startup":
+        # @req M0030-REAP-04
+        val root = secure_temp_dir("/tmp", "m0030-reap-crash").unwrap()
+        val opened = rb_open(root + "/journal", HostCapacityV1("worker_1", "host-authority", "current-fence", 41, 2000, 536870912, []))
+        val journal = opened.journal
+        step("only the index landed before the crash")
+        expect(distributed_operation_journal_publish_v3(journal, host_remote_build_reap_index_relative_v4("operation_2"),
+            remote_build_reap_index_encode_v4("operation_2", RB_PRIOR)).unwrap()).to_equal(true)
+        expect(distributed_operation_journal_read_v3(journal, host_remote_build_reap_relative_v4(RB_PRIOR, "operation_2"), 4096).unwrap().is_none()).to_equal(true)
+        step("the next write accepts the identical index and publishes the record")
+        expect(remote_build_reap_write_v4(journal, rb_row("executing"), 1700000000000).unwrap()).to_equal(true)
+        expect(distributed_operation_journal_read_v3(journal, host_remote_build_reap_relative_v4(RB_PRIOR, "operation_2"), 4096).unwrap().is_some()).to_equal(true)
+        val closed = host_capacity_owner_close_owned_v2(opened)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "writes nothing without the continuity flip and returns the same writer":
+        # @req M0030-REAP-05
+        val root = secure_temp_dir("/tmp", "m0030-reap-unproven").unwrap()
+        val opened = rb_open(root + "/journal", HostCapacityV1("worker_1", "host-authority", "current-fence", 41, 2000, 536870912, []))
+        var unproven = opened
+        unproven.ledger.continuity_proven = false
+        val turn = host_remote_build_reap_v4(unproven, 1700000000000)
+        expect(turn.error).to_equal("linux-host-remote-build-reap-unproven")
+        expect(turn.written).to_equal(0)
+        expect(turn.capacity.journal.root).to_equal(opened.journal.root)
+        val closed = host_capacity_owner_close_owned_v2(turn.capacity)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "derives rows from the held journal: the archived association's marker and the row's own fence":
+        # @req M0030-REAP-06
+        val fixture = rb_fixture()
+        val policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val native = rb_native(fixture)
+        val scope = linux_service_scope_v4(fixture.binding, native, "ab".repeat(16)).unwrap()
+        val prepare = rb_prepare(scope, host_local_context_v1(policy).monotonic_ms + 600000)
+        val grant = linux_service_prepare_authorize_v4(scope, policy, "issuer_1", prepare, host_local_context_v1(policy)).unwrap()
+        val root = secure_temp_dir("/tmp", "m0030-reap-rows").unwrap()
+        val fence = container_scope_fence_id_v2(scope).unwrap()
+        val capacity = HostCapacityV1("worker_1", "host-authority", fence, 41, 2000, 536870912, [])
+        val prepared = host_capacity_owner_prepare_v1(rb_open(root + "/journal", capacity), prepare.prepare.intent, prepare.prepare.operation,
+            grant, host_local_context_v1(policy)).unwrap()
+        step("a row without a retained association yields no remote-build row")
+        expect(remote_build_reap_rows_v4(prepared.journal, prepared.ledger).unwrap().len()).to_equal(0)
+        step("the retained association carries the remote-build marker")
+        val receipt = host_reservation_receipt_v1(prepare.prepare.intent, prepare.prepare.operation).unwrap()
+        val execution = container_execution_draft_bind_v3(prepare.draft, rb_native_scope(native)).unwrap()
+        var association = linux_service_association_v4(fixture.binding, scope, "c".repeat(64), native, prepare, receipt, execution).unwrap()
+        association.remote_build_task_digest = RB_TASK
+        val relative = "host-execution-associations/" + sha256_text(fence + "\n" + "operation_2") + ".sdn"
+        expect(distributed_operation_journal_publish_v3(prepared.journal, relative, host_execution_association_encode_v3(association).unwrap()).unwrap()).to_equal(true)
+        val rows = remote_build_reap_rows_v4(prepared.journal, prepared.ledger).unwrap()
+        expect(rows.len()).to_equal(1)
+        expect(rows[0].prior_fence).to_equal(fence)
+        expect(rows[0].task_digest).to_equal(RB_TASK)
+        expect(rows[0].association_digest).to_equal(host_execution_association_digest_v3(association).unwrap())
+        step("still admitted (never begun), so the selector writes nothing for it")
+        expect(rows[0].journal_state).to_equal("admitted")
+        expect(host_remote_build_reap_select_v4(rows, "next-fence").unwrap().len()).to_equal(0)
+        val closed = host_capacity_owner_close_owned_v2(prepared)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "runs at startup after the flip and the handoff consume, before the first admit":
+        # @req M0030-REAP-07
+        val source = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl")
+        expect(rb_count(source, "host_remote_build_reap_v4(")).to_equal(1)
+        val consume = source.index_of("host_service_handoff_consume_v1(owner.capacity.unwrap().journal")
+        val reap = source.index_of("host_remote_build_reap_v4(")
+        val start_end = source.index_of("# milestone_0022 N3 (14.3 P2-E")
+        expect(consume < reap and reap < start_end).to_equal(true)
+        step("a reap error quarantines like a refused reconcile; prepare refuses on reconcile_error")
+        expect(source).to_contain("if reaped.error != \"\": owner.reconcile_error = reaped.error")
+        step("the reap module is never a continuity setter and writes only through the journal publish")
+        val reap_source = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_reap_v4.spl")
+        expect(rb_count(reap_source, "continuity_proven =")).to_equal(0)
+        expect(rb_count(reap_source, "file_write")).to_equal(0)
+        expect(rb_count(reap_source, "use std.nogc_sync_mut.orchestration.host_linux_service_current_v4")).to_equal(0)
+
+    it "refuses a reused remote-build operation id at prepare, leaving agents unaffected (14.11 G3)":
+        # @req M0030-REAP-08
+        val root = secure_temp_dir("/tmp", "m0030-reap-g3").unwrap()
+        val opened = rb_open(root + "/journal", HostCapacityV1("worker_1", "host-authority", "current-fence", 41, 2000, 536870912, []))
+        val journal = opened.journal
+        step("a fresh id passes for both kinds")
+        expect(host_remote_build_prepare_reaped_gate_v4(journal, "operation_2", RB_TASK)).to_equal("")
+        step("once the startup reap indexed the id, a remote-build draft with that id is refused")
+        expect(remote_build_reap_write_v4(journal, rb_row("executing"), 1700000000000).unwrap()).to_equal(true)
+        expect(host_remote_build_prepare_reaped_gate_v4(journal, "operation_2", RB_TASK)).to_equal("host-remote-build-operation-reaped")
+        step("an agent draft (no marker) with the same id is not gated")
+        expect(host_remote_build_prepare_reaped_gate_v4(journal, "operation_2", "")).to_equal("")
+        step("so the startup writer can never meet a conflicting index through prepare: the reused id never begins")
+        expect(host_remote_build_prepare_reaped_gate_v4(journal, "operation_3", RB_TASK)).to_equal("")
+        val closed = host_capacity_owner_close_owned_v2(opened)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "runs the reaped gate before every slot write and before the charge (zero charge, clean slot)":
+        # @req M0030-REAP-09
+        val source = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl")
+        expect(rb_count(source, "host_remote_build_prepare_reaped_gate_v4(")).to_equal(1)
+        val gate = source.index_of("host_remote_build_prepare_reaped_gate_v4(")
+        val prepare = source.index_of("pub fn host_linux_service_prepare_v4(")
+        val slot = source.index_of("val slot = linux_service_agent_slot_v4(owner, operation.id")
+        val record = source.index_of("owner.agent_operation_id = operation.id")
+        val kind = source.index_of("owner.slot_kind = workload_kind")
+        val charge = source.index_of("host_capacity_owner_prepare_v1(owner.capacity.unwrap(), intent, operation")
+        expect(prepare < gate and gate < slot and gate < record and gate < kind and gate < charge).to_equal(true)
+        expect(source).to_contain("val reaped_gate = host_remote_build_prepare_reaped_gate_v4(owner.capacity.unwrap().journal, operation.id,\n            request.unwrap().draft.remote_build_task_digest)")
+
+    it "never reaps a row whose remote-build outcome is already published (crash between outcome and completed)":
+        # @req M0030-REAP-10 (lane B review P2-2)
+        step("the settle publishes the outcome record BEFORE it commits `completed`; a crash between leaves the row executing")
+        var published = rb_row("executing")
+        published.outcome_published = true
+        expect(host_remote_build_reap_select_v4([published], "current-fence").unwrap().len()).to_equal(0)
+        step("the fence check still runs first: a published row of THIS fence is still the explicit error")
+        expect(host_remote_build_reap_select_v4([published], RB_PRIOR)).to_equal(Err("linux-host-remote-build-reap-current-fence"))
+        step("rows derived from the journal carry the published flag; a foreign outcome record is an error, not a skip")
+        val fixture = rb_fixture()
+        val policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val native = rb_native(fixture)
+        val scope = linux_service_scope_v4(fixture.binding, native, "ab".repeat(16)).unwrap()
+        val prepare = rb_prepare(scope, host_local_context_v1(policy).monotonic_ms + 600000)
+        val grant = linux_service_prepare_authorize_v4(scope, policy, "issuer_1", prepare, host_local_context_v1(policy)).unwrap()
+        val root = secure_temp_dir("/tmp", "m0030-reap-outcome").unwrap()
+        val fence = container_scope_fence_id_v2(scope).unwrap()
+        val capacity = HostCapacityV1("worker_1", "host-authority", fence, 41, 2000, 536870912, [])
+        val prepared = host_capacity_owner_prepare_v1(rb_open(root + "/journal", capacity), prepare.prepare.intent, prepare.prepare.operation,
+            grant, host_local_context_v1(policy)).unwrap()
+        val receipt = host_reservation_receipt_v1(prepare.prepare.intent, prepare.prepare.operation).unwrap()
+        val execution = container_execution_draft_bind_v3(prepare.draft, rb_native_scope(native)).unwrap()
+        var association = linux_service_association_v4(fixture.binding, scope, "c".repeat(64), native, prepare, receipt, execution).unwrap()
+        association.remote_build_task_digest = RB_TASK
+        val relative = "host-execution-associations/" + sha256_text(fence + "\n" + "operation_2") + ".sdn"
+        expect(distributed_operation_journal_publish_v3(prepared.journal, relative, host_execution_association_encode_v3(association).unwrap()).unwrap()).to_equal(true)
+        val digest = host_execution_association_digest_v3(association).unwrap()
+        expect(remote_build_reap_rows_v4(prepared.journal, prepared.ledger).unwrap()[0].outcome_published).to_equal(false)
+        val outcome = host_remote_build_no_workload_record_v4("operation_2", fence, digest, RB_TASK, "deadline").unwrap()
+        expect(distributed_operation_journal_publish_v3(prepared.journal, host_remote_build_outcome_relative_v4("operation_2"), outcome).unwrap()).to_equal(true)
+        val rows = remote_build_reap_rows_v4(prepared.journal, prepared.ledger).unwrap()
+        expect(rows.len()).to_equal(1)
+        expect(rows[0].outcome_published).to_equal(true)
+        val closed = host_capacity_owner_close_owned_v2(prepared)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+        step("an outcome record naming another task under the same operation id refuses the derivation")
+        val foreign_root = secure_temp_dir("/tmp", "m0030-reap-outcome-foreign").unwrap()
+        val again = host_capacity_owner_prepare_v1(rb_open(foreign_root + "/journal", capacity), prepare.prepare.intent, prepare.prepare.operation,
+            grant, host_local_context_v1(policy)).unwrap()
+        expect(distributed_operation_journal_publish_v3(again.journal, relative, host_execution_association_encode_v3(association).unwrap()).unwrap()).to_equal(true)
+        val foreign = host_remote_build_no_workload_record_v4("operation_2", fence, digest, "e".repeat(64), "deadline").unwrap()
+        expect(distributed_operation_journal_publish_v3(again.journal, host_remote_build_outcome_relative_v4("operation_2"), foreign).unwrap()).to_equal(true)
+        expect(remote_build_reap_rows_v4(again.journal, again.ledger)).to_equal(Err("linux-host-remote-build-reap-outcome-foreign"))
+        val closed_again = host_capacity_owner_close_owned_v2(again)
+        expect(closed_again.closed and closed_again.error == "").to_equal(true)
+        expect(dir_remove(foreign_root, true)).to_equal(true)
+        step("the reap stays a non-writer of outcomes: it never records `completed` or publishes an outcome record")
+        val reap_source = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_reap_v4.spl")
+        expect(rb_count(reap_source, "daemon_operation_record_outcome_v2")).to_equal(0)
+        expect(rb_count(reap_source, "publish_v3(journal, host_remote_build_outcome_relative_v4")).to_equal(0)
+
+    it "answers a skipped run with its published outcome over the route, not `unopened`":
+        # @req M0030-REAP-11 (integration review P3-a; the bundle is reached through the completion-evidence reopen arm)
+        val fixture = rb_fixture()
+        val native = rb_native(fixture)
+        val scope = linux_service_scope_v4(fixture.binding, native, "ab".repeat(16)).unwrap()
+        val fence = container_scope_fence_id_v2(scope).unwrap()
+        val root = secure_temp_dir("/tmp", "m0030-reap-answer").unwrap()
+        val owner = rb_open(root + "/journal", HostCapacityV1("worker_1", "host-authority", fence, 41, 2000, 536870912, []))
+        step("no outcome record: no answer (the route keeps its holder checks)")
+        expect(host_remote_build_published_answer_v4(owner.journal, "operation_2")).to_equal("")
+        step("a published outcome answers terminal with its outcome")
+        val outcome = host_remote_build_no_workload_record_v4("operation_2", RB_PRIOR, RB_ASSOCIATION, RB_TASK, "deadline").unwrap()
+        expect(distributed_operation_journal_publish_v3(owner.journal, host_remote_build_outcome_relative_v4("operation_2"), outcome).unwrap()).to_equal(true)
+        expect(host_remote_build_published_answer_v4(owner.journal, "operation_2")).to_equal("linux-host-remote-build-completed:cancelled")
+        step("a record under another operation's path is foreign, never an answer")
+        expect(distributed_operation_journal_publish_v3(owner.journal, host_remote_build_outcome_relative_v4("operation_3"), outcome).unwrap()).to_equal(true)
+        expect(host_remote_build_published_answer_v4(owner.journal, "operation_3")).to_equal("linux-host-remote-build-outcome-foreign")
+        val closed = host_capacity_owner_close_owned_v2(owner)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+        step("collect and output ask it after the reap index and only when no holder of this operation is held")
+        val service = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl")
+        val reaped = service.substring(service.index_of("fn linux_service_remote_build_reaped_v4("), service.byte_len())
+        val gate = reaped.index_of("linux-host-remote-build-reaped-incomplete")
+        val held = reaped.index_of("owner.build.unwrap().operation_id == operation_id")
+        val answer = reaped.index_of("host_remote_build_published_answer_v4(owner.capacity.unwrap().journal, operation_id)")
+        expect(gate > 0 and held > gate and answer > held).to_equal(true)

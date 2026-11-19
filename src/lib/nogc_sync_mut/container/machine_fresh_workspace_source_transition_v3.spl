@@ -24,6 +24,9 @@ use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, time_samp
 use std.common.contracts.container.workspace_preparation_window_v3.container_workspace_preparation_deadline_v3
 use std.nogc_sync_mut.io.linux_fresh_workspace_binding_v3.LinuxFreshWorkspaceBindingV3
 use std.common.contracts.orchestration.agent_workspace_invocation_v2.{agent_workspace_invocation_manifest_decode_v2, agent_workspace_invocation_manifest_encode_v2}
+use std.common.contracts.container.build_workspace_manifest_v1.{build_workspace_invocation_decode_v1, build_workspace_invocation_encode_v1}
+use std.common.contracts.container.linux_fresh_workspace_v3.{LinuxWorkspaceArmV3, linux_workspace_manifest_arm_v3}
+use std.common.contracts.container.settled_workspace_read_v3.{ContainerSettledWorkspaceBoundsV3, ContainerSettledWorkspaceReadV3}
 
 pub struct MachineWorkspaceSourceOpenTurnV3:
     source: Option<LinuxWorkspaceSourceLoanV3> = nil
@@ -112,19 +115,41 @@ pub(package) fn machine_workspace_source_return_settled_v3(storage: MachineStora
     val returned = state.source_returned_v3()?
     Ok(true)
 
+# milestone_0030 op (ii): the bounded evidence read of the SETTLED source before it is returned
+# (DESIGN 13.3.7: return cleans up custody, so the read must precede it). Gate = the settled-return
+# preflight (settled, absence completed, no process, source still runtime-active/reserved).
+pub(package) fn machine_workspace_source_read_settled_v3(state: MachineFreshWorkloadLifecycleV2,
+        bounds: ContainerSettledWorkspaceBoundsV3) -> Result<ContainerSettledWorkspaceReadV3, text>:
+    val safe = state.source_return_settled_preflight_v3()?
+    (state.source_custody_v3()?).read_settled_v3(bounds)
+
+# The signed preparation window `(preparation_budget_ms, not_after)` carried by the full invocation
+# of the manifest-selected arm (milestone_0030 N6-a, DESIGN 14.3 item 5). The Agent arm decodes the
+# agent invocation exactly as before; the RemoteBuild arm decodes BuildWorkspaceInvocationV1.
+fn machine_workspace_enable_window_v3(manifest: text, digest: text, full_invocation_source: text) -> Result<(i64, i64), text>:
+    if sha256_text(full_invocation_source) != digest: return Err("linux-workspace-full-invocation-digest")
+    match linux_workspace_manifest_arm_v3(manifest)?:
+        case LinuxWorkspaceArmV3.Agent:
+            val full = agent_workspace_invocation_manifest_decode_v2(full_invocation_source)?
+            if agent_workspace_invocation_manifest_encode_v2(full)? != full_invocation_source or full.base.workspace_manifest != manifest:
+                return Err("linux-workspace-full-invocation-canonical-binding")
+            Ok((full.base.preparation_budget_ms, full.base.not_after))
+        case LinuxWorkspaceArmV3.RemoteBuild:
+            val full = build_workspace_invocation_decode_v1(full_invocation_source)?
+            if build_workspace_invocation_encode_v1(full)? != full_invocation_source or full.workspace_manifest != manifest:
+                return Err("linux-workspace-full-invocation-canonical-binding")
+            Ok((full.preparation_budget_ms, full.not_after))
+
 pub(package) fn machine_workspace_enable_context_v3(state: MachineFreshWorkloadLifecycleV2,
         request: ContainerExecutionRequestV2, manifest: text, digest: text,
         full_invocation_source: text) -> Result<LinuxFreshWorkspaceBindingV3, text>:
-    if sha256_text(full_invocation_source) != digest: return Err("linux-workspace-full-invocation-digest")
-    val full = agent_workspace_invocation_manifest_decode_v2(full_invocation_source)?
-    if agent_workspace_invocation_manifest_encode_v2(full)? != full_invocation_source or full.base.workspace_manifest != manifest:
-        return Err("linux-workspace-full-invocation-canonical-binding")
+    val (preparation_budget_ms, not_after) = machine_workspace_enable_window_v3(manifest, digest, full_invocation_source)?
     val original = state.source_started_v3()?
-    val deadline = container_workspace_preparation_deadline_v3(original, full.base.preparation_budget_ms,
-        time_sample_monotonic_nanos_or_failure(), full.base.not_after, time_sample_unix_micros_or_failure() / 1000)?
+    val deadline = container_workspace_preparation_deadline_v3(original, preparation_budget_ms,
+        time_sample_monotonic_nanos_or_failure(), not_after, time_sample_unix_micros_or_failure() / 1000)?
     val source = state.source_custody_v3()?
     val binding = source.binding_v3(request, manifest, digest)?
-    val retained = source.retain_context_v3(full_invocation_source, deadline, full.base.not_after)?
+    val retained = source.retain_context_v3(full_invocation_source, deadline, not_after)?
     state.capture_source_custody_v3(retained)
     Ok(binding)
 

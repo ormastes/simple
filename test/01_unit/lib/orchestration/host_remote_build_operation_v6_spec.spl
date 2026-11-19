@@ -1,0 +1,100 @@
+"""
+## Purpose and audience
+milestone_0030 owner decision N10: the remote build rides ONE authenticated V6
+action, `remote-build`, whose payload names the sub-operation (open, input,
+start, collect, output, cancel) and carries the unchanged route frame. This
+file pins the envelope rules, the sub-operation codec and the smux route that
+maps the one action onto the six Host-domain route actions. Written for owners
+of the V6 operation contract and the smux Host continuation.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-19).
+## Compatibility and limitations
+The six Host-domain route actions (`host-remote-build-*`) are unchanged and stay
+internal; the continuation is their only V6 caller. Route behaviour past the
+mapping is pinned by the route specs. The reply envelope is 1 MiB.
+## Verification guidance and troubleshooting
+A changed refusal string is a wire-contract change.
+"""
+use std.spec.step
+use std.io.file_read_text
+use std.common.contracts.orchestration.host_service_operation_v6.*
+use std.common.contracts.orchestration.host_service_operation_reply_v6.*
+use std.common.contracts.orchestration.host_remote_build_operation_v6.*
+
+fn bo_hex(ch: text, width: i64) -> text:
+    ch.repeat(width)
+
+fn bo_request(payload: text) -> HostServiceOperationRequestV6:
+    val op = "op-build-1"
+    HostServiceOperationRequestV6(action: "remote-build", service_incarnation: bo_hex("a", 32), operation_id: op,
+        scope_digest: bo_hex("b", 64), request_digest: host_service_operation_request_digest_v6(op, payload).unwrap(),
+        payload: payload)
+
+fn bo_from(source: text, start: text) -> text:
+    val at = source.index_of(start)
+    if at < 0: return ""
+    source.substring(at, source.byte_len())
+
+describe "the one V6 remote-build action":
+    it "admits remote-build like execute: payload required, request digest bound":
+        # @req M0030-N10-01
+        val payload = host_remote_build_sub_encode_v6(HostRemoteBuildSubRequestV6(sub: "open", frame: "frame-bytes")).unwrap()
+        expect(host_service_operation_validate_v6(bo_request(payload)).is_ok()).to_equal(true)
+        step("an empty payload and a wrong request digest are refused")
+        var empty = bo_request(payload)
+        empty.payload = ""
+        expect(host_service_operation_validate_v6(empty)).to_equal(Err("host-operation-payload-required"))
+        var wrong = bo_request(payload)
+        wrong.request_digest = bo_hex("c", 64)
+        expect(host_service_operation_validate_v6(wrong)).to_equal(Err("host-operation-request-digest-mismatch"))
+        step("the reply side names the action too, and never reports it pending")
+        val reply = HostServiceOperationReplyV6("remote-build", bo_hex("a", 32), "op-build-1", bo_hex("b", 64),
+            bo_hex("d", 64), false, 0, "ok", "")
+        expect(host_service_operation_reply_validate_v6(reply).is_ok()).to_equal(true)
+        var pending = reply
+        pending.pending = true
+        expect(host_service_operation_reply_validate_v6(pending)).to_equal(Err("host-operation-reply-pending-action"))
+
+    it "round-trips only canonical sub-operation envelopes":
+        # @req M0030-N10-02
+        for sub in ["open", "input", "start", "collect", "output", "cancel"]:
+            val encoded = host_remote_build_sub_encode_v6(HostRemoteBuildSubRequestV6(sub: sub, frame: "f-" + sub)).unwrap()
+            val decoded = host_remote_build_sub_decode_v6(encoded).unwrap()
+            expect(decoded.sub).to_equal(sub)
+            expect(decoded.frame).to_equal("f-" + sub)
+            expect(host_remote_build_sub_domain_action_v6(sub).unwrap()).to_equal("host-remote-build-" + sub)
+        step("an unknown sub-operation, an empty frame and non-canonical text are refused")
+        expect(host_remote_build_sub_encode_v6(HostRemoteBuildSubRequestV6(sub: "status", frame: "x"))).to_equal(Err("host-remote-build-sub-unknown"))
+        expect(host_remote_build_sub_encode_v6(HostRemoteBuildSubRequestV6(sub: "open", frame: ""))).to_equal(Err("host-remote-build-sub-frame-required"))
+        expect(host_remote_build_sub_domain_action_v6("status")).to_equal(Err("host-remote-build-sub-unknown"))
+        val good = host_remote_build_sub_encode_v6(HostRemoteBuildSubRequestV6(sub: "open", frame: "x")).unwrap()
+        expect(host_remote_build_sub_decode_v6(good + "\n")).to_equal(Err("host-remote-build-sub-noncanonical"))
+        expect(host_remote_build_sub_decode_v6("not sdn {{")).to_equal(Err("host-remote-build-sub-syntax"))
+
+    it "routes the one action onto the six domain actions inside the continuation":
+        # @req M0030-N10-03
+        val source = file_read_text("src/os/apps/smux/runtime_host_continuation_v6.spl")
+        val route = bo_from(source, "fn remote_build_query_v6(")
+        expect(route.byte_len() > 0).to_equal(true)
+        expect(route).to_contain("host_remote_build_sub_decode_v6(request.payload)")
+        expect(route).to_contain("host_remote_build_sub_domain_action_v6(")
+        expect(route).to_contain("host_service_domain_turn_v3(domain, HostServiceRequestV2(")
+        step("it waits behind a pending execution exactly like the other Host requests")
+        expect(route).to_contain("state.inspection_pending_v6()")
+        expect(route).to_contain("runtime-controller-inspection-pending")
+        expect(route).to_contain("state.execution.is_some() or context.planning_pending")
+        expect(route).to_contain("runtime-host-execution-pending")
+        step("the dispatch happens after the generic gates and before the controller-inspection branch")
+        val query = bo_from(source, "pub fn smux_host_continuation_query_v6(")
+        expect(query.index_of("if request.action == \"remote-build\":") > query.index_of("if context.scope_digest != scope.unwrap()")).to_equal(true)
+        expect(query.index_of("if request.action == \"remote-build\":") < query.index_of("if state.controller_inspection.is_some():")).to_equal(true)
+
+    it "keeps the nested envelope inside the 2 MiB request cap":
+        # @req M0030-N10-04
+        step("an input chunk is plain base64 (no escapes): 1,638,400 bytes plus wrapper and frame overhead stay under the cap")
+        expect(1638400 + 4096 < HOST_SERVICE_OPERATION_MAX_BYTES_V6).to_equal(true)
+        step("the open record is escaped three times (frame, sub envelope, V6 payload): its cap keeps the worst case inside 2 MiB")
+        val port = file_read_text("src/app/orchestrator/remote_build_service_port_v3.spl")
+        expect(port).to_contain("val REMOTE_BUILD_OPEN_RECORD_MAX_V3: i64 = 245760")
+        expect(245760 * 8 < HOST_SERVICE_OPERATION_MAX_BYTES_V6).to_equal(true)

@@ -1,0 +1,245 @@
+# milestone_0030 PR-2 (DESIGN s6, 13.4, 14.6 P3-3, 14.10 P2-2): the startup reap WRITER for remote-build runs of
+# a prior service incarnation. SOURCE_AUTHORED / NOT_RUN.
+#
+# A started remote build never survives a service restart. Its only caller is host_linux_service_start_v4, AFTER the
+# reconcile flip and the handoff consume and BEFORE the start turn returns, so before the first admit (prepare refuses
+# while `reconcile_error` is set or continuity is unproven). For every `executing` remote-build row of a prior
+# incarnation it writes, no-replace and read back, first the index
+#   host-remote-build-reap-index/<sha256(operation id)>.sdn = {operationId, priorFence}
+# and then the record
+#   host-remote-build-reap/<sha256(prior fence + "\n" + operation id)>.sdn
+#   = {operationId, priorFence, associationDigest, taskDigest, reason "service-restart", observedAt}.
+#
+# Charge: this module holds and releases nothing. The flip (R:290, the ONLY continuity setter) succeeded only on a
+# proved-absent store, so the run is gone; a present workload keeps the service quarantined and this writer never
+# runs (no flip, no record). Any write error is returned and the caller sets `reconcile_error`, so nothing is admitted
+# until a later startup completes the write.
+#
+# Restart idempotence: the flip is in memory only, so the same row is `executing` again at every later restart with
+# the same prior fence. The index bytes are deterministic and must match exactly; an existing record must carry the
+# same facts (its observedAt is the first observation and is kept). Index without record (crash between the two) is
+# completed. A remote-build row is identified by the archived association's `remoteBuildTaskDigest` marker.
+#
+# Single writer: every read and write goes through the held capacity journal `capacity.journal` (in the caller,
+# `owner.capacity.unwrap().journal`); the capacity owner is returned on every path. This module never imports the
+# service module (it is imported by it).
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_lookup_v2, distributed_operation_journal_read_v3,
+    distributed_operation_journal_read_required_v3, distributed_operation_journal_publish_v3}
+use std.common.contracts.distributed_control_codec_v2.distributed_decode_operation_v2
+use std.common.contracts.orchestration.host_capacity_v1.HostCapacityLedgerV1
+use std.common.contracts.orchestration.host_reservation_codec_v1.host_reservation_decode_intent_v1
+use std.common.contracts.orchestration.host_execution_association_v3.{host_execution_association_decode_v3,
+    host_execution_association_digest_v3}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostCapacityOwnerV1
+use std.nogc_sync_mut.orchestration.host_linux_completion_evidence_v3.{host_remote_build_outcome_decode_v4,
+    host_remote_build_outcome_relative_v4}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+val HOST_REMOTE_BUILD_REAP_MAX_BYTES_V4: i64 = 4096
+
+# Journal-derived facts for one remote-build row (DATA; grants nothing by itself).
+pub struct HostRemoteBuildReapRowV4:
+    operation_id: text
+    prior_fence: text
+    journal_state: text
+    association_digest: text
+    task_digest: text
+    # The settle published this row's outcome record (it does so BEFORE committing `completed`): the run ended and
+    # its archive is authoritative, so the reap must not write `service-restart` over it.
+    outcome_published: bool = false
+
+pub struct HostRemoteBuildReapRecordV4:
+    operation_id: text
+    prior_fence: text
+    association_digest: text
+    task_digest: text
+    reason: text
+    observed_at: i64
+
+pub struct HostRemoteBuildReapTurnV4:
+    capacity: HostCapacityOwnerV1
+    written: i64
+    error: text
+
+pub fn host_remote_build_reap_index_relative_v4(operation_id: text) -> text:
+    "host-remote-build-reap-index/" + sha256_text(operation_id) + ".sdn"
+
+pub fn host_remote_build_reap_relative_v4(prior_fence: text, operation_id: text) -> text:
+    "host-remote-build-reap/" + sha256_text(prior_fence + "\n" + operation_id) + ".sdn"
+
+fn remote_build_reap_index_encode_v4(operation_id: text, prior_fence: text) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-remote-build-reap-index"),
+        "operationId": SdnValue.String(operation_id), "priorFence": SdnValue.String(prior_fence)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn remote_build_reap_record_names_v4() -> [text]:
+    ["version", "kind", "operationId", "priorFence", "associationDigest", "taskDigest", "reason", "observedAt"]
+
+fn remote_build_reap_record_validate_v4(value: HostRemoteBuildReapRecordV4) -> Result<(), text>:
+    if not builder_identifier_valid_v1(value.operation_id) or value.prior_fence == "":
+        return Err("linux-host-remote-build-reap-invalid")
+    if not builder_digest_valid_v1(value.association_digest) or not builder_digest_valid_v1(value.task_digest):
+        return Err("linux-host-remote-build-reap-invalid")
+    if value.reason != "service-restart" or value.observed_at < 0: return Err("linux-host-remote-build-reap-invalid")
+    Ok(())
+
+pub fn host_remote_build_reap_record_encode_v4(value: HostRemoteBuildReapRecordV4) -> Result<text, text>:
+    remote_build_reap_record_validate_v4(value)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-remote-build-reap"),
+        "operationId": SdnValue.String(value.operation_id), "priorFence": SdnValue.String(value.prior_fence),
+        "associationDigest": SdnValue.String(value.association_digest), "taskDigest": SdnValue.String(value.task_digest),
+        "reason": SdnValue.String(value.reason), "observedAt": SdnValue.Int(value.observed_at)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn remote_build_reap_text_v4(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("linux-host-remote-build-reap-field:" + name)
+
+pub fn host_remote_build_reap_record_decode_v4(source: text) -> Result<HostRemoteBuildReapRecordV4, text>:
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: HOST_REMOTE_BUILD_REAP_MAX_BYTES_V4,
+            max_depth: 2, max_nodes: 32, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(issue): return Err("linux-host-remote-build-reap-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("linux-host-remote-build-reap-object")
+    val names = remote_build_reap_record_names_v4()
+    if fields.len() != names.len(): return Err("linux-host-remote-build-reap-fields")
+    for name in names:
+        if not fields.contains_key(name): return Err("linux-host-remote-build-reap-fields")
+    val observed = match fields["observedAt"]:
+        case SdnValue.Int(value): value
+        case _: return Err("linux-host-remote-build-reap-field:observedAt")
+    val value = HostRemoteBuildReapRecordV4(operation_id: remote_build_reap_text_v4(fields, "operationId")?,
+        prior_fence: remote_build_reap_text_v4(fields, "priorFence")?,
+        association_digest: remote_build_reap_text_v4(fields, "associationDigest")?,
+        task_digest: remote_build_reap_text_v4(fields, "taskDigest")?,
+        reason: remote_build_reap_text_v4(fields, "reason")?, observed_at: observed)
+    # Canonical bytes only: a re-encode must reproduce the record exactly (version/kind included).
+    if host_remote_build_reap_record_encode_v4(value)? != source: return Err("linux-host-remote-build-reap-noncanonical")
+    Ok(value)
+
+# Remote-build rows of the held journal. The retained association path is the one prepare published:
+# sha256(<row's own intent fence> + "\n" + operation id), as R's row facts read it. Rows without a retained
+# association or without the marker are not remote builds and are skipped. The ledger only drives the iteration:
+# after the flip every row is Released in memory, so the journal state is read from the journal.
+fn remote_build_reap_rows_v4(journal: DistributedOperationJournalV2,
+        ledger: HostCapacityLedgerV1) -> Result<[HostRemoteBuildReapRowV4], text>:
+    var rows: [HostRemoteBuildReapRowV4] = []
+    for row in ledger.reservations:
+        val state = distributed_operation_journal_lookup_v2(journal, row.operation_id)?
+        val operation = distributed_decode_operation_v2(state.envelope)?
+        if operation.operation != "host_reservation_v1": continue
+        if operation.id != row.operation_id or operation.payload_digest != row.payload_digest:
+            return Err("linux-host-remote-build-reap-row-mismatch")
+        val intent = host_reservation_decode_intent_v1(distributed_operation_journal_read_required_v3(journal,
+            "reservation-payloads/" + operation.payload_digest + ".sdn", 65536)?)?
+        if intent.reservation.operation_id != row.operation_id: return Err("linux-host-remote-build-reap-row-mismatch")
+        val stored = distributed_operation_journal_read_v3(journal,
+            "host-execution-associations/" + sha256_text(intent.fence.boot_id + "\n" + operation.id) + ".sdn", 2097152)?
+        if stored.is_none(): continue
+        val association = host_execution_association_decode_v3(stored.unwrap())?
+        if association.remote_build_task_digest == "": continue
+        if association.execution.plan.operation_id != operation.id: return Err("linux-host-remote-build-reap-association-foreign")
+        val association_digest = host_execution_association_digest_v3(association)?
+        # A published outcome must be this row's own record; a foreign one is an error, never a skip.
+        val outcome = distributed_operation_journal_read_v3(journal, host_remote_build_outcome_relative_v4(operation.id), 65536)?
+        if outcome.is_some():
+            val record = host_remote_build_outcome_decode_v4(outcome.unwrap())?
+            if (record.operation_id != operation.id or record.fence != intent.fence.boot_id or
+                    record.association_digest != association_digest or record.task_digest != association.remote_build_task_digest):
+                return Err("linux-host-remote-build-reap-outcome-foreign")
+        rows.push(HostRemoteBuildReapRowV4(operation_id: operation.id, prior_fence: intent.fence.boot_id,
+            journal_state: state.state, association_digest: association_digest,
+            task_digest: association.remote_build_task_digest, outcome_published: outcome.is_some()))
+    Ok(rows)
+
+# Pure selector: a begun (`executing`) remote-build row of a PRIOR incarnation whose outcome is not yet published. The reap runs before the first admit
+# of this incarnation, so an executing remote-build row already carrying the current fence cannot exist: it is an
+# error (the caller quarantines), never a silent skip.
+pub fn host_remote_build_reap_select_v4(rows: [HostRemoteBuildReapRowV4],
+        current_fence: text) -> Result<[HostRemoteBuildReapRowV4], text>:
+    var selected: [HostRemoteBuildReapRowV4] = []
+    for row in rows:
+        if row.journal_state != "executing" or row.task_digest == "": continue
+        if row.prior_fence == current_fence: return Err("linux-host-remote-build-reap-current-fence")
+        # P2-2: the settle published the outcome and crashed before `completed`; the archive already says how the run
+        # ended. Skipped here (the reap writes no outcome and records nothing); the row keeps its outcome record.
+        if row.outcome_published: continue
+        selected.push(row)
+    Ok(selected)
+
+# Index first, then the record (14.6 P3-3). Returns true when the record was newly published. Borrowed writer:
+# `journal` is the held capacity journal of the caller.
+fn remote_build_reap_write_v4(journal: DistributedOperationJournalV2, row: HostRemoteBuildReapRowV4,
+        observed_at: i64) -> Result<bool, text>:
+    val index_relative = host_remote_build_reap_index_relative_v4(row.operation_id)
+    val index = remote_build_reap_index_encode_v4(row.operation_id, row.prior_fence)
+    # No-replace: false means an index already exists; its bytes are checked below either way.
+    distributed_operation_journal_publish_v3(journal, index_relative, index)?
+    if distributed_operation_journal_read_required_v3(journal, index_relative, HOST_REMOTE_BUILD_REAP_MAX_BYTES_V4)? != index:
+        return Err("linux-host-remote-build-reap-index-conflict")
+    val relative = host_remote_build_reap_relative_v4(row.prior_fence, row.operation_id)
+    val bytes = host_remote_build_reap_record_encode_v4(HostRemoteBuildReapRecordV4(operation_id: row.operation_id,
+        prior_fence: row.prior_fence, association_digest: row.association_digest, task_digest: row.task_digest,
+        reason: "service-restart", observed_at: observed_at))?
+    val published = distributed_operation_journal_publish_v3(journal, relative, bytes)?
+    val stored = host_remote_build_reap_record_decode_v4(distributed_operation_journal_read_required_v3(journal, relative,
+        HOST_REMOTE_BUILD_REAP_MAX_BYTES_V4)?)?
+    if (stored.operation_id != row.operation_id or stored.prior_fence != row.prior_fence or
+            stored.association_digest != row.association_digest or stored.task_digest != row.task_digest):
+        return Err("linux-host-remote-build-reap-record-conflict")
+    Ok(published)
+
+# The startup reap. `observed_at` is the service grant clock. Refuses (writing nothing) unless continuity was proven
+# by the flip. The capacity owner (single journal writer) is returned on every path.
+# @allow(primitive_api) observed_at is the unix-ms trusted clock sample, as every Host settle/reap entry takes it
+pub fn host_remote_build_reap_v4(capacity: HostCapacityOwnerV1, observed_at: i64) -> HostRemoteBuildReapTurnV4:
+    if not capacity.ledger.continuity_proven:
+        return HostRemoteBuildReapTurnV4(capacity: capacity, written: 0, error: "linux-host-remote-build-reap-unproven")
+    val rows = remote_build_reap_rows_v4(capacity.journal, capacity.ledger)
+    if rows.is_err(): return HostRemoteBuildReapTurnV4(capacity: capacity, written: 0, error: rows.unwrap_err())
+    val selected = host_remote_build_reap_select_v4(rows.unwrap(), capacity.ledger.capacity.boot_id)
+    if selected.is_err(): return HostRemoteBuildReapTurnV4(capacity: capacity, written: 0, error: selected.unwrap_err())
+    var written: i64 = 0
+    for row in selected.unwrap():
+        val stored = remote_build_reap_write_v4(capacity.journal, row, observed_at)
+        if stored.is_err(): return HostRemoteBuildReapTurnV4(capacity: capacity, written: written, error: stored.unwrap_err())
+        if stored.unwrap(): written = written + 1
+    HostRemoteBuildReapTurnV4(capacity: capacity, written: written, error: "")
+
+# 14.11 G3: a remote-build draft whose operation id the startup reap already indexed never begins, so the reap
+# writer cannot meet a conflicting index through prepare. Agents (no marker) are not gated. A read error refuses.
+pub fn host_remote_build_prepare_reaped_gate_v4(journal: DistributedOperationJournalV2, operation_id: text,
+        task_digest: text) -> text:
+    if task_digest == "": return ""
+    val index = distributed_operation_journal_read_v3(journal, host_remote_build_reap_index_relative_v4(operation_id),
+        HOST_REMOTE_BUILD_REAP_MAX_BYTES_V4)
+    if index.is_err(): return index.unwrap_err()
+    if index.unwrap().is_some(): return "host-remote-build-operation-reaped"
+    ""
+
+# Integration review P3-a: a run the reap skipped because its outcome is already published (outcome before `completed`,
+# then a restart) answers terminal over the route; its bundle is reached through the completion-evidence reopen arm
+# (host_linux_completion_evidence_v3.spl:68). Read-only: the record's prior fence is not checked against this one.
+pub fn host_remote_build_published_answer_v4(journal: DistributedOperationJournalV2, operation_id: text) -> text:
+    val source = distributed_operation_journal_read_v3(journal, host_remote_build_outcome_relative_v4(operation_id), 65536)
+    if source.is_err(): return source.unwrap_err()
+    if source.unwrap().is_none(): return ""
+    val record = host_remote_build_outcome_decode_v4(source.unwrap().unwrap())
+    if record.is_err(): return record.unwrap_err()
+    if record.unwrap().operation_id != operation_id: return "linux-host-remote-build-outcome-foreign"
+    "linux-host-remote-build-completed:" + record.unwrap().outcome
+
+export HostRemoteBuildReapRowV4, HostRemoteBuildReapRecordV4, HostRemoteBuildReapTurnV4
+export host_remote_build_prepare_reaped_gate_v4, host_remote_build_published_answer_v4
+export host_remote_build_reap_index_relative_v4, host_remote_build_reap_relative_v4
+export host_remote_build_reap_record_encode_v4, host_remote_build_reap_record_decode_v4
+export host_remote_build_reap_select_v4, host_remote_build_reap_v4

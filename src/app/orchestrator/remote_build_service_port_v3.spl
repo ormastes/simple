@@ -1,0 +1,194 @@
+# milestone_0030 integration item 5 (DESIGN 13.3 F5): the app half of the Host remote-build port.
+# SOURCE_AUTHORED / NOT_RUN.
+#
+# The open record is the ONE controller-authored frame (N8-a): task, evidence policy, the controller-signed build pair,
+# the request envelope, the operator's requested environment text and the controller-authored build invocation. It is
+# untrusted here: admit_open and finalize both rebuild RemoteAuthorityContextV1 from the INSTALLED snapshot by role
+# (remote_context_from_snapshot_v1) and run remote_context_admit_v1 before anything is used.
+#
+# Lives under app.orchestrator (not app.buildrunner as DESIGN names it): it signs with the host identity key
+# (app.orchestrator.host_identity_key_v1) and decodes the remote-run environment (remote_run_plan_v1).
+use app.buildrunner.remote_evidence_v1.{RemoteEvidencePolicyV1, RemoteOutputBytesV1, remote_policy_encode_v1,
+    remote_policy_decode_v1}
+use app.buildrunner.remote_context_v1.{RemoteAuthorityContextV1, remote_context_admit_v1, remote_context_from_snapshot_v1}
+use app.buildrunner.remote_container_evidence_v3.{RemoteContainerBytesV3, RemoteContainerBundleV3,
+    remote_container_evidence_freeze_v3}
+use app.buildrunner.remote_container_authority_v3.{RemoteContainerCompletionV3, RemoteContainerBindingV3,
+    remote_container_completion_signature_message_v3, remote_container_verify_completion_v3}
+use app.buildrunner.remote_container_bundle_codec_v3.remote_container_bundle_encode_v3
+use app.orchestrator.host_identity_key_v1.host_identity_private_sign_completion_v3
+use app.orchestrator.remote_run_plan_v1.remote_run_environment_decode_v1
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.{HostRemoteBuildPortV4, HostRemoteBuildAdmittedV3,
+    HostRemoteBuildObservedV3}
+use std.nogc_sync_mut.io.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_authority_snapshot_key_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.DistributedAuthorityKeyV2
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionEnvironmentV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_authority_codec_v2.{distributed_encode_signed_grant_v2, distributed_decode_signed_grant_v2,
+    distributed_encode_signed_approval_v2, distributed_decode_signed_approval_v2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2,
+    distributed_grant_digest_v2}
+use std.common.contracts.container.runtime_v1.RuntimeExitStatusV1
+use std.common.contracts.container.settled_workspace_read_v3.ContainerSettledWorkspaceBoundsV3
+use std.common.build_manager.contracts.{BuildTaskV1, BuildResultV1, BuildInputV1, builder_task_identity_v1}
+use std.common.build_manager.codec.{builder_encode_task_v1, builder_decode_task_v1}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.crypto.secure_memory.secure_zero_u8_slots
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+# The open record is escaped three times on the V6 wire (route frame, sub-operation envelope, V6 payload; N10), each
+# at most doubling it, so 240 KiB keeps the worst case under the 2 MiB request envelope.
+val REMOTE_BUILD_OPEN_RECORD_MAX_V3: i64 = 245760
+val REMOTE_BUILD_OPEN_RECORD_FIELDS_V3 = ["version", "kind", "task", "policy", "signed", "approval", "request",
+    "environment", "invocation"]
+
+struct RemoteBuildOpenRecordV3:
+    task: BuildTaskV1
+    policy: RemoteEvidencePolicyV1
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+    request: OperationEnvelopeV2
+    # The operator's requested environment, verbatim remote-run environment text (remote_run_environment_decode_v1).
+    environment: text
+    # The controller-authored BuildWorkspaceInvocationV1 bytes (the request args pin its sha256).
+    invocation: text
+
+fn remote_build_open_record_encode_v3(record: RemoteBuildOpenRecordV3) -> Result<text, text>:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("remote-build-open"),
+        "task": SdnValue.String(builder_encode_task_v1(record.task)),
+        "policy": SdnValue.String(remote_policy_encode_v1(record.policy)?),
+        "signed": SdnValue.String(distributed_encode_signed_grant_v2(record.signed)?),
+        "approval": SdnValue.String(distributed_encode_signed_approval_v2(record.approval)?),
+        "request": SdnValue.String(distributed_encode_operation_v2(record.request)?),
+        "environment": SdnValue.String(record.environment), "invocation": SdnValue.String(record.invocation)}
+    val wire = sdn_encode_canonical(SdnValue.Dict(fields))
+    if wire.byte_len() > REMOTE_BUILD_OPEN_RECORD_MAX_V3: return Err("remote-build-open-record-size")
+    Ok(wire)
+
+fn remote_build_open_text_v3(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("remote-build-open-record-field:" + name)
+
+# Strict and canonical: exact field set, version 3, and a re-encode must reproduce the bytes.
+fn remote_build_open_record_decode_v3(wire: text) -> Result<RemoteBuildOpenRecordV3, text>:
+    if wire.byte_len() < 1 or wire.byte_len() > REMOTE_BUILD_OPEN_RECORD_MAX_V3: return Err("remote-build-open-record-size")
+    val parsed = sdn_parse_strict_v1(wire, SdnStrictLimitsV1(max_source_bytes: REMOTE_BUILD_OPEN_RECORD_MAX_V3, max_depth: 2,
+        max_nodes: 32, max_rows: 0, max_cells: 0, max_columns: 16))
+    if parsed.is_err(): return Err("remote-build-open-record-syntax")
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return Err("remote-build-open-record-object")
+    if fields.len() != REMOTE_BUILD_OPEN_RECORD_FIELDS_V3.len(): return Err("remote-build-open-record-fields")
+    for name in REMOTE_BUILD_OPEN_RECORD_FIELDS_V3:
+        if not fields.contains_key(name): return Err("remote-build-open-record-fields")
+    match fields["version"]:
+        case SdnValue.Int(value):
+            if value != 3: return Err("remote-build-open-record-version")
+        case _: return Err("remote-build-open-record-version")
+    if remote_build_open_text_v3(fields, "kind")? != "remote-build-open": return Err("remote-build-open-record-kind")
+    val record = RemoteBuildOpenRecordV3(task: builder_decode_task_v1(remote_build_open_text_v3(fields, "task")?)?,
+        policy: remote_policy_decode_v1(remote_build_open_text_v3(fields, "policy")?)?,
+        signed: distributed_decode_signed_grant_v2(remote_build_open_text_v3(fields, "signed")?)?,
+        approval: distributed_decode_signed_approval_v2(remote_build_open_text_v3(fields, "approval")?)?,
+        request: distributed_decode_operation_v2(remote_build_open_text_v3(fields, "request")?)?,
+        environment: remote_build_open_text_v3(fields, "environment")?,
+        invocation: remote_build_open_text_v3(fields, "invocation")?)
+    if remote_build_open_record_encode_v3(record)? != wire: return Err("remote-build-open-record-noncanonical")
+    Ok(record)
+
+# The service composition's installed facts (remote_build_port_install_v3, N11): `observed` is the host's own
+# environment and `read_key` reads the execution-host key file, both from the host identity profile; the policy and
+# host identity are the service's own verified records.
+struct RemoteBuildServicePortConfigV3:
+    policy: LocalAuthorityPolicyV1
+    host_identity: text
+    observed: ExecutionEnvironmentV2
+    read_key: fn(DistributedAuthorityKeyV2) -> Result<[u8], text>
+
+# The context is rebuilt from the installed snapshot on every call; assignment/epoch come from the evidence policy the
+# controller-signed task binds (remote_policy_bind_v1), so the host-side fence check is the policy's own (gap noted).
+fn remote_build_port_context_v3(config: RemoteBuildServicePortConfigV3, record: RemoteBuildOpenRecordV3,
+        now: i64) -> Result<RemoteAuthorityContextV1, text>:
+    val requested = remote_run_environment_decode_v1(record.environment)?
+    val context = remote_context_from_snapshot_v1(config.policy.snapshot, config.policy.session_generation, record.signed,
+        record.approval, config.host_identity, record.request, requested, config.observed, now,
+        record.policy.assignment_digest, record.policy.controller_epoch)?
+    val _admitted = remote_context_admit_v1(context, record.task, record.policy)?
+    Ok(context)
+
+fn remote_build_port_admit_v3(config: RemoteBuildServicePortConfigV3, wire: text, now: i64) -> Result<HostRemoteBuildAdmittedV3, text>:
+    val record = remote_build_open_record_decode_v3(wire)?
+    val context = remote_build_port_context_v3(config, record, now)?
+    Ok(HostRemoteBuildAdmittedV3(signed: context.signed, approval: context.approval, request: context.request,
+        requested: context.requested, task: record.task, invocation_bytes: record.invocation,
+        bounds: ContainerSettledWorkspaceBoundsV3(maximum_bytes: record.policy.maximum_bytes, output_paths: record.task.outputs)))
+
+# L10: Exited(n) is the result exit code (OK only for 0); any other status is ERROR / -1 with no outputs.
+fn remote_build_port_result_v3(record: RemoteBuildOpenRecordV3, observed: HostRemoteBuildObservedV3) -> (BuildResultV1, [RemoteOutputBytesV1]):
+    var status = "ERROR"
+    var code: i64 = -1
+    match observed.measurements.exit.workload_exit:
+        case RuntimeExitStatusV1.Exited(value):
+            code = value
+            if value == 0: status = "OK"
+        case _: ()
+    var outputs: [RemoteOutputBytesV1] = []
+    var listed: [BuildInputV1] = []
+    if status == "OK":
+        for file in observed.outputs:
+            outputs.push(RemoteOutputBytesV1(path: file.path, content: file.bytes))
+            listed.push(BuildInputV1(path: file.path, digest: sha256_u8_hex(file.bytes)))
+    (BuildResultV1(task_id: record.task.id, attempt: record.task.attempt, identity_digest: builder_task_identity_v1(record.task),
+        host_id: record.policy.host_id, status: status, exit_code: code, outputs: listed, cache_hits: 0, cache_misses: 0,
+        cache_stores: 0), outputs)
+
+fn remote_build_port_finalize_v3(config: RemoteBuildServicePortConfigV3, wire: text,
+        observed: HostRemoteBuildObservedV3) -> Result<text, text>:
+    val record = remote_build_open_record_decode_v3(wire)?
+    val now = observed.measurements.settled_unix_ms
+    val context = remote_build_port_context_v3(config, record, now)?
+    val built = remote_build_port_result_v3(record, observed)
+    val result = built.0
+    val bytes = RemoteContainerBytesV3(measurements: observed.measurements, stdout: observed.stdout, stderr: observed.stderr,
+        outputs: built.1)
+    val frozen = remote_container_evidence_freeze_v3(record.task, result, record.policy, observed.request, bytes)?
+    var completion = RemoteContainerCompletionV3(version: 3, task_identity: builder_task_identity_v1(record.task),
+        host_id: record.policy.host_id, assignment_digest: record.policy.assignment_digest,
+        controller_epoch: record.policy.controller_epoch, operation_id: record.policy.operation_id,
+        request_digest: sha256_text(distributed_encode_operation_v2(record.request)?),
+        grant_digest: distributed_grant_digest_v2(record.signed.grant)?, result_digest: frozen.result_digest,
+        measurement_digest: frozen.measurement_digest, stdout_digest: frozen.stdout_digest, stderr_digest: frozen.stderr_digest,
+        output_inventory_digest: frozen.output_inventory_digest, tests_digest: frozen.tests_digest,
+        signer_id: config.host_identity, key_revision: context.host_key.revision, completed_at: now, signature: [])
+    val message = remote_container_completion_signature_message_v3(completion)?
+    val host_key = distributed_authority_snapshot_key_v2(config.policy.snapshot, "execution-host", config.host_identity)?
+    val file = (config.read_key)(host_key)?
+    val signed = host_identity_private_sign_completion_v3(file, host_key.public_key, message)
+    val wipe = secure_zero_u8_slots(file)
+    if not wipe.verified(): return Err("remote-build-host-key-buffer-wipe")
+    completion.signature = signed?
+    # Issue-then-verify: nothing leaves unless the controller's own verifier accepts it.
+    val binding = RemoteContainerBindingV3(task_identity: completion.task_identity, host_id: completion.host_id,
+        assignment_digest: completion.assignment_digest, controller_epoch: completion.controller_epoch,
+        operation_id: completion.operation_id, result_digest: frozen.result_digest,
+        measurement_digest: frozen.measurement_digest, stdout_digest: frozen.stdout_digest,
+        stderr_digest: frozen.stderr_digest, output_inventory_digest: frozen.output_inventory_digest,
+        tests_digest: frozen.tests_digest)
+    val _verified = remote_container_verify_completion_v3(completion, context.signed, context.approval, context.issuer,
+        context.approver, context.host_key, context.request, record.task, binding, now, context.policy_revision,
+        context.revocation_epoch, context.session_generation)?
+    remote_container_bundle_encode_v3(RemoteContainerBundleV3(result: result, evidence: bytes, completion: completion))
+
+fn remote_build_service_port_v3(config: RemoteBuildServicePortConfigV3) -> HostRemoteBuildPortV4:
+    HostRemoteBuildPortV4(
+        admit_open: fn(wire: text, now: i64) -> Result<HostRemoteBuildAdmittedV3, text>: remote_build_port_admit_v3(config, wire, now),
+        finalize: fn(wire: text, observed: HostRemoteBuildObservedV3) -> Result<text, text>:
+            remote_build_port_finalize_v3(config, wire, observed))
+
+export RemoteBuildOpenRecordV3, remote_build_open_record_encode_v3, remote_build_open_record_decode_v3
+export RemoteBuildServicePortConfigV3, remote_build_service_port_v3

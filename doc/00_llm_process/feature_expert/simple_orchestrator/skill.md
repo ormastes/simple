@@ -460,3 +460,30 @@ available. These source paths and their manuals remain NOT_RUN.
   settlement (storage stays charged); source-return ends in phase `retained-returned` and never calls close_v1.
 - Trap: final close of a retained workspace still refuses (`machine-fresh-workspace-source-parent-retained`), so
   release_v4 / epoch close / successor advance stay blocked -- owner decision N9; bug record PARTIAL.
+
+## Host remote-build route over authenticated V6 — milestone_0030 (2026-11-19, specs NOT_RUN)
+
+Host side of the remote container build; the controller `remote-run` driver is NOT landed (see "Not landed").
+- ONE V6 action `remote-build` (N10): payload = `HostRemoteBuildSubRequestV6` {sub: open|input|start|collect|output|cancel,
+  frame} (`host_remote_build_operation_v6.spl`); `remote_build_query_v6` (smux continuation) maps it onto the six internal
+  `host-remote-build-*` domain actions behind the same pending-execution/connection/geometry gates. Reply envelope is
+  1 MiB (HOST_SERVICE_OPERATION_REPLY_MAX_BYTES_V6), NOT 8 MiB: reply chunks are 576 KiB raw; the open record is capped at
+  240 KiB because it is escaped three times (frame, sub envelope, V6 payload).
+- Port install (N11): `remote_build_port_install_v3` (called by `host-authenticated-service` on a Ready linux-service
+  domain). Profile = protected identity store `<anchor parent>/host-identity-profile` (execution-host `.key` leaf + the
+  environment as `sha256("simple-remote-build-environment-v1\n"+host)+".profile"`, written by the admin command
+  `remote-build-environment-install --store-root --host --environment`; the store accepts ONLY `<64hex>.key|.hosts|.profile`
+  leaves, a free-form name can never be read); policy snapshot and host identity come from `remote_build_facts_v4` (re-verified
+  records). No readable profile = no port = `linux-host-remote-build-port-missing` at prepare, before slot/charge.
+- P2-a: `host_remote_build_profile_gate_v4` runs at prepare (before slot + charge) over a NON-consuming profile read
+  (`read_build_workspace_profile_v3` on the admission's service reader). It checks only what the build profile
+  determines (image, launcher, arg shape, terminal, memory floor); uid/gid/mount/containment stay at enable.
+- N9-a: `close_native_v2` / `close_workload_v3` accept source phase `retained-returned` (root, lease, storage charge
+  stay in custody; cleanup_v3 still refuses). A build outcome records `source_return: retained-returned`.
+- Merge trap: release retains a written root AT SETTLE (custody already `retained-returned`), so the op (ii) evidence
+  read must accept that phase (custody `read_settled_v3`, mount owner `read_settled_build_v3` accepts
+  `native-retired-retained`).
+### Not landed (held on refs/keep, no src caller yet)
+`remote_container_session_v3` (accept_wire_v3, reset-failure receipt), chunk assemble, bundle/completion decode, and
+the controller `remote-run` driver (dispatch packet authoring with the N6-a projection inputs, a frame loop as a new
+dispatch control mode, reassembly, accept). Records: .spipe/simple_orchestrator/continuation_20261116/milestone_0030_remote_container_driver/.

@@ -46,6 +46,9 @@ fn workspace_agent_data_v3() -> LinuxAgentWorkspaceProfileV1:
         bootstrap_program: "/opt/simple/bootstrap", image: "registry.example/agent@sha256:" + "6".repeat(64),
         agent_program: "/usr/bin/codex", image_config_id: "7".repeat(64))
 
+fn workspace_primary_data_v3() -> LinuxWorkspacePrimaryV3:
+    LinuxWorkspacePrimaryV3.Agent(workspace_agent_data_v3())
+
 fn workspace_approved_data_v3() -> LinuxAgentWorkspaceProfileV2:
     val base = workspace_agent_data_v3()
     val executable = workspace_executable_data_v3()
@@ -145,20 +148,20 @@ describe "Explicit Linux workspace policy and request DATA v3":
     it "accepts only the installed one-root keep-id TTY bootstrap request and keeps CPU V2 closed":
         step("Use the real retained request encoder, not a token or native fixture")
         val value = workspace_command_data_v3()
-        expect(linux_fresh_workspace_command_validate_v3(value, workspace_policy_data_v3(), workspace_agent_data_v3(), "8".repeat(64), 20001, 20001).is_ok()).to_equal(true)
+        expect(linux_fresh_workspace_command_validate_v3(value, workspace_policy_data_v3(), workspace_primary_data_v3(), "8".repeat(64), 20001, 20001).is_ok()).to_equal(true)
         expect(linux_fresh_workload_command_validate_v2(value.command).is_err()).to_equal(true)
         var changed = value
         changed.command.memory_bytes = changed.command.memory_bytes - 1
-        expect(linux_fresh_workspace_command_validate_v3(changed, workspace_policy_data_v3(), workspace_agent_data_v3(), "8".repeat(64), 20001, 20001).is_err()).to_equal(true)
+        expect(linux_fresh_workspace_command_validate_v3(changed, workspace_policy_data_v3(), workspace_primary_data_v3(), "8".repeat(64), 20001, 20001).is_err()).to_equal(true)
         var policy = workspace_policy_data_v3()
         policy.guest_root = "/usr"
-        expect(linux_fresh_workspace_command_validate_v3(value, policy, workspace_agent_data_v3(), "8".repeat(64), 20001, 20001).is_err()).to_equal(true)
-        expect(linux_fresh_workspace_command_validate_v3(value, workspace_policy_data_v3(), workspace_agent_data_v3(), "9".repeat(64), 20001, 20001).is_err()).to_equal(true)
+        expect(linux_fresh_workspace_command_validate_v3(value, policy, workspace_primary_data_v3(), "8".repeat(64), 20001, 20001).is_err()).to_equal(true)
+        expect(linux_fresh_workspace_command_validate_v3(value, workspace_policy_data_v3(), workspace_primary_data_v3(), "9".repeat(64), 20001, 20001).is_err()).to_equal(true)
 
     it "derives exact one-root writable and interactive CLI flags without raw argv authority":
         step("Preserve the actual trusted provider root and namespace selection")
         val value = workspace_command_data_v3()
-        val args = linux_fresh_workspace_argv_v3(workspace_epoch_data_v3(), workspace_policy_data_v3(), workspace_agent_data_v3(), "8".repeat(64), 20001, 20001, value).unwrap()
+        val args = linux_fresh_workspace_argv_v3(workspace_epoch_data_v3(), workspace_policy_data_v3(), workspace_primary_data_v3(), "8".repeat(64), 20001, 20001, value).unwrap()
         for item in ["--tty", "--interactive", "--userns=keep-id", "--user=20001:20001", "--pull=never", "--read-only", "--cap-drop=ALL",
                 "type=bind,src=/srv/workspaces/slot_1,dst=/workspace,rw,nosuid,nodev,bind-propagation=rprivate"]:
             expect(args.contains(item)).to_equal(true)
@@ -199,13 +202,13 @@ describe "Explicit Linux workspace policy and request DATA v3":
         command.command.action = LinuxFreshWorkloadActionV2.Inspect
         command.command.native_id = "3".repeat(64)
         val original = workspace_created_data_v3(command)
-        expect(linux_fresh_workspace_created_config_validate_v3(workspace_policy_data_v3(), workspace_agent_data_v3(), "8".repeat(64), 20001, 20001, command, json_value_serialize(original)).is_ok()).to_equal(true)
+        expect(linux_fresh_workspace_created_config_validate_v3(workspace_policy_data_v3(), workspace_primary_data_v3(), "8".repeat(64), 20001, 20001, command, json_value_serialize(original)).is_ok()).to_equal(true)
         for pair in [("tty", JsonValue.Bool(false)), ("open_stdin", JsonValue.Null), ("stdin_once", JsonValue.Bool(true)),
                 ("memory_bytes", JsonValue.Int(1342177281)), ("memory_swap", JsonValue.Int(-1)), ("pid", JsonValue.Int(22)),
                 ("userns_mode", JsonValue.Str("host")), ("mounts", JsonValue.Array([])),
                 ("binds", json_value_str_array(["/srv/workspaces/other:/workspace:rw,rbind,rprivate,nosuid,nodev"]))]:
             val changed = json_value_object_set(original, pair.0, pair.1)
-            expect(linux_fresh_workspace_created_config_validate_v3(workspace_policy_data_v3(), workspace_agent_data_v3(), "8".repeat(64), 20001, 20001, command, json_value_serialize(changed)).is_err()).to_equal(true)
+            expect(linux_fresh_workspace_created_config_validate_v3(workspace_policy_data_v3(), workspace_primary_data_v3(), "8".repeat(64), 20001, 20001, command, json_value_serialize(changed)).is_err()).to_equal(true)
         val unknown = json_value_object_set(original, "unknown", JsonValue.Bool(false))
         expect(linux_fresh_workspace_inspect_fields_v3(json_value_serialize(unknown)).is_err()).to_equal(true)
         expect(linux_fresh_workspace_inspect_fields_v3("""{{"tty":true,"tty":true}}""").is_err()).to_equal(true)
@@ -223,9 +226,9 @@ describe "Explicit Linux workspace policy and request DATA v3":
         mount = json_value_object_set(mount, "RW", JsonValue.Bool(true))
         val no_flags = json_value_object_set(json_value_object_set(original, "mounts", JsonValue.Array([mount])),
             "binds", json_value_str_array(["/srv/workspaces/slot_1:/workspace:rw,rbind,rprivate"]))
-        expect(linux_fresh_workspace_created_config_validate_v3(workspace_policy_data_v3(), workspace_agent_data_v3(), "8".repeat(64), 20001, 20001, command, json_value_serialize(no_flags)).is_err()).to_equal(true)
+        expect(linux_fresh_workspace_created_config_validate_v3(workspace_policy_data_v3(), workspace_primary_data_v3(), "8".repeat(64), 20001, 20001, command, json_value_serialize(no_flags)).is_err()).to_equal(true)
         val bind_only_nosuid = json_value_object_set(original, "binds", json_value_str_array(["/srv/workspaces/slot_1:/workspace:rw,rbind,rprivate,nosuid"]))
-        expect(linux_fresh_workspace_created_config_validate_v3(workspace_policy_data_v3(), workspace_agent_data_v3(), "8".repeat(64), 20001, 20001, command, json_value_serialize(bind_only_nosuid)).is_err()).to_equal(true)
+        expect(linux_fresh_workspace_created_config_validate_v3(workspace_policy_data_v3(), workspace_primary_data_v3(), "8".repeat(64), 20001, 20001, command, json_value_serialize(bind_only_nosuid)).is_err()).to_equal(true)
         val good = "36 35 98:0 / /workspace rw,nosuid,nodev,relatime shared:1 - xfs /dev/sda1 rw,attr2"
         expect(linux_fresh_workspace_mountinfo_validate_v3(good, "/workspace", 36).is_ok()).to_equal(true)
         val suid = "36 35 98:0 / /workspace rw,nodev,relatime shared:1 - xfs /dev/sda1 rw,attr2"

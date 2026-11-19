@@ -1,0 +1,137 @@
+# milestone_0030 DESIGN 13.1: the V3 remote-container completion. Same fields as V2 (remote_container_authority_v2)
+# with version 3 and `execution_digest` replaced by `measurement_digest`, the digest of the frozen V3 measurements
+# (remote_container_evidence_v3). Own signature and envelope headers, so a V2 completion can never be read as V3;
+# the host signs the signature block with host_identity_private_sign_completion_v3 (domain-pinned).
+# The V3 verify shares the V2 authority body (remote_container_completion_authority_v2) and then checks the V3
+# observation digests and the Ed25519 signature over the V3 message. No new crypto.
+use std.common.build_manager.contracts.{BuildTaskV1, builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.build_manager.codec.builder_wire_line_v1
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use app.llm_caret.workbench.distributed_grant_verification_v2.DistributedAuthorityKeyV2
+use app.buildrunner.remote_container_authority_v2.{RemoteContainerAuthorityClaimV2, RemoteContainerAuthorityExpectedV2,
+    remote_container_completion_authority_v2}
+use std.common.crypto.ed25519.pure_ed25519_verify
+
+pub val REMOTE_CONTAINER_COMPLETION_MAX_BYTES_V3: i64 = 16384
+pub val REMOTE_CONTAINER_COMPLETION_INTEGER_MAX_V3: i64 = 9999999999999999
+
+struct RemoteContainerCompletionV3:
+    version: i64
+    task_identity: text
+    host_id: text
+    assignment_digest: text
+    controller_epoch: i64
+    operation_id: text
+    request_digest: text
+    grant_digest: text
+    result_digest: text
+    measurement_digest: text
+    stdout_digest: text
+    stderr_digest: text
+    output_inventory_digest: text
+    tests_digest: text
+    signer_id: text
+    key_revision: i64
+    completed_at: i64
+    signature: [u8]
+
+fn remote_container_completion_metadata_error_v3(value: RemoteContainerCompletionV3) -> text:
+    if value.version != 3: return "CONTAINER_COMPLETION_VERSION_UNSUPPORTED"
+    for identity in [value.host_id, value.operation_id, value.signer_id]:
+        if not builder_identifier_valid_v1(identity): return "CONTAINER_COMPLETION_IDENTITY_INVALID"
+    for digest in [value.task_identity, value.assignment_digest, value.request_digest,
+            value.grant_digest, value.result_digest, value.measurement_digest, value.stdout_digest,
+            value.stderr_digest, value.output_inventory_digest, value.tests_digest]:
+        if not builder_digest_valid_v1(digest): return "CONTAINER_COMPLETION_DIGEST_INVALID"
+    if value.controller_epoch < 1 or value.controller_epoch > REMOTE_CONTAINER_COMPLETION_INTEGER_MAX_V3 or
+            value.key_revision < 1 or value.key_revision > REMOTE_CONTAINER_COMPLETION_INTEGER_MAX_V3 or
+            value.completed_at < 0 or value.completed_at > REMOTE_CONTAINER_COMPLETION_INTEGER_MAX_V3:
+        return "CONTAINER_COMPLETION_INTEGER_INVALID"
+    ""
+
+# The signed message: wire lines of the 13.1 field list under the V3 signature header.
+fn remote_container_completion_signature_text_v3(value: RemoteContainerCompletionV3) -> Result<text, text>:
+    val invalid = remote_container_completion_metadata_error_v3(value)
+    if invalid != "": return Err(invalid)
+    var wire = ""
+    for field in ["SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V3", str(value.version),
+            value.task_identity, value.host_id, value.assignment_digest, str(value.controller_epoch),
+            value.operation_id, value.request_digest, value.grant_digest, value.result_digest,
+            value.measurement_digest, value.stdout_digest, value.stderr_digest,
+            value.output_inventory_digest, value.tests_digest, value.signer_id,
+            str(value.key_revision), str(value.completed_at)]:
+        wire = wire + builder_wire_line_v1(field)
+    if wire.byte_len() > REMOTE_CONTAINER_COMPLETION_MAX_BYTES_V3:
+        return Err("CONTAINER_COMPLETION_WIRE_TOO_LARGE")
+    Ok(wire)
+
+fn remote_container_completion_signature_message_v3(value: RemoteContainerCompletionV3) -> Result<[u8], text>:
+    val message = remote_container_completion_signature_text_v3(value)?
+    var bytes: [u8] = []
+    for i in 0..message.byte_len(): bytes.push(message.byte_at(i) as u8)
+    Ok(bytes)
+
+fn remote_container_completion_signature_hex_v3(signature: [u8]) -> text:
+    val digits = "0123456789abcdef"
+    var hex = ""
+    for byte in signature:
+        val number = byte as i64
+        hex = hex + digits.substring(number / 16, number / 16 + 1) + digits.substring(number % 16, number % 16 + 1)
+    hex
+
+fn remote_container_completion_encode_v3(value: RemoteContainerCompletionV3) -> Result<text, text>:
+    val message = remote_container_completion_signature_text_v3(value)?
+    if value.signature.len() != 64: return Err("CONTAINER_COMPLETION_SIGNATURE_INVALID")
+    val wire = builder_wire_line_v1("SIMPLE_REMOTE_CONTAINER_COMPLETION_ENVELOPE_V3") +
+        message + builder_wire_line_v1(remote_container_completion_signature_hex_v3(value.signature))
+    if wire.byte_len() > REMOTE_CONTAINER_COMPLETION_MAX_BYTES_V3:
+        return Err("CONTAINER_COMPLETION_WIRE_TOO_LARGE")
+    Ok(wire)
+
+# Built only from the protected assignment and the controller's own freeze, never from arriving claims.
+struct RemoteContainerBindingV3:
+    task_identity: text
+    host_id: text
+    assignment_digest: text
+    controller_epoch: i64
+    operation_id: text
+    result_digest: text
+    measurement_digest: text
+    stdout_digest: text
+    stderr_digest: text
+    output_inventory_digest: text
+    tests_digest: text
+
+# G12: issuer/approver/host_key MUST come only from role-scoped distributed_authority_snapshot_key_v2 lookups (grant-issuer, human-approver, execution-host).
+fn remote_container_verify_completion_v3(value: RemoteContainerCompletionV3,
+        signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2,
+        issuer: DistributedAuthorityKeyV2, approver: DistributedAuthorityKeyV2,
+        host_key: DistributedAuthorityKeyV2, request: OperationEnvelopeV2,
+        task: BuildTaskV1, expected: RemoteContainerBindingV3, now: i64,
+        policy_revision: i64, revocation_epoch: i64,
+        session_generation: i64) -> Result<RemoteContainerCompletionV3, text>:
+    val invalid = remote_container_completion_metadata_error_v3(value)
+    if invalid != "": return Err(invalid)
+    if value.signature.len() != 64: return Err("CONTAINER_COMPLETION_SIGNATURE_INVALID")
+    val _authority = remote_container_completion_authority_v2(RemoteContainerAuthorityClaimV2(task_identity: value.task_identity,
+        host_id: value.host_id, assignment_digest: value.assignment_digest, controller_epoch: value.controller_epoch,
+        operation_id: value.operation_id, request_digest: value.request_digest, grant_digest: value.grant_digest,
+        signer_id: value.signer_id, key_revision: value.key_revision, completed_at: value.completed_at),
+        signed, approval, issuer, approver, host_key, request, task, RemoteContainerAuthorityExpectedV2(
+        task_identity: expected.task_identity, host_id: expected.host_id, assignment_digest: expected.assignment_digest,
+        controller_epoch: expected.controller_epoch, operation_id: expected.operation_id), now, policy_revision,
+        revocation_epoch, session_generation)?
+    if value.result_digest != expected.result_digest or value.measurement_digest != expected.measurement_digest or
+            value.stdout_digest != expected.stdout_digest or value.stderr_digest != expected.stderr_digest or
+            value.output_inventory_digest != expected.output_inventory_digest or value.tests_digest != expected.tests_digest:
+        return Err("CONTAINER_COMPLETION_OBSERVATION_MISMATCH")
+    val message = remote_container_completion_signature_message_v3(value)?
+    if not pure_ed25519_verify(host_key.public_key, message, value.signature):
+        return Err("CONTAINER_COMPLETION_SIGNATURE_INVALID")
+    Ok(value)
+
+export RemoteContainerCompletionV3, RemoteContainerBindingV3, REMOTE_CONTAINER_COMPLETION_MAX_BYTES_V3
+export remote_container_verify_completion_v3
+export remote_container_completion_signature_text_v3, remote_container_completion_signature_message_v3
+export remote_container_completion_encode_v3

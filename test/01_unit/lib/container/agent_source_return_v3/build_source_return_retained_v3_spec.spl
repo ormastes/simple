@@ -1,0 +1,99 @@
+"""
+## Purpose and audience
+milestone_0030 integration item 1: the remote-build arm of the retained
+source-return (IMPL_LANE_C "what lane A's build arm must mirror"). A staged
+remote-build root is written exactly like an agent root, so its settled
+source must return RETAINED (doc/05_design/agent_workspace_retention_v3.md):
+the source re-proves the native token and commits native-retired-retained,
+storage stays charged, and nothing closes or releases the root. Written for
+owners of the Linux workspace source owner and the fresh-epoch machine
+authority.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
+## Compatibility and limitations
+Structural pins over committed source text, like the agent twin
+`agent_source_return_retained_v3_spec.spl`. The genuine path needs native
+owners (quota slot, fresh-epoch subject, staged root) a DATA spec cannot
+construct. The agent arm stays byte-identical; this file pins only the build
+dispatch and the build retirement body.
+## Verification guidance and troubleshooting
+A failing pin names the missing or misordered build-arm wiring.
+"""
+use std.spec.step
+use std.io.file_read_text
+
+fn br_count(source: text, token: text) -> i64:
+    source.split(token).len() - 1
+
+fn br_from(source: text, start: text) -> text:
+    val at = source.index_of(start)
+    if at < 0: return ""
+    source.substring(at, source.byte_len())
+
+fn br_owner() -> text:
+    file_read_text("src/lib/nogc_async_mut/container/providers/linux/workspace_mount_owner_v1.spl")
+
+describe "remote-build source-return after a staging effect completes through the retained path":
+    it "routes a staged build root to the retained path through the read-only effect trigger":
+        # @req M0030-INTEG-1 (lane C mirror: OR build_effect_attempted into the trigger)
+        val owner = br_owner()
+        val trigger = br_from(owner, "    pub fn staging_effect_attempted_v3() -> Result<bool, text>:")
+        expect(trigger.byte_len() > 0).to_equal(true)
+        expect(trigger).to_contain("Ok(state.agent_effect_attempted or state.build_effect_attempted)")
+
+    it "records the dedicated-empty observation before the first build write":
+        # @req M0030-INTEG-1 (retirement requires the empty-root observation, as the agent arm)
+        val owner = br_owner()
+        val stage = br_from(owner, "    pub fn stage_remote_build_v3(")
+        val empty = stage.index_of("if not empty.unwrap(): return workspace_build_turn_v1(self, \"remote-build-stage-dedicated-root-not-empty\", false)")
+        val observed = stage.index_of("workspace_source_states_v1[self.slot].build_dedicated_empty_observed = true")
+        val effect = stage.index_of("workspace_source_states_v1[self.slot].build_effect_attempted = true")
+        expect(empty > 0 and observed > empty and effect > observed).to_equal(true)
+
+    it "dispatches retire_native_v3 by arm and leaves the agent retirement body unchanged":
+        # @req M0030-INTEG-1 (a build source never reaches the agent-only retirement checks)
+        val owner = br_owner()
+        val method = br_from(owner, "    pub fn retire_native_v3(token: LinuxFreshWorkspaceNativeRetirementV3,")
+        expect(method).to_contain("val result = if workspace_source_build_arm_v3(self): workspace_retire_build_native_v3(self, token, invocation_source)\n            else: workspace_retire_native_v3(self, token, invocation_source)")
+        step("the agent body keeps its agent-only first gate")
+        val agent = br_from(owner, "fn workspace_retire_native_v3(owner: LinuxWorkspaceSourceOwnerV1, token: LinuxFreshWorkspaceNativeRetirementV3,")
+        expect(agent).to_contain("return Err(\"agent-retirement-no-staged-runtime-binding\")")
+
+    it "re-proves the build invocation, manifest, profile and token binding before committing":
+        # @req M0030-INTEG-1 (the build analogue of the agent re-proof; gap (m) slot mapping)
+        val owner = br_owner()
+        val body = br_from(owner, "fn workspace_retire_build_native_v3(owner: LinuxWorkspaceSourceOwnerV1, token: LinuxFreshWorkspaceNativeRetirementV3,")
+        expect(body.byte_len() > 0).to_equal(true)
+        val gate = body.index_of("return Err(\"remote-build-retirement-no-staged-runtime-binding\")")
+        val invocation = body.index_of("sha256_text(invocation_source) != state.build_invocation_digest")
+        val manifest = body.index_of("sha256_text(full.workspace_manifest) != state.build_manifest_digest")
+        val profile = body.index_of("owner.reader.read_build_workspace_profile_v1()? != state.build_profile_source")
+        val token = body.index_of("actual.binding.agent_profile_digest != sha256_text(state.build_profile_source)")
+        val after = body.index_of("val after = token.current_v3()?")
+        val commit = body.index_of("workspace_source_states_v1[owner.slot].build_stage_phase = \"native-retired-retained\"")
+        expect(gate > 0 and invocation > gate and manifest > invocation and profile > manifest).to_equal(true)
+        expect(token > profile and after > token and commit > after).to_equal(true)
+        step("the build arm reads no agent field and closes or releases nothing")
+        val end = body.index_of("\nfn ")
+        val own = if end > 0: body.substring(0, end) else: body
+        expect(br_count(own, "state.agent_")).to_equal(0)
+        expect(br_count(own, "close_v1()")).to_equal(0)
+        expect(br_count(own, "workspace_storage_release_if_absent_v1")).to_equal(0)
+        expect(own).to_contain("retention: \"retain\"")
+
+    it "serves the retained metadata of a build source through the same owner method":
+        # @req M0030-INTEG-1 (custody retained_metadata_v3 -> source retained_metadata_v3)
+        val owner = br_owner()
+        val method = br_from(owner, "    pub fn retained_metadata_v3() -> Result<LinuxWorkspaceRetainedMetadataV3, text>:")
+        expect(method).to_contain("if state.build_effect_attempted: return workspace_build_retained_metadata_v3(self)")
+        val body = br_from(owner, "fn workspace_build_retained_metadata_v3(owner: LinuxWorkspaceSourceOwnerV1)")
+        expect(body).to_contain("state.build_stage_phase != \"native-retired-retained\" or state.build_retained_metadata.is_none()")
+        expect(body).to_contain("return Err(\"remote-build-retention-root-changed\")")
+
+    it "keeps generic close refusing a staged build root":
+        # @req M0030-INTEG-1 (lane C: do not loosen close_v1 or cleanup_v3)
+        val owner = br_owner()
+        expect(owner).to_contain("error: \"remote-build-workspace-retention-requires-authorized-cleanup\")")
+        val cu = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workspace_source_custody_v3.spl")
+        expect(cu).to_contain("if self.phase == \"native-retired-retained\" or self.phase == \"retained-returned\": return MachineFreshWorkspaceSourceCustodyTurnV3(retained, \"workspace-source-retained-requires-authorized-cleanup\")")

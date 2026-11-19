@@ -1,0 +1,125 @@
+# milestone_0030 owner decision N11: the authenticated Linux service installs the Host remote-build port itself, from
+# the existing host identity profile: the protected identity store `<anchor parent>/host-identity-profile` (the same
+# store format the key-* commands and the controller issuer use). It supplies the execution-host completion-signing
+# key (one bounded read per signature, wiped after use) and the host's own execution environment. The policy snapshot
+# and the host identity come from the service's own re-verified records, never from an argument or a path.
+# SOURCE_AUTHORED / NOT_RUN.
+use app.orchestrator.controller_authority_issue_v1.controller_authority_store_reader_v1
+use app.orchestrator.remote_build_service_port_v3.{RemoteBuildServicePortConfigV3, remote_build_service_port_v3}
+use app.orchestrator.remote_run_plan_v1.remote_run_environment_decode_v1
+use std.common.contracts.distributed_control_v2.ExecutionEnvironmentV2
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.io.host_identity_store_v1.{host_identity_store_open_v1, host_identity_store_read_v1,
+    host_identity_store_publish_v1, host_identity_store_close_v1, HostIdentityStorePublicationV1}
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.host_linux_service_anchor_parent_v4
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3,
+    host_service_domain_remote_build_facts_v3, host_service_domain_install_remote_build_port_v3}
+
+val REMOTE_BUILD_PROFILE_DIR_V3 = "host-identity-profile"
+val REMOTE_BUILD_ENVIRONMENT_OPTIONS_V3 = ["--store-root", "--host", "--environment"]
+
+# The identity store accepts only `<64 lowercase hex>.key|.hosts|.profile` leaves. The environment is a `.profile`
+# leaf keyed by the host identity, like the other profile leaves (sha256(ref) + suffix).
+pub fn remote_build_environment_leaf_v3(host_identity: text) -> text:
+    sha256_text("simple-remote-build-environment-v1\n" + host_identity) + ".profile"
+
+# The profile root is a fixed sibling of the installed anchor; the anchor shape is the service's own check.
+pub fn remote_build_profile_root_v3(anchor: text) -> Result<text, text>:
+    Ok(host_linux_service_anchor_parent_v4(anchor)? + "/" + REMOTE_BUILD_PROFILE_DIR_V3)
+
+# The observed environment is the host's own: it must name this host and be the native-container class (the D1 class
+# the controller approves and the Host route enforces). Everything else is compared against the signed request by
+# remote_context_admit_v1.
+pub fn remote_build_environment_admit_v3(environment: ExecutionEnvironmentV2, host_identity: text) -> Result<ExecutionEnvironmentV2, text>:
+    if environment.host_id != host_identity: return Err("remote-build-profile-environment-host")
+    if environment.isolation_class != "native-container": return Err("remote-build-profile-environment-isolation")
+    Ok(environment)
+
+# One bounded read of the environment leaf through the protected store, closed before the bytes are decoded.
+fn remote_build_profile_environment_v3(root: text, host_identity: text) -> Result<ExecutionEnvironmentV2, text>:
+    val opened = host_identity_store_open_v1(root)
+    if opened.owner.is_none(): return Err("remote-build-profile-unavailable")
+    if not opened.ready or opened.cleanup_pending or opened.error != "":
+        host_identity_store_close_v1(opened.owner.unwrap())
+        return Err("remote-build-profile-unavailable")
+    val read = host_identity_store_read_v1(opened.owner.unwrap(), remote_build_environment_leaf_v3(host_identity), 16384)
+    val closed = host_identity_store_close_v1(read.owner)
+    if read.error != "" or read.absent or read.cleanup_pending or read.bytes.is_none() or not closed.completed or
+            closed.error != "":
+        return Err("remote-build-profile-environment-unavailable")
+    val bytes = read.bytes.unwrap()
+    if not utf8_bytes_valid(bytes): return Err("remote-build-profile-environment-encoding")
+    remote_build_environment_admit_v3(remote_run_environment_decode_v1(bytes_to_text(bytes))?, host_identity)
+
+# Install on a Ready domain. Not the signed-enrollment Linux service, or a host with no readable profile: the domain
+# is returned unchanged, so a remote-build prepare refuses `linux-host-remote-build-port-missing` before any slot or
+# charge. A port is never built from a partial profile.
+pub fn remote_build_port_install_v3(backend: text, anchor: text, domain: HostServiceDomainV3) -> HostServiceDomainV3:
+    if backend != "linux-service": return domain
+    val facts = host_service_domain_remote_build_facts_v3(domain)
+    val root = remote_build_profile_root_v3(anchor)
+    if facts.is_err() or root.is_err(): return domain
+    val policy = facts.unwrap().0
+    val host_identity = facts.unwrap().1
+    val observed = remote_build_profile_environment_v3(root.unwrap(), host_identity)
+    if observed.is_err(): return domain
+    val config = RemoteBuildServicePortConfigV3(policy: policy, host_identity: host_identity, observed: observed.unwrap(),
+        read_key: controller_authority_store_reader_v1(root.unwrap()))
+    host_service_domain_install_remote_build_port_v3(domain, remote_build_service_port_v3(config))
+
+# Admin provisioning of the environment leaf (the writer the port install reads): exactly the three options, each once.
+pub fn remote_build_environment_install_options_v3(args: [text]) -> Result<Dict<text, text>, text>:
+    if args.len() != 1 + 2 * REMOTE_BUILD_ENVIRONMENT_OPTIONS_V3.len(): return Err("remote-build-environment-install-usage")
+    var options: Dict<text, text> = {}
+    var index = 1
+    while index + 1 < args.len():
+        val name = args[index]
+        if not REMOTE_BUILD_ENVIRONMENT_OPTIONS_V3.contains(name) or options.contains_key(name) or args[index + 1] == "":
+            return Err("remote-build-environment-install-usage")
+        options[name] = args[index + 1]
+        index = index + 2
+    if not builder_identifier_valid_v1(options["--host"]): return Err("remote-build-environment-install-host")
+    Ok(options)
+
+# The environment is validated against the host (admit) BEFORE anything is written; the leaf is published no-replace
+# (an existing leaf is an admin change, never overwritten here). Fixed refusal codes only.
+fn remote_build_environment_install_v3(options: Dict<text, text>) -> Result<text, text>:
+    val read = file_read_regular_no_follow_bounded(options["--environment"], 16384)
+    if read.is_err(): return Err("remote-build-environment-install-unreadable")
+    val source = read.unwrap()
+    val admitted = remote_build_environment_admit_v3(remote_run_environment_decode_v1(source)?, options["--host"])
+    if admitted.is_err(): return Err(admitted.unwrap_err())
+    val opened = host_identity_store_open_v1(options["--store-root"])
+    if opened.owner.is_none(): return Err("remote-build-environment-install-store")
+    if not opened.ready or opened.cleanup_pending or opened.error != "":
+        host_identity_store_close_v1(opened.owner.unwrap())
+        return Err("remote-build-environment-install-store")
+    val published = host_identity_store_publish_v1(opened.owner.unwrap(), remote_build_environment_leaf_v3(options["--host"]),
+        source.bytes())
+    val closed = host_identity_store_close_v1(published.owner)
+    if published.cleanup_pending or published.error != "" or not closed.completed or closed.error != "":
+        return Err("remote-build-environment-install-unconfirmed")
+    if published.publication == HostIdentityStorePublicationV1.Published and published.file_synced:
+        return Ok("installed")
+    Err("remote-build-environment-install-exists-or-unsynced")
+
+pub fn remote_build_environment_install_command_v3(args: [text]) -> OrchestratorValidationReplyV1:
+    val options = remote_build_environment_install_options_v3(args)
+    var fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("remote-build-environment-install")}
+    if options.is_err():
+        fields["state"] = SdnValue.String("refused")
+        fields["error"] = SdnValue.String(options.unwrap_err())
+        return OrchestratorValidationReplyV1(exit_code: 2, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+    val installed = remote_build_environment_install_v3(options.unwrap())
+    if installed.is_err():
+        fields["state"] = SdnValue.String("refused")
+        fields["error"] = SdnValue.String(installed.unwrap_err())
+        return OrchestratorValidationReplyV1(exit_code: 1, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+    fields["state"] = SdnValue.String(installed.unwrap())
+    OrchestratorValidationReplyV1(exit_code: 0, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")

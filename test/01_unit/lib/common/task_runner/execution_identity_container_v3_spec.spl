@@ -1,0 +1,96 @@
+"""
+## Purpose and audience
+Pins milestone_0030 DESIGN 13.0 / 13.1: the `ContainerV3(TaskRunnerContainerAttemptV3)` arm of the task-runner
+journal record in `src/lib/common/task_runner/execution_identity_v2.spl`. It carries the V3 measurement wire in place
+of the V2 execution evidence. Written for owners of the task-runner journal.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
+## Compatibility and limitations
+The status follows the typed exit status only: `passed` needs Exited(0); `failed` needs Exited(n != 0) with
+`task_exit_code == n`; anything else is `aborted`/`infrastructure`. The legacy `exitCode` is never read. Native and V2
+container records keep their bytes (their own spec pins them).
+## Verification guidance and troubleshooting
+Each refusal names the exact error string; a changed string is a contract change.
+"""
+use std.spec.step
+use std.common.task_runner.execution_identity_v2.*
+use std.common.contracts.container.runtime_v1.*
+use std.common.contracts.container.workspace_measurement_v3.*
+
+fn ev_operation(phase: text, exit: RuntimeExitStatusV1) -> RuntimeOperationV1:
+    val identity = RuntimeIdentityV1(pod_uid: "pod_1", attempt: 1, provider_generation: 3, operation_id: "operation_1",
+        engine: "podman", native_id: "c".repeat(64), node_boot_id: "boot_1")
+    RuntimeOperationV1(status: "ok", operation: "destroy", command: RuntimeCommandV1(operation: "destroy", program: "", args: []),
+        state: RuntimeStateV1(phase: phase, identity: identity, exit_code: -1, reason: "", workload_exit: exit),
+        exit_code: 0, stdout: "", stderr: "", reason: "")
+
+fn ev_measurements(exit: RuntimeExitStatusV1) -> text:
+    val stopped = ev_operation("stopped", exit)
+    remote_container_measurements_encode_v3(RemoteContainerMeasurementsV3(task_digest: "1".repeat(64),
+        input_manifest_digest: "2".repeat(64), request_digest: "3".repeat(64), provider_identity_digest: "4".repeat(64),
+        workspace_binding_digest: "5".repeat(64), runtime: stopped.state.identity,
+        exit: container_workspace_op_fields_v3("linux-host-remote-build-exit", stopped),
+        destroy: container_workspace_op_fields_v3("linux-host-remote-build-destroy", ev_operation("destroyed", exit)),
+        machine_settle_digest: "6".repeat(64), settled_unix_ms: 1700000000000)).unwrap()
+
+fn ev_row(status: text, reason: text, code: i64, exit: RuntimeExitStatusV1) -> TaskRunnerContainerAttemptV3:
+    TaskRunnerContainerAttemptV3(identity_digest: "a".repeat(64), group_id: "operation_1", attempt: 1, mode: "isolated",
+        status: status, reason: reason, task_exit_code: code, result_validated: status != "aborted",
+        stdout_digest: "b".repeat(64), stderr_digest: "e".repeat(64), result_digest: "f".repeat(64),
+        measurement_wire: ev_measurements(exit))
+
+describe "Task-runner ContainerV3 journal arm (milestone_0030 13.1)":
+    it "round-trips each status canonically under its own header":
+        # @req M0030-JOURNAL-01
+        for row in [ev_row("passed", "", 0, RuntimeExitStatusV1.Exited(0)),
+                ev_row("failed", "compile", 1, RuntimeExitStatusV1.Exited(1)),
+                ev_row("failed", "assertion", 2, RuntimeExitStatusV1.Exited(2)),
+                ev_row("aborted", "infrastructure", -1, RuntimeExitStatusV1.Unknown("fresh-workspace-exit-inspect-code-type")),
+                ev_row("aborted", "infrastructure", -1, RuntimeExitStatusV1.Unobserved)]:
+            val record = TaskRunnerAttemptRecordV2.ContainerV3(row)
+            val payload = task_runner_record_encode_v2(record).unwrap()
+            expect(payload).to_start_with("SIMPLE-TASK-CONTAINER-ATTEMPT-3\n")
+            val back = task_runner_record_decode_v2(payload).unwrap()
+            expect(task_runner_record_encode_v2(back).unwrap()).to_equal(payload)
+            expect(task_runner_record_group_v2(back)).to_equal("operation_1")
+            expect(task_runner_record_attempt_v2(back)).to_equal(1)
+            expect(task_runner_record_status_v2(back)).to_equal(row.status)
+            expect(task_runner_record_result_digest_v2(back)).to_equal("f".repeat(64))
+            expect(task_runner_record_identity_v2(back)).to_equal("a".repeat(64))
+
+    it "classifies only by the typed exit status (only Exited(0) passes)":
+        # @req M0030-JOURNAL-02
+        step("passed needs Exited(0)")
+        expect(task_runner_container_attempt_error_v3(ev_row("passed", "", 0, RuntimeExitStatusV1.Exited(1)))).to_equal(
+            "passing container task has failed result")
+        expect(task_runner_container_attempt_error_v3(ev_row("passed", "", 0, RuntimeExitStatusV1.Unobserved))).to_equal(
+            "passing container task has failed result")
+        step("failed needs Exited(n != 0) with the same task exit code")
+        expect(task_runner_container_attempt_error_v3(ev_row("failed", "compile", 3, RuntimeExitStatusV1.Exited(1)))).to_equal(
+            "failed container task exit differs")
+        expect(task_runner_container_attempt_error_v3(ev_row("failed", "compile", 1, RuntimeExitStatusV1.NotExited("running")))).to_equal(
+            "failed container task exit differs")
+        step("aborted carries -1 and no validated result")
+        expect(task_runner_container_attempt_error_v3(ev_row("aborted", "infrastructure", 0, RuntimeExitStatusV1.Unobserved))).to_equal(
+            "container abort lacks infrastructure reason")
+        step("the measurement attempt must equal the row attempt, and the wire must decode")
+        var other = ev_row("passed", "", 0, RuntimeExitStatusV1.Exited(0))
+        other.attempt = 2
+        expect(task_runner_container_attempt_error_v3(other)).to_equal("container execution attempt differs")
+        var garbled = ev_row("passed", "", 0, RuntimeExitStatusV1.Exited(0))
+        garbled.measurement_wire = garbled.measurement_wire.replace("exited:0", "signalled:9")
+        expect(task_runner_container_attempt_error_v3(garbled)).to_equal("container-exit-status-form")
+
+    it "ties aborted to a non-success, non-ordinary-failure exit (lane B review P3-5)":
+        # @req M0030-JOURNAL-03
+        step("passed is admitted only with Exited(0)")
+        expect(task_runner_container_attempt_error_v3(ev_row("passed", "", 0, RuntimeExitStatusV1.Exited(0)))).to_equal("")
+        step("aborted never carries Exited(0) (a success) nor Exited(1) (accept_v3 journals the ordinary failure as failed)")
+        expect(task_runner_container_attempt_error_v3(ev_row("aborted", "infrastructure", -1, RuntimeExitStatusV1.Exited(0)))).to_equal(
+            "container abort carries a classified exit")
+        expect(task_runner_container_attempt_error_v3(ev_row("aborted", "infrastructure", -1, RuntimeExitStatusV1.Exited(1)))).to_equal(
+            "container abort carries a classified exit")
+        step("aborted stays admissible for an infrastructure exit and the non-exited forms")
+        expect(task_runner_container_attempt_error_v3(ev_row("aborted", "infrastructure", -1, RuntimeExitStatusV1.Exited(137)))).to_equal("")
+        expect(task_runner_container_attempt_error_v3(ev_row("aborted", "infrastructure", -1, RuntimeExitStatusV1.NotExited("running")))).to_equal("")

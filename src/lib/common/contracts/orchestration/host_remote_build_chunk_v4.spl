@@ -1,0 +1,65 @@
+# milestone_0030 s4 / s11 F3 (N3-a): chunked transport for the V4 remote-build route. A chunk is canonical base64
+# (RFC 4648, std.common.base_encoding.base64) of at most 1,228,800 raw bytes on a request (1,638,400 base64, leaving
+# > 400 KiB of the 2 MiB request envelope) or 589,824 raw bytes on a reply (786,432 base64, leaving > 256 KiB of the
+# 1 MiB V6 operation reply envelope, HOST_SERVICE_OPERATION_REPLY_MAX_BYTES_V6, which carries the route). A manifest binds the chunk digests and the whole-content digest; the content digest is what the signed
+# task (inputs) or the signed bundle (outputs) pins, so chunking adds no trust.
+use std.common.base_encoding.base64.{base64_encode_bytes, base64_decode_bytes}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+
+pub val HOST_REMOTE_BUILD_REQUEST_CHUNK_MAX_V4: i64 = 1228800
+pub val HOST_REMOTE_BUILD_REPLY_CHUNK_MAX_V4: i64 = 589824
+# The reply envelope headroom relies on the bundle wire cap (REMOTE_CONTAINER_BUNDLE_WIRE_MAX_V3, 16 MiB): at most 29
+# reply chunks, so the whole-bundle manifest (<= 29 digests) stays far below the 256 KiB left beside a 786,432-byte chunk.
+pub val HOST_REMOTE_BUILD_CHUNK_COUNT_MAX_V4: i64 = 4096
+# An input frame is one whole file under the 1 MiB stage cap (gap h) and is never assembled on the host; a reply chunk
+# of the archived bundle is bound by the manifest below for the controller that reads it.
+
+pub struct HostRemoteBuildChunkManifestV4:
+    total_bytes: i64
+    content_digest: text
+    chunk_digests: [text]
+
+fn host_remote_build_chunk_max_v4(reply: bool) -> i64:
+    if reply: HOST_REMOTE_BUILD_REPLY_CHUNK_MAX_V4 else: HOST_REMOTE_BUILD_REQUEST_CHUNK_MAX_V4
+
+# @allow(primitive_api) `reply` selects the request or reply chunk cap (two fixed caps); the payload is raw bytes
+pub fn host_remote_build_chunk_encode_v4(bytes: [u8], reply: bool) -> Result<text, text>:
+    if bytes.len() == 0: return Err("host-remote-build-chunk-empty")
+    if bytes.len() > host_remote_build_chunk_max_v4(reply): return Err("host-remote-build-chunk-too-large")
+    Ok(base64_encode_bytes(bytes))
+
+# The base64 decoder is lenient, so only text that re-encodes byte-identically is accepted.
+# @allow(primitive_api) `reply` selects the request or reply chunk cap (two fixed caps)
+pub fn host_remote_build_chunk_decode_v4(payload: text, chunk_digest: text, reply: bool) -> Result<[u8], text>:
+    val limit = host_remote_build_chunk_max_v4(reply)
+    if payload.byte_len() == 0 or payload.byte_len() > ((limit + 2) / 3) * 4: return Err("host-remote-build-chunk-too-large")
+    val bytes = base64_decode_bytes(payload)
+    if base64_encode_bytes(bytes) != payload: return Err("host-remote-build-chunk-noncanonical")
+    if bytes.len() == 0 or bytes.len() > limit: return Err("host-remote-build-chunk-too-large")
+    if sha256_u8_hex(bytes) != chunk_digest: return Err("host-remote-build-chunk-digest")
+    Ok(bytes)
+
+# @allow(primitive_api) `reply` selects the request or reply chunk cap (two fixed caps); the payload is raw bytes
+pub fn host_remote_build_chunk_split_v4(bytes: [u8], reply: bool) -> [[u8]]:
+    val limit = host_remote_build_chunk_max_v4(reply)
+    var chunks: [[u8]] = []
+    var start: i64 = 0
+    while start < bytes.len():
+        val end = if start + limit < bytes.len(): start + limit else: bytes.len()
+        chunks = chunks.push(bytes.slice(start, end))
+        start = end
+    chunks
+
+# @allow(primitive_api) `reply` selects the request or reply chunk cap (two fixed caps); the payload is raw bytes
+pub fn host_remote_build_chunk_manifest_v4(bytes: [u8], reply: bool) -> Result<HostRemoteBuildChunkManifestV4, text>:
+    val chunks = host_remote_build_chunk_split_v4(bytes, reply)
+    if chunks.len() > HOST_REMOTE_BUILD_CHUNK_COUNT_MAX_V4: return Err("host-remote-build-chunk-count")
+    var digests: [text] = []
+    for chunk in chunks: digests = digests.push(sha256_u8_hex(chunk))
+    Ok(HostRemoteBuildChunkManifestV4(total_bytes: bytes.len(), content_digest: sha256_u8_hex(bytes), chunk_digests: digests))
+
+pub fn host_remote_build_chunk_manifest_digest_v4(manifest: HostRemoteBuildChunkManifestV4) -> text:
+    var binding = "SIMPLE-REMOTE-BUILD-CHUNK-MANIFEST-4\n" + str(manifest.total_bytes) + "\n" + manifest.content_digest + "\n" +
+        str(manifest.chunk_digests.len()) + "\n"
+    for digest in manifest.chunk_digests: binding = binding + digest + "\n"
+    sha256_text(binding)

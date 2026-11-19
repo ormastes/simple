@@ -1,0 +1,213 @@
+"""
+## Purpose and audience
+Pins milestone_0030 DESIGN s1 (one incarnation slot, a kind tag) and s2 (the signed remote-build marker copied into
+the association) in `src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl`. Written for owners of
+the Linux Host service.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
+## Compatibility and limitations
+The slot gates are pure over the owner's slot fields, so they run on an owner built from DATA; the full prepare and
+execute need a published Linux-protected service and are pinned by source shape (gate before the charge, every clear
+site clears the kind). The association copy runs with the real Ed25519 verifier fixture.
+## Verification guidance and troubleshooting
+Each refusal names the exact error string; a changed string is a contract change.
+"""
+use std.spec.step
+use std.io.file_read_text
+use test.fixtures.orchestration.host_linux_service_verifier_fixture_v1.*
+# Tests reach private module gates directly (repo rule: tests may access private).
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{HostLinuxServiceCurrentV4, linux_service_scope_v4,
+    linux_service_association_v4, linux_service_workload_kind_v4, linux_service_prepare_kind_gate_v4,
+    linux_service_execute_kind_gate_v4, linux_service_agent_slot_v4}
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentitySnapshotV3
+use std.nogc_sync_mut.io.local_authority_policy_v1.{local_authority_policy_decode_v1, host_local_context_v1}
+use std.common.contracts.orchestration.host_prepare_associated_v3.HostPrepareAssociatedRequestV3
+use std.common.contracts.orchestration.host_prepare_request_v1.HostPrepareRequestV1
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.container.execution_draft_v3.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2}
+
+val SK_FAR: i64 = 4102444800000
+val SK_TASK: text = "d".repeat(64)
+
+fn sk_owner(slot: text, kind: text, consumed: bool = false) -> HostLinuxServiceCurrentV4:
+    HostLinuxServiceCurrentV4(root: "/var/lib/simple/hosts", agent_operation_id: slot, slot_kind: kind, agent_consumed: consumed)
+
+fn sk_draft(build: text, manifest: text = "") -> ContainerExecutionDraftV3:
+    ContainerExecutionDraftV3(backend: "linux-podman", workload_uid: "workload", attempt: 1, operation_id: "operation_2",
+        request_digest: "a".repeat(64), request_bytes: "opaque-codec-DATA", agent_invocation_manifest_digest: manifest,
+        remote_build_task_digest: build)
+
+fn sk_native(fixture: LinuxServiceVerifierFixtureV1) -> LinuxServiceNativeIdentitySnapshotV3:
+    LinuxServiceNativeIdentitySnapshotV3(native_machine_id: fixture.binding.native_machine_id, native_boot_id: "native-boot",
+        architecture: "x86_64", owner_generation: 41, process_identity_digest: "e".repeat(64), process_generation: 2,
+        authority_namespace_id: "namespace_1")
+
+fn sk_native_scope(native: LinuxServiceNativeIdentitySnapshotV3) -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "worker_1", service_scope_id: "epoch-" + "c".repeat(64), boot_id: native.native_boot_id,
+        provider_generation: native.owner_generation, native_machine_id: native.native_machine_id,
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: native.native_boot_id)
+
+fn sk_prepare(scope: ContainerHostScopeV2, draft: ContainerExecutionDraftV3) -> HostPrepareAssociatedRequestV3:
+    val bound = container_execution_draft_bind_v3(draft, scope).unwrap()
+    val intent = host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: "worker_1",
+        fence: HostLedgerFenceV1("host-authority", container_scope_fence_id_v2(scope).unwrap(), 41, 1),
+        plan_digest: container_execution_plan_digest_v2(bound.plan).unwrap(),
+        reservation: HostReservationV1("reservation_operation_2", "operation_2", "0".repeat(64), "service_1", 1, "nonce",
+            500, 4096, [], SK_FAR, HostReservationStateV1.Prepared))).unwrap()
+    val operation = OperationEnvelopeV2(2, intent.reservation.operation_id, intent.reservation.payload_digest, "user_1", "project_1",
+        "worker_1", "host_reservation_v1", "a".repeat(64), 4, 2, 3, 4096, 100)
+    val grant = ExecutionGrantV2("grant_2", "user_1", "project_1", "worker_1", ["host_reservation_v1"], "a".repeat(64), 4, 2, SK_FAR, 536870912, 1000)
+    val proof = linux_service_verifier_sign_v1(operation, grant, 1, 65, SK_FAR)
+    HostPrepareAssociatedRequestV3(HostPrepareRequestV1(intent, operation, proof.0, proof.1), draft, scope)
+
+fn sk_count(source: text, needle: text) -> i64:
+    source.split(needle).len() - 1
+
+describe "V4 Linux service: one incarnation slot with a workload kind (milestone_0030 s1/s2)":
+    it "derives the workload kind from the signed marker fields":
+        # @req M0030-SLOT-01
+        expect(linux_service_workload_kind_v4("", SK_TASK)).to_equal("remote-build")
+        expect(linux_service_workload_kind_v4("b".repeat(64), "")).to_equal("agent")
+        expect(linux_service_workload_kind_v4("", "")).to_equal("")
+
+    it "refuses a same-id re-prepare of a different kind before any charge":
+        # @req M0030-SLOT-02
+        expect(linux_service_prepare_kind_gate_v4(sk_owner("operation_2", "agent"), "operation_2", "remote-build")).to_equal(
+            "linux-host-workload-kind-differs")
+        expect(linux_service_prepare_kind_gate_v4(sk_owner("operation_2", "remote-build"), "operation_2", "agent")).to_equal(
+            "linux-host-workload-kind-differs")
+        step("the same kind, an empty slot and a plain draft pass this gate")
+        expect(linux_service_prepare_kind_gate_v4(sk_owner("operation_2", "remote-build"), "operation_2", "remote-build")).to_equal("")
+        expect(linux_service_prepare_kind_gate_v4(sk_owner("", ""), "operation_2", "remote-build")).to_equal("")
+        expect(linux_service_prepare_kind_gate_v4(sk_owner("operation_2", "agent"), "operation_2", "")).to_equal("")
+
+    it "keeps the slot busy in both directions and refuses both kinds once consumed":
+        # @req M0030-SLOT-03
+        step("a consumed incarnation refuses any further workload prepare")
+        val consumed = linux_service_agent_slot_v4(sk_owner("", "", true), "operation_3", 0)
+        expect(consumed.error).to_equal("linux-host-agent-incarnation-busy")
+        step("the slot's own operation passes, whatever kind holds it")
+        expect(linux_service_agent_slot_v4(sk_owner("operation_2", "remote-build"), "operation_2", 0).error).to_equal("")
+        expect(linux_service_agent_slot_v4(sk_owner("", ""), "operation_3", 0).error).to_equal("")
+
+    it "admits an execute only for the slot's operation and kind":
+        # @req M0030-SLOT-04
+        expect(linux_service_execute_kind_gate_v4(sk_owner("operation_2", "remote-build"), "operation_2", "remote-build")).to_equal("")
+        expect(linux_service_execute_kind_gate_v4(sk_owner("operation_2", "remote-build"), "operation_9", "remote-build")).to_equal(
+            "linux-host-agent-incarnation-busy")
+        expect(linux_service_execute_kind_gate_v4(sk_owner("operation_2", "agent"), "operation_9", "remote-build")).to_equal(
+            "linux-host-agent-incarnation-busy")
+        expect(linux_service_execute_kind_gate_v4(sk_owner("operation_2", "agent"), "operation_2", "remote-build")).to_equal(
+            "linux-host-workload-kind-differs")
+        step("a plain (no workload) association is not gated by the slot")
+        expect(linux_service_execute_kind_gate_v4(sk_owner("operation_2", "agent"), "operation_9", "")).to_equal("")
+
+    it "copies the signed remote-build marker into the association":
+        # @req M0030-SLOT-05
+        val fixture = linux_service_verifier_fixture_ops_v1(1, 65, SK_FAR, "/var/lib/simple/hosts",
+            ["host_enroll_v1", "host_reservation_v1", "host_execute_associated_v3"])
+        val native = sk_native(fixture)
+        val scope = linux_service_scope_v4(fixture.binding, native, "ab".repeat(16)).unwrap()
+        val prepare = sk_prepare(scope, sk_draft(SK_TASK))
+        val receipt = host_reservation_receipt_v1(prepare.prepare.intent, prepare.prepare.operation).unwrap()
+        val execution = container_execution_draft_bind_v3(prepare.draft, sk_native_scope(native)).unwrap()
+        val association = linux_service_association_v4(fixture.binding, scope, "c".repeat(64), native, prepare, receipt, execution).unwrap()
+        expect(association.remote_build_task_digest).to_equal(SK_TASK)
+        expect(association.agent_invocation_manifest_digest).to_equal("")
+
+    it "wires the gates before the charge and clears the kind with the slot":
+        # @req M0030-SLOT-06
+        val source = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl")
+        val prepare_at = source.index_of("pub fn host_linux_service_prepare_v4(")
+        val gate_at = source.index_of("linux_service_prepare_kind_gate_v4(owner, operation.id")
+        val charge_at = source.index_of("val admitted = host_capacity_owner_prepare_v1(")
+        expect(prepare_at < gate_at and gate_at < charge_at).to_equal(true)
+        expect(sk_count(source, "owner.slot_kind = workload_kind")).to_equal(1)
+        step("each slot clear site clears the kind together with the operation id")
+        expect(sk_count(source, "owner.agent_operation_id = \"\"")).to_equal(sk_count(source, "owner.slot_kind = \"\""))
+        step("the execute gate replaces the agent-only busy check")
+        expect(sk_count(source, "linux_service_execute_kind_gate_v4(owner, prepare.operation.id")).to_equal(1)
+
+    it "refuses a remote-build prepare on an incarnation with no enrolled template before any slot write or charge":
+        # @req M0030-INTEG-3 (N5 / 13.3.6: linux-host-remote-build-not-enrolled before the charge; r4.2 placement)
+        val source = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl")
+        expect(sk_count(source, "linux_service_remote_build_enrolled_gate_v4(")).to_equal(2)
+        val prepare = source.index_of("pub fn host_linux_service_prepare_v4(")
+        val gate = source.index_of("val enrolled_gate = linux_service_remote_build_enrolled_gate_v4(owner, workload_kind)")
+        val slot = source.index_of("val slot = linux_service_agent_slot_v4(owner, operation.id")
+        val record = source.index_of("owner.agent_operation_id = operation.id")
+        val charge = source.index_of("host_capacity_owner_prepare_v1(owner.capacity.unwrap(), intent, operation")
+        expect(prepare < gate and gate < slot and gate < record and gate < charge).to_equal(true)
+        step("an agent draft never needs the remote-build template")
+        val gate_fn = source.substring(source.index_of("fn linux_service_remote_build_enrolled_gate_v4("), source.byte_len())
+        expect(gate_fn).to_contain("if kind != \"remote-build\": return \"\"")
+        expect(gate_fn).to_contain("\"linux-host-remote-build-not-enrolled\"")
+        step("the template is loaded only when the signed enrollment pins it")
+        val records = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_records_v4.spl")
+        expect(records).to_contain("\"remote-build-helper-template.sdn\"")
+        val verify = file_read_text("src/lib/nogc_sync_mut/io/host_linux_service_records_v4.spl")
+        expect(verify).to_contain("if binding.remote_build_template_digest != \"\":")
+        expect(verify).to_contain("records.remote_build_template = Some(host_linux_service_remote_build_template_v4(binding, sources.remote_build_template)?)")
+
+# ---- milestone_0030 integration item 7: the V4 remote-build route (holder, epoch branch, actions, close) ----
+fn rr_service() -> text:
+    file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl")
+
+fn rr_from(source: text, start: text) -> text:
+    val at = source.index_of(start)
+    if at < 0: return ""
+    source.substring(at, source.byte_len())
+
+describe "V4 remote-build route (integration item 7)":
+    it "holds one build executor and refuses a duplicated workload or admission":
+        # @req M0030-INTEG-7 (s11 F2: the transferred-keyed epoch branch; agent and build never both set)
+        val source = rr_service()
+        expect(source).to_contain("    build: Option<HostRemoteBuildExecutorV3> = None")
+        val current = rr_from(source, "if self.agent.is_some() and self.build.is_some(): return Err(\"linux-host-service-workload-duplicated\")")
+        expect(current.byte_len() > 0).to_equal(true)
+        expect(rr_from(source, "elif self.build.is_some() and self.agent_consumed:")).to_contain("host_remote_build_epoch_v4(build)")
+
+    it "dispatches the six route actions and admits only collect/output/cancel while draining":
+        # @req M0030-INTEG-7 (DESIGN s4)
+        val dispatch = rr_from(rr_service(), "pub fn host_linux_service_dispatch_v4(")
+        for action in ["open", "input", "start", "collect", "output", "cancel"]:
+            expect(dispatch).to_contain("if action == \"host_remote_build_" + action + "_v4\": return host_linux_service_remote_build_" + action + "_v4(owner, source)")
+        expect(dispatch).to_contain("REMOTE_BUILD_DRAINING_ACTIONS_V4.contains(action)")
+        val domain = file_read_text("src/lib/nogc_sync_mut/orchestration/host_service_domain_v3.spl")
+        expect(domain).to_contain("\"host-remote-build-open\": \"host_remote_build_open_v4\"")
+
+    it "refuses a remote-build prepare without an installed port before the slot record and charge":
+        # @req M0030-INTEG-7 (a charge the service could never settle is never taken)
+        val prepare = rr_from(rr_service(), "        val enrolled_gate = linux_service_remote_build_enrolled_gate_v4(owner, workload_kind)")
+        val port = prepare.index_of("linux-host-remote-build-port-missing")
+        val slot = prepare.index_of("owner.agent_operation_id = operation.id")
+        expect(port > 0 and slot > port).to_equal(true)
+
+    it "settles a refused open cancelled/no-workload without consuming the incarnation":
+        # @req M0030-INTEG-7 (r4.1 / r4.1b: open with mismatched request bytes -> settled, charge released, slot reusable)
+        val open = rr_from(rr_service(), "pub fn host_linux_service_remote_build_open_v4(")
+        val refused = open.index_of("host_remote_build_open_v4(")
+        val settle = open.index_of("host_remote_build_settle_no_workload_v4(")
+        expect(refused > 0 and settle > refused).to_equal(true)
+        val body = open.substring(0, open.index_of("\npub fn ", 10))
+        expect(body.contains("agent_consumed = true")).to_equal(false)
+        val start = rr_from(rr_service(), "pub fn host_linux_service_remote_build_start_v4(")
+        expect(start.index_of("agent_consumed = true") > start.index_of("host_remote_build_transfer_v4(")).to_equal(true)
+
+    it "answers a reaped run from the reap index at collect and output":
+        # @req M0030-INTEG-7 (13.4 reap: collect/output -> linux-host-remote-build-reaped-incomplete)
+        val collect = rr_from(rr_service(), "fn linux_service_remote_build_reaped_v4(")
+        expect(collect).to_contain("host_remote_build_reap_index_relative_v4(")
+        expect(collect).to_contain("linux-host-remote-build-reaped-incomplete")
+
+    it "closes a build before the journal and keeps a reserved unsettled build (fail closed)":
+        # @req M0030-INTEG-7 (3.7 analogue)
+        val close = rr_from(rr_service(), "pub fn host_linux_service_close_v4(")
+        val build = close.index_of("host_remote_build_close_v4(")
+        val journal = close.index_of("distributed_operation_journal_open_cleanup_v2(")
+        val release = close.index_of("host_remote_build_release_v4(")
+        expect(build > 0 and journal > build and release > journal).to_equal(true)

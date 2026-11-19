@@ -28,6 +28,9 @@ pub struct HostLinuxServiceEnrollmentBindingV3:
     # milestone_0021 F15 (B): sha256 of the installed agent-helper-template.sdn.
     # Required and signed: every Linux service host re-enrolls (none are live).
     agent_helper_template_digest: text
+    # milestone_0030 N5: sha256 of the installed remote-build-helper-template.sdn. Optional: key
+    # `remoteBuildTemplateDigest` is emitted only when set, so legacy signed bytes are unchanged.
+    remote_build_template_digest: text = ""
 
 pub struct HostLinuxServiceAllocatableV3:
     cpu_millis: i64
@@ -62,6 +65,8 @@ pub fn host_linux_service_enrollment_encode_v3(binding: HostLinuxServiceEnrollme
     for digest in [binding.config_digest, binding.policy_digest, binding.provider_identity_digest, binding.engine_policy_digest, binding.broker_policy_digest,
             binding.agent_helper_template_digest]:
         if digest.byte_len() != 64 or not builder_digest_valid_v1(digest): return Err("linux-host-service-enrollment-digest-invalid")
+    if (binding.remote_build_template_digest != "" and (binding.remote_build_template_digest.byte_len() != 64 or
+            not builder_digest_valid_v1(binding.remote_build_template_digest))): return Err("linux-host-service-enrollment-digest-invalid")
     for identifier in [binding.physical_host_id, binding.service_scope_id]:
         if identifier.byte_len() > 128 or not builder_identifier_valid_v1(identifier): return Err("linux-host-service-enrollment-identity-invalid")
     # Native identity is an observed namespaced value, not a host alias.
@@ -76,7 +81,7 @@ pub fn host_linux_service_enrollment_encode_v3(binding: HostLinuxServiceEnrollme
     if binding.policy_revision < 0: return Err("linux-host-service-enrollment-mode-invalid")
     if not host_linux_service_parent_valid_v3(binding.machine_parent): return Err("linux-host-service-enrollment-parent-invalid")
     val capacity = host_linux_service_allocatable_v3(binding)?
-    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("linux-host-service-enrollment-binding"),
+    var fields: Dict<text, SdnValue> = {"version": SdnValue.Int(3), "kind": SdnValue.String("linux-host-service-enrollment-binding"),
         "physicalHostId": SdnValue.String(binding.physical_host_id), "serviceScopeId": SdnValue.String(binding.service_scope_id),
         "configDigest": SdnValue.String(binding.config_digest), "policyDigest": SdnValue.String(binding.policy_digest),
         "policyRevision": SdnValue.Int(binding.policy_revision), "nativeMachineId": SdnValue.String(binding.native_machine_id),
@@ -86,6 +91,8 @@ pub fn host_linux_service_enrollment_encode_v3(binding: HostLinuxServiceEnrollme
         "physicalCpuMillis": SdnValue.Int(binding.physical_cpu_millis), "physicalMemoryBytes": SdnValue.Int(binding.physical_memory_bytes),
         "reservedCpuMillis": SdnValue.Int(binding.reserved_cpu_millis), "reservedMemoryBytes": SdnValue.Int(binding.reserved_memory_bytes),
         "agentHelperTemplateDigest": SdnValue.String(binding.agent_helper_template_digest)}
+    if binding.remote_build_template_digest != "":
+        fields["remoteBuildTemplateDigest"] = SdnValue.String(binding.remote_build_template_digest)
     val encoded = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
     if encoded.byte_len() > 16384: return Err("linux-host-service-enrollment-size")
     Ok(encoded)
@@ -117,7 +124,7 @@ pub fn host_linux_service_enrollment_decode_v3(source: text) -> Result<HostLinux
         "brokerPolicyDigest", "physicalCpuMillis", "physicalMemoryBytes", "reservedCpuMillis", "reservedMemoryBytes",
         "agentHelperTemplateDigest"]
     for name in fields.keys():
-        if not names.contains(name): return Err("linux-host-service-enrollment-unknown-field:" + name)
+        if not names.contains(name) and name != "remoteBuildTemplateDigest": return Err("linux-host-service-enrollment-unknown-field:" + name)
     for name in names:
         if not fields.contains_key(name): return Err("linux-host-service-enrollment-missing-field:" + name)
     if (host_linux_service_int_v3(fields, "version")? != 3 or
@@ -135,7 +142,9 @@ pub fn host_linux_service_enrollment_decode_v3(source: text) -> Result<HostLinux
         broker_policy_digest: host_linux_service_text_v3(fields, "brokerPolicyDigest")?,
         physical_cpu_millis: host_linux_service_int_v3(fields, "physicalCpuMillis")?, physical_memory_bytes: host_linux_service_int_v3(fields, "physicalMemoryBytes")?,
         reserved_cpu_millis: host_linux_service_int_v3(fields, "reservedCpuMillis")?, reserved_memory_bytes: host_linux_service_int_v3(fields, "reservedMemoryBytes")?,
-        agent_helper_template_digest: host_linux_service_text_v3(fields, "agentHelperTemplateDigest")?)
+        agent_helper_template_digest: host_linux_service_text_v3(fields, "agentHelperTemplateDigest")?,
+        remote_build_template_digest: if fields.contains_key("remoteBuildTemplateDigest"):
+            host_linux_service_text_v3(fields, "remoteBuildTemplateDigest")? else: "")
     if host_linux_service_enrollment_encode_v3(binding)? != source: return Err("linux-host-service-enrollment-noncanonical")
     Ok(binding)
 

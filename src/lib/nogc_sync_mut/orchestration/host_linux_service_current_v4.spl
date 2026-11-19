@@ -85,6 +85,13 @@ use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.HostHelperStore
 use std.nogc_sync_mut.orchestration.host_primary_attach_owner_v1.host_primary_attach_open_entry_check_v1
 use std.container.LinuxWorkspaceRootBorrowV3
 use std.nogc_sync_mut.orchestration.host_linux_service_reconcile_v4.host_linux_service_reconcile_flip_v4
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_reap_v4.{host_remote_build_reap_v4,
+    host_remote_build_prepare_reaped_gate_v4, host_remote_build_reap_index_relative_v4, host_remote_build_published_answer_v4}
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.{HostRemoteBuildExecutorV3, HostRemoteBuildPortV4,
+    host_remote_build_open_v4, host_remote_build_profile_gate_v4, host_remote_build_input_v4, host_remote_build_transfer_v4, host_remote_build_step_v4,
+    host_remote_build_request_cancel_v4, host_remote_build_settle_no_workload_v4, host_remote_build_failed_cause_v4,
+    host_remote_build_reply_v4, host_remote_build_frame_decode_v4, host_remote_build_output_v4, host_remote_build_epoch_v4,
+    host_remote_build_close_v4, host_remote_build_release_v4}
 use std.nogc_sync_mut.orchestration.host_service_handoff_v1.{host_service_handoff_commit_v1, host_service_handoff_verify_v1,
     host_service_handoff_consume_v1, host_service_handoff_abandon_v1, HOST_SERVICE_HANDOFF_UNVERIFIED_V1}
 use std.nogc_sync_mut.io.linux_fresh_epoch_store_inventory_v1.LinuxFreshEpochStoreInventoryBorrowV1
@@ -136,6 +143,12 @@ pub class HostLinuxServiceCurrentV4:
     agent_operation_id: text = ""
     # P2R1-F8: the slot's signed operation envelope, for the public exact lookup (set with agent_operation_id).
     agent_operation: Option<OperationEnvelopeV2> = None
+    # milestone_0030 s1: the slot's workload kind ("", "agent", "remote-build"), set and cleared with agent_operation_id.
+    slot_kind: text = ""
+    # milestone_0030: the ONE remote-build executor of this incarnation (never set together with `agent`); after its
+    # transfer the admission owner lives in its holder. The port is the app half (F5), installed by the composition.
+    build: Option<HostRemoteBuildExecutorV3> = None
+    remote_build_port: Option<HostRemoteBuildPortV4> = None
     # 3.3 N-05: a pre-transfer workspace-root borrow whose loan end the lender refused; ended first at close.
     agent_root: Option<LinuxWorkspaceRootBorrowV3> = None
     # U-05 (hco:366-368): a post-outcome projection failure of the slot expiry; sticky until restart.
@@ -147,6 +160,13 @@ pub class HostLinuxServiceCurrentV4:
     # AT-OPS-01: set only after a verified controller-signed handoff was published; this owner then admits nothing
     # (inspect only) and is to be closed. The successor adopts the record at its own start.
     draining: bool = false
+
+    # milestone_0030 N11: the installed facts the remote-build port is built from, taken from the service's own
+    # re-verified records (never a caller path): the verified policy snapshot and the physical host identity.
+    pub fn remote_build_facts_v4() -> Result<(LocalAuthorityPolicyV1, text), text>:
+        val metadata = self.current_v4()?
+        if self.records.is_none(): return Err("linux-host-remote-build-records-required")
+        Ok((metadata.policy, self.records.unwrap().binding.physical_host_id))
 
     # Rechecks readers, installed records, the sealed proof under freshly read
     # installed policy, the actual native identity, Linux-protected journal
@@ -162,6 +182,7 @@ pub class HostLinuxServiceCurrentV4:
             return Err("linux-host-service-acquisition-incomplete")
         # The lending admission (installed opener) must still be current, still
         # lent to this service, and still the exact epoch whose digest it lent.
+        if self.agent.is_some() and self.build.is_some(): return Err("linux-host-service-workload-duplicated")
         if val agent = self.agent:
             # 3.5: after the transfer the epoch is read through whichever holder has it; workload liveness is
             # never consulted. The inventory can only be returned and proven here (a transfer follows the handoff).
@@ -171,6 +192,17 @@ pub class HostLinuxServiceCurrentV4:
                     not self.capacity.unwrap().ledger.continuity_proven):
                 return Err("linux-host-service-inventory-return-unproven")
             val epoch = host_linux_service_agent_epoch_v4(agent)?
+            if sha256_text(machine_fresh_epoch_record_bytes_v1(epoch)?) != self.initial_epoch:
+                return Err("linux-host-service-epoch-changed")
+        elif self.build.is_some() and self.agent_consumed:
+            # s11 F2: the transferred-keyed build branch (a pre-transfer build still reads the lent admission below).
+            val build = self.build.unwrap()
+            if self.admission.is_some() and self.admission.unwrap().owner.is_some():
+                return Err("linux-host-service-admission-duplicated")
+            if (not self.inventory_returned or self.inventory.is_some() or
+                    not self.capacity.unwrap().ledger.continuity_proven):
+                return Err("linux-host-service-inventory-return-unproven")
+            val epoch = host_remote_build_epoch_v4(build)?
             if sha256_text(machine_fresh_epoch_record_bytes_v1(epoch)?) != self.initial_epoch:
                 return Err("linux-host-service-epoch-changed")
         elif val admission = self.admission:
@@ -403,6 +435,13 @@ pub fn host_linux_service_start_v4(root: text, root_reader: LinuxProtectedRootRe
                 owner.capacity = Some(flipped.unwrap())
                 val consumed = host_service_handoff_consume_v1(owner.capacity.unwrap().journal, relative, adopted.unwrap())
                 if consumed.is_err(): owner.reconcile_error = consumed.unwrap_err()
+                else:
+                    # milestone_0030 PR-2 (13.4): reap a prior incarnation's started remote builds before the first
+                    # admit. Borrowed writer: owner.capacity.unwrap().journal; the owner is adopted on every path.
+                    val reaped = host_remote_build_reap_v4(owner.capacity.unwrap(),
+                        host_local_context_v1(loaded.unwrap().metadata.policy).grant_clock)
+                    owner.capacity = Some(reaped.capacity)
+                    if reaped.error != "": owner.reconcile_error = reaped.error
     linux_service_start_error_v4(owner, "")
 
 # milestone_0022 N3 (14.3 P2-E, 15.5, 16 P1-1/P2-5): resume every executing or
@@ -622,7 +661,8 @@ fn linux_service_association_v4(binding: HostLinuxServiceEnrollmentBindingV3, sc
         epoch_record_digest: epoch_digest, service_process_identity_digest: native.process_identity_digest,
         execution: execution, readonly_rootfs: prepare.draft.readonly_rootfs,
         agent_invocation_manifest_digest: prepare.draft.agent_invocation_manifest_digest,
-        agent_probe_list_digest: prepare.draft.agent_probe_list_digest)
+        agent_probe_list_digest: prepare.draft.agent_probe_list_digest,
+        remote_build_task_digest: prepare.draft.remote_build_task_digest)
     host_execution_association_match_v3(association, prepare, receipt)?
     Ok(association)
 
@@ -670,8 +710,25 @@ pub fn host_linux_service_prepare_v4(original: HostLinuxServiceCurrentV4, source
     val intent = request.unwrap().prepare.intent
     val operation = request.unwrap().prepare.operation
     # N-06/T-08/U-05: one agent per incarnation, enforced BEFORE any charge; the slot is reserved first.
-    val agent_draft = request.unwrap().draft.agent_invocation_manifest_digest != ""
+    # milestone_0030 s1: the slot check runs for ANY workload draft (agent or remote-build); `agent_draft` keeps its
+    # name for minimal hunks and means "workload draft". A same-id re-prepare of another kind is refused first.
+    val workload_kind = linux_service_workload_kind_v4(request.unwrap().draft.agent_invocation_manifest_digest,
+        request.unwrap().draft.remote_build_task_digest)
+    val agent_draft = workload_kind != ""
     if agent_draft:
+        val kind_gate = linux_service_prepare_kind_gate_v4(owner, operation.id, workload_kind)
+        if kind_gate != "": return linux_service_reply_v4(owner, "", kind_gate, false)
+        val enrolled_gate = linux_service_remote_build_enrolled_gate_v4(owner, workload_kind)
+        if enrolled_gate != "": return linux_service_reply_v4(owner, "", enrolled_gate, false)
+        # A remote-build charge the service could never settle (no app port installed) is never taken.
+        if workload_kind == "remote-build" and owner.remote_build_port.is_none():
+            return linux_service_reply_v4(owner, "", "linux-host-remote-build-port-missing", false)
+        val reaped_gate = host_remote_build_prepare_reaped_gate_v4(owner.capacity.unwrap().journal, operation.id,
+            request.unwrap().draft.remote_build_task_digest)
+        if reaped_gate != "": return linux_service_reply_v4(owner, "", reaped_gate, false)
+        val profile_gate = linux_service_remote_build_profile_gate_v4(owner, workload_kind, operation,
+            request.unwrap().draft.request_bytes)
+        if profile_gate != "": return linux_service_reply_v4(owner, "", profile_gate, false)
         val slot = linux_service_agent_slot_v4(owner, operation.id, host_local_context_v1(policy).monotonic_ms)
         owner = slot.owner
         if slot.error != "": return slot
@@ -680,6 +737,7 @@ pub fn host_linux_service_prepare_v4(original: HostLinuxServiceCurrentV4, source
         if owner.agent_operation_id == "":
             owner.agent_operation_id = operation.id
             owner.agent_operation = Some(operation)
+            owner.slot_kind = workload_kind
     val admitted = host_capacity_owner_prepare_v1(owner.capacity.unwrap(), intent, operation, grant.unwrap(), host_local_context_v1(policy))
     # An error may follow a committed admission: report it as attempted. The slot is cleared only when the
     # journal has no row for this operation (refused before the charge).
@@ -691,6 +749,7 @@ pub fn host_linux_service_prepare_v4(original: HostLinuxServiceCurrentV4, source
             if prior.is_err() and prior.unwrap_err() == "OPERATION_NOT_FOUND":
                 owner.agent_operation_id = ""
                 owner.agent_operation = None
+                owner.slot_kind = ""
         return linux_service_reply_v4(owner, "", admitted.unwrap_err(), true)
     owner.capacity = Some(admitted.unwrap())
     # P3R1-F2: an Ok admission means the journal row is exactly THIS envelope (prepare_v1 refuses a mismatched one
@@ -772,10 +831,12 @@ pub fn host_linux_service_execute_v4(original: HostLinuxServiceCurrentV4, source
     val request = host_execute_associated_decode_v3(source)
     if request.is_err(): return linux_service_reply_v4(owner, "", request.unwrap_err(), false)
     val prepare = request.unwrap().prepare.prepare
-    # N-06: no second executing agent row; an agent association must be the slot's, refused before the archive.
-    if (request.unwrap().association.agent_invocation_manifest_digest != "" and
-            prepare.operation.id != owner.agent_operation_id):
-        return linux_service_reply_v4(owner, "", "linux-host-agent-incarnation-busy", false)
+    # N-06 / milestone_0030 s1: no second executing workload row; a workload association must be the slot's, of the
+    # slot's kind, refused before the archive.
+    val execute_gate = linux_service_execute_kind_gate_v4(owner, prepare.operation.id,
+        linux_service_workload_kind_v4(request.unwrap().association.agent_invocation_manifest_digest,
+            request.unwrap().association.remote_build_task_digest))
+    if execute_gate != "": return linux_service_reply_v4(owner, "", execute_gate, false)
     val digest = host_execution_association_digest_v3(request.unwrap().association)
     if digest.is_err(): return linux_service_reply_v4(owner, "", digest.unwrap_err(), false)
     val relative = linux_service_execute_relative_v4(owner.scope.unwrap(), prepare.operation.id)
@@ -816,6 +877,50 @@ pub fn host_linux_service_execute_v4(original: HostLinuxServiceCurrentV4, source
     owner.capacity = Some(begun.owner)
     if begun.error != "": return linux_service_reply_v4(owner, "", begun.error, true)
     linux_service_admitted_reply_v4(owner, prepare.operation.id, digest.unwrap(), true)
+
+# milestone_0030 N5 (13.3.6): a remote-build draft needs the enrollment-pinned remote-build template; refused
+# before the slot record and the charge (r4.2 placement).
+fn linux_service_remote_build_enrolled_gate_v4(owner: HostLinuxServiceCurrentV4, kind: text) -> text:
+    if kind != "remote-build": return ""
+    if owner.records.is_none() or owner.records.unwrap().remote_build_template.is_none(): return "linux-host-remote-build-not-enrolled"
+    ""
+
+# milestone_0030 P2-a: a remote-build draft whose request bytes do not match the build projection the installed profile
+# determines is refused before the slot record and the charge. The profile is read non-consumingly through the
+# admission owner (still held here before the transfer); no profile or no admission refuses.
+fn linux_service_remote_build_profile_gate_v4(owner: HostLinuxServiceCurrentV4, kind: text, operation: OperationEnvelopeV2,
+        request_bytes: text) -> text:
+    if kind != "remote-build": return ""
+    # A re-prepare of the EXACT admitted envelope: the slot already holds it (its first prepare passed this gate before
+    # the admission moved into the holder at transfer), so the idempotent replay is answered by the later gates.
+    if linux_service_agent_slot_exact_v4(owner.agent_operation, operation): return ""
+    if owner.admission.is_none() or owner.admission.unwrap().owner.is_none(): return "linux-host-remote-build-profile-unavailable"
+    val source = owner.admission.unwrap().owner.unwrap().read_build_workspace_profile_v3()
+    if source.is_err(): return "linux-host-remote-build-profile-unavailable"
+    val gate = host_remote_build_profile_gate_v4(request_bytes, source.unwrap())
+    if gate.is_err(): return gate.unwrap_err()
+    ""
+
+# milestone_0030 s1: the workload kind named by the signed marker fields (the codecs refuse both kinds together).
+fn linux_service_workload_kind_v4(agent_manifest_digest: text, remote_build_task_digest: text) -> text:
+    if remote_build_task_digest != "": return "remote-build"
+    if agent_manifest_digest != "": return "agent"
+    ""
+
+# s1: a same-id re-prepare of a different workload kind is refused before any charge. Busy-ness of the other kind is
+# the unchanged slot check (one slot for both kinds).
+fn linux_service_prepare_kind_gate_v4(owner: HostLinuxServiceCurrentV4, operation_id: text, kind: text) -> text:
+    if kind != "" and owner.agent_operation_id == operation_id and owner.slot_kind != kind:
+        return "linux-host-workload-kind-differs"
+    ""
+
+# s1 execute gate (generalises the agent-only N-06 check): a workload association must name the slot's operation
+# and the slot's kind. A plain association is not gated by the slot.
+fn linux_service_execute_kind_gate_v4(owner: HostLinuxServiceCurrentV4, operation_id: text, kind: text) -> text:
+    if kind == "": return ""
+    if operation_id != owner.agent_operation_id: return "linux-host-agent-incarnation-busy"
+    if kind != owner.slot_kind: return "linux-host-workload-kind-differs"
+    ""
 
 # P2R2-F1: the slot holds exactly this signed envelope (whole-value equality), not merely its operation id.
 fn linux_service_agent_slot_exact_v4(slot: Option<OperationEnvelopeV2>, operation: OperationEnvelopeV2) -> bool:
@@ -859,6 +964,7 @@ fn linux_service_agent_slot_v4(original: HostLinuxServiceCurrentV4, operation_id
             return linux_service_reply_v4(owner, "", "linux-host-agent-slot-expiry-readback", true)
     owner.agent_operation_id = ""
     owner.agent_operation = None
+    owner.slot_kind = ""
     linux_service_reply_v4(owner, "", "", state == "admitted")
 
 # Agent invoke glue (milestone_0021 PR2, DESIGN section 2; deviation D14: the owner-bound entry lives here
@@ -1000,6 +1106,232 @@ pub fn host_linux_service_agent_cancel_v4(original: HostLinuxServiceCurrentV4, s
         if readback.unwrap() != source: return linux_service_reply_v4(owner, "", "linux-host-agent-cancel-packet-conflict", true)
     owner.agent = Some(cancelled.agent)
     linux_service_reply_v4(owner, cancelled.response, "", cancelled.effect_attempted)
+
+# ---- milestone_0030 remote-build route glue (integration item 7, DESIGN s4). Effects live in
+# host_linux_service_remote_build_v4; this glue owns the journal paths, the slot, the admission and the port. ----
+
+# Collect, output and cancel stay admitted while draining (as inspect/detach/cancel for the agent).
+val REMOTE_BUILD_DRAINING_ACTIONS_V4 = ["host_remote_build_collect_v4", "host_remote_build_output_v4", "host_remote_build_cancel_v4"]
+
+# The agent invoke's reconcile gate, shared by every remote-build action.
+fn linux_service_remote_build_ready_v4(owner: HostLinuxServiceCurrentV4) -> text:
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return metadata.unwrap_err()
+    if not owner.capacity.unwrap().ledger.continuity_proven: return "linux-host-service-startup-quarantine"
+    if owner.reconcile_error != "" or not owner.inventory_returned: return "linux-host-remote-build-before-reconcile"
+    ""
+
+# The archived signed execute of the slot's operation (written by the associated execute).
+fn linux_service_remote_build_execute_v4(owner: HostLinuxServiceCurrentV4, operation_id: text) -> Result<HostExecuteAssociatedRequestV3, text>:
+    val path = linux_service_execute_relative_v4(owner.scope.unwrap(), operation_id)?
+    val archived = distributed_operation_journal_read_v3(owner.capacity.unwrap().journal, path, 2097152)?
+    if archived.is_none(): return Err("linux-host-remote-build-execute-unarchived")
+    val execute = host_execute_associated_decode_v3(archived.unwrap())?
+    if execute.prepare.prepare.operation.id != operation_id: return Err("linux-host-remote-build-execute-foreign")
+    if execute.association.remote_build_task_digest == "": return Err("linux-host-remote-build-not-build")
+    Ok(execute)
+
+# 13.4 reap: a run indexed by the startup reap never collects; its controller gets the reset-failure path.
+fn linux_service_remote_build_reaped_v4(owner: HostLinuxServiceCurrentV4, operation_id: text) -> text:
+    val index = distributed_operation_journal_read_v3(owner.capacity.unwrap().journal,
+        host_remote_build_reap_index_relative_v4(operation_id), 4096)
+    if index.is_err(): return index.unwrap_err()
+    if index.unwrap().is_some(): return "linux-host-remote-build-reaped-incomplete"
+    # P3-a: a run skipped by the reap (outcome published before `completed`) answers terminal, never `unopened`.
+    if owner.build.is_some() and owner.build.unwrap().operation_id == operation_id: return ""
+    host_remote_build_published_answer_v4(owner.capacity.unwrap().journal, operation_id)
+
+fn linux_service_remote_build_held_v4(owner: HostLinuxServiceCurrentV4, operation_id: text) -> text:
+    if owner.build.is_none(): return "linux-host-remote-build-unopened"
+    if owner.build.unwrap().operation_id != operation_id: return "linux-host-remote-build-incarnation-consumed"
+    ""
+
+# open: slot is this executing remote-build operation; any refusal BEFORE the transfer settles the row
+# cancelled/no-workload (r4.1b), which releases the charge; the incarnation is not consumed (slot reusable).
+pub fn host_linux_service_remote_build_open_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val ready = linux_service_remote_build_ready_v4(owner)
+    if ready != "": return linux_service_reply_v4(owner, "", ready, false)
+    val frame = host_remote_build_frame_decode_v4(source)
+    if frame.is_err(): return linux_service_reply_v4(owner, "", frame.unwrap_err(), false)
+    val operation_id = frame.unwrap().operation_id
+    if val build = owner.build:
+        if build.operation_id != operation_id: return linux_service_reply_v4(owner, "", "linux-host-remote-build-incarnation-consumed", false)
+        if build.open_record != frame.unwrap().payload: return linux_service_reply_v4(owner, "", "linux-host-remote-build-open-conflict", false)
+        return linux_service_reply_v4(owner, host_remote_build_reply_v4(build), "", false)
+    if owner.agent_consumed or owner.agent.is_some(): return linux_service_reply_v4(owner, "", "linux-host-remote-build-incarnation-consumed", false)
+    if owner.slot_kind != "remote-build" or owner.agent_operation_id != operation_id:
+        return linux_service_reply_v4(owner, "", "linux-host-remote-build-slot", false)
+    if owner.remote_build_port.is_none(): return linux_service_reply_v4(owner, "", "linux-host-remote-build-port-missing", false)
+    val execute = linux_service_remote_build_execute_v4(owner, operation_id)
+    if execute.is_err(): return linux_service_reply_v4(owner, "", execute.unwrap_err(), false)
+    val metadata = owner.current_v4().unwrap()
+    val scope = owner.scope.unwrap()
+    val fence = container_scope_fence_id_v2(scope)
+    if fence.is_err(): return linux_service_reply_v4(owner, "", fence.unwrap_err(), false)
+    val opened = host_remote_build_open_v4(owner.capacity.unwrap().journal, owner.remote_build_port.unwrap(),
+        metadata.policy, metadata.configuration.controller_ref, owner.records.unwrap().binding.physical_host_id,
+        execute.unwrap().association, fence.unwrap(), frame.unwrap().payload, host_local_context_v1(metadata.policy))
+    if opened.is_err():
+        val settled = host_remote_build_settle_no_workload_v4(owner.capacity.unwrap(), execute.unwrap().prepare.prepare.operation,
+            execute.unwrap().association, fence.unwrap(), host_remote_build_failed_cause_v4(opened.unwrap_err()))
+        # The returned capacity owner is the single journal writer: adopted on every path.
+        owner.capacity = Some(settled.owner)
+        if settled.error != "": return linux_service_reply_v4(owner, "", opened.unwrap_err() + ";settle:" + settled.error, true)
+        return linux_service_reply_v4(owner, "", opened.unwrap_err(), true)
+    owner.build = Some(opened.unwrap())
+    linux_service_reply_v4(owner, host_remote_build_reply_v4(opened.unwrap()), "", true)
+
+pub fn host_linux_service_remote_build_input_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val ready = linux_service_remote_build_ready_v4(owner)
+    if ready != "": return linux_service_reply_v4(owner, "", ready, false)
+    val frame = host_remote_build_frame_decode_v4(source)
+    if frame.is_err(): return linux_service_reply_v4(owner, "", frame.unwrap_err(), false)
+    val held = linux_service_remote_build_held_v4(owner, frame.unwrap().operation_id)
+    if held != "": return linux_service_reply_v4(owner, "", held, false)
+    val stored = host_remote_build_input_v4(owner.build.unwrap(), owner.capacity.unwrap().journal, frame.unwrap().index,
+        frame.unwrap().payload)
+    if stored.is_err(): return linux_service_reply_v4(owner, "", stored.unwrap_err(), true)
+    owner.build = Some(stored.unwrap())
+    linux_service_reply_v4(owner, host_remote_build_reply_v4(stored.unwrap()), "", true)
+
+# start: every input archived -> the admission moves whole into the factory (as the agent stage `transfer`).
+pub fn host_linux_service_remote_build_start_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val ready = linux_service_remote_build_ready_v4(owner)
+    if ready != "": return linux_service_reply_v4(owner, "", ready, false)
+    val frame = host_remote_build_frame_decode_v4(source)
+    if frame.is_err(): return linux_service_reply_v4(owner, "", frame.unwrap_err(), false)
+    val held = linux_service_remote_build_held_v4(owner, frame.unwrap().operation_id)
+    if held != "": return linux_service_reply_v4(owner, "", held, false)
+    if owner.agent_consumed: return linux_service_reply_v4(owner, host_remote_build_reply_v4(owner.build.unwrap()), "", false)
+    # r4.1b: a window that ended before the transfer settles cancelled/no-workload; the slot stays reusable.
+    if host_local_context_v1(owner.current_v4().unwrap().policy).grant_clock >= owner.build.unwrap().deadline:
+        val execute = linux_service_remote_build_execute_v4(owner, frame.unwrap().operation_id)
+        if execute.is_err(): return linux_service_reply_v4(owner, "", execute.unwrap_err(), false)
+        val settled = host_remote_build_settle_no_workload_v4(owner.capacity.unwrap(), execute.unwrap().prepare.prepare.operation,
+            execute.unwrap().association, owner.build.unwrap().fence, "deadline")
+        owner.capacity = Some(settled.owner)
+        if settled.error != "": return linux_service_reply_v4(owner, "", settled.error, true)
+        owner.build = None
+        return linux_service_reply_v4(owner, "", "linux-host-remote-build-deadline", true)
+    val template = owner.records.unwrap().remote_build_template
+    if template.is_none(): return linux_service_reply_v4(owner, "", "linux-host-remote-build-not-enrolled", false)
+    if owner.admission.is_none() or owner.admission.unwrap().owner.is_none() or owner.native.is_none():
+        return linux_service_reply_v4(owner, "", "linux-host-service-admission-missing", false)
+    if owner.agent_root.is_some(): return linux_service_reply_v4(owner, "", "linux-host-agent-root-loan-retained", false)
+    var admission = owner.admission.unwrap()
+    val lender = admission.owner.unwrap()
+    admission.owner = None
+    val opened = host_remote_build_transfer_v4(owner.build.unwrap(), lender, owner.native.unwrap(), template.unwrap())
+    admission.owner = opened.admission
+    owner.admission = Some(admission)
+    if opened.root.is_some(): owner.agent_root = opened.root
+    if opened.executor.is_some():
+        owner.build = opened.executor
+        owner.agent_consumed = true
+        if opened.error != "": return linux_service_reply_v4(owner, "", opened.error, true)
+        return linux_service_reply_v4(owner, host_remote_build_reply_v4(opened.executor.unwrap()), "", true)
+    # r4.1b (DL-05): a returned admission proves nothing ran, so settle cancelled/no-workload. A lost admission
+    # (owner-missing, admission-lost) may follow the transfer: held consumed and `failed`, so no deadline or cancel path
+    # can settle it no-workload. No epoch holder is kept, so service close refuses with transfer-missing and the service
+    # refuses until restart (fail closed). Incomplete inputs stay retryable and ran nothing.
+    val refused = if opened.error != "": opened.error else: "linux-host-remote-build-transfer-refused"
+    if opened.admission.is_none():
+        var lost_build = owner.build.unwrap()
+        lost_build.stage = "failed"
+        lost_build.error = refused
+        owner.build = Some(lost_build)
+        owner.agent_consumed = true
+        return linux_service_reply_v4(owner, "", refused, true)
+    if refused == "linux-host-remote-build-inputs-incomplete": return linux_service_reply_v4(owner, "", refused, false)
+    val execute = linux_service_remote_build_execute_v4(owner, frame.unwrap().operation_id)
+    if execute.is_err(): return linux_service_reply_v4(owner, "", refused + ";settle:" + execute.unwrap_err(), true)
+    val settled = host_remote_build_settle_no_workload_v4(owner.capacity.unwrap(), execute.unwrap().prepare.prepare.operation,
+        execute.unwrap().association, owner.build.unwrap().fence, host_remote_build_failed_cause_v4(refused))
+    owner.capacity = Some(settled.owner)
+    if settled.error != "": return linux_service_reply_v4(owner, "", refused + ";settle:" + settled.error, true)
+    owner.build = None
+    linux_service_reply_v4(owner, "", refused, true)
+
+# collect: one bounded step of the executor (a pre-transfer executor answers its stage).
+pub fn host_linux_service_remote_build_collect_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val ready = linux_service_remote_build_ready_v4(owner)
+    if ready != "": return linux_service_reply_v4(owner, "", ready, false)
+    val frame = host_remote_build_frame_decode_v4(source)
+    if frame.is_err(): return linux_service_reply_v4(owner, "", frame.unwrap_err(), false)
+    val reaped = linux_service_remote_build_reaped_v4(owner, frame.unwrap().operation_id)
+    if reaped != "": return linux_service_reply_v4(owner, "", reaped, false)
+    val held = linux_service_remote_build_held_v4(owner, frame.unwrap().operation_id)
+    if held != "": return linux_service_reply_v4(owner, "", held, false)
+    val execute = linux_service_remote_build_execute_v4(owner, frame.unwrap().operation_id)
+    if execute.is_err(): return linux_service_reply_v4(owner, "", execute.unwrap_err(), true)
+    val template = owner.records.unwrap().remote_build_template
+    if template.is_none() or owner.remote_build_port.is_none():
+        return linux_service_reply_v4(owner, "", "linux-host-remote-build-not-enrolled", true)
+    val turn = host_remote_build_step_v4(owner.build.unwrap(), owner.capacity.unwrap(), execute.unwrap().prepare.prepare.operation,
+        execute.unwrap().association, owner.remote_build_port.unwrap(), template.unwrap(),
+        host_local_context_v1(owner.current_v4().unwrap().policy))
+    owner.build = Some(turn.executor)
+    # A pre-transfer deadline settle (r4.1b) ends the holder; the slot clears through the ended path.
+    if turn.executor.stage == "settled" and not owner.agent_consumed: owner.build = None
+    # The returned Host capacity owner is the single journal writer: adopted on every path.
+    owner.capacity = Some(turn.capacity)
+    linux_service_reply_v4(owner, turn.response, turn.error, turn.effect_attempted)
+
+pub fn host_linux_service_remote_build_output_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    val owner = original
+    val frame = host_remote_build_frame_decode_v4(source)
+    if frame.is_err(): return linux_service_reply_v4(owner, "", frame.unwrap_err(), false)
+    val reaped = linux_service_remote_build_reaped_v4(owner, frame.unwrap().operation_id)
+    if reaped != "": return linux_service_reply_v4(owner, "", reaped, false)
+    val held = linux_service_remote_build_held_v4(owner, frame.unwrap().operation_id)
+    if held != "": return linux_service_reply_v4(owner, "", held, false)
+    val chunk = host_remote_build_output_v4(owner.capacity.unwrap().journal, owner.build.unwrap(), frame.unwrap().index)
+    if chunk.is_err(): return linux_service_reply_v4(owner, "", chunk.unwrap_err(), false)
+    linux_service_reply_v4(owner, chunk.unwrap(), "", false)
+
+# cancel: the controller-signed agent cancel packet, verified exactly as the agent cancel (issuer == controller,
+# snapshot pair, the archived execute's association). A pre-transfer executor settles cancelled/no-workload now.
+pub fn host_linux_service_remote_build_cancel_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val ready = linux_service_remote_build_ready_v4(owner)
+    if ready != "": return linux_service_reply_v4(owner, "", ready, false)
+    val frame = host_remote_build_frame_decode_v4(source)
+    if frame.is_err(): return linux_service_reply_v4(owner, "", frame.unwrap_err(), false)
+    val cancel = host_agent_cancel_request_decode_v4(frame.unwrap().payload)
+    if cancel.is_err(): return linux_service_reply_v4(owner, "", cancel.unwrap_err(), false)
+    val held = linux_service_remote_build_held_v4(owner, cancel.unwrap().operation_id)
+    if held != "" or frame.unwrap().operation_id != cancel.unwrap().operation_id:
+        return linux_service_reply_v4(owner, "", if held != "": held else: "linux-host-remote-build-cancel-operation", false)
+    val build = owner.build.unwrap()
+    val execute = linux_service_remote_build_execute_v4(owner, build.operation_id)
+    if execute.is_err(): return linux_service_reply_v4(owner, "", execute.unwrap_err(), false)
+    val metadata = owner.current_v4().unwrap()
+    val grant = host_linux_service_agent_cancel_authorize_v4(metadata.policy.snapshot, metadata.configuration.controller_ref,
+        cancel.unwrap(), execute.unwrap().operation, build.association_digest, build.operation_id, build.association_digest,
+        host_local_context_v1(metadata.policy))
+    if grant.is_err(): return linux_service_reply_v4(owner, "", grant.unwrap_err(), false)
+    val cancelled = host_remote_build_request_cancel_v4(build, "controller-cancel")
+    if cancelled.error != "": return linux_service_reply_v4(owner, "", cancelled.error, true)
+    if cancelled.pretransfer:
+        val settled = host_remote_build_settle_no_workload_v4(owner.capacity.unwrap(), execute.unwrap().prepare.prepare.operation,
+            execute.unwrap().association, build.fence, "controller-cancel")
+        owner.capacity = Some(settled.owner)
+        if settled.error != "": return linux_service_reply_v4(owner, "", settled.error, true)
+        owner.build = None
+        return linux_service_reply_v4(owner, host_remote_build_reply_v4(cancelled.executor), "", true)
+    owner.build = Some(cancelled.executor)
+    linux_service_reply_v4(owner, host_remote_build_reply_v4(cancelled.executor), "", false)
+
+# F5: the service composition installs the app half of the remote-build port once, before serving.
+pub fn host_linux_service_install_remote_build_port_v4(original: HostLinuxServiceCurrentV4,
+        port: HostRemoteBuildPortV4) -> HostLinuxServiceCurrentV4:
+    var owner = original
+    owner.remote_build_port = Some(port)
+    owner
 
 # milestone_0023 part B (c): the service's LIVE epoch, derived read-only from the verified epoch record. The
 # record is read through the agent's transfer holder, must still be the exact record whose digest this service
@@ -1232,7 +1564,8 @@ fn linux_service_cancel_relative_v4(scope: ContainerHostScopeV2, operation_id: t
 pub fn host_linux_service_dispatch_v4(owner: HostLinuxServiceCurrentV4, action: text, source: text,
         project: fn(ContainerExecutionDraftV3) -> Result<ContainerExecutionRequestV2, text>) -> HostLinuxServiceReplyV4:
     # Draining admits nothing new; inspect, detach and cancel stay so a live attachment can still release the writer.
-    if owner.draining and action != "host_agent_inspect_v4" and action != "host_agent_detach_v4" and action != "host_agent_cancel_v4":
+    if owner.draining and action != "host_agent_inspect_v4" and action != "host_agent_detach_v4" and action != "host_agent_cancel_v4" and
+            not REMOTE_BUILD_DRAINING_ACTIONS_V4.contains(action):
         return linux_service_reply_v4(owner, "", "linux-host-service-draining", false)
     if action == "host_service_handoff_v1": return linux_service_handoff_v4(owner, source)
     if action == "host_service_handoff_abandon_v1": return linux_service_handoff_abandon_v4(owner, source)
@@ -1243,6 +1576,12 @@ pub fn host_linux_service_dispatch_v4(owner: HostLinuxServiceCurrentV4, action: 
     if action == "host_agent_attach_v4": return host_linux_service_agent_attach_v4(owner, source)
     if action == "host_agent_detach_v4": return host_linux_service_agent_detach_v4(owner, source)
     if action == "host_agent_inspect_v4": return host_linux_service_agent_inspect_v4(owner, source)
+    if action == "host_remote_build_open_v4": return host_linux_service_remote_build_open_v4(owner, source)
+    if action == "host_remote_build_input_v4": return host_linux_service_remote_build_input_v4(owner, source)
+    if action == "host_remote_build_start_v4": return host_linux_service_remote_build_start_v4(owner, source)
+    if action == "host_remote_build_collect_v4": return host_linux_service_remote_build_collect_v4(owner, source)
+    if action == "host_remote_build_output_v4": return host_linux_service_remote_build_output_v4(owner, source)
+    if action == "host_remote_build_cancel_v4": return host_linux_service_remote_build_cancel_v4(owner, source)
     linux_service_reply_v4(owner, "", "linux-host-service-action-unknown", false)
 
 # AT-OPS-01 drain: verify the controller-signed handoff against THIS owner's live state, publish it as the pending
@@ -1364,6 +1703,14 @@ pub fn host_linux_service_close_v4(original: HostLinuxServiceCurrentV4) -> HostL
             # The returned capacity owner is the single journal writer (13.5).
             if closed.capacity.is_some(): owner.capacity = closed.capacity
             if not closed.closed and error == "": error = closed.error
+    elif val build = owner.build:
+        # A pre-transfer build holds nothing (its executing row is reaped at the next start); a transferred one closes
+        # like the agent: wedged or reserved-unsettled keeps everything (fail closed).
+        if not owner.agent_consumed: owner.build = None
+        else:
+            val closed = host_remote_build_close_v4(build)
+            if closed.is_ok(): owner.build = Some(closed.unwrap())
+            elif error == "": error = closed.unwrap_err()
     # milestone_0021 13.5: while the agent's attachment is live the helper-settlement writer must survive, so the
     # capacity owner and the journal stay open (no capacity close, no journal cleanup).
     var attachment_live = false
@@ -1416,6 +1763,19 @@ pub fn host_linux_service_close_v4(original: HostLinuxServiceCurrentV4) -> HostL
                 owner.admission = closed.retained
                 if (not closed.closed or closed.retained.is_some() or closed.error != "") and error == "":
                     error = linux_service_close_reason_v4(closed.error, "linux-host-service-admission-close-pending")
+    elif val build = owner.build:
+        if not service_released:
+            if error == "": error = "linux-host-service-admission-close-pending"
+        elif build.workload_closed:
+            val released = host_remote_build_release_v4(build, owner.native)
+            owner.build = released.executor
+            owner.native = released.native
+            if released.error != "" and error == "": error = released.error
+            if owner.build.is_none() and owner.admission.is_some():
+                val closed = machine_fresh_epoch_admission_turn_close_v1(owner.admission.unwrap())
+                owner.admission = closed.retained
+                if (not closed.closed or closed.retained.is_some() or closed.error != "") and error == "":
+                    error = linux_service_close_reason_v4(closed.error, "linux-host-service-admission-close-pending")
     elif owner.admission.is_some():
         if not service_released:
             if error == "": error = "linux-host-service-admission-close-pending"
@@ -1464,7 +1824,7 @@ pub fn host_linux_service_close_v4(original: HostLinuxServiceCurrentV4) -> HostL
     val reported = if error != "": error else: owner.close_error
     # released_all: nothing owner-bearing is retained now, even if an earlier
     # attempt failed (that failure stays visible in `error`/`completed`).
-    val released = service_released and owner.admission.is_none() and owner.agent.is_none()
+    val released = service_released and owner.admission.is_none() and owner.agent.is_none() and owner.build.is_none()
     HostLinuxServiceCloseV4(owner: owner, completed: reported == "", released_all: released, error: reported)
 
 export HostLinuxServiceCurrentV4, HostLinuxServiceStartTurnV4, HostLinuxServiceReplyV4, HostLinuxServiceCloseV4
@@ -1475,3 +1835,6 @@ export host_linux_service_dispatch_v4, host_linux_service_execute_v4, host_linux
 export host_linux_service_agent_invoke_v4, host_linux_service_agent_cancel_v4
 export host_linux_service_agent_attach_v4, host_linux_service_agent_terminal_authority_v4, host_linux_service_agent_pane_control_target_v4
 export HostLinuxServiceLeaseTurnV4, HostLinuxServicePaneIoTurnV4, host_linux_service_attachment_lease_v4, host_linux_service_pane_io_v4
+export host_linux_service_remote_build_open_v4, host_linux_service_remote_build_input_v4, host_linux_service_remote_build_start_v4
+export host_linux_service_remote_build_collect_v4, host_linux_service_remote_build_output_v4, host_linux_service_remote_build_cancel_v4
+export host_linux_service_install_remote_build_port_v4

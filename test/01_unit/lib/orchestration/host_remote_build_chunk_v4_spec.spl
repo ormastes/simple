@@ -1,0 +1,74 @@
+"""
+## Purpose and audience
+Pins milestone_0030 DESIGN s4 and s11 F3 (N3-a): the chunked V4 frame codec in
+`src/lib/common/contracts/orchestration/host_remote_build_chunk_v4.spl`. Request chunks carry at most 1,228,800 raw
+bytes and reply chunks at most 589,824 raw bytes, as canonical base64, bound by a digest manifest. Written for owners
+of the V4 route transport.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
+## Compatibility and limitations
+The codec adds no trust: the chunk bytes must match the manifest digest that the signed task or the signed bundle
+pins. The envelope caps (2 MiB request, 1 MiB V6 reply) are checked as arithmetic on the base64 length.
+## Verification guidance and troubleshooting
+Each refusal names the exact error string; a changed string is a contract change.
+"""
+use std.spec.step
+use std.common.contracts.orchestration.host_remote_build_chunk_v4.*
+use std.common.base_encoding.base64.base64_encode_bytes
+use std.common.crypto.sha256.sha256_u8_hex
+
+fn ch_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    for index in 0..count: out = out.push((index % 251) as u8)
+    out
+
+describe "Chunked V4 remote-build frames (milestone_0030 s4, s11 F3)":
+    it "keeps the largest chunk inside the envelope caps":
+        # @req M0030-CHUNK-01
+        expect(HOST_REMOTE_BUILD_REQUEST_CHUNK_MAX_V4).to_equal(1228800)
+        expect(HOST_REMOTE_BUILD_REPLY_CHUNK_MAX_V4).to_equal(589824)
+        step("1,228,800 raw bytes are 1,638,400 base64 bytes, leaving more than 400 KiB of the 2 MiB request envelope")
+        expect(host_remote_build_chunk_encode_v4(ch_bytes(1228800), false).unwrap().byte_len()).to_equal(1638400)
+        expect(1638400 + 409600 <= 2097152).to_equal(true)
+        step("589,824 raw bytes are 786,432 base64 bytes, leaving more than 256 KiB of the 1 MiB V6 reply envelope (N10)")
+        expect(host_remote_build_chunk_encode_v4(ch_bytes(589824), true).unwrap().byte_len()).to_equal(786432)
+        expect(786432 + 262144 <= 1048576).to_equal(true)
+        step("one byte over either bound is refused")
+        expect(host_remote_build_chunk_encode_v4(ch_bytes(1228801), false)).to_equal(Err("host-remote-build-chunk-too-large"))
+        expect(host_remote_build_chunk_encode_v4(ch_bytes(589825), true)).to_equal(Err("host-remote-build-chunk-too-large"))
+        expect(host_remote_build_chunk_encode_v4([], false)).to_equal(Err("host-remote-build-chunk-empty"))
+
+    it "decodes only canonical base64 whose digest is pinned":
+        # @req M0030-CHUNK-02
+        val raw = ch_bytes(1000)
+        val payload = host_remote_build_chunk_encode_v4(raw, false).unwrap()
+        expect(host_remote_build_chunk_decode_v4(payload, sha256_u8_hex(raw), false).unwrap()).to_equal(raw)
+        step("a digest mismatch, non-canonical text and oversize payloads are refused")
+        expect(host_remote_build_chunk_decode_v4(payload, "0".repeat(64), false)).to_equal(Err("host-remote-build-chunk-digest"))
+        expect(host_remote_build_chunk_decode_v4(payload + "\n", sha256_u8_hex(raw), false)).to_equal(Err("host-remote-build-chunk-noncanonical"))
+        expect(host_remote_build_chunk_decode_v4("!" + payload, sha256_u8_hex(raw), false)).to_equal(Err("host-remote-build-chunk-noncanonical"))
+        val big = ch_bytes(1228801)
+        expect(host_remote_build_chunk_decode_v4(base64_encode_bytes(big), sha256_u8_hex(big), false)).to_equal(Err("host-remote-build-chunk-too-large"))
+        val reply_big = ch_bytes(589825)
+        expect(host_remote_build_chunk_decode_v4(base64_encode_bytes(reply_big), sha256_u8_hex(reply_big), true)).to_equal(Err("host-remote-build-chunk-too-large"))
+
+    it "splits and binds by a manifest":
+        # @req M0030-CHUNK-03
+        val raw = ch_bytes(2500000)
+        val manifest = host_remote_build_chunk_manifest_v4(raw, false).unwrap()
+        expect(manifest.total_bytes).to_equal(2500000)
+        expect(manifest.chunk_digests.len()).to_equal(3)
+        expect(manifest.content_digest).to_equal(sha256_u8_hex(raw))
+        val chunks = host_remote_build_chunk_split_v4(raw, false)
+        expect(chunks.len()).to_equal(3)
+        expect(chunks[0].len()).to_equal(1228800)
+        var altered = chunks[2]
+        altered[0] = altered[0] + 1u8
+        step("the manifest digest changes with any chunk digest")
+        val original = host_remote_build_chunk_manifest_digest_v4(manifest)
+        var digests = manifest.chunk_digests
+        digests[2] = sha256_u8_hex(altered)
+        val other = HostRemoteBuildChunkManifestV4(total_bytes: manifest.total_bytes, content_digest: manifest.content_digest,
+            chunk_digests: digests)
+        expect(host_remote_build_chunk_manifest_digest_v4(other) != original).to_equal(true)

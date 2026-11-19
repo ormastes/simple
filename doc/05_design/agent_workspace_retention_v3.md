@@ -31,8 +31,13 @@ The trusted upper coordinator must verify those actual owners and original
 journal fences before calling source, then atomically publish returned
 canonical metadata with execution-only CPU/memory settlement. A failed WAL
 publication retains the actual source and whole charge. Storage quota remains
-charged and recoverable. Generic source close refuses after any attempted
+charged and recoverable. Generic source close (`cleanup_v3` / `close_v1`) refuses after any attempted
 staging, including terminal retention; no automatic deletion or quota release.
+The lifecycle close (`close_native_v2` / `close_workload_v3`) accepts a
+`retained-returned` source (owner decision N9-a, 2026-11-19) so the host
+settle, service loan, epoch and admission can end and a successor can start;
+the root, exclusion and storage lease stay in the retained custody for a later
+authorized cleanup only.
 Guest-created links and files are never walked by this terminal path.
 
 `retained_metadata_v3` returns defensive copies of the historical canonical
