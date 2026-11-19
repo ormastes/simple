@@ -1,0 +1,113 @@
+"""
+## Purpose and audience
+Pins the encode and generate wipe contract of src/app/orchestrator/host_identity_key_v1.spl: the OpenSSH body and
+raw buffers are pre-sized and written by index (no concatenated secret temporaries, no push), and every owned secret
+buffer (body, raw, seed slice, check slice, entropy bytes) is wiped on every exit after it exists.
+Written for owners of the host identity store.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-19).
+## Compatibility and limitations
+The seed is RFC 8032 test-1: published, deliberately public fixture material. Records expose only counts of verified
+wipes. The entropy decoder returns [] on invalid input before allocating, so no partial buffer exists on an error
+path. Immutable text (PEM, base64) and std ed25519 internals carry no erasure guarantee (bug doc
+host_identity_ed25519_std_temporaries_unwiped_2026-11-19).
+## Verification guidance and troubleshooting
+Encode wipes 2 buffers (body, raw). Generate wipes 5 on success (seed, check, entropy bytes, body, raw) and 0 when the
+entropy is refused before any buffer exists.
+"""
+use app.orchestrator.host_identity_key_v1.{host_identity_private_encode_v1, host_identity_private_encode_run_v1,
+    host_identity_key_generate_from_entropy_run_v1, host_identity_private_public_v1}
+use std.common.crypto.ed25519.pure_ed25519_keypair_from_seed
+use std.common.base_encoding.base64.base64_decode_bytes
+use std.common.text_bytes.bytes_to_text
+
+fn ew_seed() -> [u8]:
+    [157, 97, 177, 157, 239, 253, 90, 96, 186, 132, 74, 244, 146, 236, 44, 196, 68, 73, 197, 105, 123, 50, 105, 25, 112, 59, 172, 3, 28, 174, 127, 96]
+
+fn ew_public() -> [u8]:
+    pure_ed25519_keypair_from_seed(ew_seed()).1
+
+fn ew_entropy() -> text:
+    "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f6001020304"
+
+fn ew_label(length: i64) -> text:
+    var label = ""
+    for index in 0..length: label = label + "a"
+    label
+
+fn ew_zeros() -> text:
+    var zeros = ""
+    for index in 0..64: zeros = zeros + "0"
+    zeros
+
+fn ew_decoded(file: [u8]) -> [u8]:
+    var body = ""
+    for line in bytes_to_text(file).split("\n"):
+        if line.len() > 0 and not line.starts_with("-----"): body = body + line
+    base64_decode_bytes(body)
+
+describe "Host identity encode and generate wipe owned secret buffers":
+    it "encodes with exactly two verified wipes and round-trips the public key":
+        # @req ENCWIPE-01
+        val run = host_identity_private_encode_run_v1(ew_seed(), ew_public(), [1, 2, 3, 4], "public-rfc8032-fixture")
+        expect(run.outcome.is_ok()).to_equal(true)
+        expect(run.wiped).to_equal(2)
+        expect(host_identity_private_public_v1(run.outcome.unwrap()).is_ok()).to_equal(true)
+
+    it "writes the exact OpenSSH layout for every label length residue":
+        # @req ENCWIPE-02
+        for length in 0..17:
+            val run = host_identity_private_encode_run_v1(ew_seed(), ew_public(), [9, 8, 7, 6], ew_label(length))
+            expect(run.wiped).to_equal(2)
+            val raw = ew_decoded(run.outcome.unwrap())
+            expect((raw.len() - 98) % 8).to_equal(0)
+            expect(raw.len() - 98 - 131 - length < 8).to_equal(true)
+            for index in 0..4:
+                expect(raw[98 + index]).to_equal(raw[102 + index])
+            expect(raw[98]).to_equal(9u8)
+            for index in 0..32:
+                expect(raw[161 + index]).to_equal(ew_seed()[index])
+                expect(raw[193 + index]).to_equal(ew_public()[index])
+            val pad = raw.len() - 229 - length
+            for index in 0..pad:
+                expect(raw[229 + length + index]).to_equal((index + 1) as u8)
+            expect(host_identity_private_public_v1(run.outcome.unwrap()).is_ok()).to_equal(true)
+
+    it "keeps the pub encode wrapper identical to the run outcome":
+        # @req ENCWIPE-03
+        val run = host_identity_private_encode_run_v1(ew_seed(), ew_public(), [1, 2, 3, 4], "x")
+        expect(host_identity_private_encode_v1(ew_seed(), ew_public(), [1, 2, 3, 4], "x")).to_equal(run.outcome)
+
+    it "refuses bad input before any buffer exists":
+        # @req ENCWIPE-04
+        val size = host_identity_private_encode_run_v1([1], ew_public(), [1, 2, 3, 4], "x")
+        expect(size.outcome).to_equal(Err("host-identity-key-size"))
+        expect(size.wiped).to_equal(0)
+        val label = host_identity_private_encode_run_v1(ew_seed(), ew_public(), [1, 2, 3, 4], "\n")
+        expect(label.outcome).to_equal(Err("host-identity-key-label"))
+        expect(label.wiped).to_equal(0)
+
+    it "generate wipes seed, check, entropy bytes, body and raw on success":
+        # @req ENCWIPE-05
+        val run = host_identity_key_generate_from_entropy_run_v1(ew_entropy(), "host-test")
+        expect(run.outcome.is_ok()).to_equal(true)
+        expect(run.wiped).to_equal(5)
+        val key = run.outcome.unwrap()
+        expect(key.label).to_equal("host-test")
+        expect(host_identity_private_public_v1(key.private_file).unwrap()).to_equal(key.public_key)
+
+    it "generate refuses invalid entropy with nothing allocated":
+        # @req ENCWIPE-06
+        val run = host_identity_key_generate_from_entropy_run_v1("zz", "host-test")
+        expect(run.outcome.unwrap_err()).to_equal("host-identity-entropy-unavailable")
+        expect(run.wiped).to_equal(0)
+        val zero = host_identity_key_generate_from_entropy_run_v1(ew_label(0) + ew_zeros() + "01020304", "host-test")
+        expect(zero.outcome.unwrap_err()).to_equal("host-identity-entropy-unavailable")
+        expect(zero.wiped).to_equal(0)
+
+    it "generate wipes the secret buffers when a later step refuses":
+        # @req ENCWIPE-07
+        val run = host_identity_key_generate_from_entropy_run_v1(ew_entropy(), "bad\nlabel")
+        expect(run.outcome.unwrap_err()).to_equal("host-identity-key-label")
+        expect(run.wiped).to_equal(3)

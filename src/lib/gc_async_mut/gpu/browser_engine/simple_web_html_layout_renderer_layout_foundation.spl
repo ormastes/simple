@@ -1816,6 +1816,9 @@ fn explicit_auto_table_column_offsets(
     )
     var widths: [i32] = [0; column_count]
     var col_min: [i32] = [0; column_count]
+    # Sub-pixel remainder (milli-px) of each column's max-content width, so the
+    # slack split below runs on Chrome's fractional widths, not rounded ones.
+    var col_frac: [i32] = [0; column_count]
     for row in rows.rows:
         var column = 0
         var cell = child_index.first_child[row]
@@ -1870,8 +1873,14 @@ fn explicit_auto_table_column_offsets(
                         )
                         if cell_width < min_width:
                             cell_width = min_width
+                    var cell_frac = 0
+                    if cell_style.width_px <= 0 and cell_style.min_width_px <= 0 and cell_style.max_width_px <= 0:
+                        cell_frac = table_cell_text_frac_milli(nodes, styles, child_index, cell)
                     if cell_width > widths[column]:
                         widths[column] = cell_width
+                        col_frac[column] = cell_frac
+                    elif cell_width == widths[column] and cell_frac > col_frac[column]:
+                        col_frac[column] = cell_frac
                     # The column's FLOOR. A cell with a stated width is its own
                     # floor; an auto cell's floor is its longest unbreakable
                     # word. Never above the ceiling just computed.
@@ -1998,17 +2007,40 @@ fn explicit_auto_table_column_offsets(
             0
     else:
         available
-    val used = table_distribute_auto_columns(col_min, widths, target)
+    # Distribute in milli-px; only the cumulative column edges round to px.
+    var max_milli: [i32] = []
+    var min_milli: [i32] = []
+    var milli_column = 0
+    while milli_column < column_count:
+        val hi_milli = widths[milli_column] * 1000 + col_frac[milli_column]
+        val lo_milli = col_min[milli_column] * 1000
+        max_milli.push(hi_milli)
+        min_milli.push(if lo_milli < hi_milli: lo_milli else: hi_milli)
+        milli_column = milli_column + 1
+    val used = table_distribute_auto_columns(min_milli, max_milli, target * 1000)
     if used.len() != column_count:
         return []
     var offsets: [i32] = [0; column_count + 1]
     var offset_column = 0
+    var edge_milli = 0
     while offset_column < column_count:
-        offsets[offset_column + 1] = (
-            offsets[offset_column] + used[offset_column]
-        )
+        edge_milli = edge_milli + used[offset_column]
+        offsets[offset_column + 1] = (edge_milli + 500) / 1000
         offset_column = offset_column + 1
     offsets
+
+# Sub-pixel remainder (milli-px, -500..500) of a table cell's max-content text
+# width when the cell holds exactly one text run measured at milli precision;
+# 0 otherwise. The integer width is the rounding of the exact one.
+fn table_cell_text_frac_milli(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, cell: i32) -> i32:
+    val only = child_index.first_child[cell]
+    if only < 0 or child_index.next_sibling[only] >= 0 or nodes[only].tag != "#text":
+        return 0
+    val st = styles[only]
+    if nodes[only].text_trimmed.len() == 0 or st.resolved_font_width <= 0 or st.resolved_font_width_milli < 0:
+        return 0
+    val frac = st.resolved_font_width_milli - (st.resolved_font_width as i64) * 1000
+    if frac > 500 or frac < -500: 0 else: frac as i32
 
 fn constrained_outer_height(node: HNode, st: Style, candidate_height: i32) -> i32:
     var out = candidate_height
