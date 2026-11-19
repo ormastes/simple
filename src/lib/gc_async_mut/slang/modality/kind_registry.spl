@@ -12,7 +12,9 @@
 #   2. a projector companion: Chat, inputs from clip.has_vision_encoder /
 #      clip.has_audio_encoder
 #   3. a WavTokenizer vocoder companion -> Tts
-#   4. `<arch>.pooling_type` (u32: 0 none, 1 mean, 2 cls, 3 last, 4 rank)
+#   4. `<arch>.pooling_type` (u32: 0 none, 1 mean, 2 cls, 3 last, 4 rank);
+#      with none written, an encoder whose tensor-info table holds a
+#      classification head (`cls.output.weight` / `cls.weight`) -> Rerank
 #   5. the architecture table
 #   6. magic sniff: `lmgg` ggml -> Asr; SD UNet safetensors -> ImageGen;
 #      LlamaForCausalLM safetensors -> Chat on the pure runner
@@ -22,7 +24,9 @@
 # GGUF metadata is read as BINARY: every key and value length is a u64 read
 # from the bytes, and the walk ends at the first tensor-info entry (after
 # kv_count entries) or at the tokenizer block, whichever is first. Bytes come
-# from a growing ranged read of the prefix, never the whole file.
+# from a growing ranged read of the prefix, never the whole file. Every length
+# and count is checked against the bytes left in the FILE before it is used: a
+# negative (top-bit) or oversized value is Malformed, never a long loop.
 
 use std.gc_async_mut.slang.modality.kinds.{Modality, ModelKind, KindProfile, kind_profile, kind_default_inputs, model_kind_from_text}
 use std.gc_async_mut.slang.engine.runner_dispatch.{RunnerKind}
@@ -58,6 +62,7 @@ struct GgufFacts:
     pooling_type: i64
     has_vision: bool
     has_audio: bool
+    has_cls_head: bool
 
 # Why a walk stopped short: the bytes read so far end mid-entry, so a larger
 # read is needed; or the file is not a GGUF this reader understands.
@@ -123,40 +128,63 @@ fn _scalar_width(t: i64) -> i64:
         return 8
     -1
 
-# Offset just past one value of type `t` at `at`, or a stop.
-fn _gguf_skip_value(b: [u8], at: i64, t: i64) -> Result<i64, GgufWalkStop>:
+# True when a length or count `n` read at `at` can fit in the `total` bytes of
+# the file. A negative value is a u64 with the top bit set; both are hostile.
+fn _fits(n: i64, at: i64, total: i64) -> bool:
+    n >= 0 and at <= total and n <= total - at
+
+# Offset just past one value of type `t` at `at`, or a stop. `total` is the
+# whole file's size: a length past the bytes in hand but inside the file is
+# NeedMore, a length past the file is Malformed.
+fn _gguf_skip_value(b: [u8], at: i64, t: i64, total: i64) -> Result<i64, GgufWalkStop>:
     val width = _scalar_width(t)
     if width > 0:
+        if not _fits(width, at, total):
+            return Err(GgufWalkStop.Malformed("value runs past the end of the file"))
         if at + width > b.len():
             return Err(GgufWalkStop.NeedMore)
         return Ok(at + width)
     if t == GGUF_T_STRING:
+        if not _fits(8, at, total):
+            return Err(GgufWalkStop.Malformed("string length runs past the end of the file"))
         if at + 8 > b.len():
             return Err(GgufWalkStop.NeedMore)
-        val end = at + 8 + _u64_at(b, at)
+        val len = _u64_at(b, at)
+        if not _fits(len, at + 8, total):
+            return Err(GgufWalkStop.Malformed("string length " + len.to_text() + " is out of range"))
+        val end = at + 8 + len
         if end > b.len():
             return Err(GgufWalkStop.NeedMore)
         return Ok(end)
     if t == GGUF_T_ARRAY:
+        if not _fits(12, at, total):
+            return Err(GgufWalkStop.Malformed("array header runs past the end of the file"))
         if at + 12 > b.len():
             return Err(GgufWalkStop.NeedMore)
         val elem = _u32_at(b, at)
         val count = _u64_at(b, at + 4)
-        if count < 0:
-            return Err(GgufWalkStop.Malformed("array count overflows"))
+        val start = at + 12
         val elem_width = _scalar_width(elem)
         if elem_width > 0:
-            val end = at + 12 + count * elem_width
+            # Divide before multiplying: count * elem_width can overflow i64.
+            if count < 0 or count > (total - start) / elem_width:
+                return Err(GgufWalkStop.Malformed("array count " + count.to_text() + " is out of range"))
+            val end = start + count * elem_width
             if end > b.len():
                 return Err(GgufWalkStop.NeedMore)
             return Ok(end)
         if elem == GGUF_T_STRING:
-            var p = at + 12
+            if count < 0 or count > (total - start) / 8:
+                return Err(GgufWalkStop.Malformed("string array count " + count.to_text() + " is out of range"))
+            var p = start
             var i: i64 = 0
             while i < count:
                 if p + 8 > b.len():
                     return Err(GgufWalkStop.NeedMore)
-                p = p + 8 + _u64_at(b, p)
+                val len = _u64_at(b, p)
+                if not _fits(len, p + 8, total):
+                    return Err(GgufWalkStop.Malformed("string length " + len.to_text() + " is out of range"))
+                p = p + 8 + len
                 i = i + 1
             if p > b.len():
                 return Err(GgufWalkStop.NeedMore)
@@ -174,9 +202,19 @@ fn _scalar_int(b: [u8], at: i64, t: i64) -> i64:
         return (b[at] as i64) | ((b[at + 1] as i64) << 8)
     b[at] as i64
 
-# Walk every KV entry of the GGUF bytes `b`, stopping at the first tensor-info
-# entry, and keep the facts the resolver reads.
-fn gguf_facts_from_bytes(b: [u8]) -> Result<GgufFacts, GgufWalkStop>:
+# The smallest KV entry: u64 key length, empty key, u32 type, one u8 value.
+val GGUF_MIN_KV = 13
+# The smallest tensor-info entry: u64 name length, u32 n_dims, u32 type, u64 offset.
+val GGUF_MIN_TENSOR_INFO = 24
+val GGUF_MAX_DIMS = 8
+
+# Walk every KV entry of the GGUF bytes `b` (a prefix of a `total`-byte file)
+# and keep the facts the resolver reads. A cheap walk (`full` false) ends at the
+# tokenizer block; a full walk crosses it and reads the tensor-info table for
+# the classification-head tensors.
+fn gguf_walk_bytes(b: [u8], total: i64, full: bool) -> Result<GgufFacts, GgufWalkStop>:
+    if total < 24:
+        return Err(GgufWalkStop.Malformed("shorter than a GGUF header"))
     if b.len() < 24:
         return Err(GgufWalkStop.NeedMore)
     if not _bytes_are(b, 0, 4, "GGUF"):
@@ -184,33 +222,46 @@ fn gguf_facts_from_bytes(b: [u8]) -> Result<GgufFacts, GgufWalkStop>:
     val version = _u32_at(b, 4)
     if version < 2:
         return Err(GgufWalkStop.Malformed("GGUF version " + version.to_text() + " is not supported (need 2 or 3)"))
+    val tensor_count = _u64_at(b, 8)
     val kv_count = _u64_at(b, 16)
+    if kv_count < 0 or kv_count > (total - 24) / GGUF_MIN_KV:
+        return Err(GgufWalkStop.Malformed("kv_count " + kv_count.to_text() + " is out of range"))
+    if tensor_count < 0 or tensor_count > (total - 24) / GGUF_MIN_TENSOR_INFO:
+        return Err(GgufWalkStop.Malformed("tensor_count " + tensor_count.to_text() + " is out of range"))
     var arch = ""
     var general_type = ""
     var pooling: i64 = -1
     var vision = false
     var audio = false
-    var p = 24
+    var p: i64 = 24
     var k: i64 = 0
+    var reached_tensors = true
     while k < kv_count:
+        if not _fits(8, p, total):
+            return Err(GgufWalkStop.Malformed("key length runs past the end of the file"))
         if p + 8 > b.len():
             return Err(GgufWalkStop.NeedMore)
         val key_len = _u64_at(b, p)
         val key_at = p + 8
-        if key_len < 0 or key_at + key_len + 4 > b.len():
+        if not _fits(key_len, key_at, total) or not _fits(4, key_at + key_len, total):
+            return Err(GgufWalkStop.Malformed("key length " + key_len.to_text() + " is out of range"))
+        if key_at + key_len + 4 > b.len():
             return Err(GgufWalkStop.NeedMore)
         # The tokenizer block (vocab and merges, megabytes of string arrays) is
         # written after the general.* / clip.* / <arch>.* keys and holds no
-        # fact the resolver reads; the walk ends there. A file that breaks
+        # fact the resolver reads; a cheap walk ends there. A file that breaks
         # that order is settled by a slang_kind.sdn override.
-        if _bytes_start(b, key_at, key_len, "tokenizer."):
+        if not full and _bytes_start(b, key_at, key_len, "tokenizer."):
+            reached_tensors = false
             break
         val t = _u32_at(b, key_at + key_len)
         val v = key_at + key_len + 4
-        match _gguf_skip_value(b, v, t):
+        match _gguf_skip_value(b, v, t, total):
             Err(stop):
                 return Err(stop)
             Ok(next):
+                if next <= p:
+                    return Err(GgufWalkStop.Malformed("KV entry does not advance"))
                 if t == GGUF_T_STRING and _bytes_are(b, key_at, key_len, "general.architecture"):
                     arch = _bytes_text(b, v + 8, _u64_at(b, v))
                 elif t == GGUF_T_STRING and _bytes_are(b, key_at, key_len, "general.type"):
@@ -223,12 +274,39 @@ fn gguf_facts_from_bytes(b: [u8]) -> Result<GgufFacts, GgufWalkStop>:
                     pooling = _scalar_int(b, v, t)
                 p = next
         k = k + 1
-    Ok(GgufFacts(arch: arch, general_type: general_type, pooling_type: pooling, has_vision: vision, has_audio: audio))
+    var cls_head = false
+    if full and reached_tensors:
+        var ti: i64 = 0
+        while ti < tensor_count:
+            if not _fits(8, p, total):
+                return Err(GgufWalkStop.Malformed("tensor name length runs past the end of the file"))
+            if p + 8 > b.len():
+                return Err(GgufWalkStop.NeedMore)
+            val name_len = _u64_at(b, p)
+            val name_at = p + 8
+            if not _fits(name_len, name_at, total) or not _fits(4, name_at + name_len, total):
+                return Err(GgufWalkStop.Malformed("tensor name length " + name_len.to_text() + " is out of range"))
+            if name_at + name_len + 4 > b.len():
+                return Err(GgufWalkStop.NeedMore)
+            val n_dims = _u32_at(b, name_at + name_len)
+            if n_dims > GGUF_MAX_DIMS:
+                return Err(GgufWalkStop.Malformed("tensor n_dims " + n_dims.to_text() + " is out of range"))
+            val next = name_at + name_len + 4 + n_dims * 8 + 4 + 8
+            if next > total:
+                return Err(GgufWalkStop.Malformed("tensor info runs past the end of the file"))
+            if next > b.len():
+                return Err(GgufWalkStop.NeedMore)
+            if _bytes_are(b, name_at, name_len, "cls.output.weight") or _bytes_are(b, name_at, name_len, "cls.weight"):
+                cls_head = true
+            p = next
+            ti = ti + 1
+    Ok(GgufFacts(arch: arch, general_type: general_type, pooling_type: pooling, has_vision: vision, has_audio: audio, has_cls_head: cls_head))
 
-# GGUF facts of the file at `path`. Reads a growing prefix until the KV block
-# fits, never past GGUF_MAX_READ.
-fn gguf_facts(path: text) -> Result<GgufFacts, text>:
-    val size = file_size(path)
+# The cheap walk of a whole in-memory GGUF (fixtures and specs).
+fn gguf_facts_from_bytes(b: [u8]) -> Result<GgufFacts, GgufWalkStop>:
+    gguf_walk_bytes(b, b.len(), false)
+
+fn _gguf_read_walk(path: text, size: i64, full: bool) -> Result<GgufFacts, text>:
     var want = GGUF_FIRST_READ
     while true:
         val n = if want > size: size else: want
@@ -236,7 +314,7 @@ fn gguf_facts(path: text) -> Result<GgufFacts, text>:
             Err(_):
                 return Err("cannot read " + path)
             Ok(bytes):
-                match gguf_facts_from_bytes(bytes):
+                match gguf_walk_bytes(bytes, size, full):
                     Ok(facts):
                         return Ok(facts)
                     Err(GgufWalkStop.Malformed(why)):
@@ -248,6 +326,32 @@ fn gguf_facts(path: text) -> Result<GgufFacts, text>:
                             return Err(path + ": GGUF metadata is larger than " + GGUF_MAX_READ.to_text() + " bytes")
                         want = want * 4
     Err(path + ": unreachable")
+
+fn _is_embedding(k: ModelKind) -> bool:
+    match k:
+        ModelKind.Embedding: true
+        _: false
+
+# GGUF facts of the file at `path`. Reads a growing prefix until the KV block
+# fits, never past GGUF_MAX_READ. An encoder that names no pooling type (the
+# bge-reranker-v2-m3 GGUF writes none) is walked again in full: its
+# classification head (`cls.output.weight`) lives in the tensor-info table,
+# after the tokenizer block, and is what tells a reranker from an embedder.
+fn gguf_facts(path: text) -> Result<GgufFacts, text>:
+    val size = file_size(path)
+    match _gguf_read_walk(path, size, false):
+        Err(why):
+            Err(why)
+        Ok(cheap):
+            if cheap.pooling_type >= 0 or not _is_embedding(arch_kind(cheap.arch)):
+                return Ok(cheap)
+            # A full walk that fails keeps the cheap facts: the head is
+            # evidence for rerank, its absence is no evidence against the rest.
+            match _gguf_read_walk(path, size, true):
+                Ok(full):
+                    Ok(full)
+                Err(_):
+                    Ok(cheap)
 
 # True when `facts` describe a multimodal projector rather than a model.
 fn gguf_facts_are_projector(facts: GgufFacts) -> bool:
@@ -381,7 +485,7 @@ fn gguf_files(dir: text) -> [GgufFile]:
                     out.push(GgufFile(name: name, facts: facts))
                 Err(_):
                     if _magic(path) == "GGUF":
-                        out.push(GgufFile(name: name, facts: GgufFacts(arch: "", general_type: "", pooling_type: -1, has_vision: false, has_audio: false)))
+                        out.push(GgufFile(name: name, facts: GgufFacts(arch: "", general_type: "", pooling_type: -1, has_vision: false, has_audio: false, has_cls_head: false)))
     out
 
 fn _override_profile(dir: text, kind_name: text) -> KindProfile:
@@ -439,6 +543,9 @@ fn resolve_kind_from(dir: text, gguf: [GgufFile]) -> KindProfile:
             case Some(k):
                 return _profile(k, [Modality.Text], RunnerKind.Ggml)
             case None:
+                # 4b. an encoder with a classification head is a reranker
+                if models[0].has_cls_head and _is_embedding(arch_kind(models[0].arch)):
+                    return _profile(ModelKind.Rerank, [Modality.Text], RunnerKind.Ggml)
                 return _profile(arch_kind(models[0].arch), [Modality.Text], RunnerKind.Ggml)
     if vocoders > 0:
         return kind_profile(ModelKind.Tts, [Modality.Text], RunnerKind.Ggml, "only a WavTokenizer vocoder (wavtokenizer-dec) was found; it needs a TTS model GGUF beside it")
@@ -455,5 +562,5 @@ fn resolve_kind_from(dir: text, gguf: [GgufFile]) -> KindProfile:
     kind_profile(ModelKind.Chat, [Modality.Text], RunnerKind.Ggml, "no kind could be resolved: no " + KIND_OVERRIDE_FILE + ", no GGUF model, no ggml (lmgg) file and no recognised safetensors")
 
 export GgufFacts, GgufWalkStop, GgufFile
-export gguf_facts_from_bytes, gguf_facts, gguf_facts_are_projector, gguf_file_is_projector, gguf_facts_are_vocoder, gguf_files
+export gguf_facts_from_bytes, gguf_walk_bytes, gguf_facts, gguf_facts_are_projector, gguf_file_is_projector, gguf_facts_are_vocoder, gguf_files
 export arch_kind, pooling_kind, kind_override_field, kind_unserved_reason, safetensors_is_sd_unet, ggml_magic_file, resolve_kind, resolve_kind_from
