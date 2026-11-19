@@ -219,13 +219,16 @@ fn replay_hook_timer_read(source_id: i64, value: i64) -> i64:
 
     match replay_mode():
         case KernelReplayMode.Replay:
-            # Return logged value instead of hardware read
+            # Return logged value instead of hardware read. A wrong event or an
+            # exhausted log is a divergence, never a silent live fallback.
             match replay_read_next():
                 case Some(entry):
-                    if entry.kind == EventKind.TimerRead.to_i32():
+                    if entry.kind == EventKind.TimerRead.to_i32() and entry.payload_a == source_id:
                         return entry.payload_b
+                    report_divergence(DivergenceKind.TimerMismatch, entry.event_id, entry.payload_a, source_id)
                     return value
                 case None:
+                    report_divergence(DivergenceKind.TimerMismatch, -1, source_id, value)
                     return value
         case KernelReplayMode.Verify:
             # Compare live value against logged, return live
@@ -316,13 +319,16 @@ fn replay_hook_random_read(task_id: i64, value: i64) -> i64:
 
     match replay_mode():
         case KernelReplayMode.Replay:
-            # Return logged entropy instead of hardware RNG
+            # Return logged entropy instead of hardware RNG; a wrong event or an
+            # exhausted log is a divergence, never a silent live fallback.
             match replay_read_next():
                 case Some(entry):
                     if entry.kind == EventKind.RandomSeed.to_i32():
                         return entry.payload_a
+                    report_divergence(DivergenceKind.RandomMismatch, entry.event_id, entry.kind.to_i64(), value)
                     return value
                 case None:
+                    report_divergence(DivergenceKind.RandomMismatch, -1, 0, value)
                     return value
         case KernelReplayMode.Verify:
             # Compare live entropy against logged, return live
