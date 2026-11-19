@@ -576,13 +576,22 @@ archive error is the plain wedge (no receipt). After a restart the startup reap 
 corrupt, foreign, non-canonical or receipt-less archives answer "" and keep the reaped refusal (controller's `service-restart`
 settle). Expiry: replay is transport, not authority (the in-memory wedged-with-receipt arm already precedes the deadline check);
 the controller verifies grant/approval/window, and open/transfer/reap still refuse an expired approval after restart.
+A read-back failure also publishes `<sha256(operation id)>.refused` beside it, and the stored reader answers "" while that marker
+exists: an archive that was never answered is never served after a restart (REVIEW_C P3-6; a lost marker keeps the old behaviour).
+VERSION SKEW (REVIEW_C P2-2, a deployment requirement, not fixed in code): a controller older than #10398 cannot decode the
+SUCCESS-shaped reset-failure reply (strict `remote_run_reply_decode_v1`) and settles `outcome-unknown`; since #10399 the same reply is
+also served after a Host restart, where that controller used to get the reaped code and finish `failed`. So the controller must be
+upgraded to >= #10398 BEFORE (or together with) any Host carrying #10398/#10399; never run a newer Host against an older controller.
 RESET-FAILURE STAGES (milestone_0040; specs NOT_RUN): the Host-signed stage set grew, on the same SIMPLE-REMOTE-RESET-FAILURE-3 wire and
 SIGNATURE_V3 domain, from 3 to 10 Host stages via one closed table in `remote_container_reset_failure_v3.spl` (reason / reap /
 has-native): `prepare-wedge`, `create-wedge` (reap identity-unresolved, no native id), `configuration-wedge`, `start-wedge`,
 `inspect-wedge` (incl. the running poll), `stop-absence` (Stop not ok, no cancel cause) and `cancel-stop-absence` (self-cancel Stop not
 ok after Create) (reap incomplete, native id). `host_remote_build_reset_stage_v4` stays total and fail-closed on impossible Create
-states; `remote_build_native_step_v4` now takes the port and routes 9 wedge sites through `remote_build_reset_wedged_v4` (sign, archive
-durably per #10399, reply; any failure = plain wedge). Compatibility: the stage set is CLOSED, so an older controller fails the signed
+states; `remote_build_native_step_v4` now takes the port and routes 8 wedge sites through `remote_build_reset_wedged_v4` (sign, archive
+durably per #10399, reply; any failure = plain wedge; a deadline-compute error is no issued effect and stays the plain wedge, REVIEW_C
+P3-4). Deadline receipts (REVIEW_C P2-1): the self-cancel fires at min(approval, grant, not_after) and the port self-verifies at the Host
+clock, so a `deadline` cancel-* receipt exists only when `not_after` ends strictly before both expiries; at either expiry there is no
+receipt (generic wedged/failed). Signing one after expiry would need a new authority rule: owner decision, not taken. Compatibility: the stage set is CLOSED, so an older controller fails the signed
 decode on a newer stage and falls back to the generic `wedged:reset-receipt-refused` settle: refused, never misclassified. Kept generic
 and why: enable error (the binding digest only exists after a successful enable), settle / source-return / host-settle (retried turn
 errors, not wedges), read / finalize (self-cancel causes settled `cancelled`, not wedges), transfer-missing / stage-invalid (before the
