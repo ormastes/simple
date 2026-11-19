@@ -1764,7 +1764,21 @@ static uint32_t rt_core_transient_scope_for_new_object(void) {
         : 0;
 }
 
-#define RT_CORE_TRANSIENT_SCOPE_MAX_OBJECTS ((size_t)1 << 24)
+/* Advisory size for one transient scope's tracking list; NOT a limit.
+ * The list used to refuse growth past 2^24 entries, which made the next
+ * allocation's registration fail and panic ("text concat: registration
+ * failed") while the Rust twin (TransientHeapScope.objects, a plain Vec) has
+ * no count limit at all. Stage 3 is the first bootstrap stage on this C
+ * runtime, so the first per-module pass scope over a very large MIR module
+ * died there although Stage 2 ran the same pass on the Rust runtime.
+ * Growth is now bounded only by SIZE_MAX and the allocator, exactly like the
+ * twin; crossing this size prints one stderr line per scope so a
+ * pathological scope stays visible instead of fatal.
+ * doc/08_tracking/bug/stage3_transient_scope_object_cap_panic_2026-11-20.md */
+#ifndef RT_CORE_TRANSIENT_SCOPE_WARN_OBJECTS
+#define RT_CORE_TRANSIENT_SCOPE_WARN_OBJECTS ((size_t)1 << 24)
+#endif
+static _Thread_local uint32_t rt_core_transient_scope_warned_id = 0;
 
 /* Make room for `extra` more session-list entries; 0 on failure. */
 static int core_session_reserve(size_t extra) {
@@ -1794,7 +1808,7 @@ static int rt_core_track_transient_immortal(void* ptr) {
         size_t next_cap = rt_core_transient_heap_scope_object_cap == 0
             ? 64
             : rt_core_transient_heap_scope_object_cap * 2;
-        if (next_cap > RT_CORE_TRANSIENT_SCOPE_MAX_OBJECTS ||
+        if (rt_core_transient_heap_scope_object_cap > SIZE_MAX / 2 ||
             next_cap > SIZE_MAX / sizeof(void*)) {
             return 0;
         }
@@ -1815,6 +1829,15 @@ static int rt_core_track_transient_immortal(void* ptr) {
     rt_core_transient_heap_scope_object_scopes[rt_core_transient_heap_scope_object_len] =
         rt_core_transient_array_scope_id;
     rt_core_transient_heap_scope_object_len++;
+    if (rt_core_transient_heap_scope_object_len == RT_CORE_TRANSIENT_SCOPE_WARN_OBJECTS + 1 &&
+            rt_core_transient_scope_warned_id != rt_core_transient_array_scope_id) {
+        rt_core_transient_scope_warned_id = rt_core_transient_array_scope_id;
+        fprintf(stderr,
+            "[transient-scope] WARNING scope %u tracks more than %zu objects; "
+            "continuing (no count limit, Rust-twin parity)\n",
+            (unsigned)rt_core_transient_array_scope_id,
+            (size_t)RT_CORE_TRANSIENT_SCOPE_WARN_OBJECTS);
+    }
     return 1;
 }
 
