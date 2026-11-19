@@ -1003,3 +1003,23 @@ head (13/40 at base).
   - `_emu_box_blur_1d` is deleted.
 - **Evidence:** `box_shadow_raster_falloff_chrome159_spec` gains cpu_simd and Vulkan k=1 cases on the same 12 Chrome points. It goes from 1/3 on base to 3/3 on head. Before the rounding change, the remaining miss was (50,56): 94 against Chrome's 91. `engine2d_shadow_rect_twin_formula_spec` passes unchanged. Base vs head sweep of 26 shadow, backdrop, Engine2D, SPIR-V, WM/glass and coverage specs (427 examples): 399 pass on head and 397 on base, with 0 new failures and 2 fixed. Every remaining failure also fails on base.
 - **Not covered:** rounded-corner shadows still use the separable rect profile.
+
+## 2026-11-19 — GPU readback cost of the knockout and `backdrop-filter` (MEASURED; region crop FIXED, readback default OPEN)
+
+- **Page timing:** 8 boxes, 300x180 at k=4, best of 3, seed JIT with lavapipe.
+
+  | lane | plain | opaque + shadow | translucent + shadow (knockout) | `backdrop-filter: blur(6px)` |
+  |---|---|---|---|---|
+  | cpu_simd | 3.0 s | 34.4 s | 44.2 s | 90.9 s |
+  | Vulkan | 10.6 s | 10.7 s | 100.3 s | 137.8 s |
+
+  A GPU-resident Vulkan shadow is free. Each gated box pays about 11 s.
+- **Per-piece timing:** one 200x200 box on a 1200x720 Vulkan surface. Each region read is a full-frame read plus a host crop (the `RenderBackend.read_pixels_region` default).
+  - Full read: 4574 ms by default (`vulkan_sffi_readback_u32_into` unpacks every pixel in interpreted code). 143 ms with `SIMPLE_VK_READBACK=native`.
+  - Crop: about 460 ms as a per-pixel interpreted loop.
+  - Knockout pixel pass: 341 ms. `draw_image` upload: 411 ms.
+- **Fixed:** the default crop copies one span per in-bounds row. On Vulkan a region read is 5085 -> 4671 ms by default and 488 -> 25 ms with native readback. `engine2d_read_pixels_region_equivalence_spec` gains an edge-clipped Vulkan case (4/4).
+- **Open:**
+  - **Native readback is still opt-in.** `vulkan_sffi_native_readback_opt_in` waits until every deployed binary carries `rt_vulkan_readback_u32_array`. The webrender seed has it; no shared `bin/simple` is deployed on this host to check. Until the default flips, every Vulkan knockout or backdrop box costs about 9 s in readbacks.
+  - **A native Vulkan region read would skip the full-frame download.** `rt_vulkan_readback_u32_array` already takes an offset and a count.
+  - **The knockout pass and the upload (about 0.75 s per box) are interpreted.**

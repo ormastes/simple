@@ -124,18 +124,18 @@ trait RenderBackend:
             val total = width.to_i64() * height.to_i64()
             if total > 0 and total <= 2147483647:
                 cropped = [0u32; total.to_i32()]
+                # One span copy per in-bounds row, clipped to the frame; the
+                # per-pixel loop this replaced cost ~0.34 s per 200x200 read.
+                val fw = self.width()
+                val c0 = if x < 0: 0 - x else: 0
+                val c1 = if x + width > fw: fw - x else: width
                 var row = 0
+                # cpu-lane-loop-ok: one span copy per row of the region; bound height
                 while row < height:
-                    var col = 0
-                    while col < width:
-                        val source_x = x + col
-                        val source_y = y + row
-                        if (source_x >= 0 and source_y >= 0 and
-                            source_x < self.width() and source_y < self.height()):
-                            cropped[row.to_i64() * width.to_i64() + col.to_i64()] =
-                                full.pixels[source_y.to_i64() * self.width().to_i64() +
-                                    source_x.to_i64()]
-                        col = col + 1
+                    val source_y = y + row
+                    if c1 > c0 and source_y >= 0 and source_y < self.height():
+                        cropped.write_span(full.pixels, row.to_i64() * width.to_i64() + c0.to_i64(),
+                            source_y.to_i64() * fw.to_i64() + (x + c0).to_i64(), (c1 - c0).to_i64())
                     row = row + 1
         engine2d_readback_with_identity(
             cropped, full.source, full.backend_handle, full.device_identity)
