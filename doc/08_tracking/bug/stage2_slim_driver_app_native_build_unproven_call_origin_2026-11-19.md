@@ -60,3 +60,45 @@ CLI hits the same gate, escalate to P1 and instrument the origin-proof pass.
 
 Evidence: build/ice/8496_*/ice_receipt.tsv and build/ice/15296_*/ice_receipt.tsv
 in the v7 lane tree; logs build/nb/devhub-build.log, devhub-build2.log.
+
+## Update 2026-11-20: export-list hypothesis disproved; minimal 2-module repro
+
+Status: open (no fix landed; root cause narrowed, not proven).
+
+Linux lane, frozen Stage 2 `/home/dev/xc/simple-p2` (ubuntu-p2), x86_64 linux
+`native-build --entry-closure`, fixtures under `~/simple/build/callorigin_fx`
+(sources: `C:/dev/wt/xc-wsl-scripts/callorigin/fx/`):
+
+| fixture | callee decl | result |
+|---|---|---|
+| `exponly/main.spl` -> `exponly.core.ex_len` | `fn ex_len` + `export ex_len` | ICE `unproven-call-origin callee=exponly.core.ex_len` |
+| `pubonly/main.spl` -> `pubonly.core.pb_len` | `pub fn pb_len` | ICE `unproven-call-origin callee=pubonly.core.pb_len` |
+| `tb_main.spl` -> `std.common.text_bytes` | (stdlib) | ICE in `lib.common.text_bytes` (`str_len`) and `tb_main` |
+
+So `pub` vs export-list visibility is NOT the discriminator: a trivial
+two-module cross-module call from a fresh module fails. Adding `pub` to
+`string_core.str_len` would not fix anything.
+
+xcmatrix census (`~/log/xm`, linux-x64/a64 + win-x64 lint/test), distinct
+Unknown callees: `text_bytes.text_byte_buffer` (51), `string_core.str_len` (28),
+`encoding.external_text.external_text` (18), `crypto.word_ops.rotr32` (16),
+`sffi.fs.file_open` (14), `traceability.case_events.test_failure_code_name` (12),
+`text_bytes.text_to_bytes` (12), `traceability.model.trace_text_order` (8).
+6 of 8 are `pub`. Callers like `text_bytes.text_byte_buffer` cascade from a
+provider module that itself failed.
+
+Source reading (pure-Simple compiler, release/1.0.0):
+- `provider_callable_call_origin_v1` (`50.mir/_MirLowering/provider_metadata.spl`)
+  answers Source only when `callable_text_value_abi` has the provider row; no
+  visibility gate anywhere on registration or HIR import binding.
+- The declaration-provider prescan (`prescan_module_declarations_v1` ->
+  `prescan_declaration_callables_v1`, `declaration_providers_v1.spl`) has had
+  **no caller** since `ab9305d783e` (40.mono removal deleted the MIR archive
+  consumer that installed `declaration_repository` and ran it). Rows now come
+  only from `prescan_module_struct_names` over `ctx.hir_modules`
+  (`driver_pipeline_lowering.spl`). Leading hypothesis: in the per-file worker
+  unit, the provider's HirModule is not in `ctx.hir_modules` (only the owned
+  module), so its callable rows are never registered. Next step: trace
+  `ctx.hir_modules` keys in a file-worker MIR unit (`SIMPLE_COMPILER_TRACE=1`)
+  for the `pubonly` fixture, then a spec asserting
+  `provider_callable_call_origin_v1 == Source` for an A->B call.
