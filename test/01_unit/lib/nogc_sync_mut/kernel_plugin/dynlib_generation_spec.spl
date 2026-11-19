@@ -10,9 +10,9 @@
 use std.spec.*
 use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
 use std.nogc_sync_mut.kernel_plugin.status.KpfSyncStatus
-use std.nogc_sync_mut.kernel_plugin.generation.{KpfGenerationTable}
-use std.nogc_sync_mut.sffi.dynamic.{DynLib, platform_name}
-use std.nogc_sync_mut.sffi.dynlib_generation_v1.{DynlibGenerationHostV1, DynlibGenerationLeaseV1}
+use std.nogc_sync_mut.kernel_plugin.generation.{KpfGenerationHandle, KpfGenerationTable}
+use std.nogc_sync_mut.sffi.dynamic.{DynLib, DynLoader, platform_name}
+use std.nogc_sync_mut.sffi.dynlib_generation_v1.{DynlibGenerationHostV1, DynlibGenerationLeaseV1, DynLoaderReloadV1}
 
 fn id(value: u64) -> KpfId128: KpfId128(hi: value, lo: value + 1)
 fn digest(value: u64) -> KpfDigest256: KpfDigest256(w0: value, w1: value + 1, w2: value + 2, w3: value + 3)
@@ -91,3 +91,70 @@ describe "Legacy DynLib under KPF generation lifetime":
     it "refuses a call when no library generation is active":
         val host = DynlibGenerationHostV1.create(KpfGenerationTable.create(4, 4))
         expect(host.begin_call().is_err()).to_equal(true)
+
+fn _reload(loader: DynLoaderReloadV1, value: u64) -> KpfGenerationHandle:
+    val r = unsafe(capabilities: [ffi]):
+        loader.reload(_libc_path(), id(value), digest(value))
+    r.unwrap().current
+
+fn _loader_unload(loader: DynLoaderReloadV1, generation: KpfGenerationHandle) -> KpfSyncStatus:
+    unsafe(capabilities: [ffi]):
+        loader.unload(_libc_path(), generation)
+
+fn _loader_call(loader: DynLoaderReloadV1) -> Result<i64, text>:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        loader.call_checked(_libc_path(), _pid_symbol(), [])
+
+describe "DynLoader opt-in reload path":
+    it "keeps the old mapping alive and refuses its unload while a lease is held across reload":
+        val loader = DynLoaderReloadV1.create(4, 4)
+        val first = _reload(loader, 1)
+        val lease = loader.begin_call(_libc_path()).unwrap()
+        val second = _reload(loader, 2)
+        expect(first.index == second.index).to_equal(false)
+        expect(_loader_unload(loader, first) == KpfSyncStatus.GenerationStillPinned).to_equal(true)
+        expect(lease.lib.is_live()).to_equal(true)
+        expect(_resolves(lease.lib)).to_equal(true)
+        expect(_loader_call(loader).is_ok()).to_equal(true)
+
+    it "collects and closes the old mapping after its last lease ends":
+        val loader = DynLoaderReloadV1.create(4, 4)
+        val first = _reload(loader, 1)
+        val lease = loader.begin_call(_libc_path()).unwrap()
+        _reload(loader, 2)
+        expect(loader.end_call(_libc_path(), lease) == KpfSyncStatus.Ok).to_equal(true)
+        expect(_loader_unload(loader, first) == KpfSyncStatus.Ok).to_equal(true)
+        expect(lease.lib.is_live()).to_equal(false)
+        expect(_loader_call(loader).is_ok()).to_equal(true)
+        expect(_loader_unload(loader, first) == KpfSyncStatus.StaleHandle).to_equal(true)
+
+    it "holds a lease only for the duration of a call made through the loader":
+        val loader = DynLoaderReloadV1.create(4, 4)
+        val first = _reload(loader, 1)
+        val old_lease = loader.begin_call(_libc_path()).unwrap()
+        expect(loader.end_call(_libc_path(), old_lease) == KpfSyncStatus.Ok).to_equal(true)
+        expect(_loader_call(loader).is_ok()).to_equal(true)
+        _reload(loader, 2)
+        expect(_loader_unload(loader, first) == KpfSyncStatus.Ok).to_equal(true)
+        expect(old_lease.lib.is_live()).to_equal(false)
+
+    it "refuses a call for a path that was never reloaded":
+        val loader = DynLoaderReloadV1.create(4, 4)
+        expect(loader.begin_call(_libc_path()).is_err()).to_equal(true)
+        expect(_loader_call(loader).is_err()).to_equal(true)
+
+    it "leaves the DynLoader singleton cache untouched for non-reload callers":
+        var legacy = DynLoader.instance()
+        val before = unsafe(capabilities: [ffi]):
+            legacy.ensure_loaded_checked(_libc_path())
+        val cached = before.unwrap()
+        val loader = DynLoaderReloadV1.create(4, 4)
+        val first = _reload(loader, 1)
+        _reload(loader, 2)
+        expect(_loader_unload(loader, first) == KpfSyncStatus.Ok).to_equal(true)
+        var again = DynLoader.instance()
+        val after = unsafe(capabilities: [ffi]):
+            again.ensure_loaded_checked(_libc_path())
+        expect(after.unwrap().lifetime_identity == cached.lifetime_identity).to_equal(true)
+        expect(cached.is_live()).to_equal(true)
+        expect(_resolves(cached)).to_equal(true)
