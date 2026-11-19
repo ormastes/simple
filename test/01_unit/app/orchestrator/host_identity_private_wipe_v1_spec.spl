@@ -1,8 +1,8 @@
 """
 ## Purpose and audience
 Pins the single-exit wipe contract of `host_identity_private_run_v1` (src/app/orchestrator/host_identity_key_v1.spl):
-every refusal that happens after the PEM body was decoded wipes the decoded buffer, the seed slice and the expanded
-private key, and the success path wipes the same three. Bug: host_identity_private_parser_seed_copies_unwiped_2026-11-18.
+every refusal that happens after the PEM body was decoded wipes the decoded buffer (structural refusals, which run
+before any key is derived) or the decoded buffer and the seed slice (consistency, signing and success paths). Bug: host_identity_private_parser_seed_copies_unwiped_2026-11-18.
 Written for owners of the host identity store.
 ## Operator workflow
 Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
@@ -11,7 +11,8 @@ Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
 The seed is RFC 8032 test-1: published, deliberately public fixture material. The run record exposes only a count of
 verified buffer wipes, never buffer contents. Text copies no longer exist: the armour and base64 are parsed on [u8].
 ## Verification guidance and troubleshooting
-`wiped` is 3 for every post-decode outcome (raw, seed, private key) and 0 for refusals before any buffer exists.
+`wiped` is 1 for structural refusals (raw only), 2 once the seed slice exists (raw, seed), 0 before any buffer exists.
+No expanded private key binding exists: the key is derived with ed25519_pubkey, which returns only the public key.
 """
 use app.orchestrator.host_identity_key_v1.{host_identity_private_encode_v1, host_identity_private_run_v1,
     host_identity_private_public_v1}
@@ -54,46 +55,46 @@ fn pw_domain() -> [u8]:
     "DBC_GRANT_SIGNATURE_V2\nx\n".bytes()
 
 describe "Host identity private parser wipes every buffer on every exit":
-    it "wipes raw, seed and private key on success":
+    it "wipes raw and seed on success":
         # @req SEEDWIPE-01
         val run = host_identity_private_run_v1(pw_file(), false, [], [], "")
         expect(run.outcome.is_ok()).to_equal(true)
-        expect(run.wiped).to_equal(3)
+        expect(run.wiped).to_equal(2)
 
     it "wipes on a signing success":
         # @req SEEDWIPE-02
         val run = host_identity_private_run_v1(pw_file(), true, pw_public(), pw_domain(), "DBC_GRANT_SIGNATURE_V2\n")
         expect(run.outcome.is_ok()).to_equal(true)
-        expect(run.wiped).to_equal(3)
+        expect(run.wiped).to_equal(2)
 
-    it "wipes on the check, format, padding and consistency refusals":
+    it "wipes the raw buffer on the check, format and padding refusals and both buffers on consistency":
         # @req SEEDWIPE-03
         val check = host_identity_private_run_v1(pw_tampered(102, 77), false, [], [], "")
         expect(check.outcome).to_equal(Err("host-identity-private-check"))
-        expect(check.wiped).to_equal(3)
+        expect(check.wiped).to_equal(1)
         val format = host_identity_private_run_v1(pw_tampered(110, 66), false, [], [], "")
         expect(format.outcome).to_equal(Err("host-identity-private-format"))
-        expect(format.wiped).to_equal(3)
+        expect(format.wiped).to_equal(1)
         val padding = host_identity_private_run_v1(pw_tampered(pw_decoded_len() - 1, 1), false, [], [], "")
         expect(padding.outcome).to_equal(Err("host-identity-private-padding"))
-        expect(padding.wiped).to_equal(3)
+        expect(padding.wiped).to_equal(1)
         val consistency = host_identity_private_run_v1(pw_tampered(62, 77), false, [], [], "")
         expect(consistency.outcome).to_equal(Err("host-identity-private-consistency"))
-        expect(consistency.wiped).to_equal(3)
+        expect(consistency.wiped).to_equal(2)
 
     it "wipes on every signing refusal":
         # @req SEEDWIPE-04
         val domain = host_identity_private_run_v1(pw_file(), true, pw_public(), "OTHER\nx\n".bytes(), "DBC_GRANT_SIGNATURE_V2\n")
         expect(domain.outcome).to_equal(Err("host-identity-sign-domain"))
-        expect(domain.wiped).to_equal(3)
+        expect(domain.wiped).to_equal(2)
         val size = host_identity_private_run_v1(pw_file(), true, [1], pw_domain(), "DBC_GRANT_SIGNATURE_V2\n")
         expect(size.outcome).to_equal(Err("host-identity-sign-key-size"))
-        expect(size.wiped).to_equal(3)
+        expect(size.wiped).to_equal(2)
         var other = pw_public()
         other[0] = 1
         val differs = host_identity_private_run_v1(pw_file(), true, other, pw_domain(), "DBC_GRANT_SIGNATURE_V2\n")
         expect(differs.outcome).to_equal(Err("host-identity-sign-key-differs"))
-        expect(differs.wiped).to_equal(3)
+        expect(differs.wiped).to_equal(2)
 
     it "refuses before any buffer exists on size and armour errors":
         # @req SEEDWIPE-05
@@ -115,6 +116,40 @@ describe "Host identity private parser wipes every buffer on every exit":
             "-----END OPENSSH PRIVATE KEY-----\n").bytes()
         expect(host_identity_private_public_v1(trailing).is_ok()).to_equal(false)
 
+    it "decodes canonical padding for every length residue and refuses non-canonical padding":
+        # @req SEEDWIPE-06
+        for residue in 0..3:
+            val raw = pw_raw_with_residue(residue)
+            val b64 = base64_encode_bytes(raw)
+            # Canonical armour decodes; the garbage tail is then refused by the structural check, never by the decoder.
+            val canonical = host_identity_private_run_v1(pw_armour(b64), false, [], [], "")
+            expect(canonical.outcome).to_equal(Err("host-identity-private-format"))
+            expect(canonical.wiped).to_equal(1)
+            val pads = pw_pad_count(b64)
+            expect(pads).to_equal(if residue == 0: 0 else: 3 - residue)
+            if pads > 0:
+                # Non-zero leftover bits in the last data character before the padding.
+                val last = b64.len() - pads - 1
+                val dirty = b64.substring(0, last) + "B" + b64.substring(last + 1, b64.len())
+                val leftover = host_identity_private_run_v1(pw_armour(dirty), false, [], [], "")
+                expect(leftover.outcome).to_equal(Err("host-identity-private-format"))
+                expect(leftover.wiped).to_equal(0)
+                # Data after the padding, and padding in the middle of the stream.
+                expect(host_identity_private_public_v1(pw_armour(b64 + "AAAA")).is_ok()).to_equal(false)
+                val middle = b64.substring(0, 8) + "=" + b64.substring(9, b64.len())
+                expect(host_identity_private_public_v1(pw_armour(middle)).is_ok()).to_equal(false)
+                # A length that is not a multiple of four, and three padding characters.
+                expect(host_identity_private_public_v1(pw_armour(b64.substring(0, b64.len() - 1))).is_ok()).to_equal(false)
+                expect(host_identity_private_public_v1(pw_armour(b64 + "=")).is_ok()).to_equal(false)
+
+    it "wipes the decoded buffer on the short-body refusal":
+        # @req SEEDWIPE-08
+        var short: [u8] = []
+        for index in 0..200: short.push(((index * 7) % 256) as u8)
+        val run = host_identity_private_run_v1(pw_armour(base64_encode_bytes(short)), false, [], [], "")
+        expect(run.outcome).to_equal(Err("host-identity-private-format"))
+        expect(run.wiped).to_equal(1)
+
     it "keeps the public wrapper behaviour":
         # @req SEEDWIPE-07
         expect(host_identity_private_public_v1(pw_file()).is_ok()).to_equal(true)
@@ -123,3 +158,26 @@ fn pw_decoded_len() -> i64:
     var body = ""
     for line in pw_pem_lines(): body = body + line
     base64_decode_bytes(body).len()
+
+# The decoded private body, extended with zero bytes until its length has the requested residue modulo 3.
+fn pw_raw_with_residue(residue: i64) -> [u8]:
+    var body = ""
+    for line in pw_pem_lines(): body = body + line
+    var raw = base64_decode_bytes(body)
+    while raw.len() % 3 != residue: raw.push(0u8)
+    raw
+
+fn pw_pad_count(b64: text) -> i64:
+    var pads = 0
+    for index in 0..b64.len():
+        if b64.substring(index, index + 1) == "=": pads = pads + 1
+    pads
+
+fn pw_armour(b64: text) -> [u8]:
+    var pem = "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+    var at = 0
+    while at < b64.len():
+        val end = if at + 70 < b64.len(): at + 70 else: b64.len()
+        pem = pem + b64.substring(at, end) + "\n"
+        at = end
+    (pem + "-----END OPENSSH PRIVATE KEY-----\n").bytes()
