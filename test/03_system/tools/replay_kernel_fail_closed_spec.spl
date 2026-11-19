@@ -5,13 +5,17 @@
 
 # RR-02: kernel replay must fail closed. A Replay-mode timer/random read that
 # meets an exhausted log or a mismatched event reports a divergence instead of
-# silently returning the live value.
+# silently returning the live value. P6: in Replay the scheduler dispatches the
+# logged tid; an exhausted log or non-runnable logged tid dispatches nothing.
 
 use std.spec.*
 use os.kernel.replay.mode.{KernelReplayMode, replay_set_mode}
 use os.kernel.replay.log_buffer.{replay_buffer_reset, replay_window_complete}
 use os.kernel.replay.divergence.{clear_divergences, get_divergence_count}
 use os.kernel.replay.hooks.{replay_hook_timer_read, replay_hook_random_read, replay_hook_schedule}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.task_types.{TaskPriority}
+use os.kernel.types.capability_types.{CapabilitySet}
 
 fn _reset():
     replay_set_mode(KernelReplayMode.Off)
@@ -61,13 +65,62 @@ describe "kernel replay fail-closed (RR-02)":
         replay_hook_schedule(1, 2, 10)
         expect(get_divergence_count()).to_equal(0)
 
-    it "schedule replay choosing a different tid reports a divergence":
+    it "schedule replay returns the logged tid, not the live pick (P6)":
         _reset()
         replay_set_mode(KernelReplayMode.Record)
         replay_hook_schedule(1, 2, 10)
         replay_set_mode(KernelReplayMode.Replay)
-        replay_hook_schedule(1, 3, 10)
+        expect(replay_hook_schedule(1, 3, 10)).to_equal(2)
+        expect(get_divergence_count()).to_equal(0)
+
+    it "schedule replay at end-of-log is a divergence, not the live pick (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Replay)
+        expect(replay_hook_schedule(1, 3, 10)).to_equal(-1)
         expect(get_divergence_count()).to_equal(1)
+
+    it "scheduler in replay dispatches the logged tid over its live pick (P6)":
+        _reset()
+        var probe = Scheduler.new()
+        val pa = probe.create_task(0x1000, TaskPriority.Normal, CapabilitySet.empty())
+        probe.create_task(0x2000, TaskPriority.Normal, CapabilitySet.empty())
+        probe.schedule()
+        val live = probe.get_current().id
+        var s = Scheduler.new()
+        val a = s.create_task(0x1000, TaskPriority.Normal, CapabilitySet.empty())
+        val b = s.create_task(0x2000, TaskPriority.Normal, CapabilitySet.empty())
+        var target = a.id
+        if live == pa.id:
+            target = b.id
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_schedule(0, target as i64, 0)
+        replay_set_mode(KernelReplayMode.Replay)
+        s.schedule()
+        expect(s.get_current().id).to_equal(target)
+        expect(get_divergence_count()).to_equal(0)
+
+    it "scheduler in replay with a non-runnable logged tid diverges and dispatches nothing (P6)":
+        _reset()
+        var s = Scheduler.new()
+        s.create_task(0x1000, TaskPriority.Normal, CapabilitySet.empty())
+        val before = s.get_current().id
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_schedule(0, 999, 0)
+        replay_set_mode(KernelReplayMode.Replay)
+        s.schedule()
+        expect(get_divergence_count()).to_equal(1)
+        expect(s.get_current().id).to_equal(before)
+
+    it "scheduler in replay with an exhausted log diverges and dispatches nothing (P6)":
+        _reset()
+        var s = Scheduler.new()
+        s.create_task(0x1000, TaskPriority.Normal, CapabilitySet.empty())
+        val before = s.get_current().id
+        replay_set_mode(KernelReplayMode.Replay)
+        s.schedule()
+        expect(get_divergence_count()).to_equal(1)
+        expect(s.get_current().id).to_equal(before)
+        replay_set_mode(KernelReplayMode.Off)
 
 # RR-04: hardware reverse operations must not report success when the
 # target executor did not move backward.

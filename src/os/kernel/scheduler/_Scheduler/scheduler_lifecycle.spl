@@ -33,6 +33,7 @@ use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.fd_io.{posix_close_task_fds_with_backends}
 use os.kernel.ipc.notif_global.{notification_clear_waiter_global}
 use os.kernel.replay.hooks.{replay_hook_schedule}
+use os.kernel.replay.divergence.{DivergenceKind, report_divergence}
 
 # Forward declaration: implemented by IpcManager wiring in kernel main.
 use os.kernel.scheduler.capability_bridge.{cap_init_task_record}
@@ -325,9 +326,34 @@ impl Scheduler:
         val cpu = self._normalize_cpu(cpu_id)
         val next_id = self._pick_next_on_cpu(cpu)
         if next_id != nil:
-            val task_id = next_id
-            self._remove_ready(task_id)
-            val slot = self._find_slot(task_id)
+            var task_id = next_id
+            var slot = -1
+            val chosen = replay_hook_schedule(self.current.id as i64, task_id.id as i64, self.tick_count as i64)
+            if chosen == task_id.id as i64:
+                self._remove_ready(task_id)
+                slot = self._find_slot(task_id)
+            else:
+                # Replay follows the logged tid, never the live pick (which stays
+                # runnable). An exhausted log (chosen < 0, already reported) or a
+                # non-runnable logged tid fails closed: nothing is dispatched.
+                self._remove_ready(task_id)
+                self._enqueue_ready(task_id)
+                if chosen >= 0:
+                    val live_tid = task_id.id as i64
+                    task_id = TaskId(id: chosen as u64)
+                    val logged_slot = self._find_slot(task_id)
+                    var ready = false
+                    if logged_slot >= 0:
+                        val logged = self.tasks[logged_slot]
+                        if logged.is_some():
+                            ready = match logged.unwrap().state:
+                                case TaskState.Ready: true
+                                case _: false
+                    if ready:
+                        self._remove_ready(task_id)
+                        slot = logged_slot
+                    else:
+                        report_divergence(DivergenceKind.ScheduleMismatch, -1, chosen, live_tid)
             if slot >= 0:
                 val tcb = self.tasks[slot]
                 if tcb != nil:
@@ -335,12 +361,10 @@ impl Scheduler:
                     task.state = TaskState.Running
                     task.ticks_remaining = TIME_SLICE_TICKS
                     self.tasks[slot] = task
-                    val old_tid_v = self.current.id as i64
                     self.current = task_id
                     self.current_slot = slot
                     self.current_by_cpu[cpu as i64] = task_id
                     self.preempt_pending_by_cpu[cpu as i64] = nil
-                    replay_hook_schedule(old_tid_v, task_id.id as i64, self.tick_count as i64)
                     return task.context
         val idle_tcb = self.tasks[0]
         if idle_tcb != nil:
