@@ -64,7 +64,7 @@ P0 exit gate met for the §1 defect list. Every listed operation now either work
 | Item | Result | Evidence / limit |
 |---|---|---|
 | P3 core: `KpfRecoveryTransaction` (#10375) | retention pin (GEN-04), epoch fence (REC-04), effect-aware rollback blocking on acknowledged/unknown writes (REC-02/03), Applied/Blocked/Rejected receipts | `recovery_transaction_spec` 8/8; mutation check fails REC-02 |
-| P3 worker exit → transaction (#10376) | crash, deadline, or protocol violation of the candidate worker fails the candidate; a clean close does not | `recovery_worker_spec` 6/6 (pure policy). **Real-subprocess receipt pending:** `real_worker_integration_spec` spawns `/bin/sh` and fails 0/3 on Windows |
+| P3 worker exit → transaction (#10376) | crash, deadline, or protocol violation of the candidate worker fails the candidate; a clean close does not | `recovery_worker_spec` 6/6 (pure policy). Real-subprocess: `real_worker_integration_spec` 3/3 on Windows 2026-11-19 (Git Bash `/bin/sh` child; the 0/3 was bare `.len` on arrays in codec/transport/protocol, not the spawn). It proves a real child crash yields `WorkerCrashed`; feeding that real exit into `kpf_recover_on_worker_exit` is not yet one spec |
 | P2 failure slot (`FailureSlotV1`) | bounded first-fault-wins record with the valid marker set last; broker `take()`; first consumer is the worker-exit path (capture before restart) | `failure_slot_v1_spec` 4/4 (DBG-06 nested fault) |
 | P2 interpreter assert / native signal → slot | **not wired** | Assert hook is compiler code, and the seed runs specs through the Rust interpreter, so it can't be verified here. The native signal path needs the externs in `doc/08_tracking/bug/crash_signal_bundle_extern_gap_2026-07-29.md` |
 | Phase-3 build | Windows Stage-2 bootstrap (cranelift, dynload) | **Stage 2 links and passes sanity; compiler tests not yet run.** The A64 link failure is fixed by #10400; Stage 2 then built 1588/1588 modules and passed sanity. The Stage 2 tool rows refused because the reserve override was dropped; fixed by #10414. The rerun at `90845b3d882` is blocked by host commit exhaustion: ~3 GB of commit free, C: full so the pagefile can't grow, and rustc OOMs in the seed build. Needs host headroom, then a rerun. |
@@ -72,5 +72,5 @@ P0 exit gate met for the §1 defect list. Every listed operation now either work
 ## Next
 
 1. Fix or route the Stage-2 link bug above, then rerun the build. Once a pure-Simple binary exists, rerun OFF-02 and the DHR specs on it.
-2. Real-subprocess P3 receipt on a POSIX host (EMB-01 with `fake_real_worker.shs`).
+2. Chain a real `fake_real_worker.shs` crash exit into `kpf_recover_on_worker_exit` in one spec (transport half is green on Windows, see P3 row).
 3. P2 assert hook behind an explicit debug profile, so the default closure stays unchanged (OFF-01).
