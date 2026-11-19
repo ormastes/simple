@@ -1,6 +1,6 @@
 # text-len-unit-mix gate flags `.len()` on `[u8]` fields
 
-Date: 2026-11-19. Status: open. Gate: `scripts/check/check-text-len-unit-mix.shs` (awk `scan_file`).
+Date: 2026-11-19. Status: fixed (2026-11-19). Gate: `scripts/check/check-text-len-unit-mix.shs` (awk `scan_file`).
 
 ## Shape (false positive)
 
@@ -46,3 +46,16 @@ not have.
 3. Follow-up (blocked on the container lane finishing its edits to `src/app/buildrunner`): once
    the gate resolves `[u8]` fields, delete `remote_container_byte_count_v3` and its export and
    use `.len()` directly at the three call sites.
+
+## Resolution (2026-11-19)
+
+`check-text-len-unit-mix.shs` now runs a per-file pre-pass (`build_fieldmap`): field declarations
+(`name: type` at the first body indent of a `struct`/`class`/`mixin`) of the scanned file plus the
+structs it imports by name (`use` lines resolved under `src/lib`, `src/app`, `src/compiler`). A
+dotted receiver (`bytes.stdout.len()`, `output.content.len()`) is a byte count only when its final
+field name is declared `[u8]` and never declared with another type in that set; ambiguous,
+undeclared and non-imported names stay flagged (fail closed). Selftest fixtures cover the `[u8]`
+PASS, `text` FAIL, ambiguous FAIL, cross-file import PASS, undeclared/non-imported FAIL, and
+imported-by-name scoping. Known limit: enum payload fields are not tracked. The workaround
+`remote_container_byte_count_v3` is deleted and its call sites use `.len()`; four baseline rows
+that the exemption retired were removed.
