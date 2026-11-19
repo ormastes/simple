@@ -96,3 +96,31 @@ describe "Native constrained unit boundary check: u64 operands (post-merge revie
         step("Lower the i32 cast")
         val mir = lower_function("unit Port: i32 as pt in 1..=65535\n\nfn mk(raw: i32) -> Port:\n    raw as Port\n", "mk")
         expect(mir.contains("U64")).to_equal(false)
+
+describe "Native constrained unit boundary check: follow-ups (post-merge review 2)", tag: ["only-compiled"]:
+    it "names the unit bounds in the range-check panic message":
+        # @req RB-UNIT-C1b
+        step("Lower a non-literal cast and read the panic text")
+        val mir = lower_function("unit Port: i32 as pt in 1..=65535\n\nfn mk(raw: i32) -> Port:\n    raw as Port\n", "mk")
+        expect(mir.contains("<runtime value>")).to_equal(false)
+        expect(mir).to_contain("Port")
+        expect(mir).to_contain("1..65535")
+
+    it "range-checks `Port(expr)` for a non-name operand":
+        # @req RB-UNIT-C1b
+        step("Lower a constructor call whose operand is an arithmetic expression")
+        val mir = lower_function("unit Port: i32 as pt in 1..=65535\n\nfn mk(raw: i32) -> Port:\n    Port(raw + 1)\n", "mk")
+        expect(mir.contains("HIR_ERROR:")).to_equal(false)
+        expect(mir).to_contain("SPL-UNIT-005")
+        expect(mir).to_contain("\"op\":\"Lt\"")
+        expect(mir).to_contain("\"op\":\"Gt\"")
+
+    it "evaluates a side-effecting `Port(next())` operand once":
+        # @req RB-UNIT-C1b
+        step("Lower a constructor call whose operand is a call")
+        val mir = lower_function("unit Port: i32 as pt in 1..=65535\n\nfn next() -> i32:\n    7\n\nfn mk() -> Port:\n    Port(next())\n", "mk")
+        expect(mir).to_contain("SPL-UNIT-005")
+        val first = mir.find("next")
+        expect(first >= 0).to_equal(true)
+        val rest = mir.substring(first + 4, mir.len())
+        expect(rest.contains("next")).to_equal(false)

@@ -180,16 +180,32 @@ fn must_use_nested(block: HirBlock, scope: MustUseScope) -> [MustUseFinding]:
         out = must_use_extend(out, must_use_classify(block.value, scope))
     out
 
-# Module a `use` path names: the map key, the HIR module name, or a dotted
-# path ending in the key. "" when the module is not in the scanned set.
+# Module a `use` path names, deterministically. An exact match on the map key
+# or the HIR module name wins (smallest key when several modules share the
+# name); otherwise the longest segment-boundary suffix match wins (path ends
+# with "." + key/name), ties broken by the smallest key. "" when the module is
+# not in the scanned set. Dict iteration order never decides the result.
 fn must_use_find_module(modules: Dict<text, HirModule>, path: text) -> text:
+    var exact = ""
+    var best = ""
+    var best_len = -1
     for key in modules.keys():
-        if key == path or path.ends_with("." + key):
-            return key
         val m: HirModule = modules[key]
-        if m.name != "" and (m.name == path or path.ends_with("." + m.name)):
-            return key
-    ""
+        if key == path or (m.name != "" and m.name == path):
+            if exact == "" or key < exact:
+                exact = key
+            continue
+        var matched_len = -1
+        if path.ends_with("." + key):
+            matched_len = key.len()
+        if m.name != "" and path.ends_with("." + m.name) and m.name.len() > matched_len:
+            matched_len = m.name.len()
+        if matched_len > best_len or (matched_len == best_len and matched_len >= 0 and key < best):
+            best = key
+            best_len = matched_len
+    if exact != "":
+        return exact
+    best
 
 # Scans every function body in `modules` (impl/class methods are merged into
 # `module.functions`). `marked` is the caller-supplied `@must_use` name set;

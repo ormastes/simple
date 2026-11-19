@@ -15,7 +15,7 @@ use app.build.targets.backend_contracts.{
 }
 use app.build.targets.target_executor.{target_action_error}
 use app.build.targets.build_targets.{BuildTarget}
-use std.nogc_sync_mut.io_runtime.{file_read}
+use std.nogc_sync_mut.io_runtime.{file_read, file_write, dir_create_all}
 use std.spec.step
 
 fn _good() -> text:
@@ -68,3 +68,35 @@ describe "backend contracts as data":
     it "wires the vector-length refusal into the executor tier check":
         val t = BuildTarget(name: "t", kind: "binary", entry: "e", output: "", deps: [], cpu_tier: "armv9-a+sve256", triple: "aarch64-unknown-linux-gnu")
         expect(target_action_error(t)).to_start_with("target-error: fixed-vector-length")
+
+describe "backend contracts compare parsed fields, not file text":
+    it "rejects a tier that is only a substring of a declared tier":
+        step("Verify: `armv9` is not the declared tier `armv9-a+sve`")
+        val bad = _good().replace("aarch64_tier: armv9-a+sve", "aarch64_tier: armv9")
+        val v = check_backend_contracts_text(bad, ".")
+        var found = false
+        for line in v:
+            if line.starts_with("backend-contract: vector-length-tier"): found = true
+        expect(found).to_equal(true)
+
+    it "does not accept `default: false` that only appears in a comment":
+        step("Verify: group default read by key, comment text ignored")
+        val root = "build/contract_fixture_opt_in"
+        dir_create_all(root + "/config/build")
+        file_write(root + "/config/build/backends_c.sdn", "# default: false\ngroup backends_c:\n    default: true\n")
+        val v = check_backend_contracts_text(_good(), root)
+        var found = false
+        for line in v:
+            if line.starts_with("backend-contract: opt-in: backends_c"): found = true
+        expect(found).to_equal(true)
+
+    it "does not accept a rocm group whose members name another target":
+        step("Verify: members compared by key")
+        val root = "build/contract_fixture_rocm"
+        dir_create_all(root + "/config/build")
+        file_write(root + "/config/build/backends_rocm.sdn", "# group backends_rocm: target //backend:hip: backend_hip\ngroup backends_rocm:\n    default: false\n    members: //backend:other\n")
+        val v = check_backend_contracts_text(_good(), root)
+        var found = false
+        for line in v:
+            if line.starts_with("backend-contract: rocm-backend-of-record"): found = true
+        expect(found).to_equal(true)

@@ -367,6 +367,19 @@ struct BurRun:
     sum_units: [text]
     sum_pubs: [text]
 
+# A statement line that yields the function's value when it is the last
+# statement of the body: not a block header, control keyword or assignment.
+fn _bur_is_value_expr(stmt: text) -> bool:
+    if stmt == "" or stmt.ends_with(":"):
+        return false
+    for kw in ["if ", "elif ", "else", "while ", "for ", "match ", "loop", "case ", "break", "continue", "pass"]:
+        if stmt.starts_with(kw):
+            return false
+    for op in [" = ", " += ", " -= ", " *= ", " /= "]:
+        if stmt.find(op) >= 0:
+            return false
+    true
+
 fn _bur_walk(lines: [CodeLine], units: [text], sum_names: [text], sum_units: [text], sum_pubs: [text]) -> [BoundUnitReassertFinding]:
     var findings: [BoundUnitReassertFinding] = []
     var i = 0
@@ -386,6 +399,7 @@ fn _bur_walk(lines: [CodeLine], units: [text], sum_names: [text], sum_units: [te
         val returns_prim = _bur_returns_primitive(header_text)
         var ret_unit = ""
         var tail = ""
+        var body_indent = -1
         var j = header_end + 1
         while j < lines.len():
             val body = lines[j]
@@ -394,6 +408,8 @@ fn _bur_walk(lines: [CodeLine], units: [text], sum_names: [text], sum_units: [te
                 continue
             if _bur_indent(body.raw) <= header_indent:
                 break
+            if body_indent < 0:
+                body_indent = _bur_indent(body.raw)
             if not _bur_ascii(body.trimmed):
                 tail = ""
                 j = j + 1
@@ -432,11 +448,17 @@ fn _bur_walk(lines: [CodeLine], units: [text], sum_names: [text], sum_units: [te
                 else:
                     _bur_set(erased_names, erased_origins, bound, erased_from)
             else:
-                tail = body.trimmed
-                if tail.starts_with("return "):
-                    tail = tail.substring(7, tail.byte_len())
+                var stmt = body.trimmed
+                if stmt.starts_with("return "):
+                    stmt = stmt.substring(7, stmt.byte_len())
                     if ret_unit == "":
-                        ret_unit = _bur_erased_origin(tail, unit_names, unit_origins, erased_names, erased_origins, sum_names, sum_units, "")
+                        ret_unit = _bur_erased_origin(stmt, unit_names, unit_origins, erased_names, erased_origins, sum_names, sum_units, "")
+                # Only a base-indent expression statement can be the tail
+                # value; nested lines, headers and assignments are not.
+                if _bur_indent(body.raw) == body_indent and _bur_is_value_expr(stmt):
+                    tail = stmt
+                elif _bur_indent(body.raw) == body_indent:
+                    tail = ""
             j = j + 1
         if returns_prim:
             if ret_unit == "" and tail != "":
