@@ -3404,3 +3404,5 @@ Pure moves, no logic edits, to get files under the 110 KiB lane target (spec cap
 - **Spec:** `drawir_text_shadow_chrome159_spec` (5 examples, 0 / 5 on base, 5 / 5 on head); `abspos_bare_text_chrome159_spec` AC-8 re-pinned (sharp shadow -> Draw IR, blurred -> raster).
 
 - Double borders (2026-11-18): stripe = `(w+1)/3`; uniform-width double = two solid rings (outer on border box, inner inset `w-stripe`, radii `max(r-inset,0)`). Draw IR `<id>_d0`/`_d1`, raster via `fb_border_ring_per_corner_clip`. Engine2D sends all rounded borders to the typed ring. Pinned by `border_double_radius_chrome159_spec`.
+
+- Raster outline over text (2026-11-19): deferred in-flow outlines that no positioned box overlaps paint after pass 6 (Chrome paints them over later in-flow text); overlapped ones keep the pre-pass-2 flush. Pinned by `outline_over_text_chrome159_spec`.

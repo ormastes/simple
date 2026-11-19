@@ -1450,6 +1450,26 @@ fn _fb_paint_img_clip(out: [u32], fbw: i32, fbh: i32, nd: HNode, st: Style, x: i
         py = py + 1
     res
 
+# True when a visible positioned box (absolute, or inside a relative paint
+# root) overlaps node `oi`'s outline ring: that box paints after the outline in
+# Chrome, so the raster keeps such an outline under passes 2-4.
+fn _outline_overlaps_positioned(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], oi: i32) -> bool:
+    val ost = styles[oi]
+    val grow = ost.outline_w + ost.outline_offset_px
+    val x0 = bx[oi] - grow
+    val y0 = by[oi] - grow
+    val x1 = bx[oi] + bw[oi] + grow
+    val y1 = by[oi] + bh[oi] + grow
+    var j = 0
+    # cpu-lane-loop-ok: overlap scan for one deferred outline; bound is node_count
+    while j < nodes.len():
+        val st = styles[j]
+        if j != oi and nodes[j].tag != "#text" and st.display != "none" and (st.position_absolute or has_relative_paint_root(nodes, styles, j)):
+            if bx[j] < x1 and bx[j] + bw[j] > x0 and by[j] < y1 and by[j] + bh[j] > y0:
+                return true
+        j = j + 1
+    false
+
 fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_cache: TextWrapCache, fb: [u32], fbw: i32, fbh: i32, widget_mode: bool) -> [u32]:
     var out = fb
     # Reserve roughly half of whatever time remains in the paint stage for the
@@ -1556,13 +1576,19 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
             if st.bg == 0u32 and st.background_gradient_from == 0u32:
                 out = fb_rect(out, fbw, fbh, x, y, w, h, web_argb(203, 213, 225))
         i = i + 1
-    # ponytail: deferred to the end of pass 1, so the outline still sits
-    # under pass 6 text of later siblings (Chrome paints it over that text);
-    # upgrade by moving text into a per-context foreground phase.
+    # Chrome paints them over in-flow text too, so an outline no positioned
+    # box overlaps waits for the end of pass 6; one that a positioned box
+    # overlaps paints here, under passes 2-4.
+    # ponytail: an overlapped outline still sits under pass 6 text; upgrade by
+    # moving text into a per-context foreground phase.
+    var late_outlines: [i32] = []
     # cpu-lane-loop-ok: paints the outlines pass 1 deferred, in document order; bound is the number of in-flow outlined boxes
     for oi in flow_outlines:
         val ost = styles[oi]
-        out = fb_outline_clip(out, fbw, fbh, bx[oi], by[oi], bw[oi], bh[oi], ost.outline_w, ost.outline_offset_px, ost.outline_color, paint_clip_at(clip_cache, oi))
+        if _outline_overlaps_positioned(nodes, styles, bx, by, bw, bh, oi):
+            out = fb_outline_clip(out, fbw, fbh, bx[oi], by[oi], bw[oi], bh[oi], ost.outline_w, ost.outline_offset_px, ost.outline_color, paint_clip_at(clip_cache, oi))
+        else:
+            late_outlines.push(oi)
     i = 0
     # cpu-lane-loop-ok: fn paint pass 2 of 6: the relative-paint-root boxes pass 1 deliberately skipped, painted after normal flow so position:relative subtrees land above it. Disjoint node set from pass 1, so it cannot be fused without breaking paint order. Bound is node_count, budget-guarded
     while i < node_count:
@@ -1957,6 +1983,10 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
                                 line_i = line_i + 1
                                 ly = ly + lh
         i = i + 1
+    # cpu-lane-loop-ok: the in-flow outlines no positioned box overlaps, over all text; bound is the number of in-flow outlined boxes
+    for oi in late_outlines:
+        val ost = styles[oi]
+        out = fb_outline_clip(out, fbw, fbh, bx[oi], by[oi], bw[oi], bh[oi], ost.outline_w, ost.outline_offset_px, ost.outline_color, paint_clip_at(clip_cache, oi))
     if chrome_widget_text:
         out = fb_generated_widget_chrome_text(out, fbw, fbh)
     # Captured-Chromium overlays are not applied here: they paste expected

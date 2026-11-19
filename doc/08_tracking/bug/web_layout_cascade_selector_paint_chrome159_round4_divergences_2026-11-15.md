@@ -650,3 +650,12 @@ head (13/40 at base).
   - New `border_double_radius_chrome159_spec`: 139 Chrome pins, 3 rows (raster, cpu_simd, Vulkan). Red 0/3 at base, green 3/3 at head.
   - Base vs head over 284 border/radius/rounded/double specs, failing test names compared: 0 new failures; the only difference is the new spec.
 - **Still open:** background AA bleeding past rounded corner tips (the corner-AA item).
+
+## 2026-11-19 — raster outline over later in-flow text (FIXED)
+
+- **Symptom:** on the CPU raster, the text of a later in-flow sibling showed through an earlier box's outline. Pass 1 deferred the outline only to the end of pass 1, and pass 6 (text) painted over it. Chrome 159 paints the outline ring solid `#ff0000` over that text. cpu_simd and Vulkan already matched, because their `<id>#outline` twin flushes after the context's text.
+- **Fix:** `_paint_passes` sends each deferred in-flow outline one of two ways. If no positioned box overlaps the ring (`_outline_overlaps_positioned`), it paints after pass 6. Otherwise it keeps the old flush before pass 2, so a later positioned box still covers it.
+  - `ponytail:` an outline that a positioned box overlaps still sits under pass-6 text; upgrade by moving text into a per-context foreground phase.
+- **Evidence:**
+  - New `outline_over_text_chrome159_spec`: 252 ring pins, all uniform `#ff0000` 4x4 blocks in Chrome, so they hold for any font. Raster red at base (cpu_simd and Vulkan green), 3/3 at head.
+  - Base vs head over 83 outline, focus, raster, stacking, positioned and opacity specs: 0 new failures.
