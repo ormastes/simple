@@ -1023,3 +1023,11 @@ head (13/40 at base).
   - **Native readback is still opt-in.** `vulkan_sffi_native_readback_opt_in` waits until every deployed binary carries `rt_vulkan_readback_u32_array`. The webrender seed has it; no shared `bin/simple` is deployed on this host to check. Until the default flips, every Vulkan knockout or backdrop box costs about 9 s in readbacks.
   - **A native Vulkan region read would skip the full-frame download.** `rt_vulkan_readback_u32_array` already takes an offset and a count.
   - **The knockout pass and the upload (about 0.75 s per box) are interpreted.**
+
+## 2026-11-19 — flex column ignores `min-height: <n>vh` (FIXED)
+
+- **Rule (CSS Flexbox 9.7, Chrome 159):** a column flex container's `min-height` also bounds its main size when free space is shared out, so `flex: 1` items grow to fill it. `min-height: 100vh` resolves to the viewport height.
+- **Was:** `col_flex_target_heights` in `..._layout_engine.spl` read only `st.min_height_px`. A `vh` minimum is kept as the `min_height_vh` flag with no px value, so the container kept its content height. The `flex: 1` items stayed at content height (44 px buttons where Chrome has 300 px).
+- **Fix:** the caller passes the resolved minimum (`min_height_px`, else the viewport height when `min_height_vh` is set). The padding is added outside the minimum for a content-box container.
+- **Chrome boxes** (480x300; `#app > .wp > .pc > .wp > .pc > button`; tag:y:h): `min-height:100vh` gives `div:0:300 div:0:300 button:0:300`; with `padding:16px` on `.pc` it gives `button:32:236`; `min-height:100vh;padding:10px 0 20px` gives `div:0:330 div:10:300 button:10:300`. `flex_column_min_height_vh_chrome159_spec` 0/3 -> 3/3. A sweep of the 24 layout specs that touch this file has 0 new failures.
+- **Not fixed by this:** the taskbar widget fixture still has 44 px buttons. Its `.widget-panel` class-name fill hack fills the panels after their children are laid out, so the row stretch never re-lays them out. Removing that hack is the next change.
