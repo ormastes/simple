@@ -507,8 +507,18 @@ those operations. Spec dir: task.sdn, environment.sdn, run.sdn, host-inputs.sdn,
 module header). Traps: the Host prepare deadline is its MONOTONIC clock (operator-observed value in run.sdn); host-inputs
 are operator-supplied projection inputs (a wrong value is refused at enable, retained workspace charged; the container memory
 must equal the task limit, authoring checks it); a cancelled run, or one the Host ended without a bundle, leaves its
-controller row `executing`. PLATFORM GAP: `dispatch_origin_v3` admits only the Windows native origin, so `remote-run` runs from
-a Windows controller and ends `refused` (controller-dispatch-native-origin-unavailable) elsewhere. A remote-build Host refusal
+controller row `executing`. PLATFORM (milestone_0037): `remote-run` runs from a Windows OR a Linux controller. One guard,
+`controller_origin_check_v3` (controller_local_root_v3.spl), serves the local root, the dispatch owner and the V6 exchange:
+Windows binds the first caller thread (retained handle, poisoned on exit), Linux admits only the procfs-pinned original
+process MAIN thread (`linux_machine_process_origin_check_v1`: tid==pid, fork/PID-namespace quarantine); both give one
+canonical native thread per registry, origin only, never authority. The Linux root is `LinuxProtectedRootReaderV1` (read-only
+custody of `controller-config-v3.sdn` + `authority-policy.sdn`) plus a child journal `<root>/journal` opened by
+`distributed_operation_journal_open_linux_v3`; `controller_local_root_install_v3` refuses on Linux
+(`controller-local-install-linux-out-of-band`): provision the two byte-exact records into the 0700 private root, the
+`--config-digest` pin and the config's own policy digest bind them. TRAP: a `linux_storage` journal has no `windows_store`, so
+a `windows_store.is_none()` "legacy path" test silently captured it into pathname IO; every controller object module now asks
+`distributed_operation_journal_protected_v3`. Live Linux verification needs a provisioned root (env
+SIMPLE_LINUX_CONTROLLER_*, test/02_integration/lib/orchestration/controller_linux_root_v3_spec.spl), still NOT_RUN. A remote-build Host refusal
 keeps the dispatch owner `ready` (outcome `host-refused`, encoded V6 reply as response) so the reaped recovery edit can run;
 prepare/execute refusals still fail it closed. The admit returns the most advanced store even on error
 (`ControllerRemoteBuildAdmitV1`) and resumes an exact-envelope row left `admitted`.

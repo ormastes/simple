@@ -11,9 +11,33 @@ use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
 use std.common.crypto.sha256.sha256_text
 use std.common.build_manager.contracts.builder_digest_valid_v1
 use std.nogc_sync_mut.io.windows_command_owner_v2.windows_command_thread_check_v2
+use std.nogc_sync_mut.io.linux_protected_root_reader_v1.{LinuxProtectedRootReaderV1, linux_protected_root_reader_open_v1,
+    linux_protected_root_reader_read_v1, linux_protected_root_reader_require_root_v1, linux_protected_root_reader_close_v1}
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+@end
+
+# Canonical-origin guard shared by the local root, the dispatch owner and every registry behind them. Windows binds the
+# first caller thread (retained thread handle, binding poisoned when that thread exits); Linux admits only the
+# procfs-pinned original process main thread (fork and PID-namespace changes quarantine it). Either way ONE native thread
+# owns every registry touch, which is what keeps those registries lock-free. It is origin only, never authority.
+pub fn controller_origin_check_v3() -> Result<bool, text>:
+    @when(os="windows"):
+    windows_command_thread_check_v2()?
+    Ok(true)
+    @elif(os="linux"):
+    val origin = unsafe(capabilities: [ffi, raw_ptr]): linux_machine_process_origin_check_v1()
+    if origin.is_err(): return Err(origin.unwrap_err())
+    Ok(true)
+    @else:
+    Err("controller-origin-unavailable")
+    @end
 
 pub class ControllerLocalRootV3:
+    # Windows backend: private root + journal store. Linux backend: the read-only protected root reader (config and
+    # policy custody); the journal is a child writer opened by the Linux factory and carries its own storage owner.
     native_root: Option<WindowsPrivateRootV1> = nil
+    linux_reader: Option<LinuxProtectedRootReaderV1> = nil
     partial_file: Option<WindowsPrivateFileV1> = nil
     native_store: Option<WindowsJournalStoreV1> = nil
     journal: Option<DistributedOperationJournalV2> = nil
@@ -31,13 +55,18 @@ pub class ControllerLocalRootV3:
     # Used to reject duplicate transfer into a canonical dispatch continuation;
     # this comparison grants no IO and exposes no journal or native token.
     pub fn same_journal_owner_v3(other: ControllerLocalRootV3) -> Result<bool, text>:
-        windows_command_thread_check_v2()?
-        if self.native_store.is_none() or other.native_store.is_none():
-            return Err("controller-local-journal-identity-unavailable")
-        Ok(self.native_store.unwrap().same_owner(other.native_store.unwrap()))
+        controller_origin_check_v3()?
+        if self.native_store.is_some() and other.native_store.is_some():
+            return Ok(self.native_store.unwrap().same_owner(other.native_store.unwrap()))
+        # Linux: the single-writer invariant is about the journal's own protected writer, not the read-only reader.
+        if (self.journal.is_some() and other.journal.is_some() and self.journal.unwrap().linux_storage.is_some() and
+                other.journal.unwrap().linux_storage.is_some()):
+            return Ok(self.journal.unwrap().linux_storage.unwrap().same_owner(other.journal.unwrap().linux_storage.unwrap()))
+        Err("controller-local-journal-identity-unavailable")
 
     pub fn current_v3() -> Result<ControllerDispatchContextV1, text>:
         if self.closing or self.quarantine != "": return Err("controller-local-root-quarantined:" + self.quarantine)
+        if self.linux_reader.is_some(): return self.current_linux_v3()
         if (self.native_root.is_none() or self.native_store.is_none() or self.journal.is_none() or
                 self.workload.is_none() or self.config.is_none()): return Err("controller-local-root-incomplete")
         val root = self.native_root.unwrap()
@@ -48,6 +77,26 @@ pub class ControllerLocalRootV3:
             return Err("controller-local-journal-origin")
         val actual_config = distributed_operation_journal_read_required_v3(journal, "controller-config-v3.sdn", 32768)?
         val actual_policy = distributed_operation_journal_read_required_v3(journal, "authority-policy.sdn", 1048576)?
+        self.installed_current_v3(journal, actual_config, actual_policy)
+
+    # Linux: the reader re-pins the actual private root, the journal rechecks its own protected writer, and both
+    # installed records are re-read through the reader (never through a pathname). Named limit: the journal child is
+    # opened by the factory from the pinned path spelling (`<root>/journal`), so its binding to the reader's root is that
+    # spelling plus the 0700 same-principal private root, not an fd-level parent proof as on Windows.
+    fn current_linux_v3() -> Result<ControllerDispatchContextV1, text>:
+        if self.journal.is_none() or self.workload.is_none() or self.config.is_none():
+            return Err("controller-local-root-incomplete")
+        val reader = self.linux_reader.unwrap()
+        val journal = self.journal.unwrap()
+        if journal.linux_storage.is_none() or journal.windows_store.is_some(): return Err("controller-local-journal-origin")
+        linux_protected_root_reader_require_root_v1(reader, self.diagnostic_root)?
+        distributed_operation_journal_linux_current_v3(journal)?
+        val actual_config = controller_root_linux_read_v3(reader, "controller-config-v3.sdn", 32768)?
+        val actual_policy = controller_root_linux_read_v3(reader, "authority-policy.sdn", 1048576)?
+        self.installed_current_v3(journal, actual_config, actual_policy)
+
+    fn installed_current_v3(journal: DistributedOperationJournalV2, actual_config: text,
+            actual_policy: text) -> Result<ControllerDispatchContextV1, text>:
         if actual_config != self.config_bytes or actual_policy != self.policy_bytes:
             return Err("controller-local-installed-bytes-changed")
         if (self.workload.unwrap().journal.lease_digest != journal.lease_digest or
@@ -66,14 +115,20 @@ pub class ControllerLocalRootV3:
     # Keep the exact returned writer BEFORE fallible current/projection checks.
     # Only same-root/same-native-writer/same-lease values may replace it.
     pub me retain_v3(next: ControllerWorkloadStoreV1) -> Result<bool, text>:
-        if self.closing or self.journal.is_none() or self.native_store.is_none() or self.config.is_none():
+        if (self.closing or self.journal.is_none() or (self.native_store.is_none() and self.linux_reader.is_none()) or
+                self.config.is_none()):
             return Err("controller-local-retain-unavailable")
         val prior = self.journal.unwrap()
+        # Same native writer: the Windows store owner, or the Linux protected storage owner of the prior journal.
+        val same_writer = if self.linux_reader.is_some():
+            next.journal.windows_store.is_none() and next.journal.linux_storage.is_some() and prior.linux_storage.is_some() and
+                next.journal.linux_storage.unwrap().same_owner(prior.linux_storage.unwrap())
+        else:
+            next.journal.windows_store.is_some() and next.journal.windows_store.unwrap().same_owner(self.native_store.unwrap())
         if (next.controller_id != self.config.unwrap().controller_id or
                 next.journal.authority_digest != prior.authority_digest or
                 next.journal.lease_digest != prior.lease_digest or next.journal.health_id != prior.health_id or
-                next.journal.windows_store.is_none() or
-                not next.journal.windows_store.unwrap().same_owner(self.native_store.unwrap())):
+                not same_writer):
             return Err("controller-local-retain-origin")
         self.journal = Some(next.journal)
         self.workload = Some(next)
@@ -96,17 +151,32 @@ pub struct ControllerLocalRootCloseV3:
 fn controller_root_failed_v3(owner: ControllerLocalRootV3, reason: text) -> ControllerLocalRootTurnV3:
     var retained = owner
     retained.quarantine = reason
-    val resources = retained.native_root.is_some() or retained.partial_file.is_some() or
+    val resources = retained.native_root.is_some() or retained.partial_file.is_some() or retained.linux_reader.is_some() or
         retained.native_store.is_some() or retained.journal.is_some() or retained.journal_cleanup.is_some()
     ControllerLocalRootTurnV3(if resources: Some(retained) else: nil, false, reason)
 
 fn controller_root_acquire_v3(path: text) -> ControllerLocalRootTurnV3:
     @when(os="windows"):
-    val supported = true
+    controller_root_acquire_windows_v3(path)
+    @elif(os="linux"):
+    controller_root_acquire_linux_v3(path)
     @else:
-    val supported = false
+    ControllerLocalRootTurnV3(None, false, "controller-local-native-backend-unsupported")
     @end
-    if not supported: return ControllerLocalRootTurnV3(nil, false, "controller-local-native-backend-unsupported")
+
+# Read-only reader over the provisioned private root; the journal child is opened later, once the pinned config names
+# the controller (its authority digest cannot be derived before that read).
+fn controller_root_acquire_linux_v3(path: text) -> ControllerLocalRootTurnV3:
+    val origin = controller_origin_check_v3()
+    if origin.is_err(): return ControllerLocalRootTurnV3(None, false, origin.unwrap_err())
+    var owner = ControllerLocalRootV3(diagnostic_root: path)
+    val opened = linux_protected_root_reader_open_v1(path)
+    owner.linux_reader = opened.owner
+    if not opened.ready or opened.owner.is_none() or opened.error != "":
+        return controller_root_failed_v3(owner, if opened.error != "": opened.error else: "controller-local-root-reader-unavailable")
+    ControllerLocalRootTurnV3(Some(owner), false, "")
+
+fn controller_root_acquire_windows_v3(path: text) -> ControllerLocalRootTurnV3:
     var owner = ControllerLocalRootV3(diagnostic_root: path)
     match windows_private_root_open_v1(path):
         case Ok(root): owner.native_root = Some(root)
@@ -122,7 +192,13 @@ fn controller_root_acquire_v3(path: text) -> ControllerLocalRootTurnV3:
             return controller_root_failed_v3(owner, reason)
     ControllerLocalRootTurnV3(Some(owner), false, "")
 
+fn controller_root_linux_read_v3(reader: LinuxProtectedRootReaderV1, relative: text, maximum: i64) -> Result<text, text>:
+    val bytes = linux_protected_root_reader_read_v1(reader, relative, maximum)?
+    if bytes.is_none(): return Err("controller-local-record-absent:" + relative)
+    Ok(bytes.unwrap())
+
 fn controller_root_read_v3(owner: ControllerLocalRootV3, relative: text, maximum: i64) -> Result<text, text>:
+    if owner.linux_reader.is_some(): return controller_root_linux_read_v3(owner.linux_reader.unwrap(), relative, maximum)
     if owner.native_root.is_none() or owner.native_store.is_none(): return Err("controller-local-read-owner")
     val store = owner.native_store.unwrap()
     if not store.belongs_to(owner.native_root.unwrap()): return Err("controller-local-read-origin")
@@ -148,8 +224,12 @@ fn controller_root_project_v3(original: ControllerLocalRootV3, expected_digest: 
     if authority.is_err(): return controller_root_failed_v3(owner, authority.unwrap_err())
     val nonce = sosix_random_hex(32)
     if nonce.is_none(): return controller_root_failed_v3(owner, "controller-local-entropy-unavailable")
-    match distributed_operation_journal_open_windows_v3(owner.diagnostic_root + "\\journal", owner.native_store.unwrap(),
-            authority.unwrap(), nonce.unwrap(), 100000):
+    val journal_open = if owner.linux_reader.is_some():
+        distributed_operation_journal_open_linux_v3(owner.diagnostic_root + "/journal", authority.unwrap(), nonce.unwrap(), 100000)
+    else:
+        distributed_operation_journal_open_windows_v3(owner.diagnostic_root + "\\journal", owner.native_store.unwrap(),
+            authority.unwrap(), nonce.unwrap(), 100000)
+    match journal_open:
         case DistributedOperationJournalOpenV2.Ready(journal): owner.journal = Some(journal)
         case DistributedOperationJournalOpenV2.Rejected(reason): return controller_root_failed_v3(owner, reason)
         case DistributedOperationJournalOpenV2.CleanupRequired(cleanup, reason):
@@ -178,6 +258,11 @@ pub fn controller_local_root_install_v3(path: text, config_bytes: text,
     if config.is_err(): return ControllerLocalRootTurnV3(nil, false, config.unwrap_err())
     val context = controller_dispatch_context_metadata_v3(config.unwrap(), policy_bytes)
     if context.is_err(): return ControllerLocalRootTurnV3(nil, false, context.unwrap_err())
+    # A Linux root is provisioned out of band (0700 private root holding the two byte-exact records): the root reader is
+    # read-only, and the pinned config digest plus the config's own policy digest bind what it reads.
+    @when(os="linux"):
+    return ControllerLocalRootTurnV3(None, false, "controller-local-install-linux-out-of-band")
+    @end
     val opened = controller_root_acquire_v3(path)
     if opened.error != "" or opened.owner.is_none(): return opened
     val owner = opened.owner.unwrap()
@@ -217,6 +302,14 @@ pub fn controller_local_root_close_v3(original: ControllerLocalRootV3) -> Contro
         var root = owner.native_root.unwrap()
         if not root.close(): return ControllerLocalRootCloseV3(Some(owner), false, "controller-local-root-close-unconfirmed")
         owner.native_root = nil
+    if owner.linux_reader.is_some():
+        val reader_closed = linux_protected_root_reader_close_v1(owner.linux_reader.unwrap())
+        owner.linux_reader = reader_closed.owner
+        if not reader_closed.completed or reader_closed.error != "":
+            val reason = "controller-local-reader-close-unconfirmed:" + reader_closed.error
+            # A consumed reader cannot be retried; its uncertainty survives as the final close error.
+            if reader_closed.owner.is_none(): owner.consumed_close_error = reason
+            return ControllerLocalRootCloseV3(Some(owner), false, reason)
     # Native obligations can be consumed without a confirmed release. Finish
     # remaining owned cleanup, but never turn that historical uncertainty into
     # a successful close or retry an already-consumed native handle.
