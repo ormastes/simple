@@ -1,0 +1,81 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+Pins the call-origin proof for a provider module that a MIR unit holds only as
+a module SURFACE (PM3 unit lane, SIMPLE_UNIT_TLDR_IMPORTS): module A imports
+`pb_len` from module B, B's HIR is never loaded, so the HIR prescan never
+registers B's callable rows. Before the fix provider_callable_call_origin_v1
+answered Unknown and native codegen failed with `unproven-call-origin:
+callee=pubonly.core.pb_len` (bug
+stage2_slim_driver_app_native_build_unproven_call_origin_2026-11-19).
+register_surface_callable_origins_v1 fills those rows from the surface's
+is_extern flag: Source for a Simple declaration, Foreign for an extern, and
+never overrides a HIR-derived row.
+Audience: compiler engineers maintaining MIR lowering and the per-file driver.
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{SymbolTable, SymbolKind}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_metadata.{mir_provider_callable_key}
+use compiler.mir.mir_instruction_support.{MirCallOrigin}
+
+
+describe "surface-only provider call origin":
+    it "an imported Simple fn with no provider HIR is Unknown, then Source from its surface":
+        step("A imports pb_len from pubonly.core; B's HIR is absent")
+        var symbols = SymbolTable.new()
+        val callee = symbols.define("pb_len", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, Some("pubonly.core"))
+        var lowering = MirLowering.new(symbols)
+        lowering.current_module_id = "pubonly.main"
+        expect(lowering.provider_callable_call_origin_v1(callee)).to_equal(MirCallOrigin.Unknown)
+        step("Register B's surface rows")
+        val added = lowering.register_surface_callable_origins_v1("pubonly.core", ["pb_len"], [false], [false], [false])
+        expect(added).to_equal(1)
+        expect(lowering.provider_callable_call_origin_v1(callee)).to_equal(MirCallOrigin.Source)
+
+    it "an extern in the surface is Foreign, not Source":
+        var symbols = SymbolTable.new()
+        val callee = symbols.define("rt_len", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, Some("pubonly.ffi"))
+        var lowering = MirLowering.new(symbols)
+        lowering.current_module_id = "pubonly.main"
+        val _added = lowering.register_surface_callable_origins_v1("pubonly.ffi", ["rt_len"], [true], [false], [false])
+        expect(lowering.provider_callable_call_origin_v1(callee)).to_equal(MirCallOrigin.Foreign)
+
+    it "stdlib-shaped providers from the xcmatrix census resolve the same way":
+        step("text_bytes -> string_core.str_len and crypto.word_ops.rotr32")
+        var symbols = SymbolTable.new()
+        val str_len = symbols.define("str_len", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, Some("lib.common.string_core"))
+        val rotr32 = symbols.define("rotr32", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, Some("lib.common.crypto.word_ops"))
+        var lowering = MirLowering.new(symbols)
+        lowering.current_module_id = "lib.common.text_bytes"
+        val _a = lowering.register_surface_callable_origins_v1("lib.common.string_core", ["str_len", "str_eq"], [false, false], [false, false], [false, false])
+        val _b = lowering.register_surface_callable_origins_v1("lib.common.crypto.word_ops", ["rotr32"], [false], [false], [false])
+        expect(lowering.provider_callable_call_origin_v1(str_len)).to_equal(MirCallOrigin.Source)
+        expect(lowering.provider_callable_call_origin_v1(rotr32)).to_equal(MirCallOrigin.Source)
+
+    it "never overrides a HIR-derived row and skips methods":
+        var symbols = SymbolTable.new()
+        val callee = symbols.define("pb_len", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, Some("pubonly.core"))
+        var lowering = MirLowering.new(symbols)
+        lowering.current_module_id = "pubonly.main"
+        var abi = lowering.callable_text_value_abi
+        abi[mir_provider_callable_key("pubonly.core", "pb_len")] = false
+        lowering.callable_text_value_abi = abi
+        val added = lowering.register_surface_callable_origins_v1("pubonly.core",
+            ["pb_len", "len", "make"], [false, false, false], [false, true, false], [false, false, true])
+        expect(added).to_equal(0)
+        expect(lowering.provider_callable_call_origin_v1(callee)).to_equal(MirCallOrigin.Foreign)
+        expect(lowering.callable_text_value_abi.has(mir_provider_callable_key("pubonly.core", "len"))).to_equal(false)
+        expect(lowering.callable_text_value_abi.has(mir_provider_callable_key("pubonly.core", "make"))).to_equal(false)
+
+    it "an empty owner registers nothing":
+        var lowering = MirLowering.new(SymbolTable.new())
+        expect(lowering.register_surface_callable_origins_v1("", ["f"], [false], [false], [false])).to_equal(0)

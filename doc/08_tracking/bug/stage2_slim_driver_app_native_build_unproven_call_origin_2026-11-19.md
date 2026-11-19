@@ -102,3 +102,37 @@ Source reading (pure-Simple compiler, release/1.0.0):
   `ctx.hir_modules` keys in a file-worker MIR unit (`SIMPLE_COMPILER_TRACE=1`)
   for the `pubonly` fixture, then a spec asserting
   `provider_callable_call_origin_v1 == Source` for an A->B call.
+
+## Update 2026-11-20 (b): root cause proven; fix landed for review
+
+Status: verification-pending
+
+Discriminating experiments (frozen Stage 2 `/home/dev/xc/simple-p2`, `pubonly`):
+
+| run | result |
+|---|---|
+| `--threads 1` dynload (in-process serial lane) | PASS, 0 ICE |
+| `--threads 1` one-binary | PASS, 0 ICE |
+| `--threads 12` dynload (per-file worker pool) | FAIL, `callee=pubonly.core.pb_len` |
+| `--threads 12` + `SIMPLE_UNIT_TLDR_IMPORTS=0` | PASS, 0 ICE |
+
+The failing unit logs `[unit-tldr] ... summaries=1` and
+`[file-worker] mir-child hir closure modules=1 of=2`: the PM3 unit lane
+(d98bf2d99e1, 2026-10-27) resolves imports through TLDR summary surfaces and
+loads HIR only for its targets, so `prescan_module_struct_names` never visits
+the provider and `callable_text_value_abi` has no row -> `MirCallOrigin.Unknown`.
+ab9305d783e (2026-10-31) removed the declaration-provider prescan that could
+have covered this, but did not trigger it.
+
+Workaround: `SIMPLE_UNIT_TLDR_IMPORTS=0` (or `--threads 1`).
+
+Fix: `MirLowering.register_surface_callable_origins_v1`
+(`50.mir/_MirLowering/provider_metadata.spl`) fills absent origin rows from a
+surface's `is_extern` flag (Source / Foreign; free functions only; never
+overrides HIR rows; link names untouched). The driver's MIR setup
+(`driver_pipeline_lowering.spl`, after struct prescan, unit-scoped only) feeds
+every surface whose module has no HIR. Spec:
+`test/01_unit/compiler/50.mir/surface_only_provider_call_origin_spec.spl`
+(5/5; RED 0/5 without the method). Native verification pending a Stage 2
+rebuild: re-run the `pubonly` fixture sharded and run the binary (link-name
+parity of the fallback callee name is the residual risk).

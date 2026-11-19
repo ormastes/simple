@@ -1330,6 +1330,33 @@ impl CompilerDriver:
                 if direct_prescan_scope_active and not driver_mir_inventory_scope_end_v1(direct_lowering):
                     self.ctx.add_error("MIR struct prescan transient scope failed (phase scope, {self.ctx.sources.len()} modules)")
                     return false
+            # PM3 unit lane: imports resolved through TLDR summary surfaces
+            # have no HIR here, so the prescan above registered no call-origin
+            # row for them. Fill those rows from the surfaces (bug
+            # stage2_slim_driver_app_native_build_unproven_call_origin_2026-11-19).
+            if mir_unit_scoped and self.streaming_surface_owner_ready:
+                var surface_origin_rows = 0
+                var surface_idx = 0
+                val surface_count = self.streaming_module_surfaces_owner.surfaces.len()
+                while surface_idx < surface_count:
+                    val surface_owner: text = self.streaming_module_surfaces_owner.surfaces[surface_idx].module_name
+                    if surface_owner != "" and not self.ctx.hir_modules.has(surface_owner):
+                        var row_names: [text] = []
+                        var row_externs: [bool] = []
+                        var row_methods: [bool] = []
+                        var row_statics: [bool] = []
+                        val row_callables = self.streaming_module_surfaces_owner.surfaces[surface_idx].callable_values
+                        var row_idx = 0
+                        while row_idx < row_callables.len():
+                            row_names.push(row_callables[row_idx].name)
+                            row_externs.push(row_callables[row_idx].is_extern)
+                            row_methods.push(row_callables[row_idx].is_method)
+                            row_statics.push(row_callables[row_idx].is_static)
+                            row_idx = row_idx + 1
+                        surface_origin_rows = surface_origin_rows + direct_lowering.register_surface_callable_origins_v1(
+                            surface_owner, row_names, row_externs, row_methods, row_statics)
+                    surface_idx = surface_idx + 1
+                log_phase("aot:mir_setup:surface_call_origins rows={surface_origin_rows} surfaces={surface_count}")
             log_phase("aot:mir_setup:struct_prescan:done")
             log_phase("aot:mir_setup:enum_inventory:start")
             log_build_progress("mir", "modules", 0, mir_source_indices.len(),

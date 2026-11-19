@@ -238,6 +238,35 @@ impl MirLowering:
             text_value_abi[mir_provider_callable_key(owner, source_name)] = not is_extern
         self.callable_text_value_abi = text_value_abi
 
+    # Call-origin rows for a provider held only as a module SURFACE, never as
+    # HIR. The PM3 per-file unit lane (SIMPLE_UNIT_TLDR_IMPORTS) resolves
+    # imports through TLDR summaries and loads HIR only for its targets, so
+    # prescan_module_struct_names never visits the provider and an imported
+    # call answered MirCallOrigin.Unknown (E-BACKEND-LLVM-CALL-ORIGIN). The
+    # surface's own is_extern flag is the declaration proof. Only absent rows
+    # are filled: HIR-derived rows stay authoritative, and link names are not
+    # touched (call sites keep the established qualified fallback name).
+    # Parallel scalar arrays, not ModuleSurfaceCallable values (native
+    # composite-transport hazard, same reason as prescan_one_function_v1).
+    me register_surface_callable_origins_v1(owner: text, names: [text],
+            externs: [bool], methods: [bool], statics: [bool]) -> i64:
+        if owner == "": return 0
+        var text_value_abi = self.callable_text_value_abi
+        var added = 0
+        var index = 0
+        while index < names.len():
+            val name = names[index]
+            # Methods are owner-qualified by HIR; a bare surface method name
+            # would key the wrong row, so only free functions register here.
+            if name != "" and not methods[index] and not statics[index]:
+                val key = mir_provider_callable_key(owner, name)
+                if not text_value_abi.has(key):
+                    text_value_abi[key] = not externs[index]
+                    added = added + 1
+            index = index + 1
+        self.callable_text_value_abi = text_value_abi
+        added
+
     fn provider_callable_accepts_text_value(symbol: SymbolId) -> bool:
         # Missing ownership keeps the established external pointer bridge.
         # Use has + a typed bracket lookup, avoiding HirSymbol? transport.
