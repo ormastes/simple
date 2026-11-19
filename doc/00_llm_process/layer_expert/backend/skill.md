@@ -366,4 +366,5 @@ loader cannot apply. Trap: ELF `r_type` numbers are per-machine; gate on
 
 Backend provider gate, receipt identity and backend contracts-as-data live in
 `src/app/build/targets/` (#10181); `provider_entry` `.provider.sdn` + SVE/RVV VL
-query pending in #10351. Details: mission_critical_robustness feature note.
+query merged in #10351 (review FAIL: provider gate self-attests; fix PR in
+progress). Details: mission_critical_robustness feature note.

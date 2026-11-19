@@ -35,6 +35,6 @@ positive controls and require cross-lane category parity.
   lowering in `src/compiler/50.mir/_MirLoweringExpr/`, spec
   `test/01_unit/compiler/mir/unit_div_remainder_native_spec.spl`), borrowed
   `char*` contract; generator `src/compiler/90.tools/sffi_gen/constrained_unit_{gen,scan}.spl`.
-- Pending: #10345 bool/enum checked facades + clang C ABI fixture
+- Merged (94261e5): #10345 bool/enum checked facades + clang C ABI fixture
   (`test/01_unit/compiler/sffi_gen/sffi_cabi_fixture_spec.spl`,
   `test/fixtures/sffi_cabi/cabi_fixture.c`).

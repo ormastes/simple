@@ -324,7 +324,9 @@ Landed (PR numbers): effects/semantics, lint, parser, build.
 - Seed: per-module unit-suffix scope save/restore (#10135,
   `src/compiler_rust/compiler/src/units/scope.rs`).
 
-Pending (open PRs, not yet landed): #10346 boundary origin facts + `simple
-robust` inventory; #10351 `provider_entry` emits `.provider.sdn` + runtime
-SVE/RVV VL query; #10358 where-only native unit ranges, `@must_use` attr +
-imports, closure unit scope.
+Also merged: #10346 (f3677e0) boundary origin facts + `simple
+robust` inventory; #10358 (1e6198c) where-only native unit ranges, `@must_use` attr +
+imports, closure unit scope; #10351 (1e7e5b3) `provider_entry` emits `.provider.sdn` +
+runtime SVE/RVV VL query. **#10351 merged but review FAIL: the provider gate
+self-attests (it trusts the entry it generated); a fix PR is in progress.** Do
+not treat the provider gate as independent evidence until that lands.
