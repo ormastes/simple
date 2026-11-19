@@ -3,8 +3,13 @@
 # Fixed-priority preemptive scheduler.
 # 8 priority levels (0=highest, 7=idle). Per-priority ready queue.
 # O(P) pick where P=8. No dynamic allocation.
+#
+# Replay (DHR P6): every tick goes through rr_hook_timer_tick and every pick
+# through rr_hook_schedule before it is committed. Off/Record/Verify keep the
+# live values; Replay follows the log and dispatches nothing on divergence.
 
-use std.baremetal.collections.ring_buffer (RingBuffer)
+use std.nogc_async_mut_noalloc.collections.ring_buffer.{RingBuffer}
+use os.realtime.replay.hooks.{rr_hook_schedule, rr_hook_timer_tick, rr_report_schedule_divergence}
 
 val NUM_PRIORITIES: i32 = 8
 val READY_QUEUE_SIZE: i32 = 16
@@ -76,8 +81,10 @@ fn sched_unblock(task_id: i32):
         need_reschedule = true
 
 fn sched_tick():
-    """Called from timer ISR every tick. Checks preemption and deadlines."""
-    tick_count = tick_count + 1u64
+    """Called from timer ISR every tick. Checks preemption and deadlines.
+    The new tick comes through the replay timer hook: the live count in
+    Off/Record/Verify, the logged tick in Replay."""
+    tick_count = rr_hook_timer_tick(tick_count + 1u64)
 
     if current_task_id == NO_TASK:
         need_reschedule = true
@@ -105,7 +112,10 @@ fn sched_switch():
         return
 
     need_reschedule = false
-    val next_id = sched_pick()
+    val live_id = sched_pick()
+    if live_id == NO_TASK:
+        return
+    val next_id = sched_replay_choose(live_id)
     if next_id == NO_TASK:
         return
     if next_id == current_task_id:
@@ -119,6 +129,48 @@ fn sched_switch():
 
     current_task_id = next_id
     task_set_state(next_id, TASK_STATE_RUNNING)
+
+fn sched_replay_choose(live_id: i32) -> i32:
+    """Consult the replay schedule hook before committing the dequeued live
+    pick (mirrors the kernel schedule_on_cpu, #10439). Off/Record/Verify get
+    live_id back. In Replay a different logged tid is run only if it is
+    queued ready; the live pick is re-queued either way. A diverging or
+    exhausted log (the hook returns NO_TASK) or a logged tid that is not
+    runnable dispatches nothing — never the live pick."""
+    val chosen = rr_hook_schedule(current_task_id, live_id, tick_count)
+    if chosen == live_id:
+        return live_id
+    sched_add(live_id, task_get(live_id).priority)
+    if chosen < 0:
+        return NO_TASK
+    if sched_take_ready(chosen):
+        return chosen
+    rr_report_schedule_divergence()
+    NO_TASK
+
+fn sched_take_ready(task_id: i32) -> bool:
+    """Remove task_id from its ready queue. False if it is not queued ready."""
+    if task_id < 0 or task_id >= MAX_TASKS:
+        return false
+    val task = task_get(task_id)
+    if task.state != TASK_STATE_READY:
+        return false
+    val p = task.priority
+    if p < 0 or p >= NUM_PRIORITIES:
+        return false
+    var found = false
+    val n = ready_queues[p].size()
+    var i = 0
+    while i < n:
+        val id = ready_queues[p].dequeue()
+        if not found and id == task_id.to_i64():
+            found = true
+        else:
+            ready_queues[p].enqueue(id)
+        i = i + 1
+    if ready_queues[p].is_empty():
+        priority_bitmap = priority_bitmap & ~(1 << p)
+    found
 
 fn sched_get_current() -> i32:
     """Return current running task ID."""

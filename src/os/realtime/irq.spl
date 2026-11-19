@@ -1,0 +1,55 @@
+# @platform: baremetal
+#
+# Realtime IRQ dispatch: an interrupt wakes the handler task bound to its
+# vector (deferred handling in task context). Fixed binding table, no
+# dynamic allocation after irq_init.
+#
+# Replay (DHR P6): every delivery is gated by rr_hook_irq. Off/Record/Verify
+# deliver; Replay delivers only the logged vector, so a mismatched vector or
+# an exhausted log wakes nothing.
+
+use os.realtime.replay.hooks.{rr_hook_irq}
+
+val IRQ_MAX_BINDINGS: i32 = 16
+
+var irq_vectors: [i32] = []
+var irq_tasks: [i32] = []
+
+fn irq_init():
+    """Clear every vector binding."""
+    irq_vectors = []
+    irq_tasks = []
+
+fn irq_find(vector: i32) -> i32:
+    """Index of the binding for vector, or -1."""
+    var i = 0
+    while i < irq_vectors.len():
+        if irq_vectors[i] == vector:
+            return i
+        i = i + 1
+    -1
+
+@allow(primitive_api)  # reason: bare-metal IRQ vector and task id are raw hardware/table indices
+fn irq_bind(vector: i32, task_id: i32) -> bool:
+    """Bind vector to its handler task (rebinding replaces). False when the
+    table is full."""
+    val i = irq_find(vector)
+    if i >= 0:
+        irq_tasks[i] = task_id
+        return true
+    if irq_vectors.len() >= IRQ_MAX_BINDINGS:
+        return false
+    irq_vectors.push(vector)
+    irq_tasks.push(task_id)
+    true
+
+@allow(primitive_api)  # reason: called from the trap entry with the raw hardware vector; no allocation for a wrapper
+fn irq_dispatch(vector: i32) -> bool:
+    """Deliver one interrupt: wake the bound handler task. Returns whether it
+    was delivered; Replay refuses any vector the log does not name."""
+    if not rr_hook_irq(vector, sched_get_tick()):
+        return false
+    val i = irq_find(vector)
+    if i >= 0:
+        sched_unblock(irq_tasks[i])
+    true
