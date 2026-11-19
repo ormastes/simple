@@ -1,0 +1,49 @@
+"""
+## Purpose and audience
+Purpose: Pin the raster soft box-shadow falloff against Chrome 159 at device
+scale 1. Chrome blurs the shadow's rect mask with sigma = blur / 2 using
+Skia's triple-box kernel. The raster used a truncated erf product measured
+from pixel edges, and was up to 11 levels dark near the shadow's edge.
+Audience: maintainers of the raster paint path.
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(raster shadow falloff).
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+
+# A 60x30 #2050c0 box at (20,20) with `box-shadow: 0 10px 8px
+# rgba(0,0,0,0.8)` on white.
+val RSF_PAGE = "<!DOCTYPE html><html><body style='margin:0;background:#ffffff'><div style='position:absolute;left:20px;top:20px;width:60px;height:30px;background:#2050c0;box-shadow:0 10px 8px rgba(0,0,0,0.8)'></div></body></html>"
+
+# Below the box down x=50, and beside it along y=40.
+val RSF_PTS: [i32] = [50, 50, 50, 52, 50, 54, 50, 56, 50, 58, 50, 60, 50, 62, 50, 64, 82, 40, 84, 40, 86, 40, 88, 40]
+# Chrome 159 at device scale 1 (grey: R = G = B).
+val RSF_CHROME: [i32] = [0x34, 0x39, 0x45, 0x5B, 0x7D, 0xA2, 0xC6, 0xE2, 0xC6, 0xE2, 0xF4, 0xFC]
+
+fn rsf_mismatches() -> i32:
+    val px = simple_web_layout_render_html_software_pixels(RSF_PAGE, 120, 90, 600000)
+    if px.len() != 120 * 90:
+        return -1
+    var bad = 0
+    var i = 0
+    while i < RSF_CHROME.len():
+        val p = px[RSF_PTS[i * 2 + 1] * 120 + RSF_PTS[i * 2]]
+        var sh = 0u32
+        while sh <= 16u32:
+            val d = ((p >> sh) & 0xFFu32) as i32 - RSF_CHROME[i]
+            if d > 2 or d < -2:
+                bad = bad + 1
+                sh = 24u32
+            else:
+                sh = sh + 8u32
+        i = i + 1
+    bad
+
+describe "raster box-shadow falloff (Chrome 159, device scale 1)":
+    it "matches Chrome's blurred rect mask below and beside the box":
+        expect(rsf_mismatches()).to_equal(0)

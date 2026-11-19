@@ -428,6 +428,7 @@ impl MirLowering:
 
     me try_lower_array_builtin_extra(receiver: HirExpr, arr: LocalId, method: text, args: [HirCallArg]) -> LocalId?:
         val shape =
+            ((method == "ptr" or method == "data_ptr") and args.len() == 0) or
             (method == "reversed" and args.len() == 0) or
             (method == "sorted") or
             (method == "enumerate" and args.len() == 0) or
@@ -439,6 +440,19 @@ impl MirLowering:
             return None
         if not self.builtin_array_receiver_proven(receiver, arr):
             return None
+
+        # ptr()/data_ptr(): raw address of the array's backing element buffer as
+        # i64 via rt_array_data_ptr, matching the Rust seed's builtin sequence
+        # lowering (`"ptr" if seq => rt_array_data_ptr`, `"ptr" | "data_ptr"`).
+        # Custom owner methods and UFCS resolve before try_lower_array_builtin_extra,
+        # and builtin_array_receiver_proven rejects user struct/class locals.
+        if method == "ptr" or method == "data_ptr":
+            var b_ptr = self.builder
+            val ptr_local = b_ptr.emit_call_value(
+                builtin_extra_rt_operand("rt_array_data_ptr", [MirType.i64()], MirType.i64()),
+                [mir_operand_copy(arr)], MirType.i64())
+            self.builder = b_ptr
+            return Some(ptr_local)
         val elem_hir = self.builtin_array_elem_hir_type(receiver, arr)
         val elem_mir = self.builtin_array_elem_mir_type(receiver, arr)
         val word_array = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))

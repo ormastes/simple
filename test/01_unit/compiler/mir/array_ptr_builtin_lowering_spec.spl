@@ -1,0 +1,91 @@
+"""
+Regression: pure-Simple MIR lowering for builtin sequence `.ptr()` and
+`.data_ptr()` (`src/compiler/70.backend/codegen.spl:688:42` `args.ptr()` in
+Stage 3 `phase3-a`, `src/lib/gc_async_mut/gpu_api.spl` `data.data_ptr()`, and
+`src/os/**` `[u8].ptr()` / `[u64].ptr()`).
+
+Matches the Rust seed lowering (`"ptr" if seq => rt_array_data_ptr` and
+`"ptr" | "data_ptr"`) while preserving user struct/class `.ptr()` methods and
+`text.ptr() -> rt_string_data`.
+"""
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn lower_module_with_errors(src: text) -> (Dict<text, text>, [text]):
+    val module = parse_full_frontend(src, "array_ptr_fix.spl", "array_ptr_fix.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("array_ptr_fix.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var out: Dict<text, text> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.byte_len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    var errs: [text] = []
+    for err in mir_lowering.errors:
+        errs = errs.push(err.message)
+    (out, errs)
+
+fn count_of(hay: text, needle: text) -> i64:
+    var n = 0
+    var i = 0
+    while i + needle.byte_len() <= hay.byte_len():
+        if hay.substring(i, i + needle.byte_len()) == needle:
+            n = n + 1
+            i = i + needle.byte_len()
+        else:
+            i = i + 1
+    n
+
+val SRC = (
+    "struct OwnedPlan:\n" +
+    "    payload: [u8]\n\n" +
+    "struct CustomBuf:\n" +
+    "    addr: i64\n\n" +
+    "impl CustomBuf:\n" +
+    "    fn ptr() -> i64:\n" +
+    "        self.addr + 1\n\n" +
+    "fn call_args_ptr(name: text, args: [i64]) -> i64:\n" +
+    "    name.ptr() + args.ptr() + args.len()\n\n" +
+    "fn field_bytes_ptr(plan: OwnedPlan) -> u64:\n" +
+    "    plan.payload.ptr() as u64\n\n" +
+    "fn gpu_slice_data_ptr(data: [i32]) -> i64:\n" +
+    "    data.data_ptr()\n\n" +
+    "fn custom_owner_ptr(buf: CustomBuf) -> i64:\n" +
+    "    buf.ptr()\n"
+)
+
+describe "Builtin array/slice .ptr() and .data_ptr() MIR lowering":
+    it "lowers [i64].ptr() to rt_array_data_ptr while keeping text.ptr() on rt_string_data":
+        val pair = lower_module_with_errors(SRC)
+        val fns = pair.0
+        val errs = pair.1
+        expect(errs.len()).to_equal(0)
+        val j = fns["call_args_ptr"] ?? ""
+        expect(j.byte_len() > 0).to_equal(true)
+        expect(count_of(j, "rt_string_data")).to_equal(1)
+        expect(count_of(j, "rt_array_data_ptr")).to_equal(1)
+
+    it "lowers struct-field [u8].ptr() and [i32].data_ptr() to rt_array_data_ptr":
+        val pair = lower_module_with_errors(SRC)
+        val fns = pair.0
+        expect(pair.1.len()).to_equal(0)
+        val field_j = fns["field_bytes_ptr"] ?? ""
+        expect(count_of(field_j, "rt_array_data_ptr")).to_equal(1)
+        val data_j = fns["gpu_slice_data_ptr"] ?? ""
+        expect(count_of(data_j, "rt_array_data_ptr")).to_equal(1)
+
+    it "preserves custom struct .ptr() method resolution over the array builtin":
+        val pair = lower_module_with_errors(SRC)
+        val fns = pair.0
+        expect(pair.1.len()).to_equal(0)
+        val custom_j = fns["custom_owner_ptr"] ?? ""
+        expect(custom_j.byte_len() > 0).to_equal(true)
+        expect(count_of(custom_j, "rt_array_data_ptr")).to_equal(0)
