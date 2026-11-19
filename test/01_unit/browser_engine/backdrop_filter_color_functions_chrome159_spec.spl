@@ -1,0 +1,74 @@
+"""
+## Purpose and audience
+Purpose: Pin the colour functions of CSS `backdrop-filter` (grayscale, sepia,
+saturate, hue-rotate, invert, opacity, brightness, contrast, and chains with
+blur) against Chrome 159 on the raster, cpu_simd and Vulkan lanes. Chrome
+applies the Filter Effects 1 sRGB colour matrices in order, clamping after
+each. Every lane used to ignore them.
+Audience: maintainers of the web paint path and Engine2D box effects.
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(backdrop-filter colour functions ignored).
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+
+# Three colour bands (red, #2050c0, #40c060) under ten 120x30 rows, each
+# with one backdrop-filter.
+val BCF_FILTERS: [text] = ["saturate(30%)", "grayscale(100%)", "brightness(150%)", "contrast(50%)", "invert(100%)", "sepia(100%)", "hue-rotate(90deg)", "opacity(50%)", "brightness(150%) contrast(50%)", "blur(2px) grayscale(100%)"]
+
+# Chrome 159 at the band centres (x = 20, 60, 100; y = row * 30 + 15).
+val BCF_CHROME: [u32] = [
+    0x732626u32, 0x404E70u32, 0x82A88Bu32,
+    0x363636u32, 0x4E4E4Eu32, 0x9E9E9Eu32,
+    0xFF0000u32, 0x3078FFu32, 0x60FF90u32,
+    0xBF4040u32, 0x5068A0u32, 0x60A070u32,
+    0x00FFFFu32, 0xDFAF3Fu32, 0xBF3F9Fu32,
+    0x645945u32, 0x6E624Du32, 0xBFAA85u32,
+    0x005B00u32, 0xC0277Cu32, 0x60A7FCu32,
+    0xFF0000u32, 0x2050C0u32, 0x40C060u32,
+    0xBF4040u32, 0x587CBFu32, 0x70BF88u32,
+    0x363636u32, 0x4E4E4Eu32, 0x9E9E9Eu32
+]
+
+fn bcf_page() -> text:
+    var rows = ""
+    var i = 0
+    while i < BCF_FILTERS.len():
+        rows = rows + "<div style='position:absolute;left:0;top:{i * 30}px;width:120px;height:30px;backdrop-filter:{BCF_FILTERS[i]}'></div>"
+        i = i + 1
+    "<!DOCTYPE html><html><body style='margin:0;background:#ffffff'><div style='position:absolute;left:0;top:0;width:40px;height:300px;background:#ff0000'></div><div style='position:absolute;left:40px;top:0;width:40px;height:300px;background:#2050c0'></div><div style='position:absolute;left:80px;top:0;width:40px;height:300px;background:#40c060'></div>" + rows + "</body></html>"
+
+fn bcf_mismatches(px: [u32], k: i32) -> i32:
+    val w = 120 * k
+    if px.len() != w * 300 * k:
+        return -1
+    var bad = 0
+    var i = 0
+    while i < BCF_CHROME.len():
+        val p = px[(((i / 3) * 30 + 15) * k + k / 2) * w + (20 + (i % 3) * 40) * k + k / 2]
+        var sh = 0u32
+        while sh <= 16u32:
+            val d = ((p >> sh) & 0xFFu32) as i32 - ((BCF_CHROME[i] >> sh) & 0xFFu32) as i32
+            if d > 2 or d < -2:
+                bad = bad + 1
+                sh = 24u32
+            else:
+                sh = sh + 8u32
+        i = i + 1
+    bad
+
+describe "backdrop-filter colour functions (Chrome 159)":
+    it "raster applies them in order":
+        expect(bcf_mismatches(simple_web_layout_render_html_software_pixels(bcf_page(), 120, 300, 600000), 1)).to_equal(0)
+    it "cpu_simd applies them in order at device scale 4":
+        expect(bcf_mismatches(simple_web_layout_render_html_pixels_engine2d_at_device_scale(bcf_page(), 120, 300, 4, "cpu_simd"), 4)).to_equal(0)
+    it "vulkan applies them in order at device scale 4":
+        expect(bcf_mismatches(simple_web_layout_render_html_pixels_engine2d_at_device_scale(bcf_page(), 120, 300, 4, "vulkan"), 4)).to_equal(0)

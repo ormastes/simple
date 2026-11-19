@@ -941,7 +941,7 @@ head (13/40 at base).
   - **Raster:** `_paint_backdrop_blur` (`paint_raster.spl`) does the same at the 4 box-paint sites, sharing `_box_clip_region` / `_copy_region` / `_restore_inside_box` with the shadow knockout.
 - **Evidence:** the new `backdrop_filter_blur_chrome159_spec` checks 19 points across a wide stripe, an edge stripe (mirror) and a rounded box (corner clip). Raster is compared with Chrome at k=1; cpu_simd and Vulkan with Chrome at k=4; all within ±2. Red -> green on all three lanes. Base vs head sweep of 57 backdrop, glass, shadow, opacity-group and coverage specs: 0 new failures, 3 fixed.
 - **Not covered:**
-  - `saturate()`, `brightness()` and the other filter functions are still ignored.
+  - The colour functions (`saturate()`, `brightness()` and others) are fixed in the entry below; `drop-shadow()` and `url()` are still ignored.
   - The backdrop root is the whole frame painted so far. Inside an opacity group or other offscreen it is the group's surface.
   - Sigma below 2 uses a true Gaussian; Chrome there was not measured.
   - On a real GPU, the readback is a device sync that only blurred boxes pay.
@@ -956,3 +956,19 @@ head (13/40 at base).
   - `_phi256` is deleted.
 - **Evidence:** the new `box_shadow_raster_falloff_chrome159_spec` checks 12 points against Chrome at k=1, all within ±2; it fails on base and passes on head. Base vs head sweep of 23 shadow, opacity-group, backdrop, Chrome-parity and coverage specs: 0 new failures, 1 fixed.
 - **Not covered:** rounded-corner shadows still use the separable rect profile. Draw IR shadows at k=1 are up to 8 levels off Chrome; at k=4 they are within ±2.
+
+## 2026-11-19 — `backdrop-filter` colour functions ignored (FIXED)
+
+- **Symptom:** `backdrop-filter: saturate(30%)`, `grayscale()`, `sepia()`, `hue-rotate()`, `invert()`, `brightness()`, `contrast()` and `opacity()` changed nothing on any lane. The `blur()` fix above only handled blur.
+- **Chrome model (measured):**
+  - Each function is the Filter Effects 1 colour matrix applied in sRGB, in order, clamped after each function. On red, `brightness(150%) contrast(50%)` gives `BF4040`, not the unclamped `FF4040`. grayscale and sepia use the 0.2126 table; saturate and hue-rotate use the 0.213 table.
+  - The filtered backdrop is composited over the unfiltered one, so `opacity(50%)` over opaque content is a no-op.
+  - Blur commutes with these affine maps on opaque content, so blur runs first.
+- **Fix:**
+  - **Shared helpers:** `engine2d_backdrop_color_matrices` parses the function list into 4x5 matrices. `engine2d_backdrop_color_filter_pixels` applies them in order and composites src-over the unfiltered region. Both are in `draw_ir_box_effects.spl`.
+  - **Draw IR:** `_engine2d_draw_ir_render_box` reads the raw `backdrop-filter` prop, which needs no device scaling.
+  - **Raster:** `_paint_backdrop_blur` reads `st.backdrop_filter_raw`.
+- **Evidence:** the new `backdrop_filter_color_functions_chrome159_spec` checks 30 points: 8 single functions and 2 chains over three colour bands. All are within ±2, and byte-exact as probed, on raster (k=1), cpu_simd and Vulkan (k=4); red -> green. Base vs head sweep of 58 backdrop, glass, shadow, opacity-group and coverage specs: 0 new failures, 3 fixed.
+- **Not covered:**
+  - `drop-shadow()` and `url()` filters.
+  - A blur next to a colour function over translucent content, where the order matters.

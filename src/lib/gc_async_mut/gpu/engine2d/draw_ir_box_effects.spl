@@ -8,7 +8,7 @@ use std.common.ui.draw_ir.{DrawIrCommand, DrawIrStyleProp}
 use std.common.ui.native_scalar_text.{ui_native_i64_text}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gpu.engine2d.color.{color_a, color_b, color_g, color_r, rgba}
-use std.common.math.math.{math_exp}
+use std.common.math.math.{math_exp, math_cos, math_sin, MATH_PI}
 
 val _E2D_BOX_MAX_STYLE_VALUE_BYTES: i64 = 65536
 val _E2D_BOX_MAX_SHADOW_LAYERS: i32 = 24
@@ -621,6 +621,166 @@ fn engine2d_draw_ir_shadow_knockout_pixels(
         row = row + 1
     out
 
+
+# The colour functions of a `backdrop-filter` value (grayscale, sepia,
+# saturate, hue-rotate, invert, opacity, brightness, contrast) as 4x5 sRGB
+# colour matrices in order, Filter Effects 1 section 10 as Chrome 159 applies
+# them. blur() and unknown functions are skipped; blur commutes with these
+# affine maps on opaque content and is applied first by the callers.
+# @allow(primitive_api): parses raw CSS filter text into colour matrices for the Draw IR and raster painters
+pub fn engine2d_backdrop_color_matrices(raw: text) -> [[f64]]:
+    var out: [[f64]] = []
+    var i = 0
+    val n = raw.byte_len() as i32
+    # cpu-lane-loop-ok: one CSS filter function per step; bound raw length
+    while i < n:
+        val open = raw.index_of("(", i) as i32
+        if open < 0:
+            return out
+        var depth = 1
+        var close = open + 1
+        # cpu-lane-loop-ok: matching parenthesis scan; bound raw length
+        while close < n and depth > 0:
+            val c = raw.slice(close, close + 1)
+            if c == "(":
+                depth = depth + 1
+            elif c == ")":
+                depth = depth - 1
+            close = close + 1
+        val name = raw.slice(i, open).trim().lower()
+        val arg = raw.slice(open + 1, close - 1).trim().lower()
+        val m = _e2d_color_matrix(name, arg)
+        if m.len() == 20:
+            out.push(m)
+        i = close
+    out
+
+fn _e2d_filter_amount(arg: text, clamp_one: bool) -> f64:
+    if arg == "":
+        return 1.0
+    var v = 1.0
+    if arg.ends_with("%"):
+        if val p = arg.slice(0, arg.byte_len() - 1).trim().parse_f64():
+            v = p / 100.0
+    elif val p = arg.parse_f64():
+        v = p
+    if v < 0.0:
+        v = 0.0
+    if clamp_one and v > 1.0:
+        v = 1.0
+    v
+
+fn _e2d_filter_angle_rad(arg: text) -> f64:
+    var unit = 1.0
+    var num = arg
+    if arg.ends_with("deg"):
+        unit = MATH_PI / 180.0
+        num = arg.slice(0, arg.byte_len() - 3)
+    elif arg.ends_with("grad"):
+        unit = MATH_PI / 200.0
+        num = arg.slice(0, arg.byte_len() - 4)
+    elif arg.ends_with("rad"):
+        num = arg.slice(0, arg.byte_len() - 3)
+    elif arg.ends_with("turn"):
+        unit = 2.0 * MATH_PI
+        num = arg.slice(0, arg.byte_len() - 4)
+    if val v = num.trim().parse_f64():
+        return v * unit
+    0.0
+
+fn _e2d_color_matrix(name: text, arg: text) -> [f64]:
+    if name == "grayscale":
+        val g = 1.0 - _e2d_filter_amount(arg, true)
+        return [0.2126 + 0.7874 * g, 0.7152 - 0.7152 * g, 0.0722 - 0.0722 * g, 0.0, 0.0,
+                0.2126 - 0.2126 * g, 0.7152 + 0.2848 * g, 0.0722 - 0.0722 * g, 0.0, 0.0,
+                0.2126 - 0.2126 * g, 0.7152 - 0.7152 * g, 0.0722 + 0.9278 * g, 0.0, 0.0,
+                0.0, 0.0, 0.0, 1.0, 0.0]
+    if name == "sepia":
+        val g = 1.0 - _e2d_filter_amount(arg, true)
+        return [0.393 + 0.607 * g, 0.769 - 0.769 * g, 0.189 - 0.189 * g, 0.0, 0.0,
+                0.349 - 0.349 * g, 0.686 + 0.314 * g, 0.168 - 0.168 * g, 0.0, 0.0,
+                0.272 - 0.272 * g, 0.534 - 0.534 * g, 0.131 + 0.869 * g, 0.0, 0.0,
+                0.0, 0.0, 0.0, 1.0, 0.0]
+    if name == "saturate":
+        val s = _e2d_filter_amount(arg, false)
+        return [0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s, 0.0, 0.0,
+                0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s, 0.0, 0.0,
+                0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s, 0.0, 0.0,
+                0.0, 0.0, 0.0, 1.0, 0.0]
+    if name == "hue-rotate":
+        val a = _e2d_filter_angle_rad(arg)
+        val c = math_cos(a)
+        val s = math_sin(a)
+        return [0.213 + c * 0.787 - s * 0.213, 0.715 - c * 0.715 - s * 0.715, 0.072 - c * 0.072 + s * 0.928, 0.0, 0.0,
+                0.213 - c * 0.213 + s * 0.143, 0.715 + c * 0.285 + s * 0.140, 0.072 - c * 0.072 - s * 0.283, 0.0, 0.0,
+                0.213 - c * 0.213 - s * 0.787, 0.715 - c * 0.715 + s * 0.715, 0.072 + c * 0.928 + s * 0.072, 0.0, 0.0,
+                0.0, 0.0, 0.0, 1.0, 0.0]
+    if name == "invert":
+        val v = _e2d_filter_amount(arg, true)
+        val k = 1.0 - 2.0 * v
+        return [k, 0.0, 0.0, 0.0, v, 0.0, k, 0.0, 0.0, v, 0.0, 0.0, k, 0.0, v, 0.0, 0.0, 0.0, 1.0, 0.0]
+    if name == "opacity":
+        val v = _e2d_filter_amount(arg, true)
+        return [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, v, 0.0]
+    if name == "brightness":
+        val v = _e2d_filter_amount(arg, false)
+        return [v, 0.0, 0.0, 0.0, 0.0, 0.0, v, 0.0, 0.0, 0.0, 0.0, 0.0, v, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    if name == "contrast":
+        val v = _e2d_filter_amount(arg, false)
+        val o = 0.5 - 0.5 * v
+        return [v, 0.0, 0.0, 0.0, o, 0.0, v, 0.0, 0.0, o, 0.0, 0.0, v, 0.0, o, 0.0, 0.0, 0.0, 1.0, 0.0]
+    []
+
+# Apply `mats` in order (each output clamped to 0..1) to the unpremultiplied
+# pixels `filtered`, then composite the result src-over `under` (the
+# unfiltered backdrop), as Chrome does for a backdrop filter.
+# @allow(primitive_api): raw ARGB pixel region shared by the Draw IR and raster painters
+pub fn engine2d_backdrop_color_filter_pixels(filtered: [u32], under: [u32], mats: [[f64]]) -> [u32]:
+    if mats.len() == 0 or filtered.len() != under.len():
+        return filtered
+    var out: [u32] = [0u32; filtered.len()]
+    var p: i64 = 0
+    # cpu-lane-loop-ok: one pixel of the filtered box region per step; bound region size
+    while p < filtered.len():
+        val c = filtered[p]
+        var v: [f64] = [(((c >> 16) & 0xFFu32) as i32).to_f64() / 255.0, (((c >> 8) & 0xFFu32) as i32).to_f64() / 255.0, ((c & 0xFFu32) as i32).to_f64() / 255.0, (((c >> 24) & 0xFFu32) as i32).to_f64() / 255.0]
+        for m in mats:
+            var nv: [f64] = [0.0, 0.0, 0.0, 0.0]
+            var r = 0
+            # cpu-lane-loop-ok: 4 matrix rows; bound 4
+            while r < 4:
+                var x = m[r * 5] * v[0] + m[r * 5 + 1] * v[1] + m[r * 5 + 2] * v[2] + m[r * 5 + 3] * v[3] + m[r * 5 + 4]
+                if x < 0.0:
+                    x = 0.0
+                if x > 1.0:
+                    x = 1.0
+                nv[r] = x
+                r = r + 1
+            v = nv
+        val sa = (v[3] * 255.0 + 0.5) as i32
+        val src = ((sa as u32) << 24) | ((((v[0] * 255.0 + 0.5) as i32) as u32) << 16) | ((((v[1] * 255.0 + 0.5) as i32) as u32) << 8) | (((v[2] * 255.0 + 0.5) as i32) as u32)
+        out[p] = if sa >= 255: src else: _e2d_src_over(src, under[p])
+        p = p + 1
+    out
+
+# Unpremultiplied src-over of one ARGB pixel onto another, rounded.
+fn _e2d_src_over(s: u32, d: u32) -> u32:
+    val sa = ((s >> 24) & 0xFFu32) as i32
+    val da = ((d >> 24) & 0xFFu32) as i32
+    val oa = sa + (da * (255 - sa) + 127) / 255
+    if oa <= 0:
+        return 0u32
+    var o = (oa as u32) << 24
+    var sh = 0u32
+    # cpu-lane-loop-ok: 3 colour channels; bound 3
+    while sh <= 16u32:
+        val sc = ((s >> sh) & 0xFFu32) as i32
+        val dc = ((d >> sh) & 0xFFu32) as i32
+        val num = sc * sa * 255 + dc * da * (255 - sa)
+        val den = oa * 255
+        o = o | ((((num + den / 2) / den) as u32) << sh)
+        sh = sh + 8u32
+    o
 # CSS `backdrop-filter: blur()` as Chrome 159 paints it: a Gaussian with
 # sigma = `sigma_milli` / 1000 device px over the w x h box region alone,
 # mirrored at its edges (nothing outside the box bleeds in), averaged in
