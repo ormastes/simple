@@ -12,7 +12,7 @@ use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
 use std.nogc_sync_mut.kernel_plugin.status.KpfSyncStatus
 use std.nogc_sync_mut.kernel_plugin.generation.{KpfGenerationHandle, KpfGenerationTable}
 use std.nogc_sync_mut.sffi.dynamic.{DynLib, DynLoader, platform_name}
-use std.nogc_sync_mut.sffi.dynlib_generation_v1.{DynlibGenerationHostV1, DynlibGenerationLeaseV1, DynLoaderReloadV1}
+use std.nogc_sync_mut.sffi.dynlib_generation_v1.{DynlibGenerationHostV1, DynlibGenerationLeaseV1, DynLoaderReloadV1, DynGenerationI64SlotV1}
 
 fn id(value: u64) -> KpfId128: KpfId128(hi: value, lo: value + 1)
 fn digest(value: u64) -> KpfDigest256: KpfDigest256(w0: value, w1: value + 1, w2: value + 2, w3: value + 3)
@@ -158,3 +158,61 @@ describe "DynLoader opt-in reload path":
         expect(after.unwrap().lifetime_identity == cached.lifetime_identity).to_equal(true)
         expect(cached.is_live()).to_equal(true)
         expect(_resolves(cached)).to_equal(true)
+
+fn _slot(loader: DynLoaderReloadV1) -> DynGenerationI64SlotV1:
+    val r = unsafe(capabilities: [ffi, raw_ptr]):
+        loader.resolve_i64(_libc_path(), _pid_symbol(), 0)
+    r.unwrap()
+
+fn _slot_call(loader: DynLoaderReloadV1, slot: DynGenerationI64SlotV1) -> Result<i64, text>:
+    unsafe(capabilities: [ffi, raw_ptr]):
+        loader.call_slot(_libc_path(), slot, [])
+
+describe "Generation-aware DynI64FnSlot":
+    it "keeps a held slot callable on its old mapping across a reload and refuses that unload":
+        val loader = DynLoaderReloadV1.create(4, 4)
+        val first = _reload(loader, 1)
+        val slot = _slot(loader)
+        val second = _reload(loader, 2)
+        expect(slot.lease.generation.index == first.index).to_equal(true)
+        expect(first.index == second.index).to_equal(false)
+        expect(_loader_unload(loader, first) == KpfSyncStatus.GenerationStillPinned).to_equal(true)
+        expect(slot.lease.lib.is_live()).to_equal(true)
+        val old_pid = _slot_call(loader, slot).unwrap()
+        expect(old_pid == _loader_call(loader).unwrap()).to_equal(true)
+
+    it "closes the old mapping after the slot is released and refuses later slot calls":
+        val loader = DynLoaderReloadV1.create(4, 4)
+        val first = _reload(loader, 1)
+        val slot = _slot(loader)
+        expect(_slot_call(loader, slot).is_ok()).to_equal(true)
+        _reload(loader, 2)
+        expect(loader.release_slot(_libc_path(), slot) == KpfSyncStatus.Ok).to_equal(true)
+        expect(_loader_unload(loader, first) == KpfSyncStatus.Ok).to_equal(true)
+        expect(slot.lease.lib.is_live()).to_equal(false)
+        expect(_slot_call(loader, slot).is_err()).to_equal(true)
+        expect(_loader_call(loader).is_ok()).to_equal(true)
+
+    it "refuses calls through a released slot even before its generation is unloaded":
+        val loader = DynLoaderReloadV1.create(4, 4)
+        _reload(loader, 1)
+        val slot = _slot(loader)
+        expect(loader.release_slot(_libc_path(), slot) == KpfSyncStatus.Ok).to_equal(true)
+        expect(slot.lease.lib.is_live()).to_equal(true)
+        expect(_slot_call(loader, slot).is_err()).to_equal(true)
+        expect(loader.release_slot(_libc_path(), slot) == KpfSyncStatus.StaleHandle).to_equal(true)
+
+    it "ends the lease when resolving a slot is refused":
+        val loader = DynLoaderReloadV1.create(4, 4)
+        val first = _reload(loader, 1)
+        val missing = unsafe(capabilities: [ffi, raw_ptr]):
+            loader.resolve_i64(_libc_path(), _pid_symbol(), 9)
+        expect(missing.is_err()).to_equal(true)
+        _reload(loader, 2)
+        expect(_loader_unload(loader, first) == KpfSyncStatus.Ok).to_equal(true)
+
+    it "refuses to resolve a slot for a path that was never reloaded":
+        val loader = DynLoaderReloadV1.create(4, 4)
+        val r = unsafe(capabilities: [ffi, raw_ptr]):
+            loader.resolve_i64(_libc_path(), _pid_symbol(), 0)
+        expect(r.is_err()).to_equal(true)
