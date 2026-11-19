@@ -1,0 +1,216 @@
+# @cover src/lib/nogc_sync_mut/trace/xray_spy_v1.spl
+# @session:mutating
+"""
+# XRay shared Spy: external intake of drained bare-metal events (DHR P5)
+
+`XraySpyV1.ingest` appends events drained off the bare-metal Spy ring
+(`BmSpyDrainV1`) to the same event store `collect()` fills from the resident
+native channel, so `log_lines`, `profile` and `lost` cover both sources.
+Input is validated all-or-nothing: per-context sequences must strictly
+increase and only raw edges with a site or disclosed Loss events are accepted.
+"""
+use std.spec.*
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_profile_v1.*
+use std.spy.bm_spy_emitter.{bm_spy_init, bm_spy_emit, bm_spy_pop, bm_spy_capacity}
+use std.nogc_sync_mut.trace.bm_spy_drain_v1.{BmSpyDrainV1}
+use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.*
+use std.nogc_sync_mut.trace.observer_native_channel_v1.*
+use std.nogc_sync_mut.trace.xray_spy_v1.*
+
+val NAMES: [text] = ["main", "work", "idle"]
+
+# Linux-style fake leaf: its handler stamps edges straight into the channel.
+class FakeLinuxLeaf:
+    slots: [i64]
+    arena: i64
+    generation: u64
+    context: u64
+    module_instance: u64
+    clock: u64
+
+impl XrayLlvmLeafV1 for FakeLinuxLeaf:
+    fn sled_kind() -> TraceBackendV1:
+        TraceBackendV1.Llvm
+    fn max_function_id() -> i64:
+        self.slots.len()
+    me install(arena: i64, generation: u64, context: u64, module_instance: u64) -> i64:
+        self.arena = arena
+        self.generation = generation
+        self.context = context
+        self.module_instance = module_instance
+        1
+    me patch_function(id: i64) -> i64:
+        if id < 1 or id > self.slots.len(): return XRAY_LLVM_STATUS_INVALID_ID_V1
+        self.slots[id - 1] = 1
+        XRAY_LLVM_STATUS_SUCCESS_V1
+    me unpatch_function(id: i64) -> i64:
+        if id < 1 or id > self.slots.len(): return XRAY_LLVM_STATUS_INVALID_ID_V1
+        self.slots[id - 1] = 0
+        XRAY_LLVM_STATUS_SUCCESS_V1
+    me close(arena: i64) -> i64:
+        unsafe(capabilities: [ffi]): trace_native_channel_close_v1(arena)
+
+impl FakeLinuxLeaf:
+    me fire(site: i64, kind: i64):
+        if self.slots[site] == 0: return
+        self.clock = self.clock + 10u64
+        val code: u64 = if kind == 0: 1u64 else: 2u64
+        val id = (site + 1) as u64
+        unsafe(capabilities: [ffi]):
+            trace_native_channel_record_words_v1(self.arena, 1u64 | (96u64 << 16) | (code << 32),
+                self.generation, self.module_instance, id | (id << 32), self.context,
+                0u64, self.clock, 0u64, 0u64, 0u64, 0u64)
+
+fn fresh_leaf() -> FakeLinuxLeaf:
+    FakeLinuxLeaf(slots: [0, 0, 0], arena: 0, generation: 0u64, context: 0u64,
+        module_instance: 0u64, clock: 0u64)
+
+fn fresh_spy() -> XraySpyV1:
+    XraySpyV1.create(XrayBackendV1.linux(fresh_leaf(), NAMES), 1u64, 64)
+
+fn config_v1() -> TraceConfigV1:
+    TraceConfigV1(instrumentation: TraceInstrumentationV1.Dynamic,
+        backend: TraceBackendV1.Llvm, consistency: TraceConsistencyV1.RawEdges,
+        patch_mode: TracePatchModeV1.Quiescent, abi_profile: "linux-aarch64-llvm-xray",
+        event_mask: 7, buffer_bytes: 98304, max_contexts: 1, max_depth: 128,
+        max_resident_generations: 8)
+
+fn selection_v1(sites: [u32]) -> TraceSelectionV1:
+    var out: [TraceSiteV1] = []
+    for site in sites:
+        out.push(TraceSiteV1(module_instance: 1, site_id: site))
+    TraceSelectionV1(manifest_incarnation: 1, sites: out)
+
+fn code(kind: TraceEventKindV1) -> i64:
+    trace_event_kind_code_v1(kind) as i64
+
+fn drain_all(context: u64) -> [TraceEventV1]:
+    var d = BmSpyDrainV1(generation: 7u64, module_instance: 3u64, context_id: context, next_sequence: 1u64)
+    match d.drain():
+        case Ok(events): events
+        case Err(_): []
+
+# Bare-metal script: main(1) -> work(2) -> idle(3), timed in ticks.
+fn emit_nested():
+    bm_spy_init()
+    bm_spy_emit(code(TraceEventKindV1.Entry), 1, 1000)
+    bm_spy_emit(code(TraceEventKindV1.Entry), 2, 1100)
+    bm_spy_emit(code(TraceEventKindV1.Entry), 3, 1200)
+    bm_spy_emit(code(TraceEventKindV1.Exit), 3, 1250)
+    bm_spy_emit(code(TraceEventKindV1.Exit), 2, 1400)
+    bm_spy_emit(code(TraceEventKindV1.Exit), 1, 2000)
+
+# Overflow the ring by two, then free room: the drain discloses Loss(2).
+fn emit_with_gap():
+    bm_spy_init()
+    var i = 0
+    while i < bm_spy_capacity():
+        bm_spy_emit(code(TraceEventKindV1.Entry), 1, i)
+        i = i + 1
+    bm_spy_emit(code(TraceEventKindV1.Exit), 1, 999)
+    bm_spy_emit(code(TraceEventKindV1.Exit), 1, 998)
+    bm_spy_pop()
+    bm_spy_pop()
+    bm_spy_emit(code(TraceEventKindV1.Exit), 1, 500)
+
+fn profile_shape(profile: TraceProfileV1) -> text:
+    var out = "events={profile.events} unmatched={profile.unmatched_exits} open={profile.open_entries}"
+    for row in profile.functions:
+        out = out + " f{row.function_id}:calls={row.calls}:depth={row.max_depth}:incl={row.inclusive_ns}:excl={row.exclusive_ns}"
+    out
+
+fn edge(kind: TraceEventKindV1, function_id: u32, context: u64, sequence: u64) -> TraceEventV1:
+    TraceEventV1(kind: kind, flags: 0, generation: 7u64, module_instance: 3u64,
+        function_id: function_id, site_id: function_id, context_id: context,
+        sequence: sequence, timestamp: sequence * 10u64, span_token: 0,
+        payload0: 0, payload1: 0, payload2: 0)
+
+fn loss(context: u64, sequence: u64, count: u64) -> TraceEventV1:
+    TraceEventV1(kind: TraceEventKindV1.Loss, flags: 0, generation: 7u64, module_instance: 3u64,
+        function_id: 0u32, site_id: 0u32, context_id: context, sequence: sequence,
+        timestamp: 0u64, span_token: 0, payload0: count, payload1: 0, payload2: 0)
+
+fn failure_code(result: Result<i64, TraceFailureV1>) -> u32:
+    match result:
+        case Ok(_): 0u32
+        case Err(failure): trace_failure_code_v1(failure)
+
+describe "XraySpyV1.ingest: drained bare-metal events join the shared Spy store":
+    it "ingested drained events profile the same as folding them directly":
+        emit_nested()
+        val drained = drain_all(1u64)
+        expect(drained.len()).to_equal(6)
+        var spy = fresh_spy()
+        expect(spy.ingest(drained).unwrap()).to_equal(6)
+        val direct = profile_shape(trace_profile_fold_v1(drained))
+        expect(direct).to_equal("events=6 unmatched=0 open=0 f1:calls=1:depth=1:incl=1000:excl=700 f2:calls=1:depth=2:incl=300:excl=250 f3:calls=1:depth=3:incl=50:excl=50")
+        expect(profile_shape(spy.profile())).to_equal(direct)
+        expect(spy.log_lines()).to_equal(["enter main", "enter work", "enter idle", "exit idle", "exit work", "exit main"])
+        expect(spy.lost()).to_equal(0u64)
+
+    it "a drained Loss event is reported by the spy's loss accounting":
+        emit_with_gap()
+        val drained = drain_all(1u64)
+        var spy = fresh_spy()
+        expect(spy.ingest(drained).is_ok()).to_equal(true)
+        expect(spy.lost()).to_equal(2u64)
+        step("the Loss event stays in the store and is counted by the profile")
+        expect(spy.profile().events).to_equal(drained.len() as u64)
+
+    it "ingested events land in the same store collect() fills":
+        var leaf = fresh_leaf()
+        var spy = XraySpyV1.create(XrayBackendV1.linux(leaf, NAMES), 1u64, 64)
+        expect(spy.enable(config_v1(), selection_v1([1, 2])).is_ok()).to_equal(true)
+        leaf.fire(0, 0)
+        leaf.fire(0, 1)
+        expect(spy.disable().is_ok()).to_equal(true)
+        expect(spy.events.len()).to_equal(2)
+        step("bare-metal context 9: work(2) with a disclosed Loss(4)")
+        bm_spy_init()
+        bm_spy_emit(code(TraceEventKindV1.Entry), 2, 100)
+        bm_spy_emit(code(TraceEventKindV1.Exit), 2, 160)
+        var batch = drain_all(9u64)
+        batch.push(loss(9u64, 3u64, 4u64))
+        expect(spy.ingest(batch).unwrap()).to_equal(3)
+        expect(spy.events.len()).to_equal(5)
+        expect(spy.log_lines()).to_equal(["enter main", "exit main", "enter work", "exit work"])
+        expect(profile_shape(spy.profile())).to_equal("events=5 unmatched=0 open=0 f1:calls=1:depth=1:incl=10:excl=10 f2:calls=1:depth=1:incl=60:excl=60")
+        expect(spy.lost()).to_equal(4u64)
+
+describe "XraySpyV1.ingest: invalid input fails closed":
+    it "out-of-order or repeated sequences in one context are refused, store unchanged":
+        var spy = fresh_spy()
+        val swapped = [edge(TraceEventKindV1.Entry, 1u32, 1u64, 2u64), edge(TraceEventKindV1.Exit, 1u32, 1u64, 1u64)]
+        expect(failure_code(spy.ingest(swapped))).to_equal(10u32)
+        expect(spy.events.len()).to_equal(0)
+        val repeated = [edge(TraceEventKindV1.Entry, 1u32, 1u64, 1u64), edge(TraceEventKindV1.Exit, 1u32, 1u64, 1u64)]
+        expect(failure_code(spy.ingest(repeated))).to_equal(10u32)
+        expect(spy.events.len()).to_equal(0)
+
+    it "a batch that does not continue the stored sequence of its context is refused":
+        emit_nested()
+        val drained = drain_all(1u64)
+        var spy = fresh_spy()
+        expect(spy.ingest(drained).is_ok()).to_equal(true)
+        expect(failure_code(spy.ingest(drained))).to_equal(10u32)
+        expect(spy.events.len()).to_equal(6)
+
+    it "independent contexts may interleave when each is increasing":
+        var spy = fresh_spy()
+        val batch = [edge(TraceEventKindV1.Entry, 1u32, 1u64, 5u64), edge(TraceEventKindV1.Entry, 2u32, 2u64, 1u64),
+            edge(TraceEventKindV1.Exit, 1u32, 1u64, 6u64), edge(TraceEventKindV1.Exit, 2u32, 2u64, 2u64)]
+        expect(spy.ingest(batch).unwrap()).to_equal(4)
+        expect(spy.profile().functions.len()).to_equal(2)
+
+    it "invalid kinds or shapes are refused and nothing from the batch is stored":
+        var spy = fresh_spy()
+        val good = edge(TraceEventKindV1.Entry, 1u32, 1u64, 1u64)
+        expect(failure_code(spy.ingest([good, edge(TraceEventKindV1.PairedSpan, 1u32, 1u64, 2u64)]))).to_equal(10u32)
+        expect(failure_code(spy.ingest([good, edge(TraceEventKindV1.Exit, 0u32, 1u64, 2u64)]))).to_equal(10u32)
+        expect(failure_code(spy.ingest([good, loss(1u64, 2u64, 0u64)]))).to_equal(10u32)
+        var sited = loss(1u64, 2u64, 3u64)
+        sited.function_id = 1u32
+        expect(failure_code(spy.ingest([good, sited]))).to_equal(10u32)
+        expect(spy.events.len()).to_equal(0)
+        expect(spy.lost()).to_equal(0u64)
