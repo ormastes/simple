@@ -31,7 +31,7 @@
 use std.gc_async_mut.slang.modality.kinds.{Modality, ModelKind, KindProfile, kind_profile, kind_default_inputs, model_kind_from_text}
 use std.gc_async_mut.slang.engine.runner_dispatch.{RunnerKind}
 use std.common.text_bytes.{bytes_to_text}
-use std.gc_async_mut.slang.host.slang_host.{host_file_exists, host_file_read, host_dir_list, host_is_dir, host_file_size, host_read_bytes_at}
+use std.gc_async_mut.slang.host.slang_host.{host_file_exists, host_file_read, host_dir_list, host_is_dir, host_file_size, host_file_mtime, host_read_bytes_at}
 
 val KIND_OVERRIDE_FILE = "slang_kind.sdn"
 val GGUF_FIRST_READ = 4096
@@ -304,52 +304,112 @@ fn gguf_walk_bytes(b: [u8], total: i64, full: bool) -> Result<GgufFacts, GgufWal
 fn gguf_facts_from_bytes(b: [u8]) -> Result<GgufFacts, GgufWalkStop>:
     gguf_walk_bytes(b, b.len(), false)
 
-fn _gguf_read_walk(path: text, size: i64, full: bool) -> Result<GgufFacts, text>:
-    var want = GGUF_FIRST_READ
-    while true:
-        val n = if want > size: size else: want
-        match host_read_bytes_at(path, 0, n):
-            Err(_):
-                return Err("cannot read " + path)
-            Ok(bytes):
-                match gguf_walk_bytes(bytes, size, full):
-                    Ok(facts):
-                        return Ok(facts)
-                    Err(GgufWalkStop.Malformed(why)):
-                        return Err(path + ": " + why)
-                    Err(GgufWalkStop.NeedMore):
-                        if n >= size:
-                            return Err(path + ": truncated GGUF metadata")
-                        if n >= GGUF_MAX_READ:
-                            return Err(path + ": GGUF metadata is larger than " + GGUF_MAX_READ.to_text() + " bytes")
-                        want = want * 4
-    Err(path + ": unreachable")
-
 fn _is_embedding(k: ModelKind) -> bool:
     match k:
         ModelKind.Embedding: true
         _: false
 
-# GGUF facts of the file at `path`. Reads a growing prefix until the KV block
-# fits, never past GGUF_MAX_READ. An encoder that names no pooling type (the
-# bge-reranker-v2-m3 GGUF writes none) is walked again in full: its
-# classification head (`cls.output.weight`) lives in the tensor-info table,
-# after the tokenizer block, and is what tells a reranker from an embedder.
+# Bytes of GGUF header read from disk by this process (a measurement for specs
+# and the /v1/models cost note; a racy increment only skews the count).
+var GGUF_HEADER_BYTES_READ: i64 = 0
+
+fn gguf_header_bytes_read() -> i64:
+    GGUF_HEADER_BYTES_READ
+
+# The walk of one file over ONE growing buffer: each step reads only the bytes
+# past what is already held (a bulk ranged read), never the prefix again. An
+# encoder that names no pooling type (the bge-reranker-v2-m3 GGUF writes none)
+# is walked again in full over the same buffer: its classification head
+# (`cls.output.weight`) lives in the tensor-info table, after the tokenizer
+# block, and is what tells a reranker from an embedder. A full walk that fails
+# keeps the cheap facts: the head is evidence for rerank, its absence is no
+# evidence against the rest.
+fn _gguf_facts_uncached(path: text, size: i64) -> Result<GgufFacts, text>:
+    var buf: [u8] = []
+    var want = GGUF_FIRST_READ
+    var full = false
+    var cheap = GgufFacts(arch: "", general_type: "", pooling_type: -1, has_vision: false, has_audio: false, has_cls_head: false)
+    while true:
+        match gguf_walk_bytes(buf, size, full):
+            Ok(facts):
+                if full:
+                    return Ok(facts)
+                if facts.pooling_type >= 0 or not _is_embedding(arch_kind(facts.arch)):
+                    return Ok(facts)
+                cheap = facts
+                full = true
+            Err(GgufWalkStop.Malformed(why)):
+                if full:
+                    return Ok(cheap)
+                return Err(path + ": " + why)
+            Err(GgufWalkStop.NeedMore):
+                if buf.len() >= size:
+                    if full:
+                        return Ok(cheap)
+                    return Err(path + ": truncated GGUF metadata")
+                if buf.len() >= GGUF_MAX_READ:
+                    if full:
+                        return Ok(cheap)
+                    return Err(path + ": GGUF metadata is larger than " + GGUF_MAX_READ.to_text() + " bytes")
+                val target = if want > size: size else: want
+                if target > buf.len():
+                    match host_read_bytes_at(path, buf.len(), target - buf.len()):
+                        Err(why):
+                            return Err(why)
+                        Ok(chunk):
+                            GGUF_HEADER_BYTES_READ = GGUF_HEADER_BYTES_READ + chunk.len()
+                            if chunk.len() != target - buf.len():
+                                return Err(path + ": short read")
+                            buf = buf + chunk
+                want = want * 4
+    Err(path + ": unreachable")
+
+# One cached walk, keyed by what makes it stale.
+struct GgufFactsCacheRow:
+    path: text
+    size: i64
+    mtime: i64
+    facts: GgufFacts
+
+val GGUF_FACTS_CACHE_MAX = 512
+
+# Copy-on-write snapshot: a reader iterates the list it read, a writer builds a
+# new list and publishes it with one assignment. Two concurrent inserts may
+# lose one, which only costs a re-walk later (lockless by design, no lock).
+var GGUF_FACTS_CACHE: [GgufFactsCacheRow] = []
+
+fn _facts_cache_publish(row: GgufFactsCacheRow):
+    val old = GGUF_FACTS_CACHE
+    var drop = 0
+    if old.len() >= GGUF_FACTS_CACHE_MAX:
+        drop = old.len() - GGUF_FACTS_CACHE_MAX + 1
+    var next: [GgufFactsCacheRow] = []
+    var i = 0
+    for r in old:
+        if i >= drop and r.path != row.path:
+            next.push(r)
+        i = i + 1
+    next.push(row)
+    GGUF_FACTS_CACHE = next
+
+# GGUF facts of the file at `path`, walked once per (path, size, mtime): a
+# /v1/models listing and the per-request kind check of a chat route reuse the
+# walk instead of re-reading headers. An mtime of 0 (unavailable) is never
+# cached. Reads a growing prefix, never past GGUF_MAX_READ.
 fn gguf_facts(path: text) -> Result<GgufFacts, text>:
     val size = host_file_size(path)
-    match _gguf_read_walk(path, size, false):
+    val mtime = host_file_mtime(path)
+    if mtime > 0 and size >= 0:
+        for row in GGUF_FACTS_CACHE:
+            if row.path == path and row.size == size and row.mtime == mtime:
+                return Ok(row.facts)
+    match _gguf_facts_uncached(path, size):
         Err(why):
             Err(why)
-        Ok(cheap):
-            if cheap.pooling_type >= 0 or not _is_embedding(arch_kind(cheap.arch)):
-                return Ok(cheap)
-            # A full walk that fails keeps the cheap facts: the head is
-            # evidence for rerank, its absence is no evidence against the rest.
-            match _gguf_read_walk(path, size, true):
-                Ok(full):
-                    Ok(full)
-                Err(_):
-                    Ok(cheap)
+        Ok(facts):
+            if mtime > 0 and size >= 0:
+                _facts_cache_publish(GgufFactsCacheRow(path: path, size: size, mtime: mtime, facts: facts))
+            Ok(facts)
 
 # True when `facts` describe a multimodal projector rather than a model.
 fn gguf_facts_are_projector(facts: GgufFacts) -> bool:
@@ -560,5 +620,5 @@ fn resolve_kind_from(dir: text, gguf: [GgufFile]) -> KindProfile:
     kind_profile(ModelKind.Chat, [Modality.Text], RunnerKind.Ggml, "no kind could be resolved: no " + KIND_OVERRIDE_FILE + ", no GGUF model, no ggml (lmgg) file and no recognised safetensors")
 
 export GgufFacts, GgufWalkStop, GgufFile
-export gguf_facts_from_bytes, gguf_walk_bytes, gguf_facts, gguf_facts_are_projector, gguf_file_is_projector, gguf_facts_are_vocoder, gguf_files
+export gguf_facts_from_bytes, gguf_walk_bytes, gguf_header_bytes_read, gguf_facts, gguf_facts_are_projector, gguf_file_is_projector, gguf_facts_are_vocoder, gguf_files
 export arch_kind, pooling_kind, kind_override_field, kind_unserved_reason, safetensors_is_sd_unet, ggml_magic_file, resolve_kind, resolve_kind_from

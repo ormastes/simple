@@ -15,7 +15,7 @@ use std.spec.step
 use std.spec.{describe, it, expect}
 
 use std.gc_async_mut.slang.modality.kinds.{ModelKind, model_kind_text, modalities_json}
-use std.gc_async_mut.slang.modality.kind_registry.{gguf_facts, resolve_kind}
+use std.gc_async_mut.slang.modality.kind_registry.{gguf_facts, gguf_header_bytes_read, resolve_kind}
 use std.gc_async_mut.slang.engine.runner_dispatch.{runner_kind_text}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{describe_model, gguf_entry_shard}
 use std.gc_async_mut.slang.entrypoints.openai.api_server.{slang_api_dispatch}
@@ -162,6 +162,43 @@ describe "the binary GGUF KV walk":
         expect(m.format).to_equal("gguf")
         expect(m.entry_path.ends_with("model.gguf")).to_equal(true)
         expect(model_kind_text(m.profile.kind)).to_equal("chat")
+
+describe "GGUF header reads":
+    it "reads a large header once, incrementally, and serves the second ask from the cache":
+        step("Verify: growing reads append only new bytes (total read == file size, not 4K+16K+...), and a repeat costs 0 bytes")
+        val d = fixture_dir("incremental")
+        val bytes = gguf([kv_str("general.architecture", "qwen2"), kv_str_array("general.tags", 3000), kv_u32("qwen2.context_length", 4096)])
+        file_write_bytes(d + "/m.gguf", bytes)
+        val before = gguf_header_bytes_read()
+        match gguf_facts(d + "/m.gguf"):
+            Ok(f):
+                expect(f.arch).to_equal("qwen2")
+            Err(why):
+                expect(why).to_equal("")
+        val first = gguf_header_bytes_read() - before
+        expect(first).to_equal(bytes.len())
+        match gguf_facts(d + "/m.gguf"):
+            Ok(f):
+                expect(f.arch).to_equal("qwen2")
+            Err(why):
+                expect(why).to_equal("")
+        expect(gguf_header_bytes_read() - before).to_equal(first)
+
+    it "re-walks a file whose size changed":
+        step("Verify: the cache key includes the size, so a rewritten file is not served stale facts")
+        val d = fixture_dir("invalidate")
+        file_write_bytes(d + "/m.gguf", gguf([kv_str("general.architecture", "llama")]))
+        match gguf_facts(d + "/m.gguf"):
+            Ok(f):
+                expect(f.arch).to_equal("llama")
+            Err(why):
+                expect(why).to_equal("")
+        file_write_bytes(d + "/m.gguf", gguf([kv_str("general.architecture", "bert"), kv_u32("bert.pooling_type", 2)]))
+        match gguf_facts(d + "/m.gguf"):
+            Ok(f):
+                expect(f.arch).to_equal("bert")
+            Err(why):
+                expect(why).to_equal("")
 
 describe "hostile GGUF headers":
     it "rejects a negative key length as malformed":
