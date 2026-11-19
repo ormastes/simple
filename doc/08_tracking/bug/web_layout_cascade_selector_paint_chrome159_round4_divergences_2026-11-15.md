@@ -840,3 +840,11 @@ head (13/40 at base).
   - Every tested box with all r >= t-1 matched exactly.
 - **What does not fit:** when r < t/2, Chrome paints the leg after the corner only on its inner half (t=6, r=0: x 3..5, y 3..8), joined by a diagonal triangle. The closed-path stroke would paint the full band width there. This looks like Chrome's per-side clip rather than a stroke join. Earlier, a box with several small corners (t=8, radii 5/7/16/6) laid its top dashes out per side: runs (0,16),(20,16),(40,15), 403 mismatches.
 - **Next:** find the switch to the per-side layout, which needs a box with several small corners. Then model the inner-half leg. Widening the admission to r >= t-1 alone gains one radius value per width, so it was not done.
+
+## 2026-11-19 — gradient `rem` stops are unpositioned (FIXED on raster, cpu_simd and Vulkan)
+
+- **Symptom:** a gradient stop given in `rem` read as having no position, so the stops spread evenly. On a 48px-wide `linear-gradient(to right, #ff0000 0.5rem, #0000ff 2rem)`, (3,7) read `FC0003`, where Chrome reads `FF0000`. The worst channel error was 78 on that page and 102 on a three-stop page whose root font size is 10px.
+- **Cause:** `gradient_stop_token` knows only `px`, `em` and `%`. The root font size is set during the cascade and reset to 16 when the cascade ends, so the paint step, which parses stops, cannot resolve `rem`.
+- **Fix:** `gradient_rem_stops_to_px` (`foundation_values`) rewrites every `<number>rem` in a gradient value to px at cascade time, against `css_cascade_root_font_px()`. `apply_decls` applies it to `background` and `background-image`. A `rem` with no digit before it, or with a name character after it (`url(a2rem.png)`), is left alone.
+- **Evidence:** new `gradient_rem_stops_chrome159_spec` (Chrome k=4, 16 points per page, ±2), 0/4 -> 4/4 on raster, cpu_simd, Vulkan and the helper's edge cases.
+- **Not covered:** a `rem` stop on `<html>` itself still resolves against 16px, because the root font size is set after the root's own declarations.
