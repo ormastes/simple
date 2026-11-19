@@ -45,6 +45,16 @@ fn user_turn(k: i64) -> text:
 fn follow_up(k: i64) -> text:
     " Follow-up " + k.to_text() + ": and how many tokens does it hold"
 
+struct PrefixCacheStatsView:
+    prefilled: i64
+    reused: i64
+    hits: i64
+    misses: i64
+    admissions: i64
+    evictions: i64
+    resident: i64
+    failures: i64
+
 struct Observed:
     texts: text
     count: i64
@@ -151,8 +161,20 @@ fn main():
             blocked("warmup:" + reason)
             return
         Ok(_): ()
-    val before = engine_prefix_cache_stats()
-    if before == nil:
+    var before_prefilled: i64 = -1
+    var before_reused: i64 = 0
+    var before_hits: i64 = 0
+    var before_misses: i64 = 0
+    var before_admissions: i64 = 0
+    var before_evictions: i64 = 0
+    if val s = engine_prefix_cache_stats():
+        before_prefilled = s.tokens_prefilled
+        before_reused = s.tokens_reused
+        before_hits = s.hits
+        before_misses = s.misses
+        before_admissions = s.admissions
+        before_evictions = s.evictions
+    if before_prefilled < 0:
         blocked("telemetry-unavailable")
         return
     val started_ms = time_now_monotonic_ms()
@@ -166,15 +188,24 @@ fn main():
         Ok(observed):
             val after = engine_prefix_cache_stats()
             val tree = engine_tree_cache_stats()
-            if after == nil or tree == nil:
+            var a = PrefixCacheStatsView(prefilled: -1, reused: 0, hits: 0, misses: 0, admissions: 0, evictions: 0, resident: 0, failures: 0)
+            if val s = after:
+                a = PrefixCacheStatsView(prefilled: s.tokens_prefilled, reused: s.tokens_reused, hits: s.hits, misses: s.misses, admissions: s.admissions, evictions: s.evictions, resident: s.resident_entries, failures: s.restore_failures)
+            var t_mode: i64 = -1
+            var t_nodes: i64 = -1
+            var t_cached: i64 = -1
+            var t_shared: i64 = -1
+            if val ts = tree:
+                t_mode = ts.mode
+                t_nodes = ts.nodes
+                t_cached = ts.cached_tokens
+                t_shared = ts.shared_tokens
+            if a.prefilled < 0 or t_mode < 0:
                 engine_unload()
                 blocked("telemetry-unavailable")
                 return
-            val a = after!
-            val b = before!
-            val t = tree!
             engine_unload()
             print "SLANG_KV_TREE_TEXTS {observed.texts}"
-            print "SLANG_KV_TREE_RESULT status=PASS lane={lane} workload={workload} model={model_id} requests={observed.count} gen_tokens={observed.gen_tokens} resident_elapsed_ms={elapsed_ms} output_digest={sha256_text(observed.texts)} prefilled_tokens={a.tokens_prefilled - b.tokens_prefilled} reused_tokens={a.tokens_reused - b.tokens_reused} hits={a.hits - b.hits} misses={a.misses - b.misses} admissions={a.admissions - b.admissions} evictions={a.evictions - b.evictions} resident_entries={a.resident_entries} restore_failures={a.restore_failures} tree_mode={t.mode} tree_nodes={t.nodes} tree_cached_tokens={t.cached_tokens} tree_shared_tokens={t.shared_tokens} ttft_status=unavailable"
+            print "SLANG_KV_TREE_RESULT status=PASS lane={lane} workload={workload} model={model_id} requests={observed.count} gen_tokens={observed.gen_tokens} resident_elapsed_ms={elapsed_ms} output_digest={sha256_text(observed.texts)} prefilled_tokens={a.prefilled - before_prefilled} reused_tokens={a.reused - before_reused} hits={a.hits - before_hits} misses={a.misses - before_misses} admissions={a.admissions - before_admissions} evictions={a.evictions - before_evictions} resident_entries={a.resident} restore_failures={a.failures} tree_mode={t_mode} tree_nodes={t_nodes} tree_cached_tokens={t_cached} tree_shared_tokens={t_shared} ttft_status=unavailable"
 
 main()

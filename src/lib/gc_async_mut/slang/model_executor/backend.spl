@@ -53,6 +53,7 @@ enum BackendError:
     CapacityExceeded
     MediaUnsupported
     MediaRejected
+    Busy
 
 fn backend_error_text(e: BackendError) -> text:
     match e:
@@ -72,6 +73,7 @@ fn backend_error_text(e: BackendError) -> text:
         BackendError.InvalidTokenBudget: "max_tokens must be a nonnegative signed 64-bit integer"
         BackendError.CapacityExceeded: "prompt plus generation exceeds the context window"
         BackendError.MediaUnsupported: "the backend or model cannot take this media"
+        BackendError.Busy: "backend is busy with another request (tree prefix cache serialises requests per model)"
         BackendError.MediaRejected: "media was rejected: unsupported container, preprocessing failure, or marker count mismatch"
 
 const SLANG_CAP_PHYSICAL_PAGED_KV: i64 = 32
@@ -237,6 +239,9 @@ struct PrefixCacheStats:
     resident_bytes: i64
     rejected_bytes: i64
     restore_failures: i64
+
+# Shim error code for a request that overlaps another on the tree context.
+val SLANG_ERR_BUSY: i64 = -9
 
 fn _call0(fptr: i64) -> i64:
     spl_wffi_call_i64(fptr, [], 0)
@@ -644,9 +649,15 @@ fn _prefill_request(input: BackendActiveGenerationRequest, max_tokens: i64) -> R
         return Err(BackendError.TokenizeFailed)
     if prompt_tokens + max_tokens > _call1(b.f_request_n_ctx, request.handle):
         return Err(BackendError.CapacityExceeded)
-    if _call1(b.f_request_prefix_prepare, request.handle) < 0:
+    val prepared = _call1(b.f_request_prefix_prepare, request.handle)
+    if prepared == SLANG_ERR_BUSY:
+        return Err(BackendError.Busy)
+    if prepared < 0:
         return Err(BackendError.DecodeFailed)
-    if _call1(b.f_request_eval_prompt, request.handle) < 0:
+    val evaluated = _call1(b.f_request_eval_prompt, request.handle)
+    if evaluated == SLANG_ERR_BUSY:
+        return Err(BackendError.Busy)
+    if evaluated < 0:
         return Err(BackendError.DecodeFailed)
     Ok(prompt_tokens)
 
