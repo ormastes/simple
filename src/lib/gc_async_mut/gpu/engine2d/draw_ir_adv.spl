@@ -57,6 +57,7 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_box_effects.{
     engine2d_draw_ir_has_inset_shadow,
     engine2d_draw_ir_has_outer_shadow,
     engine2d_draw_ir_shadow_knockout_pixels,
+    engine2d_backdrop_blur_pixels,
     engine2d_draw_ir_legacy_shadow_safe,
     engine2d_draw_ir_legacy_uniform_radius,
     engine2d_draw_ir_mask_geometry_safe,
@@ -1147,6 +1148,17 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
     val ky = if y > 0: y else: 0
     val kw = (if x + w < fb_w: x + w else: fb_w) - kx
     val kh = (if y + h < fb_h: y + h else: fb_h) - ky
+    # backdrop-filter: blur() filters what is already painted under the box
+    # before its own shadow and background (the glass material path owns
+    # material-requested boxes).
+    val backdrop_sigma = _engine2d_draw_ir_nth_int(
+        _engine2d_draw_ir_style_value(style, "backdrop-filter-blur-milli"), 0, 0) as i32
+    if (backdrop_sigma > 0 and kw > 0 and kh > 0 and
+        _engine2d_draw_ir_style_value(style, "wm-material-request") == ""):
+        val under = _engine2d_read_pixels_region(eng, kx, ky, kw, kh).pixels
+        eng.draw_image(kx, ky, kw, kh, engine2d_draw_ir_shadow_knockout_pixels(
+            engine2d_backdrop_blur_pixels(under, kw, kh, backdrop_sigma), under,
+            kx, ky, kw, kh, x, y, w, h, effective_corners))
     var knockout_pre: [u32] = []
     if knockout and kw > 0 and kh > 0:
         knockout_pre = _engine2d_read_pixels_region(eng, kx, ky, kw, kh).pixels
