@@ -1,0 +1,49 @@
+"""
+## Purpose and audience
+Pins milestone_0030 owner decision N12-a on the controller: `remote_container_request_bind_v3` no longer requires the
+signed task to pin the full execution request at `remote-container/<id>.sdn` (the pin was a hash cycle with the invocation
+digest). The controller instead binds task to request by comparing the prepare reply's association.execution with the draft
+it authored (driver, `remote_run_v1.spl`); this bind keeps the version marker, policy bind and plan-vs-task/policy checks.
+Status: AUTHORED, NOT_RUN (no runnable binary).
+## Verification guidance and troubleshooting
+Each refusal names the exact error string; a changed string is a contract change.
+"""
+use std.spec.{step, expect}
+use std.io.file_read_text
+use test.fixtures.buildrunner.remote_container_parent_v2.container_parent_fixture_v2
+use app.buildrunner.remote_container_evidence_v3.remote_container_request_bind_v3
+use std.common.build_manager.contracts.BuildInputV1
+use app.io.dir_ops.dir_remove
+
+describe "Controller V3 request bind without a task pin (N12-a)":
+    it "accepts a V3 task that carries no remote-container/<id>.sdn pin":
+        # @req M0030-N12A-01
+        val fixture = container_parent_fixture_v2(0, 3)
+        var task = fixture.task
+        var kept: [BuildInputV1] = []
+        for input in task.inputs:
+            if input.path != "remote-container/" + task.id + ".sdn": kept.push(input)
+        expect(kept.len() < task.inputs.len()).to_equal(true)
+        task.inputs = kept
+        step("the bind is the version, policy and plan-vs-task/policy check only")
+        expect(remote_container_request_bind_v3(task, fixture.policy, fixture.request).is_ok()).to_equal(true)
+        expect(file_read_text("src/app/buildrunner/remote_container_evidence_v3.spl").contains("REMOTE_CONTAINER_REQUEST_NOT_PINNED")).to_equal(false)
+        expect(dir_remove(fixture.root, true)).to_equal(true)
+
+    it "still refuses a request whose plan differs from the task or policy":
+        # @req M0030-N12A-02
+        val fixture = container_parent_fixture_v2(0, 3)
+        var request = fixture.request
+        request.plan.workload_uid = "other_task"
+        expect(remote_container_request_bind_v3(fixture.task, fixture.policy, request)).to_equal(Err("REMOTE_CONTAINER_PLAN_DIFFERS"))
+        var attempt = fixture.request
+        attempt.plan.attempt = 9
+        expect(remote_container_request_bind_v3(fixture.task, fixture.policy, attempt)).to_equal(Err("REMOTE_CONTAINER_PLAN_DIFFERS"))
+        var operation = fixture.request
+        operation.plan.operation_id = "operation_z"
+        expect(remote_container_request_bind_v3(fixture.task, fixture.policy, operation)).to_equal(Err("REMOTE_CONTAINER_PLAN_DIFFERS"))
+        step("a V2 task (no version marker) is refused by the V3 bind")
+        val legacy = container_parent_fixture_v2(0, 2)
+        expect(remote_container_request_bind_v3(legacy.task, legacy.policy, legacy.request)).to_equal(Err("REMOTE_CONTAINER_TASK_VERSION_DIFFERS"))
+        expect(dir_remove(fixture.root, true)).to_equal(true)
+        expect(dir_remove(legacy.root, true)).to_equal(true)

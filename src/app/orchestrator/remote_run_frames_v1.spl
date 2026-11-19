@@ -1,0 +1,187 @@
+# milestone_0030 controller half (DESIGN_CTRL.md C4): the PURE frame layer of `remote-run`. Request frames are built
+# here; Host replies are decoded and checked here. Nothing is trusted from a reply: the association is compared with the
+# draft the controller authored (N12-a: this is the task->request binding, replacing the removed task pin), output
+# chunks are checked against their manifest, and the assembled bundle is only handed to the session (which verifies the
+# host-signed completion against the snapshot execution-host key).
+use app.buildrunner.remote_container_reset_failure_v3.{RemoteContainerResetFailureV3, remote_container_reset_failure_new_v3}
+use app.buildrunner.remote_evidence_v1.RemoteEvidencePolicyV1
+use std.common.contracts.container.execution_draft_v3.{ContainerExecutionDraftV3, container_execution_draft_bind_v3}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2}
+use std.common.contracts.orchestration.host_execution_association_v3.HostExecutionAssociationV3
+use std.common.contracts.orchestration.host_remote_build_chunk_v4.{HostRemoteBuildChunkManifestV4, host_remote_build_chunk_encode_v4,
+    host_remote_build_chunk_decode_v4, host_remote_build_chunk_manifest_digest_v4, host_remote_build_chunk_assemble_v4}
+use std.common.contracts.orchestration.host_service_operation_reply_v6.host_service_operation_reply_decode_v6
+use std.common.contracts.orchestration.host_remote_build_operation_v6.{HostRemoteBuildSubRequestV6, host_remote_build_sub_encode_v6}
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.{HostRemoteBuildFrameV4, host_remote_build_frame_encode_v4}
+use std.common.build_manager.contracts.BuildTaskV1
+use std.common.crypto.sha256.sha256_text
+use std.common.text_bytes.{bytes_to_text, utf8_bytes_valid}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use app.orchestrator.remote_run_author_v1.RemoteRunFileV1
+
+# The Host answers a reaped run (its service restarted: a started run never survives a restart) with this refusal code.
+val REMOTE_RUN_REAPED_CODE_V1 = "linux-host-remote-build-reaped-incomplete"
+
+pub struct RemoteRunReplyV1:
+    operation_id: text
+    stage: text
+    inputs: i64
+    received: i64
+    outcome: text
+    bundle_digest: text
+    cancel_cause: text
+
+pub struct RemoteRunOutputChunkV1:
+    manifest: HostRemoteBuildChunkManifestV4
+    index: i64
+    chunk: [u8]
+
+fn remote_run_reply_fields_v1(source: text, count: i64, kind: text) -> Result<Dict<text, SdnValue>, text>:
+    if source.byte_len() < 1 or source.byte_len() > 1048576: return Err("remote-run-reply-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 1048576, max_depth: 3,
+            max_nodes: 8192, max_rows: 0, max_cells: 0, max_columns: 32)):
+        case Ok(value): value
+        case Err(_): return Err("remote-run-reply-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("remote-run-reply-object")
+    if fields.len() != count or not fields.contains_key("kind") or fields["kind"] != SdnValue.String(kind):
+        return Err("remote-run-reply-kind")
+    Ok(fields)
+
+fn remote_run_reply_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key): return Err("remote-run-reply-field:" + key)
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("remote-run-reply-text:" + key)
+
+fn remote_run_reply_int_v1(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    if not fields.contains_key(key): return Err("remote-run-reply-field:" + key)
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("remote-run-reply-number:" + key)
+
+# host_remote_build_reply_v4: the executor's stage answer to open / input / start / collect.
+pub fn remote_run_reply_decode_v1(source: text, operation_id: text) -> Result<RemoteRunReplyV1, text>:
+    val fields = remote_run_reply_fields_v1(source, 8, "linux-host-remote-build")?
+    val reply = RemoteRunReplyV1(operation_id: remote_run_reply_text_v1(fields, "operationId")?,
+        stage: remote_run_reply_text_v1(fields, "stage")?, inputs: remote_run_reply_int_v1(fields, "inputs")?,
+        received: remote_run_reply_int_v1(fields, "received")?, outcome: remote_run_reply_text_v1(fields, "outcome")?,
+        bundle_digest: remote_run_reply_text_v1(fields, "bundleDigest")?, cancel_cause: remote_run_reply_text_v1(fields, "cancelCause")?)
+    if reply.operation_id != operation_id: return Err("remote-run-reply-operation")
+    Ok(reply)
+
+# A run is DONE only at stage `settled` with a published bundle; `failed` and `wedged` are terminal refusals; every other
+# stage is a poll.
+pub fn remote_run_reply_phase_v1(reply: RemoteRunReplyV1) -> text:
+    if reply.stage == "settled" and reply.bundle_digest != "": return "done"
+    if reply.stage == "settled" or reply.stage == "failed" or reply.stage == "wedged": return "terminal"
+    "poll"
+
+# @allow(primitive_api) boolean classification of one fixed Host refusal code
+pub fn remote_run_reaped_v1(error: text) -> bool:
+    error.contains(REMOTE_RUN_REAPED_CODE_V1)
+
+# The dispatch owner hands a remote-build Host refusal to the caller as the ENCODED V6 reply (outcome host-refused);
+# this is its error text: the reply error (or the generic non-zero code), a newline and the payload that names the code.
+pub fn remote_run_refused_reply_v1(encoded: text) -> text:
+    val decoded = host_service_operation_reply_decode_v6(encoded)
+    if decoded.is_err(): return "remote-run-host-refused-undecodable\n"
+    val reply = decoded.unwrap()
+    (if reply.error != "": reply.error else: "dispatch-host-nonzero") + "\n" + reply.payload
+
+# The Host's answer to the associated execute (host_linux_service_execute_v4, linux_service_admitted_reply_v4): the
+# slot for THIS operation and association is admitted. `open` is only sent after this check.
+pub fn remote_run_execute_reply_check_v1(source: text, operation_id: text, association_digest: text) -> Result<bool, text>:
+    val fields = remote_run_reply_fields_v1(source, 6, "linux-host-execution-admission")?
+    if remote_run_reply_int_v1(fields, "version")? != 4: return Err("remote-run-execute-reply-version")
+    if remote_run_reply_text_v1(fields, "operationId")? != operation_id: return Err("remote-run-execute-reply-operation")
+    if remote_run_reply_text_v1(fields, "associationDigest")? != association_digest: return Err("remote-run-execute-reply-association")
+    if remote_run_reply_text_v1(fields, "state")? != "execution-admitted": return Err("remote-run-execute-reply-state")
+    Ok(true)
+
+# N12-a: the controller binds task->request. The association's execution must be EXACTLY the authored draft bound to the
+# Host's native scope (the Host binds the same draft with `container_execution_draft_bind_v3`); only the native scope
+# fields come from the Host, and they must be a live native-boot scope of the physical host the status named. The
+# execute-signed association carries the task marker, so request->task is already signed.
+pub fn remote_run_association_check_v1(draft: ContainerExecutionDraftV3, association: HostExecutionAssociationV3,
+        service_scope: ContainerHostScopeV2) -> Result<bool, text>:
+    val plan = association.execution.plan
+    val bound = container_execution_draft_bind_v3(draft, ContainerHostScopeV2(physical_host_id: plan.physical_host_id,
+        service_scope_id: plan.service_scope_id, boot_id: plan.boot_id, provider_generation: plan.provider_generation,
+        native_machine_id: plan.native_machine_id, continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id))?
+    if (bound.plan.backend != plan.backend or bound.plan.workload_uid != plan.workload_uid or
+            bound.plan.attempt != plan.attempt or bound.plan.operation_id != plan.operation_id or
+            bound.plan.request_digest != plan.request_digest or bound.request_bytes != association.execution.request_bytes):
+        return Err("remote-run-association-draft-differs")
+    if plan.physical_host_id != service_scope.physical_host_id: return Err("remote-run-association-host")
+    if (plan.continuity_mode != "native-boot-incarnation-v1" or plan.boot_id == "" or plan.continuity_id != plan.boot_id or
+            plan.provider_generation <= 0 or plan.native_machine_id == "" or not plan.service_scope_id.starts_with("epoch-")):
+        return Err("remote-run-association-native-scope")
+    if container_host_scope_bytes_v2(association.service_scope)? != container_host_scope_bytes_v2(service_scope)?:
+        return Err("remote-run-association-service-scope")
+    if (association.remote_build_task_digest != draft.remote_build_task_digest or association.remote_build_task_digest == "" or
+            association.readonly_rootfs != draft.readonly_rootfs or association.agent_invocation_manifest_digest != "" or
+            association.agent_probe_list_digest != ""):
+        return Err("remote-run-association-workload-kind")
+    Ok(true)
+
+# One V6 `remote-build` payload: the sub-operation envelope around the canonical route frame.
+# @allow(primitive_api) input/output chunk index is a wire frame position
+pub fn remote_run_sub_payload_v1(sub: text, operation_id: text, index: i64, payload: text) -> Result<text, text>:
+    host_remote_build_sub_encode_v6(HostRemoteBuildSubRequestV6(sub: sub,
+        frame: host_remote_build_frame_encode_v4(HostRemoteBuildFrameV4(operation_id: operation_id, index: index, payload: payload))))
+
+# One input frame = one whole file (the Host's staged-file cap, 1 MiB, is below the request chunk). Empty files and files
+# above the cap are refused here before anything is sent.
+pub fn remote_run_input_payload_v1(file: RemoteRunFileV1) -> Result<text, text>:
+    if file.bytes.len() == 0: return Err("remote-run-input-empty")
+    if file.bytes.len() > 1048576: return Err("remote-run-input-too-large")
+    host_remote_build_chunk_encode_v4(file.bytes, false)
+
+# host_remote_build_output_v4: chunk `index` plus the whole manifest. Everything is re-derived and compared.
+pub fn remote_run_output_decode_v1(source: text, operation_id: text) -> Result<RemoteRunOutputChunkV1, text>:
+    val fields = remote_run_reply_fields_v1(source, 8, "host-remote-build-output")?
+    if remote_run_reply_text_v1(fields, "operationId")? != operation_id: return Err("remote-run-output-operation")
+    val items = match fields["chunkDigests"]:
+        case SdnValue.Array(value): value
+        case _: return Err("remote-run-output-manifest")
+    var digests: [text] = []
+    for item in items:
+        match item:
+            case SdnValue.String(value): digests.push(value)
+            case _: return Err("remote-run-output-manifest")
+    val manifest = HostRemoteBuildChunkManifestV4(total_bytes: remote_run_reply_int_v1(fields, "totalBytes")?,
+        content_digest: remote_run_reply_text_v1(fields, "contentDigest")?, chunk_digests: digests)
+    if host_remote_build_chunk_manifest_digest_v4(manifest) != remote_run_reply_text_v1(fields, "manifestDigest")?:
+        return Err("remote-run-output-manifest-digest")
+    val index = remote_run_reply_int_v1(fields, "index")?
+    if index < 0 or index >= digests.len(): return Err("remote-run-output-index")
+    val chunk = host_remote_build_chunk_decode_v4(remote_run_reply_text_v1(fields, "chunk")?, digests[index], true)?
+    Ok(RemoteRunOutputChunkV1(manifest: manifest, index: index, chunk: chunk))
+
+# Same manifest in every chunk reply, exact count and order, whole-content digest, and the bundle digest the Host's
+# settled collect reply announced. Returns the bundle wire.
+pub fn remote_run_reassemble_v1(manifest: HostRemoteBuildChunkManifestV4, chunks: [[u8]], bundle_digest: text) -> Result<text, text>:
+    val bytes = host_remote_build_chunk_assemble_v4(manifest, chunks)?
+    if not utf8_bytes_valid(bytes): return Err("remote-run-bundle-encoding")
+    val wire = bytes_to_text(bytes)
+    if sha256_text(wire) != bundle_digest: return Err("remote-run-bundle-digest")
+    Ok(wire)
+
+# @allow(primitive_api) boolean equality verdict of two manifests
+pub fn remote_run_manifest_same_v1(left: HostRemoteBuildChunkManifestV4, right: HostRemoteBuildChunkManifestV4) -> bool:
+    host_remote_build_chunk_manifest_digest_v4(left) == host_remote_build_chunk_manifest_digest_v4(right)
+
+# The controller-built `service-restart` receipt (never carried by the Host): from its own admitted task and policy and
+# its own request/grant digests.
+pub fn remote_run_service_restart_receipt_v1(task: BuildTaskV1, policy: RemoteEvidencePolicyV1, request_digest: text,
+        grant_digest: text) -> Result<RemoteContainerResetFailureV3, text>:
+    remote_container_reset_failure_new_v3(task, policy, request_digest, grant_digest)
+
+export RemoteRunReplyV1, RemoteRunOutputChunkV1, REMOTE_RUN_REAPED_CODE_V1
+export remote_run_reply_decode_v1, remote_run_reply_phase_v1, remote_run_reaped_v1, remote_run_association_check_v1
+export remote_run_sub_payload_v1, remote_run_input_payload_v1, remote_run_output_decode_v1, remote_run_reassemble_v1
+export remote_run_manifest_same_v1, remote_run_service_restart_receipt_v1, remote_run_execute_reply_check_v1, remote_run_refused_reply_v1

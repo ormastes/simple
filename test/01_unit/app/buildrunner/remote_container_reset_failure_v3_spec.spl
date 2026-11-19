@@ -1,0 +1,68 @@
+"""
+## Purpose and audience
+Pins milestone_0030 DESIGN 13.5 (reduced) in `src/app/buildrunner/remote_container_reset_failure_v3.spl`: the controller
+builds ONE receipt, stage `service-restart` (reap `absent-run-lost`, empty native id and binding), from its own admitted
+task, policy and digests when the Host answers `linux-host-remote-build-reaped-incomplete`. The other stages need a Host
+emitter that does not exist and stay refused. Written for owners of the remote build route.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary).
+## Compatibility and limitations
+Pure data; the receipt is unsigned and never decoded from the wire. `accept_reset_failure_v3` is pinned in
+`remote_container_session_v3_spec.spl`.
+## Verification guidance and troubleshooting
+Each refusal names the exact error string; a changed string is a contract change.
+"""
+use std.spec.{step, expect}
+use std.common.crypto.sha256.sha256_text
+use app.buildrunner.remote_container_reset_failure_v3.*
+use test.fixtures.buildrunner.remote_container_parent_v2.container_parent_fixture_v2
+use std.nogc_sync_mut.io.dir_ops.dir_remove_all
+
+describe "Remote container reset-failure receipt V3 (service-restart only)":
+    it "builds the service-restart receipt with no runtime identity":
+        # @req M0030-RESET3-02
+        val fixture = container_parent_fixture_v2()
+        val receipt = remote_container_reset_failure_new_v3(fixture.task, fixture.policy, sha256_text("request"),
+            sha256_text("grant")).unwrap()
+        expect(receipt.stage).to_equal("service-restart")
+        expect(receipt.reap).to_equal("absent-run-lost")
+        expect(receipt.reason).to_equal("REMOTE_CONTAINER_SERVICE_RESTART_RUN_LOST")
+        expect(receipt.native_id).to_equal("")
+        expect(receipt.workspace_binding_digest).to_equal("")
+        step("any other stage, a runtime id or a binding digest is refused")
+        var other = receipt
+        other.stage = "destroy-absence"
+        expect(remote_container_reset_failure_encode_v3(other)).to_equal(Err("REMOTE_RESET_FAILURE_STAGE_INVALID"))
+        var native = receipt
+        native.native_id = "native_1"
+        expect(remote_container_reset_failure_encode_v3(native)).to_equal(Err("REMOTE_RESET_FAILURE_RUNTIME_INVALID"))
+        var binding = receipt
+        binding.workspace_binding_digest = "b".repeat(64)
+        expect(remote_container_reset_failure_encode_v3(binding)).to_equal(Err("REMOTE_RESET_FAILURE_IDENTITY_INVALID"))
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "encodes one canonical V3 wire whose digest is its sha256":
+        # @req M0030-RESET3-03
+        val fixture = container_parent_fixture_v2()
+        val receipt = remote_container_reset_failure_new_v3(fixture.task, fixture.policy, sha256_text("request"),
+            sha256_text("grant")).unwrap()
+        val wire = remote_container_reset_failure_encode_v3(receipt).unwrap()
+        expect(wire).to_start_with("SIMPLE-REMOTE-RESET-FAILURE-3\n")
+        expect(remote_container_reset_failure_digest_v3(receipt).unwrap()).to_equal(sha256_text(wire))
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "binds only to the controller's own admitted task, policy and authority digests":
+        # @req M0030-RESET3-04
+        val fixture = container_parent_fixture_v2()
+        val receipt = remote_container_reset_failure_new_v3(fixture.task, fixture.policy, sha256_text("request"),
+            sha256_text("grant")).unwrap()
+        expect(remote_container_reset_failure_bind_v3(fixture.task, fixture.policy, receipt, sha256_text("request"),
+            sha256_text("grant")).is_ok()).to_equal(true)
+        expect(remote_container_reset_failure_bind_v3(fixture.task, fixture.policy, receipt, sha256_text("other"),
+            sha256_text("grant"))).to_equal(Err("REMOTE_RESET_FAILURE_AUTHORITY_DIFFERS"))
+        var foreign = receipt
+        foreign.operation_id = "operation_9"
+        expect(remote_container_reset_failure_bind_v3(fixture.task, fixture.policy, foreign, sha256_text("request"),
+            sha256_text("grant"))).to_equal(Err("REMOTE_RESET_FAILURE_BINDING_DIFFERS"))
+        expect(dir_remove_all(fixture.root)).to_equal(true)

@@ -1,0 +1,203 @@
+"""
+## Purpose and audience
+milestone_0030 controller half: the pure frame layer of `remote-run`: the N12-a task->request association check, the
+V6 sub-operation payloads, the Host reply decoders, chunk reassembly and the controller-built service-restart receipt.
+Written for owners of the controller driver.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`. Status: AUTHORED, NOT_RUN (no runnable
+binary when written, 2026-11-19).
+## Compatibility and limitations
+Replies are built the way host_remote_build_reply_v4 / host_remote_build_output_v4 build them (canonical SDN).
+## Verification guidance and troubleshooting
+Every association mismatch names its own refusal code; a changed code is a contract change.
+"""
+use std.spec.{describe, it, expect}
+use app.orchestrator.remote_run_frames_v1.{remote_run_reply_decode_v1, remote_run_reply_phase_v1, remote_run_reaped_v1,
+    remote_run_association_check_v1, remote_run_sub_payload_v1, remote_run_input_payload_v1, remote_run_output_decode_v1,
+    remote_run_reassemble_v1, remote_run_service_restart_receipt_v1, remote_run_execute_reply_check_v1,
+    remote_run_refused_reply_v1}
+use std.common.contracts.orchestration.host_service_operation_reply_v6.{HostServiceOperationReplyV6,
+    host_service_operation_reply_encode_v6}
+use app.orchestrator.remote_run_author_v1.RemoteRunFileV1
+use std.common.contracts.container.execution_draft_v3.container_execution_draft_bind_v3
+use std.common.contracts.container.execution_v2.ContainerHostScopeV2
+use std.common.contracts.orchestration.host_execution_association_v3.HostExecutionAssociationV3
+use std.common.contracts.orchestration.host_remote_build_chunk_v4.{host_remote_build_chunk_manifest_v4,
+    host_remote_build_chunk_split_v4, host_remote_build_chunk_encode_v4, host_remote_build_chunk_manifest_digest_v4}
+use std.common.contracts.orchestration.host_remote_build_operation_v6.host_remote_build_sub_decode_v6
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.host_remote_build_frame_decode_v4
+use std.common.crypto.sha256.sha256_text
+use std.common.text_bytes.bytes_to_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use test.fixtures.orchestration.remote_run_fixture_v1.rr_authored_v1
+
+fn rf_service_scope_v1() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "worker_1", service_scope_id: "svc_1", boot_id: "", provider_generation: 1,
+        native_machine_id: "machine_1", continuity_mode: "service-incarnation-v1", continuity_id: "inc_1")
+
+fn rf_native_scope_v1() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "worker_1", service_scope_id: "epoch-" + "a".repeat(64), boot_id: "boot_1",
+        provider_generation: 1, native_machine_id: "machine_1", continuity_mode: "native-boot-incarnation-v1",
+        continuity_id: "boot_1")
+
+fn rf_association_v1() -> HostExecutionAssociationV3:
+    val draft = rr_authored_v1().unwrap().draft
+    HostExecutionAssociationV3(enrollment_digest: "1".repeat(64), service_scope: rf_service_scope_v1(),
+        intent_digest: "2".repeat(64), prepared_receipt_digest: "3".repeat(64), prepared_revision: 1,
+        epoch_record_digest: "4".repeat(64), service_process_identity_digest: "5".repeat(64),
+        execution: container_execution_draft_bind_v3(draft, rf_native_scope_v1()).unwrap(), readonly_rootfs: false,
+        remote_build_task_digest: draft.remote_build_task_digest)
+
+fn rf_reply_v1(stage: text, bundle: text) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-remote-build"),
+        "operationId": SdnValue.String("operation_a"), "stage": SdnValue.String(stage), "received": SdnValue.Int(2),
+        "inputs": SdnValue.Int(5), "outcome": SdnValue.String(""), "bundleDigest": SdnValue.String(bundle),
+        "cancelCause": SdnValue.String("")}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+fn rf_output_v1(bytes: [u8], index: i64) -> text:
+    val manifest = host_remote_build_chunk_manifest_v4(bytes, true).unwrap()
+    val chunks = host_remote_build_chunk_split_v4(bytes, true)
+    var digests: [SdnValue] = []
+    for digest in manifest.chunk_digests: digests.push(SdnValue.String(digest))
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("host-remote-build-output"),
+        "operationId": SdnValue.String("operation_a"), "totalBytes": SdnValue.Int(manifest.total_bytes),
+        "contentDigest": SdnValue.String(manifest.content_digest), "chunkDigests": SdnValue.Array(digests),
+        "manifestDigest": SdnValue.String(host_remote_build_chunk_manifest_digest_v4(manifest)),
+        "index": SdnValue.Int(index), "chunk": SdnValue.String(host_remote_build_chunk_encode_v4(chunks[index], true).unwrap())}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+describe "remote-run frames (milestone_0030 controller half)":
+    it "accepts the association exactly equal to the authored draft bound to a native scope":
+        val authored = rr_authored_v1().unwrap()
+        expect(remote_run_association_check_v1(authored.draft, rf_association_v1(), rf_service_scope_v1())).to_equal(Ok(true))
+
+    it "refuses every plan or request_bytes field that differs from the authored draft (N12-a binding)":
+        val authored = rr_authored_v1().unwrap()
+        var uid = rf_association_v1()
+        uid.execution.plan.workload_uid = "task_b"
+        var attempt = rf_association_v1()
+        attempt.execution.plan.attempt = 2
+        var operation = rf_association_v1()
+        operation.execution.plan.operation_id = "operation_b"
+        var digest = rf_association_v1()
+        digest.execution.plan.request_digest = "9".repeat(64)
+        var bytes = rf_association_v1()
+        bytes.execution.request_bytes = bytes.execution.request_bytes + " "
+        var backend = rf_association_v1()
+        backend.execution.plan.backend = "windows-docker-process"
+        for mismatch in [uid, attempt, operation, digest, bytes, backend]:
+            expect(remote_run_association_check_v1(authored.draft, mismatch, rf_service_scope_v1())).to_equal(
+                Err("remote-run-association-draft-differs"))
+
+    it "refuses a foreign host, a non-native or empty native scope, a different service scope and a wrong workload kind":
+        val authored = rr_authored_v1().unwrap()
+        var host = rf_association_v1()
+        host.execution.plan.physical_host_id = "worker_2"
+        expect(remote_run_association_check_v1(authored.draft, host, rf_service_scope_v1())).to_equal(Err("remote-run-association-host"))
+        var mode = rf_association_v1()
+        mode.execution.plan.continuity_mode = "service-incarnation-v1"
+        var boot = rf_association_v1()
+        boot.execution.plan.boot_id = ""
+        var generation = rf_association_v1()
+        generation.execution.plan.provider_generation = 0
+        var epoch = rf_association_v1()
+        epoch.execution.plan.service_scope_id = "svc_1"
+        var machine = rf_association_v1()
+        machine.execution.plan.native_machine_id = ""
+        for bad in [mode, boot, generation, epoch, machine]:
+            expect(remote_run_association_check_v1(authored.draft, bad, rf_service_scope_v1()).is_err()).to_equal(true)
+        var scope = rf_service_scope_v1()
+        scope.service_scope_id = "svc_2"
+        expect(remote_run_association_check_v1(authored.draft, rf_association_v1(), scope)).to_equal(
+            Err("remote-run-association-service-scope"))
+        var marker = rf_association_v1()
+        marker.remote_build_task_digest = "8".repeat(64)
+        var empty_marker = rf_association_v1()
+        empty_marker.remote_build_task_digest = ""
+        var agent = rf_association_v1()
+        agent.agent_invocation_manifest_digest = "7".repeat(64)
+        var readonly = rf_association_v1()
+        readonly.readonly_rootfs = true
+        for kind in [marker, empty_marker, agent, readonly]:
+            expect(remote_run_association_check_v1(authored.draft, kind, rf_service_scope_v1())).to_equal(
+                Err("remote-run-association-workload-kind"))
+
+    it "wraps every route frame in the V6 sub-operation envelope for its own operation":
+        val wire = remote_run_sub_payload_v1("input", "operation_a", 3, "Zm9v").unwrap()
+        val sub = host_remote_build_sub_decode_v6(wire).unwrap()
+        expect(sub.sub).to_equal("input")
+        val frame = host_remote_build_frame_decode_v4(sub.frame).unwrap()
+        expect(frame.operation_id).to_equal("operation_a")
+        expect(frame.index).to_equal(3)
+        expect(frame.payload).to_equal("Zm9v")
+        expect(remote_run_sub_payload_v1("bogus", "operation_a", 0, "").is_err()).to_equal(true)
+
+    it "sends one whole file per input frame and refuses an empty or oversize file":
+        expect(remote_run_input_payload_v1(RemoteRunFileV1(path: "a", bytes: [1u8, 2u8])).is_ok()).to_equal(true)
+        expect(remote_run_input_payload_v1(RemoteRunFileV1(path: "a", bytes: []))).to_equal(Err("remote-run-input-empty"))
+        var big: [u8] = []
+        for i in 0..1048577: big.push(7u8)
+        expect(remote_run_input_payload_v1(RemoteRunFileV1(path: "a", bytes: big))).to_equal(Err("remote-run-input-too-large"))
+
+    it "decodes the executor stage reply strictly and classifies the phase":
+        expect(remote_run_reply_phase_v1(remote_run_reply_decode_v1(rf_reply_v1("start", ""), "operation_a").unwrap())).to_equal("poll")
+        expect(remote_run_reply_phase_v1(remote_run_reply_decode_v1(rf_reply_v1("settled", "a".repeat(64)), "operation_a").unwrap())).to_equal("done")
+        expect(remote_run_reply_phase_v1(remote_run_reply_decode_v1(rf_reply_v1("settled", ""), "operation_a").unwrap())).to_equal("terminal")
+        expect(remote_run_reply_phase_v1(remote_run_reply_decode_v1(rf_reply_v1("failed", ""), "operation_a").unwrap())).to_equal("terminal")
+        expect(remote_run_reply_phase_v1(remote_run_reply_decode_v1(rf_reply_v1("wedged", ""), "operation_a").unwrap())).to_equal("terminal")
+        expect(remote_run_reply_decode_v1(rf_reply_v1("start", ""), "operation_b")).to_equal(Err("remote-run-reply-operation"))
+        expect(remote_run_reply_decode_v1(rf_reply_v1("start", "").replace("stage", "stagf"), "operation_a").is_err()).to_equal(true)
+
+    it "reassembles the output chunks against the manifest and the announced bundle digest":
+        var bytes: [u8] = []
+        for i in 0..700000: bytes.push((32 + i % 90) as u8)
+        val first = remote_run_output_decode_v1(rf_output_v1(bytes, 0), "operation_a").unwrap()
+        val second = remote_run_output_decode_v1(rf_output_v1(bytes, 1), "operation_a").unwrap()
+        expect(first.manifest.chunk_digests.len()).to_equal(2)
+        expect(first.index).to_equal(0)
+        expect(second.index).to_equal(1)
+        val wire = remote_run_reassemble_v1(first.manifest, [first.chunk, second.chunk], sha256_text(bytes_to_text(bytes)))
+        expect(wire.is_ok()).to_equal(true)
+        expect(remote_run_reassemble_v1(first.manifest, [first.chunk], sha256_text(bytes_to_text(bytes))).is_err()).to_equal(true)
+        expect(remote_run_reassemble_v1(first.manifest, [first.chunk, second.chunk], "0".repeat(64))).to_equal(
+            Err("remote-run-bundle-digest"))
+        expect(remote_run_output_decode_v1(rf_output_v1(bytes, 0).replace("totalBytes", "totalBytez"), "operation_a").is_err()).to_equal(true)
+        expect(remote_run_output_decode_v1(rf_output_v1(bytes, 0), "operation_b")).to_equal(Err("remote-run-output-operation"))
+
+    it "recognises the reaped refusal and builds the service-restart receipt from its own digests":
+        expect(remote_run_reaped_v1("linux-host-remote-build-reaped-incomplete")).to_equal(true)
+        expect(remote_run_reaped_v1("runtime-host-request-refused\n{error: \"linux-host-remote-build-reaped-incomplete\"}")).to_equal(true)
+        expect(remote_run_reaped_v1("linux-host-remote-build-deadline")).to_equal(false)
+        val authored = rr_authored_v1().unwrap()
+        val receipt = remote_run_service_restart_receipt_v1(authored.task, authored.policy, "a".repeat(64), "b".repeat(64)).unwrap()
+        expect(receipt.stage).to_equal("service-restart")
+        expect(receipt.reap).to_equal("absent-run-lost")
+        expect(receipt.native_id).to_equal("")
+        expect(receipt.operation_id).to_equal("operation_a")
+
+    it "accepts only the Host's execution-admission reply for this operation and association":
+        val ok = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-execution-admission"),
+            "operationId": SdnValue.String("operation_a"), "associationDigest": SdnValue.String("a".repeat(64)),
+            "state": SdnValue.String("execution-admitted"), "pending": SdnValue.Bool(true)}
+        val wire = sdn_encode_canonical(SdnValue.Dict(ok)) + "\n"
+        expect(remote_run_execute_reply_check_v1(wire, "operation_a", "a".repeat(64))).to_equal(Ok(true))
+        expect(remote_run_execute_reply_check_v1(wire, "operation_b", "a".repeat(64))).to_equal(Err("remote-run-execute-reply-operation"))
+        expect(remote_run_execute_reply_check_v1(wire, "operation_a", "b".repeat(64))).to_equal(Err("remote-run-execute-reply-association"))
+        expect(remote_run_execute_reply_check_v1(wire.replace("execution-admitted", "execution-refused"), "operation_a", "a".repeat(64))).to_equal(Err("remote-run-execute-reply-state"))
+        expect(remote_run_execute_reply_check_v1("not sdn", "operation_a", "a".repeat(64)).is_err()).to_equal(true)
+        expect(remote_run_execute_reply_check_v1(wire.replace("linux-host-execution-admission", "other"), "operation_a", "a".repeat(64)).is_err()).to_equal(true)
+
+    it "turns an encoded V6 Host refusal into error + payload text the reaped detector reads":
+        val reply = HostServiceOperationReplyV6(action: "remote-build", service_incarnation: "1".repeat(32), operation_id: "operation_a",
+            scope_digest: "2".repeat(64), request_digest: "3".repeat(64), pending: false, exit_code: 2,
+            payload: "{error: \"linux-host-remote-build-reaped-incomplete\"}", error: "runtime-host-request-refused")
+        val text_form = remote_run_refused_reply_v1(host_service_operation_reply_encode_v6(reply).unwrap())
+        expect(text_form.starts_with("runtime-host-request-refused\n")).to_equal(true)
+        expect(remote_run_reaped_v1(text_form)).to_equal(true)
+        var bare = reply
+        bare.error = ""
+        bare.payload = ""
+        expect(remote_run_refused_reply_v1(host_service_operation_reply_encode_v6(bare).unwrap())).to_equal("dispatch-host-nonzero\n")
+        expect(remote_run_refused_reply_v1("garbage")).to_equal("remote-run-host-refused-undecodable\n")

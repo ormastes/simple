@@ -1,0 +1,318 @@
+"""
+## Purpose and audience
+milestone_0030 controller half: the `remote-run` driver's phase sequence over a recording LINK double and a real
+issue-then-verify ISSUER (public test seeds). Written for owners of the controller driver.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`. Status: AUTHORED, NOT_RUN (no runnable
+binary when written, 2026-11-19).
+## Compatibility and limitations
+Two doubles: a one-shot double that ends the run at the first request after status (the first half: status -> signed
+associated prepare, and the refusals before any request) and a SCRIPTED Host double that answers the whole sequence
+(associated prepare with a real association, execution admission, stage replies, a reaped collect or a timed-out poll).
+The dispatch layer (live exchange) needs an installed Controller root and Host reader and is pinned by the dispatch-remote
+spec; the accepted-bundle path is pinned by the session spec. The live Host path is not run here.
+## Verification guidance and troubleshooting
+A changed order of calls is a contract change: the build row must be admitted before the Host may execute.
+"""
+use std.spec.{describe, it, expect}
+use std.io.file_read_text
+use app.orchestrator.remote_run_v1.{RemoteRunFactsV1, RemoteRunLinkV1, RemoteRunIssuerV1, remote_run_drive_v1, remote_run_grant_v1}
+use app.orchestrator.controller_authority_issue_v1.{ControllerIssuedAuthorityV1, controller_authority_issue_v1}
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2, ExecutionEnvironmentV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.distributed_environment_digest_v2
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
+use std.common.contracts.orchestration.host_controller_status_v3.{HostControllerStatusV3, host_controller_status_encode_v3}
+use std.common.contracts.orchestration.host_prepare_associated_v3.host_prepare_associated_decode_v3
+use std.common.contracts.orchestration.host_execution_association_v3.{HostExecutionAssociationV3, HostPreparedAssociatedReplyV3,
+    host_prepared_associated_reply_encode_v3, host_execution_association_digest_v3}
+use std.common.contracts.orchestration.host_reservation_codec_v1.{host_reservation_receipt_v1, host_reservation_encode_intent_v1}
+use std.common.contracts.container.execution_draft_v3.container_execution_draft_bind_v3
+use std.common.contracts.orchestration.host_remote_build_operation_v6.host_remote_build_sub_decode_v6
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalV2
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.DistributedAuthorityKeyV2
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_authority_snapshot_create_v2
+use std.nogc_sync_mut.io.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.{ControllerDispatchConfigV1, ControllerDispatchContextV1}
+use std.common.crypto.ed25519.pure_ed25519_keypair_from_seed
+use app.orchestrator.host_identity_key_v1.host_identity_private_encode_v1
+use test.fixtures.orchestration.remote_run_fixture_v1.rr_authored_v1
+
+class RrLogV1:
+    var calls: [text] = []
+    var prepare_payload: text = ""
+    var ready: bool = true
+
+fn rr_seed_v1(offset: i64) -> [u8]:
+    var seed: [u8] = []
+    for i in 0..32: seed.push((i + offset) as u8)
+    seed
+
+fn rr_file_v1(offset: i64) -> [u8]:
+    val seed = rr_seed_v1(offset)
+    host_identity_private_encode_v1(seed, pure_ed25519_keypair_from_seed(seed).1, [9, 8, 7, 6], "public-test-fixture").unwrap()
+
+fn rr_key_v1(identity: text, role: text, offset: i64) -> DistributedAuthorityKeyV2:
+    DistributedAuthorityKeyV2(identity: identity, role: role, revision: 1,
+        public_key: pure_ed25519_keypair_from_seed(rr_seed_v1(offset)).1, principal: "user_1", project: "project_1",
+        host_id: "worker_1", operations: ["build", "host_reservation_v1", "host_execute_associated_v3", "host_agent_cancel_v4"],
+        maximum_memory_bytes: 1073741824, maximum_duration_ms: 4000, policy_revision: 4, revocation_epoch: 2,
+        expires_at: 10000, revoked: false)
+
+fn rr_context_v1() -> ControllerDispatchContextV1:
+    val snapshot = distributed_authority_snapshot_create_v2([rr_key_v1("controller_1", "grant-issuer", 1),
+        rr_key_v1("approver_1", "human-approver", 65), rr_key_v1("worker_1", "execution-host", 129)], 9, 4, 2).unwrap()
+    ControllerDispatchContextV1(config: ControllerDispatchConfigV1(controller_id: "controller_1", controller_epoch: 7,
+        target: "retained-host-service-v1", host_root: "/var/lib/simple/host", host_authority_id: "host_authority_1",
+        provider_identity_digest: "e".repeat(64), authority_policy_digest: "f".repeat(64)),
+        policy: LocalAuthorityPolicyV1(snapshot: snapshot, session_generation: 3, source_digest: "f".repeat(64)))
+
+fn rr_read_key_v1(key: DistributedAuthorityKeyV2) -> Result<[u8], text>:
+    if key.identity == "controller_1": return Ok(rr_file_v1(1))
+    Ok(rr_file_v1(65))
+
+fn rr_issue_v1(grant: ExecutionGrantV2, request: OperationEnvelopeV2) -> Result<ControllerIssuedAuthorityV1, text>:
+    val env = rr_authored_v1().unwrap().environment
+    controller_authority_issue_v1(rr_context_v1(), rr_read_key_v1, "controller_1", "approver_1", grant, request, env,
+        grant.expires_at, 1000)
+
+fn rr_status_v1(host: text, ready: bool) -> text:
+    val scope = ContainerHostScopeV2(physical_host_id: host, service_scope_id: "svc_1", boot_id: "", provider_generation: 1,
+        native_machine_id: "machine_1", continuity_mode: "service-incarnation-v1", continuity_id: "inc_1")
+    host_controller_status_encode_v3(HostControllerStatusV3(scope: scope, authority_id: "host-" + "1".repeat(64),
+        enrollment_digest: "1".repeat(64), provider_identity_digest: "2".repeat(64), revision: 3, cpu_millis: 4000,
+        memory_bytes: 8589934592, available_cpu_millis: 4000, available_memory_bytes: 8589934592,
+        retained_reservations: 0, ready: ready)).unwrap()
+
+fn rr_begin_v1(log: RrLogV1, host: text) -> Result<text, text>:
+    log.calls = log.calls + ["begin"]
+    Ok(rr_status_v1(host, log.ready))
+
+fn rr_send_v1(log: RrLogV1, action: text, payload: text) -> Result<text, text>:
+    log.calls = log.calls + [action]
+    if action == "prepare": log.prepare_payload = payload
+    Err("double-stop-after-" + action)
+
+fn rr_admit_v1(log: RrLogV1, signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2,
+        request: OperationEnvelopeV2) -> Result<bool, text>:
+    log.calls = log.calls + ["admit"]
+    Ok(true)
+
+fn rr_edit_v1(log: RrLogV1, edit: fn(DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>) -> Result<text, text>:
+    log.calls = log.calls + ["edit"]
+    Err("double-no-journal")
+
+fn rr_link_v1(log: RrLogV1, host: text) -> RemoteRunLinkV1:
+    RemoteRunLinkV1(begin: fn() -> Result<text, text>: rr_begin_v1(log, host),
+        send: fn(action: text, payload: text) -> Result<text, text>: rr_send_v1(log, action, payload),
+        admit: fn(signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2) -> Result<bool, text>:
+            rr_admit_v1(log, signed, approval, request),
+        edit: fn(edit: fn(DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>) -> Result<text, text>:
+            rr_edit_v1(log, edit),
+        clock: fn() -> Result<i64, text>: Ok(1000), monotonic_ms: fn() -> i64: 0, pause: fn(ms: i64) -> bool: true)
+
+fn rr_facts_v1(ttl: i64) -> RemoteRunFactsV1:
+    val context = rr_context_v1()
+    RemoteRunFactsV1(snapshot: context.policy.snapshot, session_generation: 3, controller_epoch: 7,
+        grant_id: "grant_1", ttl_ms: ttl, state_root: "/var/lib/simple/state")
+
+describe "remote-run driver sequence (milestone_0030 controller half)":
+    it "reads status then sends ONE signed associated prepare bound to the status scope and the authored draft":
+        val log = RrLogV1()
+        val authored = rr_authored_v1().unwrap()
+        val outcome = remote_run_drive_v1(authored, rr_facts_v1(4000), rr_link_v1(log, "worker_1"),
+            RemoteRunIssuerV1(issue: fn(grant: ExecutionGrantV2, request: OperationEnvelopeV2) -> Result<ControllerIssuedAuthorityV1, text>: rr_issue_v1(grant, request)))
+        expect(log.calls).to_equal(["begin", "prepare"])
+        expect(outcome.state).to_equal("refused")
+        expect(outcome.detail).to_equal("double-stop-after-prepare")
+        val prepared = host_prepare_associated_decode_v3(log.prepare_payload).unwrap()
+        expect(prepared.draft.request_bytes).to_equal(authored.draft.request_bytes)
+        expect(prepared.draft.remote_build_task_digest).to_equal(authored.task_digest)
+        expect(prepared.service_scope.continuity_mode).to_equal("service-incarnation-v1")
+        expect(prepared.prepare.operation.operation).to_equal("host_reservation_v1")
+        expect(prepared.prepare.operation.id).to_equal("operation_a")
+        expect(prepared.prepare.intent.reservation.nonce).to_equal("nonce_a")
+        expect(prepared.prepare.intent.fence.boot_id).to_equal(container_scope_fence_id_v2(prepared.service_scope).unwrap())
+        expect(prepared.prepare.signed.issuer_id).to_equal("controller_1")
+        expect(prepared.prepare.approval.approver_id).to_equal("approver_1")
+
+    it "sends nothing when the Host is not ready, names another host or the lifetime is out of range":
+        val not_ready = RrLogV1()
+        not_ready.ready = false
+        val issuer = RemoteRunIssuerV1(issue: fn(grant: ExecutionGrantV2, request: OperationEnvelopeV2) -> Result<ControllerIssuedAuthorityV1, text>: rr_issue_v1(grant, request))
+        val first = remote_run_drive_v1(rr_authored_v1().unwrap(), rr_facts_v1(4000), rr_link_v1(not_ready, "worker_1"), issuer)
+        expect(first.detail).to_equal("remote-run-host-not-ready")
+        expect(not_ready.calls).to_equal(["begin"])
+        val foreign = RrLogV1()
+        val second = remote_run_drive_v1(rr_authored_v1().unwrap(), rr_facts_v1(4000), rr_link_v1(foreign, "worker_2"), issuer)
+        expect(second.detail).to_equal("remote-run-host-mismatch")
+        expect(foreign.calls).to_equal(["begin"])
+        val ttl = RrLogV1()
+        val third = remote_run_drive_v1(rr_authored_v1().unwrap(), rr_facts_v1(0), rr_link_v1(ttl, "worker_1"), issuer)
+        expect(third.detail).to_equal("remote-run-expiry-invalid")
+        expect(ttl.calls).to_equal(["begin"])
+
+    it "derives one grant over exactly the four operations the Host verifies":
+        val authored = rr_authored_v1().unwrap()
+        val env_digest = distributed_environment_digest_v2(authored.environment).unwrap()
+        val grant = remote_run_grant_v1(authored, rr_facts_v1(4000), "worker_1", env_digest, 1000).unwrap()
+        expect(grant.operations).to_equal(["build", "host_reservation_v1", "host_execute_associated_v3", "host_agent_cancel_v4"])
+        expect(grant.expires_at).to_equal(5000)
+        expect(grant.maximum_memory_bytes).to_equal(536870912)
+        expect(grant.maximum_duration_ms).to_equal(500)
+        expect(grant.environment_digest).to_equal(env_digest)
+
+# ---- the scripted Host double: answers the whole sequence the way the Host routes do ----
+class RsLogV1:
+    var calls: [text] = []
+    var edits: i64 = 0
+    var association_digest: text = ""
+    var execute_reply: text = ""
+    var collect: text = "reaped"
+    var tick: i64 = 0
+
+fn rs_stage_reply_v1(stage: text) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-remote-build"),
+        "operationId": SdnValue.String("operation_a"), "stage": SdnValue.String(stage), "received": SdnValue.Int(0),
+        "inputs": SdnValue.Int(0), "outcome": SdnValue.String(""), "bundleDigest": SdnValue.String(""),
+        "cancelCause": SdnValue.String("")}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+fn rs_prepare_reply_v1(log: RsLogV1, payload: text) -> Result<text, text>:
+    val prepared = host_prepare_associated_decode_v3(payload)?
+    val receipt = host_reservation_receipt_v1(prepared.prepare.intent, prepared.prepare.operation)?
+    val native = ContainerHostScopeV2(physical_host_id: prepared.service_scope.physical_host_id,
+        service_scope_id: "epoch-" + "4".repeat(64), boot_id: "boot_1", provider_generation: 1,
+        native_machine_id: prepared.service_scope.native_machine_id, continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot_1")
+    val association = HostExecutionAssociationV3(enrollment_digest: "1".repeat(64), service_scope: prepared.service_scope,
+        intent_digest: sha256_text(host_reservation_encode_intent_v1(prepared.prepare.intent)?),
+        prepared_receipt_digest: receipt.receipt_digest, prepared_revision: receipt.prepared_revision,
+        epoch_record_digest: "4".repeat(64), service_process_identity_digest: "5".repeat(64),
+        execution: container_execution_draft_bind_v3(prepared.draft, native)?, readonly_rootfs: false,
+        remote_build_task_digest: prepared.draft.remote_build_task_digest)
+    log.association_digest = host_execution_association_digest_v3(association)?
+    host_prepared_associated_reply_encode_v3(HostPreparedAssociatedReplyV3(prepare: prepared, receipt: receipt, association: association))
+
+fn rs_execute_reply_v1(log: RsLogV1) -> text:
+    if log.execute_reply != "": return log.execute_reply
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(4), "kind": SdnValue.String("linux-host-execution-admission"),
+        "operationId": SdnValue.String("operation_a"), "associationDigest": SdnValue.String(log.association_digest),
+        "state": SdnValue.String("execution-admitted"), "pending": SdnValue.Bool(true)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn rs_send_v1(log: RsLogV1, action: text, payload: text) -> Result<text, text>:
+    if action == "prepare":
+        log.calls = log.calls + ["prepare"]
+        return rs_prepare_reply_v1(log, payload)
+    if action == "execute":
+        log.calls = log.calls + ["execute"]
+        return Ok(rs_execute_reply_v1(log))
+    val sub = host_remote_build_sub_decode_v6(payload)?
+    log.calls = log.calls + ["remote-build:" + sub.sub]
+    if sub.sub == "open": return Ok(rs_stage_reply_v1("inputs"))
+    if sub.sub == "input": return Ok(rs_stage_reply_v1("inputs"))
+    if sub.sub == "start": return Ok(rs_stage_reply_v1("enable"))
+    if sub.sub == "collect" and log.collect == "reaped":
+        return Err("runtime-host-request-refused\n{error: \"linux-host-remote-build-reaped-incomplete\"}")
+    if sub.sub == "collect": return Ok(rs_stage_reply_v1("running"))
+    if sub.sub == "cancel": return Ok(rs_stage_reply_v1("cancel-requested"))
+    Err("double-unexpected-" + sub.sub)
+
+fn rs_mono_v1(log: RsLogV1) -> i64:
+    log.tick = log.tick + 600000
+    log.tick
+
+fn rs_begin_v1(log: RsLogV1) -> Result<text, text>:
+    log.calls = log.calls + ["begin"]
+    Ok(rr_status_v1("worker_1", true))
+
+fn rs_admit_v1(log: RsLogV1) -> Result<bool, text>:
+    log.calls = log.calls + ["admit"]
+    Ok(true)
+
+fn rs_edit_v1(log: RsLogV1) -> Result<text, text>:
+    log.edits = log.edits + 1
+    log.calls = log.calls + ["edit"]
+    Ok("ERROR:" + "d".repeat(64))
+
+fn rs_link_v1(log: RsLogV1) -> RemoteRunLinkV1:
+    RemoteRunLinkV1(begin: fn() -> Result<text, text>: rs_begin_v1(log),
+        send: fn(action: text, payload: text) -> Result<text, text>: rs_send_v1(log, action, payload),
+        admit: fn(signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2) -> Result<bool, text>:
+            rs_admit_v1(log),
+        edit: fn(edit: fn(DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>) -> Result<text, text>:
+            rs_edit_v1(log),
+        clock: fn() -> Result<i64, text>: Ok(1000), monotonic_ms: fn() -> i64: rs_mono_v1(log), pause: fn(ms: i64) -> bool: true)
+
+fn rs_issuer_v1() -> RemoteRunIssuerV1:
+    RemoteRunIssuerV1(issue: fn(grant: ExecutionGrantV2, request: OperationEnvelopeV2) -> Result<ControllerIssuedAuthorityV1, text>: rr_issue_v1(grant, request))
+
+describe "remote-run driver, scripted Host (milestone_0030 controller half)":
+    it "runs status -> prepare -> admit -> execute -> open -> inputs -> start and records a reaped run as a failed service-restart":
+        step("The reaped collect answer reaches the recovery edit: the owner is still usable and the row is finished failed")
+        val log = RsLogV1()
+        val authored = rr_authored_v1().unwrap()
+        val outcome = remote_run_drive_v1(authored, rr_facts_v1(4000), rs_link_v1(log), rs_issuer_v1())
+        expect(outcome.detail).to_equal("service-restart")
+        expect(outcome.state).to_equal("reaped-failed")
+        expect(outcome.exit_code).to_equal(2)
+        expect(outcome.digest).to_equal("d".repeat(64))
+        expect(log.edits).to_equal(1)
+        var expected = ["begin", "prepare", "admit", "execute", "remote-build:open"]
+        for index in 0..authored.files.len(): expected = expected + ["remote-build:input"]
+        expected = expected + ["remote-build:start", "remote-build:collect", "edit"]
+        expect(log.calls).to_equal(expected)
+
+    it "admits the build row before the Host may execute and never sends `open` after a wrong execution admission":
+        step("An admission naming another association stops the run before open")
+        val log = RsLogV1()
+        log.execute_reply = "{version: 4, kind: \"linux-host-execution-admission\", operationId: \"operation_a\", associationDigest: \"" + "0".repeat(64) + "\", state: \"execution-admitted\", pending: true}\n"
+        val outcome = remote_run_drive_v1(rr_authored_v1().unwrap(), rr_facts_v1(4000), rs_link_v1(log), rs_issuer_v1())
+        expect(outcome.state).to_equal("refused")
+        expect(outcome.detail).to_equal("remote-run-execute-reply-association")
+        expect(log.calls).to_equal(["begin", "prepare", "admit", "execute"])
+        expect(log.edits).to_equal(0)
+
+    it "sends the controller-signed cancel frame when the bounded collect poll runs out and never edits the journal":
+        step("A run that never settles ends with sub `cancel` after the last collect")
+        val log = RsLogV1()
+        log.collect = "running"
+        val authored = rr_authored_v1().unwrap()
+        val outcome = remote_run_drive_v1(authored, rr_facts_v1(4000), rs_link_v1(log), rs_issuer_v1())
+        expect(outcome.state).to_equal("wait-bounded-cancel-sent")
+        expect(outcome.exit_code).to_equal(2)
+        expect(log.calls[log.calls.len() - 1]).to_equal("remote-build:cancel")
+        expect(log.edits).to_equal(0)
+
+describe "remote-run driver structure (source pins)":
+    it "admits the build row before the associated execute, cancels on a bounded timeout and never reads state.exit_code":
+        val source = file_read_text("src/app/orchestrator/remote_run_v1.spl")
+        val admit = source.index_of("(link.admit)(")
+        val execute = source.index_of("(link.send)(\"execute\"")
+        expect(admit > 0).to_equal(true)
+        expect(execute > admit).to_equal(true)
+        expect(source.contains(".exit_code")).to_equal(false)
+        expect(source.contains("remote_run_cancel_v1(")).to_equal(true)
+        expect(source.contains("REMOTE_RUN_WAIT_MS_V1: i64 = 540000")).to_equal(true)
+        expect(source.contains("accept_wire_v3")).to_equal(true)
+        expect(source.contains("accept_reset_failure_v3")).to_equal(true)
+
+    it "never prints keys, signatures, request bytes or the bundle":
+        val command = file_read_text("src/app/orchestrator/remote_run_command_v1.spl")
+        expect(command.contains("signature")).to_equal(false)
+        expect(command.contains("request_bytes")).to_equal(false)
+        expect(command.contains("\"bundle\"")).to_equal(false)
+        expect(command.contains("controller_dispatch_remote_begin_v3")).to_equal(true)
+        expect(command.contains("controller_dispatch_close_v3")).to_equal(true)
+
+    it "closes the controller root on every refusal after it opened and decodes a Host refusal through the frame layer":
+        val command = file_read_text("src/app/orchestrator/remote_run_command_v1.spl")
+        expect(command.contains("controller_root_cleanup")).to_equal(true)
+        expect(command.contains("remote_run_refused_reply_v1(")).to_equal(true)
+        expect(command.contains("\"host-refused\"")).to_equal(true)
+        expect(command.contains("dir_is_real_no_follow(")).to_equal(true)
+        expect(command.contains("= nil")).to_equal(false)
+        expect(command.contains("REMOTE_RUN_EXCHANGE_MS_V1: i64 = 120000")).to_equal(true)

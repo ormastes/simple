@@ -1,13 +1,18 @@
 # milestone_0030 13.1 / 14.11 (G4): structural transport of the V3 bundle (own header). The measurements travel as
-# their canonical SDN, whose workload exit is L10's `runtime_exit_status_text_v1` form. The controller-side decode lands
-# with the controller driver (remote-run); the Host only encodes.
-use app.buildrunner.remote_container_evidence_v3.{RemoteContainerBundleV3, remote_container_byte_count_v3}
-use app.buildrunner.remote_container_authority_v3.remote_container_completion_encode_v3
-use app.buildrunner.remote_bundle_codec_v1.remote_bundle_blob_lines_v1
-use std.common.contracts.container.workspace_measurement_v3.remote_container_measurements_encode_v3
-use std.common.build_manager.codec.{builder_wire_line_v1, builder_encode_result_v1}
+# their canonical SDN, whose workload exit is L10's `runtime_exit_status_text_v1` form; decode refuses any other form
+# and any non-canonical measurement bytes. Values stay untrusted until freeze, signature and parent state accept.
+use app.buildrunner.remote_container_evidence_v3.{RemoteContainerBytesV3, RemoteContainerBundleV3, remote_container_byte_count_v3}
+use app.buildrunner.remote_evidence_v1.RemoteOutputBytesV1
+use app.buildrunner.remote_container_authority_v3.{remote_container_completion_encode_v3,
+    remote_container_completion_decode_v3}
+use app.buildrunner.remote_bundle_codec_v1.{remote_bundle_blob_lines_v1, remote_bundle_read_blob_v1}
+use std.common.contracts.container.workspace_measurement_v3.{remote_container_measurements_encode_v3,
+    remote_container_measurements_decode_v3}
+use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1,
+    builder_encode_result_v1, builder_decode_result_v1}
 use std.common.build_manager.contracts.builder_relative_path_valid_v1
 use std.common.text_bytes.text_to_utf8_bytes
+use std.nogc_sync_mut.io.external_text_io.io_legacy_utf8
 
 pub val REMOTE_CONTAINER_BUNDLE_BYTES_MAX_V3: i64 = 4194304
 pub val REMOTE_CONTAINER_BUNDLE_WIRE_MAX_V3: i64 = 16777216
@@ -46,4 +51,59 @@ fn remote_container_bundle_encode_v3(bundle: RemoteContainerBundleV3) -> Result<
         return Err("REMOTE_CONTAINER_BUNDLE_WIRE_TOO_LARGE")
     Ok(wire)
 
-export remote_container_bundle_encode_v3
+fn remote_container_bundle_decode_v3(wire: text) -> Result<RemoteContainerBundleV3, text>:
+    if wire.byte_len() > REMOTE_CONTAINER_BUNDLE_WIRE_MAX_V3:
+        return Err("REMOTE_CONTAINER_BUNDLE_WIRE_TOO_LARGE")
+    if not wire.ends_with("\n"): return Err("REMOTE_CONTAINER_BUNDLE_WIRE_INVALID")
+    val fields = wire.split("\n")
+    if fields.len() > 32768: return Err("REMOTE_CONTAINER_BUNDLE_WIRE_INVALID")
+    var reader = BuilderWireReaderV1(lines: fields, index: 0, reason: "")
+    if reader.scalar() != "SIMPLE_REMOTE_CONTAINER_BUNDLE_V3":
+        return Err("REMOTE_CONTAINER_BUNDLE_FRAME_INVALID")
+    var remaining = REMOTE_CONTAINER_BUNDLE_BYTES_MAX_V3
+    val result_read = remote_bundle_read_blob_v1(reader, remaining)?
+    reader = result_read.0
+    val result_bytes = result_read.1
+    remaining = remaining - remote_container_byte_count_v3(result_bytes)
+    val completion_read = remote_bundle_read_blob_v1(reader, remaining)?
+    reader = completion_read.0
+    val completion_bytes = completion_read.1
+    remaining = remaining - remote_container_byte_count_v3(completion_bytes)
+    val measurement_read = remote_bundle_read_blob_v1(reader, remaining)?
+    reader = measurement_read.0
+    val measurement_bytes = measurement_read.1
+    remaining = remaining - remote_container_byte_count_v3(measurement_bytes)
+    val stdout_read = remote_bundle_read_blob_v1(reader, remaining)?
+    reader = stdout_read.0
+    val stdout = stdout_read.1
+    remaining = remaining - remote_container_byte_count_v3(stdout)
+    val stderr_read = remote_bundle_read_blob_v1(reader, remaining)?
+    reader = stderr_read.0
+    val stderr = stderr_read.1
+    remaining = remaining - remote_container_byte_count_v3(stderr)
+    val count = reader.number(4096, false)
+    if reader.reason != "": return Err("REMOTE_CONTAINER_BUNDLE_OUTPUT_COUNT_INVALID")
+    var outputs: [RemoteOutputBytesV1] = []
+    var seen: Dict<text, bool> = {}
+    for index in 0..count:
+        val path = reader.scalar()
+        if reader.reason != "" or not builder_relative_path_valid_v1(path) or seen.contains_key(path):
+            return Err("REMOTE_CONTAINER_BUNDLE_OUTPUT_PATH_INVALID")
+        seen[path] = true
+        if path.byte_len() > remaining: return Err("REMOTE_CONTAINER_BUNDLE_BYTES_EXCEEDED")
+        remaining = remaining - path.byte_len()
+        val content_read = remote_bundle_read_blob_v1(reader, remaining)?
+        reader = content_read.0
+        val content = content_read.1
+        remaining = remaining - remote_container_byte_count_v3(content)
+        outputs = outputs.push(RemoteOutputBytesV1(path, content))
+    if reader.complete_error() != "": return Err("REMOTE_CONTAINER_BUNDLE_WIRE_INVALID")
+    val result_wire = io_legacy_utf8(result_bytes)?
+    val result = builder_decode_result_v1(result_wire)?
+    if builder_encode_result_v1(result) != result_wire:
+        return Err("REMOTE_CONTAINER_BUNDLE_RESULT_NONCANONICAL")
+    val completion = remote_container_completion_decode_v3(io_legacy_utf8(completion_bytes)?)?
+    val measurements = remote_container_measurements_decode_v3(io_legacy_utf8(measurement_bytes)?)?
+    Ok(RemoteContainerBundleV3(result, RemoteContainerBytesV3(measurements, stdout, stderr, outputs), completion))
+
+export remote_container_bundle_encode_v3, remote_container_bundle_decode_v3

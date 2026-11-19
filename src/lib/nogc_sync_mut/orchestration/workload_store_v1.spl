@@ -5,6 +5,9 @@ use std.common.contracts.orchestration.workload_fence_codec_v1.*
 use std.common.contracts.orchestration.assignment_v1.*
 use std.common.contracts.orchestration.host_reservation_codec_v1.HostPreparedReservationReceiptV1
 use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_operation_state_v2.{DistributedOperationStateV2, distributed_operation_initial_v2, distributed_operation_transition_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{DistributedAuthoritySnapshotV2, distributed_verify_grant_approval_from_snapshot_v2}
 use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
 use std.common.task_runner.distributed_operation_journal_v2.*
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.*
@@ -543,6 +546,68 @@ pub fn controller_workload_store_begin_prepare_v1(owner: ControllerWorkloadStore
     val retained = workload_store_exact_binding_v1(owner, binding)?
     val journal = controller_assignment_begin_prepare_v1(owner.journal, retained, operation, grant, fresh)?
     Ok(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: journal, rows: owner.rows))
+
+# milestone_0030 C5: the admit-build-row step. The remote build request (operation build|test, id == the Host operation
+# id) becomes ONE `executing` row on the store's own journal (the single controller writer); the terminal transition is
+# made later by the session accept through controller_workload_store_edit_journal_v1. Nothing here touches Host state or
+# continuity. Authority is re-verified from the installed snapshot at `now` on every call (an expired approval is refused
+# also after a restart); issuer must be this controller. An existing row with the same envelope in executing or
+# outcome-unknown is kept, one left `admitted` by an interrupted admit is completed, any other row for the id is a
+# conflict. Pre-commit refusals return the unchanged store with the code.
+pub struct ControllerRemoteBuildAdmitV1:
+    # The most advanced store: the caller MUST retain it even when `error` is set, because a failed second commit leaves
+    # the first (`admitted`) commit already published and the original store revision-stale.
+    store: ControllerWorkloadStoreV1
+    error: text = ""
+
+fn remote_build_admit_refused_v1(owner: ControllerWorkloadStoreV1, code: text) -> ControllerRemoteBuildAdmitV1:
+    ControllerRemoteBuildAdmitV1(store: owner, error: code)
+
+pub fn controller_workload_store_admit_remote_build_v1(owner: ControllerWorkloadStoreV1,
+        snapshot: DistributedAuthoritySnapshotV2, session_generation: i64, signed: DistributedSignedGrantV2,
+        approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2, now: i64) -> ControllerRemoteBuildAdmitV1:
+    if signed.issuer_id != owner.controller_id: return remote_build_admit_refused_v1(owner, "remote-build-admit-issuer")
+    if request.operation != "build" and request.operation != "test":
+        return remote_build_admit_refused_v1(owner, "remote-build-admit-operation")
+    val verified = distributed_verify_grant_approval_from_snapshot_v2(snapshot, signed, approval, request, now,
+        snapshot.generation, snapshot.policy_revision, snapshot.revocation_epoch, session_generation)
+    if verified.is_err(): return remote_build_admit_refused_v1(owner, verified.unwrap_err())
+    val encoded = distributed_encode_operation_v2(request)
+    if encoded.is_err(): return remote_build_admit_refused_v1(owner, encoded.unwrap_err())
+    val envelope = encoded.unwrap()
+    val prior = distributed_operation_journal_lookup_v2(owner.journal, request.id)
+    var journal = owner.journal
+    var row: Option<DistributedOperationStateV2> = None
+    if prior.is_ok():
+        val found = prior.unwrap()
+        if found.envelope != envelope or found.envelope_digest != sha256_text(envelope):
+            return remote_build_admit_refused_v1(owner, "remote-build-admit-conflict")
+        if found.state == "executing" or found.state == "outcome-unknown": return ControllerRemoteBuildAdmitV1(store: owner)
+        # An exact-envelope row an interrupted admit left `admitted` is completed, never a conflict.
+        if found.state != "admitted": return remote_build_admit_refused_v1(owner, "remote-build-admit-conflict")
+        row = Some(found)
+    else:
+        if prior.unwrap_err() != "OPERATION_NOT_FOUND": return remote_build_admit_refused_v1(owner, prior.unwrap_err())
+        val initial = distributed_operation_initial_v2(envelope)
+        if initial.is_err(): return remote_build_admit_refused_v1(owner, initial.unwrap_err())
+        val admitted = distributed_operation_journal_commit_v2(journal, initial.unwrap())
+        if admitted.is_err(): return remote_build_admit_refused_v1(owner, admitted.unwrap_err())
+        journal = admitted.unwrap()
+        row = Some(initial.unwrap())
+    val next = distributed_operation_transition_v2(row.unwrap(), "executing", "")
+    if next.is_err():
+        return remote_build_admit_refused_v1(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: journal, rows: owner.rows), next.unwrap_err())
+    val executing = distributed_operation_journal_commit_v2(journal, next.unwrap())
+    if executing.is_err():
+        return remote_build_admit_refused_v1(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: journal, rows: owner.rows), executing.unwrap_err())
+    ControllerRemoteBuildAdmitV1(store: ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: executing.unwrap(), rows: owner.rows))
+
+# milestone_0030 C3: the session accept runs on THE controller journal. The closure receives the store's journal and
+# returns the journal it produced plus a result text; the caller retains the returned store (root.retain_v3).
+pub fn controller_workload_store_edit_journal_v1(owner: ControllerWorkloadStoreV1,
+        edit: fn(DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>) -> Result<(ControllerWorkloadStoreV1, text), text>:
+    val edited = edit(owner.journal)?
+    Ok((ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: edited.0, rows: owner.rows), edited.1))
 
 pub fn controller_workload_store_close_v1(owner: ControllerWorkloadStoreV1) -> Result<bool, text>:
     distributed_operation_journal_close_v2(owner.journal)

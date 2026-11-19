@@ -1,0 +1,298 @@
+# milestone_0030 controller half (DESIGN_CTRL.md C4): `simple orchestrator remote-run`, the controller driver of the
+# remote container build. The flow is a pure function of a LINK (the authenticated V6 transport over ONE retained
+# dispatch reader, controller_dispatch_remote_*), an ISSUER (controller_authority_issue_v1, issue-then-verify) and the
+# controller's installed facts, so it is specified without a live Host:
+#   status -> associated prepare -> association check (N12-a task->request binding) -> admit build row (single journal
+#   writer) -> associated execute -> open -> input x n -> start -> collect* -> output x m -> reassemble -> accept
+#   (accept_wire_v3 on the ROOT's journal). A reaped answer becomes the controller-built service-restart receipt.
+# Never printed: keys, signatures, the bundle, request bytes. Printed: state, operation id and result digests. Success is
+# the signed completion's typed exit only (RuntimeExitStatusV1 Exited(0), enforced by freeze/verify inside the session);
+# the V3 state's legacy exit field is never read.
+#
+# Options: --dispatch-root <private root> --config-digest <64 hex pin> --key-store <private root> --approver <id>
+#   --spec <dir> --out <private state root> --grant-id <id> --expires-in-ms <1..86400000>
+# (spec directory formats: remote_run_author_v1.spl header). `--out` is the buildrunner state root where accepted
+# outputs and the task journal live. Named gaps: the Host's prepare deadline is its MONOTONIC clock, so run.sdn carries
+# the operator-observed absolute value; reset-failure stages other than service-restart stay refused (no Host emitter);
+# a cancelled run, or a run the Host ended without a bundle (settled-cancelled, failed, wedged), leaves its controller
+# row executing (named gap: no Host emitter for those outcomes, the operator re-runs under a new operation id).
+# Platform: the dispatch owner admits only the Windows native origin (dispatch_origin_v3), so `remote-run` runs from a
+# Windows controller; on any other controller it ends `refused` at begin (controller-dispatch-native-origin-unavailable).
+# Approver keys must be enrolled for ALL of: build|test, host_reservation_v1, host_execute_associated_v3,
+# host_agent_cancel_v4 (remote_build_task_class_v1 demands every grant operation); otherwise issuance refuses with
+# controller-approval-outside-task-class.
+use app.orchestrator.remote_run_author_v1.RemoteRunAuthoredV1
+use app.orchestrator.remote_run_frames_v1.{remote_run_reply_decode_v1,
+    remote_run_reply_phase_v1, remote_run_reaped_v1, remote_run_association_check_v1, remote_run_sub_payload_v1,
+    remote_run_input_payload_v1, remote_run_output_decode_v1, remote_run_reassemble_v1, remote_run_manifest_same_v1,
+    remote_run_service_restart_receipt_v1, remote_run_execute_reply_check_v1}
+use app.orchestrator.controller_authority_issue_v1.ControllerIssuedAuthorityV1
+use app.orchestrator.remote_build_service_port_v3.{RemoteBuildOpenRecordV3, remote_build_open_record_encode_v3}
+use app.buildrunner.remote_context_v1.{RemoteAuthorityContextV1, remote_context_from_snapshot_v1}
+use app.buildrunner.remote_session_v1.remote_database_session_open_v1
+use app.buildrunner.remote_container_session_v3.{RemoteContainerDatabaseSessionV3, remote_container_session_v3}
+use app.buildrunner.remote_container_reset_failure_v3.RemoteContainerResetFailureV3
+use app.io.file_ops.file_atomic_write
+use std.nogc_sync_mut.io.dir_ops.dir_create_all
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.{HostAgentCancelRequestV4, host_agent_cancel_operation_v4,
+    host_agent_cancel_request_encode_v4}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.DistributedAuthoritySnapshotV2
+use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalV2
+use std.common.task_runner.journal.task_runner_journal_release_v1
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_environment_digest_v2, distributed_encode_operation_v2,
+    distributed_grant_digest_v2}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerExecutionRequestV2, container_execution_plan_digest_v2,
+    container_scope_fence_id_v2}
+use std.common.contracts.container.execution_draft_v3.container_execution_draft_bind_v3
+use std.common.contracts.orchestration.host_capacity_v1.{HostLedgerFenceV1, HostReservationV1, HostReservationStateV1}
+use std.common.contracts.orchestration.host_reservation_codec_v1.{HostReservationIntentV1, host_reservation_bind_intent_v1}
+use std.common.contracts.orchestration.host_prepare_request_v1.HostPrepareRequestV1
+use std.common.contracts.orchestration.host_prepare_associated_v3.{HostPrepareAssociatedRequestV3, host_prepare_associated_encode_v3}
+use std.common.contracts.orchestration.host_execution_association_v3.{host_prepared_associated_reply_decode_v3,
+    host_execution_association_digest_v3}
+use std.common.contracts.orchestration.host_execute_associated_v3.{HostExecuteAssociatedRequestV3,
+    host_execute_associated_operation_v3, host_execute_associated_encode_v3}
+use std.common.contracts.orchestration.host_controller_status_v3.host_controller_status_decode_v3
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
+use std.common.crypto.sha256.sha256_text
+
+# The collect poll (start .. settled) is bounded under the 10 minute rule; every other single wait is bounded by the
+# command's per-exchange cap (remote_run_command_v1.spl REMOTE_RUN_EXCHANGE_MS_V1, 2 minutes). The rule is per wait.
+val REMOTE_RUN_WAIT_MS_V1: i64 = 540000
+val REMOTE_RUN_POLL_MS_V1: i64 = 500
+val REMOTE_RUN_OUTPUT_CHUNKS_MAX_V1: i64 = 64
+
+# The controller's installed facts for one run. Everything comes from the installed policy snapshot and the dispatch
+# config, never from an operator file or a Host frame.
+pub struct RemoteRunFactsV1:
+    snapshot: DistributedAuthoritySnapshotV2
+    session_generation: i64
+    controller_epoch: i64
+    grant_id: text
+    ttl_ms: i64
+    state_root: text
+
+# The authenticated transport seam over ONE retained reader (production: controller_dispatch_remote_*; specs: doubles).
+pub struct RemoteRunLinkV1:
+    begin: fn() -> Result<text, text>
+    send: fn(text, text) -> Result<text, text>
+    admit: fn(DistributedSignedGrantV2, DistributedSignedApprovalV2, OperationEnvelopeV2) -> Result<bool, text>
+    edit: fn(fn(DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>) -> Result<text, text>
+    clock: fn() -> Result<i64, text>
+    monotonic_ms: fn() -> i64
+    pause: fn(i64) -> bool
+
+pub struct RemoteRunIssuerV1:
+    issue: fn(ExecutionGrantV2, OperationEnvelopeV2) -> Result<ControllerIssuedAuthorityV1, text>
+
+pub struct RemoteRunOutcomeV1:
+    exit_code: i64
+    state: text
+    operation_id: text
+    digest: text
+    detail: text
+
+fn remote_run_outcome_v1(exit_code: i64, state: text, operation_id: text, digest: text, detail: text) -> RemoteRunOutcomeV1:
+    RemoteRunOutcomeV1(exit_code: exit_code, state: state, operation_id: operation_id, digest: digest, detail: detail)
+
+pub fn remote_run_grant_v1(authored: RemoteRunAuthoredV1, facts: RemoteRunFactsV1, host_id: text, environment_digest: text,
+        now: i64) -> Result<ExecutionGrantV2, text>:
+    if facts.ttl_ms <= 0 or facts.ttl_ms > 86400000: return Err("remote-run-expiry-invalid")
+    val task = authored.task
+    Ok(ExecutionGrantV2(id: facts.grant_id, principal: authored.spec.principal, project: authored.spec.project, host_id: host_id,
+        operations: [authored.policy.action_kind, "host_reservation_v1", "host_execute_associated_v3", "host_agent_cancel_v4"],
+        environment_digest: environment_digest, policy_revision: facts.snapshot.policy_revision,
+        revocation_epoch: facts.snapshot.revocation_epoch, expires_at: now + facts.ttl_ms,
+        maximum_memory_bytes: task.memory_limit_bytes, maximum_duration_ms: task.timeout_ms))
+
+fn remote_run_envelope_v1(authored: RemoteRunAuthoredV1, facts: RemoteRunFactsV1, host_id: text, environment_digest: text,
+        operation: text, payload_digest: text) -> OperationEnvelopeV2:
+    OperationEnvelopeV2(version: 2, id: authored.policy.operation_id, payload_digest: payload_digest,
+        principal: authored.spec.principal, project: authored.spec.project, host_id: host_id, operation: operation,
+        environment_digest: environment_digest, policy_revision: facts.snapshot.policy_revision,
+        revocation_epoch: facts.snapshot.revocation_epoch, session_generation: facts.session_generation,
+        memory_bytes: authored.task.memory_limit_bytes, duration_ms: authored.task.timeout_ms)
+
+# The service-incarnation scope is the status scope; the plan digest is of the draft bound to THAT scope (what the
+# associated prepare encoder checks), never of the Host's native plan.
+pub fn remote_run_intent_v1(authored: RemoteRunAuthoredV1,
+        authority_id: text, ledger_revision: i64, scope: ContainerHostScopeV2) -> Result<HostReservationIntentV1, text>:
+    val service_plan = container_execution_draft_bind_v3(authored.draft, scope)?
+    val row = HostReservationV1(id: authored.policy.operation_id + "-reservation", operation_id: authored.policy.operation_id,
+        payload_digest: "0".repeat(64), service_scope_id: scope.service_scope_id, assignment_generation: 1,
+        nonce: authored.spec.reservation_nonce, cpu_millis: authored.inputs.cpu_millis, memory_bytes: authored.task.memory_limit_bytes,
+        exclusive_devices: [], prepare_deadline_ms: authored.spec.prepare_deadline_ms, state: HostReservationStateV1.Prepared)
+    host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: scope.physical_host_id,
+        fence: HostLedgerFenceV1(authority_id: authority_id, boot_id: container_scope_fence_id_v2(scope)?,
+            provider_generation: scope.provider_generation, revision: ledger_revision),
+        plan_digest: container_execution_plan_digest_v2(service_plan.plan)?, reservation: row))
+
+fn remote_run_context_v1(authored: RemoteRunAuthoredV1, facts: RemoteRunFactsV1, signed: DistributedSignedGrantV2,
+        approval: DistributedSignedApprovalV2, host_id: text, request: OperationEnvelopeV2,
+        now: i64) -> Result<RemoteAuthorityContextV1, text>:
+    # `observed` is the requested environment re-derived for the status-named host; the Host's own installed environment
+    # record is compared by the Host's port, and its signature over the completion attests it (named limit).
+    var observed = authored.environment
+    observed.host_id = host_id
+    observed.isolation_class = "native-container"
+    remote_context_from_snapshot_v1(facts.snapshot, facts.session_generation, signed, approval, host_id, request,
+        authored.environment, observed, now, authored.assignment_digest, facts.controller_epoch)
+
+fn remote_run_session_open_v1(authored: RemoteRunAuthoredV1, execution: ContainerExecutionRequestV2, state_root: text,
+        journal: DistributedOperationJournalV2) -> Result<RemoteContainerDatabaseSessionV3, text>:
+    val source_root = state_root + "/source"
+    if not dir_create_all(state_root) or not dir_create_all(source_root + "/task-context"):
+        return Err("remote-run-state-root-unavailable")
+    if not file_atomic_write(source_root + "/task-context/" + authored.task.id + ".sdn", authored.task_context):
+        return Err("remote-run-task-context-unwritable")
+    val base = remote_database_session_open_v1(authored.run, state_root, source_root, {authored.task.id: authored.policy}, journal)?
+    remote_container_session_v3(base, [authored.task], {authored.task.id: execution})
+
+# Runs on the ROOT's journal (controller_dispatch_remote_edit_v3): the session's operation commit is the single writer's.
+fn remote_run_accept_apply_v1(authored: RemoteRunAuthoredV1, execution: ContainerExecutionRequestV2,
+        context: RemoteAuthorityContextV1, state_root: text, wire: text,
+        journal: DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>:
+    var session = remote_run_session_open_v1(authored, execution, state_root, journal)?
+    val accepted = session.accept_wire_v3(authored.task, wire, context)
+    val released = task_runner_journal_release_v1(session.parent.database.journal)
+    if accepted.is_err(): return Err(accepted.unwrap_err())
+    if released.is_err(): return Err("remote-run-task-journal-release")
+    Ok((session.parent.operations, accepted.unwrap().result.status + ":" + accepted.unwrap().completion_digest))
+
+fn remote_run_reset_apply_v1(authored: RemoteRunAuthoredV1, execution: ContainerExecutionRequestV2,
+        context: RemoteAuthorityContextV1, state_root: text, receipt: RemoteContainerResetFailureV3,
+        journal: DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>:
+    var session = remote_run_session_open_v1(authored, execution, state_root, journal)?
+    val accepted = session.accept_reset_failure_v3(authored.task, receipt, context)
+    val released = task_runner_journal_release_v1(session.parent.database.journal)
+    if accepted.is_err(): return Err(accepted.unwrap_err())
+    if released.is_err(): return Err("remote-run-task-journal-release")
+    Ok((session.parent.operations, "ERROR:" + accepted.unwrap().digest))
+
+fn remote_run_frame_v1(link: RemoteRunLinkV1, authored: RemoteRunAuthoredV1, sub: text, index: i64,
+        payload: text) -> Result<text, text>:
+    (link.send)("remote-build", remote_run_sub_payload_v1(sub, authored.policy.operation_id, index, payload)?)
+
+# The controller-signed cancel frame, sent when the bounded wait ends after `start` (never a silent drop).
+fn remote_run_cancel_v1(authored: RemoteRunAuthoredV1, facts: RemoteRunFactsV1, link: RemoteRunLinkV1,
+        issue: RemoteRunIssuerV1, grant: ExecutionGrantV2, execute_operation: OperationEnvelopeV2,
+        association_digest: text) -> Result<text, text>:
+    val now = (link.clock)()?
+    val operation = host_agent_cancel_operation_v4(execute_operation, association_digest, HostReservationAuthorizationContextV1(
+        grant_clock: now, monotonic_ms: 0, policy_revision: facts.snapshot.policy_revision,
+        revocation_epoch: facts.snapshot.revocation_epoch, session_generation: facts.session_generation))?
+    val pair = (issue.issue)(grant, operation)?
+    val packet = host_agent_cancel_request_encode_v4(HostAgentCancelRequestV4(operation_id: authored.policy.operation_id,
+        association_digest: association_digest, operation: operation, signed: pair.signed, approval: pair.approval))?
+    remote_run_frame_v1(link, authored, "cancel", 0, packet)
+
+fn remote_run_fetch_bundle_v1(authored: RemoteRunAuthoredV1, link: RemoteRunLinkV1, bundle_digest: text) -> Result<text, text>:
+    val first = remote_run_output_decode_v1(remote_run_frame_v1(link, authored, "output", 0, "")?, authored.policy.operation_id)?
+    if first.manifest.chunk_digests.len() > REMOTE_RUN_OUTPUT_CHUNKS_MAX_V1 or first.index != 0:
+        return Err("remote-run-output-chunk-count")
+    var chunks: [[u8]] = [first.chunk]
+    var index: i64 = 1
+    while index < first.manifest.chunk_digests.len():
+        val next = remote_run_output_decode_v1(remote_run_frame_v1(link, authored, "output", index, "")?,
+            authored.policy.operation_id)?
+        if next.index != index or not remote_run_manifest_same_v1(first.manifest, next.manifest):
+            return Err("remote-run-output-chunk-differs")
+        chunks.push(next.chunk)
+        index = index + 1
+    remote_run_reassemble_v1(first.manifest, chunks, bundle_digest)
+
+fn remote_run_flow_v1(authored: RemoteRunAuthoredV1, facts: RemoteRunFactsV1, link: RemoteRunLinkV1,
+        issue: RemoteRunIssuerV1) -> Result<RemoteRunOutcomeV1, text>:
+    val operation_id = authored.policy.operation_id
+    val status = host_controller_status_decode_v3((link.begin)()?)?
+    if not status.ready: return Err("remote-run-host-not-ready")
+    val scope = status.scope
+    if scope.physical_host_id != authored.environment.host_id: return Err("remote-run-host-mismatch")
+    val environment_digest = distributed_environment_digest_v2(authored.environment)?
+    val now = (link.clock)()?
+    val grant = remote_run_grant_v1(authored, facts, scope.physical_host_id, environment_digest, now)?
+    val intent = remote_run_intent_v1(authored, status.authority_id, status.revision, scope)?
+    val reservation_operation = remote_run_envelope_v1(authored, facts, scope.physical_host_id, environment_digest,
+        "host_reservation_v1", intent.reservation.payload_digest)
+    val build_request = remote_run_envelope_v1(authored, facts, scope.physical_host_id, environment_digest,
+        authored.policy.action_kind, authored.task_digest)
+    val reservation_pair = (issue.issue)(grant, reservation_operation)?
+    val build_pair = (issue.issue)(grant, build_request)?
+    val prepare_wire = host_prepare_associated_encode_v3(HostPrepareAssociatedRequestV3(
+        prepare: HostPrepareRequestV1(intent: intent, operation: reservation_operation, signed: reservation_pair.signed,
+            approval: reservation_pair.approval), draft: authored.draft, service_scope: scope))?
+    val prepared = host_prepared_associated_reply_decode_v3((link.send)("prepare", prepare_wire)?)?
+    if host_prepare_associated_encode_v3(prepared.prepare)? != prepare_wire: return Err("remote-run-prepare-echo-differs")
+    val _bound = remote_run_association_check_v1(authored.draft, prepared.association, scope)?
+    val association_digest = host_execution_association_digest_v3(prepared.association)?
+    # The controller's build row is admitted (verified pair, single journal writer) BEFORE the Host may run anything.
+    val _admitted = (link.admit)(build_pair.signed, build_pair.approval, build_request)?
+    val execute_operation = host_execute_associated_operation_v3(remote_run_envelope_v1(authored, facts, scope.physical_host_id,
+        environment_digest, "host_execute_associated_v3", association_digest), prepared.association)?
+    val execute_pair = (issue.issue)(grant, execute_operation)?
+    val execute_wire = host_execute_associated_encode_v3(HostExecuteAssociatedRequestV3(prepare: prepared.prepare,
+        receipt: prepared.receipt, association: prepared.association, operation: execute_operation,
+        signed: execute_pair.signed, approval: execute_pair.approval))?
+    # `open` is only sent once the Host answered that THIS operation's slot (and association) is admitted.
+    val _admitted_slot = remote_run_execute_reply_check_v1((link.send)("execute", execute_wire)?, operation_id, association_digest)?
+    val record = remote_build_open_record_encode_v3(RemoteBuildOpenRecordV3(task: authored.task, policy: authored.policy,
+        signed: build_pair.signed, approval: build_pair.approval, request: build_request,
+        environment: authored.environment_text, invocation: authored.invocation_bytes))?
+    val _opened = remote_run_reply_decode_v1(remote_run_frame_v1(link, authored, "open", 0, record)?, operation_id)?
+    var index: i64 = 0
+    while index < authored.files.len():
+        val sent = remote_run_frame_v1(link, authored, "input", index, remote_run_input_payload_v1(authored.files[index])?)?
+        val _stored = remote_run_reply_decode_v1(sent, operation_id)?
+        index = index + 1
+    var reply = remote_run_reply_decode_v1(remote_run_frame_v1(link, authored, "start", 0, "")?, operation_id)?
+    val began = (link.monotonic_ms)()
+    var phase = remote_run_reply_phase_v1(reply)
+    var reaped = false
+    var timed_out = false
+    while phase == "poll" and not reaped and not timed_out:
+        if (link.monotonic_ms)() - began > REMOTE_RUN_WAIT_MS_V1:
+            timed_out = true
+        else:
+            val collected = remote_run_frame_v1(link, authored, "collect", 0, "")
+            if collected.is_ok():
+                reply = remote_run_reply_decode_v1(collected.unwrap(), operation_id)?
+                phase = remote_run_reply_phase_v1(reply)
+                if phase == "poll":
+                    val _paused = (link.pause)(REMOTE_RUN_POLL_MS_V1)
+            elif remote_run_reaped_v1(collected.unwrap_err()):
+                reaped = true
+            else:
+                return Err(collected.unwrap_err())
+    if timed_out:
+        val cancelled = remote_run_cancel_v1(authored, facts, link, issue, grant, execute_operation, association_digest)
+        if cancelled.is_err(): return Ok(remote_run_outcome_v1(2, "wait-bounded-cancel-unsent", operation_id, "", cancelled.unwrap_err()))
+        return Ok(remote_run_outcome_v1(2, "wait-bounded-cancel-sent", operation_id, "", ""))
+    val accept_now = (link.clock)()?
+    val context = remote_run_context_v1(authored, facts, build_pair.signed, build_pair.approval, scope.physical_host_id,
+        build_request, accept_now)?
+    val execution = prepared.association.execution
+    if reaped:
+        val receipt = remote_run_service_restart_receipt_v1(authored.task, authored.policy,
+            sha256_text(distributed_encode_operation_v2(build_request)?), distributed_grant_digest_v2(grant)?)?
+        val recorded = (link.edit)(\journal: remote_run_reset_apply_v1(authored, execution, context, facts.state_root, receipt, journal))?
+        return Ok(remote_run_outcome_v1(2, "reaped-failed", operation_id, recorded.substring(6, recorded.byte_len()), "service-restart"))
+    if phase == "terminal": return Ok(remote_run_outcome_v1(2, "host-terminal", operation_id, "", reply.stage + ":" + reply.outcome))
+    val wire = remote_run_fetch_bundle_v1(authored, link, reply.bundle_digest)?
+    val accepted = (link.edit)(\journal: remote_run_accept_apply_v1(authored, execution, context, facts.state_root, wire, journal))?
+    val at = accepted.index_of(":")
+    if at < 0: return Err("remote-run-accept-result")
+    val result_status = accepted.substring(0, at)
+    val digest = accepted.substring(at + 1, accepted.byte_len())
+    if result_status == "OK": return Ok(remote_run_outcome_v1(0, "accepted", operation_id, digest, ""))
+    Ok(remote_run_outcome_v1(2, "accepted-failed-run", operation_id, digest, result_status))
+
+pub fn remote_run_drive_v1(authored: RemoteRunAuthoredV1, facts: RemoteRunFactsV1, link: RemoteRunLinkV1,
+        issue: RemoteRunIssuerV1) -> RemoteRunOutcomeV1:
+    val flow = remote_run_flow_v1(authored, facts, link, issue)
+    if flow.is_err(): return remote_run_outcome_v1(1, "refused", authored.policy.operation_id, "", flow.unwrap_err())
+    flow.unwrap()
+
+export RemoteRunFactsV1, RemoteRunLinkV1, RemoteRunIssuerV1, RemoteRunOutcomeV1
+export remote_run_grant_v1, remote_run_intent_v1, remote_run_drive_v1

@@ -1,0 +1,139 @@
+"""
+## Purpose and audience
+milestone_0030 controller half: the pure authoring of one remote build/test run (spec directory -> task with the
+controller-generated pins -> invocation -> request bytes -> draft). Written for owners of the `remote-run` command.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`. Status: AUTHORED, NOT_RUN (no runnable
+binary when written, 2026-11-19).
+## Compatibility and limitations
+Public test material only. The authored values are checked against the Host's own decoders (request bytes, manifest,
+invocation); the live Host path is not exercised here.
+## Verification guidance and troubleshooting
+A changed refusal string is a contract change. The hash-cycle rule (N12-a) is pinned: no `remote-container/` input.
+"""
+use std.spec.{describe, it, expect}
+use app.orchestrator.remote_run_author_v1.{remote_run_spec_decode_v1, remote_run_host_inputs_decode_v1,
+    remote_run_assignment_digest_v1, remote_run_author_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_decode_v1
+use std.common.contracts.container.build_workspace_manifest_v1.{build_workspace_invocation_decode_v1}
+use std.common.build_manager.contracts.BuildInputV1
+use std.common.build_manager.codec.builder_encode_task_v1
+use std.common.build_manager.remote_build_input_manifest_v3.remote_build_input_manifest_digest_v3
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use test.fixtures.orchestration.remote_run_fixture_v1.{rr_environment_text_v1, rr_task_v1, rr_files_v1, rr_spec_v1,
+    rr_inputs_v1, rr_authored_v1}
+
+fn ra_run_source_v1() -> text:
+    "{version: 1, kind: \"remote-run-spec\", principal: \"user_1\", project: \"project_1\", operationId: \"operation_a\", " +
+        "actionKind: \"build\", expectedTests: [], testReportPath: \"\", maximumBytes: 65536, " +
+        "toolchainInputs: [\"tools/runtime.a\"], prepareDeadlineMs: 9000000, reservationNonce: \"nonce_a\", " +
+        "backend: \"llvm\", runtimeDigest: \"" + "b".repeat(64) + "\"}\n"
+
+describe "remote-run authoring (milestone_0030 controller half)":
+    it "decodes run.sdn strictly and refuses unknown fields, bad actions and bad identities":
+        expect(remote_run_spec_decode_v1(ra_run_source_v1()).is_ok()).to_equal(true)
+        expect(remote_run_spec_decode_v1(ra_run_source_v1().replace("backend: \"llvm\", ", "backend: \"llvm\", extra: 1, ")).is_err()).to_equal(true)
+        expect(remote_run_spec_decode_v1(ra_run_source_v1().replace("actionKind: \"build\"", "actionKind: \"deploy\"")).is_err()).to_equal(true)
+        expect(remote_run_spec_decode_v1(ra_run_source_v1().replace("principal: \"user_1\"", "principal: \"\"")).is_err()).to_equal(true)
+        expect(remote_run_spec_decode_v1(ra_run_source_v1().replace("version: 1", "version: 2")).is_err()).to_equal(true)
+
+    it "refuses host-inputs with a non-digest, a non-positive uid or a missing field":
+        val good = "{version: 1, kind: \"remote-run-host-inputs\", image: \"i\", launcherProgram: \"/l\", guestRoot: \"/w\", " +
+            "hostRoot: \"/h\", containmentDigest: \"" + "c".repeat(64) + "\", uid: 1000, gid: 1000, cpuMillis: 1000, " +
+            "memoryBytes: 1024, pidLimit: 8, timeoutMs: 1000, profileDigest: \"" + "e".repeat(64) +
+            "\", slotBindingDigest: \"" + "f".repeat(64) + "\", preparationBudgetMs: 1000}\n"
+        expect(remote_run_host_inputs_decode_v1(good).is_ok()).to_equal(true)
+        expect(remote_run_host_inputs_decode_v1(good.replace("uid: 1000", "uid: 0")).is_err()).to_equal(true)
+        expect(remote_run_host_inputs_decode_v1(good.replace("containmentDigest: \"" + "c".repeat(64) + "\"", "containmentDigest: \"x\"")).is_err()).to_equal(true)
+        expect(remote_run_host_inputs_decode_v1(good.replace("pidLimit: 8, ", "")).is_err()).to_equal(true)
+
+    it "derives a plan-independent assignment digest":
+        val first = remote_run_assignment_digest_v1("controller_1", 7, "operation_a", "task_a")
+        expect(first).to_equal(remote_run_assignment_digest_v1("controller_1", 7, "operation_a", "task_a"))
+        expect(first == remote_run_assignment_digest_v1("controller_1", 8, "operation_a", "task_a")).to_equal(false)
+        expect(first.byte_len()).to_equal(64)
+
+    it "appends the generated pins and carries NO request pin (N12-a)":
+        val authored = rr_authored_v1().unwrap()
+        var policy_pins = 0
+        var version_pins = 0
+        var context_pins = 0
+        for input in authored.task.inputs:
+            expect(input.path.starts_with("remote-container/")).to_equal(false)
+            if input.path == "remote-policy/task_a.sdn": policy_pins = policy_pins + 1
+            if input.path == "remote-container-version/task_a.sdn":
+                version_pins = version_pins + 1
+                expect(input.digest).to_equal(sha256_text("3\n"))
+            if input.path == "task-context/task_a.sdn": context_pins = context_pins + 1
+        expect(policy_pins).to_equal(1)
+        expect(version_pins).to_equal(1)
+        expect(context_pins).to_equal(1)
+
+    it "lists the files in the Host manifest order with matching digests":
+        val authored = rr_authored_v1().unwrap()
+        expect(authored.files.len()).to_equal(authored.task.inputs.len() + 1)
+        expect(authored.files[0].path).to_equal("tools/simple")
+        expect(sha256_u8_hex(authored.files[0].bytes)).to_equal(authored.task.producer_digest)
+        for index in 0..authored.task.inputs.len():
+            expect(authored.files[index + 1].path).to_equal(authored.task.inputs[index].path)
+            expect(sha256_u8_hex(authored.files[index + 1].bytes)).to_equal(authored.task.inputs[index].digest)
+
+    it "binds the draft marker, the invocation and the request args to ONE acyclic digest chain":
+        val authored = rr_authored_v1().unwrap()
+        expect(authored.task_digest).to_equal(sha256_text(builder_encode_task_v1(authored.task)))
+        expect(authored.draft.remote_build_task_digest).to_equal(authored.task_digest)
+        expect(authored.draft.agent_invocation_manifest_digest).to_equal("")
+        val invocation = build_workspace_invocation_decode_v1(authored.invocation_bytes).unwrap()
+        expect(invocation.task_digest).to_equal(authored.task_digest)
+        expect(invocation.input_manifest_digest).to_equal(remote_build_input_manifest_digest_v3(authored.task).unwrap())
+        val request = linux_oci_retained_request_decode_v1(authored.request_bytes).unwrap()
+        expect(request.args).to_equal(["--build-invocation-sha256", sha256_text(authored.invocation_bytes)])
+        expect(request.command).to_equal(["/opt/build/launch"])
+        expect(request.pod_uid).to_equal("task_a")
+        expect(request.operation_id).to_equal("operation_a")
+        expect(request.terminal_mode).to_equal("none")
+        expect(request.mounts.len()).to_equal(1)
+        expect(authored.draft.request_bytes).to_equal(authored.request_bytes)
+        expect(authored.policy.assignment_digest).to_equal(authored.assignment_digest)
+
+    it "refuses reserved inputs, a missing or wrong producer, a wrong input digest and a non-native environment":
+        val spec = rr_spec_v1()
+        val inputs = rr_inputs_v1()
+        var reserved = rr_task_v1()
+        reserved.inputs = reserved.inputs + [BuildInputV1("remote-container/task_a.sdn", "a".repeat(64))]
+        expect(remote_run_author_v1(spec, inputs, reserved, rr_environment_text_v1(), rr_files_v1(), "controller_1", 7, 5000)).to_equal(
+            Err("remote-run-task-reserved-input"))
+        val no_producer: Dict<text, [u8]> = {"tools/runtime.a": [3u8, 4u8], "src/main.spl": [1u8]}
+        expect(remote_run_author_v1(spec, inputs, rr_task_v1(), rr_environment_text_v1(), no_producer, "controller_1", 7, 5000)).to_equal(
+            Err("remote-run-producer-file-missing"))
+        var wrong = rr_files_v1()
+        wrong["src/main.spl"] = [9u8]
+        expect(remote_run_author_v1(spec, inputs, rr_task_v1(), rr_environment_text_v1(), wrong, "controller_1", 7, 5000)).to_equal(
+            Err("remote-run-input-digest"))
+        expect(remote_run_author_v1(spec, inputs, rr_task_v1(), rr_environment_text_v1().replace("native-container", "process"),
+            rr_files_v1(), "controller_1", 7, 5000)).to_equal(Err("remote-run-isolation-class"))
+
+    it "refuses a container memory limit different from the reserved task limit and a toolchain digest the task does not carry":
+        step("The reservation, the grant and the container must cover the same memory (the Host ledger reserves the task limit)")
+        val spec = rr_spec_v1()
+        var inputs = rr_inputs_v1()
+        inputs.memory_bytes = inputs.memory_bytes * 2
+        expect(remote_run_author_v1(spec, inputs, rr_task_v1(), rr_environment_text_v1(), rr_files_v1(), "controller_1", 7, 5000)).to_equal(
+            Err("remote-run-memory-binding"))
+        step("remote_context_admit_v1 would refuse a differing toolchain digest at accept; authoring refuses it first")
+        var other = rr_task_v1()
+        other.toolchain_digest = "9".repeat(64)
+        expect(remote_run_author_v1(spec, rr_inputs_v1(), other, rr_environment_text_v1(), rr_files_v1(), "controller_1", 7, 5000)).to_equal(
+            Err("remote-run-toolchain-digest"))
+
+    it "refuses host-inputs the N6-a projection would refuse at enable (timeout, pids, cpu bounds)":
+        val good = "{version: 1, kind: \"remote-run-host-inputs\", image: \"i\", launcherProgram: \"/l\", guestRoot: \"/w\", " +
+            "hostRoot: \"/h\", containmentDigest: \"" + "c".repeat(64) + "\", uid: 1000, gid: 1000, cpuMillis: 1000, " +
+            "memoryBytes: 1024, pidLimit: 8, timeoutMs: 1000, profileDigest: \"" + "e".repeat(64) +
+            "\", slotBindingDigest: \"" + "f".repeat(64) + "\", preparationBudgetMs: 1000}\n"
+        expect(remote_run_host_inputs_decode_v1(good.replace("timeoutMs: 1000", "timeoutMs: 30001"))).to_equal(Err("remote-run-host-inputs-invalid"))
+        expect(remote_run_host_inputs_decode_v1(good.replace("timeoutMs: 1000", "timeoutMs: 0"))).to_equal(Err("remote-run-host-inputs-invalid"))
+        expect(remote_run_host_inputs_decode_v1(good.replace("pidLimit: 8", "pidLimit: 4097"))).to_equal(Err("remote-run-host-inputs-invalid"))
+        expect(remote_run_host_inputs_decode_v1(good.replace("cpuMillis: 1000", "cpuMillis: 64001"))).to_equal(Err("remote-run-host-inputs-invalid"))
+        expect(remote_run_host_inputs_decode_v1(good.replace("cpuMillis: 1000", "cpuMillis: 0"))).to_equal(Err("remote-run-host-inputs-invalid"))
+        expect(remote_run_host_inputs_decode_v1(good.replace("memoryBytes: 1024", "memoryBytes: 0"))).to_equal(Err("remote-run-host-inputs-invalid"))

@@ -1,0 +1,144 @@
+"""
+## Purpose and audience
+milestone_0030 C5: the admit-build-row step and the journal edit of the controller workload store. Written for owners of
+the controller remote-run driver and of the single controller journal writer.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`. Status: AUTHORED, NOT_RUN (no runnable
+binary when written, 2026-11-19).
+## Compatibility and limitations
+Actual temporary journal, fixture-only test seeds under test/. A failure of the SECOND commit cannot be induced without a
+fault-injecting journal; the resume-from-admitted case pins the recovery instead.
+## Verification guidance and troubleshooting
+A refusal must leave no row; an admit that returns an error carries the most advanced journal in `.store`.
+"""
+use std.nogc_sync_mut.orchestration.workload_store_v1.*
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
+use std.common.contracts.distributed_operation_state_v2.distributed_operation_initial_v2
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_lookup_v2,
+    distributed_operation_journal_commit_v2}
+use std.common.contracts.distributed_operation_state_v2.distributed_operation_transition_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{DistributedAuthorityKeyV2,
+    distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{DistributedAuthoritySnapshotV2,
+    distributed_authority_snapshot_create_v2}
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.dir_remove
+
+fn admit_seed_v1(offset: i64) -> [u8]:
+    var bytes: [u8] = []
+    for index in 0..32: bytes.push((offset + index) as u8)
+    bytes
+
+fn admit_key_v1(id: text, role: text, offset: i64) -> DistributedAuthorityKeyV2:
+    val actual = pure_ed25519_sign_from_seed_v1(admit_seed_v1(offset), [])
+    DistributedAuthorityKeyV2(identity: id, role: role, revision: 1, public_key: actual.public_key,
+        principal: "user", project: "project", host_id: "controller", operations: ["build", "test"],
+        maximum_memory_bytes: 16000, maximum_duration_ms: 2000, policy_revision: 1,
+        revocation_epoch: 0, expires_at: 2000, revoked: false)
+
+fn admit_snapshot_v1() -> DistributedAuthoritySnapshotV2:
+    distributed_authority_snapshot_create_v2([admit_key_v1("controller-issuer", "grant-issuer", 1),
+        admit_key_v1("controller-approver", "human-approver", 65)], 2, 1, 0).unwrap()
+
+fn admit_request_v1(operation: text) -> OperationEnvelopeV2:
+    OperationEnvelopeV2(version: 2, id: "build-op", payload_digest: "a".repeat(64), principal: "user", project: "project",
+        host_id: "controller", operation: operation, environment_digest: "b".repeat(64), policy_revision: 1,
+        revocation_epoch: 0, session_generation: 3, memory_bytes: 8000, duration_ms: 1000)
+
+fn admit_pair_v1(request: OperationEnvelopeV2, issuer_id: text) -> (DistributedSignedGrantV2, DistributedSignedApprovalV2):
+    val grant = ExecutionGrantV2(id: "grant", principal: "user", project: "project", host_id: "controller",
+        operations: [request.operation], environment_digest: request.environment_digest, policy_revision: 1,
+        revocation_epoch: 0, expires_at: 800, maximum_memory_bytes: 8000, maximum_duration_ms: 1000)
+    var signed = DistributedSignedGrantV2(grant: grant, issuer_id: issuer_id, key_revision: 1, signature: [])
+    signed.signature = pure_ed25519_sign_from_seed_v1(admit_seed_v1(1), distributed_grant_signature_message_v2(signed).unwrap()).signature
+    var approval = DistributedSignedApprovalV2(approver_id: "controller-approver", key_revision: 1,
+        grant_digest: distributed_grant_digest_v2(grant).unwrap(),
+        request_digest: sha256_text(distributed_encode_operation_v2(request).unwrap()),
+        policy_revision: 1, session_generation: 3, expires_at: 700, signature: [])
+    approval.signature = pure_ed25519_sign_from_seed_v1(admit_seed_v1(65), distributed_approval_signature_message_v2(approval).unwrap()).signature
+    (signed, approval)
+
+fn admit_store_v1() -> ControllerWorkloadStoreV1:
+    val root = secure_temp_dir("/tmp", "remote-build-admit-").unwrap()
+    controller_workload_store_open_v1(root, "controller", "a".repeat(64), 4096).unwrap()
+
+fn admit_cleanup_v1(store: ControllerWorkloadStoreV1):
+    val root = store.journal.root
+    expect(controller_workload_store_close_v1(store).unwrap()).to_equal(true)
+    dir_remove(root)
+
+fn admit_run_v1(store: ControllerWorkloadStoreV1, request: OperationEnvelopeV2, issuer: text, now: i64) -> ControllerRemoteBuildAdmitV1:
+    val pair = admit_pair_v1(request, issuer)
+    controller_workload_store_admit_remote_build_v1(store, admit_snapshot_v1(), 3, pair.0, pair.1, request, now)
+
+describe "controller workload store admit-build-row (milestone_0030 C5)":
+    it "admits a verified build request as one executing row on the store journal":
+        step("Issuer is the controller, the pair verifies from the snapshot, the row is executing")
+        val request = admit_request_v1("build")
+        val admitted = admit_run_v1(admit_store_v1(), request, "controller-issuer", 100)
+        expect(admitted.error).to_equal("")
+        val row = distributed_operation_journal_lookup_v2(admitted.store.journal, "build-op").unwrap()
+        expect(row.state).to_equal("executing")
+        expect(row.envelope).to_equal(distributed_encode_operation_v2(request).unwrap())
+        admit_cleanup_v1(admitted.store)
+
+    it "is idempotent for the exact envelope and refuses a different envelope for the same id":
+        step("A second admit of the same envelope keeps the row; a different envelope is a conflict")
+        val request = admit_request_v1("build")
+        val first = admit_run_v1(admit_store_v1(), request, "controller-issuer", 100)
+        val again = admit_run_v1(first.store, request, "controller-issuer", 101)
+        expect(again.error).to_equal("")
+        expect(distributed_operation_journal_lookup_v2(again.store.journal, "build-op").unwrap().state).to_equal("executing")
+        var other = admit_request_v1("build")
+        other.payload_digest = "c".repeat(64)
+        val refused = admit_run_v1(again.store, other, "controller-issuer", 102)
+        expect(refused.error).to_equal("remote-build-admit-conflict")
+        admit_cleanup_v1(refused.store)
+
+    it "resumes an exact-envelope row left `admitted` by an interrupted admit instead of conflicting":
+        step("A journal holding only the admitted row is completed to executing; a different envelope still conflicts")
+        val request = admit_request_v1("build")
+        val store = admit_store_v1()
+        val initial = distributed_operation_initial_v2(distributed_encode_operation_v2(request).unwrap()).unwrap()
+        val partial = ControllerWorkloadStoreV1(controller_id: store.controller_id,
+            journal: distributed_operation_journal_commit_v2(store.journal, initial).unwrap(), rows: store.rows)
+        expect(distributed_operation_journal_lookup_v2(partial.journal, "build-op").unwrap().state).to_equal("admitted")
+        val resumed = admit_run_v1(partial, request, "controller-issuer", 100)
+        expect(resumed.error).to_equal("")
+        expect(distributed_operation_journal_lookup_v2(resumed.store.journal, "build-op").unwrap().state).to_equal("executing")
+        admit_cleanup_v1(resumed.store)
+
+    it "refuses a terminal row, an issuer other than the controller, a non-build operation and an expired approval":
+        step("Each refusal happens before any row is written and returns the unchanged store")
+        val request = admit_request_v1("build")
+        val store = admit_store_v1()
+        expect(admit_run_v1(store, request, "host-issuer", 100).error).to_equal("remote-build-admit-issuer")
+        expect(admit_run_v1(store, admit_request_v1("host_execute_v1"), "controller-issuer", 100).error).to_equal("remote-build-admit-operation")
+        expect(admit_run_v1(store, request, "controller-issuer", 750).error != "").to_equal(true)
+        expect(distributed_operation_journal_lookup_v2(store.journal, "build-op").is_err()).to_equal(true)
+        val admitted = admit_run_v1(store, request, "controller-issuer", 100)
+        val row = distributed_operation_journal_lookup_v2(admitted.store.journal, "build-op").unwrap()
+        val done = distributed_operation_journal_commit_v2(admitted.store.journal, distributed_operation_transition_v2(row, "failed", "d".repeat(64)).unwrap()).unwrap()
+        val terminal = ControllerWorkloadStoreV1(controller_id: admitted.store.controller_id, journal: done, rows: admitted.store.rows)
+        expect(admit_run_v1(terminal, request, "controller-issuer", 100).error).to_equal("remote-build-admit-conflict")
+        admit_cleanup_v1(terminal)
+
+    it "edit returns the journal the closure produced together with its text":
+        step("The closure sees the store's own journal; the returned journal replaces it")
+        val request = admit_request_v1("build")
+        val admitted = admit_run_v1(admit_store_v1(), request, "controller-issuer", 100).store
+        val edited = controller_workload_store_edit_journal_v1(admitted,
+            fn(journal: DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>:
+                val row = distributed_operation_journal_lookup_v2(journal, "build-op")?
+                val next = distributed_operation_journal_commit_v2(journal, distributed_operation_transition_v2(row, "failed", "e".repeat(64))?)?
+                Ok((next, "edited"))).unwrap()
+        expect(edited.1).to_equal("edited")
+        expect(distributed_operation_journal_lookup_v2(edited.0.journal, "build-op").unwrap().state).to_equal("failed")
+        val refused = controller_workload_store_edit_journal_v1(edited.0,
+            fn(journal: DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>: Err("edit-refused"))
+        expect(refused.unwrap_err()).to_equal("edit-refused")
+        admit_cleanup_v1(edited.0)

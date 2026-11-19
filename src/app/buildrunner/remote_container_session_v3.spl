@@ -1,0 +1,160 @@
+# milestone_0030 13.1: the V3 counterpart of RemoteContainerDatabaseSessionV2 over the SAME parent session, operation
+# WAL and task journal. accept_wire_v3 decodes the V3 bundle, freezes the measurements, verifies the host-signed V3
+# completion through the shared authority, writes outputs with readback, journals a ContainerV3 row and commits the
+# operation transition. The journal status follows the typed exit status only (only Exited(0) passes).
+use app.buildrunner.remote_session_v1.{RemoteDatabaseSessionV1, RemoteAcceptedResultV1,
+    remote_operation_collectable_v1, remote_parent_output_path_v1}
+use app.buildrunner.remote_container_evidence_v3.*
+use app.buildrunner.remote_container_authority_v3.*
+use app.buildrunner.remote_container_bundle_codec_v3.remote_container_bundle_decode_v3
+use app.buildrunner.remote_container_reset_failure_v3.{RemoteContainerResetFailureV3, RemoteResetFailedResultV3,
+    remote_container_reset_failure_bind_v3,
+    remote_container_reset_failure_encode_v3, remote_container_reset_failure_digest_v3}
+use app.buildrunner.remote_context_v1.{RemoteAuthorityContextV1, remote_context_admit_v1}
+use std.common.contracts.container.execution_v2.ContainerExecutionRequestV2
+use std.common.contracts.container.runtime_v1.RuntimeExitStatusV1
+use std.common.contracts.container.workspace_measurement_v3.container_exit_status_succeeded_v3
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
+use std.common.contracts.distributed_operation_state_v2.distributed_operation_transition_v2
+use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_lookup_v2,
+    distributed_operation_journal_commit_v2}
+use std.common.task_runner.execution_identity_v2.{TaskRunnerContainerAttemptV3, TaskRunnerAttemptRecordV2,
+    task_runner_record_group_v2, task_runner_record_attempt_v2, task_runner_record_result_digest_v2}
+use std.common.task_runner.journal.{task_runner_journal_history_v2, task_runner_journal_append_v2}
+use std.common.build_manager.contracts.{BuildTaskV1, builder_task_identity_v1}
+use std.common.crypto.sha256.sha256_text
+use app.io.file_ops.{file_atomic_write, file_atomic_write_bytes, file_hash_sha256}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_is_real_no_follow}
+
+class RemoteContainerDatabaseSessionV3:
+    parent: RemoteDatabaseSessionV1
+    requests: Dict<text, ContainerExecutionRequestV2>
+
+impl RemoteContainerDatabaseSessionV3:
+    me accept_wire_v3(task: BuildTaskV1, payload: text,
+            context: RemoteAuthorityContextV1) -> Result<RemoteAcceptedResultV1, text>:
+        self.accept_v3(task, remote_container_bundle_decode_v3(payload)?, context)
+
+    # 13.5: the L6 receipt (unsigned, failure-only, built by the controller on the Host's reaped answer) binds to the SAME collectable op
+    # row as accept_wire_v3; the first terminal wins and the other is refused as REMOTE_COMPLETION_REPLAY. It is
+    # journaled `failed` with the receipt digest through the single operation-journal writer; never `completed`.
+    me accept_reset_failure_v3(task: BuildTaskV1, receipt: RemoteContainerResetFailureV3,
+            context: RemoteAuthorityContextV1) -> Result<RemoteResetFailedResultV3, text>:
+        if not self.parent.policies.contains_key(task.id) or not self.parent.identities.contains_key(task.id) or
+                self.parent.identities[task.id] != builder_task_identity_v1(task) or not self.requests.contains_key(task.id):
+            return Err("REMOTE_CONTAINER_TASK_NOT_ADMITTED")
+        val policy = self.parent.policies[task.id]
+        val _authority = remote_context_admit_v1(context, task, policy)?
+        if context.requested.isolation_class != "native-container" or
+                context.observed.isolation_class != "native-container":
+            return Err("REMOTE_CONTAINER_ISOLATION_REQUIRED")
+        val envelope = distributed_encode_operation_v2(context.request)?
+        val prior = distributed_operation_journal_lookup_v2(self.parent.operations, policy.operation_id)?
+        val _collectable = remote_operation_collectable_v1(prior, policy.operation_id, envelope)?
+        remote_container_reset_failure_bind_v3(task, policy, receipt, sha256_text(envelope),
+            distributed_grant_digest_v2(context.signed.grant)?)?
+        val digest = remote_container_reset_failure_digest_v3(receipt)?
+        # The same retained task-journal check as accept_v3: a row already journaled for this op and attempt must carry
+        # this receipt's digest (a completion journaled before a crashed op commit is never overridden by a receipt).
+        val history = task_runner_journal_history_v2(self.parent.database.journal, self.parent.journal_identities[task.id])?
+        for row in history:
+            if task_runner_record_group_v2(row) == policy.operation_id and task_runner_record_attempt_v2(row) == task.attempt and
+                    task_runner_record_result_digest_v2(row) != digest:
+                return Err("REMOTE_CONTAINER_RECOVERY_EVIDENCE_DIFFERS")
+        if not dir_is_real_no_follow(self.parent.database.window_root): return Err("REMOTE_PARENT_ROOT_UNSAFE")
+        val root = self.parent.database.window_root + "/reset-failed-" + digest
+        if not dir_create_all(root) or not dir_is_real_no_follow(root): return Err("REMOTE_PARENT_ROOT_UNSAFE")
+        if not file_atomic_write(root + "/receipt.sdn", remote_container_reset_failure_encode_v3(receipt)?):
+            return Err("REMOTE_PARENT_OUTPUT_WRITE_FAILED")
+        val receipt_hash = file_hash_sha256(root + "/receipt.sdn")
+        if receipt_hash.is_none() or receipt_hash.unwrap() != digest: return Err("REMOTE_PARENT_OUTPUT_READBACK_DIFFERS")
+        self.parent.operations = distributed_operation_journal_commit_v2(self.parent.operations,
+            distributed_operation_transition_v2(prior, "failed", digest)?)?
+        self.parent.database.recorded[task.id + ":" + str(task.attempt)] = true
+        Ok(RemoteResetFailedResultV3("ERROR", receipt.stage, receipt.reason, receipt.reap, root, digest))
+
+    me accept_v3(task: BuildTaskV1, bundle: RemoteContainerBundleV3,
+            context: RemoteAuthorityContextV1) -> Result<RemoteAcceptedResultV1, text>:
+        if not self.parent.policies.contains_key(task.id) or not self.parent.identities.contains_key(task.id) or
+                self.parent.identities[task.id] != builder_task_identity_v1(task) or not self.requests.contains_key(task.id):
+            return Err("REMOTE_CONTAINER_TASK_NOT_ADMITTED")
+        val policy = self.parent.policies[task.id]
+        val _authority = remote_context_admit_v1(context, task, policy)?
+        if context.requested.isolation_class != "native-container" or
+                context.observed.isolation_class != "native-container":
+            return Err("REMOTE_CONTAINER_ISOLATION_REQUIRED")
+        val envelope = distributed_encode_operation_v2(context.request)?
+        val prior = distributed_operation_journal_lookup_v2(self.parent.operations, policy.operation_id)?
+        val _collectable = remote_operation_collectable_v1(prior, policy.operation_id, envelope)?
+        val frozen = remote_container_evidence_freeze_v3(task, bundle.result, policy, self.requests[task.id], bundle.evidence)?
+        val expected = RemoteContainerBindingV3(builder_task_identity_v1(task), policy.host_id,
+            policy.assignment_digest, policy.controller_epoch, policy.operation_id,
+            frozen.result_digest, frozen.measurement_digest, frozen.stdout_digest, frozen.stderr_digest,
+            frozen.output_inventory_digest, frozen.tests_digest)
+        val completion = remote_container_verify_completion_v3(bundle.completion, context.signed,
+            context.approval, context.issuer, context.approver, context.host_key, context.request,
+            task, expected, context.now, context.policy_revision, context.revocation_epoch,
+            context.session_generation)?
+        # Host-attested in both versions: V2 compared with absence, V3 with the host settle clock.
+        if completion.completed_at < bundle.evidence.measurements.settled_unix_ms:
+            return Err("REMOTE_CONTAINER_COMPLETION_PRECEDES_SETTLE")
+        val completion_digest = sha256_text(remote_container_completion_encode_v3(completion)?)
+        if not dir_is_real_no_follow(self.parent.database.window_root): return Err("REMOTE_PARENT_ROOT_UNSAFE")
+        val output_root = self.parent.database.window_root + "/accepted-" + completion_digest
+        if not dir_create_all(output_root) or not dir_is_real_no_follow(output_root):
+            return Err("REMOTE_PARENT_ROOT_UNSAFE")
+        for output in frozen.bytes.outputs:
+            val destination = remote_parent_output_path_v1(output_root, output.path)?
+            if not file_atomic_write_bytes(destination, output.content): return Err("REMOTE_PARENT_OUTPUT_WRITE_FAILED")
+            val actual = file_hash_sha256(destination)
+            var expected_digest = ""
+            for observed in frozen.observed:
+                if observed.path == output.path: expected_digest = observed.digest
+            if actual.is_none() or actual.unwrap() != expected_digest: return Err("REMOTE_PARENT_OUTPUT_READBACK_DIFFERS")
+        val identity = self.parent.journal_identities[task.id]
+        val history = task_runner_journal_history_v2(self.parent.database.journal, identity)?
+        var retained = false
+        for row in history:
+            if task_runner_record_group_v2(row) == policy.operation_id and
+                    task_runner_record_attempt_v2(row) == task.attempt:
+                if task_runner_record_result_digest_v2(row) != completion_digest:
+                    return Err("REMOTE_CONTAINER_RECOVERY_EVIDENCE_DIFFERS")
+                retained = true
+        if not retained:
+            # V2 status/reason mapping, sourced from the typed exit (the freeze already tied it to the result).
+            var exited = -1
+            match bundle.evidence.measurements.exit.workload_exit:
+                case RuntimeExitStatusV1.Exited(code): exited = code
+                case _: pass
+            val succeeded = container_exit_status_succeeded_v3(bundle.evidence.measurements.exit.workload_exit)
+            val ordinary_failure = exited == 1
+            val row = TaskRunnerContainerAttemptV3(identity_digest: identity,
+                group_id: policy.operation_id, attempt: task.attempt, mode: "isolated",
+                status: if succeeded: "passed" else: if ordinary_failure: "failed" else: "aborted",
+                reason: if succeeded: "" else: if not ordinary_failure: "infrastructure" else:
+                    if policy.action_kind == "test": "assertion" else: "compile",
+                task_exit_code: if succeeded or ordinary_failure: exited else: -1,
+                result_validated: succeeded or ordinary_failure,
+                stdout_digest: frozen.stdout_digest, stderr_digest: frozen.stderr_digest,
+                result_digest: completion_digest, measurement_wire: frozen.measurement_wire)
+            self.parent.database.journal = task_runner_journal_append_v2(self.parent.database.journal,
+                TaskRunnerAttemptRecordV2.ContainerV3(row))?
+        val terminal = if bundle.result.status == "OK": "completed" else: "failed"
+        self.parent.operations = distributed_operation_journal_commit_v2(self.parent.operations,
+            distributed_operation_transition_v2(prior, terminal, completion_digest)?)?
+        self.parent.database.recorded[task.id + ":" + str(task.attempt)] = true
+        Ok(RemoteAcceptedResultV1(bundle.result, output_root, completion_digest))
+
+fn remote_container_session_v3(parent: RemoteDatabaseSessionV1, tasks: [BuildTaskV1],
+        requests: Dict<text, ContainerExecutionRequestV2>) -> Result<RemoteContainerDatabaseSessionV3, text>:
+    if tasks.len() != parent.policies.len() or requests.len() != tasks.len(): return Err("REMOTE_CONTAINER_INVENTORY_DIFFERS")
+    var seen: Dict<text, bool> = {}
+    for task in tasks:
+        if seen.contains_key(task.id) or not parent.policies.contains_key(task.id) or not requests.contains_key(task.id) or
+                parent.identities[task.id] != builder_task_identity_v1(task):
+            return Err("REMOTE_CONTAINER_TASK_NOT_ADMITTED")
+        seen[task.id] = true
+        val _bound = remote_container_request_bind_v3(task, parent.policies[task.id], requests[task.id])?
+    Ok(RemoteContainerDatabaseSessionV3(parent, requests))
+
+export RemoteContainerDatabaseSessionV3, remote_container_session_v3

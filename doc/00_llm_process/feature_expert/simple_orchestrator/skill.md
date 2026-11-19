@@ -464,7 +464,7 @@ available. These source paths and their manuals remain NOT_RUN.
 
 ## Host remote-build route over authenticated V6 — milestone_0030 (2026-11-19, specs NOT_RUN)
 
-Host side of the remote container build; the controller `remote-run` driver is NOT landed (see "Not landed").
+Host side of the remote container build; the controller half is the `remote-run` command (see "Controller remote-run").
 - ONE V6 action `remote-build` (N10): payload = `HostRemoteBuildSubRequestV6` {sub: open|input|start|collect|output|cancel,
   frame} (`host_remote_build_operation_v6.spl`); `remote_build_query_v6` (smux continuation) maps it onto the six internal
   `host-remote-build-*` domain actions behind the same pending-execution/connection/geometry gates. Reply envelope is
@@ -484,7 +484,26 @@ Host side of the remote container build; the controller `remote-run` driver is N
 - Merge trap: release retains a written root AT SETTLE (custody already `retained-returned`), so the op (ii) evidence
   read must accept that phase (custody `read_settled_v3`, mount owner `read_settled_build_v3` accepts
   `native-retired-retained`).
-### Not landed (held on refs/keep, no src caller yet)
-`remote_container_session_v3` (accept_wire_v3, reset-failure receipt), chunk assemble, bundle/completion decode, and
-the controller `remote-run` driver (dispatch packet authoring with the N6-a projection inputs, a frame loop as a new
-dispatch control mode, reassembly, accept). Records: .spipe/simple_orchestrator/continuation_20261116/milestone_0030_remote_container_driver/.
+### Controller remote-run (milestone_0030 controller half, specs NOT_RUN)
+`simple orchestrator remote-run --dispatch-root --config-digest --key-store --approver --spec <dir> --out --grant-id --expires-in-ms`
+(`remote_run_command_v1.spl`; pure driver `remote_run_v1.spl`, authoring `remote_run_author_v1.spl`, frames
+`remote_run_frames_v1.spl`). N12-a: the task carries NO request pin (a hash cycle: pin -> request args -> invocation ->
+task digest -> pin); request->task is the execute-signed association marker, task->request is the controller comparing the
+prepare reply's `association.execution` with the draft it authored (`remote_run_association_check_v1`). Flow over ONE
+retained reader (`controller_dispatch_remote_*`): status -> associated prepare -> association check -> admit the build row
+(`controller_workload_store_admit_remote_build_v1`, single journal writer) -> associated execute (archived no-replace, never
+resent) -> open -> input per file -> start -> collect (poll on the reply stage, 9 min bound, then the controller-signed
+cancel) -> output chunks -> reassemble -> `accept_wire_v3` on the ROOT's journal (`controller_dispatch_remote_edit_v3`).
+A reaped answer (`linux-host-remote-build-reaped-incomplete`) becomes the controller-built `service-restart` receipt
+(`accept_reset_failure_v3`); the other reset-failure stages stay refused (no Host emitter). One grant lists
+{build|test, host_reservation_v1, host_execute_associated_v3, host_agent_cancel_v4}; the approver key must be enrolled for
+those operations. Spec dir: task.sdn, environment.sdn, run.sdn, host-inputs.sdn, inputs/<path> (formats in the author
+module header). Traps: the Host prepare deadline is its MONOTONIC clock (operator-observed value in run.sdn); host-inputs
+are operator-supplied projection inputs (a wrong value is refused at enable, retained workspace charged; the container memory
+must equal the task limit, authoring checks it); a cancelled run, or one the Host ended without a bundle, leaves its
+controller row `executing`. PLATFORM GAP: `dispatch_origin_v3` admits only the Windows native origin, so `remote-run` runs from
+a Windows controller and ends `refused` (controller-dispatch-native-origin-unavailable) elsewhere. A remote-build Host refusal
+keeps the dispatch owner `ready` (outcome `host-refused`, encoded V6 reply as response) so the reaped recovery edit can run;
+prepare/execute refusals still fail it closed. The admit returns the most advanced store even on error
+(`ControllerRemoteBuildAdmitV1`) and resumes an exact-envelope row left `admitted`.
+Named gap: if the accept closure advances the operations journal and then errors, the root keeps a stale journal and the run ends in cleanup (fail closed).
