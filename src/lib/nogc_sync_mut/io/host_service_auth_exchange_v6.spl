@@ -2,6 +2,9 @@
 # this socket is consumed. No bearer is transmitted, no effect is retried.
 use std.nogc_sync_mut.io.host_service_ready_reader_v1.*
 use std.nogc_sync_mut.io.windows_command_owner_v2.windows_command_thread_check_v2
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
+@end
 use std.io.tcp.{TcpStream, tcp_backend_set_nonblocking}
 use std.common.string_core.{bytes_to_text, text_to_bytes}
 use std.common.contracts.orchestration.host_service_auth_v6.HostServiceAuthContextV6
@@ -45,9 +48,15 @@ struct AuthExchangeStateV6:
 var _auth_exchanges_v6: [AuthExchangeStateV6] = []
 var _auth_exchange_next_v6: i64 = 1
 
+# On Linux the admission is the pinned procfs origin of the original process main thread, the same guard the V6
+# connection, the ready reader and the controller dispatch owner use. Process origin only.
 fn exchange_enter_v6() -> Result<bool, text>:
     @when(os="windows"):
     windows_command_thread_check_v2()?
+    Ok(true)
+    @elif(os="linux"):
+    val origin = unsafe(capabilities: [ffi, raw_ptr]): linux_machine_process_origin_check_v1()
+    if origin.is_err(): return Err(origin.unwrap_err())
     Ok(true)
     @else:
     Err("host-service-auth-native-reader-unavailable")

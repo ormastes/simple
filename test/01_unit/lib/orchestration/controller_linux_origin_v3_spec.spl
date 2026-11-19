@@ -1,0 +1,132 @@
+"""
+## Purpose and audience
+milestone_0037: the Controller (local root, retained dispatch owner, V6 exchange) must also run on a Linux controller,
+not only on the Windows native origin. Written for owners of the controller dispatch owner and the controller local root.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`. Status: AUTHORED, NOT_RUN (no runnable
+binary when written, 2026-11-19).
+## Compatibility and limitations
+The live Linux root needs a provisioned private root and a real process main thread, so the live scenarios are in
+test/02_integration/lib/orchestration/controller_linux_root_v3_spec.spl. This file pins the SOURCE of every gate on the
+`remote-run` path (the technique the other dispatch specs use): order and names, not live behaviour.
+## Verification guidance and troubleshooting
+A failed pin names the gate that moved: the canonical-origin guard, the protected-journal predicate or the Linux root arm.
+"""
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+
+val ORCH_DIR_V3 = "src/lib/nogc_sync_mut/orchestration/"
+
+fn linux_src_v3(path: text) -> text:
+    file_read_regular_no_follow_bounded(path, 4194304).unwrap()
+
+fn linux_count_v3(source: text, needle: text) -> i64:
+    var count: i64 = 0
+    var rest = source
+    var at = rest.index_of(needle)
+    while at >= 0:
+        count = count + 1
+        rest = rest.substring(at + needle.byte_len(), rest.byte_len())
+        at = rest.index_of(needle)
+    count
+
+# The text of one top-level fn: from its header to the next top-level fn/struct/class/val/export.
+fn linux_fn_body_v3(source: text, header: text) -> text:
+    val start = source.index_of(header)
+    expect(start >= 0).to_equal(true)
+    val rest = source.substring(start + header.byte_len(), source.byte_len())
+    var end = rest.byte_len()
+    for marker in ["\nfn ", "\npub fn ", "\nstruct ", "\nclass ", "\nexport ", "\nvar ", "\nval ", "\npub struct ", "\npub class ", "\n    pub fn ", "\n    pub me ", "\n    fn "]:
+        val at = rest.index_of(marker)
+        if at >= 0 and at < end: end = at
+    rest.substring(0, end)
+
+describe "controller canonical origin on Linux (milestone_0037)":
+    it "admits the dispatch owner through ONE shared origin guard with a Linux arm":
+        step("dispatch_origin_v3 delegates to controller_origin_check_v3, which has windows and linux arms and refuses the rest")
+        val dispatch = linux_src_v3(ORCH_DIR_V3 + "controller_dispatch_owner_v3.spl")
+        val origin = linux_fn_body_v3(dispatch, "fn dispatch_origin_v3(")
+        expect(origin.contains("controller_origin_check_v3()")).to_equal(true)
+        expect(origin.contains("windows_command_thread_check_v2")).to_equal(false)
+        expect(origin.contains("controller-dispatch-native-origin-unavailable")).to_equal(false)
+        val root = linux_src_v3(ORCH_DIR_V3 + "controller_local_root_v3.spl")
+        val guard = linux_fn_body_v3(root, "pub fn controller_origin_check_v3(")
+        expect(guard.contains("@when(os=\"windows\")")).to_equal(true)
+        expect(guard.contains("windows_command_thread_check_v2()?")).to_equal(true)
+        expect(guard.contains("@elif(os=\"linux\")")).to_equal(true)
+        expect(guard.contains("linux_machine_process_origin_check_v1()")).to_equal(true)
+        expect(guard.contains("controller-origin-unavailable")).to_equal(true)
+
+    it "leaves no unconditional Windows thread check on any controller path":
+        step("The local root and the dispatch owner reach windows_command_thread_check_v2 only inside the one guard")
+        val root = linux_src_v3(ORCH_DIR_V3 + "controller_local_root_v3.spl")
+        expect(linux_count_v3(root, "windows_command_thread_check_v2()")).to_equal(1)
+        val dispatch = linux_src_v3(ORCH_DIR_V3 + "controller_dispatch_owner_v3.spl")
+        expect(dispatch.contains("windows_command_thread_check_v2")).to_equal(false)
+        expect(linux_fn_body_v3(root, "pub fn same_journal_owner_v3(").contains("controller_origin_check_v3()?")).to_equal(true)
+
+    it "gives the V6 exchange the same Linux admission the V6 connection already has":
+        step("exchange_enter_v6 has a Linux arm over the procfs-pinned process main thread")
+        val exchange = linux_src_v3("src/lib/nogc_sync_mut/io/host_service_auth_exchange_v6.spl")
+        val enter = linux_fn_body_v3(exchange, "fn exchange_enter_v6(")
+        expect(enter.contains("@when(os=\"windows\")")).to_equal(true)
+        expect(enter.contains("@elif(os=\"linux\")")).to_equal(true)
+        expect(enter.contains("linux_machine_process_origin_check_v1()")).to_equal(true)
+        expect(enter.contains("host-service-auth-native-reader-unavailable")).to_equal(true)
+
+describe "protected journal routing for a Linux controller (milestone_0037)":
+    it "exports one predicate and routes every controller object module through it":
+        step("A linux_storage journal has no windows_store: the path-backed legacy test must not capture it")
+        val journal = linux_src_v3("src/lib/common/task_runner/distributed_operation_journal_v2.spl")
+        expect(journal.contains("pub fn distributed_operation_journal_protected_v3(owner: DistributedOperationJournalV2) -> bool:")).to_equal(true)
+        val body = linux_fn_body_v3(journal, "pub fn distributed_operation_journal_protected_v3(")
+        expect(body.contains("owner.windows_store.is_some() or owner.linux_storage.is_some()")).to_equal(true)
+        for module in ["workload_store_v1", "controller_dispatch_objects_v2", "agent_preflight_objects_v1",
+                "agent_policy_objects_v1", "desired_input_objects_v1", "assignment_objects_v1"]:
+            val source = linux_src_v3(ORCH_DIR_V3 + module + ".spl")
+            expect(source.contains("journal.windows_store.is_none()")).to_equal(false)
+            expect(source.contains("distributed_operation_journal_protected_v3(")).to_equal(true)
+
+describe "controller local root Linux backend (milestone_0037)":
+    it "acquires the private root through the protected reader and opens the journal as a Linux writer":
+        step("Config and policy are read through LinuxProtectedRootReaderV1; the journal is a child opened by the Linux factory")
+        val root = linux_src_v3(ORCH_DIR_V3 + "controller_local_root_v3.spl")
+        expect(root.contains("linux_protected_root_reader_open_v1(path)")).to_equal(true)
+        expect(root.contains("distributed_operation_journal_open_linux_v3(")).to_equal(true)
+        expect(root.contains("linux_protected_root_reader_read_v1(")).to_equal(true)
+        expect(root.contains("distributed_operation_journal_linux_current_v3(")).to_equal(true)
+        expect(root.contains("linux_protected_root_reader_require_root_v1(")).to_equal(true)
+        expect(root.contains("linux_protected_root_reader_close_v1(")).to_equal(true)
+        expect(root.contains("\"\\\\journal\"")).to_equal(true)
+        expect(root.contains("\"/journal\"")).to_equal(true)
+
+    it "re-pins the root before reading records and closes the journal before the reader":
+        step("current_linux_v3 requires the reader root first; close drains the journal before the reader; acquire is origin-guarded")
+        val root = linux_src_v3(ORCH_DIR_V3 + "controller_local_root_v3.spl")
+        val current = linux_fn_body_v3(root, "    fn current_linux_v3(")
+        val require_at = current.index_of("linux_protected_root_reader_require_root_v1(")
+        val read_at = current.index_of("controller_root_linux_read_v3(")
+        expect(require_at >= 0 and read_at > require_at).to_equal(true)
+        val close = linux_fn_body_v3(root, "pub fn controller_local_root_close_v3(")
+        val journal_at = close.index_of("distributed_operation_journal_close_owned_v2(")
+        val reader_at = close.index_of("linux_protected_root_reader_close_v1(")
+        expect(journal_at >= 0 and reader_at > journal_at).to_equal(true)
+        val acquire = linux_fn_body_v3(root, "fn controller_root_acquire_linux_v3(")
+        expect(acquire.index_of("controller_origin_check_v3()") < acquire.index_of("linux_protected_root_reader_open_v1(")).to_equal(true)
+
+    it "retains only the same Linux writer and refuses an install it cannot make":
+        step("retain_v3 compares the Linux storage owner; the Linux install is a named out-of-band refusal")
+        val root = linux_src_v3(ORCH_DIR_V3 + "controller_local_root_v3.spl")
+        val retain = linux_fn_body_v3(root, "pub me retain_v3(")
+        expect(retain.contains("linux_storage")).to_equal(true)
+        expect(retain.contains("same_owner(")).to_equal(true)
+        val same = linux_fn_body_v3(root, "pub fn same_journal_owner_v3(")
+        expect(same.contains("linux_storage")).to_equal(true)
+        expect(root.contains("controller-local-install-linux-out-of-band")).to_equal(true)
+
+describe "remote-run reaches a Linux controller (milestone_0037)":
+    it "no longer documents a Windows-only controller":
+        step("The help line and driver header name the Linux origin, not a Windows-only refusal")
+        val help = linux_src_v3("src/app/orchestrator/help_v1.spl")
+        expect(help.contains("Windows controller only")).to_equal(false)
+        val driver = linux_src_v3("src/app/orchestrator/remote_run_v1.spl")
+        expect(driver.contains("admits only the Windows native origin")).to_equal(false)
