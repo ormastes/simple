@@ -1,0 +1,80 @@
+# @cover src/lib/nogc_sync_mut/kernel_plugin/recovery_transaction.spl 90%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-DHR-01
+# @req REQ-DHR-02
+# plan: doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md
+
+use std.spec.*
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.nogc_sync_mut.kernel_plugin.status.KpfSyncStatus
+use std.nogc_sync_mut.kernel_plugin.generation.{KpfGenerationTable}
+use std.nogc_sync_mut.kernel_plugin.recovery_transaction.{
+    KpfRecoveryTransaction, KpfRecoveryPhase, KpfRecoveryVerdict, KpfEffectOutcome,
+}
+
+fn id(value: u64) -> KpfId128: KpfId128(hi: value, lo: value + 1)
+fn digest(value: u64) -> KpfDigest256: KpfDigest256(w0: value, w1: value + 1, w2: value + 2, w3: value + 3)
+
+fn _with_v1() -> KpfGenerationTable:
+    val table = KpfGenerationTable.create(4, 4)
+    table.publish(id(1), digest(1), 1)
+    table
+
+describe "KPF recovery transaction":
+    it "GEN-04: the predecessor stays pinned through probation even with zero requests":
+        val table = _with_v1()
+        val tx = KpfRecoveryTransaction.create(table)
+        expect(tx.begin_upgrade(id(2), digest(2), 2, 10).verdict == KpfRecoveryVerdict.Applied).to_equal(true)
+        expect(table.collect(tx.retained_handle()) == KpfSyncStatus.GenerationStillPinned).to_equal(true)
+
+    it "commit releases the retention so the predecessor can be collected":
+        val table = _with_v1()
+        val tx = KpfRecoveryTransaction.create(table)
+        tx.begin_upgrade(id(2), digest(2), 2, 10)
+        expect(tx.commit_known_good().phase == KpfRecoveryPhase.KnownGood).to_equal(true)
+        expect(table.collect(tx.retained_handle()) == KpfSyncStatus.Ok).to_equal(true)
+
+    it "a candidate failure with no effects restores the predecessor":
+        val table = _with_v1()
+        val tx = KpfRecoveryTransaction.create(table)
+        tx.begin_upgrade(id(2), digest(2), 2, 10)
+        val receipt = tx.fail_candidate()
+        expect(receipt.verdict == KpfRecoveryVerdict.Applied).to_equal(true)
+        expect(receipt.state_revision).to_equal(10)
+        expect(table.view(tx.retained_handle()).active).to_equal(true)
+        expect(table.view(tx.candidate_handle()).active).to_equal(false)
+
+    it "REC-02: acknowledged candidate writes block rollback":
+        val table = _with_v1()
+        val tx = KpfRecoveryTransaction.create(table)
+        val started = tx.begin_upgrade(id(2), digest(2), 2, 10)
+        tx.record_effect(started.execution_epoch, KpfEffectOutcome.Acknowledged)
+        val receipt = tx.fail_candidate()
+        expect(receipt.verdict == KpfRecoveryVerdict.Blocked).to_equal(true)
+        expect(table.view(tx.candidate_handle()).active).to_equal(true)
+
+    it "REC-03: an unknown effect outcome blocks rollback":
+        val table = _with_v1()
+        val tx = KpfRecoveryTransaction.create(table)
+        val started = tx.begin_upgrade(id(2), digest(2), 2, 10)
+        tx.record_effect(started.execution_epoch, KpfEffectOutcome.Unknown)
+        expect(tx.fail_candidate().reason.contains("unknown")).to_equal(true)
+
+    it "REC-04: an effect from the failed candidate's epoch is fenced after restore":
+        val table = _with_v1()
+        val tx = KpfRecoveryTransaction.create(table)
+        val started = tx.begin_upgrade(id(2), digest(2), 2, 10)
+        tx.fail_candidate()
+        val late = tx.record_effect(started.execution_epoch, KpfEffectOutcome.Acknowledged)
+        expect(late.verdict == KpfRecoveryVerdict.Rejected).to_equal(true)
+
+    it "a second upgrade cannot start while one is in probation":
+        val table = _with_v1()
+        val tx = KpfRecoveryTransaction.create(table)
+        tx.begin_upgrade(id(2), digest(2), 2, 10)
+        expect(tx.begin_upgrade(id(3), digest(3), 3, 11).verdict == KpfRecoveryVerdict.Rejected).to_equal(true)
+
+    it "an upgrade with no active generation is rejected without publishing":
+        val table = KpfGenerationTable.create(2, 2)
+        val tx = KpfRecoveryTransaction.create(table)
+        expect(tx.begin_upgrade(id(2), digest(2), 2, 10).verdict == KpfRecoveryVerdict.Rejected).to_equal(true)
