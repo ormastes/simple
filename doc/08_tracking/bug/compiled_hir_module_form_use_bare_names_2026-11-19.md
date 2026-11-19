@@ -12,8 +12,8 @@ unresolved name becomes `HirExprKind::Global` and dies in LLVM codegen as
 
 ## Workaround in tree
 
-`src/os/kernel/abi/syscall_shim.spl` imports all 95 keepalive providers by
-name (`use os.kernel.abi.syscall_shim_X.{...}`), tagged
+`src/os/kernel/abi/syscall_shim.spl` imports the 94 sibling-module keepalive providers by
+name (`use os.kernel.abi.syscall_shim_X.{...}`; the 95th is local), tagged
 `WORKAROUND(compiled_hir_module_form_use_bare_names_2026-11-19)`. Delete those
 lines once the repro spec passes.
 
