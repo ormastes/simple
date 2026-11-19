@@ -20,6 +20,7 @@ use std.nogc_sync_mut.text_layout.font_renderer.{
 
 use common.ui.draw_ir.{
     DRAW_IR_BACKEND_CPU,
+    DRAW_IR_COMMAND_RECT,
     DRAW_IR_RASTER_ALIASED_PIXEL_CENTER,
     DRAW_IR_RASTER_COVERAGE_AA,
     DrawIrBatch,
@@ -70,7 +71,7 @@ use std.gc_async_mut.gpu.browser_engine.style.animation.{
     animation_css_value_text, sample_keyframes_with_underlying,
     browser_css_animation_capacity_available
 }
-export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_compose_support.{SimpleWebInputTextHitMap, SimpleWebLayoutHitIndex, SimpleWebElementScrollReason, simple_web_element_scroll_reason_text, SimpleWebElementScrollState, simple_web_layout_hit_test_index, _simple_web_root_sticky_admitted, _SimpleWebScrolledLayout, _SimpleWebElementScrolledLayout, _simple_web_scrolled_layout, _simple_web_element_scrolled_layout, SimpleWebLayoutMaterialWitness, _SimpleWebInputTextHitBuild, _simple_web_input_text_hit_build, simple_web_layout_material_provenance_after_execution, simple_web_layout_material_provenance_after_backend_execution, simple_web_material_fallback_realized, _simple_web_material_witness_from_sidecar, _simple_web_visible_material_witness, _animation_direction_progress, _animation_direction_is_forwards, _css_animation_signature, CSS_ANIMATION_MAX_TIME_MS, CSS_ANIMATION_MIN_TIME_MS, _css_animation_iteration_count, _css_animation_add_ms_no_wrap, _css_animation_sub_ms_no_wrap, _css_animation_active_duration_ms, _css_animation_next_frame_ms, _simple_web_animation_frame_index, simple_web_layout_reconcile_animation_instances, _animation_computed_length, _animation_computed_color, _simple_web_css_animation_instance_next_ms, simple_web_layout_animation_instances_next_ms, _simple_web_layout_animation_schedule, simple_web_layout_animation_end_ms, _simple_web_layout_canvas_base, _SIMPLE_WEB_OPACITY_NEST_MAX_LEVEL, _simple_web_opacity_root_on_chain, _simple_web_fractional_opacity_command_roots, _SimpleWebOpacityRootBounds, _simple_web_opacity_halo, _simple_web_draw_ir_command_translatable, _simple_web_opacity_root_bounds, SIMPLE_WEB_OPACITY_NEST_PROP, _simple_web_opacity_nest_texts, _simple_web_opacity_top_root, _simple_web_draw_ir_css_background, _simple_web_iframe_fractional_ancestor, _simple_web_draw_ir_has_material_request, _simple_web_layout_merge_material_witness, _simple_web_layout_segment_batch, simple_web_layout_empty_retained, simple_web_layout_render_html_software_pixels_traced, simple_web_layout_render_html_software_pixels_tile_lane, _web_gpu_paint_state, simple_web_layout_debug_gpu_paint_state_visits, _web_gpu_solid_fill_ops, _web_gpu_solid_only_frame, simple_web_layout_render_html_software_pixels_at_scroll}
+export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_compose_support.{SimpleWebInputTextHitMap, SimpleWebLayoutHitIndex, SimpleWebElementScrollReason, simple_web_element_scroll_reason_text, SimpleWebElementScrollState, simple_web_layout_hit_test_index, _simple_web_root_sticky_admitted, _SimpleWebScrolledLayout, _SimpleWebElementScrolledLayout, _simple_web_scrolled_layout, _simple_web_element_scrolled_layout, SimpleWebLayoutMaterialWitness, _SimpleWebInputTextHitBuild, _simple_web_input_text_hit_build, simple_web_layout_material_provenance_after_execution, simple_web_layout_material_provenance_after_backend_execution, simple_web_material_fallback_realized, _simple_web_material_witness_from_sidecar, _simple_web_visible_material_witness, _animation_direction_progress, _animation_direction_is_forwards, _css_animation_signature, CSS_ANIMATION_MAX_TIME_MS, CSS_ANIMATION_MIN_TIME_MS, _css_animation_iteration_count, _css_animation_add_ms_no_wrap, _css_animation_sub_ms_no_wrap, _css_animation_active_duration_ms, _css_animation_next_frame_ms, _simple_web_animation_frame_index, simple_web_layout_reconcile_animation_instances, _animation_computed_length, _animation_computed_color, _simple_web_css_animation_instance_next_ms, simple_web_layout_animation_instances_next_ms, _simple_web_layout_animation_schedule, simple_web_layout_animation_end_ms, _simple_web_layout_canvas_base, _SIMPLE_WEB_OPACITY_NEST_MAX_LEVEL, _simple_web_opacity_root_on_chain, _simple_web_fractional_opacity_command_roots, _simple_web_backdrop_root_flags, _SimpleWebOpacityRootBounds, _simple_web_opacity_halo, _simple_web_draw_ir_command_translatable, _simple_web_opacity_root_bounds, SIMPLE_WEB_OPACITY_NEST_PROP, _simple_web_opacity_nest_texts, _simple_web_opacity_top_root, _simple_web_draw_ir_css_background, _simple_web_iframe_fractional_ancestor, _simple_web_draw_ir_has_material_request, _simple_web_layout_merge_material_witness, _simple_web_layout_segment_batch, simple_web_layout_empty_retained, simple_web_layout_render_html_software_pixels_traced, simple_web_layout_render_html_software_pixels_tile_lane, _web_gpu_paint_state, simple_web_layout_debug_gpu_paint_state_visits, _web_gpu_solid_fill_ops, _web_gpu_solid_only_frame, simple_web_layout_render_html_software_pixels_at_scroll}
 
 pub fn simple_web_layout_hit_test_target_at_time(
     html: text, width: i32, height: i32,
@@ -385,6 +386,49 @@ fn _simple_web_opacity_place_command(
             draw_ir_style_prop(SIMPLE_WEB_OPACITY_NEST_PROP, nest_texts[root])]
     placed
 
+# A backdrop root's own backdrop-filter reads the target its group is
+# composited onto, not its own (still transparent) group. Its box command is
+# split into a backdrop-only command (transparent colour, only the backdrop
+# and corner-radius props) painted before the group, and the in-group
+# command with its backdrop removed. Material (WM glass) boxes are not split.
+fn _simple_web_backdrop_root_split(
+    command: DrawIrCommand
+) -> (bool, DrawIrCommand, DrawIrCommand):
+    if command.kind != DRAW_IR_COMMAND_RECT:
+        return (false, command, command)
+    var has_backdrop = false
+    var backdrop_props: [DrawIrStyleProp] = []
+    var rest: [DrawIrStyleProp] = []
+    for prop in command.computed_style:  # cpu-lane-loop-ok: one backdrop root's box command props; bound is that command's property count
+        if prop.key == "wm-material-request":
+            return (false, command, command)
+        if prop.key == "backdrop-filter-blur-milli":
+            has_backdrop = true
+            backdrop_props.push(prop)
+        elif prop.key == "backdrop-filter":
+            if prop.value != "" and prop.value != "none":
+                has_backdrop = true
+            backdrop_props.push(prop)
+            rest.push(draw_ir_style_prop("backdrop-filter", "none"))
+        else:
+            if (
+                prop.key == "border-radius" or
+                prop.key == "border-top-left-radius" or
+                prop.key == "border-top-right-radius" or
+                prop.key == "border-bottom-right-radius" or
+                prop.key == "border-bottom-left-radius"
+            ):
+                backdrop_props.push(prop)
+            rest.push(prop)
+    if not has_backdrop:
+        return (false, command, command)
+    var backdrop = command
+    backdrop.color = 0u32
+    backdrop.computed_style = backdrop_props
+    var inner = command
+    inner.computed_style = rest
+    (true, backdrop, inner)
+
 fn _simple_web_draw_ir_translate_command(
     command: DrawIrCommand, dx: i32, dy: i32
 ) -> DrawIrCommand:
@@ -661,9 +705,10 @@ fn _simple_web_layout_compose_retained(
     val canvas = _html_draw_ir_canvas_command(width, height, canvas_color)
     var batches: [DrawIrBatch] = []
     var child_witnesses: [SimpleWebLayoutMaterialWitness] = []
+    val backdrop_roots = _simple_web_backdrop_root_flags(nodes, styles)
     val (opacity_found, opacity_command_roots, opacity_root_count, opacity_root_parent) = (
         _simple_web_fractional_opacity_command_roots(
-            nodes, styles, command_owner_nodes)
+            nodes, styles, command_owner_nodes, backdrop_roots)
     )
     var opacity_supported = (
         opacity_found and opacity_command_roots.len() == commands.len()
@@ -725,6 +770,33 @@ fn _simple_web_layout_compose_retained(
             opacity_command_roots[command_index]
         else:
             -1
+        var placed_command = commands[command_index]
+        val box_owner = command_owner_nodes[command_index]
+        if (
+            cmd_root >= 0 and cmd_root == box_owner and
+            cmd_root < backdrop_roots.len() and backdrop_roots[cmd_root]
+        ):
+            # The backdrop root's own backdrop paints in its parent's
+            # surface, just before the root's group opens.
+            val (split, backdrop_command, group_command) = (
+                _simple_web_backdrop_root_split(placed_command))
+            if split:
+                val outer_root = opacity_root_parent[cmd_root]
+                val outer_top = _simple_web_opacity_top_root(
+                    opacity_root_parent, outer_root)
+                if outer_top != run_root:
+                    if run_commands.len() > 0:
+                        batches.push(_simple_web_layout_segment_batch(
+                            source, embedding, nodes, styles, run_root,
+                            opacity_bounds, segment_index, run_commands
+                        ))
+                        segment_index = segment_index + 1
+                    run_root = outer_top
+                    run_commands = []
+                run_commands.push(_simple_web_opacity_place_command(
+                    backdrop_command, outer_root, run_root, opacity_bounds,
+                    opacity_nest_texts))
+                placed_command = group_command
         val next_root = _simple_web_opacity_top_root(opacity_root_parent, cmd_root)
         if next_root != run_root:
             if run_commands.len() > 0:
@@ -736,7 +808,7 @@ fn _simple_web_layout_compose_retained(
             run_root = next_root
             run_commands = []
         run_commands.push(_simple_web_opacity_place_command(
-            commands[command_index], cmd_root, run_root, opacity_bounds,
+            placed_command, cmd_root, run_root, opacity_bounds,
             opacity_nest_texts))
         val owner = command_owner_nodes[command_index]
         if (

@@ -1,0 +1,79 @@
+"""
+## Purpose and audience
+Purpose: Pin Filter Effects 2 Backdrop Root behaviour for nested glass
+against Chrome 159 on the Engine2D cpu_simd and Vulkan lanes. An element with
+`backdrop-filter` is a backdrop root: a descendant's backdrop is only what
+was painted inside that root's group, not the page under it.
+Audience: maintainers of the web paint path and Engine2D box effects.
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(nested glass panels are darker than Chrome).
+Chrome pixels: headless Chromium 1255 at 400x300. An absolutely positioned
+outer panel `rgba(255,255,255,0.72)` over page #2d2f45 holds an inner panel
+at 60,60 200x120. With both `backdrop-filter: blur(8px)` the white inner
+panel is (250,250,251): the outer group is white at alpha 0.72, the inner
+filtered backdrop draws it src-over itself, then the inner background, then
+the group over the page. A tinted inner `rgba(80,160,255,0.72)` is
+(124,181,251). With the outer filter removed they are (239,239,241) and
+(113,170,241). The outer panel is (197,197,203).
+The raster lane is pinned in backdrop_root_nested_glass_raster_chrome159_spec.spl.
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{
+    vulkan_readback_count
+}
+
+val BDR_WHITE = "rgba(255,255,255,0.72)"
+val BDR_TINT = "rgba(80,160,255,0.72)"
+val BDR_ROOT = "backdrop-filter:blur(8px)"
+
+fn bdr_html(outer_extra: text, inner_bg: text) -> text:
+    "<!DOCTYPE html><html><body style='margin:0;background:#2d2f45'><div style='position:absolute;left:20px;top:20px;width:300px;height:220px;background:rgba(255,255,255,0.72);" + outer_extra + "'><div style='position:absolute;left:40px;top:40px;width:200px;height:120px;background:" + inner_bg + ";backdrop-filter:blur(8px)'></div></div></body></html>"
+
+# Channel mismatches (beyond +-2) against `want`: x, y, r, g, b per point.
+fn bdr_mismatches(px: [u32], want: [i32]) -> i32:
+    if px.len() < 400 * 300:
+        return -1
+    var bad = 0
+    var i = 0
+    while i < want.len():
+        val p = px[want[i + 1] * 400 + want[i]]
+        var c = 0
+        while c < 3:
+            val d = ((p >> ((16 - c * 8) as u32)) & 0xFFu32) as i32 - want[i + 2 + c]
+            if d > 2 or d < -2:
+                bad = bad + 1
+            c = c + 1
+        i = i + 5
+    bad
+
+fn bdr_render(outer_extra: text, inner_bg: text, lane: text) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(bdr_html(outer_extra, inner_bg), 400, 300, 1, lane)
+
+describe "backdrop root isolates nested glass on Engine2D (Chrome 159)":
+    it "cpu_simd: nested backdrop-filter reads only the outer group":
+        expect(bdr_mismatches(bdr_render(BDR_ROOT, BDR_WHITE, "cpu_simd"), [40, 200, 197, 197, 203, 160, 120, 250, 250, 251])).to_equal(0)
+
+    it "cpu_simd: a tinted inner panel keeps the outer group's alpha":
+        expect(bdr_mismatches(bdr_render(BDR_ROOT, BDR_TINT, "cpu_simd"), [40, 200, 197, 197, 203, 160, 120, 124, 181, 251])).to_equal(0)
+
+    it "cpu_simd: without an outer backdrop root the page shows through":
+        expect(bdr_mismatches(bdr_render("", BDR_WHITE, "cpu_simd"), [40, 200, 196, 197, 203, 160, 120, 239, 239, 241])).to_equal(0)
+        expect(bdr_mismatches(bdr_render("", BDR_TINT, "cpu_simd"), [160, 120, 113, 170, 241])).to_equal(0)
+
+    it "vulkan: nested glass renders on the device and matches Chrome":
+        val readbacks = vulkan_readback_count()
+        val white = bdr_render(BDR_ROOT, BDR_WHITE, "vulkan")
+        val tint = bdr_render(BDR_ROOT, BDR_TINT, "vulkan")
+        # Both frames were read back from the Vulkan device, not a CPU
+        # fallback. The backdrop blur itself runs on the host over a device
+        # region readback, as single-level backdrop-filter does today (the
+        # device blur kernel serves only the WM glass material path).
+        expect(vulkan_readback_count() - readbacks >= 2).to_equal(true)
+        expect(bdr_mismatches(white, [40, 200, 197, 197, 203, 160, 120, 250, 250, 251])).to_equal(0)
+        expect(bdr_mismatches(tint, [40, 200, 197, 197, 203, 160, 120, 124, 181, 251])).to_equal(0)

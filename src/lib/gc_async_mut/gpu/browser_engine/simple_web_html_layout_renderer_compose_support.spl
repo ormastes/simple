@@ -990,12 +990,39 @@ fn _simple_web_opacity_root_on_chain(root_parent: [i32], start: i32, target: i32
         r = root_parent[r]
     false
 
-# Each command's innermost fractional-opacity root, the number of roots, and
-# each root's parent root (-1 at top level). A root nested in another root is
-# a nested CSS opacity group; every root's commands must stay contiguous
-# (no root is re-entered after its subtree's run closed).
+# Filter Effects 2 backdrop roots that need their own isolated group: a node
+# with `backdrop-filter` whose subtree holds another `backdrop-filter`. The
+# descendant's backdrop is only what was painted inside the root's group
+# (transparent at start), not the page under it (Chrome 159). Pages without
+# nested backdrop filters get no flag, so their paint path is unchanged.
+fn _simple_web_backdrop_root_flags(nodes: [HNode], styles: [Style]) -> [bool]:
+    var roots: [bool] = [false; nodes.len()]
+    if nodes.len() != styles.len():
+        return roots
+    # below[i]: some descendant of i has backdrop-filter. Parents precede
+    # children, so a reverse pass sees every descendant before its ancestor.
+    var below: [bool] = [false; nodes.len()]
+    var i: i32 = nodes.len() as i32 - 1
+    while i >= 0:  # cpu-lane-loop-ok: one bottom-up pass folding backdrop-filter presence into parents; bound is node_count, once per compose
+        val own = styles[i].backdrop_filter_raw != ""
+        if (
+            own and below[i] and nodes[i].tag != "#root" and
+            nodes[i].tag != "html" and nodes[i].tag != "body"
+        ):
+            roots[i] = true
+        val parent = nodes[i].parent as i32
+        if parent >= 0 and parent < i and (own or below[i]):
+            below[parent] = true
+        i = i - 1
+    roots
+
+# Each command's innermost fractional-opacity or backdrop root, the number
+# of roots, and each root's parent root (-1 at top level). A root nested in
+# another root is a nested CSS group; every root's commands must stay
+# contiguous (no root is re-entered after its subtree's run closed). A
+# backdrop root (`backdrop_roots`) is a group at opacity 100%.
 fn _simple_web_fractional_opacity_command_roots(
-    nodes: [HNode], styles: [Style], owner_nodes: [i32]
+    nodes: [HNode], styles: [Style], owner_nodes: [i32], backdrop_roots: [bool]
 ) -> (bool, [i32], i32, [i32]):
     if nodes.len() != styles.len():
         return (false, [], 0, [])
@@ -1011,7 +1038,11 @@ fn _simple_web_fractional_opacity_command_roots(
         else:
             -1
         val opacity = styles[i].opacity_pct
-        if opacity > 0 and opacity < 100:
+        val fractional = opacity > 0 and opacity < 100
+        val backdrop_root = (
+            opacity >= 100 and i < backdrop_roots.len() and backdrop_roots[i]
+        )
+        if fractional or backdrop_root:
             if (
                 nodes[i].tag == "#root" or
                 nodes[i].tag == "html" or nodes[i].tag == "body"
@@ -1030,7 +1061,14 @@ fn _simple_web_fractional_opacity_command_roots(
             node_roots[i] >= 0 and
             styles[i].backdrop_filter_raw != ""
         ):
-            return (false, [], 0, [])
+            # A backdrop-filter under a group reads that group's layer. Only
+            # chains of backdrop roots (opacity 100%) are admitted; a
+            # fractional-opacity root above it keeps the ungrouped path.
+            var chain = node_roots[i]
+            while chain >= 0:  # cpu-lane-loop-ok: the node's root chain; bound is the nest level cap (3)
+                if styles[chain].opacity_pct < 100:
+                    return (false, [], 0, [])
+                chain = root_parent[chain]
         i = i + 1
     if not has_root:
         return (false, [], 0, [])
@@ -1145,11 +1183,13 @@ fn _simple_web_opacity_root_bounds(
     var y1: [i32] = [0; node_count]
     var translate: [bool] = [true; node_count]
     var painted: [i32] = [0; node_count]
+    var seen: [bool] = [false; node_count]
     var edge_owner = -1
     var i = 0
     while i < commands.len():  # cpu-lane-loop-ok: one pass over the emitted commands folding each into its opacity root's bounds; bound is the command count, once per compose
         val root = command_roots[i]
         if root >= 0 and root < node_count:
+            seen[root] = true
             val c = commands[i]
             val movable = _simple_web_draw_ir_command_translatable(c)
             # A shadow halo or an outline paints outside the command rect:
@@ -1200,6 +1240,9 @@ fn _simple_web_opacity_root_bounds(
     var r = 0
     while r < node_count:  # cpu-lane-loop-ok: clamps each root's rect to the viewport; bound is node_count, once per compose
         if painted[r] >= 2:
+            group[r] = true
+        # A root at opacity 100% is a backdrop root: always an isolated group.
+        if seen[r] and r < styles.len() and styles[r].opacity_pct >= 100:
             group[r] = true
         if r < root_parent.len() and root_parent[r] >= 0:
             group[r] = true
