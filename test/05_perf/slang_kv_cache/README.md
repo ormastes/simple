@@ -147,3 +147,9 @@ SLANG_LIVE=1, `simple-release.exe`): PASS, exact_repeat 48398 -> 1189 ms (40.7x)
 prefix_extension 49008 -> 1543 ms (31.8x); log `live_spec.log`. Gates against
 origin/release/1.0.0: primitive-api-added PASS, nil-outside-unsafe-added PASS
 (after replacing `== nil` in two accessors), text-len-unit-mix 0 new.
+
+Live tree spec `test/03_system/lib/slang/feature/slang_kv_tree_cache_live_spec.spl`
+(Gemma-3-270m, SLANG_LIVE=1, simple-release.exe, free 11.42 GiB): 2/2 passed.
+branching off vs tree: prefilled 6652 -> 3068, reused 3584, wall 36226 -> 23218 ms;
+multiturn: prefilled 5295 -> 2735, reused 2560, wall 28158 -> 18350 ms; digests
+equal no-cache (139fec2ec5a6, 695f3acdc604). Log `C:/dev/slang-logs/shimtree/tree_spec.log`.

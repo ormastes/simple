@@ -1,0 +1,208 @@
+# @cover src/lib/gc_async_mut/slang/engine/llm_engine.spl 80%
+# @cover src/lib/gc_async_mut/slang/model_executor/backend.spl 80%
+# @cover src/runtime/slang_ggml_shim.c 60%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# design: doc/08_tracking/bug/slang_shim_tree_kv_unified_modes_not_exact_2026-11-19.md
+
+"""
+## Purpose and audience
+Purpose: prove on a real model that the shim's tree (radix) prefix cache in its
+exact mode (mode 3: one persistent multi-sequence context, one KV stream per
+sequence) reuses a shared prefix across different requests, prefills fewer
+tokens than cache-off, and returns byte-identical greedy output.
+Audience: engineers changing the slang shim's context/prefix code.
+
+## What is checked
+Per workload, a cache-off lane and a tree lane (each in a fresh load, because
+the cache mode is fixed while a context is open):
+- branching: four users share one long system prompt, then each user is repeated
+  with a follow-up appended;
+- multiturn: six chat turns, each prompt = previous prompt + reply + next line.
+Asserted: (a) the concatenated output digest of the tree lane equals the cache-off
+digest; (b) tokens prefilled with the tree < tokens prefilled with no cache;
+(c) tokens reused > 0. Wall ms of both lanes is printed as
+SLANG_KV_TREE_LIVE_TABLE rows, never asserted (shared host).
+
+## Compatibility and limitations
+Runs when SLANG_LIVE=1 and SLANG_MODEL_ROOT names a model directory, with a built
+shim (SLANG_GGML_LIB or build/sffi/). SLANG_KV_MODEL_ID picks the model, default
+gemma-3-270m-it. The engine refuses a load with too little free memory (about
+6 GiB plus headroom); the spec skips nothing silently: it fails on a refused load.
+Text only; requests stay serialised per model.
+"""
+
+use std.spec.{describe, it, expect, step, skip, fail}
+use std.gc_async_mut.slang.entrypoints.llm.{slang_models, engine_backend_available}
+use std.gc_async_mut.slang.engine.llm_engine.{EngineGenerationRequest, engine_set_n_ctx_text, engine_set_prefix_cache_limits, engine_set_prefix_cache_mode, engine_ensure_loaded, engine_generate_observed_request, engine_prefix_cache_stats, engine_unload}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{env_get, is_dir, time_now_monotonic_ms}
+
+val TREE_LIVE_TOKENS = "16"
+
+struct TreeLane:
+    digest: text
+    requests: i64
+    elapsed_ms: i64
+    prefilled: i64
+    reused: i64
+
+fn _model_root() -> text:
+    val root = env_get("SLANG_MODEL_ROOT") ?? ""
+    if root == "" or not is_dir(root):
+        return ""
+    root
+
+fn _live_enabled() -> bool:
+    (env_get("SLANG_LIVE") ?? "") == "1" and _model_root() != "" and engine_backend_available()
+
+fn _pick_model(root: text) -> Result<NativeModel, text>:
+    var wanted = env_get("SLANG_KV_MODEL_ID") ?? ""
+    if wanted == "":
+        wanted = "gemma-3-270m-it-GGUF"
+    for m in slang_models(root):
+        if m.runnable and m.id == wanted:
+            return Ok(m)
+    Err("no runnable model '" + wanted + "' under " + root)
+
+fn _system_prompt() -> text:
+    val owners = ["alpha", "bravo", "charlie", "delta", "echo"]
+    var doc = "You are the KV cache ledger assistant. The ledger records which serving request owns each cache page"
+    var i = 1
+    while i <= 40:
+        doc = doc + ". Page " + i.to_text() + " belongs to request " + owners[i % 5] +
+            " and holds " + (i * 16).to_text() + " tokens of sealed attention state"
+        i = i + 1
+    doc + ". Answer briefly."
+
+fn _user_turn(k: i64) -> text:
+    val topics = ["page seven", "page twelve", "page nineteen", "page thirty"]
+    " Question " + k.to_text() + ": which request owns " + topics[k % 4]
+
+fn _follow_up(k: i64) -> text:
+    " Follow-up " + k.to_text() + ": and how many tokens does it hold"
+
+# (tokens_prefilled, tokens_reused); (-1, -1) when telemetry is unavailable.
+fn _counters() -> (i64, i64):
+    if val s = engine_prefix_cache_stats():
+        return (s.tokens_prefilled, s.tokens_reused)
+    (-1, -1)
+
+fn _ask(prompt: text) -> Result<text, text>:
+    val generated = engine_generate_observed_request(EngineGenerationRequest(
+        prompt: prompt, max_tokens: TREE_LIVE_TOKENS))?
+    Ok(generated.output)
+
+fn _run_branching() -> Result<[text], text>:
+    var outs: [text] = []
+    val sys = _system_prompt()
+    var k: i64 = 1
+    while k <= 4:
+        outs.push(_ask(sys + _user_turn(k))?)
+        k = k + 1
+    k = 1
+    while k <= 4:
+        outs.push(_ask(sys + _user_turn(k) + _follow_up(k))?)
+        k = k + 1
+    Ok(outs)
+
+fn _run_multiturn() -> Result<[text], text>:
+    var outs: [text] = []
+    var prompt = _system_prompt() + "\nUser: hello, who owns page one"
+    var turn: i64 = 1
+    while turn <= 6:
+        val reply = _ask(prompt)?
+        outs.push(reply)
+        prompt = prompt + reply + "\nUser: and page " + (turn + 1).to_text()
+        turn = turn + 1
+    Ok(outs)
+
+# One lane in a fresh load. tree=false: cache off. tree=true: mode 3, 4 entries.
+fn _lane(model: NativeModel, tree: bool, workload: text) -> Result<TreeLane, text>:
+    var entries: i64 = 0
+    var bytes: i64 = 0
+    var mode: i64 = 0
+    if tree:
+        entries = 4
+        bytes = 2147483648
+        mode = 3
+    if not engine_set_prefix_cache_limits(entries, bytes):
+        return Err("cache limits rejected")
+    if not engine_set_prefix_cache_mode(mode, 0):
+        return Err("cache mode rejected")
+    engine_ensure_loaded(model)?
+    # Disjoint one-token warmup outside the timed run.
+    _ask("Zebra.")?
+    val before = _counters()
+    if before.0 < 0:
+        engine_unload()
+        return Err("prefix-cache telemetry unavailable")
+    val started = time_now_monotonic_ms()
+    var run: Result<[text], text> = Err("unknown workload")
+    if workload == "branching":
+        run = _run_branching()
+    else:
+        run = _run_multiturn()
+    val elapsed = time_now_monotonic_ms() - started
+    val after = _counters()
+    engine_unload()
+    if run.is_err():
+        return Err(run.unwrap_err())
+    if after.0 < 0:
+        return Err("telemetry unavailable after the run")
+    val outs = run.unwrap()
+    var joined = ""
+    for o in outs:
+        joined = joined + o.len().to_text() + ":" + o + "|"
+    Ok(TreeLane(digest: sha256_text(joined), requests: outs.len(), elapsed_ms: elapsed,
+        prefilled: after.0 - before.0,
+        reused: after.1 - before.1))
+
+fn _row(workload: text, lane: text, r: TreeLane):
+    print "SLANG_KV_TREE_LIVE_TABLE | " + workload + " | " + lane + " | requests=" + r.requests.to_text() +
+        " | prefilled=" + r.prefilled.to_text() + " | reused=" + r.reused.to_text() +
+        " | wall_ms=" + r.elapsed_ms.to_text() + " | digest=" + r.digest.substring(0, 12) + " |"
+
+fn _check(model: NativeModel, workload: text):
+    step(workload + ": cache-off lane")
+    val off = _lane(model, false, workload)
+    if off.is_err():
+        fail(workload + " cache-off lane failed: " + off.unwrap_err())
+    step(workload + ": tree lane (mode 3)")
+    val tree = _lane(model, true, workload)
+    if tree.is_err():
+        fail(workload + " tree lane failed: " + tree.unwrap_err())
+    val o = off.unwrap()
+    val t = tree.unwrap()
+    _row(workload, "off", o)
+    _row(workload, "tree", t)
+    step(workload + ": (a) tree digest equals the no-cache digest")
+    expect(t.digest).to_equal(o.digest)
+    step(workload + ": (b) tree prefills fewer tokens than no cache")
+    expect(o.prefilled).to_be_greater_than(0)
+    expect(t.prefilled).to_be_less_than(o.prefilled)
+    step(workload + ": (c) the tree reused tokens")
+    expect(t.reused).to_be_greater_than(0)
+
+describe "slang tree (radix) KV prefix cache, exact mode, on a real model":
+
+    it "branching: shared system prompt, identical output, fewer prefilled tokens":
+        if not _live_enabled():
+            skip("branching: shared system prompt, identical output, fewer prefilled tokens", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT, and a built ggml backend")
+        else:
+            expect(engine_set_n_ctx_text("4096")).to_equal(true)
+            val picked = _pick_model(_model_root())
+            if picked.is_err():
+                fail(picked.unwrap_err())
+            print "SLANG_KV_TREE_LIVE_MODEL id=" + picked.unwrap().id + " max_tokens=" + TREE_LIVE_TOKENS
+            _check(picked.unwrap(), "branching")
+
+    it "multiturn: each turn extends the previous prompt, identical output":
+        if not _live_enabled():
+            skip("multiturn: each turn extends the previous prompt, identical output", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT, and a built ggml backend")
+        else:
+            expect(engine_set_n_ctx_text("4096")).to_equal(true)
+            val picked = _pick_model(_model_root())
+            if picked.is_err():
+                fail(picked.unwrap_err())
+            _check(picked.unwrap(), "multiturn")
