@@ -2,8 +2,10 @@
 ## Purpose and audience
 Pins milestone_0030 DESIGN 13.1: the fourth domain-pinned sign entry `host_identity_private_sign_completion_v3` in
 `src/app/orchestrator/host_identity_key_v1.spl`. The execution-host key signs only V3 completion messages
-(`SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V3`), never grants, approvals or V2 completions. Written for owners of
-the host identity store.
+(`SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V3`), never grants, approvals or V2 completions. milestone_0038 adds the fifth entry
+`host_identity_private_sign_reset_failure_v3` over its OWN domain (`SIMPLE_REMOTE_RESET_FAILURE_SIGNATURE_V3`): the two
+V3 entries refuse each other's domain, so a reset-failure receipt is never a completion. Written for owners of the host
+identity store.
 ## Operator workflow
 Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
 Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
@@ -14,7 +16,7 @@ Each refusal names the exact error string; a changed string is a contract change
 """
 use std.spec.step
 use app.orchestrator.host_identity_key_v1.{host_identity_private_encode_v1, host_identity_private_sign_completion_v3,
-    host_identity_private_sign_grant_v1}
+    host_identity_private_sign_grant_v1, host_identity_private_sign_reset_failure_v3}
 use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_verify}
 
 fn sc3_seed() -> [u8]:
@@ -51,3 +53,24 @@ describe "Host identity completion V3 sign entry (milestone_0030 13.1)":
         other[0] = 158
         expect(host_identity_private_sign_completion_v3(sc3_file(), pure_ed25519_keypair_from_seed(other).1,
             "SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V3\nx\n".bytes())).to_equal(Err("host-identity-sign-key-differs"))
+
+    it "signs a reset-failure message under its own domain and keeps the completion and reset domains apart (milestone_0038)":
+        # @req M0038-SIGN-01
+        val public_key = pure_ed25519_keypair_from_seed(sc3_seed()).1
+        val message = "SIMPLE_REMOTE_RESET_FAILURE_SIGNATURE_V3\nx\n".bytes()
+        val signed = host_identity_private_sign_reset_failure_v3(sc3_file(), public_key, message).unwrap()
+        expect(pure_ed25519_verify(public_key, message, signed)).to_equal(true)
+        step("the completion entry refuses a reset message, the reset entry refuses a completion, a grant and a bare header")
+        expect(host_identity_private_sign_completion_v3(sc3_file(), public_key, message)).to_equal(Err("host-identity-sign-domain"))
+        expect(host_identity_private_sign_reset_failure_v3(sc3_file(), public_key,
+            "SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V3\nx\n".bytes())).to_equal(Err("host-identity-sign-domain"))
+        expect(host_identity_private_sign_reset_failure_v3(sc3_file(), public_key, "DBC_GRANT_SIGNATURE_V2\nx\n".bytes())).to_equal(
+            Err("host-identity-sign-domain"))
+        expect(host_identity_private_sign_reset_failure_v3(sc3_file(), public_key,
+            "SIMPLE_REMOTE_RESET_FAILURE_SIGNATURE_V3\n".bytes())).to_equal(Err("host-identity-sign-domain"))
+        step("the grant entry refuses a reset message and another required key is refused")
+        expect(host_identity_private_sign_grant_v1(sc3_file(), public_key, message)).to_equal(Err("host-identity-sign-domain"))
+        var other = sc3_seed()
+        other[0] = 158
+        expect(host_identity_private_sign_reset_failure_v3(sc3_file(), pure_ed25519_keypair_from_seed(other).1, message)).to_equal(
+            Err("host-identity-sign-key-differs"))

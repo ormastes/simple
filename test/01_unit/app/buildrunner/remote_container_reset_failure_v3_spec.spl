@@ -1,14 +1,15 @@
 """
 ## Purpose and audience
-Pins milestone_0030 DESIGN 13.5 (reduced) in `src/app/buildrunner/remote_container_reset_failure_v3.spl`: the controller
-builds ONE receipt, stage `service-restart` (reap `absent-run-lost`, empty native id and binding), from its own admitted
-task, policy and digests when the Host answers `linux-host-remote-build-reaped-incomplete`. The other stages need a Host
-emitter that does not exist and stay refused. Written for owners of the remote build route.
+Pins milestone_0030 DESIGN 13.5 and milestone_0038 in `src/app/buildrunner/remote_container_reset_failure_v3.spl`: the
+controller builds the `service-restart` receipt (reap `absent-run-lost`, empty native id and binding) from its own admitted
+task, policy and digests when the Host answers `linux-host-remote-build-reaped-incomplete`; the Host emits the other three
+stages (`destroy-absence`, `cancel-absence`, `cancel-identity`) and signs them (see the signed-envelope spec). Written for
+owners of the remote build route.
 ## Operator workflow
 Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
 Status: AUTHORED, NOT_RUN (no runnable binary).
 ## Compatibility and limitations
-Pure data; the receipt is unsigned and never decoded from the wire. `accept_reset_failure_v3` is pinned in
+Pure data; the receipt itself is unsigned (the Host signs the envelope around a host stage). `accept_reset_failure_v3` is pinned in
 `remote_container_session_v3_spec.spl`.
 ## Verification guidance and troubleshooting
 Each refusal names the exact error string; a changed string is a contract change.
@@ -19,7 +20,7 @@ use app.buildrunner.remote_container_reset_failure_v3.*
 use test.fixtures.buildrunner.remote_container_parent_v2.container_parent_fixture_v2
 use std.nogc_sync_mut.io.dir_ops.dir_remove_all
 
-describe "Remote container reset-failure receipt V3 (service-restart only)":
+describe "Remote container reset-failure receipt V3":
     it "builds the service-restart receipt with no runtime identity":
         # @req M0030-RESET3-02
         val fixture = container_parent_fixture_v2()
@@ -30,7 +31,7 @@ describe "Remote container reset-failure receipt V3 (service-restart only)":
         expect(receipt.reason).to_equal("REMOTE_CONTAINER_SERVICE_RESTART_RUN_LOST")
         expect(receipt.native_id).to_equal("")
         expect(receipt.workspace_binding_digest).to_equal("")
-        step("any other stage, a runtime id or a binding digest is refused")
+        step("a stage with a foreign reason, a runtime id or a binding digest on service-restart is refused")
         var other = receipt
         other.stage = "destroy-absence"
         expect(remote_container_reset_failure_encode_v3(other)).to_equal(Err("REMOTE_RESET_FAILURE_STAGE_INVALID"))
@@ -65,4 +66,63 @@ describe "Remote container reset-failure receipt V3 (service-restart only)":
         foreign.operation_id = "operation_9"
         expect(remote_container_reset_failure_bind_v3(fixture.task, fixture.policy, foreign, sha256_text("request"),
             sha256_text("grant"))).to_equal(Err("REMOTE_RESET_FAILURE_BINDING_DIFFERS"))
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "builds the three Host stages with the runtime identity and the enable-time binding digest":
+        # @req M0038-RESET3-01
+        val fixture = container_parent_fixture_v2()
+        val native = "c".repeat(64)
+        val binding = "5".repeat(64)
+        val destroy = remote_container_reset_failure_host_new_v3(fixture.task, fixture.policy, sha256_text("request"),
+            sha256_text("grant"), binding, "destroy-absence", native).unwrap()
+        expect(destroy.reason).to_equal("REMOTE_CONTAINER_ABSENCE_UNRESOLVED")
+        expect(destroy.reap).to_equal("incomplete")
+        expect(destroy.native_id).to_equal(native)
+        expect(destroy.workspace_binding_digest).to_equal(binding)
+        val cancel = remote_container_reset_failure_host_new_v3(fixture.task, fixture.policy, sha256_text("request"),
+            sha256_text("grant"), binding, "cancel-absence", native).unwrap()
+        expect(cancel.reason).to_equal("REMOTE_CONTAINER_CANCEL_ABSENCE_UNRESOLVED")
+        expect(cancel.reap).to_equal("incomplete")
+        val identity = remote_container_reset_failure_host_new_v3(fixture.task, fixture.policy, sha256_text("request"),
+            sha256_text("grant"), binding, "cancel-identity", "").unwrap()
+        expect(identity.reason).to_equal("REMOTE_CONTAINER_CANCEL_IDENTITY_UNRESOLVED")
+        expect(identity.reap).to_equal("identity-unresolved")
+        expect(identity.native_id).to_equal("")
+        step("each Host receipt encodes one canonical V3 wire whose digest is its sha256")
+        val wire = remote_container_reset_failure_encode_v3(destroy).unwrap()
+        expect(wire).to_start_with("SIMPLE-REMOTE-RESET-FAILURE-3\n")
+        expect(remote_container_reset_failure_digest_v3(destroy).unwrap()).to_equal(sha256_text(wire))
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "refuses a Host stage without a binding digest, with the wrong runtime identity or through the restart constructor":
+        # @req M0038-RESET3-02
+        val fixture = container_parent_fixture_v2()
+        val native = "c".repeat(64)
+        val binding = "5".repeat(64)
+        expect(remote_container_reset_failure_host_new_v3(fixture.task, fixture.policy, sha256_text("request"),
+            sha256_text("grant"), "", "destroy-absence", native)).to_equal(Err("REMOTE_RESET_FAILURE_IDENTITY_INVALID"))
+        step("a Host stage with a runtime id that is not a digest, or an absence stage with none, is refused")
+        expect(remote_container_reset_failure_host_new_v3(fixture.task, fixture.policy, sha256_text("request"),
+            sha256_text("grant"), binding, "destroy-absence", "native_1")).to_equal(Err("REMOTE_RESET_FAILURE_RUNTIME_INVALID"))
+        expect(remote_container_reset_failure_host_new_v3(fixture.task, fixture.policy, sha256_text("request"),
+            sha256_text("grant"), binding, "cancel-absence", "")).to_equal(Err("REMOTE_RESET_FAILURE_RUNTIME_INVALID"))
+        step("cancel-identity never carries a native id (no Create happened)")
+        expect(remote_container_reset_failure_host_new_v3(fixture.task, fixture.policy, sha256_text("request"),
+            sha256_text("grant"), binding, "cancel-identity", native)).to_equal(Err("REMOTE_RESET_FAILURE_RUNTIME_INVALID"))
+        step("service-restart and an unknown stage are not Host stages")
+        expect(remote_container_reset_failure_host_new_v3(fixture.task, fixture.policy, sha256_text("request"),
+            sha256_text("grant"), binding, "service-restart", "")).to_equal(Err("REMOTE_RESET_FAILURE_STAGE_INVALID"))
+        expect(remote_container_reset_failure_host_new_v3(fixture.task, fixture.policy, sha256_text("request"),
+            sha256_text("grant"), binding, "stop-failure", native)).to_equal(Err("REMOTE_RESET_FAILURE_STAGE_INVALID"))
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "binds a Host receipt only to the controller's own admitted task, policy and authority digests":
+        # @req M0038-RESET3-03
+        val fixture = container_parent_fixture_v2()
+        val receipt = remote_container_reset_failure_host_new_v3(fixture.task, fixture.policy, sha256_text("request"),
+            sha256_text("grant"), "5".repeat(64), "destroy-absence", "c".repeat(64)).unwrap()
+        expect(remote_container_reset_failure_bind_v3(fixture.task, fixture.policy, receipt, sha256_text("request"),
+            sha256_text("grant")).is_ok()).to_equal(true)
+        expect(remote_container_reset_failure_bind_v3(fixture.task, fixture.policy, receipt, sha256_text("request"),
+            sha256_text("other"))).to_equal(Err("REMOTE_RESET_FAILURE_AUTHORITY_DIFFERS"))
         expect(dir_remove_all(fixture.root)).to_equal(true)

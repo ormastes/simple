@@ -25,7 +25,9 @@ use app.buildrunner.remote_container_bundle_codec_v3.{remote_container_bundle_en
 use app.buildrunner.remote_container_session_v3.{RemoteContainerDatabaseSessionV3, remote_container_session_v3}
 use app.buildrunner.remote_session_v1.remote_database_session_open_v1
 use app.buildrunner.remote_container_reset_failure_v3.{remote_container_reset_failure_new_v3,
-    remote_container_reset_failure_digest_v3}
+    remote_container_reset_failure_host_new_v3, remote_container_reset_failure_digest_v3, RemoteContainerResetFailureV3}
+use app.buildrunner.remote_container_reset_failure_signed_v3.{RemoteContainerResetFailureSignedV3,
+    remote_container_reset_failure_signed_encode_v3}
 use app.buildrunner.remote_container_evidence_v2.remote_container_request_bind_v2
 use std.common.build_manager.contracts.BuildInputV1
 use std.common.contracts.container.runtime_v1.*
@@ -269,7 +271,7 @@ describe "Controller V3 remote-container accept (milestone_0030 13.1, G4)":
         val grant = distributed_grant_digest_v2(fixture.authority.signed.grant).unwrap()
         step("the controller built the receipt from its own digests on the Host's reaped-incomplete answer (service-restart)")
         val receipt = remote_container_reset_failure_new_v3(fixture.task, fixture.policy, sha256_text(envelope), grant).unwrap()
-        step("a receipt for another stage is refused before any write (no Host emitter exists for those stages)")
+        step("a receipt for another stage is refused before any write (a Host stage is only accepted inside its signed envelope)")
         var other_stage = receipt
         other_stage.stage = "destroy-absence"
         expect(session.accept_reset_failure_v3(fixture.task, other_stage, fixture.authority)).to_equal(
@@ -322,6 +324,93 @@ describe "Controller V3 remote-container accept (milestone_0030 13.1, G4)":
         val body = source.substring(source.index_of("me accept_reset_failure_v3("), source.index_of("me accept_v3("))
         expect(body.index_of("task_runner_journal_history_v2(") > 0).to_equal(true)
         expect(body.index_of("task_runner_journal_history_v2(") < body.index_of("file_atomic_write(")).to_equal(true)
+        expect(task_runner_journal_release_v1(session.parent.database.journal)).to_equal(Ok(true))
+        expect(distributed_operation_journal_close_v2(session.parent.operations)).to_equal(Ok(true))
+        expect(dir_remove(fixture.root, true)).to_equal(true)
+
+# milestone_0038: a Host-signed reset-failure envelope, signed in the published order (never the production builder).
+fn s3_host_receipt(fixture: RemoteContainerParentFixtureV2, stage: text) -> RemoteContainerResetFailureV3:
+    val envelope = distributed_encode_operation_v2(fixture.authority.request).unwrap()
+    val grant = distributed_grant_digest_v2(fixture.authority.signed.grant).unwrap()
+    remote_container_reset_failure_host_new_v3(fixture.task, fixture.policy, sha256_text(envelope), grant, "5".repeat(64), stage,
+        if stage == "cancel-identity": "" else: "c".repeat(64)).unwrap()
+
+fn s3_host_signed(receipt: RemoteContainerResetFailureV3, offset: i64 = 129) -> RemoteContainerResetFailureSignedV3:
+    val message = ["SIMPLE_REMOTE_RESET_FAILURE_SIGNATURE_V3", "SIMPLE-REMOTE-RESET-FAILURE-3", receipt.task_identity,
+        receipt.host_id, receipt.assignment_digest, str(receipt.controller_epoch), receipt.operation_id,
+        receipt.request_digest, receipt.grant_digest, receipt.workspace_binding_digest, receipt.stage, receipt.reason,
+        receipt.reap, receipt.native_id, "host_signer_1", "1", "1099", ""].join("\n")
+    RemoteContainerResetFailureSignedV3(receipt: receipt, signer_id: "host_signer_1", key_revision: 1, signed_at: 1099,
+        signature: pure_ed25519_sign_from_seed_v1(verification_seed(offset), verification_bytes(message)).signature)
+
+describe "Remote container Host-signed reset-failure accept V3 (milestone_0038)":
+    it "journals a Host-signed receipt of every Host stage as the op's terminal failure bound to the receipt digest":
+        # @req M0038-ACCEPT-01
+        for stage in ["destroy-absence", "cancel-absence", "cancel-identity"]:
+            val fixture = container_parent_fixture_v2(0, 3)
+            var session = s3_open(fixture)
+            val receipt = s3_host_receipt(fixture, stage)
+            val wire = remote_container_reset_failure_signed_encode_v3(s3_host_signed(receipt)).unwrap()
+            val failed = session.accept_host_reset_failure_v3(fixture.task, wire, fixture.authority).unwrap()
+            val digest = remote_container_reset_failure_digest_v3(receipt).unwrap()
+            expect(failed.status).to_equal("ERROR")
+            expect(failed.stage).to_equal(stage)
+            expect(failed.digest).to_equal(digest)
+            val operation = distributed_operation_journal_lookup_v2(session.parent.operations, fixture.policy.operation_id).unwrap()
+            expect(operation.state).to_equal("failed")
+            expect(operation.outcome_digest).to_equal(digest)
+            step("the first terminal wins: the same envelope again and a completion are replays")
+            expect(session.accept_host_reset_failure_v3(fixture.task, wire, fixture.authority)).to_equal(Err("REMOTE_COMPLETION_REPLAY"))
+            val bundle = remote_container_bundle_encode_v3(s3_bundle(fixture, RuntimeExitStatusV1.Exited(0))).unwrap()
+            expect(session.accept_wire_v3(fixture.task, bundle, fixture.authority)).to_equal(Err("REMOTE_COMPLETION_REPLAY"))
+            expect(session.parent.database.recorded[fixture.task.id + ":" + str(fixture.task.attempt)]).to_equal(true)
+            expect(task_runner_journal_release_v1(session.parent.database.journal)).to_equal(Ok(true))
+            expect(distributed_operation_journal_close_v2(session.parent.operations)).to_equal(Ok(true))
+            expect(dir_remove(fixture.root, true)).to_equal(true)
+
+    it "refuses an UNSIGNED Host-stage receipt and a signed service-restart, leaving the operation executing":
+        # @req M0038-ACCEPT-02
+        val fixture = container_parent_fixture_v2(0, 3)
+        var session = s3_open(fixture)
+        step("the unsigned entry only builds the controller's service-restart receipt")
+        expect(session.accept_reset_failure_v3(fixture.task, s3_host_receipt(fixture, "destroy-absence"), fixture.authority)).to_equal(
+            Err("REMOTE_RESET_FAILURE_SIGNATURE_REQUIRED"))
+        val envelope = distributed_encode_operation_v2(fixture.authority.request).unwrap()
+        val grant = distributed_grant_digest_v2(fixture.authority.signed.grant).unwrap()
+        val restart = remote_container_reset_failure_new_v3(fixture.task, fixture.policy, sha256_text(envelope), grant).unwrap()
+        step("a Host never signs service-restart: the signed entry refuses it")
+        var forged = s3_host_signed(s3_host_receipt(fixture, "destroy-absence"))
+        forged.receipt = restart
+        expect(remote_container_reset_failure_signed_encode_v3(forged)).to_equal(Err("REMOTE_RESET_FAILURE_SIGNED_STAGE_INVALID"))
+        val operation = distributed_operation_journal_lookup_v2(session.parent.operations, fixture.policy.operation_id).unwrap()
+        expect(operation.state).to_equal("executing")
+        expect(task_runner_journal_release_v1(session.parent.database.journal)).to_equal(Ok(true))
+        expect(distributed_operation_journal_close_v2(session.parent.operations)).to_equal(Ok(true))
+        expect(dir_remove(fixture.root, true)).to_equal(true)
+
+    it "refuses a wrong-key signature, a receipt for another request and a non-envelope before any write":
+        # @req M0038-ACCEPT-03
+        val fixture = container_parent_fixture_v2(0, 3)
+        var session = s3_open(fixture)
+        val receipt = s3_host_receipt(fixture, "cancel-absence")
+        val foreign_key = remote_container_reset_failure_signed_encode_v3(s3_host_signed(receipt, 130)).unwrap()
+        expect(session.accept_host_reset_failure_v3(fixture.task, foreign_key, fixture.authority)).to_equal(
+            Err("REMOTE_RESET_FAILURE_SIGNATURE_INVALID"))
+        var other = receipt
+        other.request_digest = "9".repeat(64)
+        val foreign_request = remote_container_reset_failure_signed_encode_v3(s3_host_signed(other)).unwrap()
+        expect(session.accept_host_reset_failure_v3(fixture.task, foreign_request, fixture.authority)).to_equal(
+            Err("CONTAINER_COMPLETION_AUTHORIZATION_MISMATCH"))
+        expect(session.accept_host_reset_failure_v3(fixture.task, "not an envelope\n", fixture.authority)).to_equal(
+            Err("REMOTE_RESET_FAILURE_SIGNED_WIRE_INVALID"))
+        val operation = distributed_operation_journal_lookup_v2(session.parent.operations, fixture.policy.operation_id).unwrap()
+        expect(operation.state).to_equal("executing")
+        expect(session.parent.database.recorded.contains_key(fixture.task.id + ":" + str(fixture.task.attempt))).to_equal(false)
+        step("source shape: the signature is verified before the journal check and the receipt write")
+        val source = file_read_text("src/app/buildrunner/remote_container_session_v3.spl")
+        val body = source.substring(source.index_of("me accept_host_reset_failure_v3("), source.index_of("me accept_v3("))
+        expect(body.index_of("remote_container_reset_failure_verify_v3(") > 0).to_equal(true)
+        expect(body.index_of("remote_container_reset_failure_verify_v3(") < body.index_of("record_reset_failure_v3(")).to_equal(true)
         expect(task_runner_journal_release_v1(session.parent.database.journal)).to_equal(Ok(true))
         expect(distributed_operation_journal_close_v2(session.parent.operations)).to_equal(Ok(true))
         expect(dir_remove(fixture.root, true)).to_equal(true)

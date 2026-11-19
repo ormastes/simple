@@ -164,13 +164,25 @@ pub struct HostRemoteBuildObservedV3:
     stderr: [u8]
     outputs: [ContainerSettledWorkspaceFileV3]
 
+# milestone_0038: what the Host itself observed at a teardown failure the reset-failure receipt V3 defines. `stage` is the
+# receipt stage (host_remote_build_reset_stage_v4), `native_id` the runtime id Create returned (empty without a Create) and
+# `workspace_binding_digest` the provider's enable-time binding. The port re-derives everything else from the open record.
+pub struct HostRemoteBuildResetObservedV3:
+    operation_id: text
+    task_digest: text
+    stage: text
+    native_id: text
+    workspace_binding_digest: text
+
 # F5: the app half, supplied by the service composition. admit_open decodes the open record's app types (task, policy,
 # environment) and runs remote_context_admit_v1 over the snapshot-built context; finalize freezes, signs (host
-# identity key) and encodes the bundle. Neither is an authority source for this module: the open authority and the
+# identity key) and encodes the bundle; reset_failure (milestone_0038) builds and signs the Host reset-failure envelope for
+# one observed stage at the given grant clock. None is an authority source for this module: the open authority and the
 # request pin are re-verified here.
 pub struct HostRemoteBuildPortV4:
     admit_open: fn(text, i64) -> Result<HostRemoteBuildAdmittedV3, text>
     finalize: fn(text, HostRemoteBuildObservedV3) -> Result<text, text>
+    reset_failure: fn(text, HostRemoteBuildResetObservedV3, i64) -> Result<text, text>
 
 pub struct HostRemoteBuildExecutorV3:
     operation_id: text
@@ -203,6 +215,10 @@ pub struct HostRemoteBuildExecutorV3:
     cancel_cause: text = ""
     outcome: text = ""
     bundle_digest: text = ""
+    # milestone_0038: the provider's enable-time workspace binding digest and the Host-signed reset-failure envelope held
+    # on a wedged executor (a repeated collect answers the identical bytes; the executor stays wedged, charge held).
+    binding_digest: text = ""
+    reset_receipt: text = ""
     lifecycle_closed: bool = false
     workload_closed: bool = false
     loan_ended: bool = false
@@ -255,6 +271,15 @@ pub fn host_remote_build_reply_v4(executor: HostRemoteBuildExecutorV3) -> text:
         "received": SdnValue.Int(executor.received), "inputs": SdnValue.Int(executor.inputs.len()),
         "outcome": SdnValue.String(executor.outcome), "bundleDigest": SdnValue.String(executor.bundle_digest),
         "cancelCause": SdnValue.String(executor.cancel_cause)}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+# milestone_0038: the collect answer of a wedged executor that holds a Host-signed reset-failure envelope. It is a SUCCESSFUL
+# reply (the service domain flattens an error reply to text, which cannot carry the receipt); the executor stays wedged.
+fn host_remote_build_reset_reply_v4(executor: HostRemoteBuildExecutorV3) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-remote-build-reset-failure"),
+        "operationId": SdnValue.String(executor.operation_id), "stage": SdnValue.String(executor.stage),
+        "cause": SdnValue.String(host_remote_build_failed_cause_v4(executor.error)),
+        "receipt": SdnValue.String(executor.reset_receipt)}
     sdn_encode_canonical(SdnValue.Dict(fields))
 
 # Open (pre-transfer, no effect but the no-replace archive): the app port admits the record's app types, then the
@@ -424,6 +449,39 @@ fn remote_build_wedged_v4(executor: HostRemoteBuildExecutorV3, capacity: HostCap
     state.error = error
     remote_build_turn_v4(state, capacity, "", error, true)
 
+# milestone_0038: the reset-failure receipt stage of a Stop/Destroy failure, from what the executor itself observed: `failed`
+# is the failing step, `cancel_cause` the self-cancel cause (empty for a normal run), `created` whether Create returned an
+# identity and `exited` whether the engine-native exit was read. Everything else (a Stop failure with a Create or without a
+# cancel, settle/read/source-return/finalize/enable errors, every earlier step) has no V3 stage and keeps the plain wedge.
+fn host_remote_build_reset_stage_v4(failed: text, cancel_cause: text, created: bool, exited: bool) -> text:
+    if failed == "destroy":
+        if cancel_cause == "":
+            if created and exited: return "destroy-absence"
+            return ""
+        if created: return "cancel-absence"
+        return "cancel-identity"
+    if failed == "stop" and cancel_cause != "" and not created: return "cancel-identity"
+    ""
+
+# A Stop/Destroy effect failure. The receipt is built and signed by the port from the open record and this executor's own
+# observations; the executor is ALWAYS wedged (the record stays reserved and charged, the close still refuses), and a port
+# error, an unmapped stage or a missing binding digest changes nothing but the absence of the receipt.
+fn remote_build_reset_wedged_v4(executor: HostRemoteBuildExecutorV3, capacity: HostCapacityOwnerV1, port: HostRemoteBuildPortV4,
+        clock: HostReservationAuthorizationContextV1, error: text) -> HostRemoteBuildTurnV4:
+    val stage = host_remote_build_reset_stage_v4(executor.stage, executor.cancel_cause, executor.created.is_some(),
+        executor.exit.is_some())
+    if stage == "" or executor.binding_digest == "": return remote_build_wedged_v4(executor, capacity, error)
+    val native = if executor.created.is_some(): executor.created.unwrap().native_id else: ""
+    val signed = (port.reset_failure)(executor.open_record, HostRemoteBuildResetObservedV3(operation_id: executor.operation_id,
+        task_digest: executor.task_digest, stage: stage, native_id: native, workspace_binding_digest: executor.binding_digest),
+        clock.grant_clock)
+    if signed.is_err(): return remote_build_wedged_v4(executor, capacity, error)
+    var state = executor
+    state.stage = "wedged"
+    state.error = error
+    state.reset_receipt = signed.unwrap()
+    remote_build_turn_v4(state, capacity, host_remote_build_reset_reply_v4(state), "", true)
+
 # s5 / T-04: after the transfer and before a record is reserved a failure is a held `failed` executor (consumed; the
 # restart reap drains its executing row); after, it is wedged. Never a no-workload settle: the source may be open.
 fn remote_build_fail_v4(executor: HostRemoteBuildExecutorV3, capacity: HostCapacityOwnerV1, error: text) -> HostRemoteBuildTurnV4:
@@ -438,6 +496,7 @@ pub fn host_remote_build_step_v4(executor: HostRemoteBuildExecutorV3, capacity: 
         journal_operation: OperationEnvelopeV2, association: HostExecutionAssociationV3, port: HostRemoteBuildPortV4,
         template: GroupProcessStreamLaunchV2, clock: HostReservationAuthorizationContextV1) -> HostRemoteBuildTurnV4:
     var state = executor
+    if state.reset_receipt != "": return remote_build_turn_v4(state, capacity, host_remote_build_reset_reply_v4(state), "", true)
     if state.stage == "wedged" or state.stage == "failed":
         return remote_build_turn_v4(state, capacity, "", if state.error != "": state.error else: "linux-host-remote-build-" + state.stage, true)
     if state.stage == "settled": return remote_build_turn_v4(state, capacity, host_remote_build_reply_v4(state), "", false)
@@ -488,6 +547,7 @@ pub fn host_remote_build_step_v4(executor: HostRemoteBuildExecutorV3, capacity: 
             state.invocation_digest, state.invocation_bytes)
         state.container = Some(enabled.owner)
         if enabled.error != "": return remote_build_wedged_v4(state, capacity, enabled.error)
+        state.binding_digest = enabled.binding_digest
         state.reserved = true
         state.stage = "prepare"
         return remote_build_pending_v4(state, capacity)
@@ -586,12 +646,14 @@ fn remote_build_release_step_v4(executor: HostRemoteBuildExecutorV3, capacity: H
             else: simple_container_workspace_begin_v3(state.container.unwrap(), action, request, None)
         state.container = Some(turn.owner)
         state.pending = turn.pending
-        if turn.error != "": return remote_build_wedged_v4(state, capacity, turn.error)
+        if turn.error != "": return remote_build_reset_wedged_v4(state, capacity, port, clock, turn.error)
         if state.pending: return remote_build_pending_v4(state, capacity)
-        if turn.operation.is_none(): return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-" + state.stage + "-missing")
+        if turn.operation.is_none():
+            return remote_build_reset_wedged_v4(state, capacity, port, clock, "linux-host-remote-build-" + state.stage + "-missing")
         val operation = turn.operation.unwrap()
         if operation.status != RUNTIME_STATUS_OK:
-            return remote_build_wedged_v4(state, capacity, "linux-host-remote-build-" + state.stage + ":" + operation.reason)
+            return remote_build_reset_wedged_v4(state, capacity, port, clock,
+                "linux-host-remote-build-" + state.stage + ":" + operation.reason)
         if state.stage == "stop":
             # L10: the Stop reply carries the engine-native exit read taken before the stop was issued.
             # G4: the V3 measurements pin the legacy exitCode to -1 (never the runtime's state exit code).
@@ -818,7 +880,7 @@ pub fn host_remote_build_output_v4(journal: DistributedOperationJournalV2, execu
     Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
 export host_remote_build_no_workload_record_v4, host_remote_build_settle_no_workload_v4
 export HostRemoteBuildOpenAuthorityV4, host_remote_build_open_authority_v4
-export HostRemoteBuildAdmittedV3, HostRemoteBuildObservedV3, HostRemoteBuildPortV4, HostRemoteBuildExecutorV3
+export HostRemoteBuildAdmittedV3, HostRemoteBuildObservedV3, HostRemoteBuildResetObservedV3, HostRemoteBuildPortV4, HostRemoteBuildExecutorV3
 export HostRemoteBuildTurnV4, HostRemoteBuildCancelV4, HostRemoteBuildOpenV4, HostRemoteBuildReleaseV4
 export host_remote_build_deadline_v4, host_remote_build_open_relative_v4, host_remote_build_input_relative_v4
 export host_remote_build_bundle_relative_v4, host_remote_build_exit_outcome_v4, host_remote_build_reply_v4

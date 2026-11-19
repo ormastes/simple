@@ -4,7 +4,10 @@
 # controller's installed facts, so it is specified without a live Host:
 #   status -> associated prepare -> association check (N12-a task->request binding) -> admit build row (single journal
 #   writer) -> associated execute -> open -> input x n -> start -> collect* -> output x m -> reassemble -> accept
-#   (accept_wire_v3 on the ROOT's journal). A reaped answer becomes the controller-built service-restart receipt.
+#   (accept_wire_v3 on the ROOT's journal). A reaped answer becomes the controller-built service-restart receipt; a Host
+#   reset-failure reply (milestone_0038: a wedged run whose Stop/Destroy teardown failed) carries the Host-SIGNED receipt,
+#   which accept_host_reset_failure_v3 verifies and journals `failed` on the root's journal (a receipt that does not verify
+#   falls back to the existing wedged settle).
 # Never printed: keys, signatures, the bundle, request bytes. Printed: state, operation id and result digests. Success is
 # the signed completion's typed exit only (RuntimeExitStatusV1 Exited(0), enforced by freeze/verify inside the session);
 # the V3 state's legacy exit field is never read.
@@ -13,7 +16,8 @@
 #   --spec <dir> --out <private state root> --grant-id <id> --expires-in-ms <1..86400000>
 # (spec directory formats: remote_run_author_v1.spl header). `--out` is the buildrunner state root where accepted
 # outputs and the task journal live. Named gaps: the Host's prepare deadline is its MONOTONIC clock, so run.sdn carries
-# the operator-observed absolute value; reset-failure stages other than service-restart stay refused (no Host emitter).
+# the operator-observed absolute value; reset-failure stages: service-restart (controller-built, unsigned) and
+# destroy-absence / cancel-absence / cancel-identity (Host-signed); no other teardown failure has a receipt stage.
 # A run that ends WITHOUT a bundle never leaves the controller row `executing` (milestone_0037, remote_run_settle_v1.spl):
 # a Host reply that ended it (settled without a bundle, failed, wedged) settles the row failed, a settled run carrying a
 # cancel cause settles it cancelled, and a local timeout or a broken exchange after the row was admitted settles it
@@ -27,7 +31,7 @@
 # controller-approval-outside-task-class.
 use app.orchestrator.remote_run_author_v1.RemoteRunAuthoredV1
 use app.orchestrator.remote_run_frames_v1.{RemoteRunReplyV1, remote_run_reply_decode_v1,
-    remote_run_reply_phase_v1, remote_run_reaped_v1, remote_run_association_check_v1, remote_run_sub_payload_v1,
+    remote_run_reply_phase_v1, remote_run_reaped_v1, remote_run_reset_reply_decode_v1, remote_run_association_check_v1, remote_run_sub_payload_v1,
     remote_run_input_payload_v1, remote_run_output_decode_v1, remote_run_reassemble_v1, remote_run_manifest_same_v1,
     remote_run_service_restart_receipt_v1, remote_run_execute_reply_check_v1}
 use app.orchestrator.controller_authority_issue_v1.ControllerIssuedAuthorityV1
@@ -193,6 +197,21 @@ fn remote_run_reset_apply_v1(authored: RemoteRunAuthoredV1, execution: Container
     val result = "ERROR:" + accepted.unwrap().digest
     ControllerJournalEditV1(journal: advanced, result: if released.is_err(): result + REMOTE_RUN_RELEASE_FAILED_V1 else: result, error: "")
 
+# milestone_0038: the Host-signed reset-failure envelope, accepted on the ROOT's journal like every other terminal record. Result:
+# `ERROR:<receipt digest>:<stage>` (the receipt stage is the Host's observation, verified inside the session).
+fn remote_run_host_reset_apply_v1(authored: RemoteRunAuthoredV1, execution: ContainerExecutionRequestV2,
+        context: RemoteAuthorityContextV1, state_root: text, wire: text,
+        journal: DistributedOperationJournalV2) -> ControllerJournalEditV1:
+    val opened = remote_run_session_open_v1(authored, execution, state_root, journal)
+    if opened.is_err(): return ControllerJournalEditV1(journal: journal, result: "", error: opened.unwrap_err())
+    var session = opened.unwrap()
+    val accepted = session.accept_host_reset_failure_v3(authored.task, wire, context)
+    val released = task_runner_journal_release_v1(session.parent.database.journal)
+    val advanced = session.parent.operations
+    if accepted.is_err(): return ControllerJournalEditV1(journal: advanced, result: "", error: accepted.unwrap_err())
+    val result = "ERROR:" + accepted.unwrap().digest + ":" + accepted.unwrap().stage
+    ControllerJournalEditV1(journal: advanced, result: if released.is_err(): result + REMOTE_RUN_RELEASE_FAILED_V1 else: result, error: "")
+
 fn remote_run_frame_v1(link: RemoteRunLinkV1, authored: RemoteRunAuthoredV1, sub: text, index: i64,
         payload: text) -> Result<text, text>:
     (link.send)("remote-build", remote_run_sub_payload_v1(sub, authored.policy.operation_id, index, payload)?)
@@ -258,17 +277,25 @@ fn remote_run_collect_v1(authored: RemoteRunAuthoredV1, facts: RemoteRunFactsV1,
     val began = (link.monotonic_ms)()
     var phase = remote_run_reply_phase_v1(reply)
     var reaped = false
+    var reset_wire = ""
     var timed_out = false
-    while phase == "poll" and not reaped and not timed_out:
+    while phase == "poll" and not reaped and reset_wire == "" and not timed_out:
         if (link.monotonic_ms)() - began > REMOTE_RUN_WAIT_MS_V1:
             timed_out = true
         else:
             val collected = remote_run_frame_v1(link, authored, "collect", 0, "")
             if collected.is_ok():
-                reply = remote_run_reply_decode_v1(collected.unwrap(), operation_id)?
-                phase = remote_run_reply_phase_v1(reply)
-                if phase == "poll":
-                    val _paused = (link.pause)(REMOTE_RUN_POLL_MS_V1)
+                val decoded = remote_run_reply_decode_v1(collected.unwrap(), operation_id)
+                if decoded.is_ok():
+                    reply = decoded.unwrap()
+                    phase = remote_run_reply_phase_v1(reply)
+                    if phase == "poll":
+                        val _paused = (link.pause)(REMOTE_RUN_POLL_MS_V1)
+                else:
+                    # Not an ordinary stage reply: the only other successful collect answer is the reset-failure reply.
+                    val reset = remote_run_reset_reply_decode_v1(collected.unwrap(), operation_id)
+                    if reset.is_err(): return Err(decoded.unwrap_err())
+                    reset_wire = reset.unwrap().receipt
             elif remote_run_reaped_v1(collected.unwrap_err()):
                 reaped = true
             else:
@@ -292,6 +319,21 @@ fn remote_run_collect_v1(authored: RemoteRunAuthoredV1, facts: RemoteRunFactsV1,
             context, facts.state_root, receipt, journal))?)
         return Ok(remote_run_outcome_v1(2, "reaped-failed", operation_id, recorded.0.substring(6, recorded.0.byte_len()),
             if recorded.1: "service-restart;task-journal-release-failed" else: "service-restart"))
+    if reset_wire != "":
+        val accepted = (link.edit)(\journal: remote_run_host_reset_apply_v1(authored, admitted.execution, context,
+            facts.state_root, reset_wire, journal))
+        if accepted.is_ok():
+            val recorded = remote_run_result_parts_v1(accepted.unwrap())
+            val body = recorded.0.substring(6, recorded.0.byte_len())
+            val at = body.index_of(":")
+            if at < 0: return Err("remote-run-reset-result")
+            return Ok(remote_run_outcome_v1(2, "host-reset-failed", operation_id, body.substring(0, at),
+                if recorded.1: body.substring(at + 1, body.byte_len()) + ";task-journal-release-failed" else: body.substring(at + 1, body.byte_len())))
+        # The receipt was refused (unverifiable signature, stale authority, replay): the Host still ended the run wedged, so the
+        # row is settled by the existing wedged verdict and never left executing, never completed.
+        val verdict = remote_run_terminal_settle_v1("wedged", "")
+        val settled = remote_run_settle_v1(link, admitted.build_request, verdict.0, verdict.1)
+        return Ok(remote_run_outcome_v1(2, "host-terminal", operation_id, "", "wedged:reset-receipt-refused:" + accepted.unwrap_err(), settled))
     if phase == "terminal":
         # The Host ended the run WITHOUT a bundle (settled-cancelled, failed, wedged): the row is settled, never left executing.
         val verdict = remote_run_terminal_settle_v1(reply.stage, reply.cancel_cause)

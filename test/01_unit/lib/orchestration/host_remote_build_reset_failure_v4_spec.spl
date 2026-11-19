@@ -1,0 +1,128 @@
+"""
+## Purpose and audience
+Pins milestone_0038 in `src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl`: when the Host's
+remote-build teardown fails at a point the reset-failure receipt V3 defines, the executor asks the app port to build and
+sign the receipt and answers the `collect` with error "" and a `linux-host-remote-build-reset-failure` reply (an error reply
+would be flattened to text by the service domain and could not carry it). The executor still ends `wedged`: a receipt never
+releases the charge and never blocks wedging; a signing failure, a stage the receipt does not define, or a missing binding
+digest wedge exactly as before. Written for owners of the Linux Host service.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary).
+## Compatibility and limitations
+The step needs a live provider (stop/destroy effects), so the failure-point CLASSIFIER is data-tested here and the wiring
+is pinned structurally, as the neighbouring executor specs do. Stages with no V3 receipt (Stop without a cancel cause,
+create/prepare/configuration/start/inspect wedges, settle, read, source-return, finalize and enable errors) keep the
+generic `host-wedged` settle on the controller.
+## Verification guidance and troubleshooting
+A changed stage or reply field is a contract change.
+"""
+use std.spec.step
+use std.io.file_read_text
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.*
+# Tests reach private module gates directly (repo rule: tests may access private).
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.{host_remote_build_reset_stage_v4,
+    host_remote_build_reset_reply_v4}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+val RF_SOURCE: text = "src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl"
+
+fn rf_count(source: text, needle: text) -> i64:
+    source.split(needle).len() - 1
+
+fn rf_from(source: text, start: text, end: text) -> text:
+    val at = source.index_of(start)
+    if at < 0: return ""
+    val tail = source.substring(at, source.byte_len())
+    val stop = tail.index_of(end)
+    if stop < 0: return tail
+    tail.substring(0, stop)
+
+describe "Host remote-build reset-failure emitter (milestone_0038)":
+    it "maps each failure point the receipt defines to its stage":
+        # @req M0038-HOST-01
+        step("destroy not ok after a normal exit (no cancel, Create happened, an exit was read) is destroy-absence")
+        expect(host_remote_build_reset_stage_v4("destroy", "", true, true)).to_equal("destroy-absence")
+        step("a self-cancel's destroy after Create is cancel-absence; without a Create (stop or destroy) it is cancel-identity")
+        expect(host_remote_build_reset_stage_v4("destroy", "deadline", true, false)).to_equal("cancel-absence")
+        expect(host_remote_build_reset_stage_v4("destroy", "controller-cancel", true, false)).to_equal("cancel-absence")
+        expect(host_remote_build_reset_stage_v4("destroy", "deadline", false, false)).to_equal("cancel-identity")
+        expect(host_remote_build_reset_stage_v4("stop", "controller-cancel", false, false)).to_equal("cancel-identity")
+
+    it "gives no receipt stage to a failure the receipt does not define":
+        # @req M0038-HOST-02
+        step("a stop failure with Create made, or without a cancel, is not a V3 stage")
+        expect(host_remote_build_reset_stage_v4("stop", "", true, false)).to_equal("")
+        expect(host_remote_build_reset_stage_v4("stop", "deadline", true, false)).to_equal("")
+        expect(host_remote_build_reset_stage_v4("stop", "", false, false)).to_equal("")
+        step("a normal-exit destroy with no recorded exit or no Create is impossible and is refused a stage")
+        expect(host_remote_build_reset_stage_v4("destroy", "", true, false)).to_equal("")
+        expect(host_remote_build_reset_stage_v4("destroy", "", false, true)).to_equal("")
+        step("settle, read, source-return, finalize and every earlier step have no stage")
+        for failed in ["settle", "read", "source-return", "finalize", "host-settle", "create", "prepare", "enable"]:
+            expect(host_remote_build_reset_stage_v4(failed, "", true, true)).to_equal("")
+            expect(host_remote_build_reset_stage_v4(failed, "deadline", true, false)).to_equal("")
+
+    it "answers with a reset-failure reply carrying the signed receipt, the wedged stage and a bounded cause":
+        # @req M0038-HOST-03
+        var executor = HostRemoteBuildExecutorV3(operation_id: "operation_2", fence: "fence_1", association_digest: "a".repeat(64),
+            task_digest: "d".repeat(64), open_record: "", inputs: [], invocation_bytes: "", invocation_digest: "",
+            workspace_manifest: "", deadline: 0)
+        executor.stage = "wedged"
+        executor.error = "linux-host-remote-build-destroy:" + "x".repeat(400)
+        executor.reset_receipt = "SIMPLE_REMOTE_RESET_FAILURE_ENVELOPE_V3\nline\n"
+        val reply = host_remote_build_reset_reply_v4(executor)
+        val parsed = sdn_parse_strict_v1(reply, SdnStrictLimitsV1(max_source_bytes: 1048576, max_depth: 3, max_nodes: 64,
+            max_rows: 0, max_cells: 0, max_columns: 8)).unwrap()
+        val fields = match parsed.value:
+            case SdnValue.Dict(value): value
+            case _: {}
+        expect(fields.len()).to_equal(5)
+        expect(fields["kind"]).to_equal(SdnValue.String("linux-host-remote-build-reset-failure"))
+        expect(fields["operationId"]).to_equal(SdnValue.String("operation_2"))
+        expect(fields["stage"]).to_equal(SdnValue.String("wedged"))
+        expect(fields["receipt"]).to_equal(SdnValue.String("SIMPLE_REMOTE_RESET_FAILURE_ENVELOPE_V3\nline\n"))
+        match fields["cause"]:
+            case SdnValue.String(value): expect(value.byte_len()).to_equal(160)
+            case _: expect(false).to_equal(true)
+
+    it "builds and signs the receipt only at the Stop/Destroy wedge points and never lets a signing failure change the wedge":
+        # @req M0038-HOST-04
+        val source = file_read_text(RF_SOURCE)
+        step("the port gains one reset_failure fn; the open record and the host's own observations are the only inputs")
+        expect(rf_count(source, "reset_failure: fn(text, HostRemoteBuildResetObservedV3, i64) -> Result<text, text>")).to_equal(1)
+        val wedge = rf_from(source, "fn remote_build_reset_wedged_v4(", "\nfn ")
+        expect(rf_count(wedge, "(port.reset_failure)(executor.open_record,")).to_equal(1)
+        step("an Err from the port, an unmapped stage or an empty binding digest returns the plain wedge")
+        expect(rf_count(wedge, "return remote_build_wedged_v4(")).to_equal(2)
+        step("the held executor stays wedged and keeps the receipt so a repeated collect answers the identical bytes")
+        expect(rf_count(wedge, "state.stage = \"wedged\"")).to_equal(1)
+        expect(rf_count(wedge, "state.reset_receipt = ")).to_equal(1)
+        val head = rf_from(source, "pub fn host_remote_build_step_v4(", "# Every archived input")
+        expect(rf_count(head, "state.reset_receipt != \"\"")).to_equal(1)
+        expect(head.index_of("state.reset_receipt != \"\"") < head.index_of("state.stage == \"settled\"")).to_equal(true)
+        step("only the Stop and Destroy failures reach the helper; every other effect failure keeps the plain wedge")
+        val release = rf_from(source, "fn remote_build_release_step_v4(", "# The port finalize")
+        expect(rf_count(release, "remote_build_reset_wedged_v4(")).to_equal(3)
+        expect(rf_count(release, "remote_build_wedged_v4(")).to_equal(0)
+
+    it "captures the enable-time binding digest and never invents one":
+        # @req M0038-HOST-05
+        val source = file_read_text(RF_SOURCE)
+        val step_source = rf_from(source, "pub fn host_remote_build_step_v4(", "# Every archived input")
+        expect(rf_count(step_source, "state.binding_digest = enabled.binding_digest")).to_equal(1)
+        expect(step_source.index_of("state.binding_digest = enabled.binding_digest") < step_source.index_of("state.reserved = true")).to_equal(true)
+        step("the digest comes from the provider's enable turn, a typed field, never from a frame or the open record")
+        val api = file_read_text("src/lib/nogc_async_mut/container/workspace_api_v3.spl")
+        expect(rf_count(api, "binding_digest: text")).to_equal(1)
+        val adapter = file_read_text("src/lib/nogc_async_mut/container/providers/linux/simple_container_adapter_v2.spl")
+        expect(rf_count(adapter, "binding_digest: text")).to_equal(1)
+        val fresh = file_read_text("src/lib/nogc_async_mut/container/providers/linux/fresh_epoch_workload_v2.spl")
+        expect(rf_count(fresh, "binding_digest: text")).to_equal(1)
+        val machine = file_read_text("src/lib/nogc_sync_mut/container/machine_authority_v1.spl")
+        val enable = rf_from(machine, "pub fn enable_workspace_source_v3(", "    pub fn observe_workspace_primary_v3")
+        expect(rf_count(enable, "val observed = binding.current_v3()?")).to_equal(1)
+        expect(rf_count(enable, "val binding_digest = observed.binding_digest")).to_equal(1)
+        expect(enable.index_of("val binding_digest = observed.binding_digest") < enable.index_of("reserve_workspace_v3(")).to_equal(true)

@@ -501,7 +501,7 @@ retained reader (`controller_dispatch_remote_*`): status -> associated prepare -
 resent) -> open -> input per file -> start -> collect (poll on the reply stage, 9 min bound, then the controller-signed
 cancel) -> output chunks -> reassemble -> `accept_wire_v3` on the ROOT's journal (`controller_dispatch_remote_edit_v3`).
 A reaped answer (`linux-host-remote-build-reaped-incomplete`) becomes the controller-built `service-restart` receipt
-(`accept_reset_failure_v3`); the other reset-failure stages stay refused (no Host emitter). One grant lists
+(`accept_reset_failure_v3`, which now refuses every other stage with `REMOTE_RESET_FAILURE_SIGNATURE_REQUIRED`; see RESET-FAILURE EMITTERS below). One grant lists
 {build|test, host_reservation_v1, host_execute_associated_v3, host_agent_cancel_v4}; the approver key must be enrolled for
 those operations. Spec dir: task.sdn, environment.sdn, run.sdn, host-inputs.sdn, inputs/<path> (formats in the author
 module header). Traps: the Host prepare deadline is its MONOTONIC clock (operator-observed value in run.sdn); host-inputs
@@ -540,3 +540,30 @@ the journal the closure ended with is ALWAYS adopted (`dispatch_retain_v3`), a r
 part, not an error. A restart reconciles by replay of the committed journal (never by the in-memory store). Remaining:
 the Linux origin latches `quarantined` for the whole process after one failed procfs verify (one transient failure refuses
 remote-run until the process restarts).
+RESET-FAILURE EMITTERS (milestone_0038, AT-RUN-02; all specs NOT_RUN): the receipt V3 has four stages
+(`remote_container_reset_failure_v3.spl`): `service-restart` stays controller-built and UNSIGNED (the Host no longer holds the
+run: the reap record carries no open record and no binding); the three Host stages `destroy-absence` (Destroy not ok after a
+normal exit), `cancel-absence` (self-cancel Destroy not ok after Create) and `cancel-identity` (self-cancel stop/destroy not ok
+with no Create) are emitted BY THE HOST. Executor (`host_linux_service_remote_build_v4.spl`): the three Stop/Destroy wedge points
+call `remote_build_reset_wedged_v4`, which maps the failure point with `host_remote_build_reset_stage_v4` (pure: failing step,
+cancel cause, Create made, exit read) and asks the new port fn `reset_failure` (`remote_build_service_port_v3.spl`) to rebuild
+the context from the INSTALLED snapshot, build the receipt from the open record's digests plus the Host's own observations
+(native id from `created`, binding digest captured at ENABLE), sign it with the execution-host key under its OWN domain
+(`SIMPLE_REMOTE_RESET_FAILURE_SIGNATURE_V3`, `host_identity_private_sign_reset_failure_v3`; the completion domain is untouched so a
+receipt is never a completion) and verify it with the controller's verifier before it leaves
+(`remote_container_reset_failure_signed_v3.spl`, shared completion authority body). The executor ALWAYS ends `wedged` (record
+reserved, charge held, close refuses); the signed wire is held on it and every later collect repeats the same bytes. TRANSPORT
+TRAP: the service domain flattens an error reply to `host_service_error_payload_v2` text, so a receipt cannot ride on an error;
+the collect answers SUCCESS with kind `linux-host-remote-build-reset-failure` {operationId, stage wedged, cause, receipt}. A port
+refusal, an unmapped stage or an empty binding digest wedges exactly as before (a receipt never blocks wedging). Controller:
+`remote_run_collect_v1` decodes the reset reply (`remote_run_reset_reply_decode_v1`) and runs
+`accept_host_reset_failure_v3` through the root's single writer (`remote_run_host_reset_apply_v1`): verify signature + authority
+BEFORE the journal read, bind to the controller's own task/policy/request/grant digests, journal `failed` bound to the receipt
+digest, keep `signed-receipt.sdn` beside `receipt.sdn`; an unverifiable/replayed receipt falls back to the existing wedged settle
+(`failed`/`host-wedged`), never `completed`. The enable-time binding digest needed a minimal CONTAINER-LIB hunk (another lane's
+files): `enable_workspace_source_v3` -> `LinuxFreshWorkspaceEnableTurnV3` -> `LinuxWorkspaceEnableTurnV3` ->
+`ContainerWorkspaceEnableTurnV3` carry `binding_digest` (it was only visible at the settled read, after settle). NO V3 STAGE (keep
+the generic `host-wedged` settle): Stop failure with no cancel cause or after Create, create/prepare/configuration/start/inspect
+wedges, settle, read, source-return, finalize and enable errors, and any run lost to a service restart AFTER the reap (the
+controller-built `service-restart`). Open: a Host reset receipt is lost when the service restarts before the controller
+collects it (the reap then answers the reaped code and the controller builds the unsigned `service-restart` receipt).
