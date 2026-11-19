@@ -25,7 +25,7 @@ design document.
 | P1 | Protect the baseline: absent/prepared/active profiles, real off-identity comparison | OFF-01..08 evidence | **partial**: OFF-01 measured clean; OFF-02 blocked on host |
 | P2 | Failure evidence: assert/fault record, independent broker, deadlines | Real assert and fault, plus a no-debugger test | **in progress** |
 | P3 | Host managed recovery: isolated interpreter worker, state roots, effect fencing | A V2 failure restores a verified V1 without duplicate effects | **in progress** |
-| P4 | Unified native generation lifetime (legacy loader → KPF, retention pin) | Concurrent old/new execution with safe retirement | **in progress**: `share_pin` (#10379) |
+| P4 | Unified native generation lifetime (legacy loader → KPF, retention pin) | Concurrent old/new execution with safe retirement | **in progress**: `share_pin` (#10379); legacy `DynLib` reload/unload under KPF pins (`DynlibGenerationHostV1`, see P4 progress) |
 | P5 | Shared Spy plus bare-metal emitter, with a separate replay event family | Bounded operation, disclosed loss | **in progress**: replay-ring loss disclosed (#10378); bounded bare-metal Spy emitter `std.spy.bm_spy_emitter` (observer-contract kinds, drop-newest, in-stream Loss record, separate from the replay ring; `spy_baremetal_emitter_spec` 10/10). Not yet wired to XraySpyV1 or a target hook |
 | P6 | Portable semantic replay | Scoped deterministic replay with no live fallback | todo |
 | P7 | rr / TTD / QEMU / TRACE32 backends | Per-target capability receipts | todo |
@@ -69,6 +69,13 @@ P0 exit gate met for the §1 defect list. Every listed operation now either work
 | P2 interpreter assert → slot | **wired behind the `dhr` build feature**: `publish_assert_failure` in `failure_slot_v1.spl` (gate: `SIMPLE_FEATURES` lists `dhr`) is called from the 70.backend interpreter assert branch inside `@when(feature = "dhr")`, so a default build has no import or call. `check-core-lib-closure.shs` now drops feature-only `@when` blocks from the scan (selftest 8/8), so OFF-01 stays clean in both default (370 reached) and `--kernel-binary` (462 reached) modes | `failure_slot_assert_hook_spec` 5/5 on the seed (profile on → Assert record; off → slot empty). **Not verified:** the interpreter call site itself. The seed runs specs on its Rust interpreter, and no `SIMPLE_FEATURES=dhr` self-hosted build exists on this host. The K0 core interpreter (`10.frontend/core/interpreter/eval_builtins.spl`) and the MIR interpreter are not wired |
 | P2 native signal → slot | **not wired** | Needs the externs in `doc/08_tracking/bug/crash_signal_bundle_extern_gap_2026-07-29.md` |
 | Phase-3 build | Windows Stage-2 bootstrap at `27d436682c5` (cranelift, dynload; includes #10400 #10414 #10438–#10447) | **Stage 2 built, passed sanity and was admitted. The full-CLI compiler-test row was killed by the host RSS cap.** `compiler_cli_build` reached HIR module 1313/4084 in 83 min, then hit `rss-cap-exceeded` at peak 14.8 GB against a 14.76 GB cap. The bootstrap budgets this 32 GB host at one small-host worker; its own policy line puts a one-worker full-CLI build at about 30 GB. This is a host-capacity limit, not a code failure. Stage 3/full CLI needs a host with ≥ 64 GB RAM. |
+
+## P4 progress (unified native generation lifetime)
+
+| Item | Result | Evidence / limit |
+|---|---|---|
+| `share_pin` (#10379) | a live pin can take a second lease on a retired generation (GEN-02/03) | see #10379 |
+| Legacy `DynLib` under KPF pins | `DynlibGenerationHostV1` (`src/lib/nogc_sync_mut/sffi/dynlib_generation_v1.spl`) binds each legacy-loaded `DynLib` to one `KpfGenerationTable` generation. `publish` is the reload (old generation retired, still mapped); `begin_call`/`end_call` hold a KPF pin for a whole caller operation; `unload` runs `collect` first and calls `DynLib.close()` only when it accepts, so a pinned generation is refused with `GenerationStillPinned` and stays live | `dynlib_generation_spec` 5/5 on Windows 2026-11-20 (seed interpreter), real `kernel32.dll` loads through `DynLib.load_checked`, liveness read from `dynlib_lifetime_owner_v1`. Mutation (close before `collect`) fails 2 cases. **Open:** `DynLoader` (path-keyed cache) and its callers do not use the host yet; `DynI64FnSlot` cached slots still use only the per-call lifetime owner; Linux/macOS not run; no self-hosted binary run |
 
 ## Next
 
