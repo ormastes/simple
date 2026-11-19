@@ -575,6 +575,51 @@ fn engine2d_draw_ir_render_typed_outer_shadows(
                 )
     eng
 
+# True when a visible outer shadow will paint: a typed outer layer, or the
+# legacy aggregate when the typed list was not admitted.
+fn engine2d_draw_ir_has_outer_shadow(
+    layers: [Engine2dDrawIrBoxShadowLayer], typed_admitted: bool,
+    style: [DrawIrStyleProp], x: i32, y: i32, width: i32, height: i32
+) -> bool:
+    if not typed_admitted:
+        val shadow = _e2d_box_legacy_shadow(style, x, y, width, height)
+        return shadow.visible and shadow.safe
+    for layer in layers:
+        if layer.kind == "outer" and ((layer.color >> 24) & 0xFFu32) != 0u32:
+            return true
+    false
+
+# CSS Backgrounds 3 §7.1: an outer shadow is clipped to outside the border
+# box, so a translucent box shows what was under it, not its own shadow.
+# `pre` / `post` are the region (kx, ky, kw, kh) read before / after the
+# shadows; returns `post` with `pre` restored inside the rounded border box
+# (x, y, width, height), one span per row.
+fn engine2d_draw_ir_shadow_knockout_pixels(
+    pre: [u32], post: [u32], kx: i32, ky: i32, kw: i32, kh: i32,
+    x: i32, y: i32, width: i32, height: i32,
+    corners: Engine2dDrawIrCornerRadii
+) -> [u32]:
+    var out = post
+    if kw <= 0 or kh <= 0 or pre.len() != post.len() or post.len() != (kw as i64) * (kh as i64):
+        return out
+    var row = 0
+    # cpu-lane-loop-ok: one span copy per row of one shadowed translucent box; bound kh
+    while row < kh:
+        var lo = kx
+        val row_end = kx + kw
+        # cpu-lane-loop-ok: walks in from each end only across a corner curve; bound = corner radius
+        while lo < row_end and not _e2d_box_inside_corners(lo - x, ky + row - y, width, height, corners):
+            lo = lo + 1
+        var hi = row_end
+        # cpu-lane-loop-ok: walks in from each end only across a corner curve; bound = corner radius
+        while hi > lo and not _e2d_box_inside_corners(hi - 1 - x, ky + row - y, width, height, corners):
+            hi = hi - 1
+        if hi > lo:
+            val off = (row as i64) * (kw as i64) + ((lo - kx) as i64)
+            out.write_span(pre, off, off, (hi - lo) as i64)
+        row = row + 1
+    out
+
 fn _e2d_box_corner_radius(
     radius: i32, width: i32, height: i32
 ) -> i32:

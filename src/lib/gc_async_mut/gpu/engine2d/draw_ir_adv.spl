@@ -55,6 +55,8 @@ use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels, font_destina
 use std.gc_async_mut.gpu.engine2d.draw_ir_box_effects.{
     Engine2dDrawIrCornerRadii,
     engine2d_draw_ir_has_inset_shadow,
+    engine2d_draw_ir_has_outer_shadow,
+    engine2d_draw_ir_shadow_knockout_pixels,
     engine2d_draw_ir_legacy_shadow_safe,
     engine2d_draw_ir_legacy_uniform_radius,
     engine2d_draw_ir_mask_geometry_safe,
@@ -1120,15 +1122,6 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
     if (typed_has_inset and
         not engine2d_draw_ir_mask_geometry_safe(x, y, w, h)):
         shadow_admitted = false
-    if shadow_admitted:
-        eng = engine2d_draw_ir_render_typed_outer_shadows(
-            eng, typed_shadows.layers, x, y, w, h)
-    else:
-        # Absent, malformed, partial, or unsafe typed shadows fall back once.
-        # The Engine2D effect owner validates legacy geometry before drawing;
-        # an unsafe legacy aggregate is an intentional no-op.
-        eng = engine2d_draw_ir_render_legacy_shadow(
-            eng, style, x, y, w, h)
     val legacy_radius = engine2d_draw_ir_clamp_uniform_radius(
         engine2d_draw_ir_legacy_uniform_radius(style), w, h)
     val typed_nonuniform = corner_admitted and decoded_uniform_radius < 0
@@ -1142,6 +1135,35 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
         typed_corners
     else:
         engine2d_draw_ir_uniform_corners(legacy_radius)
+    # An outer shadow is clipped to outside the border box. Under an opaque
+    # box colour the box hides it anyway; otherwise read the box rect before
+    # and after the shadows and restore what was under the box.
+    val knockout = (
+        ((command.color >> 24) & 0xFFu32) != 0xFFu32 and
+        engine2d_draw_ir_has_outer_shadow(
+            typed_shadows.layers, shadow_admitted, style, x, y, w, h)
+    )
+    val kx = if x > 0: x else: 0
+    val ky = if y > 0: y else: 0
+    val kw = (if x + w < fb_w: x + w else: fb_w) - kx
+    val kh = (if y + h < fb_h: y + h else: fb_h) - ky
+    var knockout_pre: [u32] = []
+    if knockout and kw > 0 and kh > 0:
+        knockout_pre = _engine2d_read_pixels_region(eng, kx, ky, kw, kh).pixels
+    if shadow_admitted:
+        eng = engine2d_draw_ir_render_typed_outer_shadows(
+            eng, typed_shadows.layers, x, y, w, h)
+    else:
+        # Absent, malformed, partial, or unsafe typed shadows fall back once.
+        # The Engine2D effect owner validates legacy geometry before drawing;
+        # an unsafe legacy aggregate is an intentional no-op.
+        eng = engine2d_draw_ir_render_legacy_shadow(
+            eng, style, x, y, w, h)
+    if knockout_pre.len() > 0:
+        val knockout_post = _engine2d_read_pixels_region(eng, kx, ky, kw, kh).pixels
+        eng.draw_image(kx, ky, kw, kh, engine2d_draw_ir_shadow_knockout_pixels(
+            knockout_pre, knockout_post, kx, ky, kw, kh, x, y, w, h,
+            effective_corners))
     # Engine2dGlassMaterialConfig currently carries one uniform radius. A
     # nonuniform typed box therefore stays on the bounded CPU mask path rather
     # than claiming a device-glass execution with the wrong clip.
