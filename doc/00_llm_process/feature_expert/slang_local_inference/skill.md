@@ -117,9 +117,11 @@ the former `..._in_development_spec.spl` cases 2/3/5 moved into it when they wen
   `doc/08_tracking/bug/seed_jit_cannot_resolve_text_dot_from_char_code_2026-09-04.md`
   and `doc/08_tracking/bug/seed_http_server_handle_connection_dispatch_2026-09-04.md`.
   Under `SIMPLE_EXECUTION_MODE=interpret` the sync server does answer (2026-11-17).
-- **Binary bodies (L2, 2026-11-17).** `HttpRequest.body_bytes` holds the raw body
-  (`body` is "" when it is not UTF-8); `HttpResponse.bytes(status, content_type, data)`
-  sends `body_bytes` with an octet Content-Length (`write_response_bytes_limited`).
+- **Binary bodies (L2, 2026-11-17).** `HttpRequest.body_bytes` holds the raw body;
+  a non-UTF-8 body is a 400 unless Content-Type is multipart/*, application/octet-stream,
+  audio/*, image/* or video/* (then `body` is ""). `HttpResponse.bytes(status, content_type, data)`
+  sets `body_bytes`; `write_response*`, `response_wire_size` and h2 send/count it as octets
+  (`serialize_response` gives "" for a non-UTF-8 binary body).
   `http_server.handler.parse_multipart_bytes(body, content_type)` returns
   `MultipartPart{name, filename, content_type, data: [u8]}`. The slang server sets
   `policy.max_body` to 64 MiB (library default stays 10 MiB). FFI byte helpers:

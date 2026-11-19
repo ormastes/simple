@@ -1,7 +1,8 @@
 use std.spec
 use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpRequest, HttpMethod, HttpStatus}
 use std.nogc_sync_mut.http_server.parser.{request_body_decode}
-use std.nogc_sync_mut.http_server.response.{serialize_response_head_for_body_length}
+use std.nogc_sync_mut.http_server.response.{serialize_response_head_for_body_length, serialize_response, response_wire_size, response_body_octets}
+use std.nogc_sync_mut.http_server.h2_server.{h2_response_body_len}
 use std.nogc_sync_mut.http_server.handler.{MultipartPart, parse_multipart_bytes}
 use std.common.text_bytes.{text_to_utf8_bytes}
 
@@ -110,3 +111,20 @@ describe "HTTP binary bodies":
         match parse_multipart_bytes(body, "multipart/form-data; boundary=B"):
             Ok(_): fail("a delimiter inside the header block must not parse")
             Err(e): expect(e.contains("header block contains the boundary")).to_equal(true)
+
+    it "every serializer and size helper counts body_bytes":
+        val utf8 = HttpResponse.bytes(HttpStatus.Ok, "text/csv", text_to_utf8_bytes("a,é"))
+        expect(response_body_octets(utf8)).to_equal(4)
+        val wire = serialize_response(utf8)
+        expect(wire.contains("Content-Length: 4\r\n")).to_equal(true)
+        expect(wire.ends_with("\r\n\r\na,é")).to_equal(true)
+        expect(response_wire_size(utf8)).to_equal(text_to_utf8_bytes(wire).len())
+        expect(h2_response_body_len(utf8)).to_equal(4)
+
+    it "a non-UTF-8 binary body has no text wire form but keeps its octet size":
+        val wav = HttpResponse.bytes(HttpStatus.Ok, "audio/wav", [0xFFu8, 0u8, 0x80u8])
+        expect(serialize_response(wav)).to_equal("")
+        expect(response_body_octets(wav)).to_equal(3)
+        expect(h2_response_body_len(wav)).to_equal(3)
+        val head = serialize_response_head_for_body_length(wav, 3)
+        expect(response_wire_size(wav)).to_equal(head.len() + 3)

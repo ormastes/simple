@@ -9,6 +9,7 @@ use std.nogc_sync_mut.http_server.types.{
     HttpResponse, HttpStatus, http_status_code, http_status_reason
 }
 use std.common.string_core.{string_char_code_at, text_to_utf8_bytes}
+use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
 
 # Content-Length counts OCTETS on the wire. `text.len()` counts characters, so
 # a body with any non-ASCII character advertised a length shorter than what was
@@ -18,7 +19,35 @@ use std.common.string_core.{string_char_code_at, text_to_utf8_bytes}
 fn _body_wire_bytes(body: text) -> i64:
     body.byte_len()
 
+# Octets the response body puts on the wire: `body_bytes` when set, else the
+# UTF-8 length of `body`.
+fn response_body_octets(resp: HttpResponse) -> i64:
+    if resp.body_bytes.len() > 0:
+        return resp.body_bytes.len()
+    _body_wire_bytes(resp.body)
+
+# Text form of the body for the text serializers. A binary body that is not
+# valid UTF-8 has no text form (None); write_response* send it as octets.
+fn _response_body_text(resp: HttpResponse) -> text?:
+    if resp.body_bytes.len() == 0:
+        return Some(resp.body)
+    match io_legacy_utf8(resp.body_bytes):
+        Ok(value): Some(value)
+        Err(_): None
+
+# Head as text, then `body_bytes` as raw octets (no text round trip).
+fn _write_response_octets(stream: TcpStream, resp: HttpResponse) -> bool:
+    if not _write_response_wire(stream, _serialize_response_head(resp)):
+        return false
+    if _response_status_forbids_body(resp.status):
+        return true
+    match stream.write_all(resp.body_bytes):
+        Ok(_): true
+        Err(_): false
+
 fn write_response(stream: TcpStream, resp: HttpResponse) -> bool:
+    if resp.body_bytes.len() > 0:
+        return _write_response_octets(stream, resp)
     _write_response_wire(stream, serialize_response(resp))
 
 # Canonical bounded writer used by the production listener.  It builds at
@@ -27,6 +56,8 @@ fn write_response(stream: TcpStream, resp: HttpResponse) -> bool:
 # The fallback is generated through the same serializer and carries the same
 # baseline security headers as every other server-owned error.
 fn write_response_limited(stream: TcpStream, resp: HttpResponse, max_response_bytes: i64) -> bool:
+    if resp.body_bytes.len() > 0 and response_wire_fits(resp, max_response_bytes):
+        return _write_response_octets(stream, resp)
     val wire = bounded_response_wire(resp, max_response_bytes)
     if wire == "":
         return false
@@ -168,26 +199,32 @@ fn serialize_response_head_for_body_length_connection(
         resp, body_len, close_connection)
 
 fn _serialize_response_head(resp: HttpResponse) -> text:
-    _serialize_response_head_with_body_length(resp, _body_wire_bytes(resp.body))
+    _serialize_response_head_with_body_length(resp, response_body_octets(resp))
 
+# Text wire form. A non-UTF-8 `body_bytes` body cannot be text: "" (fail
+# closed, never a mis-framed prefix); write_response* send those as octets.
 fn serialize_response(resp: HttpResponse) -> text:
     val head = _serialize_response_head(resp)
     if _response_status_forbids_body(resp.status):
         return head
-    "{head}{resp.body}"
+    match _response_body_text(resp):
+        Some(body): "{head}{body}"
+        None: ""
 
 fn serialize_response_connection(resp: HttpResponse, close_connection: bool) -> text:
     val head = _serialize_response_head_with_body_length_and_connection(
-        resp, _body_wire_bytes(resp.body), close_connection)
+        resp, response_body_octets(resp), close_connection)
     if _response_status_forbids_body(resp.status):
         return head
-    "{head}{resp.body}"
+    match _response_body_text(resp):
+        Some(body): "{head}{body}"
+        None: ""
 
 fn response_wire_size(resp: HttpResponse) -> i64:
     val head_len = _serialize_response_head(resp).len()
     if _response_status_forbids_body(resp.status):
         return head_len
-    head_len + _body_wire_bytes(resp.body)
+    head_len + response_body_octets(resp)
 
 fn response_wire_fits(resp: HttpResponse, max_response_bytes: i64) -> bool:
     max_response_bytes > 0 and response_wire_size(resp) <= max_response_bytes
@@ -261,7 +298,7 @@ fn html_error_page(status: HttpStatus, message: text) -> HttpResponse:
 
 export write_response, write_response_limited, write_error, write_error_limited
 export serialize_response, serialize_response_connection
-export response_wire_size, response_wire_fits, bounded_response_wire
+export response_wire_size, response_wire_fits, bounded_response_wire, response_body_octets
 export serialize_response_head_for_body_length
 export serialize_response_head_for_body_length_connection, response_wire_parts_fit
 export with_default_security_headers
