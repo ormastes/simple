@@ -10,7 +10,15 @@
 # Crash convergence: every step is idempotent. A marker for the SAME binding is accepted again (a freshly signed release
 # finishes a release that crashed or whose approval expired); an existing archive answers the stored bytes. A crash after
 # the run child was removed but before the archive leaves no child; the re-issued (resumed) release proves it absent
-# beneath the held leaf and archives the weaker `absent-unmeasured` charge (owner decision 2, unchanged). Never a continuity flip; the capacity owner is the caller's (borrowed journal).
+# beneath the held leaf and archives the weaker `absent-unmeasured` charge (owner decision 2). Never a continuity flip; the
+# capacity owner is the caller's (borrowed journal).
+#
+# milestone_0049 (owner decision 2 amended 2026-11-20, option B): stage intent. Every incarnation records, at startup and
+# through the held writer, a regime record keyed by its own fence; before a remote build's run child is created the same
+# writer records a no-replace stage intent keyed by sha256(op id). A REAPED run whose prior fence carries the regime and
+# that has no stage intent provably never created its child, so its absent child settles `absent-unmeasured` on the
+# FIRST issue. An intent present (the child may have existed: an externally removed child stays detected) or no regime
+# record (a run of an incarnation that predates this change) refuses the first issue exactly as before.
 use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_reap_v4.{HostRemoteBuildReapRowV4, remote_build_reap_rows_v4,
     host_remote_build_reaped_record_v4, host_remote_build_reap_record_encode_v4}
 use std.nogc_sync_mut.orchestration.host_linux_completion_evidence_v3.{host_remote_build_outcome_relative_v4,
@@ -22,7 +30,7 @@ use std.common.contracts.orchestration.host_authorization_context_v1.HostReserva
 use std.common.contracts.orchestration.host_capacity_v1.HostCapacityLedgerV1
 use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_read_v3,
     distributed_operation_journal_publish_v3, distributed_operation_journal_read_required_v3}
-use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.build_manager.contracts.{builder_digest_valid_v1, builder_identifier_valid_v1}
 use std.common.crypto.sha256.sha256_text
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
@@ -35,9 +43,12 @@ pub struct HostRetentionReleaseAdmittedV1:
     marker: text
     archived: text
     request_bytes: text
-    # The marker was already recorded before this admission: a re-issue after a crash or a refused effect. Only then may a
-    # missing leaf converge to `absent-unmeasured` (a first issue with no leaf refuses).
+    # The marker was already recorded before this admission: a re-issue after a crash or a refused effect. Either this or
+    # `never_staged` lets a missing run child converge to `absent-unmeasured`; otherwise a first issue with no child refuses.
     resumed: bool = false
+    # milestone_0049: reap evidence, the prior incarnation recorded the stage-intent regime and no stage intent for this
+    # run: its child was never created, so a missing child converges `absent-unmeasured` on the first issue too.
+    never_staged: bool = false
 
 pub struct HostRetentionReleaseExpectedV1:
     record: HostRetentionReleaseV1
@@ -78,7 +89,9 @@ pub fn host_retention_release_check_v1(release: HostRetentionReleaseV1, expected
 
 # Whether a remote-build row may hold a retained run child: an outcome whose source was `retained-returned` (a
 # no-workload settle records `never-opened`: nothing was staged), or a reap record (the run began; whether it staged is
-# unknown, so it counts; a run child that was never created converges through the resumed absent path). Returns the evidence (kind, digest), or ("", "") for a row that retained nothing.
+# unknown, so it counts; a run child that was never created converges on the first issue when the stage-intent regime
+# proves it (milestone_0049), else through the resumed absent path). Returns the evidence (kind, digest), or ("", "") for a
+# row that retained nothing.
 fn retention_evidence_v1(journal: DistributedOperationJournalV2, operation_id: text, outcome_published: bool,
         association_digest: text) -> Result<(text, text), text>:
     if outcome_published:
@@ -187,6 +200,59 @@ pub fn host_retention_release_archive_v1(journal: DistributedOperationJournalV2,
     if distributed_operation_journal_read_required_v3(journal, path, 4096)? != archive: return Err("retention-released-readback")
     Ok(archive)
 
+fn stage_intent_encode_v1(operation_id: text, fence: text) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("remote-build-stage-intent"),
+        "operationId": SdnValue.String(operation_id), "fence": SdnValue.String(fence)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn stage_regime_encode_v1(fence: text) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("remote-build-stage-regime"),
+        "fence": SdnValue.String(fence)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+pub fn host_remote_build_stage_intent_relative_v1(operation_id: text) -> text:
+    "host-remote-build-stage-intent/" + sha256_text(operation_id) + ".sdn"
+
+pub fn host_remote_build_stage_regime_relative_v1(fence: text) -> text:
+    "host-remote-build-stage-regime/" + sha256_text(fence) + ".sdn"
+
+# No-replace, read back. Deterministic bytes: an existing record with the SAME bytes is accepted (idempotent across a
+# crash or a restart in the same fence); any other existing bytes are a conflict.
+fn stage_record_publish_v1(journal: DistributedOperationJournalV2, path: text, bytes: text, kind: text) -> Result<(), text>:
+    if not distributed_operation_journal_publish_v3(journal, path, bytes)?:
+        if distributed_operation_journal_read_required_v3(journal, path, 4096)? != bytes: return Err(kind + "-conflict")
+        return Ok(())
+    if distributed_operation_journal_read_required_v3(journal, path, 4096)? != bytes: return Err(kind + "-readback")
+    Ok(())
+
+# milestone_0049: the stage intent of one remote build, durable BEFORE its run child can be created (the caller refuses to
+# stage when this fails). Written only through the held capacity journal (single writer).
+pub fn host_remote_build_stage_intent_publish_v1(journal: DistributedOperationJournalV2, operation_id: text,
+        fence: text) -> Result<(), text>:
+    if not builder_identifier_valid_v1(operation_id) or not builder_digest_valid_v1(fence):
+        return Err("remote-build-stage-intent-value-invalid")
+    stage_record_publish_v1(journal, host_remote_build_stage_intent_relative_v1(operation_id), stage_intent_encode_v1(operation_id,
+        fence), "remote-build-stage-intent")
+
+# milestone_0049: this incarnation records stage intents. Published once at startup, before any reap or admit.
+pub fn host_remote_build_stage_regime_publish_v1(journal: DistributedOperationJournalV2, fence: text) -> Result<(), text>:
+    if not builder_digest_valid_v1(fence): return Err("remote-build-stage-regime-value-invalid")
+    stage_record_publish_v1(journal, host_remote_build_stage_regime_relative_v1(fence), stage_regime_encode_v1(fence),
+        "remote-build-stage-regime")
+
+# milestone_0049: Ok(true) only when the run's incarnation (`prior_fence`, the reap record's) recorded the regime AND no
+# stage intent exists for the run. No regime record (an older incarnation) is Ok(false): two issues, as before. A regime
+# or intent record with any other bytes is an error, never read as absent.
+pub fn host_remote_build_never_staged_v1(journal: DistributedOperationJournalV2, operation_id: text,
+        prior_fence: text) -> Result<bool, text>:
+    val regime = distributed_operation_journal_read_v3(journal, host_remote_build_stage_regime_relative_v1(prior_fence), 4096)?
+    if regime.is_none(): return Ok(false)
+    if regime.unwrap() != stage_regime_encode_v1(prior_fence): return Err("remote-build-stage-regime-invalid")
+    val intent = distributed_operation_journal_read_v3(journal, host_remote_build_stage_intent_relative_v1(operation_id), 4096)?
+    if intent.is_none(): return Ok(true)
+    if intent.unwrap() != stage_intent_encode_v1(operation_id, prior_fence): return Err("remote-build-stage-intent-invalid")
+    Ok(false)
+
 # The admission before any effect: verify, short-circuit on an existing archive, derive, check, record.
 pub fn host_retention_release_admit_v1(journal: DistributedOperationJournalV2, ledger: HostCapacityLedgerV1,
         policy: LocalAuthorityPolicyV1, controller_ref: text, context: HostReservationAuthorizationContextV1, host_id: text,
@@ -200,12 +266,20 @@ pub fn host_retention_release_admit_v1(journal: DistributedOperationJournalV2, l
     val expected = host_retention_release_expected_v1(journal, ledger, operation_id, host_id)?
     host_retention_release_check_v1(proof.release, expected.record)?
     val resumed = (distributed_operation_journal_read_v3(journal, host_retention_release_marker_relative_v1(operation_id), 4096)?).is_some()
+    # milestone_0049: decided only on a first issue (a re-issue already converges), so a stage record never blocks it.
+    var never_staged = false
+    if not resumed and expected.record.evidence == "reaped":
+        val reaped = host_remote_build_reaped_record_v4(journal, operation_id)?
+        if reaped.is_none(): return Err("retention-release-run-unsettled")
+        never_staged = host_remote_build_never_staged_v1(journal, operation_id, reaped.unwrap().prior_fence)?
     val marker = host_retention_release_record_publish_v1(journal, proof, source)?
     Ok(HostRetentionReleaseAdmittedV1(operation_id: operation_id, marker: marker, archived: "", request_bytes: expected.request_bytes,
-        resumed: resumed))
+        resumed: resumed, never_staged: never_staged))
 
 export HostRetentionReleaseAdmittedV1, HostRetentionReleaseExpectedV1
 export host_retention_release_marker_relative_v1, host_retention_release_proof_relative_v1
 export host_retention_release_verify_v1, host_retention_release_check_v1, host_retention_release_expected_v1
 export host_retention_release_inspect_v1, host_retention_release_record_publish_v1, host_retention_release_archived_v1
 export host_retention_release_archive_v1, host_retention_release_admit_v1
+export host_remote_build_stage_intent_relative_v1, host_remote_build_stage_regime_relative_v1
+export host_remote_build_stage_intent_publish_v1, host_remote_build_stage_regime_publish_v1, host_remote_build_never_staged_v1

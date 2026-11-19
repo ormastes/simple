@@ -9,8 +9,10 @@
 #   1. ADMIT this release's own native lease of the provisioned leaf (full native re-proof: same pool, workspace
 #      identity, project id and PROJINHERIT). An in-process holder (a retained workload custody) makes it EBUSY: refused.
 #   2. Open a FRESH source with the archived request bytes (re-proves the keep-id mapping, the profile and the leaf).
-#   3. If the run child is proven absent beneath the held leaf (no-follow), a crash already removed it before the
-#      archive: a RESUMED release converges `absent-unmeasured` (owner decision 2, unchanged); a first issue refuses.
+#   3. If the run child is proven absent beneath the held leaf (no-follow), it converges `absent-unmeasured` only when the
+#      caller proved that settles (owner decision 2, amended milestone_0049): a RESUMED release (a crash removed it before
+#      the archive) or a reaped run that provably never staged it (no stage intent under the stage-intent regime). Any
+#      other first issue refuses.
 #   4. Otherwise remove the run child and its tree inside the keep-id mapping (remove_retained_tree_v1), close every
 #      descriptor and the exclusion, then observe the leaf's lease: `run-removed` records the removed entry count and the
 #      project usage that remains (the quota is SHARED by every retained run child, so it is not zero in general).
@@ -57,13 +59,14 @@ fn retention_release_after_close_v1(lease: WorkspaceStorageLeaseV1, closed: Linu
             closed.error))
     retention_release_drop_v1(lease, turn)
 
-fn retention_release_absent_v1(resumed: bool) -> LinuxWorkspaceRetentionReleaseTurnV1:
-    if not resumed: return retention_release_failed_v1("workspace-retention-release-run-absent")
+fn retention_release_absent_v1(absent_settles: bool) -> LinuxWorkspaceRetentionReleaseTurnV1:
+    if not absent_settles: return retention_release_failed_v1("workspace-retention-release-run-absent")
     LinuxWorkspaceRetentionReleaseTurnV1(charge: "absent-unmeasured", used_bytes: -1, used_inodes: -1, removed: -1, error: "")
 
-# `resumed`: the caller journaled this release before (a re-issue). Only a resumed release converges `absent-unmeasured`.
+# `absent_settles`: the caller journaled this release before (a re-issue), or proved from its journal that the run never
+# created its child (milestone_0049). Only then does a proven-absent child converge `absent-unmeasured`.
 pub fn linux_workspace_retention_release_v1(root: LinuxWorkspaceRootBorrowV3, request_bytes: text,
-        resumed: bool) -> LinuxWorkspaceRetentionReleaseTurnV1:
+        absent_settles: bool) -> LinuxWorkspaceRetentionReleaseTurnV1:
     val admitted = root.admit_lease_v3()
     if admitted.is_err(): return retention_release_failed_v1(admitted.unwrap_err())
     val lease = admitted.unwrap()
@@ -74,7 +77,7 @@ pub fn linux_workspace_retention_release_v1(root: LinuxWorkspaceRootBorrowV3, re
             if absent.is_err():
                 return retention_release_after_close_v1(lease, source.close_v1(), retention_release_failed_v1(absent.unwrap_err()))
             if absent.unwrap():
-                return retention_release_after_close_v1(lease, source.close_v1(), retention_release_absent_v1(resumed))
+                return retention_release_after_close_v1(lease, source.close_v1(), retention_release_absent_v1(absent_settles))
             val gone = source.remove_retained_tree_v1(request_bytes)
             val closed = source.close_v1()
             if gone.is_err(): return retention_release_after_close_v1(lease, closed, retention_release_failed_v1(gone.unwrap_err()))

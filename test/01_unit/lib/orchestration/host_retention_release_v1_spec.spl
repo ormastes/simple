@@ -5,10 +5,13 @@ workspace. The Host verifies the signed record (issuer == controller_ref, V4 sig
 generation, revocation and session), checks it against its own archived outcome or reap record of that run, records the
 proof and a no-replace marker through the single journal writer, deletes the run's own retained child of the provisioned
 leaf inside the build's keep-id mapping through the container provider (no-follow, fd-relative; milestone_0047), and
-archives the outcome. The leaf and its native lease stay. Written for owners of the Host service and the Linux provider.
+archives the outcome. The leaf and its native lease stay. milestone_0049 (owner decision 2 amended, option B): before the
+run child is created the writer records a stage intent; a reaped run whose incarnation recorded the stage-intent regime
+and no intent for it never staged, so its absent child settles on the first issue. Written for owners of the Host
+service and the Linux provider.
 ## Operator workflow
 Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
-Status: AUTHORED, NOT_RUN (no runnable `simple` binary on this host, 2026-11-19).
+Status: AUTHORED, NOT_RUN (no runnable `simple` binary on this host, 2026-11-19; milestone_0049 cases 2026-11-20).
 ## Compatibility and limitations
 Real Ed25519 signatures from the verifier fixture seeds and a real temporary capacity journal for the record publish and
 archive. The native effect (root loan, lease admission, run-child removal, hold drop) needs an installed Host with a
@@ -21,7 +24,7 @@ use std.io.file_read_text
 use std.io_runtime.env_get_opt
 use test.fixtures.orchestration.host_linux_service_verifier_fixture_v1.*
 use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_open_cleanup_v2,
-    distributed_operation_journal_read_v3}
+    distributed_operation_journal_read_v3, distributed_operation_journal_publish_v3}
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
 use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.linux_service_scope_v4
 use std.common.contracts.orchestration.host_retention_release_v1.*
@@ -73,6 +76,7 @@ val RR_HOST: text = "src/lib/nogc_sync_mut/orchestration/host_remote_build_reten
 val RR_SERVICE: text = "src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl"
 val RR_PROVIDER: text = "src/lib/nogc_async_mut/container/providers/linux/workspace_retention_release_v1.spl"
 val RR_MOUNT: text = "src/lib/nogc_async_mut/container/providers/linux/workspace_mount_owner_v1.spl"
+val RR_BUILD: text = "src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl"
 
 describe "Retention-release record (milestone_0045)":
     it "round-trips the Host part and the signed form canonically and refuses every other wire version":
@@ -248,11 +252,11 @@ describe "Retention-release order and wiring (milestone_0045)":
             .to_equal(true)
         expect(effect.contains("workspace_storage_release_if_absent_v1")).to_equal(false)
         expect(effect.contains("workspace_storage_forget_released_v1")).to_equal(false)
-        expect(effect.contains("retention_release_absent_v1(resumed)")).to_equal(true)
-        step("a first issue that finds no run child refuses; only a resumed (already journaled) release converges absent-unmeasured")
+        expect(effect.contains("retention_release_absent_v1(absent_settles)")).to_equal(true)
+        step("a first issue that finds no run child refuses unless the caller proved it settles (resumed, or never staged: milestone_0049)")
         val absent_turn = rr_body(RR_PROVIDER, "fn retention_release_absent_v1(", "\n\n")
         expect(absent_turn.contains("absent-unmeasured")).to_equal(true)
-        expect(absent_turn.contains("if not resumed: return retention_release_failed_v1(\"workspace-retention-release-run-absent\")")).to_equal(true)
+        expect(absent_turn.contains("if not absent_settles: return retention_release_failed_v1(\"workspace-retention-release-run-absent\")")).to_equal(true)
         val mount = rr_body(RR_MOUNT, "    pub fn remove_retained_tree_v1(", "\n    pub fn ")
         expect(mount.contains("request.user_namespace_mode != \"keep-id\"")).to_equal(true)
         expect(mount.contains("sample.request.user_uid != sample.process.effective_uid")).to_equal(true)
@@ -270,6 +274,89 @@ describe "Retention-release order and wiring (milestone_0045)":
         val domain = file_read_text("src/lib/nogc_sync_mut/orchestration/host_service_domain_v3.spl")
         expect(domain.contains("request.action == \"host-retention-release\"")).to_equal(true)
         expect(domain.contains("request.action == \"host-retention-inspect\"")).to_equal(true)
+
+describe "Retention-release stage intent (milestone_0049, owner decision 2 amended: option B)":
+    it "settles a reaped run on the first issue only when its incarnation records stage intents and none was recorded":
+        # @req M49-STAGE-INTENT (no intent under the intent regime -> never staged; intent present or legacy -> refuse as before)
+        val fixture = rr_fixture()
+        val native = LinuxServiceNativeIdentitySnapshotV3(native_machine_id: fixture.binding.native_machine_id, native_boot_id: "native-boot",
+            architecture: "x86_64", owner_generation: 41, process_identity_digest: "e".repeat(64), process_generation: 2,
+            authority_namespace_id: "namespace_1")
+        val scope = linux_service_scope_v4(fixture.binding, native, "ab".repeat(16)).unwrap()
+        val root = secure_temp_dir("/tmp", "rr-intent").unwrap()
+        val capacity = HostCapacityV1("worker_1", "host-authority", container_scope_fence_id_v2(scope).unwrap(), 41, 2000, 536870912, [])
+        var opened: [HostCapacityOwnerV1] = []
+        match host_capacity_owner_open_owned_v2(root + "/journal", capacity, "9".repeat(64), 64, true):
+            case HostCapacityOpenV2.Ready(owner): opened.push(owner)
+            case HostCapacityOpenV2.Rejected(reason): fail(reason)
+            case HostCapacityOpenV2.CleanupRequired(cleanup, reason):
+                val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+                expect(closed.error).to_equal("")
+                fail(reason)
+        val journal = opened[0].journal
+        val fence = container_scope_fence_id_v2(scope).unwrap()
+        step("legacy: an incarnation that never recorded the stage-intent regime keeps the two-issue behaviour")
+        expect(host_remote_build_never_staged_v1(journal, "build_op_1", fence).unwrap()).to_equal(false)
+        step("the regime record is written once per incarnation fence, no-replace, and an identical re-publish is accepted")
+        expect(host_remote_build_stage_regime_publish_v1(journal, fence).is_ok()).to_equal(true)
+        expect(host_remote_build_stage_regime_publish_v1(journal, fence).is_ok()).to_equal(true)
+        expect(distributed_operation_journal_read_v3(journal, host_remote_build_stage_regime_relative_v1(fence), 4096).unwrap().is_some())
+            .to_equal(true)
+        step("regime present and no intent for the run: it never created its run child, so the first issue settles")
+        expect(host_remote_build_never_staged_v1(journal, "build_op_1", fence).unwrap()).to_equal(true)
+        step("the stage intent is durable before the child; a re-publish of the same intent is idempotent")
+        expect(host_remote_build_stage_intent_publish_v1(journal, "build_op_1", fence).is_ok()).to_equal(true)
+        expect(host_remote_build_stage_intent_publish_v1(journal, "build_op_1", fence).is_ok()).to_equal(true)
+        expect(host_remote_build_never_staged_v1(journal, "build_op_1", fence).unwrap()).to_equal(false)
+        step("an intent recorded under another fence is a conflict on publish and an error on read, never 'never staged'")
+        expect(host_remote_build_stage_intent_publish_v1(journal, "build_op_1", "2".repeat(64)).unwrap_err())
+            .to_equal("remote-build-stage-intent-conflict")
+        expect(host_remote_build_stage_regime_publish_v1(journal, "2".repeat(64)).is_ok()).to_equal(true)
+        expect(host_remote_build_never_staged_v1(journal, "build_op_1", "2".repeat(64)).unwrap_err())
+            .to_equal("remote-build-stage-intent-invalid")
+        step("a malformed intent or regime record is an error, never absent")
+        val bad_intent = host_remote_build_stage_intent_relative_v1("build_op_2")
+        expect(distributed_operation_journal_publish_v3(journal, bad_intent, "garbage\n").unwrap()).to_equal(true)
+        expect(host_remote_build_never_staged_v1(journal, "build_op_2", fence).unwrap_err()).to_equal("remote-build-stage-intent-invalid")
+        expect(host_remote_build_stage_intent_publish_v1(journal, "build_op_2", fence).unwrap_err())
+            .to_equal("remote-build-stage-intent-conflict")
+        val bad_fence = "3".repeat(64)
+        expect(distributed_operation_journal_publish_v3(journal, host_remote_build_stage_regime_relative_v1(bad_fence), "garbage\n")
+            .unwrap()).to_equal(true)
+        expect(host_remote_build_never_staged_v1(journal, "build_op_3", bad_fence).unwrap_err())
+            .to_equal("remote-build-stage-regime-invalid")
+        step("invalid inputs are refused before any write")
+        expect(host_remote_build_stage_intent_publish_v1(journal, "", fence).is_err()).to_equal(true)
+        expect(host_remote_build_stage_regime_publish_v1(journal, "").is_err()).to_equal(true)
+        val closed = host_capacity_owner_close_owned_v2(opened[0])
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "records the intent before the run child, the regime at startup, and decides only for reaped evidence":
+        # @req M49-STAGE-INTENT (single journal writer; signed authority, verification and wire format unchanged)
+        val stage = rr_body(RR_BUILD, "    if state.stage == \"stage\":", "\n    if state.stage == \"enable\":")
+        val intent = stage.index_of("host_remote_build_stage_intent_publish_v1(capacity.journal, state.operation_id, state.fence)")
+        val refused = stage.index_of("if intent.is_err(): return remote_build_fail_v4(state, capacity, intent.unwrap_err())")
+        val staged = stage.index_of(".stage_remote_build_v3(")
+        expect(intent >= 0 and refused > intent and staged > refused).to_equal(true)
+        step("the regime record is published by the held writer at startup, after the current record and before any reap or admit")
+        val start = rr_body(RR_SERVICE, "    owner.published = true", "\n# milestone_0022 N3")
+        val regime = start.index_of("host_remote_build_stage_regime_publish_v1(owner.capacity.unwrap().journal,")
+        val reap = start.index_of("host_remote_build_reap_v4(")
+        expect(regime >= 0 and reap > regime).to_equal(true)
+        expect(start.contains("owner.capacity.unwrap().ledger.capacity.boot_id")).to_equal(true)
+        step("admission decides never-staged only for reap evidence, keyed by the reap record's own prior fence")
+        val admit = rr_body(RR_HOST, "pub fn host_retention_release_admit_v1(", "\nexport ")
+        expect(admit.contains("if not resumed and expected.record.evidence == \"reaped\":")).to_equal(true)
+        expect(admit.contains("host_remote_build_never_staged_v1(journal, operation_id, reaped.unwrap().prior_fence)")).to_equal(true)
+        expect(admit.index_of("host_retention_release_check_v1(") < admit.index_of("host_remote_build_never_staged_v1(")).to_equal(true)
+        step("the service lets an absent child settle for a resumed OR never-staged release; the provider refuses otherwise")
+        val handler = rr_body(RR_SERVICE, "fn linux_service_retention_release_v4(", "\n# milestone_0045 retention-release inspect")
+        expect(handler.contains("admitted.unwrap().resumed or admitted.unwrap().never_staged")).to_equal(true)
+        expect(handler.contains("continuity_proven = true")).to_equal(false)
+        step("no new charge class and no change to the signed record: absent-unmeasured stays the only absent charge")
+        val contract = file_read_text("src/lib/common/contracts/orchestration/host_retention_release_v1.spl")
+        expect(contract.contains("never-staged")).to_equal(false)
 
 describe "Retention release on a provisioned Host (milestone_0045, live root)":
     it "releases a retained remote-build workspace end to end":

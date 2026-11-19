@@ -91,7 +91,7 @@ use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.HostHelperStore
 use std.nogc_sync_mut.orchestration.host_primary_attach_owner_v1.host_primary_attach_open_entry_check_v1
 use std.container.{LinuxWorkspaceRootBorrowV3, linux_workspace_retention_release_v1}
 use std.nogc_sync_mut.orchestration.host_remote_build_retention_release_v1.{host_retention_release_admit_v1,
-    host_retention_release_archive_v1, host_retention_release_inspect_v1}
+    host_retention_release_archive_v1, host_retention_release_inspect_v1, host_remote_build_stage_regime_publish_v1}
 use std.common.contracts.orchestration.host_retention_release_v1.HostRetentionReleaseEffectV1
 use std.nogc_sync_mut.orchestration.host_linux_service_reconcile_v4.host_linux_service_reconcile_flip_v4
 use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_reap_v4.{host_remote_build_reap_v4,
@@ -415,6 +415,10 @@ pub fn host_linux_service_start_v4(root: text, root_reader: LinuxProtectedRootRe
     owner.published = true
     val current = owner.current_v4()
     if current.is_err(): return linux_service_start_error_v4(owner, current.unwrap_err())
+    # milestone_0049: this incarnation records remote-build stage intents (held writer, before any reap or admit).
+    val regime = host_remote_build_stage_regime_publish_v1(owner.capacity.unwrap().journal,
+        owner.capacity.unwrap().ledger.capacity.boot_id)
+    if regime.is_err(): return linux_service_start_error_v4(owner, regime.unwrap_err())
     # milestone_0022 14.2: the helper store opens AFTER the journal and BEFORE any attach (and before the
     # reconcile). A refused store never fails startup: `helper_store` stays "" and an attach refuses. Only a journal
     # refusal row R that needs the store (an unsettled charged helper) still quarantines the ledger proof below.
@@ -1811,7 +1815,9 @@ fn linux_service_retention_release_v4(original: HostLinuxServiceCurrentV4, sourc
     owner.admission = Some(admission)
     if lent.error != "" or lent.root.is_none():
         return linux_service_reply_v4(owner, "", if lent.error != "": lent.error else: "linux-host-retention-release-root-missing", true)
-    val effect = linux_workspace_retention_release_v1(lent.root.unwrap(), admitted.unwrap().request_bytes, admitted.unwrap().resumed)
+    # milestone_0049: an absent run child settles for a resumed release or a proven never-staged reaped run.
+    val effect = linux_workspace_retention_release_v1(lent.root.unwrap(), admitted.unwrap().request_bytes,
+        admitted.unwrap().resumed or admitted.unwrap().never_staged)
     val ended = admission.owner.unwrap().end_workspace_root_loan_v1(lent.root.unwrap())
     admission.owner = Some(ended.owner)
     owner.admission = Some(admission)
