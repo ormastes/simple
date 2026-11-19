@@ -1,0 +1,132 @@
+# KPF recovery transaction — DHR P3 core (doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md).
+#
+# Orchestrates an upgrade/rollback over the ONE existing KpfGenerationTable; it
+# owns no second generation registry. Guarantees it adds:
+#   - retention pin: V1 is pinned BEFORE V2 publishes, so a zero-request
+#     predecessor cannot be collected during probation (GEN-04);
+#   - execution-epoch fence: effects reported under an older epoch are
+#     rejected, so a delayed V2 command cannot act after V1 is restored (REC-04);
+#   - effect-aware rollback: acknowledged writes made by V2, or any effect with
+#     an unknown outcome, BLOCK rollback instead of being silently lost or
+#     re-issued (REC-02, REC-03).
+# It does not migrate state or isolate native faults: state roots are tracked
+# by revision only, and memory-unsafe failures still need a worker restart.
+
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.nogc_sync_mut.kernel_plugin.status.KpfSyncStatus
+use std.nogc_sync_mut.kernel_plugin.generation.{KpfGenerationHandle, KpfPinHandle, KpfGenerationTable}
+
+pub enum KpfRecoveryPhase:
+    Idle
+    Probation
+    KnownGood
+    Restored
+    Blocked
+
+pub enum KpfEffectOutcome:
+    Acknowledged
+    Unknown
+
+pub enum KpfRecoveryVerdict:
+    Applied
+    Blocked
+    Rejected
+
+pub struct KpfRecoveryReceipt:
+    verdict: KpfRecoveryVerdict
+    phase: KpfRecoveryPhase
+    status: KpfSyncStatus
+    execution_epoch: u64
+    state_revision: u64
+    reason: text
+
+class KpfRecoveryTransaction:
+    table: KpfGenerationTable
+    var phase: KpfRecoveryPhase
+    var retained: KpfGenerationHandle
+    var retention_pin: KpfPinHandle
+    var candidate: KpfGenerationHandle
+    var execution_epoch: u64
+    var baseline_state_revision: u64
+    var acked_effects: u64
+    var unknown_effects: u64
+
+    static fn create(table: KpfGenerationTable) -> KpfRecoveryTransaction:
+        KpfRecoveryTransaction(table: table, phase: KpfRecoveryPhase.Idle,
+            retained: KpfGenerationHandle(index: 0, epoch: 0),
+            retention_pin: KpfPinHandle(index: 0, epoch: 0),
+            candidate: KpfGenerationHandle(index: 0, epoch: 0),
+            execution_epoch: 1, baseline_state_revision: 0,
+            acked_effects: 0, unknown_effects: 0)
+
+    fn _receipt(verdict: KpfRecoveryVerdict, status: KpfSyncStatus, reason: text) -> KpfRecoveryReceipt:
+        KpfRecoveryReceipt(verdict: verdict, phase: self.phase, status: status,
+            execution_epoch: self.execution_epoch,
+            state_revision: self.baseline_state_revision, reason: reason)
+
+    me begin_upgrade(provider_id: KpfId128, composition_digest: KpfDigest256, registry_revision: u64, state_revision: u64) -> KpfRecoveryReceipt:
+        """Pin the active generation for rollback, then publish the candidate."""
+        if self.phase == KpfRecoveryPhase.Probation or self.phase == KpfRecoveryPhase.Blocked:
+            return self._receipt(KpfRecoveryVerdict.Rejected, KpfSyncStatus.GenerationNotActive, "an upgrade is already in probation or blocked")
+        val retention = self.table.pin_active()
+        if not retention.status.accepted():
+            return self._receipt(KpfRecoveryVerdict.Rejected, retention.status, "no active generation to retain for rollback")
+        val published = self.table.publish(provider_id, composition_digest, registry_revision)
+        if not published.status.accepted():
+            self.table.release_pin(retention.handle)
+            return self._receipt(KpfRecoveryVerdict.Rejected, published.status, "candidate publication refused")
+        self.retained = published.previous
+        self.retention_pin = retention.handle
+        self.candidate = published.current
+        self.execution_epoch = self.execution_epoch + 1
+        self.baseline_state_revision = state_revision
+        self.acked_effects = 0
+        self.unknown_effects = 0
+        self.phase = KpfRecoveryPhase.Probation
+        self._receipt(KpfRecoveryVerdict.Applied, KpfSyncStatus.Ok, "candidate in probation; predecessor retained")
+
+    # @allow(primitive_api) epoch is the execution-epoch fence token issued by this transaction
+    me record_effect(epoch: u64, outcome: KpfEffectOutcome) -> KpfRecoveryReceipt:
+        """Record an external effect issued during probation; stale epochs are fenced."""
+        if epoch != self.execution_epoch:
+            return self._receipt(KpfRecoveryVerdict.Rejected, KpfSyncStatus.StaleHandle, "effect from a fenced execution epoch")
+        if self.phase != KpfRecoveryPhase.Probation:
+            return self._receipt(KpfRecoveryVerdict.Applied, KpfSyncStatus.Ok, "effect recorded outside probation")
+        match outcome:
+            case KpfEffectOutcome.Acknowledged: self.acked_effects = self.acked_effects + 1
+            case KpfEffectOutcome.Unknown: self.unknown_effects = self.unknown_effects + 1
+        self._receipt(KpfRecoveryVerdict.Applied, KpfSyncStatus.Ok, "effect recorded")
+
+    me commit_known_good() -> KpfRecoveryReceipt:
+        """Accept the candidate; release the retention pin so V1 may be collected."""
+        if self.phase != KpfRecoveryPhase.Probation:
+            return self._receipt(KpfRecoveryVerdict.Rejected, KpfSyncStatus.GenerationNotActive, "nothing in probation")
+        val status = self.table.release_pin(self.retention_pin)
+        self.phase = KpfRecoveryPhase.KnownGood
+        self._receipt(KpfRecoveryVerdict.Applied, status, "candidate known-good; predecessor released")
+
+    me fail_candidate() -> KpfRecoveryReceipt:
+        """Roll back to the retained predecessor unless that would lose or repeat effects."""
+        if self.phase != KpfRecoveryPhase.Probation:
+            return self._receipt(KpfRecoveryVerdict.Rejected, KpfSyncStatus.GenerationNotActive, "nothing in probation")
+        # Fence the failed candidate first: whatever happens next, its epoch is dead.
+        self.execution_epoch = self.execution_epoch + 1
+        if self.unknown_effects > 0:
+            self.phase = KpfRecoveryPhase.Blocked
+            return self._receipt(KpfRecoveryVerdict.Blocked, KpfSyncStatus.Ok, "unknown external effect outcome; reconcile before rollback")
+        if self.acked_effects > 0:
+            self.phase = KpfRecoveryPhase.Blocked
+            return self._receipt(KpfRecoveryVerdict.Blocked, KpfSyncStatus.Ok, "candidate acknowledged writes; rollback would lose them")
+        val rolled = self.table.rollback(self.retained)
+        if not rolled.status.accepted():
+            self.phase = KpfRecoveryPhase.Blocked
+            return self._receipt(KpfRecoveryVerdict.Blocked, rolled.status, "generation table refused rollback")
+        self.table.release_pin(self.retention_pin)
+        self.phase = KpfRecoveryPhase.Restored
+        self._receipt(KpfRecoveryVerdict.Applied, KpfSyncStatus.Ok, "predecessor restored at baseline state revision")
+
+    fn candidate_handle() -> KpfGenerationHandle:
+        self.candidate
+
+    fn retained_handle() -> KpfGenerationHandle:
+        self.retained
