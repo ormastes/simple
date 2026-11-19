@@ -1,0 +1,27 @@
+# Provider entry (design: backend_dynamic_plugin_build_groups.md §2.2).
+#
+# Emits the `<artifact>.provider.sdn` descriptor sidecar that `provider_gate`
+# requires, so a build that opts into a `backends_*` group publishes instead of
+# failing closed with `provider-missing`. The descriptor declares exactly what
+# the gate admits: ABI v1, the host triple and the `object_emit` capability.
+# Opt-in only: targets outside a `backends_*` group never reach this.
+
+use app.build.targets.build_targets.{BACKEND_PROVIDER_ABI_VERSION}
+use app.build.targets.provider_gate.{PROVIDER_GATE_REQUIRED_CAPS, provider_sidecar_path}
+use std.nogc_sync_mut.io_runtime.{file_write}
+
+pub fn render_provider_descriptor(group: text, host_triple: text) -> text:
+    var caps = ""
+    for c in PROVIDER_GATE_REQUIRED_CAPS:
+        if caps != "": caps = caps + ", "
+        caps = caps + c
+    "schema: provider_descriptor_v1\ngroup: " + group + "\nabi_version: " + BACKEND_PROVIDER_ABI_VERSION.to_string() + "\nhost_triple: " + host_triple + "\ncapabilities: [" + caps + "]\n"
+
+pub fn emit_provider_sidecar(group: text, artifact_path: text, host_triple: text) -> text:
+    """Write the sidecar next to `artifact_path`. Empty text = written; else a refusal."""
+    if group == "" or host_triple == "":
+        return "SPL-PROVIDER-ABI-001: provider-entry: cannot emit descriptor without group and host triple"
+    val path = provider_sidecar_path(artifact_path)
+    if not file_write(path, render_provider_descriptor(group, host_triple)):
+        return "SPL-PROVIDER-ABI-001: provider-entry: " + group + ": cannot write " + path
+    ""
