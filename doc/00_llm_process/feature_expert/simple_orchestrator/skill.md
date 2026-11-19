@@ -692,3 +692,10 @@ binding / Host bug). Specs: `remote_container_reset_failure_stages_v3_spec.spl`,
   `REMOTE_RUN_SETTLE_STATES_V1`. Approver keys must enroll `remote-run-abandon`.
 - VERSION SKEW: a controller older than milestone_0045 refuses a Host-signed `service-restart` and a late receipt and
   settles `outcome-unknown`; upgrade the controller first (same rule as #10398/#10399).
+
+## Unavailable-host rows (2026-11-19)
+
+Every unavailable host or capability row (spec execution NOT_RUN, container live rows, Windows/FreeBSD/VM hosts, live
+remote enrollment, operator key-policy enrollment, agent workspace close) has an open BLOCKED Todo DB row (455-459 and
+193-195) and a resume plan with owner, prerequisite, resume command and retained artifacts in
+`doc/03_plan/agent_tasks/simple_orchestrator_remote_completion.md`. None is PASS.

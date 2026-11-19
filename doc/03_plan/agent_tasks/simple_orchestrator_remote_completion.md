@@ -32,3 +32,20 @@ workspace execution capability. The buildrunner never supplies app-local engine
 commands, synthetic PID evidence, recursive chmod or inferred Windows SID/ACL
 authority. Remaining source integration and runtime qualification are explicit
 dependencies, not reasons to label RUN-01/RUN-02 complete.
+
+## Unavailable host and capability rows: open Todo DB rows and resume plans (2026-11-19)
+
+SPipe completion rule: a row whose host or capability is unavailable is BLOCKED with an open Todo DB row and a resume
+plan. It is never skipped and never counted as done. Nothing below is PASS; every spec is NOT_RUN. Records live under
+the untracked `.spipe/simple_orchestrator/continuation_20261116/` (handoff `progress_handoff_0010.md`, audit
+`container_gap_audit_20261116.md`, milestone dirs). Credentials, server addresses, accounts and fingerprints are never
+written to tracked files; they go only to untracked records.
+
+| Todo row | Row | Owner | Missing prerequisite | Resume command | Retained artifacts |
+| --- | --- | --- | --- | --- | --- |
+| 455 | Spec execution NOT_RUN | boot-fable bootstrap lane, then SIMPLEORCH lane | No full-CLI pure-Simple binary on this host; wait for boot-fable Stage 4 | After Stage 4 lands: `bin/simple test <spec> --no-session-daemon` per spec, first the queue PRs #9670 #9671 #9673 #9674, then every orchestrator spec those and later PRs touched (list in the handoff and skill.md) | handoff, milestone receipts |
+| 193-195 | Container live rows ENV-BLOCKED | SIMPLEORCH lane | docker socket permission denied; AppArmor `apparmor_restrict_unprivileged_userns=1` blocks rootless runc | see `doc/08_tracking/todo/simple_orchestrator_native_container_lane_blocked_2026-09-07.md`; then `bin/simple test test/02_integration/app/ci/pipeline_runner_spec.spl --no-session-daemon` | `container_gap_audit_20261116.md` (16 rows) |
+| 456 | Windows, FreeBSD, VM host rows | SIMPLEORCH lane with platform leads | No Windows host, FreeBSD host or VM host; related container rows 365 373 374 | Per host, once provided: run the audit rows for that host through the shared lifecycle specs with receipts | container gap audit |
+| 457 | Live remote enrollment | owner (user) then SIMPLEORCH lane | Owner-provided server, SSH account and expected host fingerprint | Run the remote enrollment acceptance flow with the values supplied through an untracked record | untracked enrollment record, receipts |
+| 458 | Operator key-policy enrollment; Linux controller root provisioning | operator (owner) | Operator enrolls kinds `host_execute_associated_v3`, `host_agent_cancel_v4`, `helper-abandon`, `service-handoff-abandon`, `remote-run-abandon`, `retention-release` in the key policy; Linux controller root provisioned out of band | After enrollment: rerun the controller and host acceptance specs that sign with each kind | key-policy records (untracked) |
+| 459 | Agent workspace close | owner | Deferred by owner on 2026-11-19 | Reopen the agent workspace close lane on owner go; first verify the landed workspace v2 specs | milestone records |
