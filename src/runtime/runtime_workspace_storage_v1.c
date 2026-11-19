@@ -271,7 +271,8 @@ static int64_t ws_open_or_recover_v1(int64_t kind,int64_t parent,int64_t leaf,
     for(size_t i=0;i<WS_SLOT_COUNT_V1;i++) {
         WsSlotV1* existing=&ws_slots_v1[i];
         /* One scope may not acquire independent concurrent native leases.
-         * Host replay must reuse its live owner or recover after process exit. */
+         * Host replay must reuse its live owner, or admit afresh after process exit or after the
+         * holder dropped its retained hold (rt_workspace_storage_close_retained_v1). */
         if(existing->token&&existing->role==1&&(!strcmp(existing->pool,candidate.pool))&&
                 (!strcmp(existing->workspace,candidate.workspace)||existing->quota==candidate.quota)) {
             if(recover&&!strcmp(existing->kind,candidate.kind)&&!strcmp(existing->parent,candidate.parent)&&
@@ -341,6 +342,19 @@ int64_t rt_workspace_storage_forget_released_v1(int64_t token) {
     WsSlotV1* slot=ws_find_v1(token);
     if(!slot||slot->role!=1)error=WS_STALE_ERROR_V1;
     else if(slot->busy||!slot->released)error=EBUSY;
+    else {ws_native_close_v1(&slot->native);memset(slot,0,sizeof(*slot));}
+    ws_lock_release_v1();return -error;
+}
+/* milestone_0047: drop this process's hold of a RETAINED (not released) storage lease: close the native descriptors
+ * and free the slot exactly as process exit does. The workspace, its project id, PROJINHERIT and quota limit are
+ * untouched (ws_native_close_v1 only closes fds), so a later admission re-proves the provisioned leaf from scratch.
+ * A released slot is forget_released's; a loaned (busy) slot refuses. */
+int64_t rt_workspace_storage_close_retained_v1(int64_t token) {
+    int origin_error=ws_origin_guard_v1();if(origin_error)return -origin_error;
+    int error=ws_lock_acquire_v1();if(error)return -error;
+    WsSlotV1* slot=ws_find_v1(token);
+    if(!slot||slot->role!=1)error=WS_STALE_ERROR_V1;
+    else if(slot->busy||slot->released)error=EBUSY;
     else {ws_native_close_v1(&slot->native);memset(slot,0,sizeof(*slot));}
     ws_lock_release_v1();return -error;
 }

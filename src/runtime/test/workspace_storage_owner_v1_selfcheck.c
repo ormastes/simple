@@ -45,6 +45,7 @@ int main(void) {
     CHECK(rt_workspace_storage_recover_v1(kind,p,leaf,pool,workspace,77,65536,policy)<0);
     CHECK(rt_workspace_storage_release_if_absent_v1(1)==-ESTALE);
     CHECK(rt_workspace_storage_forget_released_v1(1)==-ESTALE);
+    CHECK(rt_workspace_storage_close_retained_v1(1)==-ESTALE);
     CHECK(rt_string_len(rt_workspace_storage_observe_v1(1))==0);
     CHECK(stat(child,&after)==0);CHECK(before.st_ino==after.st_ino);CHECK(before.st_mode==after.st_mode);
     file=fopen(sentinel,"r");CHECK(file!=NULL);char retained[64]={0};CHECK(fread(retained,1,sizeof(retained)-1,file)==18);

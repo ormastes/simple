@@ -150,10 +150,6 @@ pub class HostLinuxServiceCurrentV4:
     # owner lives in the agent's holder and `admission` keeps only the residue (F9).
     agent: Option<HostLinuxServiceAgentV4> = None
     agent_consumed: bool = false
-    # milestone_0047: a retention release recovered the provisioned leaf's native lease in this process. The native owner
-    # admits ONE lease per scope (a second admission is EBUSY), so no workload is admitted until restart; further
-    # releases reuse the recovered lease.
-    retention_lease_held: bool = false
     # N-06/T-08 slot: set before the agent prepare charges; one agent operation per incarnation.
     agent_operation_id: text = ""
     # P2R1-F8: the slot's signed operation envelope, for the public exact lookup (set with agent_operation_id).
@@ -1018,7 +1014,6 @@ fn linux_service_agent_slot_v4(original: HostLinuxServiceCurrentV4, operation_id
         now_ms: i64) -> HostLinuxServiceReplyV4:
     var owner = original
     if owner.agent_operation_id == operation_id: return linux_service_reply_v4(owner, "", "", false)
-    if owner.retention_lease_held: return linux_service_reply_v4(owner, "", "linux-host-retention-lease-held", false)
     if owner.agent_consumed: return linux_service_reply_v4(owner, "", "linux-host-agent-incarnation-busy", false)
     if owner.agent_operation_id == "": return linux_service_reply_v4(owner, "", "", false)
     val slot = owner.agent_operation_id
@@ -1789,8 +1784,9 @@ fn linux_service_helper_inspect_v4(owner: HostLinuxServiceCurrentV4, source: tex
 # Runs only in an incarnation with a free slot (no agent, no build, no admitted slot row, nothing consumed, no root loan
 # held) after continuity and reconcile: each incarnation runs one workload, so a retained run is released by a later
 # incarnation. Admission (verify, derive, check, record proof + marker) is journaled BEFORE any effect; the root loan is
-# lent for the provider effect only and ended before the archive. The provider recovers the leaf's native lease, which
-# stays retained in this process: workload admission is refused until restart (retention_lease_held).
+# lent for the provider effect only and ended before the archive. The provider admits its OWN native lease of the leaf
+# (no workload ran in this incarnation, so no in-process holder exists) and drops that hold on every exit (milestone_0047
+# bug fix): the next workload prepare admits the leaf afresh in the same incarnation, no restart.
 # A re-issued release converges after any crash (host_remote_build_retention_release_v1). Never a continuity flip.
 fn linux_service_retention_release_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
     var owner = original
@@ -1815,7 +1811,6 @@ fn linux_service_retention_release_v4(original: HostLinuxServiceCurrentV4, sourc
     owner.admission = Some(admission)
     if lent.error != "" or lent.root.is_none():
         return linux_service_reply_v4(owner, "", if lent.error != "": lent.error else: "linux-host-retention-release-root-missing", true)
-    owner.retention_lease_held = true
     val effect = linux_workspace_retention_release_v1(lent.root.unwrap(), admitted.unwrap().request_bytes, admitted.unwrap().resumed)
     val ended = admission.owner.unwrap().end_workspace_root_loan_v1(lent.root.unwrap())
     admission.owner = Some(ended.owner)
