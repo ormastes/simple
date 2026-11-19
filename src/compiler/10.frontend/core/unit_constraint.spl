@@ -170,6 +170,7 @@ pub fn unit_constraint_violation_message(unit_name: text, value_text: text, pred
 var uc_toks: [text] = []
 var uc_pos: i64 = 0
 var uc_err: bool = false
+var uc_bounds_empty: bool = false
 var uc_self: f64 = 0.0
 
 fn uc_is_digit(c: text) -> bool:
@@ -408,7 +409,11 @@ fn uc_bound_int(t: text) -> i64:
         if not uc_is_digit(c):
             uc_err = true
             return 0
-        v = v * 10 + (int(c) as i64)
+        val digit = int(c) as i64
+        if v > (9223372036854775807 - digit) / 10:
+            uc_err = true
+            return 0
+        v = v * 10 + digit
         i = i + 1
     if neg:
         return 0 - v
@@ -435,11 +440,17 @@ fn uc_apply_bound(op: text, self_left: bool, n: i64, acc: [i64]):
         set_lo = true
     elif o == ">":
         set_lo = true
+        if n == 9223372036854775807:
+            uc_err = true
+            return
         lo_n = n + 1
     elif o == "<=":
         set_hi = true
     elif o == "<":
         set_hi = true
+        if n == 0 - 9223372036854775807 - 1:
+            uc_err = true
+            return
         hi_n = n - 1
     elif o == "==":
         set_lo = true
@@ -476,6 +487,7 @@ fn uc_fold_clause(items: [text], ops: [text], acc: [i64]):
 # full predicate; only the native compare-and-panic is limited to ranges.
 # @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
 pub fn unit_where_bounds(pred: text) -> [text]:
+    uc_bounds_empty = false
     if not uc_tokenize(pred):
         return ["", ""]
     val toks = uc_toks
@@ -505,6 +517,28 @@ pub fn unit_where_bounds(pred: text) -> [text]:
         else:
             clause_ok = false
         idx = idx + 1
+    if acc[0] != 0 and acc[2] != 0 and acc[1] > acc[3]:
+        uc_bounds_empty = true
     val lo = if acc[0] != 0: acc[1].to_text() else: ""
     val hi = if acc[2] != 0: acc[3].to_text() else: ""
     [lo, hi]
+
+# True when the last `unit_where_bounds` call folded to an empty range
+# (lo > hi), e.g. `self > 5 and self < 3`: no value can satisfy the unit.
+# @allow(primitive_api) frontend unit pool API: predicate flag over raw bound texts, matching unit_where_bounds
+pub fn unit_where_bounds_empty() -> bool:
+    uc_bounds_empty
+
+# True when both inclusive integer bound texts are present and lo > hi.
+# @allow(primitive_api) frontend unit pool API: raw inclusive bound texts, matching unit_where_bounds
+pub fn unit_bound_texts_empty(lo: text, hi: text) -> bool:
+    if lo == "" or hi == "":
+        return false
+    uc_err = false
+    val lo_n = uc_bound_int(lo)
+    val lo_bad = uc_err
+    val hi_n = uc_bound_int(hi)
+    if lo_bad or uc_err:
+        uc_err = false
+        return false
+    lo_n > hi_n
