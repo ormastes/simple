@@ -22,7 +22,7 @@
 use std.replay.bm_replay_core (bm_ring_push, bm_ring_count)
 use std.replay.portable_replay.{
     PR_MODE_OFF, PR_MODE_RECORD, PR_MODE_REPLAY, PR_KIND_TIMER_READ, PR_KIND_RANDOM_READ,
-    PR_KIND_SCHEDULE, PR_KIND_IO_READ, PR_DIV_NONE,
+    PR_KIND_SCHEDULE, PR_KIND_IO_READ, PR_DIV_NONE, PR_SCOPE_REALTIME,
     portable_replay_set_mode, portable_replay_mode, portable_replay_open_scope,
     portable_replay_scope_is_open, portable_replay_event, portable_replay_last_divergence,
     portable_replay_pending
@@ -33,7 +33,7 @@ val RR_CHECKPOINT: i64 = 6
 val RR_TASK_CREATE: i64 = 7
 val RR_TASK_EXIT: i64 = 8
 
-val RR_PORTABLE_SCOPE: i64 = 1
+val RR_PORTABLE_SCOPE: i64 = PR_SCOPE_REALTIME
 # Realtime-defined core kind (the core's own kinds are 1..4).
 val RR_PR_KIND_IRQ: i64 = 6
 # Tid returned by a diverging schedule replay: the scheduler NO_TASK, so
@@ -59,7 +59,7 @@ pub fn rr_hook_schedule(old_tid: i32, new_tid: i32, tick: u64) -> i32:
         return new_tid
     if rtos_replay_is_replaying():
         val logged = rr_portable_replay(PR_KIND_SCHEDULE, live)
-        if portable_replay_last_divergence() != PR_DIV_NONE:
+        if portable_replay_last_divergence(RR_PORTABLE_SCOPE) != PR_DIV_NONE:
             return RR_SCHEDULE_DIVERGED
         return logged.to_i32()
     if rtos_replay_is_verifying():
@@ -99,7 +99,7 @@ pub fn rr_hook_irq(vector: i32, tick: u64) -> bool:
         return true
     if rtos_replay_is_replaying():
         val logged = rr_portable_replay(RR_PR_KIND_IRQ, live)
-        if portable_replay_last_divergence() != PR_DIV_NONE:
+        if portable_replay_last_divergence(RR_PORTABLE_SCOPE) != PR_DIV_NONE:
             return false
         if logged != live:
             divergence_count = divergence_count + 1
@@ -143,7 +143,7 @@ fn rr_hook_random(value: u64) -> u64:
     if rtos_replay_is_recording():
         rtos_replay_next_seq()  # keep the shared seq numbering of the other hooks
     val replayed = portable_replay_event(PR_KIND_RANDOM_READ, RR_PORTABLE_SCOPE, value.to_i64())
-    if portable_replay_last_divergence() != PR_DIV_NONE:
+    if portable_replay_last_divergence(RR_PORTABLE_SCOPE) != PR_DIV_NONE:
         # Wrong event or end-of-log: counted, and the core's fail-closed value
         # is returned — never the live value (DHR P6: no live fallback).
         divergence_count = divergence_count + 1
@@ -157,9 +157,9 @@ fn rr_portable_sync():
         want = PR_MODE_RECORD
     elif rtos_replay_is_replaying():
         want = PR_MODE_REPLAY
-    if portable_replay_mode() != want:
-        portable_replay_set_mode(want)
-    if not portable_replay_scope_is_open():
+    if portable_replay_mode(RR_PORTABLE_SCOPE) != want:
+        portable_replay_set_mode(RR_PORTABLE_SCOPE, want)
+    if not portable_replay_scope_is_open(RR_PORTABLE_SCOPE):
         portable_replay_open_scope(RR_PORTABLE_SCOPE)
 
 fn rr_portable_record(kind: i64, live: i64):
@@ -172,7 +172,7 @@ fn rr_portable_replay(kind: i64, live: i64) -> i64:
     """Replay one event: the logged value, or the core's fail-closed value on
     a wrong event or an exhausted log, which is counted (never `live`)."""
     val replayed = portable_replay_event(kind, RR_PORTABLE_SCOPE, live)
-    if portable_replay_last_divergence() != PR_DIV_NONE:
+    if portable_replay_last_divergence(RR_PORTABLE_SCOPE) != PR_DIV_NONE:
         divergence_count = divergence_count + 1
     replayed
 
@@ -180,10 +180,10 @@ fn rr_portable_verify(kind: i64, live: i64):
     """Verify one event against the log. The session is Off in Verify (random
     reads are not replayed there), so the core steps in Replay for this one
     event; a wrong event, exhausted log or changed value is counted."""
-    portable_replay_set_mode(PR_MODE_REPLAY)
+    portable_replay_set_mode(RR_PORTABLE_SCOPE, PR_MODE_REPLAY)
     val logged = portable_replay_event(kind, RR_PORTABLE_SCOPE, live)
-    val diverged = portable_replay_last_divergence() != PR_DIV_NONE
-    portable_replay_set_mode(PR_MODE_OFF)
+    val diverged = portable_replay_last_divergence(RR_PORTABLE_SCOPE) != PR_DIV_NONE
+    portable_replay_set_mode(RR_PORTABLE_SCOPE, PR_MODE_OFF)
     if diverged or logged != live:
         divergence_count = divergence_count + 1
 
@@ -223,4 +223,4 @@ fn rr_reset_divergences():
 
 fn rr_event_count() -> i64:
     """Return number of logged events not yet replayed (ring + portable core)."""
-    bm_ring_count() + portable_replay_pending()
+    bm_ring_count() + portable_replay_pending(RR_PORTABLE_SCOPE)
