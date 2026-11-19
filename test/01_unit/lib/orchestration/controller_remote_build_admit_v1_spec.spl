@@ -17,7 +17,7 @@ use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, Dis
 use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
 use std.common.contracts.distributed_operation_state_v2.distributed_operation_initial_v2
 use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_lookup_v2,
-    distributed_operation_journal_commit_v2}
+    distributed_operation_journal_commit_v2, distributed_operation_journal_read_required_v3, distributed_operation_journal_read_v3}
 use std.common.contracts.distributed_operation_state_v2.distributed_operation_transition_v2
 use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{DistributedAuthorityKeyV2,
     distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
@@ -73,7 +73,8 @@ fn admit_cleanup_v1(store: ControllerWorkloadStoreV1):
 
 fn admit_run_v1(store: ControllerWorkloadStoreV1, request: OperationEnvelopeV2, issuer: text, now: i64) -> ControllerRemoteBuildAdmitV1:
     val pair = admit_pair_v1(request, issuer)
-    controller_workload_store_admit_remote_build_v1(store, admit_snapshot_v1(), 3, pair.0, pair.1, request, now)
+    controller_workload_store_admit_remote_build_v1(store, admit_snapshot_v1(), 3, pair.0, pair.1, request,
+        "OPEN-RECORD-" + request.payload_digest, now)
 
 describe "controller workload store admit-build-row (milestone_0030 C5)":
     it "admits a verified build request as one executing row on the store journal":
@@ -126,6 +127,30 @@ describe "controller workload store admit-build-row (milestone_0030 C5)":
         val terminal = ControllerWorkloadStoreV1(controller_id: admitted.store.controller_id, journal: done, rows: admitted.store.rows)
         expect(admit_run_v1(terminal, request, "controller-issuer", 100).error).to_equal("remote-build-admit-conflict")
         admit_cleanup_v1(terminal)
+
+    it "archives the run's open record create-only in the admit turn and refuses a different one (milestone_0045)":
+        # @req M0045-RESUME-01
+        step("the admitted row's open record is readable under the resume key, byte-identical")
+        val request = admit_request_v1("build")
+        val admitted = admit_run_v1(admit_store_v1(), request, "controller-issuer", 100)
+        expect(admitted.error).to_equal("")
+        expect(distributed_operation_journal_read_required_v3(admitted.store.journal,
+            controller_workload_store_remote_open_key_v1("build-op"), 4096)).to_equal(Ok("OPEN-RECORD-" + request.payload_digest))
+        step("a re-admit of the same run keeps it; a different record for the same operation is refused, the row untouched")
+        expect(admit_run_v1(admitted.store, request, "controller-issuer", 101).error).to_equal("")
+        val pair = admit_pair_v1(request, "controller-issuer")
+        val other = controller_workload_store_admit_remote_build_v1(admitted.store, admit_snapshot_v1(), 3, pair.0, pair.1, request,
+            "OTHER-RECORD", 102)
+        expect(other.error).to_equal("remote-build-admit-open-conflict")
+        expect(controller_workload_store_admit_remote_build_v1(admitted.store, admit_snapshot_v1(), 3, pair.0, pair.1, request,
+            "", 102).error).to_equal("remote-build-admit-open-record")
+        expect(distributed_operation_journal_lookup_v2(other.store.journal, "build-op").unwrap().state).to_equal("executing")
+        step("a refused admit (an issuer that is not the controller) archives nothing")
+        val fresh = admit_store_v1()
+        expect(admit_run_v1(fresh, request, "host-issuer", 100).error).to_equal("remote-build-admit-issuer")
+        expect(distributed_operation_journal_read_v3(fresh.journal, controller_workload_store_remote_open_key_v1("build-op"), 4096)).to_equal(Ok(None))
+        admit_cleanup_v1(fresh)
+        admit_cleanup_v1(other.store)
 
     it "edit returns the journal the closure produced together with its text and its own refusal":
         step("The closure sees the store's own journal; the returned journal replaces it even when the closure refuses afterwards")

@@ -576,9 +576,25 @@ pub struct ControllerRemoteBuildAdmitV1:
 fn remote_build_admit_refused_v1(owner: ControllerWorkloadStoreV1, code: text) -> ControllerRemoteBuildAdmitV1:
     ControllerRemoteBuildAdmitV1(store: owner, error: code)
 
+# milestone_0045 (owner decision 1, `remote-run resume`): the controller-authored open record of the run (the build pair,
+# request, task, policy, environment and invocation bytes, opaque here) is archived create-only under this key inside the
+# admit turn, so a later resume re-collects under the SAME signed pair without re-authoring it from a fresh clock.
+pub fn controller_workload_store_remote_open_key_v1(operation_id: text) -> text:
+    "controller-remote-open-v3/" + sha256_text(operation_id) + ".sdn"
+
+# Create-only, read back: an existing record for the operation must be byte-identical (a re-admit of the same run).
+fn remote_build_admit_archive_v1(journal: DistributedOperationJournalV2, operation_id: text, open_record: text) -> text:
+    if open_record == "": return "remote-build-admit-open-record"
+    val key = controller_workload_store_remote_open_key_v1(operation_id)
+    val published = distributed_operation_journal_publish_v3(journal, key, open_record)
+    if published.is_err(): return published.unwrap_err()
+    val back = distributed_operation_journal_read_required_v3(journal, key, 262144)
+    if back.is_err() or back.unwrap() != open_record: return "remote-build-admit-open-conflict"
+    ""
+
 pub fn controller_workload_store_admit_remote_build_v1(owner: ControllerWorkloadStoreV1,
         snapshot: DistributedAuthoritySnapshotV2, session_generation: i64, signed: DistributedSignedGrantV2,
-        approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2, now: i64) -> ControllerRemoteBuildAdmitV1:
+        approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2, open_record: text, now: i64) -> ControllerRemoteBuildAdmitV1:
     if signed.issuer_id != owner.controller_id: return remote_build_admit_refused_v1(owner, "remote-build-admit-issuer")
     if request.operation != "build" and request.operation != "test":
         return remote_build_admit_refused_v1(owner, "remote-build-admit-operation")
@@ -595,9 +611,12 @@ pub fn controller_workload_store_admit_remote_build_v1(owner: ControllerWorkload
         val found = prior.unwrap()
         if found.envelope != envelope or found.envelope_digest != sha256_text(envelope):
             return remote_build_admit_refused_v1(owner, "remote-build-admit-conflict")
-        if found.state == "executing" or found.state == "outcome-unknown": return ControllerRemoteBuildAdmitV1(store: owner)
+        val live = found.state == "executing" or found.state == "outcome-unknown"
         # An exact-envelope row an interrupted admit left `admitted` is completed, never a conflict.
-        if found.state != "admitted": return remote_build_admit_refused_v1(owner, "remote-build-admit-conflict")
+        if not live and found.state != "admitted": return remote_build_admit_refused_v1(owner, "remote-build-admit-conflict")
+        val archived = remote_build_admit_archive_v1(journal, request.id, open_record)
+        if archived != "": return remote_build_admit_refused_v1(owner, archived)
+        if live: return ControllerRemoteBuildAdmitV1(store: owner)
         row = Some(found)
     else:
         if prior.unwrap_err() != "OPERATION_NOT_FOUND": return remote_build_admit_refused_v1(owner, prior.unwrap_err())
@@ -607,6 +626,11 @@ pub fn controller_workload_store_admit_remote_build_v1(owner: ControllerWorkload
         if admitted.is_err(): return remote_build_admit_refused_v1(owner, admitted.unwrap_err())
         journal = admitted.unwrap()
         row = Some(initial.unwrap())
+        # Archived only once the row exists (`admitted`): a refused fresh admit leaves no archive that would conflict
+        # with a later, re-authored run of the same operation id; a re-admit of the `admitted` row archives above.
+        val archived = remote_build_admit_archive_v1(journal, request.id, open_record)
+        if archived != "":
+            return remote_build_admit_refused_v1(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: journal, rows: owner.rows), archived)
     val next = distributed_operation_transition_v2(row.unwrap(), "executing", "")
     if next.is_err():
         return remote_build_admit_refused_v1(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: journal, rows: owner.rows), next.unwrap_err())

@@ -9,7 +9,9 @@ binary when written, 2026-11-19).
 Two doubles: a one-shot double that ends the run at the first Host request (status -> admit -> signed associated
 prepare, and the refusals before any Host effect) and a SCRIPTED Host double that answers the whole sequence (associated
 prepare with a real association, execution admission, stage replies, a reaped collect or a timed-out poll).
-milestone_0045: a bare reaped refusal settles `outcome-unknown` (the Host signs the reaped receipt when it can).
+milestone_0045: a bare reaped refusal settles `outcome-unknown` (the Host signs the reaped receipt when it can), and
+`remote-run resume` re-collects an unproven run from the controller's archives with no new Host effect. The scripted
+double's monotonic clock only runs past the collect bound for a Host answering `running`.
 milestone_0043 (opus re-review P1-1): the scripted double models the REAL dispatch owner after a failure: a failed send
 (transport error, Host refusal of prepare/execute, an exchange that outlived its bound) leaves the owner in cleanup, so
 every later `edit` and `send` is refused (`dispatch-remote-not-ready`) and only the post-failure `settle` still reaches the
@@ -23,7 +25,9 @@ Host effect), and the Host may execute only after it.
 use std.spec.{describe, it, expect, step}
 use std.io.file_read_text
 use app.orchestrator.remote_run_v1.{RemoteRunFactsV1, RemoteRunLinkV1, RemoteRunIssuerV1, RemoteRunOutcomeV1, remote_run_drive_v1, remote_run_grant_v1,
-    remote_run_result_parts_v1}
+    remote_run_result_parts_v1, remote_run_resume_v1}
+use app.orchestrator.remote_run_author_v1.RemoteRunAuthoredV1
+use app.orchestrator.remote_run_command_v1.remote_run_command_v1
 use app.orchestrator.controller_authority_issue_v1.{ControllerIssuedAuthorityV1, controller_authority_issue_v1}
 use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2, ExecutionEnvironmentV2}
 use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
@@ -44,7 +48,7 @@ use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperatio
 use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
 use std.common.contracts.distributed_operation_state_v2.{distributed_operation_initial_v2, distributed_operation_transition_v2}
 use std.nogc_sync_mut.orchestration.workload_store_v1.{ControllerJournalEditV1, ControllerWorkloadStoreV1, controller_workload_store_open_v1,
-    controller_workload_store_close_v1}
+    controller_workload_store_close_v1, controller_workload_store_remote_open_key_v1}
 use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.controller_dispatch_remote_execute_key_v3
 use std.nogc_sync_mut.orchestration.host_service_domain_v2.{HostServiceRequestV2, host_service_error_payload_v2}
 use std.nogc_sync_mut.io.file_ops.secure_temp_dir
@@ -131,7 +135,8 @@ fn rr_settle_v1(log: RrLogV1, edit: fn(DistributedOperationJournalV2) -> Control
 fn rr_link_v1(log: RrLogV1, host: text) -> RemoteRunLinkV1:
     RemoteRunLinkV1(begin: fn() -> Result<text, text>: rr_begin_v1(log, host),
         send: fn(action: text, payload: text) -> Result<text, text>: rr_send_v1(log, action, payload),
-        admit: fn(signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2) -> Result<bool, text>:
+        admit: fn(signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2,
+                open_record: text) -> Result<bool, text>:
             rr_admit_v1(log, signed, approval, request),
         edit: fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
             rr_edit_v1(log, edit),
@@ -232,6 +237,10 @@ class RsLogV1:
     var quarantined: bool = false
     # The grant clock jumps to the end of the lifetime once prepare was answered.
     var late: bool = false
+    # milestone_0045: the open record handed to admit (resume re-reads it from the controller journal).
+    var open_record: text = ""
+    # A fixed grant clock (resume after the signed window).
+    var clock_at: i64 = 0
 
 fn rs_stage_cause_reply_v1(stage: text, cause: text) -> text:
     val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-remote-build"),
@@ -294,6 +303,10 @@ fn rs_send_v1(log: RsLogV1, action: text, payload: text) -> Result<text, text>:
     if action == "execute":
         log.calls = log.calls + ["execute"]
         if log.execute_fail: return rs_fail_v1(log, "double-execute-down")
+        # The real dispatch owner archives the execute create-only before sending it (resume reads it back).
+        if log.journal.is_some():
+            expect(distributed_operation_journal_publish_v3(log.journal.unwrap(), controller_dispatch_remote_execute_key_v3("operation_a"),
+                payload).unwrap()).to_equal(true)
         return Ok(rs_execute_reply_v1(log))
     val sub = host_remote_build_sub_decode_v6(payload)?
     log.calls = log.calls + ["remote-build:" + sub.sub]
@@ -312,11 +325,15 @@ fn rs_send_v1(log: RsLogV1, action: text, payload: text) -> Result<text, text>:
     if sub.sub == "cancel": return Ok(rs_stage_reply_v1("cancel-requested"))
     Err("double-unexpected-" + sub.sub)
 
+# The monotonic clock only runs past the 9 minute collect bound for a Host that keeps answering `running` (the bounded-wait
+# cases), and only once a collect was sent, so a bounded wait always polls once first; every other script reaches its
+# collect answer inside the bound (a fixed 600 s step timed them all out before any collect).
 fn rs_mono_v1(log: RsLogV1) -> i64:
-    log.tick = log.tick + 600000
+    if log.collect == "running" and log.calls.contains("remote-build:collect"): log.tick = log.tick + 600000
     log.tick
 
 fn rs_clock_v1(log: RsLogV1) -> Result<i64, text>:
+    if log.clock_at > 0: return Ok(log.clock_at)
     if log.late and log.calls.contains("prepare"): return Ok(1000 + RR_TTL - 1000)
     Ok(1000)
 
@@ -324,9 +341,13 @@ fn rs_begin_v1(log: RsLogV1) -> Result<text, text>:
     log.calls = log.calls + ["begin"]
     Ok(rr_status_v1("worker_1", true))
 
-fn rs_admit_v1(log: RsLogV1, request: OperationEnvelopeV2) -> Result<bool, text>:
+fn rs_admit_v1(log: RsLogV1, request: OperationEnvelopeV2, open_record: text) -> Result<bool, text>:
     log.calls = log.calls + ["admit"]
+    log.open_record = open_record
     if log.journal.is_some() and not log.skip_row:
+        # The real admit (workload_store_v1) archives the open record in the same turn (milestone_0045).
+        expect(distributed_operation_journal_publish_v3(log.journal.unwrap(), controller_workload_store_remote_open_key_v1(request.id),
+            open_record).unwrap()).to_equal(true)
         val initial = distributed_operation_initial_v2(distributed_encode_operation_v2(request)?)?
         val admitted = distributed_operation_journal_commit_v2(log.journal.unwrap(), initial)?
         log.journal = Some(distributed_operation_journal_commit_v2(admitted, distributed_operation_transition_v2(initial, "executing", "")?)?)
@@ -370,8 +391,9 @@ fn rs_cleanup_v1(log: RsLogV1):
 fn rs_link_v1(log: RsLogV1) -> RemoteRunLinkV1:
     RemoteRunLinkV1(begin: fn() -> Result<text, text>: rs_begin_v1(log),
         send: fn(action: text, payload: text) -> Result<text, text>: rs_send_v1(log, action, payload),
-        admit: fn(signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2) -> Result<bool, text>:
-            rs_admit_v1(log, request),
+        admit: fn(signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2,
+                open_record: text) -> Result<bool, text>:
+            rs_admit_v1(log, request, open_record),
         edit: fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
             rs_edit_v1(log, edit),
         settle: fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
@@ -534,6 +556,106 @@ describe "remote-run driver, scripted Host (milestone_0030 controller half)":
         expect(second.settled).to_equal("unsettled:controller-local-root-quarantined:double")
         expect(rs_row_state_v1(quarantined)).to_equal("executing")
         rs_cleanup_v1(quarantined)
+
+# milestone_0045 (owner decision 1): a first run that ended unproven, then `remote-run resume` on the same journal.
+fn rs_unproven_v1() -> RsLogV1:
+    val first = RsLogV1()
+    first.collect = "running"
+    first.journal = Some(rs_journal_v1())
+    val outcome = rs_drive_v1(first)
+    expect(outcome.state).to_equal("wait-bounded-cancel-sent")
+    expect(rs_row_state_v1(first)).to_equal("outcome-unknown")
+    val again = RsLogV1()
+    again.journal = first.journal
+    again
+
+fn rs_resume_v1(log: RsLogV1) -> RemoteRunOutcomeV1:
+    remote_run_resume_v1("operation_a", fn(not_after: i64) -> Result<RemoteRunAuthoredV1, text>: rr_authored_v1(),
+        rr_facts_v1(RR_TTL), rs_link_v1(log))
+
+describe "remote-run resume (milestone_0045, owner decision 1)":
+    it "re-collects under the archived pair with no new Host effect and settles a bounded wait outcome-unknown":
+        # @req M0045-RESUME-02
+        step("begin, the two archive reads (open record, execute), then only collect frames; never prepare/execute/cancel")
+        val log = rs_unproven_v1()
+        log.collect = "running"
+        val outcome = rs_resume_v1(log)
+        expect(outcome.state).to_equal("resume-wait-bounded")
+        expect(outcome.settled).to_equal("outcome-unknown")
+        expect(log.calls).to_equal(["begin", "edit", "edit", "remote-build:collect", "settle"])
+        expect(rs_row_state_v1(log)).to_equal("outcome-unknown")
+        rs_cleanup_v1(log)
+
+    it "accepts what the Host answers on resume through the same single-writer edits (reset receipt, reaped refusal)":
+        # @req M0045-RESUME-03
+        step("a Host reset-failure reply reaches the receipt accept; the garbage envelope is refused and the row stays unproven")
+        val reset = rs_unproven_v1()
+        reset.collect = "reset"
+        val first = rs_resume_v1(reset)
+        expect(first.state).to_equal("host-reset-refused")
+        expect(reset.calls).to_equal(["begin", "edit", "edit", "remote-build:collect", "edit", "settle"])
+        expect(rs_row_state_v1(reset)).to_equal("outcome-unknown")
+        rs_cleanup_v1(reset)
+        step("a bare reaped refusal stays outcome-unknown; nothing but collect was sent")
+        val reaped = rs_unproven_v1()
+        val second = rs_resume_v1(reaped)
+        expect(second.state).to_equal("reaped-unsigned")
+        expect(reaped.calls).to_equal(["begin", "edit", "edit", "remote-build:collect", "settle"])
+        rs_cleanup_v1(reaped)
+
+    it "refuses before any frame when the archive is missing, the spec differs or the signed window ended":
+        # @req M0045-RESUME-04
+        step("no admitted run (no archived open record): refused after begin and the read, nothing sent, no settle")
+        val none = RsLogV1()
+        none.journal = Some(rs_journal_v1())
+        expect(rs_resume_v1(none).detail).to_equal("remote-run-resume-unarchived")
+        expect(none.calls).to_equal(["begin", "edit"])
+        rs_cleanup_v1(none)
+        step("an operator spec that no longer reproduces the archived open record byte for byte")
+        val drift = rs_unproven_v1()
+        val changed = remote_run_resume_v1("operation_a", fn(not_after: i64) -> Result<RemoteRunAuthoredV1, text>:
+                var authored = rr_authored_v1().unwrap()
+                authored.environment_text = authored.environment_text + "\n"
+                Ok(authored),
+            rr_facts_v1(RR_TTL), rs_link_v1(drift))
+        expect(changed.detail).to_equal("remote-run-resume-spec-differs")
+        expect(drift.calls).to_equal(["begin", "edit"])
+        expect(rs_row_state_v1(drift)).to_equal("outcome-unknown")
+        rs_cleanup_v1(drift)
+        step("a row that is no longer live (terminal) is never resumed, even with its archives in place")
+        val terminal = rs_unproven_v1()
+        val row = distributed_operation_journal_lookup_v2(terminal.journal.unwrap(), "operation_a").unwrap()
+        terminal.journal = Some(distributed_operation_journal_commit_v2(terminal.journal.unwrap(),
+            distributed_operation_transition_v2(row, "failed", "e".repeat(64)).unwrap()).unwrap())
+        expect(rs_resume_v1(terminal).detail).to_equal("remote-run-resume-row")
+        expect(terminal.calls).to_equal(["begin", "edit"])
+        rs_cleanup_v1(terminal)
+        step("past the signed window: refused (the row needs the controller-signed abandon), nothing sent")
+        val expired = rs_unproven_v1()
+        expired.clock_at = 1000 + RR_TTL
+        expect(rs_resume_v1(expired).detail).to_equal("remote-run-resume-window-ended")
+        expect(expired.calls).to_equal(["begin", "edit"])
+        rs_cleanup_v1(expired)
+
+    it "routes `remote-run resume` with its own four options and no key store (it issues nothing)":
+        # @req M0045-RESUME-05
+        val usage = remote_run_command_v1(["remote-run", "resume", "--spec", "x"])
+        expect(usage.exit_code).to_equal(2)
+        expect(usage.output.contains("remote-run-usage")).to_equal(true)
+        val command = file_read_text("src/app/orchestrator/remote_run_command_v1.spl")
+        expect(command.contains("if args.len() > 1 and args[1] == \"resume\": return remote_run_resume_command_v1(args)")).to_equal(true)
+        expect(command.contains("val REMOTE_RUN_RESUME_OPTIONS_V1 = [\"--dispatch-root\", \"--config-digest\", \"--spec\", \"--out\"]")).to_equal(true)
+        val resume = command.substring(command.index_of("fn remote_run_resume_command_v1("), command.index_of("pub fn remote_run_command_v1("))
+        expect(resume.contains("key_store") or resume.contains("RemoteRunIssuerV1")).to_equal(false)
+
+    it "never sends prepare, execute, open, input, start or cancel from the resume path (source pin)":
+        val source = file_read_text("src/app/orchestrator/remote_run_v1.spl")
+        val resume = source.substring(source.index_of("fn remote_run_resume_flow_v1("), source.index_of("pub fn remote_run_resume_v1("))
+        for sent in ["(link.send)(", "(link.admit)(", "remote_run_cancel_v1(", "\"open\"", "\"input\"", "\"start\"", "issue"]:
+            expect(resume.contains(sent)).to_equal(false)
+        expect(resume.contains("remote_run_collect_v1(authored, facts, link, None, admitted,")).to_equal(true)
+        val collect = source.substring(source.index_of("fn remote_run_collect_v1("), source.index_of("fn remote_run_flow_v1("))
+        expect(collect.index_of("if timed_out and issue.is_none():") < collect.index_of("remote_run_cancel_v1(")).to_equal(true)
 
 describe "remote-run edit result parts":
     it "splits the release-failed third part off one edit result and leaves every other result alone":
