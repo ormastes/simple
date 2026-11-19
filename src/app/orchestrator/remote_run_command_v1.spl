@@ -15,7 +15,9 @@ use std.nogc_sync_mut.orchestration.controller_local_root_v3.{ControllerLocalRoo
 use std.nogc_sync_mut.io.dir_ops.dir_is_real_no_follow
 use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.{ControllerDispatchOwnerV3, ControllerDispatchOwnedTurnV3,
     controller_dispatch_remote_begin_v3, controller_dispatch_remote_send_v3, controller_dispatch_remote_admit_v3,
-    controller_dispatch_remote_edit_v3, controller_dispatch_step_v3, controller_dispatch_close_v3}
+    controller_dispatch_remote_edit_v3, controller_dispatch_step_v3, controller_dispatch_close_v3,
+    CONTROLLER_DISPATCH_EDIT_OK_V3, CONTROLLER_DISPATCH_EDIT_REFUSED_V3}
+use std.nogc_sync_mut.orchestration.workload_store_v1.ControllerJournalEditV1
 use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.{ControllerDispatchContextV1, controller_dispatch_grant_clock_v1}
 use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalV2
 use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2, ExecutionEnvironmentV2}
@@ -118,10 +120,17 @@ fn remote_run_link_admit_v1(box: RemoteRunBoxV1, signed: DistributedSignedGrantV
     val _done = remote_run_wait_v1(box, controller_dispatch_remote_admit_v3(box.owner.unwrap(), signed, approval, request))?
     Ok(true)
 
+# The edit turn always ends ready with the closure's verdict in the response (controller_dispatch_remote_edit_v3): a
+# refused closure is an Err of THIS call and leaves the link alive, so the settle can still run.
 fn remote_run_link_edit_v1(box: RemoteRunBoxV1,
-        edit: fn(DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>) -> Result<text, text>:
+        edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
     if box.owner.is_none(): return Err("remote-run-link-closed")
-    remote_run_wait_v1(box, controller_dispatch_remote_edit_v3(box.owner.unwrap(), edit))
+    val response = remote_run_wait_v1(box, controller_dispatch_remote_edit_v3(box.owner.unwrap(), edit))?
+    if response.starts_with(CONTROLLER_DISPATCH_EDIT_OK_V3):
+        return Ok(response.substring(CONTROLLER_DISPATCH_EDIT_OK_V3.byte_len(), response.byte_len()))
+    if response.starts_with(CONTROLLER_DISPATCH_EDIT_REFUSED_V3):
+        return Err(response.substring(CONTROLLER_DISPATCH_EDIT_REFUSED_V3.byte_len(), response.byte_len()))
+    Err("remote-run-edit-response")
 
 fn remote_run_sleep_v1(ms: i64) -> bool:
     sosix_sleep_ms(ms)
@@ -140,7 +149,7 @@ fn remote_run_reply_v1(outcome: RemoteRunOutcomeV1, cleanup_pending: bool) -> Or
     if detail.byte_len() > 256: detail = detail.substring(0, 256)
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("remote-run"),
         "state": SdnValue.String(outcome.state), "operationId": SdnValue.String(outcome.operation_id),
-        "digest": SdnValue.String(outcome.digest), "detail": SdnValue.String(detail),
+        "digest": SdnValue.String(outcome.digest), "detail": SdnValue.String(detail), "settled": SdnValue.String(outcome.settled),
         "cleanupPending": SdnValue.Bool(cleanup_pending)}
     OrchestratorValidationReplyV1(exit_code: outcome.exit_code, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
 
@@ -199,7 +208,7 @@ pub fn remote_run_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
         send: fn(action: text, payload: text) -> Result<text, text>: remote_run_link_send_v1(box, action, payload),
         admit: fn(signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2) -> Result<bool, text>:
             remote_run_link_admit_v1(box, signed, approval, request),
-        edit: fn(edit: fn(DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>) -> Result<text, text>:
+        edit: fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
             remote_run_link_edit_v1(box, edit),
         clock: fn() -> Result<i64, text>: controller_dispatch_grant_clock_v1(),
         monotonic_ms: fn() -> i64: sosix_time_now_monotonic_ms(),

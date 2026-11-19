@@ -127,18 +127,30 @@ describe "controller workload store admit-build-row (milestone_0030 C5)":
         expect(admit_run_v1(terminal, request, "controller-issuer", 100).error).to_equal("remote-build-admit-conflict")
         admit_cleanup_v1(terminal)
 
-    it "edit returns the journal the closure produced together with its text":
-        step("The closure sees the store's own journal; the returned journal replaces it")
+    it "edit returns the journal the closure produced together with its text and its own refusal":
+        step("The closure sees the store's own journal; the returned journal replaces it even when the closure refuses afterwards")
         val request = admit_request_v1("build")
         val admitted = admit_run_v1(admit_store_v1(), request, "controller-issuer", 100).store
         val edited = controller_workload_store_edit_journal_v1(admitted,
-            fn(journal: DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>:
-                val row = distributed_operation_journal_lookup_v2(journal, "build-op")?
-                val next = distributed_operation_journal_commit_v2(journal, distributed_operation_transition_v2(row, "failed", "e".repeat(64))?)?
-                Ok((next, "edited"))).unwrap()
-        expect(edited.1).to_equal("edited")
-        expect(distributed_operation_journal_lookup_v2(edited.0.journal, "build-op").unwrap().state).to_equal("failed")
-        val refused = controller_workload_store_edit_journal_v1(edited.0,
-            fn(journal: DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>: Err("edit-refused"))
-        expect(refused.unwrap_err()).to_equal("edit-refused")
-        admit_cleanup_v1(edited.0)
+            fn(journal: DistributedOperationJournalV2) -> ControllerJournalEditV1:
+                val row = distributed_operation_journal_lookup_v2(journal, "build-op").unwrap()
+                val next = distributed_operation_journal_commit_v2(journal, distributed_operation_transition_v2(row, "failed", "e".repeat(64)).unwrap()).unwrap()
+                ControllerJournalEditV1(journal: next, result: "edited", error: ""))
+        expect(edited.error).to_equal("")
+        expect(edited.result).to_equal("edited")
+        expect(distributed_operation_journal_lookup_v2(edited.store.journal, "build-op").unwrap().state).to_equal("failed")
+        val refused = controller_workload_store_edit_journal_v1(edited.store,
+            fn(journal: DistributedOperationJournalV2) -> ControllerJournalEditV1: ControllerJournalEditV1(journal: journal, result: "", error: "edit-refused"))
+        expect(refused.error).to_equal("edit-refused")
+        expect(distributed_operation_journal_lookup_v2(refused.store.journal, "build-op").unwrap().state).to_equal("failed")
+        step("A closure that advanced the journal and THEN refused keeps the advanced journal (no stale writer)")
+        val fresh = admit_run_v1(admit_store_v1(), admit_request_v1("test"), "controller-issuer", 100).store
+        val late = controller_workload_store_edit_journal_v1(fresh,
+            fn(journal: DistributedOperationJournalV2) -> ControllerJournalEditV1:
+                val row = distributed_operation_journal_lookup_v2(journal, "build-op").unwrap()
+                val next = distributed_operation_journal_commit_v2(journal, distributed_operation_transition_v2(row, "failed", "f".repeat(64)).unwrap()).unwrap()
+                ControllerJournalEditV1(journal: next, result: "", error: "later-step-failed"))
+        expect(late.error).to_equal("later-step-failed")
+        expect(distributed_operation_journal_lookup_v2(late.store.journal, "build-op").unwrap().state).to_equal("failed")
+        admit_cleanup_v1(late.store)
+        admit_cleanup_v1(refused.store)

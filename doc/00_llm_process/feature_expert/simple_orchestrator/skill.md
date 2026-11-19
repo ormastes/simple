@@ -506,8 +506,7 @@ A reaped answer (`linux-host-remote-build-reaped-incomplete`) becomes the contro
 those operations. Spec dir: task.sdn, environment.sdn, run.sdn, host-inputs.sdn, inputs/<path> (formats in the author
 module header). Traps: the Host prepare deadline is its MONOTONIC clock (operator-observed value in run.sdn); host-inputs
 are operator-supplied projection inputs (a wrong value is refused at enable, retained workspace charged; the container memory
-must equal the task limit, authoring checks it); a cancelled run, or one the Host ended without a bundle, leaves its
-controller row `executing`. PLATFORM (milestone_0037): `remote-run` runs from a Windows OR a Linux controller. One guard,
+must equal the task limit, authoring checks it). PLATFORM (milestone_0037): `remote-run` runs from a Windows OR a Linux controller. One guard,
 `controller_origin_check_v3` (controller_local_root_v3.spl), serves the local root, the dispatch owner and the V6 exchange:
 Windows binds the first caller thread (retained handle, poisoned on exit), Linux admits only the procfs-pinned original
 process MAIN thread (`linux_machine_process_origin_check_v1`: tid==pid, fork/PID-namespace quarantine); both give one
@@ -522,4 +521,22 @@ SIMPLE_LINUX_CONTROLLER_*, test/02_integration/lib/orchestration/controller_linu
 keeps the dispatch owner `ready` (outcome `host-refused`, encoded V6 reply as response) so the reaped recovery edit can run;
 prepare/execute refusals still fail it closed. The admit returns the most advanced store even on error
 (`ControllerRemoteBuildAdmitV1`) and resumes an exact-envelope row left `admitted`.
-Named gap: if the accept closure advances the operations journal and then errors, the root keeps a stale journal and the run ends in cleanup (fail closed).
+SETTLE (milestone_0037, `remote_run_settle_v1.spl`): a run that ends WITHOUT a signed bundle never leaves the row `executing`.
+After the build row is admitted every failure is a journal edit through the root's single writer that publishes a typed
+content-addressed record (`controller-remote-settle-v3/<sha256>.sdn`: op id, envelope digest, state, reason from a fixed
+vocabulary, `RuntimeExitStatusV1` text) and moves the row: Host stage `failed`/`wedged`/`settled`-without-bundle -> `failed`,
+`settled` + cancel cause -> `cancelled`, local timeout (cancel frame sent or unsent), broken exchange after admit or a refused
+accept -> `outcome-unknown` (a timeout or a cancel REQUEST proves nothing about the Host; a later authoritative settle or the
+reaped receipt finishes it). Exited(0) and `completed` are refused by the settle: only `accept_wire_v3` over a verified bundle
+completes a row, first terminal wins. A Host `wedged` run settles `failed` on purpose (the Host itself ended it; unlike a local
+timeout, which proves nothing). The reply prints `settled` (`failed|cancelled|outcome-unknown|unsettled:<code>`;
+`unsettled:remote-run-settle-already-terminal` after `accept-refused` means the row is already terminal: inspect it);
+`accept-refused` (exit 1) is a new state, and a reaped or accepted result may carry `task-journal-release-failed` in `detail`.
+TRAP fixed with it: the controller workload replay refused every non-controller operation (`workload-store-foreign-operation`),
+so ONE admitted remote build row bricked the root for the next open/restart; `build`/`test` rows are now skipped by
+projection (never completed by it). Stale root: the edit closure contract is `ControllerJournalEditV1{journal,result,error}`;
+the journal the closure ended with is ALWAYS adopted (`dispatch_retain_v3`), a refusal travels in the response
+(`edit-refused:<code>`) and does not kill the link, and a failed task-journal release after a terminal accept is a third result
+part, not an error. A restart reconciles by replay of the committed journal (never by the in-memory store). Remaining:
+the Linux origin latches `quarantined` for the whole process after one failed procfs verify (one transient failure refuses
+remote-run until the process restarts).
