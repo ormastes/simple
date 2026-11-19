@@ -292,3 +292,41 @@ failed bucket; with the single-spec fix ablated a crash degrades from
   `HirTypeKind.Any`; unresolved imported type names are `Error`, not `Any`),
   so the declaration rule is a source scan (`written_any_scan.spl`).
 - Shrink-only ratchet: `scripts/check/check-any-warn-rules-ratchet.shs`.
+
+## Robust Boundaries / Library Units / Backend Hardening (release/1.0.0)
+
+Landed (PR numbers): effects/semantics, lint, parser, build.
+
+- Effect soundness: while-loop CONST bound needs counter progress (#10112,
+  `src/compiler/35.semantics/effect_validation.spl`, spec
+  `test/01_unit/compiler/semantics/effect_loop_bound_soundness_spec.spl`);
+  effect admission / unknown handling (#10118, `30.types/type_infer/inference_effects.spl`,
+  `effect_admission_spec.spl`); region admission + must_use wired into typecheck
+  (#10132, `80.driver/hir_typecheck_consumer_v1.spl`).
+- `must_use` discard check on typed HIR (#10120,
+  `35.semantics/must_use_discard.spl`, `must_use_discard_spec.spl`).
+- Lint cost tiers: fast/deep registry (#10121, `90.tools/lint/_LintMain/rule_cost_tier.spl`)
+  and `simple lint --fast` Low-tier profile with completeness status (#10137).
+  `SPL-BOUND-003` as-cast form + cross-function summaries (#10168,
+  `35.semantics/lint/bound_unit_reassert.spl`).
+- Arrow functional update `x->m()` (#10127, #10133 single evaluation and
+  `?`-before-store; `10.frontend/core/parser_expr.spl`,
+  `test/01_unit/compiler/frontend/arrow_functional_update_spec.spl`).
+- Source ownership / provider policy rows: `SRC-001`, `PROVIDER-ABI-001`,
+  `simple build doctor --source-ownership` (#10134,
+  `src/app/build/doctor_cli.spl`, `build_doctor_source_ownership_spec.spl`).
+- Library units: manifest closure, `units` CLI, `SPL-BUILD-ROLE-001`,
+  extended-CI gates (#10179, `src/app/build/units_cli.spl`,
+  `80.driver/driver_build/library_unit_{manifest,drift}_v1.spl`).
+- Backend hardening: provider gate, receipt identity, backend contracts as
+  data (#10181, `src/app/build/targets/{provider_gate,provider_receipt,backend_contracts}.spl`,
+  `test/01_unit/app/build/backend_contracts_spec.spl`).
+- Seed: per-module unit-suffix scope save/restore (#10135,
+  `src/compiler_rust/compiler/src/units/scope.rs`).
+
+Also merged: #10346 (f3677e0) boundary origin facts + `simple
+robust` inventory; #10358 (1e6198c) where-only native unit ranges, `@must_use` attr +
+imports, closure unit scope; #10351 (1e7e5b3) `provider_entry` emits `.provider.sdn` +
+runtime SVE/RVV VL query. **#10351 merged but review FAIL: the provider gate
+self-attests (it trusts the entry it generated); a fix PR is in progress.** Do
+not treat the provider gate as independent evidence until that lands.
