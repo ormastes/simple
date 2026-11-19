@@ -1,23 +1,70 @@
 # @req: RB-SFFI-01..04
-# Real C ABI fixture (clang only): sizes/values of int, int32_t, bool, enum and
-# borrowed char* are measured from a compiled C program, checked against the
-# target ABI table, and the generated facades for bool/enum validate the
-# discriminant.
+# Real C ABI fixture (clang, no POSIX shell, runs on Windows too): sizes/values
+# of int, int32_t, bool, enum and borrowed char* are measured from a compiled C
+# program, checked against the target ABI table, and the generated bool/enum
+# facades are exercised against the compiled fixture: a C harness declares each
+# extern with the facade raw ABI type, is linked with the fixture, and its raw
+# values are checked against the facade validation range.
 use std.spec.*
 use std.spec.step
-use std.io_runtime.{process_run}
+use std.io_runtime.{process_run, file_write, mkdir_p}
 use compiler.types.custom_primitive_info.{c_scalar_underlying}
 use compiler.tools.sffi_gen.constrained_unit_gen.{generate_bool_return_facade, generate_enum_return_facade, BoolReturn, EnumReturn}
 
 val FIXTURE = "test/fixtures/sffi_cabi/cabi_fixture.c"
+val DIR = "build/test-artifacts"
 val OUT = "build/test-artifacts/sffi_cabi_fixture.exe"
+val HARNESS_C = "build/test-artifacts/sffi_cabi_harness.c"
+val HARNESS_OUT = "build/test-artifacts/sffi_cabi_harness.exe"
 
 fn build_and_run() -> text:
-    val cmd = "mkdir -p build/test-artifacts && clang -O0 -o " + OUT + " " + FIXTURE + " && ./" + OUT
-    process_run("sh", ["-c", cmd + " 2>&1"]).0
+    mkdir_p(DIR)
+    val cc = process_run("clang", ["-O0", "-o", OUT, FIXTURE])
+    if cc.2 != 0:
+        return "compile failed: " + cc.0 + cc.1
+    val r = process_run(OUT, [])
+    r.0 + r.1
 
 fn host_triple() -> text:
-    process_run("sh", ["-c", "clang -dumpmachine"]).0.trim()
+    process_run("clang", ["-dumpmachine"]).0.trim()
+
+# C type for a Simple fixed-width integer name used in a generated `extern fn`.
+fn c_type_of(abi: text) -> text:
+    match abi:
+        case "u8": "unsigned char"
+        case "i8": "signed char"
+        case "i16": "short"
+        case "u16": "unsigned short"
+        case "i32": "int"
+        case "u32": "unsigned int"
+        case "i64": "long long"
+        case "u64": "unsigned long long"
+        case _: "void"
+
+# Raw return type the generated facade declares: text after `-> ` on the first
+# line (`extern fn __raw_x() -> u8`).
+fn raw_abi_of(facade_source: text) -> text:
+    val first = facade_source.split("\n")[0]
+    val at = first.find("-> ")
+    first.substring(at + 3, first.byte_len()).trim()
+
+# Compile a harness linked with the fixture that declares `c_fn` with the
+# facade raw ABI type, asserts sizeof(c_actual) == sizeof(raw) at compile time
+# and prints the raw value. Returns (compiled, output).
+fn run_harness(c_fn: text, abi: text, c_actual: text) -> (bool, text):
+    mkdir_p(DIR)
+    val ct = c_type_of(abi)
+    var src = "#include <stdio.h>\n"
+    src = src + "typedef enum \{ COLOR_RED = 0, COLOR_GREEN = 1, COLOR_BLUE = 2 \} color_t;\n"
+    src = src + "extern {ct} {c_fn}(void);\n"
+    src = src + "_Static_assert(sizeof({c_actual}) == sizeof({ct}), \"facade raw width differs from C ABI\");\n"
+    src = src + "int main(void) \{ printf(\"raw=%lld\\n\", (long long){c_fn}()); return 0; \}\n"
+    file_write(HARNESS_C, src)
+    val cc = process_run("clang", ["-O0", "-DSFFI_FIXTURE_NO_MAIN", "-o", HARNESS_OUT, HARNESS_C, FIXTURE])
+    if cc.2 != 0:
+        return (false, cc.0 + cc.1)
+    val r = process_run(HARNESS_OUT, [])
+    (true, r.0 + r.1)
 
 describe "SFFI C ABI fixture (clang)":
     it "matches the target ABI table for int and int32_t":
@@ -54,18 +101,57 @@ describe "SFFI C ABI fixture (clang)":
         expect(f.source).to_contain("if raw > 1:")
         expect(f.source).to_contain("Ok(raw == 1)")
 
+    it "bool facade ABI matches the compiled fixture and gates a bad value":
+        step("Link the facade raw ABI against the fixture")
+        val f = generate_bool_return_facade(BoolReturn(extern_name: "fx_bool", params: "", arg_names: ""))
+        val abi = raw_abi_of(f.source)
+        val good = run_harness("fx_bool", abi, "_Bool")
+        expect(good.0).to_equal(true)
+        expect(good.1).to_contain("raw=1")
+        step("The hostile value is outside the facade accepted 0..1 range")
+        val bad = run_harness("fx_bool_bad", abi, "_Bool")
+        expect(bad.0).to_equal(true)
+        expect(bad.1).to_contain("raw=2")
+        expect(f.source).to_contain("if raw > 1:")
+
     it "enum facade validates the discriminant range":
         step("Generate an enum facade")
-        val f = generate_enum_return_facade(EnumReturn(extern_name: "fx_enum", params: "", arg_names: "", enum_name: "Color", first: "0", last: "2"))
+        val f = generate_enum_return_facade(EnumReturn(extern_name: "fx_enum", params: "", arg_names: "", enum_name: "Color", first: "0", last: "2", abi_type: "i32"))
         expect(f.diagnostic).to_equal("")
         expect(f.source).to_contain("extern fn __raw_fx_enum() -> i32")
         expect(f.source).to_contain("pub fn fx_enum() -> Result<Color, ConstraintError>:")
         expect(f.source).to_contain("if raw < 0 or raw > 2:")
         expect(f.source).to_contain("Ok(raw as Color)")
 
+    it "enum facade ABI matches the compiled fixture and gates an out-of-range value":
+        step("Link the facade raw ABI against the fixture")
+        val f = generate_enum_return_facade(EnumReturn(extern_name: "fx_enum", params: "", arg_names: "", enum_name: "Color", first: "0", last: "2", abi_type: "i32"))
+        val abi = raw_abi_of(f.source)
+        val good = run_harness("fx_enum", abi, "color_t")
+        expect(good.0).to_equal(true)
+        expect(good.1).to_contain("raw=2")
+        val oob = run_harness("fx_enum_oob", abi, "color_t")
+        expect(oob.0).to_equal(true)
+        expect(oob.1).to_contain("raw=7")
+        expect(f.source).to_contain("if raw < 0 or raw > 2:")
+
+    it "a wrong enum width is caught against the compiled ABI":
+        step("Declare the enum as i8 and expect the width assertion to fail")
+        val f = generate_enum_return_facade(EnumReturn(extern_name: "fx_enum", params: "", arg_names: "", enum_name: "Color", first: "0", last: "2", abi_type: "i8"))
+        expect(f.diagnostic).to_equal("")
+        val r = run_harness("fx_enum", raw_abi_of(f.source), "color_t")
+        expect(r.0).to_equal(false)
+
+    it "enum facade rejects a non-integer width":
+        step("Generate enum facades with a bogus abi_type")
+        val f = generate_enum_return_facade(EnumReturn(extern_name: "f", params: "", arg_names: "", enum_name: "Color", first: "0", last: "2", abi_type: "f64"))
+        expect(f.diagnostic).to_contain("SPL-SFFI-RANGE-001")
+        val g = generate_enum_return_facade(EnumReturn(extern_name: "f", params: "", arg_names: "", enum_name: "Color", first: "0", last: "2", abi_type: ""))
+        expect(g.diagnostic).to_contain("SPL-SFFI-RANGE-001")
+
     it "enum facade rejects a non-integer or inverted range":
         step("Generate enum facades with bad bounds")
-        val a = generate_enum_return_facade(EnumReturn(extern_name: "f", params: "", arg_names: "", enum_name: "Color", first: "x", last: "2"))
+        val a = generate_enum_return_facade(EnumReturn(extern_name: "f", params: "", arg_names: "", enum_name: "Color", first: "x", last: "2", abi_type: "i32"))
         expect(a.diagnostic).to_contain("SPL-SFFI-RANGE-001")
-        val b = generate_enum_return_facade(EnumReturn(extern_name: "f", params: "", arg_names: "", enum_name: "Color", first: "3", last: "2"))
+        val b = generate_enum_return_facade(EnumReturn(extern_name: "f", params: "", arg_names: "", enum_name: "Color", first: "3", last: "2", abi_type: "i32"))
         expect(b.diagnostic).to_contain("SPL-SFFI-RANGE-001")

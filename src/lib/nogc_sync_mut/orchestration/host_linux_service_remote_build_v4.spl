@@ -22,6 +22,7 @@ use std.common.contracts.orchestration.host_execution_association_v3.{HostExecut
     host_execution_association_digest_v3}
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1, HostCapacityMutationTurnV3,
     host_capacity_owner_settle_associated_v3}
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_reap_v4.host_remote_build_reaped_record_v4
 use std.nogc_sync_mut.orchestration.host_linux_completion_evidence_v3.{HostRemoteBuildOutcomeRecordV4,
     host_remote_build_outcome_encode_v4}
 use std.container.{SimpleContainerOwnerV2, simple_container_scope_v2, ContainerWorkspaceActionV3, LinuxWorkspaceSourceLoanV3,
@@ -277,10 +278,14 @@ pub fn host_remote_build_reply_v4(executor: HostRemoteBuildExecutorV3) -> text:
 # milestone_0038: the collect answer of a wedged executor that holds a Host-signed reset-failure envelope. It is a SUCCESSFUL
 # reply (the service domain flattens an error reply to text, which cannot carry the receipt); the executor stays wedged.
 fn host_remote_build_reset_reply_v4(executor: HostRemoteBuildExecutorV3) -> text:
+    remote_build_reset_failure_reply_v4(executor.operation_id, executor.error, executor.reset_receipt)
+
+# The one reset-failure reply shape (the controller decodes stage `wedged` only): a held wedged executor's, and milestone_0045's
+# reaped run after a restart (the run is gone; `wedged` is the reply's transport stage, the receipt's own stage is the evidence).
+fn remote_build_reset_failure_reply_v4(operation_id: text, error: text, receipt: text) -> text:
     val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-remote-build-reset-failure"),
-        "operationId": SdnValue.String(executor.operation_id), "stage": SdnValue.String(executor.stage),
-        "cause": SdnValue.String(host_remote_build_failed_cause_v4(executor.error)),
-        "receipt": SdnValue.String(executor.reset_receipt)}
+        "operationId": SdnValue.String(operation_id), "stage": SdnValue.String("wedged"),
+        "cause": SdnValue.String(host_remote_build_failed_cause_v4(error)), "receipt": SdnValue.String(receipt)}
     sdn_encode_canonical(SdnValue.Dict(fields))
 
 # milestone_0039: the durable copy of the Host-signed reset-failure reply, keyed by the operation id alone (like the startup
@@ -338,6 +343,35 @@ pub fn host_remote_build_reset_failure_stored_v4(journal: DistributedOperationJo
         "cause": SdnValue.String(cause), "receipt": SdnValue.String(receipt)}
     if sdn_encode_canonical(SdnValue.Dict(canonical)) != source: return ""
     source
+
+# milestone_0045 (owner decision 4): the HOST-SIGNED reaped outcome. A run the startup reap indexed is gone (the reap ran only
+# on a proved-absent store); the restarted Host signs a `service-restart` receipt for it (no runtime id, no binding digest: it
+# holds neither) from the reap record's task digest and the run's archived open record (found under the reap's prior fence),
+# at its own grant clock -- after a restart the approval has usually expired, which the port's late-receipt exception covers
+# (owner decision 5: the receipt can only ever journal `failed` for this exact op). The reply is archived no-replace and read
+# back through the held capacity journal BEFORE it is returned (milestone_0039), so every later collect replays the same
+# bytes. "" on any doubt (never indexed, never opened, port refusal, archive conflict): the caller keeps the typed refusal,
+# which the controller settles `outcome-unknown`. No workload or charge effect.
+# @allow(primitive_api) grant_clock is the service's trusted unix-ms sample, as every Host signing entry takes it
+pub fn host_remote_build_reaped_receipt_v4(journal: DistributedOperationJournalV2, port: HostRemoteBuildPortV4,
+        operation_id: text, grant_clock: i64) -> text:
+    # Any archive or refused marker already there (served or not) is never raced: a second, differing publish would take
+    # the archive's conflict branch and mark the operation refused, poisoning a good first archive.
+    for relative in [host_remote_build_reset_failure_relative_v4(operation_id), host_remote_build_reset_failure_refused_relative_v4(operation_id)]:
+        val existing = distributed_operation_journal_read_v3(journal, relative, 262144)
+        if existing.is_err() or existing.unwrap().is_some(): return ""
+    val reaped = host_remote_build_reaped_record_v4(journal, operation_id)
+    if reaped.is_err() or reaped.unwrap().is_none(): return ""
+    val record = reaped.unwrap().unwrap()
+    val open = distributed_operation_journal_read_v3(journal, host_remote_build_open_relative_v4(record.prior_fence, operation_id),
+        2097152)
+    if open.is_err() or open.unwrap().is_none(): return ""
+    val signed = (port.reset_failure)(open.unwrap().unwrap(), HostRemoteBuildResetObservedV3(operation_id: operation_id,
+        task_digest: record.task_digest, stage: "service-restart", native_id: "", workspace_binding_digest: ""), grant_clock)
+    if signed.is_err(): return ""
+    val reply = remote_build_reset_failure_reply_v4(operation_id, "linux-host-remote-build-reaped-incomplete", signed.unwrap())
+    if remote_build_reset_archive_v4(journal, operation_id, reply).is_err(): return ""
+    reply
 
 # Open (pre-transfer, no effect but the no-replace archive): the app port admits the record's app types, then the
 # lane B open authority (snapshot-verified pair, task class, execution-host key), then the task and request pins.
@@ -966,5 +1000,5 @@ export host_remote_build_bundle_relative_v4, host_remote_build_exit_outcome_v4, 
 export host_remote_build_open_v4, host_remote_build_input_v4, host_remote_build_transfer_v4
 export host_remote_build_request_cancel_v4, host_remote_build_step_v4, host_remote_build_close_v4, host_remote_build_release_v4
 export host_remote_build_profile_gate_v4, host_remote_build_failed_cause_v4, host_remote_build_epoch_v4, HostRemoteBuildFrameV4
-export host_remote_build_reset_failure_relative_v4, host_remote_build_reset_failure_stored_v4
+export host_remote_build_reset_failure_relative_v4, host_remote_build_reset_failure_stored_v4, host_remote_build_reaped_receipt_v4
 export host_remote_build_frame_encode_v4, host_remote_build_frame_decode_v4, host_remote_build_output_v4

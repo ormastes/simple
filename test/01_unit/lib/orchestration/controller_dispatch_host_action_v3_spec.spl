@@ -1,0 +1,98 @@
+"""
+## Purpose and audience
+milestone_0046: the HOST-ACTION mode of the retained Controller dispatch owner, the controller half of the shared control
+exchange (`host-control`) that carries the controller-signed helper abandon and the OPS-01 handoff abandon. Written for
+owners of the dispatch owner and of the `helper-abandon` / `handoff-abandon` commands.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`. Status: AUTHORED, NOT_RUN (no runnable
+binary when written, 2026-11-19).
+## Compatibility and limitations
+The native exchange needs an installed Controller root and Host reader, so these scenarios pin the SOURCE of the mode
+(the technique of controller_dispatch_remote_v3_spec.spl) plus the pure archive key.
+## Verification guidance and troubleshooting
+The security-relevant pin is the status gate: host-action drops ONLY `ready` (a quarantined Host has continuity
+unproven), every installed-identity comparison stays. A failed pin names that contract or the no-different-bytes archive.
+"""
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.controller_dispatch_host_action_key_v3
+use std.common.crypto.sha256.sha256_text
+
+val HA_DISPATCH_SOURCE_V3 = "src/lib/nogc_sync_mut/orchestration/controller_dispatch_owner_v3.spl"
+
+fn ha_dispatch_source_v3() -> text:
+    file_read_regular_no_follow_bounded(HA_DISPATCH_SOURCE_V3, 4194304).unwrap()
+
+fn ha_fn_body_v3(source: text, header: text) -> text:
+    val start = source.index_of(header)
+    expect(start >= 0).to_equal(true)
+    val rest = source.substring(start + header.byte_len(), source.byte_len())
+    var end = rest.byte_len()
+    for marker in ["\nfn ", "\npub fn ", "\nstruct ", "\nclass ", "\nexport ", "\nvar ", "\nval "]:
+        val at = rest.index_of(marker)
+        if at >= 0 and at < end: end = at
+    rest.substring(0, end)
+
+describe "controller dispatch host-action mode (milestone_0046)":
+    it "publishes begin and send and routes the start mode":
+        val source = ha_dispatch_source_v3()
+        for name in ["controller_dispatch_host_action_begin_v3", "controller_dispatch_host_action_send_v3",
+                "controller_dispatch_host_action_key_v3"]:
+            expect(source.contains("pub fn " + name + "(")).to_equal(true)
+            expect(source.contains(name + ",") or source.contains(name + "\n")).to_equal(true)
+        val start = ha_fn_body_v3(source, "fn dispatch_start_v3(")
+        val action_at = start.index_of("mode == \"host-action\"")
+        val service_at = start.index_of("mode.starts_with(\"service:\")")
+        expect(action_at >= 0 and service_at > action_at).to_equal(true)
+        expect(start.contains("dispatch_state_host_action_begin_v3(actual, uid)")).to_equal(true)
+
+    it "drops only the ready requirement from the installed-binding status check":
+        step("A quarantined Host (continuity unproven) is exactly the Host the abandons exist for")
+        val source = ha_dispatch_source_v3()
+        val gate = ha_fn_body_v3(source, "fn dispatch_service_status_v3(")
+        expect(gate.contains("(require_ready and not status.ready)")).to_equal(true)
+        for identity in ["status.enrollment_digest != digest", "status.authority_id != \"host-\" + digest",
+                "status.provider_identity_digest != binding.provider_identity_digest",
+                "status.scope.physical_host_id != binding.physical_host_id",
+                "status.scope.native_machine_id != binding.native_machine_id",
+                "status.scope.service_scope_id != binding.service_scope_id"]:
+            expect(gate.contains(identity)).to_equal(true)
+        val accept = ha_fn_body_v3(source, "fn dispatch_accept_v3(")
+        expect(accept.contains("dispatch_service_status_v3(config.unwrap(), status.unwrap(), owner.mode != \"host-action\")")).to_equal(true)
+        expect(accept.contains("owner.mode == \"remote\" or owner.mode == \"host-action\"")).to_equal(true)
+
+    it "sends only host-control, only from phase ready, under the one run operation id":
+        val send = ha_fn_body_v3(ha_dispatch_source_v3(), "fn dispatch_state_host_action_send_v3(")
+        expect(send.contains("owner.mode != \"host-action\"")).to_equal(true)
+        expect(send.contains("owner.phase != \"ready\"")).to_equal(true)
+        expect(send.contains("owner.exchange.is_some()")).to_equal(true)
+        expect(send.contains("dispatch_send_v3(owner, \"host-control\", payload)")).to_equal(true)
+        expect(send.contains("host_control_sub_decode_v6(payload)")).to_equal(true)
+        val begin = ha_fn_body_v3(ha_dispatch_source_v3(), "fn dispatch_state_host_action_begin_v3(")
+        expect(begin.contains("owner.remote_op = operation_id")).to_equal(true)
+        expect(begin.contains("packet")).to_equal(false)
+
+    it "archives every abandon create-only before it is sent and refuses different bytes":
+        step("Identical bytes may be resent (the Host is idempotent on the same proof); only abandons take the create-only archive")
+        val send = ha_fn_body_v3(ha_dispatch_source_v3(), "fn dispatch_state_host_action_send_v3(")
+        val decide_at = send.index_of("sub.unwrap().sub.ends_with(\"-abandon\")")
+        val publish_at = send.index_of("distributed_operation_journal_publish_v3(")
+        val readback_at = send.index_of("distributed_operation_journal_read_required_v3(")
+        val send_at = send.index_of("dispatch_send_v3(owner, \"host-control\", payload)")
+        expect(decide_at >= 0 and publish_at > decide_at and readback_at > publish_at and send_at > readback_at).to_equal(true)
+        expect(send.contains("readback.unwrap() != payload")).to_equal(true)
+        expect(send.contains("dispatch-host-action-archive-conflict")).to_equal(true)
+        expect(controller_dispatch_host_action_key_v3("abandon_1")).to_equal("controller-host-action-v1/" + sha256_text("abandon_1") + ".sdn")
+
+    it "hands a Host refusal of a control frame to the caller and settles nothing from Host text":
+        val accept = ha_fn_body_v3(ha_dispatch_source_v3(), "fn dispatch_accept_v3(")
+        val arm_at = accept.index_of("owner.mode == \"host-action\" and owner.phase == \"host-control\"")
+        val build_at = accept.index_of("owner.phase == \"remote-build\"")
+        expect(build_at >= 0 and arm_at > build_at).to_equal(true)
+        val after = accept.substring(arm_at, accept.byte_len())
+        val fail_at = after.index_of("dispatch_fail_v3(owner, if reply.error != \"\": reply.error else: \"dispatch-host-nonzero\")")
+        expect(fail_at > 0).to_equal(true)
+        val arm = after.substring(0, fail_at)
+        expect(arm.contains("owner.outcome = \"host-refused\"")).to_equal(true)
+        expect(arm.contains("owner.phase = \"ready\"")).to_equal(true)
+        for forbidden in ["controller_workload_store", "edit_journal", "_settle", "settle_v3(", "publish"]:
+            expect(arm.contains(forbidden)).to_equal(false)

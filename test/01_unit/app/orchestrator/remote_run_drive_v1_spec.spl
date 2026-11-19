@@ -9,6 +9,7 @@ binary when written, 2026-11-19).
 Two doubles: a one-shot double that ends the run at the first Host request (status -> admit -> signed associated
 prepare, and the refusals before any Host effect) and a SCRIPTED Host double that answers the whole sequence (associated
 prepare with a real association, execution admission, stage replies, a reaped collect or a timed-out poll).
+milestone_0045: a bare reaped refusal settles `outcome-unknown` (the Host signs the reaped receipt when it can).
 milestone_0043 (opus re-review P1-1): the scripted double models the REAL dispatch owner after a failure: a failed send
 (transport error, Host refusal of prepare/execute, an exchange that outlived its bound) leaves the owner in cleanup, so
 every later `edit` and `send` is refused (`dispatch-remote-not-ready`) and only the post-failure `settle` still reaches the
@@ -381,20 +382,24 @@ fn rs_drive_v1(log: RsLogV1) -> RemoteRunOutcomeV1:
     remote_run_drive_v1(rr_authored_v1().unwrap(), rr_facts_v1(RR_TTL), rs_link_v1(log), rr_issuer_v1())
 
 describe "remote-run driver, scripted Host (milestone_0030 controller half)":
-    it "runs status -> admit -> prepare -> execute -> open -> inputs -> start and records a reaped run as a failed service-restart":
-        step("The exact typed reaped refusal reaches the recovery edit: the owner is still usable and the row is finished failed")
+    it "runs status -> admit -> prepare -> execute -> open -> inputs -> start and settles a bare reaped refusal outcome-unknown":
+        # @req M0045-REAPED-CTL-01
+        step("milestone_0045: the bare typed reaped refusal is unsigned Host text (the Host could not sign its receipt)")
+        step("it settles the row outcome-unknown through the post-failure settle, never `failed`, and runs no accept edit")
         val log = RsLogV1()
+        log.journal = Some(rs_journal_v1())
         val authored = rr_authored_v1().unwrap()
         val outcome = remote_run_drive_v1(authored, rr_facts_v1(RR_TTL), rs_link_v1(log), rr_issuer_v1())
-        expect(outcome.detail).to_equal("service-restart")
-        expect(outcome.state).to_equal("reaped-failed")
+        expect(outcome.state).to_equal("reaped-unsigned")
         expect(outcome.exit_code).to_equal(2)
-        expect(outcome.digest).to_equal("d".repeat(64))
-        expect(log.edits).to_equal(1)
+        expect(outcome.settled).to_equal("outcome-unknown")
+        expect(log.edits).to_equal(0)
         var expected = ["begin", "admit", "prepare", "execute", "remote-build:open"]
         for index in 0..authored.files.len(): expected = expected + ["remote-build:input"]
-        expected = expected + ["remote-build:start", "remote-build:collect", "edit"]
+        expected = expected + ["remote-build:start", "remote-build:collect", "settle"]
         expect(log.calls).to_equal(expected)
+        expect(rs_row_state_v1(log)).to_equal("outcome-unknown")
+        rs_cleanup_v1(log)
 
     it "never treats a refusal that merely resembles the reaped code as reaped (milestone_0043 P2-1)":
         step("Another error string is an unexplained refusal: the row is settled outcome-unknown, never failed")
@@ -551,7 +556,8 @@ describe "remote-run driver structure (source pins)":
         expect(source.contains("remote_run_cancel_v1(")).to_equal(true)
         expect(source.contains("REMOTE_RUN_WAIT_MS_V1: i64 = 540000")).to_equal(true)
         expect(source.contains("accept_wire_v3")).to_equal(true)
-        expect(source.contains("accept_reset_failure_v3")).to_equal(true)
+        expect(source.contains("accept_reset_failure_v3")).to_equal(false)
+        expect(source.contains("\"host-reaped-unsigned\"")).to_equal(true)
         expect(source.contains("remote_run_settle_apply_v1(")).to_equal(true)
         expect(source.contains("RuntimeExitStatusV1.Unobserved")).to_equal(true)
         expect(source.contains("\"accept-refused\"")).to_equal(true)
@@ -625,3 +631,6 @@ describe "remote-run driver structure (source pins)":
         val context = source.substring(source.index_of("fn remote_run_context_v1("), source.index_of("fn remote_run_session_open_v1("))
         expect(context.contains("signed.issuer_id != facts.controller_id")).to_equal(true)
         expect(context.contains("distributed_verify_grant_approval_from_snapshot_v2(")).to_equal(true)
+        step("milestone_0045 late receipt: ONLY a reset-failure receipt is verified at the window's last instant")
+        expect(context.contains("val at = if receipt: remote_container_reset_failure_late_context_v3(context).now else: now")).to_equal(true)
+        expect(source.contains("admitted.scope.physical_host_id, admitted.build_request, accept_now, reset_wire != \"\")?")).to_equal(true)
