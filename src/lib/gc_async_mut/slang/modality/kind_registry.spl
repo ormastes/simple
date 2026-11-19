@@ -28,7 +28,8 @@ use std.gc_async_mut.slang.modality.kinds.{Modality, ModelKind, KindProfile, kin
 use std.gc_async_mut.slang.engine.runner_dispatch.{RunnerKind}
 use std.nogc_sync_mut.io.external_file.{external_file_read_bytes_at}
 use std.common.text_bytes.{bytes_to_text}
-use std.io_runtime.{file_exists, read_file, dir_list_optional, is_dir, file_size}
+use std.io_runtime.{is_dir, file_size}
+use std.gc_async_mut.slang.host.slang_host.{host_file_exists, host_file_read, host_dir_list}
 
 val KIND_OVERRIDE_FILE = "slang_kind.sdn"
 val GGUF_FIRST_READ = 4096
@@ -276,9 +277,9 @@ fn pooling_kind(pooling: i64) -> ModelKind?:
 # `key: value` from a slang_kind.sdn override, "" when absent.
 fn kind_override_field(dir: text, key: text) -> text:
     val path = _join(dir, KIND_OVERRIDE_FILE)
-    if not file_exists(path):
+    if not host_file_exists(path):
         return ""
-    for line in read_file(path).split("\n"):
+    for line in host_file_read(path).split("\n"):
         val t = line.trim()
         if t.starts_with(key + ":"):
             return t.slice(key.byte_len() + 1, t.byte_len()).trim()
@@ -306,7 +307,7 @@ fn _profile(k: ModelKind, inputs: [Modality], runner: RunnerKind) -> KindProfile
 
 fn _files(dir: text) -> [text]:
     var out: [text] = []
-    match dir_list_optional(dir):
+    match host_dir_list(dir):
         case Some(names):
             for name in names:
                 if not is_dir(_join(dir, name)):
@@ -391,7 +392,7 @@ fn _override_profile(dir: text, kind_name: text) -> KindProfile:
             val p = _profile(k, kind_default_inputs(k), _runner_for_kind(k))
             if _is_tts(k):
                 val vocoder = kind_override_field(dir, "vocoder")
-                if vocoder == "" or not file_exists(_join(dir, vocoder)):
+                if vocoder == "" or not host_file_exists(_join(dir, vocoder)):
                     return kind_profile(k, p.inputs, p.runner, KIND_OVERRIDE_FILE + " names kind tts but its vocoder file '" + vocoder + "' is missing")
             p
 
@@ -449,7 +450,7 @@ fn resolve_kind_from(dir: text, gguf: [GgufFile]) -> KindProfile:
         if name.ends_with(".safetensors") and safetensors_is_sd_unet(path):
             return _profile(ModelKind.ImageGen, [Modality.Text], RunnerKind.StableDiffusion)
     val cfg = _join(dir, "config.json")
-    if file_exists(cfg) and read_file(cfg).contains("\"LlamaForCausalLM\""):
+    if host_file_exists(cfg) and host_file_read(cfg).contains("\"LlamaForCausalLM\""):
         return _profile(ModelKind.Chat, [Modality.Text], RunnerKind.Pure)
     kind_profile(ModelKind.Chat, [Modality.Text], RunnerKind.Ggml, "no kind could be resolved: no " + KIND_OVERRIDE_FILE + ", no GGUF model, no ggml (lmgg) file and no recognised safetensors")
 
