@@ -1,0 +1,178 @@
+# Boundary origin facts: for each bound value in a module, where it came from
+# (extern_decl, param, literal, extern_return, cast, copy, call, expr).
+# Feeds `simple robust inventory`. Slice of
+# doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md
+# (P3 origin facts). Text-level, same fidelity as SPL-BOUND-001..003; typed HIR
+# fact interning (ValueSemanticOrigin / BoundaryPermit) remains open.
+
+use compiler.semantics.lint.lint_text.{code_line_snapshot}
+
+pub struct BoundOriginFact:
+    line_num: i64
+    function: text
+    subject: text
+    origin: text
+    boundary: bool
+
+fn _bof_ident_char(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+        (c >= "0" and c <= "9") or c == "_"
+
+fn _bof_leading_ident(s: text) -> text:
+    var i = 0
+    while i < s.byte_len() and _bof_ident_char(s.substring(i, i + 1)):
+        i = i + 1
+    s.substring(0, i)
+
+fn _bof_indent(raw: text) -> i64:
+    var i = 0
+    while i < raw.byte_len() and raw.substring(i, i + 1) == " ":
+        i = i + 1
+    i
+
+fn _bof_strip_fn_prefix(line: text) -> text:
+    var rest = line
+    for prefix in ["pub ", "static ", "async ", "unsafe "]:
+        if rest.starts_with(prefix):
+            rest = rest.substring(prefix.byte_len(), rest.byte_len())
+    rest
+
+fn _bof_extern_name(line: text) -> text:
+    val rest = _bof_strip_fn_prefix(line)
+    if rest.starts_with("extern fn "):
+        return _bof_leading_ident(rest.substring(10, rest.byte_len()))
+    ""
+
+fn _bof_fn_name(line: text) -> text:
+    val rest = _bof_strip_fn_prefix(line)
+    if rest.starts_with("fn "):
+        return _bof_leading_ident(rest.substring(3, rest.byte_len()))
+    if rest.starts_with("me "):
+        return _bof_leading_ident(rest.substring(3, rest.byte_len()))
+    ""
+
+fn _bof_params(line: text) -> [text]:
+    val open = line.find("(")
+    if open < 0:
+        return []
+    val rest = line.substring(open + 1, line.byte_len())
+    val close = rest.find(")")
+    if close < 0:
+        return []
+    var names: [text] = []
+    for part in rest.substring(0, close).split(","):
+        val name = _bof_leading_ident(part.trim())
+        if name != "" and name != "self":
+            names.push(name)
+    names
+
+fn _bof_all_ident(s: text) -> bool:
+    if s == "":
+        return false
+    _bof_leading_ident(s).byte_len() == s.byte_len()
+
+fn _bof_literal(rhs: text) -> bool:
+    if rhs.starts_with("\""):
+        return true
+    if rhs == "true" or rhs == "false" or rhs == "nil":
+        return true
+    var first = rhs.substring(0, 1)
+    if first == "-" and rhs.byte_len() > 1:
+        first = rhs.substring(1, 2)
+    first >= "0" and first <= "9"
+
+fn _bof_rhs_origin(rhs: text, externs: [text]) -> text:
+    if _bof_literal(rhs):
+        return "literal"
+    for e in externs:
+        if rhs.starts_with(e + "("):
+            return "extern_return"
+    if rhs.contains(" as "):
+        return "cast"
+    if _bof_all_ident(rhs):
+        return "copy"
+    if rhs.contains("("):
+        return "call"
+    "expr"
+
+fn _bof_binding(trimmed: text) -> (text, text):
+    var rest = ""
+    if trimmed.starts_with("val "):
+        rest = trimmed.substring(4, trimmed.byte_len())
+    elif trimmed.starts_with("var "):
+        rest = trimmed.substring(4, trimmed.byte_len())
+    else:
+        return ("", "")
+    val name = _bof_leading_ident(rest)
+    val eq = rest.find(" = ")
+    if name == "" or eq < 0:
+        return ("", "")
+    (name, rest.substring(eq + 3, rest.byte_len()).trim())
+
+pub fn bound_origin_facts(source: text, file_path: text) -> [BoundOriginFact]:
+    val lines = code_line_snapshot(source).lines
+    var externs: [text] = []
+    for cl in lines:
+        val name = _bof_extern_name(cl.trimmed)
+        if name != "":
+            externs.push(name)
+    var facts: [BoundOriginFact] = []
+    var fn_name = ""
+    var fn_indent = 0
+    var boundary = false
+    var ann = ""
+    for cl in lines:
+        val t = cl.trimmed
+        if t == "":
+            continue
+        val ind = _bof_indent(cl.raw)
+        if t.starts_with("@") or (ann != "" and not t.contains("fn ") and (t.ends_with(",") or t.ends_with(")"))):
+            ann = ann + " " + t
+            continue
+        val ext = _bof_extern_name(t)
+        if ext != "":
+            facts.push(BoundOriginFact(line_num: cl.line_num, function: "", subject: ext, origin: "extern_decl", boundary: false))
+            ann = ""
+            continue
+        val name = _bof_fn_name(t)
+        if name != "":
+            fn_name = name
+            fn_indent = ind
+            boundary = ann.contains("capabilities") and ann.contains("ffi")
+            ann = ""
+            for p in _bof_params(t):
+                facts.push(BoundOriginFact(line_num: cl.line_num, function: fn_name, subject: p, origin: "param", boundary: boundary))
+            continue
+        ann = ""
+        if fn_name != "" and ind <= fn_indent:
+            fn_name = ""
+            boundary = false
+        if fn_name == "":
+            continue
+        val (bname, rhs) = _bof_binding(t)
+        if bname != "":
+            facts.push(BoundOriginFact(line_num: cl.line_num, function: fn_name, subject: bname, origin: _bof_rhs_origin(rhs, externs), boundary: boundary))
+    facts
+
+pub fn bound_origin_inventory_text(source: text, file_path: text) -> text:
+    # One line per fact, in source order, then a fixed-order summary line.
+    val facts = bound_origin_facts(source, file_path)
+    var out = ""
+    var n_boundary = 0
+    for f in facts:
+        var fn_label = f.function
+        if fn_label == "":
+            fn_label = "-"
+        var kind = "plain"
+        if f.boundary:
+            kind = "boundary"
+            n_boundary = n_boundary + 1
+        out = out + "{file_path}:{f.line_num} {fn_label} {f.subject} {f.origin} {kind}\n"
+    var summary = "summary: {file_path} facts={facts.len()} boundary={n_boundary}"
+    for origin in ["extern_decl", "param", "literal", "extern_return", "cast", "copy", "call", "expr"]:
+        var n = 0
+        for f in facts:
+            if f.origin == origin:
+                n = n + 1
+        summary = summary + " {origin}={n}"
+    out + summary + "\n"
