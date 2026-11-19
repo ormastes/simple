@@ -42,7 +42,6 @@ int main(void) {
     CHECK(rt_workspace_storage_open_v1(value("invented-provider"),p,leaf,pool,workspace,77,65536,policy)<0);
     CHECK(rt_workspace_storage_open_v1(kind,p,leaf,pool,workspace,77,-1,policy)==-EINVAL);
     CHECK(rt_workspace_storage_open_v1(kind,p,leaf,pool,workspace,77,65536,value("bad-policy"))==-EINVAL);
-    CHECK(rt_workspace_storage_recover_v1(kind,p,leaf,pool,workspace,77,65536,policy)<0);
     CHECK(rt_workspace_storage_release_if_absent_v1(1)==-ESTALE);
     CHECK(rt_workspace_storage_forget_released_v1(1)==-ESTALE);
     CHECK(rt_workspace_storage_close_retained_v1(1)==-ESTALE);

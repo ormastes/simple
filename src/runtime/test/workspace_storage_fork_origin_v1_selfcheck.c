@@ -20,7 +20,6 @@
 #include <poll.h>
 
 #define rt_workspace_storage_open_v1 fork_fixture_storage_open_v1
-#define rt_workspace_storage_recover_v1 fork_fixture_storage_recover_v1
 #define rt_workspace_storage_observe_v1 fork_fixture_storage_observe_v1
 #define rt_workspace_storage_release_if_absent_v1 fork_fixture_storage_release_v1
 #define rt_workspace_storage_forget_released_v1 fork_fixture_storage_forget_v1
@@ -118,7 +117,6 @@ static void child_calls(int64_t text,int64_t digest,int64_t invalid_text) {
     CHILD_CHECK(pthread_mutex_trylock(&ws_lock_v1)==EBUSY);
     CHILD_CHECK(ws_find_v1(1)==NULL);
     CHILD_CHECK(rt_workspace_storage_open_v1(text,text,text,text,text,1,4096,digest)==-ECHILD);
-    CHILD_CHECK(rt_workspace_storage_recover_v1(text,text,text,text,text,1,4096,digest)==-ECHILD);
     child_empty(rt_workspace_storage_observe_v1(1));
     CHILD_CHECK(rt_workspace_storage_release_if_absent_v1(1)==-ECHILD);
     CHILD_CHECK(rt_workspace_storage_forget_released_v1(1)==-ECHILD);
@@ -240,7 +238,6 @@ int main(void) {
     CHECK(restored.st_dev==namespace_stat.st_dev&&restored.st_ino==namespace_stat.st_ino);
     CHECK(ws_origin_guard_v1()==EIO);CHECK(ws_lock_acquire_v1()==EIO);
     CHECK(rt_workspace_storage_open_v1(text,text,text,text,text,1,4096,digest)==-EIO);
-    CHECK(rt_workspace_storage_recover_v1(text,text,text,text,text,1,4096,digest)==-EIO);
     CHECK(rt_workspace_storage_release_if_absent_v1(1)==-EIO);
     CHECK(rt_workspace_storage_forget_released_v1(1)==-EIO);
     CHECK(rt_workspace_storage_close_retained_v1(1)==-EIO);

@@ -520,15 +520,16 @@ Host side of the remote container build; the controller half is the `remote-run`
   exit with `workspace_storage_close_retained_v1` (`rt_workspace_storage_close_retained_v1`: closes the native fds like
   process exit, refuses a loaned or released slot, never touches project/quota), so the next prepare admits afresh with
   no restart (the milestone_0047 `retention_lease_held` restart gate was a bug, removed). A failed drop fails the turn
-  and the next admission fails closed (EBUSY) until restart. Never adopt an in-process token via recover: recover skips
-  re-proof on reuse.
+  and the next admission fails closed (EBUSY) until restart. There is no recover entry (milestone_0048 deleted
+  `rt_workspace_storage_recover_v1` in C, header, Rust stub and MIR text-ABI arm): reuse would skip the native re-proof.
 - Agent workspace close (owner decision 3): DEFERRED by owner 2026-11-19 ("not now"). The agent close path keeps
   refusing (`agent-workspace-retention-requires-authorized-cleanup`); retention-release stays remote-build only. Gap
   record: no controller-side terminal row exists for a V4 agent run, and the Host agent outcome hardcodes
   `source_return: returned` although a staged agent source is retained.
 - Trap: `absent-unmeasured` (unchanged, owner decision 2) only on a RESUMED release whose run child is already gone; a
   first issue with no child refuses (`workspace-retention-release-run-absent`) after journaling the marker, so the
-  re-issue converges.
+  re-issue converges. Making a reaped never-staged run settle in one issue needs an owner decision: no durable
+  never-staged fact exists (options: converge reaped evidence on first issue, or journal a stage-intent record first).
 - Trap: journal relative path parts are <= 128 bytes; `<sha>-<sha>.sdn` (133) is invalid -- use `<sha>/<sha>.sdn`.
 ### Controller remote-run (milestone_0030 controller half, specs NOT_RUN)
 `simple orchestrator remote-run --dispatch-root --config-digest --key-store --approver --spec <dir> --out --grant-id --expires-in-ms`
