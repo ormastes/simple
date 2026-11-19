@@ -986,6 +986,49 @@ impl MirLowering:
         self.builder = b
         result ?? value_local
 
+    me option_unwrap_payload_is_erased_tagged_v1(receiver: HirExpr, receiver_local: LocalId, inner: HirType?) -> bool:
+        """`.unwrap()` inside an erased generic body of a direct call to a
+        free function whose `T?` result's `T` is also carried by an ENCODED
+        parameter slot (bare `T`, `[T]`, `Dict<K, T>`), e.g. `first(xs)`.
+        That callee stores the tagged `T` word as its Some payload, so the
+        unwrapped word is already the `-> T` RuntimeValue; left unmarked, the
+        tail re-boxed it with rt_value_int_wide (an i64 tagged twice, a record
+        handle shifted). This is the same proof decode_erased_scalar_call_payload
+        uses at a concrete caller. Everything else keeps the tail box: a `T?`
+        parameter or closure result (raw payload from a concrete caller), and
+        a callee with no encoded `T` slot (`tuple_at<T>(t, i)` forwards an
+        enum payload tuple's RAW scalar words).
+        doc/08_tracking/bug/stage2_generic_tail_unwrap_reboxes_record_2026-11-19.md"""
+        # A generic-class METHOD takes and returns `T` plain, not encoded.
+        if self.current_fn_is_method: return false
+        val found_inner = inner ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+        if inner == None or not self.hir_type_is_bare_type_param(found_inner): return false
+        var callee_symbol = SymbolId(id: -1)
+        match receiver.kind:
+            case HirExprKind.Call(callee, _, _):
+                match callee.kind:
+                    case HirExprKind.Var(symbol): callee_symbol = symbol
+                    case HirExprKind.NamedVar(symbol, _): callee_symbol = symbol
+                    case _: return false
+            case _: return false
+        if self.native_trait_concrete_option_locals.contains(receiver_local.id): return false
+        if val callee_decl = self.symbols.get_symbol_raw(callee_symbol.id):
+            if callee_decl.kind != SymbolKind.Function: return false
+        else:
+            return false
+        var payload_param = ""
+        if val declared_return = self.resolved_call_hir_return_type(callee_symbol):
+            match declared_return.kind:
+                case HirTypeKind.Optional(return_inner):
+                    match return_inner.kind:
+                        case HirTypeKind.TypeParam(name, _): payload_param = name
+                        case _: ()
+                case _: ()
+        if payload_param == "": return false
+        for declared_param in self.resolved_call_hir_param_types(callee_symbol):
+            if self.erased_encoded_slot_param_v1(declared_param) == payload_param: return true
+        false
+
     me option_record_receiver_payload_v1(receiver: HirExpr, local: LocalId) -> LocalId:
         """Field-read receiver of type `T?` where T is a struct or class:
         return a local holding the record itself.
@@ -1571,7 +1614,7 @@ impl MirLowering:
             b_none_uw.terminate_goto(merge_block_uw)
             self.builder = b_none_uw
 
-            if self.is_runtime_value_local(some_val_uw.id):
+            if self.is_runtime_value_local(some_val_uw.id) or self.option_unwrap_payload_is_erased_tagged_v1(receiver, receiver_local, inner_type_uw):
                 self.mark_runtime_value_local(result_local_uw.id)
             # An array-valued Option (`d.get(k)` over `[T]` values) unwraps to
             # that same runtime array handle.

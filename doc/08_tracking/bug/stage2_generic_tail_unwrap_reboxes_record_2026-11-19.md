@@ -2,7 +2,9 @@
 
 - **Date:** 2026-11-19
 - **Status:** workaround in source (`# @workaround bug=stage2_generic_tail_unwrap_reboxes_record_2026-11-19`);
-  lowering fix open (needs a new Stage 2 to prove, see "Not done")
+  the fixture's `tuple_at` forwarder shape cannot be fixed soundly in 50.mir, so
+  the workaround IS the fix for it (see "Lowering fix"); a sibling double-box for
+  argument-bound producers is fixed in MIR (native proof needs a Stage 2 built from it)
 - **Lane:** Stage 2 (integ18, cranelift) -> Stage 3 -> Stage 3 self-build, aarch64 Linux
 - **Source pin:** release/1.0.0 `cbff0ece9e8`
 - **Family:** `stage3_array_copy_unique_static_leaf_2026-11-19.md`,
@@ -85,13 +87,48 @@ Both `_sffi_tuple_get_req` copies now use the `if val` + explicit `return` + `pa
 generic `-> T` functions in `src/compiler`, `src/app` and `src/lib` whose tail is
 `.unwrap()`. The new form adds no call on the hot path: one presence test, as before.
 
+## Lowering fix (2026-11-19)
+
+**The fixture's shape is ambiguous inside the erased body.** `rt_tuple_get` returns
+the stored tuple word verbatim, and an enum payload tuple stores RAW scalars
+(`NI.Two(7, 9)` lowers to `rt_tuple_set(t, 0, 7)`, no `Shl`/`rt_value_int_wide`).
+So in `get_req<T>` the unwrapped word is a raw 7 for `T=i64` and a handle for
+`T=Pair`; the tail box is right for the first and wrong for the second, and the
+erased body cannot tell them apart. Marking that word as a runtime value would
+make `get_req<i64>` return 7 and its caller decode `7 >> 3 = 0`. Every in-tree
+instantiation of `_sffi_tuple_get_req` is a record or enum (`HirExpr` x7,
+`LocalId` x4, `AggregateKind`, `MirConstValue`, `MirType`), so for that shape the
+`if val` + `return` workaround is the fix, not a stopgap.
+
+**What is fixed (MIR):** `option_unwrap_payload_is_erased_tagged_v1`
+(`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`) marks the
+`.unwrap()` result as a runtime value only for a direct call to a free function
+whose `T?` result's `T` is also carried by an ENCODED parameter slot (bare `T`,
+`[T]`, `Dict<K, T>`), e.g. `head<T>(xs) -> T: first(xs).unwrap()`. That is the
+same proof `decode_erased_scalar_call_payload` uses at a concrete caller (the slot
+test is now the shared `erased_encoded_slot_param_v1`). Such a callee stores the
+tagged `T` word, and the old tail re-boxed it: `T=i64` came back tagged twice
+(caller boxes 5 -> 40, tail -> 320, caller decodes 40) and a record handle shifted.
+`T?` parameters, closure results, generic-class methods (plain `T`) and forwarders
+without an encoded slot keep the
+tail box.
+
+Spec: `test/01_unit/compiler/mir/generic_tail_unwrap_record_spec.spl` (1 of 9 red
+before, 9/9 after). Per-function MIR of the 18-function probe module before and
+after is byte-identical except `head`.
+
 ## Not done
 
-- The lowering fix. The `.unwrap()` arm should treat an erased `TypeParam` payload as
-  the `T` slot's tagged word, so that the `-> T` boundary does not re-box it. The same
-  applies to a `match` tail. Proving this needs a new Stage 2, which is out of scope for
-  this lane. The integer case currently round-trips only because the payload is raw, so
-  a naive "mark the result as a runtime value" change could break `T=i64` callers. Read
-  how the `if val` binder lowers before changing it.
+- The durable fix for the `tuple_at` forwarder shape is a producer/extern contract,
+  not MIR: restrict `_sffi_tuple_get_req` / `compiler_value_tuple_at` to handle-typed
+  `T`, or decode in a typed concrete wrapper.
+- The `T?` PARAMETER shape (`fn req<T>(v: T?) -> T: v.unwrap()`, T = record) still
+  re-boxes: a concrete caller passes `rt_enum_new(1, 0, raw)`. The fix belongs on the
+  caller side (box the payload of a `T?` argument). The `match v: case Some(x): x`
+  tail is not changed. `if val p = v: return p` on a param never boxes, so it returns
+  a raw int that the caller then decodes; check that case before relying on it.
+- `fn get_or<T>(f: fn() -> T?) -> T: f().unwrap()` called with a concrete
+  `\() -> i64?: Some(5)` lambda: the caller (`use_get_or` in the probe) has no decode
+  at all. Pre-existing, not investigated here.
 - Whether the Stage 3 self-build gets past MIR with this workaround still needs a fresh
   Stage 3 build to confirm.
