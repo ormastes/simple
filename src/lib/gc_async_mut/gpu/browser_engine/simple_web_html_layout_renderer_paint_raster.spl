@@ -130,6 +130,73 @@ fn _fb_paint_svg_rects_clip(out: [u32], fbw: i32, fbh: i32, nodes: [HNode], styl
         j = j + 1
     res
 
+fn _paint_box_shadow_outside_box(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, st: Style, clip: ClipRect) -> [u32]:
+    # CSS Backgrounds 3 section 7.1: an outer shadow is clipped to outside the
+    # border box. Under an opaque box colour the box hides it anyway;
+    # otherwise keep the box region as it was and restore it inside the
+    # rounded border box after the shadows.
+    if ((st.bg >> 24) & 255u32) == 255u32:
+        return paint_box_shadow(fb, fbw, fbh, x, y, w, h, st, clip)
+    val kx = if x > clip.x0: x else: clip.x0
+    val ky = if y > clip.y0: y else: clip.y0
+    val kx1 = if x + w < clip.x1: x + w else: clip.x1
+    val ky1 = if y + h < clip.y1: y + h else: clip.y1
+    val kx0 = if kx > 0: kx else: 0
+    val ky0 = if ky > 0: ky else: 0
+    val kw = (if kx1 < fbw: kx1 else: fbw) - kx0
+    val kh = (if ky1 < fbh: ky1 else: fbh) - ky0
+    if kw <= 0 or kh <= 0:
+        return paint_box_shadow(fb, fbw, fbh, x, y, w, h, st, clip)
+    var pre: [u32] = [0u32; kw * kh]
+    var row = 0
+    # cpu-lane-loop-ok: one span copy per row of the box region; bound kh
+    while row < kh:
+        pre.write_span(fb, (row * kw) as i64, ((ky0 + row) * fbw + kx0) as i64, kw as i64)
+        row = row + 1
+    var out = paint_box_shadow(fb, fbw, fbh, x, y, w, h, st, clip)
+    val half_min = (if w < h: w else: h) / 2
+    val rtl = if st.border_radius_tl_px < half_min: st.border_radius_tl_px else: half_min
+    val rtr = if st.border_radius_tr_px < half_min: st.border_radius_tr_px else: half_min
+    val rbr = if st.border_radius_br_px < half_min: st.border_radius_br_px else: half_min
+    val rbl = if st.border_radius_bl_px < half_min: st.border_radius_bl_px else: half_min
+    row = 0
+    # cpu-lane-loop-ok: one span copy per row of the box region; bound kh
+    while row < kh:
+        val py = ky0 + row
+        var lo = kx0
+        val row_end = kx0 + kw
+        # cpu-lane-loop-ok: walks in from each end only across a corner curve; bound = corner radius
+        while lo < row_end and not _shadow_knockout_inside(lo, py, x, y, w, h, rtl, rtr, rbr, rbl):
+            lo = lo + 1
+        var hi = row_end
+        # cpu-lane-loop-ok: walks in from each end only across a corner curve; bound = corner radius
+        while hi > lo and not _shadow_knockout_inside(hi - 1, py, x, y, w, h, rtl, rtr, rbr, rbl):
+            hi = hi - 1
+        if hi > lo:
+            out.write_span(pre, (py * fbw + lo) as i64, (row * kw + lo - kx0) as i64, (hi - lo) as i64)
+        row = row + 1
+    out
+
+# Inside the rounded border box (x, y, w, h) at pixel (px, py), tested at the
+# pixel centre against each corner's circle.
+fn _shadow_knockout_inside(px: i32, py: i32, x: i32, y: i32, w: i32, h: i32, rtl: i32, rtr: i32, rbr: i32, rbl: i32) -> bool:
+    val cx = (px - x).to_f64() + 0.5
+    val cy = (py - y).to_f64() + 0.5
+    val fw = w.to_f64()
+    val fh = h.to_f64()
+    if rtl > 0 and cx < rtl.to_f64() and cy < rtl.to_f64():
+        return _shadow_knockout_in_circle(rtl.to_f64() - cx, rtl.to_f64() - cy, rtl.to_f64())
+    if rtr > 0 and cx > fw - rtr.to_f64() and cy < rtr.to_f64():
+        return _shadow_knockout_in_circle(cx - (fw - rtr.to_f64()), rtr.to_f64() - cy, rtr.to_f64())
+    if rbr > 0 and cx > fw - rbr.to_f64() and cy > fh - rbr.to_f64():
+        return _shadow_knockout_in_circle(cx - (fw - rbr.to_f64()), cy - (fh - rbr.to_f64()), rbr.to_f64())
+    if rbl > 0 and cx < rbl.to_f64() and cy > fh - rbl.to_f64():
+        return _shadow_knockout_in_circle(rbl.to_f64() - cx, cy - (fh - rbl.to_f64()), rbl.to_f64())
+    true
+
+fn _shadow_knockout_in_circle(dx: f64, dy: f64, r: f64) -> bool:
+    dx * dx + dy * dy <= r * r
+
 fn _paint_shadow_pad(st: Style) -> i32:
     var pad = _tile_abs_i32(st.box_shadow_x_px) + _tile_abs_i32(st.box_shadow_y_px) + st.box_shadow_blur_px + 8
     if st.box_shadow_raw != "":
@@ -1650,7 +1717,7 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
             if paint_shadow or paint_bg or paint_border or paint_outline:
                 val clip = paint_clip_at(clip_cache, i)
                 if paint_shadow:
-                    out = paint_box_shadow(out, fbw, fbh, x, y, w, h, st, clip)
+                    out = _paint_box_shadow_outside_box(out, fbw, fbh, x, y, w, h, st, clip)
                 if paint_bg:
                     out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
                 if paint_border:
@@ -1719,7 +1786,7 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
                 if paint_shadow or paint_bg or paint_border or paint_outline:
                     val clip = paint_clip_at(clip_cache, i)
                     if paint_shadow:
-                        out = paint_box_shadow(out, fbw, fbh, x, y, w, h, st, clip)
+                        out = _paint_box_shadow_outside_box(out, fbw, fbh, x, y, w, h, st, clip)
                     if paint_bg:
                         out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
                     if paint_border:
@@ -1779,7 +1846,7 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
                     if paint_shadow or paint_bg or paint_border or paint_outline:
                         val clip = paint_clip_at(clip_cache, i)
                         if paint_shadow:
-                            out = paint_box_shadow(out, fbw, fbh, x, y, w, h, st, clip)
+                            out = _paint_box_shadow_outside_box(out, fbw, fbh, x, y, w, h, st, clip)
                         if paint_bg:
                             out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
                         if paint_border:
@@ -1850,7 +1917,7 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
                 if paint_shadow or paint_bg or paint_border or paint_outline:
                     val clip = paint_clip_at(clip_cache, i)
                     if paint_shadow:
-                        out = paint_box_shadow(out, fbw, fbh, x, y, w, h, st, clip)
+                        out = _paint_box_shadow_outside_box(out, fbw, fbh, x, y, w, h, st, clip)
                     if paint_bg:
                         out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
                     if paint_border:

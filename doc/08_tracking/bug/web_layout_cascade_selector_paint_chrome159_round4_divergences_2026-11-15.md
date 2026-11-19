@@ -896,3 +896,17 @@ head (13/40 at base).
 - **Cause:** the device kernel `shaders/shadow_rect.comp` is the integer twin of `emu_draw_shadow_rect` and deliberately mirrored its alpha-0 packing.
 - **Fix:** the kernel keeps `dstv & 0xFF000000u`, the same as the twin. `backend_vulkan_shadow_rect_spirv.spl` was regenerated with `scripts/tool/gen-shadow-rect-spirv.shs`, and `check-shadow-rect-spirv-pinned.shs` passes. Regenerating from the unchanged shader reproduces the committed blob byte for byte, so the large word diff is only offsets shifting.
 - **Evidence:** `box_shadow_keeps_dest_alpha_spec` gains a Vulkan example: red -> green. Sweep of 18 shadow/SPIR-V specs, base vs head: 0 new failures.
+
+## 2026-11-19 — outer box-shadow painted under the box on every lane (FIXED)
+
+- **Symptom:** a translucent box (`rgba(255,255,255,0.72)`, radius 12px) with `box-shadow: 0 0 20px rgba(0,88,188,0.6)` on `#1e1e2e` showed its own shadow through the background. Its interior read `BBC9DB` on the raster and cpu_simd, against Chrome 159 `C0C0C4`, which is the same colour as with no shadow. On Vulkan the interior read `FFFFFF` because of the alpha bug above.
+- **Cause:** none of the painters clipped an outer shadow to outside the border box (CSS Backgrounds 3 §7.1). The raster's `paint_box_shadow` and Draw IR's typed and legacy outer-shadow paths blend over the whole shadow rect.
+- **Fix:** skipped when the box colour is opaque, since the box hides the shadow anyway.
+  - **Raster:** `_paint_box_shadow_outside_box` (`paint_raster.spl`, used at the 4 call sites; `paint_box_shadow` itself is unchanged) saves the clipped box region, paints the shadow, and restores the region per row inside the rounded border box (`_shadow_knockout_inside`, tested at pixel centres).
+  - **Draw IR:** `_engine2d_draw_ir_render_box` reads the box rect before and after the outer shadows, then writes back `engine2d_draw_ir_shadow_knockout_pixels`: the pre-shadow pixels restored inside the rounded border box (`_e2d_box_inside_corners`), one span per row. The write goes through `draw_image`, a raw copy. `engine2d_draw_ir_has_outer_shadow` gates both readbacks.
+- **Evidence:**
+  - New `box_shadow_knockout_chrome159_spec`: the shadowed interior and near-edge pixels must equal the unshadowed render (Chrome `C0C0C4`, ±2). A point outside the top-left curve inside the box rect must still show the shadow. An opaque box is unchanged. Raster, cpu_simd and Vulkan all go red -> green.
+  - Base vs head sweep of 21 shadow/glass/Draw IR specs: 0 new failures.
+  - `box_shadow_falloff_spec` AC-1 asserted the shadow centre showing THROUGH a transparent box, which contradicts Chrome (`FFFFFF` there). It now probes the fully covered centre of a shadow offset 70px below the box (Chrome `000000`), and a new AC-1b pins the transparent interior at 255.
+  - Perf: an 800x600 frame with a 600x400 translucent shadowed box, 3 renders. Head against base was 13.8 s vs 14.3 s on cpu_simd and 13.0 s vs 14.8 s on Vulkan (lavapipe), with RSS 1.66 GB vs 1.67 GB. Binary: `cargo-target-webrender-premul/release/simple`, 54131896 bytes, 2026-11-19 17:24.
+- **Not covered:** the knockout edge is a binary pixel-centre test, whereas Chrome anti-aliases the clip, so edge pixels along the curve can differ. On a real GPU the readback is a device sync, which only gated boxes pay.
