@@ -969,6 +969,59 @@ pub fn gradient_stop_token(tok: text, em_px: i32) -> [i64]:
     val q10 = (milli * scale * 1024 + 500) / 1000
     [2, if neg: 0 - q10 else: q10]
 
+# Rewrites every `<number>rem` length inside a gradient value to px against
+# the root font size, at cascade time (the root size is reset after the
+# cascade, so paint cannot resolve `rem`). Values without a gradient, and
+# `rem` not preceded by a digit or followed by a name character (`url(2rem.png)`),
+# are returned unchanged.
+# reason: cascade-time text rewrite of one declaration value; root font in px
+# @allow(primitive_api)
+pub fn gradient_rem_stops_to_px(v: text, root_px: i32) -> text:
+    if text_index_of(v, "rem") < 0 or text_index_of(v, "gradient(") < 0:
+        return v
+    var out = ""
+    var start = 0
+    var i = 0
+    val n = v.byte_len()
+    # cpu-lane-loop-ok: one pass over a declaration value; bound value byte length
+    while i + 3 <= n:
+        if v.substring(i, i + 3) == "rem" and i > 0 and dec_val(v.substring(i - 1, i)) < 10:
+            val nx = if i + 3 < n: v.substring(i + 3, i + 4) else: " "
+            val next_ok = dec_val(nx) >= 10 and nx.lower() == nx.upper() and nx != "." and nx != "-" and nx != "_"
+            var b = i
+            # cpu-lane-loop-ok: walks back over one number token; bound token length
+            while b > start and (dec_val(v.substring(b - 1, b)) < 10 or v.substring(b - 1, b) == "."):
+                b = b - 1
+            val letter_before = b > 0 and v.substring(b - 1, b).lower() != v.substring(b - 1, b).upper()
+            if next_ok and not letter_before:
+                var int_part: i64 = 0
+                var frac: i64 = 0
+                var frac_den: i64 = 1
+                var in_frac = false
+                var j = b
+                # cpu-lane-loop-ok: digits of one number token; bound token length
+                while j < i:
+                    val c = v.substring(j, j + 1)
+                    if c == ".":
+                        in_frac = true
+                    elif in_frac:
+                        if frac_den < 1000:
+                            frac = frac * 10 + (dec_val(c) as i64)
+                            frac_den = frac_den * 10
+                    else:
+                        int_part = int_part * 10 + (dec_val(c) as i64)
+                    j = j + 1
+                val px_milli = (int_part * 1000 + frac * 1000 / frac_den) * (root_px as i64)
+                val whole = px_milli / 1000
+                val part = px_milli % 1000
+                val part_text = if part == 0: "" elif part < 10: ".00{part}" elif part < 100: ".0{part}" else: ".{part}"
+                out = out + v.substring(start, b) + "{whole}" + part_text + "px"
+                start = i + 3
+                i = i + 3
+                continue
+        i = i + 1
+    out + v.substring(start, n)
+
 fn parse_int(s: text) -> i32:
     var i = 0
     var v = 0
