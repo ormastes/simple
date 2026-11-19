@@ -16,10 +16,14 @@ use app.buildrunner.remote_container_evidence_v3.{RemoteContainerBytesV3, Remote
 use app.buildrunner.remote_container_authority_v3.{RemoteContainerCompletionV3, RemoteContainerBindingV3,
     remote_container_completion_signature_message_v3, remote_container_verify_completion_v3}
 use app.buildrunner.remote_container_bundle_codec_v3.remote_container_bundle_encode_v3
-use app.orchestrator.host_identity_key_v1.host_identity_private_sign_completion_v3
+use app.buildrunner.remote_container_reset_failure_v3.remote_container_reset_failure_host_new_v3
+use app.buildrunner.remote_container_reset_failure_signed_v3.{RemoteContainerResetFailureSignedV3,
+    remote_container_reset_failure_signature_message_v3, remote_container_reset_failure_verify_v3,
+    remote_container_reset_failure_signed_encode_v3}
+use app.orchestrator.host_identity_key_v1.{host_identity_private_sign_completion_v3, host_identity_private_sign_reset_failure_v3}
 use app.orchestrator.remote_run_plan_v1.remote_run_environment_decode_v1
 use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.{HostRemoteBuildPortV4, HostRemoteBuildAdmittedV3,
-    HostRemoteBuildObservedV3}
+    HostRemoteBuildObservedV3, HostRemoteBuildResetObservedV3}
 use std.nogc_sync_mut.io.local_authority_policy_v1.LocalAuthorityPolicyV1
 use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_authority_snapshot_key_v2
 use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.DistributedAuthorityKeyV2
@@ -184,11 +188,39 @@ fn remote_build_port_finalize_v3(config: RemoteBuildServicePortConfigV3, wire: t
         context.revocation_epoch, context.session_generation)?
     remote_container_bundle_encode_v3(RemoteContainerBundleV3(result: result, evidence: bytes, completion: completion))
 
+# milestone_0038: the Host reset-failure envelope for ONE teardown failure the Host observed (stage, runtime id and the
+# enable-time binding digest come from the executor; everything else is re-derived from the open record under the installed
+# snapshot, exactly as finalize does). The execution-host key signs under its OWN reset-failure domain; nothing leaves unless
+# the controller's own verifier accepts it. A refusal here only means no receipt: the Host wedges as before.
+fn remote_build_port_reset_failure_v3(config: RemoteBuildServicePortConfigV3, wire: text,
+        observed: HostRemoteBuildResetObservedV3, now: i64) -> Result<text, text>:
+    val record = remote_build_open_record_decode_v3(wire)?
+    val context = remote_build_port_context_v3(config, record, now)?
+    if (record.policy.operation_id != observed.operation_id or
+            sha256_text(builder_encode_task_v1(record.task)) != observed.task_digest):
+        return Err("remote-build-reset-observation-differs")
+    val receipt = remote_container_reset_failure_host_new_v3(record.task, record.policy,
+        sha256_text(distributed_encode_operation_v2(record.request)?), distributed_grant_digest_v2(record.signed.grant)?,
+        observed.workspace_binding_digest, observed.stage, observed.native_id)?
+    var envelope = RemoteContainerResetFailureSignedV3(receipt: receipt, signer_id: config.host_identity,
+        key_revision: context.host_key.revision, signed_at: now, signature: [])
+    val message = remote_container_reset_failure_signature_message_v3(envelope)?
+    val host_key = distributed_authority_snapshot_key_v2(config.policy.snapshot, "execution-host", config.host_identity)?
+    val file = (config.read_key)(host_key)?
+    val signed = host_identity_private_sign_reset_failure_v3(file, host_key.public_key, message)
+    val wipe = secure_zero_u8_slots(file)
+    if not wipe.verified(): return Err("remote-build-host-key-buffer-wipe")
+    envelope.signature = signed?
+    val _verified = remote_container_reset_failure_verify_v3(envelope, record.task, record.policy, context)?
+    remote_container_reset_failure_signed_encode_v3(envelope)
+
 fn remote_build_service_port_v3(config: RemoteBuildServicePortConfigV3) -> HostRemoteBuildPortV4:
     HostRemoteBuildPortV4(
         admit_open: fn(wire: text, now: i64) -> Result<HostRemoteBuildAdmittedV3, text>: remote_build_port_admit_v3(config, wire, now),
         finalize: fn(wire: text, observed: HostRemoteBuildObservedV3) -> Result<text, text>:
-            remote_build_port_finalize_v3(config, wire, observed))
+            remote_build_port_finalize_v3(config, wire, observed),
+        reset_failure: fn(wire: text, observed: HostRemoteBuildResetObservedV3, now: i64) -> Result<text, text>:
+            remote_build_port_reset_failure_v3(config, wire, observed, now))
 
 export RemoteBuildOpenRecordV3, remote_build_open_record_encode_v3, remote_build_open_record_decode_v3
 export RemoteBuildServicePortConfigV3, remote_build_service_port_v3

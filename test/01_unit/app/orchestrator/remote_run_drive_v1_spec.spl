@@ -194,6 +194,13 @@ fn rs_stage_cause_reply_v1(stage: text, cause: text) -> text:
         "cancelCause": SdnValue.String(cause)}
     sdn_encode_canonical(SdnValue.Dict(fields))
 
+# milestone_0038: the Host's reset-failure collect answer (a SUCCESSFUL reply carrying the signed envelope).
+fn rs_reset_reply_v1(receipt: text) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-remote-build-reset-failure"),
+        "operationId": SdnValue.String("operation_a"), "stage": SdnValue.String("wedged"),
+        "cause": SdnValue.String("failed:linux-host-remote-build-destroy:boom"), "receipt": SdnValue.String(receipt)}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
 fn rs_stage_reply_v1(stage: text) -> text:
     rs_stage_cause_reply_v1(stage, "")
 
@@ -235,6 +242,7 @@ fn rs_send_v1(log: RsLogV1, action: text, payload: text) -> Result<text, text>:
     if sub.sub == "collect" and log.collect == "reaped":
         return Err("runtime-host-request-refused\n{error: \"linux-host-remote-build-reaped-incomplete\"}")
     if sub.sub == "collect" and log.collect == "wedged": return Ok(rs_stage_reply_v1("wedged"))
+    if sub.sub == "collect" and log.collect == "reset": return Ok(rs_reset_reply_v1("SIMPLE_REMOTE_RESET_FAILURE_ENVELOPE_V3\nnot-verifiable\n"))
     if sub.sub == "collect" and log.collect == "failed": return Ok(rs_stage_reply_v1("failed"))
     if sub.sub == "collect" and log.collect == "cancelled": return Ok(rs_stage_cause_reply_v1("settled", "operator"))
     if sub.sub == "collect": return Ok(rs_stage_reply_v1("running"))
@@ -425,3 +433,30 @@ describe "remote-run driver structure (source pins)":
         expect(command.contains("dir_is_real_no_follow(")).to_equal(true)
         expect(command.contains("= nil")).to_equal(false)
         expect(command.contains("REMOTE_RUN_EXCHANGE_MS_V1: i64 = 120000")).to_equal(true)
+
+    it "settles a wedged run failed when its reset-failure receipt does not verify, after exactly one refused accept (milestone_0038)":
+        step("the Host's reset reply reaches the single-writer edit; the garbage envelope is refused and the existing wedged settle follows")
+        val log = RsLogV1()
+        log.collect = "reset"
+        log.journal = Some(rs_journal_v1())
+        val outcome = remote_run_drive_v1(rr_authored_v1().unwrap(), rr_facts_v1(4000), rs_link_v1(log), rs_issuer_v1())
+        expect(outcome.state).to_equal("host-terminal")
+        expect(outcome.exit_code).to_equal(2)
+        expect(outcome.settled).to_equal("failed")
+        expect(log.edits).to_equal(2)
+        expect(log.calls[log.calls.len() - 2]).to_equal("edit")
+        expect(log.calls[log.calls.len() - 1]).to_equal("edit")
+        expect(rs_row_state_v1(log)).to_equal("failed")
+        rs_cleanup_v1(log)
+
+    it "routes a verified Host reset-failure receipt through the root's single writer as a typed failed outcome":
+        val source = file_read_text("src/app/orchestrator/remote_run_v1.spl")
+        step("a reset reply is decoded before the ordinary stage decode refuses it, and accepted via accept_host_reset_failure_v3")
+        expect(source.contains("remote_run_reset_reply_decode_v1(")).to_equal(true)
+        expect(source.contains("session.accept_host_reset_failure_v3(authored.task, wire, context)")).to_equal(true)
+        val apply = source.substring(source.index_of("fn remote_run_host_reset_apply_v1("), source.index_of("fn remote_run_frame_v1("))
+        expect(apply.contains("val advanced = session.parent.operations")).to_equal(true)
+        expect(apply.contains("task_runner_journal_release_v1(session.parent.database.journal)")).to_equal(true)
+        step("an unverifiable or absent receipt falls back to the existing terminal settle, never to a completed row")
+        expect(source.contains("remote_run_terminal_settle_v1(\"wedged\", \"\")")).to_equal(true)
+        expect(source.contains("\"completed\"")).to_equal(false)

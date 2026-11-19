@@ -1,0 +1,114 @@
+"""
+## Purpose and audience
+Pins milestone_0038 in `src/app/buildrunner/remote_container_reset_failure_signed_v3.spl`: the execution-host-signed
+envelope the Host returns for a Host reset-failure stage (`destroy-absence`, `cancel-absence`, `cancel-identity`). The
+signature is over its OWN domain (`SIMPLE_REMOTE_RESET_FAILURE_SIGNATURE_V3`), so a receipt can never be read as a V3
+completion; verification reuses the shared completion authority (snapshot grant/approval/issuer/approver, role-scoped
+`execution-host` key and revision, request and grant digests, signed window). `service-restart` is controller-built and
+is never signed. Written for owners of the remote build route.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary).
+## Compatibility and limitations
+The signing order is re-derived here independently of the production message builder (the fixture host key is seed 129).
+## Verification guidance and troubleshooting
+Each refusal names the exact error string; a changed string is a contract change.
+"""
+use std.spec.{step, expect}
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
+use app.buildrunner.remote_container_reset_failure_v3.{remote_container_reset_failure_host_new_v3,
+    remote_container_reset_failure_new_v3, RemoteContainerResetFailureV3}
+use app.buildrunner.remote_container_reset_failure_signed_v3.*
+use test.fixtures.buildrunner.remote_container_parent_v2.{RemoteContainerParentFixtureV2, container_parent_fixture_v2}
+use test.fixtures.app.llm_caret.distributed_authority_verification_fixture_v2.{verification_seed, verification_bytes}
+use std.nogc_sync_mut.io.dir_ops.dir_remove_all
+
+fn sg_receipt(fixture: RemoteContainerParentFixtureV2, stage: text) -> RemoteContainerResetFailureV3:
+    val envelope = distributed_encode_operation_v2(fixture.authority.request).unwrap()
+    val grant = distributed_grant_digest_v2(fixture.authority.signed.grant).unwrap()
+    val native = if stage == "cancel-identity": "" else: "c".repeat(64)
+    remote_container_reset_failure_host_new_v3(fixture.task, fixture.policy, sha256_text(envelope), grant, "5".repeat(64),
+        stage, native).unwrap()
+
+# Independent published signing order, never the production message builder.
+fn sg_message(receipt: RemoteContainerResetFailureV3, at: i64) -> text:
+    ["SIMPLE_REMOTE_RESET_FAILURE_SIGNATURE_V3", "SIMPLE-REMOTE-RESET-FAILURE-3", receipt.task_identity,
+        receipt.host_id, receipt.assignment_digest, str(receipt.controller_epoch), receipt.operation_id,
+        receipt.request_digest, receipt.grant_digest, receipt.workspace_binding_digest, receipt.stage, receipt.reason,
+        receipt.reap, receipt.native_id, "host_signer_1", "1", str(at), ""].join("\n")
+
+fn sg_sign(receipt: RemoteContainerResetFailureV3, offset: i64 = 129, at: i64 = 1099) -> RemoteContainerResetFailureSignedV3:
+    val message = sg_message(receipt, at)
+    RemoteContainerResetFailureSignedV3(receipt: receipt, signer_id: "host_signer_1", key_revision: 1, signed_at: at,
+        signature: pure_ed25519_sign_from_seed_v1(verification_seed(offset), verification_bytes(message)).signature)
+
+describe "Remote container reset-failure signed envelope V3":
+    it "encodes one canonical envelope per Host stage that decodes back to the same value":
+        # @req M0038-SIGNED-01
+        val fixture = container_parent_fixture_v2(0, 3)
+        for stage in ["destroy-absence", "cancel-absence", "cancel-identity"]:
+            val signed = sg_sign(sg_receipt(fixture, stage))
+            val wire = remote_container_reset_failure_signed_encode_v3(signed).unwrap()
+            expect(wire).to_start_with("SIMPLE_REMOTE_RESET_FAILURE_ENVELOPE_V3\n")
+            expect(remote_container_reset_failure_signed_decode_v3(wire).unwrap()).to_equal(signed)
+        step("the production message equals the independently ordered one, so the independent signature verifies")
+        val one = sg_sign(sg_receipt(fixture, "destroy-absence"))
+        expect(remote_container_reset_failure_signature_message_v3(one).unwrap()).to_equal(
+            verification_bytes(sg_message(one.receipt, one.signed_at)))
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "refuses to sign or encode service-restart and refuses a non-canonical or truncated envelope":
+        # @req M0038-SIGNED-02
+        val fixture = container_parent_fixture_v2(0, 3)
+        val envelope = distributed_encode_operation_v2(fixture.authority.request).unwrap()
+        val grant = distributed_grant_digest_v2(fixture.authority.signed.grant).unwrap()
+        val restart = remote_container_reset_failure_new_v3(fixture.task, fixture.policy, sha256_text(envelope), grant).unwrap()
+        expect(remote_container_reset_failure_signed_encode_v3(sg_sign(restart))).to_equal(
+            Err("REMOTE_RESET_FAILURE_SIGNED_STAGE_INVALID"))
+        val wire = remote_container_reset_failure_signed_encode_v3(sg_sign(sg_receipt(fixture, "destroy-absence"))).unwrap()
+        expect(remote_container_reset_failure_signed_decode_v3(wire.substring(0, wire.byte_len() - 2))).to_equal(
+            Err("REMOTE_RESET_FAILURE_SIGNED_WIRE_INVALID"))
+        expect(remote_container_reset_failure_signed_decode_v3(wire + "\n").is_err()).to_equal(true)
+        expect(remote_container_reset_failure_signed_decode_v3("")).to_equal(Err("REMOTE_RESET_FAILURE_SIGNED_WIRE_INVALID"))
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "verifies a Host-signed receipt only against the snapshot execution-host key and the controller's own authority":
+        # @req M0038-SIGNED-03
+        val fixture = container_parent_fixture_v2(0, 3)
+        val signed = sg_sign(sg_receipt(fixture, "destroy-absence"))
+        expect(remote_container_reset_failure_verify_v3(signed, fixture.task, fixture.policy, fixture.authority).unwrap()).to_equal(signed)
+        step("a signature by another key is refused")
+        expect(remote_container_reset_failure_verify_v3(sg_sign(sg_receipt(fixture, "destroy-absence"), 130), fixture.task,
+            fixture.policy, fixture.authority)).to_equal(Err("REMOTE_RESET_FAILURE_SIGNATURE_INVALID"))
+        step("a tampered receipt (native id) no longer matches its signature")
+        var tampered = signed
+        tampered.receipt.native_id = "d".repeat(64)
+        expect(remote_container_reset_failure_verify_v3(tampered, fixture.task, fixture.policy, fixture.authority)).to_equal(
+            Err("REMOTE_RESET_FAILURE_SIGNATURE_INVALID"))
+        step("a completion-domain signature over the same fields is not a receipt signature (domain separation)")
+        val other_domain = ["SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V3", "SIMPLE-REMOTE-RESET-FAILURE-3", signed.receipt.task_identity,
+            signed.receipt.host_id, signed.receipt.assignment_digest, str(signed.receipt.controller_epoch), signed.receipt.operation_id,
+            signed.receipt.request_digest, signed.receipt.grant_digest, signed.receipt.workspace_binding_digest, signed.receipt.stage,
+            signed.receipt.reason, signed.receipt.reap, signed.receipt.native_id, "host_signer_1", "1", "1099", ""].join("\n")
+        var crossed = signed
+        crossed.signature = pure_ed25519_sign_from_seed_v1(verification_seed(129), verification_bytes(other_domain)).signature
+        expect(remote_container_reset_failure_verify_v3(crossed, fixture.task, fixture.policy, fixture.authority)).to_equal(
+            Err("REMOTE_RESET_FAILURE_SIGNATURE_INVALID"))
+        expect(dir_remove_all(fixture.root)).to_equal(true)
+
+    it "refuses a stale signer, a signed time after the verifier's clock and an unsigned service-restart stage":
+        # @req M0038-SIGNED-04
+        val fixture = container_parent_fixture_v2(0, 3)
+        var wrong_signer = sg_sign(sg_receipt(fixture, "cancel-absence"))
+        wrong_signer.signer_id = "host_other"
+        expect(remote_container_reset_failure_verify_v3(wrong_signer, fixture.task, fixture.policy, fixture.authority).is_err()).to_equal(true)
+        var late = sg_sign(sg_receipt(fixture, "cancel-absence"), 129, fixture.authority.now + 1)
+        expect(remote_container_reset_failure_verify_v3(late, fixture.task, fixture.policy, fixture.authority)).to_equal(
+            Err("CONTAINER_COMPLETION_TIME_INVALID"))
+        var restart = sg_sign(sg_receipt(fixture, "destroy-absence"))
+        restart.receipt.stage = "service-restart"
+        expect(remote_container_reset_failure_verify_v3(restart, fixture.task, fixture.policy, fixture.authority)).to_equal(
+            Err("REMOTE_RESET_FAILURE_SIGNED_STAGE_INVALID"))
+        expect(dir_remove_all(fixture.root)).to_equal(true)

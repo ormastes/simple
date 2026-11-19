@@ -1,10 +1,15 @@
-# milestone_0030 DESIGN 13.5 (reduced, owner decision 2026-11-19): the L6 reset-failure receipt under V3. A run a service
-# restart lost is NOT a passed run: the Host answers a reaped run with the error code
-# `linux-host-remote-build-reaped-incomplete`, and the CONTROLLER builds the one receipt it can (stage `service-restart`,
-# reap `absent-run-lost`, empty native id and empty binding digest) from its OWN admitted task, policy and authority
-# digests. The session journals the operation `failed` bound to the receipt digest; a receipt can never yield `completed`.
-# The other stages (destroy-absence, cancel-identity, cancel-absence) need a Host emitter that does not exist: they stay
-# refused here (named gap). The receipt is never decoded from the wire (the Host sends none).
+# milestone_0030 DESIGN 13.5, completed by milestone_0038: the L6 reset-failure receipt under V3. A run a service restart
+# lost, or whose teardown failed, is NOT a passed run: the operation is journaled `failed` bound to the receipt digest and a
+# receipt can never yield `completed`. Stages and who builds them:
+#   service-restart  the Host answers a reaped run with the error code `linux-host-remote-build-reaped-incomplete`; the
+#                    CONTROLLER builds the receipt (reap `absent-run-lost`, empty native id and binding digest) from its OWN
+#                    admitted task, policy and authority digests. Unsigned: the Host no longer holds the run.
+#   destroy-absence  the HOST emits it: Destroy not ok after a normal exit (reap `incomplete`, native id set)
+#   cancel-absence   the HOST emits it: a self-cancel's Destroy not ok after Create (reap `incomplete`, native id set)
+#   cancel-identity  the HOST emits it: a self-cancel's stop/destroy not ok with no Create (reap `identity-unresolved`)
+# A Host stage always carries `workspace_binding_digest`, the enable-time binding of the fresh epoch, and travels inside the
+# execution-host-signed envelope of remote_container_reset_failure_signed_v3.spl; the unsigned receipt of such a stage is
+# refused at accept. No PID, signal or synthetic tree-reap observation is carried.
 use app.buildrunner.remote_evidence_v1.RemoteEvidencePolicyV1
 use std.common.build_manager.contracts.{BuildTaskV1, builder_task_identity_v1, builder_identifier_valid_v1,
     builder_digest_valid_v1}
@@ -25,16 +30,38 @@ struct RemoteContainerResetFailureV3:
     reap: text
     native_id: text
 
+fn remote_container_reset_reason_v3(stage: text) -> text:
+    if stage == "destroy-absence": return "REMOTE_CONTAINER_ABSENCE_UNRESOLVED"
+    if stage == "cancel-identity": return "REMOTE_CONTAINER_CANCEL_IDENTITY_UNRESOLVED"
+    if stage == "cancel-absence": return "REMOTE_CONTAINER_CANCEL_ABSENCE_UNRESOLVED"
+    if stage == "service-restart": return "REMOTE_CONTAINER_SERVICE_RESTART_RUN_LOST"
+    ""
+
+fn remote_container_reset_reap_v3(stage: text) -> text:
+    if stage == "service-restart": return "absent-run-lost"
+    if stage == "cancel-identity": return "identity-unresolved"
+    "incomplete"
+
 fn remote_container_reset_failure_validate_v3(receipt: RemoteContainerResetFailureV3) -> Result<(), text>:
     if not builder_digest_valid_v1(receipt.task_identity) or not builder_identifier_valid_v1(receipt.host_id) or
             not builder_digest_valid_v1(receipt.assignment_digest) or receipt.controller_epoch < 1 or
             not builder_identifier_valid_v1(receipt.operation_id) or
-            not builder_digest_valid_v1(receipt.request_digest) or not builder_digest_valid_v1(receipt.grant_digest) or
-            receipt.workspace_binding_digest != "":
+            not builder_digest_valid_v1(receipt.request_digest) or not builder_digest_valid_v1(receipt.grant_digest):
         return Err("REMOTE_RESET_FAILURE_IDENTITY_INVALID")
-    if receipt.stage != "service-restart" or receipt.reason != "REMOTE_CONTAINER_SERVICE_RESTART_RUN_LOST":
-        return Err("REMOTE_RESET_FAILURE_STAGE_INVALID")
-    if receipt.native_id != "" or receipt.reap != "absent-run-lost": return Err("REMOTE_RESET_FAILURE_RUNTIME_INVALID")
+    val expected = remote_container_reset_reason_v3(receipt.stage)
+    if expected == "" or receipt.reason != expected: return Err("REMOTE_RESET_FAILURE_STAGE_INVALID")
+    val restart = receipt.stage == "service-restart"
+    if restart:
+        if receipt.workspace_binding_digest != "": return Err("REMOTE_RESET_FAILURE_IDENTITY_INVALID")
+    elif not builder_digest_valid_v1(receipt.workspace_binding_digest):
+        return Err("REMOTE_RESET_FAILURE_IDENTITY_INVALID")
+    # A runtime id exists only where Create happened; only cancel-identity and service-restart have none.
+    val has_native = not restart and receipt.stage != "cancel-identity"
+    if has_native:
+        if not builder_digest_valid_v1(receipt.native_id): return Err("REMOTE_RESET_FAILURE_RUNTIME_INVALID")
+    elif receipt.native_id != "":
+        return Err("REMOTE_RESET_FAILURE_RUNTIME_INVALID")
+    if receipt.reap != remote_container_reset_reap_v3(receipt.stage): return Err("REMOTE_RESET_FAILURE_REAP_INVALID")
     Ok(())
 
 # Constructed only from the admitted task/policy and the controller's own operation/grant digests, never from arriving
@@ -46,6 +73,20 @@ fn remote_container_reset_failure_new_v3(task: BuildTaskV1, policy: RemoteEviden
         operation_id: policy.operation_id, request_digest: request_digest, grant_digest: grant_digest,
         workspace_binding_digest: "", stage: "service-restart", reason: "REMOTE_CONTAINER_SERVICE_RESTART_RUN_LOST",
         reap: "absent-run-lost", native_id: "")
+    remote_container_reset_failure_validate_v3(receipt)?
+    Ok(receipt)
+
+# The Host's constructor (called by the Host port from its verified open record and its own observations): a Host stage
+# only, with the enable-time binding digest and the runtime id Create returned (empty for cancel-identity).
+fn remote_container_reset_failure_host_new_v3(task: BuildTaskV1, policy: RemoteEvidencePolicyV1, request_digest: text,
+        grant_digest: text, workspace_binding_digest: text, stage: text,
+        native_id: text) -> Result<RemoteContainerResetFailureV3, text>:
+    if stage == "service-restart": return Err("REMOTE_RESET_FAILURE_STAGE_INVALID")
+    val receipt = RemoteContainerResetFailureV3(task_identity: builder_task_identity_v1(task), host_id: policy.host_id,
+        assignment_digest: policy.assignment_digest, controller_epoch: policy.controller_epoch,
+        operation_id: policy.operation_id, request_digest: request_digest, grant_digest: grant_digest,
+        workspace_binding_digest: workspace_binding_digest, stage: stage, reason: remote_container_reset_reason_v3(stage),
+        reap: remote_container_reset_reap_v3(stage), native_id: native_id)
     remote_container_reset_failure_validate_v3(receipt)?
     Ok(receipt)
 
@@ -84,6 +125,6 @@ struct RemoteResetFailedResultV3:
     digest: text
 
 export RemoteContainerResetFailureV3, RemoteResetFailedResultV3
-export remote_container_reset_failure_new_v3, remote_container_reset_failure_encode_v3
+export remote_container_reset_failure_new_v3, remote_container_reset_failure_host_new_v3, remote_container_reset_failure_encode_v3
 export remote_container_reset_failure_digest_v3
-export remote_container_reset_failure_bind_v3
+export remote_container_reset_failure_bind_v3, remote_container_reset_failure_validate_v3

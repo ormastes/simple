@@ -8,8 +8,10 @@ use app.buildrunner.remote_container_evidence_v3.*
 use app.buildrunner.remote_container_authority_v3.*
 use app.buildrunner.remote_container_bundle_codec_v3.remote_container_bundle_decode_v3
 use app.buildrunner.remote_container_reset_failure_v3.{RemoteContainerResetFailureV3, RemoteResetFailedResultV3,
-    remote_container_reset_failure_bind_v3,
+    remote_container_reset_failure_bind_v3, remote_container_reset_failure_validate_v3,
     remote_container_reset_failure_encode_v3, remote_container_reset_failure_digest_v3}
+use app.buildrunner.remote_container_reset_failure_signed_v3.{remote_container_reset_failure_signed_decode_v3,
+    remote_container_reset_failure_verify_v3}
 use app.buildrunner.remote_context_v1.{RemoteAuthorityContextV1, remote_context_admit_v1}
 use std.common.contracts.container.execution_v2.ContainerExecutionRequestV2
 use std.common.contracts.container.runtime_v1.RuntimeExitStatusV1
@@ -35,11 +37,28 @@ impl RemoteContainerDatabaseSessionV3:
             context: RemoteAuthorityContextV1) -> Result<RemoteAcceptedResultV1, text>:
         self.accept_v3(task, remote_container_bundle_decode_v3(payload)?, context)
 
-    # 13.5: the L6 receipt (unsigned, failure-only, built by the controller on the Host's reaped answer) binds to the SAME collectable op
-    # row as accept_wire_v3; the first terminal wins and the other is refused as REMOTE_COMPLETION_REPLAY. It is
-    # journaled `failed` with the receipt digest through the single operation-journal writer; never `completed`.
+    # 13.5: the L6 receipt binds to the SAME collectable op row as accept_wire_v3; the first terminal wins and the other is
+    # refused as REMOTE_COMPLETION_REPLAY. It is journaled `failed` with the receipt digest through the single operation-
+    # journal writer; never `completed`. This entry takes the CONTROLLER-built receipt, which exists for service-restart only:
+    # every Host stage is accepted only inside its execution-host-signed envelope (accept_host_reset_failure_v3).
     me accept_reset_failure_v3(task: BuildTaskV1, receipt: RemoteContainerResetFailureV3,
             context: RemoteAuthorityContextV1) -> Result<RemoteResetFailedResultV3, text>:
+        remote_container_reset_failure_validate_v3(receipt)?
+        if receipt.stage != "service-restart": return Err("REMOTE_RESET_FAILURE_SIGNATURE_REQUIRED")
+        self.record_reset_failure_v3(task, receipt, context, "")
+
+    # milestone_0038: a Host-emitted receipt (destroy-absence, cancel-absence, cancel-identity). The envelope is decoded and its
+    # execution-host signature and the controller's own authority are verified BEFORE the journal is read or anything written;
+    # the signed envelope is kept beside the receipt as audit evidence, the journaled digest is the receipt's.
+    me accept_host_reset_failure_v3(task: BuildTaskV1, wire: text,
+            context: RemoteAuthorityContextV1) -> Result<RemoteResetFailedResultV3, text>:
+        if not self.parent.policies.contains_key(task.id): return Err("REMOTE_CONTAINER_TASK_NOT_ADMITTED")
+        val signed = remote_container_reset_failure_signed_decode_v3(wire)?
+        val _verified = remote_container_reset_failure_verify_v3(signed, task, self.parent.policies[task.id], context)?
+        self.record_reset_failure_v3(task, signed.receipt, context, wire)
+
+    me record_reset_failure_v3(task: BuildTaskV1, receipt: RemoteContainerResetFailureV3,
+            context: RemoteAuthorityContextV1, signed_wire: text) -> Result<RemoteResetFailedResultV3, text>:
         if not self.parent.policies.contains_key(task.id) or not self.parent.identities.contains_key(task.id) or
                 self.parent.identities[task.id] != builder_task_identity_v1(task) or not self.requests.contains_key(task.id):
             return Err("REMOTE_CONTAINER_TASK_NOT_ADMITTED")
@@ -68,6 +87,11 @@ impl RemoteContainerDatabaseSessionV3:
             return Err("REMOTE_PARENT_OUTPUT_WRITE_FAILED")
         val receipt_hash = file_hash_sha256(root + "/receipt.sdn")
         if receipt_hash.is_none() or receipt_hash.unwrap() != digest: return Err("REMOTE_PARENT_OUTPUT_READBACK_DIFFERS")
+        if signed_wire != "":
+            if not file_atomic_write(root + "/signed-receipt.sdn", signed_wire): return Err("REMOTE_PARENT_OUTPUT_WRITE_FAILED")
+            val signed_hash = file_hash_sha256(root + "/signed-receipt.sdn")
+            if signed_hash.is_none() or signed_hash.unwrap() != sha256_text(signed_wire):
+                return Err("REMOTE_PARENT_OUTPUT_READBACK_DIFFERS")
         self.parent.operations = distributed_operation_journal_commit_v2(self.parent.operations,
             distributed_operation_transition_v2(prior, "failed", digest)?)?
         self.parent.database.recorded[task.id + ":" + str(task.attempt)] = true

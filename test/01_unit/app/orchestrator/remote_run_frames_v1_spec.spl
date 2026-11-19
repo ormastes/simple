@@ -11,11 +11,11 @@ Replies are built the way host_remote_build_reply_v4 / host_remote_build_output_
 ## Verification guidance and troubleshooting
 Every association mismatch names its own refusal code; a changed code is a contract change.
 """
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, step}
 use app.orchestrator.remote_run_frames_v1.{remote_run_reply_decode_v1, remote_run_reply_phase_v1, remote_run_reaped_v1,
     remote_run_association_check_v1, remote_run_sub_payload_v1, remote_run_input_payload_v1, remote_run_output_decode_v1,
     remote_run_reassemble_v1, remote_run_service_restart_receipt_v1, remote_run_execute_reply_check_v1,
-    remote_run_refused_reply_v1}
+    remote_run_refused_reply_v1, remote_run_reset_reply_decode_v1}
 use std.common.contracts.orchestration.host_service_operation_reply_v6.{HostServiceOperationReplyV6,
     host_service_operation_reply_encode_v6}
 use app.orchestrator.remote_run_author_v1.RemoteRunFileV1
@@ -201,3 +201,27 @@ describe "remote-run frames (milestone_0030 controller half)":
         bare.payload = ""
         expect(remote_run_refused_reply_v1(host_service_operation_reply_encode_v6(bare).unwrap())).to_equal("dispatch-host-nonzero\n")
         expect(remote_run_refused_reply_v1("garbage")).to_equal("remote-run-host-refused-undecodable\n")
+
+fn rf_reset_reply_v1(stage: text, receipt: text) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-remote-build-reset-failure"),
+        "operationId": SdnValue.String("operation_a"), "stage": SdnValue.String(stage),
+        "cause": SdnValue.String("failed:linux-host-remote-build-destroy:boom"), "receipt": SdnValue.String(receipt)}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+describe "remote-run reset-failure reply (milestone_0038)":
+    it "decodes the Host's wedged reset-failure reply carrying a receipt and refuses everything else":
+        # @req M0038-FRAMES-01
+        val wire = "SIMPLE_REMOTE_RESET_FAILURE_ENVELOPE_V3\nx\n"
+        val reply = remote_run_reset_reply_decode_v1(rf_reset_reply_v1("wedged", wire), "operation_a").unwrap()
+        expect(reply.operation_id).to_equal("operation_a")
+        expect(reply.receipt).to_equal(wire)
+        step("another operation, a stage that is not wedged, an empty receipt and an over-long cause are refused")
+        expect(remote_run_reset_reply_decode_v1(rf_reset_reply_v1("wedged", wire), "operation_b")).to_equal(Err("remote-run-reply-operation"))
+        expect(remote_run_reset_reply_decode_v1(rf_reset_reply_v1("settled", wire), "operation_a")).to_equal(Err("remote-run-reset-reply-stage"))
+        expect(remote_run_reset_reply_decode_v1(rf_reset_reply_v1("wedged", ""), "operation_a")).to_equal(Err("remote-run-reset-reply-receipt"))
+        expect(remote_run_reset_reply_decode_v1(rf_reset_reply_v1("wedged", wire).replace("failed:linux-host-remote-build-destroy:boom",
+            "x".repeat(161)), "operation_a")).to_equal(Err("remote-run-reset-reply-cause"))
+        step("an ordinary stage reply is not a reset reply and a reset reply is not an ordinary stage reply")
+        expect(remote_run_reset_reply_decode_v1(rf_reply_v1("wedged", ""), "operation_a").is_err()).to_equal(true)
+        expect(remote_run_reply_decode_v1(rf_reset_reply_v1("wedged", wire), "operation_a").is_err()).to_equal(true)
+        expect(remote_run_reset_reply_decode_v1("not sdn", "operation_a").is_err()).to_equal(true)

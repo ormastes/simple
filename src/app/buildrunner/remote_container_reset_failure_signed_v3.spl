@@ -1,0 +1,126 @@
+# milestone_0038: the execution-host-signed envelope of a Host reset-failure receipt (stages destroy-absence,
+# cancel-absence, cancel-identity). The Host signs with the same execution-host identity key as a completion, but over its
+# OWN domain line (SIMPLE_REMOTE_RESET_FAILURE_SIGNATURE_V3, host_identity_private_sign_reset_failure_v3), so a receipt
+# can never be read as a completion and a completion signature can never stand for a receipt. Verification reuses the shared
+# completion authority body (snapshot grant/approval/issuer/approver, role-scoped `execution-host` key and revision, request
+# and grant digests, signed window) and then the Ed25519 signature over the message; the receipt itself is bound to the
+# controller's own task/policy/digests by remote_container_reset_failure_bind_v3 at accept. `service-restart` is controller-
+# built and never signed: it is refused here at every entry.
+use app.buildrunner.remote_container_reset_failure_v3.{RemoteContainerResetFailureV3,
+    remote_container_reset_failure_validate_v3, remote_container_reset_failure_encode_v3}
+use app.buildrunner.remote_container_authority_v2.{RemoteContainerAuthorityClaimV2, RemoteContainerAuthorityExpectedV2,
+    remote_container_completion_authority_v2}
+use app.buildrunner.remote_container_authority_v3.{remote_container_completion_signature_hex_v3,
+    remote_container_completion_hex_digit_v3}
+use app.buildrunner.remote_context_v1.RemoteAuthorityContextV1
+use app.buildrunner.remote_evidence_v1.RemoteEvidencePolicyV1
+use std.common.build_manager.contracts.{BuildTaskV1, builder_task_identity_v1, builder_identifier_valid_v1}
+use std.common.build_manager.codec.{builder_wire_line_v1, BuilderWireReaderV1}
+use std.common.crypto.ed25519.pure_ed25519_verify
+
+val REMOTE_RESET_FAILURE_SIGNED_MAX_BYTES_V3: i64 = 16384
+val REMOTE_RESET_FAILURE_SIGNED_INTEGER_MAX_V3: i64 = 9999999999999999
+
+struct RemoteContainerResetFailureSignedV3:
+    receipt: RemoteContainerResetFailureV3
+    signer_id: text
+    key_revision: i64
+    signed_at: i64
+    signature: [u8]
+
+fn remote_container_reset_failure_signed_metadata_v3(value: RemoteContainerResetFailureSignedV3) -> Result<(), text>:
+    if value.receipt.stage == "service-restart": return Err("REMOTE_RESET_FAILURE_SIGNED_STAGE_INVALID")
+    remote_container_reset_failure_validate_v3(value.receipt)?
+    if (not builder_identifier_valid_v1(value.signer_id) or value.key_revision < 1 or
+            value.key_revision > REMOTE_RESET_FAILURE_SIGNED_INTEGER_MAX_V3 or value.signed_at < 0 or
+            value.signed_at > REMOTE_RESET_FAILURE_SIGNED_INTEGER_MAX_V3):
+        return Err("REMOTE_RESET_FAILURE_SIGNED_METADATA_INVALID")
+    Ok(())
+
+# The signed message: the domain line, the canonical receipt wire (its own V3 header and fields), the signer and its window.
+fn remote_container_reset_failure_signature_text_v3(value: RemoteContainerResetFailureSignedV3) -> Result<text, text>:
+    remote_container_reset_failure_signed_metadata_v3(value)?
+    val wire = builder_wire_line_v1("SIMPLE_REMOTE_RESET_FAILURE_SIGNATURE_V3") +
+        remote_container_reset_failure_encode_v3(value.receipt)? + builder_wire_line_v1(value.signer_id) +
+        builder_wire_line_v1(str(value.key_revision)) + builder_wire_line_v1(str(value.signed_at))
+    if wire.byte_len() > REMOTE_RESET_FAILURE_SIGNED_MAX_BYTES_V3: return Err("REMOTE_RESET_FAILURE_SIGNED_WIRE_TOO_LARGE")
+    Ok(wire)
+
+fn remote_container_reset_failure_signature_message_v3(value: RemoteContainerResetFailureSignedV3) -> Result<[u8], text>:
+    val message = remote_container_reset_failure_signature_text_v3(value)?
+    var bytes: [u8] = []
+    for i in 0..message.byte_len(): bytes.push(message.byte_at(i) as u8)
+    Ok(bytes)
+
+fn remote_container_reset_failure_signed_encode_v3(value: RemoteContainerResetFailureSignedV3) -> Result<text, text>:
+    val message = remote_container_reset_failure_signature_text_v3(value)?
+    if value.signature.len() != 64: return Err("REMOTE_RESET_FAILURE_SIGNATURE_INVALID")
+    val wire = builder_wire_line_v1("SIMPLE_REMOTE_RESET_FAILURE_ENVELOPE_V3") + message +
+        builder_wire_line_v1(remote_container_completion_signature_hex_v3(value.signature))
+    if wire.byte_len() > REMOTE_RESET_FAILURE_SIGNED_MAX_BYTES_V3: return Err("REMOTE_RESET_FAILURE_SIGNED_WIRE_TOO_LARGE")
+    Ok(wire)
+
+fn remote_container_reset_failure_signed_decode_v3(wire: text) -> Result<RemoteContainerResetFailureSignedV3, text>:
+    val invalid = "REMOTE_RESET_FAILURE_SIGNED_WIRE_INVALID"
+    if wire.byte_len() < 1 or wire.byte_len() > REMOTE_RESET_FAILURE_SIGNED_MAX_BYTES_V3 or not wire.ends_with("\n"):
+        return Err(invalid)
+    var reader = BuilderWireReaderV1.create(wire)
+    if (reader.scalar() != "SIMPLE_REMOTE_RESET_FAILURE_ENVELOPE_V3" or
+            reader.scalar() != "SIMPLE_REMOTE_RESET_FAILURE_SIGNATURE_V3" or reader.scalar() != "SIMPLE-REMOTE-RESET-FAILURE-3"):
+        return Err(invalid)
+    val task_identity = reader.scalar()
+    val host_id = reader.scalar()
+    val assignment_digest = reader.scalar()
+    val controller_epoch = reader.number(REMOTE_RESET_FAILURE_SIGNED_INTEGER_MAX_V3, false)
+    val operation_id = reader.scalar()
+    val request_digest = reader.scalar()
+    val grant_digest = reader.scalar()
+    val workspace_binding_digest = reader.scalar()
+    val stage = reader.scalar()
+    val reason = reader.scalar()
+    val reap = reader.scalar()
+    val native_id = reader.scalar()
+    val signer_id = reader.scalar()
+    val key_revision = reader.number(REMOTE_RESET_FAILURE_SIGNED_INTEGER_MAX_V3, false)
+    val signed_at = reader.number(REMOTE_RESET_FAILURE_SIGNED_INTEGER_MAX_V3, false)
+    val signature_hex = reader.scalar()
+    if reader.complete_error() != "" or signature_hex.byte_len() != 128: return Err(invalid)
+    var signature: [u8] = []
+    for index in 0..64:
+        val high = remote_container_completion_hex_digit_v3(signature_hex.substring(index * 2, index * 2 + 1))
+        val low = remote_container_completion_hex_digit_v3(signature_hex.substring(index * 2 + 1, index * 2 + 2))
+        if high < 0 or low < 0: return Err("REMOTE_RESET_FAILURE_SIGNATURE_INVALID")
+        signature.push((high * 16 + low) as u8)
+    val receipt = RemoteContainerResetFailureV3(task_identity: task_identity, host_id: host_id,
+        assignment_digest: assignment_digest, controller_epoch: controller_epoch, operation_id: operation_id,
+        request_digest: request_digest, grant_digest: grant_digest, workspace_binding_digest: workspace_binding_digest,
+        stage: stage, reason: reason, reap: reap, native_id: native_id)
+    val value = RemoteContainerResetFailureSignedV3(receipt: receipt, signer_id: signer_id, key_revision: key_revision,
+        signed_at: signed_at, signature: signature)
+    if remote_container_reset_failure_signed_encode_v3(value)? != wire: return Err("REMOTE_RESET_FAILURE_SIGNED_WIRE_NONCANONICAL")
+    Ok(value)
+
+# G12: issuer/approver/host_key come only from the role-scoped snapshot lookups inside `context`. The signature is the LAST
+# check so every authority refusal is reported as itself.
+fn remote_container_reset_failure_verify_v3(value: RemoteContainerResetFailureSignedV3, task: BuildTaskV1,
+        policy: RemoteEvidencePolicyV1, context: RemoteAuthorityContextV1) -> Result<RemoteContainerResetFailureSignedV3, text>:
+    remote_container_reset_failure_signed_metadata_v3(value)?
+    if value.signature.len() != 64: return Err("REMOTE_RESET_FAILURE_SIGNATURE_INVALID")
+    val receipt = value.receipt
+    val _authority = remote_container_completion_authority_v2(RemoteContainerAuthorityClaimV2(
+        task_identity: receipt.task_identity, host_id: receipt.host_id, assignment_digest: receipt.assignment_digest,
+        controller_epoch: receipt.controller_epoch, operation_id: receipt.operation_id, request_digest: receipt.request_digest,
+        grant_digest: receipt.grant_digest, signer_id: value.signer_id, key_revision: value.key_revision,
+        completed_at: value.signed_at), context.signed, context.approval, context.issuer, context.approver, context.host_key,
+        context.request, task, RemoteContainerAuthorityExpectedV2(task_identity: builder_task_identity_v1(task),
+        host_id: policy.host_id, assignment_digest: policy.assignment_digest, controller_epoch: policy.controller_epoch,
+        operation_id: policy.operation_id), context.now, context.policy_revision, context.revocation_epoch,
+        context.session_generation)?
+    val message = remote_container_reset_failure_signature_message_v3(value)?
+    if not pure_ed25519_verify(context.host_key.public_key, message, value.signature):
+        return Err("REMOTE_RESET_FAILURE_SIGNATURE_INVALID")
+    Ok(value)
+
+export RemoteContainerResetFailureSignedV3
+export remote_container_reset_failure_signature_message_v3, remote_container_reset_failure_signed_encode_v3
+export remote_container_reset_failure_signed_decode_v3, remote_container_reset_failure_verify_v3

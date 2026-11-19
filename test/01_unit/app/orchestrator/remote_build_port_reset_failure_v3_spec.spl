@@ -1,0 +1,53 @@
+"""
+## Purpose and audience
+Pins milestone_0038 in `src/app/orchestrator/remote_build_service_port_v3.spl`: the Host port's `reset_failure` builds and
+signs the reset-failure envelope for one teardown failure the Host observed. Everything but the observation (stage, runtime id,
+enable-time binding digest) is re-derived from the controller-authored open record under the INSTALLED snapshot (the same
+context rebuild finalize does), the execution-host key signs under its OWN domain, the key buffer is wiped, and the envelope
+leaves only if the controller's own verifier accepts it. Written for owners of the Linux service composition.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary). Store and key I/O are pinned structurally (a data spec cannot build the
+protected identity store); the receipt and signature contracts are data-tested in the buildrunner and host-identity specs.
+## Compatibility and limitations
+A refusal means only that no receipt is emitted: the Host wedges exactly as it did before this port function existed.
+## Verification guidance and troubleshooting
+A changed refusal string is a contract change.
+"""
+use std.spec.step
+use std.io.file_read_text
+
+fn rp_count(source: text, needle: text) -> i64:
+    source.split(needle).len() - 1
+
+fn rp_body(source: text) -> text:
+    val at = source.index_of("fn remote_build_port_reset_failure_v3(")
+    val tail = source.substring(at, source.byte_len())
+    tail.substring(0, tail.index_of("fn remote_build_service_port_v3("))
+
+describe "Host remote-build port reset_failure (milestone_0038)":
+    it "rebuilds the authority from the installed snapshot and the open record, and binds the observation to the task":
+        # @req M0038-PORT-01
+        val body = rp_body(file_read_text("src/app/orchestrator/remote_build_service_port_v3.spl"))
+        expect(rp_count(body, "remote_build_open_record_decode_v3(wire)?")).to_equal(1)
+        expect(rp_count(body, "remote_build_port_context_v3(config, record, now)?")).to_equal(1)
+        expect(body.index_of("remote_build_port_context_v3(") < body.index_of("remote_container_reset_failure_host_new_v3(")).to_equal(true)
+        step("the observation is compared with the record's own operation and task digest before anything is built")
+        expect(rp_count(body, "remote-build-reset-observation-differs")).to_equal(1)
+        expect(body.index_of("remote-build-reset-observation-differs") < body.index_of("remote_container_reset_failure_host_new_v3(")).to_equal(true)
+        step("request and grant digests come from the open record, never from the observation")
+        expect(rp_count(body, "sha256_text(distributed_encode_operation_v2(record.request)?)")).to_equal(1)
+        expect(rp_count(body, "distributed_grant_digest_v2(record.signed.grant)?")).to_equal(1)
+
+    it "signs under the reset domain with the snapshot execution-host key, wipes the key and verifies before anything leaves":
+        # @req M0038-PORT-02
+        val body = rp_body(file_read_text("src/app/orchestrator/remote_build_service_port_v3.spl"))
+        expect(rp_count(body, "host_identity_private_sign_reset_failure_v3(file, host_key.public_key, message)")).to_equal(1)
+        expect(rp_count(body, "host_identity_private_sign_completion_v3")).to_equal(0)
+        expect(rp_count(body, "distributed_authority_snapshot_key_v2(config.policy.snapshot, \"execution-host\", config.host_identity)?")).to_equal(1)
+        expect(body.index_of("secure_zero_u8_slots(file)") < body.index_of("envelope.signature = signed?")).to_equal(true)
+        expect(body.index_of("remote_container_reset_failure_verify_v3(") > body.index_of("envelope.signature = signed?")).to_equal(true)
+        expect(body.index_of("remote_container_reset_failure_signed_encode_v3(envelope)") > body.index_of("remote_container_reset_failure_verify_v3(")).to_equal(true)
+        step("the port installs the function: one constructor site")
+        val source = file_read_text("src/app/orchestrator/remote_build_service_port_v3.spl")
+        expect(rp_count(source, "reset_failure: fn(wire: text, observed: HostRemoteBuildResetObservedV3, now: i64)")).to_equal(1)
