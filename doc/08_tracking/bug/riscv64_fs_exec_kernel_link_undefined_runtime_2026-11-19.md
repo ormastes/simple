@@ -44,6 +44,20 @@ undefined set from 47 to 36 with no duplicate definitions.
 - Link-count delta not yet measured: the WSL distro failed to start
   (`Wsl/Service/CreateInstance/E_FAIL`, code 5) when this landed.
 
+## Step 3a — restore definitions lost in e274cd33719 (verification-pending)
+
+- `rv64_prepare_kernel_exit_context` + `RV64_KERNEL_RETURN_COOKIE`
+  (`arch/riscv64/trap_model.spl`) and `vmm_copyin_packed_string_vector`
+  (`memory/vmm_copy.spl`) were deleted by the stale-snapshot merge
+  `e274cd33719` while their callers and imports survived. Restored verbatim
+  from `e274cd33719^1`. The cookie matches the literal `_rv64_enter_user`
+  still stores (`trap_vector.spl`). The `err` global is the `.err()` call on
+  this function's result and should resolve with it.
+- Spec: `test/01_unit/os/kernel/arch/riscv64_kernel_exit_context_spec.spl`
+  (4/4 red before, 4/4 green after).
+- Link unverified: WSL is down (virtual disk under repair), so the riscv64
+  kernel was not relinked for this change.
+
 ## Remaining (36 before batch 2)
 
 - x86 port I/O live via `sosix/io_rw.spl` -> `x86_com1_read_byte`; `rt_invlpg`

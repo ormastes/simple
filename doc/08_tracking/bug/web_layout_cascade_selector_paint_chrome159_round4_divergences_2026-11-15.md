@@ -909,7 +909,7 @@ head (13/40 at base).
   - Base vs head sweep of 21 shadow/glass/Draw IR specs: 0 new failures.
   - `box_shadow_falloff_spec` AC-1 asserted the shadow centre showing THROUGH a transparent box, which contradicts Chrome (`FFFFFF` there). It now probes the fully covered centre of a shadow offset 70px below the box (Chrome `000000`), and a new AC-1b pins the transparent interior at 255.
   - Perf: an 800x600 frame with a 600x400 translucent shadowed box, 3 renders. Head against base was 13.8 s vs 14.3 s on cpu_simd and 13.0 s vs 14.8 s on Vulkan (lavapipe), with RSS 1.66 GB vs 1.67 GB. Binary: `cargo-target-webrender-premul/release/simple`, 54131896 bytes, 2026-11-19 17:24.
-- **Not covered:** the knockout edge is a binary pixel-centre test, whereas Chrome anti-aliases the clip, so edge pixels along the curve can differ. On a real GPU the readback is a device sync, which only gated boxes pay.
+- **Not covered (fixed 2026-11-19, see "box-shadow knockout edge not anti-aliased"):** the knockout edge was a binary pixel-centre test, whereas Chrome anti-aliases the clip. On a real GPU the readback is a device sync, which only gated boxes pay.
 
 ## 2026-11-19 — raster repeating background starts at the clip box (FIXED)
 
@@ -972,3 +972,22 @@ head (13/40 at base).
 - **Not covered:**
   - `drop-shadow()` and `url()` filters.
   - A blur next to a colour function over translucent content, where the order matters.
+
+## 2026-11-19 — box-shadow knockout edge not anti-aliased (FIXED)
+
+- **Symptom:** a translucent 60x40 box, radius 12, `rgba(255,255,255,0.72)` with `box-shadow: 0 0 20px rgba(0,88,188,0.6)` on `#1e1e2e`. Chrome's corner pixels carry part of the shadow, because Chrome clips it with an anti-aliased rounded rect. Ours carried none: the knockout restored every pixel whose centre was inside the curve. At 1x, the shadow's share of pixel (16,14) was (-4,+7,+16) in Chrome and (0,0,0) in ours.
+- **Fix:** both knockouts mix each corner-band pixel as `pre * cov + post * (1 - cov)`, with `cov` from `rounded_rect_coverage256` (the coverage the gradient clips already use). Other rows are still one span copy.
+  - **Draw IR:** `engine2d_draw_ir_shadow_knockout_pixels`. The mix is the new shared `engine2d_mix256` in `draw_ir_box_effects.spl`.
+  - **Raster:** `_restore_inside_box` (`paint_raster.spl`). `_shadow_knockout_inside` and `_shadow_knockout_in_circle` are deleted.
+  - `backdrop-filter` writes back through the same two functions, so its rounded clip is now anti-aliased too.
+- **Evidence:** the new `box_shadow_knockout_aa_edge_chrome159_spec` pins the shadow's share (with-shadow minus without-shadow) against Chrome: 5 corner pixels on raster at k=1, and 2 on cpu_simd and Vulkan at k=4, all ±2. It fails 3/3 on base and passes 3/3 on head. Base vs head sweep of 20 shadow, knockout, backdrop, device-scale and coverage specs (200 examples): 0 new failures, 3 fixed; the backdrop rounded-corner points (`BDF_ROUND`) still match Chrome.
+- **Not covered:** the box's own corner coverage. See the next entry.
+
+## 2026-11-19 — rounded-corner anti-aliasing coverage differs from Chrome (OPEN)
+
+- **Symptom:** on the same page without the shadow, the box's corner edge pixels are up to 16 levels off Chrome. At k=1, pixel (16,14) is `5E5E69` in ours and `4E4E5B` in Chrome. Chrome is also not symmetric about the corner's diagonal: (16,14) is `4E4E5B`, but (14,16) is `585864`.
+- **Measured:** ours is the exact pixel area (or a centre distance), and runs about 0.05-0.09 above Chrome's coverage at some edge pixels. Exact areas 0.33 / 0.66 / 0.43 compare with Chrome's 0.28 / 0.62 / 0.34. Fitted against 145 edge pixels of a 160px circle at k=1:
+  - 4 sub-scanlines at y-offset 0.5: mean error 0.061, max 0.213.
+  - y-offset 0.0: mean 0.041, max 0.195.
+  - Neither fits. The y/x asymmetry points at Skia's scan converter (supersampled in y, analytic in x), which still needs modelling.
+- **Impact:** absolute corner pixels of every rounded box, on all lanes. The knockout spec above pins only the shadow's share for this reason.
