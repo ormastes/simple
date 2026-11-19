@@ -22,7 +22,7 @@ use std.nogc_sync_mut.kernel_plugin.status.KpfSyncStatus
 use std.nogc_sync_mut.kernel_plugin.generation.{
     KpfGenerationHandle, KpfGenerationPublication, KpfPinHandle, KpfGenerationTable,
 }
-use std.nogc_sync_mut.sffi.dynamic.{DynLib}
+use std.nogc_sync_mut.sffi.dynamic.{DynLib, DynI64FnSlot}
 
 struct _DynlibGenerationEntryV1:
     generation: KpfGenerationHandle
@@ -34,6 +34,14 @@ pub struct DynlibGenerationLeaseV1:
     pin: KpfPinHandle
     generation: KpfGenerationHandle
     lib: DynLib
+
+# A cached DynI64FnSlot bound to one generation lease. The lease keeps the
+# slot's generation from being collected while the slot is held; calls made
+# through DynlibGenerationHostV1.call_slot refuse once the slot has been
+# released (release_slot) or its generation has been unloaded.
+pub struct DynGenerationI64SlotV1:
+    lease: DynlibGenerationLeaseV1
+    i64_slot: DynI64FnSlot
 
 class DynlibGenerationHostV1:
     table: KpfGenerationTable
@@ -71,6 +79,39 @@ class DynlibGenerationHostV1:
 
     me end_call(lease: DynlibGenerationLeaseV1) -> KpfSyncStatus:
         self.table.release_pin(lease.pin)
+
+    # Resolve an integer slot on the active generation and bind it to a lease
+    # held until release_slot. A failed resolve ends the lease it took.
+    @allow(primitive_api)  # name and arity mirror DynLib.resolve_i64_checked
+    @unsafe(reason: "resolves an unverified integer-only foreign ABI slot", capabilities: [ffi, raw_ptr])
+    me resolve_i64(name: text, arity: i64) -> Result<DynGenerationI64SlotV1, text>:
+        match self.begin_call():
+            case Ok(lease):
+                val resolved = unsafe(capabilities: [ffi, raw_ptr]):
+                    lease.lib.resolve_i64_checked(name, arity)
+                match resolved:
+                    case Ok(i64_slot): Ok(DynGenerationI64SlotV1(lease: lease, i64_slot: i64_slot))
+                    case Err(error):
+                        _ = self.end_call(lease)
+                        Err(error)
+            case Err(_): Err("E-SFFI-019: no active generation to resolve {name}")
+
+    # Call a generation-bound slot. The call shares the slot's pin for its
+    # duration, so a released slot (stale pin) or an unloaded generation is
+    # refused before any native code runs.
+    @allow(primitive_api)  # args mirror DynI64FnSlot.call_checked
+    @unsafe(reason: "resolved integer slot cannot prove the provider artifact or declared C ABI", capabilities: [ffi, raw_ptr])
+    me call_slot(slot: DynGenerationI64SlotV1, args: [i64]) -> Result<i64, text>:
+        val shared = self.table.share_pin(slot.lease.pin)
+        if shared.status != KpfSyncStatus.Ok:
+            return Err("E-SFFI-019: slot generation released or unloaded: {slot.i64_slot.symbol}")
+        val result = unsafe(capabilities: [ffi, raw_ptr]):
+            slot.i64_slot.call_checked(args)
+        _ = self.table.release_pin(shared.handle)
+        result
+
+    me release_slot(slot: DynGenerationI64SlotV1) -> KpfSyncStatus:
+        self.end_call(slot.lease)
 
     # Collect a retired generation and only then close its native mapping.
     @unsafe(reason: "closes the retired generation's native provider mapping", capabilities: [ffi])
@@ -152,6 +193,32 @@ class DynLoaderReloadV1:
                 _ = self.end_call(path, lease)
                 result
             case Err(_): Err("E-SFFI-019: no active generation for {path}")
+
+    # Generation-aware DynI64FnSlot: resolve once on the active generation of
+    # `path`, call many times, release when done. A reload while the slot is
+    # held leaves its mapping live; after release the old mapping can be
+    # unloaded and the slot refuses further calls.
+    @allow(primitive_api)  # path, name and arity mirror DynLib.resolve_i64_checked
+    @unsafe(reason: "resolves an unverified integer-only foreign ABI slot", capabilities: [ffi, raw_ptr])
+    me resolve_i64(path: text, name: text, arity: i64) -> Result<DynGenerationI64SlotV1, text>:
+        if not self.hosts.contains(path): return Err("E-SFFI-019: no active generation for {path}")
+        val host = self.hosts[path]
+        unsafe(capabilities: [ffi, raw_ptr]):
+            host.resolve_i64(name, arity)
+
+    @allow(primitive_api)  # path and args mirror DynLoader.call_checked
+    @unsafe(reason: "resolved integer slot cannot prove the provider artifact or declared C ABI", capabilities: [ffi, raw_ptr])
+    me call_slot(path: text, slot: DynGenerationI64SlotV1, args: [i64]) -> Result<i64, text>:
+        if not self.hosts.contains(path): return Err("E-SFFI-019: no active generation for {path}")
+        val host = self.hosts[path]
+        unsafe(capabilities: [ffi, raw_ptr]):
+            host.call_slot(slot, args)
+
+    @allow(primitive_api)  # path is the same text provider key DynLoader uses
+    me release_slot(path: text, slot: DynGenerationI64SlotV1) -> KpfSyncStatus:
+        if not self.hosts.contains(path): return KpfSyncStatus.StaleHandle
+        val host = self.hosts[path]
+        host.release_slot(slot)
 
     # Collect a retired generation of `path`; its mapping is closed only when
     # no lease still pins it.
