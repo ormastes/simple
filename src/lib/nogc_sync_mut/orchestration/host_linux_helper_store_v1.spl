@@ -139,6 +139,84 @@ pub fn host_linux_helper_store_open_v1(journal_root: text) -> Result<text, text>
             Ok(checked)
         case HostLinuxHelperStoreStateV1.Absent: Err(helper_store_invalid_v1())
 
+# ---- milestone_0043 (REVIEW_B P1-1): "never consumed" is a JOURNAL fact -------------------------------------------
+# PA lives only in the helper store, so its absence alone proves nothing: a store removed, restored or edited in place
+# loses PA without any journal trace. Two no-replace journal records (single writer: the capacity journal) close that:
+# - the reap marker, published by the agent BEFORE begin, says the row is begun under an open core that journals its
+#   consume intent (a row without it is never reaped);
+# - the consume intent, published by the open core BEFORE the PA publish, carries sha256 of the exact PA bytes.
+# The reap then reads `{}` as never-consumed only when no intent exists, and `{PA}` only with a matching intent.
+fn helper_reap_record_encode_v1(kind: text, operation_id: text, digest: text) -> Result<text, text>:
+    if not builder_identifier_valid_v1(operation_id): return Err("linux-helper-reap-record-value-invalid")
+    if digest == "":
+        val marker: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String(kind),
+            "operationId": SdnValue.String(operation_id)}
+        return Ok(sdn_encode_canonical(SdnValue.Dict(marker)) + "\n")
+    if not builder_digest_valid_v1(digest): return Err("linux-helper-reap-record-value-invalid")
+    val intent: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String(kind),
+        "operationId": SdnValue.String(operation_id), "consumedDigest": SdnValue.String(digest)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(intent)) + "\n")
+
+pub fn host_linux_helper_reap_marker_relative_v1(operation_id: text) -> text:
+    "host-helper-reap-markers/" + sha256_text(operation_id) + ".sdn"
+
+pub fn host_linux_helper_consume_intent_relative_v1(operation_id: text) -> text:
+    "host-helper-consume-intents/" + sha256_text(operation_id) + ".sdn"
+
+pub fn host_linux_helper_reap_marker_encode_v1(operation_id: text) -> Result<text, text>:
+    helper_reap_record_encode_v1("host-helper-reap-marker", operation_id, "")
+
+pub fn host_linux_helper_consume_intent_encode_v1(operation_id: text, consumed_digest: text) -> Result<text, text>:
+    if consumed_digest == "": return Err("linux-helper-reap-record-value-invalid")
+    helper_reap_record_encode_v1("host-helper-consume-intent", operation_id, consumed_digest)
+
+# Ok(digest) of a canonical consume intent for this operation; Err on any other shape.
+pub fn host_linux_helper_consume_intent_decode_v1(source: text, operation_id: text) -> Result<text, text>:
+    val fields = host_helper_stream_fields_v1(source, "host-helper-consume-intent", ["version", "kind", "operationId",
+        "consumedDigest"])?
+    if host_helper_stream_text_v1(fields, "operationId")? != operation_id: return Err("linux-helper-consume-intent-mismatch")
+    val digest = host_helper_stream_text_v1(fields, "consumedDigest")?
+    if host_linux_helper_consume_intent_encode_v1(operation_id, digest)? != source:
+        return Err("linux-helper-consume-intent-noncanonical")
+    Ok(digest)
+
+# A same-content re-publish is idempotent; any other existing content names its own refusal.
+fn helper_reap_record_publish_v1(journal: DistributedOperationJournalV2, relative: text, bytes: text,
+        mismatch: text) -> Result<(), text>:
+    val published = host_helper_object_publish_owned_v2(journal, relative, bytes)
+    if published.is_err():
+        if published.unwrap_err() == "helper-request-retained-mismatch": return Err(mismatch)
+        return Err(published.unwrap_err())
+    Ok(())
+
+# The agent's mark, before begin, over the derived Valid store of this journal.
+pub fn host_linux_helper_reap_mark_v1(journal: DistributedOperationJournalV2, store_root: text,
+        operation_id: text) -> Result<(), text>:
+    val _bound = host_linux_helper_store_bound_v1(journal, store_root)?
+    helper_reap_record_publish_v1(journal, host_linux_helper_reap_marker_relative_v1(operation_id),
+        host_linux_helper_reap_marker_encode_v1(operation_id)?, "linux-helper-reap-marker-mismatch")
+
+# The open core's intent, before the PA publish: on Ok the intent is durable; on Err PA was not published.
+pub fn host_linux_helper_consume_intent_publish_v1(journal: DistributedOperationJournalV2, operation_id: text,
+        consumed_bytes: text) -> Result<(), text>:
+    helper_reap_record_publish_v1(journal, host_linux_helper_consume_intent_relative_v1(operation_id),
+        host_linux_helper_consume_intent_encode_v1(operation_id, sha256_text(consumed_bytes))?,
+        "linux-helper-consume-intent-mismatch")
+
+# @allow(primitive_api) reviewed: the bool is "the reap marker exists and is canonical for this operation"
+pub fn host_linux_helper_reap_marked_v1(journal: DistributedOperationJournalV2, operation_id: text) -> Result<bool, text>:
+    match distributed_operation_journal_read_v3(journal, host_linux_helper_reap_marker_relative_v1(operation_id), 4096)?:
+        case Some(source):
+            if source != host_linux_helper_reap_marker_encode_v1(operation_id)?: return Err("linux-helper-reap-marker-mismatch")
+            Ok(true)
+        case None: Ok(false)
+
+pub fn host_linux_helper_consume_intent_v1(journal: DistributedOperationJournalV2,
+        operation_id: text) -> Result<Option<text>, text>:
+    match distributed_operation_journal_read_v3(journal, host_linux_helper_consume_intent_relative_v1(operation_id), 4096)?:
+        case Some(source): Ok(Some(host_linux_helper_consume_intent_decode_v1(source, operation_id)?))
+        case None: Ok(None)
+
 fn helper_journal_present_v1(journal: DistributedOperationJournalV2, relative: text,
         maximum: i64) -> Result<bool, text>:
     Ok((distributed_operation_journal_read_v3(journal, relative, maximum)?).is_some())

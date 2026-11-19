@@ -66,3 +66,29 @@ Owner decision: both. Design: `.spipe/simple_orchestrator/continuation_20261116/
 - Still held: rows begun before this change (no deadline record) until an operator abandon; `{PA}` whose group may still live; `{PA,N}`; a
   permanent capacity settle failure (state 8 root cause); the agent's in-memory `release-blocked`/`wedged` attachment (capacity is freed,
   the attachment object is not un-wedged). All specs NOT_RUN (no runnable binary).
+
+## Update 2026-11-19 (milestone_0043, Opus re-review B fixes; source-authored, NOT_RUN)
+- P1 fixed: "never consumed" is now a journal fact, not the absence of a store file. The agent publishes a reap marker
+  (`host-helper-reap-markers/<sha(op)>.sdn`) through the capacity journal BEFORE begin, and the open core publishes a consume
+  intent (`host-helper-consume-intents/<sha(op)>.sdn`, sha256 of the exact PA bytes) BEFORE the PA publish; an intent
+  error writes the pre-consume R (PA was not published). The reap reaps `{}` only with no intent and `{PA}` only with an
+  intent whose digest matches the PA bytes it puts into R. A store whose PA was deleted in place, restored from an older
+  backup or removed and re-created keeps the intent, so the row is held (no R, no release, no quarantine). A first store
+  identity design (inode+device+nonce) was dropped in review: it did not cover in-place restores and `st_dev` is not stable
+  across reboots. Rows without the reap marker (begun before this change) are never reaped (operator abandon only).
+  Residual: a crash between the intent and the PA publish holds that row for the operator abandon.
+- A recorded abandon is re-verified at restart (issuer, signatures, expiry, generation, revocation epoch, session, host)
+  before its settle. If that fails, or the marker is unreadable, the row stays charged and the reason is the startup
+  quarantine text (`helper-abandon-recorded-unverified:<reason>` / `helper-abandon-marker-unreadable:<reason>`). Every
+  charged unresolved helper row quarantines through the reconcile drain anyway; a "held but serving" outcome would be a
+  reconcile design change (owner decision). Recovery: a fresh signed abandon (settles in-incarnation, still accepted while
+  quarantined) and a restart. There is no signed withdraw of a recorded abandon.
+- A freshly signed abandon for the same helper binding finishes on the recorded marker in-incarnation. Residual: the
+  durable marker still names the original proof, so a later restart re-verifies that one (and holds again if it expired).
+- Abandon refusals echo expected beside given for the request/receipt digests and the observed marker text (`|` separates
+  the observed pair), after the signed command verified; no secrets.
+- Reap errors never quarantine startup (DESIGN Revision 3); the reap gates on `helper_kind == "attach-broker"` explicitly;
+  the unreachable `helper-deadline-expiry-mismatch` branch in begin was deleted.
+- Still open: a controller-side command that authors, signs and sends `helper-abandon` (owner decision: no controller
+  transport carries host-service domain actions, and `controller_authority_issue_v1` signs only the remote-build task
+  class, so it needs new signing authority; same gap as `service-handoff-abandon`).

@@ -30,7 +30,8 @@ use std.common.contracts.distributed_control_codec_v2.distributed_encode_operati
 use std.nogc_sync_mut.io.group_process_owner.group_process_stream_recover_v2
 use std.nogc_sync_mut.io.process_ops.PipedProcessOwnedSpawnV2
 use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.{host_linux_helper_store_bound_v1,
-    host_linux_helper_markers_v1, host_primary_open_entry_allowed_v1, host_linux_helper_refusal_publish_v1}
+    host_linux_helper_markers_v1, host_primary_open_entry_allowed_v1, host_linux_helper_refusal_publish_v1,
+    host_linux_helper_consume_intent_publish_v1}
 use std.common.contracts.container.primary_open_refusal_v1.container_primary_open_refusal_authorizes_v1
 use std.common.crypto.sha256.sha256_text
 
@@ -225,6 +226,11 @@ pub fn host_primary_attach_open_core_v1(input: HostPrimaryAttachCoreInputV1, pla
     if context.is_err(): return primary_core_refused_v1(turn, store, helper, "", context.unwrap_err())
     val encoded = host_primary_attach_consumed_encode_v1(refreshed.unwrap())
     if encoded.is_err(): return primary_core_refused_v1(turn, store, helper, "", encoded.unwrap_err())
+    # milestone_0043 (REVIEW_B P1-1): V4 world, the journal consume intent (PA digest) is durable BEFORE the PA publish,
+    # so the deadline reap never reads a lost PA as "never consumed". An intent error means PA was not published.
+    if val journal = store.journal:
+        val intent = host_linux_helper_consume_intent_publish_v1(journal, helper.operation.id, encoded.unwrap())
+        if intent.is_err(): return primary_core_refused_v1(turn, store, helper, "", intent.unwrap_err())
     turn.consumption_attempted = true
     val consumed = host_helper_stream_publish_v1(store.root, helper.operation.id,
         "primary-consumed", encoded.unwrap(), true)
