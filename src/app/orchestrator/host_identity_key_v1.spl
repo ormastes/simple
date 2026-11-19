@@ -4,7 +4,6 @@ use std.common.base_encoding.base64.{base64_decode_bytes, base64_encode_bytes}
 use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign, pure_ed25519_verify}
 use std.common.crypto.sha256.sha256_text
 use std.common.crypto.secure_memory.secure_zero_u8_slots
-use std.common.text_bytes.bytes_to_text
 use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
 
 pub struct HostIdentityGeneratedKeyV1:
@@ -88,33 +87,81 @@ pub fn host_identity_private_encode_v1(seed: [u8], public_key: [u8], check: [u8]
         return Err("host-identity-key-buffer-wipe")
     Ok(pem.bytes())
 
-# Decode only our bounded unencrypted Ed25519 OpenSSH format. Validate both
-# embedded public copies against a public key re-derived from the private seed.
-# Errors are fixed codes; neither the private PEM nor a substring is returned.
-# The one parser for both uses: the seed stays a local of this function and is
-# wiped on the success and signing-refusal returns (the earlier consistency
-# refusals return before the wipe, as before). With `sign`, the derived public key must equal the
-# caller's protected key and the signature is checked before it is released.
-fn host_identity_private_use_v1(private_file: [u8], sign: bool, required_public_key: [u8],
-        message: [u8], domain_line: text) -> Result<HostIdentityPrivateUseV1, text>:
-    if private_file.len() < 300 or private_file.len() > 4096:
-        return Err("host-identity-private-size")
-    for byte in private_file:
-        if byte != 10u8 and (byte < 32u8 or byte > 126u8):
-            return Err("host-identity-private-format")
-    val source = bytes_to_text(private_file)
-    val header = "-----BEGIN OPENSSH PRIVATE KEY-----\n"
-    val footer = "-----END OPENSSH PRIVATE KEY-----\n"
-    if not source.starts_with(header) or not source.ends_with(footer):
-        return Err("host-identity-private-format")
-    val encoded_lines = source.substring(header.byte_len(), source.byte_len() - footer.byte_len())
-    var encoded = ""
-    for line in encoded_lines.split("\n"):
-        if line.len() > 70: return Err("host-identity-private-format")
-        encoded = encoded + line
-    var raw = base64_decode_bytes(encoded)
-    if raw.len() < 234 or raw.len() > 512: return Err("host-identity-private-format")
-    if base64_encode_bytes(raw) != encoded: return Err("host-identity-private-format")
+struct HostIdentityPrivateRunV1:
+    outcome: Result<HostIdentityPrivateUseV1, text>
+    # Count of owned private buffers (decoded body, seed, expanded private key) whose wipe was verified.
+    wiped: i64
+
+fn host_identity_b64_value_v1(byte: u8) -> i64:
+    val c = byte as i64
+    if c >= 65 and c <= 90: return c - 65
+    if c >= 97 and c <= 122: return c - 97 + 26
+    if c >= 48 and c <= 57: return c - 48 + 52
+    if c == 43: return 62
+    if c == 47: return 63
+    -1
+
+# Strict canonical base64 over the armour body, read straight from the [u8] (no text copy of the private
+# section exists): lines of at most 70 characters, padding only in the final quad, zero leftover bits. Returns
+# the decoded bytes, or [] after wiping any partial output.
+fn host_identity_pem_decode_v1(file: [u8], start: i64, end: i64) -> [u8]:
+    var out: [u8] = []
+    var values = [0, 0, 0, 0]
+    var count = 0
+    var pad = 0
+    var ended = false
+    var line = 0
+    var failed = false
+    var index = start
+    while index < end and not failed:
+        val byte = file[index]
+        index = index + 1
+        if byte == 10u8:
+            line = 0
+        else:
+            line = line + 1
+            if line > 70 or ended: failed = true
+            elif byte == 61u8:
+                if count < 2: failed = true
+                else:
+                    pad = pad + 1
+                    count = count + 1
+            else:
+                val value = host_identity_b64_value_v1(byte)
+                if value < 0 or pad > 0: failed = true
+                else:
+                    values[count] = value
+                    count = count + 1
+            if not failed and count == 4:
+                out.push(((values[0] << 2) | (values[1] >> 4)) as u8)
+                if pad == 2 and (values[1] & 15) != 0: failed = true
+                if pad < 2: out.push((((values[1] & 15) << 4) | (values[2] >> 2)) as u8)
+                if pad == 1 and (values[2] & 3) != 0: failed = true
+                if pad == 0: out.push((((values[2] & 3) << 6) | values[3]) as u8)
+                if pad > 0: ended = true
+                count = 0
+                pad = 0
+                values = [0, 0, 0, 0]
+    if count != 0: failed = true
+    if failed:
+        if out.len() > 0: secure_zero_u8_slots(out)
+        return []
+    out
+
+fn host_identity_private_ascii_v1(prefix: [u8], file: [u8], at: i64) -> bool:
+    if at < 0 or at + prefix.len() > file.len(): return false
+    for index in 0..prefix.len():
+        if file[at + index] != prefix[index]: return false
+    true
+
+fn host_identity_private_refuse_v1(code: text, wiped: i64) -> HostIdentityPrivateRunV1:
+    HostIdentityPrivateRunV1(outcome: Err(code), wiped: wiped)
+
+# Validate the decoded OpenSSH body and the derived public key; no buffer is wiped here (the caller owns the
+# single exit). With `sign`, the derived public key must equal the caller's protected key and the signature is
+# checked before it is released.
+fn host_identity_private_check_v1(raw: [u8], seed: [u8], expected_public: [u8], sign: bool,
+        required_public_key: [u8], message: [u8], domain_line: text) -> Result<HostIdentityPrivateUseV1, text>:
     val fixed = ("openssh-key-v1".bytes() + [0u8] + host_identity_ssh_string_v1("none".bytes()) +
         host_identity_ssh_string_v1("none".bytes()) + host_identity_ssh_string_v1([]) + host_identity_u32_v1(1))
     for index in 0..fixed.len():
@@ -138,9 +185,6 @@ fn host_identity_private_use_v1(private_file: [u8], sign: bool, required_public_
     for index in 0..padding_count:
         if raw[229 + comment_length + index] != (index + 1) as u8:
             return Err("host-identity-private-padding")
-    var seed = host_identity_slice_v1(raw, 161, 32)
-    val pair = pure_ed25519_keypair_from_seed(seed)
-    val expected_public = pair.1
     if expected_public.len() != 32: return Err("host-identity-private-consistency")
     for index in 0..32:
         if (raw[62 + index] != expected_public[index] or raw[125 + index] != expected_public[index] or
@@ -150,28 +194,56 @@ fn host_identity_private_use_v1(private_file: [u8], sign: bool, required_public_
     for index in 0..51:
         if raw[43 + index] != expected_wire[index]: return Err("host-identity-private-consistency")
     var signature: [u8] = []
-    var sign_error = ""
     if sign:
-        if required_public_key.len() != 32: sign_error = "host-identity-sign-key-size"
-        elif message.len() < 1 or message.len() > 65536: sign_error = "host-identity-sign-message-size"
-        elif not host_identity_sign_domain_v1(message, domain_line): sign_error = "host-identity-sign-domain"
-        else:
-            var same = true
-            for index in 0..32:
-                if required_public_key[index] != expected_public[index]: same = false
-            if not same: sign_error = "host-identity-sign-key-differs"
-            else:
-                signature = pure_ed25519_sign(seed, expected_public, message)
-                if signature.len() != 64 or not pure_ed25519_verify(expected_public, message, signature):
-                    signature = []
-                    sign_error = "host-identity-sign-failed"
-    val result = host_identity_public_parse_v1("ssh-ed25519 " + base64_encode_bytes(expected_wire))
+        if required_public_key.len() != 32: return Err("host-identity-sign-key-size")
+        if message.len() < 1 or message.len() > 65536: return Err("host-identity-sign-message-size")
+        if not host_identity_sign_domain_v1(message, domain_line): return Err("host-identity-sign-domain")
+        for index in 0..32:
+            if required_public_key[index] != expected_public[index]: return Err("host-identity-sign-key-differs")
+        signature = pure_ed25519_sign(seed, expected_public, message)
+        if signature.len() != 64 or not pure_ed25519_verify(expected_public, message, signature):
+            return Err("host-identity-sign-failed")
+    val public_key = host_identity_public_parse_v1("ssh-ed25519 " + base64_encode_bytes(expected_wire))?
+    Ok(HostIdentityPrivateUseV1(public_key: public_key, signature: signature))
+
+# Decode only our bounded unencrypted Ed25519 OpenSSH format. Validate both embedded public copies against a
+# public key re-derived from the private seed. Errors are fixed codes; neither the private PEM nor a substring
+# is returned. The armour and base64 are parsed on the [u8] directly, so the only private copies are the decoded
+# body `raw`, the `seed` slice and the expanded private key `pair.0`, all [u8]; every exit after the decode
+# passes the one wipe below (a failed wipe overrides the outcome).
+fn host_identity_private_run_v1(private_file: [u8], sign: bool, required_public_key: [u8],
+        message: [u8], domain_line: text) -> HostIdentityPrivateRunV1:
+    if private_file.len() < 300 or private_file.len() > 4096:
+        return host_identity_private_refuse_v1("host-identity-private-size", 0)
+    for byte in private_file:
+        if byte != 10u8 and (byte < 32u8 or byte > 126u8):
+            return host_identity_private_refuse_v1("host-identity-private-format", 0)
+    val header = "-----BEGIN OPENSSH PRIVATE KEY-----\n".bytes()
+    val footer = "-----END OPENSSH PRIVATE KEY-----\n".bytes()
+    if (not host_identity_private_ascii_v1(header, private_file, 0) or
+            not host_identity_private_ascii_v1(footer, private_file, private_file.len() - footer.len())):
+        return host_identity_private_refuse_v1("host-identity-private-format", 0)
+    var raw = host_identity_pem_decode_v1(private_file, header.len(), private_file.len() - footer.len())
+    if raw.len() < 234 or raw.len() > 512:
+        if raw.len() == 0: return host_identity_private_refuse_v1("host-identity-private-format", 0)
+        val short_wipe = secure_zero_u8_slots(raw)
+        return host_identity_private_refuse_v1("host-identity-private-format", if short_wipe.verified(): 1 else: 0)
+    var seed = host_identity_slice_v1(raw, 161, 32)
+    var pair = pure_ed25519_keypair_from_seed(seed)
+    val outcome = host_identity_private_check_v1(raw, seed, pair.1, sign, required_public_key, message, domain_line)
     val seed_wipe = secure_zero_u8_slots(seed)
     val raw_wipe = secure_zero_u8_slots(raw)
-    if not seed_wipe.verified() or not raw_wipe.verified(): return Err("host-identity-key-buffer-wipe")
-    if sign_error != "": return Err(sign_error)
-    val public_key = result?
-    Ok(HostIdentityPrivateUseV1(public_key: public_key, signature: signature))
+    val secret_wipe = secure_zero_u8_slots(pair.0)
+    var wiped = 0
+    if seed_wipe.verified(): wiped = wiped + 1
+    if raw_wipe.verified(): wiped = wiped + 1
+    if secret_wipe.verified(): wiped = wiped + 1
+    if wiped != 3: return host_identity_private_refuse_v1("host-identity-key-buffer-wipe", wiped)
+    HostIdentityPrivateRunV1(outcome: outcome, wiped: wiped)
+
+fn host_identity_private_use_v1(private_file: [u8], sign: bool, required_public_key: [u8],
+        message: [u8], domain_line: text) -> Result<HostIdentityPrivateUseV1, text>:
+    host_identity_private_run_v1(private_file, sign, required_public_key, message, domain_line).outcome
 
 pub fn host_identity_private_public_v1(private_file: [u8]) -> Result<HostPublicKeyV1, text>:
     val used = host_identity_private_use_v1(private_file, false, [], [], "")?
