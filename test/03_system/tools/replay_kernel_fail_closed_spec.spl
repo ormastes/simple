@@ -10,8 +10,9 @@
 
 use std.spec.*
 use os.kernel.replay.mode.{KernelReplayMode, replay_set_mode}
-use os.kernel.replay.log_buffer.{replay_buffer_reset, replay_window_complete}
+use os.kernel.replay.log_buffer.{replay_buffer_reset, replay_window_complete, replay_event_count}
 use os.kernel.replay.divergence.{clear_divergences, get_divergence_count}
+use std.replay.portable_replay.{portable_replay_pending, PR_FAIL_CLOSED_VALUE}
 use os.kernel.replay.hooks.{replay_hook_timer_read, replay_hook_random_read, replay_hook_schedule}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.types.task_types.{TaskPriority}
@@ -56,6 +57,45 @@ describe "kernel replay fail-closed (RR-02)":
         replay_set_mode(KernelReplayMode.Replay)
         replay_hook_random_read(1, 5)
         expect(get_divergence_count()).to_equal(1)
+
+    it "timer replay divergence returns the fail-closed value, not the live read (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_timer_read(3, 777)
+        replay_set_mode(KernelReplayMode.Replay)
+        expect(replay_hook_timer_read(4, 1234)).to_equal(PR_FAIL_CLOSED_VALUE)
+        expect(replay_hook_timer_read(3, 1234)).to_equal(PR_FAIL_CLOSED_VALUE)
+        expect(get_divergence_count()).to_equal(2)
+
+    it "random replay returns the recorded value with no divergence (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_random_read(1, 55)
+        replay_set_mode(KernelReplayMode.Replay)
+        expect(replay_hook_random_read(1, 9)).to_equal(55)
+        expect(get_divergence_count()).to_equal(0)
+
+    it "random replay at end-of-log diverges and fails closed (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Replay)
+        expect(replay_hook_random_read(1, 9)).to_equal(PR_FAIL_CLOSED_VALUE)
+        expect(get_divergence_count()).to_equal(1)
+
+    it "timer verify returns the live read and reports a changed value (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_timer_read(3, 777)
+        replay_set_mode(KernelReplayMode.Verify)
+        expect(replay_hook_timer_read(3, 778)).to_equal(778)
+        expect(get_divergence_count()).to_equal(1)
+
+    it "timer and random reads are logged by the portable core, not the kernel ring (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_timer_read(3, 777)
+        replay_hook_random_read(1, 55)
+        expect(portable_replay_pending()).to_equal(2)
+        expect(replay_event_count()).to_equal(0)
 
     it "schedule replay that matches the log reports no divergence":
         _reset()
