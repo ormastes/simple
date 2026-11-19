@@ -113,36 +113,34 @@ and the graph wire DTO `TraceGraphLocatorV1.locator_kind` are now the closed enu
 The §2 claim covers only the model structs. A field/param/return census over
 src/lib/common/traceability, src/app/traceability, main_lazy_trace_tools,
 main_lazy_ctx_tools, test_query_cli (fn params/returns on pub fn|me plus pub
-struct/class fields typed bool/int/i*/u*/f*) found 168 findings. The codec limit
-families (graph, declarations, document, qualification, conventions; 28 fields)
-now use `TraceCountLimitV1` / `TraceByteLimitV1` (envelope_types_v1.spl); 140 remain.
-32 of those are the `value` payload of single-field newtypes themselves (irreducible).
+struct/class fields typed bool/int/i*/u*/f*) found 168 findings. PR #10255 changed 30
+fields (the codec limit families graph, declarations, document, qualification,
+conventions: 28 `max_*` fields, plus the 2 `TraceCodecTextBudgetV1` limits) to
+`TraceCountLimitV1` / `TraceByteLimitV1` (envelope_types_v1.spl); 140 remained.
+32 of those were the `value` payload of single-field newtypes themselves (irreducible).
+
+Follow-up 2026-11-18 (src/lib/common/traceability, excluding test_query.spl and
+case_events.spl): the 72 non-newtype findings there are now 0. Bare bool flags became
+two-variant enums (`TraceCompletenessV1`, `TraceAvailabilityV1`, `TraceChangeStateV1`,
+`TraceRebuildScopeV1`, `TraceStageStateV1`, `TraceLookupOutcomeV1`, `TraceExecutionStateV1`,
+`TraceSeedStateV1`, `TraceFailFastV1`, `TraceParallelismV1`, `TraceSelectionScopeV1`;
+existing `TraceOverridePermissionV1`, `TraceCodecValidityV1`, `TracePageCompletenessV1`
+reused); counts, positions and codes became `value` newtypes
+(`TraceLineNumberV1`, `TraceColumnNumberV1`, `TraceByteOffsetV1`, `TraceUsedCountV1`,
+`TraceCoverageCountV1`, `TraceAttemptNumberV1`, `TraceTimeoutSecsV1`, `TraceSeedV1`,
+`TraceWorkerCountV1`, `TraceShardIndexV1`, `TraceShardCountV1`, `TraceEvaluationExitCodeV1`;
+existing `TraceCountLimitV1`, `TraceGraphByteCountV1`, `TracePageLimitV1`,
+`TraceResultCountV1` reused). The scanner now reports 28 findings in that scope, all `value`
+payloads of single-field newtypes (15 before, 13 new newtypes). Whole-surface totals:
+140 -> 81 remaining (45 irreducible `value` payloads, 36 non-newtype, all in src/app).
 Remaining non-newtype findings by file (count):
 
 - src/app/mcp/main_lazy_ctx_tools.spl: 14
-- src/lib/common/traceability/evidence_model.spl: 9
-- src/lib/common/traceability/graph_types_v1.spl: 8
-- src/lib/common/traceability/execution_config.spl: 8
-- src/lib/common/traceability/qualification_types_v1.spl: 7
-- src/lib/common/traceability/incremental.spl: 7
 - src/app/traceability/capture_v1.spl: 7
-- src/lib/common/traceability/model.spl: 5
-- src/lib/common/traceability/envelope_types_v1.spl: 5
-- src/lib/common/traceability/sspec_inventory.spl: 4
-- src/lib/common/traceability/declarations_types_v1.spl: 4
-- src/lib/common/traceability/run_plan.spl: 3
-- src/lib/common/traceability/query_refs_v1.spl: 3
 - src/app/traceability/snapshot/git_provider.spl: 3
 - src/app/traceability/query_options_v1.spl: 3
 - src/app/traceability/cli_options_v1.spl: 3
-- src/lib/common/traceability/legacy_bugs_v1.spl: 2
-- src/lib/common/traceability/conventions_types_v1.spl: 2
 - src/app/traceability/extract/snapshot_partitions.spl: 2
-- src/lib/common/traceability/sidecar_v1.spl: 1
-- src/lib/common/traceability/reverse_index_cache_v1.spl: 1
-- src/lib/common/traceability/query_nodes_v1.spl: 1
-- src/lib/common/traceability/conventions_result_v1.spl: 1
-- src/lib/common/traceability/codec_text_budget_v1.spl: 1
 - src/app/traceability/snapshot_preview.spl: 1
 - src/app/traceability/snapshot/git_batch.spl: 1
 - src/app/traceability/extract/snapshot_pipeline.spl: 1

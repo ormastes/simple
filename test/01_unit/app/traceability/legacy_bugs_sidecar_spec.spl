@@ -10,6 +10,8 @@ use std.common.traceability.query_nodes_v1.{TraceNodeQueryV1, query_trace_nodes_
 use app.traceability.query_options_v1.{trace_query_options_parse_v1}
 use app.traceability.cli_options_v1.{TraceCliFlagV1}
 use app.traceability.extract.snapshot_pipeline.{TraceSnapshotScope, build_snapshot_trace_graph, build_snapshot_trace_graph_with_sidecar_v1}
+use std.common.traceability.envelope_types_v1.*
+use std.common.traceability.trace_ids_v1.*
 
 fn fixture_db() -> text:
     "strings |id, value|\n\n" +
@@ -30,7 +32,7 @@ fn fixture_db() -> text:
 fn sidecar_snapshot() -> SnapshotInput:
     val source = SnapshotArtifact(path: "src/app/parser.spl", blob_id: "blob:source", content: "fn parse(): 1", visibility: "selected_content")
     SnapshotInput(subject: SnapshotSubject(repository_id: "repo:fixture", snapshot_id: "snapshot:tree:a",
-        kind: "worktree_preview", revision_id: "", tree_id: "tree:a", object_format: "sha256"), artifacts: [source], complete: true)
+        kind: "worktree_preview", revision_id: "", tree_id: "tree:a", object_format: "sha256"), artifacts: [source], complete: TraceCompletenessV1.Complete)
 
 fn sidecar_policy() -> TracePolicy:
     TracePolicy(id: TraceEntityIdV1(value: "policy:fixture"), authorities: [], max_nodes: TraceNodeLimitV1(value: 100), max_claims: TraceClaimLimitV1(value: 100), conventions: [])
@@ -52,7 +54,7 @@ describe "Legacy bug-DB row parsing":
         expect(source.rows.len()).to_equal(4)
         expect(source.rows[0].id).to_equal("bug:alpha_2026-11-06")
         expect(source.rows[0].title).to_equal("Alpha, with comma and \"quote\" and $dollar")
-        expect(source.rows[0].line).to_equal(12)
+        expect(source.rows[0].line.value).to_equal(12)
         expect(source.rows[0].reproducible_by).to_equal("test/01_unit/app/x_spec.spl")
         # Shared id: the active row wins over the archived twin.
         expect(source.rows[1].status).to_equal("fixed")
@@ -60,7 +62,7 @@ describe "Legacy bug-DB row parsing":
         # Unsafe file column is dropped, the row and its valid flag are kept.
         expect(source.rows[2].id).to_equal("bug:unsafe_2026-11-06")
         expect(source.rows[2].file).to_equal("")
-        expect(source.rows[2].valid).to_be(false)
+        expect(source.rows[2].valid == TraceCodecValidityV1.Valid).to_be(false)
         expect(source.rows[3].id).to_equal("bug:gamma_2026-11-06")
         expect(source.rows[3].table).to_equal("bugs")
         # Diagnostics: duplicate inside bugs_active, 11-field row, unsafe path.
@@ -89,7 +91,7 @@ describe "Legacy bug-DB row parsing":
         expect(at_path[0].from_id).to_equal("bug:gamma_2026-11-06")
         val summary = legacy_bug_sidecar_source_v1(source)
         expect(summary.kind).to_equal("bug-db/v1")
-        expect(summary.row_count).to_equal(4)
+        expect(summary.row_count.value).to_equal(4)
 
     it "matches rows on exact status and severity and on a file prefix":
         # @ac AC-TRC-044
@@ -131,11 +133,11 @@ describe "Legacy bug-DB sidecar identity and paging":
             [legacy_bug_sidecar_source_v1(source)], legacy_bug_nodes_v1(source), []).unwrap()
         val graph = build.graph
         val page = query_trace_nodes_v1(graph, TraceNodeQueryV1(snapshot_id: graph.subject.snapshot_id,
-            operation: "list", kind: "bugs", limit: 2)).unwrap()
+            operation: "list", kind: "bugs", limit: TracePageLimitV1(value: 2))).unwrap()
         expect(page.total_count.value).to_equal(4)
         expect(page.nodes[0].id).to_equal("bug:alpha_2026-11-06")
         expect(page.next_cursor.value != "").to_be(true)
-        var folded = TraceNodeQueryV1(snapshot_id: graph.subject.snapshot_id, operation: "list", kind: "bugs", limit: 2,
+        var folded = TraceNodeQueryV1(snapshot_id: graph.subject.snapshot_id, operation: "list", kind: "bugs", limit: TracePageLimitV1(value: 2),
             visibility_context: "local-selected-content/v1;status=open;severity=;file=")
         folded.cursor = page.next_cursor.value
         expect(query_trace_nodes_v1(graph, folded).is_err()).to_be(true)

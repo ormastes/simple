@@ -16,6 +16,7 @@ use std.common.traceability.graph_v1.{trace_graph_from_value_v1}
 use std.common.traceability.qualification_types_v1.{trace_qualification_codec_limits_v1}
 use std.common.traceability.qualification_v1.{trace_qualification_from_value_v1}
 use std.common.traceability.encode_v1.{trace_document_decode_v1, trace_document_encode_v1}
+use std.common.traceability.envelope_types_v1.*
 
 fn declaration_fixture_v1() -> TraceDeclarationsV1:
     TraceDeclarationsV1(id: "declarations:one", namespace: "project/simple",
@@ -24,11 +25,11 @@ fn declaration_fixture_v1() -> TraceDeclarationsV1:
         aliases: [TraceAliasDeclarationV1(id: "alias:A", from_id: "feature:old", to_id: "feature:A", origin_id: "origin:A"),
             TraceAliasDeclarationV1(id: "alias:B", from_id: "feature:old", to_id: "feature:B", origin_id: "origin:B")],
         exceptions: [TraceExceptionDeclarationV1(id: "exception:A", scope_kind: "requirement", subject_id: "req:R", rule_id: "rule:coverage",
-                reason: "λ, reviewed intent", owner: "owner:one", review_state: "reviewed", expires_available: true, expires_at: "2028-02-29T23:59:59Z", origin_id: "origin:A"),
+                reason: "λ, reviewed intent", owner: "owner:one", review_state: "reviewed", expires_available: TraceAvailabilityV1.Available, expires_at: "2028-02-29T23:59:59Z", origin_id: "origin:A"),
             TraceExceptionDeclarationV1(id: "exception:B", scope_kind: "input_path", subject_id: "src/λ\ninput.spl", rule_id: "rule:scope", reason: "Pending review",
-                owner: "owner:two", review_state: "proposed", expires_available: false, expires_at: "", origin_id: "origin:B")],
-        origins: [TraceDeclarationOriginV1(id: "origin:A", origin_kind: "explicit", path: "doc/λ\nintent.sdn", span_available: true, line: 4, column: 5, extractor_version: "extract/v1"),
-            TraceDeclarationOriginV1(id: "origin:B", origin_kind: "annotation", path: "src/input.spl", span_available: false, line: 0, column: 0, extractor_version: "extract/v1")])
+                owner: "owner:two", review_state: "proposed", expires_available: TraceAvailabilityV1.Absent, expires_at: "", origin_id: "origin:B")],
+        origins: [TraceDeclarationOriginV1(id: "origin:A", origin_kind: "explicit", path: "doc/λ\nintent.sdn", span_available: TraceAvailabilityV1.Available, line: TraceLineNumberV1(value: 4), column: TraceColumnNumberV1(value: 5), extractor_version: "extract/v1"),
+            TraceDeclarationOriginV1(id: "origin:B", origin_kind: "annotation", path: "src/input.spl", span_available: TraceAvailabilityV1.Absent, line: TraceLineNumberV1(value: 0), column: TraceColumnNumberV1(value: 0), extractor_version: "extract/v1")])
 
 fn declaration_source_v1(document: TraceDeclarationsV1) -> text:
     var accepted = false
@@ -77,8 +78,8 @@ fn declaration_raw_refusal_v1(value: SdnValue, limits: TraceDeclarationsCodecLim
         case Err(issue):
             refused = true
             expect(issue.code).to_equal(code)
-            expect(issue.location_available).to_equal(false)
-            expect(issue.line).to_equal(0)
+            expect(issue.location_available).to_equal(TraceAvailabilityV1.Absent)
+            expect(issue.line.value).to_equal(0)
     expect(refused).to_equal(true)
 
 fn declaration_encode_refusal_v1(document: TraceDeclarationsV1, limits: TraceDeclarationsCodecLimitsV1, code: text):
@@ -163,11 +164,11 @@ describe "Document dispatch and authored declarations acceptance":
         expect(document.aliases[0].to_id).to_equal("feature:A")
         expect(document.aliases[1].to_id).to_equal("feature:B")
         expect(document.origins[0].path).to_equal("doc/λ\nintent.sdn")
-        expect(document.origins[0].span_available).to_equal(true)
-        expect(document.origins[0].line).to_equal(4)
-        expect(document.origins[0].column).to_equal(5)
+        expect(document.origins[0].span_available).to_equal(TraceAvailabilityV1.Available)
+        expect(document.origins[0].line.value).to_equal(4)
+        expect(document.origins[0].column.value).to_equal(5)
         expect(document.origins[1].origin_kind).to_equal("annotation")
-        expect(document.origins[1].span_available).to_equal(false)
+        expect(document.origins[1].span_available).to_equal(TraceAvailabilityV1.Absent)
 
     it "preserves exception review and availability as untrusted authored facts":
         # @req: REQ-TRC-019
@@ -180,7 +181,7 @@ describe "Document dispatch and authored declarations acceptance":
         expect(document.exceptions[0].expires_at).to_equal("2028-02-29T23:59:59Z")
         expect(document.exceptions[1].review_state).to_equal("proposed")
         expect(document.exceptions[1].subject_id).to_equal("src/λ\ninput.spl")
-        expect(document.exceptions[1].expires_available).to_equal(false)
+        expect(document.exceptions[1].expires_available).to_equal(TraceAvailabilityV1.Absent)
         expect(document.exceptions[1].expires_at).to_equal("")
 
     it "validates real UTC calendar dates and expiry availability":
@@ -193,7 +194,7 @@ describe "Document dispatch and authored declarations acceptance":
             expect(declaration_validation_code_v1(document)).to_equal("invalid_expiry")
         document.exceptions[0].expires_at = "2000-02-29T00:00:00Z"
         expect(declaration_validation_code_v1(document)).to_equal("accepted")
-        document.exceptions[0].expires_available = false
+        document.exceptions[0].expires_available = TraceAvailabilityV1.Absent
         expect(declaration_validation_code_v1(document)).to_equal("invalid_expiry")
 
     it "rejects duplicate identities, missing origins and invalid fields":
@@ -351,14 +352,14 @@ describe "Document dispatch and authored declarations acceptance":
         graph_limits.sdn.max_nodes = 69
         var graph_refused = false
         match trace_graph_from_value_v1(declaration_raw_v1(generic_graph_source_v1()), graph_limits):
-            case Err(issue): graph_refused = issue.code == "node_limit" and not issue.location_available
+            case Err(issue): graph_refused = issue.code == "node_limit" and issue.location_available == TraceAvailabilityV1.Absent
             case Ok(_): ()
         expect(graph_refused).to_equal(true)
         var qualification_limits = trace_qualification_codec_limits_v1()
         qualification_limits.sdn.max_nodes = 36
         var qualification_refused = false
         match trace_qualification_from_value_v1(declaration_raw_v1(generic_qualification_source_v1()), qualification_limits):
-            case Err(issue): qualification_refused = issue.code == "node_limit" and not issue.location_available
+            case Err(issue): qualification_refused = issue.code == "node_limit" and issue.location_available == TraceAvailabilityV1.Absent
             case Ok(_): ()
         expect(qualification_refused).to_equal(true)
 
@@ -422,7 +423,7 @@ describe "Document dispatch and authored declarations acceptance":
         graph_fields[key] = SdnValue.Int(1)
         var graph_refused = false
         match trace_graph_from_value_v1(SdnValue.Dict(graph_fields), graph_limits):
-            case Err(issue): graph_refused = issue.code == "text_limit" and not issue.location_available
+            case Err(issue): graph_refused = issue.code == "text_limit" and issue.location_available == TraceAvailabilityV1.Absent
             case Ok(_): ()
         expect(graph_refused).to_equal(true)
         var qualification_fields: Dict<text, SdnValue> = {}
@@ -439,6 +440,6 @@ describe "Document dispatch and authored declarations acceptance":
         qualification_fields[key] = SdnValue.Int(1)
         var qualification_refused = false
         match trace_qualification_from_value_v1(SdnValue.Dict(qualification_fields), qualification_limits):
-            case Err(issue): qualification_refused = issue.code == "text_limit" and not issue.location_available
+            case Err(issue): qualification_refused = issue.code == "text_limit" and issue.location_available == TraceAvailabilityV1.Absent
             case Ok(_): ()
         expect(qualification_refused).to_equal(true)

@@ -7,6 +7,7 @@ use std.common.traceability.schema.{trace_entity_id_parse_v1}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.traceability.trace_ids_v1.{TracePageLimitV1, TraceResultCountV1, TracePageCompletenessV1}
 
 pub struct TraceNodeQueryV1:
     snapshot_id: text
@@ -14,7 +15,7 @@ pub struct TraceNodeQueryV1:
     kind: text
     selected_id: text = ""
     id_prefix: text = ""
-    limit: i64 = 100
+    limit: TracePageLimitV1 = TracePageLimitV1(value: 100)
     cursor: text = ""
     visibility_context: text = "local-selected-content/v1"
 
@@ -31,7 +32,7 @@ pub fn trace_node_query_validate_v1(query: TraceNodeQueryV1) -> Result<TraceNode
     val kind = trace_node_query_kind_v1(query.kind)?
     if query.operation != "list" and query.operation != "show":
         return Err("TRACE-QUERY-INVALID: expected list or show")
-    if query.limit < 1 or query.limit > 200:
+    if query.limit.value < 1 or query.limit.value > 200:
         return Err("TRACE-QUERY-INVALID: limit must be between 1 and 200")
     if query.id_prefix.len() > 1024 or query.cursor.len() > 256 or query.visibility_context == "":
         return Err("TRACE-QUERY-INVALID: query field exceeds its bound or lacks visibility context")
@@ -51,7 +52,7 @@ fn node_cursor_prefix_v1(graph: TraceGraph, query: TraceNodeQueryV1) -> text:
         "generation": SdnValue.String(graph.generation_id),
         "operation": SdnValue.String(query.operation), "kind": SdnValue.String(query.kind),
         "selected": SdnValue.String(query.selected_id), "prefix": SdnValue.String(query.id_prefix),
-        "limit": SdnValue.Int(query.limit), "visibility": SdnValue.String(query.visibility_context),
+        "limit": SdnValue.Int(query.limit.value), "visibility": SdnValue.String(query.visibility_context),
         "order": SdnValue.String("canonical-id/v1")})
     "tn1:" + sha256_text(sdn_encode_canonical(shape)) + ":"
 
@@ -89,9 +90,9 @@ pub fn query_trace_nodes_v1(graph: TraceGraph, query: TraceNodeQueryV1) -> Resul
         for ch in digits.chars():
             if not "0123456789".contains(ch): return Err("TRACE-QUERY-CURSOR: malformed offset")
         offset = digits.to_int()
-        if offset >= ids.len() or offset == 0 or offset % query.limit != 0 or digits != offset.to_text():
+        if offset >= ids.len() or offset == 0 or offset % query.limit.value != 0 or digits != offset.to_text():
             return Err("TRACE-QUERY-CURSOR: offset is not a continuation page")
-    var end = offset + query.limit
+    var end = offset + query.limit.value
     if end > ids.len(): end = ids.len()
     var nodes: [TraceNode] = []
     for index in offset..end: nodes.push(by_id[ids[index]])

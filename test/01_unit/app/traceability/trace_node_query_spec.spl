@@ -11,11 +11,13 @@ use app.traceability.query_options_v1.{trace_query_options_parse_v1, TraceQueryO
 use app.traceability.query_render_v1.{trace_query_render_v1, trace_query_table_diagnostics_v1}
 use app.traceability.extract.snapshot_pipeline.{TraceSnapshotScope, TraceSnapshotBuild, TraceAdmissionEligibility}
 use app.cli.command_registry.{cli_registry_payload_text_v1}
+use std.common.traceability.envelope_types_v1.*
+use std.common.traceability.trace_ids_v1.*
 
 fn node_query_graph() -> TraceGraph:
     TraceGraph(subject: SnapshotSubject(repository_id: "repo:test", snapshot_id: "snapshot:one",
         kind: "git_commit", revision_id: "commit:one", tree_id: "tree:one", object_format: "sha256"),
-        input_manifest_id: "inputs:one", generation_id: "generation:one", complete: true,
+        input_manifest_id: "inputs:one", generation_id: "generation:one", complete: TraceCompletenessV1.Complete,
         nodes: [TraceNode(id: "feature:z", kind: TraceNodeKind.Feature, title: "Last"),
             TraceNode(id: "req:a", kind: TraceNodeKind.Requirement, title: "Requirement"),
             TraceNode(id: "feature:a", kind: TraceNodeKind.Feature, title: "First\nspoof"),
@@ -23,7 +25,7 @@ fn node_query_graph() -> TraceGraph:
         test_definitions: [], claims: [], edges: [], edge_origins: [], origins: [], locators: [], diagnostics: [])
 
 fn node_list_query(limit: i64) -> TraceNodeQueryV1:
-    TraceNodeQueryV1(snapshot_id: "snapshot:one", operation: "list", kind: "features", limit: limit)
+    TraceNodeQueryV1(snapshot_id: "snapshot:one", operation: "list", kind: "features", limit: TracePageLimitV1(value: limit))
 
 describe "P0 typed node projection":
     it "sorts canonical identities before paging and preserves kinds":
@@ -47,9 +49,9 @@ describe "P0 typed node projection":
         val cursor = query_trace_nodes_v1(graph, node_list_query(1)).unwrap().next_cursor.value
         var query = node_list_query(1)
         query.cursor = cursor
-        query.limit = 2
+        query.limit = TracePageLimitV1(value: 2)
         expect(query_trace_nodes_v1(graph, query).is_err()).to_be(true)
-        query.limit = 1
+        query.limit = TracePageLimitV1(value: 1)
         query.id_prefix = "feature:z"
         expect(query_trace_nodes_v1(graph, query).is_err()).to_be(true)
         query.id_prefix = ""
@@ -91,7 +93,7 @@ describe "P0 typed node projection":
 
     it "keeps page exhaustion separate from incomplete graph and escapes table control text":
         var graph = node_query_graph()
-        graph.complete = false
+        graph.complete = TraceCompletenessV1.Incomplete
         graph.diagnostics = [trace_diagnostic("TRACE-SNAPSHOT-INCOMPLETE", "snapshot:one", "test", "", "", "missing input")]
         val page = query_trace_nodes_v1(graph, node_list_query(200)).unwrap()
         val build = TraceSnapshotBuild(graph: graph, scope: TraceSnapshotScope(selected_roots: ["doc/test.sdn"],
@@ -221,7 +223,7 @@ describe "trace missing":
         # @req TRACE-005
         step("Mark the snapshot graph incomplete")
         var graph = missing_graph()
-        graph.complete = false
+        graph.complete = TraceCompletenessV1.Incomplete
         val result = trace_missing_requirements_v1(graph, [])
         expect(result.completeness).to_equal(TraceGraphCompletenessV1.Incomplete)
         var unlinked = TraceLinkStatus.Linked

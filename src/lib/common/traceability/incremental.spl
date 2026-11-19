@@ -2,6 +2,8 @@
 # this pure planner never substitutes changed paths for the existence universe.
 # @req REQ-TRC-017
 
+use std.common.traceability.envelope_types_v1.*
+
 pub enum TraceDependencyKind:
     Artifact
     ExistingIdentity
@@ -22,16 +24,16 @@ pub struct TraceInvalidationInput:
     changed_memberships: [text]
     changed_configurations: [text]
     dependencies: [TraceDependency]
-    dependency_inventory_complete: bool
-    policy_changed: bool
-    extractor_changed: bool
-    schema_changed: bool
-    max_affected: i64
+    dependency_inventory_complete: TraceCompletenessV1
+    policy_changed: TraceChangeStateV1
+    extractor_changed: TraceChangeStateV1
+    schema_changed: TraceChangeStateV1
+    max_affected: TraceCountLimitV1
 
 pub struct TraceInvalidation:
     affected_paths: [text]
-    full_rebuild: bool
-    complete: bool
+    full_rebuild: TraceRebuildScopeV1
+    complete: TraceCompletenessV1
     reasons: [text]
 
 fn trace_changed_key(dependency: TraceDependency, input: TraceInvalidationInput, affected: [text]) -> bool:
@@ -54,29 +56,29 @@ fn trace_changed_key(dependency: TraceDependency, input: TraceInvalidationInput,
 pub fn plan_trace_invalidation(input: TraceInvalidationInput) -> TraceInvalidation:
     var affected: [text] = []
     var reasons: [text] = []
-    if input.max_affected < 1:
-        return TraceInvalidation(affected_paths: [], full_rebuild: true, complete: false,
+    if input.max_affected.value < 1:
+        return TraceInvalidation(affected_paths: [], full_rebuild: TraceRebuildScopeV1.Full, complete: TraceCompletenessV1.Incomplete,
             reasons: ["invalid invalidation budget"])
-    val full = input.policy_changed or input.extractor_changed or input.schema_changed or not input.dependency_inventory_complete
-    if input.policy_changed:
+    val full = input.policy_changed == TraceChangeStateV1.Changed or input.extractor_changed == TraceChangeStateV1.Changed or input.schema_changed == TraceChangeStateV1.Changed or input.dependency_inventory_complete == TraceCompletenessV1.Incomplete
+    if input.policy_changed == TraceChangeStateV1.Changed:
         reasons.push("policy identity changed")
-    if input.extractor_changed:
+    if input.extractor_changed == TraceChangeStateV1.Changed:
         reasons.push("extractor identity changed")
-    if input.schema_changed:
+    if input.schema_changed == TraceChangeStateV1.Changed:
         reasons.push("schema identity changed")
-    if not input.dependency_inventory_complete:
+    if input.dependency_inventory_complete == TraceCompletenessV1.Incomplete:
         reasons.push("dependency inventory incomplete; incremental reuse refused")
     var seeds = input.changed_paths
     if full:
         seeds = input.known_paths + input.changed_paths
     for path in seeds:
         if path == "":
-            return TraceInvalidation(affected_paths: affected, full_rebuild: true, complete: false,
+            return TraceInvalidation(affected_paths: affected, full_rebuild: TraceRebuildScopeV1.Full, complete: TraceCompletenessV1.Incomplete,
                 reasons: ["empty artifact identity in changed or known path set"])
         if not affected.contains(path):
-            if affected.len() >= input.max_affected:
+            if affected.len() >= input.max_affected.value:
                 reasons.push("affected scope budget exhausted")
-                return TraceInvalidation(affected_paths: affected, full_rebuild: full, complete: false, reasons: reasons)
+                return TraceInvalidation(affected_paths: affected, full_rebuild: (if full: TraceRebuildScopeV1.Full else: TraceRebuildScopeV1.Partial), complete: TraceCompletenessV1.Incomplete, reasons: reasons)
             affected.push(path)
     # Each accepted owner adds at most one known/new artifact. Fixed point is
     # finite; a cycle does not cause repeated invalidation or an endless loop.
@@ -86,16 +88,16 @@ pub fn plan_trace_invalidation(input: TraceInvalidationInput) -> TraceInvalidati
         for dependency in input.dependencies:
             if dependency.owner_path == "" or dependency.key == "":
                 reasons.push("invalid dependency record; full rebuild required")
-                return TraceInvalidation(affected_paths: affected, full_rebuild: true, complete: false, reasons: reasons)
+                return TraceInvalidation(affected_paths: affected, full_rebuild: TraceRebuildScopeV1.Full, complete: TraceCompletenessV1.Incomplete, reasons: reasons)
             if not input.known_paths.contains(dependency.owner_path):
                 reasons.push("dependency owner absent from base inventory")
-                return TraceInvalidation(affected_paths: affected, full_rebuild: true, complete: false, reasons: reasons)
+                return TraceInvalidation(affected_paths: affected, full_rebuild: TraceRebuildScopeV1.Full, complete: TraceCompletenessV1.Incomplete, reasons: reasons)
             if not affected.contains(dependency.owner_path) and trace_changed_key(dependency, input, affected):
-                if affected.len() >= input.max_affected:
+                if affected.len() >= input.max_affected.value:
                     reasons.push("reverse dependency closure budget exhausted")
-                    return TraceInvalidation(affected_paths: affected, full_rebuild: full, complete: false, reasons: reasons)
+                    return TraceInvalidation(affected_paths: affected, full_rebuild: (if full: TraceRebuildScopeV1.Full else: TraceRebuildScopeV1.Partial), complete: TraceCompletenessV1.Incomplete, reasons: reasons)
                 affected.push(dependency.owner_path)
                 added = true
     if affected.len() == 0:
         reasons.push("complete classifier found no affected facts")
-    TraceInvalidation(affected_paths: affected, full_rebuild: full, complete: true, reasons: reasons)
+    TraceInvalidation(affected_paths: affected, full_rebuild: (if full: TraceRebuildScopeV1.Full else: TraceRebuildScopeV1.Partial), complete: TraceCompletenessV1.Complete, reasons: reasons)

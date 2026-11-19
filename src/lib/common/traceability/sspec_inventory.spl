@@ -6,6 +6,7 @@ use std.common.traceability.run_request_codec.{encode_trace_run_request}
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
 use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.traceability.envelope_types_v1.*
 
 pub struct TraceSspecCase:
     test_path: text
@@ -14,10 +15,10 @@ pub struct TraceSspecCase:
     kind: text
     suite_path: [text]
     context_path: [text]
-    start_byte: i64
-    end_byte: i64
-    line: i64
-    column: i64
+    start_byte: TraceByteOffsetV1
+    end_byte: TraceByteOffsetV1
+    line: TraceLineNumberV1
+    column: TraceColumnNumberV1
 
 pub struct TraceSspecInventory:
     test_path: text
@@ -68,10 +69,10 @@ pub fn trace_sspec_definition_record(source_sha256: text, extractor_version: tex
     fields["kind"] = SdnValue.String(item.kind)
     fields["suite_path"] = sspec_texts(item.suite_path)
     fields["context_path"] = sspec_texts(item.context_path)
-    fields["start_byte"] = SdnValue.Int(item.start_byte)
-    fields["end_byte"] = SdnValue.Int(item.end_byte)
-    fields["line"] = SdnValue.Int(item.line)
-    fields["column"] = SdnValue.Int(item.column)
+    fields["start_byte"] = SdnValue.Int(item.start_byte.value)
+    fields["end_byte"] = SdnValue.Int(item.end_byte.value)
+    fields["line"] = SdnValue.Int(item.line.value)
+    fields["column"] = SdnValue.Int(item.column.value)
     SdnValue.Dict(fields)
 
 pub fn trace_sspec_definition_id(source_sha256: text, extractor_version: text, item: TraceSspecCase) -> text:
@@ -142,7 +143,7 @@ pub fn validate_trace_sspec_planned_request(value: TraceSspecPlannedRequest) -> 
         definition_ids[record.test_definition_id] = true
         if item.kind != "normal" and item.kind != "test" and item.kind != "example" and item.kind != "slow":
             return Err("SSPEC-METADATA: unsupported declaration kind")
-        if item.start_byte < 0 or item.end_byte <= item.start_byte or item.end_byte > 1048576 or item.line < 1 or item.line > 1048576 or item.column < 1 or item.column > 1048576:
+        if item.start_byte.value < 0 or item.end_byte.value <= item.start_byte.value or item.end_byte.value > 1048576 or item.line.value < 1 or item.line.value > 1048576 or item.column.value < 1 or item.column.value > 1048576:
             return Err("SSPEC-METADATA: invalid byte span or source location")
         if item.test_path.starts_with("/") or item.test_path.contains("\\") or item.test_path.contains(":"):
             return Err("SSPEC-METADATA: source path is not repository-relative")
@@ -161,12 +162,12 @@ pub fn validate_trace_sspec_planned_request(value: TraceSspecPlannedRequest) -> 
         for part in item.context_path:
             if part.contains("{") or part.contains("}"): return Err("SSPEC-METADATA: unsupported interpolated context")
         if sources.contains_key(item.test_path):
-            if sources[item.test_path] != record.source_sha256 or last_path != item.test_path or item.start_byte < ends[item.test_path]:
+            if sources[item.test_path] != record.source_sha256 or last_path != item.test_path or item.start_byte.value < ends[item.test_path]:
                 return Err("SSPEC-METADATA: inconsistent source digest or declaration ordering")
         else:
             if sources.len() >= 256: return Err("SSPEC-METADATA: file count exceeds 256")
             sources[item.test_path] = record.source_sha256
-        ends[item.test_path] = item.end_byte
+        ends[item.test_path] = item.end_byte.value
         last_path = item.test_path
         if record.test_definition_id != trace_sspec_definition_id(record.source_sha256, record.extractor_version, item):
             return Err("SSPEC-METADATA: definition digest mismatch")

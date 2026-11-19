@@ -4,6 +4,7 @@
 use std.common.traceability.model.*
 use std.common.traceability.incremental.{TraceInvalidationInput, TraceInvalidation, plan_trace_invalidation}
 use app.traceability.extract.snapshot_pipeline.{TraceSnapshotScope, TraceSnapshotBuild, build_snapshot_trace_graph}
+use std.common.traceability.envelope_types_v1.*
 
 pub struct TraceSnapshotDelta:
     removed_paths: [text]
@@ -39,7 +40,7 @@ fn snapshot_paths_unique(artifacts: [SnapshotArtifact]) -> bool:
     true
 
 fn snapshot_exact_inventory(left: SnapshotInput, right: SnapshotInput) -> bool:
-    if not left.complete or not right.complete or not snapshot_subject_equal(left.subject, right.subject): return false
+    if left.complete == TraceCompletenessV1.Incomplete or right.complete == TraceCompletenessV1.Incomplete or not snapshot_subject_equal(left.subject, right.subject): return false
     if left.artifacts.len() != right.artifacts.len() or not snapshot_paths_unique(left.artifacts) or not snapshot_paths_unique(right.artifacts): return false
     var by_path: Dict<text, SnapshotArtifact> = {}
     for artifact in left.artifacts: by_path[artifact.path] = artifact
@@ -49,7 +50,7 @@ fn snapshot_exact_inventory(left: SnapshotInput, right: SnapshotInput) -> bool:
 
 fn apply_snapshot_delta(base: SnapshotInput, candidate_subject: SnapshotSubject,
     delta: TraceSnapshotDelta) -> Result<SnapshotInput, text>:
-    if not base.complete or base.subject.snapshot_id == "" or not delta_subject_compatible(base.subject, candidate_subject):
+    if base.complete == TraceCompletenessV1.Incomplete or base.subject.snapshot_id == "" or not delta_subject_compatible(base.subject, candidate_subject):
         return Err("TRACE-DELTA-INCOMPLETE: compatible complete base and candidate subject required")
     if base.artifacts.len() > 40000 or delta.removed_paths.len() + delta.upserted_artifacts.len() > 40000:
         return Err("TRACE-DELTA-INCOMPLETE: artifact delta budget exhausted")
@@ -75,7 +76,7 @@ fn apply_snapshot_delta(base: SnapshotInput, candidate_subject: SnapshotSubject,
             if not upsert_paths.contains_key(artifact.path): artifacts.push(artifact)
     for artifact in delta.upserted_artifacts: artifacts.push(artifact)
     if artifacts.len() > 40000: return Err("TRACE-DELTA-INCOMPLETE: resulting inventory budget exhausted")
-    Ok(SnapshotInput(subject: candidate_subject, artifacts: artifacts, complete: true))
+    Ok(SnapshotInput(subject: candidate_subject, artifacts: artifacts, complete: TraceCompletenessV1.Complete))
 
 fn exact_delta_invalidation(base: SnapshotInput, delta: TraceSnapshotDelta,
     context: TraceInvalidationInput) -> TraceInvalidation:

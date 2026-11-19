@@ -1,20 +1,20 @@
 """Bounded UTF8 text charging shared by typed table families."""
 use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
-use std.common.traceability.envelope_types_v1.{TraceCodecIssueV1, trace_codec_issue_v1, TraceByteLimitV1}
+use std.common.traceability.envelope_types_v1.{TraceCodecIssueV1, trace_codec_issue_v1, TraceByteLimitV1, TraceUsedCountV1}
 
 pub class TraceCodecTextBudgetV1:
     max_field_bytes: TraceByteLimitV1
     max_text_bytes: TraceByteLimitV1
-    used: i64 = 0
+    used: TraceUsedCountV1 = TraceUsedCountV1(value: 0)
     me charge(fields: [text], path: text) -> Result<bool, TraceCodecIssueV1>:
         if (self.max_field_bytes.value < 0 or self.max_field_bytes.value > 1048576 or
             self.max_text_bytes.value < 0 or self.max_text_bytes.value > 16777216 or
-            self.used < 0 or self.used > self.max_text_bytes.value):
+            self.used.value < 0 or self.used.value > self.max_text_bytes.value):
             return Err(trace_codec_issue_v1("invalid_limits", path, "Text budget outside hard bounds"))
         for item in fields:
             if item.byte_len() > self.max_field_bytes.value: return Err(trace_codec_issue_v1("field_limit", path, "Field exceeds byte budget"))
-            if item.byte_len() > self.max_text_bytes.value - self.used: return Err(trace_codec_issue_v1("text_limit", path, "Text exceeds aggregate budget"))
-            self.used = self.used + item.byte_len()
+            if item.byte_len() > self.max_text_bytes.value - self.used.value: return Err(trace_codec_issue_v1("text_limit", path, "Text exceeds aggregate budget"))
+            self.used = TraceUsedCountV1(value: self.used.value + item.byte_len())
             match validated_utf8_bytes_to_text_linear(item.bytes()):
                 case Ok(_): ()
                 case Err(reason): return Err(trace_codec_issue_v1("invalid_utf8", path, reason))

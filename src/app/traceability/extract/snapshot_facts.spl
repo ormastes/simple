@@ -4,6 +4,7 @@ use std.common.traceability.model.*
 use std.common.traceability.schema.{trace_path_parse_v1}
 use std.common.traceability.sdn_codec.{decode_trace_declarations}
 use app.traceability.extract.snapshot_partitions.{build_trace_snapshot_partition_set, trace_snapshot_policy_binding}
+use std.common.traceability.envelope_types_v1.*
 
 pub fn artifact_trace_id(path: text) -> text:
     # A reversible path encoding keeps non-ASCII/space paths distinct without
@@ -32,13 +33,13 @@ pub fn extract_snapshot_trace_facts_cold(snapshot: SnapshotInput, policy: TraceP
     declaration_paths: [text], input_manifest_id: text, generation_id: text) -> TraceFacts:
     var facts = empty_trace_facts(snapshot, input_manifest_id, generation_id)
     if input_manifest_id == "" or generation_id == "" or snapshot.subject.snapshot_id == "":
-        facts.complete = false
+        facts.complete = TraceCompletenessV1.Incomplete
         facts.diagnostics.push(extraction_diagnostic(snapshot.subject, "TRACE-SNAPSHOT-INCOMPLETE", "", "missing immutable extraction identities"))
         return facts
-    if not snapshot.complete:
+    if snapshot.complete == TraceCompletenessV1.Incomplete:
         facts.diagnostics.push(extraction_diagnostic(snapshot.subject, "TRACE-SNAPSHOT-INCOMPLETE", "", "snapshot existence inventory is incomplete"))
     if policy.max_nodes.value < 1 or policy.max_claims.value < 1:
-        facts.complete = false
+        facts.complete = TraceCompletenessV1.Incomplete
         facts.diagnostics.push(extraction_diagnostic(snapshot.subject, "TRACE-SNAPSHOT-INCOMPLETE", "", "invalid policy extraction budgets"))
         return facts
     var seen_paths: [text] = []
@@ -46,7 +47,7 @@ pub fn extract_snapshot_trace_facts_cold(snapshot: SnapshotInput, policy: TraceP
     var loaded_declarations: [text] = []
     for artifact in snapshot.artifacts:
         if trace_path_parse_v1(artifact.path).is_none() or artifact.blob_id == "" or seen_paths.contains(artifact.path):
-            facts.complete = false
+            facts.complete = TraceCompletenessV1.Incomplete
             facts.diagnostics.push(extraction_diagnostic(snapshot.subject, "TRACE-SNAPSHOT-INCOMPLETE", artifact.path, "invalid, unpinned or duplicate snapshot artifact"))
             continue
         seen_paths.push(artifact.path)
@@ -55,7 +56,7 @@ pub fn extract_snapshot_trace_facts_cold(snapshot: SnapshotInput, policy: TraceP
             loaded_declarations.push(artifact.path)
             match decode_trace_declarations(artifact.content, snapshot.subject, artifact.path, artifact.blob_id):
                 case Err(diagnostics):
-                    facts.complete = false
+                    facts.complete = TraceCompletenessV1.Incomplete
                     for diagnostic in diagnostics:
                         facts.diagnostics.push(diagnostic)
                 case Ok(declared):
@@ -70,17 +71,17 @@ pub fn extract_snapshot_trace_facts_cold(snapshot: SnapshotInput, policy: TraceP
                     for locator in declared.locators:
                         facts.locators.push(locator)
         if facts.nodes.len() > policy.max_nodes.value or facts.claims.len() > policy.max_claims.value:
-            facts.complete = false
+            facts.complete = TraceCompletenessV1.Incomplete
             facts.diagnostics.push(extraction_diagnostic(snapshot.subject, "TRACE-SNAPSHOT-INCOMPLETE", artifact.path, "extraction policy budget exhausted"))
             return facts
     var registered: [text] = []
     for path in declaration_paths:
         if registered.contains(path) or trace_path_parse_v1(path).is_none():
-            facts.complete = false
+            facts.complete = TraceCompletenessV1.Incomplete
             facts.diagnostics.push(extraction_diagnostic(snapshot.subject, "TRACE-AUTHORITY-CONFLICT", path, "invalid or repeated declaration registration"))
         registered.push(path)
         if not loaded_declarations.contains(path):
-            facts.complete = false
+            facts.complete = TraceCompletenessV1.Incomplete
             facts.diagnostics.push(extraction_diagnostic(snapshot.subject, "TRACE-MISSING-ENDPOINT", path, "registered declaration is absent from exact snapshot"))
     # Resolve file identity before adding inventory fallbacks. A declared
     # canonical source/suite/document is the same physical artifact, not a
@@ -110,7 +111,7 @@ pub fn extract_snapshot_trace_facts_cold(snapshot: SnapshotInput, policy: TraceP
         facts.locators.push(TraceLocator(entity_id: artifact_id, path: path,
             locator_kind: TraceLocatorKind.File, locator: "", blob_id: artifact.blob_id))
         if facts.nodes.len() > policy.max_nodes.value:
-            facts.complete = false
+            facts.complete = TraceCompletenessV1.Incomplete
             facts.diagnostics.push(extraction_diagnostic(snapshot.subject, "TRACE-SNAPSHOT-INCOMPLETE", path, "inventory node budget exhausted"))
             return facts
     # Pin each declared file locator against actual inventory. A symbolic span
@@ -118,15 +119,15 @@ pub fn extract_snapshot_trace_facts_cold(snapshot: SnapshotInput, policy: TraceP
     var pinned: [TraceLocator] = []
     for locator in facts.locators:
         if not artifact_by_path.contains_key(locator.path):
-            facts.complete = false
+            facts.complete = TraceCompletenessV1.Incomplete
             facts.diagnostics.push(extraction_diagnostic(snapshot.subject, "TRACE-MISSING-ENDPOINT", locator.path, "locator path is absent from exact snapshot"))
             continue
         val artifact = artifact_by_path[locator.path]
         if locator.blob_id != "" and locator.blob_id != artifact.blob_id:
-            facts.complete = false
+            facts.complete = TraceCompletenessV1.Incomplete
             facts.diagnostics.push(extraction_diagnostic(snapshot.subject, "TRACE-MISSING-ENDPOINT", locator.path, "declared locator blob differs from snapshot"))
         if locator.locator_kind != TraceLocatorKind.File:
-            facts.complete = false
+            facts.complete = TraceCompletenessV1.Incomplete
             facts.diagnostics.push(extraction_diagnostic(snapshot.subject, "TRACE-SNAPSHOT-INCOMPLETE", locator.path, "non-file locator requires an admitted symbol/section extractor"))
         pinned.push(TraceLocator(entity_id: locator.entity_id, path: locator.path,
             locator_kind: locator.locator_kind, locator: locator.locator, blob_id: artifact.blob_id))

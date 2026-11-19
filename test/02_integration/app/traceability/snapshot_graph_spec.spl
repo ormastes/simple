@@ -25,9 +25,10 @@ use std.common.traceability.model.*
 use std.common.traceability.trace_ids_v1.{TraceNodeLimitV1, TraceClaimLimitV1}
 use std.common.traceability.resolve.{resolve_trace_graph}
 use std.common.traceability.sdn_codec.{encode_trace_document, decode_trace_document}
-use std.common.traceability.trace_ids_v1.{TraceCursorV1, TraceEntityIdV1, TracePageLimitV1, TraceQueryDirectionV1, TraceSnapshotIdV1}
+use std.common.traceability.trace_ids_v1.{TraceCursorV1, TraceEntityIdV1, TracePageCompletenessV1, TracePageLimitV1, TraceQueryDirectionV1, TraceSnapshotIdV1}
 use std.common.traceability.query.{query_trace_graph}
 use app.traceability.extract.snapshot_facts.{extract_snapshot_trace_facts}
+use std.common.traceability.envelope_types_v1.*
 
 fn snapshot_graph_policy() -> TracePolicy:
     TracePolicy(id: TraceEntityIdV1(value: "policy:integration"), authorities: [], max_nodes: TraceNodeLimitV1(value: 100), max_claims: TraceClaimLimitV1(value: 100),
@@ -43,7 +44,7 @@ fn snapshot_graph_fixture(include_test: bool, snapshot_id: text) -> SnapshotInpu
             content: "# Quoted example REQ-EXAMPLE accepted_by test:invented", visibility: "public"))
     SnapshotInput(subject: SnapshotSubject(repository_id: "simple", snapshot_id: snapshot_id,
         kind: "git_tree", revision_id: "revision:fixture", tree_id: "tree:fixture", object_format: "sha256"),
-        artifacts: artifacts, complete: true)
+        artifacts: artifacts, complete: TraceCompletenessV1.Complete)
 
 fn snapshot_graph_resolve(snapshot: SnapshotInput) -> TraceGraph:
     val policy = snapshot_graph_policy()
@@ -64,7 +65,7 @@ describe "Immutable extraction, resolution and interchange":
         val graph = snapshot_graph_resolve(snapshot_graph_fixture(true, "snapshot:paired"))
         val source_id = snapshot_graph_entity_at(graph, "src/app/parser.spl")
         val test_id = snapshot_graph_entity_at(graph, "test/01_unit/app/parser_spec.spl")
-        expect(graph.complete).to_equal(true)
+        expect(graph.complete).to_equal(TraceCompletenessV1.Complete)
         expect(graph.edges.len()).to_equal(1)
         expect(graph.edges[0].from_id).to_equal(test_id)
         expect(graph.edges[0].to_id).to_equal(source_id)
@@ -84,8 +85,8 @@ describe "Immutable extraction, resolution and interchange":
                         step("Query the decoded graph by the exact pinned source identity")
                         val page = query_trace_graph(decoded.graph, TraceQuery(snapshot_id: TraceSnapshotIdV1(value: "snapshot:paired"),
                             selected_id: Some(TraceEntityIdV1(value: source_id)), direction: TraceQueryDirectionV1.Incoming, limit: TracePageLimitV1(value: 10), cursor: None))
-                        expect(page.complete).to_equal(true)
-                        expect(page.total_count).to_equal(2)
+                        expect(page.complete).to_equal(TracePageCompletenessV1.Complete)
+                        expect(page.total_count.value).to_equal(2)
                         expect(page.edges.len()).to_equal(1)
                         expect(page.edges[0].from_id).to_equal(test_id)
 
@@ -108,7 +109,7 @@ describe "Immutable extraction, resolution and interchange":
         # @ac AC-TRC-009
         step("Resolve an exact inventory containing the source but no conventional test")
         val graph = snapshot_graph_resolve(snapshot_graph_fixture(false, "snapshot:deleted"))
-        expect(graph.complete).to_equal(false)
+        expect(graph.complete).to_equal(TraceCompletenessV1.Incomplete)
         expect(graph.edges.len()).to_equal(0)
         var matching = 0
         step("Inspect the diagnostic subject, mapping rule and missing endpoint")

@@ -1,6 +1,8 @@
 use std.common.traceability.model.*
 use std.common.traceability.evidence_model.*
 use std.common.traceability.evidence.*
+use std.common.traceability.envelope_types_v1.*
+use std.common.traceability.trace_ids_v1.*
 
 struct TraceCaseEvaluation:
     status: TraceQualificationStatus
@@ -57,36 +59,36 @@ fn trace_evaluate_case(case_id: text, obligation: TraceObligation, run: TraceRun
     var ids: [text] = []
     var attempts: [text] = []
     for observation in observations:
-        if (observation.id == "" or observation.run_id == "" or observation.attempt < 1 or
+        if (observation.id == "" or observation.run_id == "" or observation.attempt.value < 1 or
             observation.run_id != selected.run_id or trace_text_find_v1(ids, observation.id).is_some() or
-            trace_text_find_v1(attempts, observation.attempt.to_string()).is_some()):
+            trace_text_find_v1(attempts, observation.attempt.value.to_string()).is_some()):
             return TraceCaseEvaluation(TraceQualificationStatus.Incomplete, [], [case_id + ": ambiguous run or attempt identities"])
         ids.push(observation.id)
-        attempts.push(observation.attempt.to_string())
+        attempts.push(observation.attempt.value.to_string())
         if current and trace_observation_admitted(observation, context) == TraceAdmissionV1.Rejected:
             return TraceCaseEvaluation(TraceQualificationStatus.Stale, [], [case_id + ": exact observation/artifact/provenance not admitted"])
         if observation.artifact_ids.len() == 0:
             return TraceCaseEvaluation(TraceQualificationStatus.Stale, [], [case_id + ": admitted observation has no retained artifact identity"])
-        reasons.push(case_id + " attempt " + observation.attempt.to_string() + ": " + trace_outcome_name(observation.outcome))
+        reasons.push(case_id + " attempt " + observation.attempt.value.to_string() + ": " + trace_outcome_name(observation.outcome))
         if (observation.outcome == TraceOutcome.Failed or observation.outcome == TraceOutcome.UnexpectedPass or
             observation.outcome == TraceOutcome.Cancelled or observation.outcome == TraceOutcome.Crashed or
             observation.outcome == TraceOutcome.TimedOut):
             had_failure = true
-        if observation.attempt > selected.attempt:
+        if observation.attempt.value > selected.attempt.value:
             selected = observation
     if not current:
         reasons.push("eligible previous evidence from " + selected.run_id + "; not executed in current run")
-    if not selected.executed or selected.outcome == TraceOutcome.Skipped:
+    if selected.executed == TraceExecutionStateV1.NotExecuted or selected.outcome == TraceOutcome.Skipped:
         return TraceCaseEvaluation(TraceQualificationStatus.NotRun, [selected.id], reasons)
     if (selected.outcome == TraceOutcome.Cancelled or selected.outcome == TraceOutcome.Crashed or
         selected.outcome == TraceOutcome.TimedOut):
         return TraceCaseEvaluation(TraceQualificationStatus.Incomplete, [selected.id], reasons)
-    if had_failure and not obligation.allow_retry_pass:
+    if had_failure and obligation.allow_retry_pass == TraceOverridePermissionV1.Denied:
         reasons.push("retry policy retains prior failure")
         return TraceCaseEvaluation(TraceQualificationStatus.Failed, [selected.id], reasons)
     if selected.outcome == TraceOutcome.Passed:
         return TraceCaseEvaluation(TraceQualificationStatus.Verified, [selected.id], reasons)
-    if selected.outcome == TraceOutcome.ExpectedFailure and obligation.allow_expected_failure:
+    if selected.outcome == TraceOutcome.ExpectedFailure and obligation.allow_expected_failure == TraceOverridePermissionV1.Allowed:
         return TraceCaseEvaluation(TraceQualificationStatus.Verified, [selected.id], reasons)
     TraceCaseEvaluation(TraceQualificationStatus.Failed, [selected.id], reasons)
 
@@ -115,7 +117,7 @@ pub fn evaluate_obligations(graph: TraceGraph, obligations: [TraceObligation], r
     val run_problems = trace_run_problems(run)
     val binding_matches = (trace_run_binding_matches(run, context) == TraceRunBindingV1.Bound and
         graph.subject.snapshot_id == context.subject_id and graph.input_manifest_id == context.input_manifest_id)
-    var graph_valid = graph.complete
+    var graph_valid = graph.complete == TraceCompletenessV1.Complete
     for diagnostic in graph.diagnostics:
         if diagnostic.severity == TraceDiagnosticSeverity.Error:
             graph_valid = false
@@ -202,7 +204,7 @@ pub fn evaluate_obligations(graph: TraceGraph, obligations: [TraceObligation], r
             obligation.test_kind, status, selected, reasons))
     if required == 0 or not graph_valid or not binding_matches or run_problems.len() > 0:
         complete = false
-    TraceQualification(context.subject_id, run.id, results, structural, required, executed, required, complete)
+    TraceQualification(context.subject_id, run.id, results, TraceCoverageCountV1(value: structural), TraceCoverageCountV1(value: required), TraceCoverageCountV1(value: executed), TraceCoverageCountV1(value: required), (if complete: TraceCompletenessV1.Complete else: TraceCompletenessV1.Incomplete))
 
 pub fn trace_qualification_status_name(status: TraceQualificationStatus) -> text:
     match status:
