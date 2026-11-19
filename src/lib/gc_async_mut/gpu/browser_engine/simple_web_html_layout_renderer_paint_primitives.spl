@@ -1568,12 +1568,14 @@ fn _fb_border_side_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
 # (measured: t=5, L=22 gives 8.75 / 4.5 / 8.75).
 # reason: geometry helper shared by the raster and Draw IR border lanes
 # @allow(primitive_api)
-pub fn border_dash_runs(length: i32, thickness: i32, dotted: bool) -> [i32]:
+pub fn border_dash_runs(length: i32, thickness: i32, dotted: bool, device_k: i32) -> [i32]:
     if length <= 0:
         return []
     val t = if thickness > 0: thickness else: 1
-    val dash = if dotted: t else: t * 2
-    val gap = t
+    # Blink: device thickness (t * device_k) < 3 uses dash 3t / gap 2t, otherwise 2t / t.
+    val thin = (not dotted) and t * device_k < 3
+    val dash = if dotted: t else: (if thin: t * 3 else: t * 2)
+    val gap = if thin: t * 2 else: t
     if length <= 2 * dash:
         return [0, length]
     if length < 2 * dash + gap:
@@ -1838,7 +1840,7 @@ fn _fb_border_span_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
         out = _fb_border_side_clip(out, fbw, fbh, x, y, line_t, h, color, clip)
         return _fb_border_side_clip(out, fbw, fbh, x + w - line_t, y, line_t, h, color, clip)
     if style == "dashed" or style == "dotted":
-        val runs = border_dash_runs(if is_horiz: w else: h, t, style == "dotted")
+        val runs = border_dash_runs(if is_horiz: w else: h, t, style == "dotted", 1)
         var r = 0
         # cpu-lane-loop-ok: one rect per dash of one border side; bound is the run count
         val dot = if style == "dotted": border_dot_row_spans(t) else: []
