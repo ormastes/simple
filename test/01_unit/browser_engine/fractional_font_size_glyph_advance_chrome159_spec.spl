@@ -1,0 +1,114 @@
+"""
+## Purpose and audience
+Purpose: pin the per-glyph advances of FRACTIONAL font sizes against Chrome
+159. Chrome hands FreeType the size in 26.6 fixed point, truncated
+(`SkScalarToFDot6`), so every advance of a 10.6667 px run is scaled at
+682/64 = 10.65625 px and a 13.3333 px run at 853/64. Simple scaled the
+reference boundaries at the float size, so long runs (~300 px) measured up to
+0.3 px wider than Chrome: three 10.6667 px rows ended one px right of Chrome,
+both as a layout box and as painted glyph ink. Layout
+(`resolve_font_metrics_with_language_milli`) and the LCD paint pens
+(`_lcd_apply_pen_phases`) now scale at the 26.6 size; whole sizes unchanged.
+Audience: text metrics, browser-engine layout and paint maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless, `--hide-scrollbars
+--force-device-scale-factor=1 --window-size=400,300`, host default
+sans-serif). Rows 0..10: a row flex holding one item with a red background and
+transparent text (10.6667 px rows 0..5, 13.3333 px rows 6..10); right edges
+from getBoundingClientRect, probed at y = 12 r + 6 as the end of the red run:
+
+| row | getBoundingClientRect right | painted end | base (6b65999ae66) |
+|-----|-----------------------------|-------------|--------------------|
+| 0   | 289.6719                    | 290         | 290                |
+| 1   | 297.3750                    | 297         | 298                |
+| 2   | 280.5781                    | 281         | 281                |
+| 3   | 297.3438                    | 297         | 298                |
+| 4   | 352.3594                    | 352         | 353                |
+| 5   | 286.6875                    | 287         | 287                |
+| 6   | 362.3125                    | 362         | 362                |
+| 7   | 371.9219                    | 372         | 372                |
+| 8   | 350.9219                    | 351         | 351                |
+| 9   | 371.8906                    | 372         | 372                |
+| 10  | 358.5625                    | 359         | 359                |
+
+Ink rows 0..7 (black text, 20 px bands from y = 132; 10.6667 px then
+13.3333 px): last column with mean channel < 160 in Chrome's screenshot is
+288 296 279 296 361 370 350 371; base painted 288 296 280 297 361 371 350 371.
+
+Not pinned: line breaking. A 400..200 px width sweep of a three-sentence
+10.6667 px paragraph wraps identically on base and head; its remaining
+differences from Chrome are the whole-px fit test and the non-hanging
+trailing space, at every font size.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-FRACTIONAL-FONT-SIZE-003 -- fractional computed font sizes scale every glyph advance and pen at the 26.6 font size.
+"""
+# @cover src/lib/nogc_sync_mut/text_layout/font_renderer.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_resolved_engine2d_backend}
+
+val GA_W: i32 = 400
+val GA_H: i32 = 300
+val GA_PAGE: text = "<!DOCTYPE html><html><body style=\"margin:0;background:#fff;color:#000;font:16px sans-serif\"><div style=\"display:flex;height:12px;font-size:10.6667px\"><div style=\"background:#f00;color:transparent\">The quick brown fox jumps over the lazy dog again and again</div></div><div style=\"display:flex;height:12px;font-size:10.6667px\"><div style=\"background:#f00;color:transparent\">Simple renders the web catalog against Chrome headless here</div></div><div style=\"display:flex;height:12px;font-size:10.6667px\"><div style=\"background:#f00;color:transparent\">Pack my box with five dozen liquor jugs, then ship it off now</div></div><div style=\"display:flex;height:12px;font-size:10.6667px\"><div style=\"background:#f00;color:transparent\">Sphinx of black quartz, judge my vow; waltz bad nymph quickly</div></div><div style=\"display:flex;height:12px;font-size:10.6667px\"><div style=\"background:#f00;color:transparent\">abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123</div></div><div style=\"display:flex;height:12px;font-size:10.6667px\"><div style=\"background:#f00;color:transparent\">Jackdaws love my big sphinx of quartz and every vexed bum</div></div><div style=\"display:flex;height:12px;font-size:13.3333px\"><div style=\"background:#f00;color:transparent\">The quick brown fox jumps over the lazy dog again and again</div></div><div style=\"display:flex;height:12px;font-size:13.3333px\"><div style=\"background:#f00;color:transparent\">Simple renders the web catalog against Chrome headless here</div></div><div style=\"display:flex;height:12px;font-size:13.3333px\"><div style=\"background:#f00;color:transparent\">Pack my box with five dozen liquor jugs, then ship it off now</div></div><div style=\"display:flex;height:12px;font-size:13.3333px\"><div style=\"background:#f00;color:transparent\">Sphinx of black quartz, judge my vow; waltz bad nymph quickly</div></div><div style=\"display:flex;height:12px;font-size:13.3333px\"><div style=\"background:#f00;color:transparent\">Jackdaws love my big sphinx of quartz and every vexed bum</div></div><div style=\"height:20px;font-size:10.6667px\">The quick brown fox jumps over the lazy dog again and again</div><div style=\"height:20px;font-size:10.6667px\">Simple renders the web catalog against Chrome headless here</div><div style=\"height:20px;font-size:10.6667px\">Pack my box with five dozen liquor jugs, then ship it off now</div><div style=\"height:20px;font-size:10.6667px\">Sphinx of black quartz, judge my vow; waltz bad nymph quickly</div><div style=\"height:20px;font-size:13.3333px\">The quick brown fox jumps over the lazy dog again and again</div><div style=\"height:20px;font-size:13.3333px\">Simple renders the web catalog against Chrome headless here</div><div style=\"height:20px;font-size:13.3333px\">Pack my box with five dozen liquor jugs, then ship it off now</div><div style=\"height:20px;font-size:13.3333px\">Sphinx of black quartz, judge my vow; waltz bad nymph quickly</div></body></html>"
+# Chrome 159 painted box ends (rows 0..10) and ink ends (rows 0..7).
+val GA_BOX: [i32] = [290, 297, 281, 297, 352, 287, 362, 372, 351, 372, 359]
+val GA_INK: [i32] = [288, 296, 279, 296, 361, 370, 350, 371]
+
+fn ga_red_end(px: [u32], y: i32) -> i32:
+    var last = -1
+    var x = 0
+    while x < GA_W:
+        val p = px[y * GA_W + x]
+        if ((p >> 16) & 255u32) > 200u32 and ((p >> 8) & 255u32) < 60u32:
+            last = x
+        x = x + 1
+    last + 1
+
+fn ga_ink_end(px: [u32], y0: i32) -> i32:
+    var last = -1
+    var y = y0
+    while y < y0 + 20:
+        var x = 0
+        while x < GA_W:
+            val p = px[y * GA_W + x]
+            if ((((p >> 16) & 255u32) + ((p >> 8) & 255u32) + (p & 255u32)) / 3u32) < 160u32 and x > last:
+                last = x
+            x = x + 1
+        y = y + 1
+    last
+
+fn ga_box_mismatches(px: [u32]) -> i32:
+    if px.len() != GA_W * GA_H:
+        return 99
+    var bad = 0
+    var r = 0
+    while r < GA_BOX.len():
+        val got = ga_red_end(px, r * 12 + 6)
+        if got != GA_BOX[r]:
+            print "box row {r}: ends {got}, Chrome {GA_BOX[r]}"
+            bad = bad + 1
+        r = r + 1
+    bad
+
+fn ga_ink_mismatches(px: [u32]) -> i32:
+    if px.len() != GA_W * GA_H:
+        return 99
+    var bad = 0
+    var r = 0
+    while r < GA_INK.len():
+        val got = ga_ink_end(px, 132 + r * 20)
+        if got != GA_INK[r]:
+            print "ink row {r}: last column {got}, Chrome {GA_INK[r]}"
+            bad = bad + 1
+        r = r + 1
+    bad
+
+describe "fractional font size glyph advances (Chrome 159)":
+    it "AC-1: 10.6667 / 13.3333 px runs end where Chrome's boxes end":
+        step("rows 1, 3, 4 end at 297, 297, 352 (base 298, 298, 353)")
+        expect(ga_box_mismatches(simple_web_render_html_to_pixels_with_resolved_engine2d_backend(GA_PAGE, GA_W, GA_H, "cpu_simd"))).to_equal(0)
+
+    it "AC-2: painted glyph ink ends where Chrome's ink ends":
+        step("10.6667 px ink rows 2, 3 end at 279, 296 and 13.3333 px row 5 at 370 (base 280, 297, 371)")
+        expect(ga_ink_mismatches(simple_web_render_html_to_pixels_with_resolved_engine2d_backend(GA_PAGE, GA_W, GA_H, "cpu_simd"))).to_equal(0)

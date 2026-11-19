@@ -268,6 +268,13 @@ fn _fr_scale_round(value: i64, num: i64, den: i64) -> i64:
     if value < 0: return 0 - _fr_scale_round(0 - value, num, den)
     (value * num + den / 2) / den
 
+# A fractional size as FreeType sees it: Chrome 159 hands it the size in 26.6
+# fixed point, truncated (`SkScalarToFDot6`), so 10.6667 px is 682/64 =
+# 10.65625 px and 13.3333 px 853/64. Every fractional-size advance and pen is
+# scaled by this many 1/64 px, not by the float size.
+fn _fr_size_26_6(size_milli: i64) -> i64:
+    size_milli * 64 / 1000
+
 fn _adv_cache_lookup(identity: text, font_size: i32, codepoint: i32) -> i32:
     if codepoint >= _ADV_ASCII_LO and codepoint <= _ADV_ASCII_HI:
         val slot = _adv_ascii_slot(identity, font_size)
@@ -1723,12 +1730,17 @@ class FontRenderer:
             if ref > 512:
                 ref = 512
             val ref_pens = self._text_pen_milli(cps, ref.to_i32(), run_identity)
+            val s266 = _fr_size_26_6(size_milli)
             pens = [0; n + 1]
             var k: i64 = 0
             while k <= n:
-                pens[k] = _fr_scale_round(ref_pens[k], size_milli, ref * 1000)
-                whole[k] = _fr_scale_round(_milli_px_to_px_i64(ref_pens[k]), size_milli, ref * 1000)
+                pens[k] = _fr_scale_round(ref_pens[k], s266, ref * 64)
+                whole[k] = _fr_scale_round(_milli_px_to_px_i64(ref_pens[k]), s266, ref * 64)
                 k = k + 1
+            # Run end anchored to the exact pen end, as the layout resolver does.
+            val end_px = _milli_px_to_px_i64(pens[n])
+            if n > 0 and end_px >= whole[n - 1] and end_px - whole[n] <= 1 and whole[n] - end_px <= 1:
+                whole[n] = end_px
         else:
             pens = self._text_pen_milli(cps, font_size, run_identity)
             var k: i64 = 0
@@ -4656,10 +4668,11 @@ pub fn resolve_font_metrics_with_language_milli(family: text, content: text, fon
     var advances: [i32] = [0; n]
     var cumulative_ref: i64 = 0
     var previous: i64 = 0
+    val s266 = _fr_size_26_6(font_size_milli as i64)
     var i = 0
     while i < n:
         cumulative_ref = cumulative_ref + (at_ref.advances[i] as i64)
-        val boundary = (cumulative_ref * (font_size_milli as i64) + (ref_px as i64) * 500) / ((ref_px as i64) * 1000)
+        val boundary = _fr_scale_round(cumulative_ref, s266, (ref_px as i64) * 64)
         advances[i] = (boundary - previous) as i32
         previous = boundary
         i = i + 1
@@ -4667,15 +4680,22 @@ pub fn resolve_font_metrics_with_language_milli(family: text, content: text, fon
     # Exact run width as Chrome 159 measures it: FreeType takes the size in
     # 26.6 fixed point, so 10.6667 px advances are scaled at 682/64 = 10.65625
     # px (`v` = 1024 units is 341/64 px, `Overview` 44.4219 px, not the 44.4541
-    # of the float size). The reference pen end is rescaled to that size. Kept
-    # only when its rounding is the rescaled integer width, so consumers that
-    # compare whole px against `width` stay consistent.
+    # of the float size). The boundaries above use the same size, but sum
+    # whole reference px, each rounded once at the reference size: at 13.3333
+    # px `Overview` is 433 ref px -> 55.49 (55) while its exact pen end is
+    # 55.5469 (56, Chrome's edge). The run end is anchored to the exact pen
+    # end (last advance absorbs the <= 1 px), so `width` is its rounding and
+    # `width_milli` is always kept. `_lcd_apply_pen_phases` anchors the same.
     var width_milli: i64 = -1
-    if at_ref.width_milli >= 0:
-        val size_26_6 = (font_size_milli as i64) * 64 / 1000
-        val exact = (at_ref.width_milli * size_26_6 + (ref_px as i64) * 32) / ((ref_px as i64) * 64)
-        if (exact + 500) / 1000 == previous:
+    var width = previous
+    if at_ref.width_milli >= 0 and n > 0:
+        val exact = _fr_scale_round(at_ref.width_milli, s266, (ref_px as i64) * 64)
+        val anchored = _milli_px_to_px_i64(exact)
+        val last = (advances[n - 1] as i64) + anchored - previous
+        if last >= 0 and anchored - previous <= 1 and previous - anchored <= 1:
+            advances[n - 1] = last as i32
+            width = anchored
             width_milli = exact
     ResolvedFontMetrics(valid: true, family: at_ref.family, identity: at_ref.identity, advances: advances,
-        width: previous as i32, line_height: line_height as i32, reason: at_ref.reason,
+        width: width as i32, line_height: line_height as i32, reason: at_ref.reason,
         glyph_run: at_ref.glyph_run, shaping_required: false, width_milli: width_milli)
