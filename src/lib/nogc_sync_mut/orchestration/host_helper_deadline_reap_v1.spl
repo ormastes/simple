@@ -1,0 +1,85 @@
+# milestone_0036: the deadline reap of ONE charged V4 attach-broker helper row, run by the service start path before the
+# reconcile flip. It releases nothing itself: when the controller-signed begin deadline has passed AND the helper's native
+# spawn is proven dead, it writes the pre-spawn refusal R (post-consume for `{PA}`) through the single journal writer, and
+# the existing helper-cancel resume (X, settle) releases the row. Fail closed: any condition that does not hold returns
+# Ok(false) and the row is left exactly as it is (the operator abandon takes over).
+# Death proof (DESIGN 2 / F-ORDER, F-CLAIM): no PA record means the consume publish, which strictly precedes the only spawn,
+# never happened; with a PA record the native group root is the consumed plan's launch root, its `broker.claim` is
+# exclusive-created before fork and never removed, so an observed-absent claim means no fork, and a present claim must be
+# the matching broker whose own unlaunched receipt says no child was ever launched. PROOF ONLY: nothing is cancelled and no
+# native record is written here; a group that may still live keeps the row held.
+use std.common.task_runner.distributed_operation_journal_v2.DistributedOperationJournalV2
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.nogc_sync_mut.orchestration.host_helper_deadline_v1.{HostHelperReapFactsV1, host_helper_deadline_due_stored_v1}
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.host_helper_request_load_owned_v2
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.{HostHelperStoreV1, host_helper_stream_path_v1}
+use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.{HostLinuxHelperMarkersV1, host_linux_helper_store_bound_v1,
+    host_linux_helper_markers_v1, host_linux_helper_attach_expected_v1, host_linux_helper_refusal_publish_v1}
+use std.nogc_sync_mut.orchestration.host_primary_attach_record_v1.{host_primary_attach_consumed_load_core_v1,
+    host_primary_attach_native_match_v1}
+use std.nogc_sync_mut.io.group_process_owner.{group_process_stream_recover_v2, group_process_stream_cleanup_proof_v2}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.io.path_identity.path_entry_present
+
+# PURE marker table: Ok(false) = `{}` (no PA), Ok(true) = `{PA}` alone, Err = any other marker (not reapable).
+# @allow(primitive_api) reviewed: the bool names "PA present"; no domain type exists for a marker flag
+pub fn host_helper_reap_consumed_v1(markers: HostLinuxHelperMarkersV1) -> Result<bool, text>:
+    if (markers.connection or markers.native or markers.refusal or markers.cancelled or markers.output or
+            markers.refusal_mirror or markers.cancelled_mirror):
+        return Err("helper-reap-markers-not-reapable")
+    Ok(markers.consumed)
+
+# PURE death-proof table over three observations. `claim_absent` and `group_unlaunched` only matter once PA exists.
+# @allow(primitive_api) reviewed: three independent observed facts, named at the call site
+pub fn host_helper_death_proof_kind_v1(consumed: bool, claim_absent: bool, group_unlaunched: bool) -> Result<text, text>:
+    if not consumed: return Ok("never-consumed")
+    if claim_absent: return Ok("never-launched")
+    if group_unlaunched: return Ok("group-unlaunched")
+    Err("helper-death-unproven")
+
+# Observes the three inputs of the table for a `{PA}` row. The consumed record is loaded and re-validated against the
+# journal-retained request and proof; the claim is read without following links; the broker owner is recovered read-only
+# and must match the consumed plan before its own receipts are consulted.
+fn helper_death_observe_v1(store: HostHelperStoreV1, operation: OperationEnvelopeV2) -> Result<text, text>:
+    val consumed = host_primary_attach_consumed_load_core_v1(store, operation)?
+    val root = consumed.primary_plan.launch_template.root
+    val claim_path = root + "/broker.claim"
+    if not path_entry_present(claim_path)?: return host_helper_death_proof_kind_v1(true, true, false)
+    val identity = file_read_regular_no_follow_bounded(claim_path, 128)?
+    val native = group_process_stream_recover_v2(root, identity)?
+    host_primary_attach_native_match_v1(consumed, native)?
+    val proof = group_process_stream_cleanup_proof_v2(native)
+    host_helper_death_proof_kind_v1(true, false, proof.is_ok() and proof.unwrap().starts_with("SIMPLE-GROUP-STREAM-UNLAUNCHED-2\n"))
+
+# @allow(primitive_api) reviewed: `consumed` is the marker table's PA flag
+pub fn host_helper_death_proof_v1(store: HostHelperStoreV1, operation: OperationEnvelopeV2, consumed: bool) -> Result<text, text>:
+    if not consumed: return host_helper_death_proof_kind_v1(false, false, false)
+    helper_death_observe_v1(store, operation)
+
+# Ok(true): the refusal R was written and the caller continues with the existing cancel. Ok(false): not reapable now.
+# Err: only an inconsistency after the due and death checks passed (R publish, expected digests).
+# @allow(primitive_api) reviewed: the bool is the reap verdict (written or not)
+pub fn host_helper_deadline_reap_v1(journal: DistributedOperationJournalV2, store_root: text, operation: OperationEnvelopeV2,
+        facts: HostHelperReapFactsV1) -> Result<bool, text>:
+    val bound = host_linux_helper_store_bound_v1(journal, store_root)
+    if bound.is_err(): return Ok(false)
+    val markers = host_linux_helper_markers_v1(journal, bound.unwrap(), operation.id)
+    if markers.is_err(): return Ok(false)
+    val consumed = host_helper_reap_consumed_v1(markers.unwrap())
+    if consumed.is_err(): return Ok(false)
+    # A row with no retained request, no/corrupt deadline record or any mismatch is not reapable (fail closed to the operator
+    # abandon); it must never turn an unrelated row into a startup quarantine.
+    val request = host_helper_request_load_owned_v2(journal, operation.id)
+    if request.is_err(): return Ok(false)
+    val due = host_helper_deadline_due_stored_v1(journal, request.unwrap(), facts)
+    if due.is_err() or not due.unwrap(): return Ok(false)
+    val store = HostHelperStoreV1(root: store_root, journal: Some(journal))
+    val proof = host_helper_death_proof_v1(store, operation, consumed.unwrap())
+    if proof.is_err(): return Ok(false)
+    var consumed_bytes = ""
+    if consumed.unwrap():
+        consumed_bytes = file_read_regular_no_follow_bounded(host_helper_stream_path_v1(store_root, operation.id, "primary-consumed"), 8388608)?
+    val expected = host_linux_helper_attach_expected_v1(journal, operation)?
+    host_linux_helper_refusal_publish_v1(store, operation, expected.prepared_receipt_digest, consumed_bytes,
+        "helper-deadline-reap:" + proof.unwrap())?
+    Ok(true)

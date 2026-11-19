@@ -1,0 +1,154 @@
+# milestone_0036: the durable deadline of a begun attach-broker helper. `host_helper_begin_checked_v1` publishes this record
+# (no-replace, read back) after it stored the signed execution proof and before it commits `executing`, so every begun
+# attach-broker row carries one. The deadline is NOT chosen by the service: it is the minimum of the four controller-signed
+# expiries (execute grant, execute approval, parent budget grant, parent budget approval) and begin refuses when it differs
+# from the live-verified expiry. The signatures were verified at begin; they are never re-verified here (an expired or
+# prior-session grant can never verify again, by design). At reap time the deadline is RECOMPUTED from the retained signed
+# proofs and must equal this record, which also binds the retained proof by digest and the policy generation, revision and
+# revocation epoch it was verified under. Imports no capacity owner (begin imports this module).
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_read_v3}
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.nogc_sync_mut.io.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{HostHelperRequestV1, host_helper_object_publish_owned_v2,
+    host_helper_execution_proof_load_owned_v2, host_helper_execution_proof_decode_v1}
+
+pub struct HostHelperDeadlineV1:
+    operation_id: text
+    operation_digest: text
+    execution_proof_digest: text
+    deadline_unix_ms: i64
+    policy_generation: i64
+    policy_revision: i64
+    revocation_epoch: i64
+
+# What the service knows NOW: its verified policy and its grant clock (unix ms).
+pub struct HostHelperReapFactsV1:
+    policy_generation: i64
+    policy_revision: i64
+    revocation_epoch: i64
+    now_ms: i64
+
+pub fn host_helper_deadline_relative_v1(operation_id: text) -> text:
+    "host-helper-deadlines/" + sha256_text(operation_id) + ".sdn"
+
+# PURE: the minimum of the four controller-signed expiries, the same set `host_helper_fresh_v1` bounds the lease by.
+pub fn host_helper_signed_deadline_v1(grant_expires: i64, approval_expires: i64, budget_grant_expires: i64,
+        budget_approval_expires: i64) -> i64:
+    var deadline = grant_expires
+    for bound in [approval_expires, budget_grant_expires, budget_approval_expires]:
+        if bound < deadline: deadline = bound
+    deadline
+
+pub fn host_helper_request_deadline_v1(request: HostHelperRequestV1, signed: DistributedSignedGrantV2,
+        approval: DistributedSignedApprovalV2) -> i64:
+    host_helper_signed_deadline_v1(signed.grant.expires_at, approval.expires_at, request.budget_proof.signed.grant.expires_at,
+        request.budget_proof.approval.expires_at)
+
+pub fn host_helper_deadline_encode_v1(record: HostHelperDeadlineV1) -> Result<text, text>:
+    if (not builder_identifier_valid_v1(record.operation_id) or not builder_digest_valid_v1(record.operation_digest) or
+            not builder_digest_valid_v1(record.execution_proof_digest) or record.deadline_unix_ms <= 0 or
+            record.policy_generation <= 0 or record.policy_revision <= 0 or record.revocation_epoch < 0):
+        return Err("helper-deadline-value-invalid")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-helper-deadline"),
+        "operationId": SdnValue.String(record.operation_id), "operationDigest": SdnValue.String(record.operation_digest),
+        "executionProofDigest": SdnValue.String(record.execution_proof_digest),
+        "deadlineUnixMs": SdnValue.Int(record.deadline_unix_ms), "policyGeneration": SdnValue.Int(record.policy_generation),
+        "policyRevision": SdnValue.Int(record.policy_revision), "revocationEpoch": SdnValue.Int(record.revocation_epoch)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn helper_deadline_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("helper-deadline-text-required:" + key)
+
+fn helper_deadline_integer_v1(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("helper-deadline-integer-required:" + key)
+
+pub fn host_helper_deadline_decode_v1(source: text) -> Result<HostHelperDeadlineV1, text>:
+    if str_len(source) == 0 or str_len(source) > 4096: return Err("helper-deadline-source-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: 4096, max_depth: 2, max_nodes: 16, max_rows: 0, max_cells: 0, max_columns: 12)
+    val parsed = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(issue): return Err("helper-deadline-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("helper-deadline-object-required")
+    val names = ["version", "kind", "operationId", "operationDigest", "executionProofDigest", "deadlineUnixMs", "policyGeneration",
+        "policyRevision", "revocationEpoch"]
+    for key in fields.keys():
+        if not names.contains(key): return Err("helper-deadline-unknown-field:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("helper-deadline-missing-field:" + key)
+    if helper_deadline_integer_v1(fields, "version")? != 1 or helper_deadline_text_v1(fields, "kind")? != "host-helper-deadline":
+        return Err("helper-deadline-version-unsupported")
+    val record = HostHelperDeadlineV1(operation_id: helper_deadline_text_v1(fields, "operationId")?,
+        operation_digest: helper_deadline_text_v1(fields, "operationDigest")?,
+        execution_proof_digest: helper_deadline_text_v1(fields, "executionProofDigest")?,
+        deadline_unix_ms: helper_deadline_integer_v1(fields, "deadlineUnixMs")?,
+        policy_generation: helper_deadline_integer_v1(fields, "policyGeneration")?,
+        policy_revision: helper_deadline_integer_v1(fields, "policyRevision")?,
+        revocation_epoch: helper_deadline_integer_v1(fields, "revocationEpoch")?)
+    if host_helper_deadline_encode_v1(record)? != source: return Err("helper-deadline-noncanonical")
+    Ok(record)
+
+# Called by begin AFTER the signed proof is stored and BEFORE the commit refresh: loads the retained proof bytes (so the
+# digest is of what the journal holds), builds the record from the policy the grant was just verified under, publishes it
+# no-replace and reads it back. Bytes are deterministic per grant and policy, so a re-begin is idempotent.
+pub fn host_helper_deadline_publish_v1(journal: DistributedOperationJournalV2, request: HostHelperRequestV1,
+        signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, policy: LocalAuthorityPolicyV1) -> Result<text, text>:
+    val record = HostHelperDeadlineV1(operation_id: request.operation.id,
+        operation_digest: sha256_text(distributed_encode_operation_v2(request.operation)?),
+        execution_proof_digest: sha256_text(host_helper_execution_proof_load_owned_v2(journal, request.operation.id)?),
+        deadline_unix_ms: host_helper_request_deadline_v1(request, signed, approval),
+        policy_generation: policy.snapshot.generation, policy_revision: policy.snapshot.policy_revision,
+        revocation_epoch: policy.snapshot.revocation_epoch)
+    val relative = host_helper_deadline_relative_v1(request.operation.id)
+    # A record left by an earlier begin attempt of the SAME grant is kept even when the policy generation moved since (the
+    # reap then sees the mismatch and fails closed to the operator abandon); any other difference is a conflict.
+    val retained = distributed_operation_journal_read_v3(journal, relative, 4096)?
+    if val existing = retained:
+        val prior = host_helper_deadline_decode_v1(existing)?
+        if (prior.operation_id != record.operation_id or prior.operation_digest != record.operation_digest or
+                prior.execution_proof_digest != record.execution_proof_digest or prior.deadline_unix_ms != record.deadline_unix_ms):
+            return Err("helper-request-retained-mismatch")
+        return Ok(relative)
+    host_helper_object_publish_owned_v2(journal, relative, host_helper_deadline_encode_v1(record)?)
+
+# PURE due table. Err = the record no longer matches the retained evidence (never a release). Ok(false) = not due: the
+# generation, revision or epoch moved (the abandon path takes over), the clock is invalid, or it is not STRICTLY past the
+# deadline. A clock behind the begin cannot be due: the deadline is past the begin clock (begin verified the approvals
+# unexpired), so strictly-past-the-deadline already implies no regress.
+pub fn host_helper_deadline_due_v1(record: HostHelperDeadlineV1, recomputed_deadline: i64, operation_digest: text,
+        proof_digest: text, facts: HostHelperReapFactsV1) -> Result<bool, text>:
+    if record.operation_digest != operation_digest: return Err("helper-deadline-record-mismatch")
+    if record.execution_proof_digest != proof_digest: return Err("helper-deadline-proof-mismatch")
+    if record.deadline_unix_ms != recomputed_deadline: return Err("helper-deadline-recompute-mismatch")
+    if (record.policy_generation != facts.policy_generation or record.policy_revision != facts.policy_revision or
+            record.revocation_epoch != facts.revocation_epoch):
+        return Ok(false)
+    if facts.now_ms <= 0 or facts.now_ms <= record.deadline_unix_ms: return Ok(false)
+    Ok(true)
+
+# Ok(false) when this row has no record (begun before milestone_0036: only the operator abandon releases it).
+pub fn host_helper_deadline_due_stored_v1(journal: DistributedOperationJournalV2, request: HostHelperRequestV1,
+        facts: HostHelperReapFactsV1) -> Result<bool, text>:
+    val found = distributed_operation_journal_read_v3(journal, host_helper_deadline_relative_v1(request.operation.id), 4096)?
+    if found.is_none(): return Ok(false)
+    val record = host_helper_deadline_decode_v1(found.unwrap())?
+    if record.operation_id != request.operation.id: return Err("helper-deadline-record-mismatch")
+    val proof_bytes = host_helper_execution_proof_load_owned_v2(journal, request.operation.id)?
+    val proof = host_helper_execution_proof_decode_v1(request, proof_bytes)?
+    host_helper_deadline_due_v1(record, host_helper_request_deadline_v1(request, proof.signed, proof.approval),
+        sha256_text(distributed_encode_operation_v2(request.operation)?), sha256_text(proof_bytes), facts)
+
+export HostHelperDeadlineV1, HostHelperReapFactsV1
