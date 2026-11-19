@@ -196,20 +196,20 @@ fn builtin_backend_aot_context_diagnostic_v2(
 
 fn _backend_plugin_expected_aot_mode_v2(
     optimization: text
-) -> Result<(bool?, i64), text>:
+) -> Result<(bool, bool, i64), text>:
     match optimization:
-        case "none" | "o0": Ok((None, 0))
-        case "basic" | "o1" | "size" | "os": Ok((None, 1))
-        case "standard" | "speed" | "o2": Ok((None, 2))
-        case "aggressive" | "o3": Ok((None, 3))
-        case "debug" | "debug-o0": Ok((Some(false), 0))
-        case "debug-o1": Ok((Some(false), 1))
-        case "debug-o2": Ok((Some(false), 2))
-        case "debug-o3": Ok((Some(false), 3))
-        case "release-o0": Ok((Some(true), 0))
-        case "release-o1": Ok((Some(true), 1))
-        case "release-o2": Ok((Some(true), 2))
-        case "release" | "release-o3": Ok((Some(true), 3))
+        case "none" | "o0": Ok((false, false, 0))
+        case "basic" | "o1" | "size" | "os": Ok((false, false, 1))
+        case "standard" | "speed" | "o2": Ok((false, false, 2))
+        case "aggressive" | "o3": Ok((false, false, 3))
+        case "debug" | "debug-o0": Ok((true, false, 0))
+        case "debug-o1": Ok((true, false, 1))
+        case "debug-o2": Ok((true, false, 2))
+        case "debug-o3": Ok((true, false, 3))
+        case "release-o0": Ok((true, true, 0))
+        case "release-o1": Ok((true, true, 1))
+        case "release-o2": Ok((true, true, 2))
+        case "release" | "release-o3": Ok((true, true, 3))
         case _:
             Err("admitted backend optimization '" + optimization
                 + "' has no AOT parity mapping")
@@ -237,19 +237,17 @@ pub fn backend_plugin_aot_request_parity_diagnostic_v2(
                 + "' differs from admitted backend request CPU '"
                 + admitted_cpu + "'"))
     val expected = _backend_plugin_expected_aot_mode_v2(request.optimization)
-    val (expected_release, expected_opt) = match expected:
-        case Ok(pair): pair
+    # (release pinned?, pinned release, opt): flat bools, because the frozen
+    # Phase 2 compiler cannot lower an Optional slot in a Result tuple payload.
+    val (release_pinned, expected_release, expected_opt) = match expected:
+        case Ok(mode): mode
         case Err(reason):
             return Some(_backend_plugin_config_mismatch_diagnostic_v2(reason))
-    match expected_release:
-        case Some(req_release):
-            if is_release != req_release:
-                return Some(_backend_plugin_config_mismatch_diagnostic_v2(
-                    "AOT is_release=" + (if is_release: "true" else: "false")
-                        + " differs from admitted backend request optimization '"
-                        + request.optimization + "'"))
-        case None:
-            pass
+    if release_pinned and is_release != expected_release:
+        return Some(_backend_plugin_config_mismatch_diagnostic_v2(
+            "AOT is_release=" + (if is_release: "true" else: "false")
+                + " differs from admitted backend request optimization '"
+                + request.optimization + "'"))
     if opt_level < 0:
         return Some(_backend_plugin_config_mismatch_diagnostic_v2(
             "AOT opt_level=" + opt_level.to_string()
