@@ -34,7 +34,7 @@ use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.{HostHelper
     host_helper_cancel_unconsumed_v1}
 use std.nogc_sync_mut.orchestration.host_helper_abandon_record_v1.host_helper_abandoned_pending_v1
 use std.nogc_sync_mut.orchestration.host_helper_abandon_commit_v1.{host_helper_abandon_v1, host_helper_abandon_commit_v1,
-    HostHelperAbandonRecheckV1, host_helper_abandon_recorded_verify_v1}
+    HostHelperAbandonRecheckV1, host_helper_abandon_recorded_verify_v1, host_helper_abandon_inspect_v1}
 use std.nogc_sync_mut.orchestration.host_helper_deadline_v1.HostHelperReapFactsV1
 use std.nogc_sync_mut.orchestration.host_helper_deadline_reap_v1.host_helper_deadline_reap_v1
 use std.common.contracts.orchestration.host_helper_abandon_v1.host_helper_abandon_proof_decode_v1
@@ -100,7 +100,8 @@ use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.{HostRemo
     host_remote_build_close_v4, host_remote_build_release_v4, host_remote_build_reset_failure_stored_v4, host_remote_build_deadline_v4,
     host_remote_build_reaped_receipt_v4}
 use std.nogc_sync_mut.orchestration.host_service_handoff_v1.{host_service_handoff_commit_v1, host_service_handoff_verify_v1,
-    host_service_handoff_consume_v1, host_service_handoff_abandon_v1, HOST_SERVICE_HANDOFF_UNVERIFIED_V1}
+    host_service_handoff_consume_v1, host_service_handoff_abandon_v1, HOST_SERVICE_HANDOFF_UNVERIFIED_V1,
+    host_service_handoff_abandon_inspect_v1}
 use std.nogc_sync_mut.io.linux_fresh_epoch_store_inventory_v1.LinuxFreshEpochStoreInventoryBorrowV1
 use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
@@ -1670,6 +1671,8 @@ pub fn host_linux_service_dispatch_v4(owner: HostLinuxServiceCurrentV4, action: 
     if action == "host_service_handoff_v1": return linux_service_handoff_v4(owner, source)
     if action == "host_service_handoff_abandon_v1": return linux_service_handoff_abandon_v4(owner, source)
     if action == "host_helper_abandon_v1": return linux_service_helper_abandon_v4(owner, source)
+    if action == "host_helper_inspect_v1": return linux_service_helper_inspect_v4(owner, source)
+    if action == "host_service_handoff_inspect_v1": return linux_service_handoff_inspect_v4(owner)
     if action == "host_prepare_associated_v3": return host_linux_service_prepare_v4(owner, source, project)
     if action == "host_execute_associated_v3": return host_linux_service_execute_v4(owner, source)
     if action == "host_agent_invoke_v4": return host_linux_service_agent_invoke_v4(owner, source)
@@ -1728,6 +1731,11 @@ fn linux_service_handoff_abandon_v4(original: HostLinuxServiceCurrentV4, source:
 fn linux_service_helper_abandon_guard_v4(owner: HostLinuxServiceCurrentV4, source: text) -> text:
     val decoded = host_helper_abandon_proof_decode_v1(source)
     if decoded.is_err(): return decoded.unwrap_err()
+    linux_service_helper_attachment_guard_v4(owner, decoded.unwrap().abandon.operation_id)
+
+# milestone_0046: the same live-attachment refusal for the read-only inspect, so the plan phase never prints a record the
+# signed command would refuse. Keyed by the helper operation id.
+fn linux_service_helper_attachment_guard_v4(owner: HostLinuxServiceCurrentV4, operation_id: text) -> text:
     val agent = match owner.agent:
         case Some(actual): actual
         case None: return ""
@@ -1736,7 +1744,7 @@ fn linux_service_helper_abandon_guard_v4(owner: HostLinuxServiceCurrentV4, sourc
         case None: return ""
     val request = host_helper_request_decode_v1(attachment.helper_request_bytes)
     if request.is_err(): return "linux-host-service-helper-abandon-attachment-unreadable"
-    if request.unwrap().operation.id != decoded.unwrap().abandon.operation_id: return ""
+    if request.unwrap().operation.id != operation_id: return ""
     if attachment.attach_stage != HOST_AGENT_ATTACH_BLOCKED_V4: return "linux-host-service-helper-abandon-attachment-live"
     ""
 
@@ -1752,6 +1760,26 @@ fn linux_service_helper_abandon_v4(original: HostLinuxServiceCurrentV4, source: 
     owner.capacity = Some(turn.owner)
     if turn.error != "": return linux_service_reply_v4(owner, "", turn.error, turn.effect_attempted)
     linux_service_reply_v4(owner, turn.reply, "", true)
+
+# milestone_0046: the read-only inspects the controller's `helper-abandon` / `handoff-abandon` commands read before the
+# operator signs: the exact canonical record the signed command must carry, derived by the same function the command
+# uses. They write nothing and grant nothing; like the abandons they are not gated on the startup quarantine and are
+# refused while draining. `source` names the helper row.
+fn linux_service_helper_inspect_v4(owner: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    val live = linux_service_helper_attachment_guard_v4(owner, source)
+    if live != "": return linux_service_reply_v4(owner, "", live, false)
+    val record = host_helper_abandon_inspect_v1(owner.capacity.unwrap().journal, source, owner.scope.unwrap().physical_host_id)
+    if record.is_err(): return linux_service_reply_v4(owner, "", record.unwrap_err(), false)
+    linux_service_reply_v4(owner, record.unwrap(), "", false)
+
+fn linux_service_handoff_inspect_v4(owner: HostLinuxServiceCurrentV4) -> HostLinuxServiceReplyV4:
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    val record = host_service_handoff_abandon_inspect_v1(owner.capacity.unwrap().journal, owner.scope.unwrap())
+    if record.is_err(): return linux_service_reply_v4(owner, "", record.unwrap_err(), false)
+    linux_service_reply_v4(owner, record.unwrap(), "", false)
 
 # The workload scope of this service's lending epoch: the bound host (the same
 # physical_host_id association_match_v3 compares), "epoch-" + the lent digest

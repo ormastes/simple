@@ -19,6 +19,7 @@ use std.common.contracts.orchestration.controller_dispatch_request_v2.*
 use std.common.contracts.orchestration.host_controller_status_v3.*
 use std.common.contracts.orchestration.host_service_operation_v6.*
 use std.common.contracts.orchestration.host_service_operation_reply_v6.*
+use std.common.contracts.orchestration.host_control_operation_v6.host_control_sub_decode_v6
 use std.common.contracts.orchestration.host_prepare_request_v1.*
 use std.common.contracts.orchestration.host_prepare_response_v1.host_prepare_response_decode_v1
 use std.common.contracts.orchestration.host_execute_request_v2.*
@@ -131,11 +132,13 @@ pub fn controller_dispatch_host_status_match_v3(context: ControllerDispatchConte
         return Err("dispatch-host-continuity-mismatch")
     Ok(true)
 
-fn dispatch_service_status_v3(config: ControllerDispatchConfigV3, status: HostControllerStatusV3) -> Result<bool, text>:
+# milestone_0046: `require_ready` is false ONLY for host-action mode: the controller-signed abandons exist for a Host whose
+# startup quarantine left continuity unproven (status.ready false). Every installed-identity comparison still applies.
+fn dispatch_service_status_v3(config: ControllerDispatchConfigV3, status: HostControllerStatusV3, require_ready: bool) -> Result<bool, text>:
     val canonical = host_controller_status_encode_v3(status)?
     val binding = config.host_binding
     val digest = host_service_enrollment_payload_digest_v2(binding)?
-    if (not status.ready or status.enrollment_digest != digest or status.authority_id != "host-" + digest or
+    if ((require_ready and not status.ready) or status.enrollment_digest != digest or status.authority_id != "host-" + digest or
             status.provider_identity_digest != binding.provider_identity_digest or
             status.scope.physical_host_id != binding.physical_host_id or
             status.scope.native_machine_id != binding.native_machine_id or
@@ -353,6 +356,47 @@ fn dispatch_state_remote_send_v3(original: ControllerDispatchStateV3, action: te
         owner.remote_started = true
         owner.outcome = "unknown"
     dispatch_turn_v3(dispatch_send_v3(owner, action, payload))
+
+# milestone_0046: HOST-ACTION mode, the controller half of the shared control exchange (V6 `host-control`) for
+# controller-signed Host service actions (helper abandon, OPS-01 handoff abandon) and their read-only inspects. One reader,
+# one run operation id (the signed abandon envelope id) for every frame. Begin ends in phase "ready" after the
+# installed-binding status check WITHOUT the ready requirement (dispatch_service_status_v3). No packet, no workload row.
+fn dispatch_state_host_action_begin_v3(root: ControllerLocalRootV3, operation_id: text) -> ControllerDispatchStateTurnV3:
+    var owner = ControllerDispatchStateV3(root: Some(root), uid: operation_id, mode: "host-action")
+    if not builder_identifier_valid_v1(operation_id): return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-host-action-operation-id"))
+    owner.remote_op = operation_id
+    dispatch_turn_v3(dispatch_reader_v3(owner))
+
+# The create-only archive of a run's signed abandon frame, published BEFORE it is sent. Identical bytes may be resent (the
+# Host accepts the same proof idempotently); different bytes under the same run id are refused.
+pub fn controller_dispatch_host_action_key_v3(operation_id: text) -> text:
+    "controller-host-action-v1/" + sha256_text(operation_id) + ".sdn"
+
+fn dispatch_state_host_action_send_v3(original: ControllerDispatchStateV3, payload: text) -> ControllerDispatchStateTurnV3:
+    var owner = original
+    if owner.mode != "host-action" or owner.phase != "ready" or owner.exchange.is_some() or owner.root.is_none():
+        return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-host-action-not-ready"))
+    val sub = host_control_sub_decode_v6(payload)
+    if sub.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, sub.unwrap_err()))
+    owner.response = ""
+    if sub.unwrap().sub.ends_with("-abandon"):
+        val store = owner.root.unwrap().workload_v3()
+        if store.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, store.unwrap_err()))
+        val key = controller_dispatch_host_action_key_v3(owner.remote_op)
+        val published = distributed_operation_journal_publish_v3(store.unwrap().journal, key, payload)
+        if published.is_err():
+            owner.remote_started = true
+            owner.outcome = "unknown"
+            return dispatch_turn_v3(dispatch_fail_v3(owner, published.unwrap_err()))
+        val readback = distributed_operation_journal_read_required_v3(store.unwrap().journal, key, 2097152)
+        if readback.is_err() or readback.unwrap() != payload:
+            # A re-signed abandon is new bytes (fresh expiry): a retry after an unknown outcome needs a new run id.
+            owner.remote_started = true
+            owner.outcome = "unknown"
+            return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-host-action-archive-conflict:abandon-id-used-retry-with-a-new-id"))
+        owner.remote_started = true
+        owner.outcome = "unknown"
+    dispatch_turn_v3(dispatch_send_v3(owner, "host-control", payload))
 
 # The admit-build-row step (C5) through the root's single journal writer, authority re-verified at the grant clock.
 fn dispatch_state_remote_admit_v3(original: ControllerDispatchStateV3, signed: DistributedSignedGrantV2,
@@ -581,6 +625,13 @@ fn dispatch_accept_v3(original: ControllerDispatchStateV3, reply: HostServiceOpe
         owner.outcome = "host-refused"
         owner.phase = "ready"
         return owner
+    if owner.mode == "host-action" and owner.phase == "host-control" and (reply.error != "" or reply.exit_code != 0):
+        # milestone_0046: an authenticated Host refusal of a control frame (e.g. the expected-vs-given echo of a stale
+        # abandon) is DATA for the operator: the owner stays ready. No controller row changes state on it.
+        owner.response = encoded.unwrap()
+        owner.outcome = "host-refused"
+        owner.phase = "ready"
+        return owner
     if reply.error != "" or reply.exit_code != 0:
         owner.response = encoded.unwrap()
         return dispatch_fail_v3(owner, if reply.error != "": reply.error else: "dispatch-host-nonzero")
@@ -589,12 +640,12 @@ fn dispatch_accept_v3(original: ControllerDispatchStateV3, reply: HostServiceOpe
         if status.is_err(): return dispatch_fail_v3(owner, status.unwrap_err())
         val config = owner.root.unwrap().config_v3()
         if config.is_err(): return dispatch_fail_v3(owner, config.unwrap_err())
-        val installed = dispatch_service_status_v3(config.unwrap(), status.unwrap())
+        val installed = dispatch_service_status_v3(config.unwrap(), status.unwrap(), owner.mode != "host-action")
         if installed.is_err(): return dispatch_fail_v3(owner, installed.unwrap_err())
         val scope = container_scope_fence_id_v2(status.unwrap().scope)
         if scope.is_err(): return dispatch_fail_v3(owner, scope.unwrap_err())
         owner.scope_digest = scope.unwrap()
-        if owner.mode == "remote":
+        if owner.mode == "remote" or owner.mode == "host-action":
             # C3: the installed-binding status check above is the whole gate; the Windows packet match never runs here.
             owner.response = reply.payload
             owner.outcome = "authenticated-reply"
@@ -617,7 +668,7 @@ fn dispatch_accept_v3(original: ControllerDispatchStateV3, reply: HostServiceOpe
         val source = container_execution_request_encode_v2(owner.packet.unwrap().execution)
         if source.is_err(): return dispatch_fail_v3(owner, source.unwrap_err())
         return dispatch_send_v3(owner, "validate", source.unwrap())
-    if owner.mode == "remote":
+    if owner.mode == "remote" or owner.mode == "host-action":
         # Every later remote reply (prepare, execute after its progress polls, remote-build) is handed to the caller.
         owner.response = reply.payload
         owner.outcome = "authenticated-reply"
@@ -846,6 +897,7 @@ fn dispatch_start_v3(root: ControllerLocalRootV3, uid: text, packet: Option<Cont
     val actual = claim.state.root.unwrap()
     val turn = if mode == "dispatch": dispatch_state_begin_v3(actual, uid, packet.unwrap(), resume)
         elif mode == "remote": dispatch_state_remote_begin_v3(actual, uid)
+        elif mode == "host-action": dispatch_state_host_action_begin_v3(actual, uid)
         elif mode.starts_with("service:"): dispatch_state_service_begin_v3(actual, mode[8:])
         else: dispatch_state_control_begin_v3(actual, uid, mode[8:])
     dispatch_publish_v3(claim, turn)
@@ -899,6 +951,16 @@ pub fn controller_dispatch_remote_settle_v3(handle: ControllerDispatchOwnerV3,
     dispatch_remote_turn_v3(handle, fn(state: ControllerDispatchStateV3) -> ControllerDispatchStateTurnV3:
         dispatch_state_remote_settle_v3(state, edit))
 
+# milestone_0046 entry points: begin ends in phase "ready" (response = the V3 status payload); after each send the caller
+# steps controller_dispatch_step_v3 until phase "ready" (response = the reply payload, or the encoded refusal with outcome
+# `host-refused`) or an error.
+pub fn controller_dispatch_host_action_begin_v3(root: ControllerLocalRootV3, operation_id: text) -> ControllerDispatchOwnedTurnV3:
+    dispatch_start_v3(root, operation_id, None, "host-action")
+
+pub fn controller_dispatch_host_action_send_v3(handle: ControllerDispatchOwnerV3, payload: text) -> ControllerDispatchOwnedTurnV3:
+    dispatch_remote_turn_v3(handle, fn(state: ControllerDispatchStateV3) -> ControllerDispatchStateTurnV3:
+        dispatch_state_host_action_send_v3(state, payload))
+
 pub fn controller_dispatch_step_v3(handle: ControllerDispatchOwnerV3, cancel: bool = false) -> ControllerDispatchOwnedTurnV3:
     val admitted = dispatch_origin_v3()
     if admitted.is_err(): return dispatch_origin_failure_v3(Some(handle), admitted.unwrap_err())
@@ -924,5 +986,6 @@ export controller_dispatch_begin_v3, controller_dispatch_control_begin_v3, contr
 export CONTROLLER_DISPATCH_EDIT_OK_V3, CONTROLLER_DISPATCH_EDIT_REFUSED_V3
 export controller_dispatch_remote_begin_v3, controller_dispatch_remote_send_v3, controller_dispatch_remote_admit_v3, controller_dispatch_remote_edit_v3
 export controller_dispatch_remote_settle_v3, controller_dispatch_remote_execute_key_v3
+export controller_dispatch_host_action_begin_v3, controller_dispatch_host_action_send_v3, controller_dispatch_host_action_key_v3
 export controller_dispatch_service_begin_v3, controller_dispatch_step_v3, controller_dispatch_close_v3
 export controller_dispatch_host_status_match_v3, controller_dispatch_execute_archive_key_v3, controller_dispatch_original_execute_match_v3

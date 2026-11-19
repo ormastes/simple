@@ -1,0 +1,123 @@
+# milestone_0046: controller issue-then-verify of ONE signed grant and approval for a controller-signed Host service action
+# (`helper-abandon`, OPS-01 `service-handoff-abandon`). Same issuer and approver keys and custody as the remote-build issuer;
+# the host-action class (exact kind allow-list) replaces the remote-build task class. AUTHORED_NOT_RUN. Seeds are
+# deterministic, published test material (never real keys); key files come through an injected reader.
+use std.spec.{describe, it, expect, fail}
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2}
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.DistributedAuthorityKeyV2
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{distributed_authority_snapshot_create_v2,
+    distributed_verify_grant_approval_from_snapshot_v2}
+use std.nogc_sync_mut.io.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.{ControllerDispatchConfigV1, ControllerDispatchContextV1}
+use std.common.crypto.ed25519.pure_ed25519_keypair_from_seed
+use std.common.crypto.sha256.sha256_text
+use app.orchestrator.host_identity_key_v1.host_identity_private_encode_v1
+use app.orchestrator.controller_authority_issue_v1.{controller_host_action_class_v1, controller_host_action_issue_v1,
+    controller_host_action_environment_digest_v1, CONTROLLER_HOST_ACTION_KINDS_V1}
+
+var HOST_ACTION_READS_V1: i64 = 0
+
+fn ha_seed_v1(offset: i64) -> [u8]:
+    var seed: [u8] = []
+    for i in 0..32: seed.push((i + offset) as u8)
+    seed
+
+fn ha_file_v1(offset: i64) -> [u8]:
+    val seed = ha_seed_v1(offset)
+    host_identity_private_encode_v1(seed, pure_ed25519_keypair_from_seed(seed).1, [9, 8, 7, 6], "public-test-fixture").unwrap()
+
+fn ha_key_v1(identity: text, role: text, offset: i64, operations: [text]) -> DistributedAuthorityKeyV2:
+    DistributedAuthorityKeyV2(identity: identity, role: role, revision: 1,
+        public_key: pure_ed25519_keypair_from_seed(ha_seed_v1(offset)).1, principal: "user_1", project: "project_1",
+        host_id: "worker_1", operations: operations, maximum_memory_bytes: 4096, maximum_duration_ms: 4000,
+        policy_revision: 4, revocation_epoch: 2, expires_at: 10000, revoked: false)
+
+fn ha_context_v1(operations: [text]) -> ControllerDispatchContextV1:
+    val snapshot = distributed_authority_snapshot_create_v2([ha_key_v1("controller_1", "grant-issuer", 1, operations),
+        ha_key_v1("approver_1", "human-approver", 65, operations)], 9, 4, 2).unwrap()
+    val config = ControllerDispatchConfigV1(controller_id: "controller_1", controller_epoch: 7,
+        target: "retained-host-service-v1", host_root: "/var/lib/simple/host", host_authority_id: "host_authority_1",
+        provider_identity_digest: "e".repeat(64), authority_policy_digest: "f".repeat(64))
+    ControllerDispatchContextV1(config: config,
+        policy: LocalAuthorityPolicyV1(snapshot: snapshot, session_generation: 3, source_digest: "f".repeat(64)))
+
+fn ha_reader_v1(key: DistributedAuthorityKeyV2) -> Result<[u8], text>:
+    HOST_ACTION_READS_V1 = HOST_ACTION_READS_V1 + 1
+    if key.role == "grant-issuer": return Ok(ha_file_v1(1))
+    if key.role == "human-approver": return Ok(ha_file_v1(65))
+    Err("fixture-key-absent")
+
+val HA_BOTH_V1: [text] = ["helper-abandon", "service-handoff-abandon"]
+
+describe "Controller host-action issuance V1 (milestone_0046)":
+    it "names exactly the two abandon kinds as the allow-list":
+        expect(CONTROLLER_HOST_ACTION_KINDS_V1).to_equal(["helper-abandon", "service-handoff-abandon"])
+        expect(controller_host_action_environment_digest_v1("helper-abandon")).to_equal(
+            sha256_text("simple-host-service-action-v1\nhelper-abandon"))
+
+    it "issues a helper-abandon pair that verifies from the installed snapshot, bound to the record digest":
+        val context = ha_context_v1(HA_BOTH_V1)
+        HOST_ACTION_READS_V1 = 0
+        val issued = controller_host_action_issue_v1(context, ha_reader_v1, "approver_1", "helper-abandon", "abandon_1",
+            "c".repeat(64), "worker_1", "grant_1", 1000, 100)
+        match issued:
+            case Err(reason): fail("expected issued authority: {reason}")
+            case Ok(value):
+                expect(value.operation.operation).to_equal("helper-abandon")
+                expect(value.operation.id).to_equal("abandon_1")
+                expect(value.operation.payload_digest).to_equal("c".repeat(64))
+                expect(value.operation.host_id).to_equal("worker_1")
+                expect(value.operation.session_generation).to_equal(3)
+                expect(value.authority.signed.grant.operations).to_equal(["helper-abandon"])
+                expect(value.authority.signed.grant.expires_at).to_equal(1100)
+                expect(value.authority.approval.expires_at).to_equal(1100)
+                expect(value.authority.signed.issuer_id).to_equal("controller_1")
+                expect(distributed_verify_grant_approval_from_snapshot_v2(context.policy.snapshot, value.authority.signed,
+                    value.authority.approval, value.operation, 100, 9, 4, 2, 3).is_ok()).to_equal(true)
+                expect(HOST_ACTION_READS_V1).to_equal(2)
+
+    it "issues the OPS-01 service-handoff-abandon through the same exchange":
+        val issued = controller_host_action_issue_v1(ha_context_v1(HA_BOTH_V1), ha_reader_v1, "approver_1",
+            "service-handoff-abandon", "abandon_2", "d".repeat(64), "worker_1", "grant_2", 1000, 100)
+        expect(issued.is_ok()).to_equal(true)
+        expect(issued.unwrap().operation.operation).to_equal("service-handoff-abandon")
+
+    it "signs nothing outside the allow-list or the approver's scope, before reading any key":
+        HOST_ACTION_READS_V1 = 0
+        for kind in ["service-handoff", "build", "host_agent_cancel_v4", "remote-build"]:
+            expect(controller_host_action_issue_v1(ha_context_v1(HA_BOTH_V1 + [kind]), ha_reader_v1, "approver_1", kind,
+                "abandon_1", "c".repeat(64), "worker_1", "grant_1", 1000, 100)).to_equal(Err("controller-host-action-kind"))
+        step("A host the approver key does not name")
+        expect(controller_host_action_issue_v1(ha_context_v1(HA_BOTH_V1), ha_reader_v1, "approver_1", "helper-abandon",
+            "abandon_1", "c".repeat(64), "worker_2", "grant_1", 1000, 100)).to_equal(Err("controller-host-action-approver-scope"))
+        step("An approver never enrolled for the kind")
+        expect(controller_host_action_issue_v1(ha_context_v1(["service-handoff-abandon"]), ha_reader_v1, "approver_1",
+            "helper-abandon", "abandon_1", "c".repeat(64), "worker_1", "grant_1", 1000, 100)).to_equal(
+            Err("controller-host-action-approver-operations"))
+        step("A lifetime of zero, beyond the bound, or past the approver key's expiry")
+        for ttl in [0, 86400001, 9901]:
+            expect(controller_host_action_issue_v1(ha_context_v1(HA_BOTH_V1), ha_reader_v1, "approver_1", "helper-abandon",
+                "abandon_1", "c".repeat(64), "worker_1", "grant_1", ttl, 100).is_err()).to_equal(true)
+        step("An approver identity enrolled only under the issuer role")
+        expect(controller_host_action_issue_v1(ha_context_v1(HA_BOTH_V1), ha_reader_v1, "controller_1", "helper-abandon",
+            "abandon_1", "c".repeat(64), "worker_1", "grant_1", 1000, 100)).to_equal(Err("AUTHORITY_KEY_UNAVAILABLE"))
+        expect(HOST_ACTION_READS_V1).to_equal(0)
+
+    it "keeps the class predicate exact: one kind, the request is that kind, the approval within the grant":
+        val approver = ha_key_v1("approver_1", "human-approver", 65, HA_BOTH_V1)
+        val env = controller_host_action_environment_digest_v1("helper-abandon")
+        val grant = ExecutionGrantV2("grant_1", "user_1", "project_1", "worker_1", ["helper-abandon"], env, 4, 2, 1100, 1, 1)
+        val request = OperationEnvelopeV2(2, "abandon_1", "c".repeat(64), "user_1", "project_1", "worker_1", "helper-abandon",
+            env, 4, 2, 3, 1, 1)
+        expect(controller_host_action_class_v1(approver, grant, request, 1100, 100)).to_equal("")
+        val two = ExecutionGrantV2("grant_1", "user_1", "project_1", "worker_1", ["helper-abandon", "service-handoff-abandon"],
+            env, 4, 2, 1100, 1, 1)
+        expect(controller_host_action_class_v1(approver, two, request, 1100, 100)).to_equal("controller-host-action-grant-operations")
+        val other = OperationEnvelopeV2(2, "abandon_1", "c".repeat(64), "user_1", "project_1", "worker_1",
+            "service-handoff-abandon", env, 4, 2, 3, 1, 1)
+        expect(controller_host_action_class_v1(approver, grant, other, 1100, 100)).to_equal("controller-host-action-grant-operations")
+        expect(controller_host_action_class_v1(approver, grant, request, 1101, 100)).to_equal("controller-host-action-approval-expiry")
+        expect(controller_host_action_class_v1(approver, grant, request, 100, 100)).to_equal("controller-host-action-approval-expiry")
+        var revoked = approver
+        revoked.revoked = true
+        expect(controller_host_action_class_v1(revoked, grant, request, 1100, 100)).to_equal("controller-host-action-approver-key")

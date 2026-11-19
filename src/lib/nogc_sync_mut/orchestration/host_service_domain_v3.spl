@@ -220,6 +220,17 @@ fn host_helper_abandon_request_error_v3(request: HostServiceRequestV2) -> text:
     if decoded.unwrap().operation.id != request.operation_id: return "host-service-helper-abandon-operation-mismatch"
     ""
 
+# milestone_0046: the read-only inspects of the two signed abandons (V6 `host-control`). The frame names the helper row
+# (`host-helper-inspect`) or is `pending` (`host-service-handoff-inspect`); the owner writes nothing.
+fn host_control_inspect_request_error_v3(request: HostServiceRequestV2) -> text:
+    val framed = host_service_agent_frame_error_v3(request)
+    if framed != "": return framed
+    if request.action == "host-helper-inspect" and not builder_identifier_valid_v1(request.payload):
+        return "host-service-helper-inspect-operation-invalid"
+    if request.action == "host-service-handoff-inspect" and request.payload != "pending":
+        return "host-service-handoff-inspect-frame"
+    ""
+
 # milestone_0021 PR3b: attach/detach carry controller-signed packets naming the run; inspect names the run in
 # its payload (read-only). Each packet's operation id must equal the request's.
 fn host_service_agent_attachment_request_error_v3(request: HostServiceRequestV2) -> text:
@@ -320,6 +331,13 @@ pub fn host_service_domain_turn_v3(owner: HostServiceDomainV3, request: HostServ
                 val cancel_recheck = local.current_v4()
                 if cancel_recheck.is_err(): return HostServiceTurnV3(owner, 2, host_service_error_payload_v2(request, cancel_recheck.unwrap_err(), true))
                 return service_linux_agent_action_v3(local, request, "host_agent_cancel_v4")
+            if request.action == "host-helper-inspect" or request.action == "host-service-handoff-inspect":
+                val inspect_invalid = host_control_inspect_request_error_v3(request)
+                if inspect_invalid != "": return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request, inspect_invalid, false))
+                val inspect_recheck = local.current_v4()
+                if inspect_recheck.is_err(): return HostServiceTurnV3(owner, 2, host_service_error_payload_v2(request, inspect_recheck.unwrap_err(), true))
+                val inspect_action = if request.action == "host-helper-inspect": "host_helper_inspect_v1" else: "host_service_handoff_inspect_v1"
+                return service_linux_agent_action_v3(local, request, inspect_action)
             if request.action == "host-service-handoff":
                 val handoff_invalid = host_service_handoff_request_error_v3(request)
                 if handoff_invalid != "": return HostServiceTurnV3(owner, 1, host_service_error_payload_v2(request, handoff_invalid, false))
