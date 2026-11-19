@@ -49,6 +49,7 @@ pub class LinuxProtectedStorageResourcesV1:
     stage_parent: i64 = -1
     stage_name: text = ""
     stage_identity: [u8] = []
+    expected_parent: [u8] = []
     ready: bool = false
     closing: bool = false
     closed: bool = false
@@ -164,6 +165,22 @@ pub class LinuxProtectedStorageResourcesV1:
         LinuxProtectedBrokerStorageTurnV1(error: "protected-storage-linux-required")
         @end
 
+    @unsafe(reason: "read the held root directory identity of the canonical owner", capabilities: [ffi, raw_ptr])
+    pub fn root_identity_v1() -> Result<[u8], text>:
+        @when(os="linux"):
+        self.current_v1()?
+        var actual = self
+        actual.refresh_v1()
+        if actual.root_index < 0: return Err("protected-storage-root-absent")
+        Ok(actual.identities[actual.root_index])
+        @else:
+        Err("protected-storage-linux-required")
+        @end
+
+    # Set on the local value before open_v1 only (never persisted to the cell or the slot copy); open_body_v1 refuses when the walked parent directory is another inode.
+    pub me pin_parent_v1(identity: [u8]):
+        self.expected_parent = identity
+
     @unsafe(reason: "canonical owner retains and consumes exact bounded Linux resource custody", capabilities: [ffi, raw_ptr])
     pub me open_v1(writer: bool, create_final: bool = false) -> Result<(), text>:
         @when(os="linux"):
@@ -204,6 +221,11 @@ pub class LinuxProtectedStorageResourcesV1:
         self.validate_last_v1()?
         var parent = first
         for at in 1..components.len():
+            # A controller journal child is bound to the directory its root reader already holds: the parent of the
+            # final component must be that same inode (dev/ino), checked before any child create, else refused.
+            if (at == components.len() - 1 and self.expected_parent.len() > 0 and
+                    not retained_credential_bytes_equal_v2(self.identities[self.fds.len() - 1], self.expected_parent)):
+                return Err("protected-storage-parent-identity-mismatch")
             val name = anchored_linux_name_v1(components[at])
             if name == 0: return Err("protected-storage-name-memory")
             var fd = openat(parent as i32, name, anchored_linux_directory_flags_v1(), 0u32) as i64

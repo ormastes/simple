@@ -693,6 +693,19 @@ fn operation_consume_primary_held_v3(owner: DistributedOperationJournalV2,
 pub fn distributed_operation_journal_open_linux_v3(root: text, authority_digest: text,
         nonce: text, maximum_events: i64,
         retention_profile: Option<DistributedOperationRetentionProfileV2> = nil) -> DistributedOperationJournalOpenV2:
+    operation_journal_open_linux_pinned_v3(root, [], authority_digest, nonce, maximum_events, retention_profile)
+
+# Controller-root sibling: the journal child's parent directory must be the inode (dev/ino) its root reader already
+# holds, so a path swap between reader admit and journal open is refused. Same single-writer open as the Host entry.
+pub fn distributed_operation_journal_open_linux_child_v3(root: text, parent_identity: [u8], authority_digest: text,
+        nonce: text, maximum_events: i64) -> DistributedOperationJournalOpenV2:
+    if parent_identity.len() < 1:
+        return DistributedOperationJournalOpenV2.Rejected("OPERATION_JOURNAL_PARENT_IDENTITY_REQUIRED")
+    operation_journal_open_linux_pinned_v3(root, parent_identity, authority_digest, nonce, maximum_events, None)
+
+fn operation_journal_open_linux_pinned_v3(root: text, parent_identity: [u8], authority_digest: text,
+        nonce: text, maximum_events: i64,
+        retention_profile: Option<DistributedOperationRetentionProfileV2>) -> DistributedOperationJournalOpenV2:
     if (not builder_digest_valid_v1(authority_digest) or not builder_digest_valid_v1(nonce) or
             maximum_events <= 0 or maximum_events > 100000):
         return DistributedOperationJournalOpenV2.Rejected("OPERATION_JOURNAL_CONFIGURATION_INVALID")
@@ -701,7 +714,7 @@ pub fn distributed_operation_journal_open_linux_v3(root: text, authority_digest:
         if checked.is_err(): return DistributedOperationJournalOpenV2.Rejected(checked.unwrap_err())
     val lease = "DISTRIBUTED-OPERATION-LEASE-V2\n{nonce}\n{authority_digest}\n"
     val binding = operation_health_binding_v2(authority_digest, sha256_text(lease), maximum_events, retention_profile, root)
-    val opened = operation_health_linux_open_v1(root, binding)
+    val opened = operation_health_linux_open_v1(root, binding, true, true, parent_identity)
     if opened.owner.is_none(): return DistributedOperationJournalOpenV2.Rejected(opened.error)
     var cleanup = DistributedOperationJournalOpenCleanupV2(root, authority_digest, sha256_text(lease), false,
         nil, nil, opened.turn.unwrap().owner_id, binding, maximum_events, retention_profile, opened.owner, opened.turn)
@@ -767,7 +780,7 @@ fn operation_linux_current_held_v3(owner: DistributedOperationJournalV2,
     if operation_current_for_owner_v2(owner, turn)? != owner.revision: return Err("OPERATION_JOURNAL_REVISION_STALE")
     Ok(())
 
-export distributed_operation_journal_open_linux_v3, distributed_operation_journal_linux_current_v3
+export distributed_operation_journal_open_linux_v3, distributed_operation_journal_open_linux_child_v3, distributed_operation_journal_linux_current_v3
 
 # True when the journal owns a protected storage backend (Windows store or Linux storage). Object custody built on such a
 # journal must go through distributed_operation_journal_{read_required,publish}_v3, never a pathname under `root`: a
