@@ -384,3 +384,127 @@ export unit_constraint_pool_reset, unit_constraint_find, unit_constraint_registe
 export unit_constraint_predicate, unit_constraint_ref_tag, unit_constraint_min_text, unit_constraint_max_text
 export unit_range_predicate, unit_constraint_violation_message
 export unit_constraint_eval, unit_constraint_eval_literal, unit_constraint_parse_number
+
+# ---------------------------------------------------------------------------
+# Integer bounds of a `where` predicate (native range check)
+# ---------------------------------------------------------------------------
+
+# Integer literal token -> value; `uc_err` is set for anything else.
+fn uc_bound_int(t: text) -> i64:
+    var neg = false
+    var i = 0
+    if t.len() > 0 and t[0:1] == "-":
+        neg = true
+        i = 1
+    if i >= t.len():
+        uc_err = true
+        return 0
+    var v: i64 = 0
+    while i < t.len():
+        val c = t[i:i+1]
+        if c == "_":
+            i = i + 1
+            continue
+        if not uc_is_digit(c):
+            uc_err = true
+            return 0
+        v = v * 10 + (int(c) as i64)
+        i = i + 1
+    if neg:
+        return 0 - v
+    v
+
+# Fold one `self op n` / `n op self` comparison into acc = [has_lo, lo, has_hi, hi].
+fn uc_apply_bound(op: text, self_left: bool, n: i64, acc: [i64]):
+    var lo_n: i64 = n
+    var hi_n: i64 = n
+    var set_lo = false
+    var set_hi = false
+    var o = op
+    if not self_left:
+        # `n op self` mirrors to `self op' n`.
+        if op == "<=":
+            o = ">="
+        elif op == "<":
+            o = ">"
+        elif op == ">=":
+            o = "<="
+        elif op == ">":
+            o = "<"
+    if o == ">=":
+        set_lo = true
+    elif o == ">":
+        set_lo = true
+        lo_n = n + 1
+    elif o == "<=":
+        set_hi = true
+    elif o == "<":
+        set_hi = true
+        hi_n = n - 1
+    elif o == "==":
+        set_lo = true
+        set_hi = true
+    if set_lo and (acc[0] == 0 or lo_n > acc[1]):
+        acc[0] = 1
+        acc[1] = lo_n
+    if set_hi and (acc[2] == 0 or hi_n < acc[3]):
+        acc[2] = 1
+        acc[3] = hi_n
+
+fn uc_fold_clause(items: [text], ops: [text], acc: [i64]):
+    if items.len() < 2 or items.len() != ops.len() + 1:
+        return
+    var k = 0
+    while k < ops.len():
+        val a = items[k]
+        val b = items[k + 1]
+        uc_err = false
+        if a == "self" and b != "self":
+            val n = uc_bound_int(b)
+            if not uc_err:
+                uc_apply_bound(ops[k], true, n, acc)
+        elif b == "self" and a != "self":
+            val n = uc_bound_int(a)
+            if not uc_err:
+                uc_apply_bound(ops[k], false, n, acc)
+        k = k + 1
+
+# Inclusive integer bounds implied by a `where` predicate made of `and`-joined
+# comparison chains between `self` and integer literals. Returns [min, max]
+# texts ("" = open). Any other shape (`or`, `not`, parentheses, arithmetic,
+# floats) yields no bounds for that clause: the interpreter still evaluates the
+# full predicate; only the native compare-and-panic is limited to ranges.
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_where_bounds(pred: text) -> [text]:
+    if not uc_tokenize(pred):
+        return ["", ""]
+    val toks = uc_toks
+    for t in toks:
+        if t == "or" or t == "not" or t == "(" or t == ")":
+            return ["", ""]
+    var acc: [i64] = [0, 0, 0, 0]
+    var items: [text] = []
+    var ops: [text] = []
+    var clause_ok = true
+    var idx = 0
+    while idx <= toks.len():
+        val t = if idx < toks.len(): toks[idx] else: "and"
+        if t == "and":
+            if clause_ok:
+                uc_fold_clause(items, ops, acc)
+            items = []
+            ops = []
+            clause_ok = true
+        elif t == "<" or t == ">" or t == "<=" or t == ">=" or t == "==":
+            ops.push(t)
+        elif t == "-" and idx + 1 < toks.len() and uc_is_digit(toks[idx + 1][0:1]):
+            items.push("-" + toks[idx + 1])
+            idx = idx + 1
+        elif t == "self" or uc_is_digit(t[0:1]):
+            items.push(t)
+        else:
+            clause_ok = false
+        idx = idx + 1
+    val lo = if acc[0] != 0: acc[1].to_text() else: ""
+    val hi = if acc[2] != 0: acc[3].to_text() else: ""
+    [lo, hi]
