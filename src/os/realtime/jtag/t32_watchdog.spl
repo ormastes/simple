@@ -7,14 +7,17 @@
 # Solution: wrap every T32 call with a timeout check. On hang:
 #   1. Attempt T32_Ping (fast liveness check)
 #   2. If ping fails, T32_Terminate + T32_Exit (graceful shutdown)
-#   3. If that hangs too, kill the T32 process (last resort)
-#   4. Auto-reconnect if configured
+#   3. Auto-reconnect if configured
+#
+# kill_on_hang is NOT honoured: this watchdog does not own a T32 process id,
+# and a global pkill would kill other users' TRACE32 sessions (DHR P0). An
+# owned-session kill belongs to the isolated adapter host.
 
 use std.debug.remote.t32_sffi.t32_core (
     t32_ping, t32_init, t32_attach, t32_terminate, t32_exit,
     t32_stop, t32_config, t32_get_state
 )
-use std.io (shell)
+use std.timing.{time_now}
 
 class T32WatchdogConfig:
     """Watchdog configuration — loaded from config/simple.test.sdn."""
@@ -129,10 +132,6 @@ class T32Watchdog:
 
         self.connected = false
 
-        # Step 3: Kill process if configured and still hung
-        if self.config.kill_on_hang:
-            t32_kill_process()
-
         # Step 4: Auto-reconnect if configured
         if self.config.auto_reconnect:
             val ok = self.connect()
@@ -166,7 +165,17 @@ class T32Watchdog:
             if not self.recover():
                 return false
 
+        # ponytail: the deadline is checked AFTER op_fn returns, so an overrun
+        # is detected and the session marked hung, but a call that never
+        # returns is not cancelled. Real enforcement needs the out-of-process
+        # adapter host (DHR P2).
+        val started = time_now()
         val ok = op_fn()
+        if started.elapsed_ms() > self.config.operation_timeout_ms:
+            self.state = T32_HUNG
+            self.total_hangs = self.total_hangs + 1
+            self.recover()
+            return false
         if not ok:
             if not self.check_alive():
                 self.recover()
@@ -181,8 +190,3 @@ class T32Watchdog:
 
     fn stats_text() -> text:
         "hangs={self.total_hangs} recoveries={self.total_recoveries} state={self.state}"
-
-fn t32_kill_process():
-    """Last resort: kill the T32 process."""
-    shell("pkill -f t32m 2>/dev/null || true")
-    shell("pkill -f t32a 2>/dev/null || true")

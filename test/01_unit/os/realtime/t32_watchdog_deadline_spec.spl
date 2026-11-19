@@ -1,0 +1,32 @@
+# @cover src/os/realtime/jtag/t32_watchdog.spl 30%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-DHR-03
+# plan: doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md
+
+# DHR P0: guarded_op used to ignore operation_timeout_ms entirely. It now
+# marks an over-deadline operation as a hang (post-hoc detection, not
+# cancellation). Runs against the REAL module, not an inline copy; with no
+# TRACE32 library loaded the SFFI calls return Err, so recovery ends DEAD.
+
+use std.spec.*
+use os.realtime.jtag.t32_watchdog.{T32Watchdog, T32WatchdogConfig}
+
+fn _ok_op() -> bool:
+    true
+
+fn _watchdog(timeout_ms: i64) -> T32Watchdog:
+    var w = T32Watchdog.new(T32WatchdogConfig.from_sdn(3000, timeout_ms, 3, false, false, "localhost", 20000))
+    w.connected = true
+    w
+
+describe "T32 watchdog deadline":
+    it "an operation within the deadline succeeds":
+        var w = _watchdog(60000)
+        expect(w.guarded_op("halt", _ok_op)).to_equal(true)
+        expect(w.total_hangs).to_equal(0)
+
+    it "an operation past the deadline is reported as a hang, not success":
+        var w = _watchdog(-1)
+        expect(w.guarded_op("halt", _ok_op)).to_equal(false)
+        expect(w.total_hangs).to_equal(1)
+        expect(w.is_alive()).to_equal(false)
