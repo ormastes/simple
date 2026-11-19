@@ -698,3 +698,15 @@ head (13/40 at base).
 - **Trap:** headless Chrome with a small `--window-size` (160x90) left everything below the first CSS row unpainted, whether the borders were `dotted` or `solid`. Capture at 400x300 and pin only the rendered region.
 - **Evidence:** new `border_dotted_round_chrome159_spec`, 4950 pins (widths 6/8/10/12, uniform 4x4 device blocks inside the border bands). Base: 256 mismatches per lane, 0/3. Head: 3/3.
   - Base vs head over the 98 specs that mention `dashed`/`dotted`: 0 new failures.
+
+## 2026-11-19 — two text-control size pins measured in the wrong document mode (re-pinned; engine unchanged)
+
+- **Symptom:** a sweep of all 102 `*chrome159*` specs on `release/1.0.0` found two red rows:
+  - `percent_min_max_size` AC-3: engine 128 / 208, pinned 120 / 200.
+  - `table_cell_max_content_inline` AC-7: textarea 60 / table 91, pinned 66 / 96.45.
+- **Measured (Chrome 159 `--dump-dom` on the exact spec pages, with getBoundingClientRect and computed box-sizing):**
+  - The percent spec's HEAD carries `<!doctype html>` (standards): the input is content-box, 128 and 208.
+  - The table spec's HEAD has no doctype (quirks): the textarea is border-box, 60, and the table is 90.45.
+  - Chrome makes text inputs and textareas border-box in quirks mode only (html.css `input:not([type=image]), textarea`). Each 11-17 pin was taken in the other mode.
+  - The engine already models the document mode (`standards_mode`, `simple_web_html_layout_renderer_core.spl` table) and matched Chrome on both pages.
+- **Fix:** both rows re-pinned to the mode their page is actually in, with the oracle recipe in the spec comment. 15/15 and 12/12. Tolerances are unchanged.
