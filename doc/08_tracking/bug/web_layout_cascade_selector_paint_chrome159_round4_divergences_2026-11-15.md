@@ -820,3 +820,23 @@ head (13/40 at base).
 - **Evidence:**
   - New `img_opacity_chrome159_spec`: four 10x8 boxes (0.5, 0.3, 0.6 over magenta, and no opacity) on the raster, cpu_simd and Vulkan. Base 0/3, three cells each; head 3/3.
   - Base vs head over the 164 specs mentioning opacity or `<img>`, serial on the same seed: 0 new failures. The only change is the three new-spec rows going green; 425 failing rows are pre-existing and identical on both.
+
+## 2026-11-19 — dashed corners with a radius below the border width (measured, still on the per-side path)
+
+- **Scope today:** the rounded-dash path takes differing radii only when every corner has r >= t. A smaller corner keeps the per-side painter, so this entry changes no pixel.
+- **Measured** (Chrome 159, k=4, a 56x40 `#c02020` dashed box with one small corner and the other three at 16; compared with the closed-path model, using corner offset max(r, t/2), over every uniform cell):
+
+  | t | small corner | r -> mismatched cells |
+  |---|---|---|
+  | 6 | top-left | 0->16, 2->15, 3->15, 4->4, 5..10->0 |
+  | 6 | top-right | 3->7, 5->0, 7->0 |
+  | 8 | top-left | 0->29, 2..4->26, 5->7, 6->4, 7..10->0 |
+  | 8 | top-right | 3->16, 5->0, 7->0 |
+
+- **What holds:**
+  - The dash layout stays on the closed path.
+  - The first top dash starts at x = max(r, t/2).
+  - The errors are local to the small corner.
+  - Every tested box with all r >= t-1 matched exactly.
+- **What does not fit:** when r < t/2, Chrome paints the leg after the corner only on its inner half (t=6, r=0: x 3..5, y 3..8), joined by a diagonal triangle. The closed-path stroke would paint the full band width there. This looks like Chrome's per-side clip rather than a stroke join. Earlier, a box with several small corners (t=8, radii 5/7/16/6) laid its top dashes out per side: runs (0,16),(20,16),(40,15), 403 mismatches.
+- **Next:** find the switch to the per-side layout, which needs a box with several small corners. Then model the inner-half leg. Widening the admission to r >= t-1 alone gains one radius value per width, so it was not done.
