@@ -1,0 +1,273 @@
+"""
+## Purpose and audience
+milestone_0045 (owner decision 2, 2026-11-19): the controller-signed `retention-release` of a remote build's retained
+workspace. The Host verifies the signed record (issuer == controller_ref, V4 signatures at its own clock, policy
+generation, revocation and session), checks it against its own archived outcome or reap record of that run, records the
+proof and a no-replace marker through the single journal writer, deletes the retained tree inside the build's keep-id
+mapping through the container provider (no-follow, fd-relative), releases the native storage lease, archives the
+outcome, and only then forgets the native lease. Written for owners of the Host service and the Linux provider.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable `simple` binary on this host, 2026-11-19).
+## Compatibility and limitations
+Real Ed25519 signatures from the verifier fixture seeds and a real temporary capacity journal for the record publish and
+archive. The native effect (root loan, lease recovery, tree removal, quota release) needs an installed Host with a
+provisioned XFS workspace: its order is pinned structurally and the live case is BLOCKED unless its fixture env is set.
+## Verification guidance and troubleshooting
+`APPROVAL_EXPIRED` for the expired fixture is the restart-expiry rule, not a flake. A refusal names `retention-release-*`.
+"""
+use std.spec.{step, fail, pending}
+use std.io.file_read_text
+use std.io_runtime.env_get_opt
+use test.fixtures.orchestration.host_linux_service_verifier_fixture_v1.*
+use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_open_cleanup_v2,
+    distributed_operation_journal_read_v3}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.linux_service_scope_v4
+use std.common.contracts.orchestration.host_retention_release_v1.*
+use std.nogc_sync_mut.orchestration.host_remote_build_retention_release_v1.*
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentitySnapshotV3
+use std.nogc_sync_mut.io.local_authority_policy_v1.{local_authority_policy_decode_v1, host_local_context_v1}
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2}
+use std.common.crypto.sha256.sha256_text
+
+val RR_OPS: [text] = ["retention-release"]
+val RR_FAR: i64 = 4102444800000
+
+fn rr_fixture() -> LinuxServiceVerifierFixtureV1:
+    linux_service_verifier_fixture_ops_v1(1, 65, RR_FAR, "/var/lib/simple/hosts", RR_OPS)
+
+fn rr_host_part(operation_id: text = "build_op_1", evidence: text = "outcome") -> HostRetentionReleaseV1:
+    HostRetentionReleaseV1(wire_version: HOST_RETENTION_RELEASE_WIRE_V1, operation_id: operation_id,
+        association_digest: "c".repeat(64), evidence: evidence, evidence_digest: "d".repeat(64), physical_host_id: "worker_1")
+
+fn rr_record(state: text = "completed", operation_id: text = "build_op_1") -> HostRetentionReleaseV1:
+    var record = rr_host_part(operation_id)
+    record.controller_state = state
+    record.controller_row_digest = "e".repeat(64)
+    record.controller_outcome_digest = "f".repeat(64)
+    record
+
+fn rr_grant(kind: text) -> ExecutionGrantV2:
+    ExecutionGrantV2("grant_a", "user_1", "project_1", "worker_1", [kind], "a".repeat(64), 4, 2, RR_FAR, 536870912, 1000)
+
+fn rr_signed(record: HostRetentionReleaseV1, issuer: i64 = 1, approver: i64 = 65, expires: i64 = RR_FAR,
+        kind: text = "retention-release") -> text:
+    val operation = OperationEnvelopeV2(2, "release_1", host_retention_release_digest_v1(record).unwrap(), "user_1", "project_1",
+        "worker_1", kind, "a".repeat(64), 4, 2, 3, 4096, 100)
+    val signed = linux_service_verifier_sign_v1(operation, rr_grant(kind), issuer, approver, expires)
+    host_retention_release_proof_encode_v1(HostRetentionReleaseProofV1(record, operation, signed.0, signed.1)).unwrap()
+
+fn rr_body(file: text, start: text, stop: text) -> text:
+    val source = file_read_text(file)
+    val rest = source.substring(source.index_of(start), source.byte_len())
+    val to = rest.substring(1, rest.byte_len()).index_of(stop)
+    if to < 0: return rest
+    rest.substring(0, to + 1)
+
+val RR_HOST: text = "src/lib/nogc_sync_mut/orchestration/host_remote_build_retention_release_v1.spl"
+val RR_SERVICE: text = "src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl"
+val RR_PROVIDER: text = "src/lib/nogc_async_mut/container/providers/linux/workspace_retention_release_v1.spl"
+val RR_MOUNT: text = "src/lib/nogc_async_mut/container/providers/linux/workspace_mount_owner_v1.spl"
+
+describe "Retention-release record (milestone_0045)":
+    it "round-trips the Host part and the signed form canonically and refuses every other wire version":
+        # @req M45-RETENTION-RELEASE (exact version; the Host part carries no controller fields)
+        val part = host_retention_release_bytes_v1(rr_host_part()).unwrap()
+        expect(host_retention_release_decode_v1(part).unwrap().controller_state).to_equal("")
+        val full = host_retention_release_bytes_v1(rr_record()).unwrap()
+        expect(host_retention_release_decode_v1(full).unwrap().controller_state).to_equal("completed")
+        expect(host_retention_release_decode_v1(full + "extra: 1\n").is_err()).to_equal(true)
+        var future = rr_record()
+        future.wire_version = "retention-release-v2"
+        expect(host_retention_release_bytes_v1(future).unwrap_err()).to_equal("retention-release-version-unsupported")
+        step("a controller state outside the terminal set, half-filled controller fields or another evidence kind are invalid")
+        for state in ["executing", "outcome-unknown", "admitted", "accepted"]:
+            expect(host_retention_release_bytes_v1(rr_record(state)).unwrap_err()).to_equal("retention-release-value-invalid")
+        var half = rr_host_part()
+        half.controller_row_digest = "e".repeat(64)
+        expect(host_retention_release_bytes_v1(half).unwrap_err()).to_equal("retention-release-value-invalid")
+        expect(host_retention_release_bytes_v1(rr_host_part("build_op_1", "guess")).unwrap_err()).to_equal("retention-release-value-invalid")
+
+    it "binds the signed operation to the `retention-release` kind, the full record's digest and this host":
+        # @req M45-RETENTION-RELEASE
+        val record = rr_record()
+        val good = OperationEnvelopeV2(2, "release_1", host_retention_release_digest_v1(record).unwrap(), "user_1", "project_1",
+            "worker_1", "retention-release", "a".repeat(64), 4, 2, 3, 4096, 100)
+        expect(host_retention_release_match_v1(record, good).unwrap()).to_equal(true)
+        var other_kind = good
+        other_kind.operation = "helper-abandon"
+        expect(host_retention_release_match_v1(record, other_kind).unwrap_err()).to_equal("retention-release-operation-mismatch")
+        var other_host = good
+        other_host.host_id = "worker_2"
+        expect(host_retention_release_match_v1(record, other_host).unwrap_err()).to_equal("retention-release-operation-mismatch")
+        step("the unsigned Host part never matches a signed operation: the controller's terminal state is required")
+        val part = rr_host_part()
+        val unsigned = OperationEnvelopeV2(2, "release_1", host_retention_release_digest_v1(part).unwrap(), "user_1", "project_1",
+            "worker_1", "retention-release", "a".repeat(64), 4, 2, 3, 4096, 100)
+        expect(host_retention_release_match_v1(part, unsigned).unwrap_err()).to_equal("retention-release-controller-unsettled")
+
+describe "Retention-release verify gate (milestone_0045)":
+    it "accepts only the configured controller's live V4-verified signature":
+        # @req M45-RETENTION-RELEASE (issuer == controller_ref; expired approvals are refused after restart)
+        val fixture = rr_fixture()
+        val policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val context = host_local_context_v1(policy)
+        val source = rr_signed(rr_record())
+        expect(host_retention_release_verify_v1(policy, "issuer_1", context, "worker_1", source).unwrap().release.operation_id)
+            .to_equal("build_op_1")
+        expect(host_retention_release_verify_v1(policy, "issuer_9", context, "worker_1", source).unwrap_err())
+            .to_equal("linux-host-service-controller-mismatch")
+        expect(host_retention_release_verify_v1(policy, "issuer_1", context, "worker_1", rr_signed(rr_record(), 2, 66)).unwrap_err())
+            .to_equal("ISSUER_SIGNATURE_INVALID")
+        expect(host_retention_release_verify_v1(policy, "issuer_1", context, "worker_1", rr_signed(rr_record(), 1, 65, 1000))
+            .unwrap_err()).to_equal("APPROVAL_EXPIRED")
+        expect(host_retention_release_verify_v1(policy, "issuer_1", context, "worker_2", source).unwrap_err())
+            .to_equal("retention-release-operation-mismatch")
+
+    it "checks every Host-derived field against the journal's own record and echoes expected beside given":
+        # @req M45-RETENTION-RELEASE (refused unless the record names this run's own archived evidence)
+        val expected = rr_host_part()
+        expect(host_retention_release_check_v1(rr_record(), expected).is_ok()).to_equal(true)
+        expect(host_retention_release_check_v1(rr_record("failed"), expected).is_ok()).to_equal(true)
+        expect(host_retention_release_check_v1(rr_record("cancelled"), expected).is_ok()).to_equal(true)
+        var stale = expected
+        stale.evidence_digest = "9".repeat(64)
+        expect(host_retention_release_check_v1(rr_record(), stale).unwrap_err()).to_equal("retention-release-evidence-mismatch:expected=" +
+            "outcome/" + "9".repeat(64) + ";given=outcome/" + "d".repeat(64))
+        var other_association = expected
+        other_association.association_digest = "8".repeat(64)
+        expect(host_retention_release_check_v1(rr_record(), other_association).unwrap_err()).to_start_with("retention-release-association-mismatch")
+        expect(host_retention_release_check_v1(rr_record("completed", "build_op_2"), expected).unwrap_err())
+            .to_equal("retention-release-operation-mismatch")
+
+describe "Retention-release journal records (milestone_0045)":
+    it "publishes proof then marker, archives the outcome once, and stays idempotent across a re-signed retry":
+        # @req M45-RETENTION-RELEASE (single journal writer, no-replace, read back; crash/restart converges)
+        val fixture = rr_fixture()
+        val native = LinuxServiceNativeIdentitySnapshotV3(native_machine_id: fixture.binding.native_machine_id, native_boot_id: "native-boot",
+            architecture: "x86_64", owner_generation: 41, process_identity_digest: "e".repeat(64), process_generation: 2,
+            authority_namespace_id: "namespace_1")
+        val scope = linux_service_scope_v4(fixture.binding, native, "ab".repeat(16)).unwrap()
+        val root = secure_temp_dir("/tmp", "rr-publish").unwrap()
+        val capacity = HostCapacityV1("worker_1", "host-authority", container_scope_fence_id_v2(scope).unwrap(), 41, 2000, 536870912, [])
+        var opened: [HostCapacityOwnerV1] = []
+        match host_capacity_owner_open_owned_v2(root + "/journal", capacity, "9".repeat(64), 64, true):
+            case HostCapacityOpenV2.Ready(owner): opened.push(owner)
+            case HostCapacityOpenV2.Rejected(reason): fail(reason)
+            case HostCapacityOpenV2.CleanupRequired(cleanup, reason):
+                val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+                expect(closed.error).to_equal("")
+                fail(reason)
+        val journal = opened[0].journal
+        val source = rr_signed(rr_record())
+        val proof = host_retention_release_proof_decode_v1(source).unwrap()
+        val marker = host_retention_release_record_publish_v1(journal, proof, source).unwrap()
+        expect(distributed_operation_journal_read_v3(journal, host_retention_release_marker_relative_v1("build_op_1"), 4096).unwrap().unwrap())
+            .to_equal(marker)
+        expect(distributed_operation_journal_read_v3(journal, host_retention_release_proof_relative_v1("build_op_1", sha256_text(source)),
+            262144).unwrap().unwrap()).to_equal(source)
+        step("a freshly signed release for the SAME run and evidence finishes on the recorded marker (re-sign after expiry)")
+        val again = rr_signed(rr_record("failed"))
+        expect(host_retention_release_record_publish_v1(journal, host_retention_release_proof_decode_v1(again).unwrap(), again).unwrap())
+            .to_equal(marker)
+        step("a release naming other evidence for the same run is refused")
+        var foreign = rr_record()
+        foreign.evidence_digest = "7".repeat(64)
+        val third = rr_signed(foreign)
+        expect(host_retention_release_record_publish_v1(journal, host_retention_release_proof_decode_v1(third).unwrap(), third).unwrap_err())
+            .to_equal("retention-release-exists")
+        step("the outcome archive is no-replace: a repeat with the same facts answers the stored bytes")
+        expect(host_retention_release_archived_v1(journal, "build_op_1").unwrap().is_none()).to_equal(true)
+        val effect = HostRetentionReleaseEffectV1(charge: "native-released", used_bytes: 0, used_inodes: 0, removed: 12)
+        val archived = host_retention_release_archive_v1(journal, "build_op_1", sha256_text(marker), effect, 1700000000000).unwrap()
+        expect(host_retention_release_archived_v1(journal, "build_op_1").unwrap().unwrap()).to_equal(archived)
+        expect(host_retention_release_archive_v1(journal, "build_op_1", sha256_text(marker), effect, 1700000009999).unwrap())
+            .to_equal(archived)
+        step("a restart that finds the leaf gone and no native lease converges with the weaker, named evidence")
+        val absent = HostRetentionReleaseEffectV1(charge: "absent-unmeasured", used_bytes: -1, used_inodes: -1, removed: -1)
+        val converged = host_retention_release_archive_v1(journal, "build_op_9", "6".repeat(64), absent, 1700000000000).unwrap()
+        expect(host_retention_released_decode_v1(converged).unwrap().charge).to_equal("absent-unmeasured")
+        step("an archive with an unknown charge class or a measured release that left usage is refused")
+        expect(host_retention_release_archive_v1(journal, "build_op_8", "6".repeat(64),
+            HostRetentionReleaseEffectV1(charge: "guess", used_bytes: 0, used_inodes: 0, removed: 0), 1).is_err()).to_equal(true)
+        expect(host_retention_release_archive_v1(journal, "build_op_8", "6".repeat(64),
+            HostRetentionReleaseEffectV1(charge: "native-released", used_bytes: 4096, used_inodes: 1, removed: 0), 1).is_err()).to_equal(true)
+        val closed = host_capacity_owner_close_owned_v2(opened[0])
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+describe "Retention-release order and wiring (milestone_0045)":
+    it "verifies, derives, checks and records before any effect, and forgets the native lease only after the archive":
+        # @req M45-RETENTION-RELEASE (decision recorded before the delete; the charge is released through the journal)
+        val handler = rr_body(RR_SERVICE, "fn linux_service_retention_release_v4(", "\n# milestone_0045 retention-release inspect")
+        val verify = handler.index_of("host_retention_release_admit_v1(")
+        val lend = handler.index_of("lend_workspace_root_v1()")
+        val effect = handler.index_of("linux_workspace_retention_release_v1(")
+        val end_loan = handler.index_of("end_workspace_root_loan_v1(")
+        val archive = handler.index_of("host_retention_release_archive_v1(")
+        val forget = handler.index_of("workspace_storage_forget_released_v1(")
+        expect(verify >= 0 and lend > verify and effect > lend and end_loan > effect).to_equal(true)
+        expect(archive > effect and forget > archive).to_equal(true)
+        step("journal writes go through the held capacity journal (borrowed, never taken out of the owner)")
+        expect(handler.contains("owner.capacity.unwrap().journal")).to_equal(true)
+        expect(handler.contains("continuity_proven = true")).to_equal(false)
+        step("the slot must be free: no agent, no build, no consumed incarnation, no retained root loan")
+        for gate in ["owner.agent.is_some()", "owner.build.is_some()", "owner.agent_consumed", "owner.agent_root.is_some()"]:
+            expect(handler.contains(gate)).to_equal(true)
+        val admit = rr_body(RR_HOST, "pub fn host_retention_release_admit_v1(", "\npub fn ")
+        val v = admit.index_of("host_retention_release_verify_v1(")
+        val archived = admit.index_of("host_retention_release_archived_v1(")
+        val derive = admit.index_of("host_retention_release_expected_v1(")
+        val check = admit.index_of("host_retention_release_check_v1(")
+        val publish = admit.index_of("host_retention_release_record_publish_v1(")
+        expect(v >= 0 and archived > v and derive > archived and check > derive and publish > check).to_equal(true)
+        step("the shared leaf: only the ONE unreleased row that may hold its tree is releasable; no-workload outcomes retain nothing")
+        val derivation = rr_body(RR_HOST, "pub fn host_retention_release_expected_v1(", "\npub fn ")
+        expect(derivation.contains("retention-release-ambiguous:unreleased=")).to_equal(true)
+        expect(derivation.contains("retention-release-ambiguous:live=")).to_equal(true)
+        expect(derivation.contains("retention-release-nothing-retained")).to_equal(true)
+        expect(file_read_text(RR_HOST).contains("source_return != \"retained-returned\"")).to_equal(true)
+
+    it "deletes inside the keep-id mapping through the provider, closes every fd, then proves the release":
+        # @req M45-RETENTION-RELEASE (no-follow fd-relative delete; release_if_absent only after every fd is closed)
+        val effect = rr_body(RR_PROVIDER, "pub fn linux_workspace_retention_release_v1(", "\nexport ")
+        val recover = effect.index_of("root.recover_lease_v3()")
+        val open = effect.index_of("root.open_source_v3(")
+        val remove = effect.index_of(".remove_retained_tree_v1(")
+        val close = effect.index_of(".close_v1()")
+        val release = effect.index_of("workspace_storage_release_if_absent_v1(")
+        expect(recover >= 0 and open > recover and remove > open and close > remove and release > close).to_equal(true)
+        expect(effect.contains("workspace_storage_forget_released_v1")).to_equal(false)
+        expect(effect.contains("absent-unmeasured")).to_equal(true)
+        step("a first issue that finds no leaf refuses; only a resumed (already journaled) release converges absent-unmeasured")
+        expect(effect.contains("if not resumed: return retention_release_failed_v1(\"workspace-retention-release-leaf-absent\")")).to_equal(true)
+        val mount = rr_body(RR_MOUNT, "    pub fn remove_retained_tree_v1(", "\n    pub fn ")
+        expect(mount.contains("request.user_namespace_mode != \"keep-id\"")).to_equal(true)
+        expect(mount.contains("sample.request.user_uid != sample.process.effective_uid")).to_equal(true)
+        expect(mount.contains(".remove_tree_contents_v1(sample.process.effective_uid)")).to_equal(true)
+        expect(mount.contains(".remove_child_directory_v1(")).to_equal(true)
+        expect(mount.contains("phase = \"retention-removed\"")).to_equal(true)
+
+    it "routes host-control `retention-inspect` / `retention-release` to the owner through the full recheck":
+        # @req M45-RETENTION-RELEASE (nothing unreachable)
+        val dispatch = rr_body(RR_SERVICE, "pub fn host_linux_service_dispatch_v4(", "\n# AT-OPS-01 drain")
+        expect(dispatch.contains("if action == \"host_retention_release_v1\": return linux_service_retention_release_v4(owner, source)"))
+            .to_equal(true)
+        expect(dispatch.contains("if action == \"host_retention_inspect_v1\": return linux_service_retention_inspect_v4(owner, source)"))
+            .to_equal(true)
+        val domain = file_read_text("src/lib/nogc_sync_mut/orchestration/host_service_domain_v3.spl")
+        expect(domain.contains("request.action == \"host-retention-release\"")).to_equal(true)
+        expect(domain.contains("request.action == \"host-retention-inspect\"")).to_equal(true)
+
+describe "Retention release on a provisioned Host (milestone_0045, live root)":
+    it "releases a retained remote-build workspace end to end":
+        # @req M45-RETENTION-RELEASE (live root; BLOCKED unless the installed Host fixture is configured)
+        if (env_get_opt("SIMPLE_RETENTION_HOST_FIXTURE") ?? "") == "":
+            pending("BLOCKED: installed Host + provisioned XFS workspace fixture env unset: SIMPLE_RETENTION_HOST_FIXTURE")
+            return
+        fail("SIMPLE_RETENTION_HOST_FIXTURE is set but no live driver is wired for this lane yet")

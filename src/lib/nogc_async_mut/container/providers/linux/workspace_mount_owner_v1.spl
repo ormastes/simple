@@ -480,6 +480,30 @@ pub class LinuxWorkspaceSourceOwnerV1:
             return Err("workspace-source-inspect-provider-policy-mismatch")
         linux_workspace_mount_inspect_observation_v1(observed, policy, expected, sample.request)
 
+    # milestone_0045 retention release (owner decision 2): deletes the retained workspace tree INSIDE the build's own
+    # user-namespace mapping. The current sample re-proves the archived request is keep-id with user_uid == this process's
+    # euid, so every guest-created inode carries that uid and the owner removes it with no new privilege. Only a FRESH
+    # observed source (no staging effect) may remove; the walk is no-follow and fd-relative beneath the held root, never
+    # crosses a mount, and the leaf is removed through the held parent bound to the held root's identity. The phase then
+    # forbids any further use; close_v1 still releases every descriptor and the exclusion. Returns entries removed.
+    # allow(primitive_api): reviewed removed-entry count of the fd-level walk (milestone_0045)
+    pub fn remove_retained_tree_v1(request_bytes: text) -> Result<i64, text>:
+        val sample = self.current_v1(request_bytes)?
+        val state = workspace_source_state_v1(self.slot, self.generation)?
+        if state.phase != "observed": return Err("workspace-source-owner-not-current")
+        if state.agent_effect_attempted or state.build_effect_attempted:
+            return Err("workspace-retention-release-fresh-source-required")
+        val request = sample.request
+        if request.user_namespace_mode != "keep-id" or sample.request.user_uid != sample.process.effective_uid:
+            return Err("workspace-retention-release-mapping")
+        val root = state.root_directory.unwrap()
+        val parent = state.parent_directory.unwrap()
+        workspace_source_states_v1[self.slot].phase = "retention-removing"
+        val removed = root.remove_tree_contents_v1(sample.process.effective_uid)?
+        parent.remove_child_directory_v1(sample.profile.leaf_name, root)?
+        workspace_source_states_v1[self.slot].phase = "retention-removed"
+        Ok(removed + 1)
+
     # Borrowed capabilities stay available even before safe registry access.
     pub fn close_v1() -> LinuxWorkspaceSourceCloseV1:
         val loaded = workspace_source_state_v1(self.slot, self.generation)

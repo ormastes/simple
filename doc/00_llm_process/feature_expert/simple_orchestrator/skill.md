@@ -492,6 +492,25 @@ Host side of the remote container build; the controller half is the `remote-run`
 - Merge trap: release retains a written root AT SETTLE (custody already `retained-returned`), so the op (ii) evidence
   read must accept that phase (custody `read_settled_v3`, mount owner `read_settled_build_v3` accepts
   `native-retired-retained`).
+- Retention release (milestone_0045, owner decision 2, 2026-11-19, specs NOT_RUN): controller command
+  `retention-release --operation <build op>` (host_action_command_v1; two-phase plan/`--confirm`; kind `retention-release`,
+  approver keys must be ENROLLED for it) -> V6 `host-control` subs `retention-inspect` / `retention-release` (NOT a
+  remote-build sub-op: the run is gone by then). Record `HostRetentionReleaseV1` (host_retention_release_v1.spl): Host part
+  (association digest + evidence `outcome`|`reaped` digest, re-derived from the Host journal) + the controller's OWN terminal
+  state (completed|failed|cancelled; `outcome-unknown` needs remote-run-abandon first). Host order
+  (host_remote_build_retention_release_v1.spl + `linux_service_retention_release_v4`): verify -> archived? -> derive ->
+  check -> proof + no-replace marker -> lend root -> provider effect (workspace_retention_release_v1.spl: recover lease,
+  fresh source, `remove_retained_tree_v1` no-follow fd-relative walk `retained_tree_remove_v1.spl` (same st_dev AND
+  mnt_id, owner uid == euid under keep-id, symlinks unlinked never followed), close every fd, `release_if_absent`) -> end
+  loan -> archive `host-retention-released/` -> forget native lease. Slot must be free (later incarnation).
+- Trap: the leaf is SHARED by every remote build of the profile: a release is admitted only for the ONE unreleased row
+  that may hold its tree (outcome `source_return: retained-returned`, or reaped); `never-opened` outcomes retain nothing;
+  two unreleased holders refuse both (`retention-release-ambiguous:*`, named gap). `absent-unmeasured` only on a RESUMED
+  release (marker already journaled); a first issue with no leaf refuses.
+- Trap: a crash after the leaf is removed loses the in-process lease; the re-issued release archives `absent-unmeasured`
+  (leaf proven absent, quota NOT re-measured) -- stated decision, option (a) a native recover-absent entry is an owner
+  call. Release DELETES the provisioned leaf: the admin re-provisions before the next workspace build.
+- Trap: journal relative path parts are <= 128 bytes; `<sha>-<sha>.sdn` (133) is invalid -- use `<sha>/<sha>.sdn`.
 ### Controller remote-run (milestone_0030 controller half, specs NOT_RUN)
 `simple orchestrator remote-run --dispatch-root --config-digest --key-store --approver --spec <dir> --out --grant-id --expires-in-ms`
 (`remote_run_command_v1.spl`; pure driver `remote_run_v1.spl`, authoring `remote_run_author_v1.spl`, frames
