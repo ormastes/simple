@@ -1,17 +1,16 @@
 # milestone_0045 (owner decision 2, 2026-11-19): the journal side of the controller-signed `retention-release` of a remote
-# build's retained workspace. SOURCE_AUTHORED / NOT_RUN.
+# build's retained workspace run child (per run since milestone_0047). SOURCE_AUTHORED / NOT_RUN.
 #
 # Verify (issuer == controller_ref, V4 signatures at THIS clock/generation/revocation/session, so an expired or old-session
 # release is refused), derive the Host part of the record from the journal (the run's archived outcome record, or its reap
 # record), check the signed record against it, then record the proof and a no-replace marker through the single journal
-# writer BEFORE any effect. After the service's native effect (tree removed, storage lease released) the outcome is
-# archived no-replace; the service forgets the native lease only after the archive is durable.
+# writer BEFORE any effect. After the service's native effect (the run child removed) the outcome is archived
+# no-replace. The provisioned leaf and its native lease stay (milestone_0047: only the run child is deleted).
 #
 # Crash convergence: every step is idempotent. A marker for the SAME binding is accepted again (a freshly signed release
 # finishes a release that crashed or whose approval expired); an existing archive answers the stored bytes. A crash after
-# the leaf was removed but before the archive loses the in-process native lease; the re-issued release then proves the
-# leaf absent beneath the held protected parent and archives the weaker `absent-unmeasured` charge (named gap: no native
-# quota measure without the leaf exists). Never a continuity flip; the capacity owner is the caller's (borrowed journal).
+# the run child was removed but before the archive leaves no child; the re-issued (resumed) release proves it absent
+# beneath the held leaf and archives the weaker `absent-unmeasured` charge (owner decision 2, unchanged). Never a continuity flip; the capacity owner is the caller's (borrowed journal).
 use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_reap_v4.{HostRemoteBuildReapRowV4, remote_build_reap_rows_v4,
     host_remote_build_reaped_record_v4, host_remote_build_reap_record_encode_v4}
 use std.nogc_sync_mut.orchestration.host_linux_completion_evidence_v3.{host_remote_build_outcome_relative_v4,
@@ -77,12 +76,9 @@ pub fn host_retention_release_check_v1(release: HostRetentionReleaseV1, expected
             ";given=" + release.evidence + "/" + release.evidence_digest)
     Ok(())
 
-fn retention_release_archived_present_v1(journal: DistributedOperationJournalV2, operation_id: text) -> Result<bool, text>:
-    Ok((distributed_operation_journal_read_v3(journal, retention_released_relative_v1(operation_id), 4096)?).is_some())
-
-# Whether a remote-build row may hold the shared leaf's retained tree: an outcome whose source was `retained-returned` (a
-# no-workload settle records `never-opened`: the leaf was never touched), or a reap record (the run began; whether it
-# staged is unknown, so it counts). Returns the evidence (kind, digest), or ("", "") for a row that retained nothing.
+# Whether a remote-build row may hold a retained run child: an outcome whose source was `retained-returned` (a
+# no-workload settle records `never-opened`: nothing was staged), or a reap record (the run began; whether it staged is
+# unknown, so it counts; a run child that was never created converges through the resumed absent path). Returns the evidence (kind, digest), or ("", "") for a row that retained nothing.
 fn retention_evidence_v1(journal: DistributedOperationJournalV2, operation_id: text, outcome_published: bool,
         association_digest: text) -> Result<(text, text), text>:
     if outcome_published:
@@ -97,9 +93,9 @@ fn retention_evidence_v1(journal: DistributedOperationJournalV2, operation_id: t
 # ONE derivation of the Host part for a remote-build row, used by the signed command and the read-only inspect. Evidence is
 # the run's archived outcome record (the settle published it: the run ended) or, failing that, its reap record (a restart
 # ended it). A row with neither is still live or unknown here and is refused; a row that retained nothing has nothing to
-# release. The workspace leaf is shared by every remote build of this profile, so the row must be the ONLY unreleased row
-# that may hold the leaf's tree: a release signed for one run never deletes a tree another unreleased run retained. More
-# than one such row refuses (fail closed; named gap: releasing several runs of one leaf at once is an owner decision).
+# release. Since milestone_0047 (owner decision 1) every run staged into its OWN child of the provisioned leaf, named from
+# its operation id, and the effect deletes only that child: another run's retained child is never touched, so no
+# shared-holder admission exists (two retained runs release independently, in any order).
 pub fn host_retention_release_expected_v1(journal: DistributedOperationJournalV2, ledger: HostCapacityLedgerV1,
         operation_id: text, host_id: text) -> Result<HostRetentionReleaseExpectedV1, text>:
     val rows = remote_build_reap_rows_v4(journal, ledger)?
@@ -110,15 +106,6 @@ pub fn host_retention_release_expected_v1(journal: DistributedOperationJournalV2
     val target = found[0]
     val (evidence, evidence_digest) = retention_evidence_v1(journal, operation_id, target.outcome_published, target.association_digest)?
     if evidence == "": return Err("retention-release-nothing-retained")
-    for row in rows:
-        if row.operation_id == operation_id: continue
-        if not row.outcome_published and (host_remote_build_reaped_record_v4(journal, row.operation_id)?).is_none():
-            # Neither settled nor reaped: a begun run is live here (refuse); one that never began touched nothing.
-            if row.journal_state == "executing": return Err("retention-release-ambiguous:live=" + row.operation_id)
-            continue
-        val (other, _digest) = retention_evidence_v1(journal, row.operation_id, row.outcome_published, row.association_digest)?
-        if other != "" and not retention_release_archived_present_v1(journal, row.operation_id)?:
-            return Err("retention-release-ambiguous:unreleased=" + row.operation_id)
     val record = HostRetentionReleaseV1(wire_version: HOST_RETENTION_RELEASE_WIRE_V1, operation_id: operation_id,
         association_digest: target.association_digest, evidence: evidence, evidence_digest: evidence_digest,
         physical_host_id: host_id)

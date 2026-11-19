@@ -19,6 +19,9 @@ use std.common.sdn.value.SdnValue
 use std.common.crypto.sha256.sha256_text
 use std.common.json.value.*
 
+# milestone_0047: the run's own child of the provisioned leaf is the one workspace mount.
+val FW_RUN_ROOT: text = "/srv/workspaces/slot_1/" + linux_workspace_run_leaf_v1("operation_1")
+
 fn golden_policy_v3() -> LinuxWorkspaceInstalledProfileV1:
     LinuxWorkspaceInstalledProfileV1(machine_policy_digest: "a".repeat(64), provider_policy_digest: "b".repeat(64),
         containment_profile_digest: "c".repeat(64), protected_parent: "/srv/workspaces", leaf_name: "slot_1",
@@ -44,7 +47,7 @@ fn golden_native_v3(terminal_mode: text) -> LinuxOciRequestV1:
         network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true, working_directory: "/workspace",
         terminal_mode: terminal_mode, user_uid: 20001, user_gid: 20001, user_namespace_mode: "keep-id",
         containment_profile_digest: "c".repeat(64),
-        mounts: [ContainerMountProjectionV2(host_root: "/srv/workspaces/slot_1", guest_root: "/workspace", read_only: false)])
+        mounts: [ContainerMountProjectionV2(host_root: FW_RUN_ROOT, guest_root: "/workspace", read_only: false)])
 
 fn golden_scope_v3() -> ContainerHostScopeV2:
     ContainerHostScopeV2(physical_host_id: "host_1", service_scope_id: "epoch-" + "9".repeat(64),
@@ -91,12 +94,12 @@ fn golden_created_v3(command: LinuxFreshWorkspaceCommandV3) -> JsonValue:
     value = json_value_object_set(value, "security_options", json_value_str_array(["no-new-privileges"]))
     value = json_value_object_set(value, "create_command", json_value_str_array(["/usr/bin/podman", "create"]))
     var mount = JsonValue.Object([], [])
-    for pair in [("Type", "bind"), ("Source", "/srv/workspaces/slot_1"), ("Destination", "/workspace"), ("Driver", ""), ("Mode", ""), ("Propagation", "rprivate")]:
+    for pair in [("Type", "bind"), ("Source", FW_RUN_ROOT), ("Destination", "/workspace"), ("Driver", ""), ("Mode", ""), ("Propagation", "rprivate")]:
         mount = json_value_object_set(mount, pair.0, JsonValue.Str(pair.1))
     mount = json_value_object_set(mount, "Options", json_value_str_array(["rbind", "nosuid", "nodev"]))
     mount = json_value_object_set(mount, "RW", JsonValue.Bool(true))
     value = json_value_object_set(value, "mounts", JsonValue.Array([mount]))
-    value = json_value_object_set(value, "binds", json_value_str_array(["/srv/workspaces/slot_1:/workspace:rw,rbind,rprivate,nosuid,nodev"]))
+    value = json_value_object_set(value, "binds", json_value_str_array([FW_RUN_ROOT + ":/workspace:rw,rbind,rprivate,nosuid,nodev"]))
     value
 
 describe "Agent workspace arm byte identity (milestone_0030 N6-a guard)":
@@ -136,7 +139,7 @@ describe "Agent workspace arm byte identity (milestone_0030 N6-a guard)":
             "--security-opt=no-new-privileges", "--cap-drop=ALL", "--cgroups=enabled", "--cgroupns=private", "--pid=private",
             "--privileged=false", "--http-proxy=false", "--cgroup-parent=/simple/containers",
             "--tty", "--interactive", "--userns=keep-id", "--user=20001:20001",
-            "--workdir", "/workspace", "--mount", "type=bind,src=/srv/workspaces/slot_1,dst=/workspace,rw,nosuid,nodev,bind-propagation=rprivate",
+            "--workdir", "/workspace", "--mount", "type=bind,src=" + FW_RUN_ROOT + ",dst=/workspace,rw,nosuid,nodev,bind-propagation=rprivate",
             "--entrypoint", "/opt/simple/bootstrap", "--", "registry.example/agent@sha256:" + "6".repeat(64),
             "--invocation-manifest-sha256", "8".repeat(64)]
         expect(linux_fresh_workspace_argv_v3(golden_epoch_v3(), golden_policy_v3(), golden_primary_v3(), "8".repeat(64), 20001, 20001, command).unwrap()).to_equal(expected)

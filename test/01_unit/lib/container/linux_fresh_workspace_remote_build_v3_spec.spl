@@ -34,6 +34,9 @@ use std.common.contracts.orchestration.agent_workspace_invocation_v2.{AgentWorks
 use std.common.contracts.container.agent_executable_profile_v1.AgentExecutableProfileV1
 use test.fixtures.orchestration.agent_workspace_invocation_fixture_v1.agent_workspace_invocation_fixture_v1
 
+# milestone_0047: the run's own child of the provisioned leaf is the one workspace mount.
+val FW_RUN_ROOT: text = "/srv/workspaces/slot_1/" + linux_workspace_run_leaf_v1("operation_1")
+
 fn rb_policy_v3() -> LinuxWorkspaceInstalledProfileV1:
     LinuxWorkspaceInstalledProfileV1(machine_policy_digest: "a".repeat(64), provider_policy_digest: "b".repeat(64),
         containment_profile_digest: "c".repeat(64), protected_parent: "/srv/workspaces", leaf_name: "slot_1",
@@ -69,7 +72,7 @@ fn rb_native_v3(terminal_mode: text) -> LinuxOciRequestV1:
         network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true, working_directory: "/workspace",
         terminal_mode: terminal_mode, user_uid: 20001, user_gid: 20001, user_namespace_mode: "keep-id",
         containment_profile_digest: "c".repeat(64),
-        mounts: [ContainerMountProjectionV2(host_root: "/srv/workspaces/slot_1", guest_root: "/workspace", read_only: false)])
+        mounts: [ContainerMountProjectionV2(host_root: FW_RUN_ROOT, guest_root: "/workspace", read_only: false)])
 
 fn rb_scope_v3() -> ContainerHostScopeV2:
     ContainerHostScopeV2(physical_host_id: "host_1", service_scope_id: "epoch-" + "9".repeat(64),
@@ -116,12 +119,12 @@ fn rb_created_v3(command: LinuxFreshWorkspaceCommandV3) -> JsonValue:
     value = json_value_object_set(value, "security_options", json_value_str_array(["no-new-privileges"]))
     value = json_value_object_set(value, "create_command", json_value_str_array(["/usr/bin/podman", "create"]))
     var mount = JsonValue.Object([], [])
-    for pair in [("Type", "bind"), ("Source", "/srv/workspaces/slot_1"), ("Destination", "/workspace"), ("Driver", ""), ("Mode", ""), ("Propagation", "rprivate")]:
+    for pair in [("Type", "bind"), ("Source", FW_RUN_ROOT), ("Destination", "/workspace"), ("Driver", ""), ("Mode", ""), ("Propagation", "rprivate")]:
         mount = json_value_object_set(mount, pair.0, JsonValue.Str(pair.1))
     mount = json_value_object_set(mount, "Options", json_value_str_array(["rbind", "nosuid", "nodev"]))
     mount = json_value_object_set(mount, "RW", JsonValue.Bool(true))
     value = json_value_object_set(value, "mounts", JsonValue.Array([mount]))
-    value = json_value_object_set(value, "binds", json_value_str_array(["/srv/workspaces/slot_1:/workspace:rw,rbind,rprivate,nosuid,nodev"]))
+    value = json_value_object_set(value, "binds", json_value_str_array([FW_RUN_ROOT + ":/workspace:rw,rbind,rprivate,nosuid,nodev"]))
     value
 
 fn rb_kind_only_v3(kind: text) -> text:
@@ -286,7 +289,7 @@ describe "Remote-build request projection, created config and argv (milestone_00
         expect(args.contains("--tty")).to_equal(false)
         expect(args.contains("--interactive")).to_equal(false)
         for item in ["--userns=keep-id", "--user=20001:20001", "--read-only", "--cap-drop=ALL", "--network=none",
-                "type=bind,src=/srv/workspaces/slot_1,dst=/workspace,rw,nosuid,nodev,bind-propagation=rprivate"]:
+                "type=bind,src=" + FW_RUN_ROOT + ",dst=/workspace,rw,nosuid,nodev,bind-propagation=rprivate"]:
             expect(args.contains(item)).to_equal(true)
         expect(args[args.len() - 5]).to_equal("/opt/simple/build-launcher")
         expect(args[args.len() - 3]).to_equal("registry.example/build@sha256:" + "d".repeat(64))

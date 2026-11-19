@@ -160,18 +160,20 @@ fn st_between_v1(source: text, start: text, end: text) -> text:
     source.substring(from, from + source.substring(from, source.byte_len()).index_of(end))
 
 describe "stage_remote_build_v3 owner path (milestone_0030 op i, lane A review P2-2)":
-    it "admits, then refuses a restage by phase marker, then agent staging, then a non-empty root, before any effect":
+    it "admits, then refuses a restage by phase marker, then agent staging, then creates the run child, before any write":
         # @req M0030-LANEA-STAGE-01
+        # milestone_0047: the dedicated root is the run's own child of the provisioned leaf, created (exclusive, proven
+        # empty) only after the effect is recorded.
         val body = st_between_v1(st_owner_source_v1(), "pub fn stage_remote_build_v3(", "pub fn read_settled_build_v3(")
         val admitted = body.index_of("workspace_build_installed_v1(self, request_bytes")
         val staged_marker = body.index_of("\"remote-build-stage-already-retained\"")
         val any_marker = body.index_of("\"remote-build-stage-retained-or-in-progress\"")
         val exclusive = body.index_of("\"remote-build-stage-source-holds-agent-staging\"")
-        val empty = body.index_of("\"remote-build-stage-dedicated-root-not-empty\"")
         val effect = body.index_of("build_effect_attempted = true")
+        val created = body.index_of("workspace_run_directory_create_v1(self, request_bytes)")
         val write = body.index_of("linux_remote_build_stage_bytes_v1(")
         expect(admitted > 0 and admitted < staged_marker and staged_marker < any_marker and any_marker < exclusive).to_equal(true)
-        expect(exclusive < empty and empty < effect and effect < write).to_equal(true)
+        expect(exclusive < effect and effect < created and created < write).to_equal(true)
         step("the agent arm refuses a source that holds remote-build staging (exclusivity both ways)")
         expect(st_owner_source_v1()).to_contain("if state.build_effect_attempted: return workspace_agent_turn_v1(self, \"agent-stage-source-holds-remote-build-staging\", false)")
         step("the live re-check after the write keeps a changed policy a retained failure, never staged")

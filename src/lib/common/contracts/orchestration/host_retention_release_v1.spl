@@ -4,7 +4,7 @@
 # the Host re-derives from its journal; its controller part is the controller's TERMINAL state of the same run (completed,
 # failed or cancelled; `outcome-unknown` must first be abandoned to `failed`) with the digests of the controller row and
 # outcome. The Host part alone (no controller state) never matches a signed operation. It grants nothing by itself: the
-# Host verifies it, records it, deletes the tree and only then releases the storage charge. One wire version is accepted.
+# Host verifies it, records it, and only then deletes the run's own workspace tree (milestone_0047). One wire version is accepted.
 use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
 use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
@@ -21,9 +21,12 @@ pub val HOST_RETENTION_RELEASE_WIRE_V1: text = "retention-release-v1"
 val HOST_RETENTION_RELEASE_OPERATION_V1: text = "retention-release"
 pub val HOST_RETENTION_RELEASE_STATES_V1: [text] = ["completed", "failed", "cancelled"]
 val HOST_RETENTION_RELEASE_EVIDENCE_V1: [text] = ["outcome", "reaped"]
-# native-released: the native lease proved the quota empty (used bytes and inodes 0) after the leaf was unlinked.
-# absent-unmeasured: a crash after the leaf was removed lost the in-process lease; the leaf is proven absent beneath the
-# held protected parent but the quota was not re-measured (named gap: no native measure-without-leaf entry exists).
+# Per run since milestone_0047 (owner decision 1): a release deletes ONLY the run's own child of the provisioned leaf; the
+# leaf, its XFS project quota and native lease stay retained.
+# run-removed: the run child and its tree were removed (removed >= 1, the child included); used_* are the provisioned
+# project's remaining usage observed afterwards (shared by every retained run child, so not zero in general).
+# absent-unmeasured (owner decision 2, unchanged): a resumed release found the run child already absent (a crash removed
+# it before the archive); nothing was counted or measured.
 
 pub struct HostRetentionReleaseV1:
     wire_version: text
@@ -157,7 +160,7 @@ pub fn host_retention_release_proof_decode_v1(source: text) -> Result<HostRetent
     Ok(proof)
 
 fn retention_effect_valid_v1(effect: HostRetentionReleaseEffectV1) -> bool:
-    if effect.charge == "native-released": return effect.used_bytes == 0 and effect.used_inodes == 0 and effect.removed >= 0
+    if effect.charge == "run-removed": return effect.used_bytes >= 0 and effect.used_inodes >= 0 and effect.removed >= 1
     if effect.charge == "absent-unmeasured": return effect.used_bytes == -1 and effect.used_inodes == -1 and effect.removed == -1
     false
 

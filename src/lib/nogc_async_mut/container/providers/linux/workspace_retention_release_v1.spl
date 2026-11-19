@@ -1,26 +1,24 @@
 # milestone_0045 retention release (owner decision 2, 2026-11-19): the container provider's effect for a controller-
-# signed release of a retained remote-build workspace. SOURCE_AUTHORED / NOT_RUN. Mechanism only: the caller has already
-# verified and journaled the signed decision, holds the V4 workspace-root loan, and archives the returned facts before it
-# forgets the released native lease (workspace_storage_forget_released_v1 is never called here).
+# signed release of a retained workspace run. SOURCE_AUTHORED / NOT_RUN. Mechanism only: the caller has already verified
+# and journaled the signed decision, holds the V4 workspace-root loan, and archives the returned facts.
 #
-#   1. Recover the native lease of the retained leaf. If none can be recovered and the leaf is proven absent beneath the
-#      held protected parent, a crash already removed it after the in-process lease was lost: a RESUMED release converges
-#      `absent-unmeasured`; a first issue refuses. Named gap: a leaf re-provisioned before the re-issue is not told apart
-#      from one a crash left mid-walk (operators re-provision only after the release archive exists).
-#   2. A lease already `released` is done. A leaf already absent (a retry after a retryable release EBUSY, e.g. XFS
-#      deferred inactivation) is never re-deleted: go straight to the release proof.
-#   3. Otherwise open a FRESH source with the archived request bytes, remove the tree inside the keep-id mapping
-#      (remove_retained_tree_v1), and close every descriptor and the exclusion before the release proof.
-#   4. release_if_absent: the native owner proves the leaf unlinked and the quota empty (used bytes and inodes 0).
+# Per run since milestone_0047 (owner decision 1, 2026-11-19, "use worktree"): every run staged into its OWN child of
+# the admin-provisioned leaf, so a release deletes ONLY that child. The leaf, its XFS project quota and its native
+# storage lease stay retained (the admin provisions once; nothing is re-provisioned after a release).
+#
+#   1. Recover the native lease of the provisioned leaf (the in-process token, or a fresh admission of the leaf).
+#   2. Open a FRESH source with the archived request bytes (re-proves the keep-id mapping, the profile and the leaf).
+#   3. If the run child is proven absent beneath the held leaf (no-follow), a crash already removed it before the
+#      archive: a RESUMED release converges `absent-unmeasured` (owner decision 2, unchanged); a first issue refuses.
+#   4. Otherwise remove the run child and its tree inside the keep-id mapping (remove_retained_tree_v1), close every
+#      descriptor and the exclusion, then observe the leaf's lease: `run-removed` records the removed entry count and the
+#      project usage that remains (the quota is SHARED by every retained run child, so it is not zero in general).
 use std.nogc_async_mut.container.providers.linux.workspace_root_borrow_v3.LinuxWorkspaceRootBorrowV3
 use std.nogc_async_mut.container.providers.linux.workspace_mount_owner_v1.LinuxWorkspaceSourceOpenV1
-use std.nogc_sync_mut.storage_roots.workspace_storage_owner_v1.{WorkspaceStorageLeaseV1, workspace_storage_observe_v1,
-    workspace_storage_release_if_absent_v1}
+use std.nogc_sync_mut.storage_roots.workspace_storage_owner_v1.workspace_storage_observe_v1
 
-# `lease` is the released native lease the caller forgets after archiving (None for absent-unmeasured or on error).
-# charge: "native-released" | "absent-unmeasured" | "" on error. used_* and removed are -1 when unmeasured.
+# charge: "run-removed" | "absent-unmeasured" | "" on error. used_* and removed are -1 when unmeasured.
 pub struct LinuxWorkspaceRetentionReleaseTurnV1:
-    lease: Option<WorkspaceStorageLeaseV1>
     charge: text
     used_bytes: i64
     used_inodes: i64
@@ -28,48 +26,48 @@ pub struct LinuxWorkspaceRetentionReleaseTurnV1:
     error: text
 
 fn retention_release_failed_v1(error: text) -> LinuxWorkspaceRetentionReleaseTurnV1:
-    LinuxWorkspaceRetentionReleaseTurnV1(lease: None, charge: "", used_bytes: -1, used_inodes: -1, removed: -1, error: error)
+    LinuxWorkspaceRetentionReleaseTurnV1(charge: "", used_bytes: -1, used_inodes: -1, removed: -1, error: error)
 
 # `resumed`: the caller journaled this release before (a re-issue). Only a resumed release converges `absent-unmeasured`.
 pub fn linux_workspace_retention_release_v1(root: LinuxWorkspaceRootBorrowV3, request_bytes: text,
         resumed: bool) -> LinuxWorkspaceRetentionReleaseTurnV1:
     val recovered = root.recover_lease_v3()
-    if recovered.is_err():
-        val absent = root.leaf_absent_v3()
-        if absent.is_ok() and absent.unwrap():
-            if not resumed: return retention_release_failed_v1("workspace-retention-release-leaf-absent")
-            return LinuxWorkspaceRetentionReleaseTurnV1(lease: None, charge: "absent-unmeasured", used_bytes: -1, used_inodes: -1,
-                removed: -1, error: "")
-        return retention_release_failed_v1(recovered.unwrap_err())
+    if recovered.is_err(): return retention_release_failed_v1(recovered.unwrap_err())
     val lease = recovered.unwrap()
-    val observed = workspace_storage_observe_v1(lease)
-    if observed.is_err(): return retention_release_failed_v1(observed.unwrap_err())
     var removed: i64 = 0
-    if observed.unwrap().state != "released":
-        val absent = root.leaf_absent_v3()
-        if absent.is_err(): return retention_release_failed_v1(absent.unwrap_err())
-        if not absent.unwrap():
-            match root.open_source_v3(lease, request_bytes):
-                case LinuxWorkspaceSourceOpenV1.Observed(source):
-                    val gone = source.remove_retained_tree_v1(request_bytes)
-                    val closed = source.close_v1()
-                    if gone.is_err(): return retention_release_failed_v1(gone.unwrap_err())
-                    if not closed.closed or closed.error != "":
-                        return retention_release_failed_v1("workspace-retention-release-source-close:" + closed.error)
-                    removed = gone.unwrap()
-                case LinuxWorkspaceSourceOpenV1.CleanupRequired(source, reason):
-                    val closed = source.close_v1()
-                    if not closed.closed or closed.error != "":
-                        return retention_release_failed_v1(reason + ";workspace-retention-release-source-close:" + closed.error)
-                    return retention_release_failed_v1(reason)
-                case LinuxWorkspaceSourceOpenV1.Rejected(_, _, _, reason):
-                    return retention_release_failed_v1(reason)
-        val released = workspace_storage_release_if_absent_v1(lease)
-        if released.is_err(): return retention_release_failed_v1(released.unwrap_err())
+    match root.open_source_v3(lease, request_bytes):
+        case LinuxWorkspaceSourceOpenV1.Observed(source):
+            val absent = source.retained_run_absent_v1(request_bytes)
+            if absent.is_err():
+                val closed_refused = source.close_v1()
+                if not closed_refused.closed or closed_refused.error != "":
+                    return retention_release_failed_v1(absent.unwrap_err() + ";workspace-retention-release-source-close:" +
+                        closed_refused.error)
+                return retention_release_failed_v1(absent.unwrap_err())
+            if absent.unwrap():
+                val closed_absent = source.close_v1()
+                if not closed_absent.closed or closed_absent.error != "":
+                    return retention_release_failed_v1("workspace-retention-release-source-close:" + closed_absent.error)
+                if not resumed: return retention_release_failed_v1("workspace-retention-release-run-absent")
+                return LinuxWorkspaceRetentionReleaseTurnV1(charge: "absent-unmeasured", used_bytes: -1, used_inodes: -1,
+                    removed: -1, error: "")
+            val gone = source.remove_retained_tree_v1(request_bytes)
+            val closed = source.close_v1()
+            if gone.is_err(): return retention_release_failed_v1(gone.unwrap_err())
+            if not closed.closed or closed.error != "":
+                return retention_release_failed_v1("workspace-retention-release-source-close:" + closed.error)
+            removed = gone.unwrap()
+        case LinuxWorkspaceSourceOpenV1.CleanupRequired(source, reason):
+            val closed = source.close_v1()
+            if not closed.closed or closed.error != "":
+                return retention_release_failed_v1(reason + ";workspace-retention-release-source-close:" + closed.error)
+            return retention_release_failed_v1(reason)
+        case LinuxWorkspaceSourceOpenV1.Rejected(_, _, _, reason):
+            return retention_release_failed_v1(reason)
     val receipt = workspace_storage_observe_v1(lease)
     if receipt.is_err(): return retention_release_failed_v1(receipt.unwrap_err())
-    if receipt.unwrap().state != "released": return retention_release_failed_v1("workspace-retention-release-unproven")
-    LinuxWorkspaceRetentionReleaseTurnV1(lease: Some(lease), charge: "native-released", used_bytes: receipt.unwrap().used_bytes,
+    if receipt.unwrap().state != "retained": return retention_release_failed_v1("workspace-retention-release-leaf-not-retained")
+    LinuxWorkspaceRetentionReleaseTurnV1(charge: "run-removed", used_bytes: receipt.unwrap().used_bytes,
         used_inodes: receipt.unwrap().used_inodes, removed: removed, error: "")
 
 export LinuxWorkspaceRetentionReleaseTurnV1, linux_workspace_retention_release_v1

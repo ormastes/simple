@@ -90,7 +90,6 @@ use std.nogc_sync_mut.orchestration.host_helper_request_v1.{HostHelperRequestV1,
 use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.HostHelperStoreV1
 use std.nogc_sync_mut.orchestration.host_primary_attach_owner_v1.host_primary_attach_open_entry_check_v1
 use std.container.{LinuxWorkspaceRootBorrowV3, linux_workspace_retention_release_v1}
-use std.nogc_sync_mut.storage_roots.workspace_storage_owner_v1.workspace_storage_forget_released_v1
 use std.nogc_sync_mut.orchestration.host_remote_build_retention_release_v1.{host_retention_release_admit_v1,
     host_retention_release_archive_v1, host_retention_release_inspect_v1}
 use std.common.contracts.orchestration.host_retention_release_v1.HostRetentionReleaseEffectV1
@@ -151,6 +150,10 @@ pub class HostLinuxServiceCurrentV4:
     # owner lives in the agent's holder and `admission` keeps only the residue (F9).
     agent: Option<HostLinuxServiceAgentV4> = None
     agent_consumed: bool = false
+    # milestone_0047: a retention release recovered the provisioned leaf's native lease in this process. The native owner
+    # admits ONE lease per scope (a second admission is EBUSY), so no workload is admitted until restart; further
+    # releases reuse the recovered lease.
+    retention_lease_held: bool = false
     # N-06/T-08 slot: set before the agent prepare charges; one agent operation per incarnation.
     agent_operation_id: text = ""
     # P2R1-F8: the slot's signed operation envelope, for the public exact lookup (set with agent_operation_id).
@@ -1015,6 +1018,7 @@ fn linux_service_agent_slot_v4(original: HostLinuxServiceCurrentV4, operation_id
         now_ms: i64) -> HostLinuxServiceReplyV4:
     var owner = original
     if owner.agent_operation_id == operation_id: return linux_service_reply_v4(owner, "", "", false)
+    if owner.retention_lease_held: return linux_service_reply_v4(owner, "", "linux-host-retention-lease-held", false)
     if owner.agent_consumed: return linux_service_reply_v4(owner, "", "linux-host-agent-incarnation-busy", false)
     if owner.agent_operation_id == "": return linux_service_reply_v4(owner, "", "", false)
     val slot = owner.agent_operation_id
@@ -1781,10 +1785,12 @@ fn linux_service_helper_inspect_v4(owner: HostLinuxServiceCurrentV4, source: tex
     linux_service_reply_v4(owner, record.unwrap(), "", false)
 
 # milestone_0045 retention release (owner decision 2): the controller-signed release of a remote build's retained
-# workspace. Runs only in an incarnation with a free slot (no agent, no build, nothing consumed, no root loan held) after
-# continuity and reconcile: each incarnation runs one workload, so a retained tree is released by a later incarnation.
-# Admission (verify, derive, check, record proof + marker) is journaled BEFORE any effect; the root loan is lent for the
-# provider effect only and ended before the archive; the native lease is forgotten only after the archive is durable.
+# workspace, per run since milestone_0047 (owner decision 1): only the run's own child of the provisioned leaf is deleted.
+# Runs only in an incarnation with a free slot (no agent, no build, no admitted slot row, nothing consumed, no root loan
+# held) after continuity and reconcile: each incarnation runs one workload, so a retained run is released by a later
+# incarnation. Admission (verify, derive, check, record proof + marker) is journaled BEFORE any effect; the root loan is
+# lent for the provider effect only and ended before the archive. The provider recovers the leaf's native lease, which
+# stays retained in this process: workload admission is refused until restart (retention_lease_held).
 # A re-issued release converges after any crash (host_remote_build_retention_release_v1). Never a continuity flip.
 fn linux_service_retention_release_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
     var owner = original
@@ -1792,7 +1798,8 @@ fn linux_service_retention_release_v4(original: HostLinuxServiceCurrentV4, sourc
     if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
     val ready = linux_service_remote_build_ready_v4(owner)
     if ready != "": return linux_service_reply_v4(owner, "", ready, false)
-    if owner.agent.is_some() or owner.build.is_some() or owner.agent_consumed or owner.agent_root.is_some():
+    if (owner.agent.is_some() or owner.build.is_some() or owner.agent_consumed or owner.agent_root.is_some() or
+            owner.agent_operation_id != ""):
         return linux_service_reply_v4(owner, "", "linux-host-retention-release-slot-busy", false)
     if owner.admission.is_none() or owner.admission.unwrap().owner.is_none():
         return linux_service_reply_v4(owner, "", "linux-host-service-admission-missing", false)
@@ -1808,6 +1815,7 @@ fn linux_service_retention_release_v4(original: HostLinuxServiceCurrentV4, sourc
     owner.admission = Some(admission)
     if lent.error != "" or lent.root.is_none():
         return linux_service_reply_v4(owner, "", if lent.error != "": lent.error else: "linux-host-retention-release-root-missing", true)
+    owner.retention_lease_held = true
     val effect = linux_workspace_retention_release_v1(lent.root.unwrap(), admitted.unwrap().request_bytes, admitted.unwrap().resumed)
     val ended = admission.owner.unwrap().end_workspace_root_loan_v1(lent.root.unwrap())
     admission.owner = Some(ended.owner)
@@ -1819,9 +1827,6 @@ fn linux_service_retention_release_v4(original: HostLinuxServiceCurrentV4, sourc
         sha256_text(admitted.unwrap().marker), HostRetentionReleaseEffectV1(charge: effect.charge, used_bytes: effect.used_bytes,
         used_inodes: effect.used_inodes, removed: effect.removed), host_local_context_v1(policy).grant_clock)
     if archived.is_err(): return linux_service_reply_v4(owner, "", archived.unwrap_err(), true)
-    if val lease = effect.lease:
-        val forgotten = workspace_storage_forget_released_v1(lease)
-        if forgotten.is_err(): return linux_service_reply_v4(owner, archived.unwrap(), forgotten.unwrap_err(), true)
     if ended.error != "": return linux_service_reply_v4(owner, archived.unwrap(), ended.error, true)
     linux_service_reply_v4(owner, archived.unwrap(), "", true)
 
