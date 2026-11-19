@@ -5,10 +5,13 @@
 # Each hook checks replay_is_off() first — single load + branch, zero cost
 # when replay is disabled.
 #
-# Timer and random reads run on the portable semantic replay core
-# std.replay.portable_replay (DHR P6), in replay scope KERNEL_PR_SCOPE; they
-# are no longer written to the kernel log ring. The other hooks still use the
-# ring.
+# Hooks whose replay returns or validates a value — timer and random reads,
+# syscall results, IRQ delivery, IPC send/receive — run on the portable
+# semantic replay core std.replay.portable_replay (DHR P6), in replay scope
+# KERNEL_PR_SCOPE; they are not written to the kernel log ring. The ring keeps
+# the schedule hook (Replay follows its logged tid) and the diagnostic hooks
+# whose Replay makes no decision: syscall enter, thread create/exit and
+# checkpoint markers.
 
 use os.kernel.replay.mode.{replay_is_off, replay_is_recording, replay_is_verifying, replay_mode, KernelReplayMode}
 use os.kernel.replay.event_kinds.{ReplayEntry, EventKind}
@@ -22,11 +25,16 @@ use std.replay.portable_replay.{
 }
 
 val KERNEL_PR_SCOPE: i64 = 2
-# Each timer source gets its own layer-defined kind
-# (PR_KIND_TIMER_READ + source_id * stride), so a read from a different source
-# than the recorded one is a kind mismatch. The stride keeps every derived
-# kind congruent to PR_KIND_TIMER_READ, disjoint from the other core kinds.
-val KERNEL_PR_TIMER_SOURCE_STRIDE: i64 = 16
+# Keyed events fold their key into a layer-defined kind
+# (base + key * stride): the timer source, the syscall id, the IPC port. A
+# different key than the recorded one is then a kind mismatch. Every derived
+# kind stays congruent to its base modulo the stride, so the kernel bases
+# below (5..8) never collide with the core kinds (1..4) or with each other.
+val KERNEL_PR_KIND_STRIDE: i64 = 16
+val KERNEL_PR_KIND_SYSCALL_EXIT: i64 = 5
+val KERNEL_PR_KIND_IRQ: i64 = 6
+val KERNEL_PR_KIND_IPC_SEND: i64 = 7
+val KERNEL_PR_KIND_IPC_RECV: i64 = 8
 
 fn replay_portable_sync():
     """Mirror the (non-Off) kernel mode onto the portable replay session.
@@ -40,7 +48,8 @@ fn replay_portable_sync():
     if not portable_replay_scope_is_open():
         portable_replay_open_scope(KERNEL_PR_SCOPE)
 
-# Shared Replay/Verify tail of the timer and random hooks. `logged` is what the
+# Shared Replay/Verify tail of the value-returning hooks (timer, random,
+# syscall result). `logged` is what the
 # core returned for this event. Replay returns it — the logged value, or the
 # core's fail-closed value on divergence, never `live`. Verify returns `live`
 # and reports a changed or mismatched event; an exhausted log is not reported
@@ -59,6 +68,24 @@ fn replay_portable_resolve(kind: DivergenceKind, logged: i64, live: i64, actual:
     if reason != PR_DIV_NONE:
         report_divergence(kind, -1, reason, actual)
     logged
+
+# Replay/Verify tail of the validating hooks (IRQ, IPC): the live event may
+# proceed only if it matches the logged one. Verify always lets it proceed and
+# reports as replay_portable_resolve does. Replay rejects (false) a core
+# divergence — already reported by resolve — or a logged value that differs
+# from `live`, which it reports; it never accepts the live event on divergence.
+@allow(primitive_api)  # kernel replay ABI: values are raw i64 log payloads
+fn replay_portable_accept(kind: DivergenceKind, logged: i64, live: i64) -> bool:
+    val diverged = portable_replay_last_divergence() != PR_DIV_NONE
+    val resolved = replay_portable_resolve(kind, logged, live, live)
+    if replay_is_verifying():
+        return true
+    if diverged:
+        return false
+    if resolved != live:
+        report_divergence(kind, -1, resolved, live)
+        return false
+    true
 
 # ============================================================================
 # Schedule Hook
@@ -109,6 +136,8 @@ fn replay_hook_schedule(old_tid: i64, new_tid: i64, tick: i64) -> i64:
 # Syscall Hooks
 # ============================================================================
 
+# Diagnostic only: Replay makes no decision here (the forced result is applied
+# at exit), so syscall entry stays on the kernel ring.
 fn replay_hook_syscall_enter(task_id: i64, syscall_id: i64, arg0: i64, arg1: i64, arg2: i64):
     if replay_is_off():
         return
@@ -139,127 +168,66 @@ fn replay_hook_syscall_enter(task_id: i64, syscall_id: i64, arg0: i64, arg1: i64
         case _:
             pass_dn
 
-fn replay_hook_syscall_exit(task_id: i64, syscall_id: i64, retval: i64):
+# Returns the result the syscall must report. Replay returns the logged retval
+# for this syscall; a different syscall, a wrong event or an exhausted log is a
+# SyscallMismatch divergence and returns the fail-closed value, never `retval`.
+@allow(primitive_api)  # kernel replay ABI: syscall ids and results are raw i64 log payloads
+fn replay_hook_syscall_exit(task_id: i64, syscall_id: i64, retval: i64) -> i64:
     if replay_is_off():
-        return
-
+        return retval
+    replay_portable_sync()
+    val kind = KERNEL_PR_KIND_SYSCALL_EXIT + syscall_id * KERNEL_PR_KIND_STRIDE
+    val logged = portable_replay_event(kind, KERNEL_PR_SCOPE, retval)
     if replay_is_recording():
-        var entry = ReplayEntry.create(EventKind.SyscallExit, task_id, 0, 0)
-        entry.payload_a = syscall_id
-        entry.payload_b = retval
-        replay_log_event(entry)
-        return
-
-    match replay_mode():
-        case KernelReplayMode.Replay:
-            match replay_read_next():
-                case Some(entry):
-                    pass_dn  # caller uses entry.payload_b as forced retval
-                case None:
-                    pass_dn
-        case KernelReplayMode.Verify:
-            match replay_read_next():
-                case Some(entry):
-                    if entry.payload_b != retval:
-                        report_divergence(DivergenceKind.SyscallMismatch, entry.event_id, entry.payload_b, retval)
-                case None:
-                    pass_dn
-        case _:
-            pass_dn
+        return retval
+    replay_portable_resolve(DivergenceKind.SyscallMismatch, logged, retval, syscall_id)
 
 # ============================================================================
 # Interrupt Hook
 # ============================================================================
 
-fn replay_hook_irq(vector: i64, task_id: i64, timestamp: i64):
+# Returns whether the IRQ may be delivered. Replay accepts it only when the
+# log's next event is this vector; anything else is an IrqMismatch divergence
+# and returns false (fail closed: the caller must not deliver it).
+@allow(primitive_api)  # kernel replay ABI: vectors are raw i64 log payloads
+fn replay_hook_irq(vector: i64, task_id: i64, timestamp: i64) -> bool:
     if replay_is_off():
-        return
-
+        return true
+    replay_portable_sync()
+    val logged = portable_replay_event(KERNEL_PR_KIND_IRQ, KERNEL_PR_SCOPE, vector)
     if replay_is_recording():
-        var entry = ReplayEntry.create(EventKind.InterruptDeliver, task_id, 0, 0)
-        entry.payload_a = vector
-        entry.payload_b = timestamp
-        replay_log_event(entry)
-        return
-
-    match replay_mode():
-        case KernelReplayMode.Replay:
-            match replay_read_next():
-                case Some(entry):
-                    pass_dn  # replayer injects IRQ at logged point
-                case None:
-                    pass_dn
-        case KernelReplayMode.Verify:
-            match replay_read_next():
-                case Some(entry):
-                    if entry.payload_a != vector:
-                        report_divergence(DivergenceKind.IrqMismatch, entry.event_id, entry.payload_a, vector)
-                case None:
-                    pass_dn
-        case _:
-            pass_dn
+        return true
+    replay_portable_accept(DivergenceKind.IrqMismatch, logged, vector)
 
 # ============================================================================
 # IPC Hooks
 # ============================================================================
 
-fn replay_hook_ipc_send(src_task: i64, dst_port: i64, msg_len: i64):
+# Return whether the send/receive may complete. Replay accepts it only when
+# the log's next event is a send (receive) on the same port with the same
+# message length; anything else is an IpcMismatch divergence and returns
+# false (fail closed: the caller must not complete the transfer).
+@allow(primitive_api)  # kernel replay ABI: ports and lengths are raw i64 log payloads
+fn replay_hook_ipc_send(src_task: i64, dst_port: i64, msg_len: i64) -> bool:
     if replay_is_off():
-        return
-
+        return true
+    replay_portable_sync()
+    val kind = KERNEL_PR_KIND_IPC_SEND + dst_port * KERNEL_PR_KIND_STRIDE
+    val logged = portable_replay_event(kind, KERNEL_PR_SCOPE, msg_len)
     if replay_is_recording():
-        var entry = ReplayEntry.create(EventKind.IpcSend, src_task, 0, 0)
-        entry.payload_a = src_task
-        entry.payload_b = dst_port
-        entry.payload_c = msg_len
-        replay_log_event(entry)
-        return
+        return true
+    replay_portable_accept(DivergenceKind.IpcMismatch, logged, msg_len)
 
-    match replay_mode():
-        case KernelReplayMode.Replay:
-            match replay_read_next():
-                case Some(entry):
-                    pass_dn  # consumed from log
-                case None:
-                    pass_dn
-        case KernelReplayMode.Verify:
-            match replay_read_next():
-                case Some(entry):
-                    if entry.payload_b != dst_port:
-                        report_divergence(DivergenceKind.IpcMismatch, entry.event_id, entry.payload_b, dst_port)
-                case None:
-                    pass_dn
-        case _:
-            pass_dn
-
-fn replay_hook_ipc_recv(dst_task: i64, src_port: i64, msg_len: i64):
+@allow(primitive_api)  # kernel replay ABI: ports and lengths are raw i64 log payloads
+fn replay_hook_ipc_recv(dst_task: i64, src_port: i64, msg_len: i64) -> bool:
     if replay_is_off():
-        return
-
+        return true
+    replay_portable_sync()
+    val kind = KERNEL_PR_KIND_IPC_RECV + src_port * KERNEL_PR_KIND_STRIDE
+    val logged = portable_replay_event(kind, KERNEL_PR_SCOPE, msg_len)
     if replay_is_recording():
-        var entry = ReplayEntry.create(EventKind.IpcReceive, dst_task, 0, 0)
-        entry.payload_a = dst_task
-        entry.payload_b = src_port
-        entry.payload_c = msg_len
-        replay_log_event(entry)
-        return
-
-    match replay_mode():
-        case KernelReplayMode.Replay:
-            match replay_read_next():
-                case Some(entry):
-                    pass_dn  # consumed from log
-                case None:
-                    pass_dn
-        case KernelReplayMode.Verify:
-            match replay_read_next():
-                case Some(entry):
-                    if entry.payload_b != src_port:
-                        report_divergence(DivergenceKind.IpcMismatch, entry.event_id, entry.payload_b, src_port)
-                case None:
-                    pass_dn
-        case _:
-            pass_dn
+        return true
+    replay_portable_accept(DivergenceKind.IpcMismatch, logged, msg_len)
 
 # ============================================================================
 # Timer Hook
@@ -272,7 +240,7 @@ fn replay_hook_timer_read(source_id: i64, value: i64) -> i64:
     if replay_is_off():
         return value
     replay_portable_sync()
-    val kind = PR_KIND_TIMER_READ + source_id * KERNEL_PR_TIMER_SOURCE_STRIDE
+    val kind = PR_KIND_TIMER_READ + source_id * KERNEL_PR_KIND_STRIDE
     val logged = portable_replay_event(kind, KERNEL_PR_SCOPE, value)
     if replay_is_recording():
         return value
@@ -282,6 +250,8 @@ fn replay_hook_timer_read(source_id: i64, value: i64) -> i64:
 # Thread Lifecycle Hooks
 # ============================================================================
 
+# Diagnostic only (no caller consumes a forced tid; Replay makes no decision),
+# so thread create/exit stay on the kernel ring.
 fn replay_hook_thread_create(parent_tid: i64, child_tid: i64, entry_addr: i64):
     if replay_is_off():
         return
@@ -358,6 +328,7 @@ fn replay_hook_random_read(task_id: i64, value: i64) -> i64:
 # Checkpoint Marker
 # ============================================================================
 
+# Diagnostic marker: Replay only consumes it, so it stays on the kernel ring.
 fn replay_hook_checkpoint(checkpoint_id: i64):
     if replay_is_off():
         return

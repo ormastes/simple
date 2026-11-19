@@ -7,13 +7,18 @@
 # meets an exhausted log or a mismatched event reports a divergence instead of
 # silently returning the live value. P6: in Replay the scheduler dispatches the
 # logged tid; an exhausted log or non-runnable logged tid dispatches nothing.
+# P6: syscall results replay the logged retval, and IRQ/IPC events are
+# accepted only when they match the log — never the live value on divergence.
 
 use std.spec.*
 use os.kernel.replay.mode.{KernelReplayMode, replay_set_mode}
 use os.kernel.replay.log_buffer.{replay_buffer_reset, replay_window_complete, replay_event_count}
 use os.kernel.replay.divergence.{clear_divergences, get_divergence_count}
 use std.replay.portable_replay.{portable_replay_pending, PR_FAIL_CLOSED_VALUE}
-use os.kernel.replay.hooks.{replay_hook_timer_read, replay_hook_random_read, replay_hook_schedule}
+use os.kernel.replay.hooks.{
+    replay_hook_timer_read, replay_hook_random_read, replay_hook_schedule,
+    replay_hook_syscall_exit, replay_hook_irq, replay_hook_ipc_send, replay_hook_ipc_recv
+}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.types.task_types.{TaskPriority}
 use os.kernel.types.capability_types.{CapabilitySet}
@@ -95,6 +100,106 @@ describe "kernel replay fail-closed (RR-02)":
         replay_hook_timer_read(3, 777)
         replay_hook_random_read(1, 55)
         expect(portable_replay_pending()).to_equal(2)
+        expect(replay_event_count()).to_equal(0)
+
+    it "syscall exit replay returns the logged result, not the live one (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_syscall_exit(0, 7, 42)
+        replay_set_mode(KernelReplayMode.Replay)
+        expect(replay_hook_syscall_exit(0, 7, 99)).to_equal(42)
+        expect(get_divergence_count()).to_equal(0)
+
+    it "syscall exit replay of a different syscall diverges and fails closed (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_syscall_exit(0, 7, 42)
+        replay_set_mode(KernelReplayMode.Replay)
+        expect(replay_hook_syscall_exit(0, 8, 42)).to_equal(PR_FAIL_CLOSED_VALUE)
+        expect(get_divergence_count()).to_equal(1)
+
+    it "syscall exit replay at end-of-log diverges and fails closed (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Replay)
+        expect(replay_hook_syscall_exit(0, 7, 99)).to_equal(PR_FAIL_CLOSED_VALUE)
+        expect(get_divergence_count()).to_equal(1)
+
+    it "irq replay accepts the logged vector (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_irq(33, 0, 0)
+        replay_set_mode(KernelReplayMode.Replay)
+        expect(replay_hook_irq(33, 0, 0)).to_equal(true)
+        expect(get_divergence_count()).to_equal(0)
+
+    it "irq replay of a different vector diverges and is not delivered (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_irq(33, 0, 0)
+        replay_set_mode(KernelReplayMode.Replay)
+        expect(replay_hook_irq(34, 0, 0)).to_equal(false)
+        expect(get_divergence_count()).to_equal(1)
+
+    it "irq replay at end-of-log diverges and is not delivered (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Replay)
+        expect(replay_hook_irq(33, 0, 0)).to_equal(false)
+        expect(get_divergence_count()).to_equal(1)
+
+    it "ipc send replay accepts the logged port and length (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_ipc_send(0, 5, 16)
+        replay_set_mode(KernelReplayMode.Replay)
+        expect(replay_hook_ipc_send(0, 5, 16)).to_equal(true)
+        expect(get_divergence_count()).to_equal(0)
+
+    it "ipc send replay to a different port or with a different length diverges (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_ipc_send(0, 5, 16)
+        replay_hook_ipc_send(0, 5, 16)
+        replay_set_mode(KernelReplayMode.Replay)
+        expect(replay_hook_ipc_send(0, 6, 16)).to_equal(false)
+        expect(replay_hook_ipc_send(0, 5, 17)).to_equal(false)
+        expect(get_divergence_count()).to_equal(2)
+
+    it "ipc send replay at end-of-log diverges and is rejected (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Replay)
+        expect(replay_hook_ipc_send(0, 5, 16)).to_equal(false)
+        expect(get_divergence_count()).to_equal(1)
+
+    it "ipc recv replay accepts the logged port and length (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_ipc_recv(0, 5, 16)
+        replay_set_mode(KernelReplayMode.Replay)
+        expect(replay_hook_ipc_recv(0, 5, 16)).to_equal(true)
+        expect(get_divergence_count()).to_equal(0)
+
+    it "ipc recv replay meeting a logged send diverges and is rejected (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_ipc_send(0, 5, 16)
+        replay_set_mode(KernelReplayMode.Replay)
+        expect(replay_hook_ipc_recv(0, 5, 16)).to_equal(false)
+        expect(get_divergence_count()).to_equal(1)
+
+    it "ipc recv replay at end-of-log diverges and is rejected (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Replay)
+        expect(replay_hook_ipc_recv(0, 5, 16)).to_equal(false)
+        expect(get_divergence_count()).to_equal(1)
+
+    it "syscall result, irq and ipc events are logged by the portable core, not the kernel ring (P6)":
+        _reset()
+        replay_set_mode(KernelReplayMode.Record)
+        replay_hook_syscall_exit(0, 7, 42)
+        replay_hook_irq(33, 0, 0)
+        replay_hook_ipc_send(0, 5, 16)
+        replay_hook_ipc_recv(0, 5, 16)
+        expect(portable_replay_pending()).to_equal(4)
         expect(replay_event_count()).to_equal(0)
 
     it "schedule replay that matches the log reports no divergence":

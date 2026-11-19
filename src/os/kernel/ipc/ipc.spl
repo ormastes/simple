@@ -37,6 +37,9 @@ val IPC_OWNED_PAYLOAD_TOO_LARGE: i64 = -4
 val IPC_OWNED_PAYLOAD_MISMATCH: i64 = -5
 val IPC_OWNED_QUEUE_BUDGET_EXHAUSTED: i64 = -6
 val IPC_OWNED_CAPABILITY_UNSUPPORTED: i64 = -7
+# Kernel replay rejected the send: it does not match the logged event (DHR P6
+# fails closed rather than performing the live send).
+val IPC_REPLAY_DIVERGED: i64 = -10
 
 # ============================================================================
 # Port State
@@ -459,6 +462,8 @@ impl IpcManager:
             delivery_kind: QueuedIpcDeliveryKind.CopiedPayload,
             authenticated_sender: authenticated_sender
         )
+        if not replay_hook_ipc_send(0, header.dst_port as i64, header.payload_len as i64):
+            return IPC_REPLAY_DIVERGED
         if not port_state.queue.push(owned):
             return IPC_OWNED_QUEUE_BUDGET_EXHAUSTED
         self.ports[destination_slot] = port_state
@@ -469,7 +474,6 @@ impl IpcManager:
                 new_permit_slot, port_state.port.owner,
                 header.dst_port, claimed_source_port
             )
-        replay_hook_ipc_send(0, header.dst_port as i64, header.payload_len as i64)
         0
 
     me recv_owned(receiver_task: TaskId, port: IpcPort) -> OwnedIpcReceiveResult:
@@ -506,7 +510,8 @@ impl IpcManager:
 
             # The receiver TaskId is caller-provided in K1; do not emit it as
             # authenticated replay provenance.
-            replay_hook_ipc_recv(0, port.id as i64, queued.header.payload_len as i64)
+            if not replay_hook_ipc_recv(0, port.id as i64, queued.header.payload_len as i64):
+                return _owned_receive_without_message(OwnedIpcReceiveStatus.InvalidState)
             return OwnedIpcReceiveResult(
                 status: OwnedIpcReceiveStatus.Delivered,
                 header: Some(queued.header),
@@ -527,6 +532,7 @@ impl IpcManager:
           -1 = destination port not found
           -2 = destination queue full
           -3 = capability check failed
+          -10 = kernel replay divergence (fail closed, nothing queued)
         """
         # Find the destination port
         val slot = self._find_port_by_id(msg.dst_port)
@@ -546,11 +552,12 @@ impl IpcManager:
             delivery_kind: QueuedIpcDeliveryKind.LegacyMetadata,
             authenticated_sender: nil
         )
+        if not replay_hook_ipc_send(0, msg.dst_port as i64, msg.payload_len as i64):
+            return IPC_REPLAY_DIVERGED
         val ok = port_state.queue.push(queued)
         if not ok:
             self.ports[slot] = port_state
             return -2
-        replay_hook_ipc_send(0, msg.dst_port as i64, msg.payload_len as i64)
 
         self.ports[slot] = port_state
         0
@@ -579,7 +586,8 @@ impl IpcManager:
 
         if msg != nil:
             val queued = msg
-            replay_hook_ipc_recv(0, port.id as i64, queued.header.payload_len as i64)
+            if not replay_hook_ipc_recv(0, port.id as i64, queued.header.payload_len as i64):
+                return nil
             return queued.header
 
         # Queue empty — non-blocking mode returns nil
