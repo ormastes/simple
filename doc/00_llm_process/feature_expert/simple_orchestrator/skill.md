@@ -565,5 +565,12 @@ files): `enable_workspace_source_v3` -> `LinuxFreshWorkspaceEnableTurnV3` -> `Li
 `ContainerWorkspaceEnableTurnV3` carry `binding_digest` (it was only visible at the settled read, after settle). NO V3 STAGE (keep
 the generic `host-wedged` settle): Stop failure with no cancel cause or after Create, create/prepare/configuration/start/inspect
 wedges, settle, read, source-return, finalize and enable errors, and any run lost to a service restart AFTER the reap (the
-controller-built `service-restart`). Open: a Host reset receipt is lost when the service restarts before the controller
-collects it (the reap then answers the reaped code and the controller builds the unsigned `service-restart` receipt).
+controller-built `service-restart`).
+RECEIPT DURABILITY (milestone_0039; specs NOT_RUN): the Host-signed reset-failure REPLY is archived no-replace + read back via
+the held capacity journal (`remote_build_reset_archive_v4`, path `host-remote-build-reset-failure/<sha256(operation id)>.sdn`,
+keyed by operation id because a restarted service knows the operation, not the prior fence) BEFORE it is first answered; an
+archive error is the plain wedge (no receipt). After a restart the startup reap indexes the operation and the collect route, on
+`linux-host-remote-build-reaped-incomplete`, answers `host_remote_build_reset_failure_stored_v4` byte-identically; absent,
+corrupt, foreign, non-canonical or receipt-less archives answer "" and keep the reaped refusal (controller's `service-restart`
+settle). Expiry: replay is transport, not authority (the in-memory wedged-with-receipt arm already precedes the deadline check);
+the controller verifies grant/approval/window, and open/transfer/reap still refuse an expired approval after restart.
