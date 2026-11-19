@@ -313,17 +313,26 @@ int64_t rt_thread_local_new(void) {
     return handle;
 }
 
-int64_t rt_thread_local_get_i64(int64_t handle) {
-    if (handle <= 0) return 0;
+/* Live entry for `handle`, or NULL. Caller holds the table lock. */
+static ScalarTlsEntry* scalar_tls_live(int64_t handle, size_t* out_index) {
+    if (handle <= 0) return NULL;
     size_t index = (size_t)(((uint64_t)handle - 1) & SCALAR_TLS_SLOT_MASK);
-    SCALAR_TLS_RDLOCK();
+    if (index >= g_scalar_tls_used) return NULL;
+    ScalarTlsEntry* entry = &g_scalar_tls_entries[index];
+    if (!entry->active || entry->handle != handle) return NULL;
+    if (out_index) *out_index = index;
+    return entry;
+}
+
+int64_t rt_thread_local_get_i64(int64_t handle) {
     int64_t value = 0;
-    if (index < g_scalar_tls_used && g_scalar_tls_entries[index].active &&
-        g_scalar_tls_entries[index].handle == handle) {
+    SCALAR_TLS_RDLOCK();
+    ScalarTlsEntry* entry = scalar_tls_live(handle, NULL);
+    if (entry) {
 #ifdef SPL_THREAD_PTHREAD
-        uintptr_t bits = (uintptr_t)pthread_getspecific(g_scalar_tls_entries[index].key);
+        uintptr_t bits = (uintptr_t)pthread_getspecific(entry->key);
 #else
-        uintptr_t bits = (uintptr_t)TlsGetValue(g_scalar_tls_entries[index].key);
+        uintptr_t bits = (uintptr_t)TlsGetValue(entry->key);
 #endif
         memcpy(&value, &bits, sizeof(value));
     }
@@ -332,35 +341,32 @@ int64_t rt_thread_local_get_i64(int64_t handle) {
 }
 
 void rt_thread_local_set_i64(int64_t handle, int64_t value) {
-    if (handle <= 0) return;
-    size_t index = (size_t)(((uint64_t)handle - 1) & SCALAR_TLS_SLOT_MASK);
     SCALAR_TLS_RDLOCK();
-    if (index < g_scalar_tls_used && g_scalar_tls_entries[index].active &&
-        g_scalar_tls_entries[index].handle == handle) {
+    ScalarTlsEntry* entry = scalar_tls_live(handle, NULL);
+    if (entry) {
         uintptr_t bits;
         memcpy(&bits, &value, sizeof(bits));
 #ifdef SPL_THREAD_PTHREAD
-        (void)pthread_setspecific(g_scalar_tls_entries[index].key, (void*)bits);
+        (void)pthread_setspecific(entry->key, (void*)bits);
 #else
-        (void)TlsSetValue(g_scalar_tls_entries[index].key, (void*)bits);
+        (void)TlsSetValue(entry->key, (void*)bits);
 #endif
     }
     SCALAR_TLS_RDUNLOCK();
 }
 
 void rt_thread_local_free(int64_t handle) {
-    if (handle <= 0) return;
-    size_t index = (size_t)(((uint64_t)handle - 1) & SCALAR_TLS_SLOT_MASK);
+    size_t index = 0;
     SCALAR_TLS_WRLOCK();
-    if (index < g_scalar_tls_used && g_scalar_tls_entries[index].active &&
-        g_scalar_tls_entries[index].handle == handle) {
+    ScalarTlsEntry* entry = scalar_tls_live(handle, &index);
+    if (entry) {
 #ifdef SPL_THREAD_PTHREAD
-        (void)pthread_key_delete(g_scalar_tls_entries[index].key);
+        (void)pthread_key_delete(entry->key);
 #else
-        (void)TlsFree(g_scalar_tls_entries[index].key);
+        (void)TlsFree(entry->key);
 #endif
-        g_scalar_tls_entries[index].active = false;
-        g_scalar_tls_entries[index].next_free = g_scalar_tls_free_head;
+        entry->active = false;
+        entry->next_free = g_scalar_tls_free_head;
         g_scalar_tls_free_head = index;
     }
     SCALAR_TLS_WRUNLOCK();
