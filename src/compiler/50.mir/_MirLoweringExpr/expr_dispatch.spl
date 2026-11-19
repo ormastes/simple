@@ -5705,14 +5705,18 @@ impl MirLowering:
 
     me unit_div_payload_word(local: LocalId) -> LocalId:
         """Integer payload of a unit operand: a raw integer is itself; a
-        one-field custom-primitive wrapper is read as its i64 word."""
+        one-field record wrapper (a headerless rt_alloc field block) is a
+        POINTER, so its i64 field 0 is loaded; any other word is bit-cast."""
         if self.local_is_integer_scalar_v1(local):
             return local
         var b = self.builder
-        val word = b.emit_bitcast(mir_operand_copy(local), MirType.i64())
+        var word = local
+        if self.box_runtime_value_local_is_record(local):
+            word = b.emit_load(mir_operand_copy(local), MirType.i64())
+        else:
+            word = b.emit_bitcast(mir_operand_copy(local), MirType.i64())
         self.builder = b
         word
-
     me emit_unit_panic_if(cond: LocalId, block_label: text, msg: text):
         """Branch to a panicking block when `cond` holds, else continue."""
         var b = self.builder
@@ -5738,11 +5742,23 @@ impl MirLowering:
         val left_word = self.unit_div_payload_word(left_local)
         val right_word = self.unit_div_payload_word(right_local)
         var b = self.builder
+        # Zero divisor: skip the remainder (Rem by zero is a hardware trap) and
+        # let the division's own divide-by-zero handling report it.
+        val zero_div = b.emit_const_int(0)
+        val div_is_zero = b.emit_binop(MirBinOp.Eq, mir_operand_copy(right_word), mir_operand_copy(zero_div), MirType.bool())
+        val check_block = b.new_block(Some("unit_div_nonzero"))
+        val join_block = b.new_block(Some("unit_div_check_done"))
+        b.terminate_if(mir_operand_copy(div_is_zero), join_block, check_block)
+        b.switch_to_block(check_block)
         val remainder = b.emit_binop(MirBinOp.Rem, mir_operand_copy(left_word), mir_operand_copy(right_word), MirType.i64())
         val zero = b.emit_const_int(0)
         val inexact = b.emit_binop(MirBinOp.Ne, mir_operand_copy(remainder), mir_operand_copy(zero), MirType.bool())
         self.builder = b
         self.emit_unit_panic_if(inexact, "unit_div_inexact", "SPL-UNIT-002: integer unit division is inexact (remainder is not zero); use an exact ratio")
+        var b_join = self.builder
+        b_join.terminate_goto(join_block)
+        b_join.switch_to_block(join_block)
+        self.builder = b_join
 
     me hir_expr_is_pure_name_v1(e: HirExpr) -> bool:
         match e.kind:
@@ -5768,15 +5784,23 @@ impl MirLowering:
         val min_text = unit_constraint_min_text(unit_name)
         val max_text = unit_constraint_max_text(unit_name)
         val msg = unit_constraint_violation_message(unit_name, "<runtime value>", unit_constraint_predicate(unit_name))
+        # The backend picks signed/unsigned compares from the operand type, so
+        # the bound constants carry the raw value's own integer type (a u64
+        # above i64::MAX must not compare as negative).
+        var bound_type = MirType.i64()
+        if val raw_type = self.local_mir_type_of(raw):
+            bound_type = raw_type
         if min_text != "":
             var b_lo = self.builder
-            val lo_const = b_lo.emit_const_int(unit_range_bound_i64(min_text))
+            val lo_const = b_lo.new_temp(bound_type)
+            b_lo.emit_const(lo_const, MirConstValue.Int(unit_range_bound_i64(min_text)), bound_type)
             val below = b_lo.emit_binop(MirBinOp.Lt, mir_operand_copy(raw), mir_operand_copy(lo_const), MirType.bool())
             self.builder = b_lo
             self.emit_unit_panic_if(below, "unit_range_below", msg)
         if max_text != "":
             var b_hi = self.builder
-            val hi_const = b_hi.emit_const_int(unit_range_bound_i64(max_text))
+            val hi_const = b_hi.new_temp(bound_type)
+            b_hi.emit_const(hi_const, MirConstValue.Int(unit_range_bound_i64(max_text)), bound_type)
             val above = b_hi.emit_binop(MirBinOp.Gt, mir_operand_copy(raw), mir_operand_copy(hi_const), MirType.bool())
             self.builder = b_hi
             self.emit_unit_panic_if(above, "unit_range_above", msg)
