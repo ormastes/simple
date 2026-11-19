@@ -27,33 +27,59 @@ impl FailureCaptureConfig:
 # FailureCapture
 # ============================================================================
 
+# The fault path stays allocation-free: it stores the trigger registers and
+# pins the event-log tail as an id range [tail_first, tail_end) that the ring
+# already holds. It does NOT serialize a checkpoint, snapshot memory, or write
+# output_path; summary() says so instead of implying a restorable capture
+# (DHR P0). Persisting the record belongs to the independent broker (DHR P2).
 class FailureCapture:
     config: FailureCaptureConfig
     captured: bool
     capture_cycle: i64
+    trigger: text            # "panic" or "signal"
+    pc: i64
+    sp: i64
+    signal: i32
+    pid: i64
+    tail_first: i64          # first event id of the retained log tail
+    tail_end: i64            # one past the last event id at capture time
 
 impl FailureCapture:
     static fn with_config(cfg: FailureCaptureConfig) -> FailureCapture:
         FailureCapture(
             config: cfg,
             captured: false,
-            capture_cycle: 0
+            capture_cycle: 0,
+            trigger: "",
+            pc: 0,
+            sp: 0,
+            signal: 0,
+            pid: 0,
+            tail_first: 0,
+            tail_end: 0
         )
+
+    me fn _pin_tail(cycle: i64, trigger: text):
+        self.captured = true
+        self.capture_cycle = cycle
+        self.trigger = trigger
+        self.tail_end = replay_event_count()
+        val first = self.tail_end - self.config.max_events_before.to_i64()
+        self.tail_first = if first > 0: first else: 0
 
     me fn capture_on_panic(cycle: i64, pc: i64, sp: i64):
         if self.captured:
             return
-        self.captured = true
-        self.capture_cycle = cycle
-        # In a real kernel this would flush the event ring, serialize the
-        # checkpoint, and write it to config.output_path.  Here we record
-        # the trigger metadata so callers can retrieve it via summary().
+        self.pc = pc
+        self.sp = sp
+        self._pin_tail(cycle, "panic")
 
     me fn capture_on_signal(cycle: i64, signal: i32, pid: i64):
         if self.captured:
             return
-        self.captured = true
-        self.capture_cycle = cycle
+        self.signal = signal
+        self.pid = pid
+        self._pin_tail(cycle, "signal")
 
     fn is_captured() -> bool:
         self.captured
@@ -64,8 +90,16 @@ impl FailureCapture:
         var lines: [text] = []
         lines.push("FailureCapture:")
         lines.push("  captured: true")
+        lines.push("  trigger: {self.trigger}")
         lines.push("  capture_cycle: {self.capture_cycle}")
-        lines.push("  max_events_before: {self.config.max_events_before}")
-        lines.push("  include_memory: {self.config.include_memory}")
-        lines.push("  output_path: {self.config.output_path}")
+        if self.trigger == "panic":
+            lines.push("  pc: {self.pc}")
+            lines.push("  sp: {self.sp}")
+        else:
+            lines.push("  signal: {self.signal}")
+            lines.push("  pid: {self.pid}")
+        lines.push("  event_tail: [{self.tail_first}, {self.tail_end})")
+        lines.push("  checkpoint: not serialized")
+        lines.push("  memory: not captured (include_memory={self.config.include_memory})")
+        lines.push("  persisted: false (output_path={self.config.output_path} not written)")
         lines.join("\n")

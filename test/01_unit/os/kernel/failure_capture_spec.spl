@@ -1,0 +1,51 @@
+# @cover src/os/kernel/replay/checkpoint/failure_capture.spl 80%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-DHR-03
+# plan: doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md
+
+# DHR P0: FailureCapture used to record only a cycle number while its summary
+# implied a checkpoint/memory capture. It now keeps the trigger registers, pins
+# the event-log tail range, and states what it did NOT capture.
+
+use std.spec.*
+use os.kernel.replay.mode.{KernelReplayMode, replay_set_mode}
+use os.kernel.replay.log_buffer.{replay_buffer_reset}
+use os.kernel.replay.hooks.{replay_hook_timer_read}
+use os.kernel.replay.checkpoint.failure_capture.{FailureCapture, FailureCaptureConfig}
+
+fn _record_events(n: i64):
+    replay_buffer_reset()
+    replay_set_mode(KernelReplayMode.Record)
+    var i: i64 = 0
+    while i < n:
+        replay_hook_timer_read(1, i)
+        i = i + 1
+    replay_set_mode(KernelReplayMode.Off)
+
+describe "FailureCapture":
+    it "panic keeps pc/sp and pins the bounded event tail":
+        _record_events(10)
+        var c = FailureCapture.with_config(FailureCaptureConfig(max_events_before: 4, include_memory: true, output_path: "/tmp/x"))
+        c.capture_on_panic(99, 4096, 8192)
+        expect(c.pc).to_equal(4096)
+        expect(c.sp).to_equal(8192)
+        expect(c.tail_first).to_equal(6)
+        expect(c.tail_end).to_equal(10)
+
+    it "summary states what was not captured":
+        _record_events(2)
+        var c = FailureCapture.with_config(FailureCaptureConfig.default())
+        c.capture_on_signal(5, 11, 42)
+        val s = c.summary()
+        expect(s.contains("signal: 11")).to_equal(true)
+        expect(s.contains("event_tail: [0, 2)")).to_equal(true)
+        expect(s.contains("checkpoint: not serialized")).to_equal(true)
+        expect(s.contains("persisted: false")).to_equal(true)
+
+    it "only the first failure is captured":
+        _record_events(1)
+        var c = FailureCapture.with_config(FailureCaptureConfig.default())
+        c.capture_on_panic(1, 10, 20)
+        c.capture_on_panic(2, 30, 40)
+        expect(c.capture_cycle).to_equal(1)
+        expect(c.pc).to_equal(10)
