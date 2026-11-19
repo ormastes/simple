@@ -48,6 +48,16 @@ fn _count_color(pixels: [u32], color: u32) -> i32:
         idx = idx + 1
     count
 
+fn _count_reddish(pixels: [u32]) -> i32:
+    var count: i32 = 0
+    for pixel in pixels:
+        val r = ((pixel >> 16) & 0xFF) as i32
+        val g = ((pixel >> 8) & 0xFF) as i32
+        val b = (pixel & 0xFF) as i32
+        if r - g > 100 and r - b > 100:
+            count = count + 1
+    count
+
 fn _sum_red(pixels: [u32]) -> i64:
     var total: i64 = 0
     for pixel in pixels:
@@ -460,9 +470,9 @@ describe "BrowserRenderer HTML rendering":
     it "renders letter-spacing by spreading glyph advances":
         # @req: REQ-LIB-GC-ASYNC-MUT-001
         step("Verify: renders letter-spacing by spreading glyph advances")
-        # The plain page states the initial value so both renders take the raster
-        # lane: the Draw IR text lane does not paint this property yet (see
-        # doc/08_tracking/bug/draw_ir_text_lane_ignores_letter_word_spacing_text_shadow_2026-11-19.md).
+        # Both pages take the Draw IR text lane (LCD text, so no pixel is exactly
+        # #111827 or #dc2626). Chrome 159 measured at 96x32: plain ink 202 px,
+        # shadow ink 321, 23 red-dominant pixels (channel > both others by 100).
         val plain_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; letter-spacing: 0px; }</style></head><body><div class='label'>SPACING</div></body></html>"
         val spaced_html = "<html><head><style>body { margin: 0; background-color: #ffffff; } .label { color: #111827; font-size: 8px; letter-spacing: 2px; }</style></head><body><div class='label'>SPACING</div></body></html>"
         val plain = render_html_to_pixels_with_viewport(plain_html, 128, 32).pixel_data
@@ -542,8 +552,10 @@ describe "BrowserRenderer HTML rendering":
         val plain = render_html_to_pixels_with_viewport(plain_html, 96, 32).pixel_data
         val shadow = render_html_to_pixels_with_viewport(shadow_html, 96, 32).pixel_data
 
-        expect(_count_color(shadow, 0xFF111827u32)).to_equal(_count_color(plain, 0xFF111827u32))
-        expect(_count_color(shadow, 0xFFDC2626u32)).to_be_greater_than(0)
+        expect(_count_region_changed(shadow, 96, 0, 0, 96, 32, WHITE_BG) - _count_region_changed(plain, 96, 0, 0, 96, 32, WHITE_BG)).to_be_greater_than(80)
+        expect(_count_reddish(shadow)).to_be_greater_than(14)
+        expect(_count_reddish(shadow)).to_be_less_than(31)
+        expect(_count_reddish(plain)).to_equal(0)
         expect(_pixels_equal(plain, shadow)).to_equal(false)
 
     it "renders text-overflow ellipsis for clipped nowrap text":

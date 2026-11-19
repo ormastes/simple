@@ -1,0 +1,136 @@
+"""
+## Purpose and audience
+Purpose: Pin CSS `text-shadow` on the Draw IR text lane against Chrome 159.
+A sharp shadow (blur 0) is one extra copy of the text run per layer, painted
+under the text in the layer colour at the layer offset; layers paint back to
+front, so the FIRST listed is on top. Chrome paints the shadow glyphs with the
+same LCD antialiasing as the text. A blurred shadow is not painted by the Draw
+IR lane (no glyph blur primitive): such a bare-text page keeps the raster lane.
+Audience: web renderer text maintainers.
+
+The right edge (x1) is pinned within 1px: it carries the plain-text glyph AA
+difference (Chrome 166, engine 165 for the same text without a shadow).
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--force-device-scale-factor=1`, `body{margin:0;background:#fff;font:16px
+Liberation Sans;color:#000}`, `<div style="position:absolute;left:20px;top:30px;
+...">Hamburgefonstiv Qy</div>`, 400x120). "red"/"blue" count pixels whose
+channel exceeds both others by more than 100; "fringe" is a pixel whose red and
+blue differ by more than 16.
+
+| text-shadow                         | Chrome ink bbox   | red | blue | fringe |
+|-------------------------------------|-------------------|-----|------|--------|
+| `2px 2px red`                       | 20,32 - 167,48    | 442 | 0    | 1357   |
+| `2px 2px 0 rgba(0,0,255,.5)`        | 20,32 - 168,48    | 0   | 206  | 1382   |
+| `1px 1px red, 3px 3px blue`         | 20,32 - 169,49    | 184 | 275  | 1426   |
+| `-2px -1px red`                     | 18,31 - 166,46    | 486 | 0    | 1336   |
+| `2px 2px black`, `color:transparent`| 22,34 - 168,48    | -   | -    | 970    |
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-SHADOW-001 — Draw IR text lane paints sharp text-shadow like Chrome 159.
+"""
+# @tag: unit, browser_engine, text, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 400
+val H: i32 = 120
+val HEAD: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font:16px Liberation Sans;color:#000\"><div style=\"position:absolute;left:20px;top:30px;"
+val TAIL: text = "\">Hamburgefonstiv Qy</div></body></html>"
+
+fn _chan(px: u32, shift: u32) -> i32:
+    ((px >> shift) & 0xFFu32).to_i32()
+
+fn _abs(v: i32) -> i32:
+    if v < 0: 0 - v else: v
+
+fn _near(a: i32, b: i32, tol: i32) -> bool:
+    _abs(a - b) <= tol
+
+# [x0, y0, x1, y1, red, blue, fringe] of one rendered shadow page.
+fn _measure(style: text) -> [i32]:
+    val px = simple_web_render_html_to_pixels_with_engine2d_backend(HEAD + style + TAIL, W, H, "cpu_simd")
+    var x0 = 9999
+    var y0 = 9999
+    var x1 = -1
+    var y1 = -1
+    var red = 0
+    var blue = 0
+    var fringe = 0
+    var i = 0
+    while i < px.len():
+        val p = px[i]
+        val r = _chan(p, 16u32)
+        val g = _chan(p, 8u32)
+        val b = _chan(p, 0u32)
+        if (p & 0xFFFFFFu32) != 0xFFFFFFu32:
+            val x = i % W
+            val y = i / W
+            if x < x0: x0 = x
+            if y < y0: y0 = y
+            if x > x1: x1 = x
+            if y > y1: y1 = y
+        if r - g > 100 and r - b > 100: red = red + 1
+        if b - g > 100 and b - r > 100: blue = blue + 1
+        if _abs(r - b) > 16: fringe = fringe + 1
+        i = i + 1
+    [x0, y0, x1, y1, red, blue, fringe]
+
+describe "Draw IR text-shadow against Chrome 159":
+    it "AC-1: one offset shadow paints under the text at the offset":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val m = _measure("text-shadow:2px 2px red")
+        step("Chrome bbox 20,32-167,48, red 442")
+        expect([m[0], m[1], m[3]]).to_equal([20, 32, 48])
+        expect(_near(m[2], 167, 1)).to_be(true)
+        expect(_near(m[4], 442, 20)).to_be(true)
+
+    it "AC-2: an alpha shadow keeps its alpha":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val m = _measure("text-shadow:2px 2px 0 rgba(0,0,255,.5)")
+        step("Chrome bbox 20,32-168,48, blue 206")
+        expect([m[0], m[1], m[3]]).to_equal([20, 32, 48])
+        expect(_near(m[2], 168, 1)).to_be(true)
+        expect(_near(m[5], 206, 15)).to_be(true)
+        expect(m[4]).to_equal(0)
+
+    it "AC-3: several shadows paint back to front, the first listed on top":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val m = _measure("text-shadow:1px 1px red, 3px 3px blue")
+        step("Chrome bbox 20,32-169,49, red 184, blue 275")
+        expect([m[0], m[1], m[3]]).to_equal([20, 32, 49])
+        expect(_near(m[2], 169, 1)).to_be(true)
+        expect(_near(m[4], 184, 15)).to_be(true)
+        expect(_near(m[5], 275, 15)).to_be(true)
+
+    it "AC-4: a negative offset moves the shadow up and left":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val m = _measure("text-shadow:-2px -1px red")
+        step("Chrome bbox 18,31-166,46, red 486")
+        expect([m[0], m[1], m[3]]).to_equal([18, 31, 46])
+        expect(_near(m[2], 166, 1)).to_be(true)
+        expect(_near(m[4], 486, 20)).to_be(true)
+
+    it "AC-5: shadow glyphs are LCD like the text":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val m = _measure("color:transparent;text-shadow:2px 2px black")
+        step("Chrome shadow-only page: bbox 22,34-168,48, fringe 970")
+        expect([m[0], m[1], m[3]]).to_equal([22, 34, 48])
+        expect(_near(m[2], 168, 1)).to_be(true)
+        expect(m[6] >= 900).to_be(true)
