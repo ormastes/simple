@@ -1,10 +1,10 @@
 """
 ## Purpose and audience
-Purpose: Pin that the cpu_simd box-shadow painter keeps the destination alpha.
+Purpose: Pin that the box-shadow painter (cpu_simd and the Vulkan device kernel) keeps the destination alpha.
 It used to write every shadowed pixel with alpha 0, so a translucent box
 painted over its own shadow composited onto "transparent" and came out opaque
 white (Chrome 159: C3C3C7).
-Audience: Engine2D maintainers of the CPU shadow painter.
+Audience: Engine2D maintainers of the CPU shadow painter and its Vulkan twin.
 """
 
 """
@@ -19,17 +19,22 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
 fn sa_page(shadow: text) -> text:
     "<!DOCTYPE html><html><body style='margin:0;background:#1e1e2e'><div style='margin:12px;width:60px;height:40px;background:rgba(255,255,255,0.72)" + shadow + "'></div></body></html>"
 
-fn sa_inside(page: text) -> u32:
-    val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, 100, 70, 1, "cpu_simd")
+fn sa_inside(page: text, lane: text) -> u32:
+    val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, 100, 70, 1, lane)
     if px.len() != 100 * 70:
         return 0u32
     px[30 * 100 + 40]
 
-describe "box shadow under a translucent box (cpu_simd)":
-    it "keeps the box's own colour instead of turning it opaque white":
-        val plain = sa_inside(sa_page(""))
-        val shadowed = sa_inside(sa_page(";box-shadow:0 28px 76px rgba(0,68,160,0.16)"))
-        expect(plain & 0xFFFFFFu32).to_equal(0xC0C0C4u32)
-        expect(shadowed & 0xFFFFFFu32 == 0xFFFFFFu32).to_equal(false)
-        expect(((shadowed >> 16) & 0xFFu32) as i32 - ((plain >> 16) & 0xFFu32) as i32 <= 2).to_equal(true)
-        expect(((plain >> 16) & 0xFFu32) as i32 - ((shadowed >> 16) & 0xFFu32) as i32 <= 2).to_equal(true)
+fn sa_check(lane: text):
+    val plain = sa_inside(sa_page(""), lane)
+    val shadowed = sa_inside(sa_page(";box-shadow:0 28px 76px rgba(0,68,160,0.16)"), lane)
+    expect(plain & 0xFFFFFFu32).to_equal(0xC0C0C4u32)
+    expect(shadowed & 0xFFFFFFu32 == 0xFFFFFFu32).to_equal(false)
+    expect(((shadowed >> 16) & 0xFFu32) as i32 - ((plain >> 16) & 0xFFu32) as i32 <= 2).to_equal(true)
+    expect(((plain >> 16) & 0xFFu32) as i32 - ((shadowed >> 16) & 0xFFu32) as i32 <= 2).to_equal(true)
+
+describe "box shadow under a translucent box":
+    it "cpu_simd keeps the box's own colour instead of turning it opaque white":
+        sa_check("cpu_simd")
+    it "vulkan keeps the box's own colour instead of turning it opaque white":
+        sa_check("vulkan")
