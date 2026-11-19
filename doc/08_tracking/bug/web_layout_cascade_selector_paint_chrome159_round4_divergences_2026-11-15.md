@@ -779,3 +779,28 @@ head (13/40 at base).
   - the pinned PTX (`backend_cuda_font_ptx.spl`) is deliberately distrusted (semantics 1 against common 2, asserted by `cuda_generated_font_handoff_spec`);
   - the web `cuda` backend is rejected at resolve on this GB10 host (`[backend-resolve] cuda rejected: readback_unproven source=cpu_fallback`), because clipped and masked ops take `_begin_cpu_path` and latch `cpu_fallback_used`.
 - **Order of work:** first the CUDA backend's `cpu_fallback` latch (clip and mask on the device), then a trusted regenerated PTX (semantics v3, emitter change in `src/compiler/70.backend/backend/gpu_portable_compute.spl`), then the image blend rule, with a device-readback test against `color.spl` `blend()`. Changing the rule first would alter no visible pixel.
+
+## 2026-11-19 — dashed / dotted borders with per-corner radii (FIXED on raster, cpu_simd and Vulkan)
+
+- **Symptom:** a dashed or dotted border whose four corner radii differ left the uniform rounded-dash path and was dashed per side, with solid-painted or undashed arcs.
+- **Chrome rule (proven in a Python model, 0 mismatches over 6348 uniform Chrome cells):**
+  - It is the same single closed centre-line path as the uniform case.
+  - Each corner's arc has radius r - t/2.
+  - The straight pieces run between the corners' radii.
+  - SelectBestDashGap is applied over the whole loop.
+- **Fix:** `border_rounded_dash_spans` now takes `radii: [tl, tr, br, bl]`. The raster and Draw IR take differing radii for one colour with no solid side; the nearest-side colour split is pinned for one radius only.
+  - `ponytail:` a corner with r < t (square inner edge) joins its sides differently in Chrome and stays on the per-side path. Measured: 109 mismatching cells with r = 0 (box radii 0/18/6/12, 6px), and 3 cells at r = 4, t = 6, all in the join triangle.
+- **Evidence:**
+  - New `border_rounded_per_corner_dash_chrome159_spec`: 6348 pins over three boxes (4px dashed with radii 4/16/10/20, 4px dotted with 12/4/18/8, 6px dashed with 6/18/8/12).
+  - Base: raster 616, cpu_simd 630 and Vulkan 630 mismatches (0/3). Head: 3/3.
+  - Base vs head over the 101 dashed/dotted specs, serial on the same seed: 0 new failures. The only change is the three new-spec rows going green; 58 failing rows are pre-existing and identical on both.
+
+## 2026-11-19 — corner and edge anti-aliasing: Chrome uses Skia's CPU scanline AA (parked, not fixable by a coverage formula)
+
+- **Measured** (k=4 full frame, a 20x12 box with radius 6 and a 2px solid ring with radius 6, cpu_simd against Chrome 159):
+  - the filled corner is anti-aliased but up to 38 levels off;
+  - the ring has no AA at all, up to 129 levels off;
+  - 473 of 12288 device pixels differ.
+- **Chrome's path:** the GPU capture and the `--disable-gpu` capture are byte-identical. Chrome's corner coverage is not symmetric across the corner diagonal (up to 15 levels apart, mean 4). That is the signature of Skia's CPU scanline analytic AA, which snaps edges to sub-scanlines.
+- **Formulas that do not fit:** exact pixel-area coverage, distance-to-circle, gradient-normalised distance, and exact area under an N-chord polygon (N = 2..32). All are symmetric, so none can fit; the best leaves a maximum error of 22-29 levels.
+- **Order of work:** port Skia's conic -> quad -> line flattening and its AAA edge-coverage accumulation, then pin full k=4 frames within 2 levels (the `opacity_group` precedent). A spec with a wider tolerance pins nothing.

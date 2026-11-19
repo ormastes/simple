@@ -1636,7 +1636,8 @@ pub fn border_dot_row_spans(d: i32) -> [i32]:
     spans
 
 # Chrome 159 strokes a uniform dashed / dotted border on a rounded box as ONE
-# closed path: the border's centre line (inset t/2, radius r - t/2), started
+# closed path: the border's centre line (inset t/2, each corner arc of radius
+# r - t/2; `radii` is [tl, tr, br, bl]), started
 # where the top-left arc ends and run clockwise. SelectBestDashGap (closed
 # path: as many gaps as dashes) fits the gap so whole dashes close the loop:
 # dash 2t, nominal gap t; dotted: round dots of diameter t, one per pitch,
@@ -1646,27 +1647,49 @@ pub fn border_dot_row_spans(d: i32) -> [i32]:
 # to the vertical side); a side set in `solid_sides` (bit 1 top, 2 right,
 # 4 bottom, 8 left) fills its part of the ring. Returns [row, x0, len, side]
 # spans (box-relative; side 0 top, 1 right, 2 bottom, 3 left) of the pixels
-# whose centre is covered; empty when the shape does not apply (r <= t/2, a
-# side shorter than its arcs, or a loop too short to dash), so the caller
-# keeps its per-side path.
-# ponytail: uniform width and circular radius only, pixel-centre coverage (no
-# AA); upgrade with per-side widths (Chrome insets the centre line per side).
+# whose centre is covered; empty when the shape does not apply (one radius
+# <= t/2, differing radii with any r < t, a side shorter than its arcs, or a
+# loop too short to dash), so the caller keeps its per-side path.
+# ponytail: uniform width and circular radii only, pixel-centre coverage (no
+# AA); a corner with r < t (square inner edge) joins its sides differently in
+# Chrome and is not modelled; upgrade with per-side widths (Chrome insets the
+# centre line per side) and that join.
 # reason: geometry helper shared by the raster and Draw IR border lanes; box size, width and radius in px, side bit mask
 # @allow(primitive_api)
-pub fn border_rounded_dash_spans(w: i32, h: i32, t: i32, r: i32, dotted: bool, solid_sides: i32) -> [i32]:
+pub fn border_rounded_dash_spans(w: i32, h: i32, t: i32, radii: [i32], dotted: bool, solid_sides: i32) -> [i32]:
     var out: [i32] = []
-    if t <= 0 or 2 * r <= t or 2 * r > w or 2 * r > h:
+    if t <= 0 or radii.len() != 4:
+        return out
+    val tl = radii[0]
+    val tr = radii[1]
+    val br = radii[2]
+    val bl = radii[3]
+    val uniform = tl == tr and tr == br and br == bl
+    # Uniform radius: any r > t/2. Differing radii: every r >= t (a corner
+    # whose inner edge is square joins its sides differently in Chrome).
+    if uniform and 2 * tl <= t:
+        return out
+    if not uniform and (tl < t or tr < t or br < t or bl < t):
+        return out
+    if tl + tr > w or bl + br > w or tl + bl > h or tr + br > h:
         return out
     val tf = t as f64
-    val rf = r as f64
     val wf = w as f64
     val hf = h as f64
     val c = tf / 2.0
-    val rc = rf - c
-    val a = wf - 2.0 * rf
-    val b = hf - 2.0 * rf
-    val q = 3.141592653589793 * rc / 2.0
-    val total = 2.0 * a + 2.0 * b + 4.0 * q
+    # g: w, h, c, corner radii (tl tr br bl), centre-line arc radii (r - c).
+    val g = [wf, hf, c, tl as f64, tr as f64, br as f64, bl as f64,
+             (tl as f64) - c, (tr as f64) - c, (br as f64) - c, (bl as f64) - c]
+    val half_pi = 1.5707963267948966
+    var seg: [f64] = []
+    var acc = 0.0
+    # Clockwise from the top-left arc's end: top, tr arc, right, br arc,
+    # bottom, bl arc, left, tl arc; seg holds each piece's end.
+    for piece in [wf - g[3] - g[4], half_pi * g[8], hf - g[4] - g[5], half_pi * g[9],
+                  wf - g[5] - g[6], half_pi * g[10], hf - g[6] - g[3], half_pi * g[7]]:  # cpu-lane-loop-ok: the eight pieces of one closed border path
+        acc = acc + piece
+        seg.push(acc)
+    val total = acc
     val dash = if dotted: tf else: 2.0 * tf
     val nominal = tf
     if total <= 2.0 * dash:
@@ -1680,7 +1703,8 @@ pub fn border_rounded_dash_spans(w: i32, h: i32, t: i32, r: i32, dotted: bool, s
     val d_max = if max_gap > nominal: max_gap - nominal else: nominal - max_gap
     val gap = if max_gap <= 0.0 or d_min < d_max: min_gap else: max_gap
     val pitch = dash + gap
-    val seg = [a, a + q, a + q + b, a + 2.0 * q + b, 2.0 * a + 2.0 * q + b, 2.0 * a + 3.0 * q + b, 2.0 * a + 3.0 * q + 2.0 * b]
+    val top_r = if tl > tr: tl else: tr
+    val bot_r = if bl > br: bl else: br
     var py = 0
     # cpu-lane-loop-ok: rows of one rounded border box; bound is the box height
     while py < h:
@@ -1693,13 +1717,13 @@ pub fn border_rounded_dash_spans(w: i32, h: i32, t: i32, r: i32, dotted: bool, s
             var side = -1
             if px < w:
                 val x = (px as f64) + 0.5
-                val sd = _rounded_dash_param(x, y, wf, hf, rf, rc, c, seg)
+                val sd = _rounded_dash_param(x, y, g, seg)
                 val near = _rounded_nearest_side(x, y, wf, hf)
                 var hit = false
                 if (solid_sides >> near) & 1 == 1:
                     hit = sd[1] <= c
                 elif dotted:
-                    hit = _rounded_dot_hit(x, y, sd[0], pitch, total, wf, hf, rf, rc, c, seg)
+                    hit = _rounded_dot_hit(x, y, sd[0], pitch, total, g, seg)
                 else:
                     val k = ((sd[0] / pitch) as i64) as f64
                     hit = sd[1] <= c and sd[0] - k * pitch < dash
@@ -1714,37 +1738,47 @@ pub fn border_rounded_dash_spans(w: i32, h: i32, t: i32, r: i32, dotted: bool, s
             if side >= 0 and run0 < 0:
                 run0 = px
                 run_side = side
-            if px == t and py >= r and py < h - r and w - t > px:
+            if px == t and py >= top_r and py < h - bot_r and w - t > px:
                 px = w - t
             else:
                 px = px + 1
         py = py + 1
     out
 
+fn _rounded_dist(x: f64, y: f64, cx: f64, cy: f64, rc: f64) -> f64:
+    _abs_f64(sqrt_f64((x - cx) * (x - cx) + (y - cy) * (y - cy)) - rc)
+
 # [s, d] for a point: its arc-length parameter on the closed centre line
-# (see `border_rounded_dash_spans`) and its distance from that line.
-fn _rounded_dash_param(x: f64, y: f64, w: f64, h: f64, r: f64, rc: f64, c: f64, seg: [f64]) -> [f64]:
-    if x < r and y < r:
-        return [seg[6] + rc * (atan2_f64(y - r, x - r) + 3.141592653589793), _abs_f64(sqrt_f64((x - r) * (x - r) + (y - r) * (y - r)) - rc)]
-    if x > w - r and y < r:
-        return [rc * (atan2_f64(y - r, x - (w - r)) + 1.5707963267948966) + seg[0], _abs_f64(sqrt_f64((x - (w - r)) * (x - (w - r)) + (y - r) * (y - r)) - rc)]
-    if x > w - r and y > h - r:
-        return [seg[2] + rc * atan2_f64(y - (h - r), x - (w - r)), _abs_f64(sqrt_f64((x - (w - r)) * (x - (w - r)) + (y - (h - r)) * (y - (h - r))) - rc)]
-    if x < r and y > h - r:
-        return [seg[4] + rc * (atan2_f64(y - (h - r), x - r) - 1.5707963267948966), _abs_f64(sqrt_f64((x - r) * (x - r) + (y - (h - r)) * (y - (h - r))) - rc)]
+# (see `border_rounded_dash_spans`; `g` and `seg` as built there) and its
+# distance from that line.
+fn _rounded_dash_param(x: f64, y: f64, g: [f64], seg: [f64]) -> [f64]:
+    val w = g[0]
+    val h = g[1]
+    val tl = g[3]
+    val tr = g[4]
+    val br = g[5]
+    val bl = g[6]
+    if x < tl and y < tl:
+        return [seg[6] + g[7] * (atan2_f64(y - tl, x - tl) + 3.141592653589793), _rounded_dist(x, y, tl, tl, g[7])]
+    if x > w - tr and y < tr:
+        return [seg[0] + g[8] * (atan2_f64(y - tr, x - (w - tr)) + 1.5707963267948966), _rounded_dist(x, y, w - tr, tr, g[8])]
+    if x > w - br and y > h - br:
+        return [seg[2] + g[9] * atan2_f64(y - (h - br), x - (w - br)), _rounded_dist(x, y, w - br, h - br, g[9])]
+    if x < bl and y > h - bl:
+        return [seg[4] + g[10] * (atan2_f64(y - (h - bl), x - bl) - 1.5707963267948966), _rounded_dist(x, y, bl, h - bl, g[10])]
     # Nearest straight side; ties go bottom, left, right, top.
     var dm = h - y
-    var s = seg[3] + (w - r - x)
+    var s = seg[3] + (w - br - x)
     if x < dm:
         dm = x
-        s = seg[5] + (h - r - y)
+        s = seg[5] + (h - bl - y)
     if w - x < dm:
         dm = w - x
-        s = seg[1] + (y - r)
+        s = seg[1] + (y - tr)
     if y < dm:
         dm = y
-        s = x - r
-    [s, _abs_f64(dm - c)]
+        s = x - tl
+    [s, _abs_f64(dm - g[2])]
 
 # The one dash style ("dashed" / "dotted") of a rounded border whose sides are
 # each that style or solid, at least one not solid; "" otherwise.
@@ -1788,7 +1822,8 @@ fn _abs_f64(v: f64) -> f64:
 
 # Whether (x, y) lies in a dot of diameter 2c centred on the centre line at a
 # multiple of `pitch` (the nearest dots by arc length, wrapping the loop).
-fn _rounded_dot_hit(x: f64, y: f64, s: f64, pitch: f64, total: f64, w: f64, h: f64, r: f64, rc: f64, c: f64, seg: [f64]) -> bool:
+fn _rounded_dot_hit(x: f64, y: f64, s: f64, pitch: f64, total: f64, g: [f64], seg: [f64]) -> bool:
+    val c = g[2]
     val k = (s / pitch) as i64
     var kk = k - 1
     # cpu-lane-loop-ok: tests the four dots nearest one pixel; fixed bound
@@ -1798,33 +1833,40 @@ fn _rounded_dot_hit(x: f64, y: f64, s: f64, pitch: f64, total: f64, w: f64, h: f
             sp = sp + total
         if sp >= total:
             sp = sp - total
-        val p = _rounded_dash_point(sp, w, h, r, rc, c, seg)
+        val p = _rounded_dash_point(sp, g, seg)
         if (x - p[0]) * (x - p[0]) + (y - p[1]) * (y - p[1]) <= c * c:
             return true
         kk = kk + 1
     false
 
 # The centre-line point at arc length `s` (0 <= s < perimeter).
-fn _rounded_dash_point(s: f64, w: f64, h: f64, r: f64, rc: f64, c: f64, seg: [f64]) -> [f64]:
+fn _rounded_dash_point(s: f64, g: [f64], seg: [f64]) -> [f64]:
+    val w = g[0]
+    val h = g[1]
+    val c = g[2]
+    val tl = g[3]
+    val tr = g[4]
+    val br = g[5]
+    val bl = g[6]
     if s < seg[0]:
-        return [r + s, c]
+        return [tl + s, c]
     if s < seg[1]:
-        val f = (s - seg[0]) / rc - 1.5707963267948966
-        return [w - r + rc * cos_f64(f), r + rc * sin_f64(f)]
+        val f = (s - seg[0]) / g[8] - 1.5707963267948966
+        return [w - tr + g[8] * cos_f64(f), tr + g[8] * sin_f64(f)]
     if s < seg[2]:
-        return [w - c, r + (s - seg[1])]
+        return [w - c, tr + (s - seg[1])]
     if s < seg[3]:
-        val f = (s - seg[2]) / rc
-        return [w - r + rc * cos_f64(f), h - r + rc * sin_f64(f)]
+        val f = (s - seg[2]) / g[9]
+        return [w - br + g[9] * cos_f64(f), h - br + g[9] * sin_f64(f)]
     if s < seg[4]:
-        return [w - r - (s - seg[3]), h - c]
+        return [w - br - (s - seg[3]), h - c]
     if s < seg[5]:
-        val f = (s - seg[4]) / rc + 1.5707963267948966
-        return [r + rc * cos_f64(f), h - r + rc * sin_f64(f)]
+        val f = (s - seg[4]) / g[10] + 1.5707963267948966
+        return [bl + g[10] * cos_f64(f), h - bl + g[10] * sin_f64(f)]
     if s < seg[6]:
-        return [c, h - r - (s - seg[5])]
-    val f = (s - seg[6]) / rc + 3.141592653589793
-    [r + rc * cos_f64(f), r + rc * sin_f64(f)]
+        return [c, h - bl - (s - seg[5])]
+    val f = (s - seg[6]) / g[7] + 3.141592653589793
+    [tl + g[7] * cos_f64(f), tl + g[7] * sin_f64(f)]
 
 fn _fb_border_span_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, is_horiz: bool, style: text, color: u32, clip: ClipRect) -> [u32]:
     if w <= 0 or h <= 0 or color == 0u32 or _border_style_disabled(style):
@@ -2047,8 +2089,12 @@ fn fb_border_sides_styled_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w:
         val outer = fb_border_ring_per_corner_clip(fb, fbw, fbh, x, y, w, h, stripe, stripe, stripe, stripe, cl, ct, cr, cb, tl, tr, br_rad, bl_rad, clip)
         return fb_border_ring_per_corner_clip(outer, fbw, fbh, x + ins, y + ins, w - 2 * ins, h - 2 * ins, stripe, stripe, stripe, stripe, cl, ct, cr, cb, _ring_inset_radius(tl, ins), _ring_inset_radius(tr, ins), _ring_inset_radius(br_rad, ins), _ring_inset_radius(bl_rad, ins), clip)
     val dash_style = _rounded_dash_style(st_top, sr, sb, sl)
-    if dash_style != "" and bl == bt and bt == br and br == bb and tl > 0 and tl == tr and tr == br_rad and br_rad == bl_rad:
-        val spans = border_rounded_dash_spans(w, h, bt, tl, dash_style == "dotted", _rounded_solid_sides(st_top, sr, sb, sl))
+    val dash_solid = _rounded_solid_sides(st_top, sr, sb, sl)
+    # Differing corner radii: one colour, no solid side (the nearest-side
+    # split is pinned for one radius only).
+    val dash_radii_ok = (tl == tr and tr == br_rad and br_rad == bl_rad) or (dash_solid == 0 and cl == ct and ct == cr and cr == cb)
+    if dash_style != "" and bl == bt and bt == br and br == bb and tl > 0 and dash_radii_ok:
+        val spans = border_rounded_dash_spans(w, h, bt, [tl, tr, br_rad, bl_rad], dash_style == "dotted", dash_solid)
         if spans.len() > 0:
             val side_colors = [ct, cr, cb, cl]
             var dashed_out = fb
