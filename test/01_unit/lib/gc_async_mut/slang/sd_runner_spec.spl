@@ -19,7 +19,13 @@ use std.gc_async_mut.slang.model_executor.runners.sd_runner.{sd_parse_size, sd_r
 use std.gc_async_mut.slang.modality.kinds.{KindParams, KindRequest}
 use std.gc_async_mut.slang.entrypoints.openai.api_server.{slang_api_dispatch}
 use std.gc_async_mut.slang.entrypoints.openai.protocol.{json_string_field, ChatPart}
-use std.io_runtime.{dir_create_all, file_write_bytes, write_file, env_get, env_set}
+use std.io_runtime.{dir_create_all, file_write_bytes, write_file, env_get_nullable, env_set_process, env_remove_process}
+use std.gc_async_mut.slang.entrypoints.openai.serving.serving_images.{images_params_from_body, images_ok_response}
+use std.gc_async_mut.slang.model_executor.runners.sd_runner.{sd_runner_try_acquire, sd_runner_release}
+use std.gc_async_mut.slang.modality.kinds.{OutputPart, Modality}
+use std.common.json.parser.{json_parse_with_error}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.array_ops.{json_array_get, json_array_length}
 
 fn _le8(n: i64) -> [u8]:
     var o: [u8] = []
@@ -78,11 +84,14 @@ describe "POST /v1/images/generations":
         val root = _sd_root("validate")
         val no_prompt = slang_api_dispatch("POST", "/v1/images/generations", "{\"model\":\"sd\"}", root)
         expect(no_prompt.status).to_equal(400)
+        expect(json_string_field(no_prompt.body, "code")).to_equal("invalid_request")
         val bad_size = slang_api_dispatch("POST", "/v1/images/generations", "{\"model\":\"sd\",\"prompt\":\"a cat\",\"size\":\"1024x1024\"}", root)
         expect(bad_size.status).to_equal(400)
         expect(bad_size.body.contains("768")).to_equal(true)
+        expect(json_string_field(bad_size.body, "code")).to_equal("invalid_request")
         val url_format = slang_api_dispatch("POST", "/v1/images/generations", "{\"model\":\"sd\",\"prompt\":\"a cat\",\"response_format\":\"url\"}", root)
         expect(url_format.status).to_equal(400)
+        expect(json_string_field(url_format.body, "code")).to_equal("invalid_request")
 
     it "answers 400 wrong_model_kind for a chat model":
         step("Verify: a GGUF chat model is refused by kind")
@@ -93,13 +102,72 @@ describe "POST /v1/images/generations":
         expect(r.status).to_equal(400)
         expect(json_string_field(r.body, "code")).to_equal("wrong_model_kind")
 
-    it "answers 503 runner_unavailable when SLANG_SD_LIB is not usable":
-        step("Verify: an unset or missing library is an explicit 503, not a stub image")
-        val saved = env_get("SLANG_SD_LIB") ?? ""
-        env_set("SLANG_SD_LIB", "")
-        val root = _sd_root("unavailable")
-        val r = slang_api_dispatch("POST", "/v1/images/generations", "{\"model\":\"sd\",\"prompt\":\"a cat\"}", root)
-        env_set("SLANG_SD_LIB", saved)
-        expect(r.status).to_equal(503)
-        expect(json_string_field(r.body, "code")).to_equal("runner_unavailable")
-        expect(r.body.contains("SLANG_SD_LIB")).to_equal(true)
+    it "rejects n and steps outside range with 400 before the runner is touched":
+        step("Verify: with SLANG_SD_LIB unset a valid request is 503 runner_unavailable, an out-of-range one is 400")
+        val saved = env_get_nullable("SLANG_SD_LIB")
+        env_remove_process("SLANG_SD_LIB")
+        val root = _sd_root("range")
+        val ok = slang_api_dispatch("POST", "/v1/images/generations", "{\"model\":\"sd\",\"prompt\":\"a cat\"}", root)
+        expect(ok.status).to_equal(503)
+        expect(json_string_field(ok.body, "code")).to_equal("runner_unavailable")
+        expect(ok.body.contains("SLANG_SD_LIB")).to_equal(true)
+        for extra in ["\"n\":5", "\"n\":0", "\"n\":1.5", "\"steps\":51", "\"steps\":0", "\"steps\":\"x\""]:
+            val r = slang_api_dispatch("POST", "/v1/images/generations", "{\"model\":\"sd\",\"prompt\":\"a cat\"," + extra + "}", root)
+            expect(r.status).to_equal(400)
+            expect(json_string_field(r.body, "code")).to_equal("invalid_request")
+        match saved:
+            case Some(v): env_set_process("SLANG_SD_LIB", v)
+            case None: ()
+
+    it "answers 503 busy while another generation owns the runner and never loads":
+        step("Verify: a held runner gate gives busy; after release the same request reaches the runner")
+        val saved = env_get_nullable("SLANG_SD_LIB")
+        env_remove_process("SLANG_SD_LIB")
+        val root = _sd_root("busy")
+        val body = "{\"model\":\"sd\",\"prompt\":\"a cat\"}"
+        expect(sd_runner_try_acquire()).to_equal(true)
+        expect(sd_runner_try_acquire()).to_equal(false)
+        val busy = slang_api_dispatch("POST", "/v1/images/generations", body, root)
+        expect(busy.status).to_equal(503)
+        expect(json_string_field(busy.body, "code")).to_equal("busy")
+        sd_runner_release()
+        val after = slang_api_dispatch("POST", "/v1/images/generations", body, root)
+        expect(json_string_field(after.body, "code")).to_equal("runner_unavailable")
+        expect(sd_runner_try_acquire()).to_equal(true)
+        sd_runner_release()
+        match saved:
+            case Some(v): env_set_process("SLANG_SD_LIB", v)
+            case None: ()
+
+describe "images request parameters and 200 body":
+    it "reads n from the real top-level key, not from a prompt that says n":
+        step("Verify: {prompt:n, n:2} gives n=2; defaults; negative seed is random")
+        val obj = json_parse_with_error("{\"prompt\":\"n\",\"n\":2,\"seed\":-1}").0
+        val p = images_params_from_body(obj, 1763000000123456).unwrap()
+        expect(p.n).to_equal(2)
+        expect(p.steps).to_equal(4)
+        expect(p.size).to_equal("")
+        expect(p.seed >= 0).to_equal(true)
+        val fixed = images_params_from_body(json_parse_with_error("{\"seed\":7}").0, 5).unwrap()
+        expect(fixed.seed).to_equal(7)
+        expect(fixed.n).to_equal(1)
+
+    it "refuses n and steps out of range":
+        step("Verify: n 0/5 and steps 0/51 are errors, 4 and 50 are accepted")
+        for bad in ["{\"n\":0}", "{\"n\":5}", "{\"steps\":0}", "{\"steps\":51}", "{\"n\":-1}"]:
+            expect(images_params_from_body(json_parse_with_error(bad).0, 1).is_err()).to_equal(true)
+        expect(images_params_from_body(json_parse_with_error("{\"n\":4,\"steps\":50}").0, 1).is_ok()).to_equal(true)
+
+    it "builds a 200 body that is strict JSON":
+        step("Verify: the whole body parses, created is a number, data holds the base64 PNG")
+        val parts = [OutputPart(modality: Modality.Image, text: "", bytes: [1, 2, 3], mime: "image/png"), OutputPart(modality: Modality.Image, text: "", bytes: [4], mime: "image/png")]
+        val r = images_ok_response(parts, 1763000000)
+        expect(r.status).to_equal(200)
+        val parsed = json_parse_with_error(r.body)
+        expect(parsed.1).to_equal("")
+        val created = json_object_get(parsed.0, "created")
+        expect(created.0).to_equal("number")
+        expect(created.1.to_i64()).to_equal(1763000000)
+        val data = json_object_get(parsed.0, "data")
+        expect(json_array_length(data)).to_equal(2)
+        expect(json_object_get(json_array_get(data, 0), "b64_json").1).to_equal("AQID")
