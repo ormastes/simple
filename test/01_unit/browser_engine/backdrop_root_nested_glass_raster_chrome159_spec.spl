@@ -1,0 +1,59 @@
+"""
+## Purpose and audience
+Purpose: Pin Filter Effects 2 Backdrop Root behaviour for nested glass
+against Chrome 159 on the raster lane. An element with `backdrop-filter` is
+a backdrop root: a descendant's backdrop is only what was painted inside
+that root's group, drawn src-over the group so alpha compounds.
+Audience: maintainers of the raster paint path.
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(nested glass ignores the Backdrop Root). Chrome pixels: headless Chromium
+1255 at 400x300, same page as backdrop_root_nested_glass_chrome159_spec.spl.
+White inner panel (250,250,251), tinted `rgba(80,160,255,0.72)` inner panel
+(124,181,251); with the outer filter removed (239,239,241) and
+(113,170,241). The outer panel is (197,197,203).
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+
+val BDR_WHITE = "rgba(255,255,255,0.72)"
+val BDR_TINT = "rgba(80,160,255,0.72)"
+val BDR_ROOT = "backdrop-filter:blur(8px)"
+
+fn bdr_html(outer_extra: text, inner_bg: text) -> text:
+    "<!DOCTYPE html><html><body style='margin:0;background:#2d2f45'><div style='position:absolute;left:20px;top:20px;width:300px;height:220px;background:rgba(255,255,255,0.72);" + outer_extra + "'><div style='position:absolute;left:40px;top:40px;width:200px;height:120px;background:" + inner_bg + ";backdrop-filter:blur(8px)'></div></div></body></html>"
+
+# Channel mismatches (beyond +-2) against `want`: x, y, r, g, b per point.
+fn bdr_mismatches(px: [u32], want: [i32]) -> i32:
+    if px.len() < 400 * 300:
+        return -1
+    var bad = 0
+    var i = 0
+    while i < want.len():
+        val p = px[want[i + 1] * 400 + want[i]]
+        var c = 0
+        while c < 3:
+            val d = ((p >> ((16 - c * 8) as u32)) & 0xFFu32) as i32 - want[i + 2 + c]
+            if d > 2 or d < -2:
+                bad = bad + 1
+            c = c + 1
+        i = i + 5
+    bad
+
+fn bdr_raster(outer_extra: text, inner_bg: text) -> [u32]:
+    simple_web_layout_render_html_software_pixels(bdr_html(outer_extra, inner_bg), 400, 300, 600000)
+
+describe "backdrop root isolates nested glass on the raster lane (Chrome 159)":
+    it "white nested glass reads only the outer group":
+        expect(bdr_mismatches(bdr_raster(BDR_ROOT, BDR_WHITE), [40, 200, 197, 197, 203, 160, 120, 250, 250, 251, 70, 70, 250, 250, 251])).to_equal(0)
+
+    it "a tinted inner panel keeps the outer group's alpha":
+        expect(bdr_mismatches(bdr_raster(BDR_ROOT, BDR_TINT), [40, 200, 197, 197, 203, 160, 120, 124, 181, 251, 250, 170, 124, 181, 251])).to_equal(0)
+
+    it "without an outer backdrop root the page shows through":
+        expect(bdr_mismatches(bdr_raster("", BDR_WHITE), [40, 200, 196, 197, 203, 160, 120, 239, 239, 241])).to_equal(0)
+        expect(bdr_mismatches(bdr_raster("", BDR_TINT), [160, 120, 113, 170, 241])).to_equal(0)

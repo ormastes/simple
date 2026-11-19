@@ -156,7 +156,57 @@ fn _paint_backdrop_blur(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
     if (sigma <= 0 and mats.len() == 0) or k[2] <= 0 or k[3] <= 0:
         return fb
     val under = _copy_region(fb, fbw, k)
-    _restore_inside_box(fb, fbw, k, engine2d_backdrop_color_filter_pixels(engine2d_backdrop_blur_pixels(under, k[2], k[3], sigma), under, mats), x, y, w, h, st)
+    if _raster_bdr_mode == 0:
+        return _restore_inside_box(fb, fbw, k, engine2d_backdrop_color_filter_pixels(engine2d_backdrop_blur_pixels(under, k[2], k[3], sigma), under, mats), x, y, w, h, st)
+    # Inside a backdrop root's layer (admission keeps these blur-only: a
+    # colour matrix on premultiplied layer pixels is not Chrome's) the
+    # filtered backdrop draws src-over the layer with its own alpha.
+    val filtered = engine2d_backdrop_blur_pixels(under, k[2], k[3], sigma)
+    var alphas: [u32] = filtered
+    if _raster_bdr_mode == 1:
+        _raster_bdr_alphas.push(filtered)
+    else:
+        alphas = _raster_bdr_alphas[_raster_bdr_next]
+        _raster_bdr_next = _raster_bdr_next + 1
+    var over: [u32] = [0u32; under.len()]
+    var p: i64 = 0
+    while p < under.len():  # cpu-lane-loop-ok: src-over of one filtered backdrop region onto the layer; bound is that box's clipped pixel count
+        over[p] = _raster_bdr_src_over(filtered[p], 255 - (((alphas[p] >> 8) & 255u32) as i32), under[p])
+        p = p + 1
+    _restore_inside_box(fb, fbw, k, over, x, y, w, h, st)
+
+# Premultiplied src-over on opaque-encoded layer pixels: src + dst * keep / 255.
+fn _raster_bdr_src_over(src: u32, keep: i32, dst: u32) -> u32:
+    var out = 0xFF000000u32
+    var sh = 0
+    while sh < 24:  # cpu-lane-loop-ok: the three colour channels
+        val s = ((src >> (sh as u32)) & 255u32) as i32
+        val d = ((dst >> (sh as u32)) & 255u32) as i32
+        val v = s + (keep * d + 127) / 255
+        out = out | (((if v > 255: 255 else: v) as u32) << (sh as u32))
+        sh = sh + 8
+    out
+
+fn _raster_has_backdrop(st: Style) -> bool:
+    st.backdrop_filter_raw != "" and st.backdrop_filter_raw != "none"
+
+# Filter Effects 2 Backdrop Root that changes paint: an opacity-100 element
+# with a backdrop filter and a backdrop-filtered descendant.
+fn _raster_backdrop_root(nodes: [HNode], styles: [Style], g: i32) -> bool:
+    if styles[g].opacity_pct != 100 or not _raster_has_backdrop(styles[g]):
+        return false
+    val n = nodes.len() as i32
+    var inside: [bool] = [false; n]
+    inside[g] = true
+    var j = g + 1
+    while j < n:  # cpu-lane-loop-ok: subtree scan by parent pointer (pre-order, parent index < child index); runs only for a backdrop-filtered node; bound is node_count
+        val parent = nodes[j].parent as i32
+        if parent >= g and inside[parent]:
+            inside[j] = true
+            if _raster_has_backdrop(styles[j]) and styles[j].display != "none":
+                return true
+        j = j + 1
+    false
 
 # The box rect clipped to `clip` and the frame, as [x0, y0, w, h].
 fn _box_clip_region(fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, clip: ClipRect) -> [i32]:
@@ -1130,6 +1180,7 @@ struct _RasterOpacityGroup:
     h: i32
     two_pass: bool
     white_alpha: bool
+    backdrop_root: bool
 
 # `nested` scans inside a parent group's layer (the parent root is at opacity
 # 100 and everything outside it is hidden): one painted item is already a
@@ -1144,8 +1195,9 @@ fn _raster_opacity_groups(nodes: [HNode], styles: [Style], bx: [i32], by: [i32],
     while g < n:  # cpu-lane-loop-ok: one scan for fractional-opacity roots; the per-root member/overlap passes run only for a root that is found, bound is node_count per root
         val gst = styles[g]
         val tag = nodes[g].tag
+        val bdr_root = not nested and _raster_has_backdrop(gst) and _raster_backdrop_root(nodes, styles, g)
         if (
-            gst.opacity_pct > 0 and gst.opacity_pct < 100 and not claimed[g] and
+            ((gst.opacity_pct > 0 and gst.opacity_pct < 100) or bdr_root) and not claimed[g] and
             tag != "html" and tag != "body" and tag != "#root" and
             _raster_group_visible(nodes, styles, g)
         ):
@@ -1178,6 +1230,10 @@ fn _raster_opacity_groups(nodes: [HNode], styles: [Style], bx: [i32], by: [i32],
                     if j != g and st.z_index != 0:
                         has_z = true
                     if nodes[j].tag == "iframe":
+                        reject = true
+                    # A backdrop root's layer replays blur-only backdrops
+                    # once each; a colour matrix or a nested root is not exact.
+                    if bdr_root and j != g and _raster_has_backdrop(st) and (engine2d_backdrop_color_matrices(st.backdrop_filter_raw).len() > 0 or _raster_backdrop_root(nodes, styles, j)):
                         reject = true
                     val ops = if _raster_group_visible(nodes, styles, j): _raster_group_node_ops(nodes[j], st) else: 0
                     if ops > 0:
@@ -1236,7 +1292,9 @@ fn _raster_opacity_groups(nodes: [HNode], styles: [Style], bx: [i32], by: [i32],
             # root and z-index reorders paint across the tree-order interleave.
             if has_nested and (has_text or has_z or two_pass):
                 reject = true
-            if overlap and unwhitenable:
+            if (overlap or bdr_root) and unwhitenable:
+                reject = true
+            if bdr_root and has_nested:
                 reject = true
             val min_painted = if nested: 1 else: 2
             var admitted = painted >= min_painted and not reject and x1 > x0 and y1 > y0
@@ -1261,7 +1319,7 @@ fn _raster_opacity_groups(nodes: [HNode], styles: [Style], bx: [i32], by: [i32],
                             admitted = false
                     a = a + 1
             if admitted:
-                groups.push(_RasterOpacityGroup(root: g, members: members, x: x0, y: y0, w: x1 - x0, h: y1 - y0, two_pass: two_pass, white_alpha: overlap))
+                groups.push(_RasterOpacityGroup(root: g, members: members, x: x0, y: y0, w: x1 - x0, h: y1 - y0, two_pass: two_pass or bdr_root, white_alpha: overlap or bdr_root, backdrop_root: bdr_root))
         g = g + 1
     groups
 
@@ -1321,6 +1379,28 @@ fn _raster_restore_group(nodes: [HNode], styles: [Style], grp: _RasterOpacityGro
     val alpha8 = css_opacity_group_alpha8(styles[grp.root].opacity_pct)
     val lbx = _raster_shifted(bx, grp.x)
     val lby = _raster_shifted(by, grp.y)
+    if grp.backdrop_root:
+        # The root's own backdrop reads the frame under its group. Inside the
+        # layer it is a no-op (nothing is painted under the root yet); the
+        # alpha pass records each nested filtered alpha, the colour pass
+        # replays them for the src-over.
+        val root = grp.root
+        val clip = paint_clip_at(build_ancestor_clip_cache(nodes, styles, bx, by, bw, bh, fbw, fbh), root)
+        val dst = _paint_backdrop_blur(fb, fbw, fbh, bx[root], by[root], bw[root], bh[root], styles[root], clip)
+        _raster_bdr_mode = 1
+        _raster_bdr_alphas = []
+        _raster_bdr_next = 0
+        val alpha = _raster_white_alpha_pass(nodes, styles, outside, grp, lbx, lby, bw, bh, wrap_cache, widget_mode)
+        _raster_bdr_mode = 2
+        val colour = _raster_paint_hiding(nodes, styles, outside, root, lbx, lby, bw, bh, wrap_cache, [0xFF000000u32; grp.w * grp.h], grp.w, grp.h, widget_mode, true)
+        _raster_bdr_mode = 0
+        _raster_bdr_alphas = []
+        var layer: [u32] = [0u32; colour.len()]
+        var p: i64 = 0
+        while p < colour.len():  # cpu-lane-loop-ok: per-pixel layer from the colour and alpha passes; bound is the group layer size
+            layer[p] = _raster_group_layer_pixel(colour[p], (((alpha[p] >> 8) & 255u32) as i32))
+            p = p + 1
+        return css_opacity_group_composite_into(dst, fbw, fbh, layer, grp.w, grp.h, grp.x, grp.y, alpha8)
     # Two-pass layers start OPAQUE black: some raster paths (gradient layers
     # via Engine2D blend) honour a transparent destination and would leave
     # straight, not premultiplied, colour in B.
@@ -1559,6 +1639,14 @@ pub fn html_image_fit_size(
 # contract as `_web_render_deadline_us`); thread `images` through `paint` /
 # `_paint_passes` if raster renders ever run concurrently.
 var _raster_images: [SimpleOsHostGpuImageResource] = []
+
+# Backdrop-root layer paint (Filter Effects 2): mode 1 is the white-alpha
+# pass, which records each nested filtered backdrop's alpha in paint order;
+# mode 2 is the colour pass, which replays them; mode 0 is the ordinary
+# replace on an opaque frame (`_paint_backdrop_blur`).
+var _raster_bdr_mode = 0
+var _raster_bdr_alphas: [[u32]] = []
+var _raster_bdr_next = 0
 
 # reason: renderer entry hands the decoded resource list to the raster painter
 # @allow(primitive_api)
