@@ -30,10 +30,8 @@
 
 use std.gc_async_mut.slang.modality.kinds.{Modality, ModelKind, KindProfile, kind_profile, kind_default_inputs, model_kind_from_text}
 use std.gc_async_mut.slang.engine.runner_dispatch.{RunnerKind}
-use std.nogc_sync_mut.io.external_file.{external_file_read_bytes_at}
 use std.common.text_bytes.{bytes_to_text}
-use std.io_runtime.{is_dir, file_size}
-use std.gc_async_mut.slang.host.slang_host.{host_file_exists, host_file_read, host_dir_list}
+use std.gc_async_mut.slang.host.slang_host.{host_file_exists, host_file_read, host_dir_list, host_is_dir, host_file_size, host_read_bytes_at}
 
 val KIND_OVERRIDE_FILE = "slang_kind.sdn"
 val GGUF_FIRST_READ = 4096
@@ -310,7 +308,7 @@ fn _gguf_read_walk(path: text, size: i64, full: bool) -> Result<GgufFacts, text>
     var want = GGUF_FIRST_READ
     while true:
         val n = if want > size: size else: want
-        match external_file_read_bytes_at(path, 0, n):
+        match host_read_bytes_at(path, 0, n):
             Err(_):
                 return Err("cannot read " + path)
             Ok(bytes):
@@ -338,7 +336,7 @@ fn _is_embedding(k: ModelKind) -> bool:
 # classification head (`cls.output.weight`) lives in the tensor-info table,
 # after the tokenizer block, and is what tells a reranker from an embedder.
 fn gguf_facts(path: text) -> Result<GgufFacts, text>:
-    val size = file_size(path)
+    val size = host_file_size(path)
     match _gguf_read_walk(path, size, false):
         Err(why):
             Err(why)
@@ -414,7 +412,7 @@ fn _files(dir: text) -> [text]:
     match host_dir_list(dir):
         case Some(names):
             for name in names:
-                if not is_dir(_join(dir, name)):
+                if not host_is_dir(_join(dir, name)):
                     out.push(name)
         case None:
             pass
@@ -422,7 +420,7 @@ fn _files(dir: text) -> [text]:
 
 # First 4 bytes of `path` as text ("" when unreadable).
 fn _magic(path: text) -> text:
-    match external_file_read_bytes_at(path, 0, 4):
+    match host_read_bytes_at(path, 0, 4):
         Ok(b):
             if b.len() == 4:
                 return bytes_to_text(b)
@@ -433,7 +431,7 @@ fn _magic(path: text) -> text:
 # True when a safetensors file's JSON header names an SD UNet tensor
 # (`model.diffusion_model.` prefix). Only the header is read.
 fn safetensors_is_sd_unet(path: text) -> bool:
-    match external_file_read_bytes_at(path, 0, 8):
+    match host_read_bytes_at(path, 0, 8):
         Err(_):
             return false
         Ok(head):
@@ -442,7 +440,7 @@ fn safetensors_is_sd_unet(path: text) -> bool:
             val header_len = _u64_at(head, 0)
             if header_len <= 0 or header_len > GGUF_MAX_READ:
                 return false
-            match external_file_read_bytes_at(path, 8, header_len):
+            match host_read_bytes_at(path, 8, header_len):
                 Ok(json):
                     bytes_to_text(json).contains("\"model.diffusion_model.")
                 Err(_):
