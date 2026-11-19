@@ -889,3 +889,10 @@ head (13/40 at base).
 - **Evidence:** new `rounded_typed_gradient_chrome159_spec` checks interior and corner points against Chrome ±2 for an opaque and a translucent base colour, a first stop at `10px`, and `border:4px solid transparent; padding:3px` (repeat under the border). Raster runs the first three; cpu_simd and Vulkan run all four. Before: raster green, cpu_simd and Vulkan red. After: 3/3.
 - **Related, not changed:** the base-failing `decl_apply_coverage_closure` example ("records from/to and the stop model") is about the same typed routing.
 - **Open (raster):** with `border:4px solid transparent; padding:3px`, the raster leaves the border area at the box colour (`0058BC` at (45,9) and (45,59)). Chrome repeats the gradient there (`4D4187` and `4D87CD`), and Draw IR now does too.
+
+## 2026-11-19 — Vulkan box shadow wipes the destination alpha (FIXED)
+
+- **Symptom:** the CPU fix above left Vulkan behind: the same translucent box over its shadow still read `FFFFFF` there. Chrome 159 gives `C3C3C7`.
+- **Cause:** the device kernel `shaders/shadow_rect.comp` is the integer twin of `emu_draw_shadow_rect` and deliberately mirrored its alpha-0 packing.
+- **Fix:** the kernel keeps `dstv & 0xFF000000u`, the same as the twin. `backend_vulkan_shadow_rect_spirv.spl` was regenerated with `scripts/tool/gen-shadow-rect-spirv.shs`, and `check-shadow-rect-spirv-pinned.shs` passes. Regenerating from the unchanged shader reproduces the committed blob byte for byte, so the large word diff is only offsets shifting.
+- **Evidence:** `box_shadow_keeps_dest_alpha_spec` gains a Vulkan example: red -> green. Sweep of 18 shadow/SPIR-V specs, base vs head: 0 new failures.
