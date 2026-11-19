@@ -17,6 +17,10 @@
 # profile() folds it with trace_profile_fold_v1. No per-OS branch exists below
 # the backend constructors.
 #
+# Shared intake (DHR P5): ingest() appends externally drained events (e.g.
+# BmSpyDrainV1 off the bare-metal Spy ring) to that SAME list, so log_lines,
+# profile and lost() cover them exactly as they cover collect()'s events.
+#
 # Concurrency: XraySpyV1 is the adapter's serialized control-plane owner
 # (quiescent mode, as XrayLlvmAdapterV1); no lock. The hot path stays the
 # lockless channel CAS of observer_native_channel_v1.
@@ -89,6 +93,16 @@ pub class XraySpyV1:
 fn _xray_align8_v1(raw: i64) -> i64:
     raw + ((8 - (raw % 8)) % 8)
 
+# Raw-edge spy intake accepts edges with a site and disclosed Loss control
+# events (no site, non-zero lost count); every other kind is refused.
+fn _xray_ingest_shape_ok_v1(event: TraceEventV1) -> bool:
+    if event.kind == TraceEventKindV1.Loss:
+        return event.function_id == 0u32 and event.site_id == 0u32 and event.payload0 > 0u64
+    if event.kind == TraceEventKindV1.Entry or event.kind == TraceEventKindV1.Exit or
+            event.kind == TraceEventKindV1.TailExit:
+        return event.function_id != 0u32
+    false
+
 impl XraySpyV1:
     static fn create(backend: XrayBackendV1, module_instance: u64, capacity: i64) -> XraySpyV1:
         # The adapter takes the leaf's sled kind (Llvm: compiler-rt / Windows
@@ -135,6 +149,52 @@ impl XraySpyV1:
                         self.events.push(event)
                         n = n + 1
                     case Err(_): ()
+        n
+
+    # External intake into the store collect() feeds. All-or-nothing: the
+    # whole batch is validated before anything is stored, and any failure
+    # returns InvalidArgument with the store unchanged. Per context_id the
+    # sequence must be strictly increasing, both within the batch and after
+    # every event of that context already stored. Count added.
+    me ingest(events: [TraceEventV1]) -> Result<i64, TraceFailureV1>:
+        var contexts: [u64] = []
+        var last: [u64] = []
+        for event in self.events:
+            var found = false
+            for index in 0..contexts.len():
+                if contexts[index] == event.context_id:
+                    if event.sequence > last[index]: last[index] = event.sequence
+                    found = true
+            if not found:
+                contexts.push(event.context_id)
+                last.push(event.sequence)
+        for event in events:
+            if not _xray_ingest_shape_ok_v1(event): return Err(TraceFailureV1.InvalidArgument)
+            var found = false
+            for index in 0..contexts.len():
+                if contexts[index] == event.context_id:
+                    if event.sequence <= last[index]: return Err(TraceFailureV1.InvalidArgument)
+                    last[index] = event.sequence
+                    found = true
+            if not found:
+                contexts.push(event.context_id)
+                last.push(event.sequence)
+        for event in events:
+            self.events.push(event)
+        Ok(events.len())
+
+    # Lost events of this generation: the Loss control events in the store
+    # (collected or ingested, count in payload0) plus the resident channel's
+    # producer-side counter. A lower bound when the channel reports
+    # trace_native_channel_loss_inexact_v1.
+    @allow(primitive_api)  # a lost-event count, same unit as trace_native_channel_lost_v1
+    fn lost() -> u64:
+        var n: u64 = 0
+        for event in self.events:
+            if event.kind == TraceEventKindV1.Loss: n = n + event.payload0
+        if self.arena != 0:
+            val channel = unsafe(capabilities: [ffi]): trace_native_channel_lost_v1(self.arena)
+            n = n + channel
         n
 
     # Collect what is pending, then quiescent stop through the adapter.
