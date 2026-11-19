@@ -864,3 +864,11 @@ head (13/40 at base).
   - The window fixture improved from 38.1% to 47.0% agreement with Chrome. Rounded panels and buttons and the accent blue now match.
   - Base-vs-head sweep of 33 theme-sheet and `var(--` specs: no new failures. The 18 failing specs fail identically on base.
 - **Still open on that fixture:** the outer glass panel paints opaque white where Chrome shows the translucent gradient over the blurred backdrop. The button sheen gradient is also flat. A prior probe showing "gradient over `var()` colour dropped" was a probe bug: an unescaped `{--a:...}` in a Simple string literal. That case matches Chrome exactly.
+
+
+## 2026-11-19 — cpu_simd box shadow cut by the frame reads the next row (FIXED)
+
+- **Symptom:** on cpu_simd, a 60x40 box at (12,12) with `box-shadow: 0 28px 76px` in a 100x70 frame failed with `array index out of bounds: index is 7000 but length is 7000`. In frames where the shadow ended above the last row, the same rows were silently mis-painted with their neighbours' pixels. Vulkan was unaffected.
+- **Cause:** `emu_draw_shadow_rect` (`engine2d/backend_emu_adv.spl`) splits each shadow row into falloff bands and a constant interior. When the blur is wide for its box, no column is fully covered (`ia >= ib`), so the interior starts at the unclamped `nz1`. When the frame also cuts the region on the right, the clamps ran in an order that raised `i1` to that unclamped `i0` and only then lowered `i0` to `rw`. The result was an interior run `[rw, i1)` past the row end.
+- **Fix:** the clamps now run in order, so 0 <= nz0 <= i0 <= i1 <= nz1 <= rw.
+- **Evidence:** new `box_shadow_frame_clip_spec`: the 100x70 frame must equal the top-left of the same page at 200x200. Before: crash. After: 0 mismatches.
