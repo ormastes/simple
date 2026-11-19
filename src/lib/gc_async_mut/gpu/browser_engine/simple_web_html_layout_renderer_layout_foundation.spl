@@ -896,6 +896,54 @@ fn form_control_button_frac_delta_milli_px(nodes: [HNode], styles: [Style], chil
         t = child_index.next_sibling[t]
     delta
 
+# A max-content text width as Chrome 159 stores it: the exact advance sum
+# rounded UP to a LayoutUnit (1/64 px, `LayoutUnit::FromFloatCeil`), back in
+# milli-px (rounded up). `HTML` at 16px DejaVu Sans is 43.5547 px exact and
+# 43.5625 (2788/64) in Chrome; six such items in a row sum to 357.5, not 357.498.
+fn layout_unit_ceil_milli(milli: i64) -> i64:
+    val w64 = (milli * 64 + 999) / 1000
+    (w64 * 1000 + 63) / 64
+
+# reason: node indices and whole-px / milli-px widths are layout-array scalars.
+# @allow(primitive_api)
+pub fn flex_item_text_frac_delta_milli_px(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, item: i32, st: Style, intrinsic_w: i32) -> i32:
+    """How far the exact (milli-px) max-content width of an auto-width flex
+    item sits from the whole-px `intrinsic_w` the row sized it with, when the
+    item's content is one text run: Chrome 159 keeps `HTML` at 43.5625 px in
+    a row of text items, so the next item starts at 43.5625 and `CSS Paint`
+    (73.8125) ends at 117, not 118. 0 for any other content."""
+    var run = -1
+    var c = child_index.first_child[item]
+    while c >= 0:  # cpu-lane-loop-ok: one pass over one flex item's direct children; bound is that child list
+        if nodes[c].tag != "#text":
+            return 0
+        if nodes[c].text_trimmed.len() > 0:
+            if run >= 0:
+                return 0
+            run = c
+        c = child_index.next_sibling[c]
+    if run < 0:
+        return 0
+    val rst = styles[run]
+    if rst.resolved_font_width_milli < 0 or intrinsic_w != rst.resolved_font_width + st.pad_l + st.pad_r + st.border_l + st.border_r:
+        return 0
+    val frac = layout_unit_ceil_milli(rst.resolved_font_width_milli) - (rst.resolved_font_width as i64) * 1000
+    if frac > 500 or frac < -500: 0 else: frac as i32
+
+# reason: node index, run text and whole-px / milli-px widths are layout scalars.
+# @allow(primitive_api)
+pub fn text_run_exact_width_milli_px(nodes: [HNode], run: i32, st: Style, txt: text, whole_px: i32) -> i32:
+    """Exact width of the text run `run` in milli-px, as the flex row that
+    sized its parent measured it: a `<button>` label at the control's real
+    font, any other run from its resolved milli width; `whole_px` x 1000 when
+    the style carries no exact width."""
+    val parent = nodes[run].parent
+    if parent >= 0 and nodes[parent].tag == "button":
+        return form_control_label_width_milli_px(st, txt)
+    if st.resolved_font_width_milli >= 0 and whole_px == st.resolved_font_width:
+        return layout_unit_ceil_milli(st.resolved_font_width_milli) as i32
+    whole_px * 1000
+
 # Inline-start inset of a <select>'s label inside its content box: the 20 px
 # interior is 4 px of start padding and a 16 px arrow column. Chrome 159 paints
 # `Alpha` 13 px in from the border edge of a `padding:8px;border:1px` select.
@@ -1604,6 +1652,46 @@ pub fn box_device_extra_w_record(node_count: i32, i: i32, extra_device_px: i32):
 # @allow(primitive_api)
 pub fn box_device_extra_w_at(i: i32) -> i32:
     if i < 0 or i >= g_box_device_extra_w.len(): 0 else: g_box_device_extra_w[i]
+
+# True (Chrome LayoutUnit) border-box width of a box minus its whole-px width,
+# in milli-px. A flex row snaps an item's EDGES (`CSS Paint`: 73.8125 px at
+# 43.5625 is the box 44..117, 73 px), but the item's content is laid out in
+# the true width: the 73.8 px label fits and stays on one line. Handed to the
+# item's own layout through `g_item_frac_w_pending` (set by the flex row right
+# before it lays the item out, consumed on entry) and kept per node for the
+# item's text children.
+pub val BOX_FRAC_W_UNSET: i32 = -2147483648
+var g_item_frac_w_pending: i32 = -2147483648
+var g_box_frac_w_milli: [i32] = []
+
+pub fn box_frac_w_reset():
+    g_item_frac_w_pending = BOX_FRAC_W_UNSET
+    g_box_frac_w_milli = []
+
+# reason: a milli-px width remainder is a layout-array scalar.
+# @allow(primitive_api)
+pub fn item_frac_w_hand_over(frac_milli: i32):
+    g_item_frac_w_pending = frac_milli
+
+# Consumes the pending remainder for node `i`: every layout of a node
+# overwrites its entry, so a stale remainder never outlives the pass that set it.
+# reason: node index and node count are layout-array scalars.
+# @allow(primitive_api)
+pub fn box_frac_w_take(node_count: i32, i: i32):
+    val frac = g_item_frac_w_pending
+    g_item_frac_w_pending = BOX_FRAC_W_UNSET
+    if i < 0 or i >= node_count:
+        return
+    if g_box_frac_w_milli.len() != node_count:
+        if frac == BOX_FRAC_W_UNSET:
+            return
+        g_box_frac_w_milli = [BOX_FRAC_W_UNSET; node_count]
+    g_box_frac_w_milli[i] = frac
+
+# reason: node index in, milli-px remainder (or BOX_FRAC_W_UNSET) out.
+# @allow(primitive_api)
+pub fn box_frac_w_at(i: i32) -> i32:
+    if i < 0 or i >= g_box_frac_w_milli.len(): BOX_FRAC_W_UNSET else: g_box_frac_w_milli[i]
 
 # `<input>` types Chrome sizes from `size` columns of text (a text field);
 # buttons, range, color, file, image, hidden and the checkable types are not.

@@ -16,11 +16,13 @@ hard bytes and the host policy digest. `WorkspaceStorageReceiptV1` reports those
 identities, actual enforced bytes, measured usage, and a canonical binding digest.
 Observed inode usage is not a promised inode limit.
 
-The operations are admission, observation, recovery, and release-if-absent.
-Recovery reobserves an existing native lease or performs fresh native admission;
-copied receipts are never capabilities. A recovered lease retains cleanup
-authority even when observation fails; callers must obtain a successful current
-observation before treating it as readiness. Admission pins directory/volume handles before
+The operations are admission, observation, release-if-absent, and dropping a
+retained hold (`rt_workspace_storage_close_retained_v1`). There is no in-process
+recovery entry: a holder reuses its live lease; anyone else is refused (EBUSY)
+until that hold is dropped, then performs fresh native admission (full
+re-proof). Copied receipts are never capabilities.
+Callers must obtain a successful current observation before treating a lease as
+readiness. Admission pins directory/volume handles before
 returning a generation-bearing lease. A bounded in-process registry is handle
 ownership, not another capacity ledger. Host restart uses its retained request
 and native re-observation, not stale process-local tokens. Recovery after process

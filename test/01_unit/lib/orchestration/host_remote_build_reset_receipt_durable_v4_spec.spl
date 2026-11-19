@@ -4,8 +4,10 @@ Pins milestone_0039 in `src/lib/nogc_sync_mut/orchestration/host_linux_service_r
 `host_linux_service_current_v4.spl`: the Host-signed reset-failure reply (milestone_0038) is archived, no-replace and read
 back, through the held capacity journal (the single writer, the store that already owns this operation's open record and
 bundle) BEFORE it is first answered. After a service restart the startup reap has indexed the operation, and the collect
-answers the stored reply byte-identically; a missing, corrupt, foreign or non-canonical stored reply answers nothing and
-the route keeps the existing `linux-host-remote-build-reaped-incomplete` refusal (the controller's generic wedged settle).
+answers the stored reply byte-identically; a missing, corrupt, foreign or non-canonical stored reply answers nothing here
+(milestone_0045: the route then has the restarted Host sign a service-restart receipt, pinned by
+`host_remote_build_reaped_receipt_v4_spec.spl`; failing that it keeps the typed `linux-host-remote-build-reaped-incomplete`
+refusal, which the controller settles `outcome-unknown`).
 Written for owners of the Linux Host service.
 ## Operator workflow
 Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
@@ -129,6 +131,26 @@ describe "Host reset-failure receipt durability (milestone_0039)":
         expect(closed.closed and closed.error == "").to_equal(true)
         expect(dir_remove(root, true)).to_equal(true)
 
+    it "never serves after a restart an archive whose read-back failed (REVIEW_C P3-6)":
+        # @req M0039-DUR-05
+        val root = secure_temp_dir("/tmp", "m0039-refused").unwrap()
+        val opened = rd_open(root + "/journal")
+        val journal = opened.journal
+        step("a canonical reply of a reused operation id already sits in the archive")
+        var prior = rd_executor("operation_3")
+        prior.error = "linux-host-remote-build-stop:not-ok"
+        val stale = host_remote_build_reset_reply_v4(prior)
+        expect(distributed_operation_journal_publish_v3(journal, host_remote_build_reset_failure_relative_v4("operation_3"),
+            stale)).to_equal(Ok(true))
+        expect(host_remote_build_reset_failure_stored_v4(journal, "operation_3")).to_equal(stale)
+        step("this run's archive meets it, is refused, and the refusal is durable: the stored reply is no longer served")
+        expect(remote_build_reset_archive_v4(journal, "operation_3", host_remote_build_reset_reply_v4(rd_executor("operation_3"))))
+            .to_equal(Err("linux-host-remote-build-reset-failure-conflict"))
+        expect(host_remote_build_reset_failure_stored_v4(journal, "operation_3")).to_equal("")
+        val closed = host_capacity_owner_close_owned_v2(opened)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
     it "archives before answering and wires the stored reply into the reaped collect only":
         # @req M0039-DUR-04
         val source = file_read_text(RD_SOURCE)
@@ -139,7 +161,8 @@ describe "Host reset-failure receipt durability (milestone_0039)":
         expect(rd_count(wedge, "return remote_build_wedged_v4(")).to_equal(3)
         step("the archive writes no-replace and reads back; the reader fails closed to the empty string")
         val archive = rd_from(source, "fn remote_build_reset_archive_v4(", "\nfn ")
-        expect(rd_count(archive, "distributed_operation_journal_publish_v3(")).to_equal(1)
+        expect(rd_count(archive, "distributed_operation_journal_publish_v3(")).to_equal(2)
+        expect(rd_count(archive, "host_remote_build_reset_failure_refused_relative_v4(operation_id)")).to_equal(1)
         expect(rd_count(archive, "distributed_operation_journal_read_required_v3(")).to_equal(1)
         val service = file_read_text(RD_SERVICE)
         val collect = rd_from(service, "pub fn host_linux_service_remote_build_collect_v4(", "\npub fn ")

@@ -1,0 +1,295 @@
+#![allow(primitive_api)]
+# primitive_api: reviewed Linux fd/statx/dirent mechanism keeps raw fds, mode bits, counts and flag words as integers;
+# no raw descriptor crosses this module's boundary (milestone_0045 retention release).
+# No-follow recursive removal BENEATH one held directory descriptor (milestone_0045, owner decision 2, 2026-11-19).
+# SOURCE_AUTHORED_NOT_RUN. Pure Simple over LANDED libc externs only (imported, never redeclared): no new rt_* symbol.
+#
+# Every child is reached by openat/unlinkat RELATIVE to a held directory descriptor; no path is re-resolved from the
+# root. Directories open O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC, so a symlink is never followed: a symlink entry is
+# itself unlinked. Every entry is statx'ed no-follow (d_type is never trusted) and must carry the root's st_dev AND
+# mount id (no mount point is crossed, a same-device bind mount included) and the expected owner uid (the caller passes
+# the service euid; under the enforced keep-id/cap-drop ALL/no-new-privileges profile every guest-created inode carries
+# it, so any other owner is refused and everything is retained). An opened directory must be the inode its no-follow
+# statx named. A directory without owner rwx gets it through fchmod on its own held descriptor (owner right, no
+# privilege); one the owner cannot open for reading is refused. Names are collected in bounded batches from a fresh "."
+# stream of the held descriptor, then removed; the directory is rescanned until empty. A refusal closes every walk
+# descriptor and leaves the remaining tree retained; a later call resumes.
+@when(os="linux"):
+use std.nogc_sync_mut.io.retained_file_abi.{openat, statx, close, fsync, malloc, free}
+use std.nogc_sync_mut.io.host_identity_store_abi_v1.{unlinkat, fchmod, __errno_location}
+use std.nogc_sync_mut.io.retained_directory_empty_v1.{fdopendir, readdir, closedir}
+use std.nogc_sync_mut.io.anchored_io_linux_v1.anchored_linux_directory_flags_v1
+use std.nogc_sync_mut.io.retained_directory_stage_v1.retained_stage_leaf_v1
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32, volatile_read_u64,
+    volatile_write_u8, volatile_write_u32}
+use std.common.text_bytes.text_to_utf8_bytes
+@end
+
+val RETAINED_TREE_BATCH_V1: i64 = 256
+pub val RETAINED_TREE_DEPTH_V1: i64 = 256
+val RETAINED_TREE_ENTRIES_V1: i64 = 4194304
+
+# Statx facts of one entry (DATA; grants nothing). identity = ino(8) + dev major/minor(8); device = dev major/minor.
+pub struct RetainedTreeEntryV1:
+    kind: text
+    identity: [u8]
+    device: [u8]
+    mount_id: i64
+    uid: i64
+    mode: i64
+
+struct RetainedTreeFrameV1:
+    fd: i64
+    name: [u8]
+    identity: [u8]
+
+# S_IFMT / S_IFDIR of the statx mode.
+pub fn retained_tree_kind_v1(mode: i64) -> text:
+    if (mode & 61440) == 16384: "directory" else: "other"
+
+pub fn retained_tree_dot_v1(name: [u8]) -> bool:
+    (name.len() == 1 and name[0] == 46u8) or (name.len() == 2 and name[0] == 46u8 and name[1] == 46u8)
+
+# PURE decision for one no-follow statx'ed entry beneath the root. `depth` is the number of held frames.
+pub fn retained_tree_entry_action_v1(entry: RetainedTreeEntryV1, root: RetainedTreeEntryV1, owner_uid: i64,
+        depth: i64) -> Result<text, text>:
+    if entry.device != root.device or entry.mount_id != root.mount_id: return Err("retained-tree-mount-crossing")
+    if entry.uid != owner_uid: return Err("retained-tree-foreign-owner")
+    if entry.kind == "directory":
+        if depth >= RETAINED_TREE_DEPTH_V1: return Err("retained-tree-depth")
+        return Ok("descend")
+    Ok("unlink")
+
+@when(os="linux"):
+# Owned NUL-terminated copy of raw name bytes (names are never decoded as text). Caller frees.
+@unsafe(reason: "copies bounded raw dirent name bytes into owned NUL-terminated memory", capabilities: [ffi, raw_ptr])
+fn retained_tree_name_v1(bytes: [u8]) -> i64:
+    if bytes.len() > 255: return 0
+    val memory = malloc((bytes.len() + 1) as u64)
+    if memory == 0: return 0
+    for index in 0..bytes.len(): volatile_write_u8(memory + index, bytes[index] as i64)
+    volatile_write_u8(memory + bytes.len(), 0)
+    memory
+
+# statx no-follow of `name` under `fd`, or of `fd` itself when `by_handle` (AT_EMPTY_PATH). Mask 6143 asks
+# TYPE|MODE|NLINK|UID|GID|...|INO|SIZE|BLOCKS|MNT_ID; TYPE|MODE|UID|INO|MNT_ID (4363) must be genuinely returned.
+@unsafe(reason: "Linux statx stable fixed layout into owned 256 bytes for a held fd or a nofollow child", capabilities: [ffi, raw_ptr])
+fn retained_tree_stat_v1(fd: i64, name: [u8], by_handle: bool) -> Result<RetainedTreeEntryV1, text>:
+    val path = retained_tree_name_v1(name)
+    if path == 0: return Err("retained-tree-memory")
+    val memory = malloc(256u64)
+    if memory == 0:
+        free(path)
+        return Err("retained-tree-memory")
+    for index in 0..256: volatile_write_u8(memory + index, 0)
+    val status = statx(fd as i32, path, if by_handle: 4352 else: 256, 6143u32, memory)
+    val native_error = if status != 0: volatile_read_u32(__errno_location()) else: 0
+    free(path)
+    if status != 0 or (volatile_read_u32(memory) & 4363) != 4363:
+        free(memory)
+        return Err(if native_error == 2: "retained-tree-entry-vanished" else: "retained-tree-metadata")
+    var identity: [u8] = []
+    var device: [u8] = []
+    for index in 32..40: identity.push(volatile_read_u8(memory + index) as u8)
+    for index in 136..144:
+        identity.push(volatile_read_u8(memory + index) as u8)
+        device.push(volatile_read_u8(memory + index) as u8)
+    val mode = volatile_read_u16(memory + 28)
+    val entry = RetainedTreeEntryV1(kind: retained_tree_kind_v1(mode), identity: identity, device: device,
+        mount_id: volatile_read_u64(memory + 144), uid: volatile_read_u32(memory + 20), mode: mode)
+    free(memory)
+    Ok(entry)
+
+# Owner rwx on a held directory descriptor (the owner may always fchmod its own inode; no privilege).
+@unsafe(reason: "fchmod on an exact held directory descriptor the caller owns", capabilities: [ffi])
+fn retained_tree_owner_access_v1(fd: i64, mode: i64) -> Result<(), text>:
+    if (mode & 448) == 448: return Ok(())
+    if fchmod(fd as i32, ((mode & 4095) | 448) as u32) != 0: return Err("retained-tree-owner-access")
+    Ok(())
+
+# Up to `limit` names (dot entries excluded) from a FRESH "." stream of the held directory, which must be that inode.
+# Linux LP64 libc dirent: reclen@16, name@19 (as retained_directory_empty_v1 and linux_helper_root_v1).
+@unsafe(reason: "one owned dot descriptor, consumed by fdopendir, released by exactly one closedir", capabilities: [ffi, raw_ptr])
+fn retained_tree_names_v1(fd: i64, identity: [u8], limit: i64) -> Result<[[u8]], text>:
+    val dot = retained_tree_name_v1([46u8])
+    if dot == 0: return Err("retained-tree-memory")
+    val stream_fd = openat(fd as i32, dot, anchored_linux_directory_flags_v1(), 0u32)
+    free(dot)
+    if stream_fd < 0: return Err("retained-tree-stream-open")
+    val opened = retained_tree_stat_v1(stream_fd as i64, [], true)
+    if opened.is_err() or opened.unwrap().identity != identity:
+        val consumed = close(stream_fd)
+        return Err("retained-tree-stream-identity")
+    val stream = fdopendir(stream_fd)
+    if stream == 0:
+        val consumed = close(stream_fd)
+        return Err("retained-tree-stream")
+    var names: [[u8]] = []
+    var failure = ""
+    while failure == "" and names.len() < limit:
+        volatile_write_u32(__errno_location(), 0)
+        val entry = readdir(stream)
+        if entry == 0:
+            if volatile_read_u32(__errno_location()) != 0: failure = "retained-tree-read"
+            break
+        val length = volatile_read_u16(entry + 16)
+        if length < 21 or length > 280:
+            failure = "retained-tree-entry-layout"
+            break
+        var name: [u8] = []
+        var at = 19
+        while at < length and volatile_read_u8(entry + at) != 0:
+            name.push(volatile_read_u8(entry + at) as u8)
+            at = at + 1
+        if at >= length or name.len() == 0 or name.len() > 255:
+            failure = "retained-tree-entry-layout"
+            break
+        if not retained_tree_dot_v1(name): names.push(name)
+    if closedir(stream) != 0 and failure == "": failure = "retained-tree-stream-close"
+    if failure != "": return Err(failure)
+    Ok(names)
+
+# Removes one emptied directory frame through its held parent: the parent's no-follow name must still be the frame.
+@unsafe(reason: "exact unlinkat beneath a held parent after a nofollow identity recheck", capabilities: [ffi, raw_ptr])
+fn retained_tree_unlink_v1(parent: i64, name: [u8], identity: [u8], directory: bool) -> Result<(), text>:
+    val named = retained_tree_stat_v1(parent, name, false)?
+    if named.identity != identity: return Err("retained-tree-entry-identity")
+    val path = retained_tree_name_v1(name)
+    if path == 0: return Err("retained-tree-memory")
+    val status = unlinkat(parent as i32, path, if directory: 512 else: 0)
+    free(path)
+    if status != 0: return Err(if directory: "retained-tree-rmdir" else: "retained-tree-unlink")
+    Ok(())
+
+# One child of the frame `parent`: unlinked (Ok(-1)) or opened as a held, identity-checked directory (Ok(fd)).
+@unsafe(reason: "nofollow statx then unlinkat or O_NOFOLLOW|O_DIRECTORY openat beneath a held parent", capabilities: [ffi, raw_ptr])
+fn retained_tree_child_v1(parent: i64, name: [u8], root: RetainedTreeEntryV1, owner_uid: i64,
+        depth: i64) -> Result<(i64, [u8]), text>:
+    val entry = retained_tree_stat_v1(parent, name, false)?
+    val action = retained_tree_entry_action_v1(entry, root, owner_uid, depth)?
+    if action == "unlink":
+        retained_tree_unlink_v1(parent, name, entry.identity, false)?
+        return Ok((-1, entry.identity))
+    retained_tree_open_directory_v1(parent, name, entry, root)
+
+# Opens the directory `entry` statx named (no-follow, O_DIRECTORY) and proves the held fd is that inode on the root's mount.
+@unsafe(reason: "O_NOFOLLOW|O_DIRECTORY openat of one stated child beneath a held parent, then an fd statx identity recheck", capabilities: [ffi, raw_ptr])
+fn retained_tree_open_directory_v1(parent: i64, name: [u8], entry: RetainedTreeEntryV1,
+        root: RetainedTreeEntryV1) -> Result<(i64, [u8]), text>:
+    val path = retained_tree_name_v1(name)
+    if path == 0: return Err("retained-tree-memory")
+    val fd = openat(parent as i32, path, anchored_linux_directory_flags_v1(), 0u32) as i64
+    free(path)
+    # ELOOP/ENOTDIR (the name is no longer that directory) or EACCES (no owner read) refuse; nothing is followed.
+    if fd < 0: return Err("retained-tree-directory-open")
+    val stated = retained_tree_stat_v1(fd, [], true)
+    if stated.is_err():
+        val consumed = close(fd as i32)
+        return Err("retained-tree-directory-identity")
+    val held = stated.unwrap()
+    if held.identity != entry.identity or held.kind != "directory" or held.mount_id != root.mount_id or held.device != root.device:
+        val consumed = close(fd as i32)
+        return Err("retained-tree-directory-identity")
+    val access = retained_tree_owner_access_v1(fd, held.mode)
+    if access.is_err():
+        val consumed = close(fd as i32)
+        return Err(access.unwrap_err())
+    Ok((fd, entry.identity))
+
+# Removes every entry beneath the held directory `root_fd` (never `root_fd` itself, which the caller keeps). Returns
+# the number of entries removed. Only descriptors this call opened are closed, on every path.
+@unsafe(reason: "bounded held-descriptor walk; every opened frame is closed exactly once", capabilities: [ffi, raw_ptr])
+fn retained_tree_remove_contents_v1(root_fd: i64, owner_uid: i64) -> Result<i64, text>:
+    if anchored_linux_directory_flags_v1() == 0: return Err("retained-tree-architecture-unsupported")
+    if root_fd < 0 or owner_uid < 0: return Err("retained-tree-root")
+    val root = retained_tree_stat_v1(root_fd, [], true)?
+    if root.kind != "directory" or root.uid != owner_uid: return Err("retained-tree-root")
+    retained_tree_owner_access_v1(root_fd, root.mode)?
+    var frames: [RetainedTreeFrameV1] = [RetainedTreeFrameV1(fd: root_fd, name: [], identity: root.identity)]
+    var removed: i64 = 0
+    var failure = ""
+    var steps: i64 = 0
+    while frames.len() > 0 and failure == "":
+        steps = steps + 1
+        if steps > RETAINED_TREE_ENTRIES_V1 * 2 or removed >= RETAINED_TREE_ENTRIES_V1:
+            failure = "retained-tree-bound"
+            break
+        val top = frames[frames.len() - 1]
+        val listed = retained_tree_names_v1(top.fd, top.identity, RETAINED_TREE_BATCH_V1)
+        if listed.is_err():
+            failure = listed.unwrap_err()
+            break
+        if listed.unwrap().len() == 0:
+            if frames.len() == 1: break
+            frames.pop()
+            if close(top.fd as i32) != 0:
+                failure = "retained-tree-close"
+                break
+            val gone = retained_tree_unlink_v1(frames[frames.len() - 1].fd, top.name, top.identity, true)
+            if gone.is_err():
+                failure = gone.unwrap_err()
+                break
+            removed = removed + 1
+            continue
+        for name in listed.unwrap():
+            val child = retained_tree_child_v1(top.fd, name, root, owner_uid, frames.len())
+            if child.is_err():
+                failure = child.unwrap_err()
+                break
+            val (fd, identity) = child.unwrap()
+            if fd >= 0:
+                # Depth first: the rest of this batch is rescanned once the child is emptied and removed.
+                frames.push(RetainedTreeFrameV1(fd: fd, name: name, identity: identity))
+                break
+            removed = removed + 1
+    # Never the caller's root descriptor (frame 0).
+    var index = frames.len() - 1
+    while index >= 1:
+        val consumed = close(frames[index].fd as i32)
+        index = index - 1
+    if failure != "": return Err(failure)
+    Ok(removed)
+
+# milestone_0047 (per-run workspace): removes the child directory `name` beneath the held `parent_fd` together with its
+# whole tree, leaving the parent and every sibling. The child is statx'ed no-follow and must be a directory on the
+# parent's st_dev AND mount id carrying `owner_uid`; it is opened O_NOFOLLOW|O_DIRECTORY relative to the parent and must
+# be the inode that statx named (owner rwx restored on its own fd if the guest dropped it). Its contents are removed by
+# the same walk, its descriptor closed, then the parent's no-follow name is rechecked against that identity before
+# AT_REMOVEDIR and the parent's namespace change is synced. Returns the entries removed, the child included.
+@unsafe(reason: "nofollow statx + O_NOFOLLOW|O_DIRECTORY openat of one child beneath a held parent, then the bounded walk and an identity-rechecked AT_REMOVEDIR", capabilities: [ffi, raw_ptr])
+pub fn retained_tree_remove_child_tree_v1(parent_fd: i64, name: text, owner_uid: i64) -> Result<i64, text>:
+    if anchored_linux_directory_flags_v1() == 0: return Err("retained-tree-architecture-unsupported")
+    if not retained_stage_leaf_v1(name): return Err("retained-tree-leaf-name")
+    if parent_fd < 0 or owner_uid < 0: return Err("retained-tree-root")
+    val parent = retained_tree_stat_v1(parent_fd, [], true)?
+    if parent.kind != "directory": return Err("retained-tree-root")
+    val bytes = text_to_utf8_bytes(name)
+    val entry = retained_tree_stat_v1(parent_fd, bytes, false)?
+    if entry.kind != "directory": return Err("retained-tree-leaf-identity")
+    # Mount and owner checks of the child itself; then the SAME stated entry is opened (never re-stated and unlinked, so a
+    # name that stops being that directory refuses with nothing removed).
+    val _descend = retained_tree_entry_action_v1(entry, parent, owner_uid, 0)?
+    val (fd, identity) = retained_tree_open_directory_v1(parent_fd, bytes, entry, parent)?
+    val removed = retained_tree_remove_contents_v1(fd, owner_uid)
+    val closed = close(fd as i32)
+    if removed.is_err(): return Err(removed.unwrap_err())
+    if closed != 0: return Err("retained-tree-close")
+    retained_tree_unlink_v1(parent_fd, bytes, identity, true)?
+    if fsync(parent_fd as i32) != 0: return Err("retained-tree-leaf-namespace-sync")
+    Ok(removed.unwrap() + 1)
+
+# Whether `name` is absent beneath the held parent (no-follow). Any other statx failure is an error, never "absent".
+@unsafe(reason: "nofollow statx of one child name beneath a held parent", capabilities: [ffi, raw_ptr])
+pub fn retained_tree_child_absent_v1(parent_fd: i64, name: text) -> Result<bool, text>:
+    if not retained_stage_leaf_v1(name): return Err("retained-tree-leaf-name")
+    val named = retained_tree_stat_v1(parent_fd, text_to_utf8_bytes(name), false)
+    if named.is_ok(): return Ok(false)
+    if named.unwrap_err() == "retained-tree-entry-vanished": return Ok(true)
+    Err(named.unwrap_err())
+@end
+
+export RetainedTreeEntryV1, RETAINED_TREE_DEPTH_V1
+export retained_tree_kind_v1, retained_tree_dot_v1, retained_tree_entry_action_v1
+@when(os="linux"):
+export retained_tree_remove_child_tree_v1, retained_tree_child_absent_v1
+@end

@@ -909,7 +909,7 @@ head (13/40 at base).
   - Base vs head sweep of 21 shadow/glass/Draw IR specs: 0 new failures.
   - `box_shadow_falloff_spec` AC-1 asserted the shadow centre showing THROUGH a transparent box, which contradicts Chrome (`FFFFFF` there). It now probes the fully covered centre of a shadow offset 70px below the box (Chrome `000000`), and a new AC-1b pins the transparent interior at 255.
   - Perf: an 800x600 frame with a 600x400 translucent shadowed box, 3 renders. Head against base was 13.8 s vs 14.3 s on cpu_simd and 13.0 s vs 14.8 s on Vulkan (lavapipe), with RSS 1.66 GB vs 1.67 GB. Binary: `cargo-target-webrender-premul/release/simple`, 54131896 bytes, 2026-11-19 17:24.
-- **Not covered:** the knockout edge is a binary pixel-centre test, whereas Chrome anti-aliases the clip, so edge pixels along the curve can differ. On a real GPU the readback is a device sync, which only gated boxes pay.
+- **Not covered (fixed 2026-11-19, see "box-shadow knockout edge not anti-aliased"):** the knockout edge was a binary pixel-centre test, whereas Chrome anti-aliases the clip. On a real GPU the readback is a device sync, which only gated boxes pay.
 
 ## 2026-11-19 — raster repeating background starts at the clip box (FIXED)
 
@@ -925,3 +925,121 @@ head (13/40 at base).
 - **Fix:** for a destination that is not opaque, both painters now use Chrome src-over. On the CPU, `_emu_shadow_px` calls `_emu_blend_over(..., true)`. In the kernel, a new `premul_over` branch writes the source at alpha `cov` over alpha 0, and premultiplied src-over otherwise. Opaque destinations keep the integer twin formula. SPIR-V was regenerated with `scripts/tool/gen-shadow-rect-spirv.shs`, and `check-shadow-rect-spirv-pinned.shs` passes.
 - **Evidence:** the new `box_shadow_opacity_group_chrome159_spec` pins the box, (50,60) and (85,40) against Chrome ±2 on cpu_simd and Vulkan, red -> green. After the fix both lanes read `8EA6DF B1B1B1 D1D1D1 F5F5F5` at (50,35), (50,56), (50,60) and (85,40); Chrome reads `8EA6DF AEAEAE D2D2D2 F6F6F6`. Base vs head sweep of 20 shadow, opacity-group, glass and SPIR-V specs: 0 new failures, 2 fixed.
 - **Not covered:** (50,56) is 3 levels off Chrome, so it is not pinned. The raster's shadow falloff in this case is about 6 levels off Chrome, which is a separate falloff issue.
+
+## 2026-11-19 — `backdrop-filter: blur()` ignored outside the WM glass material (FIXED for blur)
+
+- **Symptom:** a transparent 100x50 box with `backdrop-filter: blur(4px)` over a red stripe left the stripe edge hard on every lane (`FF0000` / `FFFFFF`). Chrome 159 blurs it (`FF7070` at the edge at k=4).
+- **Chrome model (measured):**
+  - Only the backdrop inside the border box is blurred. Red just outside the box does not bleed in, and red inside reaches the box edge unchanged.
+  - The box edge is mirrored. A 2px stripe on the box edge reads `9E` at k=4, against `5C` under clamp.
+  - The result is clipped to the rounded box: corner pixels stay unblurred.
+  - The kernel is Skia's raster blur: for sigma >= 2, the SVG triple box of size `d = floor(sigma * 3 * sqrt(2 pi) / 4 + 0.5)` over 8-bit premultiplied channels. A true Gaussian is up to 8 levels off Chrome at k=1; the triple box matches it exactly.
+- **Cause:** the only consumer of `backdrop-filter` was the WM glass material path (`simple_web_backdrop_admission`, blur capped at 4). Plain pages never blurred.
+- **Fix:**
+  - **Shared kernel:** `engine2d_backdrop_blur_pixels` (`draw_ir_box_effects.spl`) implements the model above. It is the triple box for sigma >= 2, with sliding windows so the cost does not grow with sigma, and a Gaussian kernel below that.
+  - **Draw IR:** the producer emits a typed `backdrop-filter-blur-milli`, which is device-scaled in `draw_ir_device_scale.spl`, when the material path is not ready. `_engine2d_draw_ir_render_box` reads the box region back, blurs it and writes it inside the rounded box, before the shadow knockout and the background.
+  - **Raster:** `_paint_backdrop_blur` (`paint_raster.spl`) does the same at the 4 box-paint sites, sharing `_box_clip_region` / `_copy_region` / `_restore_inside_box` with the shadow knockout.
+- **Evidence:** the new `backdrop_filter_blur_chrome159_spec` checks 19 points across a wide stripe, an edge stripe (mirror) and a rounded box (corner clip). Raster is compared with Chrome at k=1; cpu_simd and Vulkan with Chrome at k=4; all within ±2. Red -> green on all three lanes. Base vs head sweep of 57 backdrop, glass, shadow, opacity-group and coverage specs: 0 new failures, 3 fixed.
+- **Not covered:**
+  - The colour functions (`saturate()`, `brightness()` and others) are fixed in the entry below; `drop-shadow()` and `url()` are still ignored.
+  - The backdrop root is the whole frame painted so far. Inside an opacity group or other offscreen it is the group's surface.
+  - Sigma below 2 uses a true Gaussian; Chrome there was not measured.
+  - On a real GPU, the readback is a device sync that only blurred boxes pay.
+
+## 2026-11-19 — raster soft box-shadow falloff up to 11 levels off Chrome (FIXED)
+
+- **Symptom:** a 60x30 box with `box-shadow: 0 10px 8px rgba(0,0,0,0.8)` on white, sampled down x=50 and along y=40 at device scale 1. The raster was up to 11 levels darker near the shadow edge: `99` at (50,60) against Chrome's `A2`, and `72` against `7D` at (50,58).
+- **Cause:** `fb_soft_box_shadow` used a piecewise-linear erf product with sigma = blur / 2. It measured distances from pixel edges rather than centres, and cut the shadow off at 1 x blur, although the blur reaches about 1.5 x blur.
+- **Fix:** Chrome blurs the shadow's rect mask with Skia's raster kernel. That is the same triple box `backdrop-filter` uses, and on a rect it separates into one blurred-step profile per axis.
+  - `engine2d_blur_step_profile` (`draw_ir_box_effects.spl`) computes a profile with that kernel.
+  - `fb_soft_box_shadow` builds one profile per axis, extends the painted extent to about 3 sigma, and keeps the existing native blend row.
+  - `_phi256` is deleted.
+- **Evidence:** the new `box_shadow_raster_falloff_chrome159_spec` checks 12 points against Chrome at k=1, all within ±2; it fails on base and passes on head. Base vs head sweep of 23 shadow, opacity-group, backdrop, Chrome-parity and coverage specs: 0 new failures, 1 fixed.
+- **Not covered:** rounded-corner shadows still use the separable rect profile. Draw IR shadows at k=1 were up to 8 levels off Chrome (fixed 2026-11-19, see "Draw IR box-shadow falloff off Chrome at device scale 1").
+
+## 2026-11-19 — `backdrop-filter` colour functions ignored (FIXED)
+
+- **Symptom:** `backdrop-filter: saturate(30%)`, `grayscale()`, `sepia()`, `hue-rotate()`, `invert()`, `brightness()`, `contrast()` and `opacity()` changed nothing on any lane. The `blur()` fix above only handled blur.
+- **Chrome model (measured):**
+  - Each function is the Filter Effects 1 colour matrix applied in sRGB, in order, clamped after each function. On red, `brightness(150%) contrast(50%)` gives `BF4040`, not the unclamped `FF4040`. grayscale and sepia use the 0.2126 table; saturate and hue-rotate use the 0.213 table.
+  - The filtered backdrop is composited over the unfiltered one, so `opacity(50%)` over opaque content is a no-op.
+  - Blur commutes with these affine maps on opaque content, so blur runs first.
+- **Fix:**
+  - **Shared helpers:** `engine2d_backdrop_color_matrices` parses the function list into 4x5 matrices. `engine2d_backdrop_color_filter_pixels` applies them in order and composites src-over the unfiltered region. Both are in `draw_ir_box_effects.spl`.
+  - **Draw IR:** `_engine2d_draw_ir_render_box` reads the raw `backdrop-filter` prop, which needs no device scaling.
+  - **Raster:** `_paint_backdrop_blur` reads `st.backdrop_filter_raw`.
+- **Evidence:** the new `backdrop_filter_color_functions_chrome159_spec` checks 30 points: 8 single functions and 2 chains over three colour bands. All are within ±2, and byte-exact as probed, on raster (k=1), cpu_simd and Vulkan (k=4); red -> green. Base vs head sweep of 58 backdrop, glass, shadow, opacity-group and coverage specs: 0 new failures, 3 fixed.
+- **Not covered:**
+  - `drop-shadow()` and `url()` filters.
+  - A blur next to a colour function over translucent content, where the order matters.
+
+## 2026-11-19 — box-shadow knockout edge not anti-aliased (FIXED)
+
+- **Symptom:** a translucent 60x40 box, radius 12, `rgba(255,255,255,0.72)` with `box-shadow: 0 0 20px rgba(0,88,188,0.6)` on `#1e1e2e`. Chrome's corner pixels carry part of the shadow, because Chrome clips it with an anti-aliased rounded rect. Ours carried none: the knockout restored every pixel whose centre was inside the curve. At 1x, the shadow's share of pixel (16,14) was (-4,+7,+16) in Chrome and (0,0,0) in ours.
+- **Fix:** both knockouts mix each corner-band pixel as `pre * cov + post * (1 - cov)`, with `cov` from `rounded_rect_coverage256` (the coverage the gradient clips already use). Other rows are still one span copy.
+  - **Draw IR:** `engine2d_draw_ir_shadow_knockout_pixels`. The mix is the new shared `engine2d_mix256` in `draw_ir_box_effects.spl`.
+  - **Raster:** `_restore_inside_box` (`paint_raster.spl`). `_shadow_knockout_inside` and `_shadow_knockout_in_circle` are deleted.
+  - `backdrop-filter` writes back through the same two functions, so its rounded clip is now anti-aliased too.
+- **Evidence:** the new `box_shadow_knockout_aa_edge_chrome159_spec` pins the shadow's share (with-shadow minus without-shadow) against Chrome: 5 corner pixels on raster at k=1, and 2 on cpu_simd and Vulkan at k=4, all ±2. It fails 3/3 on base and passes 3/3 on head. Base vs head sweep of 20 shadow, knockout, backdrop, device-scale and coverage specs (200 examples): 0 new failures, 3 fixed; the backdrop rounded-corner points (`BDF_ROUND`) still match Chrome.
+- **Not covered:** the box's own corner coverage. See the next entry.
+
+## 2026-11-19 — rounded-corner anti-aliasing coverage differs from Chrome (OPEN)
+
+- **Symptom:** on the same page without the shadow, the box's corner edge pixels are up to 16 levels off Chrome. At k=1, pixel (16,14) is `5E5E69` in ours and `4E4E5B` in Chrome. Chrome is also not symmetric about the corner's diagonal: (16,14) is `4E4E5B`, but (14,16) is `585864`.
+- **Measured:** ours is the exact pixel area (or a centre distance), and runs about 0.05-0.09 above Chrome's coverage at some edge pixels. Exact areas 0.33 / 0.66 / 0.43 compare with Chrome's 0.28 / 0.62 / 0.34. Fitted against 145 edge pixels of a 160px circle at k=1:
+  - 4 sub-scanlines at y-offset 0.5: mean error 0.061, max 0.213.
+  - y-offset 0.0: mean 0.041, max 0.195.
+  - Neither fits. The y/x asymmetry points at Skia's scan converter (supersampled in y, analytic in x), which still needs modelling.
+- **Impact:** absolute corner pixels of every rounded box, on all lanes. The knockout spec above pins only the shadow's share for this reason.
+
+## 2026-11-19 — Draw IR box-shadow falloff off Chrome at device scale 1 (FIXED)
+
+- **Symptom:** the page from the raster falloff entry above (a 60x30 box, `box-shadow: 0 10px 8px rgba(0,0,0,0.8)`) was up to 8 levels off Chrome on cpu_simd and Vulkan at k=1. At k=4 it was within ±2.
+- **Cause:** `_emu_shadow_profile` blurred each axis with three integer box passes of radius `floor(blur / 2)`, truncating each pass. Its effective sigma was `sqrt(r(r+1))`, not `blur / 2`, and an odd blur lost half a pixel. `emu_draw_shadow_rect` and the `shadow_rect.comp` twin then truncated the coverage product twice.
+- **Fix:**
+  - `_emu_shadow_profile` now calls `engine2d_blur_step_profile`, the Skia triple-box profile the raster already uses, with sigma = blur / 2.
+  - The coverage `((px * py + 127) / 255 * a + 127) / 255` is rounded in the CPU twin and in `shadow_rect.comp`. The SPIR-V is regenerated, and `check-shadow-rect-spirv-pinned.shs` passes.
+  - `engine2d_blur_step_profile` and `engine2d_backdrop_blur_pixels` moved to the leaf module `engine2d/helpers/blur_kernel.spl`. The backends can import them without a cycle through `engine`.
+  - `_emu_box_blur_1d` is deleted.
+- **Evidence:** `box_shadow_raster_falloff_chrome159_spec` gains cpu_simd and Vulkan k=1 cases on the same 12 Chrome points. It goes from 1/3 on base to 3/3 on head. Before the rounding change, the remaining miss was (50,56): 94 against Chrome's 91. `engine2d_shadow_rect_twin_formula_spec` passes unchanged. Base vs head sweep of 26 shadow, backdrop, Engine2D, SPIR-V, WM/glass and coverage specs (427 examples): 399 pass on head and 397 on base, with 0 new failures and 2 fixed. Every remaining failure also fails on base.
+- **Not covered:** rounded-corner shadows still use the separable rect profile.
+
+## 2026-11-19 — GPU readback cost of the knockout and `backdrop-filter` (MEASURED; region crop FIXED, readback default OPEN)
+
+- **Page timing:** 8 boxes, 300x180 at k=4, best of 3, seed JIT with lavapipe.
+
+  | lane | plain | opaque + shadow | translucent + shadow (knockout) | `backdrop-filter: blur(6px)` |
+  |---|---|---|---|---|
+  | cpu_simd | 3.0 s | 34.4 s | 44.2 s | 90.9 s |
+  | Vulkan | 10.6 s | 10.7 s | 100.3 s | 137.8 s |
+
+  A GPU-resident Vulkan shadow is free. Each gated box pays about 11 s.
+- **Per-piece timing:** one 200x200 box on a 1200x720 Vulkan surface. Each region read is a full-frame read plus a host crop (the `RenderBackend.read_pixels_region` default).
+  - Full read: 4574 ms by default (`vulkan_sffi_readback_u32_into` unpacks every pixel in interpreted code). 143 ms with `SIMPLE_VK_READBACK=native`.
+  - Crop: about 460 ms as a per-pixel interpreted loop.
+  - Knockout pixel pass: 341 ms. `draw_image` upload: 411 ms.
+- **Fixed:** the default crop copies one span per in-bounds row. On Vulkan a region read is 5085 -> 4671 ms by default and 488 -> 25 ms with native readback. `engine2d_read_pixels_region_equivalence_spec` gains an edge-clipped Vulkan case (4/4).
+- **Open:**
+  - **Native readback is still opt-in.** `vulkan_sffi_native_readback_opt_in` waits until every deployed binary carries `rt_vulkan_readback_u32_array`. The webrender seed has it; no shared `bin/simple` is deployed on this host to check. Until the default flips, every Vulkan knockout or backdrop box costs about 9 s in readbacks.
+  - **A native Vulkan region read would skip the full-frame download.** `rt_vulkan_readback_u32_array` already takes an offset and a count.
+  - **The knockout pass and the upload (about 0.75 s per box) are interpreted.**
+
+## 2026-11-19 — flex column ignores `min-height: <n>vh` (FIXED)
+
+- **Rule (CSS Flexbox 9.7, Chrome 159):** a column flex container's `min-height` also bounds its main size when free space is shared out, so `flex: 1` items grow to fill it. `min-height: 100vh` resolves to the viewport height.
+- **Was:** `col_flex_target_heights` in `..._layout_engine.spl` read only `st.min_height_px`. A `vh` minimum is kept as the `min_height_vh` flag with no px value, so the container kept its content height. The `flex: 1` items stayed at content height (44 px buttons where Chrome has 300 px).
+- **Fix:** the caller passes the resolved minimum (`min_height_px`, else the viewport height when `min_height_vh` is set). The padding is added outside the minimum for a content-box container.
+- **Chrome boxes** (480x300; `#app > .wp > .pc > .wp > .pc > button`; tag:y:h): `min-height:100vh` gives `div:0:300 div:0:300 button:0:300`; with `padding:16px` on `.pc` it gives `button:32:236`; `min-height:100vh;padding:10px 0 20px` gives `div:0:330 div:10:300 button:10:300`. `flex_column_min_height_vh_chrome159_spec` 0/3 -> 3/3. A sweep of the 24 layout specs that touch this file has 0 new failures.
+- **Not fixed by this:** the taskbar widget fixture still has 44 px buttons. Its `.widget-panel` class-name fill hack fills the panels after their children are laid out, so the row stretch never re-lays them out. Removing that hack is the next change.
+
+## 2026-11-19 — `.widget-panel` class-name fill on CSS pages (FIXED; two residuals OPEN)
+
+- **Rule (Chrome 159):** a class name has no layout meaning. A `widget-panel` on a page with a `<style>` sheet is laid out by its CSS alone.
+- **Was:** layout filled every `has_widget_panel_class` node to the viewport bottom (two flex sites and one block site in `..._layout_engine.spl`), after its children were laid out. On the taskbar fixture the row stretch never re-laid the panels out, so the buttons stayed 44 px tall where Chrome has 204 px.
+- **Fix:** the fill now runs only in legacy widget chrome (`simple_web_layout_uses_legacy_widget_chrome`: a `widget-panel` page with no `<style>`), the same test paint uses as `widget_mode`. `<style>` is dropped at parse, so `parse_html` records the verdict on `#root` as `legacy_widget_chrome`, next to `standards_mode`. Removing the fill outright broke 9 legacy-mode specs that rely on it.
+- **Chrome boxes** (taskbar fixture at 480x300, path=y:h): panels `0/0/0/0=31:238`, panel content `32:236`, buttons and clock `48:204`. `widget_panel_flex_fill_chrome159_spec` 0/2 -> 2/2. Re-pinned: the coverage spec's widget fallback test sees 4 colours, not 3 (the panel no longer covers the button); `simple_web_renderer_spec`'s styled panel gets `height:8px` (as CSS, an empty section is all border).
+- **Agreement with Chrome (‰):** taskbar cpu_simd and Vulkan 364 -> 674; taskbar raster 427 -> 413. The window fixture's geometry is identical with and without the change; its change in the same measurement (Vulkan 563 -> 556) comes from base commits that landed between the two runs.
+- **Sweep:** the 25 specs that read the two changed files have 0 new failures.
+- **Hack sites left alone:** `..._layout_foundation.spl:700,741` exclude `widget-panel` from margin collapse; `gpu_web/layout/adapter.spl:306` only sets the `LAYOUT_GPU_ADMISSION_VIEWPORT_FILL` admission bit.
+- **OPEN — raster button gradient is lighter than Chrome.** Row 60: raster (59,127,204), Vulkan (44,117,200), Chrome (44,117,199). Row 200: raster (34,110,197), Vulkan and Chrome (25,104,195). It was there before; with 204 px buttons it now covers many more pixels, which is the raster drop above.
+- **OPEN — button labels sit at the top.** Chrome centres a button's label vertically in its box; every lane draws it at the top.

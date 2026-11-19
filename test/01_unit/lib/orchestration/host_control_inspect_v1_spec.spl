@@ -1,0 +1,95 @@
+"""
+## Purpose and audience
+milestone_0046: the Host half of the controller `helper-abandon` / `handoff-abandon` commands. Two read-only inspects
+return the exact canonical abandon record the signed command must carry, derived by the SAME function the command uses.
+Written for owners of the Host service domain, the Linux V4 service dispatch and the abandon drivers.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`. Status: AUTHORED, NOT_RUN (no runnable
+binary when written, 2026-11-19).
+## Compatibility and limitations
+The live inspect needs a started Linux service; these scenarios pin the domain framing over an unstarted owner and the
+source of the derivation and wiring. The handoff inspect's behaviour is in host_service_handoff_v1_spec.spl.
+## Verification guidance and troubleshooting
+A failed pin names the moved contract: one derivation, route order, read-only handler, draining refusal.
+"""
+use std.spec.{step, fail}
+use std.io.file_read_text
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.{HostServiceDomainV3, host_service_domain_turn_v3}
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.HostLinuxServiceCurrentV4
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.HostServiceRequestV2
+
+fn hi_body(file: text, start: text, stop: text) -> text:
+    val source = file_read_text("src/lib/nogc_sync_mut/orchestration/" + file)
+    val at = source.index_of(start)
+    expect(at >= 0).to_equal(true)
+    val rest = source.substring(at, source.len())
+    val to = rest.substring(1, rest.len()).index_of(stop)
+    if to < 0: return rest
+    rest.substring(0, to + 1)
+
+describe "Host abandon inspects (milestone_0046)":
+    it "derives the helper record once for the inspect and the signed command":
+        # @req AT-OPS-HELPER-ABANDON (controller issuance reads exactly what the Host accepts)
+        val inspect = hi_body("host_helper_abandon_commit_v1.spl", "pub fn host_helper_abandon_inspect_v1(", "\npub fn ")
+        expect(inspect.contains("host_helper_abandon_expected_v1(journal, operation_id, host_id)")).to_equal(true)
+        expect(inspect.contains("host_helper_abandon_bytes_v1(")).to_equal(true)
+        val command = hi_body("host_helper_abandon_commit_v1.spl", "pub fn host_helper_abandon_v1(", "\npub fn ")
+        val verify_at = command.index_of("host_helper_abandon_verify_v1(")
+        val derive_at = command.index_of("host_helper_abandon_expected_v1(owner.journal, abandon.operation_id, host_id)")
+        val check_at = command.index_of("host_helper_abandon_check_v1(abandon, expected.operation")
+        expect(verify_at >= 0 and derive_at > verify_at and check_at > derive_at).to_equal(true)
+        step("The derivation gates kind and state on its own record and never writes")
+        val expected = hi_body("host_helper_abandon_commit_v1.spl", "pub fn host_helper_abandon_expected_v1(", "\npub fn ")
+        expect(expected.contains("host_helper_abandon_check_v1(record, operation, state.state, expected.plan.helper_kind")).to_equal(true)
+        expect(expected.contains("host_helper_abandon_observed_v1(journal, operation.id, state.state)")).to_equal(true)
+        expect(expected.contains("HOST_HELPER_ABANDON_CUSTODY_V1")).to_equal(true)
+        for write in ["publish", "settle", "commit_v1("]: expect(expected.contains(write)).to_equal(false)
+
+    it "derives the handoff record once for the inspect and the signed abandon":
+        # @req AT-OPS-01 (recovery reachable from the controller)
+        val abandon = hi_body("host_service_handoff_v1.spl", "pub fn host_service_handoff_abandon_v1(", "\npub fn ")
+        val verify_at = abandon.index_of("distributed_verify_grant_approval_from_snapshot_v2(")
+        val derive_at = abandon.index_of("host_service_handoff_abandon_expected_v1(journal, scope)")
+        expect(verify_at >= 0 and derive_at > verify_at).to_equal(true)
+        val inspect = hi_body("host_service_handoff_v1.spl", "pub fn host_service_handoff_abandon_inspect_v1(", "\n")
+        expect(inspect.contains("pub fn host_service_handoff_abandon_inspect_v1(")).to_equal(true)
+        val whole = file_read_text("src/lib/nogc_sync_mut/orchestration/host_service_handoff_v1.spl")
+        expect(whole.contains("host_service_handoff_abandon_bytes_v1(host_service_handoff_abandon_expected_v1(journal, scope)?)")).to_equal(true)
+
+    it "routes each inspect through the frame validator and the full current_v4 recheck":
+        val domain = hi_body("host_service_domain_v3.spl", "if request.action == \"host-helper-inspect\" or", "\n            if request.action == \"host-service-handoff\":")
+        val invalid = domain.index_of("host_control_inspect_request_error_v3(request)")
+        val recheck = domain.index_of("local.current_v4()")
+        val action = domain.index_of("service_linux_agent_action_v3(local, request, inspect_action)")
+        expect(invalid >= 0 and recheck > invalid and action > recheck).to_equal(true)
+        expect(domain.contains("\"host_helper_inspect_v1\"")).to_equal(true)
+        expect(domain.contains("\"host_service_handoff_inspect_v1\"")).to_equal(true)
+
+    it "dispatches the inspects read-only, refused while draining, not gated on the quarantine":
+        val dispatch = hi_body("host_linux_service_current_v4.spl", "pub fn host_linux_service_dispatch_v4(", "\n# AT-OPS-01 drain")
+        expect(dispatch.contains("if action == \"host_helper_inspect_v1\": return linux_service_helper_inspect_v4(owner, source)")).to_equal(true)
+        expect(dispatch.contains("if action == \"host_service_handoff_inspect_v1\": return linux_service_handoff_inspect_v4(owner)")).to_equal(true)
+        expect(dispatch.contains("action != \"host_helper_inspect_v1\"")).to_equal(false)
+        step("The helper inspect refuses a live attachment exactly as the signed command does (one guard)")
+        val helper_inspect = hi_body("host_linux_service_current_v4.spl", "fn linux_service_helper_inspect_v4(", "\nfn ")
+        expect(helper_inspect.contains("linux_service_helper_attachment_guard_v4(owner, source)")).to_equal(true)
+        val abandon_guard = hi_body("host_linux_service_current_v4.spl", "fn linux_service_helper_abandon_guard_v4(", "\nfn ")
+        expect(abandon_guard.contains("linux_service_helper_attachment_guard_v4(owner, decoded.unwrap().abandon.operation_id)")).to_equal(true)
+        for handler in ["fn linux_service_helper_inspect_v4(", "fn linux_service_handoff_inspect_v4("]:
+            val body = hi_body("host_linux_service_current_v4.spl", handler, "\nfn ")
+            expect(body.contains("owner.current_v4()")).to_equal(true)
+            expect(body.contains("\"\", false)")).to_equal(true)
+            for forbidden in ["publish", "settle", "owner.capacity =", "draining = true", "continuity_proven", "reconcile_error"]:
+                expect(body.contains(forbidden)).to_equal(false)
+
+    it "frames the inspects at the domain and fails closed over an unstarted owner":
+        val domain = HostServiceDomainV3(HostLocalRootV3.LinuxService(HostLinuxServiceCurrentV4(root: "/nonexistent/linux-service")))
+        val bad_helper = host_service_domain_turn_v3(domain, HostServiceRequestV2("host-helper-inspect", "abandon_1", "not an id"))
+        expect(bad_helper.exit_code).to_equal(1)
+        expect(bad_helper.response.contains("host-service-helper-inspect-operation-invalid")).to_equal(true)
+        val bad_handoff = host_service_domain_turn_v3(domain, HostServiceRequestV2("host-service-handoff-inspect", "abandon_1", "all"))
+        expect(bad_handoff.exit_code).to_equal(1)
+        expect(bad_handoff.response.contains("host-service-handoff-inspect-frame")).to_equal(true)
+        val unstarted = host_service_domain_turn_v3(domain, HostServiceRequestV2("host-service-handoff-inspect", "abandon_1", "pending"))
+        expect(unstarted.exit_code).to_equal(2)

@@ -10,6 +10,7 @@ int main(void) {
     assert(ws_origin_guard_v1() == 0);
     assert(rt_workspace_storage_release_if_absent_v1(99) == -EBADF);
     assert(rt_workspace_storage_forget_released_v1(99) == -EBADF);
+    assert(rt_workspace_storage_close_retained_v1(99) == -EBADF);
     WsSlotV1* first=&ws_slots_v1[0];
     WsSlotV1* second=&ws_slots_v1[1];
     first->token=1; first->role=1;
@@ -25,6 +26,15 @@ int main(void) {
     assert(rt_workspace_storage_forget_released_v1(1) == 0);
     assert(first->token == 0);
     assert(rt_workspace_storage_forget_released_v1(1) == -EBADF);
+    /* milestone_0047 close_retained: a loaned or released slot refuses; a retained, idle slot is freed. */
+    atomic_store(&second->busy,1);
+    assert(rt_workspace_storage_close_retained_v1(2) == -EBUSY);
+    atomic_store(&second->busy,0); second->released=1;
+    assert(rt_workspace_storage_close_retained_v1(2) == -EBUSY);
+    second->released=0;
+    assert(rt_workspace_storage_close_retained_v1(2) == 0);
+    assert(second->token == 0);
+    assert(rt_workspace_storage_close_retained_v1(2) == -EBADF);
     WsNativeV1 native={0}; int64_t used=17,inodes=19;
     assert(ws_native_observe_v1(&native,"leaf","pool","workspace",4096,&used,&inodes) == EBADF);
     assert(used == 17 && inodes == 19);

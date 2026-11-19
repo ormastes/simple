@@ -12,7 +12,8 @@
 #                      prepareDeadlineMs, reservationNonce, backend: llvm|cranelift|analysis, runtimeDigest}
 #                      (backend/runtimeDigest feed the buildrunner task context; prepareDeadlineMs is the HOST's
 #                      monotonic deadline, operator-observed: the controller cannot read the Host clock)
-#   host-inputs.sdn   {version:1, kind:"remote-run-host-inputs", image, launcherProgram, guestRoot, hostRoot,
+#   host-inputs.sdn   {version:1, kind:"remote-run-host-inputs", image, launcherProgram, guestRoot, hostRoot (the
+#                      provisioned workspace leaf; the per-run child is appended from the operation id),
 #                      containmentDigest, uid, gid, cpuMillis, memoryBytes, pidLimit, timeoutMs, profileDigest,
 #                      slotBindingDigest, preparationBudgetMs}. These are the host-installed N6-a projection inputs the
 #                      controller cannot observe. They are NOT trusted: a wrong value yields a byte mismatch the Host
@@ -29,6 +30,7 @@ use std.common.contracts.distributed_control_codec_v2.distributed_environment_di
 use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
 use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
 use std.common.contracts.container.execution_v2.ContainerMountProjectionV2
+use std.common.contracts.container.linux_workspace_profile_v1.linux_workspace_run_leaf_v1
 use std.common.contracts.container.execution_draft_v3.ContainerExecutionDraftV3
 use std.common.contracts.container.build_workspace_manifest_v1.{BuildWorkspaceManifestV1, BuildWorkspaceInvocationV1,
     build_workspace_manifest_encode_v1, build_workspace_invocation_encode_v1}
@@ -187,10 +189,12 @@ fn remote_run_input_v1(task: BuildTaskV1, path: text) -> Option<BuildInputV1>:
 
 # Authors request_bytes for the build arm exactly as the Host's N6-a projection expects
 # (linux_fresh_workspace_v3 expected request): launcher entrypoint, `--build-invocation-sha256 D`, terminal none,
-# keep-id uid/gid, containment digest and ONE read-write mount of the installed workspace root.
+# keep-id uid/gid, containment digest and ONE read-write mount of THIS run's own child of the installed workspace root
+# (milestone_0047: `hostRoot` names the provisioned leaf; the child is derived from the operation id, never operator text).
 pub fn remote_run_request_bytes_v1(task: BuildTaskV1, operation_id: text, inputs: RemoteRunHostInputsV1,
         invocation_digest: text) -> Result<(text, text), text>:
-    val mount = ContainerMountProjectionV2(host_root: inputs.host_root, guest_root: inputs.guest_root, read_only: false)
+    val mount = ContainerMountProjectionV2(host_root: inputs.host_root + "/" + linux_workspace_run_leaf_v1(operation_id),
+        guest_root: inputs.guest_root, read_only: false)
     val request = LinuxOciRequestV1(pod_uid: task.id, attempt: task.attempt, operation_id: operation_id, image: inputs.image,
         bundle_path: "", command: [inputs.launcher_program], args: ["--build-invocation-sha256", invocation_digest],
         timeout_ms: inputs.timeout_ms, cpu_limit_millis: inputs.cpu_millis, memory_limit_bytes: inputs.memory_bytes,

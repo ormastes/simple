@@ -6,15 +6,14 @@ use std.common.string_core.{str_len, string_to_int}
 @unsafe(reason: "native verified workspace quota/volume handle admission", capabilities: [ffi])
 extern fn rt_workspace_storage_open_v1(kind: text, parent: text, leaf: text, pool: text,
     workspace: text, quota: i64, hard_bytes: i64, policy: text) -> i64
-@unsafe(reason: "recover exact retained native cleanup authority; lease is not readiness", capabilities: [ffi])
-extern fn rt_workspace_storage_recover_v1(kind: text, parent: text, leaf: text, pool: text,
-    workspace: text, quota: i64, hard_bytes: i64, policy: text) -> i64
 @unsafe(reason: "copy actual native workspace identity and enforcement snapshot", capabilities: [ffi])
 extern fn rt_workspace_storage_observe_v1(token: i64) -> text
 @unsafe(reason: "verify exact disappearance and native release condition; never deletes data", capabilities: [ffi])
 extern fn rt_workspace_storage_release_if_absent_v1(token: i64) -> i64
 @unsafe(reason: "forget only retained native released receipt after host journal commit", capabilities: [ffi])
 extern fn rt_workspace_storage_forget_released_v1(token: i64) -> i64
+@unsafe(reason: "drop this process's hold of a retained native lease; closes descriptors only, never data or quota", capabilities: [ffi])
+extern fn rt_workspace_storage_close_retained_v1(token: i64) -> i64
 
 pub struct WorkspaceStorageLeaseV1:
     token: i64
@@ -81,18 +80,6 @@ pub fn workspace_storage_admit_v1(request: WorkspaceStorageRequestV1) -> Result<
     # observation must leave this lease available for reconciliation.
     Ok(WorkspaceStorageLeaseV1(token: token, request: request))
 
-# Recovery while the configured workspace still exists repeats real admission.
-# Missing workspace after process restart is conservative pending authority;
-# no copied receipt is used to fabricate a released native token.
-pub fn workspace_storage_recover_v1(request: WorkspaceStorageRequestV1) -> Result<WorkspaceStorageLeaseV1, text>:
-    if not workspace_storage_request_valid_v1(request): return Err("invalid-workspace-storage-request")
-    val token = unsafe(capabilities: [ffi]):
-        rt_workspace_storage_recover_v1(request.kind, request.protected_parent, request.leaf_name,
-            request.expected_pool_id, request.expected_workspace_id, request.quota_id,
-            request.hard_bytes, request.policy_digest)
-    if token <= 0: return Err("workspace-storage-native-recovery-pending:{token}")
-    Ok(WorkspaceStorageLeaseV1(token: token, request: request))
-
 pub fn workspace_storage_release_if_absent_v1(lease: WorkspaceStorageLeaseV1) -> Result<WorkspaceStorageReceiptV1, text>:
     val result = unsafe(capabilities: [ffi]): rt_workspace_storage_release_if_absent_v1(lease.token)
     if result != 0: return Err("workspace-storage-release-remains-unproven:{result}")
@@ -101,4 +88,11 @@ pub fn workspace_storage_release_if_absent_v1(lease: WorkspaceStorageLeaseV1) ->
 pub fn workspace_storage_forget_released_v1(lease: WorkspaceStorageLeaseV1) -> Result<(), text>:
     val result = unsafe(capabilities: [ffi]): rt_workspace_storage_forget_released_v1(lease.token)
     if result != 0: return Err("workspace-storage-native-release-not-retained:{result}")
+    Ok(())
+
+# milestone_0047: drop this process's hold of a RETAINED lease (descriptors closed exactly as process exit does). The
+# workspace, project id and quota stay; a later admission re-proves the leaf. A loaned or released lease refuses.
+pub fn workspace_storage_close_retained_v1(lease: WorkspaceStorageLeaseV1) -> Result<(), text>:
+    val result = unsafe(capabilities: [ffi]): rt_workspace_storage_close_retained_v1(lease.token)
+    if result != 0: return Err("workspace-storage-native-hold-not-dropped:{result}")
     Ok(())

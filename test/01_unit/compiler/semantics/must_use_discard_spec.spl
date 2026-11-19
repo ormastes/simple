@@ -158,3 +158,46 @@ describe "ROB-USE @must_use attribute and imported callees":
         val a = "fn quiet():\n    val q = 1\nfn caller():\n    quiet()\n"
         val b = "fn quiet():\n    val z = 2\n"
         expect(scan_import(a, "quiet", b, nil).len()).to_equal(0)
+
+# Module-key resolution fixture: `m0` imports `risky` from `path`; the scanned
+# set holds `others` (key -> source) alongside `m0`.
+fn scan_import_keys(path: text, keys: [text], srcs: [text]) -> [text]:
+    val pa = parse_full_frontend("fn risky():\n    val q = 1\nfn caller():\n    risky()\n", "m0.spl", "m0", Logger(level: 0))
+    var la = HirLowering.with_filename("m0.spl")
+    var ha = la.lower_module(pa)
+    var kept: Dict<SymbolId, HirFunction> = {}
+    for fkey in ha.functions.keys():
+        if ha.functions[fkey].name != "risky":
+            kept[fkey] = ha.functions[fkey]
+    ha.functions = kept
+    ha.imports = [HirImport(module_path: path, items: [HirImportItem(name: "risky", alias: nil, resolved: nil)], is_lazy: false, span: Span.empty())]
+    var modules: Dict<text, HirModule> = {"m0": ha}
+    var i = 0
+    for key in keys:
+        val pb = parse_full_frontend(srcs[i], key + ".spl", key, Logger(level: 0))
+        var lb = HirLowering.with_filename(key + ".spl")
+        modules[key] = lb.lower_module(pb)
+        i = i + 1
+    var out: [text] = []
+    for fd in must_use_discard_scan(modules, []):
+        out = out.push(fd.code + ":" + fd.function + ":" + fd.callee)
+    out
+
+describe "ROB-USE imported module resolution is exact or segment-bounded and deterministic":
+    val risky_src = "fn risky() -> Result<i64, text>:\n    Ok(1)\n"
+    val quiet_src = "fn risky():\n    val z = 2\n"
+
+    it "an exact key beats a shorter suffix key":
+        expect(scan_import_keys("pkg.util", ["util", "pkg.util"], [quiet_src, risky_src])).to_equal(["SPL-USE-001:caller:risky"])
+        expect(scan_import_keys("pkg.util", ["pkg.util", "util"], [risky_src, quiet_src])).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "the longest segment-boundary suffix wins":
+        expect(scan_import_keys("a.pkg.util", ["util", "pkg.util"], [quiet_src, risky_src])).to_equal(["SPL-USE-001:caller:risky"])
+
+    it "a partial-segment suffix does not match":
+        expect(scan_import_keys("pkg.myutil", ["util"], [risky_src]).len()).to_equal(0)
+
+    it "the longest suffix wins regardless of key order (two suffix candidates)":
+        expect(scan_import_keys("a.pkg.util", ["util", "pkg.util"], [quiet_src, risky_src])).to_equal(["SPL-USE-001:caller:risky"])
+        expect(scan_import_keys("a.pkg.util", ["pkg.util", "util"], [risky_src, quiet_src])).to_equal(["SPL-USE-001:caller:risky"])
+        expect(scan_import_keys("a.pkg.util", ["util", "myutil", "pkg.util"], [quiet_src, quiet_src, risky_src])).to_equal(["SPL-USE-001:caller:risky"])

@@ -13,6 +13,11 @@ order and names, not live behaviour.
 A failed pin names the contract that moved: phases, the Host-refusal arm, the no-resend archive or the single journal writer.
 """
 use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+# Tests reach the private state class and settle gate directly (repo rule: tests may access private).
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.{ControllerDispatchStateV3, dispatch_remote_settle_gate_v3,
+    controller_dispatch_remote_execute_key_v3}
+use std.nogc_sync_mut.orchestration.controller_local_root_v3.ControllerLocalRootV3
+use std.common.crypto.sha256.sha256_text
 
 val DISPATCH_SOURCE_V3 = "src/lib/nogc_sync_mut/orchestration/controller_dispatch_owner_v3.spl"
 
@@ -41,7 +46,12 @@ describe "controller dispatch remote mode (milestone_0030 C3)":
 
     it "never runs the Windows host status match in remote mode and uses the installed-binding status check":
         step("The remote branch of the status phase returns before controller_dispatch_host_status_match_v3")
-        val accept = dispatch_fn_body_v3(dispatch_source_v3(), "fn dispatch_accept_v3(")
+        # milestone_0045: measured inside the STATUS phase only. The remote-build refusal arm (milestone_0043) and the
+        # host-action arm (milestone_0046) also name `owner.mode == "remote"` and precede it, so a whole-body index was
+        # never the status-phase order this pins (it could not pass after milestone_0043).
+        val body = dispatch_fn_body_v3(dispatch_source_v3(), "fn dispatch_accept_v3(")
+        expect(body.index_of("if owner.phase == \"status\":") >= 0).to_equal(true)
+        val accept = body.substring(body.index_of("if owner.phase == \"status\":"), body.byte_len())
         val remote_at = accept.index_of("owner.mode == \"remote\"")
         val match_at = accept.index_of("controller_dispatch_host_status_match_v3(")
         val installed_at = accept.index_of("dispatch_service_status_v3(")
@@ -128,3 +138,47 @@ describe "controller dispatch remote mode (milestone_0030 C3)":
         val retain_at = admit.index_of("dispatch_retain_v3(owner, Ok(admitted.store))")
         val error_at = admit.index_of("admitted.error")
         expect(retain_at >= 0 and error_at > retain_at).to_equal(true)
+
+# ---- milestone_0043 (opus re-review P1-1): the post-failure settle ----
+fn settle_state_v3(mode: text, phase: text, with_root: bool, op: text) -> ControllerDispatchStateV3:
+    var owner = ControllerDispatchStateV3(root: if with_root: Some(ControllerLocalRootV3()) else: None, uid: op, mode: mode)
+    owner.phase = phase
+    owner.remote_op = op
+    owner.error = if phase == "cleanup": "double-execute-down" else: ""
+    owner
+
+describe "controller dispatch remote settle (milestone_0043 P1-1)":
+    it "admits the settle on a ready, a failed (cleanup) and a timed-out (still pending) remote owner":
+        step("The ready-only edit gate refused all but the first; the settle gate is phase-independent")
+        for phase in ["ready", "cleanup", "remote-build", "execute"]:
+            expect(dispatch_remote_settle_gate_v3(settle_state_v3("remote", phase, true, "operation_a"))).to_equal("")
+
+    it "refuses the settle outside remote mode, without a root or without an operation":
+        expect(dispatch_remote_settle_gate_v3(settle_state_v3("dispatch", "cleanup", true, "operation_a"))).to_equal("dispatch-remote-settle-mode")
+        expect(dispatch_remote_settle_gate_v3(settle_state_v3("remote", "cleanup", false, "operation_a"))).to_equal("dispatch-remote-settle-root")
+        expect(dispatch_remote_settle_gate_v3(settle_state_v3("remote", "cleanup", true, ""))).to_equal("dispatch-remote-settle-operation")
+
+    it "abandons only the pending exchange, then edits through the root's single writer and keeps the phase":
+        step("Never the reader or the root (closing those is the command's local cleanup), never a resend")
+        val settle = dispatch_fn_body_v3(dispatch_source_v3(), "fn dispatch_state_remote_settle_v3(")
+        val gate_at = settle.index_of("dispatch_remote_settle_gate_v3(owner)")
+        val close_at = settle.index_of("host_service_auth_exchange_close_v6(")
+        val store_at = settle.index_of("owner.root.unwrap().workload_v3()")
+        val edit_at = settle.index_of("controller_workload_store_edit_journal_v1(")
+        val retain_at = settle.index_of("retain_v3(edited.store)")
+        val verdict_at = settle.index_of("CONTROLLER_DISPATCH_EDIT_REFUSED_V3")
+        expect(gate_at >= 0 and close_at > gate_at and store_at > close_at).to_equal(true)
+        expect(edit_at > store_at and retain_at > edit_at and verdict_at > retain_at).to_equal(true)
+        expect(settle.contains("host_service_ready_reader_close_v1")).to_equal(false)
+        expect(settle.contains("controller_local_root_close_v3")).to_equal(false)
+        expect(settle.contains("dispatch_send_v3(")).to_equal(false)
+        expect(settle.contains("owner.phase =")).to_equal(false)
+        step("An abandon the lower API cannot confirm refuses the settle (the exchange is still owned)")
+        expect(settle.contains("dispatch-remote-settle-exchange-open")).to_equal(true)
+
+    it "publishes the settle entry point and names the execute archive by one helper":
+        val source = dispatch_source_v3()
+        expect(source.contains("pub fn controller_dispatch_remote_settle_v3(")).to_equal(true)
+        expect(controller_dispatch_remote_execute_key_v3("operation_a")).to_equal("controller-remote-execute-v3/" + sha256_text("operation_a") + ".sdn")
+        val send = dispatch_fn_body_v3(source, "fn dispatch_state_remote_send_v3(")
+        expect(send.contains("controller_dispatch_remote_execute_key_v3(owner.remote_op)")).to_equal(true)

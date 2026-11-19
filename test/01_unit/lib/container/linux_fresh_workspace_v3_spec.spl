@@ -28,6 +28,9 @@ use std.common.contracts.container.runtime_v1.{RuntimeExitStatusV1, runtime_exit
 use std.common.contracts.container.workspace_action_v3.ContainerWorkspaceActionV3
 use std.nogc_sync_mut.container.machine_fresh_workspace_workflow_v3.workspace_workflow_effect_v3
 
+# milestone_0047: the run's own child of the provisioned leaf is the one workspace mount.
+val FW_RUN_ROOT: text = "/srv/workspaces/slot_1/" + linux_workspace_run_leaf_v1("operation_1")
+
 fn workspace_policy_data_v3() -> LinuxWorkspaceInstalledProfileV1:
     LinuxWorkspaceInstalledProfileV1(machine_policy_digest: "a".repeat(64), provider_policy_digest: "b".repeat(64),
         containment_profile_digest: "c".repeat(64), protected_parent: "/srv/workspaces", leaf_name: "slot_1",
@@ -65,7 +68,7 @@ fn workspace_command_data_v3() -> LinuxFreshWorkspaceCommandV3:
         network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true, working_directory: policy.guest_root,
         terminal_mode: "tty", user_uid: 20001, user_gid: 20001, user_namespace_mode: "keep-id",
         containment_profile_digest: policy.containment_profile_digest,
-        mounts: [ContainerMountProjectionV2(host_root: "/srv/workspaces/slot_1", guest_root: policy.guest_root, read_only: false)])
+        mounts: [ContainerMountProjectionV2(host_root: FW_RUN_ROOT, guest_root: policy.guest_root, read_only: false)])
     val scope = ContainerHostScopeV2(physical_host_id: "host_1", service_scope_id: "epoch-" + "9".repeat(64),
         boot_id: "boot_1", provider_generation: 7, native_machine_id: "f".repeat(32), continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot_1")
     val plan = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: native.pod_uid, attempt: native.attempt,
@@ -104,12 +107,12 @@ fn workspace_created_data_v3(command: LinuxFreshWorkspaceCommandV3) -> JsonValue
     value = json_value_object_set(value, "security_options", json_value_str_array(["no-new-privileges"]))
     value = json_value_object_set(value, "create_command", json_value_str_array(["/usr/bin/podman", "create"]))
     var mount = JsonValue.Object([], [])
-    for pair in [("Type", "bind"), ("Source", "/srv/workspaces/slot_1"), ("Destination", "/workspace"), ("Driver", ""), ("Mode", ""), ("Propagation", "rprivate")]:
+    for pair in [("Type", "bind"), ("Source", FW_RUN_ROOT), ("Destination", "/workspace"), ("Driver", ""), ("Mode", ""), ("Propagation", "rprivate")]:
         mount = json_value_object_set(mount, pair.0, JsonValue.Str(pair.1))
     mount = json_value_object_set(mount, "Options", json_value_str_array(["rbind", "nosuid", "nodev"]))
     mount = json_value_object_set(mount, "RW", JsonValue.Bool(true))
     value = json_value_object_set(value, "mounts", JsonValue.Array([mount]))
-    value = json_value_object_set(value, "binds", json_value_str_array(["/srv/workspaces/slot_1:/workspace:rw,rbind,rprivate,nosuid,nodev"]))
+    value = json_value_object_set(value, "binds", json_value_str_array([FW_RUN_ROOT + ":/workspace:rw,rbind,rprivate,nosuid,nodev"]))
     value
 
 describe "Explicit Linux workspace policy and request DATA v3":
@@ -163,7 +166,7 @@ describe "Explicit Linux workspace policy and request DATA v3":
         val value = workspace_command_data_v3()
         val args = linux_fresh_workspace_argv_v3(workspace_epoch_data_v3(), workspace_policy_data_v3(), workspace_primary_data_v3(), "8".repeat(64), 20001, 20001, value).unwrap()
         for item in ["--tty", "--interactive", "--userns=keep-id", "--user=20001:20001", "--pull=never", "--read-only", "--cap-drop=ALL",
-                "type=bind,src=/srv/workspaces/slot_1,dst=/workspace,rw,nosuid,nodev,bind-propagation=rprivate"]:
+                "type=bind,src=" + FW_RUN_ROOT + ",dst=/workspace,rw,nosuid,nodev,bind-propagation=rprivate"]:
             expect(args.contains(item)).to_equal(true)
         expect(args[args.len() - 2]).to_equal("--invocation-manifest-sha256")
         expect(args[args.len() - 1]).to_equal("8".repeat(64))
@@ -220,14 +223,14 @@ describe "Explicit Linux workspace policy and request DATA v3":
         command.command.native_id = "3".repeat(64)
         val original = workspace_created_data_v3(command)
         var mount = JsonValue.Object([], [])
-        for pair in [("Type", "bind"), ("Source", "/srv/workspaces/slot_1"), ("Destination", "/workspace"), ("Driver", ""), ("Mode", ""), ("Propagation", "rprivate")]:
+        for pair in [("Type", "bind"), ("Source", FW_RUN_ROOT), ("Destination", "/workspace"), ("Driver", ""), ("Mode", ""), ("Propagation", "rprivate")]:
             mount = json_value_object_set(mount, pair.0, JsonValue.Str(pair.1))
         mount = json_value_object_set(mount, "Options", json_value_str_array(["rbind"]))
         mount = json_value_object_set(mount, "RW", JsonValue.Bool(true))
         val no_flags = json_value_object_set(json_value_object_set(original, "mounts", JsonValue.Array([mount])),
-            "binds", json_value_str_array(["/srv/workspaces/slot_1:/workspace:rw,rbind,rprivate"]))
+            "binds", json_value_str_array([FW_RUN_ROOT + ":/workspace:rw,rbind,rprivate"]))
         expect(linux_fresh_workspace_created_config_validate_v3(workspace_policy_data_v3(), workspace_primary_data_v3(), "8".repeat(64), 20001, 20001, command, json_value_serialize(no_flags)).is_err()).to_equal(true)
-        val bind_only_nosuid = json_value_object_set(original, "binds", json_value_str_array(["/srv/workspaces/slot_1:/workspace:rw,rbind,rprivate,nosuid"]))
+        val bind_only_nosuid = json_value_object_set(original, "binds", json_value_str_array([FW_RUN_ROOT + ":/workspace:rw,rbind,rprivate,nosuid"]))
         expect(linux_fresh_workspace_created_config_validate_v3(workspace_policy_data_v3(), workspace_primary_data_v3(), "8".repeat(64), 20001, 20001, command, json_value_serialize(bind_only_nosuid)).is_err()).to_equal(true)
         val good = "36 35 98:0 / /workspace rw,nosuid,nodev,relatime shared:1 - xfs /dev/sda1 rw,attr2"
         expect(linux_fresh_workspace_mountinfo_validate_v3(good, "/workspace", 36).is_ok()).to_equal(true)

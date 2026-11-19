@@ -1,0 +1,192 @@
+# milestone_0045 (owner decision 1, second half): the controller-signed ABANDON of a remote-run row whose outcome stayed
+# unknown after its signed window ended. `remote-run resume` re-collects only while the run's own grant and approval are
+# valid; past min(approval, grant) expiry nothing the Host says can end the row any more (except the late reset-failure
+# receipt), so the operator abandons it: the controller issues a `remote-run-abandon` grant+approval with its existing
+# issuer and approver keys (controller_host_action_issue_v1, host-action class) whose payload digest is the row's own
+# envelope digest, and the edit verifies it INSIDE the root's single journal writer turn:
+#   issuer == controller id, the host-action class, distributed_verify_grant_approval_from_snapshot_v2 at the grant clock
+#   (generation, policy revision, revocation, session generation), payload digest == the row's envelope digest, and the
+#   run's archived open record proves its signed window ended (refused while the original grant could still be resumed).
+# It publishes a create-only record and settles the row `failed` bound to its digest. There is NO Host effect: no
+# dispatch begin, no frame; the Host's own retained run is unaffected. `failed` is reached only through this verified
+# edit, never through remote_run_settle_v1 (whose states stay {cancelled, outcome-unknown}). A run admitted before the
+# open-record archive existed cannot be abandoned (`remote-run-abandon-unarchived`, named gap).
+use app.orchestrator.controller_authority_issue_v1.{controller_host_action_issue_v1, controller_host_action_class_v1,
+    controller_authority_store_reader_v1}
+use app.orchestrator.remote_build_service_port_v3.remote_build_open_record_decode_v3
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use std.nogc_sync_mut.orchestration.workload_store_v1.{ControllerJournalEditV1, controller_workload_store_remote_open_key_v1,
+    controller_workload_store_edit_journal_v1}
+use std.nogc_sync_mut.orchestration.controller_local_root_v3.{ControllerLocalRootV3, controller_local_root_open_v3}
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.controller_dispatch_grant_clock_v1
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{DistributedAuthoritySnapshotV2,
+    distributed_authority_snapshot_key_v2, distributed_verify_grant_approval_from_snapshot_v2}
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_lookup_v2,
+    distributed_operation_journal_commit_v2, distributed_operation_journal_publish_v3, distributed_operation_journal_read_required_v3,
+    distributed_operation_journal_read_v3}
+use std.common.contracts.distributed_operation_state_v2.distributed_operation_transition_v2
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_grant_digest_v2}
+use std.common.contracts.distributed_authority_codec_v2.distributed_encode_signed_approval_v2
+use std.common.build_manager.codec.builder_wire_line_v1
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+val REMOTE_RUN_ABANDON_KIND_V1 = "remote-run-abandon"
+
+# The installed facts the verifying edit needs (from the root's current context, never from an operator file).
+pub struct RemoteRunAbandonFactsV1:
+    snapshot: DistributedAuthoritySnapshotV2
+    session_generation: i64
+    controller_id: text
+
+fn remote_run_abandon_refused_v1(journal: DistributedOperationJournalV2, code: text) -> ControllerJournalEditV1:
+    ControllerJournalEditV1(journal: journal, result: "", error: code)
+
+pub fn remote_run_abandon_record_v1(operation: OperationEnvelopeV2, signed: DistributedSignedGrantV2,
+        approval: DistributedSignedApprovalV2) -> Result<text, text>:
+    var wire = builder_wire_line_v1("SIMPLE-REMOTE-RUN-ABANDON-1")
+    for field in [operation.id, operation.payload_digest, sha256_text(distributed_encode_operation_v2(operation)?),
+            distributed_grant_digest_v2(signed.grant)?, sha256_text(distributed_encode_signed_approval_v2(approval)?)]:
+        wire = wire + builder_wire_line_v1(field)
+    Ok(wire)
+
+# The verifying journal edit. Result `failed:<record digest>`; a repeat abandon (same or fresh pair, while that pair is
+# itself valid) answers the same result.
+pub fn remote_run_abandon_apply_v1(facts: RemoteRunAbandonFactsV1, signed: DistributedSignedGrantV2,
+        approval: DistributedSignedApprovalV2, operation: OperationEnvelopeV2, now: i64,
+        journal: DistributedOperationJournalV2) -> ControllerJournalEditV1:
+    if signed.issuer_id != facts.controller_id: return remote_run_abandon_refused_v1(journal, "remote-run-abandon-issuer")
+    if operation.operation != REMOTE_RUN_ABANDON_KIND_V1: return remote_run_abandon_refused_v1(journal, "remote-run-abandon-kind")
+    val approver = distributed_authority_snapshot_key_v2(facts.snapshot, "human-approver", approval.approver_id)
+    if approver.is_err(): return remote_run_abandon_refused_v1(journal, approver.unwrap_err())
+    val class = controller_host_action_class_v1(approver.unwrap(), signed.grant, operation, approval.expires_at, now)
+    if class != "": return remote_run_abandon_refused_v1(journal, class)
+    val verified = distributed_verify_grant_approval_from_snapshot_v2(facts.snapshot, signed, approval, operation, now,
+        facts.snapshot.generation, facts.snapshot.policy_revision, facts.snapshot.revocation_epoch, facts.session_generation)
+    if verified.is_err(): return remote_run_abandon_refused_v1(journal, verified.unwrap_err())
+    val prior = distributed_operation_journal_lookup_v2(journal, operation.id)
+    if prior.is_err():
+        return remote_run_abandon_refused_v1(journal, if prior.unwrap_err() == "OPERATION_NOT_FOUND": "remote-run-abandon-row-missing" else: prior.unwrap_err())
+    val row = prior.unwrap()
+    if operation.payload_digest != row.envelope_digest: return remote_run_abandon_refused_v1(journal, "remote-run-abandon-row-digest")
+    val archived = distributed_operation_journal_read_v3(journal, controller_workload_store_remote_open_key_v1(operation.id), 262144)
+    if archived.is_err(): return remote_run_abandon_refused_v1(journal, archived.unwrap_err())
+    if archived.unwrap().is_none(): return remote_run_abandon_refused_v1(journal, "remote-run-abandon-unarchived")
+    val open = remote_build_open_record_decode_v3(archived.unwrap().unwrap())
+    if open.is_err(): return remote_run_abandon_refused_v1(journal, open.unwrap_err())
+    val archived_request = distributed_encode_operation_v2(open.unwrap().request)
+    if archived_request.is_err() or archived_request.unwrap() != row.envelope:
+        return remote_run_abandon_refused_v1(journal, "remote-run-abandon-archive-differs")
+    var end = open.unwrap().approval.expires_at
+    if open.unwrap().signed.grant.expires_at < end: end = open.unwrap().signed.grant.expires_at
+    if now < end: return remote_run_abandon_refused_v1(journal, "remote-run-abandon-window-open")
+    val record = remote_run_abandon_record_v1(operation, signed, approval)
+    if record.is_err(): return remote_run_abandon_refused_v1(journal, record.unwrap_err())
+    val digest = sha256_text(record.unwrap())
+    if row.state == "failed" and row.outcome_digest == digest:
+        return ControllerJournalEditV1(journal: journal, result: "failed:" + digest, error: "")
+    # A retry after a lost reply carries a FRESH pair (new expiry, new digest): the row is answered as abandoned only
+    # when its outcome digest names an abandon record of THIS operation (content-addressed, read back and re-hashed);
+    # a row some other path made terminal stays refused.
+    if row.state == "failed":
+        val earlier = distributed_operation_journal_read_v3(journal, "controller-remote-abandon-v1/" + row.outcome_digest + ".sdn", 4096)
+        if earlier.is_ok() and earlier.unwrap().is_some() and sha256_text(earlier.unwrap().unwrap()) == row.outcome_digest and
+                earlier.unwrap().unwrap().starts_with(builder_wire_line_v1("SIMPLE-REMOTE-RUN-ABANDON-1") + builder_wire_line_v1(operation.id)):
+            return ControllerJournalEditV1(journal: journal, result: "failed:" + row.outcome_digest, error: "")
+    if row.state != "executing" and row.state != "outcome-unknown":
+        return remote_run_abandon_refused_v1(journal, "remote-run-abandon-row-state")
+    # The record is published (create-only, content-addressed) and read back BEFORE the row may reference its digest.
+    val key = "controller-remote-abandon-v1/" + digest + ".sdn"
+    val published = distributed_operation_journal_publish_v3(journal, key, record.unwrap())
+    if published.is_err(): return remote_run_abandon_refused_v1(journal, published.unwrap_err())
+    val back = distributed_operation_journal_read_required_v3(journal, key, 4096)
+    if back.is_err() or back.unwrap() != record.unwrap(): return remote_run_abandon_refused_v1(journal, "remote-run-abandon-record-readback")
+    # A transition/commit failure below leaves the create-only record unreferenced: harmless, reachable only by digest.
+    val next = distributed_operation_transition_v2(row, "failed", digest)
+    if next.is_err(): return remote_run_abandon_refused_v1(journal, next.unwrap_err())
+    val committed = distributed_operation_journal_commit_v2(journal, next.unwrap())
+    if committed.is_err(): return remote_run_abandon_refused_v1(journal, committed.unwrap_err())
+    ControllerJournalEditV1(journal: committed.unwrap(), result: "failed:" + digest, error: "")
+
+# `remote-run abandon --dispatch-root R --config-digest D --key-store K --approver A --operation O --grant-id G
+# --expires-in-ms T`: no Host contact. Reads the row and the open archive (read-only) to bind the request, issues the pair,
+# then runs the verifying edit on the root's retained store and hands the root back for cleanup.
+val REMOTE_RUN_ABANDON_OPTIONS_V1 = ["--dispatch-root", "--config-digest", "--key-store", "--approver", "--operation",
+    "--grant-id", "--expires-in-ms"]
+
+fn remote_run_abandon_reply_v1(exit_code: i64, state: text, operation_id: text, digest: text, detail: text,
+        root: Option<ControllerLocalRootV3>) -> OrchestratorValidationReplyV1:
+    var line = detail
+    val at = line.index_of("\n")
+    if at >= 0: line = line.substring(0, at)
+    if line.byte_len() > 256: line = line.substring(0, 256)
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("remote-run-abandon"),
+        "state": SdnValue.String(state), "operationId": SdnValue.String(operation_id), "digest": SdnValue.String(digest),
+        "detail": SdnValue.String(line)}
+    var reply = OrchestratorValidationReplyV1(exit_code: exit_code, output: sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+    reply.controller_root_cleanup = root
+    reply
+
+fn remote_run_abandon_ttl_v1(value: text) -> Result<i64, text>:
+    if value.byte_len() < 1 or value.byte_len() > 8: return Err("remote-run-abandon-ttl")
+    var total: i64 = 0
+    for index in 0..value.byte_len():
+        val digit = "0123456789".index_of(value.substring(index, index + 1))
+        if digit < 0: return Err("remote-run-abandon-ttl")
+        total = total * 10 + digit
+    Ok(total)
+
+pub fn remote_run_abandon_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
+    if args.len() != 2 + 2 * REMOTE_RUN_ABANDON_OPTIONS_V1.len(): return remote_run_abandon_reply_v1(2, "refused", "", "", "remote-run-usage", None)
+    var options: Dict<text, text> = {}
+    var index = 2
+    while index + 1 < args.len():
+        val name = args[index]
+        if not REMOTE_RUN_ABANDON_OPTIONS_V1.contains(name) or options.contains_key(name) or args[index + 1].starts_with("--"):
+            return remote_run_abandon_reply_v1(2, "refused", "", "", "remote-run-usage", None)
+        options[name] = args[index + 1]
+        index = index + 2
+    val operation_id = options["--operation"]
+    if not builder_digest_valid_v1(options["--config-digest"]) or not builder_identifier_valid_v1(options["--approver"]) or
+            not builder_identifier_valid_v1(options["--grant-id"]) or not builder_identifier_valid_v1(operation_id):
+        return remote_run_abandon_reply_v1(2, "refused", "", "", "remote-run-usage", None)
+    val ttl = remote_run_abandon_ttl_v1(options["--expires-in-ms"])
+    if ttl.is_err(): return remote_run_abandon_reply_v1(2, "refused", operation_id, "", ttl.unwrap_err(), None)
+    val opened = controller_local_root_open_v3(options["--dispatch-root"], options["--config-digest"])
+    if not opened.ready or opened.owner.is_none() or opened.error != "":
+        return remote_run_abandon_reply_v1(1, "refused", operation_id, "", if opened.error != "": opened.error else: "remote-run-root-unavailable", None)
+    var root = opened.owner.unwrap()
+    val current = root.current_v3()
+    if current.is_err(): return remote_run_abandon_reply_v1(1, "refused", operation_id, "", current.unwrap_err(), Some(root))
+    val context = current.unwrap()
+    val store = root.workload_v3()
+    if store.is_err(): return remote_run_abandon_reply_v1(1, "refused", operation_id, "", store.unwrap_err(), Some(root))
+    val row = distributed_operation_journal_lookup_v2(store.unwrap().journal, operation_id)
+    if row.is_err(): return remote_run_abandon_reply_v1(1, "refused", operation_id, "", "remote-run-abandon-row-missing", Some(root))
+    val archived = distributed_operation_journal_read_v3(store.unwrap().journal, controller_workload_store_remote_open_key_v1(operation_id), 262144)
+    if archived.is_err() or archived.unwrap().is_none():
+        return remote_run_abandon_reply_v1(1, "refused", operation_id, "", "remote-run-abandon-unarchived", Some(root))
+    val open = remote_build_open_record_decode_v3(archived.unwrap().unwrap())
+    if open.is_err(): return remote_run_abandon_reply_v1(1, "refused", operation_id, "", open.unwrap_err(), Some(root))
+    val now = controller_dispatch_grant_clock_v1()
+    if now.is_err(): return remote_run_abandon_reply_v1(1, "refused", operation_id, "", now.unwrap_err(), Some(root))
+    val issued = controller_host_action_issue_v1(context, controller_authority_store_reader_v1(options["--key-store"]),
+        options["--approver"], REMOTE_RUN_ABANDON_KIND_V1, operation_id, row.unwrap().envelope_digest,
+        open.unwrap().signed.grant.host_id, options["--grant-id"], ttl.unwrap(), now.unwrap())
+    if issued.is_err(): return remote_run_abandon_reply_v1(1, "refused", operation_id, "", issued.unwrap_err(), Some(root))
+    val authority = issued.unwrap()
+    val facts = RemoteRunAbandonFactsV1(snapshot: context.policy.snapshot, session_generation: context.policy.session_generation,
+        controller_id: context.config.controller_id)
+    val edited = controller_workload_store_edit_journal_v1(store.unwrap(), \journal: remote_run_abandon_apply_v1(facts,
+        authority.authority.signed, authority.authority.approval, authority.operation, now.unwrap(), journal))
+    # The journal the edit ended with is ALWAYS retained (single writer), even when it refused after advancing it.
+    val retained = root.retain_v3(edited.store)
+    if retained.is_err(): return remote_run_abandon_reply_v1(1, "refused", operation_id, "", retained.unwrap_err(), Some(root))
+    if edited.error != "": return remote_run_abandon_reply_v1(1, "refused", operation_id, "", edited.error, Some(root))
+    remote_run_abandon_reply_v1(0, "abandoned", operation_id, edited.result.substring(7, edited.result.byte_len()), "", Some(root))
+
+export RemoteRunAbandonFactsV1, remote_run_abandon_record_v1, remote_run_abandon_apply_v1, remote_run_abandon_command_v1

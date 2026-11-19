@@ -15,11 +15,10 @@
 //
 // WHY THE PROFILES COME FROM THE HOST and the kernel is not three passes of
 // blur_rect.comp: emu_draw_shadow_rect's coverage field is SEPARABLE —
-// cov = ((prof_x[px] * prof_y[py]) / 255 * shadow_a) / 255 — where each profile
-// is _emu_box_blur_1d applied three times to a 1-D step, with ONE truncating
-// integer division per pass per sample. Running a 2-D box blur three times
-// instead divides by (2r+1)^2 per pass and truncates on a different quantity,
-// so it is NOT the same integer field. The profiles are O(mw + mh) host work
+// cov = ((prof_x[px] * prof_y[py] + 127) / 255 * shadow_a + 127) / 255 — where each profile
+// is Skia's blurred step (engine2d_blur_step_profile, rounded integer box
+// passes). Running blur_rect.comp over a 2-D coverage image instead rounds a
+// different quantity, so it is NOT the same integer field. The profiles are O(mw + mh) host work
 // (two 1-D arrays, no pixel loop) and are uploaded into the tail of the same
 // buffer the kernel writes, which keeps the whole frame GPU-resident: no
 // readback, no host pixel loop, and the dispatch is recorded into the frame's
@@ -66,8 +65,8 @@ void main() {
 
     int cov_x = int(dst.data[uint(pc.prof_off + px)]);
     int cov_y = int(dst.data[uint(pc.prof_off + pc.mw + py)]);
-    // Same expression, same left-to-right truncating divisions as the twin.
-    int cov = ((cov_x * cov_y) / 255 * pc.shadow_a) / 255;
+    // Same expression, same left-to-right rounding divisions as the twin.
+    int cov = ((cov_x * cov_y + 127) / 255 * pc.shadow_a + 127) / 255;
 
     uint outv = dstv;
     uint da = (dstv >> 24u) & 255u;

@@ -6829,6 +6829,30 @@ impl MirLowering:
             self.error_fatal("unresolved ownership type at constructor storage transfer", Some(source.span))
         false
     me lower_struct_construct(symbol: SymbolId, fallback_struct_name: text, args: [HirCallArg]) -> LocalId:
+        """Construct, then range-check a constrained unit whose single operand
+        is NOT a plain name: the operand is evaluated exactly once (by the
+        construction) and its stored payload word is checked afterwards, so a
+        side-effecting operand is never re-lowered."""
+        val constructed = self.lower_struct_construct_core(symbol, fallback_struct_name, args)
+        if args.len() == 1 and not self.hir_expr_is_pure_name_v1(args[0].value):
+            val unit_decl_name = self.symbols.symbol_name_scalar_raw(symbol.id)
+            if unit_decl_name != "" and unit_constraint_find(unit_decl_name) >= 0:
+                self.emit_unit_range_check_on_constructed_v1(constructed, args[0].value, unit_decl_name)
+        constructed
+
+    me emit_unit_range_check_on_constructed_v1(constructed: LocalId, operand: HirExpr, unit_name: text):
+        var payload_type = MirType.i64()
+        if operand.has_type_ == true and operand.type_ != None:
+            val operand_type = self.lower_type(operand.type_)
+            payload_type = operand_type
+        var word = constructed
+        if not self.local_is_integer_scalar_v1(constructed):
+            var b = self.builder
+            word = b.emit_load(mir_operand_copy(constructed), payload_type)
+            self.builder = b
+        self.emit_unit_range_check_by_name_v1(word, unit_name)
+
+    me lower_struct_construct_core(symbol: SymbolId, fallback_struct_name: text, args: [HirCallArg]) -> LocalId:
         """Lower `Point(x:3, y:4)` (or `Point{...}`) into an aggregate: one i64
         word per field, in declared field order. Named args are matched by name;
         otherwise falls back to positional order. Yields a pointer to the

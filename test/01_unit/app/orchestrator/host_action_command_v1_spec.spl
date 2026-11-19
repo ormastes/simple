@@ -1,0 +1,149 @@
+"""
+## Purpose and audience
+milestone_0046: the controller operator commands `helper-abandon` and `handoff-abandon`. Phase 1 reads the Host's
+inspect over the authenticated `host-control` exchange and prints the exact record (and its sha256) that would be signed;
+phase 2 (`--confirm <sha256>`) re-reads it, refuses unless the digest is the confirmed one, signs it with the controller
+issuer and approver keys and delivers it. Written for operators and owners of the controller orchestrator.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`. Status: AUTHORED, NOT_RUN (no runnable
+binary when written, 2026-11-19).
+## Compatibility and limitations
+The live exchange needs an installed controller root and Host; these scenarios cover the pure option, record, confirm
+and refusal helpers and pin the command's order (inspect, confirm, issue, send; nothing settled from Host text).
+## Verification guidance and troubleshooting
+A failed scenario names the moved contract: option shape, record binding, confirm gate or command order.
+"""
+use std.spec.{describe, it, expect, fail}
+use std.io.file_read_text
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.orchestration.host_helper_abandon_v1.{HostHelperAbandonV1, host_helper_abandon_bytes_v1,
+    HOST_HELPER_ABANDON_WIRE_V1, HOST_HELPER_ABANDON_CUSTODY_V1}
+use std.common.contracts.orchestration.host_service_handoff_v1.{HostServiceHandoffAbandonV1, host_service_handoff_abandon_bytes_v1,
+    HOST_SERVICE_HANDOFF_ABANDON_WIRE_V1}
+use std.common.contracts.orchestration.host_control_operation_v6.host_control_sub_decode_v6
+use std.common.contracts.orchestration.host_service_operation_reply_v6.{HostServiceOperationReplyV6,
+    host_service_operation_reply_encode_v6}
+use std.common.contracts.orchestration.host_retention_release_v1.{HostRetentionReleaseV1, host_retention_release_bytes_v1,
+    host_retention_release_decode_v1, HOST_RETENTION_RELEASE_WIRE_V1}
+use app.orchestrator.host_action_command_v1.{host_action_options_v1, host_action_inspect_payload_v1,
+    host_action_record_check_v1, host_action_confirm_v1, host_action_refused_detail_v1, host_action_retention_record_v1}
+
+val HAC_BASE_V1: [text] = ["--dispatch-root", "/srv/ctl", "--config-digest", "a".repeat(64), "--abandon-id", "abandon_1"]
+val HAC_SIGN_V1: [text] = ["--confirm", "b".repeat(64), "--key-store", "/srv/keys", "--approver", "approver_1",
+    "--grant-id", "grant_1", "--expires-in-ms", "600000"]
+
+fn hac_helper_record_v1(operation_id: text, host: text) -> text:
+    host_helper_abandon_bytes_v1(HostHelperAbandonV1(wire_version: HOST_HELPER_ABANDON_WIRE_V1, operation_id: operation_id,
+        operation_digest: "c".repeat(64), request_digest: "d".repeat(64), prepared_receipt_digest: "e".repeat(64),
+        observed: "state=executing;pc=0;pa=1;n=0;r=0;x=0;o=0;rm=0;xm=0;store=valid", custody: HOST_HELPER_ABANDON_CUSTODY_V1,
+        physical_host_id: host)).unwrap()
+
+fn hac_handoff_record_v1(host: text) -> text:
+    host_service_handoff_abandon_bytes_v1(HostServiceHandoffAbandonV1(wire_version: HOST_SERVICE_HANDOFF_ABANDON_WIRE_V1,
+        sequence: 3, pending_digest: "f".repeat(64), physical_host_id: host)).unwrap()
+
+describe "host-action command options (milestone_0046)":
+    it "accepts the plan form and the confirm form, nothing in between":
+        val plan = host_action_options_v1(["helper-abandon"] + HAC_BASE_V1 + ["--operation", "helper_op_1"])
+        expect(plan.is_ok()).to_equal(true)
+        expect(plan.unwrap().contains_key("--confirm")).to_equal(false)
+        expect(host_action_options_v1(["helper-abandon"] + HAC_BASE_V1 + ["--operation", "helper_op_1"] + HAC_SIGN_V1).is_ok()).to_equal(true)
+        expect(host_action_options_v1(["handoff-abandon"] + HAC_BASE_V1).is_ok()).to_equal(true)
+        expect(host_action_options_v1(["handoff-abandon"] + HAC_BASE_V1 + HAC_SIGN_V1).is_ok()).to_equal(true)
+        step("A partial signing set, a missing or extra --operation, duplicates and unknown names are usage errors")
+        expect(host_action_options_v1(["handoff-abandon"] + HAC_BASE_V1 + ["--confirm", "b".repeat(64)]).unwrap_err()).to_equal("host-action-usage")
+        expect(host_action_options_v1(["helper-abandon"] + HAC_BASE_V1).unwrap_err()).to_equal("host-action-usage")
+        expect(host_action_options_v1(["handoff-abandon"] + HAC_BASE_V1 + ["--operation", "helper_op_1"]).unwrap_err()).to_equal("host-action-usage")
+        expect(host_action_options_v1(["handoff-abandon"] + HAC_BASE_V1 + ["--abandon-id", "abandon_2"]).unwrap_err()).to_equal("host-action-usage")
+        expect(host_action_options_v1(["handoff-abandon"] + HAC_BASE_V1 + ["--force", "1"]).unwrap_err()).to_equal("host-action-usage")
+        expect(host_action_options_v1(["handoff-abandon", "--dispatch-root", "/srv/ctl", "--config-digest", "short",
+            "--abandon-id", "abandon_1"]).unwrap_err()).to_equal("host-action-usage")
+        expect(host_action_options_v1(["handoff-abandon"] + HAC_BASE_V1 + ["--confirm", "short", "--key-store", "/srv/keys",
+            "--approver", "approver_1", "--grant-id", "grant_1", "--expires-in-ms", "600000"]).unwrap_err()).to_equal("host-action-usage")
+
+    it "builds the read-only inspect frame for each command":
+        val helper = host_control_sub_decode_v6(host_action_inspect_payload_v1("helper-abandon", "helper_op_1").unwrap()).unwrap()
+        expect(helper.sub).to_equal("helper-inspect")
+        expect(helper.frame).to_equal("helper_op_1")
+        val handoff = host_control_sub_decode_v6(host_action_inspect_payload_v1("handoff-abandon", "").unwrap()).unwrap()
+        expect(handoff.sub).to_equal("handoff-inspect")
+        expect(handoff.frame).to_equal("pending")
+
+describe "host-action inspected record (milestone_0046)":
+    it "accepts only a canonical record naming the requested row and the installed host, and returns its digest":
+        val helper = hac_helper_record_v1("helper_op_1", "worker_1")
+        expect(host_action_record_check_v1("helper-abandon", helper, "helper_op_1", "worker_1").unwrap()).to_equal(sha256_text(helper))
+        expect(host_action_record_check_v1("helper-abandon", hac_helper_record_v1("helper_op_2", "worker_1"), "helper_op_1",
+            "worker_1").unwrap_err()).to_equal("host-action-record-operation")
+        expect(host_action_record_check_v1("helper-abandon", hac_helper_record_v1("helper_op_1", "worker_2"), "helper_op_1",
+            "worker_1").unwrap_err()).to_equal("host-action-record-host")
+        expect(host_action_record_check_v1("helper-abandon", helper + " ", "helper_op_1", "worker_1").is_err()).to_equal(true)
+        val handoff = hac_handoff_record_v1("worker_1")
+        expect(host_action_record_check_v1("handoff-abandon", handoff, "", "worker_1").unwrap()).to_equal(sha256_text(handoff))
+        expect(host_action_record_check_v1("handoff-abandon", hac_handoff_record_v1("worker_2"), "", "worker_1").unwrap_err())
+            .to_equal("host-action-record-host")
+        step("A record of the other kind never passes")
+        expect(host_action_record_check_v1("handoff-abandon", helper, "", "worker_1").is_err()).to_equal(true)
+        expect(host_action_record_check_v1("helper-abandon", handoff, "helper_op_1", "worker_1").is_err()).to_equal(true)
+
+    it "signs only the confirmed digest":
+        expect(host_action_confirm_v1("b".repeat(64), "b".repeat(64)).is_ok()).to_equal(true)
+        expect(host_action_confirm_v1("b".repeat(64), "c".repeat(64)).unwrap_err()).to_equal(
+            "host-action-confirm-mismatch:expected=" + "c".repeat(64))
+
+    it "reports an authenticated Host refusal as data":
+        val encoded = host_service_operation_reply_encode_v6(HostServiceOperationReplyV6("host-control", "a".repeat(32),
+            "abandon_1", "b".repeat(64), "c".repeat(64), false, 1, "helper-abandon-observed-mismatch", "runtime-host-request-refused")).unwrap()
+        expect(host_action_refused_detail_v1(encoded)).to_equal("runtime-host-request-refused\nhelper-abandon-observed-mismatch")
+        expect(host_action_refused_detail_v1("not-a-reply")).to_equal("host-action-refused-undecodable")
+
+fn hac_retention_part_v1(operation_id: text, host: text) -> text:
+    host_retention_release_bytes_v1(HostRetentionReleaseV1(wire_version: HOST_RETENTION_RELEASE_WIRE_V1, operation_id: operation_id,
+        association_digest: "c".repeat(64), evidence: "outcome", evidence_digest: "d".repeat(64), physical_host_id: host)).unwrap()
+
+describe "retention-release command (milestone_0045, owner decision 2)":
+    it "requires --operation and inspects the named remote-build row":
+        # @req M45-RETENTION-RELEASE
+        expect(host_action_options_v1(["retention-release"] + HAC_BASE_V1 + ["--operation", "build_op_1"]).is_ok()).to_equal(true)
+        expect(host_action_options_v1(["retention-release"] + HAC_BASE_V1 + ["--operation", "build_op_1"] + HAC_SIGN_V1).is_ok()).to_equal(true)
+        expect(host_action_options_v1(["retention-release"] + HAC_BASE_V1).unwrap_err()).to_equal("host-action-usage")
+        val inspect = host_control_sub_decode_v6(host_action_inspect_payload_v1("retention-release", "build_op_1").unwrap()).unwrap()
+        expect(inspect.sub).to_equal("retention-inspect")
+        expect(inspect.frame).to_equal("build_op_1")
+
+    it "accepts only the Host part for the requested row and host, then completes it with the controller's terminal state":
+        # @req M45-RETENTION-RELEASE (refused unless the controller settled the run)
+        val part = hac_retention_part_v1("build_op_1", "worker_1")
+        expect(host_action_record_check_v1("retention-release", part, "build_op_1", "worker_1").unwrap()).to_equal(sha256_text(part))
+        expect(host_action_record_check_v1("retention-release", hac_retention_part_v1("build_op_2", "worker_1"), "build_op_1",
+            "worker_1").unwrap_err()).to_equal("host-action-record-operation")
+        expect(host_action_record_check_v1("retention-release", hac_retention_part_v1("build_op_1", "worker_2"), "build_op_1",
+            "worker_1").unwrap_err()).to_equal("host-action-record-host")
+        val full = host_action_retention_record_v1(part, "failed", "e".repeat(64), "f".repeat(64)).unwrap()
+        expect(host_retention_release_decode_v1(full).unwrap().controller_state).to_equal("failed")
+        step("a Host reply that already carries controller fields is refused (the Host never speaks for the controller)")
+        expect(host_action_record_check_v1("retention-release", full, "build_op_1", "worker_1").unwrap_err())
+            .to_equal("host-action-record-controller")
+        step("a live or unknown controller row refuses; outcome-unknown needs remote-run-abandon first")
+        for state in ["admitted", "executing", "outcome-unknown"]:
+            expect(host_action_retention_record_v1(part, state, "e".repeat(64), "f".repeat(64)).unwrap_err())
+                .to_equal("host-action-retention-run-unsettled:" + state)
+
+describe "host-action command order (milestone_0046)":
+    it "inspects, checks the record, gates on the confirmed digest, then issues and sends; settles nothing":
+        val source = file_read_text("src/app/orchestrator/host_action_command_v1.spl")
+        val run_at = source.index_of("pub fn host_action_command_v1(")
+        expect(run_at >= 0).to_equal(true)
+        val run = source.substring(run_at, source.len())
+        val begin_at = run.index_of("controller_dispatch_host_action_begin_v3(")
+        val inspect_at = run.index_of("host_action_inspect_payload_v1(")
+        val check_at = run.index_of("host_action_record_check_v1(")
+        val plan_at = run.index_of("\"plan\"")
+        val confirm_at = run.index_of("host_action_confirm_v1(")
+        val issue_at = run.index_of("controller_host_action_issue_v1(")
+        val send_at = run.index_of("host_action_abandon_payload_v1(")
+        expect(begin_at >= 0 and inspect_at > begin_at and check_at > inspect_at and plan_at > check_at).to_equal(true)
+        expect(confirm_at > plan_at and issue_at > confirm_at and send_at > issue_at).to_equal(true)
+        for forbidden in ["controller_dispatch_remote_settle_v3", "controller_dispatch_remote_edit_v3", "edit_journal",
+                "controller_workload_store"]:
+            expect(source.contains(forbidden)).to_equal(false)

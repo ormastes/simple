@@ -73,3 +73,53 @@ describe "simple robust inventory":
         # @req: REQ-DIAG-POLICY-001
         step("Inventory the origin-facts module itself")
         expect(run_robust(["inventory", "src/compiler/35.semantics/lint/bound_origin_facts.spl"])).to_equal(0)
+
+val MULTI_SRC = "fn wide(\n    a: i64,\n    b: i64,\n) -> i64:\n    val (x, y) = pair(a, b)\n    val (p, _) = pair(1, 2)\n    x\n"
+
+describe "boundary origin facts: multi-line signatures and tuple bindings":
+    """Parameters on continuation lines and tuple-bound names are not dropped."""
+
+    it "records params of a multi-line signature":
+        # @req: REQ-DIAG-POLICY-001
+        step("Scan a signature split over several lines")
+        val fs = bound_origin_facts(MULTI_SRC, "m.spl")
+        expect(origin_of(fs, "a")).to_equal("param")
+        expect(origin_of(fs, "b")).to_equal("param")
+
+    it "records every name of a tuple binding":
+        # @req: REQ-DIAG-POLICY-001
+        step("Scan tuple bindings")
+        val fs = bound_origin_facts(MULTI_SRC, "m.spl")
+        expect(origin_of(fs, "x")).to_equal("call")
+        expect(origin_of(fs, "y")).to_equal("call")
+        expect(origin_of(fs, "p")).to_equal("call")
+        expect(origin_of(fs, "_")).to_equal("")
+
+fn subjects_of(fs: [BoundOriginFact], origin: text) -> [text]:
+    var out: [text] = []
+    for f in fs:
+        if f.origin == origin:
+            out.push(f.subject)
+    out
+
+describe "boundary origin facts: splitter edge cases":
+    """Top-level comma splitting honours string literals; nested tuple patterns bind every name."""
+
+    it "does not split parameters on a comma inside a string default":
+        # @req: REQ-DIAG-POLICY-001
+        step("Scan a signature whose default value contains commas and parens")
+        val src = "fn greet(sep: text = \"a, b), c\", n: i64):\n    n\n"
+        val fs = bound_origin_facts(src, "m.spl")
+        val params = subjects_of(fs, "param")
+        expect(params.len()).to_equal(2)
+        expect(params[0]).to_equal("sep")
+        expect(params[1]).to_equal("n")
+
+    it "binds every name of a nested tuple pattern":
+        # @req: REQ-DIAG-POLICY-001
+        step("Scan a nested tuple destructure")
+        val src = "fn f():\n    val ((a, b), c) = pair()\n    c\n"
+        val fs = bound_origin_facts(src, "m.spl")
+        expect(origin_of(fs, "a")).to_equal("call")
+        expect(origin_of(fs, "b")).to_equal("call")
+        expect(origin_of(fs, "c")).to_equal("call")

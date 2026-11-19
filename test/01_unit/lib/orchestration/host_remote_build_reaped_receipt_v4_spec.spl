@@ -1,0 +1,165 @@
+"""
+## Purpose and audience
+Pins milestone_0045 (owner decision 4) in `src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl`,
+`host_linux_service_remote_build_reap_v4.spl` and the collect route of `host_linux_service_current_v4.spl`: a run the
+startup reap indexed (the service restarted, the run is proved absent) is answered with a HOST-SIGNED `service-restart`
+reset-failure receipt instead of the bare typed refusal. The restarted Host finds the run's prior fence in the reap index,
+its open record in the no-replace open archive, signs through the port (which applies the late-receipt exception, owner
+decision 5), and archives the reply through the held capacity journal BEFORE it is first answered (the milestone_0039
+path), so every later collect replays the identical bytes. Without an index, an open archive or a signature the route keeps
+the typed refusal, which the controller settles `outcome-unknown`, never `failed`. Written for owners of the Linux Host
+service.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary).
+## Compatibility and limitations
+The port is a double that echoes the observation into the envelope text, so the observation the Host built is checked
+exactly; the real port's signing is pinned by `remote_build_port_reset_failure_v3_spec.spl`.
+## Verification guidance and troubleshooting
+A changed archive path, observation field or reply shape is a contract change.
+"""
+use std.spec.{step, fail}
+use std.io.file_read_text
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.*
+# Tests reach private module helpers directly (repo rule: tests may access private).
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.{remote_build_reset_failure_reply_v4}
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_reap_v4.*
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_reap_v4.{remote_build_reap_index_encode_v4}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_open_cleanup_v2, distributed_operation_journal_publish_v3}
+use std.common.contracts.orchestration.host_capacity_v1.HostCapacityV1
+
+val RR_SOURCE: text = "src/lib/nogc_sync_mut/orchestration/host_linux_service_remote_build_v4.spl"
+val RR_SERVICE: text = "src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl"
+
+fn rr_count(source: text, needle: text) -> i64:
+    source.split(needle).len() - 1
+
+fn rr_from(source: text, start: text, end: text) -> text:
+    val at = source.index_of(start)
+    if at < 0: return ""
+    val tail = source.substring(at, source.byte_len())
+    val stop = tail.index_of(end)
+    if stop < 0: return tail
+    tail.substring(0, stop)
+
+fn rr_open(root: text) -> HostCapacityOwnerV1:
+    var opened: [HostCapacityOwnerV1] = []
+    match host_capacity_owner_open_owned_v2(root, HostCapacityV1("worker_1", "host-authority", "current-fence", 41, 2000, 536870912, []),
+            "9".repeat(64), 64, true):
+        case HostCapacityOpenV2.Ready(owner): opened.push(owner)
+        case HostCapacityOpenV2.Rejected(reason): fail(reason)
+        case HostCapacityOpenV2.CleanupRequired(cleanup, reason):
+            val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+            expect(closed.error).to_equal("")
+            fail(reason)
+    opened[0]
+
+# The double: the "envelope" is the observation the Host built, the clock and the open record it read.
+fn rr_echo(wire: text, observed: HostRemoteBuildResetObservedV3, now: i64) -> Result<text, text>:
+    Ok("ENVELOPE|" + observed.operation_id + "|" + observed.task_digest + "|" + observed.stage + "|" + observed.native_id + "|" +
+        observed.workspace_binding_digest + "|" + str(now) + "|" + wire + "\n")
+
+fn rr_refuse(wire: text, observed: HostRemoteBuildResetObservedV3, now: i64) -> Result<text, text>:
+    Err("remote-build-reset-observation-differs")
+
+fn rr_port(sign: fn(text, HostRemoteBuildResetObservedV3, i64) -> Result<text, text>) -> HostRemoteBuildPortV4:
+    HostRemoteBuildPortV4(admit_open: fn(wire: text, now: i64) -> Result<HostRemoteBuildAdmittedV3, text>: Err("unused"),
+        finalize: fn(wire: text, observed: HostRemoteBuildObservedV3) -> Result<text, text>: Err("unused"),
+        reset_failure: sign)
+
+# What the startup reap and the earlier open left in the journal: the reap index and record, and the open archive.
+fn rr_reaped(journal: DistributedOperationJournalV2, operation_id: text, open_record: text):
+    expect(distributed_operation_journal_publish_v3(journal, host_remote_build_reap_index_relative_v4(operation_id),
+        remote_build_reap_index_encode_v4(operation_id, "prior-fence"))).to_equal(Ok(true))
+    val record = host_remote_build_reap_record_encode_v4(HostRemoteBuildReapRecordV4(operation_id: operation_id,
+        prior_fence: "prior-fence", association_digest: "a".repeat(64), task_digest: "d".repeat(64), reason: "service-restart",
+        observed_at: 77)).unwrap()
+    expect(distributed_operation_journal_publish_v3(journal, host_remote_build_reap_relative_v4("prior-fence", operation_id),
+        record)).to_equal(Ok(true))
+    if open_record != "":
+        expect(distributed_operation_journal_publish_v3(journal, host_remote_build_open_relative_v4("prior-fence", operation_id),
+            open_record)).to_equal(Ok(true))
+
+describe "Host-signed reaped receipt after a service restart (milestone_0045)":
+    it "signs the service-restart observation from the reap record and the archived open record, and archives it first":
+        # @req M0045-REAP-01
+        val root = secure_temp_dir("/tmp", "m0045-reaped").unwrap()
+        val opened = rr_open(root + "/journal")
+        rr_reaped(opened.journal, "operation_2", "OPEN-RECORD")
+        val reply = host_remote_build_reaped_receipt_v4(opened.journal, rr_port(rr_echo), "operation_2", 5000)
+        step("the Host built service-restart with no runtime id and no binding, the reap record's task digest and its clock")
+        val envelope = "ENVELOPE|operation_2|" + "d".repeat(64) + "|service-restart|||5000|OPEN-RECORD\n"
+        expect(reply).to_equal(remote_build_reset_failure_reply_v4("operation_2", "linux-host-remote-build-reaped-incomplete", envelope))
+        step("the reply is the durable archive: a later collect replays it byte-identically (the port is not asked again)")
+        expect(host_remote_build_reset_failure_stored_v4(opened.journal, "operation_2")).to_equal(reply)
+        step("the reaped receipt reply has the reset-failure shape the controller decodes")
+        expect(reply.contains("linux-host-remote-build-reset-failure")).to_equal(true)
+        expect(reply.contains("failed:linux-host-remote-build-reaped-incomplete")).to_equal(true)
+        val closed = host_capacity_owner_close_owned_v2(opened)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "answers nothing (the typed refusal stays) without a reap index, an open archive or a signature":
+        # @req M0045-REAP-02
+        val root = secure_temp_dir("/tmp", "m0045-reaped-none").unwrap()
+        val opened = rr_open(root + "/journal")
+        step("an operation the reap never indexed")
+        expect(host_remote_build_reaped_receipt_v4(opened.journal, rr_port(rr_echo), "operation_9", 5000)).to_equal("")
+        step("a reaped run that was never opened has no open record to sign from")
+        rr_reaped(opened.journal, "operation_3", "")
+        expect(host_remote_build_reaped_receipt_v4(opened.journal, rr_port(rr_echo), "operation_3", 5000)).to_equal("")
+        expect(host_remote_build_reset_failure_stored_v4(opened.journal, "operation_3")).to_equal("")
+        step("a port refusal signs nothing and archives nothing")
+        rr_reaped(opened.journal, "operation_4", "OPEN-RECORD")
+        expect(host_remote_build_reaped_receipt_v4(opened.journal, rr_port(rr_refuse), "operation_4", 5000)).to_equal("")
+        expect(host_remote_build_reset_failure_stored_v4(opened.journal, "operation_4")).to_equal("")
+        step("a second signature at another clock is never attempted over the first archive: it answers nothing")
+        val first = host_remote_build_reaped_receipt_v4(opened.journal, rr_port(rr_echo), "operation_4", 5000)
+        expect(first != "").to_equal(true)
+        expect(host_remote_build_reaped_receipt_v4(opened.journal, rr_port(rr_echo), "operation_4", 6000)).to_equal("")
+        step("and the first archive is still served (no refused marker was written over it)")
+        expect(host_remote_build_reset_failure_stored_v4(opened.journal, "operation_4")).to_equal(first)
+        val closed = host_capacity_owner_close_owned_v2(opened)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "reads the reaped record only through the canonical reap index":
+        # @req M0045-REAP-03
+        val root = secure_temp_dir("/tmp", "m0045-reaped-index").unwrap()
+        val opened = rr_open(root + "/journal")
+        expect(host_remote_build_reaped_record_v4(opened.journal, "operation_2")).to_equal(Ok(None))
+        rr_reaped(opened.journal, "operation_2", "")
+        val record = host_remote_build_reaped_record_v4(opened.journal, "operation_2").unwrap().unwrap()
+        expect(record.prior_fence).to_equal("prior-fence")
+        expect(record.task_digest).to_equal("d".repeat(64))
+        step("a non-canonical index is refused, never trusted")
+        expect(distributed_operation_journal_publish_v3(opened.journal, host_remote_build_reap_index_relative_v4("operation_5"),
+            remote_build_reap_index_encode_v4("operation_5", "prior-fence") + "\n")).to_equal(Ok(true))
+        expect(host_remote_build_reaped_record_v4(opened.journal, "operation_5").is_err()).to_equal(true)
+        step("an index naming another operation is refused")
+        expect(distributed_operation_journal_publish_v3(opened.journal, host_remote_build_reap_index_relative_v4("operation_6"),
+            remote_build_reap_index_encode_v4("operation_7", "prior-fence"))).to_equal(Ok(true))
+        expect(host_remote_build_reaped_record_v4(opened.journal, "operation_6").is_err()).to_equal(true)
+        val closed = host_capacity_owner_close_owned_v2(opened)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "wires the signed reaped receipt into the reaped collect only, after the stored replay and before the refusal":
+        # @req M0045-REAP-04
+        val service = file_read_text(RR_SERVICE)
+        val collect = rr_from(service, "pub fn host_linux_service_remote_build_collect_v4(", "\npub fn ")
+        expect(rr_count(collect, "host_remote_build_reaped_receipt_v4(owner.capacity.unwrap().journal,")).to_equal(1)
+        expect(collect.index_of("host_remote_build_reset_failure_stored_v4(") < collect.index_of("host_remote_build_reaped_receipt_v4("))
+            .to_equal(true)
+        expect(collect.index_of("host_remote_build_reaped_receipt_v4(") < collect.index_of("if reaped != \"\": return linux_service_reply_v4("))
+            .to_equal(true)
+        step("the receipt is signed through the installed port at the service's own grant clock")
+        expect(rr_count(collect, "owner.remote_build_port.unwrap()")).to_equal(2)
+        step("the Host function archives through the existing no-replace path before returning the reply")
+        val reaped = rr_from(file_read_text(RR_SOURCE), "pub fn host_remote_build_reaped_receipt_v4(", "\n# ")
+        expect(rr_count(reaped, "remote_build_reset_archive_v4(journal, operation_id, reply)")).to_equal(1)
+        expect(rr_count(reaped, "stage: \"service-restart\"")).to_equal(1)

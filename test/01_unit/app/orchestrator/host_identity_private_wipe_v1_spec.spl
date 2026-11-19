@@ -10,10 +10,15 @@ Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
 ## Compatibility and limitations
 The seed is RFC 8032 test-1: published, deliberately public fixture material. The run record exposes only a count of
 verified buffer wipes, never buffer contents. Text copies no longer exist: the armour and base64 are parsed on [u8].
+milestone_0043 (REVIEW_B P2-2, P3-6, P3-7, P3-8): the decoder keeps its sextets in ONE 4-byte [u8] reset in place and
+wiped (and checked) on every exit; a failed decoder wipe is `host-identity-key-buffer-wipe`, never a silent []. The
+armour layout is canonical: every body line is exactly 70 characters except a non-empty last line, LF-terminated.
 ## Verification guidance and troubleshooting
-`wiped` is 1 for structural refusals (raw only), 2 once the seed slice exists (raw, seed), 0 before any buffer exists.
+`wiped` is 1 for structural refusals (raw only), 2 once the seed slice exists (raw, seed), and 0 before the decoded body
+is returned (size, armour and decoder refusals; the decoder wipes its own buffers internally).
 No expanded private key binding exists: the key is derived with ed25519_pubkey, which returns only the public key.
 """
+use std.spec.{step}
 use app.orchestrator.host_identity_key_v1.{host_identity_private_encode_v1, host_identity_private_run_v1,
     host_identity_private_public_v1}
 use std.common.text_bytes.bytes_to_text
@@ -112,12 +117,14 @@ describe "Host identity private parser wipes every buffer on every exit":
         for line in lines: joined = joined + line
         val one_line = ("-----BEGIN OPENSSH PRIVATE KEY-----\n" + joined + "\n-----END OPENSSH PRIVATE KEY-----\n").bytes()
         expect(host_identity_private_run_v1(one_line, false, [], [], "").outcome).to_equal(Err("host-identity-private-format"))
-        val trailing = ("-----BEGIN OPENSSH PRIVATE KEY-----\n" + joined.substring(0, joined.len() - 1) + "A\n" +
-            "-----END OPENSSH PRIVATE KEY-----\n").bytes()
-        expect(host_identity_private_public_v1(trailing).is_ok()).to_equal(false)
+        step("a character outside the base64 alphabet is refused by the decoder, before any decoded buffer is returned")
+        val alien = pw_armour(joined.substring(0, joined.len() - 1) + "*")
+        val refused = host_identity_private_run_v1(alien, false, [], [], "")
+        expect(refused.outcome).to_equal(Err("host-identity-private-format"))
+        expect(refused.wiped).to_equal(0)
 
     it "decodes canonical padding for every length residue and refuses non-canonical padding":
-        # @req SEEDWIPE-06
+        # @req SEEDWIPE-09
         for residue in 0..3:
             val raw = pw_raw_with_residue(residue)
             val b64 = base64_encode_bytes(raw)
@@ -150,6 +157,27 @@ describe "Host identity private parser wipes every buffer on every exit":
         expect(run.outcome).to_equal(Err("host-identity-private-format"))
         expect(run.wiped).to_equal(1)
 
+    it "accepts only the canonical 70-column armour layout":
+        # @req SEEDWIPE-10 (REVIEW_B P3-7)
+        val lines = pw_pem_lines()
+        var joined = ""
+        for line in lines: joined = joined + line
+        expect(host_identity_private_public_v1(pw_armour(joined)).is_ok()).to_equal(true)
+        val header = "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        val footer = "-----END OPENSSH PRIVATE KEY-----\n"
+        step("an empty body line")
+        val empty = (header + pw_wrap(joined.substring(0, 70)) + "\n" + pw_wrap(joined.substring(70, joined.len())) + footer).bytes()
+        expect(host_identity_private_run_v1(empty, false, [], [], "").outcome).to_equal(Err("host-identity-private-format"))
+        step("a short line that is not the last line")
+        val short = (header + joined.substring(0, 69) + "\n" + pw_wrap(joined.substring(69, joined.len())) + footer).bytes()
+        expect(host_identity_private_run_v1(short, false, [], [], "").outcome).to_equal(Err("host-identity-private-format"))
+        step("a body with no LF before the footer")
+        val wrapped = pw_wrap(joined)
+        val missing = (header + wrapped.substring(0, wrapped.len() - 1) + footer).bytes()
+        val unterminated = host_identity_private_run_v1(missing, false, [], [], "")
+        expect(unterminated.outcome).to_equal(Err("host-identity-private-format"))
+        expect(unterminated.wiped).to_equal(0)
+
     it "keeps the public wrapper behaviour":
         # @req SEEDWIPE-07
         expect(host_identity_private_public_v1(pw_file()).is_ok()).to_equal(true)
@@ -175,11 +203,15 @@ fn pw_pad_count(b64: text) -> i64:
         if b64.substring(index, index + 1) == "=": pads = pads + 1
     pads
 
-fn pw_armour(b64: text) -> [u8]:
-    var pem = "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+# The body wrapped at 70 columns, every line LF-terminated (public fixture text only).
+fn pw_wrap(b64: text) -> text:
+    var body = ""
     var at = 0
     while at < b64.len():
         val end = if at + 70 < b64.len(): at + 70 else: b64.len()
-        pem = pem + b64.substring(at, end) + "\n"
+        body = body + b64.substring(at, end) + "\n"
         at = end
-    (pem + "-----END OPENSSH PRIVATE KEY-----\n").bytes()
+    body
+
+fn pw_armour(b64: text) -> [u8]:
+    ("-----BEGIN OPENSSH PRIVATE KEY-----\n" + pw_wrap(b64) + "-----END OPENSSH PRIVATE KEY-----\n").bytes()

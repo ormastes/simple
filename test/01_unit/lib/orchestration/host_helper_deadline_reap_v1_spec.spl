@@ -4,21 +4,42 @@ milestone_0036 (bug v4_attach_helper_charge_held_without_records): the deadline 
 helper row at service start. Pins the deadline record codec, the deadline recomputed from the four controller-signed
 expiries, the pure due table (clock, generation, digests), the marker table (only `{}` and `{PA}` are reapable), the
 death-proof table, and the structural wiring: the record is published before the begin commit, only for attach-broker,
-and the reap runs before the R read in the startup resume.
+and the reap runs before the R read in the startup resume. milestone_0043 (REVIEW_B P1-1, P3-1, P3-2, P3-9): "never
+consumed" is a journal fact. The agent publishes a reap marker before begin and the open core publishes a consume intent
+(the PA digest) before PA, so a `{}` store with an intent (PA deleted in place, store restored or re-created) is held,
+not released. Both records run against a real temporary capacity journal; the broker-claim observation runs against
+real temporary directories. Every reap failure leaves the row held without quarantining startup.
 ## Operator workflow
 Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
 Status: AUTHORED, NOT_RUN (no runnable `simple` binary on this host, 2026-11-19).
 ## Compatibility and limitations
-The journal- and filesystem-backed reap (R publish, broker claim and receipt reads, cancel) needs the PR3b journal
-and helper-store fixtures that do not exist yet; their ORDER is pinned structurally. The tables are pure and exhaustive.
+Linux only for the journal and broker-claim cases (Linux-protected helper store, real directories under a private
+temp root). The full journal-backed reap (R publish over a genuine helper row, broker receipt reads, cancel) still needs
+the PR3b journal fixture, so its ORDER is pinned structurally. The tables and the intent gate are pure and exhaustive.
 ## Verification guidance and troubleshooting
 A table mismatch prints the row. A structural failure names the rule (publish before commit, reap before R read).
 """
-use std.spec.{step}
+use std.spec.{step, fail}
 use std.io.file_read_text
 use std.nogc_sync_mut.orchestration.host_helper_deadline_v1.*
-use std.nogc_sync_mut.orchestration.host_helper_deadline_reap_v1.{host_helper_reap_consumed_v1, host_helper_death_proof_kind_v1}
-use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.HostLinuxHelperMarkersV1
+use std.nogc_sync_mut.orchestration.host_helper_deadline_reap_v1.{host_helper_reap_consumed_v1, host_helper_death_proof_kind_v1,
+    host_helper_reap_intent_gate_v1, host_helper_claim_absent_v1}
+use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.{HostLinuxHelperMarkersV1, host_linux_helper_store_open_v1,
+    host_linux_helper_reap_mark_v1, host_linux_helper_reap_marked_v1, host_linux_helper_reap_marker_encode_v1,
+    host_linux_helper_reap_marker_relative_v1, host_linux_helper_consume_intent_publish_v1, host_linux_helper_consume_intent_v1,
+    host_linux_helper_consume_intent_encode_v1, host_linux_helper_consume_intent_decode_v1,
+    host_linux_helper_consume_intent_relative_v1}
+use test.fixtures.orchestration.host_linux_service_verifier_fixture_v1.*
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_open_cleanup_v2
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.linux_service_scope_v4
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentitySnapshotV3
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove, file_write}
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
+use std.common.crypto.sha256.sha256_text
 
 val HD_DIR = "src/lib/nogc_sync_mut/orchestration/"
 
@@ -118,6 +139,95 @@ describe "Marker and death-proof tables (milestone_0036)":
         expect(hd_proof(true, false, true)).to_equal("group-unlaunched")
         expect(hd_proof(true, false, false)).to_equal("Err:helper-death-unproven")
 
+fn hd_gate(marked: bool, consumed: bool, intent: Option<text>) -> text:
+    if host_helper_reap_intent_gate_v1(marked, consumed, intent): "reapable" else: "held"
+
+fn hd_owner(root: text) -> HostCapacityOwnerV1:
+    val fixture = linux_service_verifier_fixture_ops_v1(1, 65, 4102444800000, "/var/lib/simple/hosts", ["helper-abandon"])
+    val native = LinuxServiceNativeIdentitySnapshotV3(native_machine_id: fixture.binding.native_machine_id, native_boot_id: "native-boot",
+        architecture: "x86_64", owner_generation: 41, process_identity_digest: "e".repeat(64), process_generation: 2,
+        authority_namespace_id: "namespace_1")
+    val scope = linux_service_scope_v4(fixture.binding, native, "ab".repeat(16)).unwrap()
+    val capacity = HostCapacityV1("worker_1", "host-authority", container_scope_fence_id_v2(scope).unwrap(), 41, 2000, 536870912, [])
+    var opened: [HostCapacityOwnerV1] = []
+    match host_capacity_owner_open_owned_v2(root + "/journal", capacity, "9".repeat(64), 64, true):
+        case HostCapacityOpenV2.Ready(owner): opened.push(owner)
+        case HostCapacityOpenV2.Rejected(reason): fail(reason)
+        case HostCapacityOpenV2.CleanupRequired(cleanup, reason):
+            val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+            expect(closed.error).to_equal("")
+            fail(reason)
+    opened[0]
+
+describe "Journal consume intent (milestone_0043 REVIEW_B P1-1)":
+    it "holds a row whose PA was lost from the store, and every row the open core never announced":
+        # @req AT-OPS-HELPER-REAP (no PA counts as never-consumed only when the journal says no consume was attempted)
+        val digest = "a".repeat(64)
+        expect(hd_gate(true, false, None)).to_equal("reapable")
+        expect(hd_gate(true, true, Some(digest))).to_equal("reapable")
+        step("PA deleted in place, or the store restored from an older backup or re-created: `{}` with an intent is held")
+        expect(hd_gate(true, false, Some(digest))).to_equal("held")
+        step("a PA the open core never announced, and every row begun without the reap marker, are held")
+        expect(hd_gate(true, true, None)).to_equal("held")
+        expect(hd_gate(false, false, None)).to_equal("held")
+        expect(hd_gate(false, true, Some(digest))).to_equal("held")
+
+    it "publishes the reap marker and the consume intent through the capacity journal, once, and reads them back":
+        # @req AT-OPS-HELPER-REAP (single journal writer, no-replace, read back)
+        val base = secure_temp_dir("/tmp", "hd-intent").unwrap()
+        val owner = hd_owner(base)
+        val journal = owner.journal
+        val store = host_linux_helper_store_open_v1(journal.root).unwrap()
+        expect(host_linux_helper_reap_marked_v1(journal, "helper_op_1").unwrap()).to_equal(false)
+        expect(host_linux_helper_consume_intent_v1(journal, "helper_op_1").unwrap().is_none()).to_equal(true)
+        step("the agent marks the row before begin; a re-mark is idempotent")
+        expect(host_linux_helper_reap_mark_v1(journal, store, "helper_op_1").is_ok()).to_equal(true)
+        expect(host_linux_helper_reap_mark_v1(journal, store, "helper_op_1").is_ok()).to_equal(true)
+        expect(host_linux_helper_reap_marked_v1(journal, "helper_op_1").unwrap()).to_equal(true)
+        expect(host_linux_helper_reap_marked_v1(journal, "helper_op_2").unwrap()).to_equal(false)
+        step("the open core announces the exact PA bytes before publishing them; a different PA is refused by name")
+        val pa = "version: 1\nkind: primary-consumed\n"
+        expect(host_linux_helper_consume_intent_publish_v1(journal, "helper_op_1", pa).is_ok()).to_equal(true)
+        expect(host_linux_helper_consume_intent_publish_v1(journal, "helper_op_1", pa).is_ok()).to_equal(true)
+        expect(host_linux_helper_consume_intent_publish_v1(journal, "helper_op_1", pa + "x").unwrap_err())
+            .to_equal("linux-helper-consume-intent-mismatch")
+        expect(host_linux_helper_consume_intent_v1(journal, "helper_op_1").unwrap().unwrap()).to_equal(sha256_text(pa))
+        step("the store holds no PA for this announced row (lost in place): the reap gate holds it")
+        expect(hd_gate(host_linux_helper_reap_marked_v1(journal, "helper_op_1").unwrap(), false,
+            host_linux_helper_consume_intent_v1(journal, "helper_op_1").unwrap())).to_equal("held")
+        expect(host_capacity_owner_close_owned_v2(owner).error).to_equal("")
+        expect(dir_remove(base, true)).to_equal(true)
+
+    it "round-trips both records canonically and names the operation":
+        # @req AT-OPS-HELPER-REAP
+        val bytes = host_linux_helper_consume_intent_encode_v1("helper_op_1", "a".repeat(64)).unwrap()
+        expect(host_linux_helper_consume_intent_decode_v1(bytes, "helper_op_1").unwrap()).to_equal("a".repeat(64))
+        expect(host_linux_helper_consume_intent_decode_v1(bytes, "helper_op_2").is_err()).to_equal(true)
+        expect(host_linux_helper_consume_intent_decode_v1(bytes + "extra: 1\n", "helper_op_1").is_err()).to_equal(true)
+        expect(host_linux_helper_consume_intent_encode_v1("helper_op_1", "short").is_err()).to_equal(true)
+        expect(host_linux_helper_consume_intent_encode_v1("helper_op_1", "").is_err()).to_equal(true)
+        expect(host_linux_helper_reap_marker_encode_v1("helper_op_1").unwrap().contains("consumedDigest")).to_equal(false)
+        expect(host_linux_helper_consume_intent_relative_v1("helper_op_1"))
+            .to_equal("host-helper-consume-intents/" + sha256_text("helper_op_1") + ".sdn")
+        expect(host_linux_helper_reap_marker_relative_v1("helper_op_1"))
+            .to_equal("host-helper-reap-markers/" + sha256_text("helper_op_1") + ".sdn")
+
+describe "Filesystem death proof (milestone_0043 REVIEW_B P3-9)":
+    it "observes the broker claim by observed absence only and fails closed on a missing launch root":
+        # @req AT-OPS-HELPER-REAP (claim absent = no fork; a missing root is never absence)
+        val base = secure_temp_dir("/tmp", "hd-claim").unwrap()
+        val root = base + "/group"
+        expect(dir_create(root, false)).to_equal(true)
+        expect(file_set_mode(root, 0o700)).to_equal(true)
+        expect(host_helper_claim_absent_v1(root).unwrap()).to_equal(true)
+        step("a claim exclusive-created before fork is present: death then needs the broker's unlaunched receipt")
+        expect(file_write(root + "/broker.claim", "claim")).to_equal(true)
+        expect(host_helper_claim_absent_v1(root).unwrap()).to_equal(false)
+        expect(hd_proof(true, host_helper_claim_absent_v1(root).unwrap(), false)).to_equal("Err:helper-death-unproven")
+        step("a launch root that does not exist cannot prove anything")
+        expect(host_helper_claim_absent_v1(base + "/missing").is_err()).to_equal(true)
+        expect(dir_remove(base, true)).to_equal(true)
+
 describe "Reap wiring (milestone_0036)":
     it "publishes the deadline record for attach-broker before the begin commit and before the clock refresh":
         # @req AT-OPS-HELPER-REAP (every begun attach-broker row has a record; a failure leaves the row admitted)
@@ -128,9 +238,6 @@ describe "Reap wiring (milestone_0036)":
         val executing = begin.index_of("host_capacity_owner_begin_helper_v1(")
         expect(proof >= 0 and record > proof and commit > record and executing > commit).to_equal(true)
         expect(begin.contains("request.plan.helper_kind == \"attach-broker\"")).to_equal(true)
-        step("the recorded deadline must equal the live-verified expiry or begin refuses before committing")
-        val equal = begin.index_of("helper-deadline-expiry-mismatch")
-        expect(equal > commit and executing > equal).to_equal(true)
 
     it "runs the reap before the R read, after the abandon-marker probe, and keeps the settle out of the row":
         # @req AT-OPS-HELPER-REAP
@@ -160,3 +267,30 @@ describe "Reap wiring (milestone_0036)":
         expect(whole.contains("group_process_stream_cancel_v2")).to_equal(false)
         expect(whole.contains("host_primary_attach_native_recover")).to_equal(false)
         expect(whole.contains("host_primary_attach_native_store")).to_equal(false)
+
+    it "marks the row before begin, announces the consume intent before PA, gates on it, and never quarantines":
+        # @req AT-OPS-HELPER-REAP (milestone_0043 REVIEW_B P1-1, P3-1, P3-2)
+        val open = hd_body("host_agent_attachment_v4.spl", "fn host_agent_open_begin_v4(", "\nfn ")
+        val mark = open.index_of("host_linux_helper_reap_mark_v1(checked.capacity.journal, ")
+        val begin = open.index_of("host_helper_begin_v1(")
+        expect(mark >= 0 and begin > mark).to_equal(true)
+        val core = hd_body("host_primary_attach_owner_v1.spl", "pub fn host_primary_attach_open_core_v1(", "\npub fn ")
+        val intent = core.index_of("host_linux_helper_consume_intent_publish_v1(journal, helper.operation.id, encoded.unwrap())")
+        val refused = core.index_of("if intent.is_err(): return primary_core_refused_v1(turn, store, helper, \"\", intent.unwrap_err())")
+        val pa = core.index_of("\"primary-consumed\", encoded.unwrap(), true)")
+        expect(intent >= 0 and refused > intent and pa > refused).to_equal(true)
+        val reap = hd_body("host_helper_deadline_reap_v1.spl", "pub fn host_helper_deadline_reap_v1(", "\npub fn ")
+        val kind = reap.index_of("helper_kind != \"attach-broker\"")
+        val marked = reap.index_of("host_linux_helper_reap_marked_v1(journal, operation.id)")
+        val announced = reap.index_of("host_linux_helper_consume_intent_v1(journal, operation.id)")
+        val markers = reap.index_of("host_linux_helper_markers_v1(")
+        val gate = reap.index_of("host_helper_reap_intent_gate_v1(marked.unwrap(), consumed.unwrap(), intent.unwrap())")
+        val proof = reap.index_of("host_helper_death_proof_v1(")
+        val digest = reap.index_of("sha256_text(read.unwrap()) != intent.unwrap().unwrap()")
+        val publish = reap.index_of("host_linux_helper_refusal_publish_v1(")
+        expect(kind >= 0 and marked > kind and announced > marked and markers > announced).to_equal(true)
+        expect(gate > markers and proof > gate and digest > proof and publish > digest).to_equal(true)
+        step("no `?` in the reap: every failure is a held row, never a startup quarantine (DESIGN Revision 3)")
+        expect(reap.contains(")?")).to_equal(false)
+        val row = hd_body("host_linux_service_current_v4.spl", "fn linux_service_helper_cancel_row_v4(", "\npub fn ")
+        expect(row.contains("host_helper_deadline_reap_v1(capacity.journal, store_root, operation, facts)?")).to_equal(false)

@@ -39,6 +39,8 @@ pub class LinuxFreshWorkspaceBindingV3:
     exclusion: LinuxMachineWorkspaceExclusionV1
     parent_directory: RetainedDirectoryOwnerV1
     root_directory: RetainedDirectoryOwnerV1
+    # milestone_0047: the run's own child of the provisioned leaf (root_directory); the run's only mounted workspace.
+    run_directory: RetainedDirectoryOwnerV1
     request_source: text
     manifest_source: text
     invocation_digest: text
@@ -233,10 +235,13 @@ fn workspace_binding_observe_v3(owner: LinuxFreshWorkspaceBindingV3) -> Result<W
     if excluded.machine_policy_digest != machine_digest or excluded.lease_binding_digest != expected:
         return Err("fresh-workspace-original-exclusion-binding")
     owner.parent_directory.stage_child_match_v1(workspace.leaf_name, owner.root_directory)?
+    owner.root_directory.stage_child_match_v1(linux_workspace_run_leaf_v1(plan.operation_id), owner.run_directory)?
     val parent_identity = owner.parent_directory.stage_identity_v1()?
     val root_identity = owner.root_directory.stage_identity_v1()?
+    val run_identity = owner.run_directory.stage_identity_v1()?
     linux_workspace_retained_native_match_v1(root_identity, native.workspace_id)?
-    val directory_digest = sha256_u8_hex(parent_identity + root_identity)
+    # milestone_0047: the run child's identity is part of the run's binding digest.
+    val directory_digest = sha256_u8_hex(parent_identity + root_identity + run_identity)
     val image_id = if bound.image_config_id.starts_with("sha256:"): bound.image_config_id.substring(7, bound.image_config_id.byte_len()) else: bound.image_config_id
     if not builder_digest_valid_v1(image_id): return Err("fresh-workspace-full-image-config-id-required")
     var snapshot = LinuxFreshWorkspaceBindingSnapshotV3(binding_digest: "", machine_policy_digest: machine_digest,
@@ -251,6 +256,7 @@ fn workspace_binding_observe_v3(owner: LinuxFreshWorkspaceBindingV3) -> Result<W
     if owner.expected_binding != "" and snapshot.binding_digest != owner.expected_binding:
         return Err("fresh-workspace-original-binding-changed")
     owner.parent_directory.stage_child_match_v1(workspace.leaf_name, owner.root_directory)?
+    owner.root_directory.stage_child_match_v1(linux_workspace_run_leaf_v1(plan.operation_id), owner.run_directory)?
     val after_native = workspace_storage_observe_v1(owner.lease)?
     linux_workspace_retained_native_match_v1(owner.root_directory.stage_identity_v1()?, after_native.workspace_id)?
     val after_excluded = owner.exclusion.current_v1()?
@@ -258,7 +264,8 @@ fn workspace_binding_observe_v3(owner: LinuxFreshWorkspaceBindingV3) -> Result<W
     if (after.identity_digest != before.identity_digest or after.generation != before.generation or
             after_native.binding_digest != native.binding_digest or after_native.workspace_id != native.workspace_id or
             after_native.state != "retained" or after_excluded != excluded or
-            owner.parent_directory.stage_identity_v1()? != parent_identity or owner.root_directory.stage_identity_v1()? != root_identity):
+            owner.parent_directory.stage_identity_v1()? != parent_identity or owner.root_directory.stage_identity_v1()? != root_identity or
+            owner.run_directory.stage_identity_v1()? != run_identity):
         return Err("fresh-workspace-current-native-custody-changed")
     if (workspace_binding_utf8_v3(owner.reader.read_workspace_profile_v1()?)? != workspace_source or
             workspace_binding_profile_source_v3(owner, arm)? != bound.profile_source or
@@ -335,7 +342,7 @@ fn workspace_binding_gid_v3() -> Result<i64, text>: Err("fresh-workspace-linux-r
 
 pub fn linux_fresh_workspace_binding_open_v3(reader: LinuxMachinePolicyOwnerV1, storage: LinuxMachineStorageV1,
         lease: WorkspaceStorageLeaseV1, exclusion: LinuxMachineWorkspaceExclusionV1,
-        parent_directory: RetainedDirectoryOwnerV1, root_directory: RetainedDirectoryOwnerV1,
+        parent_directory: RetainedDirectoryOwnerV1, root_directory: RetainedDirectoryOwnerV1, run_directory: RetainedDirectoryOwnerV1,
         request: ContainerExecutionRequestV2, manifest_bytes: text, invocation_digest: text) -> Result<LinuxFreshWorkspaceBindingV3, text>:
     if not builder_digest_valid_v1(invocation_digest): return Err("fresh-workspace-invocation-digest")
     val source = container_execution_request_encode_v2(request)?
@@ -347,9 +354,9 @@ pub fn linux_fresh_workspace_binding_open_v3(reader: LinuxMachinePolicyOwnerV1, 
             val manifest = build_workspace_manifest_decode_v1(manifest_bytes)?
             if build_workspace_manifest_encode_v1(manifest)? != manifest_bytes: return Err("fresh-workspace-manifest-canonical")
     val candidate = LinuxFreshWorkspaceBindingV3(reader: reader, storage: storage, lease: lease, exclusion: exclusion,
-        parent_directory: parent_directory, root_directory: root_directory, request_source: source,
+        parent_directory: parent_directory, root_directory: root_directory, run_directory: run_directory, request_source: source,
         manifest_source: manifest_bytes, invocation_digest: invocation_digest, expected_binding: "")
     val current = candidate.current_v3()?
     Ok(LinuxFreshWorkspaceBindingV3(reader: reader, storage: storage, lease: lease, exclusion: exclusion,
-        parent_directory: parent_directory, root_directory: root_directory, request_source: source,
+        parent_directory: parent_directory, root_directory: root_directory, run_directory: run_directory, request_source: source,
         manifest_source: manifest_bytes, invocation_digest: invocation_digest, expected_binding: current.binding_digest))

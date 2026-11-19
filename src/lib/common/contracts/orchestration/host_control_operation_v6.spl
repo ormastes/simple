@@ -1,0 +1,56 @@
+# milestone_0046: the shared control exchange for controller-signed Host service actions. ONE authenticated V6 action,
+# `host-control`; its payload is this canonical envelope naming a sub from a CLOSED table and the unchanged route frame.
+# The shape confers no authority: the Host domain route decodes the frame and the Host owner verifies every abandon
+# (issuer == controller_ref, V4 signatures at its own clock/generation/revocation/session). The inspects are read-only.
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub val HOST_CONTROL_SUBS_V6 = ["helper-inspect", "helper-abandon", "handoff-inspect", "handoff-abandon", "retention-inspect",
+    "retention-release"]
+
+pub struct HostControlSubRequestV6:
+    sub: text
+    frame: text
+
+# The Host-domain route action (host_service_domain_v3) of a sub.
+pub fn host_control_sub_domain_action_v6(sub: text) -> Result<text, text>:
+    if sub == "helper-inspect": return Ok("host-helper-inspect")
+    if sub == "helper-abandon": return Ok("host-helper-abandon")
+    if sub == "handoff-inspect": return Ok("host-service-handoff-inspect")
+    if sub == "handoff-abandon": return Ok("host-service-handoff-abandon")
+    if sub == "retention-inspect": return Ok("host-retention-inspect")
+    if sub == "retention-release": return Ok("host-retention-release")
+    Err("host-control-sub-unknown")
+
+pub fn host_control_sub_encode_v6(request: HostControlSubRequestV6) -> Result<text, text>:
+    if not HOST_CONTROL_SUBS_V6.contains(request.sub): return Err("host-control-sub-unknown")
+    if request.frame == "": return Err("host-control-sub-frame-required")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(6), "kind": SdnValue.String("host-control-sub"),
+        "sub": SdnValue.String(request.sub), "frame": SdnValue.String(request.frame)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+pub fn host_control_sub_decode_v6(source: text) -> Result<HostControlSubRequestV6, text>:
+    if source.byte_len() < 1 or source.byte_len() > 2097152: return Err("host-control-sub-size")
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 2097152, max_depth: 2, max_nodes: 16,
+        max_rows: 0, max_cells: 0, max_columns: 8))
+    if parsed.is_err(): return Err("host-control-sub-syntax")
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return Err("host-control-sub-object")
+    if fields.len() != 4 or not fields.contains_key("sub") or not fields.contains_key("frame"):
+        return Err("host-control-sub-fields")
+    val sub = match fields["sub"]:
+        case SdnValue.String(value): value
+        case _: return Err("host-control-sub-fields")
+    val frame = match fields["frame"]:
+        case SdnValue.String(value): value
+        case _: return Err("host-control-sub-fields")
+    val request = HostControlSubRequestV6(sub: sub, frame: frame)
+    # Canonical re-encode pins version 6 and kind `host-control-sub` (a foreign kind re-encodes differently).
+    if host_control_sub_encode_v6(request)? != source: return Err("host-control-sub-noncanonical")
+    Ok(request)
+
+export HostControlSubRequestV6, HOST_CONTROL_SUBS_V6
+export host_control_sub_domain_action_v6, host_control_sub_encode_v6, host_control_sub_decode_v6

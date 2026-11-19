@@ -1,10 +1,12 @@
 """
 ## Purpose and audience
-milestone_0037: a cancelled, failed, wedged or unanswered remote run that has no bundle must not leave the controller
-operation row `executing` forever. The settle moves the row through the single controller journal writer to a terminal
-state (failed, cancelled) or to the honest non-terminal `outcome-unknown`, with a typed reason and a typed
-RuntimeExitStatusV1; only a signed bundle (accept_wire_v3) can ever produce `completed`. Written for owners of the
-remote-run driver and of the controller journal.
+milestone_0037: a remote run that has no bundle must not leave the controller operation row `executing` forever. The
+settle moves the row through the single controller journal writer to the honest non-terminal `outcome-unknown`, with a
+typed reason and a typed RuntimeExitStatusV1. milestone_0043 (opus re-review P2-1/P2-2): unsigned Host text never makes a
+row terminal, so `failed` is no longer a settle state; the only terminal settle is `cancelled` with reason
+`controller-never-executed`, which the controller proves from its OWN journal (no execute archive exists for the
+operation). Only a signed bundle (accept_wire_v3) can ever produce `completed`. Written for owners of the remote-run
+driver and of the controller journal.
 ## Operator workflow
 Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`. Status: AUTHORED, NOT_RUN (no runnable
 binary when written, 2026-11-19).
@@ -12,7 +14,7 @@ binary when written, 2026-11-19).
 Actual temporary legacy journal; the drive-level mapping (which Host reply or error picks which settle) is in
 remote_run_drive_v1_spec.spl.
 ## Verification guidance and troubleshooting
-First terminal wins: a failed settle after a completed accept must be refused, never overwrite.
+First terminal wins: a settle after a terminal row must be refused, never overwrite.
 """
 use std.spec.{describe, it, expect, step}
 use app.orchestrator.remote_run_settle_v1.*
@@ -22,7 +24,8 @@ use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
 use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
 use std.common.contracts.distributed_operation_state_v2.{distributed_operation_initial_v2, distributed_operation_transition_v2}
 use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_lookup_v2,
-    distributed_operation_journal_commit_v2, distributed_operation_journal_read_required_v3}
+    distributed_operation_journal_commit_v2, distributed_operation_journal_read_required_v3, distributed_operation_journal_publish_v3}
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.controller_dispatch_remote_execute_key_v3
 use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.io.file_ops.secure_temp_dir
 use std.nogc_sync_mut.io_runtime.dir_remove
@@ -49,75 +52,98 @@ fn settle_cleanup_v1(journal: DistributedOperationJournalV2):
 fn settle_state_v1(journal: DistributedOperationJournalV2) -> text:
     distributed_operation_journal_lookup_v2(journal, "build-op").unwrap().state
 
-describe "remote-run settle (milestone_0037)":
-    it "settles an executing row failed with the digest of a retained typed record":
-        step("The record is published through the journal, read back, and its digest is the row outcome")
+describe "remote-run settle (milestone_0037, milestone_0043)":
+    it "settles an executing row outcome-unknown with a retained typed record and no row digest":
+        step("The record is published through the journal and read back; the unproven row carries no digest")
         val store = settle_store_v1()
-        val edit = remote_run_settle_apply_v1(settle_request_v1(), "failed", "host-wedged", RuntimeExitStatusV1.Unobserved, store.journal)
+        val edit = remote_run_settle_apply_v1(settle_request_v1(), "outcome-unknown", "exchange-failed-after-admit",
+            RuntimeExitStatusV1.Unobserved, store.journal)
         expect(edit.error).to_equal("")
-        expect(settle_state_v1(edit.journal)).to_equal("failed")
-        val record = remote_run_settle_record_v1(settle_request_v1(), "failed", "host-wedged", RuntimeExitStatusV1.Unobserved).unwrap()
+        expect(settle_state_v1(edit.journal)).to_equal("outcome-unknown")
+        val record = remote_run_settle_record_v1(settle_request_v1(), "outcome-unknown", "exchange-failed-after-admit",
+            RuntimeExitStatusV1.Unobserved).unwrap()
         val digest = sha256_text(record)
-        expect(edit.result).to_equal("failed:" + digest)
-        expect(distributed_operation_journal_lookup_v2(edit.journal, "build-op").unwrap().outcome_digest).to_equal(digest)
+        expect(edit.result).to_equal("outcome-unknown:" + digest)
+        expect(distributed_operation_journal_lookup_v2(edit.journal, "build-op").unwrap().outcome_digest).to_equal("")
         expect(distributed_operation_journal_read_required_v3(edit.journal, "controller-remote-settle-v3/" + digest + ".sdn", 4096).unwrap()).to_equal(record)
         expect(record.contains("unobserved")).to_equal(true)
-        settle_cleanup_v1(edit.journal)
-
-    it "settles cancelled and outcome-unknown, and lets outcome-unknown be finished later":
-        step("outcome-unknown carries no digest on the row; a later authoritative failed settle finishes it")
-        val store = settle_store_v1()
-        val cancelled = remote_run_settle_apply_v1(settle_request_v1(), "cancelled", "host-cancelled", RuntimeExitStatusV1.Unobserved, store.journal)
-        expect(cancelled.error).to_equal("")
-        expect(settle_state_v1(cancelled.journal)).to_equal("cancelled")
-        val fresh = settle_store_v1()
-        val unknown = remote_run_settle_apply_v1(settle_request_v1(), "outcome-unknown", "wait-bounded-cancel-sent", RuntimeExitStatusV1.Unobserved, fresh.journal)
-        expect(unknown.error).to_equal("")
-        expect(settle_state_v1(unknown.journal)).to_equal("outcome-unknown")
-        expect(distributed_operation_journal_lookup_v2(unknown.journal, "build-op").unwrap().outcome_digest).to_equal("")
-        val again = remote_run_settle_apply_v1(settle_request_v1(), "outcome-unknown", "exchange-failed-after-admit", RuntimeExitStatusV1.Unobserved, unknown.journal)
+        step("A repeated outcome-unknown settle writes nothing")
+        val again = remote_run_settle_apply_v1(settle_request_v1(), "outcome-unknown", "accept-refused", RuntimeExitStatusV1.Unobserved, edit.journal)
         expect(again.error).to_equal("")
         expect(again.result).to_equal("outcome-unknown:")
-        expect(settle_state_v1(again.journal)).to_equal("outcome-unknown")
-        val finished = remote_run_settle_apply_v1(settle_request_v1(), "failed", "host-failed", RuntimeExitStatusV1.Unobserved, again.journal)
-        expect(finished.error).to_equal("")
-        expect(settle_state_v1(finished.journal)).to_equal("failed")
-        settle_cleanup_v1(cancelled.journal)
-        settle_cleanup_v1(finished.journal)
+        settle_cleanup_v1(again.journal)
 
-    it "is idempotent for the same terminal settle and refuses to overwrite a terminal row with another":
+    it "settles cancelled only when the controller never archived an execute for the operation":
+        step("No execute archive in the controller's own journal: nothing could have run, so the row ends cancelled")
+        val store = settle_store_v1()
+        val cancelled = remote_run_settle_before_execute_apply_v1(settle_request_v1(), store.journal)
+        expect(cancelled.error).to_equal("")
+        expect(settle_state_v1(cancelled.journal)).to_equal("cancelled")
+        val record = remote_run_settle_record_v1(settle_request_v1(), "cancelled", "controller-never-executed",
+            RuntimeExitStatusV1.Unobserved).unwrap()
+        expect(cancelled.result).to_equal("cancelled:" + sha256_text(record))
+        expect(distributed_operation_journal_lookup_v2(cancelled.journal, "build-op").unwrap().outcome_digest).to_equal(sha256_text(record))
+        settle_cleanup_v1(cancelled.journal)
+        step("An execute archived by ANY earlier run of this operation id makes the same call outcome-unknown")
+        val archived = settle_store_v1()
+        expect(distributed_operation_journal_publish_v3(archived.journal, controller_dispatch_remote_execute_key_v3("build-op"),
+            "archived-execute").unwrap()).to_equal(true)
+        val unknown = remote_run_settle_before_execute_apply_v1(settle_request_v1(), archived.journal)
+        expect(unknown.error).to_equal("")
+        expect(settle_state_v1(unknown.journal)).to_equal("outcome-unknown")
+        step("The direct apply refuses the never-executed reason over an archived execute")
+        val direct = remote_run_settle_apply_v1(settle_request_v1(), "cancelled", "controller-never-executed",
+            RuntimeExitStatusV1.Unobserved, unknown.journal)
+        expect(direct.error).to_equal("remote-run-settle-execute-archived")
+        expect(settle_state_v1(direct.journal)).to_equal("outcome-unknown")
+        settle_cleanup_v1(direct.journal)
+
+    it "is idempotent for the same terminal settle and refuses to overwrite a terminal row":
         step("First terminal wins")
         val store = settle_store_v1()
-        val first = remote_run_settle_apply_v1(settle_request_v1(), "failed", "host-failed", RuntimeExitStatusV1.Unobserved, store.journal)
-        val same = remote_run_settle_apply_v1(settle_request_v1(), "failed", "host-failed", RuntimeExitStatusV1.Unobserved, first.journal)
+        val first = remote_run_settle_apply_v1(settle_request_v1(), "cancelled", "controller-never-executed", RuntimeExitStatusV1.Unobserved, store.journal)
+        val same = remote_run_settle_apply_v1(settle_request_v1(), "cancelled", "controller-never-executed", RuntimeExitStatusV1.Unobserved, first.journal)
         expect(same.error).to_equal("")
         expect(same.result).to_equal(first.result)
-        val other = remote_run_settle_apply_v1(settle_request_v1(), "cancelled", "host-cancelled", RuntimeExitStatusV1.Unobserved, same.journal)
+        val other = remote_run_settle_apply_v1(settle_request_v1(), "outcome-unknown", "accept-refused", RuntimeExitStatusV1.Unobserved, same.journal)
         expect(other.error).to_equal("remote-run-settle-already-terminal")
-        expect(settle_state_v1(other.journal)).to_equal("failed")
+        expect(settle_state_v1(other.journal)).to_equal("cancelled")
         settle_cleanup_v1(other.journal)
 
-    it "can never record success: Exited(0) and the completed state are refused":
-        step("Only accept_wire_v3 over a signed bundle completes a row")
+    it "can never record success or a Host-text terminal: completed, failed and Exited(0) are refused":
+        step("Only accept_wire_v3 over a signed bundle completes a row; unsigned Host text never ends one failed")
         val store = settle_store_v1()
-        val zero = remote_run_settle_apply_v1(settle_request_v1(), "failed", "host-failed", RuntimeExitStatusV1.Exited(0), store.journal)
+        val zero = remote_run_settle_apply_v1(settle_request_v1(), "outcome-unknown", "accept-refused", RuntimeExitStatusV1.Exited(0), store.journal)
         expect(zero.error).to_equal("remote-run-settle-success-needs-bundle")
-        val done = remote_run_settle_apply_v1(settle_request_v1(), "completed", "host-failed", RuntimeExitStatusV1.Unobserved, store.journal)
+        val done = remote_run_settle_apply_v1(settle_request_v1(), "completed", "accept-refused", RuntimeExitStatusV1.Unobserved, store.journal)
         expect(done.error).to_equal("remote-run-settle-state")
-        expect(settle_state_v1(done.journal)).to_equal("executing")
-        val nonzero = remote_run_settle_apply_v1(settle_request_v1(), "failed", "host-failed", RuntimeExitStatusV1.Exited(3), store.journal)
+        for reason in ["host-wedged", "host-failed", "host-settled-without-bundle"]:
+            expect(remote_run_settle_apply_v1(settle_request_v1(), "failed", reason, RuntimeExitStatusV1.Unobserved, store.journal).error).to_equal("remote-run-settle-state")
+        expect(settle_state_v1(store.journal)).to_equal("executing")
+        val nonzero = remote_run_settle_apply_v1(settle_request_v1(), "outcome-unknown", "accept-refused", RuntimeExitStatusV1.Exited(3), store.journal)
         expect(nonzero.error).to_equal("")
         expect(remote_run_exit_text_v1(RuntimeExitStatusV1.Exited(3))).to_equal("exited:3")
         settle_cleanup_v1(nonzero.journal)
 
+    it "pairs every reason with exactly one state":
+        step("A Host-reported cancel or a refused receipt is unproven; only the controller's own fact is terminal")
+        val store = settle_store_v1()
+        for reason in ["host-cancelled", "host-settled-without-bundle", "reset-receipt-refused", "accept-refused",
+                "wait-bounded-cancel-sent", "wait-bounded-cancel-unsent", "exchange-failed-after-admit", "prior-execute-archived",
+                "host-reaped-unsigned", "resume-wait-bounded"]:
+            expect(remote_run_settle_apply_v1(settle_request_v1(), "cancelled", reason, RuntimeExitStatusV1.Unobserved, store.journal).error).to_equal("remote-run-settle-reason")
+        expect(remote_run_settle_apply_v1(settle_request_v1(), "outcome-unknown", "controller-never-executed", RuntimeExitStatusV1.Unobserved, store.journal).error).to_equal("remote-run-settle-reason")
+        expect(settle_state_v1(store.journal)).to_equal("executing")
+        settle_cleanup_v1(store.journal)
+
     it "keeps the controller root reopenable after a settle (projection accepts the settled row and its record)":
         step("A real settle, then the workload projection a restart or the next run performs")
         val store = settle_store_v1()
-        val edit = remote_run_settle_apply_v1(settle_request_v1(), "failed", "host-failed", RuntimeExitStatusV1.Unobserved, store.journal)
+        val edit = remote_run_settle_before_execute_apply_v1(settle_request_v1(), store.journal)
         expect(edit.error).to_equal("")
         val projected = controller_workload_store_project_owned_v3(edit.journal, "controller")
         expect(projected.is_ok()).to_equal(true)
-        expect(settle_state_v1(projected.unwrap().journal)).to_equal("failed")
+        expect(settle_state_v1(projected.unwrap().journal)).to_equal("cancelled")
         settle_cleanup_v1(projected.unwrap().journal)
         step("An outcome-unknown row projects too")
         val fresh = settle_store_v1()
@@ -130,9 +156,9 @@ describe "remote-run settle (milestone_0037)":
     it "refuses free-text exit facts so no verbatim Host text reaches the record":
         step("NotExited and Unknown carry identifiers only")
         val store = settle_store_v1()
-        expect(remote_run_settle_apply_v1(settle_request_v1(), "failed", "host-failed", RuntimeExitStatusV1.NotExited("free text!"), store.journal).error).to_equal("remote-run-settle-exit")
-        expect(remote_run_settle_apply_v1(settle_request_v1(), "failed", "host-failed", RuntimeExitStatusV1.Unknown("x y"), store.journal).error).to_equal("remote-run-settle-exit")
-        val ok = remote_run_settle_apply_v1(settle_request_v1(), "failed", "host-failed", RuntimeExitStatusV1.NotExited("stopped"), store.journal)
+        expect(remote_run_settle_apply_v1(settle_request_v1(), "outcome-unknown", "accept-refused", RuntimeExitStatusV1.NotExited("free text!"), store.journal).error).to_equal("remote-run-settle-exit")
+        expect(remote_run_settle_apply_v1(settle_request_v1(), "outcome-unknown", "accept-refused", RuntimeExitStatusV1.Unknown("x y"), store.journal).error).to_equal("remote-run-settle-exit")
+        val ok = remote_run_settle_apply_v1(settle_request_v1(), "outcome-unknown", "accept-refused", RuntimeExitStatusV1.NotExited("stopped"), store.journal)
         expect(ok.error).to_equal("")
         expect(remote_run_exit_text_v1(RuntimeExitStatusV1.NotExited("stopped"))).to_equal("not-exited:stopped")
         settle_cleanup_v1(ok.journal)
@@ -140,21 +166,17 @@ describe "remote-run settle (milestone_0037)":
     it "refuses an unknown reason, another envelope and a missing row without touching the journal":
         step("Typed reasons only; the row must be exactly this request")
         val store = settle_store_v1()
-        expect(remote_run_settle_apply_v1(settle_request_v1(), "failed", "free text", RuntimeExitStatusV1.Unobserved, store.journal).error).to_equal("remote-run-settle-reason")
+        expect(remote_run_settle_apply_v1(settle_request_v1(), "outcome-unknown", "free text", RuntimeExitStatusV1.Unobserved, store.journal).error).to_equal("remote-run-settle-reason")
         var other = settle_request_v1()
         other.payload_digest = "c".repeat(64)
-        expect(remote_run_settle_apply_v1(other, "failed", "host-failed", RuntimeExitStatusV1.Unobserved, store.journal).error).to_equal("remote-run-settle-envelope")
+        expect(remote_run_settle_apply_v1(other, "outcome-unknown", "accept-refused", RuntimeExitStatusV1.Unobserved, store.journal).error).to_equal("remote-run-settle-envelope")
         var missing = settle_request_v1()
         missing.id = "other-op"
-        expect(remote_run_settle_apply_v1(missing, "failed", "host-failed", RuntimeExitStatusV1.Unobserved, store.journal).error).to_equal("remote-run-settle-row-missing")
+        expect(remote_run_settle_apply_v1(missing, "outcome-unknown", "accept-refused", RuntimeExitStatusV1.Unobserved, store.journal).error).to_equal("remote-run-settle-row-missing")
         expect(settle_state_v1(store.journal)).to_equal("executing")
         settle_cleanup_v1(store.journal)
 
-    it "maps a Host terminal reply to failed, wedged or cancelled and never to success":
-        step("Only a settled run with a cancel cause is cancelled; wedged and failed stay failed; settled-without-bundle is failed")
-        expect(remote_run_terminal_settle_v1("wedged", "")).to_equal(("failed", "host-wedged"))
-        expect(remote_run_terminal_settle_v1("failed", "")).to_equal(("failed", "host-failed"))
-        expect(remote_run_terminal_settle_v1("settled", "")).to_equal(("failed", "host-settled-without-bundle"))
-        expect(remote_run_terminal_settle_v1("settled", "operator")).to_equal(("cancelled", "host-cancelled"))
-        expect(remote_run_terminal_settle_v1("wedged", "operator")).to_equal(("failed", "host-wedged"))
-        expect(remote_run_terminal_settle_v1("failed", "operator")).to_equal(("failed", "host-failed"))
+    it "names a Host reply that ended the run without a bundle by its cancel cause, never terminal":
+        step("settled without a bundle: host-cancelled with a cause, host-settled-without-bundle without one")
+        expect(remote_run_unbundled_reason_v1("deadline")).to_equal("host-cancelled")
+        expect(remote_run_unbundled_reason_v1("")).to_equal("host-settled-without-bundle")

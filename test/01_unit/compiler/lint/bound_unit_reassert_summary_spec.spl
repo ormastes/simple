@@ -94,3 +94,30 @@ describe "SPL-BOUND-003: cross-function summaries":
         val src = "use unit.length.{{Meters}\nuse unit.time.{{Seconds}\nuse app.phys.{{strip}\nfn bad(d: Meters) -> Seconds:\n    Seconds(strip(d))\n"
         expect(check_bound_unit_reasserts_cross(src, "app/use.spl", [dep]).len()).to_equal(1)
         expect(check_bound_unit_reasserts(src, "app/use.spl").len()).to_equal(0)
+
+describe "SPL-BOUND-003: tail-expression semantics of summaries":
+    """Only the function's real value expression decides the exported unit."""
+
+    it "does not export a last line nested in a branch":
+        # @req: REQ-DIAG-POLICY-001
+        step("Summarise a fn whose last line is an if-body statement")
+        val src = UNITS + "pub fn f(d: Meters, c: bool) -> f64:\n    if c:\n        d.value\n"
+        expect(bound_unit_erasure_summary(src, "app/phys.spl").fns.contains("f")).to_equal(false)
+
+    it "does not export when the last statement is an assignment":
+        # @req: REQ-DIAG-POLICY-001
+        step("Summarise a fn ending in a compound assignment")
+        val src = UNITS + "pub fn g(d: Meters) -> f64:\n    var acc = 1.0\n    acc += d.value\n"
+        expect(bound_unit_erasure_summary(src, "app/phys.spl").fns.contains("g")).to_equal(false)
+
+    it "still exports an explicit return nested in a branch":
+        # @req: REQ-DIAG-POLICY-001
+        step("Summarise a fn that returns d.value from inside an if")
+        val src = UNITS + "pub fn h(d: Meters, c: bool) -> f64:\n    if c:\n        return d.value\n    1.0\n"
+        expect(bound_unit_erasure_summary(src, "app/phys.spl").fns.contains("h")).to_equal(true)
+
+    it "still exports a base-indent tail expression":
+        # @req: REQ-DIAG-POLICY-001
+        step("Summarise a fn whose tail expression erases the unit")
+        val src = UNITS + "pub fn k(d: Meters) -> f64:\n    val z = 1.0\n    d.value\n"
+        expect(bound_unit_erasure_summary(src, "app/phys.spl").fns.contains("k")).to_equal(true)

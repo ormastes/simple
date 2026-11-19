@@ -1,0 +1,211 @@
+# milestone_0045 (owner decision 2, 2026-11-19): the journal side of the controller-signed `retention-release` of a remote
+# build's retained workspace run child (per run since milestone_0047). SOURCE_AUTHORED / NOT_RUN.
+#
+# Verify (issuer == controller_ref, V4 signatures at THIS clock/generation/revocation/session, so an expired or old-session
+# release is refused), derive the Host part of the record from the journal (the run's archived outcome record, or its reap
+# record), check the signed record against it, then record the proof and a no-replace marker through the single journal
+# writer BEFORE any effect. After the service's native effect (the run child removed) the outcome is archived
+# no-replace. The provisioned leaf and its native lease stay (milestone_0047: only the run child is deleted).
+#
+# Crash convergence: every step is idempotent. A marker for the SAME binding is accepted again (a freshly signed release
+# finishes a release that crashed or whose approval expired); an existing archive answers the stored bytes. A crash after
+# the run child was removed but before the archive leaves no child; the re-issued (resumed) release proves it absent
+# beneath the held leaf and archives the weaker `absent-unmeasured` charge (owner decision 2, unchanged). Never a continuity flip; the capacity owner is the caller's (borrowed journal).
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_reap_v4.{HostRemoteBuildReapRowV4, remote_build_reap_rows_v4,
+    host_remote_build_reaped_record_v4, host_remote_build_reap_record_encode_v4}
+use std.nogc_sync_mut.orchestration.host_linux_completion_evidence_v3.{host_remote_build_outcome_relative_v4,
+    host_remote_build_outcome_decode_v4}
+use std.nogc_sync_mut.io.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.common.contracts.orchestration.host_retention_release_v1.*
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
+use std.common.contracts.orchestration.host_capacity_v1.HostCapacityLedgerV1
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_read_v3,
+    distributed_operation_journal_publish_v3, distributed_operation_journal_read_required_v3}
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+# What the service needs after admission (DATA; grants nothing). `archived` non-empty: already released, no effect.
+pub struct HostRetentionReleaseAdmittedV1:
+    operation_id: text
+    marker: text
+    archived: text
+    request_bytes: text
+    # The marker was already recorded before this admission: a re-issue after a crash or a refused effect. Only then may a
+    # missing leaf converge to `absent-unmeasured` (a first issue with no leaf refuses).
+    resumed: bool = false
+
+pub struct HostRetentionReleaseExpectedV1:
+    record: HostRetentionReleaseV1
+    request_bytes: text
+
+pub fn host_retention_release_marker_relative_v1(operation_id: text) -> text:
+    "host-retention-release/" + sha256_text(operation_id) + ".sdn"
+
+pub fn host_retention_release_proof_relative_v1(operation_id: text, proof_digest: text) -> text:
+    "host-retention-release-proof/" + sha256_text(operation_id) + "/" + proof_digest + ".sdn"
+
+fn retention_released_relative_v1(operation_id: text) -> text:
+    "host-retention-released/" + sha256_text(operation_id) + ".sdn"
+
+pub fn host_retention_release_verify_v1(policy: LocalAuthorityPolicyV1, controller_ref: text,
+        context: HostReservationAuthorizationContextV1, host_id: text, source: text) -> Result<HostRetentionReleaseProofV1, text>:
+    val proof = host_retention_release_proof_decode_v1(source)?
+    if proof.signed.issuer_id != controller_ref: return Err("linux-host-service-controller-mismatch")
+    val _matched = host_retention_release_match_v1(proof.release, proof.operation)?
+    if proof.release.physical_host_id != host_id: return Err("retention-release-operation-mismatch")
+    val _grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, proof.signed, proof.approval, proof.operation,
+        context.grant_clock, policy.snapshot.generation, context.policy_revision, context.revocation_epoch,
+        context.session_generation)?
+    Ok(proof)
+
+# PURE: every Host-derived field must equal the journal's own derivation. A mismatch echoes expected beside given (digests
+# only, never a secret), after the signed command verified, so the operator can re-sign what this Host accepts.
+pub fn host_retention_release_check_v1(release: HostRetentionReleaseV1, expected: HostRetentionReleaseV1) -> Result<(), text>:
+    if release.operation_id != expected.operation_id or release.physical_host_id != expected.physical_host_id:
+        return Err("retention-release-operation-mismatch")
+    if release.association_digest != expected.association_digest:
+        return Err("retention-release-association-mismatch:expected=" + expected.association_digest + ";given=" +
+            release.association_digest)
+    if release.evidence != expected.evidence or release.evidence_digest != expected.evidence_digest:
+        return Err("retention-release-evidence-mismatch:expected=" + expected.evidence + "/" + expected.evidence_digest +
+            ";given=" + release.evidence + "/" + release.evidence_digest)
+    Ok(())
+
+# Whether a remote-build row may hold a retained run child: an outcome whose source was `retained-returned` (a
+# no-workload settle records `never-opened`: nothing was staged), or a reap record (the run began; whether it staged is
+# unknown, so it counts; a run child that was never created converges through the resumed absent path). Returns the evidence (kind, digest), or ("", "") for a row that retained nothing.
+fn retention_evidence_v1(journal: DistributedOperationJournalV2, operation_id: text, outcome_published: bool,
+        association_digest: text) -> Result<(text, text), text>:
+    if outcome_published:
+        val source = distributed_operation_journal_read_required_v3(journal, host_remote_build_outcome_relative_v4(operation_id), 65536)?
+        if (host_remote_build_outcome_decode_v4(source)?).source_return != "retained-returned": return Ok(("", ""))
+        return Ok(("outcome", sha256_text(source)))
+    val reaped = host_remote_build_reaped_record_v4(journal, operation_id)?
+    if reaped.is_none(): return Err("retention-release-run-unsettled")
+    if reaped.unwrap().association_digest != association_digest: return Err("retention-release-reap-foreign")
+    Ok(("reaped", sha256_text(host_remote_build_reap_record_encode_v4(reaped.unwrap())?)))
+
+# ONE derivation of the Host part for a remote-build row, used by the signed command and the read-only inspect. Evidence is
+# the run's archived outcome record (the settle published it: the run ended) or, failing that, its reap record (a restart
+# ended it). A row with neither is still live or unknown here and is refused; a row that retained nothing has nothing to
+# release. Since milestone_0047 (owner decision 1) every run staged into its OWN child of the provisioned leaf, named from
+# its operation id, and the effect deletes only that child: another run's retained child is never touched, so no
+# shared-holder admission exists (two retained runs release independently, in any order).
+pub fn host_retention_release_expected_v1(journal: DistributedOperationJournalV2, ledger: HostCapacityLedgerV1,
+        operation_id: text, host_id: text) -> Result<HostRetentionReleaseExpectedV1, text>:
+    val rows = remote_build_reap_rows_v4(journal, ledger)?
+    var found: [HostRemoteBuildReapRowV4] = []
+    for row in rows:
+        if row.operation_id == operation_id: found.push(row)
+    if found.len() != 1: return Err("retention-release-not-remote-build")
+    val target = found[0]
+    val (evidence, evidence_digest) = retention_evidence_v1(journal, operation_id, target.outcome_published, target.association_digest)?
+    if evidence == "": return Err("retention-release-nothing-retained")
+    val record = HostRetentionReleaseV1(wire_version: HOST_RETENTION_RELEASE_WIRE_V1, operation_id: operation_id,
+        association_digest: target.association_digest, evidence: evidence, evidence_digest: evidence_digest,
+        physical_host_id: host_id)
+    val _valid = host_retention_release_bytes_v1(record)?
+    Ok(HostRetentionReleaseExpectedV1(record: record, request_bytes: target.request_bytes))
+
+# The read-only inspect reply: the canonical Host part (no controller fields); the controller adds its terminal state.
+pub fn host_retention_release_inspect_v1(journal: DistributedOperationJournalV2, ledger: HostCapacityLedgerV1,
+        operation_id: text, host_id: text) -> Result<text, text>:
+    host_retention_release_bytes_v1((host_retention_release_expected_v1(journal, ledger, operation_id, host_id)?).record)
+
+fn retention_marker_encode_v1(release: HostRetentionReleaseV1, proof_digest: text) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("retention-release-marker"),
+        "operationId": SdnValue.String(release.operation_id), "associationDigest": SdnValue.String(release.association_digest),
+        "evidence": SdnValue.String(release.evidence), "evidenceDigest": SdnValue.String(release.evidence_digest),
+        "proofDigest": SdnValue.String(proof_digest)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn retention_marker_binding_v1(source: text) -> Result<[text], text>:
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 4096, max_depth: 2, max_nodes: 16,
+            max_rows: 0, max_cells: 0, max_columns: 8)):
+        case Ok(value): value
+        case Err(_): return Err("retention-release-marker-invalid")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("retention-release-marker-invalid")
+    var binding: [text] = []
+    for key in ["operationId", "associationDigest", "evidence", "evidenceDigest", "proofDigest"]:
+        if not fields.contains_key(key): return Err("retention-release-marker-invalid")
+        match fields[key]:
+            case SdnValue.String(value): binding.push(value)
+            case _: return Err("retention-release-marker-invalid")
+    if fields.keys().len() != 7: return Err("retention-release-marker-invalid")
+    Ok(binding)
+
+# Proof first (keyed by its digest; an orphan from a crash before the marker is harmless), then the marker, no-replace and
+# read back. A marker already present for the SAME binding (operation, association, evidence) is accepted and returned
+# unchanged, so a freshly signed release finishes one that crashed; any other marker is refused.
+pub fn host_retention_release_record_publish_v1(journal: DistributedOperationJournalV2, proof: HostRetentionReleaseProofV1,
+        source: text) -> Result<text, text>:
+    val release = proof.release
+    val digest = sha256_text(source)
+    val proof_path = host_retention_release_proof_relative_v1(release.operation_id, digest)
+    if not distributed_operation_journal_publish_v3(journal, proof_path, source)?:
+        if distributed_operation_journal_read_required_v3(journal, proof_path, 262144)? != source: return Err("retention-release-exists")
+    val marker = retention_marker_encode_v1(release, digest)
+    val marker_path = host_retention_release_marker_relative_v1(release.operation_id)
+    if not distributed_operation_journal_publish_v3(journal, marker_path, marker)?:
+        val existing = distributed_operation_journal_read_required_v3(journal, marker_path, 4096)?
+        val recorded = retention_marker_binding_v1(existing)?
+        if (recorded[0] != release.operation_id or recorded[1] != release.association_digest or recorded[2] != release.evidence or
+                recorded[3] != release.evidence_digest):
+            return Err("retention-release-exists")
+        return Ok(existing)
+    if distributed_operation_journal_read_required_v3(journal, marker_path, 4096)? != marker: return Err("retention-release-readback")
+    Ok(marker)
+
+pub fn host_retention_release_archived_v1(journal: DistributedOperationJournalV2, operation_id: text) -> Result<Option<text>, text>:
+    val stored = distributed_operation_journal_read_v3(journal, retention_released_relative_v1(operation_id), 4096)?
+    if stored.is_none(): return Ok(None)
+    if (host_retention_released_decode_v1(stored.unwrap())?).operation_id != operation_id: return Err("retention-released-foreign")
+    Ok(stored)
+
+# The durable outcome, no-replace and read back. An existing archive for the same operation and marker answers the stored
+# bytes (first release time kept); any other is a conflict.
+# @allow(primitive_api) released_at_ms is the unix-ms trusted clock sample, as every Host settle/reap entry takes it
+pub fn host_retention_release_archive_v1(journal: DistributedOperationJournalV2, operation_id: text, marker_digest: text,
+        effect: HostRetentionReleaseEffectV1, released_at_ms: i64) -> Result<text, text>:
+    if not builder_digest_valid_v1(marker_digest): return Err("retention-released-value-invalid")
+    val archive = host_retention_released_bytes_v1(HostRetentionReleasedV1(operation_id: operation_id, marker_digest: marker_digest,
+        charge: effect.charge, used_bytes: effect.used_bytes, used_inodes: effect.used_inodes, removed: effect.removed,
+        released_at_ms: released_at_ms))?
+    val path = retention_released_relative_v1(operation_id)
+    if not distributed_operation_journal_publish_v3(journal, path, archive)?:
+        val existing = distributed_operation_journal_read_required_v3(journal, path, 4096)?
+        val recorded = host_retention_released_decode_v1(existing)?
+        if recorded.operation_id != operation_id or recorded.marker_digest != marker_digest: return Err("retention-released-conflict")
+        return Ok(existing)
+    if distributed_operation_journal_read_required_v3(journal, path, 4096)? != archive: return Err("retention-released-readback")
+    Ok(archive)
+
+# The admission before any effect: verify, short-circuit on an existing archive, derive, check, record.
+pub fn host_retention_release_admit_v1(journal: DistributedOperationJournalV2, ledger: HostCapacityLedgerV1,
+        policy: LocalAuthorityPolicyV1, controller_ref: text, context: HostReservationAuthorizationContextV1, host_id: text,
+        source: text) -> Result<HostRetentionReleaseAdmittedV1, text>:
+    val proof = host_retention_release_verify_v1(policy, controller_ref, context, host_id, source)?
+    val operation_id = proof.release.operation_id
+    val archived = host_retention_release_archived_v1(journal, operation_id)?
+    if archived.is_some():
+        return Ok(HostRetentionReleaseAdmittedV1(operation_id: operation_id, marker: "", archived: archived.unwrap(), request_bytes: "",
+            resumed: true))
+    val expected = host_retention_release_expected_v1(journal, ledger, operation_id, host_id)?
+    host_retention_release_check_v1(proof.release, expected.record)?
+    val resumed = (distributed_operation_journal_read_v3(journal, host_retention_release_marker_relative_v1(operation_id), 4096)?).is_some()
+    val marker = host_retention_release_record_publish_v1(journal, proof, source)?
+    Ok(HostRetentionReleaseAdmittedV1(operation_id: operation_id, marker: marker, archived: "", request_bytes: expected.request_bytes,
+        resumed: resumed))
+
+export HostRetentionReleaseAdmittedV1, HostRetentionReleaseExpectedV1
+export host_retention_release_marker_relative_v1, host_retention_release_proof_relative_v1
+export host_retention_release_verify_v1, host_retention_release_check_v1, host_retention_release_expected_v1
+export host_retention_release_inspect_v1, host_retention_release_record_publish_v1, host_retention_release_archived_v1
+export host_retention_release_archive_v1, host_retention_release_admit_v1

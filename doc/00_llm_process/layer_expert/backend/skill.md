@@ -363,3 +363,8 @@ aarch64 ELF is now mapped by `r_type` first and fails closed on anything the
 loader cannot apply. Trap: ELF `r_type` numbers are per-machine; gate on
 `obj_file.architecture()`. See
 [bug](../../../08_tracking/bug/smf_aarch64_elf_relocations_dropped_2026-11-13.md).
+
+Backend provider gate, receipt identity and backend contracts-as-data live in
+`src/app/build/targets/` (#10181); `provider_entry` `.provider.sdn` + SVE/RVV VL
+query merged in #10351 (review FAIL: provider gate self-attests; fix PR in
+progress). Details: mission_critical_robustness feature note.

@@ -21,7 +21,8 @@ use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.*
 use std.common.contracts.container.runtime_v1.RuntimeExitStatusV1
 use std.nogc_sync_mut.orchestration.host_linux_completion_evidence_v3.host_remote_build_outcome_decode_v4
 # Tests reach private module gates directly (repo rule: tests may access private).
-use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{HostLinuxServiceCurrentV4, linux_service_agent_slot_v4}
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{HostLinuxServiceCurrentV4, linux_service_agent_slot_v4,
+    linux_service_remote_build_unopened_deadline_v4}
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
 use std.nogc_sync_mut.io.file_ops.secure_temp_dir
 use std.nogc_sync_mut.io_runtime.dir_remove
@@ -267,3 +268,56 @@ describe "remote-build deadline (integration review P2-b)":
         val cancelled = host_remote_build_request_cancel_v4(ex_executor("failed"), "controller-cancel")
         expect(cancelled.error).to_equal("linux-host-remote-build-failed")
         expect(cancelled.pretransfer).to_equal(false)
+
+# ---- milestone_0043 (opus re-review P1-2): an executed remote-build slot that is never opened ----
+# Before this, only a service restart freed it: the slot was `executing` with no held build, so every later prepare was
+# busy and cancel, collect and the step deadline all required an opened build.
+
+describe "executed-but-never-opened remote-build slot (milestone_0043 P1-2)":
+    it "uses the execute pair's own window (the earlier of its approval and grant expiry) as the unopened deadline":
+        # @req M0043-UNOPENED-01
+        expect(linux_service_remote_build_unopened_deadline_v4(5000, 7000)).to_equal(5000)
+        expect(linux_service_remote_build_unopened_deadline_v4(9000, 7000)).to_equal(7000)
+
+    it "keeps the slot busy (fail closed) when the service cannot prove the window ended":
+        # @req M0043-UNOPENED-02
+        step("No published current record, so no grant clock and no archived execute: never a guessed release")
+        val root = secure_temp_dir("/tmp", "m0043-unopened").unwrap()
+        var capacity = pt_open(root + "/journal")
+        capacity.ledger.reservations = [HostReservationV1("reservation_operation_2", "operation_2", "0".repeat(64), "service_1", 1,
+            "nonce", 500, 4096, [], 0, HostReservationStateV1.Executing)]
+        val owner = HostLinuxServiceCurrentV4(root: root, capacity: Some(capacity), agent_operation_id: "operation_2",
+            slot_kind: "remote-build", agent_consumed: false)
+        val turn = linux_service_agent_slot_v4(owner, "operation_3", 0)
+        expect(turn.error).to_equal("linux-host-agent-incarnation-busy")
+        expect(turn.owner.agent_operation_id).to_equal("operation_2")
+        expect(turn.owner.slot_kind).to_equal("remote-build")
+        val closed = host_capacity_owner_close_owned_v2(turn.owner.capacity.unwrap())
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "settles an expired unopened slot cancelled/no-workload on the grant clock and clears it":
+        # @req M0043-UNOPENED-03
+        step("Only the unopened, unconsumed remote-build slot; the archived signed execute supplies the window")
+        val source = file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl")
+        val slot = ex_body(source, "fn linux_service_agent_slot_v4(")
+        val gate_at = slot.index_of("owner.slot_kind == \"remote-build\" and owner.build.is_none() and not owner.agent_consumed")
+        val busy_at = slot.index_of("if state == \"executing\": return linux_service_reply_v4(owner, \"\", \"linux-host-agent-incarnation-busy\", false)")
+        expect(gate_at >= 0 and busy_at > gate_at).to_equal(true)
+        val expire = ex_body(source, "fn linux_service_remote_build_unopened_expire_v4(")
+        expect(expire.contains("host_local_context_v1(metadata.unwrap().policy).grant_clock")).to_equal(true)
+        expect(expire.contains("monotonic_ms")).to_equal(false)
+        val settle_at = expire.index_of("host_remote_build_settle_no_workload_v4(")
+        val adopt_at = expire.index_of("owner.capacity = Some(settled.owner)")
+        val readback_at = expire.index_of("row.state == HostReservationStateV1.Released")
+        val clear_at = expire.index_of("owner.agent_operation_id = \"\"")
+        expect(settle_at >= 0 and adopt_at > settle_at and readback_at > adopt_at and clear_at > readback_at).to_equal(true)
+        expect(expire.contains("\"deadline\"")).to_equal(true)
+
+    it "refuses an open after the execute window too, so the outcome never depends on whether a prepare arrived":
+        # @req M0043-UNOPENED-04
+        val open = ex_body(file_read_text("src/lib/nogc_sync_mut/orchestration/host_linux_service_current_v4.spl"),
+            "pub fn host_linux_service_remote_build_open_v4(")
+        val window_at = open.index_of("linux_service_remote_build_unopened_deadline_v4(")
+        val open_at = open.index_of("host_remote_build_open_v4(owner.capacity.unwrap().journal")
+        expect(window_at >= 0 and open_at > window_at).to_equal(true)

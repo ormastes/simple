@@ -24,7 +24,7 @@ use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.linux_service_
 use std.nogc_sync_mut.orchestration.host_service_handoff_v1.{host_service_handoff_commit_v1, host_service_handoff_verify_v1, host_service_handoff_consume_v1,
     host_service_handoff_pending_relative_v1, host_service_handoff_adopted_relative_v1,
     host_service_handoff_abandon_v1, host_service_handoff_abandoned_relative_v1,
-    host_service_handoff_abandon_evidence_relative_v1}
+    host_service_handoff_abandon_evidence_relative_v1, host_service_handoff_abandon_inspect_v1}
 use std.common.contracts.orchestration.host_service_handoff_v1.*
 use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentitySnapshotV3
 use std.nogc_sync_mut.io.local_authority_policy_v1.{local_authority_policy_decode_v1, host_local_context_v1}
@@ -329,6 +329,34 @@ describe "Controller-signed abandon of an unverifiable pending handoff (AT-OPS-0
             ho_signed(ho_record(old_scope, "current-old", 2))).is_ok()).to_equal(true)
         expect(host_service_handoff_abandon_v1(journal, new_scope, policy, "issuer_1", context, signed).unwrap_err())
             .to_equal("service-handoff-abandon-mismatch")
+        val closed = host_capacity_owner_close_owned_v2(capacity)
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "inspects exactly the record the abandon accepts (milestone_0046 controller handoff-abandon)":
+        # @req AT-OPS-01 (recovery reachable from the controller)
+        val fixture = ho_fixture()
+        val policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val old_scope = ho_scope(fixture, "ab")
+        val new_scope = ho_scope(fixture, "cd")
+        val root = secure_temp_dir("/tmp", "ho-inspect").unwrap()
+        val capacity = ho_open(root + "/journal", old_scope)
+        val journal = capacity.journal
+        val context = host_local_context_v1(policy)
+        step("nothing pending: the inspect refuses with the abandon's own code")
+        expect(host_service_handoff_abandon_inspect_v1(journal, new_scope).unwrap_err()).to_equal("service-handoff-abandon-nothing-pending")
+        val source = ho_signed(ho_record(old_scope, "current-old"))
+        expect(distributed_operation_journal_publish_v3(journal, host_service_handoff_pending_relative_v1(1), source).unwrap()).to_equal(true)
+        step("the inspected bytes are canonical and name sequence 1, the pending digest and this host")
+        val inspected = host_service_handoff_abandon_inspect_v1(journal, new_scope).unwrap()
+        val record = host_service_handoff_abandon_decode_v1(inspected).unwrap()
+        expect(record.sequence).to_equal(1)
+        expect(record.pending_digest).to_equal(sha256_text(source))
+        expect(record.physical_host_id).to_equal(new_scope.physical_host_id)
+        expect(host_service_handoff_abandon_bytes_v1(record).unwrap()).to_equal(inspected)
+        step("the inspect wrote nothing; signing the inspected record is accepted")
+        expect(distributed_operation_journal_read_v3(journal, host_service_handoff_abandoned_relative_v1(1), 4096).unwrap().is_none()).to_equal(true)
+        expect(host_service_handoff_abandon_v1(journal, new_scope, policy, "issuer_1", context, ho_abandon_signed(record)).is_ok()).to_equal(true)
         val closed = host_capacity_owner_close_owned_v2(capacity)
         expect(closed.closed and closed.error == "").to_equal(true)
         expect(dir_remove(root, true)).to_equal(true)

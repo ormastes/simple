@@ -52,6 +52,93 @@ pub fn load_backend_contracts(source: text) -> Result<BackendContracts, text>:
 fn _read_or_empty(path: text) -> text:
     if file_exists(path): file_read(path) else: ""
 
+fn _is_comment_or_blank(line: text) -> bool:
+    val t = line.trim()
+    t == "" or t.starts_with("#")
+
+# Fields of the top-level block `<kind> <name>:` in a build-group file as
+# key -> value, or None when no such block exists. A block is its header line
+# at column 0 plus the following indented `key: value` lines.
+fn _block_fields(body: text, kind: text, name: text) -> Dict<text, text>?:
+    val header = kind + " " + name + ":"
+    var in_block = false
+    var found = false
+    var fields: Dict<text, text> = {}
+    for line in body.split("\n"):
+        val raw = line.replace("\r", "")
+        if _is_comment_or_blank(raw):
+            continue
+        val indented = raw.starts_with(" ") or raw.starts_with("\t")
+        if not indented:
+            if in_block:
+                break
+            if raw.trim() == header:
+                in_block = true
+                found = true
+            continue
+        if not in_block:
+            continue
+        val t = raw.trim()
+        val at = t.find(":")
+        if at > 0:
+            fields[t.substring(0, at).trim()] = t.substring(at + 1, t.byte_len()).trim()
+    if found: Some(fields) else: None
+
+fn _field_is(fields: Dict<text, text>?, key: text, want: text) -> bool:
+    if not fields.?: return false
+    val f: Dict<text, text> = fields.unwrap()
+    if not f.has(key): return false
+    f[key] == want
+
+# Value between the first pair of double quotes on the first non-comment line
+# that starts with `prefix`, or None.
+fn _quoted_on_line(source: text, prefix: text) -> text?:
+    for line in source.split("\n"):
+        val t = line.trim()
+        if t.starts_with("#") or not t.starts_with(prefix):
+            continue
+        val a = t.find("\"")
+        if a < 0: return None
+        val rest = t.substring(a + 1, t.byte_len())
+        val b = rest.find("\"")
+        if b < 0: return None
+        return Some(rest.substring(0, b))
+    None
+
+# True when a non-comment line of `source` carries `needle` and `anchor`.
+fn _code_line_has(source: text, anchor: text, needle: text) -> bool:
+    for line in source.split("\n"):
+        val t = line.trim()
+        if t.starts_with("#"):
+            continue
+        if t.contains(anchor) and t.contains(needle):
+            return true
+    false
+
+# Tier names an `arch` entry of cpu_tiers.sdn declares (`levels` and
+# `default_tiers`), compared as whole names by parsed key.
+fn _cpu_tier_declared(tiers_src: text, arch: text, tier: text) -> bool:
+    val parsed = parse(tiers_src)
+    if parsed.is_err(): return false
+    val root = parsed.unwrap().get("cpu_tiers")
+    if not root.?: return false
+    val entries = root.unwrap().as_array()
+    if not entries.?: return false
+    for entry in entries.unwrap():
+        val a = entry.get("arch")
+        if not a.?: continue
+        val an = a.unwrap().as_str()
+        if not an.? or an.unwrap() != arch: continue
+        for key in ["levels", "default_tiers"]:
+            val list = entry.get(key)
+            if not list.?: continue
+            val items = list.unwrap().as_array()
+            if not items.?: continue
+            for item in items.unwrap():
+                val n = item.as_str()
+                if n.? and n.unwrap() == tier: return true
+    false
+
 pub fn check_backend_contracts_text(source: text, repo_root: text) -> [text]:
     """Violations of the contract data against the repo; empty = all hold."""
     var out: [text] = []
@@ -60,33 +147,42 @@ pub fn check_backend_contracts_text(source: text, repo_root: text) -> [text]:
         out.push(loaded.unwrap_err())
         return out
     val c = loaded.unwrap()
-    # HIP is the ROCm backend of record: opt-in group exists and names the HIP target.
+    # HIP is the ROCm backend of record: the opt-in group exists, its `members`
+    # field names the HIP target, and that target block has a HIP entry.
     val rocm = _read_or_empty(repo_root + "/config/build/backends_rocm.sdn")
-    if c.rocm_backend != "hip" or not rocm.contains("group " + c.rocm_group + ":") or not rocm.contains("target " + c.rocm_target + ":") or not rocm.contains("backend_hip"):
+    val rocm_group = _block_fields(rocm, "group", c.rocm_group)
+    val rocm_target = _block_fields(rocm, "target", c.rocm_target)
+    var hip_entry = false
+    if rocm_target.?:
+        val tf: Dict<text, text> = rocm_target.unwrap()
+        hip_entry = tf.has("entry") and tf["entry"].starts_with("src/plugins/backend_hip/")
+    if c.rocm_backend != "hip" or not _field_is(rocm_group, "members", c.rocm_target) or not hip_entry:
         out.push("backend-contract: rocm-backend-of-record: " + c.rocm_backend + " is not HIP-backed by config/build/backends_rocm.sdn")
     if dir_exists(repo_root + "/src/compiler/70.backend/backend_rocm"):
         out.push("backend-contract: rocm-backend-of-record: a separate backend_rocm directory exists beside HIP")
-    # PTX ISA version equals the version the builder emits.
+    # PTX ISA version equals the version the builder emits (parsed constant).
     val ptx = _read_or_empty(repo_root + "/" + c.ptx_source)
-    if not ptx.contains("val PTX_ISA_VERSION: text = \"" + c.ptx_isa_version + "\""):
+    val ptx_have = _quoted_on_line(ptx, "val PTX_ISA_VERSION: text =")
+    if not ptx_have.? or ptx_have.unwrap() != c.ptx_isa_version:
         out.push("backend-contract: ptx-isa-version: " + c.ptx_isa_version + " != PTX_ISA_VERSION in " + c.ptx_source)
     val emit = _read_or_empty(repo_root + "/src/compiler/70.backend/backend/unified_kernel_emit.spl")
-    if not emit.contains("\"" + c.ptx_default_sm + "\""):
+    if not _code_line_has(emit, "\"cuda-ptx\"", "\"" + c.ptx_default_sm + "\""):
         out.push("backend-contract: ptx-default-sm: " + c.ptx_default_sm + " not used by unified_kernel_emit.spl")
-    # SVE/RVV: vector-length-agnostic, queried at runtime, tiers exist in cpu_tiers.sdn.
+    # SVE/RVV: vector-length-agnostic, queried at runtime, tiers declared for
+    # their arch in cpu_tiers.sdn. SVE VL = kernel default VL, unverified on hardware.
     if c.vl_mode != "vl_agnostic":
         out.push("backend-contract: vector-length-mode: " + c.vl_mode + " (must be vl_agnostic)")
     if c.vl_query != "runtime":
         out.push("backend-contract: vector-length-query: " + c.vl_query + " (must be runtime)")
     val tiers = _read_or_empty(repo_root + "/config/build/cpu_tiers.sdn")
-    if not tiers.contains(c.vl_aarch64_tier):
+    if not _cpu_tier_declared(tiers, "aarch64", c.vl_aarch64_tier):
         out.push("backend-contract: vector-length-tier: " + c.vl_aarch64_tier + " missing from cpu_tiers.sdn")
-    if not tiers.contains(c.vl_riscv64_tier):
+    if not _cpu_tier_declared(tiers, "riscv64", c.vl_riscv64_tier):
         out.push("backend-contract: vector-length-tier: " + c.vl_riscv64_tier + " missing from cpu_tiers.sdn")
-    # Opt-in: every backends_* group in config/build stays default: false.
+    # Opt-in: every backends_* group in config/build declares `default: false`.
     for name in ["backends_c", "backends_cuda", "backends_rocm", "backends_vhdl", "backends_vulkan"]:
         val body = _read_or_empty(repo_root + "/config/build/" + name + ".sdn")
-        if body == "" or not body.contains("default: false"):
+        if body == "" or not _field_is(_block_fields(body, "group", name), "default", "false"):
             out.push("backend-contract: opt-in: " + name + " must exist and declare default: false")
     out
 

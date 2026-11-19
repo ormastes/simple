@@ -68,6 +68,7 @@ int main(void){
     CHECK(rt_linux_container_user_close_v1(token,wrong)==-ESTALE);
     CHECK(rt_workspace_storage_release_if_absent_v1(token)==-ESTALE);
     CHECK(rt_workspace_storage_forget_released_v1(token)==-ESTALE);
+    CHECK(rt_workspace_storage_close_retained_v1(token)==-ESTALE);
     CHECK(rt_string_len(rt_workspace_storage_observe_v1(token))==0);
     CrossThread other={token,binding,-1};pthread_t thread;CHECK(pthread_create(&thread,NULL,cross_thread,&other)==0);
     CHECK(pthread_join(thread,NULL)==0);CHECK(other.result==0);

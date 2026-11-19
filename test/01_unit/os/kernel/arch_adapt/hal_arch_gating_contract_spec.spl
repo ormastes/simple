@@ -1,0 +1,47 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# Contract: generic kernel/sosix code must not reach x86 port I/O or x86 TLB
+# primitives on non-x86 kernels (riscv64 fs-exec link, batch 2).
+# bug: doc/08_tracking/bug/riscv64_fs_exec_kernel_link_undefined_runtime_2026-11-19.md
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read_text}
+
+fn _count(src: text, needle: text) -> i64:
+    src.split(needle).len().to_i64() - 1
+
+describe "arch HAL gating for non-x86 kernels":
+    it "routes sosix console byte I/O through the arch HAL":
+        step("io_rw.spl uses hal_console_*, not x86 COM1 directly")
+        val src = file_read_text("src/os/sosix/io_rw.spl")
+        expect(src.contains("x86_com1_read_byte")).to_equal(false)
+        expect(src.contains("x86_com1_write_byte")).to_equal(false)
+        expect(src.contains("use os.kernel.arch_adapt.console_byte")).to_equal(true)
+
+    it "gives every target one console byte read and write body":
+        step("console_byte.spl has a cfg body per target")
+        val src = file_read_text("src/os/kernel/arch_adapt/console_byte.spl")
+        expect(_count(src, "fn hal_console_read_byte()")).to_equal(6)
+        expect(_count(src, "fn hal_console_write_byte(")).to_equal(6)
+        expect(src.contains("@cfg(riscv64)\nfn hal_console_read_byte")).to_equal(true)
+        expect(src.contains("@cfg(riscv64)\nfn hal_console_write_byte")).to_equal(true)
+
+    it "keeps PCI port I/O config access on x86 only":
+        step("pci.spl: port I/O bodies are x86-cfg, riscv64 reads via ECAM")
+        val src = file_read_text("src/os/drivers/pci/pci.spl")
+        expect(src.contains("@cfg(x86_64)\nfn pci_read_config")).to_equal(true)
+        expect(src.contains("@cfg(x86)\nfn pci_read_config")).to_equal(true)
+        expect(src.contains("@cfg(riscv64)\nfn pci_read_config")).to_equal(true)
+        expect(src.contains("@cfg(arm64)\nfn pci_read_config")).to_equal(true)
+        expect(_count(src, "fn pci_read_config(")).to_equal(6)
+        expect(src.contains("@cfg(riscv32)\nfn pci_read_config")).to_equal(true)
+        expect(src.contains("@cfg(arm32)\nfn pci_read_config")).to_equal(true)
+        expect(_count(src, "fn pci_write_config(")).to_equal(6)
+
+    it "flushes the TLB per architecture":
+        step("vmm.spl: riscv64 _invlpg uses sfence.vma, rt_invlpg stays off riscv")
+        val src = file_read_text("src/os/kernel/memory/vmm.spl")
+        expect(src.contains("@cfg(riscv64)\nfn _invlpg(vaddr: u64):\n    rv64_sfence_vma_addr(vaddr)")).to_equal(true)
+        expect(src.contains("@cfg(riscv32)\nfn _invlpg(vaddr: u64):\n    rv32_sfence_vma(")).to_equal(true)
+        expect(_count(src, "fn _invlpg(")).to_equal(6)

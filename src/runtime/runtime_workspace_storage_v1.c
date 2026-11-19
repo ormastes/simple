@@ -253,8 +253,8 @@ static int ws_release_busy_pair_v1(WsSlotV1* first,int64_t first_token,
     atomic_store_explicit(second_busy,0,memory_order_release);
     return 0;
 }
-static int64_t ws_open_or_recover_v1(int64_t kind,int64_t parent,int64_t leaf,
-        int64_t pool,int64_t workspace,int64_t quota,int64_t hard,int64_t policy,int recover) {
+static int64_t ws_open_v1(int64_t kind,int64_t parent,int64_t leaf,
+        int64_t pool,int64_t workspace,int64_t quota,int64_t hard,int64_t policy) {
     int origin_error=ws_origin_guard_v1();if(origin_error)return -origin_error;
     WsSlotV1 candidate; memset(&candidate,0,sizeof(candidate));atomic_init(&candidate.busy,0);
     if (!ws_copy_text_v1(kind,candidate.kind,sizeof(candidate.kind)) ||
@@ -271,18 +271,10 @@ static int64_t ws_open_or_recover_v1(int64_t kind,int64_t parent,int64_t leaf,
     for(size_t i=0;i<WS_SLOT_COUNT_V1;i++) {
         WsSlotV1* existing=&ws_slots_v1[i];
         /* One scope may not acquire independent concurrent native leases.
-         * Host replay must reuse its live owner or recover after process exit. */
+         * Host replay must reuse its live owner, or admit afresh after process exit or after the
+         * holder dropped its retained hold (rt_workspace_storage_close_retained_v1). */
         if(existing->token&&existing->role==1&&(!strcmp(existing->pool,candidate.pool))&&
                 (!strcmp(existing->workspace,candidate.workspace)||existing->quota==candidate.quota)) {
-            if(recover&&!strcmp(existing->kind,candidate.kind)&&!strcmp(existing->parent,candidate.parent)&&
-                    !strcmp(existing->leaf,candidate.leaf)&&!strcmp(existing->workspace,candidate.workspace)&&
-                    !strcmp(existing->policy,candidate.policy)&&existing->quota==candidate.quota&&existing->hard_bytes==hard) {
-                /* Recover retained cleanup authority even when observation is
-                 * currently failing. This is a lease, not a readiness receipt. */
-                if(!existing->released&&!existing->busy)(void)ws_native_observe_v1(&existing->native,existing->leaf,existing->pool,
-                    existing->workspace,hard,&existing->used_bytes,&existing->used_inodes);
-                int64_t token=existing->token;ws_lock_release_v1();return token;
-            }
             ws_lock_release_v1();return -EBUSY;
         }
         if(!existing->token&&slot==WS_SLOT_COUNT_V1)slot=i;
@@ -297,12 +289,7 @@ static int64_t ws_open_or_recover_v1(int64_t kind,int64_t parent,int64_t leaf,
 int64_t rt_workspace_storage_open_v1(int64_t kind,int64_t parent,int64_t leaf,
         int64_t pool,int64_t workspace,int64_t quota,int64_t hard,int64_t policy) {
     int origin_error=ws_origin_guard_v1();if(origin_error)return -origin_error;
-    return ws_open_or_recover_v1(kind,parent,leaf,pool,workspace,quota,hard,policy,0);
-}
-int64_t rt_workspace_storage_recover_v1(int64_t kind,int64_t parent,int64_t leaf,
-        int64_t pool,int64_t workspace,int64_t quota,int64_t hard,int64_t policy) {
-    int origin_error=ws_origin_guard_v1();if(origin_error)return -origin_error;
-    return ws_open_or_recover_v1(kind,parent,leaf,pool,workspace,quota,hard,policy,1);
+    return ws_open_v1(kind,parent,leaf,pool,workspace,quota,hard,policy);
 }
 int64_t rt_workspace_storage_observe_v1(int64_t token) {
     int origin_error=ws_origin_guard_v1();if(origin_error)return ws_origin_empty_v1();
@@ -341,6 +328,19 @@ int64_t rt_workspace_storage_forget_released_v1(int64_t token) {
     WsSlotV1* slot=ws_find_v1(token);
     if(!slot||slot->role!=1)error=WS_STALE_ERROR_V1;
     else if(slot->busy||!slot->released)error=EBUSY;
+    else {ws_native_close_v1(&slot->native);memset(slot,0,sizeof(*slot));}
+    ws_lock_release_v1();return -error;
+}
+/* milestone_0047: drop this process's hold of a RETAINED (not released) storage lease: close the native descriptors
+ * and free the slot exactly as process exit does. The workspace, its project id, PROJINHERIT and quota limit are
+ * untouched (ws_native_close_v1 only closes fds), so a later admission re-proves the provisioned leaf from scratch.
+ * A released slot is forget_released's; a loaned (busy) slot refuses. */
+int64_t rt_workspace_storage_close_retained_v1(int64_t token) {
+    int origin_error=ws_origin_guard_v1();if(origin_error)return -origin_error;
+    int error=ws_lock_acquire_v1();if(error)return -error;
+    WsSlotV1* slot=ws_find_v1(token);
+    if(!slot||slot->role!=1)error=WS_STALE_ERROR_V1;
+    else if(slot->busy||slot->released)error=EBUSY;
     else {ws_native_close_v1(&slot->native);memset(slot,0,sizeof(*slot));}
     ws_lock_release_v1();return -error;
 }
