@@ -1,0 +1,138 @@
+"""
+## Purpose and audience
+Purpose: Pin the layout size of an `<img>` whose decoded resource is supplied to
+Chrome 159: natural (intrinsic) size with no width/height, the other side
+following the aspect ratio when only one is given, and the HTML `width` /
+`height` attributes as presentational hints. The sibling block after the image
+pins the image's layout height. The 5x3 test image is uniform
+(RGBA 200,40,40,255) so sampling is exact.
+Audience: browser-engine maintainers.
+
+Chrome 159 (arm64 headless, --force-device-scale-factor=4, 64x40 viewport,
+body margin 0, sibling `<div style="width:4px;height:2px;background:#0a0">`),
+red bounding box x0..x1,y0..y1 then green top row:
+- inline bare 5x3: R 0..4,11..13 (sits on the 14px baseline), G y=18
+- inline width=10 / height=6 / css width:10px: R 0..9,8..13, G y=18
+- inline width=8 height=2: R 0..7,12..13, G y=18
+- inline height=15 (25x15 grows the line): R 0..24,0..14, G y=19
+- block bare: R 0..4,0..2, G y=3; block width=10 / height=6 / css height:6px:
+  R 0..9,0..5, G y=6; block width=8 height=2: R 0..7,0..1, G y=2
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-IMG-NATURAL-SIZE-CHROME159-001 — an <img> with a supplied resource is laid out at its natural size as Chrome 159 does.
+"""
+use std.spec.*
+use std.common.image.png_decode.{decode_png_to_argb}
+use std.common.base_encoding.base64.{base64_decode_bytes}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource, simpleos_host_gpu_image_resource}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_with_images
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels, simple_web_layout_render_html_software_pixels_with_images
+}
+
+val NS_IMG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUAAAADCAYAAABbNsX4AAAAEklEQVR4nGM4oaHxHx0zEC0IANcKH1rM0HAUAAAAAElFTkSuQmCC"
+val NS_RED = 0xFFC82828u32
+val NS_GREEN = 0xFF00AA00u32
+val NS_W = 64
+val NS_H = 40
+
+fn ns_resources() -> [SimpleOsHostGpuImageResource]:
+    val png = decode_png_to_argb(base64_decode_bytes(NS_IMG.substring(22, NS_IMG.len())))
+    if val Err(reason) = png:
+        print "decode failed: {reason}"
+        return []
+    val img = png.unwrap()
+    [simpleos_host_gpu_image_resource(NS_IMG, img.width, img.height, img.pixels)]
+
+fn ns_page(attrs: text) -> text:
+    "<!DOCTYPE html><html><body style=\"margin:0;background:#fff\"><img src=\"" + NS_IMG + "\"" + attrs + "><div style=\"width:4px;height:2px;background:#0a0\"></div></body></html>"
+
+# [x0, x1, y0, y1, count] of the pixels equal to `want`; x0 = -1 when none.
+fn ns_bbox(px: [u32], want: u32) -> [i32]:
+    var x0 = -1
+    var x1 = -1
+    var y0 = -1
+    var y1 = -1
+    var n = 0
+    var y = 0
+    # cpu-lane-loop-ok: test frame scan; bound is NS_H rows
+    while y < NS_H:
+        var x = 0
+        # cpu-lane-loop-ok: test frame scan; bound is NS_W columns
+        while x < NS_W:
+            if px[y * NS_W + x] == want:
+                if x0 < 0 or x < x0:
+                    x0 = x
+                if x > x1:
+                    x1 = x
+                if y0 < 0 or y < y0:
+                    y0 = y
+                if y > y1:
+                    y1 = y
+                n = n + 1
+            x = x + 1
+        y = y + 1
+    [x0, x1, y0, y1, n]
+
+# Chrome 159 expectation: image box [x1, y0, y1] (x0 is always 0) and the sibling's top row.
+fn ns_check(px: [u32], rx1: i32, ry0: i32, ry1: i32, gy0: i32) -> [i32]:
+    if px.len() != NS_W * NS_H:
+        return [-1]
+    val r = ns_bbox(px, NS_RED)
+    val g = ns_bbox(px, NS_GREEN)
+    val full = (rx1 + 1) * (ry1 - ry0 + 1)
+    [r[0], r[1], r[2], r[3], r[4] - full, g[0], g[2]]
+
+fn ns_want(rx1: i32, ry0: i32, ry1: i32, gy0: i32) -> [i32]:
+    [0, rx1, ry0, ry1, 0, 0, gy0]
+
+fn ns_lanes(attrs: text, rx1: i32, ry0: i32, ry1: i32, gy0: i32):
+    val res = ns_resources()
+    expect(res.len()).to_equal(1)
+    val want = ns_want(rx1, ry0, ry1, gy0)
+    val raster = simple_web_layout_render_html_software_pixels_with_images(ns_page(attrs), NS_W, NS_H, res)
+    expect(ns_check(raster, rx1, ry0, ry1, gy0)).to_equal(want)
+    for lane in ["cpu_simd", "vulkan"]:
+        val px = simple_web_layout_render_html_pixels_engine2d_with_images(ns_page(attrs), NS_W, NS_H, lane, res)
+        expect(ns_check(px, rx1, ry0, ry1, gy0)).to_equal(want)
+
+describe "img natural size Chrome 159":
+    it "lays out a bare inline <img> at its natural 5x3":
+        ns_lanes("", 4, 11, 13, 18)
+
+    it "follows the aspect ratio for a width-only attribute (10 -> 10x6)":
+        ns_lanes(" width=\"10\"", 9, 8, 13, 18)
+
+    it "follows the aspect ratio for a height-only attribute (6 -> 10x6)":
+        ns_lanes(" height=\"6\"", 9, 8, 13, 18)
+
+    it "uses width and height attributes together as presentational hints (8x2)":
+        ns_lanes(" width=\"8\" height=\"2\"", 7, 12, 13, 18)
+
+    it "follows the aspect ratio for CSS width alone":
+        ns_lanes(" style=\"width:10px\"", 9, 8, 13, 18)
+
+    it "grows the line box for a tall inline image (height=15 -> 25x15)":
+        ns_lanes(" height=\"15\"", 24, 0, 14, 19)
+
+    it "lays out a bare block <img> at 5x3 and offsets the sibling":
+        ns_lanes(" style=\"display:block\"", 4, 0, 2, 3)
+
+    it "lays out a block <img> with width only at 10x6":
+        ns_lanes(" style=\"display:block\" width=\"10\"", 9, 0, 5, 6)
+
+    it "lays out a block <img> with height only at 10x6":
+        ns_lanes(" style=\"display:block\" height=\"6\"", 9, 0, 5, 6)
+
+    it "lays out a block <img> with CSS height only at 10x6":
+        ns_lanes(" style=\"display:block;height:6px\"", 9, 0, 5, 6)
+
+    it "lays out a block <img> with both attributes at 8x2":
+        ns_lanes(" style=\"display:block\" width=\"8\" height=\"2\"", 7, 0, 1, 2)
+
+    it "keeps the no-resource size unchanged (no image painted, block sibling not shifted by the image)":
+        val px = simple_web_layout_render_html_software_pixels(ns_page(" style=\"display:block;width:6px;height:4px\""), NS_W, NS_H)
+        expect(ns_bbox(px, NS_GREEN)[2]).to_equal(4)
