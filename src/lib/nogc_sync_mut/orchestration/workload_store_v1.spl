@@ -23,6 +23,7 @@ use std.common.contracts.orchestration.agent_policy_resolution_v1.{AgentPolicyRe
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read_regular_no_follow_bounded, file_exists}
 use std.nogc_sync_mut.io_runtime.dir_create
 use std.common.crypto.sha256.sha256_text
+use std.common.build_manager.contracts.builder_digest_valid_v1
 use std.common.contracts.orchestration.agent_invocation_binding_v1.AgentTaskInputV1
 use std.common.contracts.orchestration.agent_task_use_v1.*
 use std.nogc_sync_mut.orchestration.controller_agent_task_objects_v1.*
@@ -116,6 +117,18 @@ fn workload_store_replay_v1(journal: DistributedOperationJournalV2, controller_i
             continue
         if operation.operation == "controller_assignment_v1":
             if operation.host_id != controller_id: return Err("workload-store-scope-invalid")
+            continue
+        if operation.operation == "build" or operation.operation == "test":
+            # milestone_0037: a remote-run build row (controller_workload_store_admit_remote_build_v1). It is NOT a controller
+            # desired input, so projection never completes it: only the session accept or the remote-run settle ends it,
+            # and a restart keeps executing / outcome-unknown rows exactly as journaled (a row never resumes a run).
+            if (record.state != "admitted" and record.state != "executing" and record.state != "outcome-unknown" and
+                    record.state != "completed" and record.state != "failed" and record.state != "cancelled"):
+                return Err("remote-build-row-state-invalid")
+            if distributed_encode_operation_v2(operation)? != record.envelope or sha256_text(record.envelope) != record.envelope_digest:
+                return Err("remote-build-row-envelope-invalid")
+            if (record.state == "completed" or record.state == "failed" or record.state == "cancelled") != builder_digest_valid_v1(record.outcome_digest):
+                return Err("remote-build-row-outcome-invalid")
             continue
         if operation.operation != "controller_workload_revision_v1": return Err("workload-store-foreign-operation")
         val bytes = if not distributed_operation_journal_protected_v3(journal):
@@ -602,12 +615,25 @@ pub fn controller_workload_store_admit_remote_build_v1(owner: ControllerWorkload
         return remote_build_admit_refused_v1(ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: journal, rows: owner.rows), executing.unwrap_err())
     ControllerRemoteBuildAdmitV1(store: ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: executing.unwrap(), rows: owner.rows))
 
-# milestone_0030 C3: the session accept runs on THE controller journal. The closure receives the store's journal and
-# returns the journal it produced plus a result text; the caller retains the returned store (root.retain_v3).
+# milestone_0030 C3: the session accept runs on THE controller journal. milestone_0037: the closure hands back the journal
+# it ended with TOGETHER with its own refusal, never one or the other. A commit that succeeded before a later step failed
+# must not be lost (the root would keep a stale writer and refuse everything after it); `error` is "" on success.
+pub struct ControllerJournalEditV1:
+    journal: DistributedOperationJournalV2
+    result: text
+    error: text
+
+pub struct ControllerWorkloadEditV1:
+    # The most advanced store: the caller MUST retain it even when `error` is set.
+    store: ControllerWorkloadStoreV1
+    result: text
+    error: text
+
 pub fn controller_workload_store_edit_journal_v1(owner: ControllerWorkloadStoreV1,
-        edit: fn(DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>) -> Result<(ControllerWorkloadStoreV1, text), text>:
-    val edited = edit(owner.journal)?
-    Ok((ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: edited.0, rows: owner.rows), edited.1))
+        edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> ControllerWorkloadEditV1:
+    val edited = edit(owner.journal)
+    ControllerWorkloadEditV1(store: ControllerWorkloadStoreV1(controller_id: owner.controller_id, journal: edited.journal,
+        rows: owner.rows), result: edited.result, error: edited.error)
 
 pub fn controller_workload_store_close_v1(owner: ControllerWorkloadStoreV1) -> Result<bool, text>:
     distributed_operation_journal_close_v2(owner.journal)

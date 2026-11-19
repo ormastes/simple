@@ -1,0 +1,79 @@
+"""
+## Purpose and audience
+milestone_0037: a controller root whose journal holds a remote-run build row (admit_remote_build_v1) must REOPEN. The workload
+replay used to refuse every operation it did not know (`workload-store-foreign-operation`), so the first finished or
+interrupted `remote-run` bricked the root for the next run and for a restart. Written for owners of the controller workload
+store and of the remote-run settle.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`. Status: AUTHORED, NOT_RUN (no runnable
+binary when written, 2026-11-19).
+## Compatibility and limitations
+Actual temporary legacy journal; rows are committed directly (the signed admit is pinned by controller_remote_build_admit_v1_spec).
+## Verification guidance and troubleshooting
+A projection must never COMPLETE a remote build row: it is not a controller desired input, only its own settle may finish it.
+"""
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.orchestration.workload_store_v1.*
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.distributed_operation_state_v2.{distributed_operation_initial_v2, distributed_operation_transition_v2}
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_lookup_v2,
+    distributed_operation_journal_commit_v2}
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.dir_remove
+
+fn replay_request_v1(id: text, operation: text) -> OperationEnvelopeV2:
+    OperationEnvelopeV2(version: 2, id: id, payload_digest: "a".repeat(64), principal: "user", project: "project",
+        host_id: "controller", operation: operation, environment_digest: "b".repeat(64), policy_revision: 1,
+        revocation_epoch: 0, session_generation: 3, memory_bytes: 8000, duration_ms: 1000)
+
+fn replay_store_v1() -> ControllerWorkloadStoreV1:
+    val root = secure_temp_dir("/tmp", "remote-build-replay-").unwrap()
+    controller_workload_store_open_v1(root, "controller", "a".repeat(64), 4096).unwrap()
+
+fn replay_commit_v1(journal: DistributedOperationJournalV2, request: OperationEnvelopeV2,
+        states: [text]) -> DistributedOperationJournalV2:
+    var current = journal
+    var row = distributed_operation_initial_v2(distributed_encode_operation_v2(request).unwrap()).unwrap()
+    current = distributed_operation_journal_commit_v2(current, row).unwrap()
+    for state in states:
+        row = distributed_operation_transition_v2(row, state, if state == "executing" or state == "outcome-unknown": "" else: "d".repeat(64)).unwrap()
+        current = distributed_operation_journal_commit_v2(current, row).unwrap()
+    current
+
+describe "controller workload replay with remote build rows (milestone_0037)":
+    it "reprojects an executing remote build row without completing it":
+        step("An admitted then executing build row survives projection and stays executing")
+        val store = replay_store_v1()
+        val journal = replay_commit_v1(store.journal, replay_request_v1("build-op", "build"), ["executing"])
+        val projected = controller_workload_store_project_owned_v3(journal, "controller")
+        expect(projected.is_ok()).to_equal(true)
+        expect(distributed_operation_journal_lookup_v2(projected.unwrap().journal, "build-op").unwrap().state).to_equal("executing")
+        expect(controller_workload_store_close_v1(projected.unwrap()).unwrap()).to_equal(true)
+        dir_remove(store.journal.root)
+
+    it "reprojects outcome-unknown, failed, cancelled and completed build and test rows unchanged":
+        step("Every state a settle or an accept can leave is a valid replay row")
+        val store = replay_store_v1()
+        var journal = store.journal
+        journal = replay_commit_v1(journal, replay_request_v1("op-unknown", "build"), ["executing", "outcome-unknown"])
+        journal = replay_commit_v1(journal, replay_request_v1("op-failed", "test"), ["executing", "failed"])
+        journal = replay_commit_v1(journal, replay_request_v1("op-cancelled", "build"), ["executing", "cancelled"])
+        journal = replay_commit_v1(journal, replay_request_v1("op-completed", "build"), ["executing", "completed"])
+        val projected = controller_workload_store_project_owned_v3(journal, "controller")
+        expect(projected.is_ok()).to_equal(true)
+        for pair in [("op-unknown", "outcome-unknown"), ("op-failed", "failed"), ("op-cancelled", "cancelled"), ("op-completed", "completed")]:
+            expect(distributed_operation_journal_lookup_v2(projected.unwrap().journal, pair.0).unwrap().state).to_equal(pair.1)
+        expect(controller_workload_store_close_v1(projected.unwrap()).unwrap()).to_equal(true)
+        dir_remove(store.journal.root)
+
+    it "still refuses an operation that is neither a controller record nor a remote build row":
+        step("The foreign-operation refusal is kept for everything else")
+        val store = replay_store_v1()
+        val journal = replay_commit_v1(store.journal, replay_request_v1("foreign-op", "host_reservation_v1"), ["executing"])
+        val projected = controller_workload_store_project_owned_v3(journal, "controller")
+        expect(projected.is_err()).to_equal(true)
+        expect(projected.unwrap_err()).to_equal("workload-store-foreign-operation")
+        val held = ControllerWorkloadStoreV1(controller_id: "controller", journal: journal, rows: store.rows)
+        expect(controller_workload_store_close_v1(held).unwrap()).to_equal(true)
+        dir_remove(store.journal.root)

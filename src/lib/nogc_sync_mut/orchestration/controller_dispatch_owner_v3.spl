@@ -369,18 +369,24 @@ fn dispatch_state_remote_admit_v3(original: ControllerDispatchStateV3, signed: D
     if owner.error == "" and admitted.error != "": owner = dispatch_fail_v3(owner, admitted.error)
     dispatch_turn_v3(owner)
 
-# The session accept runs on THE root journal. A refusal fails the run (cleanup only); a journal the closure advanced
-# before refusing is not adopted, so the root's stale writer then refuses further work rather than forking history.
+# The session accept (and the remote-run settle) runs on THE root journal. The journal the closure ended with is ALWAYS
+# adopted (retain_v3), even when the closure refused after advancing it, so the root never keeps a stale writer. A closure
+# refusal does not kill the link: it is handed to the caller in the response (`edit-refused:<code>`, success is
+# `edit-ok:<result>`), which is what lets the settle run after a refused accept. Only a journal the root cannot retain
+# (wrong writer or lease) fails the run, quarantines the root and leaves cleanup.
+val CONTROLLER_DISPATCH_EDIT_OK_V3 = "edit-ok:"
+val CONTROLLER_DISPATCH_EDIT_REFUSED_V3 = "edit-refused:"
+
 fn dispatch_state_remote_edit_v3(original: ControllerDispatchStateV3,
-        edit: fn(DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>) -> ControllerDispatchStateTurnV3:
+        edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> ControllerDispatchStateTurnV3:
     var owner = original
     if not dispatch_remote_ready_v3(owner): return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-remote-not-ready"))
     val store = owner.root.unwrap().workload_v3()
     if store.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, store.unwrap_err()))
     val edited = controller_workload_store_edit_journal_v1(store.unwrap(), edit)
-    if edited.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, edited.unwrap_err()))
-    owner = dispatch_retain_v3(owner, Ok(edited.unwrap().0))
-    if owner.error == "": owner.response = edited.unwrap().1
+    owner = dispatch_retain_v3(owner, Ok(edited.store))
+    if owner.error == "":
+        owner.response = if edited.error == "": CONTROLLER_DISPATCH_EDIT_OK_V3 + edited.result else: CONTROLLER_DISPATCH_EDIT_REFUSED_V3 + edited.error
     dispatch_turn_v3(owner)
 
 fn dispatch_prepare_v3(original: ControllerDispatchStateV3) -> ControllerDispatchStateV3:
@@ -837,7 +843,7 @@ pub fn controller_dispatch_remote_admit_v3(handle: ControllerDispatchOwnerV3, si
         dispatch_state_remote_admit_v3(state, signed, approval, request))
 
 pub fn controller_dispatch_remote_edit_v3(handle: ControllerDispatchOwnerV3,
-        edit: fn(DistributedOperationJournalV2) -> Result<(DistributedOperationJournalV2, text), text>) -> ControllerDispatchOwnedTurnV3:
+        edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> ControllerDispatchOwnedTurnV3:
     dispatch_remote_turn_v3(handle, fn(state: ControllerDispatchStateV3) -> ControllerDispatchStateTurnV3:
         dispatch_state_remote_edit_v3(state, edit))
 
@@ -863,6 +869,7 @@ export ControllerDispatchOwnerV3, ControllerDispatchOwnedTurnV3
 export controller_dispatch_revision_advance_v3
 export ControllerDispatchCloseDispositionV3, controller_dispatch_close_disposition_v3
 export controller_dispatch_begin_v3, controller_dispatch_control_begin_v3, controller_dispatch_inspect_begin_v3
+export CONTROLLER_DISPATCH_EDIT_OK_V3, CONTROLLER_DISPATCH_EDIT_REFUSED_V3
 export controller_dispatch_remote_begin_v3, controller_dispatch_remote_send_v3, controller_dispatch_remote_admit_v3, controller_dispatch_remote_edit_v3
 export controller_dispatch_service_begin_v3, controller_dispatch_step_v3, controller_dispatch_close_v3
 export controller_dispatch_host_status_match_v3, controller_dispatch_execute_archive_key_v3, controller_dispatch_original_execute_match_v3
