@@ -1,0 +1,36 @@
+# @cover src/lib/nogc_sync_mut/crash/failure_slot_v1.spl 100%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-DHR-03
+# plan: doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md
+
+use std.spec.*
+use std.nogc_sync_mut.crash.failure_slot_v1.{FailureSlotV1, FailureKindV1}
+
+describe "FailureSlotV1":
+    it "an empty slot has nothing to take":
+        val slot = FailureSlotV1.create()
+        expect(slot.take().is_none()).to_equal(true)
+
+    it "a published fault is handed to the broker with its identities":
+        val slot = FailureSlotV1.create()
+        expect(slot.publish(FailureKindV1.Assert, "mod.fn:12", "x > 0", 3, 9)).to_equal(true)
+        val record = slot.take().unwrap()
+        expect(record.site).to_equal("mod.fn:12")
+        expect(record.module_generation).to_equal(3)
+        expect(record.execution_epoch).to_equal(9)
+        expect(slot.take().is_none()).to_equal(true)
+
+    it "DBG-06: a nested fault never overwrites the first record":
+        val slot = FailureSlotV1.create()
+        slot.publish(FailureKindV1.Panic, "first", "boom", 1, 1)
+        expect(slot.publish(FailureKindV1.Signal, "second", "segv", 1, 1)).to_equal(false)
+        val record = slot.take().unwrap()
+        expect(record.site).to_equal("first")
+        expect(record.nested_faults).to_equal(1)
+
+    it "the slot accepts a new fault after the broker took the last one":
+        val slot = FailureSlotV1.create()
+        slot.publish(FailureKindV1.Panic, "a", "", 1, 1)
+        slot.take()
+        expect(slot.publish(FailureKindV1.Deadline, "b", "", 1, 2)).to_equal(true)
+        expect(slot.take().unwrap().sequence).to_equal(2)

@@ -9,6 +9,7 @@
 
 use os.smf.kernel_plugin.worker_protocol.{KpfWorkerOutcome}
 use os.smf.kernel_plugin.real_worker_process.{KpfRealWorkerExitV1}
+use std.nogc_sync_mut.crash.failure_slot_v1.{FailureSlotV1, FailureKindV1}
 use std.nogc_sync_mut.kernel_plugin.status.KpfSyncStatus
 use std.nogc_sync_mut.kernel_plugin.recovery_transaction.{
     KpfRecoveryTransaction, KpfRecoveryReceipt, KpfRecoveryVerdict,
@@ -24,8 +25,12 @@ pub fn kpf_worker_exit_is_failure(outcome: KpfWorkerOutcome) -> bool:
         case KpfWorkerOutcome.FrameTooLarge: true
         case _: false
 
-pub fn kpf_recover_on_worker_exit(tx: KpfRecoveryTransaction, exit: KpfRealWorkerExitV1) -> KpfRecoveryReceipt:
+pub fn kpf_recover_on_worker_exit(tx: KpfRecoveryTransaction, exit: KpfRealWorkerExitV1, evidence: FailureSlotV1) -> KpfRecoveryReceipt:
     if kpf_worker_exit_is_failure(exit.outcome):
+        # Capture before restart (plan section 6.4 step 2): the failed candidate's
+        # identities are recorded before rollback advances the epoch.
+        evidence.publish(FailureKindV1.WorkerExit, "kpf.worker", "candidate worker failure exit",
+            tx.candidate_handle().epoch, tx.execution_epoch)
         return tx.fail_candidate()
     KpfRecoveryReceipt(verdict: KpfRecoveryVerdict.Rejected, phase: tx.phase,
         status: KpfSyncStatus.Ok, execution_epoch: tx.execution_epoch,

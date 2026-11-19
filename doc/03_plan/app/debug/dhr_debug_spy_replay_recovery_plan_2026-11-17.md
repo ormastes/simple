@@ -23,7 +23,7 @@ design document.
 |---|---|---|---|
 | P0 | Truthful capabilities: repair the defects listed in §1 | No unsupported operation reports success | **done** (#10357 #10363 #10366 #10369 #10370 #10371 #10372 #10373) |
 | P1 | Protect the baseline: absent/prepared/active profiles, real off-identity comparison | OFF-01..08 evidence | **partial**: OFF-01 measured clean; OFF-02 blocked on host |
-| P2 | Failure evidence: assert/fault record, independent broker, deadlines | Real assert and fault, plus a no-debugger test | todo |
+| P2 | Failure evidence: assert/fault record, independent broker, deadlines | Real assert and fault, plus a no-debugger test | **in progress** |
 | P3 | Host managed recovery: isolated interpreter worker, state roots, effect fencing | A V2 failure restores a verified V1 without duplicate effects | **in progress** |
 | P4 | Unified native generation lifetime (legacy loader → KPF, retention pin) | Concurrent old/new execution with safe retirement | todo |
 | P5 | Shared Spy plus bare-metal emitter, with a separate replay event family | Bounded operation, disclosed loss | todo |
@@ -59,8 +59,18 @@ P0 exit gate met for the §1 defect list. Every listed operation now either work
 | OFF-02 generated output | **blocked on this host** | `check-xray-static-off-identity.shs` refuses Rust-seed compilers by design and needs a pure-Simple compiler. None is deployed on the Windows host. Its own selftest also fails here (`clean-pair expected rc=0 got rc=1`). Needs a Linux run with a deployed self-hosted binary. |
 | OFF-03..08 | not run | Bootstrap stages, runtime behaviour, prepared-idle budget, toggle, PE/Mach-O/firmware parity |
 
+## P2/P3 progress
+
+| Item | Result | Evidence / limit |
+|---|---|---|
+| P3 core: `KpfRecoveryTransaction` (#10375) | retention pin (GEN-04), epoch fence (REC-04), effect-aware rollback blocking on acknowledged/unknown writes (REC-02/03), Applied/Blocked/Rejected receipts | `recovery_transaction_spec` 8/8; mutation check fails REC-02 |
+| P3 worker exit → transaction (#10376) | crash, deadline, or protocol violation of the candidate worker fails the candidate; a clean close does not | `recovery_worker_spec` 6/6 (pure policy). **Real-subprocess receipt pending:** `real_worker_integration_spec` spawns `/bin/sh` and fails 0/3 on Windows |
+| P2 failure slot (`FailureSlotV1`) | bounded first-fault-wins record with the valid marker set last; broker `take()`; first consumer is the worker-exit path (capture before restart) | `failure_slot_v1_spec` 4/4 (DBG-06 nested fault) |
+| P2 interpreter assert / native signal → slot | **not wired** | Assert hook is compiler code, and the seed runs specs through the Rust interpreter, so it can't be verified here. The native signal path needs the externs in `doc/08_tracking/bug/crash_signal_bundle_extern_gap_2026-07-29.md` |
+| Phase-3 build | Windows Stage-2 bootstrap from release tip `b7214ff88aa` (cranelift, dynload) | running; result recorded on completion |
+
 ## Next
 
-1. P3 core: `KpfRecoveryTransaction` over the existing `KpfGenerationTable`. It needs a retention pin, an execution-epoch fence, and effect-aware rollback that blocks on acknowledged or unknown writes.
-2. P3 worker: drive the transaction from the KPF real-worker lifecycle (`real_worker_process.spl`), so a V2 worker crash restarts V1.
-3. P2: a bounded failure record. The interpreter assert and the native fault path must feed it before the frame is lost.
+1. Record the Stage-2 bootstrap result. If a pure-Simple binary results, rerun OFF-02 and the DHR specs on it.
+2. Real-subprocess P3 receipt on a POSIX host (EMB-01 with `fake_real_worker.shs`).
+3. P2 assert hook behind an explicit debug profile, so the default closure stays unchanged (OFF-01).
