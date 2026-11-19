@@ -1160,9 +1160,10 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
     if ((backdrop_sigma > 0 or backdrop_mats.len() > 0) and kw > 0 and kh > 0 and
         _engine2d_draw_ir_style_value(style, "wm-material-request") == ""):
         val under = _engine2d_read_pixels_region(eng, kx, ky, kw, kh).pixels
-        val filtered = engine2d_backdrop_color_filter_pixels(
-            engine2d_backdrop_blur_pixels(under, kw, kh, backdrop_sigma), under, backdrop_mats)
+        val blurred = engine2d_backdrop_blur_pixels(under, kw, kh, backdrop_sigma)
         if _engine2d_draw_ir_pixels_opaque(under):
+            val filtered = engine2d_backdrop_color_filter_pixels(
+                blurred, under, backdrop_mats)
             eng.draw_image(kx, ky, kw, kh, engine2d_draw_ir_shadow_knockout_pixels(
                 filtered, under,
                 kx, ky, kw, kh, x, y, w, h, effective_corners))
@@ -1170,7 +1171,11 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
             # Inside a transparent group (a backdrop root's layer) the
             # filtered backdrop draws src-over the group content, as Chrome
             # does (alpha compounds). Outside the box shape it is
-            # transparent; the corner coverage scales alpha only.
+            # transparent; the corner coverage scales alpha only. The colour
+            # functions composite over a transparent `under` (an exact
+            # pass-through), so that src-over happens once, here.
+            val filtered = engine2d_backdrop_color_filter_pixels(
+                blurred, _engine2d_draw_ir_pixels_alpha_zero(under), backdrop_mats)
             eng.draw_image_blend(kx, ky, kw, kh, engine2d_draw_ir_shadow_knockout_pixels(
                 filtered, _engine2d_draw_ir_pixels_alpha_zero(filtered),
                 kx, ky, kw, kh, x, y, w, h, effective_corners))
@@ -3447,7 +3452,11 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
     val origin_matches = embedding_x == 0 and embedding_y == 0
     val size_matches = embedding_width == target_width and embedding_height == target_height
     val fully_opaque = embedding_opacity >= 1000
-    val fills_target_exactly = origin_matches and size_matches and fully_opaque
+    # A CSS group never counts as filling the target: a backdrop root at
+    # opacity 100% whose bounds clamp to the viewport (e.g. a large shadow
+    # halo) must still be its own transparent layer, or its backdrop-filter
+    # descendants read the whole page (Filter Effects 2 Backdrop Root).
+    val fills_target_exactly = origin_matches and size_matches and fully_opaque and not css_opacity_group_surface(embedding.surface_id)
     # Backdrop material is defined against pixels already painted by earlier
     # composition batches. Rendering such a window into a fresh transparent
     # child changes its input and invalidates both pixels and receipts. Keep

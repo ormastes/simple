@@ -1,0 +1,82 @@
+"""
+## Purpose and audience
+Purpose: Pin Filter Effects 2 Backdrop Root behaviour for production-style
+nested glass (a gradient image layer over a translucent colour, and
+`backdrop-filter: blur(24px) saturate(1.7)`) against Chrome 159 on the
+Engine2D cpu_simd lane. The Vulkan lane is pinned in
+backdrop_root_glass_gradient_saturate_vulkan_chrome159_spec.spl.
+Audience: maintainers of the web paint path and Engine2D box effects.
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(2026-11-20: window-fixture glass is 241 where Chrome shows 251).
+Chrome pixels: headless Chromium 1255 at 400x300. Page #1e1e2e with a red
+bar (0,120 400x60). An outer panel (10,10 380x280, radius 20) holds an inner
+panel (20,50 340x200 in it, radius 20); both paint
+`linear-gradient(rgba(255,255,255,0.08),rgba(255,255,255,0.024))` over a
+translucent colour. Two defects are pinned separately:
+- halo: an outer `box-shadow: 0 0 120px` grows the backdrop root's group to
+  the whole viewport. That group must still be an isolated layer.
+- saturate: the colour functions of a nested backdrop over the transparent
+  group must not composite the filtered pixels over the group a second time.
+Probe points (x, y): inner over the bar (200,150), inner above the bar
+(200,80), outer only (200,35) and (200,275), outside the outer box on the
+bar (4,150, where only the halo paints).
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val WG_FILTER = "backdrop-filter:blur(24px) saturate(1.7)"
+val WG_BLUR = "backdrop-filter:blur(24px)"
+val WG_HALO = "box-shadow:0 0 120px rgba(137,180,250,0.12)"
+val WG_WHITE = "rgba(255,255,255,0.72)"
+val WG_OUTER_TINT = "rgba(255,160,60,0.45)"
+val WG_INNER_TINT = "rgba(60,140,255,0.45)"
+
+fn wg_html(outer_extra: text, outer_bg: text, inner_bg: text, inner_filter: text) -> text:
+    val grad = "linear-gradient(rgba(255,255,255,0.08),rgba(255,255,255,0.024))"
+    "<!DOCTYPE html><html><body style='margin:0;background:#1e1e2e'><div style='position:absolute;left:0;top:120px;width:400px;height:60px;background:#c03020'></div><div style='position:absolute;left:10px;top:10px;width:380px;height:280px;border-radius:20px;background:" + grad + "," + outer_bg + ";" + outer_extra + "'><div style='position:absolute;left:20px;top:50px;width:340px;height:200px;border-radius:20px;background:" + grad + "," + inner_bg + ";" + inner_filter + "'></div></div></body></html>"
+
+# Channel mismatches (beyond +-2) against `want`: x, y, r, g, b per point.
+fn wg_mismatches(px: [u32], want: [i32]) -> i32:
+    if px.len() < 400 * 300:
+        return -1
+    var bad = 0
+    var i = 0
+    while i < want.len():  # cpu-lane-loop-ok: spec probe points; bound want.len() / 5
+        val p = px[want[i + 1] * 400 + want[i]]
+        var c = 0
+        while c < 3:  # cpu-lane-loop-ok: RGB channels of one probe pixel; bound 3
+            val d = ((p >> ((16 - c * 8) as u32)) & 0xFFu32) as i32 - want[i + 2 + c]
+            if d > 2 or d < -2:
+                bad = bad + 1
+            c = c + 1
+        i = i + 5
+    bad
+
+fn wg_render(html: text) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(html, 400, 300, 1, "cpu_simd")
+
+describe "backdrop root glass with gradient and saturate on cpu_simd (Chrome 159)":
+    it "a viewport-sized backdrop root group (outer halo) stays isolated":
+        val html = wg_html(WG_BLUR + ";" + WG_HALO, WG_WHITE, WG_WHITE, WG_BLUR)
+        expect(wg_mismatches(wg_render(html), [200, 150, 252, 250, 250, 200, 80, 252, 251, 252, 200, 35, 197, 197, 201, 200, 275, 194, 194, 198, 4, 150, 188, 55, 43])).to_equal(0)
+
+    it "saturate over the transparent group composites once":
+        val html = wg_html(WG_FILTER, WG_WHITE, WG_WHITE, WG_FILTER)
+        expect(wg_mismatches(wg_render(html), [200, 150, 253, 250, 249, 200, 80, 252, 251, 252, 200, 35, 197, 197, 203, 200, 275, 194, 194, 201, 4, 150, 192, 48, 32])).to_equal(0)
+
+    it "window shape: halo, gradient and saturate together":
+        val html = wg_html(WG_FILTER + ";" + WG_HALO, WG_WHITE, WG_WHITE, WG_FILTER)
+        expect(wg_mismatches(wg_render(html), [200, 150, 253, 250, 249, 200, 80, 252, 251, 252, 200, 35, 197, 197, 203, 200, 275, 194, 194, 201, 4, 150, 188, 55, 43])).to_equal(0)
+
+    it "tinted glass keeps the colour pass to one src-over":
+        val html = wg_html(WG_FILTER, WG_OUTER_TINT, WG_INNER_TINT, WG_FILTER)
+        expect(wg_mismatches(wg_render(html), [200, 150, 167, 139, 137, 200, 80, 144, 144, 147, 200, 35, 140, 100, 73, 200, 275, 134, 92, 63, 4, 150, 192, 48, 32])).to_equal(0)
+
+    it "control: without an outer backdrop root the page shows through":
+        val html = wg_html("", WG_OUTER_TINT, WG_INNER_TINT, WG_FILTER)
+        expect(wg_mismatches(wg_render(html), [200, 150, 171, 121, 128, 200, 80, 128, 125, 144, 200, 35, 140, 100, 67, 200, 275, 135, 93, 58, 4, 150, 192, 48, 32])).to_equal(0)

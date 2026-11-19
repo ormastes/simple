@@ -1064,7 +1064,7 @@ head (13/40 at base).
 
 - **Rule (Filter Effects 2, Chrome 159):** an element with `backdrop-filter` is a Backdrop Root. A descendant's backdrop is only what was painted inside that root's group, not the page under it. Chrome draws the descendant's filtered backdrop src-over the group, so alpha compounds.
 - **Chrome evidence:** an outer `rgba(255,255,255,0.72)` panel over #2d2f45 holds an inner panel, both with `blur(8px)`. The white inner panel is (250,250,251), and (239,239,241) without the outer filter. The tinted inner `rgba(80,160,255,0.72)` is (124,181,251), and (113,170,241) without. With outer `opacity:0.99` it is 248. Hand check, 8-bit premultiplied: group 184 -> backdrop src-over 235 -> inner background 249 -> over the page 250.
-- **Was:** the inner backdrop read the whole frame. Window-fixture glass panes were 241 where Chrome shows 251.
+- **Was:** the inner backdrop read the whole frame. Window-fixture glass panes were 241 where Chrome shows 251. This fix alone did not move the window fixture; see the next entry.
 - **Fix (Engine2D, cpu_simd + Vulkan):**
   - `_simple_web_backdrop_root_flags` (`..._compose_support.spl`) marks each opacity-100 element with a backdrop filter and a backdrop-filtered descendant. Such an element becomes an opacity root, so its subtree is a group.
   - `_simple_web_backdrop_root_split` (`simple_web_html_layout_renderer.spl`) splits the root's box command. A backdrop-only command paints in the parent surface before the group opens; the in-group command has its backdrop removed. WM material boxes are not split.
@@ -1081,6 +1081,25 @@ head (13/40 at base).
 - **OPEN, raster admission:** glass with text on a non-opaque background, or with a shadow, still reads the whole frame. That is the window fixture's case.
 - **OPEN, Vulkan:** the CSS `backdrop-filter` blur should use the device blur kernel instead of readback + host blur.
 - **Not covered:** a Backdrop Root under an opacity < 100 ancestor still bails to the flat path, as before. Nested Backdrop Roots have no spec.
+
+## 2026-11-20 — window-fixture glass still 241 after the Backdrop Root fix (FIXED on Engine2D, raster OPEN)
+
+- **Symptom:** after the entry above, the production window fixture (`gui_window_widget_html`) still showed 241 where Chrome shows 251 at (240,99), on raster, cpu_simd and Vulkan, at 555/556‰ agreement.
+- **Not the cause (probe):** a Draw IR dump of the window showed the Backdrop Root composition was already right. The root's backdrop-only command sat in the page batch, the rest in `html-opacity-group-4`. The inner panel kept `backdrop-filter=blur(24px) saturate(170%)`. There was no `wm-material-request`, and both boxes were plain `rect` commands with gradient layer props.
+- **Cause 1, the group was never an offscreen.** The root's `box-shadow: 0 0 120px` halo grows its bounds, which clamp to the viewport, so the group batch is `0,0 480x300` at opacity 1000. `_engine2d_draw_ir_render_batch_embedded` treated that as `fills_target_exactly` and painted the group straight onto the page. The inner backdrop then read the whole page.
+  - Bisect at 400x300 on cpu_simd, Chrome vs ours for a white nested glass with blur only: plain 250 vs 249; with the outer halo 250 vs 237. Border, `overflow:hidden`, an inset shadow and text all matched.
+- **Cause 2, the colour pass composited twice.** `engine2d_backdrop_color_filter_pixels` draws the matrix result src-over `under` when its alpha is below 255. Inside a transparent group the box then blends that result src-over the group again, so alpha compounded twice. Blur-only backdrops skip the matrix pass, so the entry above never saw this.
+  - Bisect, white nested glass with gradient and `saturate(1.7)`: Chrome 249/250 vs ours 254. Without saturate: 249 vs 250. Tinted: green +9.
+- **Fix (`draw_ir_adv.spl`):**
+  - `fills_target_exactly` excludes CSS group surfaces (`css_opacity_group_surface`). Only opacity-1000 CSS groups are affected, which are backdrop roots; fractional groups were already below 1000.
+  - In `_engine2d_draw_ir_render_box`'s non-opaque branch, the colour functions composite over an alpha-zeroed `under`, which is an exact pass-through. The single src-over is then `draw_image_blend`. The opaque branch is unchanged and byte-identical.
+- **Evidence:**
+  - `backdrop_root_glass_gradient_saturate_chrome159_spec` (cpu_simd, ±2): halo blur-only, saturate, the halo+gradient+saturate window shape, tinted, and a no-root control. 1/5 on base (only the control passed), 5/5 on head.
+  - `backdrop_root_glass_gradient_saturate_vulkan_chrome159_spec`: the window shape and tinted, each asserting ≥1 Vulkan readback. 0/2 on base, 2/2 on head. The CSS backdrop blur is still host-side over a readback, as above.
+  - Window fixture (480x300): cpu_simd 556 -> 933‰, Vulkan 556 -> 933‰, raster 555 -> 555‰. (240,99) is now 250 vs Chrome 250. The bad rows 60-140 fell from about 420 px per row to 0-12.
+- **OPEN, raster:** the raster lane keeps 555‰, so the window panes are still not admitted by `_raster_opacity_groups`. The fixture has several features that admission rejects: text on the non-opaque root, members with shadows and gradient layers, and a colour-matrix backdrop. Which check fires first was not probed.
+- **Cost (not cleanly measured):** a backdrop root whose group fills the viewport now pays one full-viewport offscreen plus a composite per frame. The 3-lane window probe took 524 s on base and 583 s on head, but both runs overlapped other probes on a shared host, so this is not an A/B. Metal shares the `fills_target_exactly` gate and was not exercised, since there is no macOS host.
+- **OPEN, residual on Engine2D:** agreement is 933‰, not 1000. Rows 19-59 still have 12-22 bad px per row, and the outer pane edge at (14,99) is 193 vs Chrome 197.
 
 ## 2026-11-20 — `<button>` content sits at the top of a tall button (FIXED)
 
