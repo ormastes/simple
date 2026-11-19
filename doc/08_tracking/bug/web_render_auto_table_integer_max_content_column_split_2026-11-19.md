@@ -1,5 +1,13 @@
 # web render: auto-table column split uses integer max-content widths (1px column-edge shift)
 
+**Status: RESOLVED 2026-11-19** (branch work/webrender-table-milli-split-20261119). `explicit_auto_table_column_offsets`
+carries a per-column milli remainder (`col_frac`, `table_cell_text_frac_milli`) and distributes in x1000 units
+(`table_distribute_auto_columns`, interpolation product widened to i64); only the cumulative column edges round.
+Pinned by `table_auto_milli_column_split_chrome159_spec` (3 pages; Chrome 810px table at x=45: rules 45/422/854, base 423).
+css-paint 1x 2.43 -> 2.38, dpr4 3.54 -> 3.51. Not carried: cells whose max-content comes from inline children (`<code>`),
+which keep the whole-px width. Side effect: the plain UA table's third cell is 19 wide (Chrome snaps 45.6..65.4 to 46..65).
+
+
 Date: 2026-11-19. Page: examples/06_io/ui/web_catalog/css-paint.html, 1x, Chrome 159, aarch64.
 
 ## Symptom
