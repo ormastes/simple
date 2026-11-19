@@ -13,6 +13,7 @@ use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{svg_view_box_milli, font_milli_of}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 
 class IntrinsicWidthResult:
     width: i32
@@ -398,6 +399,76 @@ fn svg_ratio_scaled_px(len: i32, num: i64, den: i64) -> i32:
         return SVG_RATIO_MAX_BOX_PX.to_i32()
     scaled.to_i32()
 
+# Decoded image resources for the current layout. Set by `layout_set_images`
+# around one layout; empty (the default) keeps every `<img>` on the
+# attribute/CSS-only sizing it had before resources existed.
+# ponytail: module state, so one layout at a time per process (same contract as
+# `_raster_images` / `g_layout_device_scale`); thread `images` through
+# `web_html_layout_tree` if layouts ever run concurrently.
+var _layout_images: [SimpleOsHostGpuImageResource] = []
+
+# reason: renderer entry hands the decoded resource list to layout for <img> natural sizes
+# @allow(primitive_api)
+pub fn layout_set_images(images: [SimpleOsHostGpuImageResource]):
+    _layout_images = images
+
+# [natural width, natural height] of the node's `src` resource, or [] when no
+# valid resource is supplied for it. First valid resource per uri, the same
+# rule the painters use.
+fn img_resource_natural_size(node: HNode) -> [i32]:
+    if node.tag != "img" or _layout_images.len() == 0:
+        return []
+    val uri = attr_value(node.attrs_raw, "src").trim()
+    var k = 0
+    # cpu-lane-loop-ok: first valid resource per uri; bound is the supplied resource count
+    while k < _layout_images.len():
+        val im = _layout_images[k]
+        if im.image_uri == uri and im.width > 0 and im.height > 0 and im.pixels.len() == im.width.to_i64() * im.height.to_i64():
+            return [im.width, im.height]
+        k = k + 1
+    []
+
+fn img_round_div(a: i64, b: i64) -> i32:
+    ((a * 2 + b) / (b * 2)).to_i32()
+
+# CONTENT height an `<img>` was given (CSS height, else the `height`
+# attribute), or 0 when its height is auto.
+fn img_given_content_h(node: HNode, st: Style) -> i32:
+    if st.height_px > 0:
+        if st.border_box:
+            return st.height_px - st.pad_t - st.pad_b - st.border_t - st.border_b
+        return st.height_px
+    if st.height_px < 0:
+        return 0
+    parse_int(attr_value(node.attrs_raw, "height"))
+
+# BORDER-BOX width of an `<img>` whose width is auto and whose resource is
+# supplied (Chrome 159): the natural width, or the aspect-ratio width of a
+# given height. 0 when no resource applies or the width is not auto.
+fn img_resource_auto_outer_w(node: HNode, st: Style) -> i32:
+    val nat = img_resource_natural_size(node)
+    if nat.len() != 2 or st.width_px != 0 or st.width_zero:
+        return 0
+    if parse_int(attr_value(node.attrs_raw, "width")) > 0:
+        return 0
+    val inset_x = st.pad_l + st.pad_r + st.border_l + st.border_r
+    val given_h = img_given_content_h(node, st)
+    if given_h > 0:
+        return img_round_div(given_h.to_i64() * nat[0].to_i64(), nat[1].to_i64()) + inset_x
+    nat[0] + inset_x
+
+# BORDER-BOX height of an `<img>` whose height is auto and whose resource is
+# supplied: the aspect-ratio height at the used border-box width. 0 when no
+# resource applies.
+fn img_resource_auto_outer_h(node: HNode, st: Style, outer_w: i32) -> i32:
+    val nat = img_resource_natural_size(node)
+    if nat.len() != 2:
+        return 0
+    var content_w = outer_w - st.pad_l - st.pad_r - st.border_l - st.border_r
+    if content_w < 0:
+        content_w = 0
+    img_round_div(content_w.to_i64() * nat[1].to_i64(), nat[0].to_i64()) + st.pad_t + st.pad_b + st.border_t + st.border_b
+
 fn replaced_auto_box_w(node: HNode, st: Style, available_w: i32) -> i32:
     """BORDER-BOX width of a replaced element whose CSS width is auto. Shared
     by the final box and the inline pen prediction so they cannot disagree.
@@ -429,6 +500,10 @@ fn replaced_auto_box_w(node: HNode, st: Style, available_w: i32) -> i32:
             if available_w > inset_x:
                 return available_w
             return inset_x
+    if node.tag == "img":
+        val img_w = img_resource_auto_outer_w(node, st)
+        if img_w > 0:
+            return img_w
     val default_w = replaced_default_box_w(node.tag)
     if replaced_default_is_content_size(node.tag):
         return default_w + inset_x
@@ -558,6 +633,10 @@ fn inline_replaced_predicted_width(node: HNode, st: Style) -> i32:
     if st.width_px < 0:
         return 0
     val attr_w = parse_int(attr_value(node.attrs_raw, "width"))
+    if attr_w <= 0 and node.tag == "img":
+        val img_w = img_resource_auto_outer_w(node, st)
+        if img_w > 0:
+            return constrained_outer_width(node, st, img_w)
     if attr_w <= 0 and node.tag == "svg" and svg_ratio_view_box_milli(node.attrs_raw).len() == 4:
         # An svg with a ratio and no width contributes its height-derived
         # width, or nothing: `replaced_auto_box_w` with no available width.

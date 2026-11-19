@@ -659,3 +659,11 @@ head (13/40 at base).
 - **Evidence:**
   - New `outline_over_text_chrome159_spec`: 252 ring pins, all uniform `#ff0000` 4x4 blocks in Chrome, so they hold for any font. Raster red at base (cpu_simd and Vulkan green), 3/3 at head.
   - Base vs head over 83 outline, focus, raster, stacking, positioned and opacity specs: 0 new failures.
+
+## 2026-11-18 — `<img>` natural size from the supplied resource (FIXED)
+
+- **Symptom:** with a decoded resource supplied, layout still sized an `<img>` from its attributes/CSS only. A bare 5x3 image took the replaced default box, and a width-only or height-only image did not follow the aspect ratio, so the image and the following sibling sat in the wrong place on every lane.
+- **Chrome rule:** auto width and height take the natural size. If only one side is given (attribute or CSS), the other follows the aspect ratio, rounded. Both attributes act as presentational hints. A tall inline image grows the line box.
+- **Fix:** `layout_set_images` hands the renderer's resource list to layout around `web_html_layout_tree` (compose, retained re-layout, software result). `img_resource_auto_outer_w/h` (`layout_text`) feed `replaced_auto_box_w`, the inline pen prediction and the block `img_auto_h`. No resource means sizing is unchanged.
+  - `ponytail:` `_layout_images` is module state, so one layout runs at a time per process (same contract as `_raster_images`). Upgrade by threading `images` through `web_html_layout_tree`.
+- **Evidence:** new `img_natural_size_chrome159_spec`: 12 cases (11 Chrome-pinned boxes plus a no-resource row). Red at base, green 12/12 at head. Base vs head over 73 img/replaced/inline specs: 0 new failures. Three pins were re-derived from Chrome 159 during review (height=6, height=15, block width=10).
