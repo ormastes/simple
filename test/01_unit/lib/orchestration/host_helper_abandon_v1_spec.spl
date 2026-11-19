@@ -1,0 +1,305 @@
+"""
+## Purpose and audience
+milestone_0036 (bug v4_attach_helper_charge_held_without_records): the controller-signed `helper-abandon` operator
+command that releases a charged V4 attach-broker helper row whose death cannot be proven automatically or whose
+records are permanently unreadable. Pins the contract codec, the verify gate (issuer, signatures, expiry), the pure
+precondition table, the marker/evidence records, and that the evidence arm precedes the helper-store check.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable `simple` binary on this host, 2026-11-19).
+## Compatibility and limitations
+Real Ed25519 signatures from the verifier fixture seeds and a real temporary capacity journal for the record
+publish. The settle over a genuine helper row needs the PR3b journal fixture (not available): its ORDER and
+owner-adoption rules are pinned structurally.
+## Verification guidance and troubleshooting
+`APPROVAL_EXPIRED` for the expired fixture is the restart-expiry rule (F-VERIFY), not a flake.
+"""
+use std.spec.{step, fail}
+use std.io.file_read_text
+use test.fixtures.orchestration.host_linux_service_verifier_fixture_v1.*
+use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_open_cleanup_v2,
+    distributed_operation_journal_publish_v3, distributed_operation_journal_read_v3}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.linux_service_scope_v4
+use std.common.contracts.orchestration.host_helper_abandon_v1.*
+use std.nogc_sync_mut.orchestration.host_helper_abandon_record_v1.*
+use std.nogc_sync_mut.orchestration.host_helper_abandon_commit_v1.{host_helper_abandon_verify_v1,
+    host_helper_abandon_check_v1, host_helper_abandon_record_publish_v1}
+use std.nogc_sync_mut.io.linux_service_native_identity_v3.LinuxServiceNativeIdentitySnapshotV3
+use std.nogc_sync_mut.io.local_authority_policy_v1.{local_authority_policy_decode_v1, host_local_context_v1}
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2}
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.crypto.sha256.sha256_text
+
+val HA_OPS: [text] = ["helper-abandon"]
+val HA_FAR: i64 = 4102444800000
+val HA_OBSERVED: text = "state=executing;pc=0;pa=1;n=0;r=0;x=0;o=0;rm=0;xm=0;store=valid"
+
+fn ha_fixture() -> LinuxServiceVerifierFixtureV1:
+    linux_service_verifier_fixture_ops_v1(1, 65, HA_FAR, "/var/lib/simple/hosts", HA_OPS)
+
+fn ha_helper_operation() -> OperationEnvelopeV2:
+    OperationEnvelopeV2(2, "helper_op_1", "b".repeat(64), "user_1", "project_1", "worker_1", "host_helper_reservation_v1",
+        "a".repeat(64), 4, 2, 3, 4096, 100)
+
+fn ha_record(operation: OperationEnvelopeV2, observed: text = HA_OBSERVED) -> HostHelperAbandonV1:
+    HostHelperAbandonV1(wire_version: HOST_HELPER_ABANDON_WIRE_V1, operation_id: operation.id,
+        operation_digest: sha256_text(distributed_encode_operation_v2(operation).unwrap()), request_digest: "c".repeat(64),
+        prepared_receipt_digest: "d".repeat(64), observed: observed, custody: HOST_HELPER_ABANDON_CUSTODY_V1, physical_host_id: "worker_1")
+
+fn ha_grant(kind: text) -> ExecutionGrantV2:
+    ExecutionGrantV2("grant_a", "user_1", "project_1", "worker_1", [kind], "a".repeat(64), 4, 2, HA_FAR, 536870912, 1000)
+
+fn ha_signed(abandon: HostHelperAbandonV1, issuer: i64 = 1, approver: i64 = 65, expires: i64 = HA_FAR,
+        kind: text = "helper-abandon") -> text:
+    val operation = OperationEnvelopeV2(2, "abandon_1", host_helper_abandon_digest_v1(abandon).unwrap(), "user_1", "project_1",
+        "worker_1", kind, "a".repeat(64), 4, 2, 3, 4096, 100)
+    val signed = linux_service_verifier_sign_v1(operation, ha_grant(kind), issuer, approver, expires)
+    host_helper_abandon_proof_encode_v1(HostHelperAbandonProofV1(abandon, operation, signed.0, signed.1)).unwrap()
+
+fn ha_body(file: text, start: text, stop: text) -> text:
+    val source = file_read_text("src/lib/nogc_sync_mut/orchestration/" + file)
+    val rest = source.substring(source.index_of(start), source.len())
+    val to = rest.substring(1, rest.len()).index_of(stop)
+    if to < 0: return rest
+    rest.substring(0, to + 1)
+
+describe "Controller-signed helper-abandon contract (milestone_0036)":
+    it "round-trips canonically, refuses every other wire version, and requires the custody attestation":
+        # @req AT-OPS-HELPER-ABANDON (exact version only; the operator attests custody in the signed bytes)
+        val abandon = ha_record(ha_helper_operation())
+        val bytes = host_helper_abandon_bytes_v1(abandon).unwrap()
+        expect(host_helper_abandon_decode_v1(bytes).unwrap().operation_id).to_equal("helper_op_1")
+        var future = abandon
+        future.wire_version = "helper-abandon-v2"
+        expect(host_helper_abandon_bytes_v1(future).unwrap_err()).to_equal("helper-abandon-version-unsupported")
+        expect(host_helper_abandon_decode_v1(bytes.replace("helper-abandon-v1", "helper-abandon-v2")).is_err()).to_equal(true)
+        expect(host_helper_abandon_decode_v1(bytes + "extra: 1\n").is_err()).to_equal(true)
+        step("a different custody attestation or a malformed observed text is a value error at encode")
+        var other = abandon
+        other.custody = "operator-attests-nothing"
+        expect(host_helper_abandon_bytes_v1(other).unwrap_err()).to_equal("helper-abandon-value-invalid")
+        var shouting = abandon
+        shouting.observed = "STATE=executing"
+        expect(host_helper_abandon_bytes_v1(shouting).unwrap_err()).to_equal("helper-abandon-value-invalid")
+        var empty = abandon
+        empty.observed = ""
+        expect(host_helper_abandon_bytes_v1(empty).unwrap_err()).to_equal("helper-abandon-value-invalid")
+
+    it "binds the operation to the `helper-abandon` kind, this record's digest and this host":
+        # @req AT-OPS-HELPER-ABANDON
+        val abandon = ha_record(ha_helper_operation())
+        val good = OperationEnvelopeV2(2, "abandon_1", host_helper_abandon_digest_v1(abandon).unwrap(), "user_1", "project_1",
+            "worker_1", "helper-abandon", "a".repeat(64), 4, 2, 3, 4096, 100)
+        expect(host_helper_abandon_match_v1(abandon, good).unwrap()).to_equal(true)
+        var other_kind = good
+        other_kind.operation = "service-handoff-abandon"
+        expect(host_helper_abandon_match_v1(abandon, other_kind).unwrap_err()).to_equal("helper-abandon-operation-mismatch")
+        var other_digest = good
+        other_digest.payload_digest = "d".repeat(64)
+        expect(host_helper_abandon_match_v1(abandon, other_digest).unwrap_err()).to_equal("helper-abandon-operation-mismatch")
+        var other_host = good
+        other_host.host_id = "worker_2"
+        expect(host_helper_abandon_match_v1(abandon, other_host).unwrap_err()).to_equal("helper-abandon-operation-mismatch")
+
+    it "round-trips the proof and refuses a non-canonical or foreign-kind proof":
+        # @req AT-OPS-HELPER-ABANDON
+        val abandon = ha_record(ha_helper_operation())
+        val source = ha_signed(abandon)
+        expect(host_helper_abandon_proof_decode_v1(source).unwrap().abandon.operation_id).to_equal("helper_op_1")
+        expect(host_helper_abandon_proof_decode_v1(source + "extra: 1\n").is_err()).to_equal(true)
+        expect(host_helper_abandon_proof_decode_v1(source.replace("helper-abandon-proof", "service-handoff-abandon-proof")).is_err()).to_equal(true)
+
+describe "Verify gate (milestone_0036)":
+    it "accepts only the configured controller's live V4-verified signature":
+        # @req AT-OPS-HELPER-ABANDON (controller-signed authority only; expired approvals refused)
+        # @capture(statistics): refusal reason per gate
+        val fixture = ha_fixture()
+        val policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val context = host_local_context_v1(policy)
+        val source = ha_signed(ha_record(ha_helper_operation()))
+        expect(host_helper_abandon_verify_v1(policy, "issuer_1", context, "worker_1", source).unwrap().abandon.operation_id).to_equal("helper_op_1")
+        step("an unconfigured controller and foreign keys are refused")
+        expect(host_helper_abandon_verify_v1(policy, "issuer_9", context, "worker_1", source).unwrap_err())
+            .to_equal("linux-host-service-controller-mismatch")
+        expect(host_helper_abandon_verify_v1(policy, "issuer_1", context, "worker_1", ha_signed(ha_record(ha_helper_operation()), 2, 66)).unwrap_err())
+            .to_equal("ISSUER_SIGNATURE_INVALID")
+        step("an approval that expired is refused: the abandon must be re-signed, never replayed")
+        expect(host_helper_abandon_verify_v1(policy, "issuer_1", context, "worker_1",
+            ha_signed(ha_record(ha_helper_operation()), 1, 65, 1000)).unwrap_err()).to_equal("APPROVAL_EXPIRED")
+        step("another host or another operation kind never verifies")
+        expect(host_helper_abandon_verify_v1(policy, "issuer_1", context, "worker_2", source).unwrap_err())
+            .to_equal("helper-abandon-operation-mismatch")
+        val abandon = ha_record(ha_helper_operation())
+        val foreign = OperationEnvelopeV2(2, "abandon_1", host_helper_abandon_digest_v1(abandon).unwrap(), "user_1", "project_1",
+            "worker_1", "host_reservation_v1", "a".repeat(64), 4, 2, 3, 4096, 100)
+        val foreign_signed = linux_service_verifier_sign_v1(foreign, ha_grant("host_reservation_v1"), 1, 65, HA_FAR)
+        expect(host_helper_abandon_proof_encode_v1(HostHelperAbandonProofV1(abandon, foreign, foreign_signed.0, foreign_signed.1)).unwrap_err())
+            .to_equal("helper-abandon-operation-mismatch")
+
+describe "Precondition table (milestone_0036)":
+    it "voids only the named attach-broker helper row in the observed live state":
+        # @req AT-OPS-HELPER-ABANDON
+        val operation = ha_helper_operation()
+        val abandon = ha_record(operation)
+        expect(host_helper_abandon_check_v1(abandon, operation, "executing", "attach-broker", "c".repeat(64), "d".repeat(64), HA_OBSERVED).is_ok())
+            .to_equal(true)
+        expect(host_helper_abandon_check_v1(abandon, operation, "outcome-unknown", "attach-broker", "c".repeat(64), "d".repeat(64), HA_OBSERVED).is_ok())
+            .to_equal(true)
+        for state in ["admitted", "completed", "cancelled", "failed"]:
+            expect(host_helper_abandon_check_v1(abandon, operation, state, "attach-broker", "c".repeat(64), "d".repeat(64), HA_OBSERVED).unwrap_err())
+                .to_equal("helper-abandon-row-state")
+        expect(host_helper_abandon_check_v1(abandon, operation, "executing", "primary-connection", "c".repeat(64), "d".repeat(64), HA_OBSERVED).unwrap_err())
+            .to_equal("helper-abandon-not-attach-broker-helper")
+        var parent = operation
+        parent.operation = "host_reservation_v1"
+        expect(host_helper_abandon_check_v1(abandon, parent, "executing", "attach-broker", "c".repeat(64), "d".repeat(64), HA_OBSERVED).unwrap_err())
+            .to_equal("helper-abandon-not-attach-broker-helper")
+        var other = operation
+        other.id = "helper_op_2"
+        expect(host_helper_abandon_check_v1(abandon, other, "executing", "attach-broker", "c".repeat(64), "d".repeat(64), HA_OBSERVED).unwrap_err())
+            .to_equal("helper-abandon-operation-mismatch")
+        expect(host_helper_abandon_check_v1(abandon, operation, "executing", "attach-broker", "e".repeat(64), "d".repeat(64), HA_OBSERVED).unwrap_err())
+            .to_equal("helper-abandon-request-mismatch")
+        expect(host_helper_abandon_check_v1(abandon, operation, "executing", "attach-broker", "c".repeat(64), "e".repeat(64), HA_OBSERVED).unwrap_err())
+            .to_equal("helper-abandon-request-mismatch")
+        step("the command voids only the state the operator saw")
+        expect(host_helper_abandon_check_v1(abandon, operation, "executing", "attach-broker", "c".repeat(64), "d".repeat(64),
+            "state=executing;pc=0;pa=0;n=0;r=0;x=0;o=0;rm=0;xm=0;store=valid").unwrap_err()).to_equal("helper-abandon-observed-mismatch")
+
+describe "Observed marker text (milestone_0036)":
+    it "renders every probe as 1, 0 or ? and a store that cannot be used as store=unusable":
+        # @req AT-OPS-HELPER-ABANDON (a permanently unreadable record never blocks the abandon)
+        val seen = HostHelperObservedV1(pc: "0", pa: "1", n: "0", r: "0", x: "0", o: "0", rm: "0", xm: "0", store: "valid")
+        expect(host_helper_abandon_observed_text_v1("executing", seen)).to_equal(HA_OBSERVED)
+        val broken = HostHelperObservedV1(pc: "0", pa: "?", n: "?", r: "1", x: "?", o: "?", rm: "?", xm: "?", store: "unusable")
+        expect(host_helper_abandon_observed_text_v1("outcome-unknown", broken))
+            .to_equal("state=outcome-unknown;pc=0;pa=?;n=?;r=1;x=?;o=?;rm=?;xm=?;store=unusable")
+
+describe "Abandon marker and proof records (milestone_0036)":
+    it "round-trips the marker canonically and keeps the signed proof as evidence":
+        # @req AT-OPS-HELPER-ABANDON
+        val marker = HostHelperAbandonedV1(operation_id: "helper_op_1", operation_digest: "a".repeat(64), request_digest: "c".repeat(64),
+            prepared_receipt_digest: "d".repeat(64), abandon_digest: "e".repeat(64))
+        val bytes = host_helper_abandoned_encode_v1(marker).unwrap()
+        expect(host_helper_abandoned_decode_v1(bytes).unwrap().abandon_digest).to_equal("e".repeat(64))
+        expect(host_helper_abandoned_decode_v1(bytes + "extra: 1\n").is_err()).to_equal(true)
+        var bad = marker
+        bad.abandon_digest = "short"
+        expect(host_helper_abandoned_encode_v1(bad).unwrap_err()).to_equal("helper-abandoned-value-invalid")
+        expect(host_helper_abandoned_relative_v1("helper_op_1")).to_equal("host-helper-primary-abandoned/" + sha256_text("helper_op_1") + ".sdn")
+        expect(host_helper_abandon_proof_relative_v1("helper_op_1", "e".repeat(64)))
+            .to_equal("host-helper-abandon-proof/" + sha256_text("helper_op_1") + "-" + "e".repeat(64) + ".sdn")
+
+    it "publishes the proof then the marker through the single journal, once, and refuses a different proof":
+        # @req AT-OPS-HELPER-ABANDON (single journal writer, no-replace, read back)
+        val fixture = ha_fixture()
+        val native = LinuxServiceNativeIdentitySnapshotV3(native_machine_id: fixture.binding.native_machine_id, native_boot_id: "native-boot",
+            architecture: "x86_64", owner_generation: 41, process_identity_digest: "e".repeat(64), process_generation: 2,
+            authority_namespace_id: "namespace_1")
+        val scope = linux_service_scope_v4(fixture.binding, native, "ab".repeat(16)).unwrap()
+        val root = secure_temp_dir("/tmp", "ha-publish").unwrap()
+        val capacity = HostCapacityV1("worker_1", "host-authority", container_scope_fence_id_v2(scope).unwrap(), 41, 2000, 536870912, [])
+        var opened: [HostCapacityOwnerV1] = []
+        match host_capacity_owner_open_owned_v2(root + "/journal", capacity, "9".repeat(64), 64, true):
+            case HostCapacityOpenV2.Ready(owner): opened.push(owner)
+            case HostCapacityOpenV2.Rejected(reason): fail(reason)
+            case HostCapacityOpenV2.CleanupRequired(cleanup, reason):
+                val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+                expect(closed.error).to_equal("")
+                fail(reason)
+        val journal = opened[0].journal
+        val operation = ha_helper_operation()
+        val source = ha_signed(ha_record(operation))
+        val proof = host_helper_abandon_proof_decode_v1(source).unwrap()
+        val marker = host_helper_abandon_record_publish_v1(journal, proof, source).unwrap()
+        expect(host_helper_abandoned_decode_v1(marker).unwrap().abandon_digest).to_equal(sha256_text(source))
+        expect(distributed_operation_journal_read_v3(journal, host_helper_abandoned_relative_v1("helper_op_1"), 4096).unwrap().unwrap()).to_equal(marker)
+        expect(distributed_operation_journal_read_v3(journal, host_helper_abandon_proof_relative_v1("helper_op_1", sha256_text(source)), 262144)
+            .unwrap().unwrap()).to_equal(source)
+        step("the same proof again is idempotent; another signed proof for the same helper is refused")
+        expect(host_helper_abandon_record_publish_v1(journal, proof, source).unwrap()).to_equal(marker)
+        val second = ha_signed(ha_record(operation, "state=executing;pc=0;pa=1;n=0;r=0;x=0;o=0;rm=0;xm=0;store=unusable"))
+        expect(host_helper_abandon_record_publish_v1(journal, host_helper_abandon_proof_decode_v1(second).unwrap(), second).unwrap_err())
+            .to_equal("helper-abandon-exists")
+        val closed = host_capacity_owner_close_owned_v2(opened[0])
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+describe "Release wiring (milestone_0036)":
+    it "reads the abandon marker before the helper-store check, with no store, R, X or mirror read":
+        # @req AT-OPS-HELPER-ABANDON (states 6 and 7: an unusable store or a differing mirror no longer holds the charge)
+        val arm = ha_body("host_linux_completion_evidence_v3.spl", "pub fn host_linux_completion_evidence_v3(", "\n    if operation.operation != \"host_reservation_v1\"")
+        val linux_current = arm.index_of("distributed_operation_journal_linux_current_v3(journal)?")
+        val abandoned = arm.index_of("host_helper_abandoned_evidence_v1(journal, operation)?")
+        val store_check = arm.index_of("host_linux_helper_store_check_v1(journal.root)")
+        expect(linux_current >= 0 and abandoned > linux_current and store_check > abandoned).to_equal(true)
+        val evidence = ha_body("host_helper_abandon_record_v1.spl", "pub fn host_helper_abandoned_evidence_v1(", "\npub fn ")
+        expect(evidence.contains("host_linux_helper_attach_expected_v1(journal, operation)?")).to_equal(true)
+        expect(evidence.contains("sha256_text(proof_source) != record.abandon_digest")).to_equal(true)
+        expect(evidence.contains("Ok(Some(marker))")).to_equal(true)
+        for forbidden in ["host_linux_helper_store_check_v1", "primary-refusal", "primary-cancelled", "host_helper_archive_present_v1"]:
+            expect(evidence.contains(forbidden)).to_equal(false)
+
+    it "settles through the capacity owner on the marker evidence and never flips continuity":
+        # @req AT-OPS-HELPER-ABANDON (not a ledger-only continuity flip)
+        val commit = ha_body("host_helper_abandon_commit_v1.spl", "pub fn host_helper_abandon_commit_v1(", "\npub fn ")
+        val evidence = commit.index_of("host_capacity_completion_evidence_owned_v2(owner.journal, owner.ledger.capacity, operation)")
+        val settle = commit.index_of("host_capacity_owner_settle_v1(owner, operation)")
+        expect(evidence >= 0 and settle > evidence).to_equal(true)
+        expect(commit.contains("sha256_text(outcome)")).to_equal(true)
+        expect(commit.contains("continuity_proven")).to_equal(false)
+        val whole = file_read_text("src/lib/nogc_sync_mut/orchestration/host_helper_abandon_commit_v1.spl")
+        expect(whole.contains("continuity_proven = true")).to_equal(false)
+
+    it "verifies, checks, records, then settles, and adopts the owner on every path":
+        # @req AT-OPS-HELPER-ABANDON
+        val body = ha_body("host_helper_abandon_commit_v1.spl", "pub fn host_helper_abandon_v1(", "\npub fn ")
+        val verify = body.index_of("host_helper_abandon_verify_v1(")
+        val check = body.index_of("host_helper_abandon_check_v1(")
+        val publish = body.index_of("host_helper_abandon_record_publish_v1(")
+        val commit = body.index_of("host_helper_abandon_commit_v1(")
+        expect(verify >= 0 and check > verify and publish > check and commit > publish).to_equal(true)
+        expect(body.contains("HostHelperAbandonTurnV1(owner,")).to_equal(true)
+        expect(body.contains("host_helper_abandon_observed_v1(")).to_equal(true)
+
+describe "Route wiring (milestone_0036)":
+    it "reaches the owner only through the frame validator and the full current_v4 recheck":
+        # @req AT-OPS-HELPER-ABANDON (nothing unreachable; the route mirrors service-handoff-abandon)
+        val domain = ha_body("host_service_domain_v3.spl", "if request.action == \"host-helper-abandon\":", "\n            # milestone_0030 s4")
+        val invalid = domain.index_of("host_helper_abandon_request_error_v3(request)")
+        val recheck = domain.index_of("local.current_v4()")
+        val action = domain.index_of("service_linux_agent_action_v3(local, request, \"host_helper_abandon_v1\")")
+        expect(invalid >= 0 and recheck > invalid and action > recheck).to_equal(true)
+        val frame = ha_body("host_service_domain_v3.spl", "fn host_helper_abandon_request_error_v3(", "\n# milestone_0021 PR3b")
+        expect(frame.contains("host_service_agent_frame_error_v3(request)")).to_equal(true)
+        expect(frame.contains("decoded.unwrap().operation.id != request.operation_id")).to_equal(true)
+        val dispatch = ha_body("host_linux_service_current_v4.spl", "pub fn host_linux_service_dispatch_v4(", "\n# AT-OPS-01 drain")
+        expect(dispatch.contains("if action == \"host_helper_abandon_v1\": return linux_service_helper_abandon_v4(owner, source)")).to_equal(true)
+        step("a draining owner admits no abandon (only inspect, detach, cancel and the remote-build drain actions stay)")
+        expect(dispatch.contains("and action != \"host_helper_abandon_v1\"")).to_equal(false)
+
+    it "is not gated on the quarantine it clears, refuses a live attachment and adopts the owner on every path":
+        # @req AT-OPS-HELPER-ABANDON
+        val handler = ha_body("host_linux_service_current_v4.spl", "fn linux_service_helper_abandon_v4(", "\n# The workload scope")
+        val current = handler.index_of("owner.current_v4()")
+        val guard = handler.index_of("linux_service_helper_abandon_guard_v4(owner, source)")
+        val call = handler.index_of("host_helper_abandon_v1(owner.capacity.unwrap()")
+        val adopt = handler.index_of("owner.capacity = Some(turn.owner)")
+        expect(current >= 0 and guard > current and call > guard and adopt > call).to_equal(true)
+        expect(handler.contains("continuity_proven")).to_equal(false)
+        expect(handler.contains("reconcile_error")).to_equal(false)
+        val guard_body = ha_body("host_linux_service_current_v4.spl", "fn linux_service_helper_abandon_guard_v4(", "\nfn linux_service_helper_abandon_v4(")
+        expect(guard_body.contains("attachment.attach_stage != HOST_AGENT_ATTACH_BLOCKED_V4")).to_equal(true)
+        expect(guard_body.contains("linux-host-service-helper-abandon-attachment-live")).to_equal(true)
+        expect(guard_body.contains("linux-host-service-helper-abandon-attachment-unreadable")).to_equal(true)
+
+    it "finishes a recorded abandon's settle at the next start, before the reap and the R read":
+        # @req AT-OPS-HELPER-ABANDON (crash between the marker and the settle)
+        val row = ha_body("host_linux_service_current_v4.spl", "fn linux_service_helper_cancel_row_v4(", "\npub fn ")
+        expect(row.contains("host_helper_abandon_commit_v1(capacity, operation)")).to_equal(true)
+        expect(row.index_of("host_helper_abandoned_pending_v1(") < row.index_of("host_helper_deadline_reap_v1(")).to_equal(true)

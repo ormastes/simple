@@ -32,6 +32,11 @@ use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperatio
 use std.common.contracts.distributed_control_codec_v2.distributed_decode_operation_v2
 use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.{HostHelperCancelTurnV1,
     host_helper_cancel_unconsumed_v1}
+use std.nogc_sync_mut.orchestration.host_helper_abandon_record_v1.host_helper_abandoned_pending_v1
+use std.nogc_sync_mut.orchestration.host_helper_abandon_commit_v1.{host_helper_abandon_v1, host_helper_abandon_commit_v1}
+use std.nogc_sync_mut.orchestration.host_helper_deadline_v1.HostHelperReapFactsV1
+use std.nogc_sync_mut.orchestration.host_helper_deadline_reap_v1.host_helper_deadline_reap_v1
+use std.common.contracts.orchestration.host_helper_abandon_v1.host_helper_abandon_proof_decode_v1
 use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.{host_linux_helper_store_root_v1,
     HostLinuxHelperStoreStateV1, host_linux_helper_store_check_v1, host_linux_helper_store_open_v1,
     host_linux_helper_journal_relative_v1, host_linux_helper_attach_expected_v1,
@@ -77,10 +82,10 @@ use std.common.contracts.orchestration.host_agent_pane_v4.{HostAgentPaneLeaseV4,
 use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{host_agent_attachment_live_v4, HostAgentReleaseContextV4,
     HostAgentAttachmentPortCallV4, HostAgentAttachmentReleaseStepV4, host_agent_attachment_release_step_v4,
     host_agent_attach_archive_relative_v4, HOST_AGENT_ATTACH_MAX_BYTES_V4, HOST_AGENT_ATTACH_READY_V4,
-    HOST_AGENT_ATTACH_ADOPTED_V4, host_agent_pane_control_target_v4}
+    HOST_AGENT_ATTACH_ADOPTED_V4, HOST_AGENT_ATTACH_BLOCKED_V4, host_agent_pane_control_target_v4}
 use std.common.contracts.mux.session_runtime_control_v1.SessionRuntimeControlTargetV1
 use std.nogc_sync_mut.orchestration.host_helper_owner_v1.host_helper_prepare_check_v1
-use std.nogc_sync_mut.orchestration.host_helper_request_v1.HostHelperRequestV1
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{HostHelperRequestV1, host_helper_request_decode_v1}
 use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.HostHelperStoreV1
 use std.nogc_sync_mut.orchestration.host_primary_attach_owner_v1.host_primary_attach_open_entry_check_v1
 use std.container.LinuxWorkspaceRootBorrowV3
@@ -457,11 +462,18 @@ pub struct HostLinuxServiceResumeTurnV4:
 
 # Ok(None): not a resumable row (another operation, another state, or no journal R).
 fn linux_service_helper_cancel_row_v4(capacity: HostCapacityOwnerV1, store_root: text,
-        operation_id: text) -> Result<Option<HostHelperCancelTurnV1>, text>:
+        operation_id: text, reap: Option<HostHelperReapFactsV1>) -> Result<Option<HostHelperCancelTurnV1>, text>:
     val row = distributed_operation_journal_lookup_v2(capacity.journal, operation_id)?
     if row.state != "executing" and row.state != "outcome-unknown": return Ok(None)
     val operation = distributed_decode_operation_v2(row.envelope)?
     if operation.operation != "host_helper_reservation_v1": return Ok(None)
+    # milestone_0036: a recorded controller-signed abandon whose settle did not complete is finished first (DESIGN A6).
+    if host_helper_abandoned_pending_v1(capacity.journal, operation)?:
+        return Ok(Some(host_helper_abandon_commit_v1(capacity, operation)))
+    # milestone_0036 deadline reap: when the signed deadline passed and the helper spawn is proven dead, the refusal R is
+    # written here (single writer) and the read below finds it; any condition not met leaves the row untouched.
+    if val facts = reap:
+        val reaped = host_helper_deadline_reap_v1(capacity.journal, store_root, operation, facts)?
     val refusal_bytes = distributed_operation_journal_read_v3(capacity.journal,
         host_linux_helper_journal_relative_v1("primary-refusal", operation.id), 65536)?
     if refusal_bytes.is_none(): return Ok(None)
@@ -481,8 +493,16 @@ pub fn host_linux_service_helper_cancel_resume_v4(original: HostLinuxServiceCurr
     var error = ""
     # Row ids from the startup journal; each row is re-read from the CURRENT journal.
     val operation_ids = capacity.journal.operations.keys()
+    # milestone_0036: the facts the reap needs come from the service's own verified records and clock; without records
+    # the reap is simply not offered when they are absent.
+    var reap: Option<HostHelperReapFactsV1> = None
+    if val records = owner.records:
+        val policy = records.metadata.policy
+        reap = Some(HostHelperReapFactsV1(policy_generation: policy.snapshot.generation,
+            policy_revision: policy.snapshot.policy_revision, revocation_epoch: policy.snapshot.revocation_epoch,
+            now_ms: host_local_context_v1(policy).grant_clock))
     for operation_id in operation_ids:
-        val row = linux_service_helper_cancel_row_v4(capacity, store_root, operation_id)
+        val row = linux_service_helper_cancel_row_v4(capacity, store_root, operation_id, reap)
         if row.is_err():
             if error == "": error = row.unwrap_err()
             continue
@@ -1569,6 +1589,7 @@ pub fn host_linux_service_dispatch_v4(owner: HostLinuxServiceCurrentV4, action: 
         return linux_service_reply_v4(owner, "", "linux-host-service-draining", false)
     if action == "host_service_handoff_v1": return linux_service_handoff_v4(owner, source)
     if action == "host_service_handoff_abandon_v1": return linux_service_handoff_abandon_v4(owner, source)
+    if action == "host_helper_abandon_v1": return linux_service_helper_abandon_v4(owner, source)
     if action == "host_prepare_associated_v3": return host_linux_service_prepare_v4(owner, source, project)
     if action == "host_execute_associated_v3": return host_linux_service_execute_v4(owner, source)
     if action == "host_agent_invoke_v4": return host_linux_service_agent_invoke_v4(owner, source)
@@ -1618,6 +1639,39 @@ fn linux_service_handoff_abandon_v4(original: HostLinuxServiceCurrentV4, source:
         metadata.unwrap().configuration.controller_ref, host_local_context_v1(metadata.unwrap().policy), source)
     if reply.is_err(): return linux_service_reply_v4(owner, "", reply.unwrap_err(), false)
     linux_service_reply_v4(owner, reply.unwrap(), "", true)
+
+# milestone_0036: a controller-signed abandon releases the Host charge of one attach-broker helper row whose death cannot be
+# proven by the deadline reap or whose records are permanently unreadable. Like the handoff abandon it is deliberately NOT
+# gated on the quarantine it clears; the capacity owner (single journal writer) is adopted on every path. While this
+# service's own agent still holds that helper's attachment in any stage but `release-blocked` the command is refused: a
+# live attachment is released by its own port, never freed from underneath.
+fn linux_service_helper_abandon_guard_v4(owner: HostLinuxServiceCurrentV4, source: text) -> text:
+    val decoded = host_helper_abandon_proof_decode_v1(source)
+    if decoded.is_err(): return decoded.unwrap_err()
+    val agent = match owner.agent:
+        case Some(actual): actual
+        case None: return ""
+    val attachment = match agent.attachment:
+        case Some(actual): actual
+        case None: return ""
+    val request = host_helper_request_decode_v1(attachment.helper_request_bytes)
+    if request.is_err(): return "linux-host-service-helper-abandon-attachment-unreadable"
+    if request.unwrap().operation.id != decoded.unwrap().abandon.operation_id: return ""
+    if attachment.attach_stage != HOST_AGENT_ATTACH_BLOCKED_V4: return "linux-host-service-helper-abandon-attachment-live"
+    ""
+
+fn linux_service_helper_abandon_v4(original: HostLinuxServiceCurrentV4, source: text) -> HostLinuxServiceReplyV4:
+    var owner = original
+    val metadata = owner.current_v4()
+    if metadata.is_err(): return linux_service_reply_v4(owner, "", metadata.unwrap_err(), false)
+    val live = linux_service_helper_abandon_guard_v4(owner, source)
+    if live != "": return linux_service_reply_v4(owner, "", live, false)
+    val turn = host_helper_abandon_v1(owner.capacity.unwrap(), metadata.unwrap().policy,
+        metadata.unwrap().configuration.controller_ref, host_local_context_v1(metadata.unwrap().policy),
+        owner.scope.unwrap().physical_host_id, source)
+    owner.capacity = Some(turn.owner)
+    if turn.error != "": return linux_service_reply_v4(owner, "", turn.error, turn.effect_attempted)
+    linux_service_reply_v4(owner, turn.reply, "", true)
 
 # The workload scope of this service's lending epoch: the bound host (the same
 # physical_host_id association_match_v3 compares), "epoch-" + the lent digest

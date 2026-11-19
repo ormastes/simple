@@ -1,0 +1,124 @@
+# milestone_0036: the service side of the controller-signed `helper-abandon` operator command. Verify (issuer ==
+# controller_ref, V4 signatures at THIS clock/generation/revocation/session, so an expired or old-session abandon is
+# refused), check the named row and the operator's observed marker text against the journal, record the proof and marker
+# through the single journal writer, then release the Host helper charge with the ordinary capacity settle on the marker
+# evidence (host_helper_abandoned_evidence_v1). Never a continuity flip; the capacity owner is returned on every path.
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1, host_capacity_owner_settle_v1,
+    host_capacity_completion_evidence_owned_v2}
+use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.HostHelperCancelTurnV1
+use std.nogc_sync_mut.orchestration.host_helper_abandon_record_v1.{HostHelperAbandonedV1, host_helper_abandoned_encode_v1,
+    host_helper_abandoned_relative_v1, host_helper_abandon_proof_relative_v1, host_helper_abandon_observed_v1}
+use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.host_linux_helper_attach_expected_v1
+use std.nogc_sync_mut.io.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.daemon_operation_exact_v2
+use std.common.contracts.orchestration.host_helper_abandon_v1.{HostHelperAbandonV1, HostHelperAbandonProofV1,
+    host_helper_abandon_proof_decode_v1, host_helper_abandon_match_v1}
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_lookup_v2,
+    distributed_operation_journal_publish_v3, distributed_operation_journal_read_required_v3}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+# Retain `owner` even on error (single-writer rule, as host_capacity_owner_settle_v1).
+# `effect_attempted` is true from the first record write on: a later error may have left the proof or the marker behind.
+pub struct HostHelperAbandonTurnV1:
+    owner: HostCapacityOwnerV1
+    reply: text
+    error: text
+    effect_attempted: bool
+
+pub fn host_helper_abandon_verify_v1(policy: LocalAuthorityPolicyV1, controller_ref: text,
+        context: HostReservationAuthorizationContextV1, host_id: text, source: text) -> Result<HostHelperAbandonProofV1, text>:
+    val proof = host_helper_abandon_proof_decode_v1(source)?
+    if proof.signed.issuer_id != controller_ref: return Err("linux-host-service-controller-mismatch")
+    val matched = host_helper_abandon_match_v1(proof.abandon, proof.operation)?
+    if proof.abandon.physical_host_id != host_id: return Err("helper-abandon-operation-mismatch")
+    val grant = distributed_verify_grant_approval_from_snapshot_v2(policy.snapshot, proof.signed, proof.approval, proof.operation,
+        context.grant_clock, policy.snapshot.generation, context.policy_revision, context.revocation_epoch,
+        context.session_generation)?
+    Ok(proof)
+
+# PURE precondition table over the journal-derived facts. Only an attach-broker helper row that is charged and live
+# (executing or outcome-unknown) is abandoned; every digest is the journal's own; the operator voids only the marker
+# state they observed.
+pub fn host_helper_abandon_check_v1(abandon: HostHelperAbandonV1, operation: OperationEnvelopeV2, row_state: text,
+        helper_kind: text, request_digest: text, prepared_receipt_digest: text, observed: text) -> Result<(), text>:
+    if operation.operation != "host_helper_reservation_v1" or helper_kind != "attach-broker":
+        return Err("helper-abandon-not-attach-broker-helper")
+    if abandon.operation_id != operation.id or abandon.operation_digest != sha256_text(distributed_encode_operation_v2(operation)?):
+        return Err("helper-abandon-operation-mismatch")
+    if row_state != "executing" and row_state != "outcome-unknown": return Err("helper-abandon-row-state")
+    if abandon.request_digest != request_digest or abandon.prepared_receipt_digest != prepared_receipt_digest:
+        return Err("helper-abandon-request-mismatch")
+    if abandon.observed != observed: return Err("helper-abandon-observed-mismatch")
+    Ok(())
+
+# Proof first (keyed by its digest: an orphan left by a crash before the marker is harmless and a freshly signed abandon
+# writes its own), then the marker, no-replace and read back. A marker already present is accepted only for the same
+# proof; the marker bytes are returned.
+pub fn host_helper_abandon_record_publish_v1(journal: DistributedOperationJournalV2, proof: HostHelperAbandonProofV1,
+        source: text) -> Result<text, text>:
+    val abandon = proof.abandon
+    val digest = sha256_text(source)
+    val evidence_path = host_helper_abandon_proof_relative_v1(abandon.operation_id, digest)
+    val evidence = distributed_operation_journal_publish_v3(journal, evidence_path, source)?
+    if not evidence:
+        val retained = distributed_operation_journal_read_required_v3(journal, evidence_path, 262144)?
+        if retained != source: return Err("helper-abandon-exists")
+    val marker = host_helper_abandoned_encode_v1(HostHelperAbandonedV1(operation_id: abandon.operation_id,
+        operation_digest: abandon.operation_digest, request_digest: abandon.request_digest,
+        prepared_receipt_digest: abandon.prepared_receipt_digest, abandon_digest: digest))?
+    val marker_path = host_helper_abandoned_relative_v1(abandon.operation_id)
+    val saved = distributed_operation_journal_publish_v3(journal, marker_path, marker)?
+    if not saved:
+        val existing = distributed_operation_journal_read_required_v3(journal, marker_path, 4096)?
+        if existing != marker: return Err("helper-abandon-exists")
+        return Ok(existing)
+    val readback = distributed_operation_journal_read_required_v3(journal, marker_path, 4096)?
+    if readback != marker: return Err("helper-abandon-readback")
+    Ok(marker)
+
+# Release on the recorded marker evidence: the evidence arm returns the marker bytes verbatim, so sha256(outcome) is the
+# recorded outcome digest. A row already completed with that outcome is an idempotent Ok.
+pub fn host_helper_abandon_commit_v1(owner: HostCapacityOwnerV1, operation: OperationEnvelopeV2) -> HostHelperCancelTurnV1:
+    val evidence = host_capacity_completion_evidence_owned_v2(owner.journal, owner.ledger.capacity, operation)
+    if evidence.is_err(): return HostHelperCancelTurnV1(owner, None, evidence.unwrap_err())
+    val outcome = evidence.unwrap()
+    val committed = host_capacity_owner_settle_v1(owner, operation)
+    if not committed.settled: return HostHelperCancelTurnV1(committed.owner, None, committed.error)
+    val state = daemon_operation_exact_v2(committed.owner.journal, operation)
+    if state.is_err(): return HostHelperCancelTurnV1(committed.owner, None, state.unwrap_err())
+    if state.unwrap().state != "completed" or state.unwrap().outcome_digest != sha256_text(outcome):
+        return HostHelperCancelTurnV1(committed.owner, None, "helper-abandon-journal-settlement-mismatch")
+    HostHelperCancelTurnV1(committed.owner, None, "")
+
+fn helper_abandon_reply_v1(operation_id: text, digest: text) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("helper-abandoned"),
+        "operationId": SdnValue.String(operation_id), "digest": SdnValue.String(digest)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+# The operator command. `owner` is the held capacity owner (single journal writer); it is returned on every path.
+pub fn host_helper_abandon_v1(owner: HostCapacityOwnerV1, policy: LocalAuthorityPolicyV1, controller_ref: text,
+        context: HostReservationAuthorizationContextV1, host_id: text, source: text) -> HostHelperAbandonTurnV1:
+    val proof = host_helper_abandon_verify_v1(policy, controller_ref, context, host_id, source)
+    if proof.is_err(): return HostHelperAbandonTurnV1(owner, "", proof.unwrap_err(), false)
+    val abandon = proof.unwrap().abandon
+    val state = distributed_operation_journal_lookup_v2(owner.journal, abandon.operation_id)
+    if state.is_err(): return HostHelperAbandonTurnV1(owner, "", state.unwrap_err(), false)
+    val operation = distributed_decode_operation_v2(state.unwrap().envelope)
+    if operation.is_err(): return HostHelperAbandonTurnV1(owner, "", operation.unwrap_err(), false)
+    val expected = host_linux_helper_attach_expected_v1(owner.journal, operation.unwrap())
+    if expected.is_err(): return HostHelperAbandonTurnV1(owner, "", expected.unwrap_err(), false)
+    val observed = host_helper_abandon_observed_v1(owner.journal, operation.unwrap().id, state.unwrap().state)
+    val checked = host_helper_abandon_check_v1(abandon, operation.unwrap(), state.unwrap().state, expected.unwrap().plan.helper_kind,
+        expected.unwrap().request_digest, expected.unwrap().prepared_receipt_digest, observed)
+    if checked.is_err(): return HostHelperAbandonTurnV1(owner, "", checked.unwrap_err(), false)
+    val marker = host_helper_abandon_record_publish_v1(owner.journal, proof.unwrap(), source)
+    if marker.is_err(): return HostHelperAbandonTurnV1(owner, "", marker.unwrap_err(), true)
+    val committed = host_helper_abandon_commit_v1(owner, operation.unwrap())
+    if committed.error != "": return HostHelperAbandonTurnV1(committed.owner, "", committed.error, true)
+    HostHelperAbandonTurnV1(committed.owner, helper_abandon_reply_v1(abandon.operation_id, sha256_text(marker.unwrap())), "", true)

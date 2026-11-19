@@ -1,0 +1,152 @@
+# milestone_0036: the journal records of a controller-signed helper abandon and the settlement evidence they give.
+# The marker `host-helper-primary-abandoned/<sha(op)>.sdn` is written by the service owner after it verified the signed
+# proof (host_helper_abandon_commit_v1); the signed proof itself is retained beside it, keyed by its digest. This module
+# never imports a capacity owner: the capacity owner reaches it through host_linux_completion_evidence_v3.
+# Evidence is the marker bytes verbatim. It reads NO helper store, refusal R, cancelled X or mirror, so an unusable store or
+# a differing mirror (charged-forever states 6 and 7) cannot hold the charge once an abandon was recorded.
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_read_v3, distributed_operation_journal_read_required_v3}
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.orchestration.host_helper_abandon_v1.{host_helper_abandon_proof_decode_v1}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.{HostLinuxHelperStoreStateV1, host_linux_helper_store_check_v1,
+    host_linux_helper_connection_marker_v1, host_linux_helper_journal_relative_v1, host_linux_helper_attach_expected_v1}
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.host_helper_archive_present_v1
+
+pub struct HostHelperAbandonedV1:
+    operation_id: text
+    operation_digest: text
+    request_digest: text
+    prepared_receipt_digest: text
+    abandon_digest: text
+
+# Observed presence of every marker, each `1` (present), `0` (absent) or `?` (permanently unreadable).
+pub struct HostHelperObservedV1:
+    pc: text
+    pa: text
+    n: text
+    r: text
+    x: text
+    o: text
+    rm: text
+    xm: text
+    store: text
+
+pub fn host_helper_abandoned_relative_v1(operation_id: text) -> text:
+    "host-helper-primary-abandoned/" + sha256_text(operation_id) + ".sdn"
+
+pub fn host_helper_abandon_proof_relative_v1(operation_id: text, abandon_digest: text) -> text:
+    "host-helper-abandon-proof/" + sha256_text(operation_id) + "-" + abandon_digest + ".sdn"
+
+pub fn host_helper_abandoned_encode_v1(record: HostHelperAbandonedV1) -> Result<text, text>:
+    if not builder_identifier_valid_v1(record.operation_id): return Err("helper-abandoned-value-invalid")
+    for digest in [record.operation_digest, record.request_digest, record.prepared_receipt_digest, record.abandon_digest]:
+        if not builder_digest_valid_v1(digest): return Err("helper-abandoned-value-invalid")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-helper-primary-abandoned"),
+        "operationId": SdnValue.String(record.operation_id), "operationDigest": SdnValue.String(record.operation_digest),
+        "requestDigest": SdnValue.String(record.request_digest),
+        "preparedReceiptDigest": SdnValue.String(record.prepared_receipt_digest),
+        "abandonDigest": SdnValue.String(record.abandon_digest)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn helper_abandoned_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("helper-abandoned-text-required:" + key)
+
+pub fn host_helper_abandoned_decode_v1(source: text) -> Result<HostHelperAbandonedV1, text>:
+    if str_len(source) == 0 or str_len(source) > 4096: return Err("helper-abandoned-source-size")
+    val limits = SdnStrictLimitsV1(max_source_bytes: 4096, max_depth: 2, max_nodes: 16, max_rows: 0, max_cells: 0, max_columns: 8)
+    val parsed = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(issue): return Err("helper-abandoned-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("helper-abandoned-object-required")
+    val names = ["version", "kind", "operationId", "operationDigest", "requestDigest", "preparedReceiptDigest", "abandonDigest"]
+    for key in fields.keys():
+        if not names.contains(key): return Err("helper-abandoned-unknown-field:" + key)
+    for key in names:
+        if not fields.contains_key(key): return Err("helper-abandoned-missing-field:" + key)
+    if helper_abandoned_text_v1(fields, "kind")? != "host-helper-primary-abandoned": return Err("helper-abandoned-kind")
+    val record = HostHelperAbandonedV1(operation_id: helper_abandoned_text_v1(fields, "operationId")?,
+        operation_digest: helper_abandoned_text_v1(fields, "operationDigest")?,
+        request_digest: helper_abandoned_text_v1(fields, "requestDigest")?,
+        prepared_receipt_digest: helper_abandoned_text_v1(fields, "preparedReceiptDigest")?,
+        abandon_digest: helper_abandoned_text_v1(fields, "abandonDigest")?)
+    if host_helper_abandoned_encode_v1(record)? != source: return Err("helper-abandoned-noncanonical")
+    Ok(record)
+
+# PURE rendering of what an operator observes; the same text is signed into the command and re-derived by the service.
+pub fn host_helper_abandon_observed_text_v1(row_state: text, seen: HostHelperObservedV1) -> text:
+    "state=" + row_state + ";pc=" + seen.pc + ";pa=" + seen.pa + ";n=" + seen.n + ";r=" + seen.r + ";x=" + seen.x +
+        ";o=" + seen.o + ";rm=" + seen.rm + ";xm=" + seen.xm + ";store=" + seen.store
+
+fn helper_observed_token_v1(present: Result<bool, text>) -> text:
+    if present.is_err(): return "?"
+    if present.unwrap(): "1" else: "0"
+
+fn helper_observed_journal_v1(journal: DistributedOperationJournalV2, category: text, operation_id: text) -> text:
+    match distributed_operation_journal_read_v3(journal, host_linux_helper_journal_relative_v1(category, operation_id), 65536):
+        case Ok(found): if found.is_some(): "1" else: "0"
+        case Err(_): "?"
+
+# Journal markers are always observable (a read error is `?`); store markers only when the store is the valid one of this
+# journal (an unusable store renders `store=unusable` and `?` for every store-side probe). Never an Err: an unreadable
+# record is exactly the case the operator command exists for.
+pub fn host_helper_abandon_observed_v1(journal: DistributedOperationJournalV2, operation_id: text, row_state: text) -> text:
+    val pc = helper_observed_token_v1(host_linux_helper_connection_marker_v1(journal, operation_id))
+    val r = helper_observed_journal_v1(journal, "primary-refusal", operation_id)
+    val x = helper_observed_journal_v1(journal, "primary-cancelled", operation_id)
+    val checked = host_linux_helper_store_check_v1(journal.root)
+    if checked.is_err():
+        return host_helper_abandon_observed_text_v1(row_state, HostHelperObservedV1(pc: pc, pa: "?", n: "?", r: r, x: x, o: "?",
+            rm: "?", xm: "?", store: "unusable"))
+    match checked.unwrap():
+        case HostLinuxHelperStoreStateV1.Valid(root):
+            host_helper_abandon_observed_text_v1(row_state, HostHelperObservedV1(pc: pc,
+                pa: helper_observed_token_v1(host_helper_archive_present_v1(root, operation_id, "primary-consumed")),
+                n: helper_observed_token_v1(host_helper_archive_present_v1(root, operation_id, "primary-native")), r: r, x: x,
+                o: helper_observed_token_v1(host_helper_archive_present_v1(root, operation_id, "consumed")),
+                rm: helper_observed_token_v1(host_helper_archive_present_v1(root, operation_id, "primary-refusal")),
+                xm: helper_observed_token_v1(host_helper_archive_present_v1(root, operation_id, "primary-cancelled")), store: "valid"))
+        case HostLinuxHelperStoreStateV1.Absent:
+            host_helper_abandon_observed_text_v1(row_state, HostHelperObservedV1(pc: pc, pa: "?", n: "?", r: r, x: x, o: "?",
+                rm: "?", xm: "?", store: "unusable"))
+
+# True when an abandon marker was recorded for this helper (the start resume then finishes the settle, DESIGN A6).
+pub fn host_helper_abandoned_pending_v1(journal: DistributedOperationJournalV2, operation: OperationEnvelopeV2) -> Result<bool, text>:
+    Ok((distributed_operation_journal_read_v3(journal, host_helper_abandoned_relative_v1(operation.id), 4096)?).is_some())
+
+# Some(marker bytes) when an abandon was recorded for this helper, None when none was, Err when the marker or its retained
+# proof is inconsistent (the row then stays charged). Bound to the operation, the journal-derived request and receipt
+# digests and the retained signed proof (digest and identity). The signatures are NOT re-verified: they were verified once,
+# at publish, under the then-current clock and generation, and an old grant can never verify again by design.
+pub fn host_helper_abandoned_evidence_v1(journal: DistributedOperationJournalV2,
+        operation: OperationEnvelopeV2) -> Result<Option<text>, text>:
+    val found = distributed_operation_journal_read_v3(journal, host_helper_abandoned_relative_v1(operation.id), 4096)?
+    if found.is_none(): return Ok(None)
+    val marker = found.unwrap()
+    val record = host_helper_abandoned_decode_v1(marker)?
+    val expected = host_linux_helper_attach_expected_v1(journal, operation)?
+    if (record.operation_id != operation.id or record.operation_digest != sha256_text(distributed_encode_operation_v2(operation)?) or
+            record.request_digest != expected.request_digest or record.prepared_receipt_digest != expected.prepared_receipt_digest):
+        return Err("helper-abandoned-binding-mismatch")
+    val proof_source = distributed_operation_journal_read_required_v3(journal,
+        host_helper_abandon_proof_relative_v1(operation.id, record.abandon_digest), 262144)?
+    if sha256_text(proof_source) != record.abandon_digest: return Err("helper-abandoned-proof-digest")
+    val proof = host_helper_abandon_proof_decode_v1(proof_source)?
+    if (proof.abandon.operation_id != operation.id or proof.abandon.operation_digest != record.operation_digest or
+            proof.abandon.request_digest != record.request_digest or
+            proof.abandon.prepared_receipt_digest != record.prepared_receipt_digest):
+        return Err("helper-abandoned-proof-mismatch")
+    Ok(Some(marker))
+
+export HostHelperAbandonedV1, HostHelperObservedV1

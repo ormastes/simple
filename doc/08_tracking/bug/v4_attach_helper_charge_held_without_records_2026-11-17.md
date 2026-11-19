@@ -2,7 +2,7 @@
 
 - id: `v4_attach_helper_charge_held_without_records_2026_11_17`
 - severity: P2
-- status: open (accepted fail-closed behaviour; operator reconciliation is the only exit)
+- status: partially fixed 2026-11-19 (milestone_0036: deadline reap + controller-signed `helper-abandon`; source-authored, NOT_RUN, see `## Update 2026-11-19` for what stays held)
 - design: `.spipe/simple_orchestrator/continuation_20261116/milestone_0022_native_attach/DESIGN.md`
   sections 14.3 (P2-D), 15.6 and 16 (P3-2, final list); milestone_0021 DESIGN 13.3/13.4/14A F4/F6.
 
@@ -54,3 +54,15 @@ did not exist. Both cores now exist and are called by the release port, so a hel
 carrier is classified as releasable (not charged forever) and released through the container-side
 retirement and settle_retired (NOT_RUN: no runnable binary; never compiled). The eight no-record states above are unchanged and this row stays open; only a
 `Rejected` spawn (no owner, absence unprovable) still ends Blocked.
+
+## Update 2026-11-19 (milestone_0036): deadline reap and signed operator abandon (source-authored, NOT_RUN)
+Owner decision: both. Design: `.spipe/simple_orchestrator/continuation_20261116/milestone_0036_attach_charge_recovery/DESIGN.md`.
+- Deadline reap (service start, before the flip): releases `{}` (state 1, agent F6 service row) and `{PA}` (states 2-5) when the
+  controller-signed begin deadline (`host-helper-deadlines/`, attach-broker only) is strictly past, policy generation/revision/epoch
+  match, and the spawn is proven dead (no PA; PA with an absent `broker.claim`; PA with the matching broker's terminal or unlaunched receipt).
+  It writes R through the single journal writer and the existing cancel releases the charge. Proof only; a possibly live group stays held.
+- Controller-signed `helper-abandon` (operation kind `helper-abandon`, route `host-helper-abandon`): releases any live attach-broker helper row
+  incl. states 6 and 7 (journal-only evidence arm, store and mirrors never read) and 8 when the cause is the X evidence.
+- Still held: rows begun before this change (no deadline record) until an operator abandon; `{PA}` whose group may still live; `{PA,N}`; a
+  permanent capacity settle failure (state 8 root cause); the agent's in-memory `release-blocked`/`wedged` attachment (capacity is freed,
+  the attachment object is not un-wedged). All specs NOT_RUN (no runnable binary).

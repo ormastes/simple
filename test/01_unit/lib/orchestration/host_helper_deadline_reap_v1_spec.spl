@@ -1,0 +1,162 @@
+"""
+## Purpose and audience
+milestone_0036 (bug v4_attach_helper_charge_held_without_records): the deadline reap of a charged V4 attach-broker
+helper row at service start. Pins the deadline record codec, the deadline recomputed from the four controller-signed
+expiries, the pure due table (clock, generation, digests), the marker table (only `{}` and `{PA}` are reapable), the
+death-proof table, and the structural wiring: the record is published before the begin commit, only for attach-broker,
+and the reap runs before the R read in the startup resume.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable `simple` binary on this host, 2026-11-19).
+## Compatibility and limitations
+The journal- and filesystem-backed reap (R publish, broker claim and receipt reads, cancel) needs the PR3b journal
+and helper-store fixtures that do not exist yet; their ORDER is pinned structurally. The tables are pure and exhaustive.
+## Verification guidance and troubleshooting
+A table mismatch prints the row. A structural failure names the rule (publish before commit, reap before R read).
+"""
+use std.spec.{step}
+use std.io.file_read_text
+use std.nogc_sync_mut.orchestration.host_helper_deadline_v1.*
+use std.nogc_sync_mut.orchestration.host_helper_deadline_reap_v1.{host_helper_reap_consumed_v1, host_helper_death_proof_kind_v1}
+use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.HostLinuxHelperMarkersV1
+
+val HD_DIR = "src/lib/nogc_sync_mut/orchestration/"
+
+fn hd_record() -> HostHelperDeadlineV1:
+    HostHelperDeadlineV1(operation_id: "helper_op_1", operation_digest: "a".repeat(64), execution_proof_digest: "b".repeat(64),
+        deadline_unix_ms: 5000, policy_generation: 4, policy_revision: 7, revocation_epoch: 2)
+
+fn hd_facts(now_ms: i64 = 5001) -> HostHelperReapFactsV1:
+    HostHelperReapFactsV1(policy_generation: 4, policy_revision: 7, revocation_epoch: 2, now_ms: now_ms)
+
+fn hd_due(record: HostHelperDeadlineV1, recomputed: i64, facts: HostHelperReapFactsV1, proof: text = "b".repeat(64)) -> text:
+    match host_helper_deadline_due_v1(record, recomputed, "a".repeat(64), proof, facts):
+        case Ok(due): if due: "due" else: "not-due"
+        case Err(reason): "Err:" + reason
+
+fn hd_markers(connection: bool, consumed: bool, native: bool, refusal: bool, cancelled: bool, output: bool,
+        refusal_mirror: bool, cancelled_mirror: bool) -> HostLinuxHelperMarkersV1:
+    HostLinuxHelperMarkersV1(connection: connection, consumed: consumed, native: native, refusal: refusal, cancelled: cancelled,
+        output: output, refusal_mirror: refusal_mirror, cancelled_mirror: cancelled_mirror)
+
+fn hd_reap(markers: HostLinuxHelperMarkersV1) -> text:
+    match host_helper_reap_consumed_v1(markers):
+        case Ok(consumed): if consumed: "pa" else: "none"
+        case Err(reason): "Err:" + reason
+
+fn hd_proof(consumed: bool, claim_absent: bool, terminal: bool) -> text:
+    match host_helper_death_proof_kind_v1(consumed, claim_absent, terminal):
+        case Ok(kind): kind
+        case Err(reason): "Err:" + reason
+
+fn hd_body(file: text, start: text, stop: text) -> text:
+    val source = file_read_text(HD_DIR + file)
+    val rest = source.substring(source.index_of(start), source.len())
+    val to = rest.substring(1, rest.len()).index_of(stop)
+    if to < 0: return rest
+    rest.substring(0, to + 1)
+
+describe "Deadline record (milestone_0036)":
+    it "round-trips canonically and refuses unknown fields and non-positive values":
+        # @req AT-OPS-HELPER-REAP
+        val bytes = host_helper_deadline_encode_v1(hd_record()).unwrap()
+        expect(host_helper_deadline_decode_v1(bytes).unwrap().deadline_unix_ms).to_equal(5000)
+        expect(host_helper_deadline_decode_v1(bytes + "extra: 1\n").is_err()).to_equal(true)
+        expect(host_helper_deadline_decode_v1(bytes.replace("version: 1", "version: 2")).is_err()).to_equal(true)
+        var zero = hd_record()
+        zero.deadline_unix_ms = 0
+        expect(host_helper_deadline_encode_v1(zero).unwrap_err()).to_equal("helper-deadline-value-invalid")
+        var short = hd_record()
+        short.execution_proof_digest = "short"
+        expect(host_helper_deadline_encode_v1(short).unwrap_err()).to_equal("helper-deadline-value-invalid")
+        expect(host_helper_deadline_relative_v1("helper_op_1")).to_start_with("host-helper-deadlines/")
+
+    it "takes the deadline as the minimum of the four controller-signed expiries":
+        # @req AT-OPS-HELPER-REAP (the deadline is recomputed, not chosen by the service)
+        expect(host_helper_signed_deadline_v1(9000, 8000, 7000, 6000)).to_equal(6000)
+        expect(host_helper_signed_deadline_v1(5000, 8000, 7000, 6000)).to_equal(5000)
+        expect(host_helper_signed_deadline_v1(9000, 4000, 7000, 6000)).to_equal(4000)
+        expect(host_helper_signed_deadline_v1(9000, 8000, 3000, 6000)).to_equal(3000)
+
+describe "Due table (milestone_0036)":
+    it "is due only strictly after the deadline, with matching digests, recomputed deadline and generations":
+        # @req AT-OPS-HELPER-REAP (clock and generation checks; expired approvals are never re-verified)
+        expect(hd_due(hd_record(), 5000, hd_facts(5001))).to_equal("due")
+        step("the clock equal to the deadline, behind it, or invalid is not due")
+        expect(hd_due(hd_record(), 5000, hd_facts(5000))).to_equal("not-due")
+        expect(hd_due(hd_record(), 5000, hd_facts(4999))).to_equal("not-due")
+        expect(hd_due(hd_record(), 5000, hd_facts(0))).to_equal("not-due")
+        expect(hd_due(hd_record(), 5000, hd_facts(-1))).to_equal("not-due")
+        step("a rotated policy generation, revision or revocation epoch fails closed (to the operator abandon)")
+        expect(hd_due(hd_record(), 5000, HostHelperReapFactsV1(policy_generation: 5, policy_revision: 7, revocation_epoch: 2, now_ms: 5001))).to_equal("not-due")
+        expect(hd_due(hd_record(), 5000, HostHelperReapFactsV1(policy_generation: 4, policy_revision: 8, revocation_epoch: 2, now_ms: 5001))).to_equal("not-due")
+        expect(hd_due(hd_record(), 5000, HostHelperReapFactsV1(policy_generation: 4, policy_revision: 7, revocation_epoch: 3, now_ms: 5001))).to_equal("not-due")
+        step("a record that no longer matches its retained proof or the recomputed deadline is an error, never a release")
+        expect(hd_due(hd_record(), 5000, hd_facts(5001), "c".repeat(64))).to_equal("Err:helper-deadline-proof-mismatch")
+        expect(hd_due(hd_record(), 4000, hd_facts(5001))).to_equal("Err:helper-deadline-recompute-mismatch")
+        var other = hd_record()
+        other.operation_digest = "c".repeat(64)
+        expect(hd_due(other, 5000, hd_facts(5001))).to_equal("Err:helper-deadline-record-mismatch")
+
+describe "Marker and death-proof tables (milestone_0036)":
+    it "reaps only `{}` and `{PA}`: any other marker keeps the row held":
+        # @req AT-OPS-HELPER-REAP
+        expect(hd_reap(hd_markers(false, false, false, false, false, false, false, false))).to_equal("none")
+        expect(hd_reap(hd_markers(false, true, false, false, false, false, false, false))).to_equal("pa")
+        expect(hd_reap(hd_markers(true, false, false, false, false, false, false, false))).to_equal("Err:helper-reap-markers-not-reapable")
+        expect(hd_reap(hd_markers(false, true, true, false, false, false, false, false))).to_equal("Err:helper-reap-markers-not-reapable")
+        expect(hd_reap(hd_markers(false, false, false, true, false, false, false, false))).to_equal("Err:helper-reap-markers-not-reapable")
+        expect(hd_reap(hd_markers(false, true, false, true, true, false, false, false))).to_equal("Err:helper-reap-markers-not-reapable")
+        expect(hd_reap(hd_markers(false, false, false, false, false, true, false, false))).to_equal("Err:helper-reap-markers-not-reapable")
+        expect(hd_reap(hd_markers(false, true, false, false, false, false, true, false))).to_equal("Err:helper-reap-markers-not-reapable")
+        expect(hd_reap(hd_markers(false, true, false, false, false, false, false, true))).to_equal("Err:helper-reap-markers-not-reapable")
+
+    it "proves death only from no-consume, an absent broker claim, or the broker's unlaunched receipt":
+        # @req AT-OPS-HELPER-REAP (fail closed when a member may still live)
+        expect(hd_proof(false, false, false)).to_equal("never-consumed")
+        expect(hd_proof(true, true, false)).to_equal("never-launched")
+        expect(hd_proof(true, false, true)).to_equal("group-unlaunched")
+        expect(hd_proof(true, false, false)).to_equal("Err:helper-death-unproven")
+
+describe "Reap wiring (milestone_0036)":
+    it "publishes the deadline record for attach-broker before the begin commit and before the clock refresh":
+        # @req AT-OPS-HELPER-REAP (every begun attach-broker row has a record; a failure leaves the row admitted)
+        val begin = hd_body("host_helper_owner_v1.spl", "fn host_helper_begin_checked_v1(", "\n# Revalidate")
+        val proof = begin.index_of("host_helper_execution_proof_store_owned_v2(owner.journal, request, signed, approval)?")
+        val record = begin.index_of("host_helper_deadline_publish_v1(")
+        val commit = begin.index_of("val commit = refresh()")
+        val executing = begin.index_of("host_capacity_owner_begin_helper_v1(")
+        expect(proof >= 0 and record > proof and commit > record and executing > commit).to_equal(true)
+        expect(begin.contains("request.plan.helper_kind == \"attach-broker\"")).to_equal(true)
+        step("the recorded deadline must equal the live-verified expiry or begin refuses before committing")
+        val equal = begin.index_of("helper-deadline-expiry-mismatch")
+        expect(equal > commit and executing > equal).to_equal(true)
+
+    it "runs the reap before the R read, after the abandon-marker probe, and keeps the settle out of the row":
+        # @req AT-OPS-HELPER-REAP
+        val row = hd_body("host_linux_service_current_v4.spl", "fn linux_service_helper_cancel_row_v4(", "\npub fn ")
+        val marker = row.index_of("host_helper_abandoned_pending_v1(")
+        val reap = row.index_of("host_helper_deadline_reap_v1(")
+        val read = row.index_of("host_linux_helper_journal_relative_v1(\"primary-refusal\", operation.id)")
+        expect(marker >= 0 and reap > marker and read > reap).to_equal(true)
+        expect(row.contains("host_capacity_owner_settle_v1")).to_equal(false)
+        step("the reap runs only in the start resume, with policy facts from the service's own verified records")
+        val resume = hd_body("host_linux_service_current_v4.spl", "pub fn host_linux_service_helper_cancel_resume_v4(", "\n# Administrator anchor")
+        expect(resume.contains("owner.records")).to_equal(true)
+        expect(resume.contains("host_local_context_v1(")).to_equal(true)
+        expect(resume.contains("HostHelperReapFactsV1(")).to_equal(true)
+
+    it "writes the refusal through the existing publisher and releases through the existing cancel":
+        # @req AT-OPS-HELPER-REAP (single journal writer; no new settle path)
+        val reap = hd_body("host_helper_deadline_reap_v1.spl", "pub fn host_helper_deadline_reap_v1(", "\npub fn ")
+        val due = reap.index_of("host_helper_deadline_due_stored_v1(")
+        val proof = reap.index_of("host_helper_death_proof_v1(")
+        val publish = reap.index_of("host_linux_helper_refusal_publish_v1(")
+        expect(due >= 0 and proof > due and publish > proof).to_equal(true)
+        expect(reap.contains("host_capacity_owner_settle_v1")).to_equal(false)
+        expect(reap.contains("continuity_proven")).to_equal(false)
+        val whole = file_read_text(HD_DIR + "host_helper_deadline_reap_v1.spl")
+        expect(whole.contains("SIMPLE-GROUP-STREAM-UNLAUNCHED-2")).to_equal(true)
+        expect(whole.contains("group_process_stream_cancel_v2")).to_equal(false)
+        expect(whole.contains("host_primary_attach_native_recover")).to_equal(false)
+        expect(whole.contains("host_primary_attach_native_store")).to_equal(false)
