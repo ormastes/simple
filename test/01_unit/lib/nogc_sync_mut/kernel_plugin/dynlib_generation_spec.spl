@@ -1,0 +1,93 @@
+# @cover src/lib/nogc_sync_mut/sffi/dynlib_generation_v1.spl 90%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-DHR-01
+# plan: doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md
+#
+# DHR P4: legacy DynLib providers under KPF generation lifetime. Every case
+# loads a REAL platform C library through the legacy checked loader, so the
+# liveness assertions read the real dynlib_lifetime_owner_v1 state.
+
+use std.spec.*
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.nogc_sync_mut.kernel_plugin.status.KpfSyncStatus
+use std.nogc_sync_mut.kernel_plugin.generation.{KpfGenerationTable}
+use std.nogc_sync_mut.sffi.dynamic.{DynLib, platform_name}
+use std.nogc_sync_mut.sffi.dynlib_generation_v1.{DynlibGenerationHostV1, DynlibGenerationLeaseV1}
+
+fn id(value: u64) -> KpfId128: KpfId128(hi: value, lo: value + 1)
+fn digest(value: u64) -> KpfDigest256: KpfDigest256(w0: value, w1: value + 1, w2: value + 2, w3: value + 3)
+
+fn _libc_path() -> text:
+    val platform = platform_name()
+    if platform == "windows": return "kernel32.dll"
+    if platform == "macos": return "libSystem.B.dylib"
+    "libc.so.6"
+
+fn _pid_symbol() -> text:
+    if platform_name() == "windows": return "GetCurrentProcessId"
+    "getpid"
+
+fn _load() -> DynLib:
+    val r = unsafe(capabilities: [ffi]):
+        DynLib.load_checked(_libc_path())
+    r.unwrap()
+
+fn _lease(host: DynlibGenerationHostV1) -> DynlibGenerationLeaseV1:
+    host.begin_call().unwrap()
+
+fn _resolves(lib: DynLib) -> bool:
+    val r = unsafe(capabilities: [ffi, raw_ptr]):
+        lib.sym_checked(_pid_symbol())
+    r.is_ok()
+
+fn _unload(host: DynlibGenerationHostV1, lease: DynlibGenerationLeaseV1) -> KpfSyncStatus:
+    unsafe(capabilities: [ffi]):
+        host.unload(lease.generation)
+
+describe "Legacy DynLib under KPF generation lifetime":
+    it "refuses to unload a retired generation while an in-flight caller holds its pin":
+        val host = DynlibGenerationHostV1.create(KpfGenerationTable.create(4, 4))
+        val v1 = _load()
+        expect(host.publish(v1, id(1), digest(1), 1).status == KpfSyncStatus.Ok).to_equal(true)
+        val old_call = _lease(host)
+        val v2 = _load()
+        expect(host.publish(v2, id(2), digest(2), 2).status == KpfSyncStatus.Ok).to_equal(true)
+        expect(_unload(host, old_call) == KpfSyncStatus.GenerationStillPinned).to_equal(true)
+        expect(v1.is_live()).to_equal(true)
+        expect(_resolves(old_call.lib)).to_equal(true)
+
+    it "runs old and new generations concurrently after a reload":
+        val host = DynlibGenerationHostV1.create(KpfGenerationTable.create(4, 4))
+        host.publish(_load(), id(1), digest(1), 1)
+        val old_call = _lease(host)
+        host.publish(_load(), id(2), digest(2), 2)
+        val new_call = _lease(host)
+        expect(old_call.generation.index == new_call.generation.index).to_equal(false)
+        expect(_resolves(old_call.lib)).to_equal(true)
+        expect(_resolves(new_call.lib)).to_equal(true)
+
+    it "closes the old native mapping only after the last pin is released":
+        val host = DynlibGenerationHostV1.create(KpfGenerationTable.create(4, 4))
+        val v1 = _load()
+        host.publish(v1, id(1), digest(1), 1)
+        val old_call = _lease(host)
+        val v2 = _load()
+        host.publish(v2, id(2), digest(2), 2)
+        expect(host.end_call(old_call) == KpfSyncStatus.Ok).to_equal(true)
+        expect(_unload(host, old_call) == KpfSyncStatus.Ok).to_equal(true)
+        expect(v1.is_live()).to_equal(false)
+        expect(v2.is_live()).to_equal(true)
+        expect(_unload(host, old_call) == KpfSyncStatus.StaleHandle).to_equal(true)
+
+    it "refuses to unload the active generation":
+        val host = DynlibGenerationHostV1.create(KpfGenerationTable.create(4, 4))
+        val v1 = _load()
+        host.publish(v1, id(1), digest(1), 1)
+        val call = _lease(host)
+        expect(host.end_call(call) == KpfSyncStatus.Ok).to_equal(true)
+        expect(_unload(host, call) == KpfSyncStatus.GenerationNotRetired).to_equal(true)
+        expect(v1.is_live()).to_equal(true)
+
+    it "refuses a call when no library generation is active":
+        val host = DynlibGenerationHostV1.create(KpfGenerationTable.create(4, 4))
+        expect(host.begin_call().is_err()).to_equal(true)

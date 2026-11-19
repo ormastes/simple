@@ -1,0 +1,86 @@
+# Legacy DynLib providers under KPF generation lifetime (DHR P4).
+#
+# The legacy loader (`DynLib` / `DynLoader` in sffi/dynamic.spl) has no notion
+# of a code generation: a path maps to one cached DynLib, and `DynLib.close()`
+# retires the mapping through dynlib_lifetime_owner_v1, which only defers the
+# native dlclose past calls that are inside native code at that instant. A
+# caller that resolved a symbol, left native code, and will call again (a
+# suspended continuation, an in-flight request) is not protected, and there is
+# no way to replace a provider while old callers still run on it.
+#
+# This host binds each loaded DynLib to one KpfGenerationTable generation:
+#   publish  - a reload; the new library becomes active, the old generation is
+#              retired but stays mapped.
+#   begin_call / end_call - a KPF pin held for the whole caller operation, so
+#              old and new generations execute concurrently.
+#   unload   - KpfGenerationTable.collect first; the native mapping is closed
+#              only when collect accepts, so a pinned generation is refused
+#              with GenerationStillPinned and its library stays live.
+
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.nogc_sync_mut.kernel_plugin.status.KpfSyncStatus
+use std.nogc_sync_mut.kernel_plugin.generation.{
+    KpfGenerationHandle, KpfGenerationPublication, KpfPinHandle, KpfGenerationTable,
+}
+use std.nogc_sync_mut.sffi.dynamic.{DynLib}
+
+struct _DynlibGenerationEntryV1:
+    generation: KpfGenerationHandle
+    lib: DynLib
+
+# A caller's lease: the pin that keeps `generation` alive and the library
+# that generation owns. Release it with DynlibGenerationHostV1.end_call.
+pub struct DynlibGenerationLeaseV1:
+    pin: KpfPinHandle
+    generation: KpfGenerationHandle
+    lib: DynLib
+
+class DynlibGenerationHostV1:
+    table: KpfGenerationTable
+    var entries: [_DynlibGenerationEntryV1]
+
+    static fn create(table: KpfGenerationTable) -> DynlibGenerationHostV1:
+        DynlibGenerationHostV1(table: table, entries: [])
+
+    fn _entry_index(generation: KpfGenerationHandle) -> i64:
+        var index = 0
+        while index < self.entries.len():
+            val candidate = self.entries[index].generation
+            if candidate.index == generation.index and candidate.epoch == generation.epoch:
+                return index
+            index = index + 1
+        -1
+
+    # Publish `lib` as the active generation. On success the host owns `lib`
+    # and the previous generation is retired but still mapped. On failure the
+    # caller keeps ownership of `lib`.
+    me publish(lib: DynLib, provider_id: KpfId128, composition_digest: KpfDigest256, registry_revision: u64) -> KpfGenerationPublication:
+        val publication = self.table.publish(provider_id, composition_digest, registry_revision)
+        if publication.status == KpfSyncStatus.Ok:
+            self.entries.push(_DynlibGenerationEntryV1(generation: publication.current, lib: lib))
+        publication
+
+    # Pin the active generation for one caller operation.
+    me begin_call() -> Result<DynlibGenerationLeaseV1, KpfSyncStatus>:
+        val active = self.table.active
+        val index = self._entry_index(active)
+        if index < 0: return Err(KpfSyncStatus.GenerationNotActive)
+        val pinned = self.table.pin(active)
+        if pinned.status != KpfSyncStatus.Ok: return Err(pinned.status)
+        Ok(DynlibGenerationLeaseV1(pin: pinned.handle, generation: active, lib: self.entries[index].lib))
+
+    me end_call(lease: DynlibGenerationLeaseV1) -> KpfSyncStatus:
+        self.table.release_pin(lease.pin)
+
+    # Collect a retired generation and only then close its native mapping.
+    @unsafe(reason: "closes the retired generation's native provider mapping", capabilities: [ffi])
+    me unload(generation: KpfGenerationHandle) -> KpfSyncStatus:
+        val index = self._entry_index(generation)
+        if index < 0: return KpfSyncStatus.StaleHandle
+        val status = self.table.collect(generation)
+        if status != KpfSyncStatus.Ok: return status
+        val lib = self.entries[index].lib
+        self.entries.remove(index)
+        unsafe(capabilities: [ffi]):
+            lib.close()
+        KpfSyncStatus.Ok
