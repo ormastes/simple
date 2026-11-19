@@ -3443,3 +3443,5 @@ At 1x, all 97 mismatch clusters on html (1.78), css-layout (2.13) and overview (
 equal Chrome/Simple ink boxes (+-1px heading-top deltas = fractional font y-raster); +-3px
 shift search gains nothing in any cluster. Remaining residual is glyph raster, not layout.
 Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout_overview_2026-11-19.md`.
+
+- 2026-11-19 `backend_emu_adv.spl` `emu_draw_shadow_rect`: shadow writes keep the destination alpha (`dst & 0xFF000000`); they wrote alpha 0, so a translucent box over its own shadow composited onto "transparent" and turned opaque white (cpu_simd `FFFFFF` vs Chrome `C3C3C7`). `box_shadow_keeps_dest_alpha_spec` red -> green. Open: Draw IR outer shadow has no knockout under the box; inside a transparent offscreen the shadow stays alpha 0 (needs src-over alpha).
