@@ -10,7 +10,10 @@ use std.database.test_extended.{
     TestDatabaseExtended,
     load_test_database_extended,
     load_with_migration,
-    TestInfo
+    TestInfo,
+    TestRunCount, TestRunAgeHours, TestRunKeepCount, TestStageMs, TestDurationMs,
+    TestAnomalyWarning, TestTimingOutcome, TestStatusCounts,
+    TestByteCount, TestProcessCount, TestSignalNumber, TestExitCode
 }
 use std.test_runner.test_db_types.{TestStatus, status_to_str, TrdRunRecord, TrdTimingSummary}
 use std.common.perf.execution_metrics.{ResourceUsage, resource_evidence_quality_name, termination_cause_name}
@@ -214,7 +217,7 @@ class RunnerTestDb:
         run_id
 
     # Complete run
-    me complete_run(run_id: text, test_count: i64, passed: i64, failed: i64, timed_out: i64):
+    me complete_run(run_id: text, test_count: TestRunCount, passed: TestRunCount, failed: TestRunCount, timed_out: TestRunCount):
         self.db.complete_run(run_id: run_id, test_count: test_count, passed: passed, failed: failed, timed_out: timed_out)
 
     me record_resource_run(
@@ -222,20 +225,20 @@ class RunnerTestDb:
         test_path: text,
         resource_class: text,
         cohort_id: text,
-        compile_ms: i64,
-        execution_ms: i64,
+        compile_ms: TestStageMs,
+        execution_ms: TestStageMs,
         usage: ResourceUsage,
         budget_status: text,
         anomaly_status: text
     ):
         self.db.record_resource_run(
             run_id, test_path, resource_class, cohort_id, compile_ms, execution_ms,
-            usage.wall_ms, usage.user_cpu_ms, usage.system_cpu_ms,
-            usage.peak_tree_charge_bytes, usage.peak_direct_child_rss_bytes,
-            usage.io_read_bytes, usage.io_write_bytes, usage.pids_peak,
+            TestStageMs(value: usage.wall_ms), TestStageMs(value: usage.user_cpu_ms), TestStageMs(value: usage.system_cpu_ms),
+            TestByteCount(value: usage.peak_tree_charge_bytes), TestByteCount(value: usage.peak_direct_child_rss_bytes),
+            TestByteCount(value: usage.io_read_bytes), TestByteCount(value: usage.io_write_bytes), TestProcessCount(value: usage.pids_peak),
             resource_evidence_quality_name(usage.evidence_quality),
-            termination_cause_name(usage.termination), usage.signal,
-            usage.exit_code, budget_status, anomaly_status
+            termination_cause_name(usage.termination), TestSignalNumber(value: usage.signal),
+            TestExitCode(value: usage.exit_code), budget_status, anomaly_status
         )
 
     # Same row as record_resource_run, from a flattened TestDbFileRow
@@ -243,16 +246,16 @@ class RunnerTestDb:
     # already rendered to their canonical names.
     me record_resource_row(run_id: text, row: TestDbFileRow):
         self.db.record_resource_run(
-            run_id, row.path, row.resource_class, row.cohort_id, row.compile_ms, row.execution_ms,
-            row.wall_ms, row.user_cpu_ms, row.system_cpu_ms,
-            row.peak_tree_charge_bytes, row.peak_direct_child_rss_bytes,
-            row.io_read_bytes, row.io_write_bytes, row.pids_peak,
-            row.evidence_quality, row.termination, row.signal,
-            row.exit_code, row.budget_status, row.anomaly_status
+            run_id, row.path, row.resource_class, row.cohort_id, TestStageMs(value: row.compile_ms), TestStageMs(value: row.execution_ms),
+            TestStageMs(value: row.wall_ms), TestStageMs(value: row.user_cpu_ms), TestStageMs(value: row.system_cpu_ms),
+            TestByteCount(value: row.peak_tree_charge_bytes), TestByteCount(value: row.peak_direct_child_rss_bytes),
+            TestByteCount(value: row.io_read_bytes), TestByteCount(value: row.io_write_bytes), TestProcessCount(value: row.pids_peak),
+            row.evidence_quality, row.termination, TestSignalNumber(value: row.signal),
+            TestExitCode(value: row.exit_code), row.budget_status, row.anomaly_status
         )
 
     # Cleanup stale runs
-    me cleanup_stale_runs(max_age_hours: i64):
+    me cleanup_stale_runs(max_age_hours: TestRunAgeHours):
         val _deleted = self.db.cleanup_stale_runs(max_age_hours)
         # Custom API returns void, unified returns count - discard result
         ()
@@ -353,7 +356,7 @@ class RunnerTestDb:
         paginate_test_query_rows(rows, scoped_test_query_identity(scoped))
 
     # Prune old runs
-    me prune_runs(keep_count: i64):
+    me prune_runs(keep_count: TestRunKeepCount):
         val _deleted = self.db.prune_runs(keep_count)
         # Custom API returns void, unified returns count - discard result
         ()
@@ -375,30 +378,30 @@ class RunnerTestDb:
             case Some(test_id): self.db.get_timing_summary(test_id)
             case None: nil
 
-    me promote_timing_baseline(test_path: text, cohort_id: text) -> bool:
+    me promote_timing_baseline(test_path: text, cohort_id: text) -> TestTimingOutcome:
         match self.db.get_test_id(test_path, "spec", test_path):
             case Some(test_id): self.db.promote_timing_baseline(test_id, cohort_id)
-            case None: false
+            case None: TestTimingOutcome.Refused
 
-    fn prior_anomaly_warning(test_path: text, cohort_id: text) -> bool:
+    fn prior_anomaly_warning(test_path: text, cohort_id: text) -> TestAnomalyWarning:
         self.db.prior_anomaly_warning(test_path, cohort_id)
 
-    me record_timing_observation(test_path: text, cohort_id: text, duration_ms: f64) -> bool:
+    me record_timing_observation(test_path: text, cohort_id: text, duration_ms: TestDurationMs) -> TestTimingOutcome:
         val test_id = match self.db.get_test_id(test_path, "spec", test_path):
             case Some(value): value
-            case None: return false
+            case None: return TestTimingOutcome.Refused
         val run_id = self.start_run()
-        self.db.add_timing_run(test_id, duration_ms, run_id, cohort_id)
-        self.db.update_timing(test_id, duration_ms)
-        self.complete_run(run_id, 0, 0, 0, 0)
-        true
+        self.db.add_timing_run(test_id, duration_ms.value, run_id, cohort_id)
+        self.db.update_timing(test_id, duration_ms.value)
+        self.complete_run(run_id, TestRunCount(value: 0), TestRunCount(value: 0), TestRunCount(value: 0), TestRunCount(value: 0))
+        TestTimingOutcome.Applied
 
     # Get tests by status
     fn tests_by_status(status: text) -> [TestInfo]:
         self.db.tests_by_status(status)
 
     # Get test counts (total, passed, failed, skipped)
-    fn test_count_by_status() -> (i64, i64, i64, i64):
+    fn test_count_by_status() -> TestStatusCounts:
         self.db.test_count_by_status()
 
     # Get flaky test names

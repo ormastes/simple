@@ -16,7 +16,10 @@ use std.database.stats.{Stats, stats_from_values, is_flaky}
 use std.database.test_extended.stubs.{timestamp_now, process_id, host_name}
 use std.database.test_extended.types.{
     FileRecord, SuiteRecord, TestRecord, CounterRecord,
-    TimingSummary, TimingRun, ChangeEvent, RunRecord, TestInfo
+    TimingSummary, TimingRun, ChangeEvent, RunRecord, TestInfo,
+    TestRunCount, TestRunAgeHours, TestRunKeepCount, TestRowId, TestStageMs, TestDurationMs,
+    TestByteCount, TestProcessCount, TestSignalNumber, TestExitCode,
+    TestAnomalyWarning, TestTimingOutcome, TestStatusCounts, TestTimingStats, TestCaseCounts
 }
 use std.database.test_extended.database_queries.{
     run_record_from_row, counter_record_from_row, timing_summary_from_row,
@@ -697,13 +700,13 @@ class TestDatabaseExtended:
     # ========================================================================
 
     # Get or create file record
-    me get_or_create_file(path: text) -> i64:
+    me get_or_create_file(path: text) -> TestRowId:
         val path_id = self.interner.intern(path)
 
         # Check if file exists — O(1) index lookup, was a full table scan
         self.ensure_indexes()
         if self._file_index.has(path_id):
-            return self._file_index[path_id]
+            return TestRowId(value: self._file_index[path_id])
 
         # Create new file
         val file_id = self.next_file_id
@@ -715,7 +718,7 @@ class TestDatabaseExtended:
                 case Some(table):
                     table
                 case None:
-                    return file_id
+                    return TestRowId(value: file_id)
             val row = SdnRow.empty()
             row.set("file_id", "{file_id}")
             row.set("path_str", "{path_id}")
@@ -723,18 +726,18 @@ class TestDatabaseExtended:
             self.db.set_table("files", files_table_mut)
         self._file_index[path_id] = file_id
 
-        file_id
+        TestRowId(value: file_id)
 
     # Get or create suite record
-    me get_or_create_suite(file_path: text, suite_name: text) -> i64:
-        val file_id = self.get_or_create_file(file_path)
+    me get_or_create_suite(file_path: text, suite_name: text) -> TestRowId:
+        val file_id = self.get_or_create_file(file_path).value
         val name_id = self.interner.intern(suite_name)
 
         # Check if suite exists — O(1) index lookup, was a full table scan
         self.ensure_indexes()
         val suite_key = "{file_id}:{name_id}"
         if self._suite_index.has(suite_key):
-            return self._suite_index[suite_key]
+            return TestRowId(value: self._suite_index[suite_key])
 
         # Create new suite
         val suite_id = self.next_suite_id
@@ -746,7 +749,7 @@ class TestDatabaseExtended:
                 case Some(table):
                     table
                 case None:
-                    return suite_id
+                    return TestRowId(value: suite_id)
             val row = SdnRow.empty()
             row.set("suite_id", "{suite_id}")
             row.set("file_id", "{file_id}")
@@ -755,17 +758,18 @@ class TestDatabaseExtended:
             self.db.set_table("suites", suites_table_mut)
         self._suite_index[suite_key] = suite_id
 
-        suite_id
+        TestRowId(value: suite_id)
 
     # Get or create test record
-    me get_or_create_test(suite_id: i64, test_name: text) -> i64:
+    me get_or_create_test(row_id: TestRowId, test_name: text) -> TestRowId:
+        val suite_id = row_id.value
         val name_id = self.interner.intern(test_name)
 
         # Check if test exists — O(1) index lookup, was a full table scan
         self.ensure_indexes()
         val test_key = "{suite_id}:{name_id}"
         if self._test_index.has(test_key):
-            return self._test_index[test_key]
+            return TestRowId(value: self._test_index[test_key])
 
         # Create new test
         val test_id = self.next_test_id
@@ -777,7 +781,7 @@ class TestDatabaseExtended:
                 case Some(table):
                     table
                 case None:
-                    return test_id
+                    return TestRowId(value: test_id)
             val row = SdnRow.empty()
             row.set("test_id", "{test_id}")
             row.set("suite_id", "{suite_id}")
@@ -792,7 +796,7 @@ class TestDatabaseExtended:
             self.db.set_table("tests", tests_table_mut)
         self._test_index[test_key] = test_id
 
-        test_id
+        TestRowId(value: test_id)
 
     # ========================================================================
     # Run Management (from runs.spl)
@@ -832,10 +836,10 @@ class TestDatabaseExtended:
     # Complete test run
     me complete_run(
         run_id: text,
-        test_count: i64,
-        passed: i64,
-        failed: i64,
-        timed_out: i64
+        test_count: TestRunCount,
+        passed: TestRunCount,
+        failed: TestRunCount,
+        timed_out: TestRunCount
     ):
         var runs_table_opt = self.db.get_table_mut("test_runs")
         if not runs_table_opt.?:
@@ -851,10 +855,10 @@ class TestDatabaseExtended:
             if row_run_id != "" and row_run_id == run_id:
                 row.set("end_time", "{timestamp_now()}")
                 row.set("status", "completed")
-                row.set("test_count", "{test_count}")
-                row.set("passed", "{passed}")
-                row.set("failed", "{failed}")
-                row.set("timed_out", "{timed_out}")
+                row.set("test_count", "{test_count.value}")
+                row.set("passed", "{passed.value}")
+                row.set("failed", "{failed.value}")
+                row.set("timed_out", "{timed_out.value}")
                 match runs_table.update_row_checked(run_id, row):
                     case Ok(_): ()
                     case Err(reason): print "[db] complete/update lost: {reason}"
@@ -867,20 +871,20 @@ class TestDatabaseExtended:
         test_path: text,
         resource_class: text,
         cohort_id: text,
-        compile_ms: i64,
-        execution_ms: i64,
-        wall_ms: i64,
-        user_cpu_ms: i64,
-        system_cpu_ms: i64,
-        peak_tree_charge_bytes: i64,
-        peak_direct_child_rss_bytes: i64,
-        io_read_bytes: i64,
-        io_write_bytes: i64,
-        pids_peak: i64,
+        compile_ms: TestStageMs,
+        execution_ms: TestStageMs,
+        wall_ms: TestStageMs,
+        user_cpu_ms: TestStageMs,
+        system_cpu_ms: TestStageMs,
+        peak_tree_charge_bytes: TestByteCount,
+        peak_direct_child_rss_bytes: TestByteCount,
+        io_read_bytes: TestByteCount,
+        io_write_bytes: TestByteCount,
+        pids_peak: TestProcessCount,
         evidence_quality: text,
         termination: text,
-        signal: i64,
-        exit_code: i64,
+        signal: TestSignalNumber,
+        exit_code: TestExitCode,
         budget_status: text,
         anomaly_status: text
     ):
@@ -904,50 +908,50 @@ class TestDatabaseExtended:
         row.set("test_path", test_path)
         row.set("resource_class", resource_class)
         row.set("cohort_id", cohort_id)
-        row.set("compile_ms", "{compile_ms}")
-        row.set("execution_ms", "{execution_ms}")
-        row.set("wall_ms", "{wall_ms}")
-        row.set("user_cpu_ms", "{user_cpu_ms}")
-        row.set("system_cpu_ms", "{system_cpu_ms}")
-        row.set("peak_tree_charge_bytes", "{peak_tree_charge_bytes}")
-        row.set("peak_direct_child_rss_bytes", "{peak_direct_child_rss_bytes}")
-        row.set("io_read_bytes", "{io_read_bytes}")
-        row.set("io_write_bytes", "{io_write_bytes}")
-        row.set("pids_peak", "{pids_peak}")
+        row.set("compile_ms", "{compile_ms.value}")
+        row.set("execution_ms", "{execution_ms.value}")
+        row.set("wall_ms", "{wall_ms.value}")
+        row.set("user_cpu_ms", "{user_cpu_ms.value}")
+        row.set("system_cpu_ms", "{system_cpu_ms.value}")
+        row.set("peak_tree_charge_bytes", "{peak_tree_charge_bytes.value}")
+        row.set("peak_direct_child_rss_bytes", "{peak_direct_child_rss_bytes.value}")
+        row.set("io_read_bytes", "{io_read_bytes.value}")
+        row.set("io_write_bytes", "{io_write_bytes.value}")
+        row.set("pids_peak", "{pids_peak.value}")
         row.set("evidence_quality", evidence_quality)
         row.set("termination", termination)
-        row.set("signal", "{signal}")
-        row.set("exit_code", "{exit_code}")
+        row.set("signal", "{signal.value}")
+        row.set("exit_code", "{exit_code.value}")
         row.set("budget_status", budget_status)
         row.set("anomaly_status", anomaly_status)
         table.add_row(row)
         self.db.set_table("resource_runs", table)
 
-    fn prior_anomaly_warning(test_path: text, cohort_id: text) -> bool:
+    fn prior_anomaly_warning(test_path: text, cohort_id: text) -> TestAnomalyWarning:
         val table = match self.db.get_table("resource_runs"):
             case Some(found): found
-            case None: return false
+            case None: return TestAnomalyWarning.Quiet
         for row in table.valid_rows():
             if (row.get("test_path") ?? "") == test_path and
                     (row.get("cohort_id") ?? "") == cohort_id and
                     (row.get("anomaly_status") ?? "") == "warning":
-                return true
-        false
+                return TestAnomalyWarning.Warned
+        TestAnomalyWarning.Quiet
 
     # Cleanup stale runs (running > max_age_hours)
-    me cleanup_stale_runs(max_age_hours: i64) -> i64:
+    me cleanup_stale_runs(max_age_hours: TestRunAgeHours) -> TestRunCount:
         val now = timestamp_now()
-        val max_age_micros = max_age_hours * 3600 * 1000000
+        val max_age_micros = max_age_hours.value * 3600 * 1000000
         var cleaned = 0
 
         var runs_table_opt = self.db.get_table_mut("test_runs")
         if not runs_table_opt.?:
-            return cleaned
+            return TestRunCount(value: cleaned)
         var runs_table = match runs_table_opt:
             case Some(table):
                 table
             case None:
-                return cleaned
+                return TestRunCount(value: cleaned)
         for row in runs_table.rows:
             val status = row.get("status") ?? ""
             if status == "running":
@@ -967,18 +971,18 @@ class TestDatabaseExtended:
                         cleaned = cleaned + 1
 
         self.db.set_table("test_runs", runs_table)
-        cleaned
+        TestRunCount(value: cleaned)
 
     # Prune old runs (keep only N most recent)
-    me prune_runs(keep_count: i64) -> i64:
+    me prune_runs(keep_count: TestRunKeepCount) -> TestRunCount:
         val runs_table_opt = self.db.get_table("test_runs")
         if not runs_table_opt.?:
-            return 0
+            return TestRunCount(value: 0)
         val runs_table = match runs_table_opt:
             case Some(table):
                 table
             case None:
-                return 0
+                return TestRunCount(value: 0)
         var all_runs: [(text, i64)] = []
 
         for row in runs_table.rows:
@@ -1001,22 +1005,22 @@ class TestDatabaseExtended:
 
         # Delete old runs
         var deleted = 0
-        if all_runs.len() > keep_count:
+        if all_runs.len() > keep_count.value:
             var runs_table_mut_opt = self.db.get_table_mut("test_runs")
             if runs_table_mut_opt.?:
                 var runs_table_mut = match runs_table_mut_opt:
                     case Some(table):
                         table
                     case None:
-                        return deleted
-                var i = keep_count
+                        return TestRunCount(value: deleted)
+                var i = keep_count.value
                 while i < all_runs.len():
                     runs_table_mut.delete_row(all_runs[i].0)
                     deleted = deleted + 1
                     i = i + 1
                 self.db.set_table("test_runs", runs_table_mut)
 
-        deleted
+        TestRunCount(value: deleted)
 
     # ========================================================================
     # Test Result Tracking (from tracking.spl)
@@ -1054,7 +1058,8 @@ class TestDatabaseExtended:
         self.add_timing_run(test_id, duration_ms, run_id, cohort_id, status == "passed")
 
     # Write the latest verdict onto the `tests` row
-    me update_test_status(test_id: i64, status: text):
+    me update_test_status(row_id: TestRowId, status: text):
+        val test_id = row_id.value
         var tests_table = match self.db.get_table_mut("tests"):
             case Some(table): table
             case None: return
@@ -1071,7 +1076,8 @@ class TestDatabaseExtended:
         self.db.set_table("tests", tests_table)
 
     # Update counter for test
-    me update_counter(test_id: i64, status: text):
+    me update_counter(row_id: TestRowId, status: text):
+        val test_id = row_id.value
         var counters_table_opt = self.db.get_table_mut("counters")
         if not counters_table_opt.?:
             return
@@ -1133,10 +1139,11 @@ class TestDatabaseExtended:
         self.db.set_table("counters", counters_table)
 
     # Update timing statistics for test
-    me update_timing(test_id: i64, duration_ms: f64):
+    me update_timing(row_id: TestRowId, duration_ms: f64):
+        val test_id = row_id.value
         self.ensure_indexes()
         # Collect recent timing runs
-        val recent_runs = self.collect_timing_runs(test_id, 100)
+        val recent_runs = self.collect_timing_runs(row_id, 100)
 
         if recent_runs.len() == 0:
             return
@@ -1210,7 +1217,8 @@ class TestDatabaseExtended:
 
         self.db.set_table("timing", timing_table)
 
-    me record_baseline_generation(test_id: i64, cohort_id: text, generation: i64, p50: f64, samples: text, promoted_at: i64):
+    me record_baseline_generation(row_id: TestRowId, cohort_id: text, generation: i64, p50: f64, samples: text, promoted_at: i64):
+        val test_id = row_id.value
         var history_opt = self.db.get_table_mut("baseline_history")
         if not history_opt.?:
             val fresh = SdnTable.new("baseline_history", [
@@ -1245,7 +1253,8 @@ class TestDatabaseExtended:
         history.add_row(current)
         self.db.set_table("baseline_history", history)
 
-    fn baseline_history_states(test_id: i64) -> [text]:
+    fn baseline_history_states(row_id: TestRowId) -> [text]:
+        val test_id = row_id.value
         var states: [text] = []
         val history = match self.db.get_table("baseline_history"):
             case Some(table): table
@@ -1257,15 +1266,16 @@ class TestDatabaseExtended:
 
     # Explicitly promote the current p50 for one test. This is the only timing
     # update path allowed to mutate the approved baseline fields.
-    me promote_timing_baseline(test_id: i64, cohort_id: text = "") -> bool:
-        val cohort_samples = self.collect_timing_runs_for_cohort(test_id, cohort_id, 10)
+    me promote_timing_baseline(row_id: TestRowId, cohort_id: text = "") -> TestTimingOutcome:
+        val test_id = row_id.value
+        val cohort_samples = self.collect_timing_runs_for_cohort(row_id, cohort_id, 10)
         if cohort_id == "" or cohort_samples.len() == 0:
-            return false
+            return TestTimingOutcome.Refused
         val cohort_stats = stats_from_values(cohort_samples)
         val frozen_samples = "[" + cohort_samples.join(",") + "]"
         var timing_table = match self.db.get_table_mut("timing"):
             case Some(table): ensure_timing_baseline_schema(table)
-            case None: return false
+            case None: return TestTimingOutcome.Refused
         var i = 0
         while i < timing_table.rows.len():
             var row = timing_table.rows[i]
@@ -1284,14 +1294,15 @@ class TestDatabaseExtended:
                 match timing_table.update_row_checked("{test_id}", row):
                     case Ok(_):
                         self.db.set_table("timing", timing_table)
-                        self.record_baseline_generation(test_id, cohort_id, next_generation, cohort_stats.p50, frozen_samples, promoted_at)
-                        return true
-                    case Err(_): return false
+                        self.record_baseline_generation(row_id, cohort_id, next_generation, cohort_stats.p50, frozen_samples, promoted_at)
+                        return TestTimingOutcome.Applied
+                    case Err(_): return TestTimingOutcome.Refused
             i = i + 1
-        false
+        TestTimingOutcome.Refused
 
     # Add timing run record
-    me add_timing_run(test_id: i64, duration_ms: f64, run_id: text, cohort_id: text = "", baseline_eligible: bool = true):
+    me add_timing_run(row_id: TestRowId, duration_ms: f64, run_id: text, cohort_id: text = "", baseline_eligible: bool = true):
+        val test_id = row_id.value
         var timing_runs_table_opt = self.db.get_table_mut("timing_runs")
         if not timing_runs_table_opt.?:
             return
@@ -1330,7 +1341,8 @@ class TestDatabaseExtended:
             lst.push(duration_ms)
             self._runs_by_test[test_id] = trim_to_last_f64(lst, TIMING_RUNS_PER_TEST_CAP)
 
-    fn collect_timing_runs_for_cohort(test_id: i64, cohort_id: text, max_count: i64) -> [f64]:
+    fn collect_timing_runs_for_cohort(row_id: TestRowId, cohort_id: text, max_count: i64) -> [f64]:
+        val test_id = row_id.value
         val table = match self.db.get_table("timing_runs"):
             case Some(value): value
             case None: return []
@@ -1348,14 +1360,16 @@ class TestDatabaseExtended:
     # made the per-update cost climb run over run.
     # Stays a `fn` (non-mutating): the index is built by ensure_indexes(), which
     # every load path and every get_or_create_* call already invokes.
-    fn collect_timing_runs(test_id: i64, max_count: i64) -> [f64]:
+    fn collect_timing_runs(row_id: TestRowId, max_count: i64) -> [f64]:
+        val test_id = row_id.value
         if not self._runs_by_test.has(test_id):
             return []
         trim_to_last_f64(self._runs_by_test[test_id], max_count)
 
     # Check if test is flaky
-    fn is_flaky_test(test_id: i64) -> bool:
-        val recent_runs = self.collect_timing_runs(test_id, 10)
+    fn is_flaky_test(row_id: TestRowId) -> bool:
+        val test_id = row_id.value
+        val recent_runs = self.collect_timing_runs(row_id, 10)
         if recent_runs.len() < 3:
             return false
         is_flaky(recent_runs, 0.5)
@@ -1365,7 +1379,7 @@ class TestDatabaseExtended:
     # ========================================================================
 
     # Get file ID by path
-    fn get_file_id(path: text) -> i64?:
+    fn get_file_id(path: text) -> TestRowId?:
         val path_id = self.interner.intern(path)
 
         val files_table_opt = self.db.get_table("files")
@@ -1384,18 +1398,18 @@ class TestDatabaseExtended:
             if path_str == path_id:
                 val file_id = row.get_i64("file_id") ?? -1
                 if file_id != -1:
-                    return Some(file_id)
+                    return Some(TestRowId(value: file_id))
 
         nil
 
     # Get suite ID by file path and suite name
-    fn get_suite_id(file_path: text, suite_name: text) -> i64?:
+    fn get_suite_id(file_path: text, suite_name: text) -> TestRowId?:
         val file_id_opt = self.get_file_id(file_path)
         if file_id_opt == nil:
             return nil
         val file_id = match file_id_opt:
             case Some(id):
-                id
+                id.value
             case None:
                 return nil
 
@@ -1422,18 +1436,18 @@ class TestDatabaseExtended:
             if row_file_id == file_id and name_str == name_id:
                 val suite_id = row.get_i64("suite_id") ?? -1
                 if suite_id != -1:
-                    return Some(suite_id)
+                    return Some(TestRowId(value: suite_id))
 
         nil
 
     # Get test ID by file path, suite name, and test name
-    fn get_test_id(file_path: text, suite_name: text, test_name: text) -> i64?:
+    fn get_test_id(file_path: text, suite_name: text, test_name: text) -> TestRowId?:
         val suite_id_opt = self.get_suite_id(file_path, suite_name)
         if suite_id_opt == nil:
             return nil
         val suite_id = match suite_id_opt:
             case Some(id):
-                id
+                id.value
             case None:
                 return nil
 
@@ -1460,12 +1474,13 @@ class TestDatabaseExtended:
             if row_suite_id == suite_id and name_str == name_id:
                 val test_id = row.get_i64("test_id") ?? -1
                 if test_id != -1:
-                    return Some(test_id)
+                    return Some(TestRowId(value: test_id))
 
         nil
 
     # Get counter by test ID
-    fn get_counter(test_id: i64) -> CounterRecord?:
+    fn get_counter(row_id: TestRowId) -> CounterRecord?:
+        val test_id = row_id.value
         val counters_table_opt = self.db.get_table("counters")
         if not counters_table_opt.?:
             return nil
@@ -1483,7 +1498,8 @@ class TestDatabaseExtended:
         nil
 
     # Get timing summary by test ID
-    fn get_timing_summary(test_id: i64) -> TimingSummary?:
+    fn get_timing_summary(row_id: TestRowId) -> TimingSummary?:
+        val test_id = row_id.value
         val timing_table_opt = self.db.get_table("timing")
         if not timing_table_opt.?:
             return nil
@@ -1565,7 +1581,7 @@ class TestDatabaseExtended:
             val total_runs = if has_counts: lookup.count_total[test_id] else: 0
             val passed = if has_counts: lookup.count_passed[test_id] else: 0
             val failed = if has_counts: lookup.count_failed[test_id] else: 0
-            val is_flaky = self.is_flaky_test(test_id)
+            val is_flaky = self.is_flaky_test(TestRowId(value: test_id))
 
             result.push(TestInfo(
                 test_name: test_name,
@@ -1590,7 +1606,7 @@ class TestDatabaseExtended:
         all_tests.filter(_.status == status_filter)
 
     # Count tests by status
-    fn test_count_by_status() -> (i64, i64, i64, i64):
+    fn test_count_by_status() -> TestStatusCounts:
         val all_tests = self.all_test_info()
         var total = all_tests.len()
         var passed = 0
@@ -1605,7 +1621,7 @@ class TestDatabaseExtended:
             elif t.status == "skipped" or t.status == "ignored":
                 skipped = skipped + 1
 
-        (total, passed, failed, skipped)
+        TestStatusCounts(total: TestRunCount(value: total), passed: TestRunCount(value: passed), failed: TestRunCount(value: failed), skipped: TestRunCount(value: skipped))
 
     # Get list of flaky test names
     fn flaky_test_names() -> [text]:
@@ -1619,17 +1635,25 @@ class TestDatabaseExtended:
         result
 
     # Helper: Get suite info (file_path, suite_name)
-    fn get_suite_info(suite_id: i64) -> (text, text)?:
+    fn get_suite_info(row_id: TestRowId) -> (text, text)?:
+        val suite_id = row_id.value
         db_get_suite_info(self.db, self.interner, suite_id)
 
     # Helper: Get file path by ID
-    fn get_file_path(file_id: i64) -> text?:
+    fn get_file_path(row_id: TestRowId) -> text?:
+        val file_id = row_id.value
         db_get_file_path(self.db, self.interner, file_id)
 
     # Helper: Get test timing (mean, p50)
-    fn get_test_timing(test_id: i64) -> (f64, f64)?:
-        db_get_test_timing(self.db, test_id)
+    fn get_test_timing(row_id: TestRowId) -> TestTimingStats?:
+        val test_id = row_id.value
+        match db_get_test_timing(self.db, test_id):
+            case Some(pair): Some(TestTimingStats(mean: TestDurationMs(value: pair.0), p50: TestDurationMs(value: pair.1)))
+            case None: None
 
     # Helper: Get test counts (total_runs, passed, failed)
-    fn get_test_counts(test_id: i64) -> (i64, i64, i64)?:
-        db_get_test_counts(self.db, test_id)
+    fn get_test_counts(row_id: TestRowId) -> TestCaseCounts?:
+        val test_id = row_id.value
+        match db_get_test_counts(self.db, test_id):
+            case Some(trio): Some(TestCaseCounts(total_runs: TestRunCount(value: trio.0), passed: TestRunCount(value: trio.1), failed: TestRunCount(value: trio.2)))
+            case None: None

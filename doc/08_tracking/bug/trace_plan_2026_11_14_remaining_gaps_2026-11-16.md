@@ -164,3 +164,21 @@ API with wide caller sets): RunnerTestDb/TestDatabaseExtended `complete_run`
 `test_count_by_status -> (i64 x4)`, resource-run ms/bytes params, `get_*_id -> i64?`;
 plus private-by-convention `_trace_prepare_failed: bool`, private consts
 (`*_LIMIT: i64`) and the one-field newtype `value: i64` payloads.
+
+Batch test-DB API 2026-11-19: `RunnerTestDb` / `TestDatabaseExtended` public API no longer
+carries bare primitives for the previously listed set. New std.database.test_extended types
+(`types.spl`): `TestRunCount`, `TestRunAgeHours`, `TestRunKeepCount`, `TestRowId`,
+`TestStageMs`, `TestDurationMs`, `TestByteCount`, `TestProcessCount`, `TestSignalNumber`,
+`TestExitCode` (one-field `value:` newtypes), `TestAnomalyWarning` (Warned|Quiet),
+`TestTimingOutcome` (Applied|Refused), and structs `TestStatusCounts`, `TestTimingStats`,
+`TestCaseCounts` replacing tuples. Converted: `complete_run`, `cleanup_stale_runs`,
+`prune_runs`, `record_timing_observation`, `promote_timing_baseline`,
+`prior_anomaly_warning`, `test_count_by_status`, `record_resource_run`, `get_file_id` /
+`get_suite_id` / `get_test_id` / `get_or_create_*`, and every `test_id`/`suite_id`/`file_id`
+parameter (`TestRowId`), `get_test_timing`, `get_test_counts`. SDN wire format unchanged
+(`.value` serialised exactly as before). Still bare (deferred, no caller-set change yet):
+`update_test_result(duration_ms: f64)`, `update_timing`/`add_timing_run(duration_ms: f64,
+baseline_eligible: bool)`, `record_baseline_generation(generation/p50/promoted_at)`,
+`collect_timing_runs(max_count)`, `is_flaky_test -> bool`, `save() -> bool`, record
+structs (`TimingSummary`, `TestInfo`, ...) pub fields, and `ResourceUsage`/`TestDbFileRow`
+source fields wrapped at the call site.
