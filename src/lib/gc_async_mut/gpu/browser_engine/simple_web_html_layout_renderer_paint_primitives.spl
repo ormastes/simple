@@ -1565,7 +1565,6 @@ fn _fb_border_side_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
 # rounded to whole px. A side no longer than two dashes is solid; one shorter
 # than two dashes and a gap keeps two dashes and scales dash and gap together
 # (measured: t=5, L=22 gives 8.75 / 4.5 / 8.75).
-# ponytail: square dots for every width; Chrome draws round dots above 3px.
 # reason: geometry helper shared by the raster and Draw IR border lanes
 # @allow(primitive_api)
 pub fn border_dash_runs(length: i32, thickness: i32, dotted: bool) -> [i32]:
@@ -1600,6 +1599,39 @@ pub fn border_dash_runs(length: i32, thickness: i32, dotted: bool) -> [i32]:
         i = i + 1
     runs
 
+# Row spans [start, len] (one per row, len may be 0) of a round dot of
+# diameter `d`: the pixels whose centre lies in the circle inscribed in the
+# d x d cell. Chrome 159 draws `dotted` borders as round dots.
+# ponytail: pixel-centre coverage, no AA on the dot edge; upgrade with a
+# coverage ramp if the partial edge pixels get pinned.
+# reason: geometry helper shared by the raster and Draw IR border lanes
+# @allow(primitive_api)
+pub fn border_dot_row_spans(d: i32) -> [i32]:
+    var spans: [i32] = []
+    var row = 0
+    # cpu-lane-loop-ok: one span per dot row; bound is the border width
+    while row < d:
+        val dy = 2 * row + 1 - d
+        var c0 = -1
+        var c1 = -1
+        var c = 0
+        # cpu-lane-loop-ok: scans one dot row; bound is the border width
+        while c < d:
+            val dx = 2 * c + 1 - d
+            if dx * dx + dy * dy <= d * d:
+                if c0 < 0:
+                    c0 = c
+                c1 = c
+            c = c + 1
+        if c0 < 0:
+            spans.push(0)
+            spans.push(0)
+        else:
+            spans.push(c0)
+            spans.push(c1 - c0 + 1)
+        row = row + 1
+    spans
+
 fn _fb_border_span_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, is_horiz: bool, style: text, color: u32, clip: ClipRect) -> [u32]:
     if w <= 0 or h <= 0 or color == 0u32 or _border_style_disabled(style):
         return fb
@@ -1617,11 +1649,21 @@ fn _fb_border_span_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h
         val runs = border_dash_runs(if is_horiz: w else: h, t, style == "dotted")
         var r = 0
         # cpu-lane-loop-ok: one rect per dash of one border side; bound is the run count
+        val dot = if style == "dotted": border_dot_row_spans(t) else: []
         while r + 1 < runs.len():
-            if is_horiz:
-                out = _fb_border_side_clip(out, fbw, fbh, x + runs[r], y, runs[r + 1], h, color, clip)
+            val cx = if is_horiz: x + runs[r] else: x
+            val cy = if is_horiz: y else: y + runs[r]
+            if dot.len() > 0 and runs[r + 1] == t:
+                var k = 0
+                # cpu-lane-loop-ok: paints one round dot row by row; bound is the border width
+                while k < t:
+                    if dot[2 * k + 1] > 0:
+                        out = _fb_border_side_clip(out, fbw, fbh, cx + dot[2 * k], cy + k, dot[2 * k + 1], 1, color, clip)
+                    k = k + 1
+            elif is_horiz:
+                out = _fb_border_side_clip(out, fbw, fbh, cx, cy, runs[r + 1], h, color, clip)
             else:
-                out = _fb_border_side_clip(out, fbw, fbh, x, y + runs[r], w, runs[r + 1], color, clip)
+                out = _fb_border_side_clip(out, fbw, fbh, cx, cy, w, runs[r + 1], color, clip)
             r = r + 2
         return out
     _fb_border_side_clip(out, fbw, fbh, x, y, w, h, color, clip)
