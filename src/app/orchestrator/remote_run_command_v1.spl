@@ -15,7 +15,7 @@ use std.nogc_sync_mut.orchestration.controller_local_root_v3.{ControllerLocalRoo
 use std.nogc_sync_mut.io.dir_ops.dir_is_real_no_follow
 use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.{ControllerDispatchOwnerV3, ControllerDispatchOwnedTurnV3,
     controller_dispatch_remote_begin_v3, controller_dispatch_remote_send_v3, controller_dispatch_remote_admit_v3,
-    controller_dispatch_remote_edit_v3, controller_dispatch_step_v3, controller_dispatch_close_v3,
+    controller_dispatch_remote_edit_v3, controller_dispatch_remote_settle_v3, controller_dispatch_step_v3, controller_dispatch_close_v3,
     CONTROLLER_DISPATCH_EDIT_OK_V3, CONTROLLER_DISPATCH_EDIT_REFUSED_V3}
 use std.nogc_sync_mut.orchestration.workload_store_v1.ControllerJournalEditV1
 use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.{ControllerDispatchContextV1, controller_dispatch_grant_clock_v1}
@@ -132,6 +132,21 @@ fn remote_run_link_edit_v1(box: RemoteRunBoxV1,
         return Err(response.substring(CONTROLLER_DISPATCH_EDIT_REFUSED_V3.byte_len(), response.byte_len()))
     Err("remote-run-edit-response")
 
+# milestone_0043 P1-1: the settle is ONE turn with no exchange, read directly (never through remote_run_wait_v1, which
+# returns the owner's sticky failure first): the verdict prefix in the response decides; a turn with no verdict names the
+# owner's refusal (quarantined root, changed installed bytes, an abandon that could not be confirmed).
+fn remote_run_link_settle_v1(box: RemoteRunBoxV1,
+        edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
+    if box.owner.is_none(): return Err("remote-run-link-closed")
+    val turn = controller_dispatch_remote_settle_v3(box.owner.unwrap(), edit)
+    box.owner = turn.owner
+    if turn.root_cleanup.is_some(): box.root_cleanup = turn.root_cleanup
+    if turn.response.starts_with(CONTROLLER_DISPATCH_EDIT_OK_V3):
+        return Ok(turn.response.substring(CONTROLLER_DISPATCH_EDIT_OK_V3.byte_len(), turn.response.byte_len()))
+    if turn.response.starts_with(CONTROLLER_DISPATCH_EDIT_REFUSED_V3):
+        return Err(turn.response.substring(CONTROLLER_DISPATCH_EDIT_REFUSED_V3.byte_len(), turn.response.byte_len()))
+    Err(if turn.error != "": turn.error else: "remote-run-settle-response")
+
 fn remote_run_sleep_v1(ms: i64) -> bool:
     sosix_sleep_ms(ms)
     true
@@ -210,13 +225,15 @@ pub fn remote_run_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
             remote_run_link_admit_v1(box, signed, approval, request),
         edit: fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
             remote_run_link_edit_v1(box, edit),
+        settle: fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
+            remote_run_link_settle_v1(box, edit),
         clock: fn() -> Result<i64, text>: controller_dispatch_grant_clock_v1(),
         monotonic_ms: fn() -> i64: sosix_time_now_monotonic_ms(),
         pause: fn(ms: i64) -> bool: remote_run_sleep_v1(ms))
     val issuer = RemoteRunIssuerV1(issue: fn(grant: ExecutionGrantV2, request: OperationEnvelopeV2) -> Result<ControllerIssuedAuthorityV1, text>:
         remote_run_issue_v1(context, key_store, approver, requested, grant, request))
     val facts = RemoteRunFactsV1(snapshot: context.policy.snapshot, session_generation: context.policy.session_generation,
-        controller_epoch: context.config.controller_epoch,
+        controller_epoch: context.config.controller_epoch, controller_id: context.config.controller_id,
         grant_id: options["--grant-id"], ttl_ms: ttl.unwrap(), state_root: options["--out"])
     val outcome = remote_run_drive_v1(authored.unwrap(), facts, link, issuer)
     # Local cleanup only: closing never sends another Host request and never re-executes.

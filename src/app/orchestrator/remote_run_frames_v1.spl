@@ -92,16 +92,34 @@ pub fn remote_run_reset_reply_decode_v1(source: text, operation_id: text) -> Res
     if reply.receipt == "": return Err("remote-run-reset-reply-receipt")
     Ok(reply)
 
-# A run is DONE only at stage `settled` with a published bundle; `failed` and `wedged` are terminal refusals; every other
-# stage is a poll.
+# A run is DONE only at stage `settled` with a published bundle; `settled` without one is `unbundled` (the Host ended it,
+# for example a deadline or controller cancel before the transfer, but nothing signed says how). milestone_0043 P2-2: the
+# Host never answers `failed` or `wedged` as a stage reply (host_remote_build_fail_v4 / remote_build_wedged_v4 return an
+# error, which arrives as a refusal), so either stage in a stage reply is `invalid`, never a terminal verdict. Every
+# other stage is a poll.
 pub fn remote_run_reply_phase_v1(reply: RemoteRunReplyV1) -> text:
     if reply.stage == "settled" and reply.bundle_digest != "": return "done"
-    if reply.stage == "settled" or reply.stage == "failed" or reply.stage == "wedged": return "terminal"
+    if reply.stage == "settled": return "unbundled"
+    if reply.stage == "failed" or reply.stage == "wedged": return "invalid"
     "poll"
 
-# @allow(primitive_api) boolean classification of one fixed Host refusal code
-pub fn remote_run_reaped_v1(error: text) -> bool:
-    error.contains(REMOTE_RUN_REAPED_CODE_V1)
+# The V6 reply error of an authenticated Host-domain refusal (runtime_host_continuation_v6 remote_build_query_v6).
+val REMOTE_RUN_HOST_REFUSED_V1 = "runtime-host-request-refused"
+
+# milestone_0043 P2-1: the reaped answer is recognised ONLY as the exact typed refusal: the V6 reply error line, then the
+# Host-domain error payload (host_service_error_payload_v2, inside the MAC-verified reply frame) for THIS operation's
+# collect, whose `error` field is exactly the reaped code. A substring anywhere in the error or payload text never counts.
+# @allow(primitive_api) boolean classification of one exact typed Host refusal
+pub fn remote_run_reaped_v1(error: text, operation_id: text) -> bool:
+    val head = REMOTE_RUN_HOST_REFUSED_V1 + "\n"
+    if not error.starts_with(head): return false
+    val fields = remote_run_reply_fields_v1(error.substring(head.byte_len(), error.byte_len()), 7, "host-service-error")
+    if fields.is_err(): return false
+    val parsed = fields.unwrap()
+    (remote_run_reply_int_v1(parsed, "version") == Ok(2) and
+        remote_run_reply_text_v1(parsed, "action") == Ok("host-remote-build-collect") and
+        remote_run_reply_text_v1(parsed, "operationId") == Ok(operation_id) and
+        remote_run_reply_text_v1(parsed, "error") == Ok(REMOTE_RUN_REAPED_CODE_V1))
 
 # The dispatch owner hands a remote-build Host refusal to the caller as the ENCODED V6 reply (outcome host-refused);
 # this is its error text: the reply error (or the generic non-zero code), a newline and the payload that names the code.
