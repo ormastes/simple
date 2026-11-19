@@ -53,48 +53,112 @@ fn _bof_fn_name(line: text) -> text:
 
 fn _bof_paren_depth(s: text) -> i64:
     var depth = 0
+    var in_str = false
     var i = 0
     while i < s.byte_len():
         val c = s.substring(i, i + 1)
-        if c == "(":
+        if in_str:
+            if c == "\\":
+                i = i + 1
+            elif c == "\"":
+                in_str = false
+        elif c == "\"":
+            in_str = true
+        elif c == "(":
             depth = depth + 1
         elif c == ")":
             depth = depth - 1
         i = i + 1
     depth
 
+# Index of the `)` matching the `(` at `open`, skipping string literals; -1 if unclosed.
+fn _bof_match_close(s: text, open: i64) -> i64:
+    var depth = 0
+    var in_str = false
+    var i = open
+    while i < s.byte_len():
+        val c = s.substring(i, i + 1)
+        if in_str:
+            if c == "\\":
+                i = i + 1
+            elif c == "\"":
+                in_str = false
+        elif c == "\"":
+            in_str = true
+        elif c == "(" or c == "[":
+            depth = depth + 1
+        elif c == ")" or c == "]":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
+# Splits on top-level commas only: commas inside brackets or string literals
+# (e.g. a default value `sep: text = "a, b"`) do not split.
+fn _bof_split_top(s: text) -> [text]:
+    var parts: [text] = []
+    var depth = 0
+    var in_str = false
+    var part = ""
+    var i = 0
+    while i < s.byte_len():
+        val c = s.substring(i, i + 1)
+        if in_str:
+            part = part + c
+            if c == "\\" and i + 1 < s.byte_len():
+                i = i + 1
+                part = part + s.substring(i, i + 1)
+            elif c == "\"":
+                in_str = false
+        elif c == "\"":
+            in_str = true
+            part = part + c
+        elif c == "," and depth == 0:
+            parts.push(part)
+            part = ""
+        else:
+            if c == "(" or c == "[":
+                depth = depth + 1
+            elif c == ")" or c == "]":
+                depth = depth - 1
+            part = part + c
+        i = i + 1
+    parts.push(part)
+    parts
+
 # Parameter names of a signature that may have been joined from several lines.
-# Splits on top-level commas only, so tuple-typed params do not fragment.
 fn _bof_params(line: text) -> [text]:
     val open = line.find("(")
     if open < 0:
         return []
+    var close = _bof_match_close(line, open)
+    if close < 0:
+        close = line.byte_len()
     var names: [text] = []
-    var depth = 0
-    var part = ""
-    var i = open + 1
-    while i < line.byte_len():
-        val c = line.substring(i, i + 1)
-        if c == "(" or c == "[":
-            depth = depth + 1
-        elif c == "]":
-            depth = depth - 1
-        if c == ")" and depth == 0:
-            break
-        if c == ")":
-            depth = depth - 1
-        if c == "," and depth == 0:
-            val name = _bof_leading_ident(part.trim())
-            if name != "" and name != "self":
-                names.push(name)
-            part = ""
-        else:
-            part = part + c
-        i = i + 1
-    val last = _bof_leading_ident(part.trim())
-    if last != "" and last != "self":
-        names.push(last)
+    for part in _bof_split_top(line.substring(open + 1, close)):
+        val name = _bof_leading_ident(part.trim())
+        if name != "" and name != "self":
+            names.push(name)
     names
+
+# Names bound by a (possibly nested) tuple pattern; `_` binds nothing.
+fn _bof_pattern_names(pat: text) -> [text]:
+    val p = pat.trim()
+    if p.starts_with("("):
+        var inner = p.substring(1, p.byte_len())
+        val close = _bof_match_close(p, 0)
+        if close > 0:
+            inner = p.substring(1, close)
+        var names: [text] = []
+        for part in _bof_split_top(inner):
+            for n in _bof_pattern_names(part):
+                names.push(n)
+        return names
+    val n = _bof_leading_ident(p)
+    if n != "" and n != "_":
+        return [n]
+    []
 
 fn _bof_all_ident(s: text) -> bool:
     if s == "":
@@ -140,13 +204,11 @@ fn _bof_binding(trimmed: text) -> ([text], text):
         return ([], "")
     var names: [text] = []
     if rest.starts_with("("):
-        val close = rest.find(")")
+        val close = _bof_match_close(rest, 0)
         if close < 0 or close > eq:
             return ([], "")
-        for part in rest.substring(1, close).split(","):
-            val n = _bof_leading_ident(part.trim())
-            if n != "" and n != "_":
-                names.push(n)
+        for n in _bof_pattern_names(rest.substring(0, close + 1)):
+            names.push(n)
     else:
         val name = _bof_leading_ident(rest)
         if name == "":
