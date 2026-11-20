@@ -10431,3 +10431,43 @@ fn llvm_address_taken_symbol_form_import_compiles() {
         .expect("address-taken import must compile under LLVM");
     assert_eq!(result.failed, 0);
 }
+
+/// extern_shadow_blocks_imported_fn_value_2026-11-20: a same-named
+/// `extern fn` declared in ANOTHER module of the closure must not stop this
+/// file's explicit `use` from binding an address-taken function value
+/// (the syscall_shim.spl / netstack_init.spl shape). Covers zero- and
+/// one-argument providers: arity is not the trigger.
+#[cfg(feature = "llvm")]
+#[test]
+fn llvm_address_taken_import_survives_foreign_extern_shadow() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+    fs::create_dir_all(src.join("pkg")).unwrap();
+    fs::write(
+        src.join("pkg/provider.spl"),
+        "fn es_zero() -> i64:\n    42\nfn es_one(x: i64) -> i64:\n    x + 1\n",
+    )
+    .unwrap();
+    fs::write(
+        src.join("pkg/other.spl"),
+        "extern fn es_zero() -> i64\nextern fn es_one(x: i64) -> i64\nfn other_use() -> i64:\n    es_zero() + es_one(1)\n",
+    )
+    .unwrap();
+    fs::write(
+        src.join("consumer.spl"),
+        "use pkg.provider\nuse pkg.provider.{es_zero, es_one}\nfn keep() -> u64:\n    var total: u64 = 0\n    total = total + (es_one as u64)\n    total = total + (es_zero as u64)\n    total\n",
+    )
+    .unwrap();
+    let archive = temp.path().join("probe.a");
+    let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive)
+        .source_dir(src)
+        .config(NativeBuildConfig {
+            emit_archive: true,
+            backend: "llvm".to_string(),
+            num_threads: Some(1),
+            ..Default::default()
+        })
+        .build()
+        .expect("imported fn value must bind despite a foreign extern of the same name");
+    assert_eq!(result.failed, 0);
+}
