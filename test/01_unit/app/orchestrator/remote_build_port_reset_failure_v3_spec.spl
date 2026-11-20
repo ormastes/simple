@@ -16,7 +16,7 @@ A refusal means only that no receipt is emitted: the Host wedges exactly as it d
 ## Verification guidance and troubleshooting
 A changed refusal string is a contract change.
 """
-use std.spec.step
+use std.spec.{step, fail}
 use std.io.file_read_text
 
 fn rp_count(source: text, needle: text) -> i64:
@@ -24,8 +24,16 @@ fn rp_count(source: text, needle: text) -> i64:
 
 fn rp_body(source: text) -> text:
     val at = source.index_of("fn remote_build_port_reset_failure_v3(")
+    if at < 0:
+        # A renamed anchor must fail the case, never hand a wrong slice to the counts and order checks below.
+        fail("rp_body anchor missing: fn remote_build_port_reset_failure_v3(")
+        return ""
     val tail = source.substring(at, source.byte_len())
-    tail.substring(0, tail.index_of("fn remote_build_service_port_v3("))
+    val to = tail.index_of("fn remote_build_service_port_v3(")
+    if to < 0:
+        fail("rp_body end anchor missing: fn remote_build_service_port_v3(")
+        return ""
+    tail.substring(0, to)
 
 describe "Host remote-build port reset_failure (milestone_0038)":
     it "rebuilds the authority from the installed snapshot and the open record, and binds the observation to the task":
@@ -34,7 +42,7 @@ describe "Host remote-build port reset_failure (milestone_0038)":
         expect(rp_count(body, "remote_build_open_record_decode_v3(wire)?")).to_equal(1)
         step("milestone_0045 late receipt: the context keeps the real clock; ONLY the admit runs in the late-receipt context")
         expect(rp_count(body, "remote_build_port_context_v3(config, record, now, true)?")).to_equal(1)
-        expect(body.index_of("remote_build_port_context_v3(") < body.index_of("remote_container_reset_failure_host_new_v3(")).to_equal(true)
+        expect(body.index_of("remote_build_port_context_v3(") >= 0 and body.index_of("remote_build_port_context_v3(") < body.index_of("remote_container_reset_failure_host_new_v3(")).to_equal(true)
         val source = file_read_text("src/app/orchestrator/remote_build_service_port_v3.spl")
         step("the late admit is the helper's `late` arm; admit and finalize pass false (a completion never gets it)")
         expect(rp_count(source, "remote_context_admit_v1(if late: remote_container_reset_failure_late_context_v3(context) else: context,")).to_equal(1)
@@ -43,7 +51,7 @@ describe "Host remote-build port reset_failure (milestone_0038)":
         expect(rp_count(body, "signed_at: now, signature: [])")).to_equal(1)
         step("the observation is compared with the record's own operation and task digest before anything is built")
         expect(rp_count(body, "remote-build-reset-observation-differs")).to_equal(1)
-        expect(body.index_of("remote-build-reset-observation-differs") < body.index_of("remote_container_reset_failure_host_new_v3(")).to_equal(true)
+        expect(body.index_of("remote-build-reset-observation-differs") >= 0 and body.index_of("remote-build-reset-observation-differs") < body.index_of("remote_container_reset_failure_host_new_v3(")).to_equal(true)
         step("request and grant digests come from the open record, never from the observation")
         expect(rp_count(body, "sha256_text(distributed_encode_operation_v2(record.request)?)")).to_equal(1)
         expect(rp_count(body, "distributed_grant_digest_v2(record.signed.grant)?")).to_equal(1)
@@ -58,9 +66,9 @@ describe "Host remote-build port reset_failure (milestone_0038)":
         expect(rp_count(body, "secure_zero_u8_slots(file)")).to_equal(1)
         expect(rp_count(body, "envelope.signature = signed?")).to_equal(1)
         expect(rp_count(body, "remote_container_reset_failure_verify_v3(")).to_equal(1)
-        expect(body.index_of("secure_zero_u8_slots(file)") < body.index_of("envelope.signature = signed?")).to_equal(true)
-        expect(body.index_of("remote_container_reset_failure_verify_v3(") > body.index_of("envelope.signature = signed?")).to_equal(true)
-        expect(body.index_of("remote_container_reset_failure_signed_encode_v3(envelope)") > body.index_of("remote_container_reset_failure_verify_v3(")).to_equal(true)
+        expect(body.index_of("secure_zero_u8_slots(file)") >= 0 and body.index_of("secure_zero_u8_slots(file)") < body.index_of("envelope.signature = signed?")).to_equal(true)
+        expect(body.index_of("envelope.signature = signed?") >= 0 and body.index_of("remote_container_reset_failure_verify_v3(") > body.index_of("envelope.signature = signed?")).to_equal(true)
+        expect(body.index_of("remote_container_reset_failure_verify_v3(") >= 0 and body.index_of("remote_container_reset_failure_signed_encode_v3(envelope)") > body.index_of("remote_container_reset_failure_verify_v3(")).to_equal(true)
         step("the key buffer is a `var` place, so the `mut` wipe reaches the read buffer itself (milestone_0051 KEYWIPE-01)")
         expect(rp_count(body, "var file = (config.read_key)(host_key)?")).to_equal(1)
         expect(rp_count(body, "val file = (config.read_key)(host_key)?")).to_equal(0)

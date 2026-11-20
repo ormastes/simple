@@ -19,7 +19,7 @@ store).
 ## Verification guidance and troubleshooting
 A changed refusal string is a contract change.
 """
-use std.spec.step
+use std.spec.{step, fail}
 use std.io.file_read_text
 use std.common.contracts.distributed_control_v2.ExecutionEnvironmentV2
 use app.orchestrator.remote_build_port_install_v3.{remote_build_profile_root_v3, remote_build_environment_admit_v3,
@@ -36,7 +36,10 @@ fn pi_env(host: text, isolation: text) -> ExecutionEnvironmentV2:
 
 fn pi_from(source: text, start: text) -> text:
     val at = source.index_of(start)
-    if at < 0: return ""
+    if at < 0:
+        # A renamed anchor must fail the case, never hand an empty slice to a negative `contains` check.
+        fail("pi_from anchor missing: " + start)
+        return ""
     source.substring(at, source.byte_len())
 
 describe "the remote-build port is installed from the host identity profile":
@@ -76,8 +79,9 @@ describe "the remote-build port is installed from the host identity profile":
         val install = file_read_text("src/app/orchestrator/remote_build_port_install_v3.spl")
         val from_install = pi_from(install, "fn remote_build_environment_install_v3(")
         expect(from_install.byte_len() > 0).to_equal(true)
+        expect(from_install.index_of("pub fn remote_build_environment_install_command_v3(") > 0).to_equal(true)
         val body = from_install.substring(0, from_install.index_of("pub fn remote_build_environment_install_command_v3("))
-        expect(body.index_of("remote_build_environment_admit_v3(") < body.index_of("host_identity_store_publish_v1(")).to_equal(true)
+        expect(body.index_of("remote_build_environment_admit_v3(") >= 0 and body.index_of("remote_build_environment_admit_v3(") < body.index_of("host_identity_store_publish_v1(")).to_equal(true)
         expect(body).to_contain("HostIdentityStorePublicationV1.Published")
         val command = file_read_text("src/app/orchestrator/command.spl")
         expect(command).to_contain("args[0] == \"remote-build-environment-install\"")
@@ -93,6 +97,7 @@ describe "the remote-build port is installed from the host identity profile":
         val install = file_read_text("src/app/orchestrator/remote_build_port_install_v3.spl")
         val tail = pi_from(install, "pub fn remote_build_port_install_v3(")
         expect(tail.byte_len() > 0).to_equal(true)
+        expect(tail.index_of("# Admin provisioning of the environment leaf") > 0).to_equal(true)
         val body = tail.substring(0, tail.index_of("# Admin provisioning of the environment leaf"))
         expect(body).to_contain("host_service_domain_remote_build_facts_v3(")
         expect(body).to_contain("remote_build_service_port_v3(")
@@ -116,7 +121,7 @@ describe "the remote-build port is installed from the host identity profile":
         val ready = pi_from(command, "        case HostServiceDomainOpenV3.Ready(domain):")
         expect(ready.byte_len() > 0).to_equal(true)
         expect(ready).to_contain("remote_build_port_install_v3(args[1], args[2], domain)")
-        expect(ready.index_of("remote_build_port_install_v3(") < ready.index_of("smux_server_serve_runtime_authenticated_v6(")).to_equal(true)
+        expect(ready.index_of("remote_build_port_install_v3(") >= 0 and ready.index_of("remote_build_port_install_v3(") < ready.index_of("smux_server_serve_runtime_authenticated_v6(")).to_equal(true)
         expect(ready).to_contain("smux_server_serve_runtime_authenticated_v6(args[6], args[7], installed, args[5])")
         step("the installer is the identity for any other backend and for a host without a readable profile")
         val install = file_read_text("src/app/orchestrator/remote_build_port_install_v3.spl")
