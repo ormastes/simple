@@ -848,8 +848,10 @@ describe "remote-run abandon (milestone_0045, owner decision 1)":
         expect(rs_abandon_v1(resumed, rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_9", end + 2), end + 2)).to_equal(first)
         rs_cleanup_v1(resumed)
 
-    it "never cancels an `admitted` row once the controller archived an execute for its operation":
+    it "ends an `admitted` row whose execute WAS archived `failed` after its window, never `cancelled` (milestone_0054)":
         # @req M0050-A-ADMITTED-02
+        # @req M0054-ADMITTED-EXECUTE-01
+        step("`admitted` + an archived execute: reachable only when storage lost the `executing` commit (no fsync)")
         val log = RsLogV1()
         log.journal = Some(rs_journal_v1())
         log.admit_stops = true
@@ -857,11 +859,37 @@ describe "remote-run abandon (milestone_0045, owner decision 1)":
         expect(distributed_operation_journal_publish_v3(log.journal.unwrap(), controller_dispatch_remote_execute_key_v3("operation_a"),
             "execute-archived").unwrap()).to_equal(true)
         val envelope = distributed_operation_journal_lookup_v2(log.journal.unwrap(), "operation_a").unwrap().envelope_digest
+        step("resume still cannot reach it and sends no route frame (no new Host effect, the execute is never re-sent)")
+        val resumed = RsLogV1()
+        resumed.journal = log.journal
+        expect(rs_resume_v1(resumed).detail).to_equal("remote-run-resume-row")
+        expect(resumed.calls).to_equal(["begin", "edit"])
+        step("while the archived signed window is open the verified abandon is refused and the row stays `admitted`")
+        expect(rs_abandon_v1(resumed, rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_10", 2000), 2000)).to_equal(
+            "ERR:remote-run-abandon-window-open")
+        expect(rs_row_state_v1(resumed)).to_equal("admitted")
+        step("after it the execute may have reached the Host: the row ends `failed` (like an abandoned executing row)")
         val end = 1000 + RR_TTL
-        expect(rs_abandon_v1(log, rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_10", end), end)).to_equal(
-            "ERR:remote-run-abandon-execute-archived")
-        expect(rs_row_state_v1(log)).to_equal("admitted")
-        rs_cleanup_v1(log)
+        val pair = rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_11", end)
+        val first = rs_abandon_v1(resumed, pair, end)
+        expect(first.starts_with("failed:")).to_equal(true)
+        val row = distributed_operation_journal_lookup_v2(resumed.journal.unwrap(), "operation_a").unwrap()
+        expect(row.state).to_equal("failed")
+        expect("failed:" + row.outcome_digest).to_equal(first)
+        step("a repeat, and a retry with a fresh pair, answer the same abandon")
+        expect(rs_abandon_v1(resumed, pair, end + 1)).to_equal(first)
+        expect(rs_abandon_v1(resumed, rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_12", end + 2), end + 2)).to_equal(first)
+        rs_cleanup_v1(resumed)
+
+    it "keeps the advanced journal when the abandon stops between its two commits (source pins, milestone_0054)":
+        # @req M0054-ADMITTED-EXECUTE-02
+        val source = file_read_text("src/app/orchestrator/remote_run_abandon_v1.spl")
+        step("an archived-execute `admitted` row goes through `executing` (admitted -> failed is no transition)")
+        expect(source.contains("distributed_operation_transition_v2(row, \"executing\", \"\")")).to_equal(true)
+        step("a refusal after the `executing` commit hands back THAT journal, never the stale parameter")
+        expect(source.contains("return remote_run_abandon_refused_v1(advanced, next.unwrap_err())")).to_equal(true)
+        expect(source.contains("return remote_run_abandon_refused_v1(advanced, committed.unwrap_err())")).to_equal(true)
+        expect(source.contains("remote-run-abandon-execute-archived")).to_equal(false)
 
     it "never contacts the Host and never widens the settle states (source pins)":
         # @req M0045-ABANDON-03
