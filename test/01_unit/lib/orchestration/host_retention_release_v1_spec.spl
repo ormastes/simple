@@ -67,7 +67,11 @@ fn rr_signed(record: HostRetentionReleaseV1, issuer: i64 = 1, approver: i64 = 65
 
 fn rr_body(file: text, start: text, stop: text) -> text:
     val source = file_read_text(file)
-    val rest = source.substring(source.index_of(start), source.byte_len())
+    val at = source.index_of(start)
+    if at < 0:
+        fail("rr_body anchor missing: " + start)
+        return ""
+    val rest = source.substring(at, source.byte_len())
     val to = rest.substring(1, rest.byte_len()).index_of(stop)
     if to < 0: return rest
     rest.substring(0, to + 1)
@@ -185,6 +189,23 @@ describe "Retention-release journal records (milestone_0045)":
         val third = rr_signed(foreign)
         expect(host_retention_release_record_publish_v1(journal, host_retention_release_proof_decode_v1(third).unwrap(), third).unwrap_err())
             .to_equal("retention-release-exists")
+        step("an existing marker with the same binding but a foreign kind or non-canonical bytes is malformed, never resumed")
+        var other = rr_record()
+        other.operation_id = "build_op_2"
+        val other_source = rr_signed(other)
+        val other_path = host_retention_release_marker_relative_v1("build_op_2")
+        val foreign_kind = marker.replace("build_op_1", "build_op_2").replace("retention-release-marker", "retention-release-markex")
+        expect(distributed_operation_journal_publish_v3(journal, other_path, foreign_kind).unwrap()).to_equal(true)
+        expect(host_retention_release_record_publish_v1(journal, host_retention_release_proof_decode_v1(other_source).unwrap(),
+            other_source).unwrap_err()).to_equal("retention-release-marker-invalid")
+        var third_op = rr_record()
+        third_op.operation_id = "build_op_3"
+        val third_source = rr_signed(third_op)
+        val noncanonical = marker.replace("build_op_1", "build_op_3").replace("\n", " \n")
+        expect(distributed_operation_journal_publish_v3(journal, host_retention_release_marker_relative_v1("build_op_3"), noncanonical)
+            .unwrap()).to_equal(true)
+        expect(host_retention_release_record_publish_v1(journal, host_retention_release_proof_decode_v1(third_source).unwrap(),
+            third_source).unwrap_err()).to_equal("retention-release-marker-invalid")
         step("the outcome archive is no-replace: a repeat with the same facts answers the stored bytes")
         expect(host_retention_release_archived_v1(journal, "build_op_1").unwrap().is_none()).to_equal(true)
         val effect = HostRetentionReleaseEffectV1(charge: "run-removed", used_bytes: 4096, used_inodes: 3, removed: 12)

@@ -367,8 +367,9 @@ fn dispatch_state_host_action_begin_v3(root: ControllerLocalRootV3, operation_id
     owner.remote_op = operation_id
     dispatch_turn_v3(dispatch_reader_v3(owner))
 
-# The create-only archive of a run's signed abandon frame, published BEFORE it is sent. Identical bytes may be resent (the
-# Host accepts the same proof idempotently); different bytes under the same run id are refused.
+# The create-only archive of a run's signed effect frame (an abandon or a retention release: every sub but the read-only
+# inspects), published BEFORE it is sent. Identical bytes may be resent (the Host accepts the same proof idempotently);
+# different bytes under the same run id are refused.
 pub fn controller_dispatch_host_action_key_v3(operation_id: text) -> text:
     "controller-host-action-v1/" + sha256_text(operation_id) + ".sdn"
 
@@ -379,7 +380,7 @@ fn dispatch_state_host_action_send_v3(original: ControllerDispatchStateV3, paylo
     val sub = host_control_sub_decode_v6(payload)
     if sub.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, sub.unwrap_err()))
     owner.response = ""
-    if sub.unwrap().sub.ends_with("-abandon"):
+    if not sub.unwrap().sub.ends_with("-inspect"):
         val store = owner.root.unwrap().workload_v3()
         if store.is_err(): return dispatch_turn_v3(dispatch_fail_v3(owner, store.unwrap_err()))
         val key = controller_dispatch_host_action_key_v3(owner.remote_op)
@@ -390,10 +391,10 @@ fn dispatch_state_host_action_send_v3(original: ControllerDispatchStateV3, paylo
             return dispatch_turn_v3(dispatch_fail_v3(owner, published.unwrap_err()))
         val readback = distributed_operation_journal_read_required_v3(store.unwrap().journal, key, 2097152)
         if readback.is_err() or readback.unwrap() != payload:
-            # A re-signed abandon is new bytes (fresh expiry): a retry after an unknown outcome needs a new run id.
+            # A re-signed effect is new bytes (fresh expiry): a retry after an unknown outcome needs a new run id.
             owner.remote_started = true
             owner.outcome = "unknown"
-            return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-host-action-archive-conflict:abandon-id-used-retry-with-a-new-id"))
+            return dispatch_turn_v3(dispatch_fail_v3(owner, "dispatch-host-action-archive-conflict:action-id-used-retry-with-a-new-id"))
         owner.remote_started = true
         owner.outcome = "unknown"
     dispatch_turn_v3(dispatch_send_v3(owner, "host-control", payload))

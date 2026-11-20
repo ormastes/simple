@@ -534,6 +534,11 @@ Host side of the remote container build; the controller half is the `remote-run`
   (`workspace-retention-release-run-absent`) after journaling the marker, so the re-issue converges. Agent runs write no
   intent (nothing releases them). Signed record, verification and charge vocabulary unchanged.
 - Trap: journal relative path parts are <= 128 bytes; `<sha>-<sha>.sdn` (133) is invalid -- use `<sha>/<sha>.sdn`.
+- Trap (milestone_0050 review_b, specs NOT_RUN): a pre-transfer no-workload settle drops `owner.build` but KEEPS the slot,
+  so `remote-build open` must refuse an operation with a published outcome or reap index (`linux_service_remote_build_reaped_v4`
+  before the execute lookup) -- otherwise a replayed/retried open runs a workload on an already-settled row. An existing
+  retention marker must be byte-canonical (`retention_marker_text_v1`) or it is `marker-invalid`, never resumed. The
+  controller host-action send archives EVERY non-inspect sub create-only (retention-release included, not only `-abandon`).
 ### Controller remote-run (milestone_0030 controller half, specs NOT_RUN)
 `simple orchestrator remote-run --dispatch-root --config-digest --key-store --approver --spec <dir> --out --grant-id --expires-in-ms`
 (`remote_run_command_v1.spl`; pure driver `remote_run_v1.spl`, authoring `remote_run_author_v1.spl`, frames
