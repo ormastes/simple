@@ -7,7 +7,7 @@
 # compiler.mir.mir_instructions re-exports it (mir_instructions.spl:9-10).
 use compiler.mir.mir_instructions.{BlockId, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind}
 use compiler.mir.mir_types.{LocalId, LocalKind, MirConstValue, MirType, MirLocal}
-use compiler.mir.mir_instruction_support.{MirPlace, MirTerminator}
+use compiler.mir.mir_instruction_support.{MirAsmOperand, MirPlace, MirTerminator}
 use compiler.interp.execution.tiered_jit.{JitHotspotSpecializationProvider, jit_hotspot_specialization_provider_from_analysis}
 use compiler.mir_opt.pattern.rule_engine.{OptimizerBackendKind, optimization_backend_kind_from_text, optimization_backend_kind_name}
 use compiler.mir_opt.var_reassign_analysis.{
@@ -275,6 +275,11 @@ fn ssa_max_local_from_inst(current: i64, inst: MirInst) -> i64:
         case Intrinsic(_, _, args):
             for arg in args:
                 max_id = ssa_max_local_from_operand(max_id, arg)
+        case InlineAsm(_, _, inputs, outputs, _, _, _):
+            for inp in inputs:
+                max_id = ssa_max_local_from_operand(max_id, inp.operand)
+            for outp in outputs:
+                max_id = ssa_max_local_from_operand(max_id, outp.operand)
         case _:
             pass_do_nothing
     max_id
@@ -922,6 +927,27 @@ fn ssa_operand_list_payloads_valid(operands: [MirOperand]) -> bool:
             return false
     true
 
+fn ssa_asm_operand_list_payloads_valid(operands: [MirAsmOperand]) -> bool:
+    for asm_op in operands:
+        if not ssa_operand_local_payload_valid(asm_op.operand):
+            return false
+    true
+
+fn _ssa_asm_output_local_id(asm_op: MirAsmOperand) -> i64:
+    if not ssa_operand_local_payload_valid(asm_op.operand):
+        return -1
+    match asm_op.operand:
+        case MirOperand(kind, _):
+            match kind:
+                case Copy(local):
+                    ssa_local_id_value(local)
+                case Move(local):
+                    ssa_local_id_value(local)
+                case _:
+                    -1
+        case _:
+            -1
+
 fn ssa_inst_operand_payloads_valid(inst: MirInst) -> bool:
     match inst.kind:
         case Ref(_, _, place): ssa_local_payload_valid(place.local)
@@ -949,6 +975,8 @@ fn ssa_inst_operand_payloads_valid(inst: MirInst) -> bool:
             ssa_operand_local_payload_valid(ptr) and ssa_operand_list_payloads_valid(args)
         case Intrinsic(_, _, args): ssa_operand_list_payloads_valid(args)
         case StoreGlobal(_, value): ssa_operand_local_payload_valid(value)
+        case InlineAsm(_, _, inputs, outputs, _, _, _):
+            ssa_asm_operand_list_payloads_valid(inputs) and ssa_asm_operand_list_payloads_valid(outputs)
         case _: true
 
 fn ssa_term_operand_payloads_valid(term: MirTerminator) -> bool:
@@ -1000,6 +1028,8 @@ fn ssa_instructions_supported_for_alloca(blocks: [MirBlock]) -> bool:
                     case GlobalAddr(_, _, _):
                         pass_do_nothing
                     case StoreGlobal(_, _):
+                        pass_do_nothing
+                    case InlineAsm(_, _, _, _, _, _, _):
                         pass_do_nothing
                     # Verification-only witness for the canonical two-arm
                     # Result match (mir_instruction_kinds.spl: "no runtime
@@ -1175,6 +1205,17 @@ pub fn ssa_reassigned_locals_for_blocks(blocks: [MirBlock]) -> [i64]:
                 if counts.contains_key(written_id):
                     previous = counts[written_id]
                 counts[written_id] = previous + 1
+            match inst.kind:
+                case InlineAsm(_, _, _, outputs, _, _, _):
+                    for outp in outputs:
+                        val out_id = _ssa_asm_output_local_id(outp)
+                        if out_id >= 0:
+                            var prev_out: i64 = 0
+                            if counts.contains_key(out_id):
+                                prev_out = counts[out_id]
+                            counts[out_id] = prev_out + 1
+                case _:
+                    pass_do_nothing
     var reassigned: [i64] = []
     # Revisit the original graph rather than iterating the dictionary: slot
     # allocation must retain first-definition order, not second-write order.
@@ -1187,6 +1228,16 @@ pub fn ssa_reassigned_locals_for_blocks(blocks: [MirBlock]) -> [i64]:
                 if counts[written_id] > 1:
                     reassigned = reassigned.push(written_id)
                     counts[written_id] = 0
+            match inst.kind:
+                case InlineAsm(_, _, _, outputs, _, _, _):
+                    for outp in outputs:
+                        val out_id = _ssa_asm_output_local_id(outp)
+                        if out_id >= 0 and counts.contains_key(out_id):
+                            if counts[out_id] > 1:
+                                reassigned = reassigned.push(out_id)
+                                counts[out_id] = 0
+                case _:
+                    pass_do_nothing
     reassigned
 
 fn ssa_local_first_indices(mir_locals: [MirLocal]) -> Dict<i64, i64>:
@@ -1378,6 +1429,9 @@ fn ssa_collect_inst_operand_locals(locals: [i64], inst: MirInst) -> [i64]:
                 result = ssa_operand_push_local(result, arg)
         case StoreGlobal(_, value):
             result = ssa_operand_push_local(result, value)
+        case InlineAsm(_, _, inputs, _, _, _, _):
+            for inp in inputs:
+                result = ssa_operand_push_local(result, inp.operand)
         case _:
             pass_do_nothing
     result
@@ -1416,6 +1470,13 @@ fn ssa_local_defined_in_block(block: MirBlock, local_id: i64) -> bool:
         # see ssa_max_local_from_operand.
         if _ssa_written_local_id(inst) == local_id:
             return true
+        match inst.kind:
+            case InlineAsm(_, _, _, outputs, _, _, _):
+                for outp in outputs:
+                    if _ssa_asm_output_local_id(outp) == local_id:
+                        return true
+            case _:
+                pass_do_nothing
     false
 
 fn ssa_local_is_param(mir_locals: [MirLocal], local_id: i64) -> bool:
@@ -1454,6 +1515,14 @@ fn ssa_block_written_local_ids(block: MirBlock) -> Dict<i64, bool>:
         # Keep LocalId(0) and discard only the negative no-destination sentinel.
         if local_id >= 0:
             written[local_id] = true
+        match inst.kind:
+            case InlineAsm(_, _, _, outputs, _, _, _):
+                for outp in outputs:
+                    val out_id = _ssa_asm_output_local_id(outp)
+                    if out_id >= 0:
+                        written[out_id] = true
+            case _:
+                pass_do_nothing
     written
 
 fn ssa_cross_block_live_locals(blocks: [MirBlock], mir_locals: [MirLocal]) -> [i64]:
@@ -1492,6 +1561,14 @@ fn ssa_reassigned_param_locals(blocks: [MirBlock], mir_locals: [MirLocal]) -> [i
             val written_id = _ssa_written_local_id(inst)
             if written_id >= 0 and params.contains_key(written_id):
                 result = local_list_push_unique(result, written_id)
+            match inst.kind:
+                case InlineAsm(_, _, _, outputs, _, _, _):
+                    for outp in outputs:
+                        val out_id = _ssa_asm_output_local_id(outp)
+                        if out_id >= 0 and params.contains_key(out_id):
+                            result = local_list_push_unique(result, out_id)
+                case _:
+                    pass_do_nothing
     result
 
 # --- read-side: rewrite a use of a possibly-reassigned local into a Load ---
@@ -1645,6 +1722,30 @@ fn ssa_alloca_rewrite_inst_operands(inst: MirInst, slot_indices: Dict<i64, i64>,
         case StoreGlobal(symbol, value):
             val rv = ssa_alloca_rewrite_operand(value, slot_indices, slot_values, next_temp)
             SsaAllocaOperandRewriteResult(MirInst(kind: MirInstKind.StoreGlobal(symbol, rv[0]), span: inst.span), rv[1], rv[2])
+        case InlineAsm(asm_template, is_volatile, inputs, outputs, clobbers, clobber_abis, options):
+            var new_inputs: [MirAsmOperand] = []
+            var prepend: [MirInst] = []
+            var cur_temp = next_temp
+            for inp in inputs:
+                val r = ssa_alloca_rewrite_operand(inp.operand, slot_indices, slot_values, cur_temp)
+                new_inputs = new_inputs.push(MirAsmOperand(
+                    name: inp.name,
+                    kind: inp.kind,
+                    location: inp.location,
+                    operand: r[0],
+                    constraint_index: inp.constraint_index
+                ))
+                for p in r[1]:
+                    prepend = prepend.push(p)
+                cur_temp = r[2]
+            SsaAllocaOperandRewriteResult(
+                MirInst(
+                    kind: MirInstKind.InlineAsm(asm_template, is_volatile, new_inputs, outputs, clobbers, clobber_abis, options),
+                    span: inst.span
+                ),
+                prepend,
+                cur_temp
+            )
         case _:
             SsaAllocaOperandRewriteResult(inst, [], next_temp)
 
@@ -1737,6 +1838,42 @@ fn ssa_alloca_apply_def_store(inst: MirInst, slot_indices: Dict<i64, i64>, slot_
                     span: nil
                 )]
                 out_next = next_temp + 1
+    else:
+        match inst.kind:
+            case InlineAsm(asm_template, is_volatile, inputs, outputs, clobbers, clobber_abis, options):
+                var new_outputs: [MirAsmOperand] = []
+                var changed_outputs = false
+                for outp in outputs:
+                    val out_id = _ssa_asm_output_local_id(outp)
+                    val idx = if out_id >= 0 and slot_indices.contains_key(out_id): slot_indices[out_id] else: -1
+                    if idx >= 0:
+                        val slot_id = slot_values[idx]
+                        val new_dest = out_next
+                        out_next = out_next + 1
+                        changed_outputs = true
+                        new_outputs = new_outputs.push(MirAsmOperand(
+                            name: outp.name,
+                            kind: outp.kind,
+                            location: outp.location,
+                            operand: MirOperand(kind: MirOperandKind.Copy(ssa_local(new_dest))),
+                            constraint_index: outp.constraint_index
+                        ))
+                        out_stores = out_stores.push(MirInst(
+                            kind: MirInstKind.Store(
+                                MirOperand(kind: MirOperandKind.Copy(ssa_local(slot_id))),
+                                MirOperand(kind: MirOperandKind.Copy(ssa_local(new_dest)))
+                            ),
+                            span: None
+                        ))
+                    else:
+                        new_outputs = new_outputs.push(outp)
+                if changed_outputs:
+                    out_inst = MirInst(
+                        kind: MirInstKind.InlineAsm(asm_template, is_volatile, inputs, new_outputs, clobbers, clobber_abis, options),
+                        span: inst.span
+                    )
+            case _:
+                pass_do_nothing
     SsaAllocaDefStoreResult(out_inst, out_stores, out_next)
 
 fn ssa_alloca_rewrite_inst(inst: MirInst, slot_indices: Dict<i64, i64>, slot_values: [i64], next_temp: i64) -> SsaAllocaRewriteInstResult:
