@@ -1,6 +1,6 @@
 # SDN test wrapper scoped-process provider platform gap
 
-Status: open; release verification blocker on all current providers.
+Status: open on Windows (no V4 process-observation owner); Linux/Darwin admitted via group retirement (2026-11-20 update below).
 
 The public SDN test wrapper requires the V4 owned process provider to pass a
 per-child environment without mutating the parent environment, collect bounded
@@ -50,3 +50,21 @@ required capture evidence.
 Source evidence: `runtime_linux_group_owner_impl.h` output redirection near
 lines 561–579, and the direct Linux request/poll contract. This is a source
 audit finding; no native owner qualification was performed.
+
+## 2026-11-20 update: Linux/Darwin admitted in source, Windows still open
+
+The Linux owner has advertised `POV4_CAP_PROCESS_GROUP_RETIRE` since
+`998622c8624` and Darwin already did, but
+`test_sdn_group_retirement_preflight` still returned `Err` on both branches, so
+`--format sdn` could not succeed on any host. The preflight now uses the shared
+`process_observation_monitor_group_gap_v4` contract (the HIR-worker and
+bootstrap-builder gate). Linux/Darwin end-to-end execution of the wrapper is
+unrun; only the pure preflight spec ran (Windows seed, 10/10).
+
+Windows remains open and is a runtime platform gap, not a native-build or pin
+defect: `rt_process_observation_v4_capabilities_value` is the
+`{4, 8, 0, 0, 0, 0, 0, ENOTSUP}` stub outside unix, so both the natively built
+runner and the seed interpreting the runner source stop at
+`SDN worker scoped-environment process provider is unavailable or insufficient`
+(rc 1). Closing it needs a Windows V4 owner (job-object group retirement,
+pinned executable/cwd, bounded capture) in `runtime_process_owned.c`.

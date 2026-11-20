@@ -3,7 +3,9 @@
 # V4 supplies a child-scoped environment, pinned executable/cwd and frozen
 # process ownership. This required ProcessGroup request is admitted only where
 # the native V4 owner advertises POV4_CAP_PROCESS_GROUP_RETIRE (Linux with a
-# readable /proc, Darwin); elsewhere it is rejected before spawn.
+# readable /proc, Darwin); elsewhere it is rejected before spawn. Windows has
+# no V4 owner (runtime_process_owned.c answers ENOTSUP), so `--format sdn`
+# fails closed there with a canonical failure frame.
 # This transport is not provenance admission or proof of test/source closure.
 use app.io.cli_ops.{cli_current_exe_path}
 use app.io.env_ops.{cwd, env_get, env_vars}
@@ -12,10 +14,11 @@ use app.test_runner_new.sdn_worker_protocol.{TestRunnerSdnMessage, validate_test
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.encode.{sdn_encode_canonical}
 use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
-use std.common.process.observation_v4.{ProcessObservationEnvironmentV4, ProcessObservationRequestV4,
+use std.common.process.observation_v4.{PROCESS_OBSERVATION_V4_MAX_WALL_BUDGET_NS, ProcessObservationEnvironmentV4, ProcessObservationRequestV4,
     ProcessObservationReceiptV4, ProcessObservationPacketKindV4, ProcessObservationStatusV4,
     ProcessObservationFailurePhaseV4, ProcessObservationFailureReasonV4, ProcessObservationStreamStateV4,
     ProcessObservationEnforcementKindV4, ProcessObservationDescendantPolicyV4,
+    process_observation_monitor_group_gap_v4,
     freeze_process_observation_receipt_v4, freeze_process_observation_cleanup_receipt_v4}
 use std.nogc_sync_mut.io.process_observation_v4.{OwnedCwdPinV4,
     ProcessObservationStartV4, process_observation_capabilities_v4}
@@ -33,16 +36,16 @@ pub struct TestSdnFrame:
     document: text
     exit_code: i32
 
-# Current native V4 declares nine capability bits (0..8), ending with
-# POV4_CAP_LEADER_ONLY; there is no declared process-group retirement bit.
-# runtime_process_owned.c rejects any non-LeaderOnly descendant policy and
-# emits TREE_EMPTY=0. Keep the unsupported boundary explicit until the owner
-# publishes an implemented, typed group-retirement capability and fixtures.
-# Unknown future bits are not evidence of that capability.
+# Admission is the shared monitor-policy ProcessGroup contract: the provider
+# must declare POV4_CAP_PROCESS_GROUP_RETIRE with every capability that policy
+# depends on. A leader-only provider, a negative word and undeclared bits alone
+# never authorize the transport.
 pub fn test_sdn_group_retirement_preflight(capability_bits: i64) -> Result<(), text>:
-    if capability_bits >= 0 and (capability_bits & ~511) == 0:
-        return Err("SDN result-file transport unavailable: current V4 providers support leader-only retirement; process-group retirement is required")
-    Err("SDN result-file transport unavailable: provider capabilities do not declare a recognized process-group retirement contract")
+    if capability_bits < 0:
+        return Err("SDN result-file transport unavailable: process-group retirement is required; provider capability word is invalid")
+    val gap = process_observation_monitor_group_gap_v4(capability_bits)
+    if gap == "": return Ok(())
+    Err("SDN result-file transport unavailable: process-group retirement is required; provider lacks " + gap)
 
 fn _sdn_exit(code: i64) -> i32:
     if code > 0 and code <= 2147483647: code as i32 else: 1
@@ -223,7 +226,7 @@ fn _sdn_launch(binary: text, directory: text, arguments: [text], environment: [P
     val request = ProcessObservationRequestV4(argv: [binary] + arguments,
         environment: environment, canonical_cwd: directory, canonical_pinned_directory: directory,
         executable_pin: 0, executable_digest: [], cwd_pin_claim: 0, cwd_identity_digest: [],
-        capability_bits: capabilities, wall_budget_ns: 28800000000000,
+        capability_bits: capabilities, wall_budget_ns: PROCESS_OBSERVATION_V4_MAX_WALL_BUDGET_NS,
         term_grace_ns: 1000000000, cleanup_budget_ns: 30000000000,
         stdout_limit_bytes: SDN_DIAGNOSTIC_LIMIT, stderr_limit_bytes: SDN_DIAGNOSTIC_LIMIT,
         memory_limit_bytes: 0, enforcement_kind: ProcessObservationEnforcementKindV4.None,
