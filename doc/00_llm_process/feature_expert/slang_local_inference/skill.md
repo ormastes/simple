@@ -319,7 +319,14 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
   Media parts are never dropped: `serving_chat.media_refusal` answers 400
   `unsupported_modality` unless the resident model can take them. Each media part
   becomes `SLANG_MEDIA_MARKER` (`<__media__>`) in the chat frame.
-- **Video:** refused with a clear error (no decoder, no ffmpeg subprocess).
+- **Video (L7):** `modality/video_frames.spl` `sample_frames(blob, n)`. With
+  `SLANG_FFMPEG=<path to ffmpeg.exe>` set and a projector model, `serving_chat.expand_video_parts`
+  replaces each `video_url` part by n JPEG `image` parts (default 4 because 8 SmolVLM2 frames overflow n_ctx 4096; `SLANG_VIDEO_FRAMES`, 1..32; 384 px edge;
+  duration from `ffmpeg -i`, then `fps=n/dur` -> mjpeg image2pipe split on SOI/EOI). ffmpeg runs only via
+  `process_run_bounded_bytes` (local wrapper, to become `sosix_process_run_bounded_bytes`); temp file removed.
+  Video >10 MiB decoded = 413 `request_too_large`; `SLANG_FFMPEG` not a file = 503; no frame = 400
+  `invalid_media`. With no `SLANG_FFMPEG` the old 400 `unsupported_modality` text is kept verbatim.
+  Static build: `C:/dev/tools/ffmpeg` (gyan.dev essentials, sha256-verified). Live: `slang_video_live_spec.spl`.
 - **Model dir:** `native_formats.gguf_is_projector` walks the GGUF KV block as
   binary (`modality/kind_registry.gguf_facts`): `general.architecture == clip` or
   `general.type == mmproj`; the `mmproj` filename prefix is only the fallback when
