@@ -23,10 +23,32 @@ pub const ENDPOINT_NETWORK_MAX_RULES_V1 = 256
 
 # DNS-like name: dot-separated labels of [a-z0-9-], no leading/trailing '-',
 # label 1..63, total 1..253. Lowercase only so the spelling is canonical.
+# Never a numeric address: a last label of digits only (an IPv4 literal or a
+# single-number encoding such as `2130706433`) and `localhost` would name
+# loopback or host-local destinations directly (§11, P4d).
 pub fn endpoint_dns_name_ok_v1(s: text) -> bool:
     if s.byte_len() < 1 or s.byte_len() > 253:
         return false
-    for label in s.split("."):
+    if s == "localhost" or s.ends_with(".localhost"):
+        return false
+    val labels = s.split(".")
+    val last = labels[labels.len() - 1]
+    # inet_aton also reads hex (`0x7f000001`), so a 0x-prefixed hex label counts.
+    var start = 0
+    var hex = false
+    if last.starts_with("0x") and last.byte_len() > 2:
+        start = 2
+        hex = true
+    var numeric = last.byte_len() > 0
+    for i in start..last.byte_len():
+        val c = last.byte_at(i) as i64
+        val digit = c >= 48 and c <= 57
+        val hex_letter = hex and c >= 97 and c <= 102
+        if not digit and not hex_letter:
+            numeric = false
+    if numeric:
+        return false
+    for label in labels:
         val n = label.byte_len()
         if n < 1 or n > 63:
             return false

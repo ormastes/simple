@@ -27,9 +27,26 @@ use std.common.container_policy.sandbox_policy_decode_v1.{sandbox_policy_decode_
 use std.common.container_policy.filesystem_plan_v1.*
 use std.common.container_policy.diagnostics_v1.{scmac_codes_of_v1}
 
+fn policy_source() -> text:
+    file_read("test/fixtures/container_policy/seatbelt_policy_valid.sdn") ?? ""
+
 fn policy() -> SandboxPolicyV1:
-    val src = file_read("test/fixtures/container_policy/seatbelt_policy_valid.sdn") ?? ""
-    sandbox_policy_decode_v1(src, "policy.sdn").unwrap()
+    sandbox_policy_decode_v1(policy_source(), "policy.sdn").unwrap()
+
+# The same policy with its two explicit grants written in the opposite order.
+fn swapped_policy() -> SandboxPolicyV1:
+    val first = "        - root: \"broker-socket\"\n          ops: [\"ipc\"]\n          recursive: false\n"
+    val second = "        - root: \"shared-cache\"\n          ops: [\"read-metadata\", \"read-data\"]\n          recursive: true\n"
+    sandbox_policy_decode_v1(policy_source().replace(first + second, second + first), "policy.sdn").unwrap()
+
+fn planned_paths(p: SandboxPolicyV1, rs: [ResolvedRootV1]) -> [text]:
+    var out: [text] = []
+    match filesystem_plan_v1(p, FilesystemResolvedFactsV1(roots: rs, protected: protected()), baseline(), "policy.sdn"):
+        case Ok(plan):
+            for g in plan.grants:
+                out.push(g.canonical_path)
+        case Err(ds): out.push("refused: " + ds[0].message)
+    out
 
 fn dir(r: text, p: text) -> ResolvedRootV1:
     ResolvedRootV1(root_ref: r, canonical_path: p, identity: "id:" + p, kind: ResolvedObjectKindV1.Directory,
@@ -152,3 +169,64 @@ describe "Filesystem grant/deny planning":
         changed[0] = ResolvedRootV1(root_ref: "prepared-workspace", canonical_path: "/state/attempts/a1/workspace",
             identity: "id:replaced", kind: ResolvedObjectKindV1.Directory, case_insensitive: true)
         expect(digest_of(changed, protected(), "seatbelt-abi-v1") == a).to_equal(false)
+
+    it "orders planned grants canonically whatever the declaration order":
+        """
+        Swapping the two explicit grants in the policy document leaves the
+        planned grant order unchanged: it is sorted by canonical path, not
+        taken from the document. The swapped document really decodes in the
+        other order, so this fails if planning stops sorting.
+        """
+        val rs = with_toolchain(roots(), "/opt/simple/toolchain")
+        val swapped = swapped_policy()
+        expect(swapped.filesystem.grants[0].root_ref).to_equal("shared-cache")
+        val want = planned_paths(policy(), rs)
+        expect(want.len()).to_equal(7)
+        expect(want[0]).to_equal("/cache/immutable")
+        expect(planned_paths(swapped, rs)).to_equal(want)
+
+    it "refuses facts that omit the always-denied protected roots":
+        """
+        Supervisor state and attempt-private material are always denied
+        (§10.2). A host boundary that reports neither cannot prove the plan
+        keeps them out of reach, so planning fails closed (SCMAC-FS-002)
+        instead of admitting every grant against an empty deny set.
+        """
+        val rs = with_toolchain(roots(), "/opt/simple/toolchain")
+        expect(plan_codes(rs, [])).to_equal(["SCMAC-FS-002", "SCMAC-FS-002"])
+        val no_private = [prot("host-scope", ProtectedRootClassV1.SupervisorState, "/state/host-scope")]
+        expect(plan_codes(rs, no_private)).to_equal(["SCMAC-FS-002"])
+
+    it "treats a grant on the same object as a protected root as an overlap":
+        """
+        A different spelling of one object (a firmlink such as
+        `/System/Volumes/Data/...`, or a hard link) has the protected
+        root's identity under another path. Path containment misses it;
+        identity equality refuses it as SCMAC-FS-001.
+        """
+        var rs = roots()
+        rs.push(ResolvedRootV1(root_ref: "toolchain", canonical_path: "/System/Volumes/Data/Users/dev/.ssh",
+            identity: "id:/Users/dev/.ssh", kind: ResolvedObjectKindV1.Directory, case_insensitive: true))
+        expect(plan_codes(rs, protected())).to_equal(["SCMAC-FS-001"])
+
+    it "refuses canonical paths carrying NUL or control bytes":
+        """
+        A real host path never carries NUL, and control bytes would reach
+        the profile compiler as literal text (§9.3: reject NULs and
+        policy-language injection). Such a fact is not canonical.
+        """
+        val rs = with_toolchain(roots(), "/opt/simple/tool\x00chain")
+        expect(plan_codes(rs, protected())).to_equal(["SCMAC-FS-002"])
+        val nl = with_toolchain(roots(), "/opt/simple/tool\nchain")
+        expect(plan_codes(nl, protected())).to_equal(["SCMAC-FS-002"])
+
+    it "refuses two grant roots that resolve to one object":
+        """
+        A second reference that resolves to the workspace object would merge
+        its grant into the workspace and widen `workspaceAccess`. Distinct
+        references sharing one identity are ambiguous (SCMAC-FS-002).
+        """
+        var rs = roots()
+        rs.push(ResolvedRootV1(root_ref: "toolchain", canonical_path: "/alias/workspace",
+            identity: "id:/state/attempts/a1/workspace", kind: ResolvedObjectKindV1.Directory, case_insensitive: true))
+        expect(plan_codes(rs, protected())).to_equal(["SCMAC-FS-002"])

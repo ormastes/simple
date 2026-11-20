@@ -93,3 +93,25 @@ describe "Endpoint network SDN decoding":
         val both = refusals_of(src.replace("          destinationService: \"compiler.tools.test\"\n",
             "          destinationService: \"compiler.tools.test\"\n          destinationHost: \"x.test\"\n"))
         expect(both[0].notes).to_contain("kind: destination")
+
+    it "refuses IP literals and localhost as destination names":
+        """
+        A destination is a DNS name, never a numeric address: an IPv4
+        literal, a single-number encoding or `localhost` would let an allow
+        rule name loopback or a host-local address directly (design §11,
+        P4d: no loopback-to-host escape, numeric encodings must not bypass
+        rules). A name whose last label is all digits is refused.
+        """
+        val src = fixture("endpoint_network_valid.sdn")
+        for bad in ["127.0.0.1", "169.254.169.254", "2130706433", "0x7f000001", "localhost", "api.localhost", "10.0.0.010"]:
+            val ds = refusals_of(src.replace("destinationHost: \"packages.example.org\"",
+                "destinationHost: \"" + bad + "\""))
+            expect(ds[0].code).to_equal("SCMAC-SCHEMA-001")
+            expect(ds[0].notes).to_contain("path: policy.rules.1.destinationHost")
+            expect(ds[0].notes).to_contain("kind: dns_name")
+        val svc = refusals_of(src.replace("destinationService: \"compiler.tools.test\"",
+            "destinationService: \"127.0.0.1\""))
+        expect(svc[0].notes).to_contain("path: policy.rules.0.destinationService")
+        val ok = refusals_of(src.replace("destinationHost: \"packages.example.org\"",
+            "destinationHost: \"pkg1.example.org\""))
+        expect(ok[0].code).to_equal("accepted")
