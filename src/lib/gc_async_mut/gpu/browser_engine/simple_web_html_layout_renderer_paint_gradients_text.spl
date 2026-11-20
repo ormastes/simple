@@ -9,7 +9,7 @@ use std.gpu.engine2d.color.{blend as engine2d_color_blend}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.*
 use std.common.encoding.sfnt.{OtFont, read_u16_be}
 use std.common.encoding.sfnt_cmap.{CmapFormat4, CmapFormat12, cmap_lookup, cmap12_lookup}
-use std.common.encoding.sfnt_glyf.{SFNT_GLYF_MOVE, SFNT_GLYF_LINE, SFNT_GLYF_QUAD, SFNT_GLYF_CLOSE, SfntGlyfCommand, parse_sfnt_glyf_outline}
+use std.common.encoding.sfnt_glyf.{SFNT_GLYF_MOVE, SFNT_GLYF_LINE, SFNT_GLYF_QUAD, SFNT_GLYF_CLOSE, SfntGlyfCommand, parse_sfnt_glyf_outline, sfnt_lcd_glyph_outline, SFNT_GLYPH_SELECTOR_INDEX}
 use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{gradient_layer_list, parse_gradient_angle_deg, gradient_layer_entries, gradient_layer_split}
 use std.gc_async_mut.gpu.engine2d.gradient_tiles.{gradient_tile_spans, gradient_pixels_round_clip, gradient_layer_stack_over}
@@ -723,18 +723,34 @@ fn _ttf_hmtx_advance_px(face: _TtfFaceEntry, gid: u32, font_size: i32) -> i32:
     val scale = (font_size as f64) / (face.units_per_em as f64)
     ((adv_fu as f64) * scale + 0.5) as i32
 
-fn _ttf_rasterize_glyph(face: _TtfFaceEntry, gid: u32, font_size: i32, synth_bold: bool, synth_italic: bool) -> _TtfGlyphBitmap:
+fn _ttf_rasterize_glyph(face: _TtfFaceEntry, gid: u32, font_size: i32, font_size_milli: i32, synth_bold: bool, synth_italic: bool) -> _TtfGlyphBitmap:
     val adv_px = _ttf_hmtx_advance_px(face, gid, font_size)
     if gid == 0u32 or font_size <= 0 or font_size > 512:
         return _ttf_empty_glyph_bitmap(adv_px)
     var cmds: [SfntGlyfCommand] = []
     var has_outline = false
-    match parse_sfnt_glyf_outline(face.font, gid):
-        Some(outline):
-            cmds = outline.commands
-            has_outline = true
-        None:
-            has_outline = false
+    # Up to Skia's SK_MAX_SIZE_FOR_LCDTEXT (48 px, `FONT_LCD_MAX_SIZE_PX` in
+    # font_renderer.spl) Chrome 159 draws the light-autohinted outline (y
+    # knots at the milli size), the outline the cpu_simd and vulkan lanes
+    # take. This lane scans that outline for plain gray coverage (the LCD
+    # gray is FIR-blurred: no 16 px stem reaches full coverage). Above 48 px,
+    # and for synthetic bold/italic, the plain outline stays: an exact-area
+    # scan of the hinted 100 px outline inks the 1/4-px rise of the stem-only
+    # H/I/L tops as a whole row that Chrome's gray text does not draw.
+    if font_size <= 48 and not synth_bold and not synth_italic:
+        match sfnt_lcd_glyph_outline(face.font.blob, SFNT_GLYPH_SELECTOR_INDEX, gid as i64, font_size as i64, font_size_milli as i64):
+            Some(hinted):
+                cmds = hinted.slo_commands
+                has_outline = true
+            None:
+                has_outline = false
+    if not has_outline:
+        match parse_sfnt_glyf_outline(face.font, gid):
+            Some(outline):
+                cmds = outline.commands
+                has_outline = true
+            None:
+                has_outline = false
     if not has_outline or cmds.len() == 0:
         return _ttf_empty_glyph_bitmap(adv_px)
     val scale = (font_size as f64) / (face.units_per_em as f64)
