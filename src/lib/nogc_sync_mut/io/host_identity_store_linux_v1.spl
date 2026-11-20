@@ -20,12 +20,12 @@ pub class HostIdentityPlatformV1:
     pub fn read_v1(leaf: text, maximum: i64) -> HostIdentityPlatformReadV1:
         @when(os="linux"):
         val entered = identity_linux_enter_v1()
-        if entered.is_err(): return HostIdentityPlatformReadV1(cleanup_pending: true, error: entered.unwrap_err())
+        if entered.is_err(): return HostIdentityPlatformReadV1(bytes: None, cleanup_pending: true, error: entered.unwrap_err())
         val result = identity_linux_read_v1(self.slot, self.generation, leaf, maximum)
         identity_linux_leave_v1()
         result
         @else:
-        HostIdentityPlatformReadV1(error: "identity-store-host-unsupported")
+        HostIdentityPlatformReadV1(bytes: None, error: "identity-store-host-unsupported")
         @end
 
     pub fn publish_v1(leaf: text, bytes: [u8]) -> HostIdentityPlatformPublishV1:
@@ -377,7 +377,7 @@ fn identity_linux_file_close_v1(slot: i64) -> bool:
 fn identity_linux_read_error_v1(slot: i64, error: text) -> HostIdentityPlatformReadV1:
     val closed = identity_linux_file_close_v1(slot)
     identity_linux_quarantine_v1(slot)
-    HostIdentityPlatformReadV1(cleanup_pending: true, error: error)
+    HostIdentityPlatformReadV1(bytes: None, cleanup_pending: true, error: error)
 
 # Wipes the read copy (the caller's sole holder, parked for this call) before the store refuses the read.
 fn identity_linux_read_wiped_error_v1(slot: i64, mut bytes: [u8], error: text) -> HostIdentityPlatformReadV1:
@@ -394,22 +394,22 @@ fn identity_linux_free_wiped_v1(memory: i64, size: i64):
 @unsafe(reason: "read exact private regular inode with pread and complete metadata/name revalidation", capabilities: [ffi, raw_ptr])
 fn identity_linux_read_v1(slot: i64, generation: i64, leaf: text, maximum: i64) -> HostIdentityPlatformReadV1:
     if not host_identity_leaf_valid_v1(leaf) or maximum < 1 or maximum > 65536:
-        return HostIdentityPlatformReadV1(cleanup_pending: identity_linux_pending_v1(slot, generation), error: "identity-store-read-argument")
+        return HostIdentityPlatformReadV1(bytes: None, cleanup_pending: identity_linux_pending_v1(slot, generation), error: "identity-store-read-argument")
     val current = identity_linux_current_v1(slot, generation)
     if current.is_err():
         if identity_linux_slot_v1(slot, generation).is_ok(): identity_linux_quarantine_v1(slot)
-        return HostIdentityPlatformReadV1(cleanup_pending: identity_linux_pending_v1(slot, generation), error: current.unwrap_err())
+        return HostIdentityPlatformReadV1(bytes: None, cleanup_pending: identity_linux_pending_v1(slot, generation), error: current.unwrap_err())
     var state = current.unwrap()
     val parent = state.fds[state.fds.len() - 1]
     val name = identity_linux_name_v1(leaf)
-    if name == 0: return HostIdentityPlatformReadV1(error: "identity-store-memory")
+    if name == 0: return HostIdentityPlatformReadV1(bytes: None, error: "identity-store-memory")
     val fd = openat(parent as i32, name, identity_linux_file_flags_v1(), 0u32) as i64
     val native_error = if fd < 0: volatile_read_u32(__errno_location()) else: 0
     free(name)
     if fd < 0:
         if native_error == 2:
             val rechecked = identity_linux_current_v1(slot, generation)
-            if rechecked.is_ok(): return HostIdentityPlatformReadV1(absent: true)
+            if rechecked.is_ok(): return HostIdentityPlatformReadV1(bytes: None, absent: true)
         return identity_linux_read_error_v1(slot, "identity-store-read-open")
     state.file_fd = fd
     identity_linux_slots_v1[slot] = state
@@ -450,7 +450,7 @@ fn identity_linux_read_v1(slot: i64, generation: i64, leaf: text, maximum: i64) 
     if not identity_linux_file_close_v1(slot):
         if bytes.len() > 0:
             val _close_wipe = secure_zero_u8_slots(bytes)
-        return HostIdentityPlatformReadV1(cleanup_pending: true, error: "identity-store-close-consumed-unconfirmed")
+        return HostIdentityPlatformReadV1(bytes: None, cleanup_pending: true, error: "identity-store-close-consumed-unconfirmed")
     HostIdentityPlatformReadV1(bytes: Some(bytes))
 
 @unsafe(reason: "unlink only retained stage's exact current name binding; never touch destination or substituted object", capabilities: [ffi, raw_ptr])

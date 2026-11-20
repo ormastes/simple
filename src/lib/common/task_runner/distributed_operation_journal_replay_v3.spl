@@ -28,7 +28,13 @@ fn operation_replay_snapshot_stored_v3(root: text, authority_digest: text,
         retention_profile: Option<DistributedOperationRetentionProfileV2> = nil,
         turn: Option<OperationJournalHealthTurnV2> = nil,
         expected_digest: text = "") -> Result<OperationReplaySnapshotV2, text>:
-    val latest = operation_stored_result_v2(database_wal_current_stored_v3(root + "/database-wal",
+    # Same bytes as `root + "/database-wal"`. Written as a method call with an argument on purpose: the frozen Phase 2
+    # compiler carries hir_lambda_param_hint_outlives_module_scope_2026-11-14, so the first one-parameter lambda of a
+    # module (`\digest:` below) takes the previous module's reclaimed hint as its parameter type unless a method call
+    # with an argument is lowered before it in this module (E-HIR-VISIT-UNHANDLED at walk_hir_type).
+    val wal_parts: [text] = [root, "database-wal"]
+    val wal_root: text = wal_parts.join("/")
+    val latest = operation_stored_result_v2(database_wal_current_stored_v3(wal_root,
         authority_digest, backend), turn, expected_digest)?
     if latest == "" and expected_digest != "":
         return operation_stored_result_v2(Err("OPERATION_WAL_CURRENT_MISSING"), turn, expected_digest)
@@ -43,7 +49,7 @@ fn operation_replay_snapshot_stored_v3(root: text, authority_digest: text,
     var checkpoint_sequence: i64 = 0
     while cursor != "":
         val revision: DatabaseWalRevisionV1 = operation_stored_result_v2(database_wal_revision_open_stored_v3(
-            root + "/database-wal", cursor, backend), turn, cursor)?
+            wal_root, cursor, backend), turn, cursor)?
         if revision.database_identity != authority_digest: return Err("OPERATION_WAL_AUTHORITY_CHANGED")
         if expected_last >= 0 and revision.last_sequence != expected_last: return Err("OPERATION_WAL_SEQUENCE_GAP")
         if expected_last < 0:
@@ -52,10 +58,10 @@ fn operation_replay_snapshot_stored_v3(root: text, authority_digest: text,
         if revision.checkpoint_digest != "":
             if retention_profile.is_none(): return Err("OPERATION_CHECKPOINT_PROFILE_REQUIRED")
             val profile = retention_profile.unwrap()
-            val manifest: text = operation_stored_result_v2(database_wal_object_stored_v3(root + "/database-wal",
+            val manifest: text = operation_stored_result_v2(database_wal_object_stored_v3(wal_root,
                 revision.checkpoint_digest, backend), turn, revision.checkpoint_digest)?
             val checkpoint: OperationCheckpointSnapshotV2 = operation_stored_result_v2(distributed_operation_checkpoint_decode_v2(manifest,
-                \digest: operation_stored_result_v2(database_wal_object_stored_v3(root + "/database-wal",
+                \digest: operation_stored_result_v2(database_wal_object_stored_v3(wal_root,
                     digest, backend), turn, digest)), turn, revision.checkpoint_digest)?
             if (checkpoint.authority_digest != authority_digest or checkpoint.base_commit != revision.parent or
                     checkpoint.base_sequence != revision.last_sequence):
@@ -75,7 +81,7 @@ fn operation_replay_snapshot_stored_v3(root: text, authority_digest: text,
             expected_last = 0
             break
         val entries: [WalEntry] = operation_stored_result_v2(database_wal_segment_read_strict_stored_v3(
-            root + "/database-wal", revision, backend), turn, revision.segment_digest)?
+            wal_root, revision, backend), turn, revision.segment_digest)?
         endpoints[revision.digest] = revision.last_sequence
         var index = entries.len()
         while index > 0:
