@@ -13,8 +13,9 @@ entrypoints must not load any native library (lazy first use).
 
 use std.spec.step
 use std.spec.{describe, it, expect}
+use std.io_runtime.{dir_create_all, write_file}
 
-use std.gc_async_mut.slang.host.slang_host.{ggml_lib_default, rocm_bin_default_for, hip_lib_names, hiprtc_lib_names, host_libc_name, host_join, parse_meminfo_bytes, parse_int_text, parse_vm_stat_page_size, parse_vm_stat_available_pages, darwin_available_bytes, host_os_name, host_file_exists, slang_windows_available_bytes_fast}
+use std.gc_async_mut.slang.host.slang_host.{ggml_lib_default, rocm_bin_default_for, hip_lib_names, hiprtc_lib_names, host_libc_name, host_join, parse_meminfo_bytes, parse_int_text, parse_vm_stat_page_size, parse_vm_stat_available_pages, darwin_available_bytes, host_os_name, host_file_exists, slang_windows_available_bytes_fast, host_file_size, host_file_mtime, host_is_dir, host_read_bytes_at, host_file_read}
 use std.gc_async_mut.slang.engine.llm_engine.{engine_loaded_model, engine_backend_available, engine_lib_path, engine_set_lib_path}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{dir_byte_size}
 use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit_with_available, mem_available_bytes, mem_total_bytes, default_headroom_bytes, reset_mem_total_cache_for_test}
@@ -131,3 +132,29 @@ describe "slang model size is unknown, not zero, when the directory cannot be li
         val verdict = check_fit_with_available(-1, 0, 0, 1099511627776)
         expect(verdict.fits).to_equal(false)
         expect(verdict.reason.contains("model size")).to_equal(true)
+
+describe "slang host file seam (size, mtime, dir test, ranged read)":
+    it "answers size, mtime, dir test and a ranged read for a real file":
+        step("Verify: the non-SOSIX wrappers agree with the bytes written")
+        dir_create_all("build/test/slang_host_seam")
+        val p = "build/test/slang_host_seam/f.bin"
+        write_file(p, "0123456789")
+        expect(host_file_size(p)).to_equal(10)
+        expect(host_file_mtime(p)).to_be_greater_than(0)
+        expect(host_is_dir("build/test/slang_host_seam")).to_equal(true)
+        expect(host_is_dir(p)).to_equal(false)
+        match host_read_bytes_at(p, 3, 4):
+            Ok(b):
+                expect(b.len()).to_equal(4)
+                expect(b[0] as i64).to_equal(51)
+            Err(why):
+                expect(why).to_equal("")
+        expect(host_file_size("build/test/slang_host_seam/missing.bin") < 0).to_equal(true)
+
+    it "keeps the kind resolver and model discovery on the slang_host seam":
+        step("Verify: kind_registry and serving_models import no io_runtime / external_file host primitive")
+        for src in ["src/lib/gc_async_mut/slang/modality/kind_registry.spl", "src/lib/gc_async_mut/slang/entrypoints/openai/serving_models.spl"]:
+            val body = host_file_read(src)
+            expect(body.len() > 0).to_equal(true)
+            expect(body.contains("use std.io_runtime")).to_equal(false)
+            expect(body.contains("use std.nogc_sync_mut.io.external_file")).to_equal(false)

@@ -356,9 +356,14 @@ Design: `doc/05_design/ml/slang/slang_pluggable_modalities.md`.
   -> vocoder companion = Tts -> `<arch>.pooling_type` (4 rerank, 1-3 embedding)
   -> no pooling type on an embedding-table arch: a `cls.output.weight` /
   `cls.weight` tensor in the tensor-info table = Rerank -> arch table (bert,
-  nomic-bert, jina-bert-v2 = embedding) -> magic (`lmgg` = Asr/whisper,
-  `model.diffusion_model.` safetensors = ImageGen) -> LlamaForCausalLM =
-  Chat/pure. `NativeModel.profile` carries it (default: Chat [text] ggml).
+  nomic-bert, jina-bert-v2 = embedding; flux, sd1, sd2, sdxl, sd3, aura,
+  t5encoder = ImageGen on stable-diffusion) -> magic (`lmgg` WITH whisper.cpp
+  hparams `n_audio_ctx 1500`, `n_mels 80|128` = Asr/whisper; a legacy llama
+  ggml file shares `lmgg` and is NOT Asr; `model.diffusion_model.` safetensors
+  = ImageGen) -> LlamaForCausalLM = Chat/pure. `NativeModel.profile` carries it
+  (default: Chat [text] ggml). The deciding GGUF is the lowest-named model file
+  that names an architecture (split shard 1), not listing order.
+  `kind: "tts"` (quoted) equals `kind: tts`.
 - **Real reranker:** `bge-reranker-v2-m3-Q8_0.gguf` writes NO `bert.pooling_type`
   and no classifier KV (35 keys dumped); only its `cls.*` tensors mark it.
   `bge-small-en-v1.5` has `pooling_type 2` and no `cls.*`. The cheap KV walk
@@ -366,6 +371,12 @@ Design: `doc/05_design/ml/slang/slang_pluggable_modalities.md`.
   type gets a second, FULL walk (vocab + tensor table, 6.8 MB header for the
   reranker): real file -> `arch=bert pooling=-1 cls_head=true`, whole
   `simple-release.exe run` probe 1.9 s. A failed full walk keeps the cheap facts.
+- **Header reads:** one growing buffer per file, each step a ranged read of
+  ONLY the bytes past it (the full rerank walk reuses the cheap walk's buffer);
+  `gguf_facts` is cached per (path, size, mtime) in a copy-on-write snapshot
+  (no lock; mtime 0 never cached), so /v1/models, chat_prepare's root scan and
+  kind_mismatch do not re-walk headers per request. `gguf_header_bytes_read()`
+  counts bytes read (spec: a 42 KB header reads exactly its size once, 0 on repeat).
 - **Hostile GGUF:** every key/string/array/tensor-name length and
   `kv_count`/`tensor_count` is bounded by the bytes left in the FILE
   (`_fits`; arrays divide before multiplying); past the file = Malformed, past
@@ -375,6 +386,12 @@ Design: `doc/05_design/ml/slang/slang_pluggable_modalities.md`.
   (reason = why the kind is not served) and keeps a Chat profile's reason (an
   invalid `slang_kind.sdn`, e.g. `kind: embeddings`) as a not-runnable reason, so
   `llm_engine` / `entrypoints/llm` never load an embedder or a typo'd model as chat.
+  The FORMAT's reason wins otherwise ("safetensors recognised; ...", "slang
+  pack recognised; ..."): the resolver's "no kind could be resolved" replaces
+  it only when the format found nothing wrong or an override was refused.
+- Kind routes resolve a slang pack by its manifest `model_id` (as /v1/models
+  lists it) -> 400 `wrong_model_kind`; an empty / unknown-format dir is not a
+  model -> 404.
 - Model-root `slang_kind.sdn` overrides are NOT in git (model dirs live outside
   the repo); `C:/dev/model/bge-reranker-v2-m3-GGUF/slang_kind.sdn` = `kind: rerank`.
 - `/v1/models` entries add `slang_kind`, `input_modalities`, `output_modalities`
@@ -387,9 +404,11 @@ Design: `doc/05_design/ml/slang/slang_pluggable_modalities.md`.
   `serve_embeddings`, `serve_rerank`): wrong kind = 400 `wrong_model_kind` (chat
   routes too, by describing only the named directory; `kind_serves` also lets a Chat model with Audio input serve Asr), right kind = 501 `not_implemented` naming the runner
   (`engine/kind_dispatch.kind_open`, which loads nothing yet).
-- L1 file/dir/env access goes through `slang/host/slang_host` (`host_file_exists`,
-  `host_file_read`, `host_dir_list`, `host_env`); raw GGUF bytes still use
-  `external_file_read_bytes_at` (no host byte-range read yet).
+- L1 host access goes through `slang/host/slang_host` only: `host_file_exists`,
+  `host_file_read`, `host_dir_list`, `host_env` (SOSIX) and `host_file_size`,
+  `host_file_mtime`, `host_is_dir`, `host_read_bytes_at` (no SOSIX accessor
+  yet; the single place to swap). slang_host_spec pins that kind_registry and
+  serving_models import no io_runtime / external_file primitive.
 - Spec: `test/01_unit/lib/gc_async_mut/slang/kind_registry_spec.spl`.
 
 ## Model variety live spec (2026-11-15, Windows, llvm-mingw shim)
