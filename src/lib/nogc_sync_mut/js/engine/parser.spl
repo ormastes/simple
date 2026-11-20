@@ -120,6 +120,16 @@ fn _js_parser_statement(stmt: text) -> JsStatement:
         return JsStatement.Return(value: _js_parser_expression(stmt.slice(7, stmt.byte_len()).trim()))
     if stmt == "return":
         return JsStatement.Return(value: JsExpression.Literal(value: JsValue.Undefined))
+    if stmt == "break":
+        return JsStatement.BreakStmt
+    if stmt == "continue":
+        return JsStatement.ContinueStmt
+    if stmt == "throw":
+        return JsStatement.ThrowStmt(expr: JsExpression.Literal(value: JsValue.Undefined))
+    if _js_parser_starts_with_keyword(stmt, "throw"):
+        return JsStatement.ThrowStmt(expr: _js_parser_expression(stmt.slice(5, stmt.byte_len()).trim()))
+    if _js_parser_starts_with_keyword(stmt, "try"):
+        return _js_parser_try_statement(stmt)
     # Compound statements. The subset parser historically dropped these on the
     # floor, so a C-style `for (var i=0; ...)` fell through to expression
     # parsing and the loop header was evaluated as bare identifier lookups
@@ -203,6 +213,40 @@ fn _js_parser_leading_construct_end(stmt: text) -> i64:
                         cont = false
                 else:
                     cont = false
+        return end
+    if _js_parser_starts_with_keyword(stmt, "try"):
+        val ts = _js_parser_skip_spaces(stmt, 3)
+        if ts >= stmt.len() or stmt.slice(ts, ts + 1) != "{":
+            return -1
+        val te = _js_parser_matching_brace(stmt, ts)
+        if te < 0:
+            return -1
+        var end = te + 1
+        val ce = _js_parser_skip_spaces(stmt, end)
+        val crest = stmt.slice(ce, stmt.byte_len())
+        if _js_parser_starts_with_keyword(crest, "catch"):
+            var c_pos = _js_parser_skip_spaces(stmt, ce + 5)
+            if c_pos < stmt.len() and stmt.slice(c_pos, c_pos + 1) == "(":
+                val c_close = _js_parser_matching_paren(stmt, c_pos)
+                if c_close < 0:
+                    return -1
+                c_pos = _js_parser_skip_spaces(stmt, c_close + 1)
+            if c_pos >= stmt.len() or stmt.slice(c_pos, c_pos + 1) != "{":
+                return -1
+            val c_end = _js_parser_matching_brace(stmt, c_pos)
+            if c_end < 0:
+                return -1
+            end = c_end + 1
+        val fe = _js_parser_skip_spaces(stmt, end)
+        val frest = stmt.slice(fe, stmt.byte_len())
+        if _js_parser_starts_with_keyword(frest, "finally"):
+            val f_pos = _js_parser_skip_spaces(stmt, fe + 7)
+            if f_pos >= stmt.len() or stmt.slice(f_pos, f_pos + 1) != "{":
+                return -1
+            val f_end = _js_parser_matching_brace(stmt, f_pos)
+            if f_end < 0:
+                return -1
+            end = f_end + 1
         return end
     if stmt.starts_with("{"):
         val be = _js_parser_matching_brace(stmt, 0)
@@ -401,32 +445,81 @@ fn _js_parser_if_statement(stmt: text) -> JsStatement:
                 else_body = _js_parser_extract_body(stmt, after)
     JsStatement.If(cond: cond, then_body: then_body, else_body: else_body)
 
+fn _js_parser_try_statement(stmt: text) -> JsStatement:
+    val ts = _js_parser_skip_spaces(stmt, 3)
+    if ts >= stmt.len() or stmt.slice(ts, ts + 1) != "{":
+        return JsStatement.ExprStmt(_js_parser_expression(stmt))
+    val te = _js_parser_matching_brace(stmt, ts)
+    if te < 0:
+        return JsStatement.ExprStmt(_js_parser_expression(stmt))
+    val try_body = js_parse_program_subset(stmt.slice(ts + 1, te))
+    var end = te + 1
+    var catch_param = ""
+    var catch_body: [JsStatement] = []
+    var finally_body: [JsStatement] = []
+    val ce = _js_parser_skip_spaces(stmt, end)
+    val crest = stmt.slice(ce, stmt.byte_len())
+    if _js_parser_starts_with_keyword(crest, "catch"):
+        var c_pos = _js_parser_skip_spaces(stmt, ce + 5)
+        if c_pos < stmt.len() and stmt.slice(c_pos, c_pos + 1) == "(":
+            val c_close = _js_parser_matching_paren(stmt, c_pos)
+            if c_close >= 0:
+                catch_param = stmt.slice(c_pos + 1, c_close).trim()
+                c_pos = _js_parser_skip_spaces(stmt, c_close + 1)
+        if c_pos < stmt.len() and stmt.slice(c_pos, c_pos + 1) == "{":
+            val c_end = _js_parser_matching_brace(stmt, c_pos)
+            if c_end >= 0:
+                catch_body = js_parse_program_subset(stmt.slice(c_pos + 1, c_end))
+                end = c_end + 1
+    val fe = _js_parser_skip_spaces(stmt, end)
+    val frest = stmt.slice(fe, stmt.byte_len())
+    if _js_parser_starts_with_keyword(frest, "finally"):
+        val f_pos = _js_parser_skip_spaces(stmt, fe + 7)
+        if f_pos < stmt.len() and stmt.slice(f_pos, f_pos + 1) == "{":
+            val f_end = _js_parser_matching_brace(stmt, f_pos)
+            if f_end >= 0:
+                finally_body = js_parse_program_subset(stmt.slice(f_pos + 1, f_end))
+    JsStatement.TryCatch(
+        try_body: try_body,
+        catch_param: catch_param,
+        catch_body: catch_body,
+        finally_body: finally_body
+    )
+
 fn _js_parser_expression(raw: text) -> JsExpression:
     val expr = _js_parser_strip_outer_parens(raw.trim())
     val arrow = _js_parser_find_top_level(expr, "=>")
-    if arrow >= 0:
-        return _js_parser_arrow_expression(expr, arrow)
     val assign = _js_parser_find_top_level_assignment(expr)
-    if assign >= 0:
+    val question = _js_parser_find_ternary_question(expr)
+    val colon = if question >= 0: _js_parser_find_ternary_colon(expr, question) else: -1
+    val ternary = if question >= 0 and colon > question: question else: -1
+    # Assignment, arrow functions, and conditional (`?:`) share JS
+    # AssignmentExpression precedence, so dispatch whichever appears leftmost at
+    # depth 0 so branch assignments/arrows remain inside `?:` instead of stealing.
+    var best_kind = 0
+    var best_pos = -1
+    if arrow >= 0:
+        best_kind = 1
+        best_pos = arrow
+    if assign >= 0 and (best_pos < 0 or assign < best_pos):
+        best_kind = 2
+        best_pos = assign
+    if ternary >= 0 and (best_pos < 0 or ternary < best_pos):
+        best_kind = 3
+        best_pos = ternary
+    if best_kind == 1:
+        return _js_parser_arrow_expression(expr, arrow)
+    if best_kind == 2:
         return JsExpression.Assignment(
             target: _js_parser_expression(expr.slice(0, assign)),
             value: _js_parser_expression(expr.slice(assign + 1, expr.byte_len()))
         )
-    # Conditional (ternary) sits just above assignment and below `||` in JS
-    # precedence, so it must be matched before every binary/unary production.
-    val question = _js_parser_find_ternary_question(expr)
-    if question >= 0:
-        val colon = _js_parser_find_ternary_colon(expr, question)
-        if colon > question:
-            return JsExpression.Ternary(
-                condition: _js_parser_expression(expr.slice(0, question)),
-                consequent: _js_parser_expression(expr.slice(question + 1, colon)),
-                alternate: _js_parser_expression(expr.slice(colon + 1, expr.byte_len()))
-            )
-    if expr.starts_with("-") and expr.len() > 1:
-        return JsExpression.Unary(op: "-", operand: _js_parser_expression(expr.slice(1, expr.byte_len())))
-    if expr.starts_with("!") and expr.len() > 1:
-        return JsExpression.Unary(op: "!", operand: _js_parser_expression(expr.slice(1, expr.byte_len())))
+    if best_kind == 3:
+        return JsExpression.Ternary(
+            condition: _js_parser_expression(expr.slice(0, question)),
+            consequent: _js_parser_expression(expr.slice(question + 1, colon)),
+            alternate: _js_parser_expression(expr.slice(colon + 1, expr.byte_len()))
+        )
     val logical_or = _js_parser_find_binary_operator(expr, ["||", "??"])
     if logical_or.first >= 0:
         return JsExpression.Binary(
@@ -476,6 +569,10 @@ fn _js_parser_expression(raw: text) -> JsExpression:
             left: _js_parser_expression(expr.slice(0, exponent.first)),
             right: _js_parser_expression(expr.slice(exponent.first + exponent.second.len(), expr.byte_len()))
         )
+    if expr.starts_with("-") and expr.len() > 1:
+        return JsExpression.Unary(op: "-", operand: _js_parser_expression(expr.slice(1, expr.byte_len())))
+    if expr.starts_with("!") and expr.len() > 1:
+        return JsExpression.Unary(op: "!", operand: _js_parser_expression(expr.slice(1, expr.byte_len())))
     if expr.starts_with("new "):
         val new_rest = expr.slice(4, expr.byte_len()).trim()
         # `new C(args).m(...)`: the constructor call binds tighter than the
@@ -736,6 +833,19 @@ fn _js_parser_skip_spaces(expr: text, pos: i64) -> i64:
 
 # Index of the `?` that opens a top-level conditional expression, or -1.
 # `??` (nullish coalescing) and `?.` (optional chaining) are NOT ternaries.
+fn _js_parser_skip_literal_end(expr: text, i: i64) -> i64:
+    """If expr[i] begins a template literal or regex literal, return its
+    closing index; otherwise return -1."""
+    val ch = expr.slice(i, i + 1)
+    if ch == "`":
+        val tmpl_end = _js_parser_template_end(expr, i)
+        if tmpl_end >= i:
+            return tmpl_end
+        return expr.len() - 1
+    if ch == "/":
+        return _js_parser_regex_literal_end(expr, i)
+    -1
+
 fn _js_parser_find_ternary_question(expr: text) -> i64:
     var depth = 0
     var quote = ""
@@ -748,9 +858,9 @@ fn _js_parser_find_ternary_question(expr: text) -> i64:
             else if ch == quote:
                 quote = ""
         else:
-            val re_end = if ch == "/": _js_parser_regex_literal_end(expr, i) else: -1
-            if re_end > i:
-                i = re_end
+            val lit_end = _js_parser_skip_literal_end(expr, i)
+            if lit_end > i:
+                i = lit_end
             else if ch == "'" or ch == "\"":
                 quote = ch
             else if ch == "(" or ch == "[" or ch == "{":
@@ -782,9 +892,9 @@ fn _js_parser_find_ternary_colon(expr: text, question: i64) -> i64:
             else if ch == quote:
                 quote = ""
         else:
-            val re_end = if ch == "/": _js_parser_regex_literal_end(expr, i) else: -1
-            if re_end > i:
-                i = re_end
+            val lit_end = _js_parser_skip_literal_end(expr, i)
+            if lit_end > i:
+                i = lit_end
             else if ch == "'" or ch == "\"":
                 quote = ch
             else if ch == "(" or ch == "[" or ch == "{":
@@ -817,9 +927,9 @@ fn _js_parser_find_top_level(expr: text, needle: text) -> i64:
             else if ch == quote:
                 quote = ""
         else:
-            val re_end = if ch == "/": _js_parser_regex_literal_end(expr, i) else: -1
-            if re_end > i:
-                i = re_end
+            val lit_end = _js_parser_skip_literal_end(expr, i)
+            if lit_end > i:
+                i = lit_end
             else if ch == "'" or ch == "\"":
                 quote = ch
             else if ch == "(" or ch == "[" or ch == "{":
@@ -844,9 +954,9 @@ fn _js_parser_find_top_level_right(expr: text, needle: text) -> i64:
             else if ch == quote:
                 quote = ""
         else:
-            val re_end = if ch == "/": _js_parser_regex_literal_end(expr, i) else: -1
-            if re_end > i:
-                i = re_end
+            val lit_end = _js_parser_skip_literal_end(expr, i)
+            if lit_end > i:
+                i = lit_end
             else if ch == "'" or ch == "\"":
                 quote = ch
             else if ch == "(" or ch == "[" or ch == "{":
@@ -884,9 +994,9 @@ fn _js_parser_find_top_level_right_binary_operator(expr: text, needle: text) -> 
             else if ch == quote:
                 quote = ""
         else:
-            val re_end = if ch == "/": _js_parser_regex_literal_end(expr, i) else: -1
-            if re_end > i:
-                i = re_end
+            val lit_end = _js_parser_skip_literal_end(expr, i)
+            if lit_end > i:
+                i = lit_end
             else if ch == "'" or ch == "\"":
                 quote = ch
             else if ch == "(" or ch == "[" or ch == "{":
@@ -894,19 +1004,27 @@ fn _js_parser_find_top_level_right_binary_operator(expr: text, needle: text) -> 
             else if ch == ")" or ch == "]" or ch == "}":
                 depth = depth - 1
             else if depth == 0 and expr.slice(i, i + needle.len()) == needle:
-                if _js_parser_binary_operator_match_is_standalone(expr, i, needle):
+                if _js_parser_binary_operator_match_is_standalone(expr, i, needle) and not _js_parser_binary_operator_is_unary(expr, i, needle):
                     found = i
         i = i + 1
     found
 
 fn _js_parser_binary_operator_match_is_standalone(expr: text, pos: i64, op: text) -> bool:
+    val prev = if pos > 0: expr.slice(pos - 1, pos) else: ""
+    val op_bytes = op.byte_len()
+    val next = if pos + op_bytes < expr.byte_len(): expr.slice(pos + op_bytes, pos + op_bytes + 1) else: ""
     if op == "==":
-        val prev = if pos > 0: expr.slice(pos - 1, pos) else: ""
-        val next = if pos + 2 < expr.len(): expr.slice(pos + 2, pos + 3) else: ""
         return prev != "=" and prev != "!" and prev != "<" and prev != ">" and next != "="
     if op == "!=":
-        val next_bang = if pos + 2 < expr.len(): expr.slice(pos + 2, pos + 3) else: ""
-        return next_bang != "="
+        return next != "="
+    if op == "<":
+        return next != "=" and next != "<"
+    if op == ">":
+        return prev != "=" and next != "=" and next != ">"
+    if op == "+":
+        return prev != "+" and next != "+"
+    if op == "-":
+        return prev != "-" and next != "-"
     true
 
 fn _js_parser_binary_operator_is_unary(expr: text, pos: i64, op: text) -> bool:
@@ -922,7 +1040,7 @@ fn _js_parser_binary_operator_is_unary(expr: text, pos: i64, op: text) -> bool:
         if ch == " " or ch == "\n" or ch == "\r" or ch == "\t":
             i = i - 1
             continue
-        return ch == "(" or ch == "[" or ch == "{" or ch == "," or ch == ":" or ch == "=" or ch == "+" or ch == "-" or ch == "*" or ch == "/" or ch == "%"
+        return ch == "(" or ch == "[" or ch == "{" or ch == "," or ch == ":" or ch == "=" or ch == "+" or ch == "-" or ch == "*" or ch == "/" or ch == "%" or ch == "<" or ch == ">" or ch == "!" or ch == "&" or ch == "|" or ch == "?"
     true
 
 fn _js_parser_find_top_level_assignment(expr: text) -> i64:
@@ -937,9 +1055,9 @@ fn _js_parser_find_top_level_assignment(expr: text) -> i64:
             else if ch == quote:
                 quote = ""
         else:
-            val re_end = if ch == "/": _js_parser_regex_literal_end(expr, i) else: -1
-            if re_end > i:
-                i = re_end
+            val lit_end = _js_parser_skip_literal_end(expr, i)
+            if lit_end > i:
+                i = lit_end
             else if ch == "'" or ch == "\"":
                 quote = ch
             else if ch == "(" or ch == "[" or ch == "{":
@@ -949,7 +1067,7 @@ fn _js_parser_find_top_level_assignment(expr: text) -> i64:
             else if depth == 0 and ch == "=":
                 val prev = if i > 0: expr.slice(i - 1, i) else: ""
                 val next = if i + 1 < expr.len(): expr.slice(i + 1, i + 2) else: ""
-                if prev != "=" and prev != "!" and prev != "<" and prev != ">" and next != "=":
+                if prev != "=" and prev != "!" and prev != "<" and prev != ">" and next != "=" and next != ">":
                     return i
         i = i + 1
     -1
@@ -968,9 +1086,9 @@ fn _js_parser_split_top_level(expr: text, sep: text) -> [text]:
             else if ch == quote:
                 quote = ""
         else:
-            val re_end = if ch == "/": _js_parser_regex_literal_end(expr, i) else: -1
-            if re_end > i:
-                i = re_end
+            val lit_end = _js_parser_skip_literal_end(expr, i)
+            if lit_end > i:
+                i = lit_end
             else if ch == "'" or ch == "\"":
                 quote = ch
             else if ch == "(" or ch == "[" or ch == "{":

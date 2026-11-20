@@ -12,15 +12,27 @@ Script evaluator used by production pages.
 #![allow(REQC001)]
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_get_attr, be_dom_get_style, be_dom_get_text_content}
 use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
 use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
-use std.gc_async_mut.gpu.browser_engine.script.storage_api.{BrowserStorage}
+use std.gc_async_mut.gpu.browser_engine.script.storage_api.{BrowserStorage, storage_clear, storage_set_item}
 use std.gc_async_mut.gpu.browser_engine.script.clipboard_api.{BrowserClipboard}
 use std.gc_async_mut.gpu.browser_engine.script.location_api.{BrowserLocation, BrowserHistory}
 use std.gc_async_mut.gpu.browser_engine.script.js_transpiler.{js_is_javascript}
 # JsRuntime lives in the full runtime (tier fallback); the pure common tier
 # owns only the NATIVE_* ids + dispatch_native (core-purity split).
-use std.nogc_sync_mut.js.engine.runtime.{JsRuntime, js_runtime_with_default_logger}
+use std.nogc_sync_mut.js.engine.runtime.{
+    JsRuntime,
+    js_runtime_with_default_logger,
+    NATIVE_STORAGE_GET_ITEM,
+    NATIVE_STORAGE_SET_ITEM,
+    NATIVE_STORAGE_REMOVE_ITEM,
+    NATIVE_STORAGE_CLEAR,
+    NATIVE_STORAGE_KEY,
+    NATIVE_DOM_EVENT_TARGET_ADD,
+    NATIVE_DOM_EVENT_TARGET_REMOVE,
+    NATIVE_DOM_EVENT_TARGET_DISPATCH
+}
 use std.common.js.engine.js_error.{JsError}
 use lib.js.types.js_types.{JsValue}
 
@@ -130,75 +142,328 @@ pub fn run_script_with_type(runner: ScriptRunner, source: text, script_type: tex
         # accesses — verified empirically; a LOCAL engine works). For pages
         # whose <script> tags share globals, use run_page_scripts, which
         # holds one local engine across all tags.
-        var rt = js_runtime_with_default_logger("script-runner-js")
+        var rt = _bind_bom_and_dom(
+            js_runtime_with_default_logger("script-runner-js"),
+            Some(runner.dom_root),
+            Some(runner.storage),
+            Some(runner.location)
+        )
         match rt.eval(source):
             Ok(v):
                 runner._dom_dirty = true
+                runner.storage = _sync_runner_storage(rt, runner.storage)
                 return _js_value_text(v)
             Err(e):
                 return "js-error: " + _script_js_err_msg(e)
     run_script(runner, source)
 
-fn _bind_minimal_bom_globals(rt: JsRuntime) -> JsRuntime:
-    """Bind window/self/globalThis, navigator and location on a page-script
-    engine (bug js_engine_no_dom_bom_globals_2026-07-11), plus a detached
-    document/body pair (not yet backed by a parsed BeDomNode tree). Storage
-    stay BrowserSession-owned."""
+class _DomProjectionCursor:
+    """Mutable cursor for projecting a BeDomNode subtree into JsRuntime host objects."""
+    runtime: JsRuntime
+    seed_id: i64
+    count: i64
+    body_idx: i64
+    body_obj_id: i64
+    doc_elem_idx: i64
+
+fn _bind_event_target_methods(rt: JsRuntime, obj_id: i64) -> JsRuntime:
     var runtime = rt
+    runtime._define_method_on(obj_id, "addEventListener", NATIVE_DOM_EVENT_TARGET_ADD)
+    runtime._define_method_on(obj_id, "removeEventListener", NATIVE_DOM_EVENT_TARGET_REMOVE)
+    runtime._define_method_on(obj_id, "dispatchEvent", NATIVE_DOM_EVENT_TARGET_DISPATCH)
+    runtime
+
+fn _make_storage_host_object(rt: JsRuntime, initial: BrowserStorage?) -> (JsRuntime, i64):
+    var runtime = rt
+    val storage_id = runtime.create_host_object()
+    runtime._define_method_on(storage_id, "getItem", NATIVE_STORAGE_GET_ITEM)
+    runtime._define_method_on(storage_id, "setItem", NATIVE_STORAGE_SET_ITEM)
+    runtime._define_method_on(storage_id, "removeItem", NATIVE_STORAGE_REMOVE_ITEM)
+    runtime._define_method_on(storage_id, "clear", NATIVE_STORAGE_CLEAR)
+    runtime._define_method_on(storage_id, "key", NATIVE_STORAGE_KEY)
+    runtime.set_host_property(storage_id, "length", JsValue.Number(v: 0.0))
+    if val Some(store) = initial:
+        var interp = runtime.interpreter
+        var i = 0
+        while i + 1 < store._items.len():
+            val k = store._items[i]
+            val v = store._items[i + 1]
+            val prop_key = interp._storage_property_key(k)
+            interp.set_object_property(storage_id, prop_key, JsValue.String(v: v))
+            i = i + 2
+        interp._sync_storage_length(storage_id)
+        runtime.interpreter = interp
+    (runtime, storage_id)
+
+fn _sync_runner_storage(rt: JsRuntime, store: BrowserStorage) -> BrowserStorage:
+    var interp = rt.interpreter
+    val storage_id = interp.host_local_storage_id
+    if storage_id < 0:
+        return store
+    var next = storage_clear(store)
+    val keys = interp._storage_keys(storage_id)
+    for k in keys:
+        val raw = interp.get_object_property(storage_id, interp._storage_property_key(k))
+        val text_val = _js_value_text(raw)
+        next = storage_set_item(next, k, text_val)
+    next
+
+fn _populate_dom_styles(rt: JsRuntime, style_map_id: i64, node: BeDomNode) -> JsRuntime:
+    var runtime = rt
+    val st = be_dom_get_style(node)
+    if st.display != "":
+        runtime.set_host_property(style_map_id, "display", JsValue.String(v: st.display))
+    if st.color != "":
+        runtime.set_host_property(style_map_id, "color", JsValue.String(v: st.color))
+    if st.background_color != "":
+        runtime.set_host_property(style_map_id, "background-color", JsValue.String(v: st.background_color))
+    if st.position != "" and st.position != "static":
+        runtime.set_host_property(style_map_id, "position", JsValue.String(v: st.position))
+    if st.border_color != "":
+        runtime.set_host_property(style_map_id, "border-color", JsValue.String(v: st.border_color))
+    if st.text_align != "" and st.text_align != "left":
+        runtime.set_host_property(style_map_id, "text-align", JsValue.String(v: st.text_align))
+    if st.width > 0.0:
+        runtime.set_host_property(style_map_id, "width", JsValue.String(v: "{st.width}px"))
+    if st.height > 0.0:
+        runtime.set_host_property(style_map_id, "height", JsValue.String(v: "{st.height}px"))
+    val inline_style = node.get_attr("style")
+    if inline_style != "":
+        val decls = inline_style.split(";")
+        for decl in decls:
+            val colon = decl.index_of(":") ?? -1
+            if colon > 0:
+                val prop = decl.slice(0, colon).trim().lower()
+                val sval = decl.slice(colon + 1, decl.byte_len()).trim()
+                if prop != "" and sval != "":
+                    runtime.set_host_property(style_map_id, prop, JsValue.String(v: sval))
+    runtime
+
+fn _create_projected_dom_element(rt: JsRuntime, tag_lower: text, idx: i64, parent_idx: i64) -> (JsRuntime, i64):
+    var runtime = rt
+    val obj_id = runtime.create_host_object()
+    runtime = _bind_event_target_methods(runtime, obj_id)
+    val tag_upper = tag_lower.upper()
+    runtime.set_host_property(obj_id, "nodeType", JsValue.Number(v: 1.0))
+    runtime.set_host_property(obj_id, "tagName", JsValue.String(v: tag_upper))
+    runtime.set_host_property(obj_id, "nodeName", JsValue.String(v: tag_upper))
+    runtime.set_host_property(obj_id, "id", JsValue.String(v: ""))
+    runtime.set_host_property(obj_id, "className", JsValue.String(v: ""))
+    runtime.set_host_property(obj_id, "textContent", JsValue.String(v: ""))
+    runtime.set_host_property(obj_id, "__simple_idx", JsValue.Number(v: idx.to_f64()))
+    runtime.set_host_property(obj_id, "__simple_parent_idx", JsValue.Number(v: parent_idx.to_f64()))
+    val attrs_id = runtime.create_host_object()
+    runtime.set_host_property(obj_id, "__attrs", JsValue.Object(id: attrs_id))
+    val style_map_id = runtime.create_host_object()
+    runtime.set_host_property(obj_id, "__styles", JsValue.Object(id: style_map_id))
+    (runtime, obj_id)
+
+fn _project_dom_subtree(cursor: _DomProjectionCursor, node: BeDomNode, parent_idx: i64):
+    if node.tag_name == "#document":
+        for child in node.children:
+            _project_dom_subtree(cursor, child, -1)
+        return
+    val idx = cursor.count
+    cursor.count = idx + 1
+    var runtime = cursor.runtime
+    var obj_id = -1
+    if node.tag_name == "#text":
+        obj_id = runtime.create_host_object()
+        runtime = _bind_event_target_methods(runtime, obj_id)
+        runtime.set_host_property(obj_id, "nodeType", JsValue.Number(v: 3.0))
+        runtime.set_host_property(obj_id, "tagName", JsValue.String(v: "#text"))
+        runtime.set_host_property(obj_id, "nodeName", JsValue.String(v: "#text"))
+        runtime.set_host_property(obj_id, "data", JsValue.String(v: node.data))
+        runtime.set_host_property(obj_id, "nodeValue", JsValue.String(v: node.data))
+        runtime.set_host_property(obj_id, "textContent", JsValue.String(v: node.data))
+        runtime.set_host_property(obj_id, "__simple_idx", JsValue.Number(v: idx.to_f64()))
+        runtime.set_host_property(obj_id, "__simple_parent_idx", JsValue.Number(v: parent_idx.to_f64()))
+    else:
+        val tag_lower = node.tag_name.lower()
+        val created = _create_projected_dom_element(runtime, tag_lower, idx, parent_idx)
+        runtime = created.0
+        obj_id = created.1
+        if cursor.doc_elem_idx < 0 and parent_idx < 0:
+            cursor.doc_elem_idx = idx
+        if tag_lower == "html":
+            cursor.doc_elem_idx = idx
+        if tag_lower == "body":
+            cursor.body_idx = idx
+            cursor.body_obj_id = obj_id
+        val id_val = be_dom_get_attr(node, "id")
+        val cls_val = be_dom_get_attr(node, "class")
+        val txt_val = be_dom_get_text_content(node)
+        runtime.set_host_property(obj_id, "id", JsValue.String(v: id_val))
+        runtime.set_host_property(obj_id, "className", JsValue.String(v: cls_val))
+        runtime.set_host_property(obj_id, "textContent", JsValue.String(v: txt_val))
+        val attrs_id = match runtime.get_host_property(obj_id, "__attrs"):
+            JsValue.Object(id): id
+            _: -1
+        if attrs_id >= 0:
+            for attr_name in node.attr_names():
+                runtime.set_host_property(attrs_id, attr_name, JsValue.String(v: node.get_attr(attr_name)))
+            if id_val != "":
+                runtime.set_host_property(attrs_id, "id", JsValue.String(v: id_val))
+            if cls_val != "":
+                runtime.set_host_property(attrs_id, "class", JsValue.String(v: cls_val))
+        val style_map_id = match runtime.get_host_property(obj_id, "__styles"):
+            JsValue.Object(id): id
+            _: -1
+        if style_map_id >= 0:
+            runtime = _populate_dom_styles(runtime, style_map_id, node)
+    runtime.set_host_property(cursor.seed_id, "n" + idx.to_text(), JsValue.Object(id: obj_id))
+    cursor.runtime = runtime
+    for child in node.children:
+        _project_dom_subtree(cursor, child, idx)
+
+fn _js_dom_bridge_source() -> text:
+    var js = ""
+    js = js + "function __simple_trim_ws(s) {{ return String(s || '').trim(); }}\n"
+    js = js + "function __simple_split_ws(s) {{ var raw = String(s || '').trim(); if (raw === '') {{ return []; }} var out = []; var parts = raw.split(' '); for (var i = 0; i < parts.length; i = i + 1) {{ var p = parts[i].trim(); if (p !== '') {{ out.push(p); }} }} return out; }}\n"
+    js = js + "function __simple_collect_text(node) {{ if (node === null || node === undefined) {{ return ''; }} if (node.nodeType === 3) {{ return String(node.data || ''); }} var out = ''; var ch = node.children || []; for (var i = 0; i < ch.length; i = i + 1) {{ out = out + __simple_collect_text(ch[i]); }} return out; }}\n"
+    js = js + "function __simple_sync_text(node) {{ var cur = node; while (cur !== null && cur !== undefined) {{ if (cur.nodeType !== 3) {{ cur.textContent = __simple_collect_text(cur); }} cur = cur.parentNode; }} }}\n"
+    js = js + "function __simple_match_compound(el, raw) {{ if (el === null || el === undefined || el.nodeType !== 1) {{ return false; }} var sel = raw.trim(); if (sel === '') {{ return false; }} var attr_idx = sel.indexOf('['); if (attr_idx >= 0) {{ var close_idx = sel.indexOf(']'); if (close_idx > attr_idx) {{ var head = sel.slice(0, attr_idx); var inner = sel.slice(attr_idx + 1, close_idx); var tail = sel.slice(close_idx + 1); var eq = inner.indexOf('='); var attr_ok = false; if (eq >= 0) {{ var aname = inner.slice(0, eq).trim(); var aval = inner.slice(eq + 1).trim(); if (aval.length >= 2 && (aval.slice(0, 1) === '\"' || aval.slice(0, 1) === \"'\")) {{ aval = aval.slice(1, aval.length - 1); }} attr_ok = el.hasAttribute(aname) && el.getAttribute(aname) === aval; }} else {{ attr_ok = el.hasAttribute(inner.trim()); }} if (!attr_ok) {{ return false; }} var combined = head + tail; if (combined === '') {{ return true; }} return __simple_match_compound(el, combined); }} }} var tag = ''; var i = 0; while (i < sel.length) {{ var c = sel.slice(i, i + 1); if (c === '#' || c === '.') {{ break; }} tag = tag + c; i = i + 1; }} if (tag !== '' && tag !== '*') {{ if (String(el.tagName || '').toUpperCase() !== tag.toUpperCase()) {{ return false; }} }} while (i < sel.length) {{ var kind = sel.slice(i, i + 1); var start = i + 1; i = start; while (i < sel.length) {{ var c2 = sel.slice(i, i + 1); if (c2 === '#' || c2 === '.') {{ break; }} i = i + 1; }} var tok = sel.slice(start, i); if (kind === '#') {{ if (el.id !== tok) {{ return false; }} }} else if (kind === '.') {{ var cls_list = __simple_split_ws(el.className); var found = false; for (var j = 0; j < cls_list.length; j = j + 1) {{ if (cls_list[j] === tok) {{ found = true; break; }} }} if (!found) {{ return false; }} }} }} return true; }}\n"
+    js = js + "function __simple_match_chain(el, chain) {{ var parts = __simple_split_ws(chain); if (parts.length === 0) {{ return false; }} if (!__simple_match_compound(el, parts[parts.length - 1])) {{ return false; }} var cur = el.parentNode; var idx = parts.length - 2; while (idx >= 0) {{ var matched = false; while (cur !== null && cur !== undefined) {{ if (__simple_match_compound(cur, parts[idx])) {{ matched = true; cur = cur.parentNode; break; }} cur = cur.parentNode; }} if (!matched) {{ return false; }} idx = idx - 1; }} return true; }}\n"
+    js = js + "function __simple_matches_selector(el, selector) {{ var raw = String(selector || ''); var groups = raw.split(','); for (var i = 0; i < groups.length; i = i + 1) {{ if (__simple_match_chain(el, groups[i])) {{ return true; }} }} return false; }}\n"
+    js = js + "function __simple_query_walk(nodes, selector, first_only, out) {{ for (var i = 0; i < nodes.length; i = i + 1) {{ var n = nodes[i]; if (n.nodeType === 1 && __simple_matches_selector(n, selector)) {{ out.push(n); if (first_only) {{ return true; }} }} if (n.children && n.children.length > 0) {{ if (__simple_query_walk(n.children, selector, first_only, out) && first_only) {{ return true; }} }} }} return false; }}\n"
+    js = js + "function __simple_find_id_walk(nodes, target_id) {{ for (var i = 0; i < nodes.length; i = i + 1) {{ var n = nodes[i]; if (n.nodeType === 1 && n.id === target_id) {{ return n; }} if (n.children && n.children.length > 0) {{ var found = __simple_find_id_walk(n.children, target_id); if (found !== null) {{ return found; }} }} }} return null; }}\n"
+    js = js + "function __simple_dom_install(el) {{ if (el === null || el === undefined || el.__simple_dom_ready) {{ return el; }} el.__simple_dom_ready = true; if (!el.__attrs) {{ el.__attrs = {{}}; }} if (!el.__styles) {{ el.__styles = {{}}; }} if (!el.children) {{ el.children = []; }} if (!el.childNodes) {{ el.childNodes = el.children; }} if (el.parentNode === undefined) {{ el.parentNode = null; }} if (!el.addEventListener) {{ el.addEventListener = document.addEventListener; el.removeEventListener = document.removeEventListener; el.dispatchEvent = document.dispatchEvent; }} el.getAttribute = function(name) {{ var v = this.__attrs[name]; if (v === undefined || v === null) {{ return null; }} return String(v); }}; el.setAttribute = function(name, value) {{ var s = String(value); this.__attrs[name] = s; if (name === 'id') {{ this.id = s; }} else if (name === 'class') {{ this.className = s; }} }}; el.hasAttribute = function(name) {{ var v = this.__attrs[name]; return v !== undefined && v !== null; }}; el.removeAttribute = function(name) {{ this.__attrs[name] = undefined; if (name === 'id') {{ this.id = ''; }} else if (name === 'class') {{ this.className = ''; }} }}; el.appendChild = function(child) {{ if (child === null || child === undefined) {{ return child; }} if (child.parentNode !== null && child.parentNode !== undefined && child.parentNode.removeChild) {{ child.parentNode.removeChild(child); }} child.parentNode = this; this.children.push(child); if (this.childNodes !== this.children) {{ this.childNodes.push(child); }} __simple_sync_text(this); return child; }}; el.removeChild = function(child) {{ if (child === null || child === undefined) {{ return child; }} var kept = []; for (var i = 0; i < this.children.length; i = i + 1) {{ if (this.children[i] !== child) {{ kept.push(this.children[i]); }} }} this.children = kept; this.childNodes = kept; child.parentNode = null; __simple_sync_text(this); return child; }}; el.querySelector = function(sel) {{ var out = []; __simple_query_walk(this.children || [], sel, true, out); return out.length > 0 ? out[0] : null; }}; el.querySelectorAll = function(sel) {{ var out = []; __simple_query_walk(this.children || [], sel, false, out); return out; }}; el.classList = {{ __el: el, contains: function(c) {{ var list = __simple_split_ws(this.__el.className); for (var i = 0; i < list.length; i = i + 1) {{ if (list[i] === c) {{ return true; }} }} return false; }}, add: function(c) {{ if (c === undefined || c === null || c === '') {{ return; }} if (this.contains(c)) {{ return; }} var list = __simple_split_ws(this.__el.className); list.push(String(c)); this.__el.setAttribute('class', list.join(' ')); }}, remove: function(c) {{ var list = __simple_split_ws(this.__el.className); var kept = []; for (var i = 0; i < list.length; i = i + 1) {{ if (list[i] !== c) {{ kept.push(list[i]); }} }} this.__el.setAttribute('class', kept.join(' ')); }}, toggle: function(c) {{ if (this.contains(c)) {{ this.remove(c); return false; }} this.add(c); return true; }} }}; el.style = {{ __el: el, setProperty: function(k, v) {{ this.__el.__styles[String(k)] = String(v); }}, getPropertyValue: function(k) {{ var v = this.__el.__styles[String(k)]; if (v === undefined || v === null) {{ return ''; }} return String(v); }}, removeProperty: function(k) {{ var key = String(k); var old = this.__el.__styles[key]; this.__el.__styles[key] = undefined; if (old === undefined || old === null) {{ return ''; }} return String(old); }} }}; return el; }}\n"
+    js = js + "document.createElement = function(tag) {{ var upper = String(tag || 'div').toUpperCase(); var el = {{ nodeType: 1, tagName: upper, nodeName: upper, id: '', className: '', textContent: '', parentNode: null, children: [], childNodes: [], __attrs: {{}}, __styles: {{}} }}; return __simple_dom_install(el); }};\n"
+    js = js + "document.createTextNode = function(data) {{ var s = String(data || ''); return {{ nodeType: 3, tagName: '#text', nodeName: '#text', data: s, nodeValue: s, textContent: s, parentNode: null, children: [], childNodes: [] }}; }};\n"
+    js = js + "(function() {{ var seed = document.__simple_dom_seed; var nodes = []; document.__simple_roots = []; if (seed) {{ for (var i = 0; i < seed.count; i = i + 1) {{ var n = seed['n' + i]; nodes.push(n); if (n.nodeType !== 3) {{ __simple_dom_install(n); }} else {{ n.children = []; n.childNodes = []; n.parentNode = null; }} }} for (var j = 0; j < nodes.length; j = j + 1) {{ var node = nodes[j]; var p = node.__simple_parent_idx; if (p >= 0 && p < nodes.length) {{ var par = nodes[p]; node.parentNode = par; par.children.push(node); if (par.childNodes !== par.children) {{ par.childNodes.push(node); }} }} else {{ document.__simple_roots.push(node); }} }} if (seed.bodyIdx >= 0 && seed.bodyIdx < nodes.length) {{ document.body = nodes[seed.bodyIdx]; }} if (seed.docElemIdx >= 0 && seed.docElemIdx < nodes.length) {{ document.documentElement = nodes[seed.docElemIdx]; }} else {{ document.documentElement = document.body; }} }} delete document.__simple_dom_seed; }})();\n"
+    js = js + "document.getElementById = function(id) {{ return __simple_find_id_walk(document.__simple_roots || [], String(id || '')); }};\n"
+    js = js + "document.querySelector = function(sel) {{ var out = []; __simple_query_walk(document.__simple_roots || [], sel, true, out); return out.length > 0 ? out[0] : null; }};\n"
+    js = js + "document.querySelectorAll = function(sel) {{ var out = []; __simple_query_walk(document.__simple_roots || [], sel, false, out); return out; }};\n"
+    js
+
+fn _bind_bom_and_dom(rt: JsRuntime, dom_root: BeDomNode?, storage: BrowserStorage?, location: BrowserLocation?) -> JsRuntime:
+    """Bind BOM globals (window/self/globalThis, navigator, location), native
+    localStorage/sessionStorage, and a live DOM node/selector/createElement
+    bridge backed by an optional BeDomNode tree."""
+    var runtime = rt
+    val href = if val Some(loc) = location: (if loc.href != "": loc.href else: "about:blank") else: "about:blank"
+    val proto = if val Some(loc) = location: (if loc.protocol != "": loc.protocol else: "about:") else: "about:"
+    val host = if val Some(loc) = location: loc.host else: ""
+    val pathname = if val Some(loc) = location: (if loc.pathname != "": loc.pathname else: "blank") else: "blank"
+    val search = if val Some(loc) = location: loc.search else: ""
+    val hash = if val Some(loc) = location: loc.hash else: ""
+
     val location_id = runtime.create_host_object()
-    runtime.set_host_property(location_id, "href", JsValue.String(v: "about:blank"))
-    runtime.set_host_property(location_id, "protocol", JsValue.String(v: "about:"))
-    runtime.set_host_property(location_id, "host", JsValue.String(v: ""))
-    runtime.set_host_property(location_id, "pathname", JsValue.String(v: "blank"))
-    runtime.set_host_property(location_id, "search", JsValue.String(v: ""))
-    runtime.set_host_property(location_id, "hash", JsValue.String(v: ""))
+    runtime.set_host_property(location_id, "href", JsValue.String(v: href))
+    runtime.set_host_property(location_id, "protocol", JsValue.String(v: proto))
+    runtime.set_host_property(location_id, "host", JsValue.String(v: host))
+    runtime.set_host_property(location_id, "pathname", JsValue.String(v: pathname))
+    runtime.set_host_property(location_id, "search", JsValue.String(v: search))
+    runtime.set_host_property(location_id, "hash", JsValue.String(v: hash))
+
     val navigator_id = runtime.create_host_object()
     runtime.set_host_property(navigator_id, "userAgent", JsValue.String(v: "Mozilla/5.0 (compatible; SimpleBrowser)"))
     runtime.set_host_property(navigator_id, "language", JsValue.String(v: "en-US"))
     runtime.set_host_property(navigator_id, "platform", JsValue.String(v: ""))
-    val body_id = runtime.create_host_object()
+
+    val local_res = _make_storage_host_object(runtime, storage)
+    runtime = local_res.0
+    val local_storage_id = local_res.1
+    val session_res = _make_storage_host_object(runtime, None)
+    runtime = session_res.0
+    val session_storage_id = session_res.1
+
     val document_id = runtime.create_host_object()
+    runtime = _bind_event_target_methods(runtime, document_id)
     runtime.set_host_property(document_id, "title", JsValue.String(v: ""))
-    runtime.set_host_property(document_id, "body", JsValue.Object(id: body_id))
     runtime.set_host_property(document_id, "location", JsValue.Object(id: location_id))
+
+    val seed_id = runtime.create_host_object()
+    var cursor = _DomProjectionCursor(
+        runtime: runtime,
+        seed_id: seed_id,
+        count: 0,
+        body_idx: -1,
+        body_obj_id: -1,
+        doc_elem_idx: -1
+    )
+    if val Some(root) = dom_root:
+        _project_dom_subtree(cursor, root, -1)
+    if cursor.body_idx < 0:
+        val b_idx = cursor.count
+        cursor.count = b_idx + 1
+        val created_body = _create_projected_dom_element(cursor.runtime, "body", b_idx, -1)
+        cursor.runtime = created_body.0
+        val b_obj_id = created_body.1
+        cursor.runtime.set_host_property(cursor.seed_id, "n" + b_idx.to_text(), JsValue.Object(id: b_obj_id))
+        cursor.body_idx = b_idx
+        cursor.body_obj_id = b_obj_id
+    runtime = cursor.runtime
+    val body_id = cursor.body_obj_id
+    runtime.set_host_property(seed_id, "count", JsValue.Number(v: cursor.count.to_f64()))
+    runtime.set_host_property(seed_id, "bodyIdx", JsValue.Number(v: cursor.body_idx.to_f64()))
+    runtime.set_host_property(seed_id, "docElemIdx", JsValue.Number(v: cursor.doc_elem_idx.to_f64()))
+    runtime.set_host_property(document_id, "__simple_dom_seed", JsValue.Object(id: seed_id))
+    runtime.set_host_property(document_id, "body", JsValue.Object(id: body_id))
+
     val window_id = runtime.create_host_object()
+    runtime = _bind_event_target_methods(runtime, window_id)
     runtime.set_host_property(window_id, "document", JsValue.Object(id: document_id))
     runtime.set_host_property(window_id, "window", JsValue.Object(id: window_id))
     runtime.set_host_property(window_id, "self", JsValue.Object(id: window_id))
     runtime.set_host_property(window_id, "globalThis", JsValue.Object(id: window_id))
     runtime.set_host_property(window_id, "location", JsValue.Object(id: location_id))
     runtime.set_host_property(window_id, "navigator", JsValue.Object(id: navigator_id))
+    runtime.set_host_property(window_id, "localStorage", JsValue.Object(id: local_storage_id))
+    runtime.set_host_property(window_id, "sessionStorage", JsValue.Object(id: session_storage_id))
+
     runtime.interpreter.define_global_value("window", JsValue.Object(id: window_id))
     runtime.interpreter.define_global_value("self", JsValue.Object(id: window_id))
     runtime.interpreter.define_global_value("globalThis", JsValue.Object(id: window_id))
     runtime.interpreter.define_global_value("location", JsValue.Object(id: location_id))
     runtime.interpreter.define_global_value("navigator", JsValue.Object(id: navigator_id))
     runtime.interpreter.define_global_value("document", JsValue.Object(id: document_id))
+    runtime.interpreter.define_global_value("localStorage", JsValue.Object(id: local_storage_id))
+    runtime.interpreter.define_global_value("sessionStorage", JsValue.Object(id: session_storage_id))
+
     var interpreter = runtime.interpreter
     interpreter.host_document_id = document_id
     interpreter.host_body_id = body_id
     interpreter.host_window_id = window_id
     interpreter.host_location_id = location_id
     interpreter.host_navigator_id = navigator_id
+    interpreter.host_local_storage_id = local_storage_id
+    interpreter.host_session_storage_id = session_storage_id
     runtime.interpreter = interpreter
+    val _ = runtime.eval(_js_dom_bridge_source())
     runtime
 
-pub fn run_page_scripts(scripts: [text]) -> [text]:
-    """Execute all of a page's <script> sources on ONE JS engine so globals
-    built up by earlier tags (e.g. window.google) are visible to later tags.
-    Returns one result per script: eval result text or "js-error: ..."."""
-    var rt = _bind_minimal_bom_globals(js_runtime_with_default_logger("page-scripts"))
+fn _bind_minimal_bom_globals(rt: JsRuntime) -> JsRuntime:
+    """Bind window/self/globalThis, navigator, location, storage, and DOM bridge."""
+    _bind_bom_and_dom(rt, None, None, None)
+
+fn _eval_script_sequence(rt: JsRuntime, scripts: [text]) -> [text]:
+    var runtime = rt
     var out: [text] = []
     for source in scripts:
         if source.trim().len() == 0:
             out.push("")
             continue
-        match rt.eval(source):
+        match runtime.eval(source):
             Ok(v):
                 out.push(_js_value_text(v))
             Err(e):
                 out.push("js-error: " + _script_js_err_msg(e))
     out
+
+pub fn run_page_scripts(scripts: [text]) -> [text]:
+    """Execute all of a page's <script> sources on ONE JS engine so globals
+    built up by earlier tags (e.g. window.google) are visible to later tags.
+    Returns one result per script: eval result text or "js-error: ..."."""
+    val rt = _bind_minimal_bom_globals(js_runtime_with_default_logger("page-scripts"))
+    _eval_script_sequence(rt, scripts)
+
+pub fn run_page_scripts_with_dom(dom_root: BeDomNode, scripts: [text]) -> [text]:
+    """Execute page <script> sources on ONE JS engine bound to a projected
+    BeDomNode tree, exposing getElementById, querySelector, createElement,
+    localStorage, and sessionStorage."""
+    val rt = _bind_bom_and_dom(js_runtime_with_default_logger("page-scripts"), Some(dom_root), None, None)
+    _eval_script_sequence(rt, scripts)
 
 pub fn run_script(runner: ScriptRunner, source: text) -> text:
     """Fail closed for the legacy ambient-host Simple compiler path.
