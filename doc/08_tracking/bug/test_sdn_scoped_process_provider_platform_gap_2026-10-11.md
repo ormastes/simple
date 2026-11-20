@@ -1,6 +1,6 @@
 # SDN test wrapper scoped-process provider platform gap
 
-Status: open; release verification blocker on all current providers.
+Status: open on Windows (no V4 process-observation owner); Linux/Darwin admitted via group retirement (2026-11-20 update below).
 
 The public SDN test wrapper requires the V4 owned process provider to pass a
 per-child environment without mutating the parent environment, collect bounded
