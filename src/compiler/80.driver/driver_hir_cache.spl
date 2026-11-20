@@ -1654,20 +1654,34 @@ pub fn hir_unit_import_interface_load_v1(queue: text, path: text, library_mode: 
     loaded
 
 # True when the provider of `path` has published its .hirkey sidecar. Waits
-# (bounded by budget_ms) only while the provider is IN FLIGHT: claimed, no
-# terminal, no sidecar yet. An unclaimed provider (its unit has not started)
-# or a finished one without a sidecar (failure / codec refusal) returns at
-# once, so a unit never blocks on work nobody is doing.
+# (bounded by budget_ms) while the provider is IN FLIGHT (claimed, no
+# terminal, no sidecar yet) or SCHEDULED (unclaimed but listed in the queue's
+# frozen inventory, so some unit of this build will run it). Per-file units
+# run in an unordered pool: lib.nogc_sync_mut.database.wal's unit started
+# before core.spl's unit claimed, fell back to the summary-only import (no
+# struct layout) and MIR failed "missing exact struct construction layout
+# 'SdnRow'". A provider outside the inventory, or a finished one without a
+# sidecar (failure / codec refusal), returns at once: never wait on work
+# nobody is doing. The caller's per-unit total deadline bounds cycles.
 # reason: raw ledger path strings and ms budget matching sibling hir_shard_* helpers
 @allow(primitive_api)
 pub fn hir_shard_provider_settle_wait_v1(queue: text, path: text, budget_ms: i64) -> bool:
     val sidecar = hir_shard_key_sidecar_path_v1(queue, path)
     if sidecar == "": return false
     val base = "{queue}/{sha256_text(path)}"
+    val inventory_rows = (file_read_nullable("{queue}/inventory") ?? "").split("\n")
+    # Row 0 is the closure identity; the rest are scheduled source paths.
+    var scheduled = false
+    var row_i = 1
+    while row_i < inventory_rows.len():
+        if inventory_rows[row_i] == path:
+            scheduled = true
+        row_i = row_i + 1
     val deadline = current_time_ms() + budget_ms
     while true:
         if file_exists(sidecar): return true
-        if not file_exists("{base}.claim") or file_exists("{base}.terminal"): return false
+        if file_exists("{base}.terminal"): return false
+        if not scheduled and not file_exists("{base}.claim"): return false
         if current_time_ms() >= deadline: return false
         sleep_ms(100)
     false
