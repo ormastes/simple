@@ -12,6 +12,7 @@ use compiler.common.attributes.{FunctionAttr}
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir.mir_instruction_support.{MirCallOrigin}
 use compiler.mir._MirLowering.module_lowering.*
+use compiler.types.type_layout.{layoutattr_default_}
 use std.io_runtime.{env_get_opt}
 
 fn mir_class_identity_raw(symbols: SymbolTable, raw: i64) -> text:
@@ -1015,6 +1016,18 @@ impl MirLowering:
                 self.register_struct_identity_layout_key(source, key)
                 self.struct_field_has_default[key] = flags
                 self.struct_field_default_expr[key] = defaults
+            # Layout identity and field-type snapshot, exactly as the module
+            # prescan records them. Without these a provider record reached
+            # only through an imported callable (case_events ->
+            # parse_with_spans_and_issues -> [SdnIssue]) had field rows but no
+            # proof, so Result tuple/Array record admission failed closed.
+            # Gap-fill only: a prescan already recorded both from the provider
+            # table, and a relocated re-registration must never clear it.
+            val proof_owner = mir_layout_canonical_module_name(source.defining_module ?? "")
+            if proof_owner != "" and not self.composite_layout_digests.has("{proof_owner}::{source.name}"):
+                self.register_result_err_layout_types(key, fields, self.symbols)
+                val struct_attr = if struct_def.has_layout_attr: struct_def.layout_attr else: layoutattr_default_()
+                self.register_composite_layout_identity(source, fields, struct_attr)
             # The bare-name entry is shared by every same-named struct: replace it
             # only when the consumer does not declare that name itself and the
             # recorded bare-layout owner is this provider's declaration -- a

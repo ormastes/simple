@@ -1,0 +1,86 @@
+# Result<tuple> `?` whose Array slot holds a record the consumer never imports
+# (lib.common.traceability.case_events: parse_with_spans_and_issues -> [SdnIssue]).
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLoweringExpr.result_tuple_payload.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+
+val unimported_provider = "pub struct Issue:\n    kind: text\n    line: i64\npub fn produce() -> Result<(i64, text, [Issue]), text>:\n    Ok((1, \"a\", [Issue(kind: \"dup\", line: 2)]))\n"
+val unimported_consumer = "use app.tuple.issues.\{produce\}\nfn inspect() -> Result<i64, text>:\n    val parsed = produce()?\n    if parsed.2.len() > 0:\n        return Err(\"issues\")\n    Ok(parsed.0)\n"
+val unimported_field_reader = "use app.tuple.issues.\{produce\}\nfn inspect() -> Result<i64, text>:\n    val parsed = produce()?\n    var total = 0\n    for issue in parsed.2:\n        total = total + issue.line\n    Ok(total)\n"
+
+# mode 0: consumer-only prescan and lowering list (provider rows absent)
+# mode 1: consumer-only prescan, provider in the lowering list (rows on demand)
+# mode 2: both prescanned (registered baseline)
+# Returns "E:<error>" lines plus "F:<index>" for every GetField in inspect.
+fn lower_unimported_consumer(consumer_source: text, mode: i64) -> [text]:
+    val log = Logger(level: 0)
+    val provider_ast = parse_full_frontend(unimported_provider, "app/tuple/issues.spl", "app.tuple.issues", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/tuple/user.spl", "app.tuple.user", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.tuple.issues"] = provider_ast
+    val files = [SourceFile(path: "app/tuple/issues.spl", content: unimported_provider, module_name: "app.tuple.issues")]
+    match module_surfaces_from_modules(modules, files):
+        case Err(reason): return ["E:surfaces: {reason}"]
+        case Ok(surfaces):
+            var provider_hir = hirlowering_for_module("app/tuple/issues.spl", surfaces)
+            var consumer_hir = hirlowering_for_module("app/tuple/user.spl", surfaces)
+            val provider = provider_hir.lower_module(provider_ast)
+            val consumer = consumer_hir.lower_module(consumer_ast)
+            if consumer_hir.errors.len() != 0: return ["E:hir errors: {consumer_hir.errors.len()}"]
+            var lowering = MirLowering.new(consumer.symbols)
+            var prescan_mods: Dict<text, HirModule> = {}
+            prescan_mods["consumer"] = consumer
+            lowering.prescan_module_struct_names(prescan_mods, "consumer")
+            if mode == 2:
+                prescan_mods["provider"] = provider
+                lowering.prescan_module_struct_names(prescan_mods, "provider")
+            val mir = if mode == 0: lowering.lower_module(consumer, [consumer]) else: lowering.lower_module(consumer, [consumer, provider])
+            var lines: [text] = []
+            for error in lowering.errors:
+                lines.push("E:{error.message}")
+            for function in mir.functions.values():
+                if function.name.ends_with("inspect"):
+                    for block in function.blocks:
+                        for inst in block.instructions:
+                            match inst.kind:
+                                case MirInstKind.GetField(_, _, field): lines.push("F:{field}")
+                                case _: ()
+            return lines
+    ["E:unreachable"]
+
+fn error_lines(lines: [text]) -> [text]:
+    var errors: [text] = []
+    for line in lines:
+        if line.starts_with("E:"): errors.push(line)
+    errors
+
+describe "Result tuple Array slot of an unimported record":
+    it "lowers `?` when the provider record layout is available on demand":
+        val lowered = lower_unimported_consumer(unimported_consumer, 1)
+        expect(error_lines(lowered)).to_equal([])
+        expect(lowered.contains("F:2")).to_equal(true)
+
+    it "reads element fields at their declared index through the slot":
+        val lowered = lower_unimported_consumer(unimported_field_reader, 1)
+        expect(error_lines(lowered)).to_equal([])
+        expect(lowered.contains("F:1")).to_equal(true)
+        val registered = lower_unimported_consumer(unimported_field_reader, 2)
+        expect(error_lines(registered)).to_equal([])
+        expect(registered.contains("F:1")).to_equal(true)
+
+    it "still fails closed when no provider layout exists at all":
+        val lowered = lower_unimported_consumer(unimported_field_reader, 0)
+        expect(error_lines(lowered).len() > 0).to_equal(true)
