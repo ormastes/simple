@@ -27,11 +27,11 @@ use app.buildrunner.remote_container_authority_v2.{RemoteContainerAuthorityClaim
     remote_container_completion_authority_v2}
 use std.common.build_manager.contracts.builder_task_identity_v1
 use app.buildrunner.remote_container_reset_failure_signed_v3.*
-use test.fixtures.buildrunner.remote_container_parent_v2.{RemoteContainerParentFixtureV2, container_parent_fixture_v2}
+use test.fixtures.buildrunner.remote_container_parent_v3.{RemoteContainerParentFixtureV3, container_parent_fixture_v3}
 use test.fixtures.app.llm_caret.distributed_authority_verification_fixture_v2.{verification_seed, verification_bytes}
 use std.nogc_sync_mut.io.dir_ops.dir_remove_all
 
-fn sg_receipt(fixture: RemoteContainerParentFixtureV2, stage: text) -> RemoteContainerResetFailureV3:
+fn sg_receipt(fixture: RemoteContainerParentFixtureV3, stage: text) -> RemoteContainerResetFailureV3:
     val envelope = distributed_encode_operation_v2(fixture.authority.request).unwrap()
     val grant = distributed_grant_digest_v2(fixture.authority.signed.grant).unwrap()
     val native = if stage == "cancel-identity" or stage == "service-restart": "" else: "c".repeat(64)
@@ -54,7 +54,7 @@ fn sg_sign(receipt: RemoteContainerResetFailureV3, offset: i64 = 129, at: i64 = 
 describe "Remote container reset-failure signed envelope V3":
     it "encodes one canonical envelope per Host stage that decodes back to the same value":
         # @req M0038-SIGNED-01
-        val fixture = container_parent_fixture_v2(0, 3)
+        val fixture = container_parent_fixture_v3()
         for stage in ["destroy-absence", "cancel-absence", "cancel-identity"]:
             val signed = sg_sign(sg_receipt(fixture, stage))
             val wire = remote_container_reset_failure_signed_encode_v3(signed).unwrap()
@@ -68,7 +68,7 @@ describe "Remote container reset-failure signed envelope V3":
 
     it "signs service-restart like every Host stage and refuses a non-canonical or truncated envelope":
         # @req M0038-SIGNED-02 (milestone_0045: service-restart is Host-signed)
-        val fixture = container_parent_fixture_v2(0, 3)
+        val fixture = container_parent_fixture_v3()
         val restart = sg_sign(sg_receipt(fixture, "service-restart"))
         val restart_wire = remote_container_reset_failure_signed_encode_v3(restart).unwrap()
         expect(remote_container_reset_failure_signed_decode_v3(restart_wire).unwrap()).to_equal(restart)
@@ -82,7 +82,7 @@ describe "Remote container reset-failure signed envelope V3":
 
     it "verifies a Host-signed receipt only against the snapshot execution-host key and the controller's own authority":
         # @req M0038-SIGNED-03
-        val fixture = container_parent_fixture_v2(0, 3)
+        val fixture = container_parent_fixture_v3()
         val signed = sg_sign(sg_receipt(fixture, "destroy-absence"))
         expect(remote_container_reset_failure_verify_v3(signed, fixture.task, fixture.policy, fixture.authority).unwrap()).to_equal(signed)
         step("a signature by another key is refused")
@@ -106,10 +106,12 @@ describe "Remote container reset-failure signed envelope V3":
 
     it "refuses a stale signer, a signed time after the verifier's clock and a stage relabelled without its reason":
         # @req M0038-SIGNED-04
-        val fixture = container_parent_fixture_v2(0, 3)
+        val fixture = container_parent_fixture_v3()
         var wrong_signer = sg_sign(sg_receipt(fixture, "cancel-absence"))
         wrong_signer.signer_id = "host_other"
-        expect(remote_container_reset_failure_verify_v3(wrong_signer, fixture.task, fixture.policy, fixture.authority).is_err()).to_equal(true)
+        # The signer id passes the metadata check; the shared authority's execution-host key check is the first refusal.
+        expect(remote_container_reset_failure_verify_v3(wrong_signer, fixture.task, fixture.policy, fixture.authority)).to_equal(
+            Err("AUTHORITY_KEY_MISMATCH"))
         var late = sg_sign(sg_receipt(fixture, "cancel-absence"), 129, fixture.authority.now + 1)
         expect(remote_container_reset_failure_verify_v3(late, fixture.task, fixture.policy, fixture.authority)).to_equal(
             Err("CONTAINER_COMPLETION_TIME_INVALID"))
@@ -123,7 +125,7 @@ describe "Remote container reset-failure signed envelope V3":
         # @req M0045-LATE-01
         # Owner decision 5: the ONLY exception to the expired-approval rule. The fixture approval expires at 1900 and the
         # grant at 2000; the verifier's clock is 2500 and the Host signed at 2400, both after both expiries.
-        val fixture = container_parent_fixture_v2(0, 3)
+        val fixture = container_parent_fixture_v3()
         var late = fixture.authority
         late.now = 2500
         val signed = sg_sign(sg_receipt(fixture, "cancel-absence"), 129, 2400)
@@ -143,7 +145,9 @@ describe "Remote container reset-failure signed envelope V3":
         step("a revoked snapshot (a newer revocation epoch than the grant) is still refused after expiry")
         var revoked = late
         revoked.revocation_epoch = late.revocation_epoch + 1
-        expect(remote_container_reset_failure_verify_v3(signed, fixture.task, fixture.policy, revoked).is_err()).to_equal(true)
+        # The late context (now 1899) is inside the grant window, so the grant scope check refuses the epoch first.
+        expect(remote_container_reset_failure_verify_v3(signed, fixture.task, fixture.policy, revoked)).to_equal(
+            Err("GRANT_REVOKED"))
         step("key expiry is NOT moved by the exception: keys expire at 3000, so a receipt verified at 3500 is refused")
         var past_keys = late
         past_keys.now = 3500
@@ -154,7 +158,7 @@ describe "Remote container reset-failure signed envelope V3":
         host_expired.host_key.expires_at = 2450
         expect(remote_container_reset_failure_verify_v3(signed, fixture.task, fixture.policy, host_expired)).to_equal(
             Err("REMOTE_RESET_FAILURE_KEY_EXPIRED"))
-        step("a completion authority at the same late clock gets NO exception: the expired approval refuses it")
+        step("a completion authority at the same late clock gets NO exception: the expired grant refuses it")
         val claim = RemoteContainerAuthorityClaimV2(task_identity: signed.receipt.task_identity, host_id: signed.receipt.host_id,
             assignment_digest: signed.receipt.assignment_digest, controller_epoch: signed.receipt.controller_epoch,
             operation_id: signed.receipt.operation_id, request_digest: signed.receipt.request_digest,
@@ -164,7 +168,7 @@ describe "Remote container reset-failure signed envelope V3":
             controller_epoch: fixture.policy.controller_epoch, operation_id: fixture.policy.operation_id)
         expect(remote_container_completion_authority_v2(claim, late.signed, late.approval, late.issuer, late.approver,
             late.host_key, late.request, fixture.task, expected, late.now, late.policy_revision, late.revocation_epoch,
-            late.session_generation).is_err()).to_equal(true)
+            late.session_generation)).to_equal(Err("GRANT_EXPIRED"))
         expect(remote_container_completion_authority_v2(claim, fixture.authority.signed, fixture.authority.approval,
             fixture.authority.issuer, fixture.authority.approver, fixture.authority.host_key, fixture.authority.request,
             fixture.task, expected, fixture.authority.now, fixture.authority.policy_revision, fixture.authority.revocation_epoch,

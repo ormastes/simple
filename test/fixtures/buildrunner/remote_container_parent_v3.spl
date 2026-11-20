@@ -1,5 +1,8 @@
 # Actual temporary files/journals when executed, with independently signed
 # synthetic observations. No provider, wait/absence query or process is run.
+# V3-only (milestone_0060): the controller authority, task, policy, request and the
+# raw result/log/output bytes a V3 bundle is frozen from; V3 specs build and sign
+# their own V3 bundle. The V2 parent session, codec and completion are retired.
 use std.spec.expect
 use std.common.build_manager.contracts.{BuildTaskV1, BuildHostV1, BuildInputV1,
     BuildResultV1, BuildRunV1, builder_task_identity_v1}
@@ -8,35 +11,22 @@ use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
 use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2,
     container_execution_request_encode_v2}
-use std.common.contracts.container.execution_evidence_v2.{ContainerExecutionEvidenceV2,
-    ContainerExecutionUserReceiptV2, container_runtime_query_digest_v2, container_runtime_observation_digest_v2}
-use std.common.contracts.container.runtime_v1.{RuntimeCommandV1, RuntimeStateV1, RuntimeOperationV1}
 use std.common.contracts.distributed_control_v2.{ExecutionEnvironmentV2, ExecutionGrantV2, OperationEnvelopeV2}
 use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
 use std.common.contracts.distributed_control_codec_v2.{distributed_environment_digest_v2,
     distributed_encode_operation_v2, distributed_grant_digest_v2}
-use std.common.contracts.distributed_operation_state_v2.{distributed_operation_initial_v2,
-    distributed_operation_transition_v2}
-use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_open_v2,
-    distributed_operation_journal_commit_v2, distributed_operation_journal_close_v2}
-use std.common.task_runner.journal.task_runner_journal_release_v1
 use app.llm_caret.workbench.distributed_grant_verification_v2.DistributedAuthorityKeyV2
 use app.buildrunner.task_context.{BuildRunnerTaskContextV1, build_runner_context_encode_v1}
 use app.buildrunner.remote_evidence_v1.{RemoteEvidencePolicyV1, RemoteOutputBytesV1,
     remote_policy_encode_v1, remote_inventory_digest_v1}
 use app.buildrunner.remote_context_v1.{RemoteAuthorityContextV1, remote_context_admit_v1}
-use app.buildrunner.remote_container_evidence_v2.{RemoteContainerBundleV2, RemoteContainerBytesV2,
-    remote_container_evidence_freeze_v2}
-use app.buildrunner.remote_container_authority_v2.RemoteContainerCompletionV2
-use app.buildrunner.remote_session_v1.remote_database_session_open_v1
-use app.buildrunner.remote_container_session_v2.{RemoteContainerDatabaseSessionV2, remote_container_session_v2}
 use app.io.file_ops.{secure_temp_dir, file_atomic_write, file_atomic_write_bytes}
 use std.nogc_sync_mut.io.dir_ops.dir_create_all
 use test.fixtures.task_runner.execution_identity_v2.container_execution_fixture_v2
 use test.fixtures.app.llm_caret.distributed_authority_verification_fixture_v2.{verification_seed,
     verification_bytes, verification_key}
 
-struct RemoteContainerParentFixtureV2:
+struct RemoteContainerParentFixtureV3:
     root: text
     task: BuildTaskV1
     run: BuildRunV1
@@ -44,45 +34,21 @@ struct RemoteContainerParentFixtureV2:
     request: ContainerExecutionRequestV2
     provider_identity_digest: text
     authority: RemoteAuthorityContextV1
-    bundle: RemoteContainerBundleV2
+    result: BuildResultV1
+    stdout: [u8]
+    stderr: [u8]
+    outputs: [RemoteOutputBytesV1]
 
-fn container_parent_key_v2(identity: text, role: text, public_key: [u8]) -> DistributedAuthorityKeyV2:
+fn container_parent_key_v3(identity: text, role: text, public_key: [u8]) -> DistributedAuthorityKeyV2:
     var key = verification_key(identity, role, public_key)
     key.host_id = "host_a"
     key.expires_at = 3000
     key
 
-fn container_parent_completion_resign_v2(value: RemoteContainerCompletionV2) -> RemoteContainerCompletionV2:
-    # Independent published signing order, never production message builder.
-    val message = ["SIMPLE_REMOTE_CONTAINER_COMPLETION_SIGNATURE_V2", "2", value.task_identity,
-        value.host_id, value.assignment_digest, str(value.controller_epoch), value.operation_id,
-        value.request_digest, value.grant_digest, value.result_digest, value.execution_digest,
-        value.stdout_digest, value.stderr_digest, value.output_inventory_digest, value.tests_digest,
-        value.signer_id, str(value.key_revision), str(value.completed_at), ""].join("\n")
-    val signed = pure_ed25519_sign_from_seed_v1(verification_seed(129), verification_bytes(message))
-    var completion = value
-    completion.signature = signed.signature
-    completion
-
-fn container_parent_user_fixture_v2(execution: ContainerExecutionEvidenceV2) -> ContainerExecutionUserReceiptV2:
-    # Synthetic engine-selected-user observation, not an effective UID claim.
-    val query = RuntimeCommandV1(operation: "selected-user", program: "podman",
-        args: ["inspect", "--format", r"{{.Config.User}}", execution.runtime.native_id])
-    val observation = RuntimeOperationV1(status: "ok", operation: "selected-user", command: query,
-        state: RuntimeStateV1(phase: "exited", identity: execution.runtime,
-            exit_code: execution.exit_code, reason: "synthetic-selected-user"),
-        exit_code: 0, stdout: "1000:1000\n", stderr: "", reason: "synthetic-selected-user")
-    ContainerExecutionUserReceiptV2(backend: execution.execution.backend, scope: execution.absence.scope,
-        identity: execution.runtime, request_digest: execution.execution.request_digest,
-        provider_identity_digest: execution.provider_identity_digest, selected_user: "1000:1000",
-        observed_unix_ms: 990, query_digest: container_runtime_query_digest_v2(query).unwrap(),
-        evidence_digest: container_runtime_observation_digest_v2(observation).unwrap(),
-        proof_kind: "exact-native-execution-user-v1")
-
-# `version` 3 adds the milestone_0030 G11 task-version input `remote-container-version/<id>.sdn` = sha256("3\n");
-# the V2 freeze then refuses the task, so the V3 fixture's V2 completion is left unsigned and unused.
-fn container_parent_fixture_v2(exit_code: i64 = 0, version: i64 = 2) -> RemoteContainerParentFixtureV2:
-    val root = secure_temp_dir("/tmp", "remote-container-parent-v2").unwrap()
+# `marked` adds the milestone_0030 G11 task-version input `remote-container-version/<id>.sdn` = sha256("3\n"), the V3
+# task marker. `marked: false` is the only way to build an unmarked (version 2) task, kept to pin the V3 refusals.
+fn container_parent_fixture_v3(exit_code: i64 = 0, marked: bool = true) -> RemoteContainerParentFixtureV3:
+    val root = secure_temp_dir("/tmp", "remote-container-parent-v3").unwrap()
     val body = "synthetic opaque provider request\n"
     val execution = container_execution_fixture_v2(exit_code, 1, sha256_text(body))
     val request = ContainerExecutionRequestV2(plan: execution.execution, request_bytes: body)
@@ -115,7 +81,7 @@ fn container_parent_fixture_v2(exit_code: i64 = 0, version: i64 = 2) -> RemoteCo
             BuildInputV1("remote-container/task_a.sdn", sha256_text(request_payload)),
             BuildInputV1("remote-workspace/task_a.nonce", sha256_text(nonce + "\n")),
             BuildInputV1("remote-container-provider/task_a.sdn", sha256_text(provider + "\n"))] +
-            (if version == 3: [BuildInputV1("remote-container-version/task_a.sdn", sha256_text("3\n"))] else: []),
+            (if marked: [BuildInputV1("remote-container-version/task_a.sdn", sha256_text("3\n"))] else: []),
         outputs: ["artifact/program.bin", "remote-workspace/task_a.probe.sdn"], cache_key: sha256_text("container cache"),
         timeout_ms: 500, memory_limit_bytes: 512, links: [], memory_policy: "enforce")
     val grant_wire = "DBC_EXECUTION_GRANT_V2\ngrant_1\nuser_1\nproject_1\nhost_a\n" +
@@ -142,14 +108,16 @@ fn container_parent_fixture_v2(exit_code: i64 = 0, version: i64 = 2) -> RemoteCo
         approval: DistributedSignedApprovalV2(approver_id: "approver_1", key_revision: 1,
             grant_digest: sha256_text(grant_wire), request_digest: sha256_text(request_wire),
             policy_revision: 4, session_generation: 3, expires_at: 1900, signature: approver_signed.signature),
-        issuer: container_parent_key_v2("issuer_1", "grant-issuer", issuer_signed.public_key),
-        approver: container_parent_key_v2("approver_1", "human-approver", approver_signed.public_key),
-        host_key: container_parent_key_v2("host_signer_1", "execution-host", host_signed.public_key),
+        issuer: container_parent_key_v3("issuer_1", "grant-issuer", issuer_signed.public_key),
+        approver: container_parent_key_v3("approver_1", "human-approver", approver_signed.public_key),
+        host_key: container_parent_key_v3("host_signer_1", "execution-host", host_signed.public_key),
         request: operation, requested: environment, observed: environment, now: 1100,
         policy_revision: 4, revocation_epoch: 2, session_generation: 3,
         assignment_digest: policy.assignment_digest, controller_epoch: policy.controller_epoch)
     expect(remote_context_admit_v1(authority, task, policy)).to_equal(Ok(true))
     val output = RemoteOutputBytesV1("artifact/program.bin", [0u8, 128u8, 255u8, 10u8])
+    # The probe output and nonce input are ordinary task output/input bytes here (no V3 code checks the retired V2
+    # workspace probe); kept so the task identity the V3 specs were authored against is unchanged.
     val probe = "SIMPLE-REMOTE-CONTAINER-WORKSPACE-PROBE-2\n" + builder_task_identity_v1(task) +
         "\n" + nonce + "\nwrite-read-delete\n"
     val probe_output = RemoteOutputBytesV1("remote-workspace/task_a.probe.sdn", probe.bytes())
@@ -160,22 +128,6 @@ fn container_parent_fixture_v2(exit_code: i64 = 0, version: i64 = 2) -> RemoteCo
         identity_digest: builder_task_identity_v1(task), host_id: policy.host_id,
         status: if exit_code == 0: "OK" else: "ERROR", exit_code: exit_code,
         outputs: result_outputs, cache_hits: -1, cache_misses: -1, cache_stores: -1)
-    val bytes = RemoteContainerBytesV2(execution: execution, stdout: [1u8, 0u8, 255u8], stderr: [], outputs: outputs,
-        selected_user: container_parent_user_fixture_v2(execution), workspace_probe: probe)
-    var completion = RemoteContainerCompletionV2(version: 2, task_identity: builder_task_identity_v1(task),
-        host_id: policy.host_id, assignment_digest: policy.assignment_digest, controller_epoch: policy.controller_epoch,
-        operation_id: policy.operation_id, request_digest: sha256_text(request_wire), grant_digest: sha256_text(grant_wire),
-        result_digest: "", execution_digest: "", stdout_digest: "", stderr_digest: "", output_inventory_digest: "",
-        tests_digest: "", signer_id: "host_signer_1", key_revision: 1, completed_at: 1099, signature: [])
-    if version == 2:
-        val frozen = remote_container_evidence_freeze_v2(task, result, policy, request, provider, bytes).unwrap()
-        completion.result_digest = frozen.result_digest
-        completion.execution_digest = frozen.execution_digest
-        completion.stdout_digest = frozen.stdout_digest
-        completion.stderr_digest = frozen.stderr_digest
-        completion.output_inventory_digest = frozen.output_inventory_digest
-        completion.tests_digest = frozen.tests_digest
-        completion = container_parent_completion_resign_v2(completion)
     val host = BuildHostV1(id: policy.host_id, transport: "ssh", endpoint: "fixture-container-host",
         workspace: "/fixture/work", worker_program: "/fixture/buildrunner",
         worker_digest: sha256_text("container fixture worker"), slots: 1)
@@ -191,25 +143,8 @@ fn container_parent_fixture_v2(exit_code: i64 = 0, version: i64 = 2) -> RemoteCo
     expect(file_atomic_write(root + "/source/remote-container/task_a.sdn", request_payload)).to_equal(true)
     expect(file_atomic_write(root + "/source/remote-workspace/task_a.nonce", nonce + "\n")).to_equal(true)
     expect(file_atomic_write(root + "/source/remote-container-provider/task_a.sdn", provider + "\n")).to_equal(true)
-    RemoteContainerParentFixtureV2(root, task, run, policy, request, provider, authority,
-        RemoteContainerBundleV2(result: result, evidence: bytes, completion: completion))
+    RemoteContainerParentFixtureV3(root: root, task: task, run: run, policy: policy, request: request,
+        provider_identity_digest: provider, authority: authority, result: result, stdout: [1u8, 0u8, 255u8], stderr: [],
+        outputs: outputs)
 
-fn container_parent_open_v2(fixture: RemoteContainerParentFixtureV2) -> RemoteContainerDatabaseSessionV2:
-    var operations = distributed_operation_journal_open_v2(fixture.root + "/operations",
-        sha256_text("container fixture authority"), sha256_text(fixture.root + "/nonce"), 1000).unwrap()
-    if operations.operations.len() == 0:
-        val initial = distributed_operation_initial_v2(distributed_encode_operation_v2(fixture.authority.request).unwrap()).unwrap()
-        operations = distributed_operation_journal_commit_v2(operations, initial).unwrap()
-        operations = distributed_operation_journal_commit_v2(operations,
-            distributed_operation_transition_v2(initial, "executing", "").unwrap()).unwrap()
-    val base = remote_database_session_open_v1(fixture.run, fixture.root + "/state", fixture.root + "/source",
-        {fixture.task.id: fixture.policy}, operations).unwrap()
-    remote_container_session_v2(base, [fixture.task], {fixture.task.id: fixture.request},
-        {fixture.task.id: fixture.provider_identity_digest}).unwrap()
-
-fn container_parent_release_v2(session: RemoteContainerDatabaseSessionV2):
-    expect(task_runner_journal_release_v1(session.parent.database.journal)).to_equal(Ok(true))
-    expect(distributed_operation_journal_close_v2(session.parent.operations)).to_equal(Ok(true))
-
-export RemoteContainerParentFixtureV2, container_parent_fixture_v2
-export container_parent_open_v2, container_parent_release_v2, container_parent_completion_resign_v2
+export RemoteContainerParentFixtureV3, container_parent_fixture_v3

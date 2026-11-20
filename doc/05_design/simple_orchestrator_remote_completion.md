@@ -67,8 +67,11 @@ and recovery keep the existing task-append linearization point.
 Status (2026-11-20): the V2 container host, stager and producer described below
 (`remote_container_host_v2`, `remote_container_stage_v2`, `remote_container_producer_v2`) were
 deleted because no production entry reached them. The production container path is V3
-(`remote_run_v1` / `remote_build_service_port_v3` -> `RemoteContainerDatabaseSessionV3`). The
-remaining V2 session/evidence/probe text below is historical design, kept by test fixtures only.
+(`remote_run_v1` / `remote_build_service_port_v3` -> `RemoteContainerDatabaseSessionV3`).
+milestone_0060 then deleted the V2 session, bundle codec, evidence, workspace probe and V2
+completion record/codec/verify; only the shared completion authority body in
+`remote_container_authority_v2` remains. The V2 session/evidence/probe text in this document
+is historical design with no code behind it.
 
 The shared API host adapter checks exact argv, working directory and the one
 writable attempt-root mount. It uses prepare/create/start, actual wait and logs,
