@@ -24,12 +24,12 @@ run_task() { printf '%s\n' "$@" >"$tmp/argv"; }
 
 bootstrap_phase_c_run_tool_build llvm cli_build /p/compiler /p/cli.spl /p/cli /p/cache-cli 10
 printf '%s\n' cli_build --verification-expect-executable=/p/cli /p/compiler native-build \
-  /p/cli.spl --backend=llvm --low-memory --entry-closure --cache-dir /p/cache-cli --threads 10 -o /p/cli >"$tmp/expected"
+  /p/cli.spl --backend=llvm --low-memory --mode dynload --entry-closure --cache-dir /p/cache-cli --threads 10 -o /p/cli >"$tmp/expected"
 cmp -s "$tmp/argv" "$tmp/expected" || { echo 'LLVM tool argv mismatch' >&2; exit 1; }
 
 bootstrap_phase_c_run_tool_build cranelift runner_build /p/compiler /p/runner.spl /p/runner /p/cache-runner 10
 printf '%s\n' runner_build --verification-expect-executable=/p/runner /p/compiler native-build \
-  /p/runner.spl --backend=cranelift --low-memory --entry-closure --cache-dir /p/cache-runner --threads 10 -o /p/runner >"$tmp/expected"
+  /p/runner.spl --backend=cranelift --low-memory --mode dynload --entry-closure --cache-dir /p/cache-runner --threads 10 -o /p/runner >"$tmp/expected"
 cmp -s "$tmp/argv" "$tmp/expected" || { echo 'Cranelift tool argv mismatch' >&2; exit 1; }
 
 bootstrap_phase_c_run_module_build cranelift /p/compiler /p/module.spl /p/module.o "$tmp" 20
@@ -211,4 +211,10 @@ fi
 verifier=$root/scripts/bootstrap/bootstrap-phase-verification.shs
 grep -Fq 'measured_exact_env=phase-c-tool-row' "$verifier" || { echo 'verifier does not select the exact tool-row launch' >&2; exit 1; }
 grep -Fq 'phase-c-tool-row-exec.shs' "$verifier" || { echo 'verifier timeout owner is not wrapped by the exact tool-row launch' >&2; exit 1; }
-echo 'PASS: Phase C commands, backend cache identity, and receipt validation'
+# c50 forced STAGE3=0 even with MIR sharding enabled, bypassing the bounded
+# dispatcher and repeating the unsharded native_staged OOM. Full-tool rows must
+# select the focused capsule and expose their route before compilation starts.
+grep -Fq 'if [ "${SIMPLE_MIR_SHARDING:-0}" = 1 ]; then' "$verifier" || { echo 'verifier does not gate the Stage 3 tool route on MIR sharding' >&2; exit 1; }
+grep -Fq 'SIMPLE_BOOTSTRAP_STAGE3=1' "$verifier" || { echo 'verifier never enables the Stage 3 tool route' >&2; exit 1; }
+grep -Fq 'verification_native_route=SIMPLE_BOOTSTRAP_STAGE3=%s SIMPLE_MIR_SHARDING=%s SIMPLE_MIR_SHARD_COUNT=%s' "$verifier" || { echo 'verifier does not log the native route' >&2; exit 1; }
+echo 'PASS: Phase C commands, backend cache identity, Stage 3 dynload routing, and receipt validation'
