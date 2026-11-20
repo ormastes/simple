@@ -28,6 +28,7 @@ use std.common.build_manager.codec.builder_decode_task_v1
 use std.common.build_manager.contracts.{BuildTaskV1, builder_identifier_valid_v1, builder_digest_valid_v1,
     builder_relative_path_valid_v1}
 use std.common.sdn.value.SdnValue
+use std.common.text_bytes.text_to_bytes
 use std.common.sdn.encode.sdn_encode_canonical
 use std.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms}
 
@@ -165,7 +166,13 @@ fn remote_run_reply_v1(outcome: RemoteRunOutcomeV1, cleanup_pending: bool) -> Or
     var detail = outcome.detail
     val line = detail.index_of("\n")
     if line >= 0: detail = detail.substring(0, line)
-    if detail.byte_len() > 256: detail = detail.substring(0, 256)
+    if detail.byte_len() > 256:
+        # Byte offsets are the slice unit: back off to the start of the character the 256-byte cut would split, so the
+        # bounded detail stays valid UTF-8 (a continuation byte is 10xxxxxx).
+        val bytes = text_to_bytes(detail)
+        var cut: i64 = 256
+        while cut > 0 and (bytes[cut] & 0xC0u8) == 0x80u8: cut = cut - 1
+        detail = detail.substring(0, cut)
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("remote-run"),
         "state": SdnValue.String(outcome.state), "operationId": SdnValue.String(outcome.operation_id),
         "digest": SdnValue.String(outcome.digest), "detail": SdnValue.String(detail), "settled": SdnValue.String(outcome.settled),

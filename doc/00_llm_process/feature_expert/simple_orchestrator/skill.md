@@ -546,6 +546,13 @@ Host side of the remote container build; the controller half is the `remote-run`
   before the execute lookup) -- otherwise a replayed/retried open runs a workload on an already-settled row. An existing
   retention marker must be byte-canonical (`retention_marker_text_v1`) or it is `marker-invalid`, never resumed. The
   controller host-action send archives EVERY non-inspect sub create-only (retention-release included, not only `-abandon`).
+- Trap (milestone_0052 spec hygiene, specs NOT_RUN): a source pin built on `index_of` is VACUOUS when its anchor is gone:
+  `a.index_of(X) < b.index_of(Y)` passes with X missing (-1), `L > R` passes with R missing, and `substring` clamps a -1
+  start to 0 and a -1 end to "" (so a negative `contains` over the slice passes). Guard the low side (`x >= 0 and ...`)
+  and make every spec anchor helper `fail()` on a missing anchor (never `return ""`). `text.len()` counts code points
+  while `substring` takes BYTES: bound slices with `byte_len()`. The remote-run accept pair is verified at a clock read
+  taken AFTER the bundle fetch (an unbundled settle reads no accept authority); `--abandon-id` is the run id of every
+  signed host action, retention-release included.
 ### Controller remote-run (milestone_0030 controller half, specs NOT_RUN)
 `simple orchestrator remote-run --dispatch-root --config-digest --key-store --approver --spec <dir> --out --grant-id --expires-in-ms`
 (`remote_run_command_v1.spl`; pure driver `remote_run_v1.spl`, authoring `remote_run_author_v1.spl`, frames

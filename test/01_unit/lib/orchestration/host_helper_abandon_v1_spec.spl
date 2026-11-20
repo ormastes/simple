@@ -67,8 +67,13 @@ fn ha_signed(abandon: HostHelperAbandonV1, issuer: i64 = 1, approver: i64 = 65, 
 
 fn ha_body(file: text, start: text, stop: text) -> text:
     val source = file_read_text("src/lib/nogc_sync_mut/orchestration/" + file)
-    val rest = source.substring(source.index_of(start), source.len())
-    val to = rest.substring(1, rest.len()).index_of(stop)
+    val from = source.index_of(start)
+    if from < 0:
+        # A renamed anchor must fail the case, never hand a wrong slice to a negative `contains` check.
+        fail("ha_body anchor missing: " + start)
+        return ""
+    val rest = source.substring(from, source.byte_len())
+    val to = rest.substring(1, rest.byte_len()).index_of(stop)
     if to < 0: return rest
     rest.substring(0, to + 1)
 
@@ -342,12 +347,12 @@ describe "Route wiring (milestone_0036)":
         # @req AT-OPS-HELPER-ABANDON (crash between the marker and the settle)
         val row = ha_body("host_linux_service_current_v4.spl", "fn linux_service_helper_cancel_row_v4(", "\npub fn ")
         expect(row.contains("host_helper_abandon_commit_v1(capacity, operation)")).to_equal(true)
-        expect(row.index_of("host_helper_abandoned_pending_v1(") < row.index_of("host_helper_deadline_reap_v1(")).to_equal(true)
         step("milestone_0043 (REVIEW_B P2-4): the recorded approval is re-verified before the settle, like the handoff twin")
         val recheck = row.index_of("host_helper_abandon_recorded_verify_v1(capacity.journal, operation, ")
         val settle = row.index_of("host_helper_abandon_commit_v1(capacity, operation)")
-        expect(recheck > row.index_of("host_helper_abandoned_pending_v1(") and settle > recheck).to_equal(true)
+        expect(row.index_of("host_helper_abandoned_pending_v1(") >= 0 and recheck > row.index_of("host_helper_abandoned_pending_v1(") and settle > recheck).to_equal(true)
         step("a marker that is present but cannot be re-verified holds the row: it never falls through to the reap or R")
+        expect(row.index_of("host_helper_abandoned_pending_v1(") >= 0 and row.index_of("host_helper_deadline_reap_v1(") > row.index_of("host_helper_abandoned_pending_v1(")).to_equal(true)
         val held = row.substring(row.index_of("host_helper_abandoned_pending_v1("), row.index_of("host_helper_deadline_reap_v1("))
         expect(held.contains("case None: return Err(\"helper-abandon-recheck-unavailable\")")).to_equal(true)
         expect(held.contains("if pending.is_err(): return Err(\"helper-abandon-marker-unreadable:\" + pending.unwrap_err())")).to_equal(true)
