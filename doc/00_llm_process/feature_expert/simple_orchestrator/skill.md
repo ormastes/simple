@@ -740,6 +740,14 @@ roots resolving to one object (SCMAC-FS-002). Loopback via other DNS names is en
 Trap: path containment cannot see an ALIAS of a protected parent (only exact identity) and case folding is
 `.lower()` (no Unicode normalization) — both remain gaps, handled only by the native effectful boundary.
 
+Contracts P2 follow-up (milestone_0059, specs NOT_RUN): `linux_local_mounts_validate_v5` refuses a WRITABLE bind,
+including the legacy `build_output_root`, whose host root overlaps `/etc /proc /sys /dev /run /var/run /var/lock /boot
+/usr /bin /sbin /lib /lib64 /root /var/lib/simple/container /var/lib/containers /var/lib/docker` (path text only;
+read-only binds unchanged — open gap); build roots refuse `/`; stream policy paths refuse `/`, C0, DEL and C1; machine-policy identities refuse invisible format/bidi/separator scalars (matched
+on UTF-8 bytes); host-capability identity fields refuse `\n \t \r` on format and parse (`reason` keeps them);
+keep-id refuses uid/gid 0 in request bounds, the V3 request codec and the mapping receipt; endpoint-frame
+`u16/u32_payload_v1` return `Result` and refuse out-of-range values instead of masking.
+
 ## Unavailable-host rows (2026-11-19)
 
 Every unavailable host or capability row (spec execution NOT_RUN, container live rows, Windows/FreeBSD/VM hosts, live

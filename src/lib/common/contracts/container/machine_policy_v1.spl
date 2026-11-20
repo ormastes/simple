@@ -28,12 +28,39 @@ pub struct MachineContainerPolicyV1:
     providers: [MachineContainerProviderPolicyV1]
     local_principals: [text]
 
+# Invisible format/bidi/separator scalars let two different identities render alike (Trojan-Source class).
+# Matched on their UTF-8 bytes so the check does not depend on text indexing units: U+00AD, U+061C,
+# U+180E, U+200B-200F, U+2028-202E, U+2060-206F, U+FEFF, U+FFF9-FFFB, tags U+E0000-E007F, and the
+# blank/filler scalars U+034F, U+115F-1160, U+17B4-17B5, U+180B-180D, U+3164, U+FFA0, U+FE00-FE0F.
+fn machine_identity_format_control_v1(value: text) -> bool:
+    val size = value.byte_len()
+    for index in 0..size:
+        val b0 = value.byte_at(index) as i64
+        val b1 = if index + 1 < size: value.byte_at(index + 1) as i64 else: 0
+        val b2 = if index + 2 < size: value.byte_at(index + 2) as i64 else: 0
+        if b0 == 194 and b1 == 173: return true
+        if b0 == 205 and b1 == 143: return true
+        if b0 == 225 and b1 == 133 and (b2 == 159 or b2 == 160): return true
+        if b0 == 225 and b1 == 158 and (b2 == 180 or b2 == 181): return true
+        if b0 == 225 and b1 == 160 and b2 >= 139 and b2 <= 141: return true
+        if b0 == 227 and b1 == 133 and b2 == 164: return true
+        if b0 == 239 and b1 == 190 and b2 == 160: return true
+        if b0 == 239 and b1 == 184 and b2 >= 128 and b2 <= 143: return true
+        if b0 == 216 and b1 == 156: return true
+        if b0 == 225 and b1 == 160 and b2 == 142: return true
+        if b0 == 226 and b1 == 128 and ((b2 >= 139 and b2 <= 143) or (b2 >= 168 and b2 <= 174)): return true
+        if b0 == 226 and b1 == 129 and b2 >= 160 and b2 <= 175: return true
+        if b0 == 239 and b1 == 187 and b2 == 191: return true
+        if b0 == 239 and b1 == 191 and b2 >= 185 and b2 <= 187: return true
+        if b0 == 243 and b1 == 160 and (b2 == 128 or b2 == 129): return true
+    false
+
 fn machine_identity_text_v1(value: text) -> bool:
     if value.byte_len() < 1 or value.byte_len() > 256: return false
     for ch in value.chars():
         val scalar = ch.char_code_at(0)
         if scalar < 32 or (scalar >= 127 and scalar <= 159): return false
-    true
+    not machine_identity_format_control_v1(value)
 
 fn machine_policy_fields_v1(policy: MachineContainerPolicyV1) -> Result<(), text>:
     # Shared builder identifiers deliberately impose ASCII [A-Za-z0-9_-],

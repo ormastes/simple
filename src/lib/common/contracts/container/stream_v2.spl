@@ -68,11 +68,18 @@ pub struct ContainerHelperAdmissionV2:
     cpu_millis: i64
     memory_bytes: i64
 
+# "/" is refused: every caller's field (root, broker, directory, delegated cgroup) would then name the whole host.
 pub fn container_stream_absolute_path_v2(path: text) -> bool:
-    if not path.starts_with("/") or str_len(path) > 4095 or path.contains("\0") or
-            path.contains("\n") or path.contains("\r") or path.contains("//"):
+    if path == "/" or not path.starts_with("/") or str_len(path) > 4095 or path.contains("//") or path.ends_with("/"):
         return false
-    if path != "/" and path.ends_with("/"): return false
+    # C0, DEL and the UTF-8 encoding of C1 (U+0080-U+009F = 0xC2 0x80-0x9F).
+    val size = path.byte_len()
+    for index in 0..size:
+        val byte = path.byte_at(index) as i64
+        if byte < 32 or byte == 127: return false
+        if byte == 194 and index + 1 < size:
+            val next = path.byte_at(index + 1) as i64
+            if next >= 128 and next <= 159: return false
     for part in path.split("/"):
         if part == "." or part == "..": return false
     true
@@ -97,7 +104,7 @@ pub fn container_output_identity_digest_v2(identity: ContainerOutputIdentityV2) 
 pub fn container_stream_policy_encode_v2(policy: ContainerStreamPolicyV2) -> Result<text, text>:
     for path in [policy.root, policy.broker_program, policy.directory, policy.delegated_cgroup_path]:
         if not container_stream_absolute_path_v2(path): return Err("container-stream-policy-path-invalid")
-    if policy.root == "/" or policy.timeout_ms <= 0 or policy.memory_policy != "enforce":
+    if policy.timeout_ms <= 0 or policy.memory_policy != "enforce":
         return Err("container-stream-policy-bound-invalid")
     for digest in [policy.snapshot_digest, policy.cache_identity, policy.broker_digest]:
         if not builder_digest_valid_v1(digest): return Err("container-stream-policy-digest-invalid")

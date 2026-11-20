@@ -74,6 +74,27 @@ describe "Linux V5 mount metadata is retained without granting effects":
             too_many.push(ContainerMountProjectionV2(host_root: "/host", guest_root: "/target" + index.to_text(), read_only: true))
         expect(linux_local_mounts_validate_v5(too_many, "", "", "").unwrap_err()).to_equal("linux-mount-count-exceeded")
 
+    it "refuses writable binds of protected host roots while keeping read-only and workspace binds":
+        # milestone_0059 item 1: a writable host bind may only name a non-system tree; the workspace
+        # profile (the design's only writable-mount producer) already refuses these overlaps.
+        for host in ["/etc", "/etc/ssh", "/var", "/var/lib/simple/container", "/var/lib/simple/container/journal",
+                "/proc", "/sys", "/dev", "/run", "/boot", "/usr", "/usr/local/bin", "/bin", "/sbin", "/lib",
+                "/lib64", "/root", "/var/run", "/var/run/docker.sock", "/var/lock", "/var/lib/containers/storage",
+                "/var/lib/docker"]:
+            val writable = ContainerMountProjectionV2(host_root: host, guest_root: "/work", read_only: false)
+            expect(linux_local_mounts_validate_v5([writable], "", "", "").unwrap_err()).to_equal("linux-mount-writable-host-root-protected")
+        # The legacy build output root is a writable bind too (type=bind,source=<root>): same protected set.
+        for host in ["/", "/etc", "/var/lib/simple/container", "/usr/local"]:
+            expect(linux_local_mounts_validate_v5([], "/stage/inputs", host, "").unwrap_err()).to_equal("linux-mount-writable-host-root-protected")
+        expect(linux_local_mounts_validate_v5([], "/etc", "/stage/outputs", "").is_ok()).to_equal(true)
+        expect(_linux_oci_build_root_error_v1("/")).to_equal("build-root-unsafe")
+        expect(_linux_oci_build_root_error_v1("/stage/outputs")).to_equal("")
+        val read_only = ContainerMountProjectionV2(host_root: "/usr/share/doc", guest_root: "/docs", read_only: true)
+        expect(linux_local_mounts_validate_v5([read_only], "", "", "").is_ok()).to_equal(true)
+        for host in ["/host/work tree", "/srv/simple-workspaces/fixed", "/var/lib/simple/workspaces", "/etcetera", "/rooted"]:
+            val writable = ContainerMountProjectionV2(host_root: host, guest_root: "/work", read_only: false)
+            expect(linux_local_mounts_validate_v5([writable], "", "", "").is_ok()).to_equal(true)
+
     it "refuses create, replay and command construction without a native mount owner":
         var provider = LinuxOciRuntimeProviderV1.new("linux", "podman", "/tmp/mount-provider", "boot", 1, false)
         val request = mount_request_v5()
