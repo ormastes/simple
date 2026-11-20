@@ -1,0 +1,68 @@
+"""
+# Optional Binding Mutable Method Mutation Specification
+
+Reproducer and verification spec for bug 5064 (`me_method_mutation_through_optional_binding_discarded_2026-08-04`).
+Verifies that calling `me` methods on a `Counter?` binding (rebound `val`/`var`,
+`if val Some(...)`, or callee `if val Some(bound)` on a caller class) preserves
+all state mutations instead of silently mutating a temporary copy.
+"""
+
+use std.spec.*
+
+class OptMeCounter:
+    var n: i64 = 0
+
+    me bump():
+        self.n = self.n + 1
+
+fn increment_via_some_pattern(c: OptMeCounter?) -> i64:
+    if val Some(bound) = c:
+        bound.bump()
+        return bound.n
+    -1
+
+fn increment_via_direct_alias(c: OptMeCounter?) -> i64:
+    if c == nil:
+        return -1
+    val alias = c
+    alias.bump()
+    if val Some(inner) = alias:
+        return inner.n
+    -1
+
+describe "me-method mutation through optional bindings (bug 5064)":
+    """Verifies mutations persist across re-bound, destructured, and caller-shared optional bindings."""
+
+    it "preserves me mutations across val re-binding on Counter? (Arm A)":
+        var oa: OptMeCounter? = Some(OptMeCounter(n: 0))
+        val a = oa
+        var seen: i64 = -1
+        if a != nil:
+            val ca = a
+            ca.bump()
+            ca.bump()
+            oa = Some(ca)
+        if val Some(final_c) = oa:
+            seen = final_c.n
+        expect(seen).to_equal(2)
+
+    it "preserves me mutations across destructured Some binding (Arm B)":
+        var ob: OptMeCounter? = Some(OptMeCounter(n: 0))
+        var seen: i64 = -1
+        if val Some(cb) = ob:
+            cb.bump()
+            cb.bump()
+            ob = Some(cb)
+        if val Some(final_c) = ob:
+            seen = final_c.n
+        expect(seen).to_equal(2)
+
+    it "propagates me mutation back to caller class wrapped in Some":
+        var counter = OptMeCounter(n: 10)
+        val seen = increment_via_some_pattern(Some(counter))
+        expect(seen).to_equal(11)
+        expect(counter.n).to_equal(11)
+
+        val seen_two = increment_via_direct_alias(Some(counter))
+        expect(seen_two).to_equal(12)
+        expect(counter.n).to_equal(12)

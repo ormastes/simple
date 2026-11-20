@@ -1,0 +1,51 @@
+"""
+# Optional Field Binding Aliasing Prevention Specification
+
+Prevention tests for bug 5064 (`me_method_mutation_through_optional_binding_discarded_2026-08-04`).
+Verifies that reading an optional class field (`Holder.maybe_queue`) into a local
+or iterating/mutating `me` methods updates the held class instance without re-delivery
+across repeated cycles, while keeping `var` re-binding safe on optional class state.
+"""
+
+use std.spec.*
+
+class ScriptedQueue:
+    var items: [i64]
+    var cursor: i64 = 0
+
+    me pop_next() -> i64:
+        if self.cursor >= self.items.len():
+            return -1
+        val out = self.items[self.cursor]
+        self.cursor = self.cursor + 1
+        out
+
+class QueueOwner:
+    var input: ScriptedQueue?
+
+    me drain_one() -> i64:
+        val inp = self.input
+        if val Some(q) = inp:
+            val item = q.pop_next()
+            return item
+        -1
+
+describe "optional field binding aliasing prevention (bug 5064)":
+    """Ensures optional class fields retain me-method progress across frames."""
+
+    it "advances queue cursor once per drain without re-delivering events":
+        val owner = QueueOwner(input: Some(ScriptedQueue(items: [10, 20, 30], cursor: 0)))
+        expect(owner.drain_one()).to_equal(10)
+        expect(owner.drain_one()).to_equal(20)
+        expect(owner.drain_one()).to_equal(30)
+        expect(owner.drain_one()).to_equal(-1)
+
+    it "preserves var binding me mutations across multiple optional assignments":
+        var slot: ScriptedQueue? = Some(ScriptedQueue(items: [7, 8], cursor: 0))
+        var handle = slot
+        if val Some(q) = handle:
+            expect(q.pop_next()).to_equal(7)
+        if val Some(q2) = slot:
+            expect(q2.pop_next()).to_equal(8)
+        if val Some(q3) = slot:
+            expect(q3.cursor).to_equal(2)
