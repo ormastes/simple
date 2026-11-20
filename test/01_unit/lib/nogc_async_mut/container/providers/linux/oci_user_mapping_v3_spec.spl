@@ -8,6 +8,7 @@ use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
 use std.nogc_async_mut.container.providers.linux.user_mapping_v3.*
 use std.nogc_async_mut.container.api_v2.*
 use std.nogc_async_mut.container.user_mapping_v3.simple_container_user_mapping_v3
+use std.common.contracts.container.user_mapping_v3.{ContainerUserMappingReceiptV3, container_user_mapping_receipt_encode_v3}
 use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
 use test.fixtures.container.simple_container_api_fixture_v2.simple_container_scripted_linux_fixture_v2
 
@@ -26,7 +27,21 @@ fn _mapping_json_v3() -> text:
     val identity = _mapping_identity_v3()
     "{\"id\":\"" + identity.native_id + "\",\"pod_uid\":\"workload-1\",\"attempt\":\"1\",\"node_boot_id\":\"" + identity.node_boot_id + "\",\"provider_generation\":\"7\",\"operation_id\":\"create-api\",\"user\":\"1000:1001\",\"pid\":1234,\"cgroup\":\"/user.slice/libpod-" + identity.native_id + ".scope\",\"status\":\"running\"}"
 
+fn _mapping_receipt_v3(uid: i64, gid: i64) -> ContainerUserMappingReceiptV3:
+    ContainerUserMappingReceiptV3(backend: "linux-podman", scope: linux_container_scope_fixture_v2(),
+        identity: _mapping_identity_v3(), request_digest: "c".repeat(64), provider_identity_digest: "d".repeat(64),
+        selected_uid: uid, selected_gid: gid, user_namespace_mode: "keep-id", native_binding_digest: "e".repeat(64),
+        native_evidence_digest: "f".repeat(64), observed_unix_ms: 1, pre_query_digest: "1".repeat(64),
+        pre_evidence_digest: "2".repeat(64), post_query_digest: "3".repeat(64), post_evidence_digest: "4".repeat(64),
+        proof_kind: "exact-native-primary-user-mapping-v3")
+
 describe "qualified primary process mapping producer":
+    it "refuses a keep-id receipt that selects root uid or gid":
+        # milestone_0059 item 5: the request bounds refuse root; an audit receipt must not record it either.
+        expect(container_user_mapping_receipt_encode_v3(_mapping_receipt_v3(1000, 1001)).is_ok()).to_equal(true)
+        for pair in [(0, 1001), (1000, 0), (0, 0)]:
+            expect(container_user_mapping_receipt_encode_v3(_mapping_receipt_v3(pair.0, pair.1)).unwrap_err()).to_equal("container-user-mapping-selection-invalid")
+
     it "parses exact running primary PID cgroup and explicit numeric Config User":
         val parsed = linux_oci_mapping_inspect_v3(_mapping_json_v3(), _mapping_identity_v3(), _mapping_request_v3()).unwrap()
         expect(parsed.pid).to_equal(1234)

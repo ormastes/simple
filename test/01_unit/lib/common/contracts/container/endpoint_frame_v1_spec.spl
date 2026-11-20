@@ -62,14 +62,25 @@ describe "endpoint-frame-v1 codec":
         expect(endpoint_frame_encode_v1(EndpointFrameV1(kind: ENDPOINT_FRAME_DATA_V1, channel: 0,
             sequence: 1, payload: [1])).is_err()).to_equal(true)
         expect(endpoint_frame_encode_v1(EndpointFrameV1(kind: ENDPOINT_FRAME_WINDOW_V1, channel: 1,
-            sequence: 1, payload: endpoint_frame_u32_payload_v1(0))).is_err()).to_equal(true)
+            sequence: 1, payload: endpoint_frame_u32_payload_v1(0).unwrap())).is_err()).to_equal(true)
         expect(endpoint_frame_encode_v1(EndpointFrameV1(kind: ENDPOINT_FRAME_DATA_V1, channel: 1,
             sequence: 0, payload: [1])).is_err()).to_equal(true)
         val window = EndpointFrameV1(kind: ENDPOINT_FRAME_WINDOW_V1, channel: 1, sequence: 2,
-            payload: endpoint_frame_u32_payload_v1(70000))
+            payload: endpoint_frame_u32_payload_v1(70000).unwrap())
         expect(endpoint_frame_window_credit_v1(window).unwrap()).to_equal(70000)
         val reset = EndpointFrameV1(kind: ENDPOINT_FRAME_RESET_V1, channel: 1, sequence: 3,
-            payload: endpoint_frame_u16_payload_v1(513))
+            payload: endpoint_frame_u16_payload_v1(513).unwrap())
         expect(endpoint_frame_reason_v1(reset).unwrap()).to_equal(513)
         expect(endpoint_frame_target_payload_v1(ENDPOINT_FRAME_PROTOCOL_TCP_V1, 0, "x.test").is_err()).to_equal(true)
         expect(endpoint_frame_target_payload_v1(ENDPOINT_FRAME_PROTOCOL_TCP_V1, 80, "bad name").is_err()).to_equal(true)
+
+    it "refuses out-of-range u16 and u32 payload values instead of truncating them":
+        # milestone_0059 item 6: masking turned 65536 into reason 0 and 4294967296 into a zero window.
+        val max16: [u8] = [255, 255]
+        val max32: [u8] = [255, 255, 255, 255]
+        expect(endpoint_frame_u16_payload_v1(65535).unwrap()).to_equal(max16)
+        expect(endpoint_frame_u32_payload_v1(4294967295).unwrap()).to_equal(max32)
+        for value in [-1, 65536, 70000]:
+            expect(endpoint_frame_u16_payload_v1(value).unwrap_err()).to_equal("endpoint-frame-u16-out-of-range")
+        for value in [-1, 4294967296, 4294967297]:
+            expect(endpoint_frame_u32_payload_v1(value).unwrap_err()).to_equal("endpoint-frame-u32-out-of-range")

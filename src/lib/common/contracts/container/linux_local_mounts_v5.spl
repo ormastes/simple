@@ -15,15 +15,30 @@ fn mount_path_v5(path: text) -> bool:
         if part == "." or part == "..": return false
     true
 
+# A writable host bind must never reach system trees or machine authority state. The
+# workspace profile (the only designed writable-mount producer) refuses the same overlaps.
+fn mount_writable_host_protected_v5(path: text) -> bool:
+    if path == "/": return true
+    # /var/run and /var/lock are standard symlinks into /run; text containment cannot follow them.
+    for root in ["/etc", "/proc", "/sys", "/dev", "/run", "/var/run", "/var/lock", "/boot", "/usr", "/bin", "/sbin",
+            "/lib", "/lib64", "/root", "/var/lib/simple/container", "/var/lib/containers", "/var/lib/docker"]:
+        if path == root or path.starts_with(root + "/") or root.starts_with(path + "/"): return true
+    false
+
 pub fn linux_local_mounts_validate_v5(mounts: [ContainerMountProjectionV2],
         build_input_root: text, build_output_root: text, bundle_path: text) -> Result<(), text>:
     if mounts.len() > 64: return Err("linux-mount-count-exceeded")
+    # The legacy build output root is bound writable into the guest, so it shares the protected set.
+    if build_output_root != "" and mount_writable_host_protected_v5(build_output_root):
+        return Err("linux-mount-writable-host-root-protected")
     if mounts.len() > 0 and (build_input_root != "" or build_output_root != "" or bundle_path != ""):
         return Err("linux-mount-legacy-workspace-conflict")
     var targets: [text] = []
     for mount in mounts:
         if not mount_path_v5(mount.host_root) or not mount_path_v5(mount.guest_root):
             return Err("linux-mount-path-invalid")
+        if not mount.read_only and mount_writable_host_protected_v5(mount.host_root):
+            return Err("linux-mount-writable-host-root-protected")
         for target in targets:
             if (mount.guest_root == target or mount.guest_root.starts_with(target + "/") or
                     target.starts_with(mount.guest_root + "/")):
