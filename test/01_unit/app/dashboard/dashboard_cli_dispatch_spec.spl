@@ -1,0 +1,82 @@
+"""
+## Purpose and audience
+Purpose: Verify dashboard CLI argument parsing, subcommand dispatch, and delegation helpers.
+Audience: app.dashboard maintainers and CLI integration engineers.
+"""
+
+# @req: REQ-APP-DASHBOARD-CLI-001
+
+use std.spec.*
+use app.dashboard.main.{
+    dashboard_plan_cli,
+    dashboard_execute_plan,
+    run_dashboard,
+    _run_serve_result,
+    _run_gui_result,
+    _run_agents_result
+}
+
+describe "Dashboard CLI dispatch":
+
+    it "maps empty arguments to usage with exit code 0":
+        val plan = dashboard_plan_cli([])
+        expect(plan.valid).to_equal(true)
+        expect(plan.exit_code).to_equal(0)
+        expect(plan.command).to_equal("usage")
+
+    it "dispatches help flags and help subcommand cleanly":
+        for flag in ["--help", "-h", "help"]:
+            val plan = dashboard_plan_cli([flag])
+            expect(plan.valid).to_equal(true)
+            expect(plan.exit_code).to_equal(0)
+            expect(plan.command).to_equal("help")
+            val (out, code) = dashboard_execute_plan(plan)
+            expect(code).to_equal(0)
+            expect(out).to_contain("Simple Dashboard CLI")
+            expect(out).to_contain("--log-mode")
+            expect(out).to_contain("--progress")
+
+    it "dispatches status and tables subcommands using the table model":
+        val st_plan = dashboard_plan_cli(["status"])
+        expect(st_plan.valid).to_equal(true)
+        expect(st_plan.command).to_equal("status")
+        val (st_out, st_code) = dashboard_execute_plan(st_plan)
+        expect(st_code).to_equal(0)
+        expect(st_out).to_contain("Simple Dashboard")
+
+        val tbl_plan = dashboard_plan_cli(["tables"])
+        expect(tbl_plan.valid).to_equal(true)
+        expect(tbl_plan.command).to_equal("tables")
+        val (tbl_out, tbl_code) = dashboard_execute_plan(tbl_plan)
+        expect(tbl_code).to_equal(0)
+        expect(tbl_out).to_contain("features")
+
+    it "routes serve, gui, and agents subcommands to their result delegates":
+        val s_plan = dashboard_plan_cli(["serve", "--port", "8080"])
+        expect(s_plan.valid).to_equal(true)
+        expect(s_plan.command).to_equal("serve")
+        val (s_out, s_code) = dashboard_execute_plan(s_plan)
+        expect(s_code).to_equal(0)
+        expect(s_out).to_contain(_run_serve_result(["--port", "8080"]))
+
+        val g_plan = dashboard_plan_cli(["gui", "--port", "9090"])
+        expect(g_plan.valid).to_equal(true)
+        expect(g_plan.command).to_equal("gui")
+        val (g_out, g_code) = dashboard_execute_plan(g_plan)
+        expect(g_code).to_equal(0)
+        expect(g_out).to_contain(_run_gui_result(["--port", "9090"]))
+
+        val a_plan = dashboard_plan_cli(["agents"])
+        expect(a_plan.valid).to_equal(true)
+        expect(a_plan.command).to_equal("agents")
+        val (a_out, a_code) = dashboard_execute_plan(a_plan)
+        expect(a_code).to_equal(0)
+        expect(a_out).to_contain(_run_agents_result([]))
+
+    it "returns exit code 1 on unknown subcommands and preserves run_dashboard exit contract":
+        val bad = dashboard_plan_cli(["bogus"])
+        expect(bad.valid).to_equal(false)
+        expect(bad.exit_code).to_equal(1)
+        expect(bad.command).to_equal("error")
+        expect(run_dashboard(["bogus"])).to_equal(1)
+        expect(run_dashboard(["--help"])).to_equal(0)
