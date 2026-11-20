@@ -1,0 +1,41 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+PM3 unit plan import walk (unit_tldr_plan_v1) follows only what
+tldr_route_import_specs_v1 returns. `src/lib/io_runtime.spl` re-exports with
+`export a, b from nogc_sync_mut.io_runtime`; that form was dropped, so the
+re-export targets were never summarized or parsed, their rows stayed unbuilt,
+and every unit whose target imports std.io_runtime (e.g. io/dir_ops.spl)
+failed FILE-WORKER-E-CLOSURE-INCOMPLETE at the phase-2 readiness check.
+Audience: compiler engineers maintaining the per-file driver.
+"""
+
+# @tag: unit, compiler, driver
+
+use std.spec.*
+use compiler.driver.driver_tldr_import_route_v1.{tldr_route_import_specs_v1}
+
+fn trse_bases(source: text) -> [text]:
+    var out: [text] = []
+    for spec in tldr_route_import_specs_v1(source, true):
+        out.push(spec.0)
+    out
+
+describe "TLDR route import scan":
+    it "follows `export names from module` re-exports":
+        val specs = tldr_route_import_specs_v1("export file_read, file_write from nogc_sync_mut.io_runtime\nexport host_os from nogc_async_mut.sosix.host_facade # note from x\n", true)
+        expect(specs.len()).to_equal(2)
+        expect(specs[0].0).to_equal("nogc_sync_mut.io_runtime")
+        expect(specs[0].1).to_equal(["file_read", "file_write"])
+        expect(specs[1].0).to_equal("nogc_async_mut.sosix.host_facade")
+
+    it "still ignores a plain `export names` without a source module":
+        expect(trse_bases("export a, b\n").len()).to_equal(0)
+
+    it "keeps use and export use":
+        expect(trse_bases("use std.a.*\nexport use std.b\n")).to_equal(["std.a", "std.b"])
+
+    it "leaves frozen-route callers (default) unchanged":
+        expect(tldr_route_import_specs_v1("export a from m.x\n").len()).to_equal(0)

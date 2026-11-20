@@ -151,7 +151,7 @@ pub fn tldr_closure_walk_check_v1(flag_on: bool, site: text) -> Result<i64, text
 # (module_id, imported names) per `use` / `export use` / `pub use` line.
 # Names are [] for a bare or glob import (the summary's export list expands it).
 # Supports multi-line imports: use x.{a,\n b}
-pub fn tldr_route_import_specs_v1(source: text) -> [(text, [text])]:
+pub fn tldr_route_import_specs_v1(source: text, include_export_from: bool = false) -> [(text, [text])]:
     var out: [(text, [text])] = []
     val lines = source.replace("\r\n", "\n").split("\n")
     var i = 0
@@ -162,6 +162,25 @@ pub fn tldr_route_import_specs_v1(source: text) -> [(text, [text])]:
         if t.starts_with("use "): rest = t.substring(4)
         elif t.starts_with("export use "): rest = t.substring(11)
         elif t.starts_with("pub use "): rest = t.substring(8)
+        elif include_export_from and t.starts_with("export ") and t.contains(" from "):
+            # `export a, b from mod.path`: an explicit-origin re-export is an
+            # import edge too (src/lib/io_runtime.spl). Without it the unit
+            # plan never summarized/parsed the origin and readiness failed
+            # FILE-WORKER-E-CLOSURE-INCOMPLETE (bug ..._2026-11-19 update f).
+            val from_at = t.index_of(" from ")
+            var exported: [text] = []
+            for item in t.substring(7, from_at).split(","):
+                var name = item.trim()
+                val item_as = name.index_of(" as ")
+                if item_as > 0: name = name.substring(0, item_as).trim()
+                if name != "" and name != "*": exported.push(name)
+            var origin = t.substring(from_at + 6)
+            val hash_at = origin.index_of("#")
+            if hash_at >= 0: origin = origin.substring(0, hash_at)
+            origin = origin.trim()
+            if origin != "": out.push((origin, exported))
+            i = i + 1
+            continue
         if rest == "":
             i = i + 1
             continue
