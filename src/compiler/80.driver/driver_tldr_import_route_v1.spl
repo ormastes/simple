@@ -184,7 +184,32 @@ pub fn tldr_route_import_specs_v1(source: text, include_export_from: bool = fals
         if rest == "":
             i = i + 1
             continue
+        val rest_hash = rest.index_of("#")
+        if rest_hash >= 0: rest = rest.substring(0, rest_hash)
         rest = rest.trim()
+        if rest.starts_with("lazy "): rest = rest.substring(5).trim()
+        # Paren-group form `use mod (a, b)` / `use mod(a)`: without this the
+        # group stayed in the module id, the plan could not resolve it and
+        # silently skipped the target (process_ops -> process_governor ->
+        # FILE-WORKER-E-CLOSURE-INCOMPLETE, bug ..._2026-11-19 update g).
+        val paren = rest.index_of("(")
+        if paren > 0 and rest.index_of(".{") < 0 and _tr_is_dotted_path_v1(rest.substring(0, paren).trim()):
+            var inner = rest.substring(paren + 1)
+            var pclose = inner.index_of(")")
+            while pclose < 0 and i + 1 < lines.len() and not _tr_starts_decl_v1(lines[i + 1].trim()):
+                i = i + 1
+                inner = inner + "," + _tr_strip_comment_v1(lines[i])
+                pclose = inner.index_of(")")
+            var pnames: [text] = []
+            if pclose >= 0:
+                for item in inner.substring(0, pclose).split(","):
+                    var name = item.trim()
+                    val item_as = name.index_of(" as ")
+                    if item_as > 0: name = name.substring(0, item_as).trim()
+                    if name != "" and name != "*": pnames.push(name)
+            out.push((rest.substring(0, paren).trim(), pnames))
+            i = i + 1
+            continue
         val brace = rest.index_of(".{")
         var names: [text] = []
         var base = rest
@@ -330,3 +355,23 @@ export NATIVE_UNIT_TLDR_IMPORTS_ENV_V1, unit_tldr_imports_flag_v1, unit_tldr_imp
 export unit_tldr_imports_enabled_v1, tldr_guards_active_v1
 export tldr_route_import_specs_v1, tldr_route_worker_v1
 export tldr_import_handle_fill_v1, tldr_import_generic_body_v1
+
+# True when `s` is a bare dotted module path (letters, digits, `_`, `.`).
+fn _tr_is_dotted_path_v1(s: text) -> bool:
+    if s == "" or not s.contains("."):
+        return false
+    for ch in s.chars():
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_" or ch == "."
+        if not ok:
+            return false
+    true
+
+fn _tr_strip_comment_v1(line: text) -> text:
+    val at = line.index_of("#")
+    if at >= 0:
+        return line.substring(0, at).trim()
+    line.trim()
+
+# A continuation line that opens a new statement ends an unclosed paren group.
+fn _tr_starts_decl_v1(t: text) -> bool:
+    t.starts_with("use ") or t.starts_with("export ") or t.starts_with("pub ") or t.starts_with("fn ") or t.starts_with("\"\"\"")
