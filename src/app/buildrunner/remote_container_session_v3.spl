@@ -7,7 +7,7 @@ use app.buildrunner.remote_session_v1.{RemoteDatabaseSessionV1, RemoteAcceptedRe
 use app.buildrunner.remote_container_evidence_v3.*
 use app.buildrunner.remote_container_authority_v3.*
 use app.buildrunner.remote_container_bundle_codec_v3.remote_container_bundle_decode_v3
-use app.buildrunner.remote_container_reset_failure_v3.{RemoteContainerResetFailureV3, RemoteResetFailedResultV3,
+use app.buildrunner.remote_container_reset_failure_v3.{RemoteResetFailedResultV3,
     remote_container_reset_failure_bind_v3, remote_container_reset_failure_encode_v3, remote_container_reset_failure_digest_v3}
 use app.buildrunner.remote_container_reset_failure_signed_v3.{remote_container_reset_failure_signed_decode_v3,
     remote_container_reset_failure_verify_v3, remote_container_reset_failure_late_context_v3}
@@ -44,30 +44,30 @@ impl RemoteContainerDatabaseSessionV3:
     # execution-host signature and the controller's own authority are verified BEFORE the journal is read or anything written;
     # the signed envelope is kept beside the receipt as audit evidence, the journaled digest is the receipt's.
     # milestone_0045 LATE-RECEIPT EXCEPTION (owner decision 5): `context.now` is the controller's real clock; the receipt's
-    # authority (and the record's admit below) runs in remote_container_reset_failure_late_context_v3, so a receipt signed
+    # authority (and the admit below) runs in remote_container_reset_failure_late_context_v3, so a receipt signed
     # after the approval/grant expired still journals `failed` for this exact op. This entry can only ever write `failed`.
     me accept_host_reset_failure_v3(task: BuildTaskV1, wire: text,
             context: RemoteAuthorityContextV1) -> Result<RemoteResetFailedResultV3, text>:
         if not self.parent.policies.contains_key(task.id): return Err("REMOTE_CONTAINER_TASK_NOT_ADMITTED")
         val signed = remote_container_reset_failure_signed_decode_v3(wire)?
         val _verified = remote_container_reset_failure_verify_v3(signed, task, self.parent.policies[task.id], context)?
-        self.record_reset_failure_v3(task, signed.receipt, remote_container_reset_failure_late_context_v3(context), wire)
-
-    me record_reset_failure_v3(task: BuildTaskV1, receipt: RemoteContainerResetFailureV3,
-            context: RemoteAuthorityContextV1, signed_wire: text) -> Result<RemoteResetFailedResultV3, text>:
-        if not self.parent.policies.contains_key(task.id) or not self.parent.identities.contains_key(task.id) or
+        # milestone_0051 KEYWIPE-05: the journal step lives in this verifying entry; no method takes a bare (unsigned)
+        # receipt, so nothing can journal a receipt whose Host signature was not verified just above.
+        val receipt = signed.receipt
+        val late = remote_container_reset_failure_late_context_v3(context)
+        if not self.parent.identities.contains_key(task.id) or
                 self.parent.identities[task.id] != builder_task_identity_v1(task) or not self.requests.contains_key(task.id):
             return Err("REMOTE_CONTAINER_TASK_NOT_ADMITTED")
         val policy = self.parent.policies[task.id]
-        val _authority = remote_context_admit_v1(context, task, policy)?
-        if context.requested.isolation_class != "native-container" or
-                context.observed.isolation_class != "native-container":
+        val _authority = remote_context_admit_v1(late, task, policy)?
+        if late.requested.isolation_class != "native-container" or
+                late.observed.isolation_class != "native-container":
             return Err("REMOTE_CONTAINER_ISOLATION_REQUIRED")
-        val envelope = distributed_encode_operation_v2(context.request)?
+        val envelope = distributed_encode_operation_v2(late.request)?
         val prior = distributed_operation_journal_lookup_v2(self.parent.operations, policy.operation_id)?
         val _collectable = remote_operation_collectable_v1(prior, policy.operation_id, envelope)?
         remote_container_reset_failure_bind_v3(task, policy, receipt, sha256_text(envelope),
-            distributed_grant_digest_v2(context.signed.grant)?)?
+            distributed_grant_digest_v2(late.signed.grant)?)?
         val digest = remote_container_reset_failure_digest_v3(receipt)?
         # The same retained task-journal check as accept_v3: a row already journaled for this op and attempt must carry
         # this receipt's digest (a completion journaled before a crashed op commit is never overridden by a receipt).
@@ -83,9 +83,9 @@ impl RemoteContainerDatabaseSessionV3:
             return Err("REMOTE_PARENT_OUTPUT_WRITE_FAILED")
         val receipt_hash = file_hash_sha256(root + "/receipt.sdn")
         if receipt_hash.is_none() or receipt_hash.unwrap() != digest: return Err("REMOTE_PARENT_OUTPUT_READBACK_DIFFERS")
-        if not file_atomic_write(root + "/signed-receipt.sdn", signed_wire): return Err("REMOTE_PARENT_OUTPUT_WRITE_FAILED")
+        if not file_atomic_write(root + "/signed-receipt.sdn", wire): return Err("REMOTE_PARENT_OUTPUT_WRITE_FAILED")
         val signed_hash = file_hash_sha256(root + "/signed-receipt.sdn")
-        if signed_hash.is_none() or signed_hash.unwrap() != sha256_text(signed_wire):
+        if signed_hash.is_none() or signed_hash.unwrap() != sha256_text(wire):
             return Err("REMOTE_PARENT_OUTPUT_READBACK_DIFFERS")
         self.parent.operations = distributed_operation_journal_commit_v2(self.parent.operations,
             distributed_operation_transition_v2(prior, "failed", digest)?)?
