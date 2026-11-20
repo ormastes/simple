@@ -714,8 +714,11 @@ binding / Host bug). Specs: `remote_container_reset_failure_stages_v3_spec.spl`,
   `controller-remote-abandon-v1/<digest>.sdn` record and `failed` bound to its digest. `failed` never enters
   `REMOTE_RUN_SETTLE_STATES_V1`. Approver keys must enroll `remote-run-abandon`. milestone_0050 (review A P1): a row an
   interrupted admit left `admitted` (open record archived, `executing` commit failed; a re-run's fresh pair conflicts on
-  the archive, resume needs a live row) is ended after its window by the same verified abandon as `cancelled`
-  (admitted -> failed is no transition), only while `remote_run_execute_archived_v1` proves no execute was archived.
+  the archive, resume needs a live row) is ended after its window by the same verified abandon as `cancelled`, only
+  while `remote_run_execute_archived_v1` proves no execute was archived. milestone_0054: WITH an archived execute
+  (reachable only when storage lost the `executing` commit; journal publication is not power-loss fsynced) the same
+  abandon ends it `failed` via `admitted -> executing -> failed` in one writer turn (never `cancelled`; resume never
+  re-sends an archived execute). A stop between the two commits leaves a window-ended `executing` row; retry abandon.
 - VERSION SKEW: a controller older than milestone_0045 refuses a Host-signed `service-restart` and a late receipt and
   settles `outcome-unknown`; upgrade the controller first (same rule as #10398/#10399).
 
