@@ -1,0 +1,213 @@
+use std.spec
+use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpRequest, HttpMethod, HttpStatus}
+use std.nogc_sync_mut.http_server.parser.{request_body_decode, request_content_type}
+use std.nogc_sync_mut.http_server.vector_parser.{http_vector_request_body_v1}
+use std.nogc_sync_mut.http_server.response.{serialize_response_head_for_body_length, serialize_response, response_wire_size, response_body_octets}
+use std.nogc_sync_mut.http_server.h2_server.{h2_response_body_len, h2_request_from_hpack_v1}
+use std.common.hpack.encoder.{HpackHeader, hpack_encoder_new, hpack_encode}
+use std.nogc_sync_mut.http_server.handler.{MultipartPart, parse_multipart_bytes}
+use std.common.text_bytes.{text_to_utf8_bytes}
+
+fn _h2_block(content_type: text) -> [u8]:
+    val headers = [
+        HpackHeader(name: ":method", value: "POST", sensitive: false),
+        HpackHeader(name: ":path", value: "/upload", sensitive: false),
+        HpackHeader(name: ":scheme", value: "https", sensitive: false),
+        HpackHeader(name: "content-type", value: content_type, sensitive: false)
+    ]
+    hpack_encode(headers, hpack_encoder_new(4096, true)).0
+
+fn _concat(a: [u8], b: [u8]) -> [u8]:
+    var out: [u8] = []
+    for x in a:
+        out.push(x)
+    for x in b:
+        out.push(x)
+    out
+
+describe "HTTP binary bodies":
+    it "a bytes response carries its content type and raw octets":
+        val resp = HttpResponse.bytes(HttpStatus.Ok, "audio/wav", [0u8, 255u8, 128u8])
+        expect(resp.body).to_equal("")
+        expect(resp.body_bytes.len()).to_equal(3)
+        expect(resp.body_bytes[1]).to_equal(255)
+        val head = serialize_response_head_for_body_length(resp, resp.body_bytes.len())
+        expect(head.contains("Content-Length: 3\r\n")).to_equal(true)
+        expect(head.contains("Content-Type: audio/wav\r\n")).to_equal(true)
+
+    it "text responses and requests default to no body bytes":
+        expect(HttpResponse.json("{}").body_bytes.len()).to_equal(0)
+        expect(HttpRequest.new(HttpMethod.Post, "/x").body_bytes.len()).to_equal(0)
+
+    it "a non-UTF-8 body is admitted as empty text only for binary content types":
+        val raw: [u8] = [0xFFu8, 0xFEu8, 0u8]
+        expect(request_body_decode(raw, "audio/wav", false).unwrap()).to_equal("")
+        expect(request_body_decode(raw, "multipart/form-data; boundary=x", false).unwrap()).to_equal("")
+        expect(request_body_decode(raw, "Application/Octet-Stream", false).unwrap()).to_equal("")
+        expect(request_body_decode(raw, "image/png", false).unwrap()).to_equal("")
+        expect(request_body_decode(raw, "video/mp4", false).unwrap()).to_equal("")
+        match request_body_decode(raw, "application/json", false):
+            Ok(_): fail("a non-UTF-8 JSON body must stay a 400")
+            Err(e): expect(e.starts_with("400")).to_equal(true)
+        match request_body_decode(raw, "", false):
+            Ok(_): fail("a non-UTF-8 body without a content type must stay a 400")
+            Err(e): expect(e.starts_with("400")).to_equal(true)
+        expect(request_body_decode(text_to_utf8_bytes("é"), "application/json", false).unwrap()).to_equal("é")
+
+    it "parses a multipart upload and keeps the file part binary":
+        val head = text_to_utf8_bytes("--XyZ\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper\r\n--XyZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\n")
+        val payload: [u8] = [82u8, 73u8, 0u8, 255u8, 13u8, 10u8, 45u8, 45u8, 128u8]
+        val tail = text_to_utf8_bytes("\r\n--XyZ--\r\n")
+        val body = _concat(_concat(head, payload), tail)
+        match parse_multipart_bytes(body, "multipart/form-data; boundary=XyZ"):
+            Ok(parts):
+                expect(parts.len()).to_equal(2)
+                expect(parts[0].name).to_equal("model")
+                expect(parts[0].data.len()).to_equal(7)
+                expect(parts[1].name).to_equal("file")
+                expect(parts[1].filename).to_equal("a.wav")
+                expect(parts[1].content_type).to_equal("audio/wav")
+                expect(parts[1].data.len()).to_equal(9)
+                expect(parts[1].data[3]).to_equal(255)
+                expect(parts[1].data[8]).to_equal(128)
+            Err(e):
+                fail("multipart parse failed: {e}")
+
+    it "rejects a multipart body without its closing boundary":
+        val body = text_to_utf8_bytes("--B\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nabc")
+        match parse_multipart_bytes(body, "multipart/form-data; boundary=\"B\""):
+            Ok(_): fail("unterminated multipart must not parse")
+            Err(e): expect(e.contains("closing boundary")).to_equal(true)
+
+    it "matches name only at a parameter boundary, not inside filename":
+        val body = text_to_utf8_bytes("--B\r\nContent-Disposition: form-data; filename=\"a.wav\"; name=\"file\"\r\n\r\nxy\r\n--B--\r\n")
+        match parse_multipart_bytes(body, "multipart/form-data; boundary=B"):
+            Ok(parts):
+                expect(parts.len()).to_equal(1)
+                expect(parts[0].name).to_equal("file")
+                expect(parts[0].filename).to_equal("a.wav")
+            Err(e): fail("parse failed: {e}")
+
+    it "accepts unquoted parameter values and a case-insensitive boundary":
+        val body = text_to_utf8_bytes("--Zz\r\nContent-Disposition: form-data; name=field\r\n\r\nv\r\n--Zz--")
+        match parse_multipart_bytes(body, "multipart/form-data; BOUNDARY=Zz"):
+            Ok(parts):
+                expect(parts.len()).to_equal(1)
+                expect(parts[0].name).to_equal("field")
+                expect(parts[0].data.len()).to_equal(1)
+            Err(e): fail("parse failed: {e}")
+
+    it "keeps a part with an empty header block as its own part":
+        val body = text_to_utf8_bytes("--B\r\n\r\nabc\r\n--B\r\nContent-Disposition: form-data; name=\"n\"\r\n\r\nd\r\n--B--\r\n")
+        match parse_multipart_bytes(body, "multipart/form-data; boundary=B"):
+            Ok(parts):
+                expect(parts.len()).to_equal(2)
+                expect(parts[0].name).to_equal("")
+                expect(parts[0].data.len()).to_equal(3)
+                expect(parts[1].name).to_equal("n")
+                expect(parts[1].data.len()).to_equal(1)
+            Err(e): fail("parse failed: {e}")
+
+    it "anchors delimiters to line starts and allows transport padding":
+        # Padding after the first delimiter, and part data holding CRLF--Bq (a
+        # boundary prefix that is not a delimiter line).
+        val body = text_to_utf8_bytes("--B  \r\nContent-Disposition: form-data; name=\"p\"\r\n\r\nx\r\n--Bq y\r\n--B--\r\n")
+        match parse_multipart_bytes(body, "multipart/form-data; boundary=B"):
+            Ok(parts):
+                expect(parts.len()).to_equal(1)
+                expect(parts[0].name).to_equal("p")
+                expect(parts[0].data.len()).to_equal(9)
+            Err(e): fail("parse failed: {e}")
+
+    it "rejects a header block that contains the delimiter":
+        val body = text_to_utf8_bytes("--B\r\nContent-Disposition: form-data; name=\"a\"\r\n--B\r\nX: y\r\n\r\nz\r\n--B--\r\n")
+        match parse_multipart_bytes(body, "multipart/form-data; boundary=B"):
+            Ok(_): fail("a delimiter inside the header block must not parse")
+            Err(e): expect(e.contains("header block contains the boundary")).to_equal(true)
+
+    it "every serializer and size helper counts body_bytes":
+        val utf8 = HttpResponse.bytes(HttpStatus.Ok, "text/csv", text_to_utf8_bytes("a,é"))
+        expect(response_body_octets(utf8)).to_equal(4)
+        val wire = serialize_response(utf8)
+        expect(wire.contains("Content-Length: 4\r\n")).to_equal(true)
+        expect(wire.ends_with("\r\n\r\na,é")).to_equal(true)
+        expect(response_wire_size(utf8)).to_equal(text_to_utf8_bytes(wire).len())
+        expect(h2_response_body_len(utf8)).to_equal(4)
+
+    it "a non-UTF-8 binary body has no text wire form but keeps its octet size":
+        val wav = HttpResponse.bytes(HttpStatus.Ok, "audio/wav", [0xFFu8, 0u8, 0x80u8])
+        expect(serialize_response(wav)).to_equal("")
+        expect(response_body_octets(wav)).to_equal(3)
+        expect(h2_response_body_len(wav)).to_equal(3)
+        val head = serialize_response_head_for_body_length(wav, 3)
+        expect(response_wire_size(wav)).to_equal(head.byte_len() + 3)
+
+    it "treats every non-text media type as binary-capable":
+        val raw: [u8] = [0xFFu8, 0xFEu8, 0u8]
+        for media in ["application/zip", "application/pdf", "application/gzip", "application/wasm", "application/x-protobuf", "application/cbor", "application/msgpack", "font/woff2"]:
+            expect(request_body_decode(raw, media, false).unwrap()).to_equal("")
+        for media in ["text/plain", "application/x-www-form-urlencoded", "application/ld+json", "application/soap+xml"]:
+            match request_body_decode(raw, media, false):
+                Ok(_): fail("{media} is text-ish and must stay a 400 on the scalar path")
+                Err(e): expect(e.starts_with("400")).to_equal(true)
+
+    it "the vector path keeps its lossy decode for text-ish bodies":
+        val form: [u8] = [110u8, 97u8, 109u8, 101u8, 61u8, 99u8, 97u8, 102u8, 0xE9u8]
+        val decoded = http_vector_request_body_v1(form, [("Content-Type", "application/x-www-form-urlencoded")])
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().starts_with("name=caf")).to_equal(true)
+        expect(http_vector_request_body_v1([0xFFu8], [("Content-Type", "audio/wav")]).unwrap()).to_equal("")
+        expect(http_vector_request_body_v1(text_to_utf8_bytes("{}"), []).unwrap()).to_equal("{}")
+
+    it "both parsers take the first of duplicate Content-Type headers":
+        val headers = [("Content-Type", "audio/wav"), ("content-type", "application/json")]
+        expect(request_content_type(headers)).to_equal("audio/wav")
+        expect(http_vector_request_body_v1([0xFFu8], headers).unwrap()).to_equal("")
+
+    it "parses a part with neither headers nor body as one empty part":
+        match parse_multipart_bytes(text_to_utf8_bytes("--B\r\n\r\n--B--"), "multipart/form-data; boundary=B"):
+            Ok(parts):
+                expect(parts.len()).to_equal(1)
+                expect(parts[0].name).to_equal("")
+                expect(parts[0].data.len()).to_equal(0)
+            Err(e): fail("parse failed: {e}")
+
+    it "parses back-to-back delimiters as an empty part before the next one":
+        match parse_multipart_bytes(text_to_utf8_bytes("--B\r\n--B\r\nX: y\r\n\r\nz\r\n--B--"), "multipart/form-data; boundary=B"):
+            Ok(parts):
+                expect(parts.len()).to_equal(2)
+                expect(parts[0].data.len()).to_equal(0)
+                expect(parts[1].data.len()).to_equal(1)
+                expect(parts[1].data[0]).to_equal(122)
+            Err(e): fail("parse failed: {e}")
+
+    it "caps a part header block at 16 KiB":
+        var big = "X-Pad: "
+        var i = 0
+        while i < 2100:
+            big = big + "abcdefgh"
+            i = i + 1
+        val body = text_to_utf8_bytes("--B\r\n{big}\r\n\r\nz\r\n--B--")
+        match parse_multipart_bytes(body, "multipart/form-data; boundary=B"):
+            Ok(_): fail("an oversized part header block must be refused")
+            Err(e): expect(e.contains("exceeds 16384")).to_equal(true)
+
+    it "measures the response head in octets, not characters":
+        val resp = HttpResponse.ok("x").with_header("X-Title", "café 한글")
+        val wire = serialize_response(resp)
+        expect(response_wire_size(resp)).to_equal(text_to_utf8_bytes(wire).len())
+
+    it "h2 decodes a UTF-8 body as text and keeps its octets":
+        match h2_request_from_hpack_v1(_h2_block("application/json"), text_to_utf8_bytes("{\"a\":\"é\"}")):
+            Some(req):
+                expect(req.body).to_equal("{\"a\":\"é\"}")
+                expect(req.body_bytes.len()).to_equal(10)
+            None: fail("header block must decode")
+
+    it "h2 keeps a binary body raw with an empty text view":
+        match h2_request_from_hpack_v1(_h2_block("audio/wav"), [0xFFu8, 0u8, 0x80u8]):
+            Some(req):
+                expect(req.body).to_equal("")
+                expect(req.body_bytes.len()).to_equal(3)
+                expect(req.body_bytes[0]).to_equal(255)
+            None: fail("header block must decode")

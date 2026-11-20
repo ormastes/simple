@@ -117,6 +117,26 @@ the former `..._in_development_spec.spl` cases 2/3/5 moved into it when they wen
 - The HTTP path is unreachable on the bootstrap seed; see
   `doc/08_tracking/bug/seed_jit_cannot_resolve_text_dot_from_char_code_2026-09-04.md`
   and `doc/08_tracking/bug/seed_http_server_handle_connection_dispatch_2026-09-04.md`.
+  Under `SIMPLE_EXECUTION_MODE=interpret` the sync server does answer (2026-11-17).
+- **Binary bodies (L2, 2026-11-17, re-review 2026-11-20).** `HttpRequest.body_bytes` holds
+  the raw body on the scalar, vector and HTTP/2 paths. A non-UTF-8 body of a non-text type
+  has `body` ""; text-ish types (`request_body_is_textual`: text/*, json, xml,
+  form-urlencoded, js, ndjson, none) stay a 400 on the scalar path and keep the lossy decode
+  on the vector and h2 paths. The first Content-Type header wins everywhere.
+  `HttpResponse.bytes(status, content_type, data)` sets `body_bytes`; `write_response*`,
+  `response_wire_size` (head in octets) and h2 send/count it as octets (`serialize_response`
+  gives "" for a non-UTF-8 binary body). `http_server.handler.parse_multipart_bytes(body,
+  content_type)` returns `MultipartPart{name, filename, content_type, data: [u8]}`:
+  line-anchored delimiters with padding, empty parts, 16 KiB part-header cap.
+  `serving_stream.slang_http_response(ApiResponse)` is the one ApiResponse->HttpResponse
+  map (router and the stream path's JSON refusals, which now go through
+  `write_response_limited` with security headers). Slang caps: body 64 MiB, response
+  `SLANG_MAX_RESPONSE_BYTES` = 64 MiB + 64 KiB head room (library 10 MiB / 16 MiB).
+  FFI byte helpers: `std.nogc_sync_mut.sffi.dynamic` exports `spl_wffi_call_i64_with_bytes`,
+  `spl_wffi_call_i64_into_bytes` and `bytes_zeroed(n) -> [u8]?` (packed, n <= 256 MiB);
+  `std.nogc_sync_mut.io_runtime.file_read_bytes_at(path, offset, size) -> [u8]?`;
+  SOSIX `sosix_process_run_bounded_bytes`, `sosix_process_owned_start_v3`,
+  `sosix_process_owned_start_pinned_v3`.
 
 ## Runner dispatch: pure runner or llama.cpp wrapper (2026-11-15)
 

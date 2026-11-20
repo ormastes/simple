@@ -25,11 +25,11 @@
 # clients such as caret need far more: a tool-use system prompt plus one file
 # read already overflows 4096.
 
-use std.nogc_sync_mut.http_server.server.{SimpleHttpServer, SecureServerPolicy, plaintext_development_capability}
+use std.nogc_sync_mut.http_server.server.{SimpleHttpServer, SecureServerPolicy, PlaintextDevelopmentCapability, plaintext_development_capability}
 use std.nogc_sync_mut.http_server.router.{Router}
-use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, http_method_to_text, http_status_from_code, pure_text_to_i64}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, http_method_to_text, pure_text_to_i64}
 use std.gc_async_mut.slang.entrypoints.openai.api_server.{slang_api_dispatch}
-use std.gc_async_mut.slang.entrypoints.openai.serving_stream.{serve_stream}
+use std.gc_async_mut.slang.entrypoints.openai.serving_stream.{serve_stream, slang_http_response, SLANG_MAX_RESPONSE_BYTES}
 use std.nogc_sync_mut.io.tcp.{TcpStream}
 use std.gc_async_mut.slang.engine.llm_engine.{engine_set_n_ctx_text, engine_preload}
 use std.io_runtime.{get_args}
@@ -38,18 +38,26 @@ use std.io_runtime.{get_args}
 # here and set once by main() before the listener starts.
 var SLANG_MODEL_ROOT = "models"
 
+# Inline audio/video uploads and generated wav/png exceed the library defaults
+# (10 MiB request body, 16 MiB response); slang raises both to 64 MiB of body.
+# The response cap (SLANG_MAX_RESPONSE_BYTES, serving_stream.spl) bounds the
+# whole wire, so it carries a 64 KiB head allowance on top.
+val SLANG_MAX_BODY_BYTES: i32 = 67108864
+
 fn _dispatch(req: HttpRequest) -> HttpResponse:
-    val answer = slang_api_dispatch(http_method_to_text(req.method), req.path, req.body, SLANG_MODEL_ROOT)
-    HttpResponse(
-        status: http_status_from_code(answer.status),
-        headers: [("Content-Type", "application/json; charset=utf-8")],
-        body: answer.body
-    )
+    slang_http_response(slang_api_dispatch(http_method_to_text(req.method), req.path, req.body, SLANG_MODEL_ROOT))
 
 # stream=true is answered straight onto the connection as server-sent events
 # (serving_stream.spl); every other request falls through to the router.
 fn _stream_dispatch(req: HttpRequest, stream: TcpStream) -> bool:
     serve_stream(SLANG_MODEL_ROOT, http_method_to_text(req.method), req.path, req.body, stream)
+
+# Listener policy: the development policy with slang's 64 MiB body caps.
+fn slang_server_policy(capability: PlaintextDevelopmentCapability) -> SecureServerPolicy:
+    var policy = SecureServerPolicy.plaintext_dev(capability)
+    policy.max_body = SLANG_MAX_BODY_BYTES
+    policy.max_response_bytes = SLANG_MAX_RESPONSE_BYTES
+    policy
 
 fn build_router() -> Router:
     var router = Router.new()
@@ -118,7 +126,7 @@ fn main():
         Ok(capability):
             var server = SimpleHttpServer.new(host, port, build_router())
             server.with_stream_handler(_stream_dispatch)
-            server.with_policy(SecureServerPolicy.plaintext_dev(capability))
+            server.with_policy(slang_server_policy(capability))
             match server.start_plaintext(capability):
                 Err(e): print "Error: {e}"
                 Ok(_): pass
