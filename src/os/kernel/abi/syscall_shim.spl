@@ -104,6 +104,15 @@ use os.kernel.ipc.syscall.{_handle_brk_for_task, _handle_system_reboot}
 use os.kernel.ipc.syscall.{_handle_schedule}
 use os.kernel.ipc.syscall.{_handle_schedctl}
 use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.scheduler.scheduler_types.{
+    TaskControlBlock, ReadyQueue, CpuRunQueue,
+    SchedulerExecutableAdoptionOwnerStateV1,
+    SCHED_RT_BASE_PRIORITY_UNSET
+}
+use os.kernel.scheduler.green_carrier.{
+    GreenCarrierExecutionState, GreenCarrierParallelismState
+}
+use os.kernel.types.task_types.{TaskId, scheduler_flat_topology}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.log.klog.{KernelLog}
 use os.kernel.replay.hooks.{replay_hook_syscall_enter, replay_hook_syscall_exit}
@@ -116,25 +125,25 @@ use os.kernel.ipc.syscall_server_startup_evidence.{
 # `.{...}` imports below exist only because compiled HIR does not bind bare
 # names from a module-form `use`. Remove them when that bug is fixed.
 use os.kernel.abi.syscall_shim_process
-use os.kernel.abi.syscall_shim_process.{spl_handle_debug_write, spl_handle_enter_user_blocking, spl_handle_exit, spl_handle_get_parent_pid, spl_handle_get_task_info, spl_handle_getpid, spl_handle_list_tasks, spl_handle_mmap, spl_handle_mprotect, spl_handle_munmap, spl_handle_set_priority, spl_handle_signal, spl_handle_spawn, spl_handle_spawn_binary, spl_handle_wait, spl_handle_yield}
+export use os.kernel.abi.syscall_shim_process.{spl_handle_debug_write, spl_handle_enter_user_blocking, spl_handle_exit, spl_handle_get_parent_pid, spl_handle_get_task_info, spl_handle_getpid, spl_handle_list_tasks, spl_handle_mmap, spl_handle_mprotect, spl_handle_munmap, spl_handle_set_priority, spl_handle_signal, spl_handle_spawn, spl_handle_spawn_binary, spl_handle_wait, spl_handle_yield}
 use os.kernel.abi.syscall_shim_ipc
-use os.kernel.abi.syscall_shim_ipc.{spl_handle_ipc_connect, spl_handle_ipc_create_port, spl_handle_ipc_destroy_port, spl_handle_ipc_recv, spl_handle_ipc_recv_owned_v1, spl_handle_ipc_send, spl_handle_ipc_send_owned_v1, spl_handle_notification_create, spl_handle_notification_destroy, spl_handle_notification_poll, spl_handle_notification_signal, spl_handle_notification_wait, spl_handle_notification_wait_any}
+export use os.kernel.abi.syscall_shim_ipc.{spl_handle_ipc_connect, spl_handle_ipc_create_port, spl_handle_ipc_destroy_port, spl_handle_ipc_recv, spl_handle_ipc_recv_owned_v1, spl_handle_ipc_send, spl_handle_ipc_send_owned_v1, spl_handle_notification_create, spl_handle_notification_destroy, spl_handle_notification_poll, spl_handle_notification_signal, spl_handle_notification_wait, spl_handle_notification_wait_any}
 use os.kernel.abi.syscall_shim_file
-use os.kernel.abi.syscall_shim_file.{spl_handle_cap_grant, spl_handle_chdir, spl_handle_dup, spl_handle_dup2, spl_handle_exec, spl_handle_fcntl, spl_handle_file_close, spl_handle_file_mkdir, spl_handle_file_open, spl_handle_file_read, spl_handle_file_readdir, spl_handle_file_stat, spl_handle_file_sync, spl_handle_file_write, spl_handle_fork, spl_handle_ftruncate, spl_handle_getcwd, spl_handle_lseek, spl_handle_mount, spl_handle_pipe, spl_handle_pledge, spl_handle_poll, spl_handle_rename, spl_handle_rmdir, spl_handle_unlink, spl_handle_unmount, spl_handle_unveil, spl_handle_waitpid}
+export use os.kernel.abi.syscall_shim_file.{spl_handle_cap_grant, spl_handle_chdir, spl_handle_dup, spl_handle_dup2, spl_handle_exec, spl_handle_fcntl, spl_handle_file_close, spl_handle_file_mkdir, spl_handle_file_open, spl_handle_file_read, spl_handle_file_readdir, spl_handle_file_stat, spl_handle_file_sync, spl_handle_file_write, spl_handle_fork, spl_handle_ftruncate, spl_handle_getcwd, spl_handle_lseek, spl_handle_mount, spl_handle_pipe, spl_handle_pledge, spl_handle_poll, spl_handle_rename, spl_handle_rmdir, spl_handle_unlink, spl_handle_unmount, spl_handle_unveil, spl_handle_waitpid}
 use os.kernel.abi.syscall_shim_time_log_sysinfo
-use os.kernel.abi.syscall_shim_time_log_sysinfo.{spl_handle_clock_gettime, spl_handle_get_hostname, spl_handle_log_read, spl_handle_log_write, spl_handle_set_hostname, spl_handle_sleep, spl_handle_sysinfo}
+export use os.kernel.abi.syscall_shim_time_log_sysinfo.{spl_handle_clock_gettime, spl_handle_get_hostname, spl_handle_log_read, spl_handle_log_write, spl_handle_set_hostname, spl_handle_sleep, spl_handle_sysinfo}
 use os.kernel.abi.syscall_shim_net
-use os.kernel.abi.syscall_shim_net.{spl_handle_net_accept, spl_handle_net_bind, spl_handle_net_connect, spl_handle_net_if_config, spl_handle_net_listen, spl_handle_net_recv_from, spl_handle_net_send_to, spl_handle_net_socket}
+export use os.kernel.abi.syscall_shim_net.{spl_handle_net_accept, spl_handle_net_bind, spl_handle_net_connect, spl_handle_net_if_config, spl_handle_net_listen, spl_handle_net_recv_from, spl_handle_net_send_to, spl_handle_net_socket}
 use os.kernel.abi.syscall_shim_device
-use os.kernel.abi.syscall_shim_device.{spl_handle_alloc_dma, spl_handle_dev_enumerate, spl_handle_dev_get_info, spl_handle_device_grant, spl_handle_free_dma, spl_handle_map_bar}
+export use os.kernel.abi.syscall_shim_device.{spl_handle_alloc_dma, spl_handle_dev_enumerate, spl_handle_dev_get_info, spl_handle_device_grant, spl_handle_free_dma, spl_handle_map_bar}
 use os.kernel.abi.syscall_shim_g11g12g13
-use os.kernel.abi.syscall_shim_g11g12g13.{spl_handle_brk, spl_handle_mem_grant, spl_handle_mem_revoke, spl_handle_privctl, spl_handle_safecopy_from, spl_handle_safecopy_to, spl_handle_schedctl, spl_handle_schedule, spl_handle_sys_mmap, spl_handle_sys_munmap, spl_handle_system_reboot}
+export use os.kernel.abi.syscall_shim_g11g12g13.{spl_handle_brk, spl_handle_mem_grant, spl_handle_mem_revoke, spl_handle_privctl, spl_handle_safecopy_from, spl_handle_safecopy_to, spl_handle_schedctl, spl_handle_schedule, spl_handle_sys_mmap, spl_handle_sys_munmap, spl_handle_system_reboot}
 use os.kernel.abi.syscall_shim_positioned
-use os.kernel.abi.syscall_shim_positioned.{spl_handle_fs_pread_registered_v1, spl_handle_fs_pwrite_registered_v1}
+export use os.kernel.abi.syscall_shim_positioned.{spl_handle_fs_pread_registered_v1, spl_handle_fs_pwrite_registered_v1}
 use os.kernel.abi.syscall_shim_root_service
-use os.kernel.abi.syscall_shim_root_service.{spl_handle_root_service_spawn, spl_handle_root_service_stop}
+export use os.kernel.abi.syscall_shim_root_service.{spl_handle_root_service_spawn, spl_handle_root_service_stop}
 use os.kernel.abi.syscall_shim_sosix
-use os.kernel.abi.syscall_shim_sosix.{spl_handle_uname}
+export use os.kernel.abi.syscall_shim_sosix.{spl_handle_uname}
 
 # ---------------------------------------------------------------------------
 # Module-level singletons — populated once at boot by shim_init().
@@ -142,7 +151,96 @@ use os.kernel.abi.syscall_shim_sosix.{spl_handle_uname}
 # role for the shim layer.  Reentrancy: safe for single-core baremetal;
 # multi-core will need spinlocks (Wave 10E).
 # ---------------------------------------------------------------------------
-var g_shim_scheduler: Scheduler = Scheduler.new_bootstrap()
+fn _shim_empty_ready_queue() -> ReadyQueue:
+    var entries: [u64] = []
+    var i: i32 = 0
+    while i < 256:
+        entries.push(0u64)
+        i = i + 1
+    ReadyQueue(entries: entries, head: 0, tail: 0, count: 0, capacity: 256)
+
+fn _shim_empty_cpu_runqueue() -> CpuRunQueue:
+    CpuRunQueue(
+        cpu_id: 0u32,
+        deadline_queue: _shim_empty_ready_queue(),
+        rt_queue: _shim_empty_ready_queue(),
+        fair_queue: _shim_empty_ready_queue(),
+        background_queue: _shim_empty_ready_queue(),
+        idle_queue: _shim_empty_ready_queue(),
+        runnable_count: 0,
+        weighted_load: 0,
+        latency_debt: 0,
+        migration_pressure: 0,
+        cache_hot_wakeups: 0
+    )
+
+fn _shim_bootstrap_scheduler() -> Scheduler:
+    """Cycle-safe bootstrap Scheduler constructed without reading external module `val`s."""
+    var tasks: [TaskControlBlock?] = []
+    var deadline_remaining_ns_by_slot: [u64] = []
+    var deadline_period_start_ns_by_slot: [u64] = []
+    var deadline_miss_count_by_slot: [u64] = []
+    var deadline_overrun_count_by_slot: [u64] = []
+    var rt_base_priority_by_slot: [i64] = []
+    var i: i32 = 0
+    while i < 256:
+        tasks.push(None)
+        deadline_remaining_ns_by_slot.push(0u64)
+        deadline_period_start_ns_by_slot.push(0u64)
+        deadline_miss_count_by_slot.push(0u64)
+        deadline_overrun_count_by_slot.push(0u64)
+        rt_base_priority_by_slot.push(SCHED_RT_BASE_PRIORITY_UNSET)
+        i = i + 1
+    var queues: [ReadyQueue] = []
+    var p: i32 = 0
+    while p < 5:
+        queues.push(_shim_empty_ready_queue())
+        p = p + 1
+    Scheduler(
+        tasks: tasks,
+        current: TaskId(id: 0u64),
+        current_slot: -1i32,
+        current_by_cpu: [TaskId(id: 0u64)],
+        preempt_pending_by_cpu: [None],
+        ready_queues: queues,
+        cpu_runqueues: [_shim_empty_cpu_runqueue()],
+        topology: scheduler_flat_topology(1u32),
+        rt_runtime_ns_by_cpu: [0u64],
+        rt_period_ns_by_cpu: [0u64],
+        rt_consumed_ns_by_cpu: [0u64],
+        rt_replenish_ns_by_cpu: [0u64],
+        rt_throttled_by_cpu: [false],
+        deadline_remaining_ns_by_slot: deadline_remaining_ns_by_slot,
+        deadline_period_start_ns_by_slot: deadline_period_start_ns_by_slot,
+        deadline_miss_count_by_slot: deadline_miss_count_by_slot,
+        deadline_overrun_count_by_slot: deadline_overrun_count_by_slot,
+        rt_base_priority_by_slot: rt_base_priority_by_slot,
+        trace_events: [],
+        trace_head: 0,
+        trace_count: 0,
+        tick_count: 0u64,
+        next_task_id: 1u64,
+        executable_adoption_state: SchedulerExecutableAdoptionOwnerStateV1.Idle,
+        executable_adoption_pid: 0u64,
+        executable_adoption_token_slot: -1i64,
+        executable_adoption_token_generation: 0u64,
+        executable_adoption_token_nonce: 0u64,
+        green_execution_state: GreenCarrierExecutionState(
+            current_task_by_cpu: [0u64],
+            context_switches_by_cpu: [0i64],
+            ticks_remaining_by_cpu: [2i64],
+            total_context_switches: 0i64,
+            rejected_intents: 0i64
+        ),
+        green_parallelism_state: GreenCarrierParallelismState(
+            requested_limit: 1i64,
+            active_limit: 1i64,
+            topology_cpu_count: 1i64,
+            reason: "default_topology_limit"
+        )
+    )
+
+var g_shim_scheduler: Scheduler = _shim_bootstrap_scheduler()
 var g_shim_ipc: IpcManager = IpcManager.new()
 var g_shim_klog: KernelLog = KernelLog.new(256)
 var g_shim_server_startup_runtime_owner_available_v1: bool = false
@@ -154,8 +252,9 @@ var g_shim_server_startup_runtime_owner_available_v1: bool = false
 # ---------------------------------------------------------------------------
 fn _shim_keepalive() -> u64:
     """Returns the sum of function addresses for every spl_handle_* exported
-    by this module. The function itself is never called at runtime — we just
-    want the compiler to treat these functions as reachable from shim_init."""
+    by this module. Keep baremetal/SimpleOS symbol retention intact while
+    returning 0 on interpreter/host builds where fn->u64 casts are invalid."""
+    @when(baremetal or simpleos):
     var total: u64 = 0
     total = total + (spl_handle_debug_write as u64)
     total = total + (spl_handle_exit as u64)
@@ -260,6 +359,9 @@ fn _shim_keepalive() -> u64:
     total = total + (spl_handle_server_startup_evidence_consume_v1 as u64)
     total = total + (spl_handle_uname as u64)
     total
+    @else:
+    0u64
+    @end
 
 # A module slot keeps a real native relocation to the address graph. Boot
 # stores the function value without executing native-only pointer arithmetic.
@@ -273,9 +375,10 @@ fn shim_init(sched: Scheduler, ipc: IpcManager, klog: KernelLog):
     g_shim_ipc = ipc
     g_shim_klog = klog
     shim_positioned_reset_v1()
-    # Retain the exported providers without invoking their address graph.
-    # Interpreter initialization must not cast function values to integers.
+    # Retain the exported providers without invoking non-baremetal fn->u64 casts
+    # in interpreter/host builds; _shim_keepalive() returns 0 outside baremetal.
     _g_shim_keepalive = _shim_keepalive
+    val _keepalive_probe = _shim_keepalive()
 
 pub(package) fn shim_server_startup_runtime_owner_enable_v1():
     g_shim_server_startup_runtime_owner_available_v1 = true
@@ -296,3 +399,6 @@ fn spl_handle_server_startup_evidence_consume_v1(
     """Consume ABI 116 only while the authenticated scheduler owner is live."""
     if not g_shim_server_startup_runtime_owner_available_v1: return -38
     _handle_server_startup_evidence_consume(g_shim_scheduler).value
+
+export g_shim_scheduler, g_shim_ipc, g_shim_klog, _make_args, shim_init
+export spl_handle_server_startup_evidence_consume_v1

@@ -7,7 +7,8 @@
 use os.kernel.arch_adapt.x86_port_io.{x86_port_inl, x86_port_outl}
 
 use os.drivers.pci.pci_provider.{PciConfigTarget, pci_ecam_addr}
-use os.kernel.boot.mmio_hardware.{hardware_mmio_read32, hardware_mmio_write32}
+use os.kernel.boot.mmio.{mmio_read32, mmio_write32}
+use os.kernel.boot.fdt_blob.{FdtBlob, fdt_find_compatible, fdt_node_reg}
 
 # PCI configuration ports
 val PCI_CONFIG_ADDR: u16 = 0xCF8
@@ -85,53 +86,124 @@ fn pci_write_config(bus: u8, device: u8, func: u8, offset: u8, value: u32):
     x86_port_outl(PCI_CONFIG_ADDR, addr)
     x86_port_outl(PCI_CONFIG_DATA, value)
 
-# LEGACY DIRECT-ECAM STUB — READ BEFORE USING.
-# `_pci_ecam_base` is referenced by the @cfg(arm64)/@cfg(riscv64)
-# pci_write_config shims below but was NEVER declared anywhere in the tree
-# (verified across git history back to the x86 port-io refactor): the legacy
-# direct-ECAM write path was sketched against a helper nobody wrote, and the
-# matching arm64/riscv64 read path does not exist at all (pci_read_config is
-# x86 port-IO only). The supported route for non-x86 PCI is the provider
-# model: os.drivers.pci.pci_provider.PciHostDescriptor with ecam_base from
-# the platform DTB (see os.kernel.arch.riscv64.starfive.pcie_host). Returning
-# 0 keeps this never-wired module compiling under the strict stage2 resolver
-# without inventing a hardware constant; the SimpleOS PCI owner must either
-# wire this through the provider descriptor or delete the legacy shims.
-# Declared without @cfg: the arm64/riscv64 shims below are the only callers,
-# all cfg-gated; an unused private helper on x86 is inert.
-fn _pci_ecam_base() -> u64:
-    0u64
+var _pci_ecam_override_base: u64 = 0u64
 
-# No PCI host wired (_pci_ecam_base() == 0): reads return all-ones, the
-# standard "no device present" response, and writes are dropped, so the bus
-# scan sees an empty bus instead of touching physical address 0.
+# Platform PCI ECAM bases (QEMU virt ARM64 = 0x4010000000, QEMU virt RV64 = 0x30000000).
+# Runtime DTB discovery overrides this via pci_configure_ecam_from_fdt / pci_set_ecam_base.
+@cfg(arm64)
+fn _pci_ecam_base() -> u64: 0x4010000000u64
+
+@cfg(riscv64)
+fn _pci_ecam_base() -> u64: 0x30000000u64
+
+@cfg(x86_64)
+fn _pci_ecam_base() -> u64: 0u64
+
+@cfg(x86)
+fn _pci_ecam_base() -> u64: 0u64
+
+@cfg(riscv32)
+fn _pci_ecam_base() -> u64: 0u64
+
+@cfg(arm32)
+fn _pci_ecam_base() -> u64: 0u64
+
+@allow(primitive_api)  # reason: PCI ECAM hardware MMIO physical base address
+pub fn pci_ecam_base() -> u64:
+    """Return active PCI ECAM base (DTB/runtime override if non-zero, else arch default)."""
+    if _pci_ecam_override_base != 0u64:
+        return _pci_ecam_override_base
+    _pci_ecam_base()
+
+@allow(primitive_api)  # reason: PCI ECAM hardware MMIO physical base override
+pub fn pci_set_ecam_base(base: u64):
+    """Set or clear (0) runtime PCI ECAM base override."""
+    _pci_ecam_override_base = base
+
+@allow(primitive_api)  # reason: DTB PCI ECAM hardware MMIO physical base extraction
+pub fn pci_ecam_base_from_fdt(blob: FdtBlob) -> u64:
+    """Extract PCI ECAM base address from DTB 'pci-host-ecam-generic' node."""
+    if not blob.valid():
+        return 0u64
+    val node = fdt_find_compatible(blob, ["pci-host-ecam-generic"], 0u64)
+    if not node.found:
+        return 0u64
+    val reg = fdt_node_reg(blob, node, 0u64)
+    if not reg.found:
+        return 0u64
+    reg.addr
+
+@allow(primitive_api)  # reason: DTB PCI ECAM hardware MMIO physical base configuration
+pub fn pci_configure_ecam_from_fdt(blob: FdtBlob) -> u64:
+    """Discover PCI ECAM base from DTB and activate it if present."""
+    val detected = pci_ecam_base_from_fdt(blob)
+    if detected != 0u64:
+        _pci_ecam_override_base = detected
+    pci_ecam_base()
+
+fn _pci_ecam_valid_coords(base: u64, device: u8, func: u8) -> bool:
+    base != 0u64 and device < 32u8 and func < 8u8
+
+fn _pci_ecam_default_addr(bus: u8, device: u8, func: u8, offset: u8) -> u64:
+    if _pci_ecam_base() == 0u64:
+        return 0u64
+    val aligned = (offset & 0xFCu8).to_u16()
+    pci_ecam_addr(_pci_ecam_base(), PciConfigTarget(bus: bus, device: device, func: func, offset: aligned))
+
+@allow(primitive_api)  # reason: raw PCI ECAM MMIO config-space register read
+pub fn pci_ecam_read_config_at(base: u64, bus: u8, device: u8, func: u8, offset: u8) -> u32:
+    """Read aligned 32-bit PCI config dword at explicit ECAM base via MMIO."""
+    if not _pci_ecam_valid_coords(base, device, func):
+        return 0xFFFFFFFFu32
+    val aligned = (offset & 0xFCu8).to_u16()
+    val addr = pci_ecam_addr(base, PciConfigTarget(bus: bus, device: device, func: func, offset: aligned))
+    mmio_read32(addr)
+
+@allow(primitive_api)  # reason: raw PCI ECAM MMIO config-space register write
+pub fn pci_ecam_write_config_at(base: u64, bus: u8, device: u8, func: u8, offset: u8, value: u32):
+    """Write aligned 32-bit PCI config dword at explicit ECAM base via MMIO."""
+    if not _pci_ecam_valid_coords(base, device, func):
+        return
+    val aligned = (offset & 0xFCu8).to_u16()
+    val addr = pci_ecam_addr(base, PciConfigTarget(bus: bus, device: device, func: func, offset: aligned))
+    mmio_write32(addr, value)
+
+fn _pci_ecam_active_read(bus: u8, device: u8, func: u8, offset: u8) -> u32:
+    if _pci_ecam_override_base != 0u64:
+        return pci_ecam_read_config_at(_pci_ecam_override_base, bus, device, func, offset)
+    if device >= 32u8 or func >= 8u8:
+        return 0xFFFFFFFFu32
+    val addr = _pci_ecam_default_addr(bus, device, func, offset)
+    if addr == 0u64:
+        return 0xFFFFFFFFu32
+    mmio_read32(addr)
+
+fn _pci_ecam_active_write(bus: u8, device: u8, func: u8, offset: u8, value: u32):
+    if _pci_ecam_override_base != 0u64:
+        pci_ecam_write_config_at(_pci_ecam_override_base, bus, device, func, offset, value)
+        return
+    if device >= 32u8 or func >= 8u8:
+        return
+    val addr = _pci_ecam_default_addr(bus, device, func, offset)
+    if addr == 0u64:
+        return
+    mmio_write32(addr, value)
+
 @cfg(arm64)
 fn pci_read_config(bus: u8, device: u8, func: u8, offset: u8) -> u32:
-    val base = _pci_ecam_base()
-    if base == 0u64 or bus != 0u8:
-        return 0xFFFFFFFFu32
-    hardware_mmio_read32(pci_ecam_addr(base, PciConfigTarget(bus: bus, device: device, func: func, offset: offset.to_u16())))
+    _pci_ecam_active_read(bus, device, func, offset)
 
 @cfg(riscv64)
 fn pci_read_config(bus: u8, device: u8, func: u8, offset: u8) -> u32:
-    val base = _pci_ecam_base()
-    if base == 0u64:
-        return 0xFFFFFFFFu32
-    hardware_mmio_read32(pci_ecam_addr(base, PciConfigTarget(bus: bus, device: device, func: func, offset: offset.to_u16())))
+    _pci_ecam_active_read(bus, device, func, offset)
 
 @cfg(arm64)
 fn pci_write_config(bus: u8, device: u8, func: u8, offset: u8, value: u32):
-    val base = _pci_ecam_base()
-    if base == 0u64 or bus != 0u8:
-        return
-    hardware_mmio_write32(pci_ecam_addr(base, PciConfigTarget(bus: bus, device: device, func: func, offset: offset.to_u16())), value)
+    _pci_ecam_active_write(bus, device, func, offset, value)
 
 @cfg(riscv64)
 fn pci_write_config(bus: u8, device: u8, func: u8, offset: u8, value: u32):
-    val base = _pci_ecam_base()
-    if base == 0u64:
-        return
-    hardware_mmio_write32(pci_ecam_addr(base, PciConfigTarget(bus: bus, device: device, func: func, offset: offset.to_u16())), value)
+    _pci_ecam_active_write(bus, device, func, offset, value)
 
 # riscv32/arm32: no PCI host wired; empty bus (all-ones reads, dropped writes).
 @cfg(riscv32)
@@ -270,3 +342,10 @@ impl PciBus:
 
     fn device_count() -> i32:
         self.devices.len()
+
+export PCI_CONFIG_ADDR, PCI_CONFIG_DATA
+export PciDevice, PciBus
+export pci_config_addr, pci_read_config, pci_write_config
+export pci_read_vendor, pci_read_device_id, pci_read_class, pci_read_header_type, pci_read_bar, pci_read_irq
+export pci_ecam_base, pci_set_ecam_base, pci_ecam_base_from_fdt, pci_configure_ecam_from_fdt
+export pci_ecam_read_config_at, pci_ecam_write_config_at

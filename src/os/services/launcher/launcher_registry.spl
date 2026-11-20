@@ -11,6 +11,7 @@ use os.kernel.process_compat.{posix_spawn_with_args, posix_kill}
 use os.userlib.process.{spawn, get_task_info}
 use os.kernel.loader.spawn_authority.{spawn_authority_note_recipe, spawn_authority_clear_recipe}
 use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_APP_LAUNCHER}
+use os.kernel.loader.artifact_manifest.{ManifestScopedCapabilityV1, manifest_parse_scoped_capability_v1}
 use os.services.launcher.launcher_association_registry.{launcher_associations_authoritative_v1, launcher_associated_app_projected_v1}
 
 use os.kernel.log.klog_api.{log_raw_println}
@@ -742,3 +743,147 @@ pub fn launcher_process_is_process_backed(pid: u64) -> bool:
         return pid == launcher_last_launch_pid
     val slot = idx.to_u64()
     _is_process_backed_record(process_pid[slot], process_state[slot])
+
+# ============================================================================
+# SCI Process Identity Binding & Scoped Capability Policy Registry (#119)
+# ============================================================================
+
+var scoped_ceiling_app_id_v1: [text; 32] = [""; 32]
+var scoped_ceiling_specs_v1: [text; 32] = [""; 32]
+var scoped_ceiling_count_v1: u64 = 0
+
+var scoped_projected_app_id_v1: [text; 32] = [""; 32]
+var scoped_projected_specs_v1: [text; 32] = [""; 32]
+var scoped_projected_mask_v1: [u32; 32] = [0u32; 32]
+var scoped_projected_count_v1: u64 = 0
+
+@allow(primitive_api)  # reason: launcher process table tracks raw u64 PIDs and boolean admission outcomes
+pub fn launcher_bind_process_app_id_v1(pid: u64, app_id: text) -> bool:
+    """Bind an active launcher process row `pid` to stable SCI `app_id`."""
+    if pid == 0u64 or app_id == "":
+        return false
+    val idx = _process_index_by_pid(pid)
+    if idx < 0:
+        return false
+    val slot = idx.to_u64()
+    process_app_id[slot] = app_id
+    true
+
+@allow(primitive_api)  # reason: launcher process table indexes by raw u64 PID
+pub fn launcher_process_app_id_v1(pid: u64) -> text:
+    """Return the bound SCI app ID or canonical identity for tracked `pid`."""
+    val idx = _process_index_by_pid(pid)
+    if idx < 0:
+        return ""
+    process_app_id[idx.to_u64()]
+
+pub fn launcher_reset_scoped_capability_policy_v1():
+    """Clear all registered SCI capability ceilings and projected app masks."""
+    var i: u64 = 0
+    while i < MAX_APPS:
+        scoped_ceiling_app_id_v1[i] = ""
+        scoped_ceiling_specs_v1[i] = ""
+        scoped_projected_app_id_v1[i] = ""
+        scoped_projected_specs_v1[i] = ""
+        scoped_projected_mask_v1[i] = 0u32
+        i = i + 1
+    scoped_ceiling_count_v1 = 0
+    scoped_projected_count_v1 = 0
+
+fn _scoped_ceiling_index_v1(app_id: text) -> i64:
+    var i: u64 = 0
+    while i < scoped_ceiling_count_v1:
+        if scoped_ceiling_app_id_v1[i] == app_id:
+            return i.to_i64()
+        i = i + 1
+    -1
+
+fn _scoped_projected_index_v1(app_id: text) -> i64:
+    var i: u64 = 0
+    while i < scoped_projected_count_v1:
+        if scoped_projected_app_id_v1[i] == app_id:
+            return i.to_i64()
+        i = i + 1
+    -1
+
+fn _split_nonempty_lines(joined: text) -> [text]:
+    if joined == "":
+        return []
+    var out: [text] = []
+    for item in joined.split("\n"):
+        if item != "":
+            out.push(item)
+    out
+
+@allow(primitive_api)  # reason: boolean policy configuration outcome matching launcher_registry API
+pub fn launcher_configure_scoped_capability_ceiling_v1(app_id: text, ceiling_specs: [text]) -> bool:
+    """Provision the loader-verified scoped capability ceiling for `app_id`."""
+    if app_id == "":
+        return false
+    var normalized: [text] = []
+    for raw in ceiling_specs:
+        val parsed = manifest_parse_scoped_capability_v1(raw)
+        if not parsed.ok:
+            return false
+        normalized.push(parsed.capability.raw)
+    val existing = _scoped_ceiling_index_v1(app_id)
+    val joined = normalized.join("\n")
+    if existing >= 0:
+        scoped_ceiling_specs_v1[existing.to_u64()] = joined
+        return true
+    if scoped_ceiling_count_v1 >= MAX_APPS:
+        return false
+    val slot = scoped_ceiling_count_v1
+    scoped_ceiling_app_id_v1[slot] = app_id
+    scoped_ceiling_specs_v1[slot] = joined
+    scoped_ceiling_count_v1 = scoped_ceiling_count_v1 + 1
+    true
+
+@allow(primitive_api)  # reason: boolean policy predicate matching launcher_registry API
+pub fn launcher_app_has_scoped_ceiling_v1(app_id: text) -> bool:
+    """Return true when a scoped-capability policy ceiling is configured for `app_id`."""
+    _scoped_ceiling_index_v1(app_id) >= 0
+
+pub fn launcher_app_scoped_ceiling_v1(app_id: text) -> [ManifestScopedCapabilityV1]:
+    """Return parsed scoped-capability ceiling entries provisioned for `app_id`."""
+    val idx = _scoped_ceiling_index_v1(app_id)
+    if idx < 0:
+        return []
+    var out: [ManifestScopedCapabilityV1] = []
+    for raw in _split_nonempty_lines(scoped_ceiling_specs_v1[idx.to_u64()]):
+        val parsed = manifest_parse_scoped_capability_v1(raw)
+        if parsed.ok:
+            out.push(parsed.capability)
+    out
+
+pub fn launcher_commit_scoped_capabilities_v1(app_ids: [text], cap_specs_joined: [text], cap_masks: [u32]):
+    """Atomically replace committed per-app scoped capabilities alongside catalog commit."""
+    var i: u64 = 0
+    while i < MAX_APPS:
+        scoped_projected_app_id_v1[i] = ""
+        scoped_projected_specs_v1[i] = ""
+        scoped_projected_mask_v1[i] = 0u32
+        i = i + 1
+    var k = 0
+    while k < app_ids.len() and (k as u64) < MAX_APPS:
+        val slot = k as u64
+        scoped_projected_app_id_v1[slot] = app_ids[k]
+        scoped_projected_specs_v1[slot] = cap_specs_joined[k]
+        scoped_projected_mask_v1[slot] = cap_masks[k]
+        k = k + 1
+    scoped_projected_count_v1 = k as u64
+
+pub fn launcher_app_scoped_capabilities_v1(app_id: text) -> [text]:
+    """Return projected scoped capability strings committed for `app_id`."""
+    val idx = _scoped_projected_index_v1(app_id)
+    if idx < 0:
+        return []
+    _split_nonempty_lines(scoped_projected_specs_v1[idx.to_u64()])
+
+@allow(primitive_api)  # reason: raw CapabilityKind bitmask clamped via SimpleArtifactManifest
+pub fn launcher_app_capability_mask_v1(app_id: text) -> u32:
+    """Return clamped rights bitmask projected through SimpleArtifactManifest for `app_id`."""
+    val idx = _scoped_projected_index_v1(app_id)
+    if idx < 0:
+        return 0u32
+    scoped_projected_mask_v1[idx.to_u64()]

@@ -1,0 +1,68 @@
+# Purpose and audience: reproducer specification for bug #45 (direct os.kernel.arch.* imports outside arch/).
+# @req REQ-SSPEC-OS
+
+"""Reproduce direct os.kernel.arch.* imports outside arch/, arch_adapt/, and hal/."""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{file_read, dir_walk}
+
+fn _is_hal_boundary_exempt(norm_path: text) -> bool:
+    if norm_path.starts_with("src/os/kernel/arch/"):
+        return true
+    if norm_path.starts_with("src/os/kernel/arch_adapt/"):
+        return true
+    if norm_path.starts_with("src/os/kernel/hal/"):
+        return true
+    if (norm_path == "src/os/compositor/host_compositor_core.spl" or
+        norm_path == "src/os/installer/image_builder.spl" or
+        norm_path == "src/os/kernel/loader/smf.spl"):
+        return true
+    false
+
+fn _is_family_arch_import(stripped: text) -> bool:
+    for fam in ["x86_64.", "x86_32.", "x86.", "arm64.", "arm32.", "riscv64.", "riscv32."]:
+        if stripped.starts_with("use os.kernel.arch." + fam) or stripped.starts_with("export use os.kernel.arch." + fam):
+            return true
+    false
+
+fn _collect_direct_arch_violations(family_only: bool) -> [text]:
+    var violations: [text] = []
+    for raw in dir_walk("src/os"):
+        val norm = raw.replace("\\", "/")
+        if not norm.ends_with(".spl") or _is_hal_boundary_exempt(norm):
+            continue
+        val body = file_read(norm)
+        var line_no = 0
+        for line in body.split("\n"):
+            line_no = line_no + 1
+            val stripped = line.trim()
+            if stripped.starts_with("#"):
+                continue
+            val hit = if family_only:
+                _is_family_arch_import(stripped)
+            else:
+                stripped.starts_with("use os.kernel.arch.") or stripped.starts_with("export use os.kernel.arch.")
+            if hit:
+                violations.push(norm + ":" + line_no.to_string() + ":" + stripped)
+    violations
+
+describe "direct os.kernel.arch.* import boundary reproducer (#45)":
+    it "has zero direct os.kernel.arch.<family> imports outside arch/, arch_adapt/, and hal/":
+        step("scan all src/os/**/*.spl modules outside exempt HAL directories for per-family arch imports")
+        val family_violations = _collect_direct_arch_violations(true)
+        expect(family_violations).to_equal([])
+
+    it "has zero direct os.kernel.arch.* imports in virtio_rng_mmio.spl, ramfb.spl, cli.spl, and non-exempt OS files":
+        step("verify named offender files and full non-exempt src/os tree route arch imports through HAL facades")
+        for target in [
+            "src/os/drivers/virtio/virtio_rng_mmio.spl",
+            "src/os/drivers/framebuffer/ramfb.spl",
+            "src/os/cli.spl"
+        ]:
+            val src = file_read(target)
+            for line in src.split("\n"):
+                val s = line.trim()
+                expect(s.starts_with("use os.kernel.arch.")).to_equal(false)
+        val all_violations = _collect_direct_arch_violations(false)
+        expect(all_violations).to_equal([])
