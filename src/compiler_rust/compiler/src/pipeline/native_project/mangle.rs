@@ -716,11 +716,21 @@ pub(crate) fn mangle_mir(
                             *global_name = mangled.clone();
                             continue;
                         }
-                        if extern_fns.contains(global_name.as_str()) || known_mangled.contains(global_name.as_str()) {
+                        if extern_fns.contains(global_name.as_str()) {
                             continue;
                         }
+                        // This file's explicit `use` binding wins over
+                        // `known_mangled`: a same-named `extern fn` in ANOTHER
+                        // module registers the bare identity `name -> name` in
+                        // the project import map, which put the bare name in
+                        // `known_mangled` and skipped this file's own import,
+                        // so `f as u64` reached LLVM as an undeclared global
+                        // (extern_shadow_blocks_imported_fn_value_2026-11-20).
                         if let Some(resolved) = use_map.get(global_name.as_str()) {
                             *global_name = resolved.clone();
+                            continue;
+                        }
+                        if known_mangled.contains(global_name.as_str()) {
                             continue;
                         }
                         if is_runtime_or_builtin(global_name) {
