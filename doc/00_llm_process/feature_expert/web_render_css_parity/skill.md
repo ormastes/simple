@@ -3513,3 +3513,10 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - **Trap:** do NOT exact-area scan the hinted outline. At 100 px stem-only cap tops (H/I/L) are snapped 0.25 px above the E/F/T bars, and an exact scan inks that sliver as a whole extra row; Chrome's gray text and the 4-row LCD sampler do not. Above 48 px the plain outline stays.
 - **Open:** explicit large `line-height` puts raster text lower than Chrome (36 px/50 px: 15..40 vs 11..36), pre-existing.
 - **Evidence:** `fractional_font_y_raster_chrome159_spec` AC-3 red on base, green on head; `web_pixel_font_capital_align_no_overlap_spec` 5/5.
+
+## 2026-11-20 — a mid-line run's lead space moves the pen once
+
+- **Bug:** a `#text` run starting mid-line with a collapsible space (` tail `, ` c `) had the space charged twice — the inline loop added it to `inline_x` before the run (layout_engine, `lead_charged` block), and `_lay_inline_text_advance_width_inner` counted it again as an edge space in the box width. Every item after it on the line sat ~4-5 px late (Chrome 159 `A <b>B</b> c <b>D</b>`: `D` at 44, here 49).
+- **Fix:** such a one-line run's box is `inline_text_width_after_lead` (exact trimmed width + trailing space, rounded once). `inline_item_width_err_milli` also keeps the exact pen error for a run whose box holds one or two edge spaces (`Lead ` = 35.59 + 4.45 -> 40), so the next run keeps its sub-pixel origin.
+- **Spec:** `test/01_unit/browser_engine/inline_tail_pen_chrome159_spec.spl` (base 12 probes off, head 0).
+- **Not fixed:** kerning across a trimmed edge space (`A ` is 14.234 in Chrome, kerned A/space; here 15.117 from trimmed `A` + space), so a line of one-letter runs drifts ~1 px.
