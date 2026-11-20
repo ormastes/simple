@@ -1,0 +1,115 @@
+"""
+## Purpose and audience
+Purpose: Prevent regressions in WM lane boundary layering, portable seam exemptions, scope filtering, and ratchet-baseline integrity.
+Audience: GUI/WM compositor, Engine2D, and build-guard maintainers.
+## Operator workflow
+Run with `bin/simple test test/01_unit/scripts/wm_lane_boundary_layering_prevention_spec.spl --mode=interpreter`.
+## Compatibility and limitations
+Exercises `lint_wm_lane_boundary` rules and parses `doc/08_tracking/wm_lane_boundary_baseline.txt` without invoking subprocess shell scripts.
+"""
+# @cover src/compiler/90.tools/lint/_LintMain/wm_lane_boundary_lints.spl 60%
+# @req REQ-TOOL-WM-LANE-001
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.tools.lint.main.{lint_wm_lane_boundary, wm_lane_scope_dirs}
+
+fn _in_scope_dir(path: text, dirs: [text]) -> bool:
+    for d in dirs:
+        val prefix = if d.ends_with("/"): d else: d + "/"
+        if path.starts_with(prefix):
+            return true
+    false
+
+describe "WM lane boundary layering prevention":
+    it "allows portable FrameClock and protocol seams across every scoped directory":
+        val seam_source = "\n".join([
+            "use std.common.ui.ui_frame_clock.{{FrameClock}}",
+            "use std.nogc_sync_mut.ui.host_frame_clock.{{default_frame_clock}}",
+            "use std.common.window_protocol.geometry.{{Size}}",
+            "extern fn rt_alloc(size: i64) -> i64",
+            "extern fn rt_ptr_read_i64(addr: i64, off: i64) -> i64",
+            "extern fn rt_math_sqrt(x: f64) -> f64",
+            "fn frame_tick() -> i64:",
+            "    default_frame_clock().now_micros()"
+        ])
+        for dir_path in wm_lane_scope_dirs():
+            val prefix = if dir_path.ends_with("/"): dir_path else: dir_path + "/"
+            val sample_file = "{prefix}seam_probe.spl"
+            val warnings = lint_wm_lane_boundary(sample_file, seam_source)
+            expect(warnings.len()).to_equal(0)
+
+    it "rejects WML001 host I/O and WML002 non-core externs in every scoped directory while leaving adapter directories out of scope":
+        val bad_source = "\n".join([
+            "use std.nogc_sync_mut.io.time_ops.{{time_now_micros}}",
+            "extern fn rt_file_read_text(path: text) -> text",
+            "fn bad() -> text:",
+            "    rt_file_read_text(\"/etc/passwd\")"
+        ])
+        for dir_path in wm_lane_scope_dirs():
+            val prefix = if dir_path.ends_with("/"): dir_path else: dir_path + "/"
+            val warnings = lint_wm_lane_boundary("{prefix}bad_probe.spl", bad_source)
+            expect(warnings.len()).to_equal(2)
+            expect(warnings[0].code).to_equal("WML001")
+            expect(warnings[1].code).to_equal("WML002")
+
+        val render_lane_source = "extern fn rt_vulkan_submit_frame(cmd: i64) -> i64"
+        expect(lint_wm_lane_boundary("src/lib/gc_async_mut/gpu/engine2d/vk_probe.spl", render_lane_source).len()).to_equal(0)
+
+        val out_of_scope = [
+            "src/app/cli/main.spl",
+            "src/lib/nogc_sync_mut/ui/host_frame_clock.spl"
+        ]
+        for host_path in out_of_scope:
+            expect(lint_wm_lane_boundary(host_path, bad_source).len()).to_equal(0)
+
+    it "permits canonical host doors and render sublanes while rejecting direct mutable io and sffi imports":
+        val allowed_doors = "\n".join([
+            "use common.window_protocol.window_protocol.{{WmEvent}}",
+            "use os.userlib.ipc_protocol.{{COMP_CREATE_WINDOW}}",
+            "use std.nogc_sync_mut.text_layout.font_renderer.{{resolve_font_metrics_with_language}}"
+        ])
+        val blocked_tiers = "\n".join([
+            "use std.nogc_sync_mut.sffi.time.{{time_monotonic_ns}}",
+            "use std.gc_async_mut.io.mod_stub.{{env_get}}"
+        ])
+        val target = "src/os/services/wm/door_probe.spl"
+        expect(lint_wm_lane_boundary(target, allowed_doors).len()).to_equal(0)
+        val blocked_warnings = lint_wm_lane_boundary(target, blocked_tiers)
+        expect(blocked_warnings.len()).to_equal(2)
+        expect(blocked_warnings[0].code).to_equal("WML001")
+        expect(blocked_warnings[1].code).to_equal("WML001")
+
+    it "keeps the ratchet baseline normalized, within scope, free of duplicates, and strictly shrunk below 157":
+        val raw = file_read("doc/08_tracking/wm_lane_boundary_baseline.txt")
+        val dirs = wm_lane_scope_dirs()
+        var entries: [text] = []
+        var seen: Dict<text, bool> = {}
+        val fixed_clean_files = [
+            "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl",
+            "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_compose_support.spl",
+            "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl",
+            "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core_selectors.spl",
+            "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core_types.spl",
+            "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_draw_ir.spl",
+            "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl",
+            "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_raster.spl",
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl"
+        ]
+        for line in raw.split("\n"):
+            val trimmed = line.trim()
+            if trimmed == "" or trimmed.starts_with("#"):
+                continue
+            expect(seen.contains_key(trimmed)).to_equal(false)
+            seen[trimmed] = true
+            val parts = trimmed.split(":")
+            expect(parts.len()).to_be_greater_than(2)
+            val file_path = parts[0]
+            val code = parts[2]
+            expect(_in_scope_dir(file_path, dirs)).to_equal(true)
+            expect(code == "WML001" or code == "WML002").to_equal(true)
+            for clean in fixed_clean_files:
+                expect(file_path == clean).to_equal(false)
+            entries.push(trimmed)
+        expect(entries.len()).to_be_greater_than(0)
+        expect(entries.len()).to_be_less_than(157)
