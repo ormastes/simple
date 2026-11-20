@@ -16,3 +16,25 @@ describe "syscall_shim keepalive":
         val src = file_read_text("src/os/kernel/abi/syscall_shim.spl")
         expect(src.contains("extern fn spl_handle_debug_write")).to_equal(false)
         expect(src.contains("use os.kernel.abi.syscall_shim_process")).to_equal(true)
+
+    # Compiled HIR binds only symbol-form imports (bug
+    # compiled_hir_module_form_use_bare_names_2026-11-19), so every name the
+    # keepalive takes the address of must be imported by name. Missing
+    # spl_shim_file_capability_check broke the riscv64 LLVM kernel build.
+    it "imports every keepalive provider by name":
+        val src = file_read_text("src/os/kernel/abi/syscall_shim.spl")
+        var imported = ""
+        var taken: [text] = []
+        for line in src.split("\n"):
+            val t = line.trim()
+            if t.starts_with("use ") and t.contains("{"):
+                imported = imported + t + "\n"
+            if t.starts_with("total = total + (") and t.ends_with(" as u64)"):
+                taken.push(t.replace("total = total + (", "").replace(" as u64)", ""))
+        expect(taken.len() > 0).to_equal(true)
+        var missing = ""
+        for name in taken:
+            val local_def = src.contains("\nfn " + name + "(")
+            if not local_def and not (imported.contains("{" + name + ",") or imported.contains(" " + name + ",") or imported.contains(" " + name + "}") or imported.contains("{" + name + "}")):
+                missing = missing + name + " "
+        expect(missing).to_equal("")
