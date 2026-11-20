@@ -23,7 +23,9 @@ use compiler.backend.feature_caps.{TargetCapsKind, x86_caps_from_target}
 use compiler.backend.llvm_codegen_adapter.{llvm_compile_module_direct,
     llvm_compile_module_direct_compiled, llvm_compile_module_direct_to_path,
     llvm_translate_module_direct_ir, llvm_translate_module_bootstrap_ir_v1,
-    llvm_codegen_target_config_for, llvm_codegen_bare_metal_requested}
+    llvm_codegen_target_config_for, llvm_codegen_bare_metal_requested,
+    llvm_codegen_module_scope_enabled_v1}
+use compiler.backend._MirToLlvm.asm_constraints_helpers.{llvm_bootstrap_string_globals_retain_for_scope}
 use compiler.backend.llvm_backend_tools.{llvm_llc_object_argv_v1}
 use compiler.backend.llvm_ir_builder.{llvm_codegen_error_from_ir}
 use std.nogc_sync_mut.io.file_ops.{file_write}
@@ -820,10 +822,46 @@ fn backend_helper_llvm_pool_options_v1(is_release: bool, opt_level_i64: i64,
 # Translate one module exactly as the serial `llvm` lane does and write the IR
 # to `ir_path`. "" on success, else the failure reason (the caller then
 # compiles the module through the serial lane, which reports it in full).
+#
+# One transient scope per module covers storage lowering, the backend MIR
+# optimization copy, IR translation and the IR file write, so scope end frees
+# all of it -- exactly what the serial lane frees across
+# compile_llvm_module_to_object_path + llvm_compile_module_direct_to_path.
+# Unscoped, every module's IR text and scratch stayed live for the whole shard
+# (~20 GB over 115 modules on Stage 3 --backend llvm; bug
+# stage3_c_runtime_worker_memory_2x_2026-11-20). Only the failure reason, if
+# any, is promoted. SIMPLE_CODEGEN_MODULE_SCOPE=0 keeps the unscoped lane.
 pub fn llvm_module_ir_to_path_v1(module: MirModule, is_release: bool,
         opt_level_i64: i64, target_cpu: text,
         storage_bindings: [MirStorageViewSiteBindingV1], ir_path: text) -> text:
     val options = backend_helper_llvm_pool_options_v1(is_release, opt_level_i64, target_cpu)
+    var scoped = llvm_codegen_module_scope_enabled_v1()
+    if scoped:
+        # Module-global name index: built inside the scope, scope end would
+        # free tables the next module trusts (same warm-up as the serial lane).
+        bootstrap_llvm_name_index_ensure()
+    if scoped and (transient_array_scope_state_v1() != 0 or not transient_scope_begin()):
+        eprint("[codegen-scope] WARNING codegen pool scope refused; translating UNSCOPED: module={module.name}")
+        scoped = false
+    val reason = _llvm_module_ir_to_path_body_v1(options, module, storage_bindings, ir_path)
+    if not scoped:
+        return reason
+    val paused = transient_scope_pause()
+    if paused:
+        reset_provider_report()
+    # The bootstrap translator publishes heap text into the exported
+    # string-global cache; retain it before scope end so it never dangles.
+    val retained = paused and llvm_bootstrap_string_globals_retain_for_scope()
+    val kept = paused and (reason == "" or transient_promote<text>(reason))
+    val ended = transient_scope_end()
+    if not paused or not retained or not ended:
+        panic("LLVM codegen pool scope ownership failed")
+    if not kept:
+        return "codegen pool scope: failure reason promotion failed"
+    reason
+
+fn _llvm_module_ir_to_path_body_v1(options: BackendCompileOptions, module: MirModule,
+        storage_bindings: [MirStorageViewSiteBindingV1], ir_path: text) -> text:
     val storage_lowered = lower_mir_storage_project_fields_v1(module, storage_bindings)
     if not storage_lowered.ok:
         return "storage projection lowering failed: {storage_lowered.reason}"

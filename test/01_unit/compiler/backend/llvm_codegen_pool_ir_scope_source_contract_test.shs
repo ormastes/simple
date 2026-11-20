@@ -1,0 +1,64 @@
+#!/bin/sh
+# Bug stage3_c_runtime_worker_memory_2x_2026-11-20: the process-parallel codegen
+# pool translated every module's IR in the parent with NO transient scope, so
+# each module's IR text, translator scratch, storage-lowered and backend-
+# optimized MIR copies stayed live for the whole shard (~20 GB over 115 modules,
+# Stage 3 --backend llvm). The serial lane already scopes the same work
+# (compile_llvm_module_to_object_path + llvm_compile_module_direct_to_path,
+# bug codegen_module_memory_not_freed_per_module_2026_11_02). This contract pins
+# the pool's per-module scope and the warm-ups / retains it depends on.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)
+helpers=$root/src/compiler/70.backend/backend/backend_helpers.spl
+
+body=$(sed -n '/^pub fn llvm_module_ir_to_path_v1(/,/^# The llc argv/p' "$helpers")
+if [ -z "$body" ]; then
+    echo 'FAIL: llvm_module_ir_to_path_v1 not found' >&2
+    exit 1
+fi
+
+need() {
+    if ! printf '%s\n' "$body" | grep -F -- "$1" >/dev/null; then
+        echo "FAIL: llvm_module_ir_to_path_v1 lacks: $1" >&2
+        exit 1
+    fi
+}
+
+need 'llvm_codegen_module_scope_enabled_v1()'
+need 'bootstrap_llvm_name_index_ensure()'
+need 'transient_array_scope_state_v1() != 0 or not transient_scope_begin()'
+need 'transient_scope_pause()'
+need 'reset_provider_report()'
+need 'llvm_bootstrap_string_globals_retain_for_scope()'
+need 'transient_promote<text>('
+need 'transient_scope_end()'
+
+need '_llvm_module_ir_to_path_body_v1('
+
+# Warm-up precedes the scope; the whole per-module body (storage lowering, MIR
+# optimization, translation, IR write) runs inside it; reset/retain/promote sit
+# between pause and end.
+printf '%s\n' "$body" | awk '
+    /^fn _llvm_module_ir_to_path_body_v1\(/ { helper = 1 }
+    !helper && /bootstrap_llvm_name_index_ensure\(\)/ && !warm { warm = NR }
+    !helper && /not transient_scope_begin\(\)/ && !begin { begin = NR }
+    !helper && /= _llvm_module_ir_to_path_body_v1\(/ && !call { call = NR }
+    !helper && /transient_scope_pause\(\)/ && !pause { pause = NR }
+    !helper && /reset_provider_report\(\)/ && pause && !reset { reset = NR }
+    !helper && /llvm_bootstrap_string_globals_retain_for_scope\(\)/ && !retain { retain = NR }
+    !helper && /transient_promote<text>\(/ && !promote { promote = NR }
+    !helper && /transient_scope_end\(\)/ && !end { end = NR }
+    helper && /optimize_module_for_backend\(/ { opt = 1 }
+    helper && /llvm_translate_module_bootstrap_ir_v1\(/ { tr = 1 }
+    helper && /file_write\(ir_path, llvm_ir\)/ { wr = 1 }
+    END {
+        ok = warm && begin && call && pause && reset && retain && promote && end
+        ok = ok && warm < begin && begin < call && call < pause
+        ok = ok && pause < reset && pause < retain && pause < promote
+        ok = ok && reset < end && retain < end && promote < end
+        exit !(ok && opt && tr && wr)
+    }
+' || { echo 'FAIL: pool IR scope order (warm < begin < body < pause < reset/retain/promote < end)' >&2; exit 1; }
+
+echo 'PASS: codegen pool IR emission runs in a per-module transient scope'
