@@ -17,7 +17,9 @@
 #   pure_ed25519_verify(public_key, message, signature) -> bool
 #   pure_ed25519_self_test() -> Result<bool, text>
 
-use std.common.crypto.sha512.{sha512_bytes}
+use std.common.crypto.sha512.{sha512_bytes, sha512_family_iv, sha512_family_block, sha512_family_absorb,
+    sha512_family_words_to_bytes}
+use std.common.crypto.secure_memory.{secure_zero_u8_slots, secure_zero_i64_slots}
 use std.common.crypto.ed25519_field.{
     Fe25519, _fe_to_smalllimb, _smalllimb_to_fe,
     fe_zero, fe_one, fe_add, fe_sub, fe_mul, fe_sq, fe_invert,
@@ -53,6 +55,46 @@ fn _pure_ed25519_sha512_u8(data: [u8]) -> [u8]:
         u8_result.push((result[i] & 0xFF).to_u8())
         i = i + 1
     u8_result
+
+# A derived secret plus the number of its temporaries whose volatile wipe read back as zero (test hook; the public
+# entry points return only `output`). std signing cannot fail, so a wipe that does not verify is best effort.
+struct Ed25519SecretRunV1:
+    output: [u8]
+    wiped: i64
+
+fn _ed25519_wipe_u8(mut bytes: [u8]) -> i64:
+    if bytes.len() == 0:
+        return 0
+    if secure_zero_u8_slots(bytes).verified(): 1 else: 0
+
+fn _ed25519_wipe_i64(mut words: [i64]) -> i64:
+    if words.len() == 0:
+        return 0
+    if secure_zero_i64_slots(words).verified(): 1 else: 0
+
+fn _pure_ed25519_sha512_secret(data: [u8]) -> Ed25519SecretRunV1:
+    """SHA-512 of a SECRET preimage (seed, nonce prefix || M): the same digest as _pure_ed25519_sha512_u8.
+
+    Drives the sha512 family primitives directly (as pbkdf2 does) so the widened input copy, the state words, the
+    block words (which still hold the last input block) and the digest words are owned here and wiped before return.
+    The [u8] digest is the caller's to wipe. Public preimages keep _pure_ed25519_sha512_u8 and pay no wipe.
+    """
+    var widened: [i64] = [0; data.len()]
+    var i: u64 = 0
+    while i < data.len():
+        widened[i] = data[i].to_i64()
+        i = i + 1
+    var st = sha512_family_iv(64)
+    var w = sha512_family_block()
+    sha512_family_absorb(st, widened, 0, w)
+    var words = sha512_family_words_to_bytes(st, 8)
+    var digest: [u8] = [0u8; 64]
+    i = 0
+    while i < 64:
+        digest[i] = (words[i] & 0xFF).to_u8()
+        i = i + 1
+    val wiped = _ed25519_wipe_i64(widened) + _ed25519_wipe_i64(st) + _ed25519_wipe_i64(w) + _ed25519_wipe_i64(words)
+    Ed25519SecretRunV1(output: digest, wiped: wiped)
 
 # ============================================================================
 # Extended Point Structs
@@ -420,7 +462,8 @@ fn _pure_ed25519_sha512_modl(data: [u8]) -> [u8]:
 
 fn _pure_ed25519_clamp(h: [u8]) -> [u8]:
     """Clamp the lower 32 bytes of SHA-512 output per Ed25519 spec."""
-    var clamped: [u8] = []
+    # Pre-sized: the result is the secret scalar, so no growth reallocation may free a partial copy unzeroed.
+    var clamped: [u8] = [0u8; 32]
     var i: u64 = 0
     while i < 32:
         var byte = h[i]
@@ -428,20 +471,20 @@ fn _pure_ed25519_clamp(h: [u8]) -> [u8]:
             byte = byte & 0xF8
         if i == 31:
             byte = (byte & 0x7F) | 0x40
-        clamped.push(byte)
+        clamped[i] = byte
         i = i + 1
     clamped
 
 fn _pure_ed25519_reduce_32_to_scalar(s: [u8]) -> [u8]:
-    var wide: [u8] = []
+    # Only called with the secret clamped scalar: the widened copy is pre-sized (no growth reallocations) and wiped.
+    var wide: [u8] = [0u8; 64]
     var i: u64 = 0
-    while i < 64:
-        if i < s.len():
-            wide.push(s[i])
-        else:
-            wide.push(0)
+    while i < 64 and i < s.len():
+        wide[i] = s[i]
         i = i + 1
-    sc_reduce(wide)
+    val reduced = sc_reduce(wide)
+    val _wide_wiped = _ed25519_wipe_u8(wide)
+    reduced
 
 # ============================================================================
 # Internal helpers
@@ -498,55 +541,50 @@ fn pure_ed25519_keypair_from_seed(seed: [u8]) -> ([u8], [u8]):
       a = clamp(h[0..32])
       A = a * B
       encode A as 32 bytes
+    The seed is borrowed and returned as given; derivation temporaries are wiped (_ed25519_pubkey_run).
     """
-    val h = _pure_ed25519_sha512_u8(seed)
-    val a = _pure_ed25519_clamp(h)
-    val big_a = ed_scalar_mul_basepoint(_pure_ed25519_reduce_32_to_scalar(a))
+    (seed, ed25519_pubkey(seed))
+
+fn _ed25519_pubkey_run(seed: [u8]) -> Ed25519SecretRunV1:
+    """Derive the public key and wipe h = SHA-512(seed), the clamped scalar a and its reduction."""
+    var digest = _pure_ed25519_sha512_secret(seed)
+    var h = digest.output
+    digest.output = []
+    var a = _pure_ed25519_clamp(h)
+    var scalar = _pure_ed25519_reduce_32_to_scalar(a)
+    val big_a = ed_scalar_mul_basepoint(scalar)
     val pk = ed_point_encode(big_a)
-    (seed, pk)
+    val wiped = digest.wiped + _ed25519_wipe_u8(h) + _ed25519_wipe_u8(a) + _ed25519_wipe_u8(scalar)
+    Ed25519SecretRunV1(output: pk, wiped: wiped)
 
 fn ed25519_pubkey(seed: [u8]) -> [u8]:
     """Derive the Ed25519 public key from a 32-byte seed.
 
-    Convenience wrapper: returns only the public key from
-    pure_ed25519_keypair_from_seed.
+    Returns only the public key; the seed is borrowed and never wiped here (its owner wipes it).
     """
-    val h = _pure_ed25519_sha512_u8(seed)
-    val a = _pure_ed25519_clamp(h)
-    val big_a = ed_scalar_mul_basepoint(_pure_ed25519_reduce_32_to_scalar(a))
-    ed_point_encode(big_a)
+    _ed25519_pubkey_run(seed).output
 
-fn pure_ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
-    """Sign a message with Ed25519. Returns a 64-byte signature (R || S).
+fn _pure_ed25519_sign_run(private_seed: [u8], public_key: [u8], message: [u8]) -> Ed25519SecretRunV1:
+    """Sign and wipe h, a, the nonce preimage prefix || M, its hash and the nonce scalar r."""
+    var digest = _pure_ed25519_sha512_secret(private_seed)
+    var h = digest.output
+    digest.output = []
+    var a = _pure_ed25519_clamp(h)
 
-    Per RFC 8032 §5.1.6:
-      h = SHA-512(seed)
-      a = clamp(h[0..32]); prefix = h[32..64]
-      r = SHA-512(prefix || M) mod L
-      R = r * B
-      k = SHA-512(encode(R) || A || M) mod L
-      S = (r + k * a) mod L
-      signature = encode(R) || S
-    """
-    val h = _pure_ed25519_sha512_u8(private_seed)
-    val a = _pure_ed25519_clamp(h)
-
-    var prefix: [u8] = []
-    var i: u64 = 32
-    while i < 64:
-        prefix.push(h[i])
-        i = i + 1
-
-    var prefix_msg: [u8] = []
-    i = 0
-    while i < prefix.len():
-        prefix_msg.push(prefix[i])
+    # prefix = h[32..64], written straight into the pre-sized nonce preimage (no separate prefix copy).
+    var prefix_msg: [u8] = [0u8; 32 + message.len()]
+    var i: u64 = 0
+    while i < 32:
+        prefix_msg[i] = h[32 + i]
         i = i + 1
     i = 0
     while i < message.len():
-        prefix_msg.push(message[i])
+        prefix_msg[32 + i] = message[i]
         i = i + 1
-    val r = _pure_ed25519_sha512_modl(prefix_msg)
+    var nonce_digest = _pure_ed25519_sha512_secret(prefix_msg)
+    var r_hash = nonce_digest.output
+    nonce_digest.output = []
+    var r = sc_reduce(r_hash)
 
     val big_r = ed_scalar_mul_basepoint(r)
     val r_enc = ed_point_encode(big_r)
@@ -576,7 +614,24 @@ fn pure_ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8
         else:
             sig.push(s[i - 32])
         i = i + 1
-    sig
+    val wiped = digest.wiped + nonce_digest.wiped + _ed25519_wipe_u8(h) + _ed25519_wipe_u8(a) +
+        _ed25519_wipe_u8(prefix_msg) + _ed25519_wipe_u8(r_hash) + _ed25519_wipe_u8(r)
+    Ed25519SecretRunV1(output: sig, wiped: wiped)
+
+fn pure_ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
+    """Sign a message with Ed25519. Returns a 64-byte signature (R || S).
+
+    Per RFC 8032 §5.1.6:
+      h = SHA-512(seed)
+      a = clamp(h[0..32]); prefix = h[32..64]
+      r = SHA-512(prefix || M) mod L
+      R = r * B
+      k = SHA-512(encode(R) || A || M) mod L
+      S = (r + k * a) mod L
+      signature = encode(R) || S
+    The seed is borrowed and never wiped here; the secret temporaries are (_pure_ed25519_sign_run).
+    """
+    _pure_ed25519_sign_run(private_seed, public_key, message).output
 
 struct PureEd25519SeedSignatureV1:
     """Public material produced by same-module seed derivation and signing."""
