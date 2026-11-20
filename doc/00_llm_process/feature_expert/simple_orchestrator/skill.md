@@ -555,11 +555,13 @@ Host side of the remote container build; the controller half is the `remote-run`
   signed host action, retention-release included.
 - Trap (milestone_0057 buildrunner container review, specs NOT_RUN): the production container path is V3 only
   (`remote_run_v1` / `remote_build_service_port_v3` -> `RemoteContainerDatabaseSessionV3`). `remote_container_host_v2`,
-  `_stage_v2` and `_producer_v2` were unreachable and are deleted. The V2 session/bundle/evidence/workspace-probe modules and
-  the V2 completion half of `remote_container_authority_v2` survive only for the shared test fixture
-  (`test/fixtures/buildrunner/remote_container_parent_v2.spl`, used by five V3 specs) and the truncated-completion
-  acceptance spec, which still runs on `session_v2`. Retire them in that order: port the acceptance to V3, make the
-  fixture V3-only, then delete. `remote_container_completion_authority_v2` (the shared body) stays live.
+  `_stage_v2` and `_producer_v2` were unreachable and are deleted. milestone_0060 retired the rest: the V2
+  session/bundle/evidence/workspace-probe modules and the V2 completion half of `remote_container_authority_v2` are deleted;
+  the truncated-completion-then-one-exact-retry acceptance (AT-RUN-02) now runs on `session_v3` in
+  `remote_container_session_v3_spec`, and the shared fixture is V3-only (`test/fixtures/buildrunner/remote_container_parent_v3.spl`,
+  `marked: false` builds the unmarked task the V3 refusals need). `remote_container_completion_authority_v2` (the shared
+  body) stays live. `accept_v3` runs the retained task-journal (RECOVERY_EVIDENCE_DIFFERS) check before creating
+  `accepted-<digest>/`, so that refusal leaves no orphan directory.
 ### Controller remote-run (milestone_0030 controller half, specs NOT_RUN)
 `simple orchestrator remote-run --dispatch-root --config-digest --key-store --approver --spec <dir> --out --grant-id --expires-in-ms`
 (`remote_run_command_v1.spl`; pure driver `remote_run_v1.spl`, authoring `remote_run_author_v1.spl`, frames

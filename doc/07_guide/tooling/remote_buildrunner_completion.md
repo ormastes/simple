@@ -65,14 +65,15 @@ journal. Use the V2 history/snapshot API for mixed native/container results; the
 V1 readers refuse container records. Keep cancellation routed through the same
 parent owner.
 
-The V2 container host, staging and in-container producer modules were removed
-because no production entry reached them. `remote_container_session_v2`,
-`remote_container_bundle_codec_v2`, `remote_container_evidence_v2`,
-`remote_container_workspace_probe_v2` and the V2 completion half of
-`remote_container_authority_v2` remain only as test fixtures until they are
-retired. The shared authority body in `remote_container_authority_v2` is live:
-the V3 verify and the reset-failure receipt use it. Nothing in production
-produces a V2 bundle, so do not build a new caller on the V2 session.
+The whole V2 remote-container path was removed because no production entry
+reached it: the container host, staging and in-container producer modules, then
+`remote_container_session_v2`, `remote_container_bundle_codec_v2`,
+`remote_container_evidence_v2`, `remote_container_workspace_probe_v2` and the V2
+completion record/codec/verify of `remote_container_authority_v2`. Only the
+shared authority body in `remote_container_authority_v2` remains, and it is live:
+the V3 verify and the reset-failure receipt use it. The V3 session refuses a
+completion whose attempt already has a different journaled result before it
+creates or writes any output directory.
 
 Before qualification, run the source specs and real native/container provider
 smokes with an admitted runtime; sabotage signatures, fences, toolchains,

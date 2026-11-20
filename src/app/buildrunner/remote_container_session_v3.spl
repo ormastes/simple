@@ -1,4 +1,4 @@
-# milestone_0030 13.1: the V3 counterpart of RemoteContainerDatabaseSessionV2 over the SAME parent session, operation
+# milestone_0030 13.1: the V3 counterpart of the retired V2 container session over the SAME parent session, operation
 # WAL and task journal. accept_wire_v3 decodes the V3 bundle, freezes the measurements, verifies the host-signed V3
 # completion through the shared authority, writes outputs with readback, journals a ContainerV3 row and commits the
 # operation transition. The journal status follows the typed exit status only (only Exited(0) passes).
@@ -118,6 +118,19 @@ impl RemoteContainerDatabaseSessionV3:
         if completion.completed_at < bundle.evidence.measurements.settled_unix_ms:
             return Err("REMOTE_CONTAINER_COMPLETION_PRECEDES_SETTLE")
         val completion_digest = sha256_text(remote_container_completion_encode_v3(completion)?)
+        # milestone_0060 (milestone_0057 finding 5): the retained task-journal check runs BEFORE the output directory is
+        # created or written, so a REMOTE_CONTAINER_RECOVERY_EVIDENCE_DIFFERS refusal leaves no accepted-<digest>/ behind.
+        # A row already journaled for this op and attempt must carry this completion's digest; when it does, the outputs
+        # are re-published and no second row is appended.
+        val identity = self.parent.journal_identities[task.id]
+        val history = task_runner_journal_history_v2(self.parent.database.journal, identity)?
+        var retained = false
+        for row in history:
+            if task_runner_record_group_v2(row) == policy.operation_id and
+                    task_runner_record_attempt_v2(row) == task.attempt:
+                if task_runner_record_result_digest_v2(row) != completion_digest:
+                    return Err("REMOTE_CONTAINER_RECOVERY_EVIDENCE_DIFFERS")
+                retained = true
         if not dir_is_real_no_follow(self.parent.database.window_root): return Err("REMOTE_PARENT_ROOT_UNSAFE")
         val output_root = self.parent.database.window_root + "/accepted-" + completion_digest
         if not dir_create_all(output_root) or not dir_is_real_no_follow(output_root):
@@ -130,15 +143,6 @@ impl RemoteContainerDatabaseSessionV3:
             for observed in frozen.observed:
                 if observed.path == output.path: expected_digest = observed.digest
             if actual.is_none() or actual.unwrap() != expected_digest: return Err("REMOTE_PARENT_OUTPUT_READBACK_DIFFERS")
-        val identity = self.parent.journal_identities[task.id]
-        val history = task_runner_journal_history_v2(self.parent.database.journal, identity)?
-        var retained = false
-        for row in history:
-            if task_runner_record_group_v2(row) == policy.operation_id and
-                    task_runner_record_attempt_v2(row) == task.attempt:
-                if task_runner_record_result_digest_v2(row) != completion_digest:
-                    return Err("REMOTE_CONTAINER_RECOVERY_EVIDENCE_DIFFERS")
-                retained = true
         if not retained:
             # V2 status/reason mapping, sourced from the typed exit (the freeze already tied it to the result).
             var exited = -1

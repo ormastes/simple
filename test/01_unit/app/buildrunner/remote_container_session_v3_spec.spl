@@ -8,7 +8,7 @@ Written for owners of the build-runner parent session.
 Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
 Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-18).
 ## Compatibility and limitations
-The fixture reuses the V2 parent fixture's task, policy, request and controller authority, and signs a V3 completion
+The V3-only parent fixture supplies the task, policy, request and controller authority; this spec signs the V3 completion
 with the fixture execution-host seed through the independent published field order. Only Exited(0) is success;
 Exited(n) must equal the result exit code; any other exit status must be an ERROR result with exit code -1.
 `input_manifest_digest` is recomputed from the signed task by `remote_build_input_manifest_digest_v3` (G9 closed).
@@ -17,7 +17,7 @@ Each refusal names the exact error string; a changed string is a contract change
 """
 use std.spec.{step, expect}
 use std.io.file_read_text
-use test.fixtures.buildrunner.remote_container_parent_v2.{RemoteContainerParentFixtureV2, container_parent_fixture_v2}
+use test.fixtures.buildrunner.remote_container_parent_v3.{RemoteContainerParentFixtureV3, container_parent_fixture_v3}
 use test.fixtures.app.llm_caret.distributed_authority_verification_fixture_v2.{verification_seed, verification_bytes}
 use app.buildrunner.remote_container_evidence_v3.*
 use app.buildrunner.remote_container_authority_v3.*
@@ -27,7 +27,6 @@ use app.buildrunner.remote_session_v1.remote_database_session_open_v1
 use app.buildrunner.remote_container_reset_failure_v3.{remote_container_reset_failure_host_new_v3, remote_container_reset_failure_digest_v3, RemoteContainerResetFailureV3}
 use app.buildrunner.remote_container_reset_failure_signed_v3.{RemoteContainerResetFailureSignedV3,
     remote_container_reset_failure_signed_encode_v3}
-use app.buildrunner.remote_container_evidence_v2.remote_container_request_bind_v2
 use std.common.build_manager.contracts.BuildInputV1
 use std.common.contracts.container.runtime_v1.*
 use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
@@ -44,8 +43,11 @@ use std.common.task_runner.distributed_operation_journal_v2.{distributed_operati
 use std.common.task_runner.journal.{task_runner_journal_history_v2, task_runner_journal_release_v1, task_runner_journal_append_v2}
 use std.common.task_runner.execution_identity_v2.{task_runner_record_encode_v2, TaskRunnerContainerAttemptV3, TaskRunnerAttemptRecordV2}
 use app.io.dir_ops.dir_remove
+use app.io.file_ops.file_read_regular_no_follow_bounded_bytes
+use std.nogc_sync_mut.io.file_ops.file_exists
+use std.nogc_sync_mut.io.dir_ops.dir_is_real_no_follow
 
-fn s3_runtime(fixture: RemoteContainerParentFixtureV2) -> RuntimeIdentityV1:
+fn s3_runtime(fixture: RemoteContainerParentFixtureV3) -> RuntimeIdentityV1:
     val plan = fixture.request.plan
     val fence = container_scope_fence_id_v2(ContainerHostScopeV2(physical_host_id: plan.physical_host_id,
         service_scope_id: plan.service_scope_id, boot_id: plan.boot_id, provider_generation: plan.provider_generation,
@@ -54,11 +56,11 @@ fn s3_runtime(fixture: RemoteContainerParentFixtureV2) -> RuntimeIdentityV1:
     RuntimeIdentityV1(pod_uid: plan.workload_uid, attempt: plan.attempt, provider_generation: plan.provider_generation,
         operation_id: plan.operation_id, engine: "podman", native_id: "c".repeat(64), node_boot_id: fence)
 
-fn s3_op(fixture: RemoteContainerParentFixtureV2, kind: text, phase: text, exit: RuntimeExitStatusV1) -> ContainerWorkspaceOpFieldsV3:
+fn s3_op(fixture: RemoteContainerParentFixtureV3, kind: text, phase: text, exit: RuntimeExitStatusV1) -> ContainerWorkspaceOpFieldsV3:
     ContainerWorkspaceOpFieldsV3(kind: kind, status: "ok", phase: phase, native_id: s3_runtime(fixture).native_id,
         exit_code: -1, workload_exit: exit)
 
-fn s3_measurements(fixture: RemoteContainerParentFixtureV2, exit: RuntimeExitStatusV1, settled: i64 = 1000) -> RemoteContainerMeasurementsV3:
+fn s3_measurements(fixture: RemoteContainerParentFixtureV3, exit: RuntimeExitStatusV1, settled: i64 = 1000) -> RemoteContainerMeasurementsV3:
     RemoteContainerMeasurementsV3(task_digest: sha256_text(builder_encode_task_v1(fixture.task)),
         input_manifest_digest: remote_build_input_manifest_digest_v3(fixture.task).unwrap(), request_digest: fixture.request.plan.request_digest,
         provider_identity_digest: fixture.provider_identity_digest, workspace_binding_digest: "5".repeat(64),
@@ -66,9 +68,9 @@ fn s3_measurements(fixture: RemoteContainerParentFixtureV2, exit: RuntimeExitSta
         destroy: s3_op(fixture, "linux-host-remote-build-destroy", "destroyed", exit),
         machine_settle_digest: "6".repeat(64), settled_unix_ms: settled)
 
-fn s3_bytes(fixture: RemoteContainerParentFixtureV2, exit: RuntimeExitStatusV1, settled: i64 = 1000) -> RemoteContainerBytesV3:
-    RemoteContainerBytesV3(measurements: s3_measurements(fixture, exit, settled), stdout: fixture.bundle.evidence.stdout,
-        stderr: fixture.bundle.evidence.stderr, outputs: fixture.bundle.evidence.outputs)
+fn s3_bytes(fixture: RemoteContainerParentFixtureV3, exit: RuntimeExitStatusV1, settled: i64 = 1000) -> RemoteContainerBytesV3:
+    RemoteContainerBytesV3(measurements: s3_measurements(fixture, exit, settled), stdout: fixture.stdout,
+        stderr: fixture.stderr, outputs: fixture.outputs)
 
 # Independent published V3 signing order, never the production message builder.
 fn s3_sign(value: RemoteContainerCompletionV3) -> RemoteContainerCompletionV3:
@@ -81,9 +83,9 @@ fn s3_sign(value: RemoteContainerCompletionV3) -> RemoteContainerCompletionV3:
     completion.signature = pure_ed25519_sign_from_seed_v1(verification_seed(129), verification_bytes(message)).signature
     completion
 
-fn s3_bundle(fixture: RemoteContainerParentFixtureV2, exit: RuntimeExitStatusV1, settled: i64 = 1000) -> RemoteContainerBundleV3:
+fn s3_bundle(fixture: RemoteContainerParentFixtureV3, exit: RuntimeExitStatusV1, settled: i64 = 1000) -> RemoteContainerBundleV3:
     val bytes = s3_bytes(fixture, exit, settled)
-    val frozen = remote_container_evidence_freeze_v3(fixture.task, fixture.bundle.result, fixture.policy, fixture.request,
+    val frozen = remote_container_evidence_freeze_v3(fixture.task, fixture.result, fixture.policy, fixture.request,
         bytes).unwrap()
     val completion = s3_sign(RemoteContainerCompletionV3(version: 3, task_identity: builder_task_identity_v1(fixture.task),
         host_id: fixture.policy.host_id, assignment_digest: fixture.policy.assignment_digest,
@@ -94,15 +96,18 @@ fn s3_bundle(fixture: RemoteContainerParentFixtureV2, exit: RuntimeExitStatusV1,
         stdout_digest: frozen.stdout_digest, stderr_digest: frozen.stderr_digest,
         output_inventory_digest: frozen.output_inventory_digest, tests_digest: frozen.tests_digest,
         signer_id: "host_signer_1", key_revision: 1, completed_at: 1099, signature: []))
-    RemoteContainerBundleV3(result: fixture.bundle.result, evidence: bytes, completion: completion)
+    RemoteContainerBundleV3(result: fixture.result, evidence: bytes, completion: completion)
 
-fn s3_open(fixture: RemoteContainerParentFixtureV2) -> RemoteContainerDatabaseSessionV3:
+# Opens (or, after a release/close, reopens) the actual parent journals: the operation is seeded initial -> executing only
+# when the operation journal is empty, so a reopen sees exactly the retained row.
+fn s3_open(fixture: RemoteContainerParentFixtureV3) -> RemoteContainerDatabaseSessionV3:
     var operations = distributed_operation_journal_open_v2(fixture.root + "/operations",
         sha256_text("container fixture authority"), sha256_text(fixture.root + "/nonce"), 1000).unwrap()
-    val initial = distributed_operation_initial_v2(distributed_encode_operation_v2(fixture.authority.request).unwrap()).unwrap()
-    operations = distributed_operation_journal_commit_v2(operations, initial).unwrap()
-    operations = distributed_operation_journal_commit_v2(operations,
-        distributed_operation_transition_v2(initial, "executing", "").unwrap()).unwrap()
+    if operations.operations.len() == 0:
+        val initial = distributed_operation_initial_v2(distributed_encode_operation_v2(fixture.authority.request).unwrap()).unwrap()
+        operations = distributed_operation_journal_commit_v2(operations, initial).unwrap()
+        operations = distributed_operation_journal_commit_v2(operations,
+            distributed_operation_transition_v2(initial, "executing", "").unwrap()).unwrap()
     val base = remote_database_session_open_v1(fixture.run, fixture.root + "/state", fixture.root + "/source",
         {fixture.task.id: fixture.policy}, operations).unwrap()
     remote_container_session_v3(base, [fixture.task], {fixture.task.id: fixture.request}).unwrap()
@@ -110,28 +115,28 @@ fn s3_open(fixture: RemoteContainerParentFixtureV2) -> RemoteContainerDatabaseSe
 describe "Controller V3 remote-container accept (milestone_0030 13.1, G4)":
     it "freezes V3 measurements: only Exited(0) is success and the exit must equal the result":
         # @req M0030-ACCEPT-01
-        val ok = container_parent_fixture_v2(0, 3)
-        val frozen = remote_container_evidence_freeze_v3(ok.task, ok.bundle.result, ok.policy, ok.request,
+        val ok = container_parent_fixture_v3()
+        val frozen = remote_container_evidence_freeze_v3(ok.task, ok.result, ok.policy, ok.request,
             s3_bytes(ok, RuntimeExitStatusV1.Exited(0))).unwrap()
         expect(frozen.measurement_digest).to_equal(sha256_text("SIMPLE-REMOTE-CONTAINER-MEASUREMENTS-3\n" +
             builder_wire_line_v1(remote_container_measurements_encode_v3(s3_measurements(ok, RuntimeExitStatusV1.Exited(0))).unwrap())))
         step("an OK result is refused for every status but Exited(0)")
-        expect(remote_container_evidence_freeze_v3(ok.task, ok.bundle.result, ok.policy, ok.request,
+        expect(remote_container_evidence_freeze_v3(ok.task, ok.result, ok.policy, ok.request,
             s3_bytes(ok, RuntimeExitStatusV1.Exited(1)))).to_equal(Err("REMOTE_CONTAINER_EXIT_DIFFERS"))
         for exit in [RuntimeExitStatusV1.Unobserved, RuntimeExitStatusV1.NotExited("running"),
                 RuntimeExitStatusV1.Unknown("fresh-workspace-exit-inspect-engine-failed")]:
-            expect(remote_container_evidence_freeze_v3(ok.task, ok.bundle.result, ok.policy, ok.request,
+            expect(remote_container_evidence_freeze_v3(ok.task, ok.result, ok.policy, ok.request,
                 s3_bytes(ok, exit))).to_equal(Err("REMOTE_CONTAINER_OUTCOME_UNPROVEN"))
         step("an ERROR result needs Exited(n) with n == the result exit code")
-        val failed = container_parent_fixture_v2(1, 3)
-        expect(remote_container_evidence_freeze_v3(failed.task, failed.bundle.result, failed.policy, failed.request,
+        val failed = container_parent_fixture_v3(1)
+        expect(remote_container_evidence_freeze_v3(failed.task, failed.result, failed.policy, failed.request,
             s3_bytes(failed, RuntimeExitStatusV1.Exited(1))).is_ok()).to_equal(true)
-        expect(remote_container_evidence_freeze_v3(failed.task, failed.bundle.result, failed.policy, failed.request,
+        expect(remote_container_evidence_freeze_v3(failed.task, failed.result, failed.policy, failed.request,
             s3_bytes(failed, RuntimeExitStatusV1.Exited(2)))).to_equal(Err("REMOTE_CONTAINER_EXIT_DIFFERS"))
-        expect(remote_container_evidence_freeze_v3(failed.task, failed.bundle.result, failed.policy, failed.request,
+        expect(remote_container_evidence_freeze_v3(failed.task, failed.result, failed.policy, failed.request,
             s3_bytes(failed, RuntimeExitStatusV1.Unknown("x")))).to_equal(Err("REMOTE_CONTAINER_OUTCOME_UNPROVEN"))
         step("an unobserved exit is accepted only as an ERROR result with exit code -1")
-        var unobserved = failed.bundle.result
+        var unobserved = failed.result
         unobserved.exit_code = -1
         expect(remote_container_evidence_freeze_v3(failed.task, unobserved, failed.policy, failed.request,
             s3_bytes(failed, RuntimeExitStatusV1.Unobserved)).is_ok()).to_equal(true)
@@ -140,37 +145,37 @@ describe "Controller V3 remote-container accept (milestone_0030 13.1, G4)":
 
     it "binds the measurements to the signed task, request and plan":
         # @req M0030-ACCEPT-02
-        val fixture = container_parent_fixture_v2(0, 3)
+        val fixture = container_parent_fixture_v3()
         var task = s3_bytes(fixture, RuntimeExitStatusV1.Exited(0))
         task.measurements.task_digest = "9".repeat(64)
-        expect(remote_container_evidence_freeze_v3(fixture.task, fixture.bundle.result, fixture.policy, fixture.request,
+        expect(remote_container_evidence_freeze_v3(fixture.task, fixture.result, fixture.policy, fixture.request,
             task)).to_equal(Err("REMOTE_CONTAINER_TASK_DIGEST_DIFFERS"))
         # @req M0030-INTEG-2 (G9: the input manifest is recomputed from the signed task, never trusted)
         var inputs = s3_bytes(fixture, RuntimeExitStatusV1.Exited(0))
         inputs.measurements.input_manifest_digest = "2".repeat(64)
-        expect(remote_container_evidence_freeze_v3(fixture.task, fixture.bundle.result, fixture.policy, fixture.request,
+        expect(remote_container_evidence_freeze_v3(fixture.task, fixture.result, fixture.policy, fixture.request,
             inputs)).to_equal(Err("REMOTE_CONTAINER_INPUT_MANIFEST_DIFFERS"))
         var request = s3_bytes(fixture, RuntimeExitStatusV1.Exited(0))
         request.measurements.request_digest = "9".repeat(64)
-        expect(remote_container_evidence_freeze_v3(fixture.task, fixture.bundle.result, fixture.policy, fixture.request,
+        expect(remote_container_evidence_freeze_v3(fixture.task, fixture.result, fixture.policy, fixture.request,
             request)).to_equal(Err("REMOTE_CONTAINER_REQUEST_DIFFERS"))
         var runtime = s3_bytes(fixture, RuntimeExitStatusV1.Exited(0))
         runtime.measurements.runtime.node_boot_id = "other-fence"
-        expect(remote_container_evidence_freeze_v3(fixture.task, fixture.bundle.result, fixture.policy, fixture.request,
+        expect(remote_container_evidence_freeze_v3(fixture.task, fixture.result, fixture.policy, fixture.request,
             runtime)).to_equal(Err("REMOTE_CONTAINER_RUNTIME_DIFFERS"))
         var native = s3_bytes(fixture, RuntimeExitStatusV1.Exited(0))
         native.measurements.destroy.native_id = "e".repeat(64)
-        expect(remote_container_evidence_freeze_v3(fixture.task, fixture.bundle.result, fixture.policy, fixture.request,
+        expect(remote_container_evidence_freeze_v3(fixture.task, fixture.result, fixture.policy, fixture.request,
             native)).to_equal(Err("REMOTE_CONTAINER_RUNTIME_DIFFERS"))
         var lifecycle = s3_bytes(fixture, RuntimeExitStatusV1.Exited(0))
         lifecycle.measurements.exit.phase = "running"
-        expect(remote_container_evidence_freeze_v3(fixture.task, fixture.bundle.result, fixture.policy, fixture.request,
+        expect(remote_container_evidence_freeze_v3(fixture.task, fixture.result, fixture.policy, fixture.request,
             lifecycle)).to_equal(Err("REMOTE_CONTAINER_LIFECYCLE_UNPROVEN"))
         expect(dir_remove(fixture.root, true)).to_equal(true)
 
     it "round-trips the V3 bundle with the exit status as its versioned wire form":
         # @req M0030-ACCEPT-03
-        val fixture = container_parent_fixture_v2(0, 3)
+        val fixture = container_parent_fixture_v3()
         val bundle = s3_bundle(fixture, RuntimeExitStatusV1.Exited(0))
         val wire = remote_container_bundle_encode_v3(bundle).unwrap()
         expect(wire).to_contain("SIMPLE_REMOTE_CONTAINER_BUNDLE_V3")
@@ -185,9 +190,9 @@ describe "Controller V3 remote-container accept (milestone_0030 13.1, G4)":
 
     it "verifies the V3 completion through the shared V2 authority and its own observation digests":
         # @req M0030-ACCEPT-04
-        val fixture = container_parent_fixture_v2(0, 3)
+        val fixture = container_parent_fixture_v3()
         val bundle = s3_bundle(fixture, RuntimeExitStatusV1.Exited(0))
-        val frozen = remote_container_evidence_freeze_v3(fixture.task, fixture.bundle.result, fixture.policy, fixture.request,
+        val frozen = remote_container_evidence_freeze_v3(fixture.task, fixture.result, fixture.policy, fixture.request,
             bundle.evidence).unwrap()
         val expected = RemoteContainerBindingV3(task_identity: builder_task_identity_v1(fixture.task),
             host_id: fixture.policy.host_id, assignment_digest: fixture.policy.assignment_digest,
@@ -215,7 +220,7 @@ describe "Controller V3 remote-container accept (milestone_0030 13.1, G4)":
 
     it "accepts the wire once, journals a ContainerV3 row and completes the operation":
         # @req M0030-ACCEPT-05
-        val fixture = container_parent_fixture_v2(0, 3)
+        val fixture = container_parent_fixture_v3()
         var session = s3_open(fixture)
         val wire = remote_container_bundle_encode_v3(s3_bundle(fixture, RuntimeExitStatusV1.Exited(0))).unwrap()
         val accepted = session.accept_wire_v3(fixture.task, wire, fixture.authority).unwrap()
@@ -226,7 +231,7 @@ describe "Controller V3 remote-container accept (milestone_0030 13.1, G4)":
         expect(operation.state).to_equal("completed")
         expect(operation.outcome_digest).to_equal(accepted.completion_digest)
         step("a completion that precedes the host settle clock is refused")
-        val early_fixture = container_parent_fixture_v2(0, 3)
+        val early_fixture = container_parent_fixture_v3()
         var early_session = s3_open(early_fixture)
         step("(the bundle is frozen and signed with settle 1100, so only the clock check can refuse it)")
         val early = s3_bundle(early_fixture, RuntimeExitStatusV1.Exited(0), 1100)
@@ -239,16 +244,14 @@ describe "Controller V3 remote-container accept (milestone_0030 13.1, G4)":
         expect(dir_remove(fixture.root, true)).to_equal(true)
         expect(dir_remove(early_fixture.root, true)).to_equal(true)
 
-    it "marks V3 tasks by a versioned task input; V2 and V3 refuse each other's tasks and unknown versions":
+    it "marks V3 tasks by a versioned task input; V3 refuses unmarked (V2) tasks and unknown versions":
         # @req M0030-ACCEPT-06
-        val v3 = container_parent_fixture_v2(0, 3)
-        val v2 = container_parent_fixture_v2(0)
+        val v3 = container_parent_fixture_v3()
+        val v2 = container_parent_fixture_v3(0, false)
         expect(remote_container_task_version_v3(v3.task)).to_equal(Ok(3))
         expect(remote_container_task_version_v3(v2.task)).to_equal(Ok(2))
         expect(remote_container_request_bind_v3(v3.task, v3.policy, v3.request)).to_equal(Ok(true))
-        step("each constructor's bind refuses the other version's task")
-        expect(remote_container_request_bind_v2(v3.task, v3.policy, v3.request, v3.provider_identity_digest)).to_equal(
-            Err("REMOTE_CONTAINER_TASK_VERSION_DIFFERS"))
+        step("the V3 bind refuses an unmarked (V2) task")
         expect(remote_container_request_bind_v3(v2.task, v2.policy, v2.request)).to_equal(Err("REMOTE_CONTAINER_TASK_VERSION_DIFFERS"))
         step("an unknown version value or a second marker is refused")
         var unknown = v3.task
@@ -266,7 +269,7 @@ describe "Controller V3 remote-container accept (milestone_0030 13.1, G4)":
 
     it "accepts the Host-signed service-restart receipt as the op's terminal failure; a later completion is a replay":
         # @req M0030-ACCEPT-07 (milestone_0045: the restart receipt is Host-signed; no unsigned entry exists)
-        val fixture = container_parent_fixture_v2(0, 3)
+        val fixture = container_parent_fixture_v3()
         var session = s3_open(fixture)
         val receipt = s3_host_receipt(fixture, "service-restart")
         val wire = remote_container_reset_failure_signed_encode_v3(s3_host_signed(receipt)).unwrap()
@@ -295,7 +298,7 @@ describe "Controller V3 remote-container accept (milestone_0030 13.1, G4)":
 
     it "refuses a reset-failure receipt when the task journal already retains another result for the attempt":
         # @req M0030-ACCEPT-08 (lane B review P3-6)
-        val fixture = container_parent_fixture_v2(0, 3)
+        val fixture = container_parent_fixture_v3()
         var session = s3_open(fixture)
         val wire = remote_container_reset_failure_signed_encode_v3(s3_host_signed(s3_host_receipt(fixture, "service-restart"))).unwrap()
         step("a completion row was journaled for this operation and attempt before the operation commit (crash between)")
@@ -322,10 +325,89 @@ describe "Controller V3 remote-container accept (milestone_0030 13.1, G4)":
         expect(distributed_operation_journal_close_v2(session.parent.operations)).to_equal(Ok(true))
         expect(dir_remove(fixture.root, true)).to_equal(true)
 
+    it "refuses a completion when the task journal retains another result for the attempt, before any output write":
+        # @req M0030-ACCEPT-09 (milestone_0057 finding 5: no orphan accepted-<digest>/ directory on this refusal)
+        val fixture = container_parent_fixture_v3()
+        var session = s3_open(fixture)
+        val bundle = s3_bundle(fixture, RuntimeExitStatusV1.Exited(0))
+        val completion_digest = sha256_text(remote_container_completion_encode_v3(bundle.completion).unwrap())
+        val output_root = session.parent.database.window_root + "/accepted-" + completion_digest
+        step("a different result was journaled for this operation and attempt before a crashed operation commit")
+        val retained = TaskRunnerContainerAttemptV3(identity_digest: session.parent.journal_identities[fixture.task.id],
+            group_id: fixture.policy.operation_id, attempt: fixture.task.attempt, mode: "isolated", status: "passed", reason: "",
+            task_exit_code: 0, result_validated: true, stdout_digest: "1".repeat(64), stderr_digest: "2".repeat(64),
+            result_digest: "7".repeat(64),
+            measurement_wire: remote_container_measurements_encode_v3(s3_measurements(fixture, RuntimeExitStatusV1.Exited(0))).unwrap())
+        session.parent.database.journal = task_runner_journal_append_v2(session.parent.database.journal,
+            TaskRunnerAttemptRecordV2.ContainerV3(retained)).unwrap()
+        step("the completion is refused as differing recovery evidence and no accepted output directory or file exists")
+        expect(session.accept_wire_v3(fixture.task, remote_container_bundle_encode_v3(bundle).unwrap(), fixture.authority)).to_equal(
+            Err("REMOTE_CONTAINER_RECOVERY_EVIDENCE_DIFFERS"))
+        expect(dir_is_real_no_follow(output_root)).to_equal(false)
+        expect(file_exists(output_root + "/artifact/program.bin")).to_equal(false)
+        val operation = distributed_operation_journal_lookup_v2(session.parent.operations, fixture.policy.operation_id).unwrap()
+        expect(operation.state).to_equal("executing")
+        expect(session.parent.database.recorded.contains_key(fixture.task.id + ":" + str(fixture.task.attempt))).to_equal(false)
+        step("source shape: the retained-journal check runs before the output directory is created or written")
+        val source = file_read_text("src/app/buildrunner/remote_container_session_v3.spl")
+        val body = source.substring(source.index_of("me accept_v3("), source.index_of("fn remote_container_session_v3("))
+        expect(body.index_of("task_runner_journal_history_v2(") > 0).to_equal(true)
+        expect(body.index_of("dir_create_all(") > 0).to_equal(true)
+        expect(body.index_of("file_atomic_write_bytes(") > 0).to_equal(true)
+        expect(body.index_of("task_runner_journal_history_v2(") < body.index_of("dir_create_all(")).to_equal(true)
+        expect(body.index_of("task_runner_journal_history_v2(") < body.index_of("file_atomic_write_bytes(")).to_equal(true)
+        expect(task_runner_journal_release_v1(session.parent.database.journal)).to_equal(Ok(true))
+        expect(distributed_operation_journal_close_v2(session.parent.operations)).to_equal(Ok(true))
+        expect(dir_remove(fixture.root, true)).to_equal(true)
+
+    it "preserves the durable operation after a truncated completion and accepts exactly one exact retry":
+        # @req AT-RUN-02 (ported from the retired V2 remote_parent_malformed_completion_acceptance_v1_spec, milestone_0060)
+        val fixture = container_parent_fixture_v3()
+        var session = s3_open(fixture)
+        val identity = session.parent.journal_identities[fixture.task.id]
+        val before = distributed_operation_journal_lookup_v2(session.parent.operations, fixture.policy.operation_id).unwrap()
+        val history = task_runner_journal_history_v2(session.parent.database.journal, identity).unwrap()
+        expect(history.len()).to_equal(0)
+        val bundle = s3_bundle(fixture, RuntimeExitStatusV1.Exited(0))
+        val wire = remote_container_bundle_encode_v3(bundle).unwrap()
+        val truncated = wire.substring(0, wire.byte_len() - 1)
+        val completion_digest = sha256_text(remote_container_completion_encode_v3(bundle.completion).unwrap())
+        val artifact = session.parent.database.window_root + "/accepted-" + completion_digest + "/artifact/program.bin"
+        step("the truncated wire is refused before publication: no artifact, unchanged history and operation")
+        expect(session.accept_wire_v3(fixture.task, truncated, fixture.authority)).to_equal(
+            Err("REMOTE_CONTAINER_BUNDLE_WIRE_INVALID"))
+        expect(file_exists(artifact)).to_equal(false)
+        expect(task_runner_journal_history_v2(session.parent.database.journal, identity).unwrap()).to_equal(history)
+        expect(distributed_operation_journal_lookup_v2(session.parent.operations, fixture.policy.operation_id).unwrap().state).to_equal(
+            "executing")
+        step("release and reopen the actual journals; the retained operation, history and absence are exactly unchanged")
+        expect(task_runner_journal_release_v1(session.parent.database.journal)).to_equal(Ok(true))
+        expect(distributed_operation_journal_close_v2(session.parent.operations)).to_equal(Ok(true))
+        session = s3_open(fixture)
+        val reopened = distributed_operation_journal_lookup_v2(session.parent.operations, fixture.policy.operation_id).unwrap()
+        expect(reopened.operation_id).to_equal(before.operation_id)
+        expect(reopened.envelope_digest).to_equal(before.envelope_digest)
+        expect(reopened.envelope).to_equal(before.envelope)
+        expect(reopened.state).to_equal(before.state)
+        expect(reopened.outcome_digest).to_equal(before.outcome_digest)
+        expect(task_runner_journal_history_v2(session.parent.database.journal, identity).unwrap()).to_equal(history)
+        val reopened_artifact = session.parent.database.window_root + "/accepted-" + completion_digest + "/artifact/program.bin"
+        expect(file_exists(reopened_artifact)).to_equal(false)
+        step("the exact original wire is accepted once; a second delivery is a replay with no second history row")
+        val accepted = session.accept_wire_v3(fixture.task, wire, fixture.authority).unwrap()
+        expect(accepted.outputs_root + "/artifact/program.bin").to_equal(reopened_artifact)
+        expect(file_read_regular_no_follow_bounded_bytes(reopened_artifact, 1024).unwrap()).to_equal(fixture.outputs[0].content)
+        expect(task_runner_journal_history_v2(session.parent.database.journal, identity).unwrap().len()).to_equal(1)
+        expect(session.accept_wire_v3(fixture.task, wire, fixture.authority)).to_equal(Err("REMOTE_COMPLETION_REPLAY"))
+        expect(task_runner_journal_history_v2(session.parent.database.journal, identity).unwrap().len()).to_equal(1)
+        expect(task_runner_journal_release_v1(session.parent.database.journal)).to_equal(Ok(true))
+        expect(distributed_operation_journal_close_v2(session.parent.operations)).to_equal(Ok(true))
+        expect(dir_remove(fixture.root, true)).to_equal(true)
+
     it "journals a receipt signed after the approval and grant expired, but never a completion at that clock":
         # @req M0045-LATE-02
         # Owner decision 5, the late-receipt exception: fixture approval 1900, grant 2000; the controller clock is 2500.
-        val fixture = container_parent_fixture_v2(0, 3)
+        val fixture = container_parent_fixture_v3()
         var session = s3_open(fixture)
         var late = fixture.authority
         late.now = 2500
@@ -346,7 +428,7 @@ describe "Controller V3 remote-container accept (milestone_0030 13.1, G4)":
         expect(dir_remove(fixture.root, true)).to_equal(true)
 
 # milestone_0038: a Host-signed reset-failure envelope, signed in the published order (never the production builder).
-fn s3_host_receipt(fixture: RemoteContainerParentFixtureV2, stage: text) -> RemoteContainerResetFailureV3:
+fn s3_host_receipt(fixture: RemoteContainerParentFixtureV3, stage: text) -> RemoteContainerResetFailureV3:
     val envelope = distributed_encode_operation_v2(fixture.authority.request).unwrap()
     val grant = distributed_grant_digest_v2(fixture.authority.signed.grant).unwrap()
     val restart = stage == "service-restart"
@@ -365,7 +447,7 @@ describe "Remote container Host-signed reset-failure accept V3 (milestone_0038)"
     it "journals a Host-signed receipt of every Host stage as the op's terminal failure bound to the receipt digest":
         # @req M0038-ACCEPT-01
         for stage in ["destroy-absence", "cancel-absence", "cancel-identity"]:
-            val fixture = container_parent_fixture_v2(0, 3)
+            val fixture = container_parent_fixture_v3()
             var session = s3_open(fixture)
             val receipt = s3_host_receipt(fixture, stage)
             val wire = remote_container_reset_failure_signed_encode_v3(s3_host_signed(receipt)).unwrap()
@@ -388,7 +470,7 @@ describe "Remote container Host-signed reset-failure accept V3 (milestone_0038)"
 
     it "has no unsigned receipt entry and refuses a signature relabelled to service-restart, leaving the operation executing":
         # @req M0038-ACCEPT-02 (milestone_0045: the unsigned controller-built entry is deleted)
-        val fixture = container_parent_fixture_v2(0, 3)
+        val fixture = container_parent_fixture_v3()
         var session = s3_open(fixture)
         val source = file_read_text("src/app/buildrunner/remote_container_session_v3.spl")
         expect(source.contains("me accept_reset_failure_v3(")).to_equal(false)
@@ -406,7 +488,7 @@ describe "Remote container Host-signed reset-failure accept V3 (milestone_0038)"
 
     it "refuses a wrong-key signature, a receipt for another request and a non-envelope before any write":
         # @req M0038-ACCEPT-03
-        val fixture = container_parent_fixture_v2(0, 3)
+        val fixture = container_parent_fixture_v3()
         var session = s3_open(fixture)
         val receipt = s3_host_receipt(fixture, "cancel-absence")
         val foreign_key = remote_container_reset_failure_signed_encode_v3(s3_host_signed(receipt, 130)).unwrap()

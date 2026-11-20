@@ -41,10 +41,9 @@ exit zero, a signed digest, a start observation nor an unbound reap file suffice
 | `remote_session_v1` | Serialized parent cancellation, journal admission, recovery and output publication |
 | `remote_test_report_v1` | Pinned TraceRunPlan plus actual start/finish events to exact report; no count-based pass inference |
 | `remote_test_runner_v1` | Dedicated producer calls the existing native test executor and writes the verified report before worker finalization |
-| `remote_container_authority_v2` | Separate container completion signature domain, original scoped grant/approval and enrolled host verification |
-| `remote_container_evidence_v2` | Pinned common container request/provider, actual wait/absence evidence and transferred output bytes |
-| `remote_container_session_v2` | Container parent admission using the existing operation and task journals |
-| `remote_container_workspace_probe_v2` | Actual same-process exclusive write/read/delete cycle, bound to task identity and fresh host nonce |
+| `remote_container_authority_v2` | Shared container completion authority body (original scoped grant/approval, enrolled host key, task/fence/digest/time bindings) used by the V3 completion and reset-failure receipt verify |
+| `remote_container_authority_v3` / `_evidence_v3` / `_bundle_codec_v3` | V3 container completion signature domain, frozen V3 measurements and bounded bundle codec |
+| `remote_container_session_v3` | Container parent admission using the existing operation and task journals (the V2 session, codec, evidence and workspace probe are retired) |
 | `task_runner.execution_identity_v2` | Tagged native/container attempts; native encoding remains unchanged and container records contain no invented PID |
 
 Host/private process objects and signing keys never cross the wire. Workers own
