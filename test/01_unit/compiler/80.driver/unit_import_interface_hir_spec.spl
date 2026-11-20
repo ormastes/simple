@@ -31,7 +31,7 @@ use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.provider_metadata.{mir_provider_callable_key}
 use compiler.mir.mir_data.{bootstrap_fn_ret_hir_type_lookup}
 use compiler.driver.driver_mir_shard_hir_residency_v1.{hir_module_interface_only_v1}
-use compiler.driver.driver_hir_cache.{hir_cache_store, hir_cache_parser_binding_v1, hir_shard_key_sidecar_write_v1, hir_shard_key_sidecar_path_v1, hir_unit_import_interface_load_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_store, hir_cache_parser_binding_v1, hir_shard_key_sidecar_write_v1, hir_shard_key_sidecar_path_v1, hir_unit_import_interface_load_v1, hir_shard_provider_settle_wait_v1}
 use compiler.driver.driver_mir_physical_owners.{driver_mir_owner_disposition_v1}
 use app.io.env_ops.{env_get, env_set}
 use std.common.crypto.sha256.{sha256_text}
@@ -143,3 +143,24 @@ describe "interface-only rows never reach MIR emission":
         expect(driver_mir_owner_disposition_v1(true, false, true)).to_equal("placeholder")
         expect(driver_mir_owner_disposition_v1(true, true, true)).to_equal("hir")
         expect(driver_mir_owner_disposition_v1(false, false, true)).to_equal("hir")
+
+describe "importer waits for an in-flight provider, never for an unclaimed one":
+    it "settles immediately when unclaimed, finished or published; times out while in flight":
+        val q = "build/uih_settle_{rt_getpid()}"
+        expect(rt_dir_create_all(q)).to_be(true)
+        val base = q + "/" + sha256_text("p.spl")
+        # Unclaimed: the provider unit has not started; do not wait.
+        expect(hir_shard_provider_settle_wait_v1(q, "p.spl", 60000)).to_equal(false)
+        expect(file_atomic_write(base + ".claim", "owner\np.spl\nx\n")).to_be(true)
+        # In flight, nothing published: bounded wait, then a miss.
+        expect(hir_shard_provider_settle_wait_v1(q, "p.spl", 300)).to_equal(false)
+        # Published sidecar: hit path.
+        expect(hir_shard_key_sidecar_write_v1(q, "p.spl", sha256_text("k"), sha256_text("b"))).to_be(true)
+        expect(hir_shard_provider_settle_wait_v1(q, "p.spl", 60000)).to_equal(true)
+        # Finished without a sidecar (codec refusal / failure): no wait.
+        expect(file_atomic_write(base + ".claim", "owner\nr.spl\nx\n")).to_be(true)
+        val rbase = q + "/" + sha256_text("r.spl")
+        expect(file_atomic_write(rbase + ".claim", "owner\nr.spl\nx\n")).to_be(true)
+        expect(file_atomic_write(rbase + ".terminal", "FAILED\n")).to_be(true)
+        expect(hir_shard_provider_settle_wait_v1(q, "r.spl", 60000)).to_equal(false)
+        expect(rt_dir_remove_all(q)).to_be(true)

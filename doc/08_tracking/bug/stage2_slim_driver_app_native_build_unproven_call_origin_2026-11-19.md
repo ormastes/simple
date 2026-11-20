@@ -186,3 +186,15 @@ store/hit; the importer loads interface-only through it and logs
 returns placeholder for any non-target row of a scoped unit, so held interface or
 closure HIR is never fed to MIR. Status stays verification-pending (native proof
 by the coordinator after a Stage 2 rebuild).
+
+Update 2026-11-21 (e): native proof of #10594 on Stage 2 a61dff89cc0 removed the
+HostTextByteSpanV1 error, but logged hit=107 / miss=18698. 18.3k of those misses were
+rows the unit never imports: the loop tried every frozen row outside the load closure
+(25 units x ~722 rows). Real import rows across the run: 422 summary-bound. The lookup
+now runs only for TLDR summary-bound rows. It also waits, up to
+SIMPLE_UNIT_IMPORT_IFACE_WAIT_MS (default 60000), for a provider that is in flight
+(claimed, no terminal, no sidecar yet). It never waits for an unclaimed or finished
+provider. The new first error, FILE-WORKER-E-CLOSURE-INCOMPLETE for io/dir_ops.spl,
+comes from the phase-2 surface readiness check
+(driver_source_parse_streaming.spl:600), which runs before any #10594 code. It is
+not caused by #10594. Status: verification-pending.

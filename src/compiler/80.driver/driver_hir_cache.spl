@@ -67,6 +67,7 @@ use std.common.crypto.sha256.{sha256_text, sha256_runtime_fallback_used}
 use std.common.encoding.utf8.{text_byte_len}
 use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_publish_noreplace, file_atomic_write}
 use std.nogc_sync_mut.io_runtime.{file_exists, file_read_nullable}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms, sleep_ms}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io.disk_admission.{disk_publish_admitted}
 use compiler.driver.cache.gc.disk_cache_bound_v1.{disk_cache_admit_v1, disk_cache_source_record_v1}
@@ -1638,7 +1639,9 @@ pub fn hir_shard_queue_dir_v1() -> text:
 # provider's .hirkey sidecar. None on a missing/corrupt sidecar or cache miss.
 # reason: raw ledger path/key/binding strings matching sibling hir_shard_* helpers
 @allow(primitive_api)
-pub fn hir_unit_import_interface_load_v1(queue: text, path: text, library_mode: text = "") -> HirModule?:
+pub fn hir_unit_import_interface_load_v1(queue: text, path: text, library_mode: text = "", wait_ms: i64 = 0) -> HirModule?:
+    if wait_ms > 0:
+        val _settled = hir_shard_provider_settle_wait_v1(queue, path, wait_ms)
     val (key, binding) = hir_shard_key_sidecar_read_v1(queue, path)
     if key == "":
         print "[unit-tldr] import interface-hir miss reason=no-sidecar path={path}"
@@ -1649,3 +1652,22 @@ pub fn hir_unit_import_interface_load_v1(queue: text, path: text, library_mode: 
     else:
         print "[unit-tldr] import interface-hir miss reason=cache path={path}"
     loaded
+
+# True when the provider of `path` has published its .hirkey sidecar. Waits
+# (bounded by budget_ms) only while the provider is IN FLIGHT: claimed, no
+# terminal, no sidecar yet. An unclaimed provider (its unit has not started)
+# or a finished one without a sidecar (failure / codec refusal) returns at
+# once, so a unit never blocks on work nobody is doing.
+# reason: raw ledger path strings and ms budget matching sibling hir_shard_* helpers
+@allow(primitive_api)
+pub fn hir_shard_provider_settle_wait_v1(queue: text, path: text, budget_ms: i64) -> bool:
+    val sidecar = hir_shard_key_sidecar_path_v1(queue, path)
+    if sidecar == "": return false
+    val base = "{queue}/{sha256_text(path)}"
+    val deadline = current_time_ms() + budget_ms
+    while true:
+        if file_exists(sidecar): return true
+        if not file_exists("{base}.claim") or file_exists("{base}.terminal"): return false
+        if current_time_ms() >= deadline: return false
+        sleep_ms(100)
+    false
