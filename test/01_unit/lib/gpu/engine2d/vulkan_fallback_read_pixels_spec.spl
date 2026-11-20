@@ -1,0 +1,84 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl
+# @req REQ-ENGINE2D-VULKAN-FALLBACK-READBACK
+"""
+# VulkanBackend read_pixels delegation when CPU fallback is latched
+
+Verifies that when `cpu_fallback_used` is latched on an initialized
+`VulkanBackend`, `read_pixels()` and `read_pixels_with_source()` return the
+populated CPU fallback framebuffer (`host_buf` with `source == "cpu_fallback"`)
+instead of returning an empty slice.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+
+describe "VulkanBackend read_pixels CPU fallback delegation":
+
+    it "delegates read_pixels_with_source to host_buf when fallback is latched and device readback fails":
+        step("Initialize 4x4 fallback surface, paint via host fallback, simulate dirty device handle, verify readback")
+        var vk = VulkanBackend.create()
+        val ok = vk.init_cpu_fallback_surface(4, 4, "simulated-device-fallback")
+        expect(ok).to_equal(true)
+
+        vk.clear(0xFF010203u32)
+        vk.draw_rect_filled(1, 1, 2, 2, 0xFFAABBCCu32)
+        vk.dirty = true
+        vk.d_framebuffer = 0
+
+        val rb = vk.read_pixels_with_source()
+        val px = vk.read_pixels()
+
+        expect(rb.source).to_equal("cpu_fallback")
+        expect(rb.pixel_count).to_equal(16)
+        expect(px.len().to_i64()).to_equal(16)
+        expect(px[0]).to_equal(0xFF010203u32)
+        expect(px[5]).to_equal(0xFFAABBCCu32)
+        expect(px[10]).to_equal(0xFFAABBCCu32)
+        expect(px[15]).to_equal(0xFF010203u32)
+        vk.shutdown()
+
+    it "still returns host fallback pixels when completion_unknown becomes set after fallback latched":
+        step("Populate host fallback framebuffer, set completion_unknown post-fallback, verify readback")
+        var vk = VulkanBackend.create()
+        val ok = vk.init_cpu_fallback_surface(4, 4, "simulated-device-fallback")
+        expect(ok).to_equal(true)
+
+        vk.clear(0xFF445566u32)
+        vk.completion_unknown = true
+
+        val rb = vk.read_pixels_with_source()
+        expect(rb.source).to_equal("cpu_fallback")
+        expect(rb.pixels.len().to_i64()).to_equal(16)
+        expect(rb.pixels[0]).to_equal(0xFF445566u32)
+        vk.shutdown()
+
+    it "preserves fail-closed empty readback when uninitialized or completion_unknown without fallback":
+        step("Verify uninitialized backend and non-fallback completion_unknown return empty slices")
+        var vk_uninit = VulkanBackend.create()
+        val px_uninit = vk_uninit.read_pixels()
+        expect(px_uninit.len().to_i64()).to_equal(0)
+        vk_uninit.shutdown()
+
+        var vk_unknown = VulkanBackend.create()
+        expect(vk_unknown.init_cpu_fallback_surface(4, 4, "tmp")).to_equal(true)
+        vk_unknown.cpu_fallback_used = false
+        vk_unknown.completion_unknown = true
+        val rb_unknown = vk_unknown.read_pixels_with_source()
+        expect(rb_unknown.source).to_equal("completion_unknown")
+        expect(rb_unknown.pixels.len().to_i64()).to_equal(0)
+        vk_unknown.shutdown()
+
+    it "fails closed instead of returning stale host_buf when live device buffer dirtied post-fallback":
+        step("Simulate live d_framebuffer > 0 with dirty device surface after stale host fallback")
+        var vk = VulkanBackend.create()
+        expect(vk.init_cpu_fallback_surface(4, 4, "prior-fallback")).to_equal(true)
+        vk.clear(0xFF112233u32)
+        vk.d_framebuffer = 99
+        vk.dirty = true
+        vk.host_mirror_frame_fresh = false
+        vk.completion_unknown = true
+        val rb = vk.read_pixels_with_source()
+        vk.d_framebuffer = 0
+        expect(rb.source).to_equal("completion_unknown")
+        expect(rb.pixels.len().to_i64()).to_equal(0)
+        vk.shutdown()

@@ -1,0 +1,60 @@
+# @cover src/lib/nogc_async_mut/compute/backend_dispatch.spl
+# @req REQ-COMPUTE-NO-ENV-FAKE
+"""
+# Compute backend_dispatch — no env-var GPU simulation
+
+Verifies that `std.nogc_async_mut.compute.backend_dispatch` probes real SFFI
+GPU availability instead of honoring the `SIMPLE_COMPUTE_GPU_PAYLOAD`
+environment variable fake.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_async_mut.io.env_ops.{env_get, env_set}
+use std.nogc_async_mut.io.file_ops.{file_read}
+use std.nogc_async_mut.compute.exec_target.{
+    ComputeDeviceClass, ComputeBackend, EnforceMode, BackendCaps,
+    ExecTarget, resolve_exec_target
+}
+use std.nogc_async_mut.compute.backend_dispatch.{
+    gpu_payload_present, dispatch_reduce_i64, dispatch_requirement_met
+}
+
+fn _make_device_target(b: ComputeBackend) -> ExecTarget:
+    ExecTarget.create(ComputeDeviceClass.Gpu, b, EnforceMode.Require, true, "unit-test")
+
+fn _add_i64(a: i64, b: i64) -> i64:
+    a + b
+
+fn _bool_int(v: bool) -> i64:
+    if v: 1 else: 0
+
+describe "backend_dispatch removes SIMPLE_COMPUTE_GPU_PAYLOAD env-fake":
+
+    it "source removes SIMPLE_COMPUTE_GPU_PAYLOAD simulation completely":
+        step("Inspect backend_dispatch.spl source for env-fake removal")
+        val src = file_read("src/lib/nogc_async_mut/compute/backend_dispatch.spl")
+        expect(src.contains("SIMPLE_COMPUTE_GPU_PAYLOAD")).to_equal(false)
+
+    it "ignores SIMPLE_COMPUTE_GPU_PAYLOAD=webgpu for probe and requirement checks":
+        step("Set SIMPLE_COMPUTE_GPU_PAYLOAD=webgpu and verify fail-closed SFFI probe")
+        val prev = env_get("SIMPLE_COMPUTE_GPU_PAYLOAD")
+        env_set("SIMPLE_COMPUTE_GPU_PAYLOAD", "webgpu")
+        val present = gpu_payload_present("webgpu")
+        val req_met = dispatch_requirement_met(_make_device_target(ComputeBackend.WebGpu))
+        val outcome = dispatch_reduce_i64([10, 20, 30], 0, _add_i64, _make_device_target(ComputeBackend.WebGpu))
+        env_set("SIMPLE_COMPUTE_GPU_PAYLOAD", prev)
+        expect(_bool_int(present)).to_equal(0)
+        expect(_bool_int(req_met)).to_equal(0)
+        expect(_bool_int(outcome.ok)).to_equal(0)
+        expect(_bool_int(outcome.stats.ran_on_cpu)).to_equal(0)
+
+    it "ignores SIMPLE_COMPUTE_GPU_PAYLOAD=opencl when OpenCL context execution is unavailable":
+        step("Set SIMPLE_COMPUTE_GPU_PAYLOAD=opencl and verify no fake GPU claim")
+        val prev = env_get("SIMPLE_COMPUTE_GPU_PAYLOAD")
+        env_set("SIMPLE_COMPUTE_GPU_PAYLOAD", "opencl")
+        val present = gpu_payload_present("opencl")
+        val outcome = dispatch_reduce_i64([1, 2, 3], 0, _add_i64, _make_device_target(ComputeBackend.OpenCl))
+        env_set("SIMPLE_COMPUTE_GPU_PAYLOAD", prev)
+        expect(_bool_int(present)).to_equal(0)
+        expect(_bool_int(outcome.ok)).to_equal(0)
+        expect(outcome.value).to_equal(0)
