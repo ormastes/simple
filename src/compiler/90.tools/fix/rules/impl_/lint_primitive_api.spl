@@ -126,14 +126,26 @@ pub fn primitive_api_findings(file: text, lines: [text]) -> [PrimitiveApiFinding
     if lines_allow_rule(lines, "primitive_api"):
         return out
 
+    var owner = ""
     for line in lines:
         line_num = line_num + 1
         val line_start = byte_offset
         byte_offset = byte_offset + line.len() + 1
         val trimmed = line.trim()
+        if trimmed != "" and not line.starts_with(" ") and not line.starts_with("\t") and not trimmed.starts_with("#") and not trimmed.starts_with("@"):
+            owner = _type_block_name(trimmed)
         val is_pub_fn = trimmed.starts_with("pub fn ") or
             trimmed.starts_with("pub me ") or
             trimmed.starts_with("pub static fn ")
+        if owner != "" and not is_pub_fn and trimmed.starts_with("pub ") and not line_is_allowed(lines, line_num - 1, "primitive_api"):
+            val field = _pub_text_field(trimmed)
+            if field.len() == 2:
+                val ty_col = line.find(":") + 1 + _leading_ws_len(line.slice(line.find(":") + 1))
+                val f = _finding(file, "{owner}.field.{field[0]}", field[0], field[1],
+                    line_num, ty_col, line_start,
+                    "public field '{field[0]}' of '{owner}' uses bare primitive type '{field[1]}'")
+                out = _push_unique(out, seen, f)
+                seen.push(_finding_key(f))
         if not is_pub_fn:
             continue
         # Item-scope suppression: `@allow(primitive_api)` / `#[allow(...)]`
@@ -172,7 +184,7 @@ pub fn primitive_api_findings(file: text, lines: [text]) -> [PrimitiveApiFinding
         var seg_start = paren + 1
         for param in params:
             val param_type = _extract_param_type(param)
-            if _is_bare_primitive_type(param_type) or _is_domain_text(_extract_param_name(param), param_type):
+            if _is_bare_primitive_type(param_type) or _is_text_family(param_type):
                 val param_name = _extract_param_name(param)
                 val colon = param.find(":")
                 val ty_col = seg_start + colon + 1 + _leading_ws_len(param.slice(colon + 1))
@@ -183,7 +195,7 @@ pub fn primitive_api_findings(file: text, lines: [text]) -> [PrimitiveApiFinding
                 seen.push(_finding_key(f))
             seg_start = seg_start + param.len() + 1
 
-        if _is_bare_primitive_type(return_type) or _is_domain_text(item_name, return_type):
+        if _is_bare_primitive_type(return_type) or _is_text_family(return_type):
             val arrow = trimmed.find("->")
             val ty_col = arrow + 2 + _leading_ws_len(trimmed.slice(arrow + 2))
             val f = _finding(file, "{item_name}.return", item_name, return_type,
@@ -483,9 +495,50 @@ fn _extract_return_type(line: text) -> text:
 fn _is_text_family(ty: text) -> bool:
     ty == "text" or ty == "str" or ty == "String"
 
-# SPL-TEXT-001 (name-based first version): [domain name, suggested domain type].
-# A public text param/return is flagged only when its NAME is one of these or
-# ends in `_<name>`; text with any other name is still not flagged.
+# Name of the struct/class opened by a column-0 header line, else "".
+fn _type_block_name(header: text) -> text:
+    var rest = header
+    if rest.starts_with("pub "):
+        rest = rest.slice(4)
+    if rest.starts_with("struct "):
+        rest = rest.slice(7)
+    elif rest.starts_with("class "):
+        rest = rest.slice(6)
+    else:
+        return ""
+    var end = 0
+    while end < rest.len():
+        val c = rest.slice(end, end + 1)
+        if c == ":" or c == "<" or c == " " or c == "(":
+            break
+        end = end + 1
+    rest.slice(0, end)
+
+# `pub [val|var] name: text` -> [name, type] when the field type is the text
+# family, else []. Defaults (`= ...`) are cut off.
+fn _pub_text_field(trimmed: text) -> [text]:
+    var rest = trimmed.slice(4).trim()
+    if rest.starts_with("val "):
+        rest = rest.slice(4).trim()
+    elif rest.starts_with("var "):
+        rest = rest.slice(4).trim()
+    if rest.starts_with("fn ") or rest.starts_with("me ") or rest.starts_with("static "):
+        return []
+    val colon = rest.find(":")
+    if colon <= 0:
+        return []
+    val name = rest.slice(0, colon).trim()
+    var ty = rest.slice(colon + 1).trim()
+    val eq = ty.find("=")
+    if eq >= 0:
+        ty = ty.slice(0, eq).trim()
+    if _is_text_family(ty):
+        return [name, ty]
+    []
+
+# SPL-TEXT-001: every public text param/return/field is flagged (owner decision
+# 2026-11-19). This table only picks the suggestion: [domain name, domain type]
+# when the NAME is one of these or ends in `_<name>`.
 fn _text_domain_table() -> [[text]]:
     [["url", "Url"], ["uri", "Url"], ["path", "Path"],
      ["host", "HostName"], ["hostname", "HostName"],
@@ -500,14 +553,11 @@ fn _text_domain_of(name: text) -> [text]:
             return row
     []
 
-fn _is_domain_text(name: text, ty: text) -> bool:
-    _is_text_family(ty) and _text_domain_of(name).len() > 0
-
 fn _text_domain_help(name: text) -> text:
     val row = _text_domain_of(name)
-    val domain = if row.len() > 0: row[0] else: "domain"
-    val ty = if row.len() > 0: row[1] else: "a domain type"
-    "SPL-TEXT-001 (name-based heuristic: '{name}' reads as a {domain}): use {ty} (or another std.common.types domain type / `unit X: text`) instead of bare text, or add `@allow(primitive_api)` with a reason"
+    if row.len() == 0:
+        return "SPL-TEXT-001: public text must carry a domain: use Path, Url, HostName, ExternalText (or another std.common.types domain type / `unit X: text`) instead of bare text, or add `@allow(primitive_api)` with a reason"
+    "SPL-TEXT-001 (name hint: '{name}' reads as a {row[0]}): use {row[1]} (or another std.common.types domain type / `unit X: text`) instead of bare text, or add `@allow(primitive_api)` with a reason"
 
 fn _is_bare_primitive_type(ty: text) -> bool:
     for primitive in primitive_api_types():
