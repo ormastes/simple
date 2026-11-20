@@ -2,7 +2,6 @@
 # Published means native stage flush and no-replace rename succeeded. The
 # provider does not flush directories: namespace_synced is always false.
 use std.nogc_sync_mut.io.host_identity_store_abi_v1.*
-use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text}
 use std.common.crypto.secure_memory.secure_zero_u8_slots
 use std.nogc_sync_mut.io.windows_private_file_v1.{WindowsPrivateRootV1, WindowsPrivateFileV1,
     WindowsPrivateErrorV1, WindowsJournalStoreV1, WindowsJournalStoreOpenV1, windows_private_root_open_v1}
@@ -45,8 +44,8 @@ pub class HostIdentityPlatformV1:
         var observed = identity_windows_read_v1(self.slot, self.generation, leaf, 65536)
         val present = observed.bytes != None
         if observed.bytes != None:
-            # Only presence is wanted: wipe the [u8] copy of the re-read file as its sole holder. The journal's own
-            # `text` copy is immutable and stays unwiped (bug doc, Windows residue).
+            # Only presence is wanted: wipe the [u8] copy of the re-read file as its sole holder. The journal's
+            # `read_bytes` made no text copy and zeroed its native buffer before free (milestone_0058).
             var held = observed.bytes.unwrap()
             observed.bytes = None
             if held.len() > 0:
@@ -258,9 +257,10 @@ fn identity_windows_read_v1(slot: i64, generation: i64, leaf: text, maximum: i64
     if current.is_err(): return HostIdentityPlatformReadV1(cleanup_pending: identity_windows_pending_v1(slot, generation), error: current.unwrap_err())
     val state = current.unwrap()
     val journal = state.journal.unwrap()
-    match journal.read(leaf, maximum):
+    # milestone_0058: the journal hands back a wipeable [u8], never a text copy of the (private) file.
+    match journal.read_bytes(leaf, maximum):
         case Ok(None): HostIdentityPlatformReadV1(absent: true)
-        case Ok(Some(value)): HostIdentityPlatformReadV1(bytes: Some(text_to_utf8_bytes(value)))
+        case Ok(Some(value)): HostIdentityPlatformReadV1(bytes: Some(value))
         case Err(reason):
             val failed = identity_windows_fail_v1(slot, "identity-store-read")
             HostIdentityPlatformReadV1(cleanup_pending: true, error: "identity-store-read")
@@ -270,10 +270,11 @@ fn identity_windows_publish_v1(slot: i64, generation: i64, leaf: text, bytes: [u
         return HostIdentityPlatformPublishV1(cleanup_pending: identity_windows_pending_v1(slot, generation), error: "identity-store-publish-argument")
     val current = identity_windows_current_v1(slot, generation)
     if current.is_err(): return HostIdentityPlatformPublishV1(cleanup_pending: identity_windows_pending_v1(slot, generation), error: current.unwrap_err())
-    # The journal independently revalidates UTF8 before any native publication.
+    # The journal independently revalidates UTF8 before any native publication. milestone_0058: the caller's bytes go
+    # to the journal as is (no text copy of the private file); the journal zeroes its native copy before freeing it.
     val state = current.unwrap()
     val journal = state.journal.unwrap()
-    match journal.publish(leaf, bytes_to_text(bytes)):
+    match journal.publish_bytes(leaf, bytes):
         case Ok(true): HostIdentityPlatformPublishV1(publication: HostIdentityStorePublicationV1.Published, file_synced: true)
         case Ok(false): HostIdentityPlatformPublishV1(publication: HostIdentityStorePublicationV1.Existing)
         case Err(reason):

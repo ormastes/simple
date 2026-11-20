@@ -4,7 +4,7 @@ use std.common.base_encoding.base64.base64_encode_bytes
 use std.common.crypto.ed25519.{ed25519_pubkey, pure_ed25519_sign, pure_ed25519_verify}
 use std.common.crypto.sha256.sha256_text
 use std.common.crypto.secure_memory.secure_zero_u8_slots
-use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.nogc_sync_mut.sosix.entropy.sosix_random_bytes
 
 pub struct HostIdentityGeneratedKeyV1:
     public_key: HostPublicKeyV1
@@ -466,13 +466,30 @@ fn host_identity_generated_public_v1(derived_public: [u8]) -> Result<HostPublicK
     val wire = host_identity_public_wire_v1(derived_public)?
     host_identity_public_parse_v1("ssh-ed25519 " + base64_encode_bytes(wire))
 
-# Key generation from explicit entropy hex (the OS entropy owner supplies it in production). The entropy bytes, seed
-# slice and check slice are each allocated once, never grown, and all wiped on the single exit after they exist
-# (including when a later step refuses); a failed wipe overrides the outcome. The `entropy` hex text itself is an
-# immutable plaintext copy of the seed and check that this function cannot erase (REVIEW_B P2-3).
+# Key generation from explicit entropy hex, kept for regression vectors only (production draws bytes, see
+# host_identity_key_generate_v1). Invalid hex, including an all-zero seed, is refused before any buffer exists. The
+# `entropy` hex text is an immutable copy of the seed and check that no wipe reaches, which is why production never
+# builds it.
 pub fn host_identity_key_generate_from_entropy_run_v1(entropy: text, label: text) -> HostIdentityGenerateRunV1:
     var bytes = host_identity_entropy_bytes_v1(entropy)
     if bytes.len() != 36: return host_identity_generate_refuse_v1("host-identity-entropy-unavailable", 0)
+    host_identity_key_generate_from_entropy_bytes_run_v1(bytes, label)
+
+# Key generation from 36 entropy bytes (seed + check). `bytes` is the caller's parked sole holder (a `var` local; never
+# a Result payload or a field, see milestone_0051 SEMANTICS.md) and is wiped here on every exit: a wrong length or an
+# all-zero seed is refused after the wipe (wiped 1; 0 for an empty buffer). The entropy bytes, seed slice and check slice are each allocated
+# once, never grown, and all wiped on the single exit after they exist (including when a later step refuses); a failed
+# wipe overrides the outcome.
+pub fn host_identity_key_generate_from_entropy_bytes_run_v1(mut bytes: [u8], label: text) -> HostIdentityGenerateRunV1:
+    var seed_nonzero = false
+    if bytes.len() == 36:
+        for index in 0..32:
+            if bytes[index] != 0u8: seed_nonzero = true
+    if not seed_nonzero:
+        val refused_wipe = secure_zero_u8_slots(bytes)
+        if bytes.len() == 0: return host_identity_generate_refuse_v1("host-identity-entropy-unavailable", 0)
+        if not refused_wipe.verified(): return host_identity_generate_refuse_v1("host-identity-key-buffer-wipe", 0)
+        return host_identity_generate_refuse_v1("host-identity-entropy-unavailable", 1)
     var seed = host_identity_slice_v1(bytes, 0, 32)
     var check = host_identity_slice_v1(bytes, 32, 4)
     val derived_public = ed25519_pubkey(seed)
@@ -510,17 +527,20 @@ pub fn host_identity_key_generate_from_entropy_run_v1(entropy: text, label: text
 # Caller must admit/retain its private store BEFORE calling this function.
 # Name/time affect only a bounded public comment; the seed/check come from the
 # existing checked OS CSPRNG owner, never from text, time, hashes or a password.
-# Residue stated plainly (REVIEW_B P2-3): that owner's only API returns the 36 entropy bytes as immutable hex TEXT,
-# so `entropy` is a plaintext copy of the seed and check that cannot be wiped. Removing it needs a bytes-returning
-# entropy extern (a runtime change); tracked in host_identity_ed25519_std_temporaries_unwiped_2026-11-19.
+# milestone_0058: the 36 bytes arrive as a `[u8]` (`sosix_random_bytes` over `rt_entropy_fill`), never as hex text.
+# They are taken out of the owner's Result once and the Result is overwritten, so `entropy` is the sole holder the
+# bytes generator wipes (a live Result payload would make that wipe fork, milestone_0051 SEMANTICS.md).
 pub fn host_identity_key_generate_v1(name: Option<text>, unix_micros: i64) -> Result<HostIdentityGeneratedKeyV1, text>:
     val label = host_identity_generation_label_v1(name, unix_micros)?
-    val entropy = sosix_random_hex(36)
-    if entropy == nil: return Err("host-identity-entropy-unavailable")
-    host_identity_key_generate_from_entropy_run_v1(entropy.unwrap(), label).outcome
+    var drawn = sosix_random_bytes(36u64)
+    if drawn.is_err(): return Err("host-identity-entropy-unavailable")
+    var entropy: [u8] = drawn.unwrap()
+    drawn = Err("host-identity-entropy-taken")
+    host_identity_key_generate_from_entropy_bytes_run_v1(entropy, label).outcome
 
 export HostIdentityGeneratedKeyV1, host_identity_public_wire_v1, host_identity_private_encode_v1
 export host_identity_private_encode_run_v1, host_identity_key_generate_from_entropy_run_v1
+export host_identity_key_generate_from_entropy_bytes_run_v1
 export host_identity_private_public_v1, host_identity_key_generate_v1
 export host_identity_private_sign_grant_v1, host_identity_private_sign_approval_v1
 export host_identity_private_sign_completion_v3, host_identity_private_sign_reset_failure_v3
