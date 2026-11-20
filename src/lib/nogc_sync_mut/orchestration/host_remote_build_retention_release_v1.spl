@@ -131,10 +131,15 @@ pub fn host_retention_release_inspect_v1(journal: DistributedOperationJournalV2,
     host_retention_release_bytes_v1((host_retention_release_expected_v1(journal, ledger, operation_id, host_id)?).record)
 
 fn retention_marker_encode_v1(release: HostRetentionReleaseV1, proof_digest: text) -> text:
+    retention_marker_text_v1([release.operation_id, release.association_digest, release.evidence, release.evidence_digest,
+        proof_digest])
+
+# binding = [operationId, associationDigest, evidence, evidenceDigest, proofDigest]; the ONE canonical marker encoding.
+fn retention_marker_text_v1(binding: [text]) -> text:
     val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("retention-release-marker"),
-        "operationId": SdnValue.String(release.operation_id), "associationDigest": SdnValue.String(release.association_digest),
-        "evidence": SdnValue.String(release.evidence), "evidenceDigest": SdnValue.String(release.evidence_digest),
-        "proofDigest": SdnValue.String(proof_digest)}
+        "operationId": SdnValue.String(binding[0]), "associationDigest": SdnValue.String(binding[1]),
+        "evidence": SdnValue.String(binding[2]), "evidenceDigest": SdnValue.String(binding[3]),
+        "proofDigest": SdnValue.String(binding[4])}
     sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
 
 fn retention_marker_binding_v1(source: text) -> Result<[text], text>:
@@ -151,7 +156,8 @@ fn retention_marker_binding_v1(source: text) -> Result<[text], text>:
         match fields[key]:
             case SdnValue.String(value): binding.push(value)
             case _: return Err("retention-release-marker-invalid")
-    if fields.keys().len() != 7: return Err("retention-release-marker-invalid")
+    # A foreign version/kind or non-canonical bytes is malformed, never a resumable marker (fail closed).
+    if fields.keys().len() != 7 or retention_marker_text_v1(binding) != source: return Err("retention-release-marker-invalid")
     Ok(binding)
 
 # Proof first (keyed by its digest; an orphan from a crash before the marker is harmless), then the marker, no-replace and

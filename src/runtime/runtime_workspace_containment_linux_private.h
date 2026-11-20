@@ -221,10 +221,12 @@ static int ws_contain_observe_v1(WsContainNativeV1* n,int* populated) {
 }
 static int ws_contain_close_v1(WsContainNativeV1* n) {
     if(n->close_uncertain)return n->close_uncertain;
+    /* Close every captured fd even after a failure: the first error is latched
+     * (the slot stays refused), but no remaining descriptor is stranded. */
     for(int i=n->count-1;i>=0;i--)if(n->fds[i]>=0) {
         int fd=n->fds[i];n->fds[i]=-1;
-        if(close(fd)){n->close_uncertain=errno?errno:EIO;return n->close_uncertain;}
+        if(close(fd)&&!n->close_uncertain)n->close_uncertain=errno?errno:EIO;
     }
-    return 0;
+    return n->close_uncertain;
 }
 #endif
