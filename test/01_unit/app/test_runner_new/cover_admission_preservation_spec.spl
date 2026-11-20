@@ -1,0 +1,83 @@
+"""
+# Cover Admission Preservation Prevention Specification
+
+Prevention tests for bug #151 (`system_cover_gate_reports_791_legacy_feature_specs_as_failures_2026-08-04`).
+Verifies that `@cover` admission filtering preserves admitted file order, keeps
+executed pass/fail totals separate from admission rejections, and surfaces
+non-empty admission failures via usage exit code without fabricating test failures.
+"""
+
+use std.spec.*
+use app.test_runner_new.cover_admission.{cover_admitted_files, cover_append_failures}
+use std.test_runner.test_runner_types.{TestFileResult, TestRunResult, classify_test_run_result, test_run_outcome_exit_code}
+use std.test_runner.test_runner_output.{aggregate_failed_count, cover_admission_failure_count, run_aborted_before_execution}
+
+fn base_run_with_one_pass() -> TestRunResult:
+    val ok_row = TestFileResult(
+        path: "test/03_system/feature/admitted_spec.spl",
+        passed: 4,
+        failed: 0,
+        skipped: 1,
+        pending: 0,
+        duration_ms: 15,
+        setup_ms: 2,
+        error: "",
+        timed_out: false,
+        cached: false
+    )
+    TestRunResult(
+        files: [ok_row],
+        total_passed: 4,
+        total_failed: 0,
+        total_skipped: 1,
+        total_pending: 0,
+        total_timed_out: 0,
+        total_duration_ms: 15,
+        total_setup_ms: 2,
+        total_cached: 0
+    )
+
+describe "cover_admission preservation":
+    """Verifies cover admission keeps admitted tests distinct from admission rejections."""
+
+    it "keeps order of admitted specs and drops only exact rejected matches":
+        val files = [
+            "test/03_system/a_spec.spl",
+            "test/03_system/a_spec.spl.bak",
+            "test/03_system/b_spec.spl",
+            "test/03_system/c_spec.spl"
+        ]
+        val rejected = ["test/03_system/a_spec.spl", "test/03_system/c_spec.spl"]
+        val admitted = cover_admitted_files(files, rejected)
+        expect(admitted.len()).to_equal(2)
+        expect(admitted[0]).to_equal("test/03_system/a_spec.spl.bak")
+        expect(admitted[1]).to_equal("test/03_system/b_spec.spl")
+
+    it "returns identical counts when no files are rejected":
+        val initial = base_run_with_one_pass()
+        val updated = cover_append_failures(initial, [])
+        expect(updated.files.len()).to_equal(1)
+        expect(updated.total_passed).to_equal(4)
+        expect(updated.total_failed).to_equal(0)
+        expect(cover_admission_failure_count(updated)).to_equal(0)
+        expect(test_run_outcome_exit_code(classify_test_run_result(updated, true))).to_equal(0)
+
+    it "preserves executed passes while recording rejected files as admission failures":
+        val initial = base_run_with_one_pass()
+        val rejected = ["test/03_system/legacy_one_spec.spl", "test/03_system/legacy_two_spec.spl"]
+        val updated = cover_append_failures(initial, rejected)
+
+        expect(updated.files.len()).to_equal(3)
+        expect(updated.files[0].path).to_equal("test/03_system/feature/admitted_spec.spl")
+        expect(updated.files[1].path).to_equal("test/03_system/legacy_one_spec.spl")
+        expect(updated.files[2].path).to_equal("test/03_system/legacy_two_spec.spl")
+        expect(updated.files[1].error).to_start_with("COVER ADMISSION FAILED:")
+        expect(updated.files[2].error).to_contain("@cover")
+
+        expect(updated.total_passed).to_equal(4)
+        expect(updated.total_failed).to_equal(0)
+        expect(updated.total_skipped).to_equal(1)
+        expect(cover_admission_failure_count(updated)).to_equal(2)
+        expect(aggregate_failed_count(updated)).to_equal(0)
+        expect(run_aborted_before_execution(updated)).to_equal(false)
+        expect(test_run_outcome_exit_code(classify_test_run_result(updated, true))).to_equal(2)

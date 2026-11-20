@@ -1,0 +1,42 @@
+"""
+# Optional As-Cast Matrix Prevention Specification
+
+Prevention tests for bug 4417 (`optional_as_cast_yields_zero_2026_11_09`).
+Verifies `[E-OPT-CAST-001]` across numeric target widths (`i32`, `u32`, `i64`,
+`u64`, `f32`, `f64`) while preserving `T? as bool`, `T? as text`, non-optional
+`[u8]` element casts (`bytes[i] as i64`), and narrowed `(opt ?? 0) as u64`.
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+fn matrix_lowering_errors(source: text) -> text:
+    val ast = parse_full_frontend(source, "opt_cast_matrix.spl", "opt_cast_matrix.spl", Logger(level: 0))
+    var lowering = HirLowering.with_filename("opt_cast_matrix.spl")
+    val _hir = lowering.lower_module(ast)
+    var errors = ""
+    var idx = 0
+    while idx < lowering.lowering_error_count():
+        if not lowering.lowering_error_is_recovered_at(idx):
+            errors = errors + lowering.lowering_error_message_at(idx, "opt_cast_matrix.spl") + "\n"
+        idx = idx + 1
+    errors
+
+fn matrix_opt_cast_count(errors: text) -> i64:
+    errors.split("[E-OPT-CAST-001]").len() - 1
+
+describe "optional_as_cast matrix prevention (bug 4417)":
+    """Checks exact rejection vs admission boundaries for optional cast expressions."""
+
+    it "rejects every numeric target width for optional parameter and local values":
+        val src = "fn bad_casts(p: u64?, f: f64?) -> i64:\n    val a = p as i32\n    val b = p as u32\n    val c = p as i64\n    val d = p as u64\n    val e = f as f32\n    val g = f as f64\n    (a as i64) + (b as i64) + c + (d as i64) + (e as i64) + (g as i64)\n"
+        val errs = matrix_lowering_errors(src)
+        expect(matrix_opt_cast_count(errs)).to_equal(6)
+
+    it "permits non-numeric bool/text optional casts and byte index casts":
+        val src = "fn allowed_casts(p: i64?, bs: [u8]) -> i64:\n    val flag = p as bool\n    val label = p as text\n    val first = bs[0] as i64\n    val narrowed = (p ?? 0) as i64\n    if flag and label != \"\":\n        first + narrowed\n    else:\n        0\n"
+        val errs = matrix_lowering_errors(src)
+        expect(matrix_opt_cast_count(errs)).to_equal(0)

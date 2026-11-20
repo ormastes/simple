@@ -1,0 +1,50 @@
+"""
+# Unsafe Optional Cast HIR Lowering Specification
+
+Interpreter-runnable regression and source-contract specification for bug 4418
+(`jit_unsafe_optional_as_cast_garbage_2026_11_09`). Verifies that HIR lowering
+permits `T? as <numeric>` only inside an active `unsafe:` block, restores
+`unsafe_block_depth` after `unsafe:` exits, and keeps the Rust MIR lowerer wired
+to `rt_unwrap_or_trap` and `unbox_scalar_for_raw_slot`.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+fn lower_optional_cast_errors(source: text) -> text:
+    val ast = parse_full_frontend(source, "unsafe_opt_cast.spl", "unsafe_opt_cast.spl", Logger(level: 0))
+    var lowering = HirLowering.with_filename("unsafe_opt_cast.spl")
+    val _hir = lowering.lower_module(ast)
+    var errors = ""
+    var idx = 0
+    while idx < lowering.lowering_error_count():
+        if not lowering.lowering_error_is_recovered_at(idx):
+            errors = errors + lowering.lowering_error_message_at(idx, "unsafe_opt_cast.spl") + "\n"
+        idx = idx + 1
+    errors
+
+fn count_opt_cast_errors(errors: text) -> i64:
+    errors.split("[E-OPT-CAST-001]").len() - 1
+
+describe "unsafe optional cast HIR lowering (bug 4418)":
+    """Checks HIR admission of unsafe optional numeric casts and MIR unbox contract."""
+
+    it "permits T? as u64, i64, and f64 inside unsafe while rejecting outside":
+        val src = "fn mk(v: u64) -> u64?:\n    if v != 0:\n        v\n    else:\n        nil\n\nfn check() -> i64:\n    val r = mk(4275044352)\n    var out: i64 = 0\n    unsafe:\n        val a = r as u64\n        val b = r as i64\n        val c = r as f64\n        out = a as i64 + b\n    val rejected_after = r as u64\n    out + (rejected_after as i64)\n"
+        val errs = lower_optional_cast_errors(src)
+        expect(count_opt_cast_errors(errs)).to_equal(1)
+
+    it "rejects bare Option<u64> numeric cast outside unsafe and accepts narrowed form":
+        val src = "fn narrowed_vs_raw(opt: Option<u64>) -> u64:\n    val safe_val = (opt ?? 0) as u64\n    val bad_val = opt as u64\n    safe_val + bad_val\n"
+        val errs = lower_optional_cast_errors(src)
+        expect(count_opt_cast_errors(errs)).to_equal(1)
+
+    it "pins Cranelift MIR lowering source to unwrap and unbox optional casts":
+        val mir_ops = file_read("src/compiler_rust/compiler/src/mir/lower/lowering_expr_ops.rs")
+        expect(mir_ops).to_contain("lower_cast_expr")
+        expect(mir_ops).to_contain("rt_unwrap_or_trap")
+        expect(mir_ops).to_contain("unbox_scalar_for_raw_slot")

@@ -1,0 +1,81 @@
+# @req REQ-BUG-8-CLOSURE-LOWERING
+"""
+# Caret closure enum payload, local binding, and Dict capture lowering prevention
+
+Prevention spec for bug caret_closure_enum_payload_binding_collection_gaps_2026_11_03.
+Packs representative shapes from all three classes into minimal HIR->MIR lowering
+passes so interpreter verification completes well inside budget while still proving
+that captured enum payloads, destructured local bindings, and captured Dict/text
+methods lower with zero HIR/MIR diagnostics (and proving the harness catches real errors).
+"""
+# @tag: unit, compiler, mir, hir, lambda, enum
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn compact_lowering_errors(src: text) -> text:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hl = hirlowering_for_module(ast.name, surfaces)
+    val hir = hl.lower_module(ast)
+    var hm: Dict<text, HirModule> = {}
+    hm["app.main"] = hir
+    var ml = MirLowering.new(hir.symbols)
+    ml.prescan_module_struct_names(hm, "app.main")
+    ml.lower_module(hir)
+    var out = ""
+    for e in hl.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in ml.errors:
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        out = out + "mir: " + e.message + "\n"
+    out
+
+val compact_prelude = "enum Kind:\n    V(i64)\n    T(a: i64, b: i64)\n\nclass Box:\n    v: i64\n    static fn of(v: i64) -> Box:\n        Box(v: v)\n    fn then(f: fn(i64) -> Box) -> Box:\n        f(self.v)\n\nclass Rd:\n    v: i64\n"
+
+describe "Caret closure HIR/MIR lowering compact prevention lock":
+    it "lowers captured enum payload, captured Dict.get, and local tuple binding in one module":
+        val src = compact_prelude +
+            "    me go(size: i64) -> Box:\n" +
+            "        val k = Kind.V(size)\n" +
+            "        val t = (size, 2)\n" +
+            "        var d: Dict<text, i64> = {{}}\n" +
+            "        d[\"a\"] = size\n" +
+            "        val names = [\" a \", \"b \"]\n" +
+            "        val cleaned = names.map(\\s: s.trim())\n" +
+            "        Box.of(1).then(\\r:\n" +
+            "            val (a, b) = t\n" +
+            "            val kv = match k:\n" +
+            "                case Kind.V(n): n\n" +
+            "                case _: 0\n" +
+            "            val dv = match d.get(\"a\"):\n" +
+            "                case Some(n): n\n" +
+            "                case None: 0\n" +
+            "            Box.of(a + b + kv + dv + r + cleaned.len())\n" +
+            "        )\n"
+        val errs = compact_lowering_errors(src)
+        expect(errs).to_equal("")
+
+    it "rejects genuine unresolved method call inside capturing lambda":
+        val bad = compact_prelude +
+            "    me go(size: i64) -> Box:\n" +
+            "        Box.of(1).then(\\r:\n" +
+            "            val n = size.nonexistent_caret_method_xyz()\n" +
+            "            Box.of(n + r)\n" +
+            "        )\n"
+        val errs = compact_lowering_errors(bad)
+        expect(errs).to_contain("nonexistent_caret_method_xyz")
+        expect(errs.contains("source declaration facts do not belong")).to_equal(false)
