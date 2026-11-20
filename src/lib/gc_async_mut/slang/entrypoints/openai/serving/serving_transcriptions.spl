@@ -1,17 +1,128 @@
 # @gc — module uses GC runtime
 #
-# /v1/audio/transcriptions — stub until lane L3 (ASR) replaces this file.
-# Design: doc/05_design/ml/slang/slang_pluggable_modalities.md §3.5.
-# A model of another kind is 400 wrong_model_kind; a Asr model is 501
-# not_implemented with the runner's reason.
+# /v1/audio/transcriptions handler (lane L3, design §3.5).
+#
+# Input is JSON {model, file_b64, format[, max_tokens, response_format]} until
+# multipart upload lands (design G1). Output is {"text": "..."}.
+#
+# Two kinds of model transcribe (design §3 table):
+#   - Chat model with Audio input (Qwen3-ASR): the recording is the only
+#     message content, driven through engine_complete_chat_media; the model's
+#     own "language X<asr_text>" prefix is removed from the answer.
+#   - Asr model (whisper.cpp ggml file): whisper_runner, 16 kHz wav only.
+#   - any other kind is 400 wrong_model_kind, never answered without audio.
 
-use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse}
-use std.gc_async_mut.slang.entrypoints.openai.serving_models.{model_for_kind, kind_not_implemented_response}
-use std.gc_async_mut.slang.modality.kinds.{ModelKind}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, json_string_field, json_int_field, base64_payload_is_strict, openai_error_response}
+use std.gc_async_mut.slang.entrypoints.openai.serving_chat.{model_not_found_response, engine_refusal_response}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, scan_model_root}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_backend_available, engine_complete_chat_media, engine_media_caps_for}
+use std.gc_async_mut.slang.modality.kinds.{Modality, ModelKind, KindParams, KindRequest, model_kind_eq, model_kind_text}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ChatPart}
+use std.gc_async_mut.slang.model_executor.runners.whisper_runner.{whisper_open, whisper_run}
+use std.gc_async_mut.slang.model_executor.backend.{MediaBlob, chat_frame, SLANG_MEDIA_MARKER}
+use std.common.base_encoding.base64.{base64_decode_bytes}
+
+val DEFAULT_ASR_MAX_TOKENS: i64 = 448
+
+fn _escape_json(s: text) -> text:
+    var out = ""
+    for ch in s.chars():
+        if ch == "\\":
+            out = out + "\\\\"
+        elif ch == "\"":
+            out = out + "\\\""
+        elif ch == "\n":
+            out = out + "\\n"
+        elif ch == "\r":
+            out = out + "\\r"
+        elif ch == "\t":
+            out = out + "\\t"
+        else:
+            out = out + ch
+    out
+
+fn _wrong_kind(model: NativeModel) -> ApiResponse:
+    openai_error_response(400, "model '" + model.id + "' is a " + model_kind_text(model.profile.kind) + " model without audio input; /v1/audio/transcriptions needs an asr model or a chat model that takes audio", "invalid_request_error", "wrong_model_kind", "")
+
+fn transcription_response(text_value: text) -> ApiResponse:
+    ApiResponse(status: 200, body: "{\"text\":\"" + _escape_json(text_value) + "\"}")
+
+# Qwen3-ASR answers "language English<asr_text>The transcript." (and
+# "language None<asr_text>" for silence). Everything up to and including the
+# tag is metadata, not transcript. Other models have no tag and pass through.
+fn strip_asr_prefix(answer: text) -> text:
+    val pieces = answer.split("<asr_text>")
+    pieces[pieces.len() - 1].trim()
+
+fn _takes_audio(model: NativeModel) -> bool:
+    for m in model.profile.inputs:
+        match m:
+            Modality.Audio: return true
+            _: ()
+    false
+
+fn _serve_audio_chat(model: NativeModel, model_root: text, file_b64: text, max_tokens: i64) -> ApiResponse:
+    match engine_media_caps_for(model_root, model.id):
+        Err(reason):
+            return engine_refusal_response(model.id, reason)
+        Ok(caps):
+            if (caps & 2) == 0:
+                return _wrong_kind(model)
+    val framed = chat_frame("user", SLANG_MEDIA_MARKER)
+    match engine_complete_chat_media(model.id, framed, [MediaBlob(bytes: base64_decode_bytes(file_b64))], max_tokens):
+        Err(reason):
+            if reason.find("media was rejected") >= 0:
+                return openai_error_response(400, reason, "invalid_request_error", "invalid_media", "")
+            engine_refusal_response(model.id, reason)
+        Ok(answer):
+            transcription_response(strip_asr_prefix(answer))
+
+fn _serve_whisper(model: NativeModel, file_b64: text, format: text) -> ApiResponse:
+    match whisper_open(model):
+        Err(reason):
+            return openai_error_response(503, "model '" + model.id + "' cannot be served: " + reason, "server_error", "model_not_runnable", "")
+        Ok(_): ()
+    val params = KindParams(max_tokens: 0, n: 1, size: "", steps: 0, seed: 0, voice: "", top_n: 0, response_format: "json")
+    val part = ChatPart(kind: "audio", text: "", data: file_b64, format: format)
+    match whisper_run(KindRequest(model_id: model.id, parts: [part], params: params)):
+        Err(reason):
+            if reason.starts_with("invalid audio"):
+                return openai_error_response(400, reason, "invalid_request_error", "invalid_media", "")
+            openai_error_response(503, "model '" + model.id + "' cannot be served: " + reason, "server_error", "model_not_runnable", "")
+        Ok(done):
+            transcription_response(done.parts[0].text)
+
+fn _find_model(model_root: text, id: text) -> Option<NativeModel>:
+    for m in scan_model_root(model_root, engine_backend_available()):
+        if m.id == id:
+            return Some(m)
+    None
+
+fn _serve_model(model: NativeModel, model_root: text, body: text, file_b64: text) -> ApiResponse:
+    val limit = json_int_field(body, "max_tokens", -1)
+    val max_tokens = if limit > 0: limit else: DEFAULT_ASR_MAX_TOKENS
+    if model_kind_eq(model.profile.kind, ModelKind.Chat) and _takes_audio(model):
+        return _serve_audio_chat(model, model_root, file_b64, max_tokens)
+    if model_kind_eq(model.profile.kind, ModelKind.Asr):
+        return _serve_whisper(model, file_b64, json_string_field(body, "format"))
+    _wrong_kind(model)
 
 fn serve_transcriptions(model_root: text, body: text) -> ApiResponse:
-    match model_for_kind(model_root, body, ModelKind.Asr, "/v1/audio/transcriptions"):
-        Err(refusal): refusal
-        Ok(model): kind_not_implemented_response(model, "/v1/audio/transcriptions")
+    val id = json_string_field(body, "model")
+    if id == "":
+        return openai_error_response(400, "missing or empty required field: model", "invalid_request_error", "invalid_request", "")
+    val file_b64 = json_string_field(body, "file_b64")
+    if file_b64 == "":
+        return openai_error_response(400, "file_b64 (base64 audio) is required until multipart upload is available", "invalid_request_error", "invalid_request", "")
+    if not base64_payload_is_strict(file_b64):
+        return openai_error_response(400, "file_b64 is not strict base64", "invalid_request_error", "invalid_media", "")
+    val response_format = json_string_field(body, "response_format")
+    if response_format != "" and response_format != "json":
+        return openai_error_response(400, "response_format '" + response_format + "' is not supported; only json is served", "invalid_request_error", "invalid_request", "")
+    match _find_model(model_root, id):
+        None:
+            model_not_found_response(id)
+        Some(model):
+            _serve_model(model, model_root, body, file_b64)
 
-export serve_transcriptions
+export serve_transcriptions, strip_asr_prefix, transcription_response
