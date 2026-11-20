@@ -116,10 +116,12 @@ describe "Controller V3 remote-container accept (milestone_0030 13.1, G4)":
         expect(frozen.measurement_digest).to_equal(sha256_text("SIMPLE-REMOTE-CONTAINER-MEASUREMENTS-3\n" +
             builder_wire_line_v1(remote_container_measurements_encode_v3(s3_measurements(ok, RuntimeExitStatusV1.Exited(0))).unwrap())))
         step("an OK result is refused for every status but Exited(0)")
-        for exit in [RuntimeExitStatusV1.Exited(1), RuntimeExitStatusV1.Unobserved, RuntimeExitStatusV1.NotExited("running"),
+        expect(remote_container_evidence_freeze_v3(ok.task, ok.bundle.result, ok.policy, ok.request,
+            s3_bytes(ok, RuntimeExitStatusV1.Exited(1)))).to_equal(Err("REMOTE_CONTAINER_EXIT_DIFFERS"))
+        for exit in [RuntimeExitStatusV1.Unobserved, RuntimeExitStatusV1.NotExited("running"),
                 RuntimeExitStatusV1.Unknown("fresh-workspace-exit-inspect-engine-failed")]:
             expect(remote_container_evidence_freeze_v3(ok.task, ok.bundle.result, ok.policy, ok.request,
-                s3_bytes(ok, exit)).is_err()).to_equal(true)
+                s3_bytes(ok, exit))).to_equal(Err("REMOTE_CONTAINER_OUTCOME_UNPROVEN"))
         step("an ERROR result needs Exited(n) with n == the result exit code")
         val failed = container_parent_fixture_v2(1, 3)
         expect(remote_container_evidence_freeze_v3(failed.task, failed.bundle.result, failed.policy, failed.request,
@@ -329,7 +331,7 @@ describe "Controller V3 remote-container accept (milestone_0030 13.1, G4)":
         late.now = 2500
         step("a completion verified at the late clock is refused (no exception) and the row stays executing")
         val bundle = remote_container_bundle_encode_v3(s3_bundle(fixture, RuntimeExitStatusV1.Exited(0))).unwrap()
-        expect(session.accept_wire_v3(fixture.task, bundle, late).is_err()).to_equal(true)
+        expect(session.accept_wire_v3(fixture.task, bundle, late)).to_equal(Err("GRANT_EXPIRED"))
         expect(distributed_operation_journal_lookup_v2(session.parent.operations, fixture.policy.operation_id).unwrap().state).to_equal("executing")
         step("a deadline cancel receipt the Host signed at 2400 journals `failed` for exactly this op")
         val receipt = s3_host_receipt(fixture, "cancel-absence")

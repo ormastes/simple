@@ -52,34 +52,27 @@ Docker on Windows. Its completion signer must consume container-owned cleanup
 and absence proof plus exact runtime identity and bytes. Neither the native
 worker adapter nor a host start/inspect observation proves container completion.
 
-For the explicit V2 path, reserve the host-owned attempt directory before
-approving the common request that binds its actual mount. Pin the canonical
-request and provider digest as declared task inputs, stage immutable bytes with
-`remote_container_stage_v2`, and consume an opened shared Container API owner
-through `remote_container_owner_v2`. The provider must establish executable
-permissions and protected selected-user workspace access; byte staging alone
-does not authorize execution. `collect` accepts a protected authority callback
-so it can refresh authorization after wait, cleanup and hashing. Transfer the
-canonical V2 bundle to `RemoteContainerDatabaseSessionV2.accept_wire`.
+The production container path is V3. The controller enters through
+`remote_run_v1` and the Host through `remote_build_service_port_v3`; both rebuild
+the authority context from the installed snapshot by role
+(`remote_context_from_snapshot_v1`). The Host sends a V3 bundle
+(`remote_container_bundle_codec_v3`) carrying the frozen V3 measurements and a
+Host-signed V3 completion, and the controller accepts it with
+`RemoteContainerDatabaseSessionV3.accept_wire_v3`. Only a typed
+`RuntimeExitStatusV1.Exited(0)` is success. The parent writes parent-owned
+outputs with readback and appends a typed container record to the existing task
+journal. Use the V2 history/snapshot API for mixed native/container results; the
+V1 readers refuse container records. Keep cancellation routed through the same
+parent owner.
 
-The host retains actual wait and complete bounded logs before destruction,
-then obtains independent exact-object absence. The parent verifies the signed
-common execution evidence and transferred bytes, writes parent-owned outputs,
-and appends a typed container record to the existing task journal. Use the V2
-history/snapshot API for mixed native/container results; the V1 readers refuse
-container records. Keep cancellation routed through the same parent owner.
-
-Use `remote_container_reserve_nonce_v2` on the private reserved root before task
-approval, pin its returned bytes at `remote-workspace/<id>.nonce`, and declare
-`remote-workspace/<id>.probe.sdn` as an output. Pin the compiled
-`remote_container_producer_v2` entrypoint as `producer.exe`. It performs the
-same-process access cycle before calling the build/test action. The host's
-separate fresh engine-user query and the actual probe receipt are signed and
-rechecked by the receiving parent. These observations do not claim effective
-OS token/SID introspection; verify Windows token/ACL behavior during platform
-qualification. Build arguments currently support explicit `native-build`,
-`--source`, `--entry`, `--output`, `--backend`, `--entry-closure` and `--strip`;
-unknown switches fail before the action.
+The V2 container host, staging and in-container producer modules were removed
+because no production entry reached them. `remote_container_session_v2`,
+`remote_container_bundle_codec_v2`, `remote_container_evidence_v2`,
+`remote_container_workspace_probe_v2` and the V2 completion half of
+`remote_container_authority_v2` remain only as test fixtures until they are
+retired. The shared authority body in `remote_container_authority_v2` is live:
+the V3 verify and the reset-failure receipt use it. Nothing in production
+produces a V2 bundle, so do not build a new caller on the V2 session.
 
 Before qualification, run the source specs and real native/container provider
 smokes with an admitted runtime; sabotage signatures, fences, toolchains,
