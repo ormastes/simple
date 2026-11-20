@@ -346,12 +346,15 @@ fn host_identity_private_run_v1(private_file: [u8], sign: bool, required_public_
         return host_identity_private_refuse_v1("host-identity-private-format", 0)
     var decoded = host_identity_pem_decode_v1(private_file, header.len(), private_file.len() - footer.len())
     if decoded.error != "": return host_identity_private_refuse_v1(decoded.error, 0)
-    # The decoder's own buffer is the place wiped (milestone_0050 REVIEW_C P1-1): a `var raw = decoded.raw` local would be a
-    # SEPARATE value, so wiping it left this buffer, seed included, unwiped until it was freed.
-    host_identity_private_body_run_v1(decoded.raw, sign, required_public_key, message, domain_line)
+    # The decoder's own buffer is the buffer wiped (milestone_0050 REVIEW_C P1-1). milestone_0051 REVIEW_1 P2: passing the
+    # FIELD shares the buffer with `decoded` until the post-call write-back, so the wipe would zero a fork; the buffer is
+    # moved into a local and the field emptied, making `raw` its sole holder (a plain local is handed to the callee).
+    var raw = decoded.raw
+    decoded.raw = []
+    host_identity_private_body_run_v1(raw, sign, required_public_key, message, domain_line)
 
-# The decoded-body half of host_identity_private_run_v1. `raw` is the caller's buffer (a `mut` place, never copied into
-# a local): every exit wipes it in place, and the seed slice once it exists.
+# The decoded-body half of host_identity_private_run_v1. `raw` is the caller's buffer (a `mut` place: the decoder buffer,
+# moved into a local with the field emptied, so it is the sole holder): every exit wipes it in place, and the seed slice.
 fn host_identity_private_body_run_v1(mut raw: [u8], sign: bool, required_public_key: [u8],
         message: [u8], domain_line: text) -> HostIdentityPrivateRunV1:
     if raw.len() < 234 or raw.len() > 512:
@@ -473,7 +476,7 @@ pub fn host_identity_key_generate_from_entropy_run_v1(entropy: text, label: text
     var seed = host_identity_slice_v1(bytes, 0, 32)
     var check = host_identity_slice_v1(bytes, 32, 4)
     val derived_public = ed25519_pubkey(seed)
-    val encoded = host_identity_private_encode_run_v1(seed, derived_public, check, label)
+    var encoded = host_identity_private_encode_run_v1(seed, derived_public, check, label)
     val public_result = host_identity_generated_public_v1(derived_public)
     val seed_wipe = secure_zero_u8_slots(seed)
     val check_wipe = secure_zero_u8_slots(check)
@@ -482,15 +485,20 @@ pub fn host_identity_key_generate_from_entropy_run_v1(entropy: text, label: text
     if seed_wipe.verified(): wiped = wiped + 1
     if check_wipe.verified(): wiped = wiped + 1
     if bytes_wipe.verified(): wiped = wiped + 1
+    # milestone_0051 KEYWIPE-03: the private file is taken out of its Result ONCE and the Result is overwritten, so
+    # `private_file` is the only holder of the PEM: each refusal wipe below reaches the seed-bearing bytes in place
+    # instead of forking a copy while `encoded.outcome` keeps the original.
+    val encode_ok = encoded.outcome.is_ok()
+    val encode_error = if encode_ok: "" else: encoded.outcome.unwrap_err()
+    var private_file: [u8] = if encode_ok: encoded.outcome.unwrap() else: []
+    encoded.outcome = Err("host-identity-private-file-taken")
     # A refusal never hands out the private file: it is wiped here (its wipe result cannot change the refusal), and a
     # failed seed/check/entropy wipe still overrides every other outcome.
     if not seed_wipe.verified() or not check_wipe.verified() or not bytes_wipe.verified():
-        if encoded.outcome.is_ok():
-            var dropped = encoded.outcome.unwrap()
-            val _dropped_wipe = secure_zero_u8_slots(dropped)
+        if private_file.len() > 0:
+            val _dropped_wipe = secure_zero_u8_slots(private_file)
         return host_identity_generate_refuse_v1("host-identity-key-buffer-wipe", wiped)
-    if encoded.outcome.is_err(): return host_identity_generate_refuse_v1(encoded.outcome.unwrap_err(), wiped)
-    var private_file = encoded.outcome.unwrap()
+    if not encode_ok: return host_identity_generate_refuse_v1(encode_error, wiped)
     if public_result.is_err():
         val _file_wipe = secure_zero_u8_slots(private_file)
         return host_identity_generate_refuse_v1(public_result.unwrap_err(), wiped)

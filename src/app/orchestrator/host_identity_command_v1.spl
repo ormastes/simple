@@ -163,6 +163,8 @@ fn host_identity_public_fields_v1(public_key: HostPublicKeyV1, status: text) -> 
         "fingerprint": SdnValue.String(public_key.fingerprint),
         "proofOfPossession": SdnValue.String("not-performed"), "pinned": SdnValue.Bool(false)}
 
+# Wipes the caller's `bytes` place. milestone_0051 KEYWIPE-04: every caller first releases the store turn's
+# `bytes` Option (`<turn>.bytes = None` right after the unwrap), so that place is the only holder of the key.
 fn host_identity_decode_private_v1(mut bytes: [u8]) -> Result<HostPublicKeyV1, text>:
     val parsed = host_identity_private_public_v1(bytes)
     val wipe = secure_zero_u8_slots(bytes)
@@ -175,13 +177,14 @@ fn host_identity_generate_command_v1(options: Dict<text, text>) -> OrchestratorV
         return host_identity_open_failure_v1(opened)
     var owner = opened.owner.unwrap()
     val leaf = sha256_text(options["--auth-ref"]) + ".key"
-    val initial = host_identity_store_read_v1(owner, leaf, 4096)
+    var initial = host_identity_store_read_v1(owner, leaf, 4096)
     owner = initial.owner
     if initial.error != "" or initial.cleanup_pending:
         return host_identity_store_error_v1("host-identity-store-read", owner)
     if not initial.absent:
         if initial.bytes == nil: return host_identity_store_error_v1("host-identity-store-read", owner)
         var bytes = initial.bytes.unwrap()
+        initial.bytes = None
         val public_key = match host_identity_decode_private_v1(bytes):
             case Err(reason): return host_identity_store_error_v1(reason, owner)
             case Ok(value): value
@@ -198,13 +201,17 @@ fn host_identity_generate_command_v1(options: Dict<text, text>) -> OrchestratorV
     var generated = match host_identity_key_generate_v1(name, time_sample_unix_micros_or_failure()):
         case Err(reason): return host_identity_store_error_v1(reason, owner)
         case Ok(value): value
-    val checked = host_identity_private_public_v1(generated.private_file)
+    # milestone_0051 REVIEW_1 P2: a field argument is written back only after the call, so the field would share the
+    # buffer during the wipe; the PEM moves into a local and the field is emptied, making `private_file` the sole holder.
+    var private_file = generated.private_file
+    generated.private_file = []
+    val checked = host_identity_private_public_v1(private_file)
     if checked.is_err() or checked.unwrap().public_key != generated.public_key.public_key:
-        val wiped = secure_zero_u8_slots(generated.private_file)
+        val wiped = secure_zero_u8_slots(private_file)
         return host_identity_store_error_v1("host-identity-private-consistency", owner)
-    val published = host_identity_store_publish_v1(owner, leaf, generated.private_file)
+    val published = host_identity_store_publish_v1(owner, leaf, private_file)
     owner = published.owner
-    val wiped = secure_zero_u8_slots(generated.private_file)
+    val wiped = secure_zero_u8_slots(private_file)
     if not wiped.verified() or published.cleanup_pending or published.error != "":
         val observed = published.publication == HostIdentityStorePublicationV1.Published
         var fields: Dict<text, SdnValue> = {"status": SdnValue.String(if observed: "identity-created-unconfirmed" else: "identity-publication-uncertain"),
@@ -218,11 +225,12 @@ fn host_identity_generate_command_v1(options: Dict<text, text>) -> OrchestratorV
         return host_identity_finish_v1(fields, 1, owner)
     if published.publication == HostIdentityStorePublicationV1.Existing:
         # Another creator won. Return its actual public identity, never ours.
-        val actual = host_identity_store_read_v1(owner, leaf, 4096)
+        var actual = host_identity_store_read_v1(owner, leaf, 4096)
         owner = actual.owner
         if actual.error != "" or actual.cleanup_pending or actual.absent or actual.bytes == nil:
             return host_identity_store_error_v1("host-identity-store-existing-read", owner)
         var bytes = actual.bytes.unwrap()
+        actual.bytes = None
         val public_key = match host_identity_decode_private_v1(bytes):
             case Err(reason): return host_identity_store_error_v1(reason, owner)
             case Ok(value): value
@@ -246,11 +254,12 @@ fn host_identity_stored_public_command_v1(options: Dict<text, text>, registratio
     val opened = host_identity_store_open_v1(options["--store-root"])
     if not opened.ready or opened.owner == nil or opened.cleanup_pending or opened.error != "":
         return host_identity_open_failure_v1(opened)
-    val read = host_identity_store_read_v1(opened.owner.unwrap(), sha256_text(options["--auth-ref"]) + ".key", 4096)
+    var read = host_identity_store_read_v1(opened.owner.unwrap(), sha256_text(options["--auth-ref"]) + ".key", 4096)
     val owner = read.owner
     if read.error != "" or read.cleanup_pending or read.absent or read.bytes == nil:
         return host_identity_store_error_v1("host-identity-store-key-unavailable", owner)
     var bytes = read.bytes.unwrap()
+    read.bytes = None
     val public_key = match host_identity_decode_private_v1(bytes):
         case Err(reason): return host_identity_store_error_v1(reason, owner)
         case Ok(value): value
