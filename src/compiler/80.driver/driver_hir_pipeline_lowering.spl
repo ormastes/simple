@@ -111,7 +111,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line, hir_module_has_rt_hal}
 use compiler.hir.hir_codec.{hir_module_first_fn_name_p_v1, hir_module_first_fn_name_wi_v1, hir_module_first_fn_name_via_decode_v1, hir_module_decode}
 use compiler.hir.hir_codec.{hir_module_functions_at_v1, hir_fn_scalars_at_v1, hir_module_first_fn_name_v1, hir_module_first_fn_name_in_v1, hir_module_first_fn_name_ordered_in_v1, hir_module_blob_in_v1}
-use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_hits, hir_cache_last_warnings, hir_cache_parser_binding_v1, hir_cache_last_parser_objectless, hir_cache_load_parsed_v1, hir_cache_last_refusal_is_io_v1, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary, hir_shard_deps_wanted_v1, hir_shard_publish_records_v1, hir_shard_dep_source_indices_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_hits, hir_cache_last_warnings, hir_cache_parser_binding_v1, hir_cache_last_parser_objectless, hir_cache_load_parsed_v1, hir_cache_last_refusal_is_io_v1, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary, hir_shard_deps_wanted_v1, hir_shard_publish_records_v1, hir_shard_dep_source_indices_v1, hir_shard_key_sidecar_write_v1, hir_shard_queue_dir_v1, hir_unit_import_interface_load_v1}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_hir_load_allowed_v1, worker_hir_loads_restricted_v1}
 use compiler.driver.driver_surface_call_origin_rows_v1.{surface_call_origin_rows_capture_v1}
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_link_ledger_v1}
@@ -967,6 +967,10 @@ impl CompilerDriver:
                             # full module escapes this worker transaction.
                             store_refused_codec = true
                             eprint("[hir-shard] cache store refused (codec, not I/O); module will be lowered by the main build: {source.path}")
+        # Publish where this module's HIR lives for importing units (best
+        # effort: a missing sidecar only means importers fall back).
+        if (cached or stored) and errors.len() == 0 and infrastructure_error == "":
+            hir_shard_key_sidecar_write_v1(hir_shard_queue_dir_v1(), source.path, transaction_cache_key, parser_binding)
 
         if errors.len() == 0 and infrastructure_error == "":
             if val Some(input) = archive_input:
@@ -1311,15 +1315,13 @@ impl CompilerDriver:
                 # already cached it, so MIR's prescan registers struct/class
                 # layouts, enums, call origins and return/param types for it
                 # (bug stage2_slim_driver_app_native_build_unproven_call_origin_2026-11-19).
-                # Never lowered here and never claimed: a cache miss keeps the
-                # old summary-only behaviour.
-                if hir_closure_digest != "" and not phase_hir_modules.contains_key(source.module_name):
-                    val iface_key = hir_cache_key(source.path, hir_closure_digest, is_requested_bootstrap_entry,
-                        self.ctx.options.library_mode, self.ctx.native_target, None)
-                    val iface_binding = hir_cache_parser_binding_v1(iface_key, source.module_name, source.path,
-                        self.ctx.source_identities_owner[source_index], self.ctx.options.library_mode)
-                    val iface_hir: HirModule? = hir_cache_load_parsed_v1(iface_key, iface_binding, source.path,
-                        self.ctx.options.library_mode, true)
+                # The key/binding come from the provider's .hirkey sidecar (this
+                # unit's digest differs). Never lowered or claimed here; MIR
+                # treats the row as a placeholder (driver_mir_owner_disposition_v1).
+                # A miss keeps the old summary-only behaviour.
+                if hir_shard_mode and not phase_hir_modules.contains_key(source.module_name):
+                    val iface_hir: HirModule? = hir_unit_import_interface_load_v1(
+                        hir_shard_queue_dir_v1(), source.path, self.ctx.options.library_mode)
                     if iface_hir.?:
                         val iface_module: HirModule = iface_hir.unwrap()
                         lowered_by_surface[surface_index] = iface_module

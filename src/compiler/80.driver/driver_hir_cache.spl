@@ -1599,3 +1599,53 @@ export hir_cache_parser_binding_v1, hir_cache_last_parser_objectless
 export hir_cache_load_parsed_v1
 export hir_cache_path
 export _hir_cache_write_failed_diagnostic_v1, HIR_CACHE_FAILED_DIAGNOSTIC_MAX_BYTES_V1
+
+# PM3 unit-lane import lookup: the provider unit publishes the cache key and
+# parser binding it stored `path` under; an importing unit cannot rebuild that
+# key (its closure digest covers its own surfaces + TLDR imports). Format:
+# "hirkey-v1\n<key>\n<binding>\n". Bug
+# stage2_slim_driver_app_native_build_unproven_call_origin_2026-11-19 (d).
+# reason: raw ledger path/key/binding strings matching sibling hir_shard_* helpers
+@allow(primitive_api)
+pub fn hir_shard_key_sidecar_path_v1(queue: text, path: text) -> text:
+    if queue == "" or path == "": return ""
+    "{queue}/{sha256_text(path)}.hirkey"
+
+# reason: raw ledger path/key/binding strings matching sibling hir_shard_* helpers
+@allow(primitive_api)
+pub fn hir_shard_key_sidecar_write_v1(queue: text, path: text, key: text, binding: text) -> bool:
+    val sidecar = hir_shard_key_sidecar_path_v1(queue, path)
+    if sidecar == "" or key == "" or binding.len() != 64 or key.contains("\n"): return false
+    file_atomic_write(sidecar, "hirkey-v1\n{key}\n{binding}\n")
+
+# (key, binding), or ("", "") when absent or malformed.
+# reason: raw ledger path/key/binding strings matching sibling hir_shard_* helpers
+@allow(primitive_api)
+pub fn hir_shard_key_sidecar_read_v1(queue: text, path: text) -> (text, text):
+    val sidecar = hir_shard_key_sidecar_path_v1(queue, path)
+    if sidecar == "" or not file_exists(sidecar): return ("", "")
+    val fields = (file_read_nullable(sidecar) ?? "").split("\n")
+    if fields.len() != 4 or fields[0] != "hirkey-v1" or fields[1] == "" or fields[2].len() != 64 or fields[3] != "":
+        return ("", "")
+    (fields[1], fields[2])
+
+# reason: raw ledger path/key/binding strings matching sibling hir_shard_* helpers
+@allow(primitive_api)
+pub fn hir_shard_queue_dir_v1() -> text:
+    _hir_shard_queue_dir()
+
+# Interface-only provider HIR for an import row the unit does not own, via the
+# provider's .hirkey sidecar. None on a missing/corrupt sidecar or cache miss.
+# reason: raw ledger path/key/binding strings matching sibling hir_shard_* helpers
+@allow(primitive_api)
+pub fn hir_unit_import_interface_load_v1(queue: text, path: text, library_mode: text = "") -> HirModule?:
+    val (key, binding) = hir_shard_key_sidecar_read_v1(queue, path)
+    if key == "":
+        print "[unit-tldr] import interface-hir miss reason=no-sidecar path={path}"
+        return None
+    val loaded = hir_cache_load_parsed_v1(key, binding, path, library_mode, true)
+    if loaded.?:
+        print "[unit-tldr] import interface-hir hit path={path}"
+    else:
+        print "[unit-tldr] import interface-hir miss reason=cache path={path}"
+    loaded

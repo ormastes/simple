@@ -19,7 +19,7 @@ Audience: compiler engineers maintaining the per-file driver and MIR prescan.
 # @tag: unit, compiler, driver
 
 use std.spec.*
-use std.io_runtime.{file_read}
+
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
@@ -31,6 +31,15 @@ use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.provider_metadata.{mir_provider_callable_key}
 use compiler.mir.mir_data.{bootstrap_fn_ret_hir_type_lookup}
 use compiler.driver.driver_mir_shard_hir_residency_v1.{hir_module_interface_only_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_store, hir_cache_parser_binding_v1, hir_shard_key_sidecar_write_v1, hir_shard_key_sidecar_path_v1, hir_unit_import_interface_load_v1}
+use compiler.driver.driver_mir_physical_owners.{driver_mir_owner_disposition_v1}
+use app.io.env_ops.{env_get, env_set}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_getpid() -> i64
 
 fn uih_provider() -> HirModule:
     val parsed = parse_full_frontend(
@@ -77,7 +86,60 @@ describe "unit-lane imports hold interface-only provider HIR":
         expect(lowering.callable_text_value_abi[mir_provider_callable_key(projected.name, "uih_count")]).to_equal(true)
         expect(bootstrap_fn_ret_hir_type_lookup("uih_count") != nil).to_equal(true)
 
-    it "the unit HIR stage loads interface-only HIR for import rows it does not own":
-        val src = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
-        expect(src.contains("hir_cache_load_parsed_v1(iface_key, iface_binding, source.path,")).to_equal(true)
-        expect(src.contains("[unit-tldr] import interface-hir loads=")).to_equal(true)
+
+describe "provider .hirkey sidecar drives the unit import lookup":
+    it "round-trips: the provider's sidecar yields its interface-only HIR, which fills the prescan":
+        val dir = "build/uih_sidecar_{rt_getpid()}"
+        expect(rt_dir_create_all(dir + "/cache")).to_be(true)
+        expect(rt_dir_create_all(dir + "/queue")).to_be(true)
+        val old_dir = env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
+        expect(env_set("SIMPLE_HIR_CACHE_DIR", dir + "/cache")).to_be(true)
+        val old_scope = env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
+        expect(env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "uih-sidecar-spec")).to_be(true)
+        val provider = uih_provider()
+        # The provider's digest is private to its unit: the importer never rebuilds it.
+        val key = sha256_text("provider-unit-private-digest")
+        val binding = hir_cache_parser_binding_v1(key, "uih_core", "uih_core.spl", sha256_text("provider source"))
+        expect(hir_cache_store(key, provider, [], "bodyful:" + binding)).to_be(true)
+        expect(hir_shard_key_sidecar_write_v1(dir + "/queue", "uih_core.spl", key, binding)).to_be(true)
+        val loaded = hir_unit_import_interface_load_v1(dir + "/queue", "uih_core.spl")
+        expect(loaded.?).to_be(true)
+        val iface: HirModule = loaded.unwrap()
+        expect(iface.structs.len()).to_equal(provider.structs.len())
+        expect(iface.enums.len()).to_equal(provider.enums.len())
+        var modules: Dict<text, HirModule> = {}
+        modules["uih_core"] = iface
+        var lowering = MirLowering.new(iface.symbols)
+        lowering.prescan_module_struct_names(modules, "uih_core")
+        expect(uih_has_layout(lowering, "UihSpan")).to_equal(true)
+        expect(lowering.callable_text_value_abi.has(mir_provider_callable_key(iface.name, "uih_make"))).to_equal(true)
+        expect(env_set("SIMPLE_HIR_CACHE_DIR", old_dir)).to_be(true)
+        expect(env_set("SIMPLE_FRONTEND_CACHE_SCOPE", old_scope)).to_be(true)
+        expect(rt_dir_remove_all(dir)).to_be(true)
+
+    it "misses safely on a missing, corrupt or stale sidecar":
+        val dir = "build/uih_sidecar_miss_{rt_getpid()}"
+        expect(rt_dir_create_all(dir + "/cache")).to_be(true)
+        expect(rt_dir_create_all(dir + "/queue")).to_be(true)
+        val old_dir = env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
+        expect(env_set("SIMPLE_HIR_CACHE_DIR", dir + "/cache")).to_be(true)
+        val old_scope = env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
+        expect(env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "uih-sidecar-spec")).to_be(true)
+        val q = dir + "/queue"
+        expect(hir_unit_import_interface_load_v1(q, "absent.spl").?).to_be(false)
+        expect(file_atomic_write(hir_shard_key_sidecar_path_v1(q, "corrupt.spl"), "garbage\n")).to_be(true)
+        expect(hir_unit_import_interface_load_v1(q, "corrupt.spl").?).to_be(false)
+        val key = sha256_text("never-stored")
+        expect(hir_shard_key_sidecar_write_v1(q, "stale.spl", key, sha256_text("b"))).to_be(true)
+        expect(hir_unit_import_interface_load_v1(q, "stale.spl").?).to_be(false)
+        expect(hir_shard_key_sidecar_write_v1(q, "bad.spl", key, "short")).to_be(false)
+        expect(hir_shard_key_sidecar_write_v1("", "bad.spl", key, sha256_text("b"))).to_be(false)
+        expect(env_set("SIMPLE_HIR_CACHE_DIR", old_dir)).to_be(true)
+        expect(env_set("SIMPLE_FRONTEND_CACHE_SCOPE", old_scope)).to_be(true)
+        expect(rt_dir_remove_all(dir)).to_be(true)
+
+describe "interface-only rows never reach MIR emission":
+    it "a held non-target row of a scoped unit is a placeholder, so it feeds zero MIR functions":
+        expect(driver_mir_owner_disposition_v1(true, false, true)).to_equal("placeholder")
+        expect(driver_mir_owner_disposition_v1(true, true, true)).to_equal("hir")
+        expect(driver_mir_owner_disposition_v1(false, false, true)).to_equal("hir")

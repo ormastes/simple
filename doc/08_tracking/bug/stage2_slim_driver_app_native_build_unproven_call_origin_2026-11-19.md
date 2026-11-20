@@ -176,3 +176,13 @@ behaviour. Log: `[unit-tldr] import interface-hir loads=<n>`.
 Spec: `test/01_unit/compiler/80.driver/unit_import_interface_hir_spec.spl` (4/4;
 driver assertion RED without the change). Native verification and per-worker
 RSS/time cost need a Stage 2 built from this branch.
+
+Revision (Opus review FAIL on the first cut): an importing unit cannot rebuild the
+provider's cache key (its closure digest covers its own surfaces + TLDR imports),
+and the summary row's identity is the stub's. The provider now publishes
+`{queue}/{sha256(path)}.hirkey` (key + parser binding, atomic) after a cache
+store/hit; the importer loads interface-only through it and logs
+`[unit-tldr] import interface-hir hit|miss`. `driver_mir_owner_disposition_v1`
+returns placeholder for any non-target row of a scoped unit, so held interface or
+closure HIR is never fed to MIR. Status stays verification-pending (native proof
+by the coordinator after a Stage 2 rebuild).
