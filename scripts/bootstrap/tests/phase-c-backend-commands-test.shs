@@ -5,9 +5,25 @@ script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$script_root/phase-c-backend-commands.shs"
 . "$script_root/lib/tree-rss-policy.shs"
 . "$script_root/bootstrap-verification-resource-policy.shs"
-unset native_internal_timeout SIMPLE_MIR_SHARD_COUNT
+unset native_internal_timeout SIMPLE_MIR_SHARD_COUNT SIMPLE_MIR_SHARDING SIMPLE_MIR_RETRACT_PROVIDER_TYPES
 actual=""
-run_matrix_task() { actual="fw=${SIMPLE_FILE_WORKERS:-unset} $*"; mir_count="${SIMPLE_MIR_SHARD_COUNT:-unset}"; }
+run_matrix_task() {
+  actual="fw=${SIMPLE_FILE_WORKERS:-unset} $*"
+  mir_count="${SIMPLE_MIR_SHARD_COUNT:-unset}"
+  mir_sharding="${SIMPLE_MIR_SHARDING:-unset}"
+  retract_provider_types="${SIMPLE_MIR_RETRACT_PROVIDER_TYPES:-unset}"
+}
+bootstrap_phase_c_run_tool_build cranelift cli producer entry.spl output cache 8
+[ "$mir_sharding" = 1 ] || { echo "FAIL tool build MIR sharding is '$mir_sharding'"; exit 1; }
+[ "$retract_provider_types" = 1 ] || { echo "FAIL provider-type retraction is '$retract_provider_types'"; exit 1; }
+[ -z "${SIMPLE_MIR_SHARDING+x}" ] || { echo 'FAIL SIMPLE_MIR_SHARDING leaked past the tool build'; exit 1; }
+[ -z "${SIMPLE_MIR_RETRACT_PROVIDER_TYPES+x}" ] || { echo 'FAIL SIMPLE_MIR_RETRACT_PROVIDER_TYPES leaked past the tool build'; exit 1; }
+SIMPLE_MIR_SHARDING=0
+SIMPLE_MIR_RETRACT_PROVIDER_TYPES=0
+bootstrap_phase_c_run_tool_build cranelift cli producer entry.spl output cache 8
+[ "$mir_sharding" = 0 ] && [ "$SIMPLE_MIR_SHARDING" = 0 ] || { echo 'FAIL explicit SIMPLE_MIR_SHARDING not honoured/restored'; exit 1; }
+[ "$retract_provider_types" = 0 ] && [ "$SIMPLE_MIR_RETRACT_PROVIDER_TYPES" = 0 ] || { echo 'FAIL explicit SIMPLE_MIR_RETRACT_PROVIDER_TYPES not honoured/restored'; exit 1; }
+unset SIMPLE_MIR_SHARDING SIMPLE_MIR_RETRACT_PROVIDER_TYPES
 bootstrap_phase_c_run_tool_build cranelift cli producer entry.spl output cache 8
 # Full-tool closures (~3031 MIR modules) split into enough MIR shards that one
 # worker's retained MIR fits beside its own HIR under the 60 GiB compiler_cli_build
@@ -89,4 +105,4 @@ for target_c_platform in aarch64-unknown-linux-gnu riscv64-unknown-linux-gnu; do
     bootstrap_phase_c_run_module_build llvm producer entry.spl output "$work" 1
     [ "$actual" = "module_compile_object producer native-build entry.spl --emit-object --backend=llvm --threads 1 -o output" ]
 done
-printf '%s\n' 'PASS ARM64/RISC-V object argv (target via SIMPLE_NATIVE_BUILD_TARGET); argv[0..1] + scoped SIMPLE_FILE_WORKERS and SIMPLE_MIR_SHARD_COUNT pins; 7 Phase C backend argv contracts; canonical zero rejected, diagnostic zero forwarded'
+printf '%s\n' 'PASS ARM64/RISC-V object argv (target via SIMPLE_NATIVE_BUILD_TARGET); argv[0..1] + scoped file-worker, MIR-sharding, provider-retraction and shard-count pins; 7 Phase C backend argv contracts; canonical zero rejected, diagnostic zero forwarded'

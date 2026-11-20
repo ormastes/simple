@@ -16,6 +16,8 @@
 # Content-Length; the connection is closed after [DONE].
 
 use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_sync_mut.http_server.types.{HttpResponse, http_status_from_code}
+use std.nogc_sync_mut.http_server.response.{write_response_limited, with_default_security_headers}
 use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, openai_error_response, openai_chat_chunk_sse, openai_chat_delta_json, openai_text_chunk_sse, json_bool_field_is_true, parse_completion_request}
 use std.gc_async_mut.slang.entrypoints.openai.serving_chat.{chat_prepare, media_part_count, chat_plain_prompt_from_body, engine_refusal_response, model_not_found_response}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{scan_model_root}
@@ -41,18 +43,28 @@ fn stream_requested(method: text, path: text, body: text) -> bool:
         return false
     json_bool_field_is_true(body, "stream")
 
-fn _status_reason(status: i32) -> text:
-    if status == 400:
-        return "Bad Request"
-    if status == 404:
-        return "Not Found"
-    if status == 503:
-        return "Service Unavailable"
-    "Error"
+# Whole-wire response cap for slang: a 64 MiB body plus a 64 KiB head allowance
+# (max_response_bytes bounds head + body).
+val SLANG_RESPONSE_HEAD_ALLOWANCE: i64 = 65536
+val SLANG_MAX_RESPONSE_BYTES: i64 = 67108864 + SLANG_RESPONSE_HEAD_ALLOWANCE
 
+# The HTTP form of an ApiResponse: its content type (JSON when empty), and its
+# binary body_bytes when set, else the text body.
+fn slang_http_response(answer: ApiResponse) -> HttpResponse:
+    val content_type = if answer.content_type == "": "application/json; charset=utf-8" else: answer.content_type
+    if answer.body_bytes.len() > 0:
+        return HttpResponse.bytes(http_status_from_code(answer.status), content_type, answer.body_bytes)
+    HttpResponse(
+        status: http_status_from_code(answer.status),
+        headers: [("Content-Type", content_type)],
+        body: answer.body
+    )
+
+# Non-streamed answers on the stream path go through the canonical bounded
+# writer, so they carry the security headers and the response cap.
 fn _write_json(stream: TcpStream, answer: ApiResponse) -> bool:
-    val wire = "HTTP/1.1 " + answer.status.to_text() + " " + _status_reason(answer.status) + "\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: " + answer.body.byte_len().to_text() + "\r\nConnection: close\r\n\r\n" + answer.body
-    stream.write_text_status(wire)
+    val resp = with_default_security_headers(slang_http_response(answer), false)
+    write_response_limited(stream, resp, SLANG_MAX_RESPONSE_BYTES)
 
 fn _write_sse_head(stream: TcpStream) -> bool:
     stream.write_text_status("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n")
@@ -185,3 +197,4 @@ fn serve_stream(model_root: text, method: text, path: text, body: text, stream: 
     true
 
 export stream_requested, serve_stream, StreamJob
+export slang_http_response, SLANG_MAX_RESPONSE_BYTES

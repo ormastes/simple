@@ -8,7 +8,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_geometry
     _SimpleWebAnimationApplyResult,
     _SimpleWebAnimationSchedule
 }
-use std.nogc_sync_mut.io.time_ops.{time_now_micros}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_surface_id}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_engine.{web_html_layout_tree, web_styles_with_painted_percent_padding}
 # `min_i64` is defined in several closure modules and the native import map leaves the
@@ -372,6 +372,121 @@ fn _apply_css_animations(
         property_work_count: property_work_count
     )
 
+# Surfaces over the one-viewport budget: every command under a top-level
+# fractional-opacity root moves to the ungrouped path (root -1); backdrop-root
+# chains (opacity 100) keep their layers. Empty when the kept layers alone
+# still exceed the budget.
+# A demoted root with ONE painted item carries its opacity on that command
+# (`_simple_web_opacity_fold_demoted`).
+# ponytail: a demoted root with several items, an image or a glyph run still
+# paints at 100% (as the whole page did before when the budget tripped);
+# upgrade by giving it a real layer within a larger budget.
+fn _simple_web_opacity_demote_for_budget(
+    command_roots: [i32], root_parent: [i32], styles: [Style],
+    bounds: _SimpleWebOpacityRootBounds, viewport_work: i64
+) -> [i32]:
+    var out: [i32] = []
+    var counted: [bool] = [false; root_parent.len()]
+    var work: i64 = 0
+    for root in command_roots:  # cpu-lane-loop-ok: remaps each emitted command's opacity root once; bound is the command count, only on budget overflow
+        val top = _simple_web_opacity_top_root(root_parent, root)
+        if top >= 0 and styles[top].opacity_pct < 100:
+            out.push(-1)
+        else:
+            if top >= 0 and not counted[top]:
+                counted[top] = true
+                work = work + bounds.w[top].to_i64() * bounds.h[top].to_i64()
+            out.push(root)
+    if work > viewport_work:
+        return []
+    out
+
+# `color`'s alpha times `pct` / 100 (Chrome: a group of one item is that item
+# at alpha * opacity).
+fn _simple_web_scale_alpha(color: u32, pct: i32) -> u32:
+    val a = ((color >> 24) & 255u32) as i32
+    val na = (a * pct + 50) / 100
+    (color & 0x00FFFFFFu32) | ((na as u32) << 24)
+
+# Scales the alpha of the first `count` decimal colours of a comma list
+# (count < 0: every entry).
+fn _simple_web_scale_alpha_list(raw: text, count: i32, pct: i32) -> text:
+    var out: [text] = []
+    var k = 0
+    for part in raw.split(","):  # cpu-lane-loop-ok: one gradient's stop entries; bound is its stop count
+        if (count < 0 or k < count) and part.trim() != "":
+            out.push("{_simple_web_scale_alpha(part.trim().to_i64() as u32, pct)}")
+        else:
+            out.push(part)
+        k = k + 1
+    out.join(",")
+
+# Folds `pct` opacity into one command's paint colours: the command colour,
+# `background-color`, the 2-stop `background-image`, the stop-list
+# `background-gradient-stops` and every `background-gradient-layer-stops`
+# colour. The other props are copied unchanged.
+fn _simple_web_opacity_fold_command(command: DrawIrCommand, pct: i32) -> DrawIrCommand:
+    var out = command
+    out.color = _simple_web_scale_alpha(command.color, pct)
+    var stop_count = 0
+    for prop in command.computed_style:  # cpu-lane-loop-ok: one command's props; bound is its prop count
+        if prop.key == "background-gradient-stop-count":
+            stop_count = prop.value.trim().to_i64() as i32
+    var props: [DrawIrStyleProp] = []
+    for prop in command.computed_style:  # cpu-lane-loop-ok: one command's props; bound is its prop count
+        if prop.key == "background-color" and prop.value.trim() != "":
+            props.push(draw_ir_style_prop(prop.key, "{_simple_web_scale_alpha(prop.value.trim().to_i64() as u32, pct)}"))
+        elif prop.key == "background-image" and prop.value.starts_with("linear-gradient(") and prop.value.ends_with(")"):
+            val inner = prop.value.substring(16, prop.value.byte_len() - 1)
+            props.push(draw_ir_style_prop(prop.key, "linear-gradient(" + _simple_web_scale_alpha_list(inner, -1, pct) + ")"))
+        elif prop.key == "background-gradient-stops" and prop.value != "":
+            props.push(draw_ir_style_prop(prop.key, _simple_web_scale_alpha_list(prop.value, stop_count, pct)))
+        elif prop.key == "background-gradient-layer-stops" and prop.value != "":
+            var layers: [text] = []
+            for layer in prop.value.split(";"):  # cpu-lane-loop-ok: one box's gradient layers; bound is its layer count
+                val parts = layer.split(":")
+                if parts.len() == 3:
+                    layers.push(parts[0] + ":" + _simple_web_scale_alpha_list(parts[1], -1, pct) + ":" + parts[2])
+                else:
+                    layers.push(layer)
+            props.push(draw_ir_style_prop(prop.key, layers.join(";")))
+        else:
+            props.push(prop)
+    out.computed_style = props
+    out
+
+# After `_simple_web_opacity_demote_for_budget`: a demoted top root (no
+# nested root, so not a group) whose subtree emitted exactly ONE command with
+# exactly one painted item -- not an image, glyph run or material box --
+# carries the root's opacity on that command. Other demoted roots keep their
+# commands unchanged.
+fn _simple_web_opacity_fold_demoted(
+    commands: [DrawIrCommand], before_roots: [i32], after_roots: [i32],
+    root_parent: [i32], bounds: _SimpleWebOpacityRootBounds, styles: [Style]
+) -> [DrawIrCommand]:
+    var count: [i32] = [0; root_parent.len()]
+    var only: [i32] = [-1; root_parent.len()]
+    var i = 0
+    while i < commands.len():  # cpu-lane-loop-ok: counts each demoted root's commands; bound is the command count, only on budget overflow
+        val top = _simple_web_opacity_top_root(root_parent, before_roots[i])
+        if top >= 0 and after_roots[i] < 0:
+            count[top] = count[top] + 1
+            only[top] = i
+        i = i + 1
+    var out = commands
+    var r = 0
+    while r < root_parent.len():  # cpu-lane-loop-ok: one check per node that may be a demoted root; bound is node_count, only on budget overflow
+        if count[r] == 1 and not bounds.group[r] and bounds.painted[r] == 1:
+            val c = commands[only[r]]
+            var material = false
+            for prop in c.computed_style:  # cpu-lane-loop-ok: one command's props; bound is its prop count
+                if prop.key == "wm-material-request":
+                    material = true
+            if c.image_uri == "" and not c.glyph_run.valid and not material:
+                out[only[r]] = _simple_web_opacity_fold_command(c, styles[r].opacity_pct)
+        r = r + 1
+    out
+
 # Moves a command into its innermost opacity layer and tags its nest chain.
 fn _simple_web_opacity_place_command(
     command: DrawIrCommand, root: i32, top: i32,
@@ -720,6 +835,8 @@ fn _simple_web_layout_compose_retained(
         if opacity_supported: opacity_root_parent else: [-1; nodes.len()],
         styles, nodes.len(), width, height
     )
+    var command_roots = opacity_command_roots
+    var paint_commands = commands
     if opacity_supported and opacity_root_count > 1:
         # Several surfaces: each must be bounded (translatable into its own
         # clipped rect) and together they may not exceed one viewport of
@@ -728,6 +845,7 @@ fn _simple_web_layout_compose_retained(
         # capped (3 levels), so only top-level layers count toward the budget;
         # every level must still be translatable.
         var admission_index = 0
+        var over_budget = false
         var admitted: [bool] = [false; nodes.len()]
         var surface_pixel_work: i64 = 0
         val viewport_pixel_work = width.to_i64() * height.to_i64()
@@ -742,10 +860,21 @@ fn _simple_web_layout_compose_retained(
                         opacity_bounds.h[root].to_i64()
                     )
                 if surface_pixel_work > viewport_pixel_work:
-                    opacity_supported = false
+                    over_budget = true
                 admitted[root] = true
                 root = opacity_root_parent[root]
             admission_index = admission_index + 1
+        if opacity_supported and over_budget:
+            # Over budget: fractional-opacity top roots leave the layer path so
+            # backdrop-root groups (which need a layer) keep theirs.
+            command_roots = _simple_web_opacity_demote_for_budget(
+                opacity_command_roots, opacity_root_parent, styles,
+                opacity_bounds, viewport_pixel_work)
+            opacity_supported = command_roots.len() == commands.len()
+            if opacity_supported:
+                paint_commands = _simple_web_opacity_fold_demoted(
+                    commands, opacity_command_roots, command_roots,
+                    opacity_root_parent, opacity_bounds, styles)
     # One backwards-free prepass gives each owner a single insertion point.
     # Rechecking the remaining command suffix for every iframe made this path
     # quadratic on pages with many independently painted replaced elements.
@@ -767,10 +896,10 @@ fn _simple_web_layout_compose_retained(
     while command_index < commands.len():  # cpu-lane-loop-ok: the main compose pass: one visit per emitted DrawIR command to cut opacity/iframe batch boundaries; bound is the command count, CPU lane builds DrawIR by design
         # A batch per top-level root; nested roots ride inside it.
         val cmd_root = if opacity_supported:
-            opacity_command_roots[command_index]
+            command_roots[command_index]
         else:
             -1
-        var placed_command = commands[command_index]
+        var placed_command = paint_commands[command_index]
         val box_owner = command_owner_nodes[command_index]
         if (
             cmd_root >= 0 and cmd_root == box_owner and
@@ -834,7 +963,7 @@ fn _simple_web_layout_compose_retained(
                     content.width, content.height, WEB_IFRAME_PLACEHOLDER,
                     visible
                 )
-                val now = time_now_micros()
+                val now = default_frame_clock().now_micros()
                 if (
                     depth + 1 > WEB_IFRAME_DEPTH_CAP or
                     now >= _web_render_deadline_us or
@@ -980,7 +1109,7 @@ fn _simple_web_layout_compose_document(
     images: [SimpleOsHostGpuImageResource],
     extra_rules: Rules, depth: i32, deadline_us: i64
 ) -> SimpleWebLayoutDrawIrResult:
-    val render_start_us = time_now_micros()
+    val render_start_us = default_frame_clock().now_micros()
     val _phase_on = _web_phase_trace_enabled()
     if deadline_us > 0:
         _web_render_deadline_us = deadline_us
@@ -995,16 +1124,16 @@ fn _simple_web_layout_compose_document(
     # unattributable. Permanent and default-off in the same style as the
     # surrounding phase trace: the clock is read only when `_phase_on`, so an
     # untraced render pays nothing for them.
-    val _pp_t0 = if _phase_on: time_now_micros() else: 0
+    val _pp_t0 = if _phase_on: default_frame_clock().now_micros() else: 0
     val nodes = parse_html(html)
-    val _pp_t1 = if _phase_on: time_now_micros() else: 0
+    val _pp_t1 = if _phase_on: default_frame_clock().now_micros() else: 0
     # Pass every parameter explicitly. An omitted trailing default was
     # observed taking a non-default value in the freestanding SimpleOS kernel
     # build (the `trace_stages` receipt fired from this call site even though
     # the only trace-enabled caller never ran), so this render path does not
     # rely on default-argument materialization.
     val own_rules = extract_css_vw(html, width, false)
-    val _pp_t2 = if _phase_on: time_now_micros() else: 0
+    val _pp_t2 = if _phase_on: default_frame_clock().now_micros() else: 0
     val rules = Rules(
         group_parts: extra_rules.group_parts + own_rules.group_parts,
         group_specificities: extra_rules.group_specificities + own_rules.group_specificities,
@@ -1084,7 +1213,7 @@ fn _simple_web_layout_compose_document(
             part_i = part_i + 1
     val child_index = build_child_index(nodes)
     if _phase_on:
-        val _pp_t3 = time_now_micros()
+        val _pp_t3 = default_frame_clock().now_micros()
         print "[web-phase] phase=parse elapsed_ms={(_pp_t3 - render_start_us) / 1000} nodes={nodes.len()}" +
             " pp_html_us={_pp_t1 - _pp_t0} pp_css_us={_pp_t2 - _pp_t1}" +
             " pp_childidx_us={_pp_t3 - _pp_t2}"
@@ -1094,13 +1223,13 @@ fn _simple_web_layout_compose_document(
     var cpu_material_nodes: [i32] = []
     var solid_material_nodes: [i32] = []
     if _phase_on:
-        print "[web-phase] phase=style_start elapsed_ms={(time_now_micros() - render_start_us) / 1000}"
+        print "[web-phase] phase=style_start elapsed_ms={(default_frame_clock().now_micros() - render_start_us) / 1000}"
     val base_styles = compute_styles_with_material(
         nodes, rules, child_index, false, vector_fonts,
         material_entries, material_counts,
         cpu_material_nodes, solid_material_nodes, width, height)
     if _phase_on:
-        print "[web-phase] phase=style_end elapsed_ms={(time_now_micros() - render_start_us) / 1000}"
+        print "[web-phase] phase=style_end elapsed_ms={(default_frame_clock().now_micros() - render_start_us) / 1000}"
         # Cascade- and font-memo effectiveness, same level gate as the phase
         # boundaries: a regression shows up here as a collapsed hit count long
         # before it shows up as wall-clock on someone else's machine.
@@ -1162,7 +1291,7 @@ fn _simple_web_layout_compose_document(
     )
     layout_set_images([])
     if _phase_on:
-        print "[web-phase] phase=layout elapsed_ms={(time_now_micros() - render_start_us) / 1000}"
+        print "[web-phase] phase=layout elapsed_ms={(default_frame_clock().now_micros() - render_start_us) / 1000}"
     val _phase_composed = _simple_web_layout_compose_retained(
         html, nodes, rules, child_index, base_styles, styles, raw_boxes,
         animation_registry, animation_schedule, animation_time_ms,
@@ -1178,7 +1307,7 @@ fn _simple_web_layout_compose_document(
         # (_html_draw_ir_command's resolve_font_metrics_with_language call in
         # simple_web_html_layout_renderer_paint_layout.spl) actually runs, a
         # SECOND font-metric resolution per #text node distinct from style's.
-        print "[web-phase] phase=compose_shaping elapsed_ms={(time_now_micros() - render_start_us) / 1000}"
+        print "[web-phase] phase=compose_shaping elapsed_ms={(default_frame_clock().now_micros() - render_start_us) / 1000}"
     _phase_composed
 
 pub class SimpleWebRetainedLayoutPreparation:
@@ -1671,7 +1800,7 @@ pub fn simple_web_layout_render_html_software_result_with_images(html: text, wid
     # (compute_styles on a hostile/huge real page, in practice) doesn't zero out
     # every later phase. Total wall-clock never exceeds the caller's budget_ms —
     # only the boundary between phases moves. See _web_budget_rearm().
-    val render_start_us = time_now_micros()
+    val render_start_us = default_frame_clock().now_micros()
     val env_override = _web_render_budget_ms_env_override()
     val area_floor_ms = (width as i64) * (height as i64) / 16
     val default_budget_ms = if area_floor_ms > WEB_RENDER_BUDGET_MS: area_floor_ms else: WEB_RENDER_BUDGET_MS

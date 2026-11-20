@@ -25,3 +25,32 @@ Qwen multiturn: 948 prefilled vs 2765) and the mode-3 tree for shared-prefix
 branching (snapshot reuses nothing there). Also open: mode 3 copies the whole owner
 sequence per hit; a live tree system spec (slang_kv_tree_cache_live_spec) was not
 re-created after the worktree loss; max RSS and TTFT unmeasured.
+
+## Review fixes (2026-11-20, after-the-fact review of #10396)
+- Mode 1/3 reuse is capped by a per-terminal `exact_upto` (prompt length minus the
+  last token, rounded down to n_ubatch). Cells an owner produced by generation or a
+  partial chunk are never reused by the exact modes. Contract test: 10-token prompt +
+  6 generated tokens, follow-up matching all 16 cells reuses 8 (mode 2 reuses 16).
+  Live: `slang_kv_tree_cache_live_spec.spl` "boundary" (digest equal to no-cache and
+  reuse <= first prompt rounded down to 512).
+- The CUDA first-micro-batch workaround now applies to the persistent tree context's
+  first decode (throwaway full micro-batch on the request's own empty sequence).
+  Contract test: short first prompt, offloaded load, no short first decode. Not run on
+  a CUDA host.
+- Mode 3 "no KV slot" fails fast (evicting other streams frees nothing); mode 1/2 keep
+  evict-and-retry. Pinned owners are never evicted.
+- The engine now fails the load when a non-default cache mode is refused; `slang_ggml_free`
+  resets the mode; BUSY surfaces as `BackendError.Busy`; an abandoned request (closed
+  without finishing) releases the context; `prefix_cache_configure` is refused while a
+  tree request is active; statistic getters take `g_state_lock`.
+- Documented, not changed: a piece-buffer overflow ends the tree sequence mid-generation
+  (its prompt+decoded path is still inserted); media requests return INVALID in tree mode;
+  mode 3 ignores the `cells` argument (n_ctx x 16 streams).
+- The mock honours `kv_unified` and aborts on a partial `seq_cp` of a non-unified context.
+- The contract test is NOT wired into a gate: it needs the pinned clang (about 3 minutes
+  on this host) while the push tier targets under 20 s and the required check under a
+  minute, and an extended-lane row needs a `must_check_gates.sdn` row plus an exact
+  dispatch arm in `check-push-must-pass.shs`. Run it by hand:
+  `sh test/02_integration/lib/slang_prefix_cache_shim_contract_test.shs`.
+- Correction: PR #10396 claimed the live tree spec passed 2/2, but that spec file was
+  not in the merged head; it landed in #10437 with its own run log.

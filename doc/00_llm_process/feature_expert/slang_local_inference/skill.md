@@ -111,11 +111,32 @@ the former `..._in_development_spec.spl` cases 2/3/5 moved into it when they wen
   so its logits come from one batch shape (fixed drift,
   `doc/08_tracking/bug/slang_prefix_cache_hit_output_drift_2026-11-14.md`).
   The physical paged-KV lane needs a llama.cpp with `include/llama-slang-paged.h`.
-- Tree (radix) prefix cache, opt-in (2026-11-19): `engine_set_prefix_cache_mode(3, 0)` before load = one persistent multi-sequence context, per-sequence KV streams, byte-identical to no-cache greedy (modes 1/2 use unified KV and are NOT exact). Telemetry `engine_tree_cache_stats()`. Numbers + logs: `test/05_perf/slang_kv_cache/README.md`; bug `slang_shim_tree_kv_unified_modes_not_exact_2026-11-19.md`. Snapshot remains default; requests serialised per model (second tree request gets BUSY).
+- Tree (radix) prefix cache, opt-in (2026-11-19): `engine_set_prefix_cache_mode(3, 0)` before load = one persistent multi-sequence context, per-sequence KV streams, byte-identical to no-cache greedy (modes 1/2 use unified KV and are NOT exact). Telemetry `engine_tree_cache_stats()`. Numbers + logs: `test/05_perf/slang_kv_cache/README.md`; bug `slang_shim_tree_kv_unified_modes_not_exact_2026-11-19.md`. Snapshot remains default; requests serialised per model (second tree request gets BUSY). Review fixes 2026-11-20: reuse capped by the owner's exact span, first-micro-batch warm-up, `BackendError.Busy`, refused mode fails the load (bug record).
+
 
 - The HTTP path is unreachable on the bootstrap seed; see
   `doc/08_tracking/bug/seed_jit_cannot_resolve_text_dot_from_char_code_2026-09-04.md`
   and `doc/08_tracking/bug/seed_http_server_handle_connection_dispatch_2026-09-04.md`.
+  Under `SIMPLE_EXECUTION_MODE=interpret` the sync server does answer (2026-11-17).
+- **Binary bodies (L2, 2026-11-17, re-review 2026-11-20).** `HttpRequest.body_bytes` holds
+  the raw body on the scalar, vector and HTTP/2 paths. A non-UTF-8 body of a non-text type
+  has `body` ""; text-ish types (`request_body_is_textual`: text/*, json, xml,
+  form-urlencoded, js, ndjson, none) stay a 400 on the scalar path and keep the lossy decode
+  on the vector and h2 paths. The first Content-Type header wins everywhere.
+  `HttpResponse.bytes(status, content_type, data)` sets `body_bytes`; `write_response*`,
+  `response_wire_size` (head in octets) and h2 send/count it as octets (`serialize_response`
+  gives "" for a non-UTF-8 binary body). `http_server.handler.parse_multipart_bytes(body,
+  content_type)` returns `MultipartPart{name, filename, content_type, data: [u8]}`:
+  line-anchored delimiters with padding, empty parts, 16 KiB part-header cap.
+  `serving_stream.slang_http_response(ApiResponse)` is the one ApiResponse->HttpResponse
+  map (router and the stream path's JSON refusals, which now go through
+  `write_response_limited` with security headers). Slang caps: body 64 MiB, response
+  `SLANG_MAX_RESPONSE_BYTES` = 64 MiB + 64 KiB head room (library 10 MiB / 16 MiB).
+  FFI byte helpers: `std.nogc_sync_mut.sffi.dynamic` exports `spl_wffi_call_i64_with_bytes`,
+  `spl_wffi_call_i64_into_bytes` and `bytes_zeroed(n) -> [u8]?` (packed, n <= 256 MiB);
+  `std.nogc_sync_mut.io_runtime.file_read_bytes_at(path, offset, size) -> [u8]?`;
+  SOSIX `sosix_process_run_bounded_bytes`, `sosix_process_owned_start_v3`,
+  `sosix_process_owned_start_pinned_v3`.
 
 ## Runner dispatch: pure runner or llama.cpp wrapper (2026-11-15)
 
@@ -318,7 +339,14 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
   Media parts are never dropped: `serving_chat.media_refusal` answers 400
   `unsupported_modality` unless the resident model can take them. Each media part
   becomes `SLANG_MEDIA_MARKER` (`<__media__>`) in the chat frame.
-- **Video:** refused with a clear error (no decoder, no ffmpeg subprocess).
+- **Video (L7):** `modality/video_frames.spl` `sample_frames(blob, n)`. With
+  `SLANG_FFMPEG=<path to ffmpeg.exe>` set and a projector model, `serving_chat.expand_video_parts`
+  replaces each `video_url` part by n JPEG `image` parts (default 4 because 8 SmolVLM2 frames overflow n_ctx 4096; `SLANG_VIDEO_FRAMES`, 1..32; 384 px edge;
+  duration from `ffmpeg -i`, then `fps=n/dur` -> mjpeg image2pipe split on SOI/EOI). ffmpeg runs only via
+  `process_run_bounded_bytes` (local wrapper, to become `sosix_process_run_bounded_bytes`); temp file removed.
+  Video >10 MiB decoded = 413 `request_too_large`; `SLANG_FFMPEG` not a file = 503; no frame = 400
+  `invalid_media`. With no `SLANG_FFMPEG` the old 400 `unsupported_modality` text is kept verbatim.
+  Static build: `C:/dev/tools/ffmpeg` (gyan.dev essentials, sha256-verified). Live: `slang_video_live_spec.spl`.
 - **Model dir:** `native_formats.gguf_is_projector` walks the GGUF KV block as
   binary (`modality/kind_registry.gguf_facts`): `general.architecture == clip` or
   `general.type == mmproj`; the `mmproj` filename prefix is only the fallback when
@@ -348,9 +376,14 @@ Design: `doc/05_design/ml/slang/slang_pluggable_modalities.md`.
   -> vocoder companion = Tts -> `<arch>.pooling_type` (4 rerank, 1-3 embedding)
   -> no pooling type on an embedding-table arch: a `cls.output.weight` /
   `cls.weight` tensor in the tensor-info table = Rerank -> arch table (bert,
-  nomic-bert, jina-bert-v2 = embedding) -> magic (`lmgg` = Asr/whisper,
-  `model.diffusion_model.` safetensors = ImageGen) -> LlamaForCausalLM =
-  Chat/pure. `NativeModel.profile` carries it (default: Chat [text] ggml).
+  nomic-bert, jina-bert-v2 = embedding; flux, sd1, sd2, sdxl, sd3, aura,
+  t5encoder = ImageGen on stable-diffusion) -> magic (`lmgg` WITH whisper.cpp
+  hparams `n_audio_ctx 1500`, `n_mels 80|128` = Asr/whisper; a legacy llama
+  ggml file shares `lmgg` and is NOT Asr; `model.diffusion_model.` safetensors
+  = ImageGen) -> LlamaForCausalLM = Chat/pure. `NativeModel.profile` carries it
+  (default: Chat [text] ggml). The deciding GGUF is the lowest-named model file
+  that names an architecture (split shard 1), not listing order.
+  `kind: "tts"` (quoted) equals `kind: tts`.
 - **Real reranker:** `bge-reranker-v2-m3-Q8_0.gguf` writes NO `bert.pooling_type`
   and no classifier KV (35 keys dumped); only its `cls.*` tensors mark it.
   `bge-small-en-v1.5` has `pooling_type 2` and no `cls.*`. The cheap KV walk
@@ -358,6 +391,12 @@ Design: `doc/05_design/ml/slang/slang_pluggable_modalities.md`.
   type gets a second, FULL walk (vocab + tensor table, 6.8 MB header for the
   reranker): real file -> `arch=bert pooling=-1 cls_head=true`, whole
   `simple-release.exe run` probe 1.9 s. A failed full walk keeps the cheap facts.
+- **Header reads:** one growing buffer per file, each step a ranged read of
+  ONLY the bytes past it (the full rerank walk reuses the cheap walk's buffer);
+  `gguf_facts` is cached per (path, size, mtime) in a copy-on-write snapshot
+  (no lock; mtime 0 never cached), so /v1/models, chat_prepare's root scan and
+  kind_mismatch do not re-walk headers per request. `gguf_header_bytes_read()`
+  counts bytes read (spec: a 42 KB header reads exactly its size once, 0 on repeat).
 - **Hostile GGUF:** every key/string/array/tensor-name length and
   `kv_count`/`tensor_count` is bounded by the bytes left in the FILE
   (`_fits`; arrays divide before multiplying); past the file = Malformed, past
@@ -367,6 +406,12 @@ Design: `doc/05_design/ml/slang/slang_pluggable_modalities.md`.
   (reason = why the kind is not served) and keeps a Chat profile's reason (an
   invalid `slang_kind.sdn`, e.g. `kind: embeddings`) as a not-runnable reason, so
   `llm_engine` / `entrypoints/llm` never load an embedder or a typo'd model as chat.
+  The FORMAT's reason wins otherwise ("safetensors recognised; ...", "slang
+  pack recognised; ..."): the resolver's "no kind could be resolved" replaces
+  it only when the format found nothing wrong or an override was refused.
+- Kind routes resolve a slang pack by its manifest `model_id` (as /v1/models
+  lists it) -> 400 `wrong_model_kind`; an empty / unknown-format dir is not a
+  model -> 404.
 - Model-root `slang_kind.sdn` overrides are NOT in git (model dirs live outside
   the repo); `C:/dev/model/bge-reranker-v2-m3-GGUF/slang_kind.sdn` = `kind: rerank`.
 - `/v1/models` entries add `slang_kind`, `input_modalities`, `output_modalities`
@@ -379,9 +424,11 @@ Design: `doc/05_design/ml/slang/slang_pluggable_modalities.md`.
   `serve_embeddings`, `serve_rerank`): wrong kind = 400 `wrong_model_kind` (chat
   routes too, by describing only the named directory; `kind_serves` also lets a Chat model with Audio input serve Asr), right kind = 501 `not_implemented` naming the runner
   (`engine/kind_dispatch.kind_open`, which loads nothing yet).
-- L1 file/dir/env access goes through `slang/host/slang_host` (`host_file_exists`,
-  `host_file_read`, `host_dir_list`, `host_env`); raw GGUF bytes still use
-  `external_file_read_bytes_at` (no host byte-range read yet).
+- L1 host access goes through `slang/host/slang_host` only: `host_file_exists`,
+  `host_file_read`, `host_dir_list`, `host_env` (SOSIX) and `host_file_size`,
+  `host_file_mtime`, `host_is_dir`, `host_read_bytes_at` (no SOSIX accessor
+  yet; the single place to swap). slang_host_spec pins that kind_registry and
+  serving_models import no io_runtime / external_file primitive.
 - Spec: `test/01_unit/lib/gc_async_mut/slang/kind_registry_spec.spl`.
 
 ## Model variety live spec (2026-11-15, Windows, llvm-mingw shim)
@@ -415,6 +462,7 @@ Tokens/s below is meaningless for 1-2 token answers.
 - Device forward pass (2026-11-15): `pure/llama_forward_rocm.spl` runs the stories15M Llama forward on the Radeon 8065S: `rocm_llama_load` (F32 byte-range upload once), `llama_step_rocm` (hidden state and per-layer K/V rows stay on the device; intermediates freed every step), `rocm_generate_greedy` (same prefix-reuse rule as `kv_cache.spl`, shared via `kv_reuse_len`; counts `positions_evaluated`). New device kernels in `tensor_ops_rocm.spl`: rope, kv_write (in place), row lookup, argmax (one i32 readback, never the 32000 logits). Spec: `slang_pure_rocm_generate_spec.spl` (GPU ids == CPU ids, reference text, prefix reuse, perf table in the log; needs `--timeout 3600` because the CPU leg is minutes on the seed). KV capacity is `min(max_position_embeddings, 1024)` (attention keeps scores in shared memory). `hip_compute.rocm_kernel` now destroys the hipRTC program on every path; the code-object buffer is deliberately kept (HIP docs do not say whether `hipModuleLoadData` copies it). `env_get` returns "" when unset, not None: `?? default` never fires.
 - Integration (2026-11-16): `/v1/completions` goes through the same dispatch as chat (`engine_complete_text`) and returns real usage counts; a media request to a pure-runner model is refused (text only), never routed to ggml. Pure/dispatch/variety system specs append evidence and `SKIPPED: <why>` lines to `build/probe/*_evidence.txt` because the runner counts skip() as passed (bug records in doc/08_tracking/bug).
 
+
 ## Host portability (Windows / Linux / macOS, 2026-11-16)
 
 One module owns every per-OS decision: `src/lib/gc_async_mut/slang/host/slang_host.spl`.
@@ -447,10 +495,39 @@ route env, file exists/read, directory list and process capture through SOSIX
 - Shim build (`scripts/check/build-slang-ggml-shim.shs`): Linux = clang (refuses a non-clang
   `CC`, never GCC) + `-fuse-ld=lld`; macOS = clang `-dynamiclib` (system ld64), `nm -gU` with the
   `_` prefix stripped; Windows lanes unchanged. Linux/macOS builds are unverified (no host).
+
 ## ASR / `/v1/audio/transcriptions` (lane L3, 2026-11-17)
 
-`serving/serving_transcriptions.spl`: `serve_transcriptions(model_root, body)`, body JSON `{model, file_b64, format[, max_tokens]}` (multipart waits for L2). It does NOT use `model_for_kind(Asr)`: Qwen3-ASR resolves as Chat [Text, Audio], so the handler accepts a Chat model with Audio input (recording as the only user content through `engine_complete_chat_media`, `language X<asr_text>` prefix stripped by `strip_asr_prefix`) and answers any other model 400 `wrong_model_kind`. Phase A live (Qwen3-ASR-0.6B Q8_0, jfk.wav, CPU, model load included): "And so, my fellow Americans, ask not what your country can do for you; ask what you can do for your country." in 129 s. Specs: `test/01_unit/lib/gc_async_mut/slang/serving/serving_transcriptions_spec.spl`, `test/03_system/lib/slang/feature/slang_asr_live_spec.spl` (needs an mtmd shim: `SLANG_SHIM_MTMD=1`).
+`serving/serving_transcriptions.spl`: `serve_transcriptions(model_root, body)`, body JSON `{model, file_b64, format[, max_tokens]}` (multipart waits for L2). It does NOT use `model_for_kind(Asr)`: Qwen3-ASR resolves as Chat [Text, Audio], so the handler accepts a Chat model with Audio input (recording as the only user content through `engine_complete_chat_media`, `language X<asr_text>` prefix stripped by `strip_asr_prefix`) or an Asr model through the whisper runner, and answers other models 400 `wrong_model_kind`. Phase A live (Qwen3-ASR-0.6B Q8_0, jfk.wav, CPU, model load included): "And so, my fellow Americans, ask not what your country can do for you; ask what you can do for your country." in 129 s. Specs: `test/01_unit/lib/gc_async_mut/slang/serving/serving_transcriptions_spec.spl`, `test/03_system/lib/slang/feature/slang_asr_live_spec.spl` (needs an mtmd shim: `SLANG_SHIM_MTMD=1`).
 
 ### ASR phase B: whisper.cpp (2026-11-18)
 
 `model_executor/runners/whisper_runner.spl` (`whisper_available/open/run/close`; library path ONLY from `SLANG_WHISPER_LIB`, dlopened only in `whisper_open`) over `src/runtime/slang_whisper_shim.c` (`slang_whisper_{abi,init,transcribe,text_into,free}`, int64 ABI: model path and s16le PCM go in with `spl_wffi_call_i64_with_bytes`, transcript comes out with `spl_wffi_call_i64_into_bytes`). Build: `SLANG_SHIM_OUT_DIR=<dir> sh scripts/check/build-slang-whisper-shim.shs` (llvm-mingw only; whisper.cpp from `C:/dev/tools/whisper.cpp` built `BUILD_SHARED_LIBS=OFF` so ggml is inside the DLL; the script fails if the DLL imports a `ggml*.dll`). Model `C:/dev/model/whisper-tiny.en/ggml-tiny.en.bin` (HF `ggerganov/whisper.cpp`, 77.7 MB, `lmgg` magic -> kind Asr). Only 16 kHz wav is accepted (other rates -> 400 `invalid_media` with the reason; no resampling). Live (CPU, jfk.wav): "And so my fellow Americans ask not what your country can do for you ask what you can do for your country." in ~30-32 s per request, the same on the second call, so model load is not the cost: the pure-Simple wav decode + s16 packing of 176k samples dominates.
+
+## Image generation: /v1/images/generations (L6, 2026-11-17)
+
+- `serving/serving_images.spl` -> `model_executor/runners/sd_runner.spl`
+  (`sd_runner_open/run/close`, `engine/kind_dispatch.kind_open` has the
+  `StableDiffusion` arm) -> `src/runtime/slang_sd_shim.c` (stable-diffusion.cpp
+  opaque-options C API, **ggml statically linked** into `slang_sd.dll`).
+- Body `{model, prompt, n<=4, size, response_format:"b64_json", steps, seed}`;
+  reply `{created, data:[{b64_json}]}` (PNG via `common/image/png_encode.spl`,
+  stored deflate). `url` format = 400. `size` = WIDTHxHEIGHT, both multiples of
+  64, <= 768, default 512x512; defaults steps 4, seed 42 (cfg 1.0, sd-turbo).
+  No `SLANG_SD_LIB` / missing DLL = 503 `runner_unavailable`; wrong kind = 400.
+- Build: `sh scripts/check/build-slang-sd-shim.shs` (CPU,
+  `build/sffi/sd-cpu/slang_sd.dll`) and `SLANG_SD_VARIANT=vulkan
+  SD_VULKAN_SDK_DIR=... VULKAN_GLSLC=... sh ...` (`sd-vulkan/`). Needs
+  stable-diffusion.cpp at `SD_ROOT` (default `/c/dev/tools/stable-diffusion.cpp`),
+  llvm-mingw clang, cmake, ninja. Vulkan needs `-DSPIRV-Headers_DIR` (the script
+  derives it from the SDK dir). The runtime DLLs are copied beside the shim.
+- Model: `stabilityai/sd-turbo` `sd_turbo.safetensors` (5.2 GB, fp32 all-in-one)
+  in `C:/dev/model/sd-turbo/`; the resolver sniffs `model.diffusion_model.`.
+- ABI: prompt/path in via `spl_wffi_call_i64_with_bytes`, RGB8 out via
+  `spl_wffi_call_i64_into_bytes`; the zero buffer and ARGB conversion are local
+  loops (replace with L2's `bytes_zeroed`).
+- Specs: `test/01_unit/lib/gc_async_mut/slang/sd_runner_spec.spl` (no model),
+  `test/03_system/lib/slang/feature/slang_sd_image_live_spec.spl` (live, env
+  `SLANG_LIVE=1 SLANG_MODEL_ROOT SLANG_SD_LIB SLANG_SD_STEPS SLANG_SD_SIZE`).
+- Needs ~10 GiB free for the load; run one image at a time.
+- Host access in the runner goes through `host/slang_host` (`host_env`, `host_file_exists`).

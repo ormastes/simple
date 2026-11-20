@@ -26,6 +26,14 @@ int main(void){
 #if !defined(__linux__)
     fprintf(stderr,"Linux Core-C fixture required\n");return 77;
 #else
+    /* A failed close() must not strand the remaining captured fds (review_b P2). */
+    static WsContainNativeV1 contained;int pair[2];CHECK(pipe(pair)==0);
+    int stale=dup(pair[0]);CHECK(stale>=0&&close(stale)==0);
+    contained.count=3;contained.fds[0]=pair[0];contained.fds[1]=pair[1];contained.fds[2]=stale;
+    CHECK(ws_contain_close_v1(&contained)==EBADF);
+    CHECK(fcntl(pair[0],F_GETFD)==-1&&errno==EBADF&&fcntl(pair[1],F_GETFD)==-1&&errno==EBADF);
+    CHECK(contained.fds[0]==-1&&contained.fds[1]==-1&&contained.fds[2]==-1);
+    CHECK(ws_contain_close_v1(&contained)==EBADF);
     uint8_t notes[40]={0};uint32_t words[]={4,4,3};char id[129];
     memcpy(notes,words,12);memcpy(notes+12,"GNU\0",4);
     notes[16]=1;notes[17]=2;notes[18]=3;notes[19]=4;

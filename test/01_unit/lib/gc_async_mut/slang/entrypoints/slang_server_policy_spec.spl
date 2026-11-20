@@ -1,0 +1,36 @@
+use std.spec
+use app.slang_server.main.{slang_server_policy}
+use std.nogc_sync_mut.http_server.server.{SecureServerPolicy, plaintext_development_capability, secure_server_policy_error}
+use std.nogc_sync_mut.http_server.types.{HttpStatus}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse}
+use std.gc_async_mut.slang.entrypoints.openai.serving_stream.{slang_http_response, SLANG_MAX_RESPONSE_BYTES}
+
+describe "slang server listener policy":
+    it "raises the request body cap to 64 MiB and the response cap to 64 MiB plus head room":
+        val capability = plaintext_development_capability("slang policy spec").unwrap()
+        val policy = slang_server_policy(capability)
+        expect(policy.max_body).to_equal(67108864)
+        expect(policy.max_response_bytes).to_equal(67108864 + 65536)
+        expect(policy.max_response_bytes).to_equal(SLANG_MAX_RESPONSE_BYTES)
+        expect(policy.plaintext_development).to_equal(true)
+        expect(secure_server_policy_error(policy)).to_equal("")
+
+    it "leaves the library defaults unchanged":
+        val production = SecureServerPolicy.production()
+        expect(production.max_body).to_equal(10485760)
+        expect(production.max_response_bytes).to_equal(16777216)
+
+describe "slang ApiResponse to HTTP":
+    it "sends a text answer with its content type":
+        val resp = slang_http_response(ApiResponse(status: 404, body: "{}", content_type: "application/json", body_bytes: []))
+        expect(resp.status).to_equal(HttpStatus.NotFound)
+        expect(resp.body).to_equal("{}")
+        expect(resp.body_bytes.len()).to_equal(0)
+        expect(resp.headers[0].1).to_equal("application/json")
+
+    it "sends body_bytes as a binary response and defaults an empty type to JSON":
+        val wav = slang_http_response(ApiResponse(status: 200, body: "", content_type: "audio/wav", body_bytes: [82u8, 73u8, 70u8, 70u8]))
+        expect(wav.body_bytes.len()).to_equal(4)
+        expect(wav.headers[0].1).to_equal("audio/wav")
+        val bare = slang_http_response(ApiResponse(status: 200, body: "{}", content_type: "", body_bytes: []))
+        expect(bare.headers[0].1).to_equal("application/json; charset=utf-8")

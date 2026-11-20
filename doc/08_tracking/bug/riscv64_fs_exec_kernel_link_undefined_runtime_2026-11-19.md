@@ -58,6 +58,17 @@ undefined set from 47 to 36 with no duplicate definitions.
 - Link unverified: WSL is down (virtual disk under repair), so the riscv64
   kernel was not relinked for this change.
 
+## Step 3b — keepalive providers imported by name (verification-pending)
+
+- With the LLVM 23 seed on ubuntu-p2, release/1.0.0 no longer reached the
+  link: `syscall_shim.spl` failed with `llvm global load referenced undeclared
+  symbol spl_shim_file_capability_check`. The symbol-form import workaround
+  (0921af461ac, bug `compiled_hir_module_form_use_bare_names_2026-11-19`)
+  missed 7 address-taken `_shim_keepalive` names (file/net capability checks,
+  `spl_shim_current_task_id`). Added by-name imports.
+- Spec: `syscall_shim_keepalive_spec.spl` now requires every keepalive name to
+  be imported by name or defined locally (red: 8 missing; green after).
+
 ## Remaining (36 before batch 2)
 
 - x86 port I/O live via `sosix/io_rw.spl` -> `x86_com1_read_byte`; `rt_invlpg`

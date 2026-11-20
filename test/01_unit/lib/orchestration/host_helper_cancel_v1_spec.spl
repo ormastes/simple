@@ -18,7 +18,7 @@ ORDER and owner-adoption rules are pinned structurally.
 A table mismatch prints `<domain>/<state>`. A structural failure names the rule
 (resume before flip, adopt owner on error, reconcile untouched, X verbatim).
 """
-use std.spec.{step}
+use std.spec.{step, fail}
 use std.io.file_read_text
 use std.nogc_sync_mut.orchestration.host_linux_helper_store_v1.HostLinuxHelperDomainV1
 use std.nogc_sync_mut.orchestration.host_helper_settlement_commit_v1.host_helper_cancel_domain_allowed_v1
@@ -57,8 +57,13 @@ fn n3c_text(result: Result<(), text>) -> text:
 
 fn n3c_body(file: text, start: text, stop: text) -> text:
     val source = file_read_text(N3C_DIR + file)
-    val rest = source.substring(source.index_of(start), source.len())
-    val to = rest.substring(1, rest.len()).index_of(stop)
+    val from = source.index_of(start)
+    if from < 0:
+        # A renamed anchor must fail the case, never hand a wrong slice to a negative `contains` check.
+        fail("n3c_body anchor missing: " + start)
+        return ""
+    val rest = source.substring(from, source.byte_len())
+    val to = rest.substring(1, rest.byte_len()).index_of(stop)
     if to < 0: return rest
     rest.substring(0, to + 1)
 
@@ -88,7 +93,8 @@ describe "helper-only cancel (milestone_0022 N3)":
     it "is idempotent: a completed row re-derives X and must carry its digest":
         # @req S40-NATIVE-N3
         val prepare = n3c_body("host_helper_settlement_commit_v1.spl", "fn helper_cancel_prepare_v1(", "\n# The only release")
-        val completed = prepare.substring(prepare.index_of("if row.state == \"completed\":"), prepare.len())
+        expect(prepare.index_of("if row.state == \"completed\":") >= 0).to_equal(true)
+        val completed = prepare.substring(prepare.index_of("if row.state == \"completed\":"), prepare.byte_len())
         expect(completed.contains("host_linux_helper_cancelled_evidence_v1(owner.journal, state, operation)?")).to_equal(true)
         expect(completed.contains("if sha256_text(retained) != row.outcome_digest: return Err(\"helper-cancel-settled-by-another-path\")")).to_equal(true)
         step("the order is: R mirror regenerated, X journal + mirror, then the commit")
@@ -121,8 +127,8 @@ describe "helper-only cancel (milestone_0022 N3)":
         val flip = start.index_of("host_linux_service_reconcile_flip_v4(owner.capacity.unwrap(), native, inventory)")
         expect(resume >= 0 and adopt > resume and quarantine > adopt and flip > quarantine).to_equal(true)
         step("resume runs only in the epoch-matching branch, after the protected-journal check")
-        expect(start.index_of("host_capacity_owner_linux_current_v3(owner.capacity.unwrap())") < resume).to_equal(true)
-        expect(start.index_of("if inventory.epoch_digest != initial_epoch_digest") < resume).to_equal(true)
+        expect(start.index_of("host_capacity_owner_linux_current_v3(owner.capacity.unwrap())") >= 0 and start.index_of("host_capacity_owner_linux_current_v3(owner.capacity.unwrap())") < resume).to_equal(true)
+        expect(start.index_of("if inventory.epoch_digest != initial_epoch_digest") >= 0 and start.index_of("if inventory.epoch_digest != initial_epoch_digest") < resume).to_equal(true)
         step("the flip and the read-only reconcile do not know about resume")
         val reconcile = file_read_text(N3C_DIR + "host_linux_service_reconcile_v4.spl")
         expect(reconcile.contains("helper_cancel")).to_equal(false)

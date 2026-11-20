@@ -4,16 +4,15 @@
 # which re-exports every name defined here.
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_raster.{html_image_fit_size, input_uses_accent_color, input_is_checked, input_paints_text, input_text_for_paint, InputTextPaintPlan, input_value_vector_x, input_text_glyph_advance, paint, layout, LayoutResult, style_text_advance, style_space_advance, style_line_h, style_text_line_advance_width_with, text_line_aligned_x, text_line_needs_paint_width, text_line_box_dx, text_line_box_w, style_run_byte_advances, compute_style_wrap_ranges, compute_wrap_ranges, ellipsize_text_for_width, ClipRect, clip_intersect, clamp_corner_radius, apply_text_transform_for_paint, bidi_visual_text_for_rtl}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{spaced_advances_milli, backdrop_blur_milli, HNode, font_milli_of, web_argb, attr_value, parse_color, parse_color_any, parse_int, decl_get, svg_number_milli, svg_view_box_milli, simple_web_backdrop_admission, _wsc_on, _wsc_now_us, _wlay_add, attr_present}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{spaced_advances_milli, backdrop_blur_milli, HNode, font_milli_of, web_argb, attr_value, parse_color, parse_color_any, parse_int, decl_get, svg_number_milli, svg_view_box_milli, simple_web_backdrop_admission, _wsc_on, _wsc_now_us, _wlay_add, attr_present, web_font_style_trace_enabled}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, SIMPLE_WEB_STICKY_TOP_AUTO, _html_text_language, split_top_level_commas}
 use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{parse_box_shadow_layers}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{radial_gradient_box_paintable, radial_gradient_box_geometry, BackgroundGradientLayer, background_gradient_layers_paintable, background_gradient_layers, background_gradient_box_rects, linear_gradient_line_q10_at_angle, background_gradient_clip_shape, border_dash_runs, border_dot_row_spans, border_rounded_dash_spans, _rounded_dash_style, _rounded_solid_sides}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language, resolve_font_metrics_with_language_milli}
 use std.common.encoding.utf8.{text_codepoint_len, text_codepoints}
 use common.string_builder.{StringBuilder}
-use std.gc_async_mut.io.mod_stub.{env_get}
 use common.ui.draw_ir.{DrawIrCommand, DrawIrRect, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_rect_bounds, draw_ir_rect_clipped, draw_ir_style_prop, draw_ir_text_styled_clipped}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_at, layout_device_scale}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_at, layout_device_scale, inline_sole_text_run, inline_content_area_height}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
 use std.gc_async_mut.gpu.browser_engine.form_control_chrome.{ChromeSpans, chrome_checkable_spans, chrome_select_arrow_spans, chrome_resizer_spans, chrome_frame_spans}
 
@@ -81,7 +80,7 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
     # node's identity next to the Style it was PAIRED WITH answers whether the
     # marker node receives a wrong Style, or a different node's Style entry
     # (an index/ordering mismatch in the paint-order/visible-node filters).
-    if (env_get("SIMPLE_TRACE_FONT_STYLE") ?? "") == "1":
+    if web_font_style_trace_enabled():
         val trace_id: text = attr_value(node.attrs_raw, "id")
         val trace_class: text = attr_value(node.attrs_raw, "class")
         val trace_is_marker: bool = trace_id.contains("vector-font-evidence")
@@ -971,6 +970,47 @@ fn _html_draw_ir_wrap_extra_line_commands(
             vector_fonts
         ), boxes, i, line_i))
         line_i = line_i + 1
+    out
+
+# A plain inline element whose one text run wrapped paints its box once per
+# line FRAGMENT, not as one strip over the run's whole line box (Chrome 159,
+# 200 px block, line-height 20: `Before text <span style=background:#0f0>a
+# long span that wraps …</span>` fills 82..195, 0..187 and 0..31 on three
+# lines, each 17 px tall). Each fragment is that line's text width by the
+# element's content area, from the run's own (content-area) top on that line.
+# `box` is the element's own
+# command; its style props carry over. Empty when the element did not wrap.
+fn _html_draw_ir_inline_fragment_boxes(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32, box: DrawIrCommand
+) -> [DrawIrCommand]:
+    var out: [DrawIrCommand] = []
+    val run = inline_sole_text_run(nodes, styles, i)
+    if run < 0 or boxes.wrap_starts[run].len() <= 1:
+        return out
+    val st = styles[i]
+    val tst = styles[run]
+    if st.border_t != 0 or st.border_b != 0 or tst.white_space_nowrap:
+        return out
+    val txt = nodes[run].text_trimmed
+    val starts = boxes.wrap_starts[run]
+    val ends = boxes.wrap_ends[run]
+    val advances = style_run_byte_advances(tst, txt)
+    val lh = style_line_h(tst)
+    val area_h = inline_content_area_height(st)
+    var k = 0
+    # cpu-lane-loop-ok: one box per wrapped line of this element's run; bound is its layout line count
+    while k < starts.len():
+        val fx = boxes.bx[run] + text_line_box_dx(boxes.first_line_dx, boxes.line_boxes, run, k)
+        val fy = boxes.by[run] + k * lh
+        val fw = style_text_line_advance_width_with(
+            advances, txt, starts[k], ends[k], style_text_advance(tst), style_space_advance(tst)
+        )
+        val rect = draw_ir_rect_bounds(fx, fy, fw, area_h)
+        out.push(draw_ir_box_with_style(
+            box.component_id + "_frag{k}", fx, fy, fw, area_h, box.color,
+            rect, rect, rect, box.clip_rect, box.computed_style
+        ))
+        k = k + 1
     out
 
 fn _html_draw_ir_image_index(

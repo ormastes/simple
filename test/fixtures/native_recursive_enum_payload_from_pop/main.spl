@@ -1,0 +1,43 @@
+# Native fixture: recursive-enum payloads filled from `[T].pop()`.
+# `[T].pop()` is `T?` in pure-Simple MIR, so every pop that feeds a `T`
+# slot (enum payload, push, call argument, match scrutinee) unwraps it.
+# Shape of src/compiler/35.semantics/perf/cost_summary_v1.spl
+# summarize_hir_function_v1 (LoopRegion/Branch from a built-node stack).
+# Bug: doc/08_tracking/bug/mir_enum_payload_mismatch_loopregion_2026-11-20.md
+struct SpanX:
+    line: i64
+
+enum ShapeX:
+    Linear(n: i64)
+    Fixed
+
+enum NodeX:
+    Step(cost: i64, span: SpanX)
+    Loop(shape: ShapeX, body: NodeX, span: SpanX)
+
+fn depth(n: NodeX) -> i64:
+    match n:
+        case NodeX.Step(c, s):
+            return c + s.line
+        case NodeX.Loop(sh, b, s):
+            return 100 + depth(b)
+
+fn main():
+    var built: [NodeX] = []
+    val span = SpanX(line: 3)
+    built.push(NodeX.Step(1, span))
+    val shape = ShapeX.Linear(4)
+    built.push(NodeX.Loop(shape, built.pop().unwrap(), span))
+    built.push(NodeX.Loop(
+        ShapeX.Linear(4),
+        NodeX.Step(2, span),
+        span))
+    val b = built.pop().unwrap()
+    val a = built.pop().unwrap()
+    built.push(NodeX.Loop(ShapeX.Fixed, a, span))
+    var children: [NodeX] = []
+    children.push(b)
+    children.push(built.pop().unwrap())
+    print "a={depth(children[1])} b={depth(children[0])}"
+    val root = if children.len() > 0: children.pop().unwrap() else: NodeX.Step(0, span)
+    print "root={depth(root)}"

@@ -15,7 +15,7 @@ gate is driven as DATA (None and Rejected need no native owner).
 ## Verification guidance and troubleshooting
 A structural failure names the rule; a changed error string is a contract change.
 """
-use std.spec.{step}
+use std.spec.{step, fail}
 use std.io.file_read_text
 use std.nogc_sync_mut.io.process_ops.PipedProcessOwnedSpawnV2
 use std.nogc_sync_mut.orchestration.host_primary_attach_settlement_v1.host_primary_attach_quiesce_carrier_v3
@@ -24,7 +24,10 @@ val FB_DIR = "src/lib/nogc_sync_mut/orchestration/"
 
 fn fb_body(source: text, name: text) -> text:
     val start = source.index_of("fn " + name + "(")
-    if start < 0: return ""
+    if start < 0:
+        # A renamed anchor must fail the case, never hand an empty slice to a negative check.
+        fail("fb_body anchor missing: " + name)
+        return ""
     val rest = source.substring(start + 3, source.byte_len())
     val next = rest.index_of("\nfn ")
     val next_pub = rest.index_of("\npub fn ")
@@ -155,7 +158,7 @@ describe "release port F and B":
         step("return d4 has no session to return for F: the retirement is cleared and the attachment is returned")
         val ret = fb_body(att, "host_agent_release_return_v4")
         expect(ret).to_contain("att.native_retirement = None")
-        expect(ret.index_of("att.native_retirement = None") < ret.index_of("simple_container_primary_session_return_v3(")).to_equal(true)
+        expect(ret.index_of("att.native_retirement = None") >= 0 and ret.index_of("att.native_retirement = None") < ret.index_of("simple_container_primary_session_return_v3(")).to_equal(true)
 
     it "runs B as quiesce first, drops the spawn only on proof, then the S path":
         # @req 13.4 B: settle refuses multiple-native-carriers, so the spawn is quiesced and dropped first

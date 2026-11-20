@@ -80,15 +80,42 @@ describe "HIR codec scalar writers":
         expect(w.ok).to_equal(true)
         expect(w.finish()).to_equal("N\nN\nN\n")
 
-    # A nil handed to a bool-typed parameter is coerced to false by the
-    # interpreter (measured: `0` both before and after the fix). Whatever the
-    # engine, it is one line and never `1`.
+    # An absent optional bool reaching the bool-typed parameter is written as
+    # false by the interpreter (measured: `0`). Whatever the engine, it is one
+    # line and never `1`. A bare nil literal is not used: the call is refused
+    # before put_bool runs (bool parameter, nil literal argument).
     it "should never write a nil bool as true":
+        val absent: bool? = None
         var w = HirCodecWriter.create()
-        w.put_bool(nil)
+        w.put_bool(absent)
         val line = w.finish()
         expect(w.ok).to_equal(true)
         expect(line == "0\n" or line == "N\n").to_equal(true)
+
+    # An absent `i64?` spelled `None` renders as `Option::None` on the seed
+    # interpreter. That line is neither digits nor the absent marker, so the
+    # reader used to desynchronise on it. Absence is `N` on the wire, decodes
+    # back to an absent value, and leaves the following scalar aligned. A
+    # required field refuses it at encode time, as it does for nil.
+    it "should round-trip an absent optional integer as N":
+        val absent: i64? = None
+        val nested: Option<i64?> = None
+        var w = HirCodecWriter.create()
+        w.put_i64(absent)
+        w.put_i64(nested)
+        w.put_i64(3)
+        expect(w.ok).to_equal(true)
+        val body = w.finish()
+        expect(body).to_equal("N\nN\n3\n")
+        var r = FlatPoolReader.new(body)
+        expect(r.decode_nullable_i64(r.next()).is_none()).to_equal(true)
+        expect(r.decode_nullable_i64(r.next()).is_none()).to_equal(true)
+        expect(r.next_i64()).to_equal(3)
+        expect(r.ok).to_equal(true)
+        var refused = HirCodecWriter.create()
+        refused.put_i64_field(absent, "Probe.required")
+        expect(refused.ok).to_equal(false)
+        expect(refused.unsupported).to_equal("nil_in_non_optional_scalar:Probe.required")
 
     it "should write a present optional integer three as 3":
         val present: i64? = 3

@@ -42,6 +42,7 @@ val TREE_LIVE_TOKENS = "16"
 
 struct TreeLane:
     digest: text
+    first_prompt: i64
     requests: i64
     elapsed_ms: i64
     prefilled: i64
@@ -88,10 +89,13 @@ fn _counters() -> (i64, i64):
         return (s.tokens_prefilled, s.tokens_reused)
     (-1, -1)
 
-fn _ask(prompt: text) -> Result<text, text>:
+fn _ask_n(prompt: text, tokens: text) -> Result<text, text>:
     val generated = engine_generate_observed_request(EngineGenerationRequest(
-        prompt: prompt, max_tokens: TREE_LIVE_TOKENS))?
+        prompt: prompt, max_tokens: tokens))?
     Ok(generated.output)
+
+fn _ask(prompt: text) -> Result<text, text>:
+    _ask_n(prompt, TREE_LIVE_TOKENS)
 
 fn _run_branching() -> Result<[text], text>:
     var outs: [text] = []
@@ -105,6 +109,26 @@ fn _run_branching() -> Result<[text], text>:
         outs.push(_ask(sys + _user_turn(k) + _follow_up(k))?)
         k = k + 1
     Ok(outs)
+
+# The owner generates across a 512-token micro-batch boundary, then a follow-up
+# turn extends prompt + reply. Returns the outputs and the first prompt's token
+# count (the cold request prefills exactly its prompt).
+fn _run_boundary() -> Result<([text], i64), text>:
+    val owners = ["alpha", "bravo", "charlie", "delta", "echo"]
+    var doc = "You are the KV cache ledger assistant. The ledger records which serving request owns each cache page"
+    var i = 1
+    while i <= 48:
+        doc = doc + ". Page " + i.to_text() + " belongs to request " + owners[i % 5] +
+            " and holds " + (i * 16).to_text() + " tokens of sealed attention state"
+        i = i + 1
+    val first = doc + ". Answer briefly. Question: list the pages in order"
+    var outs: [text] = []
+    val c0 = _counters()
+    val reply = _ask_n(first, "112")?
+    val c1 = _counters()
+    outs.push(reply)
+    outs.push(_ask_n(first + reply + " Follow-up: and which request owns page forty", TREE_LIVE_TOKENS)?)
+    Ok((outs, c1.0 - c0.0))
 
 fn _run_multiturn() -> Result<[text], text>:
     var outs: [text] = []
@@ -139,8 +163,16 @@ fn _lane(model: NativeModel, tree: bool, workload: text) -> Result<TreeLane, tex
         return Err("prefix-cache telemetry unavailable")
     val started = time_now_monotonic_ms()
     var run: Result<[text], text> = Err("unknown workload")
+    var first_prompt: i64 = 0
     if workload == "branching":
         run = _run_branching()
+    elif workload == "boundary":
+        match _run_boundary():
+            Ok(pair):
+                run = Ok(pair.0)
+                first_prompt = pair.1
+            Err(reason):
+                run = Err(reason)
     else:
         run = _run_multiturn()
     val elapsed = time_now_monotonic_ms() - started
@@ -154,7 +186,7 @@ fn _lane(model: NativeModel, tree: bool, workload: text) -> Result<TreeLane, tex
     var joined = ""
     for o in outs:
         joined = joined + o.len().to_text() + ":" + o + "|"
-    Ok(TreeLane(digest: sha256_text(joined), requests: outs.len(), elapsed_ms: elapsed,
+    Ok(TreeLane(digest: sha256_text(joined), first_prompt: first_prompt, requests: outs.len(), elapsed_ms: elapsed,
         prefilled: after.0 - before.0,
         reused: after.1 - before.1))
 
@@ -183,6 +215,10 @@ fn _check(model: NativeModel, workload: text):
     expect(t.prefilled).to_be_less_than(o.prefilled)
     step(workload + ": (c) the tree reused tokens")
     expect(t.reused).to_be_greater_than(0)
+    if workload == "boundary":
+        step("boundary: reuse stops at the owner's exact span (first prompt rounded down to 512)")
+        expect(t.first_prompt).to_be_greater_than(512)
+        expect(t.reused).to_be_less_than((t.first_prompt - 1) / 512 * 512 + 1)
 
 describe "slang tree (radix) KV prefix cache, exact mode, on a real model":
 
@@ -196,6 +232,16 @@ describe "slang tree (radix) KV prefix cache, exact mode, on a real model":
                 fail(picked.unwrap_err())
             print "SLANG_KV_TREE_LIVE_MODEL id=" + picked.unwrap().id + " max_tokens=" + TREE_LIVE_TOKENS
             _check(picked.unwrap(), "branching")
+
+    it "boundary: owner generates across a micro-batch boundary, follow-up stays exact":
+        if not _live_enabled():
+            skip("boundary: owner generates across a micro-batch boundary, follow-up stays exact", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT, and a built ggml backend")
+        else:
+            expect(engine_set_n_ctx_text("4096")).to_equal(true)
+            val picked = _pick_model(_model_root())
+            if picked.is_err():
+                fail(picked.unwrap_err())
+            _check(picked.unwrap(), "boundary")
 
     it "multiturn: each turn extends the previous prompt, identical output":
         if not _live_enabled():

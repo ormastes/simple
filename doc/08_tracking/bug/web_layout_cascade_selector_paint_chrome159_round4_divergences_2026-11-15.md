@@ -1078,7 +1078,7 @@ head (13/40 at base).
   - `_raster_restore_group` paints the root's own backdrop on the main frame first. It then runs the white-alpha pass (`_raster_bdr_mode` 1), which records each filtered alpha in paint order, and the colour pass (mode 2), which replays those alphas for a premultiplied src-over in `_paint_backdrop_blur`. The layer composites at 255.
   - `backdrop_root_nested_glass_raster_chrome159_spec` (white, tinted and no-root control, ±2): 1/3 -> 3/3. Head-first sweep of 12 backdrop, opacity-group, coverage and glass specs: 0 new failures; `decl_apply_coverage_closure` 165/166 and `glass_feature_gap` 2/13 have the same ✗ lines on base.
   - Window fixture (raster, 480x300): agreement 555‰ on both base and head, so its panes are not admitted (text on a non-opaque root, shadows). Wall 277-287 s base vs 241-280 s head. Max RSS is bimodal on both sides (267 MB or 1.02 GB per run, the same binary `cargo-target-webrender-premul` 54131896 B), so there is no measured memory change.
-- **OPEN, raster admission:** glass with text on a non-opaque background, or with a shadow, still reads the whole frame. That is the window fixture's case.
+- **RESOLVED 2026-11-20 (see "raster window glass admitted" below), raster admission:** glass with text on a non-opaque background, or with a shadow, still reads the whole frame. That is the window fixture's case.
 - **OPEN, Vulkan:** the CSS `backdrop-filter` blur should use the device blur kernel instead of readback + host blur.
 - **Not covered:** a Backdrop Root under an opacity < 100 ancestor still bails to the flat path, as before. Nested Backdrop Roots have no spec.
 
@@ -1097,9 +1097,31 @@ head (13/40 at base).
   - `backdrop_root_glass_gradient_saturate_chrome159_spec` (cpu_simd, ±2): halo blur-only, saturate, the halo+gradient+saturate window shape, tinted, and a no-root control. 1/5 on base (only the control passed), 5/5 on head.
   - `backdrop_root_glass_gradient_saturate_vulkan_chrome159_spec`: the window shape and tinted, each asserting ≥1 Vulkan readback. 0/2 on base, 2/2 on head. The CSS backdrop blur is still host-side over a readback, as above.
   - Window fixture (480x300): cpu_simd 556 -> 933‰, Vulkan 556 -> 933‰, raster 555 -> 555‰. (240,99) is now 250 vs Chrome 250. The bad rows 60-140 fell from about 420 px per row to 0-12.
-- **OPEN, raster:** the raster lane keeps 555‰, so the window panes are still not admitted by `_raster_opacity_groups`. The fixture has several features that admission rejects: text on the non-opaque root, members with shadows and gradient layers, and a colour-matrix backdrop. Which check fires first was not probed.
+- **RESOLVED 2026-11-20 (see the next entry), raster:** the raster lane keeps 555‰, so the window panes are still not admitted by `_raster_opacity_groups`. The fixture has several features that admission rejects: text on the non-opaque root, members with shadows and gradient layers, and a colour-matrix backdrop. Which check fires first was not probed.
 - **Cost (not cleanly measured):** a backdrop root whose group fills the viewport now pays one full-viewport offscreen plus a composite per frame. The 3-lane window probe took 524 s on base and 583 s on head, but both runs overlapped other probes on a shared host, so this is not an A/B. Metal shares the `fills_target_exactly` gate and was not exercised, since there is no macOS host.
 - **OPEN, residual on Engine2D:** agreement is 933‰, not 1000. Rows 19-59 still have 12-22 bad px per row, and the outer pane edge at (14,99) is 193 vs Chrome 197.
+
+## 2026-11-20 — raster window glass admitted as a Backdrop Root (FIXED)
+
+- **Probe (temporary prints in `_raster_opacity_groups`, window fixture 480x300):** the root (node 4, group 0,0 480x300 from the halo) was rejected by five separate checks. A fix to any subset leaves it at 555‰.
+  - Unwhitenable shadows on the root, the panel (node 8, incl. an inset layer) and both buttons (14, 16): `box_shadow_raw` colours are not Style colour fields.
+  - Text on a non-opaque root: nodes 7, 10, 13, 15, 17.
+  - A colour-matrix backdrop inside the root: the panel's `saturate`.
+  - `<button>` fails `_raster_group_node_layer_safe` (nodes 14, 16).
+  - Not a cause: gradients. Every flagged node had empty `bg_layers_raw` and `background_image_uri`; `gradient, colour` lands in `background_gradient_from/to` and the stop colours, which the white-alpha pass already whitens.
+- **Fix (`simple_web_html_layout_renderer_paint_raster.spl`, Backdrop Root groups only):**
+  - Colour functions: mode 1 (alpha pass) still records the blurred alpha. Mode 2 (colour pass) unpremultiplies the blurred premultiplied backdrop by that alpha, applies the matrices (`engine2d_backdrop_color_filter_pixels` over a transparent `under`, an exact pass-through), premultiplies again and does the one src-over (`_raster_bdr_color_filtered`). Admission keeps only alpha-preserving functions (`_raster_bdr_alpha_preserving`; `opacity()` still rejects).
+  - Shadows: `_raster_white_shadow_raw` rewrites each layer's `rgb()/rgba()` (comma form) or `#hex` colour to white, keeping the alpha text, and the alpha pass uses it. A layer it cannot rewrite exactly (named, `hsl`, space syntax, no colour) keeps the reject.
+  - Text: allowed on a non-opaque root. The raster glyph blend (`composite_over_base`) is a linear src-over, so the white-forced pass gives text alpha from its coverage.
+  - `<button>`: allowed when restyled (`native_frame == 0`); an unrestyled one paints fixed-colour `chrome_frame_spans` and rejects. Widget panels and buttons with no Style background (the hard-coded `fb_rect` fallback colours) reject.
+  - Fractional opacity groups, opaque frames (mode 0) and blur-only nested backdrops run the same code as before.
+- **Evidence (binary `cargo-target-webrender-premul` 54131896 B, 2026-11-19 17:24):**
+  - New specs `backdrop_root_glass_raster_window_shape{,_tint,_content}_chrome159_spec` (±2, Chrome pixels from the cpu_simd spec's pages plus a text page and a 100x40 `<button>` with `0 12px 28px rgba(0,0,0,0.2)`): 8 cases, 2/8 on base (the two controls) -> 8/8 on head; the six non-control cases go 0/6 -> 6/6. One control is the same button over an opaque page, green on base and head, so the button-shadow probes measure admission, not shadow falloff. The shape and tint base reds come from the original single 7-case file (identical case bodies), which took 866 s on base, hence the split; head 310 s, 422 s, 314 s.
+  - Window fixture raster: 555 -> 932‰ (Engine2D 933‰). (240,99) is 250 vs Chrome 250 (base 240). Rows 79-139 fell from about 422 bad px per row to 0-11 (every 20th row sampled). Wall 300 s base vs 268 s head, one run each on a shared host; head max RSS 1.0 GB, inside the 267 MB / 1.02 GB bimodal range recorded above.
+  - Head-first sweep of 18 backdrop, opacity-group, box-shadow, coverage, device-scale and glass specs: 0 new failures. `decl_apply_coverage_closure` 165/166 and `glass_feature_gap` 2/13 have the same ✗ lines on base. `translucent_blend` failed once on head at its Vulkan readback-count assertion (6/6 on base) and passed 6/6 on two head reruns; that case does not reach the raster painter.
+- **Limits:** glyph pixels are not pinned (our TTF rasteriser is not Chrome's). Measured: Chrome's glass pixels around the text are the same with and without the text (the text page equals the window-shape page at every probe point), and the text case pins those. Chrome's text AA mode inside a non-opaque layer was not measured.
+- **OPEN, residual:** 932‰, not 1000. Rows 19-59 keep 12-21 bad px per row, the same rows Engine2D leaves.
+- **Not covered:** `bg_layers_raw` / `background-image` members and named or `hsl` shadow colours inside a Backdrop Root still reject; there is no exact white rewrite for them yet.
 
 ## 2026-11-20 — `<button>` content sits at the top of a tall button (FIXED)
 
@@ -1115,3 +1137,70 @@ head (13/40 at base).
   - The contain/`layout_selected` specs pass. `cpu_execution_port_line_boxes` is 0/4 on base as well.
 - **Window fixture attribution (raster 564 -> 555‰):** caused by #10502 (tile clip), a correct change. A page-background tile copy no longer spills, and the page centre now matches Chrome (27,33,56 vs 27,32,55). That exposed the next item.
 - **OPEN — body top radial highlights underpainted:** Chrome's top band is lighter (row 5, x=60: Chrome 57, ours 45).
+
+## 2026-11-20 — `::before` / `::after` generated content boxes (FIXED, first cut)
+
+- **Rule (Chrome 159):** when the cascaded `content` of an element's `::before` / `::after` is neither `none` nor `normal`, the element gets a generated box. `::before` is the first child and `::after` the last.
+  - The box takes its own cascaded style and inherits from the originating element.
+  - `content:''` gives an empty box; a string literal gives text.
+  - The box is invisible to `:first-child`, `:nth-child`, `:empty`, `+`/`~`, `children` and `textContent`.
+  - A click on the box targets the originating element, and `pointer-events:none` lets clicks through.
+- **Chrome evidence:** pinned in the docstring table of `before_after_generated_content_chrome159_spec` (cases A–H, S, R). Points:
+  - The WM window fixture's `body::before` fixed `inset:0` overlay at 480x300: (5,5)=34,34,50, (100,60)=49,49,64, (360,255)=42,46,68.
+  - `div::before{content:"WWW"}` puts span `s` at x=44.03.
+  - The `children.length` count stays 2.
+- **Fix:**
+  - **Node creation.** Generated nodes are appended after the parsed arena (`_html_append_generated_content`, `..._foundation.spl`), so the structural_id → index mapping and DOM routes never shift. `build_child_index` links `::before` at the head of the parent's child list.
+  - **Existence and matching.** Whether the box exists comes from the cascade: `compute_styles` sets `display:none` unless the cascaded `content` is present. Selectors reuse the matcher by rewriting `X::before` to `X > ::before` (`selector_group_generated_parts`).
+  - **Selector context.** It skips generated children.
+  - **Paint and hit testing.** Draw IR paint order and hit-test ties use tree order (`html_tree_order`). `pointer-events:none` is a new inherited Style bit. Raster pass 2 (`_paint_passes`) walks tree order and paints positioned z≤0 generated boxes in it.
+  - **Fixes needed by the window overlay:**
+    - `position:fixed` resolves its containing block against the viewport (`absolute_containing_width`, `absolute_containing_h`);
+    - top/left win over-constrained fixed insets;
+    - an empty inline after a block no longer flushes the pending margin (Chrome: y=16 h=18);
+    - the z-index sort is stable.
+- **Evidence:**
+  - The spec is 4/18 on base (H and S included in the reds) and 19/19 on head. The added raster paint-order `it` was red on head until the pass-2 tree walk.
+  - Window fixture permille (base → head), binary `cargo-target-webrender-premul` 54131896 B: raster 555 → 587, cpu_simd 556 → 588, Vulkan 556 → 588.
+  - Without the raster pass-2 walk, raster dropped to 540: the overlay painted over the later relative `.app` (16,078 px in rows 160–280).
+  - Window layout: 19 → 25 nodes, 4.09 → 4.32 s. The same page with the pseudo selectors renamed: 19 → 19 nodes, 3.95 → 4.06 s (single runs on a shared host).
+- **OPEN:**
+  - counters, `attr()`, `quotes` and `url()` content, and CSS escapes in strings, give an empty box;
+  - `::first-line` and `::first-letter`;
+  - uppercase `:BEFORE` is not detected;
+  - candidate rules are collected regardless of `@media`, so the text can come from a media-gated rule;
+  - retained-render CSS invalidation of generated nodes;
+  - raster still paints a generated z≤0 box under every real absolute z≤0 box, and text (pass 6) over all of them;
+  - a z-auto relative box is treated as z 0;
+  - `::marker` still counts in the selector context.
+- **Behavior changes for real elements:**
+  - `pointer-events:none` is now honored;
+  - fixed-position containing block, over-constrained insets and the empty-inline margin all follow Chrome.
+  - The hosted DOM (`BeDomNode`: querySelector, children, textContent, forms) is a separate tree and is untouched.
+- **Follow-up 2026-11-20 — the overlay knocked the window glass off the Backdrop Root path (Engine2D):**
+  - **Symptom:** release with #10538 scored 933‰ on cpu_simd and Vulkan; release plus this lane scored 588‰.
+  - **Probe** (temporary prints in `_simple_web_layout_compose_retained`):
+    - With the overlay, the page has 2 top-level surfaces: root 19 is the `::before`, opacity 90, `group=false painted=1` at 480x300; root 4 is the window glass backdrop root, `group=true painted=21` at 480x300. The result is `supported=false`.
+    - Without the overlay there is 1 root and `supported=true`.
+    - Both roots are `translate=true`, so the only clause that fires is the admission budget (`surface_pixel_work > width*height`). That clause disables every surface, the backdrop root included.
+    - The glass root alone already uses the whole budget, so any other fractional-opacity element on that page disabled the glass before this lane too.
+  - **Fix** (`_simple_web_opacity_demote_for_budget`, in the admission block of `simple_web_html_layout_renderer.spl`):
+    - On budget overflow, top-level fractional-opacity roots fall to root -1 and backdrop-root chains keep their layers.
+    - It bails as before only if the kept layers alone are over budget.
+    - The budget itself is unchanged.
+  - **Evidence:**
+    - Window: cpu_simd 588 → 962‰, Vulkan 588 → 962‰, raster 587‰.
+    - Nested glass with the overlay: glass point (160,120) is 252,250,250 in Chrome and 254,249,249 here.
+    - All pass: `backdrop_root_nested_glass` 4/4, `glass_gradient_saturate` 5/5, its Vulkan twin 2/2, `opacity_group` 21/21, `layout_renderer_selector_helpers` 13/13.
+  - **Root -1 drops opacity:** a command on root -1 paints with no CSS opacity, because Engine2D applies opacity only through an embedding surface. `filter:opacity()` folds into the same `opacity_pct`. Every fractional-opacity element painted at 100% whenever the budget tripped before this lane. Chrome: `rgb(200,0,0)` at opacity 0.5 over #2d2f45 is 122,23,34; we painted 200,0,0.
+  - **Fixed for the exact case** (owner decision: carry opacity on a single command, budget unchanged):
+    - `_simple_web_opacity_fold_demoted` applies when a demoted top root (no nested root, `group=false`, `painted=1`) emitted exactly one command that is not an image, glyph run or WM material box.
+    - It folds the root's opacity into that command's alpha: the command colour, `background-color`, the 2-stop `background-image`, `background-gradient-stops`, and every `background-gradient-layer-stops` colour.
+    - A group of one item equals that item at alpha × opacity, so this is exact.
+  - **Evidence:**
+    - The overlay tests turned green unchanged (122,23,34 / 218,190,193), and `before_after_generated_content` is 24/24.
+    - Also passing: `opacity_group` 21/21, `opacity_multi_root` 3/3, `img_opacity` 3/3, `translucent_blend` 6/6, `fractional_subtree_opacity` 2/2.
+    - Window: cpu_simd and Vulkan 962‰, raster 587‰.
+  - **Raster, same page:** overlay 122,23,34 and outer 218,190,193 are correct. The inner glass is 245,237,238, which is Chrome's value without the outer backdrop root (Chrome 252,250,250). The raster backdrop-root admission does not take this page. That is the paint_raster owner's area and was not changed here.
+- **FIXED (2026-11-20) — raster window 587‰ came from generated boxes, not the opacity budget:** after `6ca7e435177`, the window CSS's `body::before`/`body::after` (`position:fixed; inset:0; z-index:0`) became real boxes. They sit after the parsed arena, so the overlap rule in `_raster_opacity_groups` (`a > g or z > 0`, arena index used as tree order) treated both as painting over the glass and dropped its backdrop-root group. The rule now ranks by `html_tree_order` when the page has generated content. It also skips a box whose root-context layer (`_raster_root_layer_z`: the outermost positioned non-zero z-index) is below the group's layer, since the glass sits under `#app`'s z-index 1. Pinned by two new cases in `backdrop_root_glass_raster_window_shape_content_chrome159_spec`: a z-1 wrapper over both pseudos (red 3/4 before the fix), and a same-layer `body::before` (red 4/5 with the tree rank disabled). Both are green, 5/5. Raster window is now 960‰. Residual: raster pass 2 still paints a later z-0 generated box over `#app`'s non-group z-1 content. This has no measurable effect on this fixture.
+- **OPEN:** a demoted root with more than one painted item (or command), an image, a glyph run or a nested root still paints at 100% when the surface budget is exceeded. It needs a real layer. `# ponytail:` note on `_simple_web_opacity_demote_for_budget`.

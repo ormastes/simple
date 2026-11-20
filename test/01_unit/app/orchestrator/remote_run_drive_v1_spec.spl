@@ -27,7 +27,7 @@ use std.io.file_read_text
 use app.orchestrator.remote_run_v1.{RemoteRunFactsV1, RemoteRunLinkV1, RemoteRunIssuerV1, RemoteRunOutcomeV1, remote_run_drive_v1, remote_run_grant_v1,
     remote_run_result_parts_v1, remote_run_resume_v1}
 use app.orchestrator.remote_run_author_v1.RemoteRunAuthoredV1
-use app.orchestrator.remote_run_command_v1.remote_run_command_v1
+use app.orchestrator.remote_run_command_v1.{remote_run_command_v1, remote_run_reply_v1}
 use app.orchestrator.controller_authority_issue_v1.{ControllerIssuedAuthorityV1, controller_authority_issue_v1,
     ControllerHostActionAuthorityV1, controller_host_action_issue_v1}
 use app.orchestrator.remote_run_abandon_v1.{RemoteRunAbandonFactsV1, remote_run_abandon_apply_v1}
@@ -46,6 +46,9 @@ use std.common.contracts.orchestration.host_remote_build_operation_v6.host_remot
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
 use std.common.crypto.sha256.sha256_text
+use std.common.text_bytes.text_to_bytes
+use std.common.contracts.orchestration.host_remote_build_chunk_v4.{host_remote_build_chunk_manifest_v4,
+    host_remote_build_chunk_split_v4, host_remote_build_chunk_encode_v4, host_remote_build_chunk_manifest_digest_v4}
 use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2, distributed_operation_journal_lookup_v2,
     distributed_operation_journal_commit_v2, distributed_operation_journal_publish_v3}
 use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
@@ -245,6 +248,13 @@ class RsLogV1:
     var open_record: text = ""
     # A fixed grant clock (resume after the signed window).
     var clock_at: i64 = 0
+    # milestone_0050 (review A P1): the real admit's window between the open-record archive and the `executing` commit
+    # (workload_store_v1 controller_workload_store_admit_remote_build_v1): the row stays `admitted`, the admit refuses.
+    var admit_stops: bool = false
+    # milestone_0052: the Host published `bundle` (collect answers `settled` with its digest, output serves it in one chunk);
+    # once a call named `late_after` was made the grant clock reads the end of the signed window.
+    var bundle: text = ""
+    var late_after: text = ""
 
 fn rs_stage_cause_reply_v1(stage: text, cause: text) -> text:
     val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-remote-build"),
@@ -258,6 +268,27 @@ fn rs_reset_reply_v1(receipt: text) -> text:
     val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-remote-build-reset-failure"),
         "operationId": SdnValue.String("operation_a"), "stage": SdnValue.String("wedged"),
         "cause": SdnValue.String("failed:linux-host-remote-build-destroy:boom"), "receipt": SdnValue.String(receipt)}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+fn rs_bundle_reply_v1(bundle: text) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-remote-build"),
+        "operationId": SdnValue.String("operation_a"), "stage": SdnValue.String("settled"), "received": SdnValue.Int(0),
+        "inputs": SdnValue.Int(0), "outcome": SdnValue.String("succeeded"), "bundleDigest": SdnValue.String(sha256_text(bundle)),
+        "cancelCause": SdnValue.String("")}
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+# The Host's output frame for a one-chunk bundle (the shape remote_run_frames_v1_spec pins).
+fn rs_output_v1(bundle: text) -> text:
+    val bytes = text_to_bytes(bundle)
+    val manifest = host_remote_build_chunk_manifest_v4(bytes, true).unwrap()
+    val chunks = host_remote_build_chunk_split_v4(bytes, true)
+    var digests: [SdnValue] = []
+    for digest in manifest.chunk_digests: digests.push(SdnValue.String(digest))
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("host-remote-build-output"),
+        "operationId": SdnValue.String("operation_a"), "totalBytes": SdnValue.Int(manifest.total_bytes),
+        "contentDigest": SdnValue.String(manifest.content_digest), "chunkDigests": SdnValue.Array(digests),
+        "manifestDigest": SdnValue.String(host_remote_build_chunk_manifest_digest_v4(manifest)),
+        "index": SdnValue.Int(0), "chunk": SdnValue.String(host_remote_build_chunk_encode_v4(chunks[0], true).unwrap())}
     sdn_encode_canonical(SdnValue.Dict(fields))
 
 fn rs_stage_reply_v1(stage: text) -> text:
@@ -325,6 +356,8 @@ fn rs_send_v1(log: RsLogV1, action: text, payload: text) -> Result<text, text>:
     if sub.sub == "collect" and log.collect == "link-timeout": return rs_fail_v1(log, "remote-run-link-timeout")
     if sub.sub == "collect" and log.collect == "reset": return Ok(rs_reset_reply_v1("SIMPLE_REMOTE_RESET_FAILURE_ENVELOPE_V3\nnot-verifiable\n"))
     if sub.sub == "collect" and log.collect == "cancelled": return Ok(rs_stage_cause_reply_v1("settled", "deadline"))
+    if sub.sub == "collect" and log.collect == "bundle": return Ok(rs_bundle_reply_v1(log.bundle))
+    if sub.sub == "output" and log.bundle != "": return Ok(rs_output_v1(log.bundle))
     if sub.sub == "collect": return Ok(rs_stage_reply_v1("running"))
     if sub.sub == "cancel": return Ok(rs_stage_reply_v1("cancel-requested"))
     Err("double-unexpected-" + sub.sub)
@@ -338,6 +371,7 @@ fn rs_mono_v1(log: RsLogV1) -> i64:
 
 fn rs_clock_v1(log: RsLogV1) -> Result<i64, text>:
     if log.clock_at > 0: return Ok(log.clock_at)
+    if log.late_after != "" and log.calls.contains(log.late_after): return Ok(1000 + RR_TTL)
     if log.late and log.calls.contains("prepare"): return Ok(1000 + RR_TTL - 1000)
     Ok(1000)
 
@@ -349,11 +383,15 @@ fn rs_admit_v1(log: RsLogV1, request: OperationEnvelopeV2, open_record: text) ->
     log.calls = log.calls + ["admit"]
     log.open_record = open_record
     if log.journal.is_some() and not log.skip_row:
-        # The real admit (workload_store_v1) archives the open record in the same turn (milestone_0045).
-        expect(distributed_operation_journal_publish_v3(log.journal.unwrap(), controller_workload_store_remote_open_key_v1(request.id),
-            open_record).unwrap()).to_equal(true)
+        # The real admit (workload_store_v1) archives the open record in the same turn (milestone_0045), in its order:
+        # commit `admitted`, then the create-only archive, then the `executing` commit.
         val initial = distributed_operation_initial_v2(distributed_encode_operation_v2(request)?)?
         val admitted = distributed_operation_journal_commit_v2(log.journal.unwrap(), initial)?
+        expect(distributed_operation_journal_publish_v3(admitted, controller_workload_store_remote_open_key_v1(request.id),
+            open_record).unwrap()).to_equal(true)
+        if log.admit_stops:
+            log.journal = Some(admitted)
+            return Err("double-admit-executing-commit-failed")
         log.journal = Some(distributed_operation_journal_commit_v2(admitted, distributed_operation_transition_v2(initial, "executing", "")?)?)
     Ok(true)
 
@@ -478,6 +516,50 @@ describe "remote-run driver, scripted Host (milestone_0030 controller half)":
         expect(outcome.exit_code).to_equal(2)
         expect(outcome.settled).to_equal("outcome-unknown")
         expect(log.calls[log.calls.len() - 1]).to_equal("settle")
+        expect(rs_row_state_v1(log)).to_equal("outcome-unknown")
+        rs_cleanup_v1(log)
+
+    it "verifies a bundle accept at a clock read taken after the bundle fetch (milestone_0050 review A P3)":
+        # @req M0052-ACCEPT-CLOCK-01
+        step("control: inside the signed window the published bundle is fetched and reaches the accept edit")
+        val live = RsLogV1()
+        live.collect = "bundle"
+        live.bundle = "not-a-completion\n"
+        live.journal = Some(rs_journal_v1())
+        val accepted = rs_drive_v1(live)
+        expect(accepted.state).to_equal("accept-refused")
+        expect(live.edits).to_equal(1)
+        expect(live.calls.contains("remote-build:output")).to_equal(true)
+        expect(rs_row_state_v1(live)).to_equal("outcome-unknown")
+        rs_cleanup_v1(live)
+        step("the window ends while the chunks are fetched: the pair is refused before the accept edit, the row stays unproven")
+        val late = RsLogV1()
+        late.collect = "bundle"
+        late.bundle = "not-a-completion\n"
+        late.late_after = "remote-build:output"
+        late.journal = Some(rs_journal_v1())
+        val refused = rs_drive_v1(late)
+        expect(refused.state).to_equal("refused")
+        expect(refused.detail).to_equal("GRANT_EXPIRED")
+        expect(refused.exit_code).to_equal(1)
+        expect(refused.settled).to_equal("outcome-unknown")
+        expect(late.edits).to_equal(0)
+        expect(late.calls.contains("remote-build:output")).to_equal(true)
+        expect(late.calls[late.calls.len() - 1]).to_equal("settle")
+        expect(rs_row_state_v1(late)).to_equal("outcome-unknown")
+        rs_cleanup_v1(late)
+
+    it "settles an unbundled run without verifying the accept pair, even after the signed window (milestone_0052)":
+        # @req M0052-ACCEPT-CLOCK-02
+        step("no accept follows an unbundled stage reply, so no accept authority is read: the typed settle still lands")
+        val log = RsLogV1()
+        log.collect = "cancelled"
+        log.late_after = "remote-build:collect"
+        log.journal = Some(rs_journal_v1())
+        val outcome = rs_drive_v1(log)
+        expect(outcome.state).to_equal("host-unbundled")
+        expect(outcome.settled).to_equal("outcome-unknown")
+        expect(log.edits).to_equal(0)
         expect(rs_row_state_v1(log)).to_equal("outcome-unknown")
         rs_cleanup_v1(log)
 
@@ -649,17 +731,31 @@ describe "remote-run resume (milestone_0045, owner decision 1)":
         val command = file_read_text("src/app/orchestrator/remote_run_command_v1.spl")
         expect(command.contains("if args.len() > 1 and args[1] == \"resume\": return remote_run_resume_command_v1(args)")).to_equal(true)
         expect(command.contains("val REMOTE_RUN_RESUME_OPTIONS_V1 = [\"--dispatch-root\", \"--config-digest\", \"--spec\", \"--out\"]")).to_equal(true)
+        expect(command.index_of("fn remote_run_resume_command_v1(") >= 0 and command.index_of("pub fn remote_run_command_v1(") > command.index_of("fn remote_run_resume_command_v1(")).to_equal(true)
         val resume = command.substring(command.index_of("fn remote_run_resume_command_v1("), command.index_of("pub fn remote_run_command_v1("))
         expect(resume.contains("key_store") or resume.contains("RemoteRunIssuerV1")).to_equal(false)
 
     it "never sends prepare, execute, open, input, start or cancel from the resume path (source pin)":
         val source = file_read_text("src/app/orchestrator/remote_run_v1.spl")
+        expect(source.index_of("fn remote_run_resume_flow_v1(") >= 0 and source.index_of("pub fn remote_run_resume_v1(") > source.index_of("fn remote_run_resume_flow_v1(")).to_equal(true)
         val resume = source.substring(source.index_of("fn remote_run_resume_flow_v1("), source.index_of("pub fn remote_run_resume_v1("))
         for sent in ["(link.send)(", "(link.admit)(", "remote_run_cancel_v1(", "\"open\"", "\"input\"", "\"start\"", "issue"]:
             expect(resume.contains(sent)).to_equal(false)
         expect(resume.contains("remote_run_collect_v1(authored, facts, link, None, admitted,")).to_equal(true)
+        expect(source.index_of("fn remote_run_collect_v1(") >= 0 and source.index_of("fn remote_run_flow_v1(") > source.index_of("fn remote_run_collect_v1(")).to_equal(true)
         val collect = source.substring(source.index_of("fn remote_run_collect_v1("), source.index_of("fn remote_run_flow_v1("))
-        expect(collect.index_of("if timed_out and issue.is_none():") < collect.index_of("remote_run_cancel_v1(")).to_equal(true)
+        expect(collect.index_of("if timed_out and issue.is_none():") >= 0 and collect.index_of("if timed_out and issue.is_none():") < collect.index_of("remote_run_cancel_v1(")).to_equal(true)
+
+# The printed reply of a refusal carrying `detail` (remote_run_reply_v1 is private; tests may call it).
+fn rs_reply_v1(detail: text) -> text:
+    remote_run_reply_v1(RemoteRunOutcomeV1(exit_code: 1, state: "refused", operation_id: "operation_a", digest: "",
+        detail: detail), false).output
+
+fn rs_reply_expected_v1(detail: text) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("remote-run"),
+        "state": SdnValue.String("refused"), "operationId": SdnValue.String("operation_a"), "digest": SdnValue.String(""),
+        "detail": SdnValue.String(detail), "settled": SdnValue.String(""), "cleanupPending": SdnValue.Bool(false)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
 
 # milestone_0045: a controller-signed `remote-run-abandon` pair for the unproven row, issued at `now`.
 fn rs_abandon_pair_v1(payload_digest: text, kind: text, grant_id: text, now: i64) -> ControllerHostActionAuthorityV1:
@@ -714,9 +810,57 @@ describe "remote-run abandon (milestone_0045, owner decision 1)":
             "ERR:remote-run-abandon-row-digest")
         expect(rs_abandon_v1(log, rs_abandon_pair_v1(envelope, "helper-abandon", "abandon_5", end), end)).to_equal(
             "ERR:remote-run-abandon-kind")
-        expect(rs_abandon_v1(log, rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_6", end), end + 60000).starts_with(
-            "ERR:")).to_equal(true)
+        step("verified at its own approval's expiry instant: refused by the host-action class before any signature check")
+        expect(rs_abandon_v1(log, rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_6", end), end + 60000)).to_equal(
+            "ERR:controller-host-action-approval-expiry")
         expect(rs_row_state_v1(log)).to_equal("outcome-unknown")
+        rs_cleanup_v1(log)
+
+    it "ends a row an interrupted admit left `admitted` cancelled, never stuck (milestone_0050 review A P1)":
+        # @req M0050-A-ADMITTED-01
+        step("the admit archived the open record, then the `executing` commit failed: row `admitted`, no Host request sent")
+        val log = RsLogV1()
+        log.journal = Some(rs_journal_v1())
+        log.admit_stops = true
+        expect(rs_drive_v1(log).state).to_equal("refused")
+        expect(log.calls).to_equal(["begin", "admit"])
+        expect(rs_row_state_v1(log)).to_equal("admitted")
+        val envelope = distributed_operation_journal_lookup_v2(log.journal.unwrap(), "operation_a").unwrap().envelope_digest
+        step("resume cannot reach it (not a live row): only the status begin, no route frame")
+        val resumed = RsLogV1()
+        resumed.journal = log.journal
+        expect(rs_resume_v1(resumed).detail).to_equal("remote-run-resume-row")
+        expect(resumed.calls).to_equal(["begin", "edit"])
+        step("the verified abandon is still refused while the archived signed window is open")
+        val end = 1000 + RR_TTL
+        expect(rs_abandon_v1(resumed, rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_7", 2000), 2000)).to_equal(
+            "ERR:remote-run-abandon-window-open")
+        expect(rs_row_state_v1(resumed)).to_equal("admitted")
+        step("after it the row ends `cancelled` (nothing was ever executed), bound to the abandon record's digest")
+        val pair = rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_8", end)
+        val first = rs_abandon_v1(resumed, pair, end)
+        expect(first.starts_with("cancelled:")).to_equal(true)
+        val row = distributed_operation_journal_lookup_v2(resumed.journal.unwrap(), "operation_a").unwrap()
+        expect(row.state).to_equal("cancelled")
+        expect("cancelled:" + row.outcome_digest).to_equal(first)
+        step("a repeat, and a retry with a fresh pair, answer the same cancel")
+        expect(rs_abandon_v1(resumed, pair, end + 1)).to_equal(first)
+        expect(rs_abandon_v1(resumed, rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_9", end + 2), end + 2)).to_equal(first)
+        rs_cleanup_v1(resumed)
+
+    it "never cancels an `admitted` row once the controller archived an execute for its operation":
+        # @req M0050-A-ADMITTED-02
+        val log = RsLogV1()
+        log.journal = Some(rs_journal_v1())
+        log.admit_stops = true
+        expect(rs_drive_v1(log).state).to_equal("refused")
+        expect(distributed_operation_journal_publish_v3(log.journal.unwrap(), controller_dispatch_remote_execute_key_v3("operation_a"),
+            "execute-archived").unwrap()).to_equal(true)
+        val envelope = distributed_operation_journal_lookup_v2(log.journal.unwrap(), "operation_a").unwrap().envelope_digest
+        val end = 1000 + RR_TTL
+        expect(rs_abandon_v1(log, rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_10", end), end)).to_equal(
+            "ERR:remote-run-abandon-execute-archived")
+        expect(rs_row_state_v1(log)).to_equal("admitted")
         rs_cleanup_v1(log)
 
     it "never contacts the Host and never widens the settle states (source pins)":
@@ -728,6 +872,9 @@ describe "remote-run abandon (milestone_0045, owner decision 1)":
         expect(source.contains("distributed_verify_grant_approval_from_snapshot_v2(")).to_equal(true)
         expect(source.contains("if signed.issuer_id != facts.controller_id:")).to_equal(true)
         expect(source.contains("val retained = root.retain_v3(edited.store)")).to_equal(true)
+        step("the printed digest follows the result's own `<state>:` prefix (failed or cancelled), never a fixed offset")
+        expect(source.contains("edited.result.substring(7,")).to_equal(false)
+        expect(source.contains("val split = edited.result.index_of(\":\")")).to_equal(true)
         expect(REMOTE_RUN_SETTLE_STATES_V1).to_equal(["cancelled", "outcome-unknown"])
         val command = file_read_text("src/app/orchestrator/remote_run_command_v1.spl")
         expect(command.contains("if args.len() > 1 and args[1] == \"abandon\": return remote_run_abandon_command_v1(args)")).to_equal(true)
@@ -762,9 +909,22 @@ describe "remote-run driver structure (source pins)":
         expect(source.contains("REMOTE_RUN_RELEASE_FAILED_V1")).to_equal(true)
         expect(source.contains("val advanced = session.parent.operations")).to_equal(true)
         step("milestone_0043 P1-1: every settle goes through the post-failure settle seam, never the ready-only edit")
+        expect(source.index_of("fn remote_run_settle_v1(") >= 0 and source.index_of("pub fn remote_run_result_parts_v1(") > source.index_of("fn remote_run_settle_v1(")).to_equal(true)
         val settle = source.substring(source.index_of("fn remote_run_settle_v1("), source.index_of("pub fn remote_run_result_parts_v1("))
         expect(settle.contains("(link.settle)(")).to_equal(true)
         expect(settle.contains("(link.edit)(")).to_equal(false)
+
+    it "bounds the printed detail to 256 bytes on a UTF-8 character boundary (milestone_0050 review A P3)":
+        # @req M0052-DETAIL-UTF8-01
+        step("a 2-byte character straddling byte 256 is dropped whole; one ending exactly at 256 is kept")
+        expect(rs_reply_v1("a".repeat(255) + "\u{e9}b")).to_equal(rs_reply_expected_v1("a".repeat(255)))
+        expect(rs_reply_v1("a".repeat(254) + "\u{e9}b")).to_equal(rs_reply_expected_v1("a".repeat(254) + "\u{e9}"))
+        step("3- and 4-byte characters split at any offset are dropped whole")
+        expect(rs_reply_v1("a".repeat(255) + "\u{20ac}")).to_equal(rs_reply_expected_v1("a".repeat(255)))
+        expect(rs_reply_v1("a".repeat(254) + "\u{1f600}")).to_equal(rs_reply_expected_v1("a".repeat(254)))
+        step("an ASCII detail is cut at exactly 256 bytes; only the first line is printed")
+        expect(rs_reply_v1("b".repeat(300))).to_equal(rs_reply_expected_v1("b".repeat(256)))
+        expect(rs_reply_v1("short\nsecond")).to_equal(rs_reply_expected_v1("short"))
 
     it "never prints keys, signatures, request bytes or the bundle":
         val command = file_read_text("src/app/orchestrator/remote_run_command_v1.spl")
@@ -805,6 +965,7 @@ describe "remote-run driver structure (source pins)":
         step("a reset reply is decoded before the ordinary stage decode refuses it, and accepted via accept_host_reset_failure_v3")
         expect(source.contains("remote_run_reset_reply_decode_v1(")).to_equal(true)
         expect(source.contains("session.accept_host_reset_failure_v3(authored.task, wire, context)")).to_equal(true)
+        expect(source.index_of("fn remote_run_host_reset_apply_v1(") >= 0 and source.index_of("fn remote_run_frame_v1(") > source.index_of("fn remote_run_host_reset_apply_v1(")).to_equal(true)
         val apply = source.substring(source.index_of("fn remote_run_host_reset_apply_v1("), source.index_of("fn remote_run_frame_v1("))
         expect(apply.contains("val advanced = session.parent.operations")).to_equal(true)
         expect(apply.contains("task_runner_journal_release_v1(session.parent.database.journal)")).to_equal(true)
@@ -815,6 +976,7 @@ describe "remote-run driver structure (source pins)":
 
     it "answers a second collect of an already-journaled receipt as the recorded failure, not a refusal (REVIEW_C P3-5)":
         val source = file_read_text("src/app/orchestrator/remote_run_v1.spl")
+        expect(source.index_of("fn remote_run_host_reset_apply_v1(") >= 0 and source.index_of("fn remote_run_frame_v1(") > source.index_of("fn remote_run_host_reset_apply_v1(")).to_equal(true)
         val apply = source.substring(source.index_of("fn remote_run_host_reset_apply_v1("), source.index_of("fn remote_run_frame_v1("))
         step("only the session's own REPLAY verdict (signature already verified), and only when the row holds THIS digest")
         val replay_at = apply.index_of("accepted.unwrap_err() == \"REMOTE_COMPLETION_REPLAY\"")
@@ -826,9 +988,11 @@ describe "remote-run driver structure (source pins)":
 
     it "verifies accept and reset authority through the installed snapshot with the controller as issuer (milestone_0043 P2-0)":
         val source = file_read_text("src/app/orchestrator/remote_run_v1.spl")
+        expect(source.index_of("fn remote_run_context_v1(") >= 0 and source.index_of("fn remote_run_session_open_v1(") > source.index_of("fn remote_run_context_v1(")).to_equal(true)
         val context = source.substring(source.index_of("fn remote_run_context_v1("), source.index_of("fn remote_run_session_open_v1("))
         expect(context.contains("signed.issuer_id != facts.controller_id")).to_equal(true)
         expect(context.contains("distributed_verify_grant_approval_from_snapshot_v2(")).to_equal(true)
         step("milestone_0045 late receipt: ONLY a reset-failure receipt is verified at the window's last instant")
         expect(context.contains("val at = if receipt: remote_container_reset_failure_late_context_v3(context).now else: now")).to_equal(true)
-        expect(source.contains("admitted.scope.physical_host_id, admitted.build_request, accept_now, reset_wire != \"\")?")).to_equal(true)
+        expect(source.contains("admitted.scope.physical_host_id, admitted.build_request, (link.clock)()?, true)?")).to_equal(true)
+        expect(source.contains("admitted.scope.physical_host_id, admitted.build_request, (link.clock)()?, false)?")).to_equal(true)

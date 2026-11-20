@@ -1,0 +1,57 @@
+"""
+## Purpose and audience
+Purpose: Verify bootstrap_main general `run` subcommand parsing, dispatch, and internal worker isolation.
+Audience: CLI and bootstrap maintainers.
+"""
+
+# @req: REQ-APP-CLI-BOOTSTRAP-RUN-001
+
+use std.spec.*
+use app.cli.bootstrap_main.{
+    bootstrap_run_parse_args,
+    run_bootstrap_script
+}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+describe "Bootstrap CLI run subcommand dispatch":
+
+    it "parses run help flags cleanly":
+        val plan = bootstrap_run_parse_args(["simple", "run", "--help"])
+        expect(plan.valid).to_equal(true)
+        expect(plan.show_help).to_equal(true)
+
+    it "parses script path and forwards trailing script arguments":
+        val plan = bootstrap_run_parse_args(["simple", "run", "hello.spl", "--flag", "arg1"])
+        expect(plan.valid).to_equal(true)
+        expect(plan.show_help).to_equal(false)
+        expect(plan.script_path).to_equal("hello.spl")
+        expect(plan.program_args).to_equal(["hello.spl", "--flag", "arg1"])
+
+    it "accepts interpreter mode and gc-off before the script path":
+        val plan = bootstrap_run_parse_args(["simple", "run", "--mode=interpreter", "--gc-off", "app.spl", "-v"])
+        expect(plan.valid).to_equal(true)
+        expect(plan.gc_off).to_equal(true)
+        expect(plan.script_path).to_equal("app.spl")
+        expect(plan.program_args).to_equal(["app.spl", "-v"])
+
+    it "rejects missing script path and unsupported modes":
+        val missing = bootstrap_run_parse_args(["simple", "run"])
+        expect(missing.valid).to_equal(false)
+        expect(missing.error).to_contain("missing script")
+
+        val bad_mode = bootstrap_run_parse_args(["simple", "run", "--mode=aot", "app.spl"])
+        expect(bad_mode.valid).to_equal(false)
+
+    it "returns 0 on run --help and 1 on missing script file":
+        expect(run_bootstrap_script(["simple", "run", "--help"])).to_equal(0)
+        expect(run_bootstrap_script(["simple", "run", "/nonexistent_bootstrap_script_125.spl"])).to_equal(1)
+
+    it "keeps internal worker allowlist before unmarked run dispatch and avoids forbidden argc checks":
+        val src = rt_file_read_text("src/app/cli/bootstrap_main.spl") ?? ""
+        val worker_guard_pos = src.find("if first == \"run\" and native_worker_marker == \"1\"") ?? -1
+        val run_dispatch_pos = src.find("if first == \"run\":") ?? -1
+        expect(worker_guard_pos).to_be_greater_than(-1)
+        expect(run_dispatch_pos).to_be_greater_than(worker_guard_pos)
+        expect(src).to_contain("return run_bootstrap_script(all_args)")
+        expect(src.contains("if argc > 2")).to_equal(false)

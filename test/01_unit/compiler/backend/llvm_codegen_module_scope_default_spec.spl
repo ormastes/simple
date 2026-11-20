@@ -8,6 +8,7 @@ use compiler.backend.llvm_codegen_adapter.{llvm_compile_module_direct_to_path,
 use compiler.backend.backend.backend_types.{CodegenTarget, BackendCompileOptions,
     compileoptions_default_options}
 use compiler.backend.llvm_target.{LlvmTargetConfig}
+use compiler.backend.backend_helpers.{llvm_module_ir_to_path_v1}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
@@ -89,6 +90,20 @@ fn cg_scope_growth(options: BackendCompileOptions, module: MirModule,
     if failures != 0: return -1
     after - before
 
+# Process-parallel pool lane: IR translation in the parent, one module at a time
+# (bug stage3_c_runtime_worker_memory_2x_2026-11-20).
+fn cg_pool_ir_growth(module: MirModule, directory: text, tag: text, n: i64) -> i64:
+    var failures = 0
+    var index = 0
+    val before = heap_live_bytes()
+    while index < n:
+        if llvm_module_ir_to_path_v1(module, false, 0, "", [], "{directory}/{tag}{index}.ll") != "":
+            failures = failures + 1
+        index = index + 1
+    val after = heap_live_bytes()
+    if failures != 0: return -1
+    after - before
+
 describe "codegen module scope default":
     it "is enabled when SIMPLE_CODEGEN_MODULE_SCOPE is unset and disabled only by 0":
         val previous = env_get_nullable("SIMPLE_CODEGEN_MODULE_SCOPE")
@@ -127,6 +142,32 @@ describe "codegen module scope default":
         # Unscoped (=0) retains each module's IR text, staged-object bytes and
         # translator scratch; the default scope frees them, so its growth must
         # be well below the unscoped lane's on the same N modules.
+        expect(scoped_growth).to_be_greater_than(-1)
+        expect(unscoped_growth).to_be_greater_than(0)
+        expect(scoped_growth * 4).to_be_less_than(unscoped_growth)
+
+    it "does not grow the heap per module across N codegen-pool IR emissions":
+        val previous_scope = env_get_nullable("SIMPLE_CODEGEN_MODULE_SCOPE")
+        val previous_bootstrap = env_get_nullable("SIMPLE_BOOTSTRAP")
+        defer cg_scope_restore_env("SIMPLE_CODEGEN_MODULE_SCOPE", previous_scope)
+        defer cg_scope_restore_env("SIMPLE_BOOTSTRAP", previous_bootstrap)
+        env_remove_process("SIMPLE_CODEGEN_MODULE_SCOPE")
+        expect(env_set("SIMPLE_BOOTSTRAP", "0")).to_equal(true)
+        val directory = secure_temp_dir_raw("/tmp", "simple-cg-pool-scope")
+        expect(directory.len()).to_be_greater_than(0)
+        defer dir_remove(directory, true)
+        val module = cg_scope_module()
+        # Warm call: name index and translator caches are filled outside the measurement.
+        expect(llvm_module_ir_to_path_v1(module, false, 0, "", [], "{directory}/warm.ll")).to_equal("")
+        val n = 16
+        val scoped_growth = cg_pool_ir_growth(module, directory, "s", n)
+        expect(env_set("SIMPLE_CODEGEN_MODULE_SCOPE", "0")).to_equal(true)
+        val unscoped_growth = cg_pool_ir_growth(module, directory, "u", n)
+        env_remove_process("SIMPLE_CODEGEN_MODULE_SCOPE")
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        expect(file_size_raw("{directory}/s{n - 1}.ll")).to_be_greater_than(32)
+        # Unscoped (=0) retains each module's IR text and translator scratch;
+        # the default scope frees them.
         expect(scoped_growth).to_be_greater_than(-1)
         expect(unscoped_growth).to_be_greater_than(0)
         expect(scoped_growth * 4).to_be_less_than(unscoped_growth)

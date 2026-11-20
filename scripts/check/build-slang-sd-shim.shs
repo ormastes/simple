@@ -1,0 +1,173 @@
+#!/bin/sh
+# Builds the slang stable-diffusion shim: build/sffi/sd-<variant>/slang_sd.dll
+# (libslang_sd.so off Windows). The shim wraps stable-diffusion.cpp behind an
+# int64-only ABI (src/runtime/slang_sd_shim.c) for model_executor/runners/sd_runner.spl.
+#
+# Not part of the main runtime link: it needs stable-diffusion.h, an external SDK
+# header that is deliberately not vendored (CLAUDE.md Owned-Code Scope) -- the same
+# treatment as slang_ggml_shim.c. SD_ROOT points at a stable-diffusion.cpp checkout
+# (default /c/dev/tools/stable-diffusion.cpp on Windows, ~/dev/stable-diffusion.cpp
+# elsewhere); it stays outside this repo.
+#
+# ggml is linked STATICALLY into the shim (design 3.4: one ggml per DLL, so this
+# library never shares a ggml with slang_ggml.dll). The static archives come from a
+# stable-diffusion.cpp build tree, configured and built here when absent:
+#   SLANG_SD_VARIANT=cpu      (default)  $SD_ROOT/build-mingw-cpu
+#   SLANG_SD_VARIANT=vulkan              $SD_ROOT/build-mingw-vulkan, -DSD_VULKAN=ON;
+#       needs a Vulkan SDK (VULKAN_SDK, or SD_VULKAN_SDK_DIR with include/ and
+#       lib/libvulkan-1.dll.a and share/cmake/SPIRV-Headers) and a glslc (VULKAN_GLSLC, else on PATH).
+#
+# Windows lane = llvm-mingw UCRT only (never GCC, never cl). The compiler is CC,
+# else $SIMPLE_MINGW_ROOT/bin/clang, else the newest ~/.simple/toolchains/
+# llvm-mingw-*-ucrt-x86_64; a bare clang on PATH may be an MSVC-target clang
+# (ROCm's), so the target is checked with -dumpmachine. The mingw runtime DLLs
+# (libc++, libunwind, libwinpthread-1) are copied next to the shim.
+#
+# Verdict is the last line of stdout, same convention as scripts/check/*:
+#   PASS  -- <n> symbol(s) exported, <path>        exit 0
+#   FAIL  -- <reason>                              exit 1
+#   ERROR -- nothing was built (<reason>)          exit 2
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+VARIANT=${SLANG_SD_VARIANT:-cpu}
+case "$VARIANT" in
+    cpu|vulkan) ;;
+    *) echo "ERROR -- nothing was built (SLANG_SD_VARIANT must be cpu or vulkan, got $VARIANT)"; exit 2 ;;
+esac
+OUT_DIR=${SLANG_SHIM_OUT_DIR:-$ROOT/build/sffi}/sd-$VARIANT
+SRC=$ROOT/src/runtime/slang_sd_shim.c
+
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1 ;;
+    *) IS_WINDOWS=0 ;;
+esac
+if [ "$IS_WINDOWS" -eq 1 ]; then
+    SD_ROOT=${SD_ROOT:-/c/dev/tools/stable-diffusion.cpp}
+    OUT=$OUT_DIR/slang_sd.dll
+    if [ -z "${CC:-}" ]; then
+        if [ -n "${SIMPLE_MINGW_ROOT:-}" ] && [ -x "$SIMPLE_MINGW_ROOT/bin/clang.exe" ]; then
+            MINGW_BIN=$SIMPLE_MINGW_ROOT/bin
+        else
+            MINGW_BIN=
+            for cand in $(ls -d "$HOME"/.simple/toolchains/llvm-mingw-*-ucrt-x86_64/bin 2>/dev/null | sort -r); do
+                MINGW_BIN=$cand
+                break
+            done
+        fi
+        [ -n "$MINGW_BIN" ] || { echo "ERROR -- nothing was built (no llvm-mingw toolchain; set SIMPLE_MINGW_ROOT or CC)"; exit 2; }
+        CC=$MINGW_BIN/clang.exe
+        CXX=$MINGW_BIN/clang++.exe
+    else
+        command -v "$CC" >/dev/null 2>&1 || { echo "ERROR -- nothing was built (no llvm-mingw clang: $CC)"; exit 2; }
+        MINGW_BIN=$(CDPATH= cd -- "$(dirname "$(command -v "$CC")")" && pwd -P)
+        CXX=${CXX:-$MINGW_BIN/clang++.exe}
+    fi
+    command -v "$CC" >/dev/null 2>&1 || { echo "ERROR -- nothing was built (no llvm-mingw clang: $CC)"; exit 2; }
+    case "$("$CC" -dumpmachine 2>/dev/null)" in
+        *-w64-mingw32*|*-windows-gnu*) ;;
+        *) echo "ERROR -- nothing was built ($CC does not target mingw; set SIMPLE_MINGW_ROOT or CC to llvm-mingw clang)"; exit 2 ;;
+    esac
+    PATH=$MINGW_BIN:$PATH
+    export PATH
+    MINGW_RT_DIR=$MINGW_BIN/../x86_64-w64-mingw32/bin
+    READOBJ=$MINGW_BIN/llvm-readobj.exe
+    winpath() { cygpath -m "$1" 2>/dev/null || printf '%s' "$1"; }
+else
+    SD_ROOT=${SD_ROOT:-$HOME/dev/stable-diffusion.cpp}
+    OUT=$OUT_DIR/libslang_sd.so
+    CC=${CC:-clang}
+    CXX=${CXX:-clang++}
+    command -v "$CC" >/dev/null 2>&1 || { echo "ERROR -- nothing was built (no C compiler: $CC)"; exit 2; }
+    winpath() { printf '%s' "$1"; }
+fi
+
+list_exports() {
+    if [ "$IS_WINDOWS" -eq 1 ]; then
+        "$READOBJ" --coff-exports "$1" 2>/dev/null | sed -n 's/^ *Name: \(.*\)$/0 T \1/p'
+    else
+        nm -D --defined-only "$1" 2>/dev/null
+    fi
+}
+
+# Every precondition is ERROR, never PASS: absence of a toolchain or of the
+# external SDK is absence of evidence, not evidence of success.
+[ -f "$SRC" ] || { echo "ERROR -- nothing was built (missing $SRC)"; exit 2; }
+[ -f "$SD_ROOT/include/stable-diffusion.h" ] || { echo "ERROR -- nothing was built (no stable-diffusion.h under SD_ROOT=$SD_ROOT)"; exit 2; }
+command -v cmake >/dev/null 2>&1 || { echo "ERROR -- nothing was built (no cmake on PATH)"; exit 2; }
+command -v ninja >/dev/null 2>&1 || { echo "ERROR -- nothing was built (no ninja on PATH)"; exit 2; }
+
+BUILD_DIR=${SD_BUILD_DIR:-$SD_ROOT/build-mingw-$VARIANT}
+VK_FLAGS=""
+VK_LIBS=""
+SHIM_DEFS=""
+if [ "$VARIANT" = vulkan ]; then
+    SDK=${SD_VULKAN_SDK_DIR:-${VULKAN_SDK:-}}
+    [ -n "$SDK" ] || { echo "ERROR -- nothing was built (vulkan variant needs SD_VULKAN_SDK_DIR or VULKAN_SDK)"; exit 2; }
+    if [ "$IS_WINDOWS" -eq 1 ]; then
+        VK_LIB=$SDK/lib/libvulkan-1.dll.a
+    else
+        VK_LIB=$SDK/lib/libvulkan.so
+    fi
+    [ -f "$VK_LIB" ] || { echo "ERROR -- nothing was built (no Vulkan loader library $VK_LIB)"; exit 2; }
+    GLSLC=${VULKAN_GLSLC:-$(command -v glslc 2>/dev/null || true)}
+    [ -n "$GLSLC" ] || { echo "ERROR -- nothing was built (no glslc; set VULKAN_GLSLC)"; exit 2; }
+    VK_FLAGS="-DSD_VULKAN=ON -DSPIRV-Headers_DIR=$(winpath "$SDK/share/cmake/SPIRV-Headers") -DVulkan_INCLUDE_DIR=$(winpath "$SDK/include") -DVulkan_LIBRARY=$(winpath "$VK_LIB") -DVulkan_GLSLC_EXECUTABLE=$(winpath "$GLSLC")"
+    VK_LIBS=$(winpath "$VK_LIB")
+    SHIM_DEFS="-DSLANG_SD_VULKAN"
+fi
+
+mkdir -p "$OUT_DIR"
+cc_rc=0
+if [ ! -f "$BUILD_DIR/CMakeCache.txt" ]; then
+    # shellcheck disable=SC2086
+    cmake -S "$(winpath "$SD_ROOT")" -B "$(winpath "$BUILD_DIR")" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER="$(winpath "$CC")" -DCMAKE_CXX_COMPILER="$(winpath "$CXX")" \
+        -DSD_BUILD_EXAMPLES=OFF -DSD_WEBP=OFF -DSD_WEBM=OFF -DGGML_OPENMP=OFF \
+        -DBUILD_SHARED_LIBS=OFF -DSD_BUILD_SHARED_LIBS=OFF $VK_FLAGS >"$OUT_DIR/cmake-configure.log" 2>&1 || cc_rc=$?
+fi
+if [ "$cc_rc" -eq 0 ]; then
+    cmake --build "$(winpath "$BUILD_DIR")" -j "${SLANG_SD_JOBS:-6}" >"$OUT_DIR/cmake-build.log" 2>&1 || cc_rc=$?
+fi
+if [ "$cc_rc" -ne 0 ]; then
+    echo "FAIL -- stable-diffusion.cpp $VARIANT build failed (exit $cc_rc, see $OUT_DIR/cmake-*.log)"
+    exit 1
+fi
+
+# The archive set is whatever the build produced: stable-diffusion plus every
+# ggml*.a, grouped because the archives reference each other.
+ARCHIVES=$(find "$BUILD_DIR" \( -name 'libstable-diffusion.a' -o -name 'ggml*.a' -o -name 'libggml*.a' \) | sort)
+[ -n "$ARCHIVES" ] || { echo "ERROR -- nothing was built (no static archives under $BUILD_DIR)"; exit 2; }
+WIN_ARCHIVES=""
+for a in $ARCHIVES; do WIN_ARCHIVES="$WIN_ARCHIVES $(winpath "$a")"; done
+
+# The shim is C, linked with the C++ driver because the archives are C++.
+# shellcheck disable=SC2086
+"$CXX" -O2 -shared -x c $SHIM_DEFS -I"$(winpath "$SD_ROOT/include")" "$(winpath "$SRC")" -x none \
+    -o "$(winpath "$OUT")" \
+    -Wl,--start-group $WIN_ARCHIVES -Wl,--end-group $VK_LIBS >"$OUT_DIR/build.log" 2>&1 || cc_rc=$?
+if [ "$cc_rc" -ne 0 ]; then
+    echo "compile output:" >&2
+    tail -40 "$OUT_DIR/build.log" >&2
+    echo "FAIL -- shim link failed (exit $cc_rc)"
+    exit 1
+fi
+[ -f "$OUT" ] || { echo "ERROR -- nothing was built (linker reported success but $OUT is absent)"; exit 2; }
+
+if [ "$IS_WINDOWS" -eq 1 ]; then
+    for rt in libwinpthread-1.dll libunwind.dll libc++.dll; do
+        [ -f "$MINGW_RT_DIR/$rt" ] || { echo "ERROR -- nothing was built (no mingw runtime $rt under $MINGW_RT_DIR)"; exit 2; }
+        cp -f "$MINGW_RT_DIR/$rt" "$OUT_DIR/$rt"
+    done
+fi
+
+symbols=$OUT_DIR/slang_sd_symbols.txt
+list_exports "$OUT" >"$symbols"
+n_sym=$(grep -c ' T slang_sd_' "$symbols" || true)
+[ "$n_sym" -gt 0 ] || { echo "FAIL -- built $OUT but it exports 0 slang_sd_* symbols"; exit 1; }
+for required in slang_sd_capabilities slang_sd_ctx_open slang_sd_gen slang_sd_image_dim \
+    slang_sd_image_into slang_sd_error_into slang_sd_info_into slang_sd_free
+do
+    grep -q " T $required\$" "$symbols" || { echo "FAIL -- built $OUT but required symbol $required is absent"; exit 1; }
+done
+echo "PASS -- $n_sym symbol(s) exported, $OUT"

@@ -15,7 +15,7 @@ use std.spec.step
 use std.spec.{describe, it, expect}
 
 use std.gc_async_mut.slang.modality.kinds.{ModelKind, model_kind_text, modalities_json}
-use std.gc_async_mut.slang.modality.kind_registry.{gguf_facts, resolve_kind}
+use std.gc_async_mut.slang.modality.kind_registry.{gguf_facts, gguf_header_bytes_read, resolve_kind}
 use std.gc_async_mut.slang.engine.runner_dispatch.{runner_kind_text}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{describe_model, gguf_entry_shard}
 use std.gc_async_mut.slang.entrypoints.openai.api_server.{slang_api_dispatch}
@@ -119,6 +119,15 @@ fn all_ones() -> [u8]:
         i = i + 1
     o
 
+# `lmgg` magic followed by i32 hparams (whisper.cpp writes 11, llama ggml 7).
+fn ggml_header(hparams: [i64]) -> [u8]:
+    var o: [u8] = []
+    for b in "lmgg".bytes():
+        o.push(b)
+    for h in hparams:
+        o = _le(o, h, 4)
+    o
+
 fn fixture_dir(name: text) -> text:
     val dir = "build/test/slang_kind_registry/" + name
     dir_remove_all(dir)
@@ -162,6 +171,43 @@ describe "the binary GGUF KV walk":
         expect(m.format).to_equal("gguf")
         expect(m.entry_path.ends_with("model.gguf")).to_equal(true)
         expect(model_kind_text(m.profile.kind)).to_equal("chat")
+
+describe "GGUF header reads":
+    it "reads a large header once, incrementally, and serves the second ask from the cache":
+        step("Verify: growing reads append only new bytes (total read == file size, not 4K+16K+...), and a repeat costs 0 bytes")
+        val d = fixture_dir("incremental")
+        val bytes = gguf([kv_str("general.architecture", "qwen2"), kv_str_array("general.tags", 3000), kv_u32("qwen2.context_length", 4096)])
+        file_write_bytes(d + "/m.gguf", bytes)
+        val before = gguf_header_bytes_read()
+        match gguf_facts(d + "/m.gguf"):
+            Ok(f):
+                expect(f.arch).to_equal("qwen2")
+            Err(why):
+                expect(why).to_equal("")
+        val first = gguf_header_bytes_read() - before
+        expect(first).to_equal(bytes.len())
+        match gguf_facts(d + "/m.gguf"):
+            Ok(f):
+                expect(f.arch).to_equal("qwen2")
+            Err(why):
+                expect(why).to_equal("")
+        expect(gguf_header_bytes_read() - before).to_equal(first)
+
+    it "re-walks a file whose size changed":
+        step("Verify: the cache key includes the size, so a rewritten file is not served stale facts")
+        val d = fixture_dir("invalidate")
+        file_write_bytes(d + "/m.gguf", gguf([kv_str("general.architecture", "llama")]))
+        match gguf_facts(d + "/m.gguf"):
+            Ok(f):
+                expect(f.arch).to_equal("llama")
+            Err(why):
+                expect(why).to_equal("")
+        file_write_bytes(d + "/m.gguf", gguf([kv_str("general.architecture", "bert"), kv_u32("bert.pooling_type", 2)]))
+        match gguf_facts(d + "/m.gguf"):
+            Ok(f):
+                expect(f.arch).to_equal("bert")
+            Err(why):
+                expect(why).to_equal("")
 
 describe "hostile GGUF headers":
     it "rejects a negative key length as malformed":
@@ -273,7 +319,7 @@ describe "resolve_kind":
     it "sniffs whisper ggml magic and SD UNet safetensors":
         step("Verify: lmgg -> asr on whisper; model.diffusion_model. -> image_gen on stable-diffusion")
         val w = fixture_dir("whisper")
-        write_file(w + "/ggml-tiny.en.bin", "lmgg-rest-of-header")
+        file_write_bytes(w + "/ggml-tiny.en.bin", ggml_header([51864, 1500, 384, 6, 4, 448, 384, 6, 4, 80, 1]))
         expect(kind_of(w)).to_equal("asr [\"audio\"]->[\"text\"] whisper")
         expect(describe_model(w, true).format).to_equal("ggml")
         val s = fixture_dir("sd")
@@ -369,3 +415,50 @@ describe "the HTTP surface":
         expect(json_string_field(rr.body, "code")).to_equal("wrong_model_kind")
         expect(slang_api_dispatch("GET", "/v1/rerank", "", root).status).to_equal(405)
         expect(slang_api_dispatch("POST", "/v1/rerankx", "{}", root).status).to_equal(404)
+
+    it "answers a pack's manifest id with wrong_model_kind and an empty dir with 404":
+        step("Verify: a kind route resolves packs by model_id like /v1/models lists them; an empty dir is not a model")
+        val root = fixture_dir("pack_ids")
+        dir_create_all(root + "/packdir")
+        write_file(root + "/packdir/manifest.sdn", "{\"schema_version\":0,\"model_id\":\"my-pack\",\"revision\":\"v0\",\"preferred_chunk_bytes\":2097152,\"digest_algo\":\"sha256\",\"chunks\":[],\"tensors\":[]}")
+        dir_create_all(root + "/empty")
+        val pack = slang_api_dispatch("POST", "/v1/embeddings", "{\"model\":\"my-pack\",\"input\":\"x\"}", root)
+        expect(pack.status).to_equal(400)
+        expect(json_string_field(pack.body, "code")).to_equal("wrong_model_kind")
+        val empty = slang_api_dispatch("POST", "/v1/embeddings", "{\"model\":\"empty\",\"input\":\"x\"}", root)
+        expect(empty.status).to_equal(404)
+        expect(json_string_field(empty.body, "code")).to_equal("model_not_found")
+
+describe "resolve_kind entry choice and non-chat families":
+    it "takes the lowest-named model file that names an architecture as the entry":
+        step("Verify: a later split shard without general.* does not decide the kind")
+        val d = fixture_dir("entry_choice")
+        file_write_bytes(d + "/a-part.gguf", gguf([kv_u32("split.count", 2)]))
+        file_write_bytes(d + "/b-model.gguf", gguf([kv_str("general.architecture", "bert"), kv_u32("bert.pooling_type", 2)]))
+        expect(model_kind_text(resolve_kind(d).kind)).to_equal("embedding")
+
+    it "resolves flux and t5encoder GGUFs as image generation, never runnable chat":
+        step("Verify: diffusion-family architectures map to image_gen on stable-diffusion")
+        val f = fixture_dir("flux")
+        file_write_bytes(f + "/flux1-schnell-Q4_0.gguf", gguf([kv_str("general.architecture", "flux")]))
+        expect(kind_of(f)).to_equal("image_gen [\"text\"]->[\"image\"] stable-diffusion")
+        expect(describe_model(f, true).runnable).to_equal(false)
+        val t = fixture_dir("t5enc")
+        file_write_bytes(t + "/t5-v1_1-xxl-encoder-Q8_0.gguf", gguf([kv_str("general.architecture", "t5encoder")]))
+        expect(model_kind_text(resolve_kind(t).kind)).to_equal("image_gen")
+
+    it "does not take a legacy llama ggml file for whisper":
+        step("Verify: the lmgg magic alone is not Asr; whisper hparams (n_audio_ctx 1500, n_mels 80/128) are required")
+        val d = fixture_dir("llama_ggml")
+        file_write_bytes(d + "/ggml-model-q4_0.bin", ggml_header([32000, 4096, 256, 32, 32, 128, 2]))
+        expect(model_kind_text(resolve_kind(d).kind)).to_equal("chat")
+        expect(resolve_kind(d).reason.contains("no kind could be resolved")).to_equal(true)
+
+    it "accepts a quoted kind in slang_kind.sdn":
+        step("Verify: kind: \"tts\" is the same override as kind: tts")
+        val d = fixture_dir("quoted_override")
+        file_write_bytes(d + "/m.gguf", gguf([kv_str("general.architecture", "llama")]))
+        file_write_bytes(d + "/voc.gguf", gguf([kv_str("general.architecture", "wavtokenizer-dec")]))
+        write_file(d + "/slang_kind.sdn", "kind: \"tts\"\nvocoder: voc.gguf\n")
+        expect(model_kind_text(resolve_kind(d).kind)).to_equal("tts")
+        expect(resolve_kind(d).reason.contains("slang_kind.sdn")).to_equal(false)

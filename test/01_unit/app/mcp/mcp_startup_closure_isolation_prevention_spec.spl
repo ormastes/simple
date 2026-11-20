@@ -1,0 +1,80 @@
+"""
+## Purpose and audience
+Purpose: Prevent regression of MCP startup closure bloat (#187) and function-local relative/entry imports.
+Audience: MCP server owners and compiler performance engineers.
+"""
+
+# @req: REQ-APP-MCP-STARTUP-PREVENTION-001
+
+use std.spec.*
+use app.mcp.main.{
+    _mcp_get_tool_set,
+    _mcp_init_tool_set,
+    mcp_cli_option_error
+}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn _contains_indented_use(src: text) -> bool:
+    for line in src.split("\n"):
+        if line.starts_with("    use ") or line.starts_with("        use "):
+            return true
+    false
+
+fn _has_relative_function_local_use(src: text) -> bool:
+    for line in src.split("\n"):
+        val trimmed = line.trim()
+        if (line.starts_with("    use ") or line.starts_with("        use ")) and trimmed.starts_with("use ."):
+            return true
+    false
+
+describe "MCP startup closure isolation prevention guard":
+
+    it "keeps all heavy handler and schema modules out of main.spl top-level imports":
+        val main_src = rt_file_read_text("src/app/mcp/main.spl") ?? ""
+        val forbidden = [
+            "main_dispatch",
+            "main_static_tools",
+            "tool_table",
+            "main_lazy_protocol",
+            "main_lazy_diag_tools",
+            "main_lazy_vcs_tools",
+            "main_lazy_debug_tools",
+            "main_lazy_dialog_tools",
+            "main_lazy_query_tools",
+            "main_lazy_play_tools",
+            "main_lazy_assistant",
+            "main_lazy_node_tools",
+            "main_lazy_ctx_tools",
+            "main_lazy_telemetry",
+            "main_editor_tools",
+            "cli_passthrough",
+            "main_lazy_caret_tools"
+        ]
+        val lines = main_src.split("\n")
+        for line in lines:
+            if line.starts_with("use "):
+                expect(line.contains("main_lazy_dispatch") or not line.contains("main_dispatch")).to_equal(true)
+                for mod_name in forbidden:
+                    val is_lazy_bridge = mod_name == "main_dispatch" and line.contains("main_lazy_dispatch")
+                    if not is_lazy_bridge:
+                        expect(line.contains(mod_name)).to_equal(false)
+
+    it "forbids function-local use in entry module main.spl so seed JIT startup never traps":
+        val main_src = rt_file_read_text("src/app/mcp/main.spl") ?? ""
+        expect(_contains_indented_use(main_src)).to_equal(false)
+
+    it "forbids relative function-local use in main_lazy_dispatch.spl and main_dispatch.spl":
+        val bridge_src = rt_file_read_text("src/app/mcp/main_lazy_dispatch.spl") ?? ""
+        val dispatch_src = rt_file_read_text("src/app/mcp/main_dispatch.spl") ?? ""
+        expect(bridge_src.len()).to_be_greater_than(0)
+        expect(_has_relative_function_local_use(bridge_src)).to_equal(false)
+        expect(_has_relative_function_local_use(dispatch_src)).to_equal(false)
+
+    it "keeps CLI pre-dispatch option validation and tool-set selection lightweight":
+        _mcp_init_tool_set(["--tool-set=core"])
+        expect(_mcp_get_tool_set()).to_equal("core")
+        _mcp_init_tool_set(["--tool-set=auto"])
+        expect(_mcp_get_tool_set()).to_equal("auto")
+        expect(mcp_cli_option_error(["--help"])).to_equal("")
+        expect(mcp_cli_option_error(["--bad-flag"])).to_contain("Unknown mcp option")

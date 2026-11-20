@@ -1,0 +1,82 @@
+"""
+# LSP Code Action Edit Emission Prevention Spec
+
+Prevention coverage for `lsp_code_action_edit_emit_parse_mismatch_2026-06-16`:
+ensures `lsp_edit_source_map`, `lsp_code_action_text_edit`,
+`lsp_constructor_code_action`, `lsp_pass_code_action`, and
+`lsp_code_actions_convert_output` emit valid LSP `documentChanges` JSON with
+exact UTF-16 line/character coordinates and non-collapsed `newText`.
+"""
+
+use std.spec.*
+use std.common.json.value.{
+    JsonValue,
+    json_parse_value_strict,
+    json_value_field,
+    json_value_items,
+    json_value_serialize,
+    json_value_as_i64,
+    json_value_text_or
+}
+use std.nogc_sync_mut.lsp.lsp_code_action.{
+    lsp_edit_source_map,
+    lsp_code_action_text_edit,
+    lsp_query_code_action,
+    lsp_constructor_code_action,
+    lsp_pass_code_action,
+    lsp_code_actions_convert_output
+}
+
+fn convert_single_action(action: JsonValue, uri: text) -> JsonValue:
+    val raw = json_value_serialize(JsonValue.Array([action]))
+    val converted = lsp_code_actions_convert_output(raw, uri)
+    val parsed = json_parse_value_strict(converted)
+    expect(parsed.is_ok()).to_equal(true)
+    val items = json_value_items(parsed.unwrap())
+    expect(items.len()).to_equal(1)
+    items[0]
+
+fn extract_first_edits(action: JsonValue, expected_uri: text) -> [JsonValue]:
+    val workspace = json_value_field(action, "edit")
+    val docs = json_value_items(json_value_field(workspace, "documentChanges"))
+    expect(docs.len()).to_equal(1)
+    val td = json_value_field(docs[0], "textDocument")
+    expect(json_value_field(td, "uri")).to_equal(JsonValue.Str(expected_uri))
+    json_value_items(json_value_field(docs[0], "edits"))
+
+describe "LSP code action edit serialization and conversion":
+    """Prevents query-builder vs converter schema drift and offset miscalculation."""
+
+    it "round-trips empty deletions from lsp_constructor_code_action":
+        val source = "val v = Widget.new()"
+        val map = lsp_edit_source_map(source)
+        val query = lsp_constructor_code_action(map, "widget.spl", 0, 15)
+        val action = convert_single_action(query, "file:///widget.spl")
+        val edits = extract_first_edits(action, "file:///widget.spl")
+        expect(edits.len()).to_equal(1)
+        expect(json_value_field(edits[0], "newText")).to_equal(JsonValue.Str(""))
+        val start_col = json_value_as_i64(json_value_field(json_value_field(json_value_field(edits[0], "range"), "start"), "character")).unwrap()
+        val end_col = json_value_as_i64(json_value_field(json_value_field(json_value_field(edits[0], "range"), "end"), "character")).unwrap()
+        val rewritten = source.substring(0, start_col) + source.substring(end_col)
+        expect(rewritten).to_equal("val v = Widget()")
+
+    it "converts CRLF multiline edits and preserves newText verbatim":
+        val source = "fn demo():\r\n    pass\r\n"
+        val map = lsp_edit_source_map(source)
+        val query = lsp_pass_code_action(map, "demo.spl", 1)
+        val action = convert_single_action(query, "file:///demo.spl")
+        val edits = extract_first_edits(action, "file:///demo.spl")
+        expect(edits.len()).to_equal(1)
+        val start_line = json_value_as_i64(json_value_field(json_value_field(json_value_field(edits[0], "range"), "start"), "line")).unwrap()
+        expect(start_line).to_equal(1)
+        expect(json_value_text_or(json_value_field(edits[0], "newText"), "")).to_equal("pass_do_nothing")
+
+    it "rejects out-of-bounds or inverted byte spans in lsp_code_action_text_edit":
+        val map = lsp_edit_source_map("abc")
+        expect(lsp_code_action_text_edit(map, 2, 1, "x") == nil).to_equal(true)
+        expect(lsp_code_action_text_edit(map, 0, 99, "x") == nil).to_equal(true)
+        val valid = lsp_code_action_text_edit(map, 0, 3, "xyz").unwrap()
+        val query = lsp_query_code_action("Replace", "quickfix", true, "abc.spl", [valid])
+        val action = convert_single_action(query, "file:///abc.spl")
+        val edits = extract_first_edits(action, "file:///abc.spl")
+        expect(json_value_field(edits[0], "newText")).to_equal(JsonValue.Str("xyz"))

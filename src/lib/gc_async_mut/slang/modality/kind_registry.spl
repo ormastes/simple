@@ -30,10 +30,8 @@
 
 use std.gc_async_mut.slang.modality.kinds.{Modality, ModelKind, KindProfile, kind_profile, kind_default_inputs, model_kind_from_text}
 use std.gc_async_mut.slang.engine.runner_dispatch.{RunnerKind}
-use std.nogc_sync_mut.io.external_file.{external_file_read_bytes_at}
 use std.common.text_bytes.{bytes_to_text}
-use std.io_runtime.{is_dir, file_size}
-use std.gc_async_mut.slang.host.slang_host.{host_file_exists, host_file_read, host_dir_list}
+use std.gc_async_mut.slang.host.slang_host.{host_file_exists, host_file_read, host_dir_list, host_is_dir, host_file_size, host_file_mtime, host_read_bytes_at}
 
 val KIND_OVERRIDE_FILE = "slang_kind.sdn"
 val GGUF_FIRST_READ = 4096
@@ -306,52 +304,112 @@ fn gguf_walk_bytes(b: [u8], total: i64, full: bool) -> Result<GgufFacts, GgufWal
 fn gguf_facts_from_bytes(b: [u8]) -> Result<GgufFacts, GgufWalkStop>:
     gguf_walk_bytes(b, b.len(), false)
 
-fn _gguf_read_walk(path: text, size: i64, full: bool) -> Result<GgufFacts, text>:
-    var want = GGUF_FIRST_READ
-    while true:
-        val n = if want > size: size else: want
-        match external_file_read_bytes_at(path, 0, n):
-            Err(_):
-                return Err("cannot read " + path)
-            Ok(bytes):
-                match gguf_walk_bytes(bytes, size, full):
-                    Ok(facts):
-                        return Ok(facts)
-                    Err(GgufWalkStop.Malformed(why)):
-                        return Err(path + ": " + why)
-                    Err(GgufWalkStop.NeedMore):
-                        if n >= size:
-                            return Err(path + ": truncated GGUF metadata")
-                        if n >= GGUF_MAX_READ:
-                            return Err(path + ": GGUF metadata is larger than " + GGUF_MAX_READ.to_text() + " bytes")
-                        want = want * 4
-    Err(path + ": unreachable")
-
 fn _is_embedding(k: ModelKind) -> bool:
     match k:
         ModelKind.Embedding: true
         _: false
 
-# GGUF facts of the file at `path`. Reads a growing prefix until the KV block
-# fits, never past GGUF_MAX_READ. An encoder that names no pooling type (the
-# bge-reranker-v2-m3 GGUF writes none) is walked again in full: its
-# classification head (`cls.output.weight`) lives in the tensor-info table,
-# after the tokenizer block, and is what tells a reranker from an embedder.
+# Bytes of GGUF header read from disk by this process (a measurement for specs
+# and the /v1/models cost note; a racy increment only skews the count).
+var GGUF_HEADER_BYTES_READ: i64 = 0
+
+fn gguf_header_bytes_read() -> i64:
+    GGUF_HEADER_BYTES_READ
+
+# The walk of one file over ONE growing buffer: each step reads only the bytes
+# past what is already held (a bulk ranged read), never the prefix again. An
+# encoder that names no pooling type (the bge-reranker-v2-m3 GGUF writes none)
+# is walked again in full over the same buffer: its classification head
+# (`cls.output.weight`) lives in the tensor-info table, after the tokenizer
+# block, and is what tells a reranker from an embedder. A full walk that fails
+# keeps the cheap facts: the head is evidence for rerank, its absence is no
+# evidence against the rest.
+fn _gguf_facts_uncached(path: text, size: i64) -> Result<GgufFacts, text>:
+    var buf: [u8] = []
+    var want = GGUF_FIRST_READ
+    var full = false
+    var cheap = GgufFacts(arch: "", general_type: "", pooling_type: -1, has_vision: false, has_audio: false, has_cls_head: false)
+    while true:
+        match gguf_walk_bytes(buf, size, full):
+            Ok(facts):
+                if full:
+                    return Ok(facts)
+                if facts.pooling_type >= 0 or not _is_embedding(arch_kind(facts.arch)):
+                    return Ok(facts)
+                cheap = facts
+                full = true
+            Err(GgufWalkStop.Malformed(why)):
+                if full:
+                    return Ok(cheap)
+                return Err(path + ": " + why)
+            Err(GgufWalkStop.NeedMore):
+                if buf.len() >= size:
+                    if full:
+                        return Ok(cheap)
+                    return Err(path + ": truncated GGUF metadata")
+                if buf.len() >= GGUF_MAX_READ:
+                    if full:
+                        return Ok(cheap)
+                    return Err(path + ": GGUF metadata is larger than " + GGUF_MAX_READ.to_text() + " bytes")
+                val target = if want > size: size else: want
+                if target > buf.len():
+                    match host_read_bytes_at(path, buf.len(), target - buf.len()):
+                        Err(why):
+                            return Err(why)
+                        Ok(chunk):
+                            GGUF_HEADER_BYTES_READ = GGUF_HEADER_BYTES_READ + chunk.len()
+                            if chunk.len() != target - buf.len():
+                                return Err(path + ": short read")
+                            buf = buf + chunk
+                want = want * 4
+    Err(path + ": unreachable")
+
+# One cached walk, keyed by what makes it stale.
+struct GgufFactsCacheRow:
+    path: text
+    size: i64
+    mtime: i64
+    facts: GgufFacts
+
+val GGUF_FACTS_CACHE_MAX = 512
+
+# Copy-on-write snapshot: a reader iterates the list it read, a writer builds a
+# new list and publishes it with one assignment. Two concurrent inserts may
+# lose one, which only costs a re-walk later (lockless by design, no lock).
+var GGUF_FACTS_CACHE: [GgufFactsCacheRow] = []
+
+fn _facts_cache_publish(row: GgufFactsCacheRow):
+    val old = GGUF_FACTS_CACHE
+    var drop = 0
+    if old.len() >= GGUF_FACTS_CACHE_MAX:
+        drop = old.len() - GGUF_FACTS_CACHE_MAX + 1
+    var next: [GgufFactsCacheRow] = []
+    var i = 0
+    for r in old:
+        if i >= drop and r.path != row.path:
+            next.push(r)
+        i = i + 1
+    next.push(row)
+    GGUF_FACTS_CACHE = next
+
+# GGUF facts of the file at `path`, walked once per (path, size, mtime): a
+# /v1/models listing and the per-request kind check of a chat route reuse the
+# walk instead of re-reading headers. An mtime of 0 (unavailable) is never
+# cached. Reads a growing prefix, never past GGUF_MAX_READ.
 fn gguf_facts(path: text) -> Result<GgufFacts, text>:
-    val size = file_size(path)
-    match _gguf_read_walk(path, size, false):
+    val size = host_file_size(path)
+    val mtime = host_file_mtime(path)
+    if mtime > 0 and size >= 0:
+        for row in GGUF_FACTS_CACHE:
+            if row.path == path and row.size == size and row.mtime == mtime:
+                return Ok(row.facts)
+    match _gguf_facts_uncached(path, size):
         Err(why):
             Err(why)
-        Ok(cheap):
-            if cheap.pooling_type >= 0 or not _is_embedding(arch_kind(cheap.arch)):
-                return Ok(cheap)
-            # A full walk that fails keeps the cheap facts: the head is
-            # evidence for rerank, its absence is no evidence against the rest.
-            match _gguf_read_walk(path, size, true):
-                Ok(full):
-                    Ok(full)
-                Err(_):
-                    Ok(cheap)
+        Ok(facts):
+            if mtime > 0 and size >= 0:
+                _facts_cache_publish(GgufFactsCacheRow(path: path, size: size, mtime: mtime, facts: facts))
+            Ok(facts)
 
 # True when `facts` describe a multimodal projector rather than a model.
 fn gguf_facts_are_projector(facts: GgufFacts) -> bool:
@@ -364,8 +422,14 @@ fn gguf_facts_are_vocoder(facts: GgufFacts) -> bool:
 
 # The architecture table: the one place an architecture names a kind. Adding a
 # model family is one row. Architectures not listed are decoders served as Chat.
+#
+# Diffusion GGUFs (stable-diffusion.cpp / city96 conversions: flux, sd1, sd2,
+# sdxl, sd3, aura) and their T5 text encoder (t5encoder) are image-generation
+# parts, never a chat decoder.
 fn arch_kind(arch: text) -> ModelKind:
-    for row in [("bert", ModelKind.Embedding), ("nomic-bert", ModelKind.Embedding), ("jina-bert-v2", ModelKind.Embedding)]:
+    for row in [("bert", ModelKind.Embedding), ("nomic-bert", ModelKind.Embedding), ("jina-bert-v2", ModelKind.Embedding),
+                ("flux", ModelKind.ImageGen), ("sd1", ModelKind.ImageGen), ("sd2", ModelKind.ImageGen), ("sdxl", ModelKind.ImageGen),
+                ("sd3", ModelKind.ImageGen), ("aura", ModelKind.ImageGen), ("t5encoder", ModelKind.ImageGen)]:
         if row.0 == arch:
             return row.1
     ModelKind.Chat
@@ -386,8 +450,14 @@ fn kind_override_field(dir: text, key: text) -> text:
     for line in host_file_read(path).split("\n"):
         val t = line.trim()
         if t.starts_with(key + ":"):
-            return t.slice(key.byte_len() + 1, t.byte_len()).trim()
+            return _unquote(t.slice(key.byte_len() + 1, t.byte_len()).trim())
     ""
+
+# `"tts"` and `'tts'` are the SDN-quoted forms of `tts`.
+fn _unquote(v: text) -> text:
+    if v.byte_len() >= 2 and ((v.starts_with("\"") and v.ends_with("\"")) or (v.starts_with("'") and v.ends_with("'"))):
+        return v.slice(1, v.byte_len() - 1).trim()
+    v
 
 fn _runner_for_kind(k: ModelKind) -> RunnerKind:
     match k:
@@ -414,7 +484,7 @@ fn _files(dir: text) -> [text]:
     match host_dir_list(dir):
         case Some(names):
             for name in names:
-                if not is_dir(_join(dir, name)):
+                if not host_is_dir(_join(dir, name)):
                     out.push(name)
         case None:
             pass
@@ -422,7 +492,7 @@ fn _files(dir: text) -> [text]:
 
 # First 4 bytes of `path` as text ("" when unreadable).
 fn _magic(path: text) -> text:
-    match external_file_read_bytes_at(path, 0, 4):
+    match host_read_bytes_at(path, 0, 4):
         Ok(b):
             if b.len() == 4:
                 return bytes_to_text(b)
@@ -433,7 +503,7 @@ fn _magic(path: text) -> text:
 # True when a safetensors file's JSON header names an SD UNet tensor
 # (`model.diffusion_model.` prefix). Only the header is read.
 fn safetensors_is_sd_unet(path: text) -> bool:
-    match external_file_read_bytes_at(path, 0, 8):
+    match host_read_bytes_at(path, 0, 8):
         Err(_):
             return false
         Ok(head):
@@ -442,18 +512,35 @@ fn safetensors_is_sd_unet(path: text) -> bool:
             val header_len = _u64_at(head, 0)
             if header_len <= 0 or header_len > GGUF_MAX_READ:
                 return false
-            match external_file_read_bytes_at(path, 8, header_len):
+            match host_read_bytes_at(path, 8, header_len):
                 Ok(json):
                     bytes_to_text(json).contains("\"model.diffusion_model.")
                 Err(_):
                     false
 
+fn _is_whisper_ggml(path: text) -> bool:
+    match host_read_bytes_at(path, 0, 48):
+        Err(_):
+            false
+        Ok(b):
+            if b.len() != 48 or not _bytes_are(b, 0, 4, "lmgg"):
+                return false
+            val n_audio_ctx = _u32_at(b, 8)
+            val n_mels = _u32_at(b, 40)
+            n_audio_ctx == 1500 and (n_mels == 80 or n_mels == 128)
+
 # The lowest-named file in `dir` carrying the legacy ggml magic (`lmgg`, the
 # whisper.cpp model format), "" when there is none.
+#
+# The legacy llama.cpp ggml format shares the `lmgg` magic, so the magic alone is
+# not Asr: a whisper.cpp header is 11 i32 hparams (n_vocab, n_audio_ctx,
+# n_audio_state, n_audio_head, n_audio_layer, n_text_ctx, n_text_state,
+# n_text_head, n_text_layer, n_mels, ftype) with n_audio_ctx 1500 (30 s of
+# audio) and n_mels 80 or 128; a llama ggml header has n_embd there instead.
 fn ggml_magic_file(dir: text) -> text:
     var best = ""
     for name in _files(dir):
-        if (best == "" or name < best) and _magic(_join(dir, name)) == "lmgg":
+        if (best == "" or name < best) and _is_whisper_ggml(_join(dir, name)):
             best = name
     if best == "":
         return ""
@@ -519,13 +606,24 @@ fn resolve_kind_from(dir: text, gguf: [GgufFile]) -> KindProfile:
     var projectors: [GgufFacts] = []
     var vocoders = 0
     var models: [GgufFacts] = []
+    var entry_name = ""
+    var entry_has_arch = false
     for f in gguf:
         if gguf_file_is_projector(f):
             projectors.push(f.facts)
         elif gguf_facts_are_vocoder(f.facts):
             vocoders = vocoders + 1
         else:
-            models.push(f.facts)
+            # The entry is the lowest-named model file that names an
+            # architecture (shard 1 of a split carries general.*; later shards
+            # may not), never whichever the directory listing returned first.
+            val has_arch = f.facts.arch != ""
+            if models.len() == 0 or (has_arch and not entry_has_arch) or (has_arch == entry_has_arch and f.name < entry_name):
+                models = [f.facts] + models
+                entry_name = f.name
+                entry_has_arch = has_arch
+            else:
+                models.push(f.facts)
     # 2. projector companion -> Chat with the projector's input modalities
     if models.len() > 0 and projectors.len() == 1:
         var inputs = [Modality.Text]
@@ -546,7 +644,8 @@ fn resolve_kind_from(dir: text, gguf: [GgufFile]) -> KindProfile:
                 # 4b. an encoder with a classification head is a reranker
                 if models[0].has_cls_head and _is_embedding(arch_kind(models[0].arch)):
                     return _profile(ModelKind.Rerank, [Modality.Text], RunnerKind.Ggml)
-                return _profile(arch_kind(models[0].arch), [Modality.Text], RunnerKind.Ggml)
+                val k = arch_kind(models[0].arch)
+                return _profile(k, [Modality.Text], _runner_for_kind(k))
     if vocoders > 0:
         return kind_profile(ModelKind.Tts, [Modality.Text], RunnerKind.Ggml, "only a WavTokenizer vocoder (wavtokenizer-dec) was found; it needs a TTS model GGUF beside it")
     # 6. magic sniff
@@ -562,5 +661,5 @@ fn resolve_kind_from(dir: text, gguf: [GgufFile]) -> KindProfile:
     kind_profile(ModelKind.Chat, [Modality.Text], RunnerKind.Ggml, "no kind could be resolved: no " + KIND_OVERRIDE_FILE + ", no GGUF model, no ggml (lmgg) file and no recognised safetensors")
 
 export GgufFacts, GgufWalkStop, GgufFile
-export gguf_facts_from_bytes, gguf_walk_bytes, gguf_facts, gguf_facts_are_projector, gguf_file_is_projector, gguf_facts_are_vocoder, gguf_files
+export gguf_facts_from_bytes, gguf_walk_bytes, gguf_header_bytes_read, gguf_facts, gguf_facts_are_projector, gguf_file_is_projector, gguf_facts_are_vocoder, gguf_files
 export arch_kind, pooling_kind, kind_override_field, kind_unserved_reason, safetensors_is_sd_unet, ggml_magic_file, resolve_kind, resolve_kind_from

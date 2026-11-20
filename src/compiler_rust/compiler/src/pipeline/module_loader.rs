@@ -1530,6 +1530,7 @@ pub fn check_import_compatibility(
 /// verbatim with the pure-Simple twin in
 /// `src/compiler/10.frontend/core/interpreter/resolve.spl`.
 pub fn reject_captured_local_writes(module: &Module, path: &Path) -> Result<(), CompileError> {
+    simple_parser::nil_outside_unsafe::report_nil_outside_unsafe(path, None);
     // W-CAPTURE-MUTATION (staged warning): a receiver-mutating call on a
     // captured local is dropped with the by-value snapshot.
     for m in simple_parser::capture_write_check::find_captured_local_mutations(module) {

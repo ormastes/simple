@@ -16,6 +16,7 @@ unproven), every installed-identity comparison stays. A failed pin names that co
 use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
 use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.controller_dispatch_host_action_key_v3
 use std.common.crypto.sha256.sha256_text
+use std.common.contracts.orchestration.host_control_operation_v6.HOST_CONTROL_SUBS_V6
 
 val HA_DISPATCH_SOURCE_V3 = "src/lib/nogc_sync_mut/orchestration/controller_dispatch_owner_v3.spl"
 
@@ -71,10 +72,16 @@ describe "controller dispatch host-action mode (milestone_0046)":
         expect(begin.contains("owner.remote_op = operation_id")).to_equal(true)
         expect(begin.contains("packet")).to_equal(false)
 
-    it "archives every abandon create-only before it is sent and refuses different bytes":
-        step("Identical bytes may be resent (the Host is idempotent on the same proof); only abandons take the create-only archive")
+    it "archives every signed effect (abandons and retention-release) create-only before it is sent and refuses different bytes":
+        step("Identical bytes may be resent (the Host is idempotent on the same proof); every non-inspect sub is archived")
+        # @req M0050-REVIEW-B-03 (lane A finding: retention-release was sent without the archive; only `-abandon` matched)
+        var effects: [text] = []
+        for name in HOST_CONTROL_SUBS_V6:
+            if not name.ends_with("-inspect"): effects.push(name)
+        expect(effects).to_equal(["helper-abandon", "handoff-abandon", "retention-release"])
         val send = ha_fn_body_v3(ha_dispatch_source_v3(), "fn dispatch_state_host_action_send_v3(")
-        val decide_at = send.index_of("sub.unwrap().sub.ends_with(\"-abandon\")")
+        expect(send.contains("ends_with(\"-abandon\")")).to_equal(false)
+        val decide_at = send.index_of("if not sub.unwrap().sub.ends_with(\"-inspect\"):")
         val publish_at = send.index_of("distributed_operation_journal_publish_v3(")
         val readback_at = send.index_of("distributed_operation_journal_read_required_v3(")
         val send_at = send.index_of("dispatch_send_v3(owner, \"host-control\", payload)")

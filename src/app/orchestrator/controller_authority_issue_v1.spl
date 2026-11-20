@@ -34,23 +34,25 @@ fn controller_authority_store_read_v1(store_root: text, key: DistributedAuthorit
     if not opened.ready or opened.cleanup_pending or opened.error != "":
         host_identity_store_close_v1(opened.owner.unwrap())
         return Err("controller-key-store-unavailable")
-    val read = host_identity_store_read_v1(opened.owner.unwrap(), controller_authority_key_leaf_v1(key), 4096)
+    var read = host_identity_store_read_v1(opened.owner.unwrap(), controller_authority_key_leaf_v1(key), 4096)
     val closed = host_identity_store_close_v1(read.owner)
-    # Exactly one binding of the returned buffer exists after this point: `held` is wiped on a refusal and is the
-    # value returned on success (the caller wipes it after signing). No second unwrap or copy is taken.
-    if val held = read.bytes:
-        if read.error != "" or read.absent or read.cleanup_pending or not closed.completed or closed.error != "":
-            if held.len() > 0 and not secure_zero_u8_slots(held).verified(): return Err("controller-key-buffer-wipe")
-            return Err("controller-key-unavailable")
-        return Ok(held)
-    Err("controller-key-unavailable")
+    if read.bytes.is_none(): return Err("controller-key-unavailable")
+    # milestone_0051 KEYWIPE-02: `held` is taken out of the turn ONCE and the turn's Option is released, so `held` (a
+    # `var` place) is the only holder of the bytes: the refusal wipe reaches them in place instead of forking a copy
+    # while `read.bytes` keeps the original. On success `held` is returned (the caller wipes it after signing).
+    var held = read.bytes.unwrap()
+    read.bytes = None
+    if read.error != "" or read.absent or read.cleanup_pending or not closed.completed or closed.error != "":
+        if held.len() > 0 and not secure_zero_u8_slots(held).verified(): return Err("controller-key-buffer-wipe")
+        return Err("controller-key-unavailable")
+    Ok(held)
 
 pub fn controller_authority_store_reader_v1(store_root: text) -> fn(DistributedAuthorityKeyV2) -> Result<[u8], text>:
     \key: controller_authority_store_read_v1(store_root, key)
 
 fn controller_authority_sign_v1(read_key: fn(DistributedAuthorityKeyV2) -> Result<[u8], text>,
         key: DistributedAuthorityKeyV2, message: [u8], grant_domain: bool) -> Result<[u8], text>:
-    val file = read_key(key)?
+    var file = read_key(key)?
     val signed = if grant_domain: host_identity_private_sign_grant_v1(file, key.public_key, message)
         else: host_identity_private_sign_approval_v1(file, key.public_key, message)
     val wipe = secure_zero_u8_slots(file)

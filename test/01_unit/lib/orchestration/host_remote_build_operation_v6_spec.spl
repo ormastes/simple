@@ -16,7 +16,7 @@ mapping is pinned by the route specs. The reply envelope is 1 MiB.
 ## Verification guidance and troubleshooting
 A changed refusal string is a wire-contract change.
 """
-use std.spec.step
+use std.spec.{step, fail}
 use std.io.file_read_text
 use std.common.contracts.orchestration.host_service_operation_v6.*
 use std.common.contracts.orchestration.host_service_operation_reply_v6.*
@@ -33,7 +33,10 @@ fn bo_request(payload: text) -> HostServiceOperationRequestV6:
 
 fn bo_from(source: text, start: text) -> text:
     val at = source.index_of(start)
-    if at < 0: return ""
+    if at < 0:
+        # A renamed anchor must fail the case, never hand an empty slice to a negative check.
+        fail("bo_from anchor missing: " + start)
+        return ""
     source.substring(at, source.byte_len())
 
 describe "the one V6 remote-build action":
@@ -87,8 +90,8 @@ describe "the one V6 remote-build action":
         expect(route).to_contain("runtime-host-execution-pending")
         step("the dispatch happens after the generic gates and before the controller-inspection branch")
         val query = bo_from(source, "pub fn smux_host_continuation_query_v6(")
-        expect(query.index_of("if request.action == \"remote-build\":") > query.index_of("if context.scope_digest != scope.unwrap()")).to_equal(true)
-        expect(query.index_of("if request.action == \"remote-build\":") < query.index_of("if state.controller_inspection.is_some():")).to_equal(true)
+        expect(query.index_of("if context.scope_digest != scope.unwrap()") >= 0 and query.index_of("if request.action == \"remote-build\":") > query.index_of("if context.scope_digest != scope.unwrap()")).to_equal(true)
+        expect(query.index_of("if request.action == \"remote-build\":") >= 0 and query.index_of("if request.action == \"remote-build\":") < query.index_of("if state.controller_inspection.is_some():")).to_equal(true)
 
     it "keeps the nested envelope inside the 2 MiB request cap":
         # @req M0030-N10-04

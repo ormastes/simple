@@ -34,6 +34,7 @@ use std.nogc_sync_mut.io.tcp.{TcpStream}
 use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, HttpStatus, HttpMethod,
     http_method_from_text, http_status_code, http_status_reason}
 use std.nogc_sync_mut.http_server.router.{Router}
+use std.nogc_sync_mut.http_server.parser.{request_body_decode, request_content_type}
 use std.nogc_sync_mut.http_server.response.{
     with_default_security_headers, response_header_name_is_token,
     response_header_value_is_safe
@@ -196,12 +197,6 @@ fn _slice_bytes(data: [u8], start: i64, count: i64) -> [u8]:
         i = i + 1
     return out
 
-fn _u8_to_text(bytes: [u8]) -> text:
-    var parts: [text] = []
-    for b in bytes:
-        parts.push(b.to_text())
-    return parts.join("")
-
 fn _text_to_u8(s: text) -> [u8]:
     var out: [u8] = []
     var i: i64 = 0
@@ -361,6 +356,8 @@ fn _emit_rst_stream(stream: TcpStream, stream_id: i64, error_code: i64) -> bool:
 
 # Response body length in octets (DATA frames carry bytes; `text.len()` counts characters).
 fn h2_response_body_len(resp: HttpResponse) -> i64:
+    if resp.body_bytes.len() > 0:
+        return resp.body_bytes.len()
     resp.body.byte_len()
 
 # Emit a full response: HEADERS frame (with HPACK) + optional DATA frame.
@@ -402,7 +399,7 @@ fn _emit_response(stream: TcpStream, stream_id: i64, resp: HttpResponse, policy:
         Ok(_): pass_do_nothing("HEADERS frame fully written; body emission follows")
 
     if has_body:
-        val body_bytes = _text_to_u8(resp.body)
+        val body_bytes = if resp.body_bytes.len() > 0: resp.body_bytes else: _text_to_u8(resp.body)
         var offset: i64 = 0
         while offset < body_bytes.len():
             var count = body_bytes.len() - offset
@@ -468,7 +465,11 @@ fn _hpack_headers_to_request(hpack_bytes: [u8], body_bytes: [u8]) -> HttpRequest
                 qi = qi + 1
 
             val method_enum = http_method_from_text(method_text)
-            val body_text = _u8_to_text(body_bytes)
+            # The same body decision as the HTTP/1 parsers (text-ish types decode
+            # lossily, as the vector lane does); raw octets stay in body_bytes.
+            val body_text = match request_body_decode(body_bytes, request_content_type(app_headers), true):
+                Ok(decoded): decoded
+                Err(_): ""
 
             # Inject Host header from :authority if present
             if authority_text != "":
@@ -481,7 +482,8 @@ fn _hpack_headers_to_request(hpack_bytes: [u8], body_bytes: [u8]) -> HttpRequest
                 version: "HTTP/2",
                 headers: app_headers,
                 body: body_text,
-                remote_addr: ""
+                remote_addr: "",
+                body_bytes: body_bytes
             ))
 
 # =============================================================================
@@ -755,6 +757,11 @@ fn h2_serve_connection_with_policy(tcp_stream: TcpStream, router: Router, policy
 
     val _ = tcp_stream.close()
 
+# Request view of a decoded HEADERS block plus its DATA octets (None when the
+# header block does not decode).
+fn h2_request_from_hpack_v1(hpack_bytes: [u8], body_bytes: [u8]) -> HttpRequest?:
+    _hpack_headers_to_request(hpack_bytes, body_bytes)
+
 # Dispatch a fully-received stream (HEADERS + optional DATA) through the router.
 fn _h2_dispatch_stream(tcp_stream: TcpStream, session: H2ServerSession, stream_id: i64, policy: H2ServerPolicy) -> H2ServerSession:
     val entry_opt = _h2_session_find_stream(session, stream_id)
@@ -777,6 +784,7 @@ fn _h2_dispatch_stream(tcp_stream: TcpStream, session: H2ServerSession, stream_i
     return h2_session_remove_stream(session, stream_id)
 
 export h2_serve_connection, h2_serve_connection_with_policy
+export h2_request_from_hpack_v1
 export H2ServerSession, H2StreamEntry
 export H2ServerPolicy, h2_server_policy_error, h2_accumulation_fits
 export h2_frame_protocol_error, h2_data_frame_count

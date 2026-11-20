@@ -73,6 +73,28 @@ extern fn spl_wffi_call_i64_into_bytes(fptr: i64, prefix_args: [i64], out_bytes:
                                        offset: i64, capacity: i64, out_len: *mut i64,
                                        suffix_args: [i64]) -> i64
 
+@unsafe(reason: "bytes-in foreign call ABI; callee sees a call-scoped copy of bytes[offset .. offset + length]", capabilities: [ffi, raw_ptr])
+extern fn spl_wffi_call_i64_with_bytes(fptr: i64, prefix_args: [i64], bytes: [u8], offset: i64,
+                                       length: i64, suffix_args: [i64]) -> i64
+
+# Packed zeroed out-buffer for `spl_wffi_call_i64_into_bytes`. Both runtimes
+# back `rt_byte_array_new_len` with packed byte storage (seed:
+# `Value::ByteArray`), so the buffer crosses the FFI boundary without the
+# element-wise widening an interpreted `push` loop or `[]` literal costs.
+@unsafe(reason: "raw runtime ABI for rt_byte_array_new_len", capabilities: [ffi])
+extern fn rt_byte_array_new_len(len: i64) -> [u8]?
+
+# Upper bound for one zeroed out-buffer (256 MiB).
+val BYTES_ZEROED_MAX: i64 = 268435456
+
+# `n` zero bytes in packed storage; None when n is negative, above
+# BYTES_ZEROED_MAX, or the allocation fails.
+fn bytes_zeroed(n: i64) -> [u8]?:
+    if n < 0 or n > BYTES_ZEROED_MAX:
+        return None
+    unsafe(capabilities: [ffi]):
+        rt_byte_array_new_len(n)
+
 @unsafe(reason: "minimal raw dynamic FFI scope; caller validates status and result shape", capabilities: [ffi])
 fn _sffi_call_i64_raw_checked(fptr: i64, args: [i64]) -> [i64]:
     spl_wffi_call_i64_checked(fptr, args, args.len())
@@ -662,4 +684,6 @@ fn sffi_call_checked(func_name: text, args: [i64]) -> Result<i64, text>:
 
 export spl_dlopen, spl_dlopen_checked, spl_dlsym, spl_dlsym_checked, spl_dlsym_process_checked, spl_dlclose
 export spl_wffi_call_i64, spl_wffi_call_i64_checked, spl_wffi_try_call_i64_out
+export spl_wffi_call_i64_with_bytes, spl_wffi_call_i64_into_bytes
+export bytes_zeroed, BYTES_ZEROED_MAX
 export DynI64FnSlot, DynLib, DynLoader
