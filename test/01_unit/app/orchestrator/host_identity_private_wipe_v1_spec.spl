@@ -20,6 +20,7 @@ No expanded private key binding exists: the key is derived with ed25519_pubkey, 
 """
 use std.spec.{step}
 use app.orchestrator.host_identity_key_v1.{host_identity_private_encode_v1, host_identity_private_run_v1,
+    host_identity_private_body_run_v1, host_identity_pem_decode_v1,
     host_identity_private_public_v1}
 use std.common.text_bytes.bytes_to_text
 use std.common.crypto.ed25519.pure_ed25519_keypair_from_seed
@@ -178,6 +179,27 @@ describe "Host identity private parser wipes every buffer on every exit":
         expect(unterminated.outcome).to_equal(Err("host-identity-private-format"))
         expect(unterminated.wiped).to_equal(0)
 
+    it "wipes the caller's decoded body in place, never a separate copy of it":
+        # @req SEEDWIPE-11 (milestone_0050 REVIEW_C P1-1)
+        # A [u8] copied into a local is a SEPARATE value (secure_memory_aliasing_spec REQ-SECURE-MEMORY-ALIAS-003):
+        # wiping the copy leaves the decoder's own buffer, which holds the seed, untouched. The body run must wipe the
+        # buffer it is handed (a `mut` place), so the caller's decoded body reads all-zero afterwards.
+        val file = pw_file()
+        var decoded = host_identity_pem_decode_v1(file, 36, file.len() - 34)
+        expect(decoded.error).to_equal("")
+        expect(pw_all_zero(decoded.raw)).to_equal(false)
+        val run = host_identity_private_body_run_v1(decoded.raw, false, [], [], "")
+        expect(run.outcome.is_ok()).to_equal(true)
+        expect(run.wiped).to_equal(2)
+        expect(pw_all_zero(decoded.raw)).to_equal(true)
+        step("a structural refusal wipes the caller's body in place too")
+        val bad_file = pw_tampered(110, 66)
+        var bad = host_identity_pem_decode_v1(bad_file, 36, bad_file.len() - 34)
+        expect(bad.error).to_equal("")
+        val refused = host_identity_private_body_run_v1(bad.raw, false, [], [], "")
+        expect(refused.outcome).to_equal(Err("host-identity-private-format"))
+        expect(pw_all_zero(bad.raw)).to_equal(true)
+
     it "keeps the public wrapper behaviour":
         # @req SEEDWIPE-07
         expect(host_identity_private_public_v1(pw_file()).is_ok()).to_equal(true)
@@ -215,3 +237,8 @@ fn pw_wrap(b64: text) -> text:
 
 fn pw_armour(b64: text) -> [u8]:
     ("-----BEGIN OPENSSH PRIVATE KEY-----\n" + pw_wrap(b64) + "-----END OPENSSH PRIVATE KEY-----\n").bytes()
+
+fn pw_all_zero(bytes: [u8]) -> bool:
+    for byte in bytes:
+        if byte != 0u8: return false
+    true

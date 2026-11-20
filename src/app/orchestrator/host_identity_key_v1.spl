@@ -344,9 +344,16 @@ fn host_identity_private_run_v1(private_file: [u8], sign: bool, required_public_
     if (not host_identity_private_ascii_v1(header, private_file, 0) or
             not host_identity_private_ascii_v1(footer, private_file, private_file.len() - footer.len())):
         return host_identity_private_refuse_v1("host-identity-private-format", 0)
-    val decoded = host_identity_pem_decode_v1(private_file, header.len(), private_file.len() - footer.len())
+    var decoded = host_identity_pem_decode_v1(private_file, header.len(), private_file.len() - footer.len())
     if decoded.error != "": return host_identity_private_refuse_v1(decoded.error, 0)
-    var raw = decoded.raw
+    # The decoder's own buffer is the place wiped (milestone_0050 REVIEW_C P1-1): a `var raw = decoded.raw` local would be a
+    # SEPARATE value, so wiping it left this buffer, seed included, unwiped until it was freed.
+    host_identity_private_body_run_v1(decoded.raw, sign, required_public_key, message, domain_line)
+
+# The decoded-body half of host_identity_private_run_v1. `raw` is the caller's buffer (a `mut` place, never copied into
+# a local): every exit wipes it in place, and the seed slice once it exists.
+fn host_identity_private_body_run_v1(mut raw: [u8], sign: bool, required_public_key: [u8],
+        message: [u8], domain_line: text) -> HostIdentityPrivateRunV1:
     if raw.len() < 234 or raw.len() > 512:
         val short_wipe = secure_zero_u8_slots(raw)
         if not short_wipe.verified(): return host_identity_private_refuse_v1("host-identity-key-buffer-wipe", 0)

@@ -86,21 +86,35 @@ scan_file() {
       }
       return out
     }
-    function header_binds(text,   declaration, names) {
-      # Names a for/case/if-val/while-val header binds on its own line: their
-      # type is not known here, so they never count bytes on this line.
+    function header_binds(text,   declaration, names, rest) {
+      # Names a for/case/if-val/while-val/with-as header binds on its own line:
+      # their type is not known here, so they never count bytes on this line.
+      # A `for` binds wherever it appears (mid-line in a comprehension).
       names = " "
-      if (text ~ /^[ \t]*(for|case)[ \t]+/) {
+      if (text ~ /^[ \t]*case[ \t]+/) {
         declaration = text
-        sub(/^[ \t]*(for|case)[ \t]+/, "", declaration)
-        sub(/[ \t]+in[ \t].*/, "", declaration)
+        sub(/^[ \t]*case[ \t]+/, "", declaration)
+        names = names header_ids(pattern_text(declaration, ":"))
+      }
+      rest = text
+      while (match(rest, /(^|[^A-Za-z_0-9])for[ \t]+/)) {
+        rest = substr(rest, RSTART + RLENGTH)
+        declaration = rest
+        if (!sub(/[ \t]+in[ \t].*/, "", declaration)) continue
         names = names header_ids(pattern_text(declaration, ":"))
       }
       if (match(text, /(^|[^A-Za-z_0-9])(if|elif|while)[ \t]+(val|var)[ \t]+/)) {
         declaration = pattern_text(substr(text, RSTART + RLENGTH), "=:")
         names = names header_ids(declaration)
       }
-      return names
+      return names with_binds(text)
+    }
+    function with_binds(text,   name) {
+      # `with <expr> as <name>:` binds <name> for its body (type unknown).
+      if (!match(text, /(^|[^A-Za-z_0-9])with[ \t].*[ \t]as[ \t]+[A-Za-z_][A-Za-z_0-9]*[ \t]*:/)) return ""
+      name = substr(text, RSTART, RLENGTH)
+      sub(/[ \t]*:$/, "", name); sub(/^.*[ \t]as[ \t]+/, "", name)
+      return name " "
     }
     function binding_of(name,   i) {
       if (header_lambda || index(header_names, " " name " ") > 0) return 0
@@ -247,6 +261,8 @@ scan_file() {
           declaration = substr(declaration, RSTART + RLENGTH)
         }
       }
+      name = with_binds(text)
+      if (name != "") bind_type(substr(name, 1, length(name) - 1), depth + 1, 0)
       # Do not infer lambda parameter/capture types. Conservatively suspend
       # inherited exemptions for its body, then restore them on lexical dedent.
       if (index(text, "\\") > 0) {
@@ -770,12 +786,24 @@ fn lambda_shadow(bytes: [u8], value: text):
         value.byte_len() == bytes.len()
     compare
 FIXTURE
+  # A comprehension's `for` and a `with ... as` bind a name mid-line, not at
+  # the line start: both shadow an outer [u8] binding of the same name.
+  cat > "$fx/shadowed/comprehension.spl" <<'FIXTURE'
+fn comprehension(bytes: [u8], value: text, values: [text]) -> [bool]:
+    [value.byte_len() == bytes.len() for bytes in values]
+FIXTURE
+  cat > "$fx/shadowed/with_as.spl" <<'FIXTURE'
+fn with_as(bytes: [u8], value: text, source: Source) -> bool:
+    with source.open() as bytes:
+        return value.byte_len() == bytes.len()
+    false
+FIXTURE
   v=$(run_scan "$fx/shadowed"); rc=$?; [ $rc -eq 1 ] || { echo "selftest: text/unknown/shadowed bindings must FAIL, got rc=$rc: $v"; exit 2; }
-  for fixture in text local nested function member member_space loop match inline tuple initializer unknown ifval ifval_inline whileval elifvar lambda lambda_multiline; do
+  for fixture in text local nested function member member_space loop match inline tuple initializer unknown ifval ifval_inline whileval elifvar lambda lambda_multiline comprehension with_as; do
     printf '%s\n' "$v" | grep -Fq "$fixture.spl bytes (len() as byte width) (NEW" || { echo "selftest: $fixture text-width evidence was lost: $v"; exit 2; }
   done
   hits=$(printf '%s\n' "$v" | grep -c '(NEW byte/code-point unit mix)' || true)
-  [ "$hits" -eq 18 ] || { echo "selftest: expected exactly 18 unsafe typed-binding fixtures, got $hits: $v"; exit 2; }
+  [ "$hits" -eq 20 ] || { echo "selftest: expected exactly 20 unsafe typed-binding fixtures, got $hits: $v"; exit 2; }
   # [u8] struct field receivers count bytes with len(); a text field, an
   # ambiguous name (u8 in one struct, text in another) and an unknown name
   # stay flagged. The field map spans every scanned file.
@@ -840,7 +868,7 @@ FIXTURE
   printf 'struct Raw:\n    data: [u8]\n' > "$gr/src/lib/ty.spl"
   printf 'src/lib/t2.spl\n' > "$fx/scope_t2"
   v=$(cd "$gr" && use_base="$gr"; scope_tip=HEAD; scope_files="$fx/scope_t2"; run_scan); rc=$?; [ $rc -eq 1 ] || { echo "selftest: committed import (text at tip, [u8] in working copy) must FAIL, got rc=$rc: $v"; exit 2; }
-  echo "selftest: existing ratchets, 18 unsafe typed-binding fixtures, 17 struct-field receiver fixtures and 4 named-field pattern fixtures OK"
+  echo "selftest: existing ratchets, 20 unsafe typed-binding fixtures, 17 struct-field receiver fixtures and 4 named-field pattern fixtures OK"
 }
 
 do_selftest=0
