@@ -1,0 +1,69 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+Pins the lifetime half of the PM3 unit-lane call-origin fix. PR #10534 read
+the module surfaces at MIR setup, but lower_and_check_retained_owner_impl
+releases them (`streaming_surface_owner_ready = false`) at the end of HIR
+lowering, so the step never ran natively (zero `surface_call_origins` lines,
+`callee=lib.common.string_core.str_len` still Unknown). The rows are now
+captured as flat scalars before the release and consumed by MIR setup.
+Audience: compiler engineers maintaining the driver HIR->MIR handoff.
+"""
+
+# @tag: unit, compiler, driver
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{SymbolTable, SymbolKind}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_instruction_support.{MirCallOrigin}
+use compiler.driver.driver_surface_call_origin_rows_v1.{SurfaceCallOriginRowsV1,
+    surface_call_origin_rows_empty_v1, surface_call_origin_rows_capture_v1}
+
+fn scor_line_of(source: text, needle: text) -> i64:
+    var n = 0
+    for line in source.split("\n"):
+        if line.contains(needle): return n
+        n = n + 1
+    -1
+
+describe "surface call-origin rows outlive the surface release":
+    it "captures before the HIR stage releases the surfaces":
+        val src = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        val capture = scor_line_of(src, "surface_call_origin_rows_capture_v1(self.streaming_module_surfaces_owner)")
+        val release = scor_line_of(src, "self.streaming_module_surfaces_owner = ModuleSurfacesByName.empty()")
+        expect(capture >= 0).to_equal(true)
+        expect(release > capture).to_equal(true)
+
+    it "MIR setup consumes the captured rows, not the released surfaces":
+        val src = file_read("src/compiler/80.driver/driver_pipeline_lowering.spl")
+        expect(scor_line_of(src, "self.surface_call_origin_rows_v1.names.len() > 0") >= 0).to_equal(true)
+        expect(scor_line_of(src, "self.streaming_module_surfaces_owner.surfaces") < 0).to_equal(true)
+
+    it "an empty surface set captures no rows":
+        val rows = surface_call_origin_rows_capture_v1(ModuleSurfacesByName.empty())
+        expect(rows.names.len()).to_equal(0)
+        expect(surface_call_origin_rows_empty_v1().owners.len()).to_equal(0)
+
+    it "captured rows prove origins through the MIR registry (text_bytes -> str_len)":
+        val rows = SurfaceCallOriginRowsV1(owners: ["lib.common.string_core", "lib.common.ffi"],
+            names: ["str_len", "rt_len"], externs: [false, true], methods: [false, false], statics: [false, false])
+        var symbols = SymbolTable.new()
+        val str_len = symbols.define("str_len", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, Some("lib.common.string_core"))
+        val rt_len = symbols.define("rt_len", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, Some("lib.common.ffi"))
+        var lowering = MirLowering.new(symbols)
+        lowering.current_module_id = "lib.common.text_bytes"
+        expect(lowering.provider_callable_call_origin_v1(str_len)).to_equal(MirCallOrigin.Unknown)
+        var i = 0
+        while i < rows.names.len():
+            val _n = lowering.register_surface_callable_origins_v1(rows.owners[i], [rows.names[i]],
+                [rows.externs[i]], [rows.methods[i]], [rows.statics[i]])
+            i = i + 1
+        expect(lowering.provider_callable_call_origin_v1(str_len)).to_equal(MirCallOrigin.Source)
+        expect(lowering.provider_callable_call_origin_v1(rt_len)).to_equal(MirCallOrigin.Foreign)

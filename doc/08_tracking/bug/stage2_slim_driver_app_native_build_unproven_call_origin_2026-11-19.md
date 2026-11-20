@@ -136,3 +136,22 @@ every surface whose module has no HIR. Spec:
 (5/5; RED 0/5 without the method). Native verification pending a Stage 2
 rebuild: re-run the `pubonly` fixture sharded and run the binary (link-name
 parity of the fallback callee name is the residual risk).
+
+## Update 2026-11-20 (c): #10534 step never fired natively; lifetime fix
+
+Status: verification-pending
+
+Native verification of #10534 (Stage 2 from release/1.0.0 6d8ca1e90d30) still
+failed `callee=lib.common.string_core.str_len`, with zero
+`surface_call_origins` lines. Cause: `lower_and_check_retained_owner_impl`
+(`driver_hir_pipeline_lowering.spl`) releases the surfaces
+(`streaming_surface_owner_ready = false`) at the end of HIR lowering, BEFORE
+MIR setup, so the #10534 gate was always false. Fix: capture flat rows
+(`driver_surface_call_origin_rows_v1.spl`) into
+`CompilerDriver.surface_call_origin_rows_v1` just before the release (only when
+worker HIR loads are restricted); MIR setup consumes them and prints
+`[mir-setup] surface-call-origins rows=<n> candidates=<m>` unconditionally.
+Spec: `test/01_unit/compiler/80.driver/surface_call_origin_rows_lifetime_spec.spl`
+(4/4; ordering assertion fails on the #10534 tree). Native: rebuild Stage 2,
+re-run `pubonly --threads 12`, expect the `[mir-setup] surface-call-origins`
+line and rc=0.
