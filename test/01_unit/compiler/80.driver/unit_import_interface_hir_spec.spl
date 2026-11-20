@@ -36,6 +36,7 @@ use compiler.driver.driver_mir_physical_owners.{driver_mir_owner_disposition_v1}
 use app.io.env_ops.{env_get, env_set}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
 
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_dir_remove_all(path: text) -> bool
@@ -144,12 +145,12 @@ describe "interface-only rows never reach MIR emission":
         expect(driver_mir_owner_disposition_v1(true, true, true)).to_equal("hir")
         expect(driver_mir_owner_disposition_v1(false, false, true)).to_equal("hir")
 
-describe "importer waits for an in-flight provider, never for an unclaimed one":
+describe "importer waits for an in-flight provider, never for an unscheduled one":
     it "settles immediately when unclaimed, finished or published; times out while in flight":
         val q = "build/uih_settle_{rt_getpid()}"
         expect(rt_dir_create_all(q)).to_be(true)
         val base = q + "/" + sha256_text("p.spl")
-        # Unclaimed: the provider unit has not started; do not wait.
+        # Unclaimed and not in a frozen inventory: nobody will run it; do not wait.
         expect(hir_shard_provider_settle_wait_v1(q, "p.spl", 60000)).to_equal(false)
         expect(file_atomic_write(base + ".claim", "owner\np.spl\nx\n")).to_be(true)
         # In flight, nothing published: bounded wait, then a miss.
@@ -163,4 +164,33 @@ describe "importer waits for an in-flight provider, never for an unclaimed one":
         expect(file_atomic_write(rbase + ".claim", "owner\nr.spl\nx\n")).to_be(true)
         expect(file_atomic_write(rbase + ".terminal", "FAILED\n")).to_be(true)
         expect(hir_shard_provider_settle_wait_v1(q, "r.spl", 60000)).to_equal(false)
+        expect(rt_dir_remove_all(q)).to_be(true)
+
+# lib.nogc_sync_mut.database.wal constructs SdnRow from core.spl. Its unit ran
+# before core's unit claimed (log: no-sidecar at wal, hit for later importers),
+# the summary-only fallback carries no struct layout, and MIR failed with
+# "missing exact struct construction layout 'SdnRow'". A provider listed in the
+# queue's frozen inventory is scheduled work: wait (bounded) for it.
+describe "importer waits for an unclaimed provider this build will run":
+    it "waits on an inventoried unclaimed provider, not on an unknown one":
+        val q = "build/uih_settle_inv_{rt_getpid()}"
+        expect(rt_dir_create_all(q)).to_be(true)
+        expect(file_atomic_write(q + "/inventory", "identity\ncore.spl\nwal.spl")).to_be(true)
+        # Not in the inventory: nobody will run it; return at once.
+        val t0 = current_time_ms()
+        expect(hir_shard_provider_settle_wait_v1(q, "other.spl", 60000)).to_equal(false)
+        expect(current_time_ms() - t0 < 5000).to_equal(true)
+        # Inventoried, unclaimed: wait out the budget instead of giving up at once.
+        val t1 = current_time_ms()
+        expect(hir_shard_provider_settle_wait_v1(q, "core.spl", 400)).to_equal(false)
+        expect(current_time_ms() - t1 >= 400).to_equal(true)
+        # Inventoried and published: hit.
+        expect(hir_shard_key_sidecar_write_v1(q, "core.spl", sha256_text("k"), sha256_text("b"))).to_be(true)
+        expect(hir_shard_provider_settle_wait_v1(q, "core.spl", 60000)).to_equal(true)
+        # Inventoried but finished without a sidecar: no wait.
+        val wbase = q + "/" + sha256_text("wal.spl")
+        expect(file_atomic_write(wbase + ".terminal", "FAILED\n")).to_be(true)
+        val t2 = current_time_ms()
+        expect(hir_shard_provider_settle_wait_v1(q, "wal.spl", 60000)).to_equal(false)
+        expect(current_time_ms() - t2 < 5000).to_equal(true)
         expect(rt_dir_remove_all(q)).to_be(true)
