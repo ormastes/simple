@@ -111,18 +111,24 @@ fn _glass_blend_over(s: u32, d: u32) -> u32:
     glass kernel, SPIR-V pinned): straight-alpha src-over with truncating
     division. The glass material is Simple's own WM surface with no Chrome
     equivalent, so it keeps this rule rather than color.blend's Chrome rules."""
-    val sa = color_a(s)
+    val sa = ((s >> 24) & 0xFFu32) as i32
     if sa == 255:
         return s
     if sa == 0:
         return d
-    val dst_weight = (color_a(d) * (255 - sa)) / 255
+    val da = ((d >> 24) & 0xFFu32) as i32
+    val dst_weight = (da * (255 - sa)) / 255
     val out_a = sa + dst_weight
-    rgba(
-        (color_r(s) * sa + color_r(d) * dst_weight) / out_a,
-        (color_g(s) * sa + color_g(d) * dst_weight) / out_a,
-        (color_b(s) * sa + color_b(d) * dst_weight) / out_a,
-        out_a)
+    val sr = ((s >> 16) & 0xFFu32) as i32
+    val sg = ((s >> 8) & 0xFFu32) as i32
+    val sb = (s & 0xFFu32) as i32
+    val dr = ((d >> 16) & 0xFFu32) as i32
+    val dg = ((d >> 8) & 0xFFu32) as i32
+    val db = (d & 0xFFu32) as i32
+    val or_c = (sr * sa + dr * dst_weight) / out_a
+    val og_c = (sg * sa + dg * dst_weight) / out_a
+    val ob_c = (sb * sa + db * dst_weight) / out_a
+    ((out_a as u32) << 24) | ((or_c as u32) << 16) | ((og_c as u32) << 8) | (ob_c as u32)
 
 fn _glass_inside_rounded_rect(px: i32, py: i32, width: i32, height: i32, radius: i32) -> bool:
     if radius <= 0:
@@ -145,86 +151,97 @@ fn _glass_frame_pixel(framebuffer: [u32], width: i32, height: i32, x: i32, y: i3
 fn _glass_pack_average(red: i64, green: i64, blue: i64, alpha: i64, count: i64) -> u32:
     if count <= 0:
         return 0u32
-    rgba(
-        (red / count) as i32,
-        (green / count) as i32,
-        (blue / count) as i32,
-        (alpha / count) as i32
-    )
+    val r = ((red / count) & 255) as u32
+    val g = ((green / count) & 255) as u32
+    val b = ((blue / count) & 255) as u32
+    val a = ((alpha / count) & 255) as u32
+    (a << 24) | (r << 16) | (g << 8) | b
 
 fn _glass_horizontal_blur(framebuffer: [u32], config: Engine2dGlassMaterialConfig, blur_radius: i32) -> [u32]:
-    val expanded_height64 = (config.height as i64) + 2 * (blur_radius as i64)
-    val expanded_height = expanded_height64 as i32
-    val count = (config.width as i64) * expanded_height64
+    val width64: i64 = config.width as i64
+    val fb_w64: i64 = config.framebuffer_width as i64
+    val fb_h64: i64 = config.framebuffer_height as i64
+    val x64: i64 = config.x as i64
+    val y64: i64 = config.y as i64
+    val blur64: i64 = blur_radius as i64
+    val expanded_height64 = (config.height as i64) + 2 * blur64
+    val count = width64 * expanded_height64
     var horizontal: [u32] = [0u32; count]
-    var row = 0
-    while row < expanded_height:
-        val frame_y64: i64 = (config.y as i64) + (row as i64) - (blur_radius as i64)
-        var px = 0
-        while px < config.width:
+    if blur_radius == 0:
+        var row: i64 = 0
+        while row < expanded_height64:
+            val frame_y64 = y64 + row
+            if frame_y64 >= 0 and frame_y64 < fb_h64:
+                val src_base = frame_y64 * fb_w64 + x64
+                val dst_base = row * width64
+                var px: i64 = 0
+                while px < width64:
+                    horizontal[dst_base + px] = framebuffer[src_base + px]
+                    px = px + 1
+            row = row + 1
+        return horizontal
+    var row: i64 = 0
+    while row < expanded_height64:
+        val frame_y64 = y64 + row - blur64
+        if frame_y64 >= 0 and frame_y64 < fb_h64:
+            val row_base = frame_y64 * fb_w64
+            val out_base = row * width64
             var red: i64 = 0
             var green: i64 = 0
             var blue: i64 = 0
             var alpha: i64 = 0
             var samples: i64 = 0
-            var offset = 0 - blur_radius
-            while offset <= blur_radius:
-                val frame_x64: i64 = (config.x as i64) + (px as i64) + (offset as i64)
-                if (frame_x64 >= 0 and frame_x64 < (config.framebuffer_width as i64) and
-                    frame_y64 >= 0 and frame_y64 < (config.framebuffer_height as i64)):
-                    val pixel = _glass_frame_pixel(
-                        framebuffer,
-                        config.framebuffer_width,
-                        config.framebuffer_height,
-                        frame_x64 as i32,
-                        frame_y64 as i32
-                    )
-                    red = red + (color_r(pixel) as i64)
-                    green = green + (color_g(pixel) as i64)
-                    blue = blue + (color_b(pixel) as i64)
-                    alpha = alpha + (color_a(pixel) as i64)
+            var offset: i64 = 0 - blur64
+            while offset <= blur64:
+                val fx = x64 + offset
+                if fx >= 0 and fx < fb_w64:
+                    val pixel = framebuffer[row_base + fx]
+                    red = red + (((pixel >> 16) & 0xFFu32) as i64)
+                    green = green + (((pixel >> 8) & 0xFFu32) as i64)
+                    blue = blue + ((pixel & 0xFFu32) as i64)
+                    alpha = alpha + (((pixel >> 24) & 0xFFu32) as i64)
                     samples = samples + 1
                 offset = offset + 1
-            horizontal[(row as i64) * (config.width as i64) + (px as i64)] = _glass_pack_average(red, green, blue, alpha, samples)
-            px = px + 1
+            horizontal[out_base] = _glass_pack_average(red, green, blue, alpha, samples)
+            var px: i64 = 1
+            while px < width64:
+                val add_x = x64 + px + blur64
+                if add_x >= 0 and add_x < fb_w64:
+                    val pixel = framebuffer[row_base + add_x]
+                    red = red + (((pixel >> 16) & 0xFFu32) as i64)
+                    green = green + (((pixel >> 8) & 0xFFu32) as i64)
+                    blue = blue + ((pixel & 0xFFu32) as i64)
+                    alpha = alpha + (((pixel >> 24) & 0xFFu32) as i64)
+                    samples = samples + 1
+                val sub_x = x64 + px - 1 - blur64
+                if sub_x >= 0 and sub_x < fb_w64:
+                    val pixel = framebuffer[row_base + sub_x]
+                    red = red - (((pixel >> 16) & 0xFFu32) as i64)
+                    green = green - (((pixel >> 8) & 0xFFu32) as i64)
+                    blue = blue - ((pixel & 0xFFu32) as i64)
+                    alpha = alpha - (((pixel >> 24) & 0xFFu32) as i64)
+                    samples = samples - 1
+                horizontal[out_base + px] = _glass_pack_average(red, green, blue, alpha, samples)
+                px = px + 1
         row = row + 1
     horizontal
-
-fn _glass_blurred_pixel(horizontal: [u32], config: Engine2dGlassMaterialConfig, px: i32, py: i32, blur_radius: i32) -> u32:
-    var red: i64 = 0
-    var green: i64 = 0
-    var blue: i64 = 0
-    var alpha: i64 = 0
-    var samples: i64 = 0
-    var offset = 0 - blur_radius
-    while offset <= blur_radius:
-        val frame_y64: i64 = (config.y as i64) + (py as i64) + (offset as i64)
-        if frame_y64 >= 0 and frame_y64 < (config.framebuffer_height as i64):
-            val row = py + offset + blur_radius
-            val pixel = horizontal[(row as i64) * (config.width as i64) + (px as i64)]
-            red = red + (color_r(pixel) as i64)
-            green = green + (color_g(pixel) as i64)
-            blue = blue + (color_b(pixel) as i64)
-            alpha = alpha + (color_a(pixel) as i64)
-            samples = samples + 1
-        offset = offset + 1
-    _glass_pack_average(red, green, blue, alpha, samples)
 
 fn _glass_saturate(pixel: u32, saturation_milli: i32) -> u32:
     val saturation = _glass_clamp(saturation_milli, 0, 3000)
     if saturation == 1000:
         return pixel
-    val red = color_r(pixel)
-    val green = color_g(pixel)
-    val blue = color_b(pixel)
+    val red = ((pixel >> 16) & 0xFFu32) as i32
+    val green = ((pixel >> 8) & 0xFFu32) as i32
+    val blue = (pixel & 0xFFu32) as i32
+    val alpha = ((pixel >> 24) & 0xFFu32) as u32
     val luminance = (red * 54 + green * 183 + blue * 19 + 128) / 256
     val out_red = _glass_clamp(
-        luminance + (red - luminance) * saturation / 1000, 0, 255)
+        luminance + (red - luminance) * saturation / 1000, 0, 255) as u32
     val out_green = _glass_clamp(
-        luminance + (green - luminance) * saturation / 1000, 0, 255)
+        luminance + (green - luminance) * saturation / 1000, 0, 255) as u32
     val out_blue = _glass_clamp(
-        luminance + (blue - luminance) * saturation / 1000, 0, 255)
-    rgba(out_red, out_green, out_blue, color_a(pixel))
+        luminance + (blue - luminance) * saturation / 1000, 0, 255) as u32
+    (alpha << 24) | (out_red << 16) | (out_green << 8) | out_blue
 
 fn _glass_lerp_channel(from_value: i32, to_value: i32, row: i32, denominator: i32) -> i32:
     if denominator <= 0:
@@ -308,38 +325,86 @@ pub fn engine2d_draw_ir_glass_material_pixels(framebuffer: [u32], config: Engine
         return []
     val radius = _glass_radius(config)
     val horizontal = _glass_horizontal_blur(framebuffer, config, blur_radius)
+    val surface_tint = _glass_surface_tint(config)
+    val saturation_milli = config.saturation_milli
+    var col_red: [i64] = [0; width64]
+    var col_green: [i64] = [0; width64]
+    var col_blue: [i64] = [0; width64]
+    var col_alpha: [i64] = [0; width64]
+    var valid_rows: i64 = 0
+    val blur64: i64 = blur_radius as i64
+    val y64: i64 = config.y as i64
+    if blur_radius > 0:
+        var offset: i64 = 0 - blur64
+        while offset <= blur64:
+            val fy = y64 + offset
+            if fy >= 0 and fy < framebuffer_height64:
+                val row_base = (offset + blur64) * width64
+                var px: i64 = 0
+                while px < width64:
+                    val hp = horizontal[row_base + px]
+                    col_red[px] = col_red[px] + (((hp >> 16) & 0xFFu32) as i64)
+                    col_green[px] = col_green[px] + (((hp >> 8) & 0xFFu32) as i64)
+                    col_blue[px] = col_blue[px] + ((hp & 0xFFu32) as i64)
+                    col_alpha[px] = col_alpha[px] + (((hp >> 24) & 0xFFu32) as i64)
+                    px = px + 1
+                valid_rows = valid_rows + 1
+            offset = offset + 1
     var output: [u32] = [0u32; output_count]
+    val x64: i64 = config.x as i64
     var py = 0
     while py < config.height:
+        val py64 = py as i64
+        if blur_radius > 0 and py > 0:
+            val sub_fy = y64 + py64 - 1 - blur64
+            if sub_fy >= 0 and sub_fy < framebuffer_height64:
+                val sub_base = (py64 - 1) * width64
+                var px: i64 = 0
+                while px < width64:
+                    val hp = horizontal[sub_base + px]
+                    col_red[px] = col_red[px] - (((hp >> 16) & 0xFFu32) as i64)
+                    col_green[px] = col_green[px] - (((hp >> 8) & 0xFFu32) as i64)
+                    col_blue[px] = col_blue[px] - ((hp & 0xFFu32) as i64)
+                    col_alpha[px] = col_alpha[px] - (((hp >> 24) & 0xFFu32) as i64)
+                    px = px + 1
+                valid_rows = valid_rows - 1
+            val add_fy = y64 + py64 + blur64
+            if add_fy >= 0 and add_fy < framebuffer_height64:
+                val add_base = (py64 + 2 * blur64) * width64
+                var px: i64 = 0
+                while px < width64:
+                    val hp = horizontal[add_base + px]
+                    col_red[px] = col_red[px] + (((hp >> 16) & 0xFFu32) as i64)
+                    col_green[px] = col_green[px] + (((hp >> 8) & 0xFFu32) as i64)
+                    col_blue[px] = col_blue[px] + ((hp & 0xFFu32) as i64)
+                    col_alpha[px] = col_alpha[px] + (((hp >> 24) & 0xFFu32) as i64)
+                    px = px + 1
+                valid_rows = valid_rows + 1
+        val fb_row_base = (y64 + py64) * framebuffer_width64 + x64
+        val out_row_base = py64 * width64
+        val row_grad = if config.gradient_enabled: _glass_gradient_tint(config, py) else: 0u32
         var px = 0
         while px < config.width:
-            val original = _glass_frame_pixel(
-                framebuffer,
-                config.framebuffer_width,
-                config.framebuffer_height,
-                config.x + px,
-                config.y + py
-            )
+            val px64 = px as i64
+            val original = framebuffer[fb_row_base + px64]
             var result = original
             if _glass_inside_rounded_rect(
                 px, py, config.width, config.height, radius):
-                val blurred = _glass_blurred_pixel(
-                    horizontal, config, px, py, blur_radius)
-                val saturated = _glass_saturate(
-                    blurred, config.saturation_milli)
-                val surface = _glass_blend_over(_glass_surface_tint(config), saturated)
+                val blurred = if blur_radius == 0:
+                    horizontal[out_row_base + px64]
+                else:
+                    _glass_pack_average(col_red[px64], col_green[px64], col_blue[px64], col_alpha[px64], valid_rows)
+                val saturated = _glass_saturate(blurred, saturation_milli)
+                val surface = _glass_blend_over(surface_tint, saturated)
                 if config.gradient_enabled:
                     val gradient_destination = if config.gradient_layered_over_surface:
                         surface
                     else:
                         saturated
-                    result = _glass_blend_over(
-                        _glass_gradient_tint(config, py),
-                        gradient_destination
-                    )
+                    result = _glass_blend_over(row_grad, gradient_destination)
                 else:
                     result = surface
-            output[(py as i64) * width64 + (px as i64)] = result
+            output[out_row_base + px64] = result
             px = px + 1
         py = py + 1
     output

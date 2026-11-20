@@ -5,10 +5,12 @@ use common.ui.glass.theme.{is_glass_theme}
 use common.ui.glass.tokens.{GlassColorTokens}
 use common.ui.profile.{Breakpoints, default_breakpoints}
 use common.string_builder.{StringBuilder}
-use nogc_sync_mut.ui.theme_package.{load_theme_package, resolve_theme_alias}
+use nogc_sync_mut.ui.theme_package.{resolve_theme_alias, resolved_theme_css, theme_package_fingerprint}
 use common.ui.wm_chrome_theme.{active_theme_composed_css, active_theme_source_fingerprint}
 
 # Source: doc/05_design/stitch_design_system.md (macOS-style window controls).
+# These literals are intentionally used only by the package-less compatibility
+# sheet. Resolved folder packages take the early structural-adapter branch.
 val WM_TRAFFIC_CLOSE = "#FF5F57"
 val WM_TRAFFIC_MIN = "#FFBD2E"
 val WM_TRAFFIC_MAX = "#28CA41"
@@ -20,12 +22,22 @@ fn generate_css(theme: text) -> text:
     """Generate comprehensive CSS for all widget types.
     Colors are derived from ThemeColors to stay in sync with TUI ANSI colors."""
     val canonical_theme = resolve_theme_alias(theme)
-    val pkg = load_theme_package(canonical_theme)
+    val resolved_css = resolved_theme_css(canonical_theme)
+    val resolved_fingerprint = theme_package_fingerprint(canonical_theme)
     val installed_css = active_theme_composed_css(canonical_theme)
     val installed_fingerprint = active_theme_source_fingerprint(canonical_theme)
     val installed_matches_package = installed_css != "" and
-        installed_fingerprint == pkg.fingerprint
-    val package_css = if installed_matches_package: installed_css else: pkg.snapshot.composed_css
+        installed_fingerprint == resolved_fingerprint
+    val package_css = if installed_matches_package: installed_css else: resolved_css
+    # A resolved folder package is the visual authority. Its adapter retains
+    # complete DOM layout and interaction semantics but references package
+    # variables for every visual/material property.
+    if package_css != "":
+        return generate_package_authoritative_css(
+            canonical_theme,
+            resolved_fingerprint,
+            package_css
+        )
     # Determine if dark variant
     val is_dark = canonical_theme != "light" and canonical_theme != "ios_light"
     val is_glass = is_glass_theme(canonical_theme)
@@ -1851,7 +1863,7 @@ fn generate_css(theme: text) -> text:
     result = result.replace(p_font_body, ui_font_body)
     result = result.replace(p_font_label, ui_font_label)
     result = result.replace(p_wm_window_radius, wm_window_radius)
-    if is_glass and package_css == "":
+    if is_glass:
         result = "{result}\n/* Glass theme touch-up */\n"
         result = "{result}.widget-panel, .widget-menubar, .widget-statusbar, .widget-dialog, .widget-list, .widget-tabs { backdrop-filter: blur(28px) saturate(175%); -webkit-backdrop-filter: blur(28px) saturate(175%); }\n"
         result = "{result}.widget-button { background-image: linear-gradient(180deg, rgba(255,255,255,0.20), rgba(255,255,255,0.08)); }\n"
@@ -1880,15 +1892,6 @@ fn generate_css(theme: text) -> text:
     result = result.replace("{" + "wm_close_hover" + "}", WM_TRAFFIC_CLOSE_HOVER)
     result = result.replace("{" + "wm_min_hover" + "}", WM_TRAFFIC_MIN_HOVER)
     result = result.replace("{" + "wm_max_hover" + "}", WM_TRAFFIC_MAX_HOVER)
-
-    # The resolved folder package is the final visual authority. This adapter's
-    # preceding CSS supplies shared structure and compatibility fallbacks only.
-    # Keep identity beside the CSS so renderer evidence can bind the submitted
-    # stylesheet to the same content-addressed package used by WM chrome.
-    if package_css != "":
-        result = result + "\n/* Folder theme package theme=" + pkg.id +
-            " fingerprint=" + pkg.fingerprint + " */\n"
-        result = result + package_css
 
     return result
 
