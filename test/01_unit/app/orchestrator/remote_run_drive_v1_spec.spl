@@ -245,6 +245,9 @@ class RsLogV1:
     var open_record: text = ""
     # A fixed grant clock (resume after the signed window).
     var clock_at: i64 = 0
+    # milestone_0050 (review A P1): the real admit's window between the open-record archive and the `executing` commit
+    # (workload_store_v1 controller_workload_store_admit_remote_build_v1): the row stays `admitted`, the admit refuses.
+    var admit_stops: bool = false
 
 fn rs_stage_cause_reply_v1(stage: text, cause: text) -> text:
     val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-host-remote-build"),
@@ -349,11 +352,15 @@ fn rs_admit_v1(log: RsLogV1, request: OperationEnvelopeV2, open_record: text) ->
     log.calls = log.calls + ["admit"]
     log.open_record = open_record
     if log.journal.is_some() and not log.skip_row:
-        # The real admit (workload_store_v1) archives the open record in the same turn (milestone_0045).
-        expect(distributed_operation_journal_publish_v3(log.journal.unwrap(), controller_workload_store_remote_open_key_v1(request.id),
-            open_record).unwrap()).to_equal(true)
+        # The real admit (workload_store_v1) archives the open record in the same turn (milestone_0045), in its order:
+        # commit `admitted`, then the create-only archive, then the `executing` commit.
         val initial = distributed_operation_initial_v2(distributed_encode_operation_v2(request)?)?
         val admitted = distributed_operation_journal_commit_v2(log.journal.unwrap(), initial)?
+        expect(distributed_operation_journal_publish_v3(admitted, controller_workload_store_remote_open_key_v1(request.id),
+            open_record).unwrap()).to_equal(true)
+        if log.admit_stops:
+            log.journal = Some(admitted)
+            return Err("double-admit-executing-commit-failed")
         log.journal = Some(distributed_operation_journal_commit_v2(admitted, distributed_operation_transition_v2(initial, "executing", "")?)?)
     Ok(true)
 
@@ -719,6 +726,53 @@ describe "remote-run abandon (milestone_0045, owner decision 1)":
         expect(rs_row_state_v1(log)).to_equal("outcome-unknown")
         rs_cleanup_v1(log)
 
+    it "ends a row an interrupted admit left `admitted` cancelled, never stuck (milestone_0050 review A P1)":
+        # @req M0050-A-ADMITTED-01
+        step("the admit archived the open record, then the `executing` commit failed: row `admitted`, no Host request sent")
+        val log = RsLogV1()
+        log.journal = Some(rs_journal_v1())
+        log.admit_stops = true
+        expect(rs_drive_v1(log).state).to_equal("refused")
+        expect(log.calls).to_equal(["begin", "admit"])
+        expect(rs_row_state_v1(log)).to_equal("admitted")
+        val envelope = distributed_operation_journal_lookup_v2(log.journal.unwrap(), "operation_a").unwrap().envelope_digest
+        step("resume cannot reach it (not a live row): only the status begin, no route frame")
+        val resumed = RsLogV1()
+        resumed.journal = log.journal
+        expect(rs_resume_v1(resumed).detail).to_equal("remote-run-resume-row")
+        expect(resumed.calls).to_equal(["begin", "edit"])
+        step("the verified abandon is still refused while the archived signed window is open")
+        val end = 1000 + RR_TTL
+        expect(rs_abandon_v1(resumed, rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_7", 2000), 2000)).to_equal(
+            "ERR:remote-run-abandon-window-open")
+        expect(rs_row_state_v1(resumed)).to_equal("admitted")
+        step("after it the row ends `cancelled` (nothing was ever executed), bound to the abandon record's digest")
+        val pair = rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_8", end)
+        val first = rs_abandon_v1(resumed, pair, end)
+        expect(first.starts_with("cancelled:")).to_equal(true)
+        val row = distributed_operation_journal_lookup_v2(resumed.journal.unwrap(), "operation_a").unwrap()
+        expect(row.state).to_equal("cancelled")
+        expect("cancelled:" + row.outcome_digest).to_equal(first)
+        step("a repeat, and a retry with a fresh pair, answer the same cancel")
+        expect(rs_abandon_v1(resumed, pair, end + 1)).to_equal(first)
+        expect(rs_abandon_v1(resumed, rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_9", end + 2), end + 2)).to_equal(first)
+        rs_cleanup_v1(resumed)
+
+    it "never cancels an `admitted` row once the controller archived an execute for its operation":
+        # @req M0050-A-ADMITTED-02
+        val log = RsLogV1()
+        log.journal = Some(rs_journal_v1())
+        log.admit_stops = true
+        expect(rs_drive_v1(log).state).to_equal("refused")
+        expect(distributed_operation_journal_publish_v3(log.journal.unwrap(), controller_dispatch_remote_execute_key_v3("operation_a"),
+            "execute-archived").unwrap()).to_equal(true)
+        val envelope = distributed_operation_journal_lookup_v2(log.journal.unwrap(), "operation_a").unwrap().envelope_digest
+        val end = 1000 + RR_TTL
+        expect(rs_abandon_v1(log, rs_abandon_pair_v1(envelope, "remote-run-abandon", "abandon_10", end), end)).to_equal(
+            "ERR:remote-run-abandon-execute-archived")
+        expect(rs_row_state_v1(log)).to_equal("admitted")
+        rs_cleanup_v1(log)
+
     it "never contacts the Host and never widens the settle states (source pins)":
         # @req M0045-ABANDON-03
         val source = file_read_text("src/app/orchestrator/remote_run_abandon_v1.spl")
@@ -728,6 +782,9 @@ describe "remote-run abandon (milestone_0045, owner decision 1)":
         expect(source.contains("distributed_verify_grant_approval_from_snapshot_v2(")).to_equal(true)
         expect(source.contains("if signed.issuer_id != facts.controller_id:")).to_equal(true)
         expect(source.contains("val retained = root.retain_v3(edited.store)")).to_equal(true)
+        step("the printed digest follows the result's own `<state>:` prefix (failed or cancelled), never a fixed offset")
+        expect(source.contains("edited.result.substring(7,")).to_equal(false)
+        expect(source.contains("val split = edited.result.index_of(\":\")")).to_equal(true)
         expect(REMOTE_RUN_SETTLE_STATES_V1).to_equal(["cancelled", "outcome-unknown"])
         val command = file_read_text("src/app/orchestrator/remote_run_command_v1.spl")
         expect(command.contains("if args.len() > 1 and args[1] == \"abandon\": return remote_run_abandon_command_v1(args)")).to_equal(true)
