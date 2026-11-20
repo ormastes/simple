@@ -34,6 +34,7 @@ use compiler.mir.mir_types.{MirLocal}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
 use compiler.common.diagnostics.span.{Span}
+use compiler.common.value_access.{compiler_value_discriminant, compiler_value_payload, compiler_value_tuple_at}
 use compiler.hir.generated.hir_children.{HirNode, hir_children_of, hir_children_of_block}
 use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
@@ -2018,39 +2019,52 @@ impl MirLowering:
             var tail_trait_expected = false
             if val trait_expected = expected_type:
                 tail_trait_expected = self.native_trait_owner_for_type(trait_expected) != ""
-            match value.kind:
-                case HirExprKind.If(cond, then_, else_):
-                    local = self.lower_if(cond, then_, else_, expected_type)
-                case HirExprKind.IfChain(arms, else_):
-                    local = self.lower_if_chain(arms, else_, expected_type)
-                case HirExprKind.MatchCase(scrutinee, arms):
-                    local = self.lower_match_case(scrutinee, arms, expected_type)
-                case HirExprKind.Block(inner_block):
-                    # A desugared match (text/tuple patterns: `{ let s; if-chain }`)
-                    # into a `-> Trait` tail: keep the expected type so every
-                    # arm converts; lower_expr's Block arm would drop it.
-                    if tail_trait_expected:
-                        self.vm_check_desugared_match_block(value, inner_block)
-                        val inner_local = self.lower_block_expected(inner_block, expected_type)
-                        local = inner_local ?? LocalId(id: 0)
-                    else:
-                        local = self.lower_expr(value)
-                case HirExprKind.ExistsCheck(_):
-                    if tail_bool_position:
-                        local = self.lower_cond_expr(value)
-                        tail_coerced_to_bool = true
-                    else:
-                        local = self.lower_expr(value)
-                case _:
-                    var tail_float_literal: LocalId? = None
-                    if val float_expected = expected_type:
-                        tail_float_literal = self.lower_int_literal_for_float_slot(value, float_expected)
-                    if val float_local = tail_float_literal:
-                        local = float_local
-                        # value.type_ names the literal's i64; do not record it.
-                        tail_float_coerced = true
-                    else:
-                        local = self.lower_expr(value)
+            # Decode IfChain via value_access before pattern dispatch, matching
+            # expr_dispatch.spl: staged native multi-field enum matches can miss
+            # IfChain's ([HirIfArm], HirBlock?) tuple payload and fall into
+            # lower_expr(value), overwriting expected_type=None with Unit.
+            val tail_value_disc = compiler_value_discriminant<HirExprKind>(value.kind)
+            val tail_if_chain_disc = compiler_value_discriminant<HirExprKind>(HirExprKind.IfChain([], None))
+            if tail_value_disc == tail_if_chain_disc:
+                val tail_if_chain_payload = compiler_value_payload<HirExprKind, i64>(value.kind)
+                val tail_if_chain_arms_opt: [HirIfArm]? = compiler_value_tuple_at<[HirIfArm]>(tail_if_chain_payload, 0)
+                val tail_if_chain_arms: [HirIfArm] = tail_if_chain_arms_opt ?? []
+                val tail_if_chain_else: HirBlock? = compiler_value_tuple_at<HirBlock>(tail_if_chain_payload, 1)
+                local = self.lower_if_chain(tail_if_chain_arms, tail_if_chain_else, expected_type)
+            else:
+                match value.kind:
+                    case HirExprKind.If(cond, then_, else_):
+                        local = self.lower_if(cond, then_, else_, expected_type)
+                    case HirExprKind.IfChain(arms, else_):
+                        local = self.lower_if_chain(arms, else_, expected_type)
+                    case HirExprKind.MatchCase(scrutinee, arms):
+                        local = self.lower_match_case(scrutinee, arms, expected_type)
+                    case HirExprKind.Block(inner_block):
+                        # A desugared match (text/tuple patterns: `{ let s; if-chain }`)
+                        # into a `-> Trait` tail: keep the expected type so every
+                        # arm converts; lower_expr's Block arm would drop it.
+                        if tail_trait_expected:
+                            self.vm_check_desugared_match_block(value, inner_block)
+                            val inner_local = self.lower_block_expected(inner_block, expected_type)
+                            local = inner_local ?? LocalId(id: 0)
+                        else:
+                            local = self.lower_expr(value)
+                    case HirExprKind.ExistsCheck(_):
+                        if tail_bool_position:
+                            local = self.lower_cond_expr(value)
+                            tail_coerced_to_bool = true
+                        else:
+                            local = self.lower_expr(value)
+                    case _:
+                        var tail_float_literal: LocalId? = None
+                        if val float_expected = expected_type:
+                            tail_float_literal = self.lower_int_literal_for_float_slot(value, float_expected)
+                        if val float_local = tail_float_literal:
+                            local = float_local
+                            # value.type_ names the literal's i64; do not record it.
+                            tail_float_coerced = true
+                        else:
+                            local = self.lower_expr(value)
             # A tail match may return/abort on every path. Its reserved result
             # has no definition; never box or otherwise consume it afterward.
             if self.builder.current_block_has_explicit_terminator():
