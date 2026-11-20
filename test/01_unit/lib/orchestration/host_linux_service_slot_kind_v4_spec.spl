@@ -13,7 +13,7 @@ site clears the kind). The association copy runs with the real Ed25519 verifier 
 ## Verification guidance and troubleshooting
 Each refusal names the exact error string; a changed string is a contract change.
 """
-use std.spec.step
+use std.spec.{step, fail}
 use std.io.file_read_text
 use test.fixtures.orchestration.host_linux_service_verifier_fixture_v1.*
 # Tests reach private module gates directly (repo rule: tests may access private).
@@ -125,7 +125,7 @@ describe "V4 Linux service: one incarnation slot with a workload kind (milestone
         val prepare_at = source.index_of("pub fn host_linux_service_prepare_v4(")
         val gate_at = source.index_of("linux_service_prepare_kind_gate_v4(owner, operation.id")
         val charge_at = source.index_of("val admitted = host_capacity_owner_prepare_v1(")
-        expect(prepare_at < gate_at and gate_at < charge_at).to_equal(true)
+        expect(prepare_at >= 0 and prepare_at < gate_at and gate_at < charge_at).to_equal(true)
         expect(sk_count(source, "owner.slot_kind = workload_kind")).to_equal(1)
         step("each slot clear site clears the kind together with the operation id")
         expect(sk_count(source, "owner.agent_operation_id = \"\"")).to_equal(sk_count(source, "owner.slot_kind = \"\""))
@@ -141,8 +141,9 @@ describe "V4 Linux service: one incarnation slot with a workload kind (milestone
         val slot = source.index_of("val slot = linux_service_agent_slot_v4(owner, operation.id")
         val record = source.index_of("owner.agent_operation_id = operation.id")
         val charge = source.index_of("host_capacity_owner_prepare_v1(owner.capacity.unwrap(), intent, operation")
-        expect(prepare < gate and gate < slot and gate < record and gate < charge).to_equal(true)
+        expect(prepare >= 0 and prepare < gate and gate < slot and gate < record and gate < charge).to_equal(true)
         step("an agent draft never needs the remote-build template")
+        expect(source.index_of("fn linux_service_remote_build_enrolled_gate_v4(") >= 0).to_equal(true)
         val gate_fn = source.substring(source.index_of("fn linux_service_remote_build_enrolled_gate_v4("), source.byte_len())
         expect(gate_fn).to_contain("if kind != \"remote-build\": return \"\"")
         expect(gate_fn).to_contain("\"linux-host-remote-build-not-enrolled\"")
@@ -159,7 +160,10 @@ fn rr_service() -> text:
 
 fn rr_from(source: text, start: text) -> text:
     val at = source.index_of(start)
-    if at < 0: return ""
+    if at < 0:
+        # A renamed anchor must fail the case, never hand an empty slice to a negative check.
+        fail("rr_from anchor missing: " + start)
+        return ""
     source.substring(at, source.byte_len())
 
 describe "V4 remote-build route (integration item 7)":
@@ -193,10 +197,11 @@ describe "V4 remote-build route (integration item 7)":
         val refused = open.index_of("host_remote_build_open_v4(")
         val settle = open.index_of("host_remote_build_settle_no_workload_v4(")
         expect(refused > 0 and settle > refused).to_equal(true)
+        expect(open.index_of("\npub fn ", 10) > 0).to_equal(true)
         val body = open.substring(0, open.index_of("\npub fn ", 10))
         expect(body.contains("agent_consumed = true")).to_equal(false)
         val start = rr_from(rr_service(), "pub fn host_linux_service_remote_build_start_v4(")
-        expect(start.index_of("agent_consumed = true") > start.index_of("host_remote_build_transfer_v4(")).to_equal(true)
+        expect(start.index_of("host_remote_build_transfer_v4(") >= 0 and start.index_of("agent_consumed = true") > start.index_of("host_remote_build_transfer_v4(")).to_equal(true)
 
     it "answers a reaped run from the reap index at collect and output":
         # @req M0030-INTEG-7 (13.4 reap: collect/output -> linux-host-remote-build-reaped-incomplete)

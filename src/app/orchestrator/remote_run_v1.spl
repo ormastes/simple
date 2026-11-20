@@ -363,11 +363,10 @@ fn remote_run_collect_v1(authored: RemoteRunAuthoredV1, facts: RemoteRunFactsV1,
         # the Host could not sign one: the row stays unproven, never `failed` (resume or a later abandon settles it).
         val settled = remote_run_settle_v1(link, admitted.build_request, "outcome-unknown", "host-reaped-unsigned")
         return Ok(remote_run_outcome_v1(2, "reaped-unsigned", operation_id, "", "", settled))
-    val accept_now = (link.clock)()?
-    val context = remote_run_context_v1(authored, facts, admitted.build_pair.signed, admitted.build_pair.approval,
-        admitted.scope.physical_host_id, admitted.build_request, accept_now, reset_wire != "")?
     if reset_wire != "":
-        val accepted = (link.edit)(\journal: remote_run_host_reset_apply_v1(authored, admitted.execution, context,
+        val reset_context = remote_run_context_v1(authored, facts, admitted.build_pair.signed, admitted.build_pair.approval,
+            admitted.scope.physical_host_id, admitted.build_request, (link.clock)()?, true)?
+        val accepted = (link.edit)(\journal: remote_run_host_reset_apply_v1(authored, admitted.execution, reset_context,
             facts.state_root, reset_wire, journal))
         if accepted.is_ok():
             val recorded = remote_run_result_parts_v1(accepted.unwrap())
@@ -387,6 +386,11 @@ fn remote_run_collect_v1(authored: RemoteRunAuthoredV1, facts: RemoteRunFactsV1,
             remote_run_unbundled_reason_v1(reply.cancel_cause))
         return Ok(remote_run_outcome_v1(2, "host-unbundled", operation_id, "", reply.stage + ":" + reply.outcome, settled))
     val wire = remote_run_fetch_bundle_v1(authored, link, reply.bundle_digest)?
+    # milestone_0052: the accept authority is verified at a clock read taken AFTER the (up to 64 chunk) fetch, so a pair
+    # whose signed window ended during the transfer is refused here (the drive caller settles the row outcome-unknown;
+    # resume refuses and leaves the row for a later resume or the controller-signed abandon).
+    val context = remote_run_context_v1(authored, facts, admitted.build_pair.signed, admitted.build_pair.approval,
+        admitted.scope.physical_host_id, admitted.build_request, (link.clock)()?, false)?
     val accepted = (link.edit)(\journal: remote_run_accept_apply_v1(authored, admitted.execution, context, facts.state_root, wire, journal))
     if accepted.is_err():
         # The accept refused (bad completion, unreadable output...): the journal is intact and the link alive, so the row
