@@ -693,7 +693,10 @@ binding / Host bug). Specs: `remote_container_reset_failure_stages_v3_spec.spl`,
   store (`controller_workload_store_edit_journal_v1` + `root.retain_v3`): issuer == controller, class, snapshot verify at
   the grant clock, row digest, archived open record proves `now >= min(approval, grant)` of the RUN, then a create-only
   `controller-remote-abandon-v1/<digest>.sdn` record and `failed` bound to its digest. `failed` never enters
-  `REMOTE_RUN_SETTLE_STATES_V1`. Approver keys must enroll `remote-run-abandon`.
+  `REMOTE_RUN_SETTLE_STATES_V1`. Approver keys must enroll `remote-run-abandon`. milestone_0050 (review A P1): a row an
+  interrupted admit left `admitted` (open record archived, `executing` commit failed; a re-run's fresh pair conflicts on
+  the archive, resume needs a live row) is ended after its window by the same verified abandon as `cancelled`
+  (admitted -> failed is no transition), only while `remote_run_execute_archived_v1` proves no execute was archived.
 - VERSION SKEW: a controller older than milestone_0045 refuses a Host-signed `service-restart` and a late receipt and
   settles `outcome-unknown`; upgrade the controller first (same rule as #10398/#10399).
 

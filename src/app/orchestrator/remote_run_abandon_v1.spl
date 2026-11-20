@@ -11,6 +11,12 @@
 # dispatch begin, no frame; the Host's own retained run is unaffected. `failed` is reached only through this verified
 # edit, never through remote_run_settle_v1 (whose states stay {cancelled, outcome-unknown}). A run admitted before the
 # open-record archive existed cannot be abandoned (`remote-run-abandon-unarchived`, named gap).
+# milestone_0050 (review A P1): a row an interrupted admit left `admitted` (open record archived, the `executing` commit
+# failed) has no other route once its signed window ended: a re-run signs a fresh pair, so its re-admit conflicts on the
+# archive (only the original record and pair, still valid, could complete it), and resume needs a live row. After the
+# window the same verified edit ends it `cancelled` (admitted -> failed is no transition), only while the controller's
+# own execute archive proves no execute of the operation was ever sent.
+use app.orchestrator.remote_run_settle_v1.remote_run_execute_archived_v1
 use app.orchestrator.controller_authority_issue_v1.{controller_host_action_issue_v1, controller_host_action_class_v1,
     controller_authority_store_reader_v1}
 use app.orchestrator.remote_build_service_port_v3.remote_build_open_record_decode_v3
@@ -54,8 +60,8 @@ pub fn remote_run_abandon_record_v1(operation: OperationEnvelopeV2, signed: Dist
         wire = wire + builder_wire_line_v1(field)
     Ok(wire)
 
-# The verifying journal edit. Result `failed:<record digest>`; a repeat abandon (same or fresh pair, while that pair is
-# itself valid) answers the same result.
+# The verifying journal edit. Result `failed:<record digest>` (`cancelled:<record digest>` for an `admitted` row); a repeat
+# abandon (same or fresh pair, while that pair is itself valid) answers the same result.
 pub fn remote_run_abandon_apply_v1(facts: RemoteRunAbandonFactsV1, signed: DistributedSignedGrantV2,
         approval: DistributedSignedApprovalV2, operation: OperationEnvelopeV2, now: i64,
         journal: DistributedOperationJournalV2) -> ControllerJournalEditV1:
@@ -87,18 +93,26 @@ pub fn remote_run_abandon_apply_v1(facts: RemoteRunAbandonFactsV1, signed: Distr
     val record = remote_run_abandon_record_v1(operation, signed, approval)
     if record.is_err(): return remote_run_abandon_refused_v1(journal, record.unwrap_err())
     val digest = sha256_text(record.unwrap())
-    if row.state == "failed" and row.outcome_digest == digest:
-        return ControllerJournalEditV1(journal: journal, result: "failed:" + digest, error: "")
+    val ended = row.state == "failed" or row.state == "cancelled"
+    if ended and row.outcome_digest == digest:
+        return ControllerJournalEditV1(journal: journal, result: row.state + ":" + digest, error: "")
     # A retry after a lost reply carries a FRESH pair (new expiry, new digest): the row is answered as abandoned only
     # when its outcome digest names an abandon record of THIS operation (content-addressed, read back and re-hashed);
     # a row some other path made terminal stays refused.
-    if row.state == "failed":
+    if ended:
         val earlier = distributed_operation_journal_read_v3(journal, "controller-remote-abandon-v1/" + row.outcome_digest + ".sdn", 4096)
         if earlier.is_ok() and earlier.unwrap().is_some() and sha256_text(earlier.unwrap().unwrap()) == row.outcome_digest and
                 earlier.unwrap().unwrap().starts_with(builder_wire_line_v1("SIMPLE-REMOTE-RUN-ABANDON-1") + builder_wire_line_v1(operation.id)):
-            return ControllerJournalEditV1(journal: journal, result: "failed:" + row.outcome_digest, error: "")
-    if row.state != "executing" and row.state != "outcome-unknown":
+            return ControllerJournalEditV1(journal: journal, result: row.state + ":" + row.outcome_digest, error: "")
+    if row.state != "executing" and row.state != "outcome-unknown" and row.state != "admitted":
         return remote_run_abandon_refused_v1(journal, "remote-run-abandon-row-state")
+    # An `admitted` row never reached `executing`, which every execute needs; the controller's own create-only execute
+    # archive must still prove it (read in this same single-writer turn) before the row may end `cancelled`.
+    if row.state == "admitted":
+        val executed = remote_run_execute_archived_v1(journal, operation.id)
+        if executed.is_err(): return remote_run_abandon_refused_v1(journal, executed.unwrap_err())
+        if executed.unwrap(): return remote_run_abandon_refused_v1(journal, "remote-run-abandon-execute-archived")
+    val terminal = if row.state == "admitted": "cancelled" else: "failed"
     # The record is published (create-only, content-addressed) and read back BEFORE the row may reference its digest.
     val key = "controller-remote-abandon-v1/" + digest + ".sdn"
     val published = distributed_operation_journal_publish_v3(journal, key, record.unwrap())
@@ -106,11 +120,11 @@ pub fn remote_run_abandon_apply_v1(facts: RemoteRunAbandonFactsV1, signed: Distr
     val back = distributed_operation_journal_read_required_v3(journal, key, 4096)
     if back.is_err() or back.unwrap() != record.unwrap(): return remote_run_abandon_refused_v1(journal, "remote-run-abandon-record-readback")
     # A transition/commit failure below leaves the create-only record unreferenced: harmless, reachable only by digest.
-    val next = distributed_operation_transition_v2(row, "failed", digest)
+    val next = distributed_operation_transition_v2(row, terminal, digest)
     if next.is_err(): return remote_run_abandon_refused_v1(journal, next.unwrap_err())
     val committed = distributed_operation_journal_commit_v2(journal, next.unwrap())
     if committed.is_err(): return remote_run_abandon_refused_v1(journal, committed.unwrap_err())
-    ControllerJournalEditV1(journal: committed.unwrap(), result: "failed:" + digest, error: "")
+    ControllerJournalEditV1(journal: committed.unwrap(), result: terminal + ":" + digest, error: "")
 
 # `remote-run abandon --dispatch-root R --config-digest D --key-store K --approver A --operation O --grant-id G
 # --expires-in-ms T`: no Host contact. Reads the row and the open archive (read-only) to bind the request, issues the pair,
@@ -187,6 +201,9 @@ pub fn remote_run_abandon_command_v1(args: [text]) -> OrchestratorValidationRepl
     val retained = root.retain_v3(edited.store)
     if retained.is_err(): return remote_run_abandon_reply_v1(1, "refused", operation_id, "", retained.unwrap_err(), Some(root))
     if edited.error != "": return remote_run_abandon_reply_v1(1, "refused", operation_id, "", edited.error, Some(root))
-    remote_run_abandon_reply_v1(0, "abandoned", operation_id, edited.result.substring(7, edited.result.byte_len()), "", Some(root))
+    # Every success result is `<failed|cancelled>:<record digest>`; the digest follows the first `:`.
+    val split = edited.result.index_of(":")
+    remote_run_abandon_reply_v1(0, "abandoned", operation_id, edited.result.substring(split + 1, edited.result.byte_len()), "",
+        Some(root))
 
 export RemoteRunAbandonFactsV1, remote_run_abandon_record_v1, remote_run_abandon_apply_v1, remote_run_abandon_command_v1
