@@ -1,0 +1,83 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+Pins the PM3 per-file unit-lane import contract. A unit resolves imports
+through TLDR summary surfaces and held HIR only for its targets, so MIR's
+prescan never saw an imported provider: struct construction failed with
+`missing exact struct construction layout 'SiSpan'` / 'HostTextByteSpanV1'
+(native repro, frozen Stage 2, structimp fixture) and calls failed
+unproven-call-origin. The unit now holds the provider's INTERFACE-ONLY HIR
+(hir_module_interface_only_v1, loaded from the provider unit's cache entry).
+This spec proves that projection alone fills the MIR prescan tables a
+consumer needs (struct field order, call origin, scalar return type), that
+nothing is registered without it, and that the driver performs the load.
+Audience: compiler engineers maintaining the per-file driver and MIR prescan.
+"""
+
+# @tag: unit, compiler, driver
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_metadata.{mir_provider_callable_key}
+use compiler.mir.mir_data.{bootstrap_fn_ret_hir_type_lookup}
+use compiler.driver.driver_mir_shard_hir_residency_v1.{hir_module_interface_only_v1}
+
+fn uih_provider() -> HirModule:
+    val parsed = parse_full_frontend(
+        "pub struct UihSpan:\n    a: i64\n    b: i64\n\n" +
+        "pub enum UihColor:\n    Red\n    Green\n\n" +
+        "pub fn uih_make(a: i64) -> UihSpan:\n    UihSpan(a: a, b: a + 1)\n\n" +
+        "pub fn uih_count(a: i64) -> i64:\n    a + 1\n",
+        "uih_core.spl", "uih_core", Logger(level: 0))
+    var lowering = HirLowering.with_filename("uih_core.spl")
+    val module = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    module
+
+fn uih_has_layout(lowering: MirLowering, name: text) -> bool:
+    for key in lowering.struct_field_order.keys():
+        if key == name or key.ends_with("." + name) or key.ends_with("::" + name):
+            return true
+    false
+
+describe "unit-lane imports hold interface-only provider HIR":
+    it "without provider HIR the consumer's MIR has no layout and no call origin":
+        val provider = uih_provider()
+        var lowering = MirLowering.new(provider.symbols)
+        expect(uih_has_layout(lowering, "UihSpan")).to_equal(false)
+        expect(lowering.callable_text_value_abi.has(mir_provider_callable_key(provider.name, "uih_make"))).to_equal(false)
+
+    it "the interface projection strips bodies but keeps the declarations":
+        val provider = uih_provider()
+        val (projected, stripped) = hir_module_interface_only_v1(provider)
+        expect(stripped >= 1).to_equal(true)
+        expect(projected.structs.len()).to_equal(provider.structs.len())
+        expect(projected.enums.len()).to_equal(provider.enums.len())
+        expect(projected.functions.len()).to_equal(provider.functions.len())
+
+    it "prescan over the interface projection fills struct layout, call origin and return type":
+        val provider = uih_provider()
+        val (projected, _stripped) = hir_module_interface_only_v1(provider)
+        var modules: Dict<text, HirModule> = {}
+        modules["uih_core"] = projected
+        var lowering = MirLowering.new(projected.symbols)
+        lowering.prescan_module_struct_names(modules, "uih_core")
+        expect(uih_has_layout(lowering, "UihSpan")).to_equal(true)
+        expect(lowering.callable_text_value_abi.has(mir_provider_callable_key(projected.name, "uih_make"))).to_equal(true)
+        expect(lowering.callable_text_value_abi[mir_provider_callable_key(projected.name, "uih_count")]).to_equal(true)
+        expect(bootstrap_fn_ret_hir_type_lookup("uih_count") != nil).to_equal(true)
+
+    it "the unit HIR stage loads interface-only HIR for import rows it does not own":
+        val src = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        expect(src.contains("hir_cache_load_parsed_v1(iface_key, iface_binding, source.path,")).to_equal(true)
+        expect(src.contains("[unit-tldr] import interface-hir loads=")).to_equal(true)

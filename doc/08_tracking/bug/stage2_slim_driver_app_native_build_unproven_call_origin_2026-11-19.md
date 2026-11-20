@@ -155,3 +155,24 @@ Spec: `test/01_unit/compiler/80.driver/surface_call_origin_rows_lifetime_spec.sp
 (4/4; ordering assertion fails on the #10534 tree). Native: rebuild Stage 2,
 re-run `pubonly --threads 12`, expect the `[mir-setup] surface-call-origins`
 line and rc=0.
+
+## Update 2026-11-20 (d): struct layouts — unit imports hold interface-only HIR
+
+Status: verification-pending
+
+After #10575 (`surface-call-origins rows=84`) the lint lane failed next on
+`missing exact struct construction layout 'HostTextByteSpanV1'`. Native repro on
+the frozen Stage 2 (fixture `structimp`: imported struct + enum + struct return,
+`--threads 12`): `missing exact struct construction layout 'SiSpan'`,
+`mir-child hir closure modules=1 of=2`; wall 5:04, peak RSS 3.16 GB (baseline).
+
+Cause: the TLDR unit lane holds no provider HIR, and every MIR prescan table
+(struct/class layouts, enum inventory, call origin, fn return/param HirTypes, RTI)
+is filled only from held HIR. Fix: in unit mode an import row the unit does not own
+loads the provider's cached HIR interface-only (`hir_module_interface_only_v1`)
+into `ctx.hir_modules`; never lowered or claimed; a cache miss keeps the old
+behaviour. Log: `[unit-tldr] import interface-hir loads=<n>`.
+
+Spec: `test/01_unit/compiler/80.driver/unit_import_interface_hir_spec.spl` (4/4;
+driver assertion RED without the change). Native verification and per-worker
+RSS/time cost need a Stage 2 built from this branch.

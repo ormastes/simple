@@ -1199,6 +1199,7 @@ impl CompilerDriver:
             hir_shard_guard_block("HIR frozen inventory publication failed: {inventory_why}")
             self.ctx.add_error("HIR frozen inventory publication failed: {inventory_why}")
             return false
+        var unit_import_interface_loads = 0
         while hir_loop_pos < hir_visit_order.len():
             source_index = hir_visit_order[hir_loop_pos]
             val source = SourceFile(
@@ -1305,6 +1306,26 @@ impl CompilerDriver:
             # (fingerprinted from its stub, not the source) cannot pass.
             # Counted once here; the P-A gate below keeps non-unit children.
             if hir_unit_mode and not worker_hir_load_allowed_v1(source.path):
+                # PM3 TLDR import rows: hold the provider's DECLARATIONS
+                # (interface-only HIR, bodies stripped) when its own unit
+                # already cached it, so MIR's prescan registers struct/class
+                # layouts, enums, call origins and return/param types for it
+                # (bug stage2_slim_driver_app_native_build_unproven_call_origin_2026-11-19).
+                # Never lowered here and never claimed: a cache miss keeps the
+                # old summary-only behaviour.
+                if hir_closure_digest != "" and not phase_hir_modules.contains_key(source.module_name):
+                    val iface_key = hir_cache_key(source.path, hir_closure_digest, is_requested_bootstrap_entry,
+                        self.ctx.options.library_mode, self.ctx.native_target, None)
+                    val iface_binding = hir_cache_parser_binding_v1(iface_key, source.module_name, source.path,
+                        self.ctx.source_identities_owner[source_index], self.ctx.options.library_mode)
+                    val iface_hir: HirModule? = hir_cache_load_parsed_v1(iface_key, iface_binding, source.path,
+                        self.ctx.options.library_mode, true)
+                    if iface_hir.?:
+                        val iface_module: HirModule = iface_hir.unwrap()
+                        lowered_by_surface[surface_index] = iface_module
+                        streaming_hir_module_count = streaming_hir_module_count + 1
+                        phase_hir_modules[source.module_name] = iface_module
+                        unit_import_interface_loads = unit_import_interface_loads + 1
                 hir_loop_pos = hir_loop_pos + 1
                 continue
             # Keep the retained surface in its canonical owner. ModuleSurface
@@ -1705,6 +1726,7 @@ impl CompilerDriver:
         # the fault is somewhere between here and streaming_source_reclaim:done
         # below. Each step now leaves a marker so a crash names its own step.
         log_phase("phase3:hir:loop:done modules={progress_hir_done}")
+        if hir_unit_mode: print "[unit-tldr] import interface-hir loads={unit_import_interface_loads}"
         # Always printed (task 8a): a disabled cache prints
         # `[hir-cache] disabled reason=...`, so no build log is silent about it.
         # The main build (not a shard) first says how much of the shard
