@@ -3,6 +3,7 @@
 # provider does not flush directories: namespace_synced is always false.
 use std.nogc_sync_mut.io.host_identity_store_abi_v1.*
 use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text}
+use std.common.crypto.secure_memory.secure_zero_u8_slots
 use std.nogc_sync_mut.io.windows_private_file_v1.{WindowsPrivateRootV1, WindowsPrivateFileV1,
     WindowsPrivateErrorV1, WindowsJournalStoreV1, WindowsJournalStoreOpenV1, windows_private_root_open_v1}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new_gate, mutex_lock_gate, mutex_unlock_gate}
@@ -41,10 +42,18 @@ pub class HostIdentityPlatformV1:
 
     pub fn path_v1(leaf: text) -> Result<text, text>:
         if mutex_lock_gate(identity_windows_gate_v1) == None: return Err("identity-store-gate")
-        val observed = identity_windows_read_v1(self.slot, self.generation, leaf, 65536)
+        var observed = identity_windows_read_v1(self.slot, self.generation, leaf, 65536)
+        val present = observed.bytes != None
+        if observed.bytes != None:
+            # Only presence is wanted: wipe the [u8] copy of the re-read file as its sole holder. The journal's own
+            # `text` copy is immutable and stays unwiped (bug doc, Windows residue).
+            var held = observed.bytes.unwrap()
+            observed.bytes = None
+            if held.len() > 0:
+                val _held_wipe = secure_zero_u8_slots(held)
         val result: Result<text, text> = if observed.error != "":
             Err(observed.error)
-        elif observed.bytes == None:
+        elif not present:
             Err("identity-store-path-file-absent")
         else:
             # Native GLOBAL??/GLOBALROOT spellings must not be reinterpreted

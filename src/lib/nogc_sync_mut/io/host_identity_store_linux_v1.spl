@@ -2,6 +2,7 @@
 # Canonical slots are serialized by the existing mutex owner; slots never reuse.
 use std.nogc_sync_mut.io.host_identity_store_abi_v1.*
 use std.common.text_bytes.{text_to_utf8_bytes, utf8_bytes_valid}
+use std.common.crypto.secure_memory.secure_zero_u8_slots
 use std.nogc_sync_mut.io.host_identity_ssh_projection_types_v1.{HostIdentitySshPathsV1, host_identity_ssh_projection_roles_valid_v1}
 @when(os="linux"):
 use std.nogc_sync_mut.io.anchored_io_linux_v1.{anchored_linux_directory_flags_v1,
@@ -54,8 +55,16 @@ pub class HostIdentityPlatformV1:
         val entered = identity_linux_enter_v1()
         if entered.is_err(): return Err(entered.unwrap_err())
         # Validate the actual target, not merely the lexical leaf or root.
-        val observed = identity_linux_read_v1(self.slot, self.generation, leaf, 65536)
-        val result: Result<text, text> = if observed.error != "" or observed.bytes == None:
+        var observed = identity_linux_read_v1(self.slot, self.generation, leaf, 65536)
+        val present = observed.error == "" and observed.bytes != None
+        if observed.bytes != None:
+            # Only the path is wanted: take the re-read file (a private key for `.key`) out of the read result so
+            # `held` is its sole holder, then wipe it.
+            var held = observed.bytes.unwrap()
+            observed.bytes = None
+            if held.len() > 0:
+                val _held_wipe = secure_zero_u8_slots(held)
+        val result: Result<text, text> = if not present:
             Err("identity-store-path-file-unavailable")
         else:
             Ok(identity_linux_slots_v1[self.slot].root_path + "/journal/" + leaf)
@@ -370,6 +379,18 @@ fn identity_linux_read_error_v1(slot: i64, error: text) -> HostIdentityPlatformR
     identity_linux_quarantine_v1(slot)
     HostIdentityPlatformReadV1(cleanup_pending: true, error: error)
 
+# Wipes the read copy (the caller's sole holder, parked for this call) before the store refuses the read.
+fn identity_linux_read_wiped_error_v1(slot: i64, mut bytes: [u8], error: text) -> HostIdentityPlatformReadV1:
+    if bytes.len() > 0:
+        val _bytes_wipe = secure_zero_u8_slots(bytes)
+    identity_linux_read_error_v1(slot, error)
+
+# Native buffers that held file contents are zeroed before they return to the allocator.
+@unsafe(reason: "zero a malloc'd private-file buffer of exactly `size` bytes before releasing it", capabilities: [ffi, raw_ptr])
+fn identity_linux_free_wiped_v1(memory: i64, size: i64):
+    for index in 0..size: volatile_write_u8(memory + index, 0)
+    free(memory)
+
 @unsafe(reason: "read exact private regular inode with pread and complete metadata/name revalidation", capabilities: [ffi, raw_ptr])
 fn identity_linux_read_v1(slot: i64, generation: i64, leaf: text, maximum: i64) -> HostIdentityPlatformReadV1:
     if not host_identity_leaf_valid_v1(leaf) or maximum < 1 or maximum > 65536:
@@ -403,27 +424,33 @@ fn identity_linux_read_v1(slot: i64, generation: i64, leaf: text, maximum: i64) 
     while offset < meta.size:
         val count = pread(fd as i32, memory + offset, (meta.size - offset) as u64, offset)
         if count <= 0 or count > meta.size - offset:
-            free(memory)
+            identity_linux_free_wiped_v1(memory, meta.size)
             return identity_linux_read_error_v1(slot, "identity-store-read-incomplete")
         offset = offset + count
-    var bytes: [u8] = []
-    for index in 0..meta.size: bytes.push(volatile_read_u8(memory + index) as u8)
-    free(memory)
+    # Pre-sized: a growing copy would hand partial key prefixes back to the allocator on every reallocation.
+    var bytes: [u8] = [0u8; meta.size]
+    for index in 0..meta.size: bytes[index] = volatile_read_u8(memory + index) as u8
+    identity_linux_free_wiped_v1(memory, meta.size)
     val after = identity_linux_metadata_v1(fd, "", true)
     val named = identity_linux_metadata_v1(parent, leaf, false)
     val checked = identity_linux_current_v1(slot, generation)
-    if after.is_err() or named.is_err() or checked.is_err(): return identity_linux_read_error_v1(slot, "identity-store-read-changed")
+    if after.is_err() or named.is_err() or checked.is_err(): return identity_linux_read_wiped_error_v1(slot, bytes, "identity-store-read-changed")
     val after_meta = after.unwrap()
     val named_meta = named.unwrap()
     if (not identity_linux_file_valid_v1(after_meta, state.uid) or not identity_linux_file_valid_v1(named_meta, state.uid) or
             not host_identity_bytes_equal_v1(after_meta.revision, meta.revision) or
             not host_identity_bytes_equal_v1(after_meta.identity, meta.identity) or
             not host_identity_bytes_equal_v1(named_meta.identity, meta.identity)):
-        return identity_linux_read_error_v1(slot, "identity-store-read-changed")
-    if not utf8_bytes_valid(bytes): return identity_linux_read_error_v1(slot, "identity-store-file-encoding")
+        return identity_linux_read_wiped_error_v1(slot, bytes, "identity-store-read-changed")
+    # The scan only sets a flag: a wipe inside the loop would run while the iterator still holds the buffer.
+    var has_nul = false
     for byte in bytes:
-        if byte == 0u8: return identity_linux_read_error_v1(slot, "identity-store-file-encoding")
-    if not identity_linux_file_close_v1(slot): return HostIdentityPlatformReadV1(cleanup_pending: true, error: "identity-store-close-consumed-unconfirmed")
+        if byte == 0u8: has_nul = true
+    if has_nul or not utf8_bytes_valid(bytes): return identity_linux_read_wiped_error_v1(slot, bytes, "identity-store-file-encoding")
+    if not identity_linux_file_close_v1(slot):
+        if bytes.len() > 0:
+            val _close_wipe = secure_zero_u8_slots(bytes)
+        return HostIdentityPlatformReadV1(cleanup_pending: true, error: "identity-store-close-consumed-unconfirmed")
     HostIdentityPlatformReadV1(bytes: Some(bytes))
 
 @unsafe(reason: "unlink only retained stage's exact current name binding; never touch destination or substituted object", capabilities: [ffi, raw_ptr])
@@ -507,10 +534,10 @@ fn identity_linux_publish_v1(slot: i64, generation: i64, leaf: text, bytes: [u8]
     while offset < bytes.len():
         val count = write(fd as i32, memory + offset, (bytes.len() - offset) as u64)
         if count <= 0 or count > bytes.len() - offset:
-            free(memory)
+            identity_linux_free_wiped_v1(memory, bytes.len() as i64)
             return identity_linux_publish_error_v1(slot, false, false, "identity-store-stage-write")
         offset = offset + count
-    free(memory)
+    identity_linux_free_wiped_v1(memory, bytes.len() as i64)
     if fsync(fd as i32) != 0: return identity_linux_publish_error_v1(slot, false, false, "identity-store-stage-sync")
     val final_stage = identity_linux_metadata_v1(fd, "", true)
     val stage_named = identity_linux_metadata_v1(parent, stage, false)

@@ -1,6 +1,6 @@
 # std ed25519 leaves secret temporaries unwiped (2026-11-19)
 
-Status: OPEN (NOT_RUN, no runnable binary). Residual of `doc/08_tracking/bug/host_identity_private_parser_seed_copies_unwiped_2026-11-18.md`.
+Status: PARTIALLY FIXED 2026-11-20 by milestone_0055 (NOT_RUN, no runnable binary); remaining residue is listed under "Still unwiped" in the last update. Was: OPEN. Residual of `doc/08_tracking/bug/host_identity_private_parser_seed_copies_unwiped_2026-11-18.md`.
 
 `src/lib/common/crypto/ed25519.spl`: `ed25519_pubkey` and `pure_ed25519_sign` keep the SHA-512 digest of the seed
 (`h`), the clamped scalar (`a`), the nonce prefix, `r`, and field/scalar limb temporaries (`ed_scalar_mul_basepoint`,
@@ -30,3 +30,59 @@ The std internals above are not the only unwiped copies, and earlier text unders
   caller's decision (`host_identity_command_v1.spl`).
 - OPEN (not in this change): store-read error paths in `host_identity_command_v1.spl` drop `bytes` unwiped (REVIEW_B
   P3-11).
+
+## Update 2026-11-20 (milestone_0055 STORE/CRYPTO WIPE; source-authored, NOT_RUN)
+Status: PARTIALLY FIXED. The named `[u8]`/`[i64]` secret buffers that the store and the std derive/sign entry points
+own are wiped at their owning storage (moved into a sole-holder `var`, source field emptied, then `secure_zero_*`), and
+the secret byte buffers on this path are pre-sized so no growth reallocation frees a partial copy. What is left is
+listed under "Still unwiped" with the exact reason. Specs (NOT_RUN): test/01_unit/lib/crypto/ed25519_secret_temporaries_wipe_spec.spl
+(EDWIPE-01..05) and test/01_unit/lib/nogc_sync_mut/io/host_identity_store_secret_wipe_v1_spec.spl (STWIPE-01..03).
+Byte identity of the refactor is also pinned by test/01_unit/lib/crypto/ed25519_rfc8032_spec.spl.
+
+Fixed in `src/lib/common/crypto/ed25519.spl` (no public signature changed; the borrowed seed is never wiped):
+- H(seed) and H(prefix || M) go through a private `_pure_ed25519_sha512_secret`. It drives the sha512 family primitives
+  itself (as pbkdf2 does), so the widened `[i64]` input copy, the state words, the block words (which still hold the
+  last input block) and the digest words are wiped. Public preimages (H(R || A || M), verify) keep the old bridge and
+  pay nothing.
+- `h`, the clamped scalar `a`, the reduced scalar (`_pure_ed25519_reduce_32_to_scalar`, whose 64-byte widened copy is
+  now pre-sized and wiped), the nonce preimage (written straight into one pre-sized buffer; the separate `prefix` copy
+  is gone), the nonce hash and `r` are wiped before `ed25519_pubkey` / `pure_ed25519_sign` return.
+  `pure_ed25519_keypair_from_seed` now delegates to `ed25519_pubkey` (same output).
+- `_pure_ed25519_clamp` and `ed25519_scalar.spl` `_limbs32_to_bytes` (every `sc_reduce` / `sc_muladd` output, i.e. the
+  reduced scalar, `r` and `S`) built their result by `push`; both are now pre-sized (byte-identical output).
+- Wipes are best effort: these std functions return no error, so an unverified wipe cannot refuse. The private
+  `_ed25519_pubkey_run` / `_pure_ed25519_sign_run` report the verified-wipe count (7 / 13) for specs.
+
+Fixed in the store the orchestrator reads keys through (`src/lib/nogc_sync_mut/io/host_identity_store_linux_v1.spl`):
+- The `malloc` buffer `pread` fills and the one `write` drains in publish held the whole PEM and were freed as is. Both
+  are zeroed (`volatile_write_u8`) before `free`, on the error and success exits (`identity_linux_free_wiped_v1`).
+- The `[u8]` copy of the file grew by `push`, handing partial key prefixes back to the allocator on each reallocation.
+  It is now pre-sized.
+- Refusals after the copy exists (read-changed x2, file-encoding, close-unconfirmed) dropped it unwiped. Each wipes it
+  first. The NUL scan only sets a flag, so no wipe runs while the loop iterator still holds the buffer.
+- `path_v1` (called by `host_identity_command_v1` with the `.key` leaf) re-read the whole private key just to prove the
+  target and dropped the bytes. It now takes them out of the read result and wipes that sole holder (Linux and Windows).
+
+Not changed, with reason:
+- The store facade (`host_identity_store_read_v1`) and `HostIdentityPlatformV1.read_v1` only re-wrap the same
+  `Option<[u8]>` (shared, not copied); the orchestrator callers already move it out and wipe it (milestone_0051).
+- `profile_locator_v1` reads only `.profile` leaves (no private key) and is unchanged.
+
+Still unwiped (cannot be reached by a `[u8]` wipe today):
+- Windows store: `WindowsJournalStoreV1.read` returns the file as immutable `text`, and `publish` takes
+  `bytes_to_text(bytes)`. Those text copies of the private key cannot be wiped without a bytes-based journal API.
+- Entropy: `sosix_random_hex` is `crypto_sffi.random_hex` over `extern rt_random_hex -> text?`. The 36 entropy bytes
+  (seed + check) exist as immutable hex text; no bytes-returning entropy API exists. Needs a runtime extern; not added.
+- Integer locals and limb arrays inside the arithmetic: SHA-512 compression round locals (`i64` values, not arrays);
+  `ed25519_scalar.spl` `sc_reduce` / `sc_muladd` (fresh `[u32]` limb arrays per bit step, holding `a`, `r` and their
+  products); `ed_scalar_mul` (`[u64]` / `Fe25519` limbs of the accumulator and table points, whose partial values
+  depend on the secret scalar, and the per-window `digit`); `_pure_ed25519_clamp`'s per-byte local. Wiping these needs
+  a std-wide policy for arithmetic temporaries (every field/scalar op allocates new arrays) and a measured perf budget.
+- Native engines may copy or spill values (registers, stack) outside any place Simple code can name. The sha512.spl
+  header records that a full-width `i64` stored into an array allocates under the JIT and is never freed; the SHA-512
+  state words are full-width, so `secure_zero_i64_slots` zeroes the slots but not those leaked allocations.
+- Assumption (not proven by a run): `_ed25519_wipe_u8` / `_ed25519_wipe_i64` take a `mut` parameter and pass it on to
+  `secure_zero_*`'s `mut` parameter. SEMANTICS (milestone_0051) covers locals and fields; a re-passed `mut` parameter
+  is assumed to stay the parked sole holder, as the existing `host_identity_decode_private_v1(mut bytes)` already does.
+- The spec counts prove each wipe ran and read back zero, not that it hit the only copy; sole-holder shape is pinned by
+  source needles only.
