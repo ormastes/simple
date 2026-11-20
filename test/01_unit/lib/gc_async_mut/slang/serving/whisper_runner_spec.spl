@@ -1,0 +1,51 @@
+# @cover src/lib/gc_async_mut/slang/model_executor/runners/whisper_runner.spl 80%
+"""
+## Purpose and audience
+Purpose: pin the whisper runner's audio preparation and its load-on-demand
+contract without loading whisper.cpp. Audience: engineers changing the ASR path.
+
+## Operator workflow
+I hand the runner a wav. It must become 16 kHz mono s16le bytes for the shim, or
+be refused with a reason; no native library may be opened before whisper_open.
+
+## Compatibility and limitations
+The native transcription itself is covered by
+test/03_system/lib/slang/feature/slang_asr_live_spec.spl (SLANG_WHISPER_LIB).
+"""
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.slang.model_executor.runners.whisper_runner.{whisper_run, wav_to_pcm16}
+use std.gc_async_mut.slang.modality.kinds.{KindParams, KindRequest}
+use std.common.audio.wav_encode.{encode_wav_pcm16}
+
+describe "whisper audio preparation":
+    it "turns 16 kHz mono pcm16 into two bytes per sample":
+        val wav = encode_wav_pcm16([0.0, 0.5, -0.5, 0.25], 1, 16000)
+        match wav_to_pcm16(wav):
+            Err(reason): expect(reason).to_equal("")
+            Ok(pcm):
+                expect(pcm.len()).to_equal(8)
+                # 0.5 -> 16383 = 0x3FFF
+                expect((pcm[2] as i64)).to_equal(255)
+                expect((pcm[3] as i64)).to_equal(63)
+    it "averages stereo down to mono":
+        val wav = encode_wav_pcm16([0.5, -0.5, 0.25, 0.25], 2, 16000)
+        match wav_to_pcm16(wav):
+            Err(reason): expect(reason).to_equal("")
+            Ok(pcm): expect(pcm.len()).to_equal(4)
+    it "refuses another sample rate with the reason":
+        val wav = encode_wav_pcm16([0.0, 0.1], 1, 8000)
+        match wav_to_pcm16(wav):
+            Err(reason): expect(reason.find("16000 Hz") >= 0 and reason.find("8000 Hz") >= 0).to_equal(true)
+            Ok(_): expect("accepted").to_equal("refused")
+    it "refuses bytes that are not a wav":
+        match wav_to_pcm16([1u8, 2u8, 3u8]):
+            Err(reason): expect(reason.starts_with("invalid audio")).to_equal(true)
+            Ok(_): expect("accepted").to_equal("refused")
+
+describe "whisper runner without a library":
+    it "refuses to run before it is opened":
+        val params = KindParams(max_tokens: 0, n: 1, size: "", steps: 0, seed: 0, voice: "", top_n: 0, response_format: "json")
+        match whisper_run(KindRequest(model_id: "m", parts: [], params: params)):
+            Err(reason): expect(reason.find("not open") >= 0).to_equal(true)
+            Ok(_): expect("ran").to_equal("refused")
