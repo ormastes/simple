@@ -60,3 +60,27 @@ describe "arch HAL gating for non-x86 kernels":
                     ungated = ungated + t + " "
             i = i + 1
         expect(ungated).to_equal("")
+
+    it "cfg-gates x86 port I/O imports in shared drivers":
+        step("pci/rtc/reset: every x86_port_io import follows an @cfg line")
+        # Ungated, these pulled x86 port_io_owner into the riscv64 kernel and
+        # left rt_port_inb/rt_port_outb undefined at link.
+        var ungated = ""
+        for path in ["src/os/drivers/pci/pci.spl", "src/os/drivers/rtc/rtc.spl", "src/os/kernel/arch/reset.spl"]:
+            val lines = file_read_text(path).split("\n")
+            var i: i64 = 0
+            while i < lines.len().to_i64():
+                val t = lines[i].trim()
+                if t.starts_with("use os.kernel.arch_adapt.x86_port_io"):
+                    if i == 0 or not lines[i - 1].trim().starts_with("@cfg("):
+                        ungated = ungated + path + " "
+                i = i + 1
+        expect(ungated).to_equal("")
+
+    it "uses one arch per @cfg in shared drivers":
+        step("seed cfg_strip only reads not(<one ident>); not(a or b) stays ungated")
+        var compound = ""
+        for path in ["src/os/drivers/pci/pci.spl", "src/os/drivers/rtc/rtc.spl", "src/os/kernel/arch/reset.spl"]:
+            if file_read_text(path).contains("@cfg(not(x86_64 or x86))"):
+                compound = compound + path + " "
+        expect(compound).to_equal("")
