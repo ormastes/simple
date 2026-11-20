@@ -3,7 +3,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_e
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{inline_line_strut_baseline_offset, DEVICE_TOP_UNSET, box_device_top_px, box_device_extra_h_at, box_device_extra_w_at, layout_device_scale}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core_types.{Rules}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
-    HNode, web_argb, attr_value, build_child_index, parse_color, parse_color_any, parse_html, parse_int, decl_get, svg_number_milli, svg_view_box_milli,
+    HNode, web_argb, attr_value, build_child_index, html_generated_start, html_tree_order, parse_color, parse_color_any, parse_html, parse_int, decl_get, svg_number_milli, svg_view_box_milli,
     simple_web_backdrop_admission, _wsc_on, _wsc_now_us, _wlay_add,
     _web_budget_clock, _web_render_deadline_us, WEB_IFRAME_DEPTH_CAP,
     WEB_IFRAME_PLACEHOLDER, attr_present, parse_signed_nth_int,
@@ -668,11 +668,18 @@ fn _html_draw_ir_node_paint_order(
         members.push(empty_m)
         child_contexts.push(empty_c)
         ctx_init = ctx_init + 1
-    var i: i32 = 0
+    # Generated `::before`/`::after` nodes sit after the parsed arena; members
+    # are registered in TREE order so they paint where Chrome paints them.
+    val has_generated = html_generated_start(nodes) >= 0
+    val tree_order: [i32] = if has_generated: html_tree_order(nodes, build_child_index(nodes)) else: []
+    val visit_count = if has_generated: tree_order.len() as i32 else: node_count as i32
+    var visit: i32 = 0
     # cpu-lane-loop-ok: assigns each node to its nearest supported stacking context and registers it as a member; single forward O(node_count) pass, parents precede children
-    while i < node_count:
+    while visit < visit_count:
+        val i = if has_generated: tree_order[visit] else: visit
+        visit = visit + 1
         val parent = nodes[i].parent
-        val parent_context = if parent >= 0 and parent < i:
+        val parent_context = if parent >= 0 and (parent < i or has_generated):
             node_context[parent]
         else:
             0
@@ -689,7 +696,6 @@ fn _html_draw_ir_node_paint_order(
         else:
             node_context[i] = parent_context
             members[parent_context].push(i)
-        i = i + 1
     _html_draw_ir_append_context_paint_order(
         styles, members, child_contexts, 0, []
     )
