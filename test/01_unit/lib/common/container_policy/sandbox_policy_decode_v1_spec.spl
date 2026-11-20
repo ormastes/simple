@@ -170,3 +170,38 @@ describe "Seatbelt provider policy SDN decoding":
         val d = refusal_of(big)
         expect(d.code).to_equal("SCMAC-SCHEMA-001")
         expect(d.notes).to_contain("kind: size")
+
+    it "refuses grants that alias the workspace, output or another grant":
+        """
+        An explicit grant on the workspace or output reference would silently
+        widen `workspaceAccess: read-only`, and two grants on one root, or a
+        workspace that is also the output, make the authority ambiguous. Each
+        is refused instead of being merged.
+        """
+        val src = valid_source()
+        step("Name the workspace in an explicit grant")
+        val ws = refusal_of(src.replace("root: \"shared-cache\"", "root: \"prepared-workspace\""))
+        expect(ws.notes).to_contain("kind: reserved_ref")
+        expect(ws.notes).to_contain("path: filesystem.grants.1.root")
+        step("Name the output in an explicit grant")
+        val out = refusal_of(src.replace("root: \"shared-cache\"", "root: \"prepared-output\""))
+        expect(out.notes).to_contain("kind: reserved_ref")
+        step("Grant the same root twice")
+        val dup = refusal_of(src.replace("root: \"shared-cache\"", "root: \"broker-socket\""))
+        expect(dup.notes).to_contain("kind: duplicate_value")
+        expect(dup.notes).to_contain("path: filesystem.grants.1.root")
+        step("Use the workspace as the output")
+        val same = refusal_of(src.replace("output: \"prepared-output\"", "output: \"prepared-workspace\""))
+        expect(same.notes).to_contain("path: filesystem.output")
+
+    it "refuses dot-only identifiers and non-canonical quantities":
+        """
+        `.` and `..` are not identifiers: a reference must never read as a
+        path step. A quantity with a leading zero is not canonical (§13.5).
+        """
+        val dot = refusal_of(valid_source().replace("name: \"mac-build-restricted\"", "name: \"..\""))
+        expect(dot.notes).to_contain("kind: identifier")
+        expect(dot.notes).to_contain("path: name")
+        val zero = refusal_of(valid_source().replace("cleanup:\n", "resources:\n    hardMemoryLimit: \"0512Mi\"\ncleanup:\n"))
+        expect(zero.notes).to_contain("kind: quantity")
+        expect(zero.notes).to_contain("path: resources.hardMemoryLimit")

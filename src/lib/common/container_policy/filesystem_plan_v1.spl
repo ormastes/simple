@@ -60,6 +60,12 @@ fn canonical_path_ok(p: text) -> bool:
         return false
     if p != "/" and p.ends_with("/"):
         return false
+    # No real path carries NUL; control bytes would reach the profile
+    # compiler as literal policy text (§9.3).
+    for i in 0..p.byte_len():
+        val c = p.byte_at(i) as i64
+        if c < 32 or c == 127:
+            return false
     for part in p.split("/"):
         if part == "." or part == "..":
             return false
@@ -67,8 +73,12 @@ fn canonical_path_ok(p: text) -> bool:
 
 # A grant and a deny root overlap when the grant is inside the protected root,
 # or when a recursive grant contains it. An exact-object grant on a parent
-# directory does not reach a protected child.
+# directory does not reach a protected child. The same object identity under
+# another spelling (firmlink, hard link) is an overlap whatever the paths say;
+# containment through such an alias is not visible from identities alone.
 pub fn grant_overlaps_protected_v1(g: PlannedGrantV1, d: ProtectedRootV1) -> bool:
+    if g.identity == d.identity:
+        return true
     val ci = g.case_insensitive or d.case_insensitive
     if canonical_path_within_v1(g.canonical_path, d.canonical_path, ci):
         return true
@@ -162,12 +172,27 @@ pub fn filesystem_plan_v1(policy: SandboxPolicyV1, facts: FilesystemResolvedFact
             diags.push(fs_diag(SCMAC_FS_002, "root '" + r.root_ref + "' has no canonical path identity",
                 source_ref, "filesystem"))
     var denies: [ProtectedRootV1] = []
+    var has_supervisor = false
+    var has_private = false
     for d in facts.protected:
         if not canonical_path_ok(d.canonical_path) or d.identity == "" or d.generation < 1:
             diags.push(fs_diag(SCMAC_FS_002, "protected root '" + d.root_ref + "' has no canonical identity/generation",
                 source_ref, "filesystem"))
+        match d.root_class:
+            ProtectedRootClassV1.SupervisorState: has_supervisor = true
+            ProtectedRootClassV1.AttemptPrivate: has_private = true
+            ProtectedRootClassV1.Credential: pass
+            ProtectedRootClassV1.SiblingAttempt: pass
         if deny_selected(d, fsp):
             denies.push(d)
+    # Supervisor state and attempt-private material are always denied (§10.2);
+    # facts that report neither cannot show the plan keeps them out of reach.
+    if not has_supervisor:
+        diags.push(fs_diag(SCMAC_FS_002, "resolved facts name no supervisor-state root; the always-denied set is unproven",
+            source_ref, "filesystem"))
+    if not has_private:
+        diags.push(fs_diag(SCMAC_FS_002, "resolved facts name no attempt-private root; the always-denied set is unproven",
+            source_ref, "filesystem"))
     # Requested grants, in declaration order, with the field path that asked.
     var wanted: [FilesystemGrantV1] = []
     var origins: [text] = []
@@ -218,6 +243,18 @@ pub fn filesystem_plan_v1(policy: SandboxPolicyV1, facts: FilesystemResolvedFact
             diags.push(fs_diag(SCMAC_FS_002, "grant root '" + g.root_ref + "' was not resolved by the host boundary",
                 source_ref, origin))
     val sorted_grants = sort_grants(planned)
+    # Two grant roots that resolve to one object (e.g. another ref for the
+    # workspace) would merge their authority, widening `workspaceAccess`.
+    # Deliberately fail closed: two refs that legitimately share one object
+    # (baseline `toolchain` and an explicit grant on the same SDK) are refused
+    # too; express that access through one reference.
+    for i in 0..sorted_grants.len():
+        for j in (i + 1)..sorted_grants.len():
+            val a = sorted_grants[i]
+            val b = sorted_grants[j]
+            if a.root_ref != b.root_ref and a.identity == b.identity:
+                diags.push(fs_diag(SCMAC_FS_002, "grant roots '" + a.root_ref + "' and '" + b.root_ref +
+                    "' resolve to the same object (ambiguous remapping)", source_ref, b.origin))
     val sorted_denies = sort_denies(denies)
     for g in sorted_grants:
         for d in sorted_denies:

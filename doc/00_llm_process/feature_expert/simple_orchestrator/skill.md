@@ -722,6 +722,17 @@ binding / Host bug). Specs: `remote_container_reset_failure_stages_v3_spec.spl`,
 - VERSION SKEW: a controller older than milestone_0045 refuses a Host-signed `service-restart` and a late receipt and
   settles `outcome-unknown`; upgrade the controller first (same rule as #10398/#10399).
 
+## Container policy review — milestone_0056 (2026-11-20, specs NOT_RUN)
+
+`src/lib/common/container_policy/` now fails closed on: facts with no supervisor-state or attempt-private
+protected root (SCMAC-FS-002); a grant whose object identity equals a protected root's under another path
+(firmlink/hard link, SCMAC-FS-001); canonical paths with NUL/control bytes; explicit grants on the workspace,
+output or a root already granted; workspace == output; `.`/`..` identifiers; leading-zero quantities; and network
+destination names that are numeric addresses (IPv4/decimal/hex) or the literal `localhost` label; two grant
+roots resolving to one object (SCMAC-FS-002). Loopback via other DNS names is enforced only at connect time.
+Trap: path containment cannot see an ALIAS of a protected parent (only exact identity) and case folding is
+`.lower()` (no Unicode normalization) — both remain gaps, handled only by the native effectful boundary.
+
 ## Unavailable-host rows (2026-11-19)
 
 Every unavailable host or capability row (spec execution NOT_RUN, container live rows, Windows/FreeBSD/VM hosts, live

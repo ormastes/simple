@@ -31,9 +31,10 @@ pub fn policy_as_bool_v1(v: SdnValue, path: text, spans: Dict<text, SdnSpan>) ->
         case SdnValue.Bool(b): Ok(b)
         case _: Err(reject("type", path, path + " must be a boolean", spans))
 
-# Logical identifiers/references: 1..128 bytes of [A-Za-z0-9._-].
+# Logical identifiers/references: 1..128 bytes of [A-Za-z0-9._-], never the
+# path steps `.` or `..`.
 pub fn policy_ident_ok_v1(s: text) -> bool:
-    if s.byte_len() < 1 or s.byte_len() > 128:
+    if s.byte_len() < 1 or s.byte_len() > 128 or s == "." or s == "..":
         return false
     for i in 0..s.byte_len():
         val c = s.byte_at(i) as i64
@@ -144,7 +145,9 @@ pub fn filesystem_ops_sorted_v1(ops: [FilesystemOpV1]) -> [FilesystemOpV1]:
                 out.push(o)
     out
 
-fn decode_grants(v: SdnValue, spans: Dict<text, SdnSpan>) -> Result<[FilesystemGrantV1], RejectionV1>:
+# An explicit grant may not re-grant the workspace or output (that would
+# silently widen `workspaceAccess`) nor name one root twice (ambiguous).
+fn decode_grants(v: SdnValue, workspace: text, output: text, spans: Dict<text, SdnSpan>) -> Result<[FilesystemGrantV1], RejectionV1>:
     val path = "filesystem.grants"
     val items = as_array(v, path, spans)?
     if items.len() > SANDBOX_POLICY_MAX_GRANTS_V1:
@@ -158,6 +161,12 @@ fn decode_grants(v: SdnValue, spans: Dict<text, SdnSpan>) -> Result<[FilesystemG
         if root == FS_REF_PRIVATE_HOME_V1 or root == FS_REF_PRIVATE_TEMP_V1:
             return Err(reject("reserved_ref", gpath + ".root",
                 "'" + root + "' is reserved for privateHome/privateTemp", spans))
+        if root == workspace or root == output:
+            return Err(reject("reserved_ref", gpath + ".root",
+                "'" + root + "' is granted by filesystem.workspace/filesystem.output, not by an explicit grant", spans))
+        for prior in out:
+            if prior.root_ref == root:
+                return Err(reject("duplicate_value", gpath + ".root", "root '" + root + "' is granted twice", spans))
         val ops = decode_ops(require(g, "ops", gpath, spans)?, gpath + ".ops", spans)?
         val recursive = policy_required_bool_v1(g, "recursive", gpath, spans)?
         var scope = FilesystemScopeV1.ExactObject
@@ -181,11 +190,17 @@ fn decode_filesystem(top: Dict<text, SdnValue>, spans: Dict<text, SdnSpan>) -> R
     val home = policy_required_bool_v1(f, "privateHome", "filesystem", spans)?
     val tmp = policy_required_bool_v1(f, "privateTemp", "filesystem", spans)?
     val output = policy_ident_v1(f, "output", "filesystem", spans)?
+    if output == workspace or output == FS_REF_PRIVATE_HOME_V1 or output == FS_REF_PRIVATE_TEMP_V1:
+        return Err(reject("reserved_ref", "filesystem.output",
+            "filesystem.output must name its own root, not the workspace or a private directory", spans))
+    if workspace == FS_REF_PRIVATE_HOME_V1 or workspace == FS_REF_PRIVATE_TEMP_V1:
+        return Err(reject("reserved_ref", "filesystem.workspace",
+            "filesystem.workspace must not name a private directory", spans))
     val deny_cred = policy_required_bool_v1(f, "denyCredentialRoots", "filesystem", spans)?
     val deny_sib = policy_required_bool_v1(f, "denySiblingAttempts", "filesystem", spans)?
     var grants: [FilesystemGrantV1] = []
     if f.contains_key("grants"):
-        grants = decode_grants(f["grants"], spans)?
+        grants = decode_grants(f["grants"], workspace, output, spans)?
     Ok(FilesystemPolicyV1(baseline: baseline, workspace_ref: workspace, workspace_access: access,
         private_home: home, private_temp: tmp, output_ref: output, deny_credential_roots: deny_cred,
         deny_sibling_attempts: deny_sib, grants: grants))
@@ -237,14 +252,14 @@ fn decode_hard_limits(top: Dict<text, SdnValue>, spans: Dict<text, SdnSpan>) -> 
     if f.contains_key("hardMemoryLimit"):
         val raw = as_quantity_text(f["hardMemoryLimit"], "resources.hardMemoryLimit", spans)?
         val bytes = parse_memory_bytes(raw)
-        if bytes <= 0:
+        if bytes <= 0 or raw.starts_with("0"):
             return Err(reject("quantity", "resources.hardMemoryLimit",
                 "memory quantity '" + raw + "' is not a positive integer byte value", spans))
         mem = SandboxHardLimitV1.Required(bytes)
     if f.contains_key("hardCpuLimit"):
         val raw = as_quantity_text(f["hardCpuLimit"], "resources.hardCpuLimit", spans)?
         val millis = parse_cpu_millis(raw)
-        if millis <= 0:
+        if millis <= 0 or raw.starts_with("0"):
             return Err(reject("quantity", "resources.hardCpuLimit",
                 "cpu quantity '" + raw + "' is not a positive integer core or millicore value", spans))
         cpu = SandboxHardLimitV1.Required(millis)
