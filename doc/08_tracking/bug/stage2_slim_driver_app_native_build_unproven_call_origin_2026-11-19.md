@@ -198,3 +198,15 @@ provider. The new first error, FILE-WORKER-E-CLOSURE-INCOMPLETE for io/dir_ops.s
 comes from the phase-2 surface readiness check
 (driver_source_parse_streaming.spl:600), which runs before any #10594 code. It is
 not caused by #10594. Status: verification-pending.
+
+Update 2026-11-21 (f): the dir_ops FILE-WORKER-E-CLOSURE-INCOMPLETE is a real gap
+in the PM3 unit plan. dir_ops imports std.io_runtime, which re-exports with
+`export a, b from nogc_sync_mut.io_runtime`, and tldr_route_import_specs_v1 dropped
+that form. As a result the origin module (and
+nogc_async_mut.sosix.host_facade) was never summarized or parsed, its row stayed
+unbuilt, and the phase-2 readiness walk failed the target. It is neither a stale
+summary nor 83499674f1b: io_runtime.spl and dir_ops.spl are unchanged since 11-13.
+The lane only reaches this unit now. Fix: scan `export ... from ...`.
+Spec: test/01_unit/compiler/80.driver/tldr_route_export_from_spec.spl (3/3; red before).
+tldr_route_spec's 7 failures are pre-existing and the same set with or without the fix.
+Status: verification-pending.
