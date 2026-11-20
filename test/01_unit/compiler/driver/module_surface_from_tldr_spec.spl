@@ -4,7 +4,7 @@ use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.driver.cache.tldr_summary_v1.{tldr_summary_entries_v1, tldr_summary_produce_v1, read_tldr}
 use compiler.hir.hir_lowering.module_surface_canonical_digest_v1.{module_surface_canonical_digest_v1}
 use compiler.hir.hir_lowering.module_surface_declarations.{module_surface_from_owner, ModuleSurfaceParserOwner}
-use compiler.hir.hir_lowering.module_surface_from_tldr_v1.{module_surface_from_tldr_v1, module_surface_tldr_stub_module_v1}
+use compiler.hir.hir_lowering.module_surface_from_tldr_v1.{module_surface_from_tldr_v1, module_surface_tldr_stub_module_v1, module_surface_tldr_stub_source_v1}
 use compiler.common.driver_core_types.{SourceFile}
 
 # Fixture: small module with pub fn returning i64 and pub struct
@@ -253,3 +253,28 @@ impl Y:
         expect(module_surface_canonical_digest_v1(stub.unwrap())).to_equal(from_source)
         val surf = module_surface_from_tldr_v1("test.dup_impls", tldr_rows).unwrap()
         expect(surf.impls.len()).to_equal(4)
+
+# std/nogc_sync_mut/io/dir_ops.spl: `@unsafe(reason: "...ABI; false is ...")`
+# before `extern fn ... -> bool`. cfg attrs are joined with ";" in the
+# summary row, so splitting on every ";" broke the attribute across two stub
+# lines and the parser reported `unexpected token in expression: ->` at the
+# extern header (~44k [parser_error] lines in the xc matrix log).
+val SOURCE_ATTR_WITH_SEMICOLON: text = """
+@unsafe(reason: "raw directory-create ABI; false is the explicit provider failure status", capabilities: [ffi])
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+
+pub fn is_dir(path: text) -> bool:
+    rt_dir_create(path, false)
+"""
+
+describe "TLDR stub keeps attributes whose text contains ';'":
+    it "emits the attribute on one line and the stub surface matches the source":
+        val rows = tldr_summary_entries_v1("test.attrsemi", SOURCE_ATTR_WITH_SEMICOLON)
+        val stub = module_surface_tldr_stub_source_v1(rows) ?? ""
+        expect(stub.contains("@unsafe(reason: \"raw directory-create ABI; false is the explicit provider failure status\", capabilities: [ffi])\nextern fn rt_dir_create")).to_equal(true)
+        val parsed = parse_and_build_module(SOURCE_ATTR_WITH_SEMICOLON, "test/attrsemi.spl")
+        val source_file = SourceFile(path: "test/attrsemi.spl", module_name: "test.attrsemi", content: SOURCE_ATTR_WITH_SEMICOLON)
+        val source_surface = module_surface_from_owner(ModuleSurfaceParserOwner.new(parsed), source_file, 0).unwrap()
+        val tldr_surface = module_surface_from_tldr_v1("test.attrsemi", rows).unwrap()
+        # Stub rows are sorted; source order differs (pre-existing, see the cfg case above).
+        expect(tldr_surface.callable_names.sorted()).to_equal(source_surface.callable_names.sorted())
