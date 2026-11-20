@@ -1249,6 +1249,11 @@ pub fn host_linux_service_remote_build_open_v4(original: HostLinuxServiceCurrent
     if owner.slot_kind != "remote-build" or owner.agent_operation_id != operation_id:
         return linux_service_reply_v4(owner, "", "linux-host-remote-build-slot", false)
     if owner.remote_build_port.is_none(): return linux_service_reply_v4(owner, "", "linux-host-remote-build-port-missing", false)
+    # review_b P0: a pre-transfer settle drops the holder but keeps the slot, so a replayed or retried open of the SAME
+    # operation would otherwise run a workload whose row is already settled (charge released). A published outcome or
+    # a reap index answers terminal here; a journal read error refuses (fail closed).
+    val terminal = linux_service_remote_build_reaped_v4(owner, operation_id)
+    if terminal != "": return linux_service_reply_v4(owner, "", terminal, false)
     val execute = linux_service_remote_build_execute_v4(owner, operation_id)
     if execute.is_err(): return linux_service_reply_v4(owner, "", execute.unwrap_err(), false)
     val metadata = owner.current_v4().unwrap()
@@ -1417,9 +1422,12 @@ pub fn host_linux_service_remote_build_cancel_v4(original: HostLinuxServiceCurre
     val build = owner.build.unwrap()
     val execute = linux_service_remote_build_execute_v4(owner, build.operation_id)
     if execute.is_err(): return linux_service_reply_v4(owner, "", execute.unwrap_err(), false)
+    # review_b P2: the archived execute's own association digest, compared against the held executor's (never itself).
+    val association = host_execution_association_digest_v3(execute.unwrap().association)
+    if association.is_err(): return linux_service_reply_v4(owner, "", association.unwrap_err(), false)
     val metadata = owner.current_v4().unwrap()
     val grant = host_linux_service_agent_cancel_authorize_v4(metadata.policy.snapshot, metadata.configuration.controller_ref,
-        cancel.unwrap(), execute.unwrap().operation, build.association_digest, build.operation_id, build.association_digest,
+        cancel.unwrap(), execute.unwrap().operation, association.unwrap(), build.operation_id, build.association_digest,
         host_local_context_v1(metadata.policy))
     if grant.is_err(): return linux_service_reply_v4(owner, "", grant.unwrap_err(), false)
     val cancelled = host_remote_build_request_cancel_v4(build, "controller-cancel")

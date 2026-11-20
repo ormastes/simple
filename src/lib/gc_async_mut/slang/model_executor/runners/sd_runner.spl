@@ -1,0 +1,271 @@
+# @gc — module uses GC runtime
+#
+# Stable-diffusion runner — the ImageGen kind's native runner.
+# Design: doc/05_design/ml/slang/slang_pluggable_modalities.md §3.4.
+#
+# Drives src/runtime/slang_sd_shim.c (stable-diffusion.cpp, ggml linked
+# statically into the shim DLL, so it shares no ggml with slang_ggml.dll)
+# through the dynamic SFFI. The library is dlopened ONLY inside
+# sd_runner_open, from SLANG_SD_LIB; no static `extern fn` names it.
+#
+# One context at a time, one image at a time: sd_runner_run is serial and the
+# shim holds no lock. A second open replaces the first.
+#
+# ponytail: the pixel buffer is allocated with a local zero-fill loop and PNG
+# uses stored deflate. Upgrade path: L2's packed zeroed-buffer constructor and
+# a compressing deflate encoder in common/image/png_encode.spl.
+
+use std.nogc_sync_mut.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi_call_i64}
+use std.common.string_core.{text_to_utf8_bytes, bytes_to_text}
+use std.common.image.png_encode.{encode_argb_to_png_rgb}
+use std.gc_async_mut.slang.host.slang_host.{host_env, host_file_exists}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
+use std.gc_async_mut.slang.modality.kinds.{Modality, OutputPart, KindRequest, KindResult}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ChatPart}
+
+@unsafe(reason: "passes a bounded caller-owned byte payload to the slang stable-diffusion shim", capabilities: [ffi, raw_ptr])
+extern fn spl_wffi_call_i64_with_bytes(fptr: i64, prefix_args: [i64], bytes: [u8], offset: i64, length: i64, suffix_args: [i64]) -> i64
+
+@unsafe(reason: "hands the slang stable-diffusion shim a bounded caller-owned out buffer", capabilities: [ffi, raw_ptr])
+extern fn spl_wffi_call_i64_into_bytes(fptr: i64, prefix_args: [i64], out_bytes: &mut [u8],
+    offset: i64, capacity: i64, out_len: *mut i64, suffix_args: [i64]) -> i64
+
+val SD_MAX_EDGE: i64 = 768
+val SD_EDGE_MULTIPLE: i64 = 64
+val SD_DEFAULT_STEPS: i64 = 4
+val SD_MAX_STEPS: i64 = 50
+val SD_DEFAULT_SEED: i64 = 42
+# sd-turbo is trained without classifier-free guidance: cfg 1.0 (x100).
+val SD_CFG_X100: i64 = 100
+val SD_MAX_IMAGES: i64 = 4
+
+# Resolved shim entries. 0 = not open.
+var SD_LIB = 0
+var SD_CTX = 0
+var SD_F_GEN = 0
+var SD_F_DIM = 0
+var SD_F_IMAGE_INTO = 0
+var SD_F_ERROR_INTO = 0
+var SD_F_INFO_INTO = 0
+var SD_F_FREE = 0
+var SD_OPEN_MODEL = ""
+
+fn sd_runner_lib_path() -> text:
+    host_env("SLANG_SD_LIB")
+
+fn sd_runner_available() -> bool:
+    val p = sd_runner_lib_path()
+    p != "" and host_file_exists(p)
+
+fn _dir_of(path: text) -> text:
+    var cut = -1
+    var i = 0
+    while i < path.len():
+        val ch = path[i:i + 1]
+        if ch == "/" or ch == "\\":
+            cut = i
+        i = i + 1
+    if cut >= 0:
+        path[0:cut + 1]
+    else:
+        ""
+
+# The shim's mingw runtime imports, loaded first because Windows does not
+# search a DLL's own directory for the imports of a DLL opened by full path.
+fn _preload_runtime_siblings(lib_path: text):
+    if lib_path.ends_with(".dll"):
+        val dir = _dir_of(lib_path)
+        for dep in ["libwinpthread-1.dll", "libunwind.dll", "libc++.dll"]:
+            if host_file_exists(dir + dep):
+                spl_dlopen(dir + dep)
+
+fn _zero_bytes(n: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push(0)
+        i = i + 1
+    out
+
+# Text the shim reports through an `(h, buf, cap, out_len)` or `(buf, cap,
+# out_len)` entry: sized first with capacity 0, then read.
+fn _read_text(fptr: i64, prefix: [i64]) -> text:
+    var sizer: [u8] = [0]
+    var needed: i64 = 0
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_call_i64_into_bytes(fptr, prefix, &mut sizer, 0, 0, &mut needed, [])
+    if needed <= 0 or needed > 65536:
+        return ""
+    var buf = _zero_bytes(needed)
+    var written: i64 = 0
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_call_i64_into_bytes(fptr, prefix, &mut buf, 0, needed, &mut written, [])
+    bytes_to_text(buf)
+
+fn _shim_error(h: i64) -> text:
+    if SD_F_ERROR_INTO == 0:
+        return "the stable-diffusion shim is not open"
+    _read_text(SD_F_ERROR_INTO, [h])
+
+# Backend summary of the opened shim (ggml system info), "" when not open.
+fn sd_runner_info() -> text:
+    if SD_F_INFO_INTO == 0:
+        return ""
+    _read_text(SD_F_INFO_INTO, [])
+
+fn sd_runner_is_open() -> bool:
+    SD_CTX > 0
+
+fn sd_runner_close():
+    if SD_CTX > 0 and SD_F_FREE != 0:
+        spl_wffi_call_i64(SD_F_FREE, [SD_CTX], 1)
+    if SD_LIB != 0:
+        spl_dlclose(SD_LIB)
+    SD_LIB = 0
+    SD_CTX = 0
+    SD_F_GEN = 0
+    SD_F_DIM = 0
+    SD_F_IMAGE_INTO = 0
+    SD_F_ERROR_INTO = 0
+    SD_F_INFO_INTO = 0
+    SD_F_FREE = 0
+    SD_OPEN_MODEL = ""
+
+# Loads the checkpoint named by `model.entry_path` into a fresh context.
+fn sd_runner_open(model: NativeModel) -> Result<(), text>:
+    if SD_CTX > 0 and SD_OPEN_MODEL == model.entry_path:
+        return Ok(())
+    sd_runner_close()
+    val lib_path = sd_runner_lib_path()
+    if lib_path == "":
+        return Err("SLANG_SD_LIB is not set; build the shim with scripts/check/build-slang-sd-shim.shs and point SLANG_SD_LIB at slang_sd.dll")
+    if not host_file_exists(lib_path):
+        return Err("SLANG_SD_LIB=" + lib_path + " does not exist")
+    if model.entry_path == "" or not host_file_exists(model.entry_path):
+        return Err("model '" + model.id + "' has no checkpoint file to load (entry_path '" + model.entry_path + "')")
+    _preload_runtime_siblings(lib_path)
+    val lib = spl_dlopen(lib_path)
+    if lib == 0:
+        return Err("could not dlopen " + lib_path)
+    val f_open = spl_dlsym(lib, "slang_sd_ctx_open")
+    val f_gen = spl_dlsym(lib, "slang_sd_gen")
+    val f_dim = spl_dlsym(lib, "slang_sd_image_dim")
+    val f_image = spl_dlsym(lib, "slang_sd_image_into")
+    val f_err = spl_dlsym(lib, "slang_sd_error_into")
+    val f_info = spl_dlsym(lib, "slang_sd_info_into")
+    val f_free = spl_dlsym(lib, "slang_sd_free")
+    if f_open == 0 or f_gen == 0 or f_dim == 0 or f_image == 0 or f_err == 0 or f_info == 0 or f_free == 0:
+        spl_dlclose(lib)
+        return Err(lib_path + " is missing a slang_sd_* entry; rebuild it with scripts/check/build-slang-sd-shim.shs")
+    SD_LIB = lib
+    SD_F_GEN = f_gen
+    SD_F_DIM = f_dim
+    SD_F_IMAGE_INTO = f_image
+    SD_F_ERROR_INTO = f_err
+    SD_F_INFO_INTO = f_info
+    SD_F_FREE = f_free
+    val path_bytes = text_to_utf8_bytes(model.entry_path)
+    val h = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_call_i64_with_bytes(f_open, [], path_bytes, 0, path_bytes.len(), [0])
+    if h <= 0:
+        val why = _read_text(f_err, [0])
+        sd_runner_close()
+        return Err("could not load '" + model.entry_path + "': " + why)
+    SD_CTX = h
+    SD_OPEN_MODEL = model.entry_path
+    Ok(())
+
+# "512x512" -> [512, 512]. Edges must be multiples of 64 within 64..768.
+fn sd_parse_size(size: text) -> Result<[i64], text>:
+    val s = if size == "": "512x512" else: size
+    var cut = -1
+    var i = 0
+    while i < s.len():
+        if s[i:i + 1] == "x":
+            cut = i
+        i = i + 1
+    if cut <= 0 or cut >= s.len() - 1:
+        return Err("size '" + size + "' is not WIDTHxHEIGHT")
+    val w = s[0:cut].to_i64()
+    val h = s[cut + 1:s.len()].to_i64()
+    if w <= 0 or h <= 0:
+        return Err("size '" + size + "' is not WIDTHxHEIGHT")
+    if w % SD_EDGE_MULTIPLE != 0 or h % SD_EDGE_MULTIPLE != 0:
+        return Err("size '" + size + "' must have both edges a multiple of 64")
+    if w > SD_MAX_EDGE or h > SD_MAX_EDGE:
+        return Err("size '" + size + "' exceeds the 768 pixel limit per edge")
+    Ok([w, h])
+
+fn _prompt_of(parts: [ChatPart]) -> text:
+    var prompt = ""
+    for p in parts:
+        if p.kind == "text":
+            if prompt != "":
+                prompt = prompt + "\n"
+            prompt = prompt + p.text
+    prompt
+
+# Interleaved RGB bytes -> opaque ARGB pixels.
+fn _rgb_to_argb(rgb: [u8], w: i64, h: i64) -> [u32]:
+    var px: [u32] = []
+    val n = w * h
+    var i = 0
+    while i < n:
+        val o = i * 3
+        val r = rgb[o].to_u32()
+        val g = rgb[o + 1].to_u32()
+        val b = rgb[o + 2].to_u32()
+        px.push(4278190080 + r * 65536 + g * 256 + b)
+        i = i + 1
+    px
+
+fn _generate_one(prompt_bytes: [u8], w: i64, h: i64, steps: i64, seed: i64) -> Result<OutputPart, text>:
+    val rc = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_call_i64_with_bytes(SD_F_GEN, [SD_CTX], prompt_bytes, 0, prompt_bytes.len(), [w, h, steps, seed, SD_CFG_X100])
+    if rc != 0:
+        return Err("image generation failed (" + rc.to_text() + "): " + _shim_error(SD_CTX))
+    val got_w = spl_wffi_call_i64(SD_F_DIM, [SD_CTX, 0], 2)
+    val got_h = spl_wffi_call_i64(SD_F_DIM, [SD_CTX, 1], 2)
+    val chans = spl_wffi_call_i64(SD_F_DIM, [SD_CTX, 2], 2)
+    if got_w != w or got_h != h or chans != 3:
+        return Err("generator returned a " + got_w.to_text() + "x" + got_h.to_text() + "x" + chans.to_text() + " image, expected " + w.to_text() + "x" + h.to_text() + "x3")
+    val want = w * h * 3
+    var rgb = _zero_bytes(want)
+    var written: i64 = 0
+    val read_rc = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_call_i64_into_bytes(SD_F_IMAGE_INTO, [SD_CTX], &mut rgb, 0, want, &mut written, [])
+    if read_rc != 0 or written != want:
+        return Err("could not read the generated image (rc " + read_rc.to_text() + ", " + written.to_text() + " of " + want.to_text() + " bytes)")
+    val png = encode_argb_to_png_rgb(_rgb_to_argb(rgb, w, h), w.to_i32(), h.to_i32())
+    Ok(OutputPart(modality: Modality.Image, text: "", bytes: png, mime: "image/png"))
+
+# One PNG per requested image (params.n, 1..4), seed advancing by one per image.
+# params.steps <= 0 means the default of 4; params.seed < 0 means 42.
+fn sd_runner_run(req: KindRequest) -> Result<KindResult, text>:
+    if SD_CTX <= 0:
+        return Err("the stable-diffusion runner is not open")
+    val prompt = _prompt_of(req.parts)
+    if prompt == "":
+        return Err("an image prompt is required")
+    val dims = match sd_parse_size(req.params.size):
+        Err(e): return Err(e)
+        Ok(d): d
+    val steps = if req.params.steps <= 0: SD_DEFAULT_STEPS else: req.params.steps
+    if steps > SD_MAX_STEPS:
+        return Err("steps " + steps.to_text() + " exceeds the limit of " + SD_MAX_STEPS.to_text())
+    val n = if req.params.n <= 0: 1 else: req.params.n
+    if n > SD_MAX_IMAGES:
+        return Err("n " + n.to_text() + " exceeds the limit of " + SD_MAX_IMAGES.to_text() + " images per request")
+    val seed = if req.params.seed < 0: SD_DEFAULT_SEED else: req.params.seed
+    val prompt_bytes = text_to_utf8_bytes(prompt)
+    var parts: [OutputPart] = []
+    var i = 0
+    while i < n:
+        match _generate_one(prompt_bytes, dims[0], dims[1], steps, seed + i):
+            Err(e): return Err(e)
+            Ok(part): parts.push(part)
+        i = i + 1
+    Ok(KindResult(parts: parts, prompt_tokens: 0, completion_tokens: 0))
+
+export sd_runner_lib_path, sd_runner_available, sd_runner_is_open, sd_runner_info
+export sd_runner_open, sd_runner_run, sd_runner_close, sd_parse_size

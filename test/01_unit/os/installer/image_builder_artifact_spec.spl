@@ -14,9 +14,9 @@ extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
-# The staged rootfs carries ~50 MB of system fonts; the 67 MB structural minimum
-# leaves a 1 MB root partition, below the 4 MB metadata reserve plus staged data.
-val _FULL_ROOTFS_IMAGE_MB: u64 = 128
+# The staged rootfs carries ~50 MB of system fonts; MIN_IMAGE_SIZE_MB_V1 (128 MB)
+# leaves room above the 64 MB EFI + 2 MB reserve + metadata floor.
+val _FULL_ROOTFS_IMAGE_MB: u64 = MIN_IMAGE_SIZE_MB_V1
 
 fn _reset_dir(path: text):
     rt_process_run("/bin/sh", ["-c", "rm -rf '" + path + "' && mkdir -p '" + path + "'"])
@@ -44,15 +44,19 @@ describe "Image builder artifacts":
         expect(result.is_ok()).to_equal(true)
         expect(rt_file_exists(output)).to_equal(true)
         expect(rt_file_exists("{output}.manifest.sdn")).to_equal(true)
-        expect(rt_file_exists("{output}.contents/rootfs/usr/libexec/simpleos-installer/installer")).to_equal(true)
+        # Empty package_dir must record blocked installer payload instead of fabricating an executable.
+        expect(rt_file_exists("{output}.contents/rootfs/usr/libexec/simpleos-installer/installer")).to_equal(false)
+        val installer_manifest = rt_file_read_text("{output}.manifest.sdn") ?? ""
+        expect(installer_manifest).to_contain("[blocked_package_payload]")
+        expect(installer_manifest).to_contain("/usr/libexec/simpleos-installer/installer")
 
     it "writes rootfs backend markers for alternate hosted backends while keeping FAT32 carrier":
         # @req REQ-SSPEC-UNIT
         step("writes rootfs backend markers for alternate hosted backends while keeping FAT32 carrier")
         val dir = "build/test-artifacts/image-builder-rootfs"
         _reset_dir(dir)
-        val output = "{dir}/simpleos-x86_64-nvfs.img"
-        val result = build_install_image_with_rootfs(PkgArch.X86_64, "", "", output, _FULL_ROOTFS_IMAGE_MB, "nvfs")
+        val output = "{dir}/simpleos-arm64-nvfs.img"
+        val result = build_install_image_with_rootfs(PkgArch.Arm64, "", "", output, _FULL_ROOTFS_IMAGE_MB, "nvfs")
         expect(result.is_ok()).to_equal(true)
         expect(rt_file_exists("{output}.contents/rootfs/etc/rootfs.sdn")).to_equal(true)
         expect(rt_file_exists("{output}.contents/rootfs/SYS/ROOTFS.CFG")).to_equal(true)
@@ -71,22 +75,25 @@ describe "Image builder artifacts":
         step("writes a staged disk image tree and deploy manifest")
         val dir = "build/test-artifacts/image-builder"
         _reset_dir(dir)
-        val output = "{dir}/simpleos-x86_64.img"
-        val result = build_install_image(PkgArch.X86_64, "", "", output, _FULL_ROOTFS_IMAGE_MB)
+        val output = "{dir}/simpleos-arm64.img"
+        val result = build_install_image(PkgArch.Arm64, "", "", output, _FULL_ROOTFS_IMAGE_MB)
         expect(result.is_ok()).to_equal(true)
         expect(rt_file_exists(output)).to_equal(true)
         expect(rt_file_exists("{output}.manifest.sdn")).to_equal(true)
         expect(rt_file_exists("{output}.contents/rootfs/etc/fstab")).to_equal(true)
-        expect(rt_file_exists("{output}.contents/rootfs/sbin/init")).to_equal(true)
-        expect(rt_file_exists("{output}.contents/rootfs/sys/apps/llvm")).to_equal(true)
-        expect(rt_file_exists("{output}.contents/rootfs/sys/apps/clang")).to_equal(true)
-        expect(rt_file_exists("{output}.contents/rootfs/sys/apps/rust")).to_equal(true)
+        expect(rt_file_exists("{output}.contents/rootfs/sbin/init")).to_equal(false)
+        expect(rt_file_exists("{output}.contents/rootfs/sys/apps/llvm")).to_equal(false)
+        expect(rt_file_exists("{output}.contents/rootfs/sys/apps/clang")).to_equal(false)
+        expect(rt_file_exists("{output}.contents/rootfs/sys/apps/rust")).to_equal(false)
         expect(rt_file_exists("{output}.contents/rootfs/SYS/LLVMMAN.TXT")).to_equal(true)
         expect(rt_file_exists("{output}.contents/rootfs/SYS/CLANGMAN.TXT")).to_equal(true)
         expect(rt_file_exists("{output}.contents/rootfs/SYS/RUSTMAN.TXT")).to_equal(true)
-        expect(rt_file_exists("{output}.contents/rootfs/usr/share/simpleos/toolchain/llvm/hello.ll")).to_equal(true)
-        expect(rt_file_exists("{output}.contents/rootfs/usr/share/simpleos/toolchain/clang/hello.c")).to_equal(true)
-        expect(rt_file_exists("{output}.contents/rootfs/usr/share/simpleos/toolchain/rust/hello.rs")).to_equal(true)
+        val deploy_manifest = rt_file_read_text("{output}.manifest.sdn") ?? ""
+        expect(deploy_manifest).to_contain("[blocked_package_payload]")
+        expect(deploy_manifest).to_contain("/sbin/init")
+        expect(deploy_manifest).to_contain("/sys/apps/llvm")
+        expect(deploy_manifest).to_contain("/sys/apps/clang")
+        expect(deploy_manifest).to_contain("/sys/apps/rust")
         val llvm_manifest = rt_file_read_text("{output}.contents/rootfs/SYS/LLVMMAN.TXT") ?? ""
         val clang_manifest = rt_file_read_text("{output}.contents/rootfs/SYS/CLANGMAN.TXT") ?? ""
         val rust_manifest = rt_file_read_text("{output}.contents/rootfs/SYS/RUSTMAN.TXT") ?? ""

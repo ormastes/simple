@@ -43,14 +43,25 @@ fn _mcp_request_obj(json: text, key: text) -> text:
     ""
 
 # Load split module implementations from sibling files.
-# Startup path (initialize / tools/list / --probe) needs only JSON helpers,
-# protocol handlers, and the static tool table. The per-tool handler modules
-# (diag/vcs/debug/dialog/query/play/assistant/editor) are reached only through
-# dispatch_tool, so they are imported by main_dispatch — not duplicated here.
+# Startup pre-dispatch uses only .main_lazy_json and lightweight
+# app.mcp.main_lazy_dispatch wrappers; heavy tool dispatch (main_dispatch),
+# static tool schema tables (main_static_tools / tool_table), and secondary
+# protocol handlers (main_lazy_protocol) load lazily on demand inside the
+# non-entry bridge so entry main.spl holds zero function-local `use`s.
 use .main_lazy_json
-use .main_lazy_protocol
-use .main_static_tools
-# .main_dispatch is reached only through _mcp_dispatch_tool_lazy below.
+use app.mcp.main_lazy_dispatch.{
+    mcp_lazy_dispatch_tool,
+    mcp_lazy_static_tools_result_cached,
+    mcp_lazy_tools_list_json_for_set,
+    mcp_lazy_probe_tool_count,
+    mcp_lazy_handle_resources_list,
+    mcp_lazy_handle_resource_templates_list,
+    mcp_lazy_handle_resources_read,
+    mcp_lazy_handle_prompts_list,
+    mcp_lazy_handle_prompts_get,
+    mcp_lazy_handle_completion_req,
+    mcp_lazy_get_cwd
+}
 
 val SERVER_NAME = "simple-mcp-full"
 val SERVER_VERSION = "4.0.0"
@@ -218,17 +229,19 @@ fn _mcp_upgraded_value() -> i64:
 fn _mcp_emit_flag_value() -> i64:
     _MCP_EMIT_LIST_CHANGED
 
+# Delegates via main_lazy_dispatch to main_static_tools._mcp_static_tools_result_cached
+# so startup does not eagerly parse tool_table.spl or main_static_tools.spl.
 fn _mcp_tools_list_payload() -> text:
     if _MCP_TOOL_SET == "auto":
         if _mcp_upgraded_value() == 0:
             _MCP_LIST_UPGRADED = 1
             _MCP_EMIT_LIST_CHANGED = 1
-            return _mcp_tools_list_json_for_set("core")
-        return _mcp_static_tools_result_cached()
+            return mcp_lazy_tools_list_json_for_set("core")
+        return mcp_lazy_static_tools_result_cached()
     if _MCP_TOOL_SET == "core":
-        return _mcp_tools_list_json_for_set("core")
+        return mcp_lazy_tools_list_json_for_set("core")
     # "all" (and any unexpected value)
-    _mcp_static_tools_result_cached()
+    mcp_lazy_static_tools_result_cached()
 
 # Returns true once the auto-mode upgrade has been served (first tools/list done).
 fn _mcp_list_upgraded() -> bool:
@@ -356,7 +369,7 @@ fn main() -> i64:
     # full handshake and unit specs verify the manifest content.
     if args.len() > 0 and args[0] == "--probe":
         val active_set = _mcp_get_tool_set()
-        print "simple-mcp probe ok version=" + SERVER_VERSION + " tools=" + str(_mcp_probe_tool_count()) + " tool_set=" + active_set
+        print "simple-mcp probe ok version=" + SERVER_VERSION + " tools=" + str(mcp_lazy_probe_tool_count()) + " tool_set=" + active_set
         return 0
     if raw_args.len() > 0 and mcp_has_explicit_json_ready_arg(raw_args):
         print "{\"command\":\"mcp\",\"status\":\"ready\",\"tool\":\"Simple MCP Server\",\"version\":\"{SERVER_VERSION}\"}"
@@ -414,24 +427,24 @@ fn main() -> i64:
             response = make_json_result(id, "null")
         elif method == "resources/list":
             val id = envelope.request_id_raw
-            response = handle_resources_list(id)
+            response = mcp_lazy_handle_resources_list(id)
         elif method == "resources/templates/list":
             val id = envelope.request_id_raw
-            response = handle_resource_templates_list(id)
+            response = mcp_lazy_handle_resource_templates_list(id)
         elif method == "resources/read":
             val id = envelope.request_id_raw
             val uri = extract_nested(msg, "uri")
-            response = handle_resources_read(id, uri)
+            response = mcp_lazy_handle_resources_read(id, uri)
         elif method == "prompts/list":
             val id = envelope.request_id_raw
-            response = handle_prompts_list(id)
+            response = mcp_lazy_handle_prompts_list(id)
         elif method == "prompts/get":
             val id = envelope.request_id_raw
             val prompt_name = extract_nested(msg, "name")
-            response = handle_prompts_get(id, prompt_name, msg)
+            response = mcp_lazy_handle_prompts_get(id, prompt_name, msg)
         elif method == "completion/complete" or method == "completions/complete":
             val id = envelope.request_id_raw
-            response = handle_completion_req(id, msg)
+            response = mcp_lazy_handle_completion_req(id, msg)
         elif method == "logging/setLevel":
             val id = envelope.request_id_raw
             val level = extract_nested(msg, "level")
@@ -440,7 +453,7 @@ fn main() -> i64:
             response = make_json_result(id, jo1(jp("level", js(MCP_LOG_LEVEL))))
         elif method == "roots/list":
             val id = envelope.request_id_raw
-            val cwd = get_cwd()
+            val cwd = mcp_lazy_get_cwd()
             var root = LB()
             root = root + jp("uri", js("file://" + cwd))
             root = root + "," + jp("name", js("workspace"))
@@ -460,16 +473,11 @@ fn main() -> i64:
                 _mcp_write_message(notif)
     0
 
-# Module-level on purpose. A function-local `use` in this entry module segfaults
-# the seed JIT on its first call (rc 139, doc/08_tracking/bug/
-# seed_jit_function_local_use_segfaults_2026-09-13.md); every
-# tools/call hit it once main.spl stopped falling back to the interpreter.
-# Laziness is kept one level down: main_dispatch imports only main_lazy_json at
-# top level and loads each handler family inside the function that needs it.
-use app.mcp.main_dispatch.{dispatch_tool}
-
+# Module-level lazy bridge call on purpose (no function-local `use` in this
+# entry module, preserving seed JIT safety while deferring app.mcp.main_dispatch
+# loading until the first tools/call).
 fn _mcp_dispatch_tool_lazy(id: text, tool_name: text, args_raw: text) -> text:
-    return dispatch_tool(id, tool_name, args_raw)
+    return mcp_lazy_dispatch_tool(id, tool_name, args_raw)
 
 export _mcp_get_tool_set
 export _mcp_init_tool_set

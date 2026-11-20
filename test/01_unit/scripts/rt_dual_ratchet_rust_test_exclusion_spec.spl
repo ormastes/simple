@@ -1,0 +1,65 @@
+"""
+# Dual-Implementation Ratchet Rust Test Exclusion Prevention Spec
+
+Prevention coverage for `rt_dual_implementation_counts_rust_test_functions_2026_11_07`:
+ensures `scripts/check/check-rt-dual-implementation-ratchet.shs` excludes `#[test]`
+Rust functions from the runtime-implementation lane without suppressing adjacent
+or comment-preceded real `pub fn rt_*` symbols.
+"""
+
+use std.spec.*
+use app.io.process_ops.{process_run}
+
+describe "rt-dual-implementation ratchet Rust #[test] exclusion":
+    """Verifies Rust #[test] exclusion, private fn exclusion, and comment-preceded real export detection."""
+
+    it "excludes #[test] and private Rust fns while flagging #[no_mangle] fn rt_*":
+        val script =
+            "set -u; " +
+            "REPO=$(pwd); SELF=\"$REPO/scripts/check/check-rt-dual-implementation-ratchet.shs\"; " +
+            "T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; " +
+            "mkdir -p \"$T/r/src/runtime\" \"$T/r/src/compiler_rust/runtime/src\" \"$T/r/src/compiler_rust/native_all/src\" \"$T/r/src/compiler_rust/native_loader/src\" \"$T/r/scripts/check\"; " +
+            ": > \"$T/r/src/compiler_rust/native_all/src/.gitkeep\"; : > \"$T/r/src/compiler_rust/native_loader/src/.gitkeep\"; " +
+            "printf 'int64_t rt_conly(void) {{ return 1; }}\\n' > \"$T/r/src/runtime/r.c\"; " +
+            "printf 'pub fn rt_ronly() -> i64 {{ 1 }}\\n' > \"$T/r/src/compiler_rust/runtime/src/lib.rs\"; " +
+            "printf 'rt_conly\\tc-only\\nrt_ronly\\trust-only\\n' > \"$T/r/scripts/check/rt_dual_implementation_baseline.txt\"; " +
+            "(cd \"$T/r\" && git init -q . && git config user.email fx@example.com && git config user.name fx && git add -A && git commit -q -m base); " +
+            "printf 'fn rt_priv_helper() {{}}\\npub(crate) fn rt_crate_helper() {{}}\\n#[test]\\nfn rt_unit_attr_test() {{}}\\n' >> \"$T/r/src/compiler_rust/runtime/src/lib.rs\"; " +
+            "(cd \"$T/r\" && git add -A && git commit -q -m priv); " +
+            "o1=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 RT_DUAL_CENSUS_DIR=none sh \"$SELF\" --root \"$T/r\" --rev HEAD --baseline-rev HEAD~1 2>&1); rc1=$?; " +
+            "printf '#[no_mangle]\\nfn rt_new_nomangle() {{}}\\n' >> \"$T/r/src/compiler_rust/runtime/src/lib.rs\"; " +
+            "(cd \"$T/r\" && git add -A && git commit -q -m nomangle); " +
+            "o2=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 RT_DUAL_CENSUS_DIR=none sh \"$SELF\" --root \"$T/r\" --rev HEAD --baseline-rev HEAD~2 2>&1); rc2=$?; " +
+            "printf 'RC1=%s\\nO1=%s\\nRC2=%s\\nO2=%s\\n' \"$rc1\" \"$o1\" \"$rc2\" \"$o2\""
+        val res = process_run("sh", ["-c", script])
+        val out: text = res.0
+        expect(out).to_contain("RC1=0")
+        expect(out).to_contain("0 new")
+        expect(out).to_contain("RC2=1")
+        expect(out).to_contain("rt_new_nomangle")
+
+    it "ignores #[test] Rust functions while still flagging real unpaired Rust APIs and post-comment APIs":
+        val script =
+            "set -u; " +
+            "REPO=$(pwd); SELF=\"$REPO/scripts/check/check-rt-dual-implementation-ratchet.shs\"; " +
+            "T=$(mktemp -d); trap 'rm -rf \"$T\"' EXIT; " +
+            "mkdir -p \"$T/r/src/runtime\" \"$T/r/src/compiler_rust/runtime/src\" \"$T/r/src/compiler_rust/native_all/src\" \"$T/r/src/compiler_rust/native_loader/src\" \"$T/r/scripts/check\"; " +
+            ": > \"$T/r/src/compiler_rust/native_all/src/.gitkeep\"; : > \"$T/r/src/compiler_rust/native_loader/src/.gitkeep\"; " +
+            "printf 'int64_t rt_conly(void) {{ return 1; }}\\n' > \"$T/r/src/runtime/r.c\"; " +
+            "printf 'pub fn rt_ronly() -> i64 {{ 1 }}\\n' > \"$T/r/src/compiler_rust/runtime/src/lib.rs\"; " +
+            "printf 'rt_conly\\tc-only\\nrt_ronly\\trust-only\\n' > \"$T/r/scripts/check/rt_dual_implementation_baseline.txt\"; " +
+            "(cd \"$T/r\" && git init -q . && git config user.email fx@example.com && git config user.name fx && git add -A && git commit -q -m base); " +
+            "printf '#[allow(dead_code)]\\n#[test]\\nfn rt_test_only() {{}}\\n#[test] pub fn rt_inline_test() {{}}\\n' >> \"$T/r/src/compiler_rust/runtime/src/lib.rs\"; " +
+            "(cd \"$T/r\" && git add -A && git commit -q -m tests); " +
+            "o1=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 RT_DUAL_CENSUS_DIR=none sh \"$SELF\" --root \"$T/r\" --rev HEAD --baseline-rev HEAD~1 2>&1); rc1=$?; " +
+            "printf '// #[test]\\npub fn rt_after_comment() -> i64 {{ 2 }}\\npub fn rt_real_unpaired() -> i64 {{ 3 }}\\n' >> \"$T/r/src/compiler_rust/runtime/src/lib.rs\"; " +
+            "(cd \"$T/r\" && git add -A && git commit -q -m real); " +
+            "o2=$(RT_DUAL_RATCHET_SELFTEST_CHILD=1 RT_DUAL_CENSUS_DIR=none sh \"$SELF\" --root \"$T/r\" --rev HEAD --baseline-rev HEAD~2 2>&1); rc2=$?; " +
+            "printf 'RC1=%s\\nO1=%s\\nRC2=%s\\nO2=%s\\n' \"$rc1\" \"$o1\" \"$rc2\" \"$o2\""
+        val res = process_run("sh", ["-c", script])
+        val out: text = res.0
+        expect(out).to_contain("RC1=0")
+        expect(out).to_contain("0 new")
+        expect(out).to_contain("RC2=1")
+        expect(out).to_contain("rt_after_comment")
+        expect(out).to_contain("rt_real_unpaired")

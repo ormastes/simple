@@ -1,0 +1,66 @@
+"""
+## Purpose and audience
+Purpose: Verify MCP CLI/initialize pre-dispatch is split from heavy handler dispatch and static tool tables.
+Audience: MCP server maintainers and startup latency owners.
+"""
+
+# @req: REQ-APP-MCP-STARTUP-LAZY-001
+
+use std.spec.*
+use app.mcp.main_lazy_dispatch.{
+    mcp_lazy_dispatch_tool,
+    mcp_lazy_probe_tool_count,
+    mcp_lazy_static_tools_result_cached,
+    mcp_lazy_tools_list_json_for_set
+}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+describe "MCP startup lazy dispatch boundary":
+
+    it "keeps main.spl module scope free of main_dispatch, main_static_tools, and main_lazy_protocol":
+        val main_src = rt_file_read_text("src/app/mcp/main.spl") ?? ""
+        expect(main_src.contains("use .main_static_tools")).to_equal(false)
+        expect(main_src.contains("use .main_lazy_protocol")).to_equal(false)
+        expect(main_src.contains("use app.mcp.main_dispatch")).to_equal(false)
+        expect(main_src.contains("use .main_dispatch")).to_equal(false)
+        expect(main_src).to_contain("use app.mcp.main_lazy_dispatch")
+
+    it "keeps main_lazy_dispatch module scope lightweight without heavy top-level imports":
+        val bridge_src = rt_file_read_text("src/app/mcp/main_lazy_dispatch.spl") ?? ""
+        val preamble = bridge_src.split("\npub fn ")[0]
+        expect(preamble).to_contain("use .main_lazy_json")
+        for line in preamble.split("\n"):
+            if line.starts_with("use "):
+                expect(line.contains("main_dispatch")).to_equal(false)
+                expect(line.contains("main_static_tools")).to_equal(false)
+                expect(line.contains("tool_table")).to_equal(false)
+                expect(line.contains("main_lazy_protocol")).to_equal(false)
+
+    it "dispatches tools lazily through app.mcp.main_lazy_dispatch without dropping known or unknown responses":
+        val known = mcp_lazy_dispatch_tool("11", "debug_list_sessions", "{}")
+        expect(known).to_contain("\"jsonrpc\":\"2.0\"")
+        expect(known).to_contain("\"id\":11")
+        expect(known.contains("Unknown tool")).to_equal(false)
+
+        val unknown = mcp_lazy_dispatch_tool("12", "nonexistent_lazy_probe_tool", "{}")
+        expect(unknown).to_contain("\"isError\":true")
+        expect(unknown).to_contain("Unknown tool: nonexistent_lazy_probe_tool")
+
+    it "serves probe counts and tools/list schemas through lazy dispatch wrappers":
+        val count = mcp_lazy_probe_tool_count()
+        expect(count).to_be_greater_than(100)
+
+        val core_json = mcp_lazy_tools_list_json_for_set("core")
+        expect(core_json).to_contain("\"tools\":[")
+
+        val full_json = mcp_lazy_static_tools_result_cached()
+        expect(full_json).to_contain("debug_create_session")
+
+    it "gates CLI passthrough in main_dispatch before importing cli_passthrough":
+        val dispatch_src = rt_file_read_text("src/app/mcp/main_dispatch.spl") ?? ""
+        expect(dispatch_src).to_contain("fn _is_cli_passthrough_tool(")
+        val dispatch_fn_pos = dispatch_src.find("fn dispatch_tool(") ?? -1
+        val cli_gate_pos = dispatch_src.find("_is_cli_passthrough_tool(tool_name)") ?? -1
+        expect(dispatch_fn_pos).to_be_greater_than(-1)
+        expect(cli_gate_pos).to_be_greater_than(dispatch_fn_pos)

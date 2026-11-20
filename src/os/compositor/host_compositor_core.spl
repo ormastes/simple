@@ -46,7 +46,7 @@ use os.compositor.host_frame_ack.{
     host_frame_ack_exact, host_frame_ack_with_external_release,
     host_frame_ack_complete_host_present, host_frame_ack_can_advance_input
 }
-use os.compositor.dirty_rect.{DirtyRegion, DirtyRegionCheckpoint}
+use os.compositor.dirty_rect.{DirtyRegion, DirtyRegionCheckpoint, IRect, irect_intersection, irect_is_empty, irect_union}
 use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached_at_time, simple_web_content_revision_with_theme, content_paint_full_height}
 use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiRenderWindow, shared_mdi_render_window, shared_mdi_scene_from_render_windows}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache, web_render_pixel_artifact_cache}
@@ -2488,30 +2488,219 @@ class HostCompositor:
         # Compatibility renderer for explicit direct mode, image/motion
         # backgrounds, and same-frame fallback from render_frame_engine2d.
         val resolved_bg = self._resolve_background(theme, rt_time_now_unix_micros())
-        # I-item-4 fast no-op path: only the chrome paint + final scene
-        # composite + present are gated on accumulated damage (ponytail:
-        # full recomposite on any damage; partial/rect-scoped recomposition
-        # is deferred until profiling demands it). The content-frame
-        # building loop below keeps running every call regardless of
-        # `had_damage` -- it owns its own per-window cache hit/miss
-        # bookkeeping (task #15's WebRenderPixelArtifactCache) which must
-        # stay live independent of whether this frame actually presents.
         val had_damage = not self.dirty.is_empty()
-        if had_damage and not self.native_pixel_lane:
-            shared_wm_scene_render_desktop_chrome(self.backend, self.width, self.height, theme, resolved_bg.color, resolved_bg.surface)
         val frame_time = rt_time_now_unix_micros()
         # Direct compatibility rendering has no Engine2D owner; retain its
         # historical independent auto selection outside the hosted Draw IR lane.
+        # Content-frame building still runs unconditionally so per-window
+        # WebRenderPixelArtifactCache hit accounting stays live.
         val taskbar_input = self._taskbar_render_input(theme, frame_time, "auto")
-        if had_damage:
+        if not had_damage:
+            self.skipped_frame_count = self.skipped_frame_count + 1
+            return
+        val cache_key = self._host_chrome_cache_key(theme, resolved_bg, taskbar_input)
+        val cache_pixel_count = if self.width > 0 and self.height > 0: self.width * self.height else: 0
+        val cache_hit = (
+            cache_key != "" and cache_key == self._chrome_cache_key and
+            cache_pixel_count > 0 and
+            self._chrome_cache_pixels.len() == cache_pixel_count
+        )
+        if not cache_hit:
             if self.native_pixel_lane:
                 shared_wm_scene_render_taskbar_context_to_pixel_buffer(self.pixel_backend, taskbar_input)
+                if cache_key != "" and cache_pixel_count > 0:
+                    val cached = shared_wm_pixel_buffer_pixels(self.pixel_backend)
+                    if cached.len() == cache_pixel_count:
+                        self._chrome_cache_pixels = cached
+                        self._chrome_cache_key = cache_key
+                    else:
+                        self._chrome_cache_pixels = []
+                        self._chrome_cache_key = ""
+                else:
+                    self._chrome_cache_pixels = []
+                    self._chrome_cache_key = ""
             else:
                 shared_wm_scene_render_taskbar_context_to_backend(self.backend, taskbar_input)
                 self.backend.present()
+                if cache_key != "" and cache_pixel_count > 0:
+                    self._populate_chrome_cache(cache_key, taskbar_input)
+                else:
+                    self._chrome_cache_pixels = []
+                    self._chrome_cache_key = ""
             self.dirty.clear()
+            return
+        self._composite_cached_chrome_dirty_rects(taskbar_input)
+        self.dirty.clear()
+
+    fn _host_chrome_cache_key(theme: WmChromeColors, resolved_bg: SharedWmBackgroundResolution, taskbar_input: SharedWmTaskbarRenderInput) -> text:
+        if self.width <= 0 or self.height <= 0:
+            return ""
+        if self.background.kind != WM_BACKGROUND_KIND_COLOR or resolved_bg.surface.?:
+            return ""
+        val scene = taskbar_input.render.scene
+        val metrics = taskbar_input.render.metrics
+        val taskbar = taskbar_input.taskbar
+        val lane = if self.native_pixel_lane: "px" else: "be"
+        var key = "{lane}:{self.width}x{self.height}|{resolved_bg.color}|{theme.compositor_bg}|{theme.command_lane}|{theme.accent}|{theme.taskbar}|{theme.host_window_body}|{theme.title_focused}|{theme.title_unfocused}|{theme.close_button}|{theme.text_primary}|{theme.window_shadow}|{metrics.top_lane_height}:{metrics.titlebar_height}:{metrics.taskbar_height}:{metrics.min_hit_target}|{taskbar_input.clock_label}#"
+        for win in scene.windows:
+            val minf = if win.minimized: 1 else: 0
+            val focf = if win.focused: 1 else: 0
+            key = key + "{win.window_id}:{win.app_id}:{win.x},{win.y},{win.width},{win.height},{minf},{focf},{win.chrome_kind},{win.title};"
+        key = key + "|P:"
+        for app in taskbar.pinned:
+            key = key + "{app.app_id}:{app.display_name};"
+        key = key + "|R:"
+        for item in taskbar.running:
+            val imin = if item.minimized: 1 else: 0
+            key = key + "{item.window_id}:{item.app_id}:{imin}:{item.title};"
+        key = key + "|T:"
+        for tray in taskbar.tray:
+            key = key + "{tray.item_id}:{tray.label};"
+        key
+
+    me _populate_chrome_cache(cache_key: text, taskbar_input: SharedWmTaskbarRenderInput):
+        var chrome_backend = HeadlessHostCompositorBackend.new(self.width, self.height)
+        shared_wm_scene_render_taskbar_context_to_backend(chrome_backend, taskbar_input)
+        self._chrome_cache_pixels = headless_host_compositor_pixels(chrome_backend)
+        self._chrome_cache_key = cache_key
+
+    me _composite_cached_chrome_dirty_rects(taskbar_input: SharedWmTaskbarRenderInput):
+        val screen_rect = IRect(x: 0, y: 0, w: self.width, h: self.height)
+        var dirty_rects: [IRect] = []
+        for raw_rect in self.dirty.rects:
+            val clipped = irect_intersection(raw_rect, screen_rect)
+            if not irect_is_empty(clipped):
+                var covered = false
+                for existing in dirty_rects:
+                    if (clipped.x >= existing.x and clipped.y >= existing.y and
+                        clipped.x + clipped.w <= existing.x + existing.w and
+                        clipped.y + clipped.h <= existing.y + existing.h):
+                        covered = true
+                        break
+                if not covered:
+                    dirty_rects.push(clipped)
+        if dirty_rects.len() == 0:
+            return
+        val render_input = taskbar_input.render
+        val scene = render_input.scene
+        val metrics = render_input.metrics
+        val tb_h = if metrics.taskbar_height > 0: metrics.taskbar_height else: 56
+        val tb_rect = IRect(x: 0, y: self.height - tb_h, w: self.width, h: tb_h)
+        for dr in dirty_rects:
+            _host_blit_strided_region(
+                self.backend, self.native_pixel_lane, self.pixel_backend,
+                dr.x, dr.y, dr.w, dr.h,
+                self._chrome_cache_pixels, self.width, dr.x, dr.y
+            )
+            var wi = 0
+            while wi < scene.windows.len():
+                val win = scene.windows[wi]
+                if not win.minimized:
+                    val content = shared_wm_scene_window_content_rect_with_titlebar(win, metrics.titlebar_height)
+                    val c_rect = IRect(x: content.x, y: content.y, w: content.width, h: content.height)
+                    val c_clip = irect_intersection(dr, c_rect)
+                    if not irect_is_empty(c_clip):
+                        val frame_index = shared_wm_top_content_frame_index(
+                            render_input.content_frames, render_input.revision.scene_revision,
+                            win.window_id, content.width, content.height
+                        )
+                        if frame_index >= 0:
+                            val frame = render_input.content_frames[frame_index]
+                            _host_blit_strided_region(
+                                self.backend, self.native_pixel_lane, self.pixel_backend,
+                                c_clip.x, c_clip.y, c_clip.w, c_clip.h,
+                                frame.pixels, frame.width,
+                                c_clip.x - content.x, c_clip.y - content.y
+                            )
+                            self._render_child_content_subrects(
+                                render_input.content_frames, render_input.revision.scene_revision,
+                                win.window_id, content, c_clip, 1
+                            )
+                        else:
+                            _host_fill_rect_region(
+                                self.backend, self.native_pixel_lane, self.pixel_backend,
+                                c_clip.x, c_clip.y, c_clip.w, c_clip.h, 0xFFFF00FFu32
+                            )
+                        var wj = wi + 1
+                        while wj < scene.windows.len():
+                            val later = scene.windows[wj]
+                            if not later.minimized and later.chrome_kind != "borderless":
+                                val later_body = IRect(x: later.x, y: later.y, w: later.width, h: later.height)
+                                val ov_body = irect_intersection(c_clip, later_body)
+                                if not irect_is_empty(ov_body):
+                                    _host_blit_strided_region(
+                                        self.backend, self.native_pixel_lane, self.pixel_backend,
+                                        ov_body.x, ov_body.y, ov_body.w, ov_body.h,
+                                        self._chrome_cache_pixels, self.width, ov_body.x, ov_body.y
+                                    )
+                                val later_shadow = IRect(
+                                    x: later.x + 5,
+                                    y: later.y + 6,
+                                    w: later.width, h: later.height
+                                )
+                                val ov_shadow = irect_intersection(c_clip, later_shadow)
+                                if not irect_is_empty(ov_shadow):
+                                    _host_blit_strided_region(
+                                        self.backend, self.native_pixel_lane, self.pixel_backend,
+                                        ov_shadow.x, ov_shadow.y, ov_shadow.w, ov_shadow.h,
+                                        self._chrome_cache_pixels, self.width, ov_shadow.x, ov_shadow.y
+                                    )
+                            wj = wj + 1
+                        val ov_tb = irect_intersection(c_clip, tb_rect)
+                        if not irect_is_empty(ov_tb):
+                            _host_blit_strided_region(
+                                self.backend, self.native_pixel_lane, self.pixel_backend,
+                                ov_tb.x, ov_tb.y, ov_tb.w, ov_tb.h,
+                                self._chrome_cache_pixels, self.width, ov_tb.x, ov_tb.y
+                            )
+                wi = wi + 1
+        var bbox = dirty_rects[0]
+        var di = 1
+        while di < dirty_rects.len():
+            bbox = irect_union(bbox, dirty_rects[di])
+            di = di + 1
+        if self.native_pixel_lane:
+            self.pixel_backend.present_rect(bbox.x, bbox.y, bbox.w, bbox.h)
         else:
-            self.skipped_frame_count = self.skipped_frame_count + 1
+            self.backend.present_rect(bbox.x, bbox.y, bbox.w, bbox.h)
+
+    me _render_child_content_subrects(frames: [WmContentFrame], scene_revision: i64, parent_id: text, parent_rect: SharedWmRect, clip_rect: IRect, depth: i32):
+        if depth > 3:
+            return
+        for frame in frames:
+            if frame.parent_window_id == parent_id:
+                val child_x = parent_rect.x + frame.offset_x
+                val child_y = parent_rect.y + frame.offset_y
+                val valid = (
+                    _host_nested_content_frame_valid(frame, scene_revision) and
+                    _host_nested_content_frame_unique(frames, frame) and
+                    wm_content_frame_web_provenance_valid(frame)
+                )
+                val p_rect = IRect(x: parent_rect.x, y: parent_rect.y, w: parent_rect.width, h: parent_rect.height)
+                val f_rect = IRect(x: child_x, y: child_y, w: frame.width, h: frame.height)
+                val parent_clipped = irect_intersection(f_rect, p_rect)
+                val draw_rect = irect_intersection(parent_clipped, clip_rect)
+                if not irect_is_empty(draw_rect):
+                    if valid:
+                        _host_blit_strided_region(
+                            self.backend, self.native_pixel_lane, self.pixel_backend,
+                            draw_rect.x, draw_rect.y, draw_rect.w, draw_rect.h,
+                            frame.pixels, frame.width,
+                            draw_rect.x - child_x, draw_rect.y - child_y
+                        )
+                        val next_parent = SharedWmRect(
+                            x: parent_clipped.x, y: parent_clipped.y,
+                            width: parent_clipped.w, height: parent_clipped.h
+                        )
+                        self._render_child_content_subrects(
+                            frames, scene_revision, frame.window_id,
+                            next_parent, draw_rect, depth + 1
+                        )
+                    else:
+                        _host_fill_rect_region(
+                            self.backend, self.native_pixel_lane, self.pixel_backend,
+                            draw_rect.x, draw_rect.y, draw_rect.w, draw_rect.h, 0xFFFF00FFu32
+                        )
 
     me apply_bridge_request(seq: i64, owner_port: i64, method: i64, window_id: i64, title: text, x: i32, y: i32, w: i32, h: i32, content: text, process_id: i64, app_id: text):
         val action = wm_action_from_bridge_request(owner_port, method, window_id, title, x, y, w, h, content, process_id, app_id)
@@ -3478,6 +3667,58 @@ fn _host_argb_shade(color: u32, delta: i64) -> u32:
 # thin stripes that never carry text directly. Colors flow from
 # wm_chrome_theme() — the single source of truth — so an installed theme
 # reskins the chrome automatically.
+fn _host_crop_pixels_strided(source: [u32], source_stride: i32, source_x: i32, source_y: i32, width: i32, height: i32) -> [u32]:
+    if width <= 0 or height <= 0 or source_stride <= 0 or source_x < 0 or source_y < 0:
+        return []
+    var cropped: [u32] = [0u32; width * height]
+    val src_len = source.len() as i32
+    var row = 0
+    while row < height:
+        val src_row_start = (source_y + row) * source_stride + source_x
+        val dst_row_start = row * width
+        var col = 0
+        while col < width:
+            val src_idx = src_row_start + col
+            if src_idx >= 0 and src_idx < src_len:
+                cropped[dst_row_start + col] = source[src_idx]
+            col = col + 1
+        row = row + 1
+    cropped
+
+fn _host_blit_strided_region(backend: CompositorBackend, native_pixel_lane: bool, pixel_backend: SharedWmPixelBufferBackend, dx: i32, dy: i32, w: i32, h: i32, source: [u32], source_stride: i32, sx: i32, sy: i32):
+    if w <= 0 or h <= 0:
+        return
+    if native_pixel_lane:
+        pixel_backend._px_blit_strided(dx, dy, w, h, source, source_stride, sx, sy)
+    else:
+        backend.blit_pixels(dx, dy, w, h, _host_crop_pixels_strided(source, source_stride, sx, sy, w, h))
+
+fn _host_fill_rect_region(backend: CompositorBackend, native_pixel_lane: bool, pixel_backend: SharedWmPixelBufferBackend, x: i32, y: i32, w: i32, h: i32, color: u32):
+    if w <= 0 or h <= 0:
+        return
+    if native_pixel_lane:
+        pixel_backend._px_fill_rect(x, y, w, h, color)
+    else:
+        backend.fill_rect(x, y, w, h, color)
+
+fn _host_nested_content_frame_valid(frame: WmContentFrame, scene_revision: i64) -> bool:
+    (scene_revision > 0 and wm_content_frame_origin_valid(frame.origin_kind) and
+        frame.scene_revision == scene_revision and frame.content_revision > 0 and
+        frame.width > 0 and frame.height > 0 and
+        frame.pixels.len().to_i64() == frame.width.to_i64() * frame.height.to_i64() and
+        frame.checksum > 0u64 and frame.checksum == wm_content_frame_checksum(frame.pixels))
+
+fn _host_nested_content_frame_unique(content_frames: [WmContentFrame], candidate: WmContentFrame) -> bool:
+    var id_count = 0
+    var uri_count = 0
+    val candidate_uri = shared_wm_content_frame_image_uri(candidate)
+    for frame in content_frames:
+        if frame.window_id == candidate.window_id:
+            id_count = id_count + 1
+        if shared_wm_content_frame_image_uri(frame) == candidate_uri:
+            uri_count = uri_count + 1
+    id_count == 1 and uri_count == 1
+
 fn host_chrome_scene_html(windows: [HostedWindow], width: i32, height: i32) -> text:
     val theme = wm_chrome_theme()
     val bg_hex = _argb_to_css_hex(theme.compositor_bg)

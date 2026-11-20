@@ -44,17 +44,28 @@ describe "HIR codec native scalar representation":
         expect(present.finish()).to_equal("7\n1\n1\n5\n1\n0\n0\n0\n0\n\n0\n1\n3\n")
 
     it "preserves the bounded writer admission checks for three":
-        var accepted: HirCodecWriter = HirCodecWriter.create_canonical_bounded(22, 64, 22)
+        # put_i64 admits 22 output / 64 allocation / 22 work; finish() then
+        # reserves 34 + 34 allocation and charges 2 + 2 work for the one
+        # two-byte line. 132 / 26 are therefore the exact minimum that finishes.
+        var accepted: HirCodecWriter = HirCodecWriter.create_canonical_bounded(22, 132, 26)
         accepted.put_i64(3)
         expect(accepted.ok).to_equal(true)
         expect(accepted.finish()).to_equal("3\n")
-        var refused: HirCodecWriter = HirCodecWriter.create_canonical_bounded(21, 64, 22)
+        var refused: HirCodecWriter = HirCodecWriter.create_canonical_bounded(21, 132, 26)
         refused.put_i64(3)
         expect(refused.ok).to_equal(false)
         expect(refused.finish()).to_equal("")
+        var allocation_short: HirCodecWriter = HirCodecWriter.create_canonical_bounded(22, 131, 26)
+        allocation_short.put_i64(3)
+        expect(allocation_short.ok).to_equal(true)
+        expect(allocation_short.finish()).to_equal("")
+        var work_short: HirCodecWriter = HirCodecWriter.create_canonical_bounded(22, 132, 25)
+        work_short.put_i64(3)
+        expect(work_short.ok).to_equal(true)
+        expect(work_short.finish()).to_equal("")
 
     it "rejects the old producer grammar before decoding its body":
-        expect(hir_codec_header()).to_start_with("spl-hircodec-v8 ")
+        expect(hir_codec_header()).to_start_with("spl-hircodec-v22-")
         expect(hir_module_decode("spl-hircodec-v6 spl-flatpool-v4\nN\n")).to_be_nil()
 
     it "keeps boolean scalar bytes distinct":

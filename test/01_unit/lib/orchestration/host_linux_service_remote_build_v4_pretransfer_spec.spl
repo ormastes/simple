@@ -19,14 +19,18 @@ use std.spec.{step, fail}
 use std.io.file_read_text
 use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.*
 use std.common.contracts.container.runtime_v1.RuntimeExitStatusV1
-use std.nogc_sync_mut.orchestration.host_linux_completion_evidence_v3.host_remote_build_outcome_decode_v4
+use std.nogc_sync_mut.orchestration.host_linux_completion_evidence_v3.{host_remote_build_outcome_decode_v4,
+    host_remote_build_outcome_relative_v4}
+use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_reap_v4.{host_remote_build_published_answer_v4,
+    host_remote_build_reap_index_relative_v4}
 # Tests reach private module gates directly (repo rule: tests may access private).
 use std.nogc_sync_mut.orchestration.host_linux_service_current_v4.{HostLinuxServiceCurrentV4, linux_service_agent_slot_v4,
-    linux_service_remote_build_unopened_deadline_v4}
+    linux_service_remote_build_unopened_deadline_v4, linux_service_remote_build_reaped_v4}
 use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
 use std.nogc_sync_mut.io.file_ops.secure_temp_dir
 use std.nogc_sync_mut.io_runtime.dir_remove
-use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_open_cleanup_v2
+use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_open_cleanup_v2,
+    distributed_operation_journal_publish_v3}
 use std.common.contracts.orchestration.host_capacity_v1.*
 
 val PT_TASK: text = "d".repeat(64)
@@ -97,7 +101,10 @@ fn ex_module() -> text:
 
 fn ex_from(source: text, start: text) -> text:
     val at = source.index_of(start)
-    if at < 0: return ""
+    if at < 0:
+        # A renamed anchor must fail the case, never hand an empty slice to a negative check.
+        fail("ex_from anchor missing: " + start)
+        return ""
     source.substring(at, source.byte_len())
 
 fn ex_executor(stage: text) -> HostRemoteBuildExecutorV3:
@@ -243,6 +250,7 @@ describe "remote-build deadline (integration review P2-b)":
     it "DL-06 holds a lost-admission start as a consumed `failed` run, so no path settles it no-workload":
         # @req M0030-INTEG-4 (re-review P1-1: T-04 shape, drained by the restart reap; never cancelled/no-workload)
         val body = ex_body(ex_service(), "pub fn host_linux_service_remote_build_start_v4(")
+        expect(body.index_of("host_remote_build_transfer_v4(") >= 0).to_equal(true)
         val tail = body.substring(body.index_of("host_remote_build_transfer_v4("), body.byte_len())
         val lost = tail.index_of("if opened.admission.is_none():")
         expect(lost > 0).to_equal(true)
@@ -321,3 +329,45 @@ describe "executed-but-never-opened remote-build slot (milestone_0043 P1-2)":
         val window_at = open.index_of("linux_service_remote_build_unopened_deadline_v4(")
         val open_at = open.index_of("host_remote_build_open_v4(owner.capacity.unwrap().journal")
         expect(window_at >= 0 and open_at > window_at).to_equal(true)
+
+describe "remote-build settled run is never re-opened (milestone_0050 review_b)":
+    it "answers a settled pre-transfer run terminal, and the open gates on it before any open, window settle or effect":
+        # @req M0050-REVIEW-B-01 (a released run is never re-runnable: cancel / refused open then a replayed open)
+        val root = secure_temp_dir("/tmp", "m0050-reopen").unwrap()
+        val capacity = pt_open(root + "/journal")
+        expect(host_remote_build_published_answer_v4(capacity.journal, "operation_2")).to_equal("")
+        val record = host_remote_build_no_workload_record_v4("operation_2", "fence_1", PT_ASSOCIATION, PT_TASK,
+            "controller-cancel").unwrap()
+        expect(distributed_operation_journal_publish_v3(capacity.journal, host_remote_build_outcome_relative_v4("operation_2"),
+            record).unwrap()).to_equal(true)
+        expect(host_remote_build_published_answer_v4(capacity.journal, "operation_2"))
+            .to_equal("linux-host-remote-build-completed:cancelled")
+        expect(distributed_operation_journal_publish_v3(capacity.journal, host_remote_build_reap_index_relative_v4("operation_3"),
+            "reaped\n").unwrap()).to_equal(true)
+        step("the open gate itself: the settled run answers terminal, a reaped one incomplete, an unsettled one nothing")
+        val owner = HostLinuxServiceCurrentV4(root: root, capacity: Some(capacity), agent_operation_id: "operation_2",
+            slot_kind: "remote-build", agent_consumed: false)
+        expect(linux_service_remote_build_reaped_v4(owner, "operation_2")).to_equal("linux-host-remote-build-completed:cancelled")
+        expect(linux_service_remote_build_reaped_v4(owner, "operation_3")).to_equal("linux-host-remote-build-reaped-incomplete")
+        expect(linux_service_remote_build_reaped_v4(owner, "operation_4")).to_equal("")
+        val closed = host_capacity_owner_close_owned_v2(owner.capacity.unwrap())
+        expect(closed.closed and closed.error == "").to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+        step("the open entry refuses on that answer after the slot gate and before the execute lookup and the open")
+        val open = ex_body(ex_service(), "pub fn host_linux_service_remote_build_open_v4(")
+        val slot_at = open.index_of("owner.agent_operation_id != operation_id")
+        val gate_at = open.index_of("val terminal = linux_service_remote_build_reaped_v4(owner, operation_id)")
+        val refuse_at = open.index_of("if terminal != \"\": return linux_service_reply_v4(owner, \"\", terminal, false)")
+        val execute_at = open.index_of("linux_service_remote_build_execute_v4(owner, operation_id)")
+        val window_at = open.index_of("linux_service_remote_build_unopened_deadline_v4(")
+        val open_at = open.index_of("host_remote_build_open_v4(owner.capacity.unwrap().journal")
+        expect(slot_at >= 0 and gate_at > slot_at and refuse_at > gate_at and execute_at > refuse_at).to_equal(true)
+        expect(window_at > execute_at and open_at > window_at).to_equal(true)
+
+    it "authorizes a remote-build cancel against the archived execute's own association digest":
+        # @req M0050-REVIEW-B-02 (the held digest is compared against the execute's, never against itself)
+        val cancel = ex_body(ex_service(), "pub fn host_linux_service_remote_build_cancel_v4(")
+        expect(cancel.contains("execute.unwrap().operation, build.association_digest, build.operation_id, build.association_digest"))
+            .to_equal(false)
+        expect(cancel).to_contain("val association = host_execution_association_digest_v3(execute.unwrap().association)")
+        expect(cancel).to_contain("execute.unwrap().operation, association.unwrap(), build.operation_id, build.association_digest")

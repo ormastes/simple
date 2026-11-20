@@ -153,3 +153,11 @@ Live tree spec `test/03_system/lib/slang/feature/slang_kv_tree_cache_live_spec.s
 branching off vs tree: prefilled 6652 -> 3068, reused 3584, wall 36226 -> 23218 ms;
 multiturn: prefilled 5295 -> 2735, reused 2560, wall 28158 -> 18350 ms; digests
 equal no-cache (139fec2ec5a6, 695f3acdc604). Log `C:/dev/slang-logs/shimtree/tree_spec.log`.
+
+Live tree spec after the review fixes (Gemma-3-270m-it-GGUF, 3/3 passed, free 17.5 GiB,
+log `C:/dev/slang-logs/shimtree/tree_spec3.log`): branching 6652 -> 3068 prefilled
+(39898 -> 24911 ms), multiturn 5295 -> 2735 (28939 -> 19201 ms), and the new
+boundary workload (owner generates ~112 tokens across a 512 micro-batch boundary, then a
+follow-up) 1987 -> 1475 prefilled, reused 512 (capped at the owner's exact span),
+10168 -> 8076 ms; every digest equals the no-cache digest (139fec2ec5a6, 57f18cb60a04,
+695f3acdc604).

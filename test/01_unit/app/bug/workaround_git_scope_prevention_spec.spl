@@ -1,0 +1,64 @@
+"""
+# Workaround Store Git Scope & Truncation Prevention Spec
+
+Exercises the public Git output parsers and bounded Git error path in
+`app.bug.workaround_store` to prevent untracked/vendored scan leaks and
+silent acceptance of truncated NUL-delimited Git output.
+"""
+
+use std.spec.*
+use app.bug.workaround_store.{
+    workaround_tracked_paths,
+    workaround_status_paths,
+    workaround_git
+}
+
+describe "workaround_tracked_paths exclusion and truncation guards":
+    """Prevention coverage for workaround_store_git_ls_files_timeout_scv_admission_2026_11_09."""
+
+    it "filters vendored paths, non-source suffixes, and duplicates while preserving order":
+        val raw = "src/app/demo.spl\0src/compiler_rust/vendor/ext.rs\0src/runtime/vendor/lib.c\0src/runtime/miniaudio.h\0src/runtime/stb_image.h\0src/runtime/stb_truetype.h\0README.md\0src/app/demo.spl\0src/lib/helper.rs\0"
+        val res = workaround_tracked_paths(raw)
+        expect(res.is_ok()).to_equal(true)
+        val paths = res.unwrap()
+        expect(paths).to_equal(["src/app/demo.spl", "src/lib/helper.rs"])
+
+    it "accepts empty tracked output as zero paths":
+        val res = workaround_tracked_paths("")
+        expect(res.is_ok()).to_equal(true)
+        expect(res.unwrap().len()).to_equal(0)
+
+    it "fails closed when tracked output is truncated without trailing NUL":
+        val res = workaround_tracked_paths("src/app/demo.spl\0src/app/partial.spl")
+        expect(res.is_err()).to_equal(true)
+
+    it "rejects unsafe parent-traversal paths in tracked output":
+        val res = workaround_tracked_paths("../escape.spl\0")
+        expect(res.is_err()).to_equal(true)
+
+describe "workaround_status_paths porcelain-z guards":
+    """Validates porcelain -z rename pairs and malformed/truncated boundaries."""
+
+    it "collects both rename destination and source paths when source candidates":
+        val raw = "R  src/new_name.spl\0src/old_name.spl\0 M src/changed.c\0"
+        val res = workaround_status_paths(raw)
+        expect(res.is_ok()).to_equal(true)
+        expect(res.unwrap()).to_equal(["src/new_name.spl", "src/old_name.spl", "src/changed.c"])
+
+    it "fails closed on truncated porcelain output, missing rename source, or malformed record":
+        expect(workaround_status_paths(" M src/a.spl").is_err()).to_equal(true)
+        expect(workaround_status_paths("R  src/dst.spl\0").is_err()).to_equal(true)
+        expect(workaround_status_paths("bad\0").is_err()).to_equal(true)
+
+describe "workaround_git bounded invocation diagnostics":
+    """Verifies failed git execution surfaces configurable timeout/byte limits."""
+
+    it "returns descriptive error mentioning limit env vars on missing repo":
+        val res = workaround_git("Z:/nonexistent_workaround_store_repo_2026", ["status"])
+        expect(res.is_err()).to_equal(true)
+        var msg = ""
+        match res:
+            case Err(e): msg = e
+            case Ok(_): msg = ""
+        expect(msg).to_contain("SIMPLE_WORKAROUND_GIT_TIMEOUT_MS")
+        expect(msg).to_contain("SIMPLE_WORKAROUND_GIT_MAX_BYTES")

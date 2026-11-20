@@ -2,6 +2,7 @@
 # AUTHORED_NOT_RUN. Seeds are deterministic, published test material (never real keys); key files are read through
 # an injected reader so the spec needs no prepared OS store (the store-backed reader is a system concern).
 use std.spec.{describe, it, expect, fail}
+use std.io.file_read_text
 use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2, ExecutionEnvironmentV2}
 use std.common.contracts.distributed_control_codec_v2.distributed_environment_digest_v2
 use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.DistributedAuthorityKeyV2
@@ -150,3 +151,23 @@ describe "Controller authority issuance V1 (milestone_0030 D1/D2)":
         approver.role = "grant-issuer"
         approver.revision = 2
         expect(leaf == controller_authority_key_leaf_v1(approver)).to_equal(false)
+
+    it "wipes the owning key buffer in place, never a value copy of it":
+        # @req KEYWIPE-02 (milestone_0051; milestone_0050 REVIEW_C follow-up)
+        # A `[u8]` has value semantics and a `mut` wipe writes back to the caller's PLACE. A `val` binding is not a
+        # writable place, and a buffer still held by a second binding (here the store turn's `bytes` Option) is forked by
+        # the wipe, leaving the original seed bytes intact. Pinned by source shape: a callee local cannot be observed.
+        val source = file_read_text("src/app/orchestrator/controller_authority_issue_v1.spl")
+        expect(ca_count(source, "var file = read_key(key)?")).to_equal(1)
+        expect(ca_count(source, "val file =")).to_equal(0)
+        expect(ca_count(source, "if val held = read.bytes")).to_equal(0)
+        expect(ca_count(source, "var read = host_identity_store_read_v1(")).to_equal(1)
+        expect(ca_count(source, "var held = read.bytes.unwrap()")).to_equal(1)
+        expect(ca_count(source, "read.bytes = None")).to_equal(1)
+        expect(ca_count(source, "secure_zero_u8_slots(held)")).to_equal(1)
+        # The turn's Option is released before the refusal wipe, so `held` is the only holder of the bytes.
+        expect(source.index_of("var held = read.bytes.unwrap()") < source.index_of("read.bytes = None")).to_equal(true)
+        expect(source.index_of("read.bytes = None") < source.index_of("secure_zero_u8_slots(held)")).to_equal(true)
+
+fn ca_count(source: text, needle: text) -> i64:
+    source.split(needle).len() - 1

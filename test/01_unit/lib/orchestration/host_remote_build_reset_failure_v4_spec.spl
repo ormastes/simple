@@ -17,7 +17,7 @@ Stop stages are milestone_0040 (`host_remote_build_reset_stages_v4_spec.spl`).
 ## Verification guidance and troubleshooting
 A changed stage or reply field is a contract change.
 """
-use std.spec.step
+use std.spec.{step, fail}
 use std.io.file_read_text
 use std.nogc_sync_mut.orchestration.host_linux_service_remote_build_v4.*
 # Tests reach private module gates directly (repo rule: tests may access private).
@@ -34,7 +34,10 @@ fn rf_count(source: text, needle: text) -> i64:
 
 fn rf_from(source: text, start: text, end: text) -> text:
     val at = source.index_of(start)
-    if at < 0: return ""
+    if at < 0:
+        # A renamed anchor must fail the case, never hand an empty slice to a negative check.
+        fail("rf_from anchor missing: " + start)
+        return ""
     val tail = source.substring(at, source.byte_len())
     val stop = tail.index_of(end)
     if stop < 0: return tail
@@ -100,7 +103,7 @@ describe "Host remote-build reset-failure emitter (milestone_0038)":
         expect(rf_count(wedge, "state.reset_receipt = ")).to_equal(1)
         val head = rf_from(source, "pub fn host_remote_build_step_v4(", "# Every archived input")
         expect(rf_count(head, "state.reset_receipt != \"\"")).to_equal(1)
-        expect(head.index_of("state.reset_receipt != \"\"") < head.index_of("state.stage == \"settled\"")).to_equal(true)
+        expect(head.index_of("state.reset_receipt != \"\"") >= 0 and head.index_of("state.reset_receipt != \"\"") < head.index_of("state.stage == \"settled\"")).to_equal(true)
         step("the Stop and Destroy failures reach the helper from the release path (the native step is milestone_0040)")
         val release = rf_from(source, "fn remote_build_release_step_v4(", "# The port finalize")
         expect(rf_count(release, "remote_build_reset_wedged_v4(")).to_equal(3)
@@ -111,7 +114,7 @@ describe "Host remote-build reset-failure emitter (milestone_0038)":
         val source = file_read_text(RF_SOURCE)
         val step_source = rf_from(source, "pub fn host_remote_build_step_v4(", "# Every archived input")
         expect(rf_count(step_source, "state.binding_digest = enabled.binding_digest")).to_equal(1)
-        expect(step_source.index_of("state.binding_digest = enabled.binding_digest") < step_source.index_of("state.reserved = true")).to_equal(true)
+        expect(step_source.index_of("state.binding_digest = enabled.binding_digest") >= 0 and step_source.index_of("state.binding_digest = enabled.binding_digest") < step_source.index_of("state.reserved = true")).to_equal(true)
         step("the digest comes from the provider's enable turn, a typed field, never from a frame or the open record")
         val api = file_read_text("src/lib/nogc_async_mut/container/workspace_api_v3.spl")
         expect(rf_count(api, "binding_digest: text")).to_equal(1)
@@ -123,4 +126,4 @@ describe "Host remote-build reset-failure emitter (milestone_0038)":
         val enable = rf_from(machine, "pub fn enable_workspace_source_v3(", "    pub fn observe_workspace_primary_v3")
         expect(rf_count(enable, "val observed = binding.current_v3()?")).to_equal(1)
         expect(rf_count(enable, "val binding_digest = observed.binding_digest")).to_equal(1)
-        expect(enable.index_of("val binding_digest = observed.binding_digest") < enable.index_of("reserve_workspace_v3(")).to_equal(true)
+        expect(enable.index_of("val binding_digest = observed.binding_digest") >= 0 and enable.index_of("val binding_digest = observed.binding_digest") < enable.index_of("reserve_workspace_v3(")).to_equal(true)

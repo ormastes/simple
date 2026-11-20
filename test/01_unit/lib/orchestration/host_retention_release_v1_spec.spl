@@ -67,7 +67,11 @@ fn rr_signed(record: HostRetentionReleaseV1, issuer: i64 = 1, approver: i64 = 65
 
 fn rr_body(file: text, start: text, stop: text) -> text:
     val source = file_read_text(file)
-    val rest = source.substring(source.index_of(start), source.byte_len())
+    val at = source.index_of(start)
+    if at < 0:
+        fail("rr_body anchor missing: " + start)
+        return ""
+    val rest = source.substring(at, source.byte_len())
     val to = rest.substring(1, rest.byte_len()).index_of(stop)
     if to < 0: return rest
     rest.substring(0, to + 1)
@@ -185,6 +189,23 @@ describe "Retention-release journal records (milestone_0045)":
         val third = rr_signed(foreign)
         expect(host_retention_release_record_publish_v1(journal, host_retention_release_proof_decode_v1(third).unwrap(), third).unwrap_err())
             .to_equal("retention-release-exists")
+        step("an existing marker with the same binding but a foreign kind or non-canonical bytes is malformed, never resumed")
+        var other = rr_record()
+        other.operation_id = "build_op_2"
+        val other_source = rr_signed(other)
+        val other_path = host_retention_release_marker_relative_v1("build_op_2")
+        val foreign_kind = marker.replace("build_op_1", "build_op_2").replace("retention-release-marker", "retention-release-markex")
+        expect(distributed_operation_journal_publish_v3(journal, other_path, foreign_kind).unwrap()).to_equal(true)
+        expect(host_retention_release_record_publish_v1(journal, host_retention_release_proof_decode_v1(other_source).unwrap(),
+            other_source).unwrap_err()).to_equal("retention-release-marker-invalid")
+        var third_op = rr_record()
+        third_op.operation_id = "build_op_3"
+        val third_source = rr_signed(third_op)
+        val noncanonical = marker.replace("build_op_1", "build_op_3").replace("\n", " \n")
+        expect(distributed_operation_journal_publish_v3(journal, host_retention_release_marker_relative_v1("build_op_3"), noncanonical)
+            .unwrap()).to_equal(true)
+        expect(host_retention_release_record_publish_v1(journal, host_retention_release_proof_decode_v1(third_source).unwrap(),
+            third_source).unwrap_err()).to_equal("retention-release-marker-invalid")
         step("the outcome archive is no-replace: a repeat with the same facts answers the stored bytes")
         expect(host_retention_release_archived_v1(journal, "build_op_1").unwrap().is_none()).to_equal(true)
         val effect = HostRetentionReleaseEffectV1(charge: "run-removed", used_bytes: 4096, used_inodes: 3, removed: 12)
@@ -192,10 +213,23 @@ describe "Retention-release journal records (milestone_0045)":
         expect(host_retention_release_archived_v1(journal, "build_op_1").unwrap().unwrap()).to_equal(archived)
         expect(host_retention_release_archive_v1(journal, "build_op_1", sha256_text(marker), effect, 1700000009999).unwrap())
             .to_equal(archived)
-        step("a resumed release that finds the run child already gone converges with the weaker, named evidence")
+        step("a re-issued release of an archived run is admitted on the stored archive: no expected record, marker or effect again")
+        val policy = local_authority_policy_decode_v1(fixture.policy).unwrap()
+        val resumed = host_retention_release_admit_v1(journal, opened[0].ledger, policy, "issuer_1", host_local_context_v1(policy),
+            "worker_1", rr_signed(rr_record("failed"))).unwrap()
+        expect(resumed.resumed).to_equal(true)
+        expect(resumed.archived).to_equal(archived)
+        expect(resumed.marker).to_equal("")
+        expect(resumed.request_bytes).to_equal("")
+        step("the weaker `absent-unmeasured` archive is first-wins too: a later measured removal answers it, another marker conflicts")
         val absent = HostRetentionReleaseEffectV1(charge: "absent-unmeasured", used_bytes: -1, used_inodes: -1, removed: -1)
         val converged = host_retention_release_archive_v1(journal, "build_op_9", "6".repeat(64), absent, 1700000000000).unwrap()
-        expect(host_retention_released_decode_v1(converged).unwrap().charge).to_equal("absent-unmeasured")
+        expect(host_retention_release_archive_v1(journal, "build_op_9", "6".repeat(64), effect, 1700000005000).unwrap())
+            .to_equal(converged)
+        expect(host_retention_released_decode_v1(host_retention_release_archived_v1(journal, "build_op_9").unwrap().unwrap())
+            .unwrap().charge).to_equal("absent-unmeasured")
+        expect(host_retention_release_archive_v1(journal, "build_op_9", "5".repeat(64), absent, 1700000000000).unwrap_err())
+            .to_equal("retention-released-conflict")
         step("an archive with an unknown or retired charge class, or a run removal that removed nothing, is refused")
         expect(host_retention_release_archive_v1(journal, "build_op_8", "6".repeat(64),
             HostRetentionReleaseEffectV1(charge: "guess", used_bytes: 0, used_inodes: 0, removed: 0), 1).is_err()).to_equal(true)
@@ -349,7 +383,7 @@ describe "Retention-release stage intent (milestone_0049, owner decision 2 amend
         val admit = rr_body(RR_HOST, "pub fn host_retention_release_admit_v1(", "\nexport ")
         expect(admit.contains("if not resumed and expected.record.evidence == \"reaped\":")).to_equal(true)
         expect(admit.contains("host_remote_build_never_staged_v1(journal, operation_id, reaped.unwrap().prior_fence)")).to_equal(true)
-        expect(admit.index_of("host_retention_release_check_v1(") < admit.index_of("host_remote_build_never_staged_v1(")).to_equal(true)
+        expect(admit.index_of("host_retention_release_check_v1(") >= 0 and admit.index_of("host_retention_release_check_v1(") < admit.index_of("host_remote_build_never_staged_v1(")).to_equal(true)
         step("the service lets an absent child settle for a resumed OR never-staged release; the provider refuses otherwise")
         val handler = rr_body(RR_SERVICE, "fn linux_service_retention_release_v4(", "\n# milestone_0045 retention-release inspect")
         expect(handler.contains("admitted.unwrap().resumed or admitted.unwrap().never_staged")).to_equal(true)

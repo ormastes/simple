@@ -33,7 +33,8 @@ use app.cli.native_build_main.{run_native_build_worker, run_native_build_entry_v
     native_build_focused_capsule_shards_v1, native_build_shard_aggregate_fail_reason_v1, run_native_file_worker_v1,
     native_build_authority_source_roots_v1, native_build_coordinator_prepublish_closure_v1,
     native_build_memory_admission_refusal_v1}
-use app.cli.native_build_hir_warmup_outcome.{native_build_stage3_capsule_mir_route_v1}
+use app.cli.native_build_hir_warmup_outcome.{native_build_stage3_capsule_shard_entry_selected_v1,
+    native_build_stage3_capsule_mir_route_v1}
 use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
     compiler_source_authority_publish_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
@@ -529,7 +530,8 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
             # link. Unset selects this pool (default); explicit 0 opts out;
             # SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 still takes precedence and
             # keeps the single-object whole-program route (HIR warm-up only).
-            if explicit_entry == "src/app/cli/bootstrap_main.spl" and mode == "dynload":
+            val stage3_explicit_mir_sharding = (env_get("SIMPLE_MIR_SHARDING") ?? "") == "1"
+            if native_build_stage3_capsule_shard_entry_selected_v1(explicit_entry, mode, stage3_explicit_mir_sharding):
                 val stage3_allow_mir = native_bootstrap_stage3_per_file_selected_v1(
                     env_get_nullable(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
                     env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "")
@@ -546,8 +548,7 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
                 # src/app (native_build_selected_snapshot_source_roots_v1).
                 val stage3_two_pass = native_build_stage3_capsule_mir_route_v1(stage3_allow_mir,
                     args.contains("--go-to-end") or (env_get("SIMPLE_NATIVE_GO_TO_END") ?? "") == "1",
-                    env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "",
-                    (env_get("SIMPLE_MIR_SHARDING") ?? "") == "1") == "two-pass"
+                    env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "", stage3_explicit_mir_sharding) == "two-pass"
                 if stage3_two_pass and not bootstrap_shard_child_active():
                     print "[stage3-route] HIR warm-up + MIR shard pool"
                     if not bootstrap_coordinator_publish_authority_v1(worker_args):
@@ -903,6 +904,147 @@ fn run_compile_bootstrap(args: [text]) -> i64:
             print "error: in-process SMF compile: {err}"
         1
 
+pub struct BootstrapRunPlan:
+    valid: bool
+    show_help: bool
+    script_path: text
+    program_args: [text]
+    gc_off: bool
+    low_memory: bool
+    error: text
+
+pub fn bootstrap_run_parse_args(args: [text]) -> BootstrapRunPlan:
+    var start_idx = 2
+    if args.len() > 0 and args[0] == "run":
+        start_idx = 1
+    var show_help = false
+    var gc_off = false
+    var low_memory = false
+    var script_path = ""
+    var program_args: [text] = []
+    var i = start_idx
+    var stop_flags = false
+    while i < args.len():
+        val arg = args[i]
+        if script_path != "":
+            program_args.push(arg)
+            i = i + 1
+            continue
+        if not stop_flags:
+            if arg == "--help" or arg == "-h":
+                show_help = true
+                i = i + 1
+                continue
+            if arg == "--":
+                stop_flags = true
+                i = i + 1
+                continue
+            if arg == "--gc-off" or arg == "--gc=off":
+                gc_off = true
+                i = i + 1
+                continue
+            if arg == "--gc-log":
+                i = i + 1
+                continue
+            if arg == "--low-memory":
+                low_memory = true
+                i = i + 1
+                continue
+            if arg == "--mode=interpreter" or arg == "--mode=interpret":
+                i = i + 1
+                continue
+            if arg == "--mode":
+                if i + 1 >= args.len():
+                    return BootstrapRunPlan(
+                        valid: false, show_help: false, script_path: "",
+                        program_args: [], gc_off: gc_off, low_memory: low_memory,
+                        error: "missing value for --mode"
+                    )
+                val mode_val = args[i + 1]
+                if mode_val != "interpreter" and mode_val != "interpret":
+                    return BootstrapRunPlan(
+                        valid: false, show_help: false, script_path: "",
+                        program_args: [], gc_off: gc_off, low_memory: low_memory,
+                        error: "bootstrap run supports --mode=interpreter only (got '{mode_val}')"
+                    )
+                i = i + 2
+                continue
+            if arg.starts_with("--mode="):
+                return BootstrapRunPlan(
+                    valid: false, show_help: false, script_path: "",
+                    program_args: [], gc_off: gc_off, low_memory: low_memory,
+                    error: "bootstrap run supports --mode=interpreter only"
+                )
+            if arg.starts_with("-"):
+                return BootstrapRunPlan(
+                    valid: false, show_help: false, script_path: "",
+                    program_args: [], gc_off: gc_off, low_memory: low_memory,
+                    error: "unknown run option '{arg}'"
+                )
+        script_path = arg
+        program_args.push(arg)
+        i = i + 1
+    if not show_help and script_path == "":
+        return BootstrapRunPlan(
+            valid: false, show_help: false, script_path: "",
+            program_args: [], gc_off: gc_off, low_memory: low_memory,
+            error: "missing script file"
+        )
+    BootstrapRunPlan(
+        valid: true,
+        show_help: show_help,
+        script_path: script_path,
+        program_args: program_args,
+        gc_off: gc_off,
+        low_memory: low_memory,
+        error: ""
+    )
+
+@allow(primitive_api)  # CLI argv boundary: argv in, process exit code out
+pub fn run_bootstrap_script(args: [text]) -> i64:
+    val worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
+    if worker_marker == "1":
+        print "error: unsupported bootstrap internal entry"
+        return 1
+    val plan = bootstrap_run_parse_args(args)
+    if not plan.valid:
+        print "error: {plan.error}"
+        return 1
+    if plan.show_help:
+        print "Usage: simple run [options] <script.spl> [args...]"
+        print ""
+        print "Options:"
+        print "  --mode=interpreter   Execute script via the in-process interpreter"
+        print "  --low-memory         Evict AST/source buffers early during execution"
+        print "  --gc-off             Disable GC mode flag for script execution"
+        print "  -h, --help           Show this help message"
+        return 0
+    if not file_exists(plan.script_path):
+        print "error: file not found: {plan.script_path}"
+        return 1
+    val old_entry = native_build_env_saved_v1("SIMPLE_NATIVE_BUILD_ENTRY")
+    val old_closure = native_build_env_saved_v1("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY", plan.script_path)
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
+    var options: CompileOptions = driver_core_compile_options_default()
+    options.input_files = [plan.script_path]
+    options.bootstrap_input_count = 1
+    options.bootstrap_input_0 = plan.script_path
+    options.mode = CompileMode.Interpret
+    options.cli_mode_text = "interpret"
+    options.program_args = plan.program_args
+    options.gc_off = plan.gc_off
+    options.low_memory = plan.low_memory
+    val driver = compiler_driver_create(options)
+    val result = compiler_driver_run_compile(driver)
+    native_build_env_restore_v1("SIMPLE_NATIVE_BUILD_ENTRY", old_entry)
+    native_build_env_restore_v1("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_closure)
+    if compile_result_is_success(result):
+        return 0
+    for err in compile_result_errors(result):
+        print "error: bootstrap run: {err}"
+    1
+
 fn get_cli_args() -> [text]:
     unsafe(capabilities: [ffi]): sys_get_args()
 
@@ -938,8 +1080,7 @@ fn main() -> i64:
             bootstrap_internal_worker_args_v1(all_args, native_worker_marker))
     if first == "run" and native_worker_marker == "1" and argc >= 3:
         # A marked coordinator child may never escape the internal allowlist
-        # into ordinary command handling. Unmarked `run` is not internal and
-        # deliberately falls through to the canonical unknown-command path.
+        # into ordinary command handling.
         print "error: unsupported bootstrap internal entry '{all_args[2]}'"
         return 1
     if first == "native-build":
@@ -954,6 +1095,7 @@ fn main() -> i64:
         print "Commands:"
         print "  compile <file> --format=smf   Compile to SMF (the ONLY format `compile` supports)"
         print "  native-build <file>.spl       Compile to a native executable"
+        print "  run <file>.spl [args...]      Execute a Simple source script"
         print ""
         print "Compile-related flags include:"
         print "  --opt-level=<none|basic|standard|aggressive>"
@@ -961,5 +1103,7 @@ fn main() -> i64:
         return 0
     if first.len() == 7 and first.starts_with("compile"):
         return run_compile_bootstrap(all_args)
+    if first == "run":
+        return run_bootstrap_script(all_args)
     print "error: unknown command '{first}'"
     return 1

@@ -6,6 +6,7 @@
 
 use std.nogc_sync_mut.io.tcp.{TcpStream}
 use std.nogc_sync_mut.io.external_text_io.{io_legacy_utf8}
+use std.common.base_encoding.{bytes_to_text}
 use std.nogc_sync_mut.http_server.types.{
     HttpRequest, HttpMethod, http_method_from_text
 }
@@ -91,7 +92,7 @@ fn _scalar_read_line(stream: TcpStream, ahead: HttpScalarReadAheadV1, max_bytes:
             return _scalar_line(out, "", SCALAR_LINE_TOO_LONG, "{bytes.len()}")
 
 # Exactly `count` body bytes: buffered read-ahead first, then the socket.
-fn _scalar_read_body(stream: TcpStream, ahead: HttpScalarReadAheadV1, count: i64) -> Result<text, text>:
+fn _scalar_read_body(stream: TcpStream, ahead: HttpScalarReadAheadV1, count: i64) -> Result<[u8], text>:
     var body: [u8] = []
     var i = ahead.cursor
     while i < ahead.chunk.len() and body.len() < count:
@@ -100,13 +101,48 @@ fn _scalar_read_body(stream: TcpStream, ahead: HttpScalarReadAheadV1, count: i64
     if body.len() < count:
         match stream.read_exact(count - body.len()):
             Ok(rest):
+                # Nothing buffered ahead: keep the read as is (no per-byte copy).
+                if body.len() == 0:
+                    return Ok(rest)
                 for b in rest:
                     body.push(b)
             Err(_):
                 return Err("400 Failed to read request body")
-    match io_legacy_utf8(body):
+    Ok(body)
+
+# Text-ish media types: their bodies are meant to be read as text. A missing
+# Content-Type counts as text-ish.
+fn request_body_is_textual(content_type: text) -> bool:
+    var media = content_type.trim().to_lower()
+    val semi = media.index_of(";")
+    if semi >= 0:
+        media = media.slice(0, semi).trim()
+    media == "" or media.starts_with("text/") or media == "application/json" or media.ends_with("+json") or media == "application/xml" or media.ends_with("+xml") or media == "application/x-www-form-urlencoded" or media == "application/javascript" or media == "application/x-ndjson"
+
+# Any non-text media type may carry raw octets (uploads, media, archives).
+fn request_body_binary_allowed(content_type: text) -> bool:
+    not request_body_is_textual(content_type)
+
+# First Content-Type header wins, in both the scalar and the vector parser.
+fn request_content_type(headers: [(text, text)]) -> text:
+    for header in headers:
+        if header.0.to_lower() == "content-type":
+            return header.1
+    ""
+
+# UTF-8 view of a request body. A non-UTF-8 body of a non-text type has text
+# view "" (handlers read HttpRequest.body_bytes). For a text-ish type it is a
+# 400, or, with lossy_text, the lossy decode the vector parser always gave.
+fn request_body_decode(bytes: [u8], content_type: text, lossy_text: bool) -> Result<text, text>:
+    match io_legacy_utf8(bytes):
         Ok(value): Ok(value)
-        Err(_): Err("400 Failed to read request body")
+        Err(_):
+            if request_body_binary_allowed(content_type):
+                Ok("")
+            elif lossy_text:
+                Ok(bytes_to_text(bytes))
+            else:
+                Err("400 Failed to read request body")
 
 # =============================================================================
 # Public API
@@ -219,9 +255,14 @@ fn parse_request_with_policy_limits(stream: TcpStream, max_request_line: i32, ma
     val content_length = decision.1
 
     var body = ""
+    var body_bytes: [u8] = []
     if content_length > 0:
         match _scalar_read_body(stream, ahead, content_length as i64):
-            Ok(data): body = data
+            Ok(data):
+                body_bytes = data
+                match request_body_decode(data, request_content_type(headers), false):
+                    Ok(decoded): body = decoded
+                    Err(error): return Err(error)
             Err(error): return Err(error)
 
     return Ok(HttpRequest(
@@ -231,7 +272,8 @@ fn parse_request_with_policy_limits(stream: TcpStream, max_request_line: i32, ma
         version: version,
         headers: headers,
         body: body,
-        remote_addr: ""
+        remote_addr: "",
+        body_bytes: body_bytes
     ))
 
 # headers_decision inspects parsed headers and decides how the body must be
@@ -307,5 +349,5 @@ fn to_i32_safe(s: text) -> i32:
 export parse_request, parse_request_with_limits, parse_request_with_policy_limits, parse_request_line
 export request_line_without_terminator
 export to_i32_safe, headers_decision
-export request_host_error
+export request_host_error, request_body_decode, request_body_binary_allowed, request_body_is_textual, request_content_type
 export RUNTIME_READ_LINE_CAP

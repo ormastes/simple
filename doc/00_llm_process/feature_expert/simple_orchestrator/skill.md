@@ -427,7 +427,14 @@ Bug `v4_attach_helper_charge_held_without_records_2026-11-17` (partially fixed; 
   controller. Keys: OpenSSH Ed25519 files in the protected identity store, leaf
   `sha256("simple-controller-authority-key-v1\n" + role + "\n" + identity + "\n" + revision) + ".key"`; read only
   through a cleanly opened store; signed via domain-pinned `host_identity_private_sign_{grant,approval}_v1`.
-  The private-file parser (`host_identity_private_run_v1`) parses armour+base64 on `[u8]` (no text copy) and wipes raw, seed and `pair.0` on every post-decode exit (NOT_RUN spec `host_identity_private_wipe_v1_spec.spl`); encode and generate write body/raw/seed/check/entropy by index into pre-sized buffers and wipe all of them on every exit (`host_identity_private_encode_run_v1`, `host_identity_key_generate_from_entropy_run_v1`, NOT_RUN spec `host_identity_encode_wipe_v1_spec.spl`); the decoder reuses one 4-byte quantum buffer (wiped + checked on every exit) and refuses non-canonical armour (70-column lines, LF-terminated, no empty line); encode writes the PEM body by index with no base64 text intermediate (ENCWIPE-08, SEEDWIPE-10, milestone_0043). Still unwiped: std ed25519 temporaries, the hex entropy text, and the caller-owned private file (bug `host_identity_ed25519_std_temporaries_unwiped_2026-11-19`).
+  The private-file parser (`host_identity_private_run_v1`) parses armour+base64 on `[u8]` (no text copy) and wipes raw, seed and `pair.0` on every post-decode exit (NOT_RUN spec `host_identity_private_wipe_v1_spec.spl`); encode and generate write body/raw/seed/check/entropy by index into pre-sized buffers and wipe all of them on every exit (`host_identity_private_encode_run_v1`, `host_identity_key_generate_from_entropy_run_v1`, NOT_RUN spec `host_identity_encode_wipe_v1_spec.spl`); the decoder reuses one 4-byte quantum buffer (wiped + checked on every exit) and refuses non-canonical armour (70-column lines, LF-terminated, no empty line); the decoded body is wiped IN PLACE through `host_identity_private_body_run_v1(mut raw)`, after `decoded.raw` is moved into a local and the field emptied, so that local is the sole holder (a copy left beside a live holder is wiped as a fork; SEEDWIPE-11 milestone_0050, KEYWIPE milestone_0051); encode writes the PEM body by index with no base64 text intermediate (ENCWIPE-08, SEEDWIPE-10, milestone_0043). Still unwiped: std ed25519 temporaries, the hex entropy text, and the caller-owned private file (bug `host_identity_ed25519_std_temporaries_unwiped_2026-11-19`).
+- Trap (milestone_0051 KEYWIPE, specs NOT_RUN): `[u8]` has value semantics and `secure_zero_u8_slots(mut ...)` writes back
+  to the caller PLACE. Hold a key buffer in a `var` (never `val`), and when it came out of an `Option`/`Result`
+  field (store turn `bytes`, encoder `outcome`) release that field (`= None` / `= Err(..)`) right after the unwrap,
+  or the wipe forks a copy and the original keeps the seed. Never wipe a struct FIELD argument directly (it is written
+  back only after the call, so the field shares the buffer during the wipe): move it to a `var` local, empty the field,
+  wipe the local. `accept_host_reset_failure_v3` is the ONLY reset-failure
+  journal entry (the unsigned `record_reset_failure_v3` was folded into it).
 - `distributed_authority_snapshot_key_v2`: role-scoped lookup; never resolves a key under another role.
 - `orchestrator remote-run-plan`: prints only operationId/grantDigest/planDigest; never prints or writes the signed
   pair; starts no run. The remote run itself (V4 slot kind, V3 executor, chunked route) is blocked on owner decision
@@ -534,6 +541,18 @@ Host side of the remote container build; the controller half is the `remote-run`
   (`workspace-retention-release-run-absent`) after journaling the marker, so the re-issue converges. Agent runs write no
   intent (nothing releases them). Signed record, verification and charge vocabulary unchanged.
 - Trap: journal relative path parts are <= 128 bytes; `<sha>-<sha>.sdn` (133) is invalid -- use `<sha>/<sha>.sdn`.
+- Trap (milestone_0050 review_b, specs NOT_RUN): a pre-transfer no-workload settle drops `owner.build` but KEEPS the slot,
+  so `remote-build open` must refuse an operation with a published outcome or reap index (`linux_service_remote_build_reaped_v4`
+  before the execute lookup) -- otherwise a replayed/retried open runs a workload on an already-settled row. An existing
+  retention marker must be byte-canonical (`retention_marker_text_v1`) or it is `marker-invalid`, never resumed. The
+  controller host-action send archives EVERY non-inspect sub create-only (retention-release included, not only `-abandon`).
+- Trap (milestone_0052 spec hygiene, specs NOT_RUN): a source pin built on `index_of` is VACUOUS when its anchor is gone:
+  `a.index_of(X) < b.index_of(Y)` passes with X missing (-1), `L > R` passes with R missing, and `substring` clamps a -1
+  start to 0 and a -1 end to "" (so a negative `contains` over the slice passes). Guard the low side (`x >= 0 and ...`)
+  and make every spec anchor helper `fail()` on a missing anchor (never `return ""`). `text.len()` counts code points
+  while `substring` takes BYTES: bound slices with `byte_len()`. The remote-run accept pair is verified at a clock read
+  taken AFTER the bundle fetch (an unbundled settle reads no accept authority); `--abandon-id` is the run id of every
+  signed host action, retention-release included.
 ### Controller remote-run (milestone_0030 controller half, specs NOT_RUN)
 `simple orchestrator remote-run --dispatch-root --config-digest --key-store --approver --spec <dir> --out --grant-id --expires-in-ms`
 (`remote_run_command_v1.spl`; pure driver `remote_run_v1.spl`, authoring `remote_run_author_v1.spl`, frames
@@ -693,7 +712,10 @@ binding / Host bug). Specs: `remote_container_reset_failure_stages_v3_spec.spl`,
   store (`controller_workload_store_edit_journal_v1` + `root.retain_v3`): issuer == controller, class, snapshot verify at
   the grant clock, row digest, archived open record proves `now >= min(approval, grant)` of the RUN, then a create-only
   `controller-remote-abandon-v1/<digest>.sdn` record and `failed` bound to its digest. `failed` never enters
-  `REMOTE_RUN_SETTLE_STATES_V1`. Approver keys must enroll `remote-run-abandon`.
+  `REMOTE_RUN_SETTLE_STATES_V1`. Approver keys must enroll `remote-run-abandon`. milestone_0050 (review A P1): a row an
+  interrupted admit left `admitted` (open record archived, `executing` commit failed; a re-run's fresh pair conflicts on
+  the archive, resume needs a live row) is ended after its window by the same verified abandon as `cancelled`
+  (admitted -> failed is no transition), only while `remote_run_execute_archived_v1` proves no execute was archived.
 - VERSION SKEW: a controller older than milestone_0045 refuses a Host-signed `service-restart` and a late receipt and
   settles `outcome-unknown`; upgrade the controller first (same rule as #10398/#10399).
 

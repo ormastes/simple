@@ -3,6 +3,8 @@
 # Table model restored from 2ee3fed72cd8e6538646983b84765c4787fc175a.
 
 use std.cli.cli_util.{parse_csv_fields}
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.io_runtime.{get_args}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_write}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 use std.nogc_sync_mut.io.process_ops.{shell_output_trimmed}
@@ -237,5 +239,214 @@ fn ensure_dirs():
     dir_create_all(DASHBOARD_TABLE_DIR)
     dir_create_all(DASHBOARD_HISTORY_DIR)
 
+# ============================================================================
+# CLI Option Parsing, Dispatch & Log-Mode Rendering
+# ============================================================================
+
+pub struct DashboardCliPlan:
+    valid: bool
+    exit_code: i64
+    log_mode: text
+    surface: text
+    progress: text
+    command: text
+    sub_args: [text]
+    error: text
+
+fn _dash_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+    arg == "--tui" or arg == "--stdout" or
+    arg == "--quiet" or arg == "--verbose" or
+    arg == "--dots" or arg == "--count" or arg == "--no-progress" or
+    arg == "--log-mode" or arg == "--surface" or arg == "--progress" or
+    arg.starts_with("--log-mode=") or arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn _dash_strip_log_options(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if _dash_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned
+
+fn _dash_escape_json(s: text) -> text:
+    var out = s.replace("\\", "\\\\")
+    out = out.replace("\"", "\\\"")
+    out = out.replace("\n", "\\n")
+    out = out.replace("\r", "\\r")
+    out
+
+pub fn dashboard_plan_cli(args: [text]) -> DashboardCliPlan:
+    """Parse CLI log options and dashboard subcommand without performing I/O."""
+    val opts = parse_log_options(args)
+    if not opts.valid:
+        return DashboardCliPlan(
+            valid: false,
+            exit_code: 1,
+            log_mode: opts.log_mode,
+            surface: opts.surface,
+            progress: opts.progress,
+            command: "error",
+            sub_args: [],
+            error: opts.error
+        )
+
+    val rest = _dash_strip_log_options(args)
+    if rest.len() == 0:
+        return DashboardCliPlan(
+            valid: true,
+            exit_code: 0,
+            log_mode: opts.log_mode,
+            surface: opts.surface,
+            progress: opts.progress,
+            command: "usage",
+            sub_args: [],
+            error: ""
+        )
+
+    val cmd = rest[0]
+    var sub_args: [text] = []
+    var i = 1
+    while i < rest.len():
+        sub_args.push(rest[i])
+        i = i + 1
+
+    if cmd == "--help" or cmd == "-h" or cmd == "help":
+        return DashboardCliPlan(
+            valid: true,
+            exit_code: 0,
+            log_mode: opts.log_mode,
+            surface: opts.surface,
+            progress: opts.progress,
+            command: "help",
+            sub_args: sub_args,
+            error: ""
+        )
+
+    if cmd == "status" or cmd == "tables" or cmd == "serve" or cmd == "gui" or cmd == "agents":
+        return DashboardCliPlan(
+            valid: true,
+            exit_code: 0,
+            log_mode: opts.log_mode,
+            surface: opts.surface,
+            progress: opts.progress,
+            command: cmd,
+            sub_args: sub_args,
+            error: ""
+        )
+
+    DashboardCliPlan(
+        valid: false,
+        exit_code: 1,
+        log_mode: opts.log_mode,
+        surface: opts.surface,
+        progress: opts.progress,
+        command: "error",
+        sub_args: sub_args,
+        error: "Unknown command: {cmd}"
+    )
+
+fn _dash_usage_text(progress_mode: text) -> text:
+    var lines: [text] = []
+    val prog = render_progress(progress_mode, 0, 1, "usage")
+    if prog != "":
+        lines.push(prog)
+    lines.push("Simple Dashboard CLI")
+    lines.push("")
+    lines.push("Usage: simple dashboard [command] [options]")
+    lines.push("")
+    lines.push("Commands:")
+    lines.push("  status         Show project metrics table summary")
+    lines.push("  tables         List configured dashboard tables and row counts")
+    lines.push("  serve          Launch dashboard server (migrated to simple-ide)")
+    lines.push("  gui            Launch dashboard GUI (migrated to simple-ide)")
+    lines.push("  agents         Show dashboard agents view (migrated to simple-ide)")
+    lines.push("  help           Show this help message")
+    lines.push("")
+    lines.push("Shared log options:")
+    for line in log_options_help():
+        lines.push("  {line}")
+    lines.join("\n")
+
+fn _dash_status_text() -> text:
+    var non_empty: i64 = 0
+    var total_rows: i64 = 0
+    for name in TABLE_NAMES:
+        val tbl = load_table_named("{DASHBOARD_TABLE_DIR}/{name}.sdn", name)
+        if tbl.rows.len() > 0:
+            non_empty = non_empty + 1
+            total_rows = total_rows + tbl.rows.len()
+    "Simple Dashboard Status: tables={TABLE_COUNT} populated={non_empty} rows={total_rows}"
+
+fn _dash_tables_text() -> text:
+    var lines: [text] = []
+    lines.push("Simple Dashboard Tables ({TABLE_COUNT}):")
+    for name in TABLE_NAMES:
+        val tbl = load_table_named("{DASHBOARD_TABLE_DIR}/{name}.sdn", name)
+        lines.push("  {name}: {tbl.rows.len()} rows")
+    lines.join("\n")
+
+pub fn dashboard_execute_plan(plan: DashboardCliPlan) -> (text, i64):
+    """Execute a planned dashboard CLI action and return (stdout_text, exit_code)."""
+    if not plan.valid:
+        if plan.log_mode == "json":
+            val msg = _dash_escape_json(plan.error)
+            return ("{\"command\":\"dashboard\",\"status\":\"error\",\"message\":\"{msg}\"}", plan.exit_code)
+        return ("error: dashboard: {plan.error}\nRun 'simple dashboard --help' for usage.", plan.exit_code)
+
+    if plan.command == "usage" or plan.command == "help":
+        if plan.log_mode == "json":
+            return ("{\"command\":\"dashboard\",\"status\":\"usage\",\"subcommands\":[\"status\",\"tables\",\"serve\",\"gui\",\"agents\",\"help\"],\"table_count\":{TABLE_COUNT}}", 0)
+        return (_dash_usage_text(plan.progress), 0)
+
+    var detail = ""
+    if plan.command == "status":
+        detail = _dash_status_text()
+    elif plan.command == "tables":
+        detail = _dash_tables_text()
+    elif plan.command == "serve":
+        detail = _run_serve_result(plan.sub_args)
+    elif plan.command == "gui":
+        detail = _run_gui_result(plan.sub_args)
+    elif plan.command == "agents":
+        detail = _run_agents_result(plan.sub_args)
+    else:
+        return ("error: dashboard: unsupported command: {plan.command}", 1)
+
+    if plan.log_mode == "json":
+        val escaped = _dash_escape_json(detail)
+        return ("{\"command\":\"dashboard\",\"status\":\"ok\",\"subcommand\":\"{plan.command}\",\"detail\":\"{escaped}\"}", 0)
+    (detail, 0)
+
+fn _dash_cli_args() -> [text]:
+    val raw = get_args()
+    var start_idx = 1
+    if raw.len() > 2 and raw[1] == "run" and raw[2].ends_with(".spl"):
+        start_idx = 3
+    elif raw.len() > 1 and raw[1] == "dashboard":
+        start_idx = 2
+    elif raw.len() > 1 and raw[1].ends_with(".spl"):
+        start_idx = 2
+    var out: [text] = []
+    var i = start_idx
+    while i < raw.len():
+        out.push(raw[i])
+        i = i + 1
+    out
+
+@allow(primitive_api)  # CLI argv boundary: argv in, process exit code out
+pub fn run_dashboard(args: [text]) -> i64:
+    """Entry point for dashboard CLI; parses options, dispatches subcommands, and prints output."""
+    val plan = dashboard_plan_cli(args)
+    val (out, code) = dashboard_execute_plan(plan)
+    if out != "":
+        print out
+    code
+
 fn main() -> i64:
-    0
+    run_dashboard(_dash_cli_args())
