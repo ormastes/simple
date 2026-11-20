@@ -1,0 +1,119 @@
+# @cover src/lib/nogc_sync_mut/simd.spl
+# @req REQ-SIMD-MLKEM-RVV-NTT
+"""
+# ML-KEM768 RVV NTT Kernel Specification
+
+Verifies that `std.nogc_sync_mut.simd` implements real RVV forward and inverse
+ML-KEM NTT kernels matching FIPS 203 scalar NTT/INTT test vectors across
+multiple RVV VLEN widths (>= 128 bits, multiples of 32), records butterfly
+chunk hits and observed RVV VLEN bits, and removes the unimplemented RVV stub.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.nogc_sync_mut.simd.{
+    _mlkem_ntt_forward_rvv, _mlkem_ntt_inverse_rvv,
+    _mlkem_ntt_forward_rvv_with_vlen, _mlkem_ntt_inverse_rvv_with_vlen,
+    mlkem_ntt_simd_batch, mlkem_ntt_simd_backend, mlkem_ntt_simd_reset, mlkem_ntt_simd_receipt
+}
+use os.crypto.ml_kem_ntt.{ntt, intt}
+
+fn _vec_mlkem_fixture(kind: i64) -> [i64]:
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < 256:
+        var v = (i * 29 + 17 + kind * 97) % 3329
+        if kind == 1:
+            v = if i % 2 == 0: 0 else: 3328
+        elif kind == 2:
+            v = if i == 0 or i == 17 or i == 127 or i == 255: 1 else: 0
+        out.push(v)
+        i = i + 1
+    out
+
+fn _signed_fixture() -> [i64]:
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < 256:
+        val base = (i * 41 + 7) % 3329
+        out.push(base + (if i % 2 == 0: -6658 else: 6658))
+        i = i + 1
+    out
+
+fn _mismatches(a: [i64], b: [i64]) -> i64:
+    if a.len() != b.len():
+        return -1
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+describe "ML-KEM768 RVV NTT kernel":
+
+    it "source implements RVV backend code 3 without unimplemented stub markers":
+        step("Check simd.spl removes RVV unimplemented notices and wires backend 3")
+        val src = file_read("src/lib/nogc_sync_mut/simd.spl")
+        expect(src.contains("RVV has no kernel here")).to_equal(false)
+        expect(src.contains("RVV remains declared but unimplemented")).to_equal(false)
+        expect(src.contains("fn _mlkem_ntt_forward_rvv")).to_equal(true)
+        expect(src.contains("fn _mlkem_ntt_inverse_rvv")).to_equal(true)
+
+    it "RVV forward NTT matches FIPS 203 scalar NTT on standard and signed ML-KEM768 vectors":
+        step("Compare _mlkem_ntt_forward_rvv against scalar ntt")
+        mlkem_ntt_simd_reset()
+        val f0 = _vec_mlkem_fixture(0)
+        val f1 = _vec_mlkem_fixture(1)
+        val f2 = _vec_mlkem_fixture(2)
+        val fs = _signed_fixture()
+
+        expect(_mismatches(_mlkem_ntt_forward_rvv(f0), ntt(f0))).to_equal(0)
+        expect(_mismatches(_mlkem_ntt_forward_rvv(f1), ntt(f1))).to_equal(0)
+        expect(_mismatches(_mlkem_ntt_forward_rvv(f2), ntt(f2))).to_equal(0)
+        expect(_mismatches(_mlkem_ntt_forward_rvv(fs), ntt(fs))).to_equal(0)
+
+        val direct_receipt = mlkem_ntt_simd_receipt()
+        expect(direct_receipt.observed_rvv_vlen_bits).to_equal(0)
+
+        mlkem_ntt_simd_reset()
+        val batch_out = mlkem_ntt_simd_batch(f0, false)
+        val batch_receipt = mlkem_ntt_simd_receipt()
+        if batch_receipt.backend_code == 3:
+            expect(_mismatches(batch_out, ntt(f0))).to_equal(0)
+            expect(batch_receipt.chunk_hits).to_be_greater_than(0)
+            expect(batch_receipt.observed_rvv_vlen_bits).to_be_greater_than(0)
+            expect(batch_receipt.observed_rvv_vlen_bits % 32).to_equal(0)
+        elif batch_receipt.backend_code == 1 or batch_receipt.backend_code == 2:
+            expect(_mismatches(batch_out, ntt(f0))).to_equal(0)
+            expect(batch_receipt.chunk_hits).to_be_greater_than(0)
+            expect(batch_receipt.observed_rvv_vlen_bits).to_equal(0)
+        else:
+            expect(batch_out.len().to_i64()).to_equal(0)
+            expect(batch_receipt.observed_rvv_vlen_bits).to_equal(0)
+
+    it "RVV inverse NTT matches scalar intt and round-trips across VLEN 128, 256, and 512":
+        step("Verify _mlkem_ntt_inverse_rvv and multi-VLEN strip execution")
+        mlkem_ntt_simd_reset()
+        val input = _vec_mlkem_fixture(0)
+        val scalar_inv = intt(input)
+
+        expect(_mismatches(_mlkem_ntt_inverse_rvv(input), scalar_inv)).to_equal(0)
+        expect(_mismatches(_mlkem_ntt_inverse_rvv(_mlkem_ntt_forward_rvv(input)), input)).to_equal(0)
+
+        val f128 = _mlkem_ntt_forward_rvv_with_vlen(input, 128)
+        val r128 = _mlkem_ntt_inverse_rvv_with_vlen(f128, 128)
+        val f256 = _mlkem_ntt_forward_rvv_with_vlen(input, 256)
+        val r256 = _mlkem_ntt_inverse_rvv_with_vlen(f256, 256)
+        val f512 = _mlkem_ntt_forward_rvv_with_vlen(input, 512)
+        val r512 = _mlkem_ntt_inverse_rvv_with_vlen(f512, 512)
+
+        expect(_mismatches(f128, f256)).to_equal(0)
+        expect(_mismatches(f256, f512)).to_equal(0)
+        expect(_mismatches(r128, input)).to_equal(0)
+        expect(_mismatches(r256, input)).to_equal(0)
+        expect(_mismatches(r512, input)).to_equal(0)
+
+        val receipt = mlkem_ntt_simd_receipt()
+        expect(receipt.observed_rvv_vlen_bits).to_equal(0)

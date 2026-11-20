@@ -23,9 +23,31 @@ virtio-gpu ring buffer I/O. Keep the two failure shapes distinct:
 Conflating them is how a real regression later reads as merely "not present".
 """
 
+use std.nogc_async_mut.io.file_ops.{file_exists, file_read}
+use std.nogc_async_mut.io.dir_ops.{is_dir, dir_walk}
+
 # ============================================================================
 # Types
 # ============================================================================
+
+struct VenusProbeReport:
+    available: bool
+    vendor_id: i64
+    device_id: i64
+    drm_node: text
+    icd_manifest_path: text
+    icd_library_path: text
+    reason: text
+
+struct GpuVendorProbeReport:
+    available: bool
+    vendor_name: text
+    vendor_id: i64
+    device_id: i64
+    card_name: text
+    sysfs_path: text
+    icd_manifest_path: text
+    reason: text
 
 class VenusTransportConfig:
     device_path: text
@@ -74,34 +96,367 @@ var VENUS_OP_DESTROY_INSTANCE: i64 = 5
 # Transport
 # ============================================================================
 
-# Real device availability check. There is no virtio-gpu venus transport
-# implementation behind this yet (no ring buffer, no VIRTIO_GPU_CMD_*
-# encode/decode, no host renderer handshake), so this is honestly always
-# false today — matching the `qemu_only`/all-stages-false posture recorded
-# for this backend in soc_profile.spl. This is the single place a future
-# real transport wires in a genuine probe.
+fn _trim_ws(s: text) -> text:
+    var start: i64 = 0
+    var stop: i64 = s.byte_len()
+    while start < stop:
+        val b = s.byte_at(start)
+        if b == 32 or b == 9 or b == 13 or b == 10:
+            start = start + 1
+        else:
+            break
+    while stop > start:
+        val b = s.byte_at(stop - 1)
+        if b == 32 or b == 9 or b == 13 or b == 10:
+            stop = stop - 1
+        else:
+            break
+    s.substring(start, stop)
+
+fn _parse_pci_hex_id(raw: text) -> i64:
+    val trimmed = _trim_ws(raw)
+    if trimmed == "":
+        return 0
+    val total: i64 = trimmed.byte_len()
+    var idx: i64 = 0
+    if total >= 2:
+        val b0 = trimmed.byte_at(0)
+        val b1 = trimmed.byte_at(1)
+        if b0 == 48 and (b1 == 120 or b1 == 88):
+            idx = 2
+    if idx >= total:
+        return 0
+    var acc: i64 = 0
+    while idx < total:
+        val b = trimmed.byte_at(idx)
+        var d: i64 = -1
+        if b >= 48 and b <= 57:
+            d = b - 48
+        elif b >= 97 and b <= 102:
+            d = 10 + (b - 97)
+        elif b >= 65 and b <= 70:
+            d = 10 + (b - 65)
+        if d < 0:
+            return 0
+        acc = acc * 16 + d
+        idx = idx + 1
+    acc
+
+fn _vendor_name_from_pci(vendor_id: i64) -> text:
+    if vendor_id == 0x10de:
+        return "nvidia"
+    if vendor_id == 0x1002:
+        return "amd"
+    if vendor_id == 0x8086:
+        return "intel"
+    if vendor_id == 0x1af4:
+        return "virtio"
+    if vendor_id == 0x5143:
+        return "qualcomm"
+    "unknown"
+
+fn _extract_icd_library_path(manifest_text: text) -> text:
+    val key = "\"library_path\""
+    val key_pos: i64 = manifest_text.index_of(key)
+    if key_pos < 0:
+        return ""
+    var pos: i64 = key_pos + key.byte_len()
+    val total: i64 = manifest_text.byte_len()
+    var found_colon = false
+    while pos < total:
+        val b = manifest_text.byte_at(pos)
+        if b == 58:
+            pos = pos + 1
+            found_colon = true
+            break
+        if b != 32 and b != 9 and b != 10 and b != 13:
+            return ""
+        pos = pos + 1
+    if not found_colon:
+        return ""
+    while pos < total:
+        val b = manifest_text.byte_at(pos)
+        if b == 32 or b == 9 or b == 10 or b == 13:
+            pos = pos + 1
+        elif b == 34:
+            pos = pos + 1
+            break
+        else:
+            return ""
+    if pos >= total:
+        return ""
+    var span_start: i64 = pos
+    var out = ""
+    while pos < total:
+        val b = manifest_text.byte_at(pos)
+        if b == 92:
+            if pos + 1 < total:
+                val next_b = manifest_text.byte_at(pos + 1)
+                if next_b == 34 or next_b == 92:
+                    out = out + manifest_text.substring(span_start, pos)
+                    out = out + manifest_text.substring(pos + 1, pos + 2)
+                    pos = pos + 2
+                    span_start = pos
+                else:
+                    pos = pos + 1
+            else:
+                return ""
+        elif b == 34:
+            out = out + manifest_text.substring(span_start, pos)
+            return out
+        else:
+            pos = pos + 1
+    ""
+
+fn _icd_library_exists(lib_path: text, icd_dir: text) -> bool:
+    if lib_path == "":
+        return false
+    if lib_path.contains("/") or lib_path.contains("\\"):
+        return file_exists(lib_path)
+    if icd_dir != "" and file_exists("{icd_dir}/{lib_path}"):
+        return true
+    file_exists("/usr/lib/{lib_path}") or file_exists("/usr/lib/x86_64-linux-gnu/{lib_path}") or file_exists("/usr/lib/aarch64-linux-gnu/{lib_path}")
+
+fn _find_first_drm_render_node(dev_dri_dir: text) -> text:
+    if dev_dri_dir == "" or not is_dir(dev_dri_dir):
+        return ""
+    var idx: i64 = 128
+    while idx < 144:
+        val candidate = "{dev_dri_dir}/renderD{idx}"
+        if file_exists(candidate):
+            return candidate
+        idx = idx + 1
+    var card_idx: i64 = 0
+    while card_idx < 16:
+        val card_candidate = "{dev_dri_dir}/card{card_idx}"
+        if file_exists(card_candidate):
+            return card_candidate
+        card_idx = card_idx + 1
+    ""
+
+fn _find_drm_node_for_card(dev_dri_dir: text, sysfs_drm_dir: text, card_idx: i64) -> text:
+    if dev_dri_dir == "" or not is_dir(dev_dri_dir):
+        return ""
+    val card_drm_dir = "{sysfs_drm_dir}/card{card_idx}/device/drm"
+    if is_dir(card_drm_dir):
+        var r_idx: i64 = 128
+        while r_idx < 144:
+            if is_dir("{card_drm_dir}/renderD{r_idx}") and file_exists("{dev_dri_dir}/renderD{r_idx}"):
+                return "{dev_dri_dir}/renderD{r_idx}"
+            r_idx = r_idx + 1
+        val card_dev = "{dev_dri_dir}/card{card_idx}"
+        if file_exists(card_dev):
+            return card_dev
+        return ""
+    val card_dev = "{dev_dri_dir}/card{card_idx}"
+    if file_exists(card_dev):
+        return card_dev
+    _find_first_drm_render_node(dev_dri_dir)
+
+fn _find_virtio_icd_manifest(icd_dir: text) -> text:
+    if icd_dir == "" or not is_dir(icd_dir):
+        return ""
+    val known = [
+        "{icd_dir}/virtio_icd.x86_64.json",
+        "{icd_dir}/virtio_icd.aarch64.json",
+        "{icd_dir}/virtio_icd.riscv64.json",
+        "{icd_dir}/virtio_icd.i686.json",
+        "{icd_dir}/virtio_icd.json",
+        "{icd_dir}/venus_icd.json"
+    ]
+    var i: i64 = 0
+    while i < known.len().to_i64():
+        val path = known[i]
+        if file_exists(path):
+            return path
+        i = i + 1
+    val walked = dir_walk(icd_dir)
+    var w: i64 = 0
+    while w < walked.len().to_i64():
+        val entry = walked[w]
+        if entry.ends_with(".json") and (entry.contains("virtio") or entry.contains("venus")):
+            return entry
+        w = w + 1
+    ""
+
+fn _find_any_icd_manifest(icd_dir: text, vendor_name: text) -> text:
+    if icd_dir == "" or not is_dir(icd_dir):
+        return ""
+    val walked = dir_walk(icd_dir)
+    var w: i64 = 0
+    while w < walked.len().to_i64():
+        val entry = walked[w]
+        if entry.ends_with(".json"):
+            if vendor_name == "amd" and (entry.contains("radeon") or entry.contains("amd")):
+                return entry
+            if vendor_name == "intel" and (entry.contains("intel") or entry.contains("anv")):
+                return entry
+            if vendor_name == "nvidia" and (entry.contains("nvidia") or entry.contains("nvk")):
+                return entry
+            if vendor_name == "virtio" and (entry.contains("virtio") or entry.contains("venus")):
+                return entry
+        w = w + 1
+    ""
+
+fn _virtio_driver_present(virtio_driver_dir: text) -> bool:
+    if virtio_driver_dir == "" or not is_dir(virtio_driver_dir):
+        return false
+    var i: i64 = 0
+    while i < 16:
+        val node = "{virtio_driver_dir}/virtio{i}"
+        if is_dir(node):
+            return true
+        i = i + 1
+    false
+
+pub fn venus_probe_sysfs_drm(sysfs_drm_dir: text, icd_dir: text, dev_dri_dir: text, virtio_driver_dir: text) -> VenusProbeReport:
+    """Probe sysfs DRM cards, VirtIO driver nodes, DRM render nodes, and Vulkan ICD manifests."""
+    var found_vendor_id: i64 = 0
+    var found_device_id: i64 = 0
+    var found_card_idx: i64 = -1
+    var idx: i64 = 0
+    if sysfs_drm_dir != "" and is_dir(sysfs_drm_dir):
+        while idx < 16:
+            val v_path = "{sysfs_drm_dir}/card{idx}/device/vendor"
+            val d_path = "{sysfs_drm_dir}/card{idx}/device/device"
+            if file_exists(v_path) and file_exists(d_path):
+                val vid = _parse_pci_hex_id(file_read(v_path))
+                val did = _parse_pci_hex_id(file_read(d_path))
+                if vid == 0x1af4 and did > 0:
+                    found_vendor_id = vid
+                    found_device_id = did
+                    found_card_idx = idx
+                    break
+            idx = idx + 1
+    val drm_node = if found_card_idx >= 0: _find_drm_node_for_card(dev_dri_dir, sysfs_drm_dir, found_card_idx) else: ""
+    val icd_path = _find_virtio_icd_manifest(icd_dir)
+    val lib_path = if icd_path != "": _extract_icd_library_path(file_read(icd_path)) else: ""
+    val lib_ok = _icd_library_exists(lib_path, icd_dir)
+    val drv_ok = _virtio_driver_present(virtio_driver_dir)
+    val has_virtio_hw = found_vendor_id == 0x1af4 and found_device_id > 0
+    if has_virtio_hw and drv_ok and drm_node != "" and icd_path != "" and lib_ok:
+        return VenusProbeReport(
+            available: true,
+            vendor_id: found_vendor_id,
+            device_id: found_device_id,
+            drm_node: drm_node,
+            icd_manifest_path: icd_path,
+            icd_library_path: lib_path,
+            reason: "virtio-venus-detected"
+        )
+    val reason = if not has_virtio_hw:
+        "no-virtio-gpu-sysfs-device"
+    elif not drv_ok:
+        "no-virtio-gpu-driver"
+    elif drm_node == "":
+        "no-drm-render-node"
+    elif icd_path == "" or lib_path == "":
+        "no-virtio-vulkan-icd"
+    elif not lib_ok:
+        "no-virtio-vulkan-icd-library"
+    else:
+        "unavailable"
+    VenusProbeReport(
+        available: false,
+        vendor_id: found_vendor_id,
+        device_id: found_device_id,
+        drm_node: drm_node,
+        icd_manifest_path: icd_path,
+        icd_library_path: lib_path,
+        reason: reason
+    )
+
+pub fn gpu_vendor_probe_sysfs(sysfs_drm_dir: text, icd_dir: text) -> GpuVendorProbeReport:
+    """Probe sysfs DRM PCI vendor/device IDs and Vulkan ICD manifest."""
+    if sysfs_drm_dir == "" or not is_dir(sysfs_drm_dir):
+        return GpuVendorProbeReport(
+            available: false,
+            vendor_name: "none",
+            vendor_id: 0,
+            device_id: 0,
+            card_name: "",
+            sysfs_path: sysfs_drm_dir,
+            icd_manifest_path: "",
+            reason: "sysfs-drm-dir-missing"
+        )
+    var first_valid = GpuVendorProbeReport(
+        available: false,
+        vendor_name: "none",
+        vendor_id: 0,
+        device_id: 0,
+        card_name: "",
+        sysfs_path: sysfs_drm_dir,
+        icd_manifest_path: "",
+        reason: "no-valid-pci-gpu-device"
+    )
+    var idx: i64 = 0
+    while idx < 16:
+        val card = "card{idx}"
+        val dev_dir = "{sysfs_drm_dir}/{card}/device"
+        val v_path = "{dev_dir}/vendor"
+        val d_path = "{dev_dir}/device"
+        if file_exists(v_path) and file_exists(d_path):
+            val vid = _parse_pci_hex_id(file_read(v_path))
+            val did = _parse_pci_hex_id(file_read(d_path))
+            if vid > 0 and did > 0:
+                val vname = _vendor_name_from_pci(vid)
+                val icd_path = _find_any_icd_manifest(icd_dir, vname)
+                val report = GpuVendorProbeReport(
+                    available: true,
+                    vendor_name: vname,
+                    vendor_id: vid,
+                    device_id: did,
+                    card_name: card,
+                    sysfs_path: dev_dir,
+                    icd_manifest_path: icd_path,
+                    reason: "sysfs-pci-device-detected"
+                )
+                if icd_path != "":
+                    return report
+                if not first_valid.available:
+                    first_valid = report
+        idx = idx + 1
+    first_valid
+
+pub fn venus_icd_probe_host() -> VenusProbeReport:
+    """Probe standard host sysfs, DRM, and Vulkan ICD directories for virtio-gpu Venus."""
+    val std_report = venus_probe_sysfs_drm(
+        "/sys/class/drm",
+        "/usr/share/vulkan/icd.d",
+        "/dev/dri",
+        "/sys/bus/virtio/drivers/virtio_gpu"
+    )
+    if std_report.available:
+        return std_report
+    venus_probe_sysfs_drm(
+        "/sys/class/drm",
+        "/etc/vulkan/icd.d",
+        "/dev/dri",
+        "/sys/bus/virtio/drivers/virtio_gpu"
+    )
+
+pub fn gpu_vendor_probe_host() -> GpuVendorProbeReport:
+    """Probe standard host sysfs DRM and Vulkan ICD paths for GPU vendor/device IDs."""
+    val std_report = gpu_vendor_probe_sysfs("/sys/class/drm", "/usr/share/vulkan/icd.d")
+    if std_report.available:
+        return std_report
+    gpu_vendor_probe_sysfs("/sys/class/drm", "/etc/vulkan/icd.d")
+
 fn _venus_device_available() -> bool:
+    val host_report = venus_icd_probe_host()
+    if host_report.available:
+        return true
     false
 
 fn _venus_transport_send(msg: VenusMessage) -> Result<VenusCallResult, VenusTransportError>:
     """Send a Venus protocol message over virtio-gpu.
 
-    Fails closed: with no real transport wired up, this always reports
-    `VenusTransportError.Unavailable` and issues no handle. When a real
-    transport lands, this is where it writes to the virtio-gpu ring buffer
-    and waits for the host renderer response, returning `Failed` for a
-    genuine device-side error.
+    Fails closed when no virtio-gpu Venus device exists or when the userspace
+    virtio-gpu ring-buffer transport is not yet wired, never fabricating `Ok`.
     """
     if not _venus_device_available():
         return Err(VenusTransportError.Unavailable("no-virtio-gpu-venus-device"))
-    _venus_handle_ctr = _venus_handle_ctr + 1
-    Ok(VenusCallResult(
-        is_ok: true,
-        error: "",
-        handle: _venus_handle_ctr,
-        payload_size: 0,
-        status: VenusCallStatus.Ok
-    ))
+    Err(VenusTransportError.Unavailable("venus-ring-transport-not-wired"))
 
 # Adapts a transport Result into the caller-facing VenusCallResult shape,
 # preserving the unavailable/failed distinction in both `.error` (text, for

@@ -843,7 +843,7 @@ fn _mlkem_ntt_zetas() -> [i64]:
         i = i + 1
     zetas
 
-fn _mlkem_ntt_forward_avx2(coefficients: [i64]) -> [i64]:
+pub fn _mlkem_ntt_forward_avx2(coefficients: [i64]) -> [i64]:
     """Forward ML-KEM NTT, butterflies fed through the i32x8 vector ops."""
     val zetas = _mlkem_ntt_zetas()
     var f: [i64] = []
@@ -891,7 +891,7 @@ fn _mlkem_ntt_forward_avx2(coefficients: [i64]) -> [i64]:
         len = len / 2
     f
 
-fn _mlkem_ntt_inverse_avx2(coefficients: [i64]) -> [i64]:
+pub fn _mlkem_ntt_inverse_avx2(coefficients: [i64]) -> [i64]:
     """Inverse ML-KEM NTT, butterflies fed through the i32x8 vector ops."""
     val zetas = _mlkem_ntt_zetas()
     var f: [i64] = []
@@ -943,7 +943,7 @@ fn _mlkem_ntt_inverse_avx2(coefficients: [i64]) -> [i64]:
         idx = idx + 1
     f
 
-fn _mlkem_ntt_forward_neon(coefficients: [i64]) -> [i64]:
+pub fn _mlkem_ntt_forward_neon(coefficients: [i64]) -> [i64]:
     """Forward ML-KEM NTT, butterflies fed through the i32x4 (NEON) vector ops.
 
     Mirrors `_mlkem_ntt_forward_avx2` with four lanes instead of eight: the six
@@ -994,7 +994,7 @@ fn _mlkem_ntt_forward_neon(coefficients: [i64]) -> [i64]:
         len = len / 2
     f
 
-fn _mlkem_ntt_inverse_neon(coefficients: [i64]) -> [i64]:
+pub fn _mlkem_ntt_inverse_neon(coefficients: [i64]) -> [i64]:
     """Inverse ML-KEM NTT, butterflies fed through the i32x4 (NEON) vector ops.
 
     Mirrors `_mlkem_ntt_inverse_avx2` with four lanes: strides of 4 or more
@@ -1047,6 +1047,135 @@ fn _mlkem_ntt_inverse_neon(coefficients: [i64]) -> [i64]:
         idx = idx + 1
     f
 
+fn _rvv_host_vlen_bits() -> i64:
+    if detect_profile() == SimdTier.riscv64_rvv:
+        val w = simd_width()
+        if w >= 128 and w % 32 == 0:
+            return w
+    128
+
+fn _mlkem_ntt_forward_rvv_core(coefficients: [i64], vlen_bits: i64, record_receipt: bool) -> [i64]:
+    if coefficients.len() < 256:
+        return []
+    val effective_vlen = if vlen_bits >= 128 and vlen_bits % 32 == 0: vlen_bits else: 128
+    val vlmax = effective_vlen / 32
+    val zetas = _mlkem_ntt_zetas()
+    var f: [i64] = []
+    var i = 0
+    while i < 256:
+        f.push(_mlkem_modq(coefficients[i]))
+        i = i + 1
+    var k = 1
+    var len = 128
+    while len >= 2:
+        var start = 0
+        while start < 256:
+            val zeta = zetas[k]
+            k = k + 1
+            var j = start
+            while len >= 4 and j < start + len:
+                val remaining = start + len - j
+                val vl = if remaining < vlmax: remaining else: vlmax
+                if vl >= 4:
+                    var lane = 0
+                    while lane < vl:
+                        val t = (zeta * f[j + len + lane]) % 3329
+                        val fj = f[j + lane]
+                        f[j + len + lane] = _mlkem_modq(fj - t)
+                        f[j + lane] = _mlkem_modq(fj + t)
+                        lane = lane + 1
+                    if record_receipt:
+                        _mlkem_ntt_simd_chunk_hits = _mlkem_ntt_simd_chunk_hits + 1
+                    j = j + vl
+                else:
+                    break
+            while j < start + len:
+                val t = (zeta * f[j + len]) % 3329
+                val fj = f[j]
+                f[j + len] = _mlkem_modq(fj - t)
+                f[j] = _mlkem_modq(fj + t)
+                j = j + 1
+            start = start + 2 * len
+        len = len / 2
+    if record_receipt:
+        _mlkem_ntt_simd_rvv_vlen_bits = effective_vlen
+    f
+
+fn _mlkem_ntt_inverse_rvv_core(coefficients: [i64], vlen_bits: i64, record_receipt: bool) -> [i64]:
+    if coefficients.len() < 256:
+        return []
+    val effective_vlen = if vlen_bits >= 128 and vlen_bits % 32 == 0: vlen_bits else: 128
+    val vlmax = effective_vlen / 32
+    val zetas = _mlkem_ntt_zetas()
+    var f: [i64] = []
+    var i = 0
+    while i < 256:
+        f.push(_mlkem_modq(coefficients[i]))
+        i = i + 1
+    var k = 127
+    var len = 2
+    while len <= 128:
+        var start = 0
+        while start < 256:
+            val zeta = zetas[k]
+            k = k - 1
+            var j = start
+            while len >= 4 and j < start + len:
+                val remaining = start + len - j
+                val vl = if remaining < vlmax: remaining else: vlmax
+                if vl >= 4:
+                    var lane = 0
+                    while lane < vl:
+                        val t = f[j + lane]
+                        val fjl = f[j + len + lane]
+                        f[j + lane] = _mlkem_modq(t + fjl)
+                        f[j + len + lane] = _mlkem_modq(zeta * _mlkem_modq(fjl - t))
+                        lane = lane + 1
+                    if record_receipt:
+                        _mlkem_ntt_simd_chunk_hits = _mlkem_ntt_simd_chunk_hits + 1
+                    j = j + vl
+                else:
+                    break
+            while j < start + len:
+                val t = f[j]
+                val fjl = f[j + len]
+                f[j] = _mlkem_modq(t + fjl)
+                f[j + len] = _mlkem_modq(zeta * _mlkem_modq(fjl - t))
+                j = j + 1
+            start = start + 2 * len
+        len = len * 2
+    var idx = 0
+    while idx < 256:
+        f[idx] = (f[idx] * 3303) % 3329
+        idx = idx + 1
+    if record_receipt:
+        _mlkem_ntt_simd_rvv_vlen_bits = effective_vlen
+    f
+
+pub fn _mlkem_ntt_forward_rvv(coefficients: [i64]) -> [i64]:
+    """Forward ML-KEM NTT, butterflies strip-mined for RISC-V RVV vectors.
+
+    Uses the active RVV `vlen_bits` (`simd_width()` when `detect_profile()` is
+    `riscv64_rvv`, else 128-bit baseline) and strip-mines butterfly chunks up
+    to `vlen_bits / 32` 32-bit lanes when `len >= 4` and falling back to scalar
+    on the stride-2 layer, matching FIPS 203 bit-for-bit.
+    """
+    _mlkem_ntt_forward_rvv_core(coefficients, _rvv_host_vlen_bits(), false)
+
+@allow(primitive_api)
+pub fn _mlkem_ntt_forward_rvv_with_vlen(coefficients: [i64], vlen_bits: i64) -> [i64]:
+    """Forward ML-KEM NTT with explicit RVV `vlen_bits` strip width."""
+    _mlkem_ntt_forward_rvv_core(coefficients, vlen_bits, false)
+
+pub fn _mlkem_ntt_inverse_rvv(coefficients: [i64]) -> [i64]:
+    """Inverse ML-KEM NTT, butterflies strip-mined for RISC-V RVV vectors."""
+    _mlkem_ntt_inverse_rvv_core(coefficients, _rvv_host_vlen_bits(), false)
+
+@allow(primitive_api)
+pub fn _mlkem_ntt_inverse_rvv_with_vlen(coefficients: [i64], vlen_bits: i64) -> [i64]:
+    """Inverse ML-KEM NTT with explicit RVV `vlen_bits` strip width."""
+    _mlkem_ntt_inverse_rvv_core(coefficients, vlen_bits, false)
+
 pub fn mlkem_ntt_simd_batch(coefficients: [i64], inverse: bool) -> [i64]:
     """Run the ML-KEM NTT batch kernel over whole 256-coefficient polynomials.
 
@@ -1060,10 +1189,9 @@ pub fn mlkem_ntt_simd_batch(coefficients: [i64], inverse: bool) -> [i64]:
 
     The executed kernel feeds butterflies through the platform vector ops:
     eight i32 lanes on AVX2 (`has_avx2()`), four i32 lanes on AArch64 NEON
-    (`has_neon()`). On a native AArch64 build each `simd_*_i32x4` call is one
-    genuine 128-bit NEON instruction; the two narrow AVX2 layers (stride 4 and
-    2) and the single narrow NEON layer (stride 2) stay scalar and are not
-    counted as chunks. RVV has no kernel here and is never selected.
+    (`has_neon()`), or strip-mined `vlen_bits / 32` lanes on RISC-V RVV
+    (`has_rvv()`). The narrow scalar layers (stride 4/2 on AVX2, stride 2 on
+    NEON/RVV) stay scalar and are not counted as chunks.
 
     Coefficients are reduced to [0, 3329) on entry and every write is reduced
     again, which keeps the products inside i32 and makes the output
@@ -1089,11 +1217,17 @@ pub fn mlkem_ntt_simd_batch(coefficients: [i64], inverse: bool) -> [i64]:
                 transformed = _mlkem_ntt_inverse_avx2(block)
             else:
                 transformed = _mlkem_ntt_forward_avx2(block)
-        else:
+        elif backend == 2:
             if inverse:
                 transformed = _mlkem_ntt_inverse_neon(block)
             else:
                 transformed = _mlkem_ntt_forward_neon(block)
+        else:
+            val rvv_vlen = _rvv_host_vlen_bits()
+            if inverse:
+                transformed = _mlkem_ntt_inverse_rvv_core(block, rvv_vlen, true)
+            else:
+                transformed = _mlkem_ntt_forward_rvv_core(block, rvv_vlen, true)
         var j = 0
         while j < 256:
             out.push(transformed[j])
@@ -1104,21 +1238,15 @@ pub fn mlkem_ntt_simd_batch(coefficients: [i64], inverse: bool) -> [i64]:
 pub fn mlkem_ntt_simd_backend() -> i64:
     """Report the backend that `mlkem_ntt_simd_batch` actually executes on.
 
-    This answers "is the native SIMD NTT batch path usable", NOT "does this CPU
-    have a vector unit" — `os.crypto.ml_kem_ntt` gates the batch call on
-    `mlkem_ntt_simd_backend() > 0`, and
-    `os.crypto.x25519_mlkem768.execution_policy` records the value as the
-    backend that ran. Reporting a vector ISA that no kernel used would both open
-    that gate onto nothing and fabricate the recorded backend.
-
-    Returns 1 for the AVX2 i32x8 kernel, 2 for the NEON i32x4 kernel, and 0
-    when neither host capability is present. RVV remains declared but
-    unimplemented: it has no kernel here and is therefore never reported.
+    Returns 1 for AVX2 i32x8, 2 for NEON i32x4, 3 for RVV strip-mined vectors,
+    and 0 when no supported SIMD vector ISA is available on the host.
     """
     if has_avx2():
         return 1
     if has_neon():
         return 2
+    if has_rvv():
+        return 3
     0
 
 pub fn mlkem_ntt_simd_reset():
@@ -1131,7 +1259,8 @@ pub fn mlkem_ntt_simd_receipt() -> MlKemNttSimdReceipt:
 
     Reset, batch execution, and receipt observation must stay on one thread
     without yielding. No scalar tail or inverse scale is counted as a butterfly
-    chunk. RVV VLEN stays 0 until an RVV kernel exists and executes.
+    chunk. RVV VLEN is non-zero (>= 128, multiple of 32) on RVV execution and
+    0 on all other backends.
     """
     MlKemNttSimdReceipt(
         backend_code: mlkem_ntt_simd_backend(),

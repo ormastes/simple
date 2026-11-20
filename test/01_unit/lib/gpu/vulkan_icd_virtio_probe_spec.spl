@@ -1,0 +1,124 @@
+# @cover src/lib/nogc_async_mut/gpu/vulkan_icd_virtio.spl
+# @req REQ-GPU-VIRTIO-PROBE
+"""
+# VirtIO Venus ICD sysfs/DRM/Vulkan ICD probe verification
+
+Verifies that `vulkan_icd_virtio.spl` performs real sysfs/DRM/Vulkan ICD
+probing instead of returning a hardcoded `false` stub, while remaining
+fail-closed when no virtio-gpu Venus device is present.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_async_mut.io.env_ops.{env_get}
+use std.nogc_async_mut.io.file_ops.{file_read, file_write}
+use std.nogc_async_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_async_mut.gpu.vulkan_icd_virtio.{
+    venus_icd_probe_host, venus_probe_sysfs_drm,
+    venus_icd_connect, venus_icd_disconnect, venus_icd_create_instance,
+    VenusCallStatus
+}
+
+fn _tmp_root(tag: text) -> text:
+    val win_tmp = env_get("TEMP")
+    val nix_tmp = env_get("TMPDIR")
+    val base = if win_tmp != "":
+        win_tmp
+    elif nix_tmp != "":
+        nix_tmp
+    else:
+        "/tmp"
+    "{base}/simple_h1d_{tag}".replace("\\", "/")
+
+fn _bool_int(v: bool) -> i64:
+    if v: 1 else: 0
+
+describe "vulkan_icd_virtio real sysfs/DRM/ICD probe":
+
+    it "source does not hardcode _venus_device_available to false":
+        step("Verify _venus_device_available delegates to real sysfs/DRM/ICD probe")
+        val src = file_read("src/lib/nogc_async_mut/gpu/vulkan_icd_virtio.spl")
+        expect(src.contains("fn _venus_device_available() -> bool:\n    false")).to_equal(false)
+        expect(src.contains("fn _venus_device_available() -> bool:\r\n    false")).to_equal(false)
+
+    it "detects virtio-gpu Venus when real sysfs 0x1af4 card, DRM node, and virtio ICD exist":
+        step("Create temporary sysfs/DRM/ICD tree for virtio-gpu Venus")
+        val root = _tmp_root("venus_pos")
+        dir_remove_all(root)
+        dir_create_all("{root}/sys_drm/card0/device")
+        dir_create_all("{root}/icd")
+        dir_create_all("{root}/dev_dri")
+        dir_create_all("{root}/virtio_drv/virtio0")
+        file_write("{root}/sys_drm/card0/device/vendor", "0x1af4\n")
+        file_write("{root}/sys_drm/card0/device/device", "0x1050\n")
+        file_write("{root}/dev_dri/renderD128", "drm-render-node")
+        file_write("{root}/icd/virtio_icd.x86_64.json", "{\"file_format_version\":\"1.0.0\",\"ICD\":{\"library_path\":\"{root}/icd/libvulkan_virtio.so\"}}")
+        file_write("{root}/icd/libvulkan_virtio.so", "elf-stub")
+
+        val report = venus_probe_sysfs_drm("{root}/sys_drm", "{root}/icd", "{root}/dev_dri", "{root}/virtio_drv")
+        dir_remove_all(root)
+
+        expect(_bool_int(report.available)).to_equal(1)
+        expect(report.vendor_id).to_equal(0x1af4)
+        expect(report.device_id).to_equal(0x1050)
+        expect(report.icd_manifest_path).to_contain("virtio_icd")
+
+    it "fails closed for non-virtio GPU or lavapipe ICD alone":
+        step("Create non-virtio Intel sysfs + lavapipe ICD tree and verify Venus rejects it")
+        val root = _tmp_root("venus_neg_intel")
+        dir_remove_all(root)
+        dir_create_all("{root}/sys_drm/card0/device")
+        dir_create_all("{root}/icd")
+        dir_create_all("{root}/dev_dri")
+        file_write("{root}/sys_drm/card0/device/vendor", "0x8086\n")
+        file_write("{root}/sys_drm/card0/device/device", "0x56a0\n")
+        file_write("{root}/dev_dri/renderD128", "drm-render-node")
+        file_write("{root}/icd/lvp_icd.x86_64.json", "{\"file_format_version\":\"1.0.0\",\"ICD\":{\"library_path\":\"/usr/lib/libvulkan_lvp.so\"}}")
+
+        val report = venus_probe_sysfs_drm("{root}/sys_drm", "{root}/icd", "{root}/dev_dri", "{root}/missing_virtio")
+        dir_remove_all(root)
+
+        expect(_bool_int(report.available)).to_equal(0)
+
+    it "fails closed when probe paths do not exist and preserves VenusCallStatus.Unavailable":
+        step("Probe absent sysfs paths and verify transport create_instance stays fail-closed")
+        val missing = venus_probe_sysfs_drm("/nonexistent_sys_drm_h1d", "/nonexistent_icd_h1d", "/nonexistent_dri_h1d", "/nonexistent_virtio_h1d")
+        expect(_bool_int(missing.available)).to_equal(0)
+        expect(missing.device_id).to_equal(0)
+
+        val host_report = venus_icd_probe_host()
+        venus_icd_connect("/nonexistent_vgpu0", 256)
+        val inst = venus_icd_create_instance()
+        venus_icd_disconnect()
+        expect(_bool_int(inst.is_ok)).to_equal(0)
+        expect(inst.status).to_equal(VenusCallStatus.Unavailable)
+        if not host_report.available:
+            expect(inst.error).to_contain("no-virtio-gpu-venus-device")
+        else:
+            expect(inst.error).to_contain("venus-ring-transport-not-wired")
+
+    it "rejects missing library_path target, non-string library_path JSON, and driver-control-only dir":
+        step("Verify malformed JSON, missing .so, and driver control files stay fail-closed")
+        val root = _tmp_root("venus_neg_edge")
+        dir_remove_all(root)
+        dir_create_all("{root}/sys_drm/card0/device")
+        dir_create_all("{root}/icd")
+        dir_create_all("{root}/dev_dri")
+        dir_create_all("{root}/virtio_drv")
+        file_write("{root}/sys_drm/card0/device/vendor", "0x1af4\n")
+        file_write("{root}/sys_drm/card0/device/device", "0x1050\n")
+        file_write("{root}/dev_dri/renderD128", "drm-render-node")
+        file_write("{root}/virtio_drv/bind", "")
+        file_write("{root}/icd/virtio_icd.x86_64.json", "{\"file_format_version\":\"1.0.0\",\"ICD\":{\"library_path\":null,\"api_version\":\"1.3.0\"}}")
+        val null_lib = venus_probe_sysfs_drm("{root}/sys_drm", "{root}/icd", "{root}/dev_dri", "{root}/virtio_drv")
+        expect(_bool_int(null_lib.available)).to_equal(0)
+        expect(null_lib.icd_library_path).to_equal("")
+
+        file_write("{root}/icd/virtio_icd.x86_64.json", "{\"file_format_version\":\"1.0.0\",\"ICD\":{\"library_path\":\"{root}/icd/missing_libvulkan_virtio.so\"}}")
+        val missing_so = venus_probe_sysfs_drm("{root}/sys_drm", "{root}/icd", "{root}/dev_dri", "{root}/virtio_drv")
+        expect(_bool_int(missing_so.available)).to_equal(0)
+
+        dir_create_all("{root}/virtio_drv/virtio0")
+        val still_missing_so = venus_probe_sysfs_drm("{root}/sys_drm", "{root}/icd", "{root}/dev_dri", "{root}/virtio_drv")
+        dir_remove_all(root)
+        expect(_bool_int(still_missing_so.available)).to_equal(0)
+        expect(still_missing_so.reason).to_equal("no-virtio-vulkan-icd-library")

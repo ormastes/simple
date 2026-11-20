@@ -1,0 +1,110 @@
+# @cover src/lib/nogc_sync_mut/simd.spl
+# @req REQ-SIMD-X25519-MLKEM-PARITY
+"""
+# X25519 + ML-KEM SIMD Parity and PR #10562 Vec*.lane Preservation
+
+Verifies parity across AVX2, NEON, RVV, and scalar FIPS 203 ML-KEM768 NTT
+kernels, RFC 7748 X25519 key-exchange parity, and preservation of PR #10562
+`Vec*.lane(...)` fixes on `Vec4i`, `Vec8i`, `Vec4f`, `Vec8f`, and `Vec4d`.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.simd.{
+    Vec4i, Vec8i, Vec4f, Vec8f, Vec4d,
+    _mlkem_ntt_forward_avx2, _mlkem_ntt_inverse_avx2,
+    _mlkem_ntt_forward_neon, _mlkem_ntt_inverse_neon,
+    _mlkem_ntt_forward_rvv, _mlkem_ntt_inverse_rvv,
+    mlkem_ntt_simd_reset
+}
+use os.crypto.ml_kem_ntt.{ntt, intt}
+use os.crypto.curve25519.{x25519 as os_x25519, x25519_base as os_x25519_base}
+use src.lib.nogc_async_mut_noalloc.tls.x25519.{x25519 as tls_x25519, x25519_pubkey as tls_x25519_pubkey}
+
+fn _ramp_256() -> [i64]:
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < 256:
+        out.push((i * 53 + 19) % 3329)
+        i = i + 1
+    out
+
+fn _alice_priv() -> [u8]:
+    [
+        0x77u8, 0x07u8, 0x6du8, 0x0au8, 0x73u8, 0x18u8, 0xa5u8, 0x7du8,
+        0x3cu8, 0x16u8, 0xc1u8, 0x72u8, 0x51u8, 0xb2u8, 0x66u8, 0x45u8,
+        0xdfu8, 0x4cu8, 0x2fu8, 0x87u8, 0xebu8, 0xc0u8, 0x99u8, 0x2au8,
+        0xb1u8, 0x77u8, 0xfbu8, 0xa5u8, 0x1du8, 0xb9u8, 0x2cu8, 0x2au8
+    ]
+
+fn _bob_priv() -> [u8]:
+    [
+        0x5du8, 0xabu8, 0x08u8, 0x7eu8, 0x62u8, 0x4au8, 0x8au8, 0x4bu8,
+        0x79u8, 0xe1u8, 0x7fu8, 0x8bu8, 0x83u8, 0x80u8, 0x0eu8, 0xe6u8,
+        0x6fu8, 0x3bu8, 0xb1u8, 0x29u8, 0x26u8, 0x18u8, 0xb6u8, 0xfdu8,
+        0x1cu8, 0x2fu8, 0x8bu8, 0x27u8, 0xffu8, 0x88u8, 0xe0u8, 0xebu8
+    ]
+
+fn _hex(bytes: [u8]) -> text:
+    val digits = "0123456789abcdef"
+    var s = ""
+    var i: i64 = 0
+    while i < bytes.len().to_i64():
+        val b = bytes[i].to_i64()
+        s = s + digits.substring(b / 16, b / 16 + 1) + digits.substring(b % 16, b % 16 + 1)
+        i = i + 1
+    s
+
+describe "X25519 + ML-KEM SIMD backend parity and Vec*.lane preservation":
+
+    it "matches AVX2, NEON, RVV, and scalar FIPS 203 ML-KEM768 NTT outputs identically":
+        step("Run forward and inverse ML-KEM NTT across scalar, AVX2, NEON, and RVV")
+        val poly = _ramp_256()
+        val ref_f = ntt(poly)
+        val avx_f = _mlkem_ntt_forward_avx2(poly)
+        val neon_f = _mlkem_ntt_forward_neon(poly)
+        mlkem_ntt_simd_reset()
+        val rvv_f = _mlkem_ntt_forward_rvv(poly)
+
+        expect(avx_f).to_equal(ref_f)
+        expect(neon_f).to_equal(ref_f)
+        expect(rvv_f).to_equal(ref_f)
+
+        val ref_i = intt(ref_f)
+        expect(_mlkem_ntt_inverse_avx2(avx_f)).to_equal(ref_i)
+        expect(_mlkem_ntt_inverse_neon(neon_f)).to_equal(ref_i)
+        expect(_mlkem_ntt_inverse_rvv(rvv_f)).to_equal(ref_i)
+
+    it "matches RFC 7748 Section 6.1 X25519 key agreement across tls and os.crypto":
+        step("Verify os.crypto.curve25519 and tls.x25519 agree on RFC 7748 shared secret")
+        val a_pub_tls = tls_x25519_pubkey(_alice_priv())
+        val b_pub_tls = tls_x25519_pubkey(_bob_priv())
+        val a_pub_os = os_x25519_base(_alice_priv())
+        val b_pub_os = os_x25519_base(_bob_priv())
+
+        expect(_hex(a_pub_tls)).to_equal("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")
+        expect(_hex(a_pub_os)).to_equal(_hex(a_pub_tls))
+        expect(_hex(b_pub_os)).to_equal(_hex(b_pub_tls))
+
+        val shared_ab = tls_x25519(_alice_priv(), b_pub_os)
+        val shared_ba = os_x25519(_bob_priv(), a_pub_tls)
+        expect(_hex(shared_ab)).to_equal("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742")
+        expect(_hex(shared_ab)).to_equal(_hex(shared_ba))
+
+    it "preserves PR #10562 Vec*.lane accessors across all fixed vector types":
+        step("Verify Vec4i, Vec8i, Vec4f, Vec8f, Vec4d .lane() accessors")
+        val v4i = Vec4i(x: 11, y: 22, z: 33, w: 44)
+        expect(v4i.lane(0).to_i64()).to_equal(11)
+        expect(v4i.lane(3).to_i64()).to_equal(44)
+
+        val v8i = Vec8i(e0: 1, e1: 2, e2: 3, e3: 4, e4: 5, e5: 6, e6: 7, e7: 8)
+        expect(v8i.lane(0).to_i64()).to_equal(1)
+        expect(v8i.lane(7).to_i64()).to_equal(8)
+
+        val v4f = Vec4f.splat(3.5f32)
+        expect(v4f.lane(2) > 3.0f32).to_equal(true)
+
+        val v8f = Vec8f.splat(2.5f32)
+        expect(v8f.lane(7) > 2.0f32).to_equal(true)
+
+        val v4d = Vec4d.splat(7.25)
+        expect(v4d.lane(1) > 7.0).to_equal(true)

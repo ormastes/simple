@@ -1,0 +1,101 @@
+# @cover src/lib/nogc_async_mut/gpu/vulkan_icd_virtio.spl
+# @req REQ-GPU-VENDOR-PROBE-ID
+"""
+# GPU vendor & device ID sysfs/DRM/Vulkan ICD probe
+
+Verifies that real sysfs PCI vendor/device IDs and Vulkan ICD manifests are
+parsed into non-zero vendor/device IDs when present and fail closed (`device_id: 0`,
+`available: false`) when absent or malformed.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_async_mut.io.env_ops.{env_get}
+use std.nogc_async_mut.io.file_ops.{file_write}
+use std.nogc_async_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_async_mut.gpu.vulkan_icd_virtio.{
+    gpu_vendor_probe_sysfs, gpu_vendor_probe_host
+}
+use os.drivers.gpu.gpu_vendor_probe.{GpuVendorRegistry, GpuProbeState}
+
+fn _tmp_root(tag: text) -> text:
+    val win_tmp = env_get("TEMP")
+    val nix_tmp = env_get("TMPDIR")
+    val base = if win_tmp != "":
+        win_tmp
+    elif nix_tmp != "":
+        nix_tmp
+    else:
+        "/tmp"
+    "{base}/simple_h1d_{tag}"
+
+fn _bool_int(v: bool) -> i64:
+    if v: 1 else: 0
+
+describe "GPU vendor sysfs/DRM/ICD device ID probe":
+
+    it "reads real PCI vendor and non-zero device_id from sysfs DRM card":
+        step("Create synthetic sysfs DRM card with AMD vendor 0x1002 and device 0x744c")
+        val root = _tmp_root("vendor_amd")
+        dir_remove_all(root)
+        dir_create_all("{root}/sys_drm/card0/device")
+        dir_create_all("{root}/icd")
+        file_write("{root}/sys_drm/card0/device/vendor", "0x1002\n")
+        file_write("{root}/sys_drm/card0/device/device", "0x744c\n")
+        file_write("{root}/icd/radeon_icd.x86_64.json", "{\"ICD\":{\"library_path\":\"{root}/icd/libvulkan_radeon.so\"}}")
+        file_write("{root}/icd/libvulkan_radeon.so", "so-stub")
+
+        val report = gpu_vendor_probe_sysfs("{root}/sys_drm", "{root}/icd")
+        dir_remove_all(root)
+
+        expect(_bool_int(report.available)).to_equal(1)
+        expect(report.vendor_name).to_equal("amd")
+        expect(report.vendor_id).to_equal(0x1002)
+        expect(report.device_id).to_equal(0x744c)
+
+    it "identifies NVIDIA 0x10de and Intel 0x8086 device IDs without hardcoding zero":
+        step("Verify NVIDIA 0x10de device 0x2684 parses cleanly")
+        val root = _tmp_root("vendor_nv")
+        dir_remove_all(root)
+        dir_create_all("{root}/sys_drm/card1/device")
+        dir_create_all("{root}/icd")
+        file_write("{root}/sys_drm/card1/device/vendor", "0x10de\n")
+        file_write("{root}/sys_drm/card1/device/device", "0x2684\n")
+
+        val nv = gpu_vendor_probe_sysfs("{root}/sys_drm", "{root}/icd")
+        dir_remove_all(root)
+
+        expect(_bool_int(nv.available)).to_equal(1)
+        expect(nv.vendor_name).to_equal("nvidia")
+        expect(nv.vendor_id).to_equal(0x10de)
+        expect(nv.device_id).to_equal(0x2684)
+
+    it "fails closed with device_id 0 when sysfs paths are missing or zeroed":
+        step("Probe absent sysfs path and zero device_id sysfs node")
+        val missing = gpu_vendor_probe_sysfs("/nonexistent_sysfs_h1d", "/nonexistent_icd_h1d")
+        expect(_bool_int(missing.available)).to_equal(0)
+        expect(missing.device_id).to_equal(0)
+
+        val root = _tmp_root("vendor_zero")
+        dir_remove_all(root)
+        dir_create_all("{root}/sys_drm/card0/device")
+        dir_create_all("{root}/icd")
+        file_write("{root}/sys_drm/card0/device/vendor", "0x0000\n")
+        file_write("{root}/sys_drm/card0/device/device", "0x0000\n")
+
+        val zeroed = gpu_vendor_probe_sysfs("{root}/sys_drm", "{root}/icd")
+        dir_remove_all(root)
+        expect(_bool_int(zeroed.available)).to_equal(0)
+        expect(zeroed.device_id).to_equal(0)
+
+    it "preserves GpuVendorRegistry fail-closed NotProbed honesty":
+        step("Verify GpuVendorRegistry does not fabricate availability on unprobed stubs")
+        val reg = GpuVendorRegistry.create()
+        expect(reg.probe_all()).to_equal(0)
+        expect(reg.cuda_.state).to_equal(GpuProbeState.NotProbed)
+        val host = gpu_vendor_probe_host()
+        if host.available:
+            expect(host.vendor_id).to_be_greater_than(0)
+            expect(host.device_id).to_be_greater_than(0)
+            expect(_bool_int(host.vendor_name != "none")).to_equal(1)
+        else:
+            expect(host.device_id).to_equal(0)
