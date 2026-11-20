@@ -1,17 +1,50 @@
 # @gc — module uses GC runtime
 #
-# /v1/images/generations — stub until lane L6 (image generation) replaces this file.
+# /v1/images/generations — {model, prompt, n, size, response_format, steps, seed}
+# -> {created, data:[{b64_json}]} with PNG payloads. Served by the
+# stable-diffusion runner (model_executor/runners/sd_runner.spl).
 # Design: doc/05_design/ml/slang/slang_pluggable_modalities.md §3.5.
-# A model of another kind is 400 wrong_model_kind; a ImageGen model is 501
-# not_implemented with the runner's reason.
+# A model of another kind is 400 wrong_model_kind. Only response_format
+# "b64_json" (the default here) is served: "url" would need a file host.
 
-use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse}
-use std.gc_async_mut.slang.entrypoints.openai.serving_models.{model_for_kind, kind_not_implemented_response}
-use std.gc_async_mut.slang.modality.kinds.{ModelKind}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, ChatPart, json_string_field, json_int_field, openai_error_response}
+use std.gc_async_mut.slang.entrypoints.openai.serving_models.{model_for_kind}
+use std.gc_async_mut.slang.model_executor.runners.sd_runner.{sd_runner_open, sd_runner_run, sd_parse_size}
+use std.gc_async_mut.slang.modality.kinds.{ModelKind, KindParams, KindRequest}
+use std.common.base_encoding.base64.{base64_encode_bytes}
+
+fn _bad_request(message: text) -> ApiResponse:
+    openai_error_response(400, message, "invalid_request_error", "invalid_request", "")
 
 fn serve_images(model_root: text, body: text) -> ApiResponse:
     match model_for_kind(model_root, body, ModelKind.ImageGen, "/v1/images/generations"):
         Err(refusal): refusal
-        Ok(model): kind_not_implemented_response(model, "/v1/images/generations")
+        Ok(model):
+            val prompt = json_string_field(body, "prompt")
+            if prompt == "":
+                return _bad_request("missing or empty required field: prompt")
+            val format = json_string_field(body, "response_format")
+            if format != "" and format != "b64_json":
+                return _bad_request("response_format '" + format + "' is not supported; this server returns \"b64_json\"")
+            val size = json_string_field(body, "size")
+            match sd_parse_size(size):
+                Err(why): return _bad_request(why)
+                Ok(_): ()
+            val params = KindParams(max_tokens: 0, n: json_int_field(body, "n", 1), size: size, steps: json_int_field(body, "steps", 0), seed: json_int_field(body, "seed", -1), voice: "", top_n: 0, response_format: "b64_json")
+            val req = KindRequest(model_id: model.id, parts: [ChatPart(kind: "text", text: prompt, data: "", format: "")], params: params)
+            match sd_runner_open(model):
+                Err(why):
+                    return openai_error_response(503, "image generation is unavailable: " + why, "server_error", "runner_unavailable", "")
+                Ok(_): ()
+            match sd_runner_run(req):
+                Err(why):
+                    openai_error_response(500, "image generation failed: " + why, "server_error", "generation_failed", "")
+                Ok(result):
+                    var data = ""
+                    for part in result.parts:
+                        if data != "":
+                            data = data + ","
+                        data = data + "{\"b64_json\":\"" + base64_encode_bytes(part.bytes) + "\"}"
+                    ApiResponse(status: 200, body: "{\"created\":0,\"data\":[" + data + "]}}")
 
 export serve_images

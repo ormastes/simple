@@ -1,0 +1,101 @@
+# @cover src/lib/gc_async_mut/slang/model_executor/runners/sd_runner.spl 80%
+# @cover src/lib/gc_async_mut/slang/entrypoints/openai/serving/serving_images.spl 80%
+# @cover src/runtime/slang_sd_shim.c 60%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# design: doc/05_design/ml/slang/slang_pluggable_modalities.md
+
+"""
+## Purpose and audience
+Purpose: prove on a real checkpoint (stabilityai/sd-turbo, sd_turbo.safetensors)
+that POST /v1/images/generations returns a PNG that decodes, has the requested
+size and is not a constant image, through the real stable-diffusion shim.
+Audience: engineers changing the SD runner or shim, and operators comparing the
+CPU and Vulkan shim variants (SLANG_SD_LIB picks which one runs).
+
+## What is checked
+- 200 with data[0].b64_json decoding to a PNG of the requested WIDTHxHEIGHT;
+- the pixels are not constant (more than 1000 distinct colours);
+- wall time of the request is printed (build/probe/sd_evidence.txt) and the
+  PNG is written to build/probe/sd_<label>.png for inspection.
+
+## Compatibility and limitations
+Runs only with SLANG_LIVE=1, SLANG_MODEL_ROOT holding `sd-turbo/` and
+SLANG_SD_LIB naming a built slang_sd.dll (scripts/check/build-slang-sd-shim.shs).
+SLANG_SD_STEPS (default 1), SLANG_SD_SIZE (default 512x512) and SLANG_SD_LABEL
+(default sd) tune the run. Missing prerequisites skip with the reason. One
+image at a time: image generation needs about 10 GiB free.
+"""
+
+use std.spec.{describe, it, expect, step, skip}
+use std.io_runtime.{env_get, is_dir, file_exists, file_append_text, file_write_bytes, dir_create_all, time_now_monotonic_ms}
+use std.gc_async_mut.slang.entrypoints.openai.api_server.{slang_api_dispatch}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{json_string_field}
+use std.gc_async_mut.slang.model_executor.runners.sd_runner.{sd_runner_info, sd_runner_close}
+use std.common.base_encoding.base64.{base64_decode_bytes}
+use std.common.image.png_decode.{decode_png_to_argb}
+
+val SD_MODEL = "sd-turbo"
+
+fn _record(line: text):
+    print line
+    dir_create_all("build/probe")
+    file_append_text("build/probe/sd_evidence.txt", line + "\n")
+
+fn _root() -> text:
+    env_get("SLANG_MODEL_ROOT") ?? ""
+
+fn _gate() -> text:
+    if (env_get("SLANG_LIVE") ?? "") != "1":
+        return "SLANG_LIVE=1 not set"
+    if _root() == "" or not is_dir(_root() + "/" + SD_MODEL):
+        return "'" + SD_MODEL + "' not under SLANG_MODEL_ROOT '" + _root() + "'"
+    val lib = env_get("SLANG_SD_LIB") ?? ""
+    if lib == "" or not file_exists(lib):
+        return "SLANG_SD_LIB does not name a built slang_sd.dll"
+    ""
+
+fn _env_or(key: text, fallback: text) -> text:
+    val v = env_get(key) ?? ""
+    if v == "":
+        fallback
+    else:
+        v
+
+# Distinct ARGB values among the pixels, capped so a noisy image stops early.
+fn _distinct_colors(pixels: [u32], cap: i64) -> i64:
+    var seen: Dict<i64, bool> = {}
+    for p in pixels:
+        seen[p.to_i64()] = true
+        if seen.len() >= cap:
+            return cap
+    seen.len()
+
+describe "slang image generation through the stable-diffusion shim":
+    it "returns a decodable, correctly sized, non-constant PNG":
+        val name = "returns a decodable, correctly sized, non-constant PNG"
+        val gate = _gate()
+        if gate != "":
+            _record("SKIPPED: " + name + " -- " + gate)
+            skip(name, gate)
+        else:
+            val size = _env_or("SLANG_SD_SIZE", "512x512")
+            val steps = _env_or("SLANG_SD_STEPS", "1")
+            val label = _env_or("SLANG_SD_LABEL", "sd")
+            val edge = size[0:size.index_of("x")].to_i64()
+            step("POST /v1/images/generations for " + size + " at " + steps + " step(s)")
+            val body = "{\"model\":\"" + SD_MODEL + "\",\"prompt\":\"a red apple on a wooden table, photo\",\"n\":1,\"size\":\"" + size + "\",\"steps\":" + steps + ",\"seed\":7,\"response_format\":\"b64_json\"}"
+            val t0 = time_now_monotonic_ms()
+            val r = slang_api_dispatch("POST", "/v1/images/generations", body, _root())
+            val ms = time_now_monotonic_ms() - t0
+            _record("SD_LIVE label=" + label + " size=" + size + " steps=" + steps + " status=" + r.status.to_text() + " request_ms=" + ms.to_text() + " backend=" + sd_runner_info().replace("\n", " "))
+            expect(r.status).to_equal(200)
+            val png = base64_decode_bytes(json_string_field(r.body, "b64_json"))
+            file_write_bytes("build/probe/" + label + ".png", png)
+            step("Decode the PNG with png_decode.spl")
+            val img = decode_png_to_argb(png).unwrap()
+            expect(img.width as i64).to_equal(edge)
+            expect(img.height as i64).to_equal(size[size.index_of("x") + 1:size.len()].to_i64())
+            val colors = _distinct_colors(img.pixels, 1000)
+            _record("SD_LIVE label=" + label + " png_bytes=" + png.len().to_text() + " distinct_colors>=" + colors.to_text())
+            expect(colors >= 1000).to_equal(true)
+            sd_runner_close()

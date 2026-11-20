@@ -1,0 +1,105 @@
+"""
+## Purpose and audience
+Purpose: pin the image-generation request contract of /v1/images/generations
+(design slang_pluggable_modalities.md section 3.5) without loading a model: size
+rules, request validation, the wrong-kind refusal and the explicit 503 when the
+stable-diffusion shim is not configured.
+Audience: engineers changing sd_runner.spl or serving_images.spl.
+
+## Compatibility and limitations
+Fixtures are a tiny hand-built safetensors header, not a real checkpoint. The
+generated pixels are checked by the live spec
+test/03_system/lib/slang/feature/slang_sd_image_live_spec.spl.
+"""
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+
+use std.gc_async_mut.slang.model_executor.runners.sd_runner.{sd_parse_size, sd_runner_run, sd_runner_is_open, sd_runner_close}
+use std.gc_async_mut.slang.modality.kinds.{KindParams, KindRequest}
+use std.gc_async_mut.slang.entrypoints.openai.api_server.{slang_api_dispatch}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{json_string_field, ChatPart}
+use std.io_runtime.{dir_create_all, file_write_bytes, write_file, env_get, env_set}
+
+fn _le8(n: i64) -> [u8]:
+    var o: [u8] = []
+    var v = n
+    var i = 0
+    while i < 8:
+        o.push((v % 256) as u8)
+        v = v / 256
+        i = i + 1
+    o
+
+fn _sd_root(name: text) -> text:
+    val root = "build/probe/sd_runner_spec_" + name
+    dir_create_all(root + "/sd")
+    val header = "{\"model.diffusion_model.input_blocks.0.0.weight\":{}}"
+    var st = _le8(header.byte_len())
+    for b in header.bytes():
+        st.push(b)
+    file_write_bytes(root + "/sd/sd_turbo.safetensors", st)
+    root
+
+fn _params(size: text) -> KindParams:
+    KindParams(max_tokens: 0, n: 1, size: size, steps: 0, seed: -1, voice: "", top_n: 0, response_format: "b64_json")
+
+describe "sd size rules":
+    it "accepts multiples of 64 up to 768 and defaults to 512x512":
+        step("Verify: parsed edges")
+        expect(sd_parse_size("").unwrap()[0]).to_equal(512)
+        expect(sd_parse_size("512x512").unwrap()[1]).to_equal(512)
+        expect(sd_parse_size("768x64").unwrap()[0]).to_equal(768)
+        expect(sd_parse_size("64x768").unwrap()[1]).to_equal(768)
+
+    it "refuses sizes that are not multiples of 64 or exceed 768":
+        step("Verify: each refusal names the rule")
+        expect(sd_parse_size("500x512").is_err()).to_equal(true)
+        expect(sd_parse_size("512x100").is_err()).to_equal(true)
+        expect(sd_parse_size("832x512").unwrap_err().contains("768")).to_equal(true)
+        expect(sd_parse_size("1024x1024").is_err()).to_equal(true)
+        expect(sd_parse_size("0x512").is_err()).to_equal(true)
+        expect(sd_parse_size("512").is_err()).to_equal(true)
+        expect(sd_parse_size("axb").is_err()).to_equal(true)
+
+describe "sd runner without a model":
+    it "refuses to run before it is opened":
+        step("Verify: closed runner answers Err, never a fabricated image")
+        sd_runner_close()
+        expect(sd_runner_is_open()).to_equal(false)
+        val req = KindRequest(model_id: "sd", parts: [ChatPart(kind: "text", text: "a cat", data: "", format: "")], params: _params("512x512"))
+        val r = sd_runner_run(req)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("not open")).to_equal(true)
+
+describe "POST /v1/images/generations":
+    it "validates the request before touching the runner":
+        step("Verify: 400 for a missing prompt, a bad size and an unsupported response_format")
+        val root = _sd_root("validate")
+        val no_prompt = slang_api_dispatch("POST", "/v1/images/generations", "{\"model\":\"sd\"}", root)
+        expect(no_prompt.status).to_equal(400)
+        val bad_size = slang_api_dispatch("POST", "/v1/images/generations", "{\"model\":\"sd\",\"prompt\":\"a cat\",\"size\":\"1024x1024\"}", root)
+        expect(bad_size.status).to_equal(400)
+        expect(bad_size.body.contains("768")).to_equal(true)
+        val url_format = slang_api_dispatch("POST", "/v1/images/generations", "{\"model\":\"sd\",\"prompt\":\"a cat\",\"response_format\":\"url\"}", root)
+        expect(url_format.status).to_equal(400)
+
+    it "answers 400 wrong_model_kind for a chat model":
+        step("Verify: a GGUF chat model is refused by kind")
+        val root = "build/probe/sd_runner_spec_kind"
+        dir_create_all(root + "/chat")
+        write_file(root + "/chat/config.json", "{\"architectures\":[\"LlamaForCausalLM\"]}")
+        val r = slang_api_dispatch("POST", "/v1/images/generations", "{\"model\":\"chat\",\"prompt\":\"a cat\"}", root)
+        expect(r.status).to_equal(400)
+        expect(json_string_field(r.body, "code")).to_equal("wrong_model_kind")
+
+    it "answers 503 runner_unavailable when SLANG_SD_LIB is not usable":
+        step("Verify: an unset or missing library is an explicit 503, not a stub image")
+        val saved = env_get("SLANG_SD_LIB") ?? ""
+        env_set("SLANG_SD_LIB", "")
+        val root = _sd_root("unavailable")
+        val r = slang_api_dispatch("POST", "/v1/images/generations", "{\"model\":\"sd\",\"prompt\":\"a cat\"}", root)
+        env_set("SLANG_SD_LIB", saved)
+        expect(r.status).to_equal(503)
+        expect(json_string_field(r.body, "code")).to_equal("runner_unavailable")
+        expect(r.body.contains("SLANG_SD_LIB")).to_equal(true)
