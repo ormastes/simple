@@ -4678,6 +4678,12 @@ static RtCoreString* rt_core_string_from_data_pointer(int64_t value) {
     return s;
 }
 
+static inline RtCoreString* rt_core_as_string_or_data(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (s) return s;
+    return rt_core_string_from_data_pointer(value);
+}
+
 int64_t rt_string_len(int64_t string) {
     RtCoreString* s = rt_core_as_string(string);
     if (s) return (int64_t)s->len;
@@ -4774,7 +4780,7 @@ const uint8_t* rt_string_data(int64_t string) {
 }
 
 int64_t rt_string_bytes(int64_t string) {
-    RtCoreString* s = rt_core_as_string(string);
+    RtCoreString* s = rt_core_as_string_or_data(string);
     SplArray* bytes = rt_array_new(s ? (int64_t)s->len : 0);
     if (!bytes) return rt_core_nil();
     if (s) {
@@ -4790,7 +4796,7 @@ int64_t rt_string_bytes(int64_t string) {
 }
 
 int64_t rt_string_chars(int64_t string) {
-    RtCoreString* s = rt_core_as_string(string);
+    RtCoreString* s = rt_core_as_string_or_data(string);
     SplArray* chars = rt_array_new(s ? (int64_t)s->len : 0);
     if (!chars) return rt_core_nil();
     if (!s) return (int64_t)(uintptr_t)chars;
@@ -4831,7 +4837,7 @@ int64_t rt_string_builder_new(void) {
 
 int64_t rt_string_builder_push(int64_t handle, int64_t string) {
     RtStringBuilder* builder = rt_string_builder_from_handle(handle);
-    RtCoreString* value = rt_core_as_string(string);
+    RtCoreString* value = rt_core_as_string_or_data(string);
     if (!builder || !value) return 0;
     if (value->len == 0) return 1;
     if (value->len > SIZE_MAX - builder->len) return 0;
@@ -4937,7 +4943,7 @@ static uint64_t rt_str_first_non_ascii(const uint8_t* data, uint64_t len) {
  * at bit 30, ASCII memo at bit 3), but this fast path has no count to write.
  * See doc/08_tracking/bug/rt_text_slice_cp_index_quadratic_scv_prime_hang_2026-11-12.md. */
 int64_t rt_string_char_code_at(int64_t string, int64_t index) {
-    RtCoreString* s = rt_core_as_string(string);
+    RtCoreString* s = rt_core_as_string_or_data(string);
     const uint8_t* data;
     uint64_t len;
     uint64_t byte_index = 0;
@@ -5923,8 +5929,8 @@ int64_t rt_text_eq_any(int64_t left, int64_t right) {
     const char* b;
     size_t a_len;
     size_t b_len;
-    RtCoreString* left_string = rt_core_as_string(left);
-    RtCoreString* right_string = rt_core_as_string(right);
+    RtCoreString* left_string = rt_core_as_string_or_data(left);
+    RtCoreString* right_string = rt_core_as_string_or_data(right);
     if (left_string) {
         a = left_string->data;
         a_len = (size_t)left_string->len;
@@ -5962,8 +5968,8 @@ int64_t rt_native_neq(int64_t left, int64_t right) {
  * strcmp-style signed result (the caller compares this against 0 with the
  * requested predicate). */
 int64_t rt_text_cmp_any(int64_t left, int64_t right) {
-    RtCoreString* left_string = rt_core_as_string(left);
-    RtCoreString* right_string = rt_core_as_string(right);
+    RtCoreString* left_string = rt_core_as_string_or_data(left);
+    RtCoreString* right_string = rt_core_as_string_or_data(right);
     const char* a = left_string ? left_string->data : rt_interp_cstr(left);
     const char* b = right_string ? right_string->data : rt_interp_cstr(right);
     if (!a) a = "";
@@ -6177,7 +6183,7 @@ int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
         return (int64_t)(uintptr_t)result;
     }
 
-    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* s = rt_core_as_string_or_data(value);
     if (!s) return rt_core_nil();
     /* Indices are CODE POINTS (ADR-005 item 5), the unit len(), s[i] and
      * index_of use. ASCII text keeps byte == code point (one word-wise scan),
@@ -6262,7 +6268,7 @@ int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
  * spl_str_slice: no snapping and no U+FFFD. Any other receiver, and a
  * zero/negative step, is rt_slice. Twin of the Rust runtime crate's symbol. */
 int64_t rt_slice_text_bytes(int64_t value, int64_t start, int64_t end, int64_t step) {
-    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* s = rt_core_as_string_or_data(value);
     if (!s || step < 1) return rt_slice(value, start, end, step);
     int64_t len = (int64_t)s->len;
     int64_t finish = end < 0 ? 0 : (end > len ? len : end);
@@ -6279,15 +6285,15 @@ int64_t rt_slice_text_bytes(int64_t value, int64_t start, int64_t end, int64_t s
 }
 
 int64_t rt_string_starts_with(int64_t value, int64_t prefix) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* p = rt_core_as_string(prefix);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* p = rt_core_as_string_or_data(prefix);
     if (!s || !p || p->len > s->len) return 0;
     return p->len == 0 || memcmp(s->data, p->data, (size_t)p->len) == 0;
 }
 
 int64_t rt_string_ends_with(int64_t value, int64_t suffix) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* p = rt_core_as_string(suffix);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* p = rt_core_as_string_or_data(suffix);
     if (!s || !p || p->len > s->len) return 0;
     return p->len == 0 || memcmp(s->data + (s->len - p->len), p->data, (size_t)p->len) == 0;
 }
@@ -6329,8 +6335,8 @@ int64_t text_dot_from_char_code(int64_t code) {
 }
 
 int64_t rt_string_find(int64_t value, int64_t needle) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* n = rt_core_as_string(needle);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* n = rt_core_as_string_or_data(needle);
     if (!s || !n) return -1;
     if (n->len == 0) return 0;
     if (n->len > s->len) return -1;
@@ -6352,8 +6358,8 @@ int64_t rt_string_index_of(int64_t value, int64_t needle) {
 }
 
 int64_t rt_text_find(int64_t value, int64_t needle, int64_t start) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* n = rt_core_as_string(needle);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* n = rt_core_as_string_or_data(needle);
     if (!s || !n) return -1;
     /* Negative start clamps to 0 (the two-arg index_of contract; matches the
      * Rust runtime crate and simple_core impls). */
@@ -6370,8 +6376,8 @@ int64_t rt_text_find(int64_t value, int64_t needle, int64_t start) {
 }
 
 int64_t rt_string_rfind(int64_t value, int64_t needle) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* n = rt_core_as_string(needle);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* n = rt_core_as_string_or_data(needle);
     if (!s || !n) return -1;
     /* BYTE offset, like index_of / find (owner decision 2026-11-13). */
     if (n->len == 0) return (int64_t)s->len;
@@ -6546,8 +6552,8 @@ int64_t rt_string_to_float(int64_t value) {
 }
 
 int64_t rt_string_split(int64_t value, int64_t delimiter) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* d = rt_core_as_string(delimiter);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* d = rt_core_as_string_or_data(delimiter);
     if (!s || !d) return rt_core_nil();
     if (d->len == 0) return rt_string_chars(value);
 
@@ -6579,8 +6585,8 @@ int64_t rt_string_split(int64_t value, int64_t delimiter) {
 }
 
 int64_t rt_string_split_limit(int64_t value, int64_t delimiter, int64_t limit) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* d = rt_core_as_string(delimiter);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* d = rt_core_as_string_or_data(delimiter);
     if (!s || !d) return rt_core_nil();
     if (limit <= 0) return rt_string_split(value, delimiter);
     if (limit == 1) {
@@ -6643,7 +6649,7 @@ static int64_t spl_core_slot_value(const RtCoreArray* array, int64_t i) {
  * is rendered once for the two passes. */
 int64_t rt_string_join(int64_t array_value, int64_t separator) {
     RtCoreArray* array = rt_core_as_array(array_value);
-    RtCoreString* sep = rt_core_as_string(separator);
+    RtCoreString* sep = rt_core_as_string_or_data(separator);
     if (!array || !sep) return rt_core_nil();
     RtCoreString** items = NULL;
     if (array->len > 0) {
@@ -6653,7 +6659,7 @@ int64_t rt_string_join(int64_t array_value, int64_t separator) {
     uint64_t total = 0;
     for (int64_t i = 0; i < array->len; i++) {
         int64_t value = spl_core_slot_value(array, i);
-        RtCoreString* item = rt_core_as_string(value);
+        RtCoreString* item = rt_core_as_string_or_data(value);
         if (!item) item = rt_core_as_string(rt_to_string(value));
         items[i] = item;
         if (item) total += item->len;
@@ -6693,7 +6699,7 @@ int64_t rt_string_join(int64_t array_value, int64_t separator) {
  * cannot distinguish them from tagged handles. Small non-text values are empty,
  * as in rt_interp_cstr; arbitrary non-text heap values are not accepted inputs. */
 static int8_t core_join_text_view(int64_t value, const char** data, size_t* len) {
-    RtCoreString* string = rt_core_as_string(value);
+    RtCoreString* string = rt_core_as_string_or_data(value);
     if (string) {
         if (string->len > SIZE_MAX - sizeof(RtCoreString) - 1) return 0;
         *data = string->data;
@@ -7161,8 +7167,8 @@ int64_t rt_string_chomp(int64_t value) {
 
 /* trim_start_matches: repeatedly strip `pattern` from the front. */
 int64_t rt_string_trim_start_matches(int64_t value, int64_t pattern) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* p = rt_core_as_string(pattern);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* p = rt_core_as_string_or_data(pattern);
     if (!s || !p) return value;
     if (p->len == 0) return value;
     uint64_t start = 0;
@@ -7175,8 +7181,8 @@ int64_t rt_string_trim_start_matches(int64_t value, int64_t pattern) {
 
 /* trim_end_matches: repeatedly strip `pattern` from the end. */
 int64_t rt_string_trim_end_matches(int64_t value, int64_t pattern) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* p = rt_core_as_string(pattern);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* p = rt_core_as_string_or_data(pattern);
     if (!s || !p) return value;
     if (p->len == 0) return value;
     uint64_t end = s->len;
@@ -7189,8 +7195,8 @@ int64_t rt_string_trim_end_matches(int64_t value, int64_t pattern) {
 
 /* removeprefix / remove_prefix: strip `prefix` ONCE if present. */
 int64_t rt_string_remove_prefix(int64_t value, int64_t prefix) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* p = rt_core_as_string(prefix);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* p = rt_core_as_string_or_data(prefix);
     if (!s || !p) return value;
     if (p->len == 0 || p->len > s->len) return value;
     if (memcmp(s->data, p->data, (size_t)p->len) != 0) return value;
@@ -7199,8 +7205,8 @@ int64_t rt_string_remove_prefix(int64_t value, int64_t prefix) {
 
 /* removesuffix / remove_suffix: strip `suffix` ONCE if present. */
 int64_t rt_string_remove_suffix(int64_t value, int64_t suffix) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* p = rt_core_as_string(suffix);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* p = rt_core_as_string_or_data(suffix);
     if (!s || !p) return value;
     if (p->len == 0 || p->len > s->len) return value;
     if (memcmp(s->data + s->len - p->len, p->data, (size_t)p->len) != 0) return value;
@@ -7403,8 +7409,8 @@ int64_t rt_string_zfill(int64_t value, int64_t width) {
 /* find_all / find_indices: BYTE offsets of every non-overlapping match.
  * An empty needle yields an EMPTY array, matching the interpreter's guard. */
 int64_t rt_string_find_all(int64_t value, int64_t needle) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* n = rt_core_as_string(needle);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* n = rt_core_as_string_or_data(needle);
     SplArray* out = rt_array_new(0);
     if (!out) return rt_core_nil();
     if (!s || !n || n->len == 0) return (int64_t)(uintptr_t)out;
@@ -7990,9 +7996,9 @@ int64_t rt_string_sorted(int64_t value) {
  * An empty or absent separator puts the receiver in the FIRST slot for
  * partition and the LAST slot for rpartition, matching the interpreter arms. */
 static int64_t rt_string_partition_at(int64_t value, int64_t sep_value, int from_end, const char* who) {
-    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* s = rt_core_as_string_or_data(value);
     if (!s) rt_refuse_non_text_receiver(who, value);
-    RtCoreString* sep = rt_core_as_string(sep_value);
+    RtCoreString* sep = rt_core_as_string_or_data(sep_value);
     SplArray* out = rt_array_new(3);
     if (!out) return rt_core_nil();
     int64_t hit = -1;
@@ -8038,9 +8044,9 @@ int64_t rt_string_rpartition(int64_t value, int64_t sep) {
 
 /* replace_first: replace only the FIRST occurrence of `pattern`. */
 int64_t rt_string_replace_first(int64_t value, int64_t pattern, int64_t replacement) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* p = rt_core_as_string(pattern);
-    RtCoreString* r = rt_core_as_string(replacement);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* p = rt_core_as_string_or_data(pattern);
+    RtCoreString* r = rt_core_as_string_or_data(replacement);
     if (!s || !p || !r) return value;
     if (p->len > s->len) return value;
     /* An empty pattern matches at offset 0, so replace_first("", x) prepends x
@@ -8063,9 +8069,9 @@ int64_t rt_string_replace_first(int64_t value, int64_t pattern, int64_t replacem
 }
 
 int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* old_s = rt_core_as_string(old_value);
-    RtCoreString* new_s = rt_core_as_string(new_value);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* old_s = rt_core_as_string_or_data(old_value);
+    RtCoreString* new_s = rt_core_as_string_or_data(new_value);
     if (!s || !old_s || !new_s) return value;
     if (old_s->len == 0) return value;
 
@@ -8116,6 +8122,11 @@ int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {
  * never dereferenced. */
 static int rt_string_promote_raw_receiver(int64_t value, int64_t* out) {
     if (value < 0x10000) return 0;
+    RtCoreString* owner = rt_core_string_from_data_pointer(value);
+    if (owner) {
+        *out = (int64_t)(((uint64_t)(uintptr_t)owner) | RT_VALUE_TAG_HEAP);
+        return 1;
+    }
     const char* p = (const char*)(uintptr_t)value;
     *out = rt_string_new((const uint8_t*)p, (uint64_t)strlen(p));
     return 1;
@@ -9482,8 +9493,8 @@ char* rt_strcat(const char* a, const char* b) {
  * interpolation, [...].join in method_calls_literals.spl) expect a raw
  * pointer. */
 int64_t rt_strcat_tagged(int64_t a, int64_t b) {
-    RtCoreString* left_string = rt_core_as_string(a);
-    RtCoreString* right_string = rt_core_as_string(b);
+    RtCoreString* left_string = rt_core_as_string_or_data(a);
+    RtCoreString* right_string = rt_core_as_string_or_data(b);
     const char* left = left_string ? (const char*)left_string->data : rt_interp_cstr(a);
     const char* right = right_string ? (const char*)right_string->data : rt_interp_cstr(b);
     /* Tagged text is length-delimited and may contain NUL bytes. Raw C-string
@@ -9509,18 +9520,26 @@ char* rt_strreplace(const char* s, const char* old_s, const char* new_s) {
 SplArray* rt_strsplit(const char* s, const char* delim) {
     SplArray* out = rt_array_new(4);
     if (!out || !s) return out;
-    if (!delim || !*delim) {
-        rt_array_push(out, rt_string_new((const uint8_t*)s, (uint64_t)strlen(s)));
+    RtCoreString* s_owner = rt_core_string_from_data_pointer((int64_t)(uintptr_t)s);
+    RtCoreString* d_owner = delim ? rt_core_string_from_data_pointer((int64_t)(uintptr_t)delim) : NULL;
+    size_t s_len = s_owner ? (size_t)s_owner->len : strlen(s);
+    size_t delim_len = d_owner ? (size_t)d_owner->len : (delim ? strlen(delim) : 0);
+    if (!delim || delim_len == 0) {
+        rt_array_push(out, rt_string_new((const uint8_t*)s, (uint64_t)s_len));
         return out;
     }
-    size_t delim_len = strlen(delim);
-    const char* start = s;
-    const char* hit = NULL;
-    while ((hit = strstr(start, delim)) != NULL) {
-        rt_array_push(out, rt_string_new((const uint8_t*)start, (uint64_t)(hit - start)));
-        start = hit + delim_len;
+    size_t start = 0;
+    size_t i = 0;
+    while (i + delim_len <= s_len) {
+        if (memcmp(s + i, delim, delim_len) == 0) {
+            rt_array_push(out, rt_string_new((const uint8_t*)(s + start), (uint64_t)(i - start)));
+            i += delim_len;
+            start = i;
+        } else {
+            i++;
+        }
     }
-    rt_array_push(out, rt_string_new((const uint8_t*)start, (uint64_t)strlen(start)));
+    rt_array_push(out, rt_string_new((const uint8_t*)(s + start), (uint64_t)(s_len - start)));
     return out;
 }
 
@@ -10645,7 +10664,7 @@ SplArray* rt_bytes_alloc(int64_t len) {
 }
 
 int64_t rt_text_to_bytes(int64_t text_value) {
-    RtCoreString* s = rt_core_as_string(text_value);
+    RtCoreString* s = rt_core_as_string_or_data(text_value);
     uint64_t len = s ? s->len : 0;
     SplArray* arr = rt_byte_array_new_len(len);
     RtCoreArray* array = rt_core_array_ptr(arr);
@@ -17674,7 +17693,7 @@ int8_t rt_env_remove(const uint8_t* key_ptr, uint64_t key_len) {
  * are still defined in runtime.c only — add them here when needed. */
 
 static char* rt_core_string_to_cpath(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* s = rt_core_as_string_or_data(value);
     if (!s) return NULL;
     char* out = (char*)rt_observed_malloc_v1((size_t)s->len + 1);
     if (!out) return NULL;
@@ -17684,7 +17703,7 @@ static char* rt_core_string_to_cpath(int64_t value) {
 }
 
 static const uint8_t* rt_core_string_bytes(int64_t value, uint64_t* len_out) {
-    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* s = rt_core_as_string_or_data(value);
     if (!s) {
         *len_out = 0;
         return NULL;
@@ -18083,7 +18102,7 @@ int64_t rt_dir_glob(const uint8_t* pattern_ptr, uint64_t pattern_len) {
 static int64_t spl_file_atomic_write_data(int64_t path_value, const uint8_t* content_data,
                                          size_t content_len, int64_t mode, int have_mode) {
     static atomic_uint_fast64_t sequence = 0;
-    RtCoreString* path_string = rt_core_as_string(path_value);
+    RtCoreString* path_string = rt_core_as_string_or_data(path_value);
     if (!path_string || (!content_data && content_len != 0) || path_string->len == 0 ||
         memchr(path_string->data, '\0', (size_t)path_string->len) != NULL) return 0;
 
@@ -18210,7 +18229,7 @@ static int64_t spl_file_atomic_write_data(int64_t path_value, const uint8_t* con
 
 static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_value,
                                          int64_t mode, int have_mode) {
-    RtCoreString* content_string = rt_core_as_string(content_value);
+    RtCoreString* content_string = rt_core_as_string_or_data(content_value);
     if (!content_string) return 0;
     return spl_file_atomic_write_data(path_value, (const uint8_t*)content_string->data,
                                      (size_t)content_string->len, mode, have_mode);
