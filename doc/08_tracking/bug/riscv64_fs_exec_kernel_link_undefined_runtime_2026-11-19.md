@@ -83,3 +83,20 @@ undefined set from 47 to 36 with no duplicate definitions.
   `err` (`riscv64/interrupt.spl`), `vmm_copyin_packed_string_vector`
   (`ipc/syscall_process.spl`); `_rv64_enter_user`; `spl_thread_current_id`;
   `spl_handle_server_startup_evidence_consume_v1`.
+
+## Step 4a — `_rv64_enter_user` export + console import gating (2026-11-20, verification-pending)
+
+- `trap_vector.spl`: the naked `_rv64_enter_user` trampoline now carries
+  `@export("C", name: "_rv64_enter_user")` and returns `i64`, matching the
+  `extern fn` in `user_entry.spl`/`context.spl`. Before this it was emitted only
+  under its mangled module name (`llvm-nm`: `src__os__kernel__arch__riscv64__trap_vector___rv64_enter_user`).
+  Kernel link on ubuntu-p2 (seed `~/zafix-target`): undefined 38 -> 37, and `_rv64_enter_user` is gone.
+- `arch_adapt/console_byte.spl`: per-arch `use` lines are `@cfg`-gated. `rt_port_inb/outb`
+  are still undefined, because another importer still pulls `x86/port_io_owner` into the
+  riscv64 closure. That importer is the next step.
+- Still open: `spl_handle_server_startup_evidence_consume_v1` (LLVM emits the
+  definition as `.2`/`_dot_1` and the keepalive reference stays undefined; moving the definition
+  above the keepalive did not change it) and `spl_thread_current_id` (`thread_shim` is not in the
+  closure).
+- Specs: `test/01_unit/os/kernel/arch/riscv64_enter_user_link_contract_spec.spl`,
+  `hal_arch_gating_contract_spec.spl` ("cfg-gates every per-arch console import").
