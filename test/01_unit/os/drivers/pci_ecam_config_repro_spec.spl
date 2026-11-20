@@ -1,0 +1,47 @@
+# Purpose and audience: reproducer specification for bug #16 (ARM64/RV64 PCI ECAM base & MMIO config reads).
+# @req REQ-SSPEC-OS
+
+"""Reproduce hardcoded 0u64 ECAM base, bus!=0 rejection, and missing MMIO config read/write in pci.spl."""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{file_read, file_read_bytes}
+use os.kernel.boot.fdt_blob.{FdtBlob}
+use os.kernel.boot.mmio.{mmio_reset_for_test, mmio_disable_test_mode}
+use os.drivers.pci.pci.{
+    pci_ecam_base,
+    pci_set_ecam_base,
+    pci_ecam_base_from_fdt,
+    pci_configure_ecam_from_fdt,
+    pci_ecam_read_config_at,
+    pci_ecam_write_config_at
+}
+
+describe "PCI ECAM config reproducer (#16)":
+    it "resolves QEMU virt ARM64 and RV64 ECAM bases instead of hardcoded 0u64":
+        step("verify ARM64 and RV64 _pci_ecam_base resolve real QEMU virt addresses and allow non-zero bus ECAM")
+        val src = file_read("src/os/drivers/pci/pci.spl")
+        expect(src).to_contain("fn _pci_ecam_base() -> u64: 0x4010000000u64")
+        expect(src).to_contain("fn _pci_ecam_base() -> u64: 0x30000000u64")
+        expect(src.contains("bus != 0u8")).to_equal(false)
+
+    it "extracts pci-host-ecam-generic base from QEMU virt DTB":
+        step("parse qemu_virt_rv64.dtb and configure ECAM base from DTB")
+        val dtb_bytes = file_read_bytes("test/01_unit/os/kernel/boot/fixtures/qemu_virt_rv64.dtb")
+        val blob = FdtBlob.from_bytes(dtb_bytes)
+        expect(blob.valid()).to_equal(true)
+        val dtb_base = pci_ecam_base_from_fdt(blob)
+        expect(dtb_base).to_equal(0x30000000u64)
+        expect(pci_configure_ecam_from_fdt(blob)).to_equal(0x30000000u64)
+        expect(pci_ecam_base()).to_equal(0x30000000u64)
+        expect(pci_ecam_base_from_fdt(FdtBlob.from_bytes([]))).to_equal(0u64)
+        pci_set_ecam_base(0u64)
+
+    it "reads and writes PCI config dwords through MMIO ECAM including bus > 0":
+        step("write and read ECAM config space via test MMIO backing store and verify base==0 fails closed")
+        mmio_reset_for_test()
+        pci_ecam_write_config_at(0x30000000u64, 1u8, 2u8, 3u8, 0x00u8, 0x1AF41050u32)
+        val id = pci_ecam_read_config_at(0x30000000u64, 1u8, 2u8, 3u8, 0x00u8)
+        expect(id).to_equal(0x1AF41050u32)
+        expect(pci_ecam_read_config_at(0u64, 0u8, 0u8, 0u8, 0x00u8)).to_equal(0xFFFFFFFFu32)
+        mmio_disable_test_mode()

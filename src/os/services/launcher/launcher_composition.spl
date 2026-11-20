@@ -5,15 +5,25 @@
 
 use std.nogc_sync_mut.composition.types.{SimpleCompositionImageV1}
 use std.nogc_sync_mut.composition.codec.{decode_composition_image_v1}
-use os.services.launcher.launcher.{launcher_register, launcher_unregister}
 use os.services.launcher.launcher_registry.{
     MAX_APPS, MOD_META, MOD_CTRL, MOD_ALT, MOD_SHIFT,
-    app_count, _app_index_by_name
+    app_count, _app_index_by_name,
+    launcher_app_has_scoped_ceiling_v1,
+    launcher_app_scoped_ceiling_v1,
+    launcher_commit_scoped_capabilities_v1
 }
 use os.services.launcher.launcher_association_registry.{
-    launcher_associations_authoritative_v1,
-    launcher_validate_association_projection_v1,
-    launcher_commit_association_projection_v1
+    launcher_validate_association_projection_v1
+}
+use os.services.launcher.launcher_catalog_projection.{
+    launcher_replace_composition_catalog_v1,
+    launcher_is_composition_owned_name_v1,
+    launcher_is_composition_projection_active_v1
+}
+use os.kernel.loader.artifact_manifest.{
+    manifest_kind_smf, manifest_kind_elf, manifest_kind_native_simple,
+    manifest_for_kind, manifest_parse_scoped_capability_v1,
+    manifest_project_scoped_capabilities_v1
 }
 
 class LauncherCompositionLoadV1:
@@ -68,87 +78,97 @@ fn _composition_name_seen_v1(image: SimpleCompositionImageV1, end: i64, name: te
     false
 
 fn _composition_owned_name_v1(name: text) -> bool:
-    var i = 0
-    while i < composition_app_names_v1.len():
-        if composition_app_names_v1[i] == name:
-            return true
-        i = i + 1
-    false
+    launcher_is_composition_owned_name_v1(name)
+
+fn _composition_manifest_kind_for_path_v1(path: text) -> text:
+    if path.ends_with(".smf"):
+        return manifest_kind_smf()
+    if path.ends_with(".elf") or path.ends_with(".bin"):
+        return manifest_kind_elf()
+    if path.ends_with(".app") or path.ends_with(".native"):
+        return manifest_kind_native_simple()
+    ""
 
 fn _launcher_commit_composition_v1(image: SimpleCompositionImageV1) -> LauncherCompositionLoadV1:
-    # Validate the entire supported projection before mutating launcher state.
-    # v1 intentionally fails closed on policy fields whose authoritative
-    # SimpleArtifactManifest projection has not landed yet.
-    var active_old_count: u64 = 0
-    var old_index = 0
-    while old_index < composition_app_names_v1.len():
-        if _app_index_by_name(composition_app_names_v1[old_index]) >= 0:
-            active_old_count = active_old_count + 1
-        old_index = old_index + 1
-    if app_count - active_old_count + (image.apps.len() as u64) > MAX_APPS:
-        return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_CAPACITY", registered_count: 0, failed_app_id: "")
+    if not launcher_is_composition_projection_active_v1():
+        composition_app_ids_v1 = []
+        composition_app_names_v1 = []
+    # Validate all records, typed scoped capabilities, shortcuts, and associations
+    # completely before delegating atomic replacement to launcher_catalog_projection.
+    var next_ids: [text] = []
+    var next_names: [text] = []
+    var next_paths: [text] = []
+    var next_icons: [text] = []
+    var next_keys: [u32] = []
+    var next_mods: [u32] = []
+    var cap_specs_joined: [text] = []
+    var cap_masks: [u32] = []
+    var association_keys: [text] = []
+    var association_paths: [text] = []
+
     var checked = 0
     while checked < image.apps.len():
         val candidate = image.apps[checked]
         if candidate.app_id == "" or candidate.display_name == "" or candidate.artifact_path == "":
             return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_RECORD", registered_count: 0, failed_app_id: candidate.app_id)
-        # Capability admission must project through SimpleArtifactManifest.
-        # Its current u32 API cannot preserve path scopes, so accepting any
-        # SCI capability here would create a weaker second policy authority.
+        var projected_joined = ""
+        var projected_mask = 0u32
         if candidate.capabilities.len() > 0:
-            return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_MANIFEST_CAPABILITY_PROJECTION_REQUIRED", registered_count: 0, failed_app_id: candidate.app_id)
+            if not launcher_app_has_scoped_ceiling_v1(candidate.app_id):
+                return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_MANIFEST_CAPABILITY_PROJECTION_REQUIRED", registered_count: 0, failed_app_id: candidate.app_id)
+            for raw_cap in candidate.capabilities:
+                val parsed = manifest_parse_scoped_capability_v1(raw_cap)
+                if not parsed.ok:
+                    return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_CAPABILITY_INVALID", registered_count: 0, failed_app_id: candidate.app_id)
+            val kind = _composition_manifest_kind_for_path_v1(candidate.artifact_path)
+            if kind == "":
+                return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_CAPABILITY_INVALID", registered_count: 0, failed_app_id: candidate.app_id)
+            val ceiling = launcher_app_scoped_ceiling_v1(candidate.app_id)
+            val proj = manifest_project_scoped_capabilities_v1(manifest_for_kind(kind), candidate.capabilities, ceiling)
+            if not proj.ok:
+                return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_CAPABILITY_EXCEEDS_CEILING", registered_count: 0, failed_app_id: candidate.app_id)
+            var canonical_caps: [text] = []
+            for pcap in proj.projected:
+                canonical_caps.push(pcap.raw)
+            projected_joined = canonical_caps.join("\n")
+            projected_mask = proj.projected_mask
         val projected_shortcut = _project_shortcut_v1(candidate.shortcut)
         if not projected_shortcut.ok:
             return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_SHORTCUT_INVALID", registered_count: 0, failed_app_id: candidate.app_id)
         if (_app_index_by_name(candidate.display_name) >= 0 and not _composition_owned_name_v1(candidate.display_name)) or _composition_name_seen_v1(image, checked, candidate.display_name):
             return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_DUPLICATE_NAME", registered_count: 0, failed_app_id: candidate.app_id)
+        next_ids.push(candidate.app_id)
+        next_names.push(candidate.display_name)
+        next_paths.push(candidate.artifact_path)
+        next_icons.push(candidate.icon)
+        next_keys.push(projected_shortcut.key)
+        next_mods.push(projected_shortcut.modifiers)
+        cap_specs_joined.push(projected_joined)
+        cap_masks.push(projected_mask)
+        var assoc_index = 0
+        while assoc_index < candidate.associations.len():
+            association_keys.push(candidate.associations[assoc_index])
+            association_paths.push(candidate.artifact_path)
+            assoc_index = assoc_index + 1
         checked = checked + 1
 
-    # Associations are validated by their owner (keys, duplicates, targets in
-    # this image's catalog) before any launcher state is mutated.
-    var association_keys: [text] = []
-    var association_paths: [text] = []
-    var catalog_paths: [text] = []
-    var assoc_app = 0
-    while assoc_app < image.apps.len():
-        val record = image.apps[assoc_app]
-        catalog_paths.push(record.artifact_path)
-        var assoc_index = 0
-        while assoc_index < record.associations.len():
-            association_keys.push(record.associations[assoc_index])
-            association_paths.push(record.artifact_path)
-            assoc_index = assoc_index + 1
-        assoc_app = assoc_app + 1
-    val association_code = launcher_validate_association_projection_v1(association_keys, association_paths, catalog_paths)
-    if association_code != "SCI_LAUNCHER_OK":
-        return LauncherCompositionLoadV1(ok: false, code: association_code, registered_count: 0, failed_app_id: "")
+    val replace_code = launcher_replace_composition_catalog_v1(
+        next_ids,
+        next_names,
+        next_paths,
+        next_icons,
+        next_keys,
+        next_mods,
+        association_keys,
+        association_paths
+    )
+    if replace_code != "SCI_LAUNCHER_OK":
+        return LauncherCompositionLoadV1(ok: false, code: replace_code, registered_count: 0, failed_app_id: "")
 
-    var retiring = 0
-    while retiring < composition_app_names_v1.len():
-        launcher_unregister(composition_app_names_v1[retiring])
-        retiring = retiring + 1
-
-    var registered: i64 = 0
-    var next_ids: [text] = []
-    var next_names: [text] = []
-    var i = 0
-    while i < image.apps.len():
-        val app = image.apps[i]
-        val shortcut = _project_shortcut_v1(app.shortcut)
-        if not launcher_register(app.display_name, app.artifact_path, app.icon, shortcut.key, shortcut.modifiers):
-            return LauncherCompositionLoadV1(ok: false, code: "SCI_LAUNCHER_COMMIT", registered_count: registered, failed_app_id: app.app_id)
-        next_ids.push(app.app_id)
-        next_names.push(app.display_name)
-        registered = registered + 1
-        i = i + 1
-    # Take over the association table only when this image declares
-    # associations, or when a previous SCI image already did (so a reload can
-    # clear them). Otherwise the legacy defaults stay in force.
-    if association_keys.len() > 0 or launcher_associations_authoritative_v1():
-        launcher_commit_association_projection_v1(association_keys, association_paths)
+    launcher_commit_scoped_capabilities_v1(next_ids, cap_specs_joined, cap_masks)
     composition_app_ids_v1 = next_ids
     composition_app_names_v1 = next_names
-    LauncherCompositionLoadV1(ok: true, code: "SCI_LAUNCHER_OK", registered_count: registered, failed_app_id: "")
+    LauncherCompositionLoadV1(ok: true, code: "SCI_LAUNCHER_OK", registered_count: next_ids.len() as i64, failed_app_id: "")
 
 fn launcher_load_composition_bytes_v1(data: [u8]) -> LauncherCompositionLoadV1:
     val admitted = decode_composition_image_v1(data)

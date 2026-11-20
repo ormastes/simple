@@ -1,0 +1,60 @@
+# Purpose and audience: prevention specification for bug #16 (PCI ECAM multi-arch MMIO config space).
+# @req REQ-SSPEC-OS
+
+"""Prevent regression of hardcoded 0u64 ECAM base, missing arch MMIO gating, and unaligned/overlapping ECAM config transactions."""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{file_read}
+use os.kernel.boot.fdt_blob.{FdtBlob}
+use os.kernel.boot.mmio.{mmio_reset_for_test, mmio_disable_test_mode}
+use os.drivers.pci.pci.{
+    pci_ecam_base,
+    pci_set_ecam_base,
+    pci_configure_ecam_from_fdt,
+    pci_ecam_read_config_at,
+    pci_ecam_write_config_at
+}
+
+fn _count_occurrences(haystack: text, needle: text) -> i64:
+    if needle == "":
+        return 0
+    val parts = haystack.split(needle)
+    (parts.len() - 1).to_i64()
+
+describe "PCI ECAM ARM64/RV64 prevention (#16)":
+    it "gates _pci_ecam_base, pci_read_config, and pci_write_config across all six target architectures":
+        step("verify all 6 target arches declare cfg-gated ECAM base and config accessors without mmio_hardware stubs")
+        val src = file_read("src/os/drivers/pci/pci.spl")
+        expect(_count_occurrences(src, "fn _pci_ecam_base(")).to_equal(6)
+        expect(_count_occurrences(src, "fn pci_read_config(")).to_equal(6)
+        expect(_count_occurrences(src, "fn pci_write_config(")).to_equal(6)
+        expect(src.contains("mmio_hardware")).to_equal(false)
+        expect(src).to_contain("pci_ecam_addr(_pci_ecam_base()")
+        expect(src).to_contain("mmio_read32")
+        expect(src).to_contain("mmio_write32")
+
+    it "honors runtime ECAM override precedence and clears cleanly back to arch default":
+        step("set explicit ECAM override, verify precedence over default, and clear override to restore default")
+        pci_set_ecam_base(0u64)
+        val default_base = pci_ecam_base()
+        pci_set_ecam_base(0x4010000000u64)
+        expect(pci_ecam_base()).to_equal(0x4010000000u64)
+        pci_set_ecam_base(0u64)
+        expect(pci_ecam_base()).to_equal(default_base)
+        expect(pci_configure_ecam_from_fdt(FdtBlob.from_bytes([]))).to_equal(default_base)
+
+    it "isolates multi-bus, multi-function, and dword-aligned MMIO ECAM config transactions and rejects invalid coords":
+        step("verify bus 0 vs bus 2 vs func 7 isolation, 4-byte offset alignment, and fail-closed invalid coordinates")
+        mmio_reset_for_test()
+        val arm64_ecam = 0x4010000000u64
+        pci_ecam_write_config_at(arm64_ecam, 0u8, 1u8, 0u8, 0x10u8, 0x12345678u32)
+        pci_ecam_write_config_at(arm64_ecam, 2u8, 1u8, 0u8, 0x10u8, 0x9ABCDEF0u32)
+        pci_ecam_write_config_at(arm64_ecam, 2u8, 1u8, 7u8, 0x10u8, 0xCAFEBABEu32)
+        expect(pci_ecam_read_config_at(arm64_ecam, 0u8, 1u8, 0u8, 0x13u8)).to_equal(0x12345678u32)
+        expect(pci_ecam_read_config_at(arm64_ecam, 2u8, 1u8, 0u8, 0x10u8)).to_equal(0x9ABCDEF0u32)
+        expect(pci_ecam_read_config_at(arm64_ecam, 2u8, 1u8, 7u8, 0x10u8)).to_equal(0xCAFEBABEu32)
+        pci_ecam_write_config_at(arm64_ecam, 0u8, 32u8, 0u8, 0x00u8, 0x11112222u32)
+        expect(pci_ecam_read_config_at(arm64_ecam, 0u8, 32u8, 0u8, 0x00u8)).to_equal(0xFFFFFFFFu32)
+        expect(pci_ecam_read_config_at(arm64_ecam, 0u8, 0u8, 8u8, 0x00u8)).to_equal(0xFFFFFFFFu32)
+        mmio_disable_test_mode()

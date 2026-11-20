@@ -55,6 +55,17 @@ use os.kernel.loader.spawn_authority.{spawn_effective_rights, spawn_rights_is_su
 # the primitive this freestanding-adjacent module's own header discipline (no
 # unproven runtime dependencies) allows.
 use os.crypto.sha256.{sha256}
+use std.common.contracts.execution.simpleos_executable_v1.{
+    ManifestTarget as CommonManifestTarget,
+    ManifestResourceLimits as CommonManifestResourceLimits,
+    ManifestArgument as CommonManifestArgument,
+    ManifestPreload as CommonManifestPreload,
+    SimpleArtifactManifest as CommonSimpleArtifactManifest
+}
+use std.common.structural.execution.simple_artifact_manifest_v1_codec.{
+    encode_simple_artifact_manifest_v1_signing_bytes
+}
+use std.common.crypto.ed25519.{pure_ed25519_sign, pure_ed25519_verify}
 
 # Dependency-free value contracts are owned by common. Keep this loader module
 # as the compatibility import path while policy and cryptographic operations
@@ -161,6 +172,30 @@ pub fn manifest_reason_content_hash_mismatch() -> text:
     manifest's declared `content_hashes`. This is the check that catches a
     tampered or corrupted artifact, so it fails closed."""
     "content_hash_mismatch"
+
+pub fn manifest_reason_missing_signature() -> text:
+    """The manifest carries an empty `signature`."""
+    "missing_signature"
+
+pub fn manifest_reason_invalid_signature_format() -> text:
+    """The `signature` envelope is not a valid `ed25519:<key_id>:<128-hex>` payload."""
+    "invalid_signature_format"
+
+pub fn manifest_reason_untrusted_signer() -> text:
+    """The signature's `key_id` is absent from registered trust anchors."""
+    "untrusted_signer"
+
+pub fn manifest_reason_signature_verification_failed() -> text:
+    """Cryptographic Ed25519 verification against the trusted anchor failed."""
+    "signature_verification_failed"
+
+pub fn manifest_reason_trust_anchor_missing() -> text:
+    """Zero trust anchors are registered — cannot establish signer authority."""
+    "no_trust_anchor_registered"
+
+pub fn manifest_reason_invalid_trust_anchor() -> text:
+    """Trust-anchor key_id or 32-byte Ed25519 public key is malformed or conflicting."""
+    "invalid_trust_anchor"
 
 pub struct ManifestTarget:
     """A target triple. `"any"` in a field is an explicit wildcard; an EMPTY
@@ -632,3 +667,453 @@ pub fn manifest_summary(m: SimpleArtifactManifest) -> text:
         "|entry=" + m.entrypoint +
         "|interp=" + m.interpreter +
         "|ns=" + m.namespace_template
+
+# ============================================================================
+# Ed25519 trust-anchor registry and cryptographic manifest verification (#18)
+# ============================================================================
+
+pub struct ManifestTrustAnchor:
+    """Pinned Ed25519 signing authority registered for manifest verification."""
+    key_id: text
+    public_key: [u8]
+
+struct _ParsedSignatureEnvelope:
+    ok: bool
+    key_id: text
+    signature: [u8]
+
+var _manifest_trust_anchor_keys: [text] = []
+var _manifest_trust_anchor_pks: [[u8]] = []
+var _manifest_trust_anchor_count_scalar: i64 = 0
+
+fn _manifest_valid_key_id(key_id: text) -> bool:
+    if key_id.len() == 0 or key_id.len() > 128:
+        return false
+    var i: i64 = 0
+    while i < key_id.len():
+        val ch = key_id.char_code_at(i)
+        if ch < 33 or ch > 126 or ch == 58:
+            return false
+        i = i + 1
+    true
+
+fn _manifest_copy_u8_array(src: [u8]) -> [u8]:
+    var dst: [u8] = []
+    for b in src:
+        dst.push(b)
+    dst
+
+fn _manifest_bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: u64 = 0u64
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1u64
+    true
+
+fn _manifest_bytes_to_hex(bytes: [u8]) -> text:
+    var parts: [text] = []
+    var i: u64 = 0u64
+    while i < bytes.len():
+        val v = bytes[i].to_i64() & 0xFF
+        parts.push(_manifest_hex_digit((v >> 4) & 15) + _manifest_hex_digit(v & 15))
+        i = i + 1u64
+    parts.join("")
+
+fn _manifest_hex_nibble(ch: text) -> i64:
+    val code = ch.char_code_at(0)
+    if code >= 48 and code <= 57:
+        return code - 48
+    if code >= 97 and code <= 102:
+        return code - 87
+    if code >= 65 and code <= 70:
+        return code - 55
+    -1
+
+fn _manifest_hex_to_bytes(hex_str: text, expected_bytes: i64) -> [u8]:
+    if hex_str.len() != expected_bytes * 2:
+        return []
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < hex_str.len():
+        val hi = _manifest_hex_nibble(hex_str.substring(i, i + 1))
+        val lo = _manifest_hex_nibble(hex_str.substring(i + 1, i + 2))
+        if hi < 0 or lo < 0:
+            return []
+        out.push(((hi << 4) | lo).to_u8())
+        i = i + 2
+    out
+
+fn _manifest_parse_signature_envelope(signature: text) -> _ParsedSignatureEnvelope:
+    val parts = signature.split(":")
+    if parts.len() != 3 or parts[0] != "ed25519":
+        return _ParsedSignatureEnvelope(ok: false, key_id: "", signature: [])
+    val key_id = parts[1]
+    if not _manifest_valid_key_id(key_id):
+        return _ParsedSignatureEnvelope(ok: false, key_id: "", signature: [])
+    val sig_bytes = _manifest_hex_to_bytes(parts[2], 64)
+    if sig_bytes.len() != 64:
+        return _ParsedSignatureEnvelope(ok: false, key_id: "", signature: [])
+    _ParsedSignatureEnvelope(ok: true, key_id: key_id, signature: sig_bytes)
+
+fn _manifest_to_common_v1(m: SimpleArtifactManifest) -> CommonSimpleArtifactManifest:
+    var args_out: [CommonManifestArgument] = []
+    for arg in m.argument_schema:
+        args_out.push(CommonManifestArgument(
+            name: arg.name,
+            value_kind: arg.value_kind,
+            required: arg.required,
+            default_value: arg.default_value
+        ))
+    var preloads_out: [CommonManifestPreload] = []
+    for pre in m.startup_preloads:
+        preloads_out.push(CommonManifestPreload(
+            source_arg: pre.source_arg,
+            fixed_path: pre.fixed_path,
+            mode: pre.mode,
+            required: pre.required,
+            maximum_bytes: pre.maximum_bytes,
+            access: pre.access,
+            prefault: pre.prefault,
+            hash_policy: pre.hash_policy
+        ))
+    CommonSimpleArtifactManifest(
+        format_version: m.format_version,
+        artifact_kind: m.artifact_kind,
+        target: CommonManifestTarget(os: m.target.os, arch: m.target.arch, abi: m.target.abi),
+        entrypoint: m.entrypoint,
+        required_abi_features: m.required_abi_features,
+        required_services: m.required_services,
+        required_capabilities: m.required_capabilities,
+        resource_limits: CommonManifestResourceLimits(
+            max_memory_bytes: m.resource_limits.max_memory_bytes,
+            max_open_handles: m.resource_limits.max_open_handles,
+            max_threads: m.resource_limits.max_threads,
+            cpu_budget_us: m.resource_limits.cpu_budget_us
+        ),
+        namespace_template: m.namespace_template,
+        native_libraries: m.native_libraries,
+        smf_libraries: m.smf_libraries,
+        interpreter: m.interpreter,
+        argument_schema: args_out,
+        startup_preloads: preloads_out,
+        content_hashes: m.content_hashes,
+        signature: m.signature,
+        debug_identity: m.debug_identity
+    )
+
+pub fn manifest_trust_anchors_clear():
+    """Remove all registered trust anchors (for key reset or test isolation)."""
+    _manifest_trust_anchor_keys = []
+    _manifest_trust_anchor_pks = []
+    _manifest_trust_anchor_count_scalar = 0
+
+@allow(primitive_api)  # reason: count scalar matches existing SimpleArtifactManifest API conventions
+pub fn manifest_trust_anchor_count() -> i64:
+    """Return number of registered Ed25519 trust anchors."""
+    _manifest_trust_anchor_count_scalar
+
+pub fn manifest_trust_anchor_register(key_id: text, public_key: [u8]) -> ManifestCheck:
+    """Pin an Ed25519 trust-anchor public key under `key_id`."""
+    if not _manifest_valid_key_id(key_id) or public_key.len() != 32:
+        return ManifestCheck(ok: false, reason: manifest_reason_invalid_trust_anchor())
+    if _manifest_trust_anchor_count_scalar == 0:
+        _manifest_trust_anchor_keys = []
+        _manifest_trust_anchor_pks = []
+    var i: i64 = 0
+    while i < _manifest_trust_anchor_count_scalar:
+        if _manifest_trust_anchor_keys[i] == key_id:
+            if _manifest_bytes_equal(_manifest_trust_anchor_pks[i], public_key):
+                return ManifestCheck(ok: true, reason: manifest_reason_ok())
+            return ManifestCheck(ok: false, reason: manifest_reason_invalid_trust_anchor())
+        i = i + 1
+    _manifest_trust_anchor_keys.push(key_id)
+    _manifest_trust_anchor_pks.push(_manifest_copy_u8_array(public_key))
+    _manifest_trust_anchor_count_scalar = _manifest_trust_anchor_count_scalar + 1
+    ManifestCheck(ok: true, reason: manifest_reason_ok())
+
+@allow(primitive_api)  # reason: boolean revocation outcome matches existing manifest_* predicate API
+pub fn manifest_trust_anchor_revoke(key_id: text) -> bool:
+    """Remove a registered trust anchor by `key_id`; returns true when found."""
+    if _manifest_trust_anchor_count_scalar == 0:
+        return false
+    var next_keys: [text] = []
+    var next_pks: [[u8]] = []
+    var removed = false
+    var i: i64 = 0
+    while i < _manifest_trust_anchor_count_scalar:
+        if _manifest_trust_anchor_keys[i] == key_id:
+            removed = true
+        else:
+            next_keys.push(_manifest_trust_anchor_keys[i])
+            next_pks.push(_manifest_trust_anchor_pks[i])
+        i = i + 1
+    _manifest_trust_anchor_keys = next_keys
+    _manifest_trust_anchor_pks = next_pks
+    _manifest_trust_anchor_count_scalar = next_keys.len() as i64
+    removed
+
+fn _manifest_registered_anchors() -> [ManifestTrustAnchor]:
+    var out: [ManifestTrustAnchor] = []
+    var i: i64 = 0
+    while i < _manifest_trust_anchor_count_scalar:
+        out.push(ManifestTrustAnchor(
+            key_id: _manifest_trust_anchor_keys[i],
+            public_key: _manifest_copy_u8_array(_manifest_trust_anchor_pks[i])
+        ))
+        i = i + 1
+    out
+
+fn _manifest_find_anchor(anchors: [ManifestTrustAnchor], key_id: text) -> i64:
+    var i: i64 = 0
+    val n = anchors.len() as i64
+    while i < n:
+        if anchors[i].key_id == key_id:
+            return i
+        i = i + 1
+    -1
+
+pub fn manifest_sign_ed25519(
+    m: SimpleArtifactManifest,
+    key_id: text,
+    private_seed: [u8],
+    public_key: [u8],
+    image_hash: text
+) -> SimpleArtifactManifest:
+    """Sign canonical SAM1 manifest bytes over `image_hash` with Ed25519."""
+    if not _manifest_valid_key_id(key_id) or private_seed.len() != 32 or public_key.len() != 32:
+        return m
+    val resolved_hash = if image_hash != "": image_hash else:
+        if m.content_hashes.len() > 0: m.content_hashes[0] else: ""
+    if resolved_hash == "":
+        return m
+    var hashes = m.content_hashes
+    if not _manifest_hash_list_contains(hashes, resolved_hash):
+        hashes = [resolved_hash]
+    val normalized_manifest = manifest_with_signature(m, "", hashes)
+    val signing = encode_simple_artifact_manifest_v1_signing_bytes(_manifest_to_common_v1(normalized_manifest), resolved_hash)
+    if not signing.ok:
+        return m
+    val sig_bytes = pure_ed25519_sign(private_seed, public_key, signing.bytes)
+    if sig_bytes.len() != 64:
+        return m
+    manifest_with_signature(normalized_manifest, "ed25519:" + key_id + ":" + _manifest_bytes_to_hex(sig_bytes), hashes)
+
+pub fn manifest_verify_signature_with_anchors(
+    m: SimpleArtifactManifest,
+    image_hash: text,
+    anchors: [ManifestTrustAnchor]
+) -> ManifestCheck:
+    """Verify `m.signature` against explicit Ed25519 trust anchors."""
+    if m.signature == "":
+        return ManifestCheck(ok: false, reason: manifest_reason_missing_signature())
+    if m.content_hashes.len() == 0:
+        return ManifestCheck(ok: false, reason: manifest_reason_signature_without_hash())
+    if anchors.len() == 0:
+        return ManifestCheck(ok: false, reason: manifest_reason_trust_anchor_missing())
+    val parsed = _manifest_parse_signature_envelope(m.signature)
+    if not parsed.ok:
+        return ManifestCheck(ok: false, reason: manifest_reason_invalid_signature_format())
+    val resolved_hash = if image_hash != "": image_hash else: m.content_hashes[0]
+    if not _manifest_hash_list_contains(m.content_hashes, resolved_hash):
+        return ManifestCheck(ok: false, reason: manifest_reason_content_hash_mismatch())
+    val idx = _manifest_find_anchor(anchors, parsed.key_id)
+    if idx < 0:
+        return ManifestCheck(ok: false, reason: manifest_reason_untrusted_signer())
+    val anchor = anchors[idx]
+    if anchor.public_key.len() != 32:
+        return ManifestCheck(ok: false, reason: manifest_reason_invalid_trust_anchor())
+    val signing = encode_simple_artifact_manifest_v1_signing_bytes(_manifest_to_common_v1(m), resolved_hash)
+    if not signing.ok:
+        return ManifestCheck(ok: false, reason: manifest_reason_signature_verification_failed())
+    if not pure_ed25519_verify(anchor.public_key, signing.bytes, parsed.signature):
+        return ManifestCheck(ok: false, reason: manifest_reason_signature_verification_failed())
+    ManifestCheck(ok: true, reason: manifest_reason_ok())
+
+pub fn manifest_verify_signature(m: SimpleArtifactManifest, image_hash: text) -> ManifestCheck:
+    """Verify `m.signature` against registered Ed25519 trust anchors."""
+    manifest_verify_signature_with_anchors(m, image_hash, _manifest_registered_anchors())
+
+pub fn manifest_verify_signed_artifact(m: SimpleArtifactManifest, actual_bytes: [u8]) -> ManifestCheck:
+    """Fail-closed admission gate: structural check + SHA-256 hash + Ed25519 signature."""
+    val base_chk = manifest_validate(m)
+    if not base_chk.ok:
+        return base_chk
+    val hash_chk = manifest_verify_content_hash(m, actual_bytes)
+    if not hash_chk.ok:
+        return hash_chk
+    val digest_hex = manifest_sha256_hex(actual_bytes)
+    manifest_verify_signature(m, digest_hex)
+
+# ============================================================================
+# Typed path-scoped capability projection for SimpleArtifactManifest (#119)
+# ============================================================================
+
+pub struct ManifestScopedCapabilityV1:
+    """Versioned typed representation of one path- or port-scoped capability."""
+    kind: text
+    path_prefix: text
+    port: i64
+    right_mask: u32
+    raw: text
+
+pub struct ManifestScopedCapabilityParseV1:
+    """Result of parsing a typed scoped-capability expression."""
+    ok: bool
+    capability: ManifestScopedCapabilityV1
+    reason: text
+
+pub struct ManifestScopedProjectionV1:
+    """Result of projecting SCI capabilities into SimpleArtifactManifest."""
+    ok: bool
+    reason: text
+    manifest: SimpleArtifactManifest
+    projected: [ManifestScopedCapabilityV1]
+    projected_mask: u32
+
+fn _empty_scoped_capability_v1() -> ManifestScopedCapabilityV1:
+    ManifestScopedCapabilityV1(kind: "", path_prefix: "", port: -1, right_mask: 0u32, raw: "")
+
+fn _scoped_path_valid(path: text) -> bool:
+    if path.len() == 0 or not path.starts_with("/"):
+        return false
+    if path.contains("..") or path.contains("//") or path.contains("\\") or path.contains(" ") or path.contains("\t") or path.contains("\n") or path.contains("\r") or path.contains("(") or path.contains(")"):
+        return false
+    var i: i64 = 0
+    while i < path.len():
+        val ch = path.char_code_at(i)
+        if ch < 32 or ch > 126:
+            return false
+        i = i + 1
+    for seg in path.split("/"):
+        if seg == "." or seg == "..":
+            return false
+    true
+
+fn _scoped_parse_port(raw_port: text) -> i64:
+    if raw_port.len() == 0 or raw_port.len() > 5:
+        return -1
+    var acc: i64 = 0
+    var i: i64 = 0
+    while i < raw_port.len():
+        val ch = raw_port.char_code_at(i)
+        if ch < 48 or ch > 57:
+            return -1
+        acc = acc * 10 + (ch - 48)
+        i = i + 1
+    if acc < 1 or acc > 65535:
+        return -1
+    acc
+
+fn _scoped_norm_prefix(path: text) -> text:
+    if path.len() > 1 and path.ends_with("/"):
+        return path.substring(0, path.len() - 1)
+    path
+
+fn _scoped_path_within(requested: text, allowed: text) -> bool:
+    if not _scoped_path_valid(requested) or not _scoped_path_valid(allowed):
+        return false
+    if allowed == "/":
+        return true
+    val req_norm = _scoped_norm_prefix(requested)
+    val allow_norm = _scoped_norm_prefix(allowed)
+    req_norm == allow_norm or req_norm.starts_with(allow_norm + "/")
+
+fn _scoped_right_for_file_kind(kind: text) -> u32:
+    if kind == "FileRead":
+        return CAP_RIGHT_READ
+    if kind == "FileWrite" or kind == "FileCreate":
+        return CAP_RIGHT_WRITE
+    if kind == "FileExec":
+        return CAP_RIGHT_EXEC
+    0u32
+
+pub fn manifest_parse_scoped_capability_v1(spec: text) -> ManifestScopedCapabilityParseV1:
+    """Parse canonical SCI scoped capability token such as `FileRead(/home)`."""
+    val trimmed = spec.trim()
+    if trimmed == "":
+        return ManifestScopedCapabilityParseV1(ok: false, capability: _empty_scoped_capability_v1(), reason: "empty_scoped_capability")
+    if trimmed == "ProcessSpawn":
+        val cap = ManifestScopedCapabilityV1(kind: "ProcessSpawn", path_prefix: "", port: -1, right_mask: 0u32, raw: "ProcessSpawn")
+        return ManifestScopedCapabilityParseV1(ok: true, capability: cap, reason: "ok")
+    val open_idx = trimmed.index_of("(") ?? -1
+    if open_idx <= 0 or not trimmed.ends_with(")"):
+        return ManifestScopedCapabilityParseV1(ok: false, capability: _empty_scoped_capability_v1(), reason: "malformed_scoped_capability")
+    val kind = trimmed.substring(0, open_idx)
+    val arg = trimmed.substring(open_idx + 1, trimmed.len() - 1)
+    val file_mask = _scoped_right_for_file_kind(kind)
+    if file_mask != 0u32:
+        if not _scoped_path_valid(arg):
+            return ManifestScopedCapabilityParseV1(ok: false, capability: _empty_scoped_capability_v1(), reason: "invalid_capability_path_scope")
+        val cap = ManifestScopedCapabilityV1(
+            kind: kind,
+            path_prefix: _scoped_norm_prefix(arg),
+            port: -1,
+            right_mask: file_mask,
+            raw: kind + "(" + _scoped_norm_prefix(arg) + ")"
+        )
+        return ManifestScopedCapabilityParseV1(ok: true, capability: cap, reason: "ok")
+    if kind == "NetConnect" or kind == "NetListen":
+        val port = _scoped_parse_port(arg)
+        if port < 0:
+            return ManifestScopedCapabilityParseV1(ok: false, capability: _empty_scoped_capability_v1(), reason: "invalid_capability_port")
+        val cap = ManifestScopedCapabilityV1(
+            kind: kind,
+            path_prefix: "",
+            port: port,
+            right_mask: 0u32,
+            raw: kind + "(" + port.to_string() + ")"
+        )
+        return ManifestScopedCapabilityParseV1(ok: true, capability: cap, reason: "ok")
+    ManifestScopedCapabilityParseV1(ok: false, capability: _empty_scoped_capability_v1(), reason: "unknown_scoped_capability")
+
+pub fn manifest_scoped_capability_admitted_v1(
+    req: ManifestScopedCapabilityV1,
+    allowed: [ManifestScopedCapabilityV1]
+) -> bool:
+    """True when `req` matches an allowed capability and stays inside its scope."""
+    if req.kind == "":
+        return false
+    for a in allowed:
+        if a.kind != req.kind:
+            continue
+        if req.kind == "ProcessSpawn":
+            return true
+        if req.kind == "NetConnect" or req.kind == "NetListen":
+            if req.port > 0 and req.port == a.port:
+                return true
+        if _scoped_right_for_file_kind(req.kind) != 0u32:
+            if _scoped_path_within(req.path_prefix, a.path_prefix):
+                return true
+    false
+
+pub fn manifest_project_scoped_capabilities_v1(
+    m: SimpleArtifactManifest,
+    specs: [text],
+    ceiling: [ManifestScopedCapabilityV1]
+) -> ManifestScopedProjectionV1:
+    """Validate and project SCI capability strings into `m` bounded by kind & scope ceiling."""
+    val kind_max = manifest_kind_allowed_rights(m.artifact_kind)
+    var projected: [ManifestScopedCapabilityV1] = []
+    var req_mask: u32 = 0u32
+    for spec in specs:
+        val parsed = manifest_parse_scoped_capability_v1(spec)
+        if not parsed.ok:
+            return ManifestScopedProjectionV1(ok: false, reason: parsed.reason, manifest: m, projected: [], projected_mask: 0u32)
+        val cap = parsed.capability
+        if not spawn_rights_is_subset(cap.right_mask, kind_max):
+            return ManifestScopedProjectionV1(ok: false, reason: "capability_exceeds_kind_ceiling", manifest: m, projected: [], projected_mask: 0u32)
+        if not manifest_scoped_capability_admitted_v1(cap, ceiling):
+            return ManifestScopedProjectionV1(ok: false, reason: "capability_exceeds_scope_ceiling", manifest: m, projected: [], projected_mask: 0u32)
+        projected.push(cap)
+        req_mask = req_mask | cap.right_mask
+    val clamped = manifest_with_requested_rights(m, req_mask)
+    ManifestScopedProjectionV1(
+        ok: true,
+        reason: manifest_reason_ok(),
+        manifest: clamped,
+        projected: projected,
+        projected_mask: req_mask & kind_max
+    )
