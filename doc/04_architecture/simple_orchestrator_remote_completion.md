@@ -43,10 +43,7 @@ exit zero, a signed digest, a start observation nor an unbound reap file suffice
 | `remote_test_runner_v1` | Dedicated producer calls the existing native test executor and writes the verified report before worker finalization |
 | `remote_container_authority_v2` | Separate container completion signature domain, original scoped grant/approval and enrolled host verification |
 | `remote_container_evidence_v2` | Pinned common container request/provider, actual wait/absence evidence and transferred output bytes |
-| `remote_container_host_v2` | Shared Container API lifecycle, retained actual wait before destruction, exact independent absence and host signing |
 | `remote_container_session_v2` | Container parent admission using the existing operation and task journals |
-| `remote_container_stage_v2` | Bounded immutable byte staging with exclusive claims and absent output leaves |
-| `remote_container_producer_v2` | Dedicated in-container build/test entrypoint; nonce access preflight precedes every action |
 | `remote_container_workspace_probe_v2` | Actual same-process exclusive write/read/delete cycle, bound to task identity and fresh host nonce |
 | `task_runner.execution_identity_v2` | Tagged native/container attempts; native encoding remains unchanged and container records contain no invented PID |
 
@@ -88,6 +85,12 @@ its exact runtime identity, owner cleanup/absence receipt and actual output
 capture. The native-domain adapter and existing host create/start observation
 do not constitute container completion. No raw engine CLI or SSH-completion
 shortcut is introduced by this slice.
+
+Status (2026-11-20): the V2 container host, stager and producer described below
+(`remote_container_host_v2`, `remote_container_stage_v2`, `remote_container_producer_v2`) were
+deleted because no production entry reached them. The production container path is V3
+(`remote_run_v1` / `remote_build_service_port_v3` -> `RemoteContainerDatabaseSessionV3`). The
+remaining V2 session/evidence/probe text below is historical design, kept by test fixtures only.
 
 The V2 producer consumes the common owner, exact action/mount projection, actual
 wait and logs, then destroys the exact object and requests a positive absence
