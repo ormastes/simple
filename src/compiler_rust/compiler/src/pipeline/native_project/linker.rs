@@ -300,6 +300,7 @@ pub(super) fn minimal_boot_source_allowed(stem: &str, ssh_live_boot: bool) -> bo
         || stem == "baremetal_runtime_core.inc"
         || stem == "rv64_display_backend"
         || (ssh_live_boot && stem == "full_networking_runtime")
+        || stem == "rv64_kernel_primitives"
         || stem == "curve25519_ring_helper"
         || stem == "ed25519_scalar_helper"
         || stem == "ed25519_sha512_helper"
