@@ -1,6 +1,6 @@
 # std ed25519 leaves secret temporaries unwiped (2026-11-19)
 
-Status: PARTIALLY FIXED 2026-11-20 by milestone_0055 (NOT_RUN, no runnable binary); remaining residue is listed under "Still unwiped" in the last update. Was: OPEN. Residual of `doc/08_tracking/bug/host_identity_private_parser_seed_copies_unwiped_2026-11-18.md`.
+Status: PARTIALLY FIXED 2026-11-20 by milestone_0055 and milestone_0058 (NOT_RUN, no runnable binary); the entropy hex text and the Windows store text copies are fixed by milestone_0058; remaining residue is listed under "Still unwiped" (milestone_0055) minus those two items, plus the milestone_0058 "Remaining" list. Was: OPEN. Residual of `doc/08_tracking/bug/host_identity_private_parser_seed_copies_unwiped_2026-11-18.md`.
 
 `src/lib/common/crypto/ed25519.spl`: `ed25519_pubkey` and `pure_ed25519_sign` keep the SHA-512 digest of the seed
 (`h`), the clamped scalar (`a`), the nonce prefix, `r`, and field/scalar limb temporaries (`ed_scalar_mul_basepoint`,
@@ -86,3 +86,49 @@ Still unwiped (cannot be reached by a `[u8]` wipe today):
   is assumed to stay the parked sole holder, as the existing `host_identity_decode_private_v1(mut bytes)` already does.
 - The spec counts prove each wipe ran and read back zero, not that it hit the only copy; sole-holder shape is pinned by
   source needles only.
+
+## Update 2026-11-20 (milestone_0058 ENTROPY BYTES + WINDOWS JOURNAL BYTES; source-authored, NOT_RUN)
+Correction: the earlier text said "no bytes-returning entropy API exists". That was wrong. `std.nogc_sync_mut.crypto.
+entropy_platform.entropy_platform_bytes(count) -> Result<[u8], text>` already existed over `extern rt_entropy_fill`,
+with a C lane (`src/runtime/runtime_native.c` `rt_entropy_fill` -> `rt_random_bytes_c`: `/dev/urandom` read in a
+full-read loop with EINTR retry, BCryptGenRandom on Windows, zeroed and NIL on any failure), a Rust runtime twin
+(`sffi/random.rs`, scratch buffer wiped), an interpreter lane (`interpreter_extern/random.rs`, zeroize on failure) and
+a codegen spec entry. So no runtime extern, header, ABI table entry or clang selfcheck was added: none was needed.
+(The C lane uses `/dev/urandom`, not `getrandom(2)`; that is a fact, not changed here.)
+
+Fixed:
+- Entropy hex text. `sosix/entropy.spl` now also exports `sosix_random_bytes` (alias of `entropy_platform_bytes`).
+  `host_identity_key_generate_v1` draws the 36 seed + check bytes with it, takes the payload out of the Result into a
+  sole-holder `var` and overwrites the Result, then calls the new
+  `host_identity_key_generate_from_entropy_bytes_run_v1(mut bytes, label)`, which wipes the bytes on every exit (also
+  on a wrong length or an all-zero seed, wiped 1). The hex entry is now a thin wrapper kept for regression vectors
+  (same refusal codes, `wiped: 0` on invalid hex, 5 on success). Spec (NOT_RUN):
+  test/01_unit/app/orchestrator/host_identity_entropy_bytes_v1_spec.spl (ENTBYTES-01..03).
+- Windows store text copies. `WindowsJournalStoreV1` gained additive `read_bytes` / `publish_bytes` (publish = no
+  replace, operation 0). `read_bytes` keeps `read`'s quota, name, absence and UTF-8 contract, copies into a pre-sized
+  `[u8]` (no push), zeroes the native buffer before `rt_free` on every exit and wipes the copy before a UTF-8 refusal.
+  `publish_bytes` revalidates UTF-8 and zeroes its native copy before `rt_free`. `identity_windows_read_v1` /
+  `identity_windows_publish_v1` use them, so no `text` copy of a key file is made on the Windows store path. The text
+  methods and their non-key callers are unchanged. Spec (NOT_RUN):
+  test/01_unit/lib/nogc_sync_mut/io/windows_journal_bytes_wipe_v1_spec.spl (JBWIPE-01..04).
+
+Remaining (milestone_0058 scope):
+- The text journal methods (`read`, `publish`, `replace`, `compare_replace`, `publish_consumption`) still free their
+  native buffers unzeroed and build text. Their callers carry non-key records (leases, WAL CURRENT, receipts), so
+  they were left alone.
+- Native `rt_windows_journal_read_v1` / `rt_windows_journal_publish_v1` (`src/runtime/platform/
+  runtime_windows_journal_store_v1.h`): read writes straight into the caller's buffer; internal staging copies in
+  `wj_read_leaf_v1` / `wj_write_v1` were not audited here.
+- `entropy_platform.spl` `_entropy_platform_raw` keeps the array in `raw` (`[u8]?`) and `bytes = raw ?? []` while
+  building the Result; assumed to share one allocation (no copy), not proven by a run. On its wrong-length refusal
+  (a broken provider only) `_entropy_platform_wipe(bytes)` takes a non-`mut` parameter while `raw` still shares the
+  allocation, so by the milestone_0051 rule that wipe forks and the provider's bytes survive. Not fixed here: the clean
+  fix releases `raw` first, which needs a `nil` store outside `unsafe` (or a reshaped helper) in a module other lanes
+  consume. Opus review r1 P2-2.
+- Perf (accepted, not a regression of a hot path): `_journal_free_wiped` makes one `volatile_write_u8` FFI call per
+  byte. The bytes read wipes `count + 1` on success and the whole `maximum + 1` (65537 for the identity store) on its
+  error exits; a native bulk-zero helper would remove the per-byte calls.
+- Everything under milestone_0055 "Still unwiped" other than the entropy and Windows items is unchanged (ed25519
+  arithmetic temporaries, SHA-512 round locals, engine register/stack copies, the re-passed `mut` parameter
+  assumption, which this change also relies on for `host_identity_key_generate_from_entropy_bytes_run_v1`).
+

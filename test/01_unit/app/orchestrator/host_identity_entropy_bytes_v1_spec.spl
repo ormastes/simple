@@ -1,0 +1,101 @@
+"""
+## Purpose and audience
+Pins the bytes entropy path of src/app/orchestrator/host_identity_key_v1.spl: production key generation draws the 36
+seed + check bytes as a `[u8]` from the OS entropy owner (`sosix_random_bytes`, the sosix facade over
+`std.nogc_sync_mut.crypto.entropy_platform.entropy_platform_bytes` -> `rt_entropy_fill`), never as hex text, takes them
+out of the owner's Result into a sole-holder `var`, and hands them to the bytes generator, which wipes them on every
+exit after they exist. The hex entry stays as a thin wrapper for regression vectors.
+Bug: doc/08_tracking/bug/host_identity_ed25519_std_temporaries_unwiped_2026-11-19.md (entropy section).
+Written for owners of the host identity store.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-20, milestone_0058).
+## Compatibility and limitations
+The seed is RFC 8032 test-1: published, deliberately public fixture material. The production draw itself is pinned by
+source shape (a unit spec cannot inject an entropy provider failure). That the caller's `var` reads back zero after the
+`mut` call relies on mutable-argument write-back (milestone_0051 SEMANTICS.md).
+## Verification guidance and troubleshooting
+The bytes generator wipes 5 buffers on success (seed, check, entropy bytes, body, raw), and 1 (the entropy bytes) when
+it refuses the length or an all-zero seed (0 for an empty buffer: nothing was wiped).
+"""
+use std.spec.{step}
+use app.orchestrator.host_identity_key_v1.{host_identity_key_generate_from_entropy_run_v1,
+    host_identity_key_generate_from_entropy_bytes_run_v1, host_identity_private_public_v1}
+use std.io.file_read_text
+
+fn eb_count(source: text, needle: text) -> i64:
+    source.split(needle).len() - 1
+
+fn eb_body(source: text, start: text, end: text) -> text:
+    val tail = source.substring(source.index_of(start), source.byte_len())
+    tail.substring(0, tail.index_of(end))
+
+fn eb_entropy() -> [u8]:
+    [157, 97, 177, 157, 239, 253, 90, 96, 186, 132, 74, 244, 146, 236, 44, 196, 68, 73, 197, 105, 123, 50, 105, 25,
+        112, 59, 172, 3, 28, 174, 127, 96, 1, 2, 3, 4]
+
+fn eb_all_zero(bytes: [u8]) -> bool:
+    for byte in bytes:
+        if byte != 0u8: return false
+    true
+
+fn eb_source() -> text:
+    file_read_text("src/app/orchestrator/host_identity_key_v1.spl")
+
+describe "Host identity key generation draws entropy as wipeable bytes":
+    it "generates from bytes byte-identically to the hex vector and wipes the caller's entropy buffer":
+        # @req ENTBYTES-01
+        var entropy = eb_entropy()
+        val run = host_identity_key_generate_from_entropy_bytes_run_v1(entropy, "host-test")
+        expect(run.outcome.is_ok()).to_equal(true)
+        expect(run.wiped).to_equal(5)
+        expect(eb_all_zero(entropy)).to_equal(true)
+        val key = run.outcome.unwrap()
+        expect(host_identity_private_public_v1(key.private_file).unwrap()).to_equal(key.public_key)
+        val hex = host_identity_key_generate_from_entropy_run_v1(
+            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f6001020304", "host-test")
+        expect(hex.outcome.unwrap().private_file).to_equal(key.private_file)
+        expect(hex.wiped).to_equal(5)
+
+    it "refuses a wrong length or an all-zero seed and wipes the buffer it was handed":
+        # @req ENTBYTES-02
+        var short: [u8] = [9u8; 35]
+        val run = host_identity_key_generate_from_entropy_bytes_run_v1(short, "host-test")
+        expect(run.outcome.unwrap_err()).to_equal("host-identity-entropy-unavailable")
+        expect(run.wiped).to_equal(1)
+        expect(eb_all_zero(short)).to_equal(true)
+        var zero_seed: [u8] = [0u8; 36]
+        zero_seed[32] = 7u8
+        val zero = host_identity_key_generate_from_entropy_bytes_run_v1(zero_seed, "host-test")
+        expect(zero.outcome.unwrap_err()).to_equal("host-identity-entropy-unavailable")
+        expect(zero.wiped).to_equal(1)
+        expect(eb_all_zero(zero_seed)).to_equal(true)
+        var empty: [u8] = []
+        val none = host_identity_key_generate_from_entropy_bytes_run_v1(empty, "host-test")
+        expect(none.outcome.unwrap_err()).to_equal("host-identity-entropy-unavailable")
+        expect(none.wiped).to_equal(0)
+        step("the hex wrapper still refuses invalid hex before any buffer exists")
+        val bad = host_identity_key_generate_from_entropy_run_v1("zz", "host-test")
+        expect(bad.outcome.unwrap_err()).to_equal("host-identity-entropy-unavailable")
+        expect(bad.wiped).to_equal(0)
+
+    it "draws production entropy as bytes and moves it out of the owner's Result before generating":
+        # @req ENTBYTES-03
+        val source = eb_source()
+        expect(eb_count(source, "sosix_random_hex")).to_equal(0)
+        expect(eb_count(source, "use std.nogc_sync_mut.sosix.entropy.sosix_random_bytes")).to_equal(1)
+        val generate = eb_body(source, "pub fn host_identity_key_generate_v1(", "export ")
+        expect(eb_count(generate, "var drawn = sosix_random_bytes(36u64)")).to_equal(1)
+        expect(eb_count(generate, "var entropy: [u8] = drawn.unwrap()\n    drawn = Err(\"host-identity-entropy-taken\")")).to_equal(1)
+        expect(eb_count(generate, "host_identity_key_generate_from_entropy_bytes_run_v1(entropy, label)")).to_equal(1)
+        step("the hex entry only decodes and delegates; the bytes core owns and wipes the buffer")
+        val hex_entry = eb_body(source, "pub fn host_identity_key_generate_from_entropy_run_v1(",
+            "pub fn host_identity_key_generate_from_entropy_bytes_run_v1(")
+        expect(eb_count(hex_entry, "host_identity_key_generate_from_entropy_bytes_run_v1(bytes, label)")).to_equal(1)
+        expect(eb_count(hex_entry, "secure_zero_u8_slots(")).to_equal(0)
+        val core = eb_body(source, "pub fn host_identity_key_generate_from_entropy_bytes_run_v1(",
+            "pub fn host_identity_key_generate_v1(")
+        expect(eb_count(core, "(mut bytes: [u8], label: text)")).to_equal(1)
+        expect(eb_count(core, "secure_zero_u8_slots(bytes)")).to_equal(2)
+        val facade = file_read_text("src/lib/nogc_sync_mut/sosix/entropy.spl")
+        expect(eb_count(facade, "entropy_platform_bytes as sosix_random_bytes")).to_equal(1)

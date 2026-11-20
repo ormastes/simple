@@ -3,6 +3,7 @@
 use std.nogc_sync_mut.io.windows_private_file_abi.*
 use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u16, volatile_write_u8, volatile_read_u8}
 use std.common.text_bytes.{boxed_text_bytes_checked, bytes_to_text, text_to_utf8_bytes, utf8_bytes_valid}
+use std.common.crypto.secure_memory.secure_zero_u8_slots
 
 pub struct WindowsPrivateErrorV1:
     message: text
@@ -193,6 +194,13 @@ fn _journal_buffer(size: i64) -> i64:
     if size <= 0 or size > 8388609: return 0
     rt_alloc(size)
 
+# milestone_0058: the bytes methods zero a payload buffer before rt_free, so a private file's native copy is never
+# handed back to the allocator as is.
+@unsafe(reason: "zeroes a bounded native temporary before freeing it", capabilities: [ffi, raw_ptr])
+fn _journal_free_wiped(buffer: i64, size: i64):
+    for index in 0..size: volatile_write_u8(buffer + index, 0)
+    rt_free(buffer)
+
 pub class WindowsJournalStoreV1:
     token: i64
     origin_root: i64
@@ -239,8 +247,63 @@ pub class WindowsJournalStoreV1:
             if roundtrip[index] != bytes[index]: return Err("WINDOWS_JOURNAL_UTF8_ROUNDTRIP")
         Ok(Some(decoded))
 
+    # milestone_0058: private files (the identity store's keys) never become `text` here. Same quota, name, absence
+    # and UTF8 contract as read. The copy is pre-sized at the native count (no push, so no reallocation drops a
+    # prefix) and is the caller's to wipe; the native buffer is zeroed before rt_free on every exit after it exists,
+    # and a refused copy is wiped before the refusal.
+    # @allow(primitive_api): byte bound mirrors read(); the native journal ABI takes an i64 maximum
+    @unsafe(reason: "reads exact UTF8 bytes from bounded native journal operation into a wipeable copy", capabilities: [ffi, raw_ptr])
+    pub fn read_bytes(relative: text, maximum: i64) -> Result<Option<[u8]>, text>:
+        if maximum < 0 or maximum > 8388608: return Err("WINDOWS_JOURNAL_READ_QUOTA")
+        if relative.byte_len() == 0 or relative.byte_len() > 512:
+            return Err("WINDOWS_JOURNAL_NAME")
+        val name = _private_path(relative)
+        if name == 0: return Err("WINDOWS_JOURNAL_NAME")
+        val buffer = _journal_buffer(maximum + 1)
+        if buffer == 0:
+            rt_windows_private_free_v1(name)
+            return Err("WINDOWS_JOURNAL_MEMORY")
+        val count = rt_windows_journal_read_v1(self.token, name, buffer, maximum)
+        rt_windows_private_free_v1(name)
+        if count == -2:
+            _journal_free_wiped(buffer, maximum + 1)
+            return Ok(None)
+        if count < 0 or count > maximum:
+            _journal_free_wiped(buffer, maximum + 1)
+            return Err("WINDOWS_JOURNAL_READ")
+        var bytes: [u8] = [0u8; count]
+        for index in 0..count: bytes[index] = volatile_read_u8(buffer + index) as u8
+        # The native read wrote at most `count` bytes; the rest of the bound never held file content.
+        _journal_free_wiped(buffer, count + 1)
+        if not utf8_bytes_valid(bytes):
+            val _refused_wipe = secure_zero_u8_slots(bytes)
+            return Err("WINDOWS_JOURNAL_UTF8")
+        Ok(Some(bytes))
+
     pub fn publish(relative: text, payload: text) -> Result<bool, text>:
         self.write_record(relative, payload, 0, None)
+
+    # milestone_0058: publish (no replace) from bytes the caller owns and wipes; no `text` copy of the payload. The
+    # journal still revalidates UTF8 itself, and its native copy is zeroed before rt_free.
+    @unsafe(reason: "copies checked UTF8 bytes into bounded native temporary zeroed before free", capabilities: [ffi, raw_ptr])
+    pub fn publish_bytes(relative: text, payload: [u8]) -> Result<bool, text>:
+        if relative.byte_len() == 0 or relative.byte_len() > 512:
+            return Err("WINDOWS_JOURNAL_NAME")
+        if payload.len() > 8388608: return Err("WINDOWS_JOURNAL_PAYLOAD_QUOTA")
+        if not utf8_bytes_valid(payload): return Err("WINDOWS_JOURNAL_PAYLOAD_ENCODING")
+        val name = _private_path(relative)
+        if name == 0: return Err("WINDOWS_JOURNAL_NAME")
+        val buffer = _journal_buffer(payload.len() + 1)
+        if buffer == 0:
+            rt_windows_private_free_v1(name)
+            return Err("WINDOWS_JOURNAL_MEMORY")
+        for index in 0..payload.len(): volatile_write_u8(buffer + index, payload[index] as i64)
+        val status = rt_windows_journal_publish_v1(self.token, name, buffer, payload.len(), 0)
+        rt_windows_private_free_v1(name)
+        _journal_free_wiped(buffer, payload.len() + 1)
+        if status == 0: return Ok(false)
+        if status != 1: return Err("WINDOWS_JOURNAL_WRITE_UNCERTAIN")
+        Ok(true)
 
     # Only a new fixed consumption record can mint this capability. Existing
     # records and ordinary reads/publishes cannot be converted into receipts.
