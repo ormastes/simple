@@ -22,8 +22,8 @@ use std.common.io.read_only_file_view.{read_only_file_view_open_v1,
     read_only_file_view_read_v1, read_only_file_view_close_v1}
 use std.common.io.file_read_policy.{FileReadPolicyV1}
 use std.async.cancellation.{CancellationToken}
-use std.common.crypto.sha256.{sha256_text, sha256_stream_v1_new,
-    sha256_stream_v1_update, sha256_stream_v1_finish_hex}
+use std.common.crypto.sha256.{sha256_text, sha256_stream_v1_new}
+use app.build.host_path_policy.{build_host_abs_path_valid_v1}
 use std.nogc_sync_mut.io.file.{FileHandle}
 use app.io.mod.{secure_temp_dir, dir_create_all, dir_remove_all,
     file_hash_sha256, file_is_regular_no_follow, file_size_raw,
@@ -46,16 +46,7 @@ fn _retained_failure_v1(reason: text,
         BuildResultFetchV1(false, false, detail, "", "", "", ""))
 
 fn _retained_path_v1(path: text) -> bool:
-    if not path.starts_with("/") or path.len() < 2 or path.len() > 4096 or
-       path.ends_with("/") or path.contains("//") or path.contains("\0"):
-        return false
-    val parts = path.split("/")
-    var i: i64 = 1
-    while i < parts.len():
-        val item = parts[i]
-        if item == "" or item == "." or item == "..": return false
-        i = i + 1
-    true
+    build_host_abs_path_valid_v1(path, false, false, 4096, 4096)
 
 fn _retained_file_limit_v1(path: text) -> i64:
     if path == "outputs/result.wire": return 4096
@@ -86,7 +77,7 @@ fn _copy_retained_file_v1(child_root: text, output_root: text,
         val _ = read_only_file_view_close_v1(view)
         return "result-stage-write"
     var stage = created.unwrap()
-    val stream = sha256_stream_v1_new()
+    var stream = sha256_stream_v1_new()
     val cancellation = CancellationToken.new()
     var offset: u64 = 0u64
     var error = ""
@@ -101,7 +92,7 @@ fn _copy_retained_file_v1(child_root: text, output_root: text,
             break
         val bytes = read.unwrap().bytes
         if bytes.len().to_u64() != length or
-           not sha256_stream_v1_update(stream, bytes):
+           not stream.update(bytes):
             error = "result-file-read"
             break
         if stage.write_all(bytes).is_err():
@@ -109,7 +100,7 @@ fn _copy_retained_file_v1(child_root: text, output_root: text,
             break
         offset = offset + length
     if error == "":
-        val digest = sha256_stream_v1_finish_hex(stream)
+        val digest = stream.finish_hex()
         if digest == nil or digest.unwrap() != file.sha256:
             error = "result-file-digest"
     val stage_closed = stage.close()

@@ -14,24 +14,47 @@ the corpus fail-open.
 """
 
 use std.spec.*
-use std.io_runtime.{shell, file_write, file_delete}
+use std.io_runtime.{env_get, env_set, file_exists, file_write, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.fs.host_path.{host_path_canonical}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
 
-val PROBE_DIR = "build/probe_run_exit_code"
-val GOOD = "{PROBE_DIR}/good_probe.spl"
-val BAD = "{PROBE_DIR}/undef_var_probe.spl"
+fn _probe_simple_bin() -> text:
+    if file_exists("bin/simple.exe"):
+        return "bin/simple.exe"
+    if file_exists("bin/simple"):
+        return "bin/simple"
+    env_get("SIMPLE_BINARY") ?? "bin/simple"
 
-fn write_probes():
-    shell("mkdir -p {PROBE_DIR}")
-    file_write(GOOD, "fn main():\n    print \"control-ok\"\n")
+fn _write_probe_pair(work: text) -> (text, text):
+    val good = work + "/good_probe.spl"
+    val bad = work + "/undef_var_probe.spl"
+    expect(file_write(good, "fn main():\n    print \"control-ok\"\n")).to_equal(true)
     # The probe must USE the unresolved value in plain value position
     # (interpolation), not via a method call: unresolved METHOD calls already
     # fail closed (rc=70); only value-position reads hit the const-0 fail-open.
     val brace_open = "{"
-    file_write(BAD, "fn main():\n    print \"before\"\n    val x = totally_undefined_thing_xyz\n    print \"after " + brace_open + "x}\"\n")
+    expect(file_write(bad, "fn main():\n    print \"before\"\n    val x = totally_undefined_thing_xyz\n    print \"after " + brace_open + "x}\"\n")).to_equal(true)
+    (good, bad)
 
-fn run_engine(engine_env: text, file: text) -> (text, i64):
-    val r = shell("env SIMPLE_TIMEOUT_SECONDS=0 {engine_env} timeout 60 bin/simple run {file} 2>&1")
-    (r.stdout + r.stderr, r.exit_code)
+fn run_engine_probe(mode: text, strict: text, kind: text) -> (text, i64):
+    val parent = host_path_canonical(get_temp_dir())
+    val work = secure_temp_dir(parent, "probe_run_exit_code").unwrap()
+    val (good, bad) = _write_probe_pair(work)
+    val target = if kind == "good": good else: bad
+    val old_timeout = env_get("SIMPLE_TIMEOUT_SECONDS") ?? ""
+    val old_mode = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    val old_strict = env_get("SIMPLE_JIT_STRICT") ?? ""
+    val _s1 = env_set("SIMPLE_TIMEOUT_SECONDS", "0")
+    val _s2 = env_set("SIMPLE_EXECUTION_MODE", mode)
+    val _s3 = env_set("SIMPLE_JIT_STRICT", strict)
+    val res = process_run_timeout(_probe_simple_bin(), ["run", target], 60000)
+    val _r1 = env_set("SIMPLE_TIMEOUT_SECONDS", old_timeout)
+    val _r2 = env_set("SIMPLE_EXECUTION_MODE", old_mode)
+    val _r3 = env_set("SIMPLE_JIT_STRICT", old_strict)
+    val _cleanup = dir_remove_all(work)
+    (res.0 + res.1, res.2)
 
 describe "bin/simple run exit-code contract":
     """
@@ -42,19 +65,16 @@ describe "bin/simple run exit-code contract":
 
     it "control program exits 0 on interpreter and JIT":
         # @req REQ-CLI-EXIT-001
-        step("write a correct probe and an undefined-identifier probe")
-        write_probes()
         step("run the correct probe on both engines and read exit codes")
-        val (_out_i, rc_i) = run_engine("SIMPLE_EXECUTION_MODE=interpreter", GOOD)
-        val (_out_j, rc_j) = run_engine("SIMPLE_EXECUTION_MODE=jit", GOOD)
+        val (_out_i, rc_i) = run_engine_probe("interpreter", "", "good")
+        val (_out_j, rc_j) = run_engine_probe("jit", "", "good")
         assert_equal(rc_i, 0)
         assert_equal(rc_j, 0)
 
     it "undefined identifier exits non-zero with a diagnostic on the interpreter":
         # @req REQ-CLI-EXIT-002
-        write_probes()
         step("run the undefined-identifier probe on the interpreter")
-        val (out, rc) = run_engine("SIMPLE_EXECUTION_MODE=interpreter", BAD)
+        val (out, rc) = run_engine_probe("interpreter", "", "bad")
         assert_not_equal(rc, 0)
         assert_contains(out, "not found")
 
@@ -67,18 +87,13 @@ describe "bin/simple run exit-code contract":
         code is non-zero.
         """
         # @req REQ-CLI-EXIT-003
-        write_probes()
         step("run the undefined-identifier probe on the default (JIT) engine")
-        # Explicit engine env: the test daemon exports the interpreter mode to
-        # children, so an empty env here would silently re-test the interpreter.
-        val (out, rc) = run_engine("SIMPLE_EXECUTION_MODE=jit", BAD)
+        val (out, rc) = run_engine_probe("jit", "", "bad")
         assert_not_equal(rc, 0)
         step("confirm no fabricated value was printed as a successful result")
         assert_false(out.contains("after 0") and rc == 0)
 
     it "undefined identifier is a hard error under SIMPLE_JIT_STRICT=1":
         # @req REQ-CLI-EXIT-003
-        write_probes()
-        step("run the undefined-identifier probe with SIMPLE_JIT_STRICT=1")
-        val (_out, rc) = run_engine("SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1", BAD)
+        val (_out, rc) = run_engine_probe("jit", "1", "bad")
         assert_not_equal(rc, 0)

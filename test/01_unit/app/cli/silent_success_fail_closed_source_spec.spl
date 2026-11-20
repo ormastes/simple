@@ -41,7 +41,7 @@ describe "CLI silent-success fail-closed invariants":
         step("rejects a native-build worker that exits 0 without an output binary")
         val source = src("src/app/cli/native_build_main.spl")
         expect(source.len()).to_be_greater_than(0)
-        expect(source).to_contain("if code == 0 and output_path != \"\" and not file_exists(output_path):")
+        expect(source).to_contain("if native_build_missing_output_is_failure_v1(code, output_path, output_ok, shard_child_run):")
         expect(source).to_contain("error: native-build worker exited 0 but produced no output binary")
 
     it "rejects a compiler driver Success that wrote no artifact":
@@ -54,7 +54,7 @@ describe "CLI silent-success fail-closed invariants":
         # name's ".simple-native-build-" marker lives in
         # build_intermediate_policy.spl; the compile lane must consume the
         # staged name, not write the requested output directly.
-        expect(source).to_contain("val staged_output = out_parent + \"/\" + native_build_intermediate_name(")
+        expect(source).to_contain("val staged_output = native_build_join_output_parent(out_parent, native_build_intermediate_name(")
         expect(source).to_contain("error: native-build reported success but produced no fresh output binary")
         val policy = src("src/app/io/_CliCompile/build_intermediate_policy.spl")
         expect(policy).to_contain(".simple-native-build-")
@@ -69,12 +69,10 @@ describe "CLI silent-success fail-closed invariants":
         expect(source.len()).to_be_greater_than(0)
         expect(source).to_contain("extern fn rt_cli_get_args() -> [text]")
         expect(source).to_contain("extern fn rt_exit(code: i64)")
-        expect(source).to_contain("rt_cli_get_args()")
-        # Re-importing either name here reintroduces the self-binding recursion.
-        # Other io_runtime names (env_get, getpid, file facades) are imported
-        # deliberately and are safe; only the two wrapper-colliding names —
-        # imported by any module-path spelling, alone, combined, or via `*` —
-        # must stay out.
-        assert_false(source.contains("io_runtime.{get_args"))
-        assert_false(source.contains("io_runtime.{exit"))
+        expect(source).to_contain("export use std.io_runtime.\{get_args, exit, env_set\}")
+        # Defining local `fn get_args`/`fn exit` alongside a `use std.io_runtime.{...}`
+        # import reintroduces self-binding recursion.
+        assert_false(source.contains("fn get_args("))
+        assert_false(source.contains("fn exit("))
+        assert_false(source.contains("\nuse std.io_runtime.\{get_args"))
         assert_false(source.contains("io_runtime.*"))

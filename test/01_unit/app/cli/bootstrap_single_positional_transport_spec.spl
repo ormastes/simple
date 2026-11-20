@@ -3,30 +3,48 @@
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
 use std.spec.step
+use std.io_runtime.{env_get, dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.fs.host_path.{host_path_canonical}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
 
 extern fn rt_file_write_text(path: text, contents: text) -> i64
 extern fn rt_file_size(path: text) -> i64
+extern fn rt_file_exists(path: text) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn _transport_simple_bin() -> text:
+    if rt_file_exists("bin/simple.exe"):
+        return "bin/simple.exe"
+    if rt_file_exists("bin/simple"):
+        return "bin/simple"
+    env_get("SIMPLE_BINARY") ?? "bin/simple"
+
+fn _transport_work_dir() -> text:
+    val parent = host_path_canonical(get_temp_dir())
+    secure_temp_dir(parent, "sspec_baa_bootstrap_transport").unwrap()
 
 describe "bootstrap single-file native build transport":
     # @manual scenario evidence
     it "transports one positional input file into a compiled artifact":
         # @req REQ-SSPEC-APP
         step("compile a single positional source file end to end")
-        val work = "/tmp/sspec_baa_bootstrap_transport"
-        val _m = rt_process_run("/bin/mkdir", ["-p", work])
+        val work = _transport_work_dir()
+        val _m = dir_create_all(work)
         val entry = work + "/entry.spl"
         val artifact = work + "/entry.smf"
         val probe = "fn main() -> i64:\n    return 0\n"
         val _w = rt_file_write_text(entry, probe)
-        val (_out, _err, code) = rt_process_run("bin/simple", ["compile", entry, "-o", artifact])
-        expect(code).to_equal(0)
+        val (_out, _err, code) = rt_process_run(_transport_simple_bin(), ["compile", entry, "-o", artifact])
         val smf_bytes = rt_file_size(artifact) ?? 0
+        val _cleanup = dir_remove_all(work)
+        expect(code).to_equal(0)
         expect(smf_bytes > 0).to_equal(true)
 
     it "rejects a positional input that does not exist":
         # @req REQ-SSPEC-APP
         step("compile a missing positional input and observe failure")
-        val work = "/tmp/sspec_baa_bootstrap_transport"
-        val (_out2, _err2, code2) = rt_process_run("bin/simple", ["compile", work + "/missing.spl", "-o", work + "/missing.smf"])
+        val work = _transport_work_dir()
+        val (_out2, _err2, code2) = rt_process_run(_transport_simple_bin(), ["compile", work + "/missing.spl", "-o", work + "/missing.smf"])
+        val _cleanup = dir_remove_all(work)
         expect(code2 != 0).to_equal(true)

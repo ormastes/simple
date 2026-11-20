@@ -38,6 +38,11 @@ use std.spec.step
 extern fn rt_file_read_text(path: text) -> text?
 
 use app.cli.query_diagnostics.{_split_structured_error, _extract_error_code}
+use app.cli.query_lint.{_check_closure_capture_text}
+use app.cli.query_rich_common.{
+    _diag_emit_or_collect, query_diag_collect_begin, query_diag_collect_end,
+    query_diag_collected, query_diag_clear_collected,
+    query_diag_severity_reset, query_diag_severity_set}
 
 describe "query diagnostics helpers":
     it "keeps structured lint collection state owned and nested-safe":
@@ -79,17 +84,16 @@ describe "query diagnostics helpers":
             "    fn second():",
             "        x += 1"
         ]
-        _DIAG_COLLECT_MODE = true
-        _DIAG_COLLECTED = []
+        query_diag_collect_begin()
         val count = _check_closure_capture_text(lines, "fixture.spl", "json")
         expect(count).to_equal(4)  # oracle: two sibling closures each capture two outer variables
-        expect(_DIAG_COLLECTED.len()).to_equal(4)  # oracle: every collected diagnostic is retained in order
-        expect(_DIAG_COLLECTED[0]).to_contain("\"line\":5")
-        expect(_DIAG_COLLECTED[1]).to_contain("\"line\":5")
-        expect(_DIAG_COLLECTED[2]).to_contain("\"line\":7")
-        expect(_DIAG_COLLECTED[3]).to_contain("\"line\":7")
-        _DIAG_COLLECTED = []
-        _DIAG_COLLECT_MODE = false
+        val collected = query_diag_collected()
+        expect(collected.len()).to_equal(4)  # oracle: every collected diagnostic is retained in order
+        expect(collected[0]).to_contain("\"line\":5")
+        expect(collected[1]).to_contain("\"line\":5")
+        expect(collected[2]).to_contain("\"line\":7")
+        expect(collected[3]).to_contain("\"line\":7")
+        query_diag_collect_end()
 
     it "uses one forward CLOS001 scope index instead of reverse walks":
         # @req REQ-SSPEC-APP
@@ -220,27 +224,22 @@ describe "query diagnostics helpers":
         step("Collect one diagnostic under empty, overriding, and buried severity policy")
         # @capture(statistics): collected diagnostic per severity-policy case retained
         val diagnostic = "{\"severity\":2,\"code\":\"X\",\"message\":\"m\"}"
-        _DIAG_COLLECT_MODE = true
-        _DIAG_COLLECTED = []
-        _DIAG_SEVERITY_OVERRIDE = {}
-        _DIAG_SEVERITY_OVERRIDE_COUNT = 0
+        query_diag_collect_begin()
+        query_diag_severity_reset()
         _diag_emit_or_collect(diagnostic)
-        expect(_DIAG_COLLECTED).to_equal([diagnostic])
+        expect(query_diag_collected()).to_equal([diagnostic])
 
-        _DIAG_COLLECTED = []
-        _DIAG_SEVERITY_OVERRIDE["X"] = 1
-        _DIAG_SEVERITY_OVERRIDE_COUNT = 1
+        query_diag_clear_collected()
+        query_diag_severity_set("X", 1)
         _diag_emit_or_collect(diagnostic)
-        expect(_DIAG_COLLECTED[0]).to_contain("\"severity\":1")
+        expect(query_diag_collected()[0]).to_contain("\"severity\":1")
 
-        _DIAG_COLLECTED = []
-        _DIAG_SEVERITY_OVERRIDE["X"] = -1
+        query_diag_clear_collected()
+        query_diag_severity_set("X", -1)
         _diag_emit_or_collect(diagnostic)
-        expect(_DIAG_COLLECTED.len()).to_equal(0)  # oracle: a severity-buried diagnostic is suppressed entirely
-        _DIAG_SEVERITY_OVERRIDE = {}
-        _DIAG_SEVERITY_OVERRIDE_COUNT = 0
-        _DIAG_COLLECTED = []
-        _DIAG_COLLECT_MODE = false
+        expect(query_diag_collected().len()).to_equal(0)  # oracle: a severity-buried diagnostic is suppressed entirely
+        query_diag_severity_reset()
+        query_diag_collect_end()
 
     it "splits structured error metadata into core related and help":
         # @req REQ-SSPEC-APP
