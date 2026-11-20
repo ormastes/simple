@@ -1270,6 +1270,17 @@ struct _RasterOpacityGroup:
     white_alpha: bool
     backdrop_root: bool
 
+# The root stacking context layer node `i` paints in: the z-index of its
+# outermost positioned ancestor-or-self with a non-zero z-index (0 if none).
+fn _raster_root_layer_z(nodes: [HNode], styles: [Style], i: i32) -> i32:
+    var z = 0
+    var cur = i
+    while cur >= 0:  # cpu-lane-loop-ok: depth-bounded ancestor walk; bound is DOM depth
+        if _raster_group_positioned(styles[cur]) and styles[cur].z_index != 0:
+            z = styles[cur].z_index
+        cur = nodes[cur].parent as i32
+    z
+
 # `nested` scans inside a parent group's layer (the parent root is at opacity
 # 100 and everything outside it is hidden): one painted item is already a
 # layer there (a fold onto the transparent layer is not exact on the raster),
@@ -1279,6 +1290,16 @@ fn _raster_opacity_groups(nodes: [HNode], styles: [Style], bx: [i32], by: [i32],
     var groups: [_RasterOpacityGroup] = []
     val n = nodes.len() as i32
     var claimed: [bool] = [false; n]
+    # Generated ::before/::after boxes sit after the parsed arena, so arena
+    # index is not tree order there: the overlap rule ranks by tree order.
+    var tree_rank: [i32] = []
+    if not nested and html_generated_start(nodes) >= 0:
+        tree_rank = [0; n]
+        val order = html_tree_order(nodes, build_child_index(nodes))
+        var r = 0
+        while r < order.len():  # cpu-lane-loop-ok: inverts the tree-order walk once; bound is node_count
+            tree_rank[order[r]] = r as i32
+            r = r + 1
     var g = 0
     while g < n:  # cpu-lane-loop-ok: one scan for fractional-opacity roots; the per-root member/overlap passes run only for a root that is found, bound is node_count per root
         val gst = styles[g]
@@ -1400,14 +1421,19 @@ fn _raster_opacity_groups(nodes: [HNode], styles: [Style], bx: [i32], by: [i32],
             val min_painted = if nested: 1 else: 2
             var admitted = painted >= min_painted and not reject and x1 > x0 and y1 > y0
             if admitted and not nested:
+                val group_layer_z = _raster_root_layer_z(nodes, styles, g)
                 var a = 0
                 while a < n:  # cpu-lane-loop-ok: overlap check against positioned boxes outside the group; bound is node_count
                     val ast = styles[a]
+                    # A box in a lower root-context layer (a z-0 box against a
+                    # glass under a z-1 wrapper) paints below the group.
+                    val a_after = if tree_rank.len() > 0: tree_rank[a] > tree_rank[g] else: a > g
                     if (
                         not members[a] and _raster_group_positioned(ast) and
-                        (a > g or ast.z_index > 0) and
+                        (a_after or ast.z_index > 0) and
                         _raster_group_visible(nodes, styles, a) and
-                        bx[a] < x1 and bx[a] + bw[a] > x0 and by[a] < y1 and by[a] + bh[a] > y0
+                        bx[a] < x1 and bx[a] + bw[a] > x0 and by[a] < y1 and by[a] + bh[a] > y0 and
+                        _raster_root_layer_z(nodes, styles, a) >= group_layer_z
                     ):
                         # An ancestor of the group paints under it.
                         var anc = nodes[g].parent as i32
