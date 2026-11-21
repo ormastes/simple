@@ -591,6 +591,7 @@ pub fn evaluate_call_args(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Vec<Value>, CompileError> {
+    let _expected_target_guard = crate::interpreter::push_expected_target_type(None);
     let mut vals = Vec::with_capacity(args.len());
     for arg in args {
         vals.push(crate::interpreter::evaluate_expr(

@@ -193,6 +193,11 @@ impl Lowerer {
                     self.check_expr_for_async_calls(arg, caller_name, function_suspension)?;
                 }
             }
+            HirExprKind::TypeParamStaticCall { args, .. } => {
+                for arg in args {
+                    self.check_expr_for_async_calls(arg, caller_name, function_suspension)?;
+                }
+            }
             HirExprKind::GeneratorCreate { body } | HirExprKind::FutureCreate { body } | HirExprKind::Await(body) => {
                 self.check_expr_for_async_calls(body, caller_name, function_suspension)?;
             }
@@ -235,7 +240,8 @@ impl Lowerer {
             | HirExprKind::Nil
             | HirExprKind::Local(_)
             | HirExprKind::Global(_)
-            | HirExprKind::ContractResult => {}
+            | HirExprKind::ContractResult
+            | HirExprKind::ConstGeneric(_) => {}
             HirExprKind::LetIn { value, body, .. } => {
                 self.check_expr_for_async_calls(value, caller_name, function_suspension)?;
                 self.check_expr_for_async_calls(body, caller_name, function_suspension)?;
@@ -272,10 +278,8 @@ pub(super) fn validate_trait_impl_arity(ast_module: &simple_parser::ast::Module)
         let Node::Impl(impl_block) = item else { continue };
         let Some(trait_name) = impl_block.trait_name.as_ref() else { continue };
         let Some(candidates) = traits.get(trait_name.as_str()) else { continue };
-        let type_name = match &impl_block.target_type {
-            simple_parser::ast::Type::Simple(n) | simple_parser::ast::Type::Generic { name: n, .. } => n.clone(),
-            other => format!("{:?}", other),
-        };
+        let type_name = super::super::Lowerer::impl_target_type_name(&impl_block.target_type)
+            .unwrap_or_else(|| format!("{:?}", impl_block.target_type));
         let mut best: Option<Vec<String>> = None;
         for trait_def in candidates {
             let mut p = Vec::new();

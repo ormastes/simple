@@ -220,16 +220,26 @@ pub(crate) fn call_value_with_args(
                 Some(owner) => ClosureOriginGuard::enter_owned(&owner),
                 None => ClosureOriginGuard::enter_closure(captured_env),
             };
-            // Execute function with given args, using the captured environment for closure
             let mut local_env = Env::clone(captured_env);
+            let mut bound_args = HashMap::new();
             for (i, param) in def.params.iter().enumerate() {
                 if let Some(arg) = args.get(i) {
-                    local_env.insert(param.name.clone(), arg.clone());
+                    bound_args.insert(param.name.clone(), arg.clone());
+                } else if let Some(default_expr) = &param.default {
+                    let val = evaluate_expr(default_expr, &mut local_env, functions, classes, enums, impl_methods)?;
+                    bound_args.insert(param.name.clone(), val);
                 }
             }
-            // Execute the function body
-            let result = exec_block(&def.body, &mut local_env, functions, classes, enums, impl_methods);
-            control_to_value(result)
+            super::interpreter_call::execute_function_body(
+                def,
+                bound_args,
+                &mut local_env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+                false,
+            )
         }
         Value::Object { ref class, ref fields } => {
             // Support __call__ protocol
@@ -651,28 +661,9 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                         class_name: s.name.clone(),
                     },
                 );
-                let struct_class = Arc::new(ClassDef {
-                    span: s.span,
-                    name: s.name.clone(),
-                    generic_params: Vec::new(),
-                    where_clause: vec![],
-                    fields: s.fields.clone(),
-                    methods: s.methods.clone(),
-                    parent: None,
-                    visibility: s.visibility,
-                    effects: Vec::new(),
-                    // Keep the flattening loader's owner tag: an imported `struct` must not be
-                    // mistaken for an entry-declared class (`record_entry_owner_class`).
-                    attributes: s.attributes.clone(),
-                    doc_comment: None,
-                    invariant: None,
-                    macro_invocations: Vec::new(),
-                    mixins: vec![],
-                    is_generic_template: false,
-                    specialization_of: None,
-                    type_bindings: std::collections::HashMap::new(),
-                    is_value_type: true,
-                });
+                // Keep the flattening loader's owner tag via `attributes`: an imported
+                // `struct` must not be mistaken for an entry-declared class.
+                let struct_class = Arc::new(crate::interpreter::core_types::struct_def_to_class_def(s));
                 crate::interpreter::record_flattened_owner_class(&struct_class);
                 crate::interpreter::record_entry_owner_class(&struct_class);
                 classes.insert(s.name.clone(), Arc::clone(&struct_class));
@@ -868,26 +859,7 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                 // Also register as a class so instantiation works
                 classes.insert(
                     s.name.clone(),
-                    Arc::new(ClassDef {
-                        span: s.span,
-                        name: s.name.clone(),
-                        generic_params: Vec::new(),
-                        where_clause: vec![],
-                        fields: s.fields.clone(),
-                        methods: s.methods.clone(),
-                        parent: None,
-                        visibility: s.visibility,
-                        effects: Vec::new(),
-                        attributes: Vec::new(),
-                        doc_comment: None,
-                        invariant: None,
-                        macro_invocations: Vec::new(),
-                        mixins: vec![],
-                        is_generic_template: false,
-                        specialization_of: None,
-                        type_bindings: std::collections::HashMap::new(),
-                        is_value_type: true,
-                    }),
+                    Arc::new(crate::interpreter::core_types::struct_def_to_class_def(s)),
                 );
                 // Register static methods as mangled free functions (StructName__method)
                 for method in &s.methods {
@@ -2027,6 +1999,9 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
             | Node::StructuredExportStmt(_)
             | Node::AutoImportStmt(_)
             | Node::RequiresCapabilities(_)
+            | Node::FriendDecl(_)
+            | Node::InternalExportDecl(_)
+            | Node::LayerDecl(_)
             | Node::HandlePool(_)
             | Node::DiBinding(_)
             | Node::InjectGraph(_)
@@ -2151,5 +2126,259 @@ fn main_declares_unit_return(main_func: &FunctionDef) -> bool {
         Some(Type::Tuple(elems)) => elems.is_empty(),
         Some(Type::Simple(name)) => name == "Nil" || name == "()",
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod function_value_call_tests {
+    use super::*;
+    use simple_parser::{ast::Block, ast::Expr, ast::Node, ast::Parameter, ast::Visibility, Span};
+
+    #[test]
+    fn call_value_with_args_function_preserves_implicit_tail_return() {
+        let span = Span::new(0, 0, 1, 1);
+        let def = Arc::new(FunctionDef {
+            span,
+            name: "mk_implicit".to_string(),
+            generic_params: vec![],
+            where_clause: vec![],
+            params: vec![Parameter {
+                span,
+                name: "x".to_string(),
+                ty: None,
+                default: None,
+                mutability: simple_parser::ast::Mutability::Immutable,
+                inject: false,
+                variadic: false,
+                call_site_label: None,
+            }],
+            return_type: None,
+            return_constraint: None,
+            body: Block {
+                span,
+                statements: vec![Node::Expression(Expr::Binary {
+                    op: simple_parser::ast::BinOp::Add,
+                    left: Box::new(Expr::Identifier("x".to_string())),
+                    right: Box::new(Expr::Integer(1)),
+                })],
+            },
+            effects: vec![],
+            decorators: vec![],
+            visibility: Visibility::Public,
+            bounds_block: None,
+            attributes: vec![],
+            doc_comment: None,
+            is_static: false,
+            is_abstract: false,
+            is_me_method: false,
+            is_sync: false,
+            is_generator: false,
+            contract: None,
+            is_generic_template: false,
+            specialization_of: None,
+            type_bindings: HashMap::new(),
+        });
+        let fn_val = Value::Function {
+            name: "mk_implicit".to_string(),
+            def,
+            captured_env: Arc::new(Env::new()),
+        };
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        let out = call_value_with_args(
+            &fn_val,
+            vec![Value::Int(41)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("call_value_with_args should succeed");
+        assert_eq!(out, Value::Int(42));
+    }
+
+    #[test]
+    fn expected_target_type_does_not_leak_across_calls_or_unannotated_lets() {
+        let src = r#"
+trait FromIter:
+    fn from_iter(v: i64) -> Self
+
+struct Bag:
+    tag: i64
+    items: [i64]
+
+impl FromIter for Bag:
+    static fn from_iter(v: i64) -> Self:
+        Bag(tag: 99, items: [v])
+
+impl FromIter for [i64]:
+    static fn from_iter(v: i64) -> Self:
+        [v]
+
+struct Step:
+    n: i64
+
+impl Step:
+    fn collect<C: FromIter>(self) -> C:
+        return C.from_iter(self.n)
+
+fn wrap(x: [i64]) -> Bag:
+    # `x` must arrive as default `[i64]` (len == 1), NOT `Bag`!
+    return Bag(tag: x.len(), items: x)
+
+fn helper() -> Bag:
+    val tmp = Step(n: 5).collect()
+    # Unannotated `val tmp` inside helper must stay `[i64]`, not inherit caller's `Bag`.
+    return Bag(tag: 10 + tmp.len(), items: tmp)
+
+fn main() -> i64:
+    val direct: Bag = Step(n: 7).collect()
+    val wrapped: Bag = wrap(Step(n: 3).collect())
+    val via_helper: Bag = helper()
+    val in_if: Bag = if true:
+        val nested = Step(n: 4).collect()
+        Bag(tag: 20 + nested.len(), items: nested)
+    else:
+        Bag(tag: 0, items: [])
+    if direct.tag != 99:
+        return 1
+    if wrapped.tag != 1 or wrapped.items[0] != 3:
+        return 2
+    if via_helper.tag != 11 or via_helper.items[0] != 5:
+        return 3
+    if in_if.tag != 21 or in_if.items[0] != 4:
+        return 4
+    return 0
+"#;
+        let module = simple_parser::Parser::new(src).parse().expect("parse source");
+        let code = evaluate_module_impl(&module.items).expect("evaluate_module_impl");
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn expected_target_type_isolated_across_if_unsafe_match_conditions_and_lambdas() {
+        let src = r#"
+trait FromIter:
+    fn from_iter(v: i64) -> Self
+
+struct Bag:
+    tag: i64
+    items: [i64]
+
+struct OtherBag:
+    tag: i64
+    items: [i64]
+
+impl FromIter for Bag:
+    static fn from_iter(v: i64) -> Self:
+        Bag(tag: 99, items: [v])
+
+impl FromIter for OtherBag:
+    static fn from_iter(v: i64) -> Self:
+        OtherBag(tag: 77, items: [v])
+
+impl FromIter for [i64]:
+    static fn from_iter(v: i64) -> Self:
+        [v]
+
+struct Step:
+    n: i64
+
+impl Step:
+    fn collect<C: FromIter>(self) -> C:
+        return C.from_iter(self.n)
+
+fn implicit_unsafe_tail(v: i64) -> Bag:
+    unsafe:
+        Step(n: v).collect()
+
+fn implicit_if_tail(v: i64) -> Bag:
+    if true:
+        Step(n: v).collect()
+    else:
+        Bag(tag: 0, items: [])
+
+fn helper_cases() -> Bag:
+    # Unannotated if-expr inside fn() -> Bag must stay [i64], not Bag
+    val unann_if = if true:
+        Step(n: 1).collect()
+    else:
+        []
+    # Explicit local annotation over if/unsafe/match-nested-if must NOT be clobbered by Bag
+    val ann_if: OtherBag = if true:
+        Step(n: 2).collect()
+    else:
+        OtherBag(tag: 0, items: [])
+    val ann_unsafe: OtherBag = unsafe:
+        Step(n: 3).collect()
+    val ann_match_if: OtherBag = match 1:
+        case 1:
+            if true:
+                Step(n: 4).collect()
+            else:
+                OtherBag(tag: 0, items: [])
+        case _:
+            OtherBag(tag: 0, items: [])
+    # Non-tail unsafe block must see None, not Bag
+    unsafe:
+        val inner = Step(n: 5).collect()
+        if inner.len() != 1:
+            return Bag(tag: -1, items: [])
+    # Bare tail expression inside non-tail unsafe block must see None, not Bag
+    unsafe:
+        Step(n: 15).collect().len()
+    val unann_unsafe = unsafe:
+        Step(n: 16).collect()
+    if unann_unsafe.len() != 1 or unann_unsafe[0] != 16:
+        return Bag(tag: -7, items: [])
+    # DoBlock lambda explicit return inside fn() -> Bag must see None, not Bag
+    val lam = \:
+        return Step(n: 6).collect()
+    val lam_res = lam()
+    if unann_if.len() != 1 or unann_if[0] != 1:
+        return Bag(tag: -2, items: [])
+    if ann_if.tag != 77 or ann_if.items[0] != 2:
+        return Bag(tag: -3, items: [])
+    if ann_unsafe.tag != 77 or ann_unsafe.items[0] != 3:
+        return Bag(tag: -4, items: [])
+    if ann_match_if.tag != 77 or ann_match_if.items[0] != 4:
+        return Bag(tag: -5, items: [])
+    if lam_res.len() != 1 or lam_res[0] != 6:
+        return Bag(tag: -6, items: [])
+    return Bag(tag: 100, items: [1])
+
+fn main() -> i64:
+    val b_unsafe = implicit_unsafe_tail(8)
+    if b_unsafe.tag != 99 or b_unsafe.items[0] != 8:
+        return 1
+    val b_if = implicit_if_tail(9)
+    if b_if.tag != 99 or b_if.items[0] != 9:
+        return 2
+    val b_help = helper_cases()
+    if b_help.tag != 100:
+        return 3
+    # If condition / Match subject / Match guard must see None under val x: Bag = ...
+    val cond_bag: Bag = if Step(n: 10).collect().len() == 1:
+        Step(n: 11).collect()
+    else:
+        Bag(tag: 0, items: [])
+    if cond_bag.tag != 99 or cond_bag.items[0] != 11:
+        return 4
+    val subj_bag: Bag = match Step(n: 12).collect().len():
+        case 1 if Step(n: 13).collect().len() == 1:
+            Step(n: 14).collect()
+        case _:
+            Bag(tag: 0, items: [])
+    if subj_bag.tag != 99 or subj_bag.items[0] != 14:
+        return 5
+    return 0
+"#;
+        let module = simple_parser::Parser::new(src).parse().expect("parse source");
+        let code = evaluate_module_impl(&module.items).expect("evaluate_module_impl");
+        assert_eq!(code, 0);
     }
 }

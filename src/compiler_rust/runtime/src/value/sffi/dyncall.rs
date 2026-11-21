@@ -12,6 +12,42 @@ fn valid_fn_ptr(fn_ptr: i64) -> Option<usize> {
 }
 
 #[no_mangle]
+pub extern "C" fn rt_call_ptr_0(addr: i64) -> i64 {
+    let Some(ptr) = valid_fn_ptr(addr) else {
+        return -1;
+    };
+    let func: extern "C" fn() -> i64 = unsafe { std::mem::transmute(ptr) };
+    func()
+}
+
+#[no_mangle]
+pub extern "C" fn rt_call_ptr_1(addr: i64, a1: i64) -> i64 {
+    let Some(ptr) = valid_fn_ptr(addr) else {
+        return -1;
+    };
+    let func: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+    func(a1)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_call_ptr_2(addr: i64, a1: i64, a2: i64) -> i64 {
+    let Some(ptr) = valid_fn_ptr(addr) else {
+        return -1;
+    };
+    let func: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+    func(a1, a2)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_call_ptr_3(addr: i64, a1: i64, a2: i64, a3: i64) -> i64 {
+    let Some(ptr) = valid_fn_ptr(addr) else {
+        return -1;
+    };
+    let func: extern "C" fn(i64, i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+    func(a1, a2, a3)
+}
+
+#[no_mangle]
 pub extern "C" fn rt_dyncall_0(fn_ptr: i64) -> i64 {
     let Some(ptr) = valid_fn_ptr(fn_ptr) else {
         return -1;

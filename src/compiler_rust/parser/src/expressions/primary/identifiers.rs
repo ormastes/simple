@@ -186,9 +186,11 @@ impl<'a> Parser<'a> {
     fn parse_identifier_or_struct(&mut self, name: &str) -> Result<Expr, ParseError> {
         let name = name.to_string();
         self.advance();
-        if self.check(&TokenKind::Lt) {
-            self.try_skip_ident_generic_args()?;
-        }
+        let type_args = if self.check(&TokenKind::Lt) {
+            self.try_parse_ident_generic_args()?
+        } else {
+            Vec::new()
+        };
         // Check for path expression: Name::Variant
         // DEPRECATED: Use dot syntax instead (Name.Variant)
         if self.check(&TokenKind::DoubleColon) {
@@ -323,8 +325,13 @@ impl<'a> Parser<'a> {
             }
             self.expect(&TokenKind::RBrace)?;
             Ok(Expr::StructInit { name, fields, spread })
-        } else {
+        } else if type_args.is_empty() {
             Ok(Expr::Identifier(name))
+        } else {
+            Ok(Expr::GenericInst {
+                expr: Box::new(Expr::Identifier(name)),
+                type_args,
+            })
         }
     }
 

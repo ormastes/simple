@@ -539,7 +539,7 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
 
         let name = self.expect_identifier()?;
-        let generic_params = self.parse_generic_params_as_strings()?;
+        let (generic_params, inline_where_bounds) = self.parse_generic_params_with_where_bounds()?;
         let params = self.parse_parameters()?;
 
         let return_type = if self.check(&TokenKind::Arrow) {
@@ -549,7 +549,8 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let where_clause = self.parse_where_clause()?;
+        let mut where_clause = inline_where_bounds;
+        where_clause.extend(self.parse_where_clause()?);
 
         // Check if this is an abstract method (newline) or has default body (colon)
         let (body, is_abstract) = if self.check(&TokenKind::Newline) || self.check(&TokenKind::Dedent) {

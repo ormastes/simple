@@ -297,6 +297,12 @@ impl ModuleResolver {
                 Node::AutoImportStmt(stmt) => {
                     manifest.auto_imports.push(stmt.clone());
                 }
+                Node::FriendDecl(stmt) => {
+                    manifest.friends.push(stmt.package.clone());
+                }
+                Node::InternalExportDecl(stmt) => {
+                    manifest.internal_exports.extend(stmt.symbols.iter().cloned());
+                }
                 Node::RequiresCapabilities(stmt) => {
                     // Extract capabilities from requires [...] statement
                     manifest.capabilities = stmt.capabilities.clone();

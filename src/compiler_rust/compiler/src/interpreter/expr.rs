@@ -138,6 +138,7 @@ mod control;
 mod literals;
 mod ops;
 pub(crate) use ops::{static_int_width, wrap_signed, StaticIntWidth};
+pub(crate) use calls::try_eval_array_repeat_default;
 
 mod casting;
 mod units;
@@ -194,6 +195,9 @@ fn route_expr(
         | Expr::FunctionalUpdate { .. }
         | Expr::KernelLaunch { .. } => {
             calls::eval_call_expr(expr, env, functions, classes, enums, impl_methods).transpose()
+        }
+        Expr::GenericInst { expr: inner, .. } => {
+            Some(evaluate_expr(inner, env, functions, classes, enums, impl_methods))
         }
         // --- collections & indexing ---
         Expr::Array(_)

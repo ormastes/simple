@@ -25,5 +25,5 @@ mod validation;
 pub use module_pass::*;
 pub use nested_def_hoist::module_with_hoisted_defs;
 pub(crate) use flatten_global_owner::{const_literal_census, flattened_global_symbol, ConstLiteralCensus};
-pub(crate) use flatten_struct_owner::{struct_scope_for, FlattenStructOwners, FlattenStructScope};
-pub(crate) use function::block_uses_self;
+pub(crate) use flatten_struct_owner::{resolve_owned_struct, struct_scope_for, FlattenStructOwners, FlattenStructScope};
+pub(crate) use function::{ast_extern_runtime_target, ast_function_abi_override, block_uses_self, AstFnAbiOverride};

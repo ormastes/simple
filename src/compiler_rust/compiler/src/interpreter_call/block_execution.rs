@@ -417,15 +417,23 @@ pub(super) fn exec_block_closure_into(
     // Advice declared by an `on pc{...}` statement in this block is scoped to
     // the block, like the const/immutable name sets this executor restores.
     let _aop_scope = super::core::aop_runtime::AdviceScope::enter();
+    let _closure_fn_return_guard = crate::interpreter::push_current_fn_return_type(None);
+    let _closure_expected_guard = crate::interpreter::push_expected_target_type(None);
     let mut last_value = Value::Nil;
 
-    for node in nodes {
+    for (idx, node) in nodes.iter().enumerate() {
+        let is_last = idx + 1 == nodes.len();
         crate::interpreter::set_current_node_span(node.span().map(Into::into));
         // COVERAGE: this executor interprets every statement kind itself and
         // never reaches exec_node, the only other place a line is recorded.
         crate::interpreter::coverage_helpers::record_node_coverage_lexical(node);
         match node {
             Node::Expression(expr) => {
+                let _non_tail_expected_guard = if !is_last {
+                    Some(crate::interpreter::push_expected_target_type(None))
+                } else {
+                    None
+                };
                 // Handle functional update (e.g., list->append(3))
                 if let Expr::FunctionalUpdate { target, method, args } = expr {
                     if let Some((name, new_value)) = super::super::interpreter_helpers::handle_functional_update(
@@ -454,6 +462,8 @@ pub(super) fn exec_block_closure_into(
             Node::Let(let_stmt) => {
                 if let Some(ref value_expr) = let_stmt.value {
                     // Handle method calls with self-update (e.g., m.call("method", []))
+                    let _expected_target_guard =
+                        crate::interpreter::push_expected_target_type(declared_let_type(let_stmt).cloned());
                     let (val, update) = handle_method_call_with_self_update(
                         value_expr,
                         &mut local_env,
@@ -462,6 +472,7 @@ pub(super) fn exec_block_closure_into(
                         enums,
                         impl_methods,
                     )?;
+                    drop(_expected_target_guard);
                     if let Some((obj_name, new_self)) = update {
                         local_env.insert(obj_name, new_self);
                     }
@@ -1107,26 +1118,7 @@ pub(super) fn exec_block_closure_into(
                 );
                 classes.insert(
                     s.name.clone(),
-                    Arc::new(ClassDef {
-                        span: s.span,
-                        name: s.name.clone(),
-                        generic_params: Vec::new(),
-                        where_clause: vec![],
-                        fields: s.fields.clone(),
-                        methods: s.methods.clone(),
-                        parent: None,
-                        visibility: s.visibility,
-                        effects: Vec::new(),
-                        attributes: Vec::new(),
-                        doc_comment: None,
-                        invariant: None,
-                        macro_invocations: vec![],
-                        mixins: vec![],
-                        is_generic_template: false,
-                        specialization_of: None,
-                        type_bindings: std::collections::HashMap::new(),
-                        is_value_type: true,
-                    }),
+                    Arc::new(crate::interpreter::core_types::struct_def_to_class_def(s)),
                 );
                 // Register static methods as mangled free functions (StructName__method)
                 for method in &s.methods {
@@ -1465,6 +1457,8 @@ pub(super) fn exec_block_closure_into(
                 // `exec_block_closure_mut` calls and is caught at the lambda/
                 // block-closure/BDD call boundary (see `CompileError::BlockReturn`).
                 let value = if let Some(expr) = &ret.value {
+                    let _expected_guard =
+                        crate::interpreter::push_expected_target_type(crate::interpreter::current_fn_return_type());
                     evaluate_expr(expr, &mut local_env, functions, classes, enums, impl_methods)?
                 } else {
                     Value::Nil
@@ -1568,15 +1562,23 @@ fn exec_block_closure_mut_inner(
     // Advice declared by an `on pc{...}` statement in this block is scoped to
     // the block, like the const/immutable name sets this executor restores.
     let _aop_scope = super::core::aop_runtime::AdviceScope::enter();
+    let _closure_fn_return_guard = crate::interpreter::push_current_fn_return_type(None);
+    let _closure_expected_guard = crate::interpreter::push_expected_target_type(None);
     let mut last_value = Value::Nil;
 
-    for node in nodes {
+    for (idx, node) in nodes.iter().enumerate() {
+        let is_last = idx + 1 == nodes.len();
         crate::interpreter::set_current_node_span(node.span().map(Into::into));
         // COVERAGE: this executor interprets every statement kind itself and
         // never reaches exec_node, the only other place a line is recorded.
         crate::interpreter::coverage_helpers::record_node_coverage_lexical(node);
         match node {
             Node::Expression(expr) => {
+                let _non_tail_expected_guard = if !is_last {
+                    Some(crate::interpreter::push_expected_target_type(None))
+                } else {
+                    None
+                };
                 // Handle self-updating method calls (e.g., arr.append(3))
                 let (result, update) =
                     handle_method_call_with_self_update(expr, local_env, functions, classes, enums, impl_methods)?;
@@ -1588,6 +1590,8 @@ fn exec_block_closure_mut_inner(
             Node::Let(let_stmt) => {
                 if let Some(ref value_expr) = let_stmt.value {
                     // Handle method calls with self-update (e.g., m.call("method", []))
+                    let _expected_target_guard =
+                        crate::interpreter::push_expected_target_type(declared_let_type(let_stmt).cloned());
                     let (val, update) = handle_method_call_with_self_update(
                         value_expr,
                         local_env,
@@ -1596,6 +1600,7 @@ fn exec_block_closure_mut_inner(
                         enums,
                         impl_methods,
                     )?;
+                    drop(_expected_target_guard);
                     if let Some((obj_name, new_self)) = update {
                         local_env.insert(obj_name, new_self);
                     }
@@ -2009,26 +2014,7 @@ fn exec_block_closure_mut_inner(
                 );
                 classes.insert(
                     s.name.clone(),
-                    Arc::new(ClassDef {
-                        span: s.span,
-                        name: s.name.clone(),
-                        generic_params: Vec::new(),
-                        where_clause: vec![],
-                        fields: s.fields.clone(),
-                        methods: s.methods.clone(),
-                        parent: None,
-                        visibility: s.visibility,
-                        effects: Vec::new(),
-                        attributes: Vec::new(),
-                        doc_comment: None,
-                        invariant: None,
-                        macro_invocations: vec![],
-                        mixins: vec![],
-                        is_generic_template: false,
-                        specialization_of: None,
-                        type_bindings: std::collections::HashMap::new(),
-                        is_value_type: true,
-                    }),
+                    Arc::new(crate::interpreter::core_types::struct_def_to_class_def(s)),
                 );
                 // Register static methods as mangled free functions (StructName__method)
                 for method in &s.methods {
@@ -2277,6 +2263,8 @@ fn exec_block_closure_mut_inner(
                 // whole enclosing lambda/block-closure body, not just this nested
                 // call.
                 let value = if let Some(expr) = &ret.value {
+                    let _expected_guard =
+                        crate::interpreter::push_expected_target_type(crate::interpreter::current_fn_return_type());
                     evaluate_expr(expr, local_env, functions, classes, enums, impl_methods)?
                 } else {
                     Value::Nil

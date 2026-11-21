@@ -1035,7 +1035,7 @@ impl<'a> Parser<'a> {
             TokenKind::Sync => "sync".to_string(),
             TokenKind::Async => "async".to_string(),
             TokenKind::Loop => "loop".to_string(),
-            TokenKind::Vec => "Vec".to_string(),
+            TokenKind::Vec => "vec".to_string(),
             TokenKind::Gpu => "gpu".to_string(),
             TokenKind::Shared => "shared".to_string(),
             TokenKind::Repr => "repr".to_string(),
@@ -1233,7 +1233,7 @@ impl<'a> Parser<'a> {
             TokenKind::Literal => "literal",
             TokenKind::Impl => "impl",
             TokenKind::Dyn => "dyn",
-            TokenKind::Vec => "Vec",
+            TokenKind::Vec => "vec",
             TokenKind::Gpu => "gpu",
             TokenKind::Shared => "shared",
             TokenKind::Macro => "macro",
@@ -1287,6 +1287,9 @@ impl<'a> Parser<'a> {
             TokenKind::Style => "style",
             TokenKind::Schema => "schema",
             TokenKind::Music => "music",
+            // Contract / verification soft keywords in path segments (e.g., mod.admit)
+            TokenKind::Admit => "admit",
+            TokenKind::Assume => "assume",
             _ => {
                 let ctx = parse_context!(format!("parsing path segment, previous tokens analyzed"));
                 return Err(ParseError::unexpected_token_with_context(
@@ -1474,6 +1477,11 @@ impl<'a> Parser<'a> {
             TokenKind::Style => "style",
             TokenKind::Schema => "schema",
             TokenKind::Music => "music",
+            // Contract / verification soft keywords as method/field names (e.g., link.admit)
+            TokenKind::Admit => "admit",
+            TokenKind::Assume => "assume",
+            TokenKind::Allow => "allow",
+            TokenKind::Forbid => "forbid",
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
@@ -1602,7 +1610,23 @@ impl<'a> Parser<'a> {
     /// Parse generic type parameters: <T, U, V> or [T, U, V] or [T, const N: usize]
     /// Both angle brackets and square brackets are supported for compatibility
     /// Returns empty Vec if no generic parameters are present
+    fn trait_bound_name(ty: &Type) -> String {
+        match ty {
+            Type::Simple(name) => name.clone(),
+            Type::Generic { name, .. } => name.clone(),
+            Type::DynTrait(name) => name.clone(),
+            Type::Optional(inner) => Self::trait_bound_name(inner),
+            _ => String::new(),
+        }
+    }
+
     pub(crate) fn parse_generic_params(&mut self) -> Result<Vec<GenericParam>, ParseError> {
+        self.parse_generic_params_with_bounds().map(|(params, _)| params)
+    }
+
+    pub(crate) fn parse_generic_params_with_bounds(
+        &mut self,
+    ) -> Result<(Vec<GenericParam>, Vec<WhereBound>), ParseError> {
         // Check for angle brackets <T> or square brackets [T]
         let use_brackets = if self.check(&TokenKind::Lt) {
             self.advance(); // consume '<'
@@ -1623,10 +1647,11 @@ impl<'a> Parser<'a> {
             self.advance(); // consume '['
             true
         } else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         };
 
         let mut params = Vec::new();
+        let mut where_bounds = Vec::new();
         let end_token = if use_brackets {
             TokenKind::RBracket
         } else {
@@ -1642,11 +1667,13 @@ impl<'a> Parser<'a> {
                 let ty = self.parse_type()?;
                 params.push(GenericParam::Const { name, ty });
             } else {
+                let param_span = self.current.span;
                 let name = self.expect_identifier()?;
 
                 // Check for trait bounds, type limits, or type candidates
                 // T: Display, T: [f32, i32], T limits [f32, i32]
                 let mut bounds = Vec::new();
+                let mut full_bounds = Vec::new();
                 let mut type_candidates = Vec::new();
                 let mut is_candidate_mode = false;
 
@@ -1680,66 +1707,34 @@ impl<'a> Parser<'a> {
                         }
                         self.expect(&TokenKind::RBracket)?;
                     } else {
-                        // Regular trait bounds: T: Display or I: Iterator<Item=T>
-                        let bound_name = self.expect_identifier()?;
-
-                        // Check for generic arguments in bound: Iterator<Item=T>
-                        if self.check(&TokenKind::Lt) {
-                            let mut depth = 1;
-                            self.advance(); // consume '<'
-                            while depth > 0 && !self.is_at_end() {
-                                if self.check(&TokenKind::Lt) {
-                                    depth += 1;
-                                    self.advance();
-                                } else if self.check(&TokenKind::Gt) {
-                                    depth -= 1;
-                                    self.advance();
-                                } else if self.check(&TokenKind::ShiftRight) {
-                                    if depth == 1 {
-                                        break;
-                                    } else {
-                                        depth -= 2;
-                                        self.advance();
-                                    }
-                                } else {
-                                    self.advance();
-                                }
-                            }
+                        // Regular trait bounds: T: Display or C: FromIterator<Self.Item>
+                        let bound_ty = self.parse_type()?;
+                        let bound_name = Self::trait_bound_name(&bound_ty);
+                        if !bound_name.is_empty() {
+                            bounds.push(bound_name);
                         }
-
-                        bounds.push(bound_name);
+                        full_bounds.push(bound_ty);
 
                         // Parse additional bounds with + separator: T: Display + Debug
                         while self.check(&TokenKind::Plus) {
                             self.advance(); // consume '+'
-                            let bound_name = self.expect_identifier()?;
-
-                            if self.check(&TokenKind::Lt) {
-                                let mut depth = 1;
-                                self.advance();
-                                while depth > 0 && !self.is_at_end() {
-                                    if self.check(&TokenKind::Lt) {
-                                        depth += 1;
-                                        self.advance();
-                                    } else if self.check(&TokenKind::Gt) {
-                                        depth -= 1;
-                                        self.advance();
-                                    } else if self.check(&TokenKind::ShiftRight) {
-                                        if depth == 1 {
-                                            break;
-                                        } else {
-                                            depth -= 2;
-                                            self.advance();
-                                        }
-                                    } else {
-                                        self.advance();
-                                    }
-                                }
+                            let bound_ty = self.parse_type()?;
+                            let bound_name = Self::trait_bound_name(&bound_ty);
+                            if !bound_name.is_empty() {
+                                bounds.push(bound_name);
                             }
-
-                            bounds.push(bound_name);
+                            full_bounds.push(bound_ty);
                         }
                     }
+                }
+
+                if !full_bounds.is_empty() {
+                    where_bounds.push(WhereBound {
+                        span: param_span,
+                        type_param: name.clone(),
+                        bounds: full_bounds,
+                        negative_bounds: Vec::new(),
+                    });
                 }
 
                 // Parse optional default type: Rhs = Self or T = i32
@@ -1823,21 +1818,32 @@ impl<'a> Parser<'a> {
             }
         }
 
-        Ok(params)
+        Ok((params, where_bounds))
     }
 
     /// Parse generic type parameters as strings (for backward compatibility)
-    /// Ignores const parameters and trait bounds, returns only type parameter names
+    /// Includes both type and const parameter names while dropping trait bounds.
     pub(crate) fn parse_generic_params_as_strings(&mut self) -> Result<Vec<String>, ParseError> {
         let params = self.parse_generic_params()?;
         Ok(params
             .into_iter()
-            .filter_map(|p| {
-                match p {
-                    GenericParam::Type { name, .. } => Some(name),
-                    GenericParam::Const { .. } => None, // Skip const params for now
-                }
+            .map(|p| match p {
+                GenericParam::Type { name, .. } | GenericParam::Const { name, .. } => name,
             })
             .collect())
+    }
+
+    /// Parse generic type parameter names plus any inline trait bounds as `WhereBound`s.
+    pub(crate) fn parse_generic_params_with_where_bounds(
+        &mut self,
+    ) -> Result<(Vec<String>, Vec<WhereBound>), ParseError> {
+        let (params, where_bounds) = self.parse_generic_params_with_bounds()?;
+        let names = params
+            .into_iter()
+            .map(|p| match p {
+                GenericParam::Type { name, .. } | GenericParam::Const { name, .. } => name,
+            })
+            .collect();
+        Ok((names, where_bounds))
     }
 }

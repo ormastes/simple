@@ -339,6 +339,84 @@ pub(super) fn method_owner_matches(candidate: &str, type_part: &str) -> bool {
     owner.eq_ignore_ascii_case(type_part)
 }
 
+/// Rewrite `@export(..., name: "custom")` definitions and `@extern("runtime", "c_sym")`
+/// declarations in-place so their effective MIR symbol names and local call targets
+/// match the declared C ABI symbol, regardless of `no_mangle` or backend.
+pub(crate) fn apply_abi_symbol_overrides(mir: &mut crate::mir::MirModule, rewrite_entry_main: bool) {
+    use crate::mir::MirInst;
+
+    let mut renames: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut extern_targets: Vec<String> = Vec::new();
+    for func in &mut mir.functions {
+        if let Some(c_sym) = func
+            .attributes
+            .iter()
+            .find_map(|a| a.strip_prefix("extern_runtime_name="))
+            .map(str::to_string)
+        {
+            if func.name != c_sym {
+                renames.insert(func.name.clone(), c_sym.clone());
+                func.name = c_sym.clone();
+            }
+            func.blocks.clear();
+            extern_targets.push(c_sym);
+            continue;
+        }
+        if let Some(custom) = func
+            .attributes
+            .iter()
+            .find_map(|a| a.strip_prefix("export_c_name="))
+            .map(str::to_string)
+        {
+            if func.name != custom {
+                renames.insert(func.name.clone(), custom.clone());
+                func.name = custom;
+            }
+        } else if rewrite_entry_main && func.name == "main" {
+            func.name = "spl_main".to_string();
+        }
+    }
+    for sym in extern_targets {
+        mir.extern_fn_names.insert(sym);
+    }
+    if renames.is_empty() {
+        return;
+    }
+    for func in &mut mir.functions {
+        for block in &mut func.blocks {
+            for inst in &mut block.instructions {
+                match inst {
+                    MirInst::Call { target, .. } => {
+                        if let Some(mapped) = renames.get(target.name()) {
+                            *target = target.with_name(mapped.clone());
+                        }
+                    }
+                    MirInst::InterpCall { func_name, .. } => {
+                        if let Some(mapped) = renames.get(func_name.as_str()) {
+                            *func_name = mapped.clone();
+                        }
+                    }
+                    MirInst::GlobalLoad { global_name, .. } | MirInst::GlobalStore { global_name, .. } => {
+                        if let Some(mapped) = renames.get(global_name.as_str()) {
+                            *global_name = mapped.clone();
+                        }
+                    }
+                    MirInst::ClosureCreate { func_name, .. } => {
+                        for (old_prefix, new_prefix) in &renames {
+                            let old_out = format!("{old_prefix}_outlined_");
+                            if let Some(suffix) = func_name.strip_prefix(&old_out) {
+                                *func_name = format!("{new_prefix}_outlined_{suffix}");
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 /// Apply name mangling to a MIR module for the LLVM backend.
 pub(crate) fn mangle_mir(
     mir: &mut crate::mir::MirModule,
@@ -350,6 +428,8 @@ pub(crate) fn mangle_mir(
     suffix_index: &std::collections::HashMap<String, Vec<String>>,
 ) -> usize {
     use crate::mir::MirInst;
+
+    apply_abi_symbol_overrides(mir, false);
 
     let mut unresolved_count: usize = 0;
 

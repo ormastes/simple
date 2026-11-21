@@ -473,6 +473,10 @@ impl Lowerer {
                 }
             }
             Node::Function(f) => {
+                if let Some(extern_sym) = super::ast_extern_runtime_target(f) {
+                    self.extern_fn_names.insert(extern_sym);
+                    self.extern_fn_names.insert(f.name.clone());
+                }
                 self.fn_sig_type_names.insert(
                     f.name.clone(),
                     (
@@ -586,12 +590,7 @@ impl Lowerer {
                 self.register_mixin(m)?;
             }
             Node::Impl(impl_block) => {
-                let type_name = match &impl_block.target_type {
-                    simple_parser::ast::Type::Simple(name) => Some(name.clone()),
-                    simple_parser::ast::Type::Generic { name, .. } => Some(name.clone()),
-                    _ => None,
-                };
-                if let Some(type_name) = type_name {
+                if let Some(type_name) = Self::impl_target_type_name(&impl_block.target_type) {
                     for method in &impl_block.methods {
                         let ret_ty = self.resolve_type_opt(&method.return_type).unwrap_or(TypeId::ANY);
                         let qualified = format!("{}.{}", type_name, method.name);
@@ -1655,12 +1654,8 @@ impl Lowerer {
                 );
             }
             if let Node::Impl(impl_block) = item {
-                let owner = match &impl_block.target_type {
-                    simple_parser::ast::Type::Simple(name) => Some(name),
-                    simple_parser::ast::Type::Generic { name, .. } => Some(name),
-                    _ => None,
-                };
-                if let Some(owner) = owner {
+                if let Some(owner) = Self::impl_target_type_name(&impl_block.target_type) {
+                    let owner = owner.as_str();
                     self.record_method_callback_param_types(owner, &impl_block.generic_params, &impl_block.methods);
                     let module_owner = Self::flatten_owner_of(impl_block.attributes.iter().map(|a| a.name.as_str()));
                     for method in &impl_block.methods {
@@ -2073,6 +2068,8 @@ impl Lowerer {
             is_ghost: false,
             is_sync: true,
             has_suspension: false,
+            generic_params: Vec::new(),
+            generic_bounds: Vec::new(),
         }
     }
 
@@ -2298,6 +2295,9 @@ impl Lowerer {
                 | Node::StructuredExportStmt(_)
                 | Node::AutoImportStmt(_)
                 | Node::RequiresCapabilities(_)
+                | Node::FriendDecl(_)
+                | Node::InternalExportDecl(_)
+                | Node::LayerDecl(_)
                 | Node::CompoundUnit(_)
                 | Node::HandlePool(_)
                 | Node::AopAdvice(_)
@@ -2378,12 +2378,9 @@ impl Lowerer {
                     }
                 }
                 Node::Impl(impl_block) => {
-                    let type_name = match &impl_block.target_type {
-                        simple_parser::ast::Type::Simple(name) => Some(name.clone()),
-                        simple_parser::ast::Type::Generic { name, .. } => Some(name.clone()),
-                        _ => None,
-                    };
+                    let type_name = Self::impl_target_type_name(&impl_block.target_type);
                     if let Some(type_name) = type_name {
+                        let saved_scope = self.enter_impl_signature_scope(impl_block, &type_name);
                         let impl_method_names: std::collections::HashSet<&str> =
                             impl_block.methods.iter().map(|m| m.name.as_str()).collect();
                         for method in &impl_block.methods {
@@ -2396,15 +2393,13 @@ impl Lowerer {
                         // trait default methods, so calls to them resolve their real
                         // return type instead of falling back to ANY.
                         if let Some(ref trait_name) = impl_block.trait_name {
-                            if let Some(trait_def) =
-                                select_impl_trait(
-                                    &ast_module.items,
-                                    trait_name,
-                                    &impl_method_names,
-                                    methods_owner(&impl_block.methods).as_deref(),
-                                    &self.flatten_owner_import_bindings,
-                                )
-                            {
+                            let imported_trait_def = self.select_impl_trait_or_imported(
+                                &ast_module.items,
+                                trait_name,
+                                &impl_method_names,
+                                &impl_block.methods,
+                            );
+                            if let Some((trait_def, _)) = imported_trait_def {
                                 for default_method in &trait_def.methods {
                                     if default_method.is_abstract
                                         || impl_method_names.contains(default_method.name.as_str())
@@ -2419,6 +2414,7 @@ impl Lowerer {
                                 }
                             }
                         }
+                        self.restore_impl_signature_scope(saved_scope);
                     }
                 }
                 _ => {}
@@ -2436,10 +2432,7 @@ impl Lowerer {
                 }
                 Node::Class(c) => {
                     // Lower class methods with type invariant injection
-                    for method in &c.methods {
-                        let hir_func = self.lower_function(method, Some(&c.name))?;
-                        self.module.functions.push(hir_func);
-                    }
+                    self.lower_methods_with_generics(&c.methods, Some(&c.name), &c.generic_params)?;
 
                     // Lower mixin methods applied to this class
                     for mixin_ref in &c.mixins {
@@ -2465,10 +2458,7 @@ impl Lowerer {
                 }
                 Node::Struct(s) => {
                     // Lower struct methods with type invariant injection
-                    for method in &s.methods {
-                        let hir_func = self.lower_function(method, Some(&s.name))?;
-                        self.module.functions.push(hir_func);
-                    }
+                    self.lower_methods_with_generics(&s.methods, Some(&s.name), &s.generic_params)?;
                     // `struct Name(Trait):` (parser-synthesised `implements`
                     // attribute): record the trait impl exactly as an
                     // `impl Trait for Name` block would, so the struct gets a
@@ -2548,10 +2538,7 @@ impl Lowerer {
                     }
                 }
                 Node::Enum(e) => {
-                    for method in &e.methods {
-                        let hir_func = self.lower_function(method, Some(&e.name))?;
-                        self.module.functions.push(hir_func);
-                    }
+                    self.lower_methods_with_generics(&e.methods, Some(&e.name), &e.generic_params)?;
                 }
                 Node::Actor(a) => {
                     // Lower actor methods (actors are lowered like classes)
@@ -2561,76 +2548,7 @@ impl Lowerer {
                     }
                 }
                 Node::Impl(impl_block) => {
-                    // Lower impl block methods
-                    // Extract the type name from the impl block's target
-                    let type_name = match &impl_block.target_type {
-                        simple_parser::ast::Type::Simple(name) => Some(name.clone()),
-                        simple_parser::ast::Type::Generic { name, .. } => Some(name.clone()),
-                        _ => None,
-                    };
-
-                    if let Some(ref type_name) = type_name {
-                        for method in &impl_block.methods {
-                            let method = method_with_impl_driver_attrs(method, &impl_block.attributes);
-                            let hir_func = self.lower_function(&method, Some(type_name))?;
-                            self.module.functions.push(hir_func);
-                        }
-
-                        // Record trait impl metadata for vtable emission
-                        if let Some(ref trait_name) = impl_block.trait_name {
-                            let type_id = self
-                                .resolve_type(&simple_parser::ast::Type::Simple(type_name.clone()))
-                                .unwrap_or(TypeId::ANY);
-                            let mut methods_map = HashMap::new();
-                            let impl_method_names: std::collections::HashSet<&str> =
-                                impl_block.methods.iter().map(|m| m.name.as_str()).collect();
-                            for method in &impl_block.methods {
-                                let fn_name = format!("{}.{}", type_name, method.name);
-                                methods_map.insert(method.name.clone(), fn_name);
-                            }
-
-                            // Merge in trait default method bodies for methods the impl
-                            // doesn't override. Without this, the vtable slot list built
-                            // from `methods_map` silently omits the default method and the
-                            // per-slot function-pointer array ends up short, so calling the
-                            // inherited default through a vtable slot reads out-of-bounds
-                            // memory as a function pointer (crash) instead of dispatching to
-                            // the default body. Each default is lowered fresh per-impl so
-                            // `self` resolves against this impl's concrete type.
-                            if let Some(trait_def) =
-                                select_impl_trait(
-                                    &ast_module.items,
-                                    trait_name,
-                                    &impl_method_names,
-                                    methods_owner(&impl_block.methods).as_deref(),
-                                    &self.flatten_owner_import_bindings,
-                                )
-                            {
-                                for default_method in &trait_def.methods {
-                                    if default_method.is_abstract
-                                        || impl_method_names.contains(default_method.name.as_str())
-                                    {
-                                        continue;
-                                    }
-                                    let default_method =
-                                        method_with_impl_driver_attrs(default_method, &impl_block.attributes);
-                                    let hir_func = self.lower_function(&default_method, Some(type_name))?;
-                                    self.module.functions.push(hir_func);
-
-                                    let fn_name = format!("{}.{}", type_name, default_method.name);
-                                    methods_map.insert(default_method.name.clone(), fn_name);
-                                }
-                            }
-
-                            self.module.impls.push(crate::hir::HirImpl {
-                                type_id,
-                                trait_id: None, // trait TypeId resolution deferred
-                                trait_name: impl_block.trait_name.clone(),
-                                type_name: type_name.clone(),
-                                methods: methods_map,
-                            });
-                        }
-                    }
+                    self.lower_impl_block(impl_block, &ast_module.items, true)?;
                 }
                 _ => {}
             }
@@ -2681,11 +2599,6 @@ impl Lowerer {
                     use_stmt.is_lazy,
                 );
                 self.module.imports.push(import);
-
-                // NEW: Load types from imported module into globals symbol table
-                // This enables compile-time type checking for imports
-                // Errors are silently ignored for backward compatibility
-                let _ = self.load_imported_types(&use_stmt.path, &use_stmt.target);
             }
         }
 
@@ -2879,10 +2792,7 @@ impl Lowerer {
                     self.module.functions.push(hir_func);
                 }
                 Node::Class(c) => {
-                    for method in &c.methods {
-                        let hir_func = self.lower_function(method, Some(&c.name))?;
-                        self.module.functions.push(hir_func);
-                    }
+                    self.lower_methods_with_generics(&c.methods, Some(&c.name), &c.generic_params)?;
                     for mixin_ref in &c.mixins {
                         if let Some(mixin_decl) = ast_module.items.iter().find_map(|item| {
                             if let Node::Mixin(m) = item {
@@ -2903,16 +2813,10 @@ impl Lowerer {
                     }
                 }
                 Node::Struct(s) => {
-                    for method in &s.methods {
-                        let hir_func = self.lower_function(method, Some(&s.name))?;
-                        self.module.functions.push(hir_func);
-                    }
+                    self.lower_methods_with_generics(&s.methods, Some(&s.name), &s.generic_params)?;
                 }
                 Node::Enum(e) => {
-                    for method in &e.methods {
-                        let hir_func = self.lower_function(method, Some(&e.name))?;
-                        self.module.functions.push(hir_func);
-                    }
+                    self.lower_methods_with_generics(&e.methods, Some(&e.name), &e.generic_params)?;
                 }
                 Node::Actor(a) => {
                     // Lower actor methods (actors are lowered like classes)
@@ -2922,20 +2826,7 @@ impl Lowerer {
                     }
                 }
                 Node::Impl(impl_block) => {
-                    // Lower impl block methods (second pass)
-                    let type_name = match &impl_block.target_type {
-                        simple_parser::ast::Type::Simple(name) => Some(name.clone()),
-                        simple_parser::ast::Type::Generic { name, .. } => Some(name.clone()),
-                        _ => None,
-                    };
-
-                    if let Some(type_name) = type_name {
-                        for method in &impl_block.methods {
-                            let method = method_with_impl_driver_attrs(method, &impl_block.attributes);
-                            let hir_func = self.lower_function(&method, Some(&type_name))?;
-                            self.module.functions.push(hir_func);
-                        }
-                    }
+                    self.lower_impl_block(impl_block, &ast_module.items, false)?;
                 }
                 _ => {}
             }
@@ -2963,7 +2854,6 @@ impl Lowerer {
                     use_stmt.is_lazy,
                 );
                 self.module.imports.push(import);
-                let _ = self.load_imported_types(&use_stmt.path, &use_stmt.target);
             }
         }
 
@@ -3163,6 +3053,203 @@ fn select_impl_trait<'a>(
     select_impl_trait_by_overlap(&candidates, impl_method_names)
 }
 
+impl Lowerer {
+    fn collect_type_generic_names(&self, ty: &simple_parser::ast::Type, out: &mut Vec<String>) {
+        use simple_parser::ast::Type;
+        match ty {
+            Type::Simple(name) => {
+                let is_concrete_type = matches!(
+                    name.as_str(),
+                    "i8" | "i16"
+                        | "i32"
+                        | "i64"
+                        | "u8"
+                        | "u16"
+                        | "u32"
+                        | "u64"
+                        | "f32"
+                        | "f64"
+                        | "bool"
+                        | "text"
+                        | "str"
+                        | "char"
+                        | "void"
+                        | "unit"
+                        | "nil"
+                        | "Any"
+                        | "Self"
+                ) || self.module.types.lookup(name).is_some();
+                if !is_concrete_type
+                    && !name.chars().all(|ch| ch.is_ascii_digit())
+                    && !out.contains(name)
+                {
+                    out.push(name.clone());
+                }
+            }
+            Type::Generic { args, .. } => {
+                for arg in args {
+                    self.collect_type_generic_names(arg, out);
+                }
+            }
+            Type::Array { element, .. } | Type::Simd { element, .. } | Type::Optional(element) => {
+                self.collect_type_generic_names(element, out);
+            }
+            Type::Tuple(elems) | Type::Union(elems) => {
+                for elem in elems {
+                    self.collect_type_generic_names(elem, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(in crate::hir::lower) fn collect_impl_generic_params(
+        &self,
+        impl_block: &simple_parser::ast::ImplBlock,
+        type_name: &str,
+    ) -> Vec<String> {
+        let mut params = impl_block.generic_params.clone();
+        if let Some(crate::hir::HirType::Struct { generic_params, .. }) =
+            self.module.types.lookup(type_name).and_then(|id| self.module.types.get(id))
+        {
+            for gp in generic_params {
+                if !params.contains(gp) {
+                    params.push(gp.clone());
+                }
+            }
+        }
+        match &impl_block.target_type {
+            simple_parser::ast::Type::Generic { args, .. } => {
+                for arg in args {
+                    self.collect_type_generic_names(arg, &mut params);
+                }
+            }
+            simple_parser::ast::Type::Array { element, .. } => {
+                self.collect_type_generic_names(element, &mut params);
+            }
+            _ => {}
+        }
+        for ttp in &impl_block.trait_type_params {
+            self.collect_type_generic_names(ttp, &mut params);
+        }
+        params
+    }
+
+    fn select_impl_trait_or_imported<'a>(
+        &self,
+        items: &'a [simple_parser::ast::Node],
+        trait_name: &str,
+        impl_method_names: &std::collections::HashSet<&str>,
+        methods: &[simple_parser::ast::FunctionDef],
+    ) -> Option<(simple_parser::ast::TraitDef, Option<std::path::PathBuf>)> {
+        if let Some(local_trait) = select_impl_trait(
+            items,
+            trait_name,
+            impl_method_names,
+            methods_owner(methods).as_deref(),
+            &self.flatten_owner_import_bindings,
+        ) {
+            return Some((local_trait.clone(), None));
+        }
+        if methods_owner(methods).is_none()
+            && !items
+                .iter()
+                .any(|item| matches!(item, simple_parser::ast::Node::Trait(t) if t.name == trait_name))
+        {
+            if let Some(decl) = self.trait_declaration_for_current_owner(trait_name) {
+                return Some((decl.declaration.clone(), Some(decl.source_file.clone())));
+            }
+        }
+        None
+    }
+
+    fn lower_methods_with_generics(
+        &mut self,
+        methods: &[simple_parser::ast::FunctionDef],
+        owner_name: Option<&str>,
+        generics: &[String],
+    ) -> LowerResult<()> {
+        let prev = std::mem::replace(&mut self.active_impl_generic_params, generics.to_vec());
+        let res = (|| -> LowerResult<()> {
+            for method in methods {
+                let hir_func = self.lower_function(method, owner_name)?;
+                self.module.functions.push(hir_func);
+            }
+            Ok(())
+        })();
+        self.active_impl_generic_params = prev;
+        res
+    }
+
+    fn lower_impl_block(
+        &mut self,
+        impl_block: &simple_parser::ast::ImplBlock,
+        items: &[simple_parser::ast::Node],
+        record_hir_impl: bool,
+    ) -> LowerResult<()> {
+        let Some(ref type_name) = Self::impl_target_type_name(&impl_block.target_type) else {
+            return Ok(());
+        };
+        let saved_scope = self.enter_impl_signature_scope(impl_block, type_name);
+        let res = (|| -> LowerResult<()> {
+            for method in &impl_block.methods {
+                let method = method_with_impl_driver_attrs(method, &impl_block.attributes);
+                let hir_func = self.lower_function(&method, Some(type_name))?;
+                self.module.functions.push(hir_func);
+            }
+
+            if let Some(ref trait_name) = impl_block.trait_name {
+                let type_id = self
+                    .resolve_type(&simple_parser::ast::Type::Simple(type_name.clone()))
+                    .unwrap_or(TypeId::ANY);
+                let mut methods_map = HashMap::new();
+                let impl_method_names: std::collections::HashSet<&str> =
+                    impl_block.methods.iter().map(|m| m.name.as_str()).collect();
+                for method in &impl_block.methods {
+                    let fn_name = format!("{}.{}", type_name, method.name);
+                    methods_map.insert(method.name.clone(), fn_name);
+                }
+
+                if let Some((trait_def, imported_source)) =
+                    self.select_impl_trait_or_imported(items, trait_name, &impl_method_names, &impl_block.methods)
+                {
+                    for default_method in &trait_def.methods {
+                        if default_method.is_abstract || impl_method_names.contains(default_method.name.as_str()) {
+                            continue;
+                        }
+                        let default_method =
+                            method_with_impl_driver_attrs(default_method, &impl_block.attributes);
+                        let previous_file = self.current_file.clone();
+                        if let Some(ref source_file) = imported_source {
+                            self.current_file = Some(source_file.clone());
+                        }
+                        let lowered = self.lower_function(&default_method, Some(type_name));
+                        self.current_file = previous_file;
+                        let hir_func = lowered?;
+                        self.module.functions.push(hir_func);
+
+                        let fn_name = format!("{}.{}", type_name, default_method.name);
+                        methods_map.insert(default_method.name.clone(), fn_name);
+                    }
+                }
+
+                if record_hir_impl {
+                    self.module.impls.push(crate::hir::HirImpl {
+                        type_id,
+                        trait_id: None,
+                        trait_name: impl_block.trait_name.clone(),
+                        type_name: type_name.clone(),
+                        methods: methods_map,
+                    });
+                }
+            }
+            Ok(())
+        })();
+        self.restore_impl_signature_scope(saved_scope);
+        res
+    }
+}
+
 /// Owning module of a flattened impl/struct/trait, read from the owner tag the
 /// flattener puts on each of its methods. None outside the flattened lane.
 fn methods_owner(methods: &[simple_parser::ast::FunctionDef]) -> Option<String> {
@@ -3316,12 +3403,9 @@ fn implicit_struct_trait_methods<'a>(
     for item in items {
         let Node::Impl(implementation) = item else { continue };
         if implementation.trait_name.is_some() { continue; }
-        let target = match &implementation.target_type {
-            ast::Type::Simple(name) | ast::Type::Generic { name, .. } => name,
-            _ => continue,
-        };
+        let Some(target) = Lowerer::impl_target_type_name(&implementation.target_type) else { continue };
         let impl_owner = declaration_owner(&implementation.attributes, &implementation.methods);
-        let imported = impl_owner.as_ref().and_then(|o| bindings.get(o)).and_then(|b| b.get(target));
+        let imported = impl_owner.as_ref().and_then(|o| bindings.get(o)).and_then(|b| b.get(&target));
         let matches = if let Some((source_owner, source_name)) = imported {
             owner.as_ref() == Some(source_owner) && structure.name == *source_name
         } else {

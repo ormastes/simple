@@ -52,6 +52,61 @@ pub(crate) struct ArrayMoveSites {
     /// `Analysis::block_release_locals`; lowering additionally requires
     /// that it stored a fresh buffer raw into the slot.
     pub block_release_locals: HashSet<usize>,
+    /// Uniquely-owned `String` locals whose writes are all literals or fresh
+    /// concatenations and never escape; non-self-referential `Assign`s may
+    /// drop the replaced value immediately after storing the new one.
+    pub string_overwrite_locals: HashSet<usize>,
+}
+
+/// True when `e` evaluates to a freshly heap-allocated `RuntimeString`
+/// not shared with any other slot or literal table.
+pub(super) fn is_fresh_string_expr(e: &HirExpr) -> bool {
+    match &e.kind {
+        HirExprKind::Binary { op: crate::hir::BinOp::Add, left, right } => {
+            e.ty == TypeId::STRING && (left.ty == TypeId::STRING || right.ty == TypeId::STRING)
+        }
+        HirExprKind::BuiltinCall { name, .. } => matches!(
+            name.as_str(),
+            "rt_value_to_string"
+                | "rt_value_format_string"
+                | "rt_raw_i64_to_string"
+                | "rt_raw_u64_to_string"
+                | "rt_string_concat"
+        ),
+        HirExprKind::MethodCall { receiver, method, args, .. } => {
+            e.ty == TypeId::STRING
+                && args.is_empty()
+                && matches!(method.as_str(), "to_text" | "to_string")
+                && matches!(
+                    receiver.ty,
+                    TypeId::BOOL
+                        | TypeId::CHAR
+                        | TypeId::I8
+                        | TypeId::I16
+                        | TypeId::I32
+                        | TypeId::I64
+                        | TypeId::U8
+                        | TypeId::U16
+                        | TypeId::U32
+                        | TypeId::U64
+                        | TypeId::F32
+                        | TypeId::F64
+                )
+        }
+        _ => false,
+    }
+}
+
+/// True if `e` mentions `HirExprKind::Local(target_idx)` anywhere.
+pub(super) fn expr_mentions_local(e: &HirExpr, target_idx: usize) -> bool {
+    if let HirExprKind::Local(idx) = &e.kind {
+        if *idx == target_idx {
+            return true;
+        }
+    }
+    let mut children = Vec::new();
+    expr_children(e, &mut children);
+    children.into_iter().any(|c| expr_mentions_local(c, target_idx))
 }
 
 /// `obj.f = Local(o)` field store of an array value: the hand-over candidate.
@@ -209,6 +264,7 @@ pub(crate) fn compute_array_move_sites(
                 })
                 .collect();
             sites.block_release_locals = a.block_release_locals(func, &sites.let_locals);
+            sites.string_overwrite_locals = a.string_overwrite_locals(func);
             return sites;
         }
         for o in not_moved {
@@ -786,15 +842,19 @@ impl ReleaseScan<'_, '_> {
                     self.bad.insert(*local_index);
                     return;
                 };
-                let elem = self.scalar_array_elem(self.a.local_ty(*local_index));
+                let slot_ty = self.a.local_ty(*local_index);
+                let elem = self.scalar_array_elem(slot_ty);
                 let fresh = match &value.kind {
                     HirExprKind::Array(items) => items.iter().all(|it| is_release_scalar(it.ty)),
                     HirExprKind::ArrayRepeat { value: item, .. } => is_release_scalar(item.ty),
                     kind => is_place(kind),
                 };
+                let fresh_string = slot_ty == TypeId::STRING
+                    && value.ty == TypeId::STRING
+                    && is_fresh_string_expr(value);
                 // The initializer must be exactly the slot's type: no union,
                 // optional or `Any` wrapping between the buffer and the slot.
-                if elem.is_some() && fresh && value.ty == self.a.local_ty(*local_index) {
+                if (elem.is_some() && fresh && value.ty == slot_ty) || fresh_string {
                     self.init_ok.insert(*local_index);
                 }
                 self.expr(value);
@@ -888,7 +948,11 @@ impl ReleaseScan<'_, '_> {
                 receiver, method, args, ..
             } => {
                 if let HirExprKind::Local(idx) = &receiver.kind {
-                    if !(method == "len" && args.is_empty() && is_release_index_ty(e.ty) && self.typed_as_local(receiver, *idx))
+                    let read_only_method = matches!(method.as_str(), "len" | "char_count" | "byte_len");
+                    if !(read_only_method
+                        && args.is_empty()
+                        && is_release_index_ty(e.ty)
+                        && self.typed_as_local(receiver, *idx))
                     {
                         self.bad.insert(*idx);
                     }
@@ -998,6 +1062,207 @@ impl Analysis<'_> {
             .collect();
         if !candidates.is_empty() {
             release_sites_in_stmts(&func.body, &candidates, &total, &mut out);
+        }
+        out
+    }
+
+    fn string_overwrite_locals(&self, func: &HirFunction) -> HashSet<usize> {
+        let mut out = HashSet::new();
+        if is_module_init_function(&func.name) || self.poisoned {
+            return out;
+        }
+        let mut top_lets: HashSet<usize> = HashSet::new();
+        for stmt in &func.body {
+            if let HirStmt::Let { local_index, .. } = stmt {
+                top_lets.insert(*local_index);
+            }
+        }
+        struct StringOverwriteScan<'a> {
+            a: &'a Analysis<'a>,
+            bad: HashSet<usize>,
+            init_ok: HashSet<usize>,
+        }
+        impl StringOverwriteScan<'_> {
+            fn is_fresh_or_lit(e: &HirExpr) -> bool {
+                e.ty == TypeId::STRING && (matches!(e.kind, HirExprKind::String(_)) || is_fresh_string_expr(e))
+            }
+            fn allow_direct_read(&mut self, e: &HirExpr) {
+                if matches!(e.kind, HirExprKind::Local(_)) {
+                    return;
+                }
+                self.expr(e);
+            }
+            fn stmts(&mut self, stmts: &[HirStmt]) {
+                for s in stmts {
+                    self.stmt(s);
+                }
+            }
+            fn stmt(&mut self, stmt: &HirStmt) {
+                match stmt {
+                    HirStmt::Let { local_index, value, .. } => {
+                        let slot_ty = self.a.local_ty(*local_index);
+                        if let Some(v) = value {
+                            if slot_ty == TypeId::STRING && Self::is_fresh_or_lit(v) {
+                                self.init_ok.insert(*local_index);
+                            } else {
+                                self.bad.insert(*local_index);
+                            }
+                            self.expr(v);
+                        } else {
+                            self.bad.insert(*local_index);
+                        }
+                    }
+                    HirStmt::Assign { target, value } => {
+                        if let HirExprKind::Local(idx) = &target.kind {
+                            if self.a.local_ty(*idx) == TypeId::STRING
+                                && target.ty == TypeId::STRING
+                                && Self::is_fresh_or_lit(value)
+                                && !expr_mentions_local(value, *idx)
+                            {
+                                // Safe overwriting assignment.
+                            } else {
+                                self.bad.insert(*idx);
+                            }
+                        } else {
+                            self.expr(target);
+                        }
+                        self.expr(value);
+                    }
+                    HirStmt::If {
+                        condition,
+                        then_block,
+                        else_block,
+                        ..
+                    } => {
+                        self.expr(condition);
+                        self.stmts(then_block);
+                        if let Some(b) = else_block {
+                            self.stmts(b);
+                        }
+                    }
+                    HirStmt::While {
+                        condition,
+                        body,
+                        invariants,
+                        ..
+                    } => {
+                        for c in invariants {
+                            self.expr(&c.condition);
+                        }
+                        self.expr(condition);
+                        self.stmts(body);
+                    }
+                    HirStmt::Loop { body, .. } | HirStmt::Defer { body } => self.stmts(body),
+                    HirStmt::For {
+                        pattern_local,
+                        iterable,
+                        body,
+                        invariants,
+                        ..
+                    } => {
+                        for c in invariants {
+                            self.expr(&c.condition);
+                        }
+                        if let Some(idx) = pattern_local {
+                            self.bad.insert(*idx);
+                        }
+                        self.expr(iterable);
+                        self.stmts(body);
+                    }
+                    _ => {
+                        for e in stmt_direct_exprs(stmt) {
+                            self.expr(e);
+                        }
+                    }
+                }
+            }
+            fn expr(&mut self, e: &HirExpr) {
+                match &e.kind {
+                    HirExprKind::Local(idx) => {
+                        self.bad.insert(*idx);
+                    }
+                    HirExprKind::MethodCall {
+                        receiver, method, args, ..
+                    } => {
+                        if let HirExprKind::Local(idx) = &receiver.kind {
+                            let ok = args.is_empty()
+                                && matches!(method.as_str(), "len" | "char_count" | "byte_len" | "is_empty")
+                                && receiver.ty == TypeId::STRING
+                                && self.a.local_ty(*idx) == TypeId::STRING;
+                            if !ok {
+                                self.bad.insert(*idx);
+                            }
+                        } else {
+                            self.expr(receiver);
+                        }
+                        for a in args {
+                            self.expr(a);
+                        }
+                    }
+                    HirExprKind::Binary {
+                        op: crate::hir::BinOp::Eq | crate::hir::BinOp::NotEq,
+                        left,
+                        right,
+                    } => {
+                        self.allow_direct_read(left);
+                        self.allow_direct_read(right);
+                    }
+                    HirExprKind::BuiltinCall { name, args }
+                        if matches!(
+                            name.as_str(),
+                            "print"
+                                | "println"
+                                | "rt_print_value"
+                                | "rt_println_value"
+                                | "rt_print_str"
+                                | "rt_println_str"
+                        ) =>
+                    {
+                        for a in args {
+                            self.allow_direct_read(a);
+                        }
+                    }
+                    HirExprKind::Lambda { .. }
+                    | HirExprKind::GeneratorCreate { .. }
+                    | HirExprKind::FutureCreate { .. }
+                    | HirExprKind::ActorSpawn { .. } => {
+                        let mut locals = HashSet::new();
+                        collect_locals_expr(e, &mut locals);
+                        self.bad.extend(locals);
+                    }
+                    HirExprKind::LetIn { local_idx, value, body } => {
+                        self.bad.insert(*local_idx);
+                        self.expr(value);
+                        self.expr(body);
+                    }
+                    HirExprKind::Block(stmts) | HirExprKind::UnsafeBlock { statements: stmts, .. } => {
+                        self.stmts(stmts);
+                    }
+                    _ => {
+                        let mut children = Vec::new();
+                        expr_children(e, &mut children);
+                        for c in children {
+                            self.expr(c);
+                        }
+                    }
+                }
+            }
+        }
+        let mut scan = StringOverwriteScan {
+            a: self,
+            bad: HashSet::new(),
+            init_ok: HashSet::new(),
+        };
+        scan.stmts(&func.body);
+        for idx in scan.init_ok {
+            if idx >= self.nparams
+                && !scan.bad.contains(&idx)
+                && !self.closure_locals.contains(&idx)
+                && self.let_counts.get(&idx) == Some(&1)
+                && top_lets.contains(&idx)
+            {
+                out.insert(idx);
+            }
         }
         out
     }
@@ -1308,7 +1573,8 @@ fn expr_children<'e>(e: &'e HirExpr, out: &mut Vec<&'e HirExpr>) {
         | HirExprKind::VecLiteral(items)
         | HirExprKind::StructInit { fields: items, .. }
         | HirExprKind::BuiltinCall { args: items, .. }
-        | HirExprKind::GpuIntrinsic { args: items, .. } => out.extend(items.iter()),
+        | HirExprKind::GpuIntrinsic { args: items, .. }
+        | HirExprKind::TypeParamStaticCall { args: items, .. } => out.extend(items.iter()),
         HirExprKind::ArrayRepeat { value, count } => {
             out.push(value);
             out.push(count);
@@ -1355,6 +1621,7 @@ fn expr_children<'e>(e: &'e HirExpr, out: &mut Vec<&'e HirExpr>) {
         | HirExprKind::Global(_)
         | HirExprKind::Block(_)
         | HirExprKind::UnsafeBlock { .. }
-        | HirExprKind::ContractResult => {}
+        | HirExprKind::ContractResult
+        | HirExprKind::ConstGeneric(_) => {}
     }
 }

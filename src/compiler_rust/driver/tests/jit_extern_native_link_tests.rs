@@ -24,7 +24,8 @@ fn write_source(tag: &str, source: &str) -> PathBuf {
     let probe_file = dir.join("probe_target.txt");
     std::fs::write(&probe_file, b"probe").expect("probe target");
     let path = dir.join("main.spl");
-    std::fs::write(&path, source.replace("__P__", probe_file.to_str().expect("utf8 temp path"))).expect("source");
+    let escaped_probe = probe_file.to_str().expect("utf8 temp path").replace('\\', "/");
+    std::fs::write(&path, source.replace("__P__", &escaped_probe)).expect("source");
     path
 }
 
@@ -645,6 +646,108 @@ fn w4_pruned_jit_matches_the_interpreter_without_demotion() {
     assert!(jit.status.success(), "JIT run failed:\n{jit_stderr}");
     assert!(interp.status.success(), "interpreter run failed:\n{}", text(&interp.stderr));
     assert_eq!(text(&jit.stdout), "trait=16 10\nclosure=7\nfn_value=21\nstatic=15\n");
+    assert_eq!(text(&jit.stdout), text(&interp.stdout));
+    assert!(!jit_stderr.contains("[engine-demotion]"), "{jit_stderr}");
+}
+
+const SEED5F_COLLECT_SOURCE: &str = r#"
+trait IterLike:
+    type Item
+    me next() -> Option<Self.Item>
+    fn collect<C: FromIterLike<Self.Item>>(self) -> C:
+        return C.from_iter(self)
+
+trait FromIterLike<T>:
+    fn from_iter<I: IterLike<Item=T>>(iter: I) -> Self
+
+struct BoxArr<T>:
+    items: [T]
+
+impl FromIterLike<T> for BoxArr<T>:
+    fn from_iter<I: IterLike<Item=T>>(iter: I) -> Self:
+        var out: [T] = []
+        var steps = 0
+        while steps < 16:
+            steps = steps + 1
+            match iter.next():
+                case Some(item):
+                    out.push(item)
+                case None:
+                    break
+        return BoxArr(items: out)
+
+struct FixedBox<T, const N: u64>:
+    data: [T; N]
+    len: u64
+
+impl FixedBox<T, const N: u64>:
+    static fn new() -> FixedBox<T, N>:
+        return FixedBox { data: [T.default(); N], len: 0 }
+
+    me push(value: T) -> bool:
+        if self.len >= N:
+            return false
+        self.data[self.len] = value
+        self.len = self.len + 1
+        return true
+
+impl FromIterLike<T> for FixedBox<T, const N: u64>:
+    fn from_iter<I: IterLike<Item=T>>(iter: I) -> Self:
+        var result = FixedBox.new()
+        var steps = 0
+        while steps < 16:
+            steps = steps + 1
+            match iter.next():
+                case Some(item):
+                    if not result.push(item):
+                        break
+                case None:
+                    break
+        return result
+
+struct StepIter:
+    cur: i64
+    limit: i64
+
+impl IterLike for StepIter:
+    type Item = i64
+    me next() -> Option<Self.Item>:
+        if self.cur < self.limit:
+            val v = self.cur
+            self.cur = self.cur + 1
+            return Some(v)
+        return None
+
+fn main():
+    val b1 = StepIter(cur: 1, limit: 5).collect<BoxArr<i64>>()
+    val b2: BoxArr<i64> = StepIter(cur: 5, limit: 8).collect()
+    val f1 = StepIter(cur: 100, limit: 106).collect<FixedBox<i64, 4>>()
+    val f2: FixedBox<i64, 3> = StepIter(cur: 2, limit: 4).collect()
+    val d0 = i64.default()
+    val d1 = [i64; 4].default()
+    print "b1={b1.items.len()},{b1.items[0]},{b1.items[3]}"
+    print "b2={b2.items.len()},{b2.items[1]}"
+    print "f1={f1.len},{f1.data[0]},{f1.data[3]}"
+    print "f2={f2.len},{f2.data[0]},{f2.data[1]}"
+    print "d={d0},{d1.len()},{d1[0]},{d1[3]}"
+"#;
+
+#[test]
+fn seed5f_generic_collect_and_default_jit_matches_interpreter() {
+    let path = write_source("seed5f_collect", SEED5F_COLLECT_SOURCE);
+    let jit = Command::new(seed())
+        .arg("run")
+        .arg(&path)
+        .env("SIMPLE_RUST_SEED_WARNING", "0")
+        .env("SIMPLE_JIT_STRICT_ALL", "1")
+        .env_remove("SIMPLE_EXECUTION_MODE")
+        .output()
+        .expect("seed output");
+    let interp = run(&path, true, b"");
+    let jit_stderr = text(&jit.stderr);
+    assert!(jit.status.success(), "JIT run failed:\n{jit_stderr}");
+    assert!(interp.status.success(), "interpreter run failed:\n{}", text(&interp.stderr));
+    assert_eq!(text(&jit.stdout), "b1=4,1,4\nb2=3,6\nf1=4,100,103\nf2=2,2,3\nd=0,4,0,0\n");
     assert_eq!(text(&jit.stdout), text(&interp.stdout));
     assert!(!jit_stderr.contains("[engine-demotion]"), "{jit_stderr}");
 }

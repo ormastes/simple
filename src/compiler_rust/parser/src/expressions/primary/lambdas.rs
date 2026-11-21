@@ -80,11 +80,12 @@ impl<'a> Parser<'a> {
                                 break;
                             }
 
-                            // Stop at closing brackets when the lambda body is inside a function call.
+                            // Stop at closing brackets or comma when the lambda body is inside a call/collection.
                             if matches!(
                                 self.current.kind,
                                 TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace
-                            ) {
+                            ) || (!statements.is_empty() && self.check(&TokenKind::Comma))
+                            {
                                 break;
                             }
 
@@ -106,7 +107,8 @@ impl<'a> Parser<'a> {
                         } else if matches!(
                             self.current.kind,
                             TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace
-                        ) {
+                        ) || (!statements.is_empty() && self.check(&TokenKind::Comma))
+                        {
                             self.lexer.pop_indent();
                         }
 

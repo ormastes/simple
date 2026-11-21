@@ -34,6 +34,7 @@ pub(crate) fn eval_lambda_body(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    let _expected_target_guard = crate::interpreter::push_expected_target_type(None);
     let nodes = match body {
         Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes, _) => nodes,
         _ => return evaluate_expr(body, env, functions, classes, enums, impl_methods),

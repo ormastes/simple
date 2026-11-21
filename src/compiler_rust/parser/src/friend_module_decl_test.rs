@@ -63,4 +63,31 @@ mod module_access_directives {
         let src = "val layer = 3\nval n = layer + 1\nlayer(n)\nval internal_export = 2\nval m = internal_export and layer\ninternal_export(m)\n";
         assert_eq!(Parser::new(src).parse().unwrap().items.len(), 6);
     }
+
+    #[test]
+    fn friend_internal_export_and_layer_emit_dedicated_ast_nodes() {
+        use crate::ast::Node;
+        let src = "friend lib.common.task_runner\ninternal_export alpha, beta\ninternal_export {gamma}\nlayer app uses domain, infra\n";
+        let module = Parser::new(src).parse().unwrap();
+        assert_eq!(module.items.len(), 4);
+        match &module.items[0] {
+            Node::FriendDecl(decl) => assert_eq!(decl.package.segments, vec!["lib", "common", "task_runner"]),
+            other => panic!("expected FriendDecl, got {other:?}"),
+        }
+        match &module.items[1] {
+            Node::InternalExportDecl(decl) => assert_eq!(decl.symbols, vec!["alpha", "beta"]),
+            other => panic!("expected InternalExportDecl, got {other:?}"),
+        }
+        match &module.items[2] {
+            Node::InternalExportDecl(decl) => assert_eq!(decl.symbols, vec!["gamma"]),
+            other => panic!("expected InternalExportDecl, got {other:?}"),
+        }
+        match &module.items[3] {
+            Node::LayerDecl(decl) => {
+                assert_eq!(decl.name, "app");
+                assert_eq!(decl.uses, vec!["domain", "infra"]);
+            }
+            other => panic!("expected LayerDecl, got {other:?}"),
+        }
+    }
 }

@@ -91,19 +91,22 @@ pub(super) fn eval_control_expr(
             } else {
                 None
             };
-            let cond_val = match cov_site {
-                Some((line, column, sub)) if let_pattern.is_none() => crate::interpreter::eval_decision_cond(
-                    condition,
-                    line,
-                    column,
-                    sub,
-                    env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?,
-                _ => evaluate_expr(condition, env, functions, classes, enums, impl_methods)?,
+            let cond_val = {
+                let _clear_cond_target = crate::interpreter::push_expected_target_type(None);
+                match cov_site {
+                    Some((line, column, sub)) if let_pattern.is_none() => crate::interpreter::eval_decision_cond(
+                        condition,
+                        line,
+                        column,
+                        sub,
+                        env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?,
+                    _ => evaluate_expr(condition, env, functions, classes, enums, impl_methods)?,
+                }
             };
             // `let_pattern` is the `val NAME =` of `if val NAME = EXPR:`. It
             // used to be discarded here by a `..` in this destructure, so an
@@ -213,20 +216,24 @@ pub(super) fn eval_control_expr(
             // it (index expressions evaluate exactly once) and merge arm
             // payload-binding container mutations back through it after the
             // matched arm ran (the two-hop place chain).
-            let subject_place = crate::interpreter::place::resolve_place(
-                subject,
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
-            let subject_val = match &subject_place {
-                Some(place) => match crate::interpreter::place::place_slot_ref(env, place) {
-                    Some(value) => value.clone(),
+            let (subject_place, subject_val) = {
+                let _clear_subj_target = crate::interpreter::push_expected_target_type(None);
+                let subject_place = crate::interpreter::place::resolve_place(
+                    subject,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                let subject_val = match &subject_place {
+                    Some(place) => match crate::interpreter::place::place_slot_ref(env, place) {
+                        Some(value) => value.clone(),
+                        None => evaluate_expr(subject, env, functions, classes, enums, impl_methods)?,
+                    },
                     None => evaluate_expr(subject, env, functions, classes, enums, impl_methods)?,
-                },
-                None => evaluate_expr(subject, env, functions, classes, enums, impl_methods)?,
+                };
+                (subject_place, subject_val)
             };
 
             // Check pattern exhaustiveness for enums
@@ -283,17 +290,20 @@ pub(super) fn eval_control_expr(
                             guard_env.enter_block_local(name.clone());
                             guard_env.insert(name.clone(), value.clone());
                         }
-                        let guard_val = crate::interpreter::eval_decision_cond(
-                            guard,
-                            arm.span.line,
-                            arm.span.column,
-                            crate::interpreter::SUB_GUARD,
-                            &mut guard_env,
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        )?;
+                        let guard_val = {
+                            let _clear_guard_target = crate::interpreter::push_expected_target_type(None);
+                            crate::interpreter::eval_decision_cond(
+                                guard,
+                                arm.span.line,
+                                arm.span.column,
+                                crate::interpreter::SUB_GUARD,
+                                &mut guard_env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?
+                        };
                         let guard_result =
                             crate::interpreter::interpreter_control::is_condition_present(guard, &guard_val);
                         crate::interpreter::record_decision_site(
@@ -405,7 +415,11 @@ pub(super) fn eval_control_expr(
                             }
                         }
 
-                        match exec_node(stmt, &mut arm_env, functions, classes, enums, impl_methods)? {
+                        let arm_ctrl = {
+                            let _non_tail_expected = crate::interpreter::push_expected_target_type(None);
+                            exec_node(stmt, &mut arm_env, functions, classes, enums, impl_methods)?
+                        };
+                        match arm_ctrl {
                             // A `return` inside an if/match EXPRESSION arm must propagate out of the
                             // function, not become the expression's value. Reuse the `?`-operator
                             // early-return channel (TryError), which is already caught at every
@@ -816,6 +830,9 @@ fn collect_free_vars_recursive(expr: &Expr, bound: &mut Vec<String>, vars: &mut 
         Expr::ArrayRepeat { value, count } => {
             collect_free_vars_recursive(value, bound, vars);
             collect_free_vars_recursive(count, bound, vars);
+        }
+        Expr::GenericInst { expr, .. } => {
+            collect_free_vars_recursive(expr, bound, vars);
         }
         Expr::Dict(entries) => {
             for (k, v) in entries {

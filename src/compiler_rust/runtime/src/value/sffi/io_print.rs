@@ -1087,6 +1087,12 @@ pub extern "C" fn rt_read_stdin_line_sffi() -> RuntimeValue {
     }
 }
 
+/// C-ABI alias expected by stdlib `extern fn rt_stdin_read_line() -> text?`.
+#[no_mangle]
+pub extern "C" fn rt_stdin_read_line() -> RuntimeValue {
+    rt_read_stdin_line_sffi()
+}
+
 /// Legacy alias used by source-level `extern fn stdin_read_char() -> text`.
 #[no_mangle]
 pub extern "C" fn stdin_read_char() -> RuntimeValue {

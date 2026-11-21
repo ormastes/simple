@@ -263,6 +263,7 @@ impl Lowerer {
             Expr::I18nTemplate { name, parts, args } => self.lower_i18n_template(name, parts, args),
             Expr::I18nRef(name) => self.lower_i18n_ref(name),
             Expr::Identifier(name) => self.lower_identifier(name, ctx),
+            Expr::GenericInst { expr, .. } => self.lower_expr(expr, ctx),
             Expr::Symbol(name) => {
                 if ctx.lookup(name).is_some()
                     || self.globals.contains_key(name)
@@ -317,12 +318,15 @@ impl Lowerer {
             Expr::ContractOld(inner) => self.lower_contract_old(inner, ctx),
             Expr::New { kind, expr, .. } => self.lower_new(kind, expr, ctx),
             Expr::MethodCall {
-                receiver, method, args, ..
+                receiver,
+                method,
+                args,
+                generic_args,
             } => {
                 if let Some(lowered) = self.lower_trait_field_method_call(receiver, method, args, ctx)? {
                     return Ok(lowered);
                 }
-                self.lower_method_call(receiver, method, args, ctx)
+                self.lower_method_call_with_generics(receiver, method, args, generic_args, ctx)
             }
             Expr::StructInit { name, fields, spread } => self.lower_struct_init(name, fields, spread.as_deref(), ctx),
             // Simple Math: Grid and Tensor literals (#1920-#1929)
@@ -586,6 +590,12 @@ impl Lowerer {
                     )));
                 }
                 return Err(LowerError::SelfInStatic);
+            }
+            if self.active_fn_generic_params.iter().any(|p| p == name) {
+                return Ok(HirExpr {
+                    kind: HirExprKind::ConstGeneric(name.to_string()),
+                    ty: TypeId::I64,
+                });
             }
             if self.lenient_types {
                 // In lenient mode, treat unknown variables as globals with type ANY.
@@ -1090,6 +1100,63 @@ impl Lowerer {
         Some(resolved)
     }
 
+    pub(super) fn primitive_default_hir_expr(type_name: &str) -> Option<HirExpr> {
+        let (kind, ty) = match type_name {
+            "i8" => (HirExprKind::Integer(0), TypeId::I8),
+            "i16" => (HirExprKind::Integer(0), TypeId::I16),
+            "i32" => (HirExprKind::Integer(0), TypeId::I32),
+            "i64" => (HirExprKind::Integer(0), TypeId::I64),
+            "u8" => (HirExprKind::Integer(0), TypeId::U8),
+            "u16" => (HirExprKind::Integer(0), TypeId::U16),
+            "u32" => (HirExprKind::Integer(0), TypeId::U32),
+            "u64" => (HirExprKind::Integer(0), TypeId::U64),
+            "f32" => (HirExprKind::Float(0.0), TypeId::F32),
+            "f64" => (HirExprKind::Float(0.0), TypeId::F64),
+            "bool" => (HirExprKind::Bool(false), TypeId::BOOL),
+            "text" | "str" => (HirExprKind::String(String::new()), TypeId::STRING),
+            _ => return None,
+        };
+        Some(HirExpr { kind, ty })
+    }
+
+    fn method_has_generic_params(&self, method: &str) -> bool {
+        if method == "collect" {
+            return true;
+        }
+        if self
+            .module
+            .trait_infos
+            .values()
+            .any(|ti| ti.methods.get(method).is_some_and(|sig| !sig.generic_params.is_empty()))
+        {
+            return true;
+        }
+        let suffix = format!(".{method}");
+        self.module
+            .functions
+            .iter()
+            .any(|f| !f.generic_params.is_empty() && (f.name == method || f.name.ends_with(&suffix)))
+    }
+
+    fn method_returns_generic_param(&self, method: &str) -> bool {
+        if method == "collect" {
+            return true;
+        }
+        if self
+            .module
+            .trait_infos
+            .values()
+            .any(|ti| ti.methods.get(method).is_some_and(|sig| sig.generic_params.len() == 1))
+        {
+            return true;
+        }
+        let suffix = format!(".{method}");
+        self.module
+            .functions
+            .iter()
+            .any(|f| f.generic_params.len() == 1 && (f.name == method || f.name.ends_with(&suffix)))
+    }
+
     fn lower_method_call(
         &mut self,
         receiver: &Expr,
@@ -1097,8 +1164,45 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        self.lower_method_call_with_generics(receiver, method, args, &[], ctx)
+    }
+
+    fn lower_method_call_with_generics(
+        &mut self,
+        receiver: &Expr,
+        method: &str,
+        args: &[ast::Argument],
+        generic_args: &[ast::Type],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        let inherited_target_type = self.expected_target_type.take();
+        let receiver_base = match receiver {
+            Expr::GenericInst { expr, .. } => expr.as_ref(),
+            other => other,
+        };
+        if method == "default" && args.is_empty() {
+            if let Expr::ArrayRepeat { value, count } = receiver_base {
+                let is_type_or_param = match value.as_ref() {
+                    Expr::Identifier(name) if ctx.lookup(name).is_none() => {
+                        self.active_fn_generic_params.iter().any(|p| p == name)
+                            || Self::primitive_default_hir_expr(name).is_some()
+                            || self.module.types.lookup(name).is_some()
+                    }
+                    _ => false,
+                };
+                if is_type_or_param {
+                    let elem_default = Expr::MethodCall {
+                        receiver: value.clone(),
+                        method: "default".to_string(),
+                        args: Vec::new(),
+                        generic_args: Vec::new(),
+                    };
+                    return self.lower_array_repeat(&elem_default, count, ctx);
+                }
+            }
+        }
         // Check for intrinsic calls on special identifiers
-        if let Expr::Identifier(recv_name) = receiver {
+        if let Expr::Identifier(recv_name) = receiver_base {
             // Module imports are compile-time namespaces. Resolve the exact
             // qualified free-function owner before lowering the receiver;
             // lenient receiver lowering would otherwise create
@@ -1162,6 +1266,10 @@ impl Lowerer {
                         ty: ret_ty,
                     });
                 }
+                if let Some((type_name, struct_ty)) = self.resolve_flatten_namespace_type(recv_name, method) {
+                    self.gate_private_namespace_ref(recv_name, method);
+                    return self.lower_resolved_constructor(&type_name, struct_ty, args, ctx);
+                }
             }
             // this.* intrinsics
             if recv_name == "this" {
@@ -1187,6 +1295,30 @@ impl Lowerer {
                     return Ok(result);
                 }
             }
+            else if ctx.lookup(recv_name).is_none()
+                && self.active_fn_generic_params.iter().any(|p| p == recv_name)
+            {
+                let args_hir = self.lower_call_args(args, ctx)?;
+                let trait_name = self
+                    .active_fn_generic_bounds
+                    .iter()
+                    .find(|b| b.type_param == *recv_name)
+                    .and_then(|b| b.bounds.first().map(|tb| tb.trait_name.clone()));
+                return Ok(HirExpr {
+                    kind: HirExprKind::TypeParamStaticCall {
+                        type_param: recv_name.to_string(),
+                        trait_name,
+                        method: method.to_string(),
+                        args: args_hir,
+                    },
+                    ty: TypeId::ANY,
+                });
+            }
+            else if ctx.lookup(recv_name).is_none() && method == "default" && args.is_empty() {
+                if let Some(prim_default) = Self::primitive_default_hir_expr(recv_name) {
+                    return Ok(prim_default);
+                }
+            }
             // Static method calls on classes/structs
             // Only treat as static method if the name is NOT a local variable
             // (e.g., `text` is both a type alias and could be a variable name)
@@ -1204,7 +1336,43 @@ impl Lowerer {
                 if let Some(result) = self.lower_simd_static_method(recv_name, method, args, ctx)? {
                     return Ok(result);
                 }
-                return self.lower_static_member_call_with_sugar(recv_name, method, args, ctx);
+                let mut res = self.lower_static_member_call_with_sugar(recv_name, method, args, ctx)?;
+                if let Expr::GenericInst { type_args, .. } = receiver {
+                    if !type_args.is_empty() {
+                        if let Ok(concrete_ty) = self.resolve_type(&ast::Type::Generic {
+                            name: recv_name.to_string(),
+                            args: type_args.clone(),
+                        }) {
+                            if concrete_ty != TypeId::ANY {
+                                res.ty = concrete_ty;
+                            }
+                        }
+                    }
+                } else if let Some(target_ty) = inherited_target_type {
+                    if matches!(
+                        self.module.types.get(target_ty),
+                        Some(HirType::Struct { name, .. }) if name == recv_name || name.ends_with(&format!(".{recv_name}"))
+                    ) {
+                        res.ty = target_ty;
+                    }
+                }
+                return Ok(res);
+            }
+        } else if let Expr::FieldAccess {
+            receiver: inner_recv,
+            field: inner_field,
+        } = receiver_base
+        {
+            if let Expr::Identifier(ns) = inner_recv.as_ref() {
+                if ctx.lookup(ns).is_none() {
+                    if let Some((type_name, _)) = self.resolve_flatten_namespace_type(ns, inner_field) {
+                        self.gate_private_namespace_ref(ns, inner_field);
+                        if let Some(result) = self.lower_simd_static_method(&type_name, method, args, ctx)? {
+                            return Ok(result);
+                        }
+                        return self.lower_static_member_call_with_sugar(&type_name, method, args, ctx);
+                    }
+                }
             }
         }
 
@@ -1361,9 +1529,26 @@ impl Lowerer {
             }
         }
 
+        let mut resolved_generic_args = Vec::with_capacity(generic_args.len());
+        for ga in generic_args {
+            resolved_generic_args.push(self.resolve_type(ga)?);
+        }
+        if resolved_generic_args.is_empty() && self.method_has_generic_params(method) {
+            if let Some(target_ty) = inherited_target_type.filter(|ty| *ty != TypeId::ANY && *ty != TypeId::VOID) {
+                resolved_generic_args.push(target_ty);
+            }
+        }
+
         // Look up return type from module functions
         let recv_ty = receiver_hir.ty;
-        let return_ty = tuple_get_return_ty.unwrap_or_else(|| self.lookup_method_return_type(recv_ty, method));
+        let mut return_ty = tuple_get_return_ty.unwrap_or_else(|| self.lookup_method_return_type(recv_ty, method));
+        if let Some(&first_generic) = resolved_generic_args.first() {
+            if first_generic != TypeId::ANY
+                && (method == "collect" || (return_ty == TypeId::ANY && self.method_returns_generic_param(method)))
+            {
+                return_ty = first_generic;
+            }
+        }
 
         // Generate generic method call for user-defined methods
         // Uses dynamic dispatch since we don't know the concrete type at compile time
@@ -1373,6 +1558,7 @@ impl Lowerer {
                 method: method.to_string(),
                 args: hir_args,
                 dispatch: DispatchMode::Dynamic,
+                generic_args: resolved_generic_args,
             },
             ty: return_ty,
         })
@@ -2135,6 +2321,7 @@ impl Lowerer {
                     method: method.to_string(),
                     args: hir_args,
                     dispatch: DispatchMode::Static,
+                    generic_args: Vec::new(),
                 },
                 ty,
             }));
@@ -2371,6 +2558,7 @@ impl Lowerer {
                         method: method.to_string(),
                         args: hir_args,
                         dispatch: DispatchMode::Static,
+                        generic_args: Vec::new(),
                     },
                     ty,
                 }));
@@ -2544,6 +2732,7 @@ impl Lowerer {
                         method: method.to_string(),
                         args: hir_args,
                         dispatch: DispatchMode::Static,
+                        generic_args: Vec::new(),
                     },
                     ty,
                 }));
@@ -2682,6 +2871,7 @@ impl Lowerer {
                         method: method.to_string(),
                         args: hir_args,
                         dispatch: DispatchMode::Dynamic, // Dynamic dispatch for Any types
+                        generic_args: Vec::new(),
                     },
                     ty,
                 }));

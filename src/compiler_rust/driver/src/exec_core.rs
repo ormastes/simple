@@ -425,6 +425,9 @@ impl ExecCore {
                 | N::StructuredExportStmt(_)
                 | N::AutoImportStmt(_)
                 | N::RequiresCapabilities(_)
+                | N::FriendDecl(_)
+                | N::InternalExportDecl(_)
+                | N::LayerDecl(_)
                 | N::AopAdvice(_)
                 | N::DiBinding(_)
                 | N::InjectGraph(_)
@@ -1413,7 +1416,7 @@ impl ExecCore {
             .extern_fn_names
             .iter()
             .filter(|name| referenced.contains(name.as_str()))
-            .filter(|name| self.symbol_provider.get_symbol(name.as_str()).is_none())
+            .filter(|name| !simple_compiler::codegen::jit::jit_import_resolves(self.symbol_provider.as_ref(), name.as_str()))
             // Byte/word accessors are lowered inline by codegen; they never
             // need a runtime symbol, so they must not be spliced through the
             // interpreter bridge.

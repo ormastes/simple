@@ -2,6 +2,20 @@ use super::*;
 use simple_parser::ast::Visibility;
 use simple_parser::Span;
 
+/// Trait bound attached to a generic parameter on a function or method.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirTraitBound {
+    pub trait_name: String,
+    pub type_args: Vec<String>,
+}
+
+/// Generic bounds for one method/function type parameter (`C: FromIterator<Self.Item>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirGenericBound {
+    pub type_param: String,
+    pub bounds: Vec<HirTraitBound>,
+}
+
 /// HIR function definition
 #[derive(Debug, Clone)]
 pub struct HirFunction {
@@ -46,6 +60,10 @@ pub struct HirFunction {
     /// Whether this function contains suspension operators (inferred via effect_inference).
     /// If true, the function is async and should return Promise<T> (not enforced yet)
     pub has_suspension: bool,
+    /// Generic parameter names declared directly on this function/method.
+    pub generic_params: Vec<String>,
+    /// Trait bounds for generic parameters on this function/method.
+    pub generic_bounds: Vec<HirGenericBound>,
 }
 
 impl HirFunction {

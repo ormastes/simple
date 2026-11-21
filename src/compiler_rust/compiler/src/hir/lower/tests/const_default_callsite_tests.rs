@@ -203,3 +203,45 @@ fn imported_module_global_initializer_resolves_calls_through_its_owner() {
     assert!(err.contains("ambiguous call to `mk_counter`"), "{err}");
     assert!(err.contains("`user.spl` neither"), "{err}");
 }
+
+#[test]
+fn glob_import_does_not_collide_public_fn_with_cross_dir_private_helper() {
+    let tmp = tempfile::tempdir().unwrap();
+    let shared_dir = tmp.path().join("shared");
+    let contract_dir = tmp.path().join("contracts");
+    std::fs::create_dir_all(&shared_dir).unwrap();
+    std::fs::create_dir_all(&contract_dir).unwrap();
+
+    let pub_path = shared_dir.join("cfg_pub.spl");
+    let priv_path = contract_dir.join("cfg_priv.spl");
+    let caller_path = shared_dir.join("query.spl");
+    let pub_src = "pub fn cfg_text(x: i64) -> i64:\n    x + 1\n";
+    let priv_src = "fn cfg_text(x: i64) -> i64:\n    x + 2\n";
+    let caller_src = "pub fn run_query(x: i64) -> i64:\n    cfg_text(x)\n";
+
+    let pub_ast = Parser::new(pub_src).parse().unwrap();
+    let priv_ast = Parser::new(priv_src).parse().unwrap();
+    crate::interpreter::interpreter_module::register_module_private_fns(&pub_path, &pub_ast.items);
+    crate::interpreter::interpreter_module::register_module_private_fns(&priv_path, &priv_ast.items);
+
+    let pub_owner = crate::interpreter::normalize_path_key(&pub_path).to_string_lossy().into_owned();
+    let priv_owner = crate::interpreter::normalize_path_key(&priv_path).to_string_lossy().into_owned();
+    let caller_owner = crate::interpreter::normalize_path_key(&caller_path).to_string_lossy().into_owned();
+
+    let mut module = Parser::new("fn main() -> i64:\n    run_query(1)\n").parse().unwrap();
+    module.items.push(binding("<entry>", "run_query", &caller_owner, "run_query"));
+    module.items.push(binding(&caller_owner, "*", &pub_owner, "*"));
+    module.items.push(binding(&caller_owner, "*", &priv_owner, "*"));
+    module.items.extend(flattened(caller_src, &caller_owner));
+    module.items.extend(flattened(pub_src, &pub_owner));
+    module.items.extend(flattened(priv_src, &priv_owner));
+
+    let hir = crate::hir::lower(&module).expect("cross-dir private fn must not collide with pub glob export");
+    let run_query = hir
+        .functions
+        .iter()
+        .find(|f| f.name.ends_with("run_query"))
+        .expect("run_query lowered");
+    let priv_mangled = crate::interpreter::flatten_owner_mangled_name(&priv_owner, "cfg_text");
+    assert!(!format!("{run_query:?}").contains(&priv_mangled));
+}

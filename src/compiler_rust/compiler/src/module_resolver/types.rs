@@ -8,7 +8,7 @@
 
 use crate::fs_probe::{p_exists, p_is_dir, p_is_file};
 use simple_dependency_tracker::symbol::ProjectSymbols;
-use simple_parser::ast::{Attribute, AutoImportStmt, Capability, CommonUseStmt, ExportUseStmt, Visibility};
+use simple_parser::ast::{Attribute, AutoImportStmt, Capability, CommonUseStmt, ExportUseStmt, ModulePath, Visibility};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -116,6 +116,10 @@ pub struct DirectoryManifest {
     pub exports: Vec<ExportUseStmt>,
     /// Macro auto-imports (auto import)
     pub auto_imports: Vec<AutoImportStmt>,
+    /// Friend packages declared via `friend <package.path>`
+    pub friends: Vec<ModulePath>,
+    /// Symbols exported to friends via `internal_export <name>`
+    pub internal_exports: Vec<String>,
     /// Required capabilities (from `requires [pure, io, ...]`)
     /// Empty means unrestricted (all effects allowed)
     pub capabilities: Vec<Capability>,

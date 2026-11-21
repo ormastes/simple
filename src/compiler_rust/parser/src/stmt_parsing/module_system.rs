@@ -1049,4 +1049,79 @@ impl<'a> Parser<'a> {
             Ok(entries.into_iter().next().unwrap())
         }
     }
+
+    /// Parse a module-level `friend <package.path>` directive.
+    pub(crate) fn parse_friend_decl(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.advance(); // consume 'friend'
+        let package = self.parse_module_path()?;
+        let end_span = self.previous.span;
+        Ok(Node::FriendDecl(FriendDecl {
+            span: Span::new(start_span.start, end_span.end, start_span.line, start_span.column),
+            package,
+        }))
+    }
+
+    /// Parse a module-level `internal_export <symbol>[, ...]` or `{A, B}` directive.
+    pub(crate) fn parse_internal_export_decl(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.advance(); // consume 'internal_export'
+        let mut symbols = Vec::new();
+        if self.check(&TokenKind::LBrace) {
+            self.advance();
+            while !self.check(&TokenKind::RBrace) && !self.is_at_end() {
+                symbols.push(self.expect_path_segment()?);
+                if self.check(&TokenKind::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            if self.check(&TokenKind::RBrace) {
+                self.advance();
+            }
+        } else {
+            symbols.push(self.expect_path_segment()?);
+            while self.check(&TokenKind::Comma) {
+                self.advance();
+                if matches!(self.current.kind, TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof) {
+                    break;
+                }
+                symbols.push(self.expect_path_segment()?);
+            }
+        }
+        let end_span = self.previous.span;
+        Ok(Node::InternalExportDecl(InternalExportDecl {
+            span: Span::new(start_span.start, end_span.end, start_span.line, start_span.column),
+            symbols,
+        }))
+    }
+
+    /// Parse a module-level `layer <name> [uses <a, b>]` directive.
+    pub(crate) fn parse_layer_decl(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.advance(); // consume 'layer'
+        let name = self.expect_path_segment()?;
+        let mut uses = Vec::new();
+        if matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "uses") {
+            self.advance();
+            while !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+                uses.push(self.expect_path_segment()?);
+                if self.check(&TokenKind::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        while !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            self.advance();
+        }
+        let end_span = self.previous.span;
+        Ok(Node::LayerDecl(LayerDecl {
+            span: Span::new(start_span.start, end_span.end, start_span.line, start_span.column),
+            name,
+            uses,
+        }))
+    }
 }

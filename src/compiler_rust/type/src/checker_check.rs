@@ -369,6 +369,9 @@ impl TypeChecker {
                 | Node::StructuredExportStmt(_)
                 | Node::AutoImportStmt(_)
                 | Node::RequiresCapabilities(_)
+                | Node::FriendDecl(_)
+                | Node::InternalExportDecl(_)
+                | Node::LayerDecl(_)
                 | Node::LeanBlock(_) => {
                     // Module system nodes and embedded lean blocks don't introduce type bindings directly
                 }

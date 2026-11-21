@@ -377,9 +377,13 @@ pub(super) fn exec_if(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
+    let _clear_expected = crate::interpreter::push_expected_target_type(None);
     // Handle if-let: if let PATTERN = EXPR:
     if let Some(pattern) = &if_stmt.let_pattern {
-        let value = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
+        let value = {
+            let _clear_cond = crate::interpreter::push_expected_target_type(None);
+            evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?
+        };
         match optional_let_binding_condition(pattern, &value, &if_stmt.condition)? {
             LetBind::Bind(name, inner) => {
                 // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
@@ -416,17 +420,20 @@ pub(super) fn exec_if(
     } else {
         // Normal if condition
         // For if~ (is_suspend), await the condition value before checking truthiness
-        let cond_val = eval_decision_cond(
-            &if_stmt.condition,
-            if_stmt.span.line,
-            if_stmt.span.column,
-            SUB_STMT,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?;
+        let cond_val = {
+            let _clear_cond = crate::interpreter::push_expected_target_type(None);
+            eval_decision_cond(
+                &if_stmt.condition,
+                if_stmt.span.line,
+                if_stmt.span.column,
+                SUB_STMT,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+        };
         let cond_val = if if_stmt.is_suspend {
             await_value(cond_val)?
         } else {
@@ -3686,6 +3693,7 @@ fn expr_may_mutate_var(e: &Expr, var: &str) -> bool {
             items.iter().any(|x| expr_may_mutate_var(x, var))
         }
         Expr::ArrayRepeat { value, count } => expr_may_mutate_var(value, var) || expr_may_mutate_var(count, var),
+        Expr::GenericInst { expr, .. } => expr_may_mutate_var(expr, var),
         Expr::Dict(pairs) => pairs
             .iter()
             .any(|(k, v)| expr_may_mutate_var(k, var) || expr_may_mutate_var(v, var)),
@@ -5648,14 +5656,17 @@ pub(crate) fn exec_match_core(
 ) -> Result<(Control, Option<Value>), CompileError> {
     // Read the subject through its place (index expressions evaluate exactly
     // once) so the post-arm payload-binding merge can write back through it.
-    let (subject, subject_place) = crate::interpreter::interpreter_patterns::evaluate_match_subject(
-        &match_stmt.subject,
-        env,
-        functions,
-        classes,
-        enums,
-        impl_methods,
-    )?;
+    let (subject, subject_place) = {
+        let _clear_subj_target = crate::interpreter::push_expected_target_type(None);
+        crate::interpreter::interpreter_patterns::evaluate_match_subject(
+            &match_stmt.subject,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?
+    };
 
     // Check for strong enum - disallow wildcard/catch-all patterns
     if let Value::Enum { enum_name, .. } = &subject {
@@ -5680,17 +5691,20 @@ pub(crate) fn exec_match_core(
                     guard_env.enter_block_local(name.clone());
                     guard_env.insert(name.clone(), value.clone());
                 }
-                let guard_val = eval_decision_cond(
-                    guard,
-                    arm.span.line,
-                    arm.span.column,
-                    SUB_GUARD,
-                    &mut guard_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
+                let guard_val = {
+                    let _clear_guard_target = crate::interpreter::push_expected_target_type(None);
+                    eval_decision_cond(
+                        guard,
+                        arm.span.line,
+                        arm.span.column,
+                        SUB_GUARD,
+                        &mut guard_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )?
+                };
                 // COVERAGE: a guard is a decision (an unguarded arm is not; the
                 // old "arm taken" probe could only ever record `true`).
                 let guard_result = is_condition_present(guard, &guard_val);
@@ -5787,6 +5801,7 @@ pub(super) fn exec_match(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
+    let _clear_expected = crate::interpreter::push_expected_target_type(None);
     let (flow, _last_val) = exec_match_core(match_stmt, env, functions, classes, enums, impl_methods)?;
     match flow {
         Control::Return(_) | Control::Break(..) | Control::Continue(_) => Ok(flow),
@@ -5819,7 +5834,10 @@ pub(crate) fn exec_if_core(
         // `exec_if_core` sibling of the fix already landed in `exec_if` — `if val`
         // reaches THIS function instead whenever the `if` is the last statement
         // of a function/block body (implicit-return / value position).
-        let value = evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?;
+        let value = {
+            let _clear_cond = crate::interpreter::push_expected_target_type(None);
+            evaluate_expr(&if_stmt.condition, env, functions, classes, enums, impl_methods)?
+        };
         match optional_let_binding_condition(pattern, &value, &if_stmt.condition)? {
             LetBind::Bind(name, inner) => {
                 // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
@@ -5861,17 +5879,20 @@ pub(crate) fn exec_if_core(
         record_decision_site(if_stmt.span.line, if_stmt.span.column, SUB_STMT, false);
     } else {
         // Normal if condition
-        let cond_val = eval_decision_cond(
-            &if_stmt.condition,
-            if_stmt.span.line,
-            if_stmt.span.column,
-            SUB_STMT,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )?;
+        let cond_val = {
+            let _clear_cond = crate::interpreter::push_expected_target_type(None);
+            eval_decision_cond(
+                &if_stmt.condition,
+                if_stmt.span.line,
+                if_stmt.span.column,
+                SUB_STMT,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+        };
         let cond_val = if if_stmt.is_suspend {
             await_value(cond_val)?
         } else {
@@ -5903,7 +5924,10 @@ pub(crate) fn exec_if_core(
 
     for (elif_idx, (pattern, cond, block)) in if_stmt.elif_branches.iter().enumerate() {
         if let Some(pattern) = pattern {
-            let value = evaluate_expr(cond, env, functions, classes, enums, impl_methods)?;
+            let value = {
+                let _clear_cond = crate::interpreter::push_expected_target_type(None);
+                evaluate_expr(cond, env, functions, classes, enums, impl_methods)?
+            };
             match optional_let_binding_condition(pattern, &value, cond)? {
                 LetBind::Bind(name, inner) => {
                     // An `if val NAME = …` binding is a LOCAL of this frame. Marking it
@@ -5941,17 +5965,20 @@ pub(crate) fn exec_if_core(
             }
             record_decision_site(if_stmt.span.line, if_stmt.span.column, sub_elif(elif_idx), false);
         } else {
-            let elif_val = eval_decision_cond(
-                cond,
-                if_stmt.span.line,
-                if_stmt.span.column,
-                sub_elif(elif_idx),
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
+            let elif_val = {
+                let _clear_cond = crate::interpreter::push_expected_target_type(None);
+                eval_decision_cond(
+                    cond,
+                    if_stmt.span.line,
+                    if_stmt.span.column,
+                    sub_elif(elif_idx),
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?
+            };
             let elif_val = if if_stmt.is_suspend {
                 await_value(elif_val)?
             } else {

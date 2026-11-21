@@ -133,6 +133,8 @@ pub(super) fn eval_literal_expr(
                 // Execute the literal function body with the string value
                 let mut local_env: Env = Env::new();
                 local_env.insert(lit_fn_info.param_name.clone(), Value::text(s.clone()));
+                let _fn_return_guard = super::super::push_current_fn_return_type(None);
+                let _expected_target_guard = super::super::push_expected_target_type(None);
 
                 match exec_block_fn(
                     &lit_fn_info.body,
@@ -164,6 +166,8 @@ pub(super) fn eval_literal_expr(
                             let param_name = &from_method.params[0].name;
                             local_env.insert(param_name.clone(), Value::text(s.clone()));
                         }
+                        let _fn_return_guard = super::super::push_current_fn_return_type(None);
+                        let _expected_guard = super::super::push_expected_target_type(None);
 
                         match exec_block_fn(
                             &from_method.body,
@@ -404,6 +408,28 @@ pub(super) fn eval_literal_expr(
                         )
                     }),
                 })));
+            }
+            let bound_generic = crate::interpreter::GENERIC_TYPE_BINDINGS.with(|cell| cell.borrow().get(name).cloned());
+            if let Some(bound_ty) = bound_generic {
+                match crate::interpreter::resolve_generic_type_in_scope(&bound_ty) {
+                    simple_parser::ast::Type::Simple(s) => {
+                        if let Ok(n) = s.parse::<i64>() {
+                            return Ok(Some(Value::Int(n)));
+                        }
+                        if !s.is_empty() && (&s != name || classes.contains_key(&s)) {
+                            return Ok(Some(Value::Constructor { class_name: s }));
+                        }
+                    }
+                    simple_parser::ast::Type::Generic { name: target_name, .. } => {
+                        return Ok(Some(Value::Constructor { class_name: target_name }));
+                    }
+                    simple_parser::ast::Type::Array { size: None, .. } => {
+                        return Ok(Some(Value::Constructor {
+                            class_name: "array".to_string(),
+                        }));
+                    }
+                    _ => {}
+                }
             }
             // Check classes - return as Constructor for constructor polymorphism
             if classes.contains_key(name) {

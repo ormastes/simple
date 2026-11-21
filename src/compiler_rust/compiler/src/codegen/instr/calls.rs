@@ -216,6 +216,7 @@ mod tests {
         assert_eq!(boxed_text_arg_indices("other.rt_file_atomic_write"), None);
         assert_eq!(boxed_text_arg_indices("other.rt_file_atomic_write_mode"), None);
         assert_eq!(boxed_text_arg_indices("rt_file_atomic_write_mode_extra"), None);
+        assert_eq!(boxed_text_arg_indices("rt_path_normalize"), Some(&[0][..]));
         assert_eq!(boxed_text_arg_indices("rt_string_builder_push"), Some(&[1][..]));
     }
 
@@ -3220,6 +3221,20 @@ pub(in crate::codegen) const C_STRING_RETURNING_RUNTIME_FNS: &[&str] = &[
     "rt_vulkan_selected_device_type",
 ];
 
+/// Runtime entry points declared `-> bool` in Simple whose C ABI actually
+/// returns a tagged `RuntimeValue` boolean (`RuntimeValue::TRUE`/`FALSE`,
+/// where `FALSE` carries a nonzero tag word `SPECIAL_FALSE`) rather than a raw
+/// 0/1 scalar. Decode via `rt_value_as_bool` before storing into the MIR bool VReg.
+pub(in crate::codegen) const TAGGED_BOOL_RETURNING_RUNTIME_FNS: &[&str] = &[
+    "rt_pty_close",
+    "rt_pty_is_running",
+    "rt_pty_write",
+];
+
+pub(in crate::codegen) fn returns_tagged_bool(func_name: &str) -> bool {
+    TAGGED_BOOL_RETURNING_RUNTIME_FNS.contains(&func_name)
+}
+
 fn returns_c_string(func_name: &str) -> bool {
     C_STRING_RETURNING_RUNTIME_FNS.contains(&func_name)
 }
@@ -3497,9 +3512,11 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
 pub fn boxed_text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     match func_name {
         "rt_string_builder_push" => Some(&[1]),
+        "rt_pty_write" => Some(&[1]),
         // Both atomic runtime owners consume tagged path/content values;
         // mode remains a scalar argument at index 2.
         "rt_file_atomic_write" | "rt_file_atomic_write_mode" => Some(&[0, 1]),
+        "rt_path_normalize" => Some(&[0]),
         _ => None,
     }
 }
@@ -4324,6 +4341,19 @@ pub fn compile_call<M: Module>(
                     let decode_call = builder.ins().call(decode_ref, &[result]);
                     result = builder.inst_results(decode_call)[0];
                 }
+                if returns_tagged_bool(sffi_name) {
+                    let Some(&unbox_id) = ctx.runtime_funcs.get("rt_value_as_bool") else {
+                        return Err(format!(
+                            "{sffi_name} returns tagged RuntimeValue bool but rt_value_as_bool was not \
+                             declared; it is a codegen root in \
+                             codegen/common_backend.rs::runtime_symbol_is_codegen_root"
+                        ));
+                    };
+                    let unbox_ref = ctx.module.declare_func_in_func(unbox_id, builder.func);
+                    let unbox_call = builder.ins().call(unbox_ref, &[result]);
+                    let raw_i8 = builder.inst_results(unbox_call)[0];
+                    result = builder.ins().uextend(types::I64, raw_i8);
+                }
 
                 // Tag the result if needed.
                 let final_result = if needs_tagging {
@@ -4651,6 +4681,12 @@ pub fn compile_call<M: Module>(
                 // `arr.enumerate()` raised "Function 'Array.enumerate' not
                 // found" and still exited 0. It returns an array of
                 // (index, item) tuples, matching the interpreter.
+                "ptr"
+                    if args.len() == 1
+                        && ctx.vreg_types.get(&args[0]).copied() == Some(crate::hir::TypeId::STRING) =>
+                {
+                    Some("rt_string_data")
+                }
                 "enumerate" => Some("rt_array_enumerate"),
                 _ => None,
             };
