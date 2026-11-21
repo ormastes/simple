@@ -1,0 +1,28 @@
+"""
+FixApplicator dedupe: identical replacements (same span and same new_text) from
+several fixes are applied once. Distinct inserts at one offset are all applied.
+Run: bin/simple test test/01_unit/compiler/lint/easy_fix_identical_insert_spec.spl
+"""
+
+use std.spec.*
+use std.tooling.easy_fix.types.{FixApplicator, FixConfidence, Replacement, EasyFix}
+
+fn _insert_fix(new_text: text) -> EasyFix:
+    var fix = EasyFix.create(id: "t:{new_text}", description: "insert {new_text}", confidence: FixConfidence.Uncertain)
+    fix.add_replacement(Replacement.create(
+        file: "s.spl", start: 3, end: 3, line: 1, column: 4, new_text: new_text))
+    fix
+
+describe "FixApplicator identical zero-width inserts":
+    it "applies identical inserts at one offset exactly once":
+        match FixApplicator.apply([_insert_fix("X"), _insert_fix("X")], {"s.spl": "abc\n"}):
+            case Ok(m): expect(m["s.spl"]).to_equal("abcX\n")
+            case Err(e): expect(e).to_equal("")
+
+    it "still applies distinct inserts at the same offset":
+        match FixApplicator.apply([_insert_fix("X"), _insert_fix("Y")], {"s.spl": "abc\n"}):
+            case Ok(m):
+                expect(m["s.spl"].len()).to_equal(6)
+                expect(m["s.spl"].contains("X")).to_equal(true)
+                expect(m["s.spl"].contains("Y")).to_equal(true)
+            case Err(e): expect(e).to_equal("")
