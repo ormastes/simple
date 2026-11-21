@@ -1168,17 +1168,15 @@ impl LlvmBackend {
 
     /// Get the LLVM integer type used for RuntimeValue on this target.
     ///
-    /// On 64-bit targets, RuntimeValue is i64 (tagged 64-bit value).
-    /// On 32-bit targets, RuntimeValue is i32 (tagged 32-bit value).
-    /// The C runtime defines `typedef int32_t RuntimeValue` on RV32 and
-    /// `typedef int64_t RuntimeValue` on 64-bit, so this must match.
+    /// RuntimeValue is a 64-bit tagged word on EVERY target: the C runtime
+    /// has `typedef uint64_t RuntimeValue` (`src/runtime/runtime_value.h`) and
+    /// the Rust runtime `RuntimeValue(u64)`, with 61-bit int payloads and
+    /// 8-byte f64 boxing. On 32-bit targets (i686, armv7, riscv32, wasm32)
+    /// pointers are zero-extended into it. `pointer_width()` is for real
+    /// pointers only.
     #[cfg(feature = "llvm")]
     pub fn runtime_int_type(&self) -> inkwell::types::IntType<'static> {
-        if self.pointer_width() == 32 {
-            self.context_ref().i32_type()
-        } else {
-            self.context_ref().i64_type()
-        }
+        self.context_ref().i64_type()
     }
 
     #[cfg(feature = "llvm")]

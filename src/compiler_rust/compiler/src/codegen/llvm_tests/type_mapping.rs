@@ -35,6 +35,19 @@ fn test_pointer_width_32bit() {
     assert_eq!(backend.pointer_width(), 32);
 }
 
+/// RuntimeValue matches the C runtime's `uint64_t` even where pointers are
+/// 32-bit (cross_compile_linker_matrix_2026-11-17 item (b): i686 Windows).
+#[test]
+#[cfg(feature = "llvm")]
+fn test_runtime_value_is_i64_on_32bit_targets() {
+    for triple in ["i686-pc-windows-gnu", "i686-unknown-linux-gnu", "wasm32-unknown-unknown"] {
+        let target = Target::parse(triple).unwrap();
+        let backend = LlvmBackend::new(target).unwrap();
+        assert_eq!(backend.pointer_width(), 32, "{triple}");
+        assert_eq!(backend.runtime_int_type().get_bit_width(), 64, "{triple}");
+    }
+}
+
 /// Test pointer width consistency for 64-bit
 #[test]
 #[cfg(feature = "llvm")]
