@@ -52,7 +52,8 @@ use std.nogc_sync_mut.io_runtime.{file_read_bytes_result}
 use std.nogc_sync_mut.host_limits.{host_limit_i64}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
 use compiler.backend.backend.backend_types.{CompiledModule, CompileError}
-use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path, llvm_object_tool_v1}
+use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path, llvm_object_llc_v1,
+    llvm_object_tool_for_v1, llvm_object_tool_v1}
 use compiler.backend.llvm_capability.{find_archive_portable}
 use compiler.backend.linker.archive_response_file.{archive_command_build, archive_is_system_ar}
 use compiler.backend.runtime_compiler.{find_c_compiler, _is_msvc_cc}
@@ -4779,7 +4780,7 @@ fn _driver_codegen_pool_lane_reason_v1(backend_name: text, is_release: bool,
 fn _driver_codegen_pool_emit_v1(batch: FrozenNativeModuleCapsuleBatchV1,
         backend_name: text, target: text, is_release: bool, opt_level: i64,
         provider_receipt_hash: text, names: [text], index: i64,
-        ir_path: text, obj_path: text) -> [text]:
+        ir_path: text, obj_path: text, pool_llc: text) -> [text]:
     val none: [text] = []
     if index < 0 or index >= names.len() or not batch.ok:
         return none
@@ -4812,7 +4813,7 @@ fn _driver_codegen_pool_emit_v1(batch: FrozenNativeModuleCapsuleBatchV1,
         return none
     print "[NATIVE] codegen-pool: ir {index + 1}/{names.len()} {name}"
     _sffi_stdout_flush()
-    llvm_module_llc_argv_v1(is_release, opt_level, capsule.target_cpu, obj_path, ir_path)
+    llvm_module_llc_argv_v1(is_release, opt_level, capsule.target_cpu, obj_path, ir_path, pool_llc)
 
 # Run the pool over `names` and return {module: staged object} for every
 # module it produced. {} when the lane is ineligible or only one worker is
@@ -4863,9 +4864,11 @@ fn _driver_codegen_pool_prefetch_v1(batch: FrozenNativeModuleCapsuleBatchV1,
         return prefetched
     print "[NATIVE] codegen: {names.len()} uncached module(s), concurrency={workers} (process pool: {workers} llc workers, IR translation serial in this process; cpus={host_cpus} budget_kib={budget_kib} headroom_kib={headroom_kib})"
     _sffi_stdout_flush()
-    val result = native_codegen_pool_run_v1(llvm_object_tool_v1(), names, workers, stage_root, ledger,
+    # Resolve the tool once: every job's argv is built for this same answer.
+    val pool_llc = llvm_object_llc_v1()
+    val result = native_codegen_pool_run_v1(llvm_object_tool_for_v1(pool_llc), names, workers, stage_root, ledger,
         fn(job_index: i64, ir_path: text, obj_path: text) -> [text]: _driver_codegen_pool_emit_v1(batch, backend_name, target, is_release,
-            opt_level, provider_receipt_hash, names, job_index, ir_path, obj_path))
+            opt_level, provider_receipt_hash, names, job_index, ir_path, obj_path, pool_llc))
     var index: i64 = 0
     while index < names.len():
         if result.states[index] == NATIVE_CODEGEN_JOB_PASS_V1:

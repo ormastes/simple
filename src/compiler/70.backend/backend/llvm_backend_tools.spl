@@ -125,6 +125,10 @@ pub fn llvm_clang_object_args(triple: text, cpu: text, has_features: bool,
         "--target={triple}"]
     if not triple.contains("windows"):
         args.push("-fPIC")
+    if triple.contains("windows-msvc"):
+        # The clang driver stamps the COFF header with the build time for MSVC
+        # triples (llc writes 0); objects must stay byte-reproducible.
+        args.push("-mno-incremental-linker-compatible")
     if target_args:
         # llc takes -mcpu=generic; clang has no "generic" x86 -march (its default).
         if cpu == "generic" or cpu == "":
@@ -163,10 +167,19 @@ pub fn llvm_object_llc_v1() -> text:
         return ""
     find_llc()
 
+pub fn llvm_object_tool_for_v1(llc: text) -> text:
+    """The tool for one llvm_object_llc_v1() answer: that llc, else clang.
+
+    A caller that spawns many jobs resolves llc ONCE and derives both the tool
+    and every argv (llvm_object_argv_v1) from that one answer: a transient
+    probe miss is not cached, so re-resolving per job could pair llc with
+    clang argv.
+    """
+    if llc != "": llc else: find_clang()
+
 pub fn llvm_object_tool_v1() -> text:
     """The IR -> object tool: clang, else llc, else ""."""
-    val llc = llvm_object_llc_v1()
-    if llc != "": llc else: find_clang()
+    llvm_object_tool_for_v1(llvm_object_llc_v1())
 
 pub fn llvm_object_argv_v1(llc: text, config: LlvmTargetConfig,
         opt_level: OptimizationLevel, bootstrap_io: bool, direct_argv: bool,
@@ -894,7 +907,7 @@ export llvm_target_flags, generate_wasm_runtime_declarations
 export compile_ir_to_wasm, to_mir_opt_level
 export compile_ir_to_object
 export compile_ir_to_object_path, llvm_llc_object_argv_v1
-export llvm_object_llc_v1, llvm_object_tool_v1, llvm_object_argv_v1
+export llvm_object_llc_v1, llvm_object_tool_for_v1, llvm_object_tool_v1, llvm_object_argv_v1
 export find_llc, find_opt, opt_available, llc_available
 export find_wasm_ld, find_wasm_opt, find_wasi_sysroot
 # ============================================================================
