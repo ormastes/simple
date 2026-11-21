@@ -154,13 +154,25 @@ BOOTSTRAP_TREE_RSS_WORKER_MEM_MIB_DEFAULT=3300
 #   2026-10-13, x86_64 Windows, 2546-module closure, 1 thread (cycle 33):
 #     per-task peak 12591996 KiB at 73% HIR; cycles 44/46 (8 and 4 jobs):
 #     16.0 GiB plateau, killed at the then 16 GiB ceiling.
-# 15.6 GiB is load_sources ALONE and HIR grows on top of it, so 16 GiB is a
-# floor, never a cap: the cap is base + workers x floor x margin, and the
+#   2026-11-21, 60.5 GiB x86_64 Linux host (MemTotal 63449060 KiB),
+#     release/1.0.0 0d8a3269bec, llvm, build-threads=1 (in-process, 4415-module
+#     full CLI closure): plan "workers 1 (requested 8, host budget fits 1)",
+#     cap 29360128 KiB = base 4 GiB + 16 GiB x 150%; HIR finished and the tree
+#     was killed mid-MIR lowering (rss-cap-exceeded, exit 88,
+#     peak_rss_kib=29383332, cap_bound=worker-floor): ONE worker above
+#     floor x margin (> 24 GiB over the 4 GiB base, still growing). With the
+#     121 GiB aarch64 run-11 MIR workers (24.0 / 25.2 GiB, ~26 GiB per worker)
+#     this raised the floor 16 -> 18 GiB (x 150% = 27 GiB per worker; one
+#     worker 31 GiB, two 58 GiB, which is above the 56 GiB static ceiling so
+#     every two-worker plan now takes the elevated-ceiling admission).
+#     Bug record: doc/08_tracking/bug/tree_rss_floor_kills_stage2_compiler_tests_on_large_hosts_2026-10-15.md
+# 15.6 GiB is load_sources ALONE and HIR/MIR grow on top of it, so the floor
+# is a floor, never a cap: the cap is base + workers x floor x margin, and the
 # worker count is reduced to what the host budget holds at that price
 # (bootstrap_tree_rss_whole_build_plan) instead of capping below the floor.
 # A worker measured above floor x margin is evidence to raise the FLOOR here
 # (and in the bug record), not to widen the margin.
-BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB=16777216
+BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB=18874368
 # Immutable defaults the env-resolution compares against, so repeated
 # resolutions in one shell stay anchored to the shipped policy.
 BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_DEFAULT_KIB=$BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB
@@ -1254,13 +1266,13 @@ bootstrap_tree_rss__selftest() {
   printf 'MemTotal:         5000000 kB\n' >"$btr_st_dir/tiny"
   : >"$btr_st_dir/none"
   # The 2026-11-05 incident host (121 GiB aarch64), idle and with another
-  # lane holding most of it (MemAvailable 40 GB), and a 64 GiB host.
+  # lane holding most of it (MemAvailable 44 GB), and a 64 GiB host.
   printf 'MemTotal:       127600812 kB\nMemFree:        90000000 kB\nMemAvailable:   112044352 kB\n' >"$btr_st_dir/aarch64"
-  printf 'MemTotal:       127600812 kB\nMemFree:        30000000 kB\nMemAvailable:    40000000 kB\n' >"$btr_st_dir/aarch64-busy"
+  printf 'MemTotal:       127600812 kB\nMemFree:        30000000 kB\nMemAvailable:    44000000 kB\n' >"$btr_st_dir/aarch64-busy"
   printf 'MemTotal:        66865260 kB\nMemAvailable:    60000000 kB\n' >"$btr_st_dir/host64"
-  # Same host, a lane holding ~40 GiB: 3/4 of 80000000 = 60000000 KiB still
-  # fits 2 workers (54525952) but not the 62914560 KiB compiler_cli_build row.
-  printf 'MemTotal:       127600812 kB\nMemFree:        70000000 kB\nMemAvailable:    80000000 kB\n' >"$btr_st_dir/aarch64-tight"
+  # Same host, a lane holding ~38 GiB: 3/4 of 82000000 = 61500000 KiB still
+  # fits 2 workers (60817408) but not the 62914560 KiB compiler_cli_build row.
+  printf 'MemTotal:       127600812 kB\nMemFree:        70000000 kB\nMemAvailable:    82000000 kB\n' >"$btr_st_dir/aarch64-tight"
   # TEMPORARY small-host headroom fixtures (bug stage2_compiler_tests_rss_
   # headroom_temp_2026-11-13): a 128 GB host with other lanes resident,
   # 31 GiB / 37 GiB / ~11 GiB available.
@@ -1456,11 +1468,12 @@ bootstrap_tree_rss__selftest() {
     btr_st_fail=1
   }
   # 121 GiB host, 8 build threads: 50% of RAM = 63800400 KiB holds 2 workers
-  # at 25165824 KiB each (16 GiB x 150%) over the 4 GiB base, so the plan runs
-  # 2 (not 8) and caps at 54525952 KiB (>= 16 GiB per worker: 26 GiB each).
-  # With the 52 GiB static ceiling that cap needs no elevation -- it equals the
-  # static ceiling exactly -- so the bound is the plain worker floor.
-  btr_st_plan aarch64-8-threads aarch64 8 2:54525952:0:worker-floor
+  # at 28311552 KiB each (18 GiB x 150%) over the 4 GiB base, so the plan runs
+  # 2 (not 8) and caps at 60817408 KiB (>= 18 GiB per worker: 27 GiB each).
+  # Since the 18 GiB floor (2026-11-21) that cap is above the 56 GiB static
+  # ceiling, so every two-worker plan needs the elevated-ceiling admission
+  # (3/4 of available: 84033264 KiB here); one worker stays plain worker-floor.
+  btr_st_plan aarch64-8-threads aarch64 8 2:60817408:60817408:worker-floor-elevated
   # Runaway: the cap is base + workers x floor x margin, finite and strictly
   # below the host budget (63800400 KiB), never the host total or fraction.
   btr_st_n=$((btr_st_n + 1))
@@ -1472,27 +1485,29 @@ bootstrap_tree_rss__selftest() {
     BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1
     bootstrap_tree_rss_whole_build_plan 8 '' || exit 1
     [ "$bootstrap_tree_rss_plan_cap_kib" -lt "$bootstrap_tree_rss_plan_budget_kib" ] &&
-      [ "$bootstrap_tree_rss_plan_cap_kib" -eq $((BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB + 2 * 25165824)) ] &&
+      [ "$bootstrap_tree_rss_plan_cap_kib" -eq $((BOOTSTRAP_TREE_RSS_PHASE_BASE_KIB + 2 * 28311552)) ] &&
       printf 'cap-below-budget:%s<%s' "$bootstrap_tree_rss_plan_cap_kib" "$bootstrap_tree_rss_plan_budget_kib"
   )
-  [ "$btr_st_got" = 'cap-below-budget:54525952<63800400' ] || {
+  [ "$btr_st_got" = 'cap-below-budget:60817408<63800400' ] || {
     echo "selftest FAIL: plan-aarch64-runaway-cap-is-finite: got $btr_st_got" >&2
     btr_st_fail=1
   }
-  # One requested worker keeps one worker, cap 29360128 KiB, under the default
+  # One requested worker keeps one worker, cap 32505856 KiB, under the default
   # ceiling: no elevated ceiling needed (the 5859375 floor is gone).
-  btr_st_plan aarch64-1-thread aarch64 1 1:29360128:0:worker-floor
-  # Another lane holds the host: 3/4 of 40 GB available = 30000000 KiB fits
+  btr_st_plan aarch64-1-thread aarch64 1 1:32505856:0:worker-floor
+  # Another lane holds the host: 3/4 of 44 GB available = 33000000 KiB fits
   # exactly one worker -- workers reduced, cap still >= the floor.
-  btr_st_plan aarch64-busy-reduces-workers aarch64-busy 8 1:29360128:0:worker-floor
-  # 64 GiB host (the 2026-10-15 incident host): 50% = 33432630 fits 1 worker.
-  btr_st_plan host64-one-worker host64 8 1:29360128:0:worker-floor
-  # 128 GB Windows host: 67047100 budget -> 2 workers at the 52 GiB static
-  # ceiling, no elevation needed.
-  btr_st_plan big-two-workers big 12 2:54525952:0:worker-floor
-  # tree_rss_host_pct 75 on the 121 GiB host: 95700600 -> 3 workers, elevated.
-  btr_st_plan aarch64-pct75-three-workers aarch64 8 3:79691776:79691776:worker-floor-elevated SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=75
-  # Tiny host: 16 GB x 50% = 8000000 KiB < one worker (29360128): fail closed,
+  btr_st_plan aarch64-busy-reduces-workers aarch64-busy 8 1:32505856:0:worker-floor
+  # 64 GiB host (the 2026-10-15 incident host): 50% = 33432600 fits 1 worker.
+  btr_st_plan host64-one-worker host64 8 1:32505856:0:worker-floor
+  # 128 GB Windows host: 67047100 budget -> 2 workers, above the 56 GiB static
+  # ceiling since the 18 GiB floor, so elevated.
+  btr_st_plan big-two-workers big 12 2:60817408:60817408:worker-floor-elevated
+  # tree_rss_host_pct 75 on the 128 GB host: 100570650 -> 3 workers, elevated.
+  # (The 121 GiB aarch64 host at pct 75 is bound by 3/4 of available,
+  # 84033264 KiB, which holds only 2 workers at the 18 GiB floor.)
+  btr_st_plan big-pct75-three-workers big 8 3:89128960:89128960:worker-floor-elevated SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=75
+  # Tiny host: 16 GB x 50% = 8000000 KiB < one worker (32505856): fail closed,
   # naming the requirement.
   # Small host (16 GB): below one worker at floor x margin -> small-host
   # single-worker mode at 75% of RAM (12000000 KiB), cap = that budget.
@@ -1502,7 +1517,7 @@ bootstrap_tree_rss__selftest() {
   # 31 GiB available: old 3/4 = 24379392 KiB; relaxed 32505856 - 4194304.
   btr_st_plan small-host-temp-headroom win-busy 8 1:28311552:0:small-host-one-worker-temp
   # 37 GiB available: relaxed budget clamped to the one-worker requirement.
-  btr_st_plan small-host-temp-headroom-clamped win-busy37 8 1:29360128:0:small-host-one-worker-temp
+  btr_st_plan small-host-temp-headroom-clamped win-busy37 8 1:32505856:0:small-host-one-worker-temp
   # ~11 GiB available: available - 4 GiB is below 3/4 x available; old kept.
   btr_st_plan small-host-temp-never-tighter win-very-busy 8 1:9000000:0:small-host-one-worker
   # An explicit cap still wins untouched (no plan, bound explicit).
@@ -1520,7 +1535,7 @@ bootstrap_tree_rss__selftest() {
   }
   # Even the max share cannot hold the 4 GiB phase base: still refused.
   btr_st_plan tiny-host-fails-closed tiny 8 'REFUSED=cannot fit one full-CLI build worker'
-  btr_st_plan tiny-host-names-floor tiny 8 'REFUSED=worker floor 16777216 KiB x 150%'
+  btr_st_plan tiny-host-names-floor tiny 8 'REFUSED=worker floor 18874368 KiB x 150%'
   # Unknown host RAM is no evidence: refused, not floored.
   btr_st_plan unknown-host-fails-closed none 8 'REFUSED=needs host RAM evidence'
   btr_st_plan junk-workers-refused aarch64 8x 'REFUSED=worker count must be a decimal 1..128'
@@ -1554,24 +1569,24 @@ bootstrap_tree_rss__selftest() {
     btr_st_fail=1
   }
   # Run-11 host: 60 GiB row, admitted as an elevated ceiling; the 2-worker
-  # phase plan (52 GiB) equals the static ceiling, so it is not elevated.
-  btr_st_cli_plan aarch64-cli-row-60g aarch64 8 62914560:62914560:cli-row-mir-shards:54525952:0
-  btr_st_cli_plan big-cli-row-60g big 12 62914560:62914560:cli-row-mir-shards:54525952:0
-  # Budget 60000000 holds 2 workers (54525952) but not the 62914560 row that
+  # phase plan (58 GiB at the 18 GiB floor) is itself elevated.
+  btr_st_cli_plan aarch64-cli-row-60g aarch64 8 62914560:62914560:cli-row-mir-shards:60817408:60817408
+  btr_st_cli_plan big-cli-row-60g big 12 62914560:62914560:cli-row-mir-shards:60817408:60817408
+  # Budget 61500000 holds 2 workers (60817408) but not the 62914560 row that
   # run 11 proved necessary: refused up front, naming the row and the budget
-  # (never silently the 52 GiB cap run 11 died at) ...
+  # (never silently the plan cap) ...
   btr_st_cli_plan aarch64-tight-refused aarch64-tight 8 'REFUSED=compiler_cli_build row needs 62914560 KiB'
-  btr_st_cli_plan aarch64-tight-names-budget aarch64-tight 8 'REFUSED=host budget 60000000 KiB'
+  btr_st_cli_plan aarch64-tight-names-budget aarch64-tight 8 'REFUSED=host budget 61500000 KiB'
   # ... unless the row is pinned to one MIR worker (one build thread).
-  btr_st_cli_plan aarch64-tight-one-worker aarch64-tight 1 29360128:0:worker-floor:29360128:0
+  btr_st_cli_plan aarch64-tight-one-worker aarch64-tight 1 32505856:0:worker-floor:32505856:0
   # The campaign envelope is the max row cap, valid only for serial tool rows.
   btr_st_cli_plan concurrent-tool-rows-refused aarch64 8 'REFUSED=BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1' BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=2
   btr_st_cli_plan unset-concurrency-refused aarch64 8 'REFUSED=BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1' 'unset BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY'
-  btr_st_cli_plan concurrency-irrelevant-one-worker aarch64 1 29360128:0:worker-floor:29360128:0 BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=2
+  btr_st_cli_plan concurrency-irrelevant-one-worker aarch64 1 32505856:0:worker-floor:32505856:0 BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=2
   # One worker (no MIR shard pair) or a plan already above 60 GiB: unchanged.
-  btr_st_cli_plan one-worker-keeps-plan aarch64 1 29360128:0:worker-floor:29360128:0
-  btr_st_cli_plan host64-keeps-plan host64 8 29360128:0:worker-floor:29360128:0
-  btr_st_cli_plan pct75-keeps-plan aarch64 8 79691776:79691776:worker-floor-elevated:79691776:79691776 SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=75
+  btr_st_cli_plan one-worker-keeps-plan aarch64 1 32505856:0:worker-floor:32505856:0
+  btr_st_cli_plan host64-keeps-plan host64 8 32505856:0:worker-floor:32505856:0
+  btr_st_cli_plan pct75-keeps-plan big 8 89128960:89128960:worker-floor-elevated:89128960:89128960 SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=75
   btr_st_cli_plan small-host-keeps-plan small 8 12000000:0:small-host-one-worker:12000000:0
   # Row / campaign consumers of a PUBLISHED plan (enforce-mode values, no host
   # probe): row-cap TASK SETUP -> cap:ceiling:bound inside, then restored.
@@ -1629,15 +1644,15 @@ bootstrap_tree_rss__selftest() {
   # Export under a fixture (monitor mode only, by the probe's own gate): a plan
   # above the static ceiling is clamped to it (worker-floor-monitor-clamped),
   # no ceiling env is set, the thread count is the fitted one, and the pair
-  # re-admits. pct75 on the 121 GiB host fits 3 workers (plan 79691776 KiB over
-  # the 56 GiB static); at default pct the 2-worker plan (52 GiB) stays under
-  # the static ceiling and is not clamped (plan-aarch64-8-threads above).
+  # re-admits. pct75 on the 128 GB host fits 3 workers (plan 89128960 KiB over
+  # the 56 GiB static). Since the 18 GiB floor (2026-11-21) every plan of 2+
+  # workers (>= 60817408 KiB) is above the static ceiling and is clamped here.
   btr_st_n=$((btr_st_n + 1))
   btr_st_got=$(
     unset SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_HOST_PCT SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
     unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE BOOTSTRAP_VERIFY_BUILD_THREADS
     SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
-    BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/aarch64"
+    BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/big"
     BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1
     SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT=75
     bootstrap_tree_rss_whole_build_export 8 '' || { printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal"; exit 0; }
@@ -1793,7 +1808,7 @@ bootstrap_tree_rss__selftest() {
         [ "$bootstrap_tree_rss_bound" = "$bootstrap_tree_rss_plan_bound" ] && printf ADMITTED || printf 'wrong-export:%s' "$bootstrap_tree_rss_summary"
     else
       case "$bootstrap_tree_rss_refusal" in
-        (*'cannot fit one full-CLI build worker'*'worker floor 16777216 KiB'*) printf TOO-SMALL ;;
+        (*'cannot fit one full-CLI build worker'*"worker floor ${BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB} KiB"*) printf TOO-SMALL ;;
         (*'compiler ceiling '*' refused (previous='*'available_bound='*)
           # Only a real headroom shortfall may refuse here: the plan was
           # within 3/4 of MemAvailable at plan time, admission re-read it.

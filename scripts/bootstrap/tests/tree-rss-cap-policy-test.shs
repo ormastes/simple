@@ -180,7 +180,7 @@ ok
 #     worker count, --compiler-ceiling-kib only when elevated). Admitted when
 #     3/4 of MemAvailable covers the cap at admission time, refused with the
 #     headroom reason otherwise, and a host too small for one worker is a
-#     policy refusal naming the 16 GiB floor. No branch is a skip.
+#     policy refusal naming the 18 GiB floor. No branch is a skip.
 plan_status=0
 # Serial tool rows, as both Stage 2 entry points pin them (required by the
 # compiler_cli_build row cap).
@@ -197,8 +197,8 @@ if [ "$plan_status" -eq 0 ]; then
                 fail "small-host plan is not one logged worker: $plan" ;;
         *)
             [ "$plan_workers" -ge 1 ] && [ "$plan_workers" -le 8 ] &&
-                [ $((plan_cap / plan_workers)) -ge 16777216 ] ||
-                fail "whole-build plan does not price >= 16 GiB per worker: $plan" ;;
+                [ $((plan_cap / plan_workers)) -ge 18874368 ] ||
+                fail "whole-build plan does not price >= 18 GiB per worker: $plan" ;;
     esac
     plan_ceiling_arg=
     [ "$plan_ceiling" -eq 0 ] || plan_ceiling_arg=--compiler-ceiling-kib=$plan_ceiling
@@ -231,7 +231,7 @@ elif grep -Fq 'compiler_cli_build row needs 62914560 KiB' "$scratch/plan.err"; t
     : # host budget holds 2 workers but not the run-11 cli row: refused up front
 else
     grep -Fq 'cannot fit one full-CLI build worker' "$scratch/plan.err" &&
-        grep -Fq 'worker floor 16777216 KiB' "$scratch/plan.err" ||
+        grep -Fq 'worker floor 18874368 KiB' "$scratch/plan.err" ||
         fail "whole-build plan failed on this host for a reason other than its size: $(cat "$scratch/plan.err")"
 fi
 ok
@@ -394,10 +394,11 @@ ok
 # Run-11 replay, deterministic: the plan priced from an injected run-11 host
 # (MemTotal 127600812, MemAvailable 99095224 at row start; fixture hooks are
 # honoured only in monitor mode) publishes the 60 GiB compiler_cli_build row
-# beside the unchanged 52 GiB phase cap; a host whose budget holds the two
+# beside the 58 GiB two-worker phase cap (60817408 KiB at the 18 GiB floor,
+# 2026-11-21); a host whose budget holds the two
 # workers but not the row is refused up front, naming both numbers.
 printf 'MemTotal:       127600812 kB\nMemFree:        90000000 kB\nMemAvailable:    99095224 kB\n' >"$scratch/meminfo.run11"
-printf 'MemTotal:       127600812 kB\nMemFree:        70000000 kB\nMemAvailable:    80000000 kB\n' >"$scratch/meminfo.tight"
+printf 'MemTotal:       127600812 kB\nMemFree:        70000000 kB\nMemAvailable:    82000000 kB\n' >"$scratch/meminfo.tight"
 run11_plan() { # MEMINFO WORKERS [ENV=VALUE ...] -> stdout of --whole-build-plan, status
     run11_mem=$1 run11_workers=$2; shift 2
     env SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1 \
@@ -405,7 +406,7 @@ run11_plan() { # MEMINFO WORKERS [ENV=VALUE ...] -> stdout of --whole-build-plan
         sh "$policy" --whole-build-plan "$run11_workers" "" 2>&1
 }
 replay_plan=$(run11_plan meminfo.run11 8) || fail "run-11 replay plan refused: $replay_plan"
-[ "$(printf '%s\n' "$replay_plan" | sed -n 's/^cap_kib=//p')" = 54525952 ] &&
+[ "$(printf '%s\n' "$replay_plan" | sed -n 's/^cap_kib=//p')" = 60817408 ] &&
     [ "$(printf '%s\n' "$replay_plan" | sed -n 's/^workers=//p')" = 2 ] &&
     [ "$(printf '%s\n' "$replay_plan" | sed -n 's/^cli_row_cap_kib=//p')" = 62914560 ] &&
     [ "$(printf '%s\n' "$replay_plan" | sed -n 's/^cli_row_ceiling_kib=//p')" = 62914560 ] &&
