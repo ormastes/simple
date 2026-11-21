@@ -15,6 +15,7 @@ use compiler.backend.native.native_avx2_capability.{
 }
 use compiler.backend.native.native_avx512_capability.{NativeAvx512CapabilityV1, native_avx512_capability_v1}
 use compiler.backend.portable_numeric_capabilities.{PortableNumericLoweringPlan, portable_numeric_default_plan_for_target}
+use std.io_runtime.{env_get_opt, host_os, host_arch}
 
 # ============================================================================
 # Native Codegen Adapter
@@ -84,6 +85,37 @@ fn native_module_has_fixed_simd(module: MirModule) -> bool:
                     ()
     false
 
+fn _native_effective_codegen_target(target: CodegenTarget) -> CodegenTarget:
+    val raw_triple = env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val darwin_triple = raw_triple.contains("-apple-darwin") or raw_triple.contains("-apple-macosx")
+    val darwin_host = raw_triple == "" and (host_os() == "macos" or host_os() == "darwin")
+    if darwin_triple:
+        match target:
+            case AArch64:
+                return CodegenTarget.AArch64_MacOS
+            case X86_64:
+                return CodegenTarget.X86_64_MacOS
+            case Host:
+                val arch = host_arch()
+                if arch == "aarch64" or arch == "arm64":
+                    return CodegenTarget.AArch64_MacOS
+                return CodegenTarget.X86_64_MacOS
+            case _:
+                return target
+    if darwin_host and target == CodegenTarget.Host:
+        val arch = host_arch()
+        if arch == "aarch64" or arch == "arm64":
+            return CodegenTarget.AArch64_MacOS
+        return CodegenTarget.X86_64_MacOS
+    if target == CodegenTarget.Host:
+        val arch = host_arch()
+        if arch == "aarch64" or arch == "arm64":
+            return CodegenTarget.AArch64
+        if arch == "riscv64":
+            return CodegenTarget.Riscv64
+        return CodegenTarget.X86_64
+    target
+
 impl Codegen for NativeCodegenAdapter:
     fn backend_kind() -> BackendKind: BackendKind.Native
     fn backend_name() -> text: "native"
@@ -102,11 +134,12 @@ impl Codegen for NativeCodegenAdapter:
         if scalable_diags.len() > 0:
             return Ok(CodegenOutput.object(module.name, []))
 
-        val compiled = if self.options.target == CodegenTarget.X86_64 and native_module_has_fixed_simd(module):
+        val effective_target = _native_effective_codegen_target(self.options.target)
+        val compiled = if (effective_target == CodegenTarget.X86_64 or effective_target == CodegenTarget.X86_64_MacOS) and native_module_has_fixed_simd(module):
             native_compile_result_with_x86_simd_capability(
-                module, self.options.target, self.avx2_capability(), self.avx512_capability())
+                module, effective_target, self.avx2_capability(), self.avx512_capability())
         else:
-            native_compile_result(module, self.options.target)
+            native_compile_result(module, effective_target)
         val bytes = if compiled.object_code.?: compiled.object_code.unwrap() else: []
         Ok(CodegenOutput.object(module.name, bytes))
 

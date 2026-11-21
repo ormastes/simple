@@ -91,7 +91,7 @@ use compiler.driver.driver_build.library_unit_dynlib_v1.{
     library_unit_partition_and_package_closure_v1
 }
 use compiler.driver.driver_xray_link.{xray_link_with_runtime_v1}
-use compiler.driver.driver_xray_llvm_link.{xray_llvm_link_needed_v1, xray_llvm_link_objects_v1, xray_llvm_link_libraries_v1, xray_llvm_semantic_link_flags_v1}
+use compiler.driver.driver_xray_llvm_link.{xray_llvm_link_needed_v1, xray_llvm_link_objects_v1, xray_llvm_link_libraries_for_target_v1, xray_llvm_semantic_link_flags_for_target_v1, xray_llvm_thread_context_supported_v1}
 use compiler.driver.smf_writer.{Target}
 use compiler.driver.smf_group_object_adapter.{smf_group_object_from_bytes_v1}
 use compiler.driver.smf.runtime_std_package_membership_v1.{
@@ -2017,9 +2017,12 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
                                 case Err(reason):
                                     return driver_native_collection_link_cleanup_error_v1(direct_link_input_dir, CompileResult.CodegenError(reason))
                                 case Ok(linked): llvm_objects = linked
-                            llvm_libraries = xray_llvm_link_libraries_v1(llvm_libraries)
-                            llvm_thread_context = true
-                            match xray_llvm_semantic_link_flags_v1(llvm_linker_flags):
+                            llvm_libraries = xray_llvm_link_libraries_for_target_v1(llvm_libraries, ctx.native_target)
+                            llvm_thread_context = xray_llvm_thread_context_supported_v1(
+                                ctx.native_target,
+                                (env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1",
+                                env_get_nullable("SIMPLE_RUNTIME_PATH") ?? "")
+                            match xray_llvm_semantic_link_flags_for_target_v1(llvm_linker_flags, ctx.native_target):
                                 case Ok(flags): llvm_linker_flags = flags
                                 case Err(reason):
                                     return driver_native_collection_link_cleanup_error_v1(direct_link_input_dir, CompileResult.CodegenError(reason))
@@ -2030,6 +2033,7 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
                     xray_thread_context_v1: llvm_thread_context,
                     xray_startup_consumer_v1: ctx.options.xray_startup_consumer_v1,
                     debug: ctx.options.debug_info,
+                    strip_output: ctx.options.strip_output,
                     verbose: ctx.options.verbose,
                     pie: true,
                     bare_metal: false,
@@ -2205,7 +2209,13 @@ impl CompilerDriver:
         ):
             return CompileResult.CodegenError(
                 "native-build failed to publish provider identity receipt")
-        val symbol_mode = if no_mangle_requested: "no-mangle" else: ""
+        val base_symbol_mode = if no_mangle_requested: "no-mangle" else: ""
+        val symbol_mode = if ctx.options.debug_info == (not is_release) and not ctx.options.strip_output:
+            base_symbol_mode
+        else:
+            val dbg_tag = if ctx.options.debug_info: "dbg1" else: "dbg0"
+            val strip_tag = if ctx.options.strip_output: "strip1" else: "strip0"
+            if base_symbol_mode == "": "{dbg_tag}-{strip_tag}" else: "{base_symbol_mode}-{dbg_tag}-{strip_tag}"
         val storage_identity = ctx.freeze_storage_registry()
         if storage_identity == "invalid":
             return CompileResult.CodegenError(
@@ -3592,9 +3602,12 @@ impl CompilerDriver:
                             case Err(reason):
                                 return driver_native_collection_link_cleanup_error_v1(collection_link_input_dir, CompileResult.CodegenError(reason))
                             case Ok(linked): llvm_objects = linked
-                        llvm_libraries = xray_llvm_link_libraries_v1(llvm_libraries)
-                        llvm_thread_context = true
-                        match xray_llvm_semantic_link_flags_v1(llvm_linker_flags):
+                        llvm_libraries = xray_llvm_link_libraries_for_target_v1(llvm_libraries, native_target)
+                        llvm_thread_context = xray_llvm_thread_context_supported_v1(
+                            native_target,
+                            (env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1",
+                            env_get_nullable("SIMPLE_RUNTIME_PATH") ?? "")
+                        match xray_llvm_semantic_link_flags_for_target_v1(llvm_linker_flags, native_target):
                             case Ok(flags): llvm_linker_flags = flags
                             case Err(reason):
                                 return driver_native_collection_link_cleanup_error_v1(collection_link_input_dir, CompileResult.CodegenError(reason))
@@ -3651,6 +3664,7 @@ impl CompilerDriver:
                 retained_symbols: dynlib_retained_syms,
                 unit_init_symbols: dynlib_unit_inits,
                 debug: ctx.options.debug_info,
+                strip_output: ctx.options.strip_output,
                 verbose: ctx.options.verbose,
                 pie: true,
                 bare_metal: false,
