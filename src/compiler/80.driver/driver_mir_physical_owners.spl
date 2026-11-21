@@ -181,3 +181,29 @@ pub fn driver_go_to_end_alias_rows_v1(row_names: [text], row_keys: [text],
 # queue. Without one the gates keep their whole-inventory demand.
 pub fn driver_mir_unit_scoped_v1(hir_loads_restricted: bool, mir_shard_queue: text) -> bool:
     hir_loads_restricted and mir_shard_queue != ""
+
+# Held HIR keys a scoped unit hands to lower_module as declaration providers
+# in addition to its feed. The feed schedules the unit's targets only, but an
+# imported module global binds through `providers`
+# (register_imported_global_bindings), so a held non-target row (a PM3 import's
+# interface HIR, closure HIR) must still provide or every such import fails
+# "missing provider declaration for imported global". One key per canonical
+# owner (alias rows share one HirModule; a second copy is a duplicate provider
+# declaration), never an owner the feed already carries. Bug:
+# doc/08_tracking/bug/per_file_unit_imported_global_missing_provider_2026-11-21.md
+pub fn driver_mir_unit_provider_keys_v1(scoped: bool, feed_owners: [text], held_keys: [text],
+        held_owners: [text]) -> [text]:
+    var extra: [text] = []
+    if not scoped or held_keys.len() != held_owners.len():
+        return extra
+    var seen: Dict<text, bool> = {}
+    for feed_owner in feed_owners:
+        seen[mir_layout_canonical_module_name(feed_owner)] = true
+    var index = 0
+    while index < held_keys.len():
+        val owner = mir_layout_canonical_module_name(held_owners[index])
+        if not seen.has(owner):
+            seen[owner] = true
+            extra = extra.push(held_keys[index])
+        index = index + 1
+    extra
