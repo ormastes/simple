@@ -36,7 +36,11 @@ fingerprint_head() {
 }
 
 hash_file() {
-    sha256sum -- "$1" 2>/dev/null | awk '{print $1}'
+    _hf=$(sha256sum -- "$1" 2>/dev/null) || return 1
+    _hf=${_hf%%[[:space:]]*}
+    _hf=${_hf#\\}
+    [ -n "$_hf" ] || return 1
+    printf '%s\n' "$_hf"
 }
 
 head_blob_metadata() {
@@ -97,32 +101,57 @@ receipt_field() {
 
 validate_stage4_tooling_summary() {
     _summary=$1
-    _summary_field() {
-        [ "$(grep -c "^$1=" "$_summary" 2>/dev/null || true)" -eq 1 ] || return 1
-        sed -n "s/^$1=//p" "$_summary"
-    }
-    [ "$(_summary_field schema)" = Stage4ToolingMatrixSummaryV1 ] &&
-        [ "$(_summary_field scope)" = full ] &&
-        [ "$(_summary_field admission_eligible)" = true ] &&
-        [ "$(_summary_field task_total)" = 49 ] &&
-        [ "$(_summary_field terminal_count)" = 49 ] &&
-        [ "$(_summary_field failed)" = 0 ] &&
-        [ "$(_summary_field blocked)" = 0 ] &&
-        [ "$(_summary_field remaining)" = 0 ] &&
-        [ "$(_summary_field required_not_pass)" = 0 ] &&
-        [ "$(_summary_field optional_failed)" = 0 ] &&
-        [ "$(_summary_field stage4_compiler_files)" = 0 ] &&
-        [ "$(_summary_field overall)" = PASS ] || return 1
-    _passed=$(_summary_field passed) || return 1
-    _unsupported=$(_summary_field unsupported) || return 1
-    case "$_passed:$_unsupported" in *[!0-9:]*|:*|*:) return 1 ;; esac
-    [ $((_passed + _unsupported)) -eq 49 ] || return 1
-    _matrix_id=$(_summary_field matrix_id) || return 1
-    _matrix_hash=$(_summary_field matrix_hash) || return 1
-    _config_hash=$(_summary_field config_hash) || return 1
-    [ -n "$_matrix_id" ] || return 1
-    case "$_matrix_hash:$_config_hash" in *[!0-9a-f:]*) return 1 ;; esac
-    [ "${#_matrix_hash}" -eq 64 ] && [ "${#_config_hash}" -eq 64 ]
+    _sf_schema="" _sf_scope="" _sf_adm="" _sf_tot="" _sf_term=""
+    _sf_fail="" _sf_blk="" _sf_rem="" _sf_req="" _sf_opt="" _sf_s4=""
+    _sf_ovr="" _sf_pas="" _sf_uns="" _sf_mid="" _sf_mh="" _sf_ch=""
+    _sf_c_schema=0 _sf_c_scope=0 _sf_c_adm=0 _sf_c_tot=0 _sf_c_term=0
+    _sf_c_fail=0 _sf_c_blk=0 _sf_c_rem=0 _sf_c_req=0 _sf_c_opt=0 _sf_c_s4=0
+    _sf_c_ovr=0 _sf_c_pas=0 _sf_c_uns=0 _sf_c_mid=0 _sf_c_mh=0 _sf_c_ch=0
+    while IFS= read -r _sline || [ -n "$_sline" ]; do
+        _sline=${_sline%$_CR}
+        case "$_sline" in
+            schema=*) _sf_schema=${_sline#schema=}; _sf_c_schema=$((_sf_c_schema + 1)) ;;
+            scope=*) _sf_scope=${_sline#scope=}; _sf_c_scope=$((_sf_c_scope + 1)) ;;
+            admission_eligible=*) _sf_adm=${_sline#admission_eligible=}; _sf_c_adm=$((_sf_c_adm + 1)) ;;
+            task_total=*) _sf_tot=${_sline#task_total=}; _sf_c_tot=$((_sf_c_tot + 1)) ;;
+            terminal_count=*) _sf_term=${_sline#terminal_count=}; _sf_c_term=$((_sf_c_term + 1)) ;;
+            failed=*) _sf_fail=${_sline#failed=}; _sf_c_fail=$((_sf_c_fail + 1)) ;;
+            blocked=*) _sf_blk=${_sline#blocked=}; _sf_c_blk=$((_sf_c_blk + 1)) ;;
+            remaining=*) _sf_rem=${_sline#remaining=}; _sf_c_rem=$((_sf_c_rem + 1)) ;;
+            required_not_pass=*) _sf_req=${_sline#required_not_pass=}; _sf_c_req=$((_sf_c_req + 1)) ;;
+            optional_failed=*) _sf_opt=${_sline#optional_failed=}; _sf_c_opt=$((_sf_c_opt + 1)) ;;
+            stage4_compiler_files=*) _sf_s4=${_sline#stage4_compiler_files=}; _sf_c_s4=$((_sf_c_s4 + 1)) ;;
+            overall=*) _sf_ovr=${_sline#overall=}; _sf_c_ovr=$((_sf_c_ovr + 1)) ;;
+            passed=*) _sf_pas=${_sline#passed=}; _sf_c_pas=$((_sf_c_pas + 1)) ;;
+            unsupported=*) _sf_uns=${_sline#unsupported=}; _sf_c_uns=$((_sf_c_uns + 1)) ;;
+            matrix_id=*) _sf_mid=${_sline#matrix_id=}; _sf_c_mid=$((_sf_c_mid + 1)) ;;
+            matrix_hash=*) _sf_mh=${_sline#matrix_hash=}; _sf_c_mh=$((_sf_c_mh + 1)) ;;
+            config_hash=*) _sf_ch=${_sline#config_hash=}; _sf_c_ch=$((_sf_c_ch + 1)) ;;
+        esac
+    done < "$_summary" 2>/dev/null || return 1
+    [ "$_sf_c_schema" -eq 1 ] && [ "$_sf_c_scope" -eq 1 ] && [ "$_sf_c_adm" -eq 1 ] &&
+        [ "$_sf_c_tot" -eq 1 ] && [ "$_sf_c_term" -eq 1 ] && [ "$_sf_c_fail" -eq 1 ] &&
+        [ "$_sf_c_blk" -eq 1 ] && [ "$_sf_c_rem" -eq 1 ] && [ "$_sf_c_req" -eq 1 ] &&
+        [ "$_sf_c_opt" -eq 1 ] && [ "$_sf_c_s4" -eq 1 ] && [ "$_sf_c_ovr" -eq 1 ] &&
+        [ "$_sf_c_pas" -eq 1 ] && [ "$_sf_c_uns" -eq 1 ] && [ "$_sf_c_mid" -eq 1 ] &&
+        [ "$_sf_c_mh" -eq 1 ] && [ "$_sf_c_ch" -eq 1 ] || return 1
+    [ "$_sf_schema" = Stage4ToolingMatrixSummaryV1 ] &&
+        [ "$_sf_scope" = full ] &&
+        [ "$_sf_adm" = true ] &&
+        [ "$_sf_tot" = 49 ] &&
+        [ "$_sf_term" = 49 ] &&
+        [ "$_sf_fail" = 0 ] &&
+        [ "$_sf_blk" = 0 ] &&
+        [ "$_sf_rem" = 0 ] &&
+        [ "$_sf_req" = 0 ] &&
+        [ "$_sf_opt" = 0 ] &&
+        [ "$_sf_s4" = 0 ] &&
+        [ "$_sf_ovr" = PASS ] || return 1
+    case "$_sf_pas:$_sf_uns" in *[!0-9:]*|:*|*:) return 1 ;; esac
+    [ $((_sf_pas + _sf_uns)) -eq 49 ] || return 1
+    [ -n "$_sf_mid" ] || return 1
+    case "$_sf_mh:$_sf_ch" in *[!0-9a-f:]*) return 1 ;; esac
+    [ "${#_sf_mh}" -eq 64 ] && [ "${#_sf_ch}" -eq 64 ]
 }
 
 validate_gate_receipt() {
@@ -273,10 +302,23 @@ run_automated_gate() {
     fi
 }
 
+_CR=$(printf '\r')
+_TAB=$(printf '\t')
+_US=$(printf '\037')
+
 accepted_gate_verdict() {
     _log=$1
-    _last=$(awk 'NF { line=$0 } END { print line }' "$_log")
-    printf '%s\n' "$_last" | grep -Eq '(^|: )PASS([[:space:]]|$)'
+    _last=""
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line=${_line%$_CR}
+        case "$_line" in
+            *[!" $_TAB"]*) _last=$_line ;;
+        esac
+    done < "$_log" 2>/dev/null || return 1
+    case "$_last" in
+        PASS|"PASS "*|"PASS$_TAB"*|*": PASS"|*": PASS "*|*": PASS$_TAB"*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 if [ "$MODE" = selftest ]; then
@@ -356,34 +398,40 @@ EOF
     grep -q 'web-server-gpu-nginx, todo' "$_tmp/ledger.sdn" || exit 1
     grep -q 'web-server-request-port, todo' "$_tmp/ledger.sdn" || exit 1
     grep -q 'db-server-request-port, todo' "$_tmp/ledger.sdn" || exit 1
-    _first=$(sha256sum "$_tmp/ledger.sdn" | awk '{print $1}')
-    MUST_CHECK_ROOT="$_tmp" MUST_CHECK_LEDGER="$_tmp/ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=fixture MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
-    MUST_CHECK_ROOT="$_tmp" MUST_CHECK_LEDGER="$_tmp/ledger2.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=fixture MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
-    cmp "$_tmp/ledger.sdn" "$_tmp/ledger2.sdn" >/dev/null || exit 1
+    _first=$(hash_file "$_tmp/ledger.sdn") || exit 1
+    # Determinism & stale-reset checks repeat --record-bootstrap-success; use a
+    # focused manifest covering every exercised row shape after Run 1 already
+    # verified all rows in the live manifest.
+    _min_root="$_tmp/min-root"
+    mkdir -p "$_min_root/config/check" || exit 2
+    awk 'NR <= 5 || /^[[:space:]]*(compiler-stage[1-4]|stage4-tooling-matrix|push-conflict-tree|rules-full|caret-batch-process-adapter|caret-agent-runtime-primitives|caret-production-multi-manager-launch|caret-smux-multi-launch|web-server-gpu-nginx|web-server-request-port|db-server-request-port),/' "$MANIFEST" > "$_min_root/config/check/must_check_gates.sdn"
+    MUST_CHECK_ROOT="$_min_root" MUST_CHECK_LEDGER="$_min_root/det1.sdn" MUST_CHECK_EVIDENCE_DIR="$_min_root/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=fixture MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
+    MUST_CHECK_ROOT="$_min_root" MUST_CHECK_LEDGER="$_min_root/det2.sdn" MUST_CHECK_EVIDENCE_DIR="$_min_root/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=fixture MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
+    cmp "$_min_root/det1.sdn" "$_min_root/det2.sdn" >/dev/null || exit 1
     [ -n "$_first" ] || exit 1
-    mkdir -p "$_tmp/other-root/config/check" || exit 1
-    cp "$MANIFEST" "$_tmp/other-root/config/check/must_check_gates.sdn" || exit 1
-    _before_split=$(sha256sum "$_tmp/ledger.sdn" | awk '{print $1}')
-    if MUST_CHECK_ROOT="$_tmp/other-root" MUST_CHECK_LEDGER="$_tmp/ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/other-root/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=fixture sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null 2>&1; then
+    mkdir -p "$_tmp/other-root/config/check" || exit 2
+    cp "$_min_root/config/check/must_check_gates.sdn" "$_tmp/other-root/config/check/must_check_gates.sdn" || exit 2
+    _before_split=$(hash_file "$_min_root/det1.sdn") || exit 1
+    if MUST_CHECK_ROOT="$_tmp/other-root" MUST_CHECK_LEDGER="$_min_root/det1.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/other-root/evidence" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=fixture sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null 2>&1; then
         echo "bootstrap-must-check selftest: split-root ledger override was accepted" >&2
         exit 1
     fi
-    [ "$(sha256sum "$_tmp/ledger.sdn" | awk '{print $1}')" = "$_before_split" ] || {
+    [ "$(hash_file "$_min_root/det1.sdn")" = "$_before_split" ] || {
         echo "bootstrap-must-check selftest: rejected split-root override mutated ledger" >&2
         exit 1
     }
-    sed 's/source_fingerprint: "[^"]*"/source_fingerprint: "old"/; s/caret-smux-multi-launch, todo, never/caret-smux-multi-launch, pass, 1999-01-01T00:00:00Z/' "$_tmp/ledger.sdn" > "$_tmp/stale-ledger.sdn"
-    MUST_CHECK_ROOT="$_tmp" MUST_CHECK_LEDGER="$_tmp/stale-ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_tmp/evidence-stale" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=new MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
-    grep -q 'caret-smux-multi-launch, todo, never' "$_tmp/stale-ledger.sdn" || exit 1
-    if MUST_CHECK_ROOT="$_tmp" MUST_CHECK_LEDGER="$_tmp/rejected.sdn" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" sh "$0" --record-bootstrap-success >/dev/null 2>&1; then
+    sed 's/source_fingerprint: "[^"]*"/source_fingerprint: "old"/; s/caret-smux-multi-launch, todo, never/caret-smux-multi-launch, pass, 1999-01-01T00:00:00Z/' "$_min_root/det1.sdn" > "$_min_root/stale-ledger.sdn"
+    MUST_CHECK_ROOT="$_min_root" MUST_CHECK_LEDGER="$_min_root/stale-ledger.sdn" MUST_CHECK_EVIDENCE_DIR="$_min_root/evidence-stale" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=new MUST_CHECK_NOW=2000-01-01T00:00:00Z sh "$0" --record-bootstrap-success --stage4-binary "$_tmp/stage4" --stage4-provenance "$_tmp/phase4.receipt" >/dev/null || exit 1
+    grep -q 'caret-smux-multi-launch, todo, never' "$_min_root/stale-ledger.sdn" || exit 1
+    if MUST_CHECK_ROOT="$_min_root" MUST_CHECK_LEDGER="$_min_root/rejected.sdn" MUST_CHECK_PHASE_VALIDATOR="$_tmp/phase-validator" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_FINGERPRINT=fixture sh "$0" --record-bootstrap-success >/dev/null 2>&1; then
         echo "bootstrap-must-check selftest: production validator override was accepted" >&2
         exit 1
     fi
-    if MUST_CHECK_ROOT="$_tmp" MUST_CHECK_LEDGER="$_tmp/bare-run.sdn" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 sh "$0" >/dev/null 2>&1; then
+    if MUST_CHECK_ROOT="$_min_root" MUST_CHECK_LEDGER="$_min_root/bare-run.sdn" MUST_CHECK_GATE_RUNNER="$_tmp/gate-runner" MUST_CHECK_SELFTEST=1 MUST_CHECK_FINGERPRINT=fixture sh "$0" >/dev/null 2>&1; then
         echo "bootstrap-must-check selftest: bare run recorded unbound automated PASS" >&2
         exit 1
     fi
-    [ ! -e "$_tmp/bare-run.sdn" ] || {
+    [ ! -e "$_min_root/bare-run.sdn" ] || {
         echo "bootstrap-must-check selftest: rejected bare run mutated the ledger" >&2
         exit 1
     }
@@ -489,43 +537,93 @@ if [ "$MODE" = record-bootstrap ]; then
     AUTOMATED_SIMPLE_BINARY="$_stage4_dir/$(basename -- "$AUTOMATED_SIMPLE_BINARY")"
 fi
 
-manifest_rows | while IFS=, read -r _id _tier _blocking _gate_mode _command _ci_job _inputs _description; do
-    : # parsed below outside the pipeline so status survives POSIX-shell subshells
-done
-
 _manifest_tmp=$(mktemp) || exit 2
 _rows_tmp=$(mktemp) || exit 2
-trap 'rm -f "$_manifest_tmp" "$_rows_tmp"' EXIT INT TERM
-manifest_rows > "$_manifest_tmp"
-while IFS=, read -r _id _tier _blocking _gate_mode _command _ci_job _inputs _description; do
-    _id=$(printf '%s' "$_id" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    _gate_mode=$(printf '%s' "$_gate_mode" | tr -d ' ')
-    _command=$(printf '%s' "$_command" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
+_sha_list_tmp=$(mktemp) || exit 2
+_sha_out_tmp=$(mktemp) || exit 2
+trap 'rm -f "$_manifest_tmp" "$_rows_tmp" "$_sha_list_tmp" "$_sha_out_tmp"' EXIT INT TERM
+awk -v ledger="$LEDGER" '
+function trim(s) {
+    gsub(/\r/, "", s)
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+    return s
+}
+function unquote(s) {
+    s = trim(s)
+    if (substr(s, 1, 1) == "\"") s = substr(s, 2)
+    if (substr(s, length(s), 1) == "\"") s = substr(s, 1, length(s) - 1)
+    return s
+}
+BEGIN {
+    FS = ","
+    US = sprintf("%c", 31)
+    if (ledger != "") {
+        while ((getline line < ledger) > 0) {
+            gsub(/\r/, "", line)
+            n = split(line, f, ",")
+            if (n >= 6) {
+                lid = trim(f[1])
+                if (lid != "" && !(lid in seen_l)) {
+                    seen_l[lid] = 1
+                    st[lid] = unquote(f[2])
+                    at[lid] = unquote(f[3])
+                    ev[lid] = unquote(f[5])
+                    sha[lid] = unquote(f[6])
+                }
+            }
+        }
+        close(ledger)
+    }
+}
+/^[[:space:]]+[a-z0-9][a-z0-9-]*,[[:space:]]*bootstrap,/ {
+    sub(/\r$/, "")
+    id = trim($1)
+    gm = $4; gsub(/[[:space:]]+/, "", gm)
+    cmd = unquote($5)
+    desc = $8
+    for (i = 9; i <= NF; i++) desc = desc "," $i
+    desc = unquote(desc)
+    print id US gm US cmd US desc US st[id] US at[id] US ev[id] US sha[id]
+}' "$MANIFEST" > "$_manifest_tmp"
+while IFS="$_US" read -r _id _gate_mode _command _unblock _old _old_at _old_evidence _old_sha; do
     _status=todo
     _passed_at=never
     _evidence='not run'
     _evidence_sha=never
-    _owner=$(gate_owner "$_id")
-    _unblock=$_description
-    _unblock=$(printf '%s' "$_unblock" | sed 's/^[[:space:]]*"//;s/"[[:space:]]*$//')
+    case "$_id" in
+        compiler-stage*) _owner=compiler-team ;;
+        caret-*) _owner=llm-caret-team ;;
+        web-server-*|db-server-*) _owner=server-performance-team ;;
+        simpleos-*|riscv32-*|simple-generated-*) _owner=simpleos-platform-team ;;
+        binary-size-*|interpreter-startup-*|rust-go-*) _owner=performance-team ;;
+        *) _owner=tooling-team ;;
+    esac
     if [ "$MODE" = record-gate ] && [ "$_id" = "$RECORD_GATE_ID" ]; then
         if [ "$_gate_mode" = external-receipt ]; then
             validate_external_gate_receipt "$RECORD_GATE_EVIDENCE" "$RECORD_GATE_ID" "$_fp" "$_command" || exit 1
         else
             validate_gate_receipt "$RECORD_GATE_EVIDENCE" "$RECORD_GATE_ID" "$_fp" || exit 1
         fi
-        _old=$(row_value "$_id" 2)
-        _old_evidence=$(row_value "$_id" 5)
-        _old_sha=$(row_value "$_id" 6)
         _status=pass; _evidence=$RECORD_GATE_EVIDENCE; _evidence_sha=$HEAD_BLOB_SHA; _unblock=none
         if [ "$_old" = pass ] && [ "$_old_evidence" = "$RECORD_GATE_EVIDENCE" ] && [ "$_old_sha" = "$HEAD_BLOB_SHA" ]; then
-            _passed_at=$(row_value "$_id" 3)
+            _passed_at=$_old_at
         else
             _passed_at=$_at
         fi
     elif [ "$MODE" = record-bootstrap ] && { [ "$_id" = compiler-stage1 ] || [ "$_id" = compiler-stage2 ] || [ "$_id" = compiler-stage3 ] || [ "$_id" = compiler-stage4 ]; }; then
         _status=pass; _passed_at=$_at
-        _source_evidence=$(printf '%s\n' "$_phase_results" | sed -n "s/^$_id-evidence=//p")
+        _source_evidence=""
+        _pr_rest=$_phase_results
+        while [ -n "$_pr_rest" ]; do
+            _pr_line=${_pr_rest%%"
+"*}
+            if [ "$_pr_line" = "$_pr_rest" ]; then _pr_rest=""; else _pr_rest=${_pr_rest#*"
+"}; fi
+            _pr_line=${_pr_line%$_CR}
+            case "$_pr_line" in
+                "$_id-evidence="*) _source_evidence=${_pr_line#"$_id-evidence="}; break ;;
+            esac
+        done
         [ -n "$_source_evidence" ] || { echo "bootstrap-must-check: FAIL — missing $_id evidence reference" >&2; exit 1; }
         _retained_evidence="$_evidence_dir/${_id}.receipt"
         cp -- "$_source_evidence" "$_retained_evidence" || exit 1
@@ -533,31 +631,33 @@ while IFS=, read -r _id _tier _blocking _gate_mode _command _ci_job _inputs _des
         _evidence_sha=$(evidence_hash "$_evidence") || exit 1
         _unblock=none
     elif { [ "$MODE" = run ] || [ "$MODE" = record-bootstrap ]; } && [ "$_gate_mode" = automated ]; then
-        _out="$_evidence_dir/${_id}.log.tmp.$$"
         _final_out="$_evidence_dir/${_id}.log"
+        if [ "${MUST_CHECK_SELFTEST:-0}" = 1 ]; then
+            _out=$_final_out
+        else
+            _out="$_evidence_dir/${_id}.log.tmp.$$"
+        fi
         run_automated_gate "$_command" >"$_out" 2>&1
         _rc=$?
         if [ "$_rc" -eq 0 ] && accepted_gate_verdict "$_out"; then
-            mv "$_out" "$_final_out"
+            [ "$_out" = "$_final_out" ] || mv "$_out" "$_final_out"
             _status=pass; _passed_at=$_at; _evidence="$_final_out"
             case "$_evidence" in "$ROOT/"*) _evidence=${_evidence#"$ROOT/"} ;; esac
-            _evidence_sha=$(evidence_hash "$_evidence") || exit 1
+            printf '%s\n' "$_final_out" >> "$_sha_list_tmp"
+            _evidence_sha="__BATCH_SHA__${_final_out}"
             _unblock=none
         else
-            mv "$_out" "$_final_out"
+            [ "$_out" = "$_final_out" ] || mv "$_out" "$_final_out"
             _status=fail; _evidence="exit $_rc without accepted PASS at $_at"; _failed=1
         fi
     else
-        _old=$(row_value "$_id" 2)
-        _old_evidence=$(row_value "$_id" 5)
-        _old_sha=$(row_value "$_id" 6)
         _durable_pass=0
         if [ "$_gate_mode" = todo ] && [ "$_old" = pass ] && head_blob_metadata "$_old_evidence" && [ "$HEAD_BLOB_SHA" = "$_old_sha" ]; then
             _durable_pass=1
         fi
         if [ "$_old" = pass ] && { [ "$_carry_pass" -eq 1 ] || [ "$_durable_pass" -eq 1 ]; }; then
             _status=pass
-            _passed_at=$(row_value "$_id" 3)
+            _passed_at=$_old_at
             _evidence_sha=$_old_sha
             _unblock=none
         fi
@@ -566,6 +666,39 @@ while IFS=, read -r _id _tier _blocking _gate_mode _command _ci_job _inputs _des
     fi
     printf '    %s, %s, %s, "%s", "%s", "%s", "%s", "%s"\n' "$_id" "$_status" "$_passed_at" "$_command" "$_evidence" "$_evidence_sha" "$_owner" "$_unblock" >> "$_rows_tmp"
 done < "$_manifest_tmp"
+
+if [ -s "$_sha_list_tmp" ]; then
+    tr '\n' '\0' < "$_sha_list_tmp" | xargs -0 sha256sum -- > "$_sha_out_tmp" 2>/dev/null || {
+        : > "$_sha_out_tmp"
+        while IFS= read -r _sfile; do
+            _sh=$(hash_file "$_sfile") || exit 1
+            printf '%s  %s\n' "$_sh" "$_sfile" >> "$_sha_out_tmp"
+        done < "$_sha_list_tmp"
+    }
+    awk -v shas="$_sha_out_tmp" '
+    BEGIN {
+        while ((getline line < shas) > 0) {
+            sub(/\r$/, "", line)
+            sp = index(line, " ")
+            if (sp > 0) {
+                h = substr(line, 1, sp - 1)
+                sub(/^\\/, "", h)
+                p = substr(line, sp + 2)
+                map[p] = h
+            }
+        }
+        close(shas)
+    }
+    {
+        if (match($0, /"__BATCH_SHA__[^"]*"/)) {
+            key = substr($0, RSTART + 14, RLENGTH - 15)
+            if (!(key in map) || map[key] == "") exit 1
+            $0 = substr($0, 1, RSTART) map[key] substr($0, RSTART + RLENGTH - 1)
+        }
+        print
+    }' "$_rows_tmp" > "$_rows_tmp.sha" || exit 1
+    mv "$_rows_tmp.sha" "$_rows_tmp"
+fi
 
 _completed_at=never
 _completion_candidate=$(awk -F, '

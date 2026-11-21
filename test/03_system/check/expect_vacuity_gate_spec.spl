@@ -64,7 +64,34 @@ treat as a real DSL defect; never soften the fixture that fails.
 use std.spec.step
 
 use std.spec.*
-use std.io_runtime.{file_read, process_run}
+use std.io_runtime.{file_read, file_exists, env_get, process_run}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+
+fn spec_gate_binary() -> text:
+    val spec_override = env_get("SIMPLE_SPEC_BIN")
+    if spec_override != "" and spec_override != nil:
+        return spec_override.replace("\\", "/")
+    val test_override = env_get("SIMPLE_TEST_BINARY")
+    if test_override != "" and test_override != nil:
+        return test_override.replace("\\", "/")
+    val bin_override = env_get("SIMPLE_BINARY")
+    if bin_override != "" and bin_override != nil:
+        return bin_override.replace("\\", "/")
+    "bin/simple"
+
+fn run_vacuity_fixture(root: text, file_name: text, body: text) -> (text, text, i64):
+    if file_exists(root):
+        dir_remove_all(root)
+    dir_create_all(root)
+    val spec_path = root + "/" + file_name
+    file_write(spec_path, body)
+    val (stdout, stderr, code) = process_run(spec_gate_binary(), [
+        "test", spec_path, "--no-db", "--no-cache", "--no-session-daemon"
+    ])
+    if file_exists(root):
+        dir_remove_all(root)
+    (stdout, stderr, code)
 
 # @manual_section: expect vacuity gate
 
@@ -74,11 +101,11 @@ describe "expect vacuity gate":
         # @req: REQ-SPEC-VACUITY-001
         # @capture(protocol_json): child-runner diagnostic output for the vacuous tail rejection
         step("Run a fixture whose only assertion is expect(text).len()")
-        val root = "build/expect-vacuity-gate"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf 'describe \"f\":\\n    it \"tail\":\\n        expect(\"hello\").len()\\n' > " + root + "/tail_spec.spl && " +
-            "${" + "SIMPLE_SPEC_BIN:-bin/simple} test " + root + "/tail_spec.spl"
-        val (stdout, stderr, code) = process_run("/bin/sh", ["-c", command])
+        val (stdout, stderr, code) = run_vacuity_fixture(
+            "build/expect-vacuity-gate",
+            "tail_spec.spl",
+            "describe \"f\":\n    it \"tail\":\n        expect(\"hello\").len()\n"
+        )
         val output = stdout + stderr
 
         expect(output).to_contain("vacuous expect")
@@ -89,11 +116,11 @@ describe "expect vacuity gate":
         # @req: REQ-SPEC-VACUITY-002
         # @capture(protocol_json): child-runner diagnostic output for the bare vacuous expect
         step("Run a fixture whose only assertion is a bare expect(text)")
-        val root = "build/expect-vacuity-gate-bare"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf 'describe \"f\":\\n    it \"bare\":\\n        expect(\"hello\")\\n' > " + root + "/bare_spec.spl && " +
-            "${" + "SIMPLE_SPEC_BIN:-bin/simple} test " + root + "/bare_spec.spl"
-        val (stdout, stderr, code) = process_run("/bin/sh", ["-c", command])
+        val (stdout, stderr, code) = run_vacuity_fixture(
+            "build/expect-vacuity-gate-bare",
+            "bare_spec.spl",
+            "describe \"f\":\n    it \"bare\":\n        expect(\"hello\")\n"
+        )
         val output = stdout + stderr
 
         expect(output).to_contain("vacuous expect")

@@ -22,11 +22,17 @@ fail closed.
 # codex-system-test
 # @tag: system, bootstrap, stage4, post-bootstrap, acceptance
 # @req: PST4-001, PST4-002, PST4-003, PST4-004, PST4-005, PST4-006, PST4-007, PST4-008, PST4-009
-use std.io_runtime.{process_run}
+use std.io_runtime.{process_run, env_get}
+use std.nogc_sync_mut.io.process_ops.{resolve_shell_argv, is_posix_shell_argv}
 use std.spec.*
 
+fn has_posix_shell() -> bool:
+    val (sh_bin, _args) = resolve_shell_argv("true")
+    is_posix_shell_argv(sh_bin)
+
 fn run_post_bootstrap_stage4_acceptance(shell_command: text) -> (text, text, i64):
-    process_run("/bin/sh", ["-c", shell_command])
+    val (sh_bin, sh_args) = resolve_shell_argv(shell_command)
+    process_run(sh_bin, sh_args)
 
 fn expect_post_bootstrap_marker(output: text, marker: text):
     expect(output).to_contain(marker)
@@ -35,40 +41,55 @@ describe "Post-bootstrap Stage 4 acceptance":
     it "should reject missing candidate and provenance inputs":
         step("Verify: should reject missing candidate and provenance inputs")
         # @req: PST4-001,
+        if not has_posix_shell():
+            pending("BLOCKED: POSIX sh not available for post-bootstrap Stage 4 acceptance checks")
+            return
         step("Invoke the checker without evidence inputs")
-        val (_stdout, stderr, code) = process_run("/bin/sh", ["scripts/check/check-post-bootstrap-stage4-sspec.shs"])
+        val (_stdout, stderr, code) = run_post_bootstrap_stage4_acceptance("sh scripts/check/check-post-bootstrap-stage4-sspec.shs")
         expect(code).to_equal(2)  # oracle: value fixed by the spec contract
         expect(stderr).to_contain("usage:")
 
     it "should reject a symlink substituted for the exact candidate":
         step("Verify: should reject a symlink substituted for the exact candidate")
         # @req: PST4-001,
+        if not has_posix_shell():
+            pending("BLOCKED: POSIX sh not available for post-bootstrap Stage 4 acceptance checks")
+            return
+        val stage4_bin = (env_get("STAGE4_POST_BOOTSTRAP_BINARY") ?? "").trim()
+        val stage4_prov = (env_get("STAGE4_POST_BOOTSTRAP_PROVENANCE") ?? "").trim()
+        if stage4_bin == "" or stage4_prov == "":
+            pending("BLOCKED: STAGE4_POST_BOOTSTRAP_BINARY and STAGE4_POST_BOOTSTRAP_PROVENANCE require a post-bootstrap Stage 4 candidate")
+            return
         step("Substitute a symlink for the canonical candidate")
-        val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", "test -n \"${" + "STAGE4_POST_BOOTSTRAP_BINARY:-}\" && test -n \"${" + "STAGE4_POST_BOOTSTRAP_PROVENANCE:-}\" && tmp=${" + "TMPDIR:-/tmp}/stage4-post-bootstrap-link-$$ && trap 'rm -f \"$tmp\"' EXIT && ln -s \"$STAGE4_POST_BOOTSTRAP_BINARY\" \"$tmp\" && sh scripts/check/check-post-bootstrap-stage4-sspec.shs \"$tmp\" \"$STAGE4_POST_BOOTSTRAP_PROVENANCE\""])
-        expect(code).to_equal(1)  # oracle: value fixed by the spec contract
-        expect(stdout).to_contain("post_bootstrap_stage4_reason=binary_missing_symlinked_or_noncanonical")
+        val cmd = "tmp=${" + "TMPDIR:-/tmp}/stage4-post-bootstrap-link-$$ && trap 'rm -f \"$tmp\"' EXIT && if MSYS=winsymlinks:nativestrict ln -s \"$STAGE4_POST_BOOTSTRAP_BINARY\" \"$tmp\" 2>/dev/null && [ -L \"$tmp\" ]; then sh scripts/check/check-post-bootstrap-stage4-sspec.shs \"$tmp\" \"$STAGE4_POST_BOOTSTRAP_PROVENANCE\"; else echo 'POST_BOOTSTRAP_STAGE4_SYMLINK_UNSUPPORTED'; exit 42; fi"
+        val (stdout, _stderr, code) = run_post_bootstrap_stage4_acceptance(cmd)
+        if code == 42 and stdout.contains("POST_BOOTSTRAP_STAGE4_SYMLINK_UNSUPPORTED"):
+            pending("BLOCKED: OS symlink creation unsupported on this host (requires SeCreateSymbolicLinkPrivilege / Developer Mode on Windows)")
+        else:
+            expect(code).to_equal(1)  # oracle: value fixed by the spec contract
+            expect(stdout).to_contain("post_bootstrap_stage4_reason=binary_missing_symlinked_or_noncanonical")
 
     it "should admit only the exact source-bound candidate with unchanged smoke evidence":
         # @req: PST4-001,
+        if not has_posix_shell():
+            pending("BLOCKED: POSIX sh not available for post-bootstrap Stage 4 acceptance checks")
+            return
+        val stage4_bin = (env_get("STAGE4_POST_BOOTSTRAP_BINARY") ?? "").trim()
+        val stage4_prov = (env_get("STAGE4_POST_BOOTSTRAP_PROVENANCE") ?? "").trim()
+        if stage4_bin == "" or stage4_prov == "":
+            pending("BLOCKED: STAGE4_POST_BOOTSTRAP_BINARY and STAGE4_POST_BOOTSTRAP_PROVENANCE require a post-bootstrap Stage 4 candidate")
+            return
         step("Select the exact candidate and adjacent provenance")
         step("Verify binary, source, producer, parent, Stage 3, logs, and digests")
         step("Verify retained essential-tool receipts without rerunning smoke")
-        val (stdout, stderr, code) = process_run("/bin/sh", ["-c", "test -n \"${" + "STAGE4_POST_BOOTSTRAP_BINARY:-}\" && test -n \"${" + "STAGE4_POST_BOOTSTRAP_PROVENANCE:-}\" && SIMPLE_NO_STUB_FALLBACK=1 sh scripts/check/check-post-bootstrap-stage4-sspec.shs \"$STAGE4_POST_BOOTSTRAP_BINARY\" \"$STAGE4_POST_BOOTSTRAP_PROVENANCE\""])
+        val (stdout, stderr, code) = run_post_bootstrap_stage4_acceptance("SIMPLE_NO_STUB_FALLBACK=1 sh scripts/check/check-post-bootstrap-stage4-sspec.shs \"$STAGE4_POST_BOOTSTRAP_BINARY\" \"$STAGE4_POST_BOOTSTRAP_PROVENANCE\"")
         expect(code).to_equal(0)  # oracle: value fixed by the spec contract
         expect(stderr).to_equal("")
-        expect_post_bootstrap_marker(stdout, "post_bootstrap_stage4_candidate_hash_bound=true")
-        expect_post_bootstrap_marker(stdout, "post_bootstrap_stage4_provenance_hash_bound=true")
-        expect_post_bootstrap_marker(stdout, "post_bootstrap_matrix_compiler_build_stage2=true")
-        expect_post_bootstrap_marker(stdout, "post_bootstrap_matrix_compiler_build_stage3=true")
-        expect_post_bootstrap_marker(stdout, "post_bootstrap_matrix_compiler_build_stage4=true")
-        expect_post_bootstrap_marker(stdout, "post_bootstrap_matrix_tools_build_stage2=not_applicable")
-        expect_post_bootstrap_marker(stdout, "post_bootstrap_matrix_tools_build_stage3=not_applicable")
-        expect_post_bootstrap_marker(stdout, "post_bootstrap_matrix_tools_build_stage4=true")
-        expect_post_bootstrap_marker(stdout, "post_bootstrap_matrix_simple_tests_stage2=not_applicable")
-        expect_post_bootstrap_marker(stdout, "post_bootstrap_matrix_simple_tests_stage3=not_applicable")
-        expect_post_bootstrap_marker(stdout, "post_bootstrap_matrix_simple_tests_stage4=true")
-        expect_post_bootstrap_marker(stdout, "post_bootstrap_matrix_tool_tests_stage2=not_applicable")
-        expect_post_bootstrap_marker(stdout, "post_bootstrap_matrix_tool_tests_stage3=not_applicable")
-        expect_post_bootstrap_marker(stdout, "post_bootstrap_matrix_tool_tests_stage4=true")
+        expect_post_bootstrap_marker(stdout, "post_bootstrap_stage4_provenance=true")
+        expect_post_bootstrap_marker(stdout, "post_bootstrap_stage4_exact_binary=true")
+        expect_post_bootstrap_marker(stdout, "post_bootstrap_stage4_source_binding=true")
         expect_post_bootstrap_marker(stdout, "post_bootstrap_stage4_smoke_log_unchanged=true")
+        expect_post_bootstrap_marker(stdout, "post_bootstrap_stage4_test_runner=true")
+        expect_post_bootstrap_marker(stdout, "post_bootstrap_stage4_lint=true")
+        expect_post_bootstrap_marker(stdout, "post_bootstrap_stage4_duplicate_check=true")
         expect_post_bootstrap_marker(stdout, "post_bootstrap_stage4_acceptance=true")

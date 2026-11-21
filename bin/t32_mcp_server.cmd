@@ -32,6 +32,7 @@ set "TOOLS=%~dp0..\examples\10_tooling\trace32_tools"
 set "SIMPLE_LIB=%TOOLS%"
 if "%SIMPLE_LOG%"=="" set "SIMPLE_LOG=error"
 if "%RUST_LOG%"=="" set "RUST_LOG=error"
+if "%SIMPLE_EXECUTION_MODE%"=="" set "SIMPLE_EXECUTION_MODE=interpreter"
 rem The seed wall-clock-kills any entry under examples\ after 10s
 rem (driver/src/cli/examples_safety.rs); a long-lived stdio server must opt out.
 set "SIMPLE_TIMEOUT_SECONDS=0"

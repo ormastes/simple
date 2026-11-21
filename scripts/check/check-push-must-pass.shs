@@ -410,7 +410,7 @@ push_gate_defer_collect() {
         case "$_dc_rc" in
             0) : ;;
             124|137)
-                MUST_CHECK_BUDGET_OVERRUN=$_dc_id
+                [ -n "$MUST_CHECK_BUDGET_OVERRUN" ] || MUST_CHECK_BUDGET_OVERRUN=$_dc_id
                 echo "push-must-check: ERROR — blocking gate $_dc_id killed at the push budget (${MUST_CHECK_BUDGET_MS}ms); its verdict is UNKNOWN, not a pass. Split the push, or run the slow tier: sign-local-ci-receipt.shs --run --tier local" >&2
                 _dc_fail=1 ;;
             *)
@@ -1610,6 +1610,10 @@ if command -v gtimeout >/dev/null 2>&1 && _is_gnu_timeout gtimeout; then
     TIMEOUT_BIN=gtimeout
 elif command -v timeout >/dev/null 2>&1 && _is_gnu_timeout timeout; then
     TIMEOUT_BIN=timeout
+elif [ -x /usr/bin/timeout ] && _is_gnu_timeout /usr/bin/timeout; then
+    TIMEOUT_BIN=/usr/bin/timeout
+elif [ -x /bin/timeout ] && _is_gnu_timeout /bin/timeout; then
+    TIMEOUT_BIN=/bin/timeout
 else
     echo "push-must-check: ERROR — nothing was checked (GNU timeout(1) not found or not identifiable via --version: install GNU coreutils so 'timeout' or 'gtimeout' resolves to it. On Windows this means Git Bash's own coreutils 'timeout' must precede C:\\Windows\\System32 on PATH — that System32 'timeout.exe' is an unrelated countdown command and is never accepted here. On stock macOS: 'brew install coreutils' provides 'gtimeout')"
     exit 2
@@ -2003,9 +2007,14 @@ if [ "${1:-}" = --self-test ]; then
     run_push_gate "par-pass" true "$_tmp/fast-gate.shs" || die "deferred launch returned non-zero"
     run_push_gate "par-fail" true "$_tmp/fail-gate.shs" || die "deferred launch returned non-zero"
     push_gate_defer_collect >/dev/null 2>&1 && die "deferred batch with a failing gate passed"
-    MUST_CHECK_BUDGET_MS=1000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+    case "$(uname -s 2>/dev/null || printf unknown)" in
+        MINGW*|MSYS*|CYGWIN*) _par_budget_ms=4000; _par_sleep=7 ;;
+        *) _par_budget_ms=1000; _par_sleep=3 ;;
+    esac
+    printf '#!/bin/sh\nsleep %s\nexit 0\n' "$_par_sleep" > "$_tmp/slow-gate-par.shs"
+    MUST_CHECK_BUDGET_MS=$_par_budget_ms; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
     push_gate_defer_begin
-    run_push_gate "par-slow" true "$_tmp/slow-gate.shs"
+    run_push_gate "par-slow" true "$_tmp/slow-gate-par.shs"
     run_push_gate "par-pass" true "$_tmp/fast-gate.shs"
     push_gate_defer_collect >/dev/null 2>&1 && die "deferred batch with a budget-killed gate passed"
     [ "$MUST_CHECK_BUDGET_OVERRUN" = "par-slow" ] || die "deferred overrun did not name the killed gate"
@@ -2049,12 +2058,28 @@ if [ "${1:-}" = --self-test ]; then
     git -C "$_rebased_repo" commit -q --allow-empty -m old || die "rebased fixture old branch failed"
     _rebased_old=$(git -C "$_rebased_repo" rev-parse HEAD)
     git -C "$_rebased_repo" push -q origin old || die "rebased fixture old push failed"
+    _selftest_empty_chain() {
+        _sec_repo=$1
+        _sec_branch=$2
+        _sec_n=$3
+        _sec_pfx=$4
+        _sec_parent=$(git -C "$_sec_repo" rev-parse HEAD) || return 1
+        {
+            _sec_i=0
+            while [ "$_sec_i" -lt "$_sec_n" ]; do
+                _sec_msg="$_sec_pfx-$_sec_i"
+                printf 'commit refs/heads/%s\ncommitter Test <test@example.com> %d +0000\ndata %d\n%s\n' \
+                    "$_sec_branch" "$((1700000000 + _sec_i))" "${#_sec_msg}" "$_sec_msg"
+                if [ "$_sec_i" -eq 0 ]; then
+                    printf 'from %s\n' "$_sec_parent"
+                fi
+                _sec_i=$((_sec_i + 1))
+            done
+        } | git -C "$_sec_repo" fast-import --quiet &&
+        git -C "$_sec_repo" reset -q --hard "refs/heads/$_sec_branch"
+    }
     git -C "$_rebased_repo" switch -q main
-    _rebased_i=0
-    while [ "$_rebased_i" -lt 65 ]; do
-        git -C "$_rebased_repo" commit -q --allow-empty -m "main-$_rebased_i" || die "rebased fixture main commit failed"
-        _rebased_i=$((_rebased_i + 1))
-    done
+    _selftest_empty_chain "$_rebased_repo" main 65 main || die "rebased fixture main commit failed"
     _rebased_expected=$(git -C "$_rebased_repo" rev-parse HEAD)
     git -C "$_rebased_repo" push -q origin main || die "rebased fixture advanced main push failed"
     git -C "$_rebased_repo" switch -q -c replacement
@@ -2085,12 +2110,16 @@ if [ "${1:-}" = --self-test ]; then
     MUST_CHECK_PUSH_REMOTE=origin
     mkdir -p "$_tmp/rebased/slow-bin"
     _real_git=$(command -v git)
-    cat > "$_tmp/rebased/slow-bin/git" <<'SLOW_GIT'
+    case "$(uname -s 2>/dev/null || printf unknown)" in
+        MINGW*|MSYS*|CYGWIN*) _slow_remote_sleep=30; _slow_remote_bound=25 ;;
+        *) _slow_remote_sleep=10; _slow_remote_bound=8 ;;
+    esac
+    cat > "$_tmp/rebased/slow-bin/git" <<SLOW_GIT
 #!/bin/sh
-case " $* " in
-    *' ls-remote '*) sleep 5 ;;
+case " \$* " in
+    *' ls-remote '*) sleep $_slow_remote_sleep ;;
 esac
-exec "$REBASE_FIXTURE_REAL_GIT" "$@"
+exec "\$REBASE_FIXTURE_REAL_GIT" "\$@"
 SLOW_GIT
     chmod +x "$_tmp/rebased/slow-bin/git"
     (
@@ -2101,7 +2130,7 @@ SLOW_GIT
         _slow_start=$(date +%s)
         if rebased_push_published_base "$_rebased_tip" >/dev/null 2>&1; then exit 1; fi
         _slow_elapsed=$(( $(date +%s) - _slow_start ))
-        [ "$_slow_elapsed" -lt 5 ] || exit 1
+        [ "$_slow_elapsed" -lt "$_slow_remote_bound" ] || exit 1
     ) || die "slow remote was accepted or not bounded"
 
     # Release-line rebase fixture (2026-10-19): main and release_phase3 are
@@ -2175,11 +2204,7 @@ SLOW_GIT
     ) >/dev/null 2>&1 && die "stale merge admitted without a verifiable remote main"
     git -C "$ROOT" switch -q -c big main
     _big_old=$(git -C "$ROOT" rev-parse HEAD)
-    _big_i=0
-    while [ "$_big_i" -lt 65 ]; do
-        git -C "$ROOT" commit -q --allow-empty -m "big-$_big_i" || die "big fixture commit failed"
-        _big_i=$((_big_i + 1))
-    done
+    _selftest_empty_chain "$ROOT" big 65 big || die "big fixture commit failed"
     _big_tip=$(git -C "$ROOT" rev-parse HEAD)
     printf 'refs/heads/big %s refs/heads/big %s\n' "$_big_tip" "$_big_old" > "$_tmp/rebased/big-refs"
     (
@@ -2198,11 +2223,7 @@ SLOW_GIT
     git -C "$ROOT" commit -q --allow-empty -m relpr-own || die "release fixture own commit failed"
     _relpr_old=$(git -C "$ROOT" rev-parse HEAD)
     git -C "$ROOT" switch -q release/9.9
-    _rel_i=0
-    while [ "$_rel_i" -lt 70 ]; do
-        git -C "$ROOT" commit -q --allow-empty -m "rel-adv-$_rel_i" || die "release fixture advance failed"
-        _rel_i=$((_rel_i + 1))
-    done
+    _selftest_empty_chain "$ROOT" release/9.9 70 rel-adv || die "release fixture advance failed"
     git -C "$ROOT" push -q origin release/9.9 || die "release fixture advance push failed"
     git -C "$ROOT" switch -q relpr
     git -C "$ROOT" merge -q --no-ff -m merge-release release/9.9 || die "release fixture merge failed"
