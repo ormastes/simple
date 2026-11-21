@@ -6503,15 +6503,20 @@ int64_t rt_string_contains(int64_t value, int64_t needle) {
  * rt_string_ascii_case appears earlier in the file. */
 static int rt_string_promote_raw_receiver(int64_t value, int64_t* out);
 
-static int64_t rt_string_ascii_case(int64_t value, int to_lower) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_ascii_case(promoted, to_lower);
-        }
-        return rt_core_nil();
+/* Declare `s` as the text receiver of `value`. A raw (non-text) receiver is
+ * promoted when possible and the call re-dispatched as `call` (which names
+ * `promoted`); otherwise the enclosing function returns `fallback`. */
+#define RT_STRING_RECV_OR_PROMOTE(s, value, fallback, call) \
+    RtCoreString* s = rt_core_as_string(value); \
+    if (!s) { \
+        int64_t promoted; \
+        if (rt_string_promote_raw_receiver((value), &promoted)) return call; \
+        return fallback; \
     }
+
+
+static int64_t rt_string_ascii_case(int64_t value, int to_lower) {
+    RT_STRING_RECV_OR_PROMOTE(s, value, rt_core_nil(), rt_string_ascii_case(promoted, to_lower))
     RtCoreString* out = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + (size_t)s->len + 1);
     if (!out) return rt_core_nil();
     out->kind = RT_VALUE_HEAP_STRING;
@@ -6984,14 +6989,7 @@ int8_t rt_is_present(int64_t value) {
  * the native lane links THIS file, so a Rust-only definition would leave
  * native `.repeat()` unresolved. */
 int64_t rt_string_repeat(int64_t value, int64_t count) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_repeat(promoted, count);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_repeat(promoted, count))
     if (count <= 0 || s->len == 0) return rt_string_new((const uint8_t*)"", 0);
     if (count == 1) return value;
 
@@ -7114,14 +7112,7 @@ int64_t rt_string_char_count(int64_t value) {
  * char::to_digit(10) accepts ASCII digits only, so the two lanes agree on
  * every input, non-ASCII included. Never a silent 0. */
 int64_t rt_string_to_digit(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_to_digit(promoted);
-        }
-        return rt_option_none();
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, rt_option_none(), rt_string_to_digit(promoted))
     if (s->len != 1) return rt_option_none();
     unsigned char c = (unsigned char)s->data[0];
     if (c < '0' || c > '9') return rt_option_none();
@@ -7130,14 +7121,7 @@ int64_t rt_string_to_digit(int64_t value) {
 
 /* capitalize: uppercase the first character, lowercase the rest (ASCII only). */
 int64_t rt_string_capitalize(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_capitalize(promoted);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_capitalize(promoted))
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
     char* out = (char*)rt_observed_malloc_v1((size_t)s->len);
     if (!out) return value;
@@ -7154,14 +7138,7 @@ int64_t rt_string_capitalize(int64_t value) {
 
 /* swapcase: uppercase <-> lowercase for every character (ASCII only). */
 int64_t rt_string_swapcase(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_swapcase(promoted);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_swapcase(promoted))
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
     char* out = (char*)rt_observed_malloc_v1((size_t)s->len);
     if (!out) return value;
@@ -7180,14 +7157,7 @@ int64_t rt_string_swapcase(int64_t value) {
  * boundary is whitespace OR ASCII punctuation, exactly as the interpreter's
  * arm defines it. */
 int64_t rt_string_title(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_title(promoted);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_title(promoted))
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
     char* out = (char*)rt_observed_malloc_v1((size_t)s->len);
     if (!out) return value;
@@ -7211,14 +7181,7 @@ int64_t rt_string_title(int64_t value) {
 
 /* chomp: strip ONE trailing line terminator -- "\r\n", "\n", or "\r". */
 int64_t rt_string_chomp(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_chomp(promoted);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_chomp(promoted))
     uint64_t len = s->len;
     if (len >= 2 && s->data[len - 2] == '\r' && s->data[len - 1] == '\n') len -= 2;
     else if (len >= 1 && (s->data[len - 1] == '\n' || s->data[len - 1] == '\r')) len -= 1;
@@ -7282,14 +7245,7 @@ int64_t rt_string_remove_suffix(int64_t value, int64_t suffix) {
  * string, so rt_core_as_string yields NULL -- that is the "no argument,
  * squeeze everything" case. An explicit empty string squeezes nothing. */
 int64_t rt_string_squeeze(int64_t value, int64_t set) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_squeeze(promoted, set);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_squeeze(promoted, set))
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
     RtCoreString* set_s = rt_core_as_string(set);
     char* out = (char*)rt_observed_malloc_v1((size_t)s->len);
@@ -7363,14 +7319,7 @@ static inline uint64_t rt_checked_mul_u64(uint64_t a, uint64_t b, const char* ct
  * A width at or below the current length is a no-op, so a negative width
  * returns the receiver rather than attempting a huge allocation. */
 int64_t rt_string_pad_left(int64_t value, int64_t width, int64_t pad) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_pad_left(promoted, width, pad);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_pad_left(promoted, width, pad))
     int64_t current = rt_str_char_count(s);
     if (width <= current) return value;
     uint64_t pw; const char* pc = rt_pad_char(pad, &pw);
@@ -7388,14 +7337,7 @@ int64_t rt_string_pad_left(int64_t value, int64_t width, int64_t pad) {
 
 /* pad_right / pad_end: right-pad to `width` CHARACTERS. */
 int64_t rt_string_pad_right(int64_t value, int64_t width, int64_t pad) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_pad_right(promoted, width, pad);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_pad_right(promoted, width, pad))
     int64_t current = rt_str_char_count(s);
     if (width <= current) return value;
     uint64_t pw; const char* pc = rt_pad_char(pad, &pw);
@@ -7413,14 +7355,7 @@ int64_t rt_string_pad_right(int64_t value, int64_t width, int64_t pad) {
 
 /* center: pad both sides to `width` CHARACTERS, extra character on the RIGHT. */
 int64_t rt_string_center(int64_t value, int64_t width, int64_t pad) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_center(promoted, width, pad);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_center(promoted, width, pad))
     int64_t current = rt_str_char_count(s);
     if (width <= current) return value;
     uint64_t pw; const char* pc = rt_pad_char(pad, &pw);
@@ -7444,14 +7379,7 @@ int64_t rt_string_center(int64_t value, int64_t width, int64_t pad) {
 /* zfill: left-pad with '0' to `width` CHARACTERS, keeping a leading sign in
  * front of the zeros ("-7".zfill(4) is "-007", not "00-7"). */
 int64_t rt_string_zfill(int64_t value, int64_t width) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_zfill(promoted, width);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_zfill(promoted, width))
     int64_t current = rt_str_char_count(s);
     if (width <= current) return value;
     uint64_t sign = (s->len > 0 && (s->data[0] == '+' || s->data[0] == '-')) ? 1 : 0;
@@ -7490,14 +7418,7 @@ int64_t rt_string_find_all(int64_t value, int64_t needle) {
  * Deliberately NOT rt_slice, which is byte-indexed. Negative arguments clamp
  * to 0, matching the saturating eval_arg_usize in the interpreter. */
 int64_t rt_string_substr(int64_t value, int64_t start, int64_t length) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_substr(promoted, start, length);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_substr(promoted, start, length))
     if (start < 0) start = 0;
     if (length < 0) length = 0;
     uint64_t b = 0;
@@ -7513,14 +7434,7 @@ int64_t rt_string_substr(int64_t value, int64_t start, int64_t length) {
  * A separate symbol rather than a default argument, because the omitted-slot
  * padding value (tagged nil) IS the integer 3 for an int parameter. */
 int64_t rt_string_substr_from(int64_t value, int64_t start) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_substr_from(promoted, start);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_substr_from(promoted, start))
     if (start < 0) start = 0;
     uint64_t b = 0;
     int64_t skipped = 0;
@@ -8194,12 +8108,7 @@ static int rt_string_promote_raw_receiver(int64_t value, int64_t* out) {
 }
 
 int64_t rt_string_trim(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) return rt_string_trim(promoted);
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_trim(promoted))
     uint64_t begin = 0;
     uint64_t end = s->len;
     while (begin < end && (s->data[begin] == ' ' || s->data[begin] == '\t' || s->data[begin] == '\n' || s->data[begin] == '\r')) {
@@ -8212,12 +8121,7 @@ int64_t rt_string_trim(int64_t value) {
 }
 
 int64_t rt_string_trim_start(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) return rt_string_trim_start(promoted);
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_trim_start(promoted))
     uint64_t begin = 0;
     while (begin < s->len && (s->data[begin] == ' ' || s->data[begin] == '\t' ||
                               s->data[begin] == '\n' || s->data[begin] == '\v' ||
@@ -8228,12 +8132,7 @@ int64_t rt_string_trim_start(int64_t value) {
 }
 
 int64_t rt_string_trim_end(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) return rt_string_trim_end(promoted);
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_trim_end(promoted))
     uint64_t end = s->len;
     while (end > 0 && (s->data[end - 1] == ' ' || s->data[end - 1] == '\t' ||
                        s->data[end - 1] == '\n' || s->data[end - 1] == '\r')) {
@@ -12217,12 +12116,11 @@ int64_t rt_typed_bytes_u64_le_unchecked(SplArray* a, int64_t idx) {
     return (int64_t)v;
 }
 
-int8_t rt_typed_bytes_u32_le_set(SplArray* a, int64_t idx, int64_t val) {
+static int8_t rt_typed_bytes_le_set(SplArray* a, int64_t idx, uint64_t v, int nbytes) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
-    if (idx < 0 || idx + 4 > array->len) return 0;
-    uint32_t v = (uint32_t)val;
-    for (int shift = 0; shift < 4; shift++) {
+    if (idx < 0 || idx + nbytes > array->len) return 0;
+    for (int shift = 0; shift < nbytes; shift++) {
         int64_t byte = (int64_t)((v >> (shift * 8)) & 0xff);
         if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
             ((uint8_t*)array->data)[idx + shift] = (uint8_t)byte;
@@ -12231,80 +12129,83 @@ int8_t rt_typed_bytes_u32_le_set(SplArray* a, int64_t idx, int64_t val) {
         }
     }
     return 1;
+}
+
+int8_t rt_typed_bytes_u32_le_set(SplArray* a, int64_t idx, int64_t val) {
+    return rt_typed_bytes_le_set(a, idx, (uint32_t)val, 4);
 }
 
 int8_t rt_typed_bytes_u64_le_set(SplArray* a, int64_t idx, int64_t val) {
+    return rt_typed_bytes_le_set(a, idx, (uint64_t)val, 8);
+}
+
+/* Shared guards for the typed `[u32]`/`[u64]`/`[i64]` word lanes. `slot_at`
+ * normalises a negative index and bounds-checks it; `slot_push` reserves one
+ * more element and claims it. Both return NULL where the lane returns 0. */
+static int64_t* rt_typed_words_slot_at(SplArray* a, int64_t idx, RtCoreArray** out_array) {
     RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (idx < 0 || idx + 8 > array->len) return 0;
-    uint64_t v = (uint64_t)val;
-    for (int shift = 0; shift < 8; shift++) {
-        int64_t byte = (int64_t)((v >> (shift * 8)) & 0xff);
-        if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
-            ((uint8_t*)array->data)[idx + shift] = (uint8_t)byte;
-        } else {
-            ((int64_t*)array->data)[idx + shift] = rt_value_int(byte);
-        }
-    }
-    return 1;
+    if (!array) return NULL;
+    if (idx < 0) idx = array->len + idx;
+    if (idx < 0 || idx >= array->len) return NULL;
+    *out_array = array;
+    return &((int64_t*)array->data)[idx];
+}
+
+static int64_t* rt_typed_words_slot_push(SplArray* a, RtCoreArray** out_array) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return NULL;
+    if (!rt_core_array_reserve(a, array->len + 1)) return NULL;
+    *out_array = array;
+    return &((int64_t*)array->data)[array->len++];
 }
 
 int64_t rt_typed_words_u32_at(SplArray* a, int64_t idx) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (idx < 0) idx = array->len + idx;
-    if (idx < 0 || idx >= array->len) return 0;
-    int64_t value = ((int64_t*)array->data)[idx];
+    RtCoreArray* array;
+    int64_t* slot = rt_typed_words_slot_at(a, idx, &array);
+    if (!slot) return 0;
+    int64_t value = *slot;
     if (!(array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED)) value = rt_core_numeric_arg(value);
     return value & 0xffffffffLL;
 }
 
 int8_t rt_typed_words_u32_push(SplArray* a, int64_t val) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (!rt_core_array_reserve(a, array->len + 1)) return 0;
+    RtCoreArray* array;
+    int64_t* slot = rt_typed_words_slot_push(a, &array);
+    if (!slot) return 0;
     val &= 0xffffffffLL;
-    ((int64_t*)array->data)[array->len++] =
-        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
+    *slot = (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
     return 1;
 }
 
 int8_t rt_typed_words_u32_set(SplArray* a, int64_t idx, int64_t val) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (idx < 0) idx = array->len + idx;
-    if (idx < 0 || idx >= array->len) return 0;
+    RtCoreArray* array;
+    int64_t* slot = rt_typed_words_slot_at(a, idx, &array);
+    if (!slot) return 0;
     val &= 0xffffffffLL;
-    ((int64_t*)array->data)[idx] =
-        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
+    *slot = (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
     return 1;
 }
 
 int64_t rt_typed_words_u64_at(SplArray* a, int64_t idx) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (idx < 0) idx = array->len + idx;
-    if (idx < 0 || idx >= array->len) return 0;
-    int64_t value = ((int64_t*)array->data)[idx];
-    return (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? value : rt_value_as_u64(value);
+    RtCoreArray* array;
+    int64_t* slot = rt_typed_words_slot_at(a, idx, &array);
+    if (!slot) return 0;
+    return (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? *slot : rt_value_as_u64(*slot);
 }
 
 int8_t rt_typed_words_u64_push(SplArray* a, int64_t val) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (!rt_core_array_reserve(a, array->len + 1)) return 0;
-    ((int64_t*)array->data)[array->len++] =
-        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_core_value_u64_compact(val);
+    RtCoreArray* array;
+    int64_t* slot = rt_typed_words_slot_push(a, &array);
+    if (!slot) return 0;
+    *slot = (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_core_value_u64_compact(val);
     return 1;
 }
 
 int8_t rt_typed_words_u64_set(SplArray* a, int64_t idx, int64_t val) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (idx < 0) idx = array->len + idx;
-    if (idx < 0 || idx >= array->len) return 0;
-    ((int64_t*)array->data)[idx] =
-        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_core_value_u64_compact(val);
+    RtCoreArray* array;
+    int64_t* slot = rt_typed_words_slot_at(a, idx, &array);
+    if (!slot) return 0;
+    *slot = (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_core_value_u64_compact(val);
     return 1;
 }
 
@@ -12314,30 +12215,25 @@ int8_t rt_typed_words_u64_set(SplArray* a, int64_t idx, int64_t val) {
  * (gc_flags LAZY_WORDS) to stop leaking one heap box per store. A U64_PACKED
  * array holds raw words and is read/written as such. */
 int64_t rt_typed_words_i64_at(SplArray* a, int64_t idx) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (idx < 0) idx = array->len + idx;
-    if (idx < 0 || idx >= array->len) return 0;
-    int64_t value = ((int64_t*)array->data)[idx];
-    return (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? value : rt_value_unbox_int(value);
+    RtCoreArray* array;
+    int64_t* slot = rt_typed_words_slot_at(a, idx, &array);
+    if (!slot) return 0;
+    return (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? *slot : rt_value_unbox_int(*slot);
 }
 
 int8_t rt_typed_words_i64_push(SplArray* a, int64_t val) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (!rt_core_array_reserve(a, array->len + 1)) return 0;
-    ((int64_t*)array->data)[array->len++] =
-        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
+    RtCoreArray* array;
+    int64_t* slot = rt_typed_words_slot_push(a, &array);
+    if (!slot) return 0;
+    *slot = (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
     return 1;
 }
 
 int8_t rt_typed_words_i64_set(SplArray* a, int64_t idx, int64_t val) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (idx < 0) idx = array->len + idx;
-    if (idx < 0 || idx >= array->len) return 0;
-    ((int64_t*)array->data)[idx] =
-        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
+    RtCoreArray* array;
+    int64_t* slot = rt_typed_words_slot_at(a, idx, &array);
+    if (!slot) return 0;
+    *slot = (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
     return 1;
 }
 
@@ -14097,53 +13993,39 @@ static int core_dict_put_seq(RtCoreDict* d, int64_t key, int64_t value, int64_t 
     return 0;
 }
 
-static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key) {
-    if (!d || !d->entries || d->len == 0) return rt_core_nil();
+/* Probe for `key` (canonicalised); NULL when absent or the dict is empty. */
+static RtCoreDictEntry* rt_core_dict_find(RtCoreDict* d, int64_t key) {
+    if (!d || !d->entries || d->len == 0) return NULL;
     int64_t ck = rt_core_dict_canon_key(key);
     uint64_t h = rt_core_dict_hash(d, ck, 0);
     int64_t mask = d->cap - 1;
     int64_t idx = (int64_t)(h & (uint64_t)mask);
     for (;;) {
         RtCoreDictEntry* e = &d->entries[idx];
-        if (e->occupied == 0) return rt_core_nil();
-        if (e->occupied == 1 && e->hash == h && rt_core_dict_key_eq(e->key, ck)) return e->value;
+        if (e->occupied == 0) return NULL;
+        if (e->occupied == 1 && e->hash == h && rt_core_dict_key_eq(e->key, ck)) return e;
         idx = (idx + 1) & mask;
     }
+}
+
+static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key) {
+    RtCoreDictEntry* e = rt_core_dict_find(d, key);
+    return e ? e->value : rt_core_nil();
 }
 
 static int rt_core_dict_has(RtCoreDict* d, int64_t key) {
-    if (!d || !d->entries || d->len == 0) return 0;
-    int64_t ck = rt_core_dict_canon_key(key);
-    uint64_t h = rt_core_dict_hash(d, ck, 0);
-    int64_t mask = d->cap - 1;
-    int64_t idx = (int64_t)(h & (uint64_t)mask);
-    for (;;) {
-        RtCoreDictEntry* e = &d->entries[idx];
-        if (e->occupied == 0) return 0;
-        if (e->occupied == 1 && e->hash == h && rt_core_dict_key_eq(e->key, ck)) return 1;
-        idx = (idx + 1) & mask;
-    }
+    return rt_core_dict_find(d, key) != NULL;
 }
 
 static int rt_core_dict_del(RtCoreDict* d, int64_t key, int64_t* removed) {
-    if (!d || !d->entries || d->len == 0) return 0;
-    int64_t ck = rt_core_dict_canon_key(key);
-    uint64_t h = rt_core_dict_hash(d, ck, 0);
-    int64_t mask = d->cap - 1;
-    int64_t idx = (int64_t)(h & (uint64_t)mask);
-    for (;;) {
-        RtCoreDictEntry* e = &d->entries[idx];
-        if (e->occupied == 0) return 0;
-        if (e->occupied == 1 && e->hash == h && rt_core_dict_key_eq(e->key, ck)) {
-            if (removed) *removed = e->value;
-            core_dict_read_advance(d);
-            e->occupied = -1;
-            d->len--;
-            d->tombstones++;
-            return 1;
-        }
-        idx = (idx + 1) & mask;
-    }
+    RtCoreDictEntry* e = rt_core_dict_find(d, key);
+    if (!e) return 0;
+    if (removed) *removed = e->value;
+    core_dict_read_advance(d);
+    e->occupied = -1;
+    d->len--;
+    d->tombstones++;
+    return 1;
 }
 
 int64_t rt_dict_new(int64_t cap_hint) {
@@ -21192,6 +21074,36 @@ static int rt_parse_addr_port(const char* addr_str, struct sockaddr_in* sa) {
     return 0;
 }
 
+/* Extract the text address argument and parse it as host:port. 0 on success. */
+static int rt_io_addr_arg(int64_t addr_val, struct sockaddr_in* sa) {
+    char addr_buf[256];
+    const char* a = rt_extract_cstr(addr_val, addr_buf, sizeof(addr_buf));
+    if (!a) return -1;
+    return rt_parse_addr_port(a, sa) < 0 ? -1 : 0;
+}
+
+/* socket(AF_INET, type) with SO_REUSEADDR bound to `sa`; -1 on any failure. */
+static int rt_io_socket_bind_reuse(int type, const struct sockaddr_in* sa) {
+    int fd = socket(AF_INET, type, 0);
+    if (fd < 0) return -1;
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    if (bind(fd, (const struct sockaddr*)sa, sizeof(*sa)) < 0) { close(fd); return -1; }
+    return fd;
+}
+
+/* Allocate a `size`-byte receive array; NULL (nothing leaked) on failure. */
+static SplArray* rt_io_recv_buffer_new(int64_t size, RtCoreArray** out_ca) {
+    SplArray* arr = rt_byte_array_new((uint64_t)size);
+    RtCoreArray* ca = rt_core_array_ptr(arr);
+    if (!ca || (size > 0 && !ca->data)) {
+        if (arr) rt_array_free(arr);
+        return NULL;
+    }
+    *out_ca = ca;
+    return arr;
+}
+
 static int64_t rt_make_addr_string(struct sockaddr_in* sa) {
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
@@ -21207,16 +21119,10 @@ int64_t rt_io_tcp_socket_create(int64_t family) {
 }
 
 int64_t rt_io_tcp_bind(int64_t addr_val) {
-    char addr_buf[256];
-    const char* a = rt_extract_cstr(addr_val, addr_buf, sizeof(addr_buf));
-    if (!a) return -1;
     struct sockaddr_in sa;
-    if (rt_parse_addr_port(a, &sa) < 0) return -1;
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (rt_io_addr_arg(addr_val, &sa) < 0) return -1;
+    int fd = rt_io_socket_bind_reuse(SOCK_STREAM, &sa);
     if (fd < 0) return -1;
-    int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    if (bind(fd, (struct sockaddr*)&sa, sizeof(sa)) < 0) { close(fd); return -1; }
     /* Bug: redis_tagged_text_runtime_abi_2026_10_11. Match the canonical
      * rt_io_tcp_bind listener contract (also used by the Rust provider).
      * bind_fd remains the separate pre-listen socket operation. */
@@ -21225,11 +21131,8 @@ int64_t rt_io_tcp_bind(int64_t addr_val) {
 }
 
 bool rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
-    char addr_buf[256];
-    const char* a = rt_extract_cstr(addr_val, addr_buf, sizeof(addr_buf));
-    if (!a) return 0;
     struct sockaddr_in sa;
-    if (rt_parse_addr_port(a, &sa) < 0) return 0;
+    if (rt_io_addr_arg(addr_val, &sa) < 0) return 0;
     return bind((int)fd, (struct sockaddr*)&sa, sizeof(sa)) == 0 ? 1 : 0;
 }
 
@@ -21253,11 +21156,8 @@ int64_t rt_io_tcp_accept_timeout(int64_t fd, int64_t ms) {
 }
 
 int64_t rt_io_tcp_connect(int64_t addr_val) {
-    char addr_buf[256];
-    const char* a = rt_extract_cstr(addr_val, addr_buf, sizeof(addr_buf));
-    if (!a) return -1;
     struct sockaddr_in sa;
-    if (rt_parse_addr_port(a, &sa) < 0) return -1;
+    if (rt_io_addr_arg(addr_val, &sa) < 0) return -1;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     if (connect(fd, (struct sockaddr*)&sa, sizeof(sa)) < 0) { close(fd); return -1; }
@@ -21310,12 +21210,9 @@ int64_t rt_io_tcp_connect_timeout(int64_t addr_val, int64_t ms) {
 
 int64_t rt_io_tcp_read(int64_t fd, int64_t size) {
     if (size < 0) return rt_core_nil();
-    SplArray* arr = rt_byte_array_new((uint64_t)size);
-    RtCoreArray* ca = rt_core_array_ptr(arr);
-    if (!ca || (size > 0 && !ca->data)) {
-        if (arr) rt_array_free(arr);
-        return rt_core_nil();
-    }
+    RtCoreArray* ca;
+    SplArray* arr = rt_io_recv_buffer_new(size, &ca);
+    if (!arr) return rt_core_nil();
     ssize_t n = read((int)fd, ca->data, (size_t)size);
     if (n < 0) {
         rt_array_free(arr);
@@ -21521,16 +21418,10 @@ bool rt_io_tcp_shutdown(int64_t fd, int64_t how) {
  * ================================================================ */
 
 int64_t rt_io_udp_bind(int64_t addr_val) {
-    char addr_buf[256];
-    const char* a = rt_extract_cstr(addr_val, addr_buf, sizeof(addr_buf));
-    if (!a) return -1;
     struct sockaddr_in sa;
-    if (rt_parse_addr_port(a, &sa) < 0) return -1;
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (rt_io_addr_arg(addr_val, &sa) < 0) return -1;
+    int fd = rt_io_socket_bind_reuse(SOCK_DGRAM, &sa);
     if (fd < 0) return -1;
-    int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    if (bind(fd, (struct sockaddr*)&sa, sizeof(sa)) < 0) { close(fd); return -1; }
     return (int64_t)fd;
 }
 
@@ -21555,12 +21446,9 @@ int64_t rt_io_udp_send(int64_t fd, int64_t data_val) {
 
 int64_t rt_io_udp_recv(int64_t fd, int64_t size) {
     if (size < 0 || size > 65535) return rt_core_nil();
-    SplArray* arr = rt_byte_array_new((uint64_t)size);
-    RtCoreArray* ca = rt_core_array_ptr(arr);
-    if (!ca || (size > 0 && !ca->data)) {
-        if (arr) rt_array_free(arr);
-        return rt_core_nil();
-    }
+    RtCoreArray* ca;
+    SplArray* arr = rt_io_recv_buffer_new(size, &ca);
+    if (!arr) return rt_core_nil();
     ssize_t n = recv((int)fd, ca->data, (size_t)size, 0);
     if (n < 0) {
         rt_array_free(arr);
@@ -21571,11 +21459,8 @@ int64_t rt_io_udp_recv(int64_t fd, int64_t size) {
 }
 
 bool rt_io_udp_connect(int64_t fd, int64_t addr_val) {
-    char addr_buf[256];
-    const char* a = rt_extract_cstr(addr_val, addr_buf, sizeof(addr_buf));
-    if (!a) return 0;
     struct sockaddr_in sa;
-    if (rt_parse_addr_port(a, &sa) < 0) return 0;
+    if (rt_io_addr_arg(addr_val, &sa) < 0) return 0;
     return connect((int)fd, (struct sockaddr*)&sa, sizeof(sa)) == 0 ? 1 : 0;
 }
 
@@ -21641,12 +21526,9 @@ bool rt_io_udp_leave_multicast(int64_t fd, int64_t addr_val) {
 
 int64_t rt_io_udp_recv_from(int64_t fd, int64_t size) {
     if (size < 0 || size > 65535) return rt_core_nil();
-    SplArray* arr = rt_byte_array_new((uint64_t)size);
-    RtCoreArray* ca = rt_core_array_ptr(arr);
-    if (!ca || (size > 0 && !ca->data)) {
-        if (arr) rt_array_free(arr);
-        return rt_core_nil();
-    }
+    RtCoreArray* ca;
+    SplArray* arr = rt_io_recv_buffer_new(size, &ca);
+    if (!arr) return rt_core_nil();
     struct sockaddr_in from;
     socklen_t fromlen = sizeof(from);
     ssize_t n = recvfrom((int)fd, ca->data, (size_t)size, 0, (struct sockaddr*)&from, &fromlen);
