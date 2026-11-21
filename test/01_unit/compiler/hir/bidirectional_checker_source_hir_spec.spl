@@ -17,25 +17,33 @@ use compiler.types.bidirectional_inferencer.TypeInferencer
 
 extern fn rt_file_read_text(path: text) -> text?
 
+var _bidir_cached_loaded = false
+var _bidir_cached_modules: Dict<text, Module> = {}
+var _bidir_cached_surfaces: ModuleSurfacesByName = ModuleSurfacesByName.empty()
+
 fn bidirectional_actual_source_lowering(target: text) -> HirLowering:
-    val names = ["bidirectional_types", "bidirectional_inferencer", "bidirectional_checking"]
-    var modules: Dict<text, Module> = {}
-    var sources: [SourceFile] = []
-    for name in names:
-        val path = "src/compiler/30.types/" + name + ".spl"
-        val source = rt_file_read_text(path) ?? ""
-        assert source.len() > 0, "Real compiler source must exist"
-        val module_name = "compiler.types." + name
-        modules[module_name] = parse_full_frontend(source, module_name, path, Logger(level: 0))
-        sources.push(SourceFile(path: path, content: source, module_name: module_name))
-    val surfaces = match module_surfaces_from_modules(modules, sources):
-        case Ok(value): value
-        case Err(error):
-            assert false, "Real compiler module surface generation failed"
-            ModuleSurfacesByName.empty()
+    if not _bidir_cached_loaded:
+        val names = ["bidirectional_types", "bidirectional_inferencer", "bidirectional_checking"]
+        var modules: Dict<text, Module> = {}
+        var sources: [SourceFile] = []
+        for name in names:
+            val path = "src/compiler/30.types/" + name + ".spl"
+            val source = rt_file_read_text(path) ?? ""
+            assert source.len() > 0, "Real compiler source must exist"
+            val module_name = "compiler.types." + name
+            modules[module_name] = parse_full_frontend(source, path, module_name, Logger(level: 0))
+            sources.push(SourceFile(path: path, content: source, module_name: module_name))
+        _bidir_cached_surfaces = match module_surfaces_from_modules(modules, sources):
+            case Ok(value): value
+            case Err(error):
+                assert false, "Real compiler module surface generation failed"
+                ModuleSurfacesByName.empty()
+        _bidir_cached_modules = modules
+        _bidir_cached_loaded = true
     val module_name = "compiler.types." + target
-    var lowering = hirlowering_for_module(module_name, surfaces)
-    lowering.lower_module(modules[module_name])
+    val target_path = "src/compiler/30.types/" + target + ".spl"
+    var lowering = hirlowering_for_module(target_path, _bidir_cached_surfaces)
+    lowering.lower_module(_bidir_cached_modules[module_name])
     lowering
 
 describe "bidirectional checker actual source imports":

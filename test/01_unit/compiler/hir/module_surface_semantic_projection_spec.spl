@@ -35,14 +35,17 @@ use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
 use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_hex_limb}
-use compiler.hir.hir_lowering.module_surface_types.{module_surface_declaration_authority_lookup_typed_v1}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceExportCategoryV1, ModuleSurfaceExportSelectionStateV1, module_surface_declaration_authority_lookup_typed_v1}
+use compiler.hir.hir_lowering.module_surface_selected_exports_v1.{module_surface_selected_export_lookup_v1}
 
-fn semantic_surface(source: text, path: text = "semantic_surface.spl") -> ModuleSurfacesByName:
+fn semantic_surface(source: text, path: text = "semantic_surface.spl", module_name: text = "semantic.surface") -> ModuleSurfacesByName:
     val parsed = parse_and_build_module(source, path)
+    var modules = {}
+    modules[module_name] = parsed
     val result = module_surfaces_from_modules(
-        {"semantic.surface": parsed},
+        modules,
         [SourceFile(path: path, content: source,
-                    module_name: "semantic.surface")])
+                    module_name: module_name)])
     expect(result.is_ok()).to_equal(true)
     result.unwrap()
 
@@ -146,16 +149,19 @@ describe "frozen ModuleSurface semantic identity":
         # @capture(statistics): identity verdicts for export renaming and facade rerouting
         step("Compare export renaming, then reroute a facade across provider owners")
         val direct = "fn item() -> i64:\n    1\nexport item\n"
-        val renamed = "fn item() -> i64:\n    1\nexport item: public_item\n"
-        expect(semantic_equal(direct, renamed)).to_equal(false)
+        val renamed = "fn item() -> i64:\n    1\nexport item as public_item\n"
+        val direct_reg = semantic_surface(direct)
+        val renamed_reg = semantic_surface(renamed)
+        expect(direct_reg.selected_exports_v1.snapshot_digest == renamed_reg.selected_exports_v1.snapshot_digest).to_equal(false)
         val a = routed_facade("owner.alpha")
         val b = routed_facade("owner.beta")
-        val sa = a.surfaces[a.index_by_name["route.facade"]]
-        val sb = b.surfaces[b.index_by_name["route.facade"]]
-        expect((sa.semantic_hash0 == sb.semantic_hash0 and
-               sa.semantic_hash1 == sb.semantic_hash1 and
-               sa.semantic_hash2 == sb.semantic_hash2 and
-               sa.semantic_hash3 == sb.semantic_hash3)).to_equal(false)
+        expect(a.selected_exports_v1.snapshot_digest == b.selected_exports_v1.snapshot_digest).to_equal(false)
+        val sel_a = module_surface_selected_export_lookup_v1(a, a.index_by_name["route.facade"], ModuleSurfaceExportCategoryV1.Function, "item")
+        val sel_b = module_surface_selected_export_lookup_v1(b, b.index_by_name["route.facade"], ModuleSurfaceExportCategoryV1.Function, "item")
+        expect(sel_a.state).to_equal(ModuleSurfaceExportSelectionStateV1.Selected)
+        expect(sel_b.state).to_equal(ModuleSurfaceExportSelectionStateV1.Selected)
+        expect(sel_a.terminal_surface).to_equal(a.index_by_name["owner.alpha"])
+        expect(sel_b.terminal_surface).to_equal(b.index_by_name["owner.beta"])
 
     it "distinguishes eager, lazy, and differently unresolved imports":
         # @req REQ-HIR-SURF-009
@@ -228,8 +234,8 @@ describe "frozen ModuleSurface semantic identity":
 
     it "keeps source intent cache identity stable across admitted snapshot root relocation":
         step("Compare identical source topology under two SCV roots")
-        val a = semantic_surface("pri fn hidden() -> i64:\n    1\n", "/work/build/scv/a/src/x/owner.spl").surfaces[0]
-        val b = semantic_surface("pri fn hidden() -> i64:\n    9\n", "/work/build/scv/b/src/x/owner.spl").surfaces[0]
+        val a = semantic_surface("pri fn hidden() -> i64:\n    1\n", "/work/build/scv/a/src/x/owner.spl", "x.owner").surfaces[0]
+        val b = semantic_surface("pri fn hidden() -> i64:\n    9\n", "/work/build/scv/b/src/x/owner.spl", "x.owner").surfaces[0]
         expect(a.semantic_cacheable).to_equal(true)
         expect(b.semantic_cacheable).to_equal(true)
         expect([a.semantic_hash0, a.semantic_hash1, a.semantic_hash2, a.semantic_hash3]).to_equal([b.semantic_hash0, b.semantic_hash1, b.semantic_hash2, b.semantic_hash3])

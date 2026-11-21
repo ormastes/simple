@@ -41,18 +41,25 @@ preventing test, not a reproduction of a live bug.
 # @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl 10%
 # @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl 10%
 
-use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
 use compiler.common.config.{Logger}
 
 fn make_logger() -> Logger:
     Logger(level: 0)
 
-fn lower_consumer(modules_map: Dict<text, any>, path_consumer: text, module_consumer: any) -> HirModule:
-    var lowering = HirLowering.with_filename(path_consumer)
-    lowering.modules_by_name = modules_map
+fn lower_consumer(modules_map: Dict<text, Module>, sources: [SourceFile], path_consumer: text, module_consumer: Module) -> HirModule:
+    val surfaces = match module_surfaces_from_modules(modules_map, sources):
+        case Ok(value): value
+        case Err(_):
+            assert_true(false)
+            ModuleSurfacesByName.empty()
+    var lowering = hirlowering_for_module(path_consumer, surfaces)
     lowering.lower_module(module_consumer)
 
 fn find_fn(hir: HirModule, name: text) -> HirFunction?:
@@ -75,27 +82,33 @@ describe "aliased import static-call / constructor resolution (ALIAS-GAP lane)":
         val log = make_logger()
 
         val src_owner = "class RealWidget:\n    value: i64\n\nimpl RealWidget:\n    static fn make() -> RealWidget:\n        RealWidget(value: 7)\n"
-        val module_owner = parse_full_frontend(src_owner, "owner_mod", "owner_mod", log)
+        val module_owner = parse_full_frontend(src_owner, "owner_mod.spl", "owner_mod", log)
 
         # Decoy: a genuine, DIFFERENT class also literally named "Widget",
         # imported into the SAME consumer under a different local alias so
         # it is live in the compile unit (mirrors Fat32Core existing
         # elsewhere in the C8 story).
         val src_decoy = "class Widget:\n    value: i64\n\nimpl Widget:\n    static fn make() -> Widget:\n        Widget(value: 99)\n"
-        val module_decoy = parse_full_frontend(src_decoy, "decoy_mod", "decoy_mod", log)
+        val module_decoy = parse_full_frontend(src_decoy, "decoy_mod.spl", "decoy_mod", log)
 
         val open = "{"
         val close = "}"
         val src_consumer = "use owner_mod." + open + "RealWidget as Widget" + close + "\n" +
             "use decoy_mod." + open + "Widget as DecoyWidget" + close + "\n" +
             "fn build() -> i64:\n    val w = Widget.make()\n    0\n"
-        val module_consumer = parse_full_frontend(src_consumer, "consumer_mod", "consumer_mod", log)
+        val module_consumer = parse_full_frontend(src_consumer, "consumer_mod.spl", "consumer_mod", log)
 
-        var modules_map: Dict<text, any> = {}
+        var modules_map: Dict<text, Module> = {}
         modules_map["owner_mod"] = module_owner
         modules_map["decoy_mod"] = module_decoy
+        modules_map["consumer_mod"] = module_consumer
+        val sources = [
+            SourceFile(path: "owner_mod.spl", content: src_owner, module_name: "owner_mod"),
+            SourceFile(path: "decoy_mod.spl", content: src_decoy, module_name: "decoy_mod"),
+            SourceFile(path: "consumer_mod.spl", content: src_consumer, module_name: "consumer_mod")
+        ]
 
-        val hir = lower_consumer(modules_map, "consumer_mod", module_consumer)
+        val hir = lower_consumer(modules_map, sources, "consumer_mod.spl", module_consumer)
         val build_fn = find_fn(hir, "build")
 
         if val bf = build_fn:
@@ -103,7 +116,7 @@ describe "aliased import static-call / constructor resolution (ALIAS-GAP lane)":
             match first_stmt.kind:
                 case HirStmtKind.Let(_, _, init):
                     match init.kind:
-                        case HirExprKind.MethodCall(receiver, method, _, _, _):
+                        case HirExprKind.MethodCall(receiver, method, _, _):
                             expect(method).to_equal("make")
                             match receiver.kind:
                                 case HirExprKind.NamedVar(sym, name):
@@ -128,18 +141,23 @@ describe "aliased import static-call / constructor resolution (ALIAS-GAP lane)":
         val log = make_logger()
 
         val src_owner = "class RealWidget:\n    value: i64\n"
-        val module_owner = parse_full_frontend(src_owner, "owner_mod2", "owner_mod2", log)
+        val module_owner = parse_full_frontend(src_owner, "owner_mod2.spl", "owner_mod2", log)
 
         val open = "{"
         val close = "}"
         val src_consumer = "use owner_mod2." + open + "RealWidget as Widget" + close + "\n" +
             "fn build2() -> i64:\n    val w = Widget(value: 5)\n    0\n"
-        val module_consumer = parse_full_frontend(src_consumer, "consumer_mod2", "consumer_mod2", log)
+        val module_consumer = parse_full_frontend(src_consumer, "consumer_mod2.spl", "consumer_mod2", log)
 
-        var modules_map: Dict<text, any> = {}
+        var modules_map: Dict<text, Module> = {}
         modules_map["owner_mod2"] = module_owner
+        modules_map["consumer_mod2"] = module_consumer
+        val sources = [
+            SourceFile(path: "owner_mod2.spl", content: src_owner, module_name: "owner_mod2"),
+            SourceFile(path: "consumer_mod2.spl", content: src_consumer, module_name: "consumer_mod2")
+        ]
 
-        val hir = lower_consumer(modules_map, "consumer_mod2", module_consumer)
+        val hir = lower_consumer(modules_map, sources, "consumer_mod2.spl", module_consumer)
         val build_fn = find_fn(hir, "build2")
 
         if val bf = build_fn:

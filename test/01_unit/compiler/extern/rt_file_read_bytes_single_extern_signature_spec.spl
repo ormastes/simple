@@ -35,14 +35,25 @@ fn decl_return_types() -> text:
     # test/*/sffi/rsa_sha512_reference_import_spec.spl (a source fixture the
     # spec compiles at runtime) out of the count -- they are preceded by a
     # quote, not by whitespace.
-    val cmd = "/usr/bin/grep -rh --include='*.spl' --exclude-dir=vendor -E '" + ANCHOR + "' src test scripts examples "
-        + "| sed 's/.*-> //' | sort -u | tr '\\n' ' '"
-    shell_output(cmd).trim()
+    # Deduplicate in Simple instead of piping through `sort` (which resolves to
+    # Windows system32 sort.exe on Windows hosts and fails on `-u`).
+    val cmd = "/usr/bin/grep -rh --include='*.spl' --exclude-dir=vendor -E '" + ANCHOR + "' src test scripts examples"
+    var seen: [text] = []
+    for raw_line in shell_output(cmd).split("\n"):
+        val line = raw_line.trim()
+        val arrow_idx = line.find("-> ")
+        if arrow_idx >= 0:
+            val ret_ty = line.slice(arrow_idx + 3).trim()
+            if ret_ty != "" and not seen.contains(ret_ty):
+                seen = seen.push(ret_ty)
+    seen.sort()
+    seen.join(" ")
 
 fn decl_type_count() -> i64:
-    val cmd = "/usr/bin/grep -rh --include='*.spl' --exclude-dir=vendor -E '" + ANCHOR + "' src test scripts examples "
-        + "| sed 's/.*-> //' | sort -u | wc -l"
-    shell_output(cmd).trim().to_i64()
+    val types = decl_return_types()
+    if types == "":
+        return 0
+    types.split(" ").len()
 
 fn decls_with_return(ret: text) -> i64:
     val cmd = "/usr/bin/grep -rh --include='*.spl' --exclude-dir=vendor -E '" + ANCHOR + ".*-> " + ret + "$' src test scripts examples "

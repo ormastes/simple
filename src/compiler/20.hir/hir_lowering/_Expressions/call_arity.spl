@@ -12,10 +12,11 @@
 # fn values have no row here and stay unchecked.
 
 use compiler.frontend.parser_types.{ParserFunction, Param, ParserTypeParam}
-use compiler.frontend.parser_types_expr.{parser_type_kind_named_name, parser_type_kind_is_optional}
+use compiler.frontend.parser_types_expr.{Type, parser_type_kind_named_name, parser_type_kind_is_optional}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceCallable, ModuleSurfaceParam}
 use compiler.hir.hir_lowering.types.HirLowering
 # @workaround bug=stage3_mir_frozen_phase2_resolution_gaps_2026-11-15 reason=frozen Phase 2 leaves SymbolTable receiver methods unresolved unless the type and its methods module are imported directly
 use compiler.hir.hir_types.{SymbolTable}
@@ -28,14 +29,15 @@ fn call_arity_spec_name(spec: text) -> text:
 
 # True when a parameter's declared type can never hold `None` in safe code:
 # explicit, not `T?`, not `any`, not one of the function's type parameters.
-fn call_arity_param_non_option(param: Param, type_params: [ParserTypeParam]) -> bool:
-    if not param.has_type_:
+fn call_arity_type_is_non_option(has_type_: bool, type_: Type, type_name_fallback: text, type_params: [ParserTypeParam]) -> bool:
+    if not has_type_:
         return false
     # Discriminant probe, not `case TypeKind.Optional(_)`: see the SEED PATTERN
     # HAZARD note in expression_core.spl (variant-vs-struct name collision).
-    if parser_type_kind_is_optional(param.type_.kind) or parser_type_kind_named_name(param.type_.kind) == "Option":
+    if parser_type_kind_is_optional(type_.kind) or parser_type_kind_named_name(type_.kind) == "Option" or type_name_fallback == "Option":
         return false
-    val named = parser_type_kind_named_name(param.type_.kind)
+    val parsed_named = parser_type_kind_named_name(type_.kind)
+    val named = if parsed_named != "": parsed_named else: type_name_fallback
     if named == "any":
         return false
     for tp in type_params:
@@ -44,15 +46,95 @@ fn call_arity_param_non_option(param: Param, type_params: [ParserTypeParam]) -> 
             return false
     true
 
+fn call_arity_param_non_option(param: Param, type_params: [ParserTypeParam]) -> bool:
+    call_arity_type_is_non_option(param.has_type_, param.type_, "", type_params)
+
+fn call_arity_build_row(fn_name: text, names: [text], defaults: [bool], non_opts: [bool], is_instance_method: bool) -> text:
+    var start_index = 0
+    if is_instance_method and names.len() > 0:
+        val first_name: text = names[0]
+        if first_name == "self" or first_name == "me":
+            start_index = 1
+    var row = fn_name + "|"
+    var param_index = start_index
+    var emitted = 0
+    while param_index < names.len():
+        if emitted > 0:
+            row = row + ","
+        if defaults[param_index]:
+            row = row + "?"
+        row = row + names[param_index]
+        if non_opts[param_index]:
+            row = row + "!"
+        emitted = emitted + 1
+        param_index = param_index + 1
+    row
+
+fn call_arity_row_for_function(fn_: ParserFunction, is_instance_method: bool) -> text:
+    var names: [text] = []
+    var defaults: [bool] = []
+    var non_opts: [bool] = []
+    var param_index = 0
+    while param_index < fn_.params.len():
+        val param: Param = fn_.params[param_index]
+        names.push(param.name)
+        defaults.push(param.has_default)
+        non_opts.push(call_arity_type_is_non_option(param.has_type_, param.type_, "", fn_.type_params))
+        param_index = param_index + 1
+    call_arity_build_row(fn_.name, names, defaults, non_opts, is_instance_method)
+
+fn call_arity_row_for_surface_callable(callable: ModuleSurfaceCallable, is_instance_method: bool) -> text:
+    var names: [text] = []
+    var defaults: [bool] = []
+    var non_opts: [bool] = []
+    var param_index = 0
+    while param_index < callable.params.len():
+        val param: ModuleSurfaceParam = callable.params[param_index]
+        names.push(param.name)
+        defaults.push(param.has_default)
+        non_opts.push(call_arity_type_is_non_option(param.has_type_, param.type_, param.type_name, callable.type_params))
+        param_index = param_index + 1
+    call_arity_build_row(callable.name, names, defaults, non_opts, is_instance_method)
+
 fn hir_arg_is_none_literal(value: HirExpr) -> bool:
     match value.kind:
         case HirExprKind.NamedVar(_, n): n == "None"
         case _: false
 
 impl HirLowering:
+    me upsert_call_arity_row(symbol_id: i64, row: text):
+        if symbol_id < 0 or row == "":
+            return
+        var scan = 0
+        while scan < self.call_arity_symbol_ids.len():
+            if self.call_arity_symbol_ids[scan] == symbol_id:
+                self.call_arity_rows[scan] = row
+                return
+            scan = scan + 1
+        self.call_arity_symbol_ids.push(symbol_id)
+        self.call_arity_rows.push(row)
+
+    me record_call_arity_row(symbol_id: i64, fn_: ParserFunction, is_instance_method: bool):
+        if symbol_id < 0:
+            return
+        self.upsert_call_arity_row(symbol_id, call_arity_row_for_function(fn_, is_instance_method))
+
+    me record_surface_call_arity_row(symbol_id: i64, callable: ModuleSurfaceCallable, is_instance_method: bool):
+        if symbol_id < 0:
+            return
+        self.upsert_call_arity_row(symbol_id, call_arity_row_for_surface_callable(callable, is_instance_method))
+
+    me copy_call_arity_row(source_symbol_id: i64, target_symbol_id: i64):
+        if source_symbol_id < 0 or target_symbol_id < 0:
+            return
+        var scan = 0
+        while scan < self.call_arity_symbol_ids.len():
+            if self.call_arity_symbol_ids[scan] == source_symbol_id:
+                self.upsert_call_arity_row(target_symbol_id, self.call_arity_rows[scan])
+                return
+            scan = scan + 1
+
     me record_call_arity_rows(functions: Dict<text, ParserFunction>):
-        var ids: [i64] = []
-        var rows: [text] = []
         val keys = functions.keys()
         var key_index = 0
         while key_index < keys.len():
@@ -60,24 +142,8 @@ impl HirLowering:
             # @workaround bug=stage2_symbol_display_name_option_transport_2026-11-03 reason=frozen stage2 mis-tests SymbolId? != nil / .?; resolve through lookup_or_invalid and test the raw id
             val symbol_raw: i64 = self.symbols.lookup_or_invalid(fn_.name).id
             if symbol_raw >= 0:
-                val found_symbol: SymbolId = SymbolId(id: symbol_raw)
-                var row = fn_.name + "|"
-                var param_index = 0
-                while param_index < fn_.params.len():
-                    val param: Param = fn_.params[param_index]
-                    if param_index > 0:
-                        row = row + ","
-                    if param.has_default:
-                        row = row + "?"
-                    row = row + param.name
-                    if call_arity_param_non_option(param, fn_.type_params):
-                        row = row + "!"
-                    param_index = param_index + 1
-                ids.push(found_symbol.id)
-                rows.push(row)
+                self.upsert_call_arity_row(symbol_raw, call_arity_row_for_function(fn_, false))
             key_index = key_index + 1
-        self.call_arity_symbol_ids = ids
-        self.call_arity_rows = rows
 
     me check_call_arity(callee: HirExpr, args: [HirCallArg], span: Span):
         val callee_kind: HirExprKind = callee.kind
@@ -86,6 +152,9 @@ impl HirLowering:
             case HirExprKind.NamedVar(sym, _): symbol_id = sym.id
             case HirExprKind.Var(sym): symbol_id = sym.id
             case _: return
+        self.check_call_arity_by_symbol_id(symbol_id, args, span)
+
+    me check_call_arity_by_symbol_id(symbol_id: i64, args: [HirCallArg], span: Span):
         if symbol_id < 0:
             return
         var row_index = -1

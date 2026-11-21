@@ -7,6 +7,8 @@ their HIR origin.
 """
 
 use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceExportCategoryV1, ModuleSurfaceExportSelectionStateV1}
+use compiler.hir.hir_lowering.module_surface_selected_exports_v1.{module_surface_selected_export_lookup_v1}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
 use compiler.frontend.frontend.{parse_full_frontend}
@@ -25,11 +27,11 @@ describe "io_runtime compatibility facade materialization":
         val facade_source = "export env_get_nullable, env_get_opt, process_run, getpid, time_now_unix_micros, dir_create_all, shell, hash_text from nogc_sync_mut.io_runtime"
         val consumer_source = "use std.io_runtime.\{env_get_nullable, env_get_opt, process_run, getpid, time_now_unix_micros, dir_create_all, shell, hash_text\}\nfn consume_runtime_facade() -> i64:\n    process_run(\"true\") + getpid() + time_now_unix_micros() + shell(\"true\")"
         val provider = parse_full_frontend(
-            provider_source, "nogc_sync_mut.io_runtime", "nogc_sync_mut.io_runtime", log)
+            provider_source, "nogc_sync_mut/io_runtime.spl", "nogc_sync_mut.io_runtime", log)
         val facade = parse_full_frontend(
-            facade_source, "std.io_runtime", "std.io_runtime", log)
+            facade_source, "std/io_runtime.spl", "std.io_runtime", log)
         val consumer = parse_full_frontend(
-            consumer_source, "compiler.consumer", "compiler.consumer", log)
+            consumer_source, "compiler/consumer.spl", "compiler.consumer", log)
 
         var modules: Dict<text, Module> = {}
         modules["nogc_sync_mut.io_runtime"] = provider
@@ -46,17 +48,17 @@ describe "io_runtime compatibility facade materialization":
         ])
         expect(result.is_ok()).to_equal(true)
         val surfaces = result.unwrap()
-        val facade_surface = surfaces.surfaces[surfaces.index_by_name["std.io_runtime"]]
-        if val process_origin = facade_surface.export_origins["process_run"]:
-            expect(process_origin.owner_module).to_equal("nogc_sync_mut.io_runtime")
-        else:
-            expect(false).to_equal(true)
-        if val env_origin = facade_surface.export_origins["env_get_opt"]:
-            expect(env_origin.owner_module).to_equal("nogc_sync_mut.io_runtime")
-        else:
-            expect(false).to_equal(true)
+        val facade_idx = surfaces.index_by_name["std.io_runtime"]
+        val process_sel = module_surface_selected_export_lookup_v1(
+            surfaces, facade_idx, ModuleSurfaceExportCategoryV1.Function, "process_run")
+        expect(process_sel.state).to_equal(ModuleSurfaceExportSelectionStateV1.Selected)
+        expect(surfaces.surfaces[process_sel.terminal_surface].preferred_registry_name).to_equal("nogc_sync_mut.io_runtime")
+        val env_sel = module_surface_selected_export_lookup_v1(
+            surfaces, facade_idx, ModuleSurfaceExportCategoryV1.Function, "env_get_opt")
+        expect(env_sel.state).to_equal(ModuleSurfaceExportSelectionStateV1.Selected)
+        expect(surfaces.surfaces[env_sel.terminal_surface].preferred_registry_name).to_equal("nogc_sync_mut.io_runtime")
 
-        var lowering = hirlowering_for_module("compiler.consumer", surfaces)
+        var lowering = hirlowering_for_module("compiler/consumer.spl", surfaces)
         val hir = lowering.lower_module(consumer)
         expect(lowering.errors.len()).to_equal(0)
         expect(hir.symbols.lookup("env_get_nullable") != nil).to_equal(true)

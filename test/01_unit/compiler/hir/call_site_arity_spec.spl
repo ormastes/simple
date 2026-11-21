@@ -1,0 +1,140 @@
+"""
+## Purpose and audience
+Regression and acceptance specification for cross-module and method call-site arity checking (`#4611`).
+Covers cross-module imported functions, module-qualified calls, default-parameter propagation through `ModuleSurfaceParam`, static methods, instance methods (with explicit `self`/`me` and implicit receiver), trait default methods, and safe-code `None` parameter checking.
+Audience: compiler engineers maintaining `src/compiler/20.hir/hir_lowering/`.
+"""
+# @req: REQ-COMPILER-HIR-4611 — cross-module and method call sites enforce arity, defaults, and parameter binding.
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule}
+
+fn arity_consumer_errors(provider_src: text, consumer_src: text) -> [text]:
+    val log = Logger(level: 0)
+    val mod_p = parse_full_frontend(provider_src, "lib.provider", "lib.provider", log)
+    val mod_c = parse_full_frontend(consumer_src, "app.consumer", "app.consumer", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.provider"] = mod_p
+    modules["app.consumer"] = mod_c
+    val files = [
+        SourceFile(path: "lib.provider", content: provider_src, module_name: "lib.provider"),
+        SourceFile(path: "app.consumer", content: consumer_src, module_name: "app.consumer")
+    ]
+    val surfaces_res = module_surfaces_from_modules(modules, files)
+    if surfaces_res.is_err():
+        return ["surface error: " + surfaces_res.unwrap_err()]
+    val surfaces = surfaces_res.unwrap()
+    var lowering = hirlowering_for_module("app.consumer", surfaces)
+    val hir: HirModule = lowering.lower_module(mod_c)
+    var errs: [text] = []
+    for e in lowering.errors:
+        errs = errs.push(e.message)
+    errs
+
+fn arity_local_errors(src: text) -> [text]:
+    val log = Logger(level: 0)
+    val parsed = parse_full_frontend(src, "local_arity.spl", "local_arity", log)
+    var lowering = HirLowering.with_filename("local_arity.spl")
+    val hir: HirModule = lowering.lower_module(parsed)
+    var errs: [text] = []
+    for e in lowering.errors:
+        errs = errs.push(e.message)
+    errs
+
+fn arity_has_message(errs: [text], needle: text) -> bool:
+    for err in errs:
+        if err.contains(needle):
+            return true
+    false
+
+val PROVIDER_SRC =
+    "pub fn pair(a: i64, b: i64 = 10) -> i64:\n" +
+    "    a + b\n\n" +
+    "pub fn need_two(a: i64, b: i64) -> i64:\n" +
+    "    a + b\n\n" +
+    "pub fn strict_opt(x: i64) -> i64:\n" +
+    "    x\n\n" +
+    "pub trait Scorer:\n" +
+    "    fn score(bonus: i64 = 1) -> i64:\n" +
+    "        bonus\n\n" +
+    "pub class Meter:\n" +
+    "    base: i64\n\n" +
+    "    static fn create(seed: i64, step: i64 = 2) -> Meter:\n" +
+    "        Meter(base: seed + step)\n\n" +
+    "    fn measure(offset: i64) -> i64:\n" +
+    "        self.base + offset\n\n" +
+    "impl Scorer for Meter:\n" +
+    "    pass\n"
+
+describe "cross-module and method call-site arity (#4611)":
+    it "accepts valid cross-module calls, defaults, module qualifiers, and imported methods":
+        step("Lower cross-module consumer using default parameters, aliases, module qualification, static factory, and trait defaults")
+        val ok_consumer =
+            "use lib.provider.\{pair, pair as pair_alias, Meter, Scorer\}\n" +
+            "use lib.provider as prov\n" +
+            "fn main() -> i64:\n" +
+            "    val a = pair(1) + pair(1, 2) + pair_alias(3) + prov.pair(4)\n" +
+            "    val m = Meter.create(3)\n" +
+            "    a + m.measure(4) + m.score()\n"
+        expect(arity_consumer_errors(PROVIDER_SRC, ok_consumer)).to_equal([])
+
+    it "rejects cross-module missing required args, excess args, module-qualified arity, safe None, and imported method arity":
+        step("Lower cross-module consumer exercising missing required arg, extra arg, module-qualified excess arg, None, and missing method arg")
+        val bad_consumer =
+            "use lib.provider.\{pair, need_two, strict_opt, Meter, Scorer\}\n" +
+            "use lib.provider as prov\n" +
+            "fn bad_missing() -> i64:\n" +
+            "    need_two(1)\n" +
+            "fn bad_extra() -> i64:\n" +
+            "    pair(1, 2, 3)\n" +
+            "fn bad_mod() -> i64:\n" +
+            "    prov.need_two(1, 2, 3)\n" +
+            "fn bad_none() -> i64:\n" +
+            "    strict_opt(None)\n" +
+            "fn bad_method() -> i64:\n" +
+            "    val m = Meter.create(3)\n" +
+            "    m.measure()\n"
+        val errs = arity_consumer_errors(PROVIDER_SRC, bad_consumer)
+        expect(errs.len()).to_equal(5)
+        expect(arity_has_message(errs, "requires argument(s) b")).to_equal(true)
+        expect(arity_has_message(errs, "function 'pair' accepts at most 2 argument(s), but 3 were provided")).to_equal(true)
+        expect(arity_has_message(errs, "function 'need_two' accepts at most 2 argument(s), but 3 were provided")).to_equal(true)
+        expect(arity_has_message(errs, "passes None to parameter x")).to_equal(true)
+        expect(arity_has_message(errs, "requires argument(s) offset")).to_equal(true)
+
+    it "checks same-module static and instance method arity without counting self/me as user arguments":
+        step("Lower same-module class with valid defaults/me/self calls and invalid static/instance arity calls")
+        val local_src =
+            "class Box:\n" +
+            "    v: i64\n\n" +
+            "    static fn build(a: i64, b: i64 = 5) -> Box:\n" +
+            "        Box(v: a + b)\n\n" +
+            "    static fn req(a: i64, b: i64) -> Box:\n" +
+            "        Box(v: a + b)\n\n" +
+            "    fn read() -> i64:\n" +
+            "        self.v\n\n" +
+            "    me add(k: i64, scale: i64 = 1):\n" +
+            "        self.v = self.v + k * scale\n\n" +
+            "    fn add_self(self, k: i64) -> i64:\n" +
+            "        self.v + k\n\n" +
+            "fn ok_calls() -> i64:\n" +
+            "    var b = Box.build(1)\n" +
+            "    b.add(2)\n" +
+            "    b.add(2, scale: 3)\n" +
+            "    b.read() + b.add_self(1)\n\n" +
+            "fn bad_static() -> Box:\n" +
+            "    Box.req(1)\n\n" +
+            "fn bad_inst() -> i64:\n" +
+            "    val b = Box(v: 1)\n" +
+            "    b.add_self(1, 2)\n"
+        val errs = arity_local_errors(local_src)
+        expect(errs.len()).to_equal(2)
+        expect(arity_has_message(errs, "requires argument(s) b")).to_equal(true)
+        expect(arity_has_message(errs, "accepts at most 1 argument(s), but 2 were provided")).to_equal(true)

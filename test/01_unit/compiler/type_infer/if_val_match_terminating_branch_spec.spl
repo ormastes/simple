@@ -1,0 +1,269 @@
+"""
+## Purpose and audience
+Purpose: Prove that type inference and definite termination analysis skip value-type unification and subsumption on definitely terminating branches across `if`, `if val`, `if/elif`, `Block`, and `match` expressions.
+Audience: compiler engineers maintaining `src/compiler/30.types/type_infer/inference_expr.spl` and `src/compiler/35.semantics/narrowing.spl`.
+"""
+# @req: REQ-COMPILER-TYPE-INFER-5904 — terminating branches do not poison value-position branch joins.
+
+# Regression for #5904 (if-val / match terminating branch void mismatch)
+
+use std.spec.step
+use std.spec.*
+use compiler.types.type_infer_types.*
+use compiler.types.type_infer.inference.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.semantics.narrowing.{definitely_terminates, classify_match_arm_coverage, MatchTerminationStatus}
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+
+fn tb_sp() -> Span:
+    lex_span_empty()
+
+fn tb_unit() -> HirType:
+    HirType(kind: HirTypeKind.Unit, span: tb_sp())
+
+fn tb_i64() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: tb_sp())
+
+fn tb_str() -> HirType:
+    HirType(kind: HirTypeKind.Str, span: tb_sp())
+
+fn tb_bool() -> HirType:
+    HirType(kind: HirTypeKind.Bool, span: tb_sp())
+
+fn tb_err_ty() -> HirType:
+    HirType(kind: HirTypeKind.Error, span: tb_sp())
+
+fn tb_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: tb_unit(), span: tb_sp())
+
+fn tb_int(v: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(v, nil), has_type_: true, type_: tb_i64(), span: tb_sp())
+
+fn tb_str_lit(s: text) -> HirExpr:
+    HirExpr(kind: HirExprKind.StringLit(s, nil), has_type_: true, type_: tb_str(), span: tb_sp())
+
+fn tb_bool_lit(b: bool) -> HirExpr:
+    HirExpr(kind: HirExprKind.BoolLit(b), has_type_: true, type_: tb_bool(), span: tb_sp())
+
+fn tb_return(value: HirExpr?) -> HirStmt:
+    HirStmt(kind: HirStmtKind.Expr(tb_expr(HirExprKind.Return(value))), span: tb_sp())
+
+fn tb_value_block(expr: HirExpr) -> HirBlock:
+    HirBlock(stmts: [], has: true, value: expr, span: tb_sp())
+
+fn tb_stmt_block(stmts: [HirStmt]) -> HirBlock:
+    HirBlock(stmts: stmts, has: false, value: tb_expr(HirExprKind.NilLit), span: tb_sp())
+
+fn tb_wild_pat() -> HirPattern:
+    HirPattern(kind: HirPatternKind.Wildcard, has_type_: false, type_: tb_err_ty(), span: tb_sp())
+
+fn tb_bool_pat(b: bool) -> HirPattern:
+    HirPattern(kind: HirPatternKind.Literal(tb_bool_lit(b)), has_type_: false, type_: tb_err_ty(), span: tb_sp())
+
+fn tb_arm(pat: HirPattern, body: HirBlock) -> HirMatchArm:
+    HirMatchArm(pattern: pat, has_guard: false, guard: tb_bool_lit(true), body: body, span: tb_sp())
+
+fn tb_if_arm(cond: HirExpr, then_: HirBlock) -> HirIfArm:
+    HirIfArm(cond: cond, then_: then_, span: tb_sp())
+
+fn tb_is_i64(ty: HirType) -> bool:
+    match ty.kind:
+        case Int(64, true): true
+        case _: false
+
+fn tb_is_str(ty: HirType) -> bool:
+    match ty.kind:
+        case Str: true
+        case _: false
+
+fn tb_is_unit(ty: HirType) -> bool:
+    match ty.kind:
+        case Unit: true
+        case _: false
+
+fn tb_is_never(ty: HirType) -> bool:
+    match ty.kind:
+        case Never: true
+        case _: false
+
+fn tb_ctx_returning_i64() -> HmInferContext:
+    var ctx = HmInferContext.new()
+    ctx.current_return_type = Some(tb_i64())
+    ctx
+
+describe "definite termination and terminating-branch inference (#5904)":
+    it "detects termination through tail If, MatchCase, and Block values":
+        step("Check definitely_terminates on value-tail blocks whose branches all return")
+        val ret_block = tb_stmt_block([tb_return(Some(tb_int(0)))])
+        val nested_if = tb_expr(HirExprKind.If(tb_bool_lit(true), ret_block, Some(ret_block)))
+        val nested_match = tb_expr(HirExprKind.MatchCase(tb_bool_lit(true), [
+            tb_arm(tb_bool_pat(true), ret_block),
+            tb_arm(tb_wild_pat(), ret_block)
+        ]))
+        val mixed_match = tb_expr(HirExprKind.MatchCase(tb_bool_lit(true), [
+            tb_arm(tb_bool_pat(true), ret_block),
+            tb_arm(tb_wild_pat(), tb_value_block(tb_int(1)))
+        ]))
+        expect(definitely_terminates(ret_block)).to_be(true)
+        expect(definitely_terminates(tb_value_block(nested_if))).to_be(true)
+        expect(definitely_terminates(tb_value_block(nested_match))).to_be(true)
+        expect(definitely_terminates(tb_value_block(tb_expr(HirExprKind.Block(ret_block))))).to_be(true)
+        expect(definitely_terminates(tb_value_block(mixed_match))).to_be(false)
+
+    it "synthesizes non-terminating branch type for If and IfChain with returning branches":
+        step("Synthesize If and IfChain where one branch returns")
+        var ctx = tb_ctx_returning_i64()
+        val ret_block = tb_stmt_block([tb_return(Some(tb_int(0)))])
+        val if_else_ret = tb_expr(HirExprKind.If(tb_bool_lit(true), tb_value_block(tb_int(42)), Some(ret_block)))
+        val res1 = ctx.synthesize_expr(if_else_ret)
+        expect(res1.is_ok()).to_be(true)
+        expect(tb_is_i64(res1.unwrap())).to_be(true)
+
+        val if_then_ret = tb_expr(HirExprKind.If(tb_bool_lit(false), ret_block, Some(tb_value_block(tb_str_lit("ok")))))
+        val res2 = ctx.synthesize_expr(if_then_ret)
+        expect(res2.is_ok()).to_be(true)
+        expect(tb_is_str(res2.unwrap())).to_be(true)
+
+        val chain = tb_expr(HirExprKind.IfChain([
+            tb_if_arm(tb_bool_lit(true), ret_block),
+            tb_if_arm(tb_bool_lit(false), tb_value_block(tb_int(7)))
+        ], Some(ret_block)))
+        val res3 = ctx.synthesize_expr(chain)
+        expect(res3.is_ok()).to_be(true)
+        expect(tb_is_i64(res3.unwrap())).to_be(true)
+
+    it "synthesizes non-terminating arm type for MatchCase regardless of arm order":
+        step("Synthesize MatchCase when first or later arm returns, and when nested If terminates")
+        var ctx = tb_ctx_returning_i64()
+        val ret_block = tb_stmt_block([tb_return(Some(tb_int(0)))])
+        val nested_ret_block = tb_value_block(tb_expr(HirExprKind.If(tb_bool_lit(true), ret_block, Some(ret_block))))
+
+        val m_last_ret = tb_expr(HirExprKind.MatchCase(tb_bool_lit(true), [
+            tb_arm(tb_bool_pat(true), tb_value_block(tb_int(1))),
+            tb_arm(tb_wild_pat(), ret_block)
+        ]))
+        val res1 = ctx.synthesize_expr(m_last_ret)
+        expect(res1.is_ok()).to_be(true)
+        expect(tb_is_i64(res1.unwrap())).to_be(true)
+
+        val m_first_ret = tb_expr(HirExprKind.MatchCase(tb_bool_lit(true), [
+            tb_arm(tb_bool_pat(true), nested_ret_block),
+            tb_arm(tb_wild_pat(), tb_value_block(tb_str_lit("ok")))
+        ]))
+        val res2 = ctx.synthesize_expr(m_first_ret)
+        expect(res2.is_ok()).to_be(true)
+        expect(tb_is_str(res2.unwrap())).to_be(true)
+
+        val m_all_ret = tb_expr(HirExprKind.MatchCase(tb_bool_lit(true), [
+            tb_arm(tb_bool_pat(true), ret_block),
+            tb_arm(tb_wild_pat(), ret_block)
+        ]))
+        val res3 = ctx.synthesize_expr(m_all_ret)
+        expect(res3.is_ok()).to_be(true)
+        expect(tb_is_never(res3.unwrap())).to_be(true)
+
+    it "checks expected type across If, IfChain, and MatchCase with terminating branches":
+        step("Check If, IfChain, MatchCase against expected i64 while preserving mismatch errors")
+        var ctx = tb_ctx_returning_i64()
+        val ret_block = tb_stmt_block([tb_return(Some(tb_int(0)))])
+
+        val if_chk = tb_expr(HirExprKind.If(tb_bool_lit(true), tb_value_block(tb_int(5)), Some(ret_block)))
+        expect(ctx.check_expr(if_chk, tb_i64()).is_ok()).to_be(true)
+
+        val match_chk = tb_expr(HirExprKind.MatchCase(tb_bool_lit(true), [
+            tb_arm(tb_bool_pat(true), ret_block),
+            tb_arm(tb_wild_pat(), tb_value_block(tb_int(9)))
+        ]))
+        expect(ctx.check_expr(match_chk, tb_i64()).is_ok()).to_be(true)
+
+        val match_all_ret = tb_expr(HirExprKind.MatchCase(tb_bool_lit(true), [
+            tb_arm(tb_bool_pat(true), ret_block),
+            tb_arm(tb_wild_pat(), ret_block)
+        ]))
+        expect(ctx.check_expr(match_all_ret, tb_i64()).is_ok()).to_be(true)
+
+        val ret_str_block = tb_stmt_block([tb_return(Some(tb_str_lit("err")))])
+        var str_fn_ctx = HmInferContext.new()
+        str_fn_ctx.current_return_type = Some(tb_str())
+        val cross_if = tb_expr(HirExprKind.If(tb_bool_lit(true), tb_value_block(tb_int(5)), Some(ret_str_block)))
+        expect(str_fn_ctx.check_expr(cross_if, tb_i64()).is_ok()).to_be(true)
+        val cross_match = tb_expr(HirExprKind.MatchCase(tb_bool_lit(true), [
+            tb_arm(tb_bool_pat(true), ret_str_block),
+            tb_arm(tb_wild_pat(), tb_value_block(tb_int(9)))
+        ]))
+        expect(str_fn_ctx.check_expr(cross_match, tb_i64()).is_ok()).to_be(true)
+        val block_never = tb_expr(HirExprKind.Block(ret_str_block))
+        expect(str_fn_ctx.check_expr(block_never, tb_i64()).is_ok()).to_be(true)
+
+        val bad_match = tb_expr(HirExprKind.MatchCase(tb_bool_lit(true), [
+            tb_arm(tb_bool_pat(true), ret_block),
+            tb_arm(tb_wild_pat(), tb_value_block(tb_str_lit("wrong")))
+        ]))
+        expect(ctx.check_expr(bad_match, tb_i64()).is_err()).to_be(true)
+
+        val bad_synth = tb_expr(HirExprKind.MatchCase(tb_bool_lit(true), [
+            tb_arm(tb_bool_pat(true), tb_value_block(tb_int(1))),
+            tb_arm(tb_wild_pat(), tb_value_block(tb_str_lit("wrong")))
+        ]))
+        expect(ctx.synthesize_expr(bad_synth).is_err()).to_be(true)
+
+    it "does not claim termination or Never for single-branch If, guarded MatchCase, or non-exhaustive MatchCase":
+        step("Verify fall-through If and non-exhaustive/guarded MatchCase synthesize Unit and fail non-Unit check")
+        var ctx = tb_ctx_returning_i64()
+        val ret_block = tb_stmt_block([tb_return(Some(tb_int(0)))])
+        val never_inner = tb_value_block(tb_expr(HirExprKind.If(tb_bool_lit(true), ret_block, Some(ret_block))))
+
+        val single_if = tb_expr(HirExprKind.If(tb_bool_lit(true), never_inner, nil))
+        expect(definitely_terminates(tb_value_block(single_if))).to_be(false)
+        val single_if_ty = ctx.synthesize_expr(single_if)
+        expect(single_if_ty.is_ok()).to_be(true)
+        expect(tb_is_unit(single_if_ty.unwrap())).to_be(true)
+        expect(ctx.check_expr(single_if, tb_i64()).is_err()).to_be(true)
+
+        val non_exhaustive = tb_expr(HirExprKind.MatchCase(tb_bool_lit(true), [
+            tb_arm(tb_bool_pat(true), ret_block)
+        ]))
+        expect(definitely_terminates(tb_value_block(non_exhaustive))).to_be(false)
+        val non_exh_ty = ctx.synthesize_expr(non_exhaustive)
+        expect(non_exh_ty.is_ok()).to_be(true)
+        expect(tb_is_unit(non_exh_ty.unwrap())).to_be(true)
+        expect(ctx.check_expr(non_exhaustive, tb_i64()).is_err()).to_be(true)
+
+        val guarded = tb_expr(HirExprKind.MatchCase(tb_bool_lit(true), [
+            HirMatchArm(pattern: tb_wild_pat(), has_guard: true, guard: tb_bool_lit(true), body: ret_block, span: tb_sp())
+        ]))
+        expect(definitely_terminates(tb_value_block(guarded))).to_be(false)
+        val guarded_ty = ctx.synthesize_expr(guarded)
+        expect(guarded_ty.is_ok()).to_be(true)
+        expect(tb_is_unit(guarded_ty.unwrap())).to_be(true)
+        expect(ctx.check_expr(guarded, tb_i64()).is_err()).to_be(true)
+
+        val bool_exhaustive = tb_expr(HirExprKind.MatchCase(tb_bool_lit(true), [
+            tb_arm(tb_bool_pat(true), ret_block),
+            tb_arm(tb_bool_pat(false), ret_block)
+        ]))
+        expect(definitely_terminates(tb_value_block(bool_exhaustive))).to_be(true)
+        val bool_exh_ty = ctx.synthesize_expr(bool_exhaustive)
+        expect(bool_exh_ty.is_ok()).to_be(true)
+        expect(tb_is_never(bool_exh_ty.unwrap())).to_be(true)
+        expect(ctx.check_expr(bool_exhaustive, tb_i64()).is_ok()).to_be(true)
+
+        val named_enum_ty = HirType(kind: HirTypeKind.Named(SymbolId(id: 99), []), span: tb_sp())
+        val custom_some_pat = HirPattern(
+            kind: HirPatternKind.Enum(named_enum_ty, "Some", Some(HirPatternPayload.Tuple([tb_wild_pat()]))),
+            has_type_: false, type_: tb_err_ty(), span: tb_sp()
+        )
+        val custom_none_pat = HirPattern(
+            kind: HirPatternKind.Enum(named_enum_ty, "None", nil),
+            has_type_: false, type_: tb_err_ty(), span: tb_sp()
+        )
+        val custom_arms = [
+            tb_arm(custom_some_pat, ret_block),
+            tb_arm(custom_none_pat, ret_block)
+        ]
+        val is_may_fall_through = match classify_match_arm_coverage(custom_arms):
+            case MatchTerminationStatus.MayFallThrough: true
+            case MatchTerminationStatus.Exhaustive: false
+        expect(is_may_fall_through).to_be(true)

@@ -159,9 +159,10 @@ impl HmInferContext:
 
                         match then_result:
                             case Ok(then_ty):
-                                match self.subsume(then_ty, expected):
-                                    case Err(e): return Err(e)
-                                    case _: pass
+                                if not then_terminates:
+                                    match self.subsume(then_ty, expected):
+                                        case Err(e): return Err(e)
+                                        case _: pass
                                 if else_.?:
                                     # Push narrowing scope with negated facts for else-branch
                                     self.narrowing.push_scope()
@@ -182,13 +183,17 @@ impl HmInferContext:
 
                                     match else_result:
                                         case Ok(else_ty):
-                                            self.subsume(else_ty, expected)
+                                            if else_terminates:
+                                                Ok(())
+                                            else:
+                                                self.subsume(else_ty, expected)
                                         case Err(e): Err(e)
                                 else:
                                     if then_terminates:
                                         val negated = negate_facts(narrowing_facts)
                                         self._add_immutable_facts(negated)
-                                    Ok(())
+                                    val unit_ty = HirType(kind: HirTypeKind.Unit, span: span)
+                                    self.subsume(unit_ty, expected)
                             case Err(e): Err(e)
                     case Err(e): Err(e)
 
@@ -216,8 +221,8 @@ impl HmInferContext:
                     val arm_ty = match arm_result:
                         case Ok(found_arm_ty): found_arm_ty
                         case Err(e): return Err(e)
-                    self.subsume(arm_ty, expected)?
                     if not arm_terminates:
+                        self.subsume(arm_ty, expected)?
                         var arm_path: [NarrowingFact] = []
                         for fact in false_facts:
                             arm_path = arm_path.push(fact)
@@ -240,8 +245,8 @@ impl HmInferContext:
                     val else_ty = match else_result:
                         case Ok(found_else_ty): found_else_ty
                         case Err(e): return Err(e)
-                    self.subsume(else_ty, expected)?
                     if not else_terminates:
+                        self.subsume(else_ty, expected)?
                         surviving_paths = surviving_paths.push(false_facts)
                 else:
                     surviving_paths = surviving_paths.push(false_facts)
@@ -255,6 +260,7 @@ impl HmInferContext:
             case MatchCase(scrutinee, arms):
                 match self.infer_expr(scrutinee, InferMode.Synthesize):
                     case Ok(scrut_ty):
+                        var has_value_arm = false
                         for arm in arms:
                             val typed_arm: HirMatchArm = arm
                             match self.infer_pattern(typed_arm.pattern, scrut_ty):
@@ -269,13 +275,23 @@ impl HmInferContext:
                                             case Err(e): return Err(e)
                                             case _: pass
                                     case Err(e): return Err(e)
+                            val arm_terminates = definitely_terminates(typed_arm.body)
                             match self.infer_block(typed_arm.body):
                                 case Ok(arm_type):
-                                    match self.subsume(arm_type, expected):
-                                        case Ok(_): pass
-                                        case Err(e): return Err(e)
+                                    if not arm_terminates:
+                                        has_value_arm = true
+                                        match self.subsume(arm_type, expected):
+                                            case Ok(_): pass
+                                            case Err(e): return Err(e)
                                 case Err(e): return Err(e)
-                        Ok(())
+                        if has_value_arm:
+                            return Ok(())
+                        match classify_match_arm_coverage(arms):
+                            case MatchTerminationStatus.Exhaustive:
+                                Ok(())
+                            case MatchTerminationStatus.MayFallThrough:
+                                val unit_ty = HirType(kind: HirTypeKind.Unit, span: span)
+                                self.subsume(unit_ty, expected)
                     case Err(e): Err(e)
 
             # Tuple: propagate expected element types
@@ -383,6 +399,11 @@ impl HmInferContext:
         For now, this is equivalent to unification. Can be extended for
         variance-aware subtyping in the future.
         """
+        val resolved_inferred = self.resolve(inferred)
+        match resolved_inferred.kind:
+            case HirTypeKind.Never:
+                return Ok(())
+            case _: ()
         match self.unify(inferred, expected):
             case Ok(_): Ok(())
             # Unification reports its left operand first. Subsumption passes
@@ -535,6 +556,13 @@ impl HmInferContext:
                     case Err(e): Err(e)
             case _:
                 Ok(HirType(kind: HirTypeKind.Unit, span: span))
+
+    me _infer_block_expr(block: HirBlock, span: Span) -> Result<HirType, TypeInferError>:
+        """Infer a block expression and return Never when it definitely terminates."""
+        val block_ty = self.infer_block(block)?
+        if definitely_terminates(block):
+            return Ok(HirType(kind: HirTypeKind.Never, span: span))
+        Ok(block_ty)
 
     # =========================================================================
     # Type Inference (Algorithm W) - Synthesis Implementation
@@ -861,9 +889,16 @@ impl HmInferContext:
                                                 # Else always returns, so then facts apply after if
                                                 self._add_immutable_facts(narrowing_facts)
 
-                                            match self.unify(then_ty, else_ty):
-                                                case Err(e): Err(e)
-                                                case _: Ok(self.resolve(then_ty))
+                                            if then_terminates and else_terminates:
+                                                Ok(HirType(kind: HirTypeKind.Never, span: span))
+                                            elif then_terminates:
+                                                Ok(self.resolve(else_ty))
+                                            elif else_terminates:
+                                                Ok(self.resolve(then_ty))
+                                            else:
+                                                match self.unify(then_ty, else_ty):
+                                                    case Err(e): Err(e)
+                                                    case _: Ok(self.resolve(then_ty))
                                         case Err(e): Err(e)
                                 else:
                                     # No else branch. If then-branch terminates,
@@ -871,7 +906,7 @@ impl HmInferContext:
                                     if then_terminates:
                                         val negated = negate_facts(narrowing_facts)
                                         self._add_immutable_facts(negated)
-                                    Ok(self.resolve(then_ty))
+                                    Ok(HirType(kind: HirTypeKind.Unit, span: span))
                             case Err(e): Err(e)
                     case Err(e): Err(e)
 
@@ -901,12 +936,12 @@ impl HmInferContext:
                     val arm_ty = match arm_result:
                         case Ok(found_arm_ty): found_arm_ty
                         case Err(e): return Err(e)
-                    if has_result:
-                        self.unify(result_ty, arm_ty)?
-                    else:
-                        result_ty = arm_ty
-                        has_result = true
                     if not arm_terminates:
+                        if has_result:
+                            self.unify(result_ty, arm_ty)?
+                        else:
+                            result_ty = arm_ty
+                            has_result = true
                         var arm_path: [NarrowingFact] = []
                         for fact in false_facts:
                             arm_path = arm_path.push(fact)
@@ -929,16 +964,19 @@ impl HmInferContext:
                     val else_ty = match else_result:
                         case Ok(found_else_ty): found_else_ty
                         case Err(e): return Err(e)
-                    if has_result:
-                        self.unify(result_ty, else_ty)?
-                    else:
-                        result_ty = else_ty
-                        has_result = true
                     if not else_terminates:
+                        if has_result:
+                            self.unify(result_ty, else_ty)?
+                        else:
+                            result_ty = else_ty
+                            has_result = true
                         surviving_paths = surviving_paths.push(false_facts)
                     if surviving_paths.len() == 1:
                         self._add_immutable_facts(surviving_paths[0])
-                    Ok(self.resolve(result_ty))
+                    if has_result:
+                        Ok(self.resolve(result_ty))
+                    else:
+                        Ok(HirType(kind: HirTypeKind.Never, span: span))
                 else:
                     surviving_paths = surviving_paths.push(false_facts)
                     if surviving_paths.len() == 1:
@@ -980,7 +1018,8 @@ impl HmInferContext:
             case MatchCase(scrutinee, arms):
                 match self.synthesize_expr(scrutinee):
                     case Ok(scrut_ty):
-                        val result_ty = self.fresh_var(span)
+                        var result_ty = self.fresh_var(span)
+                        var has_result = false
                         for raw_arm in arms:
                             val arm: HirMatchArm = raw_arm
                             match self.infer_pattern(arm.pattern, scrut_ty):
@@ -995,13 +1034,26 @@ impl HmInferContext:
                                             case Err(e): return Err(e)
                                             case _: pass
                                     case Err(e): return Err(e)
+                            val arm_terminates = definitely_terminates(arm.body)
                             match self.infer_block(arm.body):
                                 case Ok(arm_ty):
-                                    match self.unify(result_ty, arm_ty):
-                                        case Err(e): return Err(e)
-                                        case _: pass
+                                    if not arm_terminates:
+                                        if has_result:
+                                            match self.unify(result_ty, arm_ty):
+                                                case Err(e): return Err(e)
+                                                case _: pass
+                                        else:
+                                            result_ty = arm_ty
+                                            has_result = true
                                 case Err(e): return Err(e)
-                        Ok(self.resolve(result_ty))
+                        if has_result or arms.is_empty():
+                            Ok(self.resolve(result_ty))
+                        else:
+                            match classify_match_arm_coverage(arms):
+                                case MatchTerminationStatus.Exhaustive:
+                                    Ok(HirType(kind: HirTypeKind.Never, span: span))
+                                case MatchTerminationStatus.MayFallThrough:
+                                    Ok(HirType(kind: HirTypeKind.Unit, span: span))
                     case Err(e): Err(e)
 
             # Range expressions
@@ -1042,21 +1094,21 @@ impl HmInferContext:
             # the whole expression died as "unsupported expression kind: Block"
             # at span 0:0 and never reached the nested E-TYPE-NIL-COMPARE check.
             case Block(block):
-                self.infer_block(block)
+                self._infer_block_expr(block, span)
 
             # `unsafe(capabilities: [...]):` is a normal block expression whose
             # value is its tail; the capability list only feeds effect/safety
             # validation. Without this arm `bin/simple check` rejected every
             # unsafe block (bug unsafe_block_expression_rhs_2026-08-22).
             case UnsafeBlock(unsafe_body):
-                self.infer_block(unsafe_body)
+                self._infer_block_expr(unsafe_body, span)
 
             # `loss{ ... }` and `nograd{ ... }` are block expressions too; their
             # value is the tail.
             case LossBlock(loss_body):
-                self.infer_block(loss_body)
+                self._infer_block_expr(loss_body, span)
             case NogradBlock(nograd_body):
-                self.infer_block(nograd_body)
+                self._infer_block_expr(nograd_body, span)
 
             # Control transfer: `return expr` and bare `return`.
             case Return(value):

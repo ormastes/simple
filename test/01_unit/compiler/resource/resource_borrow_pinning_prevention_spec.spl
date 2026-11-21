@@ -1,0 +1,61 @@
+"""
+## Purpose and audience
+Prevention guard for `#5270` (`BorrowGraph.record_move` + foreign-call borrow pinning) ensuring consume-while-borrowed errors trigger for both `BorrowGraph.record_move` and NLL+foreign-call pinning while valid NLL dead borrows stay accepted.
+Audience: compiler engineers maintaining `src/compiler/55.borrow/borrow_check/`.
+"""
+# @req: REQ-COMPILER-BORROW-5270 — record_move and foreign-call borrow pinning prevent premature resource consumption.
+
+use std.spec.*
+use compiler.borrow.borrow_check.borrow_graph.{BorrowGraph, BorrowKind, Place}
+use compiler.borrow.borrow_check.mod.{BorrowChecker}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_support.{MirCallOrigin, MirSignature}
+use compiler.mir.mir_types.{MirTypeKind, MirConstValue}
+
+fn bp_inst(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: nil)
+
+fn bp_foreign_target() -> MirOperand:
+    val signature = MirSignature(params: [MirType.i64()], return_type: MirType.unit(), is_variadic: false, params_known: true)
+    MirOperand(
+        kind: MirOperandKind.Const(MirConstValue.Str("ext_pin"), MirType(kind: MirTypeKind.FuncPtr(signature))),
+        call_origin: MirCallOrigin.Foreign
+    )
+
+fn bp_body(insts: [MirInst], strict: bool = false) -> MirBody:
+    val block = MirBlock(id: BlockId.new(0), label: nil, instructions: insts, terminator: MirTerminator.Ret(nil))
+    MirBody(name: "pin_prevention", blocks: [block], locals: [], arg_count: 0, return_ty: MirType.unit(), nogc_strict: strict, short_call_contracts: {})
+
+describe "borrow pinning prevention (#5270)":
+    it "rejects direct record_move against shared or mutable borrows without flagging clean reads":
+        step("Record shared borrow at point 1, allow read at point 1, reject move at point 1")
+        var graph = BorrowGraph.create()
+        val target = Place.local(10)
+        val _b = graph.record_borrow(1, target, BorrowKind.Shared)
+        graph.record_use(1, target)
+        expect(graph.errors.len()).to_equal(0)
+        graph.record_move(1, target)
+        expect(graph.errors.len()).to_equal(1)
+        expect(graph.errors[0].message).to_contain("Cannot consume borrowed value")
+
+    it "rejects dropping an owner before a moved-reference foreign call":
+        step("Create ref l1 to l0, alias to l2 via Move, drop l0, then pass l2 to MirCallOrigin.Foreign")
+        val l0 = LocalId(id: 0)
+        val l1 = LocalId(id: 1)
+        val l2 = LocalId(id: 2)
+        val place = MirPlace(local: l0, projection: [])
+        val insts = [
+            bp_inst(MirInstKind.Ref(l1, MirBorrowKind.Shared, place)),
+            bp_inst(MirInstKind.Move(l2, l1)),
+            bp_inst(MirInstKind.Drop(l0)),
+            bp_inst(MirInstKind.Call(nil, bp_foreign_target(), [MirOperand.copy(l2)]))
+        ]
+        var checker = BorrowChecker.create()
+        checker.check_function(bp_body(insts))
+        var msgs: [text] = []
+        for e in checker.errors:
+            msgs = msgs.push(e.message)
+        val combined = msgs.join("\n")
+        expect(checker.errors.len()).to_be_greater_than(0)
+        expect(combined).to_contain("because it is borrowed")
+        expect(combined).to_contain("short borrow escapes")
