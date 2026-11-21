@@ -1,0 +1,47 @@
+# @cover src/os/kernel/boot/riscv_services.spl 80%
+"""
+## Purpose and audience
+For SimpleOS RISC-V bring-up engineers: pins the `init_riscv_services_impl`
+signature to the identifiers its body reads, so a stale merge cannot drop the
+`enable_display_storage` parameter while leaving its use behind (e274cd33719
+did exactly that; the riscv32 kernel failed LLVM codegen with
+"global load referenced undeclared symbol `enable_display_storage`").
+## Operator workflow
+`bin/simple test test/01_unit/os/riscv_services_signature_spec.spl`
+## Compatibility and limitations
+Static source-contract check; no emulator needed.
+## Verification guidance and troubleshooting
+A failure names the missing marker; confirm the wrapper/parameter in
+`src/os/kernel/boot/riscv_services.spl` before editing the assertion.
+"""
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn services_src() -> text:
+    rt_file_read_text("src/os/kernel/boot/riscv_services.spl") ?? ""
+
+describe "RISC-V services init signature contract":
+    it "declares enable_display_storage as an impl parameter because the body branches on it":
+        val src = services_src()
+        expect(src).to_contain("if enable_display_storage == 0:")
+        expect(src).to_contain("fn init_riscv_services_impl(enable_network: i64, enable_display_storage: i64) -> i64:")
+
+    it "keeps every public wrapper that callers import":
+        val src = services_src()
+        expect(src).to_contain("init_riscv_services_impl(0, 1)")
+        expect(src).to_contain("init_riscv_services_impl(1, 1)")
+        expect(src).to_contain("pub fn init_riscv_network_service_only() -> i64:")
+        expect(src).to_contain("init_riscv_services_impl(1, 0)")
+
+    it "calls only helpers that exist after the e274cd33719 rewind":
+        val src = services_src()
+        expect(src.index_of("_sffi_log_raw_println(")).to_equal(-1)  # oracle: -1 = absent; wrapper was deleted, use log_raw_println
+        expect(src.index_of("_sffi_net_stats(")).to_equal(-1)  # oracle: -1 = absent; use the declared rt_net_stats extern
+        expect(src.index_of("= net_socket_facade_link_anchor(")).to_equal(-1)  # oracle: -1 = absent; only rt_net_socket_facade_link_anchor is imported
+        expect(src).to_contain("= rt_net_socket_facade_link_anchor()")
+        expect(src).to_contain("_decode_riscv_status(rt_net_stats())")
+
+    it "keeps the rv64 probe import resolvable":
+        val probe = rt_file_read_text("src/os/rv64_probe.spl") ?? ""
+        expect(probe).to_contain("init_riscv_network_service_only")
+        expect(services_src()).to_contain("fn init_riscv_network_service_only")
