@@ -3,6 +3,12 @@
 Status: implemented, opt-in, **not yet executed** (no compiler was rebuilt or
 run for this change; see "Unverified").
 
+Launch note (2026-11-21): compilers built before `SIMPLE_MIR_FORK_WORKERS`
+joined the HIR worker environment allowlist (`worker_hir_profile_v1.spl`)
+refuse the HIR pool when it is set ("unsupported HIR worker environment key")
+and lower HIR in-process, so the experiment needs a Stage 2 built from a tree
+that carries that allowlist row.
+
 ## Problem
 
 Each MIR shard worker is a fresh process
