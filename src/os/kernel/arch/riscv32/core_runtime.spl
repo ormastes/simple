@@ -17,7 +17,10 @@
 #   string: {u32 type=1, u32 size, u32 len, data[len], NUL}   (data at +12)
 #   array:  {u32 type=2, u32 size, u32 len, u32 cap, u32 data_ptr}, 4-byte words
 #   values: int = v << 3, heap = ptr | 1, nil = 3, true = 11, false = 19.
-# Typed-words arrays hold raw (packed) 32-bit words.
+# Typed-words arrays hold raw (packed) 32-bit words. Assumption: no array
+# producer (rt_array_new) is linked on riscv32 yet; the array layout above is
+# the contract a future producer must follow (until then every array ref
+# fails the kind check and reads return nil/0, writes return false).
 #
 # Heap: bump allocator over the rv32 direct-heap policy window
 # (boot_layout.spl rv32_direct_heap_start/size = 0x87000000 + 16 MiB, the same
@@ -76,7 +79,7 @@ fn _rv32_heap_obj(value: i64, kind: i64) -> i64:
     if (value & 7) != 1:
         return 0
     val ptr: i64 = value & -8
-    if not rv32_rt_ram_ref(ptr):
+    if rv32_rt_ram_ref(ptr) == 0:
         return 0
     if _rv32_ld32(ptr) != kind:
         return 0
@@ -144,7 +147,7 @@ fn rt_alloc(size: i64) -> i64:
     if size <= 0:
         return 0
     val bytes: i64 = rv32_rt_align8(size)
-    if not rv32_rt_heap_fits(_rv32_rt_heap_used, bytes, 0x01000000):
+    if rv32_rt_heap_fits(_rv32_rt_heap_used, bytes, 0x01000000) == 0:
         return 0
     val ptr: i64 = 0x87000000 + _rv32_rt_heap_used
     _rv32_rt_heap_used = _rv32_rt_heap_used + bytes
@@ -196,10 +199,16 @@ fn rt_raw_i64_to_string(raw: i64) -> i64:
 fn rt_string_concat(left: i64, right: i64) -> i64:
     val a: i64 = _rv32_heap_obj(rt_value_to_string(left), 1)
     val b: i64 = _rv32_heap_obj(rt_value_to_string(right), 1)
-    if a == 0 or b == 0:
+    if a == 0:
         return 3
-    val la: i64 = _rv32_ld32(a + 8)
-    val lb: i64 = _rv32_ld32(b + 8)
+    if b == 0:
+        return 3
+    var la: i64 = _rv32_ld32(a + 8)
+    var lb: i64 = _rv32_ld32(b + 8)
+    if la < 0:
+        la = 0
+    if lb < 0:
+        lb = 0
     val ptr: i64 = _rv32_str_alloc(la + lb)
     if ptr == 0:
         return 3
@@ -234,15 +243,16 @@ fn rt_array_set_text(array: i64, index: i64, value: i64) -> bool:
 @cfg(riscv32)
 @no_mangle
 fn rt_index_set(collection: i64, index: i64, value: i64) -> bool:
-    """Index arrives as a RuntimeValue: untag an int-tagged index."""
-    var idx: i64 = index
-    if (index & 7) == 0:
-        idx = index >> 3
-    rt_array_set_text(collection, idx, value)
+    """Index arrives as a RuntimeValue: only an int-tagged index is accepted."""
+    if (index & 7) != 0:
+        return false
+    rt_array_set_text(collection, index >> 3, value)
 
 @cfg(riscv32)
 @no_mangle
 fn rt_value_u64(bits: i64) -> i64:
+    # Known limit: rv32 has no boxed-u64 heap kind, so this is a tag-int and
+    # keeps only the low 29 bits (values >= 0x20000000 are truncated).
     bits << 3
 
 @cfg(riscv32)
