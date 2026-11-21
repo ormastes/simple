@@ -826,6 +826,59 @@ SPL_HOSTED_UNAVAILABLE_WEAK bool rt_sdl2_present_rgba(int64_t window_handle,
 SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_hosted_select_surface(void) {
     return -2;
 }
+/* Counted-text access for values handed to C. Read text by its byte LENGTH,
+ * never up to a NUL. In the mixed link of a seed-built compiler this file is
+ * a supplement behind the Rust simple_runtime: rt_string_len /
+ * rt_string_data / rt_interp_cstr / rt_array_get_text resolve to the Rust
+ * owner, whose alloc_runtime_string stores header + len with NO trailing NUL
+ * (value/sffi/package.rs), and this file's private rt_core_as_string* reject
+ * every Rust string. Treating rt_interp_cstr as a C string there reads heap
+ * slack past len: the native codegen pool's "/bin/sh -c '... 2>&1'" reached
+ * sh as "... 2>&1}}". A value with no counted length (a raw char* from a
+ * bootstrap call site) keeps the NUL-terminated reading.
+ * See doc/08_tracking/bug/process_spawn_value_reads_past_counted_text_2026-11-21.md */
+
+/* Borrowed view: 1 with (*data, *len) set, 0 for nil / no text. */
+static int rt_text_view_abi(int64_t value, const char** data, size_t* len) {
+    int64_t counted = rt_string_len(value);
+    if (counted >= 0) {
+        const uint8_t* bytes = rt_string_data(value);
+        if (!bytes && counted != 0) return 0;
+        *data = bytes ? (const char*)bytes : "";
+        *len = (size_t)counted;
+        return 1;
+    }
+    const char* raw = rt_interp_cstr(value);
+    if (!raw || (uintptr_t)raw < 0x10000) return 0;
+    *data = raw;
+    *len = strlen(raw);
+    return 1;
+}
+
+/* Owned NUL-terminated copy for a NUL-dependent consumer (exec, open, dlopen,
+ * getenv, inet_pton, ...). The caller frees it. NULL = no text or OOM. */
+static char* rt_text_cstr_dup(int64_t value) {
+    const char* data;
+    size_t len;
+    if (!rt_text_view_abi(value, &data, &len) || len == SIZE_MAX) return NULL;
+    char* out = (char*)rt_observed_malloc_v1(len + 1);
+    if (!out) return NULL;
+    if (len) memcpy(out, data, len);
+    out[len] = '\0';
+    return out;
+}
+
+/* Copy into a caller buffer instead of the heap: NULL when the text is
+ * missing or does not fit (len >= cap). */
+static const char* rt_text_cstr_into(int64_t value, char* buf, size_t cap) {
+    const char* data;
+    size_t len;
+    if (!rt_text_view_abi(value, &data, &len) || len >= cap) return NULL;
+    if (len) memcpy(buf, data, len);
+    buf[len] = '\0';
+    return buf;
+}
+
 #if defined(SIMPLE_CORE_C_STANDALONE)
 bool rt_is_interpreter_runtime(void) {
     return false;
@@ -884,9 +937,7 @@ int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags,
    to open(2) unchanged; Windows translates them onto _wopen and returns a CRT
    descriptor, which is what spl_windows_mmap_raw maps. Failure is -1 with
    errno set by the CRT. */
-int64_t rt_open_fd(const char* path, int64_t flags, int64_t mode) {
-    const char* p = rt_interp_cstr((int64_t)(uintptr_t)path);
-    if (!p) return -1;
+static int64_t rt_open_fd_cstr(const char* p, int64_t flags, int64_t mode) {
 #if defined(_WIN32)
     (void)mode; /* Rust's OpenOptions ignores the POSIX mode on Windows too. */
     int access = (int)(flags & 0x3);
@@ -906,6 +957,16 @@ int64_t rt_open_fd(const char* path, int64_t flags, int64_t mode) {
 #else
     return (int64_t)open(p, (int)flags, (unsigned int)mode);
 #endif
+}
+
+int64_t rt_open_fd(const char* path, int64_t flags, int64_t mode) {
+    char* p = rt_text_cstr_dup((int64_t)(uintptr_t)path);
+    if (!p) return -1;
+    int64_t fd = rt_open_fd_cstr(p, flags, mode);
+    int saved = errno;
+    free(p);
+    errno = saved;
+    return fd;
 }
 
 int64_t rt_close_fd(int64_t fd) {
@@ -5935,17 +5996,13 @@ int64_t rt_text_eq_any(int64_t left, int64_t right) {
         a = left_string->data;
         a_len = (size_t)left_string->len;
     } else {
-        a = rt_interp_cstr(left);
-        if (!a) return 0;
-        a_len = strlen(a);
+        if (!rt_text_view_abi(left, &a, &a_len)) return 0;
     }
     if (right_string) {
         b = right_string->data;
         b_len = (size_t)right_string->len;
     } else {
-        b = rt_interp_cstr(right);
-        if (!b) return 0;
-        b_len = strlen(b);
+        if (!rt_text_view_abi(right, &b, &b_len)) return 0;
     }
     if (a_len != b_len) return 0;
     return a_len == 0 || memcmp(a, b, a_len) == 0;
@@ -5970,12 +6027,16 @@ int64_t rt_native_neq(int64_t left, int64_t right) {
 int64_t rt_text_cmp_any(int64_t left, int64_t right) {
     RtCoreString* left_string = rt_core_as_string_or_data(left);
     RtCoreString* right_string = rt_core_as_string_or_data(right);
-    const char* a = left_string ? left_string->data : rt_interp_cstr(left);
-    const char* b = right_string ? right_string->data : rt_interp_cstr(right);
-    if (!a) a = "";
-    if (!b) b = "";
-    uint64_t a_len = left_string ? left_string->len : strlen(a);
-    uint64_t b_len = right_string ? right_string->len : strlen(b);
+    const char* a = "";
+    const char* b = "";
+    size_t a_view = 0;
+    size_t b_view = 0;
+    if (left_string) { a = left_string->data; a_view = (size_t)left_string->len; }
+    else (void)rt_text_view_abi(left, &a, &a_view);
+    if (right_string) { b = right_string->data; b_view = (size_t)right_string->len; }
+    else (void)rt_text_view_abi(right, &b, &b_view);
+    uint64_t a_len = (uint64_t)a_view;
+    uint64_t b_len = (uint64_t)b_view;
     if (a_len > SIZE_MAX || b_len > SIZE_MAX)
         spl_panic("text compare: size overflow");
     size_t common = (size_t)(a_len < b_len ? a_len : b_len);
@@ -8267,9 +8328,16 @@ int64_t rt_string_to_int_any(int64_t value) {
         buf[n] = '\0';
         return (int64_t)strtoll(buf, NULL, 10);
     }
-    const char* raw = rt_interp_cstr(value);
-    if (!raw) return 0;
-    return (int64_t)strtoll(raw, NULL, 10);
+    /* Not a C-registered string: a Rust-owned string in the mixed link (no NUL
+     * at len) or a raw char*. Bound the read by the counted length. */
+    const char* data;
+    size_t len;
+    if (!rt_text_view_abi(value, &data, &len)) return 0;
+    char buf[64];
+    size_t n = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
+    if (n) memcpy(buf, data, n);
+    buf[n] = '\0';
+    return (int64_t)strtoll(buf, NULL, 10);
 }
 
 /* Task #118: sibling of rt_string_to_int() with the canonical `int(text)`
@@ -9495,12 +9563,18 @@ char* rt_strcat(const char* a, const char* b) {
 int64_t rt_strcat_tagged(int64_t a, int64_t b) {
     RtCoreString* left_string = rt_core_as_string_or_data(a);
     RtCoreString* right_string = rt_core_as_string_or_data(b);
-    const char* left = left_string ? (const char*)left_string->data : rt_interp_cstr(a);
-    const char* right = right_string ? (const char*)right_string->data : rt_interp_cstr(b);
-    /* Tagged text is length-delimited and may contain NUL bytes. Raw C-string
-     * operands retain the existing pointer/low-value fallback semantics. */
-    uint64_t left_len = left_string ? left_string->len : (left ? strlen(left) : 0);
-    uint64_t right_len = right_string ? right_string->len : (right ? strlen(right) : 0);
+    /* Tagged text is length-delimited and may contain NUL bytes; a non-C
+     * operand (Rust-owned string or raw char*) goes through the counted view. */
+    const char* left = "";
+    const char* right = "";
+    size_t left_view = 0;
+    size_t right_view = 0;
+    if (left_string) { left = (const char*)left_string->data; left_view = (size_t)left_string->len; }
+    else (void)rt_text_view_abi(a, &left, &left_view);
+    if (right_string) { right = (const char*)right_string->data; right_view = (size_t)right_string->len; }
+    else (void)rt_text_view_abi(b, &right, &right_view);
+    uint64_t left_len = (uint64_t)left_view;
+    uint64_t right_len = (uint64_t)right_view;
     return rt_core_concat_bytes_v1((const uint8_t*)left, left_len,
                                    (const uint8_t*)right, right_len);
 }
@@ -11687,9 +11761,10 @@ static int simple_dynload_unique_snapshot_linux_v1(int snapshot) {
 
 int64_t spl_dynlib_snapshot_linux(int64_t path_value) {
 #if defined(__linux__)
-    const char* path = rt_interp_cstr(path_value);
+    char* path = rt_text_cstr_dup(path_value);
     if (!path) return -1;
     int source = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    free(path);
     if (source < 0) return -1;
     struct stat source_stat;
     if (fstat(source, &source_stat) != 0 || !S_ISREG(source_stat.st_mode) ||
@@ -11743,14 +11818,16 @@ int64_t spl_dlopen(int64_t path_value) {
 int64_t spl_dlopen_checked(int64_t path_value, int64_t* out_handle) {
     if (!out_handle) return 1;
     *out_handle = 0;
-    const char* path = rt_interp_cstr(path_value);
-    if (!path || !path[0]) return 1;
+    char* path = rt_text_cstr_dup(path_value);
+    if (!path || !path[0]) { free(path); return 1; }
 #ifdef _WIN32
     HMODULE handle = runtime_dynload_open_utf8(path);
+    free(path);
     if (!handle) return 2;
     *out_handle = (int64_t)(intptr_t)handle;
 #else
     void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    free(path);
     if (!handle) return 2;
     *out_handle = (int64_t)(intptr_t)handle;
 #endif
@@ -11765,14 +11842,16 @@ int64_t spl_dlsym(int64_t handle, int64_t name_value) {
 int64_t spl_dlsym_checked(int64_t handle, int64_t name_value, int64_t* out_symbol) {
     if (!out_symbol) return 1;
     *out_symbol = 0;
-    const char* name = rt_interp_cstr(name_value);
-    if (!handle || !name || !name[0]) return 1;
+    char* name = rt_text_cstr_dup(name_value);
+    if (!handle || !name || !name[0]) { free(name); return 1; }
 #ifdef _WIN32
     FARPROC symbol = GetProcAddress((HMODULE)(intptr_t)handle, name);
+    free(name);
     if (!symbol) return 3;
     *out_symbol = (int64_t)(intptr_t)symbol;
 #else
     void* symbol = dlsym((void*)(intptr_t)handle, name);
+    free(name);
     if (!symbol) return 3;
     *out_symbol = (int64_t)(intptr_t)symbol;
 #endif
@@ -11782,16 +11861,18 @@ int64_t spl_dlsym_checked(int64_t handle, int64_t name_value, int64_t* out_symbo
 int64_t spl_dlsym_process_checked(int64_t name_value, int64_t* out_symbol) {
     if (!out_symbol) return 1;
     *out_symbol = 0;
-    const char* name = rt_interp_cstr(name_value);
-    if (!name || !name[0]) return 1;
+    char* name = rt_text_cstr_dup(name_value);
+    if (!name || !name[0]) { free(name); return 1; }
 #ifdef _WIN32
     HMODULE process = GetModuleHandleA(NULL);
-    if (!process) return 3;
+    if (!process) { free(name); return 3; }
     FARPROC symbol = GetProcAddress(process, name);
+    free(name);
     if (!symbol) return 3;
     *out_symbol = (int64_t)(intptr_t)symbol;
 #else
     void* symbol = dlsym(NULL, name);
+    free(name);
     if (!symbol) return 3;
     *out_symbol = (int64_t)(intptr_t)symbol;
 #endif
@@ -17488,7 +17569,10 @@ int64_t rt_env_get(const uint8_t* key_ptr, uint64_t key_len) {
 }
 
 int64_t rt_env_get_value(int64_t key) {
-    return rt_env_get_cstr(rt_interp_cstr(key));
+    char* name = rt_text_cstr_dup(key);
+    int64_t result = rt_env_get_cstr(name);
+    free(name);
+    return result;
 }
 
 static atomic_flag rt_lexer_source_lock = ATOMIC_FLAG_INIT;
@@ -18987,9 +19071,18 @@ int64_t rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args
         free(command);
         return -1;
     }
+    /* Each argument is copied by its counted length (rt_text_cstr_dup): a
+     * Rust-owned string has no NUL at len. A missing element stays "". */
     for (int64_t i = 0; i < argc; i++) {
-        const uint8_t* value = rt_string_data(rt_array_get(args, i));
-        argv[i] = value ? (const char*)value : "";
+        char* value = rt_text_cstr_dup(rt_array_get(args, i));
+        if (!value) value = (char*)rt_observed_calloc_v1(1, 1);
+        if (!value) {
+            for (int64_t j = 0; j < i; j++) free((char*)argv[j]);
+            free(argv);
+            free(command);
+            return -1;
+        }
+        argv[i] = value;
     }
 #if defined(_WIN32)
     /* rt_process_spawn_async returns a _spawnvp process HANDLE on Windows, and
@@ -19011,6 +19104,7 @@ int64_t rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args
     int64_t pid = rt_process_spawn_async(command, argv, argc);
     int64_t code = pid <= 0 ? -1 : rt_process_wait(pid, 0);
 #endif
+    for (int64_t i = 0; i < argc; i++) free((char*)argv[i]);
     free(argv);
     free(command);
     return code;
@@ -19050,28 +19144,6 @@ static int64_t* rt_process_result_to_tuple(SplArray* result) {
     return tuple;
 }
 
-/* Process text arguments are copied by their byte LENGTH, never read up to a
- * NUL. In the mixed link of a seed-built compiler this file is a supplement
- * behind the Rust simple_runtime: rt_string_len / rt_string_data /
- * rt_interp_cstr / rt_array_get_text resolve to the Rust owner, whose
- * alloc_runtime_string sizes header + len with NO trailing NUL
- * (value/sffi/package.rs). Reading rt_interp_cstr as a C string ran into heap
- * slack: the native codegen pool's "/bin/sh -c '<llc ...> > job-N.log 2>&1'"
- * reached sh as "... 2>&1}}" and failed. Same class as core_text_dup_abi.
- * A value with no counted length (a raw char* from a bootstrap call site)
- * keeps the NUL-terminated reading. NULL = out of memory or no text at all.
- * See doc/08_tracking/bug/process_spawn_value_reads_past_counted_text_2026-11-21.md */
-static char* rt_process_text_value_dup(int64_t value) {
-    if (rt_string_len(value) >= 0) return core_text_dup_abi(value);
-    const char* raw = rt_interp_cstr(value);
-    if (!raw || (uintptr_t)raw < 0x10000) return NULL;
-    size_t len = strlen(raw);
-    char* out = (char*)rt_observed_malloc_v1(len + 1);
-    if (!out) return NULL;
-    memcpy(out, raw, len + 1);
-    return out;
-}
-
 typedef struct RtProcessValueArgv {
     char* command;
     char** argv;   /* argc entries + NULL terminator, each owned */
@@ -19098,7 +19170,7 @@ static int64_t rt_process_value_argv_build(int64_t cmd, SplArray* args, RtProces
     if (!rt_interp_cstr(cmd)) return -EINVAL;
     int64_t argc = rt_array_len(args);
     if (argc < 0 || (uint64_t)argc > SIZE_MAX / sizeof(char*) - 2) return -E2BIG;
-    pa->command = rt_process_text_value_dup(cmd);
+    pa->command = rt_text_cstr_dup(cmd);
     if (!pa->command) return -ENOMEM;
     pa->argv = (char**)rt_observed_calloc_v1((size_t)argc + 1, sizeof(char*));
     if (!pa->argv) {
@@ -19108,7 +19180,7 @@ static int64_t rt_process_value_argv_build(int64_t cmd, SplArray* args, RtProces
     pa->argc = argc;
     for (int64_t i = 0; i < argc; i++) {
         int64_t item = rt_array_get_text(args, i);
-        char* value = rt_interp_cstr(item) ? rt_process_text_value_dup(item) : NULL;
+        char* value = rt_interp_cstr(item) ? rt_text_cstr_dup(item) : NULL;
         if (!value) value = (char*)rt_observed_calloc_v1(1, 1);
         if (!value) {
             rt_process_value_argv_free(pa);
@@ -19120,7 +19192,7 @@ static int64_t rt_process_value_argv_build(int64_t cmd, SplArray* args, RtProces
 }
 
 int64_t rt_process_run_inherit_value(int64_t cmd, SplArray* args) {
-    char* command = rt_process_text_value_dup(cmd);
+    char* command = rt_text_cstr_dup(cmd);
     if (!command) return rt_process_run_inherit("", 0, args);
     int64_t code = rt_process_run_inherit(command, (uint64_t)strlen(command), args);
     free(command);
@@ -21093,10 +21165,11 @@ static int ws_compat_fcntl(SOCKET s, int command, int argument) {
  * bridge produces (rt_interp_cstr unwrap). Measured on the Windows Stage 2
  * build of avx_server_loadgen: rt_io_tcp_connect received the raw buffer, the
  * tagged-only decode returned NULL, and every connect failed in 0 us before a
- * socket existed. rt_interp_cstr is the runtime's existing tagged-or-raw
- * autodetector (NULL for nil and low words). */
-static const char* rt_extract_cstr(int64_t text_val) {
-    return rt_interp_cstr(text_val);
+ * socket existed. Decoded through the counted view (rt_text_cstr_into): a
+ * Rust-owned string carries no NUL at len, so the bytes are copied into the
+ * caller's buffer. NULL for nil, low words, or text that does not fit. */
+static const char* rt_extract_cstr(int64_t text_val, char* buf, size_t cap) {
+    return rt_text_cstr_into(text_val, buf, cap);
 }
 
 static int rt_parse_addr_port(const char* addr_str, struct sockaddr_in* sa) {
@@ -21134,7 +21207,8 @@ int64_t rt_io_tcp_socket_create(int64_t family) {
 }
 
 int64_t rt_io_tcp_bind(int64_t addr_val) {
-    const char* a = rt_extract_cstr(addr_val);
+    char addr_buf[256];
+    const char* a = rt_extract_cstr(addr_val, addr_buf, sizeof(addr_buf));
     if (!a) return -1;
     struct sockaddr_in sa;
     if (rt_parse_addr_port(a, &sa) < 0) return -1;
@@ -21151,7 +21225,8 @@ int64_t rt_io_tcp_bind(int64_t addr_val) {
 }
 
 bool rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
-    const char* a = rt_extract_cstr(addr_val);
+    char addr_buf[256];
+    const char* a = rt_extract_cstr(addr_val, addr_buf, sizeof(addr_buf));
     if (!a) return 0;
     struct sockaddr_in sa;
     if (rt_parse_addr_port(a, &sa) < 0) return 0;
@@ -21178,7 +21253,8 @@ int64_t rt_io_tcp_accept_timeout(int64_t fd, int64_t ms) {
 }
 
 int64_t rt_io_tcp_connect(int64_t addr_val) {
-    const char* a = rt_extract_cstr(addr_val);
+    char addr_buf[256];
+    const char* a = rt_extract_cstr(addr_val, addr_buf, sizeof(addr_buf));
     if (!a) return -1;
     struct sockaddr_in sa;
     if (rt_parse_addr_port(a, &sa) < 0) return -1;
@@ -21190,7 +21266,8 @@ int64_t rt_io_tcp_connect(int64_t addr_val) {
 
 int64_t rt_io_tcp_connect_timeout(int64_t addr_val, int64_t ms) {
     if (ms <= 0) return -1;
-    const char* address = rt_extract_cstr(addr_val);
+    char addr_buf[256];
+    const char* address = rt_extract_cstr(addr_val, addr_buf, sizeof(addr_buf));
     if (!address) return -1;
     struct sockaddr_in socket_address;
     if (rt_parse_addr_port(address, &socket_address) < 0) return -1;
@@ -21444,7 +21521,8 @@ bool rt_io_tcp_shutdown(int64_t fd, int64_t how) {
  * ================================================================ */
 
 int64_t rt_io_udp_bind(int64_t addr_val) {
-    const char* a = rt_extract_cstr(addr_val);
+    char addr_buf[256];
+    const char* a = rt_extract_cstr(addr_val, addr_buf, sizeof(addr_buf));
     if (!a) return -1;
     struct sockaddr_in sa;
     if (rt_parse_addr_port(a, &sa) < 0) return -1;
@@ -21457,7 +21535,8 @@ int64_t rt_io_udp_bind(int64_t addr_val) {
 }
 
 int64_t rt_io_udp_send_to(int64_t fd, int64_t data_val, int64_t addr_val) {
-    const char* a = rt_extract_cstr(addr_val);
+    char addr_buf[256];
+    const char* a = rt_extract_cstr(addr_val, addr_buf, sizeof(addr_buf));
     if (!a) return -1;
     RtCoreArray* ca = rt_core_array_ptr((SplArray*)(uintptr_t)data_val);
     if (!ca || !(ca->flags & RT_CORE_ARRAY_FLAG_BYTES) || ca->len < 0 ||
@@ -21492,7 +21571,8 @@ int64_t rt_io_udp_recv(int64_t fd, int64_t size) {
 }
 
 bool rt_io_udp_connect(int64_t fd, int64_t addr_val) {
-    const char* a = rt_extract_cstr(addr_val);
+    char addr_buf[256];
+    const char* a = rt_extract_cstr(addr_val, addr_buf, sizeof(addr_buf));
     if (!a) return 0;
     struct sockaddr_in sa;
     if (rt_parse_addr_port(a, &sa) < 0) return 0;
@@ -21530,7 +21610,8 @@ bool rt_io_udp_set_multicast_loop(int64_t fd, bool enabled) {
 
 static bool rt_io_udp_multicast_membership(int64_t fd, int64_t addr_val,
                                            bool join) {
-    const char* address = rt_extract_cstr(addr_val);
+    char addr_buf[256];
+    const char* address = rt_extract_cstr(addr_val, addr_buf, sizeof(addr_buf));
     if (!address) return 0;
     if (strchr(address, ':')) {
         struct ipv6_mreq request;

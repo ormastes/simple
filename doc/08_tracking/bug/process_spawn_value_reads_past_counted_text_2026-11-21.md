@@ -1,6 +1,8 @@
 # C process spawn facades read Rust-owned text past its length (2026-11-21)
 
-**Status:** fixed in source (`src/runtime/runtime_native.c`); takes effect in a
+**Status:** CLOSED for `src/runtime/runtime_native.c` (PR #10636 spawn facades;
+follow-up sweep of every remaining `rt_interp_cstr` site, see "Sweep" below).
+The fix takes effect in a
 compiler only after its runtime is rebuilt (next bootstrap). Binaries built
 before the fix, including the integ22 Stage 2
 (`.../bootstrap-s2probe-integ22/stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`,
@@ -57,8 +59,40 @@ runtime sources:
   `exit=127` — FAIL
 - after: session child `exit=7`, async child `exit=9` — PASS
 
-## Follow-up
+## Sweep (follow-up, closes the record)
 
-`rt_process_run_inherit` still reads its `args` through `rt_string_data` as C
-strings; other `rt_interp_cstr` call sites in `runtime_native.c` that pass text
-to libc have the same exposure in a mixed link and were not swept here.
+Shared helpers in `runtime_native.c`: `rt_text_view_abi` (borrowed counted
+view through the `rt_string_len`/`rt_string_data` ABI, raw `char*` falls back
+to `strlen`), `rt_text_cstr_dup` (owned NUL-terminated copy, caller frees) and
+`rt_text_cstr_into` (copy into a caller buffer). Every `rt_interp_cstr` site at
+`origin/release/1.0.0` 8d850c22c54, classified:
+
+| line | function | consumer | verdict |
+|---|---|---|---|
+| 888 | `rt_open_fd` | `open(2)` / `_wopen` | fixed: `rt_text_cstr_dup` |
+| 4898 | `rt_interp_cstr` | definition | n/a |
+| 5938, 5946 | `rt_text_eq_any` non-C operand | `strlen` -> `memcmp` | fixed: counted view (the `->len` branch was already safe) |
+| 5973, 5974 | `rt_text_cmp_any` non-C operand | `strlen` -> `memcmp` | fixed: counted view |
+| 8270 | `rt_string_to_int_any` raw branch | `strtoll` | fixed: counted view into bounded buffer |
+| 9498, 9499 | `rt_strcat_tagged` non-C operand | `strlen` -> concat | fixed: counted view |
+| 11690 | `spl_dynlib_snapshot_linux` | `open(2)` | fixed: `rt_text_cstr_dup` |
+| 11746 | `spl_dlopen_checked` | `dlopen` | fixed: `rt_text_cstr_dup` |
+| 11768 | `spl_dlsym_checked` | `dlsym` | fixed: `rt_text_cstr_dup` |
+| 11785 | `spl_dlsym_process_checked` | `dlsym` | fixed: `rt_text_cstr_dup` |
+| 17491 | `rt_env_get_value` | `getenv` | fixed: `rt_text_cstr_dup` |
+| 19066 | old spawn helper raw fallback | raw `char*` by contract | already safe; helper replaced by `rt_text_cstr_dup` |
+| 19098, 19111 | spawn argv builder | NULL-presence probe only, never dereferenced | already safe, left |
+| 21099 | `rt_extract_cstr` (8 tcp/udp callers) | `strlen` / `inet_pton` | fixed: `rt_text_cstr_into` 256-byte buffer |
+| (P2) | `rt_process_run_inherit` args | `exec` via `rt_string_data` | fixed: `rt_text_cstr_dup` per arg, freed |
+
+Red/green: `process_spawn_value_counted_text_selfcheck.c` now has one case per
+consumer class (exec x3, open, getenv, dlsym, strtoll, inet). Against the
+pre-sweep runtime: 6 FAIL (`run_inherit exit=2`, `open fd=-1`, `getenv len=-1`,
+`dlsym rc=3`, `int 127`, `udp bind accepted`); after: PASS, also under ASan with
+leak detection. The `memcmp`/concat fallbacks are reachable only by a non-C
+string, so the pure-C selfcheck covers their shared view through the `strtoll`
+case (a text data pointer).
+
+Not covered by this record (other compositions, same pattern, still open):
+`runtime_dynload.c:2007,2063,2085,2102` (twin dlopen/dlsym owners) and
+`runtime_renderdoc.c:129`.
