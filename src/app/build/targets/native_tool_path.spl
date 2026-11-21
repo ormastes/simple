@@ -3,43 +3,46 @@
 # Relative receipts retain their existing vocabulary. External POSIX tools must
 # name an existing canonical regular executable, never a symlink spelling.
 use app.build.targets.artifact_receipt.{declared_path_valid}
+use app.build.host_path_policy.{build_host_abs_path_valid_v1, build_host_has_drive_prefix_v1, build_host_path_normalize_v1}
 use std.nogc_sync_mut.io.path_identity.{path_final_existing}
 use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow}
-use app.io.process_ops.{process_run_bounded_direct}
+use app.io.process_ops.{process_run_bounded}
+use std.io_runtime.{platform_name}
+
+fn _native_tool_is_abs_v1(path: text) -> bool:
+    path.starts_with("/") or build_host_has_drive_prefix_v1(path)
 
 pub fn native_tool_path_valid_v1(path: text) -> bool:
-    if not path.starts_with("/"):
+    if not _native_tool_is_abs_v1(path):
         return declared_path_valid(path)
-    if path == "/" or path.contains("|") or path.contains("\\") or
-            path.contains("\n") or path.contains("\r") or path.contains("\0"):
-        return false
-    for segment in path[1:].split("/"):
-        if segment == "" or segment == "." or segment == "..": return false
-    true
+    build_host_abs_path_valid_v1(path, false, false, 4096, 4096)
 
 pub fn native_tool_absolute_path_v1(repo_root: text, path: text) -> text:
     if not native_tool_path_valid_v1(path): return ""
-    if not path.starts_with("/"): return repo_root + "/" + path
+    if not _native_tool_is_abs_v1(path): return repo_root + "/" + path
+    val norm_path = build_host_path_normalize_v1(path)
     match path_final_existing(path):
         case Err(_): return ""
         case Ok(final_path):
-            if final_path.path != path: return ""
+            if build_host_path_normalize_v1(final_path.path) != norm_path: return ""
     if not file_is_regular_no_follow(path): return ""
     # Permission probe only: no shell and no execution of the candidate tool.
     # The existing executable-pin provider is Linux/static-ELF-only, so it
     # cannot validate a Darwin compiler. Keep this probe bounded and fail closed.
-    val (_, _, status) = process_run_bounded_direct("/bin/test", ["-x", path], 1000, 1024)
-    if status != 0: return ""
-    path
+    if ["linux", "macos", "freebsd"].contains(platform_name()):
+        val (_, _, status) = process_run_bounded("/bin/test", ["-x", path], 1000, 1024)
+        if status != 0: return ""
+    norm_path
 
 pub fn native_tool_receipt_path_v1(repo_root: text, executable: text) -> text:
     if not native_tool_path_valid_v1(executable): return ""
     var resolved = executable
-    if executable.starts_with("/"):
+    if _native_tool_is_abs_v1(executable):
         match path_final_existing(executable):
             case Err(_): return ""
-            case Ok(final_path): resolved = final_path.path
-    val prefix = repo_root + "/"
+            case Ok(final_path): resolved = build_host_path_normalize_v1(final_path.path)
+    val norm_root = build_host_path_normalize_v1(repo_root)
+    val prefix = norm_root + "/"
     val receipt_path = if resolved.starts_with(prefix): resolved[prefix.len():] else: resolved
     if native_tool_absolute_path_v1(repo_root, receipt_path) == "": return ""
     receipt_path

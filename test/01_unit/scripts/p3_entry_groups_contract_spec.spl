@@ -1,0 +1,275 @@
+# @cover scripts/bootstrap/p3-entry-groups.shs 80%
+# @req REQ-P3-ENTRY-GROUPS-001
+"""
+## Purpose and audience
+Exercises `scripts/bootstrap/p3-entry-groups.shs` end-to-end against an isolated
+Git checkout fixture and deterministic wrapper stubs:
+- fail-closed argument and missing-stage2 checks
+- wave splitting (`P3G_WAVES`), `--low-memory` (`P3G_LOW_MEMORY=1`),
+  `P3G_MIR_WORKER_KB`, and `entry` `SIMPLE_MIR_SHARDING=0` launcher emission
+- archive-dedupe `awk` filter (dropping `__simple_main` group entry objects,
+  deduplicating `__module_init*` and `simple_empty_module_*`, preserving unique
+  objects across groups 1..7)
+- `P3G_RESUME=1` archive reuse contract (`rc=0` in `.result.txt` + non-empty
+  `.a`) vs non-reuse on empty `.a`, nonzero `rc`, or `P3G_REBUILD=1`
+
+Audience: Phase-3 bootstrap build and linker pipeline maintainers.
+
+## Compatibility and limitations
+Copies `p3-entry-groups.shs` and `p3-host-caps.shs` into an isolated temp harness
+with a recording `p3-manual-link-stage3.shs` stub and stub `P3G_MEASURE` /
+`llvm-ar` / `llvm-nm` tools so no heavy stage2 compiler binary or real object
+compile is invoked.
+
+## Examples
+```sh
+bin/simple test test/01_unit/scripts/p3_entry_groups_contract_spec.spl
+```
+"""
+
+# @tag: unit, scripts, bootstrap, phase3, p3-entry-groups
+
+use std.spec.*
+use std.spec.{step}
+use app.io.mod.{cwd, dir_create_all, dir_remove_all, file_atomic_write, file_copy, file_exists, file_read, getpid, time_now_unix_micros}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run, resolve_shell_argv}
+
+val P3_GROUPS_SCRIPT = "scripts/bootstrap/p3-entry-groups.shs"
+val P3_HOST_CAPS_SCRIPT = "scripts/bootstrap/p3-host-caps.shs"
+
+fn _p3g_make_root(tag: text) -> text:
+    val base = get_temp_dir().replace("\\", "/")
+    val root = base + "/p3-groups-test-" + tag + "-" +
+        getpid().to_text() + "-" + time_now_unix_micros().to_text()
+    expect(dir_create_all(root)).to_be(true)
+    root
+
+fn _p3g_sh(cmd: text) -> (text, text, i64):
+    val prefix = "case \"$(uname -s 2>/dev/null)\" in MINGW*|MSYS*|CYGWIN*) PATH=\"/usr/bin:/bin:$PATH\"; export PATH ;; esac; "
+    val (sh_bin, sh_args) = resolve_shell_argv(prefix + cmd)
+    process_run(sh_bin, sh_args)
+
+fn _p3g_setup_harness(root: text):
+    val repo_root = cwd().replace("\\", "/")
+    val checkout = root + "/checkout"
+    val scripts_dir = root + "/scripts"
+    val lm_bin = root + "/lm/bin"
+    val tool_bin = root + "/bin"
+    expect(dir_create_all(checkout + "/src/app/cli/p3_groups")).to_be(true)
+    expect(dir_create_all(scripts_dir)).to_be(true)
+    expect(dir_create_all(lm_bin)).to_be(true)
+    expect(dir_create_all(tool_bin)).to_be(true)
+
+    for g in 1..8:
+        val gp = checkout + "/src/app/cli/p3_groups/group_" + g.to_text() + ".spl"
+        expect(file_atomic_write(gp, "fn main() -> i64:\n    0\n")).to_be(true)
+    expect(file_atomic_write(checkout + "/src/app/cli/bootstrap_main.spl", "fn main() -> i64:\n    0\n")).to_be(true)
+
+    val (_go, _ge, git_rc) = _p3g_sh(
+        "git -C '" + checkout + "' init -q && " +
+        "git -C '" + checkout + "' config user.name p3test && " +
+        "git -C '" + checkout + "' config user.email p3test@example.invalid && " +
+        "git -C '" + checkout + "' add . && " +
+        "git -C '" + checkout + "' commit -qm base"
+    )
+    expect(git_rc).to_equal(0)
+
+    expect(file_copy(repo_root + "/" + P3_GROUPS_SCRIPT, scripts_dir + "/p3-entry-groups.shs")).to_be(true)
+    expect(file_copy(repo_root + "/" + P3_HOST_CAPS_SCRIPT, scripts_dir + "/p3-host-caps.shs")).to_be(true)
+
+    val link_stub =
+        "#!/bin/sh\n" +
+        "set -eu\n" +
+        "printf '%s|%s|%s\\n' \"$1\" \"$2\" \"$3\" > \"$P3_TEST_LINK_CALL\"\n" +
+        "printf 'linked-stage3' > \"$3\"\n"
+    expect(file_atomic_write(scripts_dir + "/p3-manual-link-stage3.shs", link_stub)).to_be(true)
+
+    val fake_stage2 = root + "/fake-stage2.exe"
+    expect(file_atomic_write(fake_stage2, "stub")).to_be(true)
+
+    # Delegate `pwsh` to Windows PowerShell if pwsh is an AppX alias or absent, and write a fake measure.ps1.
+    val pwsh_shim = "#!/bin/sh\nexec powershell.exe \"$@\"\n"
+    expect(file_atomic_write(tool_bin + "/pwsh", pwsh_shim)).to_be(true)
+
+    val measure_ps1 =
+        "param([string]$Exe, [string]$Cache, [string]$Log, [int]$Limit, [int]$CapGB, [string[]]$Rest)\n" +
+        "$outIdx = [Array]::IndexOf($Rest, '-o')\n" +
+        "$outFile = $Rest[$outIdx + 1]\n" +
+        "$entryIdx = [Array]::IndexOf($Rest, '--entry')\n" +
+        "$entryFile = $Rest[$entryIdx + 1]\n" +
+        "$dir = Split-Path -Parent $outFile\n" +
+        "if (-not (Test-Path $dir)) {{ New-Item -ItemType Directory -Force -Path $dir | Out-Null }}\n" +
+        "$name = if ($env:P3_GROUP_NAME) {{ $env:P3_GROUP_NAME }} else {{ 'unknown' }}\n" +
+        "Add-Content -Path $env:P3_TEST_INVOCATIONS -Value \"$name|$entryFile\"\n" +
+        "[System.IO.File]::WriteAllText($outFile, \"archive:$name\")\n" +
+        "\"peak_tree_GB=1 killed=0 rc=0\"\n" +
+        "exit 0\n"
+    expect(file_atomic_write(root + "/fake_measure.ps1", measure_ps1)).to_be(true)
+
+    val fake_ar =
+        "#!/bin/sh\n" +
+        "set -eu\n" +
+        "op=$1; arch=$2; base=$(basename \"$arch\" .a)\n" +
+        "if [ \"$op\" = t ]; then\n" +
+        "  case \"$base\" in\n" +
+        "    group_1) printf 'aot-g1-entry.o\\naot-g1-init.o\\naot-g1-uniq.o\\n' ;;\n" +
+        "    group_2) printf 'aot-g2-entry.o\\naot-g2-dup.o\\naot-g2-uniq.o\\n' ;;\n" +
+        "    group_4) printf 'aot-g4-emptydup.o\\naot-g4-uniq.o\\n' ;;\n" +
+        "    *) printf 'aot-%s-uniq.o\\n' \"$base\" ;;\n" +
+        "  esac\n" +
+        "elif [ \"$op\" = x ]; then\n" +
+        "  for m in $(sh \"$0\" t \"$arch\"); do printf 'obj:%s' \"$m\" > \"$m\"; done\n" +
+        "else\n" +
+        "  exit 2\n" +
+        "fi\n"
+    expect(file_atomic_write(lm_bin + "/llvm-ar", fake_ar)).to_be(true)
+
+    val fake_nm =
+        "#!/bin/sh\n" +
+        "set -eu\n" +
+        "for f in \"$@\"; do\n" +
+        "  case \"$f\" in\n" +
+        "    -A|--defined-only|--extern-only) continue ;;\n" +
+        "    *aot-g1-entry.o) printf '%s: 00000000 T ___simple_main\\n' \"$f\" ;;\n" +
+        "    *aot-g2-entry.o) printf '%s: 00000000 T __simple_main\\n' \"$f\" ;;\n" +
+        "    *aot-g1-init.o)  printf '%s: 00000000 T ___module_init_std_a\\n%s: 00000000 T _simple_empty_module_std_e\\n' \"$f\" \"$f\" ;;\n" +
+        "    *aot-g2-dup.o)   printf '%s: 00000000 T __module_init_std_a\\n' \"$f\" ;;\n" +
+        "    *aot-g4-emptydup.o) printf '%s: 00000000 T simple_empty_module_std_e\\n' \"$f\" ;;\n" +
+        "    *aot-g2-uniq.o)  printf '%s: 00000000 T __module_init_common_b\\n' \"$f\" ;;\n" +
+        "    *)               printf '%s: 00000000 T helper_%s\\n' \"$f\" \"$(basename \"$f\" .o)\" ;;\n" +
+        "  esac\n" +
+        "done\n"
+    expect(file_atomic_write(lm_bin + "/llvm-nm", fake_nm)).to_be(true)
+    val (_c_out, _c_err, chmod_rc) = _p3g_sh(
+        "chmod 755 '" + lm_bin + "/llvm-ar' '" + lm_bin + "/llvm-nm' '" + tool_bin + "/pwsh' '" + scripts_dir + "/p3-manual-link-stage3.shs'"
+    )
+    expect(chmod_rc).to_equal(0)
+
+describe "p3-entry-groups.shs contract":
+    it "fails closed on missing arguments or missing stage2 compiler":
+        val root = _p3g_make_root("fail")
+        val (_o1, err1, rc1) = _p3g_sh("sh " + P3_GROUPS_SCRIPT + " only_one_arg")
+        expect(rc1).to_equal(2)
+        expect(err1).to_contain("usage:")
+
+        val (_o2, err2, rc2) = _p3g_sh("P3G_STAGE2='" + root + "/missing-stage2.exe' P3G_CAP_GB=24 P3G_THREADS=4 sh " + P3_GROUPS_SCRIPT + " '" + root + "' '" + root + "/out'")
+        expect(rc2).to_equal(1)
+        expect(err2).to_contain("stage2 missing")
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "generates wave launchers, applies dedupe awk filter, and preserves unique objects across groups":
+        step("Run p3-entry-groups.shs with P3G_WAVES, P3G_LOW_MEMORY=1, P3G_MIR_WORKER_KB")
+        val root = _p3g_make_root("dedupe")
+        _p3g_setup_harness(root)
+        val out = root + "/out"
+        val inv_log = root + "/invocations.log"
+        val link_call = root + "/link_call.txt"
+
+        val run_cmd =
+            "PATH=\"$(CDPATH= cd -- '" + root + "/bin' && pwd):$PATH\" " +
+            "P3G_STAGE2='" + root + "/fake-stage2.exe' " +
+            "P3G_MEASURE='" + root + "/fake_measure.ps1' " +
+            "SIMPLE_LLVM_MINGW_ROOT='" + root + "/lm' " +
+            "P3G_CAP_GB=24 P3G_THREADS=4 P3G_MIN_FREE_COMMIT_GB=0 " +
+            "P3G_LOW_MEMORY=1 P3G_MIR_WORKER_KB=654321 " +
+            "P3G_WAVES='1|2 3|4|5 6|7' " +
+            "P3_TEST_INVOCATIONS='" + inv_log + "' P3_TEST_LINK_CALL='" + link_call + "' " +
+            "sh '" + root + "/scripts/p3-entry-groups.shs' '" + root + "/checkout' '" + out + "'"
+        val (stdout, stderr, code) = _p3g_sh(run_cmd)
+        if code != 0 and file_exists(out + "/group_1.wrapper.log"):
+            expect(file_read(out + "/group_1.wrapper.log")).to_equal("no-wrapper-error")
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("archive members:")
+
+        step("Verify --low-memory, P3G_MIR_WORKER_KB, and entry SIMPLE_MIR_SHARDING=0 in generated launchers")
+        val g1_ps1 = file_read(out + "/group_1.run.ps1")
+        expect(g1_ps1).to_contain("'--low-memory',")
+        expect(g1_ps1).to_contain("$env:SIMPLE_MIR_SHARD_WORKER_KB=\"654321\"")
+        val entry_ps1 = file_read(out + "/entry.run.ps1")
+        expect(entry_ps1).to_contain("$env:SIMPLE_MIR_SHARDING=\"0\"")
+        expect(entry_ps1).to_contain("Remove-Item Env:SIMPLE_MIR_SHARD_COUNT -EA SilentlyContinue")
+
+        step("Verify dedupe log dropped __simple_main, duplicate __module_init*, and duplicate simple_empty_module_*")
+        val dedupe = file_read(out + "/dedupe.log")
+        expect(dedupe).to_contain("drop aot-g1-entry.o: group entry (__simple_main)")
+        expect(dedupe).to_contain("drop aot-g2-entry.o: group entry (__simple_main)")
+        expect(dedupe).to_contain("drop aot-g2-dup.o: duplicate __module_init_std_a")
+        expect(dedupe).to_contain("drop aot-g4-emptydup.o: duplicate simple_empty_module_std_e")
+
+        step("Verify obj-list.txt preserves unique objects across groups plus bootstrap_main_entry.o")
+        val obj_list = file_read(out + "/obj-list.txt")
+        expect(obj_list).to_contain("g1_aot-g1-init.o")
+        expect(obj_list).to_contain("g1_aot-g1-uniq.o")
+        expect(obj_list).to_contain("g2_aot-g2-uniq.o")
+        expect(obj_list).to_contain("g4_aot-g4-uniq.o")
+        expect(obj_list).to_contain("bootstrap_main_entry.o")
+        expect(obj_list.contains("aot-g1-entry.o")).to_equal(false)
+        expect(obj_list.contains("aot-g2-dup.o")).to_equal(false)
+        expect(obj_list.contains("aot-g4-emptydup.o")).to_equal(false)
+        expect(stderr).to_equal("")
+        expect(file_exists(out + "/simple_stage3.exe")).to_be(true)
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "reuses non-empty rc=0 archives under P3G_RESUME=1 and rebuilds missing, failed, or P3G_REBUILD=1 groups":
+        val root = _p3g_make_root("resume")
+        _p3g_setup_harness(root)
+        val out = root + "/out"
+        val inv_log = root + "/invocations.log"
+        val link_call = root + "/link_call.txt"
+
+        val base_env =
+            "PATH=\"$(CDPATH= cd -- '" + root + "/bin' && pwd):$PATH\" " +
+            "P3G_STAGE2='" + root + "/fake-stage2.exe' " +
+            "P3G_MEASURE='" + root + "/fake_measure.ps1' " +
+            "SIMPLE_LLVM_MINGW_ROOT='" + root + "/lm' " +
+            "P3G_CAP_GB=24 P3G_THREADS=4 P3G_MIN_FREE_COMMIT_GB=0 " +
+            "P3G_WAVES='1|2 3 4|5 6 7' " +
+            "P3_TEST_INVOCATIONS='" + inv_log + "' P3_TEST_LINK_CALL='" + link_call + "' "
+
+        val (_o1, _e1, rc1) = _p3g_sh(base_env + "sh '" + root + "/scripts/p3-entry-groups.shs' '" + root + "/checkout' '" + out + "'")
+        expect(rc1).to_equal(0)
+        expect(file_atomic_write(inv_log, "")).to_be(true)
+
+        step("With P3G_RESUME=1 and valid rc=0 non-empty archives, zero builds are re-executed")
+        val (out2, _e2, rc2) = _p3g_sh(base_env + "P3G_RESUME=1 sh '" + root + "/scripts/p3-entry-groups.shs' '" + root + "/checkout' '" + out + "'")
+        expect(rc2).to_equal(0)
+        expect(out2).to_contain("[p3g] reuse " + out + "/group_1.a")
+        expect(out2).to_contain("[p3g] reuse " + out + "/group_7.a")
+        expect(file_read(inv_log).trim()).to_equal("")
+
+        step("Truncating group_2.a and setting group_3 rc=1 rebuilds only groups 2 and 3")
+        expect(file_atomic_write(out + "/group_2.a", "")).to_be(true)
+        expect(file_atomic_write(out + "/group_3.result.txt", "peak_tree_GB=1 killed=0 rc=1\n")).to_be(true)
+        val (out3, _e3, rc3) = _p3g_sh(base_env + "P3G_RESUME=1 sh '" + root + "/scripts/p3-entry-groups.shs' '" + root + "/checkout' '" + out + "'")
+        expect(rc3).to_equal(0)
+        expect(out3).to_contain("[p3g] reuse " + out + "/group_1.a")
+        val rebuilt = file_read(inv_log)
+        expect(rebuilt).to_contain("group_2|src/app/cli/p3_groups/group_2.spl")
+        expect(rebuilt).to_contain("group_3|src/app/cli/p3_groups/group_3.spl")
+        expect(rebuilt.contains("group_1|")).to_equal(false)
+
+        step("P3G_REBUILD=1 rebuilds every group despite existing rc=0 archives")
+        expect(file_atomic_write(inv_log, "")).to_be(true)
+        val (_out4, _e4, rc4) = _p3g_sh(base_env + "P3G_REBUILD=1 sh '" + root + "/scripts/p3-entry-groups.shs' '" + root + "/checkout' '" + out + "'")
+        expect(rc4).to_equal(0)
+        val rebuilt_all = file_read(inv_log)
+        expect(rebuilt_all).to_contain("group_1|")
+        expect(rebuilt_all).to_contain("group_7|")
+        expect(rebuilt_all).to_contain("entry|src/app/cli/bootstrap_main.spl")
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "refuses untracked group entrypoints at the SCV tracked-file gate":
+        val root = _p3g_make_root("untracked")
+        _p3g_setup_harness(root)
+        val (_rm_o, _rm_e, rm_rc) = _p3g_sh("git -C '" + root + "/checkout' rm -q --cached src/app/cli/p3_groups/group_1.spl")
+        expect(rm_rc).to_equal(0)
+        val (_o, err, rc) = _p3g_sh(
+            "PATH=\"$(CDPATH= cd -- '" + root + "/bin' && pwd):$PATH\" P3G_STAGE2='" + root + "/fake-stage2.exe' " +
+            "P3G_MEASURE='" + root + "/fake_measure.ps1' SIMPLE_LLVM_MINGW_ROOT='" + root + "/lm' " +
+            "P3G_CAP_GB=24 P3G_THREADS=4 P3G_MIN_FREE_COMMIT_GB=0 " +
+            "P3G_GO_TO_END_GROUPS=0 sh '" + root + "/scripts/p3-entry-groups.shs' '" + root + "/checkout' '" + root + "/out'"
+        )
+        expect(rc).to_equal(1)
+        expect(err).to_contain("is not tracked")
+        expect(dir_remove_all(root)).to_be(true)

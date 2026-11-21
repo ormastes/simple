@@ -21,8 +21,8 @@ use std.common.io.read_only_file_view.{read_only_file_view_open_v1,
 use std.common.io.file_read_policy.{FileReadPolicyV1}
 use std.async.cancellation.{CancellationToken}
 use std.nogc_sync_mut.io.file.{FileHandle}
-use std.common.crypto.sha256.{sha256_text, sha256_stream_v1_new,
-    sha256_stream_v1_update, sha256_stream_v1_finish_hex}
+use std.common.crypto.sha256.{sha256_text, sha256_stream_v1_new}
+use app.build.host_path_policy.{build_host_abs_path_valid_v1}
 
 val PREPARED_SNAPSHOT_COPY_CHUNK_BYTES_V1: u64 = 1048576u64
 
@@ -60,12 +60,14 @@ fn _snapshot_segment_v1(segment: text) -> bool:
     true
 
 fn _snapshot_path_v1(path: text, absolute: bool) -> bool:
+    if absolute:
+        return build_host_abs_path_valid_v1(path, true, true, 4096, 128)
     if path == "" or path.len() > 4096 or
-       path.starts_with("/") != absolute or path.ends_with("/") or
+       path.starts_with("/") or path.ends_with("/") or
        path.contains("//"):
         return false
     val parts = path.split("/")
-    var i: i64 = if absolute: 1 else: 0
+    var i: i64 = 0
     while i < parts.len():
         if not _snapshot_segment_v1(parts[i]): return false
         i = i + 1
@@ -106,7 +108,7 @@ fn _snapshot_put_v1(source_root: text, source: text,
         val _ = read_only_file_view_close_v1(view)
         return (total, "snapshot-write-mismatch")
     var destination_handle = created.unwrap()
-    val stream = sha256_stream_v1_new()
+    var stream = sha256_stream_v1_new()
     val cancellation = CancellationToken.new()
     var offset: u64 = 0u64
     var error = ""
@@ -122,7 +124,7 @@ fn _snapshot_put_v1(source_root: text, source: text,
             break
         val chunk = read.unwrap().bytes
         if chunk.len().to_u64() != length or
-           not sha256_stream_v1_update(stream, chunk):
+           not stream.update(chunk):
             error = "snapshot-source-unavailable"
             break
         if destination_handle.write_all(chunk).is_err():
@@ -130,7 +132,7 @@ fn _snapshot_put_v1(source_root: text, source: text,
             break
         offset = offset + length
     if error == "":
-        val observed = sha256_stream_v1_finish_hex(stream)
+        val observed = stream.finish_hex()
         if observed == nil or observed.unwrap() != digest:
             error = "snapshot-source-digest-mismatch"
     val destination_closed = destination_handle.close()

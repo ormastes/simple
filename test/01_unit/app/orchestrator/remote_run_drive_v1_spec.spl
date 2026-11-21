@@ -140,16 +140,19 @@ fn rr_settle_v1(log: RrLogV1, edit: fn(DistributedOperationJournalV2) -> Control
     Err("double-no-journal")
 
 fn rr_link_v1(log: RrLogV1, host: text) -> RemoteRunLinkV1:
-    RemoteRunLinkV1(begin: fn() -> Result<text, text>: rr_begin_v1(log, host),
-        send: fn(action: text, payload: text) -> Result<text, text>: rr_send_v1(log, action, payload),
-        admit: fn(signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2,
-                open_record: text) -> Result<bool, text>:
-            rr_admit_v1(log, signed, approval, request),
-        edit: fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
-            rr_edit_v1(log, edit),
-        settle: fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
-            rr_settle_v1(log, edit),
-        clock: fn() -> Result<i64, text>: Ok(1000), monotonic_ms: fn() -> i64: 0, pause: fn(ms: i64) -> bool: true)
+    val begin_fn = fn() -> Result<text, text>: rr_begin_v1(log, host)
+    val send_fn = fn(action: text, payload: text) -> Result<text, text>: rr_send_v1(log, action, payload)
+    val admit_fn = fn(signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2,
+            open_record: text) -> Result<bool, text>:
+        rr_admit_v1(log, signed, approval, request)
+    val edit_fn = fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
+        rr_edit_v1(log, edit)
+    val settle_fn = fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
+        rr_settle_v1(log, edit)
+    val clock_fn = fn() -> Result<i64, text>: Ok(1000)
+    val monotonic_fn = fn() -> i64: 0
+    val pause_fn = fn(ms: i64) -> bool: true
+    RemoteRunLinkV1(begin_fn, send_fn, admit_fn, edit_fn, settle_fn, clock_fn, monotonic_fn, pause_fn)
 
 fn rr_facts_v1(ttl: i64) -> RemoteRunFactsV1:
     val context = rr_context_v1()
@@ -431,16 +434,19 @@ fn rs_cleanup_v1(log: RsLogV1):
     dir_remove(root)
 
 fn rs_link_v1(log: RsLogV1) -> RemoteRunLinkV1:
-    RemoteRunLinkV1(begin: fn() -> Result<text, text>: rs_begin_v1(log),
-        send: fn(action: text, payload: text) -> Result<text, text>: rs_send_v1(log, action, payload),
-        admit: fn(signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2,
-                open_record: text) -> Result<bool, text>:
-            rs_admit_v1(log, request, open_record),
-        edit: fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
-            rs_edit_v1(log, edit),
-        settle: fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
-            rs_settle_v1(log, edit),
-        clock: fn() -> Result<i64, text>: rs_clock_v1(log), monotonic_ms: fn() -> i64: rs_mono_v1(log), pause: fn(ms: i64) -> bool: true)
+    val begin_fn = fn() -> Result<text, text>: rs_begin_v1(log)
+    val send_fn = fn(action: text, payload: text) -> Result<text, text>: rs_send_v1(log, action, payload)
+    val admit_fn = fn(signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2,
+            open_record: text) -> Result<bool, text>:
+        rs_admit_v1(log, request, open_record)
+    val edit_fn = fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
+        rs_edit_v1(log, edit)
+    val settle_fn = fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
+        rs_settle_v1(log, edit)
+    val clock_fn = fn() -> Result<i64, text>: rs_clock_v1(log)
+    val monotonic_fn = fn() -> i64: rs_mono_v1(log)
+    val pause_fn = fn(ms: i64) -> bool: true
+    RemoteRunLinkV1(begin_fn, send_fn, admit_fn, edit_fn, settle_fn, clock_fn, monotonic_fn, pause_fn)
 
 fn rs_drive_v1(log: RsLogV1) -> RemoteRunOutcomeV1:
     remote_run_drive_v1(rr_authored_v1().unwrap(), rr_facts_v1(RR_TTL), rs_link_v1(log), rr_issuer_v1())
@@ -699,10 +705,11 @@ describe "remote-run resume (milestone_0045, owner decision 1)":
         rs_cleanup_v1(none)
         step("an operator spec that no longer reproduces the archived open record byte for byte")
         val drift = rs_unproven_v1()
-        val changed = remote_run_resume_v1("operation_a", fn(not_after: i64) -> Result<RemoteRunAuthoredV1, text>:
-                var authored = rr_authored_v1().unwrap()
-                authored.environment_text = authored.environment_text + "\n"
-                Ok(authored),
+        val mutated_spec = fn(not_after: i64) -> Result<RemoteRunAuthoredV1, text>:
+            var authored = rr_authored_v1().unwrap()
+            authored.environment_text = authored.environment_text + "\n"
+            Ok(authored)
+        val changed = remote_run_resume_v1("operation_a", mutated_spec,
             rr_facts_v1(RR_TTL), rs_link_v1(drift))
         expect(changed.detail).to_equal("remote-run-resume-spec-differs")
         expect(drift.calls).to_equal(["begin", "edit"])
@@ -739,7 +746,7 @@ describe "remote-run resume (milestone_0045, owner decision 1)":
         val source = file_read_text("src/app/orchestrator/remote_run_v1.spl")
         expect(source.index_of("fn remote_run_resume_flow_v1(") >= 0 and source.index_of("pub fn remote_run_resume_v1(") > source.index_of("fn remote_run_resume_flow_v1(")).to_equal(true)
         val resume = source.substring(source.index_of("fn remote_run_resume_flow_v1("), source.index_of("pub fn remote_run_resume_v1("))
-        for sent in ["(link.send)(", "(link.admit)(", "remote_run_cancel_v1(", "\"open\"", "\"input\"", "\"start\"", "issue"]:
+        for sent in ["(link.send)(", "(link.admit_row)(", "remote_run_cancel_v1(", "\"open\"", "\"input\"", "\"start\"", "issue"]:
             expect(resume.contains(sent)).to_equal(false)
         expect(resume.contains("remote_run_collect_v1(authored, facts, link, None, admitted,")).to_equal(true)
         expect(source.index_of("fn remote_run_collect_v1(") >= 0 and source.index_of("fn remote_run_flow_v1(") > source.index_of("fn remote_run_collect_v1(")).to_equal(true)
@@ -918,12 +925,12 @@ describe "remote-run driver structure (source pins)":
     it "admits the build row before prepare and execute, cancels on a bounded timeout and never reads state.exit_code":
         val source = file_read_text("src/app/orchestrator/remote_run_v1.spl")
         val record = source.index_of("remote_build_open_record_encode_v3(")
-        val admit = source.index_of("(link.admit)(")
+        val admit_idx = source.index_of("(link.admit_row)(")
         val prepare = source.index_of("(link.send)(\"prepare\"")
         val execute = source.index_of("(link.send)(\"execute\"")
         expect(record > 0).to_equal(true)
-        expect(admit > record).to_equal(true)
-        expect(prepare > admit).to_equal(true)
+        expect(admit_idx > record).to_equal(true)
+        expect(prepare > admit_idx).to_equal(true)
         expect(execute > prepare).to_equal(true)
         expect(source.contains(".exit_code")).to_equal(false)
         expect(source.contains("remote_run_cancel_v1(")).to_equal(true)

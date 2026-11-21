@@ -11,6 +11,13 @@ use app.io.mod.{file_read_regular_no_follow_bounded_bytes,
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.nogc_sync_mut.package_sffi.{set_permissions}
 use std.nogc_sync_mut.sffi.fs.{file_mode}
+use std.io_runtime.{platform_name}
+use app.build.host_path_policy.{
+    build_host_abs_path_valid_v1,
+    build_host_path_is_descendant_v1,
+    build_host_paths_overlap_v1,
+    build_host_path_normalize_v1
+}
 
 val DIST_EXEC_ARTIFACT_SNAPSHOT_MAX_BYTES_V1: i64 = 67108864
 
@@ -37,23 +44,7 @@ fn _artifact_snapshot_pod_v1(pod_uid: text) -> bool:
     true
 
 fn _artifact_snapshot_path_v1(path: text) -> bool:
-    if (path.len() <= 1 or path.len() > 4096 or
-            not path.starts_with("/") or path.ends_with("/") or path.contains("//")):
-        return false
-    val parts = path.split("/")
-    var i: i64 = 1
-    while i < parts.len():
-        val part = parts[i]
-        if (part.len() <= 0 or part.len() > 255 or part == "." or
-                part == ".." or part.starts_with("-")):
-            return false
-        for c in part.chars():
-            if ((c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
-                    (c >= "0" and c <= "9") or c == "_" or c == "-" or c == "."):
-                continue
-            return false
-        i = i + 1
-    true
+    build_host_abs_path_valid_v1(path, true, true, 4096, 255)
 
 fn _artifact_snapshot_digest_v1(digest: text) -> bool:
     if digest.len() != 64: return false
@@ -98,10 +89,9 @@ fn prepare_dist_exec_artifact_snapshot_v1(state_dir: text, pod_uid: text,
             not _artifact_snapshot_path_v1(export_root) or
             not _artifact_snapshot_path_v1(state_dir) or state_root.len() > 3900):
         return _artifact_snapshot_reject_v1("artifact-snapshot-path-invalid", "", state_root)
-    if not export_path.starts_with(export_root + "/"):
+    if not build_host_path_is_descendant_v1(export_path, export_root):
         return _artifact_snapshot_reject_v1("artifact-snapshot-export-outside-root", "", state_root)
-    if (state_dir == export_root or state_dir.starts_with(export_root + "/") or
-            export_root.starts_with(state_dir + "/")):
+    if build_host_paths_overlap_v1(state_dir, export_root):
         return _artifact_snapshot_reject_v1("artifact-snapshot-roots-overlap", "", state_root)
     if not _artifact_snapshot_pod_v1(pod_uid) or attempt <= 0:
         return _artifact_snapshot_reject_v1("artifact-snapshot-attempt-invalid", "", state_root)
@@ -135,8 +125,9 @@ fn prepare_dist_exec_artifact_snapshot_v1(state_dir: text, pod_uid: text,
     if not file_write_bytes(destination, payload):
         return _artifact_snapshot_reject_v1("artifact-snapshot-write-failed", root, state_root)
     val executable_mode: i64 = 0o755
+    val posix_host = ["macos", "linux", "freebsd"].contains(platform_name())
     if not set_permissions(destination, executable_mode.to_i32()) or
-            file_mode(destination) != executable_mode:
+            (posix_host and file_mode(destination) != executable_mode):
         return _artifact_snapshot_reject_v1("artifact-snapshot-mode-failed", root, state_root)
     if (not file_fsync(destination) or not directory_fsync(inputs) or
             not directory_fsync(outputs) or not directory_fsync(root) or
@@ -161,22 +152,24 @@ fn release_dist_exec_artifact_snapshot_v1(snapshot: DistExecArtifactSnapshotV1,
     authenticate ownership of another stage with the same valid leaf grammar.
     """
     val state_root = state_dir + "/build-attempts"
-    val prefix = state_root + "/" + pod_uid + "-" + attempt.to_text() + "-"
+    val norm_state_root = build_host_path_normalize_v1(state_root)
+    val norm_snap_root = build_host_path_normalize_v1(snapshot.root)
+    val prefix = norm_state_root + "/" + pod_uid + "-" + attempt.to_text() + "-"
     if (not _artifact_snapshot_path_v1(state_dir) or
             not _artifact_snapshot_pod_v1(pod_uid) or attempt <= 0 or
             not _artifact_snapshot_path_v1(snapshot.root) or
-            not snapshot.root.starts_with(prefix) or
-            snapshot.root.len() != prefix.len() + 6 or
-            snapshot.artifact_path != snapshot.root + "/inputs/artifact" or
-            snapshot.build_input_root != snapshot.root + "/inputs" or
-            snapshot.build_output_root != snapshot.root + "/outputs" or
+            not norm_snap_root.starts_with(prefix) or
+            norm_snap_root.len() != prefix.len() + 6 or
+            build_host_path_normalize_v1(snapshot.artifact_path) != norm_snap_root + "/inputs/artifact" or
+            build_host_path_normalize_v1(snapshot.build_input_root) != norm_snap_root + "/inputs" or
+            build_host_path_normalize_v1(snapshot.build_output_root) != norm_snap_root + "/outputs" or
             snapshot.ready == snapshot.cleanup_pending or
             (snapshot.cleanup_removed and not snapshot.cleanup_pending)):
         return DistExecArtifactSnapshotV1(false, "artifact-snapshot-release-invalid",
             snapshot.root, snapshot.artifact_path, snapshot.artifact_sha256,
             snapshot.artifact_bytes, true, snapshot.cleanup_removed,
             snapshot.build_input_root, snapshot.build_output_root)
-    val suffix = snapshot.root[prefix.len():snapshot.root.len()]
+    val suffix = norm_snap_root[prefix.len():norm_snap_root.len()]
     for c in suffix.chars():
         if ((c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
                 (c >= "0" and c <= "9")):
