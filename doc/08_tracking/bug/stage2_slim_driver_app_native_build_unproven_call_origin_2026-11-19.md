@@ -210,3 +210,24 @@ The lane only reaches this unit now. Fix: scan `export ... from ...`.
 Spec: test/01_unit/compiler/80.driver/tldr_route_export_from_spec.spl (3/3; red before).
 tldr_route_spec's 7 failures are pre-existing and the same set with or without the fix.
 Status: verification-pending.
+
+Update 2026-11-21 (h): after (f)/(g) the phase-2 matrix (frozen Stage 2 1d2b0cf33e64,
+release/1.0.0 b58524e5c2a) still failed 40x FILE-WORKER-E-CLOSURE-INCOMPLETE for
+nogc_async_mut/env/{mod,__init__}.spl and core/ast_expr.spl + _AstExpr/{nodes,accessors}.spl.
+Same class: the unit plan frontier (tldr_route_import_specs_v1) did not follow two
+forms that the readiness graph (worker_surface_import_ids_v1) does treat as edges:
+`import std.env.types` (env/mod.spl) and qualified sibling re-exports
+`export variables.env_get, paths.split_path` (env/__init__.spl). The env providers
+were never summarized/built, so env targets were unready; ast_expr/_AstExpr fail
+transitively via accessors -> `use std.env.{env_get_or}`. Matrix logs showed every
+surface of the five targets built in the failing unit (the gap is a provider), and
+untraced runs only reach that unit after ~170 units, so the trace was not reproduced;
+the diagnosis is static (Fable-reviewed). Fix: scan `import X`; with
+include_export_from, emit `.qualifier` for dotted `export q.name` items and resolve it
+in unit_tldr_plan_v1 via resolve_module_path(owner) -> logical id
+(unit_tldr_relative_module_id_v1). Residual drift (not fixed): `from X import Y` and
+bare `export a from sibling` are still graph-only forms.
+Spec: test/01_unit/compiler/80.driver/tldr_route_export_from_spec.spl 12/12 (3 red before).
+tldr_route_spec 13/7 and unit_lane_tldr_imports_spec 4/2 are the same pre-existing
+failures with or without the fix; unit_tldr_alias_row_binding_spec 2/2.
+Status: verification-pending.

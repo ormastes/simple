@@ -24,6 +24,7 @@ use compiler.common.driver_compile_result.{CompileResult}
 use compiler.driver.driver_tldr_import_route_v1.{tldr_route_import_specs_v1, unit_tldr_imports_enabled_v1}
 use compiler.driver.driver_tldr_surface_register_v1.{driver_register_tldr_surfaces_v1}
 use compiler.common.module_path_naming.{module_logical_name_from_path, module_canonical_fold_name}
+use compiler.frontend.core.interpreter.module_loader_resolve.{resolve_module_path}
 use compiler.hir.hir_lowering.module_surface_from_tldr_v1.{module_surface_from_tldr_v1}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path,
@@ -72,7 +73,8 @@ pub fn unit_tldr_plan_v1(unit_id: text, root: text, picked: [text], module_paths
     var frontier: [text] = []
     for p in picked:
         for spec in tldr_route_import_specs_v1(file_read(p), true):
-            val (module_id, _names) = spec
+            val module_id = unit_tldr_relative_module_id_v1(spec.0, p)
+            if module_id == "": continue
             if not frontier.contains(module_id):
                 frontier.push(module_id)
     var pos = 0
@@ -131,7 +133,8 @@ pub fn unit_tldr_plan_v1(unit_id: text, root: text, picked: [text], module_paths
                     parse_paths.push(src_path)
                 print("[tldr-fallback] module={module_id} reason=no-summary-surface source-load=1")
         for spec in tldr_route_import_specs_v1(source, true):
-            val (next_id, _next_names) = spec
+            val next_id = unit_tldr_relative_module_id_v1(spec.0, src_path)
+            if next_id == "": continue
             if not frontier.contains(next_id):
                 frontier.push(next_id)
     UnitTldrPlanV1(unit_id: unit_id, picked: picked, parse_paths: parse_paths, parsed: parse_paths.len(),
@@ -238,6 +241,19 @@ pub fn unit_tldr_surface_for_v1(plan: UnitTldrPlanV1, module_name: text) -> Modu
             return Some(s)
     None
 
+# A leading-"." spec (qualified sibling re-export, `export variables.x`) is
+# relative to its owner's package. Resolve it exactly like the readiness
+# closure walk (resolve_module_path) and hand the plan a logical id, never the
+# relative spelling (it is the summary cache key). "" = unresolvable (skipped).
+pub fn unit_tldr_relative_module_id_v1(spec_id: text, owner_path: text) -> text:
+    if not spec_id.starts_with("."):
+        return spec_id
+    val resolved = resolve_module_path(spec_id, owner_path)
+    # The resolver echoes an unresolvable spelling back; only a real file counts.
+    if resolved == "" or not resolved.ends_with(".spl") or not file_exists(resolved):
+        return ""
+    module_logical_name_from_path(resolved)
+
 # Inventory path of an import spelling. The closure loader admits a src/lib
 # file under its canonical `lib.*` name and adds the `std.*` twin only on
 # demand, so a `use std.X` import must also find the `lib.X` row. SCV snapshot
@@ -294,4 +310,4 @@ pub fn unit_tldr_surface_for_row_v1(plan: UnitTldrPlanV1, module_name: text, can
 export UnitTldrPlanV1, UnitLowerResultV1
 export unit_tldr_log_line_v1, unit_tldr_plan_v1, unit_lower_v1
 export unit_tldr_empty_plan_v1, unit_tldr_module_paths_v1, unit_tldr_needed_flags_v1, unit_tldr_surface_for_v1
-export unit_tldr_module_path_for_v1, unit_tldr_surface_for_row_v1
+export unit_tldr_module_path_for_v1, unit_tldr_surface_for_row_v1, unit_tldr_relative_module_id_v1
