@@ -1109,41 +1109,20 @@ SPL_CORE_C_WEAK void rt_atomic_int_store(int64_t handle, int64_t new_value) {
     atomic_store_explicit(&value->value, new_value, memory_order_seq_cst);
 }
 
-SPL_CORE_C_WEAK int64_t rt_atomic_int_swap(int64_t handle, int64_t new_value) {
-    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
-    if (!value) return 0;
-    return atomic_exchange_explicit(&value->value, new_value, memory_order_seq_cst);
-}
-
-SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_add(int64_t handle, int64_t delta) {
-    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
-    if (!value) return 0;
-    return atomic_fetch_add_explicit(&value->value, delta, memory_order_seq_cst);
-}
-
-SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_sub(int64_t handle, int64_t delta) {
-    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
-    if (!value) return 0;
-    return atomic_fetch_sub_explicit(&value->value, delta, memory_order_seq_cst);
-}
-
-SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_and(int64_t handle, int64_t operand) {
-    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
-    if (!value) return 0;
-    return atomic_fetch_and_explicit(&value->value, operand, memory_order_seq_cst);
-}
-
-SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_or(int64_t handle, int64_t operand) {
-    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
-    if (!value) return 0;
-    return atomic_fetch_or_explicit(&value->value, operand, memory_order_seq_cst);
-}
-
-SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_xor(int64_t handle, int64_t operand) {
-    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
-    if (!value) return 0;
-    return atomic_fetch_xor_explicit(&value->value, operand, memory_order_seq_cst);
-}
+/* Null-guarded seq_cst read-modify-write on an RtCoreAtomicInt handle. */
+#define RT_ATOMIC_INT_RMW(name, atomic_op, arg) \
+    SPL_CORE_C_WEAK int64_t name(int64_t handle, int64_t arg) { \
+        RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle; \
+        if (!value) return 0; \
+        return atomic_op(&value->value, arg, memory_order_seq_cst); \
+    }
+RT_ATOMIC_INT_RMW(rt_atomic_int_swap, atomic_exchange_explicit, new_value)
+RT_ATOMIC_INT_RMW(rt_atomic_int_fetch_add, atomic_fetch_add_explicit, delta)
+RT_ATOMIC_INT_RMW(rt_atomic_int_fetch_sub, atomic_fetch_sub_explicit, delta)
+RT_ATOMIC_INT_RMW(rt_atomic_int_fetch_and, atomic_fetch_and_explicit, operand)
+RT_ATOMIC_INT_RMW(rt_atomic_int_fetch_or, atomic_fetch_or_explicit, operand)
+RT_ATOMIC_INT_RMW(rt_atomic_int_fetch_xor, atomic_fetch_xor_explicit, operand)
+#undef RT_ATOMIC_INT_RMW
 
 SPL_CORE_C_WEAK void rt_atomic_int_free(int64_t handle) {
     RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
@@ -1195,39 +1174,24 @@ SPL_CORE_C_WEAK bool rt_atomic_bool_compare_exchange(int64_t handle, bool curren
  * exists in `<stdatomic.h>` either; fetch-not is fetch-xor(true) (0^1=1,
  * 1^1=0), the same reduction Rust's `rt_atomic_bool_fetch_not` uses
  * (`fetch_xor(true, SeqCst)`, runtime/src/value/sffi/atomic.rs). */
-SPL_CORE_C_WEAK bool rt_atomic_bool_fetch_and(int64_t handle, bool operand) {
-    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
-    if (!value) return false;
-    bool current = atomic_load_explicit(&value->value, memory_order_seq_cst);
-    while (!atomic_compare_exchange_weak_explicit(
-        &value->value, &current, current && operand,
-        memory_order_seq_cst, memory_order_seq_cst)) {
-        /* current is refreshed by a failed CAS; retry with the new value. */
+/* CAS-loop fetch-modify on an RtCoreAtomicBool handle; returns the previous
+ * value. `expr` may use `current` and `operand`. */
+#define RT_ATOMIC_BOOL_RMW(name, params, expr) \
+    SPL_CORE_C_WEAK bool name params { \
+        RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle; \
+        if (!value) return false; \
+        bool current = atomic_load_explicit(&value->value, memory_order_seq_cst); \
+        while (!atomic_compare_exchange_weak_explicit( \
+            &value->value, &current, (expr), \
+            memory_order_seq_cst, memory_order_seq_cst)) { \
+            /* current is refreshed by a failed CAS; retry with the new value. */ \
+        } \
+        return current; \
     }
-    return current;
-}
-
-SPL_CORE_C_WEAK bool rt_atomic_bool_fetch_or(int64_t handle, bool operand) {
-    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
-    if (!value) return false;
-    bool current = atomic_load_explicit(&value->value, memory_order_seq_cst);
-    while (!atomic_compare_exchange_weak_explicit(
-        &value->value, &current, current || operand,
-        memory_order_seq_cst, memory_order_seq_cst)) {
-    }
-    return current;
-}
-
-SPL_CORE_C_WEAK bool rt_atomic_bool_fetch_not(int64_t handle) {
-    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
-    if (!value) return false;
-    bool current = atomic_load_explicit(&value->value, memory_order_seq_cst);
-    while (!atomic_compare_exchange_weak_explicit(
-        &value->value, &current, !current,
-        memory_order_seq_cst, memory_order_seq_cst)) {
-    }
-    return current;
-}
+RT_ATOMIC_BOOL_RMW(rt_atomic_bool_fetch_and, (int64_t handle, bool operand), current && operand)
+RT_ATOMIC_BOOL_RMW(rt_atomic_bool_fetch_or, (int64_t handle, bool operand), current || operand)
+RT_ATOMIC_BOOL_RMW(rt_atomic_bool_fetch_not, (int64_t handle), !current)
+#undef RT_ATOMIC_BOOL_RMW
 
 SPL_CORE_C_WEAK void rt_atomic_bool_free(int64_t handle) {
     RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
@@ -2200,14 +2164,21 @@ static int rt_core_register_closure(RtCoreClosure* closure) {
     return rt_core_register_scoped_immortal(closure, &closure->transient_scope_id);
 }
 
-static RtCoreClosure* rt_core_as_closure(int64_t value) {
+/* Untag a heap-tagged value and return the pointer only if it is a
+ * registered immortal pointer, else NULL. Membership is a pointer-only
+ * comparison inside rt_core_is_registered_immortal_ptr, so a raw pointer that
+ * merely collides with the heap tag is never dereferenced. */
+static void* rt_core_untag_registered_immortal(int64_t value) {
     if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
-    RtCoreClosure* closure = (RtCoreClosure*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    void* p = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    if (!p) return NULL;
+    if (!rt_core_is_registered_immortal_ptr(p)) return NULL;
+    return p;
+}
+
+static RtCoreClosure* rt_core_as_closure(int64_t value) {
+    RtCoreClosure* closure = (RtCoreClosure*)rt_core_untag_registered_immortal(value);
     if (!closure) return NULL;
-    /* Membership is a pointer-only comparison inside
-     * rt_core_is_registered_immortal_ptr. Do not dereference a raw function
-     * pointer that merely collides with the heap tag. */
-    if (!rt_core_is_registered_immortal_ptr(closure)) return NULL;
     return closure->kind == RT_VALUE_HEAP_CLOSURE ? closure : NULL;
 }
 
@@ -2957,10 +2928,8 @@ static inline RtCoreFloat* rt_core_as_heap_float(int64_t value) {
  * Registry membership is checked BEFORE any dereference (same tag-collision
  * guard as rt_core_as_heap_float). */
 static inline RtCoreWideInt* rt_core_as_heap_int(int64_t value) {
-    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
-    RtCoreWideInt* n = (RtCoreWideInt*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    RtCoreWideInt* n = (RtCoreWideInt*)rt_core_untag_registered_immortal(value);
     if (!n) return NULL;
-    if (!rt_core_is_registered_immortal_ptr(n)) return NULL;
     if (n->kind != RT_VALUE_HEAP_INT) return NULL;
     return n;
 }
@@ -2970,10 +2939,8 @@ static inline RtCoreWideInt* rt_core_as_heap_int(int64_t value) {
  * tag-collision guard as rt_core_as_heap_float / rt_core_as_heap_int), so a
  * stray i64 that merely aliases TAG_HEAP is never dereferenced. */
 static inline RtCoreUInt* rt_core_as_heap_uint(int64_t value) {
-    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
-    RtCoreUInt* u = (RtCoreUInt*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    RtCoreUInt* u = (RtCoreUInt*)rt_core_untag_registered_immortal(value);
     if (!u) return NULL;
-    if (!rt_core_is_registered_immortal_ptr(u)) return NULL;
     if (u->kind != RT_VALUE_HEAP_UINT) return NULL;
     return u;
 }
@@ -2990,6 +2957,16 @@ static inline int64_t rt_core_from_special(uint64_t payload) {
 
 static inline int64_t rt_core_nil(void) {
     return rt_core_from_special(RT_VALUE_SPECIAL_NIL);
+}
+
+/* Register a freshly built heap string and return its tagged value; on
+ * registration failure free it and return nil. */
+static int64_t rt_core_string_publish_or_nil(RtCoreString* out) {
+    if (!rt_core_register_string(out)) {
+        free(out);
+        return rt_core_nil();
+    }
+    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
 }
 
 static inline int rt_core_is_int(int64_t value) {
@@ -5873,11 +5850,10 @@ static int rt_core_enum_eq(
         rt_core_value_eq_inner(left->payload, right->payload, visited, visited_len);
 }
 
-static int rt_core_value_eq_inner(
-    int64_t left,
-    int64_t right,
-    RtCoreEqPair* visited,
-    size_t visited_len) {
+/* Equality for everything that is not an array/enum (identity, float, wide
+ * int, special, string). Returns 0/1 when decided, -1 when the operands may be
+ * containers and the caller must compare them structurally. */
+static int rt_core_eq_leaf(int64_t left, int64_t right) {
     if (left == right) return 1;
     if (rt_core_is_float(left) || rt_core_is_float(right)) {
         return rt_core_is_float(left) && rt_core_is_float(right) &&
@@ -5894,6 +5870,16 @@ static int rt_core_value_eq_inner(
         if (!a || !b || a->len != b->len) return 0;
         return a->len == 0 || memcmp(a->data, b->data, (size_t)a->len) == 0;
     }
+    return -1;
+}
+
+static int rt_core_value_eq_inner(
+    int64_t left,
+    int64_t right,
+    RtCoreEqPair* visited,
+    size_t visited_len) {
+    int leaf = rt_core_eq_leaf(left, right);
+    if (leaf >= 0) return leaf;
     RtCoreArray* left_array = rt_core_as_registered_array(left);
     RtCoreArray* right_array = rt_core_as_registered_array(right);
     if (left_array || right_array) {
@@ -5908,23 +5894,8 @@ static int rt_core_value_eq_inner(
 }
 
 int64_t rt_native_eq(int64_t left, int64_t right) {
-    if (left == right) return 1;
-    if (rt_core_is_float(left) || rt_core_is_float(right)) {
-        return rt_core_is_float(left) && rt_core_is_float(right) &&
-            rt_core_as_float(left) == rt_core_as_float(right);
-    }
-    {
-        int numeric = spl_core_heap_int_eq(left, right);
-        if (numeric >= 0) return numeric;
-    }
-    if (rt_core_is_special(left) || rt_core_is_special(right)) return 0;
-    RtCoreString* left_string = rt_core_as_string(left);
-    RtCoreString* right_string = rt_core_as_string(right);
-    if (left_string || right_string) {
-        if (!left_string || !right_string || left_string->len != right_string->len) return 0;
-        return left_string->len == 0 ||
-            memcmp(left_string->data, right_string->data, (size_t)left_string->len) == 0;
-    }
+    int leaf = rt_core_eq_leaf(left, right);
+    if (leaf >= 0) return leaf;
     RtCoreArray* left_array = rt_core_as_registered_array(left);
     RtCoreArray* right_array = rt_core_as_registered_array(right);
     RtCoreEnum* left_enum = rt_core_as_registered_enum(left);
@@ -6295,11 +6266,7 @@ int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
             i += w;
         }
         out->data[out_len] = '\0';
-        if (!rt_core_register_string(out)) {
-            free(out);
-            return rt_core_nil();
-        }
-        return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+        return rt_core_string_publish_or_nil(out);
     }
     if (!ascii) {
         begin = (int64_t)spl_text_cp_to_byte(sd, s->len, (uint64_t)begin);
@@ -6532,11 +6499,7 @@ static int64_t rt_string_ascii_case(int64_t value, int to_lower) {
         out->data[i] = ch;
     }
     out->data[s->len] = '\0';
-    if (!rt_core_register_string(out)) {
-        free(out);
-        return rt_core_nil();
-    }
-    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+    return rt_core_string_publish_or_nil(out);
 }
 
 int64_t rt_string_to_lower(int64_t value) {
@@ -6753,11 +6716,7 @@ int64_t rt_string_join(int64_t array_value, int64_t separator) {
     }
     free(items);
     out->data[total] = '\0';
-    if (!rt_core_register_string(out)) {
-        free(out);
-        return rt_core_nil();
-    }
-    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+    return rt_core_string_publish_or_nil(out);
 }
 
 /* Native joins accept registered counted strings and borrowed NUL-terminated
@@ -7006,11 +6965,7 @@ int64_t rt_string_repeat(int64_t value, int64_t count) {
         memcpy(out->data + i * s->len, s->data, (size_t)s->len);
     }
     out->data[out_len] = '\0';
-    if (!rt_core_register_string(out)) {
-        free(out);
-        return rt_core_nil();
-    }
-    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+    return rt_core_string_publish_or_nil(out);
 }
 
 /* Character-class predicates: non-empty AND every character in the class.
@@ -8083,11 +8038,7 @@ int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {
         }
     }
     out->data[out_len] = '\0';
-    if (!rt_core_register_string(out)) {
-        free(out);
-        return rt_core_nil();
-    }
-    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+    return rt_core_string_publish_or_nil(out);
 }
 
 /* A raw, unregistered `char*` receiver does not decode via rt_core_as_string.
@@ -12029,13 +11980,15 @@ int64_t rt_bytes_u8_at(SplArray* a, int64_t idx) {
     return rt_core_as_int(((int64_t*)array->data)[idx]) & 0xff;
 }
 
-int64_t rt_bytes_u32_le_at(SplArray* a, int64_t idx) {
+/* Little-endian load of `width` bytes at `idx` (negative idx counts from the
+ * end); 0 when out of range. */
+static int64_t rt_bytes_le_at(SplArray* a, int64_t idx, int width) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
     if (idx < 0) idx = array->len + idx;
-    if (idx < 0 || idx + 4 > array->len) return 0;
+    if (idx < 0 || idx + width > array->len) return 0;
     uint64_t v = 0;
-    for (int shift = 0; shift < 4; shift++) {
+    for (int shift = 0; shift < width; shift++) {
         uint64_t byte = (array->flags & RT_CORE_ARRAY_FLAG_BYTES)
             ? ((uint8_t*)array->data)[idx + shift]
             : (uint64_t)(rt_core_as_int(((int64_t*)array->data)[idx + shift]) & 0xff);
@@ -12044,19 +11997,12 @@ int64_t rt_bytes_u32_le_at(SplArray* a, int64_t idx) {
     return (int64_t)v;
 }
 
+int64_t rt_bytes_u32_le_at(SplArray* a, int64_t idx) {
+    return rt_bytes_le_at(a, idx, 4);
+}
+
 int64_t rt_bytes_u64_le_at(SplArray* a, int64_t idx) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (idx < 0) idx = array->len + idx;
-    if (idx < 0 || idx + 8 > array->len) return 0;
-    uint64_t v = 0;
-    for (int shift = 0; shift < 8; shift++) {
-        uint64_t byte = (array->flags & RT_CORE_ARRAY_FLAG_BYTES)
-            ? ((uint8_t*)array->data)[idx + shift]
-            : (uint64_t)(rt_core_as_int(((int64_t*)array->data)[idx + shift]) & 0xff);
-        v |= byte << (shift * 8);
-    }
-    return (int64_t)v;
+    return rt_bytes_le_at(a, idx, 8);
 }
 
 int8_t rt_bytes_u8_set(SplArray* a, int64_t idx, int64_t val) {
@@ -21166,11 +21112,8 @@ int64_t rt_io_tcp_connect(int64_t addr_val) {
 
 int64_t rt_io_tcp_connect_timeout(int64_t addr_val, int64_t ms) {
     if (ms <= 0) return -1;
-    char addr_buf[256];
-    const char* address = rt_extract_cstr(addr_val, addr_buf, sizeof(addr_buf));
-    if (!address) return -1;
     struct sockaddr_in socket_address;
-    if (rt_parse_addr_port(address, &socket_address) < 0) return -1;
+    if (rt_io_addr_arg(addr_val, &socket_address) < 0) return -1;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     int original_flags = fcntl(fd, F_GETFL, 0);
@@ -21426,14 +21369,11 @@ int64_t rt_io_udp_bind(int64_t addr_val) {
 }
 
 int64_t rt_io_udp_send_to(int64_t fd, int64_t data_val, int64_t addr_val) {
-    char addr_buf[256];
-    const char* a = rt_extract_cstr(addr_val, addr_buf, sizeof(addr_buf));
-    if (!a) return -1;
+    struct sockaddr_in sa;
+    if (rt_io_addr_arg(addr_val, &sa) < 0) return -1;
     RtCoreArray* ca = rt_core_array_ptr((SplArray*)(uintptr_t)data_val);
     if (!ca || !(ca->flags & RT_CORE_ARRAY_FLAG_BYTES) || ca->len < 0 ||
         ca->len > 65535 || (ca->len > 0 && !ca->data)) return -1;
-    struct sockaddr_in sa;
-    if (rt_parse_addr_port(a, &sa) < 0) return -1;
     return (int64_t)sendto((int)fd, ca->data, (size_t)ca->len, 0, (struct sockaddr*)&sa, sizeof(sa));
 }
 
