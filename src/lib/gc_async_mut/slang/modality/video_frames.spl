@@ -18,8 +18,16 @@ const VIDEO_MAX_FRAMES: i64 = 32
 # Decoded size of a video slang will take. Matches the HTTP layer's 10 MiB body
 # limit, so an in-process caller is held to the same bound a client is.
 const VIDEO_MAX_BYTES: i64 = 10485760
-const VIDEO_TIMEOUT_MS: i64 = 120000
-const VIDEO_MAX_OUTPUT_BYTES: i64 = 67108864
+const VIDEO_TIMEOUT_MS: i64 = 30000
+# rt_process_run_bounded_bytes refuses a cap above 16 MiB and then never spawns
+# (env_process.rs / runtime_process.c), so stay at that hard limit. 32 frames
+# at 384px mjpeg q4 are far below it.
+const VIDEO_MAX_OUTPUT_BYTES: i64 = 16777216
+# Video parts one request may carry: each one costs two ffmpeg runs.
+const VIDEO_MAX_PARTS: i64 = 1
+# Prefix of a sample_frames reason that is the server's fault (temp file,
+# spawn, timeout), not the client's input; callers answer it 503, not 400.
+const VIDEO_SERVER_FAULT: text = "server: "
 # Long edge of a sampled frame: small enough that n frames fit a small VLM's
 # context, large enough for it to read the scene.
 const VIDEO_FRAME_EDGE: i64 = 384
@@ -30,6 +38,13 @@ fn video_ffmpeg_path() -> text:
 
 fn video_max_bytes() -> i64:
     VIDEO_MAX_BYTES
+
+fn video_max_parts() -> i64:
+    VIDEO_MAX_PARTS
+
+# True when a sample_frames reason is a server fault rather than bad input.
+fn video_reason_is_server_fault(reason: text) -> bool:
+    reason.starts_with(VIDEO_SERVER_FAULT)
 
 # Frames taken per video: SLANG_VIDEO_FRAMES, default 4, clamped to 1..32.
 fn video_frame_count() -> i64:
@@ -55,7 +70,8 @@ fn _temp_dir() -> text:
         val v = (env_get(key) ?? "").trim()
         if v != "":
             return v
-    "."
+    # Never the server's working directory.
+    "/tmp"
 
 # Seconds from the "Duration: HH:MM:SS.cc" line ffmpeg prints for `-i` alone;
 # 0 when it prints none (a stream with no known duration).
@@ -114,17 +130,24 @@ fn sample_frames(blob: [u8], n: i64) -> Result<[[u8]], text>:
         return Err("the video is empty")
     val path = _temp_dir() + "/slang_video_" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".bin"
     if not file_write_bytes(path, blob):
-        return Err("could not write the video to a temp file under " + _temp_dir())
-    val probe = _run_ffmpeg(exe, ["-hide_banner", "-nostdin", "-i", path])
+        file_delete(path)
+        return Err(VIDEO_SERVER_FAULT + "could not stage the video in a temp file")
+    # Input pinned to plain files: an uploaded "video" that is really a playlist
+    # (HLS, concat) must not make ffmpeg open other local files or URLs.
+    val probe = _run_ffmpeg(exe, ["-hide_banner", "-nostdin", "-protocol_whitelist", "file", "-i", path])
     val seconds = _duration_seconds(bytes_to_text(probe.1))
-    val run = _run_ffmpeg(exe, ["-v", "error", "-nostdin", "-i", path, "-an", "-vf", _frame_filter(n, seconds), "-frames:v", n.to_text(), "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "4", "pipe:1"])
+    val run = _run_ffmpeg(exe, ["-v", "error", "-nostdin", "-protocol_whitelist", "file", "-i", path, "-an", "-vf", _frame_filter(n, seconds), "-frames:v", n.to_text(), "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "4", "pipe:1"])
     file_delete(path)
+    # A negative exit is a spawn failure or timeout: the server's fault.
+    if run.2 < 0:
+        return Err(VIDEO_SERVER_FAULT + "the frame sampler did not finish (exit " + run.2.to_text() + ")")
+    # A non-zero exit with some frames is a truncated or partly broken clip;
+    # answering from part of it would describe a video the client did not send.
+    if run.2 != 0:
+        return Err("the video could not be fully decoded (ffmpeg exit " + run.2.to_text() + ")")
     val frames = split_mjpeg(run.0)
     if frames.len() == 0:
-        val why = bytes_to_text(run.1).trim()
-        if why == "":
-            return Err("ffmpeg produced no frame (exit " + run.2.to_text() + "); is the input a video?")
-        return Err("ffmpeg produced no frame: " + why)
+        return Err("no frame could be decoded; is the input a video?")
     Ok(frames)
 
-export video_ffmpeg_path, video_max_bytes, video_frame_count, split_mjpeg, sample_frames
+export video_ffmpeg_path, video_max_bytes, video_max_parts, video_reason_is_server_fault, video_frame_count, split_mjpeg, sample_frames
