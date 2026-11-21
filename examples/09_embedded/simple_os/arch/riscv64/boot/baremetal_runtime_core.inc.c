@@ -3355,3 +3355,112 @@ RuntimeValue rt_stdout_write(RuntimeValue data)
     simpleos_serial_put_string_value(data);
     return (IS_HEAP(data) && DECODE_PTR(data) && ((HeapHeader *)DECODE_PTR(data))->type == HEAP_STRING) ? ENCODE_INT((int64_t)((RuntimeString *)DECODE_PTR(data))->len) : ENCODE_INT(0);
 }
+
+/* Codegen-emitted helpers on ANY receivers (codegen/runtime_sffi.rs): handles
+ * are tagged RuntimeValues, indices/counts/payloads raw int64, int8 returns
+ * raw 0/1. Array elements stay tagged slots (no byte-packed arrays here). */
+static RuntimeArray *simpleos_as_array(RuntimeValue v)
+{
+    if (!IS_HEAP(v)) return 0;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(v);
+    return (a && a->hdr.type == HEAP_ARRAY) ? a : 0;
+}
+
+static RuntimeString *simpleos_as_string(RuntimeValue v)
+{
+    if (!IS_HEAP(v)) return 0;
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(v);
+    return (s && s->hdr.type == HEAP_STRING) ? s : 0;
+}
+
+int64_t rt_any_to_int(int64_t value)
+{
+    if (simpleos_as_string(value)) return (int64_t)rt_string_to_int(value);
+    return (int64_t)rt_value_unbox_int(value);
+}
+
+int64_t rt_array_get_text(int64_t a, int64_t idx) { return (int64_t)rt_array_get(a, idx); }
+
+int8_t rt_array_set_text(int64_t a, int64_t idx, int64_t val) { return rt_array_set(a, idx, val) ? 1 : 0; }
+
+int64_t rt_array_new_with_cap_u64(int64_t cap) { return (int64_t)rt_array_new_with_cap(cap); }
+
+int64_t rt_array_is_byte_packed(int64_t a) { (void)a; return 0; }
+
+int64_t rt_array_repeat(int64_t value, int64_t count)
+{
+    RuntimeValue arr = rt_array_new_with_cap(count > 0 ? count : 0);
+    for (int64_t i = 0; i < count; i++) rt_array_push(arr, value);
+    return (int64_t)arr;
+}
+
+int64_t rt_array_fill_span(int64_t dst, int64_t off, int64_t count, int64_t value)
+{
+    RuntimeArray *a = simpleos_as_array(dst);
+    if (!a || off < 0 || count < 0 || (uint64_t)off + (uint64_t)count > a->len) return -1;
+    for (int64_t i = 0; i < count; i++) a->items[off + i] = value;
+    return 0;
+}
+
+static int64_t simpleos_typed_word_at(int64_t arr, int64_t idx)
+{
+    RuntimeArray *a = simpleos_as_array(arr);
+    if (!a) return 0;
+    if (idx < 0) idx += (int64_t)a->len;
+    if (idx < 0 || (uint64_t)idx >= a->len) return 0;
+    return (int64_t)simpleos_raw_or_encoded_int(a->items[idx]);
+}
+
+int64_t rt_typed_words_u32_at(int64_t a, int64_t idx) { return simpleos_typed_word_at(a, idx) & 0xffffffffLL; }
+
+int64_t rt_typed_words_u64_at(int64_t a, int64_t idx) { return simpleos_typed_word_at(a, idx); }
+
+int8_t rt_typed_words_u32_set(int64_t a, int64_t idx, int64_t value)
+{
+    return rt_array_set(a, idx, ENCODE_INT((int64_t)((uint64_t)value & 0xffffffffULL))) ? 1 : 0;
+}
+
+int64_t rt_typed_bytes_u8_data_at(int64_t data_ptr, int64_t index)
+{
+    if (!data_ptr || index < 0) return 0;
+    return (int64_t)(simpleos_raw_or_encoded_int(((RuntimeValue *)(uintptr_t)data_ptr)[index]) & 0xffu);
+}
+
+int64_t rt_string_from_byte_array(int64_t array_value) { return (int64_t)rt_bytes_to_text(array_value); }
+
+int64_t rt_slice_text_bytes(int64_t value, int64_t start, int64_t end, int64_t step)
+{
+    return (int64_t)rt_slice(value, start, end, step);
+}
+
+int64_t rt_string_char_count(int64_t value)
+{
+    RuntimeString *s = simpleos_as_string(value);
+    if (!s) return 0;
+    int64_t n = 0;
+    for (uint64_t i = 0; i < s->len; i++) n += ((s->data[i] & 0xC0) != 0x80);
+    return n;
+}
+
+int64_t rt_text_find(int64_t value, int64_t needle, int64_t start)
+{
+    RuntimeString *h = simpleos_as_string(value), *n = simpleos_as_string(needle);
+    if (!h || !n) return -1;
+    if (start < 0) start = 0;
+    if ((uint64_t)start > h->len) return -1;
+    if (n->len == 0) return start;
+    for (uint64_t i = (uint64_t)start; i + n->len <= h->len; i++) {
+        uint64_t j = 0;
+        while (j < n->len && h->data[i + j] == n->data[j]) j++;
+        if (j == n->len) return (int64_t)i;
+    }
+    return -1;
+}
+
+int64_t rt_text_is_ascii(int64_t value)
+{
+    RuntimeString *s = simpleos_as_string(value);
+    if (!s) return 0;
+    for (uint64_t i = 0; i < s->len; i++) if ((unsigned char)s->data[i] >= 0x80) return 0;
+    return 1;
+}
