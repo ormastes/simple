@@ -251,14 +251,6 @@ struct WinCapture {
 
 #define WIN_CAPTURE_MARKER_MAX 96U
 
-static void win_reverse_bytes(char* data, size_t len) {
-    for (size_t left = 0, right = len ? len - 1 : 0; left < right; left++, right--) {
-        char byte = data[left];
-        data[left] = data[right];
-        data[right] = byte;
-    }
-}
-
 static int win_capture_append(struct WinCapture* capture, const char* bytes, size_t len) {
     if (capture->raw_prefix) {
         size_t keep = capture->limit - capture->len;
@@ -308,32 +300,9 @@ static int win_capture_append(struct WinCapture* capture, const char* bytes, siz
     }
 
     size_t head_limit = capture->limit / 2U + capture->limit % 2U;
-    size_t tail_limit = capture->limit / 2U;
-    size_t head_add = head_limit - capture->head_len;
-    if (head_add > len) head_add = len;
-    memcpy(capture->data + capture->head_len, bytes, head_add);
-    capture->head_len += head_add;
-    bytes += head_add;
-    len -= head_add;
-    if (len == 0 || tail_limit == 0) return 1;
-
-    char* tail = capture->data + head_limit;
-    if (len >= tail_limit) {
-        memcpy(tail, bytes + len - tail_limit, tail_limit);
-        capture->tail_start = 0;
-        capture->tail_len = tail_limit;
-        return 1;
-    }
-    size_t overflow = capture->tail_len + len > tail_limit
-        ? capture->tail_len + len - tail_limit : 0;
-    capture->tail_start = (capture->tail_start + overflow) % tail_limit;
-    capture->tail_len -= overflow;
-    size_t write_at = (capture->tail_start + capture->tail_len) % tail_limit;
-    size_t first = tail_limit - write_at;
-    if (first > len) first = len;
-    memcpy(tail + write_at, bytes, first);
-    memcpy(tail, bytes + first, len - first);
-    capture->tail_len += len;
+    rt_capture_ring_append(capture->data, &capture->head_len, head_limit,
+                           capture->data + head_limit, capture->limit / 2U,
+                           &capture->tail_start, &capture->tail_len, bytes, len);
     return 1;
 }
 
@@ -343,9 +312,9 @@ static void win_capture_finish(struct WinCapture* capture) {
     size_t head_limit = capture->limit / 2U + capture->limit % 2U;
     char* tail = capture->data + head_limit;
     if (capture->tail_start != 0 && capture->tail_len != 0) {
-        win_reverse_bytes(tail, capture->tail_start);
-        win_reverse_bytes(tail + capture->tail_start, capture->tail_len - capture->tail_start);
-        win_reverse_bytes(tail, capture->tail_len);
+        rt_capture_reverse_bytes(tail, capture->tail_start);
+        rt_capture_reverse_bytes(tail + capture->tail_start, capture->tail_len - capture->tail_start);
+        rt_capture_reverse_bytes(tail, capture->tail_len);
     }
     capture->len = rt_capture_splice_tail(capture->data, capture->head_len, tail,
                                           capture->tail_len, capture->total);
