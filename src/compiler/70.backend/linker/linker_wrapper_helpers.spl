@@ -7,8 +7,9 @@ use compiler.hir.hir_types.{Effect}
 #
 # Interpreter-safe: no generics (<>) used.
 
-use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, env_get, host_os, host_arch, process_run, cwd}
+use std.io_runtime.{ShellResult, shell, shell_output, file_exists, dir_exists, dir_create_all, file_copy, file_delete, file_size_raw, file_read_bytes, env_get, host_os, host_arch, process_run, cwd}
 use std.log.{debug, info}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write_bytes}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
 use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_strict_root_v1}
 use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native}
@@ -336,32 +337,11 @@ fn hex_char_to_int(c: text) -> i64:
 # ============================================================================
 
 fn write_elf_bytes_to_file(path: text, bytes: [u8]) -> Result<(), text>:
-    """Write raw ELF bytes directly to disk."""
+    """Write raw native object bytes atomically to disk without spawning a shell."""
     if path == "":
         return Err("Output path is empty")
 
-    # Ensure the parent directory exists before writing. The native object
-    # cache assembles deep paths (build/native_cache/backend=llvm;.../object.o)
-    # that do not exist after a cache clear; rt_file_write_bytes does not
-    # create parent dirs, so the write would fail with the error below.
-    val last_slash = path.last_index_of("/")
-    if last_slash > 0:
-        val parent_dir = path[0:last_slash]
-        val _mkdir_result = shell("mkdir -p '{parent_dir}'")
-
-    if not file_write_bytes_tagged_native(path, bytes):
-        return Err("Failed to write ELF bytes to {path}")
-
-    # Lightweight magic check to catch obvious corruption. Despite the
-    # function name (historically ELF-only, written when the native-build
-    # object emitter only ever targeted Linux), the in-process LLVM backend
-    # also runs on macOS/Windows hosts and legitimately emits Mach-O
-    # (0xFEEDFACE/0xFEEDFACF little-endian == bytes CE/CF FA ED FE, or the
-    # byte-swapped big-endian form FE ED FA CE/CF) or a fat/universal binary
-    # (0xCAFEBABE) there -- an ELF-only check was misfiring as "Invalid ELF
-    # magic" on those hosts even for a correctly-formed native object.
-    # Accept any recognized native object-format magic instead of hardcoding
-    # ELF, so this stays a corruption check, not an OS-format enforcement.
+    # Validate magic BEFORE publishing so corrupt bytes never touch disk.
     if bytes.len() >= 4:
         val is_elf = bytes[0] == 0x7f and bytes[1] == 0x45 and bytes[2] == 0x4c and bytes[3] == 0x46
         val is_macho_64_le = bytes[0] == 0xcf and bytes[1] == 0xfa and bytes[2] == 0xed and bytes[3] == 0xfe
@@ -369,15 +349,28 @@ fn write_elf_bytes_to_file(path: text, bytes: [u8]) -> Result<(), text>:
         val is_macho_64_be = bytes[0] == 0xfe and bytes[1] == 0xed and bytes[2] == 0xfa and bytes[3] == 0xcf
         val is_macho_32_be = bytes[0] == 0xfe and bytes[1] == 0xed and bytes[2] == 0xfa and bytes[3] == 0xce
         val is_macho_fat = bytes[0] == 0xca and bytes[1] == 0xfe and bytes[2] == 0xba and bytes[3] == 0xbe
-        val is_pe_coff = bytes[0] == 0x4d and bytes[1] == 0x5a  # "MZ"
-        # COFF OBJECT files (what llc --filetype=obj emits on Windows) have no
-        # "MZ" header: they start directly with the IMAGE_FILE_HEADER machine
-        # field. 0x8664 = x86-64 (bytes 64 86), 0x014c = i386, 0xaa64 = arm64.
+        val is_pe_coff = bytes[0] == 0x4d and bytes[1] == 0x5a
         val is_coff_obj_amd64 = bytes[0] == 0x64 and bytes[1] == 0x86
         val is_coff_obj_i386 = bytes[0] == 0x4c and bytes[1] == 0x01
         val is_coff_obj_arm64 = bytes[0] == 0x64 and bytes[1] == 0xaa
         if not (is_elf or is_macho_64_le or is_macho_32_le or is_macho_64_be or is_macho_32_be or is_macho_fat or is_pe_coff or is_coff_obj_amd64 or is_coff_obj_i386 or is_coff_obj_arm64):
             return Err("Invalid object-file magic in {path} (bytes: {bytes[0]} {bytes[1]} {bytes[2]} {bytes[3]})")
+
+    var last_slash = -1
+    var scan_i = path.byte_len() - 1
+    while scan_i >= 0:
+        if path.byte_at(scan_i) == 47:
+            last_slash = scan_i
+            break
+        scan_i = scan_i - 1
+    if last_slash > 0:
+        val parent_dir = path.substring(0, last_slash)
+        if not dir_exists(parent_dir):
+            val _made = dir_create_all(parent_dir)
+
+    if not file_atomic_write_bytes(path, bytes):
+        if not file_write_bytes_tagged_native(path, bytes):
+            return Err("Failed to write ELF bytes to {path}")
 
     Ok(())
 

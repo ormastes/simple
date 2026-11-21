@@ -118,7 +118,7 @@ use compiler.driver.driver_source_parse_support.{
     rt_transient_heap_promote, driver_parse_exit_v1, driver_parse_stdout_flush_v1,
     driver_parse_env_get_v1, driver_parse_env_set_v1, driver_parse_transient_scope_begin_v1,
     driver_parse_transient_scope_pause_v1, driver_parse_transient_scope_end_v1, driver_parse_shard_active,
-    driver_parse_shard_claimed, _driver_parse_shard_owns, _driver_publish_frontend_cache_scope,
+    driver_parse_shard_claimed, _driver_parse_shard_owns, driver_parse_shard_strided_start_v1, _driver_publish_frontend_cache_scope,
     _STREAM_PARSE_ERROR_PREFIX, driver_frontend_offload_decision
 }
 
@@ -330,15 +330,17 @@ impl CompilerDriver:
                     return false
             for _p in source_paths:
                 worker_built.push(false)
-        while source_index < frozen_source_count:
+        val parse_shard_start = if parse_shard: driver_parse_shard_strided_start_v1(frozen_source_count) else: 0
+        var source_step = 0
+        while source_step < frozen_source_count:
+            source_index = if parse_shard: (parse_shard_start + source_step) % frozen_source_count else: source_step
+            source_step = source_step + 1
             # A parse shard exists only to warm the front-end cache for the
             # files it owns (static hash slice, or a claim from the shared
-            # queue). Until 2026-10-19 this loop never asked, so every shard
-            # parsed the WHOLE closure racing its siblings: Phase 4 (2702
-            # modules, 8 shards) reported `claimed=0` on all 8 and ~11k body
-            # parses, ~2.75 per module.
+            # queue). Starting at `parse_shard_start` and wrapping modulo
+            # `frozen_source_count` gives each shard a disjoint initial partition
+            # while still work-stealing stragglers across the full ring.
             if parse_shard and not _driver_parse_shard_owns(source_paths[source_index]):
-                source_index = source_index + 1
                 continue
             val canonical_path = canonical_paths[source_index]
             if builder.has_canonical_path(canonical_path):
@@ -404,7 +406,6 @@ impl CompilerDriver:
                         self.ctx = poison_ctx
                         if poison_ctx.poison_budget_exhausted():
                             return false
-                        source_index = source_index + 1
                         continue
                     self.ctx.add_error(
                         "Module surface extraction error: {stream_err}")
@@ -414,7 +415,6 @@ impl CompilerDriver:
                     worker_built[source_index] = true
                 release_seq = release_seq + 1
                 log_module_surface_released(source_paths[source_index], release_seq)
-            source_index = source_index + 1
 
         # One receipt per process, same shape as the non-streaming loop's.
         # Every process on this route (parse shard, HIR shard, main build)

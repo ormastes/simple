@@ -1322,15 +1322,64 @@ pub fn driver_native_collect_capsule_result_v1(
     val object_parent = dirname(object_path)
     if object_parent == "" or not directory_fsync(object_parent):
         return _collect_failure(module_name, "native-capsule-directory-fsync-failed", object_parent)
+    _driver_native_collect_capsule_persist_v1(capsule, build_cache, module_name, object_path, true)
+
+var _g_capsule_batch_collect_seq: i64 = 0
+
+fn _driver_native_collect_capsule_batch_v1(
+    batch: FrozenNativeModuleCapsuleBatchV1, build_cache: BuildCache,
+    module_name: text, object_path: text
+) -> text:
+    val capsule = frozen_native_capsule_batch_find_v1(batch, module_name)
+    if not capsule.ok or object_path != capsule.object_path:
+        return _collect_failure(module_name, "native-capsule-result-mismatch",
+            "capsule-ok={capsule.ok} produced={object_path}"
+                + " capsule-object={capsule.object_path}")
+    if capsule.cache_source != "":
+        if capsule.source_identity == "":
+            return _collect_failure(module_name, "native-capsule-source-mutated",
+                "frozen-identity-absent"
+                    + " cache-source={capsule.cache_source}")
+        if driver_native_capsule_identity_empty_v1(capsule.source_identity):
+            return _collect_failure(module_name, "capsule-identity-empty",
+                "frozen identity is the digest of empty content"
+                    + " cache-source={capsule.cache_source}")
+        val disk_identity = driver_native_disk_source_identity(capsule.cache_source)
+        if disk_identity != capsule.source_identity:
+            return _collect_failure(module_name, "native-capsule-source-mutated",
+                "cache-source={capsule.cache_source}"
+                    + " capsule-identity={capsule.source_identity}"
+                    + " disk-identity={disk_identity}")
+    val receipt_reason = driver_native_capsule_result_reason_v1(capsule)
+    if receipt_reason != "":
+        return _collect_failure(module_name, "native-capsule-receipt-invalid",
+            receipt_reason)
+    if not file_fsync(object_path):
+        return _collect_failure(module_name, "native-capsule-object-fsync-failed", object_path)
+    val receipt_path = object_path + ".capsule-receipt"
+    if not file_fsync(receipt_path):
+        return _collect_failure(module_name, "native-capsule-receipt-fsync-failed", receipt_path)
+    val object_parent = dirname(object_path)
+    if object_parent == "" or not directory_fsync(object_parent):
+        return _collect_failure(module_name, "native-capsule-directory-fsync-failed", object_parent)
+    _g_capsule_batch_collect_seq = _g_capsule_batch_collect_seq + 1
+    val persist_now = (_g_capsule_batch_collect_seq % 32) == 0
+    _driver_native_collect_capsule_persist_v1(capsule, build_cache, module_name, object_path, persist_now)
+
+fn _driver_native_collect_capsule_persist_v1(
+    capsule: FrozenNativeModuleCapsuleV1, build_cache: BuildCache,
+    module_name: text, object_path: text, persist_now: bool
+) -> text:
     if capsule.cache_source == "": return ""
     val source_fp = FileFingerprint.from_file(capsule.cache_source)
     if val source_fp_val = source_fp:
         build_cache.update_entry(capsule.cache_source, source_fp_val,
             [], [object_path], capsule.module_witness)
-        build_cache.save_entries()
+        if persist_now:
+            build_cache.save_entries()
         return ""
     _collect_failure(module_name, "native-capsule-fingerprint-failed",
-        "FileFingerprint.from_file returned nil for {capsule.cache_source}")
+        "FileFingerprint.from_file returned None for {capsule.cache_source}")
 
 pub fn driver_native_capsule_inputs_valid_v1(
     capsule: FrozenNativeModuleCapsuleV1, backend_name: text, target: text,
@@ -2831,8 +2880,13 @@ impl CompilerDriver:
                     unit_timeout_ms: 0
                 )
                 var builder = ParallelBuilder.create(parallel_cfg)
-                # stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
-                builder.set_owner_collect(fn(unit_name: text, obj_path: text): driver_native_collect_capsule_result_v1(capsules, build_cache, unit_name, obj_path))
+                _g_capsule_batch_collect_seq = 0
+                # Defer per-module O(entries) build_cache.sdn rewrites inside a batch:
+                # compile_to_native saves the whole batch immediately after build() at
+                # line ~2982, and checkpointing every 32 modules bounds crash-recovery loss
+                # without 4,231 quadratic manifest serializations.
+                builder.set_owner_collect(fn(unit_name: text, obj_path: text): _driver_native_collect_capsule_batch_v1(
+                    capsules, build_cache, unit_name, obj_path))
 
                 for name in uncached_names:
                     builder.add_unit(name, [])
@@ -4847,7 +4901,9 @@ fn _driver_codegen_pool_publish_object_v1(staged_path: text, obj_path: text) -> 
 # native-group manifest, no translation-scope or bitcode-debug variants, and
 # an object tool present (clang by default, llc as the fallback). Anything else
 # keeps the serial lane (concurrency=1).
-fn _driver_codegen_pool_lane_reason_v1(backend_name: text, is_release: bool,
+# reason: internal codegen pool admission predicate over backend flags
+@allow(primitive_api)
+pub fn _driver_codegen_pool_lane_reason_v1(backend_name: text, is_release: bool,
         backend_session_present: bool, plugin_path: text) -> text:
     if (env_get_nullable(NATIVE_CODEGEN_POOL_ENV_V1) ?? "") == "0":
         return "{NATIVE_CODEGEN_POOL_ENV_V1}=0"
@@ -4860,8 +4916,9 @@ fn _driver_codegen_pool_lane_reason_v1(backend_name: text, is_release: bool,
         return "backend {backend_name} is not the built-in llvm lane"
     if native_group_request_path_v1() != "":
         return "native group manifest lane"
-    if (env_get_nullable("SIMPLE_CODEGEN_MODULE_SCOPE") ?? "") == "1":
-        return "SIMPLE_CODEGEN_MODULE_SCOPE=1"
+    # llvm_module_ir_to_path_v1 wraps every module's IR emission in a per-module
+    # transient scope by default and when SIMPLE_CODEGEN_MODULE_SCOPE=1, so explicit
+    # =1 stays eligible for the concurrent llc/clang process pool.
     if (env_get_nullable("SIMPLE_LLVM_BITCODE_DEBUG") ?? "") == "1":
         return "SIMPLE_LLVM_BITCODE_DEBUG=1"
     if (env_get_nullable("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? "") == "1":

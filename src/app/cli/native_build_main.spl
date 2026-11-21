@@ -1170,7 +1170,7 @@ fn native_build_capsule_hir_ledger_run_v1(args: [text], queue_dir: text, count: 
 # timeout_ms (0 = none) runs from each
 # worker's own spawn; the old sequential waits let the k-th worker of a wave
 # run up to k x timeout_ms. Reap (and log) order is exit order, not index.
-const SHARD_POOL_POLL_MS: i64 = 200
+const SHARD_POOL_POLL_MS: i64 = 10
 
 # One pool run's verdict. total_claims sums every owner's claim count; -1 when
 # any count was unreadable. all_stopped is false when a worker could not be
@@ -1372,7 +1372,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
                         deadline_hit = deadline_now
                 i = i + 1
             if reap_at < 0:
-                if label == "hir-shard": sleep_ms(10)
+                if label == "hir-shard": sleep_ms(5)
                 continue
             var hir_stopped = false
             var hir_owner_reason = ""
@@ -2051,8 +2051,11 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
     val gate_started_ms = time_now_monotonic_ms()
     var state = native_file_worker_hir_gate_verdict_v1(
         native_file_worker_hir_ledger_state_v1(hir_queue), 0, NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1)
+    var gate_idle_rounds: i64 = 0
     while state == 0:
-        thread_sleep(SHARD_POOL_POLL_MS)
+        val gate_sleep = if gate_idle_rounds <= 2: 5 elif gate_idle_rounds <= 8: 15 else: 40
+        gate_idle_rounds = gate_idle_rounds + 1
+        thread_sleep(gate_sleep)
         state = native_file_worker_hir_gate_verdict_v1(native_file_worker_hir_ledger_state_v1(hir_queue),
             time_now_monotonic_ms() - gate_started_ms, NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1)
     if state == -2:
