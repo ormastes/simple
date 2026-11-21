@@ -62,10 +62,12 @@ fn native_noop_normalized_invocation_v1(
         aspect.compile_log_level.to_text(), aspect.runtime_log_level.to_text(),
         aspect.mcdc_mode.to_text(), aspect.mcdc_manifest_sha256,
     ]))
-    # XRay static switch: folded in only when on so off-path identities are unchanged.
+    # XRay & strip switches: folded in only when active so off-path identities are unchanged.
     var base = legacy
     if options.xray_enabled:
         base = sha256_text(native_noop_frame_v1(["native-noop-xray-v1", legacy, "on"]))
+    if options.strip_output:
+        base = sha256_text(native_noop_frame_v1(["native-noop-strip-v1", base, "on"]))
     if options.library_mode == "": return base
     sha256_text(native_noop_frame_v1(["native-noop-library-mode-v1", base, options.library_mode]))
 
@@ -105,7 +107,9 @@ fn native_noop_fingerprint_v1(path: text) -> text:
 # successful build with "output-missing" (Stage 2 compiler-test matrix row
 # test_runner_build, pin 18a1f28937c2). Resolve to the spelling that exists; an
 # existing bare path always wins, and nothing is invented when neither exists.
-fn native_noop_built_output_v1(path: text) -> text:
+# reason: resolves built executable path text across bare and Windows .exe link outputs
+@allow(primitive_api)
+pub fn native_noop_built_output_v1(path: text) -> text:
     if path == "" or path.ends_with(".exe") or rt_file_exists(path):
         return path
     val exe_path = "{path}.exe"
@@ -117,7 +121,8 @@ fn native_noop_request_v1(
     profile: text, allowed_families: [text], backend_plugin_path: text,
     scv_revision: text, scv_tree: text, scv_inventory: text,
     authority_digest: text, environment_digest: text,
-    invocation_identity: text, requested_inputs: [text]
+    invocation_identity: text, requested_inputs: [text],
+    strip_output: bool = false
 ) -> NativeNoopRequestV1:
     if cache_root == "" or output_path == "" or environment_digest == "" or
             invocation_identity == "":
@@ -128,7 +133,7 @@ fn native_noop_request_v1(
     else:
         native_noop_fingerprint_v1(backend_plugin_path)
     val requested_frame = native_noop_frame_v1(requested_inputs)
-    val identity = sha256_text(native_noop_frame_v1([
+    val base_identity = sha256_text(native_noop_frame_v1([
         NATIVE_NOOP_SCHEMA_V1,
         native_build_compiler_identity(), backend, target, opt_level.to_text(),
         release.to_text(), debug_info.to_text(), gc_off.to_text(), profile,
@@ -136,6 +141,10 @@ fn native_noop_request_v1(
         scv_inventory, authority_digest, environment_digest,
         invocation_identity, requested_frame, output_path,
     ]))
+    val identity = if strip_output:
+        sha256_text(native_noop_frame_v1(["native-noop-req-strip-v1", base_identity, "strip"]))
+    else:
+        base_identity
     NativeNoopRequestV1(cache_root, identity, output_path)
 
 fn native_noop_generation_path_v1(request: NativeNoopRequestV1, generation: text) -> text:

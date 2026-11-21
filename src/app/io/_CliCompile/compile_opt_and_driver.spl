@@ -248,10 +248,17 @@ fn cli_xray_route_error(backend: text, target: text, emit: text, output_format: 
         return "{prefix} is not supported for C output or driver packaging"
     if target.starts_with("baremetal-") or target.contains("simpleos") or _cli_is_wasm_target(target):
         return "{prefix} is not supported for target '{target}'"
-    # LLVM XRay is admitted for Linux triples only (design A.5); a host-default
-    # build on a non-Linux host is rejected by the LLVM backend itself.
-    if target != "" and not target.contains("-linux"):
-        return "{prefix} is not supported for target '{target}' (Linux triples only)"
+    # LLVM and native XRay sleds are admitted for Linux and Darwin x86_64/AArch64 triples.
+    val darwin_xray_target = (target.starts_with("aarch64-apple-darwin") or
+        target.starts_with("arm64-apple-darwin") or
+        target.starts_with("aarch64-apple-macosx") or
+        target.starts_with("arm64-apple-macosx") or
+        target.starts_with("x86_64-apple-darwin") or
+        target.starts_with("x86_64-apple-macosx"))
+    if target != "" and not target.contains("-linux") and not darwin_xray_target:
+        return "{prefix} is not supported for target '{target}' (Linux and Darwin triples only)"
+    if darwin_xray_target and backend == "native":
+        return "{prefix} with backend 'native' is supported on Linux ELF only; use --backend=llvm for Darwin target '{target}'"
     val native_backend = (backend == "" or backend == "auto" or backend == "llvm" or backend == "llvm-lib" or
         backend == "llvmlib" or backend == "native" or backend == "cranelift")
     if not native_backend:
@@ -270,8 +277,13 @@ fn cli_xray_route_error(backend: text, target: text, emit: text, output_format: 
 fn cli_xray_native_target(target: text) -> text:
     if target != "":
         return target
-    if host_os() == "linux":
-        return "{host_arch()}-unknown-linux-gnu"
+    val raw_arch = host_arch()
+    val arch = if raw_arch == "arm64": "aarch64" else: raw_arch
+    val os_name = host_os()
+    if os_name == "linux":
+        return "{arch}-unknown-linux-gnu"
+    if os_name == "macos" or os_name == "darwin":
+        return "{arch}-apple-darwin"
     ""
 
 fn cli_compile_xray_native(source_file: text, out: text, output_format: text, backend: text, verbose: bool, release: bool, low_memory: bool, opt_level: i64, profile: text, debug_trace_level: text, coverage_enabled: bool, mcdc_mode_text: text, mcdc_owner_bytes: i64, mcdc_global_bytes: i64, target: text, nogc_require_strict: bool = false) -> i64:
@@ -483,6 +495,10 @@ pub fn cli_compile(args: [text]) -> i64:
             if not optimization_requested:
                 opt_level = 2
             optimization_requested = true
+        elif arg == "--debug" or arg == "-g":
+            release = false
+            profile = "dev"
+            env_set("SIMPLE_DEBUG_INFO_LEVEL", "full")
         elif arg == "--release-optimized":
             release_optimized = true
             release = true

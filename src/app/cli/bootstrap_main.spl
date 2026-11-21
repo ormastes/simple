@@ -23,7 +23,8 @@ use app.cli.bootstrap_internal_worker_routing.{bootstrap_internal_worker_entry_v
 use app.cli.bootstrap_focused_native_build.{run_exact_stage3_focused_capsule, run_exact_stage4_focused_capsule}
 use app.cli.bootstrap_focused_native_build_args.{focused_native_build_target_profile_v1, focused_native_build_cache_dir,
     focused_native_build_runtime_path, focused_native_build_runtime_bundle,
-    focused_native_build_target, focused_native_build_arg_value, focused_native_build_opt_level}
+    focused_native_build_target, focused_native_build_arg_value, focused_native_build_opt_level,
+    focused_native_build_strip, focused_native_build_has_flag}
 use app.io.native_build_cache.{native_build_cache_snapshot, native_build_cache_bind, native_build_cache_restore}
 use app.cli.bootstrap_native_output_args.{native_build_flag_needs_value, bootstrap_native_build_output_mode}
 use app.io.native_build_output_mode.{native_build_output_mode_snapshot, native_build_output_mode_bind, native_build_output_mode_restore}
@@ -63,6 +64,7 @@ use app.io.env_ops.{env_get, env_set}
 use app.cli.native_build_env_restore_v1.{native_build_env_saved_v1, native_build_env_restore_v1}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable}
 use std.nogc_sync_mut.io_runtime.{file_exists, file_size, remove_file_if_exists, dir_create}
+use std.nogc_sync_mut.io.env_ops.{host_os, host_arch}
 
 fn native_build_help() -> i64:
     0
@@ -767,10 +769,21 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
         if mode == "": "dynload" else: mode,
         args.contains("--emit-smf"), requested_output_mode != "", false)
     options.backend = backend
+    val positional_xray = focused_native_build_has_flag(args, "--xray")
+    val positional_xray_startup = focused_native_build_has_flag(args, "--xray-startup-consumer")
+    val positional_debug_flag = focused_native_build_has_flag(args, "--debug") or focused_native_build_has_flag(args, "-g")
     # --target was dropped on this route: ctx.native_target stayed "" so the
     # driver emitted a HOST object (COFF on Windows) for
     # `--target x86_64-unknown-none --emit-object`, rc=0, no warning.
-    options.native_target = focused_native_build_target(args)
+    var positional_target = focused_native_build_target(args)
+    if positional_xray and positional_target == "":
+        val h_os = host_os()
+        val h_arch = if host_arch() == "arm64": "aarch64" else: host_arch()
+        if h_os == "macos" or h_os == "darwin":
+            positional_target = "{h_arch}-apple-darwin"
+        elif h_os == "linux":
+            positional_target = "{h_arch}-unknown-linux-gnu"
+    options.native_target = positional_target
     options.backend_plugin_path = native_build_backend_plugin_from_args(args, 0)
     options.low_memory = native_build_low_memory_from_args(args)
     val target_selection = focused_native_build_target_profile_v1(args)
@@ -779,11 +792,15 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
         return 1
     val target_profile = target_selection.unwrap()
     options.release = target_profile.release
+    options.debug_info = if positional_debug_flag: true else: not target_profile.release
+    options.strip_output = focused_native_build_strip(args, false)
+    options.xray_enabled = positional_xray
+    options.xray_startup_consumer_v1 = positional_xray_startup
     options.profile = target_profile.profile
     options.managed_build_phase = target_profile.managed_build_phase
     # Cranelift V2 has exact O0/O1/O2 readback and rejects O3. Select its
     # highest supported mode here instead of asking the provider to substitute.
-    options.opt_level = if backend == "cranelift": 2 else: 3
+    options.opt_level = if not target_profile.release: 0 elif backend == "cranelift": 2 else: 3
     if focused_native_build_arg_value(args, "--opt-level") != "":
         options.opt_level = focused_native_build_opt_level(args)
     options.no_borrow_check = native_build_no_borrow_check_from_args(args, 0)

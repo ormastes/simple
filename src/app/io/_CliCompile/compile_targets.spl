@@ -146,7 +146,8 @@ fn _native_build_runtime_manifest_identity(cache_dir: text, architecture: text) 
 
 fn _publish_and_admit_darwin_native_action_v1(
     cache_dir: text, output: text, entry_point: text, native_inputs: [text], backend: text,
-    native_target: text, opt_level: i64, release: bool, artifact_kind: text
+    native_target: text, opt_level: i64, release: bool, artifact_kind: text,
+    xray_enabled: bool = false, strip_output: bool = false
 ) -> text:
     val os_name = host_os()
     var target_triple = native_target
@@ -228,7 +229,9 @@ fn _publish_and_admit_darwin_native_action_v1(
         repo_root, cache_dir, entry, entry, tool_artifact, dependencies, closure_inputs
     )
     if not digest_is_sha256(closure): return closure
-    val optimization = "opt=" + opt_level.to_text() + "|release=" + release.to_text()
+    val xray_suffix = if xray_enabled: "|xray=true" else: ""
+    val strip_suffix = if strip_output: "|strip=true" else: ""
+    val optimization = "opt=" + opt_level.to_text() + "|release=" + release.to_text() + xray_suffix + strip_suffix
     val target_identity = if unlinked_output:
         darwin_object_target_identity_digest_v1(
             target_triple, architecture, cpu_features, deployment_target, sdk_identity,
@@ -789,6 +792,7 @@ pub struct CliNativeBuildParsedOptionsV1:
     source_dirs: [text] = []
     entry_closure: bool = false
     release: bool = false
+    debug_info: bool = true
     xray_enabled: bool = false
     xray_startup_consumer_v1: bool = false
     profile: text = "prod"
@@ -843,9 +847,10 @@ pub fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOp
         return cli_native_build_parse_failure_v1()
     val target_profile = target_selection.unwrap()
     var release = target_profile.release
+    var debug_info = not release
     var xray_enabled = false
     var xray_startup_consumer_v1 = false
-    var opt_level = cli_native_default_opt_level()
+    var opt_level = if release: cli_native_default_opt_level() else: 0
     var native_target = ""
     var native_cpu = ""
     var build_mode = "dynload"
@@ -952,6 +957,10 @@ pub fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOp
             verbose = true
         elif a == "--strip":
             strip = true
+        elif a == "--no-strip":
+            strip = false
+        elif a == "--debug" or a == "-g":
+            debug_info = true
         elif a == "--keep-intermediates":
             keep_intermediates = true
         elif a == "--print-intermediates":
@@ -1058,11 +1067,13 @@ pub fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOp
             xray_enabled = true
         elif a == "--release":
             release = true
+            debug_info = false
             if not optimization_requested:
                 opt_level = 2
             optimization_requested = true
         elif a == "--release-optimized":
             release = true
+            debug_info = false
             opt_level = cli_native_default_opt_level()
             optimization_requested = true
         elif a.starts_with("--opt-level="):
@@ -1181,6 +1192,9 @@ pub fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOp
             emit_smf or emit_object or emit_entry_object or emit_archive or emit_shared):
         _cli_eprint("XRAY-E-STARTUP-CONSUMER: requires --xray --mode one-binary executable output")
         return cli_native_build_parse_failure_v1()
+    if xray_startup_consumer_v1 and native_target != "" and not native_target.contains("-linux"):
+        _cli_eprint("XRAY-E-STARTUP-CONSUMER: startup consumer is supported on Linux ELF targets only (got '{native_target}')")
+        return cli_native_build_parse_failure_v1()
     CliNativeBuildParsedOptionsV1(
         ok: true, status: 0,
         entry_point: entry_point,
@@ -1196,6 +1210,7 @@ pub fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOp
         source_dirs: source_dirs,
         entry_closure: entry_closure,
         release: release,
+        debug_info: debug_info,
         xray_enabled: xray_enabled,
         xray_startup_consumer_v1: xray_startup_consumer_v1,
         profile: target_profile.profile,
@@ -1424,7 +1439,7 @@ fn _cli_native_build(
         _cli_eprint("Error: {composition_error}")
         return 1
 
-    if backend_explicit and (backend == "llvm-lib" or backend == "llvmlib" or backend == "llvm" or backend == "cranelift" or backend_plugin_path != ""):
+    if backend_explicit and (backend == "llvm-lib" or backend == "llvmlib" or backend == "llvm" or backend == "cranelift" or backend == "native" or backend_plugin_path != ""):
         # Pure Simple path: use CompilerDriver with LLVM lib backend
         # Parse native-build args: --source, --entry, -o, --strip, --no-mangle, etc.
         val parsed = cli_native_build_parse_options_v1(args)
@@ -1442,12 +1457,24 @@ fn _cli_native_build(
         var source_dirs: [text] = parsed.source_dirs
         var entry_closure: bool = parsed.entry_closure
         var release: bool = parsed.release
+        val debug_info: bool = parsed.debug_info
         val xray_enabled = parsed.xray_enabled
         val xray_startup_consumer_v1 = parsed.xray_startup_consumer_v1
         val target_profile = parsed.profile
         val managed_build_phase = parsed.managed_build_phase
         var opt_level: i64 = parsed.opt_level
         var native_target: text = parsed.native_target
+        if xray_enabled and native_target == "":
+            val raw_arch = host_arch()
+            val norm_arch = if raw_arch == "arm64": "aarch64" else: raw_arch
+            val os_name = host_os()
+            if os_name == "macos" or os_name == "darwin":
+                native_target = "{norm_arch}-apple-darwin"
+            elif os_name == "linux":
+                native_target = "{norm_arch}-unknown-linux-gnu"
+        if xray_startup_consumer_v1 and not native_target.contains("-linux"):
+            _cli_eprint("XRAY-E-STARTUP-CONSUMER: startup consumer is supported on Linux ELF targets only (got '{native_target}')")
+            return 2
         var native_cpu: text = parsed.native_cpu
         val library_units_mode: text = parsed.library_units_mode
         var build_mode: text = parsed.build_mode
@@ -1626,7 +1653,7 @@ fn _cli_native_build(
             env_set("SIMPLE_RUNTIME_PATH", runtime_path)
             env_set("SIMPLE_CORE_RUNTIME_PATH", runtime_path)
         if not optimization_requested:
-            opt_level = cli_native_default_opt_level()
+            opt_level = if release: cli_native_default_opt_level() else: 0
 
         driver_entry_scan_cache_reset()
 
@@ -1764,6 +1791,7 @@ fn _cli_native_build(
             options.backend_plugin_path = effective_backend_plugin_path
             options.native_target = native_target
             options.release = release
+            options.debug_info = debug_info
             options.xray_enabled = xray_enabled
             options.xray_startup_consumer_v1 = xray_startup_consumer_v1
             options.profile = target_profile
@@ -1824,6 +1852,7 @@ fn _cli_native_build(
             options.backend_plugin_path = effective_backend_plugin_path
             options.native_target = native_target
             options.release = release
+            options.debug_info = debug_info
             options.xray_enabled = xray_enabled
             options.xray_startup_consumer_v1 = xray_startup_consumer_v1
             options.profile = target_profile
@@ -1942,7 +1971,8 @@ fn _cli_native_build(
                     "binary"
                 val native_identity_error = _publish_and_admit_darwin_native_action_v1(
                     cache_dir, output, native_action_entry, native_action_inputs, backend,
-                    native_target, opt_level, release, native_action_artifact_kind
+                    native_target, opt_level, release, native_action_artifact_kind,
+                    xray_enabled, strip
                 )
                 if native_identity_error != "":
                     _cli_dir_create_impl(cache_dir + "/inputs", true)

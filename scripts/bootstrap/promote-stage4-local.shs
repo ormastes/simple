@@ -20,6 +20,7 @@ Usage:
   $self --promotion-receipt ABS --toolset-admission ABS [--lock-wait SECONDS]
   $self --rollback [--lock-wait SECONDS]
   $self --resolve cli|mcp|lsp-mcp
+  $self --resolve cli-debug
 EOF
 }
 
@@ -108,10 +109,14 @@ safe_atom() {
 require_manifest_keys() {
   manifest=$1
   allowed=$2
-  awk -F= -v allowed="$allowed" '
-    BEGIN { n=split(allowed, a, " "); for (i=1; i<=n; i++) ok[a[i]]=1 }
+  optional=${3:-}
+  awk -F= -v allowed="$allowed" -v optional="$optional" '
+    BEGIN {
+      n=split(allowed, a, " "); for (i=1; i<=n; i++) if (a[i] != "") ok[a[i]]=1
+      m=split(optional, b, " "); for (j=1; j<=m; j++) if (b[j] != "") opt[b[j]]=1
+    }
     /^[A-Za-z0-9_]+=/ {
-      key=$1; if (!ok[key] || ++seen[key] != 1) exit 1; next
+      key=$1; if ((!ok[key] && !opt[key]) || ++seen[key] != 1) exit 1; next
     }
     { exit 1 }
     END {
@@ -162,6 +167,14 @@ load_toolset_admission() {
   [ "$mcp" = "$candidate_dir/simple_mcp_server$suffix" ] &&
     [ "$lsp" = "$candidate_dir/simple_lsp_mcp_server$suffix" ] &&
     [ "$cli" = "$candidate_dir/simple$suffix" ] || die 'toolset artifacts are partial or mixed across directories'
+  cli_debug=
+  cli_debug_sha=
+  cli_debug_candidate="$candidate_dir/simple-debug$suffix"
+  if [ -e "$cli_debug_candidate" ] || [ -L "$cli_debug_candidate" ]; then
+    cli_debug=$(canonical_file "$cli_debug_candidate") || die 'simple-debug companion must be a canonical regular file'
+    [ -x "$cli_debug" ] && [ -s "$cli_debug" ] || die 'simple-debug companion is empty or non-executable'
+    cli_debug_sha=$(hash_file "$cli_debug") || die 'cannot hash simple-debug companion'
+  fi
   [ "$provenance" = "$cli.provenance.env" ] &&
     [ "$acceptance" = "$cli.stage3-acceptance.env" ] &&
     [ "$admission" = "$cli.toolset-admission.env" ] || die 'toolset trust inputs are not adjacent to the CLI'
@@ -239,6 +252,7 @@ generation_names() {
   generation_dir="$release_root/$platform/generations/$generation_id"
   generation_receipt="$generation_dir/generation-receipt.env"
   deployed_cli="$generation_dir/simple$suffix"
+  deployed_cli_debug="$generation_dir/simple-debug$suffix"
   deployed_mcp="$generation_dir/simple_mcp_server$suffix"
   deployed_lsp="$generation_dir/simple_lsp_mcp_server$suffix"
 }
@@ -248,7 +262,8 @@ verify_generation() {
   generation_dir=$(canonical_dir "$generation_dir") || return 1
   generation_receipt=$(canonical_file "$generation_receipt") || return 1
   require_manifest_keys "$generation_receipt" \
-    'schema status platform generation_id cli_path cli_sha256 mcp_path mcp_sha256 lsp_mcp_path lsp_mcp_sha256 provenance_path provenance_sha256 acceptance_path acceptance_sha256 toolset_admission_path toolset_admission_sha256 promotion_receipt_path promotion_receipt_sha256 created_at_utc' || return 1
+    'schema status platform generation_id cli_path cli_sha256 mcp_path mcp_sha256 lsp_mcp_path lsp_mcp_sha256 provenance_path provenance_sha256 acceptance_path acceptance_sha256 toolset_admission_path toolset_admission_sha256 promotion_receipt_path promotion_receipt_sha256 created_at_utc' \
+    'cli_debug_path simple_debug_sha256' || return 1
   [ "$(field "$generation_receipt" schema)" = simple-stage4-local-generation-v1 ] &&
     [ "$(field "$generation_receipt" status)" = admitted ] &&
     [ "$(field "$generation_receipt" platform)" = "$platform" ] &&
@@ -257,6 +272,13 @@ verify_generation() {
     path=$(verify_bound_file "$generation_receipt" "${item}_path" "${item}_sha256") || return 1
     within "$generation_dir" "$path" || return 1
   done
+  if grep -q '^simple_debug_sha256=' "$generation_receipt" || grep -q '^cli_debug_path=' "$generation_receipt"; then
+    debug_bound=$(verify_bound_file "$generation_receipt" cli_debug_path simple_debug_sha256) || return 1
+    within "$generation_dir" "$debug_bound" || return 1
+    [ "$debug_bound" = "$deployed_cli_debug" ] && [ -x "$debug_bound" ] && [ -s "$debug_bound" ] || return 1
+  else
+    [ ! -e "$deployed_cli_debug" ] && [ ! -L "$deployed_cli_debug" ] || return 1
+  fi
   [ "$(field "$generation_receipt" cli_path)" = "$deployed_cli" ] &&
     [ "$(field "$generation_receipt" mcp_path)" = "$deployed_mcp" ] &&
     [ "$(field "$generation_receipt" lsp_mcp_path)" = "$deployed_lsp" ]
@@ -370,10 +392,17 @@ within "$repo_root" "$release_root" || die 'release root escapes repository'
 current_pointer="$release_root/current.env"
 
 if [ "$mode" = resolve ]; then
-  case "$resolve_tool" in cli|mcp|lsp-mcp) ;; *) die 'resolve tool must be cli, mcp, or lsp-mcp' ;; esac
+  case "$resolve_tool" in cli|cli-debug|mcp|lsp-mcp) ;; *) die 'resolve tool must be cli, cli-debug, mcp, or lsp-mcp' ;; esac
   verify_pointer "$current_pointer" || die 'active Stage 4 local pointer failed validation'
   case "$resolve_tool" in
     cli) resolved_path=$(field "$current_pointer" cli_path) ;;
+    cli-debug)
+      platform=$(field "$current_pointer" platform)
+      generation_id=$(field "$current_pointer" generation_id)
+      generation_names
+      [ -x "$deployed_cli_debug" ] && [ ! -L "$deployed_cli_debug" ] || die 'active Stage 4 generation has no simple-debug binary'
+      resolved_path=$deployed_cli_debug
+      ;;
     mcp) resolved_path=$(field "$current_pointer" mcp_path) ;;
     lsp-mcp) resolved_path=$(field "$current_pointer" lsp_mcp_path) ;;
   esac
@@ -429,6 +458,11 @@ else
   cp "$cli" "$stage_dir/simple$suffix"
   cp "$mcp" "$stage_dir/simple_mcp_server$suffix"
   cp "$lsp" "$stage_dir/simple_lsp_mcp_server$suffix"
+  if [ -n "$cli_debug" ]; then
+    cp "$cli_debug" "$stage_dir/simple-debug$suffix"
+    chmod 555 "$stage_dir/simple-debug$suffix"
+    [ "$(hash_file "$stage_dir/simple-debug$suffix")" = "$cli_debug_sha" ] || die 'staged simple-debug hash mismatch'
+  fi
   for tool_bin in "$cli" "$mcp" "$lsp"; do
     tool_dir=$(dirname "$tool_bin")
     if [ -d "$tool_dir/lib" ]; then
@@ -461,6 +495,10 @@ else
     echo generation_id="$generation_id"
     echo cli_path="$generation_dir/simple$suffix"
     echo cli_sha256="$cli_sha"
+    if [ -n "$cli_debug" ]; then
+      echo cli_debug_path="$generation_dir/simple-debug$suffix"
+      echo simple_debug_sha256="$cli_debug_sha"
+    fi
     echo mcp_path="$generation_dir/simple_mcp_server$suffix"
     echo mcp_sha256="$mcp_sha"
     echo lsp_mcp_path="$generation_dir/simple_lsp_mcp_server$suffix"
