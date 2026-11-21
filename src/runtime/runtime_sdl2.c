@@ -949,28 +949,27 @@ int64_t rt_sdl2_wait_event(int64_t timeout_ms) {
     }
 }
 
-int64_t rt_sdl2_event_key_code(void) {
-    if (!g_last_event_valid) return 0;
+static const SDL_Keysym* sdl2_last_keysym(void) {
+    if (!g_last_event_valid) return NULL;
     if (g_last_event.type == SDL_KEYDOWN || g_last_event.type == SDL_KEYUP) {
-        return (int64_t)g_last_event.key.keysym.scancode;
+        return &g_last_event.key.keysym;
     }
-    return 0;
+    return NULL;
+}
+
+int64_t rt_sdl2_event_key_code(void) {
+    const SDL_Keysym* k = sdl2_last_keysym();
+    return k ? (int64_t)k->scancode : 0;
 }
 
 int64_t rt_sdl2_event_key_sym(void) {
-    if (!g_last_event_valid) return 0;
-    if (g_last_event.type == SDL_KEYDOWN || g_last_event.type == SDL_KEYUP) {
-        return (int64_t)g_last_event.key.keysym.sym;
-    }
-    return 0;
+    const SDL_Keysym* k = sdl2_last_keysym();
+    return k ? (int64_t)k->sym : 0;
 }
 
 int64_t rt_sdl2_event_key_mod(void) {
-    if (!g_last_event_valid) return 0;
-    if (g_last_event.type == SDL_KEYDOWN || g_last_event.type == SDL_KEYUP) {
-        return (int64_t)g_last_event.key.keysym.mod;
-    }
-    return 0;
+    const SDL_Keysym* k = sdl2_last_keysym();
+    return k ? (int64_t)k->mod : 0;
 }
 
 const char* rt_sdl2_event_text(void) {

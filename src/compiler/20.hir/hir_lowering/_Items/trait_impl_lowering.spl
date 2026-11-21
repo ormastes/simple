@@ -102,6 +102,8 @@ impl HirLowering:
     me lower_trait(trait_: ParserTrait) -> HirTrait:
         val symbol = self.symbols.lookup_or_invalid(trait_.name)
 
+        val saved_trait_prescan_parameters = self.prescan_type_parameters
+        self.prescan_type_parameters = {}
         self.symbols.push_scope(ScopeKind.Class)
 
         var type_params: [HirTypeParam] = []
@@ -130,7 +132,8 @@ impl HirLowering:
             val method_kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
             val method_type = self.declared_callable_type(method, Some(symbol))
             val method_name = self.symbols.method_symbol_name(symbol, method.name)
-            self.symbols.define(method_name, method_kind, method_type, method.span, method.visibility, false, self.module_filename)
+            val trait_method_sym = self.symbols.define(method_name, method_kind, method_type, method.span, method.visibility, false, self.module_filename)
+            self.record_call_arity_row(trait_method_sym.id, method, not method.is_static)
         # Trait signatures carry the same explicit receiver slot as concrete
         # methods. Retain its declared owner; dynamic lowering must not infer
         # a receiver or its ABI from the first user argument.
@@ -153,6 +156,7 @@ impl HirLowering:
 
         self.current_method_self_type = previous_method_self_type
         self.symbols.pop_scope()
+        self.prescan_type_parameters = saved_trait_prescan_parameters
 
         # Compute effective visibility using filename matching
         val effective_visibility = self.compute_visibility(trait_.name, trait_.visibility)
@@ -259,6 +263,8 @@ impl HirLowering:
     me lower_impl(impl_: Impl) -> HirImpl:
         # `class X with Trait:` is a trait impl only once confirmed here.
         val has_trait = impl_.has_trait_ or self.with_trait_candidate_conforms(impl_)
+        val saved_impl_prescan_parameters = self.prescan_type_parameters
+        self.prescan_type_parameters = {}
         self.symbols.push_scope(ScopeKind.Impl)
 
         # Lower generic type parameters
@@ -455,6 +461,7 @@ impl HirLowering:
                                     false,
                                     self.module_filename
                                 )
+                                self.copy_call_arity_row(default_fn.symbol.id, concrete_symbol.id)
                                 # #157 body half: the default body was lowered in
                                 # the trait scope where `self` is the trait's Self
                                 # type, so MIR's function_lowering would not
@@ -505,6 +512,7 @@ impl HirLowering:
             assoc_type_impls = assoc_type_impls.push(self.lower_assoc_type_impl(at))
 
         self.symbols.pop_scope()
+        self.prescan_type_parameters = saved_impl_prescan_parameters
 
         HirImpl(
             type_: type_,
@@ -759,7 +767,11 @@ impl HirLowering:
             case _: infer
 
     me lower_hir_const_decl(const_: ParserConst) -> HirConst:
-        val symbol = self.symbols.lookup_or_invalid(const_.name)
+        var symbol = self.symbols.lookup_or_invalid(const_.name)
+        val effective_visibility = self.compute_declared_visibility(const_.name, const_.visibility)
+        if not symbol.is_valid():
+            val mod_name: text? = if self.module_filename != "": Some(self.module_filename) else: None
+            symbol = self.symbols.define(const_.name, SymbolKind.Const, None, const_.span, effective_visibility, false, mod_name)
         val shape_type = if const_.has_type_:
             self.lower_type(const_.type_)
         else:
@@ -779,9 +791,6 @@ impl HirLowering:
                     var updated = definition
                     updated.type_ = type_
                     self.symbols.register_preserved_symbol(updated)
-
-        # Compute effective visibility using filename matching
-        val effective_visibility = self.compute_visibility(const_.name, const_.visibility)
 
         HirConst(
             symbol: symbol,

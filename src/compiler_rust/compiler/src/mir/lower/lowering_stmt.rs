@@ -176,6 +176,7 @@ impl<'a> MirLowerer<'a> {
                 })?,
                 _ => raw_element,
             };
+            let element_reg = self.copy_if_value_type(element_reg, target.ty)?;
             let addr_reg = self.lower_lvalue(target)?;
             self.with_func(|func, current_block| {
                 func.block_mut(current_block)
@@ -442,6 +443,10 @@ impl<'a> MirLowerer<'a> {
                     let fresh_array_vreg = (is_array_place_alias
                         || matches!(val.kind, HirExprKind::Array(_) | HirExprKind::ArrayRepeat { .. }))
                     .then_some(vreg);
+                    let fresh_string_vreg = (effective_declared_ty == TypeId::STRING
+                        && value_ty == TypeId::STRING
+                        && super::array_move::is_fresh_string_expr(val))
+                    .then_some(vreg);
 
                     // Wrap value in union if assigning to a union type
                     let vreg = self.emit_union_wrap_if_needed(effective_declared_ty, value_ty, vreg)?;
@@ -500,7 +505,7 @@ impl<'a> MirLowerer<'a> {
                     };
 
                     if self.block_array_release
-                        && fresh_array_vreg == Some(vreg)
+                        && (fresh_array_vreg == Some(vreg) || fresh_string_vreg == Some(vreg))
                         && self.array_move_sites.block_release_locals.contains(&local_idx)
                     {
                         self.block_release_ready.insert(local_idx, effective_declared_ty);
@@ -1163,6 +1168,7 @@ impl<'a> MirLowerer<'a> {
                                 })?;
                                 continue;
                             }
+                            let elem_reg = self.copy_if_value_type(elem_reg, elem.ty)?;
                             let addr_reg = self.lower_lvalue(elem)?;
                             self.with_func(|func, current_block| {
                                 let block = func.block_mut(current_block).unwrap();
@@ -1278,20 +1284,43 @@ impl<'a> MirLowerer<'a> {
                         // Bug jit_struct_assignment_aliases_not_copies: `b = a`
                         // re-assignment of an existing value-struct PLACE must
                         // copy, mirroring the Let arm's site G.
+                        let copy_ty = if target.ty == TypeId::ANY { ty } else { target.ty };
                         let store_val = if Self::hir_expr_is_place(&value.kind) {
-                            self.copy_if_value_type(store_val, target.ty)?
+                            self.copy_if_value_type(store_val, copy_ty)?
                         } else {
                             store_val
                         };
 
+                        let release_old_string = self.block_array_release
+                            && matches!(&target.kind, HirExprKind::Local(local_idx)
+                                if self.array_move_sites.string_overwrite_locals.contains(local_idx)
+                                    && !super::array_move::expr_mentions_local(value, *local_idx));
                         let addr_reg = self.lower_lvalue(target)?;
                         self.with_func(|func, current_block| {
+                            let old_val = if release_old_string {
+                                Some(func.new_vreg())
+                            } else {
+                                None
+                            };
                             let block = func.block_mut(current_block).unwrap();
+                            if let Some(old) = old_val {
+                                block.instructions.push(MirInst::Load {
+                                    dest: old,
+                                    addr: addr_reg,
+                                    ty: TypeId::STRING,
+                                });
+                            }
                             block.instructions.push(MirInst::Store {
                                 addr: addr_reg,
                                 value: store_val,
                                 ty,
                             });
+                            if let Some(old) = old_val {
+                                block.instructions.push(MirInst::Drop {
+                                    value: old,
+                                    ty: TypeId::STRING,
+                                });
+                            }
                         })?;
                     }
                 }
@@ -2743,18 +2772,25 @@ impl<'a> MirLowerer<'a> {
                     local_index,
                 });
                 block.instructions.push(MirInst::Load { dest: value, addr, ty });
-                block.instructions.push(MirInst::Call {
-                    dest: None,
-                    target: CallTarget::from_name("rt_array_free"),
-                    args: vec![value],
-                });
+                if ty == TypeId::STRING {
+                    block.instructions.push(MirInst::Drop { value, ty });
+                } else {
+                    block.instructions.push(MirInst::Call {
+                        dest: None,
+                        target: CallTarget::from_name("rt_array_free"),
+                        args: vec![value],
+                    });
+                }
             })?;
         }
         Ok(())
     }
 
     pub(super) fn emit_function_drops(&mut self) -> MirLowerResult<()> {
-        // First, collect information about which locals need dropping
+        // First, collect information about which locals need dropping.
+        // Only emit return-edge drops for scalar primitives (which are codegen
+        // no-ops) until full value-escape ownership tracking covers non-scalars;
+        // otherwise returning or aliasing a string/object local double-frees it.
         let locals_to_drop: Vec<(usize, crate::hir::TypeId)> = self.with_func(|func, _| {
             let local_base = func.params.len();
             func.locals
@@ -2768,6 +2804,9 @@ impl<'a> MirLowerer<'a> {
                     }
                     // Skip parameters (not owned by this function)
                     if local.kind.is_parameter() {
+                        return None;
+                    }
+                    if !crate::codegen::instr::is_drop_scalar_type(local.ty) {
                         return None;
                     }
                     Some((local_base + idx, local.ty))

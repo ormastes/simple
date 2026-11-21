@@ -66,8 +66,8 @@ impl HirLowering:
         var depth = 0
         while depth < 8:
             val current: ModuleSurface = self.module_surfaces.surfaces[current_index]
-            val origin: ModuleSurfaceExportOriginLookup = module_surface_export_origin_index_lookup(
-                current.export_origin_index, current_item)
+            val origin: ModuleSurfaceExportOriginLookup = hir_export_origin_lookup_v1(
+                self.module_surfaces, current, current_item)
             if not origin.found: break
             val owner_index = hir_export_origin_surface_index(
                 self.module_surfaces, origin.owner_module)
@@ -153,8 +153,8 @@ impl HirLowering:
         self.reexport_chase_calls = self.reexport_chase_calls + 1
         self.report_reexport_chase_stats()
         val facade_mod: ModuleSurface = self.module_surfaces.surfaces[facade_index]
-        val origin_index: ModuleSurfaceExportOriginIndex = facade_mod.export_origin_index
-        val origin_lookup: ModuleSurfaceExportOriginLookup = module_surface_export_origin_index_lookup(origin_index, wanted)
+        val origin_lookup: ModuleSurfaceExportOriginLookup = hir_export_origin_lookup_v1(
+            self.module_surfaces, facade_mod, wanted)
         if origin_lookup.found:
             val origin_index_value = hir_export_origin_surface_index(
                 self.module_surfaces, origin_lookup.owner_module)
@@ -1311,6 +1311,24 @@ impl HirLowering:
                 imported_mod, imported_mod_name, callable, import_span, materialize_enum)
         hir_phase_profile_add(HIR_PROF_RIS_CALLABLE_DEPS, started)
 
+    me materialize_imported_callable_type_dependencies_with_owner(imported_mod: ModuleSurface, imported_mod_name: text, method: ModuleSurfaceCallable, import_span: Span, materialize_enum: bool, owner_type_params: [ParserTypeParam]):
+        """Materialize callable signature dependencies with both owner and method binders scoped."""
+        if owner_type_params.len() == 0:
+            self.materialize_imported_callable_type_dependencies(
+                imported_mod, imported_mod_name, method, import_span,
+                materialize_enum)
+            return
+        val dependencies_started = hir_phase_profile_now()
+        var binders: [ParserTypeParam] = []
+        for owner_binder in owner_type_params:
+            binders.push(owner_binder)
+        for method_binder in method.type_params:
+            binders.push(method_binder)
+        self.materialize_imported_callable_type_dependencies_inner_with_owner(
+            imported_mod, imported_mod_name, method, import_span,
+            materialize_enum, binders)
+        hir_phase_profile_add(HIR_PROF_RIS_CALLABLE_DEPS, dependencies_started)
+
     me qtype_raw_counted(module_name: text, name: text) -> i64:
         """`lookup_qualified_type_raw` with miss counting for the RIS profile."""
         val found = self.symbols.lookup_qualified_type_raw(module_name, name)
@@ -1756,21 +1774,9 @@ impl HirLowering:
                             owner_type_params = imported_mod.enum_values[enum_position].type_params
                     val owner_dependencies_valid = self.materialize_imported_owner_parameter_dependencies(
                         imported_mod, imported_mod_name, owner_type_params, import_span, materialize_enum)
-                    if owner_type_params.len() == 0:
-                        self.materialize_imported_callable_type_dependencies(
-                            imported_mod, imported_mod_name, method, import_span,
-                            materialize_enum)
-                    else:
-                        val dependencies_started = hir_phase_profile_now()
-                        var binders: [ParserTypeParam] = []
-                        for owner_binder in owner_type_params:
-                            binders.push(owner_binder)
-                        for method_binder in method.type_params:
-                            binders.push(method_binder)
-                        self.materialize_imported_callable_type_dependencies_inner_with_owner(
-                            imported_mod, imported_mod_name, method, import_span,
-                            materialize_enum, binders)
-                        hir_phase_profile_add(HIR_PROF_RIS_CALLABLE_DEPS, dependencies_started)
+                    self.materialize_imported_callable_type_dependencies_with_owner(
+                        imported_mod, imported_mod_name, method, import_span,
+                        materialize_enum, owner_type_params)
                     val sig_started = hir_phase_profile_now()
                     var method_type: HirType? = nil
                     if owner_dependencies_valid:
@@ -1778,6 +1784,7 @@ impl HirLowering:
                             method, imported_mod.module_name, local_owner, owner_type_params)
                     hir_phase_profile_add(HIR_PROF_RIS_SIGTYPE, sig_started)
                     val imported_method = self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
+                    self.record_surface_call_arity_row(imported_method.id, method, not method.is_static)
                     if not method_type.? and owner_dependencies_valid and owner_type_params.len() == 0:
                         val declared_params = self.declared_imported_param_types_v1(
                             method, imported_mod.module_name, Some(local_owner))
@@ -1823,13 +1830,14 @@ impl HirLowering:
                                 # module. Resolve its dependencies through that
                                 # owner so imported names such as ContractMode
                                 # cannot be looked up in an unrelated impl file.
-                                self.materialize_imported_callable_type_dependencies(
+                                self.materialize_imported_callable_type_dependencies_with_owner(
                                     trait_module, trait_module.preferred_registry_name,
-                                    trait_method, import_span, materialize_enum)
-                                val method_type = self.declared_imported_surface_callable_type(
+                                    trait_method, import_span, materialize_enum, trait_.type_params)
+                                val method_type = self.declared_imported_owner_callable_type(
                                     trait_method, trait_module.module_name,
-                                    Some(local_owner))
+                                    local_owner, trait_.type_params)
                                 val imported_method = self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
+                                self.record_surface_call_arity_row(imported_method.id, trait_method, not trait_method.is_static)
                                 var owner_param_count = -1
                                 val owner_composite = module_surface_name_position(imported_mod.composite_names, imported_name)
                                 val owner_enum = module_surface_name_position(imported_mod.enum_names, imported_name)

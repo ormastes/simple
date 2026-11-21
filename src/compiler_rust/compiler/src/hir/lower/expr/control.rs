@@ -4314,6 +4314,9 @@ fn collect_identifiers_recursive(expr: &Expr, bound: &mut Vec<String>, identifie
             collect_identifiers_recursive(value, bound, identifiers);
             collect_identifiers_recursive(count, bound, identifiers);
         }
+        Expr::GenericInst { expr, .. } => {
+            collect_identifiers_recursive(expr, bound, identifiers);
+        }
         Expr::Dict(entries) => {
             for (k, v) in entries {
                 collect_identifiers_recursive(k, bound, identifiers);

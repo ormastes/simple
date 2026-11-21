@@ -158,6 +158,8 @@ fn extract_attrs_inject() {
         is_ghost: false,
         is_sync: false,
         has_suspension: false,
+        generic_params: vec![],
+        generic_bounds: vec![],
     };
     let attrs = lowerer.extract_function_attributes(&func);
     assert!(attrs.contains(&"inject".to_string()));
@@ -187,6 +189,8 @@ fn extract_attrs_pure() {
         is_ghost: false,
         is_sync: false,
         has_suspension: false,
+        generic_params: vec![],
+        generic_bounds: vec![],
     };
     let attrs = lowerer.extract_function_attributes(&func);
     assert!(attrs.contains(&"pure".to_string()));
@@ -216,6 +220,8 @@ fn extract_attrs_unsafe_mode() {
         is_ghost: false,
         is_sync: false,
         has_suspension: false,
+        generic_params: vec![],
+        generic_bounds: vec![],
     };
     let attrs = lowerer.extract_function_attributes(&func);
     assert!(attrs.contains(&"unsafe".to_string()));
@@ -244,6 +250,8 @@ fn extract_effects_actor_adds_async() {
         is_ghost: false,
         is_sync: false,
         has_suspension: false,
+        generic_params: vec![],
+        generic_bounds: vec![],
     };
     let effects = lowerer.extract_function_effects(&func);
     assert!(effects.contains(&"io".to_string()));
@@ -273,6 +281,8 @@ fn extract_effects_lock_base_no_async() {
         is_ghost: false,
         is_sync: false,
         has_suspension: false,
+        generic_params: vec![],
+        generic_bounds: vec![],
     };
     let effects = lowerer.extract_function_effects(&func);
     assert!(effects.contains(&"io".to_string()));

@@ -451,20 +451,116 @@ fn _unwrap_optional(ty: HirType) -> HirType?:
 # Definite Termination Analysis
 # ============================================================================
 
+"""Conservative match arm coverage status for termination analysis."""
+pub enum MatchTerminationStatus:
+    Exhaustive
+    MayFallThrough
+
+struct _MatchCoverFlags:
+    has_true: bool
+    has_false: bool
+    has_some: bool
+    has_none_or_nil: bool
+
+fn _pattern_is_irrefutable(pat: HirPattern) -> bool:
+    match pat.kind:
+        case Wildcard: true
+        case Binding(_, _): true
+        case Tuple(elements):
+            for elem in elements:
+                if not _pattern_is_irrefutable(elem):
+                    return false
+            true
+        case Or(patterns):
+            for sub in patterns:
+                if _pattern_is_irrefutable(sub):
+                    return true
+            false
+        case _: false
+
+fn _enum_some_has_irrefutable_payload(payload: HirPatternPayload?) -> bool:
+    match payload:
+        case None: false
+        case Some(HirPatternPayload.Tuple(patterns)):
+            if patterns.is_empty():
+                return false
+            for pat in patterns:
+                if not _pattern_is_irrefutable(pat):
+                    return false
+            true
+        case Some(HirPatternPayload.Struct(fields)):
+            for field_entry in fields:
+                if not _pattern_is_irrefutable(field_entry.1):
+                    return false
+            true
+
+fn _enum_none_has_no_payload(payload: HirPatternPayload?) -> bool:
+    match payload:
+        case None: true
+        case _: false
+
+fn _enum_type_allows_option(enum_ty: HirType) -> bool:
+    """Return true for Option/unqualified-Option pattern types, excluding custom Named enums."""
+    match enum_ty.kind:
+        case Optional(_) | Error: true
+        case _: false
+
+fn _collect_match_cover_flags(pat: HirPattern, flags: _MatchCoverFlags) -> _MatchCoverFlags:
+    var out = flags
+    match pat.kind:
+        case Or(patterns):
+            for sub in patterns:
+                out = _collect_match_cover_flags(sub, out)
+        case Literal(value):
+            match value.kind:
+                case BoolLit(true):
+                    out.has_true = true
+                case BoolLit(false):
+                    out.has_false = true
+                case NilLit:
+                    out.has_none_or_nil = true
+                case _: ()
+        case Enum(enum_ty, variant, payload):
+            if _enum_type_allows_option(enum_ty):
+                if variant == "Some" and _enum_some_has_irrefutable_payload(payload):
+                    out.has_some = true
+                elif variant == "None" and _enum_none_has_no_payload(payload):
+                    out.has_none_or_nil = true
+        case _: ()
+    out
+
+pub fn classify_match_arm_coverage(arms: [HirMatchArm]) -> MatchTerminationStatus:
+    """Return Exhaustive iff unguarded arms provably cover all match values."""
+    if arms.is_empty():
+        return MatchTerminationStatus.MayFallThrough
+    var flags = _MatchCoverFlags(has_true: false, has_false: false, has_some: false, has_none_or_nil: false)
+    for raw_arm in arms:
+        val typed_arm: HirMatchArm = raw_arm
+        if not typed_arm.has_guard:
+            if _pattern_is_irrefutable(typed_arm.pattern):
+                return MatchTerminationStatus.Exhaustive
+            flags = _collect_match_cover_flags(typed_arm.pattern, flags)
+    if (flags.has_true and flags.has_false) or (flags.has_some and flags.has_none_or_nil):
+        return MatchTerminationStatus.Exhaustive
+    MatchTerminationStatus.MayFallThrough
+
 pub fn definitely_terminates(block: HirBlock) -> bool:
     """Check if a block definitely does not fall through.
 
-    A block definitely terminates if its last statement is:
-    - return
-    - break (in a loop context)
-    - continue
-    - an if/match where ALL branches definitely terminate
+    A block definitely terminates if its tail value or any statement in it is:
+    - return / break / continue / throw
+    - an if / if-chain / match where ALL branches definitely terminate
+    - a nested block that definitely terminates
     """
-    if block.stmts.is_empty():
-        return false
+    if block.has:
+        if _expr_definitely_terminates(block.value):
+            return true
 
-    val last = block.stmts[block.stmts.len() - 1]
-    _stmt_definitely_terminates(last)
+    for stmt in block.stmts:
+        if _stmt_definitely_terminates(stmt):
+            return true
+
+    false
 
 fn _stmt_definitely_terminates(stmt: HirStmt) -> bool:
     """Check if a statement definitely terminates."""
@@ -498,6 +594,20 @@ fn _expr_definitely_terminates(expr: HirExpr) -> bool:
                 if not definitely_terminates(typed_arm.then_):
                     return false
             definitely_terminates(else_block.unwrap())
+        case MatchCase(_, arms):
+            if arms.is_empty():
+                return false
+            for arm in arms:
+                val typed_arm: HirMatchArm = arm
+                if not definitely_terminates(typed_arm.body):
+                    return false
+            match classify_match_arm_coverage(arms):
+                case MatchTerminationStatus.Exhaustive: true
+                case MatchTerminationStatus.MayFallThrough: false
+        case Block(inner_block):
+            definitely_terminates(inner_block)
+        case UnsafeBlock(inner_block):
+            definitely_terminates(inner_block)
         case _: false
 
 # ============================================================================

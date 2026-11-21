@@ -3515,3 +3515,58 @@ pub fn rt_process_owned_v3_release_value(_handle: i64) -> i8 {
     // A platform without an OwnedProcess V3 table owns no lease to release.
     0
 }
+
+#[cfg(windows)]
+fn os_hostname_string() -> String {
+    unsafe extern "system" {
+        fn GetComputerNameW(lpBuffer: *mut u16, nSize: *mut u32) -> i32;
+    }
+    let mut buf = [0u16; 256];
+    let mut len = buf.len() as u32;
+    if unsafe { GetComputerNameW(buf.as_mut_ptr(), &mut len) } != 0 && len > 0 {
+        let s = String::from_utf16_lossy(&buf[..len as usize]);
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "localhost".to_string())
+}
+
+#[cfg(unix)]
+fn os_hostname_string() -> String {
+    let mut buf = [0u8; 256];
+    if unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) } == 0 {
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        if end > 0 {
+            return String::from_utf8_lossy(&buf[..end]).into_owned();
+        }
+    }
+    if let Ok(h) = std::fs::read_to_string("/etc/hostname") {
+        let trimmed = h.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "localhost".to_string())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn os_hostname_string() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "localhost".to_string())
+}
+
+/// Return the host's configured hostname as a Simple text RuntimeValue.
+#[no_mangle]
+pub extern "C" fn rt_hostname() -> RuntimeValue {
+    let host = os_hostname_string();
+    unsafe { rt_string_new(host.as_ptr(), host.len() as u64) }
+}

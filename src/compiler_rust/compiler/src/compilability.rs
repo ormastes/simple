@@ -218,8 +218,13 @@ fn return_type_keeps_boxed(ty: &Type) -> bool {
         // `[u8]`, `[i64]`, `[u8; 32]` — every array spelling parses to
         // `Type::Array`, and all of them marshal to a heap runtime array.
         Type::Array { .. } => true,
-        Type::Simple(name) => matches!(name.as_str(), "text" | "str" | "string" | "String" | "Str"),
-        Type::Generic { name, .. } => matches!(name.as_str(), "Option" | "Result"),
+        Type::Simple(name) => matches!(
+            name.as_str(),
+            "text" | "str" | "string" | "String" | "Str" | "Dict" | "Map" | "Set" | "List" | "Option" | "Result"
+        ),
+        Type::Generic { name, .. } => {
+            matches!(name.as_str(), "Option" | "Result" | "Dict" | "Map" | "Set" | "List")
+        }
         Type::Optional(inner) => return_type_keeps_boxed(inner),
         Type::Capability { inner, .. } => return_type_keeps_boxed(inner),
         _ => false,
@@ -962,6 +967,9 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: Compilabil
             if mode != CompilabilityMode::AotNative {
                 add_reason(reasons, FallbackReason::CollectionLiteral);
             }
+        }
+        Expr::GenericInst { expr, .. } => {
+            analyze_expr(expr, reasons, mode);
         }
 
         // Safe unwrap operators - require Option/Result runtime handling

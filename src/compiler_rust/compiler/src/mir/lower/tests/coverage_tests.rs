@@ -227,3 +227,37 @@ fn test(x: i64, y: i64) -> i64:
 
     assert_eq!(decision_probe_count, 2, "Should have 2 decision probes for nested ifs");
 }
+
+#[test]
+fn test_struct_method_decision_probes() {
+    let source = r#"
+struct Gate:
+    limit: i64
+
+impl Gate:
+    fn allow(x: i64) -> i64:
+        if x > self.limit and x < 100:
+            return 1
+        return 0
+"#;
+    let mir = compile_with_coverage(source).unwrap();
+    let method = mir
+        .functions
+        .iter()
+        .find(|f| f.name.ends_with("allow"))
+        .expect("struct method should be lowered to MIR");
+    let decision_count = method
+        .blocks
+        .iter()
+        .flat_map(|b| b.instructions.iter())
+        .filter(|inst| matches!(inst, MirInst::DecisionProbe { .. }))
+        .count();
+    let condition_count = method
+        .blocks
+        .iter()
+        .flat_map(|b| b.instructions.iter())
+        .filter(|inst| matches!(inst, MirInst::ConditionProbe { .. }))
+        .count();
+    assert!(decision_count >= 1, "struct method should emit DecisionProbe");
+    assert_eq!(condition_count, 2, "struct method compound condition should emit 2 ConditionProbes");
+}

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     evaluate_expr, exec_function_with_bound_args, find_and_exec_method, Enums, ImplMethods, BLOCK_SCOPED_ENUMS,
-    GLOBAL_ENUMS, TRAIT_IMPLS,
+    GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, TRAIT_IMPLS,
 };
 use crate::value::{Env, OptionVariant, ResultVariant, SpecialEnumType, Value};
 use simple_parser::ast::{Argument, ClassDef, FunctionDef, Type};
@@ -226,6 +226,108 @@ pub fn handle_trait_object_methods(
 }
 
 /// Handle Constructor static method calls
+pub(crate) fn primitive_default_value(name: &str) -> Option<Value> {
+    match name {
+        "i8" | "i16" | "i32" | "i64" | "int" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => {
+            Some(Value::Int(0))
+        }
+        "f32" => Some(Value::Float32(0.0)),
+        "f64" | "float" => Some(Value::Float(0.0)),
+        "bool" => Some(Value::Bool(false)),
+        "text" | "str" => Some(Value::Str(Arc::new(String::new()))),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exec_static_method_candidates(
+    class_name: &str,
+    method: &str,
+    candidates: &[&FunctionDef],
+    generic_params: &[String],
+    positional_values: &[Value],
+    evaluated_args: Vec<(Option<String>, Value)>,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    let scored_method = candidates
+        .iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(idx, candidate)| {
+            constructor_overload_score(candidate, positional_values, generic_params)
+                .map(|score| (score, std::cmp::Reverse(idx), candidate))
+        })
+        .max_by_key(|(score, order, _)| (*score, *order))
+        .map(|(_, _, candidate)| candidate);
+    let arity_matches: Vec<&FunctionDef> = candidates
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            let required = candidate.params.iter().filter(|param| param.default.is_none()).count();
+            required <= positional_values.len() && positional_values.len() <= candidate.params.len()
+        })
+        .collect();
+    let Some(method_def) = scored_method.or_else(|| {
+        arity_matches
+            .first()
+            .copied()
+            .filter(|first| arity_matches.iter().all(|candidate| candidate.params == first.params))
+    }) else {
+        return Ok(None);
+    };
+
+    let mut local_env: Env = Env::new();
+    let mut positional_idx = 0;
+
+    for (arg_name, val) in evaluated_args {
+        if let Some(name) = arg_name {
+            let ty = method_def.params.iter().find(|p| p.name == name).and_then(|p| p.ty.as_ref());
+            local_env.insert(name, crate::interpreter::coerce_to_declared_type(val, ty));
+        } else if positional_idx < method_def.params.len() {
+            let param = &method_def.params[positional_idx];
+            let val = crate::interpreter::coerce_to_declared_type(val, param.ty.as_ref());
+            local_env.insert(param.name.clone(), val);
+            positional_idx += 1;
+        }
+    }
+
+    let mut empty_env: Env = Env::new();
+    for param in &method_def.params {
+        if !local_env.contains_key(&param.name) {
+            if let Some(default_expr) = &param.default {
+                let default_val =
+                    evaluate_expr(default_expr, &mut empty_env, functions, classes, enums, impl_methods)?;
+                local_env.insert(param.name.clone(), default_val);
+            }
+        }
+    }
+
+    let is_new_method = method == "new";
+    if is_new_method {
+        IN_NEW_METHOD.with(|set| set.borrow_mut().insert(class_name.to_string()));
+    }
+
+    let result = exec_function_with_bound_args(
+        method_def,
+        local_env.to_map(),
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+    );
+
+    if is_new_method {
+        IN_NEW_METHOD.with(|set| set.borrow_mut().remove(class_name));
+    }
+
+    result.map(Some)
+}
+
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_constructor_methods(
     class_name: &str,
@@ -259,92 +361,20 @@ pub fn handle_constructor_methods(
                     .map(|m| m.as_ref()),
             );
         }
-        // On an equal score the EARLIER candidate wins: the resolved class's
-        // own methods come first, the bare-name `impl_methods` table (which
-        // merges every loaded module's `impl Name:` blocks) only after. A
-        // same-named static from another module's same-named class used to
-        // win the tie because `max_by_key` keeps the last maximum.
-        let scored_method = candidates
-            .iter()
-            .copied()
-            .enumerate()
-            .filter_map(|(idx, candidate)| {
-                constructor_overload_score(candidate, &positional_values, &class_def.generic_params)
-                    .map(|score| (score, std::cmp::Reverse(idx), candidate))
-            })
-            .max_by_key(|(score, order, _)| (*score, *order))
-            .map(|(_, _, candidate)| candidate);
-        let arity_matches: Vec<&FunctionDef> = candidates
-            .iter()
-            .copied()
-            .filter(|candidate| {
-                let required = candidate.params.iter().filter(|param| param.default.is_none()).count();
-                required <= positional_values.len() && positional_values.len() <= candidate.params.len()
-            })
-            .collect();
-        if let Some(method_def) = scored_method.or_else(|| {
-            // Runtime aliases and values narrowed from `T?` do not retain enough
-            // nominal metadata for scoring. One distinct arity signature is
-            // unambiguous (the registries may contain the same impl twice).
-            arity_matches
-                .first()
-                .copied()
-                .filter(|first| arity_matches.iter().all(|candidate| candidate.params == first.params))
-        }) {
-            // Execute without self - start with empty local_env to avoid shadowing defaults
-            let mut local_env: Env = Env::new();
-            let mut positional_idx = 0;
-
-            // Bind provided arguments
-            for (arg_name, val) in evaluated_args {
-                if let Some(name) = arg_name {
-                    let ty = method_def.params.iter().find(|p| p.name == name).and_then(|p| p.ty.as_ref());
-                    local_env.insert(name, crate::interpreter::coerce_to_declared_type(val, ty));
-                } else if positional_idx < method_def.params.len() {
-                    let param = &method_def.params[positional_idx];
-                    let val = crate::interpreter::coerce_to_declared_type(val, param.ty.as_ref());
-                    local_env.insert(param.name.clone(), val);
-                    positional_idx += 1;
-                }
-            }
-
-            // Bind default values for remaining parameters using an empty scope
-            // to prevent caller's variables from shadowing defaults
-            let mut empty_env: Env = Env::new();
-            for param in &method_def.params {
-                if !local_env.contains_key(&param.name) {
-                    if let Some(default_expr) = &param.default {
-                        let default_val =
-                            evaluate_expr(default_expr, &mut empty_env, functions, classes, enums, impl_methods)?;
-                        local_env.insert(param.name.clone(), default_val);
-                    }
-                }
-            }
-
-            // If this is the `new` method, mark it to prevent recursion when the body
-            // calls the class constructor (e.g., `ClassName(args)` inside `new()`)
-            let is_new_method = method == "new";
-            if is_new_method {
-                IN_NEW_METHOD.with(|set| set.borrow_mut().insert(class_name.to_string()));
-            }
-
-            let result = exec_function_with_bound_args(
-                method_def,
-                local_env.to_map(),
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )
-            .map(Some);
-
-            // Remove from tracking set
-            if is_new_method {
-                IN_NEW_METHOD.with(|set| set.borrow_mut().remove(class_name));
-            }
-
-            return result;
+        if let Some(res) = exec_static_method_candidates(
+            class_name,
+            method,
+            &candidates,
+            &class_def.generic_params,
+            &positional_values,
+            evaluated_args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )? {
+            return Ok(Some(res));
         }
 
         // No matching static method on the class. `class_name` may ALSO be a
@@ -457,6 +487,52 @@ pub fn handle_constructor_methods(
                 variant: method.to_string(),
                 payload,
             }));
+        }
+    }
+
+    if method == "default" && args.is_empty() {
+        if let Some(val) = primitive_default_value(class_name) {
+            return Ok(Some(val));
+        }
+    }
+
+    let extra_candidates: Vec<Arc<FunctionDef>> = {
+        let mut list = impl_methods.get(class_name).cloned().unwrap_or_default();
+        GLOBAL_IMPL_METHODS.with(|cell| {
+            if let Some(extra) = cell.borrow().get(class_name) {
+                list.extend(extra.iter().cloned());
+            }
+        });
+        list
+    };
+    let static_candidates: Vec<&FunctionDef> = extra_candidates
+        .iter()
+        .map(|m| m.as_ref())
+        .filter(|m| m.name == method && (m.is_static || !m.params.iter().any(|p| p.name == "self")))
+        .collect();
+    if !static_candidates.is_empty() {
+        let evaluated_args: Vec<(Option<String>, Value)> = args
+            .iter()
+            .map(|arg| {
+                evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)
+                    .map(|value| (arg.name.clone(), value))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let positional_values: Vec<Value> = evaluated_args.iter().map(|(_, value)| value.clone()).collect();
+        if let Some(res) = exec_static_method_candidates(
+            class_name,
+            method,
+            &static_candidates,
+            &[],
+            &positional_values,
+            evaluated_args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )? {
+            return Ok(Some(res));
         }
     }
 

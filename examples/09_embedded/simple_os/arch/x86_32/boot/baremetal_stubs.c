@@ -401,6 +401,16 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
     return ENCODE_PTR(s);
 }
 
+/* Interned string-literal ctor: codegen emits rt_string_new_literal for every
+ * multi-byte literal (hosted interns by data ptr). The freestanding kernel has
+ * no intern table, so forward to rt_string_new with the same raw (untagged)
+ * i32 args. Matches riscv64/x86_64; pure-Simple twin:
+ * src/runtime/simple_core/core_string.spl rt_string_new_literal. */
+RuntimeValue rt_string_new_literal(RuntimeValue data, RuntimeValue len_val)
+{
+    return rt_string_new(data, len_val);
+}
+
 RuntimeValue rt_string_from_cstr(const char *cstr)
 {
     if (!cstr) return NIL_VALUE;

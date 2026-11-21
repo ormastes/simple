@@ -463,14 +463,9 @@ pub extern "C" fn __rt_btreemap_last_key(handle: i64) -> i64 {
 
 // -- Process/System stubs --
 //
-// `rt_getpid` and `rt_thread_available_parallelism` are provided by the
-// bundled `simple-runtime` (duplicate symbols fail the macOS link), so they are
-// not redefined here.
-
-#[no_mangle]
-pub extern "C" fn rt_hostname() -> i64 {
-    stub_make_string("localhost")
-}
+// `rt_getpid`, `rt_hostname`, and `rt_thread_available_parallelism` are provided
+// by the bundled `simple-runtime` (duplicate symbols fail the macOS link), so
+// they are not redefined here.
 
 #[no_mangle]
 pub extern "C" fn rt_system_cpu_count() -> i64 {

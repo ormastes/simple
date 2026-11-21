@@ -1,12 +1,44 @@
+use std.spec.*
+use std.env.variables.{env_get, env_has, env_set, env_unset}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
 extern fn rt_file_read_text(path: text) -> text?
 
 fn hir_expressions_source() -> text:
-    rt_file_read_text("src/compiler/20.hir/hir_lowering/expressions.spl") ?? ""
+    rt_file_read_text("src/compiler/20.hir/hir_lowering/_Expressions/block_and_asm_lowering.spl") ?? ""
 
 describe "bootstrap HIR block value source":
     it "marks extracted bootstrap tail values as present":
         val source = hir_expressions_source()
 
-        expect(source).to_contain("if boot_value.?:")
-        expect(source).to_contain("return HirBlock(stmts: boot_stmts, has: true")
-        expect(source).to_contain("return HirBlock(stmts: boot_stmts, has: false")
+        expect(source).to_contain("if block_has_value:")
+        expect(source).to_contain("HirBlock(stmts: stmts, has: true, value: block_value_expr, span: b.span)")
+        expect(source).to_contain("HirBlock(stmts: stmts, has: false, value: HirExpr(")
+        expect(source).to_contain("return HirBlock(stmts: boot_stmts, has: false,")
+
+        val had_bootstrap = env_has("SIMPLE_BOOTSTRAP")
+        val prior_bootstrap = env_get("SIMPLE_BOOTSTRAP")
+        val had_entry = env_has("SIMPLE_NATIVE_BUILD_ENTRY")
+        val prior_entry = env_get("SIMPLE_NATIVE_BUILD_ENTRY")
+        val _ = env_set("SIMPLE_BOOTSTRAP", "1")
+        val _ = env_set("SIMPLE_NATIVE_BUILD_ENTRY", "boot_tail.spl")
+        val parsed = parse_full_frontend("fn tail() -> i64:\n    42\n", "boot_tail.spl", "boot_tail", Logger(level: 0))
+        var lowering = HirLowering.with_filename("boot_tail.spl")
+        val hir = lowering.lower_module(parsed)
+        if had_bootstrap:
+            val _ = env_set("SIMPLE_BOOTSTRAP", prior_bootstrap)
+        else:
+            val _ = env_unset("SIMPLE_BOOTSTRAP")
+        if had_entry:
+            val _ = env_set("SIMPLE_NATIVE_BUILD_ENTRY", prior_entry)
+        else:
+            val _ = env_unset("SIMPLE_NATIVE_BUILD_ENTRY")
+        var checked = false
+        for fn_val in hir.functions.values():
+            if fn_val.name == "tail":
+                expect(fn_val.body.has).to_equal(true)
+                checked = true
+        expect(checked).to_equal(true)

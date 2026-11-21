@@ -254,7 +254,10 @@ fn overload_score(func: &FunctionDef, values: &[Value]) -> Option<usize> {
 /// a module top level, a function's owner, or the entry file
 /// (private_call_gate_skips_import_bound_and_entry_calls_2026-11-14).
 pub(crate) fn gate_private_call(name: &str, func: &Arc<FunctionDef>) -> Result<(), CompileError> {
-    if !matches!(func.visibility, simple_parser::ast::Visibility::Private) {
+    if !matches!(
+        func.visibility,
+        simple_parser::ast::Visibility::Private | simple_parser::ast::Visibility::Internal
+    ) {
         return Ok(());
     }
     let Some(owner) = function_module_owner(func) else {
@@ -296,7 +299,10 @@ pub(crate) fn gate_namespace_private_entries(entries: &DictMap) -> Result<(), Co
         .iter()
         .filter_map(|(key, stored)| match stored {
             Value::Function { def, .. }
-                if matches!(def.visibility, simple_parser::ast::Visibility::Private) && def.name == *key =>
+                if matches!(
+                    def.visibility,
+                    simple_parser::ast::Visibility::Private | simple_parser::ast::Visibility::Internal
+                ) && def.name == *key =>
             {
                 Some(def)
             }
@@ -916,7 +922,23 @@ pub(crate) fn evaluate_call(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     // Priority 1: Check extern functions first (before builtins)
-    if let Expr::Identifier(name) = callee.as_ref() {
+    let (callee_expr, call_type_args) = match callee.as_ref() {
+        Expr::GenericInst { expr, type_args } => (expr.as_ref(), Some(type_args.clone())),
+        other => (other, None),
+    };
+    let _pending_generics = crate::interpreter::PendingCallGenericsGuard::push(
+        call_type_args.map(|fn_args| crate::interpreter::PendingCallGenerics {
+            fn_args: Some(fn_args),
+            class_args: None,
+            class_name: match callee_expr {
+                Expr::Identifier(n) => Some(n.clone()),
+                _ => None,
+            },
+        }),
+    );
+    let _clear_expected_target = crate::interpreter::push_expected_target_type(None);
+
+    if let Expr::Identifier(name) = callee_expr {
         use crate::perf_counters::{self as pc, phase_end, phase_start};
         pc::bump(&pc::EVALCALL_IDENT_CALLS, 1);
         let t = phase_start();

@@ -36,7 +36,8 @@ use compiler.driver.driver_build.native_mir_fork_v1.{
     native_mir_fork_at_claim_loop_v1, NATIVE_MIR_FORK_WORKERS_ENV_V1,
     native_mir_fork_workers_of_v1, native_mir_fork_child_owner_v1,
     native_mir_fork_is_child_v1, native_mir_fork_reforkable_v1, native_mir_fork_fail_fast_v1,
-    NATIVE_MIR_FORK_RETRIES_PER_SHARE_V1}
+    NATIVE_MIR_FORK_RETRIES_PER_SHARE_V1, native_mir_fork_batch_of_v1,
+    native_mir_fork_child_cap_v1, native_mir_fork_next_batch_v1, NATIVE_MIR_FORK_BATCH_DEFAULT_V1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim,
     hir_shard_recovery_seal, hir_shard_recovery_progress,
     hir_shard_recovery_failure_count, hir_shard_recovery_owner_tree_progress_v1,
@@ -63,6 +64,35 @@ describe "MIR fork worker count":
         assert_equal(native_mir_fork_workers_of_v1("2"), 2)
         assert_equal(native_mir_fork_workers_of_v1("16"), 16)
         assert_false(native_mir_fork_is_child_v1())
+
+describe "MIR fork child batches":
+    it "bounds a child's claims so its held MIR cannot grow with its whole share":
+        # @req REQ-SSPEC-COMPILER
+        step("bounds a child's claims so its held MIR cannot grow with its whole share")
+        # p4-cli-f23: 4516 modules over 5 children = 904 claims each held
+        # until codegen; three children were OOM-killed at a 104G cap.
+        assert_equal(native_mir_fork_batch_of_v1(""), NATIVE_MIR_FORK_BATCH_DEFAULT_V1)
+        assert_equal(native_mir_fork_batch_of_v1("abc"), NATIVE_MIR_FORK_BATCH_DEFAULT_V1)
+        assert_equal(native_mir_fork_batch_of_v1("-3"), NATIVE_MIR_FORK_BATCH_DEFAULT_V1)
+        assert_equal(native_mir_fork_batch_of_v1("0"), 0)
+        assert_equal(native_mir_fork_batch_of_v1("50"), 50)
+        assert_equal(native_mir_fork_child_cap_v1(904, 200), 200)
+        assert_equal(native_mir_fork_child_cap_v1(120, 200), 120)
+        assert_equal(native_mir_fork_child_cap_v1(904, 0), 904)
+
+    it "forks the next batch only while the ledger shrinks":
+        # @req REQ-SSPEC-COMPILER
+        step("forks the next batch only while the ledger shrinks")
+        assert_true(native_mir_fork_next_batch_v1(200, true, false, false, 4516, 3516))
+        # A round that claimed nothing left only excluded residue: stop.
+        assert_false(native_mir_fork_next_batch_v1(200, true, false, false, 11, 11))
+        assert_false(native_mir_fork_next_batch_v1(200, true, false, false, 200, 0))
+        assert_false(native_mir_fork_next_batch_v1(200, true, false, false, 200, -1))
+        assert_false(native_mir_fork_next_batch_v1(0, true, false, false, 4516, 3516))
+        assert_false(native_mir_fork_next_batch_v1(200, false, false, false, 4516, 3516))
+        # stop = fail-fast AND a failure already seen (a clean CI batch goes on).
+        assert_false(native_mir_fork_next_batch_v1(200, true, true, false, 4516, 3516))
+        assert_false(native_mir_fork_next_batch_v1(200, true, false, true, 4516, 3516))
 
 describe "MIR fork child owners":
     it "are distinct from the root and from coordinator owners":

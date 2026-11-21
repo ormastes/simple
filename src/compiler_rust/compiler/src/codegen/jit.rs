@@ -10,7 +10,7 @@ use std::sync::Arc;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::Module;
 
-pub(crate) use super::jit_dlsym::dlsym_resolves;
+pub(crate) use super::jit_dlsym::{dlsym_lookup, dlsym_resolves};
 
 use crate::mir::{MirInst, MirModule};
 
@@ -70,6 +70,8 @@ impl JitCompiler {
 
         // Register runtime SFFI symbols from the provider
         register_seed_jit_runtime_symbols(&mut builder, &seed_jit_runtime_symbol_table(provider.as_ref()));
+        #[cfg(windows)]
+        builder.symbol_lookup_fn(Box::new(|name| dlsym_lookup(name)));
 
         let module = JITModule::new(builder);
         let backend = CodegenBackend::with_module(module)?;
@@ -775,15 +777,112 @@ pub(crate) fn register_seed_jit_runtime_symbols(builder: &mut JITBuilder, table:
 /// unbacked-extern defect class (see
 /// `doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md`).
 fn compiler_owned_symbol(name: &str) -> Option<*const u8> {
+    use crate::codegen::jit_sffi_bridges::*;
     match name {
         "rt_native_build" => Some(crate::native_build_sffi::rt_native_build as *const u8),
+        "rt_http_request" => Some(jit_rt_http_request as *const u8),
+        "rt_http_request_v2" => Some(jit_rt_http_request_v2 as *const u8),
+        "rt_process_spawn_piped" => Some(jit_rt_process_spawn_piped as *const u8),
+        "rt_process_read_stdout" => Some(jit_rt_process_read_stdout as *const u8),
+        "rt_process_write_stdin_some" => Some(jit_rt_process_write_stdin_some as *const u8),
+        "rt_process_is_alive" => Some(jit_rt_process_is_alive as *const u8),
+        "rt_process_close_piped" => Some(jit_rt_process_close_piped as *const u8),
+        "rt_process_stdout_state" => Some(jit_rt_process_stdout_state as *const u8),
+        "rt_process_piped_exit_status_value" => Some(jit_rt_process_piped_exit_status_value as *const u8),
+        "rt_process_spawn_piped_generation_v1" => Some(jit_rt_process_spawn_piped_generation_v1 as *const u8),
+        "rt_process_piped_pid_for_generation_v1" => Some(jit_rt_process_piped_pid_for_generation_v1 as *const u8),
+        "rt_process_read_stdout_ref_v1" => Some(jit_rt_process_read_stdout_ref_v1 as *const u8),
+        "rt_process_stdout_state_ref_v1" => Some(jit_rt_process_stdout_state_ref_v1 as *const u8),
+        "rt_process_validate_piped_ref_v1" => Some(jit_rt_process_validate_piped_ref_v1 as *const u8),
+        "rt_process_write_stdin_some_ref_v1" => Some(jit_rt_process_write_stdin_some_ref_v1 as *const u8),
+        "rt_process_is_piped_alive_ref_v1" => Some(jit_rt_process_is_piped_alive_ref_v1 as *const u8),
+        "rt_process_close_piped_ref_v1" => Some(jit_rt_process_close_piped_ref_v1 as *const u8),
+        "rt_local_unix_connect_v1" => Some(jit_rt_local_unix_connect_v1 as *const u8),
+        "rt_local_unix_read_v1" => Some(jit_rt_local_unix_read_v1 as *const u8),
+        "rt_local_unix_write_some_v1" => Some(jit_rt_local_unix_write_some_v1 as *const u8),
+        "rt_local_unix_write_some_admitted_v1" => Some(jit_rt_local_unix_write_some_admitted_v1 as *const u8),
+        "rt_local_unix_close_v1" => Some(jit_rt_local_unix_close_v1 as *const u8),
+        "rt_retained_private_credential_open_v1" => Some(jit_rt_retained_private_credential_open_v1 as *const u8),
+        "rt_retained_private_credential_state_v1" => Some(jit_rt_retained_private_credential_state_v1 as *const u8),
+        "rt_retained_private_credential_error_v1" => Some(jit_rt_retained_private_credential_error_v1 as *const u8),
+        "rt_retained_private_credential_read_v1" => Some(jit_rt_retained_private_credential_read_v1 as *const u8),
+        "rt_retained_private_credential_publish_v1" => Some(jit_rt_retained_private_credential_publish_v1 as *const u8),
+        "rt_retained_private_credential_close_v1" => Some(jit_rt_retained_private_credential_close_v1 as *const u8),
+        "rt_process_stream_reserve_v2" => Some(jit_rt_process_stream_reserve_v2 as *const u8),
+        "rt_process_stream_bind_v2" => Some(jit_rt_process_stream_bind_v2 as *const u8),
+        "rt_process_stream_abandon_unlaunched_v2" => Some(jit_rt_process_stream_abandon_unlaunched_v2 as *const u8),
+        "rt_process_stream_pid_v2" => Some(jit_rt_process_stream_pid_v2 as *const u8),
+        "rt_process_stream_retire_v2" => Some(jit_rt_process_stream_retire_v2 as *const u8),
+        "rt_process_read_stdout_owned_v2" => Some(jit_rt_process_read_stdout_owned_v2 as *const u8),
+        "rt_process_stdout_state_owned_v2" => Some(jit_rt_process_stdout_state_owned_v2 as *const u8),
+        "rt_process_validate_piped_owned_v2" => Some(jit_rt_process_validate_piped_owned_v2 as *const u8),
+        "rt_process_write_stdin_some_owned_v2" => Some(jit_rt_process_write_stdin_some_owned_v2 as *const u8),
+        "rt_process_input_enable_v1" => Some(jit_rt_process_input_enable_v1 as *const u8),
+        "rt_process_input_install_v1" => Some(jit_rt_process_input_install_v1 as *const u8),
+        "rt_process_input_revoke_v1" => Some(jit_rt_process_input_revoke_v1 as *const u8),
+        "rt_process_input_state_v1" => Some(jit_rt_process_input_state_v1 as *const u8),
+        "rt_process_input_write_some_v1" => Some(jit_rt_process_input_write_some_v1 as *const u8),
+        "rt_linux_group_stream_admit_v2" => Some(jit_rt_linux_group_stream_admit_v2 as *const u8),
+        "rt_linux_group_launch_stream_broker_v2" => Some(jit_rt_linux_group_launch_stream_broker_v2 as *const u8),
+        "rt_linux_group_stream_admit_profiled_v3" => Some(jit_rt_linux_group_stream_admit_profiled_v3 as *const u8),
+        "rt_linux_group_launch_stream_broker_profiled_v3" => {
+            Some(jit_rt_linux_group_launch_stream_broker_profiled_v3 as *const u8)
+        }
         _ => None,
     }
 }
 
 /// The names `compiler_owned_symbol` answers for. Kept beside it so a test can
 /// assert the two agree and neither can silently empty out.
-pub const COMPILER_OWNED_RUNTIME_SYMBOLS: &[&str] = &["rt_native_build"];
+pub const COMPILER_OWNED_RUNTIME_SYMBOLS: &[&str] = &[
+    "rt_native_build",
+    "rt_http_request",
+    "rt_http_request_v2",
+    "rt_process_spawn_piped",
+    "rt_process_read_stdout",
+    "rt_process_write_stdin_some",
+    "rt_process_is_alive",
+    "rt_process_close_piped",
+    "rt_process_stdout_state",
+    "rt_process_piped_exit_status_value",
+    "rt_process_spawn_piped_generation_v1",
+    "rt_process_piped_pid_for_generation_v1",
+    "rt_process_read_stdout_ref_v1",
+    "rt_process_stdout_state_ref_v1",
+    "rt_process_validate_piped_ref_v1",
+    "rt_process_write_stdin_some_ref_v1",
+    "rt_process_is_piped_alive_ref_v1",
+    "rt_process_close_piped_ref_v1",
+    "rt_local_unix_connect_v1",
+    "rt_local_unix_read_v1",
+    "rt_local_unix_write_some_v1",
+    "rt_local_unix_write_some_admitted_v1",
+    "rt_local_unix_close_v1",
+    "rt_retained_private_credential_open_v1",
+    "rt_retained_private_credential_state_v1",
+    "rt_retained_private_credential_error_v1",
+    "rt_retained_private_credential_read_v1",
+    "rt_retained_private_credential_publish_v1",
+    "rt_retained_private_credential_close_v1",
+    "rt_process_stream_reserve_v2",
+    "rt_process_stream_bind_v2",
+    "rt_process_stream_abandon_unlaunched_v2",
+    "rt_process_stream_pid_v2",
+    "rt_process_stream_retire_v2",
+    "rt_process_read_stdout_owned_v2",
+    "rt_process_stdout_state_owned_v2",
+    "rt_process_validate_piped_owned_v2",
+    "rt_process_write_stdin_some_owned_v2",
+    "rt_process_input_enable_v1",
+    "rt_process_input_install_v1",
+    "rt_process_input_revoke_v1",
+    "rt_process_input_state_v1",
+    "rt_process_input_write_some_v1",
+    "rt_linux_group_stream_admit_v2",
+    "rt_linux_group_launch_stream_broker_v2",
+    "rt_linux_group_stream_admit_profiled_v3",
+    "rt_linux_group_launch_stream_broker_profiled_v3",
+];
 
 /// True if `name` is resolvable purely through the compiler-owned table.
 /// Exposed so the regression gate can check the same predicate the JIT uses.
@@ -797,7 +896,7 @@ pub fn compiler_owned_symbol_resolves(name: &str) -> bool {
 /// cranelift-jit performs in `lookup_symbol` (registered symbols, then
 /// `lookup_with_dlsym`); an import resolving to neither is bound to a NULL GOT
 /// slot and would SIGSEGV when called.
-fn jit_import_resolves(provider: &dyn RuntimeSymbolProvider, name: &str) -> bool {
+pub fn jit_import_resolves(provider: &dyn RuntimeSymbolProvider, name: &str) -> bool {
     if provider.get_symbol(name).is_some() {
         return true;
     }

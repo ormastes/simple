@@ -1643,7 +1643,11 @@ pub extern "C" fn rt_file_mode(path: i64) -> i64 {
     }
     #[cfg(not(unix))]
     {
-        (metadata.file_attributes() as i64) & 0o7777
+        if metadata.permissions().readonly() {
+            0o444
+        } else {
+            0o644
+        }
     }
 }
 

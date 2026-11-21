@@ -108,6 +108,9 @@ pub struct TypeRegistry {
     /// table (`Lowerer::register_global_enums`). Their variant ORDER is the
     /// union's, so it must never yield a discriminant (#6953).
     merged_enum_ids: std::collections::HashSet<TypeId>,
+    /// Const generic integer arguments bound on instantiated generic struct TypeIds
+    /// (e.g., `FixedVec<i64, 4>` -> `{"N": 4}`).
+    const_generic_bindings: HashMap<TypeId, HashMap<String, i64>>,
 }
 
 impl TypeRegistry {
@@ -119,6 +122,7 @@ impl TypeRegistry {
             optional_type_ids: std::collections::HashSet::new(),
             scope_aliases: HashMap::new(),
             merged_enum_ids: std::collections::HashSet::new(),
+            const_generic_bindings: HashMap::new(),
         };
 
         // Register built-in types
@@ -499,6 +503,18 @@ impl TypeRegistry {
     /// Install an owner-scope overlay, returning the previous one.
     pub(crate) fn replace_scope_aliases(&mut self, scope: HashMap<String, String>) -> HashMap<String, String> {
         std::mem::replace(&mut self.scope_aliases, scope)
+    }
+
+    /// Record const-generic integer bindings (`N -> 4`) on an instantiated struct TypeId.
+    pub(crate) fn record_const_generic_bindings(&mut self, ty: TypeId, bindings: HashMap<String, i64>) {
+        if !bindings.is_empty() {
+            self.const_generic_bindings.insert(ty, bindings);
+        }
+    }
+
+    /// Return const-generic integer bindings associated with `ty`, if any.
+    pub(crate) fn const_generic_bindings(&self, ty: TypeId) -> Option<&HashMap<String, i64>> {
+        self.const_generic_bindings.get(&ty)
     }
 
     /// Register a type alias - maps a name to an existing type ID

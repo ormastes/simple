@@ -290,6 +290,7 @@ pub(crate) fn visit_ast_nodes(nodes: &[simple_parser::ast::Node], visitor: &mut 
                 visit_expr(value, visitor);
                 visit_expr(count, visitor);
             }
+            Expr::GenericInst { expr, .. } => visit_expr(expr, visitor),
             Expr::Dict(items) => {
                 for (key, value) in items {
                     visit_expr(key, visitor);

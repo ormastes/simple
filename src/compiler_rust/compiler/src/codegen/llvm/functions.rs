@@ -1550,10 +1550,35 @@ impl LlvmBackend {
                 vreg_map.insert(*dest, default_val.into());
             }
 
-            // Memory safety instructions (not yet implemented)
-            MirInst::Drop { .. } | MirInst::EndScope { .. } => {
-                // Drop and scope tracking not yet implemented
+            // Memory safety instructions
+            MirInst::Drop { value, ty } => {
+                let helper = if *ty == crate::hir::TypeId::STRING {
+                    Some("rt_string_free")
+                } else if !crate::codegen::instr::is_drop_scalar_type(*ty) {
+                    Some("rt_rc_release")
+                } else {
+                    None
+                };
+                if let Some(helper) = helper {
+                    if let Some(&val) = vreg_map.get(value) {
+                        if matches!(val, inkwell::values::BasicValueEnum::IntValue(_)) {
+                            let i64_type = self.runtime_int_type();
+                            let fn_val = module.get_function(helper).unwrap_or_else(|| {
+                                let ret_type = if helper == "rt_string_free" {
+                                    i64_type
+                                } else {
+                                    self.context_ref().i8_type()
+                                };
+                                module.add_function(helper, ret_type.fn_type(&[i64_type.into()], false), None)
+                            });
+                            builder
+                                .build_call(fn_val, &[val.into()], helper)
+                                .map_err(|e| crate::error::factory::llvm_build_failed(helper, &e))?;
+                        }
+                    }
+                }
             }
+            MirInst::EndScope { .. } => {}
 
             // Pattern matching
             MirInst::PatternTest { dest, subject, pattern } => {

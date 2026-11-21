@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use std::collections::HashMap;
-use simple_parser::ast::{Block, ClassDef, Expr, FunctionDef, Node};
+use simple_parser::ast::{Block, ClassDef, Expr, FunctionDef, Node, Type};
 use crate::error::CompileError;
 use crate::value::{strict_mem_enabled, Env, Value};
 
@@ -195,6 +195,9 @@ pub(crate) fn exec_block(
     // Catch module-init hangs and deep call chains that bypass loop-level checks.
     check_timeout!();
 
+    // Non-value statement blocks never forward an enclosing target type.
+    let _clear_expected = super::push_expected_target_type(None);
+
     // Enter block scope for tail injection tracking
     let _scope_depth = enter_block_scope();
     let shadows = capture_block_scope_shadows(block, env);
@@ -306,8 +309,8 @@ pub(crate) fn exec_unsafe_block(
     Ok(result)
 }
 
-/// Execute a block in a function context, supporting implicit return.
-/// If the last statement is an expression, its value is captured and returned.
+/// Execute a block in a value-producing or branch context, forwarding the caller's
+/// expected target type to its tail expression.
 pub(crate) fn exec_block_fn(
     block: &Block,
     env: &mut Env,
@@ -315,6 +318,28 @@ pub(crate) fn exec_block_fn(
     classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
+) -> Result<(Control, Option<Value>), CompileError> {
+    exec_block_fn_with_target(
+        block,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        super::current_expected_target_type(),
+    )
+}
+
+/// Execute a block in a function or value context, applying `tail_expected_target`
+/// exclusively to its implicit-return tail statement while isolating non-tail statements.
+pub(crate) fn exec_block_fn_with_target(
+    block: &Block,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    tail_expected_target: Option<Type>,
 ) -> Result<(Control, Option<Value>), CompileError> {
     // Enter block scope for tail injection tracking
     let _scope_depth = enter_block_scope();
@@ -335,7 +360,10 @@ pub(crate) fn exec_block_fn(
             // through to exec_node is harmless: line hits are a set.
             super::coverage_helpers::record_node_coverage(stmt);
             if let Node::Expression(Expr::UnsafeBlock(nodes, _)) = stmt {
-                let (flow, value) = exec_unsafe_block(nodes, env, functions, classes, enums, impl_methods)?;
+                let (flow, value) = {
+                    let _expected_guard = super::push_expected_target_type(tail_expected_target.clone());
+                    exec_unsafe_block(nodes, env, functions, classes, enums, impl_methods)?
+                };
                 match flow {
                     Control::Next => last_expr_value = value,
                     other @ (Control::Return(_) | Control::Break(..) | Control::Continue(_)) => {
@@ -352,8 +380,10 @@ pub(crate) fn exec_block_fn(
             if let simple_parser::ast::Node::Expression(expr) = stmt {
                 // Evaluate and capture the value for implicit return
                 // Use handle_method_call_with_self_update to properly track mutations
+                let _expected_guard = super::push_expected_target_type(tail_expected_target.clone());
                 let (val, update) =
                     handle_method_call_with_self_update(expr, env, functions, classes, enums, impl_methods)?;
+                drop(_expected_guard);
                 if let Some((name, new_self)) = update {
                     env.insert(name, new_self);
                 }
@@ -364,7 +394,10 @@ pub(crate) fn exec_block_fn(
             // Use exec_match_core (not exec_match_expr) so that explicit `return` statements
             // inside the arm body propagate up instead of being collapsed into a value.
             if let simple_parser::ast::Node::Match(match_stmt) = stmt {
-                let (flow, last_val) = exec_match_core(match_stmt, env, functions, classes, enums, impl_methods)?;
+                let (flow, last_val) = {
+                    let _expected_guard = super::push_expected_target_type(tail_expected_target.clone());
+                    exec_match_core(match_stmt, env, functions, classes, enums, impl_methods)?
+                };
                 match flow {
                     Control::Next => {
                         last_expr_value = last_val;
@@ -384,7 +417,10 @@ pub(crate) fn exec_block_fn(
             // Use exec_if_core (not exec_if_expr) so that explicit `return` statements
             // inside if branches propagate up instead of being collapsed into a value.
             if let simple_parser::ast::Node::If(if_stmt) = stmt {
-                let (flow, val) = exec_if_core(if_stmt, env, functions, classes, enums, impl_methods)?;
+                let (flow, val) = {
+                    let _expected_guard = super::push_expected_target_type(tail_expected_target.clone());
+                    exec_if_core(if_stmt, env, functions, classes, enums, impl_methods)?
+                };
                 match flow {
                     Control::Next => {
                         last_expr_value = Some(val);
@@ -402,7 +438,11 @@ pub(crate) fn exec_block_fn(
             }
         }
 
-        match exec_node(stmt, env, functions, classes, enums, impl_methods)? {
+        let node_ctrl = {
+            let _non_tail_expected = super::push_expected_target_type(None);
+            exec_node(stmt, env, functions, classes, enums, impl_methods)?
+        };
+        match node_ctrl {
             Control::Next => {}
             flow @ (Control::Return(_) | Control::Break(..) | Control::Continue(_)) => {
                 // Execute pending tail injections before exiting the block

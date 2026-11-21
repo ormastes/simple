@@ -920,6 +920,34 @@ fn parse_mod_decl_with_visibility(visibility: text) -> i64:
     decl_set_manifest_role_v1(child, if mod_segment_count == 1: "child" else: "child-invalid")
     finalize_decl_visibility(child, visibility)
 
+fn parse_type_alias_decl() -> i64:
+    parser_advance()
+    var ta_name: text = ""
+    if par_kind_get() == 6:
+        ta_name = par_text_get()
+        parser_advance()
+    val ta_parameters = parse_type_params_with_trait_bounds()
+    var ta_type_tag: i64 = 0
+    if parser_expect(TOK_ASSIGN):
+        ta_type_tag = parser_parse_type()
+    var ta_d: i64 = -1
+    if ta_name != "":
+        ta_d = decl_type_alias(ta_name, ta_type_tag, 0)
+        decl_set_type_params(ta_d, ta_parameters.0)
+        decl_set_type_param_constraints(ta_d, ta_parameters.1)
+    # Preserve the existing recovery boundary for unsupported trailing
+    # syntax; generic parameters and the RHS have been consumed.
+    while true:
+        val type_is_nl: bool = par_kind_get() == 180
+        val type_is_ded: bool = par_kind_get() == 182
+        val type_is_eof: bool = par_kind_get() == 190
+        val type_done: bool = type_is_nl or type_is_ded
+        val type_done2: bool = type_done or type_is_eof
+        if type_done2:
+            break
+        parser_advance()
+    ta_d
+
 fn parse_module_decl_with_visibility(loop_index: i64, visibility: text) -> i64:
     if par_kind_get() == 53:
         parser_advance()
@@ -988,6 +1016,11 @@ fn parse_module_decl_with_visibility(loop_index: i64, visibility: text) -> i64:
         if unit_decl_id >= 0:
             decl_set_visibility_text(unit_decl_id, visibility)
             PARSER_VISIBLE_UNIT_DECL_ID_V1 = unit_decl_id
+        return -1
+    if par_kind_get() == 35:
+        val ta_d = parse_type_alias_decl()
+        if ta_d >= 0:
+            return finalize_decl_visibility(ta_d, visibility)
         return -1
     parser_error("expected declaration after visibility modifier")
     -1
@@ -2524,31 +2557,9 @@ pub fn parse_module_body():
         elif par_kind_get() == 35:
             # Type aliases share declaration generic syntax, bounds/default
             # transport, and the existing semantic alias owner.
-            parser_advance()
-            var ta_name: text = ""
-            if par_kind_get() == 6:
-                ta_name = par_text_get()
-                parser_advance()
-            val ta_parameters = parse_type_params_with_trait_bounds()
-            var ta_type_tag: i64 = 0
-            if parser_expect(TOK_ASSIGN):
-                ta_type_tag = parser_parse_type()
-            if ta_name != "":
-                val ta_d = decl_type_alias(ta_name, ta_type_tag, 0)
-                decl_set_type_params(ta_d, ta_parameters.0)
-                decl_set_type_param_constraints(ta_d, ta_parameters.1)
+            val ta_d = parse_type_alias_decl()
+            if ta_d >= 0:
                 module_add_source_decl_v1(ta_d, visibility_observation_row)
-            # Preserve the existing recovery boundary for unsupported trailing
-            # syntax; generic parameters and the RHS have been consumed.
-            while true:
-                val type_is_nl: bool = par_kind_get() == 180
-                val type_is_ded: bool = par_kind_get() == 182
-                val type_is_eof: bool = par_kind_get() == 190
-                val type_done: bool = type_is_nl or type_is_ded
-                val type_done2: bool = type_done or type_is_eof
-                if type_done2:
-                    break
-                parser_advance()
             parser_skip_newlines_and_semicolons()
         elif par_kind_get() == 36:
             val asm_expr = parse_expr()

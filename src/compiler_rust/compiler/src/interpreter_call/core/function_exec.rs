@@ -9,6 +9,77 @@ use crate::interpreter::{
     FUNCTION_MODULE_OWNER, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, owned_global, owned_globals_snapshot, owner_bindings,
     owner_has_globals, seed_owner_globals, set_owned_global, visit_pattern_binding_names,
 };
+
+fn enter_generic_type_bindings(
+    func: &FunctionDef,
+    local_env: &Env,
+    classes: &HashMap<String, Arc<ClassDef>>,
+) -> crate::interpreter::GenericTypeBindingsGuard {
+    let pending = crate::interpreter::take_pending_call_generics();
+    let self_val = local_env.get("self");
+    let self_class_def = self_val
+        .as_ref()
+        .and_then(|v| v.aggregate_class())
+        .and_then(|name| classes.get(name));
+    let pending_class_def = pending
+        .as_ref()
+        .and_then(|p| p.class_name.as_deref())
+        .and_then(|name| classes.get(name));
+    let effective_class_def = self_class_def.or(pending_class_def);
+
+    let has_generic_params = !func.generic_params.is_empty()
+        || !func.type_bindings.is_empty()
+        || pending.is_some()
+        || effective_class_def.is_some_and(|c| !c.generic_params.is_empty());
+
+    if !has_generic_params {
+        return crate::interpreter::GenericTypeBindingsGuard::enter(HashMap::new());
+    }
+
+    let mut bindings: HashMap<String, Type> = func.type_bindings.clone();
+    if let Some(pending) = pending {
+        if let Some(class_args) = pending.class_args {
+            if let Some(class_def) = effective_class_def {
+                for (param, arg_ty) in class_def.generic_params.iter().zip(class_args.into_iter()) {
+                    bindings.insert(param.clone(), arg_ty);
+                }
+            }
+        }
+        if let Some(fn_args) = pending.fn_args {
+            if !func.generic_params.is_empty() {
+                for (param, arg_ty) in func.generic_params.iter().zip(fn_args.into_iter()) {
+                    bindings.insert(param.clone(), arg_ty);
+                }
+            } else if let Some(class_def) = effective_class_def {
+                for (param, arg_ty) in class_def.generic_params.iter().zip(fn_args.into_iter()) {
+                    bindings.entry(param.clone()).or_insert(arg_ty);
+                }
+            }
+        }
+    }
+
+    let mut type_param_names: std::collections::HashSet<String> = func.generic_params.iter().cloned().collect();
+    if let Some(class_def) = effective_class_def {
+        type_param_names.extend(class_def.generic_params.iter().cloned());
+        if let Some(sv) = &self_val {
+            for field in &class_def.fields {
+                if let Some(fval) = sv.aggregate_field(&field.name) {
+                    crate::interpreter::unify_generic_type_value(&field.ty, &fval, &type_param_names, &mut bindings);
+                }
+            }
+        }
+    }
+
+    for param in &func.params {
+        if let Some(param_ty) = &param.ty {
+            if let Some(arg_val) = local_env.get(&param.name) {
+                crate::interpreter::unify_generic_type_value(param_ty, &arg_val, &type_param_names, &mut bindings);
+            }
+        }
+    }
+
+    crate::interpreter::GenericTypeBindingsGuard::enter(bindings)
+}
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
 use simple_parser::ast::{
@@ -823,8 +894,19 @@ pub(crate) fn execute_function_body(
     crate::perf_counters::phase_end(&crate::perf_counters::BODY_NS_MARK_LOCALS, mark_start);
 
     // Execute function body - handle result manually to ensure flag restoration
+    let _generic_bindings = enter_generic_type_bindings(func, local_env, classes);
+    let _fn_return_guard = crate::interpreter::push_current_fn_return_type(func.return_type.clone());
+    let _expected_target_guard = crate::interpreter::push_expected_target_type(None);
     let exec_start = crate::perf_counters::phase_start();
-    let exec_result = exec_block_fn(body, local_env, functions, classes, enums, impl_methods);
+    let exec_result = crate::interpreter::exec_block_fn_with_target(
+        body,
+        local_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        func.return_type.clone(),
+    );
     crate::perf_counters::phase_end(&crate::perf_counters::BODY_NS_EXEC_BLOCK, exec_start);
     let epilogue_start = crate::perf_counters::phase_start();
 

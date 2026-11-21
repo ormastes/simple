@@ -775,7 +775,11 @@ impl ModuleResolver {
                         segments
                     };
 
-                    let mut stdlib_roots = vec![self.project_root.join("src/lib"), self.project_root.join("src/std")];
+                    let mut stdlib_roots = vec![
+                        self.project_root.join("src/lib"),
+                        self.project_root.join("src/std"),
+                        self.project_root.join("src/compiler_rust/lib/std/src"),
+                    ];
                     if let Some(ref stdlib_root) = self.stdlib_root {
                         stdlib_roots.push(stdlib_root.clone());
                     }

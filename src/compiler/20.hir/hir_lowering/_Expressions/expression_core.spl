@@ -541,6 +541,20 @@ impl HirLowering:
                 return Some(self.class_method_return_types_by_name[bare_key])
         None
 
+    fn resolve_method_call_arity_symbol_id(resolution: MethodResolution, receiver: HirExpr, method_name: text) -> i64:
+        match resolution:
+            case MethodResolution.StaticMethod(_, method_id):
+                if method_id.is_valid():
+                    return method_id.id
+            case MethodResolution.InstanceMethod(_, method_id):
+                if method_id.is_valid():
+                    return method_id.id
+            case _: ()
+        val receiver_owner = self.field_owner_for_hir_expr(receiver)
+        if receiver_owner >= 0:
+            return self.symbols.record_instance_method_scalar_raw(receiver_owner, method_name)
+        -1
+
     me lower_hir_expr(e: Expr) -> HirExpr:
         if e == nil:
             val missing_span = Span.empty()
@@ -705,6 +719,7 @@ impl HirLowering:
                                 val mc_module_callable = self.field_module_callable(mc_module_name, method_name_t)
                                 if val mc_resolved_callable = mc_module_callable:
                                     val mc_callable_name = self.symbols.symbol_display_name(mc_resolved_callable, method_name_t)
+                                    self.check_call_arity_by_symbol_id(mc_resolved_callable.id, hir_args, e.span)
                                     return HirExpr(
                                         kind: HirExprKind.Call(
                                             HirExpr(kind: _hir_callable_named_var_payload(mc_resolved_callable, mc_callable_name), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span),
@@ -777,6 +792,7 @@ impl HirLowering:
                                         )
                                     case _:
                                         ()
+                    self.check_call_arity_by_symbol_id(self.resolve_method_call_arity_symbol_id(mc_resolution, mc_lowered_receiver, method_name_t), hir_args, e.span)
                     # Type `Dict<K,V>.keys()` as `[K]` and `.values()` as `[V]`
                     # while the freshly lowered receiver is still local. The
                     # pure-Simple layer had NO per-method result-type table at
@@ -1436,6 +1452,7 @@ impl HirLowering:
                     ))
                 if val enum_constructor = self.declared_enum_constructor_expr(fallback_enum_owner, method_name_t, hir_args, e.span):
                     return enum_constructor
+                self.check_call_arity_by_symbol_id(self.resolve_method_call_arity_symbol_id(fallback_resolution, lowered_method_receiver, method_name_t), hir_args, e.span)
                 # Same Dict<K,V>.keys()/.values() typing as the pre-dispatch
                 # MethodCall arm above -- see the full rationale there. Both
                 # arms are patched because the discriminant-gated pre-dispatch

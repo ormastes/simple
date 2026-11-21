@@ -30,6 +30,11 @@ impl Lowerer {
         args: &[ast::Argument],
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        let _ = self.expected_target_type.take();
+        let callee = match callee {
+            Expr::GenericInst { expr, .. } => expr.as_ref(),
+            other => other,
+        };
         // PAREN-FORM STRUCT SPREAD: `S(..base, field: v)`.
         // `Expr::StructSpread` is produced ONLY by `parse_arguments`, so an
         // argument list carrying one is a struct-update construction and never
@@ -120,22 +125,7 @@ impl Lowerer {
             // Skip primitives here so lower_utility_builtin lowers them as Cast.
             let ctor_ty = self.resolve_constructor_type(name);
             if let Some(struct_ty) = ctor_ty {
-                if matches!(self.module.types.get(struct_ty), Some(HirType::Bitfield { .. })) {
-                    return self.lower_bitfield_constructor(struct_ty, args, ctx);
-                }
-                // ROOT FIX (bug simpleos_native_build_field_defaults_and_boxed_trait_dispatch,
-                // 2026-07-16): this used to be `lower_call_args`, which
-                // "lowers arguments as positional field initializers" —
-                // dropping `arg.name` entirely and lowering values in
-                // literal-source order regardless of the struct's declared
-                // field order. See `lower_struct_init_fields` in
-                // collections.rs for the full root-cause writeup; it
-                // reorders named args to their declared slot and fills any
-                // field the call site omits (relying on a class-level
-                // default) with `nil` instead of leaving it unset.
-                let provided: Vec<(Option<&str>, &Expr)> = args.iter().map(|a| (a.name.as_deref(), &a.value)).collect();
-                let (fields_hir, binding) = self.lower_struct_init_fields(name, struct_ty, &provided, None, ctx)?;
-                return Ok(Self::finish_struct_init(struct_ty, fields_hir, binding));
+                return self.lower_resolved_constructor(name, struct_ty, args, ctx);
             } else if self.lenient_types
                 && name.starts_with(|c: char| c.is_ascii_uppercase())
                 && args.iter().any(|a| a.name.is_some())
@@ -234,6 +224,29 @@ impl Lowerer {
         // This handles Expr::Path with 2 segments like Container.with_profile()
         if let Expr::Path(segments) = callee {
             if segments.len() == 2 {
+                if self.active_fn_generic_params.iter().any(|p| p == &segments[0]) {
+                    let args_hir = self.lower_call_args(args, ctx)?;
+                    let trait_name = self
+                        .active_fn_generic_bounds
+                        .iter()
+                        .find(|b| b.type_param == segments[0])
+                        .and_then(|b| b.bounds.first().map(|tb| tb.trait_name.clone()));
+                    return Ok(HirExpr {
+                        kind: HirExprKind::TypeParamStaticCall {
+                            type_param: segments[0].clone(),
+                            trait_name,
+                            method: segments[1].clone(),
+                            args: args_hir,
+                        },
+                        ty: TypeId::ANY,
+                    });
+                }
+                if let Some(prim_default) = (segments[1] == "default" && args.is_empty())
+                    .then(|| Self::primitive_default_hir_expr(&segments[0]))
+                    .flatten()
+                {
+                    return Ok(prim_default);
+                }
                 if let Some(type_id) = self.module.types.lookup(&segments[0]) {
                     if matches!(self.module.types.get(type_id), Some(HirType::Bitfield { .. })) && segments[1] == "new"
                     {
@@ -791,6 +804,22 @@ impl Lowerer {
             .or(bare_ctor_ty)
     }
 
+    pub(super) fn lower_resolved_constructor(
+        &mut self,
+        name: &str,
+        struct_ty: TypeId,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        if matches!(self.module.types.get(struct_ty), Some(HirType::Bitfield { .. })) {
+            return self.lower_bitfield_constructor(struct_ty, args, ctx);
+        }
+        // Reorder named args to declared field slots and fill defaulted/omitted fields.
+        let provided: Vec<(Option<&str>, &Expr)> = args.iter().map(|a| (a.name.as_deref(), &a.value)).collect();
+        let (fields_hir, binding) = self.lower_struct_init_fields(name, struct_ty, &provided, None, ctx)?;
+        Ok(Self::finish_struct_init(struct_ty, fields_hir, binding))
+    }
+
     /// Lower a PAREN-form struct-update construction `S(..base, field: v)`.
     ///
     /// Reached only when `lower_call` saw an `Expr::StructSpread` argument.
@@ -1055,6 +1084,7 @@ impl Lowerer {
                                     method: "to_f64".to_string(),
                                     args: Vec::new(),
                                     dispatch: DispatchMode::Static,
+                                    generic_args: vec![],
                                 },
                                 ty: parsed_ty,
                             }

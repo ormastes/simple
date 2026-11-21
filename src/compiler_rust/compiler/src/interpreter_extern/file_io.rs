@@ -3754,6 +3754,12 @@ pub fn rt_path_join(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::text(joined.to_string_lossy().to_string()))
 }
 
+/// Normalize path lexically, matching `simple_runtime::value::normalize_lexical_path`.
+pub fn rt_path_normalize(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    Ok(Value::text(simple_runtime::value::normalize_lexical_path(&path)))
+}
+
 // ============================================================================
 // File Locking
 // ============================================================================
@@ -3870,6 +3876,39 @@ pub fn rt_win_compare_object_handles(args: &[Value]) -> Result<Value, CompileErr
     Ok(Value::Int(
         simple_runtime::value::sffi::rt_win_compare_object_handles(*first, *second) as i64,
     ))
+}
+
+/// Interpreter twin matching `simple_runtime::value::sffi::rt_windows_pty_owner_thread_guard_v1`.
+pub fn rt_windows_pty_owner_thread_guard_v1(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(unsafe {
+        simple_runtime::value::sffi::rt_windows_pty_owner_thread_guard_v1()
+    }))
+}
+
+/// Interpreter twin matching `simple_runtime::value::sffi::rt_windows_pipe_file_mode_v1`.
+pub fn rt_windows_pipe_file_mode_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let (
+        Some(Value::Int(handle)),
+        Some(Value::Int(storage)),
+        Some(Value::Int(mode_out)),
+        Some(Value::Int(operation)),
+    ) = (args.first(), args.get(1), args.get(2), args.get(3))
+    else {
+        return Ok(Value::Int(-1));
+    };
+    Ok(Value::Int(unsafe {
+        simple_runtime::value::sffi::rt_windows_pipe_file_mode_v1(*handle, *storage, *mode_out, *operation as i32)
+    }))
+}
+
+/// Interpreter twins matching `runtime/src/value/sffi/file_io/workspace_storage_v1.rs`:
+/// retain the explicit fail-closed `-95` / `""` capability-absent semantics.
+pub fn rt_workspace_storage_fail_closed_int(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(-95))
+}
+
+pub fn rt_workspace_storage_fail_closed_text(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::text(String::new()))
 }
 
 pub fn rt_getpid(_args: &[Value]) -> Result<Value, CompileError> {

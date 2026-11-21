@@ -16,6 +16,10 @@ pub struct HirMethodSignature {
     pub param_types: Vec<TypeId>,
     /// Return type
     pub return_type: TypeId,
+    /// Method-level generic parameters (e.g. `["C"]`).
+    pub generic_params: Vec<String>,
+    /// Trait bounds for method-level generic parameters.
+    pub generic_bounds: Vec<HirGenericBound>,
 }
 
 /// Trait information for static polymorphism support
@@ -52,6 +56,18 @@ impl HirTraitInfo {
 
     /// Add a method and assign its vtable slot
     pub fn add_method(&mut self, name: String, param_types: Vec<TypeId>, return_type: TypeId) {
+        self.add_generic_method(name, param_types, return_type, Vec::new(), Vec::new());
+    }
+
+    /// Add a generic method with preserved type-parameter bounds and assign its vtable slot.
+    pub fn add_generic_method(
+        &mut self,
+        name: String,
+        param_types: Vec<TypeId>,
+        return_type: TypeId,
+        generic_params: Vec<String>,
+        generic_bounds: Vec<HirGenericBound>,
+    ) {
         let slot = self.vtable_size;
         self.methods.insert(
             name.clone(),
@@ -60,6 +76,8 @@ impl HirTraitInfo {
                 vtable_slot: slot,
                 param_types,
                 return_type,
+                generic_params,
+                generic_bounds,
             },
         );
         self.vtable_size += 1;

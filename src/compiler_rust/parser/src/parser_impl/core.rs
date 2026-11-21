@@ -907,22 +907,28 @@ impl<'a> Parser<'a> {
             // `security <name>:` or `security gate ...`; anything else
             // (`security.x = v`, `security = s`, `security(...)`) is an
             // ordinary expression/assignment.
-            // `friend <pkg.path>`, `internal_export <name>` and `layer <name> [uses ..]`
-            // are module directives handled by the
-            // pure-Simple frontend; the seed has no visibility graph, so it is
-            // consumed as a no-op (same node as bare `export`). The word stays
-            // an ordinary identifier unless an identifier follows on the line.
-            TokenKind::Identifier { name, .. } if matches!(name.as_str(), "friend" | "internal_export" | "layer") => {
+            // Module-level package/export/layer directives matching the
+            // pure-Simple frontend (`enum_module_body.spl`):
+            // `friend <pkg.path>`, `internal_export <name>`, `layer <name> [uses ..]`.
+            // Keeps the word usable as an ordinary variable/call identifier
+            // unless followed by a directive target.
+            TokenKind::Identifier { name, .. } if name == "friend" => {
                 if matches!(self.peek_next().kind, TokenKind::Identifier { .. }) {
-                    let start_span = self.current.span;
-                    while !self.check(&TokenKind::Newline) && !self.check(&TokenKind::Dedent) && !self.is_at_end() {
-                        self.advance();
-                    }
-                    Ok(Node::ExportUseStmt(ExportUseStmt {
-                        span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
-                        path: ModulePath::new(Vec::new()),
-                        target: ImportTarget::Glob,
-                    }))
+                    self.parse_friend_decl()
+                } else {
+                    self.parse_expression_or_assignment()
+                }
+            }
+            TokenKind::Identifier { name, .. } if name == "internal_export" => {
+                if matches!(self.peek_next().kind, TokenKind::Identifier { .. } | TokenKind::LBrace) {
+                    self.parse_internal_export_decl()
+                } else {
+                    self.parse_expression_or_assignment()
+                }
+            }
+            TokenKind::Identifier { name, .. } if name == "layer" => {
+                if matches!(self.peek_next().kind, TokenKind::Identifier { .. }) {
+                    self.parse_layer_decl()
                 } else {
                     self.parse_expression_or_assignment()
                 }

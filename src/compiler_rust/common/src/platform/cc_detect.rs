@@ -13,8 +13,19 @@ const WINDOWS_GNU_C_COMPILERS: &[&str] = &["clang"];
 const WINDOWS_GNU_CXX_COMPILERS: &[&str] = &["clang++"];
 // Cross (non-native-GNU-host) Windows GNU drivers: llvm-mingw's triple-prefixed
 // clang wrappers, never the `x86_64-w64-mingw32-gcc`/`g++` GCC names.
-const WINDOWS_GNU_CROSS_C_COMPILERS: &[&str] = &["x86_64-w64-mingw32-clang"];
-const WINDOWS_GNU_CROSS_CXX_COMPILERS: &[&str] = &["x86_64-w64-mingw32-clang++"];
+// The driver prefix follows the target arch (`i686-`/`aarch64-`/`armv7-`), so
+// a 32-bit target is never compiled by the x86_64 wrapper.
+fn windows_gnu_cross_driver(target: &Target, cxx: bool) -> String {
+    use crate::target::TargetArch;
+    let arch = match target.arch {
+        TargetArch::X86 => "i686",
+        TargetArch::Aarch64 => "aarch64",
+        TargetArch::Arm => "armv7",
+        // Riscv/Wasm never reach the Windows-GNU cross path.
+        _ => "x86_64",
+    };
+    format!("{arch}-w64-mingw32-{}", if cxx { "clang++" } else { "clang" })
+}
 const MSVC_C_COMPILERS: &[&str] = &["clang-cl", "clang"];
 const MSVC_CXX_COMPILERS: &[&str] = &["clang-cl", "clang++", "clang"];
 
@@ -83,7 +94,7 @@ pub fn detect_c_compiler_for_target(target: &Target) -> String {
     }
     let flavor = target.linker_flavor();
     if target.os == TargetOS::Windows && flavor == LinkerFlavor::Gnu && !is_native_gnu_windows_host(target) {
-        return WINDOWS_GNU_CROSS_C_COMPILERS[0].to_string();
+        return windows_gnu_cross_driver(target, false);
     }
     if flavor == LinkerFlavor::Msvc {
         for cc in MSVC_C_COMPILERS {
@@ -122,7 +133,7 @@ pub fn missing_compiler_error(tool: &str) -> String {
 /// `Command::new` and link through collect2. Returns the refusal text, or
 /// `None` when the driver is acceptable. Only the documented hosted cross
 /// drivers (`DOCUMENTED_CROSS_GCC_DRIVERS`, the names `hosted_linux_cross_compiler`
-/// and `WINDOWS_GNU_CROSS_*` emit) are exempt — the QEMU cross lane's own,
+/// and `windows_gnu_cross_driver` emits) are exempt — the QEMU cross lane's own,
 /// still-open gap. Any other `*gcc*` basename, including a host-triple
 /// `x86_64-linux-gnu-gcc-13`, is refused, matching the Simple side's
 /// `c_driver_classify_v1`.
@@ -216,7 +227,7 @@ pub fn detect_cxx_compiler_for_target(target: &Target) -> String {
     }
     let flavor = target.linker_flavor();
     if target.os == TargetOS::Windows && flavor == LinkerFlavor::Gnu && !is_native_gnu_windows_host(target) {
-        return WINDOWS_GNU_CROSS_CXX_COMPILERS[0].to_string();
+        return windows_gnu_cross_driver(target, true);
     }
     for cxx in cxx_candidates(target, flavor) {
         if let Some(resolved) = resolve_working_command(cxx) {
@@ -402,6 +413,32 @@ mod tests {
     }
 
     #[test]
+    fn windows_gnu_cross_driver_follows_target_arch() {
+        // cross_compile_linker_matrix_2026-11-17 (d): i686 used to get the
+        // x86_64 llvm-mingw driver and silently build 64-bit objects.
+        for (triple, cc, cxx) in [
+            ("x86_64-pc-windows-gnu", "x86_64-w64-mingw32-clang", "x86_64-w64-mingw32-clang++"),
+            ("i686-pc-windows-gnu", "i686-w64-mingw32-clang", "i686-w64-mingw32-clang++"),
+            ("aarch64-pc-windows-gnu", "aarch64-w64-mingw32-clang", "aarch64-w64-mingw32-clang++"),
+            ("armv7-pc-windows-gnu", "armv7-w64-mingw32-clang", "armv7-w64-mingw32-clang++"),
+        ] {
+            let target = Target::parse(triple).unwrap();
+            assert_eq!(windows_gnu_cross_driver(&target, false), cc, "{triple}");
+            assert_eq!(windows_gnu_cross_driver(&target, true), cxx, "{triple}");
+            assert!(gcc_driver_refusal(&windows_gnu_cross_driver(&target, false), "").is_none());
+        }
+        let i686 = Target::parse("i686-pc-windows-gnu").unwrap();
+        if !is_native_gnu_windows_host(&i686) {
+            if std::env::var("CC").map_or(true, |v| v.trim().is_empty()) {
+                assert_eq!(detect_c_compiler_for_target(&i686), "i686-w64-mingw32-clang");
+            }
+            if std::env::var("CXX").map_or(true, |v| v.trim().is_empty()) {
+                assert_eq!(detect_cxx_compiler_for_target(&i686), "i686-w64-mingw32-clang++");
+            }
+        }
+    }
+
+    #[test]
     fn windows_gnu_uses_clang_candidates() {
         let target = Target::parse("x86_64-pc-windows-gnu").unwrap();
         assert_eq!(WINDOWS_GNU_C_COMPILERS, &["clang"]);
@@ -427,10 +464,9 @@ mod tests {
         if std::env::var("CXX").map_or(true, |v| v.trim().is_empty()) {
             assert_eq!(stem(detect_cxx_compiler_for_target(&target)), cxx);
         }
-        for list in [WINDOWS_GNU_CROSS_C_COMPILERS, WINDOWS_GNU_CROSS_CXX_COMPILERS] {
-            for driver in list {
-                assert!(gcc_driver_refusal(driver, "").is_none(), "{driver}");
-            }
+        for cxx_driver in [false, true] {
+            let driver = windows_gnu_cross_driver(&target, cxx_driver);
+            assert!(gcc_driver_refusal(&driver, "").is_none(), "{driver}");
         }
     }
 

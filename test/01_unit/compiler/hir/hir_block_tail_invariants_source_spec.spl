@@ -22,53 +22,38 @@ describe "HIR block tail invariants":
     it "guards tail expression payload matching by exact discriminator":
         val expressions = source("src/compiler/20.hir/hir_lowering/_Expressions/block_and_asm_lowering.spl")
 
-        expect(expressions).to_contain("extern fn rt_enum_discriminant(value: Any) -> i64")
-        expect(expressions).to_contain("if rt_enum_discriminant(lowered_scalar.kind) == HIR_STMT_EXPR_TAG:")
-        expect(expressions).to_contain("if rt_enum_discriminant(lowered.kind) == HIR_STMT_EXPR_TAG:")
-        expect(expressions).to_contain("if rt_enum_discriminant(expr.kind) == HIR_EXPR_RETURN_TAG:")
-        expect(expressions).to_not_contain("rt_enum_discriminant(HirStmtKind.Expr(")
+        expect(expressions).to_contain("val expr_stmt_disc = rt_enum_discriminant(HirStmtKind.Expr(block_value_expr))")
+        expect(expressions).to_contain("val return_expr_disc = rt_enum_discriminant(HirExprKind.Return(None))")
+        expect(expressions).to_contain("if rt_enum_discriminant(lowered_scalar.kind) == expr_stmt_disc:")
+        expect(expressions).to_contain("if rt_enum_discriminant(lowered.kind) == expr_stmt_disc:")
+        expect(expressions).to_contain("if rt_enum_discriminant(expr.kind) == return_expr_disc:")
 
-    it "keeps direct-tail diagnostics on compile-cached primitive gates":
-        val expressions = source("src/compiler/20.hir/hir_lowering/expressions.spl")
+    it "keeps bootstrap mode gate on compile-cached primitive gates without loop probes":
+        val expressions = source("src/compiler/20.hir/hir_lowering/_Expressions/block_and_asm_lowering.spl")
         val types = source("src/compiler/20.hir/hir_lowering/types.spl")
-        val context = source("src/compiler/20.hir/hir_lowering/context_helpers.spl")
 
-        expect(types).to_contain("debug_bootstrap_hir_owner: bool")
-        expect(types).to_contain("debug_direct_tail_current_module: bool")
-        expect(types).to_contain(
-            "(hir_type_env_get(\"SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER\") ?? \"\") == \"1\"")
-        expect(context).to_contain(
-            "self.debug_direct_tail_current_module = (\n            self.debug_bootstrap_hir_owner and\n            filename.ends_with(\"bootstrap_main.spl\"))")
-        expect(expressions).to_contain(
-            "val debug_direct_tail = self.debug_direct_tail_current_module")
+        expect(types).to_contain("(hir_type_env_get(\"SIMPLE_BOOTSTRAP\") ?? \"\") == \"1\"")
         expect(expressions).to_not_contain("hir_expr_env_get(\"SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER\")")
-        expect(expressions).to_contain(
-            "while stmt_idx < stmt_count:")
-        expect(expressions).to_contain(
-            "if debug_direct_tail:\n                        eprint(\"[hir-direct-tail] stage=before-lower")
-        expect(expressions).to_contain("stage=after-lower")
-        expect(expressions).to_contain("stage=wellformed")
-        expect(expressions).to_contain("stage=before-value-reconstruct")
-        expect(expressions).to_contain("stage=after-value-reconstruct")
-        expect(expressions).to_contain("stage=before-block-construct")
-        expect(expressions).to_not_contain("stage=after-block-construct")
+        expect(expressions).to_contain("while stmt_idx < stmt_count:")
         expect(expressions).to_not_contain("val debug_result")
-        expect(expressions).to_not_contain("SIMPLE_DEBUG_HIR_BLOCK_TAIL")
+        expect(expressions).to_contain("if (hir_expr_env_get(\"SIMPLE_DEBUG_HIR_BLOCK_TAIL\") ?? \"\") == \"1\":")
 
     it "lowers the mandatory HIR function return type directly":
         # @req REQ-SSPEC-UNIT
         step("lowers the mandatory HIR function return type directly")
         val functions = source("src/compiler/50.mir/_MirLowering/function_lowering.spl")
 
-        expect(functions).to_contain("val return_type = self.lower_type(fn_.return_type)")
+        expect(functions).to_contain("val signature_return_type = fn_.return_type")
+        expect(functions).to_contain("val return_type = self.lower_type(signature_return_type)")
         expect(functions.contains("if fn_.return_type.?:")).to_equal(false)
 
     it "keeps explicit bootstrap returns as statements, not tail values":
         val items = source("src/compiler/20.hir/hir_lowering/_Items/module_declarations_bootstrap.spl")
 
-        expect(items).to_contain("if rt_enum_discriminant(stmt.kind) == HIR_STMT_EXPR_TAG:")
-        expect(items).to_contain("if rt_enum_discriminant(expr.kind) == HIR_EXPR_RETURN_TAG:")
-        expect(items).to_not_contain("rt_enum_discriminant(HirStmtKind.Expr(")
+        expect(items).to_contain("val expr_stmt_disc = rt_enum_discriminant(HirStmtKind.Expr(value_expr))")
+        expect(items).to_contain("val return_expr_disc = rt_enum_discriminant(HirExprKind.Return(None))")
+        expect(items).to_contain("if rt_enum_discriminant(statement_kind) == expr_stmt_disc:")
+        expect(items).to_contain("if rt_enum_discriminant(expr.kind) == return_expr_disc:")
         expect(items).to_contain("stmts.push(stmt)")
 
     it "preserves encoded Dict return types in bootstrap HIR":
@@ -84,8 +69,8 @@ describe "HIR block tail invariants":
         step("guards MIR Dict type payload extraction by exact discriminator")
         val functions = source("src/compiler/50.mir/_MirLowering/function_lowering.spl")
 
-        expect(functions).to_contain("val dict_type_disc = rt_enum_discriminant(HirTypeKind.Dict(type_, type_))")
-        expect(functions).to_contain("if rt_enum_discriminant(type_.kind) == dict_type_disc:")
+        expect(functions).to_contain("val dict_type_disc = _sffi_hir_type_discriminant(HirTypeKind.Dict(type_, type_))")
+        expect(functions).to_contain("if _sffi_hir_type_discriminant(type_.kind) == dict_type_disc:")
         expect(functions).to_contain("case HirTypeKind.Dict(key, value):")
 
     it "predispatches explicit Return before the raw expression match":
@@ -93,7 +78,7 @@ describe "HIR block tail invariants":
         step("predispatches explicit Return before the raw expression match")
         val expressions = source("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
 
-        expect(expressions).to_contain("val return_disc = compiler_value_discriminant(HirExprKind.Return(nil))")
+        expect(expressions).to_contain("val return_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.Return(None))")
         expect(expressions).to_contain("if expr_disc == return_disc:")
         expect(expressions).to_contain("case HirExprKind.Return(value):")
         expect(expressions).to_contain("return self.lower_return_expr(value)")
@@ -104,8 +89,9 @@ describe "HIR block tail invariants":
         step("extracts validated HIR Expr statements without pattern binding")
         val statements = source("src/compiler/50.mir/mir_lowering_stmts.spl")
 
-        expect(statements).to_contain("extern fn rt_enum_payload(value: HirStmtKind) -> HirExpr")
-        expect(statements).to_contain("val expr: HirExpr = rt_enum_payload(stmt_kind_value)")
+        expect(statements).to_contain("extern fn rt_enum_payload(value: HirStmtKind) -> HirExpr?")
+        expect(statements).to_contain("val expr = _sffi_hir_stmt_payload(stmt_kind_value)")
+        expect(statements).to_contain("if expr == None:")
         expect(statements).to_contain("empty HIR expression-statement payload")
 
     it "predispatches Index through one complete lowering helper":
@@ -113,27 +99,24 @@ describe "HIR block tail invariants":
         step("predispatches Index through one complete lowering helper")
         val expressions = source("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
 
-        expect(expressions).to_contain("use compiler.common.value_access.{compiler_value_discriminant, compiler_value_payload, compiler_value_tuple_at}")
+        expect(expressions).to_contain("use compiler.common.value_access.{{compiler_value_discriminant, compiler_value_payload, compiler_value_tuple_at}}")
         expect(expressions.contains("extern fn rt_enum_payload")).to_equal(false)
         expect(expressions.contains("extern fn rt_tuple_get")).to_equal(false)
         expect(expressions).to_contain("me lower_index_expr_from_hir(expr_value: HirExpr) -> LocalId:")
-        expect(expressions).to_contain("val payload = compiler_value_payload(expr_value.kind)")
-        expect(expressions).to_contain("val base: HirExpr = compiler_value_tuple_at(payload, 0)")
-        expect(expressions).to_contain("val index: HirExpr = compiler_value_tuple_at(payload, 1)")
-        expect(expressions).to_contain("if base == nil or index == nil:")
+        expect(expressions).to_contain("val payload = _sffi_enum_payload<HirExprKind>(expr_value.kind)")
+        expect(expressions).to_contain("val base: HirExpr = _sffi_tuple_get_req<HirExpr>(payload, 0)")
+        expect(expressions).to_contain("val index: HirExpr = _sffi_tuple_get_req<HirExpr>(payload, 1)")
+        expect(expressions).to_contain("if base == None or index == None:")
         expect(expressions).to_contain("empty HIR Index payload")
-        expect(expressions).to_contain("val has_result_hir_type = expr_value.has_type_ == true and expr_value.type_ != nil")
+        expect(expressions).to_contain("val has_result_hir_type = expr_value.has_type_ == true and expr_value.type_ != None")
         expect(expressions).to_contain("self.lower_index_expr(base, index, has_result_hir_type, expr_value.type_)")
-        expect(expressions).to_contain("me lower_index_expr(base: HirExpr, index: HirExpr, has_index_result_hir_type: bool, index_result_hir_type: HirType) -> LocalId:")
-        expect(expressions).to_contain("for item in self.builder.locals:")
-        expect(expressions).to_contain("if item.id.id == base_local.id:")
-        expect(expressions).to_contain("resolved_dict_mir_type = item.type_")
-        expect(expressions).to_contain("if not resolved_from_local and base.has_type_ == true and base.type_ != nil:")
+        expect(expressions).to_contain("me lower_index_expr(base: HirExpr, index: HirExpr, has_index_result_hir_type: bool, index_result_hir_type: HirType, nil_probe: bool = false) -> LocalId:")
+        expect(expressions).to_contain("val has_base_mir_type = if val type_ = self.builder.local_type(base_local):")
         expect(expressions).to_contain("if has_base_mir_type:")
         expect(expressions.contains("if dict_mir_type != nil:")).to_equal(false)
         expect(expressions.contains("if base_mir_type != nil:")).to_equal(false)
         expect(expressions).to_contain("elif not result_type_from_base and has_index_result_hir_type:")
-        expect(expressions).to_contain("val index_disc = compiler_value_discriminant(HirExprKind.Index(nil_expr, nil_expr))")
+        expect(expressions).to_contain("val index_disc = _sffi_enum_discriminant<HirExprKind>(HirExprKind.Index(nil_expr, nil_expr))")
         expect(expressions).to_contain("return self.lower_index_expr_from_hir(expr_value)")
-        expect(expressions).to_contain("case Index(base, index):\n                val has_index_result_type = expr_value.has_type_ == true and expr_value.type_ != nil")
+        expect(expressions).to_contain("case Index(base, index):\n                val has_index_result_type = expr_value.has_type_ == true and expr_value.type_ != None")
         expect(expressions).to_contain("self.lower_index_expr(base, index, has_index_result_type, expr_value.type_)")

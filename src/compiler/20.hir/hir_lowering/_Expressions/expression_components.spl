@@ -932,9 +932,22 @@ impl HirLowering:
         self.lower_pattern(p)
 
     me lower_scalar_const_pattern(name: text, span: Span) -> HirPattern?:
-        val existing_id = self.symbols.lookup_or_invalid(name)
+        var existing_id = self.symbols.lookup_or_invalid(name)
         if not existing_id.is_valid():
-            return None
+            # Pattern position resolves a name the way expression position
+            # does (expression_support.spl's unbound-name fallback): a
+            # constant reachable only through the lazy glob / unique-owner
+            # registration was never bound here, so `case NET_BIND:` became a
+            # catch-all binder and the next such arm tripped MIR B5b. Only
+            # Capitalized names take the lazy route -- a lowercase bare name
+            # stays an ordinary binder, exactly as in bare_name_may_be_unit_variant.
+            if name.len() == 0 or not "ABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(name[0:1]):
+                return None
+            if not self.try_register_bootstrap_global_symbol(name, span):
+                return None
+            existing_id = self.symbols.lookup_or_invalid(name)
+            if not existing_id.is_valid():
+                return None
         if val existing = self.symbols.get_symbol_raw(existing_id.id):
             if existing.kind == SymbolKind.Const and not existing.is_mutable:
                 var constant_index = 0

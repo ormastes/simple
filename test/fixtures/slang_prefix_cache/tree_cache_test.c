@@ -41,6 +41,7 @@ int64_t mock_llama_short_first_decodes(void);
 void mock_llama_set_n_ubatch(uint32_t);
 void mock_llama_fail_decode_once(void);
 void mock_llama_fail_seq_cp_once(void);
+int mock_llama_last_kv_unified(void);
 
 #define BUSY (-9)
 
@@ -83,6 +84,7 @@ int main(void) {
     assert(slang_ggml_prefix_cache_configure(4, 1024) == 4);
     int64_t h = slang_ggml_request_create(64);
     assert(h > 0);
+    assert(mock_llama_last_kv_unified() == 1);                  /* mode 2: unified KV */
     assert(slang_ggml_prefix_cache_mode_configure(0, 0) < 0);   /* fixed while a request is open */
 
     begin(h, "abcdefgh", 0);                       /* cold */
@@ -106,6 +108,8 @@ int main(void) {
 
     begin(h, "abcdefgh", 7);                       /* exact repeat recomputes the last token */
     finish(h);
+    /* cold 8 + branch suffix 2 + exact repeat (only the last token) 1 */
+    assert(mock_llama_decoded_tokens() == 11);
     assert(slang_ggml_prefix_resident_entries() == 2);
 
     /* Restore failure: seq_cp that leaves the new sequence short is detected,
@@ -195,6 +199,7 @@ int main(void) {
         assert(slang_ggml_prefix_cache_configure(4, 1024) == 4);
         h = slang_ggml_request_create(64);
         assert(h > 0);
+        assert(mock_llama_last_kv_unified() == (mode == 3 ? 0 : 1));   /* mode 3 is per-sequence streams */
         begin(h, "abcdefgh", 0);
         finish(h);
         begin(h, "abcdefXY", 4);                   /* 6 shared tokens, whole micro-batches: 4 */
@@ -232,13 +237,17 @@ int main(void) {
     h2 = slang_ggml_request_create(64);
     begin(h, "streamone", 0);
     finish(h);
+    begin(h, "otherxxxx", 0);                              /* a second, UNPINNED terminal */
+    finish(h);
     evictions = slang_ggml_prefix_evictions();
-    assert(prepare(h, "streamtwo") == 4);
+    assert(prepare(h, "streamtwo") == 4);                  /* pins "streamone" only */
     mock_llama_fail_decode_once();
+    /* A pre-fix shim evicts "otherxxxx", retries and succeeds; mode 3 must fail. */
     assert(slang_ggml_request_eval_prompt(h) < 0);
     assert(slang_ggml_prefix_evictions() == evictions);   /* nothing wiped */
-    assert(slang_ggml_prefix_resident_entries() >= 1);
-    begin(h2, "streamone", 8);                             /* released: no BUSY; cache intact */
+    begin(h2, "otherxxxx", 8);                             /* released (no BUSY) and the unpinned terminal survived */
+    finish(h2);
+    begin(h2, "streamone", 8);
     finish(h2);
     assert(slang_ggml_request_close(h) == 0);
     assert(slang_ggml_request_close(h2) == 0);
@@ -254,6 +263,11 @@ int main(void) {
     assert(slang_ggml_prefix_cache_mode_configure(3, 0) == 3);
     assert(slang_ggml_prefix_cache_configure(4, 1024) == 4);
     h = slang_ggml_request_create(64);
+    /* A first decode that fails must not mark the context warm: the next, short
+     * prompt still gets the full-micro-batch warm-up. */
+    assert(prepare(h, "abcdefghij") == 0);
+    mock_llama_fail_decode_once();
+    assert(slang_ggml_request_eval_prompt(h) < 0);
     int64_t short_before = mock_llama_short_first_decodes();
     begin(h, "ab", 0);                             /* shorter than one micro-batch */
     finish(h);

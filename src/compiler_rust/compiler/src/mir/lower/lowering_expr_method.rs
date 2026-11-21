@@ -333,6 +333,17 @@ impl<'a> MirLowerer<'a> {
         args: &[HirExpr],
         dispatch: &DispatchMode,
     ) -> MirLowerResult<VReg> {
+        self.lower_method_call_expr_with_generics(receiver, method, args, dispatch, &[])
+    }
+
+    pub(super) fn lower_method_call_expr_with_generics(
+        &mut self,
+        receiver: &HirExpr,
+        method: &str,
+        args: &[HirExpr],
+        dispatch: &DispatchMode,
+        generic_args: &[TypeId],
+    ) -> MirLowerResult<VReg> {
         let receiver_local_ty: Option<TypeId> = self.recover_receiver_type(receiver);
 
         if args.is_empty() {
@@ -2568,8 +2579,23 @@ impl<'a> MirLowerer<'a> {
                     .find(|candidate| self.function_param_types.contains_key(candidate))
                     .unwrap_or(func_name)
             }
+            Some(("Array", bare)) if bare == method && !self.function_param_types.contains_key(&func_name) => {
+                let candidate = format!("array.{}", method);
+                if self.function_param_types.contains_key(&candidate) {
+                    candidate
+                } else {
+                    func_name
+                }
+            }
             _ => func_name,
         };
+        let func_name = self.specialize_named_call(
+            &func_name,
+            args,
+            receiver_local_ty.or(Some(receiver.ty)),
+            generic_args,
+        );
+        let is_specialized_method = func_name.contains("$__spec_");
 
         // A numeric cast on an erased receiver that THIS lowering just boxed
         // (`(crc & 255).to_u8()` with an untyped `crc`: the `&` is computed raw,
@@ -2624,7 +2650,9 @@ impl<'a> MirLowerer<'a> {
                     crate::hir::HirExprKind::Local(index) => self.local_trait_dispatch.get(index).cloned(),
                     _ => None,
                 };
-                let trait_lookup = if let Some(dispatch) = declared_dispatch.as_ref() {
+                let trait_lookup = if is_specialized_method {
+                    None
+                } else if let Some(dispatch) = declared_dispatch.as_ref() {
                     let info = &dispatch.info;
                     // This signature was captured from the exact declaration
                     // owner, not re-resolved through a colliding bare name.

@@ -1,0 +1,56 @@
+"""
+## Purpose and audience
+Prevention guard for `#5232` ensuring `primitive_api` remains owned solely by the linter (`Linter.new().lint_source` / `primitive_api_findings`) with zero duplicate `EasyFix` entries in `builtin_fix_producers`.
+Audience: compiler and lint maintainers working on `src/compiler/90.tools/`.
+"""
+# @req: REQ-COMPILER-LINT-5232 — primitive_api has a single help-only owner in Linter with zero duplicate builtin EasyFix producers.
+
+use std.spec.*
+use compiler.tools.fix.builtins.{builtin_fix_producers, run_builtin_producer}
+use compiler.tools.fix.producer.{fix_unit_from_source}
+use compiler.tools.fix.rules.impl_.lint_primitive_api.{primitive_api_findings}
+use compiler.tools.lint.main.{Linter}
+
+describe "primitive_api single-owner prevention (#5232)":
+    it "routes primitive_api findings exclusively through Linter without duplicate builtin EasyFix producers":
+        step("Check public bool and mixed primitive signature via Linter and builtin_fix_producers")
+        val src =
+            "pub fn toggle(flag: bool, limit: i64) -> text:\n" +
+            "    if flag:\n" +
+            "        return \"on\"\n" +
+            "    \"off\"\n"
+        var linter = Linter.new()
+        val results = linter.lint_source("sample.spl", src)
+        var prim_count = 0
+        var bool_count = 0
+        for r in results:
+            if r.lint.code == "primitive_api":
+                prim_count = prim_count + 1
+            if r.lint.code == "bare_bool":
+                bool_count = bool_count + 1
+        expect(prim_count).to_equal(1)
+        expect(bool_count).to_equal(1)
+        expect(primitive_api_findings("sample.spl", src.split("\n")).len()).to_equal(prim_count + bool_count)
+
+        var producer_fix_count = 0
+        for producer in builtin_fix_producers():
+            expect(producer.code == "L:primitive_api").to_equal(false)
+            for fix in run_builtin_producer(producer.code, fix_unit_from_source("sample.spl", src)):
+                if fix.id.contains("primitive_api"):
+                    producer_fix_count = producer_fix_count + 1
+        expect(producer_fix_count).to_equal(0)
+
+    it "stays silent on typed semantic wrapper APIs":
+        step("Verify domain newtype signatures emit zero primitive_api warnings")
+        val clean_src =
+            "struct Limit:\n" +
+            "    value: i64\n" +
+            "pub fn apply_limit(limit: Limit) -> Limit:\n" +
+            "    limit\n"
+        var linter = Linter.new()
+        val results = linter.lint_source("clean.spl", clean_src)
+        var lint_count = 0
+        for r in results:
+            if r.lint.code == "primitive_api" or r.lint.code == "bare_bool":
+                lint_count = lint_count + 1
+        expect(lint_count).to_equal(0)

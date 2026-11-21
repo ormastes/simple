@@ -1385,7 +1385,9 @@ fn collect_hir_expr_symbols(expr: &HirExpr, symbols: &mut BTreeSet<String>) {
         HirExprKind::PointerNew { value, .. } => collect_hir_expr_symbols(value, symbols),
         HirExprKind::Cast { expr, .. } => collect_hir_expr_symbols(expr, symbols),
         HirExprKind::Lambda { body, .. } => collect_hir_expr_symbols(body, symbols),
-        HirExprKind::BuiltinCall { args, .. } | HirExprKind::GpuIntrinsic { args, .. } => {
+        HirExprKind::BuiltinCall { args, .. }
+        | HirExprKind::GpuIntrinsic { args, .. }
+        | HirExprKind::TypeParamStaticCall { args, .. } => {
             for arg in args {
                 collect_hir_expr_symbols(arg, symbols);
             }
@@ -1401,7 +1403,8 @@ fn collect_hir_expr_symbols(expr: &HirExpr, symbols: &mut BTreeSet<String>) {
         | HirExprKind::String(_)
         | HirExprKind::Bool(_)
         | HirExprKind::Nil
-        | HirExprKind::ContractResult => {}
+        | HirExprKind::ContractResult
+        | HirExprKind::ConstGeneric(_) => {}
     }
 }
 

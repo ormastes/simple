@@ -462,7 +462,6 @@ Tokens/s below is meaningless for 1-2 token answers.
 - Device forward pass (2026-11-15): `pure/llama_forward_rocm.spl` runs the stories15M Llama forward on the Radeon 8065S: `rocm_llama_load` (F32 byte-range upload once), `llama_step_rocm` (hidden state and per-layer K/V rows stay on the device; intermediates freed every step), `rocm_generate_greedy` (same prefix-reuse rule as `kv_cache.spl`, shared via `kv_reuse_len`; counts `positions_evaluated`). New device kernels in `tensor_ops_rocm.spl`: rope, kv_write (in place), row lookup, argmax (one i32 readback, never the 32000 logits). Spec: `slang_pure_rocm_generate_spec.spl` (GPU ids == CPU ids, reference text, prefix reuse, perf table in the log; needs `--timeout 3600` because the CPU leg is minutes on the seed). KV capacity is `min(max_position_embeddings, 1024)` (attention keeps scores in shared memory). `hip_compute.rocm_kernel` now destroys the hipRTC program on every path; the code-object buffer is deliberately kept (HIP docs do not say whether `hipModuleLoadData` copies it). `env_get` returns "" when unset, not None: `?? default` never fires.
 - Integration (2026-11-16): `/v1/completions` goes through the same dispatch as chat (`engine_complete_text`) and returns real usage counts; a media request to a pure-runner model is refused (text only), never routed to ggml. Pure/dispatch/variety system specs append evidence and `SKIPPED: <why>` lines to `build/probe/*_evidence.txt` because the runner counts skip() as passed (bug records in doc/08_tracking/bug).
 
-
 ## Host portability (Windows / Linux / macOS, 2026-11-16)
 
 One module owns every per-OS decision: `src/lib/gc_async_mut/slang/host/slang_host.spl`.
@@ -507,13 +506,16 @@ route env, file exists/read, directory list and process capture through SOSIX
 ## Image generation: /v1/images/generations (L6, 2026-11-17)
 
 - `serving/serving_images.spl` -> `model_executor/runners/sd_runner.spl`
-  (`sd_runner_open/run/close`, `engine/kind_dispatch.kind_open` has the
-  `StableDiffusion` arm) -> `src/runtime/slang_sd_shim.c` (stable-diffusion.cpp
+  (`sd_runner_open/run/close`; deliberately NOT wired into `kind_dispatch.kind_open`,
+  which would load a multi-GB model just to answer a 501) -> `src/runtime/slang_sd_shim.c` (stable-diffusion.cpp
   opaque-options C API, **ggml statically linked** into `slang_sd.dll`).
 - Body `{model, prompt, n<=4, size, response_format:"b64_json", steps, seed}`;
   reply `{created, data:[{b64_json}]}` (PNG via `common/image/png_encode.spl`,
   stored deflate). `url` format = 400. `size` = WIDTHxHEIGHT, both multiples of
-  64, <= 768, default 512x512; defaults steps 4, seed 42 (cfg 1.0, sd-turbo).
+  64, <= 768, default 512x512; defaults steps 4 (1..50), n 1..4, negative/absent seed = random (cfg 1.0, sd-turbo).
+  Every field is validated (400) before the runner is touched. One generation at a
+  time: `sd_runner_try_acquire` (AtomicBool) gates open/run/close, a concurrent request
+  gets 503 `busy`. `created` is unix seconds.
   No `SLANG_SD_LIB` / missing DLL = 503 `runner_unavailable`; wrong kind = 400.
 - Build: `sh scripts/check/build-slang-sd-shim.shs` (CPU,
   `build/sffi/sd-cpu/slang_sd.dll`) and `SLANG_SD_VARIANT=vulkan
@@ -531,3 +533,16 @@ route env, file exists/read, directory list and process capture through SOSIX
   `SLANG_LIVE=1 SLANG_MODEL_ROOT SLANG_SD_LIB SLANG_SD_STEPS SLANG_SD_SIZE`).
 - Needs ~10 GiB free for the load; run one image at a time.
 - Host access in the runner goes through `host/slang_host` (`host_env`, `host_file_exists`).
+
+## Post-merge review follow-ups (#10682, 2026-11-22)
+- **Video input:**
+  - ffmpeg output is capped at 16 MiB, the hard cap of `rt_process_run_bounded_bytes`; a larger cap never spawns ffmpeg.
+  - One video part per request (400 `too_many_video_parts`). The check runs before expansion.
+  - Server faults return 503 `video_sampling_failed`.
+  - ffmpeg runs with `-protocol_whitelist file`, and the request is refused when no temp directory is set.
+- **Images:**
+  - A single owner behind an atomic busy flag; a concurrent request gets 503 `busy`.
+  - `n` is 1..4 and `steps` 1..50, checked before the model loads.
+- **Tree KV:** the live spec reads `n_ubatch` from `engine_tree_cache_stats`. Measured on Vulkan:
+  - Qwen2.5-1.5B is exact, with roughly half the prefill and 1.6-1.8x faster.
+  - The Gemma branching digest differs on Vulkan only; see `doc/08_tracking/bug/slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md`.

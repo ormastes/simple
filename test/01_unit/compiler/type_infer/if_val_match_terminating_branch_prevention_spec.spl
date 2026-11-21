@@ -1,0 +1,111 @@
+"""
+## Purpose and audience
+Purpose: End-to-end prevention spec proving that real parsed-and-lowered Simple functions using `if/elif/else`, `match`, and block expressions with early-return branches pass `HmInferContext.infer_module` while genuine branch type mismatches fail.
+Audience: compiler engineers maintaining `src/compiler/30.types/type_infer/inference_expr.spl` and `src/compiler/35.semantics/narrowing.spl`.
+"""
+# @req: REQ-COMPILER-TYPE-INFER-5904 — end-to-end AST -> HIR -> HM inference checks for terminating branches.
+
+use std.spec.step
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.types.type_infer.inference.*
+use compiler.types.type_infer.context.*
+
+fn tbp_infer_errors(source: text) -> [text]:
+    val file = "testdata/if_val_match_terminating_branch.spl"
+    val parsed = parse_full_frontend(source, file, "if_val_match_terminating_branch", Logger(level: 0))
+    if parser_has_errors():
+        return ["PARSE-FAILED"]
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir: HirModule = hir_lowering.lower_module(parsed)
+    if hir_lowering.errors.len() > 0:
+        var herrs: [text] = []
+        for he in hir_lowering.errors:
+            herrs = herrs.push(he.message)
+        return herrs
+    var ctx = HmInferContext.new()
+    ctx.infer_module(hir)
+    var errs: [text] = []
+    for e in ctx.errors:
+        errs = errs.push("{e}")
+    errs
+
+describe "terminating branch inference prevention (#5904)":
+    it "accepts real parsed if/elif/else and match expressions with returning branches":
+        step("Run parse -> HIR -> HM type inference on functions with early-returning value branches")
+        val src =
+            "enum CheckColor:\n" +
+            "    Red\n" +
+            "    Green\n\n" +
+            "fn enum_tail_check(c: CheckColor) -> i64:\n" +
+            "    match c:\n" +
+            "        case CheckColor.Red: 1\n" +
+            "        case CheckColor.Green: return 2\n\n" +
+            "fn option_both_terminate(opt: i64?) -> i64:\n" +
+            "    match opt:\n" +
+            "        case Some(v): return v\n" +
+            "        case None: return 0\n\n" +
+            "fn extract_branch(opt: i64?, flag: bool) -> text:\n" +
+            "    if not flag:\n" +
+            "        return \"disabled\"\n" +
+            "    val x: i64 = match opt:\n" +
+            "        case Some(v): v + 1\n" +
+            "        case nil: return \"missing\"\n" +
+            "    if x > 0:\n" +
+            "        \"ok\"\n" +
+            "    elif x == 0:\n" +
+            "        return \"zero\"\n" +
+            "    else:\n" +
+            "        return \"nonpos\"\n\n" +
+            "fn extract_match(flag: bool) -> text:\n" +
+            "    val n: i64 = match flag:\n" +
+            "        case false: return \"false\"\n" +
+            "        case true: 42\n" +
+            "    if n == 42:\n" +
+            "        \"yes\"\n" +
+            "    else:\n" +
+            "        return \"no\"\n"
+        expect(tbp_infer_errors(src)).to_equal([])
+
+    it "still rejects non-terminating branch type mismatches end-to-end":
+        step("Verify real type mismatches across non-terminating match/if branches fail type inference")
+        val bad_src =
+            "fn mismatch_match(flag: bool) -> i64:\n" +
+            "    val n = match flag:\n" +
+            "        case false: \"wrong\"\n" +
+            "        case true: 42\n" +
+            "    n\n"
+        expect(tbp_infer_errors(bad_src).len()).to_be_greater_than(0)
+
+    it "rejects single-branch terminating If and non-exhaustive or guarded MatchCase in non-Unit positions":
+        step("Verify fall-through If, partial MatchCase, guarded MatchCase, and unsound post-match narrowing fail")
+        val single_if_src =
+            "fn single_if_ret(flag: bool) -> i64:\n" +
+            "    if flag:\n" +
+            "        return 1\n"
+        expect(tbp_infer_errors(single_if_src).len()).to_be_greater_than(0)
+
+        val partial_match_src =
+            "fn non_exhaustive_match(n: i64) -> i64:\n" +
+            "    match n:\n" +
+            "        case 1: return 10\n"
+        expect(tbp_infer_errors(partial_match_src).len()).to_be_greater_than(0)
+
+        val guarded_match_src =
+            "fn guarded_match(n: i64) -> i64:\n" +
+            "    match n:\n" +
+            "        case _ if n > 0: return 10\n"
+        expect(tbp_infer_errors(guarded_match_src).len()).to_be_greater_than(0)
+
+        val narrow_leak_src =
+            "fn unsound_narrow(opt: i64?, n: i64) -> i64:\n" +
+            "    if opt == nil:\n" +
+            "        match n:\n" +
+            "            case 1: return 10\n" +
+            "    opt + 1\n"
+        expect(tbp_infer_errors(narrow_leak_src).len()).to_be_greater_than(0)

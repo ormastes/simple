@@ -45,6 +45,62 @@ impl Lowerer {
         Ok(())
     }
 
+    pub(super) fn try_lower_enum_variant_access(
+        &mut self,
+        recv_name: &str,
+        field: &str,
+    ) -> LowerResult<Option<HirExpr>> {
+        let Some(type_id) = self.module.types.lookup(recv_name) else {
+            return Ok(None);
+        };
+        let Some(HirType::Enum { name: _, variants, .. }) = self.module.types.get(type_id) else {
+            return Ok(None);
+        };
+        let is_placeholder = variants.is_empty();
+        for (variant_name, _variant_fields) in variants {
+            if variant_name == field {
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
+                    ty: type_id,
+                }));
+            }
+        }
+        if is_placeholder {
+            if let Some(ref defs) = self.global_enum_defs.clone() {
+                if let Some(variant_summary) = defs.get(recv_name) {
+                    if variant_summary.iter().any(|(vname, _)| vname == field) {
+                        let variants = self.resolve_global_enum_variants(variant_summary);
+                        let global_type_id = self.module.types.update_named(
+                            recv_name.to_string(),
+                            HirType::Enum {
+                                name: recv_name.to_string(),
+                                variants,
+                                generic_params: vec![],
+                                is_generic_template: false,
+                                type_bindings: std::collections::HashMap::new(),
+                            },
+                        );
+                        self.globals.insert(recv_name.to_string(), global_type_id);
+                        return Ok(Some(HirExpr {
+                            kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
+                            ty: global_type_id,
+                        }));
+                    }
+                }
+            }
+        }
+        if self.lenient_types {
+            return Ok(Some(HirExpr {
+                kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
+                ty: type_id,
+            }));
+        }
+        Err(LowerError::Unsupported(format!(
+            "enum '{}' has no variant named '{}'",
+            recv_name, field
+        )))
+    }
+
     /// Lower a field access expression to HIR
     ///
     /// Handles:
@@ -58,8 +114,12 @@ impl Lowerer {
         field: &str,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        let receiver_base = match receiver {
+            Expr::GenericInst { expr, .. } => expr.as_ref(),
+            other => other,
+        };
         // Check for thread_group.id and thread_group.size before lowering receiver
-        if let Expr::Identifier(recv_name) = receiver {
+        if let Expr::Identifier(recv_name) = receiver_base {
             if recv_name == "thread_group" {
                 return self.lower_thread_group_field(field);
             }
@@ -87,66 +147,8 @@ impl Lowerer {
             // other module's enum.
             let scoped_recv_name = self.module.types.scoped_name(recv_name).to_string();
             let recv_name = &scoped_recv_name;
-            // Check if receiver is an enum type - handle as enum variant access
-            if let Some(type_id) = self.module.types.lookup(recv_name) {
-                if let Some(HirType::Enum { name: _, variants, .. }) = self.module.types.get(type_id) {
-                    let is_placeholder = variants.is_empty();
-                    // Check if field is a valid variant name
-                    for (variant_name, variant_fields) in variants {
-                        if variant_name == field {
-                            // This is an enum variant with no payload (or with payload to be filled later)
-                            if variant_fields.is_none() {
-                                // Unit variant - return enum value
-                                return Ok(HirExpr {
-                                    kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
-                                    ty: type_id,
-                                });
-                            } else {
-                                // Variant with fields - return constructor reference
-                                // This will be called later with arguments
-                                return Ok(HirExpr {
-                                    kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
-                                    ty: type_id,
-                                });
-                            }
-                        }
-                    }
-                    if is_placeholder {
-                        if let Some(ref defs) = self.global_enum_defs.clone() {
-                            if let Some(variant_summary) = defs.get(recv_name) {
-                                if variant_summary.iter().any(|(vname, _)| vname == field) {
-                                    let variants = self.resolve_global_enum_variants(variant_summary);
-                                    let global_type_id = self.module.types.update_named(
-                                        recv_name.to_string(),
-                                        HirType::Enum {
-                                            name: recv_name.to_string(),
-                                            variants,
-                                            generic_params: vec![],
-                                            is_generic_template: false,
-                                            type_bindings: std::collections::HashMap::new(),
-                                        },
-                                    );
-                                    self.globals.insert(recv_name.to_string(), global_type_id);
-                                    return Ok(HirExpr {
-                                        kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
-                                        ty: global_type_id,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    // Variant not found
-                    if self.lenient_types {
-                        return Ok(HirExpr {
-                            kind: HirExprKind::Global(format!("{}::{}", recv_name, field)),
-                            ty: type_id,
-                        });
-                    }
-                    return Err(LowerError::Unsupported(format!(
-                        "enum '{}' has no variant named '{}'",
-                        recv_name, field
-                    )));
-                }
+            if let Some(enum_expr) = self.try_lower_enum_variant_access(recv_name, field)? {
+                return Ok(enum_expr);
             }
 
             // Class 1 fallback: when the receiver identifier names an enum
@@ -194,6 +196,24 @@ impl Lowerer {
             if self.module.types.lookup(recv_name).is_some() {
                 if let Some(expr) = self.try_lower_static_member_value_with_sugar(recv_name, field, ctx)? {
                     return Ok(expr);
+                }
+            }
+        } else if let Expr::FieldAccess {
+            receiver: inner_recv,
+            field: inner_field,
+        } = receiver_base
+        {
+            if let Expr::Identifier(ns) = inner_recv.as_ref() {
+                if ctx.lookup(ns).is_none() {
+                    if let Some((type_name, _)) = self.resolve_flatten_namespace_type(ns, inner_field) {
+                        self.gate_private_namespace_ref(ns, inner_field);
+                        if let Some(enum_expr) = self.try_lower_enum_variant_access(&type_name, field)? {
+                            return Ok(enum_expr);
+                        }
+                        if let Some(expr) = self.try_lower_static_member_value_with_sugar(&type_name, field, ctx)? {
+                            return Ok(expr);
+                        }
+                    }
                 }
             }
         }
@@ -555,6 +575,7 @@ impl Lowerer {
                         method: field.to_string(),
                         args: vec![],
                         dispatch: DispatchMode::Dynamic,
+                        generic_args: vec![],
                     },
                     ty: TypeId::ANY, // Method return type is unknown at this point
                 })

@@ -20,7 +20,8 @@ fn class_identity_logger() -> Logger:
     Logger(level: 0)
 
 fn class_identity_module(source: text, name: text, log: Logger) -> Module:
-    parse_full_frontend(source, name, name, log)
+    val path = name.replace(".", "/") + ".spl"
+    parse_full_frontend(source, path, name, log)
 
 fn class_identity_surfaces(modules: Dict<text, Module>, sources: [SourceFile]):
     module_surfaces_from_test_modules(modules, sources).unwrap()
@@ -33,14 +34,14 @@ describe "class owner identity across imports":
         val consumer_source = "use identity.left.\{Cell as LeftCell\}\nuse identity.right.\{Cell as RightCell\}\nfn main() -> i64:\n    LeftCell.tag() + RightCell.tag()"
         val left = class_identity_module(left_source, "identity.left", log)
         val right = class_identity_module(right_source, "identity.right", log)
-        val consumer = class_identity_module(consumer_source, "identity.consumer", log)
+        val consumer = class_identity_module(consumer_source, "consumer.main", log)
         var modules: Dict<text, Module> = {}
         modules["identity.left"] = left
         modules["identity.right"] = right
         val surfaces = class_identity_surfaces(modules, [
             SourceFile(path: "identity/left.spl", content: left_source, module_name: "identity.left"),
             SourceFile(path: "identity/right.spl", content: right_source, module_name: "identity.right")])
-        var lowering = hirlowering_for_module("identity.consumer", surfaces)
+        var lowering = hirlowering_for_module("consumer/main.spl", surfaces)
         val hir = lowering.lower_module(consumer)
         val left_id = hir.symbols.lookup_qualified_type_raw("identity.left", "Cell")
         val right_id = hir.symbols.lookup_qualified_type_raw("identity.right", "Cell")
@@ -161,8 +162,8 @@ describe "class owner identity across imports":
         val surfaces = class_identity_surfaces(modules, [
             SourceFile(path: "identity/left.spl", content: left_source, module_name: "identity.left"),
             SourceFile(path: "identity/right.spl", content: right_source, module_name: "identity.right")])
-        var left_lowering = hirlowering_for_module("identity.left", surfaces)
-        var right_lowering = hirlowering_for_module("identity.right", surfaces)
+        var left_lowering = hirlowering_for_module("identity/left.spl", surfaces)
+        var right_lowering = hirlowering_for_module("identity/right.spl", surfaces)
         val left = left_lowering.lower_module(left_ast)
         val right = right_lowering.lower_module(right_ast)
         expect(left_lowering.errors.len()).to_equal(0)
@@ -202,10 +203,10 @@ describe "class owner identity across imports":
 
     it "preserves ABI functions while distinguishing a provider main from entry main":
         val log = class_identity_logger()
-        val source = "extern fn rt_array_push(array: i64, value: i64) -> i64\n@global\nfn abi_global() -> i64:\n    1\nexport fn abi_export() -> i64:\n    2\nfn main() -> i64:\n    3"
+        val source = "extern fn rt_array_push(array: i64, value: i64) -> i64\n@global\nfn abi_global() -> i64:\n    1\n@export(\"C\")\nfn abi_export() -> i64:\n    2\nfn main() -> i64:\n    3"
         val ast = class_identity_module(source, "identity.abi", log)
         val surfaces = class_identity_surfaces({}, [])
-        var lowering = hirlowering_for_module("identity.abi", surfaces)
+        var lowering = hirlowering_for_module("identity/abi.spl", surfaces)
         val module = lowering.lower_module(ast)
         expect(lowering.errors.len()).to_equal(0)
         var checked = 0
