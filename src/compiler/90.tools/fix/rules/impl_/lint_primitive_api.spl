@@ -96,6 +96,12 @@ pub fn primitive_api_audit_report(source: text, file: text) -> text:
         out = out + "{entry.file}:{entry.line}: {entry.item_name} {entry.position} uses {entry.primitive_type} reason={entry.reason_code} suggest={entry.suggested_wrapper}\n"
     out
 
+# SPL-TEXT-001 kind: DomainNamed when the finding name reads as a semantic domain
+# (`_text_domain_of`) -> lint `bare_text_domain`; Plain -> lint `bare_text`. Non-text: Plain.
+pub enum TextFindingKind:
+    DomainNamed
+    Plain
+
 # One primitive_api finding: exact span of the offending type token.
 # `fixes` holds ranked semantic-type rewrites of that token (possibly none);
 # the no-op same-line EasyFix this rule used to offer is gone for good.
@@ -112,6 +118,7 @@ pub struct PrimitiveApiFinding:
     message: text
     help: text
     fixes: [DiagnosticFix]
+    text_kind: TextFindingKind
 
 # Single owner of primitive_api detection. The lint driver consumes this
 # directly; the EasyFix producers no longer carry the rule (nothing to apply).
@@ -127,17 +134,20 @@ pub fn primitive_api_findings(file: text, lines: [text]) -> [PrimitiveApiFinding
         return out
 
     var owner = ""
+    var owner_allowed = false
     for line in lines:
         line_num = line_num + 1
         val line_start = byte_offset
-        byte_offset = byte_offset + line.len() + 1
+        byte_offset = byte_offset + line.byte_len() + 1
         val trimmed = line.trim()
         if trimmed != "" and not line.starts_with(" ") and not line.starts_with("\t") and not trimmed.starts_with("#") and not trimmed.starts_with("@"):
             owner = _type_block_name(trimmed)
+            # `@allow(primitive_api)` above a struct/class covers its fields too.
+            owner_allowed = line_is_allowed(lines, line_num - 1, "primitive_api")
         val is_pub_fn = trimmed.starts_with("pub fn ") or
             trimmed.starts_with("pub me ") or
             trimmed.starts_with("pub static fn ")
-        if owner != "" and not is_pub_fn and trimmed.starts_with("pub ") and not line_is_allowed(lines, line_num - 1, "primitive_api"):
+        if owner != "" and not owner_allowed and not is_pub_fn and trimmed.starts_with("pub ") and not line_is_allowed(lines, line_num - 1, "primitive_api"):
             val field = _pub_text_field(trimmed)
             if field.len() == 2:
                 val ty_col = line.find(":") + 1 + _leading_ws_len(line.slice(line.find(":") + 1))
@@ -193,7 +203,7 @@ pub fn primitive_api_findings(file: text, lines: [text]) -> [PrimitiveApiFinding
                     "public API parameter '{param_name}' of '{item_name}' uses bare primitive type '{param_type}'")
                 out = _push_unique(out, seen, f)
                 seen.push(_finding_key(f))
-            seg_start = seg_start + param.len() + 1
+            seg_start = seg_start + param.byte_len() + 1
 
         if _is_bare_primitive_type(return_type) or _is_text_family(return_type):
             val arrow = trimmed.find("->")
@@ -211,7 +221,7 @@ pub fn primitive_api_findings(file: text, lines: [text]) -> [PrimitiveApiFinding
 # the semantic-type candidates.
 fn _finding(file: text, type_path: text, name: text, ty: text, line: i64, col0: i64, line_start: i64, message: text) -> PrimitiveApiFinding:
     val symbol = type_path.slice(0, type_path.find("."))
-    val span = Span.new(line_start + col0, line_start + col0 + ty.len(), line, col0 + 1)
+    val span = Span.new(line_start + col0, line_start + col0 + ty.byte_len(), line, col0 + 1)
     PrimitiveApiFinding(
         code: if ty == "bool": "SPL-BOOL-001" else: if _is_text_family(ty): "SPL-TEXT-001" else: "primitive_api",
         file: file,
@@ -221,9 +231,10 @@ fn _finding(file: text, type_path: text, name: text, ty: text, line: i64, col0: 
         line: line,
         column: col0 + 1,
         start: line_start + col0,
-        end: line_start + col0 + ty.len(),
+        end: line_start + col0 + ty.byte_len(),
         message: message,
         help: if _is_text_family(ty): _text_domain_help(name) else: "replace '{ty}' with a semantic unit/domain type (e.g. `unit {_suggest_wrapper_name(symbol, ty)}: {ty}`), or add `@allow(primitive_api)` with a reason at an ABI/math boundary",
+        text_kind: if _is_text_family(ty) and _text_domain_of(name).len() > 0: TextFindingKind.DomainNamed else: TextFindingKind.Plain,
         fixes: _ranked_type_fixes(file, type_path, name, ty, span)
     )
 
@@ -495,15 +506,14 @@ fn _extract_return_type(line: text) -> text:
 fn _is_text_family(ty: text) -> bool:
     ty == "text" or ty == "str" or ty == "String"
 
-# Name of the struct/class opened by a column-0 header line, else "".
+# Name of the public struct/class opened by a column-0 header line, else "".
+# Fields of private types are not public API, so only `pub struct`/`pub class`.
 fn _type_block_name(header: text) -> text:
-    var rest = header
-    if rest.starts_with("pub "):
-        rest = rest.slice(4)
-    if rest.starts_with("struct "):
-        rest = rest.slice(7)
-    elif rest.starts_with("class "):
-        rest = rest.slice(6)
+    var rest = ""
+    if header.starts_with("pub struct "):
+        rest = header.slice(11)
+    elif header.starts_with("pub class "):
+        rest = header.slice(10)
     else:
         return ""
     var end = 0
@@ -515,9 +525,11 @@ fn _type_block_name(header: text) -> text:
     rest.slice(0, end)
 
 # `pub [val|var] name: text` -> [name, type] when the field type is the text
-# family, else []. Defaults (`= ...`) are cut off.
+# family, else []. A trailing `# comment` and any default (`= ...`) are cut off.
 fn _pub_text_field(trimmed: text) -> [text]:
-    var rest = trimmed.slice(4).trim()
+    val comment = trimmed.find("#")
+    val code = if comment >= 0: trimmed.slice(0, comment) else: trimmed
+    var rest = code.slice(4).trim()
     if rest.starts_with("val "):
         rest = rest.slice(4).trim()
     elif rest.starts_with("var "):
@@ -732,14 +744,14 @@ fn check_raw_unit_postfix(source: text, file: text) -> [EasyFix]:
             fix.add_replacement(Replacement.create(
                 file: file,
                 start: byte_offset,
-                end: byte_offset + line.len(),
+                end: byte_offset + line.byte_len(),
                 line: line_num,
                 column: 1,
                 new_text: new_line
             ))
             fixes.push(fix)
 
-        byte_offset = byte_offset + line.len() + 1
+        byte_offset = byte_offset + line.byte_len() + 1
 
     fixes
 

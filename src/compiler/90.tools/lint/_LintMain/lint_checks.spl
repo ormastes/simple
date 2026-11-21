@@ -91,7 +91,7 @@ use std.log.{error, info}
 use std.tooling.easy_fix.*
 use compiler.tools.fix.rules.registry.{registry_fix_producers, run_admitted_registry_producers}
 use compiler.tools.fix.producer.{fix_unit_from_source}
-use compiler.tools.fix.rules.impl_.lint_primitive_api.{primitive_api_findings, primitive_api_fix_hint}
+use compiler.tools.fix.rules.impl_.lint_primitive_api.{primitive_api_findings, primitive_api_fix_hint, TextFindingKind}
 use compiler.tools.fix.rules.impl_.lint_script_language.{check_simple_script_required}
 use lazy nogc_sync_mut.ui.theme_package.{validate_default_theme_package}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
@@ -462,13 +462,17 @@ impl Linter:
         # as an EasyFix that `lint --fix-all` would apply.
         val run_prim_api = lint_admit_and_record_v1(file_config, "primitive_api")
         val run_bare_bool = lint_admit_and_record_v1(file_config, "bare_bool")
-        val run_bare_text = lint_admit_and_record_v1(file_config, "bare_text_domain")
-        if run_prim_api or run_bare_bool or run_bare_text:
+        val run_bare_text_domain = lint_admit_and_record_v1(file_config, "bare_text_domain")
+        val run_bare_text = lint_admit_and_record_v1(file_config, "bare_text")
+        if run_prim_api or run_bare_bool or run_bare_text or run_bare_text_domain:
             for finding in primitive_api_findings(path, lines):
                 # SPL-BOOL-001 (public bool) reports under its own lint name so it is
                 # warn by default and deny only in the robust/critical/verified tiers.
-                val lint_name = if finding.code == "SPL-BOOL-001": "bare_bool" else: if finding.code == "SPL-TEXT-001": "bare_text_domain" else: "primitive_api"
-                val sub_admitted = if lint_name == "bare_bool": run_bare_bool else: if lint_name == "bare_text_domain": run_bare_text else: run_prim_api
+                # SPL-TEXT-001 splits: domain-named text (`bare_text_domain`, deny in
+                # robust/critical) and any other public text (`bare_text`, warn everywhere).
+                val text_lint = if finding.text_kind == TextFindingKind.DomainNamed: "bare_text_domain" else: "bare_text"
+                val lint_name = if finding.code == "SPL-BOOL-001": "bare_bool" else: if finding.code == "SPL-TEXT-001": text_lint else: "primitive_api"
+                val sub_admitted = if lint_name == "bare_bool": run_bare_bool else: if lint_name == "bare_text_domain": run_bare_text_domain else: if lint_name == "bare_text": run_bare_text else: run_prim_api
                 if not sub_admitted:
                     continue
                 val lint_msg = if finding.code == "primitive_api": finding.message else: "{finding.code}: {finding.message}"
