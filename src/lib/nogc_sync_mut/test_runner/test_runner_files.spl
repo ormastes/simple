@@ -9,6 +9,7 @@ use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
 use std.io_runtime.{dir_walk}
 use std.spec.platform_os.{is_os_platform_tag}
 use std.nogc_sync_mut.path.{normalize_path}
+use std.common.path_pure.{to_slash}
 use std.test_runner.test_manifest.{
     TestManifest, TestManifestEntry,
     MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh, manifest_covers
@@ -651,6 +652,17 @@ pub fn save_manifest_from_discovery(base_path: text):
 pub fn discover_test_files(base_path: text, options: TestOptions) -> [text]:
     return discover_test_files_fast(base_path, options, true)
 
+# The walker returns host-native paths (backslashes on Windows) while every
+# convention filter in discover_test_files_slow tests forward-slash segments
+# ("/fuzz/", "/deploy/", "/baremetal/", "/test/unit/", ...). Unnormalized, none
+# of them matched on Windows, so --fuzz/--chaos/--deploy/--security gated
+# nothing. Each walked path is normalized once through this function, as the
+# manifest scanner already does for its entries.
+# reason: a walked path is opaque host path text in, canonical path text out.
+@allow(primitive_api)
+pub fn discovery_walked_path(walked_path: text) -> text:
+    to_slash(walked_path)
+
 pub fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]:
     # Normalize path separators for Windows compatibility
     var base_path = base_path.replace("\\", "/")
@@ -680,7 +692,8 @@ pub fn discover_test_files_slow(base_path: text, options: TestOptions) -> [text]
     var ex_security = 0
     var ex_remote = 0
     var ex_baremetal = 0
-    for f in all_files:
+    for raw_f in all_files:
+        val f = discovery_walked_path(raw_f)
         if not is_test_file(f):
             continue
         # Legacy mirror is excluded from directory discovery (see above).
