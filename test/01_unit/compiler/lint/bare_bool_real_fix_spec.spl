@@ -24,13 +24,33 @@ fn _count(hay: text, needle: text) -> i64:
     hay.split(needle).len() - 1
 
 describe "L:bare_bool real fix":
-    it "rewrites the param type and declares a pub unit at the top of the file":
+    it "rewrites the param type and appends a pub unit at end of file":
         val out = _applied("pub fn set(enabled: bool):\n    pass\n")
-        expect(out).to_equal("pub unit EnabledFlag: bool\n\npub fn set(enabled: EnabledFlag):\n    pass\n")
+        expect(out).to_equal("pub fn set(enabled: EnabledFlag):\n    pass\n\npub unit EnabledFlag: bool\n")
 
-    it "declares the unit after the leading use block":
+    it "appends the unit after a use-led file":
         val out = _applied("use a.b\nuse c.d\n\npub fn f(x: bool):\n    pass\n")
-        expect(out).to_equal("use a.b\nuse c.d\n\npub unit XFlag: bool\n\npub fn f(x: XFlag):\n    pass\n")
+        expect(out).to_equal("use a.b\nuse c.d\n\npub fn f(x: XFlag):\n    pass\n\npub unit XFlag: bool\n")
+
+    it "keeps a multi-line use block intact":
+        val out = _applied("use a.{\n    b,\n    c\n}\n\npub fn f(x: bool):\n    pass\n")
+        expect(out).to_equal("use a.{\n    b,\n    c\n}\n\npub fn f(x: XFlag):\n    pass\n\npub unit XFlag: bool\n")
+
+    it "keeps a leading module docstring first":
+        val out = _applied("\"\"\"doc\"\"\"\n\npub fn f(x: bool):\n    pass\n")
+        expect(out).to_equal("\"\"\"doc\"\"\"\n\npub fn f(x: XFlag):\n    pass\n\npub unit XFlag: bool\n")
+
+    it "treats pub use as part of the use block":
+        val out = _applied("pub use a.b\n\npub fn f(x: bool):\n    pass\n")
+        expect(out).to_equal("pub use a.b\n\npub fn f(x: XFlag):\n    pass\n\npub unit XFlag: bool\n")
+
+    it "appends the unit when the file has no trailing newline":
+        val out = _applied("pub fn f(x: bool):\n    pass")
+        expect(out).to_equal("pub fn f(x: XFlag):\n    pass\n\npub unit XFlag: bool\n")
+
+    it "places the declaration after a non-ASCII comment line":
+        val out = _applied("# note — em dash\nuse a.b\n\npub fn f(x: bool):\n    pass\n")
+        expect(out).to_equal("# note — em dash\nuse a.b\n\npub fn f(x: XFlag):\n    pass\n\npub unit XFlag: bool\n")
 
     it "never emits a replacement that leaves the text unchanged":
         val src = "pub fn set(enabled: bool, verbose: bool):\n    pass\n"
@@ -52,25 +72,17 @@ describe "L:bare_bool real fix":
 
     it "keeps decorator and comment lines above the fn in place":
         val src = "# doc\n@inline\npub fn f(x: bool):\n    pass\n"
-        expect(_applied(src)).to_equal("pub unit XFlag: bool\n\n# doc\n@inline\npub fn f(x: XFlag):\n    pass\n")
+        expect(_applied(src)).to_equal("# doc\n@inline\npub fn f(x: XFlag):\n    pass\n\npub unit XFlag: bool\n")
 
     it "shares one unit between two fns with the same param name":
         val src = "pub fn a(x: bool):\n    pass\n\npub fn b(x: bool):\n    pass\n"
         val fixes = check_bare_bool(src, "s.spl")
         expect(fixes.len()).to_equal(2)
-        expect(_apply([fixes[1]], src)).to_equal("pub unit XFlag: bool\n\npub fn a(x: bool):\n    pass\n\npub fn b(x: XFlag):\n    pass\n")
+        expect(_apply([fixes[1]], src)).to_equal("pub fn a(x: bool):\n    pass\n\npub fn b(x: XFlag):\n    pass\n\npub unit XFlag: bool\n")
         val out = _applied(src)
         expect(_count(out, "pub unit XFlag: bool")).to_equal(1)
         expect(out.contains("a(x: XFlag)")).to_equal(true)
         expect(out.contains("b(x: XFlag)")).to_equal(true)
-
-    it "places the declaration correctly after a non-ASCII comment line":
-        val src = "# note \— em dash\nuse a.b\n\npub fn f(x: bool):\n    pass\n"
-        expect(_applied(src)).to_equal("# note \— em dash\nuse a.b\n\npub unit XFlag: bool\n\npub fn f(x: XFlag):\n    pass\n")
-
-    it "keeps the declaration at the top when a non-ASCII comment precedes the fn":
-        val src = "# note \— em dash\npub fn f(x: bool):\n    pass\n"
-        expect(_applied(src)).to_equal("pub unit XFlag: bool\n\n# note \— em dash\npub fn f(x: XFlag):\n    pass\n")
 
     it "reuses a pre-existing or imported XFlag without redeclaring":
         val declared = "pub unit XFlag: bool\n\npub fn f(x: bool):\n    pass\n"
