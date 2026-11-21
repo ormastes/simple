@@ -790,6 +790,8 @@ impl HirLowering:
                             self.warn_bare_variant(name, "over an untyped subject is a unit variant of several visible enums; it binds as a catch-all -- annotate the subject or qualify the variant")
                         else:
                             return HirPattern(kind: HirPatternKind.Enum(HirType(kind: HirTypeKind.Error, span: p.span), name, None), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: p.span), span: p.span)
+                    if val constant = self.lower_scalar_const_pattern(name, p.span):
+                        return constant
                 if val binding_type = subject_type:
                     # A binder over an erased `T` slot is defined with type
                     # `T` (the tagged word); refusing it left the arm body
@@ -929,6 +931,34 @@ impl HirLowering:
             case _: ()
         self.lower_pattern(p)
 
+    me lower_scalar_const_pattern(name: text, span: Span) -> HirPattern?:
+        val existing_id = self.symbols.lookup_or_invalid(name)
+        if not existing_id.is_valid():
+            return nil
+        if val existing = self.symbols.get_symbol_raw(existing_id.id):
+            if existing.kind == SymbolKind.Const and not existing.is_mutable:
+                var constant_index = 0
+                while constant_index < self.scalar_const_pattern_symbols.len():
+                    if self.scalar_const_pattern_symbols[constant_index] == existing_id.id:
+                        val integer = self.scalar_const_pattern_values[constant_index]
+                        val value_type = existing.type_ ?? HirType(kind: HirTypeKind.Int(64, true), span: span)
+                        return Some(HirPattern(
+                            kind: HirPatternKind.Literal(HirExpr(kind: HirExprKind.IntLit(integer, None), has_type_: true, type_: value_type, span: span)),
+                            has_type_: true,
+                            type_: value_type,
+                            span: span))
+                    constant_index = constant_index + 1
+                if val value_type = existing.type_:
+                    match value_type.kind:
+                        case HirTypeKind.Int(_, _):
+                            return Some(HirPattern(
+                                kind: HirPatternKind.Literal(HirExpr(kind: HirExprKind.Var(existing_id), has_type_: true, type_: value_type, span: span)),
+                                has_type_: true,
+                                type_: value_type,
+                                span: span))
+                        case _: ()
+        nil
+
     me lower_pattern(p: Pattern) -> HirPattern:
         val kind = match p.kind:
             case PatternKind.Wildcard:
@@ -938,6 +968,9 @@ impl HirLowering:
                 HirPatternKind.Literal(hir_normalize_integer_pattern_literal(self.lower_hir_expr(value)))
 
             case Binding(name, mutable):
+                if not mutable:
+                    if val constant = self.lower_scalar_const_pattern(name, p.span):
+                        return constant
                 val symbol = self.symbols.define(name, SymbolKind.Variable, nil, p.span, Visibility.Private, mutable, nil)
                 # Level-gated (default off): traces every pattern binding that
                 # is actually entered into the current scope. A binding that
