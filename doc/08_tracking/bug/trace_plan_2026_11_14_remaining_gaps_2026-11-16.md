@@ -182,3 +182,21 @@ baseline_eligible: bool)`, `record_baseline_generation(generation/p50/promoted_a
 `collect_timing_runs(max_count)`, `is_flaky_test -> bool`, `save() -> bool`, record
 structs (`TimingSummary`, `TestInfo`, ...) pub fields, and `ResourceUsage`/`TestDbFileRow`
 source fields wrapped at the call site.
+
+Deferred test-DB batch 2026-11-22: the deferred set above is converted except the record
+structs. New types: `TestBaselineGeneration`, `TestTimestamp` (`value: i64` newtypes),
+`TestBaselineEligibility` (Eligible|Ineligible), `TestFlakiness` (Flaky|Stable),
+`TestDbSaveOutcome` (Saved|Failed). `update_test_result`/`update_timing`/`add_timing_run`
+take `TestDurationMs`; `add_timing_run` takes `TestBaselineEligibility`;
+`record_baseline_generation` takes `TestBaselineGeneration`/`TestDurationMs`/`TestTimestamp`;
+`collect_timing_runs[_for_cohort]` take `TestRunCount`; `is_flaky_test -> TestFlakiness`;
+`TestDatabaseExtended.save -> TestDbSaveOutcome` (both test_db_compat wrappers compare it
+explicitly). SDN unchanged (`baseline_eligible` still written as "true"/"false").
+Still bare: pub fields of the record structs (`TimingSummary`, `TestInfo`, `TrdRunRecord`,
+...), `ResourceUsage`/`TestDbFileRow` source fields.
+
+Open (found 2026-11-22, not fixed): no spec observes `promote_timing_baseline` returning
+`TestTimingOutcome.Applied`. With an existing timing row and an eligible sample in the
+named cohort it still returned `Refused` in a probe (database.spl `promote_timing_baseline`,
+the `update_row_checked` / row-scan path); cause not isolated. Unblock: a spec that records
+`passed` + eligible cohort samples, then asserts `Applied` and the `baseline_history` row.
