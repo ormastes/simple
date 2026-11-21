@@ -1,0 +1,78 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Provider call results retain their Result type through a chained receiver
+
+The VFS native lane explicitly unwraps its optional MountTable global, then
+uses lookup/resolve_driver results directly as Option/Result receivers. MIR
+must recover the provider-declared Result type for resolve_driver(...).is_ok()
+and is_err(), rather than rejecting the outer predicate as an unknown method.
+"""
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.ParserModule
+use compiler.hir.hir_lowering.types.hirlowering_for_module
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.module_surfaces_from_modules
+use compiler.mir.mir.*
+
+val PROVIDER_SOURCE = "pub struct MountTable:\n    value: i64\n\nimpl MountTable:\n    static fn new() -> MountTable:\n        MountTable(value: 1)\n\n    me fn lookup(path: text) -> text?:\n        Some(path)\n\n    me fn resolve_driver(path: text) -> Result<text, text>:\n        Ok(path)\n\n    me fn lookup_text(path: text) -> text:\n        path\n"
+val STATE_SOURCE = "use lib.mount_table.\{MountTable\}\npub var g_mount_table: MountTable? = Some(MountTable.new())\n"
+val CONSUMER_SOURCE = "use lib.mount_table.\{MountTable\}\nuse lib.state.\{g_mount_table\}\n\nfn exercise(abs: text) -> bool:\n    val entry_opt = g_mount_table.unwrap().lookup(abs)\n    if not entry_opt.?:\n        return false\n    val entry = entry_opt.unwrap()\n    if g_mount_table.unwrap().resolve_driver(abs).is_err():\n        return false\n    g_mount_table.unwrap().resolve_driver(abs).is_ok()\n"
+val NEGATIVE_SOURCE = "use lib.mount_table.\{MountTable\}\nuse lib.state.\{g_mount_table\}\n\nfn exercise(abs: text) -> bool:\n    g_mount_table.unwrap().lookup_text(abs).is_ok()\n"
+
+struct ChainedResultLowering:
+    errors: [text]
+    graph: text
+
+fn lower_consumer(consumer_source: text) -> ChainedResultLowering:
+    val logger = Logger(level: 0)
+    val provider_ast = parse_full_frontend(PROVIDER_SOURCE, "lib/mount_table.spl", "lib.mount_table", logger)
+    val state_ast = parse_full_frontend(STATE_SOURCE, "lib/state.spl", "lib.state", logger)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", logger)
+    var modules: Dict<text, ParserModule> = {}
+    modules["lib.mount_table"] = provider_ast
+    modules["lib.state"] = state_ast
+    modules["app.main"] = consumer_ast
+    val sources = [
+        SourceFile(path: "lib/mount_table.spl", content: PROVIDER_SOURCE, module_name: "lib.mount_table"),
+        SourceFile(path: "lib/state.spl", content: STATE_SOURCE, module_name: "lib.state"),
+        SourceFile(path: "app/main.spl", content: consumer_source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var provider_lowering = hirlowering_for_module("lib/mount_table.spl", surfaces)
+    val provider_hir = provider_lowering.lower_module(provider_ast)
+    var state_lowering = hirlowering_for_module("lib/state.spl", surfaces)
+    val state_hir = state_lowering.lower_module(state_ast)
+    var consumer_lowering = hirlowering_for_module("app/main.spl", surfaces)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    expect(provider_lowering.errors.len()).to_equal(0)
+    expect(state_lowering.errors.len()).to_equal(0)
+    expect(consumer_lowering.errors.len()).to_equal(0)
+    var hir_modules: Dict<text, HirModule> = {}
+    hir_modules["lib.mount_table"] = provider_hir
+    hir_modules["lib.state"] = state_hir
+    hir_modules["app.main"] = consumer_hir
+    val target = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(consumer_hir.symbols, target)
+    for module_key in hir_modules.keys():
+        lowering.prescan_module_struct_names(hir_modules, module_key)
+    val mir = lowering.lower_module(consumer_hir, [provider_hir, state_hir, consumer_hir], true)
+    var errors: [text] = []
+    for error in lowering.errors:
+        errors.push(error.message)
+    ChainedResultLowering(errors: errors, graph: serialize_mir_module(mir))
+
+describe "chained Result predicates on provider call receivers":
+    it "lowers the explicitly unwrapped optional-global VFS receiver chain":
+        val lowered = lower_consumer(CONSUMER_SOURCE)
+        expect(lowered.errors).to_equal([])
+        expect(lowered.graph).to_contain("MountTable.lookup")
+        expect(lowered.graph).to_contain("MountTable.resolve_driver")
+        expect(lowered.graph).to_contain("rt_enum_discriminant")
+
+    it "still rejects is_ok on a chained non-Result provider result":
+        val lowered = lower_consumer(NEGATIVE_SOURCE)
+        expect(lowered.errors.len()).to_equal(1)
+        expect(lowered.errors[0]).to_contain("unresolved method call: is_ok")
