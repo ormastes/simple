@@ -20,11 +20,12 @@ use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 use std.io_runtime.{time_now_monotonic_ms}
 use app.io.mod.{cwd, getpid, time_now_unix_micros, dir_create_all,
     dir_remove_all, file_atomic_write, file_hash_sha256, file_rename,
-    file_read_regular_no_follow_bounded_bytes, process_run_bounded}
+    file_read_regular_no_follow_bounded_bytes}
+use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_create_nofollow_v1}
 
 fn _builder_root_v1() -> text:
-    cwd() + "/build/test/handoff-builder-" + getpid().to_text() +
-        "-" + time_now_unix_micros().to_text()
+    cwd().replace("\\", "/") + "/build/test/handoff-builder-" +
+        getpid().to_text() + "-" + time_now_unix_micros().to_text()
 
 fn _builder_fixture_v1(root: text) -> PreparedDistributedBuildAttemptV1:
     val source = root + "/source"
@@ -161,14 +162,20 @@ describe "parent parallel transport handoff builder V1":
             upload.plan.input_plan.batch)).to_be(true)
         expect(file_rename(upload.input_batch_path,
             upload.root + "/real.batch")).to_be(true)
-        val (_, _, code) = process_run_bounded("/bin/ln",
-            ["-s", "real.batch", upload.input_batch_path], 5000, 1024)
-        expect(code).to_equal(0)
-        val linked = build_parallel_transport_handoff_v1(prepared,
-            prepared.approved_node.unwrap(), root + "/result", deadline,
-            4, 1048576)
-        expect(linked.reason).to_equal("prepared-batch-mismatch")
-        expect(linked.valid).to_be(false)
+        val link_created = snapshot_symlink_create_nofollow_v1(upload.root,
+            upload.input_batch_path, "real.batch", 1)
+        @when(os="windows"):
+        val check_symlink_reject = link_created
+        @else:
+        val check_symlink_reject = true
+        expect(link_created).to_be(true)
+        @end
+        if check_symlink_reject:
+            val linked = build_parallel_transport_handoff_v1(prepared,
+                prepared.approved_node.unwrap(), root + "/result", deadline,
+                4, 1048576)
+            expect(linked.reason).to_equal("prepared-batch-mismatch")
+            expect(linked.valid).to_be(false)
         expect(dir_remove_all(root)).to_be(true)
 
     it "rejects changed ready bytes and a noncanonical admitted dispatch":
