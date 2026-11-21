@@ -5923,8 +5923,29 @@ impl MirLowering:
                     if conv_is_int:
                         if mir_conv_log_on():
                             eprint("[conv-lower] narrowing conversion arm hit method={method}\n")
+                        var conv_src_local = unresolved_receiver_local
+                        if method == "to_u8" and self.unresolved_receiver_is_text_v1(receiver, unresolved_receiver_local, declared_text_receiver):
+                            var b_txt_u8 = self.builder
+                            val zero_idx = b_txt_u8.new_temp(MirType.i64())
+                            b_txt_u8.emit_const(zero_idx, MirConstValue.Int(0), MirType.i64())
+                            val txt_byte_op = MirOperand(kind: MirOperandKind.Const(
+                                MirConstValue.Str("__simple_rt_string_byte_at"),
+                                MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                                    params: [MirType.i64(), MirType.i64()],
+                                    return_type: MirType.i64(),
+                                    is_variadic: false
+                                )))
+                            ), call_origin: MirCallOrigin.Runtime)
+                            val txt_byte_res = b_txt_u8.emit_call(
+                                txt_byte_op,
+                                [mir_operand_copy(unresolved_receiver_local), mir_operand_copy(zero_idx)],
+                                MirType.i64()
+                            )
+                            self.builder = b_txt_u8
+                            if val txt_byte_local = txt_byte_res:
+                                conv_src_local = txt_byte_local
                         var b_conv_n = self.builder
-                        val conv_narrowed = b_conv_n.emit_cast(mir_operand_copy(unresolved_receiver_local), conv_narrow)
+                        val conv_narrowed = b_conv_n.emit_cast(mir_operand_copy(conv_src_local), conv_narrow)
                         # U64 already fills the scalar slot. Casting it back to
                         # I64 loses the unsigned metadata used by comparisons,
                         # division, and right shifts when bit 63 is set.

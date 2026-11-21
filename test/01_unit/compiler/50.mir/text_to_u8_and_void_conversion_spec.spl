@@ -1,0 +1,65 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Text receiver to_u8 lowering and void destination value conversion
+
+Regression coverage for two Phase 4 full-CLI codegen issues:
+1. Calling `.to_u8()` on a `text` receiver (e.g. `for ch in name: buf.push(ch.to_u8())`)
+   must extract byte 0 via `__simple_rt_string_byte_at` before narrowing to `U8`
+   instead of emitting an invalid `Cast(ptr -> u8)`.
+2. `MirToLlvm.emit_value_type_conversion` with `dst_ty == "void"` or `"unit"`
+   must return `"0"` cleanly without recording an unsupported conversion error.
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+fn compile_snippet_ir(source: text) -> text:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [
+        SourceFile(path: "app/main.spl", content: source, module_name: "app.main")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hir_lowering = hirlowering_for_module(ast.name, surfaces)
+    val hir_mod = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir_mod.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["hir_mod"] = hir_mod
+    mir_lowering.prescan_module_struct_names(prescan_mods, "hir_mod")
+    val mir_mod = mir_lowering.lower_module(hir_mod, [hir_mod])
+    var translator = MirToLlvm.create("app.main", CodegenTarget.X86_64, nil)
+    val ir = translator.translate_module(mir_mod)
+    if translator.codegen_errors.len() > 0:
+        return "ERRORS:" + translator.codegen_errors.join("; ")
+    ir
+
+describe "text.to_u8() and void scalar conversion":
+    it "lowers text.to_u8() through __simple_rt_string_byte_at without ptr->i8 cast error":
+        val src = "fn first_byte(s: text) -> u8:\n    s.to_u8()\n\nfn loop_bytes(name: text) -> [u8]:\n    var out: [u8] = []\n    for ch in name:\n        out.push(ch.to_u8())\n    out\n"
+        val ir = compile_snippet_ir(src)
+        expect(ir.starts_with("ERRORS:")).to_equal(false)
+        expect(ir).to_contain("__simple_rt_string_byte_at")
+
+    it "discards non-void scalar conversion to void/unit without recording codegen error":
+        var translator = MirToLlvm.create("probe.void.conv", CodegenTarget.X86_64, nil)
+        val void_res = translator.emit_value_type_conversion("%1", "i64", "void", false)
+        val unit_res = translator.emit_value_type_conversion("%2", "i32", "unit", true)
+        expect(void_res).to_equal("0")
+        expect(unit_res).to_equal("0")
+        expect(translator.codegen_errors.len()).to_equal(0)
