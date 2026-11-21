@@ -32,7 +32,7 @@ doc/08_tracking/bug/stage2_imported_fn_foreign_struct_return_type_erased_2026-10
 
 use std.spec.{describe, it, expect}
 use compiler.frontend.frontend.{parse_full_frontend}
-use compiler.frontend.parser_types.{Module}
+use compiler.frontend.parser_types.{ParserModule}
 use compiler.common.config.{Logger}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir_lowering.types.{hirlowering_for_module}
@@ -43,15 +43,15 @@ use compiler.mir.mir.*
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
 
-val nodes_source = "pub struct Leaf:\n    label: text\n    vals: [i64]\n\npub struct Node:\n    id: i64\n    names: [text]\n    leaf: Leaf\n    title: text\n\nimpl Node:\n    fn name_count() -> i64:\n        self.names.len()\n\npub fn make_node() -> Node:\n    Node(id: 7, names: [\"a\", \"b\"], leaf: Leaf(label: \"l\", vals: [1, 2]), title: \"t\")\n"
+val nodes_source = "pub struct Leaf:\n    label: text\n    vals: [i64]\n\npub struct Node:\n    id: i64\n    names: [text]\n    leaf: Leaf\n    title: text\n\nimpl Node:\n    fn name_count() -> i64:\n        self.names.len()\n\npub class NodeReader:\n    fn get() -> Node:\n        make_node()\n\npub fn make_node() -> Node:\n    Node(id: 7, names: [\"a\", \"b\"], leaf: Leaf(label: \"l\", vals: [1, 2]), title: \"t\")\n\npub fn make_maybe() -> Node?:\n    Some(make_node())\n"
 
 val state_source = "use lib.nodes.\{Node, make_node\}\n\nvar node_pool: [Node] = []\n\npub fn node_get(idx: i64) -> Node:\n    if node_pool.len() == 0:\n        node_pool = node_pool.push(make_node())\n    node_pool[idx]\n"
 
 val decoy_source = "pub struct Node:\n    title: text\n    weight: i64\n\nimpl Node:\n    fn name_count() -> i64:\n        self.weight\n\npub fn decoy_node() -> Node:\n    Node(title: \"d\", weight: 1)\n"
 
-# One consumer that does NOT import `Node`: every function below reaches the
-# struct only through `node_get`'s declared return type.
-val transitive_source = "use lib.state.\{node_get\}\nuse lib.decoy.\{decoy_node\}\n\nfn f_forin() -> i64:\n    val src = node_get(0)\n    var n = 0\n    for name in src.names:\n        n = n + name.len()\n    n\n\nfn f_range() -> text:\n    val src = node_get(0)\n    src.title[0..1]\n\nfn f_method() -> i64:\n    val src = node_get(0)\n    src.name_count()\n\nfn f_text() -> i64:\n    val src = node_get(0)\n    src.title.last_index_of(\"t\") + src.title.repeat(2).len()\n\nfn f_nested() -> i64:\n    val src = node_get(0)\n    var n = 0\n    for v in src.leaf.vals:\n        n = n + v\n    n\n\nfn f_decoy() -> i64:\n    val d = decoy_node()\n    val src = node_get(0)\n    var n = d.weight\n    for name in src.names:\n        n = n + name.len()\n    n\n"
+# One consumer that does NOT import `Node` itself: every function below reaches
+# the struct only through a declared function or method return type.
+val transitive_source = "use lib.state.\{node_get\}\nuse lib.decoy.\{decoy_node\}\nuse lib.nodes.\{NodeReader, make_maybe\}\n\nfn f_forin() -> i64:\n    val src = node_get(0)\n    var n = 0\n    for name in src.names:\n        n = n + name.len()\n    n\n\nfn f_range() -> text:\n    val src = node_get(0)\n    src.title[0..1]\n\nfn f_method() -> i64:\n    val src = node_get(0)\n    src.name_count()\n\nfn f_text() -> i64:\n    val src = node_get(0)\n    src.title.last_index_of(\"t\") + src.title.repeat(2).len()\n\nfn f_nested() -> i64:\n    val src = node_get(0)\n    var n = 0\n    for v in src.leaf.vals:\n        n = n + v\n    n\n\nfn f_decoy() -> i64:\n    val d = decoy_node()\n    val src = node_get(0)\n    var n = d.weight\n    for name in src.names:\n        n = n + name.len()\n    n\n\nfn f_provider_method_return() -> text:\n    val reader = NodeReader()\n    val src = reader.get()\n    src.title\n\nfn f_optional_unwrap() -> text:\n    val src = make_maybe()\n    src.unwrap().title\n"
 
 # The bug record's exact shape: the consumer also imports the struct.
 val importing_source = "use lib.state.\{node_get\}\nuse lib.nodes.\{Node\}\n\nfn f_forin() -> i64:\n    val src = node_get(0)\n    var n = 0\n    for name in src.names:\n        n = n + name.len()\n    n\n"
@@ -71,7 +71,7 @@ fn lower_consumer(name: text, consumer_source: text) -> Lowered:
     val state_ast = parse_full_frontend(state_source, "lib/state.spl", "lib.state", log)
     val decoy_ast = parse_full_frontend(decoy_source, "lib/decoy.spl", "lib.decoy", log)
     val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
-    var modules: Dict<text, Module> = {}
+    var modules: Dict<text, ParserModule> = {}
     modules["lib.nodes"] = nodes_ast
     modules["lib.state"] = state_ast
     modules["lib.decoy"] = decoy_ast
@@ -179,6 +179,10 @@ describe "unannotated local bound to an imported fn returning a third module's s
 
     it "keeps a same-named struct of another module on its own layout":
         expect(field_reads(transitive(), "f_decoy")).to_equal("1,1,")
+
+    it "preserves the exact layout through provider methods and Optional.unwrap":
+        expect(field_reads(transitive(), "f_provider_method_return")).to_equal("3,")
+        expect(field_reads(transitive(), "f_optional_unwrap")).to_equal("3,")
 
 describe "the consumer also imports the struct":
     it "iterates an array field at the foreign struct's own field index":
