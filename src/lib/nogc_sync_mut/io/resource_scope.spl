@@ -308,7 +308,11 @@ pub fn resource_scope_memory_enforcement() -> text:
 # its supervisor (the owner SIGKILLs the group once the leader exits). A fatal
 # child signal is re-raised (stop signals excluded, no core) so the caller
 # sees the same signal death as with a plain `exec`.
-val _MEMSCOPE_SUPERVISOR = "trap ':' TERM INT HUP; f=$1; shift; \"$@\"; rc=$?; cg=$(cut -d: -f3 /proc/self/cgroup); k=$(awk '$1 == \"oom_kill\" { print $2 }' \"/sys/fs/cgroup$cg/memory.events\" 2>/dev/null); p=$(cat \"/sys/fs/cgroup$cg/memory.peak\" 2>/dev/null); t=$(awk '$1 == \"max\" { print $2 }' \"/sys/fs/cgroup$cg/pids.events\" 2>/dev/null); printf '%s:%s:%s' \"$k\" \"$p\" \"$t\" > \"$f\"; if [ $rc -gt 128 ] && [ $rc -lt 160 ]; then s=$((rc - 128)); case $s in 19|20|21|22) ;; *) ulimit -c 0; trap - TERM INT HUP; kill -$s $$ ;; esac; fi; exit $rc"
+# Raw literal: the awk programs contain `{ print $2 }`, which an
+# interpolating "..." string parses as `{expr}` (the Rust seed folded the whole
+# constant to 0, so systemd-run ran `/bin/sh -c 0` and every memory-scoped
+# process exited 127).
+val _MEMSCOPE_SUPERVISOR = r"""trap ':' TERM INT HUP; f=$1; shift; "$@"; rc=$?; cg=$(cut -d: -f3 /proc/self/cgroup); k=$(awk '$1 == "oom_kill" { print $2 }' "/sys/fs/cgroup$cg/memory.events" 2>/dev/null); p=$(cat "/sys/fs/cgroup$cg/memory.peak" 2>/dev/null); t=$(awk '$1 == "max" { print $2 }' "/sys/fs/cgroup$cg/pids.events" 2>/dev/null); printf '%s:%s:%s' "$k" "$p" "$t" > "$f"; if [ $rc -gt 128 ] && [ $rc -lt 160 ]; then s=$((rc - 128)); case $s in 19|20|21|22) ;; *) ulimit -c 0; trap - TERM INT HUP; kill -$s $$ ;; esac; fi; exit $rc"""
 
 fn _run_with_unix_limits(scope: ExecutionResourceScope, cmd: text, args: [text]) -> ObservedProcessResult:
     val requested_memory = if scope.budget.max_tree_charge_bytes > 0: scope.budget.max_tree_charge_bytes else: scope.budget.max_direct_child_rss_bytes
