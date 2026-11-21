@@ -40,12 +40,12 @@ archive=$dest/libclang_rt.builtins-riscv64.a
 
 verify_archive() { # verify_archive <a> -> PASS/FAIL line, rc
     [ -s "$1" ] || { echo "FAIL - $1 is missing or empty"; return 1; }
-    _flags=$("$readelf" -h "$1" 2>/dev/null | grep -E 'Machine|Flags' | sort -u)
+    _flags=$("$readelf" -h "$1" 2>/dev/null | grep -E 'Machine|Flags' | sort -u || true)
     printf '%s\n' "$_flags" | grep -q 'RISC-V' || { echo "FAIL - $1 holds no RISC-V objects"; return 1; }
     if printf '%s\n' "$_flags" | grep -q 'float ABI'; then
         echo "FAIL - $1 is not soft-float (lp64): $(printf '%s' "$_flags" | grep Flags | head -1)"; return 1
     fi
-    _syms=$("$nm" -g --defined-only "$1" 2>/dev/null)
+    _syms=$("$nm" -g --defined-only "$1" 2>/dev/null || true)
     for s in __udivdi3 __muldi3 __adddf3; do
         printf '%s\n' "$_syms" | grep -q " T $s\$" || { echo "FAIL - $1 does not define $s"; return 1; }
     done
@@ -53,12 +53,14 @@ verify_archive() { # verify_archive <a> -> PASS/FAIL line, rc
 }
 
 if [ "${1:-}" = --selftest ]; then
-    command -v "$readelf" >/dev/null 2>&1 || { echo "ERROR - nothing was checked ($readelf not found)"; exit 2; }
+    for t in "$readelf" "$nm"; do
+        command -v "$t" >/dev/null 2>&1 || { echo "ERROR - nothing was checked ($t not found)"; exit 2; }
+    done
     [ -e "$archive" ] || { echo "ERROR - nothing was checked (no archive at $archive; run without --selftest to build)"; exit 2; }
     verify_archive "$archive"; exit $?
 fi
 
-for t in "$cc" "$ar" "$ranlib" "$readelf" "$nm" cmake ninja; do
+for t in "$cc" "$ar" "$ranlib" "$readelf" "$nm" cmake ninja curl tar sha256sum; do
     command -v "$t" >/dev/null 2>&1 || { echo "ERROR - nothing was checked (missing tool $t)"; exit 2; }
 done
 
