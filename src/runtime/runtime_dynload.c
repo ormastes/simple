@@ -1896,14 +1896,41 @@ static int simple_gpu_array_to_bytes(int64_t array_value, uint8_t **bytes, int64
     return 1;
 }
 
+/* Pin a Metal provider symbol together with a Simple string's bytes. */
+static int simple_gpu_metal_acquire_string(int64_t str, const char *name,
+        SimpleGpuCallPinV1 *pin, const uint8_t **data, int64_t *len) {
+    *data = rt_string_data(str);
+    *len = rt_string_len(str);
+    return *data && *len >= 0 &&
+        simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_METAL, name, pin);
+}
+
+/* Copy a Simple byte array and pin a Metal provider symbol.  check_len=0
+ * skips the requested_len check.  On failure nothing is left allocated. */
+static int simple_gpu_metal_acquire_bytes(int64_t array_value, int check_len, int64_t requested_len,
+        const char *name, SimpleGpuCallPinV1 *pin, uint8_t **bytes, int64_t *len) {
+    *bytes = NULL;
+    *len = 0;
+    if (!simple_gpu_array_to_bytes(array_value, bytes, len) ||
+            (check_len && requested_len != *len)) {
+        free(*bytes);
+        return 0;
+    }
+    if (!simple_gpu_call_acquire_v1(SIMPLE_GPU_BACKEND_METAL, name, pin)) {
+        free(*bytes);
+        return 0;
+    }
+    return 1;
+}
+
 int64_t rt_metal_compile_shader(int64_t device, int64_t source) {
     typedef int64_t (*Fn)(int64_t,int64_t,int64_t);
     SimpleGpuCallPinV1 pin;
-    const uint8_t *data = rt_string_data(source);
-    int64_t len = rt_string_len(source);
+    const uint8_t *data;
+    int64_t len;
     int64_t result;
-    if (!data || len < 0 || !simple_gpu_call_acquire_v1(
-            SIMPLE_GPU_BACKEND_METAL, "rt_metal_compile_shader_raw", &pin))
+    if (!simple_gpu_metal_acquire_string(source, "rt_metal_compile_shader_raw",
+            &pin, &data, &len))
         return 0;
     result = ((Fn)pin.symbol)(device, (int64_t)(intptr_t)data, len);
     simple_gpu_call_release_v1(&pin);
@@ -1913,11 +1940,11 @@ int64_t rt_metal_compile_shader(int64_t device, int64_t source) {
 int64_t rt_metal_create_compute_pipeline(int64_t device, int64_t shader, int64_t entry) {
     typedef int64_t (*Fn)(int64_t,int64_t,int64_t,int64_t);
     SimpleGpuCallPinV1 pin;
-    const uint8_t *data = rt_string_data(entry);
-    int64_t len = rt_string_len(entry);
+    const uint8_t *data;
+    int64_t len;
     int64_t result;
-    if (!data || len < 0 || !simple_gpu_call_acquire_v1(
-            SIMPLE_GPU_BACKEND_METAL, "rt_metal_create_compute_pipeline_raw", &pin))
+    if (!simple_gpu_metal_acquire_string(entry, "rt_metal_create_compute_pipeline_raw",
+            &pin, &data, &len))
         return 0;
     result = ((Fn)pin.symbol)(device, shader, (int64_t)(intptr_t)data, len);
     simple_gpu_call_release_v1(&pin);
@@ -1928,12 +1955,9 @@ int64_t rt_metal_load_library_array(int64_t device, int64_t array_value) {
     typedef int64_t (*Fn)(int64_t,int64_t,int64_t);
     SimpleGpuCallPinV1 pin;
     uint8_t *bytes = NULL; int64_t len = 0; int64_t result;
-    if (!simple_gpu_array_to_bytes(array_value, &bytes, &len)) return 0;
-    if (!simple_gpu_call_acquire_v1(
-            SIMPLE_GPU_BACKEND_METAL, "rt_metal_load_library_raw", &pin)) {
-        free(bytes);
+    if (!simple_gpu_metal_acquire_bytes(array_value, 0, 0,
+            "rt_metal_load_library_raw", &pin, &bytes, &len))
         return 0;
-    }
     result = ((Fn)pin.symbol)(device, (int64_t)(intptr_t)bytes, len);
     simple_gpu_call_release_v1(&pin);
     free(bytes);
@@ -1944,16 +1968,9 @@ int64_t rt_metal_buffer_upload(int64_t buffer, int64_t array_value, int64_t requ
     typedef int64_t (*Fn)(int64_t,int64_t,int64_t);
     SimpleGpuCallPinV1 pin;
     uint8_t *bytes = NULL; int64_t len = 0; int64_t result;
-    if (!simple_gpu_array_to_bytes(array_value, &bytes, &len) ||
-            requested_len != len) {
-        free(bytes);
+    if (!simple_gpu_metal_acquire_bytes(array_value, 1, requested_len,
+            "rt_metal_buffer_upload_raw", &pin, &bytes, &len))
         return 0;
-    }
-    if (!simple_gpu_call_acquire_v1(
-            SIMPLE_GPU_BACKEND_METAL, "rt_metal_buffer_upload_raw", &pin)) {
-        free(bytes);
-        return 0;
-    }
     result = ((Fn)pin.symbol)(buffer, (int64_t)(intptr_t)bytes, len);
     simple_gpu_call_release_v1(&pin);
     free(bytes);
@@ -1984,16 +2001,9 @@ int64_t rt_metal_set_bytes(int64_t encoder, int64_t array_value, int64_t request
     typedef int64_t (*Fn)(int64_t,int64_t,int64_t,int64_t);
     SimpleGpuCallPinV1 pin;
     uint8_t *bytes = NULL; int64_t len = 0; int64_t result;
-    if (!simple_gpu_array_to_bytes(array_value, &bytes, &len) ||
-            requested_len != len) {
-        free(bytes);
+    if (!simple_gpu_metal_acquire_bytes(array_value, 1, requested_len,
+            "rt_metal_set_bytes_raw", &pin, &bytes, &len))
         return 0;
-    }
-    if (!simple_gpu_call_acquire_v1(
-            SIMPLE_GPU_BACKEND_METAL, "rt_metal_set_bytes_raw", &pin)) {
-        free(bytes);
-        return 0;
-    }
     result = ((Fn)pin.symbol)(encoder, (int64_t)(intptr_t)bytes, len, index);
     simple_gpu_call_release_v1(&pin);
     free(bytes);
