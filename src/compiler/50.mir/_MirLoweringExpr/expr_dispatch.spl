@@ -1865,11 +1865,7 @@ impl MirLowering:
     fn binop_struct_name_is_enum(name: text) -> bool:
         """A struct_value_syms owner that names an enum declaration (enum
         values share the Struct MIR kind) and no struct/class layout."""
-        if name == "":
-            return false
-        if self.struct_field_order.has(self.declared_struct_layout_key(name)):
-            return false
-        self.enum_variant_index_q.has(name) or self.enum_variant_index.contains(name)
+        self.mir_layout_or_runtime_key_is_enum(name)
 
     fn binop_optional_text_depth_v1(type_: HirType) -> i64:
         """Positive only for an exact Optional chain ending in text."""
@@ -2117,17 +2113,35 @@ impl MirLowering:
             # Compare through the module-qualified layout the field declaration
             # recorded when it is registered; the bare name stays only for the
             # symbol lookup (same-named structs across modules).
+            var nested_ownership = ""
+            if fi < nested_ownership_keys.len():
+                nested_ownership = nested_ownership_keys[fi]
             var nested_layout = nested_name
-            if fi < nested_ownership_keys.len() and nested_ownership_keys[fi] != "":
-                val qualified_nested = self.declared_struct_layout_key(nested_ownership_keys[fi])
+            if nested_ownership != "":
+                val qualified_nested = self.declared_struct_layout_key(nested_ownership)
                 if self.struct_field_order.contains(qualified_nested):
                     nested_layout = qualified_nested
+            var declared_field_is_enum = false
+            if fi < declared_field_types.len():
+                val rebound_df = self.declared_field_type_in_current_table(layout_key, fi, declared_field_types[fi])
+                match rebound_df.kind:
+                    case HirTypeKind.Named(df_sym, _):
+                        if val df_info = self.symbols.get_symbol_raw(df_sym.id):
+                            if df_info.kind == SymbolKind.Enum:
+                                declared_field_is_enum = true
+                    case _: ()
             var nested_symbol = SymbolId(id: -1)
             var compare_nested = false
-            if nested_name != "" and not chain.contains(nested_layout) and self.struct_field_order.contains(nested_layout):
-                val nested_lookup = self.symbols.lookup_or_invalid(nested_name)
-                if nested_lookup.is_valid():
-                    nested_symbol = self.canonical_mir_type_symbol(nested_lookup)
+            if nested_name != "" and not declared_field_is_enum and not self.mir_layout_or_runtime_key_is_enum(nested_ownership) and not self.mir_layout_or_runtime_key_is_enum(nested_layout) and not chain.contains(nested_layout) and self.struct_field_order.contains(nested_layout):
+                var resolved_nested: SymbolId? = self.struct_symbol_for_layout_key(nested_layout)
+                if resolved_nested == None:
+                    val nested_lookup = self.symbols.lookup_or_invalid(nested_name)
+                    if nested_lookup.is_valid():
+                        if val nested_info = self.symbols.get_symbol_raw(nested_lookup.id):
+                            if nested_info.kind == SymbolKind.Struct:
+                                resolved_nested = Some(nested_lookup)
+                if val valid_nested = resolved_nested:
+                    nested_symbol = self.canonical_mir_type_symbol(valid_nested)
                     compare_nested = self.struct_structural_eq_supported(nested_layout)
             # 0 = runtime word, 1 = text, 2 = raw scalar, 3 = nested record
             var field_mode = 0
@@ -4256,12 +4270,16 @@ impl MirLowering:
                     # symbol's dotted-owner key; the layout lives under the key the
                     # declaring module registered. Fold onto that one, else
                     # resolve_field_index finds no field list and reads index 0.
-                    val shape = self.declared_struct_layout_key(return_shape ?? "")
-                    if shape == "__runtime_array__":
+                    val raw_shape = return_shape ?? ""
+                    if raw_shape == "__runtime_array__":
                         self.runtime_array_locals[local.id] = true
                         self.remember_direct_array_return_element(local, call_symbol.name)
-                    elif shape != "":
-                        self.struct_value_syms[local.id] = shape
+                    elif self.mir_layout_or_runtime_key_is_enum(raw_shape):
+                        self.struct_value_syms[local.id] = raw_shape
+                    else:
+                        val shape = self.declared_struct_layout_key(raw_shape)
+                        if shape != "":
+                            self.struct_value_syms[local.id] = shape
         val return_type = self.resolved_call_hir_return_type(symbol)
         if self.extern_fn_symbols.contains(symbol.id):
             self.extern_result_locals[local.id] = true
@@ -5274,7 +5292,7 @@ impl MirLowering:
                 match element.kind:
                     case MirTypeKind.Struct(symbol):
                         val owner = self.mir_struct_symbol_name(symbol)
-                        if owner != "":
+                        if owner != "" and not self.mir_layout_or_runtime_key_is_enum(owner):
                             self.array_element_struct_syms[local.id] = owner
                     case MirTypeKind.Opaque(owner):
                         if owner != "" and owner != "str" and owner != "__runtime_array__":
@@ -8620,7 +8638,7 @@ impl MirLowering:
                         case HirTypeKind.Named(bang_owner_symbol, _):
                             match self.symbols.get_symbol_raw(bang_owner_symbol.id):
                                 case Some(bang_owner_sym):
-                                    if bang_owner_sym.name != "":
+                                    if bang_owner_sym.name != "" and (bang_owner_sym.kind == SymbolKind.Struct or bang_owner_sym.kind == SymbolKind.Class or bang_owner_sym.kind == SymbolKind.Enum):
                                         var bang_owner_key = self.struct_value_provenance_key(bang_owner_sym)
                                         if bang_owner_sym.kind == SymbolKind.Class:
                                             val bang_class_key = mir_class_identity_raw(self.symbols, bang_owner_symbol.id)

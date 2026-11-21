@@ -908,7 +908,11 @@ impl MirLowering:
                                     # class's bare name has no field layout in
                                     # this module, so `path[i].children` read
                                     # as Unit and `for c in ...` hit #143.
-                                    self.array_element_struct_syms[local.id] = self.struct_value_provenance_key(element)
+                                    if element.kind == SymbolKind.Struct:
+                                        self.array_element_struct_syms[local.id] = self.struct_value_provenance_key(element)
+                                    elif element.kind == SymbolKind.Class:
+                                        val elem_cls_key = mir_class_identity_raw(self.symbols, element_symbol.id)
+                                        self.array_element_struct_syms[local.id] = if elem_cls_key != "": elem_cls_key else: self.struct_value_provenance_key(element)
                             case _:
                                 ()
                 case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
@@ -947,7 +951,8 @@ impl MirLowering:
                             var parameter_type_name = ""
                             if val present_parameter_type = optional_parameter_type:
                                 val parameter_type: HirSymbol = present_parameter_type
-                                parameter_type_name = self.struct_value_layout_key(parameter_type)
+                                if parameter_type.kind == SymbolKind.Struct or parameter_type.kind == SymbolKind.Class:
+                                    parameter_type_name = self.struct_value_layout_key(parameter_type)
                             val is_named_struct = parameter_type_name != "" and self.struct_field_order.has(parameter_type_name)
                             if is_named_struct:
                                 self.struct_value_syms[local.id] = parameter_type_name
@@ -963,9 +968,10 @@ impl MirLowering:
                         case Named(type_symbol, _):
                             val optional_reference_owner: HirSymbol? = self.symbols.get_symbol_raw(type_symbol.id)
                             if val reference_owner = optional_reference_owner:
-                                var reference_owner_name = self.struct_value_layout_key(reference_owner)
-                                if self.struct_field_order.has(reference_owner_name):
-                                    self.struct_value_syms[local.id] = reference_owner_name
+                                if reference_owner.kind == SymbolKind.Struct or reference_owner.kind == SymbolKind.Class:
+                                    var reference_owner_name = self.struct_value_layout_key(reference_owner)
+                                    if self.struct_field_order.has(reference_owner_name):
+                                        self.struct_value_syms[local.id] = reference_owner_name
                         case _: ()
                 case Named(type_symbol, _):
                     # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
@@ -974,9 +980,11 @@ impl MirLowering:
                     var is_class_param = false
                     if val present_parameter_type = optional_parameter_type:
                         val parameter_type: HirSymbol = present_parameter_type
-                        parameter_type_name = self.struct_value_layout_key(parameter_type)
                         match parameter_type.kind:
+                            case Struct:
+                                parameter_type_name = self.struct_value_layout_key(parameter_type)
                             case Class:
+                                parameter_type_name = self.struct_value_layout_key(parameter_type)
                                 is_class_param = self.class_type_names.has(parameter_type_name)
                             case _: ()
                     val is_named_struct = parameter_type_name != "" and self.struct_field_order.has(parameter_type_name)

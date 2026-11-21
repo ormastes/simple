@@ -974,6 +974,9 @@ impl MirLowering:
         if symbol.kind == SymbolKind.Class:
             val class_owner = _hir_symbol_owner_module(symbol.defining_module ?? "")
             return if class_owner == "": symbol.name else: "{class_owner}.{symbol.name}"
+        if symbol.kind == SymbolKind.Enum:
+            val enum_owner = _hir_symbol_owner_module(symbol.defining_module ?? "")
+            return if enum_owner == "": symbol.name else: "{enum_owner}.{symbol.name}"
         if symbol.kind != SymbolKind.Struct:
             return symbol.name
         val qualified = self.declared_struct_layout_key(self.composite_layout_key(symbol))
@@ -1004,7 +1007,24 @@ impl MirLowering:
             val qualified = self.declared_struct_layout_key(self.composite_layout_key(symbol))
             if qualified != symbol.name and self.struct_field_order.has(qualified) and not self.struct_field_order_conflict_warned.contains(qualified):
                 return qualified
+        if symbol.kind == SymbolKind.Enum:
+            val enum_owner = _hir_symbol_owner_module(symbol.defining_module ?? "")
+            return if enum_owner == "": symbol.name else: "{enum_owner}.{symbol.name}"
         symbol.name
+
+    fn mir_layout_or_runtime_key_is_enum(key: text) -> bool:
+        if key == "":
+            return false
+        val dotted = key.replace("::", ".")
+        if key.contains(".") or key.contains("::"):
+            if self.enum_variant_index_q.has(key) or self.enum_variant_index_q.has(dotted) or self.enum_runtime_to_bare.has(key) or self.enum_runtime_to_bare.has(dotted):
+                return true
+            if self.struct_field_order.has(self.declared_struct_layout_key(key)):
+                return false
+            return false
+        if self.struct_field_order.has(self.declared_struct_layout_key(key)):
+            return false
+        self.enum_variant_index.contains(key) and not self.enum_bare_ambiguous.contains(key)
 
     me register_struct_default_layout_v1(key: text, fields: [text], flags: [bool], defaults: [HirExpr]):
         # Default expressions must belong to the same declaration/order as the
@@ -1145,12 +1165,15 @@ impl MirLowering:
             case Some(info):
                 if info != None and info.name != "":
                     if info.kind == SymbolKind.Class: return mir_class_identity_raw(self.symbols, symbol.id)
-                    if info.kind == SymbolKind.Struct: return self.struct_value_provenance_key(info)
+                    if info.kind == SymbolKind.Struct or info.kind == SymbolKind.Enum:
+                        return self.struct_value_provenance_key(info)
                     return info.name
             case None: ()
         val canonical_key = self.canonical_mir_type_key_v1(symbol.id)
         if canonical_key == "": return ""
         if self.class_type_names.has(canonical_key):
+            return canonical_key
+        if self.enum_variant_index_q.has(canonical_key) or self.enum_runtime_to_bare.has(canonical_key):
             return canonical_key
         val separator = canonical_key.rfind(".")
         if separator <= 0: return canonical_key
@@ -2055,7 +2078,18 @@ impl MirLowering:
         val prescan_module_value: HirModule = modules[module_key]
         val structs: Dict<SymbolId, HirStruct> = prescan_module_value.structs
         val classes: Dict<SymbolId, HirClass> = prescan_module_value.classes
+        val enums: Dict<SymbolId, HirEnum> = prescan_module_value.enums
         val module_name: text = prescan_module_value.name
+        val canonical_mod_name = mir_layout_canonical_module_name(module_name)
+        val prescan_enum_values = enums.values()
+        var pei = 0
+        while pei < prescan_enum_values.len():
+            val prescan_enum: HirEnum = prescan_enum_values[pei]
+            if prescan_enum.runtime_name != "":
+                self.enum_runtime_to_bare[prescan_enum.runtime_name] = prescan_enum.name
+            if canonical_mod_name != "":
+                self.enum_runtime_to_bare["{canonical_mod_name}.{prescan_enum.name}"] = prescan_enum.name
+            pei = pei + 1
         val module_symbols: SymbolTable = prescan_module_value.symbols
         bootstrap_default_provider_register(mir_layout_canonical_module_name(module_name),
             module_symbols, prescan_module_value.constants.values())
@@ -2253,9 +2287,12 @@ impl MirLowering:
                 val optional_prescan_return_symbol: HirSymbol? = module_symbols.get_symbol_raw(prescan_return_symbol_id.id)
                 if val present_prescan_return_symbol = optional_prescan_return_symbol:
                     val prescan_return_symbol: HirSymbol = present_prescan_return_symbol
-                    prescan_return_shape = self.composite_layout_key(prescan_return_symbol)
                     if prescan_return_symbol.kind == SymbolKind.Class:
                         prescan_return_shape = mir_class_identity_raw(module_symbols, prescan_return_symbol_id.id)
+                    elif prescan_return_symbol.kind == SymbolKind.Struct:
+                        prescan_return_shape = self.composite_layout_key(prescan_return_symbol)
+                    elif prescan_return_symbol.kind == SymbolKind.Enum:
+                        prescan_return_shape = self.struct_value_provenance_key(prescan_return_symbol)
             case Array(prescan_element_type, _) | Slice(prescan_element_type):
                 prescan_return_shape = "__runtime_array__"
                 var prescan_element_shape = "__no_struct_element__"
@@ -4703,7 +4740,9 @@ impl MirLowering:
                                             val optional_ret_symbol: HirSymbol? = self.symbols.get_symbol_raw(ret_sym.id)
                                             if val present_ret_symbol = optional_ret_symbol:
                                                 val ret_symbol: HirSymbol = present_ret_symbol
-                                                return ret_symbol.name
+                                                if ret_symbol.kind == SymbolKind.Struct:
+                                                    return self.struct_value_provenance_key(ret_symbol)
+                                                return ""
                                         case _:
                                             ()
                                 case _:
