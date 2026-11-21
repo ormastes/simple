@@ -1,0 +1,119 @@
+"""
+# WM Action Applier Pointer Move & Resize Prevention Specification
+
+Prevention tests for Bug #171 (`wm_action_applier_window_surface_session_and_web_window_request_2026-08-10`).
+Covers resize-grip hit testing, arming resize on non-minimized windows, ignoring
+minimized windows at matching coordinates, bounded pointer resize/move, and
+left-button state clearing.
+"""
+
+use std.spec.{describe, it, expect, step}
+use os.compositor.wm_action_applier.{
+    WM_WINDOW_MIN_HEIGHT,
+    WM_WINDOW_MIN_WIDTH,
+    WM_WINDOW_RESIZE_GRIP_PX,
+    WmLifecycleWindowState,
+    WmPointerInteractionState,
+    wm_lifecycle_left_button,
+    wm_lifecycle_pointer_move,
+    wm_lifecycle_resize_grip_hit
+}
+
+fn _empty_pointer_state() -> WmPointerInteractionState:
+    WmPointerInteractionState(
+        dragging: false,
+        drag_window_id: 0,
+        drag_offset_x: 0,
+        drag_offset_y: 0,
+        resizing: false,
+        resize_window_id: 0,
+        resize_start_x: 0,
+        resize_start_y: 0,
+        resize_start_w: 0,
+        resize_start_h: 0
+    )
+
+fn _sample_window(id: i64, minimized: bool) -> WmLifecycleWindowState:
+    WmLifecycleWindowState(
+        id: id,
+        owner_port: 11,
+        title: "Probe",
+        x: 40,
+        y: 70,
+        w: 200,
+        h: 160,
+        content: "",
+        process_id: 1,
+        app_id: "/probe",
+        minimized: minimized,
+        focused: true
+    )
+
+describe "WM lifecycle pointer resize and drag state transitions":
+    """
+    Verifies pointer resize-grip hit testing, arming/disarming transitions,
+    minimized-window isolation, and non-aliasing state snapshots.
+    """
+    it "detects bottom-right resize grip bounds accurately":
+        # @req REQ-SSPEC-OS
+        step("Check grip hit inside and outside the 8px corner box")
+        expect(WM_WINDOW_RESIZE_GRIP_PX).to_equal(8)
+        expect(wm_lifecycle_resize_grip_hit(40, 70, 200, 160, 238, 228)).to_be(true)
+        expect(wm_lifecycle_resize_grip_hit(40, 70, 200, 160, 232, 222)).to_be(true)
+        expect(wm_lifecycle_resize_grip_hit(40, 70, 200, 160, 231, 228)).to_be(false)
+        expect(wm_lifecycle_resize_grip_hit(40, 70, 200, 160, 241, 228)).to_be(false)
+
+    it "arms resize on non-minimized window grip and commits clamped size":
+        # @req REQ-SSPEC-OS
+        step("Hover over grip, press button, drag to (0, 0), and release")
+        val windows = [_sample_window(7, false)]
+        val hovered = wm_lifecycle_pointer_move(windows, 8, 640, 480, _empty_pointer_state(), 238, 228)
+        expect(hovered.interaction.resize_window_id).to_equal(7)
+        expect(hovered.interaction.resize_start_w).to_equal(200)
+        expect(hovered.interaction.resize_start_h).to_equal(160)
+
+        val pressed = wm_lifecycle_left_button(hovered.interaction, true)
+        expect(pressed.resizing).to_be(true)
+
+        val resized = wm_lifecycle_pointer_move(windows, 8, 640, 480, pressed, 0, 0)
+        expect(resized.windows[0].w).to_equal(WM_WINDOW_MIN_WIDTH)
+        expect(resized.windows[0].h).to_equal(WM_WINDOW_MIN_HEIGHT)
+
+        val released = wm_lifecycle_left_button(resized.interaction, false)
+        expect(released.resizing).to_be(false)
+        expect(released.resize_window_id).to_equal(0)
+
+    it "never arms resize for minimized windows at bottom-right corner":
+        # @req REQ-SSPEC-OS
+        step("Move pointer over minimized window corner and confirm zero arming")
+        val windows = [_sample_window(7, true)]
+        val hovered = wm_lifecycle_pointer_move(windows, 8, 640, 480, _empty_pointer_state(), 238, 228)
+        expect(hovered.interaction.resize_window_id).to_equal(0)
+        expect(hovered.interaction.resizing).to_be(false)
+
+    it "preserves caller window and interaction snapshots across pointer transitions":
+        # @req REQ-SSPEC-OS
+        step("Drag a window, then reuse caller windows list for resize grip probe")
+        val windows = [_sample_window(7, false)]
+        val drag = WmPointerInteractionState(
+            dragging: true,
+            drag_window_id: 7,
+            drag_offset_x: 60,
+            drag_offset_y: 40,
+            resizing: false,
+            resize_window_id: 0,
+            resize_start_x: 0,
+            resize_start_y: 0,
+            resize_start_w: 0,
+            resize_start_h: 0
+        )
+        val moved = wm_lifecycle_pointer_move(windows, 8, 640, 480, drag, -20, 10)
+        expect(moved.windows[0].x).to_equal(0)
+        expect(moved.windows[0].y).to_equal(48)
+        expect(windows[0].x).to_equal(40)
+        expect(windows[0].y).to_equal(70)
+        val hovered = wm_lifecycle_pointer_move(windows, 8, 640, 480, _empty_pointer_state(), 238, 228)
+        expect(hovered.interaction.resize_window_id).to_equal(7)
+        val pressed = wm_lifecycle_left_button(hovered.interaction, true)
+        expect(hovered.interaction.resizing).to_be(false)
+        expect(pressed.resizing).to_be(true)

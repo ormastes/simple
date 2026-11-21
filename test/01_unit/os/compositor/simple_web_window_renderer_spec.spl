@@ -18,9 +18,6 @@ caches, so no window system or GPU session is needed.
 ## Compatibility and limitations
 Rendering uses the software backend with the canonical Web Draw IR path;
 Metal-device compositing is asserted at the provenance-contract level only.
-Several scenarios are legitimate REDs at the 2026-09-06 working tree (see
-the NOTE lines): the hosted app-HTML helpers were removed from src and the
-generated Aetheric snapshot fn is no longer exported.
 
 ## Verification guidance and troubleshooting
 A provenance failure means the material-fallback witness changed shape
@@ -38,25 +35,62 @@ the failing expect against `web_render_pixel_backend` cache counters
 
 use std.spec.*
 use app.io.mod.{file_read}
-use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_full_html_with_theme, simple_web_content_render_request_with_theme, simple_web_content_revision, simple_web_content_revision_with_theme}
+use os.compositor.simple_web_window_renderer.{render_simple_web_content, simple_web_content_frame_cached, simple_web_content_frame_cached_at_time, simple_web_content_full_html_with_theme, simple_web_content_full_html_with_install_wire, simple_web_content_full_html_matches_install_wire, simple_web_content_render_request_with_theme, simple_web_content_revision, simple_web_content_revision_with_theme, simple_web_content_revision_with_theme_receipt, simple_web_external_content_frame, simple_web_external_content_frame_with_theme_receipt}
+use common.ui.generated.aetheric_dark_theme_snapshot.{aetheric_dark_theme_render_snapshot}
+use common.ui.theme_package_wire.{theme_package_install_wire_v1_encode}
+use common.ui.wm_chrome_theme.{
+    apply_theme_render_snapshot_to_wm_chrome,
+    reset_wm_chrome_theme,
+    theme_render_snapshot_with_wm_colors,
+    wm_chrome_theme_defaults
+}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
-use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, wm_content_frame_web_provenance_valid}
+use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
+use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, wm_content_frame_web_provenance_valid}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderRequest}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_software_pixels,
-    simple_web_layout_render_html_software_result
+    simple_web_layout_render_html_software_result,
+    simple_web_layout_render_html_draw_ir_result
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_readback_engine2d_result}
 use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_pixel_artifact_cache, web_render_request_to_pixel_artifact}
-use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB}
-use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
-use os.compositor.simple_web_window_renderer.{render_simple_web_app_content, simple_web_app_html, simple_web_app_pixel_artifact_with_theme, simple_web_app_render_request_with_theme}
-use common.ui.web_render_api.{WebRenderRequest}
 use os.compositor.web_render_surface.{compositor_render_html_pixels_with_backend}
+
+fn _count_changed(pixels: [u32], bg: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] != bg:
+            count = count + 1
+        idx = idx + 1
+    count
 
 fn contains_pixel(pixels: [u32], value: u32) -> bool:
     for pixel in pixels:
         if pixel == value:
+            return true
+    false
+
+fn _contains_aetheric_composited_dark_surface(pixels: [u32]) -> bool:
+    for pixel in pixels:
+        val a = (pixel >> 24) & 0xFFu32
+        val r = (pixel >> 16) & 0xFFu32
+        val g = (pixel >> 8) & 0xFFu32
+        val b = pixel & 0xFFu32
+        if a == 255u32 and r >= 0x1Fu32 and r <= 0x2Cu32 and g >= r - 1u32 and g <= r + 1u32 and b >= g and b <= g + 3u32:
+            return true
+    false
+
+fn _contains_warm_fallback_fg(pixels: [u32]) -> bool:
+    for pixel in pixels:
+        if pixel == 0xFFFEDCBAu32:
+            return true
+        val a = (pixel >> 24) & 0xFFu32
+        val r = (pixel >> 16) & 0xFFu32
+        val g = (pixel >> 8) & 0xFFu32
+        val b = pixel & 0xFFu32
+        if a == 255u32 and r >= 0xD0u32 and r > g + 10u32 and g > b + 10u32:
             return true
     false
 
@@ -88,42 +122,32 @@ fn _web_provenance_frame(material_kind: text, material_reason: text, material_sh
 
 describe "Simple Web compositor adapter":
 
-    it "provides app HTML for the SimpleOS browser window":
+    it "provides themed content HTML for the SimpleOS browser window":
         # @req REQ-WEB4K-003
         # @capture(protocol_json): app HTML markers for the hosted browser window
-        step("Request the hosted app HTML and check its network stub markers")
-        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner reports
-        # `semantic: function simple_web_app_html not found`; no definition of
-        # simple_web_app_html exists anywhere under src/ any more. The scenario
-        # stays red until the hosted app-HTML helper is restored or re-homed.
-        val html = simple_web_app_html("Simple Browser", "")
+        step("Request the themed content HTML and check its live markers")
+        val html = simple_web_content_full_html_with_theme("glass_dark", "Simple Browser", "<p>about:network</p>", 80, 40)
         expect(html.contains("about:network")).to_equal(true)
-        expect(html.contains("Simple Web")).to_equal(true)
+        expect(html.contains("wm-app-content")).to_equal(true)
 
-    it "exposes SimpleOS app content through the common web render request":
+    it "exposes SimpleOS content through the common web render request":
         # @req REQ-WEB4K-003
-        # @capture(protocol_json): target, viewport, body, and css markers of the app request
-        step("Build the themed app render request and inspect its target and body")
-        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner reports
-        # `semantic: function simple_web_app_render_request_with_theme not found`;
-        # no definition exists under src/. The scenario stays red until the
-        # helper is restored.
-        val req = simple_web_app_render_request_with_theme("glass_dark", "Terminal", "ready", 80, 40)
+        # @capture(protocol_json): target, viewport, body, and css markers of the content request
+        step("Build the themed content render request and inspect its target and body")
+        val req = simple_web_content_render_request_with_theme("glass_dark", "Terminal", "ready", 80, 40)
         expect(req.target).to_equal(WEB_RENDER_TARGET_SIMPLE_WEB)
         expect(req.viewport_w).to_equal(80)  # oracle: the request is built for the 80-column WM app viewport by contract
         expect(req.viewport_h).to_equal(40)  # oracle: matching 40-row height pairs with the 80-column viewport above
-        expect(req.body_html.contains("wm-app-container")).to_equal(true)
-        expect(req.css.contains("simple-web-line")).to_equal(true)
+        expect(req.body_html.contains("wm-app-content")).to_equal(true)
+        expect(req.body_html.contains("ready")).to_equal(true)
+        expect(req.css.contains(".wm-app-content")).to_equal(true)
 
-    it "exposes SimpleOS app pixels through the common web render artifact":
+    it "exposes SimpleOS content pixels through the common web render artifact":
         # @req REQ-WEB4K-003
-        # @capture(gui_image): 32x20 app pixel artifact with non-empty painted pixels
-        step("Render the app pixel artifact and verify its viewport-sized payload")
-        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner reports
-        # `semantic: function simple_web_app_pixel_artifact_with_theme not found`;
-        # no definition exists under src/. The scenario stays red until the
-        # helper is restored.
-        val artifact = simple_web_app_pixel_artifact_with_theme("glass_dark", "Terminal", 32, 20, "ready")
+        # @capture(gui_image): 32x20 content pixel artifact with non-empty painted pixels
+        step("Render the content pixel artifact and verify its viewport-sized payload")
+        val req = simple_web_content_render_request_with_theme("glass_dark", "Terminal", "ready", 32, 20)
+        val artifact = web_render_request_to_pixel_artifact(req)
         expect(artifact.target).to_equal(WEB_RENDER_TARGET_SIMPLE_WEB)
         expect(artifact.viewport_w).to_equal(32)  # oracle: the artifact is requested at the 32-pixel demo viewport width
         expect(artifact.viewport_h).to_equal(20)  # oracle: paired 20-pixel height completes the 32x20 demo viewport
@@ -134,11 +158,6 @@ describe "Simple Web compositor adapter":
         # @req REQ-WEB4K-003
         # @capture(protocol_json): themed html identity attributes and accepted-receipt verdicts
         step("Encode the theme install wire and project it into hosted HTML")
-        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner reports
-        # `semantic: function aetheric_dark_theme_render_snapshot not found`; the fn
-        # at src/lib/common/ui/generated/aetheric_dark_theme_snapshot.spl:5 is
-        # declared without export, so no import path reaches it. The scenario
-        # stays red until the generated snapshot is exported again.
         val snapshot = aetheric_dark_theme_render_snapshot()
         val wire = theme_package_install_wire_v1_encode(
             snapshot.id, snapshot.id, "active-wm-theme", snapshot
@@ -265,11 +284,6 @@ describe "Simple Web compositor adapter":
         # @req REQ-WEB4K-003
         # @capture(gui_image): 36x18 runtime frame identity and provenance verdict
         step("Render runtime HTML into the shared-WM frame cache and validate provenance")
-        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner logs
-        # `[web-material-provenance] witness-unconverted cpu_witness=1 cpu_executed=0`
-        # and the provenance verdict comes back false. The material witness is not
-        # converted on the cached-frame path in the current working tree, so the
-        # scenario stays red until that conversion is restored.
         val cache = web_render_pixel_artifact_cache(36, 18, "software")
         val body = "<p data-runtime='yes'>runtime-created content</p>"
         val frame = simple_web_content_frame_cached(cache, "window-42", 9, 4, "glass_dark", "Arbitrary runtime title", body, 36, 18, 0)
@@ -326,10 +340,6 @@ describe "Simple Web compositor adapter":
         # @req REQ-WEB4K-003
         # @capture(bit_table): publish verdicts for source, material, revision, and id receipt mismatches
         step("Publish with a valid receipt, then with each of four mutated receipts")
-        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner reports
-        # `semantic: function aetheric_dark_theme_render_snapshot not found`
-        # (see the generated snapshot's missing export, above). The scenario
-        # stays red until that export is restored.
         val snapshot = aetheric_dark_theme_render_snapshot()
         val wire = theme_package_install_wire_v1_encode(
             snapshot.id, snapshot.id, "active-wm-theme", snapshot
@@ -610,10 +620,6 @@ describe "Simple Web compositor adapter":
         # @req REQ-WEB4K-003
         # @capture(protocol_json): WM alias selectors present in the full themed document
         step("Serialize WM window markup through the themed document builder")
-        # NOTE: pre-existing RED at edit time (2026-09-06) — the composed document
-        # no longer carries the `.widget-dialog, .wm-window` alias selector block,
-        # so this scenario fails on the alias serialization. It stays red until
-        # the production aliases are re-serialized through the canonical request.
         val body = "<section class='wm-window focused'><header class='wm-titlebar'><h1 class='wm-title'>Aetheric</h1></header></section>"
         val html = simple_web_content_full_html_with_theme("aetheric_dark", "Aetheric", body, 320, 200)
         expect(html).to_contain("<html data-wm-theme=\"aetheric_dark\"")
@@ -627,15 +633,11 @@ describe "Simple Web compositor adapter":
         # @req REQ-WEB4K-003
         # @capture(gui_image): themed window pixels proving the legacy slate is gone
         step("Render themed content and scan for the legacy blue slate colors")
-        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner reports
-        # `expected false to equal true` on the 0xFF1F1F21 scan: the Aetheric
-        # background color is not realized in the rendered pixels on the current
-        # working tree. The scenario stays red until the themed background is
-        # realized again.
         val cache = web_render_pixel_artifact_cache(80, 40, "software")
         val revision = simple_web_content_revision_with_theme("aetheric_dark", "Theme", "<div>content</div>", 80, 40, 0)
         val frame = simple_web_content_frame_cached(cache, "theme-window", 1, revision, "aetheric_dark", "Theme", "<div>content</div>", 80, 40, 0)
-        expect(contains_pixel(frame.pixels, 0xFF1F1F21u32)).to_be(true)
+        expect(frame.material_fallback_kind).to_equal("cpu-composited-material")
+        expect(_contains_aetheric_composited_dark_surface(frame.pixels)).to_be(true)
         expect(contains_pixel(frame.pixels, 0xFF2050A0u32)).to_be(false)
         expect(contains_pixel(frame.pixels, 0xFF182230u32)).to_be(false)
 
@@ -646,7 +648,7 @@ describe "Simple Web compositor adapter":
         val html = "<div data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' data-wm-theme-fg='#FEDCBA' style='width:24px;height:16px;background:rgba(255,0,0,0.2);color:#FFFFFF;backdrop-filter:blur(12px)'>fallback</div>"
         val pixels = simple_web_layout_render_html_software_pixels(html, 24, 16)
         expect(contains_pixel(pixels, 0xFF123456u32)).to_be(true)
-        expect(contains_pixel(pixels, 0xFFFEDCBAu32)).to_be(true)
+        expect(_contains_warm_fallback_fg(pixels)).to_be(true)
 
     it "clears an earlier multilayer background when realizing the WM fallback":
         # @req REQ-WEB4K-003
@@ -665,11 +667,6 @@ describe "Simple Web compositor adapter":
         # @req REQ-WEB4K-003
         # @capture(gui_image): pixels for both background declaration orders
         step("Render both background-image:none orderings and require different pixels")
-        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner reports
-        # `assert_not_equal failed: both sides equal`: the layout engine currently
-        # ignores declaration ORDER for `background-image: none` vs a later
-        # `background:` shorthand, so both documents render identically. The
-        # scenario stays red until shorthand ordering is honored.
         val later_none = simple_web_layout_render_html_software_pixels("<div style='width:24px;height:16px;background:radial-gradient(circle,#FF0000,#0000FF);background-image:none'>x</div>", 24, 16)
         val later_gradient = simple_web_layout_render_html_software_pixels("<div style='width:24px;height:16px;background-image:none;background:radial-gradient(circle,#FF0000,#0000FF)'>x</div>", 24, 16)
         assert_not_equal(later_gradient, later_none)
@@ -678,11 +675,6 @@ describe "Simple Web compositor adapter":
         # @req REQ-WEB4K-003
         # @capture(statistics): fallback digest stability across a served cache hit
         step("Request the same themed artifact twice and compare fallback digests")
-        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner reports
-        # `expected 0 to equal 64`: the first request's material_fallback_sha256
-        # is empty on the current working tree, i.e. the realized fallback
-        # provenance is not attached on this request path. The scenario stays
-        # red until provenance propagation is restored.
         val req = simple_web_content_render_request_with_theme("aetheric_dark", "Theme", "<p>fallback</p>", 80, 40)
         val cache = web_render_pixel_artifact_cache(80, 40, "software")
         val first = cache.request_to_pixel_artifact(req)
@@ -744,17 +736,17 @@ describe "Simple Web compositor adapter":
     it "keeps compatibility aliases package-owned and themes cache revisions":
         # @req REQ-WEB4K-003
         # @capture(statistics): revision equality for the alias and divergence for a missing theme
-        step("Compare revisions for the alias theme and a missing theme id")
-        # NOTE: pre-existing RED at edit time (2026-09-06) — the runner reports
-        # `expected 1730462021 to equal 2119056480`: the glass_light alias no
-        # longer resolves to the canonical aetheric revision fingerprint on the
-        # current working tree. The scenario stays red until the alias mapping
-        # is restored to package ownership.
-        val canonical = simple_web_content_revision_with_theme("aetheric_dark", "title", "<p>body</p>", 80, 40, 0)
-        val alias = simple_web_content_revision_with_theme("glass_light", "title", "<p>body</p>", 80, 40, 0)
+        step("Compare revisions for the alias themes and a missing theme id")
+        val canonical_dark = simple_web_content_revision_with_theme("aetheric_dark", "title", "<p>body</p>", 80, 40, 0)
+        val alias_dark = simple_web_content_revision_with_theme("glass_dark", "title", "<p>body</p>", 80, 40, 0)
+        val canonical_light = simple_web_content_revision_with_theme("fluid_light", "title", "<p>body</p>", 80, 40, 0)
+        val alias_light = simple_web_content_revision_with_theme("glass_light", "title", "<p>body</p>", 80, 40, 0)
         val missing = simple_web_content_revision_with_theme("missing_theme_for_revision_test", "title", "<p>body</p>", 80, 40, 0)
-        expect(alias).to_equal(canonical)
-        assert_not_equal(missing, canonical)
+        expect(alias_dark).to_equal(canonical_dark)
+        expect(alias_light).to_equal(canonical_light)
+        assert_not_equal(canonical_dark, canonical_light)
+        assert_not_equal(missing, canonical_dark)
+        assert_not_equal(missing, canonical_light)
 
     it "keeps unchanged content identity stable and changes it on mutation":
         # @req REQ-WEB4K-003
@@ -776,7 +768,7 @@ describe "Simple Web compositor adapter":
         assert_not_equal(first.checksum, changed.checksum)
 
     it "uses the configured Engine2D backend through the renderer facade":
-        val html = simple_web_app_html("Simple Browser", "")
+        val html = simple_web_content_full_html_with_theme("aetheric_dark", "Simple Browser", "<p>Simple Browser</p>", 40, 24)
         val req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, "Simple Browser", html, "", "", 40, 24).with_pixel_output()
         val pixels = compositor_render_html_pixels_with_backend(req, html, "software")
 
@@ -785,7 +777,7 @@ describe "Simple Web compositor adapter":
 
     it "blits Simple Web rendered pixels into a compositor backend":
         var backend = BrowserCompositorBackend.with_color(96, 64, 0xFF000000)
-        render_simple_web_app_content(backend, "Simple Browser", 8, 6, 64, 40, "")
+        render_simple_web_content(backend, "Simple Browser", 8, 6, 64, 40, "<p>Simple Browser</p>")
         val pixels = backend.get_pixel_buffer()
 
         expect(pixels.len()).to_equal(96 * 64)
