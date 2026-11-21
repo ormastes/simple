@@ -1631,9 +1631,19 @@ impl MirLowering:
             # already avoided this only because it skips unwrap entirely.
             # contains + index read (never Dict.get) per the native
             # struct-valued Dict.get landmine this same change fixes.
-            if self.struct_value_syms.contains(receiver_local.id):
-                self.struct_value_syms[result_local_uw.id] = self.struct_value_syms[receiver_local.id]
-            elif inner_type_uw != None:
+            # A receiver owner that is a conflicting bare leaf (an Optional
+            # struct field such as `task.user_context` stamped `TaskContext`)
+            # is no identity at all: every field reader refuses it. Let the
+            # Option's declared type argument name the exact declaration
+            # instead (mir_result_ok_payload_bare_owner_2026-11-22). The leaf is
+            # still copied first so a miss below keeps the fail-closed reader.
+            val receiver_owner_known = self.struct_value_syms.contains(receiver_local.id)
+            var receiver_owner_ambiguous = false
+            if receiver_owner_known:
+                val receiver_owner = self.struct_value_syms[receiver_local.id]
+                self.struct_value_syms[result_local_uw.id] = receiver_owner
+                receiver_owner_ambiguous = self.struct_field_order_conflict_warned.contains(receiver_owner)
+            if (not receiver_owner_known or receiver_owner_ambiguous) and inner_type_uw != None:
                 # The receiver is an Option HANDLE -- a boxed enum payload, not
                 # a construction site -- so it carries no struct_value_syms
                 # entry of its own and the propagation above misses. The
