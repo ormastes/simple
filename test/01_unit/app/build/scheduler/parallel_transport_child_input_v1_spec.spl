@@ -17,12 +17,12 @@ use compiler.common.build_contract.{BuildInputRef, SnapshotManifest,
     action_spec_digest_v1}
 use std.common.crypto.sha256.{sha256_text}
 use app.io.mod.{cwd, getpid, time_now_unix_micros, dir_create_all,
-    dir_remove_all, file_atomic_write, file_hash_sha256, file_rename,
-    process_run_bounded}
+    dir_remove_all, file_atomic_write, file_hash_sha256, file_rename}
+use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_create_nofollow_v1}
 
 fn _child_root_v1() -> text:
-    cwd() + "/build/test/parallel-child-input-" + getpid().to_text() +
-        "-" + time_now_unix_micros().to_text()
+    cwd().replace("\\", "/") + "/build/test/parallel-child-input-" +
+        getpid().to_text() + "-" + time_now_unix_micros().to_text()
 
 fn _child_request_v1(content: text) -> BuildWorkerRequestV1:
     val snapshot = sha256_text("child-input-snapshot")
@@ -136,12 +136,18 @@ describe "parallel transport child handoff input V1":
         val inputs = linked_handoff.prepared_root + "/inputs"
         expect(file_rename(inputs + "/src", inputs + "/real"))
             .to_be(true)
-        val (_, _, link_code) = process_run_bounded("/bin/ln",
-            ["-s", "real", inputs + "/src"], 5000, 1024)
-        expect(link_code).to_equal(0)
-        val linked = validate_parallel_transport_child_input_v1(
-            encode_parallel_transport_handoff_v1(linked_handoff),
-            parallel_transport_handoff_digest_v1(linked_handoff))
-        expect(linked.valid).to_be(false)
-        expect(linked.reason).to_equal("prepared-input-invalid")
+        val link_created = snapshot_symlink_create_nofollow_v1(inputs,
+            inputs + "/src", "real", 2)
+        @when(os="windows"):
+        val check_symlink_reject = link_created
+        @else:
+        val check_symlink_reject = true
+        expect(link_created).to_be(true)
+        @end
+        if check_symlink_reject:
+            val linked = validate_parallel_transport_child_input_v1(
+                encode_parallel_transport_handoff_v1(linked_handoff),
+                parallel_transport_handoff_digest_v1(linked_handoff))
+            expect(linked.valid).to_be(false)
+            expect(linked.reason).to_equal("prepared-input-invalid")
         expect(dir_remove_all(symlink_root)).to_be(true)
