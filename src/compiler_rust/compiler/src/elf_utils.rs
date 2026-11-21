@@ -612,7 +612,19 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "spl_fonts_call_init_path" => value::spl_fonts_call_init_path as *const () as usize,
         "spl_fonts_call_layout_text" => value::spl_fonts_call_layout_text as *const () as usize,
         "rt_file_write_bytes_array" => value::rt_file_write_bytes_array as *const () as usize,
+        "rt_file_atomic_write" => value::rt_file_atomic_write as *const () as usize,
+        "rt_file_atomic_write_mode" => value::rt_file_atomic_write_mode as *const () as usize,
         "rt_file_atomic_write_bytes_array" => value::rt_file_atomic_write_bytes_array as *const () as usize,
+        "rt_pty_open" => value::pty::rt_pty_open as *const () as usize,
+        "rt_pty_spawn" => value::pty::rt_pty_spawn as *const () as usize,
+        "rt_pty_write" => value::pty::rt_pty_write as *const () as usize,
+        "rt_pty_read" => value::pty::rt_pty_read as *const () as usize,
+        "rt_pty_close" => value::pty::rt_pty_close as *const () as usize,
+        "rt_pty_is_running" => value::pty::rt_pty_is_running as *const () as usize,
+        "rt_pty_hangup" => value::pty::rt_pty_hangup as *const () as usize,
+        "rt_pty_write_bytes_v1" => value::pty::rt_pty_write_bytes_v1 as *const () as usize,
+        "rt_pty_exit_code_v1" => value::pty::rt_pty_exit_code_v1 as *const () as usize,
+        "rt_pty_resize" => value::pty::rt_pty_resize as *const () as usize,
         "rt_font_load_array" => simple_runtime::packed_byte_adapters::rt_font_load_array as *const () as usize,
         "rt_metal_load_library_array" => {
             simple_runtime::metal_graphics_runtime::rt_metal_load_library_array as *const () as usize
@@ -685,6 +697,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_value_bool" => simple_runtime::rt_value_bool as *const () as usize,
         "rt_value_nil" => simple_runtime::rt_value_nil as *const () as usize,
         "rt_value_as_int" => simple_runtime::rt_value_as_int as *const () as usize,
+        "rt_value_as_bool" => simple_runtime::rt_value_as_bool as *const () as usize,
         "rt_value_as_u64" => simple_runtime::rt_value_as_u64 as *const () as usize,
         "rt_value_as_float" => simple_runtime::rt_value_as_float as *const () as usize,
 

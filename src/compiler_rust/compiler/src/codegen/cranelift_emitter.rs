@@ -697,9 +697,8 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
     // =========================================================================
     // Memory safety
     // =========================================================================
-    fn emit_drop(&mut self, _value: VReg, _ty: TypeId) -> Result<(), String> {
-        // Same no-op as existing compile_instruction
-        Ok(())
+    fn emit_drop(&mut self, value: VReg, ty: TypeId) -> Result<(), String> {
+        super::instr::compile_drop(self.ctx, self.builder, value, ty)
     }
     fn emit_end_scope(&mut self, _local_index: usize) -> Result<(), String> {
         Ok(())

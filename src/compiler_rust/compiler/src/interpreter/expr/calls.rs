@@ -24,6 +24,80 @@ pub(crate) fn receiver_root_identifier(receiver: &Expr) -> Option<&str> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_eval_array_repeat_default(
+    receiver: &Expr,
+    method: &str,
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    if method != "default" || !args.is_empty() {
+        return Ok(None);
+    }
+    let receiver_base = match receiver {
+        Expr::GenericInst { expr, .. } => expr.as_ref(),
+        other => other,
+    };
+    if let Expr::Identifier(name) = receiver_base {
+        if env.get(name).is_none() {
+            if let Some(val) = crate::interpreter::interpreter_method::special::primitive_default_value(name) {
+                return Ok(Some(val));
+            }
+            if let Some(bound_ty) =
+                crate::interpreter::GENERIC_TYPE_BINDINGS.with(|cell| cell.borrow().get(name).cloned())
+            {
+                if let simple_parser::ast::Type::Simple(prim) = &bound_ty {
+                    if let Some(val) = crate::interpreter::interpreter_method::special::primitive_default_value(prim) {
+                        return Ok(Some(val));
+                    }
+                } else if let simple_parser::ast::Type::Array { element, size: Some(count) } = &bound_ty {
+                    if let simple_parser::ast::Type::Simple(elem_name) = element.as_ref() {
+                        let count_val = evaluate_expr(count, env, functions, classes, enums, impl_methods)?;
+                        let n = count_val.as_int().unwrap_or(0).max(0) as usize;
+                        let elem_call = Expr::MethodCall {
+                            receiver: Box::new(Expr::Identifier(elem_name.clone())),
+                            method: "default".to_string(),
+                            args: Vec::new(),
+                            generic_args: Vec::new(),
+                        };
+                        let elem_default = evaluate_expr(&elem_call, env, functions, classes, enums, impl_methods)?;
+                        return Ok(Some(Value::array(vec![elem_default; n])));
+                    }
+                }
+            }
+        }
+        return Ok(None);
+    }
+    let Expr::ArrayRepeat { value, count } = receiver_base else {
+        return Ok(None);
+    };
+    let is_type_or_param = match value.as_ref() {
+        Expr::Identifier(name) if env.get(name).is_none() => {
+            classes.contains_key(name)
+                || crate::interpreter::GENERIC_TYPE_BINDINGS.with(|cell| cell.borrow().contains_key(name))
+                || crate::interpreter::interpreter_method::special::primitive_default_value(name).is_some()
+        }
+        _ => false,
+    };
+    if !is_type_or_param {
+        return Ok(None);
+    }
+    let count_val = evaluate_expr(count, env, functions, classes, enums, impl_methods)?;
+    let n = count_val.as_int().unwrap_or(0).max(0) as usize;
+    let elem_call = Expr::MethodCall {
+        receiver: value.clone(),
+        method: "default".to_string(),
+        args: Vec::new(),
+        generic_args: Vec::new(),
+    };
+    let elem_default = evaluate_expr(&elem_call, env, functions, classes, enums, impl_methods)?;
+    Ok(Some(Value::array(vec![elem_default; n])))
+}
+
 /// Refresh a stale same-file module `var` binding before a method call uses it
 /// as its receiver.
 ///
@@ -188,8 +262,19 @@ pub(super) fn eval_call_expr(
             impl_methods,
         )?)),
         Expr::MethodCall {
-            receiver, method, args, ..
+            receiver,
+            method,
+            args,
+            generic_args,
         } => {
+            if let Some(default_arr) =
+                try_eval_array_repeat_default(receiver, method, args, env, functions, classes, enums, impl_methods)?
+            {
+                return Ok(Some(default_arr));
+            }
+            let _pending_generics =
+                crate::interpreter::push_method_call_generics_with_method(receiver, method, generic_args);
+            let _clear_expected_target = crate::interpreter::push_expected_target_type(None);
             // BDD negation link: `expect(x).not.to_contain(y)`. The receiver is
             // `FieldAccess { expect(x), "not" }`, which otherwise evaluates
             // `.not` as a field of the subject ("unknown property or method
@@ -622,7 +707,11 @@ pub(super) fn eval_call_expr(
                 }
             }
             // Support module-style access (lib.foo) by resolving directly to functions/classes
-            if let Expr::Identifier(module_name) = receiver.as_ref() {
+            let receiver_base = match receiver.as_ref() {
+                Expr::GenericInst { expr, .. } => expr.as_ref(),
+                other => other,
+            };
+            if let Expr::Identifier(module_name) = receiver_base {
                 if env.get(module_name).is_none() {
                     if field == "new" {
                         let class_name = module_name.clone();

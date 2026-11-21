@@ -264,6 +264,8 @@ pub(crate) fn instantiate_class(
             // Mark this class as currently in its `new` method
             IN_NEW_METHOD.with(|set| set.borrow_mut().insert(class_name.to_string()));
 
+            let _fn_return_guard = crate::interpreter::push_current_fn_return_type(None);
+            let _expected_target_guard = crate::interpreter::push_expected_target_type(None);
             let result = match exec_block_fn(
                 &new_method.body,
                 &mut local_env,

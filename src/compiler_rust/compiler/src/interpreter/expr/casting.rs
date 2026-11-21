@@ -13,8 +13,11 @@ use crate::value::Value;
 
 /// Cast a value to a target type
 pub(super) fn cast_value(val: Value, target_type: &Type) -> Result<Value, CompileError> {
+    let resolved_type = crate::interpreter::resolve_generic_type_in_scope(target_type);
+    let target_type = &resolved_type;
     match target_type {
         Type::Simple(type_name) => cast_to_simple_type(val, type_name),
+        Type::Generic { name, .. } => cast_to_simple_type(val, name),
         Type::Optional(inner) => {
             // Optional values follow the interpreter's bare-payload convention:
             // `None` is `Value::Nil`, a present optional is its bare payload (see
@@ -308,5 +311,44 @@ mod optional_cast_tests {
             assert!(msg.contains("optional"), "{target}: {msg}");
         }
         assert!(cast_value(Value::Nil, &Type::Simple("u64".to_string())).is_err());
+    }
+}
+
+#[cfg(test)]
+mod generic_cast_tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn generic_cast_resolves_bound_type_param_and_optional() {
+        let mut updates = HashMap::new();
+        updates.insert("T".to_string(), Type::Simple("i32".to_string()));
+        {
+            let _guard = crate::interpreter::GenericTypeBindingsGuard::enter(updates);
+            let cast_int = cast_value(Value::Float(3.9), &Type::Simple("T".to_string()))
+                .expect("bound T -> i32 must cast float to i32");
+            assert_eq!(cast_int, Value::Int(3));
+
+            let cast_opt = cast_value(Value::Float(7.2), &Type::Optional(Box::new(Type::Simple("T".to_string()))))
+                .expect("bound T? -> i32? must cast float to i32");
+            assert_eq!(cast_opt, Value::Int(7));
+        }
+
+        let err = cast_value(Value::Float(2.0), &Type::Simple("T".to_string()))
+            .expect_err("unbound T must still fail");
+        assert!(format!("{err}").contains("cannot cast f64 to T"), "{err}");
+    }
+
+    #[test]
+    fn unify_generic_type_value_infers_element_from_array() {
+        let params: HashSet<String> = ["T".to_string()].into_iter().collect();
+        let mut bindings = HashMap::new();
+        let field_ty = Type::Array {
+            element: Box::new(Type::Simple("T".to_string())),
+            size: None,
+        };
+        let arr_val = Value::array(vec![Value::Float(4.0), Value::Float(16.0)]);
+        crate::interpreter::unify_generic_type_value(&field_ty, &arr_val, &params, &mut bindings);
+        assert_eq!(bindings.get("T"), Some(&Type::Simple("f64".to_string())));
     }
 }

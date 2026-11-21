@@ -11,7 +11,7 @@ use core.sorting.*
 # ============================================
 
 struct List<T>:
-    data: *T
+    data: [T]
     len: usize
     cap: usize
 
@@ -22,14 +22,11 @@ struct List<T>:
 impl List<T>:
     # Create empty list
     static fn new() -> List<T>:
-        List { data: nil, len: 0, cap: 0 }
+        List { data: [], len: 0, cap: 0 }
 
     # Create with pre-allocated capacity
     static fn with_capacity(cap: usize) -> List<T>:
-        if cap == 0:
-            return List.new()
-        val data = alloc<T>(cap)
-        List { data: data, len: 0, cap: cap }
+        List { data: [], len: 0, cap: cap }
 
     # Create from variadic arguments
     static fn of(items: T...) -> List<T>:
@@ -52,18 +49,12 @@ impl List<T>:
             list.push(f(i))
         return list
 
-    # Create from iterator
-    static fn from_iter<I: Iterator<Item=T>>(iter: I) -> List<T>:
-        var list = List.new()
-        for item in iter:
-            list.push(item)
-        return list
-
     # Create from slice - Slice<T> parameter type now supported
     static fn from_slice(slice: Slice<T>) -> List<T> where T: Clone:
         var list = List.with_capacity(slice.len())
-        for item in slice:
-            list.push(item.clone())
+        for i in 0..slice.len():
+            val item = slice.get(i).expect("valid")
+            list.push(item)
         return list
 
 # ============================================
@@ -82,31 +73,130 @@ impl List<T>:
         while new_cap < required:
             new_cap = new_cap * 2
 
-        val new_data = alloc<T>(new_cap)
-        if self.data != nil:
-            danger:
-                copy_mem(new_data, self.data, self.len * 8)
-                dealloc(self.data)
-        self.data = new_data
         self.cap = new_cap
 
     fn shrink_to_fit():
-        if self.len == self.cap:
-            return
-        if self.len == 0:
-            if self.data != nil:
-                danger:
-                    dealloc(self.data)
-            self.data = nil
-            self.cap = 0
-            return
-
-        val new_data = alloc<T>(self.len)
-        danger:
-            copy_mem(new_data, self.data, self.len * 8)
-            dealloc(self.data)
-        self.data = new_data
         self.cap = self.len
+
+    fn swap_unchecked(i: usize, j: usize):
+        val tmp = self.data[i]
+        self.data[i] = self.data[j]
+        self.data[j] = tmp
+
+    fn insertion_sort_range(left: usize, right: usize) where T: Ord:
+        if right <= left + 1:
+            return
+        var i = left + 1
+        while i < right:
+            var j = i
+            while j > left and self.data[j] < self.data[j - 1]:
+                self.swap_unchecked(j, j - 1)
+                j = j - 1
+            i = i + 1
+
+    fn sift_down_range(start: usize, end: usize) where T: Ord:
+        var root = start
+        while true:
+            val left = 2 * root + 1
+            if left >= end:
+                break
+            var largest = root
+            if self.data[largest] < self.data[left]:
+                largest = left
+            val right = left + 1
+            if right < end and self.data[largest] < self.data[right]:
+                largest = right
+            if largest == root:
+                break
+            self.swap_unchecked(root, largest)
+            root = largest
+
+    fn heapsort_in_place() where T: Ord:
+        if self.len < 2:
+            return
+        var i = self.len / 2
+        while i > 0:
+            i = i - 1
+            self.sift_down_range(i, self.len)
+        var end = self.len
+        while end > 1:
+            end = end - 1
+            self.swap_unchecked(0, end)
+            self.sift_down_range(0, end)
+
+    fn merge_range(left: usize, mid: usize, right: usize) where T: Ord:
+        var tmp: [T] = []
+        var i = left
+        var j = mid
+        while i < mid and j < right:
+            if self.data[j] < self.data[i]:
+                tmp.push(self.data[j])
+                j = j + 1
+            else:
+                tmp.push(self.data[i])
+                i = i + 1
+        while i < mid:
+            tmp.push(self.data[i])
+            i = i + 1
+        while j < right:
+            tmp.push(self.data[j])
+            j = j + 1
+        for k in 0..tmp.len():
+            self.data[left + k] = tmp[k]
+
+    fn merge_sort_range(left: usize, right: usize) where T: Ord:
+        if right <= left + 16:
+            self.insertion_sort_range(left, right)
+            return
+        val mid = left + (right - left) / 2
+        self.merge_sort_range(left, mid)
+        self.merge_sort_range(mid, right)
+        self.merge_range(left, mid, right)
+
+    fn timsort_in_place() where T: Ord:
+        if self.len < 2:
+            return
+        val min_run: usize = 32
+        var i: usize = 0
+        while i < self.len:
+            val run_end = if i + min_run < self.len: i + min_run else: self.len
+            self.insertion_sort_range(i, run_end)
+            i = i + min_run
+        var size = min_run
+        while size < self.len:
+            var left: usize = 0
+            while left < self.len:
+                val mid = if left + size < self.len: left + size else: self.len
+                val right = if left + size * 2 < self.len: left + size * 2 else: self.len
+                if mid < right:
+                    self.merge_range(left, mid, right)
+                left = left + size * 2
+            size = size * 2
+
+    fn pdqsort_range(left: usize, right: usize, depth_limit: usize) where T: Ord:
+        if right <= left + 16:
+            self.insertion_sort_range(left, right)
+            return
+        if depth_limit == 0:
+            self.merge_sort_range(left, right)
+            return
+        val mid = left + (right - left) / 2
+        val pivot = self.data[mid]
+        var lt = left
+        var eq = left
+        var gt = right
+        while eq < gt:
+            if self.data[eq] < pivot:
+                self.swap_unchecked(lt, eq)
+                lt = lt + 1
+                eq = eq + 1
+            elif pivot < self.data[eq]:
+                gt = gt - 1
+                self.swap_unchecked(eq, gt)
+            else:
+                eq = eq + 1
+        self.pdqsort_range(left, lt, depth_limit - 1)
+        self.pdqsort_range(gt, right, depth_limit - 1)
 
 # ============================================
 # Capacity trait
@@ -133,6 +223,9 @@ impl Len for List<T>:
 
 impl Iterable<T> for List<T>:
     type Iter = ListIter<T>
+
+    fn iter() -> Self.Iter:
+        ListIter { list: self, index: 0 }
 
     fn into_iter() -> Self.Iter:
         ListIter { list: self, index: 0 }
@@ -176,8 +269,7 @@ impl Iterable<T> for List<T>:
 impl Sequence<T> for List<T>:
     fn get(idx: usize) -> Option<T>:
         if idx < self.len:
-            danger:
-                Some(self.data.offset(idx as isize).read())
+            Some(self.data[idx])
         else:
             None
 
@@ -185,8 +277,7 @@ impl Sequence<T> for List<T>:
         if start > end or end > self.len:
             Slice.empty()
         else:
-            danger:
-                Slice.new(self.data.offset(start as isize), end - start)
+            Slice.from_array(self.data, start, end - start)
 
     fn first() -> Option<T>:
         self.get(0)
@@ -195,12 +286,14 @@ impl Sequence<T> for List<T>:
         if self.len > 0: self.get(self.len - 1) else: nil
 
     fn find(predicate: fn(&T) -> bool) -> Option<T>:
-        for item in self.iter():
+        for i in 0..self.len:
+            val item = self.data[i]
             if predicate(&item): return Some(item)
         nil
 
     fn find_index(predicate: fn(&T) -> bool) -> Option<usize>:
-        for (idx, item) in self.iter().enumerate():
+        for idx in 0..self.len:
+            val item = self.data[idx]
             if predicate(&item): return Some(idx)
         nil
 
@@ -214,22 +307,24 @@ impl Sequence<T> for List<T>:
         self.get_slice(0, end)
 
     fn enumerate() -> Enumerate<Self.Iter>:
-        self.iter().enumerate()
+        self.into_iter().enumerate()
 
     fn all(predicate: fn(&T) -> bool) -> bool:
-        for item in self.iter():
+        for i in 0..self.len:
+            val item = self.data[i]
             if not predicate(&item): return false
         true
 
     fn any(predicate: fn(&T) -> bool) -> bool:
-        for item in self.iter():
+        for i in 0..self.len:
+            val item = self.data[i]
             if predicate(&item): return true
         false
 
     fn fold<U>(self, init: U, f: fn(U, T) -> U) -> U:
         var acc = init
-        for item in self.iter():
-            acc = f(acc, item)
+        for i in 0..self.len:
+            acc = f(acc, self.data[i])
         acc
 
     fn sum() -> T where T: Add<Output=T> + Default:
@@ -241,14 +336,16 @@ impl Sequence<T> for List<T>:
     fn max() -> Option<T> where T: Ord:
         if self.len == 0: return nil
         var max_val = self.get(0).unwrap()
-        for item in self.iter():
+        for i in 1..self.len:
+            val item = self.data[i]
             if item > max_val: max_val = item
         Some(max_val)
 
     fn min() -> Option<T> where T: Ord:
         if self.len == 0: return nil
         var min_val = self.get(0).unwrap()
-        for item in self.iter():
+        for i in 1..self.len:
+            val item = self.data[i]
             if item < min_val: min_val = item
         Some(min_val)
 
@@ -286,38 +383,35 @@ impl Sequence<T> for List<T>:
 impl MutSequence<T> for List<T>:
     fn get_mut(idx: usize) -> Option<&mut T>:
         if idx < self.len:
-            danger:
-                Some(&mut *self.data.offset(idx as isize))
+            Some(&mut self.data[idx])
         else:
             None
 
     fn set(idx: usize, value: T) -> Result<(), IndexError>:
         if idx >= self.len:
             return Err(IndexError.OutOfBounds(idx, self.len))
-        danger:
-            self.data.offset(idx as isize).write(value)
+        self.data[idx] = value
         Ok(())
 
     fn swap(i: usize, j: usize) -> Result<(), IndexError>:
         if i >= self.len or j >= self.len:
             return Err(IndexError.OutOfBounds(if i >= self.len: i else: j, self.len))
-        danger:
-            val temp = self.data.offset(i as isize).read()
-            self.data.offset(i as isize).write(self.data.offset(j as isize).read())
-            self.data.offset(j as isize).write(temp)
+        val temp = self.data[i]
+        self.data[i] = self.data[j]
+        self.data[j] = temp
         Ok(())
 
     fn fill(value: T) where T: Clone:
         for i in 0..self.len:
-            danger:
-                self.data.offset(i as isize).write(value.clone())
+            self.data[i] = value
 
     fn fill_with(f: fn(usize) -> T):
         for i in 0..self.len:
-            danger:
-                self.data.offset(i as isize).write(f(i))
+            self.data[i] = f(i)
 
     fn reverse():
+        if self.len < 2:
+            return
         var i = 0
         var j = self.len - 1
         while i < j:
@@ -327,7 +421,7 @@ impl MutSequence<T> for List<T>:
 
     fn sort() where T: Ord:
         """Sort list using default algorithm (PDQSort)."""
-        sort_default(self.as_mut_slice())
+        self.sort_with(SortAlgorithm.PDQSort)
 
     fn sort_with(algo: SortAlgorithm) where T: Ord:
         """Sort list using specified algorithm.
@@ -338,7 +432,22 @@ impl MutSequence<T> for List<T>:
         Example:
             list.sort_with(SortAlgorithm.TimSort)
         """
-        sort_with_algorithm(self.as_mut_slice(), algo)
+        if self.len < 2:
+            return
+        match algo:
+            case SortAlgorithm.InsertionSort:
+                self.insertion_sort_range(0, self.len)
+            case SortAlgorithm.HeapSort:
+                self.heapsort_in_place()
+            case SortAlgorithm.TimSort:
+                self.timsort_in_place()
+            case SortAlgorithm.PDQSort:
+                var depth_limit: usize = 2
+                var k = self.len
+                while k > 1:
+                    k = k / 2
+                    depth_limit = depth_limit + 2
+                self.pdqsort_range(0, self.len, depth_limit)
 
     fn retain(predicate: fn(&T) -> bool):
         var write: usize = 0
@@ -351,7 +460,7 @@ impl MutSequence<T> for List<T>:
         self.len = write
 
     fn as_mut_slice() -> MutSlice<T>:
-        MutSlice.new(self.data, self.len)
+        MutSlice.from_array(self.data, 0, self.len)
 
 # ============================================
 # ImmutSequence trait
@@ -379,15 +488,16 @@ impl ImmutSequence<T> for List<T> where T: Clone:
 
     fn filtered(predicate: fn(&T) -> bool) -> Self.Output:
         var new_list = List.new()
-        for item in self.iter():
+        for i in 0..self.len:
+            val item = self.data[i]
             if predicate(&item):
-                new_list.push(item.clone())
+                new_list.push(item)
         new_list
 
     fn mapped<U>(self, f: fn(T) -> U) -> List<U>:
         var new_list = List.with_capacity(self.len)
-        for item in self.iter():
-            new_list.push(f(item.clone()))
+        for i in 0..self.len:
+            new_list.push(f(self.data[i]))
         new_list
 
     fn appended(item: T) -> Self.Output:
@@ -402,35 +512,35 @@ impl ImmutSequence<T> for List<T> where T: Clone:
 
     fn taken(n: usize) -> Self.Output:
         var new_list = List.new()
-        for (i, item) in self.enumerate():
-            if i >= n:
-                break
-            new_list.push(item.clone())
+        val limit = if n < self.len: n else: self.len
+        for i in 0..limit:
+            new_list.push(self.data[i])
         new_list
 
     fn dropped(n: usize) -> Self.Output:
         var new_list = List.new()
-        for (i, item) in self.enumerate():
-            if i >= n:
-                new_list.push(item.clone())
+        for i in n..self.len:
+            new_list.push(self.data[i])
         new_list
 
     fn taken_while(predicate: fn(&T) -> bool) -> Self.Output:
         var new_list = List.new()
-        for item in self.iter():
+        for i in 0..self.len:
+            val item = self.data[i]
             if not predicate(&item):
                 break
-            new_list.push(item.clone())
+            new_list.push(item)
         new_list
 
     fn dropped_while(predicate: fn(&T) -> bool) -> Self.Output:
         var new_list = List.new()
         var dropping = true
-        for item in self.iter():
+        for i in 0..self.len:
+            val item = self.data[i]
             if dropping and predicate(&item):
                 continue
             dropping = false
-            new_list.push(item.clone())
+            new_list.push(item)
         new_list
 
 # ============================================
@@ -439,86 +549,91 @@ impl ImmutSequence<T> for List<T> where T: Clone:
 
 impl Growable<T> for List<T>:
     fn push(item: T):
-        self.reserve(1)
-        danger:
-            self.data.offset(self.len as isize).write(item)
+        if self.len < self.data.len():
+            self.data[self.len] = item
+        else:
+            self.data.push(item)
         self.len = self.len + 1
+        if self.len > self.cap:
+            self.cap = self.len
 
     fn pop() -> Option<T>:
         if self.len == 0:
             return None
         self.len = self.len - 1
-        danger:
-            Some(self.data.offset(self.len as isize).read())
+        Some(self.data[self.len])
 
     fn push_front(item: T):
-        self.reserve(1)
+        if self.len >= self.data.len():
+            self.data.push(item)
         # Shift all elements right
         if self.len > 0:
-            danger:
-                var i = self.len
-                while i > 0:
-                    val src = self.data.offset((i - 1) as isize)
-                    val dst = self.data.offset(i as isize)
-                    dst.write(src.read())
-                    i = i - 1
-        danger:
-            self.data.write(item)
+            var i = self.len
+            while i > 0:
+                self.data[i] = self.data[i - 1]
+                i = i - 1
+        self.data[0] = item
         self.len = self.len + 1
+        if self.len > self.cap:
+            self.cap = self.len
 
     fn pop_front() -> Option<T>:
         if self.len == 0:
             return None
-        danger:
-            val item = self.data.read()
-            # Shift all elements left
-            for i in 0..(self.len - 1):
-                val src = self.data.offset((i + 1) as isize)
-                val dst = self.data.offset(i as isize)
-                dst.write(src.read())
-            self.len = self.len - 1
-            Some(item)
+        val item = self.data[0]
+        # Shift all elements left
+        for i in 0..(self.len - 1):
+            self.data[i] = self.data[i + 1]
+        self.len = self.len - 1
+        Some(item)
 
     fn insert(idx: usize, item: T) -> Result<(), IndexError>:
         if idx > self.len:
             return Err(IndexError.OutOfBounds(idx, self.len))
-        self.reserve(1)
+        if self.len >= self.data.len():
+            self.data.push(item)
         # Shift elements right from idx
-        danger:
-            var i = self.len
-            while i > idx:
-                val src = self.data.offset((i - 1) as isize)
-                val dst = self.data.offset(i as isize)
-                dst.write(src.read())
-                i = i - 1
-            self.data.offset(idx as isize).write(item)
+        var i = self.len
+        while i > idx:
+            self.data[i] = self.data[i - 1]
+            i = i - 1
+        self.data[idx] = item
         self.len = self.len + 1
+        if self.len > self.cap:
+            self.cap = self.len
         Ok(())
 
     fn remove(idx: usize) -> Option<T>:
         if idx >= self.len:
             return None
-        danger:
-            val item = self.data.offset(idx as isize).read()
-            # Shift elements left
-            for i in idx..(self.len - 1):
-                val src = self.data.offset((i + 1) as isize)
-                val dst = self.data.offset(i as isize)
-                dst.write(src.read())
-            self.len = self.len - 1
-            Some(item)
+        val item = self.data[idx]
+        # Shift elements left
+        for i in idx..(self.len - 1):
+            self.data[i] = self.data[i + 1]
+        self.len = self.len - 1
+        Some(item)
 
     fn clear():
         # Drop all elements if T has Drop
         self.len = 0
 
     fn extend<I: IntoIterator<Item=T>>(self, iter: I):
-        for item in iter.into_iter():
-            self.push(item)
+        var it = iter.into_iter()
+        loop:
+            match it.next():
+                case Some(item):
+                    self.push(item)
+                case None:
+                    break
 
     fn append<C: Sequence<T>>(self, other: C) where T: Clone:
-        for item in other.iter():
-            self.push(item.clone())
+        var it = other.into_iter()
+        loop:
+            match it.next():
+                case Some(item):
+                    self.push(item)
+                case None:
+                    break
 
     fn truncate(len: usize):
         if len < self.len:
@@ -527,7 +642,7 @@ impl Growable<T> for List<T>:
     fn resize(new_len: usize, value: T) where T: Clone:
         if new_len > self.len:
             for _ in self.len..new_len:
-                self.push(value.clone())
+                self.push(value)
         else:
             self.truncate(new_len)
 
@@ -537,11 +652,11 @@ impl Growable<T> for List<T>:
 
 impl Sliceable<T> for List<T>:
     fn as_slice() -> Slice<T>:
-        Slice.new(self.data, self.len)
+        Slice.from_array(self.data, 0, self.len)
 
 impl MutSliceable<T> for List<T>:
     fn as_mut_slice() -> MutSlice<T>:
-        MutSlice.new(self.data, self.len)
+        MutSlice.from_array(self.data, 0, self.len)
 
 # ============================================
 # Standard trait implementations
@@ -550,8 +665,8 @@ impl MutSliceable<T> for List<T>:
 impl Clone for List<T> where T: Clone:
     fn clone() -> Self:
         var new_list = List.with_capacity(self.len)
-        for item in self.iter():
-            new_list.push(item.clone())
+        for i in 0..self.len:
+            new_list.push(self.data[i])
         new_list
 
 impl Default for List<T>:
@@ -572,7 +687,7 @@ impl Eq for List<T> where T: Eq:
 impl Hash for List<T> where T: Hash:
     fn hash() -> u64:
         var h: u64 = 0
-        for item in self.iter():
+        for item in self.into_iter():
             h = h * 31 + item.hash()
         h
 
@@ -591,30 +706,34 @@ impl Index<usize> for List<T>:
     fn index(idx: usize) -> &Self.Output:
         if idx >= self.len:
             panic("index {idx} out of bounds (len={self.len})")
-        &*self.data.offset(idx as isize)
+        &self.data[idx]
 
 impl IndexMut<usize> for List<T>:
     fn index_mut(idx: usize) -> &mut Self.Output:
         if idx >= self.len:
             panic("index {idx} out of bounds (len={self.len})")
-        danger:
-            &mut *self.data.offset(idx as isize)
+        &mut self.data[idx]
 
 impl FromIterator<T> for List<T>:
     fn from_iter<I: Iterator<Item=T>>(iter: I) -> Self:
-        List.from_iter(iter)
+        var list = List.new()
+        loop:
+            match iter.next():
+                case Some(item):
+                    list.push(item)
+                case None:
+                    break
+        list
 
 impl IntoIterator for List<T>:
     type Item = T
     type IntoIter = ListIter<T>
     fn into_iter() -> Self.IntoIter:
-        self.iter()
+        ListIter { list: self, index: 0 }
 
 impl Drop for List<T>:
     fn drop():
-        if self.data != nil:
-            danger:
-                dealloc(self.data)
+        self.len = 0
 
 # ============================================
 # List Iterator
@@ -662,15 +781,15 @@ impl List<T>:
     fn reject(predicate: fn(&T) -> bool) -> List<T> where T: Clone:
         self.filtered(|x| not predicate(x))
 
-    # Ruby-style partition
     fn partition(predicate: fn(&T) -> bool) -> (List<T>, List<T>) where T: Clone:
         var yes = List.new()
         var no = List.new()
-        for item in self.iter():
+        for i in 0..self.len:
+            val item = self.data[i]
             if predicate(&item):
-                yes.push(item.clone())
+                yes.push(item)
             else:
-                no.push(item.clone())
+                no.push(item)
         (yes, no)
 
     # Note: compact() is implemented in a separate impl block for List<Option<T>>
@@ -679,17 +798,22 @@ impl List<T>:
     # Ruby-style flatten (one level)
     fn flatten<U>(self) -> List<U> where T: Iterable<U>, U: Clone:
         var result = List.new()
-        for inner in self.iter():
-            for item in inner.iter():
-                result.push(item.clone())
+        for i in 0..self.len:
+            var it = self.data[i].into_iter()
+            loop:
+                match it.next():
+                    case Some(item):
+                        result.push(item)
+                    case None:
+                        break
         result
 
     # Python-style chunks
     fn chunks(size: usize) -> List<List<T>> where T: Clone:
         var result = List.new()
         var chunk = List.new()
-        for item in self.iter():
-            chunk.push(item.clone())
+        for i in 0..self.len:
+            chunk.push(self.data[i])
             if chunk.len() == size:
                 result.push(chunk)
                 chunk = List.new()
@@ -705,7 +829,7 @@ impl List<T>:
         for i in 0..(self.len - size + 1):
             var window = List.new()
             for j in 0..size:
-                window.push(self.get(i + j).expect("valid").clone())
+                window.push(self.get(i + j).expect("valid"))
             result.push(window)
         result
 
@@ -735,8 +859,8 @@ impl List<T>:
     # Map with index
     fn map_with_index<U>(self, f: fn(usize, T) -> U) -> List<U> where T: Clone:
         var result = List.with_capacity(self.len)
-        for (i, item) in self.enumerate():
-            result.push(f(i, item.clone()))
+        for i in 0..self.len:
+            result.push(f(i, self.data[i]))
         result
 
     # Ruby-style tap (execute function, return self)
@@ -767,8 +891,8 @@ impl<T> List<Option<T>>:
             # Result: [1, 2, 3]
         """
         var result: List<T> = List.new()
-        for item in self.iter():
-            match item:
+        for i in 0..self.len:
+            match self.data[i]:
                 case Some(v):
                     result.push(v)
                 case None:

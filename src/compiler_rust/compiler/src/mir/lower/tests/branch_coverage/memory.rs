@@ -37,6 +37,7 @@ fn lvalue_method_call_with_struct_registry() {
             method: "x".to_string(),
             args: vec![],
             dispatch: crate::hir::DispatchMode::Dynamic,
+            generic_args: vec![],
         },
         ty: hir::TypeId::I64,
     };
@@ -64,6 +65,7 @@ fn lvalue_method_call_no_registry_fallback() {
             method: "x".to_string(),
             args: vec![],
             dispatch: crate::hir::DispatchMode::Dynamic,
+            generic_args: vec![],
         },
         ty: hir::TypeId::I64,
     };
@@ -97,6 +99,7 @@ fn lvalue_method_call_non_struct_type() {
             method: "x".to_string(),
             args: vec![],
             dispatch: crate::hir::DispatchMode::Dynamic,
+            generic_args: vec![],
         },
         ty: hir::TypeId::I64,
     };
@@ -130,6 +133,7 @@ fn lvalue_method_call_field_not_found() {
             method: "z".to_string(), // field doesn't exist
             args: vec![],
             dispatch: crate::hir::DispatchMode::Dynamic,
+            generic_args: vec![],
         },
         ty: hir::TypeId::I64,
     };
@@ -152,6 +156,7 @@ fn lvalue_method_call_no_registry_method_with_args() {
             method: "foo".to_string(),
             args: vec![gpu_dummy_expr()], // non-empty args
             dispatch: crate::hir::DispatchMode::Dynamic,
+            generic_args: vec![],
         },
         ty: hir::TypeId::I64,
     };
@@ -187,6 +192,7 @@ fn lvalue_method_call_receiver_fails() {
             method: "x".to_string(),
             args: vec![],
             dispatch: crate::hir::DispatchMode::Dynamic,
+            generic_args: vec![],
         },
         ty: hir::TypeId::I64,
     };
@@ -207,6 +213,7 @@ fn lvalue_method_call_receiver_expr_fails() {
             method: "x".to_string(),
             args: vec![],
             dispatch: crate::hir::DispatchMode::Dynamic,
+            generic_args: vec![],
         },
         ty: hir::TypeId::I64,
     };

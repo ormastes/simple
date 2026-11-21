@@ -1998,7 +1998,18 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     // =========================================================================
     // Memory safety — no-ops (use trait defaults)
     // =========================================================================
-    fn emit_drop(&mut self, _value: VReg, _ty: TypeId) -> Result<(), String> {
+    fn emit_drop(&mut self, value: VReg, ty: TypeId) -> Result<(), String> {
+        if ty == TypeId::STRING {
+            if let Ok(val) = self.get(value) {
+                self.call_runtime_void("rt_string_free", &[val])?;
+            }
+        } else if !crate::codegen::instr::is_drop_scalar_type(ty) {
+            if let Ok(val) = self.get(value) {
+                if matches!(val, BasicValueEnum::IntValue(_)) {
+                    self.call_runtime_void("rt_rc_release", &[val])?;
+                }
+            }
+        }
         Ok(())
     }
 

@@ -425,7 +425,11 @@ pub(crate) fn evaluate_method_call(
         eprintln!("[eval-method-call] method={} argc={}", method, args.len());
     }
     // Support module-style dot calls (lib.func()) by resolving directly to imported functions/classes.
-    if let Expr::Identifier(module_name) = receiver.as_ref() {
+    let receiver_base = match receiver.as_ref() {
+        Expr::GenericInst { expr, .. } => expr.as_ref(),
+        other => other,
+    };
+    if let Expr::Identifier(module_name) = receiver_base {
         if method == "empty" {
             if let Ok(filter) = std::env::var("SIMPLE_INTERPRETER_CALL_TRACE") {
                 if filter == "1" || filter == "all" || method.contains(&filter) {
@@ -1772,6 +1776,11 @@ pub(crate) fn evaluate_method_call(
                 return Err(crate::error::factory::class_not_found(class_name));
             }
         }
+        Value::Symbol(class_name) if method == "default" && args.is_empty() => {
+            if let Some(val) = special::primitive_default_value(class_name) {
+                return Ok(val);
+            }
+        }
         Value::Mock(mock) => {
             if let Some(result) =
                 special::handle_mock_methods(mock, method, args, env, functions, classes, enums, impl_methods)?
@@ -2158,7 +2167,11 @@ pub(crate) fn evaluate_method_call_with_self_update(
     }
     // Builtin text static methods — intercept before evaluate_expr to avoid
     // "variable `text` not found" when the receiver is the builtin type name.
-    if let Expr::Identifier(module_name) = receiver.as_ref() {
+    let receiver_base = match receiver.as_ref() {
+        Expr::GenericInst { expr, .. } => expr.as_ref(),
+        other => other,
+    };
+    if let Expr::Identifier(module_name) = receiver_base {
         // A user-defined class/struct registered under the same name (e.g.
         // `use std.nogc_async_mut.src.map.{Map}`) takes precedence, so the
         // imported Map's own statics run instead of the builtin alias

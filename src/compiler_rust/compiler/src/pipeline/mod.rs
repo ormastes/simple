@@ -1338,6 +1338,8 @@ main = 0
             is_ghost: false,
             is_sync: false,
             has_suspension: false,
+            generic_params: vec![],
+            generic_bounds: vec![],
         };
         module.functions.push(func);
 

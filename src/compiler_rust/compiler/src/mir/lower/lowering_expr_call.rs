@@ -560,7 +560,7 @@ impl<'a> MirLowerer<'a> {
         Ok(())
     }
 
-    pub(super) fn lower_call_expr(&mut self, callee: &HirExpr, args: &[HirExpr]) -> MirLowerResult<VReg> {
+    pub(super) fn lower_call_expr(&mut self, callee: &HirExpr, args: &[HirExpr], expr_ty: TypeId) -> MirLowerResult<VReg> {
         if let HirExprKind::Global(name) = &callee.kind {
             if let Some((receiver_name, method_name)) = name.rsplit_once('.') {
                 if matches!(method_name, "push" | "append" | "len") {
@@ -1061,7 +1061,8 @@ impl<'a> MirLowerer<'a> {
             } else {
                 name
             };
-            let call_target = CallTarget::from_name(call_target_name);
+            let specialized_call_target = self.specialize_named_call(call_target_name, args, Some(expr_ty), &[]);
+            let call_target = CallTarget::from_name(&specialized_call_target);
             self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();

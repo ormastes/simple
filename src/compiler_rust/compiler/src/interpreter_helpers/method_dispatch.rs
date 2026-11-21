@@ -226,6 +226,21 @@ pub(crate) fn call_method_on_value(
                         ctx,
                     ));
                 }
+                "expect" => {
+                    if opt_variant == Some(OptionVariant::Some) {
+                        if let Some(val) = payload {
+                            return Ok(val.as_ref().clone());
+                        }
+                    }
+                    let msg = _args
+                        .first()
+                        .map(Value::to_display_string)
+                        .unwrap_or_else(|| "Option was None".to_string());
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                        .with_help("check that the Option contains Some before calling expect");
+                    return Err(CompileError::semantic_with_context(msg, ctx));
+                }
                 "unwrap_or" => {
                     if opt_variant == Some(OptionVariant::Some) {
                         if let Some(val) = payload {
@@ -297,6 +312,21 @@ pub(crate) fn call_method_on_value(
                         "called unwrap on Err".to_string(),
                         ctx,
                     ));
+                }
+                "expect" => {
+                    if res_variant == Some(ResultVariant::Ok) {
+                        if let Some(val) = payload {
+                            return Ok(val.as_ref().clone());
+                        }
+                    }
+                    let msg = _args
+                        .first()
+                        .map(Value::to_display_string)
+                        .unwrap_or_else(|| "Result was Err".to_string());
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                        .with_help("check that the Result is Ok before calling expect");
+                    return Err(CompileError::semantic_with_context(msg, ctx));
                 }
                 "unwrap_err" => {
                     if res_variant == Some(ResultVariant::Err) {
@@ -1396,6 +1426,85 @@ mod tests {
         )
         .expect("unicode character split should dispatch");
         assert_eq!(unicode, Value::array(vec![Value::text("한"), Value::text("글끝")]));
+    }
+
+    #[test]
+    fn option_and_result_expect_win_over_ufcs_free_function() {
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let span = simple_parser::Span::new(0, 0, 1, 1);
+        functions.insert(
+            "expect".to_string(),
+            Arc::new(FunctionDef {
+                span,
+                name: "expect".to_string(),
+                generic_params: vec![],
+                where_clause: vec![],
+                params: vec![],
+                return_type: None,
+                return_constraint: None,
+                body: simple_parser::ast::Block { span, statements: vec![] },
+                effects: vec![],
+                decorators: vec![],
+                visibility: simple_parser::ast::Visibility::Public,
+                bounds_block: None,
+                attributes: vec![],
+                doc_comment: None,
+                is_static: false,
+                is_abstract: false,
+                is_me_method: false,
+                is_sync: false,
+                is_generator: false,
+                contract: None,
+                is_generic_template: false,
+                specialization_of: None,
+                type_bindings: HashMap::new(),
+            }),
+        );
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let opt_some = Value::some(Value::Int(42));
+        let got_opt = call_method_on_value(
+            opt_some,
+            "expect",
+            &[Value::text("valid".to_string())],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("Option.Some.expect should dispatch before UFCS");
+        assert_eq!(got_opt, Value::Int(42));
+
+        let res_ok = Value::ok(Value::Int(7));
+        let got_res = call_method_on_value(
+            res_ok,
+            "expect",
+            &[Value::text("valid".to_string())],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("Result.Ok.expect should dispatch before UFCS");
+        assert_eq!(got_res, Value::Int(7));
+
+        let err = call_method_on_value(
+            Value::none(),
+            "expect",
+            &[Value::text("missing value".to_string())],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect_err("Option.None.expect should error");
+        assert!(format!("{err:?}").contains("missing value"));
     }
 }
 

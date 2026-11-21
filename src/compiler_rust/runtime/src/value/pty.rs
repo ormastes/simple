@@ -1559,6 +1559,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn rt_pty_close_leaves_unowned_fd_open() {
         let mut fds = [0 as libc::c_int; 2];
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
@@ -1570,6 +1571,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn rt_pty_close_reaps_the_child() {
         let handle = pty_process::open(24, 80);
         assert!(handle >= 0);
@@ -1582,6 +1584,16 @@ mod tests {
         let err = std::io::Error::last_os_error().raw_os_error();
         assert!(result == -1 && err == Some(libc::ECHILD), "child {pid} not reaped by close");
         assert_eq!(unsafe { libc::kill(pid as libc::pid_t, 0) }, -1);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn rt_pty_close_is_idempotent_on_windows_handle() {
+        let handle = pty_process::open(24, 80);
+        assert!(handle > 0);
+        assert_eq!(rt_pty_close(handle as i64), RuntimeValue::TRUE);
+        assert_eq!(rt_pty_close(handle as i64), RuntimeValue::TRUE);
+        assert_eq!(rt_pty_close(-1), RuntimeValue::TRUE);
     }
 
     /// A command LINE with arguments must spawn on Unix as it does on Windows:

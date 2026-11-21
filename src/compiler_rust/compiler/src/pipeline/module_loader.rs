@@ -503,6 +503,7 @@ fn resolve_from_stdlib_root(root: &Path, parts: &[String], use_stmt: &UseStmt) -
         "src/std/src",
         "src/lib/std/src",
         "lib/std/src",
+        "src/compiler_rust/lib/std/src",
         "rust/lib/std/src",
         "simple/std_lib/src",
         "std_lib/src",
@@ -889,6 +890,9 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                         | Node::ExportUseStmt(_)
                         | Node::StructuredExportStmt(_)
                         | Node::AutoImportStmt(_)
+                        | Node::FriendDecl(_)
+                        | Node::InternalExportDecl(_)
+                        | Node::LayerDecl(_)
                 ) {
                     next_global_already_tagged = false;
                 } else {
@@ -1005,6 +1009,311 @@ fn single_import_targets_module_file(target: &ImportTarget, resolved: &Path) -> 
         && resolved.file_name().is_none_or(|name| name != "__init__.spl")
 }
 
+fn is_simple_ident_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn contains_requested_ident(text: &str, requested_names: &[String]) -> bool {
+    let mut token_start: Option<usize> = None;
+    for (idx, ch) in text.char_indices() {
+        if is_simple_ident_char(ch) {
+            if token_start.is_none() {
+                token_start = Some(idx);
+            }
+        } else if let Some(start) = token_start.take() {
+            let ident = &text[start..idx];
+            if requested_names.iter().any(|req| req == ident) {
+                return true;
+            }
+        }
+    }
+    if let Some(start) = token_start {
+        let ident = &text[start..];
+        if requested_names.iter().any(|req| req == ident) {
+            return true;
+        }
+    }
+    false
+}
+
+fn strip_comment_outside_quotes<'a>(line: &'a str, in_docstring: &mut bool) -> &'a str {
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    while i < bytes.len() {
+        if *in_docstring {
+            if i + 2 < bytes.len() && &bytes[i..i + 3] == b"\"\"\"" {
+                *in_docstring = false;
+                i += 3;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if in_single {
+            if bytes[i] == b'\\' {
+                escaped = true;
+            } else if bytes[i] == b'\'' {
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double {
+            if bytes[i] == b'\\' {
+                escaped = true;
+            } else if bytes[i] == b'"' {
+                in_double = false;
+            }
+            i += 1;
+            continue;
+        }
+        if i + 2 < bytes.len() && &bytes[i..i + 3] == b"\"\"\"" {
+            *in_docstring = true;
+            i += 3;
+            continue;
+        }
+        match bytes[i] {
+            b'\'' => in_single = true,
+            b'"' => in_double = true,
+            b'#' => return &line[..i],
+            _ => {}
+        }
+        i += 1;
+    }
+    line
+}
+
+fn next_word(s: &str) -> Option<(&str, &str)> {
+    let s = s.trim_start();
+    if s.is_empty() {
+        return None;
+    }
+    let first = s.chars().next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    let end = s
+        .char_indices()
+        .find(|&(_, ch)| !is_simple_ident_char(ch))
+        .map(|(idx, _)| idx)
+        .unwrap_or(s.len());
+    Some((&s[..end], &s[end..]))
+}
+
+fn skip_balanced_parens(s: &str) -> &str {
+    let trimmed = s.trim_start();
+    let Some(mut rest) = trimmed.strip_prefix('(') else {
+        return s;
+    };
+    let mut depth = 1usize;
+    for (idx, ch) in rest.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    rest = &rest[idx + 1..];
+                    return rest;
+                }
+            }
+            _ => {}
+        }
+    }
+    ""
+}
+
+fn update_reexport_state(segment: &str, brace_depth: &mut i32, requested_names: &[String]) -> (bool, bool) {
+    if segment.contains('*') {
+        return (true, false);
+    }
+    if contains_requested_ident(segment, requested_names) {
+        return (true, false);
+    }
+    for ch in segment.chars() {
+        match ch {
+            '{' => *brace_depth += 1,
+            '}' => *brace_depth -= 1,
+            _ => {}
+        }
+    }
+    let trimmed = segment.trim_end();
+    let continues = *brace_depth > 0 || trimmed.ends_with(',') || trimmed.ends_with('\\');
+    (false, continues)
+}
+
+/// Fast conservative pre-filter for package sibling discovery: matches top-level
+/// definitions and `export`/`pub use` re-exports while ignoring comments,
+/// docstrings, indented members/locals, and plain `use`/`import` statements.
+pub(crate) fn source_might_define_requested_symbol(source: &str, requested_names: &[String]) -> bool {
+    if requested_names.is_empty() {
+        return true;
+    }
+
+    let stripped: std::borrow::Cow<'_, str> = if source.contains("@when") {
+        match crate::pipeline::cfg_strip::strip_os_when_blocks(
+            source,
+            &crate::pipeline::cfg_strip::cfg_target(),
+        ) {
+            Ok(filtered) => std::borrow::Cow::Owned(filtered),
+            Err(_) => std::borrow::Cow::Borrowed(source),
+        }
+    } else {
+        std::borrow::Cow::Borrowed(source)
+    };
+
+    let mut in_docstring = false;
+    let mut in_reexport = false;
+    let mut reexport_brace_depth = 0i32;
+
+    for raw_line in stripped.lines() {
+        let was_in_docstring = in_docstring;
+        let code = strip_comment_outside_quotes(raw_line, &mut in_docstring);
+        if was_in_docstring {
+            continue;
+        }
+        let trimmed = code.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if in_reexport {
+            let (matched, continues) =
+                update_reexport_state(trimmed, &mut reexport_brace_depth, requested_names);
+            if matched {
+                return true;
+            }
+            in_reexport = continues;
+            if !in_reexport {
+                reexport_brace_depth = 0;
+            }
+            continue;
+        }
+
+        // Only column-0 items can define or re-export module-level symbols;
+        // indented lines are class/struct fields, methods, or function locals.
+        if raw_line.starts_with([' ', '\t']) {
+            continue;
+        }
+
+        let mut rest = trimmed;
+        let mut saw_pub = false;
+        let mut saw_export = false;
+        while let Some((word, after)) = next_word(rest) {
+            match word {
+                "pub" => {
+                    saw_pub = true;
+                    rest = skip_balanced_parens(after);
+                }
+                "priv" | "internal" | "static" | "async" | "extern" | "unsafe" | "mut" => {
+                    rest = after;
+                }
+                "export" => {
+                    saw_export = true;
+                    rest = after;
+                    break;
+                }
+                _ => break,
+            }
+        }
+
+        if saw_export {
+            let next = next_word(rest).map(|(w, _)| w);
+            let is_decl = matches!(
+                next,
+                Some(
+                    "fn" | "me"
+                        | "type"
+                        | "alias"
+                        | "class"
+                        | "struct"
+                        | "enum"
+                        | "trait"
+                        | "bitfield"
+                        | "actor"
+                        | "unit"
+                        | "macro"
+                        | "mixin"
+                        | "let"
+                        | "val"
+                        | "var"
+                        | "const"
+                )
+            );
+            if !is_decl {
+                let reexport_rest = if next == Some("use") {
+                    next_word(rest).map(|(_, a)| a).unwrap_or(rest)
+                } else {
+                    rest
+                };
+                reexport_brace_depth = 0;
+                let (matched, continues) =
+                    update_reexport_state(reexport_rest, &mut reexport_brace_depth, requested_names);
+                if matched {
+                    return true;
+                }
+                in_reexport = continues;
+                continue;
+            }
+            // `export fn foo` / `export struct Foo` falls through to declaration check.
+            while let Some((word, after)) = next_word(rest) {
+                if matches!(word, "static" | "async" | "extern" | "unsafe" | "mut") {
+                    rest = after;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        let Some((kw, after_kw)) = next_word(rest) else {
+            continue;
+        };
+        if saw_pub && kw == "use" {
+            reexport_brace_depth = 0;
+            let (matched, continues) =
+                update_reexport_state(after_kw, &mut reexport_brace_depth, requested_names);
+            if matched {
+                return true;
+            }
+            in_reexport = continues;
+            continue;
+        }
+        match kw {
+            "fn" | "me" | "type" | "alias" | "class" | "struct" | "enum" | "trait" | "bitfield"
+            | "actor" | "unit" | "macro" | "mixin" => {
+                if let Some((decl_name, _)) = next_word(after_kw) {
+                    if requested_names.iter().any(|req| req == decl_name) {
+                        return true;
+                    }
+                }
+            }
+            "let" | "val" | "var" | "const" => {
+                let lhs = after_kw.split(['=', ':']).next().unwrap_or(after_kw).trim_start();
+                if lhs.starts_with('(') {
+                    if contains_requested_ident(lhs, requested_names) {
+                        return true;
+                    }
+                } else if let Some((decl_name, _)) = next_word(lhs) {
+                    if requested_names.iter().any(|req| req == decl_name) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    false
+}
+
 fn file_might_define_requested_symbol(path: &Path, requested_names: &[String]) -> bool {
     if requested_names.is_empty() {
         return true;
@@ -1014,34 +1323,7 @@ fn file_might_define_requested_symbol(path: &Path, requested_names: &[String]) -
         return false;
     };
 
-    requested_names.iter().any(|name| {
-        let fn_pat = format!("fn {}(", name);
-        let extern_pat = format!("extern fn {}(", name);
-        let type_pat = format!("type {}", name);
-        let class_pat = format!("class {}", name);
-        let struct_pat = format!("struct {}", name);
-        let enum_pat = format!("enum {}", name);
-        let trait_pat = format!("trait {}", name);
-        let let_pat = format!("let {}", name);
-        let val_pat = format!("val {}", name);
-        let var_pat = format!("var {}", name);
-        let const_pat = format!("const {}", name);
-        let export_pat = format!("export {}", name);
-        let export_comma_pat = format!(", {}", name);
-        source.contains(&fn_pat)
-            || source.contains(&extern_pat)
-            || source.contains(&type_pat)
-            || source.contains(&class_pat)
-            || source.contains(&struct_pat)
-            || source.contains(&enum_pat)
-            || source.contains(&trait_pat)
-            || source.contains(&let_pat)
-            || source.contains(&val_pat)
-            || source.contains(&var_pat)
-            || source.contains(&const_pat)
-            || source.contains(&export_pat)
-            || source.contains(&export_comma_pat)
-    })
+    source_might_define_requested_symbol(&source, requested_names)
 }
 
 fn load_matching_package_siblings(
@@ -2991,10 +3273,12 @@ fn resolve_use_to_path_and_kind_uncached(use_stmt: &UseStmt, base: &Path) -> Opt
         // root to resolve against at all. The interpreter already falls back to
         // the cwd's project root for exactly this (interpreter_module/
         // path_resolution.rs); mirror it so `compile` and `run` agree.
-        if project_root_ancestor(base).is_none() {
-            if let Some(cwd_root) = std::env::current_dir().ok().and_then(|cwd| project_root_ancestor(&cwd)) {
-                return resolve_parts_from_project_root(&cwd_root, parts, use_stmt);
+        if let Some(root) = project_root_ancestor(base) {
+            if let Some(resolved) = resolve_parts_from_project_root(&root, parts, use_stmt) {
+                return Some(resolved);
             }
+        } else if let Some(cwd_root) = std::env::current_dir().ok().and_then(|cwd| project_root_ancestor(&cwd)) {
+            return resolve_parts_from_project_root(&cwd_root, parts, use_stmt);
         }
         None
     };
@@ -4485,5 +4769,82 @@ impl Wrapper:
         let s = super::render_same_signature_summary(&many).unwrap();
         assert!(s.contains("40 function name(s)") && s.contains("and 28 more"));
         assert!(!s.contains("`f20`"), "summary must stay compact");
+    }
+
+    #[test]
+    fn source_might_define_requested_symbol_ignores_use_imports_locals_and_comments() {
+        let posix_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../lib/nogc_sync_mut/io/stdin_command_posix_v1.spl");
+        let posix_source = fs::read_to_string(&posix_path).expect("read stdin_command_posix_v1.spl");
+
+        for unrelated in [
+            "file_hash_sha256",
+            "file_size_raw",
+            "file_is_regular_no_follow",
+            "OwnedProcessLease",
+            "owner",
+            "result",
+            "stdout",
+            "stderr",
+            "error",
+            "lease",
+        ] {
+            assert!(
+                !super::source_might_define_requested_symbol(&posix_source, &[unrelated.to_string()]),
+                "stdin_command_posix_v1.spl must not falsely match `{unrelated}`"
+            );
+        }
+
+        for defined in [
+            "StdinCommandPlatformOwnerV1",
+            "StdinCommandPlatformTurnV1",
+            "stdin_command_platform_file_no_follow_v1",
+        ] {
+            assert!(
+                super::source_might_define_requested_symbol(&posix_source, &[defined.to_string()]),
+                "stdin_command_posix_v1.spl should match its top-level `{defined}`"
+            );
+        }
+    }
+
+    #[test]
+    fn source_might_define_requested_symbol_matches_reexports_and_top_level_decls() {
+        let sample = r#"
+# fn commented_out():
+"""
+struct InsideDocstring:
+    x: i64
+"""
+use std.other.{imported_a,
+    imported_b}
+pub use std.reexported.{
+    ReexportAlpha,
+    ReexportBeta
+}
+export exported_gamma,
+    exported_delta
+val top_val_prefix_only = 1
+pub fn top_fn(arg: i64):
+    val local_only = 2
+"#;
+        for absent in ["commented_out", "InsideDocstring", "imported_a", "imported_b", "top_val", "local_only", "arg"] {
+            assert!(
+                !super::source_might_define_requested_symbol(sample, &[absent.to_string()]),
+                "must not match `{absent}`"
+            );
+        }
+        for present in [
+            "ReexportAlpha",
+            "ReexportBeta",
+            "exported_gamma",
+            "exported_delta",
+            "top_val_prefix_only",
+            "top_fn",
+        ] {
+            assert!(
+                super::source_might_define_requested_symbol(sample, &[present.to_string()]),
+                "must match `{present}`"
+            );
+        }
     }
 }

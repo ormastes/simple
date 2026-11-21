@@ -4,52 +4,82 @@
 //! file free of seed-crate dependencies: only `std`, `libc` and `windows-sys`.
 
 #[cfg(not(windows))]
-pub(crate) fn dlsym_resolves(name: &str) -> bool {
+pub(crate) fn dlsym_lookup(name: &str) -> Option<*const u8> {
     let Ok(c_name) = std::ffi::CString::new(name) else {
-        return false;
+        return None;
     };
     // SAFETY: `dlsym(RTLD_DEFAULT, ..)` with a valid C string; this is the same
     // call cranelift-jit's `lookup_with_dlsym` makes to resolve the symbol.
     let sym = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c_name.as_ptr()) };
-    !sym.is_null()
+    if sym.is_null() {
+        None
+    } else {
+        Some(sym as *const u8)
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn dlsym_resolves(name: &str) -> bool {
+    dlsym_lookup(name).is_some()
 }
 
 #[cfg(windows)]
-pub(crate) fn dlsym_resolves(name: &str) -> bool {
-    // Mirror cranelift-jit's own Windows fallback resolver exactly
-    // (vendor `cranelift-jit-0.116.1/src/backend.rs::lookup_with_dlsym`):
-    // `GetProcAddress` against the running executable image, then against
-    // `ucrtbase.dll`. Blindly returning `true` here (the previous behaviour)
-    // meant `unresolved_imports_called` could never detect an
-    // unresolvable cross-module Simple symbol on Windows: cranelift-jit
-    // itself would fail the SAME lookup, bind the GOT slot to NULL, and the
-    // first call through it SIGSEGVs with nothing on stderr — this is the
-    // root cause of `seed_jit_app_module_function_call_segfaults_windows_2026-09-13.md`
-    // and `seed_jit_function_local_use_segfaults_2026-09-13.md`: both
-    // repros reach a cross-module Simple function symbol that resolves to
-    // neither a registered runtime symbol nor a process/CRT export, so the
-    // guard must say `false` and let `compile_module` de-JIT to the
-    // interpreter instead of finalizing a NULL import.
+fn cached_windows_module_handles() -> &'static [usize] {
+    use std::sync::OnceLock;
+    use windows_sys::Win32::System::LibraryLoader;
+
+    static HANDLES: OnceLock<Vec<usize>> = OnceLock::new();
+    HANDLES.get_or_init(|| {
+        let mut out = vec![0usize];
+        for dll in [
+            b"ucrtbase.dll\0".as_slice(),
+            b"kernel32.dll\0".as_slice(),
+            b"advapi32.dll\0".as_slice(),
+            b"bcrypt.dll\0".as_slice(),
+            b"ntdll.dll\0".as_slice(),
+            b"secur32.dll\0".as_slice(),
+            b"shell32.dll\0".as_slice(),
+            b"ole32.dll\0".as_slice(),
+        ] {
+            let mut handle = unsafe { LibraryLoader::GetModuleHandleA(dll.as_ptr()) };
+            if handle.is_null() {
+                handle = unsafe { LibraryLoader::LoadLibraryA(dll.as_ptr()) };
+            }
+            if !handle.is_null() {
+                out.push(handle as usize);
+            }
+        }
+        out
+    })
+}
+
+#[cfg(windows)]
+pub(crate) fn dlsym_lookup(name: &str) -> Option<*const u8> {
+    // Mirror cranelift-jit's own Windows fallback resolver
+    // (`GetProcAddress` against the running executable image, then `ucrtbase.dll`),
+    // plus Win32 system DLLs referenced by direct Windows SFFI declarations
+    // (`kernel32.dll`, `advapi32.dll`, `bcrypt.dll`, `ntdll.dll`, `secur32.dll`,
+    // `shell32.dll`, `ole32.dll`). Nonexistent symbols still return `None` so
+    // `unresolved_imports_called` refuses unresolvable cross-module imports cleanly.
     use windows_sys::Win32::Foundation::HMODULE;
     use windows_sys::Win32::System::LibraryLoader;
 
     let Ok(c_name) = std::ffi::CString::new(name) else {
-        return false;
+        return None;
     };
     let c_name_ptr = c_name.as_ptr();
 
     unsafe {
-        let handles: [*mut core::ffi::c_void; 2] = [
-            // The running executable image itself.
-            std::ptr::null_mut(),
-            // The local C runtime, exactly as cranelift-jit tries it.
-            LibraryLoader::GetModuleHandleA(b"ucrtbase.dll\0".as_ptr()) as *mut core::ffi::c_void,
-        ];
-        for handle in &handles {
-            if LibraryLoader::GetProcAddress(*handle as HMODULE, c_name_ptr.cast()).is_some() {
-                return true;
+        for &handle in cached_windows_module_handles() {
+            if let Some(addr) = LibraryLoader::GetProcAddress(handle as HMODULE, c_name_ptr.cast()) {
+                return Some(addr as *const u8);
             }
         }
     }
-    false
+    None
+}
+
+#[cfg(windows)]
+pub(crate) fn dlsym_resolves(name: &str) -> bool {
+    dlsym_lookup(name).is_some()
 }

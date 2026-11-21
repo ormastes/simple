@@ -1,0 +1,169 @@
+"""
+# Generic Iterator.collect<C: FromIterator> Spec
+
+Verifies bounded method-level generics, type-parameter static dispatch (`C.from_iter(self)`),
+target-type inference, and const-generic specialization across `[T]`, `List<T>`,
+`FixedVec<T, N>`, and `StaticVec<T, N>`.
+"""
+
+use std.spec.{describe, it, expect}
+use std.core.traits.{Iterator, FromIterator, IntoIterator}
+use std.core.list.{List}
+use std.core.sorting.{SortAlgorithm}
+use std.core_nogc.fixed_vec.{FixedVec}
+use std.core_nogc_immut.static_vec.{StaticVec}
+
+struct RangeStepIter:
+    current: i64
+    limit: i64
+
+impl Iterator for RangeStepIter:
+    type Item = i64
+
+    fn next() -> Option<Self.Item>:
+        if self.current < self.limit:
+            val v = self.current
+            self.current = self.current + 1
+            Some(v)
+        else:
+            None
+
+fn make_range(start: i64, limit: i64) -> RangeStepIter:
+    RangeStepIter(current: start, limit: limit)
+
+fn collect_as_list() -> List<i64>:
+    return make_range(10, 14).collect()
+
+fn wrap_array_as_list(arr: [i64]) -> List<i64>:
+    return arr.into_iter().collect<List<i64>>()
+
+fn helper_collect_default_then_convert() -> List<i64>:
+    val tmp = make_range(4, 7).collect()
+    return tmp.into_iter().collect<List<i64>>()
+
+describe "Generic Iterator.collect<C: FromIterator>":
+    it "collects into an array via explicit generic arg and target type":
+        val explicit_arr = make_range(1, 5).collect<[i64]>()
+        expect(explicit_arr.len()).to_equal(4)
+        expect(explicit_arr[0]).to_equal(1)
+        expect(explicit_arr[3]).to_equal(4)
+
+        val inferred_arr: [i64] = make_range(5, 8).collect()
+        expect(inferred_arr.len()).to_equal(3)
+        expect(inferred_arr[1]).to_equal(6)
+
+        val from_slice_iter = [7, 8, 9].into_iter().collect<[i64]>()
+        expect(from_slice_iter.len()).to_equal(3)
+        expect(from_slice_iter[2]).to_equal(9)
+
+    it "collects into List<T> via explicit generic, let target, and return type":
+        val list_a = make_range(10, 14).collect<List<i64>>()
+        expect(list_a.len()).to_equal(4)
+        expect(list_a.get(0)).to_equal(Some(10))
+        expect(list_a.get(3)).to_equal(Some(13))
+
+        val list_b: List<i64> = [1, 2, 3].into_iter().collect()
+        expect(list_b.len()).to_equal(3)
+        expect(list_b.first()).to_equal(Some(1))
+        expect(list_b.get(1)).to_equal(Some(2))
+
+        val list_c = collect_as_list()
+        expect(list_c.len()).to_equal(4)
+        expect(list_c.first()).to_equal(Some(10))
+        expect(list_c.get(2)).to_equal(Some(12))
+
+    it "collects into FixedVec<T, const N> with capacity bound":
+        var fv = make_range(100, 106).collect<FixedVec<i64, 4>>()
+        expect(fv.len()).to_equal(4)
+        expect(fv.capacity()).to_equal(4)
+        expect(fv.is_full()).to_equal(true)
+        expect(fv.pop()).to_equal(Some(103))
+        expect(fv.pop()).to_equal(Some(102))
+
+        var fv_inferred: FixedVec<i64, 3> = make_range(2, 4).collect()
+        expect(fv_inferred.len()).to_equal(2)
+        expect(fv_inferred.capacity()).to_equal(3)
+        expect(fv_inferred.pop()).to_equal(Some(3))
+
+    it "collects into StaticVec<T, const N> with default array init":
+        val sv = make_range(20, 26).collect<StaticVec<i64, 4>>()
+        expect(sv.len()).to_equal(4)
+        expect(sv.capacity()).to_equal(4)
+        expect(sv.is_full()).to_equal(true)
+        expect(sv.get(0)).to_equal(Some(20))
+        expect(sv.get(3)).to_equal(Some(23))
+
+        val sv_inferred: StaticVec<i64, 3> = make_range(1, 3).collect()
+        expect(sv_inferred.len()).to_equal(2)
+        expect(sv_inferred.capacity()).to_equal(3)
+        expect(sv_inferred.get(1)).to_equal(Some(2))
+
+    it "supports primitive and fixed-array default() calls":
+        expect(i64.default()).to_equal(0)
+        val arr = [i64; 4].default()
+        expect(arr.len()).to_equal(4)
+        expect(arr[0]).to_equal(0)
+        expect(arr[3]).to_equal(0)
+
+    it "does not leak outer target type into nested calls, helpers, or unannotated lets":
+        val via_arg: List<i64> = wrap_array_as_list(make_range(1, 4).collect())
+        expect(via_arg.len()).to_equal(3)
+        expect(via_arg.get(0)).to_equal(Some(1))
+        expect(via_arg.get(2)).to_equal(Some(3))
+
+        val via_helper: List<i64> = helper_collect_default_then_convert()
+        expect(via_helper.len()).to_equal(3)
+        expect(via_helper.get(0)).to_equal(Some(4))
+        expect(via_helper.get(2)).to_equal(Some(6))
+
+        val via_block: List<i64> = if true:
+            val tmp = make_range(8, 10).collect()
+            tmp.into_iter().collect<List<i64>>()
+        else:
+            List.new()
+        expect(via_block.len()).to_equal(2)
+        expect(via_block.get(1)).to_equal(Some(9))
+
+    it "supports List sorting and slice operations without nil stubs":
+        var list = [5, 1, 4, 2, 3].into_iter().collect<List<i64>>()
+        val imm_sorted = list.sorted()
+        expect(imm_sorted.get(0)).to_equal(Some(1))
+        expect(imm_sorted.get(4)).to_equal(Some(5))
+        expect(list.get(0)).to_equal(Some(5))
+
+        list.sort()
+        expect(list.get(0)).to_equal(Some(1))
+        expect(list.get(2)).to_equal(Some(3))
+        expect(list.get(4)).to_equal(Some(5))
+
+        var list_ins = [9, 3, 7, 1].into_iter().collect<List<i64>>()
+        list_ins.sort_with(SortAlgorithm.InsertionSort)
+        expect(list_ins.get(0)).to_equal(Some(1))
+        expect(list_ins.get(3)).to_equal(Some(9))
+
+        var list_heap = [8, 2, 6, 4].into_iter().collect<List<i64>>()
+        list_heap.sort_with(SortAlgorithm.HeapSort)
+        expect(list_heap.get(0)).to_equal(Some(2))
+        expect(list_heap.get(3)).to_equal(Some(8))
+
+        var list_tim = [12, 4, 15, 7, 1].into_iter().collect<List<i64>>()
+        list_tim.sort_with(SortAlgorithm.TimSort)
+        expect(list_tim.get(0)).to_equal(Some(1))
+        expect(list_tim.get(4)).to_equal(Some(15))
+
+        val mid_slice = list.get_slice(1, 4)
+        expect(mid_slice.len()).to_equal(3)
+        expect(mid_slice.get(0)).to_equal(Some(2))
+        expect(mid_slice.get(2)).to_equal(Some(4))
+
+        val full_slice = list.as_slice()
+        expect(full_slice.len()).to_equal(5)
+        expect(full_slice.get(4)).to_equal(Some(5))
+
+        val mut_slice = list.as_mut_slice()
+        expect(mut_slice.len()).to_equal(5)
+        expect(mut_slice.get(1)).to_equal(Some(2))
+
+        val rebuilt = List.from_slice(mid_slice)
+        expect(rebuilt.len()).to_equal(3)
+        expect(rebuilt.get(1)).to_equal(Some(3))

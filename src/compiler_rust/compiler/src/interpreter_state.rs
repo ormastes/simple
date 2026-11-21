@@ -383,6 +383,426 @@ pub(crate) fn const_trace(site: &str, name: &str) {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PendingCallGenerics {
+    pub fn_args: Option<Vec<Type>>,
+    pub class_args: Option<Vec<Type>>,
+    pub class_name: Option<String>,
+}
+
+pub(crate) struct PendingCallGenericsGuard {
+    saved_len: usize,
+}
+
+impl PendingCallGenericsGuard {
+    pub(crate) fn push(generics: Option<PendingCallGenerics>) -> Self {
+        let resolved = generics.map(|g| PendingCallGenerics {
+            fn_args: g
+                .fn_args
+                .map(|args| args.iter().map(resolve_generic_type_in_scope).collect()),
+            class_args: g
+                .class_args
+                .map(|args| args.iter().map(resolve_generic_type_in_scope).collect()),
+            class_name: g.class_name,
+        });
+        let saved_len = PENDING_CALL_GENERICS.with(|cell| {
+            let mut stack = cell.borrow_mut();
+            let len = stack.len();
+            stack.push(resolved);
+            len
+        });
+        Self { saved_len }
+    }
+}
+
+impl Drop for PendingCallGenericsGuard {
+    fn drop(&mut self) {
+        PENDING_CALL_GENERICS.with(|cell| {
+            cell.borrow_mut().truncate(self.saved_len);
+        });
+    }
+}
+
+pub(crate) fn take_pending_call_generics() -> Option<PendingCallGenerics> {
+    PENDING_CALL_GENERICS.with(|cell| cell.borrow_mut().last_mut().and_then(|slot| slot.take()))
+}
+
+fn expected_target_from_generic(
+    receiver: &simple_parser::ast::Expr,
+    method: &str,
+    generic_args: &[Type],
+) -> (Option<Vec<Type>>, Option<String>, Option<Vec<Type>>) {
+    let (mut class_args, mut class_name) = match receiver {
+        simple_parser::ast::Expr::GenericInst { expr, type_args } if !type_args.is_empty() => (
+            Some(type_args.clone()),
+            match expr.as_ref() {
+                simple_parser::ast::Expr::Identifier(n) => Some(n.clone()),
+                _ => None,
+            },
+        ),
+        simple_parser::ast::Expr::Identifier(ident) => {
+            let bound = GENERIC_TYPE_BINDINGS.with(|cell| cell.borrow().get(ident).cloned());
+            match bound.map(|t| resolve_generic_type_in_scope(&t)) {
+                Some(Type::Generic { name, args }) if !args.is_empty() => (Some(args), Some(name)),
+                Some(Type::Array { size: None, .. }) => (None, Some("array".to_string())),
+                Some(Type::Simple(name)) => (None, Some(name)),
+                _ => (None, None),
+            }
+        }
+        _ => (None, None),
+    };
+    if class_args.is_none() {
+        if let simple_parser::ast::Expr::Identifier(cls) = receiver {
+            if let Some(Type::Generic { name, args }) = current_expected_target_type() {
+                if &name == cls && !args.is_empty() {
+                    class_name = Some(name);
+                    class_args = Some(args);
+                }
+            }
+        }
+    }
+    let fn_args = if !generic_args.is_empty() {
+        Some(generic_args.to_vec())
+    } else if method == "collect" {
+        Some(vec![current_expected_target_type().unwrap_or_else(|| Type::Array {
+            element: Box::new(Type::Simple("Any".to_string())),
+            size: None,
+        })])
+    } else {
+        None
+    };
+    (class_args, class_name, fn_args)
+}
+
+pub(crate) fn push_method_call_generics(
+    receiver: &simple_parser::ast::Expr,
+    generic_args: &[Type],
+) -> PendingCallGenericsGuard {
+    push_method_call_generics_with_method(receiver, "", generic_args)
+}
+
+pub(crate) fn push_method_call_generics_with_method(
+    receiver: &simple_parser::ast::Expr,
+    method: &str,
+    generic_args: &[Type],
+) -> PendingCallGenericsGuard {
+    let (class_args, class_name, fn_args) = expected_target_from_generic(receiver, method, generic_args);
+    let pending = if fn_args.is_some() || class_args.is_some() || class_name.is_some() {
+        Some(PendingCallGenerics {
+            fn_args,
+            class_args,
+            class_name,
+        })
+    } else {
+        None
+    };
+    PendingCallGenericsGuard::push(pending)
+}
+
+pub(crate) struct ExpectedTargetTypeGuard {
+    prev_len: usize,
+}
+
+pub(crate) fn push_expected_target_type(ty: Option<Type>) -> ExpectedTargetTypeGuard {
+    let prev_len = EXPECTED_TARGET_TYPE.with(|cell| {
+        let mut stack = cell.borrow_mut();
+        let len = stack.len();
+        stack.push(ty);
+        len
+    });
+    ExpectedTargetTypeGuard { prev_len }
+}
+
+impl Drop for ExpectedTargetTypeGuard {
+    fn drop(&mut self) {
+        EXPECTED_TARGET_TYPE.with(|cell| {
+            cell.borrow_mut().truncate(self.prev_len);
+        });
+    }
+}
+
+pub(crate) fn current_expected_target_type() -> Option<Type> {
+    EXPECTED_TARGET_TYPE.with(|cell| cell.borrow().last().cloned().flatten())
+}
+
+pub(crate) struct CurrentFnReturnTypeGuard {
+    prev_len: usize,
+}
+
+pub(crate) fn push_current_fn_return_type(ty: Option<Type>) -> CurrentFnReturnTypeGuard {
+    let prev_len = CURRENT_FN_RETURN_TYPE.with(|cell| {
+        let mut stack = cell.borrow_mut();
+        let len = stack.len();
+        stack.push(ty);
+        len
+    });
+    CurrentFnReturnTypeGuard { prev_len }
+}
+
+impl Drop for CurrentFnReturnTypeGuard {
+    fn drop(&mut self) {
+        CURRENT_FN_RETURN_TYPE.with(|cell| {
+            cell.borrow_mut().truncate(self.prev_len);
+        });
+    }
+}
+
+pub(crate) fn current_fn_return_type() -> Option<Type> {
+    CURRENT_FN_RETURN_TYPE.with(|cell| cell.borrow().last().cloned().flatten())
+}
+
+pub(crate) struct GenericTypeBindingsGuard {
+    prev: Option<HashMap<String, Type>>,
+}
+
+impl GenericTypeBindingsGuard {
+    pub(crate) fn enter(updates: HashMap<String, Type>) -> Self {
+        if updates.is_empty() {
+            return Self { prev: None };
+        }
+        let prev = GENERIC_TYPE_BINDINGS.with(|cell| {
+            let mut map = cell.borrow_mut();
+            let saved = map.clone();
+            for (k, v) in updates {
+                map.insert(k, v);
+            }
+            saved
+        });
+        Self { prev: Some(prev) }
+    }
+}
+
+impl Drop for GenericTypeBindingsGuard {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.take() {
+            GENERIC_TYPE_BINDINGS.with(|cell| {
+                *cell.borrow_mut() = prev;
+            });
+        }
+    }
+}
+
+pub(crate) fn resolve_generic_type_in_scope(ty: &Type) -> Type {
+    GENERIC_TYPE_BINDINGS.with(|cell| {
+        let bindings = cell.borrow();
+        if bindings.is_empty() {
+            return ty.clone();
+        }
+        substitute_type_with_bindings(ty, &bindings, 0)
+    })
+}
+
+fn substitute_type_with_bindings(ty: &Type, bindings: &HashMap<String, Type>, depth: usize) -> Type {
+    if depth >= 8 {
+        return ty.clone();
+    }
+    match ty {
+        Type::Simple(name) => {
+            if let Some(bound) = bindings.get(name) {
+                if !matches!(bound, Type::Simple(n) if n == name) {
+                    return substitute_type_with_bindings(bound, bindings, depth + 1);
+                }
+            }
+            ty.clone()
+        }
+        Type::Generic { name, args } => {
+            if args.is_empty() {
+                if let Some(bound) = bindings.get(name) {
+                    if !matches!(bound, Type::Generic { name: n, args: a } if a.is_empty() && n == name) {
+                        return substitute_type_with_bindings(bound, bindings, depth + 1);
+                    }
+                }
+            }
+            Type::Generic {
+                name: name.clone(),
+                args: args
+                    .iter()
+                    .map(|a| substitute_type_with_bindings(a, bindings, depth + 1))
+                    .collect(),
+            }
+        }
+        Type::Optional(inner) => Type::Optional(Box::new(substitute_type_with_bindings(inner, bindings, depth + 1))),
+        Type::Array { element, size } => Type::Array {
+            element: Box::new(substitute_type_with_bindings(element, bindings, depth + 1)),
+            size: size.clone(),
+        },
+        Type::Tuple(items) => Type::Tuple(
+            items
+                .iter()
+                .map(|t| substitute_type_with_bindings(t, bindings, depth + 1))
+                .collect(),
+        ),
+        Type::Pointer { kind, inner } => Type::Pointer {
+            kind: *kind,
+            inner: Box::new(substitute_type_with_bindings(inner, bindings, depth + 1)),
+        },
+        Type::Capability { capability, inner } => Type::Capability {
+            capability: *capability,
+            inner: Box::new(substitute_type_with_bindings(inner, bindings, depth + 1)),
+        },
+        Type::Function { params, ret } => Type::Function {
+            params: params
+                .iter()
+                .map(|t| substitute_type_with_bindings(t, bindings, depth + 1))
+                .collect(),
+            ret: ret
+                .as_ref()
+                .map(|r| Box::new(substitute_type_with_bindings(r, bindings, depth + 1))),
+        },
+        Type::Union(items) => Type::Union(
+            items
+                .iter()
+                .map(|t| substitute_type_with_bindings(t, bindings, depth + 1))
+                .collect(),
+        ),
+        Type::Simd { lanes, element } => Type::Simd {
+            lanes: *lanes,
+            element: Box::new(substitute_type_with_bindings(element, bindings, depth + 1)),
+        },
+        _ => ty.clone(),
+    }
+}
+
+fn value_to_ast_type(val: &Value) -> Option<Type> {
+    match val {
+        Value::Int(_) => Some(Type::Simple("i64".to_string())),
+        Value::UInt { width, .. } => Some(Type::Simple(match width {
+            8 => "u8".to_string(),
+            16 => "u16".to_string(),
+            32 => "u32".to_string(),
+            _ => "u64".to_string(),
+        })),
+        Value::Float(_) => Some(Type::Simple("f64".to_string())),
+        Value::Float32(_) => Some(Type::Simple("f32".to_string())),
+        Value::Bool(_) => Some(Type::Simple("bool".to_string())),
+        Value::Str(_) | Value::StrBytes(_) => Some(Type::Simple("text".to_string())),
+        Value::Symbol(_) => Some(Type::Simple("Symbol".to_string())),
+        Value::Object { class, .. } => Some(Type::Simple(class.clone())),
+        Value::ClassInstance(inst) => Some(Type::Simple(inst.class().to_string())),
+        Value::Enum { enum_name, .. } => Some(Type::Simple(enum_name.clone())),
+        Value::Unique(u) => value_to_ast_type(u.inner()),
+        Value::Shared(s) => value_to_ast_type(s.inner()),
+        Value::Borrow(b) => value_to_ast_type(&*b.inner()),
+        Value::BorrowMut(b) => value_to_ast_type(&*b.inner()),
+        Value::Array(items) => {
+            let elem = items.iter().find(|v| !matches!(v, Value::Nil)).and_then(value_to_ast_type)?;
+            Some(Type::Array {
+                element: Box::new(elem),
+                size: None,
+            })
+        }
+        Value::Tuple(items) => {
+            let mut elem_tys = Vec::with_capacity(items.len());
+            for item in items {
+                elem_tys.push(value_to_ast_type(item)?);
+            }
+            Some(Type::Tuple(elem_tys))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn unify_generic_type_value(
+    expected: &Type,
+    actual: &Value,
+    type_params: &std::collections::HashSet<String>,
+    bindings: &mut HashMap<String, Type>,
+) {
+    if type_params.is_empty() {
+        return;
+    }
+    match expected {
+        Type::Simple(name) if type_params.contains(name) => {
+            if !bindings.contains_key(name) {
+                if let Some(inferred) = value_to_ast_type(actual) {
+                    bindings.insert(name.clone(), inferred);
+                }
+            }
+        }
+        Type::Array { element, size } => {
+            if let Value::Array(items) = actual {
+                if let Some(size_expr) = size {
+                    if let simple_parser::ast::Expr::Identifier(n) = size_expr.as_ref() {
+                        if type_params.contains(n) && !bindings.contains_key(n) {
+                            bindings.insert(n.clone(), Type::Simple(items.len().to_string()));
+                        }
+                    }
+                }
+                for item in items.iter() {
+                    if !matches!(item, Value::Nil) {
+                        unify_generic_type_value(element, item, type_params, bindings);
+                        break;
+                    }
+                }
+            }
+        }
+        Type::Tuple(elem_tys) => {
+            if let Value::Tuple(vals) = actual {
+                for (et, av) in elem_tys.iter().zip(vals.iter()) {
+                    unify_generic_type_value(et, av, type_params, bindings);
+                }
+            }
+        }
+        Type::Optional(inner) => match actual {
+            Value::Enum {
+                enum_name,
+                variant,
+                payload,
+            } if enum_name == "Option" && variant == "Some" => {
+                if let Some(first) = payload.as_deref() {
+                    unify_generic_type_value(inner, first, type_params, bindings);
+                }
+            }
+            Value::Nil => {}
+            Value::Enum { enum_name, variant, .. } if enum_name == "Option" && variant == "None" => {}
+            other => unify_generic_type_value(inner, other, type_params, bindings),
+        },
+        Type::Generic { name, args } if args.is_empty() && type_params.contains(name) => {
+            if !bindings.contains_key(name) {
+                if let Some(inferred) = value_to_ast_type(actual) {
+                    bindings.insert(name.clone(), inferred);
+                }
+            }
+        }
+        Type::Generic { name, args } if name == "Option" && args.len() == 1 => {
+            if let Value::Enum {
+                enum_name,
+                variant,
+                payload,
+            } = actual
+            {
+                if enum_name == "Option" && variant == "Some" {
+                    if let Some(first) = payload.as_deref() {
+                        unify_generic_type_value(&args[0], first, type_params, bindings);
+                    }
+                }
+            }
+        }
+        Type::Generic { name, args }
+            if matches!(name.as_str(), "Dict" | "Map" | "HashMap") && args.len() == 2 =>
+        {
+            if let Value::Dict(map) = actual {
+                if let Type::Simple(k) = &args[0] {
+                    if type_params.contains(k) && !bindings.contains_key(k) {
+                        bindings.insert(k.clone(), Type::Simple("text".to_string()));
+                    }
+                }
+                if let Some((_, first_v)) = map.iter().next() {
+                    unify_generic_type_value(&args[1], first_v, type_params, bindings);
+                }
+            }
+        }
+        Type::Capability { inner, .. } | Type::Pointer { inner, .. } => match actual {
+            Value::Unique(u) => unify_generic_type_value(inner, u.inner(), type_params, bindings),
+            Value::Shared(s) => unify_generic_type_value(inner, s.inner(), type_params, bindings),
+            Value::Borrow(b) => unify_generic_type_value(inner, &*b.inner(), type_params, bindings),
+            Value::BorrowMut(b) => unify_generic_type_value(inner, &*b.inner(), type_params, bindings),
+            other => unify_generic_type_value(inner, other, type_params, bindings),
+        },
+        _ => {}
+    }
+}
+
 thread_local! {
     pub(crate) static ACTOR_SPAWNER: ThreadSpawner = ThreadSpawner::new();
     pub(crate) static ACTOR_INBOX: RefCell<Option<Arc<Mutex<mpsc::Receiver<Message>>>>> = const { RefCell::new(None) };
@@ -418,6 +838,14 @@ thread_local! {
     pub(crate) static UNIT_FAMILY_ARITHMETIC: RefCell<HashMap<String, UnitArithmeticRules>> = RefCell::new(HashMap::new());
     /// Maps compound_unit_name -> Dimension (for dimensional analysis)
     pub(crate) static COMPOUND_UNIT_DIMENSIONS: RefCell<HashMap<String, Dimension>> = RefCell::new(HashMap::new());
+    /// Active generic type parameter bindings (`T -> ConcreteType`) in the current interpreter frame.
+    pub(crate) static GENERIC_TYPE_BINDINGS: RefCell<HashMap<String, Type>> = RefCell::new(HashMap::new());
+    /// Stack of explicit call-site generic arguments pushed across call boundaries.
+    pub(crate) static PENDING_CALL_GENERICS: RefCell<Vec<Option<PendingCallGenerics>>> = const { RefCell::new(Vec::new()) };
+    /// Stack of expected target Type annotations from enclosing let/return statements.
+    pub(crate) static EXPECTED_TARGET_TYPE: RefCell<Vec<Option<Type>>> = const { RefCell::new(Vec::new()) };
+    /// Stack of active function return type annotations.
+    pub(crate) static CURRENT_FN_RETURN_TYPE: RefCell<Vec<Option<Type>>> = const { RefCell::new(Vec::new()) };
     /// Maps base_family_name -> Dimension (for base unit families like length, time)
     pub(crate) static BASE_UNIT_DIMENSIONS: RefCell<HashMap<String, Dimension>> = RefCell::new(HashMap::new());
     /// Maps base unit suffix -> family name for SI prefix detection (e.g., "m" -> "length")
@@ -1056,6 +1484,10 @@ pub fn clear_interpreter_state() {
 
     // Clear interface bindings
     INTERFACE_BINDINGS.with(|cell| cell.borrow_mut().clear());
+    GENERIC_TYPE_BINDINGS.with(|cell| cell.borrow_mut().clear());
+    PENDING_CALL_GENERICS.with(|cell| cell.borrow_mut().clear());
+    EXPECTED_TARGET_TYPE.with(|cell| cell.borrow_mut().clear());
+    CURRENT_FN_RETURN_TYPE.with(|cell| cell.borrow_mut().clear());
 
     // Reset execution mode to Normal
     EXECUTION_MODE.with(|cell| *cell.borrow_mut() = ExecutionMode::Normal);
@@ -1355,6 +1787,7 @@ interpreter_thread_state! {
     interpreter_args: Vec<String> = INTERPRETER_ARGS,
     current_file: Option<PathBuf> = CURRENT_FILE,
     interface_bindings: HashMap<String, String> = INTERFACE_BINDINGS,
+    generic_type_bindings: HashMap<String, Type> = GENERIC_TYPE_BINDINGS,
     const_names: std::collections::HashSet<String> = CONST_NAMES,
     immutable_vars: std::collections::HashSet<String> = IMMUTABLE_VARS,
     extern_functions: std::collections::HashSet<String> = EXTERN_FUNCTIONS,

@@ -1836,6 +1836,7 @@ fn validate_imports(file_path: &Path, items: &[Node], errors: &mut Vec<CheckErro
             Node::Enum(enum_def) => enum_def.name == name,
             Node::Trait(trait_def) => trait_def.name == name,
             Node::ExportUseStmt(export_use) => export_target_matches(&export_use.target, name),
+            Node::InternalExportDecl(decl) => decl.symbols.iter().any(|sym| sym == name),
             _ => false,
         })
     }

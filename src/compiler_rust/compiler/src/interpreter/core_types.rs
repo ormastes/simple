@@ -69,6 +69,32 @@ pub(crate) type Enums = HashMap<String, Arc<EnumDef>>;
 /// Stores class definitions: name -> ClassDef (Arc-wrapped for cheap sharing)
 pub(crate) type Classes = HashMap<String, Arc<simple_parser::ast::ClassDef>>;
 
+/// Convert a parsed `StructDef` into its runtime `ClassDef` representation,
+/// preserving generic parameters, where clauses, attributes, docstrings,
+/// invariants, and template specialization metadata.
+pub(crate) fn struct_def_to_class_def(s: &simple_parser::ast::StructDef) -> simple_parser::ast::ClassDef {
+    simple_parser::ast::ClassDef {
+        span: s.span,
+        name: s.name.clone(),
+        generic_params: s.generic_params.clone(),
+        where_clause: s.where_clause.clone(),
+        fields: s.fields.clone(),
+        methods: s.methods.clone(),
+        parent: None,
+        visibility: s.visibility,
+        effects: Vec::new(),
+        attributes: s.attributes.clone(),
+        doc_comment: s.doc_comment.clone(),
+        invariant: s.invariant.clone(),
+        macro_invocations: Vec::new(),
+        mixins: Vec::new(),
+        is_generic_template: s.is_generic_template,
+        specialization_of: s.specialization_of.clone(),
+        type_bindings: s.type_bindings.clone(),
+        is_value_type: true,
+    }
+}
+
 /// Stores impl block methods: type_name -> list of methods
 pub(crate) type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
 

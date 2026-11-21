@@ -602,21 +602,7 @@ impl<'a> MirLowerer<'a> {
         // Array repeat: [value; count] - creates array with count copies of value
         let raw_value_reg = self.lower_expr(value)?;
         let count_reg = self.lower_expr(count)?;
-        let value_reg = if value.ty == TypeId::U64 {
-            self.box_u64_runtime_value(raw_value_reg)?
-        } else if value.ty == TypeId::U32 {
-            self.with_func(|func, current_block| {
-                let boxed = func.new_vreg();
-                let block = func.block_mut(current_block).unwrap();
-                block.instructions.push(MirInst::BoxInt {
-                    dest: boxed,
-                    value: raw_value_reg,
-                });
-                boxed
-            })?
-        } else {
-            raw_value_reg
-        };
+        let value_reg = self.box_value_as_runtime(raw_value_reg, value.ty)?;
 
         self.with_func(|func, current_block| {
             let dest = func.new_vreg();

@@ -862,3 +862,149 @@ fn entry_module_use_binding_selects_import_among_differing_signature_duplicates(
         }
     }
 }
+
+/// Seed-5f (#4950): `Iterator.collect<C: FromIterator>` and const-generic
+/// collections (`FixedVec<T, const N>`, `StaticVec<T, const N>`) with
+/// `[T.default(); N]` and `vec:` field names must specialize through HIR->MIR
+/// via `$__spec_*` functions for both explicit `<C>` and `let` target types.
+#[test]
+fn iterator_collect_specializes_const_generic_and_vec_field_in_mir() {
+    let mir = compile_to_mir(
+        r#"trait Iterator:
+    type Item
+    fn next() -> Option<Self.Item>
+    fn collect<C: FromIterator<Self.Item>>(self) -> C:
+        return C.from_iter(self)
+
+trait FromIterator<T>:
+    fn from_iter<I: Iterator<Item=T>>(iter: I) -> Self
+
+struct FixedVec<T, const N: u64>:
+    data: [T; N]
+    len: u64
+
+impl FixedVec<T, const N: u64>:
+    static fn new() -> FixedVec<T, N>:
+        return FixedVec { data: [T.default(); N], len: 0 }
+
+    me push(self, value: T) -> bool:
+        if self.len >= N:
+            return false
+        self.data[self.len] = value
+        self.len = self.len + 1
+        return true
+
+struct FixedVecIter<T, const N: u64>:
+    vec: FixedVec<T, N>
+    index: u64
+
+impl Iterator for FixedVecIter<T, const N: u64>:
+    type Item = T
+    me next() -> Option<Self.Item>:
+        if self.index < self.vec.len:
+            val item = self.vec.data[self.index]
+            self.index = self.index + 1
+            return Some(item)
+        return None
+
+impl FromIterator<T> for FixedVec<T, const N: u64>:
+    fn from_iter<I: Iterator<Item=T>>(iter: I) -> Self:
+        var result = FixedVec.new()
+        loop:
+            match iter.next():
+                case Some(item):
+                    if not result.push(item):
+                        break
+                case None:
+                    break
+        return result
+
+struct RangeStep:
+    cur: i64
+    end: i64
+
+impl Iterator for RangeStep:
+    type Item = i64
+    me next() -> Option<Self.Item>:
+        if self.cur < self.end:
+            val v = self.cur
+            self.cur = self.cur + 1
+            return Some(v)
+        return None
+
+fn probe() -> i64:
+    val explicit_fv = RangeStep(cur: 0, end: 5).collect<FixedVec<i64, 4>>()
+    val inferred_fv: FixedVec<i64, 3> = RangeStep(cur: 1, end: 3).collect()
+    return explicit_fv.len + inferred_fv.len
+"#,
+    )
+    .expect("compile_to_mir should specialize Iterator.collect and FixedVec<T, N>");
+
+    let spec_names: Vec<&str> = mir
+        .functions
+        .iter()
+        .map(|f| f.name.as_str())
+        .filter(|name| name.contains("$__spec_"))
+        .collect();
+    assert!(
+        !spec_names.is_empty(),
+        "expected specialized $__spec_ functions in MIR, got: {:?}",
+        mir.functions.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+    assert!(
+        spec_names.iter().any(|n| n.contains("collect$__spec_")),
+        "expected collect specialization in {spec_names:?}"
+    );
+    assert!(
+        spec_names.iter().any(|n| n.contains("from_iter$__spec_")),
+        "expected from_iter specialization in {spec_names:?}"
+    );
+
+    let probe = mir_fn(&mir, "probe");
+    let calls: Vec<String> = probe
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .filter_map(|inst| match inst {
+            MirInst::Call { target, .. } => Some(target.name().to_string()),
+            MirInst::MethodCallStatic { func_name, .. } => Some(func_name.clone()),
+            _ => None,
+        })
+        .collect();
+    let collect_calls: Vec<&String> = calls.iter().filter(|n| n.contains("collect$__spec_")).collect();
+    assert!(
+        collect_calls.len() == 2 && collect_calls[0] != collect_calls[1],
+        "probe should call two distinct specialized collect instances (explicit & inferred): {calls:?}"
+    );
+    let new_specs: Vec<_> = mir
+        .functions
+        .iter()
+        .filter(|f| f.name.contains("FixedVec.new$__spec_"))
+        .collect();
+    assert!(
+        new_specs.len() >= 2,
+        "expected distinct FixedVec.new specializations for N=4 and N=3: {spec_names:?}"
+    );
+}
+
+/// Seed-5f (#4950): Primitive and fixed-array `.default()` lower to typed
+/// constants / zero-filled array initialization without unresolved calls.
+#[test]
+fn primitive_and_fixed_array_default_lower_in_mir() {
+    let mir = compile_to_mir(
+        r#"fn probe() -> i64:
+    val a = i64.default()
+    val b = [i64; 4].default()
+    if bool.default():
+        return a + 1
+    return a + b[0] + b[3]
+"#,
+    )
+    .expect("compile_to_mir should lower i64.default(), bool.default(), [i64; 4].default()");
+
+    let probe = mir_fn(&mir, "probe");
+    assert!(
+        !has_call(probe, "default") && !has_call(probe, "i64.default"),
+        "primitive .default() should lower without dynamic dispatch"
+    );
+}

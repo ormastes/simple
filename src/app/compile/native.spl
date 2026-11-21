@@ -26,6 +26,7 @@
 
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_exists}
+use std.io_runtime.{file_copy}
 use std.io_runtime.{get_args}
 use std.io_runtime.{getpid}
 
@@ -120,6 +121,39 @@ fn find_objcopy_for_native_archive() -> text:
             return tool
     ""
 
+fn find_ar_for_native_archive() -> text:
+    val tools = ["llvm-ar-18", "llvm-ar-17", "llvm-ar", "ar"]
+    for tool in tools:
+        val found = shell_output("which {tool} 2>/dev/null")
+        if found != "":
+            return tool
+    ""
+
+fn strip_duplicate_memory_owner_members(archive_path: text, verbose: bool):
+    val ar_tool = find_ar_for_native_archive()
+    if ar_tool == "":
+        _cli_eprint("warning: [MEMORY-OWNER] no llvm-ar/ar found; native_all may carry duplicate runtime_memory objects")
+        warn("compile", "[MEMORY-OWNER] ar not found; runtime_memory members unstripped")
+        return
+    val members_raw = shell_output("{ar_tool} t '{archive_path}' 2>/dev/null")
+    if members_raw == "":
+        return
+    var memory_members = ""
+    for raw_line in members_raw.split("\n"):
+        val member = raw_line.trim()
+        if member != "" and member.contains("runtime_memory"):
+            memory_members = "{memory_members} '{member}'"
+    if memory_members == "":
+        return
+    val (del_out, del_err, del_exit) = shell("{ar_tool} d '{archive_path}'{memory_members} 2>&1")
+    if del_exit != 0:
+        _cli_eprint("warning: [MEMORY-OWNER] stripping runtime_memory from {archive_path} failed (exit {del_exit}): {del_out}{del_err}")
+        warn("compile", "[MEMORY-OWNER] failed stripping runtime_memory from archive: {del_out}{del_err}")
+        return
+    val (_, _, _) = shell("{ar_tool} s '{archive_path}' 2>&1")
+    if verbose:
+        debug("compile", "Stripped duplicate runtime_memory members from native_all: {memory_members}")
+
 # LIM-010: falling back to the UNSTRIPPED native_all archive re-registers LLVM's
 # CLI options at load time and segfaults Stage 3 with exit 139. The fallback is
 # kept -- with no objcopy there is nothing better to do -- but it must never be
@@ -131,23 +165,35 @@ fn find_objcopy_for_native_archive() -> text:
 # The previous code had `warn(..)` alone AND gated it on `verbose`, so this
 # fallback was doubly invisible.
 fn strip_native_all_constructors(native_lib_path: text, platform: text, verbose: bool) -> text:
-    if not should_strip_llvm_constructors_for_platform(platform):
-        return native_lib_path
-    val objcopy = find_objcopy_for_native_archive()
-    if objcopy == "":
-        _cli_eprint("warning: [LIM-010] no llvm-objcopy/objcopy found; linking native_all UNSTRIPPED. LLVM static constructors remain, which can segfault Stage 3 (exit 139). Install LLVM binutils or put objcopy on PATH.")
-        warn("compile", "[LIM-010] objcopy not found; native_all linked unstripped")
-        return native_lib_path
     val temp_dir = _get_temp_dir()
     val filtered = "{temp_dir}/libsimple_native_all_stripped_{getpid()}.a"
-    val cmd = "{objcopy} --remove-section=.init_array --remove-section=.ctors --remove-section=.fini_array --remove-section=.dtors '{native_lib_path}' '{filtered}' 2>&1"
-    val (out, err, exit_code) = shell(cmd)
-    if exit_code == 0 and file_exists(filtered):
-        if verbose:
-            debug("compile", "Stripped LLVM constructors from native_all: {filtered}")
+    var prepared = false
+    if should_strip_llvm_constructors_for_platform(platform):
+        val objcopy = find_objcopy_for_native_archive()
+        if objcopy == "":
+            _cli_eprint("warning: [LIM-010] no llvm-objcopy/objcopy found; linking native_all UNSTRIPPED. LLVM static constructors remain, which can segfault Stage 3 (exit 139). Install LLVM binutils or put objcopy on PATH.")
+            warn("compile", "[LIM-010] objcopy not found; native_all linked unstripped")
+        else:
+            val cmd = "{objcopy} --remove-section=.init_array --remove-section=.ctors --remove-section=.fini_array --remove-section=.dtors '{native_lib_path}' '{filtered}' 2>&1"
+            val (out, err, exit_code) = shell(cmd)
+            if exit_code == 0 and file_exists(filtered):
+                prepared = true
+                if verbose:
+                    debug("compile", "Stripped LLVM constructors from native_all: {filtered}")
+            else:
+                _cli_eprint("warning: [LIM-010] constructor strip of {native_lib_path} FAILED (exit {exit_code}); linking it UNSTRIPPED, which can segfault Stage 3 (exit 139): {out}{err}")
+                warn("compile", "[LIM-010] native_all constructor strip failed: {out}{err}")
+    if not prepared:
+        if not file_copy(native_lib_path, filtered):
+            return native_lib_path
+    # native_all bundles runtime_memory.o without SIMPLE_RUNTIME_MEMORY_OWNER=1,
+    # whereas compile_native compiles src/runtime/runtime_memory.c with
+    # -DSIMPLE_RUNTIME_MEMORY_OWNER=1 alongside runtime_native.c. Remove any
+    # competing runtime_memory members from the temporary archive copy on all
+    # platforms so one unified SIMPLE_RUNTIME_MEMORY_OWNER=1 allocator owns both.
+    strip_duplicate_memory_owner_members(filtered, verbose)
+    if file_exists(filtered):
         return filtered
-    _cli_eprint("warning: [LIM-010] constructor strip of {native_lib_path} FAILED (exit {exit_code}); linking it UNSTRIPPED, which can segfault Stage 3 (exit 139): {out}{err}")
-    warn("compile", "[LIM-010] native_all constructor strip failed: {out}{err}")
     native_lib_path
 
 fn find_simple_native_all_library() -> text:

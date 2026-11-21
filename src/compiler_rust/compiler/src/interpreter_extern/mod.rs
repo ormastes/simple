@@ -1721,6 +1721,21 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_get_host_target_code", file_io::rt_get_host_target_code);
     insert_simple!("rt_getpid", file_io::rt_getpid);
     insert_simple!("rt_win_compare_object_handles", file_io::rt_win_compare_object_handles);
+    insert_simple!("rt_windows_pipe_file_mode_v1", file_io::rt_windows_pipe_file_mode_v1);
+    insert_simple!("rt_windows_pty_owner_thread_guard_v1", file_io::rt_windows_pty_owner_thread_guard_v1);
+    insert_simple!("rt_workspace_storage_open_v1", file_io::rt_workspace_storage_fail_closed_int);
+    insert_simple!("rt_workspace_storage_observe_v1", file_io::rt_workspace_storage_fail_closed_text);
+    insert_simple!("rt_workspace_storage_release_if_absent_v1", file_io::rt_workspace_storage_fail_closed_int);
+    insert_simple!("rt_workspace_storage_forget_released_v1", file_io::rt_workspace_storage_fail_closed_int);
+    insert_simple!("rt_workspace_storage_close_retained_v1", file_io::rt_workspace_storage_fail_closed_int);
+    insert_simple!("rt_workspace_storage_prepare_executable_v1", file_io::rt_workspace_storage_fail_closed_text);
+    insert_simple!("rt_linux_container_user_open_v1", file_io::rt_workspace_storage_fail_closed_int);
+    insert_simple!("rt_linux_container_user_observe_v1", file_io::rt_workspace_storage_fail_closed_text);
+    insert_simple!("rt_linux_container_user_close_v1", file_io::rt_workspace_storage_fail_closed_int);
+    insert_simple!("rt_linux_container_containment_capture_v1", file_io::rt_workspace_storage_fail_closed_int);
+    insert_simple!("rt_linux_container_containment_observe_v1", file_io::rt_workspace_storage_fail_closed_text);
+    insert_simple!("rt_linux_container_containment_close_v1", file_io::rt_workspace_storage_fail_closed_int);
+    insert_simple!("rt_linux_container_containment_kernel_observe_v1", file_io::rt_workspace_storage_fail_closed_text);
     insert_simple!("rt_gui_get_glyph_8x16", conversion::rt_gui_get_glyph_8x16_fn);
     insert_simple!("rt_intern_symbol", file_io::rt_intern_symbol);
     insert_simple!("__rt_hashmap_clear", collections::__rt_hashmap_clear);
@@ -1972,6 +1987,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_path_dirname", file_io::rt_path_dirname);
     insert_simple!("rt_path_ext", file_io::rt_path_ext);
     insert_simple!("rt_path_join", file_io::rt_path_join);
+    insert_simple!("rt_path_normalize", file_io::rt_path_normalize);
     insert_simple!("rt_path_relative", file_io::rt_path_relative);
     insert_simple!("rt_path_separator", file_io::rt_path_separator);
     insert_simple!("rt_path_stem", file_io::rt_path_stem);
@@ -2446,6 +2462,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_simd_xor_u64x4", simd::rt_simd_xor_u64x4);
     insert_simple!("rt_simd_xor_u8x16", simd::rt_simd_xor_u8x16);
     insert_simple!("rt_sleep_ms", time::rt_sleep_ms);
+    insert_simple!("rt_sleep_nanos", time::rt_sleep_nanos);
     insert_simple!("rt_smf_parse_relocs", file_io::rt_smf_parse_relocs);
     insert_simple!("rt_smf_relocs_from_path", file_io::rt_smf_relocs_from_path);
     insert_simple!("rt_span_column", span_sffi::rt_span_column);

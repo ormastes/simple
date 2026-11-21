@@ -689,6 +689,8 @@ unsafe fn rt_cranelift_new_module_impl(name: &str, target: i64) -> i64 {
     let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     #[cfg(not(compiler_backfill))]
     super::jit::register_seed_jit_runtime_symbols(&mut builder, jit_provider_runtime_symbols());
+    #[cfg(windows)]
+    builder.symbol_lookup_fn(Box::new(|name| super::jit_dlsym::dlsym_lookup(name)));
     let module = JITModule::new(builder);
     let handle = next_handle();
 

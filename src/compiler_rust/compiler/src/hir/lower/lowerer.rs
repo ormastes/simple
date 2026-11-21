@@ -5,7 +5,7 @@ use simple_parser::{Expr, Pattern, Type};
 
 use super::super::capability::CapabilityEnv;
 use super::super::lifetime::LifetimeContext;
-use super::super::types::{HirModule, TypeId};
+use super::super::types::{HirGenericBound, HirModule, TypeId};
 use super::deprecation_warning::DeprecationWarningCollector;
 use super::lenient_global_diag::{LenientGlobal, LenientGlobalCollector, LenientGlobalKind};
 use super::memory_warning::MemoryWarningCollector;
@@ -347,6 +347,16 @@ pub struct Lowerer {
     /// calls can specialize the local to the appended element type instead of
     /// freezing the seed to the configured scalar default element type.
     pub(super) untyped_empty_array_locals: HashSet<usize>,
+    /// Active function generic parameter names (type & const generic params).
+    pub(super) active_fn_generic_params: Vec<String>,
+    /// Active function generic trait bounds (e.g. `C: FromIterator<...>`).
+    pub(super) active_fn_generic_bounds: Vec<HirGenericBound>,
+    /// Active impl/struct generic parameter names (type & const generic params).
+    pub(super) active_impl_generic_params: Vec<String>,
+    /// Expected target TypeId propagated from `let x: Target = ...` or return types.
+    pub(super) expected_target_type: Option<TypeId>,
+    /// Active impl associated type bindings (`Self.Item -> Type`).
+    pub(super) active_self_assoc_types: HashMap<String, Type>,
 }
 
 thread_local! {
@@ -474,6 +484,11 @@ impl Lowerer {
             global_enum_defs: None,
             merged_global_enum_names: None,
             untyped_empty_array_locals: HashSet::new(),
+            active_fn_generic_params: Vec::new(),
+            active_fn_generic_bounds: Vec::new(),
+            active_impl_generic_params: Vec::new(),
+            expected_target_type: None,
+            active_self_assoc_types: HashMap::new(),
         }
     }
 
@@ -569,6 +584,11 @@ impl Lowerer {
             global_enum_defs: None,
             merged_global_enum_names: None,
             untyped_empty_array_locals: HashSet::new(),
+            active_fn_generic_params: Vec::new(),
+            active_fn_generic_bounds: Vec::new(),
+            active_impl_generic_params: Vec::new(),
+            expected_target_type: None,
+            active_self_assoc_types: HashMap::new(),
         }
     }
 
@@ -687,6 +707,11 @@ impl Lowerer {
             global_enum_defs: None,
             merged_global_enum_names: None,
             untyped_empty_array_locals: HashSet::new(),
+            active_fn_generic_params: Vec::new(),
+            active_fn_generic_bounds: Vec::new(),
+            active_impl_generic_params: Vec::new(),
+            expected_target_type: None,
+            active_self_assoc_types: HashMap::new(),
         }
     }
 
@@ -1354,6 +1379,52 @@ impl Lowerer {
     ///    own function; this is the `fn f(): g()` recursion trap);
     /// 5. otherwise a colliding `name` is `Ambiguous` (owner list for the
     ///    diagnostic) and a non-colliding one is `NotCollision`.
+    fn flatten_glob_declarer_visible(&self, importer: &str, owner: &str, name: &str) -> bool {
+        let owner_arc = std::sync::Arc::<str>::from(owner);
+        let caller_arc: std::sync::Arc<str> = if importer == "<entry>" {
+            match self.current_file.as_ref() {
+                Some(entry) => std::sync::Arc::from(
+                    crate::interpreter::normalize_path_key(entry)
+                        .to_string_lossy()
+                        .as_ref(),
+                ),
+                None => return true,
+            }
+        } else {
+            std::sync::Arc::from(importer)
+        };
+        crate::interpreter::interpreter_module::is_fn_visible_to(name, &owner_arc, &caller_arc)
+    }
+
+    fn flatten_glob_declarers(&self, importer: &str, name: &str) -> Vec<(String, String)> {
+        let mut declarers: Vec<(String, String)> = Vec::new();
+        for glob_owner in self.flatten_owner_glob_sources.get(importer).into_iter().flatten() {
+            if let Some(declarer) = self.flatten_reexport_definer(importer, glob_owner, name) {
+                if self.flatten_glob_declarer_visible(importer, &declarer.0, &declarer.1)
+                    && !declarers.contains(&declarer)
+                {
+                    declarers.push(declarer);
+                }
+            }
+        }
+        if declarers.len() > 1 {
+            let public_only: Vec<(String, String)> = declarers
+                .iter()
+                .filter(|(owner, source_name)| {
+                    !crate::interpreter::interpreter_module::is_private_fn_of(
+                        &std::sync::Arc::<str>::from(owner.as_str()),
+                        source_name,
+                    )
+                })
+                .cloned()
+                .collect();
+            if !public_only.is_empty() {
+                return public_only;
+            }
+        }
+        declarers
+    }
+
     fn flatten_owned_callable(&self, name: &str) -> FlattenCallable {
         if self.flatten_fn_owners.is_empty() {
             return FlattenCallable::NotCollision;
@@ -1376,14 +1447,7 @@ impl Lowerer {
             return FlattenCallable::Resolved(self.flatten_emitted_symbol(Some(&source_owner), &source_name));
         }
         if self.flatten_is_collision(name) {
-            let mut declarers: Vec<(String, String)> = Vec::new();
-            for glob_owner in self.flatten_owner_glob_sources.get(importer).into_iter().flatten() {
-                if let Some(declarer) = self.flatten_reexport_definer(importer, glob_owner, name) {
-                    if !declarers.contains(&declarer) {
-                        declarers.push(declarer);
-                    }
-                }
-            }
+            let declarers = self.flatten_glob_declarers(importer, name);
             if let [(owner, source_name)] = declarers.as_slice() {
                 return FlattenCallable::Resolved(self.flatten_emitted_symbol(Some(owner), source_name));
             }
@@ -1481,14 +1545,7 @@ impl Lowerer {
                 return Some(definer);
             }
         }
-        let mut declarers: Vec<(String, String)> = Vec::new();
-        for glob_owner in self.flatten_owner_glob_sources.get(importer).into_iter().flatten() {
-            if let Some(declarer) = self.flatten_reexport_definer(importer, glob_owner, name) {
-                if !declarers.contains(&declarer) {
-                    declarers.push(declarer);
-                }
-            }
-        }
+        let mut declarers = self.flatten_glob_declarers(importer, name);
         match declarers.len() {
             0 => {}
             1 => return declarers.pop(),
@@ -1590,6 +1647,34 @@ impl Lowerer {
         })
     }
 
+    /// Resolve a struct/class/enum/bitfield named `ns.member` imported via a
+    /// whole-module import (`use m as ns` / `use m`). Flattened unit only.
+    pub(super) fn resolve_flatten_namespace_type(&self, ns: &str, member: &str) -> Option<(String, TypeId)> {
+        let source_owner = self.flatten_namespace_owner(ns)?;
+        if self.resolve_flatten_namespace_callable(ns, member).is_some()
+            || self.resolve_flatten_namespace_global(ns, member).is_some()
+        {
+            return None;
+        }
+        let type_name = super::module_lowering::resolve_owned_struct(
+            &self.flatten_struct_owners,
+            &self.flatten_owner_import_bindings,
+            &self.flatten_owner_glob_sources,
+            Some(source_owner),
+            member,
+        )
+        .unwrap_or_else(|| member.to_string());
+        let ty_id = self.module.types.lookup(&type_name)?;
+        match self.module.types.get(ty_id) {
+            Some(
+                crate::hir::HirType::Struct { .. }
+                | crate::hir::HirType::Enum { .. }
+                | crate::hir::HirType::Bitfield { .. },
+            ) => Some((type_name, ty_id)),
+            _ => None,
+        }
+    }
+
     /// Install the type-name scope of `current_function_owner` as the type
     /// registry overlay (same-named flattened structs/classes resolve to the
     /// owner's own or imported declaration), returning the previous overlay.
@@ -1682,6 +1767,74 @@ impl Lowerer {
         }
 
         None
+    }
+
+    pub(crate) fn impl_target_type_name(target: &Type) -> Option<String> {
+        match target {
+            Type::Simple(name) | Type::Generic { name, .. } => Some(name.clone()),
+            Type::Array { size: None, .. } => Some("array".to_string()),
+            _ => None,
+        }
+    }
+
+    pub(super) fn extract_generic_bounds(where_clause: &[simple_parser::ast::WhereBound]) -> Vec<super::super::types::HirGenericBound> {
+        where_clause
+            .iter()
+            .filter_map(|bound| {
+                let bounds: Vec<super::super::types::HirTraitBound> = bound
+                    .bounds
+                    .iter()
+                    .filter_map(|ty| match ty {
+                        Type::Simple(name) => Some(super::super::types::HirTraitBound {
+                            trait_name: name.clone(),
+                            type_args: Vec::new(),
+                        }),
+                        Type::Generic { name, args } => Some(super::super::types::HirTraitBound {
+                            trait_name: name.clone(),
+                            type_args: args.iter().map(|a| format!("{a:?}")).collect(),
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                if bounds.is_empty() {
+                    None
+                } else {
+                    Some(super::super::types::HirGenericBound {
+                        type_param: bound.type_param.clone(),
+                        bounds,
+                    })
+                }
+            })
+            .collect()
+    }
+
+    pub(super) fn enter_impl_signature_scope(
+        &mut self,
+        impl_block: &simple_parser::ast::ImplBlock,
+        type_name: &str,
+    ) -> (Option<TypeId>, Vec<String>, HashMap<String, Type>) {
+        let impl_generics = self.collect_impl_generic_params(impl_block, type_name);
+        let assoc_types = impl_block
+            .associated_types
+            .iter()
+            .map(|a| (a.name.clone(), a.ty.clone()))
+            .collect();
+        let prev_class = self.current_class_type;
+        if let Some(id) = self.module.types.lookup(type_name) {
+            self.current_class_type = Some(id);
+        }
+        let prev_generics = std::mem::replace(&mut self.active_impl_generic_params, impl_generics);
+        let prev_assoc = std::mem::replace(&mut self.active_self_assoc_types, assoc_types);
+        (prev_class, prev_generics, prev_assoc)
+    }
+
+    pub(super) fn restore_impl_signature_scope(
+        &mut self,
+        saved: (Option<TypeId>, Vec<String>, HashMap<String, Type>),
+    ) {
+        self.current_class_type = saved.0;
+        self.active_impl_generic_params = saved.1;
+        self.active_self_assoc_types = saved.2;
     }
 }
 

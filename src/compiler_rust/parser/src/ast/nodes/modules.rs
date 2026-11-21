@@ -166,3 +166,29 @@ pub struct RequiresCapabilitiesStmt {
     pub span: Span,
     pub capabilities: Vec<Capability>,
 }
+
+/// Friend package declaration allowing `internal_export` and `pub(friend)` access.
+///
+/// Syntax: `friend lib.nogc_sync_mut.io`
+#[derive(Debug, Clone, PartialEq)]
+pub struct FriendDecl {
+    pub span: Span,
+    pub package: ModulePath,
+}
+
+/// Internal export declaration exposing symbols to declared `friend` packages.
+///
+/// Syntax: `internal_export SymbolName` or `internal_export A, B` or `internal_export {A, B}`
+#[derive(Debug, Clone, PartialEq)]
+pub struct InternalExportDecl {
+    pub span: Span,
+    pub symbols: Vec<String>,
+}
+
+/// Layer architecture directive: `layer <name> [uses <layer_a>, ...]`
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerDecl {
+    pub span: Span,
+    pub name: String,
+    pub uses: Vec<String>,
+}

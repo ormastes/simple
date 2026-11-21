@@ -206,3 +206,20 @@ fn match_identifier_index_and_spaced_match_expression_disambiguate() {
     parse_ok("var match = [7, 9]\nlet first = match[0]");
     parse_ok("let selected = match [0]:\n    0 => 7\n    _ => 9");
 }
+
+#[test]
+fn admit_and_assume_work_as_member_names_and_path_segments() {
+    parse_ok("val admitted = (link.admit)(signed, approval)?");
+    parse_ok("val assumed = (link.assume)(signed, approval)");
+    parse_ok("val f = link.admit\nval g = link.assume");
+    parse_ok("use app.admit.assume as check_mod");
+    // Verification statements must still parse when in statement position.
+    parse_ok("fn check(x: i64):\n    admit x > 0\n    assume x >= 0");
+}
+
+#[test]
+fn remote_run_v1_parses() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../app/orchestrator/remote_run_v1.spl");
+    let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    parse_ok(&src);
+}

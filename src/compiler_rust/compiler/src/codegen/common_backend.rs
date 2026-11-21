@@ -255,6 +255,13 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                             );
                         }
                     }
+                    MirInst::Drop { ty, .. } => {
+                        if *ty == TypeId::STRING {
+                            names.insert("rt_string_free".to_string());
+                        } else if !super::instr::is_drop_scalar_type(*ty) {
+                            names.insert("rt_rc_release".to_string());
+                        }
+                    }
                     MirInst::Yield { .. } => {
                         names.insert("rt_generator_set_state".to_string());
                         names.insert("rt_value_int".to_string());
@@ -429,6 +436,7 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                     MirInst::BuiltinMethod { .. } => {
                         for n in [
                             "rt_array_clear",
+                            "rt_array_data_ptr",
                             "rt_array_extend_i64",
                             "rt_array_len",
                             "rt_array_pop",
@@ -451,9 +459,12 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                             "rt_index_set",
                             "rt_len",
                             "rt_method_not_found",
+                            "rt_reverse",
+                            "rt_reverse_mut",
                             "rt_slice",
                             "rt_slice_text_bytes",
                             "rt_string_concat",
+                            "rt_string_data",
                             "rt_string_ends_with",
                             "rt_string_len",
                             "rt_string_char_count",
@@ -638,8 +649,10 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_string_new"
             // Emitted by codegen itself, never named in Simple source: the
             // decode wrapper `calls.rs` inserts around runtime entry points
-            // that return `*const c_char` (see C_STRING_RETURNING_RUNTIME_FNS).
+            // that return `*const c_char` (see C_STRING_RETURNING_RUNTIME_FNS)
+            // or tagged `RuntimeValue` booleans (see TAGGED_BOOL_RETURNING_RUNTIME_FNS).
             | "rt_cstring_to_text"
+            | "rt_value_as_bool"
             | "rt_string_new_literal"
             | "rt_string_data"
             | "rt_string_len"
@@ -1641,6 +1654,10 @@ impl<M: Module> CodegenBackend<M> {
                     continue;
                 }
                 (self.sanitize_symbol(&func.name), cranelift_module::Linkage::Import)
+            } else if let Some(export_c) = func.attributes.iter().find_map(|a| a.strip_prefix("export_c_name=")) {
+                (self.sanitize_symbol(export_c), cranelift_module::Linkage::Export)
+            } else if func.attributes.iter().any(|a| a == "export" || a == "global") {
+                (self.sanitize_symbol(&func.name), cranelift_module::Linkage::Export)
             } else {
                 // Export (STB_GLOBAL) so symbols override weak crt0 boot-stubs and
                 // are visible to the freestanding --defsym linker mechanism.

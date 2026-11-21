@@ -23,6 +23,29 @@ use super::types_util::{type_id_size, type_id_to_cranelift, type_to_cranelift};
 // Declare submodules
 pub mod actors;
 pub mod async_ops;
+
+/// Types whose `MirInst::Drop` is an intentional no-op (primitive scalars, void, nil).
+/// Strings (`TypeId::STRING`) and heap/RC values are released instead.
+#[inline]
+pub(crate) fn is_drop_scalar_type(ty: TypeId) -> bool {
+    matches!(
+        ty,
+        TypeId::VOID
+            | TypeId::BOOL
+            | TypeId::CHAR
+            | TypeId::I8
+            | TypeId::I16
+            | TypeId::I32
+            | TypeId::I64
+            | TypeId::U8
+            | TypeId::U16
+            | TypeId::U32
+            | TypeId::U64
+            | TypeId::F32
+            | TypeId::F64
+            | TypeId::NIL
+    )
+}
 pub mod basic_ops;
 pub mod body;
 pub mod calls;
@@ -1494,41 +1517,7 @@ pub fn compile_instruction<M: Module>(
 
         // Memory safety instructions
         MirInst::Drop { value, ty } => {
-            // Drop is a no-op for primitive types
-            // Primitive types: void, bool, integers (i8-i64, u8-u64), floats (f32, f64), string, nil
-            let is_primitive = matches!(
-                *ty,
-                crate::hir::TypeId::VOID
-                    | crate::hir::TypeId::BOOL
-                    | crate::hir::TypeId::I8
-                    | crate::hir::TypeId::I16
-                    | crate::hir::TypeId::I32
-                    | crate::hir::TypeId::I64
-                    | crate::hir::TypeId::U8
-                    | crate::hir::TypeId::U16
-                    | crate::hir::TypeId::U32
-                    | crate::hir::TypeId::U64
-                    | crate::hir::TypeId::F32
-                    | crate::hir::TypeId::F64
-                    | crate::hir::TypeId::STRING
-                    | crate::hir::TypeId::NIL
-            );
-
-            if !is_primitive {
-                // Non-primitive types may need destructor calls
-                // For now, we don't have a Drop trait in Simple, so this is a no-op
-                // Future enhancement: look up Drop trait implementation in trait registry
-                // and generate: call drop_fn(value)
-                //
-                // Implementation steps when Drop trait is added:
-                // 1. Check if type implements Drop trait via ctx.module.trait_impls
-                // 2. If yes, get the drop method function pointer
-                // 3. Generate: builder.ins().call(drop_fn, &[value])
-                //
-                // For reference-counted types (Rc, Arc), the ref-count decrement
-                // is handled by MirInst::RcDecrement / MirInst::WeakDecrement
-                let _ = value; // Suppress unused warning
-            }
+            compile_drop(ctx, builder, *value, *ty)?;
         }
 
         MirInst::EndScope { local_index } => {
@@ -1718,6 +1707,28 @@ pub fn compile_instruction<M: Module>(
             let unboxed = builder.ins().select(is_nil, nil_f, unboxed);
             ctx.vreg_values.insert(*dest, unboxed);
         }
+    }
+    Ok(())
+}
+
+/// Emit `rt_string_free` or `rt_rc_release` for non-scalar `MirInst::Drop` targets.
+pub(crate) fn compile_drop<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    value: VReg,
+    ty: TypeId,
+) -> InstrResult<()> {
+    let helper = if ty == TypeId::STRING {
+        "rt_string_free"
+    } else if !is_drop_scalar_type(ty) {
+        "rt_rc_release"
+    } else {
+        return Ok(());
+    };
+    if let Some(&func_id) = ctx.runtime_funcs.get(helper) {
+        let val = ctx.get_vreg(&value)?;
+        let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+        helpers::adapted_call(builder, func_ref, &[val]);
     }
     Ok(())
 }

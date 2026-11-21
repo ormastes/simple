@@ -23,6 +23,7 @@ mod mir_inline;
 #[cfg(not(doctest))]
 pub mod jit;
 pub(crate) mod jit_dlsym;
+pub(crate) mod jit_sffi_bridges;
 pub mod lean;
 pub mod llvm;
 pub mod parallel;

@@ -53,7 +53,8 @@ pub use file_ops::{
     rt_file_canonicalize, rt_file_read_text, rt_file_read_regular_no_follow_bounded, rt_file_read_regular_no_follow_last_failure, rt_file_read_text_rv,
     rt_file_write_text, rt_file_copy, rt_file_remove, rt_file_size, rt_file_hash_sha256, rt_file_fsync,
     rt_file_fsync_cached, rt_file_rename, rt_file_read_lines, rt_file_append_text, rt_file_read_bytes,
-    rt_file_write_bytes, rt_file_write_bytes_array, rt_file_atomic_write_bytes_array, rt_file_wrap_smf_dynlib, rt_file_extract_smf_dynlib, rt_file_move,
+    rt_file_write_bytes, rt_file_write_bytes_array, rt_file_atomic_write, rt_file_atomic_write_mode,
+    rt_file_atomic_write_bytes_array, rt_file_wrap_smf_dynlib, rt_file_extract_smf_dynlib, rt_file_move,
     rt_file_lock, rt_file_unlock, rt_file_mmap_read_text, rt_file_mmap_len, rt_file_mmap_read_text_rv,
     rt_file_mmap_read_bytes, rt_file_mmap_read_bytes_rv, rt_file_read_text_at, rt_file_read_text_at_checked,
     rt_file_write_text_at, rt_file_write_text_at_cached, rt_file_write_text_at_cached_repeat, rt_mmap, rt_mmap_create, rt_munmap,
@@ -63,11 +64,11 @@ pub use file_ops::{
 };
 pub use directory::{
     rt_dir_create, rt_dir_list, rt_dir_remove, rt_file_find, rt_dir_glob, rt_dir_create_all, rt_dir_walk,
-    rt_current_dir, rt_set_current_dir, rt_dir_remove_all, rt_mkdir_p,
+    rt_current_dir, rt_set_current_dir, rt_dir_remove_all, rt_mkdir, rt_mkdir_p,
 };
 pub use descriptor::{rt_close_fd, rt_file_open, rt_file_get_size, rt_file_close, rt_open_fd};
 pub use mmap::{rt_file_mmap, rt_file_munmap, rt_file_madvise, rt_file_msync, native_msync};
 pub use path::{
     rt_path_basename, rt_path_dirname, rt_path_ext, rt_path_absolute, rt_path_separator, rt_path_stem,
-    rt_path_relative, rt_path_join, rt_path_parent,
+    rt_path_relative, rt_path_join, rt_path_parent, rt_path_normalize, normalize_lexical_path,
 };

@@ -305,3 +305,52 @@ fn try_on_a_typed_user_enum_tests_its_own_err_index() {
     let (hir, _mir) = lower_entry(&[], TYPED_TRY);
     assert_eq!(tested_discriminants(&hir, "forward"), vec![2]);
 }
+
+/// Regression: Fourth-pass `lower_import` previously re-ran `load_imported_types`
+/// *after* Pass 1 and Pass 2 on flattened units, so `reassert_cached_enums`
+/// mutated the surviving bare `HttpStatus` (`http_client_types`, variant `OK`)
+/// in place back to `http_server/types.spl`'s `Ok` after `status_to_code` had
+/// already been lowered against that `TypeId`. Both colliding enums must retain
+/// their distinct variant lists through MIR lowering.
+#[test]
+fn flattened_use_reimport_does_not_overwrite_same_named_enum_after_lowering() {
+    let dir = create_test_project();
+    let src = dir.path().join("src");
+    fs::write(
+        src.join("srv_types.spl"),
+        "enum HttpStatus:\n    Ok\n    Created\n\nfn srv_status() -> HttpStatus:\n    HttpStatus.Ok\n",
+    )
+    .unwrap();
+    fs::write(
+        src.join("srv_facade.spl"),
+        "export use srv_types.{HttpStatus, srv_status}\n",
+    )
+    .unwrap();
+    fs::write(
+        src.join("cli_types.spl"),
+        "enum HttpStatus:\n    OK\n    Created\n\npub fn cli_code(s: HttpStatus) -> i64:\n    if s == HttpStatus.OK:\n        return 200\n    0\n",
+    )
+    .unwrap();
+    let entry_path = src.join("main.spl");
+    fs::write(
+        &entry_path,
+        "use srv_facade.{HttpStatus, srv_status}\nuse cli_types.{cli_code}\n\nfn main() -> i64:\n    val s = HttpStatus.Ok\n    0\n",
+    )
+    .unwrap();
+
+    let ast = crate::pipeline::module_loader::load_module_with_imports(
+        &entry_path,
+        &mut std::collections::HashSet::new(),
+    )
+    .expect("load flattened imports");
+
+    let hir_lenient = crate::hir::lower_with_context_lenient_and_project_hint(&ast, &entry_path, None)
+        .expect("lenient HIR lowering");
+    crate::mir::lower_to_mir(&hir_lenient).expect("MIR lowering after lenient HIR");
+
+    let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+    let mut lowerer = Lowerer::with_module_resolver(resolver, entry_path);
+    lowerer.set_lenient_types(true);
+    let (hir_ret, _) = lowerer.lower_module_with_return_types(&ast).expect("HIR with return types");
+    crate::mir::lower_to_mir(&hir_ret).expect("MIR lowering after HIR with return types");
+}

@@ -618,7 +618,7 @@ impl<'a> Parser<'a> {
             }
             // Allow additional keywords as identifier patterns (used as enum variant names)
             TokenKind::Loop => self.parse_keyword_as_pattern("Loop"),
-            TokenKind::Vec => self.parse_keyword_as_pattern("Vec"),
+            TokenKind::Vec => self.parse_keyword_as_pattern("vec"),
             TokenKind::Unit => self.parse_keyword_as_pattern("Unit"),
             TokenKind::Sync => self.parse_keyword_as_pattern("Sync"),
             TokenKind::Async => self.parse_keyword_as_pattern("Async"),

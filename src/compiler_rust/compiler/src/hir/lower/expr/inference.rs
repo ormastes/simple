@@ -54,6 +54,7 @@ impl Lowerer {
                     size: None,
                 }))
             }
+            Expr::GenericInst { expr, .. } => self.infer_type(expr, ctx),
             Expr::Identifier(name) => {
                 if let Some(idx) = ctx.lookup(name) {
                     Ok(ctx.locals[idx].ty)
@@ -61,6 +62,8 @@ impl Lowerer {
                     Ok(ty)
                 } else if let Some(ty) = self.flatten_aware_global_type(name) {
                     Ok(ty)
+                } else if self.active_fn_generic_params.iter().any(|p| p == name) {
+                    Ok(TypeId::ANY)
                 } else if self.lenient_types {
                     Ok(TypeId::ANY)
                 } else {
@@ -196,7 +199,30 @@ impl Lowerer {
             Expr::MethodCall { receiver, method, .. } => {
                 // Handle SIMD intrinsics: this.index(), this.thread_index(), this.group_index()
                 // and thread_group.barrier(), gpu.* functions
-                if let Expr::Identifier(recv_name) = receiver.as_ref() {
+                let receiver_base = match receiver.as_ref() {
+                    Expr::GenericInst { expr, .. } => expr.as_ref(),
+                    other => other,
+                };
+                if method == "default" {
+                    if let Expr::ArrayRepeat { value, .. } = receiver_base {
+                        let elem_ty = self.infer_type(value, ctx)?;
+                        return Ok(self.module.types.register(HirType::Array {
+                            element: elem_ty,
+                            size: None,
+                        }));
+                    }
+                }
+                if let Expr::Identifier(recv_name) = receiver_base {
+                    if ctx.lookup(recv_name).is_none() {
+                        if self.active_fn_generic_params.iter().any(|p| p == recv_name) {
+                            return Ok(TypeId::ANY);
+                        }
+                        if method == "default" {
+                            if let Some(prim) = Self::primitive_default_hir_expr(recv_name) {
+                                return Ok(prim.ty);
+                            }
+                        }
+                    }
                     if recv_name == "this" {
                         match method.as_str() {
                             "index" | "thread_index" | "group_index" => return Ok(TypeId::I64),

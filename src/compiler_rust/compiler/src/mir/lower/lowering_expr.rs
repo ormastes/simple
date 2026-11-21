@@ -205,19 +205,27 @@ impl<'a> MirLowerer<'a> {
             HirExprKind::Unary { op, operand } => self.lower_unary_expr(*op, operand),
             HirExprKind::Cast { expr: inner, target } => self.lower_cast_expr(inner, *target),
 
-            HirExprKind::Call { func: callee, args } => self.lower_call_expr(callee, args),
+            HirExprKind::Call { func: callee, args } => self.lower_call_expr(callee, args, expr_ty),
             HirExprKind::BuiltinCall { name, args } => self.lower_builtin_call_expr(name, args, expr_ty),
             HirExprKind::MethodCall {
                 receiver,
                 method,
                 args,
                 dispatch,
+                generic_args,
             } => {
                 if let Some(reg) = self.try_lower_dict_stored_fn_call(receiver, method, args, expr_ty)? {
                     return Ok(reg);
                 }
-                self.lower_method_call_expr(receiver, method, args, dispatch)
+                self.lower_method_call_expr_with_generics(receiver, method, args, dispatch, generic_args)
             }
+            HirExprKind::TypeParamStaticCall {
+                type_param,
+                method,
+                args,
+                ..
+            } => self.lower_type_param_static_call_expr(type_param, method, args),
+            HirExprKind::ConstGeneric(name) => self.lower_const_generic_expr(name),
 
             HirExprKind::Lambda {
                 params,
