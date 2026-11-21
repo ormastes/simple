@@ -3376,6 +3376,8 @@ static RuntimeString *simpleos_as_string(RuntimeValue v)
 int64_t rt_any_to_int(int64_t value)
 {
     if (simpleos_as_string(value)) return (int64_t)rt_string_to_int(value);
+    if (((uintptr_t)value & TAG_MASK) == TAG_FLOAT) return (int64_t)rt_value_as_float(value);
+    if (IS_HEAP(value) && DECODE_PTR(value) && ((HeapHeader *)DECODE_PTR(value))->type == HEAP_FLOAT) return (int64_t)rt_value_as_float(value);
     return (int64_t)rt_value_unbox_int(value);
 }
 
@@ -3397,8 +3399,11 @@ int64_t rt_array_repeat(int64_t value, int64_t count)
 int64_t rt_array_fill_span(int64_t dst, int64_t off, int64_t count, int64_t value)
 {
     RuntimeArray *a = simpleos_as_array(dst);
-    if (!a || off < 0 || count < 0 || (uint64_t)off + (uint64_t)count > a->len) return -1;
-    for (int64_t i = 0; i < count; i++) a->items[off + i] = value;
+    if (!a || off < 0 || count < 0) return -1;
+    if (count == 0) return 0;
+    if ((uint64_t)off + (uint64_t)count > a->len) return -1;
+    RuntimeValue *items = runtime_array_items(a);
+    for (int64_t i = 0; i < count; i++) items[off + i] = value;
     return 0;
 }
 
@@ -3408,7 +3413,7 @@ static int64_t simpleos_typed_word_at(int64_t arr, int64_t idx)
     if (!a) return 0;
     if (idx < 0) idx += (int64_t)a->len;
     if (idx < 0 || (uint64_t)idx >= a->len) return 0;
-    return (int64_t)simpleos_raw_or_encoded_int(a->items[idx]);
+    return (int64_t)simpleos_raw_or_encoded_int(runtime_array_items(a)[idx]);
 }
 
 int64_t rt_typed_words_u32_at(int64_t a, int64_t idx) { return simpleos_typed_word_at(a, idx) & 0xffffffffLL; }
@@ -3417,13 +3422,19 @@ int64_t rt_typed_words_u64_at(int64_t a, int64_t idx) { return simpleos_typed_wo
 
 int8_t rt_typed_words_u32_set(int64_t a, int64_t idx, int64_t value)
 {
+    RuntimeArray *arr = simpleos_as_array(a);
+    if (arr && idx < 0) idx += (int64_t)arr->len;
     return rt_array_set(a, idx, ENCODE_INT((int64_t)((uint64_t)value & 0xffffffffULL))) ? 1 : 0;
 }
 
 int64_t rt_typed_bytes_u8_data_at(int64_t data_ptr, int64_t index)
 {
-    if (!data_ptr || index < 0) return 0;
-    return (int64_t)(simpleos_raw_or_encoded_int(((RuntimeValue *)(uintptr_t)data_ptr)[index]) & 0xffu);
+    /* Bit 0 is the MIR preheader layout tag (hosted runtime_native.c):
+     * set = 8-byte tagged slots, clear = byte-packed. */
+    uintptr_t base = (uintptr_t)data_ptr & ~(uintptr_t)1;
+    if (!base || index < 0) return 0;
+    if (data_ptr & 1) return (int64_t)(simpleos_raw_or_encoded_int(((RuntimeValue *)base)[index]) & 0xffu);
+    return (int64_t)((const uint8_t *)base)[index];
 }
 
 int64_t rt_string_from_byte_array(int64_t array_value) { return (int64_t)rt_bytes_to_text(array_value); }
@@ -3447,8 +3458,8 @@ int64_t rt_text_find(int64_t value, int64_t needle, int64_t start)
     RuntimeString *h = simpleos_as_string(value), *n = simpleos_as_string(needle);
     if (!h || !n) return -1;
     if (start < 0) start = 0;
-    if ((uint64_t)start > h->len) return -1;
-    if (n->len == 0) return start;
+    if (n->len == 0) return (uint64_t)start <= h->len ? start : (int64_t)h->len;
+    if ((uint64_t)start >= h->len || n->len > h->len) return -1;
     for (uint64_t i = (uint64_t)start; i + n->len <= h->len; i++) {
         uint64_t j = 0;
         while (j < n->len && h->data[i + j] == n->data[j]) j++;
