@@ -6,7 +6,7 @@ including ownership kinds, and otherwise use the lowerer's existing Infer
 marker. This does not infer an owner from an untyped expression.
 """
 
-use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, MethodResolution}
 use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolTable, SymbolKind}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_symbol_table_methods.*
@@ -119,9 +119,30 @@ pub fn hir_binding_direct_call_return_kind(kind: HirExprKind, symbols: SymbolTab
 # When the receiver's declared type names a non-generic owner that declares
 # the method, carry that method's declared (settled) return type.
 # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=same by-value HirExpr prologue deep copy as hir_binding_direct_call_return_kind; take the kind
+fn _hir_method_return_if_settled(symbols: SymbolTable, method_raw_id: i64) -> HirType?:
+    if method_raw_id < 0:
+        return None
+    if val declaration = symbols.get_symbol_raw(method_raw_id):
+        if declaration.generic_param_count != 0:
+            return None
+        if val signature = declaration.type_:
+            match signature.kind:
+                case HirTypeKind.Function(_, result, _):
+                    if hir_const_type_settled(result):
+                        return result
+                case _: ()
+    None
+
 pub fn hir_binding_method_call_return_kind(kind: HirExprKind, symbols: SymbolTable) -> HirType?:
     match kind:
-        case HirExprKind.MethodCall(receiver, method, _, _):
+        case HirExprKind.MethodCall(receiver, method, _, resolution):
+            var resolved_method_id: i64 = -1
+            match resolution:
+                case MethodResolution.StaticMethod(_, method_id): resolved_method_id = method_id.id
+                case MethodResolution.InstanceMethod(_, method_id): resolved_method_id = method_id.id
+                case _: ()
+            if val resolved_return = _hir_method_return_if_settled(symbols, resolved_method_id):
+                return resolved_return
             var receiver_id: i64 = -1
             match receiver.kind:
                 case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _): receiver_id = symbol.id
@@ -145,13 +166,8 @@ pub fn hir_binding_method_call_return_kind(kind: HirExprKind, symbols: SymbolTab
                         val applied: [HirType] = owner_args
                         if applied.len() != 0: return nil
                         if val method_id = symbols.lookup_method_in_type_raw(owner.id, method):
-                            if val declaration = symbols.get_symbol_raw(method_id.id):
-                                if declaration.generic_param_count != 0: return nil
-                                if val signature = declaration.type_:
-                                    match signature.kind:
-                                        case HirTypeKind.Function(_, result, _):
-                                            if hir_const_type_settled(result): return result
-                                        case _: ()
+                            if val method_return = _hir_method_return_if_settled(symbols, method_id.id):
+                                return method_return
                     case _: ()
         case _: ()
     nil

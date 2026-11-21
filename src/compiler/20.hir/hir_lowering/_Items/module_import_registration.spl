@@ -374,7 +374,8 @@ impl HirLowering:
             # behind made row N of the next importer read an id of the
             # previous one (begin_module already resets all three).
             self.transitive_bare_ids = []
-        self.supersede_transitive_bare_type(local_name)
+        if materialize_enum:
+            self.supersede_transitive_bare_type(local_name)
         val registered_enum_tag = if materialize_enum: " E" else: " -"
         val registered_scope = if self.registering_lexical_import: " scope=" + self.symbols.current_scope.id.to_string() else: ""
         val registration_key = imported_mod.module_name + " " + imported_name + " " + local_name + registered_enum_tag + registered_scope
@@ -394,12 +395,23 @@ impl HirLowering:
             val declaration_authority = module_surface_declaration_authority_lookup_typed_v1(
                 imported_mod.declaration_authority_index, imported_name, selected_category)
             if declaration_authority.found:
-                val bound_origin = self.symbols.bind_declaration_origin_v1(
-                    bound_symbol, declaration_authority.declaring_module,
-                    declaration_authority.source_name, declaration_authority.source_modifier,
-                    declaration_authority.source_path, declaration_authority.projection_key)
-                if bound_origin.is_err():
-                    self.error(bound_origin.unwrap_err(), import_span)
+                var bind_target_matches = true
+                val qual_type_id = self.symbols.lookup_qualified_type_raw(
+                    declaration_authority.declaring_module, declaration_authority.source_name)
+                if qual_type_id >= 0 and qual_type_id != bound_symbol.id:
+                    bind_target_matches = false
+                else:
+                    val bound_sym: HirSymbol = self.symbols.symbols[bound_symbol.id]
+                    if bound_sym.declaration_modifier_v1 != "" and bound_sym.declaration_owner_v1 != "" and
+                            hir_symbol_owner_module(bound_sym.declaration_owner_v1) != hir_symbol_owner_module(declaration_authority.declaring_module):
+                        bind_target_matches = false
+                if bind_target_matches:
+                    val bound_origin = self.symbols.bind_declaration_origin_v1(
+                        bound_symbol, declaration_authority.declaring_module,
+                        declaration_authority.source_name, declaration_authority.source_modifier,
+                        declaration_authority.source_path, declaration_authority.projection_key)
+                    if bound_origin.is_err():
+                        self.error(bound_origin.unwrap_err(), import_span)
         # Record misses too. A changed binding state must replace the old
         # scalar memo state so a later scope pop still triggers registration.
         self.registered_import_memo_record_selected_v1(
@@ -620,8 +632,8 @@ impl HirLowering:
         # deliberately left on the existing path.  The recursive call is
         # bounded by the already-frozen origin graph; invalid origins fail
         # closed instead of silently manufacturing a facade-owned symbol.
-        val routed_origin = module_surface_export_origin_index_lookup(
-            imported_mod.export_origin_index, imported_name)
+        val routed_origin = hir_export_origin_lookup_v1(
+            self.module_surfaces, imported_mod, imported_name)
         if routed_origin.found:
             val routed_index = hir_export_origin_surface_index(
                 self.module_surfaces, routed_origin.owner_module)
@@ -866,6 +878,20 @@ impl HirLowering:
             hir_phase_profile_add(HIR_PROF_RIS_PROJECT, project_started)
             self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span, materialize_enum)
         elif enum_position >= 0:
+            val existing_enum_check = self.import_binding_or_invalid(local_name)
+            var enum_same_owner = false
+            if existing_enum_check.is_valid() and self.symbols.symbols.has(existing_enum_check.id):
+                val existing_enum_sym: HirSymbol = self.symbols.symbols[existing_enum_check.id]
+                if val existing_enum_owner = existing_enum_sym.defining_module:
+                    enum_same_owner = existing_enum_owner == imported_mod.module_name
+            if existing_enum_check.is_valid() and not enum_same_owner:
+                val qualified_local = "{imported_mod.module_name}::{imported_name}"
+                if local_name == qualified_local:
+                    return selected_category
+                self.register_imported_symbol(
+                    imported_mod.physical_index, imported_mod_name, imported_name,
+                    qualified_local, import_span, materialize_enum)
+                return selected_category
             if materialize_enum:
                 val root_origin = HirMaterializedPayloadOrigin(
                     found: true,
@@ -1118,6 +1144,7 @@ impl HirLowering:
                 self.symbols.rename_symbol(imported_fn_sym, imported_name)
             self.qualify_imported_function_symbol(imported_fn_sym, imported_mod.module_name, imported_name)
             val imported_callable: ModuleSurfaceCallable = imported_mod.callable_values[callable_position]
+            self.record_surface_call_arity_row(imported_fn_sym.id, imported_callable, false)
             self.symbols.mark_generic_callable(imported_fn_sym, imported_callable.type_params.len())
             if not fn_type.?:
                 val declared_params = self.declared_imported_param_types_v1(
