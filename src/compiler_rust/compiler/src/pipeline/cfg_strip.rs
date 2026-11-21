@@ -125,6 +125,26 @@ fn is_top_level_global_decl(line: &str) -> bool {
     ["let ", "val ", "var ", "const ", "static "]
         .iter()
         .any(|prefix| declaration.starts_with(prefix))
+        || is_top_level_import_decl(declaration)
+}
+
+/// Top-level module edges (`use`, `import`, `from m import`, `common use`,
+/// `export ... from m`). Blanking an inactive `@cfg(arch)` import here keeps
+/// the other-arch module out of dependency collection, matching the
+/// pure-Simple preprocessor, which blanks whatever declaration follows a false
+/// `@cfg` (seed_cfg_on_top_level_use_ignored_2026-11-21).
+fn is_top_level_import_decl(declaration: &str) -> bool {
+    // `use =` / `export.x` are expressions (soft keywords): require an
+    // identifier-ish start after the keyword.
+    let starts_ident = |rest: &str| rest.trim_start().chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '{' || c == '*');
+    for keyword in ["use ", "import ", "from ", "common use "] {
+        if let Some(rest) = declaration.strip_prefix(keyword) {
+            return starts_ident(rest);
+        }
+    }
+    declaration
+        .strip_prefix("export ")
+        .is_some_and(|rest| starts_ident(rest) && rest.contains(" from "))
 }
 
 fn delimiter_delta(line: &str, triple_quote: &mut Option<u8>) -> i64 {
@@ -637,5 +657,26 @@ payload
         let riscv64 = selected(TargetArch::Riscv64);
         assert!(riscv64.contains("riscv64"));
         assert!(!riscv64.contains("aarch64"));
+    }
+
+    #[test]
+    fn inactive_cfg_arch_top_level_use_is_blanked_before_dependency_collection() {
+        // seed_cfg_on_top_level_use_ignored_2026-11-21: `@cfg(riscv64)\nuse ...`
+        // leaked riscv modules into aarch64 kernel closures.
+        let source = "@cfg(riscv64)\nuse os.kernel.arch.riscv64.console.{serial_read_byte}\n@cfg(arm64)\nuse os.kernel.arch.arm.pl011_common.{pl011_write_byte}\n@cfg(not(riscv64))\npub use os.a.{\n    b,\n    c\n}\n@cfg(x86_64)\nexport y from os.x\n@cfg(riscv32)\nimport os.rv32.thing\n@cfg(x86)\nuse = 3\nfn keep() -> i64:\n    1\n";
+        let arm = strip_inactive_cfg_arch_globals(source, TargetArch::Aarch64);
+        assert_eq!(arm.lines().count(), source.lines().count());
+        assert!(!arm.contains("riscv64.console"), "{arm}");
+        assert!(arm.contains("pl011_common") && arm.contains("pub use os.a.{") && arm.contains("    c"));
+        assert!(!arm.contains("from os.x") && !arm.contains("os.rv32.thing"));
+        // `use = 3` is an expression, not an import: left for the parser.
+        assert!(arm.contains("use = 3"));
+        assert!(arm.contains("fn keep"));
+        let rv = strip_inactive_cfg_arch_globals(source, TargetArch::Riscv64);
+        assert!(rv.contains("riscv64.console") && !rv.contains("pl011_common"));
+        assert!(!rv.contains("os.a.{") && !rv.contains("    b,") && !rv.contains("@cfg"));
+        // Indented (function-local) uses are not touched by this pass.
+        let local = "fn f():\n    @cfg(riscv64)\n    use a.b\n";
+        assert_eq!(strip_inactive_cfg_arch_globals(local, TargetArch::Aarch64), local);
     }
 }
