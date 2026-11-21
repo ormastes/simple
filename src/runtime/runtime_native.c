@@ -826,53 +826,6 @@ SPL_HOSTED_UNAVAILABLE_WEAK bool rt_sdl2_present_rgba(int64_t window_handle,
 SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_hosted_select_surface(void) {
     return -2;
 }
-#if defined(SIMPLE_CORE_C_STANDALONE)
-bool rt_is_interpreter_runtime(void) {
-    return false;
-}
-
-/* Core-C standalone archives back AOT-native binaries only; seed-JIT code
-   never runs under them. Paired with rt_is_interpreter_runtime above so the
-   standalone lane defines BOTH runtime-kind probes declared in runtime.h
-   (CORE_REQUIRED_RUNTIME_SYMBOLS lists both). runtime.c also defines this,
-   but runtime.c is not a core-C archive member (tools.rs runtime_inputs), so
-   without this the archive was one required ABI symbol short. */
-bool rt_is_jit_runtime(void) {
-    return false;
-}
-
-int64_t rt_cli_run_file(int64_t path, int64_t args, uint8_t gc_log, uint8_t gc_off) {
-    (void)path; (void)args; (void)gc_log; (void)gc_off;
-    fprintf(stderr, "simple: --fork requires hosted interpreter support\n");
-    return 1;
-}
-
-/* Raw mmap for the SMF loader (src/compiler/99.loader/smf_mmap_native.spl).
-   Exactly the runtime.c-not-an-archive-member case documented above: the only
-   definition is platform/unix_common.h:365, reached solely through
-   platform/platform.h, which runtime.c:35 is the sole TU to include -- and
-   runtime.c is not a core-C archive member. Without this, a core-C Stage-4
-   link of the full CLI failed with "requested symbols have no archive owner:
-   rt_mmap_raw" (macOS, 2026-09-06). This is real functionality, not a
-   fail-closed backfill: the loader must actually map. Kept byte-for-byte
-   equivalent to the unix_common.h implementation, including its refusal to
-   admit W|X, and confined to the standalone lane so it can never collide with
-   that definition in a link that does carry runtime.c. */
-int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags,
-                    int64_t fd, int64_t offset) {
-#if defined(_WIN32)
-    return spl_windows_mmap_raw(addr, length, prot, flags, fd, offset);
-#else
-    if (length <= 0 || offset < 0) return -1;
-    /* SFFI executable mappings must transition RW -> RX; never admit RWX. */
-    if ((prot & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)) return -1;
-    void* result = mmap((void*)(uintptr_t)addr, (size_t)length, (int)prot,
-                        (int)flags, (int)fd, (off_t)offset);
-    if (result == MAP_FAILED) return -1;
-    return (int64_t)(uintptr_t)result;
-#endif
-}
-
 /* Counted-text access for values handed to C. Read text by its byte LENGTH,
  * never up to a NUL. In the mixed link of a seed-built compiler this file is
  * a supplement behind the Rust simple_runtime: rt_string_len /
@@ -924,6 +877,53 @@ static const char* rt_text_cstr_into(int64_t value, char* buf, size_t cap) {
     if (len) memcpy(buf, data, len);
     buf[len] = '\0';
     return buf;
+}
+
+#if defined(SIMPLE_CORE_C_STANDALONE)
+bool rt_is_interpreter_runtime(void) {
+    return false;
+}
+
+/* Core-C standalone archives back AOT-native binaries only; seed-JIT code
+   never runs under them. Paired with rt_is_interpreter_runtime above so the
+   standalone lane defines BOTH runtime-kind probes declared in runtime.h
+   (CORE_REQUIRED_RUNTIME_SYMBOLS lists both). runtime.c also defines this,
+   but runtime.c is not a core-C archive member (tools.rs runtime_inputs), so
+   without this the archive was one required ABI symbol short. */
+bool rt_is_jit_runtime(void) {
+    return false;
+}
+
+int64_t rt_cli_run_file(int64_t path, int64_t args, uint8_t gc_log, uint8_t gc_off) {
+    (void)path; (void)args; (void)gc_log; (void)gc_off;
+    fprintf(stderr, "simple: --fork requires hosted interpreter support\n");
+    return 1;
+}
+
+/* Raw mmap for the SMF loader (src/compiler/99.loader/smf_mmap_native.spl).
+   Exactly the runtime.c-not-an-archive-member case documented above: the only
+   definition is platform/unix_common.h:365, reached solely through
+   platform/platform.h, which runtime.c:35 is the sole TU to include -- and
+   runtime.c is not a core-C archive member. Without this, a core-C Stage-4
+   link of the full CLI failed with "requested symbols have no archive owner:
+   rt_mmap_raw" (macOS, 2026-09-06). This is real functionality, not a
+   fail-closed backfill: the loader must actually map. Kept byte-for-byte
+   equivalent to the unix_common.h implementation, including its refusal to
+   admit W|X, and confined to the standalone lane so it can never collide with
+   that definition in a link that does carry runtime.c. */
+int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags,
+                    int64_t fd, int64_t offset) {
+#if defined(_WIN32)
+    return spl_windows_mmap_raw(addr, length, prot, flags, fd, offset);
+#else
+    if (length <= 0 || offset < 0) return -1;
+    /* SFFI executable mappings must transition RW -> RX; never admit RWX. */
+    if ((prot & (PROT_WRITE | PROT_EXEC)) == (PROT_WRITE | PROT_EXEC)) return -1;
+    void* result = mmap((void*)(uintptr_t)addr, (size_t)length, (int)prot,
+                        (int)flags, (int)fd, (off_t)offset);
+    if (result == MAP_FAILED) return -1;
+    return (int64_t)(uintptr_t)result;
+#endif
 }
 
 /* The rest of the SMF loader's descriptor pair (smf_mmap_native.spl opens,
