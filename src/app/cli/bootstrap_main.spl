@@ -32,6 +32,7 @@ use app.cli.file_worker_pool_refusal.{shard_aggregate_failure_line_v1}
 use app.cli.native_build_main.{run_native_build_worker, run_native_build_entry_v1,
     native_build_focused_capsule_shards_v1, native_build_shard_aggregate_fail_reason_v1, run_native_file_worker_v1,
     native_build_authority_source_roots_v1, native_build_coordinator_prepublish_closure_v1,
+    native_build_capsule_admit_preclosed_v1,
     native_build_memory_admission_refusal_v1}
 use app.cli.native_build_hir_warmup_outcome.{native_build_stage3_capsule_shard_entry_selected_v1,
     native_build_stage3_capsule_mir_route_v1}
@@ -258,6 +259,9 @@ fn bootstrap_stage4_link_or_place_v1(args: [text]) -> i64:
     if inc_dir != "" and (env_get(FILE_WORKER_LINK_PLACED_ENV_V1) ?? "") == "1":
         val _kept = file_worker_inc_commit_v1(inc_dir, inc_producer, output, false)
         return 0
+    val stage4_closure_args = bootstrap_stage4_closure_worker_args_v1(bootstrap_native_build_worker_args(args))
+    if not native_build_capsule_admit_preclosed_v1(stage4_closure_args):
+        return 1
     val code = run_exact_stage4_focused_capsule(args)
     if code == 0 and inc_dir != "":
         val _recorded = file_worker_inc_commit_v1(inc_dir, inc_producer, output, true)
@@ -267,6 +271,25 @@ fn bootstrap_stage4_link_or_place_v1(args: [text]) -> i64:
 # every parse shard would cold-observe the whole checkout on its own; the
 # refresh itself is lockless (doc/05_design/compiler/scv/lockless_refresh.md),
 # so inheriting is a cost saving, never a lock-contention fix.
+# Exact Stage4 capsules ignore `--source` flags and resolve from the entry's
+# default workspace cut (`focused_native_build_effective_sources`). Strip
+# `--source` when publishing/admitting Stage4's preclosed closure so the signed
+# request matches the capsule's exact default root cut (`src/os` included).
+pub fn bootstrap_stage4_closure_worker_args_v1(worker_args: [text]) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < worker_args.len():
+        val arg = worker_args[i]
+        if arg == "--source":
+            i = i + 2
+            continue
+        if arg.starts_with("--source="):
+            i = i + 1
+            continue
+        out = out.push(arg)
+        i = i + 1
+    out
+
 pub fn bootstrap_coordinator_needs_authority_v1(shard_child: bool, snapshot_root: text) -> bool:
     not shard_child and snapshot_root == ""
 
@@ -556,12 +579,16 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
                     env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "", stage3_explicit_mir_sharding) == "two-pass"
                 if stage3_two_pass and not bootstrap_shard_child_active():
                     print "[stage3-route] HIR warm-up + MIR shard pool"
+                if (stage3_allow_mir or stage3_two_pass) and not bootstrap_shard_child_active() and
+                        not bootstrap_build_role_child_requested(args):
                     if not bootstrap_coordinator_publish_authority_v1(worker_args):
                         return 1
                     if not native_build_coordinator_prepublish_closure_v1(worker_args):
                         return 1
                 if not bootstrap_capsule_shard_prepass_routed(args, stage3_allow_mir or stage3_two_pass, stage3_allow_mir):
                     return 1
+            if not native_build_capsule_admit_preclosed_v1(worker_args):
+                return 1
             return run_exact_stage3_focused_capsule(args)
         if env_get("SIMPLE_BOOTSTRAP_STAGE4") != "1":
             return run_bootstrap_native_build_coordinator(args)
@@ -594,6 +621,12 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
                 env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "")
         if stage4_per_file:
             print "[stage4-route] per-file worker pool + per-module link"
+        if not bootstrap_shard_child_active() and not bootstrap_build_role_child_requested(args):
+            val stage4_closure_args = bootstrap_stage4_closure_worker_args_v1(worker_args)
+            if not bootstrap_coordinator_publish_authority_v1(stage4_closure_args):
+                return 1
+            if not native_build_coordinator_prepublish_closure_v1(stage4_closure_args):
+                return 1
         if not bootstrap_capsule_shard_prepass_routed(args, true, stage4_per_file):
             return 1
         return bootstrap_stage4_link_or_place_v1(args)

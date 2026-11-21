@@ -33,6 +33,38 @@ extern fn rt_file_publish_noreplace(staged_path: text, destination: text) -> i64
 fn llvm_bootstrap_last_object_path() -> text:
     "{_get_temp_dir()}/simple_llvm_{getpid()}.o"
 
+pub struct LlvmTempCleanupPlanV1:
+    paths: [text]
+
+pub struct LlvmTempCleanupFlagsV1:
+    keep_intermediates: bool
+    keep_ir: bool
+    bootstrap_io: bool
+    bitcode_debug: bool
+    succeeded: bool
+
+pub fn llvm_temp_cleanup_plan_v1(ir_path: text, bitcode_path: text, obj_path: text, flags: LlvmTempCleanupFlagsV1) -> LlvmTempCleanupPlanV1:
+    if flags.keep_intermediates or flags.bootstrap_io:
+        return LlvmTempCleanupPlanV1(paths: [])
+    var paths: [text] = []
+    if obj_path != "":
+        paths.push(obj_path)
+    if flags.succeeded:
+        if not flags.keep_ir and not flags.bitcode_debug:
+            if ir_path != "": paths.push(ir_path)
+            if bitcode_path != "": paths.push(bitcode_path)
+    else:
+        if not flags.keep_ir and ir_path != "":
+            paths.push(ir_path)
+        if not flags.bitcode_debug and bitcode_path != "":
+            paths.push(bitcode_path)
+    LlvmTempCleanupPlanV1(paths: paths)
+
+fn _llvm_apply_temp_cleanup_v1(plan: LlvmTempCleanupPlanV1):
+    for p in plan.paths:
+        if file_exists(p):
+            file_delete(p)
+
 pub fn llvm_debug_artifact_paths() -> (text, text, text):
     """Current process's textual IR, bitcode, and object artifact paths."""
     val prefix = "{_get_temp_dir()}/simple_llvm_{getpid()}"
@@ -345,9 +377,10 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
     val llc = llvm_object_llc_v1()
     val clang = if llc == "": find_clang() else: ""
     if llc == "" and clang == "":
-        var probed = ""
+        var probed_lines: [text] = []
         for path in tool_probe_locations("llc"):
-            probed = probed + "  Checked: {path}\n"
+            probed_lines.push("  Checked: {path}\n")
+        val probed = probed_lines.join("")
         return Err(
             "llc not found. Please install LLVM:\n" +
             "  Ubuntu/Debian: apt install llvm\n" +
@@ -426,8 +459,17 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
     if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         print "[llvm-tools] llc-done"
 
+    val keep_intermediates = (rt_env_get("SIMPLE_KEEP_BUILD_INTERMEDIATES") ?? "") == "1"
+    val keep_ir = (rt_env_get("SIMPLE_KEEP_LLVM_IR") ?? "") == "1"
+    val fail_cleanup = llvm_temp_cleanup_plan_v1(ir_path, bitcode_path, obj_path, LlvmTempCleanupFlagsV1(
+        keep_intermediates: keep_intermediates, keep_ir: keep_ir,
+        bootstrap_io: bootstrap_io, bitcode_debug: bitcode_debug, succeeded: false))
+    val ok_cleanup = llvm_temp_cleanup_plan_v1(ir_path, bitcode_path, obj_path, LlvmTempCleanupFlagsV1(
+        keep_intermediates: keep_intermediates, keep_ir: keep_ir,
+        bootstrap_io: bootstrap_io, bitcode_debug: bitcode_debug, succeeded: true))
+
     if llvm_llc_error_diagnostic(llc_code, llc_out, llc_err, tool, compile_input_path) != "":
-        file_delete(obj_path)
+        _llvm_apply_temp_cleanup_v1(fail_cleanup)
         if bootstrap_io:
             print "[llvm-direct] failed-ir {ir_path}"
             return Err("llc failed during bootstrap; preserved LLVM IR path printed above")
@@ -450,35 +492,31 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
         llc_err = retry_err
         llc_code = retry_code
         if llvm_llc_error_diagnostic(llc_code, llc_out, llc_err, tool, compile_input_path) != "":
-            file_delete(obj_path)
+            _llvm_apply_temp_cleanup_v1(fail_cleanup)
             if bootstrap_io:
                 print "[llvm-direct] failed-ir {ir_path}"
                 return Err("llc failed during bootstrap; preserved LLVM IR path printed above")
             return Err("llc failed (exit {llc_code}):\n{llc_out}{llc_err}\n\nCommand: {cmd}")
     if not file_exists(obj_path):
+        _llvm_apply_temp_cleanup_v1(fail_cleanup)
         if bootstrap_io:
             print "[llvm-tools] llc-no-object"
         return Err("llc produced no object file after retries: {obj_path}\nCommand: {cmd}")
 
-    # Clean up IR file only after successful llc. On failure, preserve it so
-    # native-build diagnostics can point at the malformed IR.
-    # SIMPLE_KEEP_LLVM_IR=1 preserves the .ll even on success for debugging.
-    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1" and (rt_env_get("SIMPLE_KEEP_LLVM_IR") ?? "") != "1" and not bitcode_debug:
-        file_delete(ir_path)
-        if file_exists(bitcode_path):
-            file_delete(bitcode_path)
-
-    # Extract symbols before deleting the object file
+    # Extract symbols before deleting the object file; clean intermediates if nm fails.
     val symbols = if native_tool_strict_requested_v1():
-        extract_symbols_nm_checked_v1(obj_path)?
+        match extract_symbols_nm_checked_v1(obj_path):
+            case Ok(found_syms): found_syms
+            case Err(nm_err):
+                _llvm_apply_temp_cleanup_v1(fail_cleanup)
+                return Err(nm_err)
     else: extract_symbols_nm(obj_path)
 
-    # Read object bytes
+    # Read object bytes, then apply success intermediate cleanup policy.
     val bytes = rt_file_read_bytes(obj_path)
     if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         print "[llvm-tools] read-bytes"
-    if not bootstrap_io:
-        file_delete(obj_path)
+    _llvm_apply_temp_cleanup_v1(ok_cleanup)
 
     if bytes == nil:
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
