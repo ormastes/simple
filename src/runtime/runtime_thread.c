@@ -755,6 +755,21 @@ static int spl_worker_callable(int64_t kind, int64_t word, int64_t* entry, int64
     return 1;
 }
 
+/* A registered heap closure (tagged) is pinned until the worker is done, so
+ * the spawner's transient scope may end first (pool parity). On retain failure
+ * frees td and returns 0. */
+static int spl_thread_pin_closure(RtThreadData* td, int64_t closure_ptr) {
+    td->pinned_closure = 0;
+    if ((((uint64_t)closure_ptr) & TAG_MASK) == TAG_HEAP) {
+        if (!rt_closure_retain(closure_ptr)) {
+            SPL_FREE(td);
+            return 0;
+        }
+        td->pinned_closure = closure_ptr;
+    }
+    return 1;
+}
+
 static int64_t spl_thread_start(RtThreadData* td) {
     td->result      = 0;
     td->done        = 0;
@@ -789,14 +804,7 @@ int64_t rt_thread_spawn_isolated_kind(int64_t kind, int64_t closure, int64_t dat
     td->closure_ptr = closure_ptr;
     /* A registered heap closure (tagged) is pinned until the worker is done,
      * so the spawner's transient scope may end first (pool parity). */
-    td->pinned_closure = 0;
-    if ((((uint64_t)closure_ptr) & TAG_MASK) == TAG_HEAP) {
-        if (!rt_closure_retain(closure_ptr)) {
-            SPL_FREE(td);
-            return 0;
-        }
-        td->pinned_closure = closure_ptr;
-    }
+    if (!spl_thread_pin_closure(td, closure_ptr)) return 0;
     td->data1       = data;
     td->data2       = 0;
     td->raw_worker_args = raw;
@@ -825,14 +833,7 @@ int64_t rt_thread_spawn_isolated_with_args_kind(int64_t kind, int64_t fn_ptr, in
     td->closure_ptr = closure_ptr;
     /* A registered heap closure (tagged) is pinned until the worker is done,
      * so the spawner's transient scope may end first (pool parity). */
-    td->pinned_closure = 0;
-    if ((((uint64_t)closure_ptr) & TAG_MASK) == TAG_HEAP) {
-        if (!rt_closure_retain(closure_ptr)) {
-            SPL_FREE(td);
-            return 0;
-        }
-        td->pinned_closure = closure_ptr;
-    }
+    if (!spl_thread_pin_closure(td, closure_ptr)) return 0;
     td->data1       = data1;
     td->data2       = data2;
     td->raw_worker_args = raw;
@@ -937,6 +938,22 @@ typedef struct RtPoolTask {
     CONDITION_VARIABLE done_cond;
 #endif
 } RtPoolTask;
+
+static void rt_pool_task_lock(RtPoolTask* task) {
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&task->lock);
+#else
+    EnterCriticalSection(&task->lock);
+#endif
+}
+
+static void rt_pool_task_unlock(RtPoolTask* task) {
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_unlock(&task->lock);
+#else
+    LeaveCriticalSection(&task->lock);
+#endif
+}
 
 #define RT_POOL_V1_DIRECT_FUNCTION_MARKER INT64_C(0x5344495245435446)
 
@@ -1299,12 +1316,8 @@ static void rt_pool_state_v1_completed(RtPoolTask* task) {
 #endif
 }
 
-static RtPoolTask* rt_pool_pop_task(int worker_id) {
-#ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_lock(&g_pool_lock);
-    while (!rt_pool_has_tasks_locked()) {
-        pthread_cond_wait(&g_pool_not_empty, &g_pool_lock);
-    }
+/* Caller holds g_pool_lock. */
+static RtPoolTask* rt_pool_take_task_locked(int worker_id) {
     int count = g_pool_worker_count > 0 ? g_pool_worker_count : 1;
     RtPoolTask* task = rt_pool_queue_pop_head(&g_pool_queues[worker_id % count]);
     for (int offset = 1; task == NULL && offset < count; offset++) {
@@ -1315,6 +1328,16 @@ static RtPoolTask* rt_pool_pop_task(int worker_id) {
         if (g_pool_pending_tasks > 0) g_pool_pending_tasks--;
         g_pool_busy_workers++;
     }
+    return task;
+}
+
+static RtPoolTask* rt_pool_pop_task(int worker_id) {
+#ifdef SPL_THREAD_PTHREAD
+    pthread_mutex_lock(&g_pool_lock);
+    while (!rt_pool_has_tasks_locked()) {
+        pthread_cond_wait(&g_pool_not_empty, &g_pool_lock);
+    }
+    RtPoolTask* task = rt_pool_take_task_locked(worker_id);
     pthread_mutex_unlock(&g_pool_lock);
     if (task != NULL) rt_pool_state_v1_started(task);
     return task;
@@ -1323,16 +1346,7 @@ static RtPoolTask* rt_pool_pop_task(int worker_id) {
     while (!rt_pool_has_tasks_locked()) {
         SleepConditionVariableCS(&g_pool_not_empty, &g_pool_lock, INFINITE);
     }
-    int count = g_pool_worker_count > 0 ? g_pool_worker_count : 1;
-    RtPoolTask* task = rt_pool_queue_pop_head(&g_pool_queues[worker_id % count]);
-    for (int offset = 1; task == NULL && offset < count; offset++) {
-        int victim = (worker_id + offset) % count;
-        task = rt_pool_queue_pop_head(&g_pool_queues[victim]);
-    }
-    if (task != NULL) {
-        if (g_pool_pending_tasks > 0) g_pool_pending_tasks--;
-        g_pool_busy_workers++;
-    }
+    RtPoolTask* task = rt_pool_take_task_locked(worker_id);
     LeaveCriticalSection(&g_pool_lock);
     if (task != NULL) rt_pool_state_v1_started(task);
     return task;
@@ -1925,17 +1939,9 @@ int64_t rt_pool_state_try_submit_i64_v1(int64_t state_handle, int64_t entry_fn, 
 int64_t rt_pool_task_status_i64_v1(int64_t task_handle) {
     RtPoolTask* task = (RtPoolTask*)rt_pool_v1_handle_acquire(task_handle, RT_POOL_V1_TASK);
     if (!task) return -1;
-#ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_lock(&task->lock);
-#else
-    EnterCriticalSection(&task->lock);
-#endif
+    rt_pool_task_lock(task);
     int64_t status = task->released ? 3 : (task->joined ? 2 : (task->done ? 1 : 0));
-#ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_unlock(&task->lock);
-#else
-    LeaveCriticalSection(&task->lock);
-#endif
+    rt_pool_task_unlock(task);
     rt_pool_v1_handle_release(task_handle);
     return status;
 }
@@ -1952,11 +1958,7 @@ int64_t rt_pool_task_join_i64_v1(int64_t task_handle) {
 #endif
     task->joined = 1;
     int64_t result = task->result;
-#ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_unlock(&task->lock);
-#else
-    LeaveCriticalSection(&task->lock);
-#endif
+    rt_pool_task_unlock(task);
     rt_pool_v1_handle_release(task_handle);
     return result;
 }
@@ -1965,18 +1967,10 @@ int64_t rt_pool_task_release_i64_v1(int64_t task_handle) {
     RtPoolTask* task = (RtPoolTask*)rt_pool_v1_handle_acquire(task_handle, RT_POOL_V1_TASK);
     if (!task || !task->state_v1) return -1;
     RtPoolStateV1* state = task->state_v1;
-#ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_lock(&task->lock);
-#else
-    EnterCriticalSection(&task->lock);
-#endif
+    rt_pool_task_lock(task);
     int rejection = !task->done ? -3 : (task->released ? -2 : 0);
     if (!rejection) task->released = 1;
-#ifdef SPL_THREAD_PTHREAD
-    pthread_mutex_unlock(&task->lock);
-#else
-    LeaveCriticalSection(&task->lock);
-#endif
+    rt_pool_task_unlock(task);
     if (rejection) {
         rt_pool_v1_handle_release(task_handle);
         return rejection;
