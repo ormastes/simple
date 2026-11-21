@@ -216,3 +216,29 @@ the proportional dirtying above, about 1-3 GB at N=10-20, instead of the
 30 + 20 x (1-3) = 50-90 GB. Measure with `Private_Dirty` from
 `/proc/<pid>/smaps_rollup`; the first sample after the fork should now be
 near zero instead of ~5 GB.
+
+## Child memory budget and fork-time admission (2026-11-22)
+
+`SIMPLE_MIR_FORK_BATCH` bounds claims, not bytes. p4-cli-f24 (FORK=5, batch
+200, 100G cgroup cap) still lost a child to the memcg OOM killer at 52.5G
+anon-rss within ~7 minutes, because LPT order hands round 0 the heaviest
+modules. Two bounds were added in `native_mir_fork_v1.spl`:
+
+- **Per-child budget** `SIMPLE_MIR_FORK_CHILD_KB` (KiB, default 12000000,
+  `0` = off). Before each claim, after its claim count grew, a child reads
+  `/proc/self/smaps_rollup` `Private_Dirty + Private_Clean` (its COW copies and
+  new allocations; the shared root heap is not counted). Over budget, it
+  latches its claim cap to its current count, codegens and publishes what it
+  holds, and finishes like a full batch; the root forks a fresh child. The
+  check applies only after at least one claim, so a module larger than the
+  budget is still lowered and the root's "ledger must shrink" rule terminates.
+  With `BATCH=0` and the budget on, a finished child still gets a next batch.
+- **Admission**: the root forks `min(requested, max(1, headroom / budget))`
+  children, where headroom is the tightest `memory.max - memory.current` over
+  the cgroup v2 chain, bounded by `MemAvailable`. f24 numbers: ~57G headroom /
+  12G = 4. Admission of 1 still forks (declining would hand the build to the
+  complete worker, the single-process peak this mode avoids).
+
+The budget is soft: it is checked between claims, so the last module claimed
+overshoots it, and the child's end-of-batch codegen peak is not seen by it.
+The default leaves ~9G of f24's headroom for that slack. Unmeasured.

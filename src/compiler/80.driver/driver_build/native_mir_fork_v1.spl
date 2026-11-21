@@ -18,7 +18,8 @@
 #
 # Unset, empty, "0" or "1" disables it and nothing changes.
 # Design and risks: doc/05_design/compiler/perf/mir_fork_workers_cow_v1.md
-use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, file_read_nullable}
+use std.nogc_sync_mut.sffi.process_memory.{proc_status_kib}
 use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
 use std.io_runtime.{env_set, exit, getpid}
 use std.nogc_sync_mut.io.pipe.{stdout_flush}
@@ -42,6 +43,19 @@ pub const NATIVE_MIR_FORK_RETRIES_PER_SHARE_V1: i64 = 2
 # share from its untouched post-setup heap while the ledger still shrinks.
 pub const NATIVE_MIR_FORK_BATCH_ENV_V1: text = "SIMPLE_MIR_FORK_BATCH"
 pub const NATIVE_MIR_FORK_BATCH_DEFAULT_V1: i64 = 200
+# Per-child private-memory budget (SIMPLE_MIR_FORK_CHILD_KB=K KiB, "0" = off).
+# The batch bounds claims, not bytes: p4-cli-f24 (2026-11-22, FORK=5, batch
+# 200, 100G cap) had one child reach 52.5G anon-rss within ~7 minutes because
+# LPT order hands round 0 the heaviest modules. A child stops claiming once its
+# PRIVATE memory (smaps_rollup Private_Dirty+Private_Clean: the COW copies and
+# new allocations, not the ~25G of root heap it shares) exceeds K, after at
+# least one claim; it then codegens/publishes what it holds and finishes like a
+# full batch, and the root forks a fresh child. Default 12000000 KiB (~11.4G):
+# f24 left ~57G of cgroup headroom after coordinator (18G) + root (25G), so
+# 12G admits 4 children with ~9G slack for the over-shoot of the last module
+# claimed and the child's end-of-batch codegen, which the budget does not see.
+pub const NATIVE_MIR_FORK_CHILD_KB_ENV_V1: text = "SIMPLE_MIR_FORK_CHILD_KB"
+pub const NATIVE_MIR_FORK_CHILD_KB_DEFAULT_V1: i64 = 12000000
 
 var _native_mir_fork_child_v1: bool = false
 
@@ -68,19 +82,158 @@ pub fn native_mir_fork_batch_of_v1(raw: text) -> i64:
 pub fn native_mir_fork_batch_v1() -> i64:
     native_mir_fork_batch_of_v1(env_get_nullable(NATIVE_MIR_FORK_BATCH_ENV_V1) ?? "")
 
+# Budget of a SIMPLE_MIR_FORK_CHILD_KB value (KiB): unset/malformed = default,
+# "0" = off.
+# reason: env text and a KiB scalar, the same raw shape as the batch knob
+@allow(primitive_api)
+pub fn native_mir_fork_child_kb_of_v1(raw: text) -> i64:
+    if raw == "": return NATIVE_MIR_FORK_CHILD_KB_DEFAULT_V1
+    val parsed = raw.to_i64() ?? -1
+    if parsed < 0: NATIVE_MIR_FORK_CHILD_KB_DEFAULT_V1 else: parsed
+
+# reason: KiB scalar, same shape as native_mir_fork_batch_v1
+@allow(primitive_api)
+pub fn native_mir_fork_child_kb_v1() -> i64:
+    native_mir_fork_child_kb_of_v1(env_get_nullable(NATIVE_MIR_FORK_CHILD_KB_ENV_V1) ?? "")
+
+# A child stops claiming once its private memory exceeds the budget, but only
+# after it holds at least one module: a single module larger than the budget
+# is still lowered, so every child makes progress and the root's next-batch
+# rule (the ledger must shrink) still terminates. Unknown memory (-1) or a
+# disabled budget (0) never stops a child.
+# reason: claim count and KiB scalars from /proc, the same shape as the cap helpers
+@allow(primitive_api)
+pub fn native_mir_fork_child_over_budget_v1(claimed: i64, private_kib: i64, budget_kib: i64) -> bool:
+    budget_kib > 0 and claimed >= 1 and private_kib > budget_kib
+
+# Private_Dirty + Private_Clean (KiB) of a /proc/<pid>/smaps_rollup body; -1
+# when absent. Shared COW pages inherited from the root are not counted.
+# reason: procfs text in, KiB scalar out
+@allow(primitive_api)
+pub fn native_mir_fork_private_kib_of_v1(smaps_rollup: text) -> i64:
+    val dirty = proc_status_kib(smaps_rollup, "Private_Dirty:")
+    if dirty < 0: return -1
+    val clean = proc_status_kib(smaps_rollup, "Private_Clean:")
+    if clean > 0: dirty + clean else: dirty
+
+# Claim count at the last budget probe. smaps_rollup walks every page table of
+# a 30-50G process, so a child probes only after its claim count grew, never
+# on each claim attempt that loses to a sibling. 0 at fork, so the first probe
+# runs at one claim (the at-least-one rule).
+var _native_mir_fork_budget_probed_v1: i64 = 0
+
+# The child's claim cap after the budget probe: unchanged, or latched to the
+# current claim count once over budget (the walk then skips every row, the
+# child finishes and the root forks the next batch). Root / non-fork: unchanged.
+# reason: claim counts, the same shape as native_mir_fork_child_cap_v1
+@allow(primitive_api)
+pub fn native_mir_fork_budget_cap_v1(claimed: i64, cap: i64) -> i64:
+    if not _native_mir_fork_child_v1 or claimed >= cap or claimed <= _native_mir_fork_budget_probed_v1:
+        return cap
+    val budget_kib = native_mir_fork_child_kb_v1()
+    if budget_kib <= 0:
+        return cap
+    _native_mir_fork_budget_probed_v1 = claimed
+    val private_kib = native_mir_fork_private_kib_of_v1(file_read_nullable("/proc/self/smaps_rollup") ?? "")
+    if private_kib < 0 and claimed == 1:
+        # First probe only: an unreadable smaps_rollup disables the budget.
+        print "[mir-fork] child budget probe unavailable (/proc/self/smaps_rollup); budget off"
+    if not native_mir_fork_child_over_budget_v1(claimed, private_kib, budget_kib):
+        return cap
+    val owner = env_get_nullable(NATIVE_MIR_SHARD_OWNER_ENV_V1) ?? ""
+    print "[mir-fork] child owner={owner} budget reached: claimed={claimed} private_kib={private_kib} budget_kib={budget_kib}; no more claims"
+    stdout_flush()
+    claimed
+
+# Fork-time admission: min(requested, max(1, headroom / budget)). Unknown
+# headroom (-1) or a disabled budget keeps the requested count. One admitted
+# child still forks: declining would hand the build to the complete worker,
+# the single-process MIR peak this mode exists to avoid, while one budgeted
+# child re-forked per batch keeps every process bounded.
+# reason: worker count and KiB scalars
+@allow(primitive_api)
+pub fn native_mir_fork_admit_count_v1(requested: i64, headroom_kib: i64, budget_kib: i64) -> i64:
+    if requested <= 1 or budget_kib <= 0 or headroom_kib < 0:
+        return requested
+    val fit = headroom_kib / budget_kib
+    if fit < 1: return 1
+    if fit < requested: fit else: requested
+
+# cgroup v2 directories of a /proc/self/cgroup body, leaf first, root last;
+# empty without a "0::" row.
+# reason: procfs text in, cgroupfs directory paths out
+@allow(primitive_api)
+pub fn native_mir_fork_cgroup_dirs_v1(table: text) -> [text]:
+    var dirs: [text] = []
+    for line in table.split("\n"):
+        if line.starts_with("0::/"):
+            var rel = line.substring(3).trim()
+            while rel.byte_len() > 1 and rel.ends_with("/"):
+                rel = rel.substring(0, rel.byte_len() - 1)
+            while rel != "/" and rel != "":
+                dirs = dirs.push("/sys/fs/cgroup" + rel)
+                val slash = rel.rfind("/")
+                rel = if slash <= 0: "/" else: rel.substring(0, slash)
+            dirs = dirs.push("/sys/fs/cgroup")
+            return dirs
+    dirs
+
+# Tightest memory.max - memory.current (KiB) over the levels whose memory.max
+# is numeric; maxes[i]/currents[i] are one level's file bodies ("" unreadable,
+# "max" unlimited). -1 when no level is capped.
+# reason: cgroup file text in, KiB scalar out
+@allow(primitive_api)
+pub fn native_mir_fork_cgroup_headroom_kib_of_v1(maxes: [text], currents: [text]) -> i64:
+    var best: i64 = -1
+    var i: i64 = 0
+    while i < maxes.len() and i < currents.len():
+        val max_bytes = maxes[i].trim().to_i64() ?? -1
+        val current_bytes = currents[i].trim().to_i64() ?? -1
+        if max_bytes > 0 and current_bytes >= 0:
+            val free_bytes = max_bytes - current_bytes
+            val kib = if free_bytes > 0: free_bytes / 1024 else: 0
+            if best < 0 or kib < best:
+                best = kib
+        i = i + 1
+    best
+
+# Smaller of the cgroup headroom and MemAvailable when both are known; -1 when
+# neither is.
+# reason: KiB scalars
+@allow(primitive_api)
+pub fn native_mir_fork_headroom_kib_of_v1(cgroup_kib: i64, available_kib: i64) -> i64:
+    if cgroup_kib < 0: return available_kib
+    if available_kib < 0 or cgroup_kib < available_kib: cgroup_kib else: available_kib
+
+# Live headroom for the root right before it forks. Direct procfs/cgroupfs
+# reads, never a subprocess: a helper thread still alive at the fork makes
+# fork_shared_heap_v1 refuse (-2).
+# reason: KiB scalar
+@allow(primitive_api)
+pub fn native_mir_fork_headroom_kib_v1() -> (i64, i64):
+    var maxes: [text] = []
+    var currents: [text] = []
+    for dir in native_mir_fork_cgroup_dirs_v1(file_read_nullable("/proc/self/cgroup") ?? ""):
+        maxes = maxes.push(file_read_nullable(dir + "/memory.max") ?? "")
+        currents = currents.push(file_read_nullable(dir + "/memory.current") ?? "")
+    val cgroup_kib = native_mir_fork_cgroup_headroom_kib_of_v1(maxes, currents)
+    val available_kib = proc_status_kib(file_read_nullable("/proc/meminfo") ?? "", "MemAvailable:")
+    (cgroup_kib, available_kib)
+
 # A forked child's claim cap: its share's cap, bounded by the batch.
 @allow(primitive_api)
 pub fn native_mir_fork_child_cap_v1(share_cap: i64, batch: i64) -> i64:
     if batch > 0 and batch < share_cap: batch else: share_cap
 
-# Fork the next batch for a share whose child finished: only while the ledger
-# still shrinks (a round that claimed nothing means the rest is excluded
+# Fork the next batch for a share whose child finished. `batched`: a child may
+# stop before its share is done (batch > 0 or a child memory budget); only
+# while the ledger still shrinks (a round that claimed nothing means the rest is excluded
 # residue the coordinator's inventory close owns), never once a failure stops a
 # fail-fast build (`stop`) or under a BLOCKED ledger.
 @allow(primitive_api)
-pub fn native_mir_fork_next_batch_v1(batch: i64, finished: bool, stop: bool,
+pub fn native_mir_fork_next_batch_v1(batched: bool, finished: bool, stop: bool,
         blocked: bool, unclaimed_before: i64, unclaimed_after: i64) -> bool:
-    batch > 0 and finished and not stop and not blocked and
+    batched and finished and not stop and not blocked and
         unclaimed_after > 0 and unclaimed_after < unclaimed_before
 
 pub fn native_mir_fork_workers_v1() -> i64:
@@ -169,9 +322,15 @@ pub fn native_mir_fork_at_claim_loop_v1() -> (text, i64):
 # NOT mark itself done: the coordinator then sees an unfinished owner with
 # progress (its +fork children's claims) and takes its replacement path.
 pub fn native_mir_fork_shards_v1(queue: text, root_owner: text) -> (text, i64):
-    val count = native_mir_fork_workers_v1()
-    if count == 0 or _native_mir_fork_child_v1:
+    val requested = native_mir_fork_workers_v1()
+    if requested == 0 or _native_mir_fork_child_v1:
         return ("off", 0)
+    val child_kb = native_mir_fork_child_kb_v1()
+    val (cgroup_kib, available_kib) = native_mir_fork_headroom_kib_v1()
+    val headroom_kib = native_mir_fork_headroom_kib_of_v1(cgroup_kib, available_kib)
+    val count = native_mir_fork_admit_count_v1(requested, headroom_kib, child_kb)
+    print "[mir-fork] admission requested={requested} admitted={count} headroom_kib={headroom_kib} cgroup_headroom_kib={cgroup_kib} mem_available_kib={available_kib} child_kb={child_kb}"
+    stdout_flush()
     # Never recurse: children see the experiment disabled.
     if not env_set(NATIVE_MIR_FORK_WORKERS_ENV_V1, ""):
         print "[mir-fork] refused: worker-count environment could not be cleared"
@@ -179,6 +338,9 @@ pub fn native_mir_fork_shards_v1(queue: text, root_owner: text) -> (text, i64):
     val fail_fast = native_mir_fork_fail_fast_v1(env_get_nullable("SIMPLE_COMPILE_FAIL_FAST") ?? "", env_get_nullable("CI") ?? "")
     val parent_pid = getpid()
     val batch = native_mir_fork_batch_v1()
+    # A child stops early on its batch cap or its memory budget; either way it
+    # finishes and the share needs a next batch.
+    val batched = batch > 0 or child_kb > 0
     var retries: [i64] = []
     # Owner attempt per share: one per fork (retry or next batch), so every
     # child is a distinct ledger owner.
@@ -228,7 +390,7 @@ pub fn native_mir_fork_shards_v1(queue: text, root_owner: text) -> (text, i64):
         if round_index == 0 and pids.len() == 0:
             return native_mir_fork_decline_v1(queue, root_owner)
         forked_total = forked_total + pids.len()
-        print "[mir-fork] root owner={root_owner} round={round_index} forked={pids.len()}/{shares.len()} batch={batch} unclaimed={unclaimed_before} queue={queue}"
+        print "[mir-fork] root owner={root_owner} round={round_index} forked={pids.len()}/{shares.len()} batch={batch} child_kb={child_kb} unclaimed={unclaimed_before} queue={queue}"
         stdout_flush()
         # Reap the whole round before deciding anything: with no child alive
         # the unclaimed count is exact, not a race against live siblings.
@@ -268,10 +430,10 @@ pub fn native_mir_fork_shards_v1(queue: text, root_owner: text) -> (text, i64):
         # SIMPLE_COMPILE_FAIL_FAST=1, and a clean first batch must go on.
         val stop_batches = fail_fast and failed
         for share in batch_done:
-            if native_mir_fork_next_batch_v1(batch, true, stop_batches, blocked, unclaimed_before, unclaimed):
+            if native_mir_fork_next_batch_v1(batched, true, stop_batches, blocked, unclaimed_before, unclaimed):
                 attempts[share] = attempts[share] + 1
                 next_shares = next_shares.push(share)
-            elif batch > 0 and unclaimed > 0 and (stop_batches or blocked or unclaimed_before < 0):
+            elif batched and unclaimed > 0 and (stop_batches or blocked or unclaimed_before < 0):
                 # Rows a batch would have taken: the coordinator's replacement
                 # path judges them, not this root's done mark.
                 abandoned = true

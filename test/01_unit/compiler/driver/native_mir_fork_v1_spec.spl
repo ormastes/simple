@@ -37,7 +37,12 @@ use compiler.driver.driver_build.native_mir_fork_v1.{
     native_mir_fork_workers_of_v1, native_mir_fork_child_owner_v1,
     native_mir_fork_is_child_v1, native_mir_fork_reforkable_v1, native_mir_fork_fail_fast_v1,
     NATIVE_MIR_FORK_RETRIES_PER_SHARE_V1, native_mir_fork_batch_of_v1,
-    native_mir_fork_child_cap_v1, native_mir_fork_next_batch_v1, NATIVE_MIR_FORK_BATCH_DEFAULT_V1}
+    native_mir_fork_child_cap_v1, native_mir_fork_next_batch_v1, NATIVE_MIR_FORK_BATCH_DEFAULT_V1,
+    native_mir_fork_child_kb_of_v1, NATIVE_MIR_FORK_CHILD_KB_DEFAULT_V1,
+    native_mir_fork_child_over_budget_v1, native_mir_fork_private_kib_of_v1,
+    native_mir_fork_budget_cap_v1, native_mir_fork_admit_count_v1,
+    native_mir_fork_cgroup_dirs_v1, native_mir_fork_cgroup_headroom_kib_of_v1,
+    native_mir_fork_headroom_kib_of_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim,
     hir_shard_recovery_seal, hir_shard_recovery_progress,
     hir_shard_recovery_failure_count, hir_shard_recovery_owner_tree_progress_v1,
@@ -83,16 +88,89 @@ describe "MIR fork child batches":
     it "forks the next batch only while the ledger shrinks":
         # @req REQ-SSPEC-COMPILER
         step("forks the next batch only while the ledger shrinks")
-        assert_true(native_mir_fork_next_batch_v1(200, true, false, false, 4516, 3516))
+        assert_true(native_mir_fork_next_batch_v1(true, true, false, false, 4516, 3516))
         # A round that claimed nothing left only excluded residue: stop.
-        assert_false(native_mir_fork_next_batch_v1(200, true, false, false, 11, 11))
-        assert_false(native_mir_fork_next_batch_v1(200, true, false, false, 200, 0))
-        assert_false(native_mir_fork_next_batch_v1(200, true, false, false, 200, -1))
-        assert_false(native_mir_fork_next_batch_v1(0, true, false, false, 4516, 3516))
-        assert_false(native_mir_fork_next_batch_v1(200, false, false, false, 4516, 3516))
+        assert_false(native_mir_fork_next_batch_v1(true, true, false, false, 11, 11))
+        assert_false(native_mir_fork_next_batch_v1(true, true, false, false, 200, 0))
+        assert_false(native_mir_fork_next_batch_v1(true, true, false, false, 200, -1))
+        assert_false(native_mir_fork_next_batch_v1(false, true, false, false, 4516, 3516))
+        assert_false(native_mir_fork_next_batch_v1(true, false, false, false, 4516, 3516))
         # stop = fail-fast AND a failure already seen (a clean CI batch goes on).
-        assert_false(native_mir_fork_next_batch_v1(200, true, true, false, 4516, 3516))
-        assert_false(native_mir_fork_next_batch_v1(200, true, false, true, 4516, 3516))
+        assert_false(native_mir_fork_next_batch_v1(true, true, true, false, 4516, 3516))
+        assert_false(native_mir_fork_next_batch_v1(true, true, false, true, 4516, 3516))
+        # SIMPLE_MIR_FORK_BATCH=0 with the child budget on: a budget-stopped
+        # child is batched too, so the share still gets its next fork.
+        assert_true(native_mir_fork_next_batch_v1(true, true, false, false, 4516, 4515))
+
+describe "MIR fork child memory budget":
+    it "parses SIMPLE_MIR_FORK_CHILD_KB":
+        # @req REQ-SSPEC-COMPILER
+        step("parses SIMPLE_MIR_FORK_CHILD_KB")
+        assert_equal(native_mir_fork_child_kb_of_v1(""), NATIVE_MIR_FORK_CHILD_KB_DEFAULT_V1)
+        assert_equal(native_mir_fork_child_kb_of_v1("abc"), NATIVE_MIR_FORK_CHILD_KB_DEFAULT_V1)
+        assert_equal(native_mir_fork_child_kb_of_v1("-1"), NATIVE_MIR_FORK_CHILD_KB_DEFAULT_V1)
+        assert_equal(native_mir_fork_child_kb_of_v1("0"), 0)
+        assert_equal(native_mir_fork_child_kb_of_v1("8000000"), 8000000)
+        assert_equal(NATIVE_MIR_FORK_CHILD_KB_DEFAULT_V1, 12000000)
+
+    it "stops claiming over budget only after at least one claim":
+        # @req REQ-SSPEC-COMPILER
+        step("stops claiming over budget only after at least one claim")
+        # A single module bigger than the budget is still lowered.
+        assert_false(native_mir_fork_child_over_budget_v1(0, 55000000, 12000000))
+        assert_true(native_mir_fork_child_over_budget_v1(1, 12000001, 12000000))
+        assert_true(native_mir_fork_child_over_budget_v1(37, 30000000, 12000000))
+        assert_false(native_mir_fork_child_over_budget_v1(37, 12000000, 12000000))
+        assert_false(native_mir_fork_child_over_budget_v1(37, 11000000, 12000000))
+        # Unknown private memory or a disabled budget never stops a child.
+        assert_false(native_mir_fork_child_over_budget_v1(37, -1, 12000000))
+        assert_false(native_mir_fork_child_over_budget_v1(37, 55000000, 0))
+        # The root (not a child) never latches its cap.
+        assert_equal(native_mir_fork_budget_cap_v1(5, 200), 200)
+
+    it "reads private memory from smaps_rollup, not shared COW pages":
+        # @req REQ-SSPEC-COMPILER
+        step("reads private memory from smaps_rollup, not shared COW pages")
+        val rollup = "55d0-7ffd ---p 00000000 00:00 0    [rollup]\nRss:   40000000 kB\nShared_Dirty:  26000000 kB\nPrivate_Clean:     1000 kB\nPrivate_Dirty:  13999000 kB\n"
+        assert_equal(native_mir_fork_private_kib_of_v1(rollup), 14000000)
+        assert_equal(native_mir_fork_private_kib_of_v1("Private_Dirty: 7 kB\n"), 7)
+        assert_equal(native_mir_fork_private_kib_of_v1(""), -1)
+
+describe "MIR fork admission":
+    it "forks only as many children as the headroom holds budgets":
+        # @req REQ-SSPEC-COMPILER
+        step("forks only as many children as the headroom holds budgets")
+        # p4-cli-f24: 100G cap, coordinator 18G + root 25G charged: ~57G left.
+        assert_equal(native_mir_fork_admit_count_v1(5, 59768832, 12000000), 4)
+        # Tiny headroom still forks one child (never declines to the complete worker).
+        assert_equal(native_mir_fork_admit_count_v1(5, 1000000, 12000000), 1)
+        assert_equal(native_mir_fork_admit_count_v1(5, 0, 12000000), 1)
+        assert_equal(native_mir_fork_admit_count_v1(3, 500000000, 12000000), 3)
+        # Unknown headroom or disabled budget keeps the request.
+        assert_equal(native_mir_fork_admit_count_v1(5, -1, 12000000), 5)
+        assert_equal(native_mir_fork_admit_count_v1(5, 1000000, 0), 5)
+
+    it "takes the tightest cgroup level, then the smaller of cgroup and MemAvailable":
+        # @req REQ-SSPEC-COMPILER
+        step("takes the tightest cgroup level, then the smaller of cgroup and MemAvailable")
+        val dirs = native_mir_fork_cgroup_dirs_v1("0::/user.slice/run-p4.scope\n")
+        assert_equal(dirs.len(), 3)
+        assert_equal(dirs[0], "/sys/fs/cgroup/user.slice/run-p4.scope")
+        assert_equal(dirs[1], "/sys/fs/cgroup/user.slice")
+        assert_equal(dirs[2], "/sys/fs/cgroup")
+        assert_equal(native_mir_fork_cgroup_dirs_v1("12:memory:/x\n").len(), 0)
+        # 100G cap, 43G charged at the leaf; parent unlimited; root has no files.
+        val hundred_g = 107374182400
+        val charged = 46170898432
+        assert_equal(native_mir_fork_cgroup_headroom_kib_of_v1(["{hundred_g}\n", "max\n", ""],
+            ["{charged}\n", "90000000000\n", ""]), 59768832)
+        assert_equal(native_mir_fork_cgroup_headroom_kib_of_v1(["max", "max"], ["1", "1"]), -1)
+        # Over the cap reads as zero headroom, not negative.
+        assert_equal(native_mir_fork_cgroup_headroom_kib_of_v1(["1024"], ["4096"]), 0)
+        assert_equal(native_mir_fork_headroom_kib_of_v1(59768832, 100000000), 59768832)
+        assert_equal(native_mir_fork_headroom_kib_of_v1(59768832, 20000000), 20000000)
+        assert_equal(native_mir_fork_headroom_kib_of_v1(-1, 20000000), 20000000)
+        assert_equal(native_mir_fork_headroom_kib_of_v1(-1, -1), -1)
 
 describe "MIR fork child owners":
     it "are distinct from the root and from coordinator owners":
