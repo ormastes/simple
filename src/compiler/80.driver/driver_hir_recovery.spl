@@ -1,8 +1,23 @@
 # Invocation-local HIR work ledger. Cache identity and validity remain owned by
 # driver_hir_cache: PASS is a lowering outcome, never permission to load bytes.
 use std.common.crypto.sha256.{sha256_text}
-use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_atomic_write, file_publish_noreplace}
-use std.io_runtime.{file_exists, file_read, file_write, file_delete, dir_list_optional, getpid}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_publish_noreplace}
+use std.io_runtime.{file_exists, file_read, file_write, file_delete, dir_exists, dir_create_all, dir_list_optional, getpid}
+
+var _hir_shard_publish_seq: i64 = 0
+var _hir_shard_claim_probe_count: i64 = 0
+
+fn hir_shard_next_publish_seq() -> i64:
+    _hir_shard_publish_seq = _hir_shard_publish_seq + 1
+    _hir_shard_publish_seq
+
+# reason: scalar diagnostic probe counter for O(N) lock-free queue claim verification
+@allow(primitive_api)
+pub fn hir_shard_claim_probes_v1() -> i64:
+    _hir_shard_claim_probe_count
+
+pub fn hir_shard_claim_probes_reset_v1():
+    _hir_shard_claim_probe_count = 0
 
 fn hir_shard_claim_valid(record: text) -> bool:
     val fields = record.split("\n")
@@ -26,16 +41,97 @@ fn hir_shard_record_publish(path: text, content: text) -> bool:
 # linked into place without replacement, so readers never see a partial record.
 # 1 = published, 0 = destination already exists, -1 = failure.
 fn hir_shard_record_publish_new(path: text, content: text) -> i64:
-    val temporary = "{path}.{getpid()}.tmp"
-    if not file_write(temporary, content): return -1
+    val seq = hir_shard_next_publish_seq()
+    val temporary = "{path}.{getpid()}.{seq}.tmp"
+    if not file_write(temporary, content):
+        val _cleanup_err = file_delete(temporary)
+        return -1
     val published = file_publish_noreplace(temporary, path)
     val _cleanup = file_delete(temporary)
     match published:
         case Ok(created): if created: 1 else: 0
         case Err(_): -1
 
-# Claims/terminals are lockless (exclusive publish); claims are immutable until
-# the invocation ends. Inventory publication still serializes on the queue lock.
+fn hir_shard_owners_root_v1(queue: text) -> text:
+    "{queue}/owners"
+
+fn hir_shard_owner_dir_v1(queue: text, owner: text) -> text:
+    "{queue}/owners/{sha256_text(owner)}"
+
+fn hir_shard_tree_dir_v1(queue: text, root_owner: text) -> text:
+    "{queue}/trees/{sha256_text(root_owner)}"
+
+# Pre-publish atomic per-owner (and optional +fork root-tree) directory markers
+# BEFORE linking `{base}.claim` so a crash at any instruction never leaves an
+# unindexed live `.claim`, and concurrent `+fork` children never race on file_append.
+fn _hir_shard_stage_owner_markers_v1(queue: text, owner: text, digest: text, path: text) -> (bool, text, text):
+    val own_dir = hir_shard_owner_dir_v1(queue, owner)
+    if not dir_create_all(own_dir):
+        return (false, "", "")
+    val own_marker = "{own_dir}/{digest}.claim"
+    if hir_shard_record_publish_new(own_marker, "{owner}\n{path}\n") < 0:
+        return (false, "", "")
+    var tree_marker = ""
+    val fork_parts = owner.split(HIR_SHARD_FORK_OWNER_MARK_V1)
+    if fork_parts.len() > 1 and fork_parts[0] != "":
+        val tree_dir = hir_shard_tree_dir_v1(queue, fork_parts[0])
+        if not dir_create_all(tree_dir):
+            val _rm_own = file_delete(own_marker)
+            return (false, "", "")
+        # Key by `{digest}-{sha256(owner)}` so a losing sibling under the same
+        # `root_owner` cleans up only its own marker, never the winner's.
+        tree_marker = "{tree_dir}/{digest}-{sha256_text(owner)}.claim"
+        if hir_shard_record_publish_new(tree_marker, "{owner}\n{path}\n") < 0:
+            val _rm_own = file_delete(own_marker)
+            return (false, "", "")
+    (true, own_marker, tree_marker)
+
+fn _hir_shard_cleanup_owner_markers_v1(own_marker: text, tree_marker: text):
+    if own_marker != "":
+        val _d1 = file_delete(own_marker)
+    if tree_marker != "":
+        val _d2 = file_delete(tree_marker)
+
+fn _hir_shard_marker_digest_v1(name: text) -> text:
+    if not name.ends_with(".claim"):
+        return ""
+    if name.byte_len() > 70 and name.byte_at(64) == 45:
+        return name.substring(0, 64)
+    name.substring(0, name.byte_len() - 6)
+
+# reason: ledger queue path and owner key returning verified claimed source paths
+@allow(primitive_api)
+pub fn hir_shard_owner_indexed_paths_v1(queue: text, owner: text) -> [text]?:
+    if queue == "" or owner == "" or not dir_exists(queue):
+        return None
+    if not dir_exists(hir_shard_owners_root_v1(queue)):
+        return None
+    val own_dir = hir_shard_owner_dir_v1(queue, owner)
+    var out: [text] = []
+    if not dir_exists(own_dir):
+        return Some(out)
+    val listing = dir_list_optional(own_dir)
+    if not listing.?:
+        return None
+    var seen: Dict<text, bool> = {}
+    for name in listing.unwrap():
+        val digest = _hir_shard_marker_digest_v1(name)
+        if digest == "":
+            continue
+        val claim_path = "{queue}/{digest}.claim"
+        if not file_exists(claim_path):
+            continue
+        val claim = file_read(claim_path)
+        if not hir_shard_claim_valid(claim):
+            return None
+        val fields = claim.split("\n")
+        if fields.len() >= 3 and fields[0] == owner and not seen.contains_key(fields[1]):
+            seen[fields[1]] = true
+            out = out.push(fields[1])
+    Some(out)
+
+# Claims, terminals, and inventory publication are lockless (exclusive publish);
+# claims are immutable until the invocation ends.
 # Claim result codes. 1 = claimed, 0 = another owner holds it, negative =
 # a named failure (hir_shard_claim_reason_v1) so the worker's error says why.
 pub const HIR_SHARD_CLAIM_INVALID_ARGS_V1: i64 = -1
@@ -57,15 +153,31 @@ pub fn hir_shard_claim_reason_v1(code: i64) -> text:
 pub fn hir_shard_recovery_claim(queue: text, owner: text, path: text, key: text) -> i64:
     if owner == "" or path == "" or key == "" or owner.contains("\n") or path.contains("\n") or key.contains("\n"):
         return HIR_SHARD_CLAIM_INVALID_ARGS_V1
-    val base = hir_shard_record_base(queue, path)
+    if queue == "" or not dir_exists(queue):
+        return HIR_SHARD_CLAIM_PUBLISH_FAILED_V1
+    _hir_shard_claim_probe_count = _hir_shard_claim_probe_count + 1
+    val digest = sha256_text(path)
+    val claim_path = "{queue}/{digest}.claim"
+    # Fast-path read check before staging a temp file: claims are linked whole
+    # and never deleted during an invocation, so an existing claim never needs
+    # temp-file creation, hardlink attempt, or temp-file unlink.
+    if file_exists(claim_path):
+        return if hir_shard_claim_valid(file_read(claim_path)): 0 else: HIR_SHARD_CLAIM_INVALID_CLAIM_V1
+    val (staged_ok, own_marker, tree_marker) = _hir_shard_stage_owner_markers_v1(queue, owner, digest, path)
+    if not staged_ok:
+        return HIR_SHARD_CLAIM_PUBLISH_FAILED_V1
     val record = owner + "\n" + path + "\n" + key + "\n"
-    val published = hir_shard_record_publish_new("{base}.claim", record)
-    if published == 1: return 1
+    val published = hir_shard_record_publish_new(claim_path, record)
+    if published == 1:
+        return 1
+    _hir_shard_cleanup_owner_markers_v1(own_marker, tree_marker)
     if published < 0: return HIR_SHARD_CLAIM_PUBLISH_FAILED_V1
-    # An earlier claim exists; it was linked in complete, so validity is decidable.
-    if hir_shard_claim_valid(file_read("{base}.claim")): 0 else: HIR_SHARD_CLAIM_INVALID_CLAIM_V1
+    # An earlier claim landed concurrently; it was linked in complete, so validity is decidable.
+    if hir_shard_claim_valid(file_read(claim_path)): 0 else: HIR_SHARD_CLAIM_INVALID_CLAIM_V1
 
 pub fn hir_shard_recovery_terminal(queue: text, owner: text, path: text, state: text, cache_stored: bool) -> bool:
+    if queue == "" or not dir_exists(queue):
+        return false
     if state != "PASS" and state != "FAILED" and state != "CRASH" and state != "TIMEOUT" and state != "BLOCKED" and state != "SKIPPED":
         return false
     val base = hir_shard_record_base(queue, path)
@@ -92,10 +204,61 @@ pub fn hir_shard_recovery_terminal(queue: text, owner: text, path: text, state: 
 # ITS OWN claim owner (the terminal must repeat the claim); rows a surviving
 # child already sealed are skipped. Coordinator owners "<i>/<n>@<g>" never
 # contain the mark, so a sibling root's tree is never matched.
+fn _hir_shard_seal_dir_v1(queue: text, marker_dir: text, owner: text, allow_fork_tree: bool,
+        state: text, seen: Dict<text, bool>) -> i64:
+    if not dir_exists(marker_dir):
+        return 0
+    val listing = dir_list_optional(marker_dir)
+    if not listing.?:
+        return -1
+    var sealed: i64 = 0
+    for name in listing.unwrap():
+        val digest = _hir_shard_marker_digest_v1(name)
+        if digest == "":
+            continue
+        if digest == "" or seen.contains_key(digest):
+            continue
+        val claim_path = "{queue}/{digest}.claim"
+        if not file_exists(claim_path):
+            continue
+        val claim = file_read(claim_path)
+        if not hir_shard_claim_valid(claim):
+            return -1
+        val fields = claim.split("\n")
+        val matches_owner = fields.len() >= 3 and (fields[0] == owner or
+            (allow_fork_tree and fields[0].starts_with(owner + HIR_SHARD_FORK_OWNER_MARK_V1)))
+        if matches_owner:
+            seen[digest] = true
+            val terminal_path = "{queue}/{digest}.terminal"
+            if not file_exists(terminal_path):
+                if not hir_shard_recovery_terminal(queue, fields[0], fields[1], state, false):
+                    return -1
+                sealed = sealed + 1
+    sealed
+
+fn _hir_shard_seal_indexed_v1(queue: text, owner: text, state: text) -> i64?:
+    if queue == "" or owner == "" or not dir_exists(queue):
+        return None
+    if not dir_exists(hir_shard_owners_root_v1(queue)):
+        return None
+    var seen: Dict<text, bool> = {}
+    val own_sealed = _hir_shard_seal_dir_v1(queue, hir_shard_owner_dir_v1(queue, owner), owner, false, state, seen)
+    if own_sealed < 0:
+        return Some(-1)
+    val tree_sealed = _hir_shard_seal_dir_v1(queue, hir_shard_tree_dir_v1(queue, owner), owner, true, state, seen)
+    if tree_sealed < 0:
+        return Some(-1)
+    Some(own_sealed + tree_sealed)
+
 pub fn hir_shard_recovery_seal(queue: text, owner: text, state: text) -> i64:
+    if queue == "" or not dir_exists(queue):
+        return -1
+    match _hir_shard_seal_indexed_v1(queue, owner, state):
+        case Some(count): return count
+        case None: pass
     var sealed: i64 = 0
     val listing = dir_list_optional(queue)
-    if listing == nil: return -1
+    if not listing.?: return -1
     for name in listing.unwrap():
         if name.ends_with(".claim"):
             val claim = file_read("{queue}/{name}")
@@ -111,9 +274,36 @@ pub fn hir_shard_recovery_seal(queue: text, owner: text, state: text) -> i64:
     sealed
 
 pub fn hir_shard_recovery_progress(queue: text, owner: text) -> i64:
+    if queue == "" or not dir_exists(queue):
+        return -1
+    if dir_exists(hir_shard_owners_root_v1(queue)):
+        val own_dir = hir_shard_owner_dir_v1(queue, owner)
+        if not dir_exists(own_dir):
+            return 0
+        val listing = dir_list_optional(own_dir)
+        if not listing.?:
+            return -1
+        var verified: i64 = 0
+        var seen: Dict<text, bool> = {}
+        for name in listing.unwrap():
+            val digest = _hir_shard_marker_digest_v1(name)
+            if digest == "":
+                continue
+            if digest == "" or seen.contains_key(digest):
+                continue
+            val claim_path = "{queue}/{digest}.claim"
+            if not file_exists(claim_path):
+                continue
+            val claim = file_read(claim_path)
+            if not hir_shard_claim_valid(claim):
+                return -1
+            if claim.starts_with(owner + "\n"):
+                seen[digest] = true
+                verified = verified + 1
+        return verified
     var claimed: i64 = 0
     val listing = dir_list_optional(queue)
-    if listing == nil: return -1
+    if not listing.?: return -1
     for name in listing.unwrap():
         if name.ends_with(".claim"):
             val claim = file_read("{queue}/{name}")
@@ -130,10 +320,48 @@ pub const HIR_SHARD_FORK_OWNER_MARK_V1: text = "+fork"
 # Coordinator view of one reaped worker: its own claims plus every claim of
 # the children it forked. A fork root claims nothing itself, so exact-owner
 # progress would read 0 and refuse the replacement it is handing off to.
+fn _hir_shard_count_dir_claims_v1(queue: text, marker_dir: text, owner: text, allow_fork_tree: bool,
+        seen: Dict<text, bool>) -> i64:
+    if not dir_exists(marker_dir):
+        return 0
+    val listing = dir_list_optional(marker_dir)
+    if not listing.?:
+        return -1
+    var verified: i64 = 0
+    for name in listing.unwrap():
+        val digest = _hir_shard_marker_digest_v1(name)
+        if digest == "":
+            continue
+        if digest == "" or seen.contains_key(digest):
+            continue
+        val claim_path = "{queue}/{digest}.claim"
+        if not file_exists(claim_path):
+            continue
+        val claim = file_read(claim_path)
+        if not hir_shard_claim_valid(claim):
+            return -1
+        val matches_owner = claim.starts_with(owner + "\n") or
+            (allow_fork_tree and claim.starts_with(owner + HIR_SHARD_FORK_OWNER_MARK_V1))
+        if matches_owner:
+            seen[digest] = true
+            verified = verified + 1
+    verified
+
 pub fn hir_shard_recovery_owner_tree_progress_v1(queue: text, owner: text) -> i64:
+    if queue == "" or not dir_exists(queue):
+        return -1
+    if dir_exists(hir_shard_owners_root_v1(queue)) or dir_exists("{queue}/trees"):
+        var seen: Dict<text, bool> = {}
+        val own_c = _hir_shard_count_dir_claims_v1(queue, hir_shard_owner_dir_v1(queue, owner), owner, false, seen)
+        if own_c < 0:
+            return -1
+        val tree_c = _hir_shard_count_dir_claims_v1(queue, hir_shard_tree_dir_v1(queue, owner), owner, true, seen)
+        if tree_c < 0:
+            return -1
+        return own_c + tree_c
     var claimed: i64 = 0
     val listing = dir_list_optional(queue)
-    if listing == nil: return -1
+    if not listing.?: return -1
     for name in listing.unwrap():
         if name.ends_with(".claim"):
             val claim = file_read("{queue}/{name}")
@@ -191,6 +419,7 @@ pub fn hir_shard_recovery_crashed_rows_v1(queue: text) -> [text]:
     rows.sort()
 
 pub fn hir_shard_recovery_complete(queue: text, owner: text) -> bool:
+    if queue == "" or owner == "" or not dir_exists(queue): return false
     hir_shard_record_publish("{queue}/{sha256_text(owner)}.done", owner)
 
 pub fn hir_shard_recovery_finished(queue: text, owner: text) -> bool:
@@ -226,21 +455,22 @@ pub fn hir_shard_recovery_blocked_reason_v1(queue: text) -> text:
 # Every worker publishes the same frozen source inventory before taking its
 # first claim. A partial preflight has no inventory and remains global BLOCKED.
 pub fn hir_shard_recovery_inventory(queue: text, identity: text, paths: [text]) -> bool:
-    if identity == "" or paths.len() == 0: return false
+    if queue == "" or identity == "" or paths.len() == 0 or not dir_exists(queue): return false
+    val _owners_ready = dir_create_all(hir_shard_owners_root_v1(queue))
     var rows: [text] = [identity]
     for path in paths:
         if path == "" or path.contains("\n"): return false
         rows = rows.push(path)
     val record = rows.join("\n")
-    val fd = file_lock("{queue}/.lock", 30)
-    if fd < 0: return false
-    var published = false
-    if file_exists("{queue}/inventory"):
-        published = file_read("{queue}/inventory") == record
-    else:
-        published = hir_shard_record_publish("{queue}/inventory", record)
-    val _released = file_unlock(fd)
-    published
+    val inv_path = "{queue}/inventory"
+    if file_exists(inv_path):
+        return file_read(inv_path) == record
+    val created = hir_shard_record_publish_new(inv_path, record)
+    if created == 1:
+        return true
+    if created < 0:
+        return false
+    file_read(inv_path) == record
 
 # Why a worker's frozen inventory disagrees with the published one. A bare
 # "publication failed" left the s3-wa replacement generation (5/5 workers,
@@ -263,44 +493,38 @@ pub fn hir_shard_recovery_inventory_mismatch_v1(stored: text, identity: text, pa
 # the inventory under the same lock and the same must-match rule; the inventory
 # itself is untouched so close_inventory and the link path see every row.
 pub fn hir_shard_recovery_excluded(queue: text, identity: text, names: [text]) -> bool:
-    if identity == "": return false
+    if queue == "" or identity == "" or not dir_exists(queue): return false
     var rows: [text] = [identity]
     for name in names:
         if name == "" or name.contains("\n"): return false
         rows = rows.push(name)
     val record = rows.join("\n")
-    val fd = file_lock("{queue}/.lock", 30)
-    if fd < 0: return false
-    var published = false
-    if file_exists("{queue}/excluded"):
-        published = file_read("{queue}/excluded") == record
-    else:
-        published = hir_shard_record_publish("{queue}/excluded", record)
-    val _released = file_unlock(fd)
-    published
+    val excl_path = "{queue}/excluded"
+    if file_exists(excl_path):
+        return file_read(excl_path) == record
+    val created = hir_shard_record_publish_new(excl_path, record)
+    if created == 1:
+        return true
+    if created < 0:
+        return false
+    file_read(excl_path) == record
 
 # Withdraw a published inventory (and its exclusion record) while no row has
 # been claimed, returning the ledger to its pre-inventory shape. Used when the
 # MIR fork root declines after publishing (native_mir_fork_v1.spl): with the
 # inventory left in place the coordinator's inventory close would seal every
 # row BLOCKED and read "fail" instead of "fallback". False when any row is
-# already claimed (nothing is withdrawn) or the ledger cannot be locked/read.
+# already claimed (nothing is withdrawn) or the ledger cannot be read.
 pub fn hir_shard_recovery_withdraw_inventory_v1(queue: text) -> bool:
-    val fd = file_lock("{queue}/.lock", 30)
-    if fd < 0: return false
-    var withdrawn = false
     val listing = dir_list_optional(queue)
-    if listing != nil:
-        var claimed = false
-        for name in listing.unwrap():
-            if name.ends_with(".claim"):
-                claimed = true
-        if not claimed:
-            val inventory_gone = not file_exists("{queue}/inventory") or file_delete("{queue}/inventory")
-            val excluded_gone = not file_exists("{queue}/excluded") or file_delete("{queue}/excluded")
-            withdrawn = inventory_gone and excluded_gone
-    val _released = file_unlock(fd)
-    withdrawn
+    if not listing.?:
+        return false
+    for name in listing.unwrap():
+        if name.ends_with(".claim"):
+            return false
+    val inventory_gone = not file_exists("{queue}/inventory") or file_delete("{queue}/inventory")
+    val excluded_gone = not file_exists("{queue}/excluded") or file_delete("{queue}/excluded")
+    inventory_gone and excluded_gone
 
 # Coordinator only, after every child has stopped. Acquire only unclaimed
 # inventory rows; existing worker claims and their terminals stay immutable.
@@ -327,19 +551,24 @@ pub fn hir_shard_recovery_close_inventory(queue: text, fail_fast: bool) -> i64:
 pub fn hir_shard_recovery_unclaimed_count(queue: text) -> i64:
     val inventory = file_read("{queue}/inventory").split("\n")
     if inventory.len() < 2 or inventory[0] == "": return -1
-    val excluded: [text] = if file_exists("{queue}/excluded"): file_read("{queue}/excluded").split("\n") else: []
+    var excluded_set: Dict<text, bool> = {}
+    if file_exists("{queue}/excluded"):
+        for excl in file_read("{queue}/excluded").split("\n"):
+            if excl != "":
+                excluded_set[excl] = true
     var unclaimed: i64 = 0
     var index: i64 = 1
     while index < inventory.len():
         val path = inventory[index]
         if path == "": return -1
-        if excluded.contains(path):
+        if excluded_set.contains_key(path):
             index = index + 1
             continue
         if not file_exists("{hir_shard_record_base(queue, path)}.claim"):
             unclaimed = unclaimed + 1
         index = index + 1
     unclaimed
+
 
 # Replacements wait until every worker from the current generation has stopped.
 # Recheck the queue at that boundary because another worker may have claimed

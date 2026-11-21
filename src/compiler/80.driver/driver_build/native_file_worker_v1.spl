@@ -36,9 +36,10 @@
 # admitted).
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable}
-use std.io_runtime.{file_exists, file_read, file_write, dir_list_optional}
+use std.io_runtime.{file_exists, file_read, dir_list_optional}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use compiler.driver.driver_build.hir_variant_object_key_v1.{hir_variant_object_sidecar_path_v1}
+use compiler.driver.driver_hir_recovery.{hir_shard_owner_indexed_paths_v1}
 
 pub const NATIVE_FILE_WORKERS_ENV_V1: text = "SIMPLE_FILE_WORKERS"
 # SINGLE SOURCE OF TRUTH for the per-file pipeline default. It is the value
@@ -297,9 +298,18 @@ pub fn native_file_worker_receipts_in_v1(queue: text) -> [NativeFileWorkerReceip
 
 # Keys (path for HIR, canonical module name for MIR) claimed by exactly `owner`.
 pub fn native_file_worker_owner_claims_v1(queue: text, owner: text) -> [text]:
+    match hir_shard_owner_indexed_paths_v1(queue, owner):
+        case Some(paths):
+            var verified: [text] = []
+            for path in paths:
+                val fields = file_read("{queue}/{sha256_text(path)}.claim").split("\n")
+                if fields.len() == 4 and fields[0] == owner and fields[1] != "":
+                    verified = verified.push(fields[1])
+            return verified
+        case None: pass
     var out: [text] = []
     val listing = dir_list_optional(queue)
-    if listing == nil:
+    if not listing.?:
         return out
     for name in listing.unwrap():
         if name.ends_with(".claim"):
@@ -371,13 +381,17 @@ pub fn native_file_worker_hir_ledger_state_v1(queue: text) -> i64:
     val rows = file_read("{queue}/inventory").split("\n")
     if rows.len() < 2:
         return 0
-    val excluded: [text] = if file_exists("{queue}/excluded"): file_read("{queue}/excluded").split("\n") else: []
+    var excluded_set: Dict<text, bool> = {}
+    if file_exists("{queue}/excluded"):
+        for excl in file_read("{queue}/excluded").split("\n"):
+            if excl != "":
+                excluded_set[excl] = true
     var complete = true
     var index = 1
     while index < rows.len():
         val path = rows[index]
         index = index + 1
-        if path != "" and not excluded.contains(path):
+        if path != "" and not excluded_set.contains_key(path):
             val state = native_file_worker_terminal_state_v1(queue, path)
             if state == "":
                 complete = false
@@ -406,14 +420,18 @@ pub fn native_file_worker_hir_ledger_progress_v1(queue: text) -> (i64, i64):
     if not file_exists("{queue}/inventory"):
         return (0, 0)
     val rows = file_read("{queue}/inventory").split("\n")
-    val excluded: [text] = if file_exists("{queue}/excluded"): file_read("{queue}/excluded").split("\n") else: []
+    var excluded_set: Dict<text, bool> = {}
+    if file_exists("{queue}/excluded"):
+        for excl in file_read("{queue}/excluded").split("\n"):
+            if excl != "":
+                excluded_set[excl] = true
     var total: i64 = 0
     var passed: i64 = 0
     var index = 1
     while index < rows.len():
         val path = rows[index]
         index = index + 1
-        if path != "" and not excluded.contains(path):
+        if path != "" and not excluded_set.contains_key(path):
             total = total + 1
             if native_file_worker_terminal_state_v1(queue, path) == "PASS":
                 passed = passed + 1
@@ -558,7 +576,7 @@ pub fn native_file_worker_closure_incomplete_path_v1(queue: text, path: text) ->
 pub fn native_file_worker_closure_incomplete_publish_v1(queue: text, path: text, reason: text) -> bool:
     if queue == "":
         return false
-    file_write(native_file_worker_closure_incomplete_path_v1(queue, path), "{path}\n{reason}\n")
+    file_atomic_write(native_file_worker_closure_incomplete_path_v1(queue, path), "{path}\n{reason}\n")
 
 # MIR-done stamp: the MIR child writes the monotonic ms at which lower_to_mir
 # returned for its owner; the worker copies it into mir_done_ms.
@@ -568,7 +586,7 @@ pub fn native_file_worker_mir_done_path_v1(queue: text, owner: text) -> text:
 pub fn native_file_worker_mir_done_publish_v1(queue: text, owner: text, ms: i64) -> bool:
     if queue == "" or owner == "":
         return false
-    file_write(native_file_worker_mir_done_path_v1(queue, owner), "{ms}\n")
+    file_atomic_write(native_file_worker_mir_done_path_v1(queue, owner), "{ms}\n")
 
 pub fn native_file_worker_mir_done_read_v1(queue: text, owner: text) -> i64:
     val path = native_file_worker_mir_done_path_v1(queue, owner)

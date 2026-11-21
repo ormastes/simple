@@ -20,6 +20,7 @@ use compiler.driver.driver_build.native_staged_codegen.{native_staged_codegen_fl
 use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1, GO_TO_END_UNATTRIBUTED_V1}
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_spec_v1, native_mir_shard_queue_v1,
     native_mir_shard_claim_cap_v1, native_mir_shard_claim_v1, native_mir_shard_lpt_order_v1,
+    native_mir_shard_worker_order_v1, native_mir_shard_note_cursor_v1,
     native_mir_shard_publish_pass_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_paths_from_env_v1}
 use compiler.driver.driver_build.native_file_worker_reuse_v1.{FILE_WORKER_REUSE_ENV_V1, file_worker_inc_reuse_lookup_v1}
@@ -1524,7 +1525,9 @@ impl CompilerDriver:
                 var mir_walk_weights: [i64] = []
                 for weight_idx in mir_source_indices:
                     mir_walk_weights = mir_walk_weights.push(self.ctx.sources[weight_idx].content.len())
-                mir_walk_order = native_mir_shard_lpt_order_v1(staged_source_names, mir_walk_weights)
+                mir_walk_order = native_mir_shard_worker_order_v1(
+                    native_mir_shard_lpt_order_v1(staged_source_names, mir_walk_weights),
+                    native_mir_shard_spec_v1(), mir_shard_queue)
             # Native pre-lowering object cache (opt-in, all-or-nothing; see
             # driver_native_prelower_cache.spl). Keys are computed from
             # pre-lowering facts only. When EVERY scheduled module hits, MIR
@@ -1603,6 +1606,13 @@ impl CompilerDriver:
                 if fork_role == "child":
                     mir_shard_cap = native_mir_fork_child_cap_v1(native_mir_shard_claim_cap_v1(
                         native_mir_shard_spec_v1(), staged_source_names.len()), native_mir_fork_batch_v1())
+                    if mir_walk_order.len() == mir_source_indices.len():
+                        var child_weights: [i64] = []
+                        for cw_idx in mir_source_indices:
+                            child_weights = child_weights.push(self.ctx.sources[cw_idx].content.len())
+                        mir_walk_order = native_mir_shard_worker_order_v1(
+                            native_mir_shard_lpt_order_v1(staged_source_names, child_weights),
+                            native_mir_shard_spec_v1(), mir_shard_queue)
             val go_to_end_active = go_to_end_enabled_v1()
             self.go_to_end.mir_scan_complete = false
             val mir_progress_started_ms = time_now_monotonic_ms()
@@ -1650,6 +1660,8 @@ impl CompilerDriver:
                     if not mir_shard_owned:
                         direct_pos = direct_pos + 1
                         continue
+                    if mir_shard_only_paths.len() == 0:
+                        native_mir_shard_note_cursor_v1(mir_shard_queue, direct_pos, mir_source_indices.len())
                     # File-worker P-E: the planner kept this module; publish its
                     # cached object as the PASS instead of lowering it. Both
                     # output lowers anyway: the SMF part needs the module's MIR.
