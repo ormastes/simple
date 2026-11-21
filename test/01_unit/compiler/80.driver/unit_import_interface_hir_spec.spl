@@ -31,7 +31,7 @@ use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.provider_metadata.{mir_provider_callable_key}
 use compiler.mir.mir_data.{bootstrap_fn_ret_hir_type_lookup}
 use compiler.driver.driver_mir_shard_hir_residency_v1.{hir_module_interface_only_v1}
-use compiler.driver.driver_hir_cache.{hir_cache_store, hir_cache_parser_binding_v1, hir_shard_key_sidecar_write_v1, hir_shard_key_sidecar_path_v1, hir_unit_import_interface_load_v1, hir_shard_provider_settle_wait_v1}
+use compiler.driver.driver_hir_cache.{hir_cache_store, hir_cache_parser_binding_v1, hir_shard_key_sidecar_write_v1, hir_shard_key_sidecar_path_v1, hir_unit_import_interface_load_v1, hir_shard_provider_settle_wait_v1, hir_unit_import_iface_wait_ms_v1}
 use compiler.driver.driver_mir_physical_owners.{driver_mir_owner_disposition_v1}
 use app.io.env_ops.{env_get, env_set}
 use std.common.crypto.sha256.{sha256_text}
@@ -194,3 +194,18 @@ describe "importer waits for an unclaimed provider this build will run":
         expect(hir_shard_provider_settle_wait_v1(q, "wal.spl", 60000)).to_equal(false)
         expect(current_time_ms() - t2 < 5000).to_equal(true)
         expect(rt_dir_remove_all(q)).to_be(true)
+
+# The wait above only runs when the unit has a budget. Native repro (frozen
+# Stage 2 0d8a3269bec): `"".to_i64() ?? 60000` is 0, so with the variable unset
+# no importer waited; a mutual-import fixture took 28 s unset and 36 s with
+# SIMPLE_UNIT_IMPORT_IFACE_WAIT_MS=8000.
+describe "interface import wait budget":
+    it "defaults to 60 s when unset, blank or not a number":
+        expect(hir_unit_import_iface_wait_ms_v1("")).to_equal(60000)
+        expect(hir_unit_import_iface_wait_ms_v1(" ")).to_equal(60000)
+        expect(hir_unit_import_iface_wait_ms_v1("abc")).to_equal(60000)
+        expect(hir_unit_import_iface_wait_ms_v1("-5")).to_equal(60000)
+
+    it "takes an explicit budget, zero included":
+        expect(hir_unit_import_iface_wait_ms_v1("250")).to_equal(250)
+        expect(hir_unit_import_iface_wait_ms_v1("0")).to_equal(0)
