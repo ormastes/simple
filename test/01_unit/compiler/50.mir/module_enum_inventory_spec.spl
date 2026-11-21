@@ -17,12 +17,16 @@ dependency matching on its own enum's bare variants) reproduces it in ~4s.
 
 `register_module_enum_inventory_v1` closes the gap: the driver registers every
 scheduled source module's own enums up front, next to the struct-name prescan.
-register_enum_variants reads only the HirEnum (no symbol table), and identical
-re-registration inside lower_module is quiet by the existing dedup rules.
+register_enum_variants / register_enum_runtime_id read only the HirEnum (no
+symbol table), and identical re-registration inside lower_module is quiet by
+the existing dedup rules. Runtime identities must also be present before an
+imported provider's own body lowers: scoped units can hold that provider only
+as interface HIR while a consumer constructs its enum.
 
-These probes contract-test the helper directly: full registration, quiet
-idempotent re-registration, and a lowering that consumes the inventory without
-producing B5b or duplicate-registration diagnostics.
+These probes contract-test the helper directly: full registration, provider
+runtime identities, quiet idempotent re-registration, and a lowering that
+consumes the inventory without producing B5b or duplicate-registration
+diagnostics.
 """
 
 # @tag: unit, compiler, mir, enum, driver
@@ -72,6 +76,16 @@ describe "module enum inventory registration":
         expect(lowering.enum_variant_names("Inv")).to_equal(["Alpha", "Beta"])
         expect(lowering.enum_variant_discriminant("Inv", "Alpha")).to_equal(0)
         expect(lowering.enum_variant_discriminant("Inv", "Beta")).to_equal(1)
+
+    it "registers imported provider runtime identities before the provider body lowers":
+        val src = "enum Fat32ReplaceState:\n    Committed\n    Reclaim\n    Done\n\nenum Fat32ReplaceError:\n    Unsupported\n    Invalid\n    Io\n"
+        val hir = inventory_hir(src, "testdata/fixture_enum_inventory_provider.spl")
+        val target_context = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(SymbolTable.new(), target_context)
+        lowering.register_module_enum_inventory_v1([hir])
+        expect(lowering.enum_runtime_id("Fat32ReplaceState") >= 2).to_equal(true)
+        expect(lowering.enum_runtime_id("Fat32ReplaceError") >= 2).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
 
     it "advances past the first module (terminates; every module's enums register)":
         # Regression: 7c1899d73a8 dropped the module-index advance, so the
