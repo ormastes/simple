@@ -1,4 +1,4 @@
-# Seed: `xs.map(&:trim)` returns an empty list in natively built code (2026-11-21)
+# Seed: shorthand lambdas (`map(&:trim)`, `map(_.field)`) miscompile in natively built code (2026-11-21)
 
 **Status:** OPEN (seed codegen). Source workaround in place.
 
@@ -26,3 +26,17 @@ Explicit `for` loop with `push(raw_col.trim())`, tagged
 `.map(&:...)` call sites in `src/lib` and `src/app` are not on the MCP paths
 and are unchanged. Remove the workaround once the seed lowers `&:method` map
 references correctly, or once the MCP servers are built by a Phase 2+ compiler.
+
+## Second instance: `Result.map(_.roots)` (segfault)
+`resolve_ambient_storage_roots` (`src/lib/nogc_sync_mut/storage_roots/environment_owner.spl`)
+returned `inspect_ambient_storage_roots(...).map(_.roots)`. Seed-built, the
+mapped `StorageRoots` was corrupt: the first read of `roots.worktree_root.value`
+segfaulted. In simple-mcp that crashed the whole server on every CLI
+passthrough tool (`simple_tree`, `simple_env`, `simple_info`, `simple_lock`, ...),
+because `tooling_child_environment` resolves the storage roots first.
+Workaround: explicit `match` on the Result. Bisected with stderr markers in a
+seed-built simple_mcp_server; after the change `simple_env` returns a normal
+tool result instead of SIGSEGV.
+
+53 other `.map/filter/and_then/map_err(_.…)` sites in `src/lib` and `src/app`
+are unchanged; any of them may be affected when built by the seed.
