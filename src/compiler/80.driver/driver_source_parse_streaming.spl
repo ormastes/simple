@@ -46,7 +46,7 @@ use compiler.driver.driver_worker_surface_closure_v1.{worker_surface_closure_sel
     worker_surface_restrict_claims_v1, worker_surface_text_v1, worker_surface_counters_v1,
     worker_mir_scoped_targets_v1, worker_surface_import_closure_v1,
     worker_hir_restrict_loads_v1, source_path_by_canonical_map_v1,
-    worker_source_may_declare_advice_v1, worker_unit_pick_order_v1, worker_unit_pick_v1,
+    worker_source_may_declare_advice_v1, worker_unit_pick_order_v1, worker_unit_pick_with_cycle_peers_v1,
     worker_admitted_edges_v1, worker_admitted_edges_selected_v1, worker_admitted_closure_v1, worker_admitted_order_v1,
     worker_admitted_error_v1, WorkerAdmittedGraphV1}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_bind_row_identity,
@@ -209,15 +209,21 @@ impl CompilerDriver:
                 self.ctx.add_error(edge_result.unwrap_err())
                 return false
             admitted_graph = edge_result.unwrap()
-            val pick_result = worker_unit_pick_v1(driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "",
+            val unit_batch = native_file_worker_batch_v1(driver_parse_env_get_v1("SIMPLE_HIR_SHARD_CLAIM_LIMIT") ?? "")
+            val pick_result = worker_unit_pick_with_cycle_peers_v1(driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "",
                 driver_parse_env_get_v1("SIMPLE_HIR_SHARD_OWNER") ?? "", source_paths,
                 unit_order_skip_fresh_order_v1(worker_admitted_order_v1(admitted_graph.edges), unit_fresh),
-                native_file_worker_batch_v1(driver_parse_env_get_v1("SIMPLE_HIR_SHARD_CLAIM_LIMIT") ?? ""))
+                unit_batch, admitted_graph.edges)
             if pick_result.is_err():
                 self.ctx.add_error("file-worker unit pick failed: {pick_result.unwrap_err()}")
                 return false
             val picked = pick_result.unwrap()
             print "[file-worker] unit picked={picked.len()}"
+            # Import-cycle peers ride past the batch; the HIR claim limit
+            # (hir_shard_begin) must admit every pick or it seals as an orphan.
+            if picked.len() > unit_batch and not driver_parse_env_set_v1("SIMPLE_HIR_SHARD_CLAIM_LIMIT", "{picked.len()}"):
+                self.ctx.add_error("file-worker unit claim limit could not be raised for an import cycle")
+                return false
             if picked.len() == 0:
                 driver_parse_stdout_flush_v1()
                 driver_parse_exit_v1(0)
