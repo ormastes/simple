@@ -1,5 +1,5 @@
 use std.spec.*
-use compiler.backend.runtime_compiler.{CDriverProbeV1, c_driver_classify_v1, c_compiler_select_v1, c_compiler_candidates_v1, cxx_driver_for_c_driver_v1}
+use compiler.backend.runtime_compiler.{CDriverProbeV1, c_driver_classify_v1, c_compiler_select_v1, c_compiler_candidates_v1, cxx_driver_for_c_driver_v1, windows_c_compiler_candidates_v1, windows_clang_env_dirs_v1, cc_probe_exit_is_transient_v1}
 
 # CLAUDE.md Critical Rule: "Never use GCC. Toolchain is clang + lld (mold ...)".
 # The hosted native link path used to fall back to `/usr/bin/gcc` and bare `cc`
@@ -117,3 +117,28 @@ describe "clang-only C driver selection":
         expect(cxx_driver_for_c_driver_v1("C:/llvm/bin/clang.exe")).to_equal("C:/llvm/bin/clang++.exe")
         expect(cxx_driver_for_c_driver_v1("C:\\LLVM\\bin\\clang.exe")).to_equal("C:\\LLVM\\bin\\clang++.exe")
         expect(cxx_driver_for_c_driver_v1("C:\\LLVM\\bin\\clang-cl.exe")).to_equal("C:\\LLVM\\bin\\clang-cl.exe")
+
+    it "defaults Windows to clang and keeps MSVC drivers on the explicit msvc lane":
+        # @req REQ-SSPEC-COMPILER
+        step("defaults Windows to clang and keeps MSVC drivers on the explicit msvc lane")
+        expect(windows_c_compiler_candidates_v1("gnu")).to_equal(["clang"])
+        expect(windows_c_compiler_candidates_v1("")).to_equal(["clang"])
+        expect(windows_c_compiler_candidates_v1("msvc")).to_equal(["clang-cl", "cl.exe", "clang"])
+        for flavor in ["gnu", "msvc"]:
+            for candidate in windows_c_compiler_candidates_v1(flavor):
+                expect(candidate.contains("gcc")).to_equal(false)
+
+    it "probes SIMPLE_LLVM_BIN then SIMPLE_LLVM_MINGW_ROOT/bin before PATH":
+        # @req REQ-SSPEC-COMPILER
+        step("probes SIMPLE_LLVM_BIN then SIMPLE_LLVM_MINGW_ROOT/bin before PATH")
+        expect(windows_clang_env_dirs_v1("", "")).to_equal([])
+        expect(windows_clang_env_dirs_v1("C:/llvm/bin", "C:/lm")).to_equal(["C:/llvm/bin", "C:/lm/bin"])
+        expect(windows_clang_env_dirs_v1("", "C:/lm")).to_equal(["C:/lm/bin"])
+
+    it "treats 0xC0000142 as a transient spawn failure, not a compiler verdict":
+        # @req REQ-SSPEC-COMPILER
+        step("treats 0xC0000142 as a transient spawn failure, not a compiler verdict")
+        expect(cc_probe_exit_is_transient_v1(-1073741502)).to_equal(true)
+        expect(cc_probe_exit_is_transient_v1(3221225794)).to_equal(true)
+        expect(cc_probe_exit_is_transient_v1(1)).to_equal(false)
+        expect(cc_probe_exit_is_transient_v1(0)).to_equal(false)
