@@ -26,7 +26,8 @@ use app.cli.native_build_parse_closure_owner.{native_build_publish_parse_closure
     native_build_parse_closure_reuse_decision_v1, native_build_parse_closure_retire_request_v1,
     NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1, NATIVE_BUILD_PARSE_CLOSURE_SELECTED_ENV_V1}
 use app.io._CliCompile.native_build_closure_request_admit.{native_build_closure_request_admit_v1}
-use compiler.common.library_mode_policy_v1.{library_mode_parse_args_v1}
+use compiler.common.library_mode_policy_v1.{library_mode_parse_args_v1, library_mode_closure_digest_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_request_open_v1, native_entry_closure_handoff_install_capsule_v1, native_entry_closure_handoff_clear_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
     compile_source_inventory_checkout_cache_root_v1}
 use app.io._CliCompile.native_build_snapshot_roots.{native_build_selected_snapshot_source_roots_v1}
@@ -45,6 +46,7 @@ use app.bug.workaround_store.{refresh_workarounds, WorkaroundScanV1}
 # defect 3). `stderr_write` calls `rt_stderr_write` directly with no builtin
 # name to mis-resolve, so the relay path no longer depends on that dispatch.
 use std.nogc_sync_mut.io.stderr_ops.{stderr_write}
+use compiler.frontend.cache_dir_evict.{cache_dir_evict_to_cap}
 
 use compiler.driver.driver_build.incremental.{native_build_cache_scope_key, native_build_frontend_identity}
 use std.io_runtime.{get_args}
@@ -60,10 +62,11 @@ use app.cli.shard_worker_reap_v1.{shard_worker_confirm_kill_v1, parse_shard_reap
 use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal, native_build_signal_name, native_build_exit_cause_field_v1, native_build_is_dll_init_failed_v1}
 use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1, file_worker_pool_addressable_budget_kb_v1,
     file_worker_pool_hir_budget_kb_v1, file_worker_pool_mir_budget_kb_v1, file_worker_pool_host_pointer_bits_v1,
-    file_worker_pool_serial_memory_admits_v1}
+    file_worker_pool_serial_memory_admits_v1,
+    file_worker_pool_live_unit_hir_budget_kb_v1, file_worker_pool_live_unit_mir_budget_kb_v1}
 use app.cli.shard_mem_clamp.{shard_default_threads, shard_parse_worker_budget_kb_for_v1, shard_host_worker_budget_kb}
 use std.nogc_sync_mut.host_limits.{host_limit_value}
-use app.cli.shard_mem_clamp.{build_memory_reserve_kib, build_memory_start_refusal_v1}
+use app.cli.shard_mem_clamp.{build_memory_reserve_kib, build_memory_start_refusal_v1, shard_tree_headroom_kib_v1}
 use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb,
     shard_mem_available_kb, shard_mem_available_kb_from_field,
     shard_host_threads_cap, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for,
@@ -98,6 +101,7 @@ use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_
     NATIVE_FILE_WORKER_QUEUE_ENV_V1, NATIVE_FILE_WORKER_HIR_QUEUE_ENV_V1, NATIVE_FILE_WORKER_OWNER_ENV_V1,
     NativeFileWorkerReceiptV1, native_bootstrap_stage3_per_file_selected_v1, native_file_worker_spec_from_args_v1,
     native_file_worker_spec_valid_v1, native_file_worker_child_args_v1, native_file_worker_batch_from_env_v1,
+    NATIVE_FILE_WORKER_BATCH_ENV_V1, native_file_worker_plan_batch_v1,
     native_file_worker_mir_count_v1, native_file_worker_receipt_publish_v1, native_file_worker_receipts_in_v1,
     native_file_worker_owner_claims_v1, native_file_worker_terminal_state_v1, native_file_worker_inventory_rows_v1,
     native_file_worker_hir_ledger_state_v1, native_file_worker_hir_gate_verdict_v1, NATIVE_FILE_WORKER_HIR_GATE_BUDGET_MS_V1,
@@ -556,6 +560,32 @@ pub fn native_build_frontend_cache_dir_for_v1(args: [text], lane: text) -> text:
         i = i + 1
     ""
 
+pub fn native_build_cache_dir_base_for_v1(args: [text], env_cache_dir: text) -> text:
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "--cache-dir" and i + 1 < args.len():
+            return args[i + 1]
+        elif a.starts_with("--cache-dir=") and a.byte_len() > 12:
+            return a.substring(12)
+        i = i + 1
+    env_cache_dir.trim()
+
+# Focused Stage3/Stage4 capsules and their shard/unit children receive `--cache-dir`
+# or `SIMPLE_NATIVE_BUILD_CACHE_DIR` without entering `run_native_build_worker`,
+# so `SIMPLE_FRONTEND_CACHE_DIR` and `SIMPLE_HIR_CACHE_DIR` were left unset and
+# `.spab`/`.fpc`/TLDR/`.hirc` fell outside `--cache-dir`. Bind both once when unset.
+pub fn native_build_bind_cache_dirs_from_args_v1(args: [text]):
+    val base = native_build_cache_dir_base_for_v1(args, env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? "")
+    if base == "":
+        return
+    val lane = env_get("SIMPLE_CACHE_SCOPE") ?? ""
+    val lane_name = if lane == "": "default" else: lane
+    if (env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? "") == "":
+        env_set("SIMPLE_FRONTEND_CACHE_DIR", "{base}/{lane_name}/frontend")
+    if (env_get("SIMPLE_HIR_CACHE_DIR") ?? "") == "":
+        env_set("SIMPLE_HIR_CACHE_DIR", "{base}/{lane_name}/hir")
+
 pub fn native_build_normalize_exit_code(raw: i64) -> i64:
     """The worker's exit status, sign-restored.
 
@@ -708,6 +738,8 @@ fn eprint_bounded(output: text):
         native_build_stderr_spill_seq = native_build_stderr_spill_seq + 1
         spill_path = "{spill_root}/native-build-stderr-{getpid()}-{native_build_stderr_spill_seq}.log"
     if file_write(spill_path, output):
+        if cache_dir_env != "" and spill_root == "{cache_dir_env}/diagnostics":
+            val _pruned = cache_dir_evict_to_cap(spill_root, ".log", 67108864)
         stderr_write("[native-build] FULL stderr ({output.len()} bytes) saved to: {spill_path}\n")
     else:
         stderr_write("[native-build] WARNING: could not save full stderr to {spill_path}; only the excerpt below survives.\n")
@@ -1225,7 +1257,7 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
     val pool_base_headroom = host_commit_avail_kib()
     if pool_base_headroom < 0:
         print "[{label}] commit headroom unavailable on this host/engine; static worker cap only"
-    val commit_reserve_kib: i64 = build_memory_reserve_kib()
+    val commit_reserve_kib: i64 = shard_tree_headroom_kib_v1()
     var pending: [i64] = []
     var i: i64 = 0
     # A resumed MIR ledger (run_mir_shards) needs only enough owners for its
@@ -1521,10 +1553,22 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
 fn native_build_mir_worker_budget_kb_v1() -> i64:
     file_worker_pool_mir_budget_kb_v1(native_build_closure_selected_count_v1(), false)
 
+fn native_build_unit_pool_selected_v1() -> bool:
+    val whole = env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? ""
+    native_bootstrap_stage3_per_file_selected_v1(
+        env_get_nullable(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1, whole) and
+        (env_get("SIMPLE_MIR_SHARDING") ?? "") != "0" and
+        file_worker_module_scoped_selected_v1(whole, true)
+
 fn native_build_pool_mir_worker_budget_kb_v1() -> i64:
-    file_worker_pool_mir_budget_kb_v1(native_build_closure_selected_count_v1(), true)
+    val modules = native_build_closure_selected_count_v1()
+    if native_build_unit_pool_selected_v1():
+        return file_worker_pool_live_unit_mir_budget_kb_v1(modules)
+    file_worker_pool_mir_budget_kb_v1(modules, true)
 
 fn native_build_hir_worker_budget_kb_v1() -> i64:
+    if native_build_unit_pool_selected_v1():
+        return file_worker_pool_live_unit_hir_budget_kb_v1(native_build_closure_selected_count_v1())
     file_worker_pool_hir_budget_kb_v1()
 
 # reason: MIR shard parallelism preflight queried by build coordinator and specs
@@ -1733,6 +1777,7 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
     if simple_bin == "" or not file_exists(simple_bin):
         eprint "[capsule-shard] disabled: running compiler path unavailable"
         return ""
+    native_build_bind_cache_dirs_from_args_v1(args)
     native_build_publish_cache_scope_v1(simple_bin)
     val timeout_ms = native_build_timeout_ms(args)
     # Workers write no run evidence: the memory snapshot is O_EXCL (a worker
@@ -1963,8 +2008,12 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
         return 1
     val batch = native_file_worker_batch_from_env_v1()
     if file_worker_module_scoped_selected_v1(env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "", true):
+        val unit_plan = native_file_worker_plan_batch_v1(
+            env_get_nullable(NATIVE_FILE_WORKER_BATCH_ENV_V1) ?? "",
+            spec, [native_build_closure_selected_count_v1()])
+        val unit_batch = unit_plan.batch_size
         return native_file_unit_worker_loop_v1(NativeFileUnitProcessInvokerV1(simple_bin: simple_bin, args: args,
-            spec: spec, hir_queue: hir_queue, mir_queue: mir_queue, batch: batch), owner, mir_queue, hir_queue)
+            spec: spec, hir_queue: hir_queue, mir_queue: mir_queue, batch: unit_batch), owner, mir_queue, hir_queue)
     var round: i64 = 0
     # Phase A: HIR, one claim batch per child, until the HIR ledger is drained.
     var hir_drained = false
@@ -2917,6 +2966,7 @@ pub fn native_build_closure_drop_prepublished_v1(refresh: bool) -> bool:
 # Uses the same producer binding, policy digest and library mode that
 # run_native_build_worker would, so the later in-process call reuses it.
 pub fn native_build_coordinator_prepublish_closure_v1(worker_args: [text]) -> bool:
+    native_build_bind_cache_dirs_from_args_v1(worker_args)
     val library_policy = match library_mode_parse_args_v1(worker_args):
         case Ok(value): value
         case Err(reason):
@@ -2942,6 +2992,48 @@ pub fn native_build_coordinator_prepublish_closure_v1(worker_args: [text]) -> bo
         case Err(reason):
             eprint "error: " + reason
             false
+
+# Focused Stage3/Stage4 capsule child/link admission: validate an inherited
+# `SIMPLE_PARSE_CLOSURE_REQUEST` (or leave handoff empty when none was published)
+# and install both the preclosed request and resolved environment-variant policy
+# so `bootstrap_api_fixed` runs with `closure_walks=0` and identical frontend
+# cache advisory identity across parse shards, unit children, and final link.
+pub(package) fn native_build_capsule_admit_preclosed_v1(worker_args: [text]) -> bool:
+    native_build_bind_cache_dirs_from_args_v1(worker_args)
+    native_entry_closure_handoff_clear_v1()
+    val library_policy = match library_mode_parse_args_v1(worker_args):
+        case Ok(value): value
+        case Err(reason):
+            eprint(reason)
+            return false
+    val policy = match environment_variant_policy_handoff_prepare_v1(worker_args):
+        case Ok(value): value
+        case Err(failure):
+            eprint "error: native-build could not collect a valid environment variant policy: " +
+                environment_variant_policy_handoff_owner_error_label_v1(failure)
+            return false
+    if (env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? "") == "":
+        return true
+    val selection = native_build_entry_and_sources_v1(worker_args)
+    if selection.len() == 0:
+        eprint "error: focused capsule closure request has no entry"
+        return false
+    val admitted = match native_build_closure_request_admit_v1(selection[0], selection[1:]):
+        case Ok(req): req
+        case Err(reason):
+            env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "")
+            env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "")
+            eprint "error: native-build " + reason
+            return false
+    val opened = native_entry_closure_request_open_v1(admitted,
+        library_mode_closure_digest_v1(policy.handoff.policy_digest, library_policy.mode))
+    if opened.is_err():
+        eprint "error: native-build closure selection rejected: " + opened.unwrap_err()
+        return false
+    if not native_entry_closure_handoff_install_capsule_v1(admitted, policy.collection, library_policy):
+        eprint "error: native-build closure handoff already installed"
+        return false
+    true
 
 # Names the unmet stage3 entry-admission requirement behind a generic
 # SCV-E-ADMISSION refusal. "" means no known requirement is violated.

@@ -769,6 +769,9 @@ impl CompilerDriver:
         val mir_unit_scoped = driver_mir_unit_scoped_v1(worker_hir_loads_restricted_v1(),
             native_mir_shard_queue_v1())
         val mir_unit_targets: [text] = if mir_unit_scoped: native_file_worker_only_paths_from_env_v1() else: []
+        var mir_unit_target_set: Dict<text, bool> = {}
+        for mut_path in mir_unit_targets:
+            mir_unit_target_set[mut_path] = true
         # Phase 2's documented entry/closure route projects the phase-1
         # inventory to unique_entry_sources. Its parser already owns physical
         # deduplication; do not reinterpret unchanged phase-1 receipt rows.
@@ -800,7 +803,7 @@ impl CompilerDriver:
                         driver_mir_excluded_owner_v1(source.path, source.module_name))
                     continue
                 if driver_mir_owner_disposition_v1(mir_unit_scoped,
-                        mir_unit_targets.contains(source.path), self.ctx.hir_modules.has(source.module_name)) == "placeholder":
+                        mir_unit_target_set.contains_key(source.path), self.ctx.hir_modules.has(source.module_name)) == "placeholder":
                     projected_owners = projected_owners.push(driver_mir_placeholder_owner_v1(source.path))
                     continue
                 if not self.ctx.hir_modules.has(source.module_name):
@@ -838,7 +841,7 @@ impl CompilerDriver:
                 if go_to_end_enabled_v1() and self.go_to_end.is_excluded(source_name):
                     continue
                 if driver_mir_owner_disposition_v1(mir_unit_scoped,
-                        mir_unit_targets.contains(self.ctx.sources[selected_index].path), self.ctx.hir_modules.has(source_name)) == "placeholder":
+                        mir_unit_target_set.contains_key(self.ctx.sources[selected_index].path), self.ctx.hir_modules.has(source_name)) == "placeholder":
                     continue
                 if not self.ctx.hir_modules.has(source_name):
                     self.ctx.add_error("MIR projected ownership missing HIR for {source_name}")
@@ -891,7 +894,7 @@ impl CompilerDriver:
                 # only as closure/interface HIR) keeps its slot the same way; its SIMPLE_MIR_SHARD_ONLY_PATHS filter
                 # never lowers it here.
                 if driver_mir_owner_disposition_v1(mir_unit_scoped,
-                        mir_unit_targets.contains(owner_row_path), self.ctx.hir_modules.has(logical_name)) == "placeholder":
+                        mir_unit_target_set.contains_key(owner_row_path), self.ctx.hir_modules.has(logical_name)) == "placeholder":
                     physical_owners = physical_owners.push(driver_mir_placeholder_owner_v1(owner_row_path))
                     continue
                 if not self.ctx.hir_modules.contains_key(logical_name):
@@ -936,7 +939,7 @@ impl CompilerDriver:
                     # Cycle-125: guard-first double access (the erased-read
                     # class).
                     if driver_mir_owner_disposition_v1(mir_unit_scoped,
-                            mir_unit_targets.contains(self.ctx.source_paths_owner[physical_index]), self.ctx.hir_modules.has(logical_name)) == "placeholder":
+                            mir_unit_target_set.contains_key(self.ctx.source_paths_owner[physical_index]), self.ctx.hir_modules.has(logical_name)) == "placeholder":
                         continue
                     if not self.ctx.hir_modules.has(logical_name):
                         self.ctx.add_error("MIR physical ownership missing HIR for {logical_name}")
@@ -1402,8 +1405,8 @@ impl CompilerDriver:
             var enum_inventory_modules: [HirModule] = []
             var enum_inventory_idx = 0
             while enum_inventory_idx < self.ctx.sources.len():
-                val src_enum_inventory = self.ctx.sources[enum_inventory_idx]
-                val enum_inventory_hir: HirModule? = self.ctx.hir_modules[src_enum_inventory.module_name]
+                val enum_mod_name = self.ctx.sources[enum_inventory_idx].module_name
+                val enum_inventory_hir: HirModule? = self.ctx.hir_modules[enum_mod_name]
                 # Pushing the Some box into a concrete [HirModule] transports the
                 # wrapper; inventory registration then reads headers as structs.
                 # @workaround bug=stage2_if_val_struct_option_binding_as_int_wide_2026-11-03 reason=see bootstrap_enum_hir above; the as_int_wide binding reached register_module_enum_inventory_v1 as a non-pointer (dump veh_79040)
@@ -1481,6 +1484,9 @@ impl CompilerDriver:
             # File-worker P4 (SIMPLE_MIR_SHARD_ONLY_PATHS): claim only the modules
             # the worker admitted (HIR of F and its imports PASS). Empty = all.
             val mir_shard_only_paths: [text] = if mir_shard_queue != "": native_file_worker_only_paths_from_env_v1() else: []
+            var mir_shard_only_set: Dict<text, bool> = {}
+            for mso_path in mir_shard_only_paths:
+                mir_shard_only_set[mso_path] = true
             val mir_shard_key = self.ctx.native_sources_fingerprint
             var mir_shard_cap = native_mir_shard_claim_cap_v1(
                 native_mir_shard_spec_v1(), staged_source_names.len())
@@ -1616,7 +1622,7 @@ impl CompilerDriver:
                     continue
                 # Before any HIR read: a module-scoped unit holds no HIR for
                 # rows outside its targets' load closure (placeholder owners).
-                if mir_shard_only_paths.len() > 0 and not mir_shard_only_paths.contains(src_direct.path):
+                if mir_shard_only_paths.len() > 0 and not mir_shard_only_set.contains_key(src_direct.path):
                     direct_pos = direct_pos + 1
                     continue
                 val module_lowering_errors_before = direct_lowering.errors.len()

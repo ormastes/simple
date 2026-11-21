@@ -25,6 +25,8 @@
 use compiler.frontend.parser_types.{ParserModule}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_scope,
     frontend_parse_cache_dir, frontend_cache_note_native_digest_unavailable}
+use compiler.frontend.cache_dir_evict.{CacheTreeEvictRequestV1, cache_dir_evict_due, cache_dir_evict_tree_to_cap_v1, cache_dir_max_bytes}
+use std.nogc_sync_mut.io.disk_admission.{disk_publish_admitted}
 use compiler.frontend.flat_ast_bridge.{build_module_from_packed_view_v1}
 use compiler.frontend.core.flat_pool_packed_v1.{SpabDigestV1, SpabImportRefV1, flat_packed_encode_refs_v1, flat_packed_open_v1,
     flat_packed_close_v1, flat_packed_admit_view_strict_v1, flat_packed_store_v1, module_artifact_path_v1,
@@ -74,6 +76,8 @@ pub fn frontend_spab_path_v1(key: text) -> text:
     val ids = _identity(key, sd, "")
     module_artifact_path_v1(frontend_parse_cache_dir(), ids[0], ids[2])
 
+var _spab_stores_v1: i64 = 0
+
 pub fn frontend_spab_store_v1(key: text, file_path: text, blob: text, trace: [i64],
         refs: [SpabImportRefV1], source_sha: text) -> bool:
     val path = frontend_spab_path_v1(key)
@@ -82,7 +86,16 @@ pub fn frontend_spab_store_v1(key: text, file_path: text, blob: text, trace: [i6
     val packed = flat_packed_encode_refs_v1(blob, trace, refs, _identity(key, _scope_digest(), source_sha), xxh3_128_text(file_path))
     if packed.len() == 0:
         return false
-    flat_packed_store_v1(path, packed)
+    val dir = frontend_parse_cache_dir()
+    if not disk_publish_admitted(dir, packed.len()):
+        return false
+    if not flat_packed_store_v1(path, packed):
+        return false
+    _spab_stores_v1 = _spab_stores_v1 + 1
+    if cache_dir_evict_due(_spab_stores_v1):
+        val _evicted = cache_dir_evict_tree_to_cap_v1(CacheTreeEvictRequestV1(
+            root_dir: dir + "/artifacts/v1", suffix: ".spab", max_bytes: cache_dir_max_bytes()))
+    true
 
 # Last hit-path split (microseconds) for SIMPLE_FRONTEND_CACHE_BOUNDARY_PROFILE:
 # verify = map + structural validation + native section/body digests + admit;

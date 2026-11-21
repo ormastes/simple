@@ -154,7 +154,6 @@ impl CompilerDriver:
         # SourceFile field after the load boundary.
         val source_paths = self.ctx.source_paths_owner
         val source_authored_paths = self.ctx.source_authored_paths_owner
-        val source_contents = self.ctx.source_contents_owner
         val source_module_names = self.ctx.source_module_names_owner
         var canonical_paths: [text] = []
         log_phase("phase2:surface:canonical-paths:start")
@@ -168,7 +167,7 @@ impl CompilerDriver:
         log_phase("phase2:surface:canonical-paths:done")
         val frozen_source_count = source_paths.len()
         if source_authored_paths.len() != frozen_source_count or
-           source_contents.len() != frozen_source_count or
+           self.ctx.source_contents_owner.len() != frozen_source_count or
            source_module_names.len() != frozen_source_count or
            canonical_paths.len() != frozen_source_count or
            frozen_source_count != self.ctx.sources.len():
@@ -199,12 +198,14 @@ impl CompilerDriver:
             val unit_fresh = unit_order_fresh_flags_v1(
                 unit_order_skip_fresh_enabled_v1(driver_parse_env_get_v1(UNIT_ORDER_SKIP_FRESH_ENV_V1) ?? "",
                     driver_parse_env_get_v1(UNIT_ORDER_INDEX_ENV_V1) ?? ""),
-                driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "", source_paths, source_contents)
+                driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "", source_paths, self.ctx.source_contents_owner,
+                self.ctx.source_identities_owner)
             val edge_result = unit_admitted_graph_v1(
                 unit_order_index_enabled_v1(driver_parse_env_get_v1(UNIT_ORDER_INDEX_ENV_V1) ?? ""),
                 driver_parse_env_get_v1("SIMPLE_HIR_SHARD_QUEUE") ?? "",
-                source_paths, source_contents, source_module_names,
-                self.ctx.source_resolution_roots_owner, self.ctx.options.library_mode)
+                source_paths, self.ctx.source_contents_owner, source_module_names,
+                self.ctx.source_resolution_roots_owner, self.ctx.options.library_mode,
+                self.ctx.source_identities_owner)
             if edge_result.is_err():
                 self.ctx.add_error(edge_result.unwrap_err())
                 return false
@@ -236,6 +237,9 @@ impl CompilerDriver:
         else:
             []
         val mir_scoped = mir_targets.len() > 0
+        var mir_target_set: Dict<text, bool> = {}
+        for mt in mir_targets:
+            mir_target_set[mt] = true
         if worker_unit and not mir_scoped:
             self.ctx.add_error("file-worker unit requires module-scoped MIR targets (SIMPLE_HIR_WORKER_SKELETON=0 or SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 is not a unit lane)")
             return false
@@ -276,7 +280,7 @@ impl CompilerDriver:
             for source_path in source_paths:
                 claims.push(not worker_closure or worker_surface_seed_v1(worker_spec, source_path))
             val planned = tldr_route_frozen_inputs_v1(source_paths, source_module_names,
-                source_contents, claims)
+                self.ctx.source_contents_owner, claims)
             if planned.is_err():
                 self.ctx.add_error(planned.unwrap_err())
                 return false
@@ -291,10 +295,10 @@ impl CompilerDriver:
                 if mir_scoped:
                     # Possible AOP advice modules are seeded too: the weave
                     # reads advice from every loaded HIR module.
-                    val is_advice = worker_source_may_declare_advice_v1(source_contents[seed_index])
+                    val is_advice = worker_source_may_declare_advice_v1(self.ctx.source_contents_owner[seed_index])
                     if is_advice and not mir_advice_paths.contains(seed_path):
                         mir_advice_paths.push(seed_path)
-                    seeds.push(mir_targets.contains(seed_path) or is_advice)
+                    seeds.push(mir_target_set.contains_key(seed_path) or is_advice)
                 else: seeds.push(worker_surface_seed_v1(worker_spec, seed_path))
                 seed_index = seed_index + 1
             if unit_tldr_on:
@@ -313,7 +317,7 @@ impl CompilerDriver:
                         case Ok(_): pass
                 log_phase("phase2:surface:closure:start")
                 if not worker_unit:
-                    val edge_result = worker_admitted_edges_selected_v1(source_paths, source_contents, source_module_names,
+                    val edge_result = worker_admitted_edges_selected_v1(source_paths, self.ctx.source_contents_owner, source_module_names,
                         self.ctx.source_resolution_roots_owner, self.ctx.options.library_mode, seeds)
                     if edge_result.is_err():
                         self.ctx.add_error(edge_result.unwrap_err())
@@ -340,7 +344,7 @@ impl CompilerDriver:
             if builder.has_canonical_path(canonical_path):
                 val alias_result = builder.add_alias_canonical_identity(
                     source_module_names[source_index],
-                    source_contents[source_index], canonical_path)
+                    self.ctx.source_contents_owner[source_index], canonical_path)
                 if alias_result.is_err():
                     self.ctx.add_error(
                         "Module surface extraction error: {alias_result.unwrap_err()} source='{source_paths[source_index]}' module='{source_module_names[source_index]}' index={source_index}")
@@ -356,7 +360,7 @@ impl CompilerDriver:
                 # HIR closure digest folds the names, so a worker with summaries
                 # must digest the row like one that parsed it.
                 tldr_surface = module_surface_bind_row_identity(tldr_surface, source_paths[source_index],
-                    canonical_path, source_module_names[source_index], source_index, source_contents[source_index])
+                    canonical_path, source_module_names[source_index], source_index, self.ctx.source_contents_owner[source_index])
                 val tldr_added = builder.add_surface_canonical_identity(tldr_surface,
                     source_module_names[source_index], canonical_path)
                 if tldr_added.is_err():
@@ -372,7 +376,7 @@ impl CompilerDriver:
                     builder,
                     source_paths[source_index],
                     source_authored_paths[source_index],
-                    source_contents[source_index],
+                    self.ctx.source_contents_owner[source_index],
                     source_module_names[source_index],
                     source_index, canonical_path, frozen_tldr_route,
                     if frozen_tldr_route or not worker_closure: 0 elif worker_needed[source_index]: 1 else: 2,
@@ -438,7 +442,7 @@ impl CompilerDriver:
             var retained_source = SourceFile(
                 path: source_paths[retained_index],
                 authored_path: source_authored_paths[retained_index],
-                content: source_contents[retained_index],
+                content: self.ctx.source_contents_owner[retained_index],
                 module_name: source_module_names[retained_index])
             if retained_index < self.ctx.source_manifest_evidence_owner_v1.len():
                 retained_source = source_file_with_manifest_evidence_v1(retained_source,
@@ -604,7 +608,7 @@ impl CompilerDriver:
                 var ti = 0
                 while ti < surface_source.len():
                     val tpath = surface_source[ti]
-                    val is_target = mir_targets.contains(tpath)
+                    val is_target = mir_target_set.contains_key(tpath)
                     if is_target or mir_advice_paths.contains(tpath):
                         if not surface_ready[ti]:
                             pending_reason = if is_target: "import-closure surface missing for {tpath}"
@@ -620,14 +624,21 @@ impl CompilerDriver:
                     self.ctx.add_error("FILE-WORKER-E-CLOSURE-INCOMPLETE: {pending_reason}")
                     return false
                 var load_paths: [text] = []
+                var load_path_set: Dict<text, bool> = {}
                 if unit_tldr_on:
                     # PM3: no closure walk; only targets, advice and fallback modules load HIR.
                     for tp in mir_targets:
-                        if not load_paths.contains(tp): load_paths.push(tp)
+                        if not load_path_set.contains_key(tp):
+                            load_path_set[tp] = true
+                            load_paths.push(tp)
                     for ap in mir_advice_paths:
-                        if not load_paths.contains(ap): load_paths.push(ap)
+                        if not load_path_set.contains_key(ap):
+                            load_path_set[ap] = true
+                            load_paths.push(ap)
                     for fp in unit_tldr_plan.parse_paths:
-                        if not load_paths.contains(fp): load_paths.push(fp)
+                        if not load_path_set.contains_key(fp):
+                            load_path_set[fp] = true
+                            load_paths.push(fp)
                 else:
                     if tldr_imports_enabled_v1():
                         match tldr_closure_walk_check_v1(true, "worker_surface_import_closure_v1"):
@@ -637,9 +648,22 @@ impl CompilerDriver:
                     var ci = 0
                     while ci < closure.len():
                         if closure[ci] and surface_source[ci] != "":
-                            load_paths.push(surface_source[ci])
+                            val cp = surface_source[ci]
+                            if not load_path_set.contains_key(cp):
+                                load_path_set[cp] = true
+                                load_paths.push(cp)
                         ci = ci + 1
                 worker_hir_restrict_loads_v1(load_paths)
+                # Free C-heap `.spl` source allocations (~95 MB across ~7,000 rows)
+                # for unloaded physical files in unit children before HIR/MIR/LLVM.
+                if worker_unit and (driver_parse_env_get_v1("SIMPLE_KEEP_SOURCE_CONTENTS") ?? "") != "1":
+                    var kept_canonical: Dict<text, bool> = {}
+                    var keep_idx = 0
+                    while keep_idx < frozen_source_count:
+                        if load_path_set.contains_key(source_paths[keep_idx]):
+                            kept_canonical[canonical_paths[keep_idx]] = true
+                        keep_idx = keep_idx + 1
+                    val _reclaimed = self.ctx.reclaim_unloaded_streaming_sources_v1(kept_canonical, canonical_paths)
                 # A unit child HIR-claims only its picked targets.
                 if worker_unit: worker_surface_restrict_claims_v1(mir_targets)
                 print "[file-worker] mir-child hir closure modules={load_paths.len()} of={frozen_source_count} advice_modules={mir_advice_paths.len()}"
@@ -654,6 +678,8 @@ impl CompilerDriver:
         self.ctx.native_module_input_fact_snapshots_v1 = native_module_input_fact_snapshots_v1(
             retained_surfaces, native_source_facts)
         self.ctx.modules = {}
+        ast_reset()
+        lexer_release_parse_source_globals()
         # Read the authoritative scalar field directly.  Avoid both a receiver
         # method call and a phase-local boolean: the current native backend has
         # independently mis-lowered each form in this large mutable method.

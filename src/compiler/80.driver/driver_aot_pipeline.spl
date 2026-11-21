@@ -621,6 +621,8 @@ impl CompilerDriver:
         var batch_names: [text] = []
         for held_name in self.ctx.mir_modules.keys():
             batch_names = batch_names.push(held_name)
+            self.native_staged_codegen.module_functions[held_name] = self.ctx.mir_modules[held_name].functions.keys().len()
+            self.native_staged_codegen.module_statics[held_name] = self.ctx.mir_modules[held_name].statics.keys().len()
         self.native_staged_codegen.record_batch_lowering_v1(lowering_failed)
         val flushed_before_batch = self.native_staged_codegen.modules_flushed
         val batch_index = self.native_staged_codegen.batches_flushed + 1
@@ -765,11 +767,18 @@ impl CompilerDriver:
         # children inherit it. A child returns from the fork with its own spec
         # and owner installed and continues as an ordinary shard worker; the
         # root only reaps, seals, re-forks and exits there.
+        val shard_batch = native_staged_codegen_batch_size_v1()
+        if shard_batch < 0:
+            val batch_err = "{NATIVE_STAGED_CODEGEN_BATCH_ENV_V1} must be a non-negative decimal module count (0 disables staged native codegen)"
+            val _blocked = hir_shard_recovery_block(queue, batch_err)
+            val _sealed = hir_shard_recovery_seal(queue, root_owner, "FAILED")
+            val _completed = hir_shard_recovery_complete(queue, root_owner)
+            return CompileResult.CodegenError(batch_err)
         native_mir_fork_arm_v1(queue, root_owner)
         # Cold-HIR receipts stay: the worker records capsule identities for the
         # modules it claims and publishes them in the ledger; only the link child
         # persists (driver_cold_hir_persist is skipped while shard_queue is set).
-        var shard_state = NativeStagedCodegenStateV1.begin(0)
+        var shard_state = NativeStagedCodegenStateV1.begin(shard_batch)
         shard_state.active = true
         shard_state.shard_queue = queue
         self.native_staged_codegen = shard_state
@@ -787,6 +796,10 @@ impl CompilerDriver:
         var module_statics: {text: i64} = {}
         var shard_borrow_failed = false
         val shard_lowered = self.lower_to_mir()
+        bootstrap_hir_modules_reset()
+        val shard_hir_needed = self.ctx.options.backend == "vhdl" or (env_get_opt("SIMPLE_BOOTSTRAP_DIRECT_IR") ?? "") == "1"
+        if not shard_hir_needed:
+            self.ctx.evict_hir()
         # A forked child installed its own owner inside lower_to_mir; read it
         # only now so the seal/complete below are the child's, never the root's.
         val owner = native_mir_shard_owner_v1()
@@ -809,6 +822,10 @@ impl CompilerDriver:
             self.weave_aop()
             self.apply_debug_trace()
             if self.ctx.error_count_value == 0:
+                for flushed_name in self.native_staged_codegen.module_functions.keys():
+                    module_functions[flushed_name] = self.native_staged_codegen.module_functions[flushed_name]
+                for flushed_name in self.native_staged_codegen.module_statics.keys():
+                    module_statics[flushed_name] = self.native_staged_codegen.module_statics[flushed_name]
                 for held_name in self.ctx.mir_modules.keys():
                     module_functions[held_name] = self.ctx.mir_modules[held_name].functions.keys().len()
                     module_statics[held_name] = self.ctx.mir_modules[held_name].statics.keys().len()
@@ -841,11 +858,11 @@ impl CompilerDriver:
         var passed = 0
         val claimed = self.native_staged_codegen.shard_claimed_names
         if codegen_ok:
+            var outcome_label_by_name: Dict<text, text> = {}
+            for outcome in self.native_staged_codegen.module_outcomes.records:
+                outcome_label_by_name[outcome.source_path] = outcome.label()
             for name in claimed:
-                var outcome_label = ""
-                for outcome in self.native_staged_codegen.module_outcomes.records:
-                    if outcome.source_path == name:
-                        outcome_label = outcome.label()
+                val outcome_label = if outcome_label_by_name.contains_key(name): outcome_label_by_name[name] else: ""
                 val has_object = self.native_staged_codegen.module_objects.contains_key(name)
                 # No outcome at all is compile_to_native's objectless facade
                 # route; an OK outcome must carry its object.
@@ -878,6 +895,11 @@ impl CompilerDriver:
             val ice_summary = ice_boundary_finalize()
             if ice_summary != "":
                 log_error(ice_summary)
+        val tail_mir_names = self.ctx.mir_modules.keys()
+        if tail_mir_names.len() > 0:
+            self.ctx.evict_mir_modules(tail_mir_names)
+        self.native_staged_codegen.smf_part_objects = smf_object_spool_release_v1(
+            self.native_staged_codegen.smf_part_objects)
         # Like the HIR shard child: everything after this point (verdict,
         # link, output publication) is the final worker's job, and exiting
         # here is what returns this worker's MIR to the OS.

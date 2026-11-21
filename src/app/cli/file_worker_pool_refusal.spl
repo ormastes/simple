@@ -12,7 +12,8 @@ use app.cli.shard_mem_clamp.{SHARD_FLOOR_UNKNOWN_PARENT_KB_V1, SHARD_MIR_WORKER_
     SHARD_MIR_WORKER_FLOOR_KB_V1, SHARD_MIR_WORKER_PER_MODULE_KB_V1, SHARD_HIR_WORKER_KB_V1,
     shard_mem_available_kb, shard_mem_available_kb_from_field,
     shard_host_worker_budget_kb, shard_cgroup_memory_max_kb, shard_tree_budget_kb_for,
-    shard_pool_effective_budget_for_v1, shard_tree_headroom_kib_v1}
+    shard_pool_effective_budget_for_v1, shard_tree_headroom_kib_v1,
+    shard_effective_tree_budget_kb_v1, BUILD_MEMORY_RESERVE_CAP_KIB_V1}
 use app.io.env_ops.{env_get}
 use app.io.process_ops.{process_run_timeout}
 use app.io.cli_ops.{cli_kernel_executable_path}
@@ -227,6 +228,102 @@ pub fn file_worker_pool_mir_budget_kb_v1(modules: i64, scale: bool) -> i64:
     val usable_kb = if scale: file_worker_pool_live_admission_usable_kb_v1() else: 0
     return file_worker_pool_phase_budget_kb_v1(budget, explicit, usable_kb, file_worker_pool_host_pointer_bits_v1())
 
+# ===== PM3 module-scoped unit worker budget ==================================
+# Under PM3 `unit_tldr_imports` + placeholder surface skips, each `--file-worker`
+# spawns short-lived unit children that parse + lower only their picked batch
+# (1..32 modules) against TLDR interface summaries and exit immediately, instead
+# of lowering the whole closure's HIR in one process (which was the 5.04-5.65 GiB
+# pre-PM3 figure in FILE_WORKER_POOL_SCALED_FLOOR_KB_V1).
+pub const FILE_WORKER_UNIT_TLDR_FLOOR_KB_V1: i64 = 3145728
+pub const FILE_WORKER_UNIT_SMALL_CLOSURE_FLOOR_KB_V1: i64 = 2097152
+
+pub struct FileWorkerUnitPriceV1:
+    budget_kb: i64
+    explicit: bool
+
+pub struct FileWorkerUnitScaleBoundsV1:
+    usable_kb: i64
+    modules: i64
+
+pub enum BinaryPointerWidthV1:
+    Unknown
+    Bits32
+    Bits64
+
+pub fn file_worker_pool_unit_floor_kb_v1(modules: i64) -> i64:
+    if modules >= 0 and modules <= 256:
+        return FILE_WORKER_UNIT_SMALL_CLOSURE_FLOOR_KB_V1
+    return FILE_WORKER_UNIT_TLDR_FLOOR_KB_V1
+
+# Unit-pool phase price: explicit SIMPLE_*_SHARD_WORKER_KB always wins; a host
+# `worker_mem_mib` BELOW `default_kb` (e.g. `worker_mem_mib: 3500` in host-full.sdn,
+# matching the refusal remediation message) lowers the default to that calibrated
+# host figure, while a shard-sized ceiling >= `default_kb` (e.g. 26624 MiB on the
+# Windows shard host) is ignored so it never inflates per-file unit workers.
+fn _file_worker_pool_unit_phase_price_kb_v1(env_field: text, host_mib_field: text, default_kb: i64) -> i64:
+    val env_kb = shard_mem_available_kb_from_field(env_field)
+    if env_kb > 0: return env_kb
+    val host_kb = shard_host_worker_budget_kb(host_mib_field)
+    if host_kb > 0 and host_kb < default_kb: return host_kb
+    return default_kb
+
+fn _file_worker_pool_unit_price_explicit_v1(env_field: text, host_mib_field: text, default_kb: i64) -> bool:
+    if shard_mem_available_kb_from_field(env_field) > 0: return true
+    val host_kb = shard_host_worker_budget_kb(host_mib_field)
+    return host_kb > 0 and host_kb < default_kb
+
+pub fn file_worker_pool_unit_price_v1(env_field: text, host_mib_field: text, default_price: FileWorkerUnitPriceV1) -> FileWorkerUnitPriceV1:
+    FileWorkerUnitPriceV1(
+        budget_kb: _file_worker_pool_unit_phase_price_kb_v1(env_field, host_mib_field, default_price.budget_kb),
+        explicit: default_price.explicit or _file_worker_pool_unit_price_explicit_v1(env_field, host_mib_field, default_price.budget_kb))
+
+pub fn file_worker_pool_unit_admission_usable_kb_v1(avail_kb: i64, declared_kb: i64, cgroup_kb: i64, rss_cap_kb: i64, headroom_kb: i64) -> i64:
+    if declared_kb <= 0 and cgroup_kb <= 0 and rss_cap_kb <= 0 and
+            headroom_kb > 0 and headroom_kb < BUILD_MEMORY_RESERVE_CAP_KIB_V1:
+        val standalone = shard_effective_tree_budget_kb_v1(0, 0, avail_kb, headroom_kb)
+        return if standalone > 0: standalone else: 0
+    return file_worker_pool_admission_usable_kb_v1(avail_kb, declared_kb, cgroup_kb, rss_cap_kb, headroom_kb)
+
+fn _file_worker_pool_unit_scaled_budget_kb_v1(budget_kb: i64, usable_kb: i64, explicit: bool, modules: i64) -> i64:
+    if explicit or budget_kb <= 0 or usable_kb <= 0: return budget_kb
+    if usable_kb / 2 >= SHARD_HIR_WORKER_KB_V1: return budget_kb
+    var target = file_worker_pool_unit_floor_kb_v1(modules)
+    val half = (usable_kb - FILE_WORKER_POOL_SCALED_DRIFT_KB_V1) / 2
+    if half > target: target = half
+    if target < budget_kb: return target
+    return budget_kb
+
+pub fn file_worker_pool_unit_scaled_price_v1(price: FileWorkerUnitPriceV1, bounds: FileWorkerUnitScaleBoundsV1) -> FileWorkerUnitPriceV1:
+    FileWorkerUnitPriceV1(
+        budget_kb: _file_worker_pool_unit_scaled_budget_kb_v1(price.budget_kb, bounds.usable_kb, price.explicit, bounds.modules),
+        explicit: price.explicit)
+
+fn _file_worker_pool_live_unit_usable_kb_v1() -> i64:
+    val avail_kb = if (env_get("SIMPLE_SHARD_MEM_CLAMP") ?? "") != "0": shard_mem_available_kb() else: 0
+    val declared_kb = shard_mem_available_kb_from_field(env_get("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? "")
+    val rss_cap_kb = shard_mem_available_kb_from_field(env_get("SIMPLE_PROCESS_TREE_RSS_CAP_KIB") ?? "")
+    return file_worker_pool_unit_admission_usable_kb_v1(avail_kb, declared_kb, shard_cgroup_memory_max_kb(),
+        rss_cap_kb, shard_tree_headroom_kib_v1())
+
+pub(package) fn file_worker_pool_live_unit_hir_budget_kb_v1(modules: i64) -> i64:
+    val env_field = env_get("SIMPLE_HIR_SHARD_WORKER_KB") ?? ""
+    val host_field = host_limit_value("worker_mem_mib")
+    val explicit = _file_worker_pool_unit_price_explicit_v1(env_field, host_field, SHARD_HIR_WORKER_KB_V1)
+    val budget = _file_worker_pool_unit_phase_price_kb_v1(env_field, host_field, SHARD_HIR_WORKER_KB_V1)
+    return file_worker_pool_addressable_budget_kb_v1(
+        _file_worker_pool_unit_scaled_budget_kb_v1(budget, _file_worker_pool_live_unit_usable_kb_v1(), explicit, modules),
+        file_worker_pool_host_pointer_bits_v1())
+
+pub(package) fn file_worker_pool_live_unit_mir_budget_kb_v1(modules: i64) -> i64:
+    val env_field = env_get("SIMPLE_MIR_SHARD_WORKER_KB") ?? ""
+    val host_field = host_limit_value("worker_mem_mib")
+    val default_kb = file_worker_pool_mir_default_price_kb_v1(modules, true)
+    val explicit = _file_worker_pool_unit_price_explicit_v1(env_field, host_field, default_kb)
+    val budget = _file_worker_pool_unit_phase_price_kb_v1(env_field, host_field, default_kb)
+    return file_worker_pool_addressable_budget_kb_v1(
+        _file_worker_pool_unit_scaled_budget_kb_v1(budget, _file_worker_pool_live_unit_usable_kb_v1(), explicit, modules),
+        file_worker_pool_host_pointer_bits_v1())
+
 # ===== host pointer width ====================================================
 # The width of the RUNNING image, never the cfg target: an interpreted
 # coordinator cross-building to i686 would otherwise clamp its own 64-bit
@@ -262,13 +359,54 @@ pub fn file_worker_pool_host_pointer_bits_for_v1(image_bits: i64, windows_bits: 
     if not cfg_overridden: return cfg_bits
     return -1
 
+# Mach-O thin & universal magic from `od -An -tu1 -N12`:
+#   * MH_MAGIC_64 / MH_CIGAM_64 (cf fa ed fe) -> 64
+#   * MH_MAGIC / MH_CIGAM (ce fa ed fe) -> 32
+#   * FAT_MAGIC_64 / FAT_CIGAM_64 (ca fe ba bf) -> 64
+#   * FAT_MAGIC / FAT_CIGAM (ca fe ba be): inspect first slice cputype CPU_ARCH_ABI64 (0x01000000)
+fn _file_worker_pool_pointer_bits_from_macho_header_v1(od_output: text) -> i64:
+    var fields: [text] = []
+    for part in od_output.trim().split(" "):
+        if part.trim() != "": fields = fields.push(part.trim())
+    if fields.len() < 4: return -1
+    val b0 = fields[0]
+    val b1 = fields[1]
+    val b2 = fields[2]
+    val b3 = fields[3]
+    if (b0 == "207" and b1 == "250" and b2 == "237" and b3 == "254") or
+            (b0 == "254" and b1 == "237" and b2 == "250" and b3 == "207"):
+        return 64
+    if (b0 == "206" and b1 == "250" and b2 == "237" and b3 == "254") or
+            (b0 == "254" and b1 == "237" and b2 == "250" and b3 == "206"):
+        return 32
+    if (b0 == "202" and b1 == "254" and b2 == "186" and b3 == "191") or
+            (b0 == "191" and b1 == "186" and b2 == "254" and b3 == "202"):
+        return 64
+    if b0 == "202" and b1 == "254" and b2 == "186" and b3 == "190":
+        if fields.len() >= 12:
+            return if fields[8] == "1": 64 else: 32
+        return 64
+    if b0 == "190" and b1 == "186" and b2 == "254" and b3 == "202":
+        if fields.len() >= 12:
+            return if fields[11] == "1": 64 else: 32
+        return 64
+    return -1
+
+pub fn file_worker_pool_pointer_width_from_macho_header_v1(od_output: text) -> BinaryPointerWidthV1:
+    val bits = _file_worker_pool_pointer_bits_from_macho_header_v1(od_output)
+    if bits == 64: return BinaryPointerWidthV1.Bits64
+    if bits == 32: return BinaryPointerWidthV1.Bits32
+    BinaryPointerWidthV1.Unknown
+
 pub fn file_worker_pool_probe_pointer_bits_v1(exe_path: text) -> i64:
     var header = ""
     if exe_path != "":
-        val (out, _err, code) = process_run_timeout("od", ["-An", "-tu1", "-N5", exe_path], 2000)
+        val (out, _err, code) = process_run_timeout("od", ["-An", "-tu1", "-N12", exe_path], 2000)
         if code == 0: header = out
     val overridden = (env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? "") != "" or (env_get("SIMPLE_TARGET_ARCH") ?? "") != ""
-    return file_worker_pool_host_pointer_bits_for_v1(file_worker_pool_pointer_bits_from_elf_header_v1(header),
+    val elf_bits = file_worker_pool_pointer_bits_from_elf_header_v1(header)
+    val image_bits = if elf_bits > 0: elf_bits else: _file_worker_pool_pointer_bits_from_macho_header_v1(header)
+    return file_worker_pool_host_pointer_bits_for_v1(image_bits,
         file_worker_pool_pointer_bits_from_windows_arch_v1(env_get("PROCESSOR_ARCHITECTURE") ?? ""),
         FILE_WORKER_POOL_CFG_POINTER_BITS_V1, overridden)
 

@@ -1418,6 +1418,38 @@ class CompileContext:
         self.source_contents_owner = []
         reclaimed
 
+    # Free C-heap `.spl` source buffers for unloaded physical files in `worker_unit`
+    # children before HIR/MIR/LLVM begins. Keyed by `canonical_paths[idx]` so physical
+    # aliases (`lib` vs `std` twins or preclosed alias rows) of a kept module are never
+    # freed while `rt_string_free` safely deduplicates shared handles across dropped twins.
+    me reclaim_unloaded_streaming_sources_v1(kept_canonical_paths: Dict<text, bool>, canonical_paths: [text]) -> i64:
+        var reclaimed: i64 = 0
+        var idx: i64 = 0
+        while idx < self.sources.len():
+            val canon = if idx < canonical_paths.len(): canonical_paths[idx] else: ""
+            if canon != "" and not kept_canonical_paths.contains_key(canon):
+                val freed_src = rt_string_free(self.sources[idx].content)
+                if freed_src == 1:
+                    reclaimed = reclaimed + 1
+                if idx < self.source_contents_owner.len():
+                    val freed_owner = rt_string_free(self.source_contents_owner[idx])
+                    if freed_owner == 1:
+                        reclaimed = reclaimed + 1
+                    self.source_contents_owner[idx] = ""
+                val orig = self.sources[idx]
+                var trimmed = SourceFile(
+                    path: orig.path,
+                    authored_path: orig.authored_path,
+                    content: "",
+                    module_name: orig.module_name
+                )
+                if idx < self.source_manifest_evidence_owner_v1.len():
+                    trimmed = source_file_with_manifest_evidence_v1(trimmed,
+                        self.source_manifest_evidence_owner_v1[idx])
+                self.sources[idx] = trimmed
+            idx = idx + 1
+        reclaimed
+
     # Streaming parse reads the promoted SoA owners, not SourceFile.content.
     # After the AOT interface fingerprint has consumed the original records,
     # reclaim those independent buffers while preserving one metadata record

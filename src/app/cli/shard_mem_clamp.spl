@@ -921,6 +921,26 @@ pub fn shard_threads_guarded_floor_v1(requested: i64, cap: i64, tree_kb: i64,
 # (declared budget or cgroup memory.max). Host config max_threads
 # (SIMPLE_HOST_MAX_THREADS) bounds the request on every platform; it can only
 # lower it.
+# Standalone host admission when no enclosing tree budget, cgroup cap or tree
+# RSS cap is active and the host reserve is calibrated (< 24 GiB, from explicit
+# reserve/host.sdn or RAM/4 on < 96 GiB hosts): admit workers directly inside
+# `avail_kb - max(headroom_kb, parent_peak_kb)` instead of applying a second
+# 40% cut on top of the calibrated reserve (which collapsed --threads >= 2 to 1
+# worker on 24-32 GiB hosts even with 14-22 GiB free RAM).
+pub fn shard_standalone_host_cap_v1(requested: i64, budget_kb: i64,
+        avail_kb: i64, headroom_kb: i64, parent_peak_kb: i64 = -1) -> i64:
+    if requested <= 0: return 0
+    if requested == 1 and parent_peak_kb < 0: return 1
+    if budget_kb <= 0 or avail_kb <= 0:
+        return if parent_peak_kb >= 0: 0 else: 1
+    val reserve_kb = if parent_peak_kb > headroom_kb: parent_peak_kb else: headroom_kb
+    if avail_kb <= reserve_kb:
+        return if parent_peak_kb >= 0: 0 else: 1
+    val slots = (avail_kb - reserve_kb) / budget_kb
+    if parent_peak_kb < 0 and slots < 1: return 1
+    if slots >= requested: return requested
+    slots
+
 pub fn shard_threads_mem_cap(requested: i64, budget_kb: i64, parent_peak_kb: i64 = -1) -> i64:
     if requested <= 1 and parent_peak_kb < 0:
         return requested
@@ -931,15 +951,19 @@ pub fn shard_threads_mem_cap(requested: i64, budget_kb: i64, parent_peak_kb: i64
         env_get("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? "")
     val cgroup_kb = shard_cgroup_memory_max_kb()
     val tree_kb = shard_tree_budget_kb_for(declared_kb, cgroup_kb)
-    val cap0 = if parent_peak_kb >= 0:
+    val rss_cap = shard_mem_available_kb_from_field(env_get("SIMPLE_PROCESS_TREE_RSS_CAP_KIB") ?? "")
+    val cap_kb = shard_pool_cap_kb_for_v1(rss_cap, cgroup_kb)
+    val headroom_kb = shard_tree_headroom_kib_v1()
+    val standalone_calibrated = host_clamp and tree_kb <= 0 and cap_kb <= 0 and
+        headroom_kb > 0 and headroom_kb < BUILD_MEMORY_RESERVE_CAP_KIB_V1
+    val cap0 = if standalone_calibrated:
+        shard_standalone_host_cap_v1(bounded, budget_kb, avail_kb, headroom_kb, parent_peak_kb)
+    elif parent_peak_kb >= 0:
         shard_threads_parent_cap_for(bounded, budget_kb, avail_kb, tree_kb, host_clamp, parent_peak_kb)
     else:
         shard_threads_tree_cap_for(bounded, budget_kb, avail_kb, tree_kb, host_clamp)
     var cap = cap0
     if parent_peak_kb >= 0:
-        val rss_cap = shard_mem_available_kb_from_field(env_get("SIMPLE_PROCESS_TREE_RSS_CAP_KIB") ?? "")
-        val cap_kb = shard_pool_cap_kb_for_v1(rss_cap, cgroup_kb)
-        val headroom_kb = shard_tree_headroom_kib_v1()
         val effective = shard_pool_effective_budget_for_v1(avail_kb, declared_kb, cgroup_kb, rss_cap, headroom_kb)
         if effective >= 0:
             if effective != tree_kb:

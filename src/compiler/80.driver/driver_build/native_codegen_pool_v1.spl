@@ -33,6 +33,7 @@ use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{file_exists, file_read, file_size_raw, file_delete}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, host_os}
 use std.nogc_sync_mut.host_limits.{host_limit_i64, host_limit_mem_reserve_free_kib}
+use std.nogc_sync_mut.sffi.process_memory.{host_commit_avail_kib, host_physmem_total_kib}
 use compiler.backend.llvm_diagnostic_admission.{llvm_llc_error_diagnostic}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal}
@@ -113,18 +114,23 @@ pub fn native_codegen_pool_workers_v1(host_cpus: i64, requested: i64, jobs: i64,
     if n < 1: 1 else: n
 
 # Commit floor (KiB): explicit SIMPLE_BUILD_MEMORY_RESERVE_BYTES, else host
-# config mem_reserve_free_mib, else 24 GiB. Pure form first, live form second.
-pub fn native_codegen_commit_floor_for_v1(reserve_bytes_field: text, host_reserve_kib: i64) -> i64:
+# config mem_reserve_free_mib, else min(24 GiB, installed RAM / 4) when total
+# RAM is known (same host-scaled reserve as shard_tree_headroom_kib_for_v1).
+pub fn native_codegen_commit_floor_for_v1(reserve_bytes_field: text, host_reserve_kib: i64, total_kib: i64 = 0) -> i64:
     val bytes = native_codegen_kib_field_v1(reserve_bytes_field)
     if bytes > 0:
         val kib = bytes / 1024
         if kib > 0: return kib
     if host_reserve_kib > 0: return host_reserve_kib
-    NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1
+    if total_kib <= 0: return NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1
+    val quarter = total_kib / 4
+    if quarter <= 0 or quarter >= NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1: NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1 else: quarter
 
 pub fn native_codegen_commit_floor_kib_v1() -> i64:
-    native_codegen_commit_floor_for_v1(env_get_nullable("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? "",
-        host_limit_mem_reserve_free_kib(0))
+    val field = env_get_nullable("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? ""
+    val host_kib = host_limit_mem_reserve_free_kib(0)
+    val explicit = native_codegen_kib_field_v1(field) >= 1024 or host_kib > 0
+    native_codegen_commit_floor_for_v1(field, host_kib, if explicit: 0 else: host_physmem_total_kib())
 
 # Default cores for the pool: host config max_threads bounds the detected
 # count (it can only lower it); absent = detected.
@@ -163,6 +169,9 @@ pub fn native_codegen_headroom_kib_v1() -> i64:
         return bytes / 1024
     if file_exists("/proc/meminfo"):
         return native_codegen_meminfo_available_kib_v1(file_read("/proc/meminfo"))
+    val commit_kib = host_commit_avail_kib()
+    if commit_kib > 0:
+        return commit_kib
     0
 
 pub fn native_codegen_job_ir_path_v1(stage_root: text, index: i64) -> text:
