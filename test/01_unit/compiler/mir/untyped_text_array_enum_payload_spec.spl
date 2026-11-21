@@ -1,0 +1,54 @@
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+# Failing-first pin for
+# doc/08_tracking/bug/untyped_text_array_element_rejected_as_enum_payload_2026-11-21.md
+# (os.kernel.loader.spawn_recipes spawn_recipe_grants: "enum construction
+# 'CapabilityKind.FileRead': payload type mismatch at 0"). An element read
+# out of an UNANNOTATED text array literal -- by for-in or by index -- is
+# rejected from a `text` payload slot, while the same code with
+# `val paths: [text] = ...` lowers cleanly. The fix must type the element
+# as text at its producer; it must not admit Any/unknown into a text slot
+# (see the rejection twin).
+
+fn untyped_text_payload_errors(source: text) -> [text]:
+    val filename = "untyped_text_array_enum_payload.spl"
+    val parsed = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var errors: [text] = []
+    for error in hir_lowering.errors:
+        errors.push("HIR: " + error.message)
+    for error in lowering.errors:
+        errors.push("MIR: " + error.message)
+    if mir.functions.len() == 0:
+        errors.push("no lowered functions")
+    for error in errors:
+        print "UNTYPED_TEXT_PAYLOAD_DIAGNOSTIC={error}"
+    errors
+
+val CAP_ENUM = "enum Cap:\n    Read(path_prefix: text)\n    Other\n"
+
+describe "untyped text array element into a text enum payload":
+    it "for-in over an unannotated literal with a concat first element":
+        val errors = untyped_text_payload_errors(CAP_ENUM + "fn grants(root: text) -> [Cap]:\n    var out: [Cap] = []\n    val paths = [root + \"/hello.o\", \"/usr/lib/crt0.o\"]\n    for p in paths:\n        out.push(Cap.Read(path_prefix: p))\n    out\n")
+        expect(errors.len()).to_equal(0)
+    it "for-in over an unannotated all-literal array":
+        val errors = untyped_text_payload_errors(CAP_ENUM + "fn grants() -> [Cap]:\n    var out: [Cap] = []\n    val paths = [\"/a\", \"/b\"]\n    for p in paths:\n        out.push(Cap.Read(path_prefix: p))\n    out\n")
+        expect(errors.len()).to_equal(0)
+    it "index read of an unannotated all-literal array":
+        val errors = untyped_text_payload_errors(CAP_ENUM + "fn grant() -> Cap:\n    val paths = [\"/a\", \"/b\"]\n    val p = paths[0]\n    Cap.Read(path_prefix: p)\n")
+        expect(errors.len()).to_equal(0)
+    it "annotated control lowers cleanly":
+        val errors = untyped_text_payload_errors(CAP_ENUM + "fn grants() -> [Cap]:\n    var out: [Cap] = []\n    val paths: [text] = [\"/a\", \"/b\"]\n    for p in paths:\n        out.push(Cap.Read(path_prefix: p))\n    out\n")
+        expect(errors.len()).to_equal(0)
+    it "rejects an unannotated int array element in a text slot":
+        val errors = untyped_text_payload_errors(CAP_ENUM + "fn grants() -> [Cap]:\n    var out: [Cap] = []\n    val ns = [1, 2]\n    for n in ns:\n        out.push(Cap.Read(path_prefix: n))\n    out\n")
+        expect(errors.len() > 0).to_equal(true)
