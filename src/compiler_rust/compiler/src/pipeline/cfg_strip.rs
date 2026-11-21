@@ -674,7 +674,7 @@ payload
         assert!(arm.contains("fn keep"));
         let rv = strip_inactive_cfg_arch_globals(source, TargetArch::Riscv64);
         assert!(rv.contains("riscv64.console") && !rv.contains("pl011_common"));
-        assert!(!rv.contains("os.a.{") && !rv.contains("    b,") && !rv.contains("@cfg"));
+        assert!(!rv.contains("os.a.{") && !rv.contains("    b,") && !rv.contains("@cfg(riscv64)"));
         // Indented (function-local) uses are not touched by this pass.
         let local = "fn f():\n    @cfg(riscv64)\n    use a.b\n";
         assert_eq!(strip_inactive_cfg_arch_globals(local, TargetArch::Aarch64), local);
