@@ -1,0 +1,113 @@
+# @cover src/lib/gc_async_mut/slang/model_executor/runners/tts_runner.spl 60%
+# @cover src/lib/gc_async_mut/slang/entrypoints/openai/serving/serving_speech.spl 80%
+
+"""
+## Purpose and audience
+Purpose: prove slang's /v1/audio/speech end to end on real models: OuteTTS-0.2
+generates audio codes, the WavTokenizer vocoder (a second model handle) turns
+them into spectrogram rows, the pure-Simple ISTFT makes 24 kHz samples, and
+the wav comes back in the JSON envelope. The wav is then transcribed by an
+ASR-capable chat model (Qwen3-ASR through chat media), and the transcript must
+contain the spoken keyword.
+Audience: engineers touching the TTS runner, the ISTFT, or the ggml shim's
+model handles and embeddings.
+
+## Compatibility and limitations
+Runs when SLANG_LIVE=1, SLANG_MODEL_ROOT names the model directory and the
+ggml shim was built with SLANG_SHIM_MTMD=1 (the ASR half needs mtmd).
+SLANG_TTS_MODEL (default OuteTTS-0.2-500M-GGUF, a directory holding the
+OuteTTS GGUF, the WavTokenizer GGUF and a slang_kind.sdn naming it) and
+SLANG_TTS_ASR_MODEL (default Qwen3-ASR-0.6B-GGUF) pick the models.
+SLANG_TTS_OUT_DIR (default build/probe) receives speech.wav and timings;
+SLANG_TTS_SAMPLER=greedy swaps the default top-k sampler for greedy.
+Skipped, with a reason, when either model directory is absent.
+"""
+
+use std.spec.{describe, it, expect, step, skip}
+use std.gc_async_mut.slang.entrypoints.llm.{engine_backend_available}
+use std.gc_async_mut.slang.entrypoints.openai.serving.serving_speech.{serve_speech}
+use std.gc_async_mut.slang.entrypoints.openai.serving_chat.{serve_chat_completions}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{json_string_field, json_int_field}
+use std.gc_async_mut.slang.model_executor.runners.tts_runner.{tts_last_timings, tts_set_sampler}
+use std.gc_async_mut.slang.model_executor.backend.{SamplerConfig}
+use std.common.base_encoding.base64.{base64_decode_bytes, base64_encode_bytes}
+use std.common.audio.wav_decode.{decode_wav}
+use std.common.math.math.{math_sqrt}
+use std.common.text_ascii.{to_lower_ascii}
+use std.io_runtime.{env_get, is_dir, file_write_bytes, file_append_text, dir_create_all, time_now_monotonic_ms}
+
+fn _model_root() -> text:
+    val root = env_get("SLANG_MODEL_ROOT") ?? ""
+    if root == "" or not is_dir(root):
+        return ""
+    root
+
+fn _env_or(key: text, fallback: text) -> text:
+    val v = env_get(key) ?? ""
+    if v != "": v else: fallback
+
+fn _out_dir() -> text:
+    val d = _env_or("SLANG_TTS_OUT_DIR", "build/probe")
+    dir_create_all(d)
+    d
+
+fn _record(line: text):
+    file_append_text(_out_dir() + "/tts_live.txt", line + "\n")
+
+fn _live_enabled() -> bool:
+    (env_get("SLANG_LIVE") ?? "") == "1" and _model_root() != "" and engine_backend_available()
+
+fn _rms(samples: [f32]) -> f64:
+    if samples.len() == 0:
+        return 0.0
+    var acc = 0.0
+    for s in samples:
+        val v = s as f64
+        acc = acc + v * v
+    math_sqrt(acc / (samples.len() as f64))
+
+describe "slang speaks":
+    it "synthesizes a sentence that ASR hears back":
+        val tts_model = _env_or("SLANG_TTS_MODEL", "OuteTTS-0.2-500M-GGUF")
+        val asr_model = _env_or("SLANG_TTS_ASR_MODEL", "Qwen3-ASR-0.6B-GGUF")
+        if not _live_enabled() or not is_dir(_model_root() + "/" + tts_model) or not is_dir(_model_root() + "/" + asr_model):
+            # The runner counts a skip as a pass, so leave a line saying so.
+            _record("SKIPPED: live=" + (env_get("SLANG_LIVE") ?? "") + " root=" + _model_root() + " backend=" + engine_backend_available().to_text())
+            skip("synthesizes a sentence that ASR hears back", "needs SLANG_LIVE=1, SLANG_MODEL_ROOT, an mtmd ggml shim, " + tts_model + " and " + asr_model)
+            return
+        # SLANG_TTS_SAMPLER=greedy compares against the default tts.cpp sampler
+        # (top-k 4, temperature 0.8, seed 42).
+        val sampler = _env_or("SLANG_TTS_SAMPLER", "topk")
+        if sampler == "greedy":
+            tts_set_sampler(SamplerConfig(temperature_milli: 0, top_k: 0, top_p_milli: 1000, repeat_penalty_milli: 1000, seed: 42))
+        step("Synthesize through /v1/audio/speech")
+        val t0 = time_now_monotonic_ms()
+        val speech = serve_speech(_model_root(), "{\"model\":\"" + tts_model + "\",\"input\":\"The capital of France is Paris.\",\"voice\":\"alloy\",\"response_format\":\"wav\"}")
+        val t1 = time_now_monotonic_ms()
+        _record("TTS sampler=" + sampler + " status=" + speech.status.to_text() + " wall_ms=" + (t1 - t0).to_text() + " " + tts_last_timings())
+        if speech.status != 200:
+            _record("TTS body: " + speech.body)
+        expect(speech.status).to_equal(200)
+        expect(json_int_field(speech.body, "sample_rate", -1)).to_equal(24000)
+        val wav = base64_decode_bytes(json_string_field(speech.body, "audio"))
+        file_write_bytes(_out_dir() + "/speech.wav", wav)
+        step("The wav is 24 kHz mono, 1-6 s long and not silent")
+        match decode_wav(wav):
+            Err(e):
+                expect(e).to_equal("")
+            Ok(audio):
+                val seconds = (audio.samples.len() as f64) / 24000.0
+                val rms = _rms(audio.samples)
+                _record("WAV samples=" + audio.samples.len().to_text() + " seconds=" + seconds.to_text() + " rms=" + rms.to_text())
+                expect(audio.sample_rate).to_equal(24000)
+                expect(audio.channels).to_equal(1)
+                expect(seconds > 1.0 and seconds < 6.0).to_equal(true)
+                expect(rms > 0.01).to_equal(true)
+        step("Transcribe it with the ASR model through chat media")
+        val body = "{\"model\":\"" + asr_model + "\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"" + base64_encode_bytes(wav) + "\",\"format\":\"wav\"}}}},{\"type\":\"text\",\"text\":\"Transcribe the audio.\"}]}]}"
+        val t2 = time_now_monotonic_ms()
+        val heard = serve_chat_completions(_model_root(), body)
+        val t3 = time_now_monotonic_ms()
+        val transcript = if heard.status == 200: json_string_field(heard.body, "content") else: "HTTP " + heard.status.to_text() + " " + heard.body
+        _record("ASR wall_ms=" + (t3 - t2).to_text() + " transcript: " + transcript)
+        expect(to_lower_ascii(transcript).find("paris") >= 0).to_equal(true)
