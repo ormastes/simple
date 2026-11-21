@@ -3353,5 +3353,5 @@ void *memset(void *destination, int value, size_t count)
 RuntimeValue rt_stdout_write(RuntimeValue data)
 {
     simpleos_serial_put_string_value(data);
-    return ENCODE_INT(0);
+    return (IS_HEAP(data) && DECODE_PTR(data) && ((HeapHeader *)DECODE_PTR(data))->type == HEAP_STRING) ? ENCODE_INT((int64_t)((RuntimeString *)DECODE_PTR(data))->len) : ENCODE_INT(0);
 }
