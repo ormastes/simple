@@ -146,19 +146,12 @@ bootstrap_phase_c_run_tool_build() {
   # full-tool shard entry predicate rejects the empty mode.
   # --entry-closure: the explicit entry IS a frozen entry closure, but the
   # coordinator publishes the parse-closure request only on the explicit flag
-  # (native_build_closure_publish_once_v1), and the HIR shard profile the
-  # SIMPLE_FILE_WORKERS=0 pin below selects admits a worker only against a
-  # published request. Without the flag every tool row failed in 12 s with
-  # "[hir-shard] profile admission rejected: no closure request published"
-  # (bootstrap-fable-11, 2026-11-12).
+  # (native_build_closure_publish_once_v1), and an explicit SIMPLE_FILE_WORKERS=0
+  # opt-out selects the HIR shard profile, which admits a worker only against a
+  # published request (bootstrap-fable-11, 2026-11-12).
   set -- "$pcb_compiler" native-build --entry "$pcb_entry" "--backend=$pcb_backend" --low-memory --mode dynload --entry-closure
-  # Phase-route pin: these tool entries use AOP advice across module
-  # boundaries, which the per-file pool cannot close (fail-closed
-  # FILE-WORKER-E-CLOSURE-INCOMPLETE, observed 2026-11-05 on
-  # compiler_cli_build). The two-pass route needs the row RSS budget that
-  # BOOTSTRAP_VERIFY_TEST_WORKERS=2 provides (the per-row tree budget is the
-  # session cap divided by concurrent test workers). This is the documented
-  # per-invocation opt-out, not a script-global default.
+  # Per-file worker pool default (1 when unset; explicit SIMPLE_FILE_WORKERS=0
+  # opts out per invocation to the two-pass HIR/MIR shard route).
   # The pin travels in the ENVIRONMENT (exported around run_matrix_task and
   # restored after), never as an `env VAR=...` argv prefix: every owner keys
   # on argv[0]=compiler / argv[1]=native-build -- the verifier's Stage 2
@@ -180,7 +173,7 @@ bootstrap_phase_c_run_tool_build() {
   fi
   pcb_fw_was_set=${SIMPLE_FILE_WORKERS+x}
   pcb_fw_previous=${SIMPLE_FILE_WORKERS-}
-  SIMPLE_FILE_WORKERS=0
+  SIMPLE_FILE_WORKERS=${SIMPLE_FILE_WORKERS:-1}
   export SIMPLE_FILE_WORKERS
   # MIR shard pins, same per-invocation scoping. Enable the bounded route here,
   # in the row owner: an outer launcher's values are not guaranteed to survive
