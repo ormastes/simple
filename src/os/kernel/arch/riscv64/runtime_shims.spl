@@ -8,7 +8,7 @@
 # freestanding_runtime.c). rt_array_* take/return raw RuntimeValue words.
 extern fn rt_array_len(array: i64) -> i64
 extern fn rt_array_get(array: i64, index: i64) -> i64
-extern fn rt_mmio_read_u32(addr: u64) -> u32
+extern fn rt_mmio_read_u32(addr: u64) -> u64
 extern fn rt_mmio_write_u32(addr: u64, value: u32)
 extern fn rt_mmio_read_u64(addr: u64) -> u64
 extern fn rt_mmio_write_u64(addr: u64, value: u64)
@@ -19,7 +19,10 @@ extern fn rt_mmio_write_u64(addr: u64, value: u64)
 # hosted twin is src/runtime/simple_core/core_array_ops.spl; it reads the
 # hosted array header directly, so the kernel goes through rt_array_get,
 # which also handles the inline-items fallback of the kernel RuntimeArray.
-# Items and the needle are compared raw, as codegen and the hosted twin do.
+# The needle is raw (codegen contract). The kernel array store is mixed
+# encoding (rt_text_to_bytes pushes ENCODE_INT items), so an item matches the
+# way the runtime's own equality does (simpleos_raw_or_encoded_int): raw, or
+# int-tagged (low 3 bits 0) with item >> 3 == value.
 # ---------------------------------------------------------------------------
 
 @export("C")
@@ -29,7 +32,8 @@ fn rt_numeric_contains_u64(array: i64, value: i64) -> i8:
     val n = rt_array_len(array)
     var i: i64 = 0
     while i < n:
-        if rt_array_get(array, i) == value:
+        val item = rt_array_get(array, i)
+        if item == value or ((item & 7) == 0 and (item >> 3) == value):
             return 1
         i = i + 1
     0
@@ -50,7 +54,7 @@ fn rt_numeric_contains_u64(array: i64, value: i64) -> i8:
 # riscv64 kernel brings up a second hart.
 # ---------------------------------------------------------------------------
 
-val RV_HEAP_MUTEX: u32 = 12
+val RV_HEAP_MUTEX: u64 = 12
 val RV_TAG_MASK: i64 = 7
 val RV_TAG_HEAP: i64 = 1
 val RV_NIL_VALUE: i64 = 3
