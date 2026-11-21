@@ -1590,6 +1590,18 @@ pub(crate) fn find_runtime_library() -> Option<PathBuf> {
 /// the returned RISC-V path is a compiler-rt archive under the clang resource
 /// directory, while ELF cross toolchains may report libgcc instead.
 pub(crate) fn find_compiler_rt_builtins(triple: &str) -> Option<PathBuf> {
+    // Explicit override: a cross builtins archive when the host clang ships none
+    // for this triple. Never libgcc.
+    if let Ok(p) = std::env::var("SIMPLE_COMPILER_RT_BUILTINS") {
+        let path = PathBuf::from(p);
+        let is_gcc = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map_or(false, |n| n.starts_with("libgcc"));
+        if path.is_file() && !is_gcc {
+            return Some(path);
+        }
+    }
     let cc = find_c_compiler();
     let output = std::process::Command::new(&cc)
         .arg(format!("--target={triple}"))
