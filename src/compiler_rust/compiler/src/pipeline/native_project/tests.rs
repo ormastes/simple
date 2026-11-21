@@ -12,7 +12,7 @@ use super::linker::{
     add_extra_link_objects, freestanding_boot_dir, is_boot_c_translation_unit, minimal_boot_asm_source_allowed,
     minimal_boot_source_allowed, split_extra_link_objects, validate_extra_link_objects,
 };
-use super::tools::find_hosted_runtime_rlib;
+use super::tools::{find_compiler_rt_builtins, find_hosted_runtime_rlib};
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
 use super::*;
 
@@ -179,6 +179,9 @@ fn minimal_rv64_boot_keeps_entry_and_required_runtime_owners() {
     assert!(minimal_boot_source_allowed("freestanding_runtime", false));
     assert!(minimal_boot_source_allowed("baremetal_stubs", false));
     assert!(minimal_boot_source_allowed("rv64_display_backend", false));
+    // S-mode primitives TU (rt_memcpy/rt_riscv64_sbi_call/unsafe_addr_of...);
+    // omitting it left 8 symbols undefined in the riscv64 fs-exec kernel link.
+    assert!(minimal_boot_source_allowed("rv64_kernel_primitives", false));
     assert!(!minimal_boot_source_allowed("full_networking_runtime", false));
     assert!(minimal_boot_source_allowed("full_networking_runtime", true));
     assert!(!minimal_boot_source_allowed("unrelated_service", false));
@@ -10470,4 +10473,28 @@ fn llvm_address_taken_import_survives_foreign_extern_shadow() {
         .build()
         .expect("imported fn value must bind despite a foreign extern of the same name");
     assert_eq!(result.failed, 0);
+}
+
+#[test]
+fn compiler_rt_builtins_env_override_selects_explicit_archive() {
+    // clang 23 ships no riscv64 bare-metal builtins in its resource dir, so the
+    // riscv64 kernel link lost __fixdfdi/__nedf2. An explicit clang-built
+    // archive must win; a missing path must be ignored (fall back to clang).
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("libclang_rt.builtins-riscv64.a");
+    std::fs::write(&archive, b"!<arch>\n").unwrap();
+    std::env::set_var("SIMPLE_COMPILER_RT_BUILTINS", &archive);
+    let chosen = find_compiler_rt_builtins("riscv64-unknown-none-elf");
+    let missing = dir.path().join("absent.a");
+    std::env::set_var("SIMPLE_COMPILER_RT_BUILTINS", &missing);
+    let fallback = find_compiler_rt_builtins("riscv64-unknown-none-elf");
+    let gcc = dir.path().join("libgcc.a");
+    std::fs::write(&gcc, b"!<arch>\n").unwrap();
+    std::env::set_var("SIMPLE_COMPILER_RT_BUILTINS", &gcc);
+    let gcc_pick = find_compiler_rt_builtins("riscv64-unknown-none-elf");
+    std::env::remove_var("SIMPLE_COMPILER_RT_BUILTINS");
+    assert_eq!(chosen, Some(archive));
+    assert_ne!(fallback, Some(missing));
+    assert_ne!(gcc_pick, Some(gcc));
 }

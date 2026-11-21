@@ -100,3 +100,16 @@ undefined set from 47 to 36 with no duplicate definitions.
   closure).
 - Specs: `test/01_unit/os/kernel/arch/riscv64_enter_user_link_contract_spec.spl`,
   `hal_arch_gating_contract_spec.spl` ("cfg-gates every per-arch console import").
+
+## Step 4b: compiler-rt builtins and S-mode primitives (2026-11-21, verification-pending)
+
+- Seed: `rv64_kernel_primitives` is now in the `SIMPLE_BOOT_MINIMAL` allowlist, and
+  `SIMPLE_COMPILER_RT_BUILTINS` names an explicit clang-built builtins archive. libgcc is rejected.
+  LLVM 23's clang resource dir ships no riscv64 bare-metal builtins.
+- Gate: `scripts/check/check-simpleos-riscv64-user-elf-opensbi.shs --link-only`. This is a minimal
+  rebuild after the lane worktree was lost; the QEMU boot stage will be a separate change.
+- Kernel link on ubuntu-p2: undefined 33 -> 23. `__fixdfdi`, `__nedf2`, `rt_memcpy`, `rt_memset`,
+  `rt_load/store_barrier`, `rt_riscv64_{fence_i,sbi_call,syscall}`, and `unsafe_addr_of` are gone.
+- Remaining 23: `memset`, `spl_thread_current_id`, and 21 `rt_*` helpers, most of which are defined only in
+  hosted `src/runtime/runtime_native.c` or in `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`
+  (that file is not compiled by the examples boot dir).
