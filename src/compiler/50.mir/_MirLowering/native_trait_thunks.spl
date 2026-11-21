@@ -83,16 +83,25 @@ impl MirLowering:
                 case LocalKind.Arg(0): data = local.id
                 case _: ()
         if not implementation.reference_semantics:
-            val concrete_type = self.lower_type(implementation.concrete_type)
-            val concrete = builder.emit_bitcast(mir_operand_copy(data), concrete_type)
-            self.builder = builder
             val concrete_id = match implementation.concrete_type.kind:
                 case HirTypeKind.Named(id, _): id
                 case _: SymbolId(id: -1)
-            val copied = self.copy_struct_value_recursive(concrete, implementation.concrete_name,
-                concrete_id, [implementation.concrete_name])
-            builder = self.builder
-            data = builder.emit_bitcast(mir_operand_copy(copied), native_trait_data_pointer_type())
+            var is_value_struct = false
+            if concrete_id.id >= 0:
+                if val concrete_info = self.symbols.get_symbol_raw(concrete_id.id):
+                    is_value_struct = concrete_info.kind == SymbolKind.Struct
+                else:
+                    val canonical_key = self.canonical_mir_type_key_v1(concrete_id.id)
+                    if canonical_key != "" and not self.class_type_names.has(canonical_key) and not self.enum_variant_index_q.has(canonical_key) and not self.enum_runtime_to_bare.has(canonical_key):
+                        is_value_struct = self.struct_field_order.contains(implementation.concrete_name)
+            if is_value_struct:
+                val concrete_type = self.lower_type(implementation.concrete_type)
+                val concrete = builder.emit_bitcast(mir_operand_copy(data), concrete_type)
+                self.builder = builder
+                val copied = self.copy_struct_value_recursive(concrete, implementation.concrete_name,
+                    concrete_id, [implementation.concrete_name])
+                builder = self.builder
+                data = builder.emit_bitcast(mir_operand_copy(copied), native_trait_data_pointer_type())
         builder.set_terminator(MirTerminator.Ret(Some(mir_operand_copy(data))))
         self.native_trait_thunks.push(builder.end_function())
         self.builder = outer_builder
