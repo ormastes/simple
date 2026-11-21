@@ -1,5 +1,5 @@
 use compiler.common.cache_contract.mir_initializer_plan_v1.{MirInitializerStepV1, MirInitializerPlanV1}
-use compiler.mir.canonical_type_symbol_id_v1.{canonical_type_symbol_id_v1}
+use compiler.mir.canonical_type_symbol_id_v1.{canonical_type_symbol_id_v1, canonical_type_symbol_table_sorted_v1}
 use compiler.mir._MirLowering.verification_calls_v1.*
 use compiler.mir._MirLowering.declaration_enum_metadata_v1.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
@@ -1218,6 +1218,46 @@ impl MirLowering:
                 return canonical_key
             cki = cki + 1
         ""
+
+    me preseed_canonical_type_symbols_v1(modules: [HirModule]):
+        """Pre-seed canonical MIR type symbol IDs in lexically sorted key order across
+        scheduled/provider modules so even rare 30-bit slot collisions resolve
+        deterministically rather than in module lowering visit order."""
+        var keys: [text] = []
+        for existing_key in self.canonical_type_symbols.keys():
+            keys = keys.push(existing_key)
+        var mod_idx = 0
+        while mod_idx < modules.len():
+            val mod_item: HirModule = modules[mod_idx]
+            val mod_canon = mir_layout_canonical_module_name(mod_item.name)
+            if mod_canon != "":
+                for struct_sym in mod_item.structs.keys():
+                    val struct_def = mod_item.structs[struct_sym]
+                    if struct_def.name != "":
+                        keys = keys.push("{mod_canon}.{struct_def.name}")
+                for class_sym in mod_item.classes.keys():
+                    val class_def = mod_item.classes[class_sym]
+                    if class_def.name != "":
+                        keys = keys.push("{mod_canon}.{class_def.name}")
+                for enum_sym in mod_item.enums.keys():
+                    val enum_def = mod_item.enums[enum_sym]
+                    if enum_def.name != "":
+                        keys = keys.push("{mod_canon}.{enum_def.name}")
+                for bf_sym in mod_item.bitfields.keys():
+                    val bf_def = mod_item.bitfields[bf_sym]
+                    if bf_def.name != "":
+                        keys = keys.push("{mod_canon}.{bf_def.name}")
+                for trait_sym in mod_item.traits.keys():
+                    val trait_def = mod_item.traits[trait_sym]
+                    if trait_def.name != "":
+                        keys = keys.push("{mod_canon}.{trait_def.name}")
+                for type_name in mod_item.types:
+                    if type_name != "":
+                        keys = keys.push("{mod_canon}.{type_name}")
+            mod_idx = mod_idx + 1
+        val seeded = canonical_type_symbol_table_sorted_v1(keys)
+        self.canonical_type_symbols = seeded.id_by_key
+        self.canonical_type_symbol_names = seeded.key_by_id
 
     me canonical_mir_type_symbol_for_key_v1(key: text) -> SymbolId:
         # Keep key normalization at the original callers and mint in their
@@ -3081,6 +3121,7 @@ impl MirLowering:
         # Layout demand likewise starts only at this module's provider pass.
         self.provider_layout_demand_end_v1()
         self.current_module_id = mir_layout_canonical_module_name(module.name)
+        self.mcdc_next_runtime_id = 1
         # SIMPLE_ENUM_REG_TRACE=1 progression receipt (cycle-54/55 MIR livelock
         # localization): brackets every module's lowering so the next failing
         # cycle's last printed module is the one whose pass spins.

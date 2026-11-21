@@ -48,6 +48,10 @@ use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKERS_ENV_
     NATIVE_PER_FILE_PIPELINE_DEFAULT_V1, NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1,
     native_bootstrap_stage3_per_file_selected_v1, native_bootstrap_stage3_pool_result_accepts_v1,
     native_file_worker_single_unit_low_memory_admitted_from_env_v1}
+use compiler.driver.driver_build.library_unit_link_v1.{
+    LIBRARY_UNITS_ENV_V1, STAGE3_LIB_DYNLIB_ENV_V1,
+    LibraryUnitBuildModeV1, LibraryUnitModeInputsV1,
+    library_unit_select_build_mode_v1, library_unit_env_bindings_for_inputs_v1}
 use app.cli.native_build_worker_entry.{run_native_build_worker_entry}
 use app.io._CliCompile.compile_targets.{cli_native_build_option_error}
 use app.io._CliCompile.compile_options.{cli_print_shared_optimization_inventory}
@@ -550,6 +554,27 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
                 return 3
             native_build_apply_failure_policy_v1(worker_args)
             bootstrap_capsule_shard_child_env(args)
+            val stage3_target = focused_native_build_target(args)
+            val stage3_bindings = library_unit_env_bindings_for_inputs_v1(LibraryUnitModeInputsV1(
+                args: worker_args,
+                build_mode: mode,
+                stage3_env: "1",
+                stage4_env: env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "",
+                stage3_dynlib_env: env_get(STAGE3_LIB_DYNLIB_ENV_V1) ?? "",
+                library_units_env: env_get(LIBRARY_UNITS_ENV_V1) ?? "",
+                whole_program_env: env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "",
+                explicit_emit_mode: requested_output_mode,
+                target_or_os: if stage3_target != "": stage3_target else: host_os(),
+                linker_env: env_get("SIMPLE_LINKER") ?? ""
+            ))
+            if mode != "":
+                env_set("SIMPLE_NATIVE_BUILD_MODE", mode)
+            env_set(LIBRARY_UNITS_ENV_V1, stage3_bindings.library_units_env)
+            env_set(STAGE3_LIB_DYNLIB_ENV_V1, stage3_bindings.stage3_dynlib_env)
+            env_set("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", stage3_bindings.dynlib_explicit_env)
+            if stage3_bindings.mode == LibraryUnitBuildModeV1.DynLibUnits:
+                if not bootstrap_shard_child_active():
+                    print "[stage3-route] library-unit dyn-lib build + thin executable link"
             # P-H: by default (SIMPLE_FILE_WORKERS unset or 1) Stage3
             # runs the file-worker pool and the in-process capsule links the
             # pool's per-module objects from the sealed ledger
@@ -791,16 +816,37 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     val positional_runtime_bundle = focused_native_build_runtime_bundle(args)
     val old_runtime_path = native_build_env_saved_v1("SIMPLE_RUNTIME_PATH")
     val old_runtime_bundle = native_build_env_saved_v1("SIMPLE_NATIVE_RUNTIME_BUNDLE")
+    val old_pos_build_mode = native_build_env_saved_v1("SIMPLE_NATIVE_BUILD_MODE")
+    val old_pos_lib_units = native_build_env_saved_v1(LIBRARY_UNITS_ENV_V1)
+    val old_pos_stage3_dynlib = native_build_env_saved_v1(STAGE3_LIB_DYNLIB_ENV_V1)
+    val old_pos_dynlib_explicit = native_build_env_saved_v1("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT")
     if positional_runtime_path != "":
         env_set("SIMPLE_RUNTIME_PATH", positional_runtime_path)
     if positional_runtime_bundle != "":
         env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", positional_runtime_bundle)
+    env_set("SIMPLE_NATIVE_BUILD_MODE", if mode == "": "dynload" else: mode)
+    if args.contains("--no-library-units"):
+        env_set(LIBRARY_UNITS_ENV_V1, "0")
+        env_set(STAGE3_LIB_DYNLIB_ENV_V1, "0")
+        env_set("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", "")
+    elif args.contains("--library-units-dynlib"):
+        env_set(LIBRARY_UNITS_ENV_V1, "1")
+        env_set(STAGE3_LIB_DYNLIB_ENV_V1, "1")
+        env_set("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", "1")
+    elif args.contains("--library-units"):
+        env_set(LIBRARY_UNITS_ENV_V1, "1")
+        env_set(STAGE3_LIB_DYNLIB_ENV_V1, "0")
+        env_set("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", "")
     val driver = compiler_driver_create(options)
     val result = compiler_driver_run_compile(driver)
     if positional_runtime_path != "":
         native_build_env_restore_v1("SIMPLE_RUNTIME_PATH", old_runtime_path)
     if positional_runtime_bundle != "":
         native_build_env_restore_v1("SIMPLE_NATIVE_RUNTIME_BUNDLE", old_runtime_bundle)
+    native_build_env_restore_v1("SIMPLE_NATIVE_BUILD_MODE", old_pos_build_mode)
+    native_build_env_restore_v1(LIBRARY_UNITS_ENV_V1, old_pos_lib_units)
+    native_build_env_restore_v1(STAGE3_LIB_DYNLIB_ENV_V1, old_pos_stage3_dynlib)
+    native_build_env_restore_v1("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", old_pos_dynlib_explicit)
     # Restore before every result-dependent return, including compile failure
     # and missing/stub output refusal. Absent and empty are distinct states.
     val output_restored = native_build_output_mode_restore(previous_output_mode)
