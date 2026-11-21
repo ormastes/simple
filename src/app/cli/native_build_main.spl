@@ -79,7 +79,7 @@ use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
 use compiler.driver.driver_log_helpers.{build_trace_enabled, log_build_trace,
     build_trace_list, build_trace_detail}
 use compiler.driver.driver_tldr_import_route_v1.{tldr_imports_enabled_v1, tldr_closure_walk_check_v1}
-use compiler.driver.driver_mir_shard_hir_residency_v1.{mir_shard_pool_parallel_v1}
+use app.cli.native_build_hir_warmup_outcome.{mir_shard_pool_parallel_v1}
 use app.cli.native_build_streaming_request_owner.{native_build_streaming_surfaces}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_shard_recovery_unclaimed_count, hir_shard_aggregate_exit, hir_shard_recovery_seal, hir_shard_reap_state_v1, hir_shard_reap_deadline_hit_v1, hir_shard_recovery_owner_tree_progress_v1, hir_shard_recovery_failure_count, hir_shard_recovery_finished, hir_shard_recovery_block, hir_shard_recovery_blocked, hir_shard_recovery_reap_blocks_ledger_v1, hir_shard_recovery_blocked_reason_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_close_inventory,
@@ -1696,9 +1696,9 @@ fn run_mir_shards(args: [text], parallel: i64, simple_bin: text, timeout_ms: i64
 # (the in-process build then links from it and lowers nothing), "" for the
 # ordinary in-process build, or "fail" for a MIR aggregate failure (some
 # module did not PASS: the link is blocked, exactly as in run_mir_shards).
-# Everything else -- disabled, no worker budget, HIR warm-up failure,
-# ineligible lane (MIR fallback) -- degrades to the unsharded in-process build,
-# so sharding can never turn a working capsule into a failing one by itself.
+# Everything else -- disabled, HIR warm-up failure, or an ineligible lane --
+# degrades to the unsharded in-process build. Ordinary serial/no-budget builds
+# also stay in-process; explicit MIR sharding instead admits one live worker.
 # Opt-outs: SIMPLE_HIR_SHARDING=0, SIMPLE_MIR_SHARDING=0.
 # Publish ONE frontend/HIR cache scope before any shard is spawned so parse,
 # HIR and MIR children and the parent pipeline inherit the same identity.
@@ -1804,7 +1804,8 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
     val mir_flag = env_get("SIMPLE_MIR_SHARDING") ?? ""
     if allow_mir and hir_ok and mir_flag != "0":
         val parallel = native_build_shard_threads(args, native_build_mir_worker_budget_kb_v1())
-        val pool_parallel = mir_shard_pool_parallel_v1(parallel, env_get("SIMPLE_MIR_SHARD_INTERFACE_HIR") ?? "")
+        val pool_parallel = mir_shard_pool_parallel_v1(parallel,
+            env_get("SIMPLE_MIR_SHARD_INTERFACE_HIR") ?? "", mir_flag == "1")
         if pool_parallel > 0:
             val mir_queue = shard_ledger_queue_dir(args, "mir-queue", "mir-shard")
             if mir_queue != "":

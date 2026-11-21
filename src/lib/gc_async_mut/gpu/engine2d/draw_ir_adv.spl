@@ -998,9 +998,22 @@ fn _engine2d_draw_ir_render_glass_material(engine: Engine2D, command: DrawIrComm
     # when a caller did not supply dimensions.
     val framebuffer_width = if fb_w > 0: fb_w else: eng.width()
     val framebuffer_height = if fb_h > 0: fb_h else: eng.height()
-    if (x < 0 or y < 0 or w <= 0 or h <= 0 or
-        x.to_i64() + w.to_i64() > framebuffer_width.to_i64() or
-        y.to_i64() + h.to_i64() > framebuffer_height.to_i64()):
+    if (w <= 0 or h <= 0 or framebuffer_width <= 0 or framebuffer_height <= 0 or
+        x.to_i64() + w.to_i64() <= 0 or y.to_i64() + h.to_i64() <= 0 or
+        x >= framebuffer_width or y >= framebuffer_height):
+        if cap_is_contract_len:
+            print "[engine2d-glass] not-composited reason=bounds x={x} y={y} w={w} h={h} fb_w={framebuffer_width} fb_h={framebuffer_height}"
+        return Engine2dDrawIrGlassOutcome(
+            engine: eng, composited: false, execution: unavailable)
+    val glass_x: i32 = if x > 0: x else: 0
+    val glass_y: i32 = if y > 0: y else: 0
+    val x_end64: i64 = x.to_i64() + w.to_i64()
+    val y_end64: i64 = y.to_i64() + h.to_i64()
+    val glass_right: i64 = if x_end64 < framebuffer_width.to_i64(): x_end64 else: framebuffer_width.to_i64()
+    val glass_bottom: i64 = if y_end64 < framebuffer_height.to_i64(): y_end64 else: framebuffer_height.to_i64()
+    val glass_w: i32 = (glass_right - glass_x.to_i64()) as i32
+    val glass_h: i32 = (glass_bottom - glass_y.to_i64()) as i32
+    if glass_w <= 0 or glass_h <= 0:
         if cap_is_contract_len:
             print "[engine2d-glass] not-composited reason=bounds x={x} y={y} w={w} h={h} fb_w={framebuffer_width} fb_h={framebuffer_height}"
         return Engine2dDrawIrGlassOutcome(
@@ -1058,10 +1071,10 @@ fn _engine2d_draw_ir_render_glass_material(engine: Engine2D, command: DrawIrComm
     val config = Engine2dGlassMaterialConfig(
         framebuffer_width: framebuffer_width,
         framebuffer_height: framebuffer_height,
-        x: x,
-        y: y,
-        width: w,
-        height: h,
+        x: glass_x,
+        y: glass_y,
+        width: glass_w,
+        height: glass_h,
         radius: radius,
         blur_radius: realized_blur,
         saturation_milli: realized_saturation_milli,
@@ -1083,12 +1096,13 @@ fn _engine2d_draw_ir_render_glass_material(engine: Engine2D, command: DrawIrComm
             engine: eng, composited: false, execution: device_execution)
     val pixels = engine2d_draw_ir_glass_material_pixels(
         eng.read_pixels(), config)
-    if pixels.len() != w.to_i64() * h.to_i64():
+    val expected_glass_pixels = glass_w.to_i64() * glass_h.to_i64()
+    if pixels.len() != expected_glass_pixels:
         if cap_is_contract_len:
-            print "[engine2d-glass] not-composited reason=cpu-glass-pixels len={pixels.len()} expected={w.to_i64() * h.to_i64()}"
+            print "[engine2d-glass] not-composited reason=cpu-glass-pixels len={pixels.len()} expected={expected_glass_pixels}"
         return Engine2dDrawIrGlassOutcome(
             engine: eng, composited: false, execution: unavailable)
-    eng.draw_image(x, y, w, h, pixels)
+    eng.draw_image(glass_x, glass_y, glass_w, glass_h, pixels)
     Engine2dDrawIrGlassOutcome(
         engine: eng,
         composited: true,

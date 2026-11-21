@@ -2,6 +2,14 @@
 use app.cli._CliMain.args_and_os_commands.{GlobalFlags, get_cli_args, get_version, parse_global_flags,
     apply_fault_detection, print_version, print_targets, print_linkers, run_lex_command,
     print_error, print_error_with_help, run_dashboard, run_llm_dashboard}
+use app.cli._CliMain.startup_policy.{str_eq,
+    CLI_STATIC_FAST_PATH_NONE, CLI_STATIC_FAST_PATH_HELP, CLI_STATIC_FAST_PATH_VERSION,
+    cli_static_fast_path_kind,
+    CLI_USAGE_ERROR_EXIT_CODE, cli_dispatch_fallthrough_exit_code}
+export use app.cli._CliMain.startup_policy.{str_eq,
+    CLI_STATIC_FAST_PATH_NONE, CLI_STATIC_FAST_PATH_HELP, CLI_STATIC_FAST_PATH_VERSION,
+    cli_static_fast_path_kind,
+    CLI_USAGE_ERROR_EXIT_CODE, cli_dispatch_fallthrough_exit_code}
 use app.cli.orchestrator_entry_v1.cli_orchestrator_entry_v1
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.env_ops.{env_get, env_set}
@@ -88,9 +96,8 @@ use app.update.main.{run_update_command}
 #   simple file.smf     - Run compiled binary
 #   simple -c "code"    - Run code string
 
-# Workaround: native codegen string == is broken (length-only comparison)
-fn str_eq(a: text, b: text) -> bool:
-    a.len() == b.len() and a.starts_with(b)
+# CLI entry, dispatch, and flag helpers (`str_eq`, fast-path, usage error
+# policy live in `app.cli._CliMain.startup_policy` and are re-exported above).
 
 fn apply_jit_env_vars(flags: GlobalFlags):
     # Preserve the caller's resolved request across a possible driver process
@@ -198,19 +205,6 @@ fn cli_print_help_with_progress(progress_mode: text):
         print progress
     print_cli_help()
     cli_log_options_help()
-
-val CLI_STATIC_FAST_PATH_NONE: i32 = 0
-val CLI_STATIC_FAST_PATH_HELP: i32 = 1
-val CLI_STATIC_FAST_PATH_VERSION: i32 = 2
-
-fn cli_static_fast_path_kind(args: [text], phase7_child_apk_required: bool) -> i32:
-    if phase7_child_apk_required or args.len() != 1:
-        return CLI_STATIC_FAST_PATH_NONE
-    if str_eq(args[0], "-h") or str_eq(args[0], "--help"):
-        return CLI_STATIC_FAST_PATH_HELP
-    if str_eq(args[0], "-v") or str_eq(args[0], "--version"):
-        return CLI_STATIC_FAST_PATH_VERSION
-    CLI_STATIC_FAST_PATH_NONE
 
 fn cli_is_log_option(arg: text) -> bool:
     str_eq(arg, "--human") or str_eq(arg, "--llm") or str_eq(arg, "--json") or
@@ -845,33 +839,5 @@ fn cli_main_with_execution_mode(force_interpreter: bool) -> i64:
         # code. See doc/08_tracking/bug/cli_unknown_subcommand_exits_zero_fail_open_2026-08-07.md
         print_error_with_help("file not found: {first}")
         return cli_dispatch_fallthrough_exit_code(first)
-
-# CLI_USAGE_ERROR_EXIT_CODE is the exit code for an unknown-token dispatch
-# fall-through: `first` matched no known subcommand and does not resolve as
-# an existing file to run. Distinct from the code a real-but-failing file
-# execution returns (that path returns cli_run_file's own exit code).
-val CLI_USAGE_ERROR_EXIT_CODE: i64 = 2
-
-fn cli_dispatch_fallthrough_exit_code(token: text) -> i64:
-    """Exit code for the dispatch fall-through path given `token`.
-
-    Only meaningful when `token` has already been ruled out as a known
-    subcommand name (the caller's elif chain does that). Returns
-    CLI_USAGE_ERROR_EXIT_CODE (2) when `token` also does not resolve to an
-    existing file (pure usage error: unknown/misspelled/unimplemented
-    subcommand). Returns -1 when `token` IS an existing file, signalling the
-    caller should run the file and use its own exit code instead — this
-    function is never authoritative for that case. In `main()`, the -1
-    sentinel is unreachable as a process exit code: the caller's
-    `elif cli_file_exists(first):` branch runs `cli_run_file` and returns
-    BEFORE this function is ever called, so the `else` branch that calls
-    `cli_dispatch_fallthrough_exit_code` only fires when `cli_file_exists`
-    is already known false, and this function always returns
-    CLI_USAGE_ERROR_EXIT_CODE (2) in that path.
-
-    See doc/08_tracking/bug/cli_unknown_subcommand_exits_zero_fail_open_2026-08-07.md
-    """
-    if cli_file_exists(token):
-        -1
-    else:
-        CLI_USAGE_ERROR_EXIT_CODE
+# CLI_USAGE_ERROR_EXIT_CODE and cli_dispatch_fallthrough_exit_code live in
+# app.cli._CliMain.startup_policy and are re-exported at top of module.

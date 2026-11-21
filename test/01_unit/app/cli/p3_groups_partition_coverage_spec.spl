@@ -1,0 +1,214 @@
+# @cover src/app/cli/p3_groups/group_1.spl 80%
+# @cover src/app/cli/p3_groups/group_2.spl 80%
+# @cover src/app/cli/p3_groups/group_3.spl 80%
+# @cover src/app/cli/p3_groups/group_4.spl 80%
+# @cover src/app/cli/p3_groups/group_5.spl 80%
+# @cover src/app/cli/p3_groups/group_6.spl 80%
+# @cover src/app/cli/p3_groups/group_7.spl 80%
+# @req REQ-P3-GROUPS-PARTITION-001
+"""
+## Purpose and audience
+Verifies the structural, syntactic, layering, and disjoint-partition contracts
+across `src/app/cli/p3_groups/group_1.spl`..`group_7.spl` and their
+registration in `scripts/bootstrap/p3-entry-groups.shs`.
+
+Audience: Phase-3 bootstrap lane owners and release engineers maintaining the
+7-wave entry-closure split.
+
+## Compatibility and limitations
+Reads the tracked group files and `scripts/bootstrap/p3-entry-groups.shs`
+directly with pure Simple helpers so the spec runs in seconds without launching
+stage2 native-build workers.
+
+## Examples
+```sh
+bin/simple test test/01_unit/app/cli/p3_groups_partition_coverage_spec.spl
+```
+"""
+
+# @tag: unit, cli, bootstrap, phase3, p3-groups
+
+use std.spec.*
+use std.spec.{step}
+use app.io.mod.{file_exists, file_read}
+
+val P3_GROUPS_DIR = "src/app/cli/p3_groups"
+val P3_GROUPS_SCRIPT = "scripts/bootstrap/p3-entry-groups.shs"
+
+fn _group_path(idx: i64) -> text:
+    P3_GROUPS_DIR + "/group_" + idx.to_text() + ".spl"
+
+fn _is_valid_ident_segment(seg: text) -> bool:
+    if seg == "":
+        return false
+    var i = 0
+    while i < seg.byte_len():
+        val ch = seg.substring(i, i + 1)
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok:
+            return false
+        i = i + 1
+    true
+
+fn _is_valid_module_path(mod_path: text) -> bool:
+    if mod_path == "":
+        return false
+    val parts = mod_path.split(".")
+    if parts.len() == 0:
+        return false
+    for seg in parts:
+        if not _is_valid_ident_segment(seg):
+            return false
+    true
+
+fn _is_valid_group_alias(alias: text, group_num: i64) -> bool:
+    val prefix = "p3g" + group_num.to_text() + "_m"
+    if not alias.starts_with(prefix):
+        return false
+    val suffix = alias.substring(prefix.byte_len(), alias.byte_len())
+    if suffix.byte_len() < 3:
+        return false
+    var i = 0
+    while i < suffix.byte_len():
+        val ch = suffix.substring(i, i + 1)
+        if ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    true
+
+fn _parse_group_file(group_num: i64) -> ([text], [text], bool, [text]):
+    val content = file_read(_group_path(group_num))
+    val lines = content.replace("\r", "").split("\n")
+    var modules: [text] = []
+    var aliases: [text] = []
+    var bad_lines: [text] = []
+    var seen_main_sig = false
+    var seen_main_ret = false
+
+    for raw in lines:
+        val trimmed = raw.trim()
+        if seen_main_sig and not seen_main_ret:
+            if raw == "    0":
+                seen_main_ret = true
+            else:
+                bad_lines.push("unexpected main body line: " + raw)
+            continue
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if trimmed == "fn main() -> i64:":
+            if seen_main_sig:
+                bad_lines.push("duplicate main definition")
+            seen_main_sig = true
+            continue
+        if not trimmed.starts_with("use "):
+            bad_lines.push("non-import statement: " + trimmed)
+            continue
+        val rest = trimmed.substring(4, trimmed.byte_len()).trim()
+        val parts = rest.split(" as ")
+        if parts.len() != 2:
+            bad_lines.push("malformed use alias syntax: " + trimmed)
+            continue
+        val mod_path = parts[0].trim()
+        val alias = parts[1].trim()
+        if not _is_valid_module_path(mod_path):
+            bad_lines.push("invalid module path: " + mod_path)
+            continue
+        if not _is_valid_group_alias(alias, group_num):
+            bad_lines.push("invalid group alias: " + alias)
+            continue
+        modules.push(mod_path)
+        aliases.push(alias)
+
+    (modules, aliases, seen_main_sig and seen_main_ret, bad_lines)
+
+fn _module_layer_matches(group_num: i64, mod_path: text) -> bool:
+    if group_num == 1:
+        return mod_path.starts_with("std.")
+    if group_num == 2:
+        return mod_path.starts_with("compiler.common.") or mod_path.starts_with("std.")
+    if group_num == 3:
+        return mod_path.starts_with("compiler.common.") or mod_path.starts_with("compiler.frontend.") or mod_path.starts_with("compiler.core") or mod_path.starts_with("compiler.hir.")
+    if group_num == 4:
+        return mod_path.starts_with("compiler.types.") or mod_path.starts_with("compiler.semantics.") or mod_path.starts_with("compiler.mir") or mod_path.starts_with("compiler.borrow.")
+    if group_num == 5:
+        return mod_path.starts_with("compiler.borrow.") or mod_path.starts_with("compiler.mir_opt") or mod_path.starts_with("compiler.backend.") or mod_path.starts_with("compiler.driver.")
+    if group_num == 6:
+        return mod_path.starts_with("compiler.driver.")
+    if group_num == 7:
+        return mod_path.starts_with("app.cli.") or mod_path.starts_with("app.io.") or mod_path == "compiler.driver.bootstrap_k1_selected"
+    false
+
+describe "p3_groups partition coverage":
+    it "verifies groups 1..7 exist, parse cleanly, and define fn main() -> i64 returning 0":
+        step("Verify all 7 p3 group entry files parse and define fn main() -> i64")
+        var g = 1
+        while g <= 7:
+            val path = _group_path(g)
+            expect(file_exists(path)).to_be(true)
+            val content = file_read(path)
+            expect(content).to_contain("# P3 entry group " + g.to_text() + " of 7")
+            val (modules, aliases, has_main, bad_lines) = _parse_group_file(g)
+            expect(bad_lines.len()).to_equal(0)
+            expect(has_main).to_be(true)
+            expect(modules.len()).to_be_greater_than(0)
+            expect(aliases.len()).to_equal(modules.len())
+            g = g + 1
+
+    it "uses globally unique aliases and disjoint module slices across all 7 groups":
+        step("Collect modules and aliases across groups 1..7 and verify disjointness")
+        var all_modules: Dict<text, i64> = {}
+        var all_aliases: Dict<text, i64> = {}
+        var dup_modules: [text] = []
+        var dup_aliases: [text] = []
+        var total_imports: i64 = 0
+        var g = 1
+        while g <= 7:
+            val (modules, aliases, _has_main, _bad_lines) = _parse_group_file(g)
+            total_imports = total_imports + modules.len()
+            for m in modules:
+                if all_modules.contains_key(m):
+                    dup_modules.push("group_" + g.to_text() + ":" + m)
+                else:
+                    all_modules[m] = g
+            for a in aliases:
+                if all_aliases.contains_key(a):
+                    dup_aliases.push("group_" + g.to_text() + ":" + a)
+                else:
+                    all_aliases[a] = g
+            g = g + 1
+
+        expect(dup_modules.len()).to_equal(0)
+        expect(dup_aliases.len()).to_equal(0)
+        expect(total_imports).to_be_greater_than(300)
+        expect(all_modules.len()).to_equal(total_imports)
+        expect(all_aliases.len()).to_equal(total_imports)
+
+    it "assigns each group strictly to its architectural compiler/app/std layer":
+        step("Verify per-group layer ownership boundaries")
+        var g = 1
+        while g <= 7:
+            val (modules, _aliases, _has_main, _bad_lines) = _parse_group_file(g)
+            var violations: [text] = []
+            for m in modules:
+                if not _module_layer_matches(g, m):
+                    violations.push(m)
+            expect(violations.len()).to_equal(0)
+            g = g + 1
+
+        val (g1_mods, _g1a, _g1m, _g1b) = _parse_group_file(1)
+        val (g4_mods, _g4a, _g4m, _g4b) = _parse_group_file(4)
+        val (g5_mods, _g5a, _g5m, _g5b) = _parse_group_file(5)
+        val (g7_mods, _g7a, _g7m, _g7b) = _parse_group_file(7)
+        expect(g1_mods).to_contain("std.common.crypto.sha256")
+        expect(g4_mods).to_contain("compiler.mir.mir")
+        expect(g5_mods).to_contain("compiler.backend.llvm_backend")
+        expect(g7_mods).to_contain("app.cli.bootstrap_identity")
+        expect(g7_mods).to_contain("app.cli.native_build_worker_entry")
+
+    it "stays synchronized with scripts/bootstrap/p3-entry-groups.shs group count and wave range":
+        step("Verify p3-entry-groups.shs targets groups 1..7 under src/app/cli/p3_groups")
+        val script = file_read(P3_GROUPS_SCRIPT)
+        expect(script).to_contain("src/app/cli/p3_groups/group_$g.spl")
+        expect(script).to_contain("first=${" + "3:-1}")
+        expect(script).to_contain("last=${" + "4:-7}")
+        expect(script).to_contain("1|2 3|4 5|6|7")

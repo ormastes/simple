@@ -4,6 +4,11 @@
 use app.build.clang_policy.native_noop_gate.{ClangNativeNoopDecisionV1}
 use app.build.clang_policy.stamp_writer.{write_clang_native_stamp_v1}
 use app.build.clang_policy.native_ninja_graph.{validate_clang_ninja_target_map_v1}
+use app.build.host_path_policy.{
+    build_host_abs_path_valid_v1,
+    build_host_has_drive_prefix_v1,
+    build_host_path_normalize_v1
+}
 use app.io.mod.{is_dir, file_exists, file_is_regular_no_follow,
     file_create_exclusive, file_delete, file_hash_sha256,
     file_lock, file_unlock}
@@ -43,17 +48,11 @@ fn _native_barrier_reject_v1(reason: text) -> ClangNativeRebuildLeaseV1:
     ClangNativeRebuildLeaseV1(false, reason, "", false, 0, -1)
 
 fn _native_build_root_v1(path: text) -> bool:
-    if not path.starts_with("/") or path.len() < 2 or
-       path.len() > 4096 or path.ends_with("/") or path.contains("//") or
-       path.contains("\n") or path.contains("\r") or
-       path.contains("\x00"):
-        return false
-    for part in path.split("/"):
-        if part == "." or part == "..": return false
-    true
+    build_host_abs_path_valid_v1(path, false, false, 4096, 4096)
 
 fn _native_relative_v1(path: text) -> bool:
     if path == "" or path.len() > 1024 or path.starts_with("/") or
+       build_host_has_drive_prefix_v1(path) or
        path.ends_with("/") or path.contains("//") or path.contains("\\"):
         return false
     for part in path.split("/"):
@@ -127,7 +126,7 @@ fn _native_parents_unredirected_v1(root: text, relative: text) -> bool:
     if not is_dir(root): return false
     val root_resolved = unsafe(capabilities: [ffi]):
         path_absolute(root)
-    if root_resolved != root: return false
+    if build_host_path_normalize_v1(root_resolved) != build_host_path_normalize_v1(root): return false
     val parts = relative.split("/")
     var prefix = root
     var i: i64 = 0
@@ -136,7 +135,7 @@ fn _native_parents_unredirected_v1(root: text, relative: text) -> bool:
         if not is_dir(prefix): return false
         val resolved = unsafe(capabilities: [ffi]):
             path_absolute(prefix)
-        if resolved != prefix: return false
+        if build_host_path_normalize_v1(resolved) != build_host_path_normalize_v1(prefix): return false
         i = i + 1
     true
 

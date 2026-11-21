@@ -3,10 +3,7 @@
 # immutable handoff of those bytes to consumers, live signature verification,
 # gate authentication, and the GitHub workflow remain separate obligations.
 # In particular, a verified digest does not make a mutable path safe to reopen.
-use std.common.crypto.sha256.{
-    Sha256StreamV1, sha256_stream_v1_new, sha256_stream_v1_update,
-    sha256_stream_v1_finish_hex
-}
+use std.common.crypto.sha256.{Sha256StreamV1, sha256_stream_v1_new}
 
 val SIGNED_BUILD_ARTIFACT_MAX_BYTES_V2: i64 = 2305843009213693951
 val SIGNED_BUILD_ARTIFACT_MAX_CHUNK_BYTES_V2: i64 = 65536
@@ -48,7 +45,10 @@ fn signed_build_artifact_stream_update_v2(
             chunk.len() > stream.max_bytes - stream.received_length:
         stream.failure = "artifact-size-limit-exceeded"
         return Err(stream.failure)
-    if not sha256_stream_v1_update(stream.sha, chunk):
+    var sha = stream.sha
+    val updated = sha.update(chunk)
+    stream.sha = sha
+    if not updated:
         stream.failure = "artifact-hash-rejected"
         return Err(stream.failure)
     stream.received_length = stream.received_length + chunk.len()
@@ -73,7 +73,9 @@ fn signed_build_artifact_stream_finish_v2(
     if stream.received_length != expected_length:
         return SignedBuildArtifactDecisionV2("FULL_BUILD",
             "artifact-size-mismatch", "", stream.received_length)
-    val finished = sha256_stream_v1_finish_hex(stream.sha)
+    var sha = stream.sha
+    val finished = sha.finish_hex()
+    stream.sha = sha
     if finished == nil:
         return SignedBuildArtifactDecisionV2("FULL_BUILD",
             "artifact-hash-rejected", "", stream.received_length)

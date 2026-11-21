@@ -1,0 +1,234 @@
+# @cover scripts/bootstrap/p3-host-caps.shs 80%
+# @cover scripts/bootstrap/p3-targeted-stage2-build.shs 80%
+# @cover scripts/bootstrap/p3-selfbuild-stage3.shs 80%
+# @req REQ-P3-HOST-CAPS-BUILD-001
+"""
+## Purpose and audience
+Exercises `scripts/bootstrap/p3-host-caps.shs`,
+`scripts/bootstrap/p3-targeted-stage2-build.shs` (`P3_DRY_RUN=1`), and
+`scripts/bootstrap/p3-selfbuild-stage3.shs` across temporary host configurations
+and throwaway build harnesses:
+- SDN scalar parsing (`P3_HOST_SDN`), inline `#` comment stripping, CRLF cleanup,
+  `--get KEY`, missing-key fail-closed exit `2`, and RAM rounding arithmetic
+- targeted Stage-2 `--heavy` vs `--probe` budgets, minimum `1 GiB` floor,
+  `P3_PTREE_SHADOW` isolation, `P3_FULL_BACKENDS=1` composition sources, and
+  argument validation
+- Stage-3 self-build argument/checkout/binary guards, per-file worker flags,
+  smoke-failure preservation of existing `simple.exe`, and `simple.<sha12>.exe`
+  fallback rotation on admission
+
+Audience: Phase-3 bootstrap build and capacity policy maintainers.
+
+## Compatibility and limitations
+Uses isolated throwaway directories from `get_temp_dir()` and mock stage3 /
+smoke executables for `p3-selfbuild-stage3.shs` so no real compiler build runs.
+
+## Examples
+```sh
+bin/simple test test/01_unit/scripts/p3_host_caps_and_targeted_build_contract_spec.spl
+```
+"""
+
+# @tag: unit, scripts, bootstrap, phase3, host-caps, targeted-build, selfbuild
+
+use std.spec.*
+use std.spec.{step}
+use app.io.mod.{cwd, dir_create_all, dir_remove_all, file_atomic_write, file_copy, file_exists, file_read, getpid, time_now_unix_micros}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run, resolve_shell_argv}
+
+val HOST_CAPS_SCRIPT = "scripts/bootstrap/p3-host-caps.shs"
+val TARGETED_SCRIPT = "scripts/bootstrap/p3-targeted-stage2-build.shs"
+val SELFBUILD_SCRIPT = "scripts/bootstrap/p3-selfbuild-stage3.shs"
+
+fn _hc_make_root(tag: text) -> text:
+    val base = get_temp_dir().replace("\\", "/")
+    val root = base + "/p3-hc-" + tag + "-" +
+        getpid().to_text() + "-" + time_now_unix_micros().to_text()
+    expect(dir_create_all(root)).to_be(true)
+    root
+
+fn _hc_sh(cmd: text) -> (text, text, i64):
+    val prefix = "case \"$(uname -s 2>/dev/null)\" in MINGW*|MSYS*|CYGWIN*) PATH=\"/usr/bin:/bin:$PATH\"; export PATH ;; esac; "
+    val (sh_bin, sh_args) = resolve_shell_argv(prefix + cmd)
+    process_run(sh_bin, sh_args)
+
+describe "p3-host-caps.shs contract":
+    it "parses SDN scalars with comments/CRLF, evaluates caps, and fails closed on missing keys":
+        step("Write an isolated host.sdn fixture and evaluate all computed caps")
+        val root = _hc_make_root("caps")
+        val sdn = root + "/host.sdn"
+        val sdn_body =
+            "# host config fixture\r\n" +
+            "  probe_max_mib: 16384  # 16 GiB\r\n" +
+            "  tree_rss_host_pct: 50\r\n" +
+            "  mem_reserve_free_mib: 4096\r\n" +
+            "  max_threads: 16\r\n"
+        expect(file_atomic_write(sdn, sdn_body)).to_be(true)
+
+        val (out_all, err_all, rc_all) = _hc_sh(
+            "P3_HOST_SDN='" + sdn + "' P3_HOST_RAM_GB=128 sh " + HOST_CAPS_SCRIPT
+        )
+        expect(rc_all).to_equal(0)
+        expect(err_all).to_equal("")
+        expect(out_all).to_contain("probe_cap_gb=16")
+        expect(out_all).to_contain("heavy_cap_gb=64")
+        expect(out_all).to_contain("reserve_gb=4")
+        expect(out_all).to_contain("max_threads=16")
+        expect(out_all).to_contain("ram_gb=128")
+
+        val (out_get, _e_get, rc_get) = _hc_sh(
+            "P3_HOST_SDN='" + sdn + "' sh " + HOST_CAPS_SCRIPT + " --get probe_max_mib"
+        )
+        expect(rc_get).to_equal(0)
+        expect(out_get.trim()).to_equal("16384")
+
+        val (_o_miss_k, _e_miss_k, rc_miss_k) = _hc_sh(
+            "P3_HOST_SDN='" + sdn + "' sh " + HOST_CAPS_SCRIPT + " --get missing_key"
+        )
+        expect(rc_miss_k).to_equal(1)
+
+        val incomplete = root + "/incomplete.sdn"
+        expect(file_atomic_write(incomplete, "probe_max_mib: 8192\n")).to_be(true)
+        val (_o_inc, err_inc, rc_inc) = _hc_sh(
+            "P3_HOST_SDN='" + incomplete + "' P3_HOST_RAM_GB=64 sh " + HOST_CAPS_SCRIPT
+        )
+        expect(rc_inc).to_equal(2)
+        expect(err_inc).to_contain("host.sdn key tree_rss_host_pct missing")
+        expect(dir_remove_all(root)).to_be(true)
+
+describe "p3-targeted-stage2-build.shs contract":
+    it "rejects missing args or invalid modes and computes --heavy/--probe dry-run budgets":
+        val (_o0, e0, rc0) = _hc_sh("sh " + TARGETED_SCRIPT)
+        expect(rc0).to_equal(2)
+        expect(e0).to_contain("NAME and ENTRY are required")
+
+        val (_o1, e1, rc1) = _hc_sh("sh " + TARGETED_SCRIPT + " demo src/main.spl --invalid")
+        expect(rc1).to_equal(2)
+        expect(e1).to_contain("mode must be --heavy or --probe")
+
+        val root = _hc_make_root("targeted")
+        val repo_root = cwd().replace("\\", "/")
+        expect(dir_create_all(root + "/scripts")).to_be(true)
+        expect(file_copy(repo_root + "/" + HOST_CAPS_SCRIPT, root + "/scripts/p3-host-caps.shs")).to_be(true)
+        expect(file_copy(repo_root + "/" + TARGETED_SCRIPT, root + "/scripts/p3-targeted-stage2-build.shs")).to_be(true)
+
+        val sdn = root + "/host.sdn"
+        expect(file_atomic_write(sdn,
+            "probe_max_mib: 16384\ntree_rss_host_pct: 50\nmem_reserve_free_mib: 4096\nmax_threads: 8\n"
+        )).to_be(true)
+
+        val (out_h, err_h, rc_h) = _hc_sh(
+            "P3_DRY_RUN=1 P3_HOST_SDN='" + sdn + "' P3_HOST_RAM_GB=128 " +
+            "P3_PTREE_SHADOW='" + root + "/ptree' " +
+            "sh '" + root + "/scripts/p3-targeted-stage2-build.shs' mod_a src/a.spl --heavy"
+        )
+        expect(rc_h).to_equal(0)
+        expect(err_h).to_equal("")
+        expect(out_h).to_contain("cap_gb=64 mode=--heavy budget_kib=56623104")
+        expect(out_h).to_contain("SIMPLE_MIR_SHARD_COUNT=8")
+        expect(out_h).to_contain("SIMPLE_PARSE_SHARDING=0")
+        expect(out_h).to_contain("SIMPLE_FILE_WORKERS=0")
+        expect(out_h).to_contain("--emit-object")
+
+        val (out_p, _ep, rc_p) = _hc_sh(
+            "P3_DRY_RUN=1 P3_HOST_SDN='" + sdn + "' P3_HOST_RAM_GB=128 " +
+            "P3_FULL_BACKENDS=1 " +
+            "sh '" + root + "/scripts/p3-targeted-stage2-build.shs' mod_b src/b.spl --probe"
+        )
+        expect(rc_p).to_equal(0)
+        expect(out_p).to_contain("cap_gb=16 mode=--probe budget_kib=6291456")
+        expect(out_p).to_contain("src/compositions/cuda_static")
+        expect(out_p).to_contain("src/plugins")
+
+        val small_sdn = root + "/small.sdn"
+        expect(file_atomic_write(small_sdn,
+            "probe_max_mib: 4096\ntree_rss_host_pct: 5\nmem_reserve_free_mib: 1024\n"
+        )).to_be(true)
+        val (out_floor, _ef, rc_floor) = _hc_sh(
+            "P3_DRY_RUN=1 P3_HOST_SDN='" + small_sdn + "' P3_HOST_RAM_GB=64 " +
+            "sh '" + root + "/scripts/p3-targeted-stage2-build.shs' mod_c src/c.spl --probe"
+        )
+        expect(rc_floor).to_equal(0)
+        expect(out_floor).to_contain("cap_gb=4 mode=--probe budget_kib=1048576")
+        expect(dir_remove_all(root)).to_be(true)
+
+describe "p3-selfbuild-stage3.shs contract":
+    it "fails closed on invalid usage, missing stage3 binary, and non-checkout dir":
+        val root = _hc_make_root("selfbuild-errs")
+        val (_o0, e0, rc0) = _hc_sh("sh " + SELFBUILD_SCRIPT)
+        expect(rc0).to_equal(2)
+        expect(e0).to_contain("usage:")
+
+        val (_o1, e1, rc1) = _hc_sh("sh " + SELFBUILD_SCRIPT + " '" + root + "/missing.exe' '" + root + "' '" + root + "/out'")
+        expect(rc1).to_equal(1)
+        expect(e1).to_contain("no stage3 binary:")
+
+        val fake_bin = root + "/stage3.exe"
+        expect(file_atomic_write(fake_bin, "bin")).to_be(true)
+        val (_o2, e2, rc2) = _hc_sh("sh " + SELFBUILD_SCRIPT + " '" + fake_bin + "' '" + root + "/empty_checkout' '" + root + "/out'")
+        expect(rc2).to_equal(1)
+        expect(e2).to_contain("not a checkout:")
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "preserves prior simple.exe on smoke failure and rotates lineage fallback on admission":
+        val root = _hc_make_root("selfbuild-flow")
+        val repo_root = cwd().replace("\\", "/")
+        val scripts_dir = root + "/scripts"
+        val checkout = root + "/checkout"
+        val out_dir = root + "/out"
+        val lm_dir = root + "/lm"
+        expect(dir_create_all(scripts_dir)).to_be(true)
+        expect(dir_create_all(checkout + "/src/app/cli")).to_be(true)
+        expect(dir_create_all(lm_dir + "/bin")).to_be(true)
+        expect(dir_create_all(out_dir)).to_be(true)
+        expect(file_copy(repo_root + "/" + SELFBUILD_SCRIPT, scripts_dir + "/p3-selfbuild-stage3.shs")).to_be(true)
+        expect(file_atomic_write(checkout + "/src/app/cli/bootstrap_main.spl", "fn main() -> i64:\n    0\n")).to_be(true)
+
+        val smoke_stub =
+            "#!/bin/sh\n" +
+            "[ \"$SMOKE_FAIL\" != 1 ] || exit 1\n" +
+            "exit 0\n"
+        expect(file_atomic_write(scripts_dir + "/p3-smoke-stage3.shs", smoke_stub)).to_be(true)
+
+        val stage3_stub =
+            "#!/bin/sh\n" +
+            "out=\n" +
+            "while [ \"$#\" -gt 0 ]; do\n" +
+            "  if [ \"$1\" = -o ]; then out=$2; shift 2; else shift; fi\n" +
+            "done\n" +
+            "printf '%s|%s|%s\\n' \"$SIMPLE_FILE_WORKERS\" \"$SIMPLE_NATIVE_INCREMENTAL\" \"$*\" > '" + root + "/stage3.env.log'\n" +
+            "printf '%s\\n' \"$STAGE3_GEN\" > \"$out\"\n"
+        expect(file_atomic_write(root + "/fake-stage3.sh", stage3_stub)).to_be(true)
+        val (_c, _ce, c_rc) = _hc_sh("chmod +x '" + scripts_dir + "/p3-smoke-stage3.shs' '" + root + "/fake-stage3.sh'")
+        expect(c_rc).to_equal(0)
+
+        val (out1, _e1, rc1) = _hc_sh(
+            "SIMPLE_LLVM_MINGW_ROOT='" + lm_dir + "' P3_RUNTIME_DLL_DIR='" + root + "/no_dll' " +
+            "STAGE3_GEN=gen1 SMOKE_FAIL=0 P3_SELFBUILD_THREADS=4 " +
+            "sh '" + scripts_dir + "/p3-selfbuild-stage3.shs' '" + root + "/fake-stage3.sh' '" + checkout + "' '" + out_dir + "'"
+        )
+        expect(rc1).to_equal(0)
+        expect(out1).to_contain("ADMITTED:")
+        expect(file_read(out_dir + "/simple.exe").trim()).to_equal("gen1")
+        expect(file_read(root + "/stage3.env.log")).to_contain("1|1|")
+
+        val (out_fail, _ef, rc_fail) = _hc_sh(
+            "SIMPLE_LLVM_MINGW_ROOT='" + lm_dir + "' P3_RUNTIME_DLL_DIR='" + root + "/no_dll' " +
+            "STAGE3_GEN=gen_bad SMOKE_FAIL=1 " +
+            "sh '" + scripts_dir + "/p3-selfbuild-stage3.shs' '" + root + "/fake-stage3.sh' '" + checkout + "' '" + out_dir + "'"
+        )
+        expect(rc_fail).to_equal(1)
+        expect(out_fail).to_contain("REJECTED: smoke failed")
+        expect(file_read(out_dir + "/simple.exe").trim()).to_equal("gen1")
+
+        val (out2, _e2, rc2) = _hc_sh(
+            "SIMPLE_LLVM_MINGW_ROOT='" + lm_dir + "' P3_RUNTIME_DLL_DIR='" + root + "/no_dll' " +
+            "STAGE3_GEN=gen2 SMOKE_FAIL=0 " +
+            "sh '" + scripts_dir + "/p3-selfbuild-stage3.shs' '" + root + "/fake-stage3.sh' '" + checkout + "' '" + out_dir + "'"
+        )
+        expect(rc2).to_equal(0)
+        expect(out2).to_contain("fallback:")
+        expect(out2).to_contain("ADMITTED:")
+        expect(file_read(out_dir + "/simple.exe").trim()).to_equal("gen2")
+        expect(dir_remove_all(root)).to_be(true)

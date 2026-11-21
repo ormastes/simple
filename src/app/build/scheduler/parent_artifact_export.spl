@@ -26,6 +26,7 @@ use app.build.scheduler.parent_artifact_export_policy.{
 use std.nogc_sync_mut.package_sffi.{set_permissions}
 use std.nogc_sync_mut.sffi.fs.{file_mode}
 use std.io_runtime.{platform_name}
+use app.build.host_path_policy.{build_host_abs_path_valid_v1}
 
 struct ParentArtifactExportPlanV1:
     valid: bool
@@ -48,12 +49,7 @@ fn _export_reject_v1(reason: text) -> ParentArtifactExportV1:
     ParentArtifactExportV1(false, false, reason, "", "")
 
 fn _export_root_v1(value: text) -> bool:
-    value.starts_with("/") and value.len() > 1 and value.len() <= 4096 and
-        not value.ends_with("/") and not value.contains("//") and
-        not value.contains("\\") and not value.contains("\n") and
-        not value.contains("\r") and not value.contains("\x00") and
-        not value.split("/").contains(".") and
-        not value.split("/").contains("..")
+    build_host_abs_path_valid_v1(value, false, false, 4096, 4096)
 
 fn _export_leaf_v1(value: text, maximum: i64) -> bool:
     value != "" and value != "." and value != ".." and
@@ -424,8 +420,6 @@ fn _export_accepted_build_artifact_v1(owner_root: text, cas_root: text,
         return _export_reject_v1("path-invalid")
     if mode != 0 and mode != 0o644 and mode != 0o755:
         return _export_reject_v1("mode-invalid")
-    if mode > 0 and not ["linux", "macos", "freebsd"].contains(platform_name()):
-        return _export_reject_v1("mode-provider-unsupported")
     val owner = scheduler_owner_open_v1(owner_root)
     if owner.error != "" or owner.state.error != "":
         return _export_reject_v1("owner-unavailable")
@@ -455,6 +449,8 @@ fn _export_accepted_build_artifact_v1(owner_root: text, cas_root: text,
     if kind == "executable" and
        not parent_export_executable_image_v1(verified_bytes, target):
         return _export_reject_v1("executable-format-unsupported")
+    if mode > 0 and not ["linux", "macos", "freebsd"].contains(platform_name()):
+        return _export_reject_v1("mode-provider-unsupported")
     val lock = file_lock(destination_root + "/.simple-build-export.lock", 1)
     if lock < 0: return _export_reject_v1("destination-lock-unavailable")
     val result = _write_parent_artifact_export_v1(verified_bytes,

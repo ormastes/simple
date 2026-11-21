@@ -1,12 +1,28 @@
 use app.io._CliCompile.native_build_snapshot_roots.{native_build_selected_snapshot_source_roots_v1}
 use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_request_identity_matches_v1}
 use app.io.env_ops.{env_get}
-use std.nogc_sync_mut.io.dir_ops.{is_dir}
+use std.nogc_sync_mut.io.dir_ops.{is_dir, dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write}
+use std.nogc_sync_mut.fs.host_path.{host_path_canonical}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
 use app.compiler_entrypoint.source_authority.{compiler_source_authority_uncovered_root_v1}
+
+fn _closure_fixture_root() -> (text, bool):
+    val configured = env_get("SIMPLE_CLOSURE_ROOT_FIXTURE") ?? ""
+    if configured != "":
+        return (configured, false)
+    val parent = host_path_canonical(get_temp_dir())
+    val work = secure_temp_dir(parent, "closure_default_root").unwrap()
+    expect(dir_create_all(work + "/src/app")).to_equal(true)
+    expect(dir_create_all(work + "/src/lib")).to_equal(true)
+    expect(dir_create_all(work + "/src/compiler")).to_equal(true)
+    expect(dir_create_all(work + "/src/plugins")).to_equal(true)
+    expect(file_write(work + "/src/app/fixture.spl", "fn main() -> i64: 0\n")).to_equal(true)
+    (work, true)
 
 describe "native closure default source identity":
     it "matches publisher and child default cuts when optional os is absent":
-        val root = env_get("SIMPLE_CLOSURE_ROOT_FIXTURE") ?? ""
+        val (root, owned) = _closure_fixture_root()
         expect(root.len()).to_be_greater_than(0)
         expect(is_dir(root + "/src/os")).to_equal(false)
         val entry = "src/app/fixture.spl"
@@ -20,9 +36,11 @@ describe "native closure default source identity":
         expect(publisher[4]).to_equal(entry)
         expect(native_entry_closure_request_identity_matches_v1(root, entry, publisher, "producer-A",
             root, entry, child, "producer-A")).to_equal(true)
+        if owned:
+            val _cleanup = dir_remove_all(root)
 
     it "preserves explicitly missing roots for the existing source admission rejection":
-        val root = env_get("SIMPLE_CLOSURE_ROOT_FIXTURE") ?? ""
+        val (root, owned) = _closure_fixture_root()
         expect(root.len()).to_be_greater_than(0)
         expect(is_dir(root + "/src/os")).to_equal(false)
         val explicit = native_build_selected_snapshot_source_roots_v1(root, "src/app/fixture.spl", ["src/os"])
@@ -32,6 +50,8 @@ describe "native closure default source identity":
         # Exercise the existing real filesystem admission guard; acquire_v1
         # turns this nonempty uncovered root into source-inventory-root-empty.
         expect(compiler_source_authority_uncovered_root_v1(root, explicit, root)).to_equal("src/os")
+        if owned:
+            val _cleanup = dir_remove_all(root)
 
     it "still rejects changed order, entry, root and producer":
         val roots = ["src/app", "src/lib", "src/app/fixture.spl"]

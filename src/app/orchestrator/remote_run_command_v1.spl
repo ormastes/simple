@@ -214,19 +214,27 @@ fn remote_run_spec_load_v1(spec_dir: text) -> Result<RemoteRunSpecFilesV1, text>
         files: files))
 
 fn remote_run_link_v1(box: RemoteRunBoxV1, root: ControllerLocalRootV3, operation_id: text) -> RemoteRunLinkV1:
+    val begin_fn = fn() -> Result<text, text>: remote_run_wait_v1(box, controller_dispatch_remote_begin_v3(root, operation_id))
+    val send_fn = fn(action: text, payload: text) -> Result<text, text>: remote_run_link_send_v1(box, action, payload)
+    val admit_fn = fn(signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2,
+            open_record: text) -> Result<bool, text>:
+        remote_run_link_admit_v1(box, signed, approval, request, open_record)
+    val edit_fn = fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
+        remote_run_link_edit_v1(box, edit)
+    val settle_fn = fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
+        remote_run_link_settle_v1(box, edit)
+    val clock_fn = fn() -> Result<i64, text>: controller_dispatch_grant_clock_v1()
+    val monotonic_fn = fn() -> i64: sosix_time_now_monotonic_ms()
+    val pause_fn = fn(ms: i64) -> bool: remote_run_sleep_v1(ms)
     RemoteRunLinkV1(
-        begin: fn() -> Result<text, text>: remote_run_wait_v1(box, controller_dispatch_remote_begin_v3(root, operation_id)),
-        send: fn(action: text, payload: text) -> Result<text, text>: remote_run_link_send_v1(box, action, payload),
-        admit: fn(signed: DistributedSignedGrantV2, approval: DistributedSignedApprovalV2, request: OperationEnvelopeV2,
-                open_record: text) -> Result<bool, text>:
-            remote_run_link_admit_v1(box, signed, approval, request, open_record),
-        edit: fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
-            remote_run_link_edit_v1(box, edit),
-        settle: fn(edit: fn(DistributedOperationJournalV2) -> ControllerJournalEditV1) -> Result<text, text>:
-            remote_run_link_settle_v1(box, edit),
-        clock: fn() -> Result<i64, text>: controller_dispatch_grant_clock_v1(),
-        monotonic_ms: fn() -> i64: sosix_time_now_monotonic_ms(),
-        pause: fn(ms: i64) -> bool: remote_run_sleep_v1(ms))
+        begin_fn,
+        send_fn,
+        admit_fn,
+        edit_fn,
+        settle_fn,
+        clock_fn,
+        monotonic_fn,
+        pause_fn)
 
 # Local cleanup only: closing never sends another Host request and never re-executes.
 fn remote_run_finish_v1(box: RemoteRunBoxV1, outcome: RemoteRunOutcomeV1) -> OrchestratorValidationReplyV1:
@@ -275,9 +283,10 @@ fn remote_run_resume_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
     val box = RemoteRunBoxV1()
     val files = loaded.unwrap()
     val operation_id = files.spec.operation_id
-    val outcome = remote_run_resume_v1(operation_id, fn(not_after: i64) -> Result<RemoteRunAuthoredV1, text>:
-            remote_run_author_v1(files.spec, files.host_inputs, files.task, files.environment_text, files.files,
-                context.config.controller_id, context.config.controller_epoch, not_after),
+    val author_fn = fn(not_after: i64) -> Result<RemoteRunAuthoredV1, text>:
+        remote_run_author_v1(files.spec, files.host_inputs, files.task, files.environment_text, files.files,
+            context.config.controller_id, context.config.controller_epoch, not_after)
+    val outcome = remote_run_resume_v1(operation_id, author_fn,
         remote_run_facts_v1(context, "", 0, options["--out"]), remote_run_link_v1(box, root, operation_id))
     remote_run_finish_v1(box, outcome)
 
@@ -309,8 +318,9 @@ pub fn remote_run_command_v1(args: [text]) -> OrchestratorValidationReplyV1:
     val key_store = options["--key-store"]
     val approver = options["--approver"]
     val requested = authored.unwrap().environment
-    val issuer = RemoteRunIssuerV1(issue: fn(grant: ExecutionGrantV2, request: OperationEnvelopeV2) -> Result<ControllerIssuedAuthorityV1, text>:
-        remote_run_issue_v1(context, key_store, approver, requested, grant, request))
+    val issue_fn = fn(grant: ExecutionGrantV2, request: OperationEnvelopeV2) -> Result<ControllerIssuedAuthorityV1, text>:
+        remote_run_issue_v1(context, key_store, approver, requested, grant, request)
+    val issuer = RemoteRunIssuerV1(issue: issue_fn)
     val outcome = remote_run_drive_v1(authored.unwrap(), remote_run_facts_v1(context, options["--grant-id"], ttl.unwrap(),
         options["--out"]), remote_run_link_v1(box, root, files.spec.operation_id), issuer)
     remote_run_finish_v1(box, outcome)

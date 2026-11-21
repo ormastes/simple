@@ -12,6 +12,7 @@ use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
 use std.nogc_sync_mut.composition.native_build_argv_v1.{
     native_build_argv_encode_v1, native_build_argv_decode_bounded_v1}
 use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use app.build.host_path_policy.{build_host_abs_path_valid_v1, build_host_paths_overlap_v1, build_host_path_normalize_v1}
 
 val PARALLEL_TRANSPORT_WIRE_MAX_BYTES_V1: i64 = 1048576
 # Three fixed metadata files plus up to 128 declared action outputs.
@@ -73,11 +74,13 @@ fn _token_valid_v1(value: text) -> bool:
     true
 
 fn _path_valid_v1(path: text, absolute: bool) -> bool:
-    if path.len() > 4096 or path.starts_with("/") != absolute or
+    if absolute:
+        return build_host_abs_path_valid_v1(path, true, true, 4096, 128)
+    if path.len() > 4096 or path.starts_with("/") or
        path.ends_with("/") or path.contains("//") or path.contains("\0"):
         return false
     val parts = path.split("/")
-    var i: i64 = if absolute: 1 else: 0
+    var i: i64 = 0
     if i >= parts.len(): return false
     while i < parts.len():
         if not _token_valid_v1(parts[i]): return false
@@ -192,9 +195,7 @@ fn _handoff_valid_v1(h: ParallelTransportHandoffV1) -> bool:
     input.byte_count > 0 and control.byte_count > 0 and
     input.relative_path == "inputs.batch" and
     control.relative_path == "control.batch" and
-    h.prepared_root != h.result_root and
-    not h.prepared_root.starts_with(h.result_root + "/") and
-    not h.result_root.starts_with(h.prepared_root + "/")
+    not build_host_paths_overlap_v1(h.prepared_root, h.result_root)
 
 fn encode_parallel_transport_handoff_v1(
         handoff: ParallelTransportHandoffV1) -> [u8]:

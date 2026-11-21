@@ -1,0 +1,180 @@
+# @cover scripts/bootstrap/phase3-test-skip-policy.shs 80%
+# @req REQ-P3-SKIP-POLICY-001
+"""
+## Purpose and audience
+Exercises `scripts/bootstrap/phase3-test-skip-policy.shs classify` across all
+documented admission and rejection exit codes (`0`, `64`, `65`, `66`, `67`,
+`68`, `69`, `70`) using real throwaway `.spl` fixture files and an isolated
+`SIMPLE_HOST_CONFIG` override.
+
+Audience: bootstrap and Phase-3 verification gate maintainers.
+
+## Compatibility and limitations
+Uses `resolve_shell_argv` for portable POSIX shell execution on Windows/MSYS2
+and Unix hosts, and isolates `SIMPLE_HOST_CONFIG` / `SIMPLE_HOST_*` variables
+within each shell invocation so repository or user host configs cannot leak.
+
+## Examples
+```sh
+bin/simple test test/01_unit/scripts/phase3_test_skip_policy_spec.spl
+```
+"""
+
+# @tag: unit, scripts, bootstrap, phase3, skip-policy
+
+use std.spec.*
+use std.spec.{step}
+use app.io.mod.{dir_create_all, dir_remove_all, file_atomic_write, getpid, time_now_unix_micros}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run, resolve_shell_argv}
+
+val SKIP_POLICY_SCRIPT = "scripts/bootstrap/phase3-test-skip-policy.shs"
+
+fn _p3_skip_make_root(tag: text) -> text:
+    val base = get_temp_dir().replace("\\", "/")
+    val root = base + "/p3-skip-policy-" + tag + "-" +
+        getpid().to_text() + "-" + time_now_unix_micros().to_text()
+    expect(dir_create_all(root)).to_be(true)
+    root
+
+fn _p3_skip_run(env_prefix: text, args_sh: text) -> (text, text, i64):
+    val cmd = "env -u SIMPLE_HOST_HWIR -u SIMPLE_HOST_ASSURANCE -u SIMPLE_HOST_ARM_BAREMETAL " +
+        env_prefix + " sh " + SKIP_POLICY_SCRIPT + " " + args_sh
+    val (sh_bin, sh_args) = resolve_shell_argv(cmd)
+    process_run(sh_bin, sh_args)
+
+describe "phase3-test-skip-policy.shs classify":
+    it "admits zero-skip specs and rejects malformed invocation arguments (0 and 64)":
+        step("Verify zero-skip execution admission (exit 0)")
+        val root = _p3_skip_make_root("usage")
+        val ordinary = root + "/ordinary_spec.spl"
+        expect(file_atomic_write(ordinary, "describe \"ordinary\":\n    it \"ok\":\n        expect(1).to_equal(1)\n")).to_be(true)
+        val (out0, err0, code0) = _p3_skip_run("SIMPLE_HOST_CONFIG='" + root + "/absent.sdn'", "classify '" + ordinary + "' 0")
+        expect(code0).to_equal(0)
+        expect(out0.trim()).to_equal("execute|-")
+        expect(err0).to_equal("")
+
+        val (out0_exec, _err0_exec, code0_exec) = _p3_skip_run("SIMPLE_HOST_CONFIG='" + root + "/absent.sdn'", "classify '" + ordinary + "' 0 4")
+        expect(code0_exec).to_equal(0)
+        expect(out0_exec.trim()).to_equal("execute|-")
+
+        step("Verify argument-count and integer validation failures return exit 64")
+        val (out_bad_cmd, err_bad_cmd, code_bad_cmd) = _p3_skip_run("", "unknown-cmd")
+        expect(code_bad_cmd).to_equal(64)
+        expect(out_bad_cmd).to_equal("")
+        expect(err_bad_cmd).to_contain("usage:")
+
+        val (out_bad_skip, err_bad_skip, code_bad_skip) = _p3_skip_run("", "classify '" + ordinary + "' abc")
+        expect(code_bad_skip).to_equal(64)
+        expect(out_bad_skip).to_equal("")
+        expect(err_bad_skip).to_contain("observed skipped count is not a nonnegative integer")
+
+        val (out_bad_exec, err_bad_exec, code_bad_exec) = _p3_skip_run("", "classify '" + ordinary + "' 1 -2")
+        expect(code_bad_exec).to_equal(64)
+        expect(out_bad_exec).to_equal("")
+        expect(err_bad_exec).to_contain("observed executed count is not a nonnegative integer")
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "rejects missing or non-regular spec paths with exit 65":
+        val root = _p3_skip_make_root("nonreg")
+        val missing = root + "/does_not_exist_spec.spl"
+        val (out_miss, err_miss, code_miss) = _p3_skip_run("", "classify '" + missing + "' 1")
+        expect(code_miss).to_equal(65)
+        expect(out_miss).to_equal("")
+        expect(err_miss).to_contain("spec is not a regular non-symlink file")
+
+        val subdir = root + "/subdir"
+        expect(dir_create_all(subdir)).to_be(true)
+        val (out_dir, err_dir, code_dir) = _p3_skip_run("", "classify '" + subdir + "' 1")
+        expect(code_dir).to_equal(65)
+        expect(out_dir).to_equal("")
+        expect(err_dir).to_contain("spec is not a regular non-symlink file")
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "admits sole in-development skip and rejects partial execution or multi-tag files (0, 68, 69)":
+        val root = _p3_skip_make_root("dev")
+        val dev = root + "/dev_spec.spl"
+        expect(file_atomic_write(dev, "# @tag:in-development\ndescribe \"dev\":\n    it \"skips\":\n        expect(1).to_equal(1)\n")).to_be(true)
+        val (out_dev, err_dev, code_dev) = _p3_skip_run("", "classify '" + dev + "' 3 0")
+        expect(code_dev).to_equal(0)
+        expect(out_dev.trim()).to_equal("skip|in-development")
+        expect(err_dev).to_equal("")
+
+        step("Reject partial execution with nonzero skipped count (exit 69)")
+        val (out_part, err_part, code_part) = _p3_skip_run("", "classify '" + dev + "' 1 2")
+        expect(code_part).to_equal(69)
+        expect(out_part).to_equal("")
+        expect(err_part).to_contain("partial execution with skips is not admissible")
+
+        step("Reject in-development combined with another tag directive (exit 68)")
+        val multi = root + "/multi_spec.spl"
+        expect(file_atomic_write(multi, "# @tag:in-development\n# @tag:unit\ndescribe \"multi\":\n    it \"x\":\n        expect(1).to_equal(1)\n")).to_be(true)
+        val (out_multi, err_multi, code_multi) = _p3_skip_run("", "classify '" + multi + "' 1 0")
+        expect(code_multi).to_equal(68)
+        expect(out_multi).to_equal("")
+        expect(err_multi).to_contain("development category must be the spec's sole tag directive")
+
+        val mixed_feat = root + "/mixed_feat_spec.spl"
+        expect(file_atomic_write(mixed_feat, "# @tag:requires-hwir\n# @tag:unit\ndescribe \"mixed\":\n    it \"x\":\n        expect(1).to_equal(1)\n")).to_be(true)
+        val (out_mf, _err_mf, code_mf) = _p3_skip_run("", "classify '" + mixed_feat + "' 1 0")
+        expect(code_mf).to_equal(67)
+        expect(out_mf).to_equal("")
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "rejects untagged specs, unknown tags, and unknown build features (66 and 67)":
+        val root = _p3_skip_make_root("unknown")
+        val untagged = root + "/untagged_spec.spl"
+        expect(file_atomic_write(untagged, "# untagged ordinary spec\ndescribe \"plain\":\n    it \"x\":\n        expect(1).to_equal(1)\n")).to_be(true)
+        val (out66, err66, code66) = _p3_skip_run("", "classify '" + untagged + "' 1")
+        expect(code66).to_equal(66)
+        expect(out66).to_equal("")
+        expect(err66).to_contain("nonzero skipped count has no explicit category")
+
+        val unknown_tag = root + "/unknown_tag_spec.spl"
+        expect(file_atomic_write(unknown_tag, "# @tag:manual-only\ndescribe \"unk\":\n    it \"x\":\n        expect(1).to_equal(1)\n")).to_be(true)
+        val (out67a, err67a, code67a) = _p3_skip_run("", "classify '" + unknown_tag + "' 1")
+        expect(code67a).to_equal(67)
+        expect(out67a).to_equal("")
+        expect(err67a).to_contain("unknown or noncanonical category")
+
+        val unknown_feat = root + "/unknown_feat_spec.spl"
+        expect(file_atomic_write(unknown_feat, "# @tag:requires-quantum-alu\ndescribe \"q\":\n    it \"x\":\n        expect(1).to_equal(1)\n")).to_be(true)
+        val (out67b, err67b, code67b) = _p3_skip_run("", "classify '" + unknown_feat + "' 1")
+        expect(code67b).to_equal(67)
+        expect(out67b).to_equal("")
+        expect(err67b).to_contain("unknown build feature: quantum-alu")
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "handles disabled vs enabled requires-hwir and requires-assurance feature gates (0 and 70)":
+        val root = _p3_skip_make_root("features")
+        val hwir = root + "/hwir_spec.spl"
+        val assurance = root + "/assurance_spec.spl"
+        val absent_cfg = root + "/absent_host.sdn"
+        expect(file_atomic_write(hwir, "# @tag:requires-hwir\ndescribe \"hwir\":\n    it \"x\":\n        expect(1).to_equal(1)\n")).to_be(true)
+        expect(file_atomic_write(assurance, "# @tag:requires-assurance\ndescribe \"assurance\":\n    it \"x\":\n        expect(1).to_equal(1)\n")).to_be(true)
+
+        val (out_h_off, err_h_off, code_h_off) = _p3_skip_run("SIMPLE_HOST_CONFIG='" + absent_cfg + "'", "classify '" + hwir + "' 2 0")
+        expect(code_h_off).to_equal(0)
+        expect(out_h_off.trim()).to_equal("skip|requires-hwir")
+        expect(err_h_off).to_equal("")
+
+        val (out_a_off, err_a_off, code_a_off) = _p3_skip_run("SIMPLE_HOST_CONFIG='" + absent_cfg + "'", "classify '" + assurance + "' 1 0")
+        expect(code_a_off).to_equal(0)
+        expect(out_a_off.trim()).to_equal("skip|requires-assurance")
+        expect(err_a_off).to_equal("")
+
+        step("Refuse skipped feature spec when feature resolves on (exit 70)")
+        val (out_h_on, err_h_on, code_h_on) = _p3_skip_run("SIMPLE_HOST_CONFIG='" + absent_cfg + "' SIMPLE_HOST_HWIR=on", "classify '" + hwir + "' 1 0")
+        expect(code_h_on).to_equal(70)
+        expect(out_h_on).to_equal("")
+        expect(err_h_on).to_contain("requires-hwir spec skipped while the hwir feature is on")
+
+        val (out_a_on, err_a_on, code_a_on) = _p3_skip_run("SIMPLE_HOST_CONFIG='" + absent_cfg + "' SIMPLE_HOST_ASSURANCE=on", "classify '" + assurance + "' 1 0")
+        expect(code_a_on).to_equal(70)
+        expect(out_a_on).to_equal("")
+        expect(err_a_on).to_contain("requires-assurance spec skipped while the assurance feature is on")
+
+        val (out_zero_on, _err_zero_on, code_zero_on) = _p3_skip_run("SIMPLE_HOST_CONFIG='" + absent_cfg + "' SIMPLE_HOST_HWIR=on", "classify '" + hwir + "' 0 1")
+        expect(code_zero_on).to_equal(0)
+        expect(out_zero_on.trim()).to_equal("execute|-")
+        expect(dir_remove_all(root)).to_be(true)

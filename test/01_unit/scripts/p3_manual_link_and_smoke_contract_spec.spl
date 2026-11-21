@@ -1,0 +1,276 @@
+# @cover scripts/bootstrap/p3-manual-link-stage3.shs 80%
+# @cover scripts/bootstrap/p3-smoke-stage3.shs 80%
+# @cover scripts/bootstrap/check-stage3-recovery-authority.shs 80%
+# @req REQ-P3-MANUAL-LINK-SMOKE-001
+"""
+## Purpose and audience
+Verifies the fail-closed error paths and verification contracts across the four
+Phase-3 Stage-3 link, smoke, recovery-authority, and retry-readiness scripts:
+- `scripts/bootstrap/p3-manual-link-stage3.shs`
+- `scripts/bootstrap/p3-smoke-stage3.shs`
+- `scripts/bootstrap/check-stage3-recovery-authority.shs`
+- `scripts/bootstrap/check-stage3-retry-readiness.shs`
+
+Audience: Stage-3 bootstrap and recovery gate maintainers.
+
+## Compatibility and limitations
+Exercises the real scripts directly against temporary fixture trees and stub
+toolchain binaries (`clang`, `llvm-nm`) without compiling or launching a full
+Stage-3 binary.
+
+## Examples
+```sh
+bin/simple test test/01_unit/scripts/p3_manual_link_and_smoke_contract_spec.spl
+```
+"""
+
+# @tag: unit, scripts, bootstrap, phase3, stage3
+
+use std.spec.*
+use std.spec.{step}
+use app.io.mod.{cwd, dir_create_all, dir_remove_all, file_atomic_write, file_exists, file_read, getpid, time_now_unix_micros}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run, resolve_shell_argv}
+
+val LINK_SCRIPT = "scripts/bootstrap/p3-manual-link-stage3.shs"
+val SMOKE_SCRIPT = "scripts/bootstrap/p3-smoke-stage3.shs"
+val RECOVERY_SCRIPT = "scripts/bootstrap/check-stage3-recovery-authority.shs"
+val RETRY_SCRIPT = "scripts/bootstrap/check-stage3-retry-readiness.shs"
+val HEX_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val HEX_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+fn _s3c_make_root(tag: text) -> text:
+    val base = get_temp_dir().replace("\\", "/")
+    val root = base + "/p3-s3c-" + tag + "-" +
+        getpid().to_text() + "-" + time_now_unix_micros().to_text()
+    expect(dir_create_all(root)).to_be(true)
+    root
+
+fn _s3c_sh(cmd: text) -> (text, text, i64):
+    val prefix = "case \"$(uname -s 2>/dev/null)\" in MINGW*|MSYS*|CYGWIN*) PATH=\"/usr/bin:/bin:$PATH\"; export PATH ;; esac; "
+    val (sh_bin, sh_args) = resolve_shell_argv(prefix + cmd)
+    process_run(sh_bin, sh_args)
+
+describe "p3-manual-link-stage3.shs contract":
+    it "fails closed on invalid arg count, missing clang, empty objects, and missing listed objects":
+        val root = _s3c_make_root("link-errs")
+        val lm = root + "/lm"
+        val obj_dir = root + "/objs"
+        expect(dir_create_all(lm + "/bin")).to_be(true)
+        expect(dir_create_all(obj_dir)).to_be(true)
+
+        val (_o0, err0, rc0) = _s3c_sh("sh " + LINK_SCRIPT)
+        expect(rc0).to_equal(2)
+        expect(err0).to_contain("usage:")
+
+        val (_o1, err1, rc1) = _s3c_sh("SIMPLE_LLVM_MINGW_ROOT='" + root + "/absent-lm' sh " + LINK_SCRIPT + " '" + obj_dir + "' '" + root + "' '" + root + "/out.exe'")
+        expect(rc1).to_equal(1)
+        expect(err1).to_contain("llvm-mingw clang not found")
+
+        expect(file_atomic_write(lm + "/bin/clang", "#!/bin/sh\nexit 0\n")).to_be(true)
+        expect(file_atomic_write(lm + "/bin/llvm-nm", "#!/bin/sh\nexit 0\n")).to_be(true)
+        val (_co, _ce, c_rc) = _s3c_sh("chmod 755 '" + lm + "/bin/clang' '" + lm + "/bin/llvm-nm'")
+        expect(c_rc).to_equal(0)
+
+        val (_o2, err2, rc2) = _s3c_sh("SIMPLE_LLVM_MINGW_ROOT='" + lm + "' sh " + LINK_SCRIPT + " '" + obj_dir + "' '" + root + "' '" + root + "/empty.exe'")
+        expect(rc2).to_equal(1)
+        expect(err2).to_contain("no aot objects selected")
+
+        val bad_list = root + "/bad-objs.txt"
+        expect(file_atomic_write(bad_list, "aot-does-not-exist.o\n")).to_be(true)
+        val (_o3, err3, rc3) = _s3c_sh("P3_OBJ_LIST='" + bad_list + "' SIMPLE_LLVM_MINGW_ROOT='" + lm + "' sh " + LINK_SCRIPT + " '" + obj_dir + "' '" + root + "' '" + root + "/missing.exe'")
+        expect(rc3).to_equal(1)
+        expect(err3).to_contain("selected object missing")
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "builds the #5760 shadowed runtime, sorted __module_init shim, and @link-objs.rsp response file":
+        step("Prepare minimal runtime/shadow tree and stub clang/llvm-nm")
+        val root = _s3c_make_root("link-ok")
+        val repo_root = cwd().replace("\\", "/")
+        val checkout = root + "/checkout"
+        val obj_dir = root + "/objs"
+        val lm = root + "/lm"
+        val out_exe = root + "/bin/stage3.exe"
+        expect(dir_create_all(checkout + "/src/runtime/platform")).to_be(true)
+        expect(dir_create_all(checkout + "/src/compiler/70.backend/backend_plugin/abi")).to_be(true)
+        expect(dir_create_all(checkout + "/tools/counterpart/sdk/c")).to_be(true)
+        expect(dir_create_all(obj_dir)).to_be(true)
+        expect(dir_create_all(lm + "/bin")).to_be(true)
+
+        expect(file_atomic_write(checkout + "/src/runtime/runtime_process_owned.c", "void spl_rt_owned(void) {}\n")).to_be(true)
+        expect(file_atomic_write(checkout + "/src/runtime/runtime_process_tree.c", "void spl_rt_tree(void) {}\n")).to_be(true)
+        expect(file_atomic_write(checkout + "/src/runtime/runtime_dynload.c", "void spl_rt_dyn(void) {}\n")).to_be(true)
+        expect(file_atomic_write(checkout + "/src/runtime/runtime_cranelift_bridge_stub.c", "void spl_rt_cb(void) {}\n")).to_be(true)
+        expect(file_atomic_write(checkout + "/src/runtime/platform/async_driver.c", "void spl_rt_ad(void) {}\n")).to_be(true)
+        expect(file_atomic_write(checkout + "/src/runtime/platform/async_windows.c", "void spl_rt_aw(void) {}\n")).to_be(true)
+
+        expect(file_atomic_write(obj_dir + "/aot-b.o", "objB")).to_be(true)
+        expect(file_atomic_write(obj_dir + "/aot-a.o", "objA")).to_be(true)
+        val obj_list = root + "/obj-list.txt"
+        expect(file_atomic_write(obj_list, "aot-b.o\naot-a.o\n")).to_be(true)
+
+        # Provide a prior link-command defining just runtime_process_owned and runtime_dynload.
+        val prior_cmd = root + "/prior.link-command.txt"
+        expect(file_atomic_write(prior_cmd, "clang simple_rt_1_x86_64-pc-windows-gnu_runtime_process_owned.o simple_rt_1_x86_64-pc-windows-gnu_runtime_dynload.o\n")).to_be(true)
+
+        val stub_clang =
+            "#!/bin/sh\n" +
+            "out=\n" +
+            "prev=\n" +
+            "for a in \"$@\"; do\n" +
+            "  if [ \"$prev\" = '-o' ]; then out=$a; prev=; continue; fi\n" +
+            "  case \"$a\" in -o) prev='-o' ;; esac\n" +
+            "done\n" +
+            "if [ -n \"$out\" ]; then mkdir -p \"$(dirname \"$out\")\"; printf 'linked:%s\\n' \"$out\" > \"$out\"; fi\n"
+        val stub_nm =
+            "#!/bin/sh\n" +
+            "printf '00000000 T ___module_init_zeta\\n'\n" +
+            "printf '00000000 U __module_init_extern_only\\n'\n" +
+            "printf '00000000 T __module_init_alpha\\n'\n"
+        expect(file_atomic_write(lm + "/bin/clang", stub_clang)).to_be(true)
+        expect(file_atomic_write(lm + "/bin/llvm-nm", stub_nm)).to_be(true)
+        val (_co, _ce, c_rc) = _s3c_sh("chmod 755 '" + lm + "/bin/clang' '" + lm + "/bin/llvm-nm'")
+        expect(c_rc).to_equal(0)
+
+        val cmd =
+            "P3_OBJ_LIST='" + obj_list + "' P3_LINK_COMMAND='" + prior_cmd + "' " +
+            "SIMPLE_LLVM_MINGW_ROOT='" + lm + "' " +
+            "sh '" + repo_root + "/" + LINK_SCRIPT + "' '" + obj_dir + "' '" + checkout + "' '" + out_exe + "'"
+        val (out, _err, rc) = _s3c_sh(cmd)
+        expect(rc).to_equal(0)
+        expect(out).to_contain("objects: 2 selected of 2 aot-*.o")
+        expect(out).to_contain("linked: " + out_exe)
+        expect(file_exists(out_exe)).to_be(true)
+
+        val entry_c = file_read(out_exe + ".p3link/simple_entry.c")
+        expect(entry_c).to_contain("extern void __module_init_alpha(void);")
+        expect(entry_c).to_contain("extern void __module_init_zeta(void);")
+        expect(entry_c.contains("__module_init_extern_only")).to_equal(false)
+        val alpha_at = entry_c.index_of("__module_init_alpha();")
+        val zeta_at = entry_c.index_of("__module_init_zeta();")
+        expect(alpha_at).to_be_greater_than(0)
+        expect(alpha_at).to_be_less_than(zeta_at)
+
+        val rsp = file_read(out_exe + ".p3link/link-objs.rsp")
+        expect(rsp).to_contain("aot-b.o")
+        expect(rsp).to_contain("aot-a.o")
+        expect(rsp).to_contain("simple_entry.o")
+        val shadow_owned = file_read(out_exe + ".p3link/shadow/src/runtime/runtime_process_owned.c")
+        expect(shadow_owned).to_contain("#include \"runtime_process_tree.c\"")
+        expect(dir_remove_all(root)).to_be(true)
+
+describe "p3-smoke-stage3.shs contract":
+    it "fails closed on bad usage, missing binary, missing DLL dir, and failing --version":
+        val root = _s3c_make_root("smoke")
+        val (out0, err0, rc0) = _s3c_sh("sh " + SMOKE_SCRIPT)
+        expect(rc0).to_equal(2)
+        expect(err0).to_contain("usage:")
+        expect(out0).to_equal("")
+
+        val (out1, _e1, rc1) = _s3c_sh("sh " + SMOKE_SCRIPT + " '" + root + "/missing_stage3.exe'")
+        expect(rc1).to_equal(1)
+        expect(out1).to_contain("FAIL: no such binary:")
+
+        val bad_exe = root + "/bad_stage3.exe"
+        expect(file_atomic_write(bad_exe, "#!/bin/sh\nexit 3\n")).to_be(true)
+        val (_co, _ce, c_rc) = _s3c_sh("chmod 755 '" + bad_exe + "'")
+        expect(c_rc).to_equal(0)
+
+        val (out2, _e2, rc2) = _s3c_sh("P3_RUNTIME_DLL_DIR='" + root + "/absent-dlls' P3_SMOKE_WORK='" + root + "/work' sh " + SMOKE_SCRIPT + " '" + bad_exe + "'")
+        expect(rc2).to_equal(1)
+        expect(out2).to_contain("FAIL:")
+        expect(out2.contains("PASS")).to_equal(false)
+        expect(dir_remove_all(root)).to_be(true)
+
+describe "check-stage3-recovery-authority.shs and check-stage3-retry-readiness.shs contracts":
+    it "emits refused recovery receipts with exact reason on missing, malformed, and unconfined inputs":
+        val root = _s3c_make_root("recovery")
+        val (out_req, _e_req, rc_req) = _s3c_sh("sh " + RECOVERY_SCRIPT)
+        expect(rc_req).to_equal(2)
+        expect(out_req).to_contain("schema=simple-bootstrap-stage3-recovery-preflight-v1")
+        expect(out_req).to_contain("status=refused")
+        expect(out_req).to_contain("reason=source-root-required")
+
+        val (out_sha, _e_sha, rc_sha) = _s3c_sh(
+            "sh " + RECOVERY_SCRIPT +
+            " --source-root='" + root + "'" +
+            " --output-dir='" + root + "/build/bootstrap'" +
+            " --planner-receipt='" + root + "/build/planner.env'" +
+            " --expected-parent-sha256=not-a-sha256" +
+            " --expected-source-snapshot-sha256=" + HEX_B +
+            " --minimum-free-bytes=1024"
+        )
+        expect(rc_sha).to_equal(2)
+        expect(out_sha).to_contain("status=refused")
+        expect(out_sha).to_contain("reason=expected-parent-sha256-invalid")
+
+        val repo = root + "/repo"
+        val outside = root + "/outside"
+        expect(dir_create_all(repo)).to_be(true)
+        expect(dir_create_all(outside)).to_be(true)
+        val (out_out, _e_out, rc_out) = _s3c_sh(
+            "sh " + RECOVERY_SCRIPT +
+            " --source-root=\"$(CDPATH= cd -- '" + repo + "' && pwd -P)\"" +
+            " --output-dir=\"$(CDPATH= cd -- '" + outside + "' && pwd -P)\"" +
+            " --planner-receipt='" + repo + "/build/planner.env'" +
+            " --expected-parent-sha256=" + HEX_A +
+            " --expected-source-snapshot-sha256=" + HEX_B +
+            " --minimum-free-bytes=1024"
+        )
+        expect(rc_out).to_equal(1)
+        expect(out_out).to_contain("status=refused")
+        expect(out_out).to_contain("reason=output-dir-outside-source-build")
+
+        expect(dir_create_all(repo + "/build/bootstrap")).to_be(true)
+        val (out_nongit, _e_ng, rc_nongit) = _s3c_sh(
+            "sh " + RECOVERY_SCRIPT +
+            " --source-root=\"$(CDPATH= cd -- '" + repo + "' && pwd -P)\"" +
+            " --output-dir=\"$(CDPATH= cd -- '" + repo + "/build/bootstrap' && pwd -P)\"" +
+            " --planner-receipt='" + repo + "/build/planner.env'" +
+            " --expected-parent-sha256=" + HEX_A +
+            " --expected-source-snapshot-sha256=" + HEX_B +
+            " --minimum-free-bytes=1024"
+        )
+        expect(rc_nongit).to_equal(1)
+        expect(out_nongit).to_contain("status=refused")
+        expect(out_nongit).to_contain("reason=source-root-not-git-worktree")
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "refuses retry readiness on missing root, non-git dir, dirty worktree, and missing readiness files":
+        val root = _s3c_make_root("retry")
+        val (out0, _e0, rc0) = _s3c_sh("sh " + RETRY_SCRIPT)
+        expect(rc0).to_equal(1)
+        expect(out0).to_contain("schema=simple-bootstrap-stage3-retry-readiness-v1")
+        expect(out0).to_contain("status=refused")
+        expect(out0).to_contain("reason=source-root-required")
+
+        val nongit = root + "/nongit"
+        expect(dir_create_all(nongit)).to_be(true)
+        val (out1, _e1, rc1) = _s3c_sh("sh " + RETRY_SCRIPT + " --source-root=\"$(CDPATH= cd -- '" + nongit + "' && pwd -P)\"")
+        expect(rc1).to_equal(1)
+        expect(out1).to_contain("reason=source-root-not-git-worktree")
+
+        val repo = root + "/gitrepo"
+        expect(dir_create_all(repo + "/scripts/bootstrap/lib")).to_be(true)
+        expect(dir_create_all(repo + "/scripts/lib")).to_be(true)
+        val repo_root = cwd().replace("\\", "/")
+        expect(file_atomic_write(repo + "/README.md", "init\n")).to_be(true)
+        val (_gi, _ge, grc) = _s3c_sh(
+            "git -C '" + repo + "' init -q && git -C '" + repo + "' config user.name t && git -C '" + repo + "' config user.email t@example.invalid && git -C '" + repo + "' add . && git -C '" + repo + "' commit -qm init && echo dirty >> '" + repo + "/README.md'"
+        )
+        expect(grc).to_equal(0)
+        val (out2, _e2, rc2) = _s3c_sh("sh " + RETRY_SCRIPT + " --source-root=\"$(CDPATH= cd -- '" + repo + "' && pwd -P)\"")
+        expect(rc2).to_equal(1)
+        expect(out2).to_contain("reason=source-worktree-dirty")
+
+        # Clean worktree missing required compiler/bootstrap readiness files fails with required-readiness-source-missing.
+        val (_cr, _ce, crc) = _s3c_sh(
+            "cp '" + repo_root + "/scripts/bootstrap/lib/centralized-storage.shs' '" + repo + "/scripts/bootstrap/lib/' && " +
+            "cp '" + repo_root + "/scripts/lib/storage-roots.shs' '" + repo + "/scripts/lib/' && " +
+            "git -C '" + repo + "' checkout -q -- README.md && git -C '" + repo + "' add . && git -C '" + repo + "' commit -qm clean"
+        )
+        expect(crc).to_equal(0)
+        val (out3, _e3, rc3) = _s3c_sh("sh " + RETRY_SCRIPT + " --source-root=\"$(CDPATH= cd -- '" + repo + "' && pwd -P)\"")
+        expect(rc3).to_equal(1)
+        expect(out3).to_contain("reason=required-readiness-source-missing")
+        expect(dir_remove_all(root)).to_be(true)

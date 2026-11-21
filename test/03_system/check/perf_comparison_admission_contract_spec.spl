@@ -8,34 +8,40 @@
 
 use std.spec.step
 use std.spec.*
-use std.io_runtime.{process_run}
+use std.nogc_sync_mut.io.process_ops.{process_run, resolve_shell_argv}
 
 val COMMON = "workload_id=scene-v1\\nviewport_width=800\\nviewport_height=600\\nwarmup_count=5\\nsample_count=300\\ntiming_scope=submit-to-fence-p95\\nreadback_mode=post-timing-full-frame\\ncapture_mode=single-post-timing-capture\\ngpu_identity=contract-test-gpu\\nfallback_state=none\\nchecksum_semantics=sampled-u32-xor-stride-4096\\nchecksum=123\\n"
 
+fn _run_sh_perf(command: text) -> (text, text, i32):
+    val (sh_bin, sh_args) = resolve_shell_argv(command)
+    process_run(sh_bin, sh_args)
+
+val _PORTABLE_SHA_FN = "hash256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum \"$1\" | awk '{print $1}'; else shasum -a 256 \"$1\" | awk '{print $1}'; fi; }; sh_bin=$(command -v sh); "
+
 fn fixture_setup(dir: text) -> text:
-    "rm -rf " + dir + " && mkdir -p " + dir +
-    " && printf left-source > " + dir + "/left.source" +
+    "rm -rf " + dir + " && mkdir -p " + dir + " && " + _PORTABLE_SHA_FN +
+    "printf left-source > " + dir + "/left.source" +
     " && printf right-source > " + dir + "/right.source" +
     " && printf pixels > " + dir + "/left.artifact" +
     " && printf pixels > " + dir + "/right.artifact" +
-    " && left_source_sha=$(shasum -a 256 " + dir + "/left.source | awk '{print $1}')" +
-    " && right_source_sha=$(shasum -a 256 " + dir + "/right.source | awk '{print $1}')" +
-    " && left_artifact_sha=$(shasum -a 256 " + dir + "/left.artifact | awk '{print $1}')" +
-    " && right_artifact_sha=$(shasum -a 256 " + dir + "/right.artifact | awk '{print $1}')" +
-    " && binary_sha=$(shasum -a 256 /bin/sh | awk '{print $1}')" +
+    " && left_source_sha=$(hash256 " + dir + "/left.source)" +
+    " && right_source_sha=$(hash256 " + dir + "/right.source)" +
+    " && left_artifact_sha=$(hash256 " + dir + "/left.artifact)" +
+    " && right_artifact_sha=$(hash256 " + dir + "/right.artifact)" +
+    " && binary_sha=$(hash256 \"$sh_bin\")" +
     " && printf 'schema=perf-binary-admission-v1\\nstatus=admitted\\nbinary_kind=native-reference\\nbinary_sha256=%s\\n' \"$binary_sha\" > " + dir + "/left.receipt" +
     " && printf 'schema=perf-binary-admission-v1\\nstatus=admitted\\nbinary_kind=admitted-selfhosted\\nbinary_sha256=%s\\n' \"$binary_sha\" > " + dir + "/right.receipt" +
-    " && left_receipt_sha=$(shasum -a 256 " + dir + "/left.receipt | awk '{print $1}')" +
-    " && right_receipt_sha=$(shasum -a 256 " + dir + "/right.receipt | awk '{print $1}')" +
-    " && { printf '" + COMMON + "'; printf 'source_path=%s\\nsource_revision=%s\\nbinary_kind=native-reference\\nbinary_path=/bin/sh\\nbinary_sha256=%s\\nbinary_admission_path=%s\\nbinary_admission_sha256=%s\\nartifact_path=%s\\nartifact_sha256=%s\\n' " + dir + "/left.source \"$left_source_sha\" \"$binary_sha\" " + dir + "/left.receipt \"$left_receipt_sha\" " + dir + "/left.artifact \"$left_artifact_sha\"; } | sed 's/^/c_/' > " + dir + "/left.env" +
-    " && { printf '" + COMMON + "'; printf 'source_path=%s\\nsource_revision=%s\\nbinary_kind=admitted-selfhosted\\nbinary_path=/bin/sh\\nbinary_sha256=%s\\nbinary_admission_path=%s\\nbinary_admission_sha256=%s\\nartifact_path=%s\\nartifact_sha256=%s\\n' " + dir + "/right.source \"$right_source_sha\" \"$binary_sha\" " + dir + "/right.receipt \"$right_receipt_sha\" " + dir + "/right.artifact \"$right_artifact_sha\"; } | sed 's/^/simple_/' > " + dir + "/right.env"
+    " && left_receipt_sha=$(hash256 " + dir + "/left.receipt)" +
+    " && right_receipt_sha=$(hash256 " + dir + "/right.receipt)" +
+    " && { printf '" + COMMON + "'; printf 'source_path=%s\\nsource_revision=%s\\nbinary_kind=native-reference\\nbinary_path=%s\\nbinary_sha256=%s\\nbinary_admission_path=%s\\nbinary_admission_sha256=%s\\nartifact_path=%s\\nartifact_sha256=%s\\n' " + dir + "/left.source \"$left_source_sha\" \"$sh_bin\" \"$binary_sha\" " + dir + "/left.receipt \"$left_receipt_sha\" " + dir + "/left.artifact \"$left_artifact_sha\"; } | sed 's/^/c_/' > " + dir + "/left.env" +
+    " && { printf '" + COMMON + "'; printf 'source_path=%s\\nsource_revision=%s\\nbinary_kind=admitted-selfhosted\\nbinary_path=%s\\nbinary_sha256=%s\\nbinary_admission_path=%s\\nbinary_admission_sha256=%s\\nartifact_path=%s\\nartifact_sha256=%s\\n' " + dir + "/right.source \"$right_source_sha\" \"$sh_bin\" \"$binary_sha\" " + dir + "/right.receipt \"$right_receipt_sha\" " + dir + "/right.artifact \"$right_artifact_sha\"; } | sed 's/^/simple_/' > " + dir + "/right.env"
 
 fn run_gate(dir: text, mutate: text) -> (text, text, i32):
     val command = fixture_setup(dir) + " && " + mutate +
         " && sh -c '. scripts/check/lib/perf-comparison-admission.shs; " +
         "perf_compare_admit_env " + dir + "/left.env c_ " + dir + "/right.env simple_; " +
         "printf \"status=%s\\nreason=%s\\n\" \"$PERF_ADMISSION_STATUS\" \"$PERF_ADMISSION_REASON\"'"
-    process_run("/bin/sh", ["-c", command])
+    _run_sh_perf(command)
 
 describe "shared performance comparison admission":
 
@@ -114,11 +120,11 @@ describe "shared performance comparison admission":
     it "should reject a seed path even when its hash and receipt are internally consistent":
         step("Rebind the left row to a copied executable under a forbidden seed path")
         val dir = "build/test-perf-admission-seed"
-        val mutate = "cp /bin/sh " + dir + "/compiler_rust-seed && chmod +x " + dir + "/compiler_rust-seed" +
-            " && seed_sha=$(shasum -a 256 " + dir + "/compiler_rust-seed | awk '{print $1}')" +
+        val mutate = "cp \"$sh_bin\" " + dir + "/compiler_rust-seed && chmod +x " + dir + "/compiler_rust-seed" +
+            " && seed_sha=$(hash256 " + dir + "/compiler_rust-seed)" +
             " && printf 'schema=perf-binary-admission-v1\\nstatus=admitted\\nbinary_kind=native-reference\\nbinary_sha256=%s\\n' \"$seed_sha\" > " + dir + "/left.receipt" +
-            " && receipt_sha=$(shasum -a 256 " + dir + "/left.receipt | awk '{print $1}')" +
-            " && sed -e \"s#c_binary_path=/bin/sh#c_binary_path=" + dir + "/compiler_rust-seed#\" -e \"s/^c_binary_sha256=.*/c_binary_sha256=$seed_sha/\" -e \"s/^c_binary_admission_sha256=.*/c_binary_admission_sha256=$receipt_sha/\" " + dir + "/left.env > " + dir + "/left.tmp && mv " + dir + "/left.tmp " + dir + "/left.env"
+            " && receipt_sha=$(hash256 " + dir + "/left.receipt)" +
+            " && sed -e \"s#c_binary_path=$sh_bin#c_binary_path=" + dir + "/compiler_rust-seed#\" -e \"s/^c_binary_sha256=.*/c_binary_sha256=$seed_sha/\" -e \"s/^c_binary_admission_sha256=.*/c_binary_admission_sha256=$receipt_sha/\" " + dir + "/left.env > " + dir + "/left.tmp && mv " + dir + "/left.tmp " + dir + "/left.env"
         val (stdout, _stderr, code) = run_gate(dir, mutate)
         expect(code).to_equal(0)
         expect(stdout).to_contain("reason=seed-left-binary-forbidden")
@@ -128,7 +134,7 @@ describe "shared performance comparison admission":
         val command = "rm -rf build/test-chrome-simple-admission && mkdir -p build/test-chrome-simple-admission && " +
             "printf '{\"source\":\"measured\",\"comparison_admitted\":true}\\n' > build/test-chrome-simple-admission/chrome_static_page.json && " +
             "sh scripts/check/check-chrome-simple-web-comparison.shs --aggregate build/test-chrome-simple-admission"
-        val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        val (stdout, _stderr, code) = _run_sh_perf(command)
         expect(code).to_equal(0)
         expect(stdout).to_contain("chrome_simple_web_status=skipped")
         expect(stdout).to_contain("chrome_simple_web_reason=missing-canonical-artifact")

@@ -98,6 +98,50 @@ class WmLifecyclePointerResult:
     next_window_id: i64
     interaction: WmPointerInteractionState
 
+fn _clone_lifecycle_window(win: WmLifecycleWindowState) -> WmLifecycleWindowState:
+    WmLifecycleWindowState(
+        id: win.id,
+        owner_port: win.owner_port,
+        title: win.title,
+        x: win.x,
+        y: win.y,
+        w: win.w,
+        h: win.h,
+        content: win.content,
+        process_id: win.process_id,
+        app_id: win.app_id,
+        content_owner: win.content_owner,
+        minimized: win.minimized,
+        focused: win.focused,
+        maximized: win.maximized,
+        restore_x: win.restore_x,
+        restore_y: win.restore_y,
+        restore_w: win.restore_w,
+        restore_h: win.restore_h
+    )
+
+fn _clone_lifecycle_windows(windows: [WmLifecycleWindowState]) -> [WmLifecycleWindowState]:
+    var out: [WmLifecycleWindowState] = []
+    var i = 0
+    while i < windows.len():
+        out.push(_clone_lifecycle_window(windows[i]))
+        i = i + 1
+    out
+
+fn _clone_pointer_interaction(interaction: WmPointerInteractionState) -> WmPointerInteractionState:
+    WmPointerInteractionState(
+        dragging: interaction.dragging,
+        drag_window_id: interaction.drag_window_id,
+        drag_offset_x: interaction.drag_offset_x,
+        drag_offset_y: interaction.drag_offset_y,
+        resizing: interaction.resizing,
+        resize_window_id: interaction.resize_window_id,
+        resize_start_x: interaction.resize_start_x,
+        resize_start_y: interaction.resize_start_y,
+        resize_start_w: interaction.resize_start_w,
+        resize_start_h: interaction.resize_start_h
+    )
+
 fn wm_action_is_shared_lifecycle(kind: text) -> bool:
     kind == "create_window" or kind == "create_web_window" or kind == "destroy_window" or kind == "focus" or kind == "resize" or kind == "move" or kind == "set_title" or kind == "minimize" or kind == "maximize" or kind == "restore" or kind == "update_tree"
 
@@ -183,15 +227,15 @@ pub fn wm_lifecycle_owner_allows_source(owner_port: i64, src_port: u64) -> bool:
 fn wm_lifecycle_focus_window(windows: [WmLifecycleWindowState], window_id: i64) -> [WmLifecycleWindowState]:
     val idx = wm_lifecycle_find_window_index(windows, window_id)
     if idx < 0:
-        return windows
-    var selected = windows[idx]
+        return _clone_lifecycle_windows(windows)
+    var selected = _clone_lifecycle_window(windows[idx])
     selected.minimized = false
     selected.focused = true
     var out: [WmLifecycleWindowState] = []
     var i = 0
     while i < windows.len():
         if i != idx:
-            var other = windows[i]
+            var other = _clone_lifecycle_window(windows[i])
             other.focused = false
             out.push(other)
         i = i + 1
@@ -205,7 +249,7 @@ fn wm_lifecycle_focus_top_visible_window(windows: [WmLifecycleWindowState]) -> [
         if not win.minimized:
             return wm_lifecycle_focus_window(windows, win.id)
         i = i - 1
-    windows
+    _clone_lifecycle_windows(windows)
 
 fn wm_lifecycle_reconcile_display_focus(windows: [WmLifecycleWindowState]) -> [WmLifecycleWindowState]:
     """Restore the single-focus invariant after a display topology change.
@@ -236,7 +280,7 @@ fn wm_lifecycle_reconcile_display_focus(windows: [WmLifecycleWindowState]) -> [W
     var out: [WmLifecycleWindowState] = []
     i = 0
     while i < windows.len():
-        var window = windows[i]
+        var window = _clone_lifecycle_window(windows[i])
         window.focused = keep_id != 0 and window.id == keep_id
         out.push(window)
         i = i + 1
@@ -248,7 +292,7 @@ fn wm_lifecycle_destroy_window(windows: [WmLifecycleWindowState], window_id: i64
     var i = 0
     while i < windows.len():
         if windows[i].id != window_id:
-            out.push(windows[i])
+            out.push(_clone_lifecycle_window(windows[i]))
         elif windows[i].focused:
             destroyed_focused = true
         i = i + 1
@@ -296,7 +340,7 @@ fn wm_lifecycle_clamp_to_work_area(window: WmLifecycleWindowState, desktop_width
     old origin.  Keeping both transitions here prevents either path from
     reviving an unreachable or larger-than-display window.
     """
-    var out = window
+    var out = _clone_lifecycle_window(window)
     val work_width = if desktop_width > 0: desktop_width else: 1
     var work_top = WM_WORK_AREA_TOP
     if work_top >= desktop_height:
@@ -347,8 +391,8 @@ fn wm_lifecycle_resize_grip_hit(window_x: i32, window_y: i32, window_width: i32,
         y <= window_y + window_height)
 
 fn wm_lifecycle_pointer_move(windows: [WmLifecycleWindowState], next_window_id: i64, desktop_width: i32, desktop_height: i32, interaction: WmPointerInteractionState, x: i32, y: i32) -> WmLifecyclePointerResult:
-    var out_windows = windows
-    var out_interaction = interaction
+    var out_windows = _clone_lifecycle_windows(windows)
+    var out_interaction = _clone_pointer_interaction(interaction)
     if (out_interaction.resizing and
         out_interaction.resize_window_id != 0):
         val idx = wm_lifecycle_find_window_index(out_windows, out_interaction.resize_window_id)
@@ -396,7 +440,7 @@ fn wm_lifecycle_pointer_move(windows: [WmLifecycleWindowState], next_window_id: 
     WmLifecyclePointerResult(windows: out_windows, next_window_id: next_window_id, interaction: out_interaction)
 
 fn wm_lifecycle_left_button(interaction: WmPointerInteractionState, down: bool) -> WmPointerInteractionState:
-    var out = interaction
+    var out = _clone_pointer_interaction(interaction)
     if down:
         if out.resize_window_id != 0:
             out.resizing = true
@@ -408,7 +452,7 @@ fn wm_lifecycle_left_button(interaction: WmPointerInteractionState, down: bool) 
     out
 
 fn apply_wm_action_to_lifecycle_windows(windows: [WmLifecycleWindowState], next_window_id: i64, desktop_width: i32, desktop_height: i32, action: WmAction) -> WmLifecycleApplyResult:
-    var out_windows = windows
+    var out_windows = _clone_lifecycle_windows(windows)
     var next_id = next_window_id
     if not wm_action_is_shared_lifecycle(action.kind):
         return WmLifecycleApplyResult(windows: out_windows, next_window_id: next_id, window_id: 0, applied: false)
