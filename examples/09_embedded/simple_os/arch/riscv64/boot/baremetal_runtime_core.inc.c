@@ -3339,3 +3339,19 @@ int64_t rt_file_read_regular_no_follow_last_failure(void)
 #undef RV_RUNTIME_TRAP_2
 #undef RV_RUNTIME_TRAP_3
 #undef RV_RUNTIME_TRAP_5
+
+/* Link contract (riscv64 fs-exec kernel): clang lowers struct zeroing to
+ * memset, and the boot C flags carry no -fno-builtin, so the store goes
+ * through a volatile pointer to keep this loop from becoming memset(). */
+void *memset(void *destination, int value, size_t count)
+{
+    volatile unsigned char *out = (volatile unsigned char *)destination;
+    for (size_t index = 0u; index < count; ++index) out[index] = (unsigned char)value;
+    return destination;
+}
+
+RuntimeValue rt_stdout_write(RuntimeValue data)
+{
+    simpleos_serial_put_string_value(data);
+    return ENCODE_INT(0);
+}
