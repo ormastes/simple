@@ -9,7 +9,7 @@
 #   RuntimeEnum  {HeapHeader 8; u32 enum_id @8; u32 discriminant @12; payload @16}
 # ABI: on a 32-bit target the LLVM backend makes every RuntimeValue an i32
 # (codegen/llvm/backend_core.rs runtime_int_type), so `i64` below is a 32-bit
-# carrier, exactly as in src/os/kernel/arch/riscv32/core_runtime.spl.
+# carrier (same convention as the riscv32 core runtime).
 # Bodies are integer-only (no text literals / arrays / untyped compares) so they
 # emit no further rt_* references. Exports never call each other: they delegate
 # to the private _a32_* helpers.
@@ -19,6 +19,9 @@
 #   - rt_any_to_int passes strings / floats / heap handles through unchanged.
 #   - rt_unwrap_or_trap cannot print (no serial dependency); it spins on a
 #     volatile read forever, which the optimiser cannot remove.
+# Also: heap addresses must be < 0x80000000 (signed 32-bit compares; QEMU virt RAM
+# is at 0x40000000), rt_for_iterable is identity (no dict/range conversion),
+# rt_is_present uses the Option discriminant rule, like rt_unwrap_or_trap.
 # arm64 twin: src/os/kernel/arch/arm64/runtime_value_shims.spl.
 
 @cfg(arm32)
@@ -80,7 +83,10 @@ fn _a32_is_none(v: i64) -> i64:
     val p = _a32_enum_ptr(v)
     if p == 0:
         return 0
-    if rt_mmio_read_u32(p + 16) == 3:
+    if rt_mmio_read_u32(p + 8) != A32_OPTION_ENUM_ID:
+        return 0
+    val disc = rt_mmio_read_u32(p + 12)
+    if disc == 1 or disc == A32_HASH_NONE:
         return 1
     0
 
@@ -108,6 +114,8 @@ fn rt_value_truthy(v: i64) -> i8:
 fn rt_any_to_int(v: i64) -> i64:
     if (v & 7) == 0:
         return v >> 3
+    if v == 3:
+        return 0
     if v == 11:
         return 1
     if v == 19:
