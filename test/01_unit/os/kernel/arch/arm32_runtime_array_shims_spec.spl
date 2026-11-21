@@ -1,0 +1,43 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# Repro (arm32 kernel link): rt_array_copy, rt_array_data_ptr, rt_array_fill_span,
+# rt_array_get_text, rt_array_is_byte_packed, rt_array_new_with_cap_u64,
+# rt_array_repeat, rt_array_set_text, rt_byte_array_new_len, rt_bytes_from_raw,
+# rt_bytes_to_text, rt_collection_remove, rt_dict_new, rt_typed_bytes_u8_data_at,
+# rt_typed_words_u64_at/_push/_set had no definition for the arm32 kernel.
+# Source-contract spec: behaviour is proven by
+# scripts/check/check-simpleos-arm32-kernel-link.shs (undefined-symbol count).
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read_text}
+
+val SHIMS = "src/os/kernel/arch/arm32/runtime_array_shims.spl"
+
+describe "arm32 kernel runtime array shims":
+    it "exports every array/bytes/dict symbol the arm32 kernel link needs":
+        step("each symbol is @cfg(arm32) @export(C)")
+        val src = file_read_text(SHIMS)
+        val names = [
+            "rt_array_copy", "rt_array_data_ptr", "rt_array_fill_span", "rt_array_get_text",
+            "rt_array_is_byte_packed", "rt_array_new_with_cap_u64", "rt_array_repeat",
+            "rt_array_set_text", "rt_byte_array_new_len", "rt_bytes_from_raw",
+            "rt_bytes_to_text", "rt_collection_remove", "rt_dict_new",
+            "rt_typed_bytes_u8_data_at", "rt_typed_words_u64_at",
+            "rt_typed_words_u64_push", "rt_typed_words_u64_set"]
+        for n in names:
+            expect(src.contains("@cfg(arm32)\n@export(\"C\")\nfn {n}(")).to_equal(true)
+
+    it "uses the arm32 inline-items RuntimeArray layout":
+        step("RuntimeArray: {HeapHeader 8; u32 len @8; u32 cap @12; items[] @16}, 4-byte items")
+        val src = file_read_text(SHIMS)
+        expect(src.contains("val A32_ARRAY_ITEMS: i64 = 16")).to_equal(true)
+        expect(src.contains("val A32_ITEM_SIZE: i64 = 4")).to_equal(true)
+
+    it "does not call exports from exports (rt_value_truthy leak)":
+        val src = file_read_text(SHIMS)
+        expect(src.contains("-> bool")).to_equal(false)
+
+    it "keeps the shim module in the arm32 kernel entry closure":
+        val entry = file_read_text("examples/09_embedded/simple_os/arch/arm32/os_entry.spl")
+        expect(entry.contains("use os.kernel.arch.arm32.runtime_array_shims.{}")).to_equal(true)
