@@ -1,11 +1,11 @@
 # Eager binding metadata: slot addresses are image-owned, never dylib VM values.
 use compiler.backend.linker.macho.input.{MachOInput, macho_read}
-use compiler.backend.linker.macho.layout.{MachOLayout}
+use compiler.backend.linker.macho.layout.{MachOLayout, macho_section_ignored}
 use compiler.backend.linker.macho.symbols.{MachOBinding, macho_resolve_symbol}
 use compiler.backend.linker.macho.provider_types.{MachOProviderV1}
 use compiler.backend.linker.macho.provider_closure.{MachOProviderClosureV1}
 use compiler.backend.linker.macho.provider_closure_types.{MachOProviderBindingV1}
-use compiler.backend.linker.macho_parser.{macho_parse_relocations}
+use compiler.backend.linker.macho_parser.{MachOSection, MachORelocationEntry, macho_parse_relocations}
 use compiler.backend.linker.macho.relocation_pairs.{macho_relocation_pair_v1}
 
 struct MachOHostedSlot:
@@ -15,6 +15,7 @@ struct MachOHostedSlot:
     symbol_index: i64
     library_ordinal: i64
     thread_local: bool
+    weak_unresolved: bool = false
 
 struct MachOHostedBind:
     offset: i64
@@ -28,31 +29,221 @@ struct MachOHostedFixups:
     binds: [MachOHostedBind]
     rebases: [i64]
     slot_values: [i64]
+    weak_slots: [bool]
 
 fn macho_hosted_symbol_key(owner: i64, index: i64, name: text, external: bool) -> text:
     if external: "external:{name}" else: "local:{owner}:{index}"
 
+fn _macho_symbol_is_local_tlv(inputs: [MachOInput], definitions: {text: MachOBinding},
+        owner: i64, symbol_index: i64) -> bool:
+    if owner < 0 or owner >= inputs.len(): return false
+    val symbols = inputs[owner].object.symbols
+    if symbol_index < 0 or symbol_index >= symbols.len(): return false
+    val raw_sym = symbols[symbol_index]
+    var def_owner = owner
+    var def_sym = raw_sym
+    if (raw_sym.n_type & 1) != 0 and definitions.has(raw_sym.name):
+        val chosen = definitions[raw_sym.name]
+        def_owner = chosen.owner
+        def_sym = chosen.symbol
+    if (def_sym.n_type & 14) != 14: return false
+    var ordinal: i64 = 1
+    for segment in inputs[def_owner].object.segments:
+        for section in segment.sections:
+            if ordinal == def_sym.n_sect:
+                return (section.flags & 255) == 19
+            ordinal = ordinal + 1
+    false
+
+fn _macho_sort_offsets(values: [i64]) -> [i64]:
+    if values.len() <= 1: return values
+    var sorted = values
+    var i: i64 = 1
+    while i < sorted.len():
+        val key = sorted[i]
+        var j = i - 1
+        while j >= 0 and sorted[j] > key:
+            sorted[j + 1] = sorted[j]
+            j = j - 1
+        sorted[j + 1] = key
+        i = i + 1
+    var unique: [i64] = []
+    for v in sorted:
+        if unique.len() == 0 or unique[unique.len() - 1] != v:
+            unique.push(v)
+    unique
+
+fn _macho_find_subsection(bounds: [i64], rel_offset: i64) -> i64:
+    if bounds.len() <= 1 or rel_offset <= 0: return 0
+    var lo: i64 = 0
+    var hi: i64 = bounds.len() - 1
+    var best: i64 = 0
+    while lo <= hi:
+        val mid = (lo + hi) / 2
+        if bounds[mid] <= rel_offset:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    best
+
+fn _macho_reachable_unresolved_imports(inputs: [MachOInput], definitions: {text: MachOBinding},
+        entry_name: text, arm: bool) -> {text: bool}:
+    var sect_lookup: {text: MachOSection} = {}
+    var sect_active: {text: bool} = {}
+    var sub_bounds: {text: [i64]} = {}
+    var queue: [text] = []
+    var visited: {text: bool} = {}
+
+    var owner: i64 = 0
+    for input in inputs:
+        val has_subsections = (input.object.header.flags & 0x2000) != 0
+        var by_sect: {i64: [i64]} = {}
+        if has_subsections:
+            for sym in input.object.symbols:
+                if (sym.n_type & 0xe0) == 0 and (sym.n_type & 14) == 14 and sym.n_sect > 0 and (sym.n_desc & 0x0200) == 0:
+                    var list: [i64] = if by_sect.has(sym.n_sect): by_sect[sym.n_sect] else: []
+                    list.push(sym.n_value)
+                    by_sect[sym.n_sect] = list
+        var ordinal: i64 = 1
+        for segment in input.object.segments:
+            for section in segment.sections:
+                if not macho_section_ignored(section.segname, section.sectname, true):
+                    val skey = "{owner}:{ordinal}"
+                    sect_lookup[skey] = section
+                    sect_active[skey] = true
+                    var bounds: [i64] = [0]
+                    if has_subsections and by_sect.has(ordinal):
+                        var raw_offs: [i64] = [0]
+                        for addr in by_sect[ordinal]:
+                            val delta = addr - section.addr
+                            if delta > 0 and delta < section.size:
+                                raw_offs.push(delta)
+                        bounds = _macho_sort_offsets(raw_offs)
+                    sub_bounds[skey] = bounds
+                    if (section.flags & 255) == 9:
+                        for s_idx in 0..bounds.len():
+                            val node = "{skey}:{s_idx}"
+                            if not visited.has(node):
+                                visited[node] = true
+                                queue.push(node)
+                ordinal = ordinal + 1
+        owner = owner + 1
+
+    if definitions.has(entry_name):
+        val entry_def = definitions[entry_name]
+        val entry_skey = "{entry_def.owner}:{entry_def.symbol.n_sect}"
+        if sect_active.has(entry_skey):
+            val entry_sec = sect_lookup[entry_skey]
+            val entry_sub = _macho_find_subsection(sub_bounds[entry_skey], entry_def.symbol.n_value - entry_sec.addr)
+            val entry_node = "{entry_skey}:{entry_sub}"
+            if not visited.has(entry_node):
+                visited[entry_node] = true
+                queue.push(entry_node)
+
+    var parsed_relocs: {text: [MachORelocationEntry]} = {}
+    var reachable_undef: {text: bool} = {}
+    var head: i64 = 0
+    while head < queue.len():
+        val node = queue[head]
+        head = head + 1
+        val parts = node.split(":")
+        val cur_owner = parts[0].to_int()
+        val cur_ord = parts[1].to_int()
+        val cur_sub = parts[2].to_int()
+        val cur_skey = "{cur_owner}:{cur_ord}"
+        val cur_sec = sect_lookup[cur_skey]
+        val bounds = sub_bounds[cur_skey]
+        val sub_start = bounds[cur_sub]
+        val sub_end = if cur_sub + 1 < bounds.len(): bounds[cur_sub + 1] else: cur_sec.size
+        if not parsed_relocs.has(cur_skey):
+            val cur_obj = inputs[cur_owner].object
+            parsed_relocs[cur_skey] = macho_parse_relocations(cur_obj.raw, cur_sec, cur_obj.byte_order)
+        val relocs = parsed_relocs[cur_skey]
+        for reloc in relocs:
+            if reloc.r_address >= sub_start and reloc.r_address < sub_end:
+                if arm and reloc.r_type == 10:
+                    ()
+                elif reloc.r_extern:
+                    val syms = inputs[cur_owner].object.symbols
+                    if reloc.r_symbolnum >= 0 and reloc.r_symbolnum < syms.len():
+                        val sym = syms[reloc.r_symbolnum]
+                        if (sym.n_type & 1) != 0:
+                            if definitions.has(sym.name):
+                                val target_def = definitions[sym.name]
+                                if (target_def.symbol.n_type & 14) == 14:
+                                    val t_skey = "{target_def.owner}:{target_def.symbol.n_sect}"
+                                    if sect_active.has(t_skey):
+                                        val t_sec = sect_lookup[t_skey]
+                                        val t_sub = _macho_find_subsection(sub_bounds[t_skey], target_def.symbol.n_value - t_sec.addr)
+                                        val t_node = "{t_skey}:{t_sub}"
+                                        if not visited.has(t_node):
+                                            visited[t_node] = true
+                                            queue.push(t_node)
+                            else:
+                                reachable_undef[sym.name] = true
+                        elif (sym.n_type & 14) == 14:
+                            val l_skey = "{cur_owner}:{sym.n_sect}"
+                            if sect_active.has(l_skey):
+                                val l_sec = sect_lookup[l_skey]
+                                val l_sub = _macho_find_subsection(sub_bounds[l_skey], sym.n_value - l_sec.addr)
+                                val l_node = "{l_skey}:{l_sub}"
+                                if not visited.has(l_node):
+                                    visited[l_node] = true
+                                    queue.push(l_node)
+                elif reloc.r_symbolnum > 0:
+                    val sec_skey = "{cur_owner}:{reloc.r_symbolnum}"
+                    if sect_active.has(sec_skey):
+                        val t_sec = sect_lookup[sec_skey]
+                        val t_bounds = sub_bounds[sec_skey]
+                        val cur_kind = cur_sec.flags & 255
+                        if reloc.r_type == 0 and reloc.r_length == 3 and cur_kind != 1 and cur_kind != 12 and cur_kind != 18:
+                            val ptr_val = macho_read(inputs[cur_owner].object.raw, cur_sec.offset + reloc.r_address, 8)
+                            val t_sub = _macho_find_subsection(t_bounds, ptr_val - t_sec.addr)
+                            val t_node = "{sec_skey}:{t_sub}"
+                            if not visited.has(t_node):
+                                visited[t_node] = true
+                                queue.push(t_node)
+                        else:
+                            for s_idx in 0..t_bounds.len():
+                                val t_node = "{sec_skey}:{s_idx}"
+                                if not visited.has(t_node):
+                                    visited[t_node] = true
+                                    queue.push(t_node)
+    reachable_undef
+
 fn macho_hosted_slots(inputs: [MachOInput], definitions: {text: MachOBinding}, libraries: [MachOProviderV1], arm: bool,
-        closure: Option<MachOProviderClosureV1> = nil) -> Result<[MachOHostedSlot], text>:
+        closure: Option<MachOProviderClosureV1> = None, allow_darwin_abi: bool = false,
+        entry_name: text = "_main") -> Result<[MachOHostedSlot], text>:
     var resolved: {text: MachOProviderBindingV1} = {}
+    var missing_non_weak: [text] = []
+    var missing_seen: {text: bool} = {}
     if val graph = closure:
-        # One mutable owner for the complete job: cumulative lookup work cannot
-        # reset through repeatedly unwrapping a copied optional owner.
         var lookup = graph
         for input in inputs:
             for symbol in input.object.symbols:
                 if (symbol.n_type & 0xef) == 1 and symbol.n_value == 0 and not definitions.has(symbol.name) and not resolved.has(symbol.name):
                     if resolved.len() >= 100000: return Err("hosted Mach-O import count limit exceeded")
                     val binding = lookup.resolve_import(symbol.name)?
-                    if binding.is_none(): return Err("unresolved hosted import {symbol.name}")
-                    resolved[symbol.name] = binding.unwrap()
+                    if binding.is_some():
+                        resolved[symbol.name] = binding.unwrap()
+                    elif not allow_darwin_abi:
+                        return Err("unresolved hosted import {symbol.name}")
+                    elif (symbol.n_desc & 0x40) == 0 and not missing_seen.has(symbol.name):
+                        missing_seen[symbol.name] = true
+                        missing_non_weak.push(symbol.name)
+    if allow_darwin_abi and missing_non_weak.len() > 0:
+        val reachable_undef = _macho_reachable_unresolved_imports(inputs, definitions, entry_name, arm)
+        for missing_sym in missing_non_weak:
+            if reachable_undef.has(missing_sym):
+                return Err("unresolved hosted import {missing_sym}")
     var slots: [MachOHostedSlot] = []
     var seen: {text: bool} = {}
     var owner: i64 = 0
     for input in inputs:
         var index: i64 = 0
         for symbol in input.object.symbols:
-            if (symbol.n_type & 0xe0) == 0 and (symbol.n_desc & 0xc0) != 0:
+            if not allow_darwin_abi and (symbol.n_type & 0xe0) == 0 and (symbol.n_desc & 0xc0) != 0:
                 return Err("hosted Mach-O weak definition/import coalescing is not implemented")
             if (symbol.n_type & 0xef) == 1 and symbol.n_value == 0 and not definitions.has(symbol.name):
                 if symbol.name == "": return Err("empty hosted import name")
@@ -60,25 +251,38 @@ fn macho_hosted_slots(inputs: [MachOInput], definitions: {text: MachOBinding}, l
                 if not seen.has(key):
                     var ordinal: i64 = 0
                     var tls = false
+                    var weak_unresolved = false
                     var library_index: i64 = 0
                     if closure.is_some():
-                        val binding = resolved[symbol.name]
-                        if (binding.flags & 14) != 0: return Err("unsupported hosted absolute/weak/reexport provider for {symbol.name}")
-                        ordinal = binding.root_ordinal
-                        tls = (binding.flags & 1) != 0
+                        if resolved.has(symbol.name):
+                            val binding = resolved[symbol.name]
+                            val bad_flags = if allow_darwin_abi: (binding.flags & 10) != 0 else: (binding.flags & 14) != 0
+                            if bad_flags: return Err("unsupported hosted absolute/weak/reexport provider for {symbol.name}")
+                            ordinal = binding.root_ordinal
+                            tls = (binding.flags & 1) != 0
+                        elif allow_darwin_abi:
+                            weak_unresolved = true
+                        else:
+                            return Err("unresolved hosted import {symbol.name}")
                     else:
                         for library in libraries:
                             for symbol_export in library.exports:
                                 if symbol_export.name == symbol.name and ordinal == 0:
-                                    if (symbol_export.flags & 14) != 0:
+                                    val bad_flags = if allow_darwin_abi: (symbol_export.flags & 10) != 0 else: (symbol_export.flags & 14) != 0
+                                    if bad_flags:
                                         return Err("unsupported hosted absolute/weak/reexport provider for {symbol.name}")
                                     ordinal = library_index + 1
                                     tls = (symbol_export.flags & 1) != 0
                             library_index = library_index + 1
-                    if ordinal == 0: return Err("unresolved hosted import {symbol.name}")
+                        if ordinal == 0:
+                            if allow_darwin_abi and (symbol.n_desc & 0x40) != 0:
+                                weak_unresolved = true
+                            else:
+                                return Err("unresolved hosted import {symbol.name}")
                     seen[key] = true
-                    slots = slots.push(MachOHostedSlot(key: key, name: symbol.name, owner: owner,
-                        symbol_index: index, library_ordinal: ordinal, thread_local: tls))
+                    slots.push(MachOHostedSlot(key: key, name: symbol.name, owner: owner,
+                        symbol_index: index, library_ordinal: ordinal, thread_local: tls,
+                        weak_unresolved: weak_unresolved))
                     if slots.len() > 100000: return Err("hosted Mach-O import count limit exceeded")
             index = index + 1
         owner = owner + 1
@@ -86,18 +290,21 @@ fn macho_hosted_slots(inputs: [MachOInput], definitions: {text: MachOBinding}, l
     for input in inputs:
         for segment in input.object.segments:
             for section in segment.sections:
-                for relocation in macho_parse_relocations(input.object.raw, section, input.object.byte_order):
-                    val got = if arm: relocation.r_type == 5 or relocation.r_type == 6 or relocation.r_type == 8 or relocation.r_type == 9 else: relocation.r_type == 3 or relocation.r_type == 4 or relocation.r_type == 9
-                    if got:
-                        if not relocation.r_extern or relocation.r_symbolnum >= input.object.symbols.len():
-                            return Err("invalid hosted GOT symbol reference")
-                        val symbol = input.object.symbols[relocation.r_symbolnum]
-                        val key = macho_hosted_symbol_key(owner, relocation.r_symbolnum, symbol.name, (symbol.n_type & 1) != 0)
-                        if not seen.has(key):
-                            seen[key] = true
-                            slots = slots.push(MachOHostedSlot(key: key, name: symbol.name, owner: owner,
-                                symbol_index: relocation.r_symbolnum, library_ordinal: 0, thread_local: false))
-                            if slots.len() > 100000: return Err("hosted Mach-O GOT count limit exceeded")
+                if not macho_section_ignored(section.segname, section.sectname, allow_darwin_abi):
+                    for relocation in macho_parse_relocations(input.object.raw, section, input.object.byte_order):
+                        val got = if arm: relocation.r_type == 5 or relocation.r_type == 6 or relocation.r_type == 8 or relocation.r_type == 9 else: relocation.r_type == 3 or relocation.r_type == 4 or relocation.r_type == 9
+                        if got:
+                            if not relocation.r_extern or relocation.r_symbolnum >= input.object.symbols.len():
+                                return Err("invalid hosted GOT symbol reference")
+                            val symbol = input.object.symbols[relocation.r_symbolnum]
+                            val key = macho_hosted_symbol_key(owner, relocation.r_symbolnum, symbol.name, (symbol.n_type & 1) != 0)
+                            if not seen.has(key):
+                                seen[key] = true
+                                val local_tlv = allow_darwin_abi and _macho_symbol_is_local_tlv(inputs, definitions, owner, relocation.r_symbolnum)
+                                slots.push(MachOHostedSlot(key: key, name: symbol.name, owner: owner,
+                                    symbol_index: relocation.r_symbolnum, library_ordinal: 0, thread_local: local_tlv,
+                                    weak_unresolved: false))
+                                if slots.len() > 100000: return Err("hosted Mach-O GOT count limit exceeded")
         owner = owner + 1
     Ok(slots)
 
@@ -108,20 +315,26 @@ fn macho_hosted_fixups(inputs: [MachOInput], definitions: {text: MachOBinding}, 
     var binds: [MachOHostedBind] = []
     var rebases: [i64] = []
     var slot_values: [i64] = []
+    var weak_slots: [bool] = []
     var indices: {text: i64} = {}
     var index: i64 = 0
     for slot in slots:
         indices[slot.key] = index
         val offset = got_offset + index * 8
-        if slot.library_ordinal > 0:
-            slot_values = slot_values.push(0)
-            binds = binds.push(MachOHostedBind(offset: offset, library_ordinal: slot.library_ordinal, name: slot.name, addend: 0))
+        if slot.weak_unresolved:
+            slot_values.push(0)
+            weak_slots.push(true)
+        elif slot.library_ordinal > 0:
+            slot_values.push(0)
+            binds.push(MachOHostedBind(offset: offset, library_ordinal: slot.library_ordinal, name: slot.name, addend: 0))
+            weak_slots.push(false)
         else:
             val address = macho_resolve_symbol(inputs, definitions, slot.owner, slot.symbol_index, layout)?
-            slot_values = slot_values.push(address)
+            slot_values.push(address)
             val symbol = inputs[slot.owner].object.symbols[slot.symbol_index]
             val absolute = if (symbol.n_type & 1) != 0 and definitions.has(symbol.name): (definitions[symbol.name].symbol.n_type & 14) == 2 else: (symbol.n_type & 14) == 2
-            if not absolute: rebases = rebases.push(offset)
+            if not absolute: rebases.push(offset)
+            weak_slots.push(false)
         index = index + 1
     var owner: i64 = 0
     var occupied: {i64: bool} = {}
@@ -138,8 +351,8 @@ fn macho_hosted_fixups(inputs: [MachOInput], definitions: {text: MachOBinding}, 
                         val pair = macho_relocation_pair_v1(relocations, relocation_index, arm, input.name)?
                         val relocation = pair.relocation
                         val input_kind = section.flags & 255
-                        if (input_kind == 1 or input_kind == 12) and relocation.r_type != 0:
-                            return Err("hosted instruction/pair relocation in zero-fill section")
+                        if input_kind == 1 or input_kind == 12 or input_kind == 18:
+                            return Err("hosted relocation in zero-fill section")
                         val width = 1 << relocation.r_length
                         if relocation.r_address < 0 or relocation.r_address > section.size or width > section.size - relocation.r_address:
                             return Err("hosted relocation outside input section")
@@ -156,13 +369,25 @@ fn macho_hosted_fixups(inputs: [MachOInput], definitions: {text: MachOBinding}, 
                             val symbol = input.object.symbols[relocation.r_symbolnum]
                             val symbol_key = macho_hosted_symbol_key(owner, relocation.r_symbolnum, symbol.name, (symbol.n_type & 1) != 0)
                             if indices.has(symbol_key): slot_index = indices[symbol_key]
-                        val imported = slot_index >= 0 and slots[slot_index].library_ordinal > 0
+                        val is_weak_slot = slot_index >= 0 and slots[slot_index].weak_unresolved
+                        val imported = slot_index >= 0 and (slots[slot_index].library_ordinal > 0 or is_weak_slot)
                         val tlv = if arm: relocation.r_type == 8 or relocation.r_type == 9 else: relocation.r_type == 9
                         val got = tlv or (if arm: relocation.r_type == 5 or relocation.r_type == 6 else: relocation.r_type == 3 or relocation.r_type == 4)
                         if (subtractor or previous_subtractor) and imported:
                             return Err("hosted subtraction involving an imported symbol is unsupported")
                         if got:
                             if slot_index < 0: return Err("missing hosted GOT allocation")
+                            if pair.explicit_addend != 0: return Err("hosted GOT relocation addend must be zero")
+                            if not arm:
+                                if not relocation.r_pcrel or width != 4: return Err("invalid x86_64 hosted GOT relocation")
+                                if macho_read(input.object.raw, section.offset + relocation.r_address, 4) != 0:
+                                    return Err("x86_64 hosted GOT addend must be zero")
+                            else:
+                                val expected_pcrel = relocation.r_type == 5 or relocation.r_type == 8
+                                if relocation.r_pcrel != expected_pcrel or width != 4: return Err("invalid ARM64 hosted GOT relocation")
+                                val instruction = macho_read(input.object.raw, section.offset + relocation.r_address, 4)
+                                val embedded = if expected_pcrel: ((instruction >> 29) & 3) | (((instruction >> 5) & 0x7ffff) << 2) else: (instruction >> 10) & 0xfff
+                                if embedded != 0: return Err("ARM64 hosted GOT addend must be zero")
                             if tlv != slots[slot_index].thread_local: return Err("hosted TLV relocation/provider kind mismatch")
                             if arm and (relocation.r_type == 6 or relocation.r_type == 9):
                                 val instruction = macho_read(input.object.raw, section.offset + relocation.r_address, 4)
@@ -179,34 +404,38 @@ fn macho_hosted_fixups(inputs: [MachOInput], definitions: {text: MachOBinding}, 
                             if relocation.r_pcrel or width != 8 or offset < layout.data_offset:
                                 return Err("dyld binds require writable 64-bit pointer storage")
                             val section_kind = section.flags & 255
-                            val addend = if section_kind == 1 or section_kind == 12: 0 else: macho_read(input.object.raw, section.offset + relocation.r_address, 8)
+                            val addend = if section_kind == 1 or section_kind == 12 or section_kind == 18: 0 else: macho_read(input.object.raw, section.offset + relocation.r_address, 8) + pair.explicit_addend
                             targets[site] = 0
                             bound_sites[site] = true
-                            binds = binds.push(MachOHostedBind(offset: offset, library_ordinal: slots[slot_index].library_ordinal,
-                                name: slots[slot_index].name, addend: addend))
+                            if not is_weak_slot:
+                                binds.push(MachOHostedBind(offset: offset, library_ordinal: slots[slot_index].library_ordinal,
+                                    name: slots[slot_index].name, addend: addend))
                         elif imported:
                             return Err("direct imported data address requires GOT or pointer relocation")
                         elif relocation.r_type == 0 and not previous_subtractor:
-                            var absolute = not relocation.r_extern and relocation.r_symbolnum == 0
-                            if relocation.r_extern:
-                                val symbol = input.object.symbols[relocation.r_symbolnum]
-                                absolute = if (symbol.n_type & 1) != 0 and definitions.has(symbol.name): (definitions[symbol.name].symbol.n_type & 14) == 2 else: (symbol.n_type & 14) == 2
-                            if not absolute:
-                                if width != 8 or offset < layout.data_offset: return Err("PIE rebases require writable 64-bit pointer storage")
-                                rebases = rebases.push(offset)
+                            if input_kind != 19:
+                                var absolute = not relocation.r_extern and relocation.r_symbolnum == 0
+                                if relocation.r_extern:
+                                    val symbol = input.object.symbols[relocation.r_symbolnum]
+                                    absolute = if (symbol.n_type & 1) != 0 and definitions.has(symbol.name): (definitions[symbol.name].symbol.n_type & 14) == 2 else: (symbol.n_type & 14) == 2
+                                if not absolute:
+                                    if width != 8 or offset < layout.data_offset: return Err("PIE rebases require writable 64-bit pointer storage")
+                                    rebases.push(offset)
                         previous_subtractor = subtractor
                         relocation_index = relocation_index + pair.consumed
                 ordinal = ordinal + 1
         owner = owner + 1
-    Ok(MachOHostedFixups(targets: targets, bound_sites: bound_sites, binds: binds, rebases: rebases, slot_values: slot_values))
+    Ok(MachOHostedFixups(targets: targets, bound_sites: bound_sites, binds: binds,
+        rebases: rebases, slot_values: slot_values, weak_slots: weak_slots))
 
 fn macho_hosted_uleb(bytes: [u8], value: i64) -> [u8]:
     var out = bytes
     var remaining = value
     while remaining >= 128:
-        out = out.push(((remaining & 127) | 128) as u8)
+        out.push(((remaining & 127) | 128) as u8)
         remaining = remaining >> 7
     out.push(remaining as u8)
+    out
 
 fn macho_hosted_sleb(bytes: [u8], value: i64) -> [u8]:
     var out = bytes
@@ -217,27 +446,34 @@ fn macho_hosted_sleb(bytes: [u8], value: i64) -> [u8]:
         remaining = remaining >> 7
         more = not ((remaining == 0 and (byte & 64) == 0) or (remaining == -1 and (byte & 64) != 0))
         if more: byte = byte | 128
-        out = out.push(byte as u8)
+        out.push(byte as u8)
     out
 
 fn macho_hosted_bind_stream(binds: [MachOHostedBind], data_offset: i64) -> [u8]:
     var out: [u8] = []
     for binding in binds:
-        out = macho_hosted_uleb(out.push(0x20u8), binding.library_ordinal)
-        out = out.push(0x40u8)
-        for index in 0..binding.name.len(): out = out.push(binding.name.byte_at(index) as u8)
-        out = out.push(0u8).push(0x51u8)
-        out = macho_hosted_sleb(out.push(0x60u8), binding.addend)
-        out = macho_hosted_uleb(out.push(0x72u8), binding.offset - data_offset)
-        out = out.push(0x90u8)
+        out.push(0x20u8)
+        out = macho_hosted_uleb(out, binding.library_ordinal)
+        out.push(0x40u8)
+        for index in 0..binding.name.len(): out.push(binding.name.byte_at(index) as u8)
+        out.push(0u8)
+        out.push(0x51u8)
+        out.push(0x60u8)
+        out = macho_hosted_sleb(out, binding.addend)
+        out.push(0x72u8)
+        out = macho_hosted_uleb(out, binding.offset - data_offset)
+        out.push(0x90u8)
     out.push(0u8)
+    out
 
 fn macho_hosted_rebase_stream(rebases: [i64], data_offset: i64) -> [u8]:
     var out: [u8] = [0x11u8]
     for offset in rebases:
-        out = macho_hosted_uleb(out.push(0x22u8), offset - data_offset)
-        out = out.push(0x51u8)
+        out.push(0x22u8)
+        out = macho_hosted_uleb(out, offset - data_offset)
+        out.push(0x51u8)
     out.push(0u8)
+    out
 
 export MachOHostedSlot, MachOHostedFixups, macho_hosted_slots, macho_hosted_fixups
 export macho_hosted_bind_stream, macho_hosted_rebase_stream

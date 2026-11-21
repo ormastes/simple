@@ -1,6 +1,13 @@
 # Apple embedded ad-hoc CodeDirectory (SHA-256); no certificate/trust admission.
 use compiler.backend.linker.macho.input.{macho_range}
-use std.common.crypto.sha256.{sha256_bytes}
+use std.common.crypto.sha256.{sha256_u8_fast_hex}
+
+fn _macho_sig_hex_nibble(ch: u8) -> i64:
+    if ch >= 48u8 and ch <= 57u8:
+        return (ch - 48u8) as i64
+    if ch >= 97u8 and ch <= 102u8:
+        return (ch - 87u8) as i64
+    (ch - 55u8) as i64
 
 fn macho_hosted_be(bytes: [u8], at: i64, width: i64, value: i64) -> [u8]:
     var out = bytes
@@ -44,13 +51,23 @@ fn macho_hosted_sign(bytes: [u8], offset: i64, text_size: i64, identifier: text)
     out = macho_hosted_be(out, directory + 72, 8, text_size)
     out = macho_hosted_be(out, directory + 80, 8, 1)
     for index in 0..identifier.len(): out[directory + 88 + index] = identifier.byte_at(index) as u8
+    var page_buf: [u8] = [0u8; 4096]
     for page in 0..pages:
         val begin = page * 4096
         val length = if offset - begin < 4096: offset - begin else: 4096
-        var block: [i64] = [0; length]
-        for index in 0..length: block[index] = out[begin + index] as i64
-        val digest = sha256_bytes(block)
-        for index in 0..32: out[directory + hash_offset + page * 32 + index] = digest[index] as u8
+        var digest_hex = ""
+        if length == 4096:
+            for index in 0..4096: page_buf[index] = out[begin + index]
+            digest_hex = sha256_u8_fast_hex(page_buf)
+        else:
+            var tail_buf: [u8] = [0u8; length]
+            for index in 0..length: tail_buf[index] = out[begin + index]
+            digest_hex = sha256_u8_fast_hex(tail_buf)
+        val dst = directory + hash_offset + page * 32
+        for index in 0..32:
+            val hi = _macho_sig_hex_nibble(digest_hex.byte_at(index * 2))
+            val lo = _macho_sig_hex_nibble(digest_hex.byte_at(index * 2 + 1))
+            out[dst + index] = ((hi << 4) | lo) as u8
     Ok(out)
 
 export macho_hosted_sign, macho_hosted_signature_size

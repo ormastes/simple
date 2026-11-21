@@ -1,4 +1,4 @@
-use std.common.string_core.{char_from_code}
+use std.common.text_bytes.{bytes_to_text}
 use std.common.json.value.{json_parse_value_strict, json_value_has, json_value_field}
 use compiler.backend.linker.macho.tbd_types.{MachOTbdTargetV1, MachOTbdLimitsV1, MachOTbdDocumentV1, MachOTbdLibraryV1, macho_tbd_default_limits_v1}
 use compiler.backend.linker.macho.tbd_values.{tbd_object, tbd_array, tbd_keys, tbd_required, tbd_integer, tbd_target_name}
@@ -68,16 +68,7 @@ fn tbd_source(bytes: [u8], limits: MachOTbdLimitsV1) -> Result<text, text>:
             atom = true
         if tokens > limits.max_tokens: return Err("TBD token quota exceeded")
     if quote != 0 or depth != 0: return Err("TBD unterminated source collection/string")
-    # Bounded chunks avoid quadratic concatenation over the complete document.
-    var parts: [text] = []
-    var chunk = ""
-    for byte in bytes:
-        chunk = chunk + char_from_code(byte as i64)
-        if chunk.len() == 1024:
-            parts = parts.push(chunk)
-            chunk = ""
-    if chunk != "": parts = parts.push(chunk)
-    Ok(parts.join(""))
+    Ok(bytes_to_text(bytes))
 
 fn macho_read_tbd_v1(bytes: [u8], target: MachOTbdTargetV1, limits: MachOTbdLimitsV1) -> Result<MachOTbdDocumentV1, text>:
     """Parse target-qualified TAPI v4/v5; no provider closure or trust is inferred."""
@@ -93,14 +84,14 @@ fn macho_read_tbd_v1(bytes: [u8], target: MachOTbdTargetV1, limits: MachOTbdLimi
         val root = tbd_object(parsed.unwrap())?
         tbd_keys(root, ["tapi_tbd_version", "main_library", "libraries"])?
         if tbd_integer(tbd_required(root, "tapi_tbd_version")?, 5, false, limits)? != 5: return Err("TBD unsupported JSON version")
-        libraries = libraries.push(state.library(tbd_required(root, "main_library")?, false, wanted)?)
+        libraries.push(state.library(tbd_required(root, "main_library")?, false, wanted, target.allow_arm64e_fallback)?)
         if json_value_has(root, "libraries"):
             val inline = tbd_array(json_value_field(root, "libraries"))?
             if inline.len() > limits.max_libraries - 1: return Err("TBD library quota exceeded")
-            for item in inline: libraries = libraries.push(state.library(item, false, wanted)?)
+            for item in inline: libraries.push(state.library(item, false, wanted, target.allow_arm64e_fallback)?)
     else:
         val documents = tbd_yaml_documents(source, limits)?
-        for item in documents: libraries = libraries.push(state.library(item, true, wanted)?)
+        for item in documents: libraries.push(state.library(item, true, wanted, target.allow_arm64e_fallback)?)
     if libraries.len() == 0 or libraries.len() > limits.max_libraries: return Err("TBD library quota exceeded")
     val main = libraries[0]
     if not main.selected or main.install_name.is_none(): return Err("TBD main library has no matching target")
@@ -113,7 +104,7 @@ fn macho_read_tbd_v1(bytes: [u8], target: MachOTbdTargetV1, limits: MachOTbdLimi
                 val key = "{declared.len()}:{declared}{identity.name}"
                 if identities.has(key): return Err("TBD duplicate library target/install identity")
                 identities[key] = true
-        if index > 0: inline = inline.push(library)
+        if index > 0: inline.push(library)
     Ok(MachOTbdDocumentV1(format_version: version, target: target, main: main, libraries: inline,
         parsed_symbol_count: state.symbol_count))
 
