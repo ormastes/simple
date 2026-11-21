@@ -4,6 +4,17 @@
 # Per-file byte-level FAT32 8.3 directory entry matchers and the
 # short-name key builder used for dynamic directory scans.
 
+@unsafe(reason: "raw ARM tagged byte-array indexed byte projection ABI", capabilities: [ffi])
+extern fn rt_arm_array_get_byte_u32(arr: [u8], idx: u64) -> u32
+
+@always_inline
+fn _sffi_arm_array_get_byte_u32(arr: [u8], idx: u64) -> u32:
+    unsafe(capabilities: [ffi]):
+        rt_arm_array_get_byte_u32(arr, idx)
+
+fn _byte(buf: [u8], off: i32) -> u32:
+    _sffi_arm_array_get_byte_u32(buf, off as u64)
+
 fn _arm_dirent_is_hello_smf(data: [u8], off: i32) -> bool:
     _byte(data, off) == 0x48 and _byte(data, off + 1) == 0x45 and
         _byte(data, off + 2) == 0x4C and _byte(data, off + 3) == 0x4C and
@@ -134,15 +145,19 @@ fn _arm_fat83_short_name_key(name: text) -> [u8]:
     var base: [u8] = []
     var ext: [u8] = []
     var seen_dot = false
-    for ch in name:
-        if ch == "." and not seen_dot:
+    var idx: i64 = 0
+    val name_bytes = name.byte_len()
+    while idx < name_bytes:
+        val b = name.byte_at(idx).to_u8()
+        if b == 0x2Eu8 and not seen_dot:
             seen_dot = true
         else if not seen_dot:
             if base.len() < 8:
-                base.push(ch.to_u8())
+                base.push(b)
         else:
             if ext.len() < 3:
-                ext.push(ch.to_u8())
+                ext.push(b)
+        idx = idx + 1
     while base.len() < 8:
         base.push(0x20.to_u8())
     while ext.len() < 3:
