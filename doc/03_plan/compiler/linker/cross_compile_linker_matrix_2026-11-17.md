@@ -11,7 +11,7 @@ Legend: ✅ linked and ran · ⏳ not done · 🔧 in progress · ❌ unsupporte
 | OS | x86_64 | x86 32 (i686) | arm64 | arm32 (armv7) | riscv64 | riscv32 |
 |----|--------|---------------|-------|---------------|---------|---------|
 | Linux | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Windows | ✅ | 🔧 | ✅ | — | — | — |
+| Windows | ✅ | 🔧 (triple fixed; needs LLVM backend + 32-bit RuntimeValue) | ✅ | — | — | — |
 | FreeBSD | ✅ | — | ✅ | — | ✅ | — |
 | SimpleOS | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ | ⏳ |
 | Bare-metal EFI | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -62,7 +62,7 @@ Notes:
 
 Open gaps only.
 
-- Native Windows i686.
+- Native Windows i686: seed now emits `i686-pc-windows-gnu` and `--target=i686-w64-windows-gnu` (was i686-unknown-linux-gnu / x86_64). Remaining: Cranelift has no i686 ("Support for this target has not been implemented yet") so it needs an `--features llvm` seed (LLVM 18 dev libs absent in the WSL lane), C `RuntimeValue` is u64 vs i32 in LLVM on 32-bit, and i386 `_` decoration in stubs.rs/cc_detect x86_64-only cross driver.
 - Native SimpleOS (all CPUs).
 - Simple Windows i686 (redeploy).
 - Simple SimpleOS arm64/riscv64 boot; i686/arm32/riscv32 sysroots.

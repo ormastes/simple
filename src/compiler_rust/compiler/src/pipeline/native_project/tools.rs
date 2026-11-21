@@ -411,6 +411,7 @@ pub(crate) fn windows_gnu_target_flag(
         .filter(|_| compiler.to_ascii_lowercase().contains("clang"))
         .map(|_| match target.arch {
             simple_common::target::TargetArch::Aarch64 => "--target=aarch64-w64-windows-gnu",
+            simple_common::target::TargetArch::X86 => "--target=i686-w64-windows-gnu",
             _ => "--target=x86_64-w64-windows-gnu",
         })
 }
