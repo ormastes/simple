@@ -3,7 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 struct llama_model { int live; };
-struct llama_context { uint32_t n_ctx; int64_t n_tokens; int64_t decodes; int unified; int kvu; int32_t seq_len[16]; };
+struct llama_context { uint32_t n_ctx; int64_t n_tokens; int64_t decodes; int unified; int kvu; int nseq; int32_t seq_len[16]; };
+static int last_kv_unified = -1;
 static int fail_seq_cp_once;
 static int64_t decoded_tokens;
 static int64_t seq_cp_tokens;
@@ -30,7 +31,7 @@ void llama_backend_init(void) {}
 struct llama_model_params llama_model_default_params(void) { return (struct llama_model_params){0}; }
 struct llama_model * llama_model_load_from_file(const char *p, struct llama_model_params x) { (void)x; return p && *p ? calloc(1, sizeof(struct llama_model)) : NULL; }
 struct llama_context_params llama_context_default_params(void) { return (struct llama_context_params){0}; }
-struct llama_context * llama_init_from_model(struct llama_model *m, struct llama_context_params p) { if (!m) return NULL; struct llama_context *c = calloc(1, sizeof(*c)); c->n_ctx = p.n_ctx; c->unified = p.n_seq_max > 1; c->kvu = p.kv_unified; return c; }
+struct llama_context * llama_init_from_model(struct llama_model *m, struct llama_context_params p) { if (!m) return NULL; struct llama_context *c = calloc(1, sizeof(*c)); c->n_ctx = p.n_ctx; c->unified = p.n_seq_max > 1; c->kvu = p.kv_unified; c->nseq = (int)(p.n_seq_max ? p.n_seq_max : 1); last_kv_unified = c->kvu; return c; }
 struct llama_sampler_chain_params llama_sampler_chain_default_params(void) { return (struct llama_sampler_chain_params){0}; }
 struct llama_sampler * llama_sampler_chain_init(struct llama_sampler_chain_params p) { (void)p; return calloc(1, sizeof(struct llama_sampler)); }
 struct llama_sampler * llama_sampler_init_greedy(void) { return calloc(1, sizeof(struct llama_sampler)); }
@@ -56,7 +57,7 @@ size_t llama_state_seq_get_size(struct llama_context *c, llama_seq_id id) { (voi
 size_t llama_state_seq_get_data(struct llama_context *c, uint8_t *d, size_t n, llama_seq_id id) { (void)id; if (fail_serialize_once) { fail_serialize_once = 0; return 0; } if (n < sizeof(c->n_tokens)) return 0; memcpy(d, &c->n_tokens, sizeof(c->n_tokens)); return sizeof(c->n_tokens); }
 size_t llama_state_seq_set_data(struct llama_context *c, const uint8_t *d, size_t n, llama_seq_id id) { (void)id; restore_calls++; if (corrupt_restore_once) { corrupt_restore_once = 0; if (n < sizeof(c->n_tokens)) return 0; memcpy(&c->n_tokens, d, sizeof(c->n_tokens)); c->n_tokens -= 2; return sizeof(c->n_tokens); } if (fail_restore_once) { fail_restore_once = 0; return 0; } if (n < sizeof(c->n_tokens)) return 0; memcpy(&c->n_tokens, d, sizeof(c->n_tokens)); return sizeof(c->n_tokens); }
 struct llama_batch llama_batch_get_one(llama_token *t, int32_t n) { return (struct llama_batch){.token = t, .n_tokens = n}; }
-int32_t llama_decode(struct llama_context *c, struct llama_batch b) { if (b.seq_id && c->unified) { if (fail_decode_once) { fail_decode_once = 0; return 1; } if (c->decodes++ == 0 && (uint32_t)b.n_tokens < n_ubatch) short_first_decodes++; for (int32_t i = 0; i < b.n_tokens; i++) { int s = b.seq_id[i][0]; if (b.pos[i] != c->seq_len[s]) { bad_positions++; return -1; } c->seq_len[s]++; } decode_calls++; decoded_tokens += b.n_tokens; return 0; } decoded_tokens += b.n_tokens; if (fail_decode_once) { fail_decode_once = 0; return 1; } decode_calls++; if (c->decodes++ == 0 && (uint32_t)b.n_tokens < n_ubatch) short_first_decodes++; if (short_decode_once) { short_decode_once = 0; c->n_tokens -= 1; } c->n_tokens += b.n_tokens; return c->n_tokens > c->n_ctx ? 1 : 0; }
+int32_t llama_decode(struct llama_context *c, struct llama_batch b) { if (b.seq_id && c->unified) { if (fail_decode_once) { fail_decode_once = 0; return 1; } /* Capacity: a unified KV shares n_ctx cells across sequences, a non-unified one gives each stream n_ctx/n_seq_max. */ { int s0 = b.seq_id[0][0]; if (c->kvu) { int64_t tot = 0; for (int q = 0; q < 16; q++) tot += c->seq_len[q]; if (tot + b.n_tokens > (int64_t)c->n_ctx) return 1; } else if (c->seq_len[s0] + b.n_tokens > (int64_t)(c->n_ctx / (uint32_t)c->nseq)) return 1; } if (c->decodes++ == 0 && (uint32_t)b.n_tokens < n_ubatch) short_first_decodes++; for (int32_t i = 0; i < b.n_tokens; i++) { int s = b.seq_id[i][0]; if (b.pos[i] != c->seq_len[s]) { bad_positions++; return -1; } c->seq_len[s]++; } decode_calls++; decoded_tokens += b.n_tokens; return 0; } decoded_tokens += b.n_tokens; if (fail_decode_once) { fail_decode_once = 0; return 1; } decode_calls++; if (c->decodes++ == 0 && (uint32_t)b.n_tokens < n_ubatch) short_first_decodes++; if (short_decode_once) { short_decode_once = 0; c->n_tokens -= 1; } c->n_tokens += b.n_tokens; return c->n_tokens > c->n_ctx ? 1 : 0; }
 llama_token llama_sampler_sample(struct llama_sampler *s, struct llama_context *c, int32_t i) { (void)s; (void)c; (void)i; return 2; }
 /* Fault injection for the fail-closed restore checks. */
 void mock_llama_corrupt_restore_once(void) { corrupt_restore_once = 1; }
@@ -76,9 +77,10 @@ llama_pos llama_memory_seq_pos_max(llama_memory_t m, llama_seq_id id) { if (((st
 /* Multi-sequence (tree mode) mock: one length per seq id, positions must be consecutive. */
 void llama_memory_seq_cp(llama_memory_t m, llama_seq_id src, llama_seq_id dst, llama_pos p0, llama_pos p1) {
     struct llama_context *c = (struct llama_context *)m;
-    if (!c->unified || p0 > 0) return;
-    /* llama.cpp asserts "seq_cp() is only supported for full KV buffers" on non-unified KV. */
+    if (!c->unified) return;
+    /* llama.cpp asserts "seq_cp() is only supported for full KV buffers" on non-unified KV; checked before any early return. */
     assert(c->kvu || (p0 <= 0 && p1 < 0));
+    if (p0 > 0) return;
     if (fail_seq_cp_once) { fail_seq_cp_once = 0; return; }
     if (p1 < 0) p1 = c->seq_len[src];
     if (c->seq_len[src] < p1) return;
@@ -103,4 +105,5 @@ void llama_batch_free(struct llama_batch b) {
 }
 int64_t mock_llama_decoded_tokens(void) { return decoded_tokens; }
 int64_t mock_llama_seq_cp_tokens(void) { return seq_cp_tokens; }
+int mock_llama_last_kv_unified(void) { return last_kv_unified; }
 int64_t mock_llama_bad_positions(void) { return bad_positions; }

@@ -684,6 +684,8 @@ static int64_t slang_tree_match(const llama_token *tok, int64_t len, int *node_o
  * the most exact cells up to cap, ties broken by recency. */
 static int64_t slang_tree_usable(int t, int64_t cap) {
     int64_t e = g_tree_node[t].exact_upto;
+    int64_t len = g_tree_node[t].start + g_tree_node[t].n;   /* cells the terminal holds */
+    if (len < e) e = len;
     return e < cap ? e : cap;
 }
 static int slang_tree_find_terminal(int node, int64_t cap) {
@@ -695,6 +697,18 @@ static int slang_tree_find_terminal(int node, int64_t cap) {
         int64_t ut = slang_tree_usable(t, cap), ub = slang_tree_usable(best, cap);
         if (ut > ub || (ut == ub && g_tree_node[t].last_used > g_tree_node[best].last_used))
             best = t;
+    }
+    return best;
+}
+
+/* find_terminal over the subtree plus the terminals on the way down to it: a
+ * shorter cached prompt that is a prefix of this one can hold more exact cells
+ * than a longer path whose tail came from generation. */
+static int slang_tree_pick_owner(int node, int64_t cap) {
+    int best = slang_tree_find_terminal(node, cap);
+    for (int a = g_tree_node[node].parent; a > 0; a = g_tree_node[a].parent) {
+        if (g_tree_node[a].seq < 0) continue;
+        if (best < 0 || slang_tree_usable(a, cap) > slang_tree_usable(best, cap)) best = a;
     }
     return best;
 }
@@ -722,6 +736,8 @@ static int slang_tree_split(int node, int64_t k) {
     np->last_used = x->last_used;
     return p;
 }
+
+static void slang_tree_free_seq(int seq);
 
 /* Inserts a full path whose KV lives on seq. Returns 1 when seq became a
  * terminal, 0 when the tree was left untouched (duplicate path or no room). */
@@ -759,6 +775,15 @@ static int slang_tree_insert(const llama_token *path, int64_t len, int seq, int6
     }
     if (g_tree_node[cur].seq >= 0) {
         g_tree_node[cur].last_used = ++g_prefix_clock;
+        /* Same path already cached. If this run computed more of it as exact
+         * aligned micro-batches, its sequence replaces the older one (an
+         * exact_upto can only be raised together with the cells it describes). */
+        if (exact > g_tree_node[cur].exact_upto && g_tree_node[cur].pins == 0) {
+            slang_tree_free_seq(g_tree_node[cur].seq);
+            g_tree_node[cur].seq = seq;
+            g_tree_node[cur].exact_upto = exact;
+            return 1;
+        }
         return 0;
     }
     g_tree_node[cur].seq = seq;
@@ -865,6 +890,10 @@ static void slang_tree_release_locked(struct slang_request *request) {
         /* Exact modes: only whole aligned micro-batches of the PROMPT are
          * reusable. The last prompt token is decoded alone, so the aligned
          * span is (decoded prompt - 1) rounded down to n_ubatch. */
+        /* tok_len is this request's prompt: slang_ggml_request_tokenize releases
+         * the previous request state (this function) before it overwrites tok,
+         * so tok_len and path agree here. path_len < tok_len means the prefill
+         * stopped early; the min below bounds exactness by what was decoded. */
         int64_t exact = INT64_MAX;
         if (g_tree_mode != 2) {
             int64_t ub = (int64_t)llama_n_ubatch(g_tree_ctx);
@@ -924,7 +953,11 @@ static int64_t slang_tree_prepare_locked(struct slang_request *request) {
             int64_t ubatch = (int64_t)llama_n_ubatch(g_tree_ctx);
             if (ubatch > 1) reuse = reuse / ubatch * ubatch;
         }
-        int owner = reuse > 0 ? slang_tree_find_terminal(node, reuse) : -1;
+        int owner = reuse > 0 ? slang_tree_pick_owner(node, reuse) : -1;
+        if (owner >= 0) {
+            int64_t held = g_tree_node[owner].start + g_tree_node[owner].n;
+            if (reuse > held) reuse = held;   /* an ancestor owner holds fewer cells */
+        }
         if (owner >= 0 && g_tree_mode != 2 && reuse > g_tree_node[owner].exact_upto) {
             int64_t ub = (int64_t)llama_n_ubatch(g_tree_ctx);
             reuse = g_tree_node[owner].exact_upto;
@@ -1018,7 +1051,7 @@ static int slang_tree_decode(struct slang_request *request, const llama_token *t
 static int slang_tree_warm_first(struct slang_request *request, int64_t suffix_len) {
     if (g_tree_warm) return 1;
     int64_t ub = (int64_t)llama_n_ubatch(request->ctx);
-    if (suffix_len >= ub) { g_tree_warm = 1; return 1; }
+    if (suffix_len >= ub) return 1;   /* warm is recorded after the decode succeeds */
     if (!g_model_offloaded || ub <= 0 || ub >= request->context_limit ||
         request->eval_start != 0 || request->tok_len <= 0)
         return 1;
@@ -1062,6 +1095,7 @@ static int64_t slang_tree_eval_prompt(struct slang_request *request) {
             slang_request_release_lease(request);
             return SLANG_ERR_DECODE;
         }
+        if (!g_tree_warm && suffix_len - 1 >= (int64_t)llama_n_ubatch(request->ctx)) g_tree_warm = 1;
     }
     SLANG_LOCK();
     if (suffix_len > 0) g_prefix_tokens_prefilled += suffix_len;
@@ -1102,6 +1136,7 @@ int64_t slang_ggml_prefix_cache_mode_configure(int64_t mode, int64_t cells) {
 /* Statistic getters read state the entry points mutate under g_state_lock. */
 #define SLANG_LOCKED_GET(expr) do { SLANG_LOCK(); int64_t v_ = (int64_t)(expr); SLANG_UNLOCK(); return v_; } while (0)
 int64_t slang_ggml_tree_mode(void) { SLANG_LOCKED_GET(g_tree_mode); }
+int64_t slang_ggml_tree_n_ubatch(void) { SLANG_LOCKED_GET(g_tree_ctx ? llama_n_ubatch(g_tree_ctx) : 0); }
 int64_t slang_ggml_tree_nodes(void) { SLANG_LOCKED_GET(slang_tree_node_count()); }
 int64_t slang_ggml_tree_cached_tokens(void) { SLANG_LOCKED_GET(slang_tree_cached_tokens()); }
 int64_t slang_ggml_tree_shared_tokens(void) { SLANG_LOCKED_GET(slang_tree_shared_tokens()); }

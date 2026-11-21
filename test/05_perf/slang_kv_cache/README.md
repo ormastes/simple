@@ -161,3 +161,18 @@ boundary workload (owner generates ~112 tokens across a 512 micro-batch boundary
 follow-up) 1987 -> 1475 prefilled, reused 512 (capped at the owner's exact span),
 10168 -> 8076 ms; every digest equals the no-cache digest (139fec2ec5a6, 57f18cb60a04,
 695f3acdc604).
+
+## Tree (radix) prefix cache on the AMD GPU (Vulkan), 2026-11-22
+
+The host is a Radeon 8065S with the Vulkan llama.cpp build. Every layer is offloaded (Qwen 29/29, Gemma 19/19). The shim is built from #10682, the seed is `simple-release.exe` and `max_tokens` is 16. Logs are in `C:/dev/slang-logs/postfix/`.
+
+| model | workload | prefilled off -> tree | wall ms off -> tree | digest |
+|---|---|---|---|---|
+| Qwen2.5-1.5B Q4_K_M | branching | 6704 -> 3120 | 2907 -> 1650 (1.76x) | equal |
+| Qwen2.5-1.5B Q4_K_M | boundary | 2109 -> 1597 | 1354 -> 1153 (1.17x) | equal |
+| Qwen2.5-1.5B Q4_K_M | multiturn | 5325 -> 2765 | 2122 -> 1318 (1.61x) | equal |
+| gemma-3-270m Q8_0 | branching | 6652 -> 3068 | 1584 -> 655 (2.42x) | **differs** |
+| gemma-3-270m Q8_0 | boundary | 1987 -> 1475 | 276 -> 145 (1.90x) | equal |
+| gemma-3-270m Q8_0 | multiturn | 5295 -> 2735 | 959 -> 509 (1.88x) | equal |
+
+On the GPU, Qwen runs 15-40x faster than the 2026-11-19 CPU rows above, and the tree still removes about half of the prefill. The Gemma branching digest mismatch, which appears only on Vulkan, is tracked in `doc/08_tracking/bug/slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md`.
