@@ -60,3 +60,20 @@ GetField index 0.
 - Native fixture: `test/fixtures/compiler/result_tuple_array_slot_unimported/main.spl`.
   Stage 2 `native-build` reproduces the error. Verifying the fix natively needs
   a rebuilt stage compiler, which is why the status is verification-pending.
+
+## Follow-up 2026-11-21: class slot (native verification failed)
+
+Stage 2 built from b58524e5c2a (contains #10595, sha 1d2b0cf3) still fails the
+native fixture, now with `slot 1 is Dict` (`Dict<text, SdnSpan>`). `SdnSpan` is a
+**class**. `register_provider_class` relocated field rows and a snapshot but,
+like the struct path before #10595, never recorded the layout digest, so a class
+reached only through an imported callable failed `result_try_tuple_nominal_owner`.
+The rejection diagnostic re-walks every slot, so after the first pass demanded
+`SdnSpan` the reported slot moved from 2 to 1.
+
+Fix: the same digest gap-fill in `register_provider_class`.
+
+- Spec: new case "keeps a Dict class slot admitted after its layout is demanded",
+  run seed-interpreted. Before the fix 4/5 pass; after, 5/5.
+- The status stays verification-pending until a Stage 2 rebuilt from this fix
+  passes the native fixture.

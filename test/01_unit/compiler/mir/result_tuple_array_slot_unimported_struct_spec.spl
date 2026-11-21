@@ -20,18 +20,23 @@ use compiler.mir._MirLoweringExpr.expr_dispatch.*
 val unimported_provider = "pub struct Issue:\n    kind: text\n    line: i64\npub fn produce() -> Result<(i64, text, [Issue]), text>:\n    Ok((1, \"a\", [Issue(kind: \"dup\", line: 2)]))\n"
 val unimported_consumer = "use app.tuple.issues.\{produce\}\nfn inspect() -> Result<i64, text>:\n    val parsed = produce()?\n    if parsed.2.len() > 0:\n        return Err(\"issues\")\n    Ok(parsed.0)\n"
 val unimported_field_reader = "use app.tuple.issues.\{produce\}\nfn inspect() -> Result<i64, text>:\n    val parsed = produce()?\n    var total = 0\n    for issue in parsed.2:\n        total = total + issue.line\n    Ok(total)\n"
+val span_provider = "pub class Span:\n    line: i64\n    column: i64\npub struct Issue:\n    kind: text\n    line: i64\npub fn produce() -> Result<(i64, Dict<text, Span>, [Issue]), text>:\n    var spans: Dict<text, Span> = \{\}\n    spans[\"a\"] = Span(line: 1, column: 2)\n    Ok((1, spans, [Issue(kind: \"dup\", line: 2)]))\n"
+val span_consumer = "use app.tuple.issues.\{produce\}\nfn inspect() -> Result<i64, text>:\n    val parsed = produce()?\n    Ok(parsed.2.len())\n"
 
 # mode 0: consumer-only prescan and lowering list (provider rows absent)
 # mode 1: consumer-only prescan, provider in the lowering list (rows on demand)
 # mode 2: both prescanned (registered baseline)
 # Returns "E:<error>" lines plus "F:<index>" for every GetField in inspect.
 fn lower_unimported_consumer(consumer_source: text, mode: i64) -> [text]:
+    lower_unimported_with_provider(unimported_provider, consumer_source, mode)
+
+fn lower_unimported_with_provider(provider_source: text, consumer_source: text, mode: i64) -> [text]:
     val log = Logger(level: 0)
-    val provider_ast = parse_full_frontend(unimported_provider, "app/tuple/issues.spl", "app.tuple.issues", log)
+    val provider_ast = parse_full_frontend(provider_source, "app/tuple/issues.spl", "app.tuple.issues", log)
     val consumer_ast = parse_full_frontend(consumer_source, "app/tuple/user.spl", "app.tuple.user", log)
     var modules: Dict<text, Module> = {}
     modules["app.tuple.issues"] = provider_ast
-    val files = [SourceFile(path: "app/tuple/issues.spl", content: unimported_provider, module_name: "app.tuple.issues")]
+    val files = [SourceFile(path: "app/tuple/issues.spl", content: provider_source, module_name: "app.tuple.issues")]
     match module_surfaces_from_modules(modules, files):
         case Err(reason): return ["E:surfaces: {reason}"]
         case Ok(surfaces):
@@ -80,6 +85,16 @@ describe "Result tuple Array slot of an unimported record":
         val registered = lower_unimported_consumer(unimported_field_reader, 2)
         expect(error_lines(registered)).to_equal([])
         expect(registered.contains("F:1")).to_equal(true)
+
+    # parse_with_spans_and_issues shape: Dict<text, class> slot before the
+    # [record] slot. Demanding the class layout must not void its own proof.
+    it "admits a Dict class slot when the provider is prescanned":
+        val registered = lower_unimported_with_provider(span_provider, span_consumer, 2)
+        expect(error_lines(registered)).to_equal([])
+
+    it "keeps a Dict class slot admitted after its layout is demanded":
+        val demanded = lower_unimported_with_provider(span_provider, span_consumer, 1)
+        expect(error_lines(demanded)).to_equal([])
 
     it "still fails closed when no provider layout exists at all":
         val lowered = lower_unimported_consumer(unimported_field_reader, 0)
