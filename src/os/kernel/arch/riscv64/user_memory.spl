@@ -1,0 +1,28 @@
+# RISC-V 64 user-memory access for the kernel (pure Simple).
+#
+# rt_copy_user_byte is the kernel copy-from-user primitive declared `extern`
+# by syscall.spl, ipc/syscall_{process,ipc,spm}.spl and sosix/process.spl.
+# Contract (same as the hosted interpreter twin,
+# src/compiler_rust/compiler/src/interpreter_extern/memory.rs rt_copy_user_byte):
+# a raw byte load; callers validate the user range BEFORE calling
+# (_is_user_read_range / vmm_pt_range_user_readable).
+#
+# Syscalls run under the user's satp (user_entry.spl), so a virtual load is
+# correct, but user pages carry PTE_U and an S-mode load from them faults
+# unless sstatus.SUM (bit 18) is set. SUM is set only around the one load so
+# the "kernel never touches user memory by accident" invariant stays local.
+
+use os.kernel.arch.riscv64.cpu.{csrs_sstatus, csrc_sstatus}
+# Backed by arch/riscv64/boot/freestanding_runtime.c (volatile load).
+extern fn rt_mmio_read_u8(addr: u64) -> u8
+
+val SSTATUS_SUM: u64 = 0x40000
+
+@export("C")
+fn rt_copy_user_byte(addr: u64) -> u8:
+    if addr == 0:
+        return 0
+    csrs_sstatus(SSTATUS_SUM)
+    val b = rt_mmio_read_u8(addr)
+    csrc_sstatus(SSTATUS_SUM)
+    b

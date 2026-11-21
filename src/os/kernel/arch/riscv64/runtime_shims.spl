@@ -1,0 +1,85 @@
+# RISC-V 64 kernel runtime shims (pure Simple).
+#
+# Runtime entry points the riscv64 fs-exec kernel closure references but the
+# riscv64 boot C runtime does not define. Layouts are those of
+# examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c.
+
+# Backed by the riscv64 boot runtime (baremetal_runtime_core.inc.c /
+# freestanding_runtime.c). rt_array_* take/return raw RuntimeValue words.
+extern fn rt_array_len(array: i64) -> i64
+extern fn rt_array_get(array: i64, index: i64) -> i64
+extern fn rt_mmio_read_u32(addr: u64) -> u32
+extern fn rt_mmio_write_u32(addr: u64, value: u32)
+extern fn rt_mmio_read_u64(addr: u64) -> u64
+extern fn rt_mmio_write_u64(addr: u64, value: u64)
+
+# ---------------------------------------------------------------------------
+# rt_numeric_contains_u64 — target of the compiler's u64-contains loop fusion
+# (compiler_rust pipeline/lowering.rs lower_hir_u64_contains_candidate). The
+# hosted twin is src/runtime/simple_core/core_array_ops.spl; it reads the
+# hosted array header directly, so the kernel goes through rt_array_get,
+# which also handles the inline-items fallback of the kernel RuntimeArray.
+# Items and the needle are compared raw, as codegen and the hosted twin do.
+# ---------------------------------------------------------------------------
+
+@export("C")
+fn rt_numeric_contains_u64(array: i64, value: i64) -> i8:
+    if array < 4096:
+        return 0
+    val n = rt_array_len(array)
+    var i: i64 = 0
+    while i < n:
+        if rt_array_get(array, i) == value:
+            return 1
+        i = i + 1
+    0
+
+# ---------------------------------------------------------------------------
+# rt_mutex_lock / rt_mutex_unlock — contract of
+# src/lib/nogc_sync_mut/concurrent/mutex.spl (lock returns the protected
+# value, nil on a bad handle; unlock stores new_value, releases, returns 1 or
+# 0 on a bad handle). RuntimeMutex from rt_mutex_new (riscv64
+# baremetal_runtime_core.inc.c): {u32 type=12, u32 size, value@8, u32
+# locked@16}, handle tagged ENCODE_PTR (low bits 0b001).
+#
+# Concurrency exception (doc/04_architecture/language/concurrency/
+# concurrency_architecture.md): no CAS here. This image is single-hart with no
+# preemption inside these calls — the same assumption the C rt_mutex_new port
+# documents — so plain volatile loads/stores of the lock word are exact.
+# Owner: SimpleOS riscv64 boot runtime. Revisit (use an LR/SC CAS) when the
+# riscv64 kernel brings up a second hart.
+# ---------------------------------------------------------------------------
+
+val RV_HEAP_MUTEX: u32 = 12
+val RV_TAG_MASK: i64 = 7
+val RV_TAG_HEAP: i64 = 1
+val RV_NIL_VALUE: i64 = 3
+
+fn _rv_mutex_ptr(mutex: i64) -> u64:
+    if (mutex & RV_TAG_MASK) != RV_TAG_HEAP:
+        return 0
+    val p = (mutex - RV_TAG_HEAP) as u64
+    if p < 4096:
+        return 0
+    if rt_mmio_read_u32(p) != RV_HEAP_MUTEX:
+        return 0
+    p
+
+@export("C")
+fn rt_mutex_lock(mutex: i64) -> i64:
+    val p = _rv_mutex_ptr(mutex)
+    if p == 0:
+        return RV_NIL_VALUE
+    while rt_mmio_read_u32(p + 16) != 0:
+        pass
+    rt_mmio_write_u32(p + 16, 1)
+    rt_mmio_read_u64(p + 8) as i64
+
+@export("C")
+fn rt_mutex_unlock(mutex: i64, new_value: i64) -> i64:
+    val p = _rv_mutex_ptr(mutex)
+    if p == 0:
+        return 0
+    rt_mmio_write_u64(p + 8, new_value as u64)
+    rt_mmio_write_u32(p + 16, 0)
+    1
