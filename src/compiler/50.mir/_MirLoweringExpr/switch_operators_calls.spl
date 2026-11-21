@@ -3982,10 +3982,26 @@ impl MirLowering:
             return true
         false
 
+    me scalar_constant_pattern_symbol(symbol: SymbolId) -> bool:
+        if val definition = self.symbols.get_symbol_raw(symbol.id):
+            if definition.kind == SymbolKind.Const and not definition.is_mutable:
+                if val value_type = definition.type_:
+                    match value_type.kind:
+                        case HirTypeKind.Int(_, _): return true
+                        case _: ()
+        false
+
+    me scalar_constant_pattern_expr(expr: HirExpr) -> bool:
+        match expr.kind:
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                self.scalar_constant_pattern_symbol(symbol)
+            case _: false
+
     me lower_guarded_scalar_match(scrutinee: HirExpr, arms: [HirMatchArm], expected_type: HirType?) -> LocalId:
-        """Lower an int-scrutinee `match` that has at least one guard, in
-        source order: per arm, test the pattern (IntLit / or-of-IntLit; a
-        Wildcard or Binding needs no test), bind, then branch on the guard --
+        """Lower an int-scrutinee `match` that has a guard or symbolic constant,
+        in source order: per arm, test the pattern (IntLit / symbolic integer
+        constant, or an or-pattern of those; a Wildcard or Binding needs no
+        test), bind, then branch on the guard --
         false falls to the next arm. An unguarded Wildcard/Binding arm ends
         the chain; without one, a value no arm accepts falls through to the
         merge (statement match: nothing ran, like the seed).
@@ -4006,7 +4022,8 @@ impl MirLowering:
                     match v_lit.kind:
                         case IntLit(_, _):
                             v_ok = true
-                        case _: ()
+                        case _:
+                            v_ok = self.scalar_constant_pattern_expr(v_lit)
                 case Or(v_subs):
                     v_ok = true
                     for v_sub_any in v_subs:
@@ -4017,7 +4034,8 @@ impl MirLowering:
                                 match v_sub_lit.kind:
                                     case IntLit(_, _):
                                         v_sub_ok = true
-                                    case _: ()
+                                    case _:
+                                        v_sub_ok = self.scalar_constant_pattern_expr(v_sub_lit)
                             case _: ()
                         if not v_sub_ok:
                             v_ok = false
@@ -4051,7 +4069,7 @@ impl MirLowering:
                     self.match_guards_expected = self.match_guards_expected - 1
                 i = i + 1
                 continue
-            var keys: [i64] = []
+            var key_locals: [LocalId] = []
             var irrefutable = false
             match arm.pattern.kind:
                 case HirPatternKind.Wildcard:
@@ -4063,8 +4081,12 @@ impl MirLowering:
                 case Literal(lit):
                     match lit.kind:
                         case IntLit(n, _):
-                            keys = keys.push(n)
-                        case _: ()
+                            var b_key = self.builder
+                            key_locals = key_locals.push(b_key.emit_const_int(n))
+                            self.builder = b_key
+                        case _:
+                            if self.scalar_constant_pattern_expr(lit):
+                                key_locals = key_locals.push(self.lower_expr(lit))
                 case Or(subs):
                     for sub_any in subs:
                         val sub: HirPattern = sub_any
@@ -4072,8 +4094,12 @@ impl MirLowering:
                             case Literal(sub_lit):
                                 match sub_lit.kind:
                                     case IntLit(sn, _):
-                                        keys = keys.push(sn)
-                                    case _: ()
+                                        var b_sub_key = self.builder
+                                        key_locals = key_locals.push(b_sub_key.emit_const_int(sn))
+                                        self.builder = b_sub_key
+                                    case _:
+                                        if self.scalar_constant_pattern_expr(sub_lit):
+                                            key_locals = key_locals.push(self.lower_expr(sub_lit))
                             case _: ()
                 case _: ()
             var b_t = self.builder
@@ -4081,10 +4107,10 @@ impl MirLowering:
             if not irrefutable:
                 val arm_block = b_t.new_block(Some("match_arm"))
                 var ki = 0
-                while ki < keys.len():
-                    val key_local = b_t.emit_const_int(keys[ki])
+                while ki < key_locals.len():
+                    val key_local = key_locals[ki]
                     val cmp_local = b_t.emit_binop(MirBinOp.Eq, mir_operand_copy(scrut_local), mir_operand_copy(key_local), MirType.bool())
-                    if ki == keys.len() - 1:
+                    if ki == key_locals.len() - 1:
                         b_t.terminate_if(mir_operand_copy(cmp_local), arm_block, next_block)
                     else:
                         val more_block = b_t.new_block(Some("match_alt"))

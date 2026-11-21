@@ -26,15 +26,25 @@ real-module probes use modules whose enums are local.
 use std.spec
 use compiler.common.config.Logger
 use compiler.frontend.frontend.parse_full_frontend
-use compiler.hir.hir_lowering.types.HirLowering
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
 use compiler.mir.mir.*
-use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.common.driver_core_types.{driver_core_compile_options_default, SourceFile}
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
 
 extern fn rt_file_read_text(path: text) -> text?
 
 val bare_enum_src = "enum D:\n    A\n    B\n    C\n\n"
+
+fn bare_collect_messages(hir_lowering: HirLowering, lowering: MirLowering) -> [text]:
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push(e.message)
+    for e in lowering.errors:
+        messages = messages.push(e.message)
+    messages
 
 fn bare_lower_full(src: text, file: text) -> (MirModule, [text]):
     val parsed = parse_full_frontend(src, file, "fixture_bare_variant", Logger(level: 0))
@@ -43,12 +53,29 @@ fn bare_lower_full(src: text, file: text) -> (MirModule, [text]):
     val target_context = driver_mir_target_context(driver_core_compile_options_default())
     var lowering = MirLowering.new_for_target(hir.symbols, target_context)
     val mir = lowering.lower_module(hir)
-    var messages: [text] = []
-    for e in hir_lowering.errors:
-        messages = messages.push(e.message)
-    for e in lowering.errors:
-        messages = messages.push(e.message)
-    (mir, messages)
+    (mir, bare_collect_messages(hir_lowering, lowering))
+
+fn bare_lower_vfs_with_protocol() -> (MirModule, [text]):
+    val path = "src/os/services/vfs/vfs_service.spl"
+    val source = rt_file_read_text(path) ?? ""
+    val protocol_path = "src/os/userlib/ipc_protocol.spl"
+    val protocol_source = rt_file_read_text(protocol_path) ?? ""
+    val parsed = parse_full_frontend(source, path, "os.services.vfs.vfs_service", Logger(level: 0))
+    val protocol = parse_full_frontend(protocol_source, protocol_path, "os.userlib.ipc_protocol", Logger(level: 0))
+    var modules: Dict<text, Module> = {}
+    modules["os.services.vfs.vfs_service"] = parsed
+    modules["os.userlib.ipc_protocol"] = protocol
+    val sources = [
+        SourceFile(path: path, content: source, module_name: "os.services.vfs.vfs_service"),
+        SourceFile(path: protocol_path, content: protocol_source, module_name: "os.userlib.ipc_protocol")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hir_lowering = hirlowering_for_module(path, surfaces)
+    val hir = hir_lowering.lower_module(parsed)
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+    val mir = lowering.lower_module(hir)
+    (mir, bare_collect_messages(hir_lowering, lowering))
 
 fn bare_lower_src(body: text) -> (MirModule, [text]):
     bare_lower_full(bare_enum_src + body, "testdata/fixture_bare_variant.spl")
@@ -119,3 +146,32 @@ describe "bare variant patterns":
         print "real-site errors: [{all}]"
         expect(all.contains("B5b")).to_equal(false)
         expect(all.contains("must bind the same variables")).to_equal(false)
+
+describe "module integer constant patterns":
+    it "lowers immutable val arms as integer tests, not catch-all bindings":
+        val src = "val PCIMGR_ENUMERATE: u32 = 1\nval PCIMGR_REQUEST_DEVICE: u32 = 2\nval PCIMGR_RELEASE_DEVICE: u32 = 3\n\nfn dispatch(method: u32) -> i64:\n    match method:\n        PCIMGR_ENUMERATE: 10\n        PCIMGR_REQUEST_DEVICE: 20\n        PCIMGR_RELEASE_DEVICE: 30\n        _: 40\n"
+        val (mir, messages) = bare_lower_full(src, "testdata/fixture_scalar_const_pattern.spl")
+        val all = bare_joined(messages)
+        print "constant-pattern errors: [{all}]"
+        expect(all.contains("B5b")).to_equal(false)
+        expect(all.contains("unreachable match arm")).to_equal(false)
+
+    it "lowers the real pcimgr constant dispatch":
+        val path = "src/os/services/pcimgr/pcimgr.spl"
+        val (mir, messages) = bare_lower_full(rt_file_read_text(path) ?? "", path)
+        val all = bare_joined(messages)
+        print "pcimgr errors: [{all}]"
+        expect(all.contains("B5b")).to_equal(false)
+
+    it "lowers the real VFS payload validation dispatch":
+        val (mir, messages) = bare_lower_vfs_with_protocol()
+        val all = bare_joined(messages)
+        print "vfs errors: [{all}]"
+        expect(all.contains("B5b")).to_equal(false)
+
+    it "lowers the real task cleanup resource dispatch":
+        val path = "src/os/kernel/lifecycle/task_cleanup.spl"
+        val (mir, messages) = bare_lower_full(rt_file_read_text(path) ?? "", path)
+        val all = bare_joined(messages)
+        print "task-cleanup errors: [{all}]"
+        expect(all.contains("B5b")).to_equal(false)
