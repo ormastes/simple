@@ -4359,24 +4359,10 @@ impl MirLowering:
                     ()
 
     me optional_payload_struct_name(inner: HirType) -> text:
-        """Struct/class NAME carried by an `Optional<T>` return, or "".
+        """Declaration-qualified struct/class layout carried by an Optional return.
 
-        Fails closed twice: the payload symbol must resolve to a Class/Struct,
-        and its bare name must already be a layout this lowering knows
-        (`struct_field_order`), which is exactly the table
-        `resolve_field_index`'s name-keyed tier reads. A name that fails either
-        test is discarded rather than guessed, so the worst case is the
-        pre-existing behaviour (no provenance), never a NEW wrong index.
-
-        The `Named(SymbolId)` this dereferences was captured in the DEFINING
-        module's own SymbolTable (the declared return type reaches here through
-        the name-keyed `bootstrap_fn_ret_hir_type_*` registry), so the id-space
-        hazard documented on `resolved_call_result_ok_shape` applies here too.
-        This is the same exposure the shipped `result_variant_payload_type`
-        consumer already carries for a Result payload
-        (switch_operators_calls.spl, the `known_rpt` branch); the
-        `struct_field_order` gate below is what keeps a collided id from
-        naming a layout that does not exist.
+        The symbol must resolve to a Class/Struct with a registered layout. A
+        missing declaration or layout is discarded rather than guessed.
         """
         if inner == None:
             return ""
@@ -4385,20 +4371,12 @@ impl MirLowering:
                 val raw_symbol: HirSymbol? = self.symbols.get_symbol_raw(optional_payload_sym.id)
                 if val present_payload_symbol = raw_symbol:
                     val optional_payload_symbol: HirSymbol = present_payload_symbol
-                    # A class is keyed by its owner identity everywhere this
-                    # name is consumed (register_provider_class layouts and
-                    # `{identity}::{method}` dispatch rows, the opt/ok shape
-                    # prescan); its bare name exists only for a local class.
-                    # Answering the bare name failed the layout gate for every
-                    # IMPORTED class, so `if val a = maybe_reg(1): a.activate()`
-                    # lost the receiver class and died as `unresolved method
-                    # call`. Structs keep their bare-name convention.
                     var payload_key = ""
                     match optional_payload_symbol.kind:
                         case SymbolKind.Class:
                             payload_key = mir_class_identity_raw(self.symbols, optional_payload_sym.id)
                         case SymbolKind.Struct:
-                            payload_key = optional_payload_symbol.name
+                            payload_key = self.struct_value_provenance_key(optional_payload_symbol)
                         case _:
                             return ""
                     if not self.struct_field_order.contains(payload_key):
