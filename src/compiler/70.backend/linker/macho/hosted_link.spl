@@ -1,7 +1,7 @@
 # Dyld executable image construction. Runtime and host qualification are separate.
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker.macho.input.{MachOInput, macho_checked_object, macho_archive_inputs}
-use compiler.backend.linker.macho.layout.{macho_layout, macho_align}
+use compiler.backend.linker.macho.layout.{macho_layout, macho_align, macho_section_ignored}
 use compiler.backend.linker.macho.symbols.{macho_definitions, macho_unresolved, macho_member_needed, macho_symbol_address}
 use compiler.backend.linker.macho.relocations.{macho_relocate}
 use compiler.backend.linker.macho.provider_types.{MachOProviderV1, macho_validate_provider_v1}
@@ -19,6 +19,7 @@ struct MachOHostedRequest:
     identifier: text
     rpaths: [text]
     allow_duplicate_definitions: bool = false
+    hosted_darwin_abi: bool = false
 
 fn macho_hosted_link(objects: [[u8]], archives: [[u8]], providers: [[u8]], request: MachOHostedRequest) -> Result<[u8], text>:
     """Validate actual binary providers before using the shared metadata path."""
@@ -26,7 +27,7 @@ fn macho_hosted_link(objects: [[u8]], archives: [[u8]], providers: [[u8]], reque
     if providers.len() > 255: return Err("hosted dependency count exceeds 255")
     var libraries: [MachOProviderV1] = []
     for bytes in providers:
-        libraries = libraries.push(macho_read_binary_provider_v1(bytes, request.target)?)
+        libraries.push(macho_read_binary_provider_v1(bytes, request.target)?)
     macho_hosted_link_with_providers(objects, archives, libraries, request)
 
 fn macho_hosted_request_v1(request: MachOHostedRequest) -> Result<bool, text>:
@@ -54,20 +55,25 @@ fn macho_hosted_request_v1(request: MachOHostedRequest) -> Result<bool, text>:
     Ok(arm)
 
 fn macho_hosted_link_with_providers(objects: [[u8]], archives: [[u8]], providers: [MachOProviderV1], request: MachOHostedRequest) -> Result<[u8], text>:
-    macho_hosted_link_selected_v1(objects, archives, providers, nil, request)
+    macho_hosted_link_selected_v1(objects, archives, providers, None, request)
 
 fn macho_hosted_link_with_closure(objects: [[u8]], archives: [[u8]], closure: MachOProviderClosureV1, request: MachOHostedRequest) -> Result<[u8], text>:
     closure.validate_for_request(request.target, request.minimum_os)?
     macho_hosted_link_selected_v1(objects, archives, closure.direct_providers(), Some(closure), request)
 
+fn _macho_hosted_darwin_section_allowed(segname: text, sectname: text) -> bool:
+    if segname != "__TEXT" and segname != "__DATA" and segname != "__DATA_CONST":
+        return false
+    sectname == "__text" or sectname == "__stubs" or sectname == "__stub_helper" or
+        sectname == "__const" or sectname == "__cstring" or sectname == "__ustring" or
+        sectname == "__literal4" or sectname == "__literal8" or sectname == "__literal16" or
+        sectname == "__data" or sectname == "__bss" or sectname == "__common" or
+        sectname == "__thread_vars" or sectname == "__thread_data" or sectname == "__thread_bss" or
+        sectname == "__mod_init_func" or sectname == "__nl_symbol_ptr" or sectname == "__la_symbol_ptr"
+
 fn macho_hosted_link_selected_v1(objects: [[u8]], archives: [[u8]], providers: [MachOProviderV1],
         closure: Option<MachOProviderClosureV1>, request: MachOHostedRequest) -> Result<[u8], text>:
-    """Construct a two-level PIE main image with eager dyld fixups and signing.
-
-    No Apple loader execution/trust is inferred from a successful byte result.
-    Unsupported TLS, unwind, weak coalescing and dynamic exports fail or remain
-    outside this explicit executable request contract; they are open item4 gates.
-    """
+    """Construct a two-level PIE main image with eager dyld fixups and signing."""
     val arm = macho_hosted_request_v1(request)?
     val cpu = if arm: 0x0100000c else: 0x01000007
     val limit = request.max_image_bytes
@@ -97,43 +103,65 @@ fn macho_hosted_link_selected_v1(objects: [[u8]], archives: [[u8]], providers: [
     var index: i64 = 0
     for bytes in objects:
         val object = macho_checked_object(bytes)?
-        inputs = inputs.push(MachOInput(name: "object {index}", object: object))
+        inputs.push(MachOInput(name: "object {index}", object: object))
         index = index + 1
     var members: [MachOInput] = []
     for bytes in archives:
         val archive_members = macho_archive_inputs(bytes)?
-        for member in archive_members: members = members.push(member)
-    var selected: {i64: bool} = {}
-    var changed = true
-    while changed:
-        changed = false
-        val unresolved = macho_unresolved(inputs, request.entry, request.allow_duplicate_definitions)?
-        index = 0
-        for member in members:
-            if not selected.has(index) and macho_member_needed(member, unresolved):
-                selected[index] = true
-                inputs = inputs.push(member)
-                changed = true
-                break
-            index = index + 1
+        for member in archive_members: members.push(member)
+    if members.len() > 0:
+        var known_defined: {text: bool} = {}
+        for existing in inputs:
+            for esym in existing.object.symbols:
+                if (esym.n_type & 0xe0) == 0 and (esym.n_type & 1) != 0 and esym.name != "":
+                    if (esym.n_type & 14) != 0 or esym.n_value != 0:
+                        known_defined[esym.name] = true
+        var selected: {i64: bool} = {}
+        var changed = true
+        while changed:
+            changed = false
+            var unresolved = macho_unresolved(inputs, request.entry, request.allow_duplicate_definitions)?
+            index = 0
+            for member in members:
+                if not selected.has(index) and macho_member_needed(member, unresolved):
+                    selected[index] = true
+                    inputs.push(member)
+                    for msym in member.object.symbols:
+                        if (msym.n_type & 0xe0) == 0 and (msym.n_type & 1) != 0 and msym.name != "":
+                            val mkind = msym.n_type & 14
+                            if mkind != 0 or msym.n_value != 0:
+                                known_defined[msym.name] = true
+                                if unresolved.has(msym.name):
+                                    unresolved.remove(msym.name)
+                            elif (msym.n_desc & 0x40) == 0 and not known_defined.has(msym.name):
+                                unresolved[msym.name] = true
+                    changed = true
+                index = index + 1
     for input in inputs:
         if input.object.header.filetype != 1 or input.object.header.cputype != cpu or input.object.header.cpusubtype != (if arm: 0 else: 3):
             return Err("hosted input must be matching baseline CPU MH_OBJECT")
         for segment in input.object.segments:
             for section in segment.sections:
-                val kind = section.flags & 255
-                if kind >= 17 and kind <= 21: return Err("hosted local TLS definitions and initialization are not implemented")
-                if section.sectname == "__eh_frame" or section.sectname == "__compact_unwind":
-                    return Err("hosted Mach-O unwind tables are not implemented")
-                if section.segname != "__DWARF" and section.sectname != "__text" and section.sectname != "__const" and
-                        section.sectname != "__cstring" and section.sectname != "__literal4" and section.sectname != "__literal8" and
-                        section.sectname != "__literal16" and section.sectname != "__data" and section.sectname != "__bss" and section.sectname != "__common":
-                    return Err("hosted section discovery semantics unsupported: {section.segname},{section.sectname}")
+                if not macho_section_ignored(section.segname, section.sectname, request.hosted_darwin_abi):
+                    val kind = section.flags & 255
+                    if not request.hosted_darwin_abi:
+                        if kind >= 17 and kind <= 21: return Err("hosted local TLS definitions and initialization are not implemented")
+                        if section.sectname == "__eh_frame" or section.sectname == "__compact_unwind":
+                            return Err("hosted Mach-O unwind tables are not implemented")
+                        if section.segname != "__DWARF" and section.sectname != "__text" and section.sectname != "__const" and
+                                section.sectname != "__cstring" and section.sectname != "__literal4" and section.sectname != "__literal8" and
+                                section.sectname != "__literal16" and section.sectname != "__data" and section.sectname != "__bss" and section.sectname != "__common":
+                            return Err("hosted section discovery semantics unsupported: {section.segname},{section.sectname}")
+                    else:
+                        if kind == 20 or kind == 21: return Err("hosted local TLS thread-init pointers are not implemented")
+                        if not _macho_hosted_darwin_section_allowed(section.segname, section.sectname):
+                            return Err("hosted section discovery semantics unsupported: {section.segname},{section.sectname}")
     val definitions = macho_definitions(inputs, request.allow_duplicate_definitions)?
     if not definitions.has(request.entry): return Err("undefined hosted entry {request.entry}")
-    val slots = macho_hosted_slots(inputs, definitions, providers, arm, closure)?
+    val slots = macho_hosted_slots(inputs, definitions, providers, arm, closure, request.hosted_darwin_abi, request.entry)?
     val text_reserve = macho_align(slots.len() * 16, 0x4000)
-    val layout = macho_layout(inputs, limit, text_reserve)?
+    val got_bytes = slots.len() * 8
+    val layout = macho_layout(inputs, limit, text_reserve, request.hosted_darwin_abi, if request.hosted_darwin_abi: got_bytes else: 0)?
     val chosen = definitions[request.entry]
     val entry = macho_symbol_address(inputs[chosen.owner], chosen.owner, chosen.symbol, layout)?
     var executable = false
@@ -144,9 +172,10 @@ fn macho_hosted_link_selected_v1(objects: [[u8]], archives: [[u8]], providers: [
                 executable = true
             ordinal = ordinal + 1
     if not executable or (arm and entry % 4 != 0): return Err("hosted entry must address executable instruction bytes")
-    val got = macho_align(layout.size, 8)
-    if got > limit or slots.len() * 8 > limit - got: return Err("hosted GOT exceeds image byte budget")
-    val payload_size = got + slots.len() * 8
+    val got = if request.hosted_darwin_abi: layout.got_offset else: macho_align(layout.size, 8)
+    if not request.hosted_darwin_abi and (got > limit or got_bytes > limit - got):
+        return Err("hosted GOT exceeds image byte budget")
+    val payload_size = if request.hosted_darwin_abi: layout.data_file_end else: got + got_bytes
     val stubs = layout.data_offset - text_reserve
     val fixups = macho_hosted_fixups(inputs, definitions, layout, slots, got, stubs, arm)?
     var bytes: [u8] = [0u8; payload_size]
@@ -155,7 +184,7 @@ fn macho_hosted_link_selected_v1(objects: [[u8]], archives: [[u8]], providers: [
             for byte in 0..placement.size:
                 bytes[placement.offset + byte] = inputs[placement.owner].object.raw[placement.source_offset + byte]
     bytes = macho_relocate(bytes, inputs, definitions, layout, arm, fixups.targets, fixups.bound_sites)?
-    bytes = macho_hosted_stubs(bytes, got, stubs, fixups.slot_values, arm)?
+    bytes = macho_hosted_stubs(bytes, got, stubs, fixups.slot_values, arm, fixups.weak_slots)?
     macho_hosted_image(bytes, layout, providers, fixups, entry, arm, request.minimum_os, request.sdk, request.identifier, request.rpaths, limit)
 
 export MachOHostedRequest, macho_hosted_link, macho_hosted_link_with_providers, macho_hosted_link_with_closure

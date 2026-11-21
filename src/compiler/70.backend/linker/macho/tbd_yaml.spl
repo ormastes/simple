@@ -39,6 +39,10 @@ fn tbd_yaml_scalar(value: text, limits: MachOTbdLimitsV1) -> Result<JsonValue, t
     if item.starts_with("'"):
         if item.byte_len() < 2 or not item.ends_with("'"): return Err("TBD unterminated YAML quote")
         if item.byte_len() > limits.max_name_bytes * 2 + 2: return Err("TBD YAML name quota exceeded")
+        val raw_inner = item.substring(1, item.byte_len() - 1)
+        if not raw_inner.contains("'"):
+            if raw_inner.len() > limits.max_name_bytes: return Err("TBD YAML name quota exceeded")
+            return Ok(JsonValue.Str(raw_inner))
         var name = ""
         var index: i64 = 1
         while index < item.byte_len() - 1:
@@ -69,12 +73,12 @@ fn tbd_yaml_scalar(value: text, limits: MachOTbdLimitsV1) -> Result<JsonValue, t
             elif byte == 91 or byte == 123 or byte == 93 or byte == 125:
                 return Err("TBD unsupported nested YAML flow collection")
             elif byte == 44:
-                values = values.push(tbd_yaml_scalar(item.substring(start, index), limits)?)
+                values.push(tbd_yaml_scalar(item.substring(start, index), limits)?)
                 start = index + 1
             index = index + 1
         if quote != 0: return Err("TBD unterminated YAML flow quote")
         val tail = item.substring(start, item.byte_len() - 1).trim()
-        if tail != "": values = values.push(tbd_yaml_scalar(tail, limits)?)
+        if tail != "": values.push(tbd_yaml_scalar(tail, limits)?)
         return Ok(JsonValue.Array(values))
     if item.starts_with("&") or item.starts_with("*") or item.starts_with("!") or item.starts_with("{") or
             item.starts_with("|") or item.starts_with(">") or item == "~" or item == "null":
@@ -113,10 +117,10 @@ class TbdYamlParser:
             if rest == "":
                 if self.cursor >= self.lines.len() or self.lines[self.cursor].indent <= indent:
                     return Err("TBD missing YAML mapping value")
-                values = values.push(self.block(self.lines[self.cursor].indent, depth + 1)?)
+                values.push(self.block(self.lines[self.cursor].indent, depth + 1)?)
             else:
-                values = values.push(tbd_yaml_scalar(rest, self.limits)?)
-            keys = keys.push(key)
+                values.push(tbd_yaml_scalar(rest, self.limits)?)
+            keys.push(key)
         Ok(JsonValue.Object(keys: keys, values: values))
 
     me block(indent: i64, depth: i64) -> Result<JsonValue, text>:
@@ -131,9 +135,9 @@ class TbdYamlParser:
             val rest = line.body[2:line.body.len()].trim()
             self.cursor = self.cursor + 1
             if tbd_yaml_colon(rest) >= 0:
-                values = values.push(self.mapping(indent + 2, rest, depth + 1)?)
+                values.push(self.mapping(indent + 2, rest, depth + 1)?)
             else:
-                values = values.push(tbd_yaml_scalar(rest, self.limits)?)
+                values.push(tbd_yaml_scalar(rest, self.limits)?)
         Ok(JsonValue.Array(values))
 
 fn tbd_yaml_documents(source: text, limits: MachOTbdLimitsV1) -> Result<[JsonValue], text>:
@@ -175,7 +179,7 @@ fn tbd_yaml_documents(source: text, limits: MachOTbdLimitsV1) -> Result<[JsonVal
             if active:
                 if lines.len() == 0: return Err("TBD empty YAML document")
                 var parser = TbdYamlParser(lines: lines, cursor: 0, limits: limits)
-                documents = documents.push(parser.block(0, 1)?)
+                documents.push(parser.block(0, 1)?)
                 if parser.cursor != lines.len(): return Err("TBD unconsumed YAML document")
                 if documents.len() > limits.max_libraries: return Err("TBD library quota exceeded")
                 lines = []
@@ -193,15 +197,15 @@ fn tbd_yaml_documents(source: text, limits: MachOTbdLimitsV1) -> Result<[JsonVal
             pending_indent = 0
             while pending_indent < raw.byte_len() and raw.byte_at(pending_indent) == 32:
                 pending_indent = pending_indent + 1
-        pending = pending.push(body)
+        pending.push(body)
         if brackets == 0:
-            lines = lines.push(TbdYamlLine(indent: pending_indent, body: pending.join(" ")))
+            lines.push(TbdYamlLine(indent: pending_indent, body: pending.join(" ")))
             pending = []
     if pending.len() != 0 or brackets != 0: return Err("TBD unterminated YAML flow sequence")
     if active:
         if lines.len() == 0: return Err("TBD empty YAML document")
         var parser = TbdYamlParser(lines: lines, cursor: 0, limits: limits)
-        documents = documents.push(parser.block(0, 1)?)
+        documents.push(parser.block(0, 1)?)
         if parser.cursor != lines.len(): return Err("TBD unconsumed YAML document")
     if documents.len() == 0 or documents.len() > limits.max_libraries: return Err("TBD library quota exceeded")
     Ok(documents)

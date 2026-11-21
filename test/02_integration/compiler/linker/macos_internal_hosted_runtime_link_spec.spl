@@ -1,0 +1,114 @@
+# @req REQ-SSPEC-LINKER
+"""
+Darwin host runtime integration spec for SIMPLE_LINKER=internal (internal:macho).
+
+Verifies that link_to_native_with_engine / internal_link_macho_native adapts
+standard native-build NativeLinkConfig on macOS, resolves Apple SDK libSystem.tbd
+(arm64e-macos + reexports + $ld$ directives), handles LC_LINKER_OPTIMIZATION_HINT,
+unwind metadata, C __attribute__((constructor)) (__mod_init_func), local Mach-O TLS
+(__thread_vars/__thread_data/__thread_bss including >64 KB zerofill and 32-byte
+over-aligned __thread_bss + MH_HAS_TLV_DESCRIPTORS), weak definitions/imports,
+and MH_SUBSECTIONS_VIA_SYMBOLS dead-subsection pruning while still failing closed
+on live unresolved symbols.
+"""
+use std.spec.*
+use std.io_runtime.{host_os, host_arch, dir_create_all, file_write, file_exists, process_run}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig, link_to_native_with_engine, internal_link_macho_native}
+
+describe "Darwin internal:macho hosted runtime linker":
+    it "links C objects with constructors, local/aligned/large TLS, weak symbols, dead subsections, and SDK libSystem.tbd":
+        val os = host_os()
+        val arch = host_arch()
+        if (os != "macos" and os != "darwin") or (arch != "aarch64" and arch != "arm64" and arch != "x86_64"):
+            return
+        val selected = env_get_opt("SIMPLE_LINKER") ?? ""
+        expect(dir_create_all("build")).to_equal(true)
+        val created = secure_temp_dir("build", "macos-internal-runtime-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err():
+            return
+        val dir = created.unwrap()
+        val main_c = dir + "/main.c"
+        val helper_c = dir + "/helper.c"
+        val live_bad_c = dir + "/live_bad.c"
+        val main_o = dir + "/main.o"
+        val helper_o = dir + "/helper.o"
+        val live_bad_o = dir + "/live_bad.o"
+        val out_bin = dir + "/app_ok"
+        val bad_bin = dir + "/app_bad"
+
+        val main_src = "#include <stdio.h>\n" +
+            "#include <stdint.h>\n" +
+            "static int g_ctor_bonus = 0;\n" +
+            "__attribute__((constructor)) static void init_bonus(void) { g_ctor_bonus = 10; }\n" +
+            "__thread int g_tls_init = 30;\n" +
+            "_Alignas(32) __thread unsigned char g_aligned_tls_zero[32];\n" +
+            "__thread unsigned char g_big_tls_zero[65536];\n" +
+            "__attribute__((weak)) extern int optional_missing_hook(void);\n" +
+            "extern int never_defined_dead_sym(void);\n" +
+            "__attribute__((weak)) int overridable_value(void) { return 1; }\n" +
+            "int dead_caller(void) { return never_defined_dead_sym() + 99; }\n" +
+            "int main(void) {\n" +
+            "    if (((uintptr_t)&g_aligned_tls_zero[0] & 31u) != 0u) return 4;\n" +
+            "    if (g_big_tls_zero[0] != 0 || g_big_tls_zero[65535] != 0) return 5;\n" +
+            "    g_big_tls_zero[65535] = 7;\n" +
+            "    int extra = optional_missing_hook ? optional_missing_hook() : 0;\n" +
+            "    int total = g_ctor_bonus + g_tls_init + overridable_value() + extra + (g_big_tls_zero[65535] - 7);\n" +
+            "    printf(\"internal-macho-darwin-ok:%d\\n\", total);\n" +
+            "    return total == 42 ? 0 : 3;\n" +
+            "}\n"
+        val helper_src = "int overridable_value(void) { return 2; }\n"
+        val live_bad_src = "extern int missing_live_symbol(void);\nint main(void) { return missing_live_symbol(); }\n"
+
+        expect(file_write(main_c, main_src)).to_equal(true)
+        expect(file_write(helper_c, helper_src)).to_equal(true)
+        expect(file_write(live_bad_c, live_bad_src)).to_equal(true)
+
+        val (_o1, _e1, c1) = process_run("/usr/bin/clang", ["-O2", "-c", main_c, "-o", main_o])
+        expect(c1).to_equal(0)
+        val (_o2, _e2, c2) = process_run("/usr/bin/clang", ["-O2", "-c", helper_c, "-o", helper_o])
+        expect(c2).to_equal(0)
+        val (_o3, _e3, c3) = process_run("/usr/bin/clang", ["-O2", "-c", live_bad_c, "-o", live_bad_o])
+        expect(c3).to_equal(0)
+
+        var config = NativeLinkConfig.default()
+        config.runtime_path = "none"
+        config.debug = true
+        config.strip_output = true
+        config.prefer_size_linker = true
+        config.extra_flags = ["-Wl,-dead_strip"]
+
+        val linked_ok = if selected == "internal":
+            val res = link_to_native_with_engine([main_o, helper_o], out_bin, config)
+            expect(res.is_ok()).to_equal(true)
+            if res.is_ok():
+                expect(res.unwrap().engine_id).to_equal("internal:macho")
+            res.is_ok()
+        else:
+            val res = internal_link_macho_native(os, arch, config, [main_o, helper_o], out_bin)
+            expect(res.is_ok()).to_equal(true)
+            res.is_ok()
+        if linked_ok:
+            val (_cs_o, _cs_e, cs_code) = process_run("/usr/bin/codesign", ["--verify", "--strict", out_bin])
+            expect(cs_code).to_equal(0)
+            val (run_out, _run_err, run_code) = process_run(out_bin, [])
+            expect(run_code).to_equal(0)
+            expect(run_out.trim()).to_equal("internal-macho-darwin-ok:42")
+
+        val bad_err = if selected == "internal":
+            val r = link_to_native_with_engine([live_bad_o], bad_bin, config)
+            expect(r.is_err()).to_equal(true)
+            if r.is_err(): r.unwrap_err() else: ""
+        else:
+            val r = internal_link_macho_native(os, arch, config, [live_bad_o], bad_bin)
+            expect(r.is_err()).to_equal(true)
+            if r.is_err(): r.unwrap_err() else: ""
+        expect(bad_err).to_contain("unresolved hosted import _missing_live_symbol")
+
+        for f in [main_c, helper_c, live_bad_c, main_o, helper_o, live_bad_o, out_bin, bad_bin]:
+            if file_exists(f):
+                val _removed = file_remove(f)
+        expect(dir_remove(dir, false)).to_equal(true)

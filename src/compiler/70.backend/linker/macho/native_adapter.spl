@@ -18,7 +18,8 @@ struct MachONativePlanV1:
     runtime_bundle: text
     verbose: bool
     sdk_root: text = ""
-    client_name: Option<text> = nil
+    client_name: Option<text> = None
+    hosted_darwin_abi: bool = false
 
 fn _native_macho_decimal(value: text, maximum: i64) -> Result<i64, text>:
     if value == "": return Err("internal engine: invalid Mach-O empty number")
@@ -70,43 +71,48 @@ fn native_macho_plan_v1(arch: text, config: NativeLinkConfig, output: text) -> R
     var limit = 0x7fffffff
     var rpaths: [text] = []
     var sdk_root = ""
-    var client_name: Option<text> = nil
+    var client_name: Option<text> = None
+    var hosted_darwin_abi = false
     var seen: {text: bool} = {}
     var index = 0
     while index < config.extra_flags.len():
         val flag = config.extra_flags[index]
         if flag.contains("\0"): return Err("internal engine: invalid Mach-O flag NUL")
         if flag != "-platform_version" and flag != "-e" and flag != "-rpath" and
-                flag != "--macho-signing-identifier" and flag != "--macho-max-image-bytes" and flag != "-syslibroot" and flag != "-client_name":
+                flag != "--macho-signing-identifier" and flag != "--macho-max-image-bytes" and
+                flag != "-syslibroot" and flag != "-client_name" and flag != "--macho-hosted-darwin-abi":
             return Err("internal engine: unsupported Mach-O flag '{flag}'")
         if flag != "-rpath" and seen.has(flag): return Err("internal engine: invalid Mach-O duplicate flag '{flag}'")
         seen[flag] = true
-        val operands = if flag == "-platform_version": 3 else: 1
+        val operands = if flag == "-platform_version": 3 elif flag == "--macho-hosted-darwin-abi": 0 else: 1
         if config.extra_flags.len() - index - 1 < operands: return Err("internal engine: invalid Mach-O missing flag operand '{flag}'")
         for offset in 1..(operands + 1):
             if config.extra_flags[index + offset].contains("\0"): return Err("internal engine: invalid Mach-O flag operand NUL")
-        val value = config.extra_flags[index + 1]
-        if flag == "-platform_version":
-            if value != "macos": return Err("internal engine: unsupported Mach-O platform '{value}'")
-            minimum = _native_macho_version(config.extra_flags[index + 2])?
-            sdk = _native_macho_version(config.extra_flags[index + 3])?
-        elif flag == "-e":
-            if value == "": return Err("internal engine: invalid Mach-O empty entry")
-            entry = value
-        elif flag == "--macho-signing-identifier":
-            if not _native_macho_ascii(value): return Err("internal engine: invalid Mach-O signing identifier")
-            identifier = value
-        elif flag == "--macho-max-image-bytes":
-            limit = _native_macho_decimal(value, 0x7fffffff)?
-        elif flag == "-syslibroot":
-            sdk_root = macho_provider_path_v1(value)?
-        elif flag == "-client_name":
-            if not _native_macho_ascii(value): return Err("internal engine: invalid Mach-O client name")
-            client_name = Some(value)
+        if flag == "--macho-hosted-darwin-abi":
+            hosted_darwin_abi = true
         else:
-            if not _native_macho_ascii(value) or rpaths.contains(value) or rpaths.len() >= 128:
-                return Err("internal engine: invalid Mach-O rpath")
-            rpaths.push(value)
+            val value = config.extra_flags[index + 1]
+            if flag == "-platform_version":
+                if value != "macos": return Err("internal engine: unsupported Mach-O platform '{value}'")
+                minimum = _native_macho_version(config.extra_flags[index + 2])?
+                sdk = _native_macho_version(config.extra_flags[index + 3])?
+            elif flag == "-e":
+                if value == "": return Err("internal engine: invalid Mach-O empty entry")
+                entry = value
+            elif flag == "--macho-signing-identifier":
+                if not _native_macho_ascii(value): return Err("internal engine: invalid Mach-O signing identifier")
+                identifier = value
+            elif flag == "--macho-max-image-bytes":
+                limit = _native_macho_decimal(value, 0x7fffffff)?
+            elif flag == "-syslibroot":
+                sdk_root = macho_provider_path_v1(value)?
+            elif flag == "-client_name":
+                if not _native_macho_ascii(value): return Err("internal engine: invalid Mach-O client name")
+                client_name = Some(value)
+            else:
+                if not _native_macho_ascii(value) or rpaths.contains(value) or rpaths.len() >= 128:
+                    return Err("internal engine: invalid Mach-O rpath")
+                rpaths.push(value)
         index = index + operands + 1
     if minimum < 0xb0000 or sdk < minimum: return Err("internal engine: invalid Mach-O explicit macOS 11+ minimum/SDK versions required")
     if identifier == "": return Err("internal engine: invalid Mach-O explicit signing identifier required")
@@ -114,9 +120,11 @@ fn native_macho_plan_v1(arch: text, config: NativeLinkConfig, output: text) -> R
     # allow_cc_fallback cannot override this explicit internal route.
     Ok(MachONativePlanV1(request: MachOHostedRequest(target: if arm: RelocArch.AArch64 else: RelocArch.X86_64,
         entry: entry, minimum_os: minimum, sdk: sdk, max_image_bytes: limit,
-        identifier: identifier, rpaths: rpaths, allow_duplicate_definitions: config.allow_duplicate_definitions), libraries: config.libraries,
+        identifier: identifier, rpaths: rpaths, allow_duplicate_definitions: config.allow_duplicate_definitions,
+        hosted_darwin_abi: hosted_darwin_abi), libraries: config.libraries,
         library_paths: config.library_paths, runtime_path: config.runtime_path,
-        runtime_bundle: config.runtime_bundle, verbose: config.verbose, sdk_root: sdk_root, client_name: client_name))
+        runtime_bundle: config.runtime_bundle, verbose: config.verbose, sdk_root: sdk_root,
+        client_name: client_name, hosted_darwin_abi: hosted_darwin_abi))
 
 fn _native_macho_library(library: text, paths: [text]) -> Result<text, text>:
     if library == "" or library.contains("\0"): return Err("internal engine: invalid Mach-O library name")
@@ -149,11 +157,10 @@ fn _native_macho_kind(bytes: [u8]) -> Result<i64, text>:
         return Err("internal engine: unsupported Mach-O input format")
     val kind = bytes[12] as i64 | ((bytes[13] as i64) << 8) | ((bytes[14] as i64) << 16) | ((bytes[15] as i64) << 24)
     if kind == 1: return Ok(0)
-    if kind == 6: return Ok(2)
+    if kind == 6 or kind == 9: return Ok(2)
     Err("internal engine: unsupported Mach-O file type {kind}")
 
-fn native_macho_link_files_v1(plan: MachONativePlanV1, object_files: [text],
-        runtime_archives: [text], output: text) -> Result<text, text>:
+fn native_macho_link_files_v1(plan: MachONativePlanV1, object_files: [text], runtime_archives: [text], output: text) -> Result<text, text>:
     if output == "" or output.contains("\0"): return Err("internal engine: invalid Mach-O output path")
     if object_files.len() == 0: return Err("No object files to link")
     if plan.runtime_path == "none" and runtime_archives.len() != 0:
@@ -188,10 +195,11 @@ fn native_macho_link_files_v1(plan: MachONativePlanV1, object_files: [text],
             elif kind == 2: providers.push(MachOProviderSourceV1(path: macho_provider_path_v1(path)?, bytes: bytes))
             else: return Err("internal engine: unsupported object in Mach-O libraries")
     if plan.verbose: debug("native-macho", "linking {objects.len()} objects, {archives.len()} archives, {providers.len()} dylibs")
-    val target = MachOTbdTargetV1(arch: plan.request.target, platform: 1)
+    val target = MachOTbdTargetV1(arch: plan.request.target, platform: 1,
+        allow_arm64e_fallback: plan.hosted_darwin_abi, ignore_ld_directives: plan.hosted_darwin_abi)
     # Preserve the actual output spelling, including './', for the client rule.
     # Directory separators adapt to Windows; filesystem normalization is separate.
-    val client = MachOProviderClientV1(output_install_name: output.replace("\\", "/"), client_name: plan.client_name, parent_umbrella: nil)
+    val client = MachOProviderClientV1(output_install_name: output.replace("\\", "/"), client_name: plan.client_name, parent_umbrella: None)
     val search = MachOProviderSearchV1(sdk_root: plan.sdk_root, library_paths: plan.library_paths, output_path: output)
     val closure = macho_provider_closure_v2(providers, target, client, search, native_macho_load_provider_v2, macho_provider_closure_default_limits_v1())
     if closure.is_err(): return Err("internal engine: invalid Mach-O provider closure: {closure.unwrap_err()}")
