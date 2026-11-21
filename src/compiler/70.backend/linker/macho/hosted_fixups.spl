@@ -5,7 +5,7 @@ use compiler.backend.linker.macho.symbols.{MachOBinding, macho_resolve_symbol}
 use compiler.backend.linker.macho.provider_types.{MachOProviderV1}
 use compiler.backend.linker.macho.provider_closure.{MachOProviderClosureV1}
 use compiler.backend.linker.macho.provider_closure_types.{MachOProviderBindingV1}
-use compiler.backend.linker.macho_parser.{MachOSection, MachORelocationEntry, macho_parse_relocations}
+use compiler.backend.linker.macho_parser.{MachOSectionInfo, MachORelocationEntry, macho_parse_relocations}
 use compiler.backend.linker.macho.relocation_pairs.{macho_relocation_pair_v1}
 
 struct MachOHostedSlot:
@@ -89,7 +89,7 @@ fn _macho_find_subsection(bounds: [i64], rel_offset: i64) -> i64:
 
 fn _macho_reachable_unresolved_imports(inputs: [MachOInput], definitions: {text: MachOBinding},
         entry_name: text, arm: bool) -> {text: bool}:
-    var sect_lookup: {text: MachOSection} = {}
+    var sect_lookup: {text: MachOSectionInfo} = {}
     var sect_active: {text: bool} = {}
     var sub_bounds: {text: [i64]} = {}
     var queue: [text] = []
@@ -134,7 +134,7 @@ fn _macho_reachable_unresolved_imports(inputs: [MachOInput], definitions: {text:
         val entry_def = definitions[entry_name]
         val entry_skey = "{entry_def.owner}:{entry_def.symbol.n_sect}"
         if sect_active.has(entry_skey):
-            val entry_sec = sect_lookup[entry_skey]
+            val entry_sec: MachOSectionInfo = sect_lookup[entry_skey]
             val entry_sub = _macho_find_subsection(sub_bounds[entry_skey], entry_def.symbol.n_value - entry_sec.addr)
             val entry_node = "{entry_skey}:{entry_sub}"
             if not visited.has(entry_node):
@@ -152,14 +152,14 @@ fn _macho_reachable_unresolved_imports(inputs: [MachOInput], definitions: {text:
         val cur_ord = parts[1].to_int()
         val cur_sub = parts[2].to_int()
         val cur_skey = "{cur_owner}:{cur_ord}"
-        val cur_sec = sect_lookup[cur_skey]
+        val cur_sec: MachOSectionInfo = sect_lookup[cur_skey]
         val bounds = sub_bounds[cur_skey]
         val sub_start = bounds[cur_sub]
         val sub_end = if cur_sub + 1 < bounds.len(): bounds[cur_sub + 1] else: cur_sec.size
         if not parsed_relocs.has(cur_skey):
             val cur_obj = inputs[cur_owner].object
             parsed_relocs[cur_skey] = macho_parse_relocations(cur_obj.raw, cur_sec, cur_obj.byte_order)
-        val relocs = parsed_relocs[cur_skey]
+        val relocs: [MachORelocationEntry] = parsed_relocs[cur_skey]
         for reloc in relocs:
             if reloc.r_address >= sub_start and reloc.r_address < sub_end:
                 if arm and reloc.r_type == 10:
@@ -174,7 +174,7 @@ fn _macho_reachable_unresolved_imports(inputs: [MachOInput], definitions: {text:
                                 if (target_def.symbol.n_type & 14) == 14:
                                     val t_skey = "{target_def.owner}:{target_def.symbol.n_sect}"
                                     if sect_active.has(t_skey):
-                                        val t_sec = sect_lookup[t_skey]
+                                        val t_sec: MachOSectionInfo = sect_lookup[t_skey]
                                         val t_sub = _macho_find_subsection(sub_bounds[t_skey], target_def.symbol.n_value - t_sec.addr)
                                         val t_node = "{t_skey}:{t_sub}"
                                         if not visited.has(t_node):
@@ -185,7 +185,7 @@ fn _macho_reachable_unresolved_imports(inputs: [MachOInput], definitions: {text:
                         elif (sym.n_type & 14) == 14:
                             val l_skey = "{cur_owner}:{sym.n_sect}"
                             if sect_active.has(l_skey):
-                                val l_sec = sect_lookup[l_skey]
+                                val l_sec: MachOSectionInfo = sect_lookup[l_skey]
                                 val l_sub = _macho_find_subsection(sub_bounds[l_skey], sym.n_value - l_sec.addr)
                                 val l_node = "{l_skey}:{l_sub}"
                                 if not visited.has(l_node):
@@ -194,7 +194,7 @@ fn _macho_reachable_unresolved_imports(inputs: [MachOInput], definitions: {text:
                 elif reloc.r_symbolnum > 0:
                     val sec_skey = "{cur_owner}:{reloc.r_symbolnum}"
                     if sect_active.has(sec_skey):
-                        val t_sec = sect_lookup[sec_skey]
+                        val t_sec: MachOSectionInfo = sect_lookup[sec_skey]
                         val t_bounds = sub_bounds[sec_skey]
                         val cur_kind = cur_sec.flags & 255
                         if reloc.r_type == 0 and reloc.r_length == 3 and cur_kind != 1 and cur_kind != 12 and cur_kind != 18:
