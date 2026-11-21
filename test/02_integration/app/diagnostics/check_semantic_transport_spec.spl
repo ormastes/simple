@@ -6,6 +6,11 @@ These cases do not substitute help-only output for type-check execution.
 use std.spec
 use compiler.tools.lint.semantic_check.{simple_semantic_check_source, simple_check_is_clean}
 use compiler.tools.lint.check_diagnostic.{CheckDiagnostic, check_diagnostic_text, check_diagnostic_json}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use std.common.string_core.{char_from_code}
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_to_string}
 
 describe "p2_p3_bug_reproduction":
     it "rejects the exact annotated initializer with its declared type first":
@@ -56,3 +61,27 @@ describe "p2_p3_adjacent_regression":
         expect(checked.diagnostic_records.len()).to_be_greater_than(0)
         expect(checked.diagnostic_records[0].code == "E1003").to_equal(false)
         expect(checked.diagnostic_records[0].message).to_contain("undefined")
+
+    it "co-loads DiagnosticV1 without shadowing check_diagnostic_json escape_json":
+        val bs = char_from_code(8)
+        val ff = char_from_code(12)
+        val soh = char_from_code(1)
+        val uni = "한글 — é 🚀"
+        val diag_v1 = DiagnosticV1.error("E0002", "line\n\"quoted\"\\한글")
+        val v1_json = diag_v1.to_json()
+        expect(v1_json).to_contain("line\\n\\\"quoted\\\"\\\\한글")
+
+        val raw_path = "C:\\src\\한글\\\"file\".spl"
+        val raw_msg = "bad\t\"msg\"\r\n" + bs + ff + soh + " " + uni
+        val record = CheckDiagnostic(path: raw_path, code: "E1003",
+            message: raw_msg, help: "")
+        val encoded = check_diagnostic_json(record)
+
+        expect(encoded).to_contain("C:\\\\src\\\\한글\\\\\\\"file\\\".spl")
+        expect(encoded).to_contain("bad\\t\\\"msg\\\"\\r\\n\\b\\f\\u0001 " + uni)
+        expect(encoded).to_contain("\"help\": \"\"")
+
+        val parsed = json_parse(encoded)
+        expect(json_to_string(json_object_get(parsed, "file")) ?? "").to_equal(raw_path)
+        expect(json_to_string(json_object_get(parsed, "help")) ?? "MISSING").to_equal("")
+        expect(json_to_string(json_object_get(parsed, "code")) ?? "").to_equal("E1003")
