@@ -195,8 +195,8 @@ explicitly). SDN unchanged (`baseline_eligible` still written as "true"/"false")
 Still bare: pub fields of the record structs (`TimingSummary`, `TestInfo`, `TrdRunRecord`,
 ...), `ResourceUsage`/`TestDbFileRow` source fields.
 
-Open (found 2026-11-22, not fixed): no spec observes `promote_timing_baseline` returning
-`TestTimingOutcome.Applied`. With an existing timing row and an eligible sample in the
-named cohort it still returned `Refused` in a probe (database.spl `promote_timing_baseline`,
-the `update_row_checked` / row-scan path); cause not isolated. Unblock: a spec that records
-`passed` + eligible cohort samples, then asserts `Applied` and the `baseline_history` row.
+Closed 2026-11-22: `promote_timing_baseline` could never return `Applied` after a single
+observation because `update_test_result` refreshed timing stats (`update_timing`) before
+recording the run (`add_timing_run`): the stats lagged one observation and a first run never
+created its `timing` row. The two steps are swapped (as `record_timing_observation` already
+did) and `test_extended_primitive_types_spec` pins `Applied` (old order: 5/6, fixed: 6/6).
