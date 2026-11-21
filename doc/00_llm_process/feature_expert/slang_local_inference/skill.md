@@ -533,3 +533,16 @@ route env, file exists/read, directory list and process capture through SOSIX
   `SLANG_LIVE=1 SLANG_MODEL_ROOT SLANG_SD_LIB SLANG_SD_STEPS SLANG_SD_SIZE`).
 - Needs ~10 GiB free for the load; run one image at a time.
 - Host access in the runner goes through `host/slang_host` (`host_env`, `host_file_exists`).
+
+## Post-merge review follow-ups (#10682, 2026-11-22)
+- **Video input:**
+  - ffmpeg output is capped at 16 MiB, the hard cap of `rt_process_run_bounded_bytes`; a larger cap never spawns ffmpeg.
+  - One video part per request (400 `too_many_video_parts`). The check runs before expansion.
+  - Server faults return 503 `video_sampling_failed`.
+  - ffmpeg runs with `-protocol_whitelist file`, and the request is refused when no temp directory is set.
+- **Images:**
+  - A single owner behind an atomic busy flag; a concurrent request gets 503 `busy`.
+  - `n` is 1..4 and `steps` 1..50, checked before the model loads.
+- **Tree KV:** the live spec reads `n_ubatch` from `engine_tree_cache_stats`. Measured on Vulkan:
+  - Qwen2.5-1.5B is exact, with roughly half the prefill and 1.6-1.8x faster.
+  - The Gemma branching digest differs on Vulkan only; see `doc/08_tracking/bug/slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md`.
