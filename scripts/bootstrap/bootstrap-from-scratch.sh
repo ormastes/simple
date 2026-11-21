@@ -3,9 +3,9 @@
 # process per file (parse -> HIR -> MIR -> obj), then link. Whole-program is
 # opt-in per invocation only: SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1; two-pass shard
 # route: SIMPLE_FILE_WORKERS=0. Never set these as script-global defaults.
-# Exception (2026-11-13): Stage 3 takes SIMPLE_FILE_WORKERS from the tracked
-# config/bootstrap.sdn key stage3_file_workers (env overrides) while the
-# per-file route is broken (bug #8504); delete the key once it is fixed.
+# Stage 3 takes SIMPLE_FILE_WORKERS from the tracked config/bootstrap.sdn key
+# stage3_file_workers (default 1 = per-file worker pool; explicit env
+# SIMPLE_FILE_WORKERS=0 opts out per invocation).
 # 2026-11-05: the admitted compiler's bootstrap_main.spl now applies the same
 # default to EVERY route -- plain positional native-build, Stage 4 and the
 # coordinator/Stage 3 routes (Windows batch included; it delegates here) --

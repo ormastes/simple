@@ -2441,10 +2441,11 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
     # Bound every shard phase by the published closure (first-object latency,
     # TODO #437): each shard is a process that pays start + load_sources
     # before claiming one unit, so a tiny closure is faster in process.
+    val presealed_mir_link = (env_get("SIMPLE_MIR_SHARD_LINK") ?? "") != ""
     val closure_files = native_build_closure_selected_count_v1()
     val small_closure_max = native_build_small_closure_max_v1(
         env_get("SIMPLE_SHARD_SMALL_CLOSURE_MAX") ?? "")
-    val shard_count = native_build_shard_count_for_closure_v1(
+    val shard_count = if presealed_mir_link: 0 else: native_build_shard_count_for_closure_v1(
         requested_parse_shards, closure_files, small_closure_max)
     log_build_trace("coordinator:shards parse={shard_count} requested={requested_parse_shards} closure_files={closure_files}")
     if shard_count > 0:
@@ -2453,8 +2454,9 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
     # worker; it is cleared once the real worker has returned.
     # Then fill the HIR cache the same way, so the real build's HIR phase is
     # all hits too. Runs AFTER the parse shards: each HIR child's own parse
-    # phase is then pure cache hits.
-    var hir_shard_count = native_build_shard_count_for_closure_v1(
+    # phase is then pure cache hits. Skip when an upstream per-file worker pool
+    # already lowered and sealed SIMPLE_MIR_SHARD_LINK.
+    var hir_shard_count = if presealed_mir_link: 0 else: native_build_shard_count_for_closure_v1(
         native_build_hir_shard_count(args), closure_files, small_closure_max)
     # The HIR worker profile admits only a frozen entry closure. An ordinary
     # warm-up over a bulk (--entry without --entry-closure) build lowers HIR in
@@ -2505,7 +2507,7 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
     val old_mir_export_dir = native_build_env_saved_v1("SIMPLE_MIR_SHARD_EXPORT_DIR")
     val requested_mir_parallel = native_build_mir_shard_parallel(args)
     # A refusal (< 0) stays a refusal; only an admitted fan-out is clamped.
-    val mir_shard_parallel = if requested_mir_parallel < 0: requested_mir_parallel else: native_build_shard_count_for_closure_v1(requested_mir_parallel, closure_files, small_closure_max)
+    val mir_shard_parallel = if presealed_mir_link: 0 elif requested_mir_parallel < 0: requested_mir_parallel else: native_build_shard_count_for_closure_v1(requested_mir_parallel, closure_files, small_closure_max)
     log_build_trace("coordinator:shards mir_parallel={mir_shard_parallel}")
     if mir_shard_parallel < 0:
         native_build_env_restore_v1("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
