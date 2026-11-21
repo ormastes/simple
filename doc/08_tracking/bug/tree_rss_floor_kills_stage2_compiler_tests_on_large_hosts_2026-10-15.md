@@ -378,3 +378,60 @@ However, managed Stage 3 resume recomputes the source snapshot
 (`check-stage3-recovery-authority.shs:353-436`) and will not match. On the
 frozen run-6 tree no env override repairs the argv. The sanctioned path is a
 fresh bootstrap from a tree that has this fix.
+
+## Status (2026-11-21): one worker measured above floor x margin -- floor raised 16 -> 18 GiB
+
+Data point (Linux x86_64, 60.5 GiB RAM, MemTotal 63449060 KiB, release/1.0.0
+`0d8a3269bec`, llvm backend): `bootstrap-from-scratch.sh --full-bootstrap
+--stop-after-stage2` planned stage2-compiler-tests as
+
+    whole-build phase: workers 1 (requested 8, host budget fits 1, timeout scale x4),
+    cap 29360128 KiB = base 4194304 KiB + worker floor 16777216 KiB x 150% x 1,
+    host budget 31724500 KiB (host RAM 63449060 KiB x 50%)
+
+and the single in-process `compiler_cli_build` (4415-module full-CLI closure,
+build-threads=1) was killed by the process-tree watchdog mid-MIR lowering,
+after HIR had finished: `status=rss-cap-exceeded exit_status=88
+max_rss_kib=29360128 peak_rss_kib=29383332 cap_source=phase-policy
+cap_bound=worker-floor`. One worker therefore needed more than floor x margin
+(24 GiB over the 4 GiB base) and was still growing. This agrees with the
+121 GiB aarch64 run-11 MIR workers (24.0 / 25.2 GiB, ~26 GiB per worker,
+`stage2_compiler_cli_build_mir_shard_share_unbounded_2026-11-06.md`).
+
+Per the policy rule ("a worker measured above floor x margin is evidence to
+raise the FLOOR, not to widen the margin"),
+`BOOTSTRAP_TREE_RSS_PHASE_WORKER_FLOOR_KIB` is now 18874368 (18 GiB). Prices
+(base 4 GiB, margin 150%): one worker 32505856 KiB (31 GiB, 27 GiB per
+worker), two workers 60817408 KiB, three 89128960 KiB; the guarded two-worker
+floor (no margin) is 41943040 KiB.
+
+Behaviour changes to know:
+
+- Every two-worker plan (60817408 KiB) is now above the 56 GiB static
+  ceiling, so it is `worker-floor-elevated` and needs the elevated-ceiling
+  admission (3/4 of MemAvailable >= 60817408, i.e. >= ~77.3 GiB available);
+  on the idle 121 GiB aarch64 host (budget 63800400) it is still 2 workers,
+  and the 60 GiB `compiler_cli_build` row cap still applies (62914560 <=
+  budget). Monitor mode clamps a 2-worker plan to the static ceiling.
+- A host that holds 2 at the old price but not the new one runs 1 worker
+  (e.g. 3/4 x 80 GB available = 60000000 KiB).
+- The 60.5 GiB host above no longer fits one worker at the default 50%
+  share (31724500 < 32505856) and takes small-host single-worker mode
+  (cap = min(75% of RAM, 3/4 of MemAvailable), or the temporary
+  available - 4 GiB relaxation when that is larger: e.g. 43500000 KiB with
+  58 GB available, 32505856 KiB `-temp` with 40 GB); with
+  `tree_rss_host_pct: 65` in its host config and 3/4 of MemAvailable >=
+  32505856 KiB the normal one-worker plan (cap 32505856 KiB) applies.
+- On the 121 GiB aarch64 host `tree_rss_host_pct=75` is bound by 3/4 of
+  available (84033264 KiB) and fits 2 workers, no longer 3.
+
+Fixtures: the policy selftest, `tree-rss-cap-policy-test.shs` and
+`test/01_unit/scripts/bootstrap_whole_build_two_worker_floor_test.shs` keep
+each fixture on the branch it names. Hosts that would have changed branch
+were re-sized (busy aarch64 MemAvailable 40 -> 44 GB so it still fits exactly
+one normal worker; tight aarch64 80 -> 82 GB so it still fits 2 workers but not
+the 60 GiB row), and the three-worker pct75 fixtures moved to the 128 GB
+fixture host.
+
+Verification still owed: a real stage2-compiler-tests pass with the 18 GiB
+floor on the 60.5 GiB x86_64 host.
