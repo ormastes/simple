@@ -1553,7 +1553,196 @@ class _InternalElfByteInputs:
                 if loaded.kind != 0: return Ok(loaded)
         Err("internal engine: ELF library '{name}' was not found")
 
-fn internal_link_macho_native(os: text, arch: text, config: NativeLinkConfig,
+fn _darwin_host_os_version() -> text:
+    if file_exists("/usr/bin/sw_vers"):
+        val (out, _, code) = process_run("/usr/bin/sw_vers", ["-productVersion"])
+        if code == 0:
+            val trimmed = out.trim().split("\n")[0].trim()
+            val parts = trimmed.split(".")
+            if parts.len() >= 2:
+                val major = parts[0].to_int()
+                val minor = parts[1].to_int()
+                if major >= 11 and major <= 99 and minor >= 0 and minor <= 99:
+                    return "{major}.{minor}"
+    "14.0"
+
+fn _darwin_signing_identifier_for_output(output: text) -> text:
+    val normalized = output.replace("\\", "/")
+    val slash_parts = normalized.split("/")
+    val raw_leaf = if slash_parts.len() > 0: slash_parts[slash_parts.len() - 1] else: "app"
+    var chars: [text] = []
+    for idx in 0..raw_leaf.byte_len():
+        val b = raw_leaf.byte_at(idx)
+        val ok = (b >= 48u8 and b <= 57u8) or (b >= 65u8 and b <= 90u8) or (b >= 97u8 and b <= 122u8) or b == 45u8 or b == 46u8 or b == 95u8
+        if ok:
+            chars.push(raw_leaf.substring(idx, idx + 1))
+        else:
+            chars.push("_")
+    val clean = chars.join("")
+    if clean == "": "simple.app" else: "simple." + clean
+
+fn _resolve_darwin_framework_tbd(name: text, sdk: text) -> text:
+    if sdk != "":
+        val sdk_tbd = sdk + "/System/Library/Frameworks/" + name + ".framework/" + name + ".tbd"
+        if file_exists(sdk_tbd): return sdk_tbd
+        val sdk_ver_tbd = sdk + "/System/Library/Frameworks/" + name + ".framework/Versions/A/" + name + ".tbd"
+        if file_exists(sdk_ver_tbd): return sdk_ver_tbd
+    val sys_tbd = "/System/Library/Frameworks/" + name + ".framework/" + name + ".tbd"
+    if file_exists(sys_tbd): return sys_tbd
+    ""
+
+fn _adapt_darwin_host_macho_config(config: NativeLinkConfig, output: text) -> NativeLinkConfig:
+    for ef in config.extra_flags:
+        if ef == "-platform_version" or ef.starts_with("-platform_version "):
+            return config
+    var adapted = config
+    adapted.debug = false
+    adapted.strip_output = false
+    adapted.prefer_size_linker = false
+    adapted.retained_symbols = []
+    adapted.allow_duplicate_definitions = true
+    if adapted.runtime_path == "none":
+        adapted.runtime_bundle = ""
+    var sdk = darwin_sdk_path()
+    var lib_paths: [text] = []
+    for p in config.library_paths:
+        if p != "" and not lib_paths.contains(p):
+            lib_paths.push(p)
+    var raw_libs: [text] = []
+    for lib in config.libraries:
+        if lib != "":
+            raw_libs.push(lib)
+    var extra: [text] = ["--macho-hosted-darwin-abi"]
+    var rpaths_seen: [text] = []
+    var frameworks: [text] = []
+    var sign_id = ""
+    var idx = 0
+    while idx < config.extra_flags.len():
+        val flag = config.extra_flags[idx]
+        if (flag == "-isysroot" or flag == "-syslibroot") and idx + 1 < config.extra_flags.len():
+            sdk = config.extra_flags[idx + 1]
+            idx = idx + 2
+        elif flag == "-framework" and idx + 1 < config.extra_flags.len():
+            val fw = config.extra_flags[idx + 1]
+            if fw != "" and not frameworks.contains(fw):
+                frameworks.push(fw)
+            idx = idx + 2
+        elif flag == "-rpath" and idx + 1 < config.extra_flags.len():
+            val rp = config.extra_flags[idx + 1]
+            if rp != "" and not rpaths_seen.contains(rp):
+                rpaths_seen.push(rp)
+                extra.push("-rpath")
+                extra.push(rp)
+            idx = idx + 2
+        elif flag.starts_with("-Wl,"):
+            val wl_parts = flag.substring(4).split(",")
+            var wi = 0
+            while wi < wl_parts.len():
+                val wp = wl_parts[wi]
+                if wp == "":
+                    wi = wi + 1
+                elif wp == "-rpath" and wi + 1 < wl_parts.len():
+                    val rp = wl_parts[wi + 1]
+                    if rp != "" and not rpaths_seen.contains(rp):
+                        rpaths_seen.push(rp)
+                        extra.push("-rpath")
+                        extra.push(rp)
+                    wi = wi + 2
+                elif wp == "-framework" and wi + 1 < wl_parts.len():
+                    val fw = wl_parts[wi + 1]
+                    if fw != "" and not frameworks.contains(fw):
+                        frameworks.push(fw)
+                    wi = wi + 2
+                elif wp == "-e" and wi + 1 < wl_parts.len():
+                    extra.push("-e")
+                    extra.push(wl_parts[wi + 1])
+                    wi = wi + 2
+                elif wp.starts_with("-L") and wp.byte_len() > 2:
+                    val lp = wp.substring(2)
+                    if not lib_paths.contains(lp):
+                        lib_paths.push(lp)
+                    wi = wi + 1
+                elif wp.starts_with("-l") and wp.byte_len() > 2:
+                    raw_libs.push(wp.substring(2))
+                    wi = wi + 1
+                elif wp == "-dead_strip" or wp == "-export_dynamic" or wp == "-S" or wp == "-x" or wp == "-pie" or wp == "-no_pie" or wp == "-search_paths_first" or wp == "-headerpad_max_install_names":
+                    wi = wi + 1
+                else:
+                    extra.push("-Wl," + wp)
+                    wi = wi + 1
+            idx = idx + 1
+        elif flag == "-L" and idx + 1 < config.extra_flags.len():
+            val lp = config.extra_flags[idx + 1]
+            if lp != "" and not lib_paths.contains(lp):
+                lib_paths.push(lp)
+            idx = idx + 2
+        elif flag.starts_with("-L") and flag.byte_len() > 2:
+            val lp = flag.substring(2)
+            if not lib_paths.contains(lp):
+                lib_paths.push(lp)
+            idx = idx + 1
+        elif flag == "-l" and idx + 1 < config.extra_flags.len():
+            raw_libs.push(config.extra_flags[idx + 1])
+            idx = idx + 2
+        elif flag.starts_with("-l") and flag.byte_len() > 2:
+            raw_libs.push(flag.substring(2))
+            idx = idx + 1
+        elif (flag == "-e" or flag == "--macho-max-image-bytes" or flag == "-client_name") and idx + 1 < config.extra_flags.len():
+            extra.push(flag)
+            extra.push(config.extra_flags[idx + 1])
+            idx = idx + 2
+        elif flag == "--macho-signing-identifier" and idx + 1 < config.extra_flags.len():
+            sign_id = config.extra_flags[idx + 1]
+            idx = idx + 2
+        elif flag == "-dead_strip" or flag == "-export_dynamic" or flag == "-S" or flag == "-x" or flag == "-g" or flag == "-pie" or flag == "-search_paths_first" or flag == "-headerpad_max_install_names":
+            idx = idx + 1
+        else:
+            extra.push(flag)
+            idx = idx + 1
+    for fw in frameworks:
+        val fw_tbd = _resolve_darwin_framework_tbd(fw, sdk)
+        if fw_tbd != "":
+            raw_libs.push(fw_tbd)
+        else:
+            extra.push("-framework")
+            extra.push(fw)
+    if sdk != "":
+        val sdk_usr_lib = sdk + "/usr/lib"
+        if not lib_paths.contains(sdk_usr_lib):
+            lib_paths.push(sdk_usr_lib)
+        val sdk_sys_lib = sdk + "/usr/lib/system"
+        if not lib_paths.contains(sdk_sys_lib):
+            lib_paths.push(sdk_sys_lib)
+        extra.push("-syslibroot")
+        extra.push(sdk)
+    if file_exists("/opt/homebrew/lib") and not lib_paths.contains("/opt/homebrew/lib"):
+        lib_paths.push("/opt/homebrew/lib")
+    var libs: [text] = []
+    var has_system = false
+    for lib in raw_libs:
+        val clean_lib = if lib.starts_with("-l"): lib.substring(2) else: lib
+        if clean_lib == "System" or clean_lib == "c" or clean_lib == "m" or clean_lib == "pthread" or clean_lib == "dl":
+            if not has_system:
+                has_system = true
+                libs.push("System")
+        elif clean_lib != "" and not libs.contains(clean_lib):
+            libs.push(clean_lib)
+    if not has_system:
+        libs.push("System")
+    val host_ver = _darwin_host_os_version()
+    extra.push("-platform_version")
+    extra.push("macos")
+    extra.push(host_ver)
+    extra.push(host_ver)
+    val final_sign_id = if sign_id != "": sign_id else: _darwin_signing_identifier_for_output(output)
+    extra.push("--macho-signing-identifier")
+    extra.push(final_sign_id)
+    adapted.libraries = libs
+    adapted.library_paths = lib_paths
+    adapted.extra_flags = extra
+    adapted
+
+pub fn internal_link_macho_native(os: text, arch: text, config: NativeLinkConfig,
         object_files: [text], output: text) -> Result<text, text>:
     @when(os = "macos" or feature = "macho"):
     if native_tool_strict_requested_v1(): return Err("managed native admission requires the admitted external hosted linker")
@@ -1562,8 +1751,10 @@ fn internal_link_macho_native(os: text, arch: text, config: NativeLinkConfig,
     val actual_arch = if host_arch() == "arm64": "aarch64" elif host_arch() == "amd64": "x86_64" else: host_arch()
     if (os != "macos" and os != "darwin") or (host != "macos" and host != "darwin") or selected_arch != actual_arch:
         return Err("internal engine: unsupported Mach-O cross-host link")
+    val effective_config = _adapt_darwin_host_macho_config(config, output)
     # Finish pure configuration checks before runtime discovery or input reads.
-    val plan = native_macho_plan_v1(selected_arch, config, output)?
+    val plan = native_macho_plan_v1(selected_arch, effective_config, output)?
+    val config = effective_config
     if config.runtime_bundle != "" and config.runtime_bundle != "auto" and not native_runtime_bundle_is_known(config.runtime_bundle):
         return Err("internal engine: unsupported runtime bundle '{config.runtime_bundle}'")
     val selection_error = native_runtime_provider_selection_error_for_config(config)
@@ -2602,7 +2793,7 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
 pub fn windows_link_flavor_for_config(config: NativeLinkConfig) -> text:
     """"msvc" or "gnu" for this link request, decided from the TARGET first
     (config.target_triple / config.linker_abi, then the driver's --target),
-    then the SIMPLE_LINKER_FLAVOR / SIMPLE_WINDOWS_ABI overrides, else msvc.
+    then the SIMPLE_LINKER_FLAVOR / SIMPLE_WINDOWS_ABI overrides, else gnu.
     Never from MSYSTEM: Git Bash sets it for every shell, which used to route
     MSVC-ABI runtime objects (and `x86_64-pc-windows-msvc` links) through
     the MinGW arm."""

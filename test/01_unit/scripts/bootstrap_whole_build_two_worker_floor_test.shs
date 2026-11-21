@@ -45,9 +45,9 @@ floor() {
     printf '%s:%s|%s' "$bootstrap_tree_rss_floor_workers" "$bootstrap_tree_rss_floor_cap_kib" \
         "$bootstrap_tree_rss_floor_note"
 }
-cap2=$((4194304 + 2 * 16777216))   # base + 2 x worker floor (no runaway margin)
+cap2=$((4194304 + 2 * 18874368))   # base + 2 x worker floor (no runaway margin)
 
-# 1. Budget fits 1, guard enforcing, cap2 37748736 <= 70000000 - 25165824.
+# 1. Budget fits 1, guard enforcing, cap2 41943040 <= 70000000 - 25165824.
 out=$(floor 8 1 0 enforce 70000000 25165824 50331648)
 expect 'fits-1 enforcing headroom -> 2 workers' "2:$cap2" "${out%%|*}"
 expect_has 'applied note' 'build-threads floor applied:' "$out"
@@ -117,19 +117,22 @@ plan_enforce() (
         "$bootstrap_tree_rss_plan_cli_row_cap_kib" "$bootstrap_tree_rss_plan_summary"
 )
 # 121 GiB host with 66 GiB available: budget 3/4 x 70000000 = 52500000 fits 1
-# at 25165824; 70000000 - 25165824 holds cap2 -> 2 workers at cap2, ADMITTED
+# at 28311552; 70000000 - 25165824 holds cap2 -> 2 workers at cap2, ADMITTED
 # (no compiler_cli_build 60 GiB row elevation, no elevated ceiling).
 out=$(plan_enforce 127600812 70000000 8)
 expect 'plan enforce floor applied' "2:$cap2:0:two-worker-guarded-floor:$cap2" "${out%%|*}"
 expect_has 'plan summary keeps the fit' 'workers 2 (requested 8, host budget fits 1' "$out"
 expect_has 'plan summary applied line' 'build-threads floor applied:' "$out"
-# Run 20 numbers: floor not applied, one worker exactly as before, reason logged.
-out=$(plan_enforce 127600812 41569324 8)
-expect 'plan enforce run-20 unchanged' '1:29360128:0:worker-floor:29360128' "${out%%|*}"
+# Run 20 shape (busy host; at the 18 GiB floor run 20's own 41569324 KiB
+# available is below one worker and takes small-host mode, so 44000000):
+# budget fits 1, headroom 44000000 - 25165824 < cap2 -> floor not applied,
+# one worker exactly as before, reason logged.
+out=$(plan_enforce 127600812 44000000 8)
+expect 'plan enforce run-20 unchanged' '1:32505856:0:worker-floor:32505856' "${out%%|*}"
 expect_has 'plan run-20 reason line' 'build-threads floor not applied:' "$out"
 # Idle host, budget fits 2: unchanged plan, no floor text.
 out=$(plan_enforce 127600812 112044352 8)
-expect 'plan enforce fits 2 unchanged' '2:54525952:54525952:worker-floor-elevated:62914560' "${out%%|*}"
+expect 'plan enforce fits 2 unchanged' '2:60817408:60817408:worker-floor-elevated:62914560' "${out%%|*}"
 expect_lacks 'plan fits 2 has no floor text' 'build-threads floor' "$out"
 # Export: 2 workers, the floor cap, no elevated ceiling, no 60 GiB row, and
 # MIR pinned to one worker at the run-11 measured peak (reviewer finding:
@@ -154,8 +157,8 @@ expect 'export floor keeps a caller MIR estimate' "2:$cap2:none:two-worker-guard
     "$(export_enforce 70000000 'SIMPLE_MIR_SHARD_WORKER_KB=30000000; export SIMPLE_MIR_SHARD_WORKER_KB')"
 # (Budget fits 2 is pinned at the plan level above: its export re-admits an
 # elevated ceiling against the REAL /proc/meminfo, so it is not deterministic.)
-# Run 20: one worker as before, MIR untouched.
-expect 'export run-20 unchanged' '1:29360128:none:worker-floor:none:unset' "$(export_enforce 41569324)"
+# Run 20 shape (44000000 available, see above): one worker as before, MIR untouched.
+expect 'export run-20 unchanged' '1:32505856:none:worker-floor:none:unset' "$(export_enforce 44000000)"
 # A floored export followed by an unfloored one withdraws its own MIR pin.
 out=$(
     bootstrap_tree_rss_probe_host() {
@@ -166,7 +169,7 @@ out=$(
     SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
     ee_avail=70000000; bootstrap_tree_rss_whole_build_export 8 '' || exit 1
     unset SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB
-    ee_avail=41569324; bootstrap_tree_rss_whole_build_export 8 '' || exit 1
+    ee_avail=44000000; bootstrap_tree_rss_whole_build_export 8 '' || exit 1
     printf '%s:%s' "$BOOTSTRAP_VERIFY_BUILD_THREADS" "${SIMPLE_MIR_SHARD_WORKER_KB:-unset}"
 )
 expect 'export withdraws its own MIR pin' '1:unset' "$out"
@@ -186,9 +189,9 @@ out=$(
     sh "$root/scripts/bootstrap/phase-c-tool-row-exec.shs" sh -c 'printf "%s" "${SIMPLE_MIR_SHARD_WORKER_KB:-dropped}"'
 )
 expect 'tool row child sees the MIR pin' 26424115 "$out"
-# Monitor-mode fixture (the ordinary selftest path): 40 GB available fits 1,
+# Monitor-mode fixture (the ordinary selftest path): 44 GB available fits 1,
 # floor not applied and said so.
-printf 'MemTotal:       127600812 kB\nMemFree:        30000000 kB\nMemAvailable:    40000000 kB\n' >"$scratch/busy"
+printf 'MemTotal:       127600812 kB\nMemFree:        30000000 kB\nMemAvailable:    44000000 kB\n' >"$scratch/busy"
 out=$(SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$scratch/busy" \
     BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1 sh "$policy" --whole-build-plan 8 '')
 expect_has 'monitor plan one worker' 'workers=1' "$out"

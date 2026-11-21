@@ -14,12 +14,39 @@ struct MachOLayout:
     addresses: {text: i64}
     common_addresses: {text: i64}
     data_offset: i64
+    data_file_end: i64 = 0
+    got_offset: i64 = 0
+    mod_init_offset: i64 = 0
+    mod_init_size: i64 = 0
+    mod_init_align: i64 = 0
     size: i64
+    has_local_tls: bool = false
+    tls_vars_offset: i64 = 0
+    tls_vars_size: i64 = 0
+    tls_vars_align: i64 = 0
+    tls_data_offset: i64 = 0
+    tls_data_size: i64 = 0
+    tls_data_align: i64 = 0
+    tls_bss_offset: i64 = 0
+    tls_bss_size: i64 = 0
+    tls_bss_align: i64 = 0
+    tls_template_address: i64 = 0
 
 fn macho_align(value: i64, alignment: i64) -> i64:
     ((value + alignment - 1) / alignment) * alignment
 
-fn macho_layout(inputs: [MachOInput], limit: i64, hosted_text_reserve: i64 = 0) -> Result<MachOLayout, text>:
+fn macho_section_ignored(segname: text, sectname: text, allow_darwin_abi: bool) -> bool:
+    if segname == "__DWARF":
+        return true
+    if allow_darwin_abi:
+        if segname == "__LD" or segname == "__LLVM":
+            return true
+        if sectname == "__eh_frame" or sectname == "__compact_unwind" or sectname == "__gcc_except_tab":
+            return true
+    false
+
+fn macho_layout(inputs: [MachOInput], limit: i64, hosted_text_reserve: i64 = 0,
+        allow_darwin_abi: bool = false, hosted_got_bytes: i64 = 0) -> Result<MachOLayout, text>:
     if hosted_text_reserve < 0 or hosted_text_reserve > limit or hosted_text_reserve % 0x4000 != 0:
         return Err("invalid hosted Mach-O text reservation")
     var placements: [MachOPlacement] = []
@@ -27,41 +54,155 @@ fn macho_layout(inputs: [MachOInput], limit: i64, hosted_text_reserve: i64 = 0) 
     var addresses: {text: i64} = {}
     var cursor: i64 = 0x4000
     var data_offset: i64 = 0
-    var group: i64 = 0
-    while group < 2:
-        if group == 1:
+    var data_file_end: i64 = 0
+    var got_offset: i64 = 0
+    var mod_init_offset: i64 = 0
+    var mod_init_size: i64 = 0
+    var mod_init_align: i64 = 0
+    var mod_init_started = false
+    var has_local_tls = false
+    var tls_vars_offset: i64 = 0
+    var tls_vars_size: i64 = 0
+    var tls_vars_align: i64 = 0
+    var tls_vars_started = false
+    var tls_data_offset: i64 = 0
+    var tls_data_size: i64 = 0
+    var tls_data_align: i64 = 0
+    var tls_data_started = false
+    var tls_bss_offset: i64 = 0
+    var tls_bss_size: i64 = 0
+    var tls_bss_align: i64 = 0
+    var tls_bss_started = false
+    var max_tls_template_align: i64 = 0
+    var has_tls_template = false
+    if allow_darwin_abi:
+        for input in inputs:
+            for segment in input.object.segments:
+                for section in segment.sections:
+                    if not macho_section_ignored(section.segname, section.sectname, true):
+                        val sk = section.flags & 255
+                        if (sk == 17 or sk == 18) and section.size > 0:
+                            if section.align_val < 0 or section.align_val > 24:
+                                return Err("{input.name}: unsupported Mach-O section alignment")
+                            has_tls_template = true
+                            if section.align_val > max_tls_template_align:
+                                max_tls_template_align = section.align_val
+    var pass_index: i64 = 0
+    val pass_count: i64 = if allow_darwin_abi: 7 else: 2
+    while pass_index < pass_count:
+        if pass_index == 1:
             cursor = macho_align(cursor, 0x4000)
             if hosted_text_reserve > limit - cursor: return Err("Mach-O stub storage exceeds byte limit")
             cursor = cursor + hosted_text_reserve
             data_offset = cursor
+        elif allow_darwin_abi and pass_index == 2:
+            got_offset = macho_align(cursor, 8)
+            if got_offset > limit or hosted_got_bytes > limit - got_offset:
+                return Err("hosted GOT exceeds image byte budget")
+            cursor = got_offset + hosted_got_bytes
+        elif allow_darwin_abi and pass_index == 4 and has_tls_template:
+            cursor = macho_align(cursor, 1 << max_tls_template_align)
+            if cursor > limit:
+                return Err("Mach-O image exceeds requested byte limit {limit}")
+        elif allow_darwin_abi and pass_index == 5:
+            data_file_end = cursor
         var owner: i64 = 0
         for input in inputs:
             var ordinal: i64 = 1
             for segment in input.object.segments:
                 for section in segment.sections:
-                    val kind = section.flags & 255
-                    val writable = section.segname != "__TEXT"
-                    if section.segname != "__DWARF" and ((group == 1) == writable):
-                        if section.sectname == "__eh_frame" or section.sectname == "__compact_unwind":
-                            return Err("{input.name}: unsupported static Mach-O unwind metadata")
-                        if kind != 0 and kind != 1 and kind != 2 and kind != 3 and kind != 4 and kind != 12 and kind != 14:
-                            return Err("{input.name}: unsupported Mach-O section type {kind} (dyld/TLS/init requires loader support)")
-                        if section.align_val < 0 or section.align_val > 24:
-                            return Err("{input.name}: unsupported Mach-O section alignment")
-                        val alignment = 1 << section.align_val
-                        cursor = macho_align(cursor, alignment)
-                        if section.size < 0 or cursor > limit or section.size > limit - cursor:
-                            return Err("Mach-O image exceeds requested byte limit {limit}")
-                        val key = "{owner}:{ordinal}"
-                        offsets[key] = cursor
-                        addresses[key] = 0x100000000 + cursor
-                        placements = placements.push(MachOPlacement(owner: owner, ordinal: ordinal,
-                            source_offset: section.offset, offset: cursor, size: section.size,
-                            zerofill: kind == 1 or kind == 12))
-                        cursor = cursor + section.size
+                    if not macho_section_ignored(section.segname, section.sectname, allow_darwin_abi):
+                        val kind = section.flags & 255
+                        val writable = section.segname != "__TEXT"
+                        val is_tls = kind == 17 or kind == 18 or kind == 19
+                        val is_zf = kind == 1 or kind == 12 or kind == 18
+                        var selected = false
+                        if not allow_darwin_abi:
+                            selected = (pass_index == 1) == writable
+                        elif pass_index == 0:
+                            selected = not writable
+                        elif pass_index == 1:
+                            selected = writable and not is_tls and not is_zf and kind != 9
+                        elif pass_index == 2:
+                            selected = writable and kind == 9
+                        elif pass_index == 3:
+                            selected = writable and kind == 19
+                        elif pass_index == 4:
+                            selected = writable and kind == 17
+                        elif pass_index == 5:
+                            selected = writable and kind == 18
+                        else:
+                            selected = writable and not is_tls and is_zf
+                        if selected:
+                            if not allow_darwin_abi:
+                                if section.sectname == "__eh_frame" or section.sectname == "__compact_unwind":
+                                    return Err("{input.name}: unsupported static Mach-O unwind metadata")
+                                if kind != 0 and kind != 1 and kind != 2 and kind != 3 and kind != 4 and kind != 12 and kind != 14:
+                                    return Err("{input.name}: unsupported Mach-O section type {kind} (dyld/TLS/init requires loader support)")
+                            else:
+                                if kind != 0 and kind != 1 and kind != 2 and kind != 3 and kind != 4 and kind != 5 and
+                                        kind != 6 and kind != 9 and kind != 11 and kind != 12 and kind != 14 and
+                                        kind != 17 and kind != 18 and kind != 19:
+                                    return Err("{input.name}: unsupported Mach-O section type {kind} (dyld/TLS/init requires loader support)")
+                            if section.align_val < 0 or section.align_val > 24:
+                                return Err("{input.name}: unsupported Mach-O section alignment")
+                            val alignment = 1 << section.align_val
+                            cursor = macho_align(cursor, alignment)
+                            if section.size < 0 or cursor > limit or section.size > limit - cursor:
+                                return Err("Mach-O image exceeds requested byte limit {limit}")
+                            if allow_darwin_abi and pass_index == 2 and section.size > 0:
+                                if not mod_init_started:
+                                    mod_init_offset = cursor
+                                    mod_init_started = true
+                                if section.align_val > mod_init_align:
+                                    mod_init_align = section.align_val
+                            elif allow_darwin_abi and pass_index == 3 and section.size > 0:
+                                if not tls_vars_started:
+                                    tls_vars_offset = cursor
+                                    tls_vars_started = true
+                                if section.align_val > tls_vars_align:
+                                    tls_vars_align = section.align_val
+                            elif allow_darwin_abi and pass_index == 4 and section.size > 0:
+                                if not tls_data_started:
+                                    tls_data_offset = cursor
+                                    tls_data_started = true
+                                if section.align_val > tls_data_align:
+                                    tls_data_align = section.align_val
+                            elif allow_darwin_abi and pass_index == 5 and section.size > 0:
+                                if not tls_bss_started:
+                                    tls_bss_offset = cursor
+                                    tls_bss_started = true
+                                if section.align_val > tls_bss_align:
+                                    tls_bss_align = section.align_val
+                            val key = "{owner}:{ordinal}"
+                            offsets[key] = cursor
+                            addresses[key] = 0x100000000 + cursor
+                            placements.push(MachOPlacement(owner: owner, ordinal: ordinal,
+                                source_offset: section.offset, offset: cursor, size: section.size,
+                                zerofill: is_zf))
+                            cursor = cursor + section.size
+                            if allow_darwin_abi and pass_index == 2 and mod_init_started:
+                                mod_init_size = cursor - mod_init_offset
+                            elif allow_darwin_abi and pass_index == 3 and tls_vars_started:
+                                tls_vars_size = cursor - tls_vars_offset
+                            elif allow_darwin_abi and pass_index == 4 and tls_data_started:
+                                tls_data_size = cursor - tls_data_offset
+                            elif allow_darwin_abi and pass_index == 5 and tls_bss_started:
+                                tls_bss_size = cursor - tls_bss_offset
                     ordinal = ordinal + 1
             owner = owner + 1
-        group = group + 1
+        pass_index = pass_index + 1
+    var tls_template_address: i64 = 0
+    if tls_vars_size > 0 or tls_data_size > 0 or tls_bss_size > 0:
+        has_local_tls = true
+        if max_tls_template_align > tls_data_align:
+            tls_data_align = max_tls_template_align
+        if tls_data_size > 0:
+            tls_template_address = 0x100000000 + tls_data_offset
+        elif tls_bss_size > 0:
+            tls_template_address = 0x100000000 + tls_bss_offset
+        else:
+            tls_template_address = 0x100000000 + tls_vars_offset
     # Tentative definitions coalesce by maximum size/alignment unless a real
     # definition exists. Allocate once, in first-input order, in zeroed DATA.
     var defined: {text: bool} = {}
@@ -80,7 +221,7 @@ fn macho_layout(inputs: [MachOInput], limit: i64, hosted_text_reserve: i64 = 0) 
                 if not common_sizes.has(symbol.name):
                     common_sizes[symbol.name] = symbol.n_value
                     common_alignments[symbol.name] = alignment
-                    common_names = common_names.push(symbol.name)
+                    common_names.push(symbol.name)
                 else:
                     if common_sizes[symbol.name] < symbol.n_value: common_sizes[symbol.name] = symbol.n_value
                     if common_alignments[symbol.name] < alignment: common_alignments[symbol.name] = alignment
@@ -91,24 +232,44 @@ fn macho_layout(inputs: [MachOInput], limit: i64, hosted_text_reserve: i64 = 0) 
             return Err("Mach-O common storage exceeds requested byte limit {limit}")
         common_addresses[name] = 0x100000000 + cursor
         cursor = cursor + common_sizes[name]
-    if cursor > limit: return Err("Mach-O image exceeds requested byte limit {limit}")
+    if not allow_darwin_abi:
+        data_file_end = cursor
     Ok(MachOLayout(placements: placements, offsets: offsets, addresses: addresses,
-        common_addresses: common_addresses, data_offset: data_offset, size: cursor))
+        common_addresses: common_addresses, data_offset: data_offset,
+        data_file_end: data_file_end, got_offset: got_offset,
+        mod_init_offset: mod_init_offset, mod_init_size: mod_init_size, mod_init_align: mod_init_align,
+        size: cursor, has_local_tls: has_local_tls,
+        tls_vars_offset: tls_vars_offset, tls_vars_size: tls_vars_size, tls_vars_align: tls_vars_align,
+        tls_data_offset: tls_data_offset, tls_data_size: tls_data_size, tls_data_align: tls_data_align,
+        tls_bss_offset: tls_bss_offset, tls_bss_size: tls_bss_size, tls_bss_align: tls_bss_align,
+        tls_template_address: tls_template_address))
 
-fn macho_segment(bytes: [u8], at: i64, name: text, address: i64,
-        memory: i64, offset: i64, size: i64, protection: i64) -> [u8]:
-    var out = macho_put(bytes, at, 4, 0x19)
-    out = macho_put(out, at + 4, 4, 72)
-    var index: i64 = 0
-    while index < name.byte_len():
-        out[at + 8 + index] = name.byte_at(index) as u8
-        index = index + 1
-    out = macho_put(out, at + 24, 8, address)
-    out = macho_put(out, at + 32, 8, memory)
-    out = macho_put(out, at + 40, 8, offset)
-    out = macho_put(out, at + 48, 8, size)
-    out = macho_put(out, at + 56, 4, protection)
-    macho_put(out, at + 60, 4, protection)
+fn macho_segment(bytes: [u8], at: i64, name: text, vmaddr: i64, vmsize: i64,
+        fileoff: i64, filesize: i64, prot: i64, nsects: i64 = 0, cmdsize: i64 = 72) -> [u8]:
+    var out = bytes
+    out = macho_put(out, at, 4, 0x19)
+    out = macho_put(out, at + 4, 4, cmdsize)
+    for index in 0..name.byte_len(): out[at + 8 + index] = name.byte_at(index) as u8
+    out = macho_put(out, at + 24, 8, vmaddr)
+    out = macho_put(out, at + 32, 8, vmsize)
+    out = macho_put(out, at + 40, 8, fileoff)
+    out = macho_put(out, at + 48, 8, filesize)
+    out = macho_put(out, at + 56, 4, prot)
+    out = macho_put(out, at + 60, 4, prot)
+    out = macho_put(out, at + 64, 4, nsects)
+    out
+
+fn macho_section_header_64(bytes: [u8], at: i64, sectname: text, segname: text,
+        addr: i64, size: i64, offset: i64, align_val: i64, flags: i64) -> [u8]:
+    var out = bytes
+    for index in 0..sectname.byte_len(): out[at + index] = sectname.byte_at(index) as u8
+    for index in 0..segname.byte_len(): out[at + 16 + index] = segname.byte_at(index) as u8
+    out = macho_put(out, at + 32, 8, addr)
+    out = macho_put(out, at + 40, 8, size)
+    out = macho_put(out, at + 48, 4, offset)
+    out = macho_put(out, at + 52, 4, align_val)
+    out = macho_put(out, at + 64, 4, flags)
+    out
 
 fn macho_executable_header(bytes: [u8], layout: MachOLayout, cpu: i64, entry: i64) -> [u8]:
     val arm = cpu == 0x0100000c
@@ -132,4 +293,4 @@ fn macho_executable_header(bytes: [u8], layout: MachOLayout, cpu: i64, entry: i6
     out = macho_put(out, 260, 4, if arm: 68 else: 42)
     macho_put(out, if arm: 520 else: 392, 8, entry)
 
-export MachOPlacement, MachOLayout, macho_align, macho_layout, macho_executable_header, macho_segment
+export MachOPlacement, MachOLayout, macho_align, macho_section_ignored, macho_layout, macho_executable_header, macho_segment, macho_section_header_64

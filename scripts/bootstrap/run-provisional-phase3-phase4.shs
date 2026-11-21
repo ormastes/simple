@@ -78,7 +78,10 @@ case "$host" in
     set -- $(powershell.exe -NoProfile -Command '$o=Get-CimInstance Win32_OperatingSystem; "{0} {1} {2}" -f ([int64]$o.FreePhysicalMemory*1024),([int64]$o.FreeVirtualMemory*1024),([int64]$o.TotalVisibleMemorySize*1024)' | tr -d '\r') \
       || die "Windows memory probe failed" ;;
   linux)
-    set -- $(awk '$1=="MemTotal:" {t=$2*1024} $1=="MemAvailable:" {p=$2*1024} $1=="CommitLimit:" {l=$2*1024} $1=="Committed_AS:" {c=$2*1024} END {if(t>0&&p>0&&l>c) printf "%.0f %.0f %.0f\n",p,l-c,t; else exit 1}' /proc/meminfo) \
+    # CommitLimit binds only under strict overcommit (vm.overcommit_memory=2);
+    # in heuristic/always modes the kernel ignores it, so physical availability rules.
+    overcommit_mode=$(cat /proc/sys/vm/overcommit_memory 2>/dev/null || echo 2)
+    set -- $(awk -v strict="$overcommit_mode" '$1=="MemTotal:" {t=$2*1024} $1=="MemAvailable:" {p=$2*1024} $1=="CommitLimit:" {l=$2*1024} $1=="Committed_AS:" {c=$2*1024} END {h=(strict==2)?l-c:p; if(t>0&&p>0&&h>0) printf "%.0f %.0f %.0f\n",p,h,t; else exit 1}' /proc/meminfo) \
       || die "Linux memory probe failed" ;;
 esac
 [ "$#" -eq 3 ] || die "host memory observation incomplete"

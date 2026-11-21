@@ -4367,6 +4367,11 @@ mod linker_tests {
             generated_c_target_flag(mingw, "clang", None).as_deref(),
             Some("--target=x86_64-w64-windows-gnu")
         );
+        let mingw32 = Target::parse("i686-pc-windows-gnu").unwrap();
+        assert_eq!(
+            generated_c_target_flag(mingw32, "clang", None).as_deref(),
+            Some("--target=i686-w64-windows-gnu")
+        );
 
         let linux = Target::parse("x86_64-unknown-linux-gnu").unwrap();
         assert_eq!(

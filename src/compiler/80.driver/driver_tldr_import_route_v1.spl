@@ -162,6 +162,39 @@ pub fn tldr_route_import_specs_v1(source: text, include_export_from: bool = fals
         if t.starts_with("use "): rest = t.substring(4)
         elif t.starts_with("export use "): rest = t.substring(11)
         elif t.starts_with("pub use "): rest = t.substring(8)
+        # `import mod.path` is a `use` spelling (env/mod.spl); dropping it left
+        # the providers unplanned -> CLOSURE-INCOMPLETE (bug ..._2026-11-19 update h).
+        elif t.starts_with("import "): rest = t.substring(7)
+        elif include_export_from and t.starts_with("export ") and not t.contains(" from ") and
+                not t.starts_with("export use "):
+            # `export variables.env_get, paths.split_path` (env/__init__.spl):
+            # a qualified sibling re-export is an import edge of the facade's
+            # package. Emitted as ".qualifier"; unit_tldr_plan_v1 resolves it
+            # against the owner's directory (bug ..._2026-11-19 update h).
+            var body = t.substring(7)
+            val qhash = body.index_of("#")
+            if qhash >= 0: body = body.substring(0, qhash)
+            for item in body.split(","):
+                var qualified = item.trim()
+                val q_as = qualified.index_of(" as ")
+                if q_as > 0: qualified = qualified.substring(0, q_as).trim()
+                val dot = qualified.last_index_of(".")
+                if dot > 0 and _tr_is_dotted_path_v1(qualified):
+                    val qualifier = "." + qualified.substring(0, dot)
+                    val member = qualified.substring(dot + 1)
+                    var found = -1
+                    var oi = 0
+                    while oi < out.len():
+                        if out[oi].0 == qualifier: found = oi
+                        oi = oi + 1
+                    if found < 0:
+                        out.push((qualifier, [member]))
+                    else:
+                        var members = out[found].1
+                        if not members.contains(member): members.push(member)
+                        out[found] = (qualifier, members)
+            i = i + 1
+            continue
         elif include_export_from and t.starts_with("export ") and t.contains(" from "):
             # `export a, b from mod.path`: an explicit-origin re-export is an
             # import edge too (src/lib/io_runtime.spl). Without it the unit

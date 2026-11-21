@@ -16,6 +16,7 @@ Audience: compiler engineers maintaining the per-file driver.
 
 use std.spec.*
 use compiler.driver.driver_tldr_import_route_v1.{tldr_route_import_specs_v1}
+use compiler.driver.driver_unit_tldr_imports_v1.{unit_tldr_relative_module_id_v1}
 
 fn trse_bases(source: text) -> [text]:
     var out: [text] = []
@@ -69,3 +70,29 @@ describe "TLDR route import scan":
         val specs = tldr_route_import_specs_v1("use send_eoi(vector) instead.\nuse a.b (x\nuse c.d\n")
         expect(specs[0].0 == "send_eoi").to_equal(false)
         expect(specs[specs.len() - 1].0).to_equal("c.d")
+    it "follows `import mod.path` lines like `use`":
+        # env/mod.spl: `import std.env.types` ... the unit plan never summarized
+        # the providers -> FILE-WORKER-E-CLOSURE-INCOMPLETE (bug ..._2026-11-19 update h).
+        expect(trse_bases("import std.env.types\nimport std.env.paths as p\n")).to_equal(["std.env.types", "std.env.paths"])
+        expect(trse_bases("val important = 1\n").len()).to_equal(0)
+
+    it "follows qualified sibling re-exports `export pkg.name, ...`":
+        # env/__init__.spl: `export variables.env_get, paths.split_path`
+        val specs = tldr_route_import_specs_v1("export variables.env_get, variables.env_set, paths.split_path\nexport a, b\nexport ()\n", true)
+        expect(specs.len()).to_equal(2)
+        expect(specs[0].0).to_equal(".variables")
+        expect(specs[0].1).to_equal(["env_get", "env_set"])
+        expect(specs[1].0).to_equal(".paths")
+        expect(specs[1].1).to_equal(["split_path"])
+
+    it "keeps qualified exports out of frozen-route callers":
+        expect(tldr_route_import_specs_v1("export variables.env_get\n").len()).to_equal(0)
+
+describe "unit plan relative module ids":
+    it "resolves a sibling id against the owner's directory to a logical id":
+        val owner = "src/lib/nogc_async_mut/env/__init__.spl"
+        val variables = unit_tldr_relative_module_id_v1(".variables", owner)
+        expect(variables.ends_with("env.variables")).to_equal(true)
+        expect(unit_tldr_relative_module_id_v1(".variables", "src/lib/nogc_async_mut/env/mod.spl")).to_equal(variables)
+        expect(unit_tldr_relative_module_id_v1(".no_such_sibling_zz", owner)).to_equal("")
+        expect(unit_tldr_relative_module_id_v1("std.env", owner)).to_equal("std.env")

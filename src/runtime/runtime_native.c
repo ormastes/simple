@@ -19050,42 +19050,98 @@ static int64_t* rt_process_result_to_tuple(SplArray* result) {
     return tuple;
 }
 
+/* Process text arguments are copied by their byte LENGTH, never read up to a
+ * NUL. In the mixed link of a seed-built compiler this file is a supplement
+ * behind the Rust simple_runtime: rt_string_len / rt_string_data /
+ * rt_interp_cstr / rt_array_get_text resolve to the Rust owner, whose
+ * alloc_runtime_string sizes header + len with NO trailing NUL
+ * (value/sffi/package.rs). Reading rt_interp_cstr as a C string ran into heap
+ * slack: the native codegen pool's "/bin/sh -c '<llc ...> > job-N.log 2>&1'"
+ * reached sh as "... 2>&1}}" and failed. Same class as core_text_dup_abi.
+ * A value with no counted length (a raw char* from a bootstrap call site)
+ * keeps the NUL-terminated reading. NULL = out of memory or no text at all.
+ * See doc/08_tracking/bug/process_spawn_value_reads_past_counted_text_2026-11-21.md */
+static char* rt_process_text_value_dup(int64_t value) {
+    if (rt_string_len(value) >= 0) return core_text_dup_abi(value);
+    const char* raw = rt_interp_cstr(value);
+    if (!raw || (uintptr_t)raw < 0x10000) return NULL;
+    size_t len = strlen(raw);
+    char* out = (char*)rt_observed_malloc_v1(len + 1);
+    if (!out) return NULL;
+    memcpy(out, raw, len + 1);
+    return out;
+}
+
+typedef struct RtProcessValueArgv {
+    char* command;
+    char** argv;   /* argc entries + NULL terminator, each owned */
+    int64_t argc;
+} RtProcessValueArgv;
+
+static void rt_process_value_argv_free(RtProcessValueArgv* pa) {
+    if (pa->argv) {
+        for (int64_t i = 0; i < pa->argc; i++) free(pa->argv[i]);
+        free(pa->argv);
+    }
+    free(pa->command);
+    pa->command = NULL;
+    pa->argv = NULL;
+    pa->argc = 0;
+}
+
+/* 0 = ok; -EINVAL = no command; -E2BIG = bad argc; -ENOMEM = copy failed.
+ * A missing argument element becomes "" as before. */
+static int64_t rt_process_value_argv_build(int64_t cmd, SplArray* args, RtProcessValueArgv* pa) {
+    pa->command = NULL;
+    pa->argv = NULL;
+    pa->argc = 0;
+    if (!rt_interp_cstr(cmd)) return -EINVAL;
+    int64_t argc = rt_array_len(args);
+    if (argc < 0 || (uint64_t)argc > SIZE_MAX / sizeof(char*) - 2) return -E2BIG;
+    pa->command = rt_process_text_value_dup(cmd);
+    if (!pa->command) return -ENOMEM;
+    pa->argv = (char**)rt_observed_calloc_v1((size_t)argc + 1, sizeof(char*));
+    if (!pa->argv) {
+        rt_process_value_argv_free(pa);
+        return -ENOMEM;
+    }
+    pa->argc = argc;
+    for (int64_t i = 0; i < argc; i++) {
+        int64_t item = rt_array_get_text(args, i);
+        char* value = rt_interp_cstr(item) ? rt_process_text_value_dup(item) : NULL;
+        if (!value) value = (char*)rt_observed_calloc_v1(1, 1);
+        if (!value) {
+            rt_process_value_argv_free(pa);
+            return -ENOMEM;
+        }
+        pa->argv[i] = value;
+    }
+    return 0;
+}
+
 int64_t rt_process_run_inherit_value(int64_t cmd, SplArray* args) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
-    return rt_process_run_inherit(cmd_c ? cmd_c : "", cmd_len, args);
+    char* command = rt_process_text_value_dup(cmd);
+    if (!command) return rt_process_run_inherit("", 0, args);
+    int64_t code = rt_process_run_inherit(command, (uint64_t)strlen(command), args);
+    free(command);
+    return code;
 }
 
 int64_t rt_process_spawn_guarded_value(int64_t cmd, SplArray* args) {
-    const char* command = rt_interp_cstr(cmd);
-    if (!command) return -1;
-    int64_t argc = rt_array_len(args);
-    const char** argv = (const char**)rt_observed_calloc_v1((size_t)argc + 1, sizeof(char*));
-    if (!argv) return -1;
-    for (int64_t i = 0; i < argc; i++) {
-        const char* value = rt_interp_cstr(rt_array_get_text(args, i));
-        argv[i] = value ? value : "";
-    }
-    int64_t pid = rt_process_spawn_guarded(command, argv, argc);
-    free(argv);
+    RtProcessValueArgv pa;
+    if (rt_process_value_argv_build(cmd, args, &pa) != 0) return -1;
+    int64_t pid = rt_process_spawn_guarded(pa.command, (const char**)pa.argv, pa.argc);
+    rt_process_value_argv_free(&pa);
     return pid;
 }
 
 /* Unique value ABI for native Simple callers. The raw C owner below
  * keeps its existing (char*, char**, count) contract. */
 int64_t rt_process_spawn_async_value(int64_t cmd, SplArray* args) {
-    const char* command = rt_interp_cstr(cmd);
-    if (!command) return -1;
-    int64_t argc = rt_array_len(args);
-    if (argc < 0 || (uint64_t)argc > SIZE_MAX / sizeof(char*) - 2) return -1;
-    const char** argv = (const char**)rt_observed_calloc_v1((size_t)argc + 1, sizeof(char*));
-    if (!argv) return -1;
-    for (int64_t i = 0; i < argc; i++) {
-        const char* value = rt_interp_cstr(rt_array_get_text(args, i));
-        argv[i] = value ? value : "";
-    }
-    int64_t pid = rt_process_spawn_async(command, argv, argc);
-    free(argv);
+    RtProcessValueArgv pa;
+    if (rt_process_value_argv_build(cmd, args, &pa) != 0) return -1;
+    int64_t pid = rt_process_spawn_async(pa.command, (const char**)pa.argv, pa.argc);
+    rt_process_value_argv_free(&pa);
     return pid;
 }
 
@@ -19094,18 +19150,11 @@ int64_t rt_process_spawn_async_value(int64_t cmd, SplArray* args) {
  * session leader so rt_process_kill_tree(pid) can reach every descendant.
  * Returns pid > 0, -errno, or RT_PTREE_UNSUPPORTED; never a fake pid. */
 int64_t rt_process_spawn_session_value(int64_t cmd, SplArray* args) {
-    const char* command = rt_interp_cstr(cmd);
-    if (!command) return -EINVAL;
-    int64_t argc = rt_array_len(args);
-    if (argc < 0 || (uint64_t)argc > SIZE_MAX / sizeof(char*) - 2) return -E2BIG;
-    const char** argv = (const char**)rt_observed_calloc_v1((size_t)argc + 1, sizeof(char*));
-    if (!argv) return -ENOMEM;
-    for (int64_t i = 0; i < argc; i++) {
-        const char* value = rt_interp_cstr(rt_array_get_text(args, i));
-        argv[i] = value ? value : "";
-    }
-    int64_t pid = rt_process_spawn_session(command, argv, argc);
-    free(argv);
+    RtProcessValueArgv pa;
+    int64_t rc = rt_process_value_argv_build(cmd, args, &pa);
+    if (rc != 0) return rc;
+    int64_t pid = rt_process_spawn_session(pa.command, (const char**)pa.argv, pa.argc);
+    rt_process_value_argv_free(&pa);
     return pid;
 }
 

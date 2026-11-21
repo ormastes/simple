@@ -776,6 +776,10 @@ impl Target {
             (TargetArch::Aarch64, TargetOS::MacOS) => "aarch64-apple-darwin",
             (TargetArch::Aarch64, TargetOS::FreeBSD) => "aarch64-unknown-freebsd",
             (TargetArch::Riscv64, TargetOS::Linux) => "riscv64gc-unknown-linux-gnu",
+            (TargetArch::X86, TargetOS::Windows) => match self.linker_flavor_hint {
+                Some(LinkerFlavor::Gnu) => "i686-pc-windows-gnu",
+                _ => "i686-pc-windows-msvc",
+            },
             _ => self.arch.triple_str(),
         }
     }
@@ -1253,6 +1257,10 @@ mod tests {
             Target::new(TargetArch::X86, TargetOS::SimpleOS).triple_str(),
             "i686-unknown-none-elf"
         );
+        // i686 Windows must keep its OS: the arch fallback is "i686-unknown-linux-gnu",
+        // which made LLVM emit ELF/Linux objects for i686-pc-windows-gnu.
+        assert_eq!(Target::parse("i686-pc-windows-gnu").unwrap().triple_str(), "i686-pc-windows-gnu");
+        assert_eq!(Target::parse("i686-pc-windows-msvc").unwrap().triple_str(), "i686-pc-windows-msvc");
         assert_eq!(
             Target::new(TargetArch::Arm, TargetOS::SimpleOS).triple_str(),
             "armv7a-unknown-none-eabihf"
