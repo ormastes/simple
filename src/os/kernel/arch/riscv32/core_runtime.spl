@@ -1,0 +1,269 @@
+# riscv32 freestanding core runtime — pure Simple.
+#
+# riscv32 has no C freestanding runtime (riscv64 gets these from
+# src/os/kernel/arch/riscv64/boot/freestanding_runtime.c). This module provides
+# the core symbols the riscv32 kernel link needs:
+#   rt_alloc rt_pool_safepoint rt_string_new_literal rt_string_concat
+#   rt_value_to_string rt_raw_i64_to_string rt_array_get rt_array_set_text
+#   rt_index_set rt_value_u64 rt_typed_words_{u32,u64}_{at,set}
+#
+# ABI: on riscv32 the LLVM backend makes every RuntimeValue, param and local an
+# i32 (codegen/llvm/backend_core.rs runtime_int_type), so `i64` below is a
+# 32-bit carrier. `rt_typed_words_u64_*` therefore carry the low 32 bits only.
+#
+# Layout matches the rv32 boot C that is linked into this image
+# (examples/09_embedded/simple_os/arch/riscv32/boot/baremetal_stubs.c and
+# arch/common/riscv_common.h serial_println / rt_native_eq):
+#   string: {u32 type=1, u32 size, u32 len, data[len], NUL}   (data at +12)
+#   array:  {u32 type=2, u32 size, u32 len, u32 cap, u32 data_ptr}, 4-byte words
+#   values: int = v << 3, heap = ptr | 1, nil = 3, true = 11, false = 19.
+# Typed-words arrays hold raw (packed) 32-bit words.
+#
+# Heap: bump allocator over the rv32 direct-heap policy window
+# (boot_layout.spl rv32_direct_heap_start/size = 0x87000000 + 16 MiB, the same
+# region the riscv64 freestanding rt_alloc uses). It lies inside the linker
+# `.heap` section, so riscv_plausible_heap_ref accepts strings allocated here.
+# The bump state is an offset (BSS-zeroed; module initializers do not run
+# freestanding) so no 0x8xxxxxxx address is ever ordered with a signed compare.
+#
+# Memory access goes through the rv32 boot probes already linked into the
+# image (rt_rv32_probe_load8 / rt_rv32_probe_store32): no inline asm.
+# Bodies must not use text literals, f-strings, arrays or untyped compares —
+# those lower to the very rt_* symbols defined here (or to rt_native_cmp).
+
+use os.kernel.arch.riscv32.core_runtime_layout.{
+    rv32_rt_align8, rv32_rt_normalize_index, rv32_rt_heap_fits, rv32_rt_byte_merge,
+    rv32_rt_ram_ref, rv32_rt_decimal_len, rv32_rt_decimal_digit
+}
+
+@cfg(riscv32)
+extern fn rt_rv32_probe_load8(addr: i64) -> i64
+@cfg(riscv32)
+extern fn rt_rv32_probe_store32(addr: i64, value: i64) -> i64
+
+@cfg(riscv32)
+var _rv32_rt_heap_used: i64 = 0
+
+# ---------------------------------------------------------------------------
+# Raw memory over the boot probes.
+# ---------------------------------------------------------------------------
+
+@cfg(riscv32)
+fn _rv32_ld8(addr: i64) -> i64:
+    rt_rv32_probe_load8(addr) & 255
+
+@cfg(riscv32)
+fn _rv32_ld32(addr: i64) -> i64:
+    _rv32_ld8(addr) | (_rv32_ld8(addr + 1) << 8) | (_rv32_ld8(addr + 2) << 16) | (_rv32_ld8(addr + 3) << 24)
+
+@cfg(riscv32)
+fn _rv32_st32(addr: i64, value: i64):
+    """`addr` must be 4-byte aligned."""
+    rt_rv32_probe_store32(addr, value)
+
+@cfg(riscv32)
+fn _rv32_st8(addr: i64, byte: i64):
+    val word_addr: i64 = addr & -4
+    _rv32_st32(word_addr, rv32_rt_byte_merge(_rv32_ld32(word_addr), addr & 3, byte))
+
+# ---------------------------------------------------------------------------
+# Object helpers.
+# ---------------------------------------------------------------------------
+
+@cfg(riscv32)
+fn _rv32_heap_obj(value: i64, kind: i64) -> i64:
+    """Untagged object pointer when `value` is a heap ref of `kind`, else 0."""
+    if (value & 7) != 1:
+        return 0
+    val ptr: i64 = value & -8
+    if not rv32_rt_ram_ref(ptr):
+        return 0
+    if _rv32_ld32(ptr) != kind:
+        return 0
+    ptr
+
+@cfg(riscv32)
+fn _rv32_str_alloc(len: i64) -> i64:
+    """Allocate a string object with header and NUL set; data left to the caller."""
+    val total: i64 = 12 + len + 1
+    val ptr: i64 = rt_alloc(total)
+    if ptr == 0:
+        return 0
+    _rv32_st32(ptr, 1)
+    _rv32_st32(ptr + 4, total)
+    _rv32_st32(ptr + 8, len)
+    ptr
+
+@cfg(riscv32)
+fn _rv32_str_small(len: i64, word0: i64, word1: i64) -> i64:
+    """String of up to 8 bytes given as little-endian words (no text literals)."""
+    val ptr: i64 = _rv32_str_alloc(len)
+    if ptr == 0:
+        return 3
+    _rv32_st32(ptr + 12, word0)
+    if len > 4:
+        _rv32_st32(ptr + 16, word1)
+    _rv32_st8(ptr + 12 + len, 0)
+    ptr | 1
+
+@cfg(riscv32)
+fn _rv32_decimal(value: i64) -> i64:
+    val n: i64 = rv32_rt_decimal_len(value)
+    val ptr: i64 = _rv32_str_alloc(n)
+    if ptr == 0:
+        return 3
+    var digits: i64 = n
+    if value < 0:
+        _rv32_st8(ptr + 12, 45)
+        digits = n - 1
+    var pos: i64 = 0
+    while pos < digits:
+        _rv32_st8(ptr + 12 + n - 1 - pos, 48 + rv32_rt_decimal_digit(value, pos))
+        pos = pos + 1
+    _rv32_st8(ptr + 12 + n, 0)
+    ptr | 1
+
+@cfg(riscv32)
+fn _rv32_array_slot(array: i64, index: i64) -> i64:
+    """Element address for `array[index]`, or 0 when not an array / out of bounds."""
+    val obj: i64 = _rv32_heap_obj(array, 2)
+    if obj == 0:
+        return 0
+    val idx: i64 = rv32_rt_normalize_index(index, _rv32_ld32(obj + 8))
+    if idx < 0:
+        return 0
+    _rv32_ld32(obj + 16) + idx * 4
+
+# ---------------------------------------------------------------------------
+# Exported core runtime.
+# ---------------------------------------------------------------------------
+
+@cfg(riscv32)
+@no_mangle
+fn rt_alloc(size: i64) -> i64:
+    if size <= 0:
+        return 0
+    val bytes: i64 = rv32_rt_align8(size)
+    if not rv32_rt_heap_fits(_rv32_rt_heap_used, bytes, 0x01000000):
+        return 0
+    val ptr: i64 = 0x87000000 + _rv32_rt_heap_used
+    _rv32_rt_heap_used = _rv32_rt_heap_used + bytes
+    ptr
+
+@cfg(riscv32)
+@no_mangle
+fn rt_pool_safepoint() -> i64:
+    0
+
+@cfg(riscv32)
+@no_mangle
+fn rt_string_new_literal(bytes: i64, len: i64) -> i64:
+    var n: i64 = len
+    if n < 0:
+        n = 0
+    val ptr: i64 = _rv32_str_alloc(n)
+    if ptr == 0:
+        return 3
+    var i: i64 = 0
+    while i < n:
+        _rv32_st8(ptr + 12 + i, _rv32_ld8(bytes + i))
+        i = i + 1
+    _rv32_st8(ptr + 12 + n, 0)
+    ptr | 1
+
+@cfg(riscv32)
+@no_mangle
+fn rt_value_to_string(value: i64) -> i64:
+    if _rv32_heap_obj(value, 1) != 0:
+        return value
+    if (value & 7) == 0:
+        return _rv32_decimal(value >> 3)
+    if value == 11:
+        return _rv32_str_small(4, 0x65757274, 0)          # "true"
+    if value == 19:
+        return _rv32_str_small(5, 0x736C6166, 0x65)       # "false"
+    if value == 3:
+        return _rv32_str_small(3, 0x6C696E, 0)            # "nil"
+    _rv32_str_small(7, 0x6C61763C, 0x3E6575)              # "<value>"
+
+@cfg(riscv32)
+@no_mangle
+fn rt_raw_i64_to_string(raw: i64) -> i64:
+    _rv32_decimal(raw)
+
+@cfg(riscv32)
+@no_mangle
+fn rt_string_concat(left: i64, right: i64) -> i64:
+    val a: i64 = _rv32_heap_obj(rt_value_to_string(left), 1)
+    val b: i64 = _rv32_heap_obj(rt_value_to_string(right), 1)
+    if a == 0 or b == 0:
+        return 3
+    val la: i64 = _rv32_ld32(a + 8)
+    val lb: i64 = _rv32_ld32(b + 8)
+    val ptr: i64 = _rv32_str_alloc(la + lb)
+    if ptr == 0:
+        return 3
+    var i: i64 = 0
+    while i < la:
+        _rv32_st8(ptr + 12 + i, _rv32_ld8(a + 12 + i))
+        i = i + 1
+    i = 0
+    while i < lb:
+        _rv32_st8(ptr + 12 + la + i, _rv32_ld8(b + 12 + i))
+        i = i + 1
+    _rv32_st8(ptr + 12 + la + lb, 0)
+    ptr | 1
+
+@cfg(riscv32)
+@no_mangle
+fn rt_array_get(array: i64, index: i64) -> i64:
+    val slot: i64 = _rv32_array_slot(array, index)
+    if slot == 0:
+        return 3
+    _rv32_ld32(slot)
+
+@cfg(riscv32)
+@no_mangle
+fn rt_array_set_text(array: i64, index: i64, value: i64) -> bool:
+    val slot: i64 = _rv32_array_slot(array, index)
+    if slot == 0:
+        return false
+    _rv32_st32(slot, value)
+    true
+
+@cfg(riscv32)
+@no_mangle
+fn rt_index_set(collection: i64, index: i64, value: i64) -> bool:
+    """Index arrives as a RuntimeValue: untag an int-tagged index."""
+    var idx: i64 = index
+    if (index & 7) == 0:
+        idx = index >> 3
+    rt_array_set_text(collection, idx, value)
+
+@cfg(riscv32)
+@no_mangle
+fn rt_value_u64(bits: i64) -> i64:
+    bits << 3
+
+@cfg(riscv32)
+@no_mangle
+fn rt_typed_words_u32_at(array: i64, index: i64) -> i64:
+    val slot: i64 = _rv32_array_slot(array, index)
+    if slot == 0:
+        return 0
+    _rv32_ld32(slot)
+
+@cfg(riscv32)
+@no_mangle
+fn rt_typed_words_u64_at(array: i64, index: i64) -> i64:
+    rt_typed_words_u32_at(array, index)
+
+@cfg(riscv32)
+@no_mangle
+fn rt_typed_words_u32_set(array: i64, index: i64, value: i64) -> bool:
+    rt_array_set_text(array, index, value)
+
+@cfg(riscv32)
+@no_mangle
+fn rt_typed_words_u64_set(array: i64, index: i64, value: i64) -> bool:
+    rt_array_set_text(array, index, value)
