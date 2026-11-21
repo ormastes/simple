@@ -81,6 +81,15 @@ use compiler.backend.linker.linker_wrapper.{
 }
 use compiler.backend.llvm_native_link.{NativeLinkOptions}
 use compiler.driver.driver_build.native_link_receipt_v1.{native_link_with_receipt_v1, native_shared_link_with_receipt_v1}
+use compiler.driver.driver_build.library_unit_link_v1.{
+    LIBRARY_UNITS_ENV_V1, STAGE3_LIB_DYNLIB_ENV_V1,
+    LIBRARY_UNITS_DYNLIB_EXPLICIT_ENV_V1, LIBRARY_UNITS_DYNLIB_FLAG_V1,
+    LibraryUnitBuildModeV1, LibraryUnitModeInputsV1, library_unit_select_build_mode_v1
+}
+use compiler.driver.driver_build.library_unit_dynlib_v1.{
+    LibraryUnitClosureModuleRowV1, LibraryUnitClosurePackageRequestV1,
+    library_unit_partition_and_package_closure_v1
+}
 use compiler.driver.driver_xray_link.{xray_link_with_runtime_v1}
 use compiler.driver.driver_xray_llvm_link.{xray_llvm_link_needed_v1, xray_llvm_link_objects_v1, xray_llvm_link_libraries_v1, xray_llvm_semantic_link_flags_v1}
 use compiler.driver.smf_writer.{Target}
@@ -2356,11 +2365,13 @@ impl CompilerDriver:
             self.native_staged_codegen.modules_flushed
         else:
             0
+        var build_module_objects: {text: text} = {}
         if staged_active:
             if native_group.? or emit_entry_object_requested:
                 return CompileResult.CodegenError(
                     "staged native codegen does not support grouped or entry-object publication")
             object_files = self.native_staged_codegen.object_files
+            build_module_objects = self.native_staged_codegen.module_objects
             collection_bindings = self.native_staged_codegen.collection_bindings
             module_outcomes = self.native_staged_codegen.module_outcomes
             module_unit_id = self.native_staged_codegen.module_unit_id
@@ -2422,6 +2433,9 @@ impl CompilerDriver:
                 module_unit_id = module_unit_id + 1
                 module_outcomes.record(BuildUnitOutcome.ok(module_unit_id, name, 0, 0))
                 object_files = object_files.push(prelower_object)
+                build_module_objects[name] = prelower_object
+                if staged_active:
+                    self.native_staged_codegen.module_objects[name] = prelower_object
                 continue
             # ParserImport/export facades contribute symbols through their imported
             # implementation modules and have no object code of their own.
@@ -2573,8 +2587,10 @@ impl CompilerDriver:
                             BuildUnitOutcome.ok(module_unit_id, name, 0, 0))
                         for obj in scoped_outputs:
                             object_files = object_files.push(obj)
-                        if staged_active:
-                            self.native_staged_codegen.module_objects[name] = scoped_outputs[0]
+                        if scoped_outputs.len() > 0:
+                            build_module_objects[name] = scoped_outputs[0]
+                            if staged_active:
+                                self.native_staged_codegen.module_objects[name] = scoped_outputs[0]
                         if collection_receipt_requested:
                             collection_bindings = collection_bindings.push(cached_collection_binding)
                         if native_group.? and scoped_outputs.len() == 1:
@@ -2891,6 +2907,7 @@ impl CompilerDriver:
                         entry_object_ready_size = admitted_size
                     reconstructed_outputs = reconstructed_outputs.push(obj_path)
                     object_files = object_files.push(obj_path)
+                    build_module_objects[name] = obj_path
                     if staged_active:
                         self.native_staged_codegen.module_objects[name] = obj_path
                     if collection_receipt_requested:
@@ -2987,6 +3004,7 @@ impl CompilerDriver:
             # failed module stays recorded in module_outcomes and blocks the
             # final link exactly as an unstaged failure would.
             self.native_staged_codegen.object_files = object_files
+            self.native_staged_codegen.module_objects = build_module_objects
             self.native_staged_codegen.collection_bindings = collection_bindings
             self.native_staged_codegen.module_outcomes = module_outcomes
             self.native_staged_codegen.module_unit_id = module_unit_id
@@ -3430,20 +3448,93 @@ impl CompilerDriver:
             log_build_trace("driver:link:start backend={effective_backend} objects={object_files.len()} output={output} inputs={build_trace_list(object_files)}")
         log_build_progress("link", "objects", object_files.len(),
             object_files.len(), output, 5, 6, 0, cache_hit_count, "running")
+        val explicit_dynlib_requested = (env_get_nullable(LIBRARY_UNITS_DYNLIB_EXPLICIT_ENV_V1) ?? "") == "1"
+        val mode_env_val = env_get_nullable("SIMPLE_NATIVE_BUILD_MODE") ?? ""
+        val effective_driver_mode = if mode_env_val != "":
+            mode_env_val
+        elif driver_output_format_is_self_contained(ctx.options.output_format):
+            "one-binary"
+        else:
+            ""
+        val selected_unit_link_mode = library_unit_select_build_mode_v1(LibraryUnitModeInputsV1(
+            args: if explicit_dynlib_requested: [LIBRARY_UNITS_DYNLIB_FLAG_V1] else: [],
+            build_mode: effective_driver_mode,
+            stage3_env: env_get_nullable("SIMPLE_BOOTSTRAP_STAGE3") ?? "",
+            stage4_env: env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4") ?? "",
+            stage3_dynlib_env: env_get_nullable(STAGE3_LIB_DYNLIB_ENV_V1) ?? "",
+            library_units_env: env_get_nullable(LIBRARY_UNITS_ENV_V1) ?? "",
+            whole_program_env: env_get_nullable("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM") ?? "",
+            explicit_emit_mode: if native_output_mode != "": native_output_mode else: "",
+            target_or_os: if native_target != "": native_target else: get_host_os(),
+            linker_env: env_get_nullable("SIMPLE_LINKER") ?? ""
+        ))
+        var dynlib_unit_files: [text] = []
+        var dynlib_unit_inits: [text] = []
+        var dynlib_retained_syms: [text] = []
+        var dynlib_extra_flags: [text] = []
+        var effective_link_objects = object_files
+        if selected_unit_link_mode == LibraryUnitBuildModeV1.DynLibUnits and
+                not collection_receipt_requested and native_group == None:
+            val entry_src_candidate = env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY") ?? (
+                if ctx.options.input_files.len() > 0: ctx.options.input_files[ctx.options.input_files.len() - 1] else: "")
+            var closure_rows: [LibraryUnitClosureModuleRowV1] = []
+            for mod_key in build_module_objects.keys():
+                val mod_obj = build_module_objects[mod_key]
+                val mod_src = driver_native_module_cache_source(ctx, mod_key)
+                if mod_src != "" and mod_obj != "":
+                    closure_rows = closure_rows.push(LibraryUnitClosureModuleRowV1(
+                        module_name: mod_key, source_path: mod_src, object_path: mod_obj))
+            if closure_rows.len() > 0 and entry_src_candidate != "":
+                val unit_producer = module_cache_config.compiler_identity + "|" +
+                    module_cache_config.target_identity + "|" +
+                    module_cache_config.options_identity + "|" +
+                    module_cache_config.provider_identity
+                match library_unit_partition_and_package_closure_v1(LibraryUnitClosurePackageRequestV1(
+                        repo_root: "",
+                        entry_source: entry_src_candidate,
+                        output_path: output,
+                        cache_root: base_cache_scope_root,
+                        producer_identity: unit_producer,
+                        scope_key: base_cache_scope_name,
+                        target_or_os: if native_target != "": native_target else: get_host_os(),
+                        rows: closure_rows)):
+                    case Ok(unit_plan):
+                        var reused_units = 0
+                        var built_units = 0
+                        for ua in unit_plan.unit_artifacts:
+                            if ua.reused:
+                                reused_units = reused_units + 1
+                            else:
+                                built_units = built_units + 1
+                        print "[library-unit-dynlib] units={unit_plan.unit_artifacts.len()} reused={reused_units} built={built_units} entry_objects={unit_plan.entry_objects.len()} staged={unit_plan.staged_dynlibs.len()}"
+                        _sffi_stdout_flush()
+                        effective_link_objects = unit_plan.entry_objects
+                        dynlib_unit_files = unit_plan.staged_dynlibs
+                        dynlib_unit_inits = unit_plan.unit_init_symbols
+                        dynlib_retained_syms = unit_plan.retained_symbols
+                        dynlib_extra_flags = unit_plan.linker_flags
+                    case Err(unit_err):
+                        if not explicit_dynlib_requested and unit_err.starts_with("no-library-units:"):
+                            if trace:
+                                print "[library-unit-dynlib] fallback=flat-objects reason={unit_err}"
+                        else:
+                            return driver_native_collection_link_cleanup_error_v1(
+                                collection_link_input_dir,
+                                CompileResult.CodegenError("library-unit dyn-lib packaging failed: {unit_err}"))
         if effective_backend == "llvm" or effective_backend == "llvm-lib":
             # LLVM path: compile C runtime and link with entry point
             if trace:
                 print "[NATIVE] creating NativeLinkOptions..."
-            var llvm_objects = object_files
+            var llvm_objects = effective_link_objects
             var llvm_libraries = ctx.options.native_libraries
-            var llvm_linker_flags = ctx.options.native_linker_flags
+            var llvm_linker_flags = ctx.options.native_linker_flags + dynlib_extra_flags
             var llvm_thread_context = false
             match xray_llvm_link_needed_v1(ctx.options.xray_enabled, effective_backend, native_target, false):
                 case Err(reason):
                     return driver_native_collection_link_cleanup_error_v1(collection_link_input_dir, CompileResult.CodegenError(reason))
                 case Ok(needed):
                     if needed:
-                        match xray_llvm_link_objects_v1(object_files, true, effective_backend, native_target, false):
+                        match xray_llvm_link_objects_v1(effective_link_objects, true, effective_backend, native_target, false):
                             case Err(reason):
                                 return driver_native_collection_link_cleanup_error_v1(collection_link_input_dir, CompileResult.CodegenError(reason))
                             case Ok(linked): llvm_objects = linked
@@ -3457,6 +3548,9 @@ impl CompilerDriver:
                 libraries: llvm_libraries,
                 library_paths: ctx.options.native_library_paths,
                 linker_flags: llvm_linker_flags,
+                unit_dynlibs: dynlib_unit_files,
+                retained_symbols: dynlib_retained_syms,
+                unit_init_symbols: dynlib_unit_inits,
                 xray_thread_context_v1: llvm_thread_context,
                 xray_startup_consumer_v1: ctx.options.xray_startup_consumer_v1,
                 debug: ctx.options.debug_info,
@@ -3474,19 +3568,19 @@ impl CompilerDriver:
             if trace:
                 print "[NATIVE] calling link_llvm_native..."
             if not driver_native_collection_link_inputs_current_v1(
-                    collection_bindings, object_files):
+                    collection_bindings, effective_link_objects):
                 return driver_native_collection_link_cleanup_error_v1(
                     collection_link_input_dir,
                     CompileResult.CodegenError("native collection link input changed before LLVM link"))
             match native_link_with_initializer_capture_v1(ctx, llvm_objects, output, llvm_opts):
                 case Ok(_):
-                    log_build_progress("link", "objects", object_files.len(),
-                        object_files.len(), output, 6, 6, 0,
+                    log_build_progress("link", "objects", effective_link_objects.len(),
+                        effective_link_objects.len(), output, 6, 6, 0,
                         cache_hit_count, "succeeded")
                     if build_trace_enabled():
                         log_build_trace("driver:link:done rc=0 output={output} output_bytes={file_size_raw(output)}")
                     driver_log_info(log, "Native executable written to {output} (backend: LLVM)")
-                    return driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files, collection_link_input_dir)
+                    return driver_native_success_with_launch_metadata(ctx, output, collection_bindings, effective_link_objects, collection_link_input_dir)
                 case Err(e):
                     log_build_trace("driver:link:failed output={output} detail={build_trace_detail(e)}")
                     driver_native_collection_link_cleanup_error_v1(
@@ -3498,7 +3592,10 @@ impl CompilerDriver:
             val hosted_opts = NativeLinkOptions(
                 libraries: ctx.options.native_libraries,
                 library_paths: ctx.options.native_library_paths,
-                linker_flags: ctx.options.native_linker_flags,
+                linker_flags: ctx.options.native_linker_flags + dynlib_extra_flags,
+                unit_dynlibs: dynlib_unit_files,
+                retained_symbols: dynlib_retained_syms,
+                unit_init_symbols: dynlib_unit_inits,
                 debug: ctx.options.debug_info,
                 verbose: ctx.options.verbose,
                 pie: true,
@@ -3511,27 +3608,27 @@ impl CompilerDriver:
                 runtime_bundle: env_get_nullable("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
             )
             if not driver_native_collection_link_inputs_current_v1(
-                    collection_bindings, object_files):
+                    collection_bindings, effective_link_objects):
                 return driver_native_collection_link_cleanup_error_v1(
                     collection_link_input_dir,
                     CompileResult.CodegenError("native collection link input changed before hosted link"))
             # XRay PR5b: only --xray builds call into driver_xray_link.
-            var hosted_link_objects = object_files
+            var hosted_link_objects = effective_link_objects
             if ctx.options.xray_enabled:
-                match xray_link_with_runtime_v1(object_files, true, effective_backend, native_target):
+                match xray_link_with_runtime_v1(effective_link_objects, true, effective_backend, native_target):
                     case Ok(linked): hosted_link_objects = linked
                     case Err(xray_error):
                         return driver_native_collection_link_cleanup_error_v1(
                             collection_link_input_dir, CompileResult.CodegenError(xray_error))
             match native_link_with_initializer_capture_v1(ctx, hosted_link_objects, output, hosted_opts):
                 case Ok(_):
-                    log_build_progress("link", "objects", object_files.len(),
-                        object_files.len(), output, 6, 6, 0,
+                    log_build_progress("link", "objects", effective_link_objects.len(),
+                        effective_link_objects.len(), output, 6, 6, 0,
                         cache_hit_count, "succeeded")
                     if build_trace_enabled():
                         log_build_trace("driver:link:done rc=0 output={output} output_bytes={file_size_raw(output)}")
                     driver_log_info(log, "Native executable written to {output} (backend: {effective_backend})")
-                    driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files, collection_link_input_dir)
+                    driver_native_success_with_launch_metadata(ctx, output, collection_bindings, effective_link_objects, collection_link_input_dir)
                 case Err(e):
                     log_build_trace("driver:link:failed output={output} detail={build_trace_detail(e)}")
                     driver_native_collection_link_cleanup_error_v1(

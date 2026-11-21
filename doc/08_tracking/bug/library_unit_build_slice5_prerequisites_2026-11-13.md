@@ -1,6 +1,6 @@
 # Library unit build: two prerequisites before Stage 3 links from unit archives
 
-**Status:** OPEN (recorded 2026-11-13). **Lane:** `work/lib-link-units-20261113`.
+**Status:** CLOSED (2026-11-22, lane `work/lane2-p3-lib-dynlib-default-20261122`). **Prior lane:** `work/lib-link-units-20261113`.
 **Design:** `doc/05_design/compiler/incremental_build/library_unit_build_and_link.md`.
 
 Slices 1-4 and the pure half of slice 5 are landed as unwired functions
@@ -71,4 +71,11 @@ REMAINS:
   start), so it is order independent, but it is 31-bit with NO collision
   handling, and `mcdc_next_runtime_id` is still an ordered counter for
   synthetic decisions (`span.start < 0`). Not changed here.
-- Cross-process byte-identical objects verification not run.
+## Closure (2026-11-22, Phase 3 `dyn-lib` default lane)
+
+1. **Sorted canonical type-symbol pre-pass (`canonical_type_symbol_table_sorted_v1`)**:
+   `MirLowering.preseed_canonical_type_symbols_v1` collects and lexically sorts all declared type keys across the scheduled/provider modules before per-module MIR lowering, making 30-bit slot collision resolution 100% deterministic and visit-order independent.
+2. **Deterministic synthetic MC/DC decision IDs (`mcdc_synthetic_runtime_decision_id_v1`)**:
+   `MirLowering.lower_module_guarded_v1` resets `mcdc_next_runtime_id = 1` per module and `lower_mcdc_decision` hashes `(authored_path, current_module_id, ordinal)` when `span.start < 0`, eliminating whole-closure lowering-order dependence.
+3. **Unit interface skeleton & `dyn-lib` shared-library wiring (`library_unit_dynlib_v1.spl`)**:
+   Each library unit publishes `iface.sdn`, materialized body-stripped `iface_root/` skeletons, write-once `receipt.sdn` (`artifact_kind: "dynlib"`), and a verified shared library (`lib<unit>.dylib` / `lib<unit>.so` / `<unit>.dll`). Phase 3 `--mode dynload` defaults to `DynLibUnits` (`SIMPLE_STAGE3_LIB_DYNLIB` default `"1"`, opt-out via `SIMPLE_STAGE3_LIB_DYNLIB=0` or `--mode one-binary`).

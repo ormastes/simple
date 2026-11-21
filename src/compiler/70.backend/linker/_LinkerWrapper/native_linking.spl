@@ -141,6 +141,38 @@ fn detect_preferred_backend(extra_flags: [text]) -> text:
                 return backend
     ""
 
+fn _direct_linker_translate_single_token_v1(tok: text, os: text) -> [text]:
+    val darwin = os == "macos" or os == "darwin" or os == "Darwin"
+    if tok == "":
+        return []
+    if tok == "-export_dynamic" or tok == "--export-dynamic":
+        return if darwin: ["-export_dynamic"] else: ["--export-dynamic"]
+    if tok == "--no-gc-sections":
+        return if darwin: [] else: ["--no-gc-sections"]
+    [tok]
+
+pub fn direct_linker_translate_extra_flags_v1(extra_flags: [text], os: text) -> [text]:
+    """Translate C-driver `-Wl,...` flags for direct raw linker (`ld64`/`ld.lld`/`mold`) invocations."""
+    var out: [text] = []
+    for flag in extra_flags:
+        if flag.starts_with("-Wl,"):
+            val parts = flag.substring(4).split(",")
+            var idx = 0
+            while idx < parts.len():
+                val p = parts[idx]
+                if p == "-rpath" and idx + 1 < parts.len():
+                    out.push("-rpath")
+                    out.push(parts[idx + 1])
+                    idx = idx + 2
+                else:
+                    for mapped in _direct_linker_translate_single_token_v1(p, os):
+                        out.push(mapped)
+                    idx = idx + 1
+        else:
+            for mapped in _direct_linker_translate_single_token_v1(flag, os):
+                out.push(mapped)
+    out
+
 fn unresolved_symbol_flags_for_unix_linker(os: text) -> [text]:
     if os == "linux" or os == "freebsd":
         return ["--allow-multiple-definition"]
@@ -578,8 +610,8 @@ fn link_native_unix_with_engine(object_files: [text], output: text, config: Nati
     if config.debug:
         args.push("-g")
 
-    # Extra flags
-    for flag in config.extra_flags:
+    # Extra flags (translate `-Wl,...` prefixes for direct raw linker drivers)
+    for flag in direct_linker_translate_extra_flags_v1(config.extra_flags, os):
         args.push(flag)
 
     # CRT epilogue: crtend.o, crtn.o (after libs)
@@ -2676,6 +2708,11 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push(flag)
         for flag in native_cc_platform_flags(link_os, config.strip_output):
             args.push(flag)
+        # Mach-O ld64 requires explicit `-U` for optional `__attribute__((weak_import))`
+        # / `__attribute__((weak))` runtime hooks (`runtime_thread.c`, `runtime_value.h`,
+        # `runtime_fork.c`) so they resolve to NULL when no Simple module defines them.
+        for weak_sym in ["_worker_loop_entry", "_simple_note_user_threads_started", "_spl_immortal_registry_freeze_for_fork_child_v1"]:
+            args.push("-Wl,-U," + weak_sym)
         for flag in ["-o", output]:
             args.push(flag)
         record_link_command(output, cc, args, config.verbose)
@@ -2711,7 +2748,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push(flag)
         if config.allow_duplicate_definitions:
             args.push("-Wl,--allow-multiple-definition")
-        args.push("-Wl,--gc-sections")
+        if not config.extra_flags.contains("-Wl,--no-gc-sections") and not config.extra_flags.contains("--no-gc-sections"):
+            args.push("-Wl,--gc-sections")
         if config.strip_output:
             args.push("-Wl,--strip-all")
         args.push("-o")
@@ -2769,7 +2807,7 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         # user asked for it). First consumer: the go-to-end trial link
         # (driver_build/go_to_end_trial_link_v1.spl), which needs every
         # undefined reference reported, including in sections GC would drop.
-        if not config.extra_flags.contains("-Wl,--no-gc-sections"):
+        if not config.extra_flags.contains("-Wl,--no-gc-sections") and not config.extra_flags.contains("--no-gc-sections"):
             args.push("-Wl,--gc-sections")
         if config.strip_output:
             args.push("-Wl,--strip-all")

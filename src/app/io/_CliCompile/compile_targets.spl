@@ -797,6 +797,7 @@ pub struct CliNativeBuildParsedOptionsV1:
     native_target: text = ""
     native_cpu: text = ""
     build_mode: text = ""
+    library_units_mode: text = ""
     cache_dir: text = ""
     collection_profile_path: text = ""
     collection_profile_digest: text = ""
@@ -848,6 +849,7 @@ pub fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOp
     var native_target = ""
     var native_cpu = ""
     var build_mode = "dynload"
+    var library_units_mode = ""
     var cache_dir = "build/native_cache"
     var collection_profile_path = ""
     var collection_profile_digest = ""
@@ -965,6 +967,12 @@ pub fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOp
             emit_archive = true
         elif a == "--emit-shared":
             emit_shared = true
+        elif a == "--library-units":
+            library_units_mode = "static"
+        elif a == "--library-units-dynlib":
+            library_units_mode = "dynlib"
+        elif a == "--no-library-units":
+            library_units_mode = "off"
         elif a == "--threads" or a == "--jobs" or a == "-j":
             if j + 1 >= args.len():
                 _cli_eprint("Error: {a} requires a positive integer")
@@ -1196,6 +1204,7 @@ pub fn cli_native_build_parse_options_v1(args: [text]) -> CliNativeBuildParsedOp
         native_target: native_target,
         native_cpu: native_cpu,
         build_mode: build_mode,
+        library_units_mode: library_units_mode,
         cache_dir: cache_dir,
         collection_profile_path: collection_profile_path,
         collection_profile_digest: collection_profile_digest,
@@ -1440,6 +1449,7 @@ fn _cli_native_build(
         var opt_level: i64 = parsed.opt_level
         var native_target: text = parsed.native_target
         var native_cpu: text = parsed.native_cpu
+        val library_units_mode: text = parsed.library_units_mode
         var build_mode: text = parsed.build_mode
         var cache_dir: text = parsed.cache_dir
         var collection_profile_path: text = parsed.collection_profile_path
@@ -1695,6 +1705,23 @@ fn _cli_native_build(
         if not env_set("SIMPLE_NATIVE_NOOP_FINAL_OUTPUT", output):
             _cli_eprint("Error: could not export SIMPLE_NATIVE_NOOP_FINAL_OUTPUT={output}")
             return 1
+        val old_native_build_mode = env_get("SIMPLE_NATIVE_BUILD_MODE") ?? ""
+        val old_library_units_env = env_get("SIMPLE_NATIVE_LIBRARY_UNITS") ?? ""
+        val old_stage3_dynlib_env = env_get("SIMPLE_STAGE3_LIB_DYNLIB") ?? ""
+        val old_dynlib_explicit_env = env_get("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT") ?? ""
+        env_set("SIMPLE_NATIVE_BUILD_MODE", build_mode)
+        if library_units_mode == "static":
+            env_set("SIMPLE_NATIVE_LIBRARY_UNITS", "1")
+            env_set("SIMPLE_STAGE3_LIB_DYNLIB", "0")
+            env_set("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", "")
+        elif library_units_mode == "dynlib":
+            env_set("SIMPLE_NATIVE_LIBRARY_UNITS", "1")
+            env_set("SIMPLE_STAGE3_LIB_DYNLIB", "1")
+            env_set("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", "1")
+        elif library_units_mode == "off":
+            env_set("SIMPLE_NATIVE_LIBRARY_UNITS", "0")
+            env_set("SIMPLE_STAGE3_LIB_DYNLIB", "0")
+            env_set("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", "")
         env_set("SIMPLE_KEEP_BUILD_INTERMEDIATES", if keep_intermediates: "1" else: "")
         env_set("SIMPLE_PRINT_BUILD_INTERMEDIATES", if print_intermediates: "1" else: "")
         val result = if emit_smf:
@@ -1825,6 +1852,10 @@ fn _cli_native_build(
         env_set("SIMPLE_NATIVE_NOOP_FINAL_OUTPUT", old_native_noop_final_output)
         env_set("SIMPLE_KEEP_BUILD_INTERMEDIATES", old_keep_intermediates)
         env_set("SIMPLE_PRINT_BUILD_INTERMEDIATES", old_print_intermediates)
+        env_set("SIMPLE_NATIVE_BUILD_MODE", old_native_build_mode)
+        env_set("SIMPLE_NATIVE_LIBRARY_UNITS", old_library_units_env)
+        env_set("SIMPLE_STAGE3_LIB_DYNLIB", old_stage3_dynlib_env)
+        env_set("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", old_dynlib_explicit_env)
         match result:
             case CompileResult.Success(_):
                 if native_group_requested:
