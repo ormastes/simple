@@ -36,7 +36,7 @@ use compiler.mir.mir.*
 use compiler.common.driver_core_types.{driver_core_compile_options_default, SourceFile}
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
 
-val icp_consts_src = "val CMD_OPEN: u32 = 1\nval CMD_READ: u32 = 2\nval CMD_CLOSE: u32 = 3\n\nexport CMD_OPEN, CMD_READ, CMD_CLOSE\n"
+val icp_consts_src = "val CMD_OPEN: u32 = 1\nval CMD_READ: u32 = 2\nval CMD_CLOSE: u32 = 3\nval CMD_LABEL: text = \"open\"\n\nexport CMD_OPEN, CMD_READ, CMD_CLOSE, CMD_LABEL\n"
 val icp_facade_src = "export use fixture.icp_consts.{CMD_OPEN, CMD_READ, CMD_CLOSE}\n"
 val icp_dispatch_body = "\nfn dispatch(method: u32) -> i64:\n    match method:\n        CMD_OPEN: 10\n        CMD_READ: 20\n        CMD_CLOSE: 30\n        _: 40\n"
 
@@ -123,4 +123,23 @@ describe "imported integer constant patterns":
         print "lowercase-binder errors: [{all}]"
         expect(all.contains("B5b")).to_equal(false)
         expect(all.contains("unresolved name: other")).to_equal(false)
+        expect(icp_label_count(mir, "pick", "match_arm")).to_equal(1)
+
+    it "an uppercase name with no owning declaration anywhere stays a binding":
+        val body = "\nfn pick(method: u32) -> i64:\n    match method:\n        CMD_OPEN: 10\n        NO_SUCH_CONSTANT: 20\n"
+        val (mir, messages) = icp_lower("use fixture.icp_consts.{CMD_OPEN}\n" + body)
+        val all = icp_joined(messages)
+        print "unowned-uppercase errors: [{all}]"
+        expect(all.contains("B5b")).to_equal(false)
+        expect(all.contains("unresolved name: NO_SUCH_CONSTANT")).to_equal(false)
+        # Only CMD_OPEN is refutable; NO_SUCH_CONSTANT is the catch-all.
+        expect(icp_label_count(mir, "pick", "match_arm")).to_equal(1)
+
+    it "an imported text constant over an int subject is not an integer value test":
+        val body = "\nfn pick(method: u32) -> i64:\n    match method:\n        CMD_OPEN: 10\n        CMD_LABEL: 20\n"
+        val (mir, messages) = icp_lower("use fixture.icp_consts.{CMD_OPEN, CMD_LABEL}\n" + body)
+        val all = icp_joined(messages)
+        print "text-const errors: [{all}]"
+        expect(all.contains("B5b")).to_equal(false)
+        # HirTypeKind.Int filter: CMD_LABEL binds (catch-all), no compare emitted.
         expect(icp_label_count(mir, "pick", "match_arm")).to_equal(1)
