@@ -1,0 +1,101 @@
+# riscv32 core-runtime integer policy (pure, target-neutral, host-testable).
+#
+# Shared by os.kernel.arch.riscv32.core_runtime, the pure-Simple riscv32
+# freestanding provider of rt_alloc / string / array core symbols. On riscv32
+# the LLVM backend lowers every RuntimeValue/param/local to i32
+# (codegen/llvm/backend_core.rs runtime_int_type), so every helper here keeps
+# its arithmetic within 32 bits and never orders 0x8xxxxxxx addresses with a
+# signed compare (they are negative as i32): heap bounds are tracked as
+# small positive offsets instead.
+#
+# Value model matches the rv32 boot C (examples/.../riscv32/boot/baremetal_stubs.c):
+# low 3 bits tag, int = v << 3, heap = ptr | 1, special = (payload << 3) | 3.
+
+pub val RV32_RT_TAG_MASK: i64 = 7
+pub val RV32_RT_TAG_HEAP: i64 = 1
+pub val RV32_RT_NIL: i64 = 3
+pub val RV32_RT_TRUE: i64 = 11
+pub val RV32_RT_FALSE: i64 = 19
+
+# rv32 RAM window (boot_layout.spl rv32_direct_ram_base/size).
+pub val RV32_RT_RAM_BASE: i64 = 0x80000000
+pub val RV32_RT_RAM_SIZE: i64 = 0x08000000
+
+pub fn rv32_rt_tag_int(value: i64) -> i64:
+    value << 3
+
+pub fn rv32_rt_untag_int(value: i64) -> i64:
+    value >> 3
+
+pub fn rv32_rt_align8(size: i64) -> i64:
+    (size + 7) & -8
+
+pub fn rv32_rt_normalize_index(index: i64, len: i64) -> i64:
+    """Python-style index; -1 when out of bounds."""
+    var idx: i64 = index
+    if idx < 0:
+        idx = len + idx
+    if idx < 0:
+        return -1
+    if idx >= len:
+        return -1
+    idx
+
+# Predicates return i64 1/0, not bool: on the riscv32 kernel link a
+# bool-returning call used as an `if` condition (or under `not`/`or`) lowered
+# to rt_value_truthy, which riscv32 does not define. Test with `== 0`.
+
+pub fn rv32_rt_heap_fits(used: i64, bytes: i64, capacity: i64) -> i64:
+    if bytes <= 0:
+        return 0
+    if used < 0:
+        return 0
+    if bytes > capacity - used:
+        return 0
+    1
+
+pub fn rv32_rt_byte_merge(word: i64, byte_index: i64, byte: i64) -> i64:
+    """Replace byte `byte_index` (0..3, little-endian) of a 32-bit word."""
+    val shift: i64 = byte_index * 8
+    val keep: i64 = (word & (-1 ^ (255 << shift))) & 0xFFFFFFFF
+    keep | ((byte & 255) << shift)
+
+pub fn rv32_rt_ram_ref(ptr: i64) -> i64:
+    """1 when `ptr` lies in rv32 RAM. Offset compare (wraps negative below base)."""
+    # Literals, not the module vals: freestanding builds skip module initializers.
+    val off: i64 = (ptr - 0x80000000) & 0xFFFFFFFF
+    if off < 0:
+        return 0
+    if off >= 0x08000000:
+        return 0
+    1
+
+pub fn rv32_rt_decimal_len(value: i64) -> i64:
+    """Characters needed to print `value` in decimal, including a '-' sign."""
+    var n: i64 = 1
+    var q: i64 = value / 10
+    while q != 0:
+        n = n + 1
+        q = q / 10
+    if value < 0:
+        n = n + 1
+    n
+
+pub fn rv32_rt_decimal_digit(value: i64, pos: i64) -> i64:
+    """Digit `pos` (0 = least significant) of |value|; truncating division,
+    so no negation of the minimum value is ever needed."""
+    var q: i64 = value
+    var i: i64 = 0
+    while i < pos:
+        q = q / 10
+        i = i + 1
+    var d: i64 = q - (q / 10) * 10
+    if d < 0:
+        d = 0 - d
+    d
+
+export RV32_RT_TAG_MASK, RV32_RT_TAG_HEAP, RV32_RT_NIL, RV32_RT_TRUE, RV32_RT_FALSE
+export RV32_RT_RAM_BASE, RV32_RT_RAM_SIZE
+export rv32_rt_tag_int, rv32_rt_untag_int, rv32_rt_align8, rv32_rt_normalize_index
+export rv32_rt_heap_fits, rv32_rt_byte_merge, rv32_rt_ram_ref
+export rv32_rt_decimal_len, rv32_rt_decimal_digit
