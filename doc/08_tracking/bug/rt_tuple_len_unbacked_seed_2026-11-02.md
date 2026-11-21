@@ -28,9 +28,19 @@
 - Evidence (pin-built rung-7 runner, lldb): `windows_process_request_valid_v1`
   returns that text on the first assignment, whose bytes are `=`; the loop's
   disassembly loads `[pair & ~7]` and `[pair & ~7 + 8]` with no `rt_tuple_get`.
-- Fix: `env_vars_nilable` again rebuilds language tuples through
-  `rt_tuple_len`/`rt_tuple_get`. `C:/dev/seeds/simple-release.exe` and the
-  release-tip interpreter (`interpreter_extern/mod.rs`) register both.
+- Compiler-side fix already on release: `e9b6b0e24d6` (2026-11-15) rebuilds any
+  extern `-> [(A, B)]?` result into native tuples at the call
+  (`extern_runtime_tuple_array_to_native`). A runner built by a compiler with
+  that commit is not affected. The frozen Phase 2 pin predates it, so pin-built
+  binaries of tip source still were.
+- Fix: `env_vars_nilable` is correct for both producers. `rt_tuple_len` is the
+  validated discriminator: it returns 2 for a runtime pair (frozen Phase 2 pin),
+  which is rebuilt through `rt_tuple_get`, and -1 for anything else (a native
+  tuple from a compiler with `e9b6b0e24d6`), which is kept as-is. No pair is
+  dropped; None means only that the snapshot itself is unavailable. #10688 as
+  first merged (70e103b) returned None on `!= 2`, which under `e9b6b0e24d6` lost
+  the whole snapshot; #10701 corrects that. `C:/dev/seeds/simple-release.exe` and
+  the release-tip interpreter (`interpreter_extern/mod.rs`) register both externs.
 - Same destructure, covered by the same owner change:
   `src/lib/nogc_sync_mut/test_runner/aggregate_task_executor.spl` (environment
   digest). The `pair.0`/`pair.1` readers in `src/app/bootstrap_builder/` consume

@@ -30,35 +30,40 @@ fn env_remove(key: text) -> bool:
 extern fn rt_env_vars() -> [(text, text)]?
 
 # A runtime tuple is an array-headed heap object, not the inline two-word
-# layout native code uses for a typed `(text, text)`. Native `for (k, v) in`
-# / `.0` / `.1` on a raw snapshot pair therefore reads the header words, so
-# every key and value came back as a non-text word (the Windows owned-child
-# admission then refused each test child with "invalid environment
-# assignment"). These getters are private to the runtime-produced snapshot.
+# layout native code uses for a typed `(text, text)`. Two producers exist:
+#   - a compiler with e9b6b0e24d6 rebuilds the extern result into native
+#     tuples at the call, and the interpreter has real tuples: `pair` is
+#     already usable and must be kept as-is;
+#   - a compiler without it (the frozen Phase 2 pin) hands over the runtime
+#     pair, whose `.0`/`.1` read header words (every owned Windows test child
+#     then got the assignment "=" and admission was refused).
+# These getters are private to the runtime-produced snapshot.
 @unsafe(reason: "validate the runtime-owned environment pair before slot access", capabilities: [ffi])
 extern fn rt_tuple_len(pair: (text, text)) -> i64
 @unsafe(reason: "read a validated environment pair slot; runtime owns both text values", capabilities: [ffi])
 extern fn rt_tuple_get(pair: (text, text), index: i64) -> text?
 
-# None means the snapshot is unavailable or a pair failed validation. Empty
-# values stay present and unchanged.
+# None means the snapshot is unavailable. A pair is never dropped: rt_tuple_len
+# is the validated discriminator (2 for a runtime pair, -1 for anything else),
+# so a runtime pair is rebuilt and any other pair is kept as the language tuple
+# it already is. Empty values stay present and unchanged.
 fn env_vars_nilable() -> [(text, text)]?:
     val snapshot = unsafe(capabilities: [ffi]): rt_env_vars()
     var result: [(text, text)] = []
     if val pairs = snapshot:
         for pair in pairs:
+            var rebuilt = false
             val arity = unsafe(capabilities: [ffi]): rt_tuple_len(pair)
-            if arity != 2: return None
-            val key = unsafe(capabilities: [ffi]): rt_tuple_get(pair, 0)
-            val value = unsafe(capabilities: [ffi]): rt_tuple_get(pair, 1)
-            var complete = false
-            if val key_text = key:
-                if val value_text = value:
-                    # Construct a language tuple instead of exposing the
-                    # runtime header.
-                    result = result.push((key_text, value_text))
-                    complete = true
-            if not complete: return None
+            if arity == 2:
+                val key = unsafe(capabilities: [ffi]): rt_tuple_get(pair, 0)
+                val value = unsafe(capabilities: [ffi]): rt_tuple_get(pair, 1)
+                if val key_text = key:
+                    if val value_text = value:
+                        # Construct a language tuple instead of exposing
+                        # the runtime header.
+                        result = result.push((key_text, value_text))
+                        rebuilt = true
+            if not rebuilt: result = result.push(pair)
         return result
     None
 
