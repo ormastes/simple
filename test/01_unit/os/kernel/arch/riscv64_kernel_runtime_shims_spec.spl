@@ -1,0 +1,42 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# Repro (riscv64 fs-exec kernel link): rt_copy_user_byte, rt_numeric_contains_u64,
+# rt_mutex_lock and rt_mutex_unlock had no definition for the riscv64 kernel.
+# bug: doc/08_tracking/bug/riscv64_fs_exec_kernel_link_undefined_runtime_2026-11-19.md
+# Source-contract spec: there is no riscv64 kernel unit harness; behaviour is
+# proven by the link gate scripts/check/check-simpleos-riscv64-user-elf-opensbi.shs.
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read_text}
+
+val USER_MEM = "src/os/kernel/arch/riscv64/user_memory.spl"
+val SHIMS = "src/os/kernel/arch/riscv64/runtime_shims.spl"
+val ENTRY = "examples/09_embedded/simple_os/arch/riscv64/fs_exec_hello_entry.spl"
+
+describe "riscv64 kernel runtime shims":
+    it "exports rt_copy_user_byte with SUM set around the user load":
+        step("S-mode loads from PTE_U pages fault unless sstatus.SUM is set")
+        val src = file_read_text(USER_MEM)
+        expect(src.contains("@export(\"C\")\nfn rt_copy_user_byte(addr: u64) -> u8:")).to_equal(true)
+        expect(src.contains("csrs_sstatus(SSTATUS_SUM)")).to_equal(true)
+        expect(src.contains("csrc_sstatus(SSTATUS_SUM)")).to_equal(true)
+        expect(src.contains("val SSTATUS_SUM: u64 = 0x40000")).to_equal(true)
+
+    it "exports rt_numeric_contains_u64 over the kernel array ABI":
+        val src = file_read_text(SHIMS)
+        expect(src.contains("@export(\"C\")\nfn rt_numeric_contains_u64(array: i64, value: i64) -> i8:")).to_equal(true)
+        step("kernel arrays are mixed raw/ENCODE_INT, match like simpleos_raw_or_encoded_int")
+        expect(src.contains("item == value or ((item & 7) == 0 and (item >> 3) == value)")).to_equal(true)
+
+    it "exports rt_mutex_lock/unlock matching the RuntimeMutex layout":
+        step("rt_mutex_new: {u32 type=12, u32 size, value@8, u32 locked@16}, handle tagged 0b001")
+        val src = file_read_text(SHIMS)
+        expect(src.contains("@export(\"C\")\nfn rt_mutex_lock(mutex: i64) -> i64:")).to_equal(true)
+        expect(src.contains("@export(\"C\")\nfn rt_mutex_unlock(mutex: i64, new_value: i64) -> i64:")).to_equal(true)
+        expect(src.contains("val RV_HEAP_MUTEX: u64 = 12")).to_equal(true)
+
+    it "keeps both shim modules in the fs-exec closure":
+        val src = file_read_text(ENTRY)
+        expect(src.contains("use os.kernel.arch.riscv64.user_memory.{}")).to_equal(true)
+        expect(src.contains("use os.kernel.arch.riscv64.runtime_shims.{}")).to_equal(true)
