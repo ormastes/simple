@@ -6,7 +6,7 @@ use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{dir_create_all, file_write}
 use std.nogc_sync_mut.io_runtime.{getpid, time_now_unix_micros}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_unit_pick_order_v1, worker_unit_pick_v1,
-    worker_unit_cycle_peers_v1}
+    worker_unit_cycle_peers_v1, worker_unit_pick_with_cycle_peers_v1}
 
 fn fresh_queue() -> text:
     val dir = "build/test_tmp/worker_unit_pick_{getpid()}_{time_now_unix_micros()}"
@@ -45,8 +45,12 @@ describe "per-file unit pick":
         expect(worker_unit_cycle_peers_v1([[1], [2], [0], [0]], 1)).to_equal([2, 0])
         val queue = fresh_queue()
         val paths = ["a.spl", "b.spl", "c.spl", "d.spl"]
-        expect(worker_unit_pick_v1(queue, "u0", paths, [1, 0, 2, 3], 1, edges).unwrap()).to_equal(["b.spl", "a.spl"])
-        expect(worker_unit_pick_v1(queue, "u1", paths, [1, 0, 2, 3], 1, edges).unwrap()).to_equal(["c.spl"])
+        expect(worker_unit_pick_with_cycle_peers_v1(queue, "u0", paths, [1, 0, 2, 3], 1, edges).unwrap()).to_equal(["b.spl", "a.spl"])
+        expect(worker_unit_pick_with_cycle_peers_v1(queue, "u1", paths, [1, 0, 2, 3], 1, edges).unwrap()).to_equal(["c.spl"])
+        # A peer another worker already claimed is skipped; the pick stays valid.
+        val taken = fresh_queue()
+        expect(file_write("{taken}/{sha256_text("a.spl")}.claim", "other\na.spl\nk\n")).to_equal(true)
+        expect(worker_unit_pick_with_cycle_peers_v1(taken, "u0", paths, [1, 0, 2, 3], 1, edges).unwrap()).to_equal(["b.spl"])
 
     it "refuses to pick without a ledger or owner":
         expect(worker_unit_pick_v1("", "u0", ["a.spl"], [0], 1).is_err()).to_equal(true)

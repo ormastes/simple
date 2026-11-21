@@ -69,13 +69,22 @@ peer's HIR is never held.
 
 ## Fix
 
-`worker_unit_pick_v1` takes the admitted import edges. After the batch pick,
-each picked row also picks its free import-cycle peers
+`worker_unit_pick_v1` is unchanged. The unit now calls
+`worker_unit_pick_with_cycle_peers_v1`, which runs it and then, under the
+ledger lock again, also picks the free import-cycle peers of each picked row
 (`worker_unit_cycle_peers_v1`: rows reachable from it that reach it back), so
 the cycle is lowered as one unit with every member a target. The unit raises
 `SIMPLE_HIR_SHARD_CLAIM_LIMIT` to the pick count so the extra rows can be
 claimed. A cycle with more than `WORKER_UNIT_CYCLE_PEER_MAX_V1` (16) peers keeps
 the old pick, to bound one unit's memory.
+
+A peer that another worker already claimed or leased makes
+`_worker_unit_try_pick_path_v1` return 0. The peer is skipped and the pick is
+still correct: every returned path carries this owner's lease and nothing else
+does. It is then partial. The unit holds that peer as an import, exactly as
+before this change, so the cycle can still fail when the other worker has not
+published the peer's sidecar. The lock is released between the base pick and
+the peer pick, so two workers can each take one member of a cycle this way.
 
 ## Verified
 
@@ -83,9 +92,14 @@ the old pick, to bound one unit's memory.
   `a.spl` and `b.spl` in one unit, the shape the fix produces): builds, exit
   code 42. Six variants (field read, construction, both, a printing entry)
   build the same way.
-- `worker_unit_cycle_peers_v1` and the peer-pick loop, copied standalone and
-  compiled with the frozen Stage 2: a 2-cycle picks both rows, a missing `edges`
-  argument and a peer absent from the order pick nothing extra.
+- The pick functions (lease helpers, `worker_unit_pick_v1`,
+  `worker_unit_cycle_peers_v1`, `worker_unit_pick_with_cycle_peers_v1`) copied
+  verbatim into one file with the real stdlib and compiled by the frozen
+  Stage 2 (`SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1`; the per-file lane of that binary
+  cannot build the stdlib closure), run against a real ledger directory: a
+  2-cycle picks `b.spl|a.spl`, the next unit picks `c.spl`, a peer with another
+  worker's `.claim` leaves `b.spl` alone, empty `edges` picks nothing extra, an
+  empty queue is an error.
 
 ## Not verified
 

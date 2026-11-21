@@ -628,6 +628,8 @@ pub const WORKER_UNIT_CYCLE_PEER_MAX_V1: i64 = 16
 
 # Rows on an import cycle with `seed` (reachable from it and reaching it),
 # without `seed`. edges[i] = the rows row i imports.
+# reason: schedule row indices, as worker_admitted_order_v1
+@allow(primitive_api)
 pub fn worker_unit_cycle_peers_v1(edges: [[i64]], seed: i64) -> [i64]:
     var peers: [i64] = []
     if seed < 0 or seed >= edges.len():
@@ -661,12 +663,7 @@ pub fn worker_unit_cycle_peers_v1(edges: [[i64]], seed: i64) -> [i64]:
             peers.push(node)
     peers
 
-# `edges` (optional, row-aligned with `paths`): a picked row on an import cycle
-# takes its free cycle peers past `batch`, so the cycle is lowered in one unit.
-# A unit that held a peer only as a summary surface had no class metadata or
-# method call origin for it (bug per_file_unit_class_import_cycle_2026-11-21).
-pub fn worker_unit_pick_v1(queue: text, owner: text, paths: [text], order: [i64], batch: i64,
-        edges: [[i64]] = []) -> Result<[text], text>:
+pub fn worker_unit_pick_v1(queue: text, owner: text, paths: [text], order: [i64], batch: i64) -> Result<[text], text>:
     var picked: [text] = []
     if queue == "" or owner == "" or owner.contains("\n") or batch <= 0:
         return Err("unit pick needs a HIR ledger, an owner and a batch")
@@ -703,23 +700,47 @@ pub fn worker_unit_pick_v1(queue: text, owner: text, paths: [text], order: [i64]
             next_cursor = if picked.len() == batch and idx < total: idx else: 0
     if not failed and total > 0:
         val _cursor_saved = file_write(_worker_unit_pick_cursor_path_v1(queue), "{next_cursor}")
-    if not failed and edges.len() == paths.len():
-        var seeds: [i64] = []
-        for row in order:
-            if picked.contains(paths[row]):
-                seeds.push(row)
-        for seed in seeds:
-            val peers = worker_unit_cycle_peers_v1(edges, seed)
-            if peers.len() <= WORKER_UNIT_CYCLE_PEER_MAX_V1:
-                for peer in peers:
-                    if order.contains(peer) and not failed:
-                        val status = _worker_unit_try_pick_path_v1(queue, owner, paths[peer], picked.contains(paths[peer]))
-                        if status < 0:
-                            failed = true
-                        if status > 0:
-                            picked.push(paths[peer])
     if not failed and picked.len() == 0:
         failed = not file_write(worker_unit_drained_path_v1(queue, owner), owner)
+    val _unlocked = file_unlock(fd)
+    if failed:
+        return Err("unit pick record publication failed")
+    Ok(picked)
+
+# worker_unit_pick_v1, then each picked row on an import cycle also takes its
+# free cycle peers past `batch` (edges row-aligned with paths), so the cycle is
+# lowered in one unit. A unit that held a peer only as a summary surface had no
+# class metadata or method call origin for it (bug
+# per_file_unit_class_import_cycle_2026-11-21). A peer another worker already
+# claimed or leased is skipped: the pick stays valid, that peer is an import.
+# reason: raw ledger path, owner and row-index arguments, as worker_unit_pick_v1
+@allow(primitive_api)
+pub fn worker_unit_pick_with_cycle_peers_v1(queue: text, owner: text, paths: [text], order: [i64], batch: i64,
+        edges: [[i64]]) -> Result<[text], text>:
+    val base = worker_unit_pick_v1(queue, owner, paths, order, batch)
+    if base.is_err() or edges.len() != paths.len():
+        return base
+    var picked: [text] = base.unwrap()
+    if picked.len() == 0:
+        return Ok(picked)
+    val fd = file_lock("{queue}/.lock", 30)
+    if fd < 0:
+        return Err("HIR ledger lock unavailable for unit cycle pick")
+    var failed = false
+    var seeds: [i64] = []
+    for row in order:
+        if picked.contains(paths[row]):
+            seeds.push(row)
+    for seed in seeds:
+        val peers = worker_unit_cycle_peers_v1(edges, seed)
+        if peers.len() <= WORKER_UNIT_CYCLE_PEER_MAX_V1:
+            for peer in peers:
+                if order.contains(peer) and not failed:
+                    val status = _worker_unit_try_pick_path_v1(queue, owner, paths[peer], picked.contains(paths[peer]))
+                    if status < 0:
+                        failed = true
+                    if status > 0:
+                        picked.push(paths[peer])
     val _unlocked = file_unlock(fd)
     if failed:
         return Err("unit pick record publication failed")
@@ -764,4 +785,4 @@ export worker_hir_restrict_loads_v1, worker_hir_load_allowed_v1, worker_hir_coun
 export worker_unit_pick_lease_v1, worker_unit_pick_owner_dead_v1
 export WorkerAdmittedResolutionsV1, worker_admitted_resolutions_v1, WORKER_ADMITTED_MEMO_ENV_V1
 export worker_unit_pick_order_v1, worker_unit_pick_v1, worker_unit_drained_path_v1, worker_unit_pick_seal_v1
-export worker_unit_cycle_peers_v1, WORKER_UNIT_CYCLE_PEER_MAX_V1
+export worker_unit_cycle_peers_v1, WORKER_UNIT_CYCLE_PEER_MAX_V1, worker_unit_pick_with_cycle_peers_v1
