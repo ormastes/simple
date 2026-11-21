@@ -990,6 +990,24 @@ impl MirLowering:
         self.error_fatal("ambiguous struct/class value owner '{symbol.name}': no module-qualified layout matched", Some(symbol.span))
         ""
 
+    fn record_shape_layout_key(shape: text) -> text:
+        """Fold a name-keyed callable payload shape (bootstrap_fn_ret_ok/opt
+        registries, which record a struct's defining-declaration key) onto
+        this lowering's exact layout key. When the declaration has no
+        unambiguous layout here, answer its bare leaf: that is exactly what the
+        registry used to store. Readers fail closed on a CONFLICTING leaf, but
+        a leaf with a single row resolves to whichever declaration owns that
+        row -- which can be another declaration when the right one registered
+        no layout in this lowering. That pre-existing exposure is unchanged by
+        this fallback, not removed (mir_result_ok_payload_bare_owner_2026-11-22)."""
+        val folded = self.declared_struct_layout_key(shape)
+        if self.struct_field_order.has(folded) and not self.struct_field_order_conflict_warned.contains(folded):
+            return folded
+        val separator = shape.rfind("::")
+        if separator <= 0:
+            return folded
+        shape.substring(separator + 2)
+
     fn struct_value_provenance_key(symbol: HirSymbol) -> text:
         """Value-provenance key for a local whose type is the HIR-resolved
         record `symbol` (call result, Result/Option payload).
@@ -2355,16 +2373,16 @@ impl MirLowering:
                                 case SymbolKind.Class:
                                     bootstrap_fn_ret_ok_shape_register(prescan_call_name, mir_class_identity_raw(module_symbols, prescan_ok_symbol_id.id))
                                 case SymbolKind.Struct:
-                                    # Bare name, matching the spelling
-                                    # `struct_value_syms`/`lookup_or_invalid`
-                                    # consumers expect downstream
-                                    # (method_calls_literals.spl's
-                                    # unresolved-owner recovery) -- NOT
-                                    # composite_layout_key's module-
-                                    # qualified form, which those bare
-                                    # name-keyed lookups never match.
+                                    # Defining-declaration key, same as the
+                                    # Err and Optional arms. A bare name is
+                                    # ambiguous once two modules declare the
+                                    # same struct leaf (`DirEntry`), and the
+                                    # field reader then fails closed with "no
+                                    # exact layout". Consumers fold it through
+                                    # record_shape_layout_key
+                                    # (mir_result_ok_payload_bare_owner_2026-11-22).
                                     bootstrap_fn_ret_ok_shape_register(
-                                        prescan_call_name, prescan_ok_symbol.name)
+                                        prescan_call_name, self.composite_layout_key(prescan_ok_symbol))
                                 case _: ()
                     case _: ()
             case Optional(prescan_optional_inner):
@@ -3699,6 +3717,7 @@ impl MirLowering:
         # from struct_value_syms and looks it up here to dispatch the real
         # method instead of failing.
         var static_method_symbol_ids: Dict<i64, bool> = {}
+        var local_method_return_owner: Dict<i64, text> = {}
         # Cycle-98: values+index (bootstrap-branch-proven shape). The
         # keys+index form silently mismatched aggregate SymbolId keys on
         # re-lookup (cycle-97/98 receipts); values are heap refs whose
@@ -3715,6 +3734,16 @@ impl MirLowering:
             if val module_fn = static_element:
                 if module_fn.is_static:
                     static_method_symbol_ids[self.symbol_id_value(module_fn.symbol)] = true
+                # Exact declared struct return owner for local impl methods;
+                # HirImpl.method_return_struct_names carries only the leaf.
+                match module_fn.return_type.kind:
+                    case Named(local_ret_symbol_id, _):
+                        val optional_local_ret_symbol: HirSymbol? = self.symbols.get_symbol_raw(local_ret_symbol_id.id)
+                        if val present_local_ret_symbol = optional_local_ret_symbol:
+                            val local_ret_symbol: HirSymbol = present_local_ret_symbol
+                            if local_ret_symbol.kind == SymbolKind.Struct:
+                                local_method_return_owner[self.symbol_id_value(module_fn.symbol)] = self.struct_value_provenance_key(local_ret_symbol)
+                    case _: ()
             module_fn_i = module_fn_i + 1
 
         var impl_mi = 0
@@ -3761,7 +3790,14 @@ impl MirLowering:
                     # HirImpl.method_return_struct_names doc comment) so a
                     # chained `.m2()` on this call's RESULT can resolve too
                     # (consumed in method_calls_literals.spl's Unresolved arm).
-                    val impl_ret_struct_name = impl_def.method_return_struct_names.get(impl_method_name)
+                    var impl_ret_struct_name = impl_def.method_return_struct_names.get(impl_method_name)
+                    # A leaf shared by another declaration in the closure
+                    # (`Fat32Bpb` in fat32_core and fat32_hardening) is
+                    # ambiguous to every field reader; record the declaring
+                    # module's layout key (mir_result_ok_payload_bare_owner_2026-11-22).
+                    val impl_method_sid = self.symbol_id_value(impl_method_id)
+                    if local_method_return_owner.has(impl_method_sid):
+                        impl_ret_struct_name = Some(local_method_return_owner[impl_method_sid])
                     if impl_ret_struct_name != None and impl_ret_struct_name != "":
                         self.struct_method_return_names["{impl_type_name}::{impl_method_name}"] = impl_ret_struct_name
                         if impl_type_key != impl_type_name:
