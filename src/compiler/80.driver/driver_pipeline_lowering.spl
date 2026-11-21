@@ -46,7 +46,7 @@ use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indic
     driver_mir_feed_is_identity_v1, driver_mir_projected_source_identities_v1,
     driver_mir_entry_alias_projection_required_v1, driver_mir_owner_disposition_v1,
     driver_mir_schedule_name_v1, driver_mir_placeholder_owner_v1, driver_mir_unit_scoped_v1,
-    driver_mir_excluded_owner_v1}
+    driver_mir_unit_provider_keys_v1, driver_mir_excluded_owner_v1}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_hir_loads_restricted_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_reload_body_v1}
 use compiler.driver.driver_mir_shard_hir_residency_v1.{mir_shard_hir_residency_armed_v1,
@@ -956,6 +956,28 @@ impl CompilerDriver:
                 mir_source_indices = physical_indices
             mir_physical_ownership_active = true
             log_phase("aot:mir_physical_owners logical={physical_owners.len()} physical={self.ctx.mir_feed_modules.len()}")
+        # Scoped unit: the feed above is the schedule (targets only). Held
+        # non-target HIR (import interface HIR) still provides declarations to
+        # lower_module, else imported module globals have no provider.
+        var mir_unit_providers: [HirModule] = []
+        if mir_unit_scoped:
+            var unit_feed_owners: [text] = []
+            for unit_feed_module in self.ctx.mir_feed_modules:
+                mir_unit_providers = mir_unit_providers.push(unit_feed_module)
+                unit_feed_owners = unit_feed_owners.push(unit_feed_module.name)
+            var unit_held_keys: [text] = []
+            var unit_held_owners: [text] = []
+            for unit_held_key in feed_keys:
+                if self.ctx.hir_modules.has(unit_held_key):
+                    val unit_held_hir: HirModule = self.ctx.hir_modules[unit_held_key]
+                    unit_held_keys = unit_held_keys.push(unit_held_key)
+                    unit_held_owners = unit_held_owners.push(unit_held_hir.name)
+            for unit_provider_key in driver_mir_unit_provider_keys_v1(true, unit_feed_owners,
+                    unit_held_keys, unit_held_owners):
+                if self.ctx.hir_modules.has(unit_provider_key):
+                    val unit_provider_hir: HirModule = self.ctx.hir_modules[unit_provider_key]
+                    mir_unit_providers = mir_unit_providers.push(unit_provider_hir)
+            log_phase("aot:mir_unit_providers feed={unit_feed_owners.len()} providers={mir_unit_providers.len()}")
         val mir_scheduled_count = if mir_checked_entry_alias_inventory and mir_physical_ownership_active:
             mir_source_indices.len()
         elif mir_physical_ownership_active:
@@ -1221,7 +1243,8 @@ impl CompilerDriver:
             # fork point below: the key is a per-process seal counter value,
             # so every forked shard inherits this one root key. Sealing after
             # the fork would mint a distinct token per shard.
-            direct_lowering.provider_session_requested_key = mir_provider_session_content_key_v1(self.ctx.mir_feed_modules)
+            direct_lowering.provider_session_requested_key = mir_provider_session_content_key_v1(
+                if mir_unit_scoped: mir_unit_providers else: self.ctx.mir_feed_modules)
             # Ambient bootstrap MIR semantics (MirLowering.ambient_bootstrap_enabled
             # = allow_ambient_bootstrap_policy and SIMPLE_BOOTSTRAP == "1") send
             # every module through lower_module's bootstrap-FLAT function loop.
@@ -1671,7 +1694,8 @@ impl CompilerDriver:
                         # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
                         val module_lower_started_ms = time_now_monotonic_ms()
                         val scoped_entry: Result<MirModule, text> = if val scoped_hir = direct_hir:
-                            direct_lowering.lower_module_transient_scoped(scoped_hir, self.ctx.mir_feed_modules, mir_schedule_pos == 0)
+                            direct_lowering.lower_module_transient_scoped(scoped_hir,
+                                if mir_unit_scoped: mir_unit_providers else: self.ctx.mir_feed_modules, mir_schedule_pos == 0)
                         else:
                             Err("MIR lowering missing HIR module for {name_direct}")
                         # Per-module MIR cost receipt, slow modules only (bounded output):
