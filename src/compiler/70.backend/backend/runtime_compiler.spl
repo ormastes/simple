@@ -556,7 +556,9 @@ fn _cc_verify_compiles(cc: text) -> bool:
         args = ["/nologo", "/c", "/Fo{obj}", src]
     else:
         args = ["-c", "-o", obj, src]
-    val (out, err, code) = process_run(cc, args)
+    # A spawn that died before the compiler ran is not a verdict on the
+    # compiler: retry it instead of rejecting a healthy toolchain.
+    val (out, err, code) = _cc_probe_run_retrying(cc, args, false)
     val ok = code == 0 and file_exists(obj)
     if runtime_compile_trace_enabled():
         print "[CC-VERIFY] {cc}: exit={code} obj_exists={ok}"
@@ -569,20 +571,69 @@ fn _cc_verify_compiles(cc: text) -> bool:
     file_delete(obj)
     ok
 
+pub fn windows_c_compiler_candidates_v1(flavor: text) -> [text]:
+    """Windows C driver order per toolchain flavor (windows_link_flavor_select).
+
+    Default / "gnu": llvm-mingw (or msys2 clang64) `clang` ONLY -- MSVC drivers
+    are never a fallback, because their objects carry the MSVC ABI and cannot
+    link on the GNU lane. "msvc" (`--msvc`, SIMPLE_WINDOWS_ABI=msvc or a
+    `*-windows-msvc` target): clang-cl, cl.exe, then clang. GCC never."""
+    if flavor == "msvc":
+        return ["clang-cl", "cl.exe", "clang"]
+    ["clang"]
+
+pub fn windows_clang_env_dirs_v1(llvm_bin: text, llvm_mingw_root: text) -> [text]:
+    """Explicit clang bin dirs probed BEFORE PATH on the GNU lane:
+    SIMPLE_LLVM_BIN, then SIMPLE_LLVM_MINGW_ROOT/bin (same vars as the LLVM
+    tool lookup's env_tool_dirs). The LLVM_SYS_* prefixes are deliberately
+    absent: those are MSVC-targeted LLVM installs."""
+    var dirs: [text] = []
+    if llvm_bin != "":
+        dirs.push(llvm_bin)
+    if llvm_mingw_root != "":
+        dirs.push(llvm_mingw_root + "/bin")
+    dirs
+
+pub fn cc_probe_exit_is_transient_v1(code: i64) -> bool:
+    """0xC0000142 STATUS_DLL_INIT_FAILED (signed or unsigned): a Windows process
+    failed to START under memory / desktop-heap pressure. It says nothing about
+    the compiler, so a probe that hits it is retried, never taken as a verdict."""
+    code == -1073741502 or code == 3221225794
+
+val _CC_PROBE_MAX_TRANSIENT_RETRIES = 3
+
+fn _cc_probe_run_retrying(cmd: text, args: [text], shell: bool) -> (text, text, i64):
+    """Run a detection probe, re-running it while it fails transiently (bounded)."""
+    var attempt = 0
+    while attempt < _CC_PROBE_MAX_TRANSIENT_RETRIES:
+        val (out, err, code) = _cc_probe_run_once(cmd, args, shell)
+        if not cc_probe_exit_is_transient_v1(code):
+            return (out, err, code)
+        attempt = attempt + 1
+        print "[cc-detect] {cmd}: transient spawn failure exit={code}; retry {attempt}/{_CC_PROBE_MAX_TRANSIENT_RETRIES}"
+    _cc_probe_run_once(cmd, args, shell)
+
+fn _cc_probe_run_once(cmd: text, args: [text], shell: bool) -> (text, text, i64):
+    if shell:
+        return backend_shell_tuple(cmd)
+    process_run(cmd, args)
+
 fn _find_c_compiler_windows() -> text:
-    """Find a C compiler on Windows (clang-cl / cl.exe on MSVC, llvm-mingw clang on GNU).
+    """Find a C compiler on Windows: llvm-mingw clang by default, clang-cl /
+    cl.exe only on the explicit MSVC lane (windows_c_compiler_candidates_v1).
 
     Every candidate is verified by actually compiling a trivial file
     (_cc_verify_compiles) — a `where` hit alone selects nothing."""
-    # MinGW: llvm-mingw clang only (the windows-gnu lane never uses GCC).
-    if _is_mingw():
-        val mingw_candidates = ["clang"]
-        for candidate in mingw_candidates:
-            val resolved = _first_verified_windows_compiler(candidate)
-            if resolved != "":
-                return resolved
+    val mingw = _is_mingw()
+    var tried: [text] = []
+    if mingw:
+        for dir in windows_clang_env_dirs_v1(_env_text("SIMPLE_LLVM_BIN"), _env_text("SIMPLE_LLVM_MINGW_ROOT")):
+            val direct = "{_msys_drive_path(dir)}/clang.exe"
+            tried.push(direct)
+            if file_exists(direct) and _cc_verify_compiles(direct):
+                return direct
 
-    # clang-cl BEFORE cl.exe on the MSVC lane. cl.exe passes the trivial
+    # MSVC lane: clang-cl BEFORE cl.exe. cl.exe passes the trivial
     # _cc_verify_compiles probe and then cannot compile the C runtime at all:
     # measured 2026-09-01 on cl.exe 19.44.35228, src/runtime/runtime.c yields
     # C1189 ("C atomic support is not enabled" — stdatomic needs BOTH /std:c11
@@ -591,18 +642,9 @@ fn _find_c_compiler_windows() -> text:
     # clang-cl compiles the same file clean with the flags below. clang-cl is
     # also the compiler the stage-2 candidate itself was built with, so probing
     # the candidate with a DIFFERENT compiler than built it is its own defect.
-    # Windows-only ordering change: the MinGW branch above and the Unix path in
-    # find_c_compiler are untouched.
-    val msvc_candidates = ["clang-cl", "cl.exe"]
-    for candidate in msvc_candidates:
-        val resolved = _first_verified_windows_compiler(candidate)
-        if resolved != "":
-            return resolved
-
-    # Try clang on PATH (works in both MSVC and MinGW). Never gcc: CLAUDE.md
-    # pins Windows to llvm-mingw clang / clang-cl.
-    val candidates = ["clang"]
-    for candidate in candidates:
+    # These are reached ONLY on the MSVC lane; the default lane is clang-only.
+    for candidate in windows_c_compiler_candidates_v1(if mingw: "gnu" else: "msvc"):
+        tried.push(candidate)
         val resolved = _first_verified_windows_compiler(candidate)
         if resolved != "":
             return resolved
@@ -613,7 +655,9 @@ fn _find_c_compiler_windows() -> text:
     # bootstrap cycle to re-diagnose. Always say what was attempted.
     print "[cc-detect] no C compiler verified on Windows."
     print "[cc-detect] temp dir: {_get_temp_dir()}"
-    print "[cc-detect] tried: clang-cl, cl.exe, clang (each `where` + a real compile; gcc is never used)"
+    print "[cc-detect] tried: {tried.join(', ')} (each `where` + a real compile; gcc is never used)"
+    if mingw:
+        print "[cc-detect] default lane is llvm-mingw clang: set SIMPLE_LLVM_MINGW_ROOT (or SIMPLE_LLVM_BIN) or put its bin on PATH; clang-cl/cl.exe need the MSVC lane (--msvc / SIMPLE_WINDOWS_ABI=msvc)"
     print "[cc-detect] set SIMPLE_CC to override, or SIMPLE_COMPILER_TRACE=1 for per-candidate exit codes"
     ""
 
@@ -623,7 +667,7 @@ fn _first_verified_windows_compiler(candidate: text) -> text:
     `where` may report multiple installations. Verifying the bare candidate
     name only retries the first PATH hit and can never reach a later healthy
     toolchain when the first executable has a missing DLL."""
-    val (out, err, code) = backend_shell_tuple("where {candidate} 2>nul")
+    val (out, err, code) = _cc_probe_run_retrying("where {candidate} 2>nul", [], true)
     if code != 0:
         return ""
     for path in out.split("\n"):
