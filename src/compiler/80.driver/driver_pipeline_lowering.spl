@@ -46,7 +46,7 @@ use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indic
     driver_mir_feed_is_identity_v1, driver_mir_projected_source_identities_v1,
     driver_mir_entry_alias_projection_required_v1, driver_mir_owner_disposition_v1,
     driver_mir_schedule_name_v1, driver_mir_placeholder_owner_v1, driver_mir_unit_scoped_v1,
-    driver_mir_excluded_owner_v1}
+    driver_mir_excluded_owner_v1, driver_mir_unit_provider_rows_v1}
 use compiler.driver.driver_worker_surface_closure_v1.{worker_hir_loads_restricted_v1}
 use compiler.driver.driver_hir_cache.{hir_cache_reload_body_v1}
 use compiler.driver.driver_mir_shard_hir_residency_v1.{mir_shard_hir_residency_armed_v1,
@@ -1221,7 +1221,36 @@ impl CompilerDriver:
             # fork point below: the key is a per-process seal counter value,
             # so every forked shard inherits this one root key. Sealing after
             # the fork would mint a distinct token per shard.
-            direct_lowering.provider_session_requested_key = mir_provider_session_content_key_v1(self.ctx.mir_feed_modules)
+            # A scoped unit's feed holds only its targets. The HIR it holds for
+            # imports (closure or interface-only) is still the declaration
+            # provider set lower_module needs; it is never scheduled.
+            var mir_provider_modules: [HirModule] = self.ctx.mir_feed_modules
+            if mir_unit_scoped:
+                var provider_feed_names: [text] = []
+                var provider_feed_i = 0
+                while provider_feed_i < self.ctx.mir_feed_modules.len():
+                    provider_feed_names = provider_feed_names.push(self.ctx.mir_feed_modules[provider_feed_i].name)
+                    provider_feed_i = provider_feed_i + 1
+                val provider_held_keys = self.ctx.hir_modules.keys()
+                var provider_held_names: [text] = []
+                for provider_held_key in provider_held_keys:
+                    var provider_held_name = ""
+                    if self.ctx.hir_modules.has(provider_held_key):
+                        val provider_held_hir: HirModule = self.ctx.hir_modules[provider_held_key]
+                        provider_held_name = provider_held_hir.name
+                    provider_held_names = provider_held_names.push(provider_held_name)
+                val provider_rows = driver_mir_unit_provider_rows_v1(true, provider_feed_names, provider_held_names)
+                if provider_rows.len() > 0:
+                    mir_provider_modules = []
+                    provider_feed_i = 0
+                    while provider_feed_i < self.ctx.mir_feed_modules.len():
+                        mir_provider_modules = mir_provider_modules.push(self.ctx.mir_feed_modules[provider_feed_i])
+                        provider_feed_i = provider_feed_i + 1
+                    for provider_row in provider_rows:
+                        if self.ctx.hir_modules.has(provider_held_keys[provider_row]):
+                            mir_provider_modules = mir_provider_modules.push(self.ctx.hir_modules[provider_held_keys[provider_row]])
+                print "[mir-setup] unit-declaration-providers targets={self.ctx.mir_feed_modules.len()} held={provider_rows.len()}"
+            direct_lowering.provider_session_requested_key = mir_provider_session_content_key_v1(mir_provider_modules)
             # Ambient bootstrap MIR semantics (MirLowering.ambient_bootstrap_enabled
             # = allow_ambient_bootstrap_policy and SIMPLE_BOOTSTRAP == "1") send
             # every module through lower_module's bootstrap-FLAT function loop.
@@ -1671,7 +1700,7 @@ impl CompilerDriver:
                         # @workaround bug=mir_unresolved_method_inferred_receiver_2026-10-24
                         val module_lower_started_ms = time_now_monotonic_ms()
                         val scoped_entry: Result<MirModule, text> = if val scoped_hir = direct_hir:
-                            direct_lowering.lower_module_transient_scoped(scoped_hir, self.ctx.mir_feed_modules, mir_schedule_pos == 0)
+                            direct_lowering.lower_module_transient_scoped(scoped_hir, mir_provider_modules, mir_schedule_pos == 0)
                         else:
                             Err("MIR lowering missing HIR module for {name_direct}")
                         # Per-module MIR cost receipt, slow modules only (bounded output):

@@ -1,7 +1,8 @@
 use std.spec.*
 use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1, driver_mir_feed_is_identity_v1,
     driver_mir_owner_disposition_v1, driver_mir_schedule_name_v1, driver_mir_placeholder_owner_v1,
-    driver_mir_unit_scoped_v1, driver_mir_excluded_owner_v1, driver_go_to_end_alias_rows_v1}
+    driver_mir_unit_scoped_v1, driver_mir_excluded_owner_v1, driver_go_to_end_alias_rows_v1,
+    driver_mir_unit_provider_rows_v1}
 
 val MIR_ALIAS_DIGEST = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 val MIR_OTHER_DIGEST = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -224,3 +225,20 @@ describe "go-to-end HIR failure excludes every alias row of the failed file":
         val aliases = driver_go_to_end_alias_rows_v1(
             ["app.bad", "gen.provider"], ["", ""], ["app.bad"])
         expect(aliases.len()).to_equal(0)
+
+# A scoped unit's feed is its targets only, yet lower_module binds imported
+# globals and class layouts from the provider list alone. Native repro (frozen
+# Stage 2 0d8a3269bec, per-file pool): `use dfx.consts.{DFX_LIMIT}` failed
+# "missing provider declaration for imported global" and an imported class Err
+# payload failed "Result Err record has no exact provider layout".
+describe "declaration providers of a module-scoped per-file unit":
+    it "adds every held non-target module once":
+        val rows = driver_mir_unit_provider_rows_v1(true, ["src/dfx/usec.spl"],
+            ["src/dfx/usec.spl", "src/dfx/consts.spl", "src/dfx/consts.spl", "src/dfx/errs.spl"])
+        expect(rows.len()).to_equal(2)
+        expect(rows[0]).to_equal(1)
+        expect(rows[1]).to_equal(3)
+
+    it "adds nothing outside a scoped unit or for a target":
+        expect(driver_mir_unit_provider_rows_v1(false, ["src/dfx/usec.spl"], ["src/dfx/consts.spl"]).len()).to_equal(0)
+        expect(driver_mir_unit_provider_rows_v1(true, ["src/dfx/usec.spl"], ["src/dfx/usec.spl"]).len()).to_equal(0)
