@@ -114,17 +114,24 @@ pub fn llvm_llc_object_argv_v1(config: LlvmTargetConfig, opt_level: Optimization
 
 pub fn llvm_clang_object_args(triple: text, cpu: text, has_features: bool,
         features: text, opt_flag: text, target_args: bool, obj_path: text,
-        input_path: text) -> [text]:
+        input_path: text, abi: text = "") -> [text]:
     """clang equivalent of compile_ir_to_object_path's llc argv.
 
-    Same CPU/feature arguments as llc. The opt level and --target are always
-    passed: llc defaults to -O2 and the module's triple, clang to -O0 and its
-    own default target. -fPIC is dropped for Windows (COFF) targets.
+    Same CPU/feature/ABI arguments as llc. The opt level and --target are
+    always passed: llc defaults to -O2 and the module's triple, clang to -O0
+    and its own default target. -fPIC is dropped for Windows (COFF) targets.
     """
+    # -disable-llvm-passes keeps llc parity: codegen at opt_flag, no IR pipeline
+    # (llc -O2 never ran it; it would add per-module time/RSS the pool budgets
+    # were tuned without).
     var args = ["-c", "-x", "ir", "-ffunction-sections", "-fdata-sections", opt_flag,
-        "--target={triple}"]
+        "-Xclang", "-disable-llvm-passes", "--target={triple}"]
     if not triple.contains("windows"):
         args.push("-fPIC")
+    if triple.contains("windows-msvc"):
+        # The clang driver stamps the COFF header with the build time for MSVC
+        # triples (llc writes 0); objects must stay byte-reproducible.
+        args.push("-mno-incremental-linker-compatible")
     if target_args:
         # llc takes -mcpu=generic; clang has no "generic" x86 -march (its default).
         if cpu == "generic" or cpu == "":
@@ -140,10 +147,66 @@ pub fn llvm_clang_object_args(triple: text, cpu: text, has_features: bool,
                     args.push("-target-feature")
                     args.push("-Xclang")
                     args.push(feature)
+        # Only RISC-V's clang -mabi takes the llc -target-abi spelling; ARM
+        # triple ABIs (eabihf/gnueabihf) are rejected as an unknown -mabi.
+        if abi != "" and triple.starts_with("riscv"):
+            args.push("-mabi={abi}")
     args.push("-o")
     args.push(obj_path)
     args.push(input_path)
     args
+
+# ----------------------------------------------------------------------------
+# IR -> object tool selection: clang by default, llc only as the fallback.
+# llvm-mingw ships no llc at all, and a long Windows build lost 1472 modules to
+# transient llc spawn failures; clang is the driver every lane already needs
+# for the link. Serial compile, the codegen pool and the scope warm-up all
+# select through these functions so they never disagree on the tool.
+# ----------------------------------------------------------------------------
+
+pub fn llvm_object_llc_v1() -> text:
+    """llc for IR -> object, or "" when clang is the tool (the default)."""
+    # Strict admission keeps its admitted llc: the strict `cc` role is the
+    # link driver and may be clang-cl, which does not take this argv.
+    if not native_tool_strict_requested_v1() and find_clang() != "":
+        return ""
+    find_llc()
+
+pub fn llvm_object_tool_for_v1(llc: text) -> text:
+    """The tool for one llvm_object_llc_v1() answer: that llc, else clang.
+
+    A caller that spawns many jobs resolves llc ONCE and derives both the tool
+    and every argv (llvm_object_argv_v1) from that one answer: a transient
+    probe miss is not cached, so re-resolving per job could pair llc with
+    clang argv.
+    """
+    if llc != "": llc else: find_clang()
+
+pub fn llvm_object_tool_v1() -> text:
+    """The IR -> object tool: clang, else llc, else ""."""
+    llvm_object_tool_for_v1(llvm_object_llc_v1())
+
+pub fn llvm_object_argv_v1(llc: text, config: LlvmTargetConfig,
+        opt_level: OptimizationLevel, bootstrap_io: bool, direct_argv: bool,
+        obj_path: text, input_path: text) -> [text]:
+    """argv (without argv[0]) for the selected tool: llc when `llc` is set, else clang.
+
+    Shared by compile_ir_to_object (serial) and the native codegen process
+    pool, so both lanes run the identical invocation.
+    """
+    if llc != "":
+        return llvm_llc_object_argv_v1(config, opt_level, bootstrap_io,
+            direct_argv, obj_path, input_path)
+    var cpu = config.to_cpu_string()
+    if cpu == "x86-64-v1":
+        cpu = "x86-64"
+    val abi: text = match config.abi:
+        case Some(target_abi): target_abi
+        case None: ""
+    llvm_clang_object_args(config.triple.to_text(), cpu,
+        config.features.len() > 0, config.to_feature_string(),
+        llvm_llc_opt_flag(opt_level), direct_argv or not bootstrap_io,
+        obj_path, input_path, abi)
 
 fn extract_symbols_nm(obj_path: text) -> [CompiledSymbol]:
     """Extract defined symbols from an object file using nm.
@@ -278,8 +341,8 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
     val codegen_error = llvm_codegen_error_from_ir(llvm_ir)
     if codegen_error != "":
         return Err(codegen_error)
-    # Find llc binary (or clang when LLVM ships clang without llc on Windows)
-    val llc = find_llc()
+    # clang compiles the IR by default; llc only when no clang resolves.
+    val llc = llvm_object_llc_v1()
     val clang = if llc == "": find_clang() else: ""
     if llc == "" and clang == "":
         var probed = ""
@@ -350,17 +413,8 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
     val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     val direct_argv = retain_target_arguments or target.ends_with("-simpleos")
     val tool = if llc != "": llc else: clang
-    var cpu = config.to_cpu_string()
-    if cpu == "x86-64-v1":
-        cpu = "x86-64"
-    val llc_args = if llc != "":
-        llvm_llc_object_argv_v1(config, opt_level, bootstrap_io,
-            direct_argv, obj_path, compile_input_path)
-    else:
-        llvm_clang_object_args(config.triple.to_text(), cpu,
-            config.features.len() > 0, config.to_feature_string(),
-            llvm_llc_opt_flag(opt_level), direct_argv or not bootstrap_io,
-            obj_path, compile_input_path)
+    val llc_args = llvm_object_argv_v1(llc, config, opt_level, bootstrap_io,
+        direct_argv, obj_path, compile_input_path)
     val cmd = "{tool} " + llc_args.join(" ") + " 2>&1"
     var llc_out = ""
     var llc_err = ""
@@ -516,8 +570,8 @@ pub fn compile_ir_to_object_path(
     val ir_path = stage_dir + "/module.ll"
     val bitcode_path = stage_dir + "/module.bc"
     val staged_obj_path = stage_dir + "/module.o"
-    # No llc (llvm-mingw ships none): clang compiles the same IR to an object.
-    val llc = find_llc()
+    # clang compiles the IR by default; llc only when no clang resolves.
+    val llc = llvm_object_llc_v1()
     val clang = if llc == "": find_clang() else: ""
     if llc == "" and clang == "":
         return llvm_object_stage_fail(
@@ -575,10 +629,13 @@ pub fn compile_ir_to_object_path(
     args.push(compile_input_path)
     val tool = if llc != "": llc else: clang
     if llc == "":
+        val clang_abi: text = match config.abi:
+            case Some(target_abi): target_abi
+            case None: ""
         args = llvm_clang_object_args(frozen_target_triple, cpu,
             config.features.len() > 0, config.to_feature_string(), opt_flag,
             retain_target_arguments or not bootstrap_io, staged_obj_path,
-            compile_input_path)
+            compile_input_path, clang_abi)
     val (llc_out, llc_err, llc_code) = process_run(tool, args)
     if llvm_llc_error_diagnostic(llc_code, llc_out, llc_err, tool, compile_input_path) != "":
         return llvm_object_stage_fail(stage_dir, diagnostic_path,
@@ -855,6 +912,7 @@ export llvm_target_flags, generate_wasm_runtime_declarations
 export compile_ir_to_wasm, to_mir_opt_level
 export compile_ir_to_object
 export compile_ir_to_object_path, llvm_llc_object_argv_v1
+export llvm_object_llc_v1, llvm_object_tool_for_v1, llvm_object_tool_v1, llvm_object_argv_v1
 export find_llc, find_opt, opt_available, llc_available
 export find_wasm_ld, find_wasm_opt, find_wasi_sysroot
 # ============================================================================

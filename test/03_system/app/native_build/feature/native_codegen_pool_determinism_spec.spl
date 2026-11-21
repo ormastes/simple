@@ -5,15 +5,15 @@
 """
 ## Purpose and audience
 Purpose: prove that the native codegen process pool emits objects that are
-byte-identical to the serial lane, with real concurrent llc children, and that
+byte-identical to the serial lane, with real concurrent object-tool children, and that
 the first object is published within the 10 s budget.
 Audience: compiler engineers who maintain native-build step 5, and release
 reviewers who need determinism evidence for parallel codegen.
 Plan: doc/03_plan/compiler/native_codegen/step5_real_parallelism_plan_2026-09-04.md (P2)
 
-Requires `llc` on PATH (find_llc). The serial side is the serial lane's own
+Requires clang (the default object tool) or llc on PATH (llvm_object_tool_v1). The serial side is the serial lane's own
 compile_ir_to_object; the parallel side is the pool driven by the driver's own
-llc argv (llvm_module_llc_argv_v1), so any drift between the two lanes fails
+argv (llvm_module_llc_argv_v1), so any drift between the two lanes fails
 this spec.
 """
 
@@ -21,7 +21,8 @@ use std.spec
 use compiler.driver.driver_build.native_codegen_pool_v1.{native_codegen_pool_run_v1,
     native_codegen_receipt_path_v1, NATIVE_CODEGEN_JOB_PASS_V1}
 use compiler.backend.backend_helpers.{llvm_module_llc_argv_v1}
-use compiler.backend.llvm_backend_tools.{compile_ir_to_object, find_llc}
+use compiler.backend.llvm_backend_tools.{compile_ir_to_object, llvm_object_llc_v1,
+    llvm_object_tool_for_v1}
 use compiler.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use std.io_runtime.{dir_create_all, dir_exists, file_exists, file_read, file_write, getpid}
@@ -55,10 +56,10 @@ fn fixture_ir(index: i64) -> text:
     body = body + "define ptr @" + sym + "_msg() " + open + "\nentry:\n  ret ptr @msg_{index}\n" + close + "\n"
     body
 
-fn emit_fixture(index: i64, ir_path: text, obj_path: text) -> [text]:
+fn emit_fixture(index: i64, ir_path: text, obj_path: text, pool_llc: text) -> [text]:
     if not file_write(ir_path, fixture_ir(index)):
         return []
-    llvm_module_llc_argv_v1(false, 2, "", obj_path, ir_path)
+    llvm_module_llc_argv_v1(false, 2, "", obj_path, ir_path, pool_llc)
 
 fn bytes_equal(a: [u8], b: [u8]) -> bool:
     if a.len() != b.len():
@@ -73,8 +74,9 @@ fn bytes_equal(a: [u8], b: [u8]) -> bool:
 describe "native codegen pool determinism":
     # @manual scenario evidence
     it "emits objects byte-identical to the serial lane with concurrent llc children":
-        step("Require llc for both lanes")
-        val llc = find_llc()
+        step("Require the object tool (clang, else llc) for both lanes")
+        val pool_llc = llvm_object_llc_v1()
+        val llc = llvm_object_tool_for_v1(pool_llc)
         expect(llc.len()).to_be_greater_than(0)
 
         step("Run the pool: six modules on three llc workers")
@@ -87,7 +89,7 @@ describe "native codegen pool determinism":
             names.push(fixture_name(index))
             index = index + 1
         val result = native_codegen_pool_run_v1(llc, names, 3, stage, ledger,
-            emit_fixture(_1, _2, _3))
+            emit_fixture(_1, _2, _3, pool_llc))
         expect(result.passed).to_equal(FIXTURE_COUNT)
         expect(result.failed).to_equal(0)
         expect(result.skipped).to_equal(0)

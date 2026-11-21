@@ -1,7 +1,9 @@
 # @cover src/compiler/70.backend/backend/llvm_backend_tools.spl
 
-use compiler.backend.backend.backend_types.{OptimizationLevel}
-use compiler.backend.llvm_backend_tools.{llvm_llc_opt_flag, llvm_clang_object_args}
+use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
+use compiler.backend.llvm_target.{LlvmTargetConfig}
+use compiler.backend.llvm_backend_tools.{llvm_llc_opt_flag, llvm_clang_object_args,
+    llvm_object_argv_v1, llvm_llc_object_argv_v1}
 
 describe "LLVM llc optimization argument policy":
     it "uses only numeric optimization levels accepted by llc":
@@ -18,7 +20,7 @@ describe "clang fallback when llc is absent":
         val win = llvm_clang_object_args("x86_64-w64-windows-gnu", "x86-64", false, "",
             "-O2", false, "m.o", "m.ll")
         expect(win).to_equal(["-c", "-x", "ir", "-ffunction-sections", "-fdata-sections",
-            "-O2", "--target=x86_64-w64-windows-gnu", "-o", "m.o", "m.ll"])
+            "-O2", "-Xclang", "-disable-llvm-passes", "--target=x86_64-w64-windows-gnu", "-o", "m.o", "m.ll"])
         val linux = llvm_clang_object_args("x86_64-unknown-linux-gnu", "x86-64", true,
             "+avx2", "-O3", true, "m.o", "m.ll")
         expect(linux).to_contain("-fPIC")
@@ -28,4 +30,32 @@ describe "clang fallback when llc is absent":
         val generic = llvm_clang_object_args("x86_64-w64-windows-gnu", "generic", false, "",
             "-O2", true, "m.o", "m.ll")
         expect(generic).to_equal(["-c", "-x", "ir", "-ffunction-sections", "-fdata-sections",
-            "-O2", "--target=x86_64-w64-windows-gnu", "-o", "m.o", "m.ll"])
+            "-O2", "-Xclang", "-disable-llvm-passes", "--target=x86_64-w64-windows-gnu", "-o", "m.o", "m.ll"])
+
+    it "carries llc's -target-abi as clang's -mabi":
+        val riscv = llvm_clang_object_args("riscv64-unknown-linux-gnu", "generic-rv64", false,
+            "", "-O2", true, "m.o", "m.ll", "lp64d")
+        expect(riscv).to_contain("-mabi=lp64d")
+        expect(riscv).to_contain("-mcpu=generic-rv64")
+
+    it "never passes an ARM triple ABI as -mabi (clang rejects eabihf)":
+        val arm = llvm_clang_object_args("armv7-unknown-none-eabihf", "cortex-a7", false,
+            "", "-O2", true, "m.o", "m.ll", "eabihf")
+        expect(arm.join(" ").contains("-mabi=")).to_equal(false)
+
+    it "keeps MSVC COFF objects reproducible (no header timestamp)":
+        val msvc = llvm_clang_object_args("x86_64-pc-windows-msvc", "x86-64", false, "",
+            "-O2", false, "m.o", "m.ll")
+        expect(msvc).to_contain("-mno-incremental-linker-compatible")
+
+describe "IR -> object tool argv: clang by default, llc as the fallback":
+    it "builds clang argv when no llc is selected and llc argv when one is":
+        val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.X86_64, None)
+        val clang_argv = llvm_object_argv_v1("", config, OptimizationLevel.Speed, false, false, "o.o", "i.ll")
+        expect(clang_argv[0]).to_equal("-c")
+        expect(clang_argv[1]).to_equal("-x")
+        expect(clang_argv[2]).to_equal("ir")
+        expect(clang_argv).to_contain("-O2")
+        expect(clang_argv[clang_argv.len() - 1]).to_equal("i.ll")
+        val llc_argv = llvm_object_argv_v1("llc", config, OptimizationLevel.Speed, false, false, "o.o", "i.ll")
+        expect(llc_argv).to_equal(llvm_llc_object_argv_v1(config, OptimizationLevel.Speed, false, false, "o.o", "i.ll"))
