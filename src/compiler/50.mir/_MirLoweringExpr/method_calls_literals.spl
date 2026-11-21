@@ -1639,10 +1639,13 @@ impl MirLowering:
             # still copied first so a miss below keeps the fail-closed reader.
             val receiver_owner_known = self.struct_value_syms.contains(receiver_local.id)
             var receiver_owner_ambiguous = false
+            var receiver_owner_leaf = ""
             if receiver_owner_known:
                 val receiver_owner = self.struct_value_syms[receiver_local.id]
                 self.struct_value_syms[result_local_uw.id] = receiver_owner
                 receiver_owner_ambiguous = self.struct_field_order_conflict_warned.contains(receiver_owner)
+                val receiver_owner_sep = receiver_owner.rfind("::")
+                receiver_owner_leaf = if receiver_owner_sep > 0: receiver_owner.substring(receiver_owner_sep + 2) else: receiver_owner
             if (not receiver_owner_known or receiver_owner_ambiguous) and inner_type_uw != None:
                 # The receiver is an Option HANDLE -- a boxed enum payload, not
                 # a construction site -- so it carries no struct_value_syms
@@ -1668,7 +1671,14 @@ impl MirLowering:
                                         case SymbolKind.Class: inner_owner_name = mir_class_identity_raw(self.symbols, inner_owner_symbol.id)
                                         case SymbolKind.Struct: inner_owner_name = self.struct_value_provenance_key(inner_owner_sym)
                                         case _: ()
-                                    self.struct_value_syms[result_local_uw.id] = inner_owner_name
+                                    # Override an ambiguous receiver leaf only
+                                    # with a declaration of the SAME leaf:
+                                    # inner_type_uw may carry another module's
+                                    # SymbolId, and a different leaf would be a
+                                    # silent wrong layout. Otherwise keep the
+                                    # copied leaf (fail closed).
+                                    if not receiver_owner_ambiguous or inner_owner_sym.name == receiver_owner_leaf:
+                                        self.struct_value_syms[result_local_uw.id] = inner_owner_name
                             case _: ()
                     case _: ()
             # `val f = self.op.unwrap(); f(x)` on an `Option<fn(..) -> R>`
