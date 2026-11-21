@@ -1398,20 +1398,23 @@ pub(crate) fn exec_assignment(
         // pre-bound bindings and is cleared by any genuine local declaration.
         // doc/08_tracking/bug/implicit_self_field_assignment_still_silent_in_plain_fn_methods_2026-08-31.md
         if is_first_assignment || env.is_field_prebind(name) {
-            if let Some(Value::Object { class, fields }) = env.get("self") {
-                if fields.contains_key(name) {
-                    let ctx = ErrorContext::new()
-                        .with_code(codes::INVALID_ASSIGNMENT)
-                        .with_help(format!(
-                            "write `self.{name} = ...` to assign the field; `self` is implicit only in the parameter list, not in field access"
-                        ));
-                    return Err(CompileError::semantic_with_context(
-                        format!(
-                            "invalid assignment: `{name}` is a field of `{class}`; a bare `{name} = ...` creates a new local and leaves `self.{name}` unchanged"
-                        ),
-                        ctx,
+            let shadowed_class = match env.get("self") {
+                Some(Value::Object { class, fields }) if fields.contains_key(name) => Some(class.clone()),
+                Some(Value::ClassInstance(instance)) if instance.field(name).is_some() => Some(instance.class().to_string()),
+                _ => None,
+            };
+            if let Some(class) = shadowed_class {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_ASSIGNMENT)
+                    .with_help(format!(
+                        "write `self.{name} = ...` to assign the field; `self` is implicit only in the parameter list, not in field access"
                     ));
-                }
+                return Err(CompileError::semantic_with_context(
+                    format!(
+                        "invalid assignment: `{name}` is a field of `{class}`; a bare `{name} = ...` creates a new local and leaves `self.{name}` unchanged"
+                    ),
+                    ctx,
+                ));
             }
         }
 
