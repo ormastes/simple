@@ -59,22 +59,8 @@ fn _bool_targets(lines: [text], findings: [PrimitiveApiFinding]) -> [PrimitiveAp
         out.push(f)
     out
 
-# 0-based index of the line a unit declaration goes in front of: just after the
-# leading `use` block (blank and comment lines may sit inside it), else 0.
-fn _unit_insert_line(lines: [text]) -> i64:
-    var at = 0
-    var i = 0
-    while i < lines.len():
-        val t = lines[i].trim()
-        if t.starts_with("use "):
-            at = i + 1
-        elif t != "" and not t.starts_with("#"):
-            break
-        i = i + 1
-    at
-
 # Offset of the start of line `index`, counted the same way as the finding
-# offsets (`line.len()` plus one for the newline).
+# offsets (`byte_len()` plus one for the newline).
 fn _line_offset(lines: [text], index: i64) -> i64:
     var off = 0
     var i = 0
@@ -83,11 +69,17 @@ fn _line_offset(lines: [text], index: i64) -> i64:
         i = i + 1
     off
 
-# The declaration text inserted at line `at`, spaced to keep the file tidy.
-fn _unit_decl_text(lines: [text], at: i64, unit_name: text) -> text:
-    val lead = if at > 0: "\n" else: ""
-    val tail = if at >= lines.len() or lines[at].trim() == "": "" else: "\n"
-    lead + "pub unit {unit_name}: bool\n" + tail
+# Offset just past the last character of the file. The declaration goes here:
+# a forward reference to a `pub unit` is legal, and identical zero-width inserts
+# from several fixes at this offset are applied once by the applier.
+fn _eof_offset(lines: [text]) -> i64:
+    val last = lines.len() - 1
+    _line_offset(lines, last) + lines[last].byte_len()
+
+fn _unit_decl_text(lines: [text], unit_name: text) -> text:
+    val ends_with_newline = lines.len() > 1 and lines[lines.len() - 1] == ""
+    val lead = if ends_with_newline: "\n" else: "\n\n"
+    lead + "pub unit {unit_name}: bool\n"
 
 pub fn check_bare_bool_with_lines(file: text, lines: [text]) -> [EasyFix]:
     var fixes: [EasyFix] = []
@@ -103,10 +95,9 @@ pub fn check_bare_bool_with_lines(file: text, lines: [text]) -> [EasyFix]:
         fix.add_replacement(Replacement.create(
             file: file, start: f.start, end: f.end, line: f.line, column: f.column, new_text: unit_name))
         if not _flag_name_declared(lines, unit_name):
-            val at = _unit_insert_line(lines)
-            val off = _line_offset(lines, at)
+            val off = _eof_offset(lines)
             fix.add_replacement(Replacement.create(
-                file: file, start: off, end: off, line: at + 1, column: 1,
-                new_text: _unit_decl_text(lines, at, unit_name)))
+                file: file, start: off, end: off, line: lines.len(), column: 1,
+                new_text: _unit_decl_text(lines, unit_name)))
         fixes.push(fix)
     fixes
