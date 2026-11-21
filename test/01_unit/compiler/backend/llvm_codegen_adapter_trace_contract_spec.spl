@@ -5,27 +5,31 @@ use std.io_runtime.{file_read}
 describe "LLVM adapter operation policy":
     it "keeps the optimized function opener outside mutable receiver write-back":
         val builder_source = file_read(
-            "src/compiler/70.backend/backend/llvm_ir_builder.spl")
+            "src/compiler/70.backend/backend/llvm_ir_builder.spl").replace("\r\n", "\n")
         val core_source = file_read(
-            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl")
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl").replace("\r\n", "\n")
         expect(builder_source).to_contain("fn llvm_ir_builder_push_line(")
         expect(builder_source.contains("me start_function_opt(")).to_equal(false)
         expect(builder_source.contains(
             "fn llvm_ir_builder_start_function_opt(")).to_equal(false)
+        val opener_start = core_source.index_of("        var attrs = \" nounwind\" + placement_attrs") ?? -1
         val scalar_start = core_source.index_of(
-            "        else:\n            val param_str = params.join(\", \")")
+            "        else:\n            val param_str = params.join(\", \")") ?? -1
         val scalar_end = core_source.index_of(
-            "        if bootstrap_debug:\n            print \"[mir-to-llvm] function:started")
+            "        if bootstrap_debug:\n            print \"[mir-to-llvm] function:started") ?? -1
+        expect(opener_start).to_be_greater_than(-1)
+        expect(scalar_start).to_be_greater_than(opener_start)
+        expect(scalar_end).to_be_greater_than(scalar_start)
+        val attrs_opener = core_source.substring(opener_start, scalar_end)
         val scalar_opener = core_source.substring(scalar_start, scalar_end)
+        expect(attrs_opener).to_contain("if is_readonly and not placement_naked and not (self.xray_flag_guard and xray_mode > 0):")
+        expect(attrs_opener).to_contain("attrs = attrs + \" readonly\"")
+        expect(attrs_opener).to_contain("if ((is_small and xray_mode == 0) or self.fn_inline.has(name)) and not placement_naked:")
+        expect(attrs_opener).to_contain("attrs = attrs + \" alwaysinline\"")
         expect(scalar_opener).to_contain("val param_str = params.join(\", \")")
-        expect(scalar_opener).to_contain("var attrs = \" nounwind\"")
-        expect(scalar_opener).to_contain("if is_readonly and not placement_naked:")
-        expect(scalar_opener).to_contain("attrs = attrs + \" readonly\"")
-        expect(scalar_opener).to_contain("if (is_small or self.fn_inline.has(name)) and not placement_naked:")
-        expect(scalar_opener).to_contain("attrs = attrs + \" alwaysinline\"")
-        expect(scalar_opener).to_contain("Some(id): dbg_suffix = \" !dbg !\{id}\"")
+        expect(scalar_opener).to_contain("if val did = dbg_id:\n                dbg_suffix = \" !dbg !\{did}\"")
         expect(scalar_opener).to_contain(
-            "val opening = \"define \{effective_ret_ty} @\{fn_name}(\{param_str})\{attrs}\{dbg_suffix} \{\{\"")
+            "val opening = \"define \{effective_ret_ty} @\{fn_name}(\{param_str})\{attrs}\{dbg_suffix}\{semantic_suffix} \{\{\"")
         val handle_pos = scalar_opener.index_of(
             "val builder_handle = llvm_ir_builder_handle(self.builder)")
         val push_pos = scalar_opener.index_of(

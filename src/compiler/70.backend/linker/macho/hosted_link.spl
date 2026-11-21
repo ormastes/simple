@@ -8,7 +8,7 @@ use compiler.backend.linker.macho.provider_types.{MachOProviderV1, macho_validat
 use compiler.backend.linker.macho.binary_provider.{macho_read_binary_provider_v1}
 use compiler.backend.linker.macho.provider_closure.{MachOProviderClosureV1}
 use compiler.backend.linker.macho.hosted_fixups.{macho_hosted_slots, macho_hosted_fixups}
-use compiler.backend.linker.macho.hosted_image.{macho_hosted_stubs, macho_hosted_image}
+use compiler.backend.linker.macho.hosted_image.{macho_hosted_stubs, macho_hosted_image, macho_hosted_dead_strip_live}
 
 struct MachOHostedRequest:
     target: RelocArch
@@ -20,6 +20,8 @@ struct MachOHostedRequest:
     rpaths: [text]
     allow_duplicate_definitions: bool = false
     hosted_darwin_abi: bool = false
+    dead_strip: bool = false
+    retained_symbols: [text] = []
 
 fn macho_hosted_link(objects: [[u8]], archives: [[u8]], providers: [[u8]], request: MachOHostedRequest) -> Result<[u8], text>:
     """Validate actual binary providers before using the shared metadata path."""
@@ -158,10 +160,14 @@ fn macho_hosted_link_selected_v1(objects: [[u8]], archives: [[u8]], providers: [
                             return Err("hosted section discovery semantics unsupported: {section.segname},{section.sectname}")
     val definitions = macho_definitions(inputs, request.allow_duplicate_definitions)?
     if not definitions.has(request.entry): return Err("undefined hosted entry {request.entry}")
-    val slots = macho_hosted_slots(inputs, definitions, providers, arm, closure, request.hosted_darwin_abi, request.entry)?
+    val live = if request.dead_strip:
+        macho_hosted_dead_strip_live(inputs, definitions, request.entry, request.retained_symbols, arm, request.hosted_darwin_abi)?
+    else:
+        []
+    val slots = macho_hosted_slots(inputs, definitions, providers, arm, closure, request.hosted_darwin_abi, request.entry, live)?
     val text_reserve = macho_align(slots.len() * 16, 0x4000)
     val got_bytes = slots.len() * 8
-    val layout = macho_layout(inputs, limit, text_reserve, request.hosted_darwin_abi, if request.hosted_darwin_abi: got_bytes else: 0)?
+    val layout = macho_layout(inputs, limit, text_reserve, request.hosted_darwin_abi, if request.hosted_darwin_abi: got_bytes else: 0, live)?
     val chosen = definitions[request.entry]
     val entry = macho_symbol_address(inputs[chosen.owner], chosen.owner, chosen.symbol, layout)?
     var executable = false

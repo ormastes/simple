@@ -5,10 +5,14 @@
 use std.spec
 use std.spec.step
 use compiler.common.config.{Logger}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir.*
+use compiler.mir.mir_data.*
 use compiler.mir.mir_lowering.{MirLowering}
 use compiler.backend.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
@@ -29,8 +33,9 @@ val provider_module = "compiler.common.module_path_naming"
 val expected_symbol = "compiler.common.module_path_naming.module_logical_name_from_path"
 
 fn lower_source(src: text, module_name: text) -> MirModule:
-    val ast = parse_full_frontend(src, "mangle.spl", "mangle.spl", Logger(level: 0))
-    var hir_lowering = HirLowering.with_filename("mangle.spl")
+    val module_path = module_name.replace(".", "/") + ".spl"
+    val ast = parse_full_frontend(src, module_path, module_name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(module_path)
     val hir = hir_lowering.lower_module(ast)
     var mir_lowering = MirLowering.new(hir.symbols)
     var mir = mir_lowering.lower_module(hir)
@@ -40,6 +45,44 @@ fn lower_source(src: text, module_name: text) -> MirModule:
 fn emit(src: text, module_name: text, is_entry: bool) -> text:
     MirToLlvm.create(module_name, CodegenTarget.X86_64, nil)
         .translate_module_with_entry(lower_source(src, module_name), is_entry)
+
+fn emit_bare_mir_fn(fn_name: text, module_name: text, is_entry: bool) -> text:
+    val sig = MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)
+    val arg0 = MirLocal(id: LocalId(id: 0), name: Some("x"), type_: MirType.i64(), kind: LocalKind.Arg(0), is_ghost: false)
+    val fn_ = MirFunction(
+        symbol: SymbolId(id: 0),
+        name: fn_name,
+        signature: sig,
+        locals: [arg0],
+        blocks: [MirBlock(
+            id: BlockId.entry(),
+            label: Some("entry"),
+            instructions: [],
+            terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))))
+        )],
+        entry_block: BlockId.entry(),
+        span: Span.empty(),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {},
+        layout_phase: nil,
+        is_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        is_export_c: false,
+        export_name: "",
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[fn_.symbol] = fn_
+    val mir = MirModule(name: module_name, functions: functions, statics: {}, constants: {}, types: {})
+    MirToLlvm.create(module_name, CodegenTarget.X86_64, nil)
+        .translate_module_with_entry(mir, is_entry)
 
 describe "cross-module function symbols agree between definition and call", tag: ["only-compiled"]:
     it "defines a non-entry module's function under its module-qualified name":
@@ -55,7 +98,7 @@ describe "cross-module function symbols agree between definition and call", tag:
     it "keeps the entry module's own functions unqualified":
         # @req REQ-SSPEC-UNIT
         step("keeps the entry module's own functions unqualified")
-        expect(emit(provider_src, provider_module, true).contains("@module_logical_name_from_path(")).to_equal(true)
+        expect(emit_bare_mir_fn("module_logical_name_from_path", provider_module, true).contains("@module_logical_name_from_path(")).to_equal(true)
 
     it "moves an intra-module call with the definition it targets":
         # @req REQ-SSPEC-UNIT
