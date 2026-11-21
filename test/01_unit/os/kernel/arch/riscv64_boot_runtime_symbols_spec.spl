@@ -20,8 +20,33 @@ describe "riscv64 boot runtime link symbols":
     it "defines rt_stdout_write over the serial string writer":
         val src = file_read_text(CORE)
         expect(src.contains("RuntimeValue rt_stdout_write(RuntimeValue data)")).to_equal(true)
+        step("returns the byte count written, like the hosted and common writers")
+        expect(src.contains("ENCODE_INT((int64_t)((RuntimeString *)DECODE_PTR(data))->len)")).to_equal(true)
 
     it "keeps the kernel thread shim in the fs-exec closure":
         step("spl_thread_current_id is exported by os.kernel.net.thread_shim")
         val src = file_read_text("examples/09_embedded/simple_os/arch/riscv64/fs_exec_hello_entry.spl")
         expect(src.contains("use os.kernel.net.thread_shim.{}")).to_equal(true)
+
+describe "riscv64 boot runtime: codegen-emitted rt_* helpers":
+    it "defines every helper the seed codegen calls on ANY receivers":
+        step("signatures follow codegen/runtime_sffi.rs: handles tagged, indices raw")
+        val src = file_read_text(CORE)
+        val names = ["rt_any_to_int(", "rt_array_fill_span(", "rt_array_get_text(", "rt_array_is_byte_packed(", "rt_array_new_with_cap_u64(", "rt_array_repeat(", "rt_array_set_text(", "rt_slice_text_bytes(", "rt_string_char_count(", "rt_string_from_byte_array(", "rt_text_find(", "rt_text_is_ascii(", "rt_typed_bytes_u8_data_at(", "rt_typed_words_u32_at(", "rt_typed_words_u32_set(", "rt_typed_words_u64_at("]
+        for n in names:
+            expect(src.contains("int64_t " + n) or src.contains("int8_t " + n)).to_equal(true)
+
+    it "stores typed u32 words tagged so rt_array_get decodes them":
+        val src = file_read_text(CORE)
+        expect(src.contains("ENCODE_INT((int64_t)((uint64_t)value & 0xffffffffULL))")).to_equal(true)
+
+    it "counts code points, not bytes, in rt_string_char_count":
+        val src = file_read_text(CORE)
+        expect(src.contains("(s->data[i] & 0xC0) != 0x80")).to_equal(true)
+
+    it "honours the preheader layout bit and inline-item arrays (review fixes)":
+        val src = file_read_text(CORE)
+        expect(src.contains("uintptr_t base = (uintptr_t)data_ptr & ~(uintptr_t)1;")).to_equal(true)
+        expect(src.contains("RuntimeValue *items = runtime_array_items(a);")).to_equal(true)
+        expect(src.contains("if (n->len == 0) return (uint64_t)start <= h->len ? start : (int64_t)h->len;")).to_equal(true)
+        expect(src.contains("== TAG_FLOAT) return (int64_t)rt_value_as_float(value);")).to_equal(true)
