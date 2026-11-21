@@ -462,3 +462,34 @@ pub fn log_mir_progress(done: i64, total: i64, started_ms: i64, module_name: tex
     print line
     rt_stdout_flush()
     _append_phase_profile(line)
+
+# --- In-process serial codegen liveness line ----------------------------------
+# Serial native codegen is the other long silent loop: a 1601-module build grew
+# from 21 GB at the end of MIR to >44 GB with nothing between the two readings
+# (bug serial_codegen_retains_optimized_mir_2026-11-21). Same line shape and
+# interval as [mir]. The count is per process, so forked codegen workers (one
+# module each) stay silent.
+var _g_codegen_progress_done: i64 = 0
+var _g_codegen_progress_total: i64 = 0
+var _g_codegen_progress_started_ms: i64 = 0
+
+# @allow(primitive_api) log-line counters, same shape as log_mir_progress
+pub fn codegen_progress_begin(total: i64):
+    _g_codegen_progress_done = 0
+    _g_codegen_progress_total = total
+    _g_codegen_progress_started_ms = time_now_monotonic_ms()
+
+# @allow(primitive_api) log-line counters, same shape as log_mir_progress
+pub fn codegen_progress_line_v1(done: i64, total: i64, rss_mib: i64, elapsed_s: i64, module_name: text) -> text:
+    "[codegen] {done}/{total} rss_mib={rss_mib} elapsed_s={elapsed_s} module={module_name}"
+
+pub fn log_codegen_progress_module_done(module_name: text):
+    _g_codegen_progress_done = _g_codegen_progress_done + 1
+    if _g_codegen_progress_total > 0 and
+            mir_progress_due(_g_codegen_progress_done, _g_codegen_progress_total):
+        val line = codegen_progress_line_v1(_g_codegen_progress_done, _g_codegen_progress_total,
+            rt_process_rss_kib() / 1024,
+            (time_now_monotonic_ms() - _g_codegen_progress_started_ms) / 1000, module_name)
+        print line
+        rt_stdout_flush()
+        _append_phase_profile(line)
