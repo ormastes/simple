@@ -36,7 +36,8 @@
 
 use os.kernel.arch.riscv32.core_runtime_layout.{
     rv32_rt_align8, rv32_rt_normalize_index, rv32_rt_heap_fits, rv32_rt_byte_merge,
-    rv32_rt_ram_ref, rv32_rt_decimal_len, rv32_rt_decimal_digit
+    rv32_rt_ram_ref, rv32_rt_decimal_len, rv32_rt_decimal_digit,
+    rv32_rt_clamp, rv32_rt_byte_index_ok, rv32_rt_digit_value
 }
 
 @cfg(riscv32)
@@ -305,3 +306,88 @@ fn rt_typed_words_u64_set(array: i64, index: i64, value: i64) -> bool:
     if _rv32_array_set(array, index, value) == 0:
         return false
     true
+
+# ---------------------------------------------------------------------------
+# Text / any core symbols reached by the riscv32 UART log path
+# (console_common riscv_uart_write: msg.len(), msg.char_at(i), `ch as u8`).
+# Semantics follow the hosted runtime (src/runtime/runtime_native.c):
+# raw lengths/bytes/ints out, tagged string handles in.
+# ---------------------------------------------------------------------------
+
+@cfg(riscv32)
+fn _rv32_str_copy(src: i64, begin: i64, count: i64) -> i64:
+    """New string of `count` bytes copied from string object `src` at `begin`."""
+    val ptr: i64 = _rv32_str_alloc(count)
+    if ptr == 0:
+        return 3
+    var i: i64 = 0
+    while i < count:
+        _rv32_st8(ptr + 12 + i, _rv32_ld8(src + 12 + begin + i))
+        i = i + 1
+    _rv32_st8(ptr + 12 + count, 0)
+    ptr | 1
+
+@cfg(riscv32)
+@no_mangle
+fn rt_string_len(value: i64) -> i64:
+    val s: i64 = _rv32_heap_obj(value, 1)
+    if s == 0:
+        return 0
+    _rv32_ld32(s + 8)
+
+@cfg(riscv32)
+@no_mangle
+fn rt_string_byte_at(value: i64, index: i64) -> i64:
+    val s: i64 = _rv32_heap_obj(value, 1)
+    if s == 0:
+        return 0
+    if rv32_rt_byte_index_ok(index, _rv32_ld32(s + 8)) == 0:
+        return 0
+    _rv32_ld8(s + 12 + index)
+
+@cfg(riscv32)
+@no_mangle
+fn rt_slice_text_bytes(value: i64, start: i64, end: i64, step: i64) -> i64:
+    """Byte slice [start, end) clamped to the string; step != 1 -> empty.
+    Non-string receivers answer nil (hosted falls back to the generic
+    rt_slice, which riscv32 does not provide)."""
+    val s: i64 = _rv32_heap_obj(value, 1)
+    if s == 0:
+        return 3
+    if step < 1:
+        return 3
+    val finish: i64 = rv32_rt_clamp(end, 0, _rv32_ld32(s + 8))
+    val begin: i64 = rv32_rt_clamp(start, 0, finish)
+    if step != 1:
+        return _rv32_str_copy(s, 0, 0)
+    _rv32_str_copy(s, begin, finish - begin)
+
+@cfg(riscv32)
+@no_mangle
+fn rt_any_to_int(value: i64) -> i64:
+    """Tag-int -> its value; string -> leading decimal (optional '-', stops at
+    the first non-digit, like strtoll); anything else -> 0."""
+    if (value & 7) == 0:
+        return value >> 3
+    val s: i64 = _rv32_heap_obj(value, 1)
+    if s == 0:
+        return 0
+    val len: i64 = _rv32_ld32(s + 8)
+    var i: i64 = 0
+    var neg: i64 = 0
+    if len > 0:
+        if _rv32_ld8(s + 12) == 45:
+            neg = 1
+            i = 1
+    var acc: i64 = 0
+    while i < len:
+        val d: i64 = rv32_rt_digit_value(_rv32_ld8(s + 12 + i))
+        if d < 0:
+            i = len
+        else:
+            acc = acc * 10 - d
+            i = i + 1
+    # Accumulated in the negative domain so i32 min needs no negation.
+    if neg == 1:
+        return acc
+    0 - acc
