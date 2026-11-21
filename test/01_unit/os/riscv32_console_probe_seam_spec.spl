@@ -1,0 +1,82 @@
+"""
+## Purpose and audience
+For SimpleOS riscv32 bring-up: the rv32 kernel closure must not reach the
+riscv64 display stack (`hal.display` -> `arch.riscv64.display` ->
+`noalloc_pmm_runtime`, which drags `_riscv_uart_put_raw` and `rt_display_*`)
+nor the PCI/net/storage probe externs, and it must have a pure-Simple
+`log_raw_println` provider. Before this seam the riscv32 kernel link gate
+(`scripts/check/check-simpleos-riscv32-kernel-link.shs --link-only`) reported
+those 11 symbols undefined.
+## Operator workflow
+`bin/simple test test/01_unit/os/riscv32_console_probe_seam_spec.spl`
+## Compatibility and limitations
+Static source-contract check. The seed ignores `@cfg` on `use`/`extern fn`,
+so the import seam must be an `@when(arch=...)` text mask; the link gate is
+the end-to-end proof.
+## Verification guidance and troubleshooting
+A failure names the marker; confirm the `@when`/`@cfg` blocks in the files
+below before editing an assertion.
+"""
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn read_src(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn services() -> text:
+    read_src("src/os/kernel/boot/riscv_services.spl")
+
+fn rv32_arms(src: text) -> [text]:
+    """Every `@when(arch="riscv32"):` arm, each cut at its `@else:`."""
+    var arms: [text] = []
+    val parts = src.split("@when(arch=\"riscv32\"):")
+    var i = 1
+    while i < parts.len():
+        val p = parts[i]
+        val stop = p.index_of("\n@else:")
+        if stop >= 0:
+            arms.push(p.substring(0, stop))
+        i = i + 1
+    arms
+
+fn arm_with(src: text, marker: text) -> text:
+    for arm in rv32_arms(src):
+        if arm.index_of(marker) >= 0:
+            return arm
+    ""
+
+describe "riscv32 console and probe seam":
+    it "keeps the riscv64 display import out of every riscv32 arm":
+        val src = services()
+        expect(rv32_arms(src).len() >= 2).to_equal(true)
+        expect(src).to_contain("use os.kernel.hal.display.{")
+        expect(arm_with(src, "os.kernel.hal.display")).to_equal("")
+
+    it "gives riscv32 a services impl that references no rv64-only probe externs":
+        val arm = arm_with(services(), "fn init_riscv_services_impl(")
+        expect(arm).to_contain("fn init_riscv_services_impl(enable_network: i64, enable_display_storage: i64) -> i64:")
+        expect(arm.index_of("riscv64_display_")).to_equal(-1)  # oracle: -1 = absent
+        expect(arm.index_of("rt_pci_")).to_equal(-1)  # oracle: -1 = absent
+        expect(arm.index_of("rt_storage_")).to_equal(-1)  # oracle: -1 = absent
+        expect(arm.index_of("rt_net_")).to_equal(-1)  # oracle: -1 = absent
+        expect(arm).to_contain("unavailable on riscv32")
+
+    it "keeps the original probing impl for every other arch":
+        val src = services()
+        expect(src.split("fn init_riscv_services_impl(enable_network: i64, enable_display_storage: i64) -> i64:").len()).to_equal(3)
+        expect(src).to_contain("riscv64_display_initialize()")
+        expect(src).to_contain("rt_pci_device_count()")
+        expect(src).to_contain("rt_storage_init()")
+
+    it "provides an exported pure-Simple log_raw_println for riscv32":
+        val log = read_src("src/os/kernel/arch/riscv32/rv32_log_raw.spl")
+        expect(log).to_contain("@cfg(riscv32)\n@export\nfn log_raw_println(msg: text):")
+        expect(log).to_contain("riscv_uart_writeln(")
+        expect(log.index_of("\nextern fn")).to_equal(-1)  # oracle: -1 = absent; no extern declaration, pure Simple
+
+    it "links the provider into the riscv32 kernel entry":
+        val entry = read_src("examples/09_embedded/simple_os/arch/riscv32/os_entry.spl")
+        # No brace pair in a literal: "{name}" is string interpolation.
+        expect(entry).to_contain("use os.kernel.arch.riscv32.rv32_log_raw.")
+        expect(entry).to_contain("rv32_log_raw_link_anchor}")
+        expect(entry).to_contain("rv32_log_raw_link_anchor()")
