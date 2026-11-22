@@ -27,10 +27,36 @@ done
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 
+_HCFR_CR=$(printf '\r')
+
+value_of_into() {
+    _voi_var=$1
+    _voi_prefix="$2="
+    _voi_file=$3
+    _voi_val=""
+    if [ -r "$_voi_file" ]; then
+        while IFS= read -r _voi_line || [ -n "$_voi_line" ]; do
+            _voi_line="${_voi_line%$_HCFR_CR}"
+            case "$_voi_line" in
+                "$_voi_prefix"*) _voi_val="${_voi_line#"$_voi_prefix"}" ;;
+            esac
+        done < "$_voi_file"
+    fi
+    eval "$_voi_var=\$_voi_val"
+}
+
 value_of() {
-    key="$1"
-    file="$2"
-    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+    value_of_into _vo_res "$1" "$2"
+    printf '%s\n' "$_vo_res"
+}
+
+to_int_into() {
+    _tii_var=$1
+    _tii_val=$2
+    case "$_tii_val" in
+        ''|*[!0-9]*) eval "$_tii_var=0" ;;
+        *) eval "$_tii_var=\$_tii_val" ;;
+    esac
 }
 
 to_int() {
@@ -59,46 +85,66 @@ current_source_revision() {
 
 SOURCE_REVISION="${SOURCE_REVISION:-$(current_source_revision)}"
 
-sspec_env="$BUILD_DIR/sspec-traceability/evidence.env"
-render_env="$BUILD_DIR/rendering-manifest/evidence.env"
+configured_sspec_env="${HTML_CSS_TRACEABILITY_EVIDENCE_ENV:-}"
+configured_render_env="${HTML_CSS_RENDERING_MANIFEST_TRACEABILITY_ENV:-}"
+sspec_env="${configured_sspec_env:-$BUILD_DIR/sspec-traceability/evidence.env}"
+render_env="${configured_render_env:-$BUILD_DIR/rendering-manifest/evidence.env}"
 sspec_code=127
 render_code=127
 
 set +e
-BUILD_DIR="$BUILD_DIR/sspec-traceability" \
-REPORT_PATH="$BUILD_DIR/sspec-traceability/report.md" \
-    sh scripts/check/check-html-css-sspec-traceability.shs >"$BUILD_DIR/sspec-traceability.out" 2>&1
-sspec_code=$?
+if [ -n "$configured_sspec_env" ]; then
+    if [ -s "$sspec_env" ]; then
+        sspec_code=0
+    else
+        sspec_code=1
+    fi
+else
+    rm -f "$sspec_env"
+    BUILD_DIR="$BUILD_DIR/sspec-traceability" \
+    REPORT_PATH="$BUILD_DIR/sspec-traceability/report.md" \
+        sh scripts/check/check-html-css-sspec-traceability.shs >"$BUILD_DIR/sspec-traceability.out" 2>&1
+    sspec_code=$?
+fi
 
-BUILD_DIR="$BUILD_DIR/rendering-manifest" \
-REPORT_PATH="$BUILD_DIR/rendering-manifest/report.md" \
-HTML_CSS_RENDERING_MANIFEST_FETCH="${HTML_CSS_RENDERING_MANIFEST_FETCH:-0}" \
-    sh scripts/check/check-html-css-rendering-manifest-traceability.shs >"$BUILD_DIR/rendering-manifest.out" 2>&1
-render_code=$?
+if [ -n "$configured_render_env" ]; then
+    if [ -s "$render_env" ]; then
+        render_code=0
+    else
+        render_code=1
+    fi
+else
+    rm -f "$render_env"
+    BUILD_DIR="$BUILD_DIR/rendering-manifest" \
+    REPORT_PATH="$BUILD_DIR/rendering-manifest/report.md" \
+    HTML_CSS_RENDERING_MANIFEST_FETCH="${HTML_CSS_RENDERING_MANIFEST_FETCH:-0}" \
+        sh scripts/check/check-html-css-rendering-manifest-traceability.shs >"$BUILD_DIR/rendering-manifest.out" 2>&1
+    render_code=$?
+fi
 set -e
 
-sspec_status="$(value_of html_css_sspec_traceability_status "$sspec_env")"
-sspec_reason="$(value_of html_css_sspec_traceability_reason "$sspec_env")"
-html_total="$(value_of html_css_sspec_traceability_html_tag_count "$sspec_env")"
-html_required="$(value_of html_css_sspec_traceability_required_html_tag_count "$sspec_env")"
-css_total="$(value_of html_css_sspec_traceability_css_property_count "$sspec_env")"
-css_required_min="$(value_of html_css_sspec_traceability_required_css_property_min_count "$sspec_env")"
-implemented_total="$(value_of html_css_sspec_traceability_implemented_css_property_count "$sspec_env")"
-implemented_indexed_total="$(value_of html_css_sspec_traceability_implemented_css_property_indexed_count "$sspec_env")"
-unsupported_total="$(value_of html_css_sspec_traceability_unsupported_css_property_count "$sspec_env")"
-unsupported_properties="$(value_of html_css_sspec_traceability_unsupported_css_properties "$sspec_env")"
+value_of_into sspec_status html_css_sspec_traceability_status "$sspec_env"
+value_of_into sspec_reason html_css_sspec_traceability_reason "$sspec_env"
+value_of_into html_total html_css_sspec_traceability_html_tag_count "$sspec_env"
+value_of_into html_required html_css_sspec_traceability_required_html_tag_count "$sspec_env"
+value_of_into css_total html_css_sspec_traceability_css_property_count "$sspec_env"
+value_of_into css_required_min html_css_sspec_traceability_required_css_property_min_count "$sspec_env"
+value_of_into implemented_total html_css_sspec_traceability_implemented_css_property_count "$sspec_env"
+value_of_into implemented_indexed_total html_css_sspec_traceability_implemented_css_property_indexed_count "$sspec_env"
+value_of_into unsupported_total html_css_sspec_traceability_unsupported_css_property_count "$sspec_env"
+value_of_into unsupported_properties html_css_sspec_traceability_unsupported_css_properties "$sspec_env"
 
-render_status="$(value_of html_css_rendering_manifest_traceability_status "$render_env")"
-render_reason="$(value_of html_css_rendering_manifest_traceability_reason "$render_env")"
-render_html_total="$(value_of html_css_rendering_manifest_traceability_html_tag_count "$render_env")"
-render_html_covered="$(value_of html_css_rendering_manifest_traceability_html_tag_covered_count "$render_env")"
-render_html_missing="$(value_of html_css_rendering_manifest_traceability_html_tag_missing "$render_env")"
+value_of_into render_status html_css_rendering_manifest_traceability_status "$render_env"
+value_of_into render_reason html_css_rendering_manifest_traceability_reason "$render_env"
+value_of_into render_html_total html_css_rendering_manifest_traceability_html_tag_count "$render_env"
+value_of_into render_html_covered html_css_rendering_manifest_traceability_html_tag_covered_count "$render_env"
+value_of_into render_html_missing html_css_rendering_manifest_traceability_html_tag_missing "$render_env"
 render_css_scope="implemented-simple-web-css"
-render_css_total="$(value_of html_css_rendering_manifest_traceability_css_property_count "$render_env")"
-render_css_covered="$(value_of html_css_rendering_manifest_traceability_css_property_covered_count "$render_env")"
-render_css_missing="$(value_of html_css_rendering_manifest_traceability_css_property_missing "$render_env")"
-manifest_case_count="$(value_of html_css_rendering_manifest_traceability_manifest_case_count "$render_env")"
-manifest_required_case_count="$(value_of html_css_rendering_manifest_traceability_required_manifest_case_count "$render_env")"
+value_of_into render_css_total html_css_rendering_manifest_traceability_css_property_count "$render_env"
+value_of_into render_css_covered html_css_rendering_manifest_traceability_css_property_covered_count "$render_env"
+value_of_into render_css_missing html_css_rendering_manifest_traceability_css_property_missing "$render_env"
+value_of_into manifest_case_count html_css_rendering_manifest_traceability_manifest_case_count "$render_env"
+value_of_into manifest_required_case_count html_css_rendering_manifest_traceability_required_manifest_case_count "$render_env"
 
 if [ "$sspec_status" = "" ]; then
     sspec_status="fail"
@@ -118,14 +164,14 @@ implemented_css_status="pass"
 full_css_status="pass"
 animation_css_status="pass"
 
-html_total_int="$(to_int "$html_total")"
-html_required_int="$(to_int "$html_required")"
-render_html_covered_int="$(to_int "$render_html_covered")"
-css_total_int="$(to_int "$css_total")"
-implemented_total_int="$(to_int "$implemented_total")"
-implemented_indexed_total_int="$(to_int "$implemented_indexed_total")"
-render_css_covered_int="$(to_int "$render_css_covered")"
-unsupported_total_int="$(to_int "$unsupported_total")"
+to_int_into html_total_int "$html_total"
+to_int_into html_required_int "$html_required"
+to_int_into render_html_covered_int "$render_html_covered"
+to_int_into css_total_int "$css_total"
+to_int_into implemented_total_int "$implemented_total"
+to_int_into implemented_indexed_total_int "$implemented_indexed_total"
+to_int_into render_css_covered_int "$render_css_covered"
+to_int_into unsupported_total_int "$unsupported_total"
 
 if [ "$render_html_covered_int" -lt "$html_required_int" ] || [ "$render_html_missing" != "" ]; then
     html_status="fail"
@@ -148,16 +194,25 @@ if [ "$unrendered_css_count" -gt 0 ]; then
     full_css_status="incomplete"
 fi
 
-animation_properties="$(
-    printf '%s\n' "$unsupported_properties" \
-        | tr ',' '\n' \
-        | awk '/^(animation|transition|transform)(-|$)/ { print }' \
-        | paste -sd, -
-)"
+animation_properties=""
 animation_css_total=0
+_old_ifs=$IFS
+IFS=','
+for _ap in $unsupported_properties; do
+    case "$_ap" in
+        animation|animation-*|transition|transition-*|transform|transform-*)
+            if [ -n "$animation_properties" ]; then
+                animation_properties="$animation_properties,$_ap"
+            else
+                animation_properties="$_ap"
+            fi
+            animation_css_total=$((animation_css_total + 1))
+            ;;
+    esac
+done
+IFS=$_old_ifs
 animation_css_unrendered=0
-if [ "$animation_properties" != "" ]; then
-    animation_css_total="$(printf '%s\n' "$animation_properties" | tr ',' '\n' | sed '/^$/d' | wc -l | tr -d ' ')"
+if [ "$animation_css_total" -gt 0 ]; then
     animation_css_unrendered="$animation_css_total"
     animation_css_status="incomplete"
 fi
@@ -181,6 +236,13 @@ elif [ "$full_css_status" != "pass" ]; then
     reason="full-css-rendering-incomplete"
 fi
 
+_html_ready_reason="html-rendering-incomplete"
+[ "$html_status" = "pass" ] && _html_ready_reason="pass"
+_impl_css_ready_reason="implemented-css-rendering-incomplete"
+[ "$implemented_css_status" = "pass" ] && _impl_css_ready_reason="pass"
+_full_css_ready_reason="full-css-rendering-incomplete"
+[ "$full_css_status" = "pass" ] && _full_css_ready_reason="pass"
+
 {
     echo "html_css_full_rendering_goal_status=$status"
     echo "html_css_full_rendering_goal_reason=$reason"
@@ -198,21 +260,21 @@ fi
     echo "html_css_full_rendering_goal_rendering_manifest_reason=$render_reason"
     echo "html_css_full_rendering_goal_html_tag_status=$html_status"
     echo "html_css_full_rendering_goal_all_html_elements_ready_status=$html_status"
-    echo "html_css_full_rendering_goal_all_html_elements_ready_reason=$([ "$html_status" = "pass" ] && echo pass || echo html-rendering-incomplete)"
+    echo "html_css_full_rendering_goal_all_html_elements_ready_reason=$_html_ready_reason"
     echo "html_css_full_rendering_goal_html_tag_total_count=$html_total"
     echo "html_css_full_rendering_goal_html_tag_required_count=$html_required"
     echo "html_css_full_rendering_goal_html_tag_rendered_count=$render_html_covered"
     echo "html_css_full_rendering_goal_html_tag_missing=$render_html_missing"
     echo "html_css_full_rendering_goal_implemented_css_status=$implemented_css_status"
     echo "html_css_full_rendering_goal_all_implemented_css_ready_status=$implemented_css_status"
-    echo "html_css_full_rendering_goal_all_implemented_css_ready_reason=$([ "$implemented_css_status" = "pass" ] && echo pass || echo implemented-css-rendering-incomplete)"
+    echo "html_css_full_rendering_goal_all_implemented_css_ready_reason=$_impl_css_ready_reason"
     echo "html_css_full_rendering_goal_implemented_css_scope=$render_css_scope"
     echo "html_css_full_rendering_goal_implemented_css_total_count=$implemented_total"
     echo "html_css_full_rendering_goal_implemented_css_rendered_count=$render_css_covered"
     echo "html_css_full_rendering_goal_implemented_css_missing=$render_css_missing"
     echo "html_css_full_rendering_goal_full_css_status=$full_css_status"
     echo "html_css_full_rendering_goal_all_css_properties_ready_status=$full_css_status"
-    echo "html_css_full_rendering_goal_all_css_properties_ready_reason=$([ "$full_css_status" = "pass" ] && echo pass || echo full-css-rendering-incomplete)"
+    echo "html_css_full_rendering_goal_all_css_properties_ready_reason=$_full_css_ready_reason"
     echo "html_css_full_rendering_goal_full_css_total_count=$css_total"
     echo "html_css_full_rendering_goal_full_css_required_min_count=$css_required_min"
     echo "html_css_full_rendering_goal_full_css_rendered_count=$full_css_rendered_count"
@@ -245,7 +307,10 @@ fi
     echo "- manifest cases: $manifest_case_count/$manifest_required_case_count"
     echo
     echo "## Raw Evidence"
-    sed 's/^/- /' "$OUT_ENV"
+    while IFS= read -r _hcfr_line || [ -n "$_hcfr_line" ]; do
+        _hcfr_line="${_hcfr_line%$_HCFR_CR}"
+        printf -- '- %s\n' "$_hcfr_line"
+    done < "$OUT_ENV"
 } >"$REPORT_PATH"
 
 cat "$OUT_ENV"

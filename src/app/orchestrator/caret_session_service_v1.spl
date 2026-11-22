@@ -6,7 +6,7 @@
 # Caret Suite agent + container + worktree lifecycle (launch, inspect, send,
 # crashed-list, relaunch, clean close, and full shutdown cleanup).
 
-use app.io.mod.{getpid, file_exists, file_remove, dir_exists, dir_create_all,
+use std.nogc_sync_mut.sosix.host.{sosix_getpid, file_remove, dir_exists, dir_create_all,
     dir_list, dir_remove, dir_remove_all}
 use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
 use std.nogc_sync_mut.fs.host_path.host_path_is_absolute
@@ -27,7 +27,7 @@ use app.orchestrator.caret_session_protocol_v1.{OrchestratorCaretServerInfoV1,
 use app.llm_caret.cs_dashboard.{CsDashboard, cs_dashboard_new, cs_refresh,
     cs_handle_command, cs_apply_action, cs_quote_word_if_needed, cs_reap_containers}
 use app.llm_caret.cs_container_lifecycle_v1.{cs_container_records_load_v1,
-    cs_container_reconcile_v1, cs_container_crashed_records_v1}
+    cs_container_reconcile_v1, cs_container_crashed_records_v1, cs_container_close_record_v1}
 use app.llm_caret.pane_backend.{pane_list, pane_cleanup_session}
 
 fn _orch_caret_provider_v1(spec_arg: text) -> text:
@@ -255,22 +255,47 @@ fn _orch_caret_handle_request_v1(info: OrchestratorCaretServerInfoV1, dash: CsDa
             "outcome": SdnValue.String(outcome)
         }))
 
+    if action == "cleanup":
+        if target == "" or args.len() != 0:
+            return (d, uid_seq, false, _orch_caret_encode_reply_v1({
+                "ok": SdnValue.Bool(false), "status": SdnValue.String("error"),
+                "code": SdnValue.String("cleanup-requires-one-target")}))
+        for rec in cs_container_crashed_records_v1(d.session, live_ids):
+            if rec.agent_id == target or rec.name == target:
+                val (removed, outcome) = cs_container_close_record_v1(d.session, rec.agent_id, live_ids, true)
+                val deleted = removed and not dir_exists(rec.attempt_dir) and
+                    (not rec.worktree_owned or not dir_exists(rec.worktree_path))
+                return (cs_refresh(d), uid_seq, false, _orch_caret_encode_reply_v1({
+                    "ok": SdnValue.Bool(deleted),
+                    "status": SdnValue.String(if deleted: "cleaned" else: "cleanup-failed"),
+                    "target": SdnValue.String(target),
+                    "outcome": SdnValue.String(outcome)}))
+        return (d, uid_seq, false, _orch_caret_encode_reply_v1({
+            "ok": SdnValue.Bool(false), "status": SdnValue.String("error"),
+            "code": SdnValue.String("no-matching-crashed-session")}))
+
     if action == "close":
         var wt_before = ""
         var attempt_before = ""
+        var agent_key = target
         for rec in cs_container_records_load_v1(d.session):
             if rec.agent_id == target or rec.name == target:
+                agent_key = rec.agent_id
                 wt_before = rec.worktree_path
                 attempt_before = rec.attempt_dir
-        val (d1, cl_action) = cs_handle_command(d, "/close " + target)
+        val (d1, cl_action) = cs_handle_command(d, "/close " + agent_key)
         val (d2, outcome) = cs_apply_action(d1, cl_action)
         d = cs_refresh(d2)
         val preserved = outcome.contains("preserved worktree")
         val wt_deleted = wt_before == "" or not dir_exists(wt_before)
         val temp_deleted = attempt_before == "" or not dir_exists(attempt_before)
+        val closed = wt_deleted and temp_deleted and not outcome.starts_with("could not close pane ")
+        var status = if closed: "closed" else: "close-failed"
+        if preserved:
+            status = "crashed-preserved"
         return (d, uid_seq, false, _orch_caret_encode_reply_v1({
-            "ok": SdnValue.Bool(true),
-            "status": SdnValue.String(if preserved: "crashed-preserved" else: "closed"),
+            "ok": SdnValue.Bool(preserved or closed),
+            "status": SdnValue.String(status),
             "target": SdnValue.String(target),
             "preservedForRelaunch": SdnValue.Bool(preserved),
             "worktreeDeleted": SdnValue.Bool(wt_deleted),
@@ -342,7 +367,7 @@ pub fn orchestrator_caret_serve_command_v1(args: [text]) -> OrchestratorValidati
             return orchestrator_caret_error_reply_v1("caret-serve-local-addr-failed", 1)
     val info = OrchestratorCaretServerInfoV1(
         controller_id: controller_id, state_root: state_root, listen_addr: addr,
-        token: token_opt ?? "", pid: getpid(), session: session_name,
+        token: token_opt ?? "", pid: sosix_getpid(), session: session_name,
         server_name: selected.record.name, context_name: selected.context)
     if not orchestrator_caret_server_info_save_v1(runtime_dir, info):
         val _c = listener.close()
