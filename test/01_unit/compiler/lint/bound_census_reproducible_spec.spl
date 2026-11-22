@@ -1,0 +1,56 @@
+"""
+## Purpose and audience
+Purpose: Prove RB-RATCHET-01 at detector level. The boundary census that a
+ratchet baseline is built from is reproducible: the same source yields the same
+findings (code, line, order) on every run, and linting one file never changes
+the findings of another, so a recorded baseline can be regenerated exactly.
+Audience: tooling engineers maintaining boundary-lint baselines.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Detector level only; no baseline file or ratchet script is exercised here.
+Plan: doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md section 9.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.semantics.lint.bound_late_cast.{check_bound_late_casts, BoundLateCastFinding}
+
+val SRC_A = "unit Km: i32 as km\nextern fn c_a() -> i32\nextern fn c_b() -> i32\nfn late() -> Km:\n    val a = c_a()\n    val b = c_b()\n    Km(a)\n    Km(b)\nfn esc() -> i32:\n    val r = c_a()\n    return r\n"
+val SRC_B = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn late() -> Km:\n    val raw = c_read()\n    Km(raw)\n"
+
+fn _render(fs: [BoundLateCastFinding]) -> text:
+    var out = ""
+    for f in fs:
+        out = out + "{f.code}@{f.line_num};"
+    out
+
+# @manual_section: bound_census_reproducible
+describe "RB-RATCHET-01: boundary census is reproducible":
+    """Census findings are a pure function of the file content."""
+
+    it "yields identical findings on repeated runs of the same source":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint the same source three times and compare rendered findings")
+        val first = _render(check_bound_late_casts(SRC_A, "app/a.spl"))
+        expect(first.len()).to_be_greater_than(0)
+        expect(_render(check_bound_late_casts(SRC_A, "app/a.spl"))).to_equal(first)
+        expect(_render(check_bound_late_casts(SRC_A, "app/a.spl"))).to_equal(first)
+
+    it "is not affected by which file was linted before":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint B alone, then A then B, and compare B's findings")
+        val alone = _render(check_bound_late_casts(SRC_B, "app/b.spl"))
+        val _a = check_bound_late_casts(SRC_A, "app/a.spl")
+        expect(_render(check_bound_late_casts(SRC_B, "app/b.spl"))).to_equal(alone)
+        expect(alone).to_equal("SPL-BOUND-002@5;")
+
+    it "reports findings in ascending line order":
+        # @req: REQ-DIAG-POLICY-001
+        step("Check line numbers never decrease across the finding list")
+        val fs = check_bound_late_casts(SRC_A, "app/a.spl")
+        var prev = 0
+        for f in fs:
+            expect(f.line_num >= prev).to_equal(true)
+            prev = f.line_num
