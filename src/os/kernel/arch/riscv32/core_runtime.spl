@@ -7,17 +7,17 @@
 #   rt_value_to_string rt_raw_i64_to_string rt_array_get rt_array_set_text
 #   rt_index_set rt_value_u64 rt_typed_words_{u32,u64}_{at,set}
 #
-# ABI: on riscv32 the LLVM backend makes every RuntimeValue, param and local an
-# i32 (codegen/llvm/backend_core.rs runtime_int_type), so `i64` below is a
-# 32-bit carrier. `rt_typed_words_u64_*` therefore carry the low 32 bits only.
+# ABI: RuntimeValue is a 64-bit word on every arch (PR #10816; codegen/llvm/
+# backend_core.rs runtime_int_type is i64), so `i64` below is a true 64-bit value.
+# 64-bit slots are two aligned 32-bit probe accesses (low word first).
 #
 # Layout matches the rv32 boot C that is linked into this image
 # (examples/09_embedded/simple_os/arch/riscv32/boot/baremetal_stubs.c and
 # arch/common/riscv_common.h serial_println / rt_native_eq):
 #   string: {u32 type=1, u32 size, u32 len, data[len], NUL}   (data at +12)
-#   array:  {u32 type=2, u32 size, u32 len, u32 cap, u32 data_ptr}, 4-byte words
+#   array:  {u32 type=2, u32 size, u32 len, u32 cap, u32 data_ptr}, 8-byte items at data_ptr
 #   values: int = v << 3, heap = ptr | 1, nil = 3, true = 11, false = 19.
-# Typed-words arrays hold raw (packed) 32-bit words. Assumption: no array
+# Typed-words arrays hold 8-byte words like every array. Assumption: no array
 # producer (rt_array_new) is linked on riscv32 yet; the array layout above is
 # the contract a future producer must follow (until then every array ref
 # fails the kind check and reads return nil/0, writes return false).
@@ -64,6 +64,17 @@ fn _rv32_ld32(addr: i64) -> i64:
 fn _rv32_st32(addr: i64, value: i64):
     """`addr` must be 4-byte aligned."""
     rt_rv32_probe_store32(addr, value)
+
+@cfg(riscv32)
+fn _rv32_ld64(addr: i64) -> i64:
+    """Little-endian 64-bit load; `addr` must be 4-byte aligned."""
+    _rv32_ld32(addr) | (_rv32_ld32(addr + 4) << 32)
+
+@cfg(riscv32)
+fn _rv32_st64(addr: i64, value: i64):
+    """64-bit store as two aligned 32-bit probe stores, low word first."""
+    _rv32_st32(addr, value & 0xFFFFFFFF)
+    _rv32_st32(addr + 4, (value >> 32) & 0xFFFFFFFF)
 
 @cfg(riscv32)
 fn _rv32_st8(addr: i64, byte: i64):
@@ -136,7 +147,7 @@ fn _rv32_array_slot(array: i64, index: i64) -> i64:
     val idx: i64 = rv32_rt_normalize_index(index, _rv32_ld32(obj + 8))
     if idx < 0:
         return 0
-    _rv32_ld32(obj + 16) + idx * 4
+    _rv32_ld32(obj + 16) + idx * 8
 
 @cfg(riscv32)
 fn _rv32_array_set(array: i64, index: i64, value: i64) -> i64:
@@ -144,7 +155,7 @@ fn _rv32_array_set(array: i64, index: i64, value: i64) -> i64:
     val slot: i64 = _rv32_array_slot(array, index)
     if slot == 0:
         return 0
-    _rv32_st32(slot, value)
+    _rv32_st64(slot, value)
     1
 
 @cfg(riscv32)
@@ -152,7 +163,7 @@ fn _rv32_words_at(array: i64, index: i64) -> i64:
     val slot: i64 = _rv32_array_slot(array, index)
     if slot == 0:
         return 0
-    _rv32_ld32(slot)
+    _rv32_ld64(slot)
 
 @cfg(riscv32)
 fn _rv32_to_string(value: i64) -> i64:
@@ -257,7 +268,7 @@ fn rt_array_get(array: i64, index: i64) -> i64:
     val slot: i64 = _rv32_array_slot(array, index)
     if slot == 0:
         return 3
-    _rv32_ld32(slot)
+    _rv32_ld64(slot)
 
 @cfg(riscv32)
 @no_mangle
@@ -280,7 +291,7 @@ fn rt_index_set(collection: i64, index: i64, value: i64) -> bool:
 @no_mangle
 fn rt_value_u64(bits: i64) -> i64:
     # Known limit: rv32 has no boxed-u64 heap kind, so this is a tag-int and
-    # keeps only the low 29 bits (values >= 0x20000000 are truncated).
+    # keeps only the low 61 bits (values >= 2^61 are truncated).
     bits << 3
 
 @cfg(riscv32)

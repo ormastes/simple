@@ -8,13 +8,13 @@
 #   rt_pool_safepoint rt_value_to_string rt_raw_i64_to_string rt_array_get
 #   rt_array_set_text rt_value_u64 rt_typed_words_{u32,u64}_{at,set}
 #
-# ABI: i686 is ILP32, so the LLVM backend makes every RuntimeValue, param and
-# local an i32 (codegen/llvm/backend_core.rs runtime_int_type); `i64` below is
-# a 32-bit carrier and rt_typed_words_u64_* carry the low 32 bits only.
+# ABI: RuntimeValue is a 64-bit word on every arch (PR #10816; codegen/llvm/
+# backend_core.rs runtime_int_type is i64), so `i64` below is a true 64-bit value.
+# 64-bit slots are two aligned 32-bit probe accesses (low word first).
 #
 # Layout (baremetal_stubs.c):
 #   string: {u32 type=1, u32 size, u32 len, data[len], NUL}   (data at +12)
-#   array:  {u32 type=2, u32 size, u32 len, u32 cap, items[]} (items at +16)
+#   array:  {u32 type=2, u32 size, u32 len, u32 cap, u64 items[]} (items at +16, 8-byte stride)
 #   values: int = v << 3, heap = ptr | 1, nil = 3, true = 11, false = 19.
 #
 # Memory and allocation go through raw boot probes in baremetal_stubs.c
@@ -51,6 +51,17 @@ fn _x86_32_ld32(addr: i64) -> i64:
 fn _x86_32_st32(addr: i64, value: i64):
     """`addr` must be 4-byte aligned."""
     rt_x86_32_probe_store32(addr, value)
+
+@cfg(i686)
+fn _x86_32_ld64(addr: i64) -> i64:
+    """Little-endian 64-bit load; `addr` must be 4-byte aligned."""
+    _x86_32_ld32(addr) | (_x86_32_ld32(addr + 4) << 32)
+
+@cfg(i686)
+fn _x86_32_st64(addr: i64, value: i64):
+    """64-bit store as two aligned 32-bit probe stores, low word first."""
+    _x86_32_st32(addr, value & 0xFFFFFFFF)
+    _x86_32_st32(addr + 4, (value >> 32) & 0xFFFFFFFF)
 
 @cfg(i686)
 fn _x86_32_st8(addr: i64, byte: i64):
@@ -132,7 +143,7 @@ fn _x86_32_array_set(array: i64, index: i64, value: i64) -> i64:
     val slot: i64 = _x86_32_array_slot(array, index)
     if slot == 0:
         return 0
-    _x86_32_st32(slot, value)
+    _x86_32_st64(slot, value)
     1
 
 @cfg(i686)
@@ -140,7 +151,7 @@ fn _x86_32_words_at(array: i64, index: i64) -> i64:
     val slot: i64 = _x86_32_array_slot(array, index)
     if slot == 0:
         return 0
-    _x86_32_ld32(slot)
+    _x86_32_ld64(slot)
 
 @cfg(i686)
 fn _x86_32_to_string(value: i64) -> i64:
@@ -184,7 +195,7 @@ fn rt_array_get(array: i64, index: i64) -> i64:
     val slot: i64 = _x86_32_array_slot(array, index)
     if slot == 0:
         return 3
-    _x86_32_ld32(slot)
+    _x86_32_ld64(slot)
 
 @cfg(i686)
 @no_mangle
@@ -197,7 +208,7 @@ fn rt_array_set_text(array: i64, index: i64, value: i64) -> bool:
 @no_mangle
 fn rt_value_u64(bits: i64) -> i64:
     # Known limit: i686 has no boxed-u64 heap kind, so this is a tag-int and
-    # keeps only the low 29 bits (values >= 0x20000000 are truncated).
+    # keeps only the low 61 bits (values >= 2^61 are truncated).
     bits << 3
 
 @cfg(i686)
