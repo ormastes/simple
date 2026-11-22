@@ -3402,3 +3402,38 @@ impl LlvmBackend {
         Ok(())
     }
 }
+
+#[cfg(all(test, feature = "llvm"))]
+mod tests {
+    use crate::codegen::llvm::LlvmBackend;
+    use crate::hir::TypeId as T;
+    use crate::mir::{MirFunction, MirInst, Terminator, VReg};
+    use simple_common::target::Target;
+    use simple_parser::ast::Visibility;
+
+    /// rt_interp_call takes real C pointers for name/argv: on i686 Windows they
+    /// must be `ptr` (32-bit), not the 64-bit RuntimeValue word.
+    #[test]
+    fn interp_call_i686_windows_pointer_params() {
+        let backend = LlvmBackend::new(Target::parse("i686-pc-windows-gnu").unwrap()).unwrap();
+        backend.create_module("interp_i686").unwrap();
+        let mut func = MirFunction::new("test".to_string(), T::I64, Visibility::Public);
+        func.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(0), value: 42 });
+        func.blocks[0].instructions.push(MirInst::InterpCall {
+            dest: Some(VReg(1)),
+            func_name: "complex_fn".to_string(),
+            args: vec![VReg(0)],
+            boxed_result: false,
+        });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+        backend.compile_function(&func).unwrap();
+
+        let ir = backend.get_ir().unwrap();
+        assert!(
+            ir.contains("declare i64 @rt_interp_call(ptr, i64, i64, ptr)"),
+            "rt_interp_call must take pointer name/argv: {ir}"
+        );
+        assert!(!ir.contains("func_name_ptr"), "name pointer must not be ptrtoint'd: {ir}");
+        backend.verify().unwrap();
+    }
+}
