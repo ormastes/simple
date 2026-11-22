@@ -22,6 +22,7 @@
 use app.io.env_ops.{env_get}
 use app.io.process_ops.{process_run_timeout}
 use std.nogc_sync_mut.host_limits.{host_limit_value, host_limit_mem_reserve_free_kib}
+use std.nogc_sync_mut.io.host_capacity.{host_memory_admit_v1}
 
 use std.nogc_sync_mut.sffi.process_memory.{freebsd_vm_available_kib_from_sysctl}
 
@@ -467,6 +468,14 @@ pub fn shard_default_threads(explicit: i64, max_threads_field: text) -> i64:
         return explicit
     shard_mem_available_kb_from_field(max_threads_field)
 
+# Opt-in live worker count (2026-11-22): SIMPLE_NATIVE_BUILD_THREADS=auto and
+# no explicit count (--threads/--jobs win). Default off: an unset value keeps
+# shard_default_threads exactly as before.
+# reason: env text and an explicit worker count
+@allow(primitive_api)
+pub fn shard_live_threads_selected_v1(threads_env: text, explicit: i64) -> bool:
+    threads_env.trim() == "auto" and explicit <= 0
+
 # The clamp itself, pure: N x budget must fit inside 60% of MemAvailable.
 # Unknown memory or an invalid estimate permits only the sequential path.
 pub fn shard_threads_cap_for(requested: i64, budget_kb: i64, avail_kb: i64) -> i64:
@@ -593,15 +602,7 @@ pub fn shard_worker_exit_hint_v1(code: i64, label: text) -> text:
     " (fast-fail abort 0xC0000409: a worker panic or allocation failure -- check the log for 'panicked at'; only if it says 'memory allocation ... failed' set {knob} to at least the measured worker peak commit)"
 
 pub fn shard_commit_spawn_admit_v1(headroom_kib: i64, reserve_kib: i64, est_kib: i64, live_private_kib: [i64]) -> bool:
-    if headroom_kib < 0: return true
-    if live_private_kib.len() == 0: return true
-    var need = est_kib
-    for current in live_private_kib:
-        if current < 0:
-            need = need + est_kib
-        elif current < est_kib:
-            need = need + (est_kib - current)
-    headroom_kib - reserve_kib >= need
+    host_memory_admit_v1(headroom_kib, reserve_kib, est_kib, live_private_kib)
 
 # ===== per-worker estimate and tree-budget clamp (phase 4) ===================
 #

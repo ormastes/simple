@@ -242,3 +242,69 @@ modules. Two bounds were added in `native_mir_fork_v1.spl`:
 The budget is soft: it is checked between claims, so the last module claimed
 overshoots it, and the child's end-of-batch codegen peak is not seen by it.
 The default leaves ~9G of f24's headroom for that slack. Unmeasured.
+
+## Continuous admission (2026-11-22, supersedes the round barrier)
+
+The fork-time `min(N, headroom / child_kb)` count and the per-round barrier
+(reap every child of a round before re-forking) are gone: a round ran at the
+pace of its slowest child, so the host sat at load ~5 of 20 CPUs with 77G free.
+`SIMPLE_MIR_FORK_WORKERS=N` is now a ceiling (and the fixed share count, so
+specs `i/N`, claim caps and worker order are unchanged); `auto` = CPU count
+(2..64). Every share starts pending. The root forks a pending share whenever
+`native_mir_fork_admit_v1` admits it from a live probe
+(`src/lib/nogc_sync_mut/io/host_capacity.spl`): no child alive -> always fork
+(progress floor); else live < N, idle CPU >= 1 (online CPUs tightened by
+cgroup `cpu.max`, minus min(instant runnable - 1, load1), never below the live
+child count), and headroom (min of cgroup `memory.max - memory.current` and
+MemAvailable) covering child_kb plus every live child's unconsumed budget
+(child_kb - its smaps_rollup private KiB), so a burst of fresh COW children is
+charged in full. Otherwise the root polls `/proc/<pid>/stat` once a second for
+a zombie child, reaps it with the blocking wait (returns at once), and
+re-admits on every reap and every 5 polls. No procfs: blocking wait on the
+oldest child. The next-batch rule uses the finished child's own claim count
+(`claimed > 0`) instead of "the ledger shrank across a round", which needed
+every sibling reaped. Retries, sealing, fail-fast, BLOCKED and the abandoned ->
+coordinator replacement hand-off are unchanged. Each fork prints one
+`[mir-fork] admit ...` line with the probe inputs; a wait prints one
+`[mir-fork] admission wait reason=...` line per reason change. Unverified: no
+run of this code exists (no full-CLI binary to run specs, no native-build
+allowed in the authoring lane).
+
+## Hard per-child bound, reserve and MEMKILL solo retry (2026-11-22)
+
+Trigger: p4-cli-f25 (old code) died in a host-wide OOM: fork-time admission
+let 3 children in against MemAvailable 40G and one grew to 45.9G on a 12G
+budget. The child-side budget latch stops CLAIMS, not bytes.
+
+- **Reserve.** Every admission keeps `SIMPLE_WORKER_MEMORY_RESERVE_KB` (default
+  max(8 GiB, 10% of MemTotal)) of HOST memory free: headroom =
+  min(cgroup headroom, MemAvailable - reserve). The reserve is not taken off
+  the cgroup headroom; the cgroup cap is the operator's own bound, and
+  subtracting the reserve twice would kill f25-class modules that fit their
+  scope. Each live child is charged
+  max(child_kb, its observed peak) - its current private KiB, at least
+  child_kb/4; an unreadable reading is charged in full. The busy-CPU estimate
+  is now max(runnable - 1, load1). (Before, it was the smaller of the two.)
+- **Root-side kill.** Every 1 s poll reads each live child's smaps_rollup. A
+  child above 2 x child_kb, or (only with 2 or more children alive) the newest
+  child when MemAvailable < reserve, is
+  signalled (rt_process_kill = SIGTERM, default disposition in the child; no
+  SIGKILL-by-pid primitive is backed in every runtime lane, and a new extern
+  would be undefined against a pinned `--runtime-path`). Each child also sets
+  `/proc/self/oom_score_adj` to 1000 right after the fork.
+- **MEMKILL.** A child killed for memory is not a module failure. Its rows stay
+  claimed by the dead owner until no child is alive, then
+  `hir_shard_recovery_release_memkill_v1` deletes their claims (audit record in
+  `{queue}/memkill/`) and one SOLO child walks them first
+  (`SIMPLE_MIR_FORK_SOLO_ROWS`, front-loaded in the child branch of
+  driver_pipeline_lowering) with no sibling admitted until every released row
+  has a terminal. A sole child (the first, or the solo retry) is never
+  reserve-killed; the solo child is also exempt from the 2 x cap. Its bounds
+  are oom_score_adj=1000 and its cgroup. A solo child that dies anyway has its
+  rows sealed CRASH. A row
+  is released at most once. This is the only exception to "claims are
+  immutable"; it is not a MEMKILL terminal because a terminal could never
+  become PASS.
+- **Limit.** In-build admission cannot see other scopes' later growth.
+  Cross-tenant safety also needs the operator to keep the sum of every scope's
+  MemoryMax at or below RAM minus the reserve.
