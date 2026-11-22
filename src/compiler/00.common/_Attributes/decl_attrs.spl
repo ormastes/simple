@@ -30,6 +30,11 @@ use compiler.types.type_layout.{
     platform_predicate_default, platform_validate_variants
 }
 use compiler.common.diagnostics.span.{Span}
+use compiler.common.data.attribute_schema_v1.{AttrPlacementV1}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+
+@unsafe(reason: "observe live build session id before permanent default caching", capabilities: [ffi])
+extern fn rt_session_heap_id() -> u32
 
 
 # ============================================================================
@@ -442,6 +447,41 @@ pub fn parse_driver_manifest_attrs(attrs: [Attribute]) -> DriverManifestAttr?:
 
     nil
 
+var _decl_attrs_session_active: bool = false
+var _vhdl_hardware_metadata_absent_cached: VhdlHardwareMetadata? = None
+var _driver_manifest_attr_absent_cached: DriverManifestAttr? = None
+
+fn _decl_attrs_live_session_id_v1() -> u32:
+    unsafe(capabilities: [ffi]):
+        rt_session_heap_id()
+
+fn _decl_attrs_can_cache_permanent_v1() -> bool:
+    not _decl_attrs_session_active and transient_array_scope_state_v1() == 0 and _decl_attrs_live_session_id_v1() == 0u32
+
+fn decl_attrs_set_session_v1(active: bool):
+    _decl_attrs_session_active = active
+
+fn decl_attrs_reset_after_session_v1():
+    _decl_attrs_session_active = false
+
+fn driver_manifest_attr_default_fresh_v1() -> DriverManifestAttr:
+    DriverManifestAttr(
+        kind: DriverManifestAttrKind.Driver,
+        driver_class: 0,
+        vendor: 0,
+        device_ids: [],
+        version: "",
+        abi: ""
+    )
+
+fn driver_manifest_attr_absent_shared_v1() -> DriverManifestAttr:
+    if val cached = _driver_manifest_attr_absent_cached:
+        return cached
+    val fresh = driver_manifest_attr_default_fresh_v1()
+    if _decl_attrs_can_cache_permanent_v1():
+        _driver_manifest_attr_absent_cached = Some(fresh)
+    fresh
+
 fn vhdl_clocked_metadata_default() -> VhdlClockedMetadata:
     VhdlClockedMetadata(
         clock_signal: "",
@@ -464,6 +504,18 @@ pub fn vhdl_hardware_metadata_default() -> VhdlHardwareMetadata:
         flatten_struct_output: false
     )
 
+fn vhdl_hardware_metadata_absent_shared_v1() -> VhdlHardwareMetadata:
+    if val cached = _vhdl_hardware_metadata_absent_cached:
+        return cached
+    val fresh = vhdl_hardware_metadata_default()
+    if _decl_attrs_can_cache_permanent_v1():
+        _vhdl_hardware_metadata_absent_cached = Some(fresh)
+    fresh
+
+fn decl_attrs_warm_absent_defaults_v1():
+    val _vhdl = vhdl_hardware_metadata_absent_shared_v1()
+    val _drv = driver_manifest_attr_absent_shared_v1()
+
 pub fn vhdl_hardware_metadata_flat_row_is_valid(row: VhdlHardwareMetadataFlatRow) -> bool:
     (row.generic_names.len() == row.generic_type_texts.len() and
     row.generic_names.len() == row.generic_default_texts.len() and
@@ -480,7 +532,17 @@ pub fn parse_vhdl_hardware_attrs(attrs: [Attribute]) -> VhdlHardwareMetadata:
 
     This intentionally preserves the existing syntax as metadata instead of
     making the VHDL backend rescan source text for @hardware/@generic/@clocked.
+    Fast-paths the 99.99% case with zero VHDL attributes by returning the
+    shared immutable absent metadata instead of allocating a 5-object tree.
     """
+    var has_any_vhdl_attr = false
+    for attr in attrs:
+        if attr.name == "hardware" or attr.name == "generic" or attr.name == "clocked" or attr.name == "flatten_struct_output":
+            has_any_vhdl_attr = true
+            break
+    if not has_any_vhdl_attr:
+        return vhdl_hardware_metadata_absent_shared_v1()
+
     var meta = vhdl_hardware_metadata_default()
 
     for attr in attrs:
@@ -787,7 +849,7 @@ pub fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
             is_entry = true
         elif attr.name == "naked":
             is_naked = true
-        elif attr.name == "inline" or attr.name == "always_inline":
+        elif attr.name == "inline" or attr.name == "always_inline" or attr.name == "embed":
             is_inline = true
         elif attr.name == "align":
             # Design A.2: power of two in 1..4096, else E-ALIGN-RANGE.
@@ -1051,3 +1113,107 @@ struct TaskPolicyDiagnostic:
     """A diagnostic from @task scheduler policy validation."""
     level: text
     message: text
+
+# ============================================================================
+# @embed Attribute Types & TypeLayout / AttrPlacementV1 Wiring
+# ============================================================================
+
+pub enum EmbedLayoutMode:
+    InlineDirect
+    PackedInline
+    PreserveOrder
+
+pub struct EmbedAttr:
+    """Parsed `@embed` declaration/field attribute for inline/embedded layout."""
+    mode: EmbedLayoutMode
+    has_explicit_align: bool
+    explicit_align: i64
+
+pub fn parse_embed_attr(attrs: [Attribute]) -> EmbedAttr?:
+    """Extract `@embed` attribute intent (`@embed`, `@embed("packed")`, `@embed(align=N)`)."""
+    var found = false
+    var mode = EmbedLayoutMode.InlineDirect
+    var has_explicit_align = false
+    var explicit_align: i64 = 0
+
+    for attr in attrs:
+        if attr.name == "embed":
+            found = true
+            for arg in attr.args:
+                match arg.kind:
+                    case Assign(left, _op, right):
+                        val key = extract_text_arg(left)
+                        if key == "align":
+                            val parsed_align = extract_int_arg(right)
+                            if val align_value = parsed_align:
+                                if align_value >= 1 and (align_value & (align_value - 1)) == 0:
+                                    has_explicit_align = true
+                                    explicit_align = align_value
+                        elif key == "mode" or key == "layout":
+                            val mode_name = extract_text_arg(right)
+                            if mode_name == "packed":
+                                mode = EmbedLayoutMode.PackedInline
+                            elif mode_name == "preserve_order" or mode_name == "C":
+                                mode = EmbedLayoutMode.PreserveOrder
+                            else:
+                                mode = EmbedLayoutMode.InlineDirect
+                    case _:
+                        val parsed_int = extract_int_arg(arg)
+                        if val align_value = parsed_int:
+                            if align_value >= 1 and (align_value & (align_value - 1)) == 0:
+                                has_explicit_align = true
+                                explicit_align = align_value
+                        else:
+                            val token = extract_text_arg(arg)
+                            if token == "packed":
+                                mode = EmbedLayoutMode.PackedInline
+                            elif token == "preserve_order" or token == "C":
+                                mode = EmbedLayoutMode.PreserveOrder
+                            elif token == "direct" or token == "inline" or token == "embed":
+                                mode = EmbedLayoutMode.InlineDirect
+
+    if not found:
+        return None
+
+    Some(EmbedAttr(
+        mode: mode,
+        has_explicit_align: has_explicit_align,
+        explicit_align: explicit_align
+    ))
+
+pub fn embed_attr_placement_v1(embed: EmbedAttr?) -> AttrPlacementV1:
+    """Map `@embed` metadata to `AttrPlacementV1.Embedded` when present, `SparseHash` when absent."""
+    if val _present = embed:
+        return AttrPlacementV1.Embedded
+    AttrPlacementV1.SparseHash
+
+pub fn apply_embed_layout_attr_v1(base: LayoutAttr, embed: EmbedAttr?) -> LayoutAttr:
+    """Apply `@embed` inline/embedded intent onto a `LayoutAttr` (`TypeLayout`)."""
+    if val present = embed:
+        var layout_kind = base.layout_kind
+        var is_packed = base.is_packed
+        var is_preserve_order = base.is_preserve_order
+        match present.mode:
+            case EmbedLayoutMode.PackedInline:
+                layout_kind = TypeLayoutKind.Packed
+                is_packed = true
+            case EmbedLayoutMode.PreserveOrder:
+                is_preserve_order = true
+            case EmbedLayoutMode.InlineDirect:
+                if layout_kind == TypeLayoutKind.Simple and not is_packed:
+                    is_preserve_order = true
+        val has_align = if present.has_explicit_align: true else: base.has_explicit_align
+        val align_val = if present.has_explicit_align: present.explicit_align else: base.explicit_align
+        return LayoutAttr(
+            layout_kind: layout_kind,
+            has_explicit_align: has_align,
+            explicit_align: align_val,
+            is_packed: is_packed,
+            is_preserve_order: is_preserve_order,
+            is_compactq: base.is_compactq
+        )
+    base
+
+export EmbedLayoutMode, EmbedAttr, parse_embed_attr, embed_attr_placement_v1, apply_embed_layout_attr_v1
+export driver_manifest_attr_absent_shared_v1, vhdl_hardware_metadata_absent_shared_v1
+export decl_attrs_set_session_v1, decl_attrs_reset_after_session_v1, decl_attrs_warm_absent_defaults_v1

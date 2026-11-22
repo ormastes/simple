@@ -220,6 +220,12 @@ fn stmt_body_store(idx: i64, values: [i64]):
     stmt_body_offsets[idx] = offset
     stmt_body_counts[idx] = values.len()
 
+fn stmt_body_store_one(idx: i64, item: i64):
+    val offset = stmt_body_flat.len()
+    stmt_body_flat.push(item)
+    stmt_body_offsets[idx] = offset
+    stmt_body_counts[idx] = 1
+
 fn stmt_count() -> i64:
     val env_count = stmt_count_env()
     if env_count > 0:
@@ -283,7 +289,8 @@ fn stmt_alloc(tag: i64, span_id: i64) -> i64:
     stmt_expr.push(-1)
     stmt_name.push("")
     stmt_type_tag.push(0)
-    stmt_body.push(stmt_empty_i64)
+    # `stmt_body` pool slot is retained at length 0 for .spab dump-ordinal
+    # compatibility; all statement bodies live in `stmt_body_flat` + offsets/counts.
     stmt_body_offsets.push(stmt_body_flat.len())
     stmt_body_counts.push(0)
     stmt_if_single_else.push(-1)
@@ -293,7 +300,7 @@ fn stmt_alloc(tag: i64, span_id: i64) -> i64:
     stmt_i64_set(idx, "EXPR", -1)
     stmt_text_set(idx, "NAME", "")
     stmt_i64_set(idx, "TYPE", 0)
-    stmt_list_set(idx, "BODY", [])
+    stmt_text_set(idx, "BODY", "")
     stmt_i64_set(idx, "IF_ELSE_SINGLE", -1)
     val trace_stmt_tags = env_get_nullable("SIMPLE_TRACE_STMT_TAGS") ?? ""
     if (trace_stmt_tags != "" and not frontend_trace_suppressed() and
@@ -361,10 +368,8 @@ fn stmt_assign_stmt(target_expr: i64, value_expr: i64, span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_ASSIGN, span_id)
     stmt_expr[idx] = target_expr
     stmt_i64_set(idx, "EXPR", target_expr)
-    var body: [i64] = []
-    body.push(value_expr)
-    stmt_body_store(idx, body)
-    stmt_list_set(idx, "BODY", body)
+    stmt_body_store_one(idx, value_expr)
+    stmt_i64_set(idx, "BODY", value_expr)
     idx
 
 fn stmt_return_stmt(value_expr: i64, span_id: i64) -> i64:
@@ -481,10 +486,8 @@ fn stmt_compound_assign_stmt(op: i64, target_expr: i64, value_expr: i64, span_id
     stmt_i64_set(idx, "EXPR", target_expr)
     stmt_type_tag[idx] = op
     stmt_i64_set(idx, "TYPE", op)
-    var body: [i64] = []
-    body.push(value_expr)
-    stmt_body_store(idx, body)
-    stmt_list_set(idx, "BODY", body)
+    stmt_body_store_one(idx, value_expr)
+    stmt_i64_set(idx, "BODY", value_expr)
     idx
 
 fn stmt_defer_stmt(deferred_expr: i64, span_id: i64) -> i64:
@@ -524,10 +527,8 @@ fn stmt_labeled_loop(label: text, inner_stmt: i64, span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_LABELED_LOOP, span_id)
     stmt_name[idx] = label
     stmt_text_set(idx, "NAME", label)
-    var body: [i64] = []
-    body.push(inner_stmt)
-    stmt_body_store(idx, body)
-    stmt_list_set(idx, "BODY", body)
+    stmt_body_store_one(idx, inner_stmt)
+    stmt_i64_set(idx, "BODY", inner_stmt)
     idx
 
 # GPU launch dimension storage (parallel to stmt arrays)
@@ -708,6 +709,7 @@ export stmt_count, stmt_set_expr, stmt_owner_len
 export stmt_parse_i64, stmt_i64_list_join, stmt_i64_list_split
 export stmt_count_env, stmt_count_set, stmt_key
 export stmt_i64_set, stmt_text_set, stmt_list_set
+export stmt_body_store, stmt_body_store_one
 export stmt_reset, stmt_alloc
 export stmt_contract_clause
 

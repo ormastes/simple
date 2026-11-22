@@ -182,10 +182,25 @@ fn generate_smf_with_raw_code_options(code_bytes: [u8], options: SmfBuildOptions
         return build_smf_with_code_for_target(code_bytes, options.target)
     build_smf_with_templates_internal(code_bytes, options)
 
+fn smf_assemble_parts_v1(parts: [[u8]]) -> [u8]:
+    """Assemble SMF byte sections into a single buffer via geometric in-place .push.
+
+    Avoids the O(N * K) full-image reallocations of sequential `bytes_concat_copy_v1`
+    which cloned the entire `code_bytes` prefix 9-10 times per SMF emission.
+    """
+    var buf: [u8] = []
+    for part in parts:
+        var index: i64 = 0
+        val count = part.len()
+        while index < count:
+            buf.push(part[index])
+            index = index + 1
+    buf
+
 # Build an SMF module with code and optional template sections
 # v1.1: Uses TRAILER-BASED HEADER (like ZIP format)
 fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions) -> [u8]:
-    var buf: [u8] = []
+    var parts: [[u8]] = []
 
     # No stub in this implementation (stub_size = 0)
     # Future: Add optional stub support for executable SMF
@@ -235,34 +250,28 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     val header_offset = string_table_offset + 5  # "main\0"
 
     # Write code section
-    # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-    buf = bytes_concat_copy_v1(buf, code_bytes)
+    parts.push(code_bytes)
 
     # Write note.deps section (dependency content hashes)
     if has_deps:
-        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-        buf = bytes_concat_copy_v1(buf, deps_bytes)
+        parts.push(deps_bytes)
 
     # Write .drv_manifest section payload
     if has_driver_manifest:
-        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-        buf = bytes_concat_copy_v1(buf, options.driver_manifest_bytes)
+        parts.push(options.driver_manifest_bytes)
 
     # Write .launch_meta section payload
     if has_launch_metadata:
-        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-        buf = bytes_concat_copy_v1(buf, options.launch_metadata_bytes)
+        parts.push(options.launch_metadata_bytes)
 
     # Write .simple_meta section payload
     if has_meta:
-        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-        buf = bytes_concat_copy_v1(buf, meta_bytes)
+        parts.push(meta_bytes)
 
     # 2. Write section table
 
     # Code section
-    # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-    buf = bytes_concat_copy_v1(buf, build_section_entry(
+    parts.push(build_section_entry(
         section_type: 1,  # SectionType::Code
         flags: 0x05,  # READ | EXEC
         offset: code_offset,
@@ -272,8 +281,7 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
 
     # note.deps section (dependency content hashes for staleness checking)
     if has_deps:
-        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-        buf = bytes_concat_copy_v1(buf, build_section_entry(
+        parts.push(build_section_entry(
             section_type: 7,  # SectionType::Note
             flags: 0x01,  # READ
             offset: deps_offset,
@@ -283,8 +291,7 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
 
     # .drv_manifest section (DRVS records)
     if has_driver_manifest:
-        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-        buf = bytes_concat_copy_v1(buf, build_section_entry(
+        parts.push(build_section_entry(
             section_type: 14,  # SectionType::DrvManifest
             flags: 0x01,  # READ
             offset: driver_manifest_offset,
@@ -294,8 +301,7 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
 
     # .launch_meta section (startup launch metadata SDN)
     if has_launch_metadata:
-        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-        buf = bytes_concat_copy_v1(buf, build_section_entry(
+        parts.push(build_section_entry(
             section_type: 15,  # SectionType::LaunchMetadata
             flags: 0x01,  # READ
             offset: launch_metadata_offset,
@@ -305,8 +311,7 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
 
     # .simple_meta section (TLV metadata records)
     if has_meta:
-        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-        buf = bytes_concat_copy_v1(buf, build_section_entry(
+        parts.push(build_section_entry(
             section_type: 7,  # SectionType::Note
             flags: 0x01,  # READ
             offset: meta_offset,
@@ -315,12 +320,10 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
         ))
 
     # 3. Write symbol table
-    # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-    buf = bytes_concat_copy_v1(buf, build_symbol_entry("main", 0, code_bytes.len()))
+    parts.push(build_symbol_entry("main", 0, code_bytes.len()))
 
     # 4. Write string table
-    # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-    buf = bytes_concat_copy_v1(buf, [109.to_u8(), 97.to_u8(), 105.to_u8(), 110.to_u8(), 0.to_u8()])
+    parts.push([109.to_u8(), 97.to_u8(), 105.to_u8(), 110.to_u8(), 0.to_u8()])
 
     # 5. Write HEADER at END (TRAILER) v1.1 design
     # This enables executable SMF files (prepend shebang/stub)
@@ -346,10 +349,9 @@ fn build_smf_with_templates_internal(code_bytes: [u8], options: SmfBuildOptions)
     header.set_stub_info(stub_size, smf_data_offset)
 
     # Serialize and append header
-    # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-    buf = bytes_concat_copy_v1(buf, header.to_bytes())
+    parts.push(header.to_bytes())
 
-    buf
+    smf_assemble_parts_v1(parts)
 
 fn smf_name_bytes(name: text) -> [u8]:
     match name:
@@ -534,7 +536,7 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
     val has_meta = meta_bytes.len() > 0
 
     # Build SMF with Code + Reloc sections
-    var buf: [u8] = []
+    var parts: [[u8]] = []
     val code_offset = 0
     val reloc_offset = code_bytes.len()
     val deps_offset = reloc_offset + reloc_bytes.len()
@@ -560,25 +562,25 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
     val header_offset = string_table_offset + 5
 
     # Write code
-    buf = buf + (code_bytes)
+    parts.push(code_bytes)
 
     # Write reloc section
-    buf = buf + (reloc_bytes)
+    parts.push(reloc_bytes)
 
     if has_deps:
-        buf = buf + (deps_bytes)
+        parts.push(deps_bytes)
 
     if has_driver_manifest:
-        buf = buf + (options.driver_manifest_bytes)
+        parts.push(options.driver_manifest_bytes)
 
     if has_launch_metadata:
-        buf = buf + (options.launch_metadata_bytes)
+        parts.push(options.launch_metadata_bytes)
 
     if has_meta:
-        buf = buf + (meta_bytes)
+        parts.push(meta_bytes)
 
     # Write section table - Code section
-    buf = buf + (build_section_entry(
+    parts.push(build_section_entry(
         section_type: 1,
         flags: 0x05,
         offset: code_offset,
@@ -587,7 +589,7 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
     ))
 
     # Write section table - Reloc section (wire type 5)
-    buf = buf + (build_section_entry(
+    parts.push(build_section_entry(
         section_type: 5,
         flags: 0x01,
         offset: reloc_offset,
@@ -596,7 +598,7 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
     ))
 
     if has_deps:
-        buf = buf + (build_section_entry(
+        parts.push(build_section_entry(
             section_type: 7,
             flags: 0x01,
             offset: deps_offset,
@@ -605,7 +607,7 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
         ))
 
     if has_driver_manifest:
-        buf = buf + (build_section_entry(
+        parts.push(build_section_entry(
             section_type: 14,
             flags: 0x01,
             offset: driver_manifest_offset,
@@ -614,7 +616,7 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
         ))
 
     if has_launch_metadata:
-        buf = buf + (build_section_entry(
+        parts.push(build_section_entry(
             section_type: 15,
             flags: 0x01,
             offset: launch_metadata_offset,
@@ -623,7 +625,7 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
         ))
 
     if has_meta:
-        buf = buf + (build_section_entry(
+        parts.push(build_section_entry(
             section_type: 7,
             flags: 0x01,
             offset: meta_offset,
@@ -632,10 +634,10 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
         ))
 
     # Write symbol table
-    buf = buf + (build_symbol_entry("main", 0, code_bytes.len()))
+    parts.push(build_symbol_entry("main", 0, code_bytes.len()))
 
     # Write string table
-    buf = buf + [109, 97, 105, 110, 0]
+    parts.push([109.to_u8(), 97.to_u8(), 105.to_u8(), 110.to_u8(), 0.to_u8()])
 
     # Write HEADER as trailer
     val platform = text_to_platform(options.target.os)
@@ -650,9 +652,9 @@ fn build_smf_with_relocations(object_code: [u8], options: SmfBuildOptions) -> [u
     header.exported_count = 1
     header.entry_point = 0
     header.set_stub_info(0, 0)
-    buf = buf + (header.to_bytes())
+    parts.push(header.to_bytes())
 
-    buf
+    smf_assemble_parts_v1(parts)
 
 # SMF output mode for the driver
 enum SmfOutputMode:
@@ -670,7 +672,7 @@ from the SMF Code section by checking for ELF magic bytes.
 fn build_smf_with_elf_embedded(object_code: [u8], target: Target) -> [u8]:
     # Store the full ELF .o bytes as-is in the Code section
     # (skip extract_code_from_object which strips to raw .text)
-    var buf: [u8] = []
+    var parts: [[u8]] = []
     val code_offset = 0
     val section_table_offset = object_code.len()
     val section_count = 1
@@ -681,10 +683,10 @@ fn build_smf_with_elf_embedded(object_code: [u8], target: Target) -> [u8]:
     val header_offset = string_table_offset + 5
 
     # Write full ELF .o as Code section
-    buf = buf + (object_code)
+    parts.push(object_code)
 
     # Write section table - Code section (contains full ELF)
-    buf = buf + (build_section_entry(
+    parts.push(build_section_entry(
         section_type: 1,
         flags: 0x05,
         offset: code_offset,
@@ -693,10 +695,10 @@ fn build_smf_with_elf_embedded(object_code: [u8], target: Target) -> [u8]:
     ))
 
     # Write symbol table
-    buf = buf + (build_symbol_entry("main", 0, object_code.len()))
+    parts.push(build_symbol_entry("main", 0, object_code.len()))
 
     # Write string table
-    buf = buf + [109, 97, 105, 110, 0]
+    parts.push([109.to_u8(), 97.to_u8(), 105.to_u8(), 110.to_u8(), 0.to_u8()])
 
     # Write HEADER as trailer
     val platform = text_to_platform(target.os)
@@ -710,9 +712,9 @@ fn build_smf_with_elf_embedded(object_code: [u8], target: Target) -> [u8]:
     header.exported_count = 1
     header.entry_point = 0
     header.set_stub_info(0, 0)
-    buf = buf + (header.to_bytes())
+    parts.push(header.to_bytes())
 
-    buf
+    smf_assemble_parts_v1(parts)
 
 # Core exports
 
