@@ -21,9 +21,15 @@ Every route in the source that runs the pool fails closed. `run_file_worker_pool
 `src/app/cli/bootstrap_main.spl` (coordinator, Stage 3, Stage 4 and positional routes) returns 1.
 `bootstrap_main.spl` is byte-identical between a20233fd230 and the release head.
 So no single source line returns 0 on this outcome. The exit 0 is unexplained at source level.
-The leading suspect is the known bool branch-merge codegen defect of the admitted capsule (noted in
-`src/app/cli/bootstrap_native_output_args.spl`). This path chains bool returns:
-`..._accepts_v1` -> `..._prepass_routed` -> `if not ...: return 1`. The suspect has not been reproduced.
+One guess, with no evidence behind it, is the bool branch-merge codegen defect of the admitted
+capsule (the note in `src/app/cli/bootstrap_native_output_args.spl`). It is a guess only because
+this path chains bool returns. It has not been reproduced, and nothing ties it to this failure.
+
+Two other possibilities were checked. Neither explains the exit 0:
+- No script under `scripts/` exports `SIMPLE_MIR_SHARD_LINK`, so the "shard child" exclusion
+  cannot turn the new gate off for a top-level invocation.
+- The producer runs the canonical parent `.exe` directly, not through a wrapper that swallows
+  the exit status.
 
 ## Fix
 There is now a route-level gate in `bootstrap_main.spl` `main`, which no route can bypass. For a
