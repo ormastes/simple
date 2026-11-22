@@ -27,6 +27,8 @@ use compiler.driver.driver_build.library_unit_plan_v1.{library_unit_cache_key_v1
 val LIBRARY_UNIT_RECEIPT_FORMAT_V1 = "simple/library-unit-receipt/v1"
 val LIBRARY_UNIT_VERDICT_OK_V1 = "ok"
 val LIBRARY_UNIT_VERDICT_FAILED_V1 = "failed"
+pub val LIBRARY_UNIT_ARTIFACT_ARCHIVE_V1 = "archive"
+pub val LIBRARY_UNIT_ARTIFACT_DYNLIB_V1 = "dynlib"
 
 pub struct LibraryUnitReceiptV1:
     unit: text
@@ -39,6 +41,8 @@ pub struct LibraryUnitReceiptV1:
     objects: [text]             # object file names under objects/
     verdict: text               # ok | failed
     failed_modules: [text]      # go-to-end: non-empty iff verdict == failed
+    artifact_kind: text = "archive"
+    init_symbols: [text] = []
 
 pub fn library_unit_archive_dir_v1(cache_root: text, unit: text, unit_key: text) -> text:
     "{cache_root}/units/{unit}/{unit_key}"
@@ -92,6 +96,10 @@ pub fn library_unit_receipt_encode_v1(r: LibraryUnitReceiptV1) -> text:
     root["objects"] = _library_unit_sdn_text_array(r.objects)
     root["verdict"] = SdnValue.String(r.verdict)
     root["failed_modules"] = _library_unit_sdn_text_array(r.failed_modules)
+    if r.artifact_kind != "" and r.artifact_kind != LIBRARY_UNIT_ARTIFACT_ARCHIVE_V1:
+        root["artifact_kind"] = SdnValue.String(r.artifact_kind)
+    if r.init_symbols.len() > 0:
+        root["init_symbols"] = _library_unit_sdn_text_array(r.init_symbols)
     sdn_encode_canonical(SdnValue.Dict(root)) + "\n"
 
 pub fn library_unit_receipt_decode_v1(content: text) -> Result<LibraryUnitReceiptV1, text>:
@@ -135,10 +143,15 @@ pub fn library_unit_receipt_decode_v1(content: text) -> Result<LibraryUnitReceip
             return Err("receipt.sdn: verdict ok with failed_modules")
     else:
         return Err("receipt.sdn: verdict '{verdict}' is not ok|failed")
+    val raw_kind = _library_unit_sdn_text(root, "artifact_kind")
+    val artifact_kind = if raw_kind == "": LIBRARY_UNIT_ARTIFACT_ARCHIVE_V1 else: raw_kind
+    if artifact_kind != LIBRARY_UNIT_ARTIFACT_ARCHIVE_V1 and artifact_kind != LIBRARY_UNIT_ARTIFACT_DYNLIB_V1:
+        return Err("receipt.sdn: artifact_kind '{artifact_kind}' is not archive|dynlib")
+    val init_symbols = _library_unit_sdn_texts(root, "init_symbols")
     Ok(LibraryUnitReceiptV1(unit: unit, unit_key: unit_key, scope_key: scope_key,
         producer_identity: producer, source_digest: source_digest, iface_digest: iface_digest,
         deps: deps, objects: _library_unit_sdn_texts(root, "objects"), verdict: verdict,
-        failed_modules: failed_modules))
+        failed_modules: failed_modules, artifact_kind: artifact_kind, init_symbols: init_symbols))
 
 # Toolchain rule: LLVM only. Unit archives are written by llvm-ar; the shared
 # `find_archive_portable` fallback to binutils `ar` / `lib.exe` is refused here

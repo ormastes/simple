@@ -28,6 +28,7 @@ describe "primitive_api text flagged":
     Every public text-family API is an SPL-TEXT-001 finding.
     """
     it "flags a bare text parameter and return":
+        # @req REQ-DPOL-006
         # @capture(statistics): finding and audit counts for greet
         step("Scan pub fn greet(name: text) -> text")
         val source = "pub fn greet(name: text) -> text:\n    name\n"
@@ -35,13 +36,37 @@ describe "primitive_api text flagged":
         expect(primitive_api_audit_source(source, "sample.spl").len()).to_equal(0)  # oracle: audit stays numeric-only
 
     it "flags str and String":
+        # @req REQ-DPOL-006
         step("Scan pub fns using str and String")
         expect(_findings("pub fn a(name: str) -> String:\n    name\n")).to_equal(2)  # oracle: whole text family flagged
 
     it "carries no ranked type fix for text":
+        # @req REQ-DPOL-006
         val fs = primitive_api_findings("sample.spl", "pub fn f(port: text):\n    pass\n".split("\n"))
         expect(fs[0].fixes.len()).to_equal(0)  # oracle: text has no numeric-family candidates
 
     it "still flags a bare numeric parameter":
+        # @req REQ-DPOL-006
         step("Scan pub fn open(port: i64)")
         expect(_findings("pub fn open(port: i64):\n    pass\n")).to_equal(1)  # oracle: numeric primitive unchanged
+
+    it "does not flag optional text or generic text containers":
+        # @req REQ-DPOL-006
+        expect(_findings("pub fn f(name: text?):\n    pass\n")).to_equal(0)  # oracle: Option text is not the bare text family
+        expect(_findings("pub fn g(names: List<text>) -> List<text>:\n    names\n")).to_equal(0)  # oracle: container of text is not bare text
+
+    it "does not flag text fields of a private struct":
+        # @req REQ-DPOL-006
+        expect(_findings("struct Rec:\n    pub file: text\n")).to_equal(0)  # oracle: only pub struct/class fields are public API
+
+    it "flags a public text field with a trailing comment":
+        # @req REQ-DPOL-006
+        val fs = primitive_api_findings("sample.spl", "pub struct Rec:\n    pub file: text  # the file\n".split("\n"))
+        expect(fs.len()).to_equal(1)  # oracle: the comment is not part of the type
+        expect(fs[0].code).to_equal("SPL-TEXT-001")  # oracle: text field finding code
+        expect(fs[0].type_path).to_equal("Rec.field.file")  # oracle: owner and field name
+
+    it "honours a struct-level @allow for its text fields":
+        # @req REQ-DPOL-006
+        expect(_findings("@allow(primitive_api)\npub struct Rec:\n    pub file: text\n")).to_equal(0)  # oracle: allow covers fields
+        expect(_findings("pub struct Rec:\n    pub file: text\n")).to_equal(1)  # oracle: same struct without allow is flagged

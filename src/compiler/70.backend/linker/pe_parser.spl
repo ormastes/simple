@@ -3,6 +3,7 @@
 # Uses BinaryReader ([u8]) and builds on pe_inspect for header/section parsing.
 
 use std.binary_io.{BinaryReader, ByteOrder}
+use std.common.text_bytes.{bytes_to_text}
 use std.pe_coff_header.{pe_rva_to_file_offset}
 use compiler.linker.pe_inspect.{
     PeHeader, PeSectionHeader, PeDataDirectory, PeInspector,
@@ -142,15 +143,8 @@ fn pe_parse_codeview(data: [u8], debug_dirs: [PeDebugDirectory]) -> PeCodeViewIn
 
     val age = reader.read_u32(order) ?? 0
 
-    var pdb_path = ""
     val path_start = off + 24
-    var pos = path_start
-    while pos < data.len() and pos < off + dir.size_of_data:
-        val b = data[pos]
-        if b == 0:
-            break
-        pdb_path = pdb_path + text.from_char_code(b)
-        pos = pos + 1
+    val pdb_path = _read_bounded_cstr(data, path_start, off + dir.size_of_data)
 
     PeCodeViewInfo(
         signature: sig,
@@ -215,32 +209,22 @@ fn _read_u32_at(data: [u8], offset: i64) -> i64:
     val b3 = data[offset + 3] as i64
     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
 
-fn _read_coff_string(data: [u8], offset: i64) -> text:
-    if offset >= data.len():
+fn _read_bounded_cstr(data: [u8], offset: i64, limit_end: i64) -> text:
+    if offset < 0 or offset >= data.len():
         return ""
-    var result = ""
-    var pos = offset
-    while pos < data.len():
-        val b = data[pos]
-        if b == 0:
-            break
-        result = result + text.from_char_code(b)
-        pos = pos + 1
-    result
+    val bound = if limit_end < data.len(): limit_end else: data.len()
+    var end = offset
+    while end < bound and data[end] != 0:
+        end = end + 1
+    if end <= offset:
+        return ""
+    bytes_to_text(data[offset:end])
+
+fn _read_coff_string(data: [u8], offset: i64) -> text:
+    _read_bounded_cstr(data, offset, data.len())
 
 fn _read_fixed_ascii(data: [u8], offset: i64, max_len: i64) -> text:
-    var result = ""
-    var i = 0
-    while i < max_len:
-        val idx = offset + i
-        if idx >= data.len():
-            break
-        val b = data[idx]
-        if b == 0:
-            break
-        result = result + text.from_char_code(b)
-        i = i + 1
-    result
+    _read_bounded_cstr(data, offset, offset + max_len)
 
 # ============================================================================
 # Section Data Extraction

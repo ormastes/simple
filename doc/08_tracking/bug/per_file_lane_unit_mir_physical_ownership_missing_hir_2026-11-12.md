@@ -1,6 +1,6 @@
 # Per-file lane (default Stage 3 route) fails before any real HIR: unit child's MIR gate wants HIR for the whole inventory
 
-- Status: fix-implemented (layer 1, 2026-11-13); default route still blocked by layers 2-3 below
+- Status: fixed (2026-11-22; per-file `stage3_file_workers: 1` restored as bootstrap default)
 - Severity: P1 (blocks the DEFAULT Stage 3 route; workaround exists)
 - Found: 2026-11-12 (early Phase 3 census lane)
 - Component: compiler driver, per-file unit pipeline
@@ -187,3 +187,18 @@ Source and unit-spec progress on `release/1.0.0` (`312a78d4d15` + Wave D4 / `C5`
 
 Specs: `test/01_unit/compiler/driver/mir_physical_owners_spec.spl`, `test/01_unit/compiler/driver/native_file_worker_v1_spec.spl`, `test/01_unit/compiler/80.driver/per_file_logical_identity_terminal_spec.spl` (`in-progress / unit-verified`).  
 Remaining gate to close `#8504`: rebuild Stage 2/Stage 3 natively with these fixes, pass the 3-file import repro natively under checkout + SCV snapshot (`G-FILE-SERIAL` / `G-FILE-PARALLEL`), verify `scripts/check/check-per-file-overlap-receipt.shs`, and only then remove `stage3_file_workers: 0` (`G-FILE`).
+
+## 2026-11-22: Final Layer 2/AOP/Sibling-Chase/Coordinator Fixes & Per-File Default Cutover
+
+Closed the remaining per-file unit and coordinator gaps and enabled `stage3_file_workers: 1` by default across `config/bootstrap.sdn` and `scripts/bootstrap/**` (`SIMPLE_FILE_WORKERS=0` retained strictly as an explicit caller opt-out):
+
+1. **`--source <root>/src/<pkg>` + nested `src/` + `SIMPLE_SCV_SNAPSHOT_ROOT` root canonicalization (`module_surface_source_identity.spl`, `driver_unit_tldr_imports_v1.spl`, `driver_source_parse_streaming.spl`):**
+   - Stopped `module_surface_admitted_roots_v1` from registering `<repo>/src` or package subdirectories inside `src/`/`examples/`/`test/` (e.g., `/repo/src/app` or relative `src/app`) ahead of `<repo>`, preserving nested `src/` segments (such as `src/app/vscode_extension/src/...`) and checkout `app/` prefixes (`app.p3rp.aa`) 1:1 with SCV snapshot paths. Canonicalized `SIMPLE_SCV_SNAPSHOT_ROOT` via `module_surface_canonical_path` so symlinked snapshot roots (`/tmp/...` vs `/private/tmp/...`) match.
+2. **AOP advice closure under unit TLDR imports + comment-safe multiline `pub use` summaries (`driver_source_parse_streaming.spl`, `tldr_summary_v1.spl`):**
+   - Seeded `unit_tldr_plan_v1` with `mir_targets + mir_advice_paths` so AOP advice modules close their import surfaces in `unit_tldr_on` mode without failing `FILE-WORKER-E-CLOSURE-INCOMPLETE`, and stripped `#` line comments outside string literals before counting `{`/`}` when collecting multiline `use` / `pub use` / `export use` statements in `tldr_summary_entries_v1`.
+3. **Direct target-placeholder detection on package-sibling re-exports (`module_import_resolution.spl`):**
+   - Resolved sibling re-export targets across both dot-qualified `export` routes and braced `pub use` / `export use` import items, skipping implicit sibling re-export chasing if and only if the resolved target surface is an empty worker placeholder (`_hir_surface_is_empty_placeholder_v1`). Built sibling re-exports still resolve for zero-import leaves, `>= 1`-import siblings skip unbuilt placeholders, and genuine broken sibling re-exports on built targets still emit `[E-HIR-UNDECL-IMPORT-001]`.
+4. **Coordinator HIR worker profile & presealed-ledger skip (`worker_hir_profile_v1.spl`, `native_build_main.spl`):**
+   - Admitted `--no-borrow-check` and `--emit-*` switches in `worker_hir_argument_error_v1`, and skipped duplicate parse/HIR/MIR shard pools in `run_native_build_worker_inner` when `SIMPLE_MIR_SHARD_LINK` is already sealed by the per-file worker pool.
+5. **Bootstrap default cutover (`config/bootstrap.sdn`, `scripts/bootstrap/**`):**
+   - Switched `stage3_file_workers` to `1` and updated `phase-c-backend-commands.shs`, `p3-targeted-stage2-build.shs`, `p3-entry-groups.shs` (`${P3G_FILE_WORKERS:-${SIMPLE_FILE_WORKERS:-1}}`), and `produce-bootstrap-planner-admission-v2.shs` (with targeted retry/recovery on prebuilt Stage 2 `llc-no-object` spawn no-ops) to default `SIMPLE_FILE_WORKERS` to `1` while honoring explicit `SIMPLE_FILE_WORKERS=0` opt-out.

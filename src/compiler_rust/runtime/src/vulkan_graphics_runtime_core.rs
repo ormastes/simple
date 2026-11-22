@@ -573,6 +573,37 @@ pub extern "C" fn rt_vulkan_shutdown() -> i64 {
 // Evidence to close: gate availability on the feature (or make the dlopen
 // path report a distinct "loader present but unsupported build" status) plus
 // a spec that pins both answers for a feature-on and a feature-off build.
+/// Single process-wide MoltenVK ICD environment discovery guard on macOS.
+///
+/// Shared by both `vulkan::instance` (`feature = "vulkan"`) and the compiler
+/// interpreter's `vulkan_dlopen` (`default = []`) so `setenv("VK_ICD_FILENAMES")`
+/// runs under one `Once` lock and cannot race concurrent `getenv` probes.
+pub fn ensure_macos_moltenvk_icd_env() {
+    #[cfg(target_os = "macos")]
+    {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            const MOLTENVK_ICD_CANDIDATES: &[&str] = &[
+                "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json",
+                "/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json",
+                "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json",
+                "/usr/local/share/vulkan/icd.d/MoltenVK_icd.json",
+            ];
+            let has_icd = std::env::var_os("VK_ICD_FILENAMES").is_some_and(|v| !v.is_empty());
+            let has_drv = std::env::var_os("VK_DRIVER_FILES").is_some_and(|v| !v.is_empty());
+            if !has_icd && !has_drv {
+                if let Some(path) = MOLTENVK_ICD_CANDIDATES
+                    .iter()
+                    .find(|candidate| std::path::Path::new(candidate).is_file())
+                {
+                    std::env::set_var("VK_ICD_FILENAMES", path);
+                }
+            }
+        });
+    }
+}
+
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_is_available() -> i64 {
@@ -609,6 +640,7 @@ pub extern "C" fn rt_vulkan_is_available() -> i64 {
     const CANDIDATES: &[&str] = &["vulkan-1.dll"];
 
     let available = *AVAILABLE.get_or_init(|| {
+        ensure_macos_moltenvk_icd_env();
         CANDIDATES
             .iter()
             .any(|name| unsafe { libloading::Library::new(name).is_ok() })

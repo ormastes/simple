@@ -13,6 +13,9 @@ use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.driver.driver_mir_error_owner.{driver_mir_error_is_fatal_owned_v1}
 
+fn gpu_hir_i64() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+
 fn gpu_dimension_span() -> Span:
     var span = Span.empty()
     span.file = "gpu_dimension.spl"
@@ -49,13 +52,13 @@ describe "GPU index dimensions fail closed":
     it "rejects a dynamic HIR parameter through the actual driver fatal gate":
         step("Invoke the production owner")
         var symbols = SymbolTable.new()
-        val symbol = symbols.define("dimension", SymbolKind.Parameter, HirType.i64(),
+        val symbol = symbols.define("dimension", SymbolKind.Parameter, gpu_hir_i64(),
             Span.empty(), Visibility.Private, false, nil)
         var lowering = gpu_dimension_lowering(symbols, [MirType.i64()])
         val parameter = lowering.builder.locals[0].id
         lowering.bind_local(symbol.id, parameter)
         val dimension = HirExpr(kind: HirExprKind.NamedVar(symbol, "dimension"),
-            has_type_: true, type_: HirType.i64(), span: gpu_dimension_span())
+            has_type_: true, type_: gpu_hir_i64(), span: gpu_dimension_span())
         lowering.lower_gpu_intrinsic_call("gpu_global_id", [gpu_dimension_argument(dimension)])
         expect(lowering.errors.len()).to_equal(1)
         val diagnostic = lowering.errors[0]
@@ -74,7 +77,7 @@ describe "GPU index dimensions fail closed":
             for dimension in [0, 1, 2]:
                 var lowering = gpu_dimension_lowering(SymbolTable.new(), [])
                 val value = HirExpr(kind: HirExprKind.IntLit(dimension, nil),
-                    has_type_: true, type_: HirType.i64(), span: gpu_dimension_span())
+                    has_type_: true, type_: gpu_hir_i64(), span: gpu_dimension_span())
                 lowering.lower_gpu_intrinsic_call(name, [gpu_dimension_argument(value)])
                 expect(lowering.errors.len()).to_equal(0)
                 expect(lowering.builder.instructions.len()).to_equal(1)
@@ -95,7 +98,7 @@ describe "GPU index dimensions fail closed":
     it "lowers a dimension expression once before rejecting its runtime value":
         step("Invoke the production owner")
         var symbols = SymbolTable.new()
-        val signature = HirType(kind: HirTypeKind.Function([], HirType.i64(), []), span: Span.empty())
+        val signature = HirType(kind: HirTypeKind.Function([], gpu_hir_i64(), []), span: Span.empty())
         val symbol = symbols.define("dimension_effect", SymbolKind.Function, signature,
             Span.empty(), Visibility.Public, false, nil)
         var lowering = gpu_dimension_lowering(symbols, [])
@@ -103,7 +106,7 @@ describe "GPU index dimensions fail closed":
         val callee = HirExpr(kind: HirExprKind.NamedVar(symbol, "dimension_effect"),
             has_type_: true, type_: signature, span: gpu_dimension_span())
         val dimension = HirExpr(kind: HirExprKind.Call(callee, [], []),
-            has_type_: true, type_: HirType.i64(), span: gpu_dimension_span())
+            has_type_: true, type_: gpu_hir_i64(), span: gpu_dimension_span())
         lowering.lower_gpu_intrinsic_call("gpu_global_id", [gpu_dimension_argument(dimension)])
         expect(lowering.errors.len()).to_equal(1)
         expect(driver_mir_error_is_fatal_owned_v1(lowering.errors[0])).to_equal(true)
@@ -145,13 +148,13 @@ fn gpu_effect_argument(symbol: SymbolId, name: text, signature: HirType, result_
 describe "GPU non-index arguments retain their owning lowering path":
     it "accepts real pointer and data parameters for CAS and every ordinary atomic":
         step("Prepare the real fixture")
-        val pointer_type = HirType(kind: HirTypeKind.Ptr(HirType.i64(), true), span: Span.empty())
+        val pointer_type = HirType(kind: HirTypeKind.Ptr(gpu_hir_i64(), true), span: Span.empty())
         for name in ["gpu_atomic_cas", "gpu_atomic_add", "gpu_atomic_sub", "gpu_atomic_min", "gpu_atomic_max", "gpu_atomic_and", "gpu_atomic_or", "gpu_atomic_xor", "gpu_atomic_exchange"]:
             expect(is_gpu_intrinsic(name)).to_equal(true)
             var symbols = SymbolTable.new()
             val pointer = symbols.define("pointer", SymbolKind.Parameter, pointer_type,
                 Span.empty(), Visibility.Private, false, nil)
-            val data = symbols.define("data", SymbolKind.Parameter, HirType.i64(),
+            val data = symbols.define("data", SymbolKind.Parameter, gpu_hir_i64(),
                 Span.empty(), Visibility.Private, false, nil)
             var lowering = gpu_dimension_lowering(symbols, [MirType.ptr(MirType.i64(), true), MirType.i64()])
             val pointer_local = lowering.builder.locals[0].id
@@ -161,7 +164,7 @@ describe "GPU non-index arguments retain their owning lowering path":
             val pointer_arg = gpu_dimension_argument(HirExpr(kind: HirExprKind.NamedVar(pointer, "pointer"),
                 has_type_: true, type_: pointer_type, span: gpu_dimension_span()))
             val data_arg = gpu_dimension_argument(HirExpr(kind: HirExprKind.NamedVar(data, "data"),
-                has_type_: true, type_: HirType.i64(), span: gpu_dimension_span()))
+                has_type_: true, type_: gpu_hir_i64(), span: gpu_dimension_span()))
             val arguments = if name == "gpu_atomic_cas": [pointer_arg, data_arg, data_arg] else: [pointer_arg, data_arg]
             step("Invoke the production owner")
             lowering.lower_gpu_intrinsic_call(name, arguments)
@@ -190,10 +193,10 @@ describe "GPU non-index arguments retain their owning lowering path":
         for name in ["gpu_atomic_cas", "gpu_atomic_add", "gpu_warp_shuffle"]:
             expect(is_gpu_intrinsic(name)).to_equal(true)
             var symbols = SymbolTable.new()
-            val first_type = if name == "gpu_warp_shuffle": HirType.i64() else:
-                HirType(kind: HirTypeKind.Ptr(HirType.i64(), true), span: Span.empty())
+            val first_type = if name == "gpu_warp_shuffle": gpu_hir_i64() else:
+                HirType(kind: HirTypeKind.Ptr(gpu_hir_i64(), true), span: Span.empty())
             val first_signature = HirType(kind: HirTypeKind.Function([], first_type, []), span: Span.empty())
-            val data_signature = HirType(kind: HirTypeKind.Function([], HirType.i64(), []), span: Span.empty())
+            val data_signature = HirType(kind: HirTypeKind.Function([], gpu_hir_i64(), []), span: Span.empty())
             val first_symbol = symbols.define("gpu_probe_first", SymbolKind.Function, first_signature,
                 Span.empty(), Visibility.Public, false, nil)
             val second_symbol = symbols.define("gpu_probe_second", SymbolKind.Function, data_signature,
@@ -207,8 +210,8 @@ describe "GPU non-index arguments retain their owning lowering path":
             expect(symbols.symbols[second_symbol.id].name).to_equal("gpu_probe_second")
             expect(symbols.symbols[third_symbol.id].name).to_equal("gpu_probe_third")
             val first = gpu_effect_argument(first_symbol, "gpu_probe_first", first_signature, first_type)
-            val second = gpu_effect_argument(second_symbol, "gpu_probe_second", data_signature, HirType.i64())
-            val third = gpu_effect_argument(third_symbol, "gpu_probe_third", data_signature, HirType.i64())
+            val second = gpu_effect_argument(second_symbol, "gpu_probe_second", data_signature, gpu_hir_i64())
+            val third = gpu_effect_argument(third_symbol, "gpu_probe_third", data_signature, gpu_hir_i64())
             var lowering = gpu_dimension_lowering(symbols, [])
             lowering.current_function_names = ["gpu_probe_first", "gpu_probe_second", "gpu_probe_third"]
             val arguments = if name == "gpu_atomic_cas": [first, second, third] else: [first, second]

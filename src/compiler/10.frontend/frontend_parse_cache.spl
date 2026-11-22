@@ -39,9 +39,15 @@ use compiler.frontend.cache_dir_evict.{cache_dir_evict_due, cache_dir_evict_to_c
 use std.io_runtime.{
     env_get_opt, file_exists, file_read_result,
     file_hash_sha256_or_empty, dir_create_all,
-    file_delete
+    file_delete, file_write, getpid
 }
-use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_publish_noreplace}
+
+var _fe_cache_tmp_seq: i64 = 0
+
+fn _fe_cache_next_tmp_seq() -> i64:
+    _fe_cache_tmp_seq = _fe_cache_tmp_seq + 1
+    _fe_cache_tmp_seq
 use std.common.crypto.sha256.{sha256_text, sha256_text_native_or_empty}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
 use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
@@ -255,11 +261,21 @@ pub fn frontend_parse_cache_store_phase3_immutable_v1(key: text, blob: text, ide
     val dir = frontend_parse_cache_dir()
     val _made = dir_create_all(dir)
     val final_path = frontend_parse_cache_path(key)
-    val encoded = frontend_parse_cache_entry_encode(frontend_parse_cache_header(), blob, identity_sha)
-    if not file_create_excl(final_path, encoded):
+    if file_exists(final_path):
         return false
-    if file_hash_sha256_or_empty(final_path) != sha256_text(encoded):
-        val _deleted = file_delete(final_path)
+    val encoded = frontend_parse_cache_entry_encode(frontend_parse_cache_header(), blob, identity_sha)
+    val tmp_path = "{final_path}.{getpid()}.{_fe_cache_next_tmp_seq()}.tmp"
+    if not file_write(tmp_path, encoded):
+        val _deleted = file_delete(tmp_path)
+        return false
+    if file_hash_sha256_or_empty(tmp_path) != sha256_text(encoded):
+        val _deleted = file_delete(tmp_path)
+        return false
+    val published = match file_publish_noreplace(tmp_path, final_path):
+        case Ok(created): created
+        case Err(_): false
+    val _cleanup = file_delete(tmp_path)
+    if not published:
         return false
     _fe_cache_stores = _fe_cache_stores + 1
     true

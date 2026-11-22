@@ -62,9 +62,10 @@ fn _wm_theme_is_ws(c: text) -> bool:
 
 fn _wm_theme_skip_ws(css: text, pos: i64) -> i64:
     var i = pos
-    val n = css.len()
+    val n = css.byte_len()
     while i < n:
-        if _wm_theme_is_ws(css.char_at(i)):
+        val b = css.byte_at(i)
+        if b == 32u8 or b == 9u8 or b == 10u8 or b == 13u8:
             i = i + 1
         else:
             return i
@@ -72,11 +73,12 @@ fn _wm_theme_skip_ws(css: text, pos: i64) -> i64:
 
 fn _wm_theme_find_terminator(css: text, pos: i64) -> i64:
     # First of ';' or '}' at/after pos; end-of-text if neither appears.
-    val rest = css.substring(pos, css.byte_len())
+    val css_len = css.byte_len()
+    val rest = css.substring(pos, css_len)
     val semi = rest.index_of(";")
     val brace = rest.index_of("}")
     if semi < 0 and brace < 0:
-        return css.len()
+        return css_len
     if semi < 0:
         return pos + brace
     if brace < 0:
@@ -92,16 +94,17 @@ fn _wm_theme_css_value(css: text, prop: text) -> text:
     # (not ':') right after the name and keeps searching past it, so it
     # never mismatches onto the longer property.
     var search_from = 0
-    val css_len = css.len()
+    val css_len = css.byte_len()
+    val prop_len = prop.byte_len()
     while search_from < css_len:
         val remaining = css.substring(search_from, css_len)
         val rel = remaining.index_of(prop)
         if rel < 0:
             return ""
         val name_start = search_from + rel
-        val after_name = name_start + prop.len()
+        val after_name = name_start + prop_len
         val colon_pos = _wm_theme_skip_ws(css, after_name)
-        if colon_pos < css_len and css.char_at(colon_pos) == ":":
+        if colon_pos < css_len and css.byte_at(colon_pos) == 58u8:
             val value_start = colon_pos + 1
             val term = _wm_theme_find_terminator(css, value_start)
             return css.substring(value_start, term).trim()
@@ -139,28 +142,52 @@ fn wm_theme_tokens_from_css(css: text) -> WmThemeCssTokens:
         wtc_error: _wm_theme_css_value(clean, "--wm-error")
     )
 
+fn _wm_ascii_lower_byte(b: u8) -> u8:
+    if b >= 65u8 and b <= 90u8:
+        return b + 32u8
+    b
+
+fn _wm_find_ascii_ci(haystack: text, needle: text, start: i64) -> i64:
+    val hlen = haystack.byte_len()
+    val nlen = needle.byte_len()
+    if nlen == 0:
+        return start
+    val limit = hlen - nlen
+    var i = start
+    while i <= limit:
+        var matched = true
+        var j = 0
+        while j < nlen:
+            if _wm_ascii_lower_byte(haystack.byte_at(i + j)) != needle.byte_at(j):
+                matched = false
+                j = nlen
+            else:
+                j = j + 1
+        if matched:
+            return i
+        i = i + 1
+    -1
+
 fn _wm_theme_extract_style_blocks(html: text) -> text:
-    # Concatenates the contents of every <style>...</style> block. Simple
-    # lowercase tag match (no full HTML/XML parsing needed for this).
-    val lower = html.lower()
-    val n = html.len()
+    # Concatenates the contents of every <style>...</style> block using
+    # byte-exact ASCII case-insensitive tag matching so non-ASCII UTF-8
+    # characters (including Turkish I/i) never shift byte offsets.
+    val n = html.byte_len()
     var out = ""
     var search_from = 0
     while search_from < n:
-        val open_rel = lower.substring(search_from, n).index_of("<style")
-        if open_rel < 0:
+        val open_abs = _wm_find_ascii_ci(html, "<style", search_from)
+        if open_abs < 0:
             return out
-        val open_abs = search_from + open_rel
-        val gt_rel = lower.substring(open_abs, n).index_of(">")
+        val gt_rel = html.substring(open_abs, n).index_of(">")
         if gt_rel < 0:
             return out
         val content_start = open_abs + gt_rel + 1
-        val close_rel = lower.substring(content_start, n).index_of("</style")
-        if close_rel < 0:
+        val close_abs = _wm_find_ascii_ci(html, "</style", content_start)
+        if close_abs < 0:
             return out + html.substring(content_start, n)
-        val content_end = content_start + close_rel
-        out = out + html.substring(content_start, content_end) + "\n"
-        search_from = content_end
+        out = out + html.substring(content_start, close_abs) + "\n"
+        search_from = close_abs + 7
     out
 
 fn wm_theme_tokens_from_html(html: text) -> WmThemeCssTokens:

@@ -36,9 +36,10 @@
 # admitted).
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable}
-use std.io_runtime.{file_exists, file_read, file_write, dir_list_optional}
+use std.io_runtime.{file_exists, file_read, dir_list_optional}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use compiler.driver.driver_build.hir_variant_object_key_v1.{hir_variant_object_sidecar_path_v1}
+use compiler.driver.driver_hir_recovery.{hir_shard_owner_indexed_paths_v1}
 
 pub const NATIVE_FILE_WORKERS_ENV_V1: text = "SIMPLE_FILE_WORKERS"
 # SINGLE SOURCE OF TRUTH for the per-file pipeline default. It is the value
@@ -191,6 +192,41 @@ pub fn native_file_worker_batch_v1(raw: text) -> i64:
 pub fn native_file_worker_batch_from_env_v1() -> i64:
     native_file_worker_batch_v1(env_get_nullable(NATIVE_FILE_WORKER_BATCH_ENV_V1) ?? "")
 
+pub struct NativeFileWorkerBatchPlanV1:
+    batch_size: i64
+    worker_count: i64
+
+fn _native_file_worker_spec_count_v1(spec: text) -> i64:
+    val slash = spec.index_of("/")
+    if slash <= 0: return 1
+    val count = spec.substring(slash + 1, spec.byte_len()).to_i64() ?? 0
+    if count > 0: count else: 1
+
+# Bounded adaptive unit batch when SIMPLE_FILE_WORKER_BATCH is unset:
+#   * explicit env (> 0) always wins;
+#   * small/unknown closures (<= 32 modules) keep 1 so multi-round overlap specs
+#     and tiny incremental fixtures retain single-module granularity;
+#   * large closures scale to `clamp(closure_modules / (max(workers, 1) * 4), 1, 16)`,
+#     cutting 4,231 unit child process spawns down to ~265 bounded batches while
+#     keeping per-unit HIR/MIR residency safely under 3 GiB.
+pub const NATIVE_FILE_WORKER_ADAPTIVE_BATCH_MAX_V1: i64 = 16
+
+pub fn native_file_worker_adaptive_batch_v1(closure_modules: i64, workers: i64) -> i64:
+    if closure_modules <= 32: return 1
+    val w = if workers > 0: workers else: 1
+    var target = closure_modules / (w * 4)
+    if target < 1: target = 1
+    if target > NATIVE_FILE_WORKER_ADAPTIVE_BATCH_MAX_V1:
+        target = NATIVE_FILE_WORKER_ADAPTIVE_BATCH_MAX_V1
+    target
+
+pub fn native_file_worker_plan_batch_v1(explicit_raw: text, spec: text, closure_counts: [i64]) -> NativeFileWorkerBatchPlanV1:
+    val workers = _native_file_worker_spec_count_v1(spec)
+    val explicit = explicit_raw.trim().to_i64() ?? 0
+    val closure_modules = if closure_counts.len() > 0: closure_counts[0] else: -1
+    val batch = if explicit > 0: explicit else: native_file_worker_adaptive_batch_v1(closure_modules, workers)
+    NativeFileWorkerBatchPlanV1(batch_size: batch, worker_count: workers)
+
 # MIR child shard count so its claim cap (ceil(scheduled / count)) is `batch`.
 pub fn native_file_worker_mir_count_v1(scheduled: i64, batch: i64) -> i64:
     val b = if batch > 0: batch else: 1
@@ -262,9 +298,18 @@ pub fn native_file_worker_receipts_in_v1(queue: text) -> [NativeFileWorkerReceip
 
 # Keys (path for HIR, canonical module name for MIR) claimed by exactly `owner`.
 pub fn native_file_worker_owner_claims_v1(queue: text, owner: text) -> [text]:
+    match hir_shard_owner_indexed_paths_v1(queue, owner):
+        case Some(paths):
+            var verified: [text] = []
+            for path in paths:
+                val fields = file_read("{queue}/{sha256_text(path)}.claim").split("\n")
+                if fields.len() == 4 and fields[0] == owner and fields[1] != "":
+                    verified = verified.push(fields[1])
+            return verified
+        case None: pass
     var out: [text] = []
     val listing = dir_list_optional(queue)
-    if listing == nil:
+    if listing.is_none():
         return out
     for name in listing.unwrap():
         if name.ends_with(".claim"):
@@ -336,13 +381,17 @@ pub fn native_file_worker_hir_ledger_state_v1(queue: text) -> i64:
     val rows = file_read("{queue}/inventory").split("\n")
     if rows.len() < 2:
         return 0
-    val excluded: [text] = if file_exists("{queue}/excluded"): file_read("{queue}/excluded").split("\n") else: []
+    var excluded_set: Dict<text, bool> = {}
+    if file_exists("{queue}/excluded"):
+        for excl in file_read("{queue}/excluded").split("\n"):
+            if excl != "":
+                excluded_set[excl] = true
     var complete = true
     var index = 1
     while index < rows.len():
         val path = rows[index]
         index = index + 1
-        if path != "" and not excluded.contains(path):
+        if path != "" and not excluded_set.contains_key(path):
             val state = native_file_worker_terminal_state_v1(queue, path)
             if state == "":
                 complete = false
@@ -371,14 +420,18 @@ pub fn native_file_worker_hir_ledger_progress_v1(queue: text) -> (i64, i64):
     if not file_exists("{queue}/inventory"):
         return (0, 0)
     val rows = file_read("{queue}/inventory").split("\n")
-    val excluded: [text] = if file_exists("{queue}/excluded"): file_read("{queue}/excluded").split("\n") else: []
+    var excluded_set: Dict<text, bool> = {}
+    if file_exists("{queue}/excluded"):
+        for excl in file_read("{queue}/excluded").split("\n"):
+            if excl != "":
+                excluded_set[excl] = true
     var total: i64 = 0
     var passed: i64 = 0
     var index = 1
     while index < rows.len():
         val path = rows[index]
         index = index + 1
-        if path != "" and not excluded.contains(path):
+        if path != "" and not excluded_set.contains_key(path):
             total = total + 1
             if native_file_worker_terminal_state_v1(queue, path) == "PASS":
                 passed = passed + 1
@@ -523,7 +576,7 @@ pub fn native_file_worker_closure_incomplete_path_v1(queue: text, path: text) ->
 pub fn native_file_worker_closure_incomplete_publish_v1(queue: text, path: text, reason: text) -> bool:
     if queue == "":
         return false
-    file_write(native_file_worker_closure_incomplete_path_v1(queue, path), "{path}\n{reason}\n")
+    file_atomic_write(native_file_worker_closure_incomplete_path_v1(queue, path), "{path}\n{reason}\n")
 
 # MIR-done stamp: the MIR child writes the monotonic ms at which lower_to_mir
 # returned for its owner; the worker copies it into mir_done_ms.
@@ -533,7 +586,7 @@ pub fn native_file_worker_mir_done_path_v1(queue: text, owner: text) -> text:
 pub fn native_file_worker_mir_done_publish_v1(queue: text, owner: text, ms: i64) -> bool:
     if queue == "" or owner == "":
         return false
-    file_write(native_file_worker_mir_done_path_v1(queue, owner), "{ms}\n")
+    file_atomic_write(native_file_worker_mir_done_path_v1(queue, owner), "{ms}\n")
 
 pub fn native_file_worker_mir_done_read_v1(queue: text, owner: text) -> i64:
     val path = native_file_worker_mir_done_path_v1(queue, owner)

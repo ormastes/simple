@@ -154,3 +154,31 @@ owned modules + codegen, not from its own share of the closure.
 
 Unmeasured: the single-process 4415-module plateau on Linux, the codegen step
 in the shard worker, and any effect of the interface-only flag on this lane.
+
+### Reader audit, 2026-11-22: which suspects can be fixed by reading alone
+
+- **Suspect 1 (AST + HIR immortal): no change, blocked.** Dropping
+  `ctx.modules` / `ctx.hir_modules` frees nothing, and the only deep free
+  (`rt_dict_free_deep`) is measured unsafe on these dicts: class instances are
+  header-less, so it frees key strings that HIR, AST, the symbol table and
+  `_bootstrap_mir_functions` still alias (`driver_types.spl:1492-1511`). HIR is
+  also read after lowering by `evict_hir` (AOP advices), the vhdl backend and
+  `SIMPLE_BOOTSTRAP_DIRECT_IR` (`driver_aot_pipeline.spl:196-203`). Needs class
+  instances identifiable at runtime, or HIR lowered inside a scope that is
+  never promoted. Neither is a driver edit.
+- **Suspect 2 (interface-only HIR in shard workers): not made default.**
+  Output identity is not established: 77 of 332 objects differed between the
+  flag off and on, with no off-vs-off baseline
+  (`doc/05_design/compiler/perf/mir_shard_hir_residency_v1.md`, last section).
+  It is also unwired on the retained route the shard lane uses, and saved 5 to
+  11 percent per worker at 332 modules. Required first: an off-vs-off rerun,
+  then an on run with a Stage 2 that carries the hardened keep rule.
+- **Suspect 3 (post-codegen growth): one change landed, saving unmeasured.**
+  A shard worker no longer builds initializer receipts that only an in-process
+  link reads. Proof and the measurement to run are in
+  `native_build_cache_save_memory_blowup_2026-11-21.md`.
+- **Per-file unit worker (1.7 to 5.7 GB per unit): no change.** The unit child
+  runs the same `aot_compile_mir_shard_v1`, so it gets the suspect 3 change.
+  The 1601-file surface rebuild per unit was not audited to the reader level.
+  Observed again on the `53795406ba6` Stage 2: a one-module `native-build`
+  passed HIR and was killed at a 3 GiB cap before the build finished.

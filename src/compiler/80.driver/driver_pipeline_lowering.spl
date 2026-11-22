@@ -20,12 +20,14 @@ use compiler.driver.driver_build.native_staged_codegen.{native_staged_codegen_fl
 use compiler.driver.driver_build.go_to_end.{go_to_end_enabled_v1, GO_TO_END_UNATTRIBUTED_V1}
 use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_spec_v1, native_mir_shard_queue_v1,
     native_mir_shard_claim_cap_v1, native_mir_shard_claim_v1, native_mir_shard_lpt_order_v1,
+    native_mir_shard_worker_order_v1, native_mir_shard_note_cursor_v1,
     native_mir_shard_publish_pass_v1}
 use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_only_paths_from_env_v1}
 use compiler.driver.driver_build.native_file_worker_reuse_v1.{FILE_WORKER_REUSE_ENV_V1, file_worker_inc_reuse_lookup_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory, hir_shard_recovery_excluded, hir_shard_claim_reason_v1}
 use compiler.driver.driver_build.native_mir_fork_v1.{native_mir_fork_at_claim_loop_v1, native_mir_fork_exit_v1,
-    native_mir_fork_child_cap_v1, native_mir_fork_batch_v1}
+    native_mir_fork_child_cap_v1, native_mir_fork_batch_v1, native_mir_fork_budget_cap_v1,
+    native_mir_fork_solo_rows_v1, native_mir_fork_front_load_v1}
 use compiler.driver.driver_ice_boundary.{
     ice_boundary_module_start, ice_message_arena_aborted,
     ice_boundary_module_done, ice_boundary_fail, ice_boundary_keep_going
@@ -769,6 +771,9 @@ impl CompilerDriver:
         val mir_unit_scoped = driver_mir_unit_scoped_v1(worker_hir_loads_restricted_v1(),
             native_mir_shard_queue_v1())
         val mir_unit_targets: [text] = if mir_unit_scoped: native_file_worker_only_paths_from_env_v1() else: []
+        var mir_unit_target_set: Dict<text, bool> = {}
+        for mut_path in mir_unit_targets:
+            mir_unit_target_set[mut_path] = true
         # Phase 2's documented entry/closure route projects the phase-1
         # inventory to unique_entry_sources. Its parser already owns physical
         # deduplication; do not reinterpret unchanged phase-1 receipt rows.
@@ -800,7 +805,7 @@ impl CompilerDriver:
                         driver_mir_excluded_owner_v1(source.path, source.module_name))
                     continue
                 if driver_mir_owner_disposition_v1(mir_unit_scoped,
-                        mir_unit_targets.contains(source.path), self.ctx.hir_modules.has(source.module_name)) == "placeholder":
+                        mir_unit_target_set.contains_key(source.path), self.ctx.hir_modules.has(source.module_name)) == "placeholder":
                     projected_owners = projected_owners.push(driver_mir_placeholder_owner_v1(source.path))
                     continue
                 if not self.ctx.hir_modules.has(source.module_name):
@@ -838,7 +843,7 @@ impl CompilerDriver:
                 if go_to_end_enabled_v1() and self.go_to_end.is_excluded(source_name):
                     continue
                 if driver_mir_owner_disposition_v1(mir_unit_scoped,
-                        mir_unit_targets.contains(self.ctx.sources[selected_index].path), self.ctx.hir_modules.has(source_name)) == "placeholder":
+                        mir_unit_target_set.contains_key(self.ctx.sources[selected_index].path), self.ctx.hir_modules.has(source_name)) == "placeholder":
                     continue
                 if not self.ctx.hir_modules.has(source_name):
                     self.ctx.add_error("MIR projected ownership missing HIR for {source_name}")
@@ -891,7 +896,7 @@ impl CompilerDriver:
                 # only as closure/interface HIR) keeps its slot the same way; its SIMPLE_MIR_SHARD_ONLY_PATHS filter
                 # never lowers it here.
                 if driver_mir_owner_disposition_v1(mir_unit_scoped,
-                        mir_unit_targets.contains(owner_row_path), self.ctx.hir_modules.has(logical_name)) == "placeholder":
+                        mir_unit_target_set.contains_key(owner_row_path), self.ctx.hir_modules.has(logical_name)) == "placeholder":
                     physical_owners = physical_owners.push(driver_mir_placeholder_owner_v1(owner_row_path))
                     continue
                 if not self.ctx.hir_modules.contains_key(logical_name):
@@ -936,7 +941,7 @@ impl CompilerDriver:
                     # Cycle-125: guard-first double access (the erased-read
                     # class).
                     if driver_mir_owner_disposition_v1(mir_unit_scoped,
-                            mir_unit_targets.contains(self.ctx.source_paths_owner[physical_index]), self.ctx.hir_modules.has(logical_name)) == "placeholder":
+                            mir_unit_target_set.contains_key(self.ctx.source_paths_owner[physical_index]), self.ctx.hir_modules.has(logical_name)) == "placeholder":
                         continue
                     if not self.ctx.hir_modules.has(logical_name):
                         self.ctx.add_error("MIR physical ownership missing HIR for {logical_name}")
@@ -1131,6 +1136,12 @@ impl CompilerDriver:
             # Match the direct lane's declaration prepass order before any
             # bootstrap-flat module body is lowered: struct field identities
             # first, then enum and composite inventories.
+            # This lane never reaches the direct lane's mir_setup:* rows or its
+            # [mir] i/N line, so a whole-program build sat for hours under the
+            # last shared label, mir_setup:physical_owners
+            # (bug mir_setup_whole_program_superlinear_2026-11-22).
+            log_build_progress("mir", "modules", 0, self.ctx.sources.len(),
+                "mir:bootstrap_fixed:struct_prescan", 4, 6, 0, 0, "running")
             log_phase("aot:bootstrap_fixed:struct_prescan:start")
             var bootstrap_prescan_idx = 0
             while bootstrap_prescan_idx < self.ctx.sources.len():
@@ -1152,6 +1163,8 @@ impl CompilerDriver:
             # stage3 frontier 2026-10-17); the seed seeds a global enum
             # sidecar across the whole closure before lowering. Register
             # the closure's enums + runtime ids + builtin seeds up front.
+            log_build_progress("mir", "modules", 0, self.ctx.sources.len(),
+                "mir:bootstrap_fixed:inventories", 4, 6, 0, 0, "running")
             var bootstrap_enum_modules: [HirModule] = []
             var bootstrap_enum_idx = 0
             while bootstrap_enum_idx < self.ctx.sources.len():
@@ -1181,6 +1194,9 @@ impl CompilerDriver:
             # the entry must be the LAST module lowered on this instance.
             # Modules already in ctx.mir_modules keep
             # their MIR and are skipped.
+            log_build_progress("mir", "modules", 0, self.ctx.sources.len(),
+                "mir:bootstrap_fixed:closure_modules", 4, 6, 0, 0, "running")
+            val bootstrap_progress_started_ms = time_now_monotonic_ms()
             var bootstrap_closure_idx = 0
             while bootstrap_closure_idx < self.ctx.sources.len():
                 val bootstrap_closure_source = self.ctx.sources[bootstrap_closure_idx]
@@ -1204,6 +1220,9 @@ impl CompilerDriver:
                         self.ctx.mir_modules[bootstrap_closure_name] = bootstrap_closure_mir
                         log_phase("aot:bootstrap_fixed:closure_module module={bootstrap_closure_name} functions={bootstrap_closure_mir.functions.len()}")
                 bootstrap_closure_idx = bootstrap_closure_idx + 1
+                if mir_progress_due(bootstrap_closure_idx, self.ctx.sources.len()):
+                    log_mir_progress(bootstrap_closure_idx, self.ctx.sources.len(),
+                        bootstrap_progress_started_ms, bootstrap_closure_name)
             var bootstrap_mir = bootstrap_lowering.lower_bootstrap_entry_module(bootstrap_hir, self.ctx.mir_feed_modules)
             driver_trace_module_mir_errors("app.cli.bootstrap_main", bootstrap_hir.path,
                 bootstrap_lowering.errors, 0)
@@ -1388,8 +1407,8 @@ impl CompilerDriver:
             var enum_inventory_modules: [HirModule] = []
             var enum_inventory_idx = 0
             while enum_inventory_idx < self.ctx.sources.len():
-                val src_enum_inventory = self.ctx.sources[enum_inventory_idx]
-                val enum_inventory_hir: HirModule? = self.ctx.hir_modules[src_enum_inventory.module_name]
+                val enum_mod_name = self.ctx.sources[enum_inventory_idx].module_name
+                val enum_inventory_hir: HirModule? = self.ctx.hir_modules[enum_mod_name]
                 # Pushing the Some box into a concrete [HirModule] transports the
                 # wrapper; inventory registration then reads headers as structs.
                 # @workaround bug=stage2_if_val_struct_option_binding_as_int_wide_2026-11-03 reason=see bootstrap_enum_hir above; the as_int_wide binding reached register_module_enum_inventory_v1 as a non-pointer (dump veh_79040)
@@ -1397,6 +1416,7 @@ impl CompilerDriver:
                     val present_enum_hir: HirModule = enum_inventory_hir.unwrap()
                     enum_inventory_modules = enum_inventory_modules.push(present_enum_hir)
                 enum_inventory_idx = enum_inventory_idx + 1
+            direct_lowering.preseed_canonical_type_symbols_v1(enum_inventory_modules)
             enum_inventory_idx = 0
             val enum_scope_active = transient_array_scope_begin_v1()
             while enum_inventory_idx < enum_inventory_modules.len():
@@ -1467,6 +1487,9 @@ impl CompilerDriver:
             # File-worker P4 (SIMPLE_MIR_SHARD_ONLY_PATHS): claim only the modules
             # the worker admitted (HIR of F and its imports PASS). Empty = all.
             val mir_shard_only_paths: [text] = if mir_shard_queue != "": native_file_worker_only_paths_from_env_v1() else: []
+            var mir_shard_only_set: Dict<text, bool> = {}
+            for mso_path in mir_shard_only_paths:
+                mir_shard_only_set[mso_path] = true
             val mir_shard_key = self.ctx.native_sources_fingerprint
             var mir_shard_cap = native_mir_shard_claim_cap_v1(
                 native_mir_shard_spec_v1(), staged_source_names.len())
@@ -1503,7 +1526,9 @@ impl CompilerDriver:
                 var mir_walk_weights: [i64] = []
                 for weight_idx in mir_source_indices:
                     mir_walk_weights = mir_walk_weights.push(self.ctx.sources[weight_idx].content.len())
-                mir_walk_order = native_mir_shard_lpt_order_v1(staged_source_names, mir_walk_weights)
+                mir_walk_order = native_mir_shard_worker_order_v1(
+                    native_mir_shard_lpt_order_v1(staged_source_names, mir_walk_weights),
+                    native_mir_shard_spec_v1(), mir_shard_queue)
             # Native pre-lowering object cache (opt-in, all-or-nothing; see
             # driver_native_prelower_cache.spl). Keys are computed from
             # pre-lowering facts only. When EVERY scheduled module hits, MIR
@@ -1582,6 +1607,33 @@ impl CompilerDriver:
                 if fork_role == "child":
                     mir_shard_cap = native_mir_fork_child_cap_v1(native_mir_shard_claim_cap_v1(
                         native_mir_shard_spec_v1(), staged_source_names.len()), native_mir_fork_batch_v1())
+                    if mir_walk_order.len() == mir_source_indices.len():
+                        var child_weights: [i64] = []
+                        for cw_idx in mir_source_indices:
+                            child_weights = child_weights.push(self.ctx.sources[cw_idx].content.len())
+                        mir_walk_order = native_mir_shard_worker_order_v1(
+                            native_mir_shard_lpt_order_v1(staged_source_names, child_weights),
+                            native_mir_shard_spec_v1(), mir_shard_queue)
+                    # Solo retry of memory-killed rows (native_mir_fork_v1): walk
+                    # the released rows first, so this lone child takes them.
+                    val solo_rows = native_mir_fork_solo_rows_v1()
+                    if solo_rows.len() > 0:
+                        var solo_order: [i64] = []
+                        if mir_walk_order.len() == mir_source_indices.len():
+                            solo_order = mir_walk_order
+                        else:
+                            var so_pos: i64 = 0
+                            while so_pos < mir_source_indices.len():
+                                solo_order = solo_order.push(so_pos)
+                                so_pos = so_pos + 1
+                        var solo_names: [text] = []
+                        for so_idx in mir_source_indices:
+                            val so_module = self.ctx.sources[so_idx].module_name
+                            if mir_physical_ownership_active and self.ctx.hir_modules.contains_key(so_module):
+                                solo_names = solo_names.push(mir_layout_canonical_module_name(self.ctx.hir_modules[so_module].name))
+                            else:
+                                solo_names = solo_names.push(so_module)
+                        mir_walk_order = native_mir_fork_front_load_v1(solo_order, solo_names, solo_rows)
             val go_to_end_active = go_to_end_enabled_v1()
             self.go_to_end.mir_scan_complete = false
             val mir_progress_started_ms = time_now_monotonic_ms()
@@ -1602,7 +1654,7 @@ impl CompilerDriver:
                     continue
                 # Before any HIR read: a module-scoped unit holds no HIR for
                 # rows outside its targets' load closure (placeholder owners).
-                if mir_shard_only_paths.len() > 0 and not mir_shard_only_paths.contains(src_direct.path):
+                if mir_shard_only_paths.len() > 0 and not mir_shard_only_set.contains_key(src_direct.path):
                     direct_pos = direct_pos + 1
                     continue
                 val module_lowering_errors_before = direct_lowering.errors.len()
@@ -1615,6 +1667,10 @@ impl CompilerDriver:
                     # not lowered here. direct_pos still advances; the entry
                     # flag (mir_schedule_pos == 0) keeps its schedule meaning.
                     var mir_shard_owned = false
+                    # Forked child over SIMPLE_MIR_FORK_CHILD_KB after >=1
+                    # claim: latch the cap so it finishes its batch now.
+                    mir_shard_cap = native_mir_fork_budget_cap_v1(
+                        self.native_staged_codegen.shard_claimed_names.len(), mir_shard_cap)
                     if self.native_staged_codegen.shard_claimed_names.len() < mir_shard_cap:
                         val mir_shard_claim = native_mir_shard_claim_v1(
                             mir_shard_queue, name_direct, mir_shard_key)
@@ -1625,6 +1681,8 @@ impl CompilerDriver:
                     if not mir_shard_owned:
                         direct_pos = direct_pos + 1
                         continue
+                    if mir_shard_only_paths.len() == 0:
+                        native_mir_shard_note_cursor_v1(mir_shard_queue, direct_pos, mir_source_indices.len())
                     # File-worker P-E: the planner kept this module; publish its
                     # cached object as the PASS instead of lowering it. Both
                     # output lowers anyway: the SMF part needs the module's MIR.

@@ -312,34 +312,16 @@ pub fn go_to_end_blocked_modules_v1(candidates: [text], edge_from: [text],
     blocked
 
 pub fn go_to_end_sdn_quote_v1(value: text) -> text:
-    var out = ""
-    var index = 0
-    while index < value.len():
-        val ch = value.substring(index, index + 1)
-        if ch == "\\":
-            out = out + "\\\\"
-        elif ch == "\"":
-            out = out + "\\\""
-        elif ch == "\n":
-            out = out + "\\n"
-        elif ch == "\r":
-            out = out + "\\r"
-        elif ch == "\t":
-            out = out + "\\t"
-        else:
-            out = out + ch
-        index = index + 1
-    "\"" + out + "\""
+    val escaped = value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    "\"" + escaped + "\""
 
 fn _go_to_end_name_list_v1(names: [text]) -> text:
-    var out = "["
+    var quoted: [text] = []
     var index = 0
     while index < names.len():
-        if index > 0:
-            out = out + ", "
-        out = out + go_to_end_sdn_quote_v1(names[index])
+        quoted.push(go_to_end_sdn_quote_v1(names[index]))
         index = index + 1
-    out + "]"
+    "[" + quoted.join(", ") + "]"
 
 # The manifest text. Pure: same inputs, byte-identical output.
 pub fn go_to_end_manifest_text_v1(output: text, ledger: GoToEndLedgerV1,
@@ -352,28 +334,30 @@ pub fn go_to_end_manifest_text_v1(output: text, ledger: GoToEndLedgerV1,
 # false`. Passed as text so this module stays free of the linker.
 pub fn go_to_end_manifest_text_with_trial_v1(output: text, ledger: GoToEndLedgerV1,
         object_count: i64, built_modules: [text], trial_block: text) -> text:
-    var out = "go_to_end:\n"
-    out = out + "  schema: {go_to_end_sdn_quote_v1(GO_TO_END_SCHEMA_V1)}\n"
     val user_output = go_to_end_user_output_v1(output)
-    out = out + "  output: {go_to_end_sdn_quote_v1(user_output)}\n"
-    out = out + "  linked: false\n"
-    out = out + "  object_count: {object_count}\n"
-    out = out + "  built_count: {built_modules.len()}\n"
-    out = out + "  failed_count: {ledger.len()}\n"
-    out = out + "  stages:\n"
+    var parts: [text] = [
+        "go_to_end:\n",
+        "  schema: {go_to_end_sdn_quote_v1(GO_TO_END_SCHEMA_V1)}\n",
+        "  output: {go_to_end_sdn_quote_v1(user_output)}\n",
+        "  linked: false\n",
+        "  object_count: {object_count}\n",
+        "  built_count: {built_modules.len()}\n",
+        "  failed_count: {ledger.len()}\n",
+        "  stages:\n"
+    ]
     for stage in ["build", "hir", "hir_dependency", "mir", "borrow", "codegen"]:
-        out = out + "    {stage}: {_go_to_end_name_list_v1(ledger.stage_modules(stage))}\n"
-    out = out + "  built: {_go_to_end_name_list_v1(built_modules)}\n"
+        parts.push("    {stage}: {_go_to_end_name_list_v1(ledger.stage_modules(stage))}\n")
+    parts.push("  built: {_go_to_end_name_list_v1(built_modules)}\n")
     if trial_block == "":
-        out = out + "  trial_link:\n    attempted: false\n"
+        parts.push("  trial_link:\n    attempted: false\n")
     else:
-        out = out + trial_block
-    out = out + "\nfailures |stage, module, message|\n"
+        parts.push(trial_block)
+    parts.push("\nfailures |stage, module, message|\n")
     var index = 0
     while index < ledger.len():
-        out = out + "  {ledger.stages[index]}, {go_to_end_sdn_quote_v1(ledger.modules[index])}, {go_to_end_sdn_quote_v1(ledger.messages[index])}\n"
+        parts.push("  {ledger.stages[index]}, {go_to_end_sdn_quote_v1(ledger.modules[index])}, {go_to_end_sdn_quote_v1(ledger.messages[index])}\n")
         index = index + 1
-    out
+    parts.join("")
 
 # Write the manifest and return the non-zero build verdict text. The link is
 # the caller's to skip; this never reports success.

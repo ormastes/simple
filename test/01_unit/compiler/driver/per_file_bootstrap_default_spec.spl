@@ -1,0 +1,269 @@
+# Per-file worker pool default & unit lowering root-cause regression spec.
+#
+# Covers:
+# 1. SCV snapshot + `--source <root>/src/<pkg>` + nested `src/` resolution-root
+#    canonicalization so importing units match summary surfaces 1:1 across SCV
+#    snapshot, custom SIMPLE_SCV_SNAPSHOT_ROOT, `<checkout>/src/app/...`,
+#    nested `src/app/vscode_extension/src/...`, and `<checkout>/app/...`.
+# 2. Multiline `pub use` / `export use` TLDR summary extraction (including `#`
+#    comments with unbalanced `{` / `}` braces) without fallback.
+# 3. Direct target-placeholder detection on package-sibling re-exports:
+#    - skips sibling re-exports targeting empty worker placeholders for both
+#      zero-import leaves and `>= 1`-import sibling modules;
+#    - resolves sibling re-exports targeting built modules even on zero-import leaves;
+#    - preserves `[E-HIR-UNDECL-IMPORT-001]` diagnostics when a sibling facade
+#      re-exports a missing symbol from a built module.
+# 4. Pre-sealed `SIMPLE_MIR_SHARD_LINK` skips redundant two-pass shard pools, and
+#    `config/bootstrap.sdn` + `bootstrap_select_stage3_file_workers` default to
+#    per-file (`1`) while honoring explicit `SIMPLE_FILE_WORKERS=0` opt-out.
+# 5. Multi-file importing closure (4 modules: leaf_a, leaf_zero, facade, main)
+#    plans and resolves surfaces cleanly under unit TLDR imports (with & without
+#    SCV snapshot paths).
+
+use std.spec.*
+use std.io_runtime.{file_read, file_write, dir_create_all, getpid, process_run}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use compiler.hir.hir_lowering.module_surface_source_identity.{
+    module_surface_admitted_roots_v1,
+    module_surface_admitted_logical_id_v1,
+    module_surface_same_admitted_logical_module_v1
+}
+use compiler.driver.cache.tldr_summary_v1.{tldr_summary_entries_v1}
+use compiler.hir.hir_lowering.module_surface_from_tldr_v1.{module_surface_from_tldr_v1}
+use compiler.driver.driver_unit_tldr_imports_v1.{
+    unit_tldr_module_paths_v1,
+    unit_tldr_plan_v1,
+    unit_tldr_surface_for_row_v1
+}
+use compiler.driver.driver_build.native_file_worker_v1.{
+    NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
+    native_file_workers_selected_v1,
+    native_bootstrap_stage3_per_file_selected_v1
+}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+use test.helpers.module_surface_owner_fixture.{module_surfaces_from_test_modules}
+
+extern fn rt_dir_remove_all(path: text) -> bool
+
+describe "SCV snapshot and --source subdirectory root normalization":
+    it "maps checkout src/app, nested src/, unprefixed checkout app, and SCV snapshot paths to identical logical ids":
+        val scv_main = "/work/repo/build/scv/snapshots/scv-revision-v2-abc123/src/app/p3rp/main.spl"
+        val scv_aa = "/work/repo/build/scv/snapshots/scv-revision-v2-abc123/src/app/p3rp/aa.spl"
+        val checkout_src_aa = "/work/repo/src/app/p3rp/aa.spl"
+        val checkout_unprefixed_aa = "/work/repo/app/p3rp/aa.spl"
+        val custom_scv_root = "/tmp/custom-scv-snap-42"
+        val custom_scv_aa = "/tmp/custom-scv-snap-42/src/app/p3rp/aa.spl"
+        val nested_scv_diag = "/work/repo/build/scv/snapshots/scv-revision-v2-abc123/src/app/vscode_extension/src/diagnostics_provider.spl"
+        val nested_checkout_diag = "/work/repo/src/app/vscode_extension/src/diagnostics_provider.spl"
+
+        val roots = module_surface_admitted_roots_v1(
+            [scv_main, scv_aa, nested_scv_diag],
+            [
+                "/work/repo/src",
+                "/work/repo/src/app",
+                "/work/repo/src/app/vscode_extension/src",
+                "src/app",
+                "./src/lib",
+                "/work/repo/examples",
+                "/work/repo/test",
+                custom_scv_root
+            ],
+            "/work/repo"
+        )
+        expect(roots.contains("/work/repo/src")).to_be(false)
+        expect(roots.contains("src/app")).to_be(false)
+        expect(module_surface_admitted_logical_id_v1(scv_aa, roots)).to_equal("app.p3rp.aa")
+        expect(module_surface_admitted_logical_id_v1(checkout_src_aa, roots)).to_equal("app.p3rp.aa")
+        expect(module_surface_admitted_logical_id_v1(checkout_unprefixed_aa, roots)).to_equal("app.p3rp.aa")
+        expect(module_surface_admitted_logical_id_v1(custom_scv_aa, roots)).to_equal("app.p3rp.aa")
+        expect(module_surface_admitted_logical_id_v1(nested_scv_diag, roots)).to_equal("app.vscode_extension.src.diagnostics_provider")
+        expect(module_surface_admitted_logical_id_v1(nested_checkout_diag, roots)).to_equal("app.vscode_extension.src.diagnostics_provider")
+        expect(module_surface_admitted_logical_id_v1("src/app/vscode_extension/src/diagnostics_provider.spl", roots)).to_equal("app.vscode_extension.src.diagnostics_provider")
+        expect(module_surface_same_admitted_logical_module_v1(scv_aa, checkout_src_aa, roots)).to_be(true)
+        expect(module_surface_same_admitted_logical_module_v1(scv_aa, checkout_unprefixed_aa, roots)).to_be(true)
+        expect(module_surface_same_admitted_logical_module_v1(scv_aa, custom_scv_aa, roots)).to_be(true)
+        expect(module_surface_same_admitted_logical_module_v1(nested_scv_diag, nested_checkout_diag, roots)).to_be(true)
+
+describe "multiline pub use TLDR summary extraction":
+    it "summarizes multiline pub use and export use brace re-exports with # comment braces and zero fallback rows":
+        val facade_src = "pub use compiler.common.driver_compile_options.{{\n    # comment with unbalanced opening brace {{\n    CompileOptions, # inline comment with closing braces }}}} and {{\n    driver_core_compile_options_default\n}}\nexport use compiler.common.driver_diagnostic_types.{{\n    # another unbalanced comment brace }}\n    DriverDiag\n}}\n"
+        val rows = tldr_summary_entries_v1("compiler.common.driver_core_types", facade_src)
+        var fallbacks = 0
+        for r in rows:
+            if r.starts_with("fallback|"):
+                fallbacks = fallbacks + 1
+        expect(fallbacks).to_equal(0)
+        expect(rows.contains("export|CompileOptions")).to_be(true)
+        expect(rows.contains("export|driver_core_compile_options_default")).to_be(true)
+        expect(rows.contains("export|DriverDiag")).to_be(true)
+        val built = module_surface_from_tldr_v1("compiler.common.driver_core_types", rows)
+        expect(built.is_some()).to_be(true)
+
+describe "package-sibling re-export target-placeholder detection":
+    it "skips sibling re-exports targeting empty placeholders for both zero-import and >=1-import siblings":
+        val log = Logger(level: 0)
+        val leaf_src = "pub struct LeafZero:\n    value: i64\n"
+        val worker_src = "use pkg.own.{{SiblingOwn}}\npub struct WorkerUser:\n    value: i64\n"
+        val sibling_own_src = "pub struct SiblingOwn:\n    tag: i64\n"
+        val sibling_facade_src = "export use external.unbuilt.opts.{{CompileOptions}}\nuse external.unbuilt.opts.{{BareCompileOpts}}\nexport BareCompileOpts\npub struct FacadeLocal:\n    code: i64\n"
+        val placeholder_src = "\n"
+
+        val leaf_mod = parse_full_frontend(leaf_src, "src/pkg/leaf.spl", "pkg.leaf", log)
+        val worker_mod = parse_full_frontend(worker_src, "src/pkg/worker.spl", "pkg.worker", log)
+        val own_mod = parse_full_frontend(sibling_own_src, "src/pkg/own.spl", "pkg.own", log)
+        val facade_mod = parse_full_frontend(sibling_facade_src, "src/pkg/facade.spl", "pkg.facade", log)
+        val unbuilt_mod = parse_full_frontend(placeholder_src, "src/external/unbuilt/opts.spl", "external.unbuilt.opts", log)
+
+        expect(facade_mod.exports.len()).to_be_greater_than(0)
+
+        var modules: Dict<text, ParserModule> = {}
+        modules["pkg.leaf"] = leaf_mod
+        modules["pkg.worker"] = worker_mod
+        modules["pkg.own"] = own_mod
+        modules["pkg.facade"] = facade_mod
+        modules["external.unbuilt.opts"] = unbuilt_mod
+        val sources = [
+            SourceFile(path: "src/pkg/leaf.spl", content: leaf_src, module_name: "pkg.leaf"),
+            SourceFile(path: "src/pkg/worker.spl", content: worker_src, module_name: "pkg.worker"),
+            SourceFile(path: "src/pkg/own.spl", content: sibling_own_src, module_name: "pkg.own"),
+            SourceFile(path: "src/pkg/facade.spl", content: sibling_facade_src, module_name: "pkg.facade"),
+            SourceFile(path: "src/external/unbuilt/opts.spl", content: placeholder_src, module_name: "external.unbuilt.opts")
+        ]
+        val surfaces = module_surfaces_from_test_modules(modules, sources).unwrap()
+
+        val saved_strict = env_get("SIMPLE_STRICT_IMPORTS")
+        env_set("SIMPLE_STRICT_IMPORTS", "1")
+        var leaf_lowering = hirlowering_for_module("src/pkg/leaf.spl", surfaces)
+        leaf_lowering.resolve_package_sibling_symbols(leaf_mod)
+        var worker_lowering = hirlowering_for_module("src/pkg/worker.spl", surfaces)
+        worker_lowering.resolve_package_sibling_symbols(worker_mod)
+        env_set("SIMPLE_STRICT_IMPORTS", saved_strict)
+
+        expect(leaf_lowering.errors.len()).to_equal(0)
+        expect(leaf_lowering.symbols.lookup_or_invalid("SiblingOwn").is_valid()).to_be(true)
+        expect(leaf_lowering.symbols.lookup_or_invalid("FacadeLocal").is_valid()).to_be(true)
+        expect(leaf_lowering.symbols.lookup_or_invalid("CompileOptions").is_valid()).to_be(false)
+        expect(leaf_lowering.symbols.lookup_or_invalid("BareCompileOpts").is_valid()).to_be(false)
+
+        expect(worker_lowering.errors.len()).to_equal(0)
+        expect(worker_lowering.symbols.lookup_or_invalid("SiblingOwn").is_valid()).to_be(true)
+        expect(worker_lowering.symbols.lookup_or_invalid("FacadeLocal").is_valid()).to_be(true)
+        expect(worker_lowering.symbols.lookup_or_invalid("CompileOptions").is_valid()).to_be(false)
+        expect(worker_lowering.symbols.lookup_or_invalid("BareCompileOpts").is_valid()).to_be(false)
+
+    it "resolves sibling braced re-exports on a zero-import leaf when the target module is built and reports broken built re-exports":
+        val log = Logger(level: 0)
+        val leaf_src = "pub struct LeafZero:\n    value: i64\n"
+        val built_ext_src = "pub struct BuiltReexportedSym:\n    id: i64\npub struct BuiltBareSym:\n    id: i64\n"
+        val ok_facade_src = "export use external.built.defs.{{BuiltReexportedSym}}\nuse external.built.defs.{{BuiltBareSym}}\nexport BuiltBareSym\n"
+
+        val leaf_mod = parse_full_frontend(leaf_src, "src/pkg/leaf.spl", "pkg.leaf", log)
+        val ext_mod = parse_full_frontend(built_ext_src, "src/external/built/defs.spl", "external.built.defs", log)
+        val ok_facade_mod = parse_full_frontend(ok_facade_src, "src/pkg/facade.spl", "pkg.facade", log)
+
+        var ok_modules: Dict<text, ParserModule> = {}
+        ok_modules["pkg.leaf"] = leaf_mod
+        ok_modules["pkg.facade"] = ok_facade_mod
+        ok_modules["external.built.defs"] = ext_mod
+        val ok_sources = [
+            SourceFile(path: "src/pkg/leaf.spl", content: leaf_src, module_name: "pkg.leaf"),
+            SourceFile(path: "src/pkg/facade.spl", content: ok_facade_src, module_name: "pkg.facade"),
+            SourceFile(path: "src/external/built/defs.spl", content: built_ext_src, module_name: "external.built.defs")
+        ]
+        val ok_surfaces = module_surfaces_from_test_modules(ok_modules, ok_sources).unwrap()
+
+        val saved_strict = env_get("SIMPLE_STRICT_IMPORTS")
+        env_set("SIMPLE_STRICT_IMPORTS", "1")
+        var ok_lowering = hirlowering_for_module("src/pkg/leaf.spl", ok_surfaces)
+        ok_lowering.resolve_package_sibling_symbols(leaf_mod)
+
+        val broken_facade_src = "use external.built.defs.{{MissingFromBuilt}}\nexport MissingFromBuilt\n"
+        val broken_facade_mod = parse_full_frontend(broken_facade_src, "src/pkg/facade.spl", "pkg.facade", log)
+        var broken_modules: Dict<text, ParserModule> = {}
+        broken_modules["pkg.leaf"] = leaf_mod
+        broken_modules["pkg.facade"] = broken_facade_mod
+        broken_modules["external.built.defs"] = ext_mod
+        val broken_sources = [
+            SourceFile(path: "src/pkg/leaf.spl", content: leaf_src, module_name: "pkg.leaf"),
+            SourceFile(path: "src/pkg/facade.spl", content: broken_facade_src, module_name: "pkg.facade"),
+            SourceFile(path: "src/external/built/defs.spl", content: built_ext_src, module_name: "external.built.defs")
+        ]
+        val broken_surfaces = module_surfaces_from_test_modules(broken_modules, broken_sources).unwrap()
+        var broken_lowering = hirlowering_for_module("src/pkg/leaf.spl", broken_surfaces)
+        broken_lowering.resolve_package_sibling_symbols(leaf_mod)
+        env_set("SIMPLE_STRICT_IMPORTS", saved_strict)
+
+        expect(ok_lowering.errors.len()).to_equal(0)
+        expect(ok_lowering.symbols.lookup_or_invalid("BuiltReexportedSym").is_valid()).to_be(true)
+        expect(ok_lowering.symbols.lookup_or_invalid("BuiltBareSym").is_valid()).to_be(true)
+        expect(broken_lowering.errors.len()).to_be_greater_than(0)
+        val diag_msg = if broken_lowering.errors.len() > 0: broken_lowering.errors[0].message else: ""
+        expect(diag_msg).to_contain("HIR-UNDECL-IMPORT-001")
+
+describe "multi-file closure unit TLDR planning across checkout and SCV snapshot":
+    it "builds 1:1 summary surfaces for a 4-file closure with cross-file use and facade re-export":
+        val root = "build/tmp-per-file-default-spec-{getpid()}"
+        val snap = root + "/build/scv/snapshots/scv-revision-v2-spec123"
+        expect(dir_create_all(snap + "/src/app/p3rp")).to_be(true)
+        expect(dir_create_all(root + "/tldr")).to_be(true)
+
+        val aa_path = snap + "/src/app/p3rp/aa.spl"
+        val lz_path = snap + "/src/app/p3rp/leaf_zero.spl"
+        val fac_path = snap + "/src/app/p3rp/facade.spl"
+        val main_path = snap + "/src/app/p3rp/main.spl"
+
+        expect(file_write(aa_path, "pub fn leaf_a() -> i64:\n    2\n")).to_be(true)
+        expect(file_write(lz_path, "pub struct LeafZeroTag:\n    code: i64\n")).to_be(true)
+        expect(file_write(fac_path, "pub use app.p3rp.aa.{{leaf_a}}\npub use app.p3rp.leaf_zero.{{LeafZeroTag}}\n")).to_be(true)
+        expect(file_write(main_path, "use app.p3rp.facade.{{leaf_a, LeafZeroTag}}\nfn main() -> i64:\n    val t = LeafZeroTag(code: 40)\n    leaf_a() + t.code\n")).to_be(true)
+
+        val module_paths = unit_tldr_module_paths_v1(
+            [main_path, fac_path, aa_path, lz_path],
+            [main_path, fac_path, aa_path, lz_path]
+        )
+        val plan = unit_tldr_plan_v1("0/2@0", root + "/tldr", [main_path], module_paths)
+        expect(plan.fallbacks).to_equal(0)
+        expect(plan.summaries).to_equal(3)
+        expect(unit_tldr_surface_for_row_v1(plan, fac_path, fac_path).is_some()).to_be(true)
+        expect(unit_tldr_surface_for_row_v1(plan, aa_path, aa_path).is_some()).to_be(true)
+        expect(unit_tldr_surface_for_row_v1(plan, lz_path, lz_path).is_some()).to_be(true)
+        expect(unit_tldr_surface_for_row_v1(plan, root + "/src/app/p3rp/aa.spl", root + "/src/app/p3rp/aa.spl").is_some()).to_be(true)
+
+        val _cleaned = rt_dir_remove_all(root)
+
+describe "bootstrap per-file default and SIMPLE_FILE_WORKERS=0 opt-out":
+    it "selects per-file (1) by default in compiler constants, config/bootstrap.sdn, and bootstrap-jobs.shs while honoring 0 opt-out":
+        expect(NATIVE_PER_FILE_PIPELINE_DEFAULT_V1).to_equal("1")
+        expect(native_file_workers_selected_v1(NATIVE_PER_FILE_PIPELINE_DEFAULT_V1)).to_be(true)
+        expect(native_file_workers_selected_v1("0")).to_be(false)
+        expect(native_bootstrap_stage3_per_file_selected_v1(NATIVE_PER_FILE_PIPELINE_DEFAULT_V1, "")).to_be(true)
+        expect(native_bootstrap_stage3_per_file_selected_v1("0", "")).to_be(false)
+
+        val sdn = file_read("config/bootstrap.sdn")
+        expect(sdn).to_contain("stage3_file_workers: 1")
+
+        val nb_main = file_read("src/app/cli/native_build_main.spl")
+        expect(nb_main).to_contain("val presealed_mir_link = (env_get(\"SIMPLE_MIR_SHARD_LINK\") ?? \"\") != \"\"")
+
+        val streaming = file_read("src/compiler/80.driver/driver_source_parse_streaming.spl")
+        expect(streaming).to_contain("for ap in mir_advice_paths:")
+        expect(streaming).to_contain("unit_tldr_seeds.push(ap)")
+
+        val (out_def, _e1, rc_def) = process_run("/bin/sh", [
+            "-c",
+            "unset SIMPLE_FILE_WORKERS; . scripts/bootstrap/bootstrap-jobs.shs; bootstrap_select_stage3_file_workers config/bootstrap.sdn && printf '%s:%s' \"$stage3_file_workers\" \"$stage3_file_workers_source\""
+        ])
+        expect(rc_def).to_equal(0)
+        expect(out_def).to_equal("1:config")
+
+        val (out_opt, _e2, rc_opt) = process_run("/bin/sh", [
+            "-c",
+            "SIMPLE_FILE_WORKERS=0; export SIMPLE_FILE_WORKERS; . scripts/bootstrap/bootstrap-jobs.shs; bootstrap_select_stage3_file_workers config/bootstrap.sdn && printf '%s:%s' \"$stage3_file_workers\" \"$stage3_file_workers_source\""
+        ])
+        expect(rc_opt).to_equal(0)
+        expect(out_opt).to_equal("0:env")

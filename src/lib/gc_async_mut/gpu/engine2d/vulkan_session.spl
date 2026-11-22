@@ -248,6 +248,22 @@ class VulkanSession:
           5 — one or more shader compilations failed
           6 — one or more pipeline creations failed
         """
+        var retained_refs: i64 = 1
+        if self.is_initialized and self.device > 0:
+            if self.selected_device_index < 0:
+                self.init_error = ""
+                return 0
+            val live_device = vulkan_get_device()
+            if live_device == self.device:
+                self.init_error = ""
+                return 0
+            # Runtime device was shut down or replaced externally: reset local
+            # handle slots without calling vulkan_sffi_destroy_* (which would
+            # destroy 1-based Vec indices belonging to a replacement device in
+            # gpu.rs), preserving live retain count across recovery.
+            if self.ref_count > 1:
+                retained_refs = self.ref_count
+            self._reset_local_handles()
         self.init_error = ""
         if not vulkan_sffi_is_available():
             self.init_error = "availability"
@@ -444,7 +460,7 @@ class VulkanSession:
             else:
                 self.gradient_layer_error = ""
 
-        self.ref_count = 1
+        self.ref_count = retained_refs
         self.is_initialized = true
         self.generation = self.generation + 1
         self.install_pinned_font_atlas_pipeline(spirv_font_atlas_composite())
@@ -638,26 +654,50 @@ class VulkanSession:
         )
 
     me _cleanup():
-        """Destroy all GPU objects. Called automatically by release() on zero refcount."""
-        if self.pipe_font_atlas != 0:     vulkan_sffi_destroy_pipeline(self.pipe_font_atlas)
+        """Destroy all GPU objects when owned by the live runtime device, then reset local slots."""
+        if self.selected_device_index < 0 or vulkan_get_device() == self.device:
+            if self.pipe_font_atlas != 0:     vulkan_sffi_destroy_pipeline(self.pipe_font_atlas)
+            if self.pipe_clear != 0:          vulkan_sffi_destroy_pipeline(self.pipe_clear)
+            if self.pipe_rect_filled != 0:    vulkan_sffi_destroy_pipeline(self.pipe_rect_filled)
+            if self.pipe_affine_coverage_rect != 0: vulkan_sffi_destroy_pipeline(self.pipe_affine_coverage_rect)
+            if self.pipe_rect_outline != 0:   vulkan_sffi_destroy_pipeline(self.pipe_rect_outline)
+            if self.pipe_circle_filled != 0:  vulkan_sffi_destroy_pipeline(self.pipe_circle_filled)
+            if self.pipe_circle_outline != 0: vulkan_sffi_destroy_pipeline(self.pipe_circle_outline)
+            if self.pipe_line != 0:           vulkan_sffi_destroy_pipeline(self.pipe_line)
+            if self.pipe_rounded_rect != 0:   vulkan_sffi_destroy_pipeline(self.pipe_rounded_rect)
+            if self.pipe_triangle != 0:       vulkan_sffi_destroy_pipeline(self.pipe_triangle)
+            if self.pipe_gradient != 0:       vulkan_sffi_destroy_pipeline(self.pipe_gradient)
+            if self.pipe_blit != 0:           vulkan_sffi_destroy_pipeline(self.pipe_blit)
+            if self.pipe_blur_rect != 0: vulkan_sffi_destroy_pipeline(self.pipe_blur_rect)
+            if self.pipe_shadow_rect != 0: vulkan_sffi_destroy_pipeline(self.pipe_shadow_rect)
+            if self.pipe_css_group_restore != 0: vulkan_sffi_destroy_pipeline(self.pipe_css_group_restore)
+            if self.pipe_gradient_layer != 0: vulkan_sffi_destroy_pipeline(self.pipe_gradient_layer)
+            if self.pipe_glass_material != 0: vulkan_sffi_destroy_pipeline(self.pipe_glass_material)
+            if self.pipe_rect_batch != 0:     vulkan_sffi_destroy_pipeline(self.pipe_rect_batch)
+
+            if self.shader_clear != 0:          vulkan_sffi_destroy_shader(self.shader_clear)
+            if self.shader_rect_filled != 0:    vulkan_sffi_destroy_shader(self.shader_rect_filled)
+            if self.shader_affine_coverage_rect != 0: vulkan_sffi_destroy_shader(self.shader_affine_coverage_rect)
+            if self.shader_rect_outline != 0:   vulkan_sffi_destroy_shader(self.shader_rect_outline)
+            if self.shader_circle_filled != 0:  vulkan_sffi_destroy_shader(self.shader_circle_filled)
+            if self.shader_circle_outline != 0: vulkan_sffi_destroy_shader(self.shader_circle_outline)
+            if self.shader_line != 0:           vulkan_sffi_destroy_shader(self.shader_line)
+            if self.shader_rounded_rect != 0:   vulkan_sffi_destroy_shader(self.shader_rounded_rect)
+            if self.shader_triangle != 0:       vulkan_sffi_destroy_shader(self.shader_triangle)
+            if self.shader_gradient != 0:       vulkan_sffi_destroy_shader(self.shader_gradient)
+            if self.shader_blit != 0:           vulkan_sffi_destroy_shader(self.shader_blit)
+            if self.shader_font_atlas != 0:     vulkan_sffi_destroy_shader(self.shader_font_atlas)
+            if self.shader_blur_rect != 0: vulkan_sffi_destroy_shader(self.shader_blur_rect)
+            if self.shader_shadow_rect != 0: vulkan_sffi_destroy_shader(self.shader_shadow_rect)
+            if self.shader_css_group_restore != 0: vulkan_sffi_destroy_shader(self.shader_css_group_restore)
+            if self.shader_gradient_layer != 0: vulkan_sffi_destroy_shader(self.shader_gradient_layer)
+            if self.shader_glass_material != 0: vulkan_sffi_destroy_shader(self.shader_glass_material)
+            if self.shader_rect_batch != 0:     vulkan_sffi_destroy_shader(self.shader_rect_batch)
+        self._reset_local_handles()
+
+    me _reset_local_handles():
+        """Zero all local shader, pipeline, and device slots without FFI destroy calls."""
         self.pipe_font_atlas = 0
-        if self.pipe_clear != 0:          vulkan_sffi_destroy_pipeline(self.pipe_clear)
-        if self.pipe_rect_filled != 0:    vulkan_sffi_destroy_pipeline(self.pipe_rect_filled)
-        if self.pipe_affine_coverage_rect != 0: vulkan_sffi_destroy_pipeline(self.pipe_affine_coverage_rect)
-        if self.pipe_rect_outline != 0:   vulkan_sffi_destroy_pipeline(self.pipe_rect_outline)
-        if self.pipe_circle_filled != 0:  vulkan_sffi_destroy_pipeline(self.pipe_circle_filled)
-        if self.pipe_circle_outline != 0: vulkan_sffi_destroy_pipeline(self.pipe_circle_outline)
-        if self.pipe_line != 0:           vulkan_sffi_destroy_pipeline(self.pipe_line)
-        if self.pipe_rounded_rect != 0:   vulkan_sffi_destroy_pipeline(self.pipe_rounded_rect)
-        if self.pipe_triangle != 0:       vulkan_sffi_destroy_pipeline(self.pipe_triangle)
-        if self.pipe_gradient != 0:       vulkan_sffi_destroy_pipeline(self.pipe_gradient)
-        if self.pipe_blit != 0:           vulkan_sffi_destroy_pipeline(self.pipe_blit)
-        if self.pipe_blur_rect != 0: vulkan_sffi_destroy_pipeline(self.pipe_blur_rect)
-        if self.pipe_shadow_rect != 0: vulkan_sffi_destroy_pipeline(self.pipe_shadow_rect)
-        if self.pipe_css_group_restore != 0: vulkan_sffi_destroy_pipeline(self.pipe_css_group_restore)
-        if self.pipe_gradient_layer != 0: vulkan_sffi_destroy_pipeline(self.pipe_gradient_layer)
-        if self.pipe_glass_material != 0: vulkan_sffi_destroy_pipeline(self.pipe_glass_material)
-        if self.pipe_rect_batch != 0:     vulkan_sffi_destroy_pipeline(self.pipe_rect_batch)
         self.pipe_rect_batch = 0
         self.pipe_glass_material = 0
         self.pipe_blur_rect = 0
@@ -675,25 +715,6 @@ class VulkanSession:
         self.pipe_triangle = 0
         self.pipe_gradient = 0
         self.pipe_blit = 0
-
-        if self.shader_clear != 0:          vulkan_sffi_destroy_shader(self.shader_clear)
-        if self.shader_rect_filled != 0:    vulkan_sffi_destroy_shader(self.shader_rect_filled)
-        if self.shader_affine_coverage_rect != 0: vulkan_sffi_destroy_shader(self.shader_affine_coverage_rect)
-        if self.shader_rect_outline != 0:   vulkan_sffi_destroy_shader(self.shader_rect_outline)
-        if self.shader_circle_filled != 0:  vulkan_sffi_destroy_shader(self.shader_circle_filled)
-        if self.shader_circle_outline != 0: vulkan_sffi_destroy_shader(self.shader_circle_outline)
-        if self.shader_line != 0:           vulkan_sffi_destroy_shader(self.shader_line)
-        if self.shader_rounded_rect != 0:   vulkan_sffi_destroy_shader(self.shader_rounded_rect)
-        if self.shader_triangle != 0:       vulkan_sffi_destroy_shader(self.shader_triangle)
-        if self.shader_gradient != 0:       vulkan_sffi_destroy_shader(self.shader_gradient)
-        if self.shader_blit != 0:           vulkan_sffi_destroy_shader(self.shader_blit)
-        if self.shader_font_atlas != 0:     vulkan_sffi_destroy_shader(self.shader_font_atlas)
-        if self.shader_blur_rect != 0: vulkan_sffi_destroy_shader(self.shader_blur_rect)
-        if self.shader_shadow_rect != 0: vulkan_sffi_destroy_shader(self.shader_shadow_rect)
-        if self.shader_css_group_restore != 0: vulkan_sffi_destroy_shader(self.shader_css_group_restore)
-        if self.shader_gradient_layer != 0: vulkan_sffi_destroy_shader(self.shader_gradient_layer)
-        if self.shader_glass_material != 0: vulkan_sffi_destroy_shader(self.shader_glass_material)
-        if self.shader_rect_batch != 0:     vulkan_sffi_destroy_shader(self.shader_rect_batch)
         self.shader_rect_batch = 0
         self.shader_glass_material = 0
         self.shader_blur_rect = 0

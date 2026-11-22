@@ -31,11 +31,21 @@ updating this spec.
 # @manual_section: incremental change membership indices
 
 use std.spec.*
-use std.io_runtime.{file_read}
+use std.io_runtime.{file_read, file_write}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use app.io.time_ops.{time_now_unix_micros}
+use compiler.driver.cache.module_artifacts_v1.{module_artifacts_emit_v1}
+use compiler.driver.cache.reverse_reference_receipt.{REVERSE_REFERENCE_FAMILIES_V1}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_begin_v1, reverse_reference_owner_end_v1,
+    reverse_reference_owner_mark_known_v1
+}
 use compiler.driver.driver_build.incremental.{
     ChangeKind, IncrChange, IncrChangeSet, DependencyEntry, FileFingerprint,
+    build_cache_open_with_tldr_v1, build_cache_record_entry, build_cache_persist,
     incremental_append_deleted_changes,
-    incremental_propagate_dependency_changes
+    incremental_propagate_dependency_changes,
+    incremental_reverse_reference_fallback_reason_v1
 }
 
 fn test_fingerprint(path: text) -> FileFingerprint:
@@ -80,17 +90,48 @@ describe "incremental change membership indices":
         expect(result.changed_files()).to_equal(["a.spl", "b.spl"])
         expect(result.changes[1].kind).to_equal(ChangeKind.DependencyChanged)
 
-    it "keeps dependency invalidation one hop in append order":
+    it "propagates exact dependents with a receipt and widens fail-closed without one":
         # @req REQ-DRIVER-INCR-MEMBERSHIP-003
-        # @capture(statistics): propagated list for a two-hop dependency chain
-        step("Propagate one change through a two-level dependency chain")
+        # @capture(statistics): receipt-backed exact dependents vs fail-closed widened list
+        step("Propagate with a published schema-2 receipt and without a receipt")
+        val root = "build/test_tmp/incr_membership_direct_{time_now_unix_micros()}"
+        val src_dir = root + "/src"
+        val tldr = root + "/tldr"
+        val _created = dir_create_all(src_dir)
+        val path_a = src_dir + "/a.spl"
+        val path_b = src_dir + "/b.spl"
+        val path_c = src_dir + "/c.spl"
+        val cache_path = root + "/build_cache.sdn"
+        expect(file_write(path_a, "export fn a() -> i64: 1\n")).to_equal(true)
+        expect(file_write(path_b, "use a.{a}\nfn b() -> i64: a()\n")).to_equal(true)
+        expect(file_write(path_c, "fn c() -> i64: 3\n")).to_equal(true)
+        val _ea = module_artifacts_emit_v1(path_a, tldr)
+        val _eb = module_artifacts_emit_v1(path_b, tldr)
+        val _ec = module_artifacts_emit_v1(path_c, tldr)
+        reverse_reference_owner_end_v1()
+        val _begun = reverse_reference_owner_begin_v1()
+        for family in REVERSE_REFERENCE_FAMILIES_V1:
+            reverse_reference_owner_mark_known_v1(family)
+        val cache = build_cache_open_with_tldr_v1(cache_path, tldr)
+        expect(build_cache_record_entry(cache, path_a, [], [])).to_equal(true)
+        expect(build_cache_record_entry(cache, path_b, [path_a], [])).to_equal(true)
+        expect(build_cache_record_entry(cache, path_c, [], [])).to_equal(true)
+        expect(build_cache_persist(cache)).to_equal(true)
+
+        val exact = incremental_propagate_dependency_changes(
+            initial_changes([path_a]), cache.entries, cache_path, tldr)
+        expect(exact.changed_files()).to_equal([path_a, path_b])
+        expect(exact.changes[1].kind).to_equal(ChangeKind.DependencyChanged)
+        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal("")
+
         val entries: {text: DependencyEntry} = {
             "b.spl": test_entry("b.spl", ["a.spl"]),
             "c.spl": test_entry("c.spl", ["b.spl"])
         }
-        val result = incremental_propagate_dependency_changes(
+        val widened = incremental_propagate_dependency_changes(
             initial_changes(["a.spl"]), entries, "", "")
-        expect(result.changed_files()).to_equal(["a.spl", "b.spl"])
+        expect(widened.changed_files()).to_equal(["a.spl", "b.spl", "c.spl"])
+        expect(incremental_reverse_reference_fallback_reason_v1().len()).to_be_greater_than(0)
 
     it "adds only the initial source dependent in a dependency cycle":
         # @req REQ-DRIVER-INCR-MEMBERSHIP-004
@@ -104,9 +145,9 @@ describe "incremental change membership indices":
             initial_changes(["a.spl"]), entries, "", "")
         expect(result.changed_files()).to_equal(["a.spl", "b.spl"])
 
-    it "does not propagate a deleted path through the dependency graph":
+    it "fails closed for deleted paths under reverse-reference receipts":
         # @req REQ-DRIVER-INCR-MEMBERSHIP-005
-        # @capture(statistics): live and deleted lists for a deleted seed
+        # @capture(statistics): deleted-path fail-closed propagation list
         step("Propagate a deleted change through a dependent edge")
         val entries: {text: DependencyEntry} = {
             "b.spl": test_entry("b.spl", ["a.spl"])
@@ -114,8 +155,10 @@ describe "incremental change membership indices":
         val deleted = IncrChangeSet(
             changes: [IncrChange(path: "a.spl", kind: ChangeKind.Deleted)])
         val result = incremental_propagate_dependency_changes(deleted, entries, "", "")
-        expect(result.changed_files()).to_equal(["a.spl"])
+        expect(result.changed_files()).to_equal(["a.spl", "b.spl"])
+        expect(result.changes[1].kind).to_equal(ChangeKind.DependencyChanged)
         expect(result.deleted()).to_equal(["a.spl"])
+        expect(incremental_reverse_reference_fallback_reason_v1().len()).to_be_greater_than(0)
 
     it "keeps cached-path order and ignores duplicate live source paths":
         # @req REQ-DRIVER-INCR-MEMBERSHIP-006

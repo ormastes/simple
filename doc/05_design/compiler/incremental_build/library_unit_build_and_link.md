@@ -1,6 +1,6 @@
 # Library Unit Build and Link
 
-**Status:** design + first slice (plan/key pure functions, no wiring). 2026-11-13.
+**Status:** implemented + wired as Phase 3 (`--mode dynload`) `dyn-lib` default (`library_unit_dynlib_v1.spl`). Updated 2026-11-22.
 **User request:** "each lib build than link to binaries (not yet done)".
 
 Today `native-build` compiles an entry's whole closure as ONE program: one

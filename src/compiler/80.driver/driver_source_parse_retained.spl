@@ -108,7 +108,7 @@ use compiler.common.diagnostics.span.{Span}
 # @workaround bug=phase2_private_sffi_cross_owner_export_unresolved_2026-10-27 reason=explicit_public_owner_imports_avoid_private_inline_sffi_export_resolution
 use compiler.driver.driver_source_parse_support.{
     driver_parse_exit_v1, driver_parse_stdout_flush_v1, driver_parse_env_get_v1,
-    driver_parse_shard_active, driver_parse_shard_claimed, _driver_parse_shard_owns,
+    driver_parse_shard_active, driver_parse_shard_claimed, _driver_parse_shard_owns, driver_parse_shard_strided_start_v1,
     _driver_publish_frontend_cache_scope, dtrace
 }
 
@@ -170,7 +170,7 @@ impl CompilerDriver:
                             return (self.ctx, false)
                     entry_sources = entry_sources.push(source)
                 entry_idx = entry_idx + 1
-            val unique_entry_sources = _driver_unique_physical_sources(
+            var unique_entry_sources = _driver_unique_physical_sources(
                 entry_sources)
             log_phase(
                 "phase2:parse:closure:sources collected={entry_sources.len()} unique={unique_entry_sources.len()}")
@@ -205,8 +205,18 @@ impl CompilerDriver:
                 false
             else:
                 _driver_publish_frontend_cache_scope(self.ctx)
+            val retained_total = unique_entry_sources.len()
+            val retained_start = if driver_parse_shard_active(): driver_parse_shard_strided_start_v1(retained_total) else: 0
+            if retained_start > 0 and retained_start < retained_total:
+                var rotated_entry_sources: [SourceFile] = []
+                var retained_step = 0
+                while retained_step < retained_total:
+                    rotated_entry_sources = rotated_entry_sources.push(
+                        unique_entry_sources[(retained_start + retained_step) % retained_total])
+                    retained_step = retained_step + 1
+                unique_entry_sources = rotated_entry_sources
             log_build_progress("parse", "files", 0,
-                unique_entry_sources.len(), "pending", 1, 6, 0, 0, "running")
+                retained_total, "pending", 1, 6, 0, 0, "running")
             for source in unique_entry_sources:
                 val physical_key = _driver_physical_source_key(source.path)
                 if ((driver_parse_env_get_v1("SIMPLE_COMPILER_TRACE") ?? "") == "1" or

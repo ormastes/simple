@@ -12,7 +12,9 @@ struct llama_context;
 struct llama_sampler;
 struct llama_vocab;
 struct llama_model_params { int32_t n_gpu_layers; };
-struct llama_context_params { uint32_t n_ctx; uint32_t n_batch; uint32_t n_seq_max; bool kv_unified; int32_t n_threads; int32_t n_threads_batch; };
+enum llama_pooling_type { LLAMA_POOLING_TYPE_UNSPECIFIED = -1, LLAMA_POOLING_TYPE_NONE = 0, LLAMA_POOLING_TYPE_MEAN = 1, LLAMA_POOLING_TYPE_CLS = 2, LLAMA_POOLING_TYPE_LAST = 3, LLAMA_POOLING_TYPE_RANK = 4 };
+#define LLAMA_TOKEN_NULL -1
+struct llama_context_params { uint32_t n_ctx; uint32_t n_batch; uint32_t n_ubatch; uint32_t n_seq_max; bool kv_unified; int32_t n_threads; int32_t n_threads_batch; enum llama_pooling_type pooling_type; bool embeddings; };
 struct llama_sampler_chain_params { int unused; };
 struct llama_batch { llama_token * token; int32_t n_tokens; llama_pos * pos; int32_t * n_seq_id; llama_seq_id ** seq_id; int8_t * logits; };
 struct llama_chat_message { const char * role; const char * content; };
@@ -55,4 +57,22 @@ void llama_batch_free(struct llama_batch);
 void llama_memory_seq_cp(llama_memory_t, llama_seq_id, llama_seq_id, llama_pos, llama_pos);
 int32_t llama_decode(struct llama_context *, struct llama_batch);
 llama_token llama_sampler_sample(struct llama_sampler *, struct llama_context *, int32_t);
+enum llama_pooling_type llama_pooling_type(const struct llama_context *);
+float * llama_get_embeddings(struct llama_context *);
+float * llama_get_embeddings_seq(struct llama_context *, llama_seq_id);
+int32_t llama_model_n_embd_out(const struct llama_model *);
+uint32_t llama_model_n_cls_out(const struct llama_model *);
+int32_t llama_model_n_ctx_train(const struct llama_model *);
+llama_token llama_vocab_bos(const struct llama_vocab *);
+llama_token llama_vocab_eos(const struct llama_vocab *);
+llama_token llama_vocab_sep(const struct llama_vocab *);
+bool llama_vocab_get_add_bos(const struct llama_vocab *);
+bool llama_vocab_get_add_eos(const struct llama_vocab *);
+bool llama_vocab_get_add_sep(const struct llama_vocab *);
+#define LLAMA_DEFAULT_SEED 0xFFFFFFFF
+struct llama_sampler * llama_sampler_init_penalties(int32_t, int32_t, float, float, float);
+struct llama_sampler * llama_sampler_init_top_k(int32_t);
+struct llama_sampler * llama_sampler_init_top_p(float, size_t);
+struct llama_sampler * llama_sampler_init_temp(float);
+struct llama_sampler * llama_sampler_init_dist(uint32_t);
 #endif
