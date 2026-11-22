@@ -644,10 +644,7 @@ impl LlvmBackend {
         let i64_type = self.runtime_int_type();
 
         // Declare rt_string_data and rt_string_len if not already declared
-        let string_data_fn = module.get_function("rt_string_data").unwrap_or_else(|| {
-            let fn_type = i64_type.fn_type(&[i64_type.into()], false);
-            module.add_function("rt_string_data", fn_type, None)
-        });
+        let string_data_fn = self.declare_rt_string_data(module);
         let string_len_fn = module.get_function("rt_string_len").unwrap_or_else(|| {
             let fn_type = i64_type.fn_type(&[i64_type.into()], false);
             module.add_function("rt_string_len", fn_type, None)
@@ -2895,19 +2892,11 @@ impl LlvmBackend {
         // and Rust SFFI (text = *const u8 + u64 len).
         let arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> =
             if let Some(text_indices) = crate::codegen::instr::calls::boxed_text_arg_indices(sffi_name) {
-                let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
-                    module.add_function("rt_string_data", i64_type.fn_type(&[i64_type.into()], false), None)
-                });
+                let rt_string_data = self.declare_rt_string_data(module);
                 let rt_string_len = module.get_function("rt_string_len").unwrap_or_else(|| {
                     module.add_function("rt_string_len", i64_type.fn_type(&[i64_type.into()], false), None)
                 });
-                let rt_string_new = module.get_function("rt_string_new").unwrap_or_else(|| {
-                    module.add_function(
-                        "rt_string_new",
-                        i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
-                        None,
-                    )
-                });
+                let rt_string_new = self.declare_rt_string_new(module);
                 let mut boxed = Vec::with_capacity(raw_arg_vals.len());
                 for (i, val) in raw_arg_vals.iter().enumerate() {
                     if text_indices.contains(&i) {
@@ -2916,8 +2905,7 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?
                             .try_as_basic_value()
                             .basic()
-                            .unwrap()
-                            .into_int_value();
+                            .unwrap();
                         let len = builder
                             .build_call(rt_string_len, &[(*val).into()], "boxed_text_len")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?
@@ -2941,10 +2929,7 @@ impl LlvmBackend {
                 .map(|(indices, _)| indices)
                 .or_else(|| crate::codegen::instr::calls::text_arg_indices(sffi_name))
             {
-                let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
-                    let fn_type = i64_type.fn_type(&[i64_type.into()], false);
-                    module.add_function("rt_string_data", fn_type, None)
-                });
+                let rt_string_data = self.declare_rt_string_data(module);
                 let rt_string_len = module.get_function("rt_string_len").unwrap_or_else(|| {
                     let fn_type = i64_type.fn_type(&[i64_type.into()], false);
                     module.add_function("rt_string_len", fn_type, None)
@@ -2981,11 +2966,17 @@ impl LlvmBackend {
         // Check if declared param count matches expanded arg count
         let declared_param_types = called_func.get_type().get_param_types();
         let declared_params = declared_param_types.len();
-        let call_site = if declared_params != arg_vals.len() {
-            // Arity mismatch: use indirect call with matching function type
-            let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                arg_vals.iter().map(|_| i64_type.into()).collect();
-            let fn_type = i64_type.fn_type(&param_types, false);
+        let typed = Self::ptr_arg_needs_typed_call(&declared_param_types, &arg_vals);
+        let call_site = if declared_params != arg_vals.len() || typed {
+            // Arity mismatch or a real pointer arg vs a word param: call through a
+            // fn type built from the actual args (pointers stay pointers).
+            let fn_type = if typed {
+                self.call_type_from_args(called_func.get_type(), &arg_vals)
+            } else {
+                let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                    arg_vals.iter().map(|_| i64_type.into()).collect();
+                i64_type.fn_type(&param_types, false)
+            };
             let fn_ptr = called_func.as_global_value().as_pointer_value();
             builder
                 .build_indirect_call(fn_type, fn_ptr, &arg_vals, "call")
@@ -3512,6 +3503,43 @@ mod tests {
             backend.compile(&mir_module).unwrap();
             assert_string_literal_abi(&backend.get_ir().unwrap());
         }
+    }
+
+    /// Text args to SFFI runtime fns expand to `(ptr, len)`. On i686 the
+    /// pointer must stay a 4-byte `ptr` all the way to the callee: an i64
+    /// `rt_string_data` return reads garbage EDX, and an i64 call slot shifts
+    /// `len` (same shape as the empty-print literal bug).
+    #[test]
+    fn text_arg_expansion_i686_windows_passes_real_pointer() {
+        use crate::mir::CallTarget;
+
+        let backend = LlvmBackend::new(Target::parse("i686-pc-windows-gnu").unwrap()).unwrap();
+        backend.create_module("textarg_i686").unwrap();
+        let mut func = MirFunction::new("main".to_string(), T::I64, Visibility::Public);
+        func.blocks[0].instructions.push(MirInst::ConstString {
+            dest: VReg(0),
+            value: "hi".to_string(),
+        });
+        func.blocks[0].instructions.push(MirInst::Call {
+            dest: None,
+            target: CallTarget::from_name("rt_println_str"),
+            args: vec![VReg(0)],
+        });
+        func.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(1), value: 0 });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+        backend.compile_function(&func).unwrap();
+        let ir = backend.get_ir().unwrap();
+
+        assert!(
+            ir.contains("declare ptr @rt_string_data(i64)"),
+            "rt_string_data returns a real pointer: {ir}"
+        );
+        let call = ir
+            .lines()
+            .find(|l| l.contains("call") && l.contains("rt_println_str"))
+            .unwrap_or_else(|| panic!("no rt_println_str call: {ir}"));
+        assert!(call.contains("(ptr %"), "expanded text ptr must be passed as ptr: {call}\n{ir}");
+        backend.verify().unwrap();
     }
 
     /// `InterpCall` with an `f64` argument must declare `rt_value_float(double)`
