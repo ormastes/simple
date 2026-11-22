@@ -164,6 +164,7 @@ entry, a bootstrap-only parse, or a generated `pass` row does not qualify.
 
 ## Implementation log
 
+- 2026-11-22 rbid2: robust-boundaries §9 IDs all mapped to specs (see the 2026-11-15 plan §9 table); new specs for RB-ORIGIN-03, RB-BUILD-03, RB-BUILD-04, RB-RATCHET-01; RB-LOAD-01..02 in-development RED + todo.
 - 2026-11-18 P0-3 slice: `inference_effects.spl` — non-function callee type and
   trait-method calls now infer Unknown (incomplete row); `Await` has an explicit
   Async arm; `effect_region_admission` rejects Unknown in pure/nogc/nonblocking
