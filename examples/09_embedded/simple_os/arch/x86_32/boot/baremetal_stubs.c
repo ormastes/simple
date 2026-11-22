@@ -288,6 +288,29 @@ RuntimeValue rt_alloc_zeroed(RuntimeValue sz)
     return ENCODE_PTR(p);
 }
 
+/* Raw (untagged) memory probes for the pure-Simple core runtime
+ * (src/os/kernel/arch/x86_32/core_runtime.spl). rt_mmio_* carry tagged
+ * 29-bit ints and cannot address or move full 32-bit words. Same contract
+ * as the riscv32 rt_rv32_probe_load8/store32. */
+RuntimeValue rt_x86_32_probe_load8(RuntimeValue addr)
+{
+    return (RuntimeValue)(uint32_t)(*(volatile uint8_t *)(uintptr_t)(uint32_t)addr);
+}
+
+RuntimeValue rt_x86_32_probe_store32(RuntimeValue addr, RuntimeValue value)
+{
+    *(volatile uint32_t *)(uintptr_t)(uint32_t)addr = (uint32_t)value;
+    return NIL_VALUE;
+}
+
+/* Raw pointer (0 on failure) from the same bump heap as rt_alloc. */
+RuntimeValue rt_x86_32_probe_alloc(RuntimeValue size)
+{
+    size_t bytes = (size_t)(uint32_t)size;
+    if (bytes == 0 || bytes > 0x1000000) return 0;
+    return (RuntimeValue)(uintptr_t)malloc(bytes);
+}
+
 RuntimeValue rt_dealloc(RuntimeValue ptr)
 {
     (void)ptr;

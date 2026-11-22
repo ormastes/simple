@@ -4575,7 +4575,7 @@ int64_t rt_host_commit_headroom_bytes_v1(void) {
 #endif
 }
 
-int64_t rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv) {
+int64_t rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, const uint64_t* argv) {
     (void)argc;
     (void)argv;
     return rt_function_not_found(name, len);

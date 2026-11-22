@@ -64,6 +64,16 @@ os, LLVM root/version, gpu) out of scripts and tracked files.
   fixture hooks (`*_MEMINFO_PATH`) need `*_TEST_FIXTURE=1` and monitor mode;
   the receipt records `host_total_source`, `cap_source`, `cap_bound`. Gate:
   `scripts/bootstrap/tests/tree-rss-cap-policy-test.shs`.
+- **Windows balloon + cap-kill naming (2026-11-22, W21/W23):** the Stage 2
+  whole-build plan (`bootstrap_tree_rss_whole_build_plan`) treats Windows free
+  RAM below half of physical as a Hyper-V balloon and budgets from physical
+  minus `mem_reserve_free_mib` (source printed in the plan summary); an
+  explicit `SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB` still wins. A cap kill
+  prints `rss-guard: rss-cap-exceeded cap_kib=<n> peak_kib=<n>`, the campaign
+  writes `task=campaign_rss_cap`, and `admit-stage2: REJECTED` / `rejection.env`
+  carry `kill_cause`. `admit-built-stage2-compiler-tests.shs` refuses (exit 75)
+  concurrent heavy work with the Stage 3 gate. Gates: policy `--selftest`,
+  `scripts/check/admit-stage2-compiler-tests-lane-test.shs`.
 
 ## Shared orchestration server contexts (2026-11-15)
 
