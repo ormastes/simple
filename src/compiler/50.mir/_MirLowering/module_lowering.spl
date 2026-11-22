@@ -73,6 +73,7 @@ use compiler.mir._MirLowering.transient_owner_sffi.{
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, mir_operand_const_int}
 use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.hir.hir_symbol_table_methods.{_hir_symbol_owner_module}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
@@ -1425,6 +1426,8 @@ impl MirLowering:
         self.generic_enum_constructor_owners[enum_def_r.name] = generic_constructor
         if enum_def_r.runtime_name != "":
             self.generic_enum_constructor_owners[enum_def_r.runtime_name] = generic_constructor
+        val had_bare_enum = self.enum_variant_index.has(enum_def_r.name)
+        var prior_bare_diverged = false
         var names: [text] = []
         var discriminants: [i64] = []
         var seen_discriminants: Dict<i64, bool> = {}
@@ -1475,6 +1478,20 @@ impl MirLowering:
                         full_names.push(payload_fields[pfi].name)
                         pfi = pfi + 1
                 case _: ()
+            if had_bare_enum and store_payload_types and not prior_bare_diverged:
+                val bare_vk = "{enum_def_r.name}::{variant.name}"
+                if self.enum_variant_payload_kind.has(bare_vk) and self.enum_variant_payload_kind[bare_vk] != payload_kind:
+                    prior_bare_diverged = true
+                elif self.enum_variant_payload_types.has(bare_vk):
+                    val prior_types: [HirType] = self.enum_variant_payload_types[bare_vk]
+                    if prior_types.len() != full_types.len():
+                        prior_bare_diverged = true
+                    else:
+                        var pti = 0
+                        while pti < full_types.len():
+                            if not hir_types_equal(prior_types[pti], full_types[pti]):
+                                prior_bare_diverged = true
+                            pti = pti + 1
             self.register_enum_payload_metadata_v1(enum_def_r.name, enum_def_r.runtime_name,
                 variant.name, full_types, full_names, payload_kind, store_payload_types, true)
             next_value = value + 1
@@ -1487,7 +1504,18 @@ impl MirLowering:
         # only -- an identical re-registration is benign and stays quiet.
         if self.enum_variant_index.has(enum_def_r.name):
             val prior_names = self.enum_variant_index[enum_def_r.name]
-            if not _text_list_eq(prior_names, names):
+            var disc_diverged = false
+            if self.enum_variant_discriminants.has(enum_def_r.name):
+                val prior_discs = self.enum_variant_discriminants[enum_def_r.name]
+                if prior_discs.len() != discriminants.len():
+                    disc_diverged = true
+                else:
+                    var di = 0
+                    while di < discriminants.len():
+                        if prior_discs[di] != discriminants[di]:
+                            disc_diverged = true
+                        di = di + 1
+            if prior_bare_diverged or disc_diverged or not _text_list_eq(prior_names, names):
                 val prior_text = prior_names.join(", ")
                 val new_text = names.join(", ")
                 self.enum_bare_name_collisions[enum_def_r.name] = "previously registered as [{prior_text}], now overwritten by [{new_text}] (runtime_name '{enum_def_r.runtime_name}')"
@@ -3704,7 +3732,7 @@ impl MirLowering:
                 field_has_default.push(struct_def.fields[fi].has_default)
                 field_default_expr.push(struct_def.fields[fi].default)
                 fi = fi + 1
-            self.field_map[self.symbol_id_value(sym_id)] = field_names
+            self.field_map[sym_id.id] = field_names
             self.struct_field_has_default[struct_def.name] = field_has_default
             self.struct_field_default_expr[struct_def.name] = field_default_expr
             # Name-keyed struct field order: lower_call reclassifies a
@@ -3874,7 +3902,7 @@ impl MirLowering:
                 field_has_default.push(class_def.fields[fi].has_default)
                 field_default_expr.push(class_def.fields[fi].default)
                 fi = fi + 1
-            self.field_map[self.symbol_id_value(sym_id)] = field_names
+            self.field_map[sym_id.id] = field_names
             self.struct_field_has_default[class_def.name] = field_has_default
             self.struct_field_default_expr[class_def.name] = field_default_expr
             # Name-keyed, same as the struct loop above: `lower_call`'s

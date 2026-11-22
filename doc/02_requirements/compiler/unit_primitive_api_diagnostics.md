@@ -13,7 +13,7 @@ This register adds stable ids for tracing; it does not narrow the plan. Every ro
 | REQ-DPOL-003 | `primitive_api` reports the exact byte span of the offending type token (not line 1, not the whole line) | §10.2 | U0 | OPEN |
 | REQ-DPOL-004 | No diagnostic offers a fix whose replacement leaves the text unchanged; rules without a real edit are help-only | §0.3, §5 | U0 | OPEN |
 | REQ-DPOL-005 | DiagnosticV1 carries multiple ranked fixes with confidence and applicability; legacy `fix` aliases the first Safe/Likely fix; JSON stays compatible | §5 | U1 | OPEN |
-| REQ-DPOL-006 | check/driver/lint share one dedup sink and one severity decision | §0.4, §9 P0 | U1 | OPEN |
+| REQ-DPOL-006 | check/driver/lint share one dedup sink and one severity decision. All public `text` is flagged (owner decision 2026-11-19, no text exemption): non-domain text emits lint `bare_text` (warn); domain-named text (path/url/host/sql/html/log/secret/digest) emits lint `bare_text_domain` | §0.4, §9 P0 | U1 | OPEN |
 | REQ-DPOL-007 | `--assurance-warning-phase` never silently downgrades security rules; selective per-rule scheduling | §1 | U1 | OPEN |
 | REQ-DPOL-008 | `@allow(primitive_api)` exceptions are scoped and need reason/owner (and expiry for critical); expired/unowned exceptions are diagnosed | §4, §10.3 | U1 | OPEN |
 

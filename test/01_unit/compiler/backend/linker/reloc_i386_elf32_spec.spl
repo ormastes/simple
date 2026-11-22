@@ -91,9 +91,9 @@ describe "ELF32 exec writer":
     it "plans 52-byte headers and 32-byte program headers":
         val secs = [elf_out_sec(".text", SHT_PROGBITS_E, SHF_ALLOC | SHF_EXECINSTR, 16, 8, ELF_SEG_RX)]
         val plan = elf_exec_plan_class(secs, 0x400000, 0x1000, true).unwrap()
-        # R load + RX load + GNU_STACK + no notes
-        expect(plan.segments.len()).to_equal(3)
-        expect(plan.offsets[0] >= 52 + 3 * 32).to_equal(true)
+        # PHDR + R load + RX load + GNU_STACK + no notes
+        expect(plan.segments.len()).to_equal(4)
+        expect(plan.offsets[0] >= 52 + 4 * 32).to_equal(true)
 
     it "serializes the ELF32 header, phdr field order and shdr size":
         val secs = [elf_out_sec(".text", SHT_PROGBITS_E, SHF_ALLOC | SHF_EXECINSTR, 16, 4, ELF_SEG_RX)]
@@ -107,8 +107,8 @@ describe "ELF32 exec writer":
         expect(u8_le(img, 40, 2)).to_equal(52)      # e_ehsize
         expect(u8_le(img, 42, 2)).to_equal(32)      # e_phentsize
         expect(u8_le(img, 46, 2)).to_equal(40)      # e_shentsize
-        # second phdr is the RX PT_LOAD: p_flags sits at +24 in ELF32
-        val ph = 52 + 32
+        # third phdr (after PT_PHDR and R PT_LOAD) is the RX PT_LOAD: p_flags sits at +24 in ELF32
+        val ph = 52 + 2 * 32
         expect(u8_le(img, ph, 4)).to_equal(1)
         expect(u8_le(img, ph + 24, 4)).to_equal(5)
         expect(u8_le(img, ph + 28, 4)).to_equal(0x1000)
@@ -146,8 +146,8 @@ describe "ELF32 static links":
         val r = elf_static_link([load("elf32_got32_nobase_i386.o")], [], "_start", RelocArch.I386)
         expect(r.is_ok()).to_equal(true)
         val img = r.unwrap()
-        # phdr[1] is the RX PT_LOAD; its first bytes are `8b 0d <disp32>`.
-        val text_off = u_le(img, 52 + 32 + 4, 4)
+        # phdr[2] (after PT_PHDR and R PT_LOAD) is the RX PT_LOAD; its first bytes are `8b 0d <disp32>`.
+        val text_off = u_le(img, 52 + 2 * 32 + 4, 4)
         expect(img[text_off]).to_equal(0x8b)
         expect(img[text_off + 1]).to_equal(0x0d)
         # Absolute G + A lands inside the image (>= 0x400000), not a small
