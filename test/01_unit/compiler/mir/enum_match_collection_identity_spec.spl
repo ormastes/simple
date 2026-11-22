@@ -2,6 +2,7 @@
 # @tag: unit, compiler, mir
 use std.spec.{describe, it, expect}
 use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
@@ -25,11 +26,42 @@ fn match_collection_errors(source: text, inspect_selected: bool = false) -> [tex
         errors.push("no lowered functions")
     if inspect_selected:
         for function in mir.functions.values():
+            var merge_id: i64 = -1
+            for block in function.blocks:
+                if val lbl = block.label:
+                    if lbl == "ematch_merge":
+                        merge_id = block.id.id
+            var merge_dest_id: i64 = -1
+            if merge_id >= 0:
+                for block in function.blocks:
+                    match block.terminator:
+                        case MirTerminator.Goto(target):
+                            if target.id == merge_id:
+                                for inst in block.instructions:
+                                    match inst.kind:
+                                        case MirInstKind.Copy(dest, _):
+                                            merge_dest_id = dest.id
+                                        case _: ()
+                        case _: ()
+            var selected_id: i64 = merge_dest_id
+            if merge_dest_id >= 0:
+                for block in function.blocks:
+                    if block.id.id == merge_id:
+                        for inst in block.instructions:
+                            match inst.kind:
+                                case MirInstKind.Copy(dest, src):
+                                    if src.id == merge_dest_id:
+                                        selected_id = dest.id
+                                case _: ()
             for local in function.locals:
-                if local.name == Some("selected"):
-                    if local.type_.kind == MirTypeKind.I64:
-                        errors.push("selected has untyped I64 carrier")
+                var is_selected = local.id.id == selected_id
+                if val local_name = local.name:
+                    if local_name == "selected":
+                        is_selected = true
+                if is_selected:
                     match local.type_.kind:
+                        case MirTypeKind.I64:
+                            errors.push("selected has untyped I64 carrier")
                         case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_) | MirTypeKind.Dict(_, _):
                             errors.push("selected has accepted collection carrier")
                         case _: ()
@@ -59,8 +91,11 @@ describe "enum match collection identity":
         val left = lowering.builder.new_temp(MirType.i64())
         val right = lowering.builder.new_temp(MirType.i64())
         val merged = lowering.builder.new_temp(MirType.i64())
-        lowering.remember_local_hir_type(left.id, HirType(kind: HirTypeKind.Array(HirType.i64(), nil), span: HirType.i64().span), 0, 0)
-        lowering.remember_local_hir_type(right.id, HirType(kind: HirTypeKind.Array(HirType.str(), nil), span: HirType.str().span), 0, 0)
+        val dummy_span = Span(start: 0, end: 0, line: 1, col: 1, file: "enum_match.spl", length: 0)
+        val hir_i64 = HirType(kind: HirTypeKind.Int(64, true), span: dummy_span)
+        val hir_str = HirType(kind: HirTypeKind.Str, span: dummy_span)
+        lowering.remember_local_hir_type(left.id, HirType(kind: HirTypeKind.Array(hir_i64, nil), span: dummy_span), 0, 0)
+        lowering.remember_local_hir_type(right.id, HirType(kind: HirTypeKind.Array(hir_str, nil), span: dummy_span), 0, 0)
         lowering.remember_merged_arm_identity(merged, [left, right])
         expect(lowering.find_local_hir_type(merged.id) == nil).to_be(true)
 

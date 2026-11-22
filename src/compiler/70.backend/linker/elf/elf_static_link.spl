@@ -1478,7 +1478,7 @@ fn elf_synth_shndx(plan: ElfExecPlan, name: text, target: RelocArch) -> i64:
         return -1
     k + 1
 
-fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout, w32: bool, ifunc_at: {text: i64}) -> Result<ElfSymtabOut, text>:
+fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout, w32: bool, ifunc_at: {text: i64}, gc_sections: bool = false, live_undef: {text: bool} = {}) -> Result<ElfSymtabOut, text>:
     """ld.lld's .symtab shape: null, then per input file its locals (STT_SECTION
     dropped; symbols in non-allocated sections dropped — they have no output
     section here) followed by the hidden globals it defines (demoted to LOCAL),
@@ -1546,7 +1546,7 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout, w32: bool, ifunc_at: {text:
             si = si + 1
         oi = oi + 1
     for n in order:
-        if elf_is_synth(n) and n != "__bss_start" and not ctx.res.defined.has(n):
+        if elf_is_synth(n) and n != "__bss_start" and not ctx.res.defined.has(n) and (not gc_sections or live_undef.has(n)):
             val sh = elf_synth_shndx(lay.plan, n, ctx.target)
             if sh > 0:
                 rows.add(n, 0, 2, sh, elf_synth_addr(lay.plan, lay.base, n, ctx.target)?, 0)
@@ -1558,6 +1558,8 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout, w32: bool, ifunc_at: {text:
     val first_global = rows.names.len()
     for n in order:
         if n == "__bss_start" and not ctx.res.defined.has(n):
+            if gc_sections and not live_undef.has(n):
+                continue
             # ld.lld defines __bss_start GLOBAL DEFAULT, not hidden like the other synthetics
             val bsh = elf_synth_shndx(lay.plan, n, ctx.target)
             if bsh > 0:
@@ -1590,6 +1592,8 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout, w32: bool, ifunc_at: {text:
                 if (info & 15) == 6: v = elf_symtab_address(lay.plan, info, v)?
                 rows.add(n, info, def_sym.st_other, sh, v, sz)
         else:
+            if gc_sections and not live_undef.has(n):
+                continue
             var sym_bind = STB_GLOBAL
             if all_weak[n]:
                 sym_bind = STB_WEAK
@@ -2106,7 +2110,9 @@ fn elf_request_packed(req: ElfLinkRequest) -> ElfLinkRequest:
     for object in req.objects: objects.push(elf_u8_from_i64(object))
     var archives: [[u8]] = []
     for archive in req.archives: archives.push(elf_u8_from_i64(archive))
-    ElfLinkRequest(objects: objects, archives: archives, shared: req.shared, entry: req.entry,
+    var shared: [[u8]] = []
+    for lib in req.shared: shared.push(elf_u8_from_i64(lib))
+    ElfLinkRequest(objects: objects, archives: archives, shared: shared, entry: req.entry,
         target: req.target, mode: req.mode, interp: req.interp, shared_names: req.shared_names,
         runpath: req.runpath, bind_now: req.bind_now, hash_style: req.hash_style,
         as_needed: req.as_needed, gc_sections: req.gc_sections, jobs: req.jobs)
@@ -2283,7 +2289,8 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     for r in refs:
         if r.name == "_GLOBAL_OFFSET_TABLE_" or
                 (target == RelocArch.X86_64 and
-                (r.rtype == R_X86_64_GOTOFF64 or r.rtype == R_X86_64_PLTOFF64)) or
+                (r.rtype == R_X86_64_GOTOFF64 or r.rtype == R_X86_64_PLTOFF64 or
+                r.rtype == R_X86_64_GOT32 or r.rtype == R_X86_64_GOT64 or r.rtype == R_X86_64_GOTPLT64)) or
                 (elf_target_is_a64(target) and
                 (r.rtype == R_AARCH64_GOTREL64 or r.rtype == R_AARCH64_GOTREL32)) or
                 (target == RelocArch.I386 and
@@ -3032,11 +3039,15 @@ fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
     elf_link_trace("image written")
     if not strip_output:
         var ifunc_at: {text: i64} = {}
+        var live_undef: {text: bool} = {}
+        for rn in retained_symbols:
+            if rn != "": live_undef[rn] = true
         for ar in refs:
+            if ar.name != "": live_undef[ar.name] = true
             val ak = ar.key
             if ifunc_idx.has(ak) and ak.starts_with("global:") and (ar.rclass == RC_ABS64 or ar.rclass == RC_ABS_NARROW or ar.rclass == RC_PCREL):
                 ifunc_at[ar.name] = elf_iplt_entry_addr(target, iplt_v, ifunc_idx[ak], false)
-        val symtab = elf_build_symtab(ctx, lay, w32, ifunc_at)?
+        val symtab = elf_build_symtab(ctx, lay, w32, ifunc_at, req.gc_sections, live_undef)?
         image = if w32: elf_append_symtab32(image, symtab)? else: elf_append_symtab(image, symtab)?
     if riscv_attributes.len() > 0:
         val attr_off = image.len()

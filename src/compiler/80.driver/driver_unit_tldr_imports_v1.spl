@@ -8,8 +8,9 @@
 # imports of those imports, text-scanned, never parsed) gets a summary via
 # tldr_summary_ensure_v1; its surface is built by module_surface_from_tldr_v1 and
 # registered with driver_register_tldr_surfaces_v1. No import HIR is lowered. A
-# summary that is missing, carries fallback rows, or yields no surface is a
-# fallback: only that module's source is parsed (counted, `[tldr-fallback]`).
+# summary that is missing, carries fallback rows, yields no surface, or declares
+# a class whose interface HIR is not published yet is a fallback: only that
+# module's source is parsed (counted, `[tldr-fallback]`).
 # Imported generic bodies are never loaded on demand: the template-body seam
 # was removed (2026-10-31).
 use std.io_runtime.{file_exists, file_read}
@@ -23,6 +24,7 @@ use compiler.driver.driver_stage_hir_v1.*
 use compiler.common.driver_compile_result.{CompileResult}
 use compiler.driver.driver_tldr_import_route_v1.{tldr_route_import_specs_v1, unit_tldr_imports_enabled_v1}
 use compiler.driver.driver_tldr_surface_register_v1.{driver_register_tldr_surfaces_v1}
+use compiler.driver.driver_hir_cache.{hir_shard_key_sidecar_path_v1}
 use compiler.common.module_path_naming.{module_logical_name_from_path, module_canonical_fold_name}
 use compiler.frontend.core.interpreter.module_loader_resolve.{resolve_module_path}
 use compiler.hir.hir_lowering.module_surface_from_tldr_v1.{module_surface_from_tldr_v1}
@@ -105,11 +107,28 @@ pub fn unit_tldr_plan_v1(unit_id: text, root: text, picked: [text], module_paths
         seen_paths.push(path_key)
         val source = file_read(src_path)
         var built: ModuleSurface? = None
-        match tldr_summary_ensure_v1(root, module_id, source):
-            case Some(rows):
-                summaries = summaries + 1
-                built = module_surface_from_tldr_v1(module_id, rows)
-            case None: pass
+        # A package `__init__.spl` row never takes a summary surface in the
+        # streaming loop (it is parsed for its manifest facts), so a summary
+        # here left the row a placeholder and every importer unready (bug
+        # per_file_unit_closure_incomplete_2026-11-22). Parse it as a fallback.
+        if not src_path.ends_with("/__init__.spl"):
+            match tldr_summary_ensure_v1(root, module_id, source):
+                case Some(rows):
+                    summaries = summaries + 1
+                    built = module_surface_from_tldr_v1(module_id, rows)
+                case None: pass
+        # A summary surface gives MIR free-function call origins only -- no
+        # method origins, no class/struct layout -- so a provider declaring a
+        # class, struct or methods is usable as an import only through its
+        # interface HIR. Until its unit publishes the .hirkey sidecar, parse
+        # its source (bug per_file_unit_imported_class_method_origin_2026-11-22).
+        var fallback_reason = "no-summary-surface"
+        if val summary = built:
+            if (summary.composite_values.len() > 0 or summary.impls.len() > 0) and
+                    not parse_paths.contains(src_path) and
+                    not file_exists(hir_shard_key_sidecar_path_v1(env_get("SIMPLE_HIR_SHARD_QUEUE"), src_path)):
+                built = None
+                fallback_reason = "class-without-interface-hir"
         match built:
             case Some(surface):
                 # The summary surface is built from the module id, so its
@@ -139,7 +158,7 @@ pub fn unit_tldr_plan_v1(unit_id: text, root: text, picked: [text], module_paths
                 fallback_modules.push(module_id)
                 if not parse_paths.contains(src_path):
                     parse_paths.push(src_path)
-                print("[tldr-fallback] module={module_id} reason=no-summary-surface source-load=1")
+                print("[tldr-fallback] module={module_id} reason={fallback_reason} source-load=1")
         for spec in tldr_route_import_specs_v1(source, true):
             val next_id = unit_tldr_relative_module_id_v1(spec.0, src_path)
             if next_id == "": continue

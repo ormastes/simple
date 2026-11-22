@@ -259,7 +259,22 @@ pub(package) fn module_surface_resolve_relative_key(
         if module_surface_registry_index(registry, key) >= 0: return key
         return ""
     if not name.starts_with("."):
-        return module_surface_resolve_absolute_key(registry, name)
+        val absolute_key = module_surface_resolve_absolute_key(registry, name)
+        if absolute_key != "":
+            return absolute_key
+        # Match `_driver_try_entry_import_rel` (`[checkout_prefix, src/, entry_dir/]`):
+        # when an un-dotted module import (`use provider`) misses root/src/std
+        # resolution, try the importer's own directory sibling (`"." + name`),
+        # rejecting a self-match on the importer's own physical file.
+        val sibling_key = module_surface_resolve_relative_key(registry, facade, "." + name)
+        if sibling_key == "":
+            return ""
+        val sibling_index = module_surface_registry_index(registry, sibling_key)
+        if sibling_index < 0 or sibling_index == facade.physical_index:
+            return ""
+        if facade.canonical_path != "" and registry.surfaces[sibling_index].canonical_path == facade.canonical_path:
+            return ""
+        return sibling_key
     # Importer normalization can collapse a repeated tier while its sibling
     # keeps that tier to distinguish a root-level twin. Resolve the physical
     # sibling first; a miss must not select the unrelated collapsed twin.
@@ -835,9 +850,17 @@ pub(package) fn module_surfaces_freeze(
                             # same relative rule the `.*` glob branch uses);
                             # `surface.package_name` is filesystem-derived and
                             # does not always agree with the registry key.
+                            # A package `__init__.spl` can be registered as the
+                            # package itself, so the parent taken below is one
+                            # level too high and selected a same-named module
+                            # there (`export platform.x` in env/__init__.spl ->
+                            # src/lib/platform.spl). Its physical sibling wins.
+                            if surface.canonical_path.ends_with("/__init__.spl"):
+                                route_target_name = module_surface_resolve_relative_key(
+                                    registry, surface, "." + qualifier)
                             val registry_package = module_surface_package_name_from_name(
                                 surface.preferred_registry_name)
-                            if registry_package != "":
+                            if route_target_name == "" and registry_package != "":
                                 route_target_name = module_surface_resolve_absolute_key(
                                     registry, registry_package + "." + qualifier)
                             if route_target_name == "":

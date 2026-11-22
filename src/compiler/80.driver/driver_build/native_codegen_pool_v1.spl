@@ -37,6 +37,8 @@ use std.nogc_sync_mut.sffi.process_memory.{host_commit_avail_kib, host_physmem_t
 use compiler.backend.llvm_diagnostic_admission.{llvm_llc_error_diagnostic}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal}
+use compiler.driver.driver_build.native_mir_shard.{native_mir_shard_count_of_v1}
+use compiler.driver.driver_build.native_codegen_rss_sffi.{native_codegen_self_rss_kib_sffi_v1}
 
 extern fn rt_process_spawn_async_value(cmd: text, args: [text]) -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
@@ -55,13 +57,21 @@ extern fn rt_host_memory_headroom_bytes_v1() -> i64
 pub const NATIVE_CODEGEN_POOL_ENV_V1: text = "SIMPLE_NATIVE_CODEGEN_POOL"
 # Per-worker memory estimate override (KiB).
 pub const NATIVE_CODEGEN_WORKER_KIB_ENV_V1: text = "SIMPLE_NATIVE_CODEGEN_WORKER_KIB"
-# Default per-llc-child estimate: 2 GiB. The 2-10 GB per-module peaks measured
-# on this host are the in-process translation, which stays in the parent; an
-# llc child holds one module's IR and machine code only.
-pub const NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1: i64 = 2097152
-# Built-in default of the RAM/commit the pool always leaves free (24 GiB), same
-# floor as the shard pool. Live value: native_codegen_commit_floor_kib_v1().
+# Default per-llc-child estimate: 512 MiB (524,288 KiB). In-process MIR->IR
+# translation stays serial in the parent inside a per-module transient scope;
+# each llc/clang child holds only one module's IR and object output (~64-320 MiB
+# peak RSS across compiler modules) and exits immediately.
+pub const NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1: i64 = 524288
+# Built-in default of the RAM/commit a standalone pool leaves free (24 GiB),
+# same floor as the shard pool. Live value: native_codegen_commit_floor_kib_v1().
 pub const NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1: i64 = 25165824
+# Inside an already-admitted shard tree (SIMPLE_MIR_SHARD / file-worker unit),
+# the coordinator already reserved host headroom before spawning the shards and
+# live headroom already excludes resident shard RSS; keep a 12.5% RAM anti-OOM
+# margin clamped to [2 GiB, 8 GiB] (strictly above earlyoom's 10% trigger)
+# instead of double-counting a second 24 GiB whole-host floor.
+pub const NATIVE_CODEGEN_SHARD_MIN_FLOOR_KIB_V1: i64 = 2097152
+pub const NATIVE_CODEGEN_SHARD_MAX_FLOOR_KIB_V1: i64 = 8388608
 # With neither a declared budget nor a measurable headroom, never admit-all.
 pub const NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1: i64 = 4
 # Per-job wall clock cap (ms); a child past it is killed and the module
@@ -83,15 +93,28 @@ pub const NATIVE_CODEGEN_JOB_PASS_V1: i64 = 2
 pub const NATIVE_CODEGEN_JOB_FAILED_V1: i64 = 3
 pub const NATIVE_CODEGEN_JOB_SKIPPED_V1: i64 = 4
 
-# Worker count from cores, the declared tree budget, and live headroom minus
-# the commit floor. Every known bound can only lower N; the result is >= 1
+# Worker count from cores, per-shard net tree budget (after subtracting this
+# process's resident RSS), live host headroom minus the commit floor, and any
+# enclosing cgroup `memory.max - memory.current` spare, divided across concurrent
+# peer shard processes. Every known bound can only lower N; the result is >= 1
 # whenever there is a job (1 = serial).
+# reason: worker-count admission arithmetic over KiB memory bounds and core counts
+@allow(primitive_api)
 pub fn native_codegen_pool_workers_v1(host_cpus: i64, requested: i64, jobs: i64,
         budget_kib: i64, headroom_kib: i64, estimate_kib: i64,
-        floor_kib: i64 = NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1) -> i64:
+        floor_kib: i64 = NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1,
+        resident_kib: i64 = 0, peer_shards: i64 = 1,
+        cgroup_spare_kib: i64 = -1) -> i64:
     if jobs <= 0:
         return 0
-    var n = if requested > 0: requested else: host_cpus
+    val peers = if peer_shards > 1: peer_shards else: 1
+    val cpu_cap = if requested > 0 and host_cpus > 0:
+        if requested < host_cpus: requested else: host_cpus
+    elif requested > 0:
+        requested
+    else:
+        host_cpus
+    var n = if cpu_cap > 0: cpu_cap / peers else: 1
     if n < 1:
         n = 1
     if n > jobs:
@@ -100,15 +123,24 @@ pub fn native_codegen_pool_workers_v1(host_cpus: i64, requested: i64, jobs: i64,
     var known = false
     if budget_kib > 0:
         known = true
-        val by_budget = budget_kib / est
+        val shard_budget = budget_kib / peers
+        val net_budget = if resident_kib > 0: shard_budget - resident_kib else: shard_budget
+        val by_budget = if net_budget > 0: net_budget / est else: 0
         if by_budget < n:
             n = by_budget
     if headroom_kib > 0:
         known = true
         val spare = headroom_kib - floor_kib
-        val by_commit = if spare > 0: spare / est else: 0
+        val shard_spare = if spare > 0: spare / peers else: 0
+        val by_commit = if shard_spare > 0: shard_spare / est else: 0
         if by_commit < n:
             n = by_commit
+    if cgroup_spare_kib >= 0:
+        known = true
+        val shard_cgroup = cgroup_spare_kib / peers
+        val by_cgroup = if shard_cgroup > 0: shard_cgroup / est else: 0
+        if by_cgroup < n:
+            n = by_cgroup
     if not known and n > NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1:
         n = NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1
     if n < 1: 1 else: n
@@ -116,6 +148,8 @@ pub fn native_codegen_pool_workers_v1(host_cpus: i64, requested: i64, jobs: i64,
 # Commit floor (KiB): explicit SIMPLE_BUILD_MEMORY_RESERVE_BYTES, else host
 # config mem_reserve_free_mib, else min(24 GiB, installed RAM / 4) when total
 # RAM is known (same host-scaled reserve as shard_tree_headroom_kib_for_v1).
+# reason: KiB reserve calculation for standalone and shard-child admission
+@allow(primitive_api)
 pub fn native_codegen_commit_floor_for_v1(reserve_bytes_field: text, host_reserve_kib: i64, total_kib: i64 = 0) -> i64:
     val bytes = native_codegen_kib_field_v1(reserve_bytes_field)
     if bytes > 0:
@@ -126,11 +160,187 @@ pub fn native_codegen_commit_floor_for_v1(reserve_bytes_field: text, host_reserv
     val quarter = total_kib / 4
     if quarter <= 0 or quarter >= NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1: NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1 else: quarter
 
-pub fn native_codegen_commit_floor_kib_v1() -> i64:
+# Commit floor (KiB) inside an already-admitted shard worker: explicit
+# overrides still win; otherwise reserve clamp(total_kib / 8, 2 GiB, 8 GiB) so
+# the shard coordinator's 24 GiB whole-host floor is not double-counted while
+# keeping >10% host RAM free above earlyoom/OS pressure.
+# reason: KiB reserve calculation for already-admitted shard children
+@allow(primitive_api)
+pub fn native_codegen_shard_commit_floor_for_v1(reserve_bytes_field: text, host_reserve_kib: i64, total_kib: i64 = 0) -> i64:
+    val bytes = native_codegen_kib_field_v1(reserve_bytes_field)
+    if bytes > 0:
+        val kib = bytes / 1024
+        if kib > 0: return kib
+    if host_reserve_kib > 0: return host_reserve_kib
+    if total_kib <= 0: return NATIVE_CODEGEN_SHARD_MAX_FLOOR_KIB_V1
+    val eighth = total_kib / 8
+    if eighth < NATIVE_CODEGEN_SHARD_MIN_FLOOR_KIB_V1:
+        return NATIVE_CODEGEN_SHARD_MIN_FLOOR_KIB_V1
+    if eighth > NATIVE_CODEGEN_SHARD_MAX_FLOOR_KIB_V1:
+        return NATIVE_CODEGEN_SHARD_MAX_FLOOR_KIB_V1
+    eighth
+
+# reason: live KiB reserve query for standalone or shard-child context
+@allow(primitive_api)
+@allow(bare_bool)
+pub fn native_codegen_commit_floor_kib_for_context_v1(in_shard_tree: bool) -> i64:
     val field = env_get_nullable("SIMPLE_BUILD_MEMORY_RESERVE_BYTES") ?? ""
     val host_kib = host_limit_mem_reserve_free_kib(0)
     val explicit = native_codegen_kib_field_v1(field) >= 1024 or host_kib > 0
-    native_codegen_commit_floor_for_v1(field, host_kib, if explicit: 0 else: host_physmem_total_kib())
+    val total = if explicit: 0 else: host_physmem_total_kib()
+    if in_shard_tree:
+        return native_codegen_shard_commit_floor_for_v1(field, host_kib, total)
+    native_codegen_commit_floor_for_v1(field, host_kib, total)
+
+# reason: standalone live KiB commit reserve query
+@allow(primitive_api)
+pub fn native_codegen_commit_floor_kib_v1() -> i64:
+    native_codegen_commit_floor_kib_for_context_v1(false)
+
+fn _native_codegen_peer_count_field_v1(raw: text) -> i64:
+    val trimmed = raw.trim()
+    if trimmed == "":
+        return 0
+    if trimmed.contains("/"):
+        return native_mir_shard_count_of_v1(trimmed)
+    native_codegen_kib_field_v1(trimmed)
+
+# Concurrent peer shard processes sharing the host/tree budget alongside this
+# process (1 = standalone). Prefers explicit live file-worker pool size
+# (`SIMPLE_NATIVE_FILE_WORKERS`, or `SIMPLE_HIR_SHARD` fallback for unit children)
+# over `--mir-shard=0/<batches>` total batch counts, and bounds by active CPU /
+# `--threads` slots so queued shards are never double-counted as live.
+# reason: shard peer count calculation over env fields and thread caps
+@allow(primitive_api)
+pub fn native_codegen_live_peer_shards_v1(shard_spec: text, file_worker_unit: text,
+        file_workers_field: text, host_cpus: i64, requested: i64) -> i64:
+    val slot_cap = if requested > 0 and host_cpus > 0:
+        if requested < host_cpus: requested else: host_cpus
+    elif requested > 0:
+        requested
+    else:
+        host_cpus
+    val live_workers = _native_codegen_peer_count_field_v1(file_workers_field)
+    if live_workers > 0:
+        if slot_cap > 0 and slot_cap < live_workers:
+            return slot_cap
+        return live_workers
+    val shard_count = native_mir_shard_count_of_v1(shard_spec)
+    if shard_count > 1:
+        if slot_cap > 0 and slot_cap < shard_count:
+            return slot_cap
+        return shard_count
+    val _ = file_worker_unit
+    1
+
+# Current process RSS in KiB (0 when unavailable).
+# reason: process RSS scalar probe in KiB
+@allow(primitive_api)
+pub fn native_codegen_process_rss_kib_v1() -> i64:
+    native_codegen_self_rss_kib_sffi_v1()
+
+fn _native_codegen_cgroup_chain_dirs_v1(rel_path: text) -> [text]:
+    if rel_path == "" or not rel_path.starts_with("/"):
+        return []
+    var dirs: [text] = []
+    var cur = rel_path
+    while cur.byte_len() > 1 and cur.ends_with("/"):
+        cur = cur.substring(0, cur.byte_len() - 1)
+    var done = false
+    while not done:
+        dirs.push(if cur == "/": "" else: cur)
+        if cur == "/":
+            done = true
+        else:
+            val slash = cur.rfind("/")
+            cur = if slash <= 0: "/" else: cur.substring(0, slash)
+    dirs
+
+fn _native_codegen_cgroup_v1_has_memory_v1(controllers: text) -> bool:
+    for item in controllers.split(","):
+        if item.trim() == "memory":
+            return true
+    false
+
+# Enclosing cgroup spare KiB (`memory.max - memory.current` for v2 and
+# `memory.limit_in_bytes - memory.usage_in_bytes` for v1) across the ancestor
+# chain; -1 when uncapped or absent, 0 when resident usage is at/above the cap.
+# reason: pure cgroup KiB spare calculation for tests and live admission
+@allow(primitive_api)
+pub fn native_codegen_cgroup_spare_kib_from_probe_v1(cgroup_table: text, files: {text: text}) -> i64:
+    var v2_rel = ""
+    var v1_rel = ""
+    for line in cgroup_table.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("0::"):
+            v2_rel = trimmed.substring(3, trimmed.byte_len()).trim()
+        else:
+            val parts = trimmed.split(":")
+            if parts.len() == 3 and _native_codegen_cgroup_v1_has_memory_v1(parts[1]):
+                v1_rel = parts[2].trim()
+    var best_spare_kib: i64 = -1
+    for dir in _native_codegen_cgroup_chain_dirs_v1(v2_rel):
+        val max_path = "/sys/fs/cgroup" + dir + "/memory.max"
+        val cur_path = "/sys/fs/cgroup" + dir + "/memory.current"
+        val max_raw = (files[max_path] ?? "").trim()
+        val cur_raw = (files[cur_path] ?? "").trim()
+        if max_raw != "" and max_raw != "max" and cur_raw != "":
+            val max_bytes = native_codegen_kib_field_v1(max_raw)
+            val cur_bytes = cur_raw.to_i64() ?? -1
+            if max_bytes > 0 and max_bytes < 4611686018427387904 and cur_bytes >= 0:
+                val spare_kib = if max_bytes > cur_bytes: (max_bytes - cur_bytes) / 1024 else: 0
+                if best_spare_kib < 0 or spare_kib < best_spare_kib:
+                    best_spare_kib = spare_kib
+    for dir in _native_codegen_cgroup_chain_dirs_v1(v1_rel):
+        val lim_path = "/sys/fs/cgroup/memory" + dir + "/memory.limit_in_bytes"
+        val use_path = "/sys/fs/cgroup/memory" + dir + "/memory.usage_in_bytes"
+        val lim_raw = (files[lim_path] ?? "").trim()
+        val use_raw = (files[use_path] ?? "").trim()
+        if lim_raw != "" and use_raw != "":
+            val lim_bytes = native_codegen_kib_field_v1(lim_raw)
+            val use_bytes = use_raw.to_i64() ?? -1
+            if lim_bytes > 0 and lim_bytes < 4611686018427387904 and use_bytes >= 0:
+                val spare_kib = if lim_bytes > use_bytes: (lim_bytes - use_bytes) / 1024 else: 0
+                if best_spare_kib < 0 or spare_kib < best_spare_kib:
+                    best_spare_kib = spare_kib
+    best_spare_kib
+
+# Live cgroup spare KiB (-1 when no cgroup cap applies).
+# reason: cgroup spare memory probe in KiB
+@allow(primitive_api)
+pub fn native_codegen_cgroup_spare_kib_v1() -> i64:
+    if not file_exists("/proc/self/cgroup"):
+        return -1
+    val table = file_read("/proc/self/cgroup")
+    if table == "":
+        return -1
+    var files: {text: text} = {}
+    for line in table.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("0::"):
+            val rel = trimmed.substring(3, trimmed.byte_len()).trim()
+            for dir in _native_codegen_cgroup_chain_dirs_v1(rel):
+                val max_p = "/sys/fs/cgroup" + dir + "/memory.max"
+                val cur_p = "/sys/fs/cgroup" + dir + "/memory.current"
+                if file_exists(max_p): files[max_p] = file_read(max_p)
+                if file_exists(cur_p): files[cur_p] = file_read(cur_p)
+        else:
+            val parts = trimmed.split(":")
+            if parts.len() == 3 and _native_codegen_cgroup_v1_has_memory_v1(parts[1]):
+                for dir in _native_codegen_cgroup_chain_dirs_v1(parts[2].trim()):
+                    val lim_p = "/sys/fs/cgroup/memory" + dir + "/memory.limit_in_bytes"
+                    val use_p = "/sys/fs/cgroup/memory" + dir + "/memory.usage_in_bytes"
+                    if file_exists(lim_p): files[lim_p] = file_read(lim_p)
+                    if file_exists(use_p): files[use_p] = file_read(use_p)
+    native_codegen_cgroup_spare_kib_from_probe_v1(table, files)
+
+# Human-readable diagnostic summary of all admission inputs.
+# reason: diagnostic text formatter over admission KiB and worker scalars
+@allow(primitive_api)
+pub fn native_codegen_admission_summary_v1(host_cpus: i64, budget_kib: i64,
+        resident_kib: i64, headroom_kib: i64, cgroup_spare_kib: i64,
+        floor_kib: i64, estimate_kib: i64, peer_shards: i64) -> text:
+    "cpus={host_cpus} budget_kib={budget_kib} resident_kib={resident_kib} headroom_kib={headroom_kib} cgroup_spare_kib={cgroup_spare_kib} floor_kib={floor_kib} worker_kib={estimate_kib} peer_shards={peer_shards}"
 
 # Default cores for the pool: host config max_threads bounds the detected
 # count (it can only lower it); absent = detected.
@@ -138,8 +348,8 @@ pub fn native_codegen_host_cpus_for_v1(detected: i64, max_threads: i64) -> i64:
     if max_threads > 0 and (detected <= 0 or max_threads < detected): max_threads else: detected
 
 # Per-llc-child estimate (KiB): explicit SIMPLE_NATIVE_CODEGEN_WORKER_KIB, else
-# host worker_mem_mib when it is ABOVE the 2 GiB default (a host hint may only
-# make admission more conservative, same rule as shard_worker_budget_kb), else 2 GiB.
+# host worker_mem_mib when it is ABOVE the 512 MiB default (a host hint may only
+# make admission more conservative, same rule as shard_worker_budget_kb), else 512 MiB.
 pub fn native_codegen_worker_estimate_for_v1(env_kib: i64, host_worker_mib: i64) -> i64:
     if env_kib > 0: return env_kib
     val host_kib = if host_worker_mib > 0 and host_worker_mib < 9007199254740991: host_worker_mib * 1024 else: 0

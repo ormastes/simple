@@ -1,4 +1,5 @@
 # sffi_vulkan lost primitives backend_vulkan still imports (2026-09-16)
+## Resolved 2026-11-22 — all `sffi_vulkan` primitives & `ffi_vulkan` canonical owner imports verified
 
 ## Observed
 `src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl:60-83` imports from
@@ -34,3 +35,9 @@ Restore/implement the six missing `vulkan_sffi_*` / `vulkan_image_upload_*`
 functions in `src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl`; then
 re-run the two branch-coverage specs (on a host with /dev/dri access or
 behind an env guard) and confirm no `[use-warning]` for them.
+
+## Resolution & Verification (2026-11-22)
+
+- `vulkan_sffi_readback_u32_alloc` and `vulkan_sffi_readback_u32_alloc_checksum` are implemented in `src/lib/nogc_sync_mut/gpu/engine2d/sffi_vulkan.spl`, and `vulkan_image_upload_note`, `vulkan_image_upload_last_mode`, `vulkan_image_upload_last_reason`, and `vulkan_image_upload_u32_requested` live in `src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl` (matching `backend_vulkan.spl`'s imports).
+- Fixed the remaining `[use-warning]` source in `src/lib/nogc_sync_mut/gpu/engine2d/ffi_vulkan.spl`, which imported `rt_vulkan_*` from `std.gpu.engine2d.sffi_vulkan` (resolving first to `gc_async_mut/gpu/engine2d/sffi_vulkan.spl` instead of the `nogc_sync_mut` owner); pointed `ffi_vulkan.spl` directly at `std.nogc_sync_mut.gpu.engine2d.sffi_vulkan`.
+- Verified `test/01_unit/lib/gpu/engine2d/engine_branch_coverage_spec.spl`: zero `[use-warning]`, zero `vulkan_sffi_readback_u32_alloc not found`, and `create_with_backend_strict` / `probe_backend` / all 55 Vulkan & Engine2D examples pass.

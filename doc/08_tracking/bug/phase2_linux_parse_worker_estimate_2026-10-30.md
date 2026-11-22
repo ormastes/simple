@@ -72,3 +72,29 @@ not full CLI success, a guarantee for later phases, or a causal percentage
 memory/performance improvement: the combined source contains other changes.
 The reduced parse pool trades concurrency for admission headroom; throughput
 remains unqualified. Independent Astra source review found no P0/P1/P2 issues.
+
+## Re-check 2026-11-22 (aarch64 Linux) — still verification-pending
+
+- `sh test/01_unit/scripts/product_frontend_worker_estimates_test.shs` ->
+  `PASS: measured product worker estimates, unchanged caps, and Windows owner` (rc 0).
+- The price is live in production: `scripts/bootstrap/lib/product-frontend-policy.shs:48`
+  exports `SIMPLE_PARSE_SHARD_WORKER_KB=25165824` on Linux, read by
+  `native_build_main.spl:833`. The integ25 Stage 2 compiler-CLI verification
+  (compiler `ef46f0d2ab4274c4550530851db407bf9bad7f21bfabd50f9b56e87e77fd58d6`,
+  `stage2-compiler-tests/aarch64-unknown-linux-gnu/verification/summary.env`)
+  records `verification_frontend_policy=SIMPLE_PARSE_SHARD_WORKER_KB=25165824`
+  under a 62,914,560 KiB tree budget and admitted 2 parse shards
+  (`fits 2 x 25165824 kB`), with no tree-cap refusal.
+- Not verified: that CLI run has no terminal receipt. Both parse shards died
+  with `exit=-139` (SIGSEGV) and the run fell back to in-process parsing and
+  reached HIR, but as of 2026-11-22 10:15 no process of it is alive, its log was
+  last written 07:26, `outputs/` is empty and `compiler_cli_build.max-rss-kib` is
+  empty, so no whole-run tree peak exists under the 24 GiB price. Candidate
+  records for the SIGSEGV (both show `[parse-shard] shard=N/2 ... FAILED exit=-139`):
+  `stage2_parse_shard_segv_named_type_find_2026-11-13.md` and
+  `native_build_fresh_hir_cache_dir_parse_shard_segfault_2026-11-12.md`. The old `file_is_symlink` blocker is gone
+  (no longer referenced in `src/app/stats/inventory_scan_v2.spl`).
+- The p4 `cli-f26` direct `native-build` is NOT evidence here: it never sources
+  the product policy, and its 10 parse shards use the compiler's 3.8 GB clamp.
+- Missing evidence: one completed bootstrap-script Phase 2 CLI build with this
+  policy plus its `simple-process-tree-rss.*.env` receipt (status complete, peak <= cap).

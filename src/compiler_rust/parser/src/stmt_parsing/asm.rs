@@ -117,19 +117,20 @@ impl<'a> Parser<'a> {
             .unwrap_or("")
             .trim()
             .to_string();
-        let instructions = Self::normalize_raw_asm_instructions(&raw);
+        let block_span = Span::new(start_span.start, close_end, start_span.line, start_span.column);
+        let (instructions, constraints) = Self::extract_braced_asm_body(&raw, block_span)?;
 
         while !self.check(&TokenKind::Eof) && self.current.span.start < close_end {
             self.advance();
         }
 
         Ok(Node::InlineAsm(InlineAsmStmt {
-            span: Span::new(start_span.start, close_end, start_span.line, start_span.column),
+            span: block_span,
             volatile: is_volatile,
             instructions,
             target_match: vec![],
             clobbers,
-            constraints: vec![],
+            constraints,
         }))
     }
 
@@ -250,22 +251,215 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    fn normalize_raw_asm_instructions(raw: &str) -> Vec<String> {
-        raw.lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(|line| {
-                let line = line.trim_end_matches([';', ',']).trim();
-                if line.len() >= 2
-                    && ((line.starts_with('"') && line.ends_with('"'))
-                        || (line.starts_with('\'') && line.ends_with('\'')))
-                {
-                    line[1..line.len() - 1].to_string()
+    fn extract_braced_asm_body(
+        raw: &str,
+        block_span: Span,
+    ) -> Result<(Vec<String>, Vec<AsmConstraint>), ParseError> {
+        let mut instructions = Vec::new();
+        let mut constraints = Vec::new();
+
+        for raw_line in raw.lines() {
+            let trimmed = raw_line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if trimmed.starts_with('"')
+                || trimmed.starts_with('\'')
+                || Self::looks_like_braced_asm_constraint_line(trimmed)
+            {
+                Self::parse_structured_braced_asm_line(trimmed, block_span, &mut instructions, &mut constraints)?;
+                continue;
+            }
+            let stripped = trimmed.trim_end_matches([';', ',']).trim();
+            if !stripped.is_empty() {
+                instructions.push(stripped.to_string());
+            }
+        }
+
+        Ok((instructions, constraints))
+    }
+
+    fn strip_unquoted_hash_comment(line: &str) -> &str {
+        let mut in_quote: Option<char> = None;
+        let mut escaped = false;
+        for (offset, ch) in line.char_indices() {
+            if let Some(q) = in_quote {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == q {
+                    in_quote = None;
+                }
+            } else if ch == '"' || ch == '\'' {
+                in_quote = Some(ch);
+            } else if ch == '#' {
+                return &line[..offset];
+            }
+        }
+        line
+    }
+
+    fn decode_quoted_asm_literal(input: &str, block_span: Span) -> Result<(String, &str), ParseError> {
+        let mut chars = input.char_indices();
+        let Some((_, quote)) = chars.next() else {
+            return Err(ParseError::syntax_error_with_span(
+                "expected quoted inline asm string literal".to_string(),
+                block_span,
+            ));
+        };
+        let mut decoded = String::new();
+        while let Some((offset, ch)) = chars.next() {
+            if ch == quote {
+                return Ok((decoded, &input[offset + ch.len_utf8()..]));
+            }
+            if ch == '\\' {
+                let Some((_, esc)) = chars.next() else {
+                    return Err(ParseError::syntax_error_with_span(
+                        "unterminated escape sequence in inline asm string literal".to_string(),
+                        block_span,
+                    ));
+                };
+                match esc {
+                    'n' => decoded.push('\n'),
+                    't' => decoded.push('\t'),
+                    'r' => decoded.push('\r'),
+                    '0' => decoded.push('\0'),
+                    '\\' => decoded.push('\\'),
+                    '"' => decoded.push('"'),
+                    '\'' => decoded.push('\''),
+                    other => {
+                        decoded.push('\\');
+                        decoded.push(other);
+                    }
+                }
+            } else {
+                decoded.push(ch);
+            }
+        }
+        Err(ParseError::syntax_error_with_span(
+            "unterminated string literal in inline asm block".to_string(),
+            block_span,
+        ))
+    }
+
+    fn parse_structured_braced_asm_line(
+        line: &str,
+        block_span: Span,
+        instructions: &mut Vec<String>,
+        constraints: &mut Vec<AsmConstraint>,
+    ) -> Result<(), ParseError> {
+        let mut rest = Self::strip_unquoted_hash_comment(line).trim();
+        while !rest.is_empty() {
+            if rest.starts_with('"') || rest.starts_with('\'') {
+                let (decoded, after_quote) = Self::decode_quoted_asm_literal(rest, block_span)?;
+                instructions.push(decoded);
+                rest = after_quote.trim_start();
+                if rest.is_empty() {
+                    break;
+                }
+                if rest.starts_with(',') || rest.starts_with(';') {
+                    while rest.starts_with(',') || rest.starts_with(';') {
+                        rest = rest[1..].trim_start();
+                    }
                 } else {
-                    line.to_string()
+                    return Err(ParseError::syntax_error_with_span(
+                        format!("unexpected trailing tokens `{rest}` after inline asm instruction string"),
+                        block_span,
+                    ));
+                }
+                continue;
+            }
+
+            let mut sub = Parser::new(rest);
+            sub.skip_asm_ws();
+            if sub.check(&TokenKind::Eof) {
+                break;
+            }
+            let parsed = sub.try_parse_asm_constraint().map_err(|err| {
+                ParseError::syntax_error_with_span(
+                    format!("invalid inline asm operand clause `{rest}`: {err}"),
+                    block_span,
+                )
+            })?;
+            let Some(mut constraint) = parsed else {
+                return Err(ParseError::syntax_error_with_span(
+                    format!("invalid inline asm operand clause `{rest}` in braced asm block"),
+                    block_span,
+                ));
+            };
+            constraint.span = block_span;
+            constraints.push(constraint);
+            sub.skip_asm_ws();
+            if sub.check(&TokenKind::Eof) {
+                break;
+            }
+            if sub.check(&TokenKind::Comma) || sub.check(&TokenKind::Semicolon) {
+                let sep_end = sub.current.span.end;
+                rest = rest.get(sep_end..).unwrap_or("").trim_start();
+                while rest.starts_with(',') || rest.starts_with(';') {
+                    rest = rest[1..].trim_start();
+                }
+            } else {
+                return Err(ParseError::syntax_error_with_span(
+                    format!(
+                        "unexpected token {:?} after inline asm operand clause `{rest}`",
+                        sub.current.kind
+                    ),
+                    block_span,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn looks_like_braced_asm_constraint_line(line: &str) -> bool {
+        fn starts_with_constraint_call(s: &str) -> bool {
+            for kw in ["inout", "lateout", "clobber_abi", "clobber", "options"] {
+                if let Some(rest) = s.strip_prefix(kw) {
+                    if rest.trim_start().starts_with('(') {
+                        return true;
+                    }
+                }
+            }
+            for kw in ["in", "out"] {
+                if let Some(rest) = s.strip_prefix(kw) {
+                    let rest_trimmed = rest.trim_start();
+                    if let Some(inside) = rest_trimmed.strip_prefix('(') {
+                        // Exclude AT&T port I/O addressing such as `in (%dx), %al`.
+                        if !inside.trim_start().starts_with('%') {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+
+        let trimmed = line.trim_start();
+        if starts_with_constraint_call(trimmed) {
+            return true;
+        }
+        let ident_len = trimmed
+            .bytes()
+            .enumerate()
+            .take_while(|(i, b)| {
+                if *i == 0 {
+                    b.is_ascii_alphabetic() || *b == b'_'
+                } else {
+                    b.is_ascii_alphanumeric() || *b == b'_'
                 }
             })
-            .collect()
+            .count();
+        if ident_len > 0 {
+            let after_ident = trimmed[ident_len..].trim_start();
+            if let Some(after_eq) = after_ident.strip_prefix('=') {
+                if !after_eq.starts_with('=') && starts_with_constraint_call(after_eq.trim_start()) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn try_parse_asm_constraint(&mut self) -> Result<Option<AsmConstraint>, ParseError> {
@@ -313,7 +507,7 @@ impl<'a> Parser<'a> {
         match kw {
             "inout" => {
                 self.expect(&TokenKind::LParen)?;
-                let rc = self.expect_identifier()?;
+                let rc = self.expect_clobber_name()?;
                 self.expect(&TokenKind::RParen)?;
                 let op = self.parse_expression()?;
                 Ok(AsmConstraint {
@@ -326,7 +520,7 @@ impl<'a> Parser<'a> {
             }
             "lateout" => {
                 self.expect(&TokenKind::LParen)?;
-                let rc = self.expect_identifier()?;
+                let rc = self.expect_clobber_name()?;
                 self.expect(&TokenKind::RParen)?;
                 let op = self.parse_expression()?;
                 Ok(AsmConstraint {
@@ -411,7 +605,7 @@ impl<'a> Parser<'a> {
     fn parse_asm_in_constraint(&mut self, bname: Option<String>, cs: Span) -> Result<AsmConstraint, ParseError> {
         self.expect(&TokenKind::In)?;
         self.expect(&TokenKind::LParen)?;
-        let rc = self.expect_identifier()?;
+        let rc = self.expect_clobber_name()?;
         self.expect(&TokenKind::RParen)?;
         let op = self.parse_expression()?;
         Ok(AsmConstraint {
@@ -426,7 +620,7 @@ impl<'a> Parser<'a> {
     fn parse_asm_out_constraint(&mut self, bname: Option<String>, cs: Span) -> Result<AsmConstraint, ParseError> {
         self.expect(&TokenKind::Out)?;
         self.expect(&TokenKind::LParen)?;
-        let rc = self.expect_identifier()?;
+        let rc = self.expect_clobber_name()?;
         self.expect(&TokenKind::RParen)?;
         let op = self.parse_expression()?;
         Ok(AsmConstraint {
@@ -981,6 +1175,107 @@ mod tests {
     fn test_asm_braced_raw_allows_comment_like_hash_text_until_close() {
         let asm = parse_first_asm("fn test():\n    asm { svc #0 }\n");
         assert_eq!(asm.instructions, vec!["svc #0"]);
+    }
+
+    #[test]
+    fn test_asm_braced_lowers_operand_and_clobber_clauses_into_constraints() {
+        let asm = parse_first_asm(
+            concat!(
+                "fn syscall(id32: u32, a0_32: u32, result32: u32):\n",
+                "    asm volatile {\n",
+                "        \"mv a7, {id}\"\n",
+                "        \"mv a0, {a0_in}\"\n",
+                "        \"ecall\"\n",
+                "        \"mv {out}, a0\"\n",
+                "        id = in(reg) id32\n",
+                "        a0_in = in(reg) a0_32\n",
+                "        out = out(reg) result32\n",
+                "        clobber(\"a0\")\n",
+                "        clobber(memory)\n",
+                "        options(nostack)\n",
+                "    }\n",
+            ),
+        );
+        assert!(asm.volatile);
+        assert_eq!(
+            asm.instructions,
+            vec!["mv a7, {id}", "mv a0, {a0_in}", "ecall", "mv {out}, a0"]
+        );
+        assert_eq!(asm.constraints.len(), 6);
+        assert_eq!(asm.constraints[0].name.as_deref(), Some("id"));
+        assert!(matches!(asm.constraints[0].kind, AsmConstraintKind::In));
+        assert_eq!(asm.constraints[0].reg_class.as_deref(), Some("reg"));
+        assert_eq!(asm.constraints[0].operand, Some(Expr::Identifier("id32".to_string())));
+        assert_eq!(asm.constraints[1].name.as_deref(), Some("a0_in"));
+        assert!(matches!(asm.constraints[1].kind, AsmConstraintKind::In));
+        assert_eq!(asm.constraints[2].name.as_deref(), Some("out"));
+        assert!(matches!(asm.constraints[2].kind, AsmConstraintKind::Out));
+        assert_eq!(asm.constraints[2].operand, Some(Expr::Identifier("result32".to_string())));
+        assert!(matches!(asm.constraints[3].kind, AsmConstraintKind::Clobber));
+        assert_eq!(asm.constraints[3].reg_class.as_deref(), Some("a0"));
+        assert!(matches!(asm.constraints[4].kind, AsmConstraintKind::Clobber));
+        assert_eq!(asm.constraints[4].reg_class.as_deref(), Some("memory"));
+        assert!(matches!(&asm.constraints[5].kind, AsmConstraintKind::Options(opts) if opts == &vec!["nostack".to_string()]));
+    }
+
+    #[test]
+    fn test_asm_braced_rejects_malformed_operand_clause_instead_of_emitting_raw_asm() {
+        let mut parser = crate::Parser::new(
+            "fn bad(x: u32):\n    asm volatile {\n        \"ecall\"\n        id = in(reg)\n    }\n",
+        );
+        let err = parser
+            .parse()
+            .err()
+            .expect("malformed operand clause in braced asm must fail");
+        assert!(
+            format!("{err}").contains("invalid inline asm operand clause"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_asm_braced_single_line_quoted_instr_with_constraints_comments_and_escapes() {
+        let single_line = parse_first_asm(
+            "fn f(result: u64):\n    asm volatile { \"mv {out}, a0\", out = out(reg) result, clobber(\"a0\") }\n",
+        );
+        assert!(single_line.volatile);
+        assert_eq!(single_line.instructions, vec!["mv {out}, a0"]);
+        assert_eq!(single_line.constraints.len(), 2);
+        assert_eq!(single_line.constraints[0].name.as_deref(), Some("out"));
+        assert!(matches!(single_line.constraints[0].kind, AsmConstraintKind::Out));
+        assert_eq!(
+            single_line.constraints[0].operand,
+            Some(Expr::Identifier("result".to_string()))
+        );
+        assert!(matches!(single_line.constraints[1].kind, AsmConstraintKind::Clobber));
+        assert_eq!(single_line.constraints[1].reg_class.as_deref(), Some("a0"));
+
+        let multi_quoted = parse_first_asm("fn f():\n    asm { \"nop\", \"wfi\" }\n");
+        assert_eq!(multi_quoted.instructions, vec!["nop", "wfi"]);
+        assert!(multi_quoted.constraints.is_empty());
+
+        let commented = parse_first_asm(
+            "fn f():\n    asm volatile {\n        \"bkpt #0\" # keep #0 inside quotes\n        \"ecall\" # invoke trap\n    }\n",
+        );
+        assert_eq!(commented.instructions, vec!["bkpt #0", "ecall"]);
+
+        let escaped = parse_first_asm(
+            "fn f(id32: u32):\n    asm volatile { \"mv a7, {id}\\necall\\t\\\"tag\\\\ok\\\"\", id = in(reg) id32 }\n",
+        );
+        assert_eq!(escaped.instructions, vec!["mv a7, {id}\necall\t\"tag\\ok\""]);
+        assert_eq!(escaped.constraints.len(), 1);
+        assert_eq!(escaped.constraints[0].name.as_deref(), Some("id"));
+
+        for bad_src in [
+            "fn bad():\n    asm volatile { \"ecall\", bogus_clause }\n",
+            "fn bad():\n    asm volatile { \"ecall\" bogus_clause }\n",
+        ] {
+            let mut parser = crate::Parser::new(bad_src);
+            assert!(
+                parser.parse().is_err(),
+                "unrecognized trailing tokens must fail closed: {bad_src}"
+            );
+        }
     }
 
     #[test]

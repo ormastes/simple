@@ -1765,6 +1765,11 @@ impl VulkanBackend:
         for low-frequency text draws (UI labels, debug overlays).
         """
         if not self.initialized:
+            self.dirty = true
+            self.host_mirror_frame_fresh = false
+            self.note_damage_full()
+            self.last_text_path = "cpu-raster-blit"
+            self.last_text_fallback_reason = "backend-uninitialized"
             return
         val pending_status = self._flush_pending_compute_at("_gpu_draw_text_fallback")
         if pending_status <= 0:
@@ -1782,14 +1787,33 @@ impl VulkanBackend:
             self.host_buf = refreshed
 
         self.mark_cpu_fallback("legacy-text-host-framebuffer-fallback")
+        self.last_text_path = "cpu-raster-blit"
+        self.last_text_fallback_reason = "legacy-text-host-framebuffer-fallback"
         # Render glyphs into host buffer using shared glyph module
         render_text_to_buffer(self.host_buf, self.w, self.h, x, y, text_val, color, font_size)
 
-        # Upload entire host buffer back to GPU
+        # Upload entire host buffer back to GPU and maintain mirror authority
         val fb_size = _i64(self.w) * _i64(self.h) * 4
         val upload_bytes = _pixels_to_bytes(self.host_buf, _i64(self.w) * _i64(self.h))
-        vulkan_sffi_copy_to_buffer(self.d_framebuffer, upload_bytes, 0)
-        self.dirty = false
+        val uploaded = vulkan_sffi_copy_to_buffer(self.d_framebuffer, upload_bytes, 0)
+        self.note_damage_full()
+        if uploaded:
+            self.host_mirror_valid = false
+            self.host_mirror_frame_fresh = false
+            self.dirty = true
+        else:
+            var checksum: i64 = 0
+            var ci: i64 = 0
+            while ci < self.host_buf.len().to_i64():
+                val cpx = (self.host_buf[ci] as i64) & 4294967295
+                checksum = (checksum + cpx) % 2147483647
+                ci = ci + 1
+            self.last_host_checksum = checksum
+            self.host_mirror_valid = true
+            self.host_mirror_frame_fresh = true
+            self.cpu_fallback_host_surface = true
+            self.last_error = "legacy-text-host-framebuffer-upload-failed: {vulkan_sffi_last_error()}"
+            self.dirty = true
 
 # ============================================================================
 # Type Conversion Helpers
@@ -2402,3 +2426,26 @@ fn vulkan_font_atlas_slot_plan(slot_found: bool, slot_sequence: i64,
     if free_slot_available:
         return VK_FONT_SLOT_WRITE_FRESH
     VK_FONT_SLOT_FLUSH_THEN_WRITE
+
+val VK_CLEAR_WORKGROUP_SIZE: i64 = 256
+val VK_SPEC_MAX_WORKGROUP_COUNT: i64 = 65535
+val VK_CLEAR_MAX_GROUPS_X: i64 = 32768
+
+fn vulkan_clear_dispatch_groups_x(total_pixels: i64) -> i64:
+    """Compute X workgroup count for `spirv_clear`, bounded within Vulkan's
+    spec-minimum `maxComputeWorkGroupCount[0] = 65535`."""
+    if total_pixels <= 0:
+        return 0
+    val total_groups = (total_pixels + VK_CLEAR_WORKGROUP_SIZE - 1) / VK_CLEAR_WORKGROUP_SIZE
+    if total_groups <= VK_SPEC_MAX_WORKGROUP_COUNT:
+        return total_groups
+    VK_CLEAR_MAX_GROUPS_X
+
+fn vulkan_clear_dispatch_groups_y(total_pixels: i64) -> i64:
+    """Compute Y workgroup count for `spirv_clear` when 1D groups exceed 65535."""
+    if total_pixels <= 0:
+        return 0
+    val total_groups = (total_pixels + VK_CLEAR_WORKGROUP_SIZE - 1) / VK_CLEAR_WORKGROUP_SIZE
+    if total_groups <= VK_SPEC_MAX_WORKGROUP_COUNT:
+        return 1
+    (total_groups + VK_CLEAR_MAX_GROUPS_X - 1) / VK_CLEAR_MAX_GROUPS_X

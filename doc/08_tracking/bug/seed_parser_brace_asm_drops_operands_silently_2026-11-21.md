@@ -1,6 +1,6 @@
 # Seed parser: brace-form `asm volatile { ... }` drops operand clauses silently
 
-- **Status:** open
+- **Status:** fixed (2026-11-22)
 - **Found:** 2026-11-21, riscv32 SimpleOS kernel link lane
   (`scripts/check/check-simpleos-riscv32-kernel-link.shs --link-only`)
 - **Symptom:** the riscv32 `syscall` in `src/os/userlib/syscall_raw.spl`, written
@@ -28,10 +28,11 @@ by `mir/lower/lowering_stmt.rs:2561`.
 `clobber("a0".."a4","a7","memory")`; pinned by
 `test/01_unit/os/syscall_raw_rv32_asm_spec.spl`.
 
-## Fix wanted
+## Resolution (2026-11-22)
 
-Either lower operand clauses in the brace form (parse trailing
-`in(...)`/`out(...)`/`inout(...)`/`clobber(...)` lines as constraints), or reject
-a brace block that contains clause lines or `{name}` placeholders with a
-diagnostic pointing at the parenthesized form. Silent pass-through is the bug.
-Same fix needed in the pure-Simple parser if it shares the behaviour.
+`parse_asm_braced` (`src/compiler_rust/parser/src/stmt_parsing/asm.rs`) now extracts
+unquoted operand, clobber, and options clauses (`in(...)`, `out(...)`, `inout(...)`,
+`lateout(...)`, `clobber(...)`, `clobber_abi(...)`, `options(...)`, and named
+`name = ...` forms) into `InlineAsmStmt.constraints`, and raises a `ParseError` on
+malformed operand clauses instead of passing them through as raw assembly text.
+Added Rust parser unit tests in `asm.rs`.

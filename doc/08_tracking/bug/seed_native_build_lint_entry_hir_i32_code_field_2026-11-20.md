@@ -1,5 +1,5 @@
 # Seed native-build of the lint entry fails: HIR "Cannot infer field type: struct 'i32' field 'code'"
-- Status: open
+- Status: fixed (2026-11-22)
 - Severity: P3 (seed is bootstrap-only; pure-Simple lint is unaffected)
 - Found: 2026-11-20, ubuntu-p2 WSL2
 - Component: Rust seed compiler HIR type inference (`src/compiler_rust/`), compiling `src/compiler/90.tools/lint/_LintMain/entry_and_fixes.spl`
@@ -20,5 +20,7 @@ Owner rule: seed semantics must match pure Simple; pure Simple accepts this file
   `finding.code` (:271, :273). Suspected: seed mis-types a loop/tuple binding as i32.
 - NOT bisected: which exact `.code` site the seed fails on is unconfirmed (no seed in this worktree).
 
-## Needed
-Bisect by trimming the file in the seed to the failing `.code` site; fix seed inference to match pure Simple (or record the construct as unsupported). Not needed for the self-hosted lint path.
+## Root Cause & Resolution (2026-11-22)
+- **Exact site:** `entry_and_fixes.spl:421` (`val option_me_warnings = if not run_opt_me:\n    []\nelif (linter.last_resolved_path == path and linter.last_source_locations_valid):\n    linter.last_option_me_warnings\nelse:\n    check_option_me_call_source(path, content)`) iterated at `:512` (`for warning in option_me_warnings:` -> `warning.code` at `:514`).
+- **Why `i32`:** `Lowerer::lower_array` gives an empty array literal `[]` the configured default element type `TypeId::I32`. `Lowerer::lower_if` (`src/compiler_rust/compiler/src/hir/lower/expr/control.rs`) only recognized inline `Expr::Array([])` branches and concrete `HirType::Array` siblings, missing both multiline `Expr::DoBlock([Node::Expression(Expr::Array([]))])` branches and `elif` chains whose sibling lowered to `TypeId::ANY` across modules — leaving `option_me_warnings` typed `[i32]` and `warning` typed `i32`.
+- **Fix:** Taught `lower_if` (`expr_is_empty_array_literal` + `retype_empty_array_branch` in `control.rs`) to unwrap `DoBlock` empty-array tails and contextualize empty-array branches against both `HirType::Array` and `ANY` siblings. Added regression tests `multiline_if_elif_empty_array_never_narrows_struct_or_any_elements_to_i32` (`conditional_empty_array_tests.rs`) and `lint_entry_closure_lowers_entry_and_fixes_without_i32_code_field_error` (`native_project/discovery.rs`).
