@@ -396,8 +396,9 @@ fn _html_draw_ir_list_marker_commands(
 # the run itself, in the layer colour and offset by the layer. Layers paint
 # back to front, so the FIRST listed ends up on top. Chrome 159 draws a sharp
 # shadow with the same LCD antialiasing as the text. A blurred layer
-# (blur > 0) is skipped here: no Draw IR blur primitive exists for glyphs, and
-# the bare-text routing hold keeps such pages on the raster lane.
+# (blur > 0) carries `text-shadow-blur-px` (device px): the executor draws
+# its run as a grayscale coverage mask, Gaussian-blurs it and tints it with
+# the layer colour (Chrome 159 blurs an A8 glyph mask, never LCD).
 fn _html_draw_ir_text_shadow_commands(
     node: HNode, st: Style, run: DrawIrCommand
 ) -> [DrawIrCommand]:
@@ -412,12 +413,20 @@ fn _html_draw_ir_text_shadow_commands(
     # cpu-lane-loop-ok: one copy per authored text-shadow layer of this run; bound is that layer list
     while li >= 0:
         val layer = parsed.layers[li]
-        if layer.blur_radius_px == 0 and (layer.color_rgba >> 24) != 0u32:
+        if layer.blur_radius_px >= 0 and (layer.color_rgba >> 24) != 0u32:
             var shadow = run
             shadow.component_id = run.component_id + "_tshadow{li}"
             shadow.x = run.x + layer.offset_x_px * k
             shadow.y = run.y + layer.offset_y_px * k
             shadow.color = layer.color_rgba
+            if layer.blur_radius_px > 0:
+                # A fresh list: the run's own props must not gain the key.
+                var props: [DrawIrStyleProp] = []
+                # cpu-lane-loop-ok: copies this run's style props once per blurred layer; bound is the run's prop count
+                for prop in run.computed_style:
+                    props.push(prop)
+                props.push(draw_ir_style_prop("text-shadow-blur-px", "{layer.blur_radius_px * k}"))
+                shadow.computed_style = props
             out.push(shadow)
         li = li - 1
     out

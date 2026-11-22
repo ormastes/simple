@@ -3529,3 +3529,10 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - **Rule:** `<input size=N>` content = `ceil((N - 1) c + round(maxCharWidth))`; `<textarea cols=N>` content = `ceil(N c) + 15k`. The UA 13.3333 px rows (`8N + 17`, `ceil(8.0273 N) + 15`) are unchanged.
 - **Spec:** `test/01_unit/browser_engine/form_control_width_dpr_chrome159_spec.spl` (AC-2/3/4/5 red on base, green on head).
 - **Trap:** the ratio is not linear in the font size, so fitting one size's widths (as the 2026-11-17 entry did) cannot predict another; measure two sizes whose `a` rounds in opposite directions.
+## 2026-11-20 — blurred `text-shadow` on the Draw IR lane
+
+- **Change:** a blurred layer is a text copy with `text-shadow-blur-px`; the executor (`_engine2d_draw_ir_blurred_text_shadow`) draws the run white on black in a CPU offscreen, averages the LCD subpixels into coverage, blurs with sigma = blur/2 (`engine2d_blur_coverage`: Skia triple box for sigma >= 2, else Gaussian), tints, and `draw_image_blend`s it under the text. Both cpu_simd and vulkan take it. The raster routing hold for blurred shadows is gone.
+- **Chrome 159 measured:** Chrome's blur extent matches Skia's triple box (blur 8 reaches ~10 px, not a true Gaussian's ~12). Halo rows within 3 per pixel at 1x; dpr4 max channel error 25.
+- **Trap:** Engine2D's gray (`set_lcd_text(false)`) glyphs are ~0.4 px high and unhinted vs Chrome's A8 mask; the LCD subpixel mean is the closer mask.
+- **Open:** Chrome's mask sits ~0.3 px left for sigma >= 2; the `raster` lane still paints blurred layers sharp.
+- **Cost:** a blurred-shadow bare-text page now renders on Draw IR (~4.3 s cold at 1x vs 1.5 s on the raster lane, which drew it wrong); plain pages unchanged (byte-identical, 3.24 s both).
