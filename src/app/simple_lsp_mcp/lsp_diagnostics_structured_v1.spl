@@ -230,7 +230,7 @@ pub fn lsp_build_diagnostics_command_v1(binary: text, file: text, source_mode: b
         )
     LspDiagCommandPlanV1(
         binary: binary,
-        args: ["check", "--format=json", file],
+        args: ["check", "--json", file],
         mode: "native_check",
         timeout_ms: _lsp_diag_timeout_ms()
     )
@@ -1934,17 +1934,18 @@ pub fn lsp_collect_structured_diagnostics_v1(
             "target file not found: " + file, [], [], []
         )
 
-    val binary = find_simple_binary()
-    val source_mode = _lsp_detect_source_mode(binary)
+    val check_binary = env_get("SIMPLE_LSP_CHECK_BINARY") ?? ""
+    val binary = if check_binary == "": find_simple_binary() else: check_binary
+    val source_mode = check_binary == "" and _lsp_detect_source_mode(binary)
     val plan = lsp_build_diagnostics_command_v1(binary, file, source_mode)
     lsp_note_command_start()
     var (stdout, stderr, code) = process_run_bounded(
         plan.binary, plan.args, plan.timeout_ms, _lsp_diag_capture_bytes()
     )
-    if not source_mode and code == 2 and (stdout.contains("unknown option") or stderr.contains("unknown option")):
+    if not source_mode and (code == 1 or code == 2) and (stdout.contains("unknown option") or stderr.contains("unknown option")):
         lsp_note_command_start()
         val retry = process_run_bounded(
-            plan.binary, ["check", "--json", file], plan.timeout_ms, _lsp_diag_capture_bytes()
+            plan.binary, ["check", "--format=json", file], plan.timeout_ms, _lsp_diag_capture_bytes()
         )
         stdout = retry.0
         stderr = retry.1
