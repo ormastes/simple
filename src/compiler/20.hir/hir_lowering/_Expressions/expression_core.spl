@@ -19,7 +19,7 @@ use compiler.hir.hir_lowering._Expressions.source_union_pattern_v1.*
 use compiler.hir.hir_lowering._Expressions.declared_enum_constructor.*
 use compiler.hir.hir_lowering._Expressions.accessor_forwarding.*
 use compiler.hir.hir_lowering._Expressions.collection_factory_types.{collection_factory_type_concrete}
-use compiler.hir.hir_lowering.pattern_enum_substitution.{substitute_declared_pattern_type}
+use compiler.hir.hir_lowering.pattern_enum_substitution.{substitute_declared_pattern_type, declared_pattern_slot_type_is_concrete}
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.hir.hir_lowering._Expressions.cfg_when_marker.{cfg_when_marker_cond, cfg_when_chain_is_marker}
 use compiler.hir.hir_lowering._Expressions.call_arity.*
@@ -428,7 +428,12 @@ impl HirLowering:
             case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
                 if val declared_type = self.symbols.get_symbol_type_raw(symbol.id):
                     return self.named_owner_for_hir_type(declared_type)
-            case HirExprKind.Call(callee, _, _):
+            case HirExprKind.Call(callee, _, call_type_args):
+                val applied_args: [HirType] = call_type_args
+                if applied_args.len() > 0:
+                    if val inst_ret = self.instantiated_direct_call_return_kind(base.kind):
+                        return self.named_owner_for_hir_type(inst_ret)
+                    return -1
                 val callee_symbol = _hir_expr_symbol_or_invalid(callee.kind)
                 if callee_symbol.is_valid():
                     if val signature = self.symbols.get_symbol_type_raw(callee_symbol.id):
@@ -460,8 +465,13 @@ impl HirLowering:
                 source_type = self.symbols.get_symbol_type_raw(source_symbol.id) ?? source_type
             var callable = SymbolId(id: -1)
             match source.kind:
-                case HirExprKind.Call(callee, _, _):
-                    callable = _hir_expr_symbol_or_invalid(callee.kind)
+                case HirExprKind.Call(callee, _, call_type_args):
+                    val applied_args: [HirType] = call_type_args
+                    if applied_args.len() > 0:
+                        if val inst_ret = self.instantiated_direct_call_return_kind(source.kind):
+                            source_type = inst_ret
+                    else:
+                        callable = _hir_expr_symbol_or_invalid(callee.kind)
                 case HirExprKind.MethodCall(receiver, method_name, _, resolution):
                     match resolution:
                         case MethodResolution.StaticMethod(_, method_id):
@@ -548,6 +558,33 @@ impl HirLowering:
             if self.struct_type_param_names_by_name.has(owner_name):
                 return self.struct_type_param_names_by_name[owner_name]
         empty
+
+    # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=take the kind, never a by-value HirExpr (frozen stage2 prologue copy fault)
+    me instantiated_direct_call_return_kind(kind: HirExprKind) -> HirType?:
+        """Instantiate a generic free/extern function's declared return type with explicit turbofish type_args."""
+        match kind:
+            case HirExprKind.Call(callee, _, call_type_args):
+                val applied: [HirType] = call_type_args
+                if applied.len() == 0:
+                    return None
+                val callee_symbol = _hir_expr_symbol_or_invalid(callee.kind)
+                if not callee_symbol.is_valid():
+                    return None
+                val sym_key = callee_symbol.id.to_text()
+                val tp_key = "#fn_tp#" + sym_key
+                val ret_key = "#fn_ret#" + sym_key
+                if not self.struct_type_param_names_by_name.has(tp_key) or not self.class_method_return_types_by_name.has(ret_key):
+                    return None
+                val names = self.struct_type_param_names_by_name[tp_key]
+                if names.len() != applied.len():
+                    return None
+                val declared = self.class_method_return_types_by_name[ret_key]
+                val substituted = substitute_declared_pattern_type(declared, names, applied)
+                if not declared_pattern_slot_type_is_concrete(substituted):
+                    return None
+                return Some(substituted)
+            case _: ()
+        None
 
     # @workaround bug=stage2_struct_param_deep_copy_packed_span_2026-11-03 reason=take the kind, never a by-value HirExpr (frozen stage2 prologue copy fault)
     me instantiated_method_call_return_kind(kind: HirExprKind) -> HirType?:
