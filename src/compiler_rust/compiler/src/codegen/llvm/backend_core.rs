@@ -1291,6 +1291,42 @@ impl LlvmBackend {
             .any(|(a, t)| a.is_pointer_value() && !t.is_pointer_type())
     }
 
+    /// `inttoptr` any word arg sitting in a declared `ptr` param slot (a Simple
+    /// extern call to e.g. `rt_string_new` hands the pointer over as a word).
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn words_to_declared_ptrs(
+        &self,
+        declared: &[inkwell::types::BasicMetadataTypeEnum<'static>],
+        args: &mut [inkwell::values::BasicMetadataValueEnum<'static>],
+        builder: &inkwell::builder::Builder<'static>,
+    ) -> Result<(), CompileError> {
+        for (a, t) in args.iter_mut().zip(declared) {
+            if t.is_pointer_type() && a.is_int_value() {
+                let p = builder
+                    .build_int_to_ptr(a.into_int_value(), t.into_pointer_type(), "word_to_ptr")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("word inttoptr", &e))?;
+                *a = p.into();
+            }
+        }
+        Ok(())
+    }
+
+    /// A runtime `ptr` return stored into a vreg becomes a word.
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn ptr_result_to_word(
+        &self,
+        v: inkwell::values::BasicValueEnum<'static>,
+        builder: &inkwell::builder::Builder<'static>,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        if !v.is_pointer_value() {
+            return Ok(v);
+        }
+        Ok(builder
+            .build_ptr_to_int(v.into_pointer_value(), self.runtime_int_type(), "ptr_ret_word")
+            .map_err(|e| crate::error::factory::llvm_build_failed("ptr return ptrtoint", &e))?
+            .into())
+    }
+
     /// Get or declare `rt_string_new_literal` with the runtime prototype
     /// `rt_string_new_literal(bytes: *const u8, len: u64) -> RuntimeValue`.
     /// `bytes` is a real pointer: passing it as a 64-bit word shifts `len`

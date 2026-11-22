@@ -2799,7 +2799,11 @@ impl LlvmBackend {
                 let context = self.context_ref();
                 let i8_type = context.i8_type();
                 let i32_type = context.i32_type();
-                if let Some(spec) = crate::codegen::runtime_sffi::spec_for_target(&self.target, sffi_name) {
+                if sffi_name == "rt_string_data" {
+                    self.declare_rt_string_data(module)
+                } else if sffi_name == "rt_string_new" {
+                    self.declare_rt_string_new(module)
+                } else if let Some(spec) = crate::codegen::runtime_sffi::spec_for_target(&self.target, sffi_name) {
                     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = spec
                         .params
                         .iter()
@@ -3004,7 +3008,7 @@ impl LlvmBackend {
                 // shift, matching Cranelift, whose
                 // `tag_runtime_pool_join_result` defaults to false and is
                 // forced false for native-project builds.
-                let mut final_ret = ret_val;
+                let mut final_ret = self.ptr_result_to_word(ret_val, builder)?;
                 if crate::codegen::instr::calls::returns_tagged_bool(sffi_name) {
                     let i8_type = self.context_ref().i8_type();
                     let rt_value_as_bool = module.get_function("rt_value_as_bool").unwrap_or_else(|| {
@@ -3509,6 +3513,24 @@ mod tests {
     /// pointer must stay a 4-byte `ptr` all the way to the callee: an i64
     /// `rt_string_data` return reads garbage EDX, and an i64 call slot shifts
     /// `len` (same shape as the empty-print literal bug).
+    #[test]
+    fn direct_rt_string_data_and_new_calls_verify_on_i686() {
+        use crate::mir::CallTarget;
+        let backend = LlvmBackend::new(Target::parse("i686-pc-windows-gnu").unwrap()).unwrap();
+        backend.create_module("direct_str_i686").unwrap();
+        let mut func = MirFunction::new("main".to_string(), T::I64, Visibility::Public);
+        let b = &mut func.blocks[0].instructions;
+        b.push(MirInst::ConstString { dest: VReg(0), value: "hi".to_string() });
+        b.push(MirInst::Call { dest: Some(VReg(1)), target: CallTarget::from_name("rt_string_data"), args: vec![VReg(0)] });
+        b.push(MirInst::ConstInt { dest: VReg(2), value: 2 });
+        b.push(MirInst::Call { dest: Some(VReg(3)), target: CallTarget::from_name("rt_string_new"), args: vec![VReg(1), VReg(2)] });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(3)));
+        backend.compile_function(&func).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("call i64 @rt_string_new(ptr %"), "{ir}");
+        backend.verify().unwrap();
+    }
+
     #[test]
     fn text_arg_expansion_i686_windows_passes_real_pointer() {
         use crate::mir::CallTarget;

@@ -2555,7 +2555,7 @@ impl LlvmBackend {
                     };
                     if let Some(d) = dest {
                         if let Some(ret_val) = call_site.try_as_basic_value().basic() {
-                            vreg_map.insert(*d, ret_val);
+                            vreg_map.insert(*d, self.ptr_result_to_word(ret_val, builder)?);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
                         }
@@ -3649,6 +3649,7 @@ impl LlvmBackend {
                             .get(i)
                             .copied()
                             .and_then(|ty| ty.try_into().ok())
+                            .filter(|ty: &inkwell::types::BasicTypeEnum| !ty.is_pointer_type())
                             .or_else(|| Some(i64_type.into()));
                         let casted = self.coerce_value_to_type(val, target_ty, builder)?;
                         raw_arg_vals.push(casted.into_int_value());
@@ -3732,13 +3733,14 @@ impl LlvmBackend {
                             .build_indirect_call(call_ty, fn_ptr, &arg_vals, "mcall")
                             .map_err(|e| crate::error::factory::llvm_build_failed("method call", &e))?
                     } else {
+                        self.words_to_declared_ptrs(&func.get_type().get_param_types(), &mut arg_vals, builder)?;
                         builder
                             .build_call(func, &arg_vals, "mcall")
                             .map_err(|e| crate::error::factory::llvm_build_failed("method call", &e))?
                     };
                     if let Some(d) = dest {
                         if let Some(ret_val) = call_site.try_as_basic_value().basic() {
-                            vreg_map.insert(*d, ret_val);
+                            vreg_map.insert(*d, self.ptr_result_to_word(ret_val, builder)?);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
                         }
@@ -3895,7 +3897,7 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_build_failed("builtin call", &e))?;
                     if let Some(d) = dest {
                         if let Some(ret_val) = call_site.try_as_basic_value().basic() {
-                            vreg_map.insert(*d, ret_val);
+                            vreg_map.insert(*d, self.ptr_result_to_word(ret_val, builder)?);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
                         }
