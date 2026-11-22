@@ -68,8 +68,13 @@ use compiler.driver.driver_build.native_full_inventory_sources.{
     native_full_inventory_requires_cold_index_v1,
     native_cold_entry_snapshot_path_v1, native_cold_source_roots_snapshot_v1}
 use compiler.driver.driver_build.native_entry_closure_owner.{
-    NativeEntryClosureRequestV1, native_entry_closure_request_open_v1}
-use compiler.driver.driver_build.native_entry_closure_receipt.{NativeEntryClosureSelectionV1}
+    NativeEntryClosureRequestV1, native_entry_closure_request_open_v1,
+    native_entry_closure_request_source_roots_v1,
+    native_entry_closure_request_snapshot_root_v1,
+    native_entry_closure_request_snapshot_id_v1}
+use compiler.driver.driver_build.native_entry_closure_receipt.{
+    NativeEntryClosureBindingV1, NativeEntryClosureSelectionV1}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1}
 use compiler.common.cache.phase_compatibility_path_io.{
     phase_compatibility_existing_artifact_io_v1}
 use compiler.driver.driver_log_helpers.{log_phase, log_build_progress}
@@ -318,10 +323,11 @@ impl CompilerDriver:
             self.ctx.add_error(library_error)
             log_phase(library_error)
             return (self.ctx, false)
-        val handoff_list = if preclosed != nil:
-            [preclosed!]
+        var handoff_list: [NativeEntryClosureRequestV1] = []
+        if val req_val = preclosed:
+            handoff_list = [req_val]
         else:
-            native_entry_closure_handoff_take_list_v1()
+            handoff_list = native_entry_closure_handoff_take_list_v1()
         val admitted_task = driver_admitted_epoch_task_active_v1()
         if handoff_list.len() > 0 and driver_admitted_epoch_active_v1():
             self.ctx.add_error("preclosed parse selection cannot compose with admitted source epoch")
@@ -365,7 +371,7 @@ impl CompilerDriver:
                     self.ctx.add_error(reason)
                     driver_entry_scan_cache_release()
                     return (self.ctx, false)
-        var admitted_preclosed: NativeEntryClosureSelectionV1? = nil
+        var admitted_preclosed: NativeEntryClosureSelectionV1? = None
         var preclosed_snapshot_root = ""
         var visibility_inventory: Dict<text, text> = {}
         var visibility_snapshot_selected: Dict<text, text> = {}
@@ -375,7 +381,7 @@ impl CompilerDriver:
         # Array handoff, not `Option<Struct>`: binding a struct-payload optional
         # across compiled Stage 2 frames caused SEGV in native_entry_closure_request_open_v1.
         if handoff_list.len() > 0:
-            val request = handoff_list[0]
+            val request: NativeEntryClosureRequestV1 = handoff_list[0]
             val selected = native_entry_closure_request_open_v1(
                 request, library_mode_closure_digest_v1(self.ctx.environment_variant_policy_digest,
                     self.ctx.options.library_mode))
@@ -383,8 +389,9 @@ impl CompilerDriver:
                 self.ctx.add_error("preclosed source request rejected: " + selected.unwrap_err())
                 driver_entry_scan_cache_release()
                 return (self.ctx, false)
-            match native_source_root_paths_v1(request.binding.source_roots,
-                    request.snapshot.snapshot_root):
+            match native_source_root_paths_v1(
+                    native_entry_closure_request_source_roots_v1(request),
+                    native_entry_closure_request_snapshot_root_v1(request)):
                 case Ok(roots):
                     if roots != closure_source_roots:
                         self.ctx.add_error("preclosed source root authority mismatch")
@@ -395,7 +402,7 @@ impl CompilerDriver:
                     driver_entry_scan_cache_release()
                     return (self.ctx, false)
             admitted_preclosed = Some(selected.unwrap())
-            preclosed_snapshot_root = request.snapshot.snapshot_root
+            preclosed_snapshot_root = native_entry_closure_request_snapshot_root_v1(request)
             val manifest_maps = native_entry_closure_visibility_maps_v1(request)
             if manifest_maps.is_err():
                 self.ctx.add_error(manifest_maps.unwrap_err())
@@ -403,7 +410,7 @@ impl CompilerDriver:
                 return (self.ctx, false)
             visibility_inventory = manifest_maps.unwrap().0
             visibility_snapshot_selected = manifest_maps.unwrap().1
-            visibility_snapshot_id = request.snapshot.revision_id + ":" + request.snapshot.inventory_digest
+            visibility_snapshot_id = native_entry_closure_request_snapshot_id_v1(request)
             val prepared_visibility_index = driver_entry_resolver_index_prepare_v1(
                 preclosed_snapshot_root, visibility_snapshot_id, visibility_inventory)
             if prepared_visibility_index.is_err():
