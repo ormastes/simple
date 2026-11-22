@@ -1,6 +1,6 @@
 # Profile HIR workers have been Darwin-only since 35541505cd5: Linux lacks PROCESS_GROUP_RETIRE
 
-- Status: verified (2026-11-22, aarch64 Linux; see "Verification 2026-11-22" below)
+- Status: fix-implemented-verification-pending (2026-11-22: retire behaviour confirmed on aarch64 Linux by stand-in evidence below; the Stage 3-shape probe named in the acceptance criterion is still unrun)
 - Severity: P1. On Linux, every HIR shard pool (the coordinator and the Stage 3 capsule) runs serially.
 - Found: 2026-11-12, by the early Phase 3 lane on aarch64 Linux
 - Component: `src/runtime/runtime_process_owned.c` (Process Observation V4 owner)
@@ -43,7 +43,7 @@ The `/proc` scan is local to the owner, side-effect free, and matches the Darwin
 - `check-c-runtime-compiles-push.shs`: the same 20 pre-existing vector-provider failures on base and on this change. `runtime_process_owned.c` compiles clean with `-Wall -Wextra`.
 - Native confirmation is PENDING: a Phase 1 runtime authority plus Stage 2 rebuild, then the 3-file pre-flight (`completed_workers=2`) and the Stage 3-shape probe. This is sequenced by the coordinator around run 17.
 
-## Verification 2026-11-22 (aarch64 Linux) — VERIFIED
+## Verification 2026-11-22 (aarch64 Linux) — partial evidence (Stage 3-shape probe still pending)
 
 - Host: Linux aarch64 (6.17.0-1032-nvidia), clang 23.1.0, worktree at `origin/release/1.0.0` `3c2e4556b6d`.
 - Fix commit `998622c8624` is an ancestor of `c1a10190b97`, the source of the Stage 2 used below.
