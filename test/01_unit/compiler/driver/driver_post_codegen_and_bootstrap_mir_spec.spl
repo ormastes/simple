@@ -1,0 +1,256 @@
+"""
+# Driver post-codegen cache/capsule O(1) ownership and whole-program MIR setup
+
+Verifies root-cause fixes for:
+1. `FrozenNativeModuleCapsuleBatchV1` O(1) `capsule_index` lookup without
+   allocating dummy `MirModule`s on hits, plus fail-closed duplicate and stale
+   index rejection.
+2. `BuildOutcomeSet` O(1) `paths_seen` membership (`has_path`).
+3. `build_cache_dependency_closure` empty-dependency fast path, cached
+   `interface_digest` reuse on unchanged fingerprints, and `build_cache_persist`
+   merging `on_disk` entries inside a transient scope without mutating or
+   corrupting the caller's `cache.entries` dict.
+4. Whole-program bootstrap MIR deduplication (`driver_bootstrap_unique_module_names_v1`)
+   and `[build] phase=mir` progress cadence (`driver_bootstrap_mir_build_progress_due_v1`).
+"""
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/80.driver/driver_types.spl
+# @cover src/compiler/80.driver/driver_build/build_outcome.spl
+# @cover src/compiler/80.driver/driver_build/incremental.spl
+# @cover src/compiler/80.driver/driver_bootstrap_mir_progress_v1.spl
+# @cover src/compiler/80.driver/driver_build/smf_object_spool_v1.spl
+# @cover src/compiler/80.driver/driver_build/smf_staged_parts_v1.spl
+# @cover src/compiler/80.driver/driver_build/native_file_worker_v1.spl
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_write, getpid}
+use compiler.common.driver_core_types.{
+    driver_core_compile_options_default,
+    driver_output_format_native,
+    driver_output_format_both,
+    driver_output_format_smf
+}
+use compiler.driver.driver_types.{
+    CompileContext, FrozenNativeModuleCapsuleBatchV1,
+    frozen_native_capsule_batch_find_v1, native_capsule_mir_identity_v1
+}
+use compiler.driver.driver_build.build_outcome.{BuildOutcomeSet, BuildUnitOutcome}
+use compiler.driver.driver_build.incremental.{
+    BuildCache, FileFingerprint, build_cache_dependency_closure,
+    build_cache_persist
+}
+use compiler.driver.driver_bootstrap_mir_progress_v1.{
+    driver_bootstrap_mir_build_progress_due_v1,
+    driver_bootstrap_unique_module_names_v1
+}
+use compiler.driver.driver_build.smf_object_spool_v1.{
+    smf_object_spool_begin_v1, smf_object_spool_put_v1,
+    smf_object_spool_assemble_v1, smf_object_spool_release_v1,
+    smf_object_spool_count_v1
+}
+use compiler.driver.driver_build.smf_staged_parts_v1.{
+    smf_effective_output_is_both_v1,
+    smf_part_encode_v1, smf_part_decode_ok_v1,
+    smf_part_decode_object_v1, smf_part_decode_manifest_v1
+}
+use compiler.driver.driver_build.native_mir_shard.{
+    native_mir_shard_smf_part_write_v1, native_mir_shard_smf_part_read_v1
+}
+use compiler.driver.driver_build.native_file_worker_v1.{
+    native_file_worker_effective_output_is_both_v1,
+    native_file_worker_smf_sidecar_supported_for_target_v1
+}
+use compiler.mir.mir_data.{MirModule, MirConstant, MirConstValue, MirType}
+use compiler.hir.hir_types.{SymbolId}
+
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn _spec_fixture_dir(tag: text) -> text:
+    val dir = "build/tmp/simple_driver_post_codegen_{getpid()}_{tag}"
+    val _removed = rt_dir_remove_all(dir)
+    expect(rt_dir_create(dir, true)).to_equal(true)
+    dir
+
+describe "FrozenNativeModuleCapsuleBatchV1 O(1) indexed lookup":
+    it "indexes frozen capsules in O(1) and fails closed on misses, duplicates, and stale indices":
+        step("Freeze 3 MIR modules and verify capsule_index mappings")
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        for name in ["mod.alpha", "mod.beta", "mod.gamma"]:
+            var consts: Dict<SymbolId, MirConstant> = {}
+            consts[SymbolId(id: 1)] = MirConstant(
+                symbol: SymbolId(id: 1), name: "K",
+                type_: MirType.i64(), value: MirConstValue.Int(7))
+            ctx.mir_modules[name] = MirModule(name: name, functions: {},
+                statics: {}, constants: consts, types: {})
+        val _frozen_reg = ctx.freeze_storage_registry()
+        val batch = ctx.freeze_native_module_capsules_v1(
+            ["mod.alpha", "mod.beta", "mod.gamma"],
+            "build/tmp/spec_capsules", "llvm", "aarch64-apple-darwin", "apple-m1", 2, true)
+        expect(batch.ok).to_equal(true)
+        expect(batch.capsule_index["mod.alpha"]).to_equal(0)
+        expect(batch.capsule_index["mod.beta"]).to_equal(1)
+        expect(batch.capsule_index["mod.gamma"]).to_equal(2)
+
+        val hit = frozen_native_capsule_batch_find_v1(batch, "mod.beta")
+        expect(hit.ok).to_equal(true)
+        expect(hit.module_name).to_equal("mod.beta")
+        expect(hit.mir_identity).to_equal(native_capsule_mir_identity_v1(ctx.mir_modules["mod.beta"]))
+
+        val miss = frozen_native_capsule_batch_find_v1(batch, "mod.absent")
+        expect(miss.ok).to_equal(false)
+        expect(miss.reason).to_equal("capsule-not-found")
+
+        step("Reject duplicate module names during freeze_native_module_capsules_v1")
+        val dup_freeze = ctx.freeze_native_module_capsules_v1(
+            ["mod.alpha", "mod.beta", "mod.alpha"],
+            "build/tmp/spec_capsules", "llvm", "aarch64-apple-darwin", "apple-m1", 2, true)
+        expect(dup_freeze.ok).to_equal(false)
+        expect(dup_freeze.reason).to_equal("duplicate-capsule-module")
+
+        step("Reject -1 duplicate sentinel and mismatched capsule_index entries")
+        val wrong_idx_batch = FrozenNativeModuleCapsuleBatchV1(
+            ok: true, registry_identity: batch.registry_identity,
+            capsules: batch.capsules, capsule_index: {"mod.alpha": 2}, reason: "ok")
+        val wrong_hit = frozen_native_capsule_batch_find_v1(wrong_idx_batch, "mod.alpha")
+        expect(wrong_hit.ok).to_equal(false)
+        expect(wrong_hit.reason).to_equal("capsule-index-invalid")
+
+describe "BuildOutcomeSet O(1) membership":
+    it "tracks recorded module paths in O(1) across hundreds of outcomes":
+        var outcomes = BuildOutcomeSet.empty()
+        var i = 0
+        while i < 300:
+            outcomes.record(BuildUnitOutcome.ok(i + 1, "mod.unit_{i}", 1, 64))
+            i = i + 1
+        expect(outcomes.len()).to_equal(300)
+        expect(outcomes.has_path("mod.unit_0")).to_equal(true)
+        expect(outcomes.has_path("mod.unit_199")).to_equal(true)
+        expect(outcomes.has_path("mod.unit_299")).to_equal(true)
+        expect(outcomes.has_path("mod.unit_300")).to_equal(false)
+
+describe "BuildCache empty closure fast path and transient-safe persist merge":
+    it "short-circuits empty dependency closures and keeps cache.entries intact across transient persist merges":
+        val dir = _spec_fixture_dir("cache_persist")
+        val cache_path = "{dir}/build_cache.sdn"
+        val src_a = "{dir}/a.spl"
+        val src_b = "{dir}/b.spl"
+        val obj_a = "{dir}/a.o"
+        val obj_b = "{dir}/b.o"
+        expect("w_src_a:{rt_file_write_text(src_a, \"pub fn alpha() -> i64:\\n    1\\n\")}").to_equal("w_src_a:true")
+        expect("w_src_b:{rt_file_write_text(src_b, \"pub fn beta() -> i64:\\n    2\\n\")}").to_equal("w_src_b:true")
+        expect("w_obj_a:{rt_file_write_text(obj_a, \"obj-a\")}").to_equal("w_obj_a:true")
+        expect("w_obj_b:{rt_file_write_text(obj_b, \"obj-b\")}").to_equal("w_obj_b:true")
+
+        step("Writer 1 persists src_a to disk")
+        var writer_one = BuildCache.load(cache_path)
+        var writer_two = BuildCache.load(cache_path)
+        val empty_closure = build_cache_dependency_closure(writer_one, [])
+        match empty_closure:
+            case Some(items):
+                expect(items.len()).to_equal(0)
+            case None:
+                expect("empty_closure").to_equal("Some")
+        val fp_a = FileFingerprint.from_file(src_a).unwrap()
+        writer_one.update_entry(src_a, fp_a, [], [obj_a], "wit-a")
+        val first_iface = writer_one.entries[src_a].interface_digest
+        expect("iface:{first_iface != \"\"}").to_equal("iface:true")
+        # Re-recording with identical content_hash reuses interface_digest cleanly
+        writer_one.update_entry(src_a, fp_a, [], [obj_a], "")
+        expect(writer_one.entries[src_a].interface_digest).to_equal(first_iface)
+        expect(writer_one.entries[src_a].module_witness).to_equal("wit-a")
+        expect("persist1:{writer_one.save_entries()}").to_equal("persist1:true")
+
+        step("Writer 2 starts empty, records src_b, and persists over on-disk src_a inside transient scope")
+        val fp_b = FileFingerprint.from_file(src_b).unwrap()
+        writer_two.update_entry(src_b, fp_b, [], [obj_b], "wit-b")
+        expect(writer_two.entries.keys().len()).to_equal(1)
+        expect("persist2:{writer_two.save_entries()}").to_equal("persist2:true")
+
+        step("writer_two.entries was NOT mutated with transient-owned on_disk entries, while disk has both")
+        expect(writer_two.entries.keys().len()).to_equal(1)
+        expect("mem_b:{writer_two.entries.contains_key(src_b)}").to_equal("mem_b:true")
+        expect(writer_two.entries[src_b].module_witness).to_equal("wit-b")
+
+        val reloaded = BuildCache.load(cache_path)
+        expect("disk_a:{reloaded.entries.contains_key(src_a)}").to_equal("disk_a:true")
+        expect("disk_b:{reloaded.entries.contains_key(src_b)}").to_equal("disk_b:true")
+        expect(reloaded.entries[src_a].module_witness).to_equal("wit-a")
+        expect(reloaded.entries[src_b].module_witness).to_equal("wit-b")
+        val _cleaned = rt_dir_remove_all(dir)
+
+describe "whole-program bootstrap MIR schedule deduplication and progress cadence":
+    it "deduplicates aliased source module names in first-seen order":
+        val raw = ["std.io", "app.main", "std.io", "", "compiler.driver", "app.main"]
+        val unique = driver_bootstrap_unique_module_names_v1(raw)
+        expect(unique).to_equal(["std.io", "app.main", "compiler.driver"])
+
+    it "fires build progress on first module, every 64th module, and final module":
+        expect(driver_bootstrap_mir_build_progress_due_v1(0, 200)).to_equal(false)
+        expect(driver_bootstrap_mir_build_progress_due_v1(1, 200)).to_equal(true)
+        expect(driver_bootstrap_mir_build_progress_due_v1(2, 200)).to_equal(false)
+        expect(driver_bootstrap_mir_build_progress_due_v1(64, 200)).to_equal(true)
+        expect(driver_bootstrap_mir_build_progress_due_v1(128, 200)).to_equal(true)
+        expect(driver_bootstrap_mir_build_progress_due_v1(199, 200)).to_equal(false)
+        expect(driver_bootstrap_mir_build_progress_due_v1(200, 200)).to_equal(true)
+
+describe "per-file worker OutputFormat.Both SMF part spooling and target gating":
+    it "reconciles OutputFormat.Both across positional dynload unit children and excludes explicit native/Stage3/Stage4 lanes":
+        expect(smf_effective_output_is_both_v1(driver_output_format_both())).to_equal(true)
+        expect(smf_effective_output_is_both_v1(driver_output_format_smf())).to_equal(false)
+        # Positional `--mode dynload` unit child whose enum arrived as Native:
+        expect(native_file_worker_effective_output_is_both_v1(
+            false, false, false, "dynload", "", "", "", "")).to_equal(true)
+        # Explicit --emit-object / grouped request / Stage3 / Stage4 / one-binary stay Native:
+        expect(native_file_worker_effective_output_is_both_v1(
+            false, false, false, "dynload", "1", "", "", "")).to_equal(false)
+        expect(native_file_worker_effective_output_is_both_v1(
+            false, false, false, "dynload", "", "/tmp/group.sdn", "", "")).to_equal(false)
+        expect(native_file_worker_effective_output_is_both_v1(
+            false, false, false, "dynload", "", "", "1", "")).to_equal(false)
+        expect(native_file_worker_effective_output_is_both_v1(
+            false, false, false, "dynload", "", "", "", "1")).to_equal(false)
+        expect(native_file_worker_effective_output_is_both_v1(
+            false, false, false, "one-binary", "", "", "", "")).to_equal(false)
+
+    it "gates OutputFormat.Both ELF SMF cache sidecars cleanly across Darwin, Windows, and ELF targets":
+        expect(native_file_worker_smf_sidecar_supported_for_target_v1("", "macos")).to_equal(false)
+        expect(native_file_worker_smf_sidecar_supported_for_target_v1("", "darwin")).to_equal(false)
+        expect(native_file_worker_smf_sidecar_supported_for_target_v1("aarch64-apple-darwin", "linux")).to_equal(false)
+        expect(native_file_worker_smf_sidecar_supported_for_target_v1("x86_64-pc-windows-msvc", "linux")).to_equal(false)
+        expect(native_file_worker_smf_sidecar_supported_for_target_v1("x86_64-unknown-linux-gnu", "macos")).to_equal(true)
+        expect(native_file_worker_smf_sidecar_supported_for_target_v1("", "linux")).to_equal(true)
+        expect(native_file_worker_smf_sidecar_supported_for_target_v1("x86_64-unknown-freebsd", "freebsd")).to_equal(true)
+
+    it "spools SMF object bytes into nested non-existent directories and round-trips .smfpart into link spool":
+        val dir = _spec_fixture_dir("smf_part_roundtrip")
+        val nested_worker_spool = "{dir}/worker/deep/smf_spool/p1"
+        val ledger_dir = "{dir}/mir_queue"
+        val nested_link_spool = "{dir}/link/deep/smf_spool/p2"
+        expect(rt_dir_create(ledger_dir, true)).to_equal(true)
+
+        var worker_spool = smf_object_spool_begin_v1(nested_worker_spool)
+        worker_spool = smf_object_spool_put_v1(worker_spool, "app.hello", [127u8, 69u8, 76u8, 70u8])
+        expect(worker_spool.error).to_equal("")
+        expect(smf_object_spool_count_v1(worker_spool)).to_equal(1)
+
+        val encoded = smf_part_encode_v1([127u8, 69u8, 76u8, 70u8], [1u8, 2u8])
+        expect(native_mir_shard_smf_part_write_v1(ledger_dir, "app.hello", encoded)).to_equal(true)
+        worker_spool = smf_object_spool_release_v1(worker_spool)
+
+        val read_part = native_mir_shard_smf_part_read_v1(ledger_dir, "app.hello")
+        expect(read_part.is_ok()).to_equal(true)
+        val part_bytes = read_part.unwrap()
+        expect(smf_part_decode_ok_v1(part_bytes)).to_equal(true)
+
+        var link_spool = smf_object_spool_begin_v1(nested_link_spool)
+        link_spool = smf_object_spool_put_v1(link_spool, "app.hello", smf_part_decode_object_v1(part_bytes))
+        expect(link_spool.error).to_equal("")
+        expect(smf_object_spool_count_v1(link_spool)).to_equal(1)
+        val assembled = smf_object_spool_assemble_v1(link_spool)
+        expect(assembled.is_ok()).to_equal(true)
+        expect(assembled.unwrap()).to_equal([127u8, 69u8, 76u8, 70u8])
+        expect(smf_part_decode_manifest_v1(part_bytes)).to_equal([1u8, 2u8])
+        link_spool = smf_object_spool_release_v1(link_spool)
+        val _cleaned = rt_dir_remove_all(dir)

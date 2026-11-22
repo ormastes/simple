@@ -1,7 +1,7 @@
 # Workaround refresh rejects two stacked `@workaround` markers
 
 - id: workaround_refresh_rejects_stacked_markers_2026-11-04
-- status: open
+- status: FIXED (2026-11-22)
 - priority: P3
 - found: 2026-11-04, phase-3 F3 lane (stage3 `s3_fable16` native-build of the test runner)
 
@@ -46,3 +46,8 @@ typed `value: text` parameter; those three markers were removed, leaving the
 adjacent `rti007` marker, so the refresh no longer aborts. The scanner still
 rejects any stacked pair (`src/app/bug/workaround_index.spl`: the affected line
 may not start with `#`, and one marker carries one `bug=`), so this stays open.
+
+## Root-Cause Fix & Verification (2026-11-22)
+
+- `src/app/bug/workaround_index.spl` (`parse_workaround_source`, lines 146-152) advances `next` across any contiguous run of `workaround_marker_line(lines[next])` before checking that the shared target line is non-empty, non-comment code, binding every stacked `# @workaround` or `// @workaround` marker to the declaration line immediately below the stack while still rejecting trailing comments, blank lines, or EOF.
+- Added explicit stacked-marker regression coverage (Simple `# @workaround`, C `// @workaround`, and negative trailing-comment/blank/EOF cases) in `test/01_unit/app/bug/workaround_stacked_markers_spec.spl`.

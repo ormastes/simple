@@ -19,7 +19,11 @@ use compiler.driver.driver_build.native_codegen_pool_v1.{
     native_codegen_receipt_publish_v1, native_codegen_receipt_path_v1,
     native_codegen_job_ir_path_v1, native_codegen_job_object_path_v1,
     native_codegen_command_line_v1, native_codegen_job_log_path_v1,
+    NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1,
     NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1, NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1,
+    NATIVE_CODEGEN_SHARD_MIN_FLOOR_KIB_V1, NATIVE_CODEGEN_SHARD_MAX_FLOOR_KIB_V1,
+    native_codegen_shard_commit_floor_for_v1, native_codegen_live_peer_shards_v1,
+    native_codegen_cgroup_spare_kib_from_probe_v1, native_codegen_admission_summary_v1,
     native_codegen_pool_run_v1, NATIVE_CODEGEN_JOB_TIMEOUT_ENV_V1, NATIVE_CODEGEN_JOB_FAILED_V1}
 use compiler.backend.llvm_backend_tools.{llvm_llc_object_argv_v1}
 use compiler.backend.llvm_target.{LlvmTargetConfig}
@@ -46,9 +50,15 @@ describe "native codegen pool worker admission":
         expect(native_codegen_pool_workers_v1(80, 0, 3, 1024 * GIB, 1024 * GIB, 2 * GIB)).to_equal(3)
         expect(native_codegen_pool_workers_v1(80, 0, 0, 1024 * GIB, 1024 * GIB, 2 * GIB)).to_equal(0)
 
-    it "honours an explicit thread request as an upper bound":
+    it "honours an explicit thread request as an upper bound and divides across peer shards":
         step("--threads 6 on an 80-core host")
         expect(native_codegen_pool_workers_v1(80, 6, 100, 1024 * GIB, 1024 * GIB, 2 * GIB)).to_equal(6)
+        step("--threads 40 on 64 CPUs across 2 peer shards admits 20 per shard (never 80 total)")
+        expect(native_codegen_pool_workers_v1(64, 40, 776, 1024 * GIB, 1024 * GIB, 524288,
+            8 * GIB, 0, 2, -1)).to_equal(20)
+        step("--threads 100 on 64 CPUs across 2 peer shards clamps to host_cpus / peers = 32")
+        expect(native_codegen_pool_workers_v1(64, 100, 776, 1024 * GIB, 1024 * GIB, 524288,
+            8 * GIB, 0, 2, -1)).to_equal(32)
 
     it "clamps by the declared tree budget":
         step("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB = 20 GiB at 2 GiB per worker")
@@ -88,6 +98,91 @@ describe "native codegen pool default-config concurrency":
 
     it "stays serial for a single uncached module":
         expect(native_codegen_pool_workers_v1(8, 0, 1, 0, 64 * GIB, 2 * GIB)).to_equal(1)
+
+describe "native codegen pool shard-aware and cgroup-aware admission":
+    it "prices llc workers at 512 MiB by default while respecting explicit overrides":
+        step("Default per-llc-child estimate is 512 MiB (524,288 KiB)")
+        expect(NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1).to_equal(524288)
+        expect(native_codegen_worker_estimate_for_v1(0, 0)).to_equal(524288)
+        step("Explicit SIMPLE_NATIVE_CODEGEN_WORKER_KIB overrides in either direction")
+        expect(native_codegen_worker_estimate_for_v1(262144, 0)).to_equal(262144)
+        expect(native_codegen_worker_estimate_for_v1(2 * GIB, 0)).to_equal(2 * GIB)
+        step("Host worker_mem_mib only tightens above the 512 MiB default")
+        expect(native_codegen_worker_estimate_for_v1(0, 256)).to_equal(524288)
+        expect(native_codegen_worker_estimate_for_v1(0, 1024)).to_equal(1024 * 1024)
+
+    it "admits parallel llc workers inside a 64 GiB shard budget without double-counting the 24 GiB floor":
+        step("Reproduce 64 GiB host: budget=44 GiB, headroom=25,149,248 KiB (~23.98 GiB), 2 peer shards, 6 GiB resident per shard")
+        val floor_kib = native_codegen_shard_commit_floor_for_v1("", 0, 64 * GIB)
+        expect(floor_kib).to_equal(8 * GIB)
+        val est = native_codegen_worker_estimate_for_v1(0, 0)
+        val workers = native_codegen_pool_workers_v1(8, 0, 677, 44 * GIB, 25149248, est,
+            floor_kib, 6 * GIB, 2, -1)
+        expect(workers).to_equal(4)
+        step("When two 22 GiB shards already exhaust the 44 GiB tree budget, clamps to 1 worker")
+        val saturated = native_codegen_pool_workers_v1(8, 0, 677, 44 * GIB, 25149248, est,
+            floor_kib, 22 * GIB, 2, -1)
+        expect(saturated).to_equal(1)
+
+    it "computes shard commit floor in [2 GiB, 8 GiB] and honours explicit reserves":
+        expect(native_codegen_shard_commit_floor_for_v1("", 0, 12 * GIB)).to_equal(NATIVE_CODEGEN_SHARD_MIN_FLOOR_KIB_V1)
+        expect(native_codegen_shard_commit_floor_for_v1("", 0, 24 * GIB)).to_equal(3 * GIB)
+        expect(native_codegen_shard_commit_floor_for_v1("", 0, 64 * GIB)).to_equal(8 * GIB)
+        expect(native_codegen_shard_commit_floor_for_v1("", 0, 128 * GIB)).to_equal(NATIVE_CODEGEN_SHARD_MAX_FLOOR_KIB_V1)
+        expect(native_codegen_shard_commit_floor_for_v1("4294967296", 0, 64 * GIB)).to_equal(4 * GIB)
+
+    it "counts concurrent peer shards bounded by active CPU or thread slots":
+        expect(native_codegen_live_peer_shards_v1("", "", "", 8, 0)).to_equal(1)
+        expect(native_codegen_live_peer_shards_v1("0/2", "", "", 8, 0)).to_equal(2)
+        expect(native_codegen_live_peer_shards_v1("1/8", "", "", 4, 0)).to_equal(4)
+        expect(native_codegen_live_peer_shards_v1("0/8", "", "", 8, 3)).to_equal(3)
+        expect(native_codegen_live_peer_shards_v1("0/1", "1", "4", 8, 0)).to_equal(4)
+        expect(native_codegen_live_peer_shards_v1("0/1", "1", "0/4", 8, 0)).to_equal(4)
+        expect(native_codegen_live_peer_shards_v1("0/250", "", "4", 64, 40)).to_equal(4)
+        expect(native_codegen_live_peer_shards_v1("0/250", "", "1", 64, 40)).to_equal(1)
+
+    it "bounds admission by cgroup v2 and v1 hierarchy spare bytes":
+        step("Uncapped cgroup v2 ('max') answers -1")
+        val uncapped_files: {text: text} = {
+            "/sys/fs/cgroup/user.slice/memory.max": "max\n",
+            "/sys/fs/cgroup/user.slice/memory.current": "1048576\n"
+        }
+        expect(native_codegen_cgroup_spare_kib_from_probe_v1("0::/user.slice\n", uncapped_files)).to_equal(-1)
+
+        step("Parent cgroup tighter than leaf wins across the hierarchy")
+        val hierarchy_files: {text: text} = {
+            "/sys/fs/cgroup/build.slice/memory.max": "4294967296\n",
+            "/sys/fs/cgroup/build.slice/memory.current": "3221225472\n",
+            "/sys/fs/cgroup/build.slice/shard.scope/memory.max": "8589934592\n",
+            "/sys/fs/cgroup/build.slice/shard.scope/memory.current": "1073741824\n"
+        }
+        val spare_v2 = native_codegen_cgroup_spare_kib_from_probe_v1("0::/build.slice/shard.scope\n", hierarchy_files)
+        expect(spare_v2).to_equal(GIB)
+        val cgroup_workers = native_codegen_pool_workers_v1(8, 0, 100, 0, 64 * GIB, 524288,
+            8 * GIB, 0, 1, spare_v2)
+        expect(cgroup_workers).to_equal(2)
+
+        step("Exhausted cgroup v1 cap (including co-mounted controllers) answers 0 spare and admits only 1 worker")
+        val v1_files: {text: text} = {
+            "/sys/fs/cgroup/memory/ci/memory.limit_in_bytes": "2147483648\n",
+            "/sys/fs/cgroup/memory/ci/memory.usage_in_bytes": "2147483648\n"
+        }
+        val spare_v1 = native_codegen_cgroup_spare_kib_from_probe_v1("6:memory:/ci\n", v1_files)
+        expect(spare_v1).to_equal(0)
+        val spare_v1_comount_a = native_codegen_cgroup_spare_kib_from_probe_v1("6:cpu,memory:/ci\n", v1_files)
+        expect(spare_v1_comount_a).to_equal(0)
+        val spare_v1_comount_b = native_codegen_cgroup_spare_kib_from_probe_v1("6:memory,hugetlb:/ci\n", v1_files)
+        expect(spare_v1_comount_b).to_equal(0)
+        expect(native_codegen_pool_workers_v1(8, 0, 100, 0, 64 * GIB, 524288, 8 * GIB, 0, 1, spare_v1)).to_equal(1)
+
+    it "formats every admission input into the diagnostic banner summary":
+        val summary = native_codegen_admission_summary_v1(8, 44 * GIB, 6 * GIB, 25149248, -1, 8 * GIB, 524288, 2)
+        expect(summary).to_contain("cpus=8")
+        expect(summary).to_contain("resident_kib=")
+        expect(summary).to_contain("cgroup_spare_kib=-1")
+        expect(summary).to_contain("floor_kib=")
+        expect(summary).to_contain("worker_kib=524288")
+        expect(summary).to_contain("peer_shards=2")
 
 describe "native codegen pool memory probe parsing":
     it "reads MemAvailable from /proc/meminfo text":
