@@ -1387,7 +1387,7 @@ impl MirLowering:
             return ""
         if val registered = bootstrap_fn_ret_shape_lookup(call_name):
             val shape = registered
-            if shape != "__runtime_array__":
+            if shape != "__runtime_array__" and not self.mir_layout_or_runtime_key_is_enum(shape):
                 return self.declared_struct_layout_key(shape)
         ""
 
@@ -1702,7 +1702,10 @@ impl MirLowering:
                         # 4710b22a991).
                         if val present_struct_sym = self.symbols.get_symbol_raw(struct_symbol.id):
                             val struct_sym: HirSymbol = present_struct_sym
-                            self.struct_value_syms[dest.id] = struct_sym.name
+                            # Declaring-module key, not the leaf: a local
+                            # `self._parse() -> Fat32Bpb` shares its leaf with
+                            # other modules (mir_result_ok_payload_bare_owner_2026-11-22).
+                            self.struct_value_syms[dest.id] = if struct_sym.kind == SymbolKind.Struct: self.struct_value_provenance_key(struct_sym) else: struct_sym.name
                 case _: ()
             return dest
         if self.verification_capture_enabled:
@@ -5188,8 +5191,17 @@ impl MirLowering:
                             case HirTypeKind.Named(rpt_sym, _):
                                 if val rpt_symbol = self.symbols.get_symbol_raw(rpt_sym.id):
                                     match rpt_symbol.kind:
-                                        case SymbolKind.Class | SymbolKind.Struct:
+                                        case SymbolKind.Class:
                                             scrutinee_payload_struct = rpt_symbol.name
+                                        case SymbolKind.Struct:
+                                            # `match rc:` over a local has no
+                                            # callee for the name registry; a
+                                            # bare leaf is ambiguous once two
+                                            # modules declare it. Same key as
+                                            # struct_value_layout tiers
+                                            # (mir_result_ok_payload_bare_owner_2026-11-22).
+                                            val rpt_declaration: HirSymbol = rpt_symbol
+                                            scrutinee_payload_struct = self.struct_value_provenance_key(rpt_declaration)
                                         case SymbolKind.Enum:
                                             scrutinee_payload_is_enum = true
                                         case _: ()
@@ -5379,6 +5391,9 @@ impl MirLowering:
                                         var declared_owner_name = declared_owner.name
                                         match declared_owner.kind:
                                             case SymbolKind.Class: declared_owner_name = mir_class_identity_raw(self.symbols, declared_owner_sym.id)
+                                            case SymbolKind.Struct:
+                                                val declared_struct: HirSymbol = declared_owner
+                                                declared_owner_name = self.struct_value_provenance_key(declared_struct)
                                             case _: ()
                                         if declared_owner_name != "" and self.struct_field_order.has(declared_owner_name):
                                             self.struct_value_syms[bound_payload.id] = declared_owner_name
@@ -7029,11 +7044,13 @@ impl MirLowering:
                             else:
                                 fi < known_names.len() and self.class_type_names.has(known_names[fi])
                         )
-                        if fi < known_names.len() and known_names[fi] != "" and not known_is_class and self.struct_field_order.has(known_names[fi]):
+                        if fi < known_names.len() and known_names[fi] != "" and not known_is_class and not self.mir_layout_or_runtime_key_is_enum(known_ownership_key) and self.struct_field_order.has(known_names[fi]):
                             val nested_symbol = self.symbols.lookup_or_invalid(known_names[fi])
                             if nested_symbol.is_valid():
-                                spread_field_type = MirType(kind: MirTypeKind.Struct(
-                                    self.canonical_mir_type_symbol(nested_symbol)))
+                                if val nested_info = self.symbols.get_symbol_raw(nested_symbol.id):
+                                    if nested_info.kind == SymbolKind.Struct:
+                                        spread_field_type = MirType(kind: MirTypeKind.Struct(
+                                            self.canonical_mir_type_symbol(nested_symbol)))
                     var spread_b = self.builder
                     val spread_field_val = spread_b.emit_get_field(mir_operand_copy(spread_local), fi, spread_field_type)
                     self.builder = spread_b
@@ -9771,6 +9788,7 @@ impl MirLowering:
             # select the owner-qualified metadata key before falling back to
             # the legacy bare struct name.
             var constructor_name = direct_name
+            var constructor_is_non_record = false
             if mir_expr_symbol_id_value(direct_symbol) >= 0:
                 if val present_constructor_info = self.symbols.get_symbol_raw(direct_symbol.id):
                     val constructor_info: HirSymbol = present_constructor_info
@@ -9794,7 +9812,9 @@ impl MirLowering:
                             b_missing_class.emit_const(missing_class_local, MirConstValue.Int(0), MirType.i64())
                             self.builder = b_missing_class
                             return missing_class_local
-            if self.struct_field_order.has(constructor_name):
+                    else:
+                        constructor_is_non_record = true
+            if not constructor_is_non_record and self.struct_field_order.has(constructor_name):
                 return self.lower_struct_construct(direct_symbol, constructor_name, args)
 
         # TODO(LANE ISO1, switch_operators_calls.spl:3105-3182): call arguments
@@ -10287,12 +10307,25 @@ impl MirLowering:
                                     var sr_shape: text = bootstrap_fn_ret_shape_lookup(source_name) ?? ""
                                     if sr_shape == "":
                                         sr_shape = bootstrap_fn_ret_shape_lookup(resolved_name) ?? ""
-                                    if sr_shape != "" and sr_shape != "__runtime_array__" and self.struct_field_order.has(sr_shape):
-                                        val sr_bare = layout_key_bare_name(sr_shape)
-                                        val sr_by_name = self.symbols.lookup_or_invalid(sr_bare)
-                                        if sr_by_name.is_valid():
-                                            return_type = MirType(kind: MirTypeKind.Struct(self.canonical_mir_type_symbol(sr_by_name)))
-                                            stamped_struct_name = sr_shape
+                                    val sr_layout = self.declared_struct_layout_key(sr_shape)
+                                    if sr_shape != "" and sr_shape != "__runtime_array__" and not self.mir_layout_or_runtime_key_is_enum(sr_shape) and self.struct_field_order.has(sr_layout):
+                                        val sr_bare = layout_key_bare_name(sr_layout)
+                                        var sr_mir_sym: SymbolId? = None
+                                        if val sr_sym = self.struct_symbol_for_layout_key(sr_layout):
+                                            sr_mir_sym = Some(self.canonical_mir_type_symbol(sr_sym))
+                                        elif sr_layout.contains("::"):
+                                            sr_mir_sym = Some(self.canonical_mir_type_symbol_for_key_v1(sr_layout.replace("::", ".")))
+                                        else:
+                                            val sr_by_name = self.symbols.lookup_or_invalid(sr_bare)
+                                            if sr_by_name.is_valid():
+                                                if val sr_info = self.symbols.get_symbol_raw(sr_by_name.id):
+                                                    if sr_info.kind == SymbolKind.Struct or sr_info.kind == SymbolKind.Class:
+                                                        sr_mir_sym = Some(self.canonical_mir_type_symbol(sr_by_name))
+                                        if val final_sr_sym = sr_mir_sym:
+                                            return_type = MirType(kind: MirTypeKind.Struct(final_sr_sym))
+                                            stamped_struct_name = sr_layout
+                                    elif sr_shape != "" and self.mir_layout_or_runtime_key_is_enum(sr_shape):
+                                        stamped_struct_name = sr_shape
                                 case _:
                                     ()
                     case _:
@@ -10456,9 +10489,14 @@ impl MirLowering:
             match result_hir.kind:
                 case HirTypeKind.Named(owner, _):
                     if val declaration = self.symbols.get_symbol_raw(owner.id):
-                        val layout_key = self.declared_struct_layout_key(self.composite_layout_key(declaration))
-                        if self.struct_field_order.has(layout_key):
-                            self.struct_value_syms[indirect_result.id] = layout_key
+                        if declaration.kind == SymbolKind.Struct or declaration.kind == SymbolKind.Class:
+                            val layout_key = self.declared_struct_layout_key(self.composite_layout_key(declaration))
+                            if self.struct_field_order.has(layout_key):
+                                self.struct_value_syms[indirect_result.id] = layout_key
+                        elif declaration.kind == SymbolKind.Enum:
+                            val enum_key = self.struct_value_provenance_key(declaration)
+                            if enum_key != "":
+                                self.struct_value_syms[indirect_result.id] = enum_key
                 case HirTypeKind.Optional(_):
                     self.option_value_locals[indirect_result.id] = true
                     self.mark_runtime_value_local(indirect_result.id)

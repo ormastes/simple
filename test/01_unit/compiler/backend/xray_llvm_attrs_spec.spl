@@ -84,10 +84,19 @@ describe "XRay LLVM function attributes":
         expect(ir).to_contain("XRAY-E-UNSUPPORTED-MODE")
         expect(ir).to_contain("simple_llvm_codegen_error")
 
-    it "rejects non-Linux targets":
-        step("A.5: LLVM XRay sleds are admitted for Linux triples only")
-        val ir = xray_attr_translator("darwin").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
-        expect(ir).to_contain("XRAY-E-UNSUPPORTED-TARGET")
+    it "admits Darwin/macOS targets via __DATA,__xray_fn_slots flag-guard without ELF pcsections and rejects unsupported targets":
+        step("Darwin Mach-O emits W^X-safe __DATA,__xray_fn_slots flag-guard slots and edge calls")
+        val darwin_ir = xray_attr_translator("darwin").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
+        expect(darwin_ir.contains("XRAY-E-")).to_equal(false)
+        expect(darwin_ir).to_contain("declare void @__simple_darwin_xray_edge_v1(ptr, i32)")
+        expect(darwin_ir).to_contain("@__simple_xray_dslot_0 = internal global { i64, ptr, ptr, i32, i32 }")
+        expect(darwin_ir).to_contain("section \"__DATA,__xray_fn_slots\", align 8")
+        expect(darwin_ir).to_contain("call void @__simple_darwin_xray_edge_v1(ptr @__simple_xray_dslot_0, i32 0)")
+        expect(darwin_ir).to_contain("call void @__simple_darwin_xray_edge_v1(ptr @__simple_xray_dslot_0, i32 1)")
+        expect(xray_define_line(darwin_ir, "xr_tail").contains("alwaysinline")).to_equal(false)
+        expect(darwin_ir.contains("pcsections")).to_equal(false)
+        val freebsd_ir = xray_attr_translator("freebsd").translate_module(xray_attr_module([xray_attr_fn(1, "xr_tail", 2)]))
+        expect(freebsd_ir).to_contain("XRAY-E-UNSUPPORTED-TARGET")
 
     # @req REQ-XRAY-V1-API-01
     it "admits windows-msvc with an explicit /EXPORT list for every xray symbol":
@@ -134,6 +143,11 @@ describe "XRay LLVM function attributes":
             step("Windows host: host-default triple is windows -> flag-guard sleds, no compiler-rt attribute")
             expect(ir.contains("XRAY-E-")).to_equal(false)
             expect(ir).to_contain("@__simple_xray_slot_xr_tail")
+        elif host_os() == "macos" or host_os() == "darwin":
+            step("Darwin host: host-default triple is darwin -> __DATA,__xray_fn_slots flag-guard slots")
+            expect(ir.contains("XRAY-E-")).to_equal(false)
+            expect(ir).to_contain("@__simple_xray_dslot_0")
+            expect(ir).to_contain("section \"__DATA,__xray_fn_slots\", align 8")
         else:
             expect(ir.contains("XRAY-E-")).to_equal(false)
             expect(xray_define_line(ir, "xr_tail")).to_contain("\"function-instrument\"=\"xray-always\"")

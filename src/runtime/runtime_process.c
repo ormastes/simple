@@ -251,14 +251,6 @@ struct WinCapture {
 
 #define WIN_CAPTURE_MARKER_MAX 96U
 
-static void win_reverse_bytes(char* data, size_t len) {
-    for (size_t left = 0, right = len ? len - 1 : 0; left < right; left++, right--) {
-        char byte = data[left];
-        data[left] = data[right];
-        data[right] = byte;
-    }
-}
-
 static int win_capture_append(struct WinCapture* capture, const char* bytes, size_t len) {
     if (capture->raw_prefix) {
         size_t keep = capture->limit - capture->len;
@@ -308,32 +300,9 @@ static int win_capture_append(struct WinCapture* capture, const char* bytes, siz
     }
 
     size_t head_limit = capture->limit / 2U + capture->limit % 2U;
-    size_t tail_limit = capture->limit / 2U;
-    size_t head_add = head_limit - capture->head_len;
-    if (head_add > len) head_add = len;
-    memcpy(capture->data + capture->head_len, bytes, head_add);
-    capture->head_len += head_add;
-    bytes += head_add;
-    len -= head_add;
-    if (len == 0 || tail_limit == 0) return 1;
-
-    char* tail = capture->data + head_limit;
-    if (len >= tail_limit) {
-        memcpy(tail, bytes + len - tail_limit, tail_limit);
-        capture->tail_start = 0;
-        capture->tail_len = tail_limit;
-        return 1;
-    }
-    size_t overflow = capture->tail_len + len > tail_limit
-        ? capture->tail_len + len - tail_limit : 0;
-    capture->tail_start = (capture->tail_start + overflow) % tail_limit;
-    capture->tail_len -= overflow;
-    size_t write_at = (capture->tail_start + capture->tail_len) % tail_limit;
-    size_t first = tail_limit - write_at;
-    if (first > len) first = len;
-    memcpy(tail + write_at, bytes, first);
-    memcpy(tail, bytes + first, len - first);
-    capture->tail_len += len;
+    rt_capture_ring_append(capture->data, &capture->head_len, head_limit,
+                           capture->data + head_limit, capture->limit / 2U,
+                           &capture->tail_start, &capture->tail_len, bytes, len);
     return 1;
 }
 
@@ -343,9 +312,9 @@ static void win_capture_finish(struct WinCapture* capture) {
     size_t head_limit = capture->limit / 2U + capture->limit % 2U;
     char* tail = capture->data + head_limit;
     if (capture->tail_start != 0 && capture->tail_len != 0) {
-        win_reverse_bytes(tail, capture->tail_start);
-        win_reverse_bytes(tail + capture->tail_start, capture->tail_len - capture->tail_start);
-        win_reverse_bytes(tail, capture->tail_len);
+        rt_capture_reverse_bytes(tail, capture->tail_start);
+        rt_capture_reverse_bytes(tail + capture->tail_start, capture->tail_len - capture->tail_start);
+        rt_capture_reverse_bytes(tail, capture->tail_len);
     }
     capture->len = rt_capture_splice_tail(capture->data, capture->head_len, tail,
                                           capture->tail_len, capture->total);
@@ -2566,6 +2535,19 @@ static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, Sp
         max_output_bytes, raw_bytes, 0, NULL);
 }
 
+static int posix_bounded_args_valid(SplArray* args) {
+    int64_t count = args ? rt_array_len(args) : 0;
+    if (count < 0 || count > 32768) return 0;
+    for (int64_t i = 0; i < count; i++) {
+        int64_t value = rt_array_get(args, i);
+        if (value == 3) continue;
+        uint64_t size = rt_string_len(value);
+        const uint8_t* data = rt_string_data(value);
+        if (!data || size > 16777216 || memchr(data, 0, (size_t)size)) return 0;
+    }
+    return 1;
+}
+
 int64_t* rt_process_run_bounded_admitted_tuple_v1(const char* cmd, uint64_t length,
         SplArray* args, SplArray* environment, int64_t mode, int64_t timeout,
         int64_t cap, int64_t expires_at_unix_ms) {
@@ -2575,15 +2557,7 @@ int64_t* rt_process_run_bounded_admitted_tuple_v1(const char* cmd, uint64_t leng
     if (mode != 2 || (environment && rt_array_len(environment) != 0) ||
             !cmd || !length || cmd[0] != '/' || length > 1048576 || memchr(cmd, 0, (size_t)length) ||
             timeout <= 0 || cap <= 0 || cap > 16777216 || expires_at_unix_ms <= 0) return block;
-    int64_t count = args ? rt_array_len(args) : 0;
-    if (count < 0 || count > 32768) return block;
-    for (int64_t i = 0; i < count; i++) {
-        int64_t value = rt_array_get(args, i);
-        if (value == 3) continue;
-        uint64_t size = rt_string_len(value);
-        const uint8_t* data = rt_string_data(value);
-        if (!data || size > 16777216 || memchr(data, 0, (size_t)size)) return block;
-    }
+    if (!posix_bounded_args_valid(args)) return block;
     int64_t flags = 8 | 64;
     SplArray* result = posix_process_run_capture_admission_v1(cmd, length, args,
         timeout, cap, 0, expires_at_unix_ms, &flags);
@@ -2600,14 +2574,7 @@ int64_t* rt_process_run_bounded_observed_tuple_v1(const char* cmd, uint64_t leng
     block[0] = block[1] = 3; block[2] = -1; block[3] = 8 | 64;
     if (!cmd || !length || length > 1048576 || memchr(cmd, 0, (size_t)length) ||
             timeout <= 0 || cap <= 0 || cap > 16777216) return block;
-    int64_t count = args ? rt_array_len(args) : 0;
-    if (count < 0 || count > 32768) return block;
-    for (int64_t i = 0; i < count; i++) {
-        int64_t value = rt_array_get(args, i);
-        if (value == 3) continue;
-        uint64_t size = rt_string_len(value); const uint8_t* data = rt_string_data(value);
-        if (!data || size > 16777216 || memchr(data, 0, (size_t)size)) return block;
-    }
+    if (!posix_bounded_args_valid(args)) return block;
     int64_t flags = 8;
     SplArray* result = posix_process_run_capture_admission_v1(cmd, length, args,
         timeout, cap, 0, 0, &flags);
@@ -3239,9 +3206,8 @@ const char* rt_browser_renderer_read_stdin_some(int64_t max_bytes) {
     return s_browser_renderer_stdin_buf;
 }
 
-int64_t rt_browser_renderer_write_stdout_some(
-        const char* data, int64_t data_len, int64_t offset,
-        int64_t max_bytes) {
+static int64_t posix_write_some(int fd, const char* data, int64_t data_len,
+        int64_t offset, int64_t max_bytes) {
     if (!data || data_len < 0 || offset < 0 || offset > data_len ||
         max_bytes <= 0) return -1;
     if (offset == data_len) return 0;
@@ -3251,9 +3217,15 @@ int64_t rt_browser_renderer_write_stdout_some(
         remaining < max_bytes ? remaining : max_bytes);
     ssize_t written;
     do {
-        written = write(STDOUT_FILENO, data + offset, request);
+        written = write(fd, data + offset, request);
     } while (written < 0 && errno == EINTR);
     return written < 0 ? -1 : (int64_t)written;
+}
+
+int64_t rt_browser_renderer_write_stdout_some(
+        const char* data, int64_t data_len, int64_t offset,
+        int64_t max_bytes) {
+    return posix_write_some(STDOUT_FILENO, data, data_len, offset, max_bytes);
 }
 
 int64_t rt_browser_renderer_write_protocol_some(
@@ -3266,18 +3238,7 @@ int64_t rt_browser_renderer_write_protocol_some(
     (void)max_bytes;
     return -1;
 #else
-    if (!data || data_len < 0 || offset < 0 || offset > data_len ||
-        max_bytes <= 0) return -1;
-    if (offset == data_len) return 0;
-    int64_t remaining = data_len - offset;
-    if (max_bytes > 1048576) max_bytes = 1048576;
-    size_t request = (size_t)(
-        remaining < max_bytes ? remaining : max_bytes);
-    ssize_t written;
-    do {
-        written = write(STDIN_FILENO, data + offset, request);
-    } while (written < 0 && errno == EINTR);
-    return written < 0 ? -1 : (int64_t)written;
+    return posix_write_some(STDIN_FILENO, data, data_len, offset, max_bytes);
 #endif
 }
 

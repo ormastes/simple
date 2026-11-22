@@ -399,6 +399,8 @@ The linter reads project-wide lint levels from `simple.sdn`:
 [lints]
 primitive_api = "warn"
 bare_bool = "warn"
+bare_text = "warn"
+bare_text_domain = "warn"
 export_outside_init = "deny"
 too_many_arguments = "warn"
 wildcard_match = "allow"
@@ -410,6 +412,8 @@ wildcard_match = "allow"
 |------|---------|-------------|
 | `primitive_api` | warn | Bare primitives in public APIs |
 | `bare_bool` | warn | Boolean parameters (suggest enum) |
+| `bare_text` | warn | Public `text` with no domain name (use a domain type or `unit X: text`); warn in every profile |
+| `bare_text_domain` | warn | Public `text` whose name reads as a domain (`url`, `path`, `host`, `sql`, ...); deny in robust/critical |
 | `print_in_test_spec` | warn | `print()` in test specs |
 | `todo_format` | warn | TODO/FIXME format compliance |
 | `spipe_no_print_based_tests` | **deny** | Print-based BDD tests |

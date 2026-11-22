@@ -61,8 +61,56 @@ pub fn freebsd_vm_available_kib_from_sysctl(output: text) -> i64:
     if pages <= 0 or pages > 9223372036854775807 / page_size: return -1
     (pages * page_size) / 1024
 
+pub struct HostMemoryProbeV1:
+    kib: i64
+    valid: bool
+
+# Installed physical RAM in KiB from a byte-valued sysctl/WMI output; 0 when unknown.
+fn _physmem_total_kib_from_bytes_field_v1(field: text) -> i64:
+    val bytes = _process_memory_digits_v1(field)
+    if bytes <= 0: 0 else: bytes / 1024
+
+pub fn physmem_total_from_bytes_field_v1(field: text) -> HostMemoryProbeV1:
+    val kib = _physmem_total_kib_from_bytes_field_v1(field)
+    HostMemoryProbeV1(kib: kib, valid: kib > 0)
+
+# macOS: `vm_stat` page counts ("page size of <n> bytes", "Pages free: <n>.",
+# "Pages inactive: <n>."). Free + inactive pages are reclaimable headroom;
+# -1 when missing or malformed so callers keep their static admission cap.
+fn _macos_vm_available_kib_from_vm_stat_v1(output: text) -> i64:
+    var page_size: i64 = -1
+    var free_pages: i64 = -1
+    var inactive_pages: i64 = -1
+    for raw in output.split("\n"):
+        val line = raw.trim()
+        if line == "": continue
+        if line.contains("page size of"):
+            val start = line.index_of("page size of ")
+            val end = line.index_of(" bytes")
+            if start >= 0 and end > start + 13:
+                page_size = _process_memory_digits_v1(line.substring(start + 13, end))
+        elif line.starts_with("Pages free:"):
+            var field = line.substring(11).trim()
+            if field.ends_with("."): field = field.substring(0, field.byte_len() - 1)
+            free_pages = _process_memory_digits_v1(field)
+        elif line.starts_with("Pages inactive:"):
+            var field = line.substring(15).trim()
+            if field.ends_with("."): field = field.substring(0, field.byte_len() - 1)
+            inactive_pages = _process_memory_digits_v1(field)
+    if page_size <= 0 or free_pages < 0 or inactive_pages < 0: return -1
+    val pages = free_pages + inactive_pages
+    if pages <= 0 or pages > 9223372036854775807 / page_size: return -1
+    (pages * page_size) / 1024
+
+pub fn macos_vm_available_from_vm_stat_v1(output: text) -> HostMemoryProbeV1:
+    val kib = _macos_vm_available_kib_from_vm_stat_v1(output)
+    HostMemoryProbeV1(kib: kib, valid: kib >= 0)
+
+var _cached_process_physmem_kib_v1: i64 = 0
+
 @when(os="windows"):
 use std.nogc_sync_mut.io.windows_process_owner_abi.{rt_host_commit_headroom_bytes_v1}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
 
 # CommitLimit - CommitTotal, KiB; -1 when unknown.
 pub fn host_commit_avail_kib() -> i64:
@@ -70,6 +118,17 @@ pub fn host_commit_avail_kib() -> i64:
     unsafe(capabilities: [ffi]):
         bytes = rt_host_commit_headroom_bytes_v1()
     host_commit_avail_kib_from_bytes(bytes)
+
+# @allow(primitive_api)  # low-level SFFI host memory probe matching host_commit_avail_kib
+pub fn host_physmem_total_kib() -> i64:
+    if _cached_process_physmem_kib_v1 > 0: return _cached_process_physmem_kib_v1
+    val (out, _err, code) = process_run_timeout("powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command",
+            "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"], 20000)
+    if code != 0: return 0
+    val kib = _physmem_total_kib_from_bytes_field_v1(out)
+    if kib > 0: _cached_process_physmem_kib_v1 = kib
+    kib
 @else:
 @when(os="freebsd"):
 use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
@@ -80,11 +139,49 @@ pub fn host_commit_avail_kib() -> i64:
         ["hw.pagesize", "vm.stats.vm.v_free_count", "vm.stats.vm.v_inactive_count"], 2000)
     if code != 0: return -1
     freebsd_vm_available_kib_from_sysctl(out)
+
+# @allow(primitive_api)  # low-level SFFI host memory probe matching host_commit_avail_kib
+pub fn host_physmem_total_kib() -> i64:
+    if _cached_process_physmem_kib_v1 > 0: return _cached_process_physmem_kib_v1
+    val (out, _err, code) = process_run_timeout("sysctl", ["-n", "hw.physmem"], 2000)
+    if code != 0: return 0
+    val kib = _physmem_total_kib_from_bytes_field_v1(out)
+    if kib > 0: _cached_process_physmem_kib_v1 = kib
+    kib
+@else:
+@when(os="macos"):
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+
+# Darwin has no /proc/meminfo; read vm_stat free + inactive reclaimable pages.
+# @allow(primitive_api)  # low-level SFFI host memory probe matching Linux/BSD host_commit_avail_kib
+pub fn host_commit_avail_kib() -> i64:
+    val (out, _err, code) = process_run_timeout("vm_stat", [], 2000)
+    if code != 0: return -1
+    _macos_vm_available_kib_from_vm_stat_v1(out)
+
+# @allow(primitive_api)  # low-level SFFI host memory probe matching host_commit_avail_kib
+pub fn host_physmem_total_kib() -> i64:
+    if _cached_process_physmem_kib_v1 > 0: return _cached_process_physmem_kib_v1
+    val (out, _err, code) = process_run_timeout("sysctl", ["-n", "hw.memsize"], 2000)
+    if code != 0: return 0
+    val kib = _physmem_total_kib_from_bytes_field_v1(out)
+    if kib > 0: _cached_process_physmem_kib_v1 = kib
+    kib
 @else:
 use std.nogc_sync_mut.io_runtime.{file_read_nullable}
 
 # MemAvailable + SwapFree KiB; -1 when unknown.
 pub fn host_commit_avail_kib() -> i64:
     host_commit_avail_kib_from_meminfo(file_read_nullable("/proc/meminfo") ?? "")
+
+# @allow(primitive_api)  # low-level SFFI host memory probe matching host_commit_avail_kib
+pub fn host_physmem_total_kib() -> i64:
+    if _cached_process_physmem_kib_v1 > 0: return _cached_process_physmem_kib_v1
+    val kib = proc_status_kib(file_read_nullable("/proc/meminfo") ?? "", "MemTotal:")
+    if kib > 0:
+        _cached_process_physmem_kib_v1 = kib
+        return kib
+    0
+@end
 @end
 @end

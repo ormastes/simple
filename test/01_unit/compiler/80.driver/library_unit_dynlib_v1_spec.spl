@@ -1,0 +1,444 @@
+use std.spec
+use std.io_runtime.{
+    file_exists, file_read, file_write, file_copy, file_delete,
+    dir_create_all, dir_remove_all, process_run, env_get, host_os
+}
+use compiler.driver.driver_build.source_inventory_v1.{
+    SourceInventoryFileV1, SourceInventoryUnitV1, source_inventory_ownership_check_v1
+}
+use compiler.driver.driver_build.source_inventory_scan_v1.{source_inventory_scan_resolve_v1}
+use compiler.driver.driver_build.library_unit_plan_v1.{
+    LibraryUnitDeclV1, library_unit_plan_v1, library_unit_cache_key_v1
+}
+use compiler.driver.driver_build.library_unit_manifest_v1.{library_unit_manifest_closure_v1}
+use compiler.driver.driver_build.library_unit_iface_v1.{
+    LibraryUnitIfaceBuildRequestV1, library_unit_iface_build_resolved_v1,
+    library_unit_module_iface_digest_v1, library_unit_iface_read_v1
+}
+use compiler.driver.driver_build.library_unit_archive_v1.{
+    LIBRARY_UNIT_ARTIFACT_DYNLIB_V1, library_unit_receipt_read_v1
+}
+use compiler.driver.driver_build.library_unit_link_v1.{library_unit_link_set_v1}
+use std.nogc_sync_mut.io.env_ops.{env_set}
+use compiler.backend.linker._LinkerWrapper.native_linking.{direct_linker_translate_extra_flags_v1}
+use compiler.backend.linker.managed_native_args_v1.{managed_native_extra_args_error_v1}
+use compiler.driver.driver_build.library_unit_dynlib_v1.{
+    LibraryUnitDynlibNamingRequestV1, LibraryUnitExecRpathRequestV1,
+    LibraryUnitDynlibWriteRequestV1, LibraryUnitNmParseRequestV1,
+    LibraryUnitClosureModuleRowV1, LibraryUnitClosurePackageRequestV1,
+    LibraryUnitRepoRootResolveRequestV1,
+    LibraryUnitProjectBuildRequestV1,
+    library_unit_dynlib_naming_v1, library_unit_dynlib_link_flags_v1,
+    library_unit_exec_rpath_flags_v1, library_unit_dynlib_write_v1,
+    library_unit_parse_nm_extern_output_v1, library_unit_resolve_repo_root_v1,
+    library_unit_partition_and_package_closure_v1,
+    library_unit_dynlib_build_project_v1
+}
+
+fn _resolve_test_compiler_bin_v1() -> text:
+    for env_key in ["SIMPLE_STAGE3_TEST_COMPILER", "SIMPLE_COMPILER", "SIMPLE_BINARY"]:
+        val configured = env_get(env_key) ?? ""
+        if configured != "" and file_exists(configured):
+            return configured
+    for candidate in [
+        "bin/release/aarch64-apple-darwin-macho/simple",
+        "bin/release/macos-arm64/simple",
+        "/private/tmp/simple-rc-build-20261117/phase3-b/simple",
+        "/private/tmp/simple-rc-build-20261117/phase2/simple",
+        "bin/simple"
+    ]:
+        if file_exists(candidate):
+            return candidate
+    ""
+
+describe "library_unit_dynlib_v1 platform naming and link flags":
+    it "emits Mach-O .dylib naming, @rpath install_name, and hermetic rpath flags on darwin":
+        val naming = library_unit_dynlib_naming_v1(
+            LibraryUnitDynlibNamingRequestV1(unit: "simple-std", target_or_os: "aarch64-apple-darwin"))
+        expect(naming.os_kind).to_equal("darwin")
+        expect(naming.filename).to_equal("libsimple-std.dylib")
+        expect(naming.install_name).to_equal("@rpath/libsimple-std.dylib")
+        val flags = library_unit_dynlib_link_flags_v1(
+            LibraryUnitDynlibNamingRequestV1(unit: "simple-std", target_or_os: "macos"))
+        expect(flags.join(" ")).to_contain("-dynamiclib")
+        expect(flags.join(" ")).to_contain("-Wl,-install_name,@rpath/libsimple-std.dylib")
+        expect(flags.join(" ")).to_contain("-Wl,-undefined,dynamic_lookup")
+        val rpaths = library_unit_exec_rpath_flags_v1(
+            LibraryUnitExecRpathRequestV1(target_or_os: "darwin", unit_dirs: ["/cache/u1", "/cache/u1"]))
+        expect(rpaths.join(" ")).to_contain("-rpath @executable_path")
+        expect(rpaths.join(" ")).to_contain("-rpath @executable_path/lib")
+        expect(rpaths.join(" ")).to_contain("-Wl,-export_dynamic")
+        # By default mutable cache paths are NOT embedded so Stage 3a and 3b stay bit-identical.
+        expect(rpaths.join(" ").contains("/cache/u1")).to_equal(false)
+        val old_embed = env_get("SIMPLE_DYNLIB_EMBED_CACHE_RPATH") ?? ""
+        env_set("SIMPLE_DYNLIB_EMBED_CACHE_RPATH", "1")
+        val rpaths_opt_in = library_unit_exec_rpath_flags_v1(
+            LibraryUnitExecRpathRequestV1(target_or_os: "darwin", unit_dirs: ["/cache/u1", "/cache/u1"]))
+        env_set("SIMPLE_DYNLIB_EMBED_CACHE_RPATH", old_embed)
+        expect(rpaths_opt_in.join(" ")).to_contain("-rpath /cache/u1")
+
+    it "emits ELF .so naming, --allow-shlib-undefined, $ORIGIN rpaths, and refuses PE .dll writes":
+        val elf = library_unit_dynlib_naming_v1(
+            LibraryUnitDynlibNamingRequestV1(unit: "simple-compiler", target_or_os: "x86_64-unknown-linux-gnu"))
+        expect(elf.os_kind).to_equal("elf")
+        expect(elf.filename).to_equal("libsimple-compiler.so")
+        val elf_flags = library_unit_dynlib_link_flags_v1(
+            LibraryUnitDynlibNamingRequestV1(unit: "simple-compiler", target_or_os: "linux"))
+        expect(elf_flags.join(" ")).to_contain("-shared")
+        expect(elf_flags.join(" ")).to_contain("-fPIC")
+        expect(elf_flags.join(" ")).to_contain("-Wl,-soname,libsimple-compiler.so")
+        expect(elf_flags.join(" ")).to_contain("-Wl,--allow-shlib-undefined")
+        val elf_rpaths = library_unit_exec_rpath_flags_v1(
+            LibraryUnitExecRpathRequestV1(target_or_os: "linux", unit_dirs: []))
+        expect(elf_rpaths.join(" ")).to_contain("-rpath $ORIGIN")
+        expect(elf_rpaths.join(" ")).to_contain("-rpath $ORIGIN/lib")
+        expect(managed_native_extra_args_error_v1(elf_rpaths)).to_equal("")
+        val direct_elf = direct_linker_translate_extra_flags_v1(elf_rpaths, "linux")
+        expect(direct_elf.join(" ")).to_contain("--export-dynamic")
+        expect(direct_elf.join(" ")).to_contain("--no-gc-sections")
+        expect(direct_elf.join(" ").contains("-Wl,")).to_equal(false)
+        val direct_darwin = direct_linker_translate_extra_flags_v1(["-Wl,-export_dynamic", "-Wl,-rpath,@executable_path/lib"], "macos")
+        expect(direct_darwin.join(" ")).to_contain("-export_dynamic")
+        expect(direct_darwin.join(" ")).to_contain("-rpath @executable_path/lib")
+        val win_write = library_unit_dynlib_write_v1(LibraryUnitDynlibWriteRequestV1(
+            dir: "build/spec_win_refusal", unit: "simple-std", objects: ["a.obj"],
+            dep_dynlibs: [], target_or_os: "x86_64-pc-windows-msvc"))
+        expect(win_write.is_err()).to_equal(true)
+        expect(win_write.unwrap_err()).to_contain("PE/COFF .dll library units are not supported")
+
+    it "strips one leading underscore on Mach-O nm output while preserving ELF underscore prefixes":
+        val elf_nm = "0000000000001000 T __module_init_lib_leaf\n                 U __simple_runtime_init\n                 U rt_alloc\n0000000000001020 T app_entry_hook\n"
+        val elf_parsed = library_unit_parse_nm_extern_output_v1(
+            LibraryUnitNmParseRequestV1(nm_stdout: elf_nm, target_or_os: "x86_64-unknown-linux-gnu"))
+        expect(elf_parsed.init_symbols).to_equal(["__module_init_lib_leaf"])
+        expect(elf_parsed.undefined).to_equal(["__simple_runtime_init", "rt_alloc"])
+        expect(elf_parsed.defined).to_equal(["__module_init_lib_leaf", "app_entry_hook"])
+        val macho_nm = "0000000000001000 T ___module_init_lib_leaf\n                 U ___simple_runtime_init\n                 U _rt_alloc\n"
+        val macho_parsed = library_unit_parse_nm_extern_output_v1(
+            LibraryUnitNmParseRequestV1(nm_stdout: macho_nm, target_or_os: "aarch64-apple-darwin"))
+        expect(macho_parsed.init_symbols).to_equal(["__module_init_lib_leaf"])
+        expect(macho_parsed.undefined).to_equal(["__simple_runtime_init", "rt_alloc"])
+
+    it "returns no-library-units for standalone external smoke paths without matching CWD simple.sdn":
+        val standalone = library_unit_partition_and_package_closure_v1(LibraryUnitClosurePackageRequestV1(
+            repo_root: "",
+            entry_source: "/tmp/nonexistent_smoke_dir_20261122/hello.spl",
+            output_path: "/tmp/nonexistent_smoke_dir_20261122/hello",
+            cache_root: "build/spec_standalone_fallback_cache",
+            producer_identity: "prod-v1",
+            scope_key: "scope-v1",
+            target_or_os: "macos",
+            rows: [LibraryUnitClosureModuleRowV1(
+                module_name: "hello",
+                source_path: "/tmp/nonexistent_smoke_dir_20261122/hello.spl",
+                object_path: "/tmp/nonexistent_smoke_dir_20261122/hello.o")]))
+        expect(standalone.is_err()).to_equal(true)
+        expect(standalone.unwrap_err().starts_with("no-library-units:")).to_equal(true)
+        val (pwd_out, _pwd_e, pwd_c) = process_run("/bin/pwd", [])
+        if pwd_c == 0 and pwd_out.trim() != "":
+            val abs_repo = pwd_out.trim()
+            val resolved_ext = library_unit_resolve_repo_root_v1(LibraryUnitRepoRootResolveRequestV1(
+                repo_root: "",
+                entry_source: "{abs_repo}/src/app/cli/bootstrap_main.spl",
+                cwd_override: "/tmp"))
+            expect(resolved_ext.repo_root).to_equal(abs_repo)
+            expect(resolved_ext.rel_entry).to_equal("src/app/cli/bootstrap_main.spl")
+
+describe "real repository simple.sdn closure and zero-drift ownership":
+    it "plans simple-app -> simple-compiler -> simple-compiler-common -> simple-std with zero duplicate owners":
+        val loader = fn(dir: text) -> text:
+            val p = "{dir}/simple.sdn"
+            if file_exists(p): file_read(p) else: ""
+        match library_unit_manifest_closure_v1("src/app", loader):
+            case Ok(manifests):
+                var decls: [LibraryUnitDeclV1] = []
+                var src_digests: {text: text} = {}
+                var ifc_digests: {text: text} = {}
+                var compiler_files: [SourceInventoryFileV1] = []
+                var common_files: [SourceInventoryFileV1] = []
+                var all_compiler_scanned: [text] = []
+                for m in manifests:
+                    decls.push(LibraryUnitDeclV1(name: m.name, kind: m.kind, dir: m.dir, deps: m.deps))
+                    src_digests[m.name] = "src-" + m.name
+                    ifc_digests[m.name] = "ifc-" + m.name
+                    if m.name == "simple-compiler" or m.name == "simple-compiler-common":
+                        for rel in source_inventory_scan_resolve_v1(m.dir, m.includes, m.excludes):
+                            val repo_rel = "{m.dir}/{rel}"
+                            all_compiler_scanned.push(repo_rel)
+                            if m.name == "simple-compiler":
+                                compiler_files.push(SourceInventoryFileV1(path: repo_rel, digest: "d"))
+                            else:
+                                common_files.push(SourceInventoryFileV1(path: repo_rel, digest: "d"))
+                match library_unit_plan_v1(decls):
+                    case Ok(plan):
+                        match library_unit_link_set_v1(plan, "simple-app", "prod-v1", src_digests, ifc_digests):
+                            case Ok(link_set):
+                                expect(link_set.len()).to_equal(4)
+                                expect(link_set[0].unit).to_equal("simple-compiler")
+                                expect(link_set[1].unit).to_equal("simple-compiler-common")
+                                expect(link_set[2].unit).to_equal("simple-std")
+                                expect(link_set[3].unit).to_equal("simple-rust-runtime")
+                            case Err(e):
+                                expect(e).to_equal("")
+                    case Err(e):
+                        expect(e).to_equal("")
+                val findings = source_inventory_ownership_check_v1([
+                    SourceInventoryUnitV1(name: "simple-compiler", files: compiler_files),
+                    SourceInventoryUnitV1(name: "simple-compiler-common", files: common_files)
+                ], all_compiler_scanned)
+                expect(findings.len()).to_equal(0)
+            case Err(e):
+                expect(e).to_equal("")
+
+describe "library_unit_iface_build_resolved_v1 skeleton invariance":
+    it "strips ordinary bodies while preserving interface digests and struct/const declarations":
+        val root = "build/spec_library_unit_dynlib_v1_iface"
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all(root)).to_equal(true)
+        val src_v1 = "pub val K: i64 = 7\n\npub struct BoxV1:\n    n: i64\n\npub fn eval_box(b: BoxV1) -> i64:\n    val inner = b.n * 3\n    inner + K\n"
+        val src_v2 = "pub val K: i64 = 7\n\npub struct BoxV1:\n    n: i64\n\npub fn eval_box(b: BoxV1) -> i64:\n    val changed = b.n * 100\n    changed + K\n"
+        expect(file_write("{root}/m.spl", src_v1)).to_equal(true)
+        val built1 = library_unit_iface_build_resolved_v1(
+            LibraryUnitIfaceBuildRequestV1(unit: "u", root: root, rel_files: ["m.spl"]))
+        expect(file_write("{root}/m.spl", src_v2)).to_equal(true)
+        val built2 = library_unit_iface_build_resolved_v1(
+            LibraryUnitIfaceBuildRequestV1(unit: "u", root: root, rel_files: ["m.spl"]))
+        expect(built1.iface.digest).to_equal(built2.iface.digest)
+        expect(built1.source_digest == built2.source_digest).to_equal(false)
+        expect(built1.skeletons[0].skeleton).to_equal(built2.skeletons[0].skeleton)
+        expect(built1.skeletons[0].skeleton).to_contain("panic(\"library-unit-iface-stub\")")
+        expect(library_unit_module_iface_digest_v1(built1.skeletons[0].skeleton)).to_equal(
+            library_unit_module_iface_digest_v1(src_v1))
+        val _rm = dir_remove_all(root)
+
+describe "end-to-end macOS Mach-O .dylib multi-unit build, @rpath link, execution, and body-only reuse":
+    it "builds lib_leaf -> lib_mid -> main, runs hermetically via @rpath, and skips lib_mid on lib_leaf body edit":
+        val compiler_bin = _resolve_test_compiler_bin_v1()
+        if host_os() == "macos" and compiler_bin != "":
+            val root = "build/spec_library_unit_dynlib_v1_e2e"
+            val relocated = "build/spec_library_unit_dynlib_v1_relocated"
+            val _c1 = dir_remove_all(root)
+            val _c2 = dir_remove_all(relocated)
+            expect(dir_create_all("{root}/lib_leaf")).to_equal(true)
+            expect(dir_create_all("{root}/lib_mid")).to_equal(true)
+            expect(dir_create_all("{root}/app")).to_equal(true)
+
+            expect(file_write("{root}/lib_leaf/simple.sdn",
+                "project:\n  name: lib_leaf\n  version: 1.0.0\n  type: library\n  root: .\n")).to_equal(true)
+            expect(file_write("{root}/lib_mid/simple.sdn",
+                "project:\n  name: lib_mid\n  version: 1.0.0\n  type: library\n  root: .\n  dependencies:\n    - project: ../lib_leaf\n")).to_equal(true)
+            expect(file_write("{root}/app/simple.sdn",
+                "project:\n  name: app_main\n  version: 1.0.0\n  type: application\n  root: .\n  dependencies:\n    - project: ../lib_mid\n")).to_equal(true)
+
+            val leaf_v1 = "pub val LEAF_BASE: i64 = 10\n\npub struct LeafPair:\n    a: i64\n    b: i64\n\npub fn leaf_eval(p: LeafPair) -> i64:\n    print \"leaf-run\"\n    p.a + p.b + LEAF_BASE\n"
+            val leaf_facade = "# pure re-export / comment facade (zero runtime functions or statics)\nuse build.spec_library_unit_dynlib_v1_e2e.lib_leaf.leaf (LeafPair)\n"
+            val mid_src = "use build.spec_library_unit_dynlib_v1_e2e.lib_leaf.leaf (LeafPair, leaf_eval)\n\npub fn mid_eval(x: i64) -> i64:\n    leaf_eval(LeafPair(a: x, b: 11)) * 2\n"
+            val app_helper_src = "pub fn app_offset() -> i64:\n    0\n"
+            val main_src = "use build.spec_library_unit_dynlib_v1_e2e.lib_mid.mid (mid_eval)\nuse build.spec_library_unit_dynlib_v1_e2e.app.helper (app_offset)\n\nfn main() -> i64:\n    val r = mid_eval(app_offset())\n    print (\"dynlib_e2e_result=\" + r.to_text())\n    if r > 0: 0 else: 1\n"
+
+            expect(file_write("{root}/lib_leaf/leaf.spl", leaf_v1)).to_equal(true)
+            expect(file_write("{root}/lib_leaf/facade.spl", leaf_facade)).to_equal(true)
+            expect(file_write("{root}/lib_mid/mid.spl", mid_src)).to_equal(true)
+            expect(file_write("{root}/app/helper.spl", app_helper_src)).to_equal(true)
+            expect(file_write("{root}/app/main.spl", main_src)).to_equal(true)
+            # Lock lib_leaf/leaf.spl read-only during cold build to prove zero in-place source mutation.
+            val (_ro_out, _ro_err, ro_code) = process_run("/bin/chmod", ["0444", "{root}/lib_leaf/leaf.spl"])
+            expect(ro_code).to_equal(0)
+
+            val out_bin = "{root}/dist/app_main"
+            val cache_root = "{root}/unit_cache"
+            val req = LibraryUnitProjectBuildRequestV1(
+                workspace_root: ".",
+                target_manifest_dir: "{root}/app",
+                entry_rel_path: "main.spl",
+                output_path: out_bin,
+                cache_root: cache_root,
+                compiler_bin: compiler_bin,
+                producer_identity: "spec-dynlib-producer-v1",
+                scope_key: "spec-macos-arm64-llvm",
+                target_or_os: "macos")
+
+            # 1. Cold build: builds lib_leaf.dylib, lib_mid.dylib, and multi-file thin app_main.
+            val cold_res = library_unit_dynlib_build_project_v1(req)
+            val (_rw_out, _rw_err, _rw_code) = process_run("/bin/chmod", ["0644", "{root}/lib_leaf/leaf.spl"])
+            expect(file_read("{root}/lib_leaf/leaf.spl")).to_equal(leaf_v1)
+            if cold_res.is_err():
+                expect(cold_res.unwrap_err()).to_equal("")
+            else:
+                val cold = cold_res.unwrap()
+                expect(cold.unit_artifacts.len()).to_equal(2)
+                expect(cold.entry_objects.len()).to_equal(2)
+                val leaf_cold = cold.unit_artifacts[0]
+                val mid_cold = cold.unit_artifacts[1]
+                expect(leaf_cold.unit).to_equal("lib_leaf")
+                expect(mid_cold.unit).to_equal("lib_mid")
+                expect(leaf_cold.reused).to_equal(false)
+                expect(mid_cold.reused).to_equal(false)
+                expect(file_exists(leaf_cold.dynlib_path)).to_equal(true)
+                expect(file_exists(mid_cold.dynlib_path)).to_equal(true)
+                expect(library_unit_iface_read_v1(leaf_cold.iface_path).is_ok()).to_equal(true)
+                match library_unit_receipt_read_v1(mid_cold.unit_dir):
+                    case Ok(r):
+                        expect(r.artifact_kind).to_equal(LIBRARY_UNIT_ARTIFACT_DYNLIB_V1)
+                        expect(r.verdict).to_equal("ok")
+                    case Err(e):
+                        expect(e).to_equal("")
+
+                val (out1, _err1, code1) = process_run(out_bin, [])
+                expect(code1).to_equal(0)
+                expect(out1).to_contain("leaf-run")
+                expect(out1).to_contain("dynlib_e2e_result=42")
+
+                # Prove hermetic @executable_path/lib resolution in a relocated directory
+                # EVEN AFTER deleting unit_cache (no embedded mutable cache rpath!).
+                expect(dir_create_all("{relocated}/lib")).to_equal(true)
+                expect(file_copy(out_bin, "{relocated}/app_main")).to_equal(true)
+                expect(file_copy("{root}/dist/lib/liblib_leaf.dylib", "{relocated}/lib/liblib_leaf.dylib")).to_equal(true)
+                expect(file_copy("{root}/dist/lib/liblib_mid.dylib", "{relocated}/lib/liblib_mid.dylib")).to_equal(true)
+                val (rel_out, _rel_err, rel_code) = process_run("{relocated}/app_main", [])
+                expect(rel_code).to_equal(0)
+                expect(rel_out).to_contain("dynlib_e2e_result=42")
+
+                # 2. Body-only edit inside lib_leaf: iface.sdn unchanged -> ONLY lib_leaf rebuilds;
+                #    lib_mid cache key is unchanged and lib_mid.dylib is NOT rebuilt!
+                val leaf_v2 = "pub val LEAF_BASE: i64 = 10\n\npub struct LeafPair:\n    a: i64\n    b: i64\n\npub fn leaf_eval(p: LeafPair) -> i64:\n    print \"leaf-v2\"\n    p.a + p.b + LEAF_BASE + 9\n"
+                expect(file_write("{root}/lib_leaf/leaf.spl", leaf_v2)).to_equal(true)
+
+                val warm_body_res = library_unit_dynlib_build_project_v1(req)
+                if warm_body_res.is_err():
+                    expect(warm_body_res.unwrap_err()).to_equal("")
+                else:
+                    val warm_body = warm_body_res.unwrap()
+                    val leaf_warm = warm_body.unit_artifacts[0]
+                    val mid_warm = warm_body.unit_artifacts[1]
+                    expect(leaf_warm.iface_digest).to_equal(leaf_cold.iface_digest)
+                    expect(leaf_warm.unit_key == leaf_cold.unit_key).to_equal(false)
+                    expect(leaf_warm.reused).to_equal(false)
+                    expect(mid_warm.unit_key).to_equal(mid_cold.unit_key)
+                    expect(mid_warm.reused).to_equal(true)
+
+                    val (out2, _err2, code2) = process_run(out_bin, [])
+                    expect(code2).to_equal(0)
+                    expect(out2).to_contain("leaf-v2")
+                    expect(out2).to_contain("dynlib_e2e_result=60")
+
+                    # 3. Public constant / interface edit in lib_leaf -> iface.sdn changes -> lib_mid re-keys & rebuilds!
+                    val leaf_v3 = "pub val LEAF_BASE: i64 = 20\n\npub struct LeafPair:\n    a: i64\n    b: i64\n\npub fn leaf_eval(p: LeafPair) -> i64:\n    p.a + p.b + LEAF_BASE + 9\n"
+                    expect(file_write("{root}/lib_leaf/leaf.spl", leaf_v3)).to_equal(true)
+                    val warm_iface_res = library_unit_dynlib_build_project_v1(req)
+                    if warm_iface_res.is_err():
+                        expect(warm_iface_res.unwrap_err()).to_equal("")
+                    else:
+                        val warm_iface = warm_iface_res.unwrap()
+                        val leaf_v3_art = warm_iface.unit_artifacts[0]
+                        val mid_v3_art = warm_iface.unit_artifacts[1]
+                        expect(leaf_v3_art.iface_digest == leaf_warm.iface_digest).to_equal(false)
+                        expect(mid_v3_art.unit_key == mid_warm.unit_key).to_equal(false)
+                        expect(mid_v3_art.reused).to_equal(false)
+
+                        val (out3, _err3, code3) = process_run(out_bin, [])
+                        expect(code3).to_equal(0)
+                        expect(out3).to_contain("dynlib_e2e_result=80")
+
+                        # 4. Closure partitioner (driver_aot_native_output build_module_objects path):
+                        #    cold + warm prelower-hit reuse and zero-library-unit fallback.
+                        val leaf_rec = library_unit_receipt_read_v1(leaf_v3_art.unit_dir).unwrap()
+                        val mid_rec = library_unit_receipt_read_v1(mid_v3_art.unit_dir).unwrap()
+                        val closure_cache = "{root}/closure_pkg_cache"
+                        val closure_rows = [
+                            LibraryUnitClosureModuleRowV1(
+                                module_name: "lib_leaf.leaf",
+                                source_path: "{root}/lib_leaf/leaf.spl",
+                                object_path: "{leaf_v3_art.unit_dir}/objects/{leaf_rec.objects[0]}"),
+                            LibraryUnitClosureModuleRowV1(
+                                module_name: "lib_mid.mid",
+                                source_path: "{root}/lib_mid/mid.spl",
+                                object_path: "{mid_v3_art.unit_dir}/objects/{mid_rec.objects[0]}"),
+                            LibraryUnitClosureModuleRowV1(
+                                module_name: "app.main",
+                                source_path: "{root}/app/main.spl",
+                                object_path: warm_iface.entry_objects[0])
+                        ]
+                        val pkg_cold = library_unit_partition_and_package_closure_v1(
+                            LibraryUnitClosurePackageRequestV1(
+                                repo_root: ".",
+                                entry_source: "{root}/app/main.spl",
+                                output_path: "{root}/closure_dist/app_main",
+                                cache_root: closure_cache,
+                                producer_identity: "closure-prod-v1",
+                                scope_key: "closure-scope-v1",
+                                target_or_os: "macos",
+                                rows: closure_rows))
+                        expect(pkg_cold.is_ok()).to_equal(true)
+                        val pkg_warm = library_unit_partition_and_package_closure_v1(
+                            LibraryUnitClosurePackageRequestV1(
+                                repo_root: ".",
+                                entry_source: "{root}/app/main.spl",
+                                output_path: "{root}/closure_dist/app_main",
+                                cache_root: closure_cache,
+                                producer_identity: "closure-prod-v1",
+                                scope_key: "closure-scope-v1",
+                                target_or_os: "macos",
+                                rows: closure_rows))
+                        expect(pkg_warm.is_ok()).to_equal(true)
+                        expect(pkg_warm.unwrap().unit_artifacts[0].reused).to_equal(true)
+                        expect(pkg_warm.unwrap().unit_artifacts[1].reused).to_equal(true)
+
+                        expect(dir_create_all("{root}/standalone_app")).to_equal(true)
+                        expect(file_write("{root}/standalone_app/simple.sdn",
+                            "project:\n  name: standalone_app\n  version: 1.0.0\n  type: application\n  root: .\n")).to_equal(true)
+                        expect(file_write("{root}/standalone_app/hello.spl", "fn main() -> i64: 0\n")).to_equal(true)
+                        val zero_lib_app = library_unit_partition_and_package_closure_v1(
+                            LibraryUnitClosurePackageRequestV1(
+                                repo_root: ".",
+                                entry_source: "{root}/standalone_app/hello.spl",
+                                output_path: "{root}/standalone_app/hello",
+                                cache_root: closure_cache,
+                                producer_identity: "closure-prod-v1",
+                                scope_key: "closure-scope-v1",
+                                target_or_os: "macos",
+                                rows: [LibraryUnitClosureModuleRowV1(
+                                    module_name: "hello",
+                                    source_path: "{root}/standalone_app/hello.spl",
+                                    object_path: warm_iface.entry_objects[0])]))
+                        expect(zero_lib_app.is_err()).to_equal(true)
+                        expect(zero_lib_app.unwrap_err()).to_equal(
+                            "no-library-units: closure has no buildable library units")
+
+                        # 5. Undeclared upward import from lib_leaf -> lib_mid fails closed in isolated build!
+                        val leaf_upward = "use build.spec_library_unit_dynlib_v1_e2e.lib_mid.mid (mid_eval)\n\npub val LEAF_BASE: i64 = 20\n\npub struct LeafPair:\n    a: i64\n    b: i64\n\npub fn leaf_eval(p: LeafPair) -> i64:\n    mid_eval(p.a)\n"
+                        expect(file_write("{root}/lib_leaf/leaf.spl", leaf_upward)).to_equal(true)
+                        val upward_res = library_unit_dynlib_build_project_v1(req)
+                        expect(upward_res.is_err()).to_equal(true)
+
+            val _rm1 = dir_remove_all(root)
+            val _rm2 = dir_remove_all(relocated)
+
+describe "preserve-phase-binary.shs sidecar lib/ preservation":
+    it "copies <bin_dir>/lib/*.dylib alongside preserved phase3 snapshot":
+        if host_os() != "windows":
+            val p_root = "build/spec_preserve_phase_dynlib"
+            val _pc = dir_remove_all(p_root)
+            expect(dir_create_all("{p_root}/src_stage/lib")).to_equal(true)
+            expect(dir_create_all("{p_root}/snapshots/phase1_100_phase2_200")).to_equal(true)
+            expect(file_write("{p_root}/snapshots/phase1_100_phase2_200/LINEAGE", "phase1_100_phase2_200\n")).to_equal(true)
+            expect(file_write("{p_root}/src_stage/simple", "#!/bin/sh\nexit 0\n")).to_equal(true)
+            val (_ch_o, _ch_e, ch_c) = process_run("/bin/chmod", ["0755", "{p_root}/src_stage/simple"])
+            expect(ch_c).to_equal(0)
+            expect(file_write("{p_root}/src_stage/lib/libsimple-std.dylib", "macho-placeholder")).to_equal(true)
+            val old_snap_root = env_get("PHASE_SNAPSHOT_ROOT") ?? ""
+            env_set("PHASE_SNAPSHOT_ROOT", "{p_root}/snapshots")
+            val (pres_out, _pres_err, pres_code) = process_run("/bin/sh", [
+                "scripts/bootstrap/preserve-phase-binary.shs",
+                "{p_root}/src_stage/simple",
+                "phase3"
+            ])
+            env_set("PHASE_SNAPSHOT_ROOT", old_snap_root)
+            expect(pres_code).to_equal(0)
+            expect(pres_out).to_contain("preserved:")
+            val (_fix_o, _fix_e, _fix_c) = process_run("/bin/chmod", ["-R", "u+w", p_root])
+            val (_ls_o, _ls_e, ls_c) = process_run("/bin/sh", [
+                "-c", "test -f {p_root}/snapshots/phase1_100_phase2_200_phase3_*/lib/libsimple-std.dylib"
+            ])
+            expect(ls_c).to_equal(0)
+            val _prm = dir_remove_all(p_root)

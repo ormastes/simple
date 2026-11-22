@@ -1,0 +1,149 @@
+"""
+## Purpose and audience
+Purpose: Pin slang's pure-Simple ISTFT (runners/istft.spl), the port of
+llama.cpp tts.cpp `embd_to_audio` that turns WavTokenizer spectrogram rows
+into samples. Audience: engineers touching the TTS vocoder stage.
+
+## Compatibility and limitations
+References are computed independently in this spec: hand-derived irfft
+values, a naive O(n^2) inverse sum, and a forward STFT by direct DFT whose
+log-magnitude/phase rows must round-trip to the original sinusoid. The
+round trip uses a small geometry (n_fft 80 = 2^4 * 5, hop 20) so the direct
+DFT stays cheap; the mixed-radix path is the same one 1280 = 2^8 * 5 takes.
+"""
+
+use std.spec.{describe, it, expect}
+
+use std.gc_async_mut.slang.model_executor.runners.istft.{Spectrum, IstftParams, wavtokenizer_istft_params, hann_window, irfft, embd_to_audio}
+use std.common.math.math.{math_sin, math_cos, math_sqrt, MATH_PI}
+use std.common.math.special.{ln_f64, atan2_f64}
+
+fn _abs(x: f64) -> f64:
+    if x < 0.0: 0.0 - x else: x
+
+fn _max_err(a: [f64], b: [f64]) -> f64:
+    var worst = 0.0
+    var i = 0
+    while i < a.len():
+        val d = _abs(a[i] - b[i])
+        if d > worst:
+            worst = d
+        i = i + 1
+    worst
+
+fn _signal(t: i64) -> f64:
+    val x = t as f64
+    0.5 * math_sin(2.0 * MATH_PI * 3.0 * x / 80.0) + 0.25 * math_cos(2.0 * MATH_PI * 7.3 * x / 80.0 + 0.4)
+
+fn _sample(t: i64, len: i64) -> f64:
+    if t < 0 or t >= len: 0.0 else: _signal(t)
+
+# Forward STFT by direct DFT, written as [ln|X| | phase] rows, frame l sample
+# j <-> x[l*hop + j - pad] (torch.stft center=True geometry).
+fn _stft_rows(len: i64, n_codes: i64, n_fft: i64, hop: i64) -> [f64]:
+    val pad = (n_fft - hop) / 2
+    val bins = n_fft / 2 + 1
+    val w = hann_window(n_fft, true)
+    var rows: [f64] = []
+    var l = 0
+    while l < n_codes:
+        var mags: [f64] = []
+        var phases: [f64] = []
+        var m = 0
+        while m < bins:
+            var re = 0.0
+            var im = 0.0
+            var j = 0
+            while j < n_fft:
+                val v = w[j] * _sample(l * hop + j - pad, len)
+                val a = 0.0 - 2.0 * MATH_PI * ((j * m) as f64) / (n_fft as f64)
+                re = re + v * math_cos(a)
+                im = im + v * math_sin(a)
+                j = j + 1
+            var mag = math_sqrt(re * re + im * im)
+            if mag < 1e-30:
+                mag = 1e-30
+            mags.push(ln_f64(mag))
+            phases.push(atan2_f64(im, re))
+            m = m + 1
+        for v in mags:
+            rows.push(v)
+        for v in phases:
+            rows.push(v)
+        l = l + 1
+    rows
+
+describe "slang istft":
+    it "uses WavTokenizer-75 geometry":
+        val p = wavtokenizer_istft_params()
+        expect(p.n_fft).to_equal(1280)
+        expect(p.hop).to_equal(320)
+
+    it "builds a periodic Hann window":
+        val w = hann_window(4, true)
+        expect(_max_err(w, [0.0, 0.5, 1.0, 0.5]) < 1e-12).to_equal(true)
+        val s = hann_window(5, false)
+        expect(_max_err(s, [0.0, 0.5, 1.0, 0.5, 0.0]) < 1e-12).to_equal(true)
+
+    it "inverts hand-computed spectra":
+        # n=4: X = [0, 2, 0] -> x[k] = (1/4) * 2 * 2 cos(pi k / 2) = [1, 0, -1, 0]
+        match irfft(Spectrum(re: [0.0, 2.0, 0.0], im: [0.0, 0.0, 0.0]), 4):
+            Ok(x): expect(_max_err(x, [1.0, 0.0, -1.0, 0.0]) < 1e-12).to_equal(true)
+            Err(e): expect(e).to_equal("")
+        # n=5 (odd, prime leaf): X = [5, 0, 0] -> all ones
+        match irfft(Spectrum(re: [5.0, 0.0, 0.0], im: [0.0, 0.0, 0.0]), 5):
+            Ok(x): expect(_max_err(x, [1.0, 1.0, 1.0, 1.0, 1.0]) < 1e-12).to_equal(true)
+            Err(e): expect(e).to_equal("")
+
+    it "matches a naive Hermitian inverse sum for n = 80":
+        val n = 80
+        val bins = 41
+        var re: [f64] = []
+        var im: [f64] = []
+        var m = 0
+        while m < bins:
+            re.push(math_cos((m * 7) as f64) * 0.3)
+            im.push(if m == 0 or m == 40: 0.0 else: math_sin((m * 5) as f64) * 0.2)
+            m = m + 1
+        var naive: [f64] = []
+        var k = 0
+        while k < n:
+            var acc = re[0] + re[40] * math_cos(MATH_PI * (k as f64))
+            var b = 1
+            while b < 40:
+                val a = 2.0 * MATH_PI * ((b * k) as f64) / (n as f64)
+                acc = acc + 2.0 * (re[b] * math_cos(a) - im[b] * math_sin(a))
+                b = b + 1
+            naive.push(acc / (n as f64))
+            k = k + 1
+        match irfft(Spectrum(re: re, im: im), n):
+            Ok(x): expect(_max_err(x, naive) < 1e-9).to_equal(true)
+            Err(e): expect(e).to_equal("")
+
+    it "round-trips a sinusoid through STFT rows":
+        val n_fft = 80
+        val hop = 20
+        val n_codes = 12
+        val len = n_codes * hop
+        val rows = _stft_rows(len, n_codes, n_fft, hop)
+        match embd_to_audio(rows, n_codes, n_fft + 2, IstftParams(n_fft: n_fft, hop: hop)):
+            Ok(audio):
+                expect(audio.len()).to_equal(len)
+                var want: [f64] = []
+                var got: [f64] = []
+                var t = n_fft
+                while t < len - n_fft:
+                    want.push(_signal(t))
+                    got.push(audio[t])
+                    t = t + 1
+                expect(want.len() > 60).to_equal(true)
+                expect(_max_err(got, want) < 1e-6).to_equal(true)
+            Err(e): expect(e).to_equal("")
+
+    it "refuses a row width that does not match n_fft":
+        match embd_to_audio([0.0, 0.0, 0.0, 0.0], 1, 4, IstftParams(n_fft: 80, hop: 20)):
+            Ok(_): expect("accepted").to_equal("refused")
+            Err(e): expect(e.contains("does not match n_fft")).to_equal(true)
+        match irfft(Spectrum(re: [1.0], im: [0.0]), 4):
+            Ok(_): expect("accepted").to_equal("refused")
+            Err(e): expect(e.contains("bins")).to_equal(true)

@@ -9,7 +9,7 @@ use compiler.driver.bootstrap_k1_selected.{install_selected_k1_backend_table_v1,
     selected_k1_backend_policy_v1, selected_k1_backend_table_diagnostic_v1}
 use compiler.backend.backend_port.{codegen_optimization_from_scalar_v1}
 use compiler.common.driver_compile_result.{compile_result_is_success, compile_result_errors}
-use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set, host_os, host_arch}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use app.cli.native_build_env_restore_v1.{native_build_env_saved_v1, native_build_env_restore_v1}
@@ -55,6 +55,12 @@ pub fn focused_native_build_error(args: [text]) -> text:
     if (focused_native_build_arg_value(args, "--output") == "" and
         focused_native_build_arg_value(args, "-o") == ""):
         return "Error: focused native-build requires --output"
+    if focused_native_build_has_flag(args, "--xray-startup-consumer"):
+        if not focused_native_build_has_flag(args, "--xray") or (mode != "" and mode != "one-binary"):
+            return "XRAY-E-STARTUP-CONSUMER: requires --xray --mode one-binary executable output"
+        val explicit_target = focused_native_build_target(args)
+        if explicit_target != "" and not explicit_target.contains("-linux"):
+            return "XRAY-E-STARTUP-CONSUMER: startup consumer is supported on Linux ELF targets only (got '{explicit_target}')"
     ""
 
 pub fn run_focused_native_build(args: [text]) -> i64:
@@ -85,6 +91,18 @@ pub fn run_exact_stage3_focused_capsule(args: [text]) -> i64:
         return 1
     run_focused_native_build_plan(args, false)
 
+fn _focused_default_xray_target_v1(explicit_target: text) -> text:
+    if explicit_target != "":
+        return explicit_target
+    val os_name = host_os()
+    val raw_arch = host_arch()
+    val arch = if raw_arch == "arm64": "aarch64" else: raw_arch
+    if os_name == "macos" or os_name == "darwin":
+        return "{arch}-apple-darwin"
+    if os_name == "linux":
+        return "{arch}-unknown-linux-gnu"
+    ""
+
 fn run_focused_native_build_plan(args: [text], exact_stage4_capsule: bool) -> i64:
     val plan_error = focused_native_build_error(args)
     if plan_error != "":
@@ -112,8 +130,22 @@ fn run_focused_native_build_plan(args: [text], exact_stage4_capsule: bool) -> i6
         output = focused_native_build_arg_value(args, "-o")
     val backend = focused_native_build_backend(args)
     val backend_plugin_path = focused_native_build_backend_plugin(args)
-    val target = focused_native_build_target(args)
-    val opt_level = focused_native_build_opt_level(args)
+    val xray_enabled = focused_native_build_has_flag(args, "--xray")
+    val xray_startup_consumer = focused_native_build_has_flag(args, "--xray-startup-consumer")
+    val debug_requested = focused_native_build_has_flag(args, "--debug") or focused_native_build_has_flag(args, "-g")
+    val target = if xray_enabled:
+        _focused_default_xray_target_v1(focused_native_build_target(args))
+    else:
+        focused_native_build_target(args)
+    if xray_startup_consumer and not target.contains("-linux"):
+        print "XRAY-E-STARTUP-CONSUMER: startup consumer is supported on Linux ELF targets only (got '{target}')"
+        return 1
+    val opt_level = if focused_native_build_arg_value(args, "--opt-level") != "":
+        focused_native_build_opt_level(args)
+    elif not target_profile.release:
+        0
+    else:
+        focused_native_build_opt_level(args)
     val composition_error = bootstrap_backend_request_error_v1(backend, backend_plugin_path)
     if composition_error != "":
         print "Error: {composition_error}"
@@ -140,9 +172,14 @@ fn run_focused_native_build_plan(args: [text], exact_stage4_capsule: bool) -> i6
     val old_receipt_dir = old_receipt_dir_saved ?? ""
     val old_runtime_bundle = native_build_env_saved_v1("SIMPLE_NATIVE_RUNTIME_BUNDLE")
     val old_native_arena_decls = native_build_env_saved_v1("SIMPLE_NATIVE_ARENA_DECLS")
+    val old_build_mode = native_build_env_saved_v1("SIMPLE_NATIVE_BUILD_MODE")
+    val old_lib_units = native_build_env_saved_v1("SIMPLE_NATIVE_LIBRARY_UNITS")
+    val old_stage3_dynlib = native_build_env_saved_v1("SIMPLE_STAGE3_LIB_DYNLIB")
+    val old_dynlib_explicit = native_build_env_saved_v1("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT")
+    val requested_mode = focused_native_build_arg_value(args, "--mode")
     val effective_cache_dir = focused_native_build_profile_cache_dir_v1(args, old_cache_dir, target_profile)
     val effective_receipt_dir = focused_native_build_receipt_dir_from_env_v1(
-        old_receipt_dir, target_profile, effective_cache_dir
+        old_receipt_dir, target_profile, effective_cache_dir, xray_enabled
     )
     env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry)
     env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
@@ -157,7 +194,23 @@ fn run_focused_native_build_plan(args: [text], exact_stage4_capsule: bool) -> i6
     env_set("SIMPLE_NATIVE_BUILD_RECEIPT_DIR", effective_receipt_dir)
     if runtime_bundle != "":
         env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", runtime_bundle)
+    if requested_mode != "":
+        env_set("SIMPLE_NATIVE_BUILD_MODE", requested_mode)
+    if focused_native_build_has_flag(args, "--no-library-units"):
+        env_set("SIMPLE_NATIVE_LIBRARY_UNITS", "0")
+        env_set("SIMPLE_STAGE3_LIB_DYNLIB", "0")
+        env_set("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", "")
+    elif focused_native_build_has_flag(args, "--library-units-dynlib"):
+        env_set("SIMPLE_NATIVE_LIBRARY_UNITS", "1")
+        env_set("SIMPLE_STAGE3_LIB_DYNLIB", "1")
+        env_set("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", "1")
+    elif focused_native_build_has_flag(args, "--library-units"):
+        env_set("SIMPLE_NATIVE_LIBRARY_UNITS", "1")
+        env_set("SIMPLE_STAGE3_LIB_DYNLIB", "0")
+        env_set("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", "")
 
+    val effective_strip = focused_native_build_strip(args, exact_stage4_capsule)
+    val debug_info_override = if debug_requested: 1 elif target_profile.release: 0 else: 1
     val result = aot_native_project_with_backend_fixed_v2(
         focused_native_build_source_at(sources, 0),
         focused_native_build_source_at(sources, 1),
@@ -169,17 +222,20 @@ fn run_focused_native_build_plan(args: [text], exact_stage4_capsule: bool) -> i6
         entry,
         output,
         backend,
-        focused_native_build_strip(args, exact_stage4_capsule),
+        effective_strip,
         target_profile.release,
         opt_level,
         focused_native_build_has_flag(args, "--no-borrow-check"),
         target_profile.managed_build_phase,
-        backend_plugin_path
+        backend_plugin_path,
+        xray_enabled,
+        xray_startup_consumer,
+        debug_info_override
     )
     val active_receipt_dir = focused_native_build_receipt_dir_from_env_v1(
-        env_get("SIMPLE_NATIVE_BUILD_RECEIPT_DIR"), target_profile, effective_cache_dir)
+        env_get("SIMPLE_NATIVE_BUILD_RECEIPT_DIR"), target_profile, effective_cache_dir, xray_enabled)
     val focused_receipt_path = focused_native_build_receipt_path_v1(
-        output, active_receipt_dir, target_profile, effective_cache_dir)
+        output, active_receipt_dir, target_profile, effective_cache_dir, xray_enabled)
 
     native_build_env_restore_v1("SIMPLE_NATIVE_BUILD_ENTRY", old_entry)
     native_build_env_restore_v1("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_entry_closure)
@@ -190,6 +246,10 @@ fn run_focused_native_build_plan(args: [text], exact_stage4_capsule: bool) -> i6
     native_build_env_restore_v1("SIMPLE_NATIVE_BUILD_RECEIPT_DIR", old_receipt_dir_saved)
     native_build_env_restore_v1("SIMPLE_NATIVE_RUNTIME_BUNDLE", old_runtime_bundle)
     native_build_env_restore_v1("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
+    native_build_env_restore_v1("SIMPLE_NATIVE_BUILD_MODE", old_build_mode)
+    native_build_env_restore_v1("SIMPLE_NATIVE_LIBRARY_UNITS", old_lib_units)
+    native_build_env_restore_v1("SIMPLE_STAGE3_LIB_DYNLIB", old_stage3_dynlib)
+    native_build_env_restore_v1("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", old_dynlib_explicit)
 
     if compile_result_is_success(result):
         if dir_create_all(active_receipt_dir):

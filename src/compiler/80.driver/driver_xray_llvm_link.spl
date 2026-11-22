@@ -1,10 +1,24 @@
-# Linux LLVM-XRay executable runtime inputs. No public profile admission here.
-# compiler-rt is materialized as a relocatable resident object: the final
+# Linux and Darwin LLVM-XRay executable runtime inputs. No public profile admission here.
+# On Linux, compiler-rt is materialized as a relocatable resident object: the final
 # hosted linker may be ld/lld, so no Clang-only -fxray flag escapes this owner.
+# On Darwin, Apple CommandLineTools/Xcode clang does not ship libclang_rt.xray_osx.a,
+# so our self-contained Mach-O runtime (xray_llvm_runtime_darwin.c) is compiled to a
+# private relocatable object and linked into the executable.
 # Both resident object bytes and explicit libraries enter the normal link key.
 use std.nogc_sync_mut.io_runtime.{dir_create_all, is_file, process_run_timeout}
+use std.nogc_sync_mut.io.env_ops.{env_get_opt, host_os}
 use compiler.backend.runtime_compiler.{find_c_compiler, find_runtime_source_dir}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
+
+fn _xray_llvm_target_is_darwin_arm64_v1(target: text) -> bool:
+    (target.starts_with("aarch64-apple-darwin") or target.starts_with("arm64-apple-darwin") or
+        target.starts_with("aarch64-apple-macosx") or target.starts_with("arm64-apple-macosx"))
+
+fn _xray_llvm_target_is_darwin_x86_64_v1(target: text) -> bool:
+    target.starts_with("x86_64-apple-darwin") or target.starts_with("x86_64-apple-macosx")
+
+fn xray_llvm_target_is_darwin_v1(target: text) -> bool:
+    _xray_llvm_target_is_darwin_arm64_v1(target) or _xray_llvm_target_is_darwin_x86_64_v1(target)
 
 pub fn xray_llvm_link_needed_v1(enabled: bool, backend: text, target: text,
         shared: bool) -> Result<bool, text>:
@@ -12,6 +26,12 @@ pub fn xray_llvm_link_needed_v1(enabled: bool, backend: text, target: text,
         return Ok(false)
     if target == "":
         return Err("XRAY-E-LLVM-TARGET: unresolved target")
+    if target.contains("-apple-darwin") or target.contains("-apple-macosx"):
+        if not xray_llvm_target_is_darwin_v1(target):
+            return Err("XRAY-E-LLVM-TARGET: unsupported Darwin target {target}")
+        if shared:
+            return Err("XRAY-E-LLVM-IMAGE: LLVM observer supports the main executable only")
+        return Ok(true)
     # Other platform owners, including the Windows IR-slot lane, are unchanged.
     if not target.contains("-linux"):
         return Ok(false)
@@ -21,6 +41,12 @@ pub fn xray_llvm_link_needed_v1(enabled: bool, backend: text, target: text,
         return Err("XRAY-E-LLVM-IMAGE: LLVM observer supports the main executable only")
     Ok(true)
 
+# @allow(primitive_api) boolean policy query over target triple, Stage4 capsule flag, and runtime archive path
+pub fn xray_llvm_thread_context_supported_v1(target: text, stage4: bool, runtime_path: text) -> bool:
+    if stage4 or runtime_path != "":
+        return false
+    target == "aarch64-unknown-linux-gnu" or target == "x86_64-unknown-linux-gnu"
+
 pub fn xray_llvm_link_libraries_v1(libraries: [text]) -> [text]:
     var result: [text] = []
     for library in libraries: result.push(library)
@@ -29,6 +55,13 @@ pub fn xray_llvm_link_libraries_v1(libraries: [text]) -> [text]:
     for library in ["pthread", "rt", "m", "dl"]:
         if not result.contains(library): result.push(library)
     result
+
+pub fn xray_llvm_link_libraries_for_target_v1(libraries: [text], target: text) -> [text]:
+    if xray_llvm_target_is_darwin_v1(target):
+        var copy: [text] = []
+        for library in libraries: copy.push(library)
+        return copy
+    xray_llvm_link_libraries_v1(libraries)
 
 # NativeLinkOptions carries direct-linker arguments. The hosted CC fallback
 # translates these exact options; Clang-only flags must never reach ld/lld.
@@ -56,9 +89,17 @@ pub fn xray_llvm_semantic_link_flags_v1(flags: [text]) -> Result<[text], text>:
     result.push("start-stop-gc")
     Ok(result)
 
+pub fn xray_llvm_semantic_link_flags_for_target_v1(flags: [text], target: text) -> Result<[text], text>:
+    if xray_llvm_target_is_darwin_v1(target):
+        var copy: [text] = []
+        for flag in flags: copy.push(flag)
+        return Ok(copy)
+    xray_llvm_semantic_link_flags_v1(flags)
+
 pub fn xray_llvm_adapter_flags_v1(target: text) -> [text]:
     var flags = ["--target={target}", "-O2", "-fPIC", "-mgeneral-regs-only"]
-    if target == "aarch64-unknown-linux-gnu": flags.push("-mno-outline-atomics")
+    if target == "aarch64-unknown-linux-gnu" or _xray_llvm_target_is_darwin_arm64_v1(target):
+        flags.push("-mno-outline-atomics")
     flags
 
 pub fn xray_llvm_runtime_query_args_v1(target: text) -> [text]:
@@ -102,10 +143,53 @@ pub fn xray_llvm_link_objects_v1(objects: [text], enabled: bool, backend: text,
     val runtime_source = find_runtime_source_dir()
     if runtime_source.len() == 0:
         return Err("XRAY-E-LLVM-SOURCE: no hosted runtime source owner")
+    if xray_llvm_target_is_darwin_v1(target):
+        return xray_llvm_materialize_darwin_runtime_v1(objects, target, compiler,
+            "{runtime_source}/xray/xray_llvm_runtime_darwin.c", "build/xray")
     xray_llvm_materialize_runtime_v1(objects, target, compiler,
         "{runtime_source}/xray/xray_llvm_adapter_linux.c",
         "{runtime_source}/xray/xray_llvm_image_linux.c",
         "{runtime_source}/xray/xray_qualification_profile_linux.c", "build/xray")
+
+fn _xray_llvm_darwin_sdk_path_v1() -> text:
+    val pinned = env_get_opt("SDKROOT") ?? ""
+    if pinned != "" and (is_file(pinned + "/SDKSettings.json") or is_file(pinned + "/SDKSettings.plist") or is_file(pinned + "/usr/include/stdint.h")):
+        return pinned
+    val h_os = host_os()
+    if (h_os == "macos" or h_os == "darwin") and is_file("/usr/bin/xcrun"):
+        val (out, _err, code) = process_run_timeout("/usr/bin/xcrun", ["--show-sdk-path"], 30000)
+        if code == 0:
+            val candidate = out.trim().split("\n")[0]
+            if candidate != "":
+                return candidate
+    val clt_sdk = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+    if is_file(clt_sdk + "/SDKSettings.json") or is_file(clt_sdk + "/usr/include/stdint.h"):
+        return clt_sdk
+    ""
+
+fn xray_llvm_materialize_darwin_runtime_v1(objects: [text], target: text, compiler: text,
+        source: text, output_root: text) -> Result<[text], text>:
+    if not is_file(source):
+        return Err("XRAY-E-LLVM-SOURCE: {source} not found")
+    if not dir_create_all(output_root):
+        return Err("XRAY-E-LLVM-OUTPUT: cannot create runtime output root")
+    val directory = secure_temp_dir_raw(output_root, "llvm-darwin-runtime")
+    if directory.byte_len() <= 0:
+        return Err("XRAY-E-LLVM-OUTPUT: cannot create private runtime directory")
+    val runtime_obj = "{directory}/darwin_xray_runtime.o"
+    var compile_args = xray_llvm_adapter_flags_v1(target)
+    val sdk = _xray_llvm_darwin_sdk_path_v1()
+    if sdk != "":
+        compile_args.push("-isysroot")
+        compile_args.push(sdk)
+    for argument in ["-c", source, "-o", runtime_obj]: compile_args.push(argument)
+    val (_out, compile_error, compile_code) = process_run_timeout(compiler, compile_args, 120000)
+    if compile_code != 0 or not is_file(runtime_obj):
+        return Err("XRAY-E-LLVM-ADAPTER: Darwin XRay runtime compile failed ({compile_code}): {compile_error}")
+    var result: [text] = []
+    for object in objects: result.push(object)
+    result.push(runtime_obj)
+    Ok(result)
 
 # Internal effectful executor; callers must first resolve policy and compiler.
 # Keeping explicit inputs permits native integration tests without a second

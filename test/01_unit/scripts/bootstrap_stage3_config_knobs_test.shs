@@ -9,7 +9,8 @@
 # Transport/selection only: no compiler, admission or memory evidence.
 set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
-work=$(mktemp -d "${TMPDIR:-/tmp}/stage3-config-knobs.XXXXXX")
+temp_parent=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
+work=$(mktemp -d "$temp_parent/stage3-config-knobs.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT HUP INT TERM
 checks=0
 fail() { printf 'FAIL stage3 config knobs: %s\n' "$*" >&2; exit 1; }
@@ -25,14 +26,15 @@ select_fw() (
 )
 unset SIMPLE_FILE_WORKERS
 expect 'config value honoured' 0:config "$(select_fw "$work/zero.sdn")"
-expect 'env overrides config' 1:env "$(SIMPLE_FILE_WORKERS=1 select_fw "$work/zero.sdn")"
-expect 'env 0 with no config' 0:env "$(SIMPLE_FILE_WORKERS=0 select_fw "$work/missing.sdn")"
-expect 'unset env and no key keeps the compiler default' :default "$(select_fw "$work/missing.sdn")"
-expect 'empty env is unset' 0:config "$(SIMPLE_FILE_WORKERS= select_fw "$work/zero.sdn")"
-if SIMPLE_FILE_WORKERS=2 select_fw "$work/zero.sdn" > /dev/null 2>&1; then fail 'invalid env accepted'; fi
+expect 'env overrides config' 1:env "$( (SIMPLE_FILE_WORKERS=1; export SIMPLE_FILE_WORKERS; select_fw "$work/zero.sdn") )"
+expect 'env 0 with no config' 0:env "$( (SIMPLE_FILE_WORKERS=0; export SIMPLE_FILE_WORKERS; select_fw "$work/missing.sdn") )"
+expect 'unset env and no key keeps the compiler default' :default "$( (unset SIMPLE_FILE_WORKERS; select_fw "$work/missing.sdn") )"
+expect 'empty env is unset' 0:config "$( (SIMPLE_FILE_WORKERS=; export SIMPLE_FILE_WORKERS; select_fw "$work/zero.sdn") )"
+if (SIMPLE_FILE_WORKERS=2; export SIMPLE_FILE_WORKERS; select_fw "$work/zero.sdn") > /dev/null 2>&1; then fail 'invalid env accepted'; fi
 if select_fw "$work/bad.sdn" > /dev/null 2>&1; then fail 'invalid config value accepted'; fi
 checks=$((checks + 2))
-expect 'tracked repo config pins the phase route' 0:config "$(select_fw "$repo/config/bootstrap.sdn")"
+expect 'tracked repo config selects the per-file default' 1:config "$( (unset SIMPLE_FILE_WORKERS; select_fw "$repo/config/bootstrap.sdn") )"
+expect 'explicit SIMPLE_FILE_WORKERS=0 opts out over repo config' 0:env "$( (SIMPLE_FILE_WORKERS=0; export SIMPLE_FILE_WORKERS; select_fw "$repo/config/bootstrap.sdn") )"
 host_cpus_fixture() { bootstrap_detect_host_cpus() { printf '8\n'; }; bootstrap_select_jobs "" "$work/zero.sdn"; printf '%s:%s' "$jobs" "$job_source"; }
 expect 'jobs key still read beside the new key' 4:config "$(unset SIMPLE_NATIVE_BUILD_THREADS; host_cpus_fixture)"
 
@@ -115,7 +117,7 @@ for bad_attr in 27262976:memory-admission 27262976::memory-high 27262976:Stage3:
   if run_worker bad-attr '' "$bad_attr" per-file; then fail "malformed cap attribution '$bad_attr' accepted"; fi
   checks=$((checks + 1))
 done
-if SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy run_worker ambient-attr '' 27262976:memory-admission:memory-high per-file; then
+if (SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy; export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE; run_worker ambient-attr '' 27262976:memory-admission:memory-high per-file); then
   fail 'conflicting ambient cap attribution accepted'
 fi
 # Under an explicit elevated ceiling the cap is the operator's pair by contract.
@@ -127,12 +129,12 @@ run_worker gte-only '' '' per-file:gte=0 || fail "worker refused go-to-end-only 
 expect 'go-to-end alone, compiler-default file workers' 'fw=unset gte=0' "$(grep '^fw=' "$work/gte-only.log")"
 if run_worker bad-gte '' '' per-file:gte=2; then fail 'invalid go-to-end lane item accepted'; fi
 if run_worker bad-cap '' 0123 per-file; then fail 'non-canonical transported cap accepted'; fi
-if SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=58720256 run_worker ambient '' 27262976 per-file; then
+if (SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=58720256; export SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB; run_worker ambient '' 27262976 per-file); then
   fail 'ambient ceiling accepted beside a transported cap'
 fi
 # Same refusal the ceiling branch already has: an ambient cap that disagrees
 # with the transported one is a conflict, never silently overwritten.
-if SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=1 run_worker ambient-cap '' 27262976 per-file; then
+if (SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=1; export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB; run_worker ambient-cap '' 27262976 per-file); then
   fail 'conflicting ambient cap overwritten by the transported cap'
 fi
 grep -Fq 'conflicting compiler RSS cap' "$work/ambient-cap.err" || fail 'ambient cap conflict not named'
@@ -147,6 +149,7 @@ parent_hash() (
   stage3_requested_route=direct stage3_fallback_route=none stage3_cache="$work/cache"
   progress="$work/progress" phase_profile="$work/profile" memory_snapshot="$work/memory"
   evidence_run_id=fixture stage3_bootstrap_flag= stage3_whole_program_env= stage3_per_file_env=$1
+  stage3_streaming_surfaces=0 stage3_mir_interface_hir_env= stage3_mir_shard_count_env= stage3_file_worker_batch_env=
   stage3_mc_env= stage3_cold_init_env= stage3_diagnostic_env= stage3_compiler_ceiling_env=
   platform=fixture-apple-darwin stage3_threads=1 stage2_backend=cranelift runtime="$work/runtime"
   admitted="$work/producer.shs" candidate="$work/candidate" stage3_timeout_args=

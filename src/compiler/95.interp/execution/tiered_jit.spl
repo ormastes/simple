@@ -360,161 +360,356 @@ fn jit_hotspot_llvm_preference_threshold(config: TieredJitConfig) -> i64:
 fn jit_hotspot_var_rebuild_reason(profile: FunctionProfile) -> text:
     jit_var_optimization_reason(profile.var_facts)
 
-fn jit_hotspot_source_has_strength_reduce_candidate(source: text) -> bool:
-    if source.contains("* 2"):
-        return true
-    if source.contains("* 4"):
-        return true
-    if source.contains("* 8"):
-        return true
-    if source.contains("* 16"):
-        return true
-    if source.contains("<<"):
-        return true
-    if source.contains("+= 2"):
-        return true
-    if source.contains("+= 4"):
-        return true
-    if source.contains("+= 8"):
-        return true
-    source.contains("+= 16")
+struct JitHotspotSourceScanCounters:
+    source_byte_snapshots: i64
+    source_passes: i64
+    source_bytes_visited: i64
+    needle_attempts: i64
+    needle_byte_comparisons: i64
 
-fn jit_hotspot_source_has_bounded_byte_scan_with_shared(
-    source: text,
-    has_loop: bool,
-    has_indexed_access: bool,
-    advances_index: bool
-) -> bool:
-    val has_scan_terminator = source.contains("break") or source.contains("return")
-    has_loop and has_indexed_access and has_scan_terminator and advances_index
-
-fn jit_hotspot_source_has_bounded_byte_scan(source: text) -> bool:
-    val has_loop = source.contains("while") or source.contains("for ")
-    val has_indexed_access = source.contains("[") and source.contains("]")
-    val advances_index = source.contains("+ 1") or source.contains("+= 1")
-    jit_hotspot_source_has_bounded_byte_scan_with_shared(
-        source, has_loop, has_indexed_access, advances_index)
-
-fn jit_hotspot_source_has_checksum_reducer_with_shared(
-    source: text,
-    has_loop: bool,
+struct JitHotspotSourceScan:
+    has_loop: bool
     has_indexed_access: bool
-) -> bool:
-    val has_accumulator_update = source.contains("^=") or source.contains("+=") or source.contains("acc =") or source.contains("checksum =")
-    val has_checksum_op = source.contains("xor") or source.contains("^") or source.contains("<<") or source.contains(">>") or source.contains("+")
-    has_loop and has_indexed_access and has_accumulator_update and has_checksum_op
-
-fn jit_hotspot_source_has_checksum_reducer(source: text) -> bool:
-    val has_loop = source.contains("while") or source.contains("for ")
-    val has_indexed_access = source.contains("[") and source.contains("]")
-    jit_hotspot_source_has_checksum_reducer_with_shared(
-        source, has_loop, has_indexed_access)
-
-fn jit_hotspot_source_has_structured_loop(source: text) -> bool:
-    source.contains("while") or source.contains("for ")
-
-fn jit_hotspot_source_has_small_fixed_trip_loop_with_shared(source: text, has_loop: bool) -> bool:
-    val has_small_bound = source.contains("< 2") or source.contains("< 3") or source.contains("< 4") or source.contains("< 8") or source.contains("< 16")
-    val increments_by_one = source.contains("+ 1") or source.contains("+= 1")
-    has_loop and has_small_bound and increments_by_one
-
-fn jit_hotspot_source_has_small_fixed_trip_loop(source: text) -> bool:
-    jit_hotspot_source_has_small_fixed_trip_loop_with_shared(
-        source, jit_hotspot_source_has_structured_loop(source))
-
-fn jit_hotspot_source_has_predication_candidate(source: text) -> bool:
-    val has_branch = source.contains("if ") or source.contains("else")
-    val has_select_shape = source.contains("?") or source.contains("select") or source.contains("else")
-    val has_scalar_compare = source.contains(" < ") or source.contains(" > ") or source.contains(" == ") or source.contains(" != ")
-    val has_safe_result_shape = source.contains("return") or source.contains(" = ")
-    has_branch and has_select_shape and has_scalar_compare and has_safe_result_shape
-
-fn jit_hotspot_source_has_vectorization_candidate_with_shared(
-    source: text,
-    has_loop: bool,
-    has_indexed_access: bool,
     advances_index: bool
-) -> bool:
-    val has_vector_op = source.contains("+") or source.contains("-") or source.contains("*") or source.contains("^")
-    val no_early_exit = not source.contains("break") and not source.contains("return -1")
-    has_loop and has_indexed_access and advances_index and has_vector_op and no_early_exit
+    small_fixed_trip_loop: bool
+    predication_candidate: bool
+    vectorization_candidate: bool
+    range_facts: bool
+    hot_call_candidate: bool
+    strength_reduce_candidate: bool
+    bounded_byte_scan: bool
+    checksum_reducer: bool
+    counters: JitHotspotSourceScanCounters
 
-fn jit_hotspot_source_has_vectorization_candidate(source: text) -> bool:
-    val has_loop = jit_hotspot_source_has_structured_loop(source)
-    val has_indexed_access = source.contains("[") and source.contains("]")
-    val advances_index = source.contains("+ 1") or source.contains("+= 1")
-    jit_hotspot_source_has_vectorization_candidate_with_shared(
-        source, has_loop, has_indexed_access, advances_index)
+struct JitHotspotFactBuild:
+    facts: [text]
+    counters: JitHotspotSourceScanCounters
 
-fn jit_hotspot_source_has_range_facts_with_shared(
-    source: text,
-    has_loop: bool,
-    has_indexed_access: bool,
-    advances_index: bool
-) -> bool:
-    val has_upper_bound = source.contains(" < n") or source.contains(" < len") or source.contains(" < length") or source.contains(".len")
-    val starts_at_zero = source.contains("= 0")
-    has_loop and has_indexed_access and has_upper_bound and starts_at_zero and advances_index
+fn _jit_zero_source_scan_counters() -> JitHotspotSourceScanCounters:
+    JitHotspotSourceScanCounters(
+        source_byte_snapshots: 0,
+        source_passes: 0,
+        source_bytes_visited: 0,
+        needle_attempts: 0,
+        needle_byte_comparisons: 0
+    )
 
-fn jit_hotspot_source_has_range_facts(source: text) -> bool:
-    val has_loop = jit_hotspot_source_has_structured_loop(source)
-    val has_indexed_access = source.contains("[") and source.contains("]")
-    val advances_index = source.contains("+ 1") or source.contains("+= 1")
-    jit_hotspot_source_has_range_facts_with_shared(
-        source, has_loop, has_indexed_access, advances_index)
+fn _jit_bytes_match_at(bytes: [u8], total_bytes: i64, pos: i64, pat: [u8]) -> (bool, i64):
+    val pat_len = pat.len()
+    if pos + pat_len > total_bytes:
+        return (false, 0)
+    var k: i64 = 0
+    while k < pat_len:
+        if bytes[pos + k] != pat[k]:
+            return (false, k + 1)
+        k = k + 1
+    (true, pat_len)
 
-fn jit_hotspot_source_has_hot_call_candidate(source: text) -> bool:
-    val has_direct_call = source.contains("helper(") or source.contains("callee(") or source.contains("leaf(") or source.contains("inline_target(") or source.contains("hot_call(")
-    val has_scalar_site = source.contains("return ") or source.contains(" = ")
-    val avoids_indexed_or_method_dispatch = not source.contains("[") and not source.contains(".")
-    has_direct_call and has_scalar_site and avoids_indexed_or_method_dispatch
+fn _jit_hotspot_source_scan(source: text) -> JitHotspotSourceScan:
+    val bytes = source.bytes()
+    val total_bytes = bytes.len()
+    var has_loop = false
+    var has_open_bracket = false
+    var has_close_bracket = false
+    var has_dot = false
+    var advances_index = false
+    var has_small_bound = false
+    var has_branch = false
+    var has_select_shape = false
+    var has_scalar_compare = false
+    var has_return_word = false
+    var has_return_space = false
+    var has_assign_eq = false
+    var has_vector_op = false
+    var has_break = false
+    var has_return_neg_one = false
+    var has_upper_bound = false
+    var starts_at_zero = false
+    var has_direct_call = false
+    var strength_reduce = false
+    var has_acc_update = false
+    var has_checksum_op = false
+    var needle_attempts: i64 = 0
+    var needle_comparisons: i64 = 0
 
-fn jit_hotspot_backend_plugin_facts(profile: FunctionProfile, config: TieredJitConfig, backend_name: text) -> [text]:
+    var idx: i64 = 0
+    while idx < total_bytes:
+        val b = bytes[idx]
+        if b == 91:
+            has_open_bracket = true
+        elif b == 93:
+            has_close_bracket = true
+        elif b == 46:
+            has_dot = true
+            needle_attempts = needle_attempts + 1
+            val (m_len, c_len) = _jit_bytes_match_at(bytes, total_bytes, idx, [46, 108, 101, 110])
+            needle_comparisons = needle_comparisons + c_len
+            if m_len:
+                has_upper_bound = true
+        elif b == 63:
+            has_select_shape = true
+        elif b == 43:
+            has_vector_op = true
+            has_checksum_op = true
+            needle_attempts = needle_attempts + 1
+            val (m_p1, c_p1) = _jit_bytes_match_at(bytes, total_bytes, idx, [43, 32, 49])
+            needle_comparisons = needle_comparisons + c_p1
+            if m_p1:
+                advances_index = true
+            needle_attempts = needle_attempts + 1
+            val (m_peq, c_peq) = _jit_bytes_match_at(bytes, total_bytes, idx, [43, 61])
+            needle_comparisons = needle_comparisons + c_peq
+            if m_peq:
+                has_acc_update = true
+                needle_attempts = needle_attempts + 1
+                val (m_peq1, c_peq1) = _jit_bytes_match_at(bytes, total_bytes, idx, [43, 61, 32, 49])
+                needle_comparisons = needle_comparisons + c_peq1
+                if m_peq1:
+                    advances_index = true
+                    needle_attempts = needle_attempts + 1
+                    val (m_peq16, c_peq16) = _jit_bytes_match_at(bytes, total_bytes, idx, [43, 61, 32, 49, 54])
+                    needle_comparisons = needle_comparisons + c_peq16
+                    if m_peq16:
+                        strength_reduce = true
+                else:
+                    needle_attempts = needle_attempts + 3
+                    val (m_peq2, c_peq2) = _jit_bytes_match_at(bytes, total_bytes, idx, [43, 61, 32, 50])
+                    val (m_peq4, c_peq4) = _jit_bytes_match_at(bytes, total_bytes, idx, [43, 61, 32, 52])
+                    val (m_peq8, c_peq8) = _jit_bytes_match_at(bytes, total_bytes, idx, [43, 61, 32, 56])
+                    needle_comparisons = needle_comparisons + c_peq2 + c_peq4 + c_peq8
+                    if m_peq2 or m_peq4 or m_peq8:
+                        strength_reduce = true
+        elif b == 45:
+            has_vector_op = true
+        elif b == 42:
+            has_vector_op = true
+            needle_attempts = needle_attempts + 4
+            val (m_m2, c_m2) = _jit_bytes_match_at(bytes, total_bytes, idx, [42, 32, 50])
+            val (m_m4, c_m4) = _jit_bytes_match_at(bytes, total_bytes, idx, [42, 32, 52])
+            val (m_m8, c_m8) = _jit_bytes_match_at(bytes, total_bytes, idx, [42, 32, 56])
+            val (m_m16, c_m16) = _jit_bytes_match_at(bytes, total_bytes, idx, [42, 32, 49, 54])
+            needle_comparisons = needle_comparisons + c_m2 + c_m4 + c_m8 + c_m16
+            if m_m2 or m_m4 or m_m8 or m_m16:
+                strength_reduce = true
+        elif b == 94:
+            has_vector_op = true
+            has_checksum_op = true
+            needle_attempts = needle_attempts + 1
+            val (m_xeq, c_xeq) = _jit_bytes_match_at(bytes, total_bytes, idx, [94, 61])
+            needle_comparisons = needle_comparisons + c_xeq
+            if m_xeq:
+                has_acc_update = true
+        elif b == 60:
+            needle_attempts = needle_attempts + 1
+            val (m_shl, c_shl) = _jit_bytes_match_at(bytes, total_bytes, idx, [60, 60])
+            needle_comparisons = needle_comparisons + c_shl
+            if m_shl:
+                strength_reduce = true
+                has_checksum_op = true
+            else:
+                needle_attempts = needle_attempts + 5
+                val (m_lt2, c_lt2) = _jit_bytes_match_at(bytes, total_bytes, idx, [60, 32, 50])
+                val (m_lt3, c_lt3) = _jit_bytes_match_at(bytes, total_bytes, idx, [60, 32, 51])
+                val (m_lt4, c_lt4) = _jit_bytes_match_at(bytes, total_bytes, idx, [60, 32, 52])
+                val (m_lt8, c_lt8) = _jit_bytes_match_at(bytes, total_bytes, idx, [60, 32, 56])
+                val (m_lt16, c_lt16) = _jit_bytes_match_at(bytes, total_bytes, idx, [60, 32, 49, 54])
+                needle_comparisons = needle_comparisons + c_lt2 + c_lt3 + c_lt4 + c_lt8 + c_lt16
+                if m_lt2 or m_lt3 or m_lt4 or m_lt8 or m_lt16:
+                    has_small_bound = true
+        elif b == 62:
+            needle_attempts = needle_attempts + 1
+            val (m_shr, c_shr) = _jit_bytes_match_at(bytes, total_bytes, idx, [62, 62])
+            needle_comparisons = needle_comparisons + c_shr
+            if m_shr:
+                has_checksum_op = true
+        elif b == 61:
+            needle_attempts = needle_attempts + 1
+            val (m_eq0, c_eq0) = _jit_bytes_match_at(bytes, total_bytes, idx, [61, 32, 48])
+            needle_comparisons = needle_comparisons + c_eq0
+            if m_eq0:
+                starts_at_zero = true
+        elif b == 32:
+            needle_attempts = needle_attempts + 5
+            val (m_aeq, c_aeq) = _jit_bytes_match_at(bytes, total_bytes, idx, [32, 61, 32])
+            val (m_slt, c_slt) = _jit_bytes_match_at(bytes, total_bytes, idx, [32, 60, 32])
+            val (m_sgt, c_sgt) = _jit_bytes_match_at(bytes, total_bytes, idx, [32, 62, 32])
+            val (m_seq, c_seq) = _jit_bytes_match_at(bytes, total_bytes, idx, [32, 61, 61, 32])
+            val (m_sne, c_sne) = _jit_bytes_match_at(bytes, total_bytes, idx, [32, 33, 61, 32])
+            needle_comparisons = needle_comparisons + c_aeq + c_slt + c_sgt + c_seq + c_sne
+            if m_aeq:
+                has_assign_eq = true
+            if m_slt or m_sgt or m_seq or m_sne:
+                has_scalar_compare = true
+            if m_slt:
+                needle_attempts = needle_attempts + 3
+                val (m_ubn, c_ubn) = _jit_bytes_match_at(bytes, total_bytes, idx, [32, 60, 32, 110])
+                val (m_ubl, c_ubl) = _jit_bytes_match_at(bytes, total_bytes, idx, [32, 60, 32, 108, 101, 110])
+                val (m_ublg, c_ublg) = _jit_bytes_match_at(bytes, total_bytes, idx, [32, 60, 32, 108, 101, 110, 103, 116, 104])
+                needle_comparisons = needle_comparisons + c_ubn + c_ubl + c_ublg
+                if m_ubn or m_ubl or m_ublg:
+                    has_upper_bound = true
+        elif b == 119:
+            needle_attempts = needle_attempts + 1
+            val (m_wh, c_wh) = _jit_bytes_match_at(bytes, total_bytes, idx, [119, 104, 105, 108, 101])
+            needle_comparisons = needle_comparisons + c_wh
+            if m_wh:
+                has_loop = true
+        elif b == 102:
+            needle_attempts = needle_attempts + 1
+            val (m_for, c_for) = _jit_bytes_match_at(bytes, total_bytes, idx, [102, 111, 114, 32])
+            needle_comparisons = needle_comparisons + c_for
+            if m_for:
+                has_loop = true
+        elif b == 105:
+            needle_attempts = needle_attempts + 2
+            val (m_if, c_if) = _jit_bytes_match_at(bytes, total_bytes, idx, [105, 102, 32])
+            val (m_inl, c_inl) = _jit_bytes_match_at(bytes, total_bytes, idx, [105, 110, 108, 105, 110, 101, 95, 116, 97, 114, 103, 101, 116, 40])
+            needle_comparisons = needle_comparisons + c_if + c_inl
+            if m_if:
+                has_branch = true
+            if m_inl:
+                has_direct_call = true
+        elif b == 101:
+            needle_attempts = needle_attempts + 1
+            val (m_el, c_el) = _jit_bytes_match_at(bytes, total_bytes, idx, [101, 108, 115, 101])
+            needle_comparisons = needle_comparisons + c_el
+            if m_el:
+                has_branch = true
+                has_select_shape = true
+        elif b == 115:
+            needle_attempts = needle_attempts + 1
+            val (m_sel, c_sel) = _jit_bytes_match_at(bytes, total_bytes, idx, [115, 101, 108, 101, 99, 116])
+            needle_comparisons = needle_comparisons + c_sel
+            if m_sel:
+                has_select_shape = true
+        elif b == 114:
+            needle_attempts = needle_attempts + 1
+            val (m_ret, c_ret) = _jit_bytes_match_at(bytes, total_bytes, idx, [114, 101, 116, 117, 114, 110])
+            needle_comparisons = needle_comparisons + c_ret
+            if m_ret:
+                has_return_word = true
+                needle_attempts = needle_attempts + 1
+                val (m_rets, c_rets) = _jit_bytes_match_at(bytes, total_bytes, idx, [114, 101, 116, 117, 114, 110, 32])
+                needle_comparisons = needle_comparisons + c_rets
+                if m_rets:
+                    has_return_space = true
+                    needle_attempts = needle_attempts + 1
+                    val (m_retn1, c_retn1) = _jit_bytes_match_at(bytes, total_bytes, idx, [114, 101, 116, 117, 114, 110, 32, 45, 49])
+                    needle_comparisons = needle_comparisons + c_retn1
+                    if m_retn1:
+                        has_return_neg_one = true
+        elif b == 98:
+            needle_attempts = needle_attempts + 1
+            val (m_brk, c_brk) = _jit_bytes_match_at(bytes, total_bytes, idx, [98, 114, 101, 97, 107])
+            needle_comparisons = needle_comparisons + c_brk
+            if m_brk:
+                has_break = true
+        elif b == 97:
+            needle_attempts = needle_attempts + 1
+            val (m_acc, c_acc) = _jit_bytes_match_at(bytes, total_bytes, idx, [97, 99, 99, 32, 61])
+            needle_comparisons = needle_comparisons + c_acc
+            if m_acc:
+                has_acc_update = true
+        elif b == 99:
+            needle_attempts = needle_attempts + 2
+            val (m_chk, c_chk) = _jit_bytes_match_at(bytes, total_bytes, idx, [99, 104, 101, 99, 107, 115, 117, 109, 32, 61])
+            val (m_cal, c_cal) = _jit_bytes_match_at(bytes, total_bytes, idx, [99, 97, 108, 108, 101, 101, 40])
+            needle_comparisons = needle_comparisons + c_chk + c_cal
+            if m_chk:
+                has_acc_update = true
+            if m_cal:
+                has_direct_call = true
+        elif b == 104:
+            needle_attempts = needle_attempts + 2
+            val (m_hlp, c_hlp) = _jit_bytes_match_at(bytes, total_bytes, idx, [104, 101, 108, 112, 101, 114, 40])
+            val (m_hc, c_hc) = _jit_bytes_match_at(bytes, total_bytes, idx, [104, 111, 116, 95, 99, 97, 108, 108, 40])
+            needle_comparisons = needle_comparisons + c_hlp + c_hc
+            if m_hlp or m_hc:
+                has_direct_call = true
+        elif b == 108:
+            needle_attempts = needle_attempts + 1
+            val (m_lf, c_lf) = _jit_bytes_match_at(bytes, total_bytes, idx, [108, 101, 97, 102, 40])
+            needle_comparisons = needle_comparisons + c_lf
+            if m_lf:
+                has_direct_call = true
+        elif b == 120:
+            needle_attempts = needle_attempts + 1
+            val (m_xor, c_xor) = _jit_bytes_match_at(bytes, total_bytes, idx, [120, 111, 114])
+            needle_comparisons = needle_comparisons + c_xor
+            if m_xor:
+                has_checksum_op = true
+        idx = idx + 1
+
+    val has_indexed_access = has_open_bracket and has_close_bracket
+    val has_safe_result = has_return_word or has_assign_eq
+    val has_scalar_site = has_return_space or has_assign_eq
+    val avoids_indexed_or_method = not has_open_bracket and not has_dot
+    val no_early_exit = not has_break and not has_return_neg_one
+    val has_scan_terminator = has_break or has_return_word
+
+    JitHotspotSourceScan(
+        has_loop: has_loop,
+        has_indexed_access: has_indexed_access,
+        advances_index: advances_index,
+        small_fixed_trip_loop: has_loop and has_small_bound and advances_index,
+        predication_candidate: has_branch and has_select_shape and has_scalar_compare and has_safe_result,
+        vectorization_candidate: has_loop and has_indexed_access and advances_index and has_vector_op and no_early_exit,
+        range_facts: has_loop and has_indexed_access and has_upper_bound and starts_at_zero and advances_index,
+        hot_call_candidate: has_direct_call and has_scalar_site and avoids_indexed_or_method,
+        strength_reduce_candidate: strength_reduce,
+        bounded_byte_scan: has_loop and has_indexed_access and has_scan_terminator and advances_index,
+        checksum_reducer: has_loop and has_indexed_access and has_acc_update and has_checksum_op,
+        counters: JitHotspotSourceScanCounters(
+            source_byte_snapshots: 1,
+            source_passes: 1,
+            source_bytes_visited: total_bytes,
+            needle_attempts: needle_attempts,
+            needle_byte_comparisons: needle_comparisons
+        )
+    )
+
+fn _jit_hotspot_backend_plugin_fact_build(profile: FunctionProfile, config: TieredJitConfig, backend_name: text) -> JitHotspotFactBuild:
     var facts = jit_hotspot_profile_facts(profile, config, profile.typed_mir, profile.safe_deopt)
     for fact in jit_var_optimization_fact_list(profile.var_facts):
         facts = facts.push(fact)
     if profile.typed_mir and profile.safe_deopt and jit_var_optimization_implies_scalar_cleanup(profile.var_facts):
         facts = facts.push("ssa.canonical")
         facts = facts.push("alias_stable")
+    var counters = _jit_zero_source_scan_counters()
     if profile.typed_mir and profile.safe_deopt:
-        # These three lexical predicates feed several independent plugin facts.
-        # Compute them once only after eligibility so ineligible profiles retain
-        # the previous zero-source-scan fast path.
-        val has_loop = jit_hotspot_source_has_structured_loop(profile.source)
-        val has_indexed_access = profile.source.contains("[") and profile.source.contains("]")
-        val advances_index = profile.source.contains("+ 1") or profile.source.contains("+= 1")
-        if has_loop:
+        val scan = _jit_hotspot_source_scan(profile.source)
+        counters = scan.counters
+        if scan.has_loop:
             facts = facts.push("loop_preheader")
-        if jit_hotspot_source_has_small_fixed_trip_loop_with_shared(profile.source, has_loop):
+        if scan.small_fixed_trip_loop:
             facts = facts.push("loop_canonical")
             facts = facts.push("loop_trip_count")
             facts = facts.push("unroll_budget")
-        if jit_hotspot_source_has_predication_candidate(profile.source):
+        if scan.predication_candidate:
             facts = facts.push("predication_candidate")
             facts = facts.push("predicate_safe")
-        if jit_hotspot_source_has_vectorization_candidate_with_shared(
-            profile.source, has_loop, has_indexed_access, advances_index):
+        if scan.vectorization_candidate:
             facts = facts.push("vectorization_candidate")
-        if jit_hotspot_source_has_range_facts_with_shared(
-            profile.source, has_loop, has_indexed_access, advances_index):
+        if scan.range_facts:
             facts = facts.push("range_facts")
-        if jit_hotspot_source_has_hot_call_candidate(profile.source):
+        if scan.hot_call_candidate:
             facts = facts.push("profile.hot_call")
             facts = facts.push("inline_budget")
-        if jit_hotspot_source_has_strength_reduce_candidate(profile.source):
+        if scan.strength_reduce_candidate:
             facts = facts.push("strength_reduce_candidate")
             facts = facts.push("induction_safe")
-        if jit_hotspot_source_has_bounded_byte_scan_with_shared(
-            profile.source, has_loop, has_indexed_access, advances_index):
+        if scan.bounded_byte_scan:
             facts = facts.push("bounded_scan_terminates")
-        if jit_hotspot_source_has_checksum_reducer_with_shared(
-            profile.source, has_loop, has_indexed_access):
+        if scan.checksum_reducer:
             facts = facts.push("checksum_associative")
     if backend_name == "llvm":
         facts = facts.push("llvm_backend_available")
     if backend_name == "cranelift":
         facts = facts.push("cranelift_backend_available")
-    facts
+    JitHotspotFactBuild(facts: facts, counters: counters)
+
+fn jit_hotspot_backend_plugin_facts(profile: FunctionProfile, config: TieredJitConfig, backend_name: text) -> [text]:
+    _jit_hotspot_backend_plugin_fact_build(profile, config, backend_name).facts
 
 fn jit_hotspot_rebuild_choice(
     profile: FunctionProfile,

@@ -17,7 +17,7 @@ use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded,
-    file_is_regular_no_follow, file_atomic_write}
+    file_is_regular_no_follow, file_atomic_write, file_lock, file_unlock}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 use compiler.core.cfg_platform.{cfg_guard_context_identity_v1}
 use std.common.cpu_tier.{tier_parse, tier_alias, tier_rank}
@@ -1381,6 +1381,7 @@ fn _build_cache_prune_missing_outputs_v1(cache: BuildCache) -> i64:
         if not _incremental_outputs_all_live_v1(entry.outputs):
             stale = stale.push(source)
     for source in stale:
+        _build_cache_mark_tombstone_v1(cache.cache_path, source)
         cache.entries.remove(source)
         cache.fingerprints.remove(source)
     stale.len()
@@ -1596,10 +1597,12 @@ impl BuildCache:
         pinned to the dependencies' interfaces as they were when the artifact
         was produced. If any dependency is unreadable the fold is nil and ""
         is stored — has_cached_object then fails closed on this entry."""
+        _build_cache_clear_tombstone_v1(self.cache_path, source)
         build_cache_record_entry_with_fp(self, source, fingerprint,
             dependencies, outputs, module_witness)
 
     me remove_entry(source: text):
+        _build_cache_mark_tombstone_v1(self.cache_path, source)
         self.entries.remove(source)
         self.fingerprints.remove(source)
 
@@ -1670,6 +1673,7 @@ impl BuildCache:
 
     me invalidate_all():
         """Clear entire cache."""
+        _build_cache_mark_invalidated_v1(self.cache_path)
         self.entries = {}
         self.fingerprints = {}
         self.version = self.version + 1
@@ -2150,17 +2154,62 @@ pub fn build_cache_persist(cache: BuildCache, publish_receipt: bool = true) -> b
         eprint("[build-cache] WARNING persist scratch scope end failed: {cache.cache_path}")
     persisted
 
+var _g_build_cache_tombstones: Dict<text, bool> = {}
+var _g_build_cache_invalidated: Dict<text, bool> = {}
+
+fn _build_cache_mark_tombstone_v1(cache_path: text, source: text):
+    if cache_path != "" and source != "":
+        _g_build_cache_tombstones["{cache_path}|{source}"] = true
+
+fn _build_cache_clear_tombstone_v1(cache_path: text, source: text):
+    if cache_path != "" and source != "":
+        _g_build_cache_tombstones.remove("{cache_path}|{source}")
+
+fn _build_cache_mark_invalidated_v1(cache_path: text):
+    if cache_path != "":
+        _g_build_cache_invalidated[cache_path] = true
+
+fn _build_cache_clear_path_tombstones_v1(cache_path: text):
+    if cache_path == "":
+        return
+    val prefix = "{cache_path}|"
+    var to_clear: [text] = []
+    for k in _g_build_cache_tombstones.keys():
+        if k.starts_with(prefix):
+            to_clear.push(k)
+    for k in to_clear:
+        _g_build_cache_tombstones.remove(k)
+
 fn build_cache_persist_unscoped_v1(cache: BuildCache, publish_receipt: bool) -> bool:
     val dir = incremental_parent_dir(cache.cache_path)
     if dir != "":
         incremental_mkdir_p(dir)
+    # Brief merge lock around ONLY the final manifest read-merge-atomic_write critical
+    # section so two OS processes saving concurrently never lose each other's entries;
+    # never unlink `.merge.lock` so flock+unlink cannot split-brain.
+    val lock_fd = if cache.cache_path != "": file_lock("{cache.cache_path}.merge.lock", 30) else: -1
+    if cache.cache_path != "" and lock_fd < 0:
+        return false
+    var merged_entries = cache.entries
+    var merged_fps = cache.fingerprints
+    var base_version = cache.version
+    if cache.cache_path != "" and not _g_build_cache_invalidated.contains_key(cache.cache_path) and incremental_file_exists(cache.cache_path):
+        val on_disk = BuildCache.load(cache.cache_path)
+        if on_disk.version > base_version:
+            base_version = on_disk.version
+        for disk_src in on_disk.entries.keys():
+            if not merged_entries.contains_key(disk_src) and not _g_build_cache_tombstones.contains_key("{cache.cache_path}|{disk_src}"):
+                merged_entries[disk_src] = on_disk.entries[disk_src]
+                if on_disk.fingerprints.contains_key(disk_src):
+                    merged_fps[disk_src] = on_disk.fingerprints[disk_src]
+    val next_version = base_version + 1
     var lines: [text] = [
-        "version: {cache.version + 1}",
+        "version: {next_version}",
         "entries: ["
     ]
     # Sorted: persisted build_cache.sdn bytes must not follow dict bucket order.
-    for source in cache.entries.keys().sort():
-        val entry = cache.entries[source]
+    for source in merged_entries.keys().sort():
+        val entry = merged_entries[source]
         val fp = entry.fingerprint
         val source_text = incremental_sdn_escape(entry.source)
         val hash_text = incremental_sdn_escape(incremental_digest_tag_v1(fp.content_hash))
@@ -2173,12 +2222,23 @@ fn build_cache_persist_unscoped_v1(cache: BuildCache, publish_receipt: bool) -> 
         val fp_text = "{" + " hash: \"" + hash_text + "\", size: {fp.size}, modified_time: {fp.modified_time} " + "}"
         lines = lines.push("  " + "{" + " source: \"" + source_text + "\", fingerprint: " + fp_text + ", dependencies: " + deps_text + ", outputs: " + outputs_text + ", deps_iface: \"" + deps_iface_text + "\", interface_digest: \"" + interface_digest_text + "\", module_witness: \"" + module_witness_text + "\", macro_input_root: \"" + macro_input_root_text + "\" " + "}")
     lines = lines.push("]")
-    if not incremental_file_write_text(cache.cache_path, lines.join("\n")):
+    val wrote = incremental_file_write_text(cache.cache_path, lines.join("\n"))
+    if not wrote:
+        if lock_fd >= 0:
+            val _u_err = file_unlock(lock_fd)
         return false
-    if not publish_receipt:
-        return true
-    val receipt = incremental_reverse_reference_generation_v1(cache)
-    reverse_reference_publish_generation_v1(cache.cache_path, receipt)
+    if cache.cache_path != "":
+        _g_build_cache_invalidated.remove(cache.cache_path)
+        _build_cache_clear_path_tombstones_v1(cache.cache_path)
+    var receipt_ok = true
+    if publish_receipt:
+        val merged_view = BuildCache(entries: merged_entries, fingerprints: merged_fps,
+            cache_path: cache.cache_path, version: next_version, tldr_root: cache.tldr_root)
+        val receipt = incremental_reverse_reference_generation_v1(merged_view)
+        receipt_ok = reverse_reference_publish_generation_v1(cache.cache_path, receipt)
+    if lock_fd >= 0:
+        val _u_ok = file_unlock(lock_fd)
+    receipt_ok
 
 
 
@@ -2198,13 +2258,37 @@ pub fn build_cache_record_entry_at(cache_path: text, source: text,
 pub fn build_cache_entry_is_valid_at(cache_path: text, source: text) -> bool:
     build_cache_entry_is_valid(BuildCache.load(cache_path), source)
 
+pub fn build_cache_outputs_for_source_at(cache_path: text, source: text) -> [text]:
+    val cache = BuildCache.load(cache_path)
+    if cache.entries.contains_key(source):
+        return cache.entries[source].outputs
+    var want = native_object_source_key_v1(source.replace("\\", "/"))
+    while want.starts_with("./"):
+        want = want.substring(2)
+    var matched_outputs: [text] = []
+    var match_count = 0
+    for key in cache.entries.keys():
+        var kn = native_object_source_key_v1(key.replace("\\", "/"))
+        while kn.starts_with("./"):
+            kn = kn.substring(2)
+        if kn == want or kn.ends_with("/" + want) or want.ends_with("/" + kn):
+            val outs = cache.entries[key].outputs
+            if match_count == 0:
+                matched_outputs = outs
+                match_count = 1
+            elif outs != matched_outputs:
+                match_count = match_count + 1
+    if match_count == 1:
+        return matched_outputs
+    []
+
 pub fn incremental_detect_changes_at(cache_path: text,
                                      source_files: [text]) -> IncrementalCompileResult:
     val cache = BuildCache.load(cache_path)
     cache.detect_changes(source_files)
 
 export build_cache_open, build_cache_record_entry, build_cache_entry_is_valid, build_cache_persist, incremental_dependency_interface_fold
-export build_cache_record_entry_at, build_cache_entry_is_valid_at
+export build_cache_record_entry_at, build_cache_entry_is_valid_at, build_cache_outputs_for_source_at
 export incremental_detect_changes_at
 export build_cache_open_with_tldr_v1, incremental_detect_changes_with_tldr_at
 export dep_iface_gate_record_v2, dep_iface_gate_valid_v2

@@ -64,8 +64,16 @@ pub fn unit_tldr_plan_v1(unit_id: text, root: text, picked: [text], module_paths
         root_candidates.push(p)
     for mp in module_paths.values():
         root_candidates.push(mp)
+    val scv_env_root = env_get("SIMPLE_SCV_SNAPSHOT_ROOT")
+    var scv_roots: [text] = []
+    if scv_env_root != "":
+        val scv_canon = module_surface_canonical_path(scv_env_root)
+        if scv_canon != "":
+            scv_roots.push(scv_canon)
+        if not scv_roots.contains(scv_env_root):
+            scv_roots.push(scv_env_root)
     val admitted_roots = module_surface_admitted_roots_v1(
-        root_candidates, [], module_surface_canonical_path("."))
+        root_candidates, scv_roots, module_surface_canonical_path("."))
     var surfaces: [ModuleSurface] = []
     var fallback_modules: [text] = []
     var seen: [text] = []
@@ -97,11 +105,16 @@ pub fn unit_tldr_plan_v1(unit_id: text, root: text, picked: [text], module_paths
         seen_paths.push(path_key)
         val source = file_read(src_path)
         var built: ModuleSurface? = None
-        match tldr_summary_ensure_v1(root, module_id, source):
-            case Some(rows):
-                summaries = summaries + 1
-                built = module_surface_from_tldr_v1(module_id, rows)
-            case None: pass
+        # A package `__init__.spl` row never takes a summary surface in the
+        # streaming loop (it is parsed for its manifest facts), so a summary
+        # here left the row a placeholder and every importer unready (bug
+        # per_file_unit_closure_incomplete_2026-11-22). Parse it as a fallback.
+        if not src_path.ends_with("/__init__.spl"):
+            match tldr_summary_ensure_v1(root, module_id, source):
+                case Some(rows):
+                    summaries = summaries + 1
+                    built = module_surface_from_tldr_v1(module_id, rows)
+                case None: pass
         match built:
             case Some(surface):
                 # The summary surface is built from the module id, so its
@@ -211,7 +224,15 @@ fn _unit_tldr_inventory_logical_from_path_v1(path: text, admitted_roots: [text])
 
 pub fn unit_tldr_module_paths_v1(module_names: [text], paths: [text]) -> Dict<text, text>:
     var out: Dict<text, text> = {}
-    val admitted_roots = module_surface_admitted_roots_v1(paths, [], module_surface_canonical_path("."))
+    val scv_env_root = env_get("SIMPLE_SCV_SNAPSHOT_ROOT")
+    var scv_roots: [text] = []
+    if scv_env_root != "":
+        val scv_canon = module_surface_canonical_path(scv_env_root)
+        if scv_canon != "":
+            scv_roots.push(scv_canon)
+        if not scv_roots.contains(scv_env_root):
+            scv_roots.push(scv_env_root)
+    val admitted_roots = module_surface_admitted_roots_v1(paths, scv_roots, module_surface_canonical_path("."))
     var i = 0
     while i < module_names.len() and i < paths.len():
         val raw_name = module_names[i]

@@ -56,7 +56,7 @@ use compiler.backend.simpleos_native_symbols.{is_simpleos_x86_64_link, is_simple
 use compiler.backend.baremetal_native_link.{baremetal_link_arch_v1, link_baremetal_native_v1}
 use compiler.backend.aot_target_normalization.{backend_aot_simpleos_32bit_user_target_error}
 use compiler.backend.simpleos_native_linkers.{link_simpleos_x86_64, link_simpleos_arm64, link_simpleos_riscv64, link_simpleos_riscv32}
-use compiler.common.cache.darwin_runtime_provider_manifest.{darwin_runtime_provider_manifest_v1}
+use compiler.common.cache.darwin_runtime_provider_manifest.{darwin_runtime_artifact_error_v1, darwin_runtime_provider_manifest_v1}
 # ============================================================================
 # Main Orchestrator
 # ============================================================================
@@ -158,7 +158,7 @@ fn _llvm_darwin_snapshot_link_inputs(
         return Err("darwin-link-input-snapshot-count-mismatch")
     Ok(snapshots)
 
-fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptions) -> Result<text, text>:
+pub fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptions) -> Result<text, text>:
     match link_llvm_native_with_receipt_v2(user_objects, output, options):
         case Ok(value): Ok(value.output_path)
         case Err(message): Err(message)
@@ -338,8 +338,12 @@ pub fn link_llvm_native_with_receipt_v2(user_objects: [text], output: text, opti
         print "[LLVM-LINK] step 1: compile_runtime_objects..."
     # native_all already owns spl_dl* in Rust; otherwise the pure hosted
     # runtime supplies the C owner for both LLVM and Cranelift.
+    val effective_runtime_bundle = if runtime_bundle == "" and bootstrap_native_all == "" and options.unit_dynlibs.len() > 0:
+        "core-c"
+    else:
+        runtime_bundle
     val runtime_compile_bundle = llvm_runtime_owner_compile_bundle_v1(runtime_owner,
-        llvm_hosted_runtime_compile_bundle(runtime_bundle, bootstrap_native_all, hosted_os, hosted_target, stage4_requested),
+        llvm_hosted_runtime_compile_bundle(effective_runtime_bundle, bootstrap_native_all, hosted_os, hosted_target, stage4_requested),
         bootstrap_native_all, coff_native_all)
     val rt_result = compile_runtime_objects(verbose, options.opt_level, bootstrap_native_all == "", hosted_cc, stage4_requested, runtime_compile_bundle,
         llvm_runtime_owner_compile_owner_v1(runtime_owner, bootstrap_native_all, coff_native_all),
@@ -375,7 +379,7 @@ pub fn link_llvm_native_with_receipt_v2(user_objects: [text], output: text, opti
     # A mingw cross target (e.g. aarch64-pc-windows-gnu) needs the entry shim
     # built for the target arch, not the host's; native hosts stay untargeted.
     val entry_target = if hosted_plan.requires_cross and hosted_target.ends_with("-pc-windows-gnu"): hosted_target else: ""
-    val c_result = compile_entry_point_c_with_receipt_v2(user_objects, pid, verbose, options.opt_level, hosted_cc, entry_target, options.xray_thread_context_v1, options.xray_startup_consumer_v1)
+    val c_result = compile_entry_point_c_with_receipt_v2(user_objects, pid, verbose, options.opt_level, hosted_cc, entry_target, options.xray_thread_context_v1, options.xray_startup_consumer_v1, options.unit_init_symbols)
     if trace:
         print "[LLVM-LINK] entry point compiled"
     val entry_result = match c_result:
@@ -672,11 +676,23 @@ pub fn link_llvm_native_with_receipt_v2(user_objects: [text], output: text, opti
             llvm_native_link_orchestrator_publish_runtime_provider_v1(
                 user_object, user_object,
                 "runtime-link-input:{provider}:output:{output}")
+    for unit_dynlib in options.unit_dynlibs:
+        if not file_exists(unit_dynlib):
+            cleanup_runtime_objects(runtime_objects)
+            file_delete(entry_obj_path)
+            return Err("library-unit dynlib input missing: " + unit_dynlib)
+        all_objects = all_objects.push(unit_dynlib)
     if hosted_os == "macos" or hosted_os == "darwin":
         val requested_arch = if hosted_target == "" or hosted_target == "host" or hosted_target == "native":
             mir_target_context_normalize_arch(hosted_arch)
         else:
             mir_target_context_normalize_arch(hosted_target.split("-")[0])
+        for unit_dynlib in options.unit_dynlibs:
+            val dynlib_error = darwin_runtime_artifact_error_v1(unit_dynlib, requested_arch)
+            if dynlib_error != "":
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                return Err("Darwin library-unit dynlib admission failed: " + dynlib_error + ":" + unit_dynlib)
         val configured_cache_root = env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
         val runtime_manifest_root = if configured_cache_root == "":
             "build/native_cache"
