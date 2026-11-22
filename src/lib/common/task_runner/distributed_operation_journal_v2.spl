@@ -41,12 +41,12 @@ struct DistributedOperationJournalV2:
     parent_lock: i64
     lease_digest: text
     operations: {text: DistributedOperationStateV2}
-    owned_lock: Option<FileLockOwnerV2> = nil
-    windows_store: Option<WindowsJournalStoreV1> = nil
+    owned_lock: Option<FileLockOwnerV2> = None
+    windows_store: Option<WindowsJournalStoreV1> = None
     checkpoint_sequence: i64 = 0
-    retention_profile: Option<DistributedOperationRetentionProfileV2> = nil
+    retention_profile: Option<DistributedOperationRetentionProfileV2> = None
     health_id: i64 = 0
-    linux_storage: Option<OperationJournalLinuxStorageOwnerV1> = nil
+    linux_storage: Option<OperationJournalLinuxStorageOwnerV1> = None
 
 fn operation_health_binding_v2(authority: text, lease: text, maximum: i64,
         profile: Option<DistributedOperationRetentionProfileV2>, io_root: text) -> text:
@@ -95,7 +95,7 @@ fn operation_current_for_owner_v2(owner: DistributedOperationJournalV2,
     Ok(current)
 
 fn operation_owner_check_v2(owner: DistributedOperationJournalV2,
-        turn: Option<OperationJournalHealthTurnV2> = nil) -> Result<bool, text>:
+        turn: Option<OperationJournalHealthTurnV2> = None) -> Result<bool, text>:
     if owner.linux_storage.is_some():
         val backend = operation_backend_v3(owner, turn)?
         val bytes: Option<text> = operation_stored_result_v2(journal_storage_read_v3(backend, "parent.lease", 512), turn, owner.lease_digest)?
@@ -167,7 +167,7 @@ pub fn distributed_operation_journal_open_v2(root: text, authority_digest: text,
 
 fn distributed_operation_journal_replay_v2(root: text, authority_digest: text,
         maximum_events: i64, held: i64, lease_digest: text,
-        retention_profile: Option<DistributedOperationRetentionProfileV2> = nil) -> Result<DistributedOperationJournalV2, text>:
+        retention_profile: Option<DistributedOperationRetentionProfileV2> = None) -> Result<DistributedOperationJournalV2, text>:
     val snapshot = operation_replay_snapshot_v2(root, authority_digest, maximum_events, nil, retention_profile)?
     Ok(DistributedOperationJournalV2(root, authority_digest, snapshot.history.head_commit_digest,
         snapshot.history.head_sequence, maximum_events, held, lease_digest, snapshot.rows,
@@ -347,13 +347,13 @@ pub struct DistributedOperationJournalOpenCleanupV2:
     lease_digest: text
     lease_published: bool
     lock: Option<FileLockOwnerV2>
-    windows_store: Option<WindowsJournalStoreV1> = nil
+    windows_store: Option<WindowsJournalStoreV1> = None
     health_id: i64 = 0
     health_binding: text = ""
     maximum_events: i64 = 0
-    retention_profile: Option<DistributedOperationRetentionProfileV2> = nil
-    linux_storage: Option<OperationJournalLinuxStorageOwnerV1> = nil
-    linux_open_turn: Option<OperationJournalHealthTurnV2> = nil
+    retention_profile: Option<DistributedOperationRetentionProfileV2> = None
+    linux_storage: Option<OperationJournalLinuxStorageOwnerV1> = None
+    linux_open_turn: Option<OperationJournalHealthTurnV2> = None
     linux_error: text = ""
 
 pub enum DistributedOperationJournalOpenV2:
@@ -465,7 +465,7 @@ fn operation_cleanup_held_v2(cleanup: DistributedOperationJournalOpenCleanupV2,
     DistributedOperationJournalCleanupTurnV2(nil, released.closed, released.error, released.state)
 
 fn operation_open_reject_owned_v2(cleanup: DistributedOperationJournalOpenCleanupV2,
-        error: text, turn: Option<OperationJournalHealthTurnV2> = nil) -> DistributedOperationJournalOpenV2:
+        error: text, turn: Option<OperationJournalHealthTurnV2> = None) -> DistributedOperationJournalOpenV2:
     if val held = turn:
         val ended = operation_health_end_v2(held)
         if ended.is_err(): return DistributedOperationJournalOpenV2.CleanupRequired(cleanup, error + ":" + ended.unwrap_err())
@@ -478,7 +478,7 @@ fn operation_open_reject_owned_v2(cleanup: DistributedOperationJournalOpenCleanu
 
 pub fn distributed_operation_journal_open_owned_v2(root: text, authority_digest: text,
         nonce: text, maximum_events: i64,
-        retention_profile: Option<DistributedOperationRetentionProfileV2> = nil) -> DistributedOperationJournalOpenV2:
+        retention_profile: Option<DistributedOperationRetentionProfileV2> = None) -> DistributedOperationJournalOpenV2:
     if (root == "" or not builder_digest_valid_v1(authority_digest) or
             not builder_digest_valid_v1(nonce) or maximum_events <= 0 or maximum_events > 100000):
         return DistributedOperationJournalOpenV2.Rejected("OPERATION_JOURNAL_CONFIGURATION_INVALID")
@@ -492,7 +492,7 @@ pub fn distributed_operation_journal_open_owned_v2(root: text, authority_digest:
     val turn = reserved.unwrap()
     directory_create_private(root)
     val acquired = file_lock_open_owned_v2(root + "/parent.lock", 1)
-    var held: Option<FileLockOwnerV2> = nil
+    var held: Option<FileLockOwnerV2> = None
     match acquired:
         case FileLockOpenV2.Ready(lock): held = Some(lock)
         case FileLockOpenV2.Rejected(error):
@@ -555,7 +555,7 @@ export distributed_operation_journal_checkpoint_v2
 # root is diagnostic only on this path; no Windows IO derives authority from it.
 pub fn distributed_operation_journal_open_windows_v3(root: text, store: WindowsJournalStoreV1,
         authority_digest: text, nonce: text, maximum_events: i64,
-        retention_profile: Option<DistributedOperationRetentionProfileV2> = nil) -> DistributedOperationJournalOpenV2:
+        retention_profile: Option<DistributedOperationRetentionProfileV2> = None) -> DistributedOperationJournalOpenV2:
     var cleanup = DistributedOperationJournalOpenCleanupV2(root, authority_digest, "", false, nil, Some(store))
     val lease = "DISTRIBUTED-OPERATION-LEASE-V2\n{nonce}\n{authority_digest}\n"
     cleanup.lease_digest = sha256_text(lease)
@@ -695,7 +695,7 @@ fn operation_consume_primary_held_v3(owner: DistributedOperationJournalV2,
 # resources are attached to the SAME health ticket before the first openat.
 pub fn distributed_operation_journal_open_linux_v3(root: text, authority_digest: text,
         nonce: text, maximum_events: i64,
-        retention_profile: Option<DistributedOperationRetentionProfileV2> = nil) -> DistributedOperationJournalOpenV2:
+        retention_profile: Option<DistributedOperationRetentionProfileV2> = None) -> DistributedOperationJournalOpenV2:
     operation_journal_open_linux_pinned_v3(root, [], authority_digest, nonce, maximum_events, retention_profile)
 
 # Controller-root sibling: the journal child's parent directory must be the inode (dev/ino) its root reader already
