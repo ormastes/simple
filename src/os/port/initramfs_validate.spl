@@ -64,11 +64,22 @@ fn initramfs_init_artifact_admission(path: text, data: [u8]) -> Result<(), text>
         return Err("init-artifact-source-or-placeholder-path")
     if data.len() < 64 or data.len() > MAX_INIT_ARTIFACT_BYTES:
         return Err("init-artifact-size-invalid")
-    val elf = _native_elf_prefix(data, data.len())
-    val smf = _canonical_executable_smf(data)
-    if not elf and not smf:
+    # An SMF envelope wraps an ELF stub, so its ELF prefix alone must not
+    # admit it: any artifact carrying an SMF trailer must pass SMF admission.
+    if _has_smf_trailer(data):
+        if not _canonical_executable_smf(data):
+            return Err("init-artifact-smf-envelope-invalid")
+        return Ok(())
+    if not _native_elf_prefix(data, data.len()):
         return Err("init-artifact-native-format-invalid")
     Ok(())
+
+fn _has_smf_trailer(data: [u8]) -> bool:
+    if data.len() < 192:
+        return false
+    val at = data.len() - 128
+    data[at].to_i64() == 0x53 and data[at + 1].to_i64() == 0x4D and
+        data[at + 2].to_i64() == 0x46
 
 fn simple_toolchain_role_paths() -> [text]:
     var paths: [text] = []
@@ -256,6 +267,22 @@ fn _expected_toolchain_role(path: text) -> text:
             return "loader"
     ""
 
+fn initramfs_tool_role_artifact_admission(role: text, path: text, data: [u8]) -> Result<(), text>:
+    if role != "compiler" and role != "interpreter" and role != "loader":
+        return Err("toolchain-role-name-invalid")
+    if path == "" or not path.starts_with("/") or path.contains("\0") or
+       path.contains("\n") or path.contains("\r") or path.contains("\t") or
+       path.contains("//") or path.contains("/./") or path.contains("/../") or
+       path.ends_with("/.") or path.ends_with("/.."):
+        return Err("toolchain-role-path-invalid")
+    if _expected_toolchain_role(path) != role:
+        return Err("toolchain-role-path-mismatch")
+    if data.len() < 64 or data.len() > MAX_INIT_ARTIFACT_BYTES:
+        return Err("toolchain-role-size-invalid")
+    if not _native_elf_prefix(data, data.len()) and not _canonical_executable_smf(data):
+        return Err("toolchain-role-native-format-invalid")
+    Ok(())
+
 fn _validate_toolchain_manifest(entries: [CpioEntry], init_digest: text) -> Result<(), text>:
     val manifest_entry = _archive_entry(entries, "SYS/SIMPLETOOL.SDN") ??
         return Err("toolchain-manifest-missing")
@@ -293,6 +320,10 @@ fn _validate_toolchain_manifest(entries: [CpioEntry], init_digest: text) -> Resu
             return Err("toolchain-role-payload-missing")
         if (payload.mode.to_i64() & 0xF000) != 0x8000 or payload.data.len() == 0:
             return Err("toolchain-role-payload-invalid")
+        match initramfs_tool_role_artifact_admission(
+            binding.role, binding.guest_path, payload.data):
+            case Ok(()): ()
+            case Err(message): return Err(message)
         if sha256_u8_hex(payload.data) != binding.digest:
             return Err("toolchain-role-payload-digest-mismatch")
         if role_digests.has(binding.role):
@@ -314,6 +345,28 @@ fn _validate_toolchain_manifest(entries: [CpioEntry], init_digest: text) -> Resu
        init_digest == loader_digest:
         return Err("toolchain-role-digests-not-distinct")
     Ok(())
+
+enum InitramfsRoleGateV1:
+    # Archive carries no SYS/SIMPLETOOL.SDN; toolchain role paths must not be served.
+    NoToolchainManifest
+    # Archive manifest bound every role path to its exact archived digest.
+    ToolchainVerified
+
+fn initramfs_role_gate_v1(entries: [CpioEntry]) -> Result<InitramfsRoleGateV1, text>:
+    """Kernel-side role/digest gate over an already bounded-parsed archive.
+
+    Run by the kernel initramfs reader before any archived byte is served.
+    """
+    val manifest = _archive_entry(entries, "SYS/SIMPLETOOL.SDN")
+    if not manifest.?:
+        return Ok(InitramfsRoleGateV1.NoToolchainManifest)
+    val init_entry = _archive_entry(entries, "sbin/init") ??
+        return Err("required-entry-missing:sbin/init")
+    if (init_entry.mode.to_i64() & 0xF000) != 0x8000:
+        return Err("required-file-invalid:sbin/init")
+    initramfs_init_artifact_admission("sbin/init", init_entry.data)?
+    _validate_toolchain_manifest(entries, sha256_u8_hex(init_entry.data))?
+    Ok(InitramfsRoleGateV1.ToolchainVerified)
 
 fn validate_cpio_toolchain_archive(raw: [u8]) -> Result<(), text>:
     val entries = _validated_newc_entries(raw)?
@@ -347,7 +400,7 @@ fn _zstd_bounded_le(input: [u8], start: i64, width: i64) -> Result<i64, text>:
             return Err("zstd-frame-size-overflow")
         value = value | (byte << (i * 8))
         i = i + 1
-    value
+    Ok(value)
 
 fn _zstd_single_frame_size(input: [u8]) -> Result<i64, text>:
     if input.len() < 9 or not (input[0].to_i64() == 0x28 and
@@ -436,4 +489,5 @@ fn validate_zstd_toolchain_archive(compressed: [u8]) -> Result<(), text>:
 export MAX_INITRAMFS_COMPRESSED_BYTES, MAX_INITRAMFS_EXPANDED_BYTES
 export SIMPLE_COMPILER_ROLE_PATHS, SIMPLE_INTERPRETER_ROLE_PATHS, SIMPLE_LOADER_ROLE_PATHS
 export simple_toolchain_role_paths, initramfs_init_artifact_admission
-export validate_cpio_toolchain_archive, validate_zstd_toolchain_archive
+export initramfs_tool_role_artifact_admission
+export validate_cpio_toolchain_archive, validate_zstd_toolchain_archive, InitramfsRoleGateV1, initramfs_role_gate_v1
