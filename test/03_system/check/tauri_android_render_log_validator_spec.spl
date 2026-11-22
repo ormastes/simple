@@ -68,7 +68,7 @@ recapture it with the scripts/check command named in the scenario before shippin
 
 # @tag: system, gui, tauri, android, vulkan, renderer
 
-use std.io_runtime.{file_read, process_run}
+use std.io_runtime.{dir_create_all, dir_remove_all, file_read, file_write_exact, process_run}
 use std.spec.*
 
 # Lifecycle: doc/01_research/ui/render_path/electron_tauri_vulkan_enablement_2026-06-16.md ;
@@ -77,6 +77,28 @@ use std.spec.*
 # doc/05_design/gpu_renderer_processing_backends_metal.md
 # @manual_section: proof validators
 
+fn _valid_android_log() -> text:
+    "[tauri-shell] render, html_len=4096\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\nforeground=com.simple.ui\n"
+
+fn _prepare_dir(root: text):
+    val _removed = dir_remove_all(root)
+    expect(dir_create_all(root)).to_equal(true)
+
+fn _run_validator(logs: [text]) -> (text, i64):
+    var args: [text] = ["scripts/check/validate-tauri-android-render-log-proof.js"]
+    for log_path in logs:
+        args.push(log_path)
+    val (stdout, _stderr, code) = process_run("node", args)
+    (stdout, code)
+
+fn _create_symlink(target: text, link_path: text) -> i64:
+    val (_out, _err, code) = process_run("node", ["-e", "require('fs').symlinkSync(process.argv[1], process.argv[2])", target, link_path])
+    code
+
+fn _create_hardlink(existing_path: text, link_path: text) -> i64:
+    val (_out, _err, code) = process_run("node", ["-e", "require('fs').linkSync(process.argv[1], process.argv[2])", existing_path, link_path])
+    code
+
 describe "Tauri Android render-log validator":
 
     it "accepts complete Android WebView Vulkan render-log proof":
@@ -84,13 +106,12 @@ describe "Tauri Android render-log validator":
         step("Verify: accepts complete Android WebView Vulkan render-log proof")
         # @req: REQ-CHECK-TaurAndrRendLogVali-001
         val root = "build/test-tauri-android-render-log-validator-pass"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + root + "/android.log && " +
-            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/android.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        val log_path = root + "/android.log"
+        expect(file_write_exact(log_path, _valid_android_log())).to_equal(true)
+        val (evidence, code) = _run_validator([log_path])
         expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
-        val evidence = file_read(root + "/evidence.env")
         step("Inspect normalized Android render-log rows")
         expect(evidence).to_contain("android_render_log_validation_status=pass")
         expect(evidence).to_contain("android_render_log_validation_reason=pass")
@@ -103,53 +124,55 @@ describe "Tauri Android render-log validator":
         expect(evidence).to_contain("android_render_log_duplicate_source_count=0")
         expect(evidence).to_contain("android_render_log_html_len=4096")
         expect(evidence).to_contain("android_render_log_source_coherence_status=pass")
-        expect(evidence).to_contain("android_render_log_coherent_source_path=" + root + "/android.log")
-        expect(evidence).to_contain("android_render_log_coherent_source_size_bytes=88")
+        expect(evidence).to_contain("android_render_log_coherent_source_path=" + log_path)
+        expect(evidence).to_contain("android_render_log_coherent_source_size_bytes=113")
         expect(evidence).to_contain("android_render_log_marker_status=pass")
         expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
+        expect(evidence).to_contain("android_render_log_foreground_marker_status=pass")
         expect(evidence).to_contain("android_render_log_failure_marker_status=pass")
 
     it "binds html length evidence to the coherent Android Vulkan source":
-        # @req: REQ-CHECK-TaurAndRendLogVali-002
+        # @req: REQ-CHECK-TaurAndrRendLogVali-002
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-android-render-log-validator-coherent-html-len"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf '[tauri-shell] render, html_len=999\\n' > " + root + "/render-only.log && " +
-            "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + root + "/android.log && " +
-            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/render-only.log " + root + "/android.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        val render_only = root + "/render-only.log"
+        val android_log = root + "/android.log"
+        expect(file_write_exact(render_only, "[tauri-shell] render, html_len=999\n")).to_equal(true)
+        expect(file_write_exact(android_log, _valid_android_log())).to_equal(true)
+        val (evidence, code) = _run_validator([render_only, android_log])
         expect(code).to_equal(0)  # oracle: validator exits 0 only for a complete well-formed proof (fail-closed exit contract)
 
-        val evidence = file_read(root + "/evidence.env")
         step("Confirm html_len is emitted from the coherent Vulkan source")
         expect(evidence).to_contain("android_render_log_validation_status=pass")
         expect(evidence).to_contain("android_render_log_requested_source_count=2")
         expect(evidence).to_contain("android_render_log_source_count=2")
         expect(evidence).to_contain("android_render_log_duplicate_source_count=0")
         expect(evidence).to_contain("android_render_log_source_coherence_status=pass")
-        expect(evidence).to_contain("android_render_log_coherent_source_path=" + root + "/android.log")
-        expect(evidence).to_contain("android_render_log_coherent_source_size_bytes=88")
+        expect(evidence).to_contain("android_render_log_coherent_source_path=" + android_log)
+        expect(evidence).to_contain("android_render_log_coherent_source_size_bytes=113")
         expect(evidence).to_contain("android_render_log_html_len=4096")
         expect_not(evidence.contains("android_render_log_html_len=999"))
 
     it "rejects malformed Android render html length markers":
-        # @req: REQ-CHECK-TaurAndRendLogVali-003
+        # @req: REQ-CHECK-TaurAndrRendLogVali-003
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         step("Verify: rejects malformed Android render html length markers")
         val root = "build/test-tauri-android-render-log-validator-html-len"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf '[tauri-shell] render, html_len=4096px\\nHWUI Vulkan renderer ready\\n' > " + root + "/suffix.log && " +
-            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/suffix.log > " + root + "/suffix.env; " +
-            "printf '[tauri-shell] render, html_len=0\\nHWUI Vulkan renderer ready\\n' > " + root + "/zero.log && " +
-            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/zero.log > " + root + "/zero.env; " +
-            "printf '[tauri-shell] render, html_len=10000001\\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + root + "/huge.log && " +
-            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/huge.log > " + root + "/huge.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
+        _prepare_dir(root)
+        val suffix_log = root + "/suffix.log"
+        val zero_log = root + "/zero.log"
+        val huge_log = root + "/huge.log"
+        expect(file_write_exact(suffix_log, "[tauri-shell] render, html_len=4096px\nHWUI Vulkan renderer ready\n")).to_equal(true)
+        expect(file_write_exact(zero_log, "[tauri-shell] render, html_len=0\nHWUI Vulkan renderer ready\n")).to_equal(true)
+        expect(file_write_exact(huge_log, "[tauri-shell] render, html_len=10000001\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\n")).to_equal(true)
+        val (suffix, suffix_code) = _run_validator([suffix_log])
+        val (zero, zero_code) = _run_validator([zero_log])
+        val (huge, huge_code) = _run_validator([huge_log])
+        expect(suffix_code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
+        expect(zero_code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
+        expect(huge_code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val suffix = file_read(root + "/suffix.env")
-        val zero = file_read(root + "/zero.env")
-        val huge = file_read(root + "/huge.env")
         expect(suffix).to_contain("android_render_log_validation_reason=android-render-log-html-len-malformed")
         expect(suffix).to_contain("android_render_log_marker_status=fail")
         expect(suffix).to_contain("android_render_log_html_len=")
@@ -162,52 +185,67 @@ describe "Tauri Android render-log validator":
         expect_not(huge.contains("android_render_log_html_len=10000001"))
 
     it "rejects missing Vulkan render backing markers":
-        # @req: REQ-CHECK-TaurAndRendLogVali-004
+        # @req: REQ-CHECK-TaurAndrRendLogVali-004
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         step("Verify: rejects missing Vulkan render backing markers")
         val root = "build/test-tauri-android-render-log-validator-missing-vulkan"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf '[tauri-shell] render, html_len=4096\\nplain WebView log\\n' > " + root + "/android.log && " +
-            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/android.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        val log_path = root + "/android.log"
+        expect(file_write_exact(log_path, "[tauri-shell] render, html_len=4096\nplain WebView log\n")).to_equal(true)
+        val (evidence, code) = _run_validator([log_path])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         expect(evidence).to_contain("android_render_log_validation_reason=android-vulkan-log-marker-missing")
         expect(evidence).to_contain("android_render_log_marker_status=pass")
         expect(evidence).to_contain("android_render_log_vulkan_marker_status=fail")
 
     it "rejects pass markers split across unrelated Android log sources":
-        # @req: REQ-CHECK-TaurAndRendLogVali-005
+        # @req: REQ-CHECK-TaurAndrRendLogVali-005
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         step("Verify: rejects pass markers split across unrelated Android log sources")
         val root = "build/test-tauri-android-render-log-validator-source-mismatch"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf '[tauri-shell] render, html_len=4096\\n' > " + root + "/render.log && " +
-            "printf 'HWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + root + "/vulkan.log && " +
-            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/render.log " + root + "/vulkan.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        val render_log = root + "/render.log"
+        val vulkan_log = root + "/vulkan.log"
+        expect(file_write_exact(render_log, "[tauri-shell] render, html_len=4096\n")).to_equal(true)
+        expect(file_write_exact(vulkan_log, "HWUI Vulkan renderer ready VK_ANDROID_native_buffer\nforeground=com.simple.ui\n")).to_equal(true)
+        val (evidence, code) = _run_validator([render_log, vulkan_log])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         expect(evidence).to_contain("android_render_log_validation_reason=android-render-log-source-mismatch")
         expect(evidence).to_contain("android_render_log_source_count=2")
         expect(evidence).to_contain("android_render_log_source_coherence_status=fail")
         expect(evidence).to_contain("android_render_log_marker_status=pass")
         expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
+        expect(evidence).to_contain("android_render_log_foreground_marker_status=pass")
+
+    it "rejects Android render logs without foreground activity markers":
+        # @req: REQ-CHECK-TaurAndRendLogVali-014
+        # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
+        step("Verify: rejects Android render logs without foreground activity markers")
+        val root = "build/test-tauri-android-render-log-validator-missing-foreground"
+        _prepare_dir(root)
+        val log_path = root + "/android.log"
+        expect(file_write_exact(log_path, "[tauri-shell] render, html_len=4096\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\n")).to_equal(true)
+        val (evidence, code) = _run_validator([log_path])
+        expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
+
+        expect(evidence).to_contain("android_render_log_validation_reason=android-foreground-marker-missing")
+        expect(evidence).to_contain("android_render_log_marker_status=pass")
+        expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
+        expect(evidence).to_contain("android_render_log_foreground_marker_status=fail")
 
     it "rejects missing requested Android log source paths":
-        # @req: REQ-CHECK-TaurAndRendLogVali-006
+        # @req: REQ-CHECK-TaurAndrRendLogVali-006
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         step("Verify: rejects missing requested Android log source paths")
         val root = "build/test-tauri-android-render-log-validator-missing-source"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + root + "/android.log && " +
-            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/android.log " + root + "/missing.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        val android_log = root + "/android.log"
+        expect(file_write_exact(android_log, _valid_android_log())).to_equal(true)
+        val (evidence, code) = _run_validator([android_log, root + "/missing.log"])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         expect(evidence).to_contain("android_render_log_validation_status=fail")
         expect(evidence).to_contain("android_render_log_validation_reason=android-render-log-source-missing")
         expect(evidence).to_contain("android_render_log_requested_source_count=2")
@@ -218,18 +256,18 @@ describe "Tauri Android render-log validator":
         expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
 
     it "rejects empty requested Android log source paths":
-        # @req: REQ-CHECK-TaurAndRendLogVali-007
+        # @req: REQ-CHECK-TaurAndrRendLogVali-007
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         step("Verify: rejects empty requested Android log source paths")
         val root = "build/test-tauri-android-render-log-validator-empty-source"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + root + "/android.log && " +
-            ": > " + root + "/empty.log && " +
-            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/android.log " + root + "/empty.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        val android_log = root + "/android.log"
+        val empty_log = root + "/empty.log"
+        expect(file_write_exact(android_log, _valid_android_log())).to_equal(true)
+        expect(file_write_exact(empty_log, "")).to_equal(true)
+        val (evidence, code) = _run_validator([android_log, empty_log])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         expect(evidence).to_contain("android_render_log_validation_status=fail")
         expect(evidence).to_contain("android_render_log_validation_reason=android-render-log-source-empty")
         expect(evidence).to_contain("android_render_log_requested_source_count=2")
@@ -242,20 +280,22 @@ describe "Tauri Android render-log validator":
         expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
 
     it "rejects symlinked requested Android log source paths":
-        # @req: REQ-CHECK-TaurAndRendLogVali-008
+        # @req: REQ-CHECK-TaurAndrRendLogVali-008
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         step("Verify: rejects symlinked requested Android log source paths")
         val root = "build/test-tauri-android-render-log-validator-symlink-source"
         val external = "build/test-tauri-android-render-log-validator-symlink-source-external"
-        val command = "rm -rf " + root + " " + external + " && mkdir -p " + root + " " + external + " && " +
-            "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + root + "/android.log && " +
-            "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + external + "/android.log && " +
-            "ln -s ../test-tauri-android-render-log-validator-symlink-source-external/android.log " + root + "/linked.log && " +
-            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/android.log " + root + "/linked.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        _prepare_dir(external)
+        val android_log = root + "/android.log"
+        val ext_log = external + "/android.log"
+        val linked_log = root + "/linked.log"
+        expect(file_write_exact(android_log, _valid_android_log())).to_equal(true)
+        expect(file_write_exact(ext_log, _valid_android_log())).to_equal(true)
+        expect(_create_symlink("../test-tauri-android-render-log-validator-symlink-source-external/android.log", linked_log)).to_equal(0)
+        val (evidence, code) = _run_validator([android_log, linked_log])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         expect(evidence).to_contain("android_render_log_validation_status=fail")
         expect(evidence).to_contain("android_render_log_validation_reason=android-render-log-source-symlink")
         expect(evidence).to_contain("android_render_log_requested_source_count=2")
@@ -268,19 +308,20 @@ describe "Tauri Android render-log validator":
         expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
 
     it "rejects hardlinked requested Android log source paths":
-        # @req: REQ-CHECK-TaurAndRendLogVali-009
+        # @req: REQ-CHECK-TaurAndrRendLogVali-009
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         step("Verify: rejects hardlinked requested Android log source paths")
         val root = "build/test-tauri-android-render-log-validator-hardlink-source"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + root + "/android.log && " +
-            "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + root + "/original.log && " +
-            "ln " + root + "/original.log " + root + "/linked.log && " +
-            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/android.log " + root + "/linked.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        val android_log = root + "/android.log"
+        val original_log = root + "/original.log"
+        val linked_log = root + "/linked.log"
+        expect(file_write_exact(android_log, _valid_android_log())).to_equal(true)
+        expect(file_write_exact(original_log, _valid_android_log())).to_equal(true)
+        expect(_create_hardlink(original_log, linked_log)).to_equal(0)
+        val (evidence, code) = _run_validator([android_log, linked_log])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         expect(evidence).to_contain("android_render_log_validation_status=fail")
         expect(evidence).to_contain("android_render_log_validation_reason=android-render-log-source-hardlink")
         expect(evidence).to_contain("android_render_log_requested_source_count=2")
@@ -294,16 +335,15 @@ describe "Tauri Android render-log validator":
         expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
 
     it "rejects duplicate requested Android log source paths":
-        # @req: REQ-CHECK-TaurAndRendLogVali-010
+        # @req: REQ-CHECK-TaurAndrRendLogVali-010
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-android-render-log-validator-duplicate-source"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + root + "/android.log && " +
-            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/android.log " + root + "/android.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        val android_log = root + "/android.log"
+        expect(file_write_exact(android_log, _valid_android_log())).to_equal(true)
+        val (evidence, code) = _run_validator([android_log, android_log])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         step("Confirm one Android render log cannot satisfy two requested source channels")
         expect(evidence).to_contain("android_render_log_validation_status=fail")
         expect(evidence).to_contain("android_render_log_validation_reason=android-render-log-source-duplicate")
@@ -318,16 +358,17 @@ describe "Tauri Android render-log validator":
         expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
 
     it "rejects non-regular requested Android log source paths":
-        # @req: REQ-CHECK-TaurAndRendLogVali-011
+        # @req: REQ-CHECK-TaurAndrRendLogVali-011
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         val root = "build/test-tauri-android-render-log-validator-nonregular-source"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " " + root + "/not-a-log && " +
-            "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready VK_ANDROID_native_buffer\\n' > " + root + "/android.log && " +
-            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/android.log " + root + "/not-a-log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        val android_log = root + "/android.log"
+        val dir_path = root + "/not-a-log"
+        expect(dir_create_all(dir_path)).to_equal(true)
+        expect(file_write_exact(android_log, _valid_android_log())).to_equal(true)
+        val (evidence, code) = _run_validator([android_log, dir_path])
         expect(code).to_equal(1)  # oracle: validator exits 1 on the injected defect (fail-closed reject contract)
 
-        val evidence = file_read(root + "/evidence.env")
         step("Confirm Android render-log artifacts must be regular files")
         expect(evidence).to_contain("android_render_log_validation_status=fail")
         expect(evidence).to_contain("android_render_log_validation_reason=android-render-log-source-not-regular")
@@ -343,22 +384,21 @@ describe "Tauri Android render-log validator":
         expect(evidence).to_contain("android_render_log_vulkan_marker_status=pass")
 
     it "rejects Android render-log failure markers":
-        # @req: REQ-CHECK-TaurAndRendLogVali-012
+        # @req: REQ-CHECK-TaurAndrRendLogVali-012
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         step("Verify: rejects Android render-log failure markers")
         val root = "build/test-tauri-android-render-log-validator-failure"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf '[tauri-shell] render, html_len=4096\\nHWUI Vulkan renderer ready\\nFatal signal 11\\n' > " + root + "/android.log && " +
-            "node scripts/check/validate-tauri-android-render-log-proof.js " + root + "/android.log > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root)
+        val android_log = root + "/android.log"
+        expect(file_write_exact(android_log, "[tauri-shell] render, html_len=4096\nHWUI Vulkan renderer ready\nFatal signal 11\n")).to_equal(true)
+        val (evidence, code) = _run_validator([android_log])
         expect(code).to_equal(1)  # oracle: value fixed by the spec contract
 
-        val evidence = file_read(root + "/evidence.env")
         expect(evidence).to_contain("android_render_log_validation_reason=android-render-log-failure-marker")
         expect(evidence).to_contain("android_render_log_failure_marker_status=fail")
 
     it "keeps the Android renderer wrapper and mobile aggregate wired to the validator":
-        # @req: REQ-CHECK-TaurAndRendLogVali-013
+        # @req: REQ-CHECK-TaurAndrRendLogVali-013
         # @capture(protocol_json): validator exit code and normalized verdict rows retained for review
         step("Verify: keeps the Android renderer wrapper and mobile aggregate wired to the validator")
         val direct = file_read("scripts/check/check-tauri-android-mobile-renderer-evidence.shs")
@@ -421,7 +461,9 @@ describe "Tauri Android render-log validator":
         expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_render_log_coherent_source_artifact_status")
         expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_event_body_key_routed")
         expect(aggregate).to_contain("tauri_mobile_renderer_parity_android_mdi_event_taskbar_labels_visible")
-        expect(aggregate).to_contain("android-render-log-html-len-malformed")
+        expect(aggregate).to_contain("android_render_log_validation_reason:-android-render-log-marker-missing")
+        expect(aggregate).to_contain("android-foreground-marker-missing")
+        expect(aggregate).to_contain("android_render_log_foreground_marker_status")
         expect(aggregate).to_contain("android-render-log-coherent-source-artifact-missing")
         expect(aggregate).to_contain("android-render-log-coherent-source-size-mismatch")
         expect(aggregate).to_contain("android-render-log-coherent-source-missing")
