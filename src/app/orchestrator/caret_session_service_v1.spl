@@ -167,32 +167,41 @@ fn _orch_caret_handle_request_v1(info: OrchestratorCaretServerInfoV1, dash: CsDa
         }))
 
     if action == "inspect":
-        val inspect_id = if target != "": target
+        val pre_recs = cs_container_reconcile_v1(d.session, live_ids)
+        val inspect_key = if target != "": target
             else: (if d.selected >= 0 and d.selected < d.agents.len(): d.agents[d.selected].agent_id else: "")
-        var agent_status = "not-found"
-        var pane_id = ""
+        var resolved_agent_id = inspect_key
         var container_state = "none"
         var exit_code = -1
         var worktree_path = ""
+        for rec in pre_recs:
+            if rec.agent_id == inspect_key or rec.name == inspect_key:
+                resolved_agent_id = rec.agent_id
+                container_state = rec.state
+                exit_code = rec.exit_code
+                worktree_path = rec.worktree_path
+        var agent_status = "not-found"
+        var pane_id = ""
         var screen_text = ""
         var idx = 0
         while idx < d.agents.len():
-            if d.agents[idx].agent_id == inspect_id:
+            if d.agents[idx].agent_id == resolved_agent_id:
                 agent_status = d.agents[idx].status
                 pane_id = d.agents[idx].pane_id
-                val (ds, _sw) = cs_handle_command(d, "/switch " + inspect_id)
+                val (ds, _sw) = cs_handle_command(d, "/switch " + resolved_agent_id)
                 d = cs_refresh(ds)
                 screen_text = d.screen.join("\n")
+                break
             idx = idx + 1
         for rec in cs_container_reconcile_v1(d.session, _orch_caret_live_pane_ids_v1(d.session)):
-            if rec.agent_id == inspect_id or rec.name == inspect_id:
+            if rec.agent_id == resolved_agent_id or rec.name == inspect_key:
                 container_state = rec.state
                 exit_code = rec.exit_code
                 worktree_path = rec.worktree_path
         return (d, uid_seq, false, _orch_caret_encode_reply_v1({
             "ok": SdnValue.Bool(agent_status != "not-found" or container_state != "none"),
             "status": SdnValue.String("inspected"),
-            "agentId": SdnValue.String(inspect_id),
+            "agentId": SdnValue.String(resolved_agent_id),
             "agentStatus": SdnValue.String(agent_status),
             "paneId": SdnValue.String(pane_id),
             "containerState": SdnValue.String(container_state),

@@ -1135,17 +1135,22 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
         val target_id = if words.len() > 1: words[1] else: ""
         var pane_id = if words.len() > 2: words[2] else: ""
         val live_before_close = _live_pane_ids_for(d.session)
-        var closing_live = false
+        # Reconcile BEFORE killing the pane so intentionally closing a live
+        # running container cleans it up, while an already-crashed container
+        # still closes any remaining pane slot yet preserves its worktree.
+        var already_crashed = false
         for rec in cs_container_reconcile_v1(d.session, live_before_close):
             if rec.agent_id == target_id or rec.name == target_id:
-                closing_live = rec.state == "running"
-                pane_id = if closing_live: rec.pane_id else: ""
+                if rec.state == "crashed":
+                    already_crashed = true
+                if pane_id == "" and rec.pane_id != "" and live_before_close.contains(rec.pane_id):
+                    pane_id = rec.pane_id
         if pane_id != "":
             val killed = pane_kill(d.session, pane_id)
             if not killed and _live_pane_ids_for(d.session).contains(pane_id):
                 return (cs_refresh(d), "could not close pane " + pane_id)
         val (cleaned, note) = cs_container_close_record_v1(d.session, target_id,
-            live_before_close, closing_live)
+            (if already_crashed: live_before_close else: []), not already_crashed)
         if not cleaned:
             return (cs_refresh(d), note)
         if cs_container_launched(d.session, target_id):
@@ -1159,13 +1164,19 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
         val outcome = cs_orchestrator_dispatch_v1(d.session, orch_words)
         return (cs_refresh(d), outcome)
     if head == "pane:kill":
+        # Reconcile BEFORE killing the pane so already-crashed containers keep
+        # their worktree while intentionally killed running agents clean up.
+        var already_crashed = false
+        for rec in cs_container_reconcile_v1(d.session, _live_pane_ids_for(d.session)):
+            if (rec.agent_id == words[1] or rec.name == words[1]) and rec.state == "crashed":
+                already_crashed = true
         val killed = pane_kill(d.session, words[2])
         # Closing the pane only ends the engine CLIENT; the container outlives
         # it. Reap whether or not the pane kill succeeded — but only a
         # container this process launched, verified by its instance label.
         var container_note = ""
         val (lc_cleaned, lc_note) = cs_container_close_record_v1(d.session, words[1],
-            _live_pane_ids_for(d.session), false)
+            (if already_crashed: _live_pane_ids_for(d.session) else: []), not already_crashed)
         if lc_note != "":
             container_note = "; " + lc_note
         elif cs_container_launched(d.session, words[1]):
