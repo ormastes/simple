@@ -326,23 +326,8 @@ DARWIN_XRAY_EXPORT int64_t simple_xray_llvm_install(int64_t arena, int64_t gener
         return 0;
     }
     int64_t *base = (int64_t *)(intptr_t)arena;
-    int64_t capacity = base[CH_CAPACITY];
-    if (capacity <= 0 || capacity > CH_MAX_RECORDS) return 0;
-    if (base[CH_GENERATION] != generation || base[CH_CONTEXT] != context) return 0;
-    if (base[CH_ARENA_BYTES] != (CH_HEADER_WORDS + capacity * CH_RECORD_WORDS) * 8) {
-        return 0;
-    }
-    if (__atomic_load_n(&base[CH_GATE], __ATOMIC_SEQ_CST) != 0) return 0;
-    uint64_t mode = __atomic_load_n(&g_xray_handler_mode, __ATOMIC_ACQUIRE);
-    if (mode == 0) {
-        uint64_t expected = 0;
-        if (!__atomic_compare_exchange_n(&g_xray_handler_mode, &expected, 1, 0,
-                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-            mode = expected;
-        } else {
-            mode = 1;
-        }
-    }
+    if (!simple_xray_arena_install_ready_v1(base, generation, context)) return 0;
+    uint64_t mode = simple_xray_claim_handler_mode_v1(&g_xray_handler_mode, 1);
     if (mode != 1) return 0;
     int64_t *previous = __atomic_load_n(&g_simple_xray_arena, __ATOMIC_ACQUIRE);
     __atomic_store_n(&g_simple_xray_module_instance, (uint64_t)module_instance,

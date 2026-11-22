@@ -1,0 +1,447 @@
+#!/bin/sh
+# fast-verify-bootstrap-scripts.shs
+#
+# Sub-second fail-closed integrity, banner, syntax, and `--path-check` verifier
+# for protected bootstrap scripts listed in `config/check/bootstrap_protected_scripts.sdn`.
+#
+# Checks:
+#   1. `.sdn` xxh3 sidecar seal (`bootstrap_protected_scripts.xxh3_<hex>.csm`)
+#      verified via `scripts/check/sdn-seal-lib.shs` against `sdn_seal_policy.sdn`.
+#   2. `PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER`
+#      banner in the top 12 lines of every protected script.
+#   3. LF-normalized SHA-256 match (`tr -d '\r'`) against `bootstrap_protected_scripts.sdn`.
+#   4. `sh -n` / `bash -n` syntax check (plus batch structure check for `.bat`/`.cmd`).
+#   5. `sh scripts/check/check-bootstrap-path-matrix-all.shs --fast`.
+#
+# Modes:
+#   (default)          Full sub-second verification (checks 1..5)
+#   --hashes-only      Verify `.sdn` seal + protected banner + LF-normalized SHA-256s (checks 1..3)
+#   --update-manifest  Recompute LF-normalized SHA-256s and reseal `.sdn` via `reseal-sdn-crc32.shs`
+#   --selftest         Run isolated fixture suite verifying clean pass, 1-byte tamper,
+#                      banner removal, and extensible superset vs missing PATH_ACTION
+#
+# Verdict (last stdout line):
+#   PASS — <n> protected bootstrap script(s) verified ...   exit 0
+#   FAIL — ...                                              exit 1
+#   ERROR — nothing was checked (<reason>)                  exit 2
+
+set -u
+
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || {
+  echo "ERROR — nothing was checked (cannot locate script directory)"
+  exit 2
+}
+
+if [ ! -f "$HERE/sdn-seal-lib.shs" ]; then
+  echo "ERROR — nothing was checked (missing $HERE/sdn-seal-lib.shs)"
+  exit 2
+fi
+. "$HERE/sdn-seal-lib.shs"
+
+MODE="full"
+ROOT_DIR=""
+MANIFEST_REL="config/check/bootstrap_protected_scripts.sdn"
+POLICY_REL="config/check/sdn_seal_policy.sdn"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --hashes-only) MODE="hashes-only"; shift ;;
+    --update-manifest) MODE="update-manifest"; shift ;;
+    --selftest) MODE="selftest"; shift ;;
+    --root)
+      [ "$#" -ge 2 ] || { echo "ERROR — nothing was checked (--root requires a directory)"; exit 2; }
+      ROOT_DIR=$2; shift 2 ;;
+    --root=*) ROOT_DIR=${1#*=}; shift ;;
+    --help|-h)
+      echo "usage: sh scripts/check/fast-verify-bootstrap-scripts.shs [--hashes-only|--update-manifest|--selftest] [--root DIR]"
+      exit 0 ;;
+    *)
+      echo "ERROR — nothing was checked (unknown option '$1')"
+      exit 2 ;;
+  esac
+done
+
+if [ -z "$ROOT_DIR" ]; then
+  ROOT_DIR=$(CDPATH= cd -- "$HERE/../.." 2>/dev/null && pwd -P) || {
+    echo "ERROR — nothing was checked (cannot resolve repo root)"
+    exit 2
+  }
+fi
+
+lf_sha256() {
+  _f=$1
+  if command -v sha256sum >/dev/null 2>&1; then
+    tr -d '\r' < "$_f" | sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    tr -d '\r' < "$_f" | shasum -a 256 | awk '{print $1}'
+  else
+    echo "ERROR: missing sha256sum/shasum" >&2
+    return 1
+  fi
+}
+
+parse_manifest_rows() {
+  _mf=$1
+  awk '
+    function trim(s) {
+      sub(/^[ \t\r]+/, "", s)
+      sub(/[ \t\r]+$/, "", s)
+      return s
+    }
+    /^[ \t]*bootstrap_protected_scripts[ \t]*\|/ { in_tbl = 1; next }
+    in_tbl && /^[ \t\r]*$/ { in_tbl = 0; next }
+    in_tbl && /^    / {
+      row = substr($0, 5)
+      if (row ~ /^[ \t]*#/) next
+      n = split(row, c, ",")
+      if (n >= 4) {
+        printf "%s\t%s\t%s\t%s\n", trim(c[1]), trim(c[2]), trim(c[3]), trim(c[4])
+      }
+    }
+  ' "$_mf"
+}
+
+check_banner_top12() {
+  _file=$1
+  _kind=$2
+  case "$_kind" in
+    sh)
+      head -n 12 "$_file" | tr -d '\r' | grep -Eq '^[[:space:]]*#.*PROTECTED BOOTSTRAP SCRIPT.*DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER'
+      ;;
+    bat)
+      head -n 12 "$_file" | tr -d '\r' | grep -Eq '^[[:space:]]*([Rr][Ee][Mm][[:space:]]|::).*PROTECTED BOOTSTRAP SCRIPT.*DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+check_syntax() {
+  _file=$1
+  _shell=$2
+  case "$_shell" in
+    sh)
+      sh -n "$_file"
+      ;;
+    bash)
+      if ! command -v bash >/dev/null 2>&1; then
+        echo "required interpreter bash unavailable" >&2
+        return 2
+      fi
+      bash -n "$_file"
+      ;;
+    bat)
+      head -n 5 "$_file" | tr -d '\r' | grep -Eiq '^@echo[[:space:]]+off'
+      ;;
+    *)
+      echo "unsupported syntax_shell '$_shell'" >&2
+      return 2
+      ;;
+  esac
+}
+
+update_manifest_in_root() {
+  _uroot=$1
+  _umf="$_uroot/$MANIFEST_REL"
+  _upol="$_uroot/$POLICY_REL"
+  if [ ! -f "$_umf" ]; then
+    echo "ERROR — nothing was checked (missing $_umf)"
+    return 2
+  fi
+  _rows=$(parse_manifest_rows "$_umf")
+  if [ -z "$_rows" ]; then
+    echo "ERROR — nothing was checked (0 rows in $_umf)"
+    return 2
+  fi
+  _tmp_mf="$_umf.tmp.$$"
+  {
+    echo "# Protected bootstrap scripts manifest (sealed with xxh3 sidecar .csm)."
+    echo "# Guarded by: scripts/check/fast-verify-bootstrap-scripts.shs"
+    echo "# SHA-256 digests are over LF-normalized file contents (CR stripped)."
+    echo "bootstrap_protected_scripts |path, banner_kind, sha256, syntax_shell|"
+    _count=0
+    printf '%s\n' "$_rows" | while IFS="$(printf '\t')" read -r _p _bk _oldsha _ss; do
+      [ -n "$_p" ] || continue
+      _full="$_uroot/$_p"
+      if [ ! -f "$_full" ]; then
+        echo "ERROR: missing protected script $_full" >&2
+        exit 2
+      fi
+      _sha=$(lf_sha256 "$_full") || exit 2
+      printf '    %s, %s, %s, %s\n' "$_p" "$_bk" "$_sha" "$_ss"
+    done
+  } > "$_tmp_mf" || {
+    rm -f "$_tmp_mf"
+    echo "ERROR — nothing was checked (failed to recompute SHA-256 manifest)"
+    return 2
+  }
+  mv "$_tmp_mf" "$_umf"
+  _n_updated=$(parse_manifest_rows "$_umf" | wc -l | tr -d ' ')
+  if [ "$_n_updated" -eq 0 ]; then
+    echo "ERROR — nothing was checked (updated manifest had 0 rows)"
+    return 2
+  fi
+  if [ "$_uroot" = "$ROOT_DIR" ] && [ -f "$HERE/reseal-sdn-crc32.shs" ]; then
+    sh "$HERE/reseal-sdn-crc32.shs" --no-selftest "$_umf" >/dev/null || {
+      echo "ERROR — nothing was checked (reseal-sdn-crc32.shs failed on $_umf)"
+      return 2
+    }
+  else
+    _algo=$(csm_policy_algo_strict "$_upol" "$MANIFEST_REL")
+    csm_seal_file "$_umf" "$_algo" >/dev/null || {
+      echo "ERROR — nothing was checked (csm_seal_file failed on $_umf)"
+      return 2
+    }
+  fi
+  echo "PASS — updated $_n_updated protected bootstrap script digest(s) and resealed $MANIFEST_REL"
+  return 0
+}
+
+verify_root() {
+  _vroot=$1
+  _vmode=$2
+  _vmf="$_vroot/$MANIFEST_REL"
+  _vpol="$_vroot/$POLICY_REL"
+
+  if [ ! -f "$_vmf" ]; then
+    echo "ERROR — nothing was checked (missing $_vmf)"
+    return 2
+  fi
+  if [ ! -f "$_vpol" ]; then
+    echo "ERROR — nothing was checked (missing $_vpol)"
+    return 2
+  fi
+
+  _fails=0
+
+  # 1. Verify .sdn xxh3 sidecar seal
+  _want_algo=$(csm_policy_algo_strict "$_vpol" "$MANIFEST_REL")
+  if [ "$_want_algo" != "xxh3" ]; then
+    echo "FAIL [seal-policy]: expected policy algorithm xxh3 for $MANIFEST_REL, got '$_want_algo'"
+    _fails=$((_fails + 1))
+  fi
+  # shellcheck disable=SC2046
+  _seal_state=$(csm_state "$_vmf" $(csm_fs_tags "$_vmf"))
+  if [ "$_seal_state" != "OK xxh3" ]; then
+    echo "FAIL [sdn-seal]: $MANIFEST_REL seal state is '$_seal_state' (expected 'OK xxh3')"
+    _fails=$((_fails + 1))
+  fi
+
+  # Parse rows
+  _rows_file=$(mktemp) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+  parse_manifest_rows "$_vmf" > "$_rows_file"
+  _checked=0
+
+  while IFS="$(printf '\t')" read -r _p _bk _want_sha _ss; do
+    [ -n "$_p" ] || continue
+    _checked=$((_checked + 1))
+    _full="$_vroot/$_p"
+    if [ ! -f "$_full" ]; then
+      echo "FAIL [missing]: protected script not found: $_p"
+      _fails=$((_fails + 1))
+      continue
+    fi
+
+    # 2. Protected banner in top 12 lines
+    if ! check_banner_top12 "$_full" "$_bk"; then
+      echo "FAIL [banner]: missing PROTECTED BOOTSTRAP SCRIPT banner in top 12 lines of $_p"
+      _fails=$((_fails + 1))
+    fi
+
+    # 3. LF-normalized SHA-256 match
+    _got_sha=$(lf_sha256 "$_full") || {
+      rm -f "$_rows_file"
+      echo "ERROR — nothing was checked (SHA-256 tool unavailable)"
+      return 2
+    }
+    if [ "$_got_sha" != "$_want_sha" ]; then
+      echo "FAIL [sha256]: unauthorized modification in $_p (expected $_want_sha, got $_got_sha)"
+      _fails=$((_fails + 1))
+    fi
+
+    # 4. Syntax check (full mode only)
+    if [ "$_vmode" = "full" ]; then
+      check_syntax "$_full" "$_ss"
+      _syn_rc=$?
+      if [ "$_syn_rc" -eq 2 ]; then
+        rm -f "$_rows_file"
+        echo "ERROR — nothing was checked (syntax checker unavailable for $_p)"
+        return 2
+      elif [ "$_syn_rc" -ne 0 ]; then
+        echo "FAIL [syntax]: $_ss -n failed on $_p"
+        _fails=$((_fails + 1))
+      fi
+    fi
+  done < "$_rows_file"
+  rm -f "$_rows_file"
+
+  if [ "$_checked" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 rows parsed from $_vmf)"
+    return 2
+  fi
+
+  # 5. Fast --path-check matrix (full mode only)
+  if [ "$_vmode" = "full" ]; then
+    if ! sh "$HERE/check-bootstrap-path-matrix-all.shs" --fast --root "$_vroot" >/dev/null; then
+      echo "FAIL [path-check]: check-bootstrap-path-matrix-all.shs --fast failed"
+      _fails=$((_fails + 1))
+    fi
+  fi
+
+  if [ "$_fails" -gt 0 ]; then
+    echo "FAIL — $_checked protected bootstrap script(s) checked ($_vmode), $_fails failure(s)"
+    return 1
+  fi
+
+  echo "PASS — $_checked protected bootstrap script(s) verified ($_vmode)"
+  return 0
+}
+
+run_selftest() {
+  _st=$(csm_mktemp_dir) || {
+    echo "ERROR — nothing was checked (mktemp failed in selftest)"
+    return 2
+  }
+  mkdir -p "$_st/config/check" "$_st/scripts/bootstrap" "$_st/scripts/os"
+
+  # Ensure xxhsum is available in selftest even on minimal containers without xxhsum/bin/simple
+  if ! csm_hasher_kat xxh3 2>/dev/null; then
+    mkdir -p "$_st/fake-xxh"
+    cat > "$_st/fake-xxh/xxhsum" <<'EOF_XXH'
+#!/bin/sh
+# Deterministic 16-hex digest over stdin + KAT for empty input
+bytes=$(wc -c | tr -d ' ')
+if [ "$bytes" = "0" ]; then
+  echo "XXH3_2d06800538d394c2  stdin"
+  exit 0
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+  h=$(sha256sum | cut -c1-16)
+else
+  h=$(shasum -a 256 | cut -c1-16)
+fi
+echo "XXH3_${h}  stdin"
+EOF_XXH
+    chmod +x "$_st/fake-xxh/xxhsum"
+    PATH="$_st/fake-xxh:$PATH"
+    export PATH
+  fi
+
+  cp "$ROOT_DIR/scripts/bootstrap/build-phase3-phase4.sh" "$_st/scripts/bootstrap/build-phase3-phase4.sh"
+  cp "$ROOT_DIR/scripts/bootstrap/build-phase3-phase4.bat" "$_st/scripts/bootstrap/build-phase3-phase4.bat"
+  cp "$ROOT_DIR/scripts/bootstrap/stage3-native-host-link-policy.shs" "$_st/scripts/bootstrap/stage3-native-host-link-policy.shs"
+  cp "$ROOT_DIR/scripts/bootstrap/stage3-native-host-link-policy.sdn" "$_st/scripts/bootstrap/stage3-native-host-link-policy.sdn"
+
+  cat > "$_st/scripts/bootstrap/dummy-protected.shs" <<'EOF_DUMMY'
+#!/bin/sh
+# ==============================================================================
+# PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER
+# Guarded by: scripts/check/fast-verify-bootstrap-scripts.shs
+# ==============================================================================
+exit 0
+EOF_DUMMY
+
+  cat > "$_st/config/check/sdn_seal_policy.sdn" <<'EOF_POL'
+seal_policy |glob, algo|
+    config/check/bootstrap_protected_scripts.sdn, xxh3
+EOF_POL
+
+  cat > "$_st/config/check/bootstrap_protected_scripts.sdn" <<'EOF_MF'
+bootstrap_protected_scripts |path, banner_kind, sha256, syntax_shell|
+    scripts/bootstrap/build-phase3-phase4.sh, sh, 0000000000000000000000000000000000000000000000000000000000000000, bash
+    scripts/bootstrap/build-phase3-phase4.bat, bat, 0000000000000000000000000000000000000000000000000000000000000000, bat
+    scripts/bootstrap/stage3-native-host-link-policy.shs, sh, 0000000000000000000000000000000000000000000000000000000000000000, sh
+    scripts/bootstrap/dummy-protected.shs, sh, 0000000000000000000000000000000000000000000000000000000000000000, sh
+EOF_MF
+
+  _st_fails=0
+
+  # (a) Update manifest + seal -> clean pass
+  update_manifest_in_root "$_st" >/dev/null || { echo "selftest FAIL (a-init): update_manifest failed"; _st_fails=$((_st_fails + 1)); }
+  if ! verify_root "$_st" "full" >/dev/null; then
+    echo "selftest FAIL (a): clean fixture did not PASS"
+    _st_fails=$((_st_fails + 1))
+  fi
+
+  # (b) 1-byte unauthorized edit -> fails closed
+  cp "$_st/scripts/bootstrap/dummy-protected.shs" "$_st/dummy.bak"
+  printf '#' >> "$_st/scripts/bootstrap/dummy-protected.shs"
+  if verify_root "$_st" "full" >/dev/null 2>&1; then
+    echo "selftest FAIL (b): 1-byte unauthorized script edit did not FAIL"
+    _st_fails=$((_st_fails + 1))
+  fi
+  mv "$_st/dummy.bak" "$_st/scripts/bootstrap/dummy-protected.shs"
+
+  # (b2) Tampered .sdn without resealing .csm -> fails closed
+  cp "$_st/config/check/bootstrap_protected_scripts.sdn" "$_st/mf.bak"
+  printf '# unsealed comment\n' >> "$_st/config/check/bootstrap_protected_scripts.sdn"
+  if verify_root "$_st" "hashes-only" >/dev/null 2>&1; then
+    echo "selftest FAIL (b2): unsealed .sdn edit did not FAIL"
+    _st_fails=$((_st_fails + 1))
+  fi
+  mv "$_st/mf.bak" "$_st/config/check/bootstrap_protected_scripts.sdn"
+
+  # (c) Removed PROTECTED BOOTSTRAP SCRIPT banner fails closed (even after hash+seal refresh!)
+  cp "$_st/scripts/bootstrap/dummy-protected.shs" "$_st/dummy.bak"
+  cat > "$_st/scripts/bootstrap/dummy-protected.shs" <<'EOF_NOBANNER'
+#!/bin/sh
+# ordinary comment without the guard banner
+exit 0
+EOF_NOBANNER
+  update_manifest_in_root "$_st" >/dev/null
+  if verify_root "$_st" "hashes-only" >/dev/null 2>&1; then
+    echo "selftest FAIL (c): removed PROTECTED BOOTSTRAP SCRIPT banner did not FAIL"
+    _st_fails=$((_st_fails + 1))
+  fi
+  mv "$_st/dummy.bak" "$_st/scripts/bootstrap/dummy-protected.shs"
+  update_manifest_in_root "$_st" >/dev/null
+
+  # (d1) Extra PATH_ACTION step STILL PASSES extensible superset check!
+  cp "$_st/scripts/bootstrap/build-phase3-phase4.sh" "$_st/p34.bak"
+  awk '
+    /emit_path_action "p4" "smoke-gates"/ {
+      print "      emit_path_action \"p4\" \"future-pgo-superopt\" \"$COMPILE_MODE\" \"$p4_lmode_label\" \"0\" \"1\""
+      print "      emit_path_action \"p5-sign\" \"future-notarize\" \"$COMPILE_MODE\" \"one-binary\" \"0\" \"1\""
+    }
+    { print }
+  ' "$_st/p34.bak" > "$_st/scripts/bootstrap/build-phase3-phase4.sh"
+  update_manifest_in_root "$_st" >/dev/null
+  if ! verify_root "$_st" "full" >/dev/null; then
+    echo "selftest FAIL (d1): extra future PATH_ACTION steps broke superset check"
+    _st_fails=$((_st_fails + 1))
+  fi
+
+  # (d2) Missing required PATH_ACTION step FAILS!
+  grep -v 'emit_path_action "p4" "cli-debug-xray"' "$_st/p34.bak" > "$_st/scripts/bootstrap/build-phase3-phase4.sh"
+  update_manifest_in_root "$_st" >/dev/null
+  if verify_root "$_st" "full" >/dev/null 2>&1; then
+    echo "selftest FAIL (d2): missing required PATH_ACTION step (cli-debug-xray) did not FAIL"
+    _st_fails=$((_st_fails + 1))
+  fi
+
+  mv "$_st/p34.bak" "$_st/scripts/bootstrap/build-phase3-phase4.sh"
+  rm -rf "$_st"
+
+  if [ "$_st_fails" -gt 0 ]; then
+    echo "FAIL — fast-verify-bootstrap-scripts selftest failed ($_st_fails/6 fixtures failed)"
+    return 1
+  fi
+  echo "PASS — fast-verify-bootstrap-scripts selftest verified (6/6 fixtures)"
+  return 0
+}
+
+case "$MODE" in
+  selftest)
+    run_selftest
+    exit $? ;;
+  update-manifest)
+    update_manifest_in_root "$ROOT_DIR"
+    exit $? ;;
+  hashes-only)
+    verify_root "$ROOT_DIR" "hashes-only"
+    exit $? ;;
+  full)
+    verify_root "$ROOT_DIR" "full"
+    exit $? ;;
+esac

@@ -1,0 +1,54 @@
+"""
+## Purpose and audience
+
+Regression guard for bug
+`seed_stage2_optional_dot_question_collection_semantics_divergence_2026-11-22`
+(the #10717 regression, fixed at 11 sites in #10743). On a collection-typed
+optional `xs.?` means present AND non-empty, so `not xs.?` is NOT
+`xs.is_none()`. NDQ001 warns on every syntactic `not <expr>.?` and tells the
+author to check intent. For compiler engineers changing lint rules.
+"""
+use compiler.semantics.lint.not_dot_question.{check_not_dot_question}
+use compiler.tools.lint.static_rules.{static_lint_rule_table}
+
+fn ndq_count(src: text) -> i64:
+    check_not_dot_question(src, "probe.spl").len()
+
+describe "NDQ001 not <expr>.?":
+    it "flags a plain name":
+        expect(ndq_count("if not xs.?:\n    return 1\n")).to_equal(1)
+
+    it "flags a field chain and a call":
+        expect(ndq_count("val a = not self.items.?\n")).to_equal(1)
+        expect(ndq_count("val b = not f(x).?\n")).to_equal(1)
+
+    it "flags inside a compound condition":
+        expect(ndq_count("if a and not xs.? and b:\n    pass\n")).to_equal(1)
+
+    it "reports code, line and suggests both rewrites":
+        val fs = check_not_dot_question("val a = 1\nif not ys.?:\n    pass\n", "probe.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].line_num).to_equal(2)
+        expect(fs[0].code).to_equal("NDQ001")
+        expect(fs[0].note.contains("ys.is_none()")).to_equal(true)
+        expect(fs[0].note.contains("ys.unwrap().is_empty()")).to_equal(true)
+
+    it "does not flag positive .?":
+        expect(ndq_count("if xs.?:\n    pass\n")).to_equal(0)
+
+    it "does not flag is_none":
+        expect(ndq_count("if xs.is_none():\n    pass\n")).to_equal(0)
+
+    it "does not flag comments or string literals":
+        expect(ndq_count("# if not xs.?:\n")).to_equal(0)
+        expect(ndq_count("val s = \"not xs.?\"\n")).to_equal(0)
+
+    it "does not flag identifiers merely ending in not":
+        expect(ndq_count("if cannot xs.?:\n    pass\n")).to_equal(0)
+
+    it "is registered in the static lint rule table":
+        var found = false
+        for rule in static_lint_rule_table():
+            if rule.id() == "not_dot_question":
+                found = true
+        expect(found).to_equal(true)

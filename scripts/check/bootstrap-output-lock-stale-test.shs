@@ -1,0 +1,86 @@
+#!/bin/sh
+# W14 regression: the Stage 3 resume output lock is recovered only when its
+# recorded owner is provably dead; a live, retained, malformed or
+# unknown-liveness lock is still refused.
+# doc/08_tracking/bug/windows_msvc_release_bootstrap_lane_gaps_2026-11-22.md
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+. "$repo/scripts/bootstrap/lib/output-lock.shs"
+
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-output-lock.XXXXXX")
+scratch=$(CDPATH= cd -- "$scratch" && pwd -P)
+live=
+trap '[ -z "$live" ] || kill "$live" 2>/dev/null || :; rm -rf -- "$scratch"' EXIT HUP INT TERM
+checked=0
+windows=0
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) windows=1 ;; esac
+
+# A pid that has certainly exited, with its Win32 pid captured while alive.
+sh -c 'cat /proc/$$/winpid >"$1" 2>/dev/null || :; echo $$ >"$2"' _ \
+    "$scratch/dead.winpid" "$scratch/dead.pid"
+dead_pid=$(cat "$scratch/dead.pid")
+dead_winpid=$(cat "$scratch/dead.winpid")
+sleep 300 &
+live=$!
+live_winpid=$(cat "/proc/$live/winpid" 2>/dev/null || :)
+
+mklock() {
+    # NAME PID WINPID [retained]
+    mkdir "$scratch/$1"
+    printf '%s\n' "$2" >"$scratch/$1/pid"
+    [ -z "$3" ] || printf '%s\n' "$3" >"$scratch/$1/winpid"
+    [ "${4:-}" != retained ] || : >"$scratch/$1/retained"
+}
+want_acquired() {
+    if ! bootstrap_output_lock_acquire "$scratch/$1" 2>"$scratch/$1.err"; then
+        printf 'FAIL — %s refused: %s\n' "$1" "$(cat "$scratch/$1.err")"; exit 1
+    fi
+    [ "$(cat "$scratch/$1/pid")" = "$$" ] || { printf 'FAIL — %s owner not recorded\n' "$1"; exit 1; }
+    if [ "$windows" = 1 ]; then
+        [ "$(cat "$scratch/$1/winpid")" = "$(cat /proc/$$/winpid)" ] ||
+            { printf 'FAIL — %s winpid not recorded\n' "$1"; exit 1; }
+    fi
+    checked=$((checked + 1))
+}
+want_refused() {
+    # NAME EXPECTED-PID
+    if bootstrap_output_lock_acquire "$scratch/$1" 2>"$scratch/$1.err"; then
+        printf 'FAIL — %s acquired over a lock that must be kept\n' "$1"; exit 1
+    fi
+    [ "$(cat "$scratch/$1/pid")" = "$2" ] || { printf 'FAIL — %s lock was mutated\n' "$1"; exit 1; }
+    grep -q 'bootstrap output is locked' "$scratch/$1.err" ||
+        { printf 'FAIL — %s refusal unexplained\n' "$1"; exit 1; }
+    checked=$((checked + 1))
+}
+
+# Fresh acquisition.
+want_acquired fresh
+# Reproduction: killed run left the lock, owner dead -> recovered, evidence kept.
+mklock dead "$dead_pid" "$dead_winpid"
+want_acquired dead
+ls -d "$scratch"/dead.stale-pid"$dead_pid"-* >/dev/null 2>&1 ||
+    { echo 'FAIL — stale lock evidence not kept'; exit 1; }
+# Live owner -> refused.
+mklock alive "$live" "$live_winpid"
+want_refused alive "$live"
+# Deliberately retained lock with a dead owner -> refused.
+mklock retained "$dead_pid" "$dead_winpid" retained
+want_refused retained "$dead_pid"
+# Malformed pid -> unknown -> refused.
+mklock garbage 'not-a-pid' ''
+want_refused garbage not-a-pid
+if [ "$windows" = 1 ]; then
+    # Pre-fix lock without a Win32 pid: liveness unknown -> refused.
+    mklock nowinpid "$dead_pid" ''
+    want_refused nowinpid "$dead_pid"
+    # Process-table query failure -> unknown -> refused.
+    mkdir "$scratch/failbin"
+    printf '#!/bin/sh\nexit 1\n' >"$scratch/failbin/tasklist"
+    chmod +x "$scratch/failbin/tasklist"
+    mklock tasklistfail "$dead_pid" "$dead_winpid"
+    PATH="$scratch/failbin:$PATH"
+    want_refused tasklistfail "$dead_pid"
+fi
+
+printf 'PASS — %s output-lock case(s) checked\n' "$checked"

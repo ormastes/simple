@@ -31,7 +31,8 @@ use std.nogc_sync_mut.io.native_tool_authority_v1.{
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use compiler.common.cache.darwin_runtime_provider_manifest.{darwin_runtime_artifact_error_v1}
 use compiler.backend.runtime_compiler.{find_c_compiler}
-use compiler.backend.llvm_capability.{find_nm_portable}
+use compiler.backend.llvm_capability.{find_nm_portable, find_archive_portable}
+use compiler.backend.linker.archive_response_file.{archive_command_build}
 use compiler.backend.llvm_native_link.{NativeLinkOptions, link_llvm_native_with_receipt_v2}
 use compiler.driver.driver_build.incremental.{build_cache_outputs_for_source_at}
 use compiler.driver.driver_build.source_inventory_glob_v1.{source_inventory_glob_match_v1}
@@ -45,6 +46,7 @@ use compiler.driver.driver_build.library_unit_manifest_v1.{
 }
 use compiler.driver.driver_build.library_unit_iface_v1.{
     LibraryUnitIfaceV1, LibraryUnitModuleSkeletonV1, LibraryUnitIfaceBuildRequestV1,
+    library_unit_source_digest_v1,
     library_unit_iface_build_resolved_v1, library_unit_iface_write_v1,
     library_unit_iface_read_v1, library_unit_iface_materialize_skeletons_v1
 }
@@ -156,6 +158,201 @@ pub struct LibraryUnitProjectBuildResultV1:
     staged_dynlibs: [text]
     unit_artifacts: [LibraryUnitDynlibArtifactV1]
     entry_objects: [text]
+
+pub struct LibraryUnitHostTagV1:
+    platform: text
+    cpu: text
+    tag: text
+    native_host_match: bool
+
+fn _dynlib_normalize_platform_v1(raw_os: text) -> text:
+    val low = raw_os.trim().lower()
+    if low == "macos" or low == "darwin" or low.contains("-apple-darwin") or low.contains("-macos") or low.starts_with("darwin-") or low.starts_with("macos-"):
+        return "darwin"
+    if low == "linux" or low.contains("-linux") or low.starts_with("linux-"):
+        return "linux"
+    if low == "freebsd" or low.contains("-freebsd") or low.starts_with("freebsd-"):
+        return "freebsd"
+    if (low == "windows" or low == "windows-msvc" or low == "windows-gnu" or
+            low == "windows-mingw" or low.contains("-windows") or low.contains("mingw") or low.starts_with("windows-")):
+        return "windows"
+    if low.contains("simpleos"):
+        return "simpleos"
+    if low.contains("-none"):
+        return "none"
+    low
+
+fn _dynlib_normalize_cpu_token_v1(raw_cpu: text) -> text:
+    val low = raw_cpu.trim().lower()
+    if low == "arm64" or low == "aarch64":
+        return "aarch64"
+    if low == "amd64" or low == "x64" or low == "x86_64" or low == "x86-64":
+        return "x86_64"
+    if low.starts_with("riscv64"):
+        return "riscv64"
+    if low.starts_with("riscv32"):
+        return "riscv32"
+    if low == "arm" or low.starts_with("armv") or low.starts_with("thumbv"):
+        return "arm"
+    if low == "x86" or low == "i386" or low == "i486" or low == "i586" or low == "i686":
+        return "x86"
+    ""
+
+fn _dynlib_normalize_cpu_v1(raw_cpu: text) -> text:
+    val known = _dynlib_normalize_cpu_token_v1(raw_cpu)
+    if known != "":
+        return known
+    raw_cpu.trim().lower()
+
+fn _dynlib_is_pure_os_selector_v1(low: text) -> bool:
+    (low == "macos" or low == "darwin" or low == "linux" or low == "freebsd" or
+        low == "windows" or low == "windows-msvc" or low == "windows-gnu" or
+        low == "windows-mingw" or low == "simpleos")
+
+# reason: target/host strings are the CLI/env boundary inputs for host-tag normalization
+@allow(primitive_api)
+pub fn library_unit_resolve_host_tag_v1(
+        target_or_os: text, host_os_raw: text, host_arch_raw: text) -> LibraryUnitHostTagV1:
+    val norm_host_os = _dynlib_normalize_platform_v1(host_os_raw)
+    val norm_host_cpu = _dynlib_normalize_cpu_v1(host_arch_raw)
+    val raw = target_or_os.trim().lower()
+    if raw == "" or raw == "host" or raw == "native":
+        val host_tag = "{norm_host_os}-{norm_host_cpu}"
+        return LibraryUnitHostTagV1(
+            platform: norm_host_os, cpu: norm_host_cpu,
+            tag: host_tag, native_host_match: true)
+    val pure_cpu = _dynlib_normalize_cpu_token_v1(raw)
+    if pure_cpu != "":
+        val cpu_tag = "{norm_host_os}-{pure_cpu}"
+        return LibraryUnitHostTagV1(
+            platform: norm_host_os, cpu: pure_cpu,
+            tag: cpu_tag,
+            native_host_match: norm_host_cpu == pure_cpu)
+    if _dynlib_is_pure_os_selector_v1(raw):
+        val plat = _dynlib_normalize_platform_v1(raw)
+        val os_tag = "{plat}-{norm_host_cpu}"
+        return LibraryUnitHostTagV1(
+            platform: plat, cpu: norm_host_cpu,
+            tag: os_tag,
+            native_host_match: plat == norm_host_os)
+    var resolved_plat = _dynlib_normalize_platform_v1(raw)
+    val segs = raw.split("-")
+    if resolved_plat == raw and segs.len() > 1:
+        var found_plat = ""
+        for seg in segs:
+            if _dynlib_is_pure_os_selector_v1(seg):
+                found_plat = _dynlib_normalize_platform_v1(seg)
+                break
+        resolved_plat = if found_plat != "": found_plat else: norm_host_os
+    var resolved_cpu = ""
+    for seg in segs:
+        val cand = _dynlib_normalize_cpu_token_v1(seg)
+        if cand != "":
+            resolved_cpu = cand
+            break
+    if resolved_cpu == "":
+        resolved_cpu = if segs.len() > 0 and segs[0] != "": segs[0] else: norm_host_cpu
+    val resolved_tag = "{resolved_plat}-{resolved_cpu}"
+    LibraryUnitHostTagV1(
+        platform: resolved_plat,
+        cpu: resolved_cpu,
+        tag: resolved_tag,
+        native_host_match: resolved_plat == norm_host_os and resolved_cpu == norm_host_cpu)
+
+# reason: stage3/host-match env and target/host strings are the boundary inputs for Stage 3 native-host verification
+@allow(primitive_api)
+pub fn library_unit_stage3_host_match_error_v1(
+        stage3_env: text, host_match_env: text,
+        target_or_os: text, host_os_raw: text, host_arch_raw: text) -> text:
+    if stage3_env != "1" or host_match_env == "0":
+        return ""
+    val norm_host_os = _dynlib_normalize_platform_v1(host_os_raw)
+    val norm_host_cpu = _dynlib_normalize_cpu_v1(host_arch_raw)
+    val resolved = library_unit_resolve_host_tag_v1(target_or_os, host_os_raw, host_arch_raw)
+    if not resolved.native_host_match:
+        return "STAGE3-E-NATIVE-HOST-MISMATCH: Phase 3 requires native_host_match ({resolved.tag} != host {norm_host_os}-{norm_host_cpu})"
+    val expected = (env_get("SIMPLE_STAGE3_HOST_TAG") ?? "").trim()
+    if expected != "" and expected != resolved.tag:
+        return "STAGE3-E-NATIVE-HOST-TAG-MISMATCH: build script tag '{expected}' != resolved '{resolved.tag}'"
+    ""
+
+fn _primitive_platform_seg_matches_os_v1(seg: text, norm_plat: text) -> bool:
+    if norm_plat == "darwin":
+        return seg == "darwin" or seg == "macos"
+    seg == norm_plat
+
+fn _primitive_platform_seg_is_known_cpu_v1(seg: text) -> bool:
+    _dynlib_normalize_cpu_token_v1(seg) != ""
+
+fn _primitive_platform_seg_matches_cpu_v1(seg: text, norm_cpu: text) -> bool:
+    val cand = _dynlib_normalize_cpu_token_v1(seg)
+    cand != "" and cand == norm_cpu
+
+# reason: relative source path and normalized platform/cpu tags classify primitive static-archive membership
+@allow(primitive_api)
+@allow(bare_bool)
+pub fn library_unit_source_is_primitive_static_for_host_v1(
+        rel_source: text, platform: text, cpu: text) -> bool:
+    var rel = rel_source.replace("\\", "/")
+    while rel.starts_with("./"):
+        rel = rel.substring(2)
+    if not rel.ends_with(".spl"):
+        return false
+    match rel:
+        case "src/lib/bitwise_utils.spl" | "src/lib/common.spl" | "src/lib/exp.spl" | "src/lib/format_utils.spl":
+            return true
+        case "src/lib/hash.spl" | "src/lib/io_runtime.spl" | "src/lib/math.spl" | "src/lib/math_repr.spl":
+            return true
+        case "src/lib/platform.spl" | "src/lib/process.spl" | "src/lib/string.spl" | "src/lib/string_core.spl":
+            return true
+        case "src/lib/text.spl" | "src/lib/validation_utils.spl":
+            return true
+        case _:
+            pass
+    if (rel.starts_with("src/lib/core/") or rel.starts_with("src/lib/pure/") or
+            rel.starts_with("src/lib/nogc_async_mut_noalloc/") or
+            rel.starts_with("src/lib/math/") or rel.starts_with("src/runtime/simple_core/")):
+        return true
+    val plat_prefix = "src/lib/nogc_sync_mut/platform/"
+    if rel.starts_with(plat_prefix):
+        val rest = rel.substring(plat_prefix.byte_len())
+        val segs = rest.split("/")
+        if segs.len() < 2:
+            return false
+        val norm_plat = _dynlib_normalize_platform_v1(platform)
+        val norm_cpu = _dynlib_normalize_cpu_v1(cpu)
+        if _primitive_platform_seg_matches_os_v1(segs[0], norm_plat):
+            if segs.len() >= 3 and _primitive_platform_seg_is_known_cpu_v1(segs[1]):
+                return _primitive_platform_seg_matches_cpu_v1(segs[1], norm_cpu)
+            return true
+        if _primitive_platform_seg_matches_cpu_v1(segs[0], norm_cpu):
+            return true
+        return false
+    false
+
+# reason: relative source path classifies primitive static-archive membership for the current host
+@allow(primitive_api)
+@allow(bare_bool)
+pub fn library_unit_source_is_primitive_static_v1(rel_source: text) -> bool:
+    library_unit_source_is_primitive_static_for_host_v1(rel_source, host_os(), host_arch())
+
+# reason: relative source path and normalized platform/cpu tags filter unneeded Stage 3 plugin dynlibs
+@allow(primitive_api)
+@allow(bare_bool)
+pub fn library_unit_source_is_unneeded_stage3_dynlib_v1(
+        rel_source: text, platform: text, cpu: text) -> bool:
+    var rel = rel_source.replace("\\", "/")
+    while rel.starts_with("./"):
+        rel = rel.substring(2)
+    if rel.starts_with("src/plugins/"):
+        return true
+    val plat_prefix = "src/lib/nogc_sync_mut/platform/"
+    if rel.starts_with(plat_prefix):
+        val rest = rel.substring(plat_prefix.byte_len())
+        val segs = rest.split("/")
+        if segs.len() >= 2:
+            return not library_unit_source_is_primitive_static_for_host_v1(rel, platform, cpu)
+    false
 
 fn _dynlib_normalize_os_kind_v1(target_or_os: text) -> text:
     val raw = (if target_or_os == "": host_os() else: target_or_os).trim().lower()
@@ -475,8 +672,7 @@ pub fn library_unit_dynlib_complete_v1(req: LibraryUnitDynlibCompleteRequestV1) 
     if not file_exists(dynlib_path) or file_size_raw(dynlib_path) <= 0:
         return Err("unit '{req.unit}' receipt is ok but {dynlib_path} is missing")
     if naming.os_kind == "darwin":
-        val raw_arch = host_arch().trim().lower()
-        val arch = if raw_arch == "arm64": "aarch64" elif raw_arch == "amd64": "x86_64" else: raw_arch
+        val arch = library_unit_resolve_host_tag_v1(req.target_or_os, host_os(), host_arch()).cpu
         val macho_err = darwin_runtime_artifact_error_v1(dynlib_path, arch)
         if macho_err != "":
             return Err("unit '{req.unit}' Mach-O validation failed: {macho_err}")
@@ -547,7 +743,9 @@ fn _dynlib_retained_symbols_for_exec_v1(dynlibs: [text], entry_objects: [text],
         if provided_by_dynlib.contains_key(sym):
             continue
         if defined_in_entry.contains_key(sym) or sym.starts_with("rt_") or
-                sym.starts_with("spl_") or sym.starts_with("__simple_"):
+                sym.starts_with("spl_") or sym.starts_with("__simple_") or
+                sym.starts_with("simple_") or sym.starts_with("LLVM") or
+                sym.starts_with("sffi_"):
             retained.push(sym)
     Ok(canonical_identity_sort_texts(retained))
 
@@ -763,12 +961,188 @@ fn _dynlib_transitive_dep_set_v1(plan: [LibraryUnitPlanEntryV1], direct_deps: [t
         frontier = next
     out
 
+fn _dynlib_package_primitive_static_archive_v1(
+        root: text,
+        host_tag: LibraryUnitHostTagV1,
+        cache_root: text,
+        producer_identity: text,
+        primitive_rows: [LibraryUnitClosureModuleRowV1]
+) -> Result<text, text>:
+    val prim_unit = "simple-primitive-{host_tag.platform}-{host_tag.cpu}"
+    var prim_entries: [(text, text)] = []
+    var seen_rel: {text: bool} = {}
+    for row in primitive_rows:
+        val rel_src = _dynlib_strip_scv_snapshot_prefix_v1(root, row.source_path)
+        if seen_rel.contains_key(rel_src):
+            continue
+        seen_rel[rel_src] = true
+        val fs_src = if root == "" or root == ".": rel_src else: "{root}/{rel_src}"
+        val src_body = if file_exists(fs_src):
+            file_read(fs_src)
+        elif file_exists(row.source_path):
+            file_read(row.source_path)
+        else:
+            ""
+        val obj_hash = if row.object_path != "" and file_exists(row.object_path):
+            sha256_u8_hex(file_read_bytes(row.object_path))
+        else:
+            ""
+        prim_entries.push((rel_src, src_body + "\n#obj=" + obj_hash))
+    val prim_source_digest = library_unit_source_digest_v1(prim_entries)
+    val prim_key = library_unit_cache_key_v1(
+        producer_identity + "|host=" + host_tag.tag, prim_source_digest, [])
+    val prim_dir = library_unit_archive_dir_v1(cache_root, prim_unit, prim_key)
+    val prim_archive_path = "{prim_dir}/lib{prim_unit}.a"
+    if file_exists(prim_archive_path) and file_size_raw(prim_archive_path) > 0:
+        if host_tag.platform == "darwin":
+            if darwin_runtime_artifact_error_v1(prim_archive_path, host_tag.cpu) == "":
+                return Ok(prim_archive_path)
+            val _rm_bad = file_delete(prim_archive_path)
+        else:
+            return Ok(prim_archive_path)
+    val staged_names = match _dynlib_stage_objects_into_unit_dir_v1(prim_dir, primitive_rows):
+        case Ok(ns): ns
+        case Err(e): return Err("unit '{prim_unit}': {e}")
+    if staged_names.len() == 0:
+        return Err("unit '{prim_unit}': no primitive objects to archive")
+    var obj_paths: [text] = []
+    for name in staged_names:
+        obj_paths.push("{prim_dir}/objects/{name}")
+    val ar_env = (env_get("SIMPLE_AR") ?? "").trim()
+    val archiver = if ar_env != "": ar_env else: find_archive_portable()
+    if archiver == "":
+        return Err("unit '{prim_unit}': static primitive archive requires llvm-ar or ar")
+    val tmp_dir = "{prim_dir}/.ar-tmp-{getpid()}"
+    if not dir_create_all(tmp_dir):
+        return Err("unit '{prim_unit}': cannot create temp directory {tmp_dir}")
+    val tmp_archive = "{tmp_dir}/lib{prim_unit}.a"
+    val _stale = file_delete(tmp_archive)
+    val cmd = archive_command_build(archiver, host_os(), tmp_archive, obj_paths)
+    if cmd.response_path != "":
+        if not file_write(cmd.response_path, cmd.response_body):
+            val _rm_tmp = dir_remove_all(tmp_dir)
+            return Err("unit '{prim_unit}': cannot write archiver response file {cmd.response_path}")
+    val (ar_out, ar_err, ar_code) = process_run(archiver, cmd.argv)
+    if cmd.response_path != "":
+        val _del_rsp = file_delete(cmd.response_path)
+    if ar_code != 0:
+        val _rm_tmp = dir_remove_all(tmp_dir)
+        return Err("unit '{prim_unit}': archiver {archiver} exited {ar_code}: {ar_err}{ar_out}")
+    if not file_exists(tmp_archive) or file_size_raw(tmp_archive) <= 0:
+        val _rm_tmp = dir_remove_all(tmp_dir)
+        return Err("unit '{prim_unit}': archiver {archiver} exited 0 but wrote no {tmp_archive}")
+    if file_exists(prim_archive_path) and file_size_raw(prim_archive_path) > 0:
+        val _rm_tmp = dir_remove_all(tmp_dir)
+        return Ok(prim_archive_path)
+    if not file_rename(tmp_archive, prim_archive_path):
+        val _rm_tmp = dir_remove_all(tmp_dir)
+        if file_exists(prim_archive_path) and file_size_raw(prim_archive_path) > 0:
+            return Ok(prim_archive_path)
+        return Err("unit '{prim_unit}': cannot rename {tmp_archive} to {prim_archive_path}")
+    val _rm_tmp = dir_remove_all(tmp_dir)
+    Ok(prim_archive_path)
+
+fn _dynlib_closure_rel_files_for_unit_v1(
+        root: text, unit_dir_rel: text, rows: [LibraryUnitClosureModuleRowV1]) -> [text]:
+    val prefix = if unit_dir_rel == "" or unit_dir_rel == ".": "" else: unit_dir_rel + "/"
+    var seen: {text: bool} = {}
+    var out: [text] = []
+    for row in rows:
+        val rel_src = _dynlib_strip_scv_snapshot_prefix_v1(root, row.source_path)
+        val unit_rel = if prefix != "" and rel_src.starts_with(prefix):
+            rel_src.substring(prefix.byte_len())
+        else:
+            rel_src
+        if unit_rel != "" and not seen.contains_key(unit_rel):
+            seen[unit_rel] = true
+            out.push(unit_rel)
+    canonical_identity_sort_texts(out)
+
+fn _dynlib_build_or_reuse_unit_artifact_v1(
+        unit_name: text,
+        unit_fs_dir: text,
+        rel_files: [text],
+        unit_rows: [LibraryUnitClosureModuleRowV1],
+        dep_ifaces: [(text, text)],
+        dep_dynlibs: [text],
+        req: LibraryUnitClosurePackageRequestV1
+) -> Result<(text, text, Option<LibraryUnitDynlibArtifactV1>), text>:
+    val iface_built = library_unit_iface_build_resolved_v1(
+        LibraryUnitIfaceBuildRequestV1(unit: unit_name, root: unit_fs_dir, rel_files: rel_files))
+    val unit_key = library_unit_cache_key_v1(req.producer_identity, iface_built.source_digest, dep_ifaces)
+    val unit_dir = library_unit_archive_dir_v1(req.cache_root, unit_name, unit_key)
+    match library_unit_dynlib_complete_v1(LibraryUnitDynlibCompleteRequestV1(
+            dir: unit_dir, unit: unit_name, target_or_os: req.target_or_os)):
+        case Ok(reused_art):
+            return Ok((iface_built.source_digest, iface_built.iface.digest, Some(reused_art)))
+        case Err(_):
+            pass
+    if unit_rows.len() == 0:
+        return Ok((iface_built.source_digest, iface_built.iface.digest, None))
+    val staged_names = match _dynlib_stage_objects_into_unit_dir_v1(unit_dir, unit_rows):
+        case Ok(ns): ns
+        case Err(e): return Err("unit '{unit_name}': {e}")
+    if staged_names.len() == 0:
+        return Ok((iface_built.source_digest, iface_built.iface.digest, None))
+    val iface_path = library_unit_iface_path_v1(unit_dir)
+    match library_unit_iface_write_v1(iface_path, iface_built.iface):
+        case Ok(_): pass
+        case Err(e): return Err(e)
+    val iface_root = library_unit_iface_root_dir_v1(unit_dir)
+    match library_unit_iface_materialize_skeletons_v1(iface_root, iface_built.skeletons):
+        case Ok(_): pass
+        case Err(e): return Err(e)
+    val written = match library_unit_dynlib_write_v1(LibraryUnitDynlibWriteRequestV1(
+            dir: unit_dir, unit: unit_name, objects: staged_names,
+            dep_dynlibs: dep_dynlibs, target_or_os: req.target_or_os)):
+        case Ok(w): w
+        case Err(e): return Err(e)
+    val receipt = LibraryUnitReceiptV1(
+        unit: unit_name,
+        unit_key: unit_key,
+        scope_key: req.scope_key,
+        producer_identity: req.producer_identity,
+        source_digest: iface_built.source_digest,
+        iface_digest: iface_built.iface.digest,
+        deps: dep_ifaces,
+        objects: staged_names,
+        verdict: "ok",
+        failed_modules: [],
+        artifact_kind: LIBRARY_UNIT_ARTIFACT_DYNLIB_V1,
+        init_symbols: written.init_symbols)
+    if not file_exists(library_unit_receipt_path_v1(unit_dir)):
+        match library_unit_receipt_publish_v1(unit_dir, receipt):
+            case Ok(_): pass
+            case Err(e):
+                if not file_exists(library_unit_receipt_path_v1(unit_dir)):
+                    return Err("unit '{unit_name}' receipt publication failed: {e}")
+    val verified = match library_unit_dynlib_complete_v1(LibraryUnitDynlibCompleteRequestV1(
+            dir: unit_dir, unit: unit_name, target_or_os: req.target_or_os)):
+        case Ok(v): v
+        case Err(e): return Err(e)
+    val fresh_art = LibraryUnitDynlibArtifactV1(
+        unit: verified.unit, unit_key: verified.unit_key, unit_dir: verified.unit_dir,
+        dynlib_path: verified.dynlib_path, iface_path: verified.iface_path,
+        iface_root_dir: verified.iface_root_dir, receipt_path: verified.receipt_path,
+        iface_digest: verified.iface_digest, init_symbols: verified.init_symbols,
+        reused: false)
+    Ok((iface_built.source_digest, iface_built.iface.digest, Some(fresh_art)))
+
 # Package a compiled closure's library-unit modules into cached, verified
 # `lib<unit>.dylib`/`.so`/`.dll` artifacts + `iface.sdn` + `receipt.sdn` in
 # dependency-first order, returning a thin executable link plan containing ONLY
 # the application/entry objects + staged unit shared libraries.
 pub fn library_unit_partition_and_package_closure_v1(
         req: LibraryUnitClosurePackageRequestV1) -> Result<LibraryUnitClosureLinkPlanV1, text>:
+    val stage3_env = env_get("SIMPLE_BOOTSTRAP_STAGE3") ?? ""
+    val raw_hm_primary = env_get("SIMPLE_STAGE3_NATIVE_HOST_MATCH") ?? ""
+    val raw_hm_alt = env_get("SIMPLE_STAGE3_REQUIRE_NATIVE_HOST_MATCH") ?? ""
+    val host_match_env = if raw_hm_primary != "": raw_hm_primary else: raw_hm_alt
+    val host_err = library_unit_stage3_host_match_error_v1(
+        stage3_env, host_match_env, req.target_or_os, host_os(), host_arch())
+    if host_err != "":
+        return Err(host_err)
+    val host_tag = library_unit_resolve_host_tag_v1(req.target_or_os, host_os(), host_arch())
     val (root, rel_entry) = _dynlib_resolve_repo_root_and_entry_v1(req.repo_root, req.entry_source)
     val target_dir = _dynlib_find_manifest_dir_for_source_v1(root, rel_entry)
     if target_dir == "":
@@ -793,21 +1167,63 @@ pub fn library_unit_partition_and_package_closure_v1(
         case Ok(p): p
         case Err(e): return Err(e)
 
-    # Partition closure rows by owning unit; unowned/target rows stay in entry_objects.
+    # Partition closure rows by owning unit; for `simple-app`, isolate thin entry,
+    # host-tagged static primitive archive rows, std/compiler dynlibs, and `simple-app` dynlib.
+    val is_simple_app = target_unit_name == "simple-app"
     var rows_by_unit: {text: [LibraryUnitClosureModuleRowV1]} = {}
     for entry in plan:
         rows_by_unit[entry.name] = []
     var entry_objects: [text] = []
-    for row in req.rows:
-        val rel_src = _dynlib_strip_scv_snapshot_prefix_v1(root, row.source_path)
-        val owner = _dynlib_most_specific_owner_v1(manifests, rel_src)
-        if owner != "" and owner != target_unit_name and manifest_by_name.contains_key(owner) and
-                manifest_by_name[owner].kind == "library":
-            var bucket = rows_by_unit[owner]
-            bucket.push(row)
-            rows_by_unit[owner] = bucket
-        elif row.object_path != "":
-            entry_objects.push(row.object_path)
+    var thin_entry_objects: [text] = []
+    var primitive_static_rows: [LibraryUnitClosureModuleRowV1] = []
+    var app_unit_rows: [LibraryUnitClosureModuleRowV1] = []
+    if is_simple_app:
+        for row in req.rows:
+            val rel_src = _dynlib_strip_scv_snapshot_prefix_v1(root, row.source_path)
+            if rel_src == rel_entry:
+                if row.object_path != "":
+                    thin_entry_objects.push(row.object_path)
+            elif library_unit_source_is_primitive_static_for_host_v1(rel_src, host_tag.platform, host_tag.cpu):
+                if row.object_path != "":
+                    primitive_static_rows.push(row)
+            elif stage3_env == "1" and library_unit_source_is_unneeded_stage3_dynlib_v1(rel_src, host_tag.platform, host_tag.cpu):
+                continue
+            elif rel_src.starts_with("src/lib/") and rows_by_unit.contains_key("simple-std"):
+                var std_bucket = rows_by_unit["simple-std"]
+                std_bucket.push(row)
+                rows_by_unit["simple-std"] = std_bucket
+            elif rel_src.starts_with("src/compiler/00.common/") and rows_by_unit.contains_key("simple-compiler-common"):
+                var common_bucket = rows_by_unit["simple-compiler-common"]
+                common_bucket.push(row)
+                rows_by_unit["simple-compiler-common"] = common_bucket
+            elif rel_src.starts_with("src/compiler/") and rows_by_unit.contains_key("simple-compiler"):
+                var comp_bucket = rows_by_unit["simple-compiler"]
+                comp_bucket.push(row)
+                rows_by_unit["simple-compiler"] = comp_bucket
+            elif (rel_src.starts_with("src/app/") or rel_src.starts_with("src/compositions/") or
+                    rel_src.starts_with("src/os/") or (stage3_env != "1" and rel_src.starts_with("src/plugins/"))):
+                if row.object_path != "":
+                    app_unit_rows.push(row)
+            else:
+                val owner = _dynlib_most_specific_owner_v1(manifests, rel_src)
+                if owner != "" and owner != target_unit_name and manifest_by_name.contains_key(owner) and
+                        manifest_by_name[owner].kind == "library":
+                    var other_bucket = rows_by_unit[owner]
+                    other_bucket.push(row)
+                    rows_by_unit[owner] = other_bucket
+                elif row.object_path != "":
+                    app_unit_rows.push(row)
+    else:
+        for row in req.rows:
+            val rel_src = _dynlib_strip_scv_snapshot_prefix_v1(root, row.source_path)
+            val owner = _dynlib_most_specific_owner_v1(manifests, rel_src)
+            if owner != "" and owner != target_unit_name and manifest_by_name.contains_key(owner) and
+                    manifest_by_name[owner].kind == "library":
+                var bucket = rows_by_unit[owner]
+                bucket.push(row)
+                rows_by_unit[owner] = bucket
+            elif row.object_path != "":
+                entry_objects.push(row.object_path)
 
     # Compute unit source + interface digests and build/reuse dynlibs dependency-first.
     var source_digest_by_unit: {text: text} = {}
@@ -825,12 +1241,16 @@ pub fn library_unit_partition_and_package_closure_v1(
         if entry.kind != "library":
             continue
         val m = manifest_by_name[entry.name]
-        val unit_fs_dir = if root == ".": m.dir else: "{root}/{m.dir}"
-        val resolved_files = source_inventory_scan_resolve_v1(unit_fs_dir, m.includes, m.excludes)
-        val iface_built = library_unit_iface_build_resolved_v1(
-            LibraryUnitIfaceBuildRequestV1(unit: entry.name, root: unit_fs_dir, rel_files: resolved_files))
-        source_digest_by_unit[entry.name] = iface_built.source_digest
-        iface_digest_by_unit[entry.name] = iface_built.iface.digest
+        val unit_fs_dir = if root == "" or root == ".": m.dir else: "{root}/{m.dir}"
+        val unit_rows = rows_by_unit[entry.name]
+        if is_simple_app and unit_rows.len() == 0:
+            source_digest_by_unit[entry.name] = "empty-closure-unit-v1:" + entry.name
+            iface_digest_by_unit[entry.name] = "empty-closure-iface-v1:" + entry.name
+            continue
+        val resolved_files = if is_simple_app:
+            _dynlib_closure_rel_files_for_unit_v1(root, m.dir, unit_rows)
+        else:
+            source_inventory_scan_resolve_v1(unit_fs_dir, m.includes, m.excludes)
         var dep_ifaces: [(text, text)] = []
         for dep in entry.deps:
             dep_ifaces.push((dep, iface_digest_by_unit[dep]))
@@ -842,70 +1262,55 @@ pub fn library_unit_partition_and_package_closure_v1(
             if trans_deps.contains_key(dep_art.unit):
                 dep_dynlibs.push(dep_art.dynlib_path)
             bf_rev = bf_rev - 1
-        val unit_key = library_unit_cache_key_v1(req.producer_identity, iface_built.source_digest, dep_ifaces)
-        val unit_dir = library_unit_archive_dir_v1(req.cache_root, entry.name, unit_key)
-        match library_unit_dynlib_complete_v1(LibraryUnitDynlibCompleteRequestV1(
-                dir: unit_dir, unit: entry.name, target_or_os: req.target_or_os)):
-            case Ok(reused_art):
-                built_by_unit[entry.name] = reused_art
-                built_forward.push(reused_art)
-                continue
-            case Err(_):
+        val (u_src_digest, u_ifc_digest, maybe_art) = match _dynlib_build_or_reuse_unit_artifact_v1(
+                entry.name, unit_fs_dir, resolved_files, unit_rows,
+                dep_ifaces, dep_dynlibs, req):
+            case Ok(t): t
+            case Err(e): return Err(e)
+        source_digest_by_unit[entry.name] = u_src_digest
+        iface_digest_by_unit[entry.name] = u_ifc_digest
+        match maybe_art:
+            case Some(art):
+                built_by_unit[entry.name] = art
+                built_forward.push(art)
+            case None:
                 pass
-        val unit_rows = rows_by_unit[entry.name]
-        if unit_rows.len() == 0:
-            continue
-        val staged_names = match _dynlib_stage_objects_into_unit_dir_v1(unit_dir, unit_rows):
-            case Ok(ns): ns
-            case Err(e): return Err("unit '{entry.name}': {e}")
-        if staged_names.len() == 0:
-            continue
-        val iface_path = library_unit_iface_path_v1(unit_dir)
-        match library_unit_iface_write_v1(iface_path, iface_built.iface):
-            case Ok(_): pass
-            case Err(e): return Err(e)
-        val iface_root = library_unit_iface_root_dir_v1(unit_dir)
-        match library_unit_iface_materialize_skeletons_v1(iface_root, iface_built.skeletons):
-            case Ok(_): pass
-            case Err(e): return Err(e)
-        val written = match library_unit_dynlib_write_v1(LibraryUnitDynlibWriteRequestV1(
-                dir: unit_dir, unit: entry.name, objects: staged_names,
-                dep_dynlibs: dep_dynlibs, target_or_os: req.target_or_os)):
-            case Ok(w): w
-            case Err(e): return Err(e)
-        val receipt = LibraryUnitReceiptV1(
-            unit: entry.name,
-            unit_key: unit_key,
-            scope_key: req.scope_key,
-            producer_identity: req.producer_identity,
-            source_digest: iface_built.source_digest,
-            iface_digest: iface_built.iface.digest,
-            deps: dep_ifaces,
-            objects: staged_names,
-            verdict: "ok",
-            failed_modules: [],
-            artifact_kind: LIBRARY_UNIT_ARTIFACT_DYNLIB_V1,
-            init_symbols: written.init_symbols)
-        if not file_exists(library_unit_receipt_path_v1(unit_dir)):
-            match library_unit_receipt_publish_v1(unit_dir, receipt):
-                case Ok(_): pass
-                case Err(e):
-                    if not file_exists(library_unit_receipt_path_v1(unit_dir)):
-                        return Err("unit '{entry.name}' receipt publication failed: {e}")
-        val verified = match library_unit_dynlib_complete_v1(LibraryUnitDynlibCompleteRequestV1(
-                dir: unit_dir, unit: entry.name, target_or_os: req.target_or_os)):
-            case Ok(v): v
-            case Err(e): return Err(e)
-        val fresh_art = LibraryUnitDynlibArtifactV1(
-            unit: verified.unit, unit_key: verified.unit_key, unit_dir: verified.unit_dir,
-            dynlib_path: verified.dynlib_path, iface_path: verified.iface_path,
-            iface_root_dir: verified.iface_root_dir, receipt_path: verified.receipt_path,
-            iface_digest: verified.iface_digest, init_symbols: verified.init_symbols,
-            reused: false)
-        built_by_unit[entry.name] = fresh_art
-        built_forward.push(fresh_art)
 
-    if built_forward.len() == 0:
+    if is_simple_app and app_unit_rows.len() > 0:
+        val app_fs_dir = if root == "": "." else: root
+        val app_rel_files = _dynlib_closure_rel_files_for_unit_v1(root, ".", app_unit_rows)
+        var app_dep_ifaces: [(text, text)] = []
+        for dep_name in ["simple-compiler", "simple-compiler-common", "simple-std"]:
+            if iface_digest_by_unit.contains_key(dep_name) and iface_digest_by_unit[dep_name] != "":
+                app_dep_ifaces.push((dep_name, iface_digest_by_unit[dep_name]))
+        var app_dep_dynlibs: [text] = []
+        var app_rev = built_forward.len() - 1
+        while app_rev >= 0:
+            app_dep_dynlibs.push(built_forward[app_rev].dynlib_path)
+            app_rev = app_rev - 1
+        val (_app_sd, _app_id, maybe_app_art) = match _dynlib_build_or_reuse_unit_artifact_v1(
+                "simple-app", app_fs_dir, app_rel_files, app_unit_rows,
+                app_dep_ifaces, app_dep_dynlibs, req):
+            case Ok(t): t
+            case Err(e): return Err(e)
+        match maybe_app_art:
+            case Some(app_art):
+                built_by_unit["simple-app"] = app_art
+                built_forward.push(app_art)
+            case None:
+                pass
+
+    if is_simple_app:
+        if primitive_static_rows.len() > 0:
+            val prim_archive_path = match _dynlib_package_primitive_static_archive_v1(
+                    root, host_tag, req.cache_root, req.producer_identity, primitive_static_rows):
+                case Ok(p): p
+                case Err(e): return Err(e)
+            entry_objects = thin_entry_objects + [prim_archive_path]
+        else:
+            entry_objects = thin_entry_objects
+
+    if built_forward.len() == 0 and (not is_simple_app or primitive_static_rows.len() == 0):
         return Err("no-library-units: closure has no buildable library units")
 
     # Link set order: dependents first, leaves last; init symbols: dependency-first!
@@ -921,16 +1326,25 @@ pub fn library_unit_partition_and_package_closure_v1(
         for init_sym in art.init_symbols:
             if not unit_init_symbols.contains(init_sym):
                 unit_init_symbols.push(init_sym)
-    val staged_dynlibs = match _dynlib_stage_beside_output_v1(
-            req.output_path, link_order_artifacts, req.target_or_os):
-        case Ok(paths): paths
-        case Err(e): return Err(e)
-    val retained = match _dynlib_retained_symbols_for_exec_v1(
-            staged_dynlibs, entry_objects, req.target_or_os):
-        case Ok(syms): syms
-        case Err(e): return Err(e)
-    val rpath_flags = library_unit_exec_rpath_flags_v1(
-        LibraryUnitExecRpathRequestV1(target_or_os: req.target_or_os, unit_dirs: unit_dirs))
+    val staged_dynlibs = if link_order_artifacts.len() > 0:
+        match _dynlib_stage_beside_output_v1(
+                req.output_path, link_order_artifacts, req.target_or_os):
+            case Ok(paths): paths
+            case Err(e): return Err(e)
+    else:
+        []
+    val retained = if staged_dynlibs.len() > 0:
+        match _dynlib_retained_symbols_for_exec_v1(
+                staged_dynlibs, entry_objects, req.target_or_os):
+            case Ok(syms): syms
+            case Err(e): return Err(e)
+    else:
+        []
+    val rpath_flags = if staged_dynlibs.len() > 0:
+        library_unit_exec_rpath_flags_v1(
+            LibraryUnitExecRpathRequestV1(target_or_os: req.target_or_os, unit_dirs: unit_dirs))
+    else:
+        []
     Ok(LibraryUnitClosureLinkPlanV1(
         entry_objects: entry_objects,
         staged_dynlibs: staged_dynlibs,
@@ -1048,11 +1462,13 @@ fn _project_compile_unit_objects_v1(compiler_bin: text, unit_name: text,
     val old_stage3_dyn = env_get("SIMPLE_STAGE3_LIB_DYNLIB") ?? ""
     val old_keep_arch = env_get("SIMPLE_KEEP_ARCHIVE_OBJECTS") ?? ""
     val old_simple_lib = env_get("SIMPLE_LIB") ?? ""
+    val old_mcdc = env_get("SIMPLE_MCDC_MODE") ?? ""
     if old_reserve == "":
         env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "536870912")
     env_set("SIMPLE_FILE_WORKERS", "0")
     env_set("SIMPLE_STAGE3_LIB_DYNLIB", "0")
     env_set("SIMPLE_KEEP_ARCHIVE_OBJECTS", "1")
+    env_set("SIMPLE_MCDC_MODE", "")
     if is_dir("{abs_stage_ws}/src"):
         env_set("SIMPLE_LIB", "{abs_stage_ws}/src")
     elif old_simple_lib != "" and not _dynlib_is_abs_path_v1(old_simple_lib):
@@ -1096,6 +1512,7 @@ fn _project_compile_unit_objects_v1(compiler_bin: text, unit_name: text,
     env_set("SIMPLE_STAGE3_LIB_DYNLIB", old_stage3_dyn)
     env_set("SIMPLE_KEEP_ARCHIVE_OBJECTS", old_keep_arch)
     env_set("SIMPLE_LIB", old_simple_lib)
+    env_set("SIMPLE_MCDC_MODE", old_mcdc)
 
     var unit_objects: [text] = []
     if compile_err == "":

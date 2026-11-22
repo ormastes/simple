@@ -1,5 +1,56 @@
 # bootstrap Layer Expert
 
+## Unified Cross-Platform Phase 3 / Phase 4 Build, Seed-Skip & Protected Scripts (2026-11-22)
+
+See [`phase3_phase4_shared_build.md`](../../../07_guide/tooling/phase3_phase4_shared_build.md)
+and [`bootstrap_options.md`](../../../07_guide/tooling/bootstrap_options.md):
+
+1. **Shared Cross-Platform Phased Build (`scripts/bootstrap/build-phase3-phase4.sh` & `.bat`):**
+   One shared script across **Linux, macOS, FreeBSD, Windows (Git-Bash/MSYS2), and SimpleOS**.
+   Shows the **interactive Phased Build Menu** when invoked interactively without
+   `--phase=...` (or with `--menu`), and accepts non-interactive `--phase=p3a|p3|p4|all`.
+   Windows `scripts/bootstrap/build-phase3-phase4.bat` delegates to `.sh` with 2 configs:
+   **`mingw` DEFAULT** (`--win-config=mingw`, `llvm-mingw` clang + `ld.lld`) and
+   **`msvc` optional** (`--win-config=msvc`, `clang-cl`). Old standalone Phase 3/4 scripts
+   (`p3-selfbuild-stage3.shs`, `p3-manual-link-stage3.shs`, `p3-smoke-stage3.shs`,
+   `p3-targeted-stage2-build.shs`, `p3-entry-groups.shs`, etc.) are deprecated —
+   direct invocation pauses with migration instructions for `build-phase3-phase4.sh`
+   (including phased/shard mode) and returns without building.
+2. **Default Bootstrap Skips Phase 1 & Phase 2 Once Phase 3+ Exists:**
+   In `scripts/bootstrap/bootstrap-from-scratch.sh`, when a working native pure-Simple
+   Phase 3+ host compiler already exists (`bin/release/<triple>/simple` or `bin/simple`
+   without the Rust-seed banner), **default bootstrap skips Phase 1 (Cargo Rust seed)
+   and Phase 2 (`seed -> stage2`)** and delegates directly to
+   `scripts/bootstrap/build-phase3-phase4.sh` (`P3 -> P4`). Pass `--from-seed` /
+   `--cold-bootstrap` (or `--full-bootstrap` in CI) ONLY when intentionally rebuilding
+   Phase 1 & Phase 2 from the Rust seed; pass `--skip-seed` to require an existing
+   Phase 3+ compiler without seed fallback.
+3. **Compile Mode (`shard` Default, `file` Optional) & `native_host_match` Unit Link:**
+   `--compile-mode=shard` is **DEFAULT** in `build-phase3-phase4.sh`
+   (`SIMPLE_FILE_WORKERS=0`, `SIMPLE_HIR_SHARDING=1`, `SIMPLE_MIR_SHARDING=1`);
+   `--compile-mode=file` (`SIMPLE_FILE_WORKERS=1`) is optional.
+   `scripts/bootstrap/stage3-native-host-link-policy.{sdn,shs}` enforces mandatory
+   **`native_host_match` tag check** (`target (platform, cpu) == host (os, arch)`),
+   minimizing `simple` to link **only** thin entry + `(platform, cpu)` static primitive
+   archive (`libsimple-primitive-<platform>-<cpu>.a`) + dead-stripped primitive C core
+   statically, while linking `lib/libsimple-{std,compiler-common,compiler,app}.dylib`
+   (`.so`) dynamically. **Phase 3 builds ONLY native host targets** — non-native
+   backends (other CPUs, VHDL, GPU/CUDA/Vulkan, Wasm) are NOT built during Phase 3,
+   **but if a `.dylib` already exists on disk, `simple` can load and use it**
+   (`--backend-plugin <existing.dylib>`).
+4. **Phase 4 Dual-Mode Build (`--xray` + Optimized Release):**
+   Phase 4 builds **both** the optimized production binary
+   (`simple`: `--profile=prod --release --strip`) AND the XRay-instrumented debug binary
+   (`simple-debug`: `--profile=dev --debug --no-strip --xray`), plus Stage 5 essentials
+   (`simple_test_runner`, `simple_build_runner`, `simple_mcp_server`, `simple_lsp_mcp_server`).
+5. **Protected Script Guard & Zero-Compile `--path-check`:**
+   Every core bootstrap script carries a top-of-file
+   `PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER`
+   banner. Run `sh scripts/check/fast-verify-bootstrap-scripts.shs` for a sub-second
+   check of sealed `.sdn` SHA-256 digests, protected banners, syntax, and
+   `check-bootstrap-path-matrix-all.shs` across Unix/Windows/SimpleOS using extensible
+   `PATH_ACTION|...|status=ALIVE` superset records without running actual compilation.
+
 ## Host-config bootstrap settings (2026-11-22)
 
 Host tuning (reserve, Stage 3 tree RSS cap, Stage 3 direct threads, Stage 3
@@ -934,6 +985,7 @@ environment fingerprint. See `doc/00_llm_process/feature_expert/host_config/skil
 - 2026-10-25 (later): Per-file src to obj is the DEFAULT (#4525 compiler, #4542 guide, scripts PR 2026-10-25): each module lowers to its own `aot-<hash>.o` in the per-module object cache under `SIMPLE_NATIVE_BUILD_CACHE_DIR`, codegen fans out over `SIMPLE_NATIVE_BUILD_THREADS` (scripts: host.sdn `max_build_jobs`), then all objects link into one binary. Stage 3 scripts pass `SIMPLE_BOOTSTRAP=` empty so the bootstrap_fixed shortcut is not forced; `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` opts back into the whole-program lane (hashed into the Stage 3 args). First-object proof: 9-module closure, 9 objects, first at 160 s, last at 174 s, binary runs.
 
 - Default build mode (user policy 2026-11-04): unset `SIMPLE_FILE_WORKERS` resolves to `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"` (`native_file_worker_v1.spl`): file-based src → obj, one process per file (parse → HIR → MIR → obj), then link. Supersedes the 2026-10-26 opt-in. Opt-outs are per invocation only: `SIMPLE_FILE_WORKERS=0` (two-pass shard route), `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` (whole-program route), `SIMPLE_MIR_SHARDING=0`. Never flip a shared default (config, script-global env, constant) to suit one build; pass the option at the call site with a why-comment. Gap: per-package library archives are not yet the default link input. Runtime proof pending a stage3 binary: `sh scripts/check/check-per-file-overlap-receipt.shs <receipt dir>`. See `doc/07_guide/tooling/bootstrap_options.md` § Default build mode.
+- 2026-11-22 reconciliation: for Phase 3/4 bootstrap scripts (`scripts/bootstrap/build-phase3-phase4.sh`, `config/bootstrap.sdn` `stage3_file_workers: 0`), **`--compile-mode=shard` (`SIMPLE_FILE_WORKERS=0`, `SIMPLE_HIR_SHARDING=1`, `SIMPLE_MIR_SHARDING=1`) is the script DEFAULT** and `--compile-mode=file` (`SIMPLE_FILE_WORKERS=1`) is optional; old standalone `p3-*.shs` scripts (`p3-selfbuild-stage3.shs`, `p3-manual-link-stage3.shs`, `p3-smoke-stage3.shs`, `p3-targeted-stage2-build.shs`, `p3-entry-groups.shs`) are deprecated migration stubs delegating to `build-phase3-phase4.sh`.
 
 ## BuildRunner collection identity (2026-10-29)
 
@@ -970,3 +1022,13 @@ i64 `SIMPLE_BUILD_MEMORY_RESERVE_BYTES`; absence retains the compiler default
 and malformed values refuse before candidate execution. This does not change
 hard memory enforcement or admit a previously rejected compiler. See
 [reserve scrub evidence](../../../08_tracking/bug/bootstrap_sanity_memory_reserve_scrub_2026_10_30.md).
+
+## Phase 3 HIR `unresolved name: cpu_count_checked` (2026-11-22)
+
+integ25 Stage 2 -> Stage 3 (go-to-end) failed HIR on
+`compiler.backend.runtime_c_compile_pool_v1`: the name was imported through the
+`std.io_runtime` facade, which does not export it. Fixed import-only in #10770;
+`scripts/check/check-io-runtime-facade-imports.shs` (#10777) now catches the
+class statically. Details: [lib](../lib/skill.md) § "`std.io_runtime` facade
+imports" and
+`doc/08_tracking/bug/io_runtime_facade_unexported_import_hir_unresolved_2026-11-22.md`.

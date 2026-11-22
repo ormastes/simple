@@ -1,0 +1,67 @@
+# Toolchain environment for the standalone Stage 2 compiler-tests admit lane
+# (W13, doc/08_tracking/bug/windows_msvc_release_bootstrap_lane_gaps_2026-11-22.md).
+# bootstrap-windows.sh / bootstrap-from-scratch.sh export these before running
+# this gate; admit-built-stage2-compiler-tests.shs runs it on its own and used
+# to need SIMPLE_LINKER_FLAVOR, LLVM_SYS_231_PREFIX and LLVM 23's bin ahead of
+# MSYS2 mingw64 (whose clang-cl.exe fails to load) set by hand.
+#
+# PLATFORM SOURCE_ROOT -> 0 with the env exported, 1 with a reason on stderr.
+# Non-Windows platforms are left untouched. The ABI comes from the admitted
+# platform triple. An environment value wins; one that contradicts the triple
+# is refused (same rule as bootstrap-from-scratch.sh's SIMPLE_LINKER_FLAVOR
+# check). MSVC LLVM prefix order: LLVM_SYS_231_PREFIX, SIMPLE_LLVM_WIN_ROOT_23,
+# host config llvm_root (scripts/setup/host-env.shs, as platform-detect.shs),
+# then the pinned toolchain locations windows-msvc-bootstrap-env.shs knows.
+admit_stage2_toolchain_env() {
+    case "$1" in
+        *-windows-msvc) admit_env_abi=msvc ;;
+        *-windows-gnu*) admit_env_abi=gnu ;;
+        *) return 0 ;;
+    esac
+    case "${SIMPLE_WINDOWS_ABI:-$admit_env_abi}" in
+        "$admit_env_abi") ;;
+        *) echo "admit-stage2: SIMPLE_WINDOWS_ABI=${SIMPLE_WINDOWS_ABI} conflicts with --platform=$1" >&2
+           return 1 ;;
+    esac
+    case "$admit_env_abi:${SIMPLE_LINKER_FLAVOR:-$admit_env_abi}" in
+        msvc:msvc|gnu:gnu|gnu:mingw) ;;
+        *) echo "admit-stage2: SIMPLE_LINKER_FLAVOR=${SIMPLE_LINKER_FLAVOR} conflicts with --platform=$1" >&2
+           return 1 ;;
+    esac
+    SIMPLE_WINDOWS_ABI=$admit_env_abi
+    SIMPLE_LINKER_FLAVOR=${SIMPLE_LINKER_FLAVOR:-$admit_env_abi}
+    export SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR
+    [ "$admit_env_abi" = msvc ] || return 0
+
+    admit_env_prefix=${LLVM_SYS_231_PREFIX:-${SIMPLE_LLVM_WIN_ROOT_23:-}}
+    admit_env_prefix_source=environment
+    if [ -z "$admit_env_prefix" ] && [ -f "$2/scripts/setup/host-env.shs" ]; then
+        admit_env_prefix=$(sh "$2/scripts/setup/host-env.shs" --get llvm_root 2>/dev/null) ||
+            admit_env_prefix=
+        admit_env_prefix_source="host config llvm_root"
+    fi
+    if [ -z "$admit_env_prefix" ]; then
+        admit_env_prefix_source="pinned toolchain location"
+        for admit_env_candidate in \
+            "${HOME:-}/.simple/toolchains/llvm-msvc-23.1.1/clang+llvm-23.1.1-x86_64-pc-windows-msvc" \
+            /c/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc; do
+            [ -x "$admit_env_candidate/bin/clang-cl.exe" ] || continue
+            admit_env_prefix=$admit_env_candidate
+            break
+        done
+    fi
+    [ -n "$admit_env_prefix" ] &&
+        [ -x "$admit_env_prefix/bin/clang-cl.exe" ] &&
+        [ -x "$admit_env_prefix/bin/lld-link.exe" ] || {
+        echo "admit-stage2: no LLVM 23 MSVC toolchain (clang-cl.exe + lld-link.exe) at '${admit_env_prefix}' (${admit_env_prefix_source}); set LLVM_SYS_231_PREFIX" >&2
+        return 1
+    }
+    LLVM_SYS_231_PREFIX=$admit_env_prefix
+    export LLVM_SYS_231_PREFIX
+    # LLVM 23 must shadow MSYS2 mingw64's clang-cl.exe / lld-link.exe.
+    case "$(command -v clang-cl.exe 2>/dev/null || :)" in
+        "$admit_env_prefix/bin/clang-cl.exe") ;;
+        *) PATH="$admit_env_prefix/bin:$PATH"; export PATH ;;
+    esac
+    echo "admit-stage2: toolchain env SIMPLE_WINDOWS_ABI=$SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR=$SIMPLE_LINKER_FLAVOR LLVM_SYS_231_PREFIX=$LLVM_SYS_231_PREFIX ($admit_env_prefix_source)" >&2
+}
