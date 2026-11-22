@@ -18,13 +18,23 @@
 use std.nogc_sync_mut.tui.style.{Style, styled, make_style, COLOR_NONE,
     COLOR_BLACK, COLOR_BLUE, COLOR_CYAN, COLOR_WHITE}
 use std.nogc_async_mut.sosix.{sosix_proc_usage, sosix_is_running, sosix_which,
-    sosix_platform}
+    sosix_platform, sosix_host_os}
 use std.io_runtime.{env_get, file_exists, cwd}
 use app.io.mod.{file_remove}
+use std.nogc_sync_mut.container_session.macos_seatbelt_session_v1.{macos_seatbelt_image_selected_v1,
+    macos_seatbelt_host_capable_v1, macos_seatbelt_canonical_path_v1}
 use app.llm_caret.cs_container.{CsContainerRequest, cs_container_request, cs_container_argv,
     cs_container_name, cs_container_reap, cs_container_real_path,
     cs_container_present, cs_container_reap_session, cs_container_instance,
     cs_container_mark_launched, cs_container_launched}
+use app.llm_caret.cs_container_lifecycle_v1.{CsContainerSessionRecordV1,
+    cs_worktree_extract_flag_v1, cs_strip_workspace_for_cli_harness_v1,
+    cs_worktree_create_v1, cs_worktree_remove_owned_v1,
+    cs_container_record_save_v1, cs_container_prepare_macos_seatbelt_v1,
+    cs_container_records_load_v1, cs_container_reconcile_v1,
+    cs_container_close_record_v1, cs_container_crashed_records_v1,
+    cs_container_prepare_relaunch_v1}
+use app.llm_caret.cs_orchestrator_v1.{cs_orchestrator_dispatch_v1}
 use app.llm_caret.workbench.session_contract.{SessionId, new_session_id}
 use app.llm_caret.workbench.roster_order.{roster_order}
 use app.llm_caret.harness_spec.{parse_harness_spec, harness_spec_display}
@@ -127,10 +137,15 @@ fn _usage_text(a: CsAgent) -> text:
 
 fn cs_help_text() -> text:
     val lines = [
-        "/launch <spec> [args...]   launch an agent (harness[:provider][/model])",
-        "    --container <image>    run it in a container via the Simple container layer",
+        "/launch <spec> [args...]   launch an agent (harness[:provider][/model], incl. agy)",
+        "    --container <image|macos-seatbelt>  run via the Simple container layer",
+        "    --worktree             create an isolated git worktree (cleaned on close, kept on crash)",
         "    --container-mount <src>:<dst>[:ro|rw]  --container-network host|none|private",
         "    --container-env KEY=VALUE   (e.g. GIT_AUTHOR_NAME, GIT_COMMITTER_EMAIL)",
+        "/containers  (/crashed)    list tracked & crashed containers available for relaunch",
+        "/relaunch <n|id|name> [args...]  relaunch a crashed container in its preserved worktree",
+        "/close <n|id>              close an agent and clean its worktree & temp files",
+        "/orchestrator <sub>        start|status|launch|inspect|crashed|relaunch|close|stop",
         "/reap            remove EVERY container on this session, any cs's (after a killed cs)",
         "/switch <n|id|query>  select an agent (fuzzy label match) and focus its pane",
         "/pin [n|id]  /unpin [n|id]   keep an agent at the top of the roster",
@@ -153,6 +168,53 @@ fn _words(line: text) -> [text]:
         if part.trim() != "":
             out = out + [part.trim()]
     out
+
+# Quote-aware word splitter so multi-word prompts (`-p "hello world"`) stay intact
+# while unquoted words split identically to `_words`.
+fn cs_shell_words(line: text) -> [text]:
+    var out: [text] = []
+    var cur = ""
+    var in_token = false
+    var quote = ""
+    var escaped = false
+    for ch in line.chars():
+        if escaped:
+            cur = cur + ch
+            in_token = true
+            escaped = false
+            continue
+        if ch == "\\" and quote != "'":
+            escaped = true
+            in_token = true
+            continue
+        if quote != "":
+            if ch == quote:
+                quote = ""
+            else:
+                cur = cur + ch
+            continue
+        if ch == "\"" or ch == "'":
+            quote = ch
+            in_token = true
+            continue
+        if ch == " " or ch == "\t":
+            if in_token:
+                out.push(cur)
+                cur = ""
+                in_token = false
+            continue
+        cur = cur + ch
+        in_token = true
+    if in_token:
+        out.push(cur)
+    out
+
+fn cs_quote_word_if_needed(word: text) -> text:
+    if word == "":
+        return "\"\""
+    if not word.contains(" ") and not word.contains("\t") and not word.contains("\"") and not word.contains("'"):
+        return word
+    "\"" + word.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
 # `.split(sep, N)` ignores N on this seed, so the argument tail is rejoined.
 fn _rest(words: [text]) -> text:
@@ -237,17 +299,16 @@ fn cs_handle_command(d: CsDashboard, line: text) -> (CsDashboard, text):
         return (d, _agent_list_text(d))
 
     if cmd == "/launch":
-        # Extra args are space-split words; an arg containing spaces is not supported.
-        val launch_words = _words(arg)
-        val first = if launch_words.len() > 0: launch_words[0] else: ""
+        val launch_words = cs_shell_words(trimmed)
+        val first = if launch_words.len() > 1: launch_words[1] else: ""
         val spec = parse_harness_spec(first)
         if not spec.valid:
             return (d, spec.error)
         val display = harness_spec_display(spec)
         var extras_text = ""
-        var wi = 1
+        var wi = 2
         while wi < launch_words.len():
-            extras_text = extras_text + " " + launch_words[wi]
+            extras_text = extras_text + " " + cs_quote_word_if_needed(launch_words[wi])
             wi = wi + 1
         val shown = display + extras_text
         val agent_id = "a" + (d.agents.len() + 1).to_text()
@@ -258,6 +319,42 @@ fn cs_handle_command(d: CsDashboard, line: text) -> (CsDashboard, text):
         val next = _dash(d, d.manager_status, agents, agents.len() - 1,
             _logged(d, "launch " + display + " as " + agent_id))
         return (next, "launch:" + agent_id + " " + shown)
+
+    if cmd == "/containers" or cmd == "/crashed":
+        return (d, "container:list-" + (if cmd == "/crashed": "crashed" else: "all"))
+
+    if cmd == "/relaunch":
+        val rl_words = cs_shell_words(trimmed)
+        if rl_words.len() < 2 or rl_words[1] == "":
+            return (d, "usage: /relaunch <n|id|container-name> [override-args...]")
+        var target_key = rl_words[1]
+        val resolved_idx = _resolve(d, target_key)
+        if resolved_idx >= 0:
+            target_key = d.agents[resolved_idx].agent_id
+        var rl_tail = ""
+        var ri = 2
+        while ri < rl_words.len():
+            rl_tail = rl_tail + " " + cs_quote_word_if_needed(rl_words[ri])
+            ri = ri + 1
+        return (d, "container:relaunch " + cs_quote_word_if_needed(target_key) + rl_tail)
+
+    if cmd == "/close":
+        val key = if arg == "" and d.selected >= 0: d.agents[d.selected].agent_id else: arg
+        if key == "":
+            return (d, "usage: /close <n|id>")
+        val idx = _resolve(d, key)
+        val target_id = if idx >= 0: d.agents[idx].agent_id else: key
+        val pane_id = if idx >= 0: d.agents[idx].pane_id else: ""
+        return (d, "session:close " + target_id + (if pane_id != "": " " + pane_id else: ""))
+
+    if cmd == "/orchestrator" or cmd == "/orch":
+        var orch_tail = ""
+        val orch_words = cs_shell_words(trimmed)
+        var oi = 1
+        while oi < orch_words.len():
+            orch_tail = orch_tail + (if orch_tail == "": "" else: " ") + cs_quote_word_if_needed(orch_words[oi])
+            oi = oi + 1
+        return (d, "orchestrator:" + orch_tail)
 
     if cmd == "/switch":
         val found = _resolve_fuzzy(d, arg)
@@ -616,14 +713,26 @@ fn cs_refresh(d: CsDashboard) -> CsDashboard:
     val backend = pane_backend_name()
     val probe_pid = backend == "tmux"
     val panes = pane_list(d.session)
+    var live_pane_ids: [text] = []
+    for p in panes:
+        if not probe_pid or sosix_is_running(p.pid):
+            live_pane_ids.push(p.pane_id)
+    val records = cs_container_reconcile_v1(d.session, live_pane_ids)
     var agents: [CsAgent] = []
     for a in d.agents:
         var next = _unmeasured(a, "gone: pane closed", "pane " + a.pane_id +
             " is no longer listed")
-        if a.pane_id == "" and (a.status.starts_with("pending") or a.status.starts_with("gone")):
+        if a.pane_id == "" and (a.status.starts_with("pending") or a.status.starts_with("gone") or a.status.starts_with("crashed")):
             next = _unmeasured(a, a.status, a.detail)
         for pane in _find_pane(panes, a.pane_id, a.agent_id):
             next = _measured(a, pane, probe_pid)
+        for rec in records:
+            if rec.agent_id == a.agent_id and rec.state == "crashed":
+                next = _unmeasured(a, "crashed: exit " + rec.exit_code.to_text(),
+                    "container " + rec.name + " worktree " + rec.worktree_path + " preserved for /relaunch")
+            elif rec.agent_id == a.agent_id and rec.state == "exited-clean" and next.status.starts_with("gone"):
+                next = _unmeasured(a, "exited: clean (0)",
+                    "container " + rec.name + " ready to /close")
         agents = agents + [next]
     # The header derives agent and running counts from the roster itself.
     _with_screen(_dash(d, "connected: " + backend, agents, d.selected, d.log))
@@ -758,24 +867,90 @@ fn _detach(d: CsDashboard, agent_id: text) -> CsDashboard:
 # refused or failed launch leaves the agent unmarked, so it can never cause a
 # removal: the name may be another cs's live container. See
 # roster entry.
-fn _cs_launch_in_container(d: CsDashboard, agent_id: text, exe: text, args: [text],
+fn _live_pane_ids_for(session: text) -> [text]:
+    val probe_pid = pane_backend_name() == "tmux"
+    var ids: [text] = []
+    for p in pane_list(session):
+        if not probe_pid or sosix_is_running(p.pid):
+            ids.push(p.pane_id)
+    ids
+
+fn _cs_launch_macos_seatbelt(d: CsDashboard, agent_id: text, spec_shown: text,
+        exe: text, args: [text], repo_root: text, worktree_path: text,
+        worktree_owned: bool, container: CsContainerRequest) -> (CsDashboard, text):
+    if not macos_seatbelt_host_capable_v1():
+        if worktree_owned and worktree_path != "":
+            val _rm = cs_worktree_remove_owned_v1(repo_root, worktree_path)
+        return (d, "cannot launch " + agent_id + ": macOS Seatbelt (/usr/bin/sandbox-exec) unavailable or nested sandbox refused")
+    val stderr_path = cs_stderr_path(d.session, agent_id)
+    val prepared = match cs_container_prepare_macos_seatbelt_v1(d.session, agent_id,
+            spec_shown, exe, args, repo_root, worktree_path, worktree_owned,
+            stderr_path, env_get("HOME") ?? "", cs_container_instance(), container):
+        case Ok(pair): pair
+        case Err(reason):
+            if worktree_owned and worktree_path != "":
+                val _rm = cs_worktree_remove_owned_v1(repo_root, worktree_path)
+            return (d, "cannot launch " + agent_id + ": " + reason)
+    var rec = prepared.0
+    val run_path = prepared.1
+    val pane = pane_spawn_at(d.session, agent_id, "/bin/sh", [run_path], _cs_pane_cols,
+        _cs_pane_rows, stderr_path)
+    if pane.pane_id == "":
+        val _closed = cs_container_close_record_v1(d.session, agent_id, [], true)
+        return (d, "pane backend could not spawn a pane for " + agent_id)
+    rec.pane_id = pane.pane_id
+    rec.pid = pane.pid
+    val _saved = cs_container_record_save_v1(rec)
+    val wt_note = if worktree_path != "": " worktree " + worktree_path else: ""
+    (_attach(d, agent_id, pane), "launched " + agent_id + " in pane " + pane.pane_id +
+        " inside container " + rec.name + " (macos-seatbelt)" + wt_note)
+
+fn cs_repo_root() -> text:
+    val explicit = env_get("SIMPLE_CS_REPO_ROOT") ?? ""
+    if explicit != "":
+        return explicit
+    cwd()
+
+fn _cs_launch_in_container(d: CsDashboard, agent_id: text, spec_shown: text, exe: text,
+        args: [text], worktree_path: text, worktree_owned: bool,
         container: CsContainerRequest) -> (CsDashboard, text):
-    val real_exe = cs_container_real_path(exe)
-    val repo_root = cs_container_real_path(cwd())
+    val base_repo = cs_repo_root()
+    val real_exe = macos_seatbelt_canonical_path_v1(exe)
+    val repo_root = macos_seatbelt_canonical_path_v1(base_repo)
     if real_exe == "" or repo_root == "":
+        if worktree_owned and worktree_path != "":
+            val _rm = cs_worktree_remove_owned_v1(base_repo, worktree_path)
         return (d, "cannot launch " + agent_id + ": could not resolve the binary or repo path")
-    val engine_argv = match cs_container_argv(d.session, agent_id, real_exe, args, repo_root,
+    if macos_seatbelt_image_selected_v1(container.image, sosix_host_os()):
+        return _cs_launch_macos_seatbelt(d, agent_id, spec_shown, real_exe, args, repo_root,
+            worktree_path, worktree_owned, container)
+    val podman_exe = cs_container_real_path(exe)
+    val podman_repo = cs_container_real_path(base_repo)
+    if podman_exe == "" or podman_repo == "":
+        if worktree_owned and worktree_path != "":
+            val _rm = cs_worktree_remove_owned_v1(repo_root, worktree_path)
+        return (d, "cannot launch " + agent_id + ": could not resolve the binary or repo path")
+    val engine_argv = match cs_container_argv(d.session, agent_id, podman_exe, args, podman_repo,
             env_get("TERM") ?? "", env_get("HOME") ?? "", cs_container_instance(), container):
         case Ok(value): value
-        case Err(reason): return (d, "cannot launch " + agent_id + ": " + reason)
+        case Err(reason):
+            if worktree_owned and worktree_path != "":
+                val _rm = cs_worktree_remove_owned_v1(repo_root, worktree_path)
+            return (d, "cannot launch " + agent_id + ": " + reason)
     val engine = _which(engine_argv[0])
     if engine == "":
+        if worktree_owned and worktree_path != "":
+            val _rm = cs_worktree_remove_owned_v1(repo_root, worktree_path)
         return (d, "cannot launch " + agent_id + ": '" + engine_argv[0] + "' is not on PATH")
     val present = cs_container_present(d.session, agent_id)
     if present == "exists":
+        if worktree_owned and worktree_path != "":
+            val _rm = cs_worktree_remove_owned_v1(repo_root, worktree_path)
         return (d, "cannot launch " + agent_id + ": container " + cs_container_name(d.session, agent_id) +
             " already exists (another cs on this session, or left by a killed one): /reap removes it")
     if present != "":
+        if worktree_owned and worktree_path != "":
+            val _rm = cs_worktree_remove_owned_v1(repo_root, worktree_path)
         return (d, "cannot launch " + agent_id + ": container state unknown: " + present)
     var engine_args: [text] = []
     var i = 1
@@ -785,20 +960,26 @@ fn _cs_launch_in_container(d: CsDashboard, agent_id: text, exe: text, args: [tex
     val pane = pane_spawn_at(d.session, agent_id, engine, engine_args, _cs_pane_cols,
         _cs_pane_rows, cs_stderr_path(d.session, agent_id))
     if pane.pane_id == "":
-        # No pane means no engine client ran, so no container exists to reap.
+        if worktree_owned and worktree_path != "":
+            val _rm = cs_worktree_remove_owned_v1(repo_root, worktree_path)
         return (d, "pane backend could not spawn a pane for " + agent_id)
-    # Only now does this process own a container for the agent. Every
-    # removal is gated on this mark AND on the engine-side instance label.
     cs_container_mark_launched(d.session, agent_id)
     (_attach(d, agent_id, pane), "launched " + agent_id + " in pane " + pane.pane_id +
         " inside container " + cs_container_name(d.session, agent_id))
 
-# Removes every container of this dashboard's containerized agents; called
-# when either cs loop ends (quit, EOF, Ctrl-C/D) so no agent container
-# outlives its dashboard. Returns a
-# note for the operator, "" when there was nothing to do.
+# Removes every non-crashed container and its worktree/temp files when a cs
+# loop ends cleanly; crashed containers and their worktrees remain preserved
+# on disk for `/containers` and `/relaunch`.
 fn cs_reap_containers(d: CsDashboard) -> text:
     var note = ""
+    val live_ids = _live_pane_ids_for(d.session)
+    for rec in cs_container_reconcile_v1(d.session, live_ids):
+        if rec.state == "crashed":
+            note = note + "preserved crashed container " + rec.name + " worktree " + rec.worktree_path + "\n"
+        else:
+            val (_ok, msg) = cs_container_close_record_v1(d.session, rec.agent_id, live_ids, false)
+            if msg != "" and not _ok:
+                note = note + msg + "\n"
     for a in d.agents:
         if cs_container_launched(d.session, a.agent_id):
             val reap_error = cs_container_reap(d.session, a.agent_id)
@@ -806,7 +987,23 @@ fn cs_reap_containers(d: CsDashboard) -> text:
                 note = note + "container " + cs_container_name(d.session, a.agent_id) + " NOT removed: " + reap_error + "\n"
             else:
                 val _spool = file_remove(cs_stderr_path(d.session, a.agent_id))
+        elif a.status != "crashed" and not a.status.starts_with("crashed:"):
+            val _spool2 = file_remove(cs_stderr_path(d.session, a.agent_id))
     note
+
+fn _format_container_records(session: text, crashed_only: bool) -> text:
+    val live_ids = _live_pane_ids_for(session)
+    val records = if crashed_only: cs_container_crashed_records_v1(session, live_ids)
+        else: cs_container_reconcile_v1(session, live_ids)
+    if records.len() == 0:
+        return if crashed_only: "(no crashed containers)\n" else: "(no tracked containers)\n"
+    var out = ""
+    for rec in records:
+        out = out + rec.agent_id + "  " + rec.name + "  [" + rec.state +
+            " exit=" + rec.exit_code.to_text() + "]  backend=" + rec.backend +
+            "  worktree=" + (if rec.worktree_path == "": "(none)" else: rec.worktree_path) +
+            "  spec=" + rec.spec + "\n"
+    out
 
 fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
     val words = _words(action)
@@ -829,45 +1026,123 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
         if pane_send_key(d.session, words[1], words[2]):
             return (d, "pressed " + words[2] + " in pane " + words[1])
         return (d, "pane backend refused key " + words[2] + " for pane " + words[1])
+    if head == "container:list-all":
+        return (cs_refresh(d), _format_container_records(d.session, false))
+    if head == "container:list-crashed":
+        return (cs_refresh(d), _format_container_records(d.session, true))
+    if head == "container:relaunch":
+        val rl_words = cs_shell_words(action)
+        if rl_words.len() < 2:
+            return (d, "malformed relaunch action")
+        val target_key = rl_words[1]
+        var override_args: [text] = []
+        var ri = 2
+        while ri < rl_words.len():
+            override_args.push(rl_words[ri])
+            ri = ri + 1
+        val prepared = match cs_container_prepare_relaunch_v1(d.session, target_key,
+                override_args, _live_pane_ids_for(d.session), cs_container_instance(),
+                env_get("HOME") ?? ""):
+            case Ok(pair): pair
+            case Err(reason): return (d, "cannot relaunch " + target_key + ": " + reason)
+        var rec = prepared.0
+        val run_path = prepared.1
+        val pane = pane_spawn_at(d.session, rec.agent_id, "/bin/sh", [run_path],
+            _cs_pane_cols, _cs_pane_rows, rec.stderr_path)
+        if pane.pane_id == "":
+            return (d, "pane backend could not spawn relaunch pane for " + rec.agent_id)
+        rec.pane_id = pane.pane_id
+        rec.pid = pane.pid
+        val _saved = cs_container_record_save_v1(rec)
+        var base_d = d
+        if _resolve(base_d, rec.agent_id) < 0:
+            val restored = CsAgent(agent_id: rec.agent_id, spec: rec.spec,
+                status: "running", pid: pane.pid, pane_id: pane.pane_id,
+                cpu_pct: -1.0, rss_mb: -1, detail: "relaunched in " + rec.worktree_path)
+            val next_agents = base_d.agents + [restored]
+            base_d = _dash(base_d, base_d.manager_status, next_agents, next_agents.len() - 1,
+                _logged(base_d, "relaunch " + rec.agent_id))
+        return (_attach(base_d, rec.agent_id, pane), "relaunched " + rec.agent_id +
+            " in pane " + pane.pane_id + " inside container " + rec.name +
+            (if rec.worktree_path != "": " worktree " + rec.worktree_path else: ""))
+    if head == "session:close":
+        val target_id = if words.len() > 1: words[1] else: ""
+        val pane_id = if words.len() > 2: words[2] else: ""
+        if pane_id != "":
+            val _k = pane_kill(d.session, pane_id)
+        val (cleaned, note) = cs_container_close_record_v1(d.session, target_id,
+            _live_pane_ids_for(d.session), false)
+        if not cleaned:
+            return (cs_refresh(d), note)
+        if cs_container_launched(d.session, target_id):
+            val _reap = cs_container_reap(d.session, target_id)
+        val _spool = file_remove(cs_stderr_path(d.session, target_id))
+        val detached = if _resolve(d, target_id) >= 0: _detach(d, target_id) else: d
+        return (cs_refresh(detached), if note != "": note else: "closed " + target_id)
+    if head.starts_with("orchestrator:"):
+        val orch_line = action.substring(13, action.byte_len())
+        val orch_words = cs_shell_words(orch_line)
+        val outcome = cs_orchestrator_dispatch_v1(d.session, orch_words)
+        return (cs_refresh(d), outcome)
     if head == "pane:kill":
         val killed = pane_kill(d.session, words[2])
         # Closing the pane only ends the engine CLIENT; the container outlives
         # it. Reap whether or not the pane kill succeeded — but only a
         # container this process launched, verified by its instance label.
         var container_note = ""
-        if cs_container_launched(d.session, words[1]):
+        val (lc_cleaned, lc_note) = cs_container_close_record_v1(d.session, words[1],
+            _live_pane_ids_for(d.session), false)
+        if lc_note != "":
+            container_note = "; " + lc_note
+        elif cs_container_launched(d.session, words[1]):
             val reap_error = cs_container_reap(d.session, words[1])
             if reap_error != "":
                 container_note = "; container " + cs_container_name(d.session, words[1]) +
                     " NOT removed: " + reap_error
             else:
-                # The engine client's stderr spool is this agent's only temp file.
                 val _spool = file_remove(cs_stderr_path(d.session, words[1]))
                 container_note = ", removed container " + cs_container_name(d.session, words[1])
+        elif lc_cleaned:
+            val _spool2 = file_remove(cs_stderr_path(d.session, words[1]))
         if killed:
-            # Forget the pane id even when the reap failed: the pane IS gone, a
-            # backend may reuse its id for the next spawn, and the killed agent
-            # must not then be reported as that pane's owner.
             return (cs_refresh(_detach(d, words[1])), "killed pane " + words[2] + container_note)
         return (d, "pane backend refused to kill " + words[2] + container_note)
     if head == "container:reap-session":
+        var reaped_local: [text] = []
+        for rec in cs_container_records_load_v1(d.session):
+            val (_ok, _msg) = cs_container_close_record_v1(d.session, rec.agent_id, [], true)
+            reaped_local.push(rec.name)
+        if sosix_host_os() == "macos" and _which("podman") == "":
+            if reaped_local.len() == 0:
+                return (cs_refresh(d), "no containers owned by session " + d.session)
+            return (cs_refresh(d), "removed containers: " + reaped_local.join(" "))
         match cs_container_reap_session(d.session):
             case Ok(names):
-                if names.len() == 0: return (d, "no containers owned by session " + d.session)
-                return (d, "removed containers: " + names.join(" "))
-            case Err(reason): return (d, "containers NOT removed: " + reason)
+                val all_names = reaped_local + names
+                if all_names.len() == 0: return (cs_refresh(d), "no containers owned by session " + d.session)
+                return (cs_refresh(d), "removed containers: " + all_names.join(" "))
+            case Err(reason):
+                if reaped_local.len() > 0:
+                    return (cs_refresh(d), "removed local containers: " + reaped_local.join(" ") + "; podman: " + reason)
+                return (d, "containers NOT removed: " + reason)
     if head.starts_with("launch:"):
-        val agent_id = head.split(":")[1]
-        val spec_text = if words.len() > 1: words[1] else: ""
-        var extras: [text] = []
+        val launch_tokens = cs_shell_words(action)
+        val agent_id = launch_tokens[0].split(":")[1]
+        val spec_text = if launch_tokens.len() > 1: launch_tokens[1] else: ""
+        var raw_extras: [text] = []
         var xi = 2
-        while xi < words.len():
-            extras = extras + [words[xi]]
+        while xi < launch_tokens.len():
+            raw_extras = raw_extras + [launch_tokens[xi]]
             xi = xi + 1
-        val container = cs_container_request(extras)
+        val (wants_worktree, extras) = cs_worktree_extract_flag_v1(raw_extras)
+        var container = cs_container_request(extras)
         if container.error != "":
             return (d, "cannot launch " + agent_id + ": " + container.error)
-        val argv = cs_launch_argv_with_extras(spec_text, container.rest)
+        val parsed_spec = parse_harness_spec(spec_text)
+        if not parsed_spec.valid:
+            return (d, "cannot launch " + spec_text + ": invalid spec")
+        val cleaned_rest = cs_strip_workspace_for_cli_harness_v1(parsed_spec.harness, container.rest)
+        val argv = cs_launch_argv_with_extras(spec_text, cleaned_rest)
         if argv.len() == 0:
             return (d, "cannot launch " + spec_text + ": invalid spec")
         var args: [text] = []
@@ -875,16 +1150,48 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
         while i < argv.len():
             args = args + [argv[i]]
             i = i + 1
-        # argv[0] is a NAME, not a path. A caret agent runs the repo's own
-        # Simple binary, which is not installed on PATH — launching the bare
-        # name would spawn a pane that dies instantly with "command not
-        # found", and the roster would show an agent that never existed.
         val exe = cs_resolve_exe(argv[0])
         if exe == "":
             return (d, "cannot launch " + agent_id + ": '" + argv[0] +
                 "' is not on PATH and no repo binary was found")
+        var worktree_path = ""
+        var worktree_owned = false
+        if wants_worktree:
+            val repo_root = macos_seatbelt_canonical_path_v1(cs_repo_root())
+            match cs_worktree_create_v1(repo_root, d.session, agent_id):
+                case Ok(wt):
+                    worktree_path = wt
+                    worktree_owned = true
+                    if container.workspace == "":
+                        container = CsContainerRequest(image: container.image, network: container.network,
+                            mounts: container.mounts, workspace: wt, rest: container.rest,
+                            error: "", env: container.env)
+                        if parsed_spec.harness == "caret":
+                            args = args + ["--workspace", wt]
+                case Err(reason):
+                    return (d, "cannot launch " + agent_id + ": " + reason)
+        elif container.workspace != "":
+            worktree_path = macos_seatbelt_canonical_path_v1(container.workspace)
+        var spec_shown = spec_text
+        for tok in raw_extras:
+            spec_shown = spec_shown + " " + cs_quote_word_if_needed(tok)
         if container.image != "":
-            return _cs_launch_in_container(d, agent_id, exe, args, container)
+            return _cs_launch_in_container(d, agent_id, spec_shown, exe, args,
+                worktree_path, worktree_owned, container)
+        if worktree_path != "":
+            val cd_cmd = "cd " + cs_quote_word_if_needed(worktree_path) + " && exec " + exe
+            var sh_line = "cd '" + worktree_path.replace("'", "'\\''") + "' && exec '" + exe.replace("'", "'\\''") + "'"
+            for a in args:
+                sh_line = sh_line + " '" + a.replace("'", "'\\''") + "'"
+            val _unused = cd_cmd
+            val pane_wt = pane_spawn_at(d.session, agent_id, "/bin/sh", ["-c", sh_line],
+                _cs_pane_cols, _cs_pane_rows, cs_stderr_path(d.session, agent_id))
+            if pane_wt.pane_id == "":
+                if worktree_owned:
+                    val _rm = cs_worktree_remove_owned_v1(macos_seatbelt_canonical_path_v1(cs_repo_root()), worktree_path)
+                return (d, "pane backend could not spawn a pane for " + agent_id)
+            return (_attach(d, agent_id, pane_wt), "launched " + agent_id + " in pane " +
+                pane_wt.pane_id + " worktree " + worktree_path)
         val pane = pane_spawn_at(d.session, agent_id, exe, args, _cs_pane_cols,
             _cs_pane_rows, cs_stderr_path(d.session, agent_id))
         if pane.pane_id == "":
@@ -915,6 +1222,7 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
 
 export CsAgent, CsDashboard
 export cs_dashboard_new, cs_refresh, cs_render, cs_handle_command, cs_help_text
+export cs_shell_words, cs_quote_word_if_needed
 export cs_frame_rows, cs_fit, cs_fit_sgr, cs_agent_area, cs_stderr_path, cs_poll_screens
 export cs_resize_agents, cs_reap_containers
 export cs_launch_argv, cs_launch_argv_with_extras, cs_apply_action, cs_resolve_exe, windows_executable_names

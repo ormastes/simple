@@ -1,0 +1,197 @@
+# Caret Suite (`/orchestrator`) client & server-launcher integration.
+#
+# Allows Caret Suite (`cs`) to start/stop Simple Orchestrator on the host using
+# `host.sdn` -> `servers.sdn`, query status, and launch/inspect/relaunch/close
+# containerized `agy` + worktree sessions through Simple Orchestrator.
+
+use app.io.mod.{env_get, file_exists, dir_exists, dir_create_all,
+    process_spawn_async_env, process_is_running, sleep_ms, cwd}
+use std.nogc_async_mut.sosix.{sosix_platform}
+use std.nogc_sync_mut.container_session.macos_seatbelt_session_v1.{macos_seatbelt_canonical_path_v1}
+use app.orchestrator.caret_session_protocol_v1.{orchestrator_caret_server_info_load_v1,
+    orchestrator_caret_client_call_v1, orchestrator_caret_parse_dict_v1,
+    orchestrator_caret_bool_v1, orchestrator_caret_str_v1}
+
+var _cs_orch_runtime_dirs: Dict<text, text> = {}
+var _cs_orch_config_args: Dict<text, text> = {}
+
+pub fn cs_orchestrator_default_runtime_dir_v1(session: text) -> text:
+    val explicit = env_get("SIMPLE_ORCHESTRATOR_RUNTIME_DIR") ?? ""
+    if explicit != "":
+        return macos_seatbelt_canonical_path_v1(explicit)
+    var tmp = env_get("TMPDIR") ?? ""
+    if tmp == "":
+        tmp = "/tmp"
+    if tmp.ends_with("/"):
+        tmp = tmp.substring(0, tmp.byte_len() - 1)
+    macos_seatbelt_canonical_path_v1(tmp + "/simple-orchestrator-cs-" + session)
+
+pub fn cs_orchestrator_runtime_dir_v1(session: text) -> text:
+    if _cs_orch_runtime_dirs.contains_key(session):
+        return _cs_orch_runtime_dirs[session]
+    cs_orchestrator_default_runtime_dir_v1(session)
+
+fn _cs_orch_config_v1(session: text) -> text:
+    if _cs_orch_config_args.contains_key(session):
+        return _cs_orch_config_args[session]
+    "-"
+
+fn _cs_orch_find_main_spl_v1() -> text:
+    val explicit = env_get("SIMPLE_ORCHESTRATOR_MAIN") ?? ""
+    if explicit != "" and file_exists(explicit):
+        return explicit
+    val lib_dir = env_get("SIMPLE_LIB") ?? ""
+    if lib_dir != "":
+        val under_lib = lib_dir + "/app/orchestrator/main.spl"
+        if file_exists(under_lib):
+            return under_lib
+        val slash = lib_dir.last_index_of("/")
+        if slash > 0:
+            val sibling = lib_dir.substring(0, slash) + "/src/app/orchestrator/main.spl"
+            if file_exists(sibling):
+                return sibling
+    val local_main = cwd() + "/src/app/orchestrator/main.spl"
+    if file_exists(local_main):
+        return local_main
+    ""
+
+fn _cs_orch_resolve_spawn_v1(extra_args: [text]) -> Result<(text, [text]), text>:
+    val orch_bin = env_get("SIMPLE_ORCHESTRATOR_BINARY") ?? ""
+    if orch_bin != "" and file_exists(orch_bin):
+        return Ok((orch_bin, ["caret-serve"] + extra_args))
+    val orch_main = _cs_orch_find_main_spl_v1()
+    val simple_bin = env_get("SIMPLE_BINARY") ?? ""
+    if simple_bin != "" and file_exists(simple_bin):
+        if orch_main != "":
+            return Ok((simple_bin, [orch_main, "caret-serve"] + extra_args))
+        return Ok((simple_bin, ["orchestrator", "caret-serve"] + extra_args))
+    for candidate in [cwd() + "/bin/simple", "bin/simple"]:
+        if file_exists(candidate):
+            if orch_main != "":
+                return Ok((candidate, [orch_main, "caret-serve"] + extra_args))
+            return Ok((candidate, ["orchestrator", "caret-serve"] + extra_args))
+    Err("no Simple or Orchestrator binary found (set SIMPLE_BINARY or SIMPLE_ORCHESTRATOR_BINARY)")
+
+pub fn cs_orchestrator_start_v1(session: text, words: [text]) -> text:
+    var runtime_dir = cs_orchestrator_runtime_dir_v1(session)
+    var config_arg = _cs_orch_config_v1(session)
+    var controller_id = "caret-controller-" + session
+    var i = 0
+    while i < words.len():
+        if words[i] == "--runtime-dir" and i + 1 < words.len():
+            runtime_dir = macos_seatbelt_canonical_path_v1(words[i + 1])
+            i = i + 2
+            continue
+        if words[i] == "--config" and i + 1 < words.len():
+            config_arg = words[i + 1]
+            i = i + 2
+            continue
+        if words[i] == "--controller-id" and i + 1 < words.len():
+            controller_id = words[i + 1]
+            i = i + 2
+            continue
+        i = i + 1
+    _cs_orch_runtime_dirs[session] = runtime_dir
+    _cs_orch_config_args[session] = config_arg
+    match orchestrator_caret_server_info_load_v1(runtime_dir):
+        case Ok(existing):
+            if existing.pid > 0 and process_is_running(existing.pid):
+                match orchestrator_caret_client_call_v1(runtime_dir, config_arg, "status", "", []):
+                    case Ok(_):
+                        return ("orchestrator already running at " + existing.listen_addr +
+                            " (controller " + existing.controller_id + ")")
+                    case Err(_): pass
+        case Err(_): pass
+    dir_create_all(runtime_dir)
+    val serve_args = ["--runtime-dir", runtime_dir, "--config", config_arg,
+        "--controller-id", controller_id, "--session", session + "-orch"]
+    val resolved = match _cs_orch_resolve_spawn_v1(serve_args):
+        case Ok(pair): pair
+        case Err(reason): return "orchestrator start failed: " + reason
+    val repo_root_env = env_get("SIMPLE_CS_REPO_ROOT") ?? ""
+    var child_env: {text: text} = {
+        "SIMPLE_RUST_SEED_WARNING": "0",
+        "SIMPLE_LOG": "error",
+        "RUST_LOG": "error",
+        "SIMPLE_CS_REPO_ROOT": (if repo_root_env != "": repo_root_env else: cwd())
+    }
+    for key in ["PATH", "HOME", "TMPDIR", "USER", "TERM", "SIMPLE_LIB", "SIMPLE_BINARY",
+            "SIMPLE_ORCHESTRATOR_BINARY", "SIMPLE_ORCHESTRATOR_MAIN",
+            "SIMPLE_HOST_CONFIG", "SIMPLE_SERVERS_CONFIG", "SIMPLE_SERVERS_SDN",
+            "SIMPLE_CONTAINER_SESSION_ROOT", "CS_PANE_BACKEND"]:
+        val v = env_get(key) ?? ""
+        if v != "":
+            child_env[key] = v
+    val pid = if sosix_platform() != "windows":
+        process_spawn_async_env("/bin/sh",
+            ["-c", "exec \"$@\" </dev/null >/dev/null 2>&1", "sh", resolved.0] + resolved.1,
+            child_env)
+    else:
+        process_spawn_async_env(resolved.0, resolved.1, child_env)
+    if pid <= 0:
+        return "orchestrator start failed: spawn returned " + pid.to_text()
+    var waited_ms = 0
+    while waited_ms < 120000:
+        match orchestrator_caret_client_call_v1(runtime_dir, config_arg, "status", "", []):
+            case Ok(reply):
+                match orchestrator_caret_parse_dict_v1(reply):
+                    case Ok(d):
+                        if orchestrator_caret_bool_v1(d, "ok"):
+                            return ("orchestrator started pid=" + pid.to_text() +
+                                " addr=" + orchestrator_caret_str_v1(d, "listenAddr") +
+                                " controller=" + orchestrator_caret_str_v1(d, "controllerId") +
+                                " server=" + orchestrator_caret_str_v1(d, "serverName"))
+                    case Err(_): pass
+            case Err(_): pass
+        if not process_is_running(pid):
+            return "orchestrator server process exited during startup (pid=" + pid.to_text() + ")"
+        sleep_ms(250)
+        waited_ms = waited_ms + 250
+    "orchestrator start timed out waiting for server readiness in " + runtime_dir
+
+pub fn cs_orchestrator_dispatch_v1(session: text, sub_words: [text]) -> text:
+    if sub_words.len() == 0 or sub_words[0] == "help":
+        return ("/orchestrator start [--runtime-dir <dir>] [--config <file|->]\n" +
+            "/orchestrator status | crashed | stop\n" +
+            "/orchestrator launch <spec> [--container <img|macos-seatbelt>] [--worktree] [args...]\n" +
+            "/orchestrator inspect [id] | send <id> <msg> | relaunch <id> [args...] | close <id>")
+    val sub = sub_words[0]
+    var tail: [text] = []
+    var i = 1
+    while i < sub_words.len():
+        tail.push(sub_words[i])
+        i = i + 1
+    if sub == "start":
+        return cs_orchestrator_start_v1(session, tail)
+    val runtime_dir = cs_orchestrator_runtime_dir_v1(session)
+    val config_arg = _cs_orch_config_v1(session)
+    val action = if sub == "stop": "shutdown" else: sub
+    if not ["status", "launch", "inspect", "send", "crashed", "relaunch", "close", "shutdown"].contains(action):
+        return "unknown /orchestrator subcommand '" + sub + "': try /orchestrator help"
+    var target = ""
+    var args: [text] = []
+    if ["inspect", "close", "relaunch", "send"].contains(action):
+        if tail.len() > 0:
+            target = tail[0]
+            var j = 1
+            while j < tail.len():
+                args.push(tail[j])
+                j = j + 1
+    else:
+        args = tail
+    if (action == "close" or action == "relaunch" or action == "send") and target == "":
+        return "/orchestrator " + sub + " needs an agent or container id"
+    if action == "launch" and args.len() == 0:
+        return "/orchestrator launch needs a harness spec (e.g. agy --container macos-seatbelt --worktree)"
+    match orchestrator_caret_client_call_v1(runtime_dir, config_arg, action, target, args):
+        case Err(reason): "orchestrator client error: " + reason
+        case Ok(reply):
+            if action == "shutdown":
+                var wait_ms = 0
+                while wait_ms < 5000 and file_exists(runtime_dir + "/server.sdn"):
+                    sleep_ms(100)
+                    wait_ms = wait_ms + 100
+            reply.trim()
+
+export cs_orchestrator_default_runtime_dir_v1, cs_orchestrator_runtime_dir_v1
+export cs_orchestrator_start_v1, cs_orchestrator_dispatch_v1

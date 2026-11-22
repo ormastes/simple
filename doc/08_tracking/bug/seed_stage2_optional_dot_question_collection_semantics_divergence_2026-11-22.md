@@ -23,3 +23,7 @@ Use `is_none()` when only absence is meant; do not write `not <collection-option
 ## Fix direction
 
 Align seed and Stage 2 semantics, and add a lint rule against `not <collection-optional>.?`.
+
+## Lint rule
+
+Lint rule `not_dot_question` (code `NDQ001`, warning) flags every syntactic `not <expr>.?` and asks the author to check intent (`is_none()` vs `is_none() or unwrap().is_empty()`). Lint has no type info, so it is not limited to collections. Implementation: `src/compiler/35.semantics/lint/not_dot_question.spl`; spec `test/01_unit/compiler/lint/not_dot_question_spec.spl`. Population at introduction: about 1250 sites in 308 `src/**/*.spl` files (grep estimate, not converted). The seed/Stage 2 semantic divergence itself remains open.
