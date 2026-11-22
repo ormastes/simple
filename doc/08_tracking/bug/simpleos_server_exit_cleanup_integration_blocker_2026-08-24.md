@@ -250,6 +250,7 @@ capsule must not be presented as production Zombie wiring.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 SimpleOS release/admission/artifact-blocked item per in-file status; requires the SimpleOS target-artifact pipeline and owner lanes this Windows seed lane cannot run. No change from this lane.
+
 ## 2026-11-22 progress (still open)
 
 Re-audit: `TaskState.PreparingExit`, `task_pre_exit_admission_v1` admission
