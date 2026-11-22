@@ -1,0 +1,35 @@
+# Provider shim (design: backend_dynamic_plugin_build_groups.md §2.2).
+#
+# Provider-side build step plus loader probe for the minimal C entry
+# `provider_entry_v1.c`. The build step compiles the entry with clang and then
+# emits the provider's own `.provider.sdn` sidecar via `emit_provider_sidecar`.
+# The target executor never calls this module; it only reads the sidecar.
+# C stays at the ABI boundary only; everything else here is Simple.
+
+use app.build.targets.provider_entry.{emit_provider_sidecar}
+use compiler.backend.backend_plugin.dynamic_loader.{load_dynamic_backend_plugin_lease}
+use std.nogc_sync_mut.io_runtime.{file_exists}
+use std.nogc_sync_mut.sffi.system.{process_run}
+
+val PROVIDER_ENTRY_C_PATH = "src/compiler/70.backend/backend_plugin/abi/provider_entry_v1.c"
+val PROVIDER_ENTRY_ABI_DIR = "src/compiler/70.backend/backend_plugin/abi"
+
+pub fn provider_shim_build(group: text, artifact_path: text, host_triple: text) -> text:
+    """Compile the C entry into `artifact_path`, then emit its sidecar. Empty = ok."""
+    val (_, err, status) = process_run("clang", ["-shared", "-O2", "-I", PROVIDER_ENTRY_ABI_DIR, "-o", artifact_path, PROVIDER_ENTRY_C_PATH])
+    if status != 0 or not file_exists(artifact_path):
+        return "SPL-PROVIDER-ABI-001: provider-shim: " + group + ": clang failed: " + err
+    emit_provider_sidecar(group, artifact_path, host_triple)
+
+pub fn provider_shim_probe(artifact_path: text) -> text:
+    """Load the provider through the checked loader and resolve the v1 entry. Empty = ok."""
+    val loaded = unsafe(capabilities: [ffi, raw_ptr]):
+        load_dynamic_backend_plugin_lease(artifact_path)
+    match loaded:
+        case Ok(lease):
+            var held = lease
+            val open_ok = held.is_open()
+            held.close()
+            if open_ok: "" else: "SPL-PROVIDER-ABI-001: provider-shim: lease not open for " + artifact_path
+        case Err(e):
+            "SPL-PROVIDER-ABI-001: provider-shim: " + e.diagnostic()
