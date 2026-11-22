@@ -91,6 +91,72 @@ describe "missing struct field in MIR lowering":
         ]))
         expect(errs.contains("no field")).to_equal(false)
 
+fn missing_field_reported(errs: text, field: text) -> bool:
+    errs.contains("no field '{field}' on ") or errs.contains("field '{field}' is absent from exact ")
+
+val FIELD_HANDOFF = [
+    "struct Handoff:",
+    "    collection: i64",
+    "    digest: i64",
+    "",
+    "struct Prepared:",
+    "    handoff: Handoff",
+    "    encoded_payload: text",
+    "",
+    "fn prepare(n: i64) -> Result<Prepared, text>:",
+    "    if n < 0:",
+    "        return Err(\"neg\")",
+    "    Ok(Prepared(handoff: Handoff(collection: n, digest: 2), encoded_payload: \"p\"))",
+    "",
+    "fn maybe_prepare(n: i64) -> Prepared?:",
+    "    if n < 0:",
+    "        return nil",
+    "    Some(Prepared(handoff: Handoff(collection: n, digest: 2), encoded_payload: \"q\"))",
+    ""
+]
+
+fn with_handoff(lines: [text]) -> text:
+    var out: [text] = []
+    for l in FIELD_HANDOFF:
+        out.push(l)
+    for l in lines:
+        out.push(l)
+    field_src_of(out)
+
+# Bug: doc/08_tracking/bug/mir_shard_worker_av_missing_policy_collection_field_2026-11-22.md
+# `val policy = match prepare(..): case Ok(v): v` has no HIR type; the read of
+# a field Prepared lacks used to lower as index 0 (the `handoff` record).
+describe "missing field on an untyped match-bound receiver":
+    it "rejects policy.collection when Prepared has only handoff and encoded_payload":
+        val errs = field_lower_errors(with_handoff([
+            "fn run() -> i64:",
+            "    val policy = match prepare(1):",
+            "        case Ok(value): value",
+            "        case Err(_): return 1",
+            "    policy.collection"
+        ]))
+        expect(missing_field_reported(errs, "collection")).to_equal(true)
+
+    it "rejects the same missing field through an if-val binding":
+        val errs = field_lower_errors(with_handoff([
+            "fn run() -> i64:",
+            "    if val policy = maybe_prepare(1):",
+            "        return policy.collection",
+            "    0"
+        ]))
+        expect(missing_field_reported(errs, "collection")).to_equal(true)
+
+    it "still lowers the real nested path policy.handoff.collection":
+        val errs = field_lower_errors(with_handoff([
+            "fn run() -> i64:",
+            "    val policy = match prepare(1):",
+            "        case Ok(value): value",
+            "        case Err(_): return 1",
+            "    policy.handoff.collection"
+        ]))
+        expect(errs.contains("no field")).to_equal(false)
+        expect(errs.contains("is absent from exact")).to_equal(false)
+
 describe "struct field initializer failure in MIR lowering":
     it "reports a failed array-literal field initializer once, at its span":
         # A field initializer whose own lowering already failed (here the

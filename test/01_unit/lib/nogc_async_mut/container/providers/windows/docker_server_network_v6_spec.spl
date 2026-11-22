@@ -18,6 +18,7 @@ use std.nogc_async_mut.container.providers.windows.docker_observation_codec_v2.*
 use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.WindowsDockerRuntimeProviderV1
 use std.nogc_async_mut.container.providers.windows.docker_scope_v2.windows_docker_scope_values_v2
 use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.windows_adapter_scope_fixture_v2
+use std.nogc_sync_mut.io.windows_command_domain_v4.windows_command_registry_thread_v4
 
 fn server_policy_v6() -> WindowsDockerPolicyV1:
     WindowsDockerPolicyV1(docker_executable: "C:\\Program Files\\Docker\\docker.exe", endpoint: "npipe:////./pipe/docker_engine",
@@ -285,16 +286,26 @@ describe "versioned Windows public discovery and installed NAT network":
         val intent = provider.intent(r)
         expect(intent.unwrap().native_id).to_equal("c".repeat(64))
 
-    it "uses the same network stages in bounded cooperative progress":
-        var provider = server_provider_v6(server_script_v6())
-        val r = server_request_v6()
-        expect(provider.prepare_pod(r).status).to_equal("ok")
-        var progress = provider.progress_begin_v2("create", r)
-        for index in 0..16:
-            if not progress.completed_v2(): progress = provider.progress_poll_v2(progress, false)
-        expect(progress.completed_v2()).to_equal(true)
-        val operation = progress.operation_v2()
-        expect(operation.unwrap().status).to_equal("ok")
+    # Native lane only (owner decision 2026-11-22): on Windows the command
+    # registry keeps requiring the native PTY owner thread even for scripted
+    # turns, which the Rust seed refuses by design. The skip is at describe
+    # level so it is counted as skipped, never as passed. See
+    # doc/08_tracking/bug/windows_scripted_docker_progress_needs_native_thread_on_seed_2026-11-22.md
+    if windows_command_registry_thread_v4(true).is_err():
+        skip("uses the same network stages in bounded cooperative progress",
+            "NOT_RUN: native Phase 2+ lane only; registry thread unavailable here: " +
+            windows_command_registry_thread_v4(true).unwrap_err())
+    else:
+        it "uses the same network stages in bounded cooperative progress":
+            var provider = server_provider_v6(server_script_v6())
+            val r = server_request_v6()
+            expect(provider.prepare_pod(r).status).to_equal("ok")
+            var progress = provider.progress_begin_v2("create", r)
+            for index in 0..16:
+                if not progress.completed_v2(): progress = provider.progress_poll_v2(progress, false)
+            expect(progress.completed_v2()).to_equal(true)
+            val operation = progress.operation_v2()
+            expect(operation.unwrap().status).to_equal("ok")
 
     it "retains the exact created ID when the post-create network becomes unproven":
         var provider = server_provider_v6(server_script_v6("e".repeat(64)))

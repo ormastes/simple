@@ -19,7 +19,8 @@ use compiler.hir.hir_definitions.{HirFunction}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.config.{Logger}
-use compiler.semantics.must_use_discard.{must_use_discard_scan, must_use_finding_severity, MUST_USE_CODE_RESULT, MUST_USE_CODE_MARKED}
+use compiler.semantics.must_use_discard.{must_use_discard_scan}
+use compiler.common.must_use_policy.{must_use_finding_severity, MUST_USE_CODE_RESULT, MUST_USE_CODE_MARKED}
 
 val PRELUDE = "fn risky() -> Result<i64, text>:\n    Ok(1)\nfn maybe() -> i64?:\n    Some(1)\nfn quiet():\n    val q = 1\nfn plain() -> i64:\n    2\n"
 
@@ -183,7 +184,7 @@ fn scan_import_keys(path: text, keys: [text], srcs: [text]) -> [text]:
         out = out.push(fd.code + ":" + fd.function + ":" + fd.callee)
     out
 
-describe "ROB-USE imported module resolution is exact or segment-bounded and deterministic":
+describe "ROB-USE imported module resolution is exact or unambiguous, never guessed":
     val risky_src = "fn risky() -> Result<i64, text>:\n    Ok(1)\n"
     val quiet_src = "fn risky():\n    val z = 2\n"
 
@@ -191,13 +192,13 @@ describe "ROB-USE imported module resolution is exact or segment-bounded and det
         expect(scan_import_keys("pkg.util", ["util", "pkg.util"], [quiet_src, risky_src])).to_equal(["SPL-USE-001:caller:risky"])
         expect(scan_import_keys("pkg.util", ["pkg.util", "util"], [risky_src, quiet_src])).to_equal(["SPL-USE-001:caller:risky"])
 
-    it "the longest segment-boundary suffix wins":
-        expect(scan_import_keys("a.pkg.util", ["util", "pkg.util"], [quiet_src, risky_src])).to_equal(["SPL-USE-001:caller:risky"])
+    it "a single segment-boundary suffix candidate resolves":
+        expect(scan_import_keys("a.pkg.util", ["myutil", "pkg.util"], [quiet_src, risky_src])).to_equal(["SPL-USE-001:caller:risky"])
 
     it "a partial-segment suffix does not match":
         expect(scan_import_keys("pkg.myutil", ["util"], [risky_src]).len()).to_equal(0)
 
-    it "the longest suffix wins regardless of key order (two suffix candidates)":
-        expect(scan_import_keys("a.pkg.util", ["util", "pkg.util"], [quiet_src, risky_src])).to_equal(["SPL-USE-001:caller:risky"])
-        expect(scan_import_keys("a.pkg.util", ["pkg.util", "util"], [risky_src, quiet_src])).to_equal(["SPL-USE-001:caller:risky"])
-        expect(scan_import_keys("a.pkg.util", ["util", "myutil", "pkg.util"], [quiet_src, quiet_src, risky_src])).to_equal(["SPL-USE-001:caller:risky"])
+    it "two suffix candidates are ambiguous and yield no finding in either key order":
+        expect(scan_import_keys("a.pkg.util", ["util", "pkg.util"], [quiet_src, risky_src]).len()).to_equal(0)
+        expect(scan_import_keys("a.pkg.util", ["pkg.util", "util"], [risky_src, quiet_src]).len()).to_equal(0)
+        expect(scan_import_keys("a.pkg.util", ["util", "pkg.util"], [risky_src, risky_src]).len()).to_equal(0)

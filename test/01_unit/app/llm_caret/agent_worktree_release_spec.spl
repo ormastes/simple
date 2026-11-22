@@ -9,6 +9,13 @@
 use std.spec
 use std.spec.step
 use app.llm_caret.agent_workspace.{worktree_remove_args_v1}
+use app.llm_caret.cs_container.{cs_container_name}
+use app.llm_caret.cs_container_lifecycle_v1.{CsContainerSessionRecordV1, cs_container_close_record_v1,
+    cs_container_record_save_v1, cs_container_records_load_v1, cs_container_session_store_root_v1,
+    cs_worktree_create_v1, cs_container_cleanup_old_v1}
+use std.nogc_sync_mut.io.file_ops.{dir_exists, dir_remove_all, file_write, secure_temp_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use app.io.mod.{env_get, env_set, getpid}
 
 describe "agent worktree release argv":
     it "passes --force only on the explicit operator path":
@@ -20,3 +27,101 @@ describe "agent worktree release argv":
         val release = worktree_remove_args_v1("/repo", "/repo/.agents/a1", false)
         expect(release.contains("--force")).to_equal(false)
         expect(release.join(" ")).to_equal("-C /repo worktree remove /repo/.agents/a1")
+
+    it "preserves a crashed worktree until its named cleanup without signaling its stale pid":
+        # @req REQ-SSPEC-UNIT
+        val repo = secure_temp_dir("/tmp", "simple-caret-worktree").unwrap()
+        val previous_store = env_get("SIMPLE_CONTAINER_SESSION_ROOT") ?? ""
+        env_set("SIMPLE_CONTAINER_SESSION_ROOT", repo + "/session-state")
+        val init = process_run_timeout("git", ["-C", repo, "init", "-q"], 5000)
+        expect(init.2).to_equal(0)
+        val commit = process_run_timeout("git", ["-C", repo, "-c", "user.name=Fixture",
+            "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-qm", "fixture"], 5000)
+        expect(commit.2).to_equal(0)
+
+        val session = "crash-fixture"
+        val worktree = cs_worktree_create_v1(repo, session, "a1").unwrap()
+        val attempt = cs_container_session_store_root_v1(session) + "/containers/first"
+        val record = CsContainerSessionRecordV1(
+            name: "first", owner: session, session: session, agent_id: "a1",
+            spec: "claude --worktree", backend: "host-worktree", image: "",
+            executable: "claude", argv: [], repo_root: repo,
+            worktree_path: worktree, worktree_owned: true, attempt_dir: attempt,
+            stderr_path: "", pane_id: "", pid: getpid(), instance: "fixture",
+            network: "", env: [], state: "crashed", exit_code: 2)
+        expect(cs_container_record_save_v1(record)).to_equal(true)
+
+        val (closed, note) = cs_container_close_record_v1(session, "a1", [], false)
+        expect(closed).to_equal(false)
+        expect(note).to_contain("preserved worktree")
+        expect(cs_worktree_create_v1(repo, session, "a1").is_err()).to_equal(true)
+        expect(dir_exists(worktree)).to_equal(true)
+
+        val (removed, _outcome) = cs_container_close_record_v1(session, "a1", [], true)
+        expect(removed).to_equal(true)
+        expect(dir_exists(worktree)).to_equal(false)
+        expect(dir_exists(attempt)).to_equal(false)
+        expect(cs_container_records_load_v1(session).len()).to_equal(0)
+        env_set("SIMPLE_CONTAINER_SESSION_ROOT", previous_store)
+        val _removed = dir_remove_all(repo)
+
+    it "previews then removes aged clean attempts while keeping fresh live and crashed worktrees":
+        # @req REQ-SSPEC-UNIT
+        val repo = secure_temp_dir("/tmp", "simple-caret-aged").unwrap()
+        val previous_store = env_get("SIMPLE_CONTAINER_SESSION_ROOT") ?? ""
+        env_set("SIMPLE_CONTAINER_SESSION_ROOT", repo + "/session-state")
+        val init = process_run_timeout("git", ["-C", repo, "init", "-q"], 5000)
+        expect(init.2).to_equal(0)
+        val commit = process_run_timeout("git", ["-C", repo, "-c", "user.name=Fixture",
+            "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-qm", "fixture"], 5000)
+        expect(commit.2).to_equal(0)
+
+        val session = "age-fixture"
+        val states = ["exited-clean", "exited-clean", "crashed", "running", "exited-clean"]
+        var worktrees: [text] = []
+        var attempts: [text] = []
+        var index = 0
+        for state in states:
+            val id = "a" + (index + 1).to_text()
+            val name = cs_container_name(session, id)
+            val worktree = cs_worktree_create_v1(repo, session, id).unwrap()
+            val attempt = cs_container_session_store_root_v1(session) + "/containers/" + name
+            val record = CsContainerSessionRecordV1(
+                name: name, owner: session, session: session, agent_id: id,
+                spec: "claude --worktree", backend: "host-worktree", image: "",
+                executable: "claude", argv: [], repo_root: repo,
+                worktree_path: worktree, worktree_owned: true, attempt_dir: attempt,
+                stderr_path: "", pane_id: if state == "running": "live-pane" else: "",
+                pid: -1, instance: "fixture", network: "", env: [], state: state, exit_code: 0)
+            expect(cs_container_record_save_v1(record)).to_equal(true)
+            if state != "running":
+                val receipt = attempt + "/exit_code"
+                expect(file_write(receipt, if state == "crashed": "2" else: "0")).to_equal(true)
+                if index != 1:
+                    val aged = process_run_timeout("touch", ["-t", "200001010000", receipt], 5000)
+                    expect(aged.2).to_equal(0)
+                if index == 0:
+                    val aged_worktree = process_run_timeout("touch",
+                        ["-t", "200001010000", worktree + "/.git"], 5000)
+                    expect(aged_worktree.2).to_equal(0)
+            worktrees.push(worktree)
+            attempts.push(attempt)
+            index = index + 1
+
+        val preview = cs_container_cleanup_old_v1(session, ["live-pane"], false)
+        expect(preview.eligible).to_equal(["a1"])
+        expect(preview.removed.len()).to_equal(0)
+        expect(dir_exists(worktrees[0])).to_equal(true)
+
+        val cleaned = cs_container_cleanup_old_v1(session, ["live-pane"], true)
+        expect(cleaned.removed).to_equal(["a1"])
+        expect(cleaned.failures.len()).to_equal(0)
+        expect(dir_exists(worktrees[0])).to_equal(false)
+        expect(dir_exists(attempts[0])).to_equal(false)
+        for remaining in [1, 2, 3, 4]:
+            expect(dir_exists(worktrees[remaining])).to_equal(true)
+            expect(dir_exists(attempts[remaining])).to_equal(true)
+        val registered = process_run_timeout("git", ["-C", repo, "worktree", "list", "--porcelain"], 5000)
+        expect(registered.0.contains(worktrees[0])).to_equal(false)
+        env_set("SIMPLE_CONTAINER_SESSION_ROOT", previous_store)
+        val _removed = dir_remove_all(repo)

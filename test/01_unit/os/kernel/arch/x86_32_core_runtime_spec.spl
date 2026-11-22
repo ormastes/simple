@@ -1,0 +1,76 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# Repro (i686 kernel link, scripts/check/check-simpleos-i686-kernel-link.shs
+# --link-only): the x86_32 freestanding C stubs define rt_alloc,
+# rt_string_concat, rt_string_new_literal and rt_index_set, but not
+# rt_pool_safepoint, rt_value_to_string, rt_raw_i64_to_string, rt_array_get,
+# rt_array_set_text, rt_value_u64 or rt_typed_words_{u32,u64}_{at,set}, which
+# the shared POSIX + shell closure needs (the riscv32 lane hit the same set).
+# The exported bodies need i686 memory, so they are proven by the link gate;
+# the x86-specific layout policy they are built on is tested directly here.
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read_text}
+use os.kernel.arch.x86_32.core_runtime_layout.{
+    x86_32_rt_ram_ref, x86_32_rt_array_item_addr, X86_32_RT_ARRAY_ITEMS_OFFSET
+}
+
+val RT = "src/os/kernel/arch/x86_32/core_runtime.spl"
+val ENTRY = "examples/09_embedded/simple_os/arch/x86_32/os_entry.spl"
+val STUBS = "examples/09_embedded/simple_os/arch/x86_32/boot/baremetal_stubs.c"
+
+describe "x86_32 core runtime layout policy":
+    it "addresses inline array items like the x86_32 boot C RuntimeArray":
+        step("{u32 type, u32 size, u32 len, u32 cap, RuntimeValue items[]}")
+        expect(X86_32_RT_ARRAY_ITEMS_OFFSET).to_equal(16)
+        expect(x86_32_rt_array_item_addr(0x00200000, 0)).to_equal(0x00200010)
+        expect(x86_32_rt_array_item_addr(0x00200000, 3)).to_equal(0x0020001C)
+
+    it "only dereferences refs inside the identity-mapped kernel window":
+        expect(x86_32_rt_ram_ref(0x00100000)).to_equal(1)
+        expect(x86_32_rt_ram_ref(0x3FFFFFFF)).to_equal(1)
+        expect(x86_32_rt_ram_ref(0x000FFFFF)).to_equal(0)
+        expect(x86_32_rt_ram_ref(0)).to_equal(0)
+        expect(x86_32_rt_ram_ref(0x40000000)).to_equal(0)
+
+describe "x86_32 core runtime exports":
+    it "exports every missing core symbol for i686 only":
+        val src = file_read_text(RT)
+        for name in ["rt_pool_safepoint() -> i64",
+                     "rt_value_to_string(value: i64) -> i64",
+                     "rt_raw_i64_to_string(raw: i64) -> i64",
+                     "rt_array_get(array: i64, index: i64) -> i64",
+                     "rt_array_set_text(array: i64, index: i64, value: i64) -> bool",
+                     "rt_value_u64(bits: i64) -> i64",
+                     "rt_typed_words_u32_at(array: i64, index: i64) -> i64",
+                     "rt_typed_words_u64_at(array: i64, index: i64) -> i64",
+                     "rt_typed_words_u32_set(array: i64, index: i64, value: i64) -> bool",
+                     "rt_typed_words_u64_set(array: i64, index: i64, value: i64) -> bool"]:
+            expect(src.contains("@cfg(i686)\n@no_mangle\nfn " + name + ":")).to_equal(true)
+
+    it "never redefines a symbol the x86_32 boot C already provides":
+        val src = file_read_text(RT)
+        for name in ["fn rt_alloc(", "fn rt_string_concat(", "fn rt_string_new_literal(", "fn rt_index_set("]:
+            expect(src.contains(name)).to_equal(false)
+
+    it "never calls one rt_* export from another (ANY result -> rt_value_truthy)":
+        val src = file_read_text(RT)
+        expect(src.contains("    rt_array_set_text(")).to_equal(false)
+        expect(src.contains("    rt_typed_words_u32_at(")).to_equal(false)
+        expect(src.contains("rt_value_to_string(value)")).to_equal(false)
+
+    it "uses no inline asm (memory goes through raw x86_32 boot probes)":
+        val src = file_read_text(RT)
+        expect(src.contains("asm volatile")).to_equal(false)
+        expect(src.contains("extern fn rt_x86_32_probe_load8(addr: i64) -> i64")).to_equal(true)
+        expect(src.contains("extern fn rt_x86_32_probe_store32(addr: i64, value: i64) -> i64")).to_equal(true)
+        expect(src.contains("extern fn rt_x86_32_probe_alloc(size: i64) -> i64")).to_equal(true)
+        val c = file_read_text(STUBS)
+        expect(c.contains("RuntimeValue rt_x86_32_probe_load8(RuntimeValue addr)")).to_equal(true)
+        expect(c.contains("RuntimeValue rt_x86_32_probe_store32(RuntimeValue addr, RuntimeValue value)")).to_equal(true)
+        expect(c.contains("RuntimeValue rt_x86_32_probe_alloc(RuntimeValue size)")).to_equal(true)
+
+    it "keeps the runtime in the x86_32 kernel entry closure":
+        val src = file_read_text(ENTRY)
+        expect(src.contains("use os.kernel.arch.x86_32.core_runtime.{}")).to_equal(true)

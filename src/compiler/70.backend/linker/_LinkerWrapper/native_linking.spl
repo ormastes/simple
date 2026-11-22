@@ -595,10 +595,12 @@ fn link_native_unix_with_engine(object_files: [text], output: text, config: Nati
     # See doc/08_tracking/bug/linux_native_link_unconditional_lsdl2_2026-09-06.md
 
     val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
+    val stage3_host_only = (env_get("SIMPLE_BOOTSTRAP_STAGE3") ?? "") == "1" or
+        (env_get("SIMPLE_STAGE3_MINIMAL_STATIC_PRIMITIVES") ?? "") == "1"
     var native_support_inputs = object_files
     for archive in runtime_archives:
         native_support_inputs.push(archive)
-    for flag in native_all_gnu_support_args(native_support_inputs, os, brew_prefix):
+    for flag in native_all_gnu_support_args_for_stage_v1(native_support_inputs, os, brew_prefix, stage3_host_only):
         args.push(flag)
 
     # Libraries from config
@@ -1497,7 +1499,10 @@ fn internal_link_simpleos(object_files: [text], output: text, target: text,
         boot_plan = boot_layout_add_defsym(boot_plan,
             flags.defsym_names[defsym_i], flags.defsym_exprs[defsym_i])
         defsym_i = defsym_i + 1
-    if elf32:
+    # i386 SECTIONS scripts (the x86_32 kernel) go through elf_boot_link, which
+    # writes ELFCLASS32 for EM_386; arm32/riscv32 SECTIONS links are still rejected.
+    val i386_script = target_arch == RelocArch.I386 and boot_plan.sections.len() > 0
+    if elf32 and not i386_script:
         return internal_link_simpleos_elf32(objects, archives, boot_plan, target_arch,
             flags.gc_sections, output, config)
     val linked = elf_boot_link_archives_policy(objects, archives, boot_plan,
@@ -1512,7 +1517,8 @@ fn internal_link_simpleos(object_files: [text], output: text, target: text,
 
 # ponytail: 32-bit SimpleOS user links take ENTRY/INPUT scripts only and use the
 # static ELF32 engine's lld-default layout at 0x400000 (inside every 32-bit
-# spawn window). Upgrade path: ELF32 in elf_boot_link, then honour SECTIONS.
+# spawn window). i386 SECTIONS links already use elf_boot_link's ELF32 output;
+# upgrade path for arm32/riscv32: ELF32 in elf_boot_link for those machines.
 fn internal_link_simpleos_elf32(objects: [[i64]], archives: [[i64]],
         plan: BootLayoutPlan, target_arch: RelocArch, gc_sections: bool,
         output: text, config: NativeLinkConfig) -> Result<text, text>:
@@ -2719,7 +2725,9 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         for path in object_files: support_inputs.push(path)
         for runtime_arg in runtime_args:
             support_inputs.push(runtime_arg)
-        for flag in native_all_gnu_support_args(support_inputs, link_os, brew_prefix):
+        val stage3_host_only = (env_get("SIMPLE_BOOTSTRAP_STAGE3") ?? "") == "1" or
+            (env_get("SIMPLE_STAGE3_MINIMAL_STATIC_PRIMITIVES") ?? "") == "1"
+        for flag in native_all_gnu_support_args_for_stage_v1(support_inputs, link_os, brew_prefix, stage3_host_only):
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
@@ -2759,7 +2767,9 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         var support_inputs = object_files
         for runtime_arg in runtime_args:
             support_inputs.push(runtime_arg)
-        for flag in native_all_gnu_support_args(support_inputs, link_os, ""):
+        val stage3_host_only = (env_get("SIMPLE_BOOTSTRAP_STAGE3") ?? "") == "1" or
+            (env_get("SIMPLE_STAGE3_MINIMAL_STATIC_PRIMITIVES") ?? "") == "1"
+        for flag in native_all_gnu_support_args_for_stage_v1(support_inputs, link_os, "", stage3_host_only):
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
@@ -2801,7 +2811,9 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         var support_inputs = object_files
         for runtime_arg in runtime_args:
             support_inputs.push(runtime_arg)
-        for flag in native_all_gnu_support_args(support_inputs, link_os, ""):
+        val stage3_host_only = (env_get("SIMPLE_BOOTSTRAP_STAGE3") ?? "") == "1" or
+            (env_get("SIMPLE_STAGE3_MINIMAL_STATIC_PRIMITIVES") ?? "") == "1"
+        for flag in native_all_gnu_support_args_for_stage_v1(support_inputs, link_os, "", stage3_host_only):
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)

@@ -41,7 +41,7 @@ use compiler.backend.linker.elf_parser.{
     elf_reloc_sym, elf_reloc_type, elf_section_addralign, elf_section_name,
     SHN_UNDEF, STB_LOCAL, STB_GLOBAL, STB_WEAK, STT_SECTION, SHT_NOBITS
 }
-use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_AARCH64, EM_RISCV}
+use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_386, EM_AARCH64, EM_RISCV}
 use compiler.backend.linker.riscv_reloc.{riscv_is_pcrel_hi, riscv_is_pcrel_lo, riscv_hi_key,
     riscv_pcrel_lo_value, riscv_pcrel_lo_as_absolute}
 use compiler.backend.linker.elf.riscv_link_support.{elf_riscv_flags}
@@ -60,7 +60,8 @@ use compiler.backend.linker.elf.tls_relax.{elf_relax_tls, elf_tls_tpoff}
 use compiler.backend.linker.elf.section_gc.{ElfSectionGc, elf_section_gc}
 use compiler.backend.linker.elf.eh_frame_gc.{elf_gc_eh_frames}
 use compiler.backend.linker.elf.elf_exec_writer.{
-    ElfOutSec, ElfExecSegment, ElfExecPlan, elf_write_image,
+    ElfOutSec, ElfExecSegment, ElfExecPlan, elf_write_image, elf_write_image32_bytes,
+    ELF32_EHDR_SIZE, ELF32_PHDR_SIZE,
     ELF_SEG_R, PT_LOAD, PT_NOTE, PT_PHDR, PT_TLS, PT_GNU_STACK, PF_R, PF_W, PF_X,
     SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_TLS,
     SHT_PROGBITS_E, SHT_STRTAB_E, SHT_NOBITS_E
@@ -137,8 +138,25 @@ fn _bl_machine(target: RelocArch) -> Result<i64, text>:
             Ok(EM_AARCH64)
         case Riscv64:
             Ok(EM_RISCV)
+        case I386:
+            Ok(EM_386)
         case _:
-            Err("elf_boot_link: supports only x86_64, aarch64 and riscv64 targets")
+            Err("elf_boot_link: supports only x86_64, i386, aarch64 and riscv64 targets")
+
+fn _bl_is_i386(target: RelocArch) -> bool:
+    match target:
+        case I386:
+            true
+        case _:
+            false
+
+fn _bl_i386_type_ok(rtype: i64) -> bool:
+    # Non-PIC i386 kernel set: NONE, 32, PC32, PLT32 (a static PLT32 is PC32)
+    # and 16/PC16/8/PC8 for real-mode trampolines. GOT/GOTOFF/GOTPC, TLS, SIZE
+    # and dynamic types fail closed (reloc_scan treats unknown i386 types as
+    # PC-relative, which would link them silently wrong).
+    rtype == 0 or rtype == 1 or rtype == 2 or rtype == 4 or
+        rtype == 20 or rtype == 21 or rtype == 22 or rtype == 23
 
 fn _bl_page(target: RelocArch) -> i64:
     # ld.lld's default max-page-size: 64 KiB on aarch64, 4 KiB on x86_64.
@@ -466,7 +484,7 @@ fn _bl_ctx_at(ctx: BootEvalCtx, dot: i64) -> BootEvalCtx:
 # reason: layout replays the plan with all link state; positional by design
 fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution,
         defines: [bool], got_size: i64, common_live: {text: bool},
-        gc_sections: bool) -> Result<_BootLayout, text>:
+        gc_sections: bool, ehdr: i64, phdr: i64) -> Result<_BootLayout, text>:
     var ins = ins0
     var off_of = ins0.off_of
     var pool_off = ins0.pool_off
@@ -479,7 +497,7 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution,
         region_cur = region_cur.push(r.origin)
     if plan.segments.len() > 0:
         # PHDRS fixes the header count, so SIZEOF_HEADERS is known before layout.
-        ctx = boot_eval_bind(ctx, "SIZEOF_HEADERS", BOOT_EHDR + plan.segments.len() * BOOT_PHDR)
+        ctx = boot_eval_bind(ctx, "SIZEOF_HEADERS", ehdr + plan.segments.len() * phdr)
     # Object symbols the script refers to (bound once their section is placed).
     var wanted: [text] = []
     for s in plan.symbols:
@@ -822,7 +840,8 @@ fn _bl_seg_flags(outs: [_BootOut], seg_of: [i64], si: i64) -> i64:
         i = i + 1
     f
 
-fn _bl_segments(plan: BootLayoutPlan, outs: [_BootOut], page: i64, ctx: BootEvalCtx) -> Result<_BootSegs, text>:
+fn _bl_segments(plan: BootLayoutPlan, outs: [_BootOut], page: i64, ctx: BootEvalCtx,
+        ehdr: i64, phdr: i64) -> Result<_BootSegs, text>:
     # 1. section -> program header index
     var seg_of: [i64] = []
     var types: [i64] = []
@@ -892,7 +911,7 @@ fn _bl_segments(plan: BootLayoutPlan, outs: [_BootOut], page: i64, ctx: BootEval
         ti = ti + 1
     val primary_phnum = types.len()
     val phnum = primary_phnum + (if tls_first >= 0: 1 else: 0)
-    val hdr_end = BOOT_EHDR + phnum * BOOT_PHDR
+    val hdr_end = ehdr + phnum * phdr
 
     # 2. file offsets (lld: first section of a load congruent to its VMA mod page)
     var offsets: [i64] = []
@@ -992,10 +1011,10 @@ fn _bl_segments(plan: BootLayoutPlan, outs: [_BootOut], page: i64, ctx: BootEval
         if types[sj] == PT_PHDR:
             if not has_hdr_load:
                 return Err("elf_boot_link: PT_PHDR needs a PT_LOAD with FILEHDR PHDRS")
-            val sz = phnum * BOOT_PHDR
-            segs[sj] = ElfExecSegment(p_type: PT_PHDR, p_flags: PF_R, p_offset: BOOT_EHDR,
-                p_vaddr: hdr_load_vaddr + BOOT_EHDR, p_paddr: hdr_load_paddr + BOOT_EHDR,
-                p_filesz: sz, p_memsz: sz, p_align: 8)
+            val sz = phnum * phdr
+            segs[sj] = ElfExecSegment(p_type: PT_PHDR, p_flags: PF_R, p_offset: ehdr,
+                p_vaddr: hdr_load_vaddr + ehdr, p_paddr: hdr_load_paddr + ehdr,
+                p_filesz: sz, p_memsz: sz, p_align: if ehdr == BOOT_EHDR: 8 else: 4)
         sj = sj + 1
     var pa: i64 = 0
     while pa < segs.len():
@@ -1109,6 +1128,9 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
         wraps: [text]) -> Result<ElfBootImage, text>:
     val machine = _bl_machine(target)?
     val a64 = _bl_is_a64(target)
+    val i386 = _bl_is_i386(target)
+    val hdr_ehdr = if i386: ELF32_EHDR_SIZE else: BOOT_EHDR
+    val hdr_phdr = if i386: ELF32_PHDR_SIZE else: BOOT_PHDR
     var parsed: [ElfObject] = []
     var i: i64 = 0
     while i < objects.len():
@@ -1125,7 +1147,7 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
 
     parsed = elf_relax_tls(parsed, target)?
     val rv = _bl_is_rv64(target)
-    val x86 = not a64 and not rv
+    val x86 = not a64 and not rv and not i386  # x86_64 relocation numbering
     var riscv_flags: i64 = 0
     if rv:
         # Relaxation off (ld.lld --no-relax): R_RISCV_RELAX is ignored and
@@ -1170,6 +1192,8 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
         for r in obj.relocations:
             val t = r.target_section_idx
             if t >= 0 and t < obj.sections.len() and ins0.out_of[ins0.base[oi] + t] >= 0:
+                if i386 and not _bl_i386_type_ok(elf_reloc_type(r)):
+                    return Err("object {names[oi]}: i386 relocation type {elf_reloc_type(r)} is unsupported in boot images (non-PIC kernels use R_386_32/PC32/PLT32/16/PC16/8/PC8 only)")
                 val rc = elf_reloc_class(target, elf_reloc_type(r))
                 val rsym = obj.symbols[elf_reloc_sym(r)]
                 if rsym.name == "_GLOBAL_OFFSET_TABLE_":
@@ -1256,8 +1280,10 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
     var got_size = (got_keys.len() + got_hdr) * 8
     if need_got_base and got_size == 0:
         got_size = 8
+    if i386 and got_size > 0:
+        return Err("elf_boot_link: i386 boot images have no GOT (_GLOBAL_OFFSET_TABLE_ or a GOT relocation needs a PIC link)")
     val lay = _bl_layout(plan, ins0, res, defines, got_size,
-        gc.common_live, gc_sections)?
+        gc.common_live, gc_sections, hdr_ehdr, hdr_phdr)?
     val ins = lay.ins
     val outs = lay.outs
     var script_val: {text: i64} = {}
@@ -1271,7 +1297,7 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
     for o in outs:
         var buf: [i64] = []
         if o.sh_type != SHT_NOBITS_E and o.plan_idx >= 0:
-            if x86 and o.sh_flags & SHF_EXECINSTR != 0:
+            if (x86 or i386) and o.sh_flags & SHF_EXECINSTR != 0:
                 # ld.lld fills gaps in executable sections with the target trap byte (int3).
                 buf = elf_i64_filled(o.size, 0xcc)
             oi = 0
@@ -1565,7 +1591,7 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
 
     # --- segments, offsets ---
     val page = _bl_page(target)
-    val sg = _bl_segments(plan, outs, page, lay.ctx)?
+    val sg = _bl_segments(plan, outs, page, lay.ctx, hdr_ehdr, hdr_phdr)?
 
     # --- .symtab: object globals + script symbols ---
     var sym_names: [text] = []
@@ -1614,16 +1640,25 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
             sym_shndx = sym_shndx.push(_bl_section_of(outs, lay.sym_values[i]))
         i = i + 1
     var strtab: [i64] = [0]
-    var symtab: [i64] = write_zeros([], 24)
+    val sym_ent: i64 = if i386: 16 else: 24
+    var symtab: [i64] = write_zeros([], sym_ent)
     i = 0
     while i < sym_names.len():
         symtab = write_u32_le(symtab, strtab.len())
         strtab = _bl_strtab_add(strtab, sym_names[i])
-        symtab = symtab.push(sym_info[i] & 0xff)
-        symtab = symtab.push(0)
-        symtab = write_u16_le(symtab, sym_shndx[i])
-        symtab = write_u64_le(symtab, sym_values[i])
-        symtab = write_u64_le(symtab, 0)
+        if i386:
+            # Elf32_Sym: name, value, size, info, other, shndx.
+            symtab = write_u32_le(symtab, sym_values[i] & 0xffffffff)
+            symtab = write_u32_le(symtab, 0)
+            symtab = symtab.push(sym_info[i] & 0xff)
+            symtab = symtab.push(0)
+            symtab = write_u16_le(symtab, sym_shndx[i])
+        else:
+            symtab = symtab.push(sym_info[i] & 0xff)
+            symtab = symtab.push(0)
+            symtab = write_u16_le(symtab, sym_shndx[i])
+            symtab = write_u64_le(symtab, sym_values[i])
+            symtab = write_u64_le(symtab, 0)
         i = i + 1
 
     # --- assemble the exec plan (allocated sections, then .symtab/.strtab) ---
@@ -1642,9 +1677,10 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
         i = i + 1
     var final_end = sg.file_end
     if not strip_output:
-        val symtab_off = boot_align_up(sg.file_end, 8)
-        secs = secs.push(ElfOutSec(name: ".symtab", sh_type: BOOT_SHT_SYMTAB, sh_flags: 0, align: 8,
-            size: symtab.len(), entsize: 24, link: ".strtab", info: 1, seg: ELF_SEG_R))
+        val sym_align: i64 = if i386: 4 else: 8
+        val symtab_off = boot_align_up(sg.file_end, sym_align)
+        secs = secs.push(ElfOutSec(name: ".symtab", sh_type: BOOT_SHT_SYMTAB, sh_flags: 0, align: sym_align,
+            size: symtab.len(), entsize: sym_ent, link: ".strtab", info: 1, seg: ELF_SEG_R))
         offs = offs.push(symtab_off)
         vaddrs = vaddrs.push(0)
         out_contents = out_contents.push(symtab)
@@ -1658,7 +1694,17 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
 
     val xplan = ElfExecPlan(secs: secs, offsets: offs, vaddrs: vaddrs, segments: sg.segs,
         file_end: final_end)
-    var bytes = elf_write_image(BOOT_ET_EXEC, machine, entry, xplan, out_contents)
+    var bytes: [i64] = []
+    if i386:
+        var c8: [[u8]] = []
+        for c in out_contents:
+            var b: [u8] = []
+            for v in c: b = b.push(v as u8)
+            c8 = c8.push(b)
+        for v in elf_write_image32_bytes(BOOT_ET_EXEC, machine, 0, entry, xplan, c8):
+            bytes = bytes.push(v as i64)
+    else:
+        bytes = elf_write_image(BOOT_ET_EXEC, machine, entry, xplan, out_contents)
     if rv:
         # e_flags: the merged RVC / float-ABI flags of the inputs, as ld.lld writes.
         var fi: i64 = 0

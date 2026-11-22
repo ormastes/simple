@@ -1,0 +1,225 @@
+# x86_32 (i686) freestanding core runtime — pure Simple.
+#
+# The x86_32 boot C (examples/09_embedded/simple_os/arch/x86_32/boot/
+# baremetal_stubs.c) already defines rt_alloc, rt_string_new_literal,
+# rt_string_concat and rt_index_set. This module provides the remaining core
+# symbols the shared POSIX + shell kernel closure needs (same set the riscv32
+# lane needed, see riscv32/core_runtime.spl):
+#   rt_pool_safepoint rt_value_to_string rt_raw_i64_to_string rt_array_get
+#   rt_array_set_text rt_value_u64 rt_typed_words_{u32,u64}_{at,set}
+#
+# ABI: i686 is ILP32, so the LLVM backend makes every RuntimeValue, param and
+# local an i32 (codegen/llvm/backend_core.rs runtime_int_type); `i64` below is
+# a 32-bit carrier and rt_typed_words_u64_* carry the low 32 bits only.
+#
+# Layout (baremetal_stubs.c):
+#   string: {u32 type=1, u32 size, u32 len, data[len], NUL}   (data at +12)
+#   array:  {u32 type=2, u32 size, u32 len, u32 cap, items[]} (items at +16)
+#   values: int = v << 3, heap = ptr | 1, nil = 3, true = 11, false = 19.
+#
+# Memory and allocation go through raw boot probes in baremetal_stubs.c
+# (rt_x86_32_probe_load8 / _store32 / _alloc): no inline asm. The tagged
+# rt_mmio_* helpers cannot be used — they carry 29-bit ints only.
+# Bodies must not use text literals, f-strings, arrays or untyped compares —
+# those lower to rt_* symbols (or rt_native_cmp).
+
+use os.kernel.arch.riscv32.core_runtime_layout.{
+    rv32_rt_normalize_index, rv32_rt_byte_merge, rv32_rt_decimal_len, rv32_rt_decimal_digit
+}
+use os.kernel.arch.x86_32.core_runtime_layout.{x86_32_rt_array_item_addr, x86_32_rt_ram_ref}
+
+@cfg(i686)
+extern fn rt_x86_32_probe_load8(addr: i64) -> i64
+@cfg(i686)
+extern fn rt_x86_32_probe_store32(addr: i64, value: i64) -> i64
+@cfg(i686)
+extern fn rt_x86_32_probe_alloc(size: i64) -> i64
+
+# ---------------------------------------------------------------------------
+# Raw memory over the boot probes.
+# ---------------------------------------------------------------------------
+
+@cfg(i686)
+fn _x86_32_ld8(addr: i64) -> i64:
+    rt_x86_32_probe_load8(addr) & 255
+
+@cfg(i686)
+fn _x86_32_ld32(addr: i64) -> i64:
+    _x86_32_ld8(addr) | (_x86_32_ld8(addr + 1) << 8) | (_x86_32_ld8(addr + 2) << 16) | (_x86_32_ld8(addr + 3) << 24)
+
+@cfg(i686)
+fn _x86_32_st32(addr: i64, value: i64):
+    """`addr` must be 4-byte aligned."""
+    rt_x86_32_probe_store32(addr, value)
+
+@cfg(i686)
+fn _x86_32_st8(addr: i64, byte: i64):
+    val word_addr: i64 = addr & -4
+    _x86_32_st32(word_addr, rv32_rt_byte_merge(_x86_32_ld32(word_addr), addr & 3, byte))
+
+# ---------------------------------------------------------------------------
+# Object helpers.
+# ---------------------------------------------------------------------------
+
+@cfg(i686)
+fn _x86_32_heap_obj(value: i64, kind: i64) -> i64:
+    """Untagged object pointer when `value` is a heap ref of `kind`, else 0."""
+    if (value & 7) != 1:
+        return 0
+    val ptr: i64 = value & -8
+    if x86_32_rt_ram_ref(ptr) == 0:
+        return 0
+    if _x86_32_ld32(ptr) != kind:
+        return 0
+    ptr
+
+@cfg(i686)
+fn _x86_32_str_alloc(len: i64) -> i64:
+    """Allocate a string object with header set; data and NUL left to the caller."""
+    val total: i64 = 12 + len + 1
+    # Round to a word: _x86_32_st8/_str_small write whole aligned words.
+    val ptr: i64 = rt_x86_32_probe_alloc((total + 3) & -4)
+    if ptr == 0:
+        return 0
+    _x86_32_st32(ptr, 1)
+    _x86_32_st32(ptr + 4, total)
+    _x86_32_st32(ptr + 8, len)
+    ptr
+
+@cfg(i686)
+fn _x86_32_str_small(len: i64, word0: i64, word1: i64) -> i64:
+    """String of up to 8 bytes given as little-endian words (no text literals)."""
+    val ptr: i64 = _x86_32_str_alloc(len)
+    if ptr == 0:
+        return 3
+    _x86_32_st32(ptr + 12, word0)
+    if len > 4:
+        _x86_32_st32(ptr + 16, word1)
+    _x86_32_st8(ptr + 12 + len, 0)
+    ptr | 1
+
+@cfg(i686)
+fn _x86_32_decimal(value: i64) -> i64:
+    val n: i64 = rv32_rt_decimal_len(value)
+    val ptr: i64 = _x86_32_str_alloc(n)
+    if ptr == 0:
+        return 3
+    var digits: i64 = n
+    if value < 0:
+        _x86_32_st8(ptr + 12, 45)
+        digits = n - 1
+    var pos: i64 = 0
+    while pos < digits:
+        _x86_32_st8(ptr + 12 + n - 1 - pos, 48 + rv32_rt_decimal_digit(value, pos))
+        pos = pos + 1
+    _x86_32_st8(ptr + 12 + n, 0)
+    ptr | 1
+
+@cfg(i686)
+fn _x86_32_array_slot(array: i64, index: i64) -> i64:
+    """Item address for `array[index]`, or 0 when not an array / out of bounds."""
+    val obj: i64 = _x86_32_heap_obj(array, 2)
+    if obj == 0:
+        return 0
+    val idx: i64 = rv32_rt_normalize_index(index, _x86_32_ld32(obj + 8))
+    if idx < 0:
+        return 0
+    x86_32_rt_array_item_addr(obj, idx)
+
+@cfg(i686)
+fn _x86_32_array_set(array: i64, index: i64, value: i64) -> i64:
+    """1 when stored, 0 when not an array / out of bounds."""
+    val slot: i64 = _x86_32_array_slot(array, index)
+    if slot == 0:
+        return 0
+    _x86_32_st32(slot, value)
+    1
+
+@cfg(i686)
+fn _x86_32_words_at(array: i64, index: i64) -> i64:
+    val slot: i64 = _x86_32_array_slot(array, index)
+    if slot == 0:
+        return 0
+    _x86_32_ld32(slot)
+
+@cfg(i686)
+fn _x86_32_to_string(value: i64) -> i64:
+    if _x86_32_heap_obj(value, 1) != 0:
+        return value
+    if (value & 7) == 0:
+        return _x86_32_decimal(value >> 3)
+    if value == 11:
+        return _x86_32_str_small(4, 0x65757274, 0)          # "true"
+    if value == 19:
+        return _x86_32_str_small(5, 0x736C6166, 0x65)       # "false"
+    if value == 3:
+        return _x86_32_str_small(3, 0x6C696E, 0)            # "nil"
+    _x86_32_str_small(7, 0x6C61763C, 0x3E6575)              # "<value>"
+
+# ---------------------------------------------------------------------------
+# Exported core runtime. Exports never call each other: a call to an rt_*
+# name is typed ANY by MIR lowering, and an ANY result flowing into `-> bool`
+# lowers through rt_value_truthy, which i686 does not define. They all
+# delegate to the private _x86_32_* helpers above.
+# ---------------------------------------------------------------------------
+
+@cfg(i686)
+@no_mangle
+fn rt_pool_safepoint() -> i64:
+    0
+
+@cfg(i686)
+@no_mangle
+fn rt_value_to_string(value: i64) -> i64:
+    _x86_32_to_string(value)
+
+@cfg(i686)
+@no_mangle
+fn rt_raw_i64_to_string(raw: i64) -> i64:
+    _x86_32_decimal(raw)
+
+@cfg(i686)
+@no_mangle
+fn rt_array_get(array: i64, index: i64) -> i64:
+    val slot: i64 = _x86_32_array_slot(array, index)
+    if slot == 0:
+        return 3
+    _x86_32_ld32(slot)
+
+@cfg(i686)
+@no_mangle
+fn rt_array_set_text(array: i64, index: i64, value: i64) -> bool:
+    if _x86_32_array_set(array, index, value) == 0:
+        return false
+    true
+
+@cfg(i686)
+@no_mangle
+fn rt_value_u64(bits: i64) -> i64:
+    # Known limit: i686 has no boxed-u64 heap kind, so this is a tag-int and
+    # keeps only the low 29 bits (values >= 0x20000000 are truncated).
+    bits << 3
+
+@cfg(i686)
+@no_mangle
+fn rt_typed_words_u32_at(array: i64, index: i64) -> i64:
+    _x86_32_words_at(array, index)
+
+@cfg(i686)
+@no_mangle
+fn rt_typed_words_u64_at(array: i64, index: i64) -> i64:
+    _x86_32_words_at(array, index)
+
+@cfg(i686)
+@no_mangle
+fn rt_typed_words_u32_set(array: i64, index: i64, value: i64) -> bool:
+    if _x86_32_array_set(array, index, value) == 0:
+        return false
+    true
+
+@cfg(i686)
+@no_mangle
+fn rt_typed_words_u64_set(array: i64, index: i64, value: i64) -> bool:
+    if _x86_32_array_set(array, index, value) == 0:
+        return false
+    true

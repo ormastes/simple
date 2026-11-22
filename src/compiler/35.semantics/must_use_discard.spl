@@ -12,16 +12,17 @@
 # Severity projection mirrors SPL-UNIT-002: error in compiled code, warning in
 # script mode (see `unit_profile_apply`'s `script_mode`).
 #
+# The driver feeds the project's whole HIR module set through
+# `must_use_discard_scan_module`; the interpreter (no HIR) consumes the shared
+# policy in compiler.common.must_use_policy.
+#
 # NOT covered yet (tracked in the plan's Implementation log): method-call
-# return types (only `@must_use` method NAMES are matched), the driver cross-module scan (TODO(ROB-USE-01) below),
-# the interpreter consumer (`eval_stmt_expr` still emits its own R9 strings),
-# and TLDR/SMF metadata carrying the obligation.
+# return types (only `@must_use` method NAMES are matched) and TLDR/SMF
+# metadata carrying the obligation.
 
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
-
-pub val MUST_USE_CODE_RESULT: text = "SPL-USE-001"
-pub val MUST_USE_CODE_MARKED: text = "SPL-USE-002"
+use compiler.common.must_use_policy.{MUST_USE_CODE_RESULT, MUST_USE_CODE_MARKED}
 
 pub struct MustUseFinding:
     code: text
@@ -32,23 +33,12 @@ pub struct MustUseFinding:
 # only (by symbol id, else by name inside the module). A bare name is never
 # matched across modules.
 # Imported callees are added to `imported` (see must_use_discard_scan).
-# TODO(ROB-USE-01): the driver (collect_module_typecheck_receipt_v1) passes only
-# ONE module to must_use_discard_scan, so cross-module (imported callee)
-# resolution is dormant in production; feed it the full module set.
 struct MustUseScope:
     owner: text
     names: Dict<i64, text>
     result_like: Dict<text, bool>
     marked: [text]
     imported: [text]
-
-# `script_mode` true only for interpreted script execution. Severity does not
-# depend on the finding code.
-# @allow(primitive_api) severity word is the diagnostic wire format shared with eval_warnings
-pub fn must_use_finding_severity(script_mode: bool) -> text:
-    if script_mode:
-        return "warning"
-    "error"
 
 fn must_use_is_result_like(t: HirType) -> bool:
     match t.kind:
@@ -180,32 +170,32 @@ fn must_use_nested(block: HirBlock, scope: MustUseScope) -> [MustUseFinding]:
         out = must_use_extend(out, must_use_classify(block.value, scope))
     out
 
-# Module a `use` path names, deterministically. An exact match on the map key
-# or the HIR module name wins (smallest key when several modules share the
-# name); otherwise the longest segment-boundary suffix match wins (path ends
-# with "." + key/name), ties broken by the smallest key. "" when the module is
-# not in the scanned set. Dict iteration order never decides the result.
+# Module a `use` path names, or "" when that cannot be decided. An exact map
+# key wins outright (one hashed lookup, the common case). Otherwise exactly one
+# module whose HIR name equals the path wins; failing that, exactly one module
+# matching on a segment boundary (path ends with "." + key/name). Two or more
+# candidates at the deciding tier are ambiguous and yield "" (no finding, never
+# a guessed module), so Dict iteration order never decides the result.
 fn must_use_find_module(modules: Dict<text, HirModule>, path: text) -> text:
-    var exact = ""
-    var best = ""
-    var best_len = -1
+    if modules.contains_key(path):
+        return path
+    var named = ""
+    var named_count = 0
+    var suffix = ""
+    var suffix_count = 0
     for key in modules.keys():
         val m: HirModule = modules[key]
-        if key == path or (m.name != "" and m.name == path):
-            if exact == "" or key < exact:
-                exact = key
-            continue
-        var matched_len = -1
-        if path.ends_with("." + key):
-            matched_len = key.len()
-        if m.name != "" and path.ends_with("." + m.name) and m.name.len() > matched_len:
-            matched_len = m.name.len()
-        if matched_len > best_len or (matched_len == best_len and matched_len >= 0 and key < best):
-            best = key
-            best_len = matched_len
-    if exact != "":
-        return exact
-    best
+        if m.name != "" and m.name == path:
+            named = key
+            named_count = named_count + 1
+        elif path.ends_with("." + key) or (m.name != "" and path.ends_with("." + m.name)):
+            suffix = key
+            suffix_count = suffix_count + 1
+    if named_count == 1:
+        return named
+    if named_count == 0 and suffix_count == 1:
+        return suffix
+    ""
 
 # Scans every function body in `modules` (impl/class methods are merged into
 # `module.functions`). `marked` is the caller-supplied `@must_use` name set;
@@ -216,39 +206,49 @@ fn must_use_find_module(modules: Dict<text, HirModule>, path: text) -> text:
 pub fn must_use_discard_scan(modules: Dict<text, HirModule>, marked: [text]) -> [MustUseFinding]:
     var out: [MustUseFinding] = []
     for key in modules.keys():
-        val module: HirModule = modules[key]
-        var names: Dict<i64, text> = {}
-        var result_like: Dict<text, bool> = {}
-        var local_marked: [text] = marked
-        for func in module.functions.values():
-            names[func.symbol.id] = func.name
-            if func.func_attr.is_must_use and not local_marked.contains(func.name):
-                local_marked.push(func.name)
-            if must_use_is_result_like(func.return_type):
-                result_like[func.name] = true
-        var imported: [text] = []
-        for imp in module.imports:
-            val target_key = must_use_find_module(modules, imp.module_path)
-            if target_key == "" or target_key == key:
+        out = must_use_extend(out, must_use_discard_scan_module(modules, key, marked))
+    out
+
+# Findings for the single module `key`, with imported callees resolved against
+# the full `modules` set. This is the driver entry point: it scans one module's
+# bodies while seeing the whole project, so findings are attributed once.
+pub fn must_use_discard_scan_module(modules: Dict<text, HirModule>, key: text, marked: [text]) -> [MustUseFinding]:
+    var out: [MustUseFinding] = []
+    if not modules.contains_key(key):
+        return out
+    val module: HirModule = modules[key]
+    var names: Dict<i64, text> = {}
+    var result_like: Dict<text, bool> = {}
+    var local_marked: [text] = marked
+    for func in module.functions.values():
+        names[func.symbol.id] = func.name
+        if func.func_attr.is_must_use and not local_marked.contains(func.name):
+            local_marked.push(func.name)
+        if must_use_is_result_like(func.return_type):
+            result_like[func.name] = true
+    var imported: [text] = []
+    for imp in module.imports:
+        val target_key = must_use_find_module(modules, imp.module_path)
+        if target_key == "" or target_key == key:
+            continue
+        val target: HirModule = modules[target_key]
+        for item in imp.items:
+            var local = item.name
+            if val alias = item.alias:
+                local = alias
+            if names.values().contains(local):
                 continue
-            val target: HirModule = modules[target_key]
-            for item in imp.items:
-                var local = item.name
-                if val alias = item.alias:
-                    local = alias
-                if names.values().contains(local):
+            for tf in target.functions.values():
+                if tf.name != item.name:
                     continue
-                for tf in target.functions.values():
-                    if tf.name != item.name:
-                        continue
-                    if tf.func_attr.is_must_use:
-                        imported.push(local)
-                        if not local_marked.contains(local):
-                            local_marked.push(local)
-                    elif must_use_is_result_like(tf.return_type):
-                        imported.push(local)
-                        result_like[local] = true
-        for func in module.functions.values():
-            val scope = MustUseScope(owner: func.name, names: names, result_like: result_like, marked: local_marked, imported: imported)
-            out = must_use_extend(out, must_use_block(func.body, scope))
+                if tf.func_attr.is_must_use:
+                    imported.push(local)
+                    if not local_marked.contains(local):
+                        local_marked.push(local)
+                elif must_use_is_result_like(tf.return_type):
+                    imported.push(local)
+                    result_like[local] = true
+    for func in module.functions.values():
+        val scope = MustUseScope(owner: func.name, names: names, result_like: result_like, marked: local_marked, imported: imported)
+        out = must_use_extend(out, must_use_block(func.body, scope))
     out
