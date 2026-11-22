@@ -26,7 +26,8 @@ use app.cli.bootstrap_focused_native_build_args.{focused_native_build_target_pro
     focused_native_build_target, focused_native_build_arg_value, focused_native_build_opt_level,
     focused_native_build_strip, focused_native_build_has_flag}
 use app.io.native_build_cache.{native_build_cache_snapshot, native_build_cache_bind, native_build_cache_restore}
-use app.cli.bootstrap_native_output_args.{native_build_flag_needs_value, bootstrap_native_build_output_mode}
+use app.cli.bootstrap_native_output_args.{native_build_flag_needs_value, bootstrap_native_build_output_mode,
+    bootstrap_native_build_missing_artifact_v1}
 use app.io.native_build_output_mode.{native_build_output_mode_snapshot, native_build_output_mode_bind, native_build_output_mode_restore}
 use app.cli.bootstrap_source_authority_route.{bootstrap_source_authority_refresh_route_v1}
 use app.cli.file_worker_pool_refusal.{shard_aggregate_failure_line_v1}
@@ -191,6 +192,21 @@ pub fn bootstrap_capsule_shard_child_env(args: [text]):
             env_set("SIMPLE_MIR_SHARD", arg.substring(12))
         elif arg.starts_with("--parse-shard="):
             env_set("SIMPLE_PARSE_SHARD", arg.substring(14))
+
+# 1 when this `native-build` invocation owns an executable at its -o path:
+# not a coordinator worker, shard/role child, MIR export-summary producer or
+# grouped child, and not help/list/removed-bundle or object/archive/shared
+# output. i64: see bootstrap_native_build_missing_artifact_v1.
+fn bootstrap_native_build_artifact_owner_v1(args: [text], worker_marker: text) -> i64:
+    if worker_marker == "1" or bootstrap_shard_child_active() or bootstrap_build_role_child_requested(args):
+        return 0
+    if (env_get("SIMPLE_MIR_SHARD_EXPORT_WRITE") ?? "") != "" or (env_get("SIMPLE_NATIVE_GROUP_RESULT") ?? "") != "":
+        return 0
+    if args.contains("--group-manifest") or bootstrap_file_worker_requested(args):
+        return 0
+    if native_build_policy_action_from_args(args, 0) != "" or bootstrap_native_build_output_mode(args) != "":
+        return 0
+    1
 
 fn bootstrap_file_worker_requested(args: [text]) -> bool:
     for arg in args:
@@ -590,7 +606,8 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
                 val stage3_allow_mir = native_bootstrap_stage3_per_file_selected_v1(
                     env_get_nullable(NATIVE_FILE_WORKERS_ENV_V1) ?? NATIVE_PER_FILE_PIPELINE_DEFAULT_V1,
                     env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "")
-                if stage3_allow_mir:
+                if stage3_allow_mir and not bootstrap_shard_child_active() and
+                        not bootstrap_build_role_child_requested(args):
                     print "[stage3-route] per-file worker pool + per-module link"
                 # go-to-end or explicit MIR sharding on the two-pass route
                 # (SIMPLE_FILE_WORKERS=0): HIR and MIR shard pools, so HIR runs
@@ -622,8 +639,8 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
         if explicit_entry != "src/app/cli/main.spl" and explicit_entry != "src/app/os/main.spl":
             print "Error: Stage4 entry must be src/app/cli/main.spl or src/app/os/main.spl"
             return 1
-        if mode != "one-binary":
-            print "Error: Stage4 compiler capsule requires --mode one-binary"
+        if mode != "one-binary" and mode != "dynload":
+            print "Error: Stage4 compiler capsule requires --mode one-binary or --mode dynload"
             return 1
         val worker_args = bootstrap_native_build_worker_args(args)
         val option_error = cli_native_build_option_error(worker_args, true)
@@ -634,6 +651,27 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
             return 3
         native_build_apply_failure_policy_v1(worker_args)
         bootstrap_capsule_shard_child_env(args)
+        val stage4_target = focused_native_build_target(args)
+        val stage4_bindings = library_unit_env_bindings_for_inputs_v1(LibraryUnitModeInputsV1(
+            args: worker_args,
+            build_mode: mode,
+            stage3_env: env_get("SIMPLE_BOOTSTRAP_STAGE3") ?? "",
+            stage4_env: "1",
+            stage3_dynlib_env: env_get(STAGE3_LIB_DYNLIB_ENV_V1) ?? "",
+            library_units_env: env_get(LIBRARY_UNITS_ENV_V1) ?? "",
+            whole_program_env: env_get(NATIVE_BOOTSTRAP_WHOLE_PROGRAM_ENV_V1) ?? "",
+            explicit_emit_mode: requested_output_mode,
+            target_or_os: if stage4_target != "": stage4_target else: host_os(),
+            linker_env: env_get("SIMPLE_LINKER") ?? ""
+        ))
+        if mode != "":
+            env_set("SIMPLE_NATIVE_BUILD_MODE", mode)
+        env_set(LIBRARY_UNITS_ENV_V1, stage4_bindings.library_units_env)
+        env_set(STAGE3_LIB_DYNLIB_ENV_V1, stage4_bindings.stage3_dynlib_env)
+        env_set("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", stage4_bindings.dynlib_explicit_env)
+        if stage4_bindings.mode == LibraryUnitBuildModeV1.DynLibUnits:
+            if not bootstrap_shard_child_active():
+                print "[stage4-route] library-unit dyn-lib build + thin executable link"
         # Seed only the entry. The driver resolves its transitive imports and
         # then enables closure mode; pre-enabling it while passing whole source
         # roots made Stage 4 parse every file before it could prune anything.
@@ -1049,7 +1087,20 @@ fn main() -> i64:
         print "error: unsupported bootstrap internal entry '{all_args[2]}'"
         return 1
     if first == "native-build":
-        return run_native_build_bootstrap(all_args)
+        # Decided BEFORE the route runs: a successful prepass installs
+        # SIMPLE_MIR_SHARD_LINK in this process, which would otherwise make
+        # the top-level build look like a shard child afterwards.
+        val artifact_owner = bootstrap_native_build_artifact_owner_v1(all_args, native_worker_marker)
+        val native_code = run_native_build_bootstrap(all_args)
+        val native_output = bootstrap_output_from_args(all_args, 0)
+        # A Windows link of `-o <path>` without an extension writes `<path>.exe`
+        # (native_noop_admission.spl; bug native_noop_receipt_misses_windows_exe_suffix_2026-11-14),
+        # so either spelling counts as the produced artifact.
+        val native_present: i64 = if native_output != "" and (file_exists(native_output) or file_exists(native_output + ".exe")): 1 else: 0
+        if bootstrap_native_build_missing_artifact_v1(native_code, native_output, native_present, artifact_owner) == 1:
+            eprint "error: native-build finished with exit 0 but produced no artifact at {native_output}; failing closed (see the pool/aggregate lines above)"
+            return 1
+        return native_code
     if first.len() == 9 and first.starts_with("--version"):
         print "simple-bootstrap {bootstrap_version()}{bootstrap_backend_capability_label_v1()}"
         return 0

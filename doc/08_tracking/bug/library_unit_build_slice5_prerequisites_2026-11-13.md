@@ -1,6 +1,6 @@
 # Library unit build: two prerequisites before Stage 3 links from unit archives
 
-**Status:** CLOSED (2026-11-22, lane `work/lane2-p3-lib-dynlib-default-20261122`). **Prior lane:** `work/lib-link-units-20261113`.
+**Status:** verification-pending (re-checked 2026-11-22 against release/1.0.0 d0e85c0518; was CLOSED, lane `work/lane2-p3-lib-dynlib-default-20261122`). **Prior lane:** `work/lib-link-units-20261113`.
 **Design:** `doc/05_design/compiler/incremental_build/library_unit_build_and_link.md`.
 
 Slices 1-4 and the pure half of slice 5 are landed as unwired functions
@@ -79,3 +79,11 @@ REMAINS:
    `MirLowering.lower_module_guarded_v1` resets `mcdc_next_runtime_id = 1` per module and `lower_mcdc_decision` hashes `(authored_path, current_module_id, ordinal)` when `span.start < 0`, eliminating whole-closure lowering-order dependence.
 3. **Unit interface skeleton & `dyn-lib` shared-library wiring (`library_unit_dynlib_v1.spl`)**:
    Each library unit publishes `iface.sdn`, materialized body-stripped `iface_root/` skeletons, write-once `receipt.sdn` (`artifact_kind: "dynlib"`), and a verified shared library (`lib<unit>.dylib` / `lib<unit>.so` / `<unit>.dll`). Phase 3 `--mode dynload` defaults to `DynLibUnits` (`SIMPLE_STAGE3_LIB_DYNLIB` default `"1"`, opt-out via `SIMPLE_STAGE3_LIB_DYNLIB=0` or `--mode one-binary`).
+
+## Re-check against release/1.0.0 (2026-11-22, lane vm1)
+
+Status per prerequisite is verification-pending: each fix is present in the tree and its spec is green on the interpreter, but nothing here proves two-process byte-identical native objects (the stated verification).
+
+1. Unit-scoped lowering (prereq 1): verification-pending. `library_unit_{archive,link,dynlib,drift}_v1_spec` pass (10/10, 12/12, 8/8, 6/6), but they cover plan/iface/archive/link/dynlib, not lowering against interface artifacts only; no spec lowers a unit without provider HIR.
+2. Row 22 `canonical_type_symbol_ids`: verification-pending. `preseed_canonical_type_symbols_v1` + `canonical_type_symbol_table_sorted_v1` present; `canonical_type_symbol_id_spec` 6/6.
+3. `mcdc_next_runtime_id`: verification-pending. It is still an i64 field (`mir_lowering_types.spl:127`) but is reset to 1 per module (`module_lowering.spl:3124`) and used only as an ordinal inside `mcdc_synthetic_runtime_decision_id_v1`, which digests `(authored_path, owner_module, ordinal)`. No whole-closure order dependence remains; ids are not globally content-digested, the ordinal depends on decision order within one module, which is fixed by that module's source. No failing spec could be written, because the existing `mcdc synthetic runtime decision ids` example in `canonical_type_symbol_id_spec` already passes, so no change was made.

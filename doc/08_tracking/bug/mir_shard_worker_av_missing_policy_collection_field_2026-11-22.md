@@ -38,9 +38,37 @@ function, which is identified by its writes to the three adjacent handoff global
 `policy.handoff.collection`, the same form as `native_build_worker_entry.spl:33` and
 `parse_shard_main.spl:157`.
 
-## Follow-up (not fixed here)
-The Stage 2 frontend did not reject a missing struct field, so it compiled silently into a wild read.
-That type-check gap needs its own regression spec.
+## Follow-up: compiler accepted the missing field (fix implemented, verification pending)
+`policy` is bound by `val policy = match ...: case Ok(value): value`, so HIR has no type for it.
+The HIR accessor-forwarding check (`lower_accessor_read`) needs an owner, so it never ran. The
+MIR module-qualified layout tier, which already rejects a missing field, needs a HIR type
+symbol, so it never ran either. `resolve_field_index`
+(`src/compiler/50.mir/_MirLowering/function_lowering.spl`) found the bare value-provenance layout
+and saw that it lacked `collection`. It fell through and returned the default index 0, the
+`handoff` record. That is why the deep copy read a 4-field "collection" out of a handoff.
+
+Fix: when the bare value-provenance layout is unambiguous (not conflict-warned) and lacks the
+field, and no later tier resolves it, lowering now fails with
+`no field '<f>' on '<Owner>' (receiver type from value provenance)`. Successful lookups are
+unchanged: any tier that finds the field still returns its index first.
+
+The HIR `SIMPLE_STRICT_FIELD_FORWARDING` default was deliberately left alone. For a typed receiver,
+MIR's qualified tier already fails closed. Flipping the HIR default needs the cross-module census
+that `strict_field_forwarding_opt_in_workaround_2026-10-27.md` still lacks.
+
+Specs (`test/01_unit/compiler/50.mir/missing_struct_field_lowering_spec.spl`, describe
+"missing field on an untyped match-bound receiver"):
+- reproduction: `policy.collection` on a match-bound `Prepared`;
+- generalization: the same read through an `if val` binding;
+- control: `policy.handoff.collection` still lowers.
+
+They run only on a compiler deployed after this change.
+
+Unverified assumption: the guard arms only when `struct_value_syms` holds the receiver's owner.
+Value provenance for an untyped match result comes from `remember_merged_arm_identity`
+(`mir_lowering_stmts.spl` match lowering), and nothing here checks that it is populated for this
+shape. If the reproduction case stays RED, the remaining gap is missing provenance for the
+match-arm binding. That gap must be fixed. The assertion must not be weakened.
 
 ## Verification pending
 Phase 3 rebuild, then the 1-file `--entry-closure` repro above must seal both owners.

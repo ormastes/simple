@@ -1,5 +1,5 @@
-use compiler.driver.driver.{compiler_driver_create, compiler_driver_apply_environment_variant_policy_v1, compiler_driver_run_compile}
-use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_handoff_peek_v1, native_entry_closure_handoff_policy_collection_take_v1, native_entry_closure_handoff_library_policy_take_v1}
+use compiler.driver.driver.{compiler_driver_create, compiler_driver_create_with_environment_variant_policy_v1, compiler_driver_run_compile}
+use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_handoff_peek_list_v1, native_entry_closure_handoff_policy_collection_take_list_v1, native_entry_closure_handoff_library_policy_take_list_v1}
 use compiler.driver.bootstrap_api_low_memory.{bootstrap_low_memory_requested}
 use compiler.common.driver_core_modes.{CompileMode, driver_output_format_native}
 use compiler.common.driver_compile_options.{driver_core_compile_options_default, compileoptions_normalize_mir_optimization}
@@ -114,24 +114,24 @@ pub fn aot_native_project_with_backend_fixed_v2(
     # Reclaim only for the explicit Stage4 low-memory profile. Ordinary focused
     # builds and the no-opt-in negative control retain their source buffers.
     options.low_memory = bootstrap_low_memory_requested()
-    match native_entry_closure_handoff_peek_v1():
-        case Some(req):
-            options.native_source_roots = req.binding.source_roots
-            options.native_source_snapshot_root = req.snapshot.snapshot_root
-        case None: ()
-    match native_entry_closure_handoff_library_policy_take_v1():
-        case Some(lib_pol):
-            options.library_mode = lib_pol.mode
-            options.gc_off = lib_pol.gc_off
-            options.allowed_families = lib_pol.allowed_families
-        case None: ()
+    val peeked_reqs = native_entry_closure_handoff_peek_list_v1()
+    if peeked_reqs.len() > 0:
+        val req = peeked_reqs[0]
+        options.native_source_roots = req.binding.source_roots
+        options.native_source_snapshot_root = req.snapshot.snapshot_root
+    val taken_lib_pols = native_entry_closure_handoff_library_policy_take_list_v1()
+    if taken_lib_pols.len() > 0:
+        val lib_pol = taken_lib_pols[0]
+        options.library_mode = lib_pol.mode
+        options.gc_off = lib_pol.gc_off
+        options.allowed_families = lib_pol.allowed_families
     options = compileoptions_normalize_mir_optimization(options)
-    val driver = compiler_driver_create(options)
-    match native_entry_closure_handoff_policy_collection_take_v1():
-        case Some(collection):
-            match compiler_driver_apply_environment_variant_policy_v1(driver, collection):
-                case Ok(_): ()
-                case Err(reason):
-                    return CompileResult.RuntimeError("invalid environment variant policy: " + reason)
-        case None: ()
+    val taken_collections = native_entry_closure_handoff_policy_collection_take_list_v1()
+    val driver = if taken_collections.len() > 0:
+        match compiler_driver_create_with_environment_variant_policy_v1(options, taken_collections[0]):
+            case Ok(created): created
+            case Err(reason):
+                return CompileResult.RuntimeError("invalid environment variant policy: " + reason)
+    else:
+        compiler_driver_create(options)
     compiler_driver_run_compile(driver)

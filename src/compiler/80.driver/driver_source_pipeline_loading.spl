@@ -7,7 +7,8 @@ use compiler.driver.driver_entry_closure_core.{DriverEntryResolverIndexV1,
 use compiler.common.cache.visibility_manifest_read_v1.{VisibilityManifestReadV1,
     VisibilityManifestEvidenceV1, visibility_manifest_reads_v1}
 use compiler.common.driver_source_file.{source_file_with_manifest_evidence_v1}
-use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_visibility_maps_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_visibility_maps_v1,
+    native_entry_closure_handoff_take_list_v1}
 # CompilerDriver phase-1 source loading.
 #
 # The main driver retains parsing, HIR, and later compilation phases.
@@ -317,8 +318,12 @@ impl CompilerDriver:
             self.ctx.add_error(library_error)
             log_phase(library_error)
             return (self.ctx, false)
+        val handoff_list = if preclosed != nil:
+            [preclosed!]
+        else:
+            native_entry_closure_handoff_take_list_v1()
         val admitted_task = driver_admitted_epoch_task_active_v1()
-        if preclosed != nil and driver_admitted_epoch_active_v1():
+        if handoff_list.len() > 0 and driver_admitted_epoch_active_v1():
             self.ctx.add_error("preclosed parse selection cannot compose with admitted source epoch")
             return (self.ctx, false)
         if driver_admitted_epoch_active_v1() and not admitted_task:
@@ -367,11 +372,10 @@ impl CompilerDriver:
         var visibility_snapshot_id = ""
         var visibility_resolver_index: DriverEntryResolverIndexV1? = None
         var preclosed_row_by_identity: Dict<text, i64> = {}
-        # Nil guard, not `if val`: binding a struct-payload optional that is nil
-        # copied a payload out of nil on the native lane (SEGV in
-        # native_entry_closure_request_open_v1, Stage 2 load_sources).
-        if preclosed != nil:
-            val request = preclosed!
+        # Array handoff, not `Option<Struct>`: binding a struct-payload optional
+        # across compiled Stage 2 frames caused SEGV in native_entry_closure_request_open_v1.
+        if handoff_list.len() > 0:
+            val request = handoff_list[0]
             val selected = native_entry_closure_request_open_v1(
                 request, library_mode_closure_digest_v1(self.ctx.environment_variant_policy_digest,
                     self.ctx.options.library_mode))

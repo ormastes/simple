@@ -1,0 +1,299 @@
+#!/bin/sh
+# check-bootstrap-path-matrix-windows.shs
+#
+# Forward-compatible superset `--path-check` verification harness for Windows
+# bootstrap targets (`windows-x86_64`, `windows-aarch64`, default `mingw` +
+# optional `msvc`, `shard` + `file`) and `build-phase3-phase4.bat` contract.
+#
+# Verdict (last stdout line):
+#   PASS — windows bootstrap path-alive matrix verified (<n> checks)    exit 0
+#   FAIL — windows bootstrap path-alive matrix failed (<k>/<n> failed)  exit 1
+#   ERROR — nothing was checked (<reason>)                              exit 2
+
+set -u
+
+ROOT_DIR=""
+FAST_MODE=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --fast) FAST_MODE=1; shift ;;
+    --root)
+      [ "$#" -ge 2 ] || { echo "ERROR — nothing was checked (--root requires a directory)"; exit 2; }
+      ROOT_DIR=$2; shift 2 ;;
+    --root=*) ROOT_DIR=${1#*=}; shift ;;
+    --help|-h)
+      echo "usage: sh scripts/check/check-bootstrap-path-matrix-windows.shs [--fast] [--root DIR]"
+      exit 0 ;;
+    *)
+      echo "ERROR — nothing was checked (unknown option '$1')"
+      exit 2 ;;
+  esac
+done
+
+if [ -z "$ROOT_DIR" ]; then
+  ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." 2>/dev/null && pwd -P) || {
+    echo "ERROR — nothing was checked (cannot resolve repo root)"
+    exit 2
+  }
+fi
+
+TARGET_SCRIPT="$ROOT_DIR/scripts/bootstrap/build-phase3-phase4.sh"
+BAT_SCRIPT="$ROOT_DIR/scripts/bootstrap/build-phase3-phase4.bat"
+if [ ! -f "$TARGET_SCRIPT" ]; then
+  echo "ERROR — nothing was checked (missing $TARGET_SCRIPT)"
+  exit 2
+fi
+
+WORK_DIR=$(mktemp -d) || {
+  echo "ERROR — nothing was checked (mktemp failed)"
+  exit 2
+}
+trap 'rm -rf "$WORK_DIR"' EXIT INT TERM
+
+POISON_BIN="$WORK_DIR/poison-bin"
+mkdir -p "$POISON_BIN"
+for _tool in cargo rustc clang clang++ clang-cl lld ld.lld lld-link llvm-ar; do
+  cat > "$POISON_BIN/$_tool" <<'EOF_SHIM'
+#!/bin/sh
+echo "FATAL: heavy tool invoked during --path-check ($0 $*)" >&2
+exit 99
+EOF_SHIM
+  chmod +x "$POISON_BIN/$_tool"
+done
+
+ORIG_PATH="$PATH"
+PATH="$POISON_BIN:$ORIG_PATH"
+export PATH
+
+validate_win_actions() {
+  _out_file=$1
+  _exp_cpu=$2
+  _exp_wincfg=$3
+  _exp_cmode=$4
+  _req_steps=$5
+
+  awk \
+    -v exp_cpu="$_exp_cpu" \
+    -v exp_wincfg="$_exp_wincfg" \
+    -v exp_cmode="$_exp_cmode" \
+    -v req_steps="$_req_steps" '
+    BEGIN {
+      n_req = split(req_steps, req_arr, " ")
+      pa_count = 0
+      bad = 0
+      p4_xray = 0
+      p4_rel = 0
+      first_p3a = 0
+      first_p3b = 0
+      first_p4 = 0
+    }
+    {
+      sub(/\r$/, "", $0)
+      if (index($0, "FATAL: heavy tool invoked during --path-check") > 0) {
+        printf "  heavy tool shim triggered: %s\n", $0
+        bad++
+      }
+      if (substr($0, 1, 12) != "PATH_ACTION|") next
+      pa_count++
+      delete kv
+      n_fields = split($0, fields, "|")
+      for (i = 2; i <= n_fields; i++) {
+        eq = index(fields[i], "=")
+        if (eq > 1) {
+          k = substr(fields[i], 1, eq - 1)
+          v = substr(fields[i], eq + 1)
+          kv[k] = v
+        }
+      }
+      if (kv["script"] == "" || kv["platform"] == "" || kv["cpu"] == "" || kv["phase"] == "" || kv["step"] == "") {
+        printf "  malformed PATH_ACTION schema on line %d: %s\n", NR, $0
+        bad++
+        next
+      }
+      if (kv["status"] == "DEAD" || kv["status"] == "ERROR" || kv["status"] != "ALIVE") {
+        printf "  non-ALIVE PATH_ACTION status (%s) on line %d: %s\n", kv["status"], NR, $0
+        bad++
+      }
+      if (kv["platform"] != "windows") {
+        printf "  platform mismatch (expected windows, got %s): %s\n", kv["platform"], $0
+        bad++
+      }
+      if (exp_cpu != "" && kv["cpu"] != exp_cpu) {
+        printf "  cpu mismatch (expected %s, got %s): %s\n", exp_cpu, kv["cpu"], $0
+        bad++
+      }
+      if (exp_wincfg != "" && kv["win_config"] != exp_wincfg) {
+        printf "  win_config mismatch (expected %s, got %s): %s\n", exp_wincfg, kv["win_config"], $0
+        bad++
+      }
+      ps = kv["phase"] ":" kv["step"]
+      seen_ps[ps] = 1
+      seen_step[kv["step"]] = 1
+
+      if (kv["phase"] == "p3a" && first_p3a == 0) first_p3a = pa_count
+      if (kv["phase"] == "p3b" && first_p3b == 0) first_p3b = pa_count
+      if (kv["phase"] == "p4"  && first_p4  == 0) first_p4  = pa_count
+
+      if (exp_cmode != "" && (ps == "p3a:compile-bootstrap-stage3" || ps == "p3b:compile-bootstrap-stage3-selfhost")) {
+        if (kv["compile_mode"] != exp_cmode) {
+          printf "  compile_mode mismatch on %s (expected %s, got %s)\n", ps, exp_cmode, kv["compile_mode"]
+          bad++
+        }
+      }
+      if (kv["phase"] == "p4" && kv["status"] == "ALIVE") {
+        if (kv["xray"] == "1") p4_xray = 1
+        if (kv["release"] == "1") p4_rel = 1
+      }
+    }
+    END {
+      if (pa_count == 0) {
+        print "  zero PATH_ACTION lines emitted"
+        bad++
+      }
+      for (i = 1; i <= n_req; i++) {
+        tok = req_arr[i]
+        if (tok == "") continue
+        if (index(tok, ":") > 0) {
+          if (!(tok in seen_ps)) {
+            printf "  missing required milestone %s\n", tok
+            bad++
+          }
+        } else {
+          if (!(tok in seen_step)) {
+            printf "  missing required step %s\n", tok
+            bad++
+          }
+        }
+      }
+      if (first_p3a > 0 && first_p3b > 0 && first_p3a >= first_p3b) {
+        print "  phase order violation: p3a must precede p3b"
+        bad++
+      }
+      if (first_p3b > 0 && first_p4 > 0 && first_p3b >= first_p4) {
+        print "  phase order violation: p3b must precede p4"
+        bad++
+      }
+      if (p4_xray != 1) {
+        print "  missing p4 action with xray=1"
+        bad++
+      }
+      if (p4_rel != 1) {
+        print "  missing p4 action with release=1"
+        bad++
+      }
+      exit (bad > 0 ? 1 : 0)
+    }
+  ' "$_out_file"
+}
+
+FULL_PHASE_REQ="init:native-host-match-check p3a:compile-bootstrap-stage3 p3a:hello-smoke p3b:compile-bootstrap-stage3-selfhost p3b:hello-smoke p4:cli-release p4:cli-debug-xray p4:stage5-simple_test_runner p4:stage5-simple_build_runner p4:stage5-simple_mcp_server p4:stage5-simple_lsp_mcp_server p4:smoke-gates"
+
+CHECKS=0
+FAILS=0
+
+run_win_case() {
+  _label=$1
+  _cpu=$2
+  _wincfg_arg=$3
+  _exp_wincfg=$4
+  _cmode_arg=$5
+  _exp_cmode=$6
+
+  CHECKS=$((CHECKS + 1))
+  _out="$WORK_DIR/win_${CHECKS}.txt"
+  (
+    unset SIMPLE_WIN_CONFIG SIMPLE_P3_COMPILE_MODE
+    set -- --simulate-host="windows-$_cpu" --phase=all --path-check
+    [ -n "$_wincfg_arg" ] && set -- "$@" "$_wincfg_arg"
+    [ -n "$_cmode_arg" ] && set -- "$@" "$_cmode_arg"
+    sh "$TARGET_SCRIPT" "$@"
+  ) >"$_out" 2>&1
+  _rc=$?
+  if [ "$_rc" -ne 0 ]; then
+    echo "FAIL [$_label]: exited $_rc"
+    sed 's/^/  /' "$_out"
+    FAILS=$((FAILS + 1))
+    return
+  fi
+  if ! validate_win_actions "$_out" "$_cpu" "$_exp_wincfg" "$_exp_cmode" "$FULL_PHASE_REQ"; then
+    echo "FAIL [$_label]: PATH_ACTION validation failed"
+    FAILS=$((FAILS + 1))
+  fi
+}
+
+for _cpu in x86_64 aarch64; do
+  # Omitting --win-config MUST default to win_config=mingw and compile_mode=shard
+  run_win_case "windows-$_cpu:default-mingw-shard" "$_cpu" "" "mingw" "" "shard"
+  run_win_case "windows-$_cpu:mingw-shard" "$_cpu" "--win-config=mingw" "mingw" "--compile-mode=shard" "shard"
+  run_win_case "windows-$_cpu:msvc-shard" "$_cpu" "--win-config=msvc" "msvc" "--compile-mode=shard" "shard"
+  if [ "$FAST_MODE" -eq 0 ] || [ "$_cpu" = "x86_64" ]; then
+    run_win_case "windows-$_cpu:mingw-file" "$_cpu" "--win-config=mingw" "mingw" "--compile-mode=file" "file"
+    run_win_case "windows-$_cpu:msvc-file" "$_cpu" "--win-config=msvc" "msvc" "--compile-mode=file" "file"
+  fi
+done
+
+# Negative mismatch check on Windows
+CHECKS=$((CHECKS + 1))
+_neg_out="$WORK_DIR/win_neg.txt"
+sh "$TARGET_SCRIPT" --path-check --simulate-host=windows-x86_64 --target=aarch64-pc-windows-gnu >"$_neg_out" 2>&1
+_neg_rc=$?
+if [ "$_neg_rc" -eq 0 ] || ! grep -q "STAGE3-E-NATIVE-HOST-MISMATCH" "$_neg_out"; then
+  echo "FAIL [windows-negative-mismatch]: expected non-zero STAGE3-E-NATIVE-HOST-MISMATCH (rc=$_neg_rc)"
+  FAILS=$((FAILS + 1))
+fi
+
+# Static verification of build-phase3-phase4.bat contract
+if [ -f "$BAT_SCRIPT" ]; then
+  CHECKS=$((CHECKS + 1))
+  _bat_norm="$WORK_DIR/bat_norm.txt"
+  tr -d '\r' < "$BAT_SCRIPT" > "$_bat_norm"
+  _bat_bad=0
+  if ! grep -Eq 'if not defined WIN_CFG set "WIN_CFG=mingw"|WIN_CONFIG=mingw' "$_bat_norm"; then
+    echo "FAIL [build-phase3-phase4.bat]: missing default mingw config assignment"
+    _bat_bad=1
+  fi
+  if ! grep -Eq 'WIN_CFG=msvc|--win-config=msvc|--msvc' "$_bat_norm"; then
+    echo "FAIL [build-phase3-phase4.bat]: missing msvc config support"
+    _bat_bad=1
+  fi
+  if ! grep -Eq 'build-phase3-phase4\.sh.*%\*' "$_bat_norm"; then
+    echo "FAIL [build-phase3-phase4.bat]: missing argument forwarding (%*) to build-phase3-phase4.sh"
+    _bat_bad=1
+  fi
+  [ "$_bat_bad" -eq 0 ] || FAILS=$((FAILS + 1))
+
+  # Native execution on real Windows hosts
+  if [ "${OS:-}" = "Windows_NT" ] && command -v cmd.exe >/dev/null 2>&1; then
+    CHECKS=$((CHECKS + 1))
+    _bat_out="$WORK_DIR/bat_exec_mingw.txt"
+    _bat_win_path="$BAT_SCRIPT"
+    if command -v cygpath >/dev/null 2>&1; then
+      _bat_win_path=$(cygpath -w "$BAT_SCRIPT")
+    fi
+    (unset SIMPLE_WIN_CONFIG; MSYS_NO_PATHCONV=1 cmd.exe /c "\"$_bat_win_path\" --simulate-host=windows-x86_64 --phase=all --path-check") >"$_bat_out" 2>&1
+    _bat_rc=$?
+    if [ "$_bat_rc" -ne 0 ] || ! validate_win_actions "$_bat_out" "x86_64" "mingw" "shard" "$FULL_PHASE_REQ"; then
+      echo "FAIL [build-phase3-phase4.bat:native-exec]: native cmd.exe invocation failed (rc=$_bat_rc)"
+      sed 's/^/  /' "$_bat_out"
+      FAILS=$((FAILS + 1))
+    fi
+  fi
+elif [ "$ROOT_DIR" = "$(CDPATH= cd -- "$(dirname -- "$0")/../.." 2>/dev/null && pwd -P)" ]; then
+  CHECKS=$((CHECKS + 1))
+  echo "FAIL [build-phase3-phase4.bat]: missing $BAT_SCRIPT"
+  FAILS=$((FAILS + 1))
+fi
+
+if [ "$CHECKS" -eq 0 ]; then
+  echo "ERROR — nothing was checked (0 windows path-check cases executed)"
+  exit 2
+fi
+
+if [ "$FAILS" -gt 0 ]; then
+  echo "FAIL — windows bootstrap path-alive matrix failed ($FAILS/$CHECKS failed)"
+  exit 1
+fi
+
+echo "PASS — windows bootstrap path-alive matrix verified ($CHECKS checks)"
+exit 0

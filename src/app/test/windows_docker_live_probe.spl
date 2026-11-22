@@ -1,0 +1,94 @@
+# Windows Docker process-provider live probe.
+#
+# Drives WindowsDockerRuntimeProviderV1 (live, not scripted) through
+# prepare_pod -> create -> start -> wait -> logs -> destroy for one
+# `cmd.exe /c echo` workload in a process-isolated Windows container, and
+# exits 0 only when every step is ok, the logs carry the marker and the wait
+# exit code equals the requested one. Pins come from the environment; the
+# deployment owner (or scripts/check/check-windows-docker-live-probe.shs)
+# supplies them from the observed engine and the pulled image.
+#
+# Live capture needs the native C provider: under the interpreter/JIT the
+# provider refuses before any Docker effect, which this probe reports as-is.
+use std.io_runtime.{exit, env_get}
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.common.contracts.container.runtime_v1.RuntimeOperationV1
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.*
+use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.WindowsDockerRuntimeProviderV1
+
+fn pin(name: text) -> text:
+    val value = env_get(name)
+    if value == "":
+        print "windows-docker-live-probe: missing " + name
+        exit(2)
+    value
+
+fn report(step: text, op: RuntimeOperationV1) -> bool:
+    val head = "step=" + step + " status=" + op.status + " phase=" + op.state.phase
+    print head + " exit=" + op.exit_code.to_text() + " reason=" + op.reason
+    op.status == "ok"
+
+fn main():
+    val marker = "simple-wdp-ok"
+    val wanted_exit = if env_get("SIMPLE_WDP_EXIT") == "": "0" else: env_get("SIMPLE_WDP_EXIT")
+    val policy = WindowsDockerPolicyV1(docker_executable: pin("SIMPLE_WDP_DOCKER"),
+        endpoint: "npipe:////./pipe/docker_engine", engine_id: pin("SIMPLE_WDP_ENGINE_ID"),
+        node_boot_id: "probe-boot", provider_generation: 1,
+        expected_kernel_version: pin("SIMPLE_WDP_KERNEL"),
+        image_os_version: pin("SIMPLE_WDP_IMAGE_OS"),
+        expected_image_id: pin("SIMPLE_WDP_IMAGE_ID"),
+        timeout_ms: 120000, max_output_bytes: 65536,
+        system_root: "C:\\Windows", temp_directory: pin("SIMPLE_WDP_TEMP"))
+    val request = WindowsDockerRequestV1(pod_uid: "wdp-probe", attempt: 1, operation_id: "wdp-probe-op",
+        image: pin("SIMPLE_WDP_IMAGE"),
+        command: ["C:\\Windows\\System32\\cmd.exe", "/c", "echo", marker, "&", "exit", "/b", wanted_exit],
+        args: [], cpu_count: 1, memory_limit_bytes: 536870912, network: "none")
+    val invalid = windows_docker_request_reason_v1(policy, request)
+    if invalid != "":
+        print "windows-docker-live-probe: request refused: " + invalid
+        exit(3)
+    val digest = windows_docker_request_digest_v1(policy, request).unwrap()
+    val now_ms = time_sample_unix_micros_or_failure() / 1000
+    var provider = WindowsDockerRuntimeProviderV1.new(policy)
+    match container_effect_deadline_v1(digest, request.operation_id, ["create", "start"], now_ms + 600000):
+        case Ok(deadline):
+            match provider.set_launch_deadline_v1(deadline):
+                case Ok(_): ()
+                case Err(reason):
+                    print "windows-docker-live-probe: launch deadline refused: " + reason
+                    exit(3)
+        case Err(reason):
+            print "windows-docker-live-probe: launch deadline invalid: " + reason
+            exit(3)
+    val probe = provider.probe()
+    print "probe healthy=" + probe.healthy.to_text() + " launch_capable=" + probe.launch_capable.to_text() + " reason=" + probe.reason
+    var ok = report("prepare", provider.prepare_pod(request))
+    if ok: ok = report("create", provider.create(request))
+    var created = ok
+    if ok: ok = report("start", provider.start(request))
+    var exit_text = ""
+    if ok:
+        val waited = provider.wait(request)
+        ok = report("wait", waited)
+        exit_text = waited.exit_code.to_text()
+    var logs_text = ""
+    if ok:
+        val logs = provider.logs(request)
+        ok = report("logs", logs)
+        logs_text = logs.stdout
+        print "logs=" + logs_text.trim()
+    if created:
+        val removed = provider.destroy(request, true)
+        if not report("destroy", removed): ok = false
+    if ok and not logs_text.contains(marker):
+        print "windows-docker-live-probe: FAIL marker absent from logs"
+        ok = false
+    if ok and exit_text != wanted_exit:
+        print "windows-docker-live-probe: FAIL exit " + exit_text + " != " + wanted_exit
+        ok = false
+    if ok:
+        print "windows-docker-live-probe: PASS exit=" + exit_text
+        exit(0)
+    print "windows-docker-live-probe: FAIL"
+    exit(1)
