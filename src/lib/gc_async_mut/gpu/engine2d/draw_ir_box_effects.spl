@@ -378,7 +378,9 @@ fn _e2d_box_shadow_call_safe(
     height: i64,
     offset_x: i64,
     offset_y: i64,
-    blur: i64
+    blur: i64,
+    frame_w: i64,
+    frame_h: i64
 ) -> bool:
     if (not _e2d_box_i32(x) or not _e2d_box_i32(y) or
         not _e2d_box_i32(width) or not _e2d_box_i32(height) or
@@ -400,6 +402,25 @@ fn _e2d_box_shadow_call_safe(
         not _e2d_box_i32(right) or not _e2d_box_i32(bottom) or
         expanded_width <= 0 or expanded_height <= 0):
         return false
+    # The painter reads and writes only the part of the shadow inside the
+    # frame, and its blur profiles are O(width + height). With a known frame
+    # the bound is that part, so a box far taller than the frame (a long page
+    # panel: 852 x 16939 CSS px is 231M px at device scale 4) keeps its shadow.
+    if frame_w > 0 and frame_h > 0:
+        if (expanded_width > _E2D_BOX_MAX_TRANSIENT_PIXELS or
+            expanded_height > _E2D_BOX_MAX_TRANSIENT_PIXELS):
+            return false
+        # The painter pads by 2 * blur a side.
+        val reach_left = if left - blur > 0: left - blur else: 0
+        val reach_top = if top - blur > 0: top - blur else: 0
+        val reach_right = if right + blur < frame_w: right + blur else: frame_w
+        val reach_bottom = if bottom + blur < frame_h: bottom + blur else: frame_h
+        if reach_right <= reach_left or reach_bottom <= reach_top:
+            return true
+        return (
+            (reach_right - reach_left) * (reach_bottom - reach_top) <=
+            _E2D_BOX_MAX_TRANSIENT_PIXELS
+        )
     val expanded_pixels = expanded_width * expanded_height
     (
         expanded_pixels > 0 and
@@ -411,7 +432,9 @@ fn engine2d_draw_ir_typed_shadow_geometry_safe(
     x: i32,
     y: i32,
     width: i32,
-    height: i32
+    height: i32,
+    frame_w: i32 = 0,
+    frame_h: i32 = 0
 ) -> bool:
     if width <= 0 or height <= 0:
         return false
@@ -431,7 +454,9 @@ fn engine2d_draw_ir_typed_shadow_geometry_safe(
                     shadow_height,
                     layer.offset_x as i64,
                     layer.offset_y as i64,
-                    layer.blur_radius as i64
+                    layer.blur_radius as i64,
+                    frame_w as i64,
+                    frame_h as i64
                 ):
                     return false
         elif layer.kind == "inset":
@@ -460,7 +485,9 @@ fn _e2d_box_legacy_shadow(
     x: i32,
     y: i32,
     width: i32,
-    height: i32
+    height: i32,
+    frame_w: i32,
+    frame_h: i32
 ) -> Engine2dDrawIrLegacyShadow:
     val value = _e2d_box_style_value(style, "box-shadow")
     if value == "" or value == "none":
@@ -503,7 +530,9 @@ fn _e2d_box_legacy_shadow(
         height as i64,
         offset_x,
         offset_y,
-        blur
+        blur,
+        frame_w as i64,
+        frame_h as i64
     )
     Engine2dDrawIrLegacyShadow(
         visible: visible,
@@ -519,9 +548,12 @@ fn engine2d_draw_ir_legacy_shadow_safe(
     x: i32,
     y: i32,
     width: i32,
-    height: i32
+    height: i32,
+    frame_w: i32 = 0,
+    frame_h: i32 = 0
 ) -> bool:
-    val shadow = _e2d_box_legacy_shadow(style, x, y, width, height)
+    val shadow = _e2d_box_legacy_shadow(
+        style, x, y, width, height, frame_w, frame_h)
     shadow.safe
 
 fn engine2d_draw_ir_render_legacy_shadow(
@@ -530,15 +562,23 @@ fn engine2d_draw_ir_render_legacy_shadow(
     x: i32,
     y: i32,
     width: i32,
-    height: i32
+    height: i32,
+    frame_w: i32 = 0,
+    frame_h: i32 = 0,
+    hole_x: i32 = 0,
+    hole_y: i32 = 0,
+    hole_w: i32 = 0,
+    hole_h: i32 = 0
 ) -> Engine2D:
     var eng = engine
-    val shadow = _e2d_box_legacy_shadow(style, x, y, width, height)
+    val shadow = _e2d_box_legacy_shadow(
+        style, x, y, width, height, frame_w, frame_h)
     if shadow.visible and shadow.safe:
-        eng.draw_shadow_rect(
+        eng.draw_shadow_rect_outside(
             x, y, width, height,
             shadow.offset_x, shadow.offset_y,
-            shadow.blur_radius, shadow.color)
+            shadow.blur_radius, shadow.color,
+            hole_x, hole_y, hole_w, hole_h)
     eng
 
 fn engine2d_draw_ir_render_typed_outer_shadows(
@@ -547,7 +587,13 @@ fn engine2d_draw_ir_render_typed_outer_shadows(
     x: i32,
     y: i32,
     width: i32,
-    height: i32
+    height: i32,
+    frame_w: i32 = 0,
+    frame_h: i32 = 0,
+    hole_x: i32 = 0,
+    hole_y: i32 = 0,
+    hole_w: i32 = 0,
+    hole_h: i32 = 0
 ) -> Engine2D:
     var eng = engine
     var index = layers.len()
@@ -564,8 +610,9 @@ fn engine2d_draw_ir_render_typed_outer_shadows(
                 _e2d_box_shadow_call_safe(
                     shadow_x, shadow_y, shadow_width, shadow_height,
                     layer.offset_x as i64, layer.offset_y as i64,
-                    layer.blur_radius as i64)):
-                eng.draw_shadow_rect(
+                    layer.blur_radius as i64,
+                    frame_w as i64, frame_h as i64)):
+                eng.draw_shadow_rect_outside(
                     shadow_x as i32,
                     shadow_y as i32,
                     shadow_width as i32,
@@ -573,7 +620,8 @@ fn engine2d_draw_ir_render_typed_outer_shadows(
                     layer.offset_x,
                     layer.offset_y,
                     layer.blur_radius,
-                    layer.color
+                    layer.color,
+                    hole_x, hole_y, hole_w, hole_h
                 )
     eng
 
@@ -581,10 +629,12 @@ fn engine2d_draw_ir_render_typed_outer_shadows(
 # legacy aggregate when the typed list was not admitted.
 fn engine2d_draw_ir_has_outer_shadow(
     layers: [Engine2dDrawIrBoxShadowLayer], typed_admitted: bool,
-    style: [DrawIrStyleProp], x: i32, y: i32, width: i32, height: i32
+    style: [DrawIrStyleProp], x: i32, y: i32, width: i32, height: i32,
+    frame_w: i32 = 0, frame_h: i32 = 0
 ) -> bool:
     if not typed_admitted:
-        val shadow = _e2d_box_legacy_shadow(style, x, y, width, height)
+        val shadow = _e2d_box_legacy_shadow(
+            style, x, y, width, height, frame_w, frame_h)
         return shadow.visible and shadow.safe
     for layer in layers:
         if layer.kind == "outer" and ((layer.color >> 24) & 0xFFu32) != 0u32:
@@ -631,6 +681,19 @@ fn engine2d_draw_ir_shadow_knockout_pixels(
                 col = col + 1
         row = row + 1
     out
+
+# The rows [y0, y1) of the border box (y, width, height) below its top corner
+# bands and above its bottom ones, radii clamped as the knockout above clamps
+# them: every pixel of those rows is inside the rounded box, and the knockout
+# restores each of them whole.
+fn engine2d_draw_ir_box_straight_rows(
+    y: i32, width: i32, height: i32, corners: Engine2dDrawIrCornerRadii
+) -> [i32]:
+    val tl = _e2d_box_corner_radius(corners.top_left, width, height)
+    val tr = _e2d_box_corner_radius(corners.top_right, width, height)
+    val br = _e2d_box_corner_radius(corners.bottom_right, width, height)
+    val bl = _e2d_box_corner_radius(corners.bottom_left, width, height)
+    [y + (if tl > tr: tl else: tr), y + height - (if bl > br: bl else: br)]
 
 # a * cov / 256 + b * (256 - cov) / 256 per ARGB channel, rounded.
 # @allow(primitive_api): per-pixel ARGB mix by 8.8 coverage, shared with the raster knockout

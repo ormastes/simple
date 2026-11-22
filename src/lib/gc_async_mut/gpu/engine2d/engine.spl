@@ -18,6 +18,7 @@
 use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_identity}
 use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba, blend}
 use std.gc_async_mut.gpu.engine2d.css_opacity_group.{css_opacity_group_composite_region, css_opacity_group_alpha8_milli}
+use std.gc_async_mut.gpu.engine2d.backend_emu_adv.{emu_draw_shadow_rect_outside}
 use std.gc_async_mut.gpu.engine2d.helpers.lcd_s32_tables.{engine2d_lcd_s32_tables}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_text_bg,
@@ -4274,6 +4275,23 @@ class Engine2D with DrawIrRenderTarget:
             self.backend = vulkan_typed
         else:
             emu_draw_shadow_rect(self.backend, x, y, w, h, offset_x, offset_y, blur_r, color)
+
+    # draw_shadow_rect with the hole (hx, hy, hw, hh) left as it is. The
+    # host painter skips the hole; a device lane paints the whole shadow,
+    # which callers accept because they pass only a hole the box paint
+    # repaints opaque or restores.
+    me draw_shadow_rect_outside(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32, hx: i32, hy: i32, hw: i32, hh: i32):
+        if val Some(vg) = self.virtio_gpu_backend:
+            emu_draw_shadow_rect_outside(self.backend, x, y, w, h, offset_x, offset_y, blur_r, color, hx, hy, hw, hh)
+        elif val Some(bm) = self.baremetal_backend:
+            emu_draw_shadow_rect_outside(self.backend, x, y, w, h, offset_x, offset_y, blur_r, color, hx, hy, hw, hh)
+        elif self.selected_backend_name == "cuda":
+            self.draw_shadow_rect(x, y, w, h, offset_x, offset_y, blur_r, color)
+        elif val Some(vulkan) = self._vulkan_primitive_target():
+            self.draw_shadow_rect(x, y, w, h, offset_x, offset_y, blur_r, color)
+        else:
+            emu_draw_shadow_rect_outside(self.backend, x, y, w, h, offset_x, offset_y, blur_r, color, hx, hy, hw, hh)
+
 
     me draw_image_transform(dst_x: i32, dst_y: i32, src_w: i32, src_h: i32, a: i32, b: i32, c: i32, d: i32, tx: i32, ty: i32, pixels: [u32]):
         if val Some(vg) = self.virtio_gpu_backend:

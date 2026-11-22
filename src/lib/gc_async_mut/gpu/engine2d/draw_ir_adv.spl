@@ -58,6 +58,7 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_box_effects.{
     engine2d_draw_ir_has_inset_shadow,
     engine2d_draw_ir_has_outer_shadow,
     engine2d_draw_ir_shadow_knockout_pixels,
+    engine2d_draw_ir_box_straight_rows,
     engine2d_backdrop_color_matrices,
     engine2d_backdrop_color_filter_pixels,
     engine2d_draw_ir_legacy_shadow_safe,
@@ -1124,7 +1125,7 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
     var shadow_admitted = (
         typed_shadows.schema_present and typed_shadows.valid and
         engine2d_draw_ir_typed_shadow_geometry_safe(
-            typed_shadows.layers, x, y, w, h)
+            typed_shadows.layers, x, y, w, h, fb_w, fb_h)
     )
     var corner_admitted = typed_corners.valid
     val decoded_uniform_radius = engine2d_draw_ir_clamp_uniform_radius(
@@ -1158,7 +1159,8 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
     val knockout = (
         ((command.color >> 24) & 0xFFu32) != 0xFFu32 and
         engine2d_draw_ir_has_outer_shadow(
-            typed_shadows.layers, shadow_admitted, style, x, y, w, h)
+            typed_shadows.layers, shadow_admitted, style, x, y, w, h,
+            fb_w, fb_h)
     )
     val kx = if x > 0: x else: 0
     val ky = if y > 0: y else: 0
@@ -1196,15 +1198,36 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
     var knockout_pre: [u32] = []
     if knockout and kw > 0 and kh > 0:
         knockout_pre = _engine2d_read_pixels_region(eng, kx, ky, kw, kh).pixels
+    # Outer shadows skip the border-box rows outside its corner bands that
+    # the box provably replaces: the knockout restores them, or an opaque
+    # plain colour fill (no gradient, layer list, glass or nonuniform corner
+    # path) covers them. A box taller than the frame then composites only
+    # its falloff bands, not its whole in-frame interior.
+    var hole_rows: [i32] = []
+    if knockout_pre.len() > 0:
+        hole_rows = engine2d_draw_ir_box_straight_rows(y, w, h, effective_corners)
+    elif (((command.color >> 24) & 0xFFu32) == 0xFFu32 and not typed_nonuniform and
+        _engine2d_draw_ir_style_value(style, "background-gradient-layer-geometry") == "" and
+        _engine2d_draw_ir_gradient_stop_count(style) < 2 and
+        not _engine2d_draw_ir_style_value(style, "background-image").starts_with("linear-gradient(") and
+        _engine2d_draw_ir_style_value(style, "backdrop-filter-capability") == "" and
+        _engine2d_draw_ir_style_value(style, "wm-material-request") == ""):
+        val fill_r = if radius > 0: radius else: 0
+        hole_rows = [y + fill_r, y + h - fill_r]
+    val hole_y = if hole_rows.len() == 2: hole_rows[0] else: 0
+    val hole_h = if hole_rows.len() == 2 and hole_rows[1] > hole_rows[0]: hole_rows[1] - hole_rows[0] else: 0
+    val hole_w = if hole_h > 0: w else: 0
     if shadow_admitted:
         eng = engine2d_draw_ir_render_typed_outer_shadows(
-            eng, typed_shadows.layers, x, y, w, h)
+            eng, typed_shadows.layers, x, y, w, h, fb_w, fb_h,
+            x, hole_y, hole_w, hole_h)
     else:
         # Absent, malformed, partial, or unsafe typed shadows fall back once.
         # The Engine2D effect owner validates legacy geometry before drawing;
         # an unsafe legacy aggregate is an intentional no-op.
         eng = engine2d_draw_ir_render_legacy_shadow(
-            eng, style, x, y, w, h)
+            eng, style, x, y, w, h, fb_w, fb_h,
+            x, hole_y, hole_w, hole_h)
     if knockout_pre.len() > 0:
         val knockout_post = _engine2d_read_pixels_region(eng, kx, ky, kw, kh).pixels
         eng.draw_image(kx, ky, kw, kh, engine2d_draw_ir_shadow_knockout_pixels(
@@ -1759,7 +1782,9 @@ fn _engine2d_draw_ir_fresh_device_command_supported(command: DrawIrCommand, imag
                 command.x,
                 command.y,
                 command.width,
-                command.height)
+                command.height,
+                width,
+                height)
         )
         if (typed_shadow_admitted and
             engine2d_draw_ir_has_inset_shadow(typed_shadows.layers) and
@@ -1775,7 +1800,9 @@ fn _engine2d_draw_ir_fresh_device_command_supported(command: DrawIrCommand, imag
                 command.x,
                 command.y,
                 command.width,
-                command.height)):
+                command.height,
+                width,
+                height)):
             return false
         val alpha = (command.color >> 24) & 0xFFu32
         val pixel_work = command.width.to_i64() * command.height.to_i64()

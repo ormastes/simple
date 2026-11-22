@@ -681,9 +681,18 @@ impl RenderBackend for SoftwareBackend:
         if w <= 0 or h <= 0:
             return
         val pixels_len = pixels.len()
-        val slow_checked = self.clip_enabled or self.mask_buf.len() > 0
+        val mask_active = self.mask_buf.len() > 0
+        # A span write into the `self.buf` FIELD re-materializes the whole
+        # surface per call in the interpreter (1.4 ms a row at 3600 x 3040),
+        # and the clipped path used to go per pixel (22 us a pixel). Without a
+        # mask, the clip rect is a span clip, so every row is one span written
+        # into one local surface that is stored back once: a 2896-row band
+        # went from 4.2 s to 5 ms, a clipped 3600 x 3040 one from 239 s.
+        var buf: [u32] = []
+        if not mask_active:
+            buf = self.buf
         var row = 0
-        # cpu-lane-loop-ok: one iteration per source image row while blitting; each row body delegates to sw_copy_raw_span, so the per-pixel work is already bulk
+        # cpu-lane-loop-ok: one iteration per source image row while blitting; each unmasked row is one bulk span
         while row < h:
             val py = y + row
             if py >= 0 and py < self.h:
@@ -699,17 +708,33 @@ impl RenderBackend for SoftwareBackend:
                     count = self.w - start_x
                 if count > 0 and src_row_base + src_x + count <= pixels_len:
                     val src_off = src_row_base + src_x
-                    if slow_checked:
+                    if mask_active:
                         var col = 0
-                        # cpu-lane-loop-ok: clipped/masked slow path only (slow_checked): per-pixel sw_set_pixel is required because clip and mask tests are per-pixel predicates
+                        # cpu-lane-loop-ok: masked slow path only: per-pixel sw_set_pixel is required because the mask test is a per-pixel predicate
                         while col < count:
                             self.sw_set_pixel(start_x + col, py, pixels[src_off + col])
                             col = col + 1
                     else:
-                        val dst_off = py * self.w + start_x
-                        self.sw_copy_raw_span(dst_off, pixels, src_off, count)
-                        self.mark_span_dirty(start_x, py, count)
+                        var cs = start_x
+                        var ce = start_x + count
+                        if self.clip_enabled:
+                            if py < self.clip_y or py >= self.clip_y + self.clip_h:
+                                ce = cs
+                            if cs < self.clip_x:
+                                cs = self.clip_x
+                            if ce > self.clip_x + self.clip_w:
+                                ce = self.clip_x + self.clip_w
+                        if ce > cs:
+                            val dst_off = py * self.w + cs
+                            val safe_count = _span_copy_safe_count(buf.len(), dst_off, pixels_len, src_off + cs - start_x, ce - cs)
+                            if safe_count > 0:
+                                if self.native_simd_spans and native_pixel_rows_enabled():
+                                    record_simd_copy_hit()
+                                buf.write_span(pixels, dst_off as i64, (src_off + cs - start_x) as i64, safe_count as i64)
+                            self.mark_span_dirty(cs, py, ce - cs)
             row = row + 1
+        if not mask_active:
+            self.buf = buf
 
     me blit_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
         """Compatibility alias used by SIMD integration tests."""
