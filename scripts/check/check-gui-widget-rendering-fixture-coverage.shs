@@ -12,6 +12,7 @@ OUT_ENV="$BUILD_DIR/evidence.env"
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 
 python3 - <<'PY' >"$OUT_ENV"
+import sys
 from pathlib import Path
 import re
 
@@ -31,9 +32,13 @@ SPEC_ROOTS.extend(sorted((ROOT / "test/01_unit/app/ui").glob("widget*_spec.spl")
 
 def rel(path: Path) -> str:
     try:
-        return str(path.relative_to(ROOT))
+        return path.relative_to(ROOT).as_posix()
     except ValueError:
-        return str(path)
+        return path.as_posix()
+
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(newline="\n")
 
 
 def emit(key: str, value) -> None:
@@ -272,28 +277,43 @@ emit("gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_classes", "
 emit("gui_widget_rendering_fixture_coverage_renderdoc_fixture_widget_features", ",".join(covered_renderdoc_fixture_features))
 PY
 
-status="$(sed -n 's/^gui_widget_rendering_fixture_coverage_status=//p' "$OUT_ENV" | tail -n 1)"
-reason="$(sed -n 's/^gui_widget_rendering_fixture_coverage_reason=//p' "$OUT_ENV" | tail -n 1)"
+python3 - "$OUT_ENV" "$REPORT_PATH" <<'PY_REPORT'
+import sys
+from pathlib import Path
 
-{
-    echo "# GUI Widget Rendering Fixture Coverage"
-    echo
-    echo "- status: $status"
-    echo "- reason: $reason"
-    echo "- widget kinds: $(sed -n 's/^gui_widget_rendering_fixture_coverage_widget_kind_count=//p' "$OUT_ENV" | tail -n 1)"
-    echo "- renderer dispatch covered: $(sed -n 's/^gui_widget_rendering_fixture_coverage_dispatch_covered_count=//p' "$OUT_ENV" | tail -n 1)"
-    echo "- renderer class markers covered: $(sed -n 's/^gui_widget_rendering_fixture_coverage_renderer_class_covered_count=//p' "$OUT_ENV" | tail -n 1)"
-    echo "- spec markers covered: $(sed -n 's/^gui_widget_rendering_fixture_coverage_spec_covered_count=//p' "$OUT_ENV" | tail -n 1)"
-    echo "- render fixture witnesses covered: $(sed -n 's/^gui_widget_rendering_fixture_coverage_render_fixture_covered_count=//p' "$OUT_ENV" | tail -n 1)"
-    echo "- RenderDoc HTML fixture widgets covered: $(sed -n 's/^gui_widget_rendering_fixture_coverage_renderdoc_fixture_covered_count=//p' "$OUT_ENV" | tail -n 1)"
-    echo "- RenderDoc HTML fixture features covered: $(sed -n 's/^gui_widget_rendering_fixture_coverage_renderdoc_fixture_feature_covered_count=//p' "$OUT_ENV" | tail -n 1)"
-    echo
-    echo "## Raw Evidence"
-    sed 's/^/- /' "$OUT_ENV"
-} >"$REPORT_PATH"
+out_env = Path(sys.argv[1])
+report_path = Path(sys.argv[2])
+raw = out_env.read_text(encoding="utf-8")
+vals = {}
+for line in raw.splitlines():
+    if "=" in line:
+        k, v = line.split("=", 1)
+        vals[k] = v
 
-cat "$OUT_ENV"
+def g(k: str) -> str:
+    return vals.get(k, "")
 
-if [ "$status" != "pass" ]; then
-    exit 1
-fi
+status = g("gui_widget_rendering_fixture_coverage_status")
+reason = g("gui_widget_rendering_fixture_coverage_reason")
+lines = [
+    "# GUI Widget Rendering Fixture Coverage",
+    "",
+    f"- status: {status}",
+    f"- reason: {reason}",
+    f"- widget kinds: {g('gui_widget_rendering_fixture_coverage_widget_kind_count')}",
+    f"- renderer dispatch covered: {g('gui_widget_rendering_fixture_coverage_dispatch_covered_count')}",
+    f"- renderer class markers covered: {g('gui_widget_rendering_fixture_coverage_renderer_class_covered_count')}",
+    f"- spec markers covered: {g('gui_widget_rendering_fixture_coverage_spec_covered_count')}",
+    f"- render fixture witnesses covered: {g('gui_widget_rendering_fixture_coverage_render_fixture_covered_count')}",
+    f"- RenderDoc HTML fixture widgets covered: {g('gui_widget_rendering_fixture_coverage_renderdoc_fixture_covered_count')}",
+    f"- RenderDoc HTML fixture features covered: {g('gui_widget_rendering_fixture_coverage_renderdoc_fixture_feature_covered_count')}",
+    "",
+    "## Raw Evidence",
+]
+for raw_line in raw.splitlines():
+    lines.append(f"- {raw_line}")
+report_path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+sys.stdout.write(raw)
+if status != "pass":
+    raise SystemExit(1)
+PY_REPORT

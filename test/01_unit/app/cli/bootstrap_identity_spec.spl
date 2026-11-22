@@ -1,0 +1,75 @@
+# @cover src/app/cli/bootstrap_identity.spl 100%
+# @cover src/app/cli/bootstrap_native_worker_runtime.spl 100%
+"""
+## Purpose and audience
+Verifies `VERSION` parity of `app.cli.bootstrap_identity` and all exported
+helpers in `app.cli.bootstrap_native_worker_runtime`: Rust bootstrap seed path
+detection, candidate priority fallback across unavailable or seed runtimes,
+and worker preflight exit codes.
+
+## Operator workflow
+```sh
+SIMPLE_LIB=src bin/simple test test/01_unit/app/cli/bootstrap_identity_spec.spl --mode=interpreter
+```
+"""
+
+use app.cli.bootstrap_identity.{bootstrap_version}
+use app.cli.bootstrap_native_worker_runtime.{
+    native_build_runtime_is_rust_seed,
+    native_build_select_worker_runtime,
+    native_build_worker_preflight_code
+}
+use std.io_runtime.{file_read}
+use std.spec.*
+
+describe "bootstrap identity helpers":
+
+    it "keeps bootstrap_version synchronized with VERSION":
+        # @req REQ-CLI-BOOTSTRAP-IDENTITY-001
+        step("Read repository VERSION and compare with bootstrap_version()")
+        val expected_version = file_read("VERSION").trim()
+        expect(bootstrap_version()).to_equal(expected_version)
+
+    it "detects Rust bootstrap seed binaries across platforms and path forms":
+        # @req REQ-CLI-BOOTSTRAP-IDENTITY-002
+        step("Verify empty, relative, Unix, and Windows bootstrap seed paths")
+        expect(native_build_runtime_is_rust_seed("")).to_equal(false)
+        expect(native_build_runtime_is_rust_seed("bin/release/x86_64/simple")).to_equal(false)
+        expect(native_build_runtime_is_rust_seed("target/bootstrap/simple")).to_equal(true)
+        expect(native_build_runtime_is_rust_seed("build/target/bootstrap/simple.exe")).to_equal(true)
+        expect(native_build_runtime_is_rust_seed("C:\\repo\\target\\bootstrap\\simple.exe")).to_equal(true)
+        expect(native_build_runtime_is_rust_seed("src/compiler_rust/target/release/simple")).to_equal(true)
+
+    it "falls back across unavailable or seed candidates in priority order":
+        # @req REQ-CLI-BOOTSTRAP-IDENTITY-003
+        step("Skip seed explicit_binary and select valid explicit_bin")
+        val second = native_build_select_worker_runtime(
+            "target/bootstrap/simple", true,
+            "bin/release/x86_64/simple", true,
+            "build/bootstrap/stage3/simple", true,
+        )
+        expect(second).to_equal("bin/release/x86_64/simple")
+
+        step("Skip unavailable or seed higher candidates and fall back to invoking_exe")
+        val third = native_build_select_worker_runtime(
+            "bin/simple", false,
+            "src/compiler_rust/target/bootstrap/simple", true,
+            "build/bootstrap/stage3/simple", true,
+        )
+        expect(third).to_equal("build/bootstrap/stage3/simple")
+
+        step("Return empty when the invoking runtime is itself a Rust seed")
+        val none = native_build_select_worker_runtime(
+            "", true,
+            "target/bootstrap/simple", true,
+            "src/compiler_rust/target/bootstrap/simple.exe", true,
+        )
+        expect(none).to_equal("")
+
+    it "returns zero preflight code only for valid non-seed runtimes":
+        # @req REQ-CLI-BOOTSTRAP-IDENTITY-004
+        step("Check fail-closed exit code for empty and Rust seed runtimes")
+        expect(native_build_worker_preflight_code("")).to_equal(1)
+        expect(native_build_worker_preflight_code("target/bootstrap/simple")).to_equal(1)
+        expect(native_build_worker_preflight_code("src\\compiler_rust\\target\\bootstrap\\simple.exe")).to_equal(1)
+        expect(native_build_worker_preflight_code("bin/release/x86_64/simple")).to_equal(0)

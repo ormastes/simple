@@ -1,0 +1,76 @@
+"""
+## Purpose and audience
+Purpose: ROB-USE-01. The driver's typecheck consumer must hand the must_use
+pass the project's whole HIR module set, so a discarded Result from an IMPORTED
+function is reported (it was dormant while only one module was passed), and a
+module's findings are reported once, under that module only.
+Audience: compiler engineers maintaining must_use enforcement.
+## Operator workflow
+Run with the test runner and read the per-scenario verdict lines.
+"""
+# @req: ROB-USE-01
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule, HirImport, HirImportItem, SymbolId}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.config.{Logger}
+use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
+use compiler.driver.hir_typecheck_consumer_v1.{collect_module_typecheck_receipt_v1}
+
+fn lower(src: text, name: text) -> HirModule:
+    val parsed = parse_full_frontend(src, name + ".spl", name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(name + ".spl")
+    lowering.lower_module(parsed)
+
+# `m0` calls `risky()` (declared in `util`), importing it from "util".
+fn caller_module() -> HirModule:
+    var ha = lower("fn risky():\n    val q = 1\nfn caller():\n    risky()\n", "m0")
+    var kept: Dict<SymbolId, HirFunction> = {}
+    for fkey in ha.functions.keys():
+        if ha.functions[fkey].name != "risky":
+            kept[fkey] = ha.functions[fkey]
+    ha.functions = kept
+    ha.imports = [HirImport(module_path: "util", items: [HirImportItem(name: "risky", alias: nil, resolved: nil)], is_lazy: false, span: Span.empty())]
+    ha
+
+fn must_use_msgs(msgs: [text]) -> [text]:
+    var out: [text] = []
+    for m in msgs:
+        if m.contains("[must-use "):
+            out = out.push(m)
+    out
+
+describe "ROB-USE-01 driver passes the project module set to must_use":
+    it "an imported Result-returning callee is flagged when the project set is supplied":
+        val util = lower("fn risky() -> Result<i64, text>:\n    Ok(1)\n", "util")
+        val m0 = caller_module()
+        val project: Dict<text, HirModule> = {"m0": m0, "util": util}
+        val receipt = collect_module_typecheck_receipt_v1("m0", m0, TypecheckPassSeverity.Deny, false, false, project)
+        val found = must_use_msgs(receipt.errors)
+        expect(found.len()).to_equal(1)
+        expect(found[0].contains("SPL-USE-001")).to_equal(true)
+        expect(found[0].contains("`risky`")).to_equal(true)
+
+    it "the same module alone (no project set) stays unflagged":
+        val m0 = caller_module()
+        val receipt = collect_module_typecheck_receipt_v1("m0", m0, TypecheckPassSeverity.Deny, false, false)
+        expect(must_use_msgs(receipt.errors).len()).to_equal(0)
+
+    it "the imported module's own findings are not reported under the caller":
+        val util = lower("fn risky() -> Result<i64, text>:\n    Ok(1)\nfn other():\n    risky()\n", "util")
+        val m0 = caller_module()
+        val project: Dict<text, HirModule> = {"m0": m0, "util": util}
+        val receipt = collect_module_typecheck_receipt_v1("m0", m0, TypecheckPassSeverity.Deny, false, false, project)
+        expect(must_use_msgs(receipt.errors).len()).to_equal(1)
+
+    it "script mode downgrades the cross-module finding to a warning":
+        val util = lower("fn risky() -> Result<i64, text>:\n    Ok(1)\n", "util")
+        val m0 = caller_module()
+        val project: Dict<text, HirModule> = {"m0": m0, "util": util}
+        val receipt = collect_module_typecheck_receipt_v1("m0", m0, TypecheckPassSeverity.Deny, false, true, project)
+        expect(must_use_msgs(receipt.errors).len()).to_equal(0)
+        expect(must_use_msgs(receipt.warnings).len()).to_equal(1)
