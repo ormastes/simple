@@ -1,0 +1,124 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: `if val b = dv` on an untyped `nil` / bool join binds a real bool
+
+Bug: doc/08_tracking/bug/phase2_if_val_optional_bool_binds_false_2026-11-23.md.
+`val dv = if raw == "N": nil else: raw == "1"` has no annotation. The join of a
+`nil` arm and a bare bool arm was left as an untyped raw word, because
+`join_untyped_optional_arms` refused every bare scalar payload ("its raw word
+could equal the nil sentinel 3"). So `if val present = dv` bound an untyped i64,
+and `d[k] = present` boxed it as the INT 1 (`rt_value_int_wide`) instead of the
+bool true (tagged 11). Reading that slot back as a bool gave false, which broke
+the HIR-cache re-encode self-check in the generated `hir_codec.spl` decoder.
+
+A bool word is 0 or 1 (or the tagged 11/19), never the sentinel 3, so the join
+is safely `bool?`. These scenarios check the lowered MIR: the bool box constants
+(11 = true, 19 = false) appear when the binder is stored, exactly as they do for
+an annotated `bool?` local or a `bool?` parameter.
+"""
+
+# @tag: unit, compiler, mir, optional
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn lowered_mir(src: text) -> MirModule:
+    val file = "testdata/fixture_if_val_optional_bool.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_if_val_optional_bool", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    lowering.lower_module(hir)
+
+fn int_consts_of(src: text) -> [i64]:
+    val mir = lowered_mir(src)
+    var values: [i64] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Const(_, value, _):
+                        match value:
+                            case MirConstValue.Int(v): values = values.push(v)
+                            case _: pass
+                    case _: pass
+    values
+
+fn callees_of(src: text) -> [text]:
+    val mir = lowered_mir(src)
+    var callees: [text] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                            case _: pass
+                    case _: pass
+    callees
+
+fn has_int(values: [i64], wanted: i64) -> bool:
+    for v in values:
+        if v == wanted:
+            return true
+    false
+
+fn has_callee(callees: [text], name: text) -> bool:
+    for c in callees:
+        if c == name:
+            return true
+    false
+
+# The exact generated-decoder shape (hir_codec.spl `dvN` / `present_vN`).
+val untyped_join_src = "fn f(raw: text, d: Dict<i64, bool>):\n    val dv = if raw == \"N\": nil else: raw == \"1\"\n    if val present = dv:\n        d[38] = present\n"
+
+describe "if val on an untyped nil / bool join":
+    it "binds a bool, so storing it boxes bool true/false, not int 1":
+        step("lower the hir_codec decoder shape: untyped `nil` / `raw == \"1\"` join, then `if val present = dv: d[38] = present`")
+        val values = int_consts_of(untyped_join_src)
+        step("the present branch decodes the payload as bool (true word 11) and boxes it with the bool tags (11 / 19)")
+        expect(has_int(values, 11)).to_equal(true)
+        expect(has_int(values, 19)).to_equal(true)
+
+    it "normalises the joined word into the canonical bool? handle":
+        step("the join classifies the word at runtime: handle, nil sentinel -> None, bool -> Some")
+        val callees = callees_of(untyped_join_src)
+        expect(has_callee(callees, "rt_enum_id")).to_equal(true)
+        expect(has_callee(callees, "rt_is_some")).to_equal(true)
+
+    it "reversed arm order (bool first, nil else) joins to bool? too":
+        step("lower `val dv = if raw != \"N\": raw == \"1\" else: nil`")
+        val values = int_consts_of("fn f(raw: text, d: Dict<i64, bool>):\n    val dv = if raw != \"N\": raw == \"1\" else: nil\n    if val present = dv:\n        d[38] = present\n")
+        expect(has_int(values, 11)).to_equal(true)
+        expect(has_int(values, 19)).to_equal(true)
+
+    it "an elif chain joining nil with bool arms binds a bool":
+        step("lower `if a: nil elif b: true else: false` bound untyped, then `if val`")
+        val values = int_consts_of("fn f(raw: text, d: Dict<i64, bool>):\n    val dv = if raw == \"N\": nil elif raw == \"1\": true else: false\n    if val present = dv:\n        d[38] = present\n")
+        expect(has_int(values, 11)).to_equal(true)
+        expect(has_int(values, 19)).to_equal(true)
+
+    it "control: an annotated bool? local already binds a bool":
+        step("lower the same join with `val dv: bool? = ...`")
+        val values = int_consts_of("fn f(raw: text, d: Dict<i64, bool>):\n    val dv: bool? = if raw == \"N\": nil else: raw == \"1\"\n    if val present = dv:\n        d[38] = present\n")
+        expect(has_int(values, 11)).to_equal(true)
+        expect(has_int(values, 19)).to_equal(true)
+
+    it "control: a bool? parameter already binds a bool":
+        step("lower `fn f(dv: bool?, d)` with `if val present = dv: d[38] = present`")
+        val values = int_consts_of("fn f(dv: bool?, d: Dict<i64, bool>):\n    if val present = dv:\n        d[38] = present\n")
+        expect(has_int(values, 11)).to_equal(true)
+        expect(has_int(values, 19)).to_equal(true)
+
+    it "control: an untyped nil / int join stays unnormalised (3 can be a real int)":
+        step("lower `val dv = if raw == \"N\": nil else: 7` and confirm no runtime handle classification is invented")
+        val callees = callees_of("fn f(raw: text) -> i64:\n    val dv = if raw == \"N\": nil else: 7\n    if val present = dv:\n        return present\n    0\n")
+        expect(has_callee(callees, "rt_enum_id")).to_equal(false)

@@ -4244,9 +4244,14 @@ impl MirLowering:
     me optional_join_bare_payload_ok(payload: HirType) -> bool:
         """A bare `T` arm can be normalised into `T?` at runtime only when its
         raw word can never equal the nil sentinel 3: text or a non-generic
-        class/struct/enum heap handle. A scalar `T` cannot."""
+        class/struct/enum heap handle, or a bool (raw 0/1, tagged 11/19). An
+        int/char/float `T` cannot: its raw word may be 3."""
         match payload.kind:
             case HirTypeKind.Str: true
+            # bug phase2_if_val_optional_bool_binds_false_2026-11-23: a
+            # rejected bool arm left `val dv = if c: nil else: flag` untyped,
+            # so `if val b = dv` bound a bare word that `d[k] = b` boxed as int.
+            case HirTypeKind.Bool: true
             case HirTypeKind.Named(owner, args):
                 val kind = enum_payload_nominal_kind(owner, self.symbols)
                 args.len() == 0 and (kind == 1 or kind == 2 or kind == 3)
@@ -4334,6 +4339,10 @@ impl MirLowering:
         var arm_i = 0
         while arm_i < arm_locals.len():
             val arm_local: LocalId = arm_locals[arm_i]
+            # A comparison / bool literal arm has a MIR Bool slot but no
+            # registered HIR type; its payload is still provably `bool`.
+            if not self.nil_locals.contains(arm_local.id) and not self.option_none_locals.contains(arm_local.id) and self.find_local_hir_type(arm_local.id) == None and self.local_is_bool(arm_local):
+                self.remember_local_hir_type(arm_local.id, HirType(kind: HirTypeKind.Bool, span: Span.empty()), 0, 0)
             if self.nil_locals.contains(arm_local.id) or self.option_none_locals.contains(arm_local.id):
                 saw_absent = true
             elif val arm_type = self.find_local_hir_type(arm_local.id):
