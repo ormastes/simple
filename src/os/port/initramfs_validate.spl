@@ -8,7 +8,7 @@ use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use std.common.compress.zstd.{zstd_decompress_frame}
 use os.kernel.loader.cpio_newc.{CpioEntry, cpio_parse_bounded}
-use os.kernel.loader.smf.{smf_admit_explicit_simpleos_executable}
+use os.kernel.loader.smf.{smf_admit_explicit_simpleos_executable, smf_header_offset}
 
 val MAX_INITRAMFS_COMPRESSED_BYTES: i64 = 537000000
 val MAX_INITRAMFS_EXPANDED_BYTES: i64 = 536870912
@@ -75,11 +75,9 @@ fn initramfs_init_artifact_admission(path: text, data: [u8]) -> Result<(), text>
     Ok(())
 
 fn _has_smf_trailer(data: [u8]) -> bool:
-    if data.len() < 192:
-        return false
-    val at = data.len() - 128
-    data[at].to_i64() == 0x53 and data[at + 1].to_i64() == 0x4D and
-        data[at + 2].to_i64() == 0x46
+    # Any SMF header the kernel loader would locate (v1.3 at EOF-96, legacy
+    # at EOF-128, seed-shaped, or leading) makes this an SMF envelope.
+    smf_header_offset(data) >= 0
 
 fn simple_toolchain_role_paths() -> [text]:
     var paths: [text] = []
@@ -279,7 +277,10 @@ fn initramfs_tool_role_artifact_admission(role: text, path: text, data: [u8]) ->
         return Err("toolchain-role-path-mismatch")
     if data.len() < 64 or data.len() > MAX_INIT_ARTIFACT_BYTES:
         return Err("toolchain-role-size-invalid")
-    if not _native_elf_prefix(data, data.len()) and not _canonical_executable_smf(data):
+    if _has_smf_trailer(data):
+        if not _canonical_executable_smf(data):
+            return Err("toolchain-role-smf-envelope-invalid")
+    elif not _native_elf_prefix(data, data.len()):
         return Err("toolchain-role-native-format-invalid")
     Ok(())
 
@@ -357,6 +358,12 @@ fn initramfs_role_gate_v1(entries: [CpioEntry]) -> Result<InitramfsRoleGateV1, t
 
     Run by the kernel initramfs reader before any archived byte is served.
     """
+    # _archive_entry gives up at the first non-canonical name, which would
+    # downgrade a manifest-bearing archive to NoToolchainManifest. Refuse it.
+    for entry in entries:
+        match _canonical_archive_path(entry.path):
+            case Ok(_): ()
+            case Err(message): return Err(message)
     val manifest = _archive_entry(entries, "SYS/SIMPLETOOL.SDN")
     if not manifest.?:
         return Ok(InitramfsRoleGateV1.NoToolchainManifest)
