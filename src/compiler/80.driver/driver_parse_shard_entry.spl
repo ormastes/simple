@@ -39,7 +39,7 @@ use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
 use compiler.driver.cache.module_artifacts_v1.{module_artifact_module_id_v1,
     module_tldr_companion_path_v1, module_tldr_companion_render_sections_v1,
     module_tldr_companion_view_sections_v1, module_artifact_publish_atomic_v1}
-use compiler.core.parser.{par_had_error_get}
+use compiler.core.parser.{par_had_error_get, par_had_error_clear_v1}
 use compiler.core.types.{reset_all_pools}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_hits, frontend_parse_cache_misses}
 use compiler.driver.driver_hir_worker_surface_v1.{driver_hir_worker_skeleton_text_v1,
@@ -321,8 +321,10 @@ fn _driver_run_parse_fibers(
                     # the full source above, so without this every worker
                     # re-parsed ~2,300 skeletons (cli-f25: 1,540-2,444 misses per
                     # worker). Warm that key too, through the same selected parse,
-                    # after this module is already done: a skeleton failure is
-                    # only a later worker miss, never a failed full-source store.
+                    # after this module is already done: a skeleton Err is only a
+                    # later worker miss, never a failed full-source store. A
+                    # transient-scope panic inside the parse still kills the child;
+                    # the orphan reclaim in run_parse_shards_with_base reruns it.
                     if warm_skeletons:
                         val skeleton = driver_hir_worker_skeleton_text_v1(e.content)
                         if skeleton != e.content:
@@ -331,6 +333,7 @@ fn _driver_run_parse_fibers(
                                 skeletons = skeletons + 1
                             else:
                                 skeleton_failures = skeleton_failures + 1
+                            par_had_error_clear_v1()
         file_fiber_end_v1(run)
         if run.close_error != "":
             eprint "error: parse child: FileFiber scope remains open: {run.close_error}"
