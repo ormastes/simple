@@ -8,7 +8,7 @@ use std.spec.*
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory.*
 use std.io_runtime.{file_read}
-use std.nogc_sync_mut.io_runtime.{dir_remove, dir_list_or_empty}
+use std.nogc_sync_mut.io_runtime.{dir_remove, dir_list_or_empty, dir_create_all}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
 
@@ -155,4 +155,21 @@ describe "lockless inventory publication":
         for name in dir_list_or_empty(generations):
             if name.ends_with(".inventory"): remaining = remaining + 1
         expect(remaining).to_equal(1)
+        dir_remove(cache_root, true)
+
+describe "inventory publication failure diagnostics":
+    # Bug: unit_range_cast_native_execution_blocked_2026-11-19 -- a native
+    # stage2 answered `publish-current-write-failed` with no path, so the
+    # failing write could not be located. The reason must name the target.
+    it "names the CURRENT path when the pointer write fails":
+        val cache_root = "build/test-artifacts/scv-publish-current-path-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        # A directory squatting on CURRENT makes the atomic replace fail.
+        val current_dir = cache_root + "/source-inventory/CURRENT"
+        dir_create_all(current_dir + "/blocker")
+        val (digest, reason) = publish_first(cache_root)
+        expect(digest).to_equal("")
+        expect(reason.starts_with("publish-current-write-failed")).to_equal(true)
+        expect(reason.contains("path=")).to_equal(true)
+        expect(reason.ends_with("source-inventory/CURRENT")).to_equal(true)
         dir_remove(cache_root, true)
