@@ -876,7 +876,7 @@ stage3_diagnostic_env=$(bootstrap_stage3_diagnostic_env) || exit 1
 # selects its coordinator route. The resolved thread count and route are bound
 # into both the argument hash and the transcribed worker invocation below.
 # Host-config defaults (env/--jobs still win; a host without the keys is
-# unchanged): stage3_direct_threads, stage3_tree_rss_cap_kib,
+# unchanged): stage3_threads, stage3_tree_rss_cap_kib,
 # mem_reserve_free_mib -> the env vars consumed below.
 . "$root/scripts/bootstrap/lib/host-bootstrap-settings.shs"
 bootstrap_host_apply_stage3_settings "$root"
