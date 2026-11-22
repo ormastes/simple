@@ -14,6 +14,8 @@ use app.io.mod.{env_get, file_exists, file_read, file_write, file_atomic_write,
     file_remove, dir_exists, dir_create_all, dir_list, dir_remove, dir_remove_all,
     process_run_timeout, process_is_running, process_kill}
 use std.nogc_sync_mut.package_sffi.{set_permissions}
+use std.nogc_sync_mut.io.file_ops.{file_modified_time}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.nogc_sync_mut.container_session.podman_session_v1.{PodmanMountV1}
 use std.nogc_sync_mut.container_session.macos_seatbelt_session_v1.{MacosSeatbeltSessionSpecV1,
     macos_seatbelt_canonical_path_v1, macos_seatbelt_compile_profile_v1,
@@ -48,6 +50,11 @@ pub struct CsContainerSessionRecordV1:
     env: [text]
     state: text
     exit_code: i64
+
+pub struct CsOldCleanupResultV1:
+    eligible: [text]
+    removed: [text]
+    failures: [text]
 
 pub fn cs_worktree_extract_flag_v1(extras: [text]) -> (bool, [text]):
     var wants_wt = false
@@ -334,6 +341,23 @@ fn _prune_empty_store_dirs_v1(session: text):
         if dir_exists(sub) and dir_list(sub).len() == 0:
             val _rm = dir_remove(sub, false)
 
+fn _cs_container_remove_record_v1(rec: CsContainerSessionRecordV1) -> (bool, text):
+    if rec.state == "running" and rec.pane_id == "" and rec.pid > 0 and process_is_running(rec.pid):
+        val _k = process_kill(rec.pid)
+    if rec.worktree_owned and rec.worktree_path != "":
+        val wt_rm = cs_worktree_remove_owned_v1(rec.repo_root, rec.worktree_path)
+        if wt_rm.is_err():
+            return (false, wt_rm.unwrap_err())
+    if rec.stderr_path != "":
+        val _sp = file_remove(rec.stderr_path)
+        if file_exists(rec.stderr_path):
+            return (false, "could not remove stderr for " + rec.name)
+    if rec.attempt_dir != "" and dir_exists(rec.attempt_dir):
+        val _ad = dir_remove_all(rec.attempt_dir)
+        if dir_exists(rec.attempt_dir):
+            return (false, "could not remove attempt files for " + rec.name)
+    (true, "cleaned container " + rec.name + ", worktree and temp files")
+
 pub fn cs_container_close_record_v1(session: text, key: text, live_pane_ids: [text],
         force_reap: bool) -> (bool, text):
     val records = cs_container_reconcile_v1(session, live_pane_ids)
@@ -342,19 +366,50 @@ pub fn cs_container_close_record_v1(session: text, key: text, live_pane_ids: [te
             if rec.state == "crashed" and not force_reap:
                 return (false, "container " + rec.name + " crashed (exit " + rec.exit_code.to_text() +
                     "): preserved worktree " + rec.worktree_path + " and state for /relaunch")
-            if rec.state == "running" and rec.pane_id == "" and rec.pid > 0 and process_is_running(rec.pid):
-                val _k = process_kill(rec.pid)
-            if rec.worktree_owned and rec.worktree_path != "":
-                val wt_rm = cs_worktree_remove_owned_v1(rec.repo_root, rec.worktree_path)
-                if wt_rm.is_err():
-                    return (false, wt_rm.unwrap_err())
-            if rec.stderr_path != "":
-                val _sp = file_remove(rec.stderr_path)
-            if rec.attempt_dir != "" and dir_exists(rec.attempt_dir):
-                val _ad = dir_remove_all(rec.attempt_dir)
+            val result = _cs_container_remove_record_v1(rec)
             _prune_empty_store_dirs_v1(session)
-            return (true, "cleaned container " + rec.name + ", worktree and temp files")
+            return result
     (true, "")
+
+pub fn cs_container_cleanup_old_v1(session: text, live_pane_ids: [text],
+        apply_changes: bool) -> CsOldCleanupResultV1:
+    val now_seconds = time_now_unix_micros() / 1000000
+    val root = cs_container_session_store_root_v1(session)
+    var eligible: [text] = []
+    var removed: [text] = []
+    var failures: [text] = []
+    for rec in cs_container_reconcile_v1(session, live_pane_ids):
+        if rec.session != session or rec.state != "exited-clean" or live_pane_ids.contains(rec.pane_id):
+            continue
+        val expected_name = cs_container_name(session, rec.agent_id)
+        val expected_attempt = root + "/containers/" + expected_name
+        if rec.name != expected_name or rec.attempt_dir != expected_attempt:
+            continue
+        if macos_seatbelt_canonical_path_v1(rec.attempt_dir) != expected_attempt:
+            continue
+        if rec.worktree_owned:
+            val expected_worktree = root + "/worktrees/" + rec.agent_id
+            if rec.worktree_path != expected_worktree:
+                continue
+            if dir_exists(expected_worktree):
+                if macos_seatbelt_canonical_path_v1(expected_worktree) != expected_worktree:
+                    continue
+                val worktree_created = file_modified_time(expected_worktree + "/.git")
+                if worktree_created <= 0 or now_seconds - worktree_created < 3600:
+                    continue
+        val finished = file_modified_time(rec.attempt_dir + "/exit_code")
+        if finished <= 0 or now_seconds - finished < 3600:
+            continue
+        eligible.push(rec.agent_id)
+        if apply_changes:
+            val (ok, reason) = _cs_container_remove_record_v1(rec)
+            if ok:
+                removed.push(rec.agent_id)
+            else:
+                failures.push(reason)
+    if apply_changes and removed.len() > 0:
+        _prune_empty_store_dirs_v1(session)
+    CsOldCleanupResultV1(eligible: eligible, removed: removed, failures: failures)
 
 pub fn cs_container_crashed_records_v1(session: text, live_pane_ids: [text]) -> [CsContainerSessionRecordV1]:
     var crashed: [CsContainerSessionRecordV1] = []
@@ -397,10 +452,11 @@ pub fn cs_container_prepare_relaunch_v1(session: text, key: text, override_args:
             return Ok((rec, run_path))
     Err("no crashed container matching '" + key + "'")
 
-export CsContainerSessionRecordV1
+export CsContainerSessionRecordV1, CsOldCleanupResultV1
 export cs_worktree_extract_flag_v1, cs_strip_workspace_for_cli_harness_v1
 export cs_container_session_store_root_v1, cs_worktree_create_v1, cs_worktree_remove_owned_v1
 export cs_container_record_save_v1, cs_container_write_runner_v1
 export cs_container_prepare_macos_seatbelt_v1, cs_container_records_load_v1
 export cs_container_reconcile_v1, cs_container_close_record_v1
+export cs_container_cleanup_old_v1
 export cs_container_crashed_records_v1, cs_container_prepare_relaunch_v1
