@@ -1,6 +1,6 @@
 # `WebBoxShadow.none()` does not exist — legacy box-shadow parser stops on `none` / short layers (2026-11-14)
 
-Status: OPEN. Severity: low (module has no importer inside `src/`).
+Status: FIXED (2026-11-22 — aligned `WebBoxShadow` field types (`i32` lengths, packed `u32` colour) with `dom_visual_effects.spl` and added `WebBoxShadow.none()` + explicit `"none"` handling; verified in `css_box_shadow_and_supports_spec.spl`). Severity: low (module has no importer inside `src/`).
 
 ## Defect
 

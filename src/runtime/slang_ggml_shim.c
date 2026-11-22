@@ -142,6 +142,12 @@ struct slang_request {
     llama_token *path;
     int64_t path_len;
     int64_t path_cap;
+    /* The model this request decodes: g_model (model_handle 0) or a handle
+     * from slang_ggml_model_open. Embedding output is valid after embed_eval. */
+    struct llama_model *model;
+    int64_t model_handle;
+    int64_t embed_tokens;
+    int embed_valid;
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
     float *paged_logits;
     int paged_logits_valid;
@@ -219,6 +225,55 @@ static int64_t g_load_str_len = 0;
 static int g_matched_cpu_context = 0;
 static int32_t g_context_threads = 0;
 
+/* Bit 256: bulk byte I/O (str_push_bytes / out_into). Bit 512: model handles
+ * (model_open / request_create_for), the embeddings group, token input and
+ * per-request sampler configuration. */
+#define SLANG_CAP_BULK_IO 256
+#define SLANG_CAP_MODEL_HANDLES 512
+#define SLANG_MODEL_MAX_HANDLES 4
+#define SLANG_MODEL_MAX_GENERATION ((uint64_t)(INT64_MAX - SLANG_MODEL_MAX_HANDLES) / SLANG_MODEL_MAX_HANDLES)
+
+/* Models loaded beside g_model, so a chat model and an embedding model (or an
+ * LLM and its vocoder) are resident together. Guarded by g_state_lock. */
+struct slang_model_slot {
+    struct llama_model *model;
+    char *path;
+    uint64_t generation;
+    int64_t requests;
+    /* Owners holding the handle: every model_open (including one that found the
+     * path already open) takes one, every model_close gives one back, and the
+     * model is freed only by the last. Concurrent per-request owners of one
+     * model therefore never close it from under each other. */
+    int64_t opens;
+    int offloaded;
+};
+static struct slang_model_slot g_model_slots[SLANG_MODEL_MAX_HANDLES];
+static uint64_t g_model_slot_generation = 0;
+
+static struct slang_model_slot *slang_model_slot_get(int64_t handle) {
+    if (handle <= 0) return NULL;
+    uint64_t raw = (uint64_t)(handle - 1);
+    struct slang_model_slot *slot = &g_model_slots[raw % SLANG_MODEL_MAX_HANDLES];
+    uint64_t generation = raw / SLANG_MODEL_MAX_HANDLES;
+    if (slot->model == NULL || generation == 0 || slot->generation != generation)
+        return NULL;
+    return slot;
+}
+
+/* A request stays valid only while the model it was built on is loaded. */
+static int slang_request_model_live(const struct slang_request *request) {
+    if (request->model_handle == 0)
+        return request->model_generation == g_model_generation;
+    struct slang_model_slot *slot = slang_model_slot_get(request->model_handle);
+    return slot != NULL && slot->model == request->model;
+}
+
+static int slang_request_offloaded(const struct slang_request *request) {
+    if (request->model_handle == 0) return g_model_offloaded;
+    struct slang_model_slot *slot = slang_model_slot_get(request->model_handle);
+    return slot != NULL && slot->offloaded;
+}
+
 static int64_t slang_request_handle(int64_t slot, uint64_t generation) {
     if (generation == 0 || generation > SLANG_REQUEST_MAX_GENERATION)
         return SLANG_ERR_EXHAUSTED;
@@ -232,7 +287,7 @@ static struct slang_request *slang_request_get(int64_t handle) {
     uint64_t generation = raw / SLANG_REQUEST_MAX_ENTRIES;
     struct slang_request *request = &g_requests[slot];
     if (!request->active || generation == 0 || request->generation != generation ||
-        request->model_generation != g_model_generation)
+        !slang_request_model_live(request))
         return NULL;
     return request;
 }
@@ -399,7 +454,7 @@ static int64_t slang_chat_frame_len(const char *s, int64_t len, int64_t *at) {
 int64_t slang_ggml_request_chat_render(int64_t handle) {
     struct slang_request *request = slang_request_get(handle);
     if (request == NULL) return SLANG_ERR_INVALID;
-    if (g_model == NULL) return SLANG_ERR_NO_MODEL;
+    if (request->model == NULL) return SLANG_ERR_NO_MODEL;
     const char *src = request->str;
     int64_t len = request->str_len;
     int64_t fields = 0;
@@ -427,7 +482,7 @@ int64_t slang_ggml_request_chat_render(int64_t handle) {
             cursor += n + 1;
             at += n;
         }
-        const char *tmpl = llama_model_chat_template(g_model, NULL);
+        const char *tmpl = llama_model_chat_template(request->model, NULL);
         int32_t n = tmpl == NULL ? -1 :
             llama_chat_apply_template(tmpl, messages, count, true, rendered, SLANG_STR_CAP);
         result = 1;
@@ -684,6 +739,8 @@ static int64_t slang_tree_match(const llama_token *tok, int64_t len, int *node_o
  * the most exact cells up to cap, ties broken by recency. */
 static int64_t slang_tree_usable(int t, int64_t cap) {
     int64_t e = g_tree_node[t].exact_upto;
+    int64_t len = g_tree_node[t].start + g_tree_node[t].n;   /* cells the terminal holds */
+    if (len < e) e = len;
     return e < cap ? e : cap;
 }
 static int slang_tree_find_terminal(int node, int64_t cap) {
@@ -695,6 +752,18 @@ static int slang_tree_find_terminal(int node, int64_t cap) {
         int64_t ut = slang_tree_usable(t, cap), ub = slang_tree_usable(best, cap);
         if (ut > ub || (ut == ub && g_tree_node[t].last_used > g_tree_node[best].last_used))
             best = t;
+    }
+    return best;
+}
+
+/* find_terminal over the subtree plus the terminals on the way down to it: a
+ * shorter cached prompt that is a prefix of this one can hold more exact cells
+ * than a longer path whose tail came from generation. */
+static int slang_tree_pick_owner(int node, int64_t cap) {
+    int best = slang_tree_find_terminal(node, cap);
+    for (int a = g_tree_node[node].parent; a > 0; a = g_tree_node[a].parent) {
+        if (g_tree_node[a].seq < 0) continue;
+        if (best < 0 || slang_tree_usable(a, cap) > slang_tree_usable(best, cap)) best = a;
     }
     return best;
 }
@@ -722,6 +791,8 @@ static int slang_tree_split(int node, int64_t k) {
     np->last_used = x->last_used;
     return p;
 }
+
+static void slang_tree_free_seq(int seq);
 
 /* Inserts a full path whose KV lives on seq. Returns 1 when seq became a
  * terminal, 0 when the tree was left untouched (duplicate path or no room). */
@@ -759,6 +830,15 @@ static int slang_tree_insert(const llama_token *path, int64_t len, int seq, int6
     }
     if (g_tree_node[cur].seq >= 0) {
         g_tree_node[cur].last_used = ++g_prefix_clock;
+        /* Same path already cached. If this run computed more of it as exact
+         * aligned micro-batches, its sequence replaces the older one (an
+         * exact_upto can only be raised together with the cells it describes). */
+        if (exact > g_tree_node[cur].exact_upto && g_tree_node[cur].pins == 0) {
+            slang_tree_free_seq(g_tree_node[cur].seq);
+            g_tree_node[cur].seq = seq;
+            g_tree_node[cur].exact_upto = exact;
+            return 1;
+        }
         return 0;
     }
     g_tree_node[cur].seq = seq;
@@ -865,6 +945,10 @@ static void slang_tree_release_locked(struct slang_request *request) {
         /* Exact modes: only whole aligned micro-batches of the PROMPT are
          * reusable. The last prompt token is decoded alone, so the aligned
          * span is (decoded prompt - 1) rounded down to n_ubatch. */
+        /* tok_len is this request's prompt: slang_ggml_request_tokenize releases
+         * the previous request state (this function) before it overwrites tok,
+         * so tok_len and path agree here. path_len < tok_len means the prefill
+         * stopped early; the min below bounds exactness by what was decoded. */
         int64_t exact = INT64_MAX;
         if (g_tree_mode != 2) {
             int64_t ub = (int64_t)llama_n_ubatch(g_tree_ctx);
@@ -924,7 +1008,11 @@ static int64_t slang_tree_prepare_locked(struct slang_request *request) {
             int64_t ubatch = (int64_t)llama_n_ubatch(g_tree_ctx);
             if (ubatch > 1) reuse = reuse / ubatch * ubatch;
         }
-        int owner = reuse > 0 ? slang_tree_find_terminal(node, reuse) : -1;
+        int owner = reuse > 0 ? slang_tree_pick_owner(node, reuse) : -1;
+        if (owner >= 0) {
+            int64_t held = g_tree_node[owner].start + g_tree_node[owner].n;
+            if (reuse > held) reuse = held;   /* an ancestor owner holds fewer cells */
+        }
         if (owner >= 0 && g_tree_mode != 2 && reuse > g_tree_node[owner].exact_upto) {
             int64_t ub = (int64_t)llama_n_ubatch(g_tree_ctx);
             reuse = g_tree_node[owner].exact_upto;
@@ -1018,7 +1106,7 @@ static int slang_tree_decode(struct slang_request *request, const llama_token *t
 static int slang_tree_warm_first(struct slang_request *request, int64_t suffix_len) {
     if (g_tree_warm) return 1;
     int64_t ub = (int64_t)llama_n_ubatch(request->ctx);
-    if (suffix_len >= ub) { g_tree_warm = 1; return 1; }
+    if (suffix_len >= ub) return 1;   /* warm is recorded after the decode succeeds */
     if (!g_model_offloaded || ub <= 0 || ub >= request->context_limit ||
         request->eval_start != 0 || request->tok_len <= 0)
         return 1;
@@ -1062,6 +1150,7 @@ static int64_t slang_tree_eval_prompt(struct slang_request *request) {
             slang_request_release_lease(request);
             return SLANG_ERR_DECODE;
         }
+        if (!g_tree_warm && suffix_len - 1 >= (int64_t)llama_n_ubatch(request->ctx)) g_tree_warm = 1;
     }
     SLANG_LOCK();
     if (suffix_len > 0) g_prefix_tokens_prefilled += suffix_len;
@@ -1102,12 +1191,14 @@ int64_t slang_ggml_prefix_cache_mode_configure(int64_t mode, int64_t cells) {
 /* Statistic getters read state the entry points mutate under g_state_lock. */
 #define SLANG_LOCKED_GET(expr) do { SLANG_LOCK(); int64_t v_ = (int64_t)(expr); SLANG_UNLOCK(); return v_; } while (0)
 int64_t slang_ggml_tree_mode(void) { SLANG_LOCKED_GET(g_tree_mode); }
+int64_t slang_ggml_tree_n_ubatch(void) { SLANG_LOCKED_GET(g_tree_ctx ? llama_n_ubatch(g_tree_ctx) : 0); }
 int64_t slang_ggml_tree_nodes(void) { SLANG_LOCKED_GET(slang_tree_node_count()); }
 int64_t slang_ggml_tree_cached_tokens(void) { SLANG_LOCKED_GET(slang_tree_cached_tokens()); }
 int64_t slang_ggml_tree_shared_tokens(void) { SLANG_LOCKED_GET(slang_tree_shared_tokens()); }
 
-static int64_t slang_request_create_locked(int64_t n_ctx, int physical_only) {
-    if (g_model == NULL) return SLANG_ERR_NO_MODEL;
+static int64_t slang_request_create_model_locked(struct llama_model *model, int64_t model_handle,
+                                                 int64_t n_ctx, int physical_only) {
+    if (model == NULL) return SLANG_ERR_NO_MODEL;
     if (n_ctx <= 0 || n_ctx > INT32_MAX) return SLANG_ERR_INVALID;
     if (g_request_count >= g_request_capacity) return SLANG_ERR_BUSY;
     int64_t slot = -1;
@@ -1122,7 +1213,9 @@ static int64_t slang_request_create_locked(int64_t n_ctx, int physical_only) {
     struct llama_context *ctx = NULL;
     struct llama_sampler *smpl = NULL;
     struct llama_sampler *greedy = NULL;
-    int tree = g_tree_mode && !physical_only;
+    /* The tree context is built on the default model; a model-handle request
+     * always gets its own context. */
+    int tree = g_tree_mode && !physical_only && model_handle == 0;
     if (tree) {
         if (g_tree_ctx == NULL) {
             int64_t cells = g_tree_cells_cfg > 0 ? g_tree_cells_cfg : n_ctx * 4;
@@ -1167,7 +1260,7 @@ static int64_t slang_request_create_locked(int64_t n_ctx, int physical_only) {
             cp.n_threads_batch = g_context_threads;
         }
 #endif
-        ctx = llama_init_from_model(g_model, cp);
+        ctx = llama_init_from_model(model, cp);
         if (ctx == NULL) return SLANG_ERR_NO_CTX;
         struct llama_sampler_chain_params sp = llama_sampler_chain_default_params();
         smpl = llama_sampler_chain_init(sp);
@@ -1193,9 +1286,14 @@ static int64_t slang_request_create_locked(int64_t n_ctx, int physical_only) {
     old->physical_only = physical_only;
     old->context_limit = n_ctx;
     old->generation = generation; old->model_generation = g_model_generation;
+    old->model = model; old->model_handle = model_handle;
     old->active = 1;
     g_request_count++;
     return slang_request_handle(slot, generation);
+}
+
+static int64_t slang_request_create_locked(int64_t n_ctx, int physical_only) {
+    return slang_request_create_model_locked(g_model, 0, n_ctx, physical_only);
 }
 
 static int64_t slang_request_create_impl(int64_t n_ctx, int physical_only) {
@@ -1231,7 +1329,7 @@ int64_t slang_ggml_ctx_create(int64_t n_ctx) {
  * advertised only when this shim was compiled against the complete external
  * paged-request API. */
 int64_t slang_ggml_capabilities(void) {
-    return 1 | 2 | 4 | 8 | 16 | SLANG_CAP_MTMD |
+    return 1 | 2 | 4 | 8 | 16 | SLANG_CAP_MTMD | SLANG_CAP_BULK_IO | SLANG_CAP_MODEL_HANDLES |
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
         SLANG_CAP_PHYSICAL_PAGED_KV | SLANG_CAP_PHYSICAL_LIGHTWEIGHT_REQUESTS;
 #else
@@ -1338,6 +1436,8 @@ static int64_t slang_request_close_locked(int64_t handle) {
     slang_physical_request_detach(handle);
 #endif
     slang_request_release_lease_locked(request);
+    struct slang_model_slot *model_slot = slang_model_slot_get(request->model_handle);
+    if (model_slot != NULL && model_slot->requests > 0) model_slot->requests--;
     if (request->smpl) llama_sampler_free(request->smpl);
     if (request->ctx && !request->tree) llama_free(request->ctx);
     free(request->str); free(request->out); free(request->tok);
@@ -1421,11 +1521,12 @@ int64_t slang_ggml_request_tokenize(int64_t handle, int64_t add_bos) {
 #endif
     request->legacy_logits_valid = 0;
     if (request->cancelled) return SLANG_ERR_CANCELLED;
-    if (g_model == NULL) return SLANG_ERR_NO_MODEL;
+    if (request->model == NULL) return SLANG_ERR_NO_MODEL;
+    request->embed_valid = 0;
     /* A reused tree request finishes its previous prompt before request->tok
      * is overwritten. */
     if (request->tree) slang_request_release_lease(request);
-    const struct llama_vocab *vocab = llama_model_get_vocab(g_model);
+    const struct llama_vocab *vocab = llama_model_get_vocab(request->model);
     int32_t n = llama_tokenize(vocab, request->str, (int32_t)request->str_len,
                                request->tok, SLANG_TOK_CAP, add_bos != 0, true);
     if (n < 0) return SLANG_ERR_TOKENIZE;
@@ -1459,8 +1560,8 @@ int64_t slang_ggml_request_piece(int64_t handle, int64_t token) {
     struct slang_request *request = slang_request_get(handle);
     if (request == NULL) return SLANG_ERR_INVALID;
     if (request->cancelled) return SLANG_ERR_CANCELLED;
-    if (g_model == NULL) return SLANG_ERR_NO_MODEL;
-    const struct llama_vocab *vocab = llama_model_get_vocab(g_model);
+    if (request->model == NULL) return SLANG_ERR_NO_MODEL;
+    const struct llama_vocab *vocab = llama_model_get_vocab(request->model);
     int32_t n = llama_token_to_piece(vocab, (llama_token)token,
                                      request->out, SLANG_OUT_CAP, 0, true);
     if (n < 0) {
@@ -1536,7 +1637,7 @@ static int slang_request_kv_holds(struct slang_request *request, int64_t count) 
  * model with layers offloaded, whose micro-batch is smaller than its context
  * (the matched-CPU profile sets n_ubatch = n_ctx). */
 static int64_t slang_request_first_ubatch(struct slang_request *request) {
-    if (request->warm || request->tree || !g_model_offloaded) return 0;
+    if (request->warm || request->tree || !slang_request_offloaded(request)) return 0;
     int64_t ubatch = (int64_t)llama_n_ubatch(request->ctx);
     return ubatch > 0 && ubatch < request->context_limit ? ubatch : 0;
 }
@@ -1571,6 +1672,12 @@ static int64_t slang_request_prefix_prepare_locked(int64_t handle) {
     slang_request_release_lease_locked(request);
     request->eval_start = 0;
     request->selected_prefix = -1;
+    /* Snapshots are keyed by the default model's load generation, so a
+     * request on a model handle never restores or admits one. */
+    if (request->model_handle != 0) {
+        llama_memory_clear(llama_get_memory(request->ctx), true);
+        return 0;
+    }
     for (int64_t i = 0; i < SLANG_PREFIX_CACHE_MAX_ENTRIES; i++) {
         struct slang_prefix_entry *entry = &g_prefix[i];
         if (entry->state == NULL || entry->unavailable || entry->token_count <= 1 ||
@@ -1668,6 +1775,7 @@ static int64_t slang_prefix_exact_slot(struct slang_request *request) {
 }
 
 static void slang_prefix_admit(struct slang_request *request) {
+    if (request->model_handle != 0) return;
     if (g_prefix_capacity == 0 || g_prefix_byte_limit == 0) return;
     int64_t exact = slang_prefix_exact_slot(request);
     if (exact >= 0) {
@@ -1852,8 +1960,9 @@ int64_t slang_ggml_vocab_size(void) {
 
 int64_t slang_ggml_request_logit_bits(int64_t handle, int64_t index) {
     struct slang_request *request = slang_request_get(handle);
-    int64_t count = slang_ggml_vocab_size();
-    if (request == NULL || index < 0 || index >= count) return SLANG_ERR_INVALID;
+    if (request == NULL || request->model == NULL) return SLANG_ERR_INVALID;
+    int64_t count = (int64_t)llama_vocab_n_tokens(llama_model_get_vocab(request->model));
+    if (index < 0 || index >= count) return SLANG_ERR_INVALID;
     const float *logits = NULL;
 #if SLANG_HAS_EXTERNAL_PAGED_PROVIDER
     if (request->paged_logits_valid && request->paged_logits != NULL) {
@@ -2497,3 +2606,387 @@ int64_t slang_ggml_request_mm_eval_prompt(int64_t handle) {
 }
 #endif /* SLANG_WITH_MTMD */
 /* ===== end mtmd group ===== */
+
+/* ---- bulk byte I/O (capability bit 256) -------------------------------
+ *
+ * One call per buffer instead of one per byte. The Simple side passes bytes
+ * IN with spl_wffi_call_i64_with_bytes (callee gets ptr, len) and reads them
+ * OUT with spl_wffi_call_i64_into_bytes (callee gets buf, cap, out_len). An
+ * out call always reports the size it needs in *out_len; when cap is smaller
+ * it copies nothing and returns SLANG_ERR_OVERFLOW, so cap 0 is a size probe. */
+
+static int64_t slang_append_bytes(char *dst, int64_t *len, const uint8_t *src, int64_t n) {
+    if (n < 0 || (n > 0 && src == NULL)) return SLANG_ERR_INVALID;
+    if (n > SLANG_STR_CAP - 1 - *len) return SLANG_ERR_OVERFLOW;
+    if (n > 0) memcpy(dst + *len, src, (size_t)n);
+    *len += n;
+    dst[*len] = '\0';
+    return *len;
+}
+
+static int64_t slang_copy_out(const void *src, int64_t n, uint8_t *buf, int64_t cap, int64_t *out_len) {
+    if (out_len != NULL) *out_len = n;
+    if (cap < n) return SLANG_ERR_OVERFLOW;
+    if (n > 0) {
+        if (buf == NULL) return SLANG_ERR_INVALID;
+        memcpy(buf, src, (size_t)n);
+    }
+    return 0;
+}
+
+int64_t slang_ggml_request_str_push_bytes(int64_t handle, const uint8_t *ptr, int64_t len) {
+    struct slang_request *request = slang_request_get(handle);
+    if (request == NULL) return SLANG_ERR_INVALID;
+    return slang_append_bytes(request->str, &request->str_len, ptr, len);
+}
+
+/* Same routing as slang_ggml_str_push: the compat request when one exists,
+ * else the load-path buffer (a model path is pushed before any context). */
+int64_t slang_ggml_str_push_bytes(const uint8_t *ptr, int64_t len) {
+    if (slang_compat_request() != NULL)
+        return slang_ggml_request_str_push_bytes(g_compat_handle, ptr, len);
+    return slang_append_bytes(g_load_str, &g_load_str_len, ptr, len);
+}
+
+int64_t slang_ggml_request_out_into(int64_t handle, uint8_t *buf, int64_t cap, int64_t *out_len) {
+    if (out_len != NULL) *out_len = 0;
+    struct slang_request *request = slang_request_get(handle);
+    if (request == NULL) return SLANG_ERR_INVALID;
+    return slang_copy_out(request->out, request->out_len, buf, cap, out_len);
+}
+
+int64_t slang_ggml_out_into(uint8_t *buf, int64_t cap, int64_t *out_len) {
+    return slang_ggml_request_out_into(g_compat_handle, buf, cap, out_len);
+}
+
+/* ---- model handles (capability bit 512) --------------------------------
+ *
+ * slang_ggml_model_load keeps owning the default model (handle 0). These load
+ * further models beside it. Opening a path that is already open returns the
+ * same handle: a server thread that starts from a stale module snapshot then
+ * finds the resident model instead of loading a second copy. */
+
+int64_t slang_ggml_model_open(const uint8_t *path, int64_t len, int64_t n_gpu_layers) {
+    if (path == NULL || len <= 0 || len >= SLANG_STR_CAP) return SLANG_ERR_INVALID;
+    char *owned = (char *)malloc((size_t)len + 1);
+    if (owned == NULL) return SLANG_ERR_LOAD_FAILED;
+    memcpy(owned, path, (size_t)len);
+    owned[len] = '\0';
+    SLANG_LOCK();
+    int64_t result = SLANG_ERR_BUSY;
+    int64_t free_slot = -1;
+    for (int64_t i = 0; i < SLANG_MODEL_MAX_HANDLES; i++) {
+        struct slang_model_slot *slot = &g_model_slots[i];
+        if (slot->model != NULL && strcmp(slot->path, owned) == 0) {
+            result = (int64_t)(slot->generation * SLANG_MODEL_MAX_HANDLES + (uint64_t)i + 1);
+            slot->opens++;
+            free_slot = -2;
+            break;
+        }
+        if (slot->model == NULL && free_slot == -1) free_slot = i;
+    }
+    if (free_slot >= 0) {
+        if (g_model_slot_generation >= SLANG_MODEL_MAX_GENERATION) {
+            result = SLANG_ERR_EXHAUSTED;
+        } else {
+            struct llama_model_params mp = llama_model_default_params();
+            mp.n_gpu_layers = (n_gpu_layers < 0) ? 999 : (int32_t)n_gpu_layers;
+            struct llama_model *model = llama_model_load_from_file(owned, mp);
+            if (model == NULL) {
+                result = SLANG_ERR_LOAD_FAILED;
+            } else {
+                struct slang_model_slot *slot = &g_model_slots[free_slot];
+                slot->model = model;
+                slot->path = owned;
+                owned = NULL;
+                slot->generation = ++g_model_slot_generation;
+                slot->requests = 0;
+                slot->opens = 1;
+                slot->offloaded = mp.n_gpu_layers != 0 && llama_supports_gpu_offload();
+                result = (int64_t)(slot->generation * SLANG_MODEL_MAX_HANDLES + (uint64_t)free_slot + 1);
+            }
+        }
+    }
+    SLANG_UNLOCK();
+    free(owned);
+    return result;
+}
+
+/* Gives back one owner's hold. While other owners hold the model it stays
+ * loaded and the close succeeds; the last owner's close frees it, and is
+ * refused with SLANG_ERR_BUSY while a request built on the model is open. */
+int64_t slang_ggml_model_close(int64_t handle) {
+    SLANG_LOCK();
+    int64_t result = SLANG_ERR_INVALID;
+    struct slang_model_slot *slot = slang_model_slot_get(handle);
+    if (slot != NULL) {
+        if (slot->opens > 1) {
+            slot->opens--;
+            result = 0;
+        } else if (slot->requests > 0) {
+            result = SLANG_ERR_BUSY;
+        } else {
+            llama_model_free(slot->model);
+            free(slot->path);
+            slot->opens = 0;
+            slot->model = NULL;
+            slot->path = NULL;
+            result = 0;
+        }
+    }
+    SLANG_UNLOCK();
+    return result;
+}
+
+/* A request on model `handle`; handle 0 is the default model, exactly
+ * slang_ggml_request_create. Every request_* entry then works on it. */
+int64_t slang_ggml_request_create_for(int64_t handle, int64_t n_ctx) {
+    if (handle == 0) return slang_ggml_request_create(n_ctx);
+    SLANG_LOCK();
+    int64_t result = SLANG_ERR_INVALID;
+    struct slang_model_slot *slot = slang_model_slot_get(handle);
+    if (slot != NULL) {
+        result = slang_request_create_model_locked(slot->model, handle, n_ctx > 0 ? n_ctx : 4096, 0);
+        if (result > 0) slot->requests++;
+    }
+    SLANG_UNLOCK();
+    return result;
+}
+
+/* ---- embeddings and rerank (capability bit 512) ------------------------
+ *
+ * request_embed_configure rebuilds the request's context with embeddings on
+ * and the given pooling (-1 the model's own, else enum llama_pooling_type:
+ * 0 none, 1 mean, 2 cls, 3 last, 4 rank). n_batch = n_ubatch = n_ctx because
+ * non-causal attention needs the whole sequence in one micro-batch. Returns
+ * the pooling the context really uses. */
+int64_t slang_ggml_request_embed_configure(int64_t handle, int64_t pooling) {
+    if (pooling < -1 || pooling > 4) return SLANG_ERR_INVALID;
+    struct slang_request *request = slang_request_get(handle);
+    if (request == NULL || request->ctx == NULL) return SLANG_ERR_INVALID;
+    if (request->cancelled) return SLANG_ERR_CANCELLED;
+    /* A tree request shares the persistent tree context; it is never rebuilt. */
+    if (request->tree) return SLANG_ERR_INVALID;
+    struct llama_context_params cp = llama_context_default_params();
+    cp.n_ctx = (uint32_t)request->context_limit;
+    cp.n_batch = cp.n_ctx;
+    cp.n_ubatch = cp.n_ctx;
+    cp.embeddings = true;
+    cp.pooling_type = (enum llama_pooling_type)pooling;
+    struct llama_context *ctx = llama_init_from_model(request->model, cp);
+    if (ctx == NULL) return SLANG_ERR_NO_CTX;
+    llama_free(request->ctx);
+    request->ctx = ctx;
+    request->embed_valid = 0;
+    request->embed_tokens = 0;
+    request->legacy_logits_valid = 0;
+    return (int64_t)llama_pooling_type(ctx);
+}
+
+/* Runs the tokenized string buffer as ONE batch with every output on (the
+ * pooled vector needs every position). Not eval_prompt: that decodes the last
+ * token separately and may decode a warm-up filler, which would corrupt a
+ * pooled result. Refuses more tokens than the model was trained on: an
+ * absolute-position encoder (BERT) has no embedding past n_ctx_train, and a
+ * vocoder longer than that is out of its trained range too.
+ *
+ * llama_decode, not llama_encode: at llama.cpp 99b9548, decode on a context
+ * with no memory (every encoder-only arch, BERT and WavTokenizer-dec alike)
+ * forwards to encode() itself (llama-context.cpp `llama_context::decode`),
+ * and llama_model_has_encoder is true only for T5/T5ENCODER/EAGLE3/DFLASH, so
+ * switching on it would still pick decode for those models. */
+int64_t slang_ggml_request_embed_eval(int64_t handle) {
+    struct slang_request *request = slang_request_get(handle);
+    if (request == NULL || request->ctx == NULL) return SLANG_ERR_INVALID;
+    if (request->cancelled) return SLANG_ERR_CANCELLED;
+    request->embed_valid = 0;
+    if (request->tok_len <= 0) return SLANG_ERR_TOKENIZE;
+    int32_t trained = llama_model_n_ctx_train(request->model);
+    if (request->tok_len > request->context_limit ||
+        (trained > 0 && request->tok_len > (int64_t)trained))
+        return SLANG_ERR_OVERFLOW;
+    struct llama_batch batch = llama_batch_init((int32_t)request->tok_len, 0, 1);
+    for (int64_t i = 0; i < request->tok_len; i++) {
+        batch.token[i] = request->tok[i];
+        batch.pos[i] = (llama_pos)i;
+        batch.n_seq_id[i] = 1;
+        batch.seq_id[i][0] = 0;
+        batch.logits[i] = 1;
+    }
+    batch.n_tokens = (int32_t)request->tok_len;
+    llama_memory_clear(llama_get_memory(request->ctx), true);
+    int32_t rc = llama_decode(request->ctx, batch);
+    llama_batch_free(batch);
+    if (rc != 0) return SLANG_ERR_DECODE;
+    request->embed_tokens = request->tok_len;
+    request->embed_valid = 1;
+    return request->tok_len;
+}
+
+/* Copies the last embed_eval result as float32 in host byte order (little-
+ * endian on every supported target): pooling none gives tokens * n_embd_out
+ * floats, rank gives n_cls_out scores, any other pooling n_embd_out. */
+int64_t slang_ggml_request_embeddings_into(int64_t handle, uint8_t *buf, int64_t cap, int64_t *out_len) {
+    if (out_len != NULL) *out_len = 0;
+    struct slang_request *request = slang_request_get(handle);
+    if (request == NULL || request->ctx == NULL) return SLANG_ERR_INVALID;
+    if (!request->embed_valid) return SLANG_ERR_DECODE;
+    enum llama_pooling_type pooling = llama_pooling_type(request->ctx);
+    const float *values = NULL;
+    int64_t count = 0;
+    if (pooling == LLAMA_POOLING_TYPE_NONE) {
+        values = llama_get_embeddings(request->ctx);
+        count = request->embed_tokens * (int64_t)llama_model_n_embd_out(request->model);
+    } else {
+        values = llama_get_embeddings_seq(request->ctx, 0);
+        count = pooling == LLAMA_POOLING_TYPE_RANK
+            ? (int64_t)llama_model_n_cls_out(request->model)
+            : (int64_t)llama_model_n_embd_out(request->model);
+    }
+    if (values == NULL || count <= 0) return SLANG_ERR_DECODE;
+    return slang_copy_out(values, count * (int64_t)sizeof(float), buf, cap, out_len);
+}
+
+/* Appends the tokens of text[0..n) at request->tok[*at]. */
+static int slang_tokenize_append(struct slang_request *request, const char *text, int64_t n,
+                                 int parse_special) {
+    int32_t got = llama_tokenize(llama_model_get_vocab(request->model), text, (int32_t)n,
+                                 request->tok + request->tok_len,
+                                 (int32_t)(SLANG_TOK_CAP - request->tok_len), false, parse_special != 0);
+    if (got < 0) return 0;
+    request->tok_len += got;
+    return 1;
+}
+
+static int slang_token_append(struct slang_request *request, llama_token token) {
+    if (request->tok_len >= SLANG_TOK_CAP) return 0;
+    request->tok[request->tok_len++] = token;
+    return 1;
+}
+
+/* Replaces every `key` in `tmpl` with value[0..n). Caller frees. */
+static char *slang_replace_all(const char *tmpl, const char *key, const char *value, int64_t n) {
+    size_t key_len = strlen(key), hits = 0;
+    for (const char *p = strstr(tmpl, key); p != NULL; p = strstr(p + key_len, key)) hits++;
+    size_t size = strlen(tmpl) + hits * (size_t)n + 1;
+    char *out = (char *)malloc(size);
+    if (out == NULL) return NULL;
+    char *w = out;
+    const char *r = tmpl;
+    for (const char *p = strstr(r, key); p != NULL; p = strstr(r, key)) {
+        memcpy(w, r, (size_t)(p - r)); w += p - r;
+        memcpy(w, value, (size_t)n); w += n;
+        r = p + key_len;
+    }
+    strcpy(w, r);
+    return out;
+}
+
+/* Tokenizes a (query, document) pair for a rank-pooled model, exactly as
+ * llama.cpp's server format_prompt_rerank does: the model's "rerank" chat
+ * template when it has one, else [BOS] query [EOS] [SEP] doc [EOS] following
+ * the vocab's add flags. The string buffer holds the query bytes followed by
+ * the document bytes; query_len splits them. Returns the token count. */
+int64_t slang_ggml_request_rerank_tokenize(int64_t handle, int64_t query_len) {
+    struct slang_request *request = slang_request_get(handle);
+    if (request == NULL || request->model == NULL) return SLANG_ERR_INVALID;
+    if (request->cancelled) return SLANG_ERR_CANCELLED;
+    if (query_len < 0 || query_len > request->str_len) return SLANG_ERR_INVALID;
+    request->embed_valid = 0;
+    request->legacy_logits_valid = 0;
+    request->tok_len = 0;
+    const char *query = request->str;
+    const char *doc = request->str + query_len;
+    int64_t doc_len = request->str_len - query_len;
+    const struct llama_vocab *vocab = llama_model_get_vocab(request->model);
+    const char *tmpl = llama_model_chat_template(request->model, "rerank");
+    int ok = 1;
+    if (tmpl != NULL) {
+        char *with_query = slang_replace_all(tmpl, "{query}", query, query_len);
+        char *prompt = with_query == NULL ? NULL :
+            slang_replace_all(with_query, "{document}", doc, doc_len);
+        ok = prompt != NULL && slang_tokenize_append(request, prompt, (int64_t)strlen(prompt), 1);
+        free(with_query);
+        free(prompt);
+    } else {
+        llama_token eos = llama_vocab_eos(vocab);
+        if (eos == LLAMA_TOKEN_NULL) eos = llama_vocab_sep(vocab);
+        if (ok && llama_vocab_get_add_bos(vocab)) ok = slang_token_append(request, llama_vocab_bos(vocab));
+        if (ok) ok = slang_tokenize_append(request, query, query_len, 0);
+        if (ok && llama_vocab_get_add_eos(vocab)) ok = slang_token_append(request, eos);
+        if (ok && llama_vocab_get_add_sep(vocab)) ok = slang_token_append(request, llama_vocab_sep(vocab));
+        if (ok) ok = slang_tokenize_append(request, doc, doc_len, 0);
+        if (ok && llama_vocab_get_add_eos(vocab)) ok = slang_token_append(request, eos);
+    }
+    if (!ok) {
+        request->tok_len = 0;
+        return SLANG_ERR_TOKENIZE;
+    }
+    return request->tok_len;
+}
+
+/* Replaces the request's token list with raw ids, int32 little-endian, for
+ * input that is not text (a vocoder's audio codes). `len` is in bytes. The
+ * ids are checked against the request model's vocabulary. Returns the count;
+ * embed_eval or eval_prompt then runs them. */
+int64_t slang_ggml_request_tokens_set(int64_t handle, const uint8_t *ptr, int64_t len) {
+    struct slang_request *request = slang_request_get(handle);
+    if (request == NULL || request->model == NULL) return SLANG_ERR_INVALID;
+    if (request->cancelled) return SLANG_ERR_CANCELLED;
+    if (len < 0 || (len % 4) != 0 || (len > 0 && ptr == NULL)) return SLANG_ERR_INVALID;
+    int64_t count = len / 4;
+    if (count > SLANG_TOK_CAP) return SLANG_ERR_OVERFLOW;
+    int32_t vocab_size = llama_vocab_n_tokens(llama_model_get_vocab(request->model));
+    for (int64_t i = 0; i < count; i++) {
+        int32_t id;
+        memcpy(&id, ptr + i * 4, sizeof(id));
+        if (id < 0 || id >= vocab_size) return SLANG_ERR_INVALID;
+    }
+    if (count > 0) memcpy(request->tok, ptr, (size_t)len);
+    request->tok_len = count;
+    request->eval_start = 0;
+    request->embed_valid = 0;
+    request->legacy_logits_valid = 0;
+    return count;
+}
+
+/* Replaces the request's sampler chain. temp_milli <= 0 keeps greedy (the
+ * default every request starts with), with the repetition penalty in front
+ * when it is not 1.0. Otherwise the chain is penalties -> top_k (if > 0) ->
+ * top_p (if < 1000) -> temperature -> dist(seed); seed < 0 is a random seed.
+ * Fractions are in thousandths so the ABI stays int64-only. */
+int64_t slang_ggml_request_sampler_configure(int64_t handle, int64_t temp_milli, int64_t top_k,
+                                             int64_t top_p_milli, int64_t repeat_milli, int64_t seed) {
+    struct slang_request *request = slang_request_get(handle);
+    if (request == NULL || request->ctx == NULL || request->model == NULL) return SLANG_ERR_INVALID;
+    if (top_k < 0 || top_k > INT32_MAX || top_p_milli <= 0 || top_p_milli > 1000 ||
+        repeat_milli <= 0 || repeat_milli > 100000 || temp_milli > 100000 || seed > (int64_t)UINT32_MAX)
+        return SLANG_ERR_INVALID;
+    struct llama_sampler *chain = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    if (chain == NULL) return SLANG_ERR_NO_CTX;
+    if (repeat_milli != 1000)
+        llama_sampler_chain_add(chain, llama_sampler_init_penalties(
+            llama_vocab_n_tokens(llama_model_get_vocab(request->model)), 64,
+            (float)repeat_milli / 1000.0f, 0.0f, 0.0f));
+    if (temp_milli <= 0) {
+        llama_sampler_chain_add(chain, llama_sampler_init_greedy());
+    } else {
+        if (top_k > 0) llama_sampler_chain_add(chain, llama_sampler_init_top_k((int32_t)top_k));
+        if (top_p_milli < 1000)
+            llama_sampler_chain_add(chain, llama_sampler_init_top_p((float)top_p_milli / 1000.0f, 1));
+        llama_sampler_chain_add(chain, llama_sampler_init_temp((float)temp_milli / 1000.0f));
+        llama_sampler_chain_add(chain, llama_sampler_init_dist(seed < 0 ? LLAMA_DEFAULT_SEED : (uint32_t)seed));
+    }
+    llama_sampler_free(request->smpl);
+    request->smpl = chain;
+    return 0;
+}
+
+/* End-of-generation against the REQUEST's model. slang_ggml_is_eog asks the
+ * default model's vocabulary, which is wrong (or absent) for a request on a
+ * model handle. */
+int64_t slang_ggml_request_is_eog(int64_t handle, int64_t token) {
+    struct slang_request *request = slang_request_get(handle);
+    if (request == NULL || request->model == NULL) return SLANG_ERR_INVALID;
+    return llama_vocab_is_eog(llama_model_get_vocab(request->model), (llama_token)token) ? 1 : 0;
+}

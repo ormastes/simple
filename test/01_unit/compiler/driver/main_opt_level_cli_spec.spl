@@ -2,47 +2,54 @@
 # @req REQ-SSPEC-COMPILER
 # research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
+use std.spec.*
 use std.spec.step
+use compiler.driver.main.{ArgParser}
 
-use std.spec
-use std.spec.step
-
-
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-
-fn run_standalone_driver(args_line: text) -> (text, text, i64):
-    rt_process_run("/bin/sh", [
-        "-c",
-        "SIMPLE_FORCE_ARGS='" + args_line + "' bin/release/simple src/compiler/80.driver/main.spl"
-    ])
+fn parse_standalone_driver_args(args: [text]) -> (i64, text, i64):
+    var parser = ArgParser.create(args)
+    match parser.parse():
+        case Ok(parsed):
+            val level = parsed.opt_level ?? -1
+            (level, "", 0)
+        case Err(message):
+            (-1, message, 1)
 
 describe "standalone driver opt-level parsing":
     it "accepts inline legacy numeric opt levels 0 through 3":
         # @req REQ-SSPEC-COMPILER
         step("accepts inline legacy numeric opt levels 0 through 3")
         val levels = ["0", "1", "2", "3"]
-        for level in levels:
-            val result = run_standalone_driver("simple-compiler --opt-level=" + level + " missing_input.spl")
-            expect(result.0.contains("Invalid optimization level")).to_equal(false)
-            expect(result.0.contains("Optimization level must be 0-3")).to_equal(false)
+        var idx = 0
+        while idx < levels.len():
+            val result = parse_standalone_driver_args(["--opt-level=" + levels[idx], "missing_input.spl"])
+            expect(result.2).to_equal(0)
+            expect(result.0).to_equal(idx)
+            expect(result.1.contains("Invalid optimization level")).to_equal(false)
+            expect(result.1.contains("Optimization level must be 0-3")).to_equal(false)
+            idx = idx + 1
 
     it "accepts split legacy numeric opt levels 0 through 3":
         # @req REQ-SSPEC-COMPILER
         step("accepts split legacy numeric opt levels 0 through 3")
         val levels = ["0", "1", "2", "3"]
-        for level in levels:
-            val result = run_standalone_driver("simple-compiler --opt-level " + level + " missing_input.spl")
-            expect(result.0.contains("Invalid optimization level")).to_equal(false)
-            expect(result.0.contains("Optimization level must be 0-3")).to_equal(false)
+        var idx = 0
+        while idx < levels.len():
+            val result = parse_standalone_driver_args(["--opt-level", levels[idx], "missing_input.spl"])
+            expect(result.2).to_equal(0)
+            expect(result.0).to_equal(idx)
+            expect(result.1.contains("Invalid optimization level")).to_equal(false)
+            expect(result.1.contains("Optimization level must be 0-3")).to_equal(false)
+            idx = idx + 1
 
     it "rejects out-of-range legacy numeric opt levels":
-        val result = run_standalone_driver("simple-compiler --opt-level=4 missing_input.spl")
+        val result = parse_standalone_driver_args(["--opt-level=4", "missing_input.spl"])
         expect(result.2).to_equal(1)
-        expect(result.0).to_contain("Optimization level must be 0-3")
+        expect(result.1).to_contain("Optimization level must be 0-3")
 
     it "rejects non-numeric legacy opt levels":
         # @req REQ-SSPEC-COMPILER
         step("rejects non-numeric legacy opt levels")
-        val result = run_standalone_driver("simple-compiler --opt-level=basic missing_input.spl")
+        val result = parse_standalone_driver_args(["--opt-level=basic", "missing_input.spl"])
         expect(result.2).to_equal(1)
-        expect(result.0).to_contain("Invalid optimization level: basic")
+        expect(result.1).to_contain("Invalid optimization level: basic")

@@ -1,5 +1,16 @@
 # bootstrap Layer Expert
 
+## Host-config bootstrap settings (2026-11-22)
+
+Host tuning (reserve, Stage 3 tree RSS cap, Stage 3 direct threads, Stage 3
+file workers) is read from host config keys `mem_reserve_free_mib`,
+`stage3_tree_rss_cap_kib`, `stage3_threads`, `stage3_file_workers`
+via `scripts/bootstrap/lib/host-bootstrap-settings.shs` and
+`bootstrap-jobs.shs`; env vars still win, absent keys change nothing. Update
+with `sh scripts/setup/update-host-config.shs --dry-run`. A user
+`~/.config/simple/host.sdn` value shadows `config/host/<hostname>.sdn`.
+Table + precedence: `doc/07_guide/tooling/bootstrap_options.md` § Host settings.
+
 ## Phase 1 whole-test callback evidence (2026-10-27)
 
 For the configured Phase 1 whole-test callback, use

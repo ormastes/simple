@@ -7,7 +7,8 @@ same ids. Collisions are resolved by re-hashing.
 """
 
 use std.spec.*
-use compiler.mir.canonical_type_symbol_id_v1.{canonical_type_symbol_id_v1}
+use compiler.mir.canonical_type_symbol_id_v1.{canonical_type_symbol_id_v1, canonical_type_symbol_table_sorted_v1}
+use std.common.mcdc.model.{McdcSyntheticDecisionKeyV1, mcdc_synthetic_runtime_decision_id_v1}
 
 fn build_table(keys: [text]) -> Dict<text, i64>:
     var names: Dict<i64, text> = {}
@@ -55,3 +56,25 @@ describe "canonical type symbol ids":
         expect(moved >= 1000000000).to_equal(true)
         step("the moved id is itself deterministic")
         expect(canonical_type_symbol_id_v1("app.Foo", names)).to_equal(moved)
+
+    it "pre-seeds sorted canonical type tables deterministically regardless of input order":
+        val forward = canonical_type_symbol_table_sorted_v1(["zeta.Type", "alpha.Type", "mid.Type", "alpha.Type"])
+        val reverse = canonical_type_symbol_table_sorted_v1(["mid.Type", "alpha.Type", "zeta.Type"])
+        for k in ["alpha.Type", "mid.Type", "zeta.Type"]:
+            expect(forward.id_by_key[k]).to_equal(reverse.id_by_key[k])
+            expect(forward.key_by_id[forward.id_by_key[k]]).to_equal(k)
+
+describe "mcdc synthetic runtime decision ids":
+    it "derives module-scoped synthetic decision ids deterministically independent of sibling order":
+        val d1 = mcdc_synthetic_runtime_decision_id_v1(
+            McdcSyntheticDecisionKeyV1(authored_path: "src/lib/a.spl", owner_module: "lib.a", ordinal: 1))
+        val d1_again = mcdc_synthetic_runtime_decision_id_v1(
+            McdcSyntheticDecisionKeyV1(authored_path: "src/lib/a.spl", owner_module: "lib.a", ordinal: 1))
+        val d2_other_mod = mcdc_synthetic_runtime_decision_id_v1(
+            McdcSyntheticDecisionKeyV1(authored_path: "src/lib/b.spl", owner_module: "lib.b", ordinal: 1))
+        val d3_next_ord = mcdc_synthetic_runtime_decision_id_v1(
+            McdcSyntheticDecisionKeyV1(authored_path: "src/lib/a.spl", owner_module: "lib.a", ordinal: 2))
+        expect(d1).to_equal(d1_again)
+        expect(d1 > 0).to_equal(true)
+        expect(d1 != d2_other_mod).to_equal(true)
+        expect(d1 != d3_next_ord).to_equal(true)

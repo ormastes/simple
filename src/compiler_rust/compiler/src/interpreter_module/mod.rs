@@ -33,6 +33,6 @@ pub(crate) use module_loader::{
     private_call_caller,
     ClosureOriginGuard,
 };
-pub use module_loader::PRIVATE_FN_VISIBILITY_HINT;
+pub use module_loader::{FRIEND_SYMBOL_VISIBILITY_HINT, PRIVATE_FN_VISIBILITY_HINT};
 pub use module_merger::merge_module_definitions;
 pub use path_resolution::{resolve_module_path, clear_path_resolution_cache, print_resolve_stats, reset_resolve_stats};

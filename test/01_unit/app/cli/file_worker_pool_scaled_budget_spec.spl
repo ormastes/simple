@@ -14,7 +14,8 @@ use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1,
     file_worker_pool_host_pointer_bits_for_v1,
     file_worker_pool_probe_pointer_bits_v1, file_worker_pool_host_pointer_bits_v1,
     file_worker_pool_live_usable_kb_v1, file_worker_pool_admission_usable_kb_v1,
-    file_worker_pool_live_admission_usable_kb_v1}
+    file_worker_pool_live_admission_usable_kb_v1,
+    FILE_WORKER_UNIT_WORKER_KB_V1, file_worker_pool_nonzero_price_kb_v1}
 use app.cli.shard_mem_clamp.{SHARD_HIR_WORKER_KB_V1, SHARD_MIR_WORKER_KB_V1,
     shard_host_worker_budget_kb,
     shard_threads_cap_for, shard_worker_budget_kb, shard_tree_budget_kb_for, shard_cgroup_memory_max_kb,
@@ -321,3 +322,17 @@ describe "file worker pool: host pointer width comes from the running image":
         val first = file_worker_pool_host_pointer_bits_v1()
         expect(first).to_equal(64)
         expect(file_worker_pool_host_pointer_bits_v1()).to_equal(first)
+
+
+    it "a zero unit price falls back to the unit price and admits 4 workers on the 2026-11-22 host":
+        # bug per_file_pool_zero_worker_admission_2026-11-22: MIR priced at 0 kB
+        # admitted 0 workers at 53 GB free under a 44 GB tree budget.
+        val price = file_worker_pool_nonzero_price_kb_v1(0, FILE_WORKER_UNIT_WORKER_KB_V1)
+        expect(price).to_equal(6291456)
+        expect(file_worker_pool_nonzero_price_kb_v1(3500000, FILE_WORKER_UNIT_WORKER_KB_V1)).to_equal(3500000)
+        expect(FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1).to_equal(9000000)
+        val hir = shard_threads_parent_cap_for(40, price, 53436100, 44000000, true, 5374532)
+        val mir = shard_threads_cap_for(shard_threads_cap_for(40, price, 53543896), price, 44000000)
+        expect(hir).to_equal(4)
+        expect(mir).to_equal(4)
+        expect(shard_threads_cap_for(shard_threads_cap_for(40, 0, 53543896), 0, 44000000)).to_equal(1)

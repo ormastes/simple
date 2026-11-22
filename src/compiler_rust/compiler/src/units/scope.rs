@@ -343,6 +343,7 @@ mod tests {
             target,
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         }
     }
 
@@ -513,6 +514,7 @@ mod module_scope_tests {
             target: ImportTarget::Group(names.iter().map(|n| ImportTarget::Single((*n).into())).collect()),
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         }
     }
 

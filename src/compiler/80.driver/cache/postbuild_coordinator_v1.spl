@@ -11,8 +11,15 @@
 # touch binary=ready. A job that carries a different generation than the one it
 # stamps is refused, and a file whose embedded generation is not the directory's
 # is ignored on load. Lockless: no globals.
-use compiler.driver.cache.tldr_layout_v1.{tldr_publish_v1}
-use std.io_runtime.{file_exists, file_read}
+use std.nogc_sync_mut.io.disk_admission.{disk_publish_admitted}
+use std.nogc_sync_mut.io.file_ops.{file_publish_noreplace}
+use std.io_runtime.{file_exists, file_read, file_write, file_delete, dir_create_all, getpid}
+
+var _postbuild_publish_seq: i64 = 0
+
+fn _postbuild_next_seq() -> i64:
+    _postbuild_publish_seq = _postbuild_publish_seq + 1
+    _postbuild_publish_seq
 
 pub val POSTBUILD_SCHEMA_V1: text = "simple.postbuild/1"
 
@@ -69,9 +76,27 @@ pub fn postbuild_record_v1(root: text, current_generation: text, job_generation:
         if file_read(path) == content:
             return ""
         return "postbuild: {path} is settled with different bytes"
-    if not tldr_publish_v1(path, content):
+    val slash = path.rfind("/")
+    val dir = if slash > 0: path.substring(0, slash) else: "."
+    if slash > 0 and not dir_create_all(dir):
         return "postbuild: publish failed: {path}"
-    ""
+    if not disk_publish_admitted(dir, content.byte_len()):
+        return "postbuild: publish failed: {path}"
+    val tmp = "{path}.{getpid()}.{_postbuild_next_seq()}.tmp"
+    if not file_write(tmp, content):
+        val _del = file_delete(tmp)
+        return "postbuild: publish failed: {path}"
+    val published = file_publish_noreplace(tmp, path)
+    val _del = file_delete(tmp)
+    match published:
+        case Ok(created):
+            if created:
+                return ""
+            if file_read(path) == content:
+                return ""
+            return "postbuild: {path} is settled with different bytes"
+        case Err(_):
+            return "postbuild: publish failed: {path}"
 
 # (state, digest) of one kind, "pending" when absent, foreign or malformed.
 fn _postbuild_read_kind_v1(root: text, generation: text, kind: text) -> (text, text):

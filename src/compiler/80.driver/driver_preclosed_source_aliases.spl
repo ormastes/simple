@@ -1,16 +1,22 @@
 # Replay import names without expanding the admitted physical source frontier.
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.common.source_root_resolution.{SourceRootResolutionV1}
-use compiler.common.library_mode_policy_v1.{library_mode_import_key_v1}
+use compiler.common.library_mode_policy_v1.{library_mode_import_key_v1,
+    library_mode_effective_family_v1, library_mode_generic_import_v1}
 use compiler.driver.driver_library_mode_resolution_v1.{driver_library_mode_resolve_v1,
     driver_library_mode_native_owner_v1}
 use compiler.driver.driver_source_loading.{
     _driver_physical_source_key_strict_v1, _driver_entry_import_dirname,
-    driver_closure_import_specs_v1, driver_resolve_closure_import_v1,
-    driver_closure_native_owner_v1}
+    _driver_resolve_entry_import,
+    driver_entry_resolver_cache_release_v1,
+    driver_entry_sync_resolver_cwd_v1,
+    driver_closure_import_specs_from_source_v1,
+    driver_file_natively_owns_in_memory_v1}
 
 pub fn driver_preclosed_source_aliases_v1(sources: [SourceFile],
         source_roots: [text], snapshot_root: text, library_mode: text = "") -> Result<[SourceFile], text>:
+    driver_entry_resolver_cache_release_v1()
+    driver_entry_sync_resolver_cwd_v1()
     val snapshot = _driver_physical_source_key_strict_v1(snapshot_root)
     if snapshot == "": return Err("PRECLOSED_ALIAS_SNAPSHOT_INVALID")
     var physical_rows: Dict<text, i64> = {}
@@ -39,30 +45,75 @@ pub fn driver_preclosed_source_aliases_v1(sources: [SourceFile],
     for original in sources:
         result = result.push(original)
     var seen_imports: Dict<text, text> = {}
+    var resolved_physical_by_key: Dict<text, text> = {}
     for source_index in physical_order:
         val source = sources[source_index]
         val importer_dir = _driver_entry_import_dirname(source.path)
         val importer_module = if source.module_name.ends_with(".__init__"):
             source.module_name[0:source.module_name.len() - 9]
         else: source.module_name
-        for spec in driver_closure_import_specs_v1(source.path):
+        val effective_family = if library_mode != "": library_mode_effective_family_v1(library_mode, source.module_name) else: ""
+        for spec in driver_closure_import_specs_from_source_v1(source.path, source.content):
             val authored_alias = if spec.starts_with(".") and not spec.starts_with(".."):
                 importer_module + spec
             else: spec
             val alias = library_mode_import_key_v1(authored_alias, library_mode, source.module_name)
             if alias == "": return Err("LIBRARY_MODE_IMPORT_CONTEXT_INVALID: " + source.path)
-            val selected = driver_library_mode_resolve_v1(spec, source_roots, importer_dir, library_mode, source.module_name)?
-            val selected_path = match selected:
-                case SourceRootResolutionV1.Found(path): path
-                case SourceRootResolutionV1.Ambiguous(directory):
-                    return Err("SOURCE_ROOT_AMBIGUOUS: preclosed import '" + spec + "' in '" + source.path + "' under '" + directory + "'")
-                case SourceRootResolutionV1.Missing:
-                    # Same distinction as the ordinary entry closure loader.
+            val memo_key = importer_dir + "\t" + effective_family + "\n" + spec
+            var physical = ""
+            var owner = ""
+            if resolved_physical_by_key.contains_key(memo_key):
+                val cached = resolved_physical_by_key[memo_key]
+                if cached == "@MISSING":
                     if alias.contains("."):
                         return Err("PRECLOSED_ALIAS_IMPORT_MISSING: " + source.path + "|" + spec)
                     continue
-            val owner = driver_library_mode_native_owner_v1(selected_path, spec, importer_dir, library_mode, source.module_name)
-            val physical = _driver_physical_source_key_strict_v1(owner)
+                physical = cached
+                owner = cached
+            else:
+                val selected = driver_library_mode_resolve_v1(spec, source_roots, importer_dir, library_mode, source.module_name)?
+                val selected_path = match selected:
+                    case SourceRootResolutionV1.Found(path): path
+                    case SourceRootResolutionV1.Ambiguous(directory):
+                        return Err("SOURCE_ROOT_AMBIGUOUS: preclosed import '" + spec + "' in '" + source.path + "' under '" + directory + "'")
+                    case SourceRootResolutionV1.Missing:
+                        # Same distinction as the ordinary entry closure loader.
+                        if alias.contains("."):
+                            return Err("PRECLOSED_ALIAS_IMPORT_MISSING: " + source.path + "|" + spec)
+                        resolved_physical_by_key[memo_key] = "@MISSING"
+                        continue
+                owner = selected_path
+                val selected_phys = _driver_physical_source_key_strict_v1(selected_path)
+                if library_mode == "" or not library_mode_generic_import_v1(spec):
+                    val spelled = spec.replace(".", "/")
+                    val at_own_path = selected_path.ends_with("/" + spelled + ".spl") or
+                        selected_path.ends_with("/" + spelled + "/__init__.spl") or
+                        selected_path.ends_with("/" + spelled + "/mod.spl")
+                    if selected_phys != "" and physical_rows.contains_key(selected_phys):
+                        val sel_src = sources[physical_rows[selected_phys]]
+                        if at_own_path or driver_file_natively_owns_in_memory_v1(selected_path, sel_src.content, spec):
+                            physical = selected_phys
+                        else:
+                            val native_cand = _driver_resolve_entry_import(spec, importer_dir)
+                            val native_phys = if native_cand != "": _driver_physical_source_key_strict_v1(native_cand) else: ""
+                            if native_cand != "" and native_cand != selected_path and native_phys != "" and physical_rows.contains_key(native_phys):
+                                val nat_src = sources[physical_rows[native_phys]]
+                                if driver_file_natively_owns_in_memory_v1(native_cand, nat_src.content, spec):
+                                    owner = native_cand
+                                    physical = native_phys
+                                else:
+                                    physical = selected_phys
+                            else:
+                                owner = driver_library_mode_native_owner_v1(selected_path, spec, importer_dir, library_mode, source.module_name)
+                                physical = _driver_physical_source_key_strict_v1(owner)
+                    else:
+                        owner = driver_library_mode_native_owner_v1(selected_path, spec, importer_dir, library_mode, source.module_name)
+                        physical = _driver_physical_source_key_strict_v1(owner)
+                else:
+                    owner = driver_library_mode_native_owner_v1(selected_path, spec, importer_dir, library_mode, source.module_name)
+                    physical = _driver_physical_source_key_strict_v1(owner)
+                if physical != "" and physical.starts_with(snapshot + "/") and physical_rows.contains_key(physical):
+                    resolved_physical_by_key[memo_key] = physical
             if physical == "" or not physical.starts_with(snapshot + "/") or
                     not physical_rows.contains_key(physical):
                 return Err("PRECLOSED_ALIAS_PROVIDER_NOT_ADMITTED: " + source.path + "|" + spec + "|" + owner)

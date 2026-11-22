@@ -1,7 +1,7 @@
 # Dynamic Library Loader (SFFI)
 #
-# Provides convention-based dynamic loading of .so/.dll for SFFI.
-# Convention: rt_{prefix}_{fn} -> $SIMPLE_SFFI_PATH/libspl_{prefix}.so
+# Provides convention-based dynamic loading of .so/.dylib/.dll for SFFI.
+# Convention: rt_{prefix}_{fn} -> $SIMPLE_SFFI_PATH/libspl_{prefix}{.so|.dylib|.dll}
 #
 # The native runtime and Rust bootstrap interpreter both register the loader
 # externs; provider admission and callable lifetime still require this owner.
@@ -215,7 +215,7 @@ impl DynI64FnSlot:
         result
 
 use std.common.structural.digest.hash256.{hash256_hex_valid}
-use std.io_runtime.{env_get, file_exists}
+use std.io_runtime.{env_get, file_exists, host_os}
 use std.nogc_sync_mut.sffi.dynlib_lifetime_owner_v1.{
     dynlib_lifetime_register_v1, dynlib_lifetime_begin_v1,
     dynlib_lifetime_end_v1, dynlib_lifetime_retire_v1,
@@ -611,6 +611,9 @@ impl DynLoader:
 
 # Return the current platform name: "linux", "macos", "windows", or "freebsd".
 pub fn platform_name() -> text:
+    val detected = host_os()
+    if detected == "windows" or detected == "macos" or detected == "linux" or detected == "freebsd":
+        return detected
     val os = env_get("OS") ?? ""
     if os == "Windows_NT":
         return "windows"
@@ -636,16 +639,13 @@ fn platform_lib_extension() -> text:
 
 # Build the library path for a given SFFI prefix.
 # Reads SIMPLE_SFFI_PATH env var; defaults to "build" if empty.
-# On Windows (OS == "Windows_NT") uses .dll extension, otherwise .so.
+# Uses platform_lib_extension() (.dll on Windows, .dylib on macOS, .so elsewhere).
 fn sffi_lib_path(prefix: text) -> text:
     var base = env_get("SIMPLE_SFFI_PATH") ?? ""
     if base == "":
         base = "build"
-    val os = env_get("OS")
-    if os == "Windows_NT":
-        "{base}/libspl_{prefix}.dll"
-    else:
-        "{base}/libspl_{prefix}.so"
+    val ext = platform_lib_extension()
+    "{base}/libspl_{prefix}{ext}"
 
 # Call an SFFI function by its full rt_{prefix}_{rest} name.
 # Parses the prefix from the function name, resolves the library path

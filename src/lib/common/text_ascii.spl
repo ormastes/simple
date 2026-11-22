@@ -43,3 +43,46 @@ pub fn to_lower_ascii(s: text) -> text:
             result = result + ch
         i = i + 1
     return result
+
+# C-MIG-0044 twin of rt_text_is_ascii (boot C: riscv64 baremetal_runtime_core
+# .inc.c, PR #10638): true iff every UTF-8 byte of `s` is < 0x80.
+use std.common.text_bytes.{text_to_bytes}
+use std.common.char_from_code_pure.{char_from_code}
+
+@allow(primitive_api)  # twin mirrors the rt_text_is_ascii(text) -> bool runtime signature for dual-run
+pub fn text_is_ascii_pure(s: text) -> bool:
+    val b = text_to_bytes(s)
+    var i = 0
+    while i < b.len():
+        if b[i].to_i64() >= 128:
+            return false
+        i = i + 1
+    return true
+
+# C-MIG-0045 twin of rt_string_from_byte_array (same boot C file): decodes
+# well-formed UTF-8 bytes into text codepoint by codepoint. Malformed input
+# is outside the twin's contract (see dual_run_boot_c_twins_spec.spl).
+pub fn text_from_bytes_pure(b: [u8]) -> text:
+    var result = ""
+    var i = 0
+    val n = b.len()
+    while i < n:
+        val c0 = b[i].to_i64()
+        var code = c0
+        var extra = 0
+        if c0 >= 0xF0:
+            code = c0 % 8
+            extra = 3
+        elif c0 >= 0xE0:
+            code = c0 % 16
+            extra = 2
+        elif c0 >= 0xC0:
+            code = c0 % 32
+            extra = 1
+        var k = 1
+        while k <= extra and i + k < n:
+            code = code * 64 + (b[i + k].to_i64() % 64)
+            k = k + 1
+        result = result + char_from_code(code)
+        i = i + 1 + extra
+    return result

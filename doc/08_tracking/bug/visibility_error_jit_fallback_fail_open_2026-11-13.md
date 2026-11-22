@@ -1,5 +1,6 @@
 # Visibility error swallowed by the JIT -> interpreter fallback (2026-11-13)
 
+- **Status:** fixed (2026-11-13; friend-symbol visibility propagation + cache-hit pre-merge check hardened 2026-11-22)
 - **Ids:** `visibility_error_jit_fallback_fail_open_2026-11-13` (P2, fail-open),
   follow-up `jit_main_lane_skips_private_import_visibility_2026-11-13` (P2, fixed
   2026-11-14, see the end of this file).

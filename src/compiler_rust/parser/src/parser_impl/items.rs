@@ -277,6 +277,7 @@ impl<'a> Parser<'a> {
                     ),
                     path,
                     target,
+                    attributes: vec![],
                 }))
             }
             TokenKind::Import => {
@@ -303,6 +304,7 @@ impl<'a> Parser<'a> {
                     ),
                     path,
                     target,
+                    attributes: vec![],
                 }))
             }
             TokenKind::Val => {
@@ -663,11 +665,17 @@ impl<'a> Parser<'a> {
                 }
                 Ok(node)
             }
-            TokenKind::Use
-            | TokenKind::Export
-            | TokenKind::Trait
-            | TokenKind::From
-            | TokenKind::Import => self.parse_item(),
+            TokenKind::Use | TokenKind::Export | TokenKind::From | TokenKind::Import => {
+                let mut node = self.parse_item()?;
+                match &mut node {
+                    Node::UseStmt(u) => u.attributes = attributes,
+                    Node::MultiUse(m) => m.attributes = attributes,
+                    Node::ExportUseStmt(e) => e.attributes = attributes,
+                    _ => {}
+                }
+                Ok(node)
+            }
+            TokenKind::Trait => self.parse_item(),
             // Design A.5 data items: `@section/@align/@global const|static`
             // keep their attributes so the backend can place the bytes.
             TokenKind::Const | TokenKind::Static => {
@@ -768,8 +776,18 @@ impl<'a> Parser<'a> {
                 Ok(node)
             }
             // Everything else (val/var/const/static/trait/type/actor/use/...) shares the
-            // attribute-less `pub` item table rather than being rejected outright.
-            _ => self.parse_pub_item_with_visibility(visibility),
+            // attribute-less `pub` item table rather than being rejected outright, while
+            // preserving attributes on `pub use` / `pub const` / `pub static`.
+            _ => {
+                let mut node = self.parse_pub_item_with_visibility(visibility)?;
+                match &mut node {
+                    Node::ExportUseStmt(e) => e.attributes = attributes,
+                    Node::Const(c) => c.attributes = attributes,
+                    Node::Static(s) => s.attributes = attributes,
+                    _ => {}
+                }
+                Ok(node)
+            }
         }
     }
 }

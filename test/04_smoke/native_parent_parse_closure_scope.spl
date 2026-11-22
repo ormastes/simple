@@ -55,8 +55,19 @@ fn main() -> i64:
     val roots = [root + "/src/app"]
     val policy = sha256_text("parent-closure-scope-fixture")
     if not dir_create_all(root + "/src/app"): return 2
-    if not file_write(root + "/src/app/main.spl", "use app.helper.{{answer}}\nfn main() -> i64: answer()\n"): return 2
-    if not file_write(root + "/src/app/helper.spl", "pub fn answer() -> i64: 37\n"): return 2
+    if not file_write(root + "/src/app/main.spl", "use app.helper0.answer0\nfn main() -> i64: answer0()\n"): return 2
+    var fixture_index = 0
+    while fixture_index < 130:
+        val next_index = fixture_index + 1
+        var source = if next_index < 130:
+            "use app.helper{next_index}.answer{next_index}\npub fn answer{fixture_index}() -> i64: answer{next_index}()\n"
+        else:
+            "pub fn answer{fixture_index}() -> i64: 37\n"
+        # Reuse a pre-checkpoint import through both resolve_cache and discovered.
+        if fixture_index == 65:
+            source = "use app.helper0.answer0\n" + source
+        if not file_write(root + "/src/app/helper{fixture_index}.spl", source): return 2
+        fixture_index = fixture_index + 1
     if not git_ok(root, ["init", "-q"]): return 2
     if not git_ok(root, ["add", "src"]): return 2
     if not git_ok(root, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"]): return 2
@@ -71,8 +82,9 @@ fn main() -> i64:
     check(first, "cold-selected request publishes after cleanup")
     if not first: return 1
     val cold = open_paths(root, roots, producer, policy)
-    check(cold.len() == 2 and cold.contains("src/app/main.spl") and cold.contains("src/app/helper.spl"),
-        "complete two-file closure")
+    check(cold.len() == 131 and cold.contains("src/app/main.spl") and
+        cold.contains("src/app/helper0.spl") and cold.contains("src/app/helper129.spl"),
+        "complete 131-file closure across two chunk checkpoints")
     val warm = native_build_publish_parse_closure_v1(root, roots, "src/app/main.spl",
         policy, producer, root + "/build/frontend/warm")
     check(warm, "warm request reopens reset memo")
@@ -93,7 +105,7 @@ fn main() -> i64:
     val scoped = native_build_publish_parse_closure_v1(root, roots, "src/app/main.spl",
         policy, producer, root + "/build/frontend/measured")
     val scoped_live = rt_heap_registry_count() - before_scoped
-    check(scoped and baseline_paths.len() == 2, "both measured paths perform real closure")
+    check(scoped and baseline_paths.len() == 131, "both measured paths perform real closure")
     check(baseline_live > 0 and scoped_live >= 0 and scoped_live * 2 < baseline_live,
         "scope removes more than half the retained allocations")
     print "allocation_baseline={baseline_live} allocation_scoped={scoped_live}"

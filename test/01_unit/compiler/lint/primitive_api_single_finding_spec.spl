@@ -24,7 +24,7 @@ use compiler.tools.fix.builtins.{builtin_fix_producers, run_builtin_producer}
 use compiler.tools.fix.producer.{fix_unit_from_source}
 use compiler.tools.lint.main.{Linter}
 
-val SRC = "# header\n    pub fn truncate(value: i64) -> i32:\n        return value as i32\n"
+val SRC = "# header\n    pub fn truncate(value: i64, name: text) -> i32:\n        return value as i32\n"
 
 fn _fake_fix_count(source: text) -> i64:
     var n = 0
@@ -50,9 +50,11 @@ describe "primitive_api single finding":
         # @capture(statistics): finding count and type paths for the i64/i32 fixture
         step("Scan a pub fn with a bare i64 param and an i32 return")
         val findings = primitive_api_findings("sample.spl", SRC.split("\n"))
-        expect(findings.len()).to_equal(2)  # oracle: one i64 param + one i32 return
+        expect(findings.len()).to_equal(3)  # oracle: one i64 param + one text param + one i32 return
         expect(findings[0].type_path).to_equal("truncate.param.value")  # oracle: fixture param name
-        expect(findings[1].type_path).to_equal("truncate.return")  # oracle: fixture return position
+        expect(findings[1].type_path).to_equal("truncate.param.name")  # oracle: fixture text param
+        expect(findings[1].code).to_equal("SPL-TEXT-001")  # oracle: bare text is its own finding code
+        expect(findings[2].type_path).to_equal("truncate.return")  # oracle: fixture return position
 
     it "points the span at the offending type token, not the line":
         # @req REQ-DPOL-003
@@ -65,14 +67,16 @@ describe "primitive_api single finding":
         expect(p.start).to_equal(9 + 27)  # oracle: "# header\n" is 9 bytes, then 27 bytes into line 2
         expect(p.end - p.start).to_equal(3)  # oracle: len("i64")
         expect(SRC.slice(p.start, p.end)).to_equal("i64")  # oracle: the span covers exactly the type
-        val r = findings[1]
+        val t = findings[1]
+        expect(SRC.slice(t.start, t.end)).to_equal("text")  # oracle: text span covers exactly the type
+        val r = findings[2]
         expect(SRC.slice(r.start, r.end)).to_equal("i32")  # oracle: return span covers exactly the type
 
     it "offers no fix whose edit would leave the text unchanged":
         # @req REQ-DPOL-004
         # @capture(statistics): replacement count and fix-producer primitive_api count
         step("Count replacements on the compat records and in the fix producers")
-        expect(check_primitive_api(SRC, "sample.spl").len()).to_equal(2)  # oracle: one help-only record per finding
+        expect(check_primitive_api(SRC, "sample.spl").len()).to_equal(3)  # oracle: one help-only record per finding
         expect(_fake_fix_count(SRC)).to_equal(0)  # oracle: help only, never a replacement
         expect(_producer_primitive_fixes(SRC)).to_equal(0)  # oracle: simple fix / code actions get no primitive_api fix
 

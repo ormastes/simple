@@ -26,7 +26,8 @@ use compiler.backend.llvm_codegen_adapter.{llvm_compile_module_direct,
     llvm_codegen_target_config_for, llvm_codegen_bare_metal_requested,
     llvm_codegen_module_scope_enabled_v1}
 use compiler.backend._MirToLlvm.asm_constraints_helpers.{llvm_bootstrap_string_globals_retain_for_scope}
-use compiler.backend.llvm_backend_tools.{llvm_object_argv_v1}
+use compiler.backend.llvm_backend_tools.{llvm_object_argv_v1,
+    compile_ir_to_object_path, llvm_object_tool_v1}
 use compiler.backend.llvm_ir_builder.{llvm_codegen_error_from_ir}
 use std.nogc_sync_mut.io.file_ops.{file_write}
 use compiler.backend.codegen_types.{CodegenOutput}
@@ -652,6 +653,27 @@ pub fn compile_llvm_module_to_object_path(
     if not backend_helper_llc_available():
         backend_aot_write_diagnostic(diagnostic_path, "llc not found")
         return 1
+    # ONE transient scope per module covers storage lowering, the backend MIR
+    # optimization copy, IR translation and object emission. The result is a
+    # scalar status, so nothing is promoted and scope end frees all of it --
+    # the shape llvm_module_ir_to_path_v1 already has. The two-scope lane below
+    # promoted the optimized MIR out of an optimization-only scope, which made
+    # it persistent: with no collector every module's copy stayed live for the
+    # whole build (bug serial_codegen_retains_optimized_mir_2026-11-21). That
+    # lane remains only for the two cases llvm_compile_module_direct_to_path
+    # itself keeps unscoped (SIMPLE_CODEGEN_MODULE_SCOPE=0, bitcode debug).
+    val one_scope = llvm_codegen_module_scope_enabled_v1() and
+        (env_get_opt("SIMPLE_LLVM_BITCODE_DEBUG") ?? "") != "1"
+    val bare_metal = if val config = retained_llvm_config:
+        config.triple.os == "none" or config.triple.os == "simpleos"
+    else:
+        llvm_codegen_bare_metal_requested()
+    val llvm_config = retained_llvm_config ?? llvm_codegen_target_config_for(options, bare_metal)
+    if one_scope:
+        # Process-lifetime caches must not be first built inside the scope
+        # (same warm-ups as llvm_compile_module_direct_to_path).
+        val _warm_tool = llvm_object_tool_v1()
+        bootstrap_llvm_name_index_ensure()
     var scoped = transient_array_scope_state_v1() == 0 and transient_scope_begin()
     val storage_lowered = lower_mir_storage_project_fields_v1(
         module, storage_bindings)
@@ -671,6 +693,22 @@ pub fn compile_llvm_module_to_object_path(
         return 1
     val backend_module = optimize_module_for_backend(
         storage_lowered.module, backend_helper_mir_opt_level(opt), "llvm")
+    if scoped and one_scope:
+        val llvm_ir = llvm_translate_module_direct_ir(
+            options, backend_module, retained_llvm_config)
+        val status = compile_ir_to_object_path(
+            llvm_ir, llvm_config, options.opt_level, object_path, diagnostic_path,
+            retained_llvm_config.?)
+        val paused = transient_scope_pause()
+        if paused:
+            reset_provider_report()
+        # The bootstrap translator publishes heap text into the exported
+        # string-global cache; retain it before scope end so it never dangles.
+        val strings_kept = paused and llvm_bootstrap_string_globals_retain_for_scope()
+        val ended = transient_scope_end()
+        if not paused or not strings_kept or not ended:
+            panic("LLVM codegen scope ownership failed")
+        return status
     if scoped:
         val paused = transient_scope_pause()
         if paused:

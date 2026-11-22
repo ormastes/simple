@@ -1,0 +1,81 @@
+"""
+## Purpose and audience
+Purpose: Verify Pure-Simple MIR lowering of integer `.to_string(radix)` calls across bases 2..36, negative values, unsigned U64 high-bit handling, and invalid-radix panic behavior.
+Audience: Compiler engineers maintaining MIR method lowering and integer formatting parity.
+"""
+# @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+# @req REQ-COMPFIX-1
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_function(src: text, target_name: text) -> text:
+    val filename = "int_to_string_radix_" + target_name + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var result = ""
+    for error in hir_lowering.errors:
+        result = result + "HIR_ERROR:" + error.message + "\n"
+    for error in mir_lowering.errors:
+        result = result + "MIR_ERROR:" + error.message + "\n"
+    for function in mir.functions.values():
+        if function.name == target_name or function.name.ends_with("." + target_name):
+            result = result + serialize_mir_function(function)
+    result
+
+describe "Integer.to_string(radix) MIR lowering":
+    it "lowers signed i64.to_string(16) with radix guard and digit builder":
+        step("Lower i64.to_string(16) through frontend, HIR, and MIR")
+        val source = "fn hex_i64(x: i64) -> text:\n    x.to_string(16)\n"
+        val mir = lower_function(source, "hex_i64")
+
+        expect(mir.contains("HIR_ERROR:")).to_equal(false)
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(mir.contains("unresolved")).to_equal(false)
+        expect(mir).to_contain("rt_panic")
+        expect(mir).to_contain("to_string radix must be between 2 and 36")
+        expect(mir).to_contain("rt_char_from_code")
+        expect(mir).to_contain("rt_string_concat")
+        expect(mir).to_contain("rt_interp_cstr")
+
+    it "lowers binary and base-36 conversions on i32 without unresolved errors":
+        step("Lower i32.to_string(2) and i32.to_string(36) through MIR")
+        val source = "fn fmt_bases(x: i32) -> text:\n    val b = x.to_string(2)\n    val z = x.to_string(36)\n    b + z\n"
+        val mir = lower_function(source, "fmt_bases")
+
+        expect(mir.contains("HIR_ERROR:")).to_equal(false)
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(mir.contains("unresolved")).to_equal(false)
+        expect(mir).to_contain("rt_char_from_code")
+
+    it "lowers unsigned u64.to_string(16) without signed negation overflow":
+        step("Lower u64.to_string(radix) through unsigned shift-peel MIR")
+        val source = "fn hex_u64(x: u64, radix: i64) -> text:\n    x.to_string(radix)\n"
+        val mir = lower_function(source, "hex_u64")
+
+        expect(mir.contains("HIR_ERROR:")).to_equal(false)
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(mir.contains("unresolved")).to_equal(false)
+        expect(mir).to_contain("rt_panic")
+        expect(mir).to_contain("rt_char_from_code")
+        expect(mir).to_contain("rt_string_concat")
+
+    it "keeps zero-arg to_string unchanged and emits negative/zero branch checks for signed radices":
+        step("Lower zero-arg to_string() alongside negative and boundary radix calls")
+        val source = "fn fmt_edge(x: i64) -> text:\n    val plain = x.to_string()\n    val neg = (-255).to_string(16)\n    val zero = 0.to_string(2)\n    val maxb = 35.to_string(36)\n    plain + neg + zero + maxb\n"
+        val mir = lower_function(source, "fmt_edge")
+
+        expect(mir.contains("HIR_ERROR:")).to_equal(false)
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(mir.contains("unresolved")).to_equal(false)
+        expect(mir).to_contain("rt_char_from_code")
+        expect(mir).to_contain("rt_interp_cstr")
+        expect(mir).to_contain("rt_string_concat")

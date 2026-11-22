@@ -1,0 +1,310 @@
+use std.spec.{step}
+use app.io.env_ops.{env_get, env_set, env_unset}
+use app.io.file_ops.{path_absolute}
+use app.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{dir_create_all, dir_remove_all, file_write}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.process_memory.{macos_vm_available_from_vm_stat_v1,
+    physmem_total_from_bytes_field_v1, host_commit_avail_kib, host_physmem_total_kib}
+use app.cli.shard_mem_clamp.{shard_standalone_host_cap_v1, SHARD_HIR_WORKER_KB_V1,
+    shard_commit_spawn_admit_v1, shard_tree_headroom_kib_v1}
+use app.cli.file_worker_pool_refusal.{FILE_WORKER_UNIT_TLDR_FLOOR_KB_V1,
+    FILE_WORKER_UNIT_SMALL_CLOSURE_FLOOR_KB_V1,
+    FileWorkerUnitPriceV1, FileWorkerUnitScaleBoundsV1, BinaryPointerWidthV1,
+    file_worker_pool_unit_floor_kb_v1,
+    file_worker_pool_unit_price_v1,
+    file_worker_pool_unit_admission_usable_kb_v1,
+    file_worker_pool_unit_scaled_price_v1,
+    file_worker_pool_pointer_width_from_macho_header_v1,
+    file_worker_pool_refusal_v1}
+use app.cli.native_build_main.{native_build_cache_dir_base_for_v1,
+    native_build_bind_cache_dirs_from_args_v1}
+use app.cli.bootstrap_main.{bootstrap_stage4_closure_worker_args_v1}
+use app.io._CliCompile.native_build_snapshot_roots.{native_build_selected_snapshot_source_roots_v1}
+use compiler.driver.driver_build.native_codegen_pool_v1.{native_codegen_commit_floor_for_v1,
+    native_codegen_pool_workers_v1, NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1}
+use compiler.driver.driver_build.native_file_worker_v1.{native_file_worker_adaptive_batch_v1,
+    native_file_worker_plan_batch_v1, NATIVE_FILE_WORKER_ADAPTIVE_BATCH_MAX_V1}
+use compiler.common.driver_source_file.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend, Logger}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_hits, frontend_parse_cache_misses}
+use compiler.frontend._FlatAstBridge.module_assembly.{flat_parse_module_body_calls}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceParserOwner,
+    module_surface_from_owner, module_surface_placeholder_from_source_v1}
+use compiler.driver.driver_source_loading.{driver_entry_scan_cache_reset,
+    driver_entry_scan_cache_release, driver_entry_scan_cache_read_count,
+    driver_entry_resolver_stats_v1, _driver_resolve_source_root_entry_import_from_v1,
+    _driver_physical_source_key}
+use compiler.driver.driver_unit_order_index_v1.{unit_order_index_stamp_v1,
+    unit_order_content_hashes_v1}
+use compiler.driver.driver_preclosed_source_aliases.{driver_preclosed_source_aliases_v1}
+
+val GIB: i64 = 1048576
+
+describe "Pillar 1: parallel worker admission on 24 GiB Apple Silicon & calibrated hosts":
+    it "admits >= 2 workers in standalone host mode and live commit gate without over-reserving":
+        step("24 GiB WSL repro: 22624328 kB free, 6 GiB reserve, 6.5 GiB worker -> 2 workers")
+        expect(shard_standalone_host_cap_v1(2, 6815744, 22624328, 6 * GIB, 500000)).to_equal(2)
+        step("24 GiB Mac with host-full.sdn: 14 GiB free, 4 GiB reserve, 3500 MiB worker -> 2 workers")
+        expect(shard_standalone_host_cap_v1(2, 3584000, 14 * GIB, 4 * GIB, 500000)).to_equal(2)
+        expect(shard_standalone_host_cap_v1(2, 3584000, 14 * GIB, 4 * GIB, 0 - 1)).to_equal(2)
+        step("24 GiB Mac standalone: 14 GiB free, 6 GiB reserve, 3 GiB PM3 unit worker -> 2 workers")
+        expect(shard_standalone_host_cap_v1(2, FILE_WORKER_UNIT_TLDR_FLOOR_KB_V1, 14 * GIB, 6 * GIB, 500000)).to_equal(2)
+        expect(shard_standalone_host_cap_v1(2, FILE_WORKER_UNIT_TLDR_FLOOR_KB_V1, 14 * GIB, 6 * GIB, 0 - 1)).to_equal(2)
+        step("live run_ledger_shards commit gate (RAM/4 = 6 GiB reserve, not RAM/2 = 12 GiB) admits 2nd worker on 14 GiB avail Mac")
+        expect(shard_commit_spawn_admit_v1(14 * GIB, 6 * GIB, 3584000, [0])).to_equal(true)
+        expect(shard_commit_spawn_admit_v1(14 * GIB, 6 * GIB, FILE_WORKER_UNIT_TLDR_FLOOR_KB_V1, [0])).to_equal(true)
+        expect(shard_tree_headroom_kib_v1() <= 8 * GIB).to_equal(true)
+        step("exhausted reserve fails closed to 0 for HIR pool and 1 for sequential lane")
+        expect(shard_standalone_host_cap_v1(4, 3584000, 3 * GIB, 4 * GIB, 500000)).to_equal(0)
+        expect(shard_standalone_host_cap_v1(4, 3584000, 3 * GIB, 4 * GIB, 0 - 1)).to_equal(1)
+
+    it "prices PM3 unit workers at host worker_mem_mib < default or 3 GiB floor, ignoring 26 GiB shard ceilings":
+        val def_hir = FileWorkerUnitPriceV1(budget_kb: SHARD_HIR_WORKER_KB_V1, explicit: false)
+        val p_cal = file_worker_pool_unit_price_v1("", "3500", def_hir)
+        expect(p_cal.budget_kb).to_equal(3584000)
+        expect(p_cal.explicit).to_equal(true)
+        val p_ceil = file_worker_pool_unit_price_v1("", "26624", def_hir)
+        expect(p_ceil.budget_kb).to_equal(SHARD_HIR_WORKER_KB_V1)
+        expect(p_ceil.explicit).to_equal(false)
+        val usable_24g = file_worker_pool_unit_admission_usable_kb_v1(14 * GIB, 0, 0, 0, 6 * GIB)
+        expect(usable_24g).to_equal(8 * GIB)
+        val scaled = file_worker_pool_unit_scaled_price_v1(p_ceil,
+            FileWorkerUnitScaleBoundsV1(usable_kb: usable_24g, modules: 4231))
+        expect(scaled.budget_kb >= FILE_WORKER_UNIT_TLDR_FLOOR_KB_V1).to_equal(true)
+        expect(usable_24g / scaled.budget_kb >= 2).to_equal(true)
+        expect(file_worker_pool_refusal_v1(2, 2, 14 * GIB, scaled.budget_kb, scaled.budget_kb, 2)).to_equal("")
+        expect(file_worker_pool_unit_floor_kb_v1(120)).to_equal(FILE_WORKER_UNIT_SMALL_CLOSURE_FLOOR_KB_V1)
+        expect(file_worker_pool_unit_floor_kb_v1(4231)).to_equal(FILE_WORKER_UNIT_TLDR_FLOOR_KB_V1)
+
+    it "decodes macOS vm_stat + thin/fat Mach-O width and scales codegen commit floor on 24 GiB hosts":
+        val sample = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 500000.\nPages active: 300000.\nPages inactive: 400000.\n"
+        val vm_ok = macos_vm_available_from_vm_stat_v1(sample)
+        expect(vm_ok.valid).to_equal(true)
+        expect(vm_ok.kib).to_equal((900000 * 16384) / 1024)
+        expect(macos_vm_available_from_vm_stat_v1("garbage").valid).to_equal(false)
+        val pm_ok = physmem_total_from_bytes_field_v1("25769803776\n")
+        expect(pm_ok.valid).to_equal(true)
+        expect(pm_ok.kib).to_equal(24 * GIB)
+        expect(host_commit_avail_kib() > 0).to_equal(true)
+        expect(host_physmem_total_kib() > 0).to_equal(true)
+        expect(file_worker_pool_pointer_width_from_macho_header_v1(" 207 250 237 254 12")).to_equal(BinaryPointerWidthV1.Bits64)
+        expect(file_worker_pool_pointer_width_from_macho_header_v1(" 206 250 237 254 7")).to_equal(BinaryPointerWidthV1.Bits32)
+        expect(file_worker_pool_pointer_width_from_macho_header_v1(" 202 254 186 191 0")).to_equal(BinaryPointerWidthV1.Bits64)
+        expect(file_worker_pool_pointer_width_from_macho_header_v1(" 202 254 186 190 0 0 0 2 1 0 0 12")).to_equal(BinaryPointerWidthV1.Bits64)
+        expect(file_worker_pool_pointer_width_from_macho_header_v1(" 202 254 186 190 0 0 0 2 0 0 0 7")).to_equal(BinaryPointerWidthV1.Bits32)
+        val floor_24g = native_codegen_commit_floor_for_v1("", 0, 24 * GIB)
+        expect(floor_24g).to_equal(6 * GIB)
+        expect(native_codegen_pool_workers_v1(10, 4, 16, 0, 14 * GIB,
+            NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1, floor_24g)).to_equal(4)
+
+describe "Pillar 2: bounded batching, cache-dir binding, preclosed Stage4 roots, and zero-parse placeholders":
+    it "scales unit batching to bounded 16 on 4231 modules while preserving 1 on small closures":
+        val plan_big = native_file_worker_plan_batch_v1("", "0/2", [4231])
+        expect(plan_big.worker_count).to_equal(2)
+        expect(plan_big.batch_size).to_equal(NATIVE_FILE_WORKER_ADAPTIVE_BATCH_MAX_V1)
+        expect(NATIVE_FILE_WORKER_ADAPTIVE_BATCH_MAX_V1).to_equal(16)
+        expect(native_file_worker_plan_batch_v1("", "bad", [12]).worker_count).to_equal(1)
+        expect(native_file_worker_adaptive_batch_v1(0 - 1, 2)).to_equal(1)
+        expect(native_file_worker_adaptive_batch_v1(12, 2)).to_equal(1)
+        expect(native_file_worker_adaptive_batch_v1(32, 2)).to_equal(1)
+        expect(native_file_worker_adaptive_batch_v1(80, 2)).to_equal(10)
+        expect(native_file_worker_plan_batch_v1("7", "0/2", [4231]).batch_size).to_equal(7)
+
+    it "binds SIMPLE_FRONTEND_CACHE_DIR and SIMPLE_HIR_CACHE_DIR from --cache-dir and env":
+        expect(native_build_cache_dir_base_for_v1(["--cache-dir", "/tmp/c1"], "/tmp/c2")).to_equal("/tmp/c1")
+        expect(native_build_cache_dir_base_for_v1(["--cache-dir=/tmp/c3"], "/tmp/c2")).to_equal("/tmp/c3")
+        expect(native_build_cache_dir_base_for_v1(["--entry", "a.spl"], "/tmp/c2")).to_equal("/tmp/c2")
+        val old_fe = env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
+        val old_hir = env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
+        val old_scope = env_get("SIMPLE_CACHE_SCOPE") ?? ""
+        val _uf = env_unset("SIMPLE_FRONTEND_CACHE_DIR")
+        val _uh = env_unset("SIMPLE_HIR_CACHE_DIR")
+        val _sc = env_set("SIMPLE_CACHE_SCOPE", "p4lane")
+        native_build_bind_cache_dirs_from_args_v1(["--cache-dir", "/tmp/nb-cache-spec"])
+        val got_fe = env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
+        val got_hir = env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
+        if old_fe == "":
+            val _rf = env_unset("SIMPLE_FRONTEND_CACHE_DIR")
+        else:
+            val _rf = env_set("SIMPLE_FRONTEND_CACHE_DIR", old_fe)
+        if old_hir == "":
+            val _rh = env_unset("SIMPLE_HIR_CACHE_DIR")
+        else:
+            val _rh = env_set("SIMPLE_HIR_CACHE_DIR", old_hir)
+        if old_scope == "":
+            val _rs = env_unset("SIMPLE_CACHE_SCOPE")
+        else:
+            val _rs = env_set("SIMPLE_CACHE_SCOPE", old_scope)
+        expect(got_fe).to_equal("/tmp/nb-cache-spec/p4lane/frontend")
+        expect(got_hir).to_equal("/tmp/nb-cache-spec/p4lane/hir")
+
+    it "hits disk frontend parse cache on warm second pass when --cache-dir is bound":
+        val cache_root = path_absolute("build/tests/warm-fe-cache-{time_now_unix_micros()}")
+        val old_fe = env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
+        val old_hir = env_get("SIMPLE_HIR_CACHE_DIR") ?? ""
+        val old_en = env_get("SIMPLE_FRONTEND_CACHE") ?? ""
+        val old_fscope = env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
+        val _uf = env_unset("SIMPLE_FRONTEND_CACHE_DIR")
+        val _uh = env_unset("SIMPLE_HIR_CACHE_DIR")
+        val _en = env_set("SIMPLE_FRONTEND_CACHE", "1")
+        val _fs = env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "warm-fe-spec")
+        native_build_bind_cache_dirs_from_args_v1(["--cache-dir", cache_root])
+        expect(dir_create_all(cache_root + "/src")).to_equal(true)
+        val f1 = cache_root + "/src/w1.spl"
+        val f2 = cache_root + "/src/w2.spl"
+        val f3 = cache_root + "/src/w3.spl"
+        val s1 = "pub fn mod_one(x: i64) -> i64: x + 1\n"
+        val s2 = "pub fn mod_two(x: i64) -> i64: x + 2\n"
+        val s3 = "pub fn mod_three(x: i64) -> i64: x + 3\n"
+        expect(file_write(f1, s1)).to_equal(true)
+        expect(file_write(f2, s2)).to_equal(true)
+        expect(file_write(f3, s3)).to_equal(true)
+        val hits_p0 = frontend_parse_cache_hits()
+        val misses_p0 = frontend_parse_cache_misses()
+        val _m1a = parse_full_frontend(s1, f1, "app.w1", Logger(level: 0))
+        val _m2a = parse_full_frontend(s2, f2, "app.w2", Logger(level: 0))
+        val _m3a = parse_full_frontend(s3, f3, "app.w3", Logger(level: 0))
+        val cold_misses = frontend_parse_cache_misses() - misses_p0
+        val hits_p1 = frontend_parse_cache_hits()
+        val misses_p1 = frontend_parse_cache_misses()
+        val parses_p1 = flat_parse_module_body_calls()
+        val m1b = parse_full_frontend(s1, f1, "app.w1", Logger(level: 0))
+        val m2b = parse_full_frontend(s2, f2, "app.w2", Logger(level: 0))
+        val m3b = parse_full_frontend(s3, f3, "app.w3", Logger(level: 0))
+        val warm_hits = frontend_parse_cache_hits() - hits_p1
+        val warm_misses = frontend_parse_cache_misses() - misses_p1
+        val warm_parses = flat_parse_module_body_calls() - parses_p1
+        if old_fe == "":
+            val _rf = env_unset("SIMPLE_FRONTEND_CACHE_DIR")
+        else:
+            val _rf = env_set("SIMPLE_FRONTEND_CACHE_DIR", old_fe)
+        if old_hir == "":
+            val _rh = env_unset("SIMPLE_HIR_CACHE_DIR")
+        else:
+            val _rh = env_set("SIMPLE_HIR_CACHE_DIR", old_hir)
+        if old_en == "":
+            val _re = env_unset("SIMPLE_FRONTEND_CACHE")
+        else:
+            val _re = env_set("SIMPLE_FRONTEND_CACHE", old_en)
+        if old_fscope == "":
+            val _rfs = env_unset("SIMPLE_FRONTEND_CACHE_SCOPE")
+        else:
+            val _rfs = env_set("SIMPLE_FRONTEND_CACHE_SCOPE", old_fscope)
+        val _clean = dir_remove_all(cache_root)
+        expect(hits_p1 - hits_p0).to_equal(0)
+        expect(cold_misses).to_equal(3)
+        expect(warm_hits).to_equal(3)
+        expect(warm_misses).to_equal(0)
+        expect(warm_parses).to_equal(0)
+        expect(m1b.functions.contains_key("mod_one")).to_equal(true)
+        expect(m2b.functions.contains_key("mod_two")).to_equal(true)
+        expect(m3b.functions.contains_key("mod_three")).to_equal(true)
+
+    it "aligns Stage4 closure worker args and explicit cli/os snapshot roots with src/os":
+        val stripped = bootstrap_stage4_closure_worker_args_v1([
+            "--source", "src/compiler", "--source=src/lib", "--entry-closure",
+            "--entry", "src/app/cli/main.spl", "--mode", "one-binary"
+        ])
+        expect(stripped).to_equal(["--entry-closure", "--entry", "src/app/cli/main.spl", "--mode", "one-binary"])
+        val fix_root = path_absolute("build/tests/cli-os-roots-{time_now_unix_micros()}")
+        expect(dir_create_all(fix_root + "/src/app/cli")).to_equal(true)
+        expect(dir_create_all(fix_root + "/src/lib")).to_equal(true)
+        expect(dir_create_all(fix_root + "/src/compiler")).to_equal(true)
+        expect(dir_create_all(fix_root + "/src/plugins")).to_equal(true)
+        expect(dir_create_all(fix_root + "/src/os")).to_equal(true)
+        val roots = native_build_selected_snapshot_source_roots_v1(
+            fix_root, "src/app/cli/main.spl", ["src/compiler", "src/lib", "src/app"])
+        val _clean = dir_remove_all(fix_root)
+        expect(roots.contains("src/plugins")).to_equal(true)
+        expect(roots.contains("src/os")).to_equal(true)
+
+    it "builds placeholder surfaces with 0 parser calls, 0 cache misses, and exact semantic parity":
+        val body = "# Re-exported from sub_mod.spl\nexport foo_bar\npub fn real_fn() -> i64: 42\n"
+        val src_row = SourceFile(path: "src/app/demo/__init__.spl", content: body, module_name: "app.demo.__init__")
+        val ref_parsed = parse_full_frontend("\n", src_row.path, src_row.module_name, Logger(level: 0))
+        val ref_surface = module_surface_from_owner(ModuleSurfaceParserOwner.new(ref_parsed), src_row, 7).unwrap()
+        val parses_before = flat_parse_module_body_calls()
+        val misses_before = frontend_parse_cache_misses()
+        var count = 0
+        var last_fast = ref_surface
+        while count < 64:
+            last_fast = module_surface_placeholder_from_source_v1(src_row, "", 7).unwrap()
+            count = count + 1
+        expect(flat_parse_module_body_calls() - parses_before).to_equal(0)
+        expect(frontend_parse_cache_misses() - misses_before).to_equal(0)
+        expect(last_fast.canonical_path).to_equal(ref_surface.canonical_path)
+        expect(last_fast.module_name).to_equal(ref_surface.module_name)
+        expect(last_fast.logical_name).to_equal(ref_surface.logical_name)
+        expect(last_fast.canonical_name).to_equal(ref_surface.canonical_name)
+        expect(last_fast.package_name).to_equal(ref_surface.package_name)
+        expect(last_fast.content_length).to_equal(ref_surface.content_length)
+        expect(last_fast.content_hash).to_equal(ref_surface.content_hash)
+        expect(last_fast.semantic_hash0).to_equal(ref_surface.semantic_hash0)
+        expect(last_fast.semantic_hash1).to_equal(ref_surface.semantic_hash1)
+        expect(last_fast.semantic_hash2).to_equal(ref_surface.semantic_hash2)
+        expect(last_fast.semantic_hash3).to_equal(ref_surface.semantic_hash3)
+        expect(last_fast.semantic_cacheable).to_equal(true)
+        expect(last_fast.export_origins.keys().len()).to_equal(1)
+
+describe "Pillar 3: deterministic syscall/hash/read elimination in closure & preclosed paths":
+    it "bounds rt_dir_list syscalls via persistent numbered-dir cache across 200 import resolutions":
+        driver_entry_scan_cache_reset()
+        val roots = ["src/compiler", "src/lib", "src/app"]
+        val specs = [
+            "compiler.common.driver_core_types",
+            "compiler.hir.hir_lowering.module_surface_types",
+            "compiler.mir.mir_types",
+            "compiler.backend.backend_port",
+            "compiler.driver.driver_types",
+            "std.io_runtime",
+            "std.common.crypto.sha256",
+            "app.cli.shard_mem_clamp"
+        ]
+        var round = 0
+        while round < 25:
+            for spec in specs:
+                val _res = _driver_resolve_source_root_entry_import_from_v1(spec, roots, "src/app/cli")
+            round = round + 1
+        val dir_lists = driver_entry_resolver_stats_v1().numbered_dir_lists
+        val _pk = _driver_physical_source_key("src/app/cli/main.spl")
+        driver_entry_scan_cache_release()
+        step("200 resolutions (8 specs x 25 rounds) warm numbered dirs once instead of O(resolutions) rt_dir_list calls")
+        expect(dir_lists > 0).to_equal(true)
+        expect(dir_lists <= 40).to_equal(true)
+
+    it "reuses precomputed Phase-1 SHA-256 digests in unit_order_index_stamp_v1 with exact parity":
+        val contents = ["fn a(): 1\n", "fn b(): 2\n", "fn c(): 3\n"]
+        val hashes = [sha256_text(contents[0]), sha256_text(contents[1]), sha256_text(contents[2])]
+        val expected_stamp = unit_order_index_stamp_v1(contents, ["src/lib"], "")
+        val fast_stamp = unit_order_index_stamp_v1(["mutated", "ignored", "bodies"], ["src/lib"], "", hashes)
+        expect(fast_stamp).to_equal(expected_stamp)
+        expect(unit_order_content_hashes_v1(["x", "y", "z"], hashes)).to_equal(hashes)
+
+    it "replays preclosed aliases from in-memory SourceFile.content with zero disk re-reads":
+        val snap = path_absolute("build/tests/preclosed-mem-{time_now_unix_micros()}")
+        expect(dir_create_all(snap + "/src/app")).to_equal(true)
+        expect(dir_create_all(snap + "/src/lib")).to_equal(true)
+        val p_lib = snap + "/src/lib/helper.spl"
+        val p_a = snap + "/src/app/a.spl"
+        val p_b = snap + "/src/app/b.spl"
+        val c_lib = "pub fn helper() -> i64: 1\n"
+        val c_a = "use lib.helper.*\npub fn run_a() -> i64: helper()\n"
+        val c_b = "use lib.helper.*\npub fn run_b() -> i64: helper()\n"
+        expect(file_write(p_lib, c_lib)).to_equal(true)
+        expect(file_write(p_a, c_a)).to_equal(true)
+        expect(file_write(p_b, c_b)).to_equal(true)
+        driver_entry_scan_cache_reset()
+        val sources = [
+            SourceFile(path: p_a, content: c_a, module_name: "app.a"),
+            SourceFile(path: p_b, content: c_b, module_name: "app.b"),
+            SourceFile(path: p_lib, content: c_lib, module_name: "std.helper")
+        ]
+        val replayed = driver_preclosed_source_aliases_v1(
+            sources, [snap + "/src/app", snap + "/src/lib"], snap, "")
+        val disk_reads = driver_entry_scan_cache_read_count()
+        driver_entry_scan_cache_release()
+        val _clean = dir_remove_all(snap)
+        expect(replayed.is_ok()).to_equal(true)
+        expect(disk_reads).to_equal(0)
+        expect(replayed.unwrap().len()).to_equal(4)

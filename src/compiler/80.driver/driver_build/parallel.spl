@@ -463,10 +463,13 @@ impl ParallelBuilder:
         var poll_iteration = 0
         while true:
             for pid in live_pid:
-                if not rt_process_is_running(pid):
-                    val exit_code = rt_process_wait(pid, 1)
-                    if exit_code != -2:
-                        return (pid, exit_code)
+                # Wait directly without pre-probing rt_process_is_running: on
+                # hosted C runtime waitpid(WNOHANG) reaps and discards status.
+                var exit_code = rt_process_wait(pid, 1)
+                if exit_code > 2147483647:
+                    exit_code = exit_code - 4294967296
+                if exit_code != -2:
+                    return (pid, exit_code)
             var at = 0
             while at < live_pid.len() and at < live_start.len():
                 if parallel_unit_budget_expired_v1(live_start[at], time_now_monotonic_ms(), budget_ms):
@@ -484,11 +487,13 @@ impl ParallelBuilder:
                     return (pid, PARALLEL_UNIT_TIMEOUT_CODE_V1)
                 at = at + 1
 
-            var sleep_ms = 10
-            if poll_iteration >= 50:
-                sleep_ms = 100
-            elif poll_iteration >= 10:
-                sleep_ms = 25
+            var sleep_ms = 5
+            if poll_iteration >= 60:
+                sleep_ms = 50
+            elif poll_iteration >= 20:
+                sleep_ms = 15
+            elif poll_iteration >= 6:
+                sleep_ms = 10
 
             unsafe(capabilities: [ffi]):
                 rt_thread_sleep(sleep_ms)

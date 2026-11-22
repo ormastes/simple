@@ -148,10 +148,9 @@ struct RtPoolState {
 #define RT_POOL_HANDLE_KIND_STATE 1U
 #define RT_POOL_HANDLE_KIND_TASK 2U
 
-typedef struct RtPoolStateSlot { RtPoolState* ptr; uint32_t generation; uint32_t refs; int closing; } RtPoolStateSlot;
-typedef struct RtPoolTaskSlot { RtPoolTask* ptr; uint32_t generation; uint32_t refs; int closing; } RtPoolTaskSlot;
-static RtPoolStateSlot g_pool_state_slots[RT_POOL_STATE_SLOT_COUNT];
-static RtPoolTaskSlot g_pool_task_slots[RT_POOL_TASK_SLOT_COUNT];
+typedef struct RtPoolSlot { void* ptr; uint32_t generation; uint32_t refs; int closing; } RtPoolSlot;
+static RtPoolSlot g_pool_state_slots[RT_POOL_STATE_SLOT_COUNT];
+static RtPoolSlot g_pool_task_slots[RT_POOL_TASK_SLOT_COUNT];
 
 #ifdef RT_POOL_PTHREAD
 static pthread_mutex_t g_pool_handle_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -190,53 +189,12 @@ static uint32_t rt_pool_handle_kind(int64_t handle) {
     return (uint32_t)(((uint64_t)handle) >> RT_POOL_HANDLE_KIND_SHIFT);
 }
 
-static int64_t rt_pool_state_handle_alloc(RtPoolState* state) {
-    int64_t handle = 0;
-    RT_POOL_HANDLE_LOCK();
-    for (uint32_t i = 1; i < RT_POOL_STATE_SLOT_COUNT; i++) {
-        if (g_pool_state_slots[i].ptr == NULL) {
-            uint32_t generation = (g_pool_state_slots[i].generation + 1) & RT_POOL_HANDLE_GENERATION_MASK;
-            if (generation == 0) generation = 1;
-            g_pool_state_slots[i].generation = generation;
-            g_pool_state_slots[i].ptr = state;
-            g_pool_state_slots[i].closing = 0;
-            g_pool_state_slots[i].refs = 0;
-            handle = rt_pool_handle_encode(RT_POOL_HANDLE_KIND_STATE, generation, i);
-            break;
-        }
-    }
-    RT_POOL_HANDLE_UNLOCK();
-    return handle;
-}
-
-static RtPoolState* rt_pool_state_handle_get(int64_t handle) {
-    uint32_t index = rt_pool_handle_index(handle);
-    uint32_t generation = rt_pool_handle_generation(handle);
-    if (rt_pool_handle_kind(handle) != RT_POOL_HANDLE_KIND_STATE || index == 0 || index >= RT_POOL_STATE_SLOT_COUNT || generation == 0) return NULL;
-    RT_POOL_HANDLE_LOCK();
-    RtPoolState* state = NULL;
-    if (g_pool_state_slots[index].generation == generation && !g_pool_state_slots[index].closing) {
-        state = g_pool_state_slots[index].ptr;
-        if (state != NULL) g_pool_state_slots[index].refs++;
-    }
-    RT_POOL_HANDLE_UNLOCK();
-    return state;
-}
-
-static void rt_pool_state_handle_put(int64_t handle) {
-    uint32_t index = rt_pool_handle_index(handle);
-    uint32_t generation = rt_pool_handle_generation(handle);
-    if (rt_pool_handle_kind(handle) != RT_POOL_HANDLE_KIND_STATE || index == 0 || index >= RT_POOL_STATE_SLOT_COUNT) return;
-    RT_POOL_HANDLE_LOCK();
-    if (g_pool_state_slots[index].generation == generation && g_pool_state_slots[index].refs > 0) {
-        g_pool_state_slots[index].refs--;
+static void rt_pool_handle_changed_broadcast(void) {
 #ifdef RT_POOL_PTHREAD
-        pthread_cond_broadcast(&g_pool_handle_changed);
+    pthread_cond_broadcast(&g_pool_handle_changed);
 #else
-        WakeAllConditionVariable(&g_pool_handle_changed);
+    WakeAllConditionVariable(&g_pool_handle_changed);
 #endif
-    }
-    RT_POOL_HANDLE_UNLOCK();
 }
 
 /* Called with the handle lock held: mark the slot closing, drop the closer's
@@ -251,30 +209,19 @@ static void rt_pool_slot_drain_locked(int* closing, uint32_t* refs) {
 #endif
 }
 
-static int rt_pool_state_handle_close_wait(int64_t handle, RtPoolState* state) {
-    uint32_t index = rt_pool_handle_index(handle), generation = rt_pool_handle_generation(handle);
-    if (rt_pool_handle_kind(handle) != RT_POOL_HANDLE_KIND_STATE || index == 0 || index >= RT_POOL_STATE_SLOT_COUNT) return 0;
-    RT_POOL_HANDLE_LOCK();
-    RtPoolStateSlot* slot = &g_pool_state_slots[index];
-    if (slot->generation != generation || slot->ptr != state || slot->closing) { RT_POOL_HANDLE_UNLOCK(); return 0; }
-    rt_pool_slot_drain_locked(&slot->closing, &slot->refs); /* destroy's acquire */
-    slot->ptr = NULL;
-    RT_POOL_HANDLE_UNLOCK();
-    return 1;
-}
-
-static int64_t rt_pool_task_handle_alloc(RtPoolTask* task) {
+/* Generic slot-table ops shared by the state and task tables. */
+static int64_t rt_pool_slot_alloc(RtPoolSlot* slots, uint32_t slot_count, uint32_t kind, void* obj) {
     int64_t handle = 0;
     RT_POOL_HANDLE_LOCK();
-    for (uint32_t i = 1; i < RT_POOL_TASK_SLOT_COUNT; i++) {
-        if (g_pool_task_slots[i].ptr == NULL) {
-            uint32_t generation = (g_pool_task_slots[i].generation + 1) & RT_POOL_HANDLE_GENERATION_MASK;
+    for (uint32_t i = 1; i < slot_count; i++) {
+        if (slots[i].ptr == NULL) {
+            uint32_t generation = (slots[i].generation + 1) & RT_POOL_HANDLE_GENERATION_MASK;
             if (generation == 0) generation = 1;
-            g_pool_task_slots[i].generation = generation;
-            g_pool_task_slots[i].ptr = task;
-            g_pool_task_slots[i].closing = 0;
-            g_pool_task_slots[i].refs = 0;
-            handle = rt_pool_handle_encode(RT_POOL_HANDLE_KIND_TASK, generation, i);
+            slots[i].generation = generation;
+            slots[i].ptr = obj;
+            slots[i].closing = 0;
+            slots[i].refs = 0;
+            handle = rt_pool_handle_encode(kind, generation, i);
             break;
         }
     }
@@ -282,46 +229,68 @@ static int64_t rt_pool_task_handle_alloc(RtPoolTask* task) {
     return handle;
 }
 
-static RtPoolTask* rt_pool_task_handle_get(int64_t handle) {
+static void* rt_pool_slot_get(RtPoolSlot* slots, uint32_t slot_count, uint32_t kind, int64_t handle) {
     uint32_t index = rt_pool_handle_index(handle);
     uint32_t generation = rt_pool_handle_generation(handle);
-    if (rt_pool_handle_kind(handle) != RT_POOL_HANDLE_KIND_TASK || index == 0 || index >= RT_POOL_TASK_SLOT_COUNT || generation == 0) return NULL;
+    if (rt_pool_handle_kind(handle) != kind || index == 0 || index >= slot_count || generation == 0) return NULL;
     RT_POOL_HANDLE_LOCK();
-    RtPoolTask* task = NULL;
-    if (g_pool_task_slots[index].generation == generation && !g_pool_task_slots[index].closing) {
-        task = g_pool_task_slots[index].ptr;
-        if (task != NULL) g_pool_task_slots[index].refs++;
+    void* obj = NULL;
+    if (slots[index].generation == generation && !slots[index].closing) {
+        obj = slots[index].ptr;
+        if (obj != NULL) slots[index].refs++;
     }
     RT_POOL_HANDLE_UNLOCK();
-    return task;
+    return obj;
 }
 
-static void rt_pool_task_handle_put(int64_t handle) {
+static void rt_pool_slot_put(RtPoolSlot* slots, uint32_t slot_count, uint32_t kind, int64_t handle) {
     uint32_t index = rt_pool_handle_index(handle);
     uint32_t generation = rt_pool_handle_generation(handle);
-    if (rt_pool_handle_kind(handle) != RT_POOL_HANDLE_KIND_TASK || index == 0 || index >= RT_POOL_TASK_SLOT_COUNT) return;
+    if (rt_pool_handle_kind(handle) != kind || index == 0 || index >= slot_count) return;
     RT_POOL_HANDLE_LOCK();
-    if (g_pool_task_slots[index].generation == generation && g_pool_task_slots[index].refs > 0) {
-        g_pool_task_slots[index].refs--;
-#ifdef RT_POOL_PTHREAD
-        pthread_cond_broadcast(&g_pool_handle_changed);
-#else
-        WakeAllConditionVariable(&g_pool_handle_changed);
-#endif
+    if (slots[index].generation == generation && slots[index].refs > 0) {
+        slots[index].refs--;
+        rt_pool_handle_changed_broadcast();
     }
     RT_POOL_HANDLE_UNLOCK();
 }
 
-static int rt_pool_task_handle_close_wait(int64_t handle, RtPoolTask* task) {
+static int rt_pool_slot_close_wait(RtPoolSlot* slots, uint32_t slot_count, uint32_t kind, int64_t handle, void* obj) {
     uint32_t index = rt_pool_handle_index(handle), generation = rt_pool_handle_generation(handle);
-    if (rt_pool_handle_kind(handle) != RT_POOL_HANDLE_KIND_TASK || index == 0 || index >= RT_POOL_TASK_SLOT_COUNT) return 0;
+    if (rt_pool_handle_kind(handle) != kind || index == 0 || index >= slot_count) return 0;
     RT_POOL_HANDLE_LOCK();
-    RtPoolTaskSlot* slot = &g_pool_task_slots[index];
-    if (slot->generation != generation || slot->ptr != task || slot->closing) { RT_POOL_HANDLE_UNLOCK(); return 0; }
-    rt_pool_slot_drain_locked(&slot->closing, &slot->refs); /* release's acquire */
+    RtPoolSlot* slot = &slots[index];
+    if (slot->generation != generation || slot->ptr != obj || slot->closing) { RT_POOL_HANDLE_UNLOCK(); return 0; }
+    rt_pool_slot_drain_locked(&slot->closing, &slot->refs); /* the closer's own acquire */
     slot->ptr = NULL;
     RT_POOL_HANDLE_UNLOCK();
     return 1;
+}
+
+static int64_t rt_pool_state_handle_alloc(RtPoolState* state) {
+    return rt_pool_slot_alloc(g_pool_state_slots, RT_POOL_STATE_SLOT_COUNT, RT_POOL_HANDLE_KIND_STATE, state);
+}
+static RtPoolState* rt_pool_state_handle_get(int64_t handle) {
+    return (RtPoolState*)rt_pool_slot_get(g_pool_state_slots, RT_POOL_STATE_SLOT_COUNT, RT_POOL_HANDLE_KIND_STATE, handle);
+}
+static void rt_pool_state_handle_put(int64_t handle) {
+    rt_pool_slot_put(g_pool_state_slots, RT_POOL_STATE_SLOT_COUNT, RT_POOL_HANDLE_KIND_STATE, handle);
+}
+static int rt_pool_state_handle_close_wait(int64_t handle, RtPoolState* state) {
+    return rt_pool_slot_close_wait(g_pool_state_slots, RT_POOL_STATE_SLOT_COUNT, RT_POOL_HANDLE_KIND_STATE, handle, state);
+}
+
+static int64_t rt_pool_task_handle_alloc(RtPoolTask* task) {
+    return rt_pool_slot_alloc(g_pool_task_slots, RT_POOL_TASK_SLOT_COUNT, RT_POOL_HANDLE_KIND_TASK, task);
+}
+static RtPoolTask* rt_pool_task_handle_get(int64_t handle) {
+    return (RtPoolTask*)rt_pool_slot_get(g_pool_task_slots, RT_POOL_TASK_SLOT_COUNT, RT_POOL_HANDLE_KIND_TASK, handle);
+}
+static void rt_pool_task_handle_put(int64_t handle) {
+    rt_pool_slot_put(g_pool_task_slots, RT_POOL_TASK_SLOT_COUNT, RT_POOL_HANDLE_KIND_TASK, handle);
+}
+static int rt_pool_task_handle_close_wait(int64_t handle, RtPoolTask* task) {
+    return rt_pool_slot_close_wait(g_pool_task_slots, RT_POOL_TASK_SLOT_COUNT, RT_POOL_HANDLE_KIND_TASK, handle, task);
 }
 
 #define RT_POOL_MAX_WORKERS 64

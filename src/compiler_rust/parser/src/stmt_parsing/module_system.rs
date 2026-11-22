@@ -392,6 +392,7 @@ impl<'a> Parser<'a> {
             target,
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         }))
     }
 
@@ -421,6 +422,7 @@ impl<'a> Parser<'a> {
                 ),
                 imports,
                 is_type_only,
+                attributes: vec![],
             }))
         } else {
             Ok(Node::UseStmt(UseStmt {
@@ -434,6 +436,7 @@ impl<'a> Parser<'a> {
                 target,
                 is_type_only,
                 is_lazy: false,
+                attributes: vec![],
             }))
         }
     }
@@ -527,6 +530,7 @@ impl<'a> Parser<'a> {
                 ),
                 path: ModulePath::new(Vec::new()),
                 target: ImportTarget::Glob,
+                attributes: vec![],
             }));
         }
 
@@ -543,6 +547,7 @@ impl<'a> Parser<'a> {
                 ),
                 path: ModulePath::new(Vec::new()),
                 target: ImportTarget::Group(vec![]),
+                attributes: vec![],
             }));
         }
 
@@ -575,6 +580,7 @@ impl<'a> Parser<'a> {
                 ),
                 path,
                 target,
+                attributes: vec![],
             }))
         } else if self.check(&TokenKind::Star) {
             // export * from module (glob re-export)
@@ -597,6 +603,7 @@ impl<'a> Parser<'a> {
                 ),
                 path: module_path,
                 target: ImportTarget::Glob,
+                attributes: vec![],
             }))
         } else if self.check(&TokenKind::LBrace) {
             // Style 3: export { X, Y, Z } from module (JS-style with braces)
@@ -641,6 +648,7 @@ impl<'a> Parser<'a> {
                 ),
                 path: module_path,
                 target: ImportTarget::Group(targets),
+                attributes: vec![],
             }))
         } else {
             // Multiple styles:
@@ -684,6 +692,7 @@ impl<'a> Parser<'a> {
                             ),
                             path: ModulePath::new(segments),
                             target: ImportTarget::Glob,
+                            attributes: vec![],
                         }));
                     }
 
@@ -705,6 +714,7 @@ impl<'a> Parser<'a> {
                                 ),
                                 path: ModulePath::new(segments),
                                 target: ImportTarget::Glob,
+                                attributes: vec![],
                             }));
                         }
 
@@ -736,6 +746,7 @@ impl<'a> Parser<'a> {
                             ),
                             path: ModulePath::new(segments),
                             target: ImportTarget::Group(targets),
+                            attributes: vec![],
                         }));
                     }
 
@@ -786,6 +797,7 @@ impl<'a> Parser<'a> {
                         ),
                         path: module_path,
                         target,
+                        attributes: vec![],
                     }));
                 }
 
@@ -872,6 +884,7 @@ impl<'a> Parser<'a> {
                     ),
                     path: module_path,
                     target: ImportTarget::Group(items),
+                    attributes: vec![],
                 }))
             } else {
                 // Style 3: bare export (export X, Y, Z / export X as Y)
@@ -888,6 +901,7 @@ impl<'a> Parser<'a> {
                     ),
                     path: ModulePath::new(Vec::new()), // Empty path for bare exports
                     target: ImportTarget::Group(targets),
+                    attributes: vec![],
                 }))
             }
         }
@@ -1024,6 +1038,7 @@ impl<'a> Parser<'a> {
                 ),
                 path,
                 target,
+                attributes: vec![],
             });
             entries.push(export);
 

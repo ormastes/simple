@@ -11,6 +11,9 @@ use std.nogc_sync_mut.io.process_ops.{process_run}
 use std.nogc_sync_mut.env.platform.{get_temp_dir}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_exists, secure_temp_dir}
 use std.io_runtime.{dir_remove}
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_to_string}
 
 var TEMP_ROOT: text = ""
 
@@ -197,6 +200,34 @@ describe "`simple check` diagnostics":
         expect(combined).to_contain("\"code\": \"E0001\"")
         expect(combined).to_contain("\"cannot read file")
         expect(combined).to_contain("\"check that the path exists and is readable\"")
+
+    it "emits valid parseable JSON lines for paths with spaces and backslashes":
+        val path = get_temp_path("escaped path.spl")
+        expect(file_write(path, "fn main():\n    val x: i64 = \"quoted\\\"value\"\n")).to_equal(true)
+
+        val (stdout, stderr, code) = run_check(["--json", path])
+        expect(code).to_equal(1)
+
+        var diag_line = ""
+        var summary_line = ""
+        for raw_line in (stdout + "\n" + stderr).split("\n"):
+            val trimmed = raw_line.trim()
+            if trimmed.starts_with(r"{") and trimmed.contains("\"type\": \"check-diagnostic\""):
+                diag_line = trimmed
+            elif trimmed.starts_with(r"{") and trimmed.contains("\"command\":\"check\""):
+                summary_line = trimmed
+
+        expect(diag_line == "").to_equal(false)
+        expect(summary_line == "").to_equal(false)
+
+        val diag_obj = json_parse(diag_line)
+        expect(json_to_string(json_object_get(diag_obj, "type")) ?? "").to_equal("check-diagnostic")
+        expect(json_to_string(json_object_get(diag_obj, "code")) ?? "").to_equal("E1003")
+        expect(json_to_string(json_object_get(diag_obj, "file")) ?? "").to_equal(path)
+
+        val summary_obj = json_parse(summary_line)
+        expect(json_to_string(json_object_get(summary_obj, "command")) ?? "").to_equal("check")
+        expect(json_to_string(json_object_get(summary_obj, "status")) ?? "").to_equal("error")
 
     after_each():
         cleanup_temps()

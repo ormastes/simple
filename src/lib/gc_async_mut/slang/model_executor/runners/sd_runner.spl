@@ -19,6 +19,7 @@ use std.nogc_sync_mut.sffi.dynamic.{spl_dlopen, spl_dlsym, spl_dlclose, spl_wffi
 use std.common.string_core.{text_to_utf8_bytes, bytes_to_text}
 use std.common.image.png_encode.{encode_argb_to_png_rgb}
 use std.gc_async_mut.slang.host.slang_host.{host_env, host_file_exists}
+use std.nogc_sync_mut.atomic.{AtomicBool, atomic_bool_new, MemoryOrdering}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
 use std.gc_async_mut.slang.modality.kinds.{Modality, OutputPart, KindRequest, KindResult}
 use std.gc_async_mut.slang.entrypoints.openai.protocol.{ChatPart}
@@ -49,6 +50,10 @@ var SD_F_ERROR_INTO = 0
 var SD_F_INFO_INTO = 0
 var SD_F_FREE = 0
 var SD_OPEN_MODEL = ""
+# Handles of the mingw runtime DLLs preloaded for the shim; kept so close can release them.
+var SD_PRELOADS: [i64] = []
+# One owner at a time: open/run/close may only be called by the holder of this flag.
+var SD_BUSY: AtomicBool = atomic_bool_new(false)
 
 fn sd_runner_lib_path() -> text:
     host_env("SLANG_SD_LIB")
@@ -72,12 +77,15 @@ fn _dir_of(path: text) -> text:
 
 # The shim's mingw runtime imports, loaded first because Windows does not
 # search a DLL's own directory for the imports of a DLL opened by full path.
+# Loaded once and kept in SD_PRELOADS (released by sd_runner_close).
 fn _preload_runtime_siblings(lib_path: text):
-    if lib_path.ends_with(".dll"):
+    if lib_path.ends_with(".dll") and SD_PRELOADS.len() == 0:
         val dir = _dir_of(lib_path)
         for dep in ["libwinpthread-1.dll", "libunwind.dll", "libc++.dll"]:
             if host_file_exists(dir + dep):
-                spl_dlopen(dir + dep)
+                val h = spl_dlopen(dir + dep)
+                if h != 0:
+                    SD_PRELOADS.push(h)
 
 fn _zero_bytes(n: i64) -> [u8]:
     var out: [u8] = []
@@ -116,11 +124,23 @@ fn sd_runner_info() -> text:
 fn sd_runner_is_open() -> bool:
     SD_CTX > 0
 
+# Single-owner gate for the whole runner. Returns true when the caller now owns it;
+# false means another request is generating (answer busy, never wait). Only the
+# owner may call sd_runner_open, sd_runner_run or sd_runner_close.
+fn sd_runner_try_acquire() -> bool:
+    SD_BUSY.compare_exchange(false, true, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst)
+
+fn sd_runner_release():
+    SD_BUSY.store(false, MemoryOrdering.SeqCst)
+
 fn sd_runner_close():
     if SD_CTX > 0 and SD_F_FREE != 0:
         spl_wffi_call_i64(SD_F_FREE, [SD_CTX], 1)
     if SD_LIB != 0:
         spl_dlclose(SD_LIB)
+    for h in SD_PRELOADS:
+        spl_dlclose(h)
+    SD_PRELOADS = []
     SD_LIB = 0
     SD_CTX = 0
     SD_F_GEN = 0
@@ -267,5 +287,6 @@ fn sd_runner_run(req: KindRequest) -> Result<KindResult, text>:
         i = i + 1
     Ok(KindResult(parts: parts, prompt_tokens: 0, completion_tokens: 0))
 
+export sd_runner_try_acquire, sd_runner_release
 export sd_runner_lib_path, sd_runner_available, sd_runner_is_open, sd_runner_info
 export sd_runner_open, sd_runner_run, sd_runner_close, sd_parse_size
