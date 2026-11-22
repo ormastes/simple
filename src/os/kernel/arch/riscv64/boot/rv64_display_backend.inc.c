@@ -152,31 +152,24 @@ static spl_u64 g_rt_gpu_cmd = 0;
 static spl_u64 g_rt_gpu_resp = 0;
 static spl_u64 g_rt_gpu_fb = 0;
 
-static spl_u32 rt_pci_read_config32(spl_u64 bus, spl_u64 dev, spl_u64 func, spl_u64 reg) {
-    spl_u64 addr = RT_PCI_ECAM_BASE
-        + (bus << 20)
-        + (dev << 15)
-        + (func << 12)
-        + (reg & ~3ULL);
-    return *(volatile spl_u32 *)addr;
-}
-
-static spl_u8 rt_pci_read_config8(spl_u64 bus, spl_u64 dev, spl_u64 func, spl_u64 reg) {
-    spl_u64 addr = RT_PCI_ECAM_BASE
+static spl_u64 rt_pci_ecam_addr(spl_u64 bus, spl_u64 dev, spl_u64 func, spl_u64 reg) {
+    return RT_PCI_ECAM_BASE
         + (bus << 20)
         + (dev << 15)
         + (func << 12)
         + reg;
-    return *(volatile spl_u8 *)addr;
+}
+
+static spl_u32 rt_pci_read_config32(spl_u64 bus, spl_u64 dev, spl_u64 func, spl_u64 reg) {
+    return *(volatile spl_u32 *)rt_pci_ecam_addr(bus, dev, func, reg & ~3ULL);
+}
+
+static spl_u8 rt_pci_read_config8(spl_u64 bus, spl_u64 dev, spl_u64 func, spl_u64 reg) {
+    return *(volatile spl_u8 *)rt_pci_ecam_addr(bus, dev, func, reg);
 }
 
 static void rt_pci_write_config32(spl_u64 bus, spl_u64 dev, spl_u64 func, spl_u64 reg, spl_u32 value) {
-    spl_u64 addr = RT_PCI_ECAM_BASE
-        + (bus << 20)
-        + (dev << 15)
-        + (func << 12)
-        + (reg & ~3ULL);
-    *(volatile spl_u32 *)addr = value;
+    *(volatile spl_u32 *)rt_pci_ecam_addr(bus, dev, func, reg & ~3ULL) = value;
 }
 
 static spl_u8 rt_mmio_read8_raw(spl_u64 addr) {
@@ -200,11 +193,11 @@ static void rt_mmio_write32_raw(spl_u64 addr, spl_u32 value) {
 }
 
 static spl_u8 rt_io_read8(spl_u64 base, spl_u64 off) {
-    return *(volatile spl_u8 *)(base + off);
+    return rt_mmio_read8_raw(base + off);
 }
 
 static spl_u16 rt_io_read16(spl_u64 base, spl_u64 off) {
-    return *(volatile spl_u16 *)(base + off);
+    return rt_mmio_read16_raw(base + off);
 }
 
 static spl_u32 rt_io_read32(spl_u64 base, spl_u64 off) {
@@ -212,15 +205,15 @@ static spl_u32 rt_io_read32(spl_u64 base, spl_u64 off) {
 }
 
 static void rt_io_write8(spl_u64 base, spl_u64 off, spl_u8 value) {
-    *(volatile spl_u8 *)(base + off) = value;
+    rt_mmio_write8_raw(base + off, value);
 }
 
 static void rt_io_write16(spl_u64 base, spl_u64 off, spl_u16 value) {
-    *(volatile spl_u16 *)(base + off) = value;
+    rt_mmio_write16_raw(base + off, value);
 }
 
 static void rt_io_write32(spl_u64 base, spl_u64 off, spl_u32 value) {
-    *(volatile spl_u32 *)(base + off) = value;
+    rt_mmio_write32_raw(base + off, value);
 }
 
 static void rt_memzero(void *ptr, spl_u64 bytes) {
@@ -286,13 +279,28 @@ static void rt_avail_push(spl_u64 avail_base, spl_u16 qsize, spl_u16 desc_idx) {
     *idxp = idx + 1U;
 }
 
+/* Allocates and zeroes the contiguous ring for `size` entries and publishes the
+ * desc/avail/used addresses. Returns the ring base, or 0 on allocation failure
+ * (with the out-parameters left untouched). */
+static spl_u64 rt_virtqueue_alloc(spl_u16 size, spl_u64 *desc, spl_u64 *avail, spl_u64 *used) {
+    spl_u64 total = rt_virtqueue_total_size(size);
+    spl_u64 pages = (total + 4095ULL) / 4096ULL;
+    spl_u64 ring = rt_alloc_contiguous_pages(pages);
+    spl_u64 desc_avail;
+    if (ring == 0) {
+        return 0;
+    }
+    rt_memzero((void *)ring, pages * 4096ULL);
+    desc_avail = rt_virtqueue_desc_size(size) + rt_virtqueue_avail_size(size);
+    *desc = ring;
+    *avail = ring + rt_virtqueue_desc_size(size);
+    *used = ring + ((desc_avail + 4095ULL) & ~4095ULL);
+    return ring;
+}
+
 static spl_i64 rt_setup_virtqueue(spl_u64 bar0, spl_u16 queue, spl_u64 *desc, spl_u64 *avail, spl_u64 *used, spl_u16 *qsize) {
     spl_u16 max_size;
-    spl_u16 size;
-    spl_u64 total;
     spl_u64 ring;
-    spl_u64 pages;
-    spl_u64 desc_avail;
     rt_io_write16(bar0, RT_VIRTIO_PCI_QUEUE_SEL, queue);
     max_size = rt_io_read16(bar0, RT_VIRTIO_PCI_QUEUE_SIZE);
     if (max_size == 0) {
@@ -301,19 +309,11 @@ static spl_i64 rt_setup_virtqueue(spl_u64 bar0, spl_u16 queue, spl_u64 *desc, sp
     if (max_size > RT_NET_QUEUE_CAP) {
         return -1;
     }
-    size = max_size;
-    total = rt_virtqueue_total_size(size);
-    pages = (total + 4095ULL) / 4096ULL;
-    ring = rt_alloc_contiguous_pages(pages);
+    ring = rt_virtqueue_alloc(max_size, desc, avail, used);
     if (ring == 0) {
         return -1;
     }
-    rt_memzero((void *)ring, pages * 4096ULL);
-    desc_avail = rt_virtqueue_desc_size(size) + rt_virtqueue_avail_size(size);
-    *desc = ring;
-    *avail = ring + rt_virtqueue_desc_size(size);
-    *used = ring + ((desc_avail + 4095ULL) & ~4095ULL);
-    *qsize = size;
+    *qsize = max_size;
     rt_io_write32(bar0, RT_VIRTIO_PCI_QUEUE_PFN, (spl_u32)(ring >> 12));
     return 0;
 }
@@ -321,27 +321,17 @@ static spl_i64 rt_setup_virtqueue(spl_u64 bar0, spl_u16 queue, spl_u64 *desc, sp
 static spl_i64 rt_setup_virtqueue_capped(spl_u64 bar0, spl_u16 queue, spl_u16 cap, spl_u64 *desc, spl_u64 *avail, spl_u64 *used, spl_u16 *qsize) {
     spl_u16 max_size;
     spl_u16 size;
-    spl_u64 total;
     spl_u64 ring;
-    spl_u64 pages;
-    spl_u64 desc_avail;
     rt_io_write16(bar0, RT_VIRTIO_PCI_QUEUE_SEL, queue);
     max_size = rt_io_read16(bar0, RT_VIRTIO_PCI_QUEUE_SIZE);
     if (max_size == 0) {
         return -1;
     }
     size = max_size > cap ? cap : max_size;
-    total = rt_virtqueue_total_size(size);
-    pages = (total + 4095ULL) / 4096ULL;
-    ring = rt_alloc_contiguous_pages(pages);
+    ring = rt_virtqueue_alloc(size, desc, avail, used);
     if (ring == 0) {
         return -1;
     }
-    rt_memzero((void *)ring, pages * 4096ULL);
-    desc_avail = rt_virtqueue_desc_size(size) + rt_virtqueue_avail_size(size);
-    *desc = ring;
-    *avail = ring + rt_virtqueue_desc_size(size);
-    *used = ring + ((desc_avail + 4095ULL) & ~4095ULL);
     *qsize = size;
     rt_io_write32(bar0, RT_VIRTIO_PCI_QUEUE_PFN, (spl_u32)(ring >> 12));
     return 0;
@@ -503,6 +493,18 @@ static spl_i64 rt_gpu_send_command(spl_u32 cmd, spl_u32 req_len, spl_u32 resp_le
     return -2;
 }
 
+static spl_i64 rt_gpu_send_nodata(spl_u32 cmd, spl_u32 req_len, spl_u32 resp_len) {
+    return rt_gpu_send_command(cmd, req_len, resp_len) == RT_GPU_RESP_OK_NODATA ? 0 : -1;
+}
+
+/* Writes the {x, y, width, height} rectangle header used by the 2D commands. */
+static void rt_gpu_put_rect(spl_u8 *p, spl_u32 x, spl_u32 y, spl_u32 w, spl_u32 h) {
+    rt_put_le32(p, x);
+    rt_put_le32(p + 4, y);
+    rt_put_le32(p + 8, w);
+    rt_put_le32(p + 12, h);
+}
+
 static spl_i64 rt_gpu_find_modern_caps(RtPciDevice *dev) {
     spl_u8 cap = rt_pci_read_config8((spl_u64)dev->bus, (spl_u64)dev->device, (spl_u64)dev->function, 0x34) & 0xfcU;
     spl_u64 bar_base[6];
@@ -545,10 +547,7 @@ static spl_i64 rt_gpu_find_modern_caps(RtPciDevice *dev) {
 static spl_i64 rt_gpu_setup_modern(RtPciDevice *dev) {
     spl_u16 max_size;
     spl_u16 size;
-    spl_u64 total;
-    spl_u64 pages;
     spl_u64 ring;
-    spl_u64 desc_avail;
     if (rt_gpu_find_modern_caps(dev) < 0) {
         return -1;
     }
@@ -572,17 +571,10 @@ static spl_i64 rt_gpu_setup_modern(RtPciDevice *dev) {
         return -4;
     }
     size = max_size > RT_GPU_QUEUE_CAP ? RT_GPU_QUEUE_CAP : max_size;
-    total = rt_virtqueue_total_size(size);
-    pages = (total + 4095ULL) / 4096ULL;
-    ring = rt_alloc_contiguous_pages(pages);
+    ring = rt_virtqueue_alloc(size, &g_rt_gpu_desc, &g_rt_gpu_avail, &g_rt_gpu_used);
     if (ring == 0) {
         return -5;
     }
-    rt_memzero((void *)ring, pages * 4096ULL);
-    desc_avail = rt_virtqueue_desc_size(size) + rt_virtqueue_avail_size(size);
-    g_rt_gpu_desc = ring;
-    g_rt_gpu_avail = ring + rt_virtqueue_desc_size(size);
-    g_rt_gpu_used = ring + ((desc_avail + 4095ULL) & ~4095ULL);
     g_rt_gpu_qsize = size;
     rt_mmio_write16_raw(g_rt_gpu_common + RT_VIRTIO_MODERN_QUEUE_SIZE, size);
     rt_mmio_write32_raw(g_rt_gpu_common + RT_VIRTIO_MODERN_QUEUE_DESC_LO, (spl_u32)(g_rt_gpu_desc & 0xffffffffULL));
@@ -622,7 +614,7 @@ static spl_i64 rt_gpu_cmd_resource_create(void) {
     rt_put_le32(cmd + 28, RT_GPU_FORMAT_B8G8R8A8_UNORM);
     rt_put_le32(cmd + 32, RT_GPU_WIDTH);
     rt_put_le32(cmd + 36, RT_GPU_HEIGHT);
-    return rt_gpu_send_command(RT_GPU_CMD_RESOURCE_CREATE_2D, 40U, 24U) == RT_GPU_RESP_OK_NODATA ? 0 : -1;
+    return rt_gpu_send_nodata(RT_GPU_CMD_RESOURCE_CREATE_2D, 40U, 24U);
 }
 
 static spl_i64 rt_gpu_cmd_attach_backing(void) {
@@ -633,44 +625,41 @@ static spl_i64 rt_gpu_cmd_attach_backing(void) {
     rt_put_le64(cmd + 32, g_rt_gpu_fb);
     rt_put_le32(cmd + 40, RT_GPU_WIDTH * RT_GPU_HEIGHT * 4U);
     rt_put_le32(cmd + 44, 0U);
-    return rt_gpu_send_command(RT_GPU_CMD_RESOURCE_ATTACH_BACKING, 48U, 24U) == RT_GPU_RESP_OK_NODATA ? 0 : -1;
+    return rt_gpu_send_nodata(RT_GPU_CMD_RESOURCE_ATTACH_BACKING, 48U, 24U);
 }
 
 static spl_i64 rt_gpu_cmd_set_scanout(void) {
     spl_u8 *cmd = (spl_u8 *)g_rt_gpu_cmd;
     rt_gpu_ctrl_hdr(cmd, RT_GPU_CMD_SET_SCANOUT);
-    rt_put_le32(cmd + 24, 0U);
-    rt_put_le32(cmd + 28, 0U);
-    rt_put_le32(cmd + 32, RT_GPU_WIDTH);
-    rt_put_le32(cmd + 36, RT_GPU_HEIGHT);
+    rt_gpu_put_rect(cmd + 24, 0U, 0U, RT_GPU_WIDTH, RT_GPU_HEIGHT);
     rt_put_le32(cmd + 40, 0U);
     rt_put_le32(cmd + 44, RT_GPU_RESOURCE_ID);
-    return rt_gpu_send_command(RT_GPU_CMD_SET_SCANOUT, 48U, 24U) == RT_GPU_RESP_OK_NODATA ? 0 : -1;
+    return rt_gpu_send_nodata(RT_GPU_CMD_SET_SCANOUT, 48U, 24U);
 }
 
 static spl_i64 rt_gpu_cmd_transfer_flush(void) {
     spl_u8 *cmd = (spl_u8 *)g_rt_gpu_cmd;
-    spl_i64 resp;
     rt_gpu_ctrl_hdr(cmd, RT_GPU_CMD_TRANSFER_TO_HOST_2D);
-    rt_put_le32(cmd + 24, 0U);
-    rt_put_le32(cmd + 28, 0U);
-    rt_put_le32(cmd + 32, RT_GPU_WIDTH);
-    rt_put_le32(cmd + 36, RT_GPU_HEIGHT);
+    rt_gpu_put_rect(cmd + 24, 0U, 0U, RT_GPU_WIDTH, RT_GPU_HEIGHT);
     rt_put_le64(cmd + 40, 0ULL);
     rt_put_le32(cmd + 48, RT_GPU_RESOURCE_ID);
     rt_put_le32(cmd + 52, 0U);
-    resp = rt_gpu_send_command(RT_GPU_CMD_TRANSFER_TO_HOST_2D, 56U, 24U);
-    if (resp != RT_GPU_RESP_OK_NODATA) {
+    if (rt_gpu_send_nodata(RT_GPU_CMD_TRANSFER_TO_HOST_2D, 56U, 24U) < 0) {
         return -1;
     }
     rt_gpu_ctrl_hdr(cmd, RT_GPU_CMD_RESOURCE_FLUSH);
-    rt_put_le32(cmd + 24, 0U);
-    rt_put_le32(cmd + 28, 0U);
-    rt_put_le32(cmd + 32, RT_GPU_WIDTH);
-    rt_put_le32(cmd + 36, RT_GPU_HEIGHT);
+    rt_gpu_put_rect(cmd + 24, 0U, 0U, RT_GPU_WIDTH, RT_GPU_HEIGHT);
     rt_put_le32(cmd + 40, RT_GPU_RESOURCE_ID);
     rt_put_le32(cmd + 44, 0U);
-    return rt_gpu_send_command(RT_GPU_CMD_RESOURCE_FLUSH, 48U, 24U) == RT_GPU_RESP_OK_NODATA ? 0 : -1;
+    return rt_gpu_send_nodata(RT_GPU_CMD_RESOURCE_FLUSH, 48U, 24U);
+}
+
+/* The present contract shared by rt_gui_flush and rt_display_present. */
+static spl_i64 rt_gpu_present(void) {
+    if (!g_rt_display_ready || !g_rt_gpu_fb) {
+        return -1;
+    }
+    return rt_gpu_cmd_transfer_flush();
 }
 
 static void rt_gpu_fill_rect(spl_u32 x, spl_u32 y, spl_u32 w, spl_u32 h, spl_u32 color) {
@@ -717,10 +706,7 @@ spl_u64 rt_gui_blend_span8(spl_u64 framebuffer_addr, spl_u64 width,
 }
 
 spl_i64 rt_gui_flush(void) {
-    if (!g_rt_display_ready || !g_rt_gpu_fb) {
-        return -1;
-    }
-    return rt_gpu_cmd_transfer_flush();
+    return rt_gpu_present();
 }
 
 static void rt_gpu_fill_wm_scene(void) {
@@ -842,8 +828,5 @@ spl_u64 rt_display_framebuffer_address(void) {
 }
 
 spl_i64 rt_display_present(void) {
-    if (!g_rt_display_ready || !g_rt_gpu_fb) {
-        return -1;
-    }
-    return rt_gpu_cmd_transfer_flush();
+    return rt_gpu_present();
 }
