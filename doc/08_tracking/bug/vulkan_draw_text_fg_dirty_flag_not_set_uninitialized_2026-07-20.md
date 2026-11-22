@@ -1,5 +1,5 @@
 # Bug: `VulkanBackend.draw_text` does not set `dirty=true` on uninitialized-Vulkan fallback (sibling `draw_text_bg` does)
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-22 — `_draw_text_impl` and `_gpu_draw_text_fallback` aligned and verified
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -77,4 +77,10 @@ Add `self.dirty = true` before the early `return` in
 ## Affected
 
 - `test/01_unit/lib/gpu/engine2d/backend_vulkan_text_fallback_spec.spl` (1 of 2 examples)
+
+## Resolution (2026-11-22)
+
+- `_draw_text_impl` (`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl`) and `_gpu_draw_text_fallback` (`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl`) both now set `self.dirty = true`, `self.host_mirror_frame_fresh = false`, `self.note_damage_full()`, `self.last_text_path = "cpu_raster"`, and `self.last_text_fallback_reason = "backend-uninitialized"` before returning when `not self.initialized`.
+- `_gpu_draw_text_fallback` also invalidates `self.host_mirror_valid = false` and marks `self.dirty = uploaded` after uploading CPU-rasterized glyphs into `self.d_framebuffer`, preventing stale `last_host_checksum` reuse and skipped `present()`.
+- Added direct `_gpu_draw_text_fallback` regression coverage in `test/01_unit/lib/gpu/engine2d/backend_vulkan_text_fallback_spec.spl` and verified 3/3 examples pass.
 

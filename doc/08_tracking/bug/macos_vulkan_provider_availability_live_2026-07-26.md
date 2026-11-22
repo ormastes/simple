@@ -73,3 +73,19 @@ blocked dynamic-text ABI instead of unsafely calling it. Provider availability,
 device count, dyld resolution, and provider error remain unobserved in this
 run. No Rust seed fallback and no exhausted full-live Vulkan command were used.
 
+## 2026-11-22 Root-Cause MoltenVK Portability & Micro-Probe Fixes (work/mac-bugs-vulkan-20261122)
+
+Four concrete macOS MoltenVK discovery, portability, and micro-probe defects were found and fixed in source:
+1. **`src/compiler_rust/runtime/src/vulkan/instance.rs` (`VUID-VkInstanceCreateInfo-flags-06559`)**:
+   - Previously, `create_flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR` was set on `#[cfg(target_os = "macos")]` unconditionally while `VK_KHR_portability_enumeration` was pushed only under `#[cfg(feature = "vulkan")]`, and `VK_EXT_metal_surface` was pushed without checking `has_ext(...)`.
+   - Fixed by enumerating instance extensions unconditionally, gating `VK_EXT_metal_surface` on `has_ext`, and pairing `ENUMERATE_PORTABILITY_KHR` strictly with `has_ext(ash::khr::portability_enumeration::NAME)` across all feature configurations.
+   - Added automatic macOS `VK_ICD_FILENAMES` fallback discovery (`/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json`, `/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json`, `/usr/local/{etc,share}/vulkan/icd.d/MoltenVK_icd.json`) when both `VK_ICD_FILENAMES` and `VK_DRIVER_FILES` are unset.
+2. **`src/compiler_rust/runtime/src/vulkan/device.rs` & `src/compiler_rust/compiler/src/interpreter_extern/gpu.rs` (`VUID-VkDeviceCreateInfo-pProperties-04451`)**:
+   - MoltenVK physical devices advertise `VK_KHR_portability_subset`, which the Vulkan Portability specification requires `vkCreateDevice` to enable whenever advertised. Both runtime and interpreter `vkCreateDevice` paths now enumerate device extensions and enable `"VK_KHR_portability_subset"` when present (and `device.rs` gates `shader_int64` and `VK_KHR_swapchain` on adapter support).
+   - `gpu.rs` also applies the macOS `MoltenVK_icd.json` environment fallback before `dlopen`.
+3. **`test/02_integration/rendering/macos_vulkan_provider_micro_probe.spl`**:
+   - Fixed unconditional `vulkan_provider_probe_status=fail` at exit even when `is_available > 0`, `initialized > 0`, and `device_count > 0`: a healthy initialized provider with `device_count > 0` now emits `vulkan_provider_probe_status=pass` (`reason=provider-ready`, exit `0`) while preserving `vulkan_provider_probe_provider_error_abi=blocked` (never calling text-returning `rt_vulkan_get_last_error` through `DynLib.call0`).
+4. **`scripts/check/check-macos-vulkan-provider-micro-probe.shs`**:
+   - Restored explicit canonical-compiler and override consistency checks (`VULKAN_PROVIDER_PROBE_COMPILER_MANIFEST`, `VULKAN_PROVIDER_PROBE_COMPILER`, `VULKAN_PROVIDER_DYLIB`, rejection of `*compiler_rust/target/*`, and canonical `bin/release/{aarch64,x86_64}-apple-darwin-macho/simple` path enforcement) plus `DYLD_FALLBACK_LIBRARY_PATH` fallback for Homebrew `libvulkan.dylib`.
+   - Verified `test/03_system/check/macos_vulkan_provider_micro_probe_contract_spec.spl` (2/2 passed) and `sh -n scripts/check/check-macos-vulkan-provider-micro-probe.shs`. Live native-build execution awaits the admitted macOS self-hosted compiler artifact outside Seatbelt's `MTLCreateSystemDefaultDevice` sandbox restriction.
+

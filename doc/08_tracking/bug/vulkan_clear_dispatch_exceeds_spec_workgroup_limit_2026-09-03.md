@@ -1,5 +1,5 @@
 # Full-surface `clear` exceeds the Vulkan spec-minimum workgroup count at 4K and above
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-22 — 2D-tiled clear kernel and workgroup cap `<= 65535` implemented & verified
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -79,4 +79,12 @@ this arc. Fix when the machine is quiet and both gates run clean.
 Found by a delegated defaults/sizing audit; call site verified independently by
 reading `backend_vulkan.spl`. Full inventory:
 `doc/08_tracking/bug/engine2d_8k_default_sizing_inventory_2026-09-03.md`.
+
+## Resolution (2026-11-22)
+
+- Updated `_glsl_clear()` (`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_glsl.spl`), `spirv_clear()` (`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_spirv.spl`), and `test/09_baselines/engine2d_vulkan/clear.comp` to compute linear pixel index via `gl_WorkGroupID.y * (gl_NumWorkGroups.x * 256u) + gl_GlobalInvocationID.x` with `local_size_x = 256, local_size_y = 1, local_size_z = 1`.
+  - Existing 1D callers (`gy = 1` when `total_groups <= 65535`) preserve identical `gl_GlobalInvocationID.x` indexing with zero ABI or push-constant change.
+  - Surfaces whose `ceil(w * h / 256) > 65535` tile across `(gx = 32768, gy = ceil(total_groups / 32768), 1)` via `vulkan_clear_dispatch_groups_x` / `vulkan_clear_dispatch_groups_y` (`backend_vulkan_helpers.spl`), keeping both X and Y strictly `<= 65535` across 7680x4320 (`32768 x 4`), 8192x8192 (`32768 x 8`), and 16384x16384 (`32768 x 32`).
+- Updated `VulkanBackend.clear()` (`backend_vulkan.spl`), `processing_ir_execute_vulkan` (`src/lib/gc_async_mut/processing/vulkan_fill_u32.spl`), and `test/09_baselines/engine2d_vulkan/engine2d_vulkan_clear_8k_bench.c` to enforce the 2D-bounded workgroup counts and reject out-of-range dispatches fail-closed.
+- Validated embedded SPIR-V 1.3 bytecode with `glslangValidator --target-env vulkan1.1`, `spirv-val --target-env vulkan1.1`, `MoltenVKShaderConverter` (SPIR-V -> MSL), `vulkan_spirv_module_structure_spec.spl` (25/25 passed), `spirv_blob_bare_hex_words_spec.spl` (2/2 passed), and `vulkan_clear_and_damage_readback_spec.spl` (7/7 passed).
 
