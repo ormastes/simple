@@ -157,3 +157,7 @@ binary was produced; the old MIR SIGSEGV is NOT re-assessed by this run. A
 full link needs a run without the 8 GiB cap.
 `cuda_optimizer_owner_imports_spec.spl` docstring updated (still imports the
 owners directly, which is its purpose).
+
+Negative control (same producer, env and flags): a fixture with `fn take(x: NoSuchOwnerType)` fails HIR with `[ERROR] HIR lowering error ... unresolved type: NoSuchOwnerType` (build rc=1). So `failed=0` on the 514-module closure is evidence that can fail, not a vacuous pass.
+Importer audit: no file under src/ or test/ that imports the four optimizer modules or `cuda_backend_port` names `LocalId`, `BlockId`, `MirType` or `MirSignature` without the owner import. The only matches are commented-out code in `mir_opt_spec.spl` and the intentional `mir_owner_adapter/cuda_adapter_import_only.spl` fixture.
+**Untracked residual:** the 2026-10-10 CUDA-closure crash at MIR entry (SIGSEGV, exit 139) has no other bug record, and this run could not reach it because of the 8 GiB OOM. It is now UNTRACKED; file a narrow MIR record when a run above 8 GiB reproduces it.
