@@ -295,7 +295,16 @@ if "$SIMPLE_BINARY" native-build --help 2>/dev/null | rg -q -- '--emit-archive';
         exit 1
     fi
     rm -f "$CORE_ARCHIVE"
-    ar rcs "$CORE_ARCHIVE" "$CORE_ARCHIVE_PART_DIR"/objects/*/*.o
+    # The parts define their runtime symbols as weak externals. On COFF, GNU ar
+    # leaves weak externals out of the archive symbol index, so lld-link pulled
+    # no member and reported every rt_* as undefined; llvm-ar indexes them.
+    # See doc/08_tracking/bug/simple_core_archive_gnu_ar_drops_coff_weak_symbols_2026-11-22.md
+    if command -v llvm-ar >/dev/null 2>&1; then
+        CORE_AR=llvm-ar
+    else
+        CORE_AR=ar
+    fi
+    "$CORE_AR" rcs "$CORE_ARCHIVE" "$CORE_ARCHIVE_PART_DIR"/objects/*/*.o
 else
     echo "simple_core_archive_capable=false"
     echo "error=selected_simple_binary_lacks_emit_archive:$SIMPLE_BINARY"
@@ -341,11 +350,30 @@ if [ -z "$core_required_symbols" ]; then
 fi
 # Same normalisation as the seed's archive_defined_symbols/runtime_archive_has_core_required_symbols:
 # strip ALL leading underscores on both sides (`__simple_runtime_init` is required as-is).
-core_defined_symbols="$(nm -g "$CORE_ARCHIVE" 2>/dev/null | awk '{print $NF}' | sed 's/^_*//' | sort -u)"
+# Defined entries only (undefined `U` lines have no address field), and the
+# archive symbol index must list the name, which is what the linker consults.
+# Use llvm-nm when present: GNU nm shows a COFF weak-external definition as an
+# address-less `w` line, indistinguishable from an undefined weak reference.
+if command -v llvm-nm >/dev/null 2>&1; then
+    core_defined_symbols="$(llvm-nm -g --defined-only "$CORE_ARCHIVE" 2>/dev/null | awk 'NF >= 3 {print $NF}' | sed 's/^_*//' | sort -u)"
+else
+    core_defined_symbols="$(nm -g "$CORE_ARCHIVE" 2>/dev/null | awk 'NF >= 3 {print $NF}' | sed 's/^_*//' | sort -u)"
+fi
+# llvm-nm prints the index as "Archive map" / "<sym> in <member>"; other nm
+# flavours (or none) leave this empty and the index check is skipped.
+core_indexed_symbols=""
+if command -v llvm-nm >/dev/null 2>&1; then
+    core_indexed_symbols="$(llvm-nm --print-armap "$CORE_ARCHIVE" 2>/dev/null | sed -n '/^Archive map/,/^$/p' | awk 'NF >= 3 {print $1}' | sed 's/^_*//' | sort -u)"
+fi
 for required_symbol in $core_required_symbols; do
     if ! printf '%s\n' "$core_defined_symbols" | grep -qx -- "$required_symbol"; then
         echo "simple_core_archive_complete=false"
         echo "error=missing_core_required_symbol:$required_symbol"
+        exit 1
+    fi
+    if [ -n "$core_indexed_symbols" ] && ! printf '%s\n' "$core_indexed_symbols" | grep -qx -- "$required_symbol"; then
+        echo "simple_core_archive_complete=false"
+        echo "error=core_required_symbol_not_in_archive_index:$required_symbol"
         exit 1
     fi
 done
