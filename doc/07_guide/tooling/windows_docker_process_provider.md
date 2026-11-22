@@ -25,6 +25,7 @@ wrapper reads the pins from the engine and the image and passes them in.
 |---|---|---|
 | live prepare/create/start/wait/logs/destroy, `cmd.exe /c echo` | N/A by design: refused before any Docker effect (`child environment capture requires the matching native C provider`, `process_ops.spl:1959`) | PASS: logs `simple-wdp-ok`, wait exit 0, exact-ID absence confirmed |
 | non-zero exit propagation (`WDP_EXIT=3`) | N/A (same refusal) | PASS: wait exit 3 |
+| inside an smux pane (`--serve`, `new`, `send`, `capture`, `stop-server`) | PASS: smux served by Phase 1; the pane ran `docker run --rm --isolation=process ... cmd /c echo` and printed `smux-container-ok` | PASS: the pane ran the wrapper + Phase 2 probe, verdict PASS |
 | Windows provider scripted specs (10 files) | 121/122 after realigning 3 stale V6 expectations (`doc/08_tracking/bug/windows_docker_specs_stale_after_v6_network_2026-11-22.md`). One RED: `docker_server_network_v6_spec.spl:288`, see `doc/08_tracking/bug/windows_scripted_docker_progress_needs_native_thread_on_seed_2026-11-22.md` | N/A (bootstrap CLI has no `test`) |
 
 Use the Windows provider's typed request and explicit policy. Its host kernel and

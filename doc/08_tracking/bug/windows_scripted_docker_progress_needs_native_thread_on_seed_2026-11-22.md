@@ -13,7 +13,8 @@
 "uses the same network stages in bounded cooperative progress" fails with
 `expected blocked to equal ok`; the operation reason is
 `windows-command-canonical-thread-required` at stage `engine` after 3 scripted replies.
-22 of 23 examples pass. On a non-Windows host the same example passes.
+22 of 23 examples pass. The non-Windows branch of `windows_command_registry_thread_v4`
+admits scripted turns (code path; not executed here).
 
 ## Cause
 
