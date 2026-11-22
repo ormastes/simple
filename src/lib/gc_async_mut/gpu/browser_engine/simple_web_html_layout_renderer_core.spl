@@ -2,7 +2,7 @@ export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_c
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_declarations.{css_cascade_root_font_set, css_cascade_root_font_px}
 use std.gc_async_mut.gpu.browser_engine.style.supports.{eval_supports_query}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style, browser_font_candidates_for_family}
-use std.common.encoding.utf8.{text_codepoints}
+use std.common.encoding.utf8.{text_codepoints, char_from_codepoint}
 use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 use common.ui.glyph_bitmap_5x7.{glyph_row_bits, glyph_index_for_char_code}
@@ -326,6 +326,26 @@ pub fn web_font_face_candidates(family: text, bold: bool, italic: bool) -> [text
     browser_font_candidates_for_family(styled_family)
 
 var _overflow_triple_memo: Dict<text, [text]> = {}
+
+# Kerned edge-space advance (milli-px): width(" " + glyph) - width(glyph) for
+# the lead side, width(glyph + " ") - width(glyph) for the trail side. A kern
+# pair only involves the adjacent glyph, so one or two codepoints are measured,
+# memoized per (family, size, language, glyph, side). -1 when unmeasurable.
+var _edge_space_memo: Dict<text, i64> = {}
+
+fn edge_space_kerned_milli(family: text, size_milli: i32, language: text, cp: i64, lead: bool) -> i64:
+    val key = "{family}|{size_milli}|{language}|{cp}|{lead}"
+    if _edge_space_memo.has(key):
+        return _edge_space_memo[key]
+    val g = char_from_codepoint(cp)
+    val pair = if lead: " " + g else: g + " "
+    val m_pair = resolve_font_metrics_with_language_milli(family, pair, size_milli, language)
+    val m_one = resolve_font_metrics_with_language_milli(family, g, size_milli, language)
+    var r: i64 = -1
+    if m_pair.valid and m_one.valid and m_pair.width_milli > 0 and m_one.width_milli >= 0:
+        r = m_pair.width_milli - m_one.width_milli
+    _edge_space_memo[key] = r
+    r
 var _overflow_triple_memo_hits: i64 = 0
 var _overflow_triple_memo_misses: i64 = 0
 
@@ -1449,6 +1469,21 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                             if space_metrics.valid and space_metrics.width_milli > 0:
                                 st.resolved_font_width_milli = metrics.width_milli
                                 st.resolved_space_milli = space_metrics.width_milli
+                                # Chrome shapes a run together with its collapsible
+                                # edge space, so the (letter, space) kern pair
+                                # applies. Measure run+space as one string, but only
+                                # for a run that really has that edge space.
+                                if not st.white_space_nowrap and not st.direction_rtl and metric_text.len() > 0:
+                                    val nd_bytes = nd.text_data.bytes()
+                                    val nd_n = nd_bytes.len()
+                                    if nd_n > 1 and (nd_bytes[0] == 32 or nd_bytes[0] == 9 or nd_bytes[0] == 10 or nd_bytes[0] == 13):
+                                        val lead_m = edge_space_kerned_milli(metric_family, font_milli_of(st.font_size, st.font_size_milli), language, metric_cps[0], true)
+                                        if lead_m > 0:
+                                            st.resolved_lead_space_milli = lead_m
+                                    if nd_n > 1 and (nd_bytes[nd_n - 1] == 32 or nd_bytes[nd_n - 1] == 9 or nd_bytes[nd_n - 1] == 10 or nd_bytes[nd_n - 1] == 13):
+                                        val trail_m = edge_space_kerned_milli(metric_family, font_milli_of(st.font_size, st.font_size_milli), language, metric_cps[metric_cps.len() - 1], false)
+                                        if trail_m > 0:
+                                            st.resolved_trail_space_milli = trail_m
                 else:
                     st.resolved_font_advances = metrics.advances
                     st.resolved_font_width = metrics.width
