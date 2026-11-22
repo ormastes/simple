@@ -452,33 +452,141 @@ fn _css_resolve_vars(
 # pass. Width terms compare against the viewport; any unknown feature term
 # (prefers-*, forced-colors, resolution, ...) fails its group, matching a UA
 # with no such preference set (Chrome headless defaults).
+fn _parse_media_width_px_x2_or_neg1(raw: text) -> i32:
+    val s = raw.trim().lower()
+    val n = s.byte_len()
+    if n == 0:
+        return -1
+    var has_px = false
+    var end_idx = n
+    if s.ends_with("px"):
+        has_px = true
+        end_idx = n - 2
+    var idx = 0
+    var neg = false
+    if idx < end_idx:
+        val sign_ch = s.substring(idx, idx + 1)
+        if sign_ch == "-":
+            neg = true
+            idx = idx + 1
+        elif sign_ch == "+":
+            idx = idx + 1
+    if idx >= end_idx:
+        return -1
+    var saw_digit = false
+    var saw_dot = false
+    var digit_after_dot = false
+    var whole = 0
+    var nonzero_frac = false
+    while idx < end_idx:  # cpu-lane-loop-ok: scans digits of ONE @media width length token
+        val ch = s.substring(idx, idx + 1)
+        if ch == ".":
+            if saw_dot:
+                return -1
+            saw_dot = true
+        elif ch >= "0" and ch <= "9":
+            val d = dec_val(ch)
+            saw_digit = true
+            if not saw_dot:
+                if whole < 10000000:
+                    whole = whole * 10 + d
+            else:
+                digit_after_dot = true
+                if d > 0:
+                    nonzero_frac = true
+        else:
+            return -1
+        idx = idx + 1
+    if not saw_digit or (saw_dot and not digit_after_dot):
+        return -1
+    if not has_px:
+        if whole == 0 and not nonzero_frac:
+            return 0
+        return -1
+    if neg:
+        if whole == 0 and not nonzero_frac:
+            return 0
+        return -1
+    whole * 2 + (if nonzero_frac: 1 else: 0)
+
 fn _media_group_applies(group: text, viewport_w: i32) -> bool:
+    val raw = group.trim().lower()
+    if raw.byte_len() == 0:
+        return false
+    if raw == "not" or raw == "only":
+        return false
+    var negated = false
+    var saw_only = false
+    var body = raw
+    if body.starts_with("not ") or body.starts_with("not\t") or body.starts_with("not("):
+        negated = true
+        body = body.substring(3, body.byte_len()).trim()
+    elif body.starts_with("only ") or body.starts_with("only\t") or body.starts_with("only("):
+        saw_only = true
+        body = body.substring(4, body.byte_len()).trim()
+    val n = body.byte_len()
+    if n == 0:
+        return false
+    val first_lp = find_from(body, "(", 0)
+    if first_lp < 0:
+        if body.contains(" ") or body.contains("\t") or body.contains(")") or body.contains(":"):
+            return false
+        val type_ok = body == "all" or body == "screen"
+        return if negated: not type_ok else: type_ok
+    if first_lp == 0 and saw_only:
+        return false
+    var type_ok = true
+    if first_lp > 0:
+        val prefix = body.substring(0, first_lp).trim()
+        if not (prefix.ends_with(" and") or prefix.ends_with("\tand")):
+            return false
+        val mtype = prefix.substring(0, prefix.byte_len() - 4).trim()
+        if mtype.byte_len() == 0 or mtype.contains(" ") or mtype.contains("\t"):
+            return false
+        type_ok = mtype == "all" or mtype == "screen"
     var ok = true
-    var i = 0
-    val n = group.byte_len()
-    while i < n and ok:  # cpu-lane-loop-ok: walks the parenthesized feature terms of ONE @media comma-group via native find_from; a handful of terms per group
-        val lp = find_from(group, "(", i)
+    var unknown = false
+    var i = first_lp
+    while i < n:  # cpu-lane-loop-ok: walks the parenthesized feature terms of ONE @media comma-group via native find_from; a handful of terms per group
+        val lp = find_from(body, "(", i)
         if lp < 0:
+            val trailing = body.substring(i, n).trim()
+            if trailing.byte_len() > 0:
+                return false
             break
-        val rp = find_from(group, ")", lp)
+        val between = body.substring(i, lp).trim()
+        if i > first_lp and between != "and":
+            return false
+        val rp = find_from(body, ")", lp)
         if rp < 0:
-            ok = false
-            break
-        val term = group.substring(lp + 1, rp).trim().lower()
+            return false
+        val term = body.substring(lp + 1, rp).trim()
         val colon = text_index_of(term, ":")
         if colon < 0:
-            ok = false
+            unknown = true
         else:
             val feat = term.substring(0, colon).trim()
-            val px = parse_int(term.substring(colon + 1, term.byte_len()))
+            val px_x2 = _parse_media_width_px_x2_or_neg1(term.substring(colon + 1, term.byte_len()))
             if feat == "max-width":
-                ok = viewport_w <= px
+                if px_x2 < 0:
+                    unknown = true
+                elif viewport_w * 2 > px_x2:
+                    ok = false
             elif feat == "min-width":
-                ok = viewport_w >= px
+                if px_x2 < 0:
+                    unknown = true
+                elif viewport_w * 2 < px_x2:
+                    ok = false
             else:
-                ok = false
+                unknown = true
         i = rp + 1
-    ok
+    val definite_false = (not type_ok) or (not ok)
+    if unknown and not definite_false:
+        return false
+    val matched = not definite_false
+    if negated:
+        return not matched
+    matched
 
 # Evaluate a @media prelude ("@media (max-width: 599px), print") against the
 # viewport width. Comma groups OR together. viewport_w < 0 = legacy mode:

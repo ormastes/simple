@@ -1,6 +1,6 @@
 # Selector matching: a `:` inside an attribute value kills the selector, `[a^=""]` matches, `*.a` never matches (2026-11-15)
 
-Status: OPEN. Severity: medium for Simple web styling (`a[href^="http:"]`,
+Status: FIXED (2026-11-22 — colon scanning in `core_selectors.spl` and `core_rule_index.spl` now skips quoted/bracketed text, empty operands for `^=`, `$=`, and `*=` return false across all three attribute matchers, and universal compounds `*.a` / `*[attr]` are pinned in `layout_renderer_selector_matching_chrome159_spec.spl`). Severity: medium for Simple web styling (`a[href^="http:"]`,
 `a[href^="https:"]` and `*.class` are common in real stylesheets).
 
 ## Defects
