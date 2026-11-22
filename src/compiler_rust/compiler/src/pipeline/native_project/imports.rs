@@ -457,8 +457,17 @@ pub(crate) fn build_import_map(
                                 f.params.iter().map(|p| p.default.clone()).collect(),
                             );
                         }
-                        if !f.body.statements.is_empty() {
-                            let mangled = format!("{}__{}", prefix, f.name);
+                        let abi_override = crate::hir::lower::module_lowering::ast_function_abi_override(f);
+                        if matches!(
+                            abi_override,
+                            Some(crate::hir::lower::module_lowering::AstFnAbiOverride::ExternRuntime(_))
+                        ) || !f.body.statements.is_empty()
+                        {
+                            let mangled = match abi_override {
+                                Some(crate::hir::lower::module_lowering::AstFnAbiOverride::ExternRuntime(sym))
+                                | Some(crate::hir::lower::module_lowering::AstFnAbiOverride::Export(sym)) => sym,
+                                None => format!("{}__{}", prefix, f.name),
+                            };
                             fn_arities.insert(mangled.clone(), f.params.len());
                             raw_to_mangled.entry(f.name.clone()).or_default().push(mangled.clone());
                             // Preserve every declared return type. The lowerer
@@ -747,12 +756,9 @@ pub(crate) fn build_import_map(
                         }
                     }
                     simple_parser::ast::Node::Impl(imp) => {
-                        let type_name = match &imp.target_type {
-                            simple_parser::ast::Type::Simple(n) => Some(n.as_str()),
-                            simple_parser::ast::Type::Generic { name, .. } => Some(name.as_str()),
-                            _ => None,
-                        };
-                        if let Some(type_name) = type_name {
+                        let type_name = crate::hir::lower::Lowerer::impl_target_type_name(&imp.target_type);
+                        if let Some(ref type_name) = type_name {
+                            let type_name = type_name.as_str();
                             if let Some(trait_name) = &imp.trait_name {
                                 let implementations = trait_impls.entry(trait_name.clone()).or_default();
                                 if !implementations.iter().any(|candidate| candidate == type_name) {

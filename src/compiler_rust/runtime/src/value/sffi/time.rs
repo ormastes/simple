@@ -216,6 +216,14 @@ pub fn rt_progress_tls_clear() {
     unsafe { c_sffi::rt_progress_tls_clear() }
 }
 
+/// Sleep for `nanos` nanoseconds (non-positive durations return immediately).
+#[no_mangle]
+pub extern "C" fn rt_sleep_nanos(nanos: i64) {
+    if nanos > 0 {
+        std::thread::sleep(std::time::Duration::from_nanos(nanos as u64));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{fractional_seconds_to_millis, lift_clock_value, rt_time_now_seconds, try_rt_time_now_seconds_f64};

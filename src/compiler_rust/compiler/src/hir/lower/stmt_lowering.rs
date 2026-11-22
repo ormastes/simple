@@ -164,13 +164,20 @@ fn freeze_hir_place_at(expr: HirExpr, top: bool, ctx: &mut FunctionContext, prel
             };
             HirExpr { ty, kind: HirExprKind::Index { receiver: Box::new(receiver), index: Box::new(index) } }
         }
-        HirExprKind::MethodCall { receiver, method, args, dispatch } if args.is_empty() => HirExpr {
+        HirExprKind::MethodCall {
+            receiver,
+            method,
+            args,
+            dispatch,
+            generic_args,
+        } if args.is_empty() => HirExpr {
             ty,
             kind: HirExprKind::MethodCall {
                 receiver: Box::new(freeze_hir_place_at(*receiver, false, ctx, prelude)),
                 method,
                 args,
                 dispatch,
+                generic_args,
             },
         },
         HirExprKind::Local(_) | HirExprKind::Global(_) => HirExpr { ty, kind: expr.kind },
@@ -584,22 +591,35 @@ impl Lowerer {
                     return self.lower_tuple_destructuring(patterns, let_stmt, ctx);
                 }
 
+                // Extract type annotation from either let_stmt.ty OR Pattern::Typed
+                // BEFORE lowering the value so generic calls like `iter.collect()`
+                // can infer their target container type from `let x: List<i64> = ...`.
+                let pattern_type = Self::extract_pattern_type(&let_stmt.pattern);
+                let explicit_target_ty = if let Some(t) = &let_stmt.ty {
+                    self.resolve_type(t).ok()
+                } else if let Some(pt) = pattern_type {
+                    self.resolve_type(pt).ok()
+                } else {
+                    None
+                };
+
                 // Lower the value first (if present) to get the actual TypeId
                 // This avoids the issue where infer_type and lower_expr create
                 // different TypeIds for the same type (e.g., array types)
                 let mut value = if let Some(v) = &let_stmt.value {
-                    let lowered = self.lower_expr(v, ctx)?;
-                    Some(lowered)
+                    let prev_expected = std::mem::replace(
+                        &mut self.expected_target_type,
+                        explicit_target_ty.filter(|ty| *ty != TypeId::ANY && *ty != TypeId::VOID),
+                    );
+                    let lowered = self.lower_expr(v, ctx);
+                    self.expected_target_type = prev_expected;
+                    Some(lowered?)
                 } else {
                     None
                 };
                 if matches!(inner_pattern, Pattern::Wildcard) {
                     return Ok(value.map(HirStmt::Expr).into_iter().collect());
                 }
-
-                // Extract type annotation from either let_stmt.ty OR Pattern::Typed
-                // In Simple syntax, `var x: T = v` puts the type in Pattern::Typed
-                let pattern_type = Self::extract_pattern_type(&let_stmt.pattern);
 
                 // Use explicit type annotation if provided, otherwise use the
                 // type from the lowered value to ensure TypeId consistency
@@ -1040,7 +1060,13 @@ impl Lowerer {
                     // `lower_condition` prevents at direct condition sites,
                     // just laundered through a return. 42 owned `-> bool`
                     // functions in this repo return a bare `.?`.
-                    let expr = self.lower_bool_return_expr(v, ctx)?;
+                    let prev_expected = std::mem::replace(
+                        &mut self.expected_target_type,
+                        (ctx.return_type != TypeId::ANY && ctx.return_type != TypeId::VOID).then_some(ctx.return_type),
+                    );
+                    let expr = self.lower_bool_return_expr(v, ctx);
+                    self.expected_target_type = prev_expected;
+                    let expr = expr?;
                     self.validate_declared_return_type(ctx.return_type, expr.ty)?;
 
                     // Check for returning local reference (E2005)
@@ -1704,7 +1730,10 @@ impl Lowerer {
             | Node::CommonUseStmt(_)
             | Node::ExportUseStmt(_)
             | Node::StructuredExportStmt(_)
-            | Node::AutoImportStmt(_) => Ok(vec![]),
+            | Node::AutoImportStmt(_)
+            | Node::FriendDecl(_)
+            | Node::InternalExportDecl(_)
+            | Node::LayerDecl(_) => Ok(vec![]),
 
             // Guard statement: ? condition -> result
             // Desugars to: if condition: return result
@@ -1774,6 +1803,7 @@ impl Lowerer {
                         method: "__enter__".to_string(),
                         args: vec![],
                         dispatch: DispatchMode::Dynamic,
+                        generic_args: vec![],
                     },
                     ty: resource_ty, // __enter__ returns self or similar type
                 };
@@ -1814,6 +1844,7 @@ impl Lowerer {
                             ty: TypeId::NIL,
                         }],
                         dispatch: DispatchMode::Dynamic,
+                        generic_args: vec![],
                     },
                     ty: TypeId::VOID,
                 };
@@ -1973,6 +2004,9 @@ impl Lowerer {
             | Node::LiteralFunction(_)
             | Node::ModDecl(_)
             | Node::RequiresCapabilities(_)
+            | Node::FriendDecl(_)
+            | Node::InternalExportDecl(_)
+            | Node::LayerDecl(_)
             | Node::AopAdvice(_)
             | Node::DiBinding(_)
             | Node::ArchitectureRule(_)

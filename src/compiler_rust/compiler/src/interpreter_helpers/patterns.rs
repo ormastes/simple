@@ -1264,9 +1264,27 @@ fn handle_method_call_with_self_update_inner(
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<(String, Value)>), CompileError> {
     if let Expr::MethodCall {
-        receiver, method, args, ..
+        receiver,
+        method,
+        args,
+        generic_args,
     } = value_expr
     {
+        if let Some(default_arr) = crate::interpreter::expr::try_eval_array_repeat_default(
+            receiver,
+            method,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )? {
+            return Ok((default_arr, None));
+        }
+        let _pending_generics =
+            crate::interpreter::push_method_call_generics_with_method(receiver, method, generic_args);
+        let _clear_expected_target = crate::interpreter::push_expected_target_type(None);
         // Handle nested method calls like self.advance().unwrap()
         // The receiver itself might be a method call that mutates an object
         if let Expr::MethodCall {

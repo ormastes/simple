@@ -344,19 +344,75 @@ impl HirLowering:
         # An empty literal or any untyped/mixed element provides no
         # authoritative element type. Only propagate a type when every
         # lowered element carries the same concrete HIR type.
+        #
+        # HIR literals are lowered `has_type_: false`, so an unannotated
+        # `val paths = ["/a", root + "/b"]` used to stay untyped: its binding
+        # settled with no element type, and the element read by for-in or
+        # index reached the MIR enum-payload check as a settled no-shape type
+        # and was rejected from a `text` slot (bug
+        # untyped_text_array_element_rejected_as_enum_payload_2026-11-21).
+        # An untyped element whose KIND proves `text` (string literal, a
+        # binding declared `text`, a `+` of two such) is typed `text` here,
+        # at the literal's producer. Nothing else is inferred: numeric
+        # literals keep taking their width from context, and Any/unknown
+        # never becomes an element type.
         if elements.is_empty(): return HirType(kind: HirTypeKind.Error, span: span)
-        val first = elements[0]
-        if not first.has_type_: return HirType(kind: HirTypeKind.Error, span: span)
-        match first.type_.kind:
-            case HirTypeKind.Error | HirTypeKind.Infer(_, _) | HirTypeKind.Any | HirTypeKind.Never:
-                return HirType(kind: HirTypeKind.Error, span: span)
-            case _: ()
+        var first_type = HirType(kind: HirTypeKind.Error, span: span)
+        var first_seen = false
         for raw_element in elements:
             # ANY-transport hazard sweep round 3: annotated rebind.
             val element: HirExpr = raw_element
-            if not element.has_type_: return HirType(kind: HirTypeKind.Error, span: span)
-            if not hir_types_equal(first.type_, element.type_): return HirType(kind: HirTypeKind.Error, span: span)
-        first.type_
+            # Read `type_` only under `has_type_` in its own if (frozen-stage2
+            # placeholder-span hazard, bug
+            # stage2_struct_param_deep_copy_packed_span_2026-11-03); only the
+            # kind crosses into the text helper.
+            var element_type = HirType(kind: HirTypeKind.Error, span: span)
+            if element.has_type_:
+                element_type = element.type_
+            elif self.hir_kind_proves_text(element.kind):
+                element_type = HirType(kind: HirTypeKind.Str, span: element.span)
+            match element_type.kind:
+                case HirTypeKind.Error | HirTypeKind.Infer(_, _) | HirTypeKind.Any | HirTypeKind.Never:
+                    return HirType(kind: HirTypeKind.Error, span: span)
+                case _: ()
+            if not first_seen:
+                first_type = element_type
+                first_seen = true
+            elif not hir_types_equal(first_type, element_type):
+                return HirType(kind: HirTypeKind.Error, span: span)
+        first_type
+
+    fn hir_kind_proves_text(kind: HirExprKind) -> bool:
+        # Positive `text` evidence for an untyped array-literal element. A
+        # string literal (plain or interpolated) is text; a variable is text
+        # only when its symbol is DECLARED `text`; `a + b` is text only when
+        # both operands are. Anything else is not evidence.
+        match kind:
+            case HirExprKind.StringLit(_, _): return true
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                if val declared = self.symbols.get_symbol_type_raw(symbol.id):
+                    match declared.kind:
+                        case HirTypeKind.Str: return true
+                        case _: ()
+                return false
+            case HirExprKind.Binary(op, left, right):
+                match op:
+                    case HirBinOp.Add:
+                        var left_text = false
+                        if left.has_type_:
+                            match left.type_.kind:
+                                case HirTypeKind.Str: left_text = true
+                                case _: ()
+                        else:
+                            left_text = self.hir_kind_proves_text(left.kind)
+                        if not left_text: return false
+                        if right.has_type_:
+                            match right.type_.kind:
+                                case HirTypeKind.Str: return true
+                                case _: return false
+                        return self.hir_kind_proves_text(right.kind)
+                    case _: return false
+            case _: return false
 
     me field_owner_for_hir_expr(base: HirExpr) -> i64:
         # Preserve the explicit HIR type when one is already attached (for
@@ -541,6 +597,20 @@ impl HirLowering:
                 return Some(self.class_method_return_types_by_name[bare_key])
         None
 
+    fn resolve_method_call_arity_symbol_id(resolution: MethodResolution, receiver: HirExpr, method_name: text) -> i64:
+        match resolution:
+            case MethodResolution.StaticMethod(_, method_id):
+                if method_id.is_valid():
+                    return method_id.id
+            case MethodResolution.InstanceMethod(_, method_id):
+                if method_id.is_valid():
+                    return method_id.id
+            case _: ()
+        val receiver_owner = self.field_owner_for_hir_expr(receiver)
+        if receiver_owner >= 0:
+            return self.symbols.record_instance_method_scalar_raw(receiver_owner, method_name)
+        -1
+
     me lower_hir_expr(e: Expr) -> HirExpr:
         if e == nil:
             val missing_span = Span.empty()
@@ -705,6 +775,7 @@ impl HirLowering:
                                 val mc_module_callable = self.field_module_callable(mc_module_name, method_name_t)
                                 if val mc_resolved_callable = mc_module_callable:
                                     val mc_callable_name = self.symbols.symbol_display_name(mc_resolved_callable, method_name_t)
+                                    self.check_call_arity_by_symbol_id(mc_resolved_callable.id, hir_args, e.span)
                                     return HirExpr(
                                         kind: HirExprKind.Call(
                                             HirExpr(kind: _hir_callable_named_var_payload(mc_resolved_callable, mc_callable_name), has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: e.span), span: e.span),
@@ -777,6 +848,7 @@ impl HirLowering:
                                         )
                                     case _:
                                         ()
+                    self.check_call_arity_by_symbol_id(self.resolve_method_call_arity_symbol_id(mc_resolution, mc_lowered_receiver, method_name_t), hir_args, e.span)
                     # Type `Dict<K,V>.keys()` as `[K]` and `.values()` as `[V]`
                     # while the freshly lowered receiver is still local. The
                     # pure-Simple layer had NO per-method result-type table at
@@ -1436,6 +1508,7 @@ impl HirLowering:
                     ))
                 if val enum_constructor = self.declared_enum_constructor_expr(fallback_enum_owner, method_name_t, hir_args, e.span):
                     return enum_constructor
+                self.check_call_arity_by_symbol_id(self.resolve_method_call_arity_symbol_id(fallback_resolution, lowered_method_receiver, method_name_t), hir_args, e.span)
                 # Same Dict<K,V>.keys()/.values() typing as the pre-dispatch
                 # MethodCall arm above -- see the full rationale there. Both
                 # arms are patched because the discriminant-gated pre-dispatch

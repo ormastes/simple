@@ -804,8 +804,122 @@ fn rd_u64(b: &[u8], off: usize) -> Option<u64> {
     Some(u64::from_le_bytes(b.get(off..off + 8)?.try_into().ok()?))
 }
 
+/// Same verdict inputs as `elf64_code_census`, read from disk without loading
+/// the whole image: only the header, section table, .shstrtab and symbol
+/// tables are read (bounded chunks). A 207 MB debug-info kernel ELF failed
+/// `fs::read` under an 8 GB ulimit. The symbol scan stops at the first defined
+/// FUNC, so `funcs` is only meaningful as `> 0`; text bytes and saw_symtab are
+/// exact. `Ok(None)` = not an ELF64 LE image we can parse (bounds problems
+/// included; caller treats as non-ELF). `Err` = an I/O error while reading,
+/// which the caller rejects (fail closed, as the old whole-file read did).
+fn elf64_code_census_file(path: &std::path::Path) -> std::io::Result<Option<(usize, u64, bool)>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let file_len = f.metadata()?.len();
+    let mut read_at = |off: u64, len: u64| -> std::io::Result<Option<Vec<u8>>> {
+        match off.checked_add(len) {
+            Some(end) if end <= file_len => {}
+            _ => return Ok(None),
+        }
+        let Ok(n) = usize::try_from(len) else { return Ok(None) };
+        f.seek(SeekFrom::Start(off))?;
+        let mut v = vec![0u8; n];
+        f.read_exact(&mut v)?;
+        Ok(Some(v))
+    };
+    macro_rules! some_or_none {
+        ($e:expr) => {
+            match $e {
+                Some(v) => v,
+                None => return Ok(None),
+            }
+        };
+    }
+    let hdr = some_or_none!(read_at(0, 64)?);
+    if &hdr[0..4] != b"\x7fELF" || hdr[4] != 2 || hdr[5] != 1 {
+        return Ok(None);
+    }
+    let e_shoff = some_or_none!(rd_u64(&hdr, 0x28));
+    let e_shentsize = some_or_none!(rd_u16(&hdr, 0x3a)) as u64;
+    let e_shnum = some_or_none!(rd_u16(&hdr, 0x3c)) as u64;
+    let e_shstrndx = some_or_none!(rd_u16(&hdr, 0x3e)) as u64;
+    if e_shoff == 0 || e_shnum == 0 || e_shentsize < 64 || e_shstrndx >= e_shnum {
+        return Ok(None);
+    }
+    let shdrs = some_or_none!(read_at(e_shoff, e_shnum * e_shentsize)?);
+    let sh = |i: u64| -> Option<(u32, u32, u64, u64, u64)> {
+        let o = (i * e_shentsize) as usize;
+        Some((
+            rd_u32(&shdrs, o)?,
+            rd_u32(&shdrs, o + 4)?,
+            rd_u64(&shdrs, o + 0x18)?,
+            rd_u64(&shdrs, o + 0x20)?,
+            rd_u64(&shdrs, o + 0x38)?,
+        ))
+    };
+    const SHSTR_CAP: u64 = 16 << 20;
+    let (_, _, shstr_off, shstr_size, _) = some_or_none!(sh(e_shstrndx));
+    if shstr_size > SHSTR_CAP {
+        return Ok(None);
+    }
+    let shstr = some_or_none!(read_at(shstr_off, shstr_size)?);
+    let name_at = |n: u32| -> &str {
+        match shstr.get(n as usize..) {
+            Some(rest) => {
+                let end = rest.iter().position(|&c| c == 0).unwrap_or(rest.len());
+                std::str::from_utf8(&rest[..end]).unwrap_or("")
+            }
+            None => "",
+        }
+    };
+    let mut text_bytes: u64 = 0;
+    let mut func_syms: usize = 0;
+    let mut saw_symtab = false;
+    let mut symtabs = Vec::new();
+    for i in 0..e_shnum {
+        let Some((nm, sh_type, off, size, entsize)) = sh(i) else { continue };
+        let name = name_at(nm);
+        if name == ".text" || name.starts_with(".text.") {
+            text_bytes = text_bytes.saturating_add(size);
+        }
+        if sh_type == 2 || sh_type == 11 {
+            if sh_type == 2 {
+                saw_symtab = true;
+            }
+            if entsize >= 24 {
+                symtabs.push((off, size, entsize));
+            }
+        }
+    }
+    // Symbol scan in bounded chunks of whole entries; stop at the first FUNC.
+    // A table running past EOF is clamped to the entries that exist, like the
+    // buffer census, which scanned until `buf.get` ran out.
+    const CHUNK_ENTRIES: u64 = 4096;
+    'tables: for (off, size, entsize) in symtabs {
+        if off >= file_len {
+            continue;
+        }
+        let count = size.min(file_len - off) / entsize;
+        let mut k = 0u64;
+        while k < count {
+            let n = CHUNK_ENTRIES.min(count - k);
+            let chunk = some_or_none!(read_at(off + k * entsize, n * entsize)?);
+            for j in 0..n as usize {
+                let so = j * entsize as usize;
+                if (chunk[so + 4] & 0xf) == 2 && u16::from_le_bytes([chunk[so + 6], chunk[so + 7]]) != 0 {
+                    func_syms += 1;
+                    break 'tables;
+                }
+            }
+            k += n;
+        }
+    }
+    Ok(Some((func_syms, text_bytes, saw_symtab)))
+}
+
 /// Counts (defined FUNC symbols, total .text bytes) in an ELF64 LE image.
 /// Returns `None` when the image is not an ELF64 LE we can parse.
+#[cfg(test)]
 fn elf64_code_census(buf: &[u8]) -> Option<(usize, u64, bool)> {
     if buf.len() < 64 || &buf[0..4] != b"\x7fELF" {
         return None;
@@ -998,8 +1112,8 @@ pub(crate) fn verify_emitted_artifact(
             }
         }
     }
-    let buf = match std::fs::read(path) {
-        Ok(b) => b,
+    let census = match elf64_code_census_file(path) {
+        Ok(c) => c,
         Err(e) => {
             return ArtifactVerdict::Reject(format!(
                 "declared output '{}' is unreadable ({})",
@@ -1008,7 +1122,7 @@ pub(crate) fn verify_emitted_artifact(
             ))
         }
     };
-    match elf64_code_census(&buf) {
+    match census {
         // Not an ELF64 LE image (archive, wasm, mach-o, ELF32): the only claim
         // we can make is non-emptiness, already established above.
         None => ArtifactVerdict::Ok,
@@ -1039,7 +1153,8 @@ pub(crate) fn verify_emitted_artifact(
 #[cfg(test)]
 mod tests {
     use super::{
-        is_allowed_runtime_bundle, normalize_backend, seed_build_mode_notice, verify_emitted_artifact,
+        elf64_code_census, elf64_code_census_file, is_allowed_runtime_bundle, normalize_backend,
+        seed_build_mode_notice, verify_emitted_artifact,
         ArtifactVerdict, SEED_DEFAULT_BUILD_MODE,
     };
 
@@ -1129,6 +1244,48 @@ mod tests {
             }
             ArtifactVerdict::Ok => panic!("0-FUNC ELF was accepted -- the false green is back"),
         }
+    }
+
+    #[test]
+    fn verifies_huge_elf_without_reading_it_whole() {
+        // Repro: a 207 MB riscv64 kernel ELF was rejected as "unreadable (out
+        // of memory)" under an 8 GB ulimit because the census fs::read the
+        // whole file. A real ELF padded to a 64 GiB sparse file must verify
+        // from its header, section table and symtab alone.
+        let d = fixture_dir();
+        let me = std::env::current_exe().unwrap();
+        let huge = d.join("huge.out");
+        std::fs::copy(&me, &huge).unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&huge).unwrap();
+        if f.set_len(64 << 30).is_err() {
+            eprintln!("SKIP: filesystem cannot hold a 64 GiB sparse fixture");
+            return;
+        }
+        drop(f);
+        assert_eq!(verify_emitted_artifact(&huge, None), ArtifactVerdict::Ok);
+        let _ = std::fs::remove_file(&huge);
+    }
+
+    #[test]
+    fn rejects_artifact_whose_read_fails_after_open() {
+        // A directory opens on Unix but read_exact fails (EISDIR): an I/O
+        // error after open must Reject, never fall through to the non-ELF Ok.
+        let d = fixture_dir();
+        let dir_artifact = d.join("dir_artifact");
+        std::fs::create_dir_all(&dir_artifact).unwrap();
+        match verify_emitted_artifact(&dir_artifact, None) {
+            ArtifactVerdict::Reject(_) => {}
+            ArtifactVerdict::Ok => panic!("an unreadable artifact was accepted"),
+        }
+    }
+
+    #[test]
+    fn streamed_census_matches_buffer_census() {
+        let me = std::env::current_exe().unwrap();
+        let buf = std::fs::read(&me).unwrap();
+        let full = elf64_code_census(&buf).map(|(f, t, s)| (f > 0, t, s));
+        let streamed = elf64_code_census_file(&me).unwrap().map(|(f, t, s)| (f > 0, t, s));
+        assert_eq!(full, streamed);
     }
 
     #[test]

@@ -1,7 +1,10 @@
 use std.spec
 use compiler.driver.driver_build.library_unit_plan_v1.{LibraryUnitDeclV1, LibraryUnitPlanEntryV1, library_unit_plan_v1, library_unit_cache_key_v1}
 use compiler.driver.driver_build.library_unit_link_v1.{
-    LIBRARY_UNITS_ENV_V1, LIBRARY_UNITS_FLAG_V1, library_unit_mode_enabled_v1,
+    LIBRARY_UNITS_ENV_V1, LIBRARY_UNITS_FLAG_V1, STAGE3_LIB_DYNLIB_ENV_V1,
+    LibraryUnitBuildModeV1, LibraryUnitModeInputsV1,
+    library_unit_mode_enabled_v1, library_unit_select_build_mode_v1,
+    library_unit_env_bindings_for_inputs_v1,
     LibraryUnitLinkEntryV1, library_unit_link_set_v1, library_unit_link_key_inputs_v1}
 
 # Design: doc/05_design/compiler/incremental_build/library_unit_build_and_link.md §5-6
@@ -125,3 +128,97 @@ describe "library_unit_link_key_inputs_v1":
         expect(parts.len()).to_equal(2)
         expect(parts[0]).to_equal("unit=10:simple-std:5:k-std")
         expect(parts[1]).to_equal("unit=19:simple-rust-runtime:4:k-rt")
+
+describe "library_unit_select_build_mode_v1":
+    it "defaults Phase 3 --mode dynload to DynLibUnits when SIMPLE_STAGE3_LIB_DYNLIB is unset or 1":
+        expect(STAGE3_LIB_DYNLIB_ENV_V1).to_equal("SIMPLE_STAGE3_LIB_DYNLIB")
+        val default_s3 = library_unit_select_build_mode_v1(LibraryUnitModeInputsV1(
+            args: ["--entry", "src/app/cli/bootstrap_main.spl", "--mode", "dynload"],
+            build_mode: "dynload", stage3_env: "1", stage4_env: "",
+            stage3_dynlib_env: "", library_units_env: "", whole_program_env: "", explicit_emit_mode: ""))
+        expect(default_s3.to_text()).to_equal("dyn-lib-units")
+        val explicit_s3 = library_unit_select_build_mode_v1(LibraryUnitModeInputsV1(
+            args: ["--entry", "src/app/cli/bootstrap_main.spl"],
+            build_mode: "", stage3_env: "1", stage4_env: "",
+            stage3_dynlib_env: "1", library_units_env: "", whole_program_env: "", explicit_emit_mode: ""))
+        expect(explicit_s3.to_text()).to_equal("dyn-lib-units")
+
+    it "opts out cleanly on SIMPLE_STAGE3_LIB_DYNLIB=0, --mode one-binary, Stage 4, or explicit object/shared emit":
+        val opt_out_env = library_unit_select_build_mode_v1(LibraryUnitModeInputsV1(
+            args: ["--mode", "dynload"],
+            build_mode: "dynload", stage3_env: "1", stage4_env: "",
+            stage3_dynlib_env: "0", library_units_env: "", whole_program_env: "", explicit_emit_mode: ""))
+        expect(opt_out_env.to_text()).to_equal("flat-objects")
+        val static_units = library_unit_select_build_mode_v1(LibraryUnitModeInputsV1(
+            args: ["--mode", "dynload", "--library-units"],
+            build_mode: "dynload", stage3_env: "1", stage4_env: "",
+            stage3_dynlib_env: "0", library_units_env: "1", whole_program_env: "", explicit_emit_mode: ""))
+        expect(static_units.to_text()).to_equal("static-units")
+        val one_binary = library_unit_select_build_mode_v1(LibraryUnitModeInputsV1(
+            args: ["--mode", "one-binary"],
+            build_mode: "one-binary", stage3_env: "1", stage4_env: "",
+            stage3_dynlib_env: "", library_units_env: "", whole_program_env: "", explicit_emit_mode: ""))
+        expect(one_binary.to_text()).to_equal("flat-objects")
+        val stage4 = library_unit_select_build_mode_v1(LibraryUnitModeInputsV1(
+            args: ["--mode", "one-binary"],
+            build_mode: "one-binary", stage3_env: "", stage4_env: "1",
+            stage3_dynlib_env: "1", library_units_env: "1", whole_program_env: "", explicit_emit_mode: ""))
+        expect(stage4.to_text()).to_equal("flat-objects")
+        val emit_obj = library_unit_select_build_mode_v1(LibraryUnitModeInputsV1(
+            args: ["--emit-object"],
+            build_mode: "dynload", stage3_env: "1", stage4_env: "",
+            stage3_dynlib_env: "1", library_units_env: "", whole_program_env: "", explicit_emit_mode: "1"))
+        expect(emit_obj.to_text()).to_equal("flat-objects")
+
+    it "preserves --library-units / SIMPLE_NATIVE_LIBRARY_UNITS=1 as StaticUnits and falls back on Windows":
+        val cli_static = library_unit_select_build_mode_v1(LibraryUnitModeInputsV1(
+            args: ["--library-units"],
+            build_mode: "dynload", stage3_env: "", stage4_env: "",
+            stage3_dynlib_env: "", library_units_env: "", whole_program_env: "", explicit_emit_mode: ""))
+        expect(cli_static.to_text()).to_equal("static-units")
+        val env_static = library_unit_select_build_mode_v1(LibraryUnitModeInputsV1(
+            args: [],
+            build_mode: "dynload", stage3_env: "", stage4_env: "",
+            stage3_dynlib_env: "", library_units_env: "1", whole_program_env: "", explicit_emit_mode: ""))
+        expect(env_static.to_text()).to_equal("static-units")
+        val one_bin_override = library_unit_select_build_mode_v1(LibraryUnitModeInputsV1(
+            args: ["--library-units-dynlib", "--mode", "one-binary"],
+            build_mode: "one-binary", stage3_env: "1", stage4_env: "",
+            stage3_dynlib_env: "1", library_units_env: "1", whole_program_env: "", explicit_emit_mode: ""))
+        expect(one_bin_override.to_text()).to_equal("flat-objects")
+        val win_implicit_s3 = library_unit_select_build_mode_v1(LibraryUnitModeInputsV1(
+            args: ["--mode", "dynload"],
+            build_mode: "dynload", stage3_env: "1", stage4_env: "",
+            stage3_dynlib_env: "", library_units_env: "", whole_program_env: "",
+            explicit_emit_mode: "", target_or_os: "x86_64-pc-windows-msvc"))
+        expect(win_implicit_s3.to_text()).to_equal("flat-objects")
+        val win_explicit = library_unit_select_build_mode_v1(LibraryUnitModeInputsV1(
+            args: ["--library-units-dynlib"],
+            build_mode: "dynload", stage3_env: "", stage4_env: "",
+            stage3_dynlib_env: "", library_units_env: "", whole_program_env: "",
+            explicit_emit_mode: "", target_or_os: "x86_64-pc-windows-msvc"))
+        expect(win_explicit.to_text()).to_equal("dyn-lib-units")
+
+    it "propagates Stage 3 --no-library-units / --library-units env bindings and honors SIMPLE_LINKER=internal":
+        val internal_s3 = library_unit_select_build_mode_v1(LibraryUnitModeInputsV1(
+            args: ["--entry", "src/app/cli/bootstrap_main.spl", "--mode", "dynload"],
+            build_mode: "dynload", stage3_env: "1", stage4_env: "",
+            stage3_dynlib_env: "", library_units_env: "", whole_program_env: "",
+            explicit_emit_mode: "", target_or_os: "linux", linker_env: "internal"))
+        expect(internal_s3.to_text()).to_equal("flat-objects")
+        val no_units_bind = library_unit_env_bindings_for_inputs_v1(LibraryUnitModeInputsV1(
+            args: ["--entry", "src/app/cli/bootstrap_main.spl", "--mode", "dynload", "--no-library-units"],
+            build_mode: "dynload", stage3_env: "1", stage4_env: "",
+            stage3_dynlib_env: "", library_units_env: "", whole_program_env: "",
+            explicit_emit_mode: "", target_or_os: "macos"))
+        expect(no_units_bind.mode.to_text()).to_equal("flat-objects")
+        expect(no_units_bind.library_units_env).to_equal("0")
+        expect(no_units_bind.stage3_dynlib_env).to_equal("0")
+        val static_bind = library_unit_env_bindings_for_inputs_v1(LibraryUnitModeInputsV1(
+            args: ["--entry", "src/app/cli/bootstrap_main.spl", "--mode", "dynload", "--library-units"],
+            build_mode: "dynload", stage3_env: "1", stage4_env: "",
+            stage3_dynlib_env: "", library_units_env: "", whole_program_env: "",
+            explicit_emit_mode: "", target_or_os: "macos"))
+        expect(static_bind.mode.to_text()).to_equal("static-units")
+        expect(static_bind.library_units_env).to_equal("1")
+        expect(static_bind.stage3_dynlib_env).to_equal("0")

@@ -12,10 +12,10 @@
 #   increment()
 #   print count  # Prints 0, not 1!
 
-use compiler.core.ast.{DECL_FN, STMT_VAR_DECL, STMT_ASSIGN, EXPR_ASSIGN}
-use compiler.core.ast.{EXPR_IDENT, EXPR_COMPOUND_ASSIGN}
-use compiler.core.ast.{decl_count, decl_get_tag, decl_get_name, decl_get_param_names, decl_get_body}
-use compiler.core.ast.{stmt_get_tag, stmt_get_name, stmt_get_expr, stmt_get_body}
+use compiler.core.ast.{DECL_FN, STMT_ASSIGN, STMT_BIND, STMT_COMPOUND_ASSIGN, STMT_EXPR, STMT_IF, STMT_LAZY_VAL_DECL, STMT_MATCH, STMT_RECEIVE, STMT_RETURN, STMT_USE_IMPORT, STMT_VAL_DECL, STMT_VAR_DECL, EXPR_ASSIGN}
+use compiler.core.ast.{EXPR_ASM_MATCH, EXPR_COMPOUND_ASSIGN, EXPR_DICT_COMP, EXPR_DICT_LIT, EXPR_IDENT, EXPR_IF, EXPR_LAMBDA, EXPR_LIST_COMP, EXPR_MATCH, EXPR_SLICE, EXPR_STRUCT_LIT}
+use compiler.core.ast.{arm_get_body, arm_get_guard, decl_count, decl_get_tag, decl_get_name, decl_get_param_names, decl_get_body}
+use compiler.core.ast.{elif_get_body, elif_get_cond, elif_get_else, stmt_get_tag, stmt_get_name, stmt_get_expr, stmt_get_body, stmt_get_type}
 use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_right, expr_get_extra}
 use compiler.core.ast.{expr_get_args, expr_get_stmts}
 
@@ -38,7 +38,7 @@ pub fn closure_warnings_has() -> bool:
 
 var closure_scope_depth: i64 = 0
 var scope_vars: [[text]] = []
-var var_depth_map = {}
+var var_depth_map: Dict<text, i64> = {}
 
 fn scope_enter():
     scope_vars.push([])
@@ -117,7 +117,11 @@ fn analyze_function_decl(decl_idx: i64):
     scope_exit()
 
 fn analyze_stmt(stmt_idx: i64, containing_fn: text):
+    if stmt_idx < 0:
+        return
     val tag = stmt_get_tag(stmt_idx)
+    if tag < 0 or tag == STMT_USE_IMPORT:
+        return
     val name = stmt_get_name(stmt_idx)
     val expr_idx = stmt_get_expr(stmt_idx)
     val body = stmt_get_body(stmt_idx)
@@ -126,17 +130,62 @@ fn analyze_stmt(stmt_idx: i64, containing_fn: text):
     if tag == STMT_VAR_DECL:
         scope_add_var(name)
 
-    # Check assignments
-    if tag == STMT_ASSIGN:
+    if tag == STMT_ASSIGN or tag == STMT_COMPOUND_ASSIGN:
+        if expr_idx >= 0:
+            val target_tag = expr_get_tag(expr_idx)
+            if target_tag == EXPR_IDENT:
+                val var_name = expr_get_str(expr_idx)
+                if scope_is_outer_var(var_name):
+                    emit_closure_warning(var_name, containing_fn)
+            analyze_expr_for_capture(expr_idx, containing_fn)
+        for veid in body:
+            analyze_expr_for_capture(veid, containing_fn)
+        return
+    if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_LAZY_VAL_DECL or tag == STMT_BIND:
         if expr_idx >= 0:
             analyze_expr_for_capture(expr_idx, containing_fn)
+        for veid in body:
+            analyze_expr_for_capture(veid, containing_fn)
+        return
+    if tag == STMT_EXPR or tag == STMT_RETURN:
+        if expr_idx >= 0:
+            analyze_expr_for_capture(expr_idx, containing_fn)
+        return
+    if tag == STMT_IF and stmt_get_type(stmt_idx) >= 0:
+        val elif_idx = stmt_get_type(stmt_idx)
+        val cond_eid = elif_get_cond(elif_idx)
+        if cond_eid >= 0:
+            analyze_expr_for_capture(cond_eid, containing_fn)
+        for nested_sid in elif_get_body(elif_idx):
+            analyze_stmt(nested_sid, containing_fn)
+        for nested_sid in elif_get_else(elif_idx):
+            analyze_stmt(nested_sid, containing_fn)
+        return
+    if tag == STMT_MATCH or tag == STMT_RECEIVE:
+        if expr_idx >= 0:
+            analyze_expr_for_capture(expr_idx, containing_fn)
+        if tag == STMT_RECEIVE and stmt_get_type(stmt_idx) >= 0:
+            analyze_stmt(stmt_get_type(stmt_idx), containing_fn)
+        for arm_id in body:
+            val guard_eid = arm_get_guard(arm_id)
+            if guard_eid >= 0:
+                analyze_expr_for_capture(guard_eid, containing_fn)
+            for arm_sid in arm_get_body(arm_id):
+                analyze_stmt(arm_sid, containing_fn)
+        return
 
+    if expr_idx >= 0:
+        analyze_expr_for_capture(expr_idx, containing_fn)
     # Analyze nested statements in body
     for nested_stmt_idx in body:
         analyze_stmt(nested_stmt_idx, containing_fn)
 
 fn analyze_expr_for_capture(expr_idx: i64, containing_fn: text):
+    if expr_idx < 0:
+        return
     val tag = expr_get_tag(expr_idx)
+    if tag < 0:
+        return
     val left = expr_get_left(expr_idx)
     val right = expr_get_right(expr_idx)
     val extra = expr_get_extra(expr_idx)
@@ -167,13 +216,26 @@ fn analyze_expr_for_capture(expr_idx: i64, containing_fn: text):
         analyze_expr_for_capture(left, containing_fn)
     if right >= 0:
         analyze_expr_for_capture(right, containing_fn)
-    if extra >= 0:
+    if (tag == EXPR_IF or tag == EXPR_SLICE or tag == EXPR_LIST_COMP or tag == EXPR_DICT_COMP) and extra >= 0:
         analyze_expr_for_capture(extra, containing_fn)
 
+    if tag == EXPR_ASM_MATCH:
+        return
+    if tag == EXPR_MATCH:
+        for arm_id in args:
+            val guard_eid = arm_get_guard(arm_id)
+            if guard_eid >= 0:
+                analyze_expr_for_capture(guard_eid, containing_fn)
+            for arm_sid in arm_get_body(arm_id):
+                analyze_stmt(arm_sid, containing_fn)
+        return
     for arg_idx in args:
         analyze_expr_for_capture(arg_idx, containing_fn)
-
-    # Analyze statements in expression (for blocks, lambdas, etc.)
+    if tag == EXPR_LAMBDA or tag == EXPR_DICT_LIT or tag == EXPR_LIST_COMP or tag == EXPR_DICT_COMP or tag == EXPR_STRUCT_LIT:
+        for child_eid in stmts:
+            analyze_expr_for_capture(child_eid, containing_fn)
+        return
+    # Analyze statements in expression (for blocks, loops, etc.)
     for stmt_idx in stmts:
         analyze_stmt(stmt_idx, containing_fn)
 

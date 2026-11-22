@@ -1,0 +1,99 @@
+"""
+## Purpose and audience
+Purpose: Pin /v1/audio/speech request validation and the wav JSON envelope
+(serving/serving_speech.spl, lane L5). Audience: engineers touching the
+slang speech route or its clients.
+
+## Compatibility and limitations
+No model is loaded: synthesis needs the TTS runner (live spec). The envelope
+is the interim form until binary HTTP bodies land (lane L2).
+"""
+
+use std.spec.{describe, it, expect}
+
+use std.gc_async_mut.slang.entrypoints.openai.serving.serving_speech.{parse_speech_request, speech_wav_response, serve_speech}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{json_string_field, json_int_field}
+use std.common.json.parser.{json_parse_with_error}
+use std.common.base_encoding.base64.{base64_decode_bytes}
+use std.common.audio.wav_decode.{decode_wav}
+use std.common.audio.wav_encode.{encode_wav_pcm16}
+use std.io_runtime.{dir_create_all, dir_remove_all}
+
+fn _code(body: text) -> text:
+    json_string_field(body, "code")
+
+fn _abs(x: f64) -> f64:
+    if x < 0.0: 0.0 - x else: x
+
+describe "slang /v1/audio/speech":
+    it "accepts a minimal request and defaults the format to wav":
+        match parse_speech_request("{\"model\":\"tts\",\"input\":\"Hello there.\",\"voice\":\"alloy\"}"):
+            Ok(r):
+                expect(r.model).to_equal("tts")
+                expect(r.input).to_equal("Hello there.")
+                expect(r.voice).to_equal("alloy")
+                expect(r.response_format).to_equal("wav")
+            Err(e): expect(e.body).to_equal("")
+
+    it "refuses input with no speakable words before any model is loaded":
+        match parse_speech_request("{\"model\":\"tts\",\"input\":\"!!! ???\"}"):
+            Ok(_): expect("accepted").to_equal("refused")
+            Err(e):
+                expect(e.status).to_equal(400)
+                expect(_code(e.body)).to_equal("invalid_request")
+
+    it "refuses empty input, over-long input and non-wav formats":
+        match parse_speech_request("{\"model\":\"tts\",\"input\":\"  \"}"):
+            Ok(_): expect("accepted").to_equal("refused")
+            Err(e):
+                expect(e.status).to_equal(400)
+                expect(_code(e.body)).to_equal("invalid_request")
+        var long = ""
+        var i = 0
+        while i < 4097:
+            long = long + "a"
+            i = i + 1
+        match parse_speech_request("{\"model\":\"tts\",\"input\":\"" + long + "\"}"):
+            Ok(_): expect("accepted").to_equal("refused")
+            Err(e): expect(_code(e.body)).to_equal("input_too_long")
+        var many = "w"
+        var w = 1
+        while w < 101:
+            many = many + " w"
+            w = w + 1
+        match parse_speech_request("{\"model\":\"tts\",\"input\":\"" + many + "\"}"):
+            Ok(_): expect("accepted").to_equal("refused")
+            Err(e): expect(e.body.contains("101 words")).to_equal(true)
+        match parse_speech_request("{\"model\":\"tts\",\"input\":\"hi\",\"response_format\":\"mp3\"}"):
+            Ok(_): expect("accepted").to_equal("refused")
+            Err(e):
+                expect(e.status).to_equal(400)
+                expect(_code(e.body)).to_equal("unsupported_response_format")
+
+    it "wraps a 16-bit wav in a base64 JSON envelope":
+        val r = speech_wav_response("tts", encode_wav_pcm16([0.0, 0.5, -0.5, 0.25], 1, 24000), 24000)
+        expect(r.status).to_equal(200)
+        expect(json_parse_with_error(r.body).1).to_equal("")
+        expect(json_string_field(r.body, "object")).to_equal("audio.speech")
+        expect(json_string_field(r.body, "content_type")).to_equal("audio/wav")
+        expect(json_int_field(r.body, "sample_rate", -1)).to_equal(24000)
+        val wav = base64_decode_bytes(json_string_field(r.body, "audio"))
+        expect(wav.len()).to_equal(44 + 8)
+        match decode_wav(wav):
+            Ok(a):
+                expect(a.sample_rate).to_equal(24000)
+                expect(a.channels).to_equal(1)
+                expect(a.samples.len()).to_equal(4)
+                expect(_abs((a.samples[1] as f64) - 0.5) < 0.001).to_equal(true)
+                expect(_abs((a.samples[2] as f64) + 0.5) < 0.001).to_equal(true)
+            Err(e): expect(e).to_equal("")
+
+    it "validates the body before resolving the model":
+        val root = "build/test/slang_serving_speech/empty"
+        dir_remove_all(root)
+        dir_create_all(root)
+        val bad = serve_speech(root, "{\"model\":\"tts\",\"input\":\"\"}")
+        expect(bad.status).to_equal(400)
+        val missing = serve_speech(root, "{\"model\":\"nope\",\"input\":\"hi\"}")
+        expect(missing.status).to_equal(404)
+        expect(_code(missing.body)).to_equal("model_not_found")

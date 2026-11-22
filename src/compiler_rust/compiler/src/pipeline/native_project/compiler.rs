@@ -1045,13 +1045,7 @@ pub(crate) fn compile_file_to_object(
                     );
                 }
             } else {
-                if is_entry {
-                    for func in &mut mir.functions {
-                        if func.name == "main" {
-                            func.name = "spl_main".to_string();
-                        }
-                    }
-                }
+                super::mangle::apply_abi_symbol_overrides(&mut mir, is_entry);
             }
 
             let target = effective_target();
@@ -1110,6 +1104,8 @@ pub(crate) fn compile_file_to_object(
 
     // Cranelift backend
     phase_timer.mark("mir_post");
+    let mut mir = mir;
+    super::mangle::apply_abi_symbol_overrides(&mut mir, false);
     let target = effective_target();
     let mut codegen =
         Codegen::for_target_with_opt_level_and_cpu(target, opt_level, native_build_cpu_for_target(target))
@@ -2136,33 +2132,45 @@ fn qualify_native_struct_layouts(
                         owner_has_vtable,
                         ..
                     } => {
-                        if let Some((owner, _)) = resolve_exact_owner(name) {
+                        let base_name = name.split('<').next().unwrap_or(name.as_str()).to_string();
+                        if let Some((owner, _)) =
+                            resolve_exact_owner(name).or_else(|| resolve_exact_owner(&base_name))
+                        {
                             *owner_has_vtable = Some(vtable_type_owners.contains(&owner));
                             *name = owner;
-                        } else if ambiguous_names.contains(name) {
-                            let suffix = format!("__{name}");
-                            let mut candidate_layouts: Vec<bool> = all_mangled
-                                .get(name)
+                        } else {
+                            let suffix = format!("__{base_name}");
+                            let mut matched_owners: Vec<String> = all_mangled
+                                .get(&base_name)
                                 .into_iter()
                                 .flatten()
                                 .filter(|candidate| candidate.ends_with(&suffix))
-                                .map(|candidate| vtable_type_owners.contains(candidate))
+                                .cloned()
                                 .collect();
-                            candidate_layouts.sort_unstable();
-                            candidate_layouts.dedup();
-                            match candidate_layouts.as_slice() {
-                                [has_vtable] => *owner_has_vtable = Some(*has_vtable),
-                                _ => {
-                                    return Err(format!(
-                                        "native object layout: ambiguous owner `{name}` has incompatible header layouts; import it from an explicit module"
-                                    ));
+                            matched_owners.sort();
+                            matched_owners.dedup();
+                            if matched_owners.is_empty() && !ambiguous_names.contains(&base_name) {
+                                // The project-wide scan is exhaustive for trait
+                                // implementations. An unresolved builtin/generic
+                                // owner therefore has no native object header.
+                                *owner_has_vtable = Some(false);
+                            } else {
+                                let mut candidate_layouts: Vec<bool> = matched_owners
+                                    .iter()
+                                    .map(|candidate| vtable_type_owners.contains(candidate))
+                                    .collect();
+                                candidate_layouts.sort_unstable();
+                                candidate_layouts.dedup();
+                                match candidate_layouts.as_slice() {
+                                    [has_vtable] => *owner_has_vtable = Some(*has_vtable),
+                                    [] => *owner_has_vtable = Some(false),
+                                    _ => {
+                                        return Err(format!(
+                                            "native object layout: ambiguous owner `{name}` has incompatible header layouts; import it from an explicit module"
+                                        ));
+                                    }
                                 }
                             }
-                        } else {
-                            // The project-wide scan is exhaustive for trait
-                            // implementations. An unresolved builtin/generic
-                            // owner therefore has no native object header.
-                            *owner_has_vtable = Some(false);
                         }
                     }
                     MirInst::FieldGet {

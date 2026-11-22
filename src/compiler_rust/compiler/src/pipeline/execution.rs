@@ -175,6 +175,9 @@ fn strip_flattened_import_nodes(module: Module) -> Module {
                     | Node::ExportUseStmt(_)
                     | Node::StructuredExportStmt(_)
                     | Node::AutoImportStmt(_)
+                    | Node::FriendDecl(_)
+                    | Node::InternalExportDecl(_)
+                    | Node::LayerDecl(_)
             )
         })
         .collect();

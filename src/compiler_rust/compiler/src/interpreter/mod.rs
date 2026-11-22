@@ -75,6 +75,10 @@ pub(crate) use interpreter_state::{
     FLATTEN_MODULE_OWNER_ATTR_PREFIX, tag_function_module_owner, report_globals_census, owned_globals_snapshot,
     owned_global, owned_global_present, owner_has_globals, steal_owned_global, set_owned_global, seed_owner_globals,
     reset_owned_globals_from_initial, owner_bindings, record_owner_binding, record_owner_binding_layer,
+    GENERIC_TYPE_BINDINGS, GenericTypeBindingsGuard, PendingCallGenerics, PendingCallGenericsGuard,
+    push_method_call_generics, push_method_call_generics_with_method, take_pending_call_generics,
+    resolve_generic_type_in_scope, unify_generic_type_value,
+    push_expected_target_type, current_expected_target_type, push_current_fn_return_type, current_fn_return_type,
 };
 
 // Core types and utilities
@@ -117,8 +121,8 @@ pub(crate) use node_exec::{
 // Block execution
 mod block_exec;
 pub(crate) use block_exec::{
-    assert_dirty_names_invariant, capture_node_scope_shadows, exec_block, exec_block_fn, exec_unsafe_block,
-    bind_block_scope_shadows, restore_block_scope_shadows,
+    assert_dirty_names_invariant, capture_node_scope_shadows, exec_block, exec_block_fn, exec_block_fn_with_target,
+    exec_unsafe_block, bind_block_scope_shadows, restore_block_scope_shadows,
 };
 
 // Public API
@@ -209,7 +213,7 @@ pub(crate) use module_cache::{
 #[path = "../interpreter_module/mod.rs"]
 pub(crate) mod interpreter_module;
 pub use interpreter_module::print_resolve_stats;
-pub use interpreter_module::PRIVATE_FN_VISIBILITY_HINT;
+pub use interpreter_module::{FRIEND_SYMBOL_VISIBILITY_HINT, PRIVATE_FN_VISIBILITY_HINT};
 use interpreter_module::{
     evaluate_module_exports, get_import_alias, load_and_merge_module, merge_module_definitions, resolve_module_path,
 };

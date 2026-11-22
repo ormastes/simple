@@ -372,15 +372,23 @@ impl Iterator for Enumerate<I> where I: Iterator:
 struct Slice<T>:
     ptr: *T
     len: usize
+    backing: Option<[T]>
+    offset: usize
 
 impl Slice<T>:
     @pure
     fn new(ptr: *T, len: usize) -> Slice<T>:
-        Slice { ptr: ptr, len: len }
+        Slice { ptr: ptr, len: len, backing: None, offset: 0 }
 
     @pure
     fn empty() -> Slice<T>:
-        Slice { ptr: nil, len: 0 }
+        unsafe:
+            Slice { ptr: nil, len: 0, backing: None, offset: 0 }
+
+    @pure
+    fn from_array(data: [T], start: usize, len: usize) -> Slice<T>:
+        unsafe:
+            Slice { ptr: nil, len: len, backing: Some(data), offset: start }
 
 impl Len for Slice<T>:
     fn len() -> usize:
@@ -396,19 +404,23 @@ impl Iterable<T> for Slice<T>:
         self.iter()
 
     fn each(f: fn(T)):
-        for item in self.iter():
-            f(item)
+        for i in 0..self.len:
+            f(self.get(i).expect("valid"))
 
     fn each_with_index(f: fn(usize, T)):
-        for (idx, item) in self.iter().enumerate():
-            f(idx, item)
+        for i in 0..self.len:
+            f(i, self.get(i).expect("valid"))
 
 
 impl Sequence<T> for Slice<T>:
     fn get(idx: usize) -> Option<T>:
         if idx < self.len:
-            danger:
-                Some(self.ptr.offset(idx as isize).read())
+            match self.backing:
+                case Some(arr):
+                    Some(arr[self.offset + idx])
+                case None:
+                    danger:
+                        Some(self.ptr.offset(idx as isize).read())
         else:
             None
 
@@ -416,8 +428,12 @@ impl Sequence<T> for Slice<T>:
         if start > end or end > self.len:
             Slice.empty()
         else:
-            danger:
-                Slice.new(self.ptr.offset(start as isize), end - start)
+            match self.backing:
+                case Some(arr):
+                    Slice.from_array(arr, self.offset + start, end - start)
+                case None:
+                    danger:
+                        Slice.new(self.ptr.offset(start as isize), end - start)
 
     fn first() -> Option<T>:
         self.get(0)
@@ -541,11 +557,18 @@ impl ExactSizeIterator for SliceIter<T>:
 struct MutSlice<T>:
     ptr: *mut T
     len: usize
+    backing: Option<[T]>
+    offset: usize
 
 impl MutSlice<T>:
     @pure
     fn new(ptr: *mut T, len: usize) -> MutSlice<T>:
-        MutSlice { ptr: ptr, len: len }
+        MutSlice { ptr: ptr, len: len, backing: None, offset: 0 }
+
+    @pure
+    fn from_array(data: [T], start: usize, len: usize) -> MutSlice<T>:
+        unsafe:
+            MutSlice { ptr: nil, len: len, backing: Some(data), offset: start }
 
 impl Len for MutSlice<T>:
     fn len() -> usize:
@@ -561,18 +584,23 @@ impl Iterable<T> for MutSlice<T>:
         self.iter()
 
     fn each(f: fn(T)):
-        for item in self.iter():
-            f(item)
+        for i in 0..self.len:
+            f(self.get(i).expect("valid"))
 
     fn each_with_index(f: fn(usize, T)):
-        for (idx, item) in self.iter().enumerate():
-            f(idx, item)
+        for i in 0..self.len:
+            f(i, self.get(i).expect("valid"))
 
 
 impl Sequence<T> for MutSlice<T>:
     fn get(idx: usize) -> Option<T>:
         if idx < self.len:
-            Some(self.ptr.offset(idx as isize).read())
+            match self.backing:
+                case Some(arr):
+                    Some(arr[self.offset + idx])
+                case None:
+                    danger:
+                        Some(self.ptr.offset(idx as isize).read())
         else:
             None
 
@@ -580,8 +608,12 @@ impl Sequence<T> for MutSlice<T>:
         if start > end or end > self.len:
             Slice.empty()
         else:
-            danger:
-                Slice.new(self.ptr.offset(start as isize) as *T, end - start)
+            match self.backing:
+                case Some(arr):
+                    Slice.from_array(arr, self.offset + start, end - start)
+                case None:
+                    danger:
+                        Slice.new(self.ptr.offset(start as isize) as *T, end - start)
 
     fn first() -> Option<T>:
         self.get(0)
@@ -677,37 +709,48 @@ impl Sequence<T> for MutSlice<T>:
 impl MutSequence<T> for MutSlice<T>:
     fn get_mut(idx: usize) -> Option<&mut T>:
         if idx < self.len:
-            danger:
-                Some(&mut *self.ptr.offset(idx as isize))
+            match self.backing:
+                case Some(_):
+                    None
+                case None:
+                    danger:
+                        Some(&mut *self.ptr.offset(idx as isize))
         else:
             None
 
     fn set(idx: usize, value: T) -> Result<(), IndexError>:
         if idx >= self.len:
             return Err(IndexError.OutOfBounds(idx, self.len))
-        danger:
-            self.ptr.offset(idx as isize).write(value)
+        match self.backing:
+            case Some(arr):
+                var updated = arr
+                updated[self.offset + idx] = value
+                self.backing = Some(updated)
+            case None:
+                danger:
+                    self.ptr.offset(idx as isize).write(value)
         Ok(())
 
     fn swap(i: usize, j: usize) -> Result<(), IndexError>:
         if i >= self.len or j >= self.len:
             return Err(IndexError.OutOfBounds(if i >= self.len: i else: j, self.len))
-        val temp = self.ptr.offset(i as isize).read()
-        self.ptr.offset(i as isize).write(self.ptr.offset(j as isize).read())
-        self.ptr.offset(j as isize).write(temp)
+        val left = self.get(i).expect("valid")
+        val right = self.get(j).expect("valid")
+        self.set(i, right)?
+        self.set(j, left)?
         Ok(())
 
     fn fill(value: T) where T: Clone:
         for i in 0..self.len:
-            danger:
-                self.ptr.offset(i as isize).write(value.clone())
+            val _ = self.set(i, value.clone())
 
     fn fill_with(f: fn(usize) -> T):
         for i in 0..self.len:
-            danger:
-                self.ptr.offset(i as isize).write(f(i))
+            val _ = self.set(i, f(i))
 
     fn reverse():
+        if self.len < 2:
+            return
         var i = 0
         var j = self.len - 1
         while i < j:
@@ -730,8 +773,12 @@ impl MutSequence<T> for MutSlice<T>:
 
 impl Sliceable<T> for MutSlice<T>:
     fn as_slice() -> Slice<T>:
-        danger:
-            Slice.new(self.ptr as *T, self.len)
+        match self.backing:
+            case Some(arr):
+                Slice.from_array(arr, self.offset, self.len)
+            case None:
+                danger:
+                    Slice.new(self.ptr as *T, self.len)
 
 impl MutSliceable<T> for MutSlice<T>:
     fn as_mut_slice() -> MutSlice<T>:

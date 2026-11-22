@@ -6,25 +6,32 @@
 # coordinator (src/app/cli/native_build_main.spl) spawns ONE ordinary shard
 # worker (spec 0/1, the "root"). The root runs lower_to_mir's shared setup
 # (warm names, enum/composite inventories, MIR schedule, ledger inventory and
-# exclusion publication, LPT order) once, then forks N children right before
+# exclusion publication, LPT order) once, then forks children right before
 # the per-module claim loop; each child is an
 # ordinary shard worker "i/N" with its own ledger owner, so claims, per-PASS
 # sidecars, seals and the link child are the unchanged native_mir_shard.spl
-# protocol. The root waits, seals any child that died holding claims, and
-# re-forks an unfinished child's share from that same post-setup point (at most
-# NATIVE_MIR_FORK_RETRIES_PER_SHARE_V1 times per share). It marks its owner
+# protocol. N is a ceiling ("auto" = CPU count): the root admits each child
+# from live CPU and memory (std.nogc_sync_mut.io.host_capacity), reaps children
+# as they exit, seals any child that died holding claims, and forks the share's
+# next batch or retry from that same post-setup point (at most
+# NATIVE_MIR_FORK_RETRIES_PER_SHARE_V1 retries per share). It marks its owner
 # done and exits once nothing is unclaimed; otherwise it exits unfinished and
 # the coordinator's replacement path takes over.
 #
 # Unset, empty, "0" or "1" disables it and nothing changes.
 # Design and risks: doc/05_design/compiler/perf/mir_fork_workers_cow_v1.md
-use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, file_read_nullable, thread_sleep, file_write, process_kill}
+use std.nogc_sync_mut.sffi.process_memory.{proc_status_kib}
 use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
 use std.io_runtime.{env_set, exit, getpid}
+use std.nogc_sync_mut.io.host_capacity.{host_capacity_probe_v1, host_capacity_idle_cpu_v1,
+    host_capacity_headroom_kib_v1, host_capacity_text_v1, host_memory_admit_charged_v1,
+    host_capacity_reserve_kib_v1, host_capacity_below_reserve_v1}
 use std.nogc_sync_mut.io.pipe.{stdout_flush}
 use std.nogc_sync_mut.sffi.process.{fork_shared_heap_v1, fork_child_exit, fork_shared_heap_wait_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_seal, hir_shard_recovery_complete,
     hir_shard_recovery_finished, hir_shard_recovery_unclaimed_count, hir_shard_recovery_block,
+    hir_shard_recovery_progress, hir_shard_recovery_release_memkill_v1, hir_shard_recovery_row_terminal_v1,
     hir_shard_recovery_blocked, hir_shard_recovery_withdraw_inventory_v1, HIR_SHARD_FORK_OWNER_MARK_V1}
 use compiler.driver.driver_build.native_mir_shard.{NATIVE_MIR_SHARD_ENV_V1,
     NATIVE_MIR_SHARD_OWNER_ENV_V1}
@@ -33,18 +40,255 @@ pub const NATIVE_MIR_FORK_WORKERS_ENV_V1: text = "SIMPLE_MIR_FORK_WORKERS"
 pub const NATIVE_MIR_FORK_WORKERS_MAX_V1: i64 = 64
 # Re-forks of one share after its child stopped unfinished (OOM kill, crash).
 pub const NATIVE_MIR_FORK_RETRIES_PER_SHARE_V1: i64 = 2
+# Batched children (SIMPLE_MIR_FORK_BATCH=B, default 200, "0" = off). A child
+# holds every module it lowered until its codegen at the end, so its private
+# heap grows with its claim count: p4-cli-f23 (2026-11-21, FORK=5, 104G cap)
+# had children claim ~904 modules each and reach 37-59G anon-rss before the
+# cgroup OOM killer took three of them. A batched child claims at most B
+# modules, emits, publishes and exits; the root forks a fresh child for the
+# share from its untouched post-setup heap while the ledger still shrinks.
+pub const NATIVE_MIR_FORK_BATCH_ENV_V1: text = "SIMPLE_MIR_FORK_BATCH"
+pub const NATIVE_MIR_FORK_BATCH_DEFAULT_V1: i64 = 200
+# Per-child private-memory budget (SIMPLE_MIR_FORK_CHILD_KB=K KiB, "0" = off).
+# The batch bounds claims, not bytes: p4-cli-f24 (2026-11-22, FORK=5, batch
+# 200, 100G cap) had one child reach 52.5G anon-rss within ~7 minutes because
+# LPT order hands round 0 the heaviest modules. A child stops claiming once its
+# PRIVATE memory (smaps_rollup Private_Dirty+Private_Clean: the COW copies and
+# new allocations, not the ~25G of root heap it shares) exceeds K, after at
+# least one claim; it then codegens/publishes what it holds and finishes like a
+# full batch, and the root forks a fresh child. Default 12000000 KiB (~11.4G):
+# f24 left ~57G of cgroup headroom after coordinator (18G) + root (25G), so
+# 12G admits 4 children with ~9G slack for the over-shoot of the last module
+# claimed and the child's end-of-batch codegen, which the budget does not see.
+pub const NATIVE_MIR_FORK_CHILD_KB_ENV_V1: text = "SIMPLE_MIR_FORK_CHILD_KB"
+pub const NATIVE_MIR_FORK_CHILD_KB_DEFAULT_V1: i64 = 12000000
 
 var _native_mir_fork_child_v1: bool = false
 
-# Worker count of a SIMPLE_MIR_FORK_WORKERS value; 0 = disabled. Malformed or
-# out-of-range values disable the experiment rather than guess.
+# Ceiling of a SIMPLE_MIR_FORK_WORKERS value; 0 = disabled. N (2..64) is a
+# ceiling on concurrent children and the share count; how many actually run at
+# once is decided live (native_mir_fork_admit_v1). "auto" = the host's CPU
+# count, clamped to 2..64. Malformed or out-of-range values disable the
+# experiment rather than guess.
 pub fn native_mir_fork_workers_of_v1(raw: text) -> i64:
+    if raw == "auto":
+        return native_mir_fork_auto_workers_of_v1(host_capacity_probe_v1().cpus)
     if raw == "":
         return 0
     val parsed = raw.to_i64() ?? 0
     if parsed < 2 or parsed > NATIVE_MIR_FORK_WORKERS_MAX_V1:
         return 0
     parsed
+
+# reason: CPU count in, worker ceiling out
+@allow(primitive_api)
+pub fn native_mir_fork_auto_workers_of_v1(cpus: i64) -> i64:
+    if cpus < 2: return 2
+    if cpus > NATIVE_MIR_FORK_WORKERS_MAX_V1: NATIVE_MIR_FORK_WORKERS_MAX_V1 else: cpus
+
+# Batch size of a SIMPLE_MIR_FORK_BATCH value: unset/malformed = default,
+# "0" = off (a child claims its whole share).
+# reason: env text and plain module/ledger-row counts, the same raw shape as the worker-count knob
+@allow(primitive_api)
+pub fn native_mir_fork_batch_of_v1(raw: text) -> i64:
+    if raw == "": return NATIVE_MIR_FORK_BATCH_DEFAULT_V1
+    val parsed = raw.to_i64() ?? -1
+    if parsed < 0: NATIVE_MIR_FORK_BATCH_DEFAULT_V1 else: parsed
+
+@allow(primitive_api)
+pub fn native_mir_fork_batch_v1() -> i64:
+    native_mir_fork_batch_of_v1(env_get_nullable(NATIVE_MIR_FORK_BATCH_ENV_V1) ?? "")
+
+# Budget of a SIMPLE_MIR_FORK_CHILD_KB value (KiB): unset/malformed = default,
+# "0" = off.
+# reason: env text and a KiB scalar, the same raw shape as the batch knob
+@allow(primitive_api)
+pub fn native_mir_fork_child_kb_of_v1(raw: text) -> i64:
+    if raw == "": return NATIVE_MIR_FORK_CHILD_KB_DEFAULT_V1
+    val parsed = raw.to_i64() ?? -1
+    if parsed < 0: NATIVE_MIR_FORK_CHILD_KB_DEFAULT_V1 else: parsed
+
+# reason: KiB scalar, same shape as native_mir_fork_batch_v1
+@allow(primitive_api)
+pub fn native_mir_fork_child_kb_v1() -> i64:
+    native_mir_fork_child_kb_of_v1(env_get_nullable(NATIVE_MIR_FORK_CHILD_KB_ENV_V1) ?? "")
+
+# A child stops claiming once its private memory exceeds the budget, but only
+# after it holds at least one module: a single module larger than the budget
+# is still lowered, so every child makes progress and the root's next-batch
+# rule (the ledger must shrink) still terminates. Unknown memory (-1) or a
+# disabled budget (0) never stops a child.
+# reason: claim count and KiB scalars from /proc, the same shape as the cap helpers
+@allow(primitive_api)
+pub fn native_mir_fork_child_over_budget_v1(claimed: i64, private_kib: i64, budget_kib: i64) -> bool:
+    budget_kib > 0 and claimed >= 1 and private_kib > budget_kib
+
+# Private_Dirty + Private_Clean (KiB) of a /proc/<pid>/smaps_rollup body; -1
+# when absent. Shared COW pages inherited from the root are not counted.
+# reason: procfs text in, KiB scalar out
+@allow(primitive_api)
+pub fn native_mir_fork_private_kib_of_v1(smaps_rollup: text) -> i64:
+    val dirty = proc_status_kib(smaps_rollup, "Private_Dirty:")
+    if dirty < 0: return -1
+    val clean = proc_status_kib(smaps_rollup, "Private_Clean:")
+    if clean > 0: dirty + clean else: dirty
+
+# Claim count at the last budget probe. smaps_rollup walks every page table of
+# a 30-50G process, so a child probes only after its claim count grew, never
+# on each claim attempt that loses to a sibling. 0 at fork, so the first probe
+# runs at one claim (the at-least-one rule).
+var _native_mir_fork_budget_probed_v1: i64 = 0
+
+# The child's claim cap after the budget probe: unchanged, or latched to the
+# current claim count once over budget (the walk then skips every row, the
+# child finishes and the root forks the next batch). Root / non-fork: unchanged.
+# reason: claim counts, the same shape as native_mir_fork_child_cap_v1
+@allow(primitive_api)
+pub fn native_mir_fork_budget_cap_v1(claimed: i64, cap: i64) -> i64:
+    if not _native_mir_fork_child_v1 or claimed >= cap or claimed <= _native_mir_fork_budget_probed_v1:
+        return cap
+    val budget_kib = native_mir_fork_child_kb_v1()
+    if budget_kib <= 0:
+        return cap
+    _native_mir_fork_budget_probed_v1 = claimed
+    val private_kib = native_mir_fork_private_kib_of_v1(file_read_nullable("/proc/self/smaps_rollup") ?? "")
+    if private_kib < 0 and claimed == 1:
+        # First probe only: an unreadable smaps_rollup disables the budget.
+        print "[mir-fork] child budget probe unavailable (/proc/self/smaps_rollup); budget off"
+    if not native_mir_fork_child_over_budget_v1(claimed, private_kib, budget_kib):
+        return cap
+    val owner = env_get_nullable(NATIVE_MIR_SHARD_OWNER_ENV_V1) ?? ""
+    print "[mir-fork] child owner={owner} budget reached: claimed={claimed} private_kib={private_kib} budget_kib={budget_kib}; no more claims"
+    stdout_flush()
+    claimed
+
+# Continuous admission (2026-11-22): one decision per pending share, re-taken
+# whenever a child exits and every NATIVE_MIR_FORK_ADMIT_EVERY_POLLS_V1 polls.
+# Returns "fork", or the reason to wait ("ceiling", "cpu", "memory"). With no
+# child alive it always forks: declining would hand the build to the complete
+# worker, the single-process MIR peak this mode exists to avoid, and a waiting
+# root with no child would never make progress. `idle_cpu` is
+# host_capacity_idle_cpu_v1 with the live children counted busy. Memory fails
+# closed: with a child alive, unknown headroom (-1) or no child budget
+# (SIMPLE_MIR_FORK_CHILD_KB=0) refuses; otherwise headroom (min of cgroup
+# headroom and MemAvailable minus the reserve, host_capacity_headroom_kib_v1)
+# must cover child_kb plus every live child's charge (host_live_charge_kib_v1:
+# max(child_kb, its peak) - its current private use, at least child_kb/4), so
+# a burst of fresh COW children is charged nearly in full.
+# reason: worker count and KiB scalars
+@allow(primitive_api)
+pub fn native_mir_fork_admit_v1(live: i64, ceiling: i64, idle_cpu: i64, headroom_kib: i64,
+        child_kb: i64, live_current_kib: [i64], live_peak_kib: [i64]) -> text:
+    if live <= 0: return "fork"
+    if live >= ceiling: return "ceiling"
+    if idle_cpu < 1: return "cpu"
+    if headroom_kib < 0 or child_kb <= 0:
+        return "memory"
+    if not host_memory_admit_charged_v1(headroom_kib, child_kb, live_current_kib, live_peak_kib):
+        return "memory"
+    "fork"
+
+# Hard per-child bound, checked by the root on every poll: a child whose
+# private memory exceeds NATIVE_MIR_FORK_HARD_CAP_FACTOR_V1 x child_kb is
+# killed ("over-cap"; never the solo child, which runs alone precisely so a
+# heavy module can finish), and when host headroom falls below the reserve the
+# NEWEST live child is killed ("reserve") -- but only with two or more children
+# alive: a sole child (the first, or the solo retry) is never reserve-killed,
+# so a heavy module cannot burn its solo attempt; it stays bounded by the hard
+# cap (unless solo), oom_score_adj=1000 and its cgroup. Returns (index into the live list,
+# reason) or (-1, ""). `killed[i]` marks a child already signalled; it is never
+# chosen again. Unknown readings (< 0: unreadable, or exited and not yet
+# reaped) never trigger a kill. No reserve kill is issued while a signalled
+# child is still unreaped: freeing a 40G child takes seconds, and the next poll
+# would otherwise see the same low headroom and kill the next child too.
+pub const NATIVE_MIR_FORK_HARD_CAP_FACTOR_V1: i64 = 2
+
+# reason: KiB scalars and live-list indices
+@allow(primitive_api)
+pub fn native_mir_fork_kill_choice_v1(current_kib: [i64], killed: [bool], solo_index: i64,
+        child_kb: i64, below_reserve: bool) -> (i64, text):
+    if child_kb > 0:
+        val hard_cap = child_kb * NATIVE_MIR_FORK_HARD_CAP_FACTOR_V1
+        var i: i64 = 0
+        while i < current_kib.len():
+            if not killed[i] and i != solo_index and current_kib[i] > hard_cap:
+                return (i, "over-cap")
+            i = i + 1
+    if below_reserve and current_kib.len() >= 2:
+        for was_killed in killed:
+            if was_killed:
+                return (-1, "")
+        var j = current_kib.len() - 1
+        while j >= 0:
+            if current_kib[j] >= 0:
+                return (j, "reserve")
+            j = j - 1
+    (-1, "")
+
+# Solo retry rows (ledger module names, newline-separated) a solo child must
+# walk first; set only in that child's environment, right after the fork.
+pub const NATIVE_MIR_FORK_SOLO_ROWS_ENV_V1: text = "SIMPLE_MIR_FORK_SOLO_ROWS"
+
+# `order` (schedule positions) with every position whose ledger name is in
+# `solo` moved to the front, relative order kept. `names[pos]` is the ledger
+# name of schedule position pos ("" unknown).
+# reason: schedule positions and module-name rows
+@allow(primitive_api)
+pub fn native_mir_fork_front_load_v1(order: [i64], names: [text], solo: [text]) -> [i64]:
+    if solo.len() == 0: return order
+    var front: [i64] = []
+    var rest: [i64] = []
+    for pos in order:
+        if pos >= 0 and pos < names.len() and names[pos] != "" and solo.contains(names[pos]):
+            front = front.push(pos)
+        else:
+            rest = rest.push(pos)
+    for pos in rest:
+        front = front.push(pos)
+    front
+
+# The solo rows of this process's environment (empty when unset).
+pub fn native_mir_fork_solo_rows_v1() -> [text]:
+    var rows: [text] = []
+    for row in (env_get_nullable(NATIVE_MIR_FORK_SOLO_ROWS_ENV_V1) ?? "").split("\n"):
+        if row != "":
+            rows = rows.push(row)
+    rows
+
+# Poll period of the root while children run, and how many polls pass between
+# periodic admission retries (a reap always retries at once).
+pub const NATIVE_MIR_FORK_POLL_MS_V1: i64 = 1000
+pub const NATIVE_MIR_FORK_ADMIT_EVERY_POLLS_V1: i64 = 5
+
+# Exit state of a /proc/<pid>/stat body: 1 exited (zombie "Z" / dead "X",
+# not yet reaped, so the blocking wait returns at once), 0 still running,
+# -1 unreadable (no procfs: the caller falls back to a blocking wait).
+# reason: procfs text in, tri-state out
+@allow(primitive_api)
+pub fn native_mir_fork_stat_exited_v1(stat: text) -> i64:
+    val close = stat.rfind(")")
+    if close < 0 or close + 2 >= stat.byte_len(): return -1
+    val state = stat.substring(close + 2, close + 3)
+    if state == "Z" or state == "X": 1 else: 0
+
+# A forked child's claim cap: its share's cap, bounded by the batch.
+@allow(primitive_api)
+pub fn native_mir_fork_child_cap_v1(share_cap: i64, batch: i64) -> i64:
+    if batch > 0 and batch < share_cap: batch else: share_cap
+
+# Fork the next batch for a share whose child finished. `batched`: a child may
+# stop before its share is done (batch > 0 or a child memory budget). Only
+# while the finished child itself claimed something (`claimed` > 0; a child
+# that walked the whole order and claimed nothing saw only excluded residue
+# the coordinator's inventory close owns) and rows remain unclaimed; never
+# once a failure stops a fail-fast build (`stop`) or under a BLOCKED ledger.
+# The child's own claim count replaces the old round-wide "the ledger shrank"
+# test, which needed every sibling reaped and so a round barrier.
+@allow(primitive_api)
+pub fn native_mir_fork_next_batch_v1(batched: bool, finished: bool, stop: bool,
+        blocked: bool, claimed: i64, unclaimed_after: i64) -> bool:
+    batched and finished and not stop and not blocked and
+        unclaimed_after > 0 and claimed > 0
 
 pub fn native_mir_fork_workers_v1() -> i64:
     native_mir_fork_workers_of_v1(env_get_nullable(NATIVE_MIR_FORK_WORKERS_ENV_V1) ?? "")
@@ -123,110 +367,319 @@ pub fn native_mir_fork_at_claim_loop_v1() -> (text, i64):
 #         ("child", 0): this process is child i; spec and owner env are set.
 #         ("root", code): every child was reaped; the caller exits with code.
 #
-# Rounds: round 0 forks every share; each later round re-forks only the shares
-# whose child stopped unfinished (native_mir_fork_reforkable_v1), from this
-# root's untouched final heap. A replacement keeps the share's spec i/N, so
-# its own claim cap ceil(n/N) covers the dead child's unclaimed residue; rows
-# the dead child claimed are sealed CRASH/FAILED and the ledger refuses to
-# re-claim them. When retries run out with rows still unclaimed, the root does
-# NOT mark itself done: the coordinator then sees an unfinished owner with
-# progress (its +fork children's claims) and takes its replacement path.
+# Continuous admission (2026-11-22; was a round barrier that waited for every
+# child of a round, so each round ran at the pace of its slowest child). The
+# share count N (the SIMPLE_MIR_FORK_WORKERS ceiling) is fixed for the run, so
+# every child keeps spec i/N, its claim cap ceil(n/N) and its worker order.
+# Every share starts pending; the root forks a pending share whenever
+# native_mir_fork_admit_v1 says live CPU and memory hold one more child, and
+# otherwise polls once a second. Each poll reads every live child's private
+# memory (smaps_rollup) and kills, by native_mir_fork_kill_choice_v1, a child
+# over 2 x child_kb, or, with two or more children alive, the newest child when
+# host MemAvailable falls below the reserve; then it reaps the first exited child. A memory-killed child is not
+# a module failure: once no child is alive its unterminated rows are released
+# (hir_shard_recovery_release_memkill_v1) and retried by ONE solo child that
+# walks them first, with no sibling admitted until every released row has a
+# terminal (or the solo child claimed nothing). A reaped child's share goes
+# back to pending for its next batch (finished child that claimed something)
+# or a retry (unfinished child: native_mir_fork_reforkable_v1, its claims
+# sealed CRASH/FAILED). When retries run out with rows still unclaimed, the
+# root does NOT mark itself done: the coordinator then sees an unfinished owner
+# with progress (its +fork children's claims) and takes its replacement path.
+# The root never starts a thread: probes are file reads, the kill is one
+# signal, the wait is a sleep, so fork_shared_heap_v1's no-helper-thread rule
+# holds. Every child sets its own oom_score_adj to 1000 right after the fork,
+# so the kernel's OOM killer takes a child before the root or another tenant.
 pub fn native_mir_fork_shards_v1(queue: text, root_owner: text) -> (text, i64):
     val count = native_mir_fork_workers_v1()
     if count == 0 or _native_mir_fork_child_v1:
         return ("off", 0)
+    val child_kb = native_mir_fork_child_kb_v1()
     # Never recurse: children see the experiment disabled.
     if not env_set(NATIVE_MIR_FORK_WORKERS_ENV_V1, ""):
         print "[mir-fork] refused: worker-count environment could not be cleared"
         return native_mir_fork_decline_v1(queue, root_owner)
     val fail_fast = native_mir_fork_fail_fast_v1(env_get_nullable("SIMPLE_COMPILE_FAIL_FAST") ?? "", env_get_nullable("CI") ?? "")
     val parent_pid = getpid()
+    val batch = native_mir_fork_batch_v1()
+    # A child stops early on its batch cap or its memory budget; either way it
+    # finishes and the share needs a next batch.
+    val batched = batch > 0 or child_kb > 0
+    val hard_cap_kib = child_kb * NATIVE_MIR_FORK_HARD_CAP_FACTOR_V1
+    print "[mir-fork] root owner={root_owner} continuous admission ceiling={count} batch={batch} child_kb={child_kb} hard_cap_kib={hard_cap_kib} queue={queue}"
+    stdout_flush()
     var retries: [i64] = []
-    var shares: [i64] = []
+    # Owner attempt per share: one per fork (retry, next batch or solo retry),
+    # so every child is a distinct ledger owner.
+    var attempts: [i64] = []
+    var pending: [i64] = []
     var index: i64 = 0
     while index < count:
         retries = retries.push(0)
-        shares = shares.push(index)
+        attempts = attempts.push(0)
+        pending = pending.push(index)
         index = index + 1
+    # Live children, index-aligned.
+    var live_pids: [i64] = []
+    var live_owners: [text] = []
+    var live_shares: [i64] = []
+    var live_current: [i64] = []
+    var live_peak: [i64] = []
+    var live_killed: [text] = []
+    # Owners killed for memory whose rows wait for release (no child alive).
+    var memkill_owners: [text] = []
+    # Rows released once; a second memory kill seals them CRASH instead.
+    var released_rows: [text] = []
+    # Released rows awaiting their solo retry, and the live solo child (0 none).
+    var solo_rows: [text] = []
+    var solo_pid: i64 = 0
     var failed = false
     var abandoned = false
-    var round_index: i64 = 0
     var forked_total: i64 = 0
-    while shares.len() > 0:
-        var pids: [i64] = []
-        var owners: [text] = []
-        var forked_shares: [i64] = []
-        var unforked: [i64] = []
-        var fork_refused = false
-        for share in shares:
-            if fork_refused:
-                unforked = unforked.push(share)
-                continue
-            val owner = native_mir_fork_child_owner_v1(root_owner, share, count, retries[share])
+    var admit_due = true
+    var polls: i64 = 0
+    var last_wait = ""
+    var poll_fallback_noted = false
+    while pending.len() > 0 or live_pids.len() > 0:
+        if pending.len() > 0 and (admit_due or live_pids.len() == 0):
+            admit_due = false
+            if memkill_owners.len() > 0 and live_pids.len() == 0:
+                for mk_owner in memkill_owners:
+                    match hir_shard_recovery_release_memkill_v1(queue, mk_owner, released_rows):
+                        case Some(rows):
+                            for row in rows:
+                                released_rows = released_rows.push(row)
+                                solo_rows = solo_rows.push(row)
+                            print "[mir-fork] memkill owner={mk_owner} released={rows.len()} row(s) for a solo retry"
+                        case None:
+                            val _blocked_memkill = hir_shard_recovery_block(queue, "MIR fork MEMKILL rows could not be released")
+                            failed = true
+                            print "[mir-fork] memkill owner={mk_owner}: rows could not be released; ledger BLOCKED"
+                memkill_owners = []
+                stdout_flush()
+            val unclaimed_now = hir_shard_recovery_unclaimed_count(queue)
+            val blocked_now = hir_shard_recovery_blocked(queue)
+            # Fail-fast stops new forks only once something failed: CI exports
+            # SIMPLE_COMPILE_FAIL_FAST=1, and a clean first batch must go on.
+            if memkill_owners.len() == 0 and ((fail_fast and failed) or blocked_now or unclaimed_now == 0):
+                if unclaimed_now > 0:
+                    abandoned = true
+                print "[mir-fork] dropping {pending.len()} pending share(s): unclaimed={unclaimed_now} blocked={blocked_now} fail_fast={fail_fast} failed={failed}"
+                pending = []
+            while pending.len() > 0:
+                var open_solo: [text] = []
+                for solo_row in solo_rows:
+                    if not hir_shard_recovery_row_terminal_v1(queue, solo_row):
+                        open_solo = open_solo.push(solo_row)
+                val solo_now = open_solo.len() > 0 or memkill_owners.len() > 0
+                val capacity = host_capacity_probe_v1()
+                val live = live_pids.len()
+                val idle_cpu = host_capacity_idle_cpu_v1(capacity, live)
+                val headroom_kib = host_capacity_headroom_kib_v1(capacity)
+                val reserve_kib = host_capacity_reserve_kib_v1(capacity)
+                var decision = "solo"
+                if not solo_now:
+                    decision = native_mir_fork_admit_v1(live, count, idle_cpu, headroom_kib,
+                        child_kb, live_current, live_peak)
+                elif live == 0:
+                    decision = "fork"
+                if decision != "fork":
+                    if decision != last_wait:
+                        print "[mir-fork] admission wait reason={decision} live={live} pending={pending.len()} idle_cpu={idle_cpu} headroom_kib={headroom_kib} reserve_kib={reserve_kib} child_kb={child_kb} {host_capacity_text_v1(capacity)}"
+                        stdout_flush()
+                        last_wait = decision
+                    break
+                last_wait = ""
+                val share = pending[0]
+                var rest: [i64] = []
+                var k: i64 = 1
+                while k < pending.len():
+                    rest = rest.push(pending[k])
+                    k = k + 1
+                pending = rest
+                val owner = native_mir_fork_child_owner_v1(root_owner, share, count, attempts[share])
+                print "[mir-fork] admit share={share}/{count} attempt={attempts[share]} solo_rows={open_solo.len()} live={live} idle_cpu={idle_cpu} headroom_kib={headroom_kib} reserve_kib={reserve_kib} child_kb={child_kb} {host_capacity_text_v1(capacity)}"
+                stdout_flush()
+                val pid = fork_shared_heap_v1()
+                if pid > 0:
+                    live_pids = live_pids.push(pid)
+                    live_owners = live_owners.push(owner)
+                    live_shares = live_shares.push(share)
+                    live_current = live_current.push(0)
+                    live_peak = live_peak.push(0)
+                    live_killed = live_killed.push("")
+                    if open_solo.len() > 0:
+                        solo_pid = pid
+                    forked_total = forked_total + 1
+                elif pid == 0 and getpid() != parent_pid:
+                    _native_mir_fork_child_v1 = true
+                    if not file_write("/proc/self/oom_score_adj", "1000"):
+                        print "[mir-fork] child {share}/{count}: oom_score_adj could not be set"
+                    if not env_set(NATIVE_MIR_SHARD_ENV_V1, "{share}/{count}") or
+                            not env_set(NATIVE_MIR_SHARD_OWNER_ENV_V1, owner) or
+                            not env_set(NATIVE_MIR_FORK_SOLO_ROWS_ENV_V1, open_solo.join("\n")):
+                        print "[mir-fork] child {share}/{count}: shard environment could not be installed"
+                        native_mir_fork_exit_v1(1)
+                    return ("child", 0)
+                else:
+                    # 0 without a new pid means the host runtime does not back the
+                    # extern (an unbacked extern reads as nil/0): nothing forked.
+                    print "[mir-fork] fork {share}/{count} refused code={pid} (-2 = threads alive, -3 = unsupported host, 0 = primitive unbacked)"
+                    if forked_total == 0:
+                        return native_mir_fork_decline_v1(queue, root_owner)
+                    # A refused fork is retried like a dead child; the cap bounds both.
+                    if native_mir_fork_reforkable_v1(fail_fast, blocked_now, false, retries[share], unclaimed_now):
+                        retries[share] = retries[share] + 1
+                        attempts[share] = attempts[share] + 1
+                        pending = pending.push(share)
+                    else:
+                        abandoned = true
+                        print "[mir-fork] share {share}/{count} not re-forked retries={retries[share]} unclaimed={unclaimed_now} blocked={blocked_now} fail_fast={fail_fast}"
+                    break
+        if live_pids.len() == 0:
+            continue
+        # Hard per-child bound: every poll reads each live child's private
+        # memory and kills at most one child (over its hard cap, or the newest
+        # when the host fell below the reserve).
+        var r: i64 = 0
+        var killed_flags: [bool] = []
+        var solo_index: i64 = -1
+        while r < live_pids.len():
+            val private_kib = native_mir_fork_private_kib_of_v1(
+                file_read_nullable("/proc/{live_pids[r]}/smaps_rollup") ?? "")
+            live_current[r] = private_kib
+            if private_kib > live_peak[r]:
+                live_peak[r] = private_kib
+            killed_flags = killed_flags.push(live_killed[r] != "")
+            if live_pids[r] == solo_pid:
+                solo_index = r
+            r = r + 1
+        val poll_capacity = host_capacity_probe_v1()
+        val poll_headroom = host_capacity_headroom_kib_v1(poll_capacity)
+        val poll_reserve = host_capacity_reserve_kib_v1(poll_capacity)
+        val poll_below_reserve = host_capacity_below_reserve_v1(poll_capacity)
+        val (kill_index, kill_reason) = native_mir_fork_kill_choice_v1(live_current, killed_flags,
+            solo_index, child_kb, poll_below_reserve)
+        if kill_index >= 0:
+            # SIGTERM (rt_process_kill): the fork child has the default
+            # disposition, so it terminates; there is no SIGKILL-by-pid primitive
+            # backed in every runtime lane.
+            val sent = process_kill(live_pids[kill_index])
+            live_killed[kill_index] = kill_reason
+            print "[mir-fork] kill owner={live_owners[kill_index]} pid={live_pids[kill_index]} reason={kill_reason} private_kib={live_current[kill_index]} hard_cap_kib={hard_cap_kib} headroom_kib={poll_headroom} reserve_kib={poll_reserve} solo_index={solo_index} sent={sent}"
+            if not sent:
+                print "[mir-fork] kill not delivered (runtime lane cannot signal this pid); oom_score_adj=1000 is the remaining backstop"
             stdout_flush()
-            val pid = fork_shared_heap_v1()
-            if pid > 0:
-                pids = pids.push(pid)
-                owners = owners.push(owner)
-                forked_shares = forked_shares.push(share)
-            elif pid == 0 and getpid() != parent_pid:
-                _native_mir_fork_child_v1 = true
-                if not env_set(NATIVE_MIR_SHARD_ENV_V1, "{share}/{count}") or
-                        not env_set(NATIVE_MIR_SHARD_OWNER_ENV_V1, owner):
-                    print "[mir-fork] child {share}/{count}: shard environment could not be installed"
-                    native_mir_fork_exit_v1(1)
-                return ("child", 0)
-            else:
-                # 0 without a new pid means the host runtime does not back the
-                # extern (an unbacked extern reads as nil/0): nothing forked.
-                print "[mir-fork] fork {share}/{count} round={round_index} refused code={pid} (-2 = threads alive, -3 = unsupported host, 0 = primitive unbacked)"
-                fork_refused = true
-                unforked = unforked.push(share)
-        if round_index == 0 and pids.len() == 0:
-            return native_mir_fork_decline_v1(queue, root_owner)
-        forked_total = forked_total + pids.len()
-        print "[mir-fork] root owner={root_owner} round={round_index} forked={pids.len()}/{shares.len()} queue={queue}"
-        stdout_flush()
-        # Reap the whole round before deciding anything: with no child alive
-        # the unclaimed count is exact, not a race against live siblings.
-        var stopped: [i64] = []
-        var i: i64 = 0
-        while i < pids.len():
-            val code = fork_shared_heap_wait_v1(pids[i])
-            # Reaped (or unwaitable): seal every claim this child left without a
-            # terminal, so the coordinator's inventory close and link see it.
-            val state = if code < 0: "CRASH" else: "FAILED"
-            val sealed = hir_shard_recovery_seal(queue, owners[i], state)
-            val finished = hir_shard_recovery_finished(queue, owners[i])
-            if sealed < 0:
-                val _blocked = hir_shard_recovery_block(queue, "MIR fork child ledger could not be sealed")
-            # Module outcomes are the ledger's job (the coordinator counts every
-            # non-PASS terminal). Here: a finished child that failed, or any row
-            # sealed now (CRASH/FAILED stands), fails the root. A stopped child
-            # that left nothing unterminated is judged by its replacement, or by
-            # the abandoned-with-unclaimed hand-off below.
-            if (finished and code != 0) or sealed != 0:
-                failed = true
-            if code != 0 or sealed != 0 or not finished:
-                print "[mir-fork] child owner={owners[i]} exit={code} sealed={sealed} finished={finished}"
-            if not finished:
-                stopped = stopped.push(forked_shares[i])
-            i = i + 1
-        # A refused fork is retried like a dead child; the cap bounds both.
-        for share in unforked:
-            stopped = stopped.push(share)
+        # Reap the first child that exited; poll instead of blocking on one pid,
+        # so a slow child never holds back the next fork. Without procfs (-1)
+        # fall back to a blocking wait on the first child whose stat is unreadable.
+        var exited: i64 = -1
+        var j: i64 = 0
+        while j < live_pids.len() and exited < 0:
+            val state = native_mir_fork_stat_exited_v1(file_read_nullable("/proc/{live_pids[j]}/stat") ?? "")
+            if state != 0:
+                exited = j
+                if state < 0 and not poll_fallback_noted:
+                    print "[mir-fork] /proc/{live_pids[j]}/stat unreadable; blocking wait on that child (continuous reaping off)"
+                    stdout_flush()
+                    poll_fallback_noted = true
+            j = j + 1
+        if exited < 0:
+            thread_sleep(NATIVE_MIR_FORK_POLL_MS_V1)
+            polls = polls + 1
+            if polls % NATIVE_MIR_FORK_ADMIT_EVERY_POLLS_V1 == 0:
+                admit_due = true
+            continue
+        val pid = live_pids[exited]
+        val owner = live_owners[exited]
+        val share = live_shares[exited]
+        val killed_reason = live_killed[exited]
+        var keep_pids: [i64] = []
+        var keep_owners: [text] = []
+        var keep_shares: [i64] = []
+        var keep_current: [i64] = []
+        var keep_peak: [i64] = []
+        var keep_killed: [text] = []
+        var m: i64 = 0
+        while m < live_pids.len():
+            if m != exited:
+                keep_pids = keep_pids.push(live_pids[m])
+                keep_owners = keep_owners.push(live_owners[m])
+                keep_shares = keep_shares.push(live_shares[m])
+                keep_current = keep_current.push(live_current[m])
+                keep_peak = keep_peak.push(live_peak[m])
+                keep_killed = keep_killed.push(live_killed[m])
+            m = m + 1
+        live_pids = keep_pids
+        live_owners = keep_owners
+        live_shares = keep_shares
+        live_current = keep_current
+        live_peak = keep_peak
+        live_killed = keep_killed
+        admit_due = true
+        val was_solo = pid == solo_pid
+        if was_solo:
+            solo_pid = 0
+        val code = fork_shared_heap_wait_v1(pid)
+        if killed_reason != "" and not was_solo:
+            # MEMKILL: not a module failure. Its rows stay claimed by the dead
+            # owner (no sibling can take them) until no child is alive, then are
+            # released for a solo retry; the share is re-forked without spending
+            # a retry.
+            memkill_owners = memkill_owners.push(owner)
+            attempts[share] = attempts[share] + 1
+            pending = pending.push(share)
+            print "[mir-fork] reaped owner={owner} exit={code} memkill reason={killed_reason}; rows held for a solo retry live={live_pids.len()} pending={pending.len()}"
+            stdout_flush()
+            continue
+        # Reaped (or unwaitable): seal every claim this child left without a
+        # terminal, so the coordinator's inventory close and link see it. The
+        # root never kills a sole child, so a solo child that died here died on
+        # its own (cgroup or kernel OOM): its rows are CRASH (released rows are
+        # never released twice).
+        val state = if code < 0: "CRASH" else: "FAILED"
+        val sealed = hir_shard_recovery_seal(queue, owner, state)
+        val finished = hir_shard_recovery_finished(queue, owner)
+        if sealed < 0:
+            val _blocked = hir_shard_recovery_block(queue, "MIR fork child ledger could not be sealed")
+        # Module outcomes are the ledger's job (the coordinator counts every
+        # non-PASS terminal). Here: a finished child that failed, or any row
+        # sealed now (CRASH/FAILED stands), fails the root. A stopped child
+        # that left nothing unterminated is judged by its replacement, or by
+        # the abandoned-with-unclaimed hand-off below.
+        if (finished and code != 0) or sealed != 0:
+            failed = true
+        val claimed = hir_shard_recovery_progress(queue, owner)
         val unclaimed = hir_shard_recovery_unclaimed_count(queue)
         val blocked = hir_shard_recovery_blocked(queue)
-        var next_shares: [i64] = []
-        for share in stopped:
-            if native_mir_fork_reforkable_v1(fail_fast, blocked, false, retries[share], unclaimed):
-                retries[share] = retries[share] + 1
-                next_shares = next_shares.push(share)
-            else:
+        val stop_batches = fail_fast and failed
+        print "[mir-fork] reaped owner={owner} exit={code} sealed={sealed} finished={finished} claimed={claimed} unclaimed={unclaimed} solo={was_solo} live={live_pids.len()} pending={pending.len()}"
+        stdout_flush()
+        if was_solo and claimed <= 0:
+            # The solo child walked its rows first and took none: leave them to
+            # ordinary admission (a second memory kill seals them CRASH).
+            print "[mir-fork] solo child claimed nothing; {solo_rows.len()} solo row(s) return to ordinary admission"
+            solo_rows = []
+        if finished:
+            if native_mir_fork_next_batch_v1(batched, true, stop_batches, blocked, claimed, unclaimed):
+                attempts[share] = attempts[share] + 1
+                pending = pending.push(share)
+            elif batched and unclaimed > 0 and (stop_batches or blocked or claimed < 0):
+                # Rows a batch would have taken: the coordinator's replacement
+                # path judges them, not this root's done mark.
                 abandoned = true
-                print "[mir-fork] share {share}/{count} not re-forked retries={retries[share]} unclaimed={unclaimed} blocked={blocked} fail_fast={fail_fast}"
-        shares = next_shares
-        round_index = round_index + 1
+        elif native_mir_fork_reforkable_v1(fail_fast, blocked, false, retries[share], unclaimed):
+            retries[share] = retries[share] + 1
+            attempts[share] = attempts[share] + 1
+            pending = pending.push(share)
+        else:
+            abandoned = true
+            print "[mir-fork] share {share}/{count} not re-forked retries={retries[share]} unclaimed={unclaimed} blocked={blocked} fail_fast={fail_fast}"
+    # A memory-killed owner whose rows were never released (fail-fast stop):
+    # seal them CRASH so the coordinator's inventory close sees them.
+    for mk_owner in memkill_owners:
+        if hir_shard_recovery_seal(queue, mk_owner, "CRASH") != 0:
+            failed = true
     # Every share is finished or was abandoned (out of retries, fail-fast,
     # BLOCKED, or nothing unclaimed). An abandoned share with rows still
     # unclaimed is this root's incomplete work: leave the root unfinished so the
@@ -241,7 +694,7 @@ pub fn native_mir_fork_shards_v1(queue: text, root_owner: text) -> (text, i64):
     val completed = hir_shard_recovery_complete(queue, root_owner)
     if not completed or unclaimed_left < 0:
         failed = true
-    print "[mir-fork] root done owner={root_owner} rounds={round_index} children={forked_total} failed={failed}"
+    print "[mir-fork] root done owner={root_owner} children={forked_total} released_rows={released_rows.len()} failed={failed}"
     stdout_flush()
     ("root", if failed: 1 else: 0)
 

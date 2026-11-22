@@ -269,15 +269,16 @@ impl HirLowering:
         # synthesized function, exactly as ordinary functions and methods do.
         val fn_defining_module: text? = if self.module_filename != "": Some(self.module_filename) else: None
         val fn_symbol_lookup = self.symbols.lookup(fn_symbol_name)
-        if val found_symbol = fn_symbol_lookup:
-            # `if val` can still bind nil on the seed interpreter when the
-            # lookup fails. Never put Some(nil) into current_function.
+        if fn_symbol_lookup.?:
+            val found_symbol = fn_symbol_lookup.unwrap()
+            # Guard the unwrapped payload before using it; never put nil into current_function.
             if found_symbol == nil:
                 fn_symbol_id = self.symbols.define(fn_symbol_name, fn_symbol_kind, fn_fallback_type, fn_.span, fn_.visibility, false, fn_defining_module)
             else:
                 fn_symbol_id = found_symbol
         else:
             fn_symbol_id = self.symbols.define(fn_symbol_name, fn_symbol_kind, fn_fallback_type, fn_.span, fn_.visibility, false, fn_defining_module)
+        self.record_call_arity_row(fn_symbol_id.id, fn_, fn_.is_method and not fn_.is_static)
         self.current_function = Some(fn_symbol_id)
         # NOTE(#133): push the function scope unconditionally, including under
         # SIMPLE_BOOTSTRAP. Bug #133: params were never lowered under bootstrap
@@ -295,6 +296,7 @@ impl HirLowering:
             eprint("[hir-lower] lower_function:scope {fn_.name}")
 
         # Lower type parameters
+        val saved_fn_prescan_parameters = self.prescan_type_parameters
         var type_params: [HirTypeParam] = []
         var tpi = 0
         while tpi < fn_.type_params.len():
@@ -562,6 +564,7 @@ impl HirLowering:
 
         # NOTE(#133): pop unconditionally, matching the unconditional push above.
         self.symbols.pop_scope()
+        self.prescan_type_parameters = saved_fn_prescan_parameters
         self.current_function = nil
 
         # Compute effective visibility using filename matching
@@ -723,6 +726,8 @@ impl HirLowering:
         # they must remain visible while field annotations are lowered.  Without
         # this scope, multi-character parameters such as `Id` are immediately
         # discarded and every `Id` field becomes an unresolved type.
+        val saved_struct_prescan_parameters = self.prescan_type_parameters
+        self.prescan_type_parameters = {}
         self.symbols.push_scope(ScopeKind.Class)
         var type_params: [HirTypeParam] = []
         for tp in struct_type_params:
@@ -756,6 +761,7 @@ impl HirLowering:
             val lowered_field: HirField = self.lower_field(sf)
             fields = fields.push(lowered_field)
         self.symbols.pop_scope()
+        self.prescan_type_parameters = saved_struct_prescan_parameters
 
         # Compute effective visibility using filename matching
         val effective_visibility = self.compute_visibility(struct_name, struct_visibility)
@@ -832,7 +838,37 @@ impl HirLowering:
         # omitted-field default fill (switch_operators_calls.spl) never
         # fired (jit-0x890 defaulted-field bug chain).
         val fld_has_default = fld.has_default
-        val lowered_default = if fld_has_default:
+        var optional_field_none = false
+        if fld_has_default:
+            match type_.kind:
+                case HirTypeKind.Optional(_):
+                    match fld.default.kind:
+                        case ExprKind.Ident(ident_name):
+                            optional_field_none = ident_name == "None"
+                        case _: ()
+                case _: ()
+        val lowered_default = if fld_has_default and optional_field_none:
+            # An `Option<T> = None` field default denotes built-in `Option.None`, even
+            # when an unrelated enum in the same module registered a bare `None`
+            # `EnumVariant` symbol in lexical scope.
+            var none_sym = self.symbols.lookup_or_invalid("None")
+            var needs_builtin_none = not none_sym.is_valid()
+            if not needs_builtin_none and self.symbols.symbols.has(none_sym.id):
+                val existing_none: HirSymbol = self.symbols.symbols[none_sym.id]
+                if existing_none.kind == SymbolKind.EnumVariant:
+                    needs_builtin_none = true
+            if needs_builtin_none:
+                val bind_lex = not self.symbols.lookup_or_invalid("None").is_valid()
+                none_sym = self.symbols.define_with_binding("None", SymbolKind.Function, None, fld.default.span, Visibility.Private, false, None, bind_lex)
+            if none_sym.is_valid() and self.symbols.symbols.has(none_sym.id):
+                val resolved_none: HirSymbol = self.symbols.symbols[none_sym.id]
+                if resolved_none.kind == SymbolKind.Function and (resolved_none.defining_module ?? "") == "":
+                    HirExpr(kind: HirExprKind.NamedVar(none_sym, "None"), has_type_: true, type_: type_, span: fld.default.span)
+                else:
+                    self.lower_hir_expr(fld.default)
+            else:
+                self.lower_hir_expr(fld.default)
+        elif fld_has_default:
             val initializer = self.lower_hir_expr(fld.default)
             if self.attributed_factory_call_kind(initializer.kind): self.retain_attributed_collection_type(initializer, type_) else: initializer
         else:
@@ -874,6 +910,8 @@ impl HirLowering:
             symbol = SymbolId(id: self.imported_enum_symbol_ids[lookup_name])
         if project_imported_payloads and not symbol.is_valid():
             self.error("imported enum `{lookup_name}` has no materialized symbol", span)
+        val saved_enum_prescan_parameters = self.prescan_type_parameters
+        self.prescan_type_parameters = {}
         var hir_type_params: [HirTypeParam] = []
         for tp in type_params:
             hir_type_params = hir_type_params.push(self.lower_type_param(tp))
@@ -884,6 +922,7 @@ impl HirLowering:
         # type, so only imported variants project through that owner.
         for v in variants:
             hir_variants = hir_variants.push(self.lower_variant(v, owner_module, project_imported_payloads))
+        self.prescan_type_parameters = saved_enum_prescan_parameters
         var hir_attrs: [HirAttribute] = []
         for raw_attr in enum_.attributes:
             hir_attrs = hir_attrs.push(hir_attribute_from_raw(raw_attr))

@@ -40,22 +40,18 @@ fn binding_owner_match(name: text, other: text) -> Expr:
 fn binding_owner_expect_match(expr: HirExpr, owner: i64):
     match expr.kind:
         case HirExprKind.MatchCase(_, arms):
-            expect(arms.len()).to_equal(1)
-            match arms[0].pattern.kind:
-                case HirPatternKind.Or(alternatives):
-                    expect(alternatives.len()).to_equal(2)
-                    var names: [text] = []
-                    for alternative in alternatives:
-                        expect(alternative.has_type_).to_be(true)
-                        match alternative.kind:
-                            case HirPatternKind.Enum(type_, name, _):
-                                match type_.kind:
-                                    case HirTypeKind.Named(actual, _): expect(actual.id).to_equal(owner)
-                                    case _: assert(false)
-                                names = names.push(name)
+            expect(arms.len()).to_equal(2)
+            var names: [text] = []
+            for arm in arms:
+                expect(arm.pattern.has_type_).to_be(true)
+                match arm.pattern.kind:
+                    case HirPatternKind.Enum(type_, name, _):
+                        match type_.kind:
+                            case HirTypeKind.Named(actual, _): expect(actual.id).to_equal(owner)
                             case _: assert(false)
-                    expect(names).to_equal(["A", "B"])
-                case _: assert(false)
+                        names = names.push(name)
+                    case _: assert(false)
+            expect(names).to_equal(["A", "B"])
         case _: assert(false)
 
 describe "statement bindings preserve proven match subject ownership":
@@ -72,7 +68,10 @@ describe "statement bindings preserve proven match subject ownership":
             val declaration = lowering.lower_hir_stmt(Stmt(kind: kind, span: span))
             match declaration.kind:
                 case HirStmtKind.Let(symbol, annotation, _):
-                    expect(annotation).to_be_nil()
+                    expect(lowering.local_annotation_provenance[symbol.id]).to_equal(false)
+                    match annotation.kind:
+                        case HirTypeKind.Named(actual, _): expect(actual.id).to_equal(expected.id)
+                        case _: assert(false)
                     expect(lowering.symbols.get_symbol_named_type_raw(symbol.id)).to_equal(expected.id)
                 case _: assert(false)
             val matched = lowering.lower_hir_expr(binding_owner_match("copy", "B"))
@@ -93,7 +92,10 @@ describe "statement bindings preserve proven match subject ownership":
             val declaration = lowering.lower_hir_stmt(Stmt(kind: kind, span: span))
             match declaration.kind:
                 case HirStmtKind.Let(symbol, annotation, _):
-                    expect(annotation).to_be_nil()
+                    expect(lowering.local_annotation_provenance[symbol.id]).to_equal(false)
+                    match annotation.kind:
+                        case HirTypeKind.Named(actual, _): expect(actual.id).to_equal(expected.id)
+                        case _: assert(false)
                     expect(lowering.symbols.get_symbol_named_type_raw(symbol.id)).to_equal(expected.id)
                 case _: assert(false)
             val matched = lowering.lower_hir_expr(binding_owner_match("copy", "B"))
@@ -108,7 +110,12 @@ describe "statement bindings preserve proven match subject ownership":
             val span = Span.empty()
             val explicit_type = Type(kind: TypeKind.Named(type_name, []), span: span)
             val declaration = lowering.lower_hir_stmt(Stmt(kind: StmtKind.Val("copy", explicit_type, binding_owner_ident("input")), span: span))
-            expect(lowering.errors.len()).to_equal(0)
+            if type_name == "Any":
+                expect(lowering.errors.len()).to_equal(1)
+                expect(lowering.diagnostic_recovered[0]).to_equal(true)
+                expect(lowering.errors[0].message).to_contain("W-ANY-COMPILE-001")
+            else:
+                expect(lowering.errors.len()).to_equal(0)
             match declaration.kind:
                 case HirStmtKind.Let(symbol, annotation, _):
                     val actual = annotation ?? HirType(kind: HirTypeKind.Error, span: span)
@@ -165,7 +172,7 @@ describe "statement bindings preserve proven match subject ownership":
         step("Propagating an enum owner must not admit an unrelated bare binding")
         var lowering = binding_owner_context()
         lowering.lower_hir_stmt(Stmt(kind: StmtKind.Val("copy", nil, binding_owner_ident("input")), span: Span.empty()))
-        lowering.lower_hir_expr(binding_owner_match("copy", "Unrelated"))
+        lowering.lower_hir_expr(binding_owner_match("copy", "unrelated"))
         var found = false
         for diagnostic in lowering.diagnostic_messages:
             if diagnostic.contains("or-pattern alternatives must bind the same variables"):

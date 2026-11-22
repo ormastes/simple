@@ -303,18 +303,47 @@ planner_build_argv=$(bootstrap_planner_v2_canonical_build_argv_text \
     "$admission_root/stage2-runtime-authority" \
     "$adm_dir/planner-cache" "$planner_entry_rel" "$build_planner_out")
 planner_build_argv_sha=$(bootstrap_planner_v2_hash_text "$planner_build_argv") || adm_fail planner-build-argv-unavailable
-# SIMPLE_FILE_WORKERS=0 pins this mandatory admission build to the phase route:
-# the per-file pool's process facade intermittently starts inert for a
-# worker's whole lifetime (no llc child ever spawns), which flaked this build
-# 3 of 4 attempts on 2026-11-05. Tracked in
-# doc/08_tracking/bug/per_file_pool_llc_spawn_flaky_noop_2026-11-05.md. This is
-# the documented per-invocation opt-out, not a script-global default.
-if ! ( cd "$adm_root" && SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BOOTSTRAP=1 SIMPLE_FILE_WORKERS=0 SIMPLE_RUNTIME_PATH="$admission_root/stage2-runtime-authority" "$parent_file" \
+# Default to the per-file worker pool (SIMPLE_FILE_WORKERS=1 when unset);
+# explicit caller SIMPLE_FILE_WORKERS=0 opts out to the two-pass phase route.
+# Prebuilt Stage 2 binaries predating the clang IR-to-object cutover could
+# intermittently hit an inert per-unit-child spawn (`llc-no-object`,
+# doc/08_tracking/bug/per_file_pool_llc_spawn_flaky_noop_2026-11-05.md).
+# Run the canonical argv on the per-file default first, and ONLY on that exact
+# spawn-noop signature retry once cleanly (keeping planner_build_argv_sha
+# identical by reusing the exact `$adm_dir/planner-cache` path).
+adm_run_planner_build() {
+    ( cd "$adm_root" && SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BOOTSTRAP=1 SIMPLE_FILE_WORKERS="$1" SIMPLE_RUNTIME_PATH="$admission_root/stage2-runtime-authority" "$parent_file" \
         native-build "--backend=$adm_planner_backend" --source src/app/cli --source src/lib \
         --runtime-path "$admission_root/stage2-runtime-authority" --runtime-bundle core-c-bootstrap \
         --cache-dir "$adm_dir/planner-cache" \
-        --entry-closure --entry "$planner_entry_rel" -o "$build_planner_out" ) >"$adm_dir/planner-build.log" 2>&1; then
-    adm_fail planner-build-failed
+        --entry-closure --entry "$planner_entry_rel" -o "$build_planner_out" ) >"$adm_dir/planner-build.log" 2>&1
+}
+adm_requested_fw=${SIMPLE_FILE_WORKERS:-1}
+if ! adm_run_planner_build "$adm_requested_fw"; then
+    if [ -z "${SIMPLE_FILE_WORKERS:-}" ] && grep -Eq 'llc-no-object|llc produced no object file|Failed to read compiled object file' "$adm_dir/planner-build.log"; then
+        cp "$adm_dir/planner-build.log" "$adm_dir/planner-build.attempt1.log" 2>/dev/null || :
+        rm -rf "$adm_dir/planner-cache" "$build_planner_out"
+        if ! adm_run_planner_build 1; then
+            if grep -Eq 'llc-no-object|llc produced no object file|Failed to read compiled object file' "$adm_dir/planner-build.log"; then
+                cp "$adm_dir/planner-build.log" "$adm_dir/planner-build.attempt2.log" 2>/dev/null || :
+                rm -rf "$adm_dir/planner-cache" "$build_planner_out"
+                adm_run_planner_build 0 || adm_fail planner-build-failed
+            else
+                adm_fail planner-build-failed
+            fi
+        fi
+    else
+        adm_fail planner-build-failed
+    fi
+fi
+# A per-file pool that cannot admit two workers (low reported free memory, e.g.
+# a Hyper-V ballooned guest) aborts the closure, yet native-build still exits 0
+# with no executable. Retry once on the phase route, as for the spawn-noop case.
+if [ ! -x "$build_planner_out" ] && [ -z "${SIMPLE_FILE_WORKERS:-}" ] &&
+    grep -q 'per-file worker pool refused' "$adm_dir/planner-build.log"; then
+    cp "$adm_dir/planner-build.log" "$adm_dir/planner-build.pool-refused.log" 2>/dev/null || :
+    rm -rf "$adm_dir/planner-cache" "$build_planner_out"
+    adm_run_planner_build 0 || adm_fail planner-build-failed
 fi
 [ -x "$build_planner_out" ] || adm_fail planner-build-produced-no-executable
 planner_sha=$(bootstrap_planner_v2_hash_file "$build_planner_out")
@@ -362,7 +391,12 @@ expected_auth=$(bootstrap_planner_v2_authorization_text \
 # An admitted planner must REFUSE an untyped reason. A planner that accepts
 # anything is not a policy gate, so we prove refusal before trusting its pass.
 smoke_rc=0
+# Same MSYS argv-conversion exclusion as the positive exec above: without it
+# the target reaches a native planner as /bootstrap:stage3, so any refusal is
+# about the mangled TARGET rather than the untyped reason and the smoke stops
+# proving what it claims. Empty on Unix, where this line is unchanged.
 env -i LC_ALL=C LANG=C TZ=UTC PATH=/usr/bin:/bin SOURCE_DATE_EPOCH=0 \
+    ${adm_env_excl_arg} \
     SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$adm_runtime" \
     "$build_planner_out" \
     '--bootstrap-reason=none' \
@@ -372,7 +406,15 @@ env -i LC_ALL=C LANG=C TZ=UTC PATH=/usr/bin:/bin SOURCE_DATE_EPOCH=0 \
     "--planner-source-closure-sha256=$closure_sha" \
     "--planner-sha256=$planner_sha" \
     "--bootstrap-receipt=$stage/smoke.receipt" >"$stage/smoke.out" 2>&1 || smoke_rc=$?
-[ "$smoke_rc" -ne 0 ] || adm_fail planner-smoke-accepted-untyped-reason
+if [ "$smoke_rc" -eq 0 ]; then
+    # $stage is removed on exit, so keep the transcript in the admission dir;
+    # a zero exit is otherwise undiagnosable. The check itself is unchanged.
+    cp -- "$stage/smoke.out" "$adm_dir/planner-smoke-accepted.out" 2>/dev/null || :
+    smoke_bytes=$(wc -c <"$stage/smoke.out" 2>/dev/null || echo unknown)
+    echo "bootstrap-admission-note: smoke transcript ($smoke_bytes bytes) kept at $adm_dir/planner-smoke-accepted.out; first lines:" >&2
+    head -n 20 -- "$stage/smoke.out" >&2 2>/dev/null || :
+    adm_fail planner-smoke-accepted-untyped-reason
+fi
 [ ! -e "$stage/smoke.receipt" ] || adm_fail planner-smoke-wrote-receipt-on-refusal
 {
     printf 'smoke-schema: simple-planner-smoke-v1\n'

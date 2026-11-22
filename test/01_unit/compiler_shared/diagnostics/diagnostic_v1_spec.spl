@@ -19,6 +19,10 @@ use compiler.common.diagnostics.severity.{Severity}
 use std.common.diagnostics.diagnostic_v1.{DiagnosticV1 as StdDiagnosticV1, render_diagnostic_v1_json}
 use std.common.diagnostics.span.{Span as StdSpan}
 use std.common.diagnostics.diagnostic_batch.{DiagnosticBatchV1, diagnostic_stable_id}
+use std.common.string_core.{char_from_code}
+use std.common.json.parser.{json_parse}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_to_string}
 
 # Takes the compiler-path type; fed a value built through the std path.
 fn code_of(d: DiagnosticV1) -> text:
@@ -130,3 +134,77 @@ describe "DiagnosticV1":
         expect(rendered).to_contain("\"name\":\"derive_ord\"")
         expect(rendered).to_contain("\"file\":\"macros.spl\"")
         expect(rendered).to_contain("\"line\":5")
+
+    it "escapes empty strings, quotes, backslashes, and whitespace controls in JSON":
+        # @req REQ-DIAG-001
+        step("Render diagnostics with empty text, quotes, backslashes, and whitespace controls")
+        val empty_diag = StdDiagnosticV1.error("", "")
+        val empty_json = empty_diag.to_json()
+        expect(empty_json).to_contain("\"code\":\"\"")
+        expect(empty_json).to_contain("\"message\":\"\"")
+        val empty_parsed = json_parse(empty_json)
+        expect(json_to_string(json_object_get(empty_parsed, "code")) ?? "MISSING").to_equal("")
+        expect(json_to_string(json_object_get(empty_parsed, "message")) ?? "MISSING").to_equal("")
+
+        val raw_msg = "quote\" slash\\ nl\n cr\r tab\t"
+        val raw_file = "C:\\src\\\"dir\"\\file.spl"
+        val diag = StdDiagnosticV1.error("E1001", raw_msg)
+            .with_file(raw_file)
+            .with_note("note\nline2\\end")
+            .with_help("help\t\"quoted\"")
+        val rendered = diag.to_json()
+
+        expect(rendered).to_contain("quote\\\" slash\\\\ nl\\n cr\\r tab\\t")
+        expect(rendered).to_contain("C:\\\\src\\\\\\\"dir\\\"\\\\file.spl")
+        expect(rendered).to_contain("note\\nline2\\\\end")
+        expect(rendered).to_contain("help\\t\\\"quoted\\\"")
+
+        val parsed = json_parse(rendered)
+        expect(json_to_string(json_object_get(parsed, "message")) ?? "").to_equal(raw_msg)
+        expect(json_to_string(json_object_get(parsed, "file")) ?? "").to_equal(raw_file)
+
+    it "escapes C0 control characters including BS, FF, NUL, and 0x01/0x1F in JSON":
+        # @req REQ-DIAG-001
+        step("Render diagnostics containing ASCII control bytes 0x00, 0x01, 0x08, 0x0C, 0x1F")
+        val bs = char_from_code(8)
+        val ff = char_from_code(12)
+        val soh = char_from_code(1)
+        val us = char_from_code(31)
+        val nul = char_from_code(0)
+
+        val ctrl_msg = "a" + bs + "b" + ff + "c" + soh + us + "d"
+        val rendered_ctrl = DiagnosticV1.error("E1002", ctrl_msg).to_json()
+        expect(rendered_ctrl).to_contain("a\\bb\\fc\\u0001\\u001fd")
+        expect(rendered_ctrl.contains(bs)).to_equal(false)
+        expect(rendered_ctrl.contains(ff)).to_equal(false)
+        expect(rendered_ctrl.contains(soh)).to_equal(false)
+        expect(rendered_ctrl.contains(us)).to_equal(false)
+        expect(json_to_string(json_object_get(json_parse(rendered_ctrl), "code")) ?? "").to_equal("E1002")
+
+        val roundtrip_ctrl = "x" + soh + us + "y"
+        val parsed_ctrl = json_parse(DiagnosticV1.error("E1003", roundtrip_ctrl).to_json())
+        expect(json_to_string(json_object_get(parsed_ctrl, "message")) ?? "").to_equal(roundtrip_ctrl)
+
+        val nul_msg = "p" + nul + "q"
+        val rendered_nul = DiagnosticV1.error("E1004", nul_msg).to_json()
+        expect(rendered_nul).to_contain("p\\u0000q")
+        expect(json_to_string(json_object_get(json_parse(rendered_nul), "message")) ?? "").to_equal(nul_msg)
+
+    it "preserves multi-byte Unicode and non-ASCII text verbatim in JSON":
+        # @req REQ-DIAG-001
+        step("Render diagnostics with multi-byte UTF-8 message, file, label, note, and help")
+        val uni = "한글 — é 🚀"
+        val diag = StdDiagnosticV1.error("E2001", uni)
+            .with_file("src/한글/é.spl")
+            .with_note("참고: " + uni)
+            .with_help("도움말: " + uni)
+        val rendered = diag.to_json()
+
+        expect(rendered).to_contain(uni)
+        expect(rendered).to_contain("src/한글/é.spl")
+
+        val parsed = json_parse(rendered)
+        val decoded_msg = json_to_string(json_object_get(parsed, "message")) ?? ""
+        expect(decoded_msg).to_equal(uni)
+        expect(decoded_msg.byte_len()).to_equal(uni.byte_len())
+        expect(json_to_string(json_object_get(parsed, "file")) ?? "").to_equal("src/한글/é.spl")

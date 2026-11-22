@@ -16,6 +16,12 @@ use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolKind, SymbolTa
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir._MirLowering.declaration_inventory_barriers_v1.*
+use compiler.mir._MirLowering.declaration_default_bindings_v1.{MirHirDefaultBindingFrameV1}
+use compiler.mir._MirLowering.declaration_default_bindings_v1.*
+use compiler.mir._MirLowering.declaration_default_rewrite_v1.*
+use compiler.mir.hir_declaration_types_v1.{MirHirModuleDeclarationsV1, MirHirNominalDeclarationV1, MirHirFieldDeclarationV1}
+use compiler.types.type_layout.{layoutattr_default_}
 
 fn default_expr(kind: HirExprKind) -> HirExpr:
     HirExpr(kind: kind, has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: Span.empty()), span: Span.empty())
@@ -105,3 +111,130 @@ describe "provider field default `None` and literal forms":
         match lowering.relocate_provider_default(default_expr(HirExprKind.NamedVar(none_symbol, "None")), provider, {}).kind:
             case HirExprKind.Error: ()
             case _: fail("a consumer symbol named None owned by a module is not the built-in")
+
+    it "relocates built-in None when the consumer binds an unrelated EnumVariant named None":
+        var provider = SymbolTable.new()
+        val none_symbol = provider_builtin_none(provider)
+        var consumer = SymbolTable.new()
+        val variant_none = consumer.define("None", SymbolKind.EnumVariant, None, Span.empty(),
+            Visibility.Public, false, Some("std.common.contracts.provider_cli.adapter_types_v1"))
+        var lowering = MirLowering.new(consumer)
+        val relocated = lowering.relocate_provider_default(
+            default_expr(HirExprKind.NamedVar(none_symbol, "None")), provider, {})
+        match relocated.kind:
+            case HirExprKind.NamedVar(target, name):
+                expect(name).to_equal("None")
+                expect(target.id >= 0).to_equal(true)
+                expect(target.id != variant_none.id).to_equal(true)
+                expect(lowering.symbols.lookup_or_invalid("None").id).to_equal(variant_none.id)
+                expect(lowering.symbols.symbol_defining_module_scalar_raw(target.id)).to_equal("")
+            case _: fail("consumer EnumVariant None must not turn Option.None provider default into Error")
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "relocates an Optional-typed EnumVariant None from a provider that also declared enum variant None":
+        var provider = SymbolTable.new()
+        val provider_variant = provider.define("None", SymbolKind.EnumVariant, None, Span.empty(),
+            Visibility.Public, false, None)
+        val opt_i64 = HirType(kind: HirTypeKind.Optional(HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())), span: Span.empty())
+        val typed_default = HirExpr(kind: HirExprKind.NamedVar(provider_variant, "None"),
+            has_type_: true, type_: opt_i64, span: Span.empty())
+        var lowering = MirLowering.new(SymbolTable.new())
+        val relocated = lowering.relocate_provider_default(typed_default, provider, {})
+        match relocated.kind:
+            case HirExprKind.NamedVar(target, name):
+                expect(name).to_equal("None")
+                expect(target.id >= 0).to_equal(true)
+                expect(lowering.symbols.symbol_defining_module_scalar_raw(target.id)).to_equal("")
+            case _: fail("Optional-typed provider EnumVariant None must relocate as built-in Option.None")
+
+    it "registers declaration-repository struct defaults under both bare name and composite_layout_key":
+        var provider_syms = SymbolTable.new()
+        val struct_sym = provider_syms.define("HostAgentAttachmentV4", SymbolKind.Struct, None,
+            Span.empty(), Visibility.Public, false, Some("lib.nogc_sync_mut.orchestration.host_agent_attachment_v4"))
+        val field_sym = provider_syms.define("helper", SymbolKind.Field, None,
+            Span.empty(), Visibility.Public, false, None)
+        val opt_type = HirType(kind: HirTypeKind.Optional(HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())), span: Span.empty())
+        val field_decl = MirHirFieldDeclarationV1(
+            symbol: field_sym, name: "helper", type_: opt_type,
+            has_default: true, default_artifact: None, visibility: Visibility.Public,
+            is_public: true, is_volatile: false, has_bits_attr: false, bits_width: 0,
+            has_fixed_address: false, fixed_address: 0, span: Span.empty())
+        val struct_decl = MirHirNominalDeclarationV1(
+            symbol: struct_sym, name: "HostAgentAttachmentV4", kind: SymbolKind.Struct,
+            type_params: [], fields: [field_decl], methods: {},
+            has_layout_attr: false, layout_attr: layoutattr_default_(), layout_digest: "",
+            has_export_attr: false, export_attr: None, visibility: Visibility.Public,
+            is_public: true, is_generic_template: false, span: Span.empty())
+        val mod_decl = MirHirModuleDeclarationsV1(
+            name: "lib.nogc_sync_mut.orchestration.host_agent_attachment_v4",
+            path: "src/lib/nogc_sync_mut/orchestration/host_agent_attachment_v4.spl",
+            final_repository_authority: "", final_archive_key: "", final_body_digest: "",
+            symbols: provider_syms, functions: [], structs: [struct_decl], classes: [],
+            enums: [], bitfields: [], traits: [], impls: [], globals: [],
+            needs_initialization: false, declaration_digest: "", stage: "mir-hir-declarations-v1")
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.register_declaration_composite_inventory_v1(mod_decl)
+        val exact_key = "lib.nogc_sync_mut.orchestration.host_agent_attachment_v4::HostAgentAttachmentV4"
+        expect(lowering.struct_field_has_default.has("HostAgentAttachmentV4")).to_equal(true)
+        expect(lowering.struct_field_has_default.has(exact_key)).to_equal(true)
+        expect(lowering.declaration_field_defaults.has("HostAgentAttachmentV4")).to_equal(true)
+        expect(lowering.declaration_field_defaults.has(exact_key)).to_equal(true)
+
+    it "remap_declaration_default_expr_v1 relocates Optional-typed EnumVariant None to Option.None":
+        var provider_syms = SymbolTable.new()
+        val variant_none = provider_syms.define("None", SymbolKind.EnumVariant, None,
+            Span.empty(), Visibility.Public, false, Some("app.provider"))
+        val mod_decl = MirHirModuleDeclarationsV1(
+            name: "app.provider", path: "src/app/provider.spl",
+            final_repository_authority: "", final_archive_key: "", final_body_digest: "",
+            symbols: provider_syms, functions: [], structs: [], classes: [],
+            enums: [], bitfields: [], traits: [], impls: [], globals: [],
+            needs_initialization: false, declaration_digest: "", stage: "mir-hir-declarations-v1")
+        var consumer_syms = SymbolTable.new()
+        val consumer_variant = consumer_syms.define("None", SymbolKind.EnumVariant, None,
+            Span.empty(), Visibility.Public, false, Some("app.consumer_enum"))
+        var lowering = MirLowering.new(consumer_syms)
+        val frame = MirHirDefaultBindingFrameV1(
+            provider: mod_decl, links: {}, lexical_ids: {}, declaration_ids: {}, failed: false)
+        val opt_i64 = HirType(kind: HirTypeKind.Optional(HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())), span: Span.empty())
+        val opt_expr = HirExpr(kind: HirExprKind.NamedVar(variant_none, "None"),
+            has_type_: true, type_: opt_i64, span: Span.empty())
+        val remapped = lowering.remap_declaration_default_expr_v1(opt_expr, frame)
+        expect(frame.failed).to_equal(false)
+        match remapped.kind:
+            case HirExprKind.NamedVar(target, name):
+                expect(name).to_equal("None")
+                expect(target.id >= 0).to_equal(true)
+                expect(target.id != consumer_variant.id).to_equal(true)
+                expect(lowering.symbols.symbol_defining_module_scalar_raw(target.id)).to_equal("")
+            case _: fail("Optional-typed EnumVariant None should remap to built-in Option.None")
+
+    it "remap_declaration_default_expr_v1 rejects non-Optional EnumVariant None without substituting Option.None":
+        var provider_syms = SymbolTable.new()
+        val color_enum = provider_syms.define("Color", SymbolKind.Enum, None,
+            Span.empty(), Visibility.Public, false, Some("app.provider"))
+        val color_none = provider_syms.define("None", SymbolKind.EnumVariant, None,
+            Span.empty(), Visibility.Public, false, Some("app.provider"))
+        val mod_decl = MirHirModuleDeclarationsV1(
+            name: "app.provider", path: "src/app/provider.spl",
+            final_repository_authority: "", final_archive_key: "", final_body_digest: "",
+            symbols: provider_syms, functions: [], structs: [], classes: [],
+            enums: [], bitfields: [], traits: [], impls: [], globals: [],
+            needs_initialization: false, declaration_digest: "", stage: "mir-hir-declarations-v1")
+        var consumer_syms = SymbolTable.new()
+        val _consumer_color = consumer_syms.define("Color", SymbolKind.Enum, None,
+            Span.empty(), Visibility.Public, false, Some("app.provider"))
+        var lowering = MirLowering.new(consumer_syms)
+        val frame = MirHirDefaultBindingFrameV1(
+            provider: mod_decl, links: {}, lexical_ids: {}, declaration_ids: {}, failed: false)
+        val color_type = HirType(kind: HirTypeKind.Named(color_enum, []), span: Span.empty())
+        val non_opt_expr = HirExpr(kind: HirExprKind.NamedVar(color_none, "None"),
+            has_type_: true, type_: color_type, span: Span.empty())
+        val remapped = lowering.remap_declaration_default_expr_v1(non_opt_expr, frame)
+        expect(frame.failed).to_equal(true)
+        match remapped.kind:
+            case HirExprKind.Error: ()
+            case _: fail("non-Optional EnumVariant None must fail closed rather than substitute Option.None")
+        match lowering.relocate_provider_default(non_opt_expr, provider_syms, {}).kind:
+            case HirExprKind.Error: ()
+            case _: fail("relocate_provider_default must also reject non-Optional EnumVariant None")

@@ -3,7 +3,7 @@
 use std.spec.{describe, it, expect}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
-use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder, ModuleSurfaceParserOwner}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder}
 use compiler.hir.hir_lowering.module_surface_types.*
 use compiler.hir.hir_lowering.module_surface_selected_exports_v1.*
 
@@ -12,11 +12,10 @@ fn selected_registry_fixture_v1(names: [text], bodies: [text]) -> ModuleSurfaces
     var builder = ModuleSurfaceBuilder.new()
     var row = 0
     while row < names.len():
-        val path = "src/selected_routes/" + names[row] + ".spl"
+        val path = "selected_routes/" + names[row] + ".spl"
         val parsed = parse_and_build_module(bodies[row], path)
-        val owner = ModuleSurfaceParserOwner.new(parsed)
         val source = SourceFile(path: path, content: bodies[row], module_name: names[row])
-        expect(builder.add_parsed(owner, source, row).is_ok()).to_equal(true)
+        expect(builder.add_parsed(parsed, source, row).is_ok()).to_equal(true)
         row = row + 1
     val result = builder.finish()
     expect(result.is_ok()).to_equal(true)
@@ -38,7 +37,7 @@ describe "typed selected export provenance":
         expect(marker.import_row).to_equal(-1)
 
     it "binds a named alias through its configured import instead of bare export target minus one":
-        val registry = selected_registry_fixture_v1(["provider", "facade"], ["pub fn item() -> i64:\n    1\n", "use provider.\{item as alias\}\nexport alias\n"])
+        var registry = selected_registry_fixture_v1(["provider", "facade"], ["pub fn item() -> i64:\n    1\n", "use provider.\{item as alias\}\nexport alias\n"])
         expect(registry.surfaces[1].export_route_target_indices[0]).to_equal(-1)
         val selected = selected_function_v1(registry, 1, "alias")
         expect(selected.state).to_equal(ModuleSurfaceExportSelectionStateV1.Selected)
@@ -48,7 +47,13 @@ describe "typed selected export provenance":
         expect(hop.target_name).to_equal("item")
         expect(hop.import_row).to_equal(0)
         expect(hop.import_item).to_equal(0)
-        registry.surfaces[1].import_target_indices[0] = 1
+        var facade_surface = registry.surfaces[1]
+        var import_targets = facade_surface.import_target_indices
+        import_targets[0] = 1
+        facade_surface.import_target_indices = import_targets
+        var surfaces = registry.surfaces
+        surfaces[1] = facade_surface
+        registry.surfaces = surfaces
         expect(module_surface_selected_export_hop_v1(registry, selected, 0).is_err()).to_equal(true)
 
     it "retains both same-terminal routes and their intermediate export bindings":
@@ -93,11 +98,15 @@ describe "typed selected export provenance":
         expect(cyclic.surfaces[0].semantic_cacheable).to_equal(false)
 
     it "rejects stale generations and corrupt windows rather than returning a grant":
-        val registry = selected_registry_fixture_v1(["provider"], ["pub fn item() -> i64:\n    1\nexport item\n"])
+        var registry = selected_registry_fixture_v1(["provider"], ["pub fn item() -> i64:\n    1\nexport item\n"])
         val selected = selected_function_v1(registry, 0, "item")
         expect(selected.state).to_equal(ModuleSurfaceExportSelectionStateV1.Selected)
         expect(module_surface_selected_export_hop_v1(registry, selected, selected.hop_count).is_err()).to_equal(true)
-        registry.selected_exports_v1.hop_counts[selected.binding_row] = 9223372036854775807
+        var selected_exports = registry.selected_exports_v1
+        var hop_counts = selected_exports.hop_counts
+        hop_counts[selected.binding_row] = 9223372036854775807
+        selected_exports.hop_counts = hop_counts
+        registry.selected_exports_v1 = selected_exports
         expect(selected_function_v1(registry, 0, "item").state).to_equal(ModuleSurfaceExportSelectionStateV1.Unavailable)
         registry.generation = registry.generation + 1
         expect(module_surface_selected_export_hop_v1(registry, selected, 0).is_err()).to_equal(true)

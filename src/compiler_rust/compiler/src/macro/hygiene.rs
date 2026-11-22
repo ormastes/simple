@@ -392,6 +392,10 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
             value: Box::new(apply_macro_hygiene_expr(value, ctx)),
             count: Box::new(apply_macro_hygiene_expr(count, ctx)),
         },
+        Expr::GenericInst { expr, type_args } => Expr::GenericInst {
+            expr: Box::new(apply_macro_hygiene_expr(expr, ctx)),
+            type_args: type_args.clone(),
+        },
         Expr::VecLiteral(items) => {
             Expr::VecLiteral(items.iter().map(|item| apply_macro_hygiene_expr(item, ctx)).collect())
         }

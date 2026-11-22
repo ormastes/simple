@@ -380,9 +380,52 @@ on a live run means nothing has flushed yet, not that nothing happened. Confirm
 with `lsof -p <worker>` that it is the process's fd 1/2, and judge liveness from
 CPU/RSS rather than from log size.
 
+## Unified Phase 3 / Phase 4 Architecture & Protected Bootstrap Policy (2026-11-22)
+
+See [phase3_phase4_shared_build.md](../../doc/07_guide/tooling/phase3_phase4_shared_build.md)
+and [bootstrap_options.md](../../doc/07_guide/tooling/bootstrap_options.md) for full details:
+
+1. **Shared Cross-Platform Phased Build Script (`scripts/bootstrap/build-phase3-phase4.sh` & Windows `scripts/bootstrap/build-phase3-phase4.bat`):**
+   - One shared script across **Linux, macOS, FreeBSD, Windows (Git-Bash/MSYS2), and SimpleOS**.
+   - Displays an **interactive Phased Build Menu** when invoked interactively without `--phase=...` (or with `--menu`), and accepts non-interactive `--phase=p3a|p3|p4|all`.
+   - **Windows `.bat` (`scripts/bootstrap/build-phase3-phase4.bat`):** Supports 2 configs delegating to the same `.sh` script — **`mingw` is DEFAULT** (`--win-config=mingw`, `llvm-mingw` clang + `ld.lld`), and **`msvc` is optional** (`--win-config=msvc`, `clang-cl`).
+   - **Deprecated standalone Phase 3/4 scripts** (`p3-selfbuild-stage3.shs`, `p3-manual-link-stage3.shs`, `p3-smoke-stage3.shs`, `p3-targeted-stage2-build.shs`, `p3-entry-groups.shs`, etc.): invoking them directly pauses with migration instructions showing how to run `build-phase3-phase4.sh` (including phased/shard mode) and returns without building.
+2. **Default Bootstrap Skips Phase 1 & Phase 2 Once Phase 3+ Compiler Exists:**
+   - In `scripts/bootstrap/bootstrap-from-scratch.sh`, when a working native pure-Simple Phase 3+ host compiler already exists (`bin/release/<triple>/simple` or `bin/simple` without the Rust-seed banner), **default bootstrap skips Phase 1 (Cargo Rust seed) and Phase 2 (`seed -> stage2`)** and delegates directly to `scripts/bootstrap/build-phase3-phase4.sh` (`P3 -> P4`).
+   - Pass `--from-seed` / `--cold-bootstrap` (or `--full-bootstrap` in CI) ONLY when intentionally rebuilding Phase 1 & Phase 2 from the Rust seed; pass `--skip-seed` to require an existing Phase 3+ compiler without seed fallback.
+3. **Compile Mode (`shard` Default, `file` Optional) & Platform/CPU Unit Link (`native_host_match`):**
+   - **`--compile-mode=shard` is DEFAULT** in `build-phase3-phase4.sh` (phase-based HIR/MIR shard build: `SIMPLE_FILE_WORKERS=0`, `SIMPLE_HIR_SHARDING=1`, `SIMPLE_MIR_SHARDING=1`).
+   - **`--compile-mode=file` is optional** (parallel per-file worker pool: `SIMPLE_FILE_WORKERS=1`).
+   - **Platform & CPU Link Policy (`scripts/bootstrap/stage3-native-host-link-policy.{sdn,shs}`):** Enforces mandatory **`native_host_match` tag check** (`target (platform, cpu) == host (os, arch)`). Minimizes `simple` to link **only** thin entry + `(platform, cpu)` static primitive archive (`libsimple-primitive-<platform>-<cpu>.a`) + dead-stripped primitive C core statically, while linking `lib/libsimple-{std,compiler-common,compiler,app}.dylib` (`.so`) dynamically. **Phase 3 builds ONLY native host targets** — non-native backends (other CPUs, VHDL, GPU/CUDA/Vulkan, Wasm) are NOT built during Phase 3, **but if a `.dylib` already exists on disk, `simple` can load and use it** (`--backend-plugin <existing.dylib>`).
+4. **Phase 4 Dual-Mode Build (`--xray` + Optimized Release):**
+   - Phase 4 builds **both** the optimized production binary (`simple`: `--profile=prod --release --strip`) AND the XRay-instrumented debug binary (`simple-debug`: `--profile=dev --debug --no-strip --xray`), plus Stage 5 essentials (`simple_test_runner`, `simple_build_runner`, `simple_mcp_server`, `simple_lsp_mcp_server`).
+5. **Zero-Compile `--path-check` Alive Verification & Protected Script Guard:**
+   - Every core bootstrap script carries a top-of-file `PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER` banner.
+   - Run `sh scripts/check/fast-verify-bootstrap-scripts.shs` for a sub-second check of sealed `.sdn` SHA-256 digests, protected banners, syntax, and `check-bootstrap-path-matrix-all.shs` across Unix/Windows/SimpleOS using extensible `PATH_ACTION|...|status=ALIVE` superset records without running actual compilation.
+
 ## Bootstrap Commands
 ```bash
-# Full bootstrap (recommended):
+# Fast zero-compile verification of protected bootstrap scripts + alive path matrix:
+sh scripts/check/fast-verify-bootstrap-scripts.shs
+
+# Default bootstrap (skips Phase 1 & 2 and runs build-phase3-phase4.sh P3 -> P4 when Phase 3+ exists):
+sh scripts/bootstrap/bootstrap-from-scratch.sh
+sh scripts/bootstrap/bootstrap-from-scratch.sh --skip-seed        # require existing Phase 3+; never fall back to seed
+sh scripts/bootstrap/bootstrap-from-scratch.sh --from-seed        # cold rebuild from Phase 1 Rust seed (--cold-bootstrap)
+
+# Direct shared cross-platform Phase 3 / Phase 4 build (Linux, macOS, FreeBSD, Windows Git-Bash/MSYS2, SimpleOS):
+sh scripts/bootstrap/build-phase3-phase4.sh --menu
+sh scripts/bootstrap/build-phase3-phase4.sh --phase=p3 --compile-mode=shard   # shard is DEFAULT
+sh scripts/bootstrap/build-phase3-phase4.sh --phase=p3 --compile-mode=file    # per-file worker pool optional
+sh scripts/bootstrap/build-phase3-phase4.sh --phase=p4                        # builds release `simple` + debug-xray `simple-debug` + Stage 5 tools
+sh scripts/bootstrap/build-phase3-phase4.sh --phase=all
+sh scripts/bootstrap/build-phase3-phase4.sh --path-check
+
+# Windows .bat launcher (delegates to build-phase3-phase4.sh; mingw DEFAULT, msvc optional):
+#   scripts\bootstrap\build-phase3-phase4.bat --phase=p3 --compile-mode=shard
+#   scripts\bootstrap\build-phase3-phase4.bat --win-config=msvc --phase=p3 --compile-mode=shard
+
+# Full bootstrap + deploy (historical warning preserved below):
 scripts/bootstrap/bootstrap-from-scratch.sh --deploy
 # WARNING: --deploy replaces bin/release/<triple>/simple with the STAGE4 CLI
 # without any smoke gate. Verified broken 2026-06-11 (lint coredumps, test
@@ -469,4 +512,5 @@ Exception (2026-11-13, owner request): Stage 3 reads `stage3_file_workers: 0` fr
 
 Shard knobs, `.spab` (`SIMPLE_FRONTEND_SPAB`, opt-in), DigestV1 (unknown algo =
 miss) and the Lean cache gates: `doc/07_guide/tooling/bootstrap_options.md`.
+*(2026-11-22 reconciliation: `build-phase3-phase4.sh` defaults to `--compile-mode=shard` / `SIMPLE_FILE_WORKERS=0` with `--compile-mode=file` optional; see "Unified Phase 3 / Phase 4 Architecture & Protected Bootstrap Policy (2026-11-22)" above.)*
 Never `git stash`; never GCC on Windows.

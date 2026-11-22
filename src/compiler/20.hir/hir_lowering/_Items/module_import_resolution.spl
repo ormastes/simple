@@ -26,6 +26,7 @@ use std.io_runtime.{hash_text}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path}
 use compiler.hir.hir_lowering.module_surface_types.{module_surface_declaration_authority_lookup_typed_v1}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
@@ -385,11 +386,118 @@ impl HirLowering:
         self.register_glob_imported_symbols_depth(imported_mod, imported_mod_name, import_span, 0, true, true)
         hir_phase_profile_add(HIR_PROF_GLOB, prof_glob_started)
 
+    fn _hir_surface_is_empty_placeholder_v1(surface: ModuleSurface) -> bool:
+        surface.composite_names.len() == 0 and
+            surface.enum_names.len() == 0 and
+            surface.trait_names.len() == 0 and
+            surface.callable_names.len() == 0 and
+            surface.type_alias_names.len() == 0 and
+            surface.constant_names.len() == 0 and
+            surface.exports.len() == 0 and
+            surface.imports.len() == 0
+
+    fn _hir_sibling_surface_item_targets_placeholder_v1(facade_mod: ModuleSurface,
+            wanted: text, depth: i64) -> bool:
+        if depth > 8:
+            return false
+        var saw_placeholder_hop = false
+        var import_idx = 0
+        while import_idx < facade_mod.imports.len():
+            if import_idx + 1 < facade_mod.import_item_offsets.len():
+                val item_start = facade_mod.import_item_offsets[import_idx]
+                val item_end = facade_mod.import_item_offsets[import_idx + 1]
+                var matches = item_start == item_end
+                var source_item = wanted
+                var item_idx = item_start
+                while item_idx < item_end:
+                    val item_name = facade_mod.import_item_names[item_idx]
+                    val local = if facade_mod.import_item_has_alias[item_idx]:
+                        facade_mod.import_item_aliases[item_idx]
+                    else:
+                        item_name
+                    if local == wanted or item_name == wanted:
+                        matches = true
+                        source_item = item_name
+                    item_idx = item_idx + 1
+                if matches and import_idx < facade_mod.import_target_indices.len():
+                    val next_idx = facade_mod.import_target_indices[import_idx]
+                    if next_idx >= 0 and next_idx < self.module_surfaces.surfaces.len() and
+                            next_idx != facade_mod.physical_index:
+                        val next_surf = self.module_surfaces.surfaces[next_idx]
+                        if self._hir_surface_is_empty_placeholder_v1(next_surf):
+                            saw_placeholder_hop = true
+                        elif hir_module_declares_item(next_surf, source_item):
+                            return false
+                        elif self._hir_sibling_surface_item_targets_placeholder_v1(
+                                next_surf, source_item, depth + 1):
+                            saw_placeholder_hop = true
+                        elif item_start < item_end:
+                            return false
+            import_idx = import_idx + 1
+        var r_idx = 0
+        while r_idx < facade_mod.export_route_sources.len():
+            if facade_mod.export_route_is_glob[r_idx]:
+                val sub_idx = if r_idx < facade_mod.export_route_target_indices.len():
+                    facade_mod.export_route_target_indices[r_idx]
+                else:
+                    -1
+                if sub_idx >= 0 and sub_idx < self.module_surfaces.surfaces.len() and
+                        sub_idx != facade_mod.physical_index:
+                    val sub_surf = self.module_surfaces.surfaces[sub_idx]
+                    if self._hir_surface_is_empty_placeholder_v1(sub_surf):
+                        saw_placeholder_hop = true
+                    elif hir_module_declares_item(sub_surf, wanted):
+                        return false
+                    elif self._hir_sibling_surface_item_targets_placeholder_v1(
+                            sub_surf, wanted, depth + 1):
+                        saw_placeholder_hop = true
+            elif depth > 0 and r_idx < facade_mod.export_route_locals.len() and
+                    facade_mod.export_route_locals[r_idx] == wanted:
+                val sub_idx = if r_idx < facade_mod.export_route_target_indices.len():
+                    facade_mod.export_route_target_indices[r_idx]
+                else:
+                    -1
+                val sub_src = facade_mod.export_route_sources[r_idx]
+                if sub_idx >= 0 and sub_idx < self.module_surfaces.surfaces.len() and
+                        sub_idx != facade_mod.physical_index:
+                    val sub_surf = self.module_surfaces.surfaces[sub_idx]
+                    if self._hir_surface_is_empty_placeholder_v1(sub_surf):
+                        saw_placeholder_hop = true
+                    elif hir_module_declares_item(sub_surf, sub_src):
+                        return false
+                    elif self._hir_sibling_surface_item_targets_placeholder_v1(
+                            sub_surf, sub_src, depth + 1):
+                        saw_placeholder_hop = true
+                    else:
+                        return false
+            r_idx = r_idx + 1
+        saw_placeholder_hop
+
+    fn _hir_sibling_reexport_targets_placeholder_v1(facade_mod: ModuleSurface, route_index: i64,
+            export_source: text, export_local: text) -> bool:
+        if route_index >= 0 and route_index < facade_mod.export_route_target_indices.len():
+            val direct_idx = facade_mod.export_route_target_indices[route_index]
+            if direct_idx >= 0 and direct_idx < self.module_surfaces.surfaces.len():
+                val direct_surf = self.module_surfaces.surfaces[direct_idx]
+                if self._hir_surface_is_empty_placeholder_v1(direct_surf):
+                    return true
+                if hir_module_declares_item(direct_surf, export_source):
+                    return false
+                return self._hir_sibling_surface_item_targets_placeholder_v1(
+                    direct_surf, export_source, 1)
+        if self._hir_sibling_surface_item_targets_placeholder_v1(facade_mod, export_source, 0):
+            return true
+        if export_local != export_source:
+            return self._hir_sibling_surface_item_targets_placeholder_v1(facade_mod, export_local, 0)
+        false
+
     me register_package_sibling_symbols(imported_mod: ModuleSurface, imported_mod_name: text, import_span: Span):
         # Directory siblings share declarations and explicit exports, but a
         # sibling relationship is not a user-written glob import. In
         # particular, private named imports and private nested globs remain
         # implementation details of the sibling that wrote them.
+        if self._hir_surface_is_empty_placeholder_v1(imported_mod):
+            return
         val fresh_memo: {text: i64} = {}
         self.glob_expand_memo = fresh_memo
         # BOOT-20 (2026-09-18): scalar read authority resets with the Dict.
@@ -535,12 +643,18 @@ impl HirLowering:
                 val export_surface_index = imported_mod.export_route_target_indices[route_index]
                 val export_key = imported_mod.export_route_target_names[route_index]
                 if export_surface_index >= 0 and export_surface_index != imported_mod.physical_index:
-                    self.register_glob_imported_symbols_depth(
-                        self.module_surfaces.surfaces[export_surface_index], export_key,
-                        import_span, depth + 1, include_private_named_imports,
-                        materialize_enums)
+                    val glob_target_surf = self.module_surfaces.surfaces[export_surface_index]
+                    if include_private_named_imports or not self._hir_surface_is_empty_placeholder_v1(glob_target_surf):
+                        self.register_glob_imported_symbols_depth(
+                            glob_target_surf, export_key,
+                            import_span, depth + 1, include_private_named_imports,
+                            materialize_enums)
             elif export_local != export_source or not hir_module_declares_item(imported_mod, export_source):
-                self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, export_source, export_local, import_span, materialize_enums)
+                val skip_sibling_placeholder = not include_private_named_imports and
+                    self._hir_sibling_reexport_targets_placeholder_v1(
+                        imported_mod, route_index, export_source, export_local)
+                if not skip_sibling_placeholder:
+                    self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, export_source, export_local, import_span, materialize_enums)
             route_index = route_index + 1
 
         # Facade globs: `use std.simd.*` can resolve to a tier FACADE (e.g.
@@ -1039,7 +1153,11 @@ impl HirLowering:
             return false
         if not importer_path.contains("/"):
             return false
-        if private_import_dir_of(importer_path) == private_import_dir_of(imported.canonical_path):
+        val importer_canon = module_surface_canonical_path(importer_path)
+        val imported_canon = module_surface_canonical_path(imported.canonical_path)
+        val importer_dir = if importer_canon != "": private_import_dir_of(importer_canon) else: private_import_dir_of(importer_path)
+        val imported_dir = if imported_canon != "": private_import_dir_of(imported_canon) else: private_import_dir_of(imported.canonical_path)
+        if importer_dir == imported_dir:
             return false
         if imported.exports.len() > 0:
             return false

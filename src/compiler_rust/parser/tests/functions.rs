@@ -197,3 +197,41 @@ fn parse_send_recv() {
     parse_ok("let x = recv()");
     parse_ok("send(h, msg)");
 }
+
+#[test]
+fn parse_method_inline_generic_bounds_and_const_generic_args() {
+    let items = parse(
+        "trait Iterator:\n    type Item\n    fn collect<C: FromIterator<Self.Item>>(self) -> C:\n        return C.from_iter(self)\nimpl FixedVec<T, const N: u64>:\n    fn dummy():\n        return 0\nfn call_site():\n    val a = iter.collect<FixedVec<i64, 4>>()\n",
+    );
+    let Node::Trait(t) = &items[0] else {
+        panic!("expected trait");
+    };
+    let collect = t.methods.iter().find(|m| m.name == "collect").expect("collect method");
+    assert_eq!(collect.generic_params, vec!["C".to_string()]);
+    assert_eq!(collect.where_clause.len(), 1);
+    assert_eq!(collect.where_clause[0].type_param, "C");
+    assert_eq!(
+        collect.where_clause[0].bounds,
+        vec![Type::Generic {
+            name: "FromIterator".to_string(),
+            args: vec![Type::Simple("Self.Item".to_string())],
+        }]
+    );
+
+    let Node::Function(call_site) = &items[2] else {
+        panic!("expected call_site fn");
+    };
+    let Node::Let(stmt) = &call_site.body.statements[0] else {
+        panic!("expected val binding");
+    };
+    let Some(Expr::MethodCall { generic_args, .. }) = &stmt.value else {
+        panic!("expected MethodCall");
+    };
+    assert_eq!(
+        *generic_args,
+        vec![Type::Generic {
+            name: "FixedVec".to_string(),
+            args: vec![Type::Simple("i64".to_string()), Type::Simple("4".to_string())],
+        }]
+    );
+}

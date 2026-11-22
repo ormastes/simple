@@ -182,3 +182,21 @@ baseline_eligible: bool)`, `record_baseline_generation(generation/p50/promoted_a
 `collect_timing_runs(max_count)`, `is_flaky_test -> bool`, `save() -> bool`, record
 structs (`TimingSummary`, `TestInfo`, ...) pub fields, and `ResourceUsage`/`TestDbFileRow`
 source fields wrapped at the call site.
+
+Deferred test-DB batch 2026-11-22: the deferred set above is converted except the record
+structs. New types: `TestBaselineGeneration`, `TestTimestamp` (`value: i64` newtypes),
+`TestBaselineEligibility` (Eligible|Ineligible), `TestFlakiness` (Flaky|Stable),
+`TestDbSaveOutcome` (Saved|Failed). `update_test_result`/`update_timing`/`add_timing_run`
+take `TestDurationMs`; `add_timing_run` takes `TestBaselineEligibility`;
+`record_baseline_generation` takes `TestBaselineGeneration`/`TestDurationMs`/`TestTimestamp`;
+`collect_timing_runs[_for_cohort]` take `TestRunCount`; `is_flaky_test -> TestFlakiness`;
+`TestDatabaseExtended.save -> TestDbSaveOutcome` (both test_db_compat wrappers compare it
+explicitly). SDN unchanged (`baseline_eligible` still written as "true"/"false").
+Still bare: pub fields of the record structs (`TimingSummary`, `TestInfo`, `TrdRunRecord`,
+...), `ResourceUsage`/`TestDbFileRow` source fields.
+
+Closed 2026-11-22: `promote_timing_baseline` could never return `Applied` after a single
+observation because `update_test_result` refreshed timing stats (`update_timing`) before
+recording the run (`add_timing_run`): the stats lagged one observation and a first run never
+created its `timing` row. The two steps are swapped (as `record_timing_observation` already
+did) and `test_extended_primitive_types_spec` pins `Applied` (old order: 5/6, fixed: 6/6).

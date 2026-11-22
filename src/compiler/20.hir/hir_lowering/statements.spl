@@ -989,7 +989,8 @@ impl HirLowering:
             case HirExprKind.Var(td_sym): td_sym
             case HirExprKind.NamedVar(td_sym2, _): td_sym2
             case _: nil
-        if val td_bs = td_base_sym:
+        if td_base_sym.?:
+            val td_bs = td_base_sym ?? SymbolId(id: -1)
             if self.local_tuple_types.has(td_bs.id):
                 # Native-safe get read (see ta_found above).
                 val td_found: [HirType] = self.local_tuple_types.get(td_bs.id) ?? []
@@ -1190,7 +1191,8 @@ impl HirLowering:
                 self.immutable_view_symbols[vr_symbol.id] = parser_type_kind_named_name(vr_ast_type.kind)
             if not is_read_only_handle_name(parser_type_kind_named_name(vr_ast_type.kind)):
                 self.flag_frozen_alias(vr_hir_init, s.span)
-            if val vr_init_present = vr_init:
+            if vr_init.?:
+                val vr_init_present = vr_init ?? sk_dummy
                 self.mark_optional_call_init(vr_symbol.id, vr_init_present, vr_has_annotation, s.bind_optional_payload, vr_sym_type)
                 self.try_register_local_struct_type(vr_symbol, vr_init_present)
                 self.try_register_local_tuple_type(vr_symbol, vr_init_present)
@@ -1287,6 +1289,21 @@ impl HirLowering:
                         assign_target, assign_op, assign_value, s.span), span: s.span)
                 case _:
                     return HirStmt(kind: HirStmtKind.Expr(self.lower_hir_expr(expr_t)), span: s.span)
+        val dummy_tl_cfg = TargetLaterConfig(lane: TargetLane.Host, max_packet: None, call: sk_dummy, span: s.span)
+        val dummy_tl_blk = Block(stmts: [], span: s.span)
+        if sk_disc == hir_stmt_kind_disc(StmtKind.TargetLater(dummy_tl_cfg, dummy_tl_blk)):
+            var tl_ok = false
+            var tl_cfg = dummy_tl_cfg
+            var tl_blk = dummy_tl_blk
+            match stmt_kind_value:
+                case StmtKind.TargetLater(cfg, blk):
+                    tl_cfg = cfg
+                    tl_blk = blk
+                    tl_ok = true
+                case _:
+                    pass
+            if tl_ok:
+                return HirStmt(kind: self.lower_hir_target_later_kind(tl_cfg, tl_blk, s.span), span: s.span)
 
         val kind: HirStmtKind = match stmt_kind_value:
             case StmtKind.Val(name, type_, init):
@@ -1554,6 +1571,9 @@ impl HirLowering:
                     span: s.span
                 ))
 
+            case StmtKind.TargetLater(config, body):
+                self.lower_hir_target_later_kind(config, body, s.span)
+
             case _:
                 self.error("unsupported statement kind", s.span)
                 HirStmtKind.Expr(HirExpr(
@@ -1563,6 +1583,35 @@ impl HirLowering:
                 ))
 
         HirStmt(kind: kind, span: s.span)
+
+    me lower_hir_target_later_kind(config: TargetLaterConfig, body_block: Block, span: Span) -> HirStmtKind:
+        """Lower frontend `StmtKind.TargetLater` into canonical `HirExprKind.HostGpuLane`."""
+        var lane_code: i64 = 1
+        match config.lane:
+            case TargetLane.Gpu:
+                lane_code = 2
+            case TargetLane.Host:
+                lane_code = 1
+        var payload_size: i64 = 0
+        if val mp = config.max_packet:
+            if mp > 0:
+                payload_size = mp
+        if payload_size == 0:
+            payload_size = self.lower_host_gpu_lane_payload(config.call)
+        val marker = if self.symbols.lookup_or_invalid("target").is_valid():
+            self.lower_hir_expr(config.call)
+        else:
+            HirExpr(
+                kind: HirExprKind.UnitLit,
+                has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span),
+                span: span
+            )
+        val body = self.lower_hir_block(body_block)
+        HirStmtKind.Expr(HirExpr(
+            kind: HirExprKind.HostGpuLane(lane_code, payload_size, marker, body),
+            has_type_: false, type_: HirType(kind: HirTypeKind.Unit, span: span),
+            span: span
+        ))
 
 
 # True for an identifier or a field chain over one (`a`, `a.b`, `a.b.c`): a

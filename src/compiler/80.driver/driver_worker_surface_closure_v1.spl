@@ -38,8 +38,8 @@ use compiler.driver.driver_advice_scan_v1.{advice_source_may_declare_v1}
 use compiler.frontend.core.parser_preprocessor.{pp_scan_diagnostic_state_v1}
 use compiler.driver.driver_worker_surface_graph_v1.{worker_surface_import_ids_v1, worker_surface_ready_v1}
 use std.common.crypto.sha256.{sha256_text}
-use std.io_runtime.{file_exists, file_read, file_write, file_delete, dir_list_optional, getpid}
-use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
+use std.io_runtime.{file_exists, file_read, file_write, file_delete, dir_exists, dir_list_optional, getpid}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_atomic_write, file_publish_noreplace}
 use std.nogc_sync_mut.io_runtime.{dir_create_all}
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
 use compiler.driver.driver_parse_shard_hash.{driver_parse_shard_hash}
@@ -597,31 +597,125 @@ pub fn worker_unit_pick_owner_dead_v1(record: text) -> bool:
         return false
     rt_process_start_identity(pid) != start
 
-fn _worker_unit_pick_cursor_path_v1(queue: text) -> text:
+var _worker_unit_pick_seq: i64 = 0
+var _worker_unit_pick_probe_count: i64 = 0
+
+fn _worker_unit_next_pick_seq() -> i64:
+    _worker_unit_pick_seq = _worker_unit_pick_seq + 1
+    _worker_unit_pick_seq
+
+# reason: scalar diagnostic probe counter for O(N) lock-free unit-pick verification
+@allow(primitive_api)
+pub fn worker_unit_pick_probes_v1() -> i64:
+    _worker_unit_pick_probe_count
+
+pub fn worker_unit_pick_probes_reset_v1():
+    _worker_unit_pick_probe_count = 0
+
+fn _worker_unit_pick_cursor_path_for_slot_v1(queue: text, slot: i64, workers: i64) -> text:
+    if workers > 1 and slot >= 0 and slot < workers:
+        return "{queue}/.pick_cursor.{slot}-{workers}"
     "{queue}/.pick_cursor"
 
-fn _worker_unit_pick_cursor_read_v1(queue: text, limit: i64) -> i64:
+fn _worker_unit_owner_picks_root_v1(queue: text) -> text:
+    "{queue}/owner_picks"
+
+fn _worker_unit_owner_picks_dir_v1(queue: text, owner: text) -> text:
+    "{queue}/owner_picks/{sha256_text(owner)}"
+
+fn _worker_unit_pick_cursor_read_slot_v1(queue: text, slot: i64, workers: i64, limit: i64) -> i64:
     if limit <= 0:
         return 0
-    val path = _worker_unit_pick_cursor_path_v1(queue)
+    val default_start = if workers > 1 and slot > 0 and slot < workers: (slot * limit) / workers else: 0
+    val path = _worker_unit_pick_cursor_path_for_slot_v1(queue, slot, workers)
     if not file_exists(path):
-        return 0
-    val parsed = file_read(path).trim().to_i64() ?? 0
-    if parsed < 0 or parsed >= limit: 0 else: parsed
+        return default_start
+    val parsed = file_read(path).trim().to_i64() ?? default_start
+    if parsed < 0 or parsed >= limit: default_start else: parsed
 
-# 1 = picked (lease written), 0 = already claimed/live-picked/duplicate, -1 = lease write failed.
+fn _worker_unit_owner_stride_slot_v1(owner: text) -> (i64, i64):
+    var base_owner = owner.split("~")[0].split("@")[0]
+    if base_owner.starts_with("file-"):
+        base_owner = base_owner.substring(5, base_owner.byte_len())
+    val parts = base_owner.split("/")
+    if parts.len() != 2:
+        return (0, 1)
+    val slot = parts[0].to_i64() ?? -1
+    val workers = parts[1].to_i64() ?? 0
+    if workers <= 1 or slot < 0 or slot >= workers:
+        return (0, 1)
+    (slot, workers)
+
+fn _worker_unit_publish_pick_noreplace_v1(pick_path: text, lease: text) -> i64:
+    val seq = _worker_unit_next_pick_seq()
+    val tmp = "{pick_path}.{getpid()}.{seq}.tmp"
+    if not file_write(tmp, lease):
+        val _cleanup_err = file_delete(tmp)
+        return -1
+    val published = file_publish_noreplace(tmp, pick_path)
+    val _cleanup = file_delete(tmp)
+    match published:
+        case Ok(created): if created: 1 else: 0
+        case Err(_): -1
+
+fn _worker_unit_stage_owner_pick_marker_v1(queue: text, owner: text, digest: text, path: text) -> text:
+    val dir = _worker_unit_owner_picks_dir_v1(queue, owner)
+    if not dir_create_all(dir):
+        return ""
+    val marker = "{dir}/{digest}.pick"
+    if _worker_unit_publish_pick_noreplace_v1(marker, path) < 0:
+        return ""
+    marker
+
+# Lock-free atomic pick via file_publish_noreplace (link/O_EXCL).
+# 1 = picked (lease published), 0 = already claimed, -2 = already live-picked by peer, -1 = I/O error.
 fn _worker_unit_try_pick_path_v1(queue: text, owner: text, path: text, already_in_batch: bool) -> i64:
     if already_in_batch:
         return 0
-    val base = "{queue}/{sha256_text(path)}"
+    _worker_unit_pick_probe_count = _worker_unit_pick_probe_count + 1
+    val digest = sha256_text(path)
+    val base = "{queue}/{digest}"
     if file_exists("{base}.claim"):
         return 0
-    val free = not file_exists("{base}.pick") or worker_unit_pick_owner_dead_v1(file_read("{base}.pick"))
-    if not free:
-        return 0
-    if not file_write("{base}.pick", worker_unit_pick_lease_v1(owner)):
+    val pick_path = "{base}.pick"
+    val lease = worker_unit_pick_lease_v1(owner)
+    if file_exists(pick_path):
+        if not worker_unit_pick_owner_dead_v1(file_read(pick_path)):
+            return -2
+        val reclaim_marker = _worker_unit_stage_owner_pick_marker_v1(queue, owner, digest, path)
+        if reclaim_marker == "":
+            return -1
+        # Dead-lease recovery: synchronize only on this single key so two
+        # reclaimers cannot unlink a newly published live pick (no global lock).
+        # Never unlink `{base}.reclaim.lock` after unlock (flock+unlink split-brain).
+        val rfd = file_lock("{base}.reclaim.lock", 5)
+        if rfd < 0:
+            val _rm_m = file_delete(reclaim_marker)
+            return -2
+        var reclaimed: i64 = -2
+        if not file_exists("{base}.claim"):
+            if not file_exists(pick_path):
+                reclaimed = _worker_unit_publish_pick_noreplace_v1(pick_path, lease)
+            elif worker_unit_pick_owner_dead_v1(file_read(pick_path)):
+                if file_delete(pick_path):
+                    reclaimed = _worker_unit_publish_pick_noreplace_v1(pick_path, lease)
+        val _runlocked = file_unlock(rfd)
+        if reclaimed == 1:
+            return 1
+        val _rm_reclaim = file_delete(reclaim_marker)
+        if reclaimed < 0 and reclaimed != -2:
+            return -1
+        return -2
+    val marker = _worker_unit_stage_owner_pick_marker_v1(queue, owner, digest, path)
+    if marker == "":
         return -1
-    1
+    val created = _worker_unit_publish_pick_noreplace_v1(pick_path, lease)
+    if created == 1:
+        return 1
+    val _rm_loser = file_delete(marker)
+    if created == 0:
+        return -2
+    -1
 
 # Largest import cycle one unit takes whole; a bigger one keeps the batch pick.
 pub const WORKER_UNIT_CYCLE_PEER_MAX_V1: i64 = 16
@@ -667,44 +761,71 @@ pub fn worker_unit_pick_v1(queue: text, owner: text, paths: [text], order: [i64]
     var picked: [text] = []
     if queue == "" or owner == "" or owner.contains("\n") or batch <= 0:
         return Err("unit pick needs a HIR ledger, an owner and a batch")
-    val fd = file_lock("{queue}/.lock", 30)
-    if fd < 0:
-        return Err("HIR ledger lock unavailable for unit pick")
-    var failed = false
+    if not dir_exists(queue):
+        return Err("HIR ledger directory unavailable for unit pick")
+    var picked_set: Dict<text, bool> = {}
     val total = order.len()
-    val start_cursor = _worker_unit_pick_cursor_read_v1(queue, total)
+    if total == 0:
+        if not file_atomic_write(worker_unit_drained_path_v1(queue, owner), owner):
+            return Err("unit pick record publication failed")
+        return Ok(picked)
+    val (slot, workers) = _worker_unit_owner_stride_slot_v1(owner)
+    val cursor_path = _worker_unit_pick_cursor_path_for_slot_v1(queue, slot, workers)
+    val start_cursor = _worker_unit_pick_cursor_read_slot_v1(queue, slot, workers, total)
+    var visited: [bool] = []
+    var vi = 0
+    while vi < total:
+        visited.push(false)
+        vi = vi + 1
     var next_cursor = start_cursor
-    var idx = start_cursor
-    while idx < total and picked.len() < batch:
+    var cursor_published = false
+    var step = 0
+    # Pass 1: lockless per-slot disjoint cursor + contention-leapfrog scan with wraparound stealing.
+    while step < total and picked.len() < batch:
+        val idx = (start_cursor + step) % total
+        visited[idx] = true
         val path = paths[order[idx]]
-        val status = _worker_unit_try_pick_path_v1(queue, owner, path, picked.contains(path))
-        if status < 0:
-            failed = true
-            break
-        if status > 0:
+        val status = _worker_unit_try_pick_path_v1(queue, owner, path, picked_set.contains_key(path))
+        if status == -1:
+            return Err("unit pick record publication failed")
+        if status == 1:
             picked.push(path)
-        idx = idx + 1
-        next_cursor = if idx < total: idx else: 0
-    if not failed and picked.len() < batch:
-        idx = 0
-        while idx < start_cursor and picked.len() < batch:
+            picked_set[path] = true
+            next_cursor = (idx + 1) % total
+            if not cursor_published and workers <= 1 and total >= batch * 2:
+                cursor_published = true
+                val _early_cursor = file_atomic_write(cursor_path, "{(idx + batch) % total}")
+            step = step + 1
+        elif status == -2 and picked.len() == 0 and total >= batch * 2 and batch > 1:
+            # Peer is actively claiming this batch window; leapfrog to the next batch boundary.
+            step = step + batch
+        else:
+            step = step + 1
+            if picked.len() == 0:
+                next_cursor = (idx + 1) % total
+    # Pass 2: exact completeness sweep over any indices skipped during contention leapfrogs.
+    if picked.len() < batch:
+        var sweep = 0
+        while sweep < total and picked.len() < batch:
+            val idx = (start_cursor + sweep) % total
+            sweep = sweep + 1
+            if visited[idx]:
+                continue
+            visited[idx] = true
             val path = paths[order[idx]]
-            val status = _worker_unit_try_pick_path_v1(queue, owner, path, picked.contains(path))
-            if status < 0:
-                failed = true
-                break
-            if status > 0:
+            val status = _worker_unit_try_pick_path_v1(queue, owner, path, picked_set.contains_key(path))
+            if status == -1:
+                return Err("unit pick record publication failed")
+            if status == 1:
                 picked.push(path)
-            idx = idx + 1
-        if not failed:
-            next_cursor = if picked.len() == batch and idx < total: idx else: 0
-    if not failed and total > 0:
-        val _cursor_saved = file_write(_worker_unit_pick_cursor_path_v1(queue), "{next_cursor}")
-    if not failed and picked.len() == 0:
-        failed = not file_write(worker_unit_drained_path_v1(queue, owner), owner)
-    val _unlocked = file_unlock(fd)
-    if failed:
-        return Err("unit pick record publication failed")
+                picked_set[path] = true
+                next_cursor = (idx + 1) % total
+    if picked.len() == 0:
+        next_cursor = 0
+    val _cursor_saved = file_atomic_write(cursor_path, "{next_cursor}")
+    if picked.len() == 0:
+        if not file_atomic_write(worker_unit_drained_path_v1(queue, owner), owner):
+            return Err("unit pick record publication failed")
     Ok(picked)
 
 # worker_unit_pick_v1, then each picked row on an import cycle also takes its
@@ -723,27 +844,27 @@ pub fn worker_unit_pick_with_cycle_peers_v1(queue: text, owner: text, paths: [te
     var picked: [text] = base.unwrap()
     if picked.len() == 0:
         return Ok(picked)
-    val fd = file_lock("{queue}/.lock", 30)
-    if fd < 0:
-        return Err("HIR ledger lock unavailable for unit cycle pick")
-    var failed = false
+    var picked_set: Dict<text, bool> = {}
+    for p in picked:
+        picked_set[p] = true
+    var order_set: Dict<i64, bool> = {}
     var seeds: [i64] = []
     for row in order:
-        if picked.contains(paths[row]):
+        order_set[row] = true
+        if picked_set.contains_key(paths[row]):
             seeds.push(row)
     for seed in seeds:
         val peers = worker_unit_cycle_peers_v1(edges, seed)
         if peers.len() <= WORKER_UNIT_CYCLE_PEER_MAX_V1:
             for peer in peers:
-                if order.contains(peer) and not failed:
-                    val status = _worker_unit_try_pick_path_v1(queue, owner, paths[peer], picked.contains(paths[peer]))
-                    if status < 0:
-                        failed = true
-                    if status > 0:
-                        picked.push(paths[peer])
-    val _unlocked = file_unlock(fd)
-    if failed:
-        return Err("unit pick record publication failed")
+                if order_set.contains_key(peer):
+                    val peer_path = paths[peer]
+                    val status = _worker_unit_try_pick_path_v1(queue, owner, peer_path, picked_set.contains_key(peer_path))
+                    if status == -1:
+                        return Err("unit pick record publication failed")
+                    if status == 1:
+                        picked.push(peer_path)
+                        picked_set[peer_path] = true
     Ok(picked)
 
 pub fn worker_unit_drained_path_v1(queue: text, owner: text) -> text:
@@ -751,25 +872,62 @@ pub fn worker_unit_drained_path_v1(queue: text, owner: text) -> text:
 
 # After `owner`'s unit exited: delete its picks that never became a claim so
 # a later unit can pick them again. Returns how many, or -1 when the ledger
-# cannot be listed/locked or a record cannot be removed.
-pub fn worker_unit_pick_seal_v1(queue: text, owner: text) -> i64:
-    val listing = dir_list_optional(queue)
-    if listing == nil:
+# is unavailable or a record cannot be removed. Lockless via per-owner index.
+fn _worker_unit_drop_orphan_pick_v1(queue: text, digest: text, owner: text) -> i64:
+    val base = "{queue}/{digest}"
+    val pick_path = "{base}.pick"
+    val claim_path = "{base}.claim"
+    if file_exists(claim_path) or not file_exists(pick_path):
+        return 0
+    if file_read(pick_path).split("\n")[0] != owner:
+        return 0
+    # Rare unclaimed-orphan path: coordinate on `{base}.reclaim.lock` (matching
+    # dead-lease reclamation in `_worker_unit_try_pick_path_v1`) so a peer that
+    # reclaimed this dead unit PID's lease cannot have its new `.pick` unlinked.
+    val rfd = file_lock("{base}.reclaim.lock", 5)
+    if rfd < 0:
         return -1
-    val fd = file_lock("{queue}/.lock", 30)
-    if fd < 0:
+    var outcome: i64 = 0
+    if not file_exists(claim_path) and file_exists(pick_path) and file_read(pick_path).split("\n")[0] == owner:
+        if not file_delete(pick_path) and file_exists(pick_path):
+            outcome = -1
+        else:
+            outcome = 1
+    val _runlocked = file_unlock(rfd)
+    outcome
+
+pub fn worker_unit_pick_seal_v1(queue: text, owner: text) -> i64:
+    if queue == "" or not dir_exists(queue):
+        return -1
+    if dir_exists(_worker_unit_owner_picks_root_v1(queue)):
+        val owner_dir = _worker_unit_owner_picks_dir_v1(queue, owner)
+        if not dir_exists(owner_dir):
+            return 0
+        val idx_listing = dir_list_optional(owner_dir)
+        if idx_listing.is_none():
+            return -1
+        var dropped_idx: i64 = 0
+        for name in idx_listing.unwrap():
+            if not name.ends_with(".pick"):
+                continue
+            val digest = name.substring(0, name.byte_len() - 5)
+            val drop_rc = _worker_unit_drop_orphan_pick_v1(queue, digest, owner)
+            if drop_rc < 0:
+                return -1
+            dropped_idx = dropped_idx + drop_rc
+            val _rm_marker = file_delete("{owner_dir}/{name}")
+        return dropped_idx
+    val listing = dir_list_optional(queue)
+    if listing.is_none():
         return -1
     var dropped: i64 = 0
     for name in listing.unwrap():
         if name.ends_with(".pick"):
-            val pick = "{queue}/{name}"
-            val claim = "{queue}/{name.substring(0, name.byte_len() - 5)}.claim"
-            if not file_exists(claim) and file_read(pick).split("\n")[0] == owner:
-                if not file_delete(pick):
-                    dropped = -1
-                    break
-                dropped = dropped + 1
-    val _unlocked = file_unlock(fd)
+            val digest = name.substring(0, name.byte_len() - 5)
+            val drop_rc = _worker_unit_drop_orphan_pick_v1(queue, digest, owner)
+            if drop_rc < 0:
+                return -1
+            dropped = dropped + drop_rc
     dropped
 
 pub fn worker_surface_counters_v1() -> text:

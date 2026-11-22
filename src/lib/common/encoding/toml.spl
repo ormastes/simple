@@ -30,29 +30,9 @@ mod std.common.encoding.toml
 # ============================================================================
 
 fn _toml_char_at(s: text, i: i64) -> i64:
-    # Byte value at BYTE offset `i`, matching every caller's `.length()`
-    # (byte-length) loop bound. Was `s[i].ord()` -- plain single-index text
-    # access is CHARACTER-indexed on this engine (confirmed: `"café"[3]`
-    # returns the whole 2-byte "é" as one character, .ord()=233, the
-    # Unicode codepoint) while `.length()` returns bytes, so a loop like
-    # `while i < s.length(): ... _toml_char_at(s, i) ...` silently walked
-    # `i` in the wrong space the moment any multi-byte character appeared
-    # anywhere in the document -- confirmed via toml_parse() returning 0
-    # entries for a 2-entry document where entry 1's value contained "café"
-    # (whole document lost, not just that entry). All 4 callers below only
-    # ever compare this against ASCII thresholds (digit/alpha/ws/key-char),
-    # so a raw byte value is exactly as correct as a codepoint would be for
-    # the ASCII range and additionally correct for the >=0x80 case (every
-    # UTF-8 continuation/lead byte is > 122, so it always classifies as
-    # "not digit/alpha/ws", which is what a byte-oriented scanner should
-    # do -- treat it as ordinary non-special content).
-    # NOTE (perf): `.bytes()` reallocates the whole string's byte array on
-    # every call; this function is on toml.spl's hot per-character scan
-    # path (46 call sites). Fine for typical KB-sized config files: not
-    # re-optimized in this pass (would need threading a pre-computed byte
-    # array through every caller, a larger refactor) -- flagging as a
-    # known follow-up, not silently absorbed.
-    s.bytes()[i]
+    # Byte value at BYTE offset `i`, matching every caller's `.byte_len()`
+    # loop bound without per-call array allocation.
+    s.byte_at(i) as i64
 
 fn _toml_is_digit(c: i64) -> bool:
     c >= 48 and c <= 57
@@ -67,7 +47,7 @@ fn _toml_is_ws(c: i64) -> bool:
     c == 32 or c == 9
 
 fn _toml_skip_ws(s: text, pos: i64) -> i64:
-    val slen = s.length()
+    val slen = s.byte_len()
     var i = pos
     while (i < slen and _toml_is_ws(_toml_char_at(s, i))):
         i = i + 1
@@ -79,7 +59,7 @@ fn _toml_skip_ws(s: text, pos: i64) -> i64:
 
 fn _toml_parse_string(s: text, pos: i64) -> [text]:
     # Returns ["ok", value, new_pos] or ["error", msg, pos]
-    val slen = s.length()
+    val slen = s.byte_len()
     # pos must point to opening quote '"'
     if pos >= slen:
         var r: [text] = []
@@ -94,15 +74,20 @@ fn _toml_parse_string(s: text, pos: i64) -> [text]:
         r.push(pos.to_string())
         return r
     var i = pos + 1
+    var run_start = i
     var result = ""
     var done = false
     while (i < slen and not done):
         val c = _toml_char_at(s, i)
         if c == 34:
-            # closing quote
+            # closing quote: flush clean UTF-8 byte span intact
+            if i > run_start:
+                result = result + s.slice(run_start, i)
             done = true
         elif c == 92:
-            # backslash escape
+            # backslash escape: flush preceding clean UTF-8 byte span first
+            if i > run_start:
+                result = result + s.slice(run_start, i)
             val next_i = i + 1
             if next_i >= slen:
                 var r: [text] = []
@@ -114,25 +99,27 @@ fn _toml_parse_string(s: text, pos: i64) -> [text]:
             if nc == 110:
                 result = result + "\n"
                 i = next_i + 1
+                run_start = i
             elif nc == 116:
                 result = result + "\t"
                 i = next_i + 1
+                run_start = i
             elif nc == 34:
                 result = result + "\""
                 i = next_i + 1
+                run_start = i
             elif nc == 92:
                 result = result + "\\"
                 i = next_i + 1
-            else:
-                # Byte-indexed 1-byte slice, not single-index `s[next_i]` --
-                # `i`/`next_i` are byte offsets (see _toml_char_at above);
-                # single-index text access is character-indexed and would
-                # fetch the wrong character (or go out of bounds) once `i`
-                # is a byte position past the first multi-byte character.
-                result = result + s[next_i:next_i + 1]
+                run_start = i
+            elif nc < 128:
+                result = result + s.slice(next_i, next_i + 1)
                 i = next_i + 1
+                run_start = i
+            else:
+                i = next_i
+                run_start = next_i
         else:
-            result = result + s[i:i + 1]
             i = i + 1
     if not done:
         var r: [text] = []
@@ -152,13 +139,12 @@ fn _toml_parse_string(s: text, pos: i64) -> [text]:
 
 fn _toml_parse_key(s: text, pos: i64) -> [text]:
     # Returns ["ok", key_text, new_pos] or ["error", msg, pos]
-    val slen = s.length()
+    val slen = s.byte_len()
     var i = pos
-    var key = ""
     while (i < slen and _toml_is_key_char(_toml_char_at(s, i))):
-        key = key + s[i:i + 1]
         i = i + 1
-    if key.length() == 0:
+    val key = s.slice(pos, i)
+    if key.byte_len() == 0:
         var r: [text] = []
         r.push("error")
         r.push("empty key")
@@ -176,11 +162,9 @@ fn _toml_parse_key(s: text, pos: i64) -> [text]:
 
 fn _toml_parse_int_text(s: text, pos: i64) -> [text]:
     # Returns ["ok", int_text, new_pos] or ["error", msg, pos]
-    val slen = s.length()
+    val slen = s.byte_len()
     var i = pos
-    var num = ""
     if i < slen and _toml_char_at(s, i) == 45:
-        num = "-"
         i = i + 1
     if i >= slen:
         var r: [text] = []
@@ -210,8 +194,8 @@ fn _toml_parse_int_text(s: text, pos: i64) -> [text]:
             r.push(i.to_string())
             return r
         n = n * 10 + digit
-        num = num + s[i:i + 1]
         i = i + 1
+    val num = s.slice(pos, i)
     var r: [text] = []
     r.push("ok")
     r.push(num)
@@ -225,7 +209,7 @@ fn _toml_parse_int_text(s: text, pos: i64) -> [text]:
 fn _toml_parse_array(s: text, pos: i64) -> [text]:
     # Returns ["ok", item1, item2, ..., itemN, "end", new_pos]
     # or ["error", msg, pos]
-    val slen = s.length()
+    val slen = s.byte_len()
     if pos >= slen or _toml_char_at(s, pos) != 91:
         var r: [text] = []
         r.push("error")
@@ -323,7 +307,7 @@ fn _toml_parse_value(s: text, pos: i64) -> [text]:
     # Returns ["string", value, new_pos] or ["int", value, new_pos]
     # or ["bool", value, new_pos] or ["array", item1..itemN, "end", new_pos]
     # or ["error", msg, pos]
-    val slen = s.length()
+    val slen = s.byte_len()
     val i = _toml_skip_ws(s, pos)
     if i >= slen:
         var r: [text] = []
@@ -418,7 +402,7 @@ fn _toml_pack_array_items(ar: [text]) -> text:
     # items from index 1 up to but not including "end" marker
     var i = 1
     while (i < alen and ar[i] != "end"):
-        if packed.length() > 0:
+        if packed.byte_len() > 0:
             packed = packed + ","
         packed = packed + ar[i]
         i = i + 1
@@ -454,7 +438,7 @@ fn _toml_split_lines(content: text) -> [text]:
 
 fn _toml_strip_comment(s: text) -> text:
     # Remove trailing # comment, but respect quoted strings
-    val slen = s.length()
+    val slen = s.byte_len()
     var i = 0
     var in_str = false
     var result_end = slen
@@ -483,7 +467,7 @@ fn _toml_strip_comment(s: text) -> text:
     s.slice(0, result_end).trim()
 
 fn _toml_value_tail_ok(s: text, pos: i64) -> bool:
-    val slen = s.length()
+    val slen = s.byte_len()
     var i = _toml_skip_ws(s, pos)
     if i >= slen:
         return true
@@ -542,7 +526,7 @@ fn toml_parse(content: text) -> [[text]]:
                 val val_part = line.slice(eq_pos + 1, llen)
                 # Determine full key
                 var full_key = ""
-                if current_section.length() > 0:
+                if current_section.byte_len() > 0:
                     full_key = current_section + "." + key_part
                 else:
                     full_key = key_part
@@ -620,7 +604,7 @@ fn toml_get_array(entries: [[text]], key: text) -> [text]:
         if e[0] == key:
             # packed is comma-separated items
             val packed = e[2]
-            if packed.length() > 0:
+            if packed.byte_len() > 0:
                 result = packed.split(",")
             i = entries.len()
         else:
@@ -641,23 +625,41 @@ fn toml_encode(entries: [[text]]) -> text:
         val tag = e[1]
         val raw = e[2]
         if tag == "string":
-            # Re-encode string: escape special chars
+            # Re-encode string: escape special chars while preserving clean UTF-8 byte spans
             var enc = "\""
             var j = 0
-            val rlen = raw.length()
+            var run_start = 0
+            val rlen = raw.byte_len()
             while j < rlen:
                 val c = _toml_char_at(raw, j)
                 if c == 34:
+                    if j > run_start:
+                        enc = enc + raw.slice(run_start, j)
                     enc = enc + "\\\""
+                    j = j + 1
+                    run_start = j
                 elif c == 92:
+                    if j > run_start:
+                        enc = enc + raw.slice(run_start, j)
                     enc = enc + "\\\\"
+                    j = j + 1
+                    run_start = j
                 elif c == 10:
+                    if j > run_start:
+                        enc = enc + raw.slice(run_start, j)
                     enc = enc + "\\n"
+                    j = j + 1
+                    run_start = j
                 elif c == 9:
+                    if j > run_start:
+                        enc = enc + raw.slice(run_start, j)
                     enc = enc + "\\t"
+                    j = j + 1
+                    run_start = j
                 else:
-                    enc = enc + raw[j:j + 1]
-                j = j + 1
+                    j = j + 1
+            if rlen > run_start:
+                enc = enc + raw.slice(run_start, rlen)
             enc = enc + "\""
             out = out + key + " = " + enc + "\n"
         elif tag == "int":

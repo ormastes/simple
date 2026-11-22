@@ -1,0 +1,145 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# A bare name that resolves to an imported integer constant is a value test
+
+`match method: CMD_OPEN: ... CMD_READ: ... _: ...` names module-level
+`val` constants. When the constant lives in ANOTHER module the arm must still
+lower as an equality test against the constant, never as a fresh catch-all
+binding: a binding swallows every later arm, and the second such arm makes MIR
+reject the match with "B5b: match has multiple wildcard/binding default arms"
+(Stage 2 full-CLI native-build, 5 OS service modules: RES_IRQ_ROUTE,
+ETHERTYPE_IPV4, NET_BIND, PCIMGR_REQUEST_DEVICE, VFS_READ).
+
+Three import shapes reach the constant:
+
+- selective import (`use m.{CMD_OPEN, ...}`) -- eager Const symbol;
+- glob import of a facade that re-exports it (`use facade.*` where the facade
+  says `export use m.{...}`) -- eager, via the re-export chase;
+- no import of the name at all, only a unique owner in the import closure --
+  the LAZY unbound-name route expression position already takes
+  (`try_register_bootstrap_global_symbol`). Pattern position used to skip it,
+  so such a name silently became a binder.
+
+A lowercase bare name stays an ordinary binding.
+"""
+
+# @tag: unit, compiler, mir, hir
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default, SourceFile}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+val icp_consts_src = "val CMD_OPEN: u32 = 1\nval CMD_READ: u32 = 2\nval CMD_CLOSE: u32 = 3\nval CMD_LABEL: text = \"open\"\n\nexport CMD_OPEN, CMD_READ, CMD_CLOSE, CMD_LABEL\n"
+val icp_facade_src = "export use fixture.icp_consts.{CMD_OPEN, CMD_READ, CMD_CLOSE}\n"
+val icp_dispatch_body = "\nfn dispatch(method: u32) -> i64:\n    match method:\n        CMD_OPEN: 10\n        CMD_READ: 20\n        CMD_CLOSE: 30\n        _: 40\n"
+
+fn icp_lower(consumer_src: text) -> (MirModule, [text]):
+    val consumer_path = "fixture/icp_consumer.spl"
+    val consts_path = "fixture/icp_consts.spl"
+    val facade_path = "fixture/icp_facade.spl"
+    val consumer = parse_full_frontend(consumer_src, consumer_path, "fixture.icp_consumer", Logger(level: 0))
+    val consts = parse_full_frontend(icp_consts_src, consts_path, "fixture.icp_consts", Logger(level: 0))
+    val facade = parse_full_frontend(icp_facade_src, facade_path, "fixture.icp_facade", Logger(level: 0))
+    var modules: Dict<text, Module> = {}
+    modules["fixture.icp_consumer"] = consumer
+    modules["fixture.icp_consts"] = consts
+    modules["fixture.icp_facade"] = facade
+    val sources = [
+        SourceFile(path: consumer_path, content: consumer_src, module_name: "fixture.icp_consumer"),
+        SourceFile(path: consts_path, content: icp_consts_src, module_name: "fixture.icp_consts"),
+        SourceFile(path: facade_path, content: icp_facade_src, module_name: "fixture.icp_facade")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hir_lowering = hirlowering_for_module(consumer_path, surfaces)
+    val hir = hir_lowering.lower_module(consumer)
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push(e.message)
+    for e in lowering.errors:
+        messages = messages.push(e.message)
+    (mir, messages)
+
+fn icp_joined(messages: [text]) -> text:
+    var out = ""
+    for m in messages:
+        out = out + m + "\n"
+    out
+
+fn icp_find_function(mir: MirModule, name: text) -> MirFunction?:
+    for function in mir.functions.values():
+        if function.name == name or function.name.ends_with("." + name):
+            return Some(function)
+    nil
+
+fn icp_label_count(mir: MirModule, fn_name: text, needle: text) -> i64:
+    var n = 0
+    if val function = icp_find_function(mir, fn_name):
+        for block in function.blocks:
+            val label = block.label ?? ""
+            if label.contains(needle):
+                n = n + 1
+    n
+
+describe "imported integer constant patterns":
+    it "selective import: every constant arm is a test, not a binder":
+        val (mir, messages) = icp_lower("use fixture.icp_consts.{CMD_OPEN, CMD_READ, CMD_CLOSE}\n" + icp_dispatch_body)
+        val all = icp_joined(messages)
+        print "selective errors: [{all}]"
+        expect(all.contains("B5b")).to_equal(false)
+        expect(all.contains("unresolved name")).to_equal(false)
+        # One refutable arm block per constant arm (lower_guarded_scalar_match).
+        expect(icp_label_count(mir, "dispatch", "match_arm")).to_equal(3)
+
+    it "glob import of a re-exporting facade: constants stay value tests":
+        val (mir, messages) = icp_lower("use fixture.icp_facade.*\n" + icp_dispatch_body)
+        val all = icp_joined(messages)
+        print "facade-glob errors: [{all}]"
+        expect(all.contains("B5b")).to_equal(false)
+        expect(icp_label_count(mir, "dispatch", "match_arm")).to_equal(3)
+
+    it "lazily-resolved constant (unique owner, name not imported) is a value test":
+        # Only CMD_OPEN is imported; CMD_READ / CMD_CLOSE reach the consumer
+        # through the same unbound-name route an expression `CMD_READ` takes.
+        val (mir, messages) = icp_lower("use fixture.icp_consts.{CMD_OPEN}\n" + icp_dispatch_body)
+        val all = icp_joined(messages)
+        print "lazy-owner errors: [{all}]"
+        expect(all.contains("B5b")).to_equal(false)
+        expect(icp_label_count(mir, "dispatch", "match_arm")).to_equal(3)
+
+    it "a lowercase bare name is still a catch-all binding":
+        val body = "\nfn pick(method: u32) -> u32:\n    match method:\n        CMD_OPEN: 10u32\n        other: other\n"
+        val (mir, messages) = icp_lower("use fixture.icp_consts.{CMD_OPEN}\n" + body)
+        val all = icp_joined(messages)
+        print "lowercase-binder errors: [{all}]"
+        expect(all.contains("B5b")).to_equal(false)
+        expect(all.contains("unresolved name: other")).to_equal(false)
+        expect(icp_label_count(mir, "pick", "match_arm")).to_equal(1)
+
+    it "an uppercase name with no owning declaration anywhere stays a binding":
+        val body = "\nfn pick(method: u32) -> i64:\n    match method:\n        CMD_OPEN: 10\n        NO_SUCH_CONSTANT: 20\n"
+        val (mir, messages) = icp_lower("use fixture.icp_consts.{CMD_OPEN}\n" + body)
+        val all = icp_joined(messages)
+        print "unowned-uppercase errors: [{all}]"
+        expect(all.contains("B5b")).to_equal(false)
+        expect(all.contains("unresolved name: NO_SUCH_CONSTANT")).to_equal(false)
+        # Only CMD_OPEN is refutable; NO_SUCH_CONSTANT is the catch-all.
+        expect(icp_label_count(mir, "pick", "match_arm")).to_equal(1)
+
+    it "an imported text constant over an int subject is not an integer value test":
+        val body = "\nfn pick(method: u32) -> i64:\n    match method:\n        CMD_OPEN: 10\n        CMD_LABEL: 20\n"
+        val (mir, messages) = icp_lower("use fixture.icp_consts.{CMD_OPEN, CMD_LABEL}\n" + body)
+        val all = icp_joined(messages)
+        print "text-const errors: [{all}]"
+        expect(all.contains("B5b")).to_equal(false)
+        # HirTypeKind.Int filter: CMD_LABEL binds (catch-all), no compare emitted.
+        expect(icp_label_count(mir, "pick", "match_arm")).to_equal(1)

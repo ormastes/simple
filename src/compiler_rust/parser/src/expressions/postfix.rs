@@ -1327,6 +1327,10 @@ impl<'a> Parser<'a> {
     /// The parsed type args are discarded in the seed; the caller's `expr` (Identifier) is
     /// unchanged so that the postfix loop can continue with `.bar()` or `::bar()`.
     pub(super) fn try_skip_ident_generic_args(&mut self) -> Result<(), ParseError> {
+        self.try_parse_ident_generic_args().map(|_| ())
+    }
+
+    pub(super) fn try_parse_ident_generic_args(&mut self) -> Result<Vec<Type>, ParseError> {
         // Save state for backtracking
         let saved_current = self.current.clone();
         let saved_previous = self.previous.clone();
@@ -1344,6 +1348,17 @@ impl<'a> Parser<'a> {
 
         let mut depth: u32 = 1;
         let mut ok = false;
+        let mut frames: Vec<(Option<String>, Vec<Type>)> = vec![(None, Vec::new())];
+        let mut pending_nested_name: Option<String> = None;
+        let pop_frame = |frames: &mut Vec<(Option<String>, Vec<Type>)>| {
+            if frames.len() > 1 {
+                if let Some((Some(owner), args)) = frames.pop() {
+                    if let Some((_, parent_args)) = frames.last_mut() {
+                        parent_args.push(Type::Generic { name: owner, args });
+                    }
+                }
+            }
+        };
         // A numeric literal in generic-argument position is a CONST GENERIC
         // argument (`Tensor<i64, 2>`). Simple has no const generic parameters,
         // so it is not a type and `parse_type` rejects it. Without this flag the
@@ -1370,16 +1385,24 @@ impl<'a> Parser<'a> {
             // Handle >> as two >
             if self.check(&TokenKind::ShiftRight) {
                 if depth >= 2 {
-                    depth -= 2;
                     self.advance();
-                    if depth == 0 {
-                        // After closing all nested levels, check if continuation follows
-                        ok = self.check(&TokenKind::Dot)
-                            || self.check(&TokenKind::DoubleColon)
-                            || self.check(&TokenKind::LParen)
-                            || (!self.no_brace_postfix && self.check(&TokenKind::LBrace));
+                    let mut closed_outer = false;
+                    for _ in 0..2 {
+                        depth -= 1;
+                        if depth == 0 {
+                            ok = self.check(&TokenKind::Dot)
+                                || self.check(&TokenKind::DoubleColon)
+                                || self.check(&TokenKind::LParen)
+                                || (!self.no_brace_postfix && self.check(&TokenKind::LBrace));
+                            closed_outer = true;
+                            break;
+                        }
+                        pop_frame(&mut frames);
+                    }
+                    if closed_outer {
                         break;
                     }
+                    need_comma = true;
                     continue;
                 } else {
                     // depth == 1: >> closes the outer and yields a stray >
@@ -1421,12 +1444,14 @@ impl<'a> Parser<'a> {
                         || (!self.no_brace_postfix && self.check(&TokenKind::LBrace));
                     break;
                 }
+                pop_frame(&mut frames);
                 need_comma = true;
                 continue;
             }
 
             if self.check(&TokenKind::Lt) {
                 depth += 1;
+                frames.push((pending_nested_name.take(), Vec::new()));
                 self.advance();
                 need_comma = false;
                 continue;
@@ -1477,6 +1502,9 @@ impl<'a> Parser<'a> {
                 if need_comma {
                     break;
                 }
+                if let TokenKind::Identifier { name, .. } = &self.current.kind {
+                    pending_nested_name = Some(name.clone());
+                }
                 self.advance();
                 continue;
             }
@@ -1487,7 +1515,11 @@ impl<'a> Parser<'a> {
 
             // Try to parse a type arg; if that fails this is not a valid generic list
             match self.parse_type() {
-                Ok(_) => {}
+                Ok(ty) => {
+                    if let Some((_, cur_args)) = frames.last_mut() {
+                        cur_args.push(ty);
+                    }
+                }
                 Err(_) => break,
             }
 
@@ -1508,7 +1540,7 @@ impl<'a> Parser<'a> {
             self.pending_tokens = saved_pending;
             self.lexer = saved_lexer;
             self.error_hints.truncate(saved_hints_len);
-            return Ok(());
+            return Ok(Vec::new());
         }
         // The shape is confirmed: a closed `<...>` followed by `(`, `.`, `::` or
         // `{`. If one of the arguments was a numeric literal, this is a const
@@ -1523,8 +1555,7 @@ impl<'a> Parser<'a> {
                 span,
             ));
         }
-        // Otherwise the generic args were consumed and discarded; caller's expr is unchanged.
-        Ok(())
+        Ok(frames.into_iter().next().map(|(_, args)| args).unwrap_or_default())
     }
 }
 
@@ -1588,5 +1619,51 @@ mod tuple_index_split_tests {
         ] {
             assert_eq!(split_tuple_index_pair(bad), None, "must refuse {bad:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod generic_inst_tests {
+    use crate::ast::{Expr, Node, Type};
+    use crate::Parser;
+
+    #[test]
+    fn preserves_explicit_and_nested_generic_inst_arguments() {
+        let mut parser = Parser::new("fn main():\n    val a = foo<i32>(1)\n    val b = Mask<FixedVec<f64>>.from_cmp(x)\n");
+        let module = parser.parse().expect("parse generic inst calls");
+        let Node::Function(main_fn) = &module.items[0] else {
+            panic!("expected main function");
+        };
+        let Node::Let(let_a) = &main_fn.body.statements[0] else {
+            panic!("expected let a");
+        };
+        let Some(Expr::Call { callee, .. }) = &let_a.value else {
+            panic!("expected Call for a, got {:?}", let_a.value);
+        };
+        assert_eq!(
+            callee.as_ref(),
+            &Expr::GenericInst {
+                expr: Box::new(Expr::Identifier("foo".to_string())),
+                type_args: vec![Type::Simple("i32".to_string())],
+            }
+        );
+
+        let Node::Let(let_b) = &main_fn.body.statements[1] else {
+            panic!("expected let b");
+        };
+        let Some(Expr::MethodCall { receiver, method, .. }) = &let_b.value else {
+            panic!("expected MethodCall for b, got {:?}", let_b.value);
+        };
+        assert_eq!(method, "from_cmp");
+        assert_eq!(
+            receiver.as_ref(),
+            &Expr::GenericInst {
+                expr: Box::new(Expr::Identifier("Mask".to_string())),
+                type_args: vec![Type::Generic {
+                    name: "FixedVec".to_string(),
+                    args: vec![Type::Simple("f64".to_string())],
+                }],
+            }
+        );
     }
 }

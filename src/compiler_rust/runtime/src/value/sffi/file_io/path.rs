@@ -74,6 +74,100 @@ pub extern "C" fn rt_path_extension(path: RuntimeValue) -> RuntimeValue {
     managed_path_component(path, true)
 }
 
+/// Normalize a path lexically (no filesystem access): converts `\` to `/`,
+/// collapses duplicate separators, removes `.` segments, folds `..` against
+/// preceding non-`..` segments, and preserves a Windows drive prefix (`C:`).
+/// Mirrors `src/runtime/runtime_core_io_exports.c::rt_path_normalize`.
+pub fn normalize_lexical_path(input: &str) -> String {
+    if input.is_empty() {
+        return ".".to_string();
+    }
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        out.push(bytes[0] as char);
+        out.push(':');
+        i = 2;
+    }
+
+    let mut rooted = false;
+    if i < bytes.len() && (bytes[i] == b'/' || bytes[i] == b'\\') {
+        out.push('/');
+        rooted = true;
+        while i < bytes.len() && (bytes[i] == b'/' || bytes[i] == b'\\') {
+            i += 1;
+        }
+    }
+    let body_start = out.len();
+
+    while i < bytes.len() {
+        let seg_start = i;
+        while i < bytes.len() && bytes[i] != b'/' && bytes[i] != b'\\' {
+            i += 1;
+        }
+        let seg = &input[seg_start..i];
+        while i < bytes.len() && (bytes[i] == b'/' || bytes[i] == b'\\') {
+            i += 1;
+        }
+
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            if out.len() > body_start {
+                let tail = &out[body_start..];
+                let trimmed = tail.strip_suffix('/').unwrap_or(tail);
+                let prev_seg = trimmed.rsplit('/').next().unwrap_or("");
+                if prev_seg != ".." {
+                    let pop_start = out.len() - tail.len()
+                        + trimmed.rfind('/').map_or(0, |pos| pos + 1);
+                    out.truncate(pop_start);
+                    if out.len() > body_start && out.ends_with('/') {
+                        out.pop();
+                    }
+                    continue;
+                }
+            } else if rooted {
+                continue;
+            }
+        }
+        if out.len() > body_start && !out.ends_with('/') {
+            out.push('/');
+        }
+        out.push_str(seg);
+    }
+
+    if out.len() > body_start && out.ends_with('/') {
+        out.pop();
+    }
+    if out.is_empty() {
+        ".".to_string()
+    } else {
+        out
+    }
+}
+
+/// Lexical path normalization SFFI export taking a boxed `RuntimeValue` text
+/// and returning a new `RuntimeValue` text.
+#[no_mangle]
+pub extern "C" fn rt_path_normalize(path: RuntimeValue) -> RuntimeValue {
+    let normalized = with_typed_ptr::<RuntimeString, _>(path, HeapObjectType::String, |ptr| unsafe {
+        let len = usize::try_from((*ptr).len).ok()?;
+        if len > isize::MAX as usize {
+            return None;
+        }
+        let s = std::str::from_utf8((*ptr).as_bytes()).ok()?;
+        Some(normalize_lexical_path(s))
+    })
+    .flatten();
+    match normalized {
+        Some(s) => rt_string_new(s.as_ptr(), s.len() as u64),
+        None => rt_string_new(b"".as_ptr(), 0),
+    }
+}
+
 #[cfg(test)]
 #[path = "path_component_tests.rs"]
 mod path_component_tests;
@@ -738,6 +832,27 @@ mod verbatim_prefix_tests {
             missing.starts_with(existing.trim_end_matches(sep)),
             "shapes disagree: existing={existing} missing={missing}"
         );
+    }
+
+    #[test]
+    fn rt_path_normalize_lexical_cases() {
+        let norm = |s: &str| {
+            let bytes = s.as_bytes();
+            let input = crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64);
+            let out = super::rt_path_normalize(input);
+            let len = unsafe { crate::value::collections::rt_string_len(out) };
+            let ptr = unsafe { crate::value::collections::rt_string_data(out) };
+            let slice = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+            std::str::from_utf8(slice).unwrap().to_string()
+        };
+        assert_eq!(norm(""), ".");
+        assert_eq!(norm("a/./b/../c"), "a/c");
+        assert_eq!(norm("/../../a"), "/a");
+        assert_eq!(norm("../a/b"), "../a/b");
+        assert_eq!(norm(r"\\server\share\x"), "/server/share/x");
+        assert_eq!(norm(r"C:\a\b\.."), "C:/a");
+        assert_eq!(norm(r"C:\"), "C:/");
+        assert_eq!(norm("a/b/"), "a/b");
     }
 }
 

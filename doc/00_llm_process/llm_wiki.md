@@ -47,6 +47,55 @@ Phase 3 requires a full CLI qualified to its exact phase 3 producer, source, and
 runtime. Do not promote partial diagnostics to phase completion or bootstrap
 admission.
 
+## Unified Phase 3 / Phase 4 Cross-Platform Build & Protected Bootstrap
+
+- **Shared cross-platform script:** `scripts/bootstrap/build-phase3-phase4.sh`
+  owns Phase 3 and Phase 4 builds across **Linux, macOS, FreeBSD, Windows
+  (Git-Bash/MSYS2), and SimpleOS**. Running interactively without `--phase=...`
+  (or with `--menu`) opens the **interactive Phased Build Menu**; non-interactive
+  invocations use `--phase=p3a|p3|p4|all`. Windows `scripts/bootstrap/build-phase3-phase4.bat`
+  delegates to the same `.sh` script with 2 configs: **`mingw` DEFAULT**
+  (`--win-config=mingw`, `llvm-mingw` clang + `ld.lld`) and **`msvc` optional**
+  (`--win-config=msvc`, `clang-cl`). Legacy standalone Phase 3/4 scripts
+  (`p3-selfbuild-stage3.shs`, `p3-manual-link-stage3.shs`, `p3-smoke-stage3.shs`,
+  `p3-targeted-stage2-build.shs`, `p3-entry-groups.shs`, etc.) are deprecated —
+  direct invocation pauses with migration instructions for `build-phase3-phase4.sh`
+  (including phased/shard mode) and returns without building.
+- **Default Phase 1 & Phase 2 skip:** In `scripts/bootstrap/bootstrap-from-scratch.sh`,
+  when a working native pure-Simple Phase 3+ host compiler already exists
+  (`bin/release/<triple>/simple` or `bin/simple` without the Rust-seed banner),
+  **default bootstrap skips Phase 1 (Cargo Rust seed) and Phase 2 (`seed -> stage2`)**
+  and delegates directly to `scripts/bootstrap/build-phase3-phase4.sh` (`P3 -> P4`).
+  Pass `--from-seed` / `--cold-bootstrap` (or `--full-bootstrap` in CI) ONLY when
+  intentionally rebuilding Phase 1 & Phase 2 from the Rust seed; pass `--skip-seed`
+  to require an existing Phase 3+ compiler without seed fallback.
+- **Compile mode & `(platform, cpu)` link policy:** `--compile-mode=shard` is
+  **DEFAULT** in `build-phase3-phase4.sh` (`SIMPLE_FILE_WORKERS=0`,
+  `SIMPLE_HIR_SHARDING=1`, `SIMPLE_MIR_SHARDING=1`); `--compile-mode=file`
+  (`SIMPLE_FILE_WORKERS=1`) is optional. `scripts/bootstrap/stage3-native-host-link-policy.{sdn,shs}`
+  enforces mandatory **`native_host_match`** (`target (platform, cpu) == host (os, arch)`),
+  minimizing `simple` to link **only** thin entry + `(platform, cpu)` static
+  primitive archive (`libsimple-primitive-<platform>-<cpu>.a`) + dead-stripped
+  primitive C core statically, while linking
+  `lib/libsimple-{std,compiler-common,compiler,app}.dylib` (`.so`) dynamically.
+  **Phase 3 builds ONLY native host targets** — non-native backends (other CPUs,
+  VHDL, GPU/CUDA/Vulkan, Wasm) are NOT built during Phase 3, **but if a `.dylib`
+  already exists on disk, `simple` can load and use it** (`--backend-plugin <existing.dylib>`).
+- **Phase 4 dual-mode build:** Phase 4 builds **both** the optimized production
+  binary (`simple`: `--profile=prod --release --strip`) AND the XRay-instrumented
+  debug binary (`simple-debug`: `--profile=dev --debug --no-strip --xray`), plus
+  Stage 5 essentials (`simple_test_runner`, `simple_build_runner`,
+  `simple_mcp_server`, `simple_lsp_mcp_server`).
+- **Protected script guard & zero-compile `--path-check`:** Every core bootstrap
+  script carries a top-of-file
+  `PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER`
+  banner. Run `sh scripts/check/fast-verify-bootstrap-scripts.shs` for a sub-second
+  check of sealed `.sdn` SHA-256 digests, protected banners, syntax, and
+  `check-bootstrap-path-matrix-all.shs` across Unix/Windows/SimpleOS using extensible
+  `PATH_ACTION|...|status=ALIVE` superset records without running compilation.
+- **Primary guides:** [shared Phase 3/4 build](../07_guide/tooling/phase3_phase4_shared_build.md)
+  and [bootstrap options](../07_guide/tooling/bootstrap_options.md).
+
 ## Bootstrap failure collection
 
 ### Release compiler selection and platform qualification
@@ -115,7 +164,9 @@ test PASS. Restore normal gates before promotion. Follow the
 cache preservation, and bug evidence. This is agent workflow guidance; it does
 not change runner behavior.
 
-Maintained project routes: [build collection](../07_guide/tooling/bootstrap_failure_collection.md),
+Maintained project routes: [shared Phase 3/4 build](../07_guide/tooling/phase3_phase4_shared_build.md),
+[bootstrap options](../07_guide/tooling/bootstrap_options.md),
+[build collection](../07_guide/tooling/bootstrap_failure_collection.md),
 [parallel handoff](../07_guide/app/llm/bootstrap_parallel_handoff.md), and
 [LLVM debugging](../07_guide/app/llm/llm_bootstrap_llvm_debugging.md).
 Agent entrypoints: [debug](../../.agents/skills/debug/SKILL.md),

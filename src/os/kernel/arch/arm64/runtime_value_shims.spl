@@ -1,0 +1,172 @@
+# ARM64 kernel runtime value/array shims (pure Simple).
+#
+# Codegen-called runtime entry points the arm64 fs-exec kernel closure
+# references but the arm64 boot C runtime does not define. Layouts are those
+# of examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c:
+#   tags: INT=0 HEAP=1 FLOAT=2 SPECIAL=3; NIL=3 TRUE=11 FALSE=19; int = v << 3
+#   HeapHeader {u32 type; u32 size}; HEAP_STRING=1, HEAP_ARRAY=2
+#   RuntimeArray {HeapHeader 8; u32 len @8; u32 cap @12; items[] @16}
+# Items are INLINE (no items pointer, unlike riscv64), and arm64
+# rt_array_get/set take a TAGGED index, so items are read directly here.
+# TAG_FLOAT is MASKED (IEEE bits in place, low 3 replaced by the tag), as the
+# LLVM codegen emits it (compiler_rust codegen/llvm/functions.rs box_float:
+# ((bits >> 3) << 3) | 2), value_runtime_owner.c any_box_f64/any_as_f64, and
+# baremetal_stubs.c f64_from_bits/f64_to_bits/rt_value_float all agree on.
+# Bodies stay integer-only so they emit no further rt_* references.
+# riscv64 twin: src/os/kernel/arch/riscv64/runtime_shims.spl.
+
+extern fn rt_mmio_read_u8(addr: u64) -> u64
+extern fn rt_mmio_read_u32(addr: u64) -> u64
+extern fn rt_mmio_read_u64(addr: u64) -> u64
+extern fn rt_mmio_write_u64(addr: u64, value: u64)
+extern fn rt_value_unbox_int(value: i64) -> i64
+extern fn rt_string_to_int(value: i64) -> i64
+
+val A64_TAG_MASK: i64 = 7
+val A64_TAG_INT: i64 = 0
+val A64_TAG_HEAP: i64 = 1
+val A64_TAG_FLOAT: i64 = 2
+val A64_TAG_SPECIAL: i64 = 3
+val A64_TRUE_VALUE: i64 = 11
+val A64_HEAP_STRING: u64 = 1
+val A64_HEAP_ARRAY: u64 = 2
+val A64_ARRAY_ITEMS: u64 = 16
+
+fn _a64_heap_ptr(v: i64, heap_type: u64) -> u64:
+    if (v & A64_TAG_MASK) != A64_TAG_HEAP:
+        return 0
+    val p = (v - A64_TAG_HEAP) as u64
+    if p < 4096:
+        return 0
+    if rt_mmio_read_u32(p) != heap_type:
+        return 0
+    p
+
+fn _a64_array_len(p: u64) -> i64:
+    rt_mmio_read_u32(p + 8) as i64
+
+fn _a64_item_at(p: u64, i: i64) -> i64:
+    rt_mmio_read_u64(p + A64_ARRAY_ITEMS + (i as u64) * 8) as i64
+
+fn _a64_raw_or_encoded_int(v: i64) -> i64:
+    if (v & A64_TAG_MASK) == A64_TAG_INT:
+        return v >> 3
+    v
+
+# IEEE-754 binary64 -> i64 truncation toward zero, integer-only (no float
+# ops, so no rt_* helper is pulled in). Out-of-range saturates.
+fn _a64_f64_bits_to_int(bits: i64) -> i64:
+    val exp = (bits >> 52) & 0x7ff
+    if exp < 1023:
+        return 0
+    val neg = bits < 0
+    if exp >= 1086:
+        if neg:
+            return -9223372036854775807 - 1
+        return 9223372036854775807
+    val mant = (bits & 0xfffffffffffff) | 0x10000000000000
+    val shift = exp - 1075
+    var mag: i64 = 0
+    if shift >= 0:
+        mag = mant << shift
+    else:
+        mag = mant >> (0 - shift)
+    if neg:
+        return 0 - mag
+    mag
+
+# ---------------------------------------------------------------------------
+# Value conversions (riscv64 baremetal_runtime_core.inc.c rt_value_truthy /
+# rt_any_to_int, baremetal_stubs.c rt_to_int_dynamic).
+# ---------------------------------------------------------------------------
+
+@export("C")
+fn rt_value_truthy(v: i64) -> i8:
+    val tag = v & A64_TAG_MASK
+    if tag == A64_TAG_SPECIAL:
+        if v == A64_TRUE_VALUE:
+            return 1
+        return 0
+    if tag == A64_TAG_INT:
+        if (v >> 3) != 0:
+            return 1
+        return 0
+    if tag == A64_TAG_FLOAT:
+        # +0.0 and -0.0 are falsy: all bits except sign (and the tag) clear.
+        if ((v & (0 - 8)) << 1) != 0:
+            return 1
+        return 0
+    if (v & (0 - 8)) != 0:
+        return 1
+    0
+
+@export("C")
+fn rt_any_to_int(v: i64) -> i64:
+    if _a64_heap_ptr(v, A64_HEAP_STRING) != 0:
+        return rt_string_to_int(v)
+    if (v & A64_TAG_MASK) == A64_TAG_FLOAT:
+        return _a64_f64_bits_to_int(v & (0 - 8))
+    rt_value_unbox_int(v)
+
+@export("C")
+fn rt_to_int_dynamic(v: i64) -> i64:
+    if _a64_heap_ptr(v, A64_HEAP_STRING) != 0:
+        return rt_string_to_int(v)
+    v
+
+# ---------------------------------------------------------------------------
+# Array helpers over the inline-items RuntimeArray.
+# ---------------------------------------------------------------------------
+
+@export("C")
+fn rt_array_data_ptr(array: i64) -> i64:
+    val p = _a64_heap_ptr(array, A64_HEAP_ARRAY)
+    if p == 0:
+        return 0
+    (p + A64_ARRAY_ITEMS) as i64
+
+@export("C")
+fn rt_array_is_byte_packed(array: i64) -> i64:
+    # arm64 RuntimeArray has no byte-packed representation.
+    0
+
+@export("C")
+fn rt_array_fill_span(array: i64, offset: i64, count: i64, value: i64) -> i64:
+    val p = _a64_heap_ptr(array, A64_HEAP_ARRAY)
+    if p == 0 or offset < 0 or count < 0:
+        return -1
+    if count == 0:
+        return 0
+    if offset + count > (rt_mmio_read_u32(p + 8) as i64):
+        return -1
+    var i: i64 = 0
+    while i < count:
+        rt_mmio_write_u64(p + A64_ARRAY_ITEMS + ((offset + i) as u64) * 8, value as u64)
+        i = i + 1
+    0
+
+@export("C")
+fn rt_typed_bytes_u8_data_at(data: i64, index: i64) -> i64:
+    # Bit 0 is the MIR preheader layout tag: set = 8-byte tagged slots,
+    # clear = byte-packed.
+    val base = (data & (0 - 2)) as u64
+    if base == 0 or index < 0:
+        return 0
+    if (data & 1) != 0:
+        return _a64_raw_or_encoded_int(rt_mmio_read_u64(base + (index as u64) * 8) as i64) & 0xff
+    rt_mmio_read_u8(base + (index as u64)) as i64
+
+@export("C")
+fn rt_numeric_contains_u64(array: i64, value: i64) -> i8:
+    # Needle is raw (codegen contract); items are mixed raw / ENCODE_INT.
+    val p = _a64_heap_ptr(array, A64_HEAP_ARRAY)
+    if p == 0:
+        return 0
+    val n = _a64_array_len(p)
+    var i: i64 = 0
+    while i < n:
+        val item = _a64_item_at(p, i)
+        if item == value or ((item & 7) == 0 and (item >> 3) == value):
+            return 1
+        i = i + 1
+    0

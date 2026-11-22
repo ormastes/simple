@@ -1,55 +1,24 @@
 """
-# `resource` invariant 3 -- borrow pinning across foreign calls (RED, filed)
+# `resource` invariant 3 -- borrow pinning across foreign calls
 
 **WP:** WP-G (`doc/03_plan/language/resource/resource_parallel_agent_plan_2026-08-06.md`).
 **Architecture:** `doc/04_architecture/language/resource/resource_declaration_architecture_2026-08-06.md`
 §8, invariant 3: "a borrowed resource stays live through the entire foreign
 call, including blocking calls."
 
-**Left RED, per this session's own standing practice** ("a correct spec that
-fails is a legitimate artifact ... leave it RED, file a bug record ... never
-weaken the assertion") -- see
-`doc/08_tracking/bug/resource_borrow_pinning_not_enforced_2026-08-07.md` for
-the full writeup. Summary of the investigation (not a half-built attempt):
-
-- `BorrowGraph.record_move` (`borrow_check/borrow_graph.spl`) checks ONLY
-  `self.moved_now` before recording a move -- it never calls
-  `borrows_of`/`has_conflicting_borrow` (the functions that DO exist and ARE
-  used by `record_borrow` itself, at `borrow_graph.spl:501`, to reject a NEW
-  borrow of an already-moved place). The reverse direction -- rejecting a
-  MOVE/DROP of a place that has an outstanding, still-live BORROW -- has no
-  code path at all. A resource could be `.close()`d (Drop) or reassigned
-  WHILE a `Ref` borrow of it is outstanding and nothing in the checker
-  notices.
-- There is no MIR-level or checker-level concept of "this call is a foreign/
-  blocking call whose duration a borrow must span" -- grepping
-  `borrow.pin`/`pinning`/`BorrowPin`/`foreign_call_borrow` across
-  `55.borrow/` and `50.mir/` returns zero hits. `Call`/`CallTerminator`
-  carry no "this argument must outlive the call" marker; nothing
-  distinguishes a foreign/SFFI call from an ordinary one at MIR level
-  either.
-- Building this for real needs: (a) a call-scoped borrow-liveness region
-  (the callee's whole execution, not just the call instruction's own
-  program point) and (b) a way to mark which calls are foreign/blocking
-  (SFFI calls specifically, not ordinary Simple function calls) so the rule
-  only fires where the architecture doc actually requires it. Neither
-  exists. This is real lifetime/region infrastructure, not a narrow
-  `analyze_instruction` arm -- out of scope for a single WP-G spec per this
-  lane's own stated boundary ("do NOT attempt a half-built version").
-
-This spec demonstrates the CONCRETE gap with the same hand-built-MIR
-technique as `resource_drop_exactly_once_spec.spl`: a `Ref` borrow of a
-place immediately followed by a `Drop` of that SAME place, with no
-intervening use that would otherwise reveal the conflict. The desired
-(invariant-3-respecting) result is a diagnostic; the measured, CURRENT
-result is none -- this `it` block is expected to FAIL until the borrow-
-liveness-vs-move-or-drop check described above is implemented.
+Verifies:
+- `BorrowChecker` rejects `Drop(l0)` when borrowed reference `l1` flows to a `MirCallOrigin.Foreign` call.
+- `BorrowGraph.record_move` rejects moving/dropping a place that has an active borrow at the same point.
+- NLL permits `Ref(l0)` followed by `Drop(l0)` when the borrow has no remaining use.
 """
 
 use std.spec
 use compiler.borrow.borrow_check.*
+use compiler.borrow.borrow_check.borrow_graph.{BorrowGraph, BorrowKind, Place}
 use compiler.borrow.borrow_check.mod.{BorrowChecker}
 use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_support.{MirCallOrigin, MirSignature}
+use compiler.mir.mir_types.{MirTypeKind, MirConstValue}
 
 fn mk_inst(kind: MirInstKind) -> MirInst:
     MirInst(kind: kind, span: nil)
@@ -69,8 +38,45 @@ fn mk_body(insts: [MirInst]) -> MirBody:
         return_ty: MirType.i64()
     )
 
-describe "invariant 3 (RED -- infrastructure gap, see the bug doc): a resource dropped WHILE a borrow of it is outstanding should be a compile error":
-    it "reports a borrow diagnostic for Ref(l0) [borrow, standing in for a foreign-call argument] immediately followed by Drop(l0) [the resource released before the call it was pinned to could plausibly complete]":
+fn mk_foreign_callee() -> MirOperand:
+    val signature = MirSignature(params: [MirType.i64()], return_type: MirType.unit(), is_variadic: false, params_known: true)
+    MirOperand(
+        kind: MirOperandKind.Const(MirConstValue.Str("foreign_sink"), MirType(kind: MirTypeKind.FuncPtr(signature))),
+        call_origin: MirCallOrigin.Foreign
+    )
+
+fn checker_messages(checker: BorrowChecker) -> text:
+    var msgs: [text] = []
+    for err in checker.errors:
+        msgs = msgs.push(err.message)
+    msgs.join("\n")
+
+describe "invariant 3 (resource borrow pinning): dropping a resource while a foreign call or live loan holds a borrow is rejected":
+    it "rejects Drop(l0) when a borrowed reference l1 is later passed to a foreign call":
+        val l0 = LocalId(id: 0)
+        val l1 = LocalId(id: 1)
+        val place = MirPlace(local: l0, projection: [])
+        val insts = [
+            mk_inst(MirInstKind.Ref(l1, MirBorrowKind.Shared, place)),
+            mk_inst(MirInstKind.Drop(l0)),
+            mk_inst(MirInstKind.Call(nil, mk_foreign_callee(), [MirOperand.copy(l1)]))
+        ]
+        var checker = BorrowChecker.create()
+        checker.check_function(mk_body(insts))
+        val combined = checker_messages(checker)
+        expect(checker.errors.len()).to_be_greater_than(0)
+        expect(combined).to_contain("because it is borrowed")
+        expect(combined).to_contain("short borrow escapes")
+
+    it "rejects BorrowGraph.record_move when an active borrow exists at the point":
+        var graph = BorrowGraph.create()
+        val place = Place.local(0)
+        val _b = graph.record_borrow(1, place, BorrowKind.Shared)
+        graph.record_move(1, place)
+        expect(graph.errors.len()).to_be_greater_than(0)
+        expect(graph.errors[0].message).to_contain("Cannot consume borrowed value")
+
+    it "permits Ref(l0) followed by Drop(l0) when NLL proves the borrow is never used":
         val l0 = LocalId(id: 0)
         val place = MirPlace(local: l0, projection: [])
         val insts = [
@@ -79,9 +85,4 @@ describe "invariant 3 (RED -- infrastructure gap, see the bug doc): a resource d
         ]
         var checker = BorrowChecker.create()
         checker.check_function(mk_body(insts))
-        # Desired (invariant 3): dropping a place with a live outstanding
-        # borrow is a compile error. Currently record_move (which the new
-        # WP-G Drop arm reuses) checks only moved_now, never the borrow set
-        # -- so this is 0 today. Left as an honest RED assertion rather than
-        # weakened to match current behaviour.
-        assert_true(checker.errors.len() > 0)
+        expect(checker.errors.len()).to_equal(0)

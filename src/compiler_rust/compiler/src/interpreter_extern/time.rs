@@ -452,6 +452,19 @@ pub fn rt_sleep_ms(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
+/// Sleep for the given number of nanoseconds (`rt_sleep_nanos(nanos)`).
+pub fn rt_sleep_nanos(args: &[Value]) -> Result<Value, CompileError> {
+    use std::time::Duration;
+    let nanos = match args.first() {
+        Some(Value::Int(ns)) => *ns,
+        _ => return Err(CompileError::semantic("rt_sleep_nanos requires i64 argument")),
+    };
+    if nanos > 0 {
+        std::thread::sleep(Duration::from_nanos(nanos as u64));
+    }
+    Ok(Value::Nil)
+}
+
 // ============================================================================
 // Profiler + Perf State (Lane L observability — interpreter mode, real impl)
 // ============================================================================

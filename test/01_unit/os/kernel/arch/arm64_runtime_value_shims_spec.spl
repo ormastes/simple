@@ -1,0 +1,37 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# Repro (arm64 fs-exec kernel link): rt_any_to_int, rt_to_int_dynamic,
+# rt_value_truthy, rt_array_data_ptr, rt_array_fill_span,
+# rt_array_is_byte_packed, rt_typed_bytes_u8_data_at and
+# rt_numeric_contains_u64 had no definition for the arm64 kernel.
+# Source-contract spec: there is no arm64 kernel unit harness; behaviour is
+# proven by the link gate scripts/check/check-simpleos-arm64-user-elf-link.shs.
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read_text}
+
+val SHIMS = "src/os/kernel/arch/arm64/runtime_value_shims.spl"
+val ENTRY = "examples/09_embedded/simple_os/arch/arm64/fs_exec_entry.spl"
+
+describe "arm64 kernel runtime value shims":
+    it "exports the value conversion helpers":
+        val src = file_read_text(SHIMS)
+        expect(src.contains("@export(\"C\")\nfn rt_value_truthy(v: i64) -> i8:")).to_equal(true)
+        expect(src.contains("@export(\"C\")\nfn rt_any_to_int(v: i64) -> i64:")).to_equal(true)
+        expect(src.contains("@export(\"C\")\nfn rt_to_int_dynamic(v: i64) -> i64:")).to_equal(true)
+
+    it "exports the array helpers over the inline-items RuntimeArray":
+        step("arm64 RuntimeArray: {HeapHeader 8; u32 len @8; u32 cap @12; items[] @16}")
+        val src = file_read_text(SHIMS)
+        expect(src.contains("@export(\"C\")\nfn rt_array_data_ptr(array: i64) -> i64:")).to_equal(true)
+        expect(src.contains("@export(\"C\")\nfn rt_array_fill_span(array: i64, offset: i64, count: i64, value: i64) -> i64:")).to_equal(true)
+        expect(src.contains("@export(\"C\")\nfn rt_array_is_byte_packed(array: i64) -> i64:")).to_equal(true)
+        expect(src.contains("@export(\"C\")\nfn rt_typed_bytes_u8_data_at(data: i64, index: i64) -> i64:")).to_equal(true)
+        expect(src.contains("@export(\"C\")\nfn rt_numeric_contains_u64(array: i64, value: i64) -> i8:")).to_equal(true)
+        expect(src.contains("val A64_ARRAY_ITEMS: u64 = 16")).to_equal(true)
+        expect(src.contains("rt_mmio_read_u32(p + 8)")).to_equal(true)
+
+    it "keeps the shim module in the fs-exec closure":
+        val src = file_read_text(ENTRY)
+        expect(src.contains("use os.kernel.arch.arm64.runtime_value_shims.{}")).to_equal(true)

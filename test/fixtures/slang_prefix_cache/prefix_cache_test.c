@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdint.h>
+#include <string.h>
 int64_t slang_ggml_str_reset(void);
 int64_t slang_ggml_str_push(int64_t);
 int64_t slang_ggml_backend_init(void);
@@ -29,6 +30,19 @@ int64_t slang_ggml_prefix_resident_bytes(void);
 int64_t slang_ggml_prefix_rejected_bytes(void);
 int64_t slang_ggml_prefix_restore_failures(void);
 int64_t slang_ggml_capabilities(void);
+int64_t slang_ggml_str_push_bytes(const uint8_t *, int64_t);
+int64_t slang_ggml_request_str_push_bytes(int64_t, const uint8_t *, int64_t);
+int64_t slang_ggml_request_out_into(int64_t, uint8_t *, int64_t, int64_t *);
+int64_t slang_ggml_model_open(const uint8_t *, int64_t, int64_t);
+int64_t slang_ggml_model_close(int64_t);
+int64_t slang_ggml_request_create_for(int64_t, int64_t);
+int64_t slang_ggml_request_embed_configure(int64_t, int64_t);
+int64_t slang_ggml_request_embed_eval(int64_t);
+int64_t slang_ggml_request_embeddings_into(int64_t, uint8_t *, int64_t, int64_t *);
+int64_t slang_ggml_request_rerank_tokenize(int64_t, int64_t);
+int64_t slang_ggml_request_tokens_set(int64_t, const uint8_t *, int64_t);
+int64_t slang_ggml_request_sampler_configure(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+int64_t slang_ggml_request_is_eog(int64_t, int64_t);
 int64_t slang_ggml_free(void);
 int64_t slang_ggml_request_configure(int64_t);
 int64_t slang_ggml_context_profile_configure(int64_t, int64_t);
@@ -87,7 +101,7 @@ int main(void) {
     assert(slang_ggml_context_profile_configure(1, -1) < 0);
     assert(slang_ggml_context_profile_configure(1, 2) == 0);
     slang_ggml_backend_init(); text("model"); assert(slang_ggml_model_load(0) == 0);
-    assert(slang_ggml_ctx_create(64) == 0); assert(slang_ggml_capabilities() == 31);
+    assert(slang_ggml_ctx_create(64) == 0); assert(slang_ggml_capabilities() == (31 | 256 | 512));
     assert(slang_ggml_ctx_create(64) < 0);
     assert(slang_ggml_model_load(0) < 0);
     assert(slang_ggml_n_ctx() == 64);
@@ -324,6 +338,73 @@ int main(void) {
     assert(slang_ggml_request_close(no_gpu_hit) == 0);
     mock_llama_set_n_ubatch(1);
     mock_llama_set_gpu_offload(1);
+    assert(slang_ggml_free() == 0);
+
+    /* Model handles, bulk I/O, embeddings, token input, sampler config. */
+    text("chat"); assert(slang_ggml_model_load(0) == 0);
+    const uint8_t path[] = "embed.gguf";
+    int64_t h = slang_ggml_model_open(path, 10, 0);
+    assert(h > 0);
+    assert(slang_ggml_model_open(path, 10, 0) == h);   /* same path, same handle */
+    int64_t er = slang_ggml_request_create_for(h, 64);
+    int64_t cr = slang_ggml_request_create_for(0, 64);
+    assert(er > 0 && cr > 0);
+    /* Two owners hold h: the first close only gives back its hold, so the other
+     * owner's open request (er, used below) keeps working; the last owner's close is refused
+     * while that request is open. */
+    assert(slang_ggml_model_close(h) == 0);
+    assert(slang_ggml_model_close(h) == -9);            /* last owner: busy while a request is open */
+    const uint8_t hello[] = "hello";
+    assert(slang_ggml_request_str_push_bytes(er, hello, 5) == 5);
+    assert(slang_ggml_request_str_push_bytes(er, hello, 0) == 5);
+    assert(slang_ggml_request_embed_configure(er, 1) == 1);
+    assert(slang_ggml_request_tokenize(er, 1) == 6);
+    assert(slang_ggml_request_embed_eval(er) == 6);
+    int64_t need = -1;
+    assert(slang_ggml_request_embeddings_into(er, 0, 0, &need) == -4 && need == 16);
+    uint8_t vec[16];
+    assert(slang_ggml_request_embeddings_into(er, vec, 16, &need) == 0 && need == 16);
+    float lane0; memcpy(&lane0, vec, 4); assert(lane0 == 1.0f);
+    assert(slang_ggml_request_rerank_tokenize(er, 2) == 8); /* bos h e eos l l o eos */
+    const uint8_t codes[8] = {5, 0, 0, 0, 7, 0, 0, 0};
+    assert(slang_ggml_request_tokens_set(er, codes, 8) == 2);
+    assert(slang_ggml_request_token_at(er, 1) == 7);
+    const uint8_t bad[4] = {99, 0, 0, 0};
+    assert(slang_ggml_request_tokens_set(er, bad, 4) == -8);
+    assert(slang_ggml_request_sampler_configure(cr, 800, 40, 950, 1100, 7) == 0);
+    assert(slang_ggml_request_sampler_configure(cr, 0, 0, 1000, 1000, -1) == 0);
+    assert(slang_ggml_request_piece(cr, 65) == 1);
+    uint8_t piece[4]; int64_t got = 0;
+    assert(slang_ggml_request_out_into(cr, piece, 4, &got) == 0 && got == 1 && piece[0] == 65);
+    assert(slang_ggml_request_close(er) == 0);
+    assert(slang_ggml_request_close(cr) == 0);
+    assert(slang_ggml_model_close(h) == 0);
+    assert(slang_ggml_model_close(h) == -8);
+    assert(slang_ggml_free() == 0);
+
+    /* No default model: EOG must come from the handle request's own vocab. */
+    int64_t h2 = slang_ggml_model_open(path, 10, 0);
+    int64_t r2 = slang_ggml_request_create_for(h2, 64);
+    assert(h2 > 0 && r2 > 0);
+    assert(slang_ggml_is_eog(2) == -1);
+    assert(slang_ggml_request_is_eog(r2, 2) == 1);
+    assert(slang_ggml_request_is_eog(r2, 5) == 0);
+    assert(slang_ggml_request_close(r2) == 0);
+    assert(slang_ggml_model_close(h2) == 0);
+
+    /* Two models with different EOG ids: a request on model B stops at B's
+     * EOG (7), never at the default model's (2). Fails on the old shim, whose
+     * only EOG check read the default model's vocab. */
+    text("chat"); assert(slang_ggml_model_load(0) == 0);
+    const uint8_t eog7[] = "eog7.gguf";
+    int64_t hb = slang_ggml_model_open(eog7, 9, 0);
+    int64_t rb = slang_ggml_request_create_for(hb, 64);
+    assert(hb > 0 && rb > 0);
+    assert(slang_ggml_is_eog(2) == 1 && slang_ggml_is_eog(7) == 0);
+    assert(slang_ggml_request_is_eog(rb, 7) == 1);
+    assert(slang_ggml_request_is_eog(rb, 2) == 0);
+    assert(slang_ggml_request_close(rb) == 0);
+    assert(slang_ggml_model_close(hb) == 0);
     assert(slang_ggml_free() == 0);
     return 0;
 }

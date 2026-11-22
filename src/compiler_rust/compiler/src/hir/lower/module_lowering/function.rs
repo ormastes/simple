@@ -10,6 +10,118 @@ use crate::hir::types::{
     LocalVar, PointerKind, TypeId,
 };
 
+pub(crate) enum AstFnAbiOverride {
+    Export(String),
+    ExternRuntime(String),
+}
+
+fn extract_string_lit_expr(expr: &ast::Expr) -> Option<String> {
+    match expr {
+        ast::Expr::String(s) => Some(s.clone()),
+        ast::Expr::FString { parts, .. } => {
+            let mut out = String::new();
+            for p in parts {
+                match p {
+                    ast::FStringPart::Literal(lit) => out.push_str(lit),
+                    _ => return None,
+                }
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn ast_extern_runtime_target(f: &ast::FunctionDef) -> Option<String> {
+    for dec in &f.decorators {
+        if let ast::Expr::Identifier(name) = &dec.name {
+            if name == "extern" {
+                if let Some(args) = &dec.args {
+                    if args.len() >= 2 {
+                        let kind = extract_string_lit_expr(&args[0].value);
+                        if matches!(kind.as_deref(), Some("runtime" | "c" | "C")) {
+                            if let Some(target) = extract_string_lit_expr(&args[1].value) {
+                                return Some(target);
+                            }
+                        }
+                    } else if let Some(first) = args.first() {
+                        if first.name.as_deref() == Some("name") {
+                            if let Some(target) = extract_string_lit_expr(&first.value) {
+                                return Some(target);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn ast_function_abi_override(f: &ast::FunctionDef) -> Option<AstFnAbiOverride> {
+    if let Some(target) = ast_extern_runtime_target(f) {
+        return Some(AstFnAbiOverride::ExternRuntime(target));
+    }
+    for dec in &f.decorators {
+        if let ast::Expr::Identifier(name) = &dec.name {
+            if name == "export" {
+                if let Some(args) = &dec.args {
+                    for arg in args {
+                        if arg.name.as_deref() == Some("name") {
+                            if let Some(custom) = extract_string_lit_expr(&arg.value) {
+                                return Some(AstFnAbiOverride::Export(custom));
+                            }
+                        }
+                    }
+                }
+                return Some(AstFnAbiOverride::Export(f.name.clone()));
+            }
+            if name == "global" {
+                return Some(AstFnAbiOverride::Export(f.name.clone()));
+            }
+        }
+    }
+    for attr in &f.attributes {
+        if attr.name == "export" {
+            if let Some(named) = &attr.named_args {
+                for (k, v) in named {
+                    if k == "name" {
+                        if let Some(custom) = extract_string_lit_expr(v) {
+                            return Some(AstFnAbiOverride::Export(custom));
+                        }
+                    }
+                }
+            }
+            return Some(AstFnAbiOverride::Export(f.name.clone()));
+        }
+        if attr.name == "global" {
+            return Some(AstFnAbiOverride::Export(f.name.clone()));
+        }
+    }
+    None
+}
+
+fn collect_fn_abi_attributes(f: &ast::FunctionDef, attributes: &mut Vec<String>) {
+    if let Some(override_kind) = ast_function_abi_override(f) {
+        match override_kind {
+            AstFnAbiOverride::Export(sym) => {
+                if sym != f.name {
+                    let entry = format!("export_c_name={sym}");
+                    if !attributes.contains(&entry) {
+                        attributes.push(entry);
+                    }
+                }
+            }
+            AstFnAbiOverride::ExternRuntime(sym) => {
+                let entry = format!("extern_runtime_name={sym}");
+                if !attributes.contains(&entry) {
+                    attributes.push(entry);
+                }
+            }
+        }
+    }
+}
+
 /// Whether an unannotated function body produces a value at its boundary.
 ///
 /// Missing return annotations are gradual (`Any`), not `()`.  We still keep
@@ -610,6 +722,7 @@ fn expr_uses_self(expr: &ast::Expr) -> bool {
             .iter()
             .any(|(key, value)| expr_uses_self(key) || expr_uses_self(value)),
         ast::Expr::ArrayRepeat { value, count } => expr_uses_self(value) || expr_uses_self(count),
+        ast::Expr::GenericInst { expr, .. } => expr_uses_self(expr),
         ast::Expr::StructInit { fields, spread, .. } => {
             fields.iter().any(|(_, value)| expr_uses_self(value))
                 || spread.as_ref().map(|expr| expr_uses_self(expr)).unwrap_or(false)
@@ -1078,6 +1191,15 @@ impl Lowerer {
         let fn_flatten_owner = Self::flatten_owner_of(f.attributes.iter().map(|a| a.name.as_str()));
         let previous_function_owner = std::mem::replace(&mut self.current_function_owner, fn_flatten_owner.clone());
         let previous_type_scope = self.enter_flatten_struct_scope();
+        let mut active_generics = self.active_impl_generic_params.clone();
+        for gp in &f.generic_params {
+            if !active_generics.contains(gp) {
+                active_generics.push(gp.clone());
+            }
+        }
+        let generic_bounds = Self::extract_generic_bounds(&f.where_clause);
+        let previous_fn_generics = std::mem::replace(&mut self.active_fn_generic_params, active_generics.clone());
+        let previous_fn_bounds = std::mem::replace(&mut self.active_fn_generic_bounds, generic_bounds.clone());
         self.current_function_name = Some(func_name.clone());
         // Attribution anchor for the `lenient_types` unresolved-name fallback:
         // `Expr::Identifier` has no span, so the enclosing function's
@@ -1242,6 +1364,8 @@ impl Lowerer {
                 if std::env::var_os("SIMPLE_SEED_RETURN_TYPE_DEBUG").is_some() {
                     eprintln!("lowering error in function {}: {error:?}", func_name);
                 }
+                self.active_fn_generic_params = previous_fn_generics;
+                self.active_fn_generic_bounds = previous_fn_bounds;
                 return Err(error);
             }
         };
@@ -1387,6 +1511,7 @@ impl Lowerer {
                 }
             }
         }
+        collect_fn_abi_attributes(f, &mut attributes);
 
         // Extract layout hint from #[layout(...)] attribute
         let layout_hint = self.extract_layout_hint(&f.attributes);
@@ -1422,6 +1547,8 @@ impl Lowerer {
         self.current_function_line = previous_function_line;
         self.current_function_owner = previous_function_owner;
         self.module.types.replace_scope_aliases(previous_type_scope);
+        self.active_fn_generic_params = previous_fn_generics;
+        self.active_fn_generic_bounds = previous_fn_bounds;
 
         // Use qualified name for methods (ClassName.method) for DI compatibility
         let name = if let Some(owner) = owner_type {
@@ -1453,6 +1580,8 @@ impl Lowerer {
             is_ghost: f.is_ghost(),
             is_sync: f.is_sync,
             has_suspension,
+            generic_params: active_generics,
+            generic_bounds,
         })
     }
 }

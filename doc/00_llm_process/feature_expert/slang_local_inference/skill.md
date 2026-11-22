@@ -413,7 +413,8 @@ Design: `doc/05_design/ml/slang/slang_pluggable_modalities.md`.
   lists it) -> 400 `wrong_model_kind`; an empty / unknown-format dir is not a
   model -> 404.
 - Model-root `slang_kind.sdn` overrides are NOT in git (model dirs live outside
-  the repo); `C:/dev/model/bge-reranker-v2-m3-GGUF/slang_kind.sdn` = `kind: rerank`.
+  the repo). bge-reranker-v2-m3 needs none: its `cls.output.weight` tensor
+  (full tensor-table walk when no pooling_type is written) makes it Rerank.
 - `/v1/models` entries add `slang_kind`, `input_modalities`, `output_modalities`
   (`scan_model_root(C:/dev/model)` 573 ms vs 229 ms before kinds, 12 dirs, seed;
   each describe walks every GGUF header once, first read 4 KiB). `ApiResponse` gained `content_type`
@@ -423,7 +424,7 @@ Design: `doc/05_design/ml/slang/slang_pluggable_modalities.md`.
   stub per family (`serve_transcriptions`, `serve_speech`, `serve_images`,
   `serve_embeddings`, `serve_rerank`): wrong kind = 400 `wrong_model_kind` (chat
   routes too, by describing only the named directory; `kind_serves` also lets a Chat model with Audio input serve Asr), right kind = 501 `not_implemented` naming the runner
-  (`engine/kind_dispatch.kind_open`, which loads nothing yet).
+  (formerly `engine/kind_dispatch.kind_open`; deleted once every kind route was served).
 - L1 host access goes through `slang/host/slang_host` only: `host_file_exists`,
   `host_file_read`, `host_dir_list`, `host_env` (SOSIX) and `host_file_size`,
   `host_file_mtime`, `host_is_dir`, `host_read_bytes_at` (no SOSIX accessor
@@ -431,6 +432,107 @@ Design: `doc/05_design/ml/slang/slang_pluggable_modalities.md`.
   serving_models import no io_runtime / external_file primitive.
 - Spec: `test/01_unit/lib/gc_async_mut/slang/kind_registry_spec.spl`.
 
+## Shim bulk I/O, model handles, embeddings (L4, 2026-11-18)
+
+- **Bit 256 bulk I/O:** `slang_ggml_[request_]str_push_bytes(ptr, len)` (via
+  `spl_wffi_call_i64_with_bytes`) and `slang_ggml_[request_]out_into(buf, cap,
+  out_len)` (via `spl_wffi_call_i64_into_bytes`; cap 0 = size probe, too-small
+  cap = -4 with `out_len` set). `backend.spl` `_push_text`/`_read_out` and the
+  request variants use them when the bit is set and keep the per-byte loop for
+  an older shim. `_sample_loop` reuses one 4096-byte piece buffer.
+  `into_bytes` is declared locally in `backend.spl` until L2 exports it (G1);
+  `_out_buffer` is a packed-buffer stand-in until L2's `bytes_zeroed` (G5).
+- **Bit 512 model handles:** `slang_ggml_model_open(path_bytes, n_gpu_layers)`
+  loads a model BESIDE the default `g_model` (max 4; same path returns the same
+  handle), `model_close(h)` (-9 while a request on it is open),
+  `request_create_for(h, n_ctx)` (h 0 = default). Each request carries its
+  model; tokenize/piece/chat_render use it. Handle requests never touch the
+  prefix cache. Backend API: `open_model_handle`, `open_request_for`,
+  `close_model_handle`.
+- **Embeddings/rerank:** `request_embed_configure(r, pooling)` rebuilds the
+  context with `embeddings=true`, `n_ubatch = n_ctx` (pooling -1 model default,
+  0 none, 1 mean, 2 cls, 3 last, 4 rank). `request_embed_eval` decodes ALL
+  tokens in one batch, every position output (not eval_prompt: that splits off
+  the last token). `request_embeddings_into` = f32 LE: none -> tokens x n_embd,
+  rank -> n_cls_out scores, else one n_embd vector. `request_rerank_tokenize(r,
+  query_len)` mirrors llama.cpp server `format_prompt_rerank`.
+  `request_tokens_set(r, i32le_ids)` feeds raw ids (vocoder codes), checked
+  against the vocab. `request_sampler_configure(r, temp_milli, top_k,
+  top_p_milli, repeat_milli, seed)`; greedy stays the default.
+- **Verified (release seed `C:/dev/seeds/simple-release.exe`, CPU shim):**
+  Qwen2.5-1.5B chat + bge-small-en-v1.5 q8_0 + bge-reranker-v2-m3 Q8_0 resident
+  in one process; cos(cat,kitten)=0.789 vs cos(cat,stock)=0.331; rerank Paris
+  doc 7.78 vs Berlin -5.45, bananas -11.04; pooling none on 4 raw ids = 1536
+  floats (4 x 384). Trap: under the release seed a RELATIVE `SLANG_GGML_LIB`
+  failed `open_backend`; pass an absolute path.
+
+### Serving: /v1/embeddings and /v1/rerank (L4)
+
+- `model_executor/runners/pooling_runner.spl` (`pooling_runner_open/run/close`)
+  opens the shim itself and loads the model as a HANDLE, so a resident chat
+  model is never evicted; `release_backend_library` drops the dlopen ref
+  without `slang_ggml_free`. One request per input, n_ctx 2048.
+- `entrypoints/openai/serving/serving_pooling.spl`: embeddings = OpenAI list
+  shape, L2-normalized, `encoding_format` float|base64 (normalized f32 LE);
+  rerank = `{query, documents, top_n}` -> `results[{index, relevance_score}]`
+  sorted, score = sigmoid(logit). String inputs only (token-id input -> 400).
+- `bge-reranker-v2-m3` GGUF (gpustack Q8_0) has NO `bert.pooling_type` key; the
+  resolver reaches Rerank from its `cls.output.weight` tensor (a pre-review L1
+  that stopped at the tokenizer block said Embedding).
+- Traps: `env_get` answers "" (not nil) when unset, so `?? default` never
+  fires; `protocol.json_int_field` fails on the release seed (`ord` not
+  found), so top_n is read from the parsed tree; a private `_sigmoid` helper
+  returned ~1e-19 (bug `slang_serving_pooling_sigmoid_helper_wrong_value_2026-11-19.md`).
+- `generate_on_request(BackendActiveGenerationRequest)` generates on a
+  caller-opened request (e.g. `open_request_for`), used by L5 TTS.
+- Live: `test/03_system/lib/slang/feature/slang_pooling_live_spec.spl` 5/5 on
+  the CPU shim and on the Vulkan shim (13/13 layers on the Radeon 8065S).
+
+## TTS / speech (L5, live-verified 2026-11-19, Windows CPU shim)
+
+- Pipeline: `serving/serving_speech.spl` -> `runners/tts_runner.spl`
+  (`tts_open` / `tts_run` / `tts_close`) -> `runners/istft.spl` -> wav. Model
+  dir = OuteTTS GGUF + WavTokenizer GGUF + `slang_kind.sdn`
+  (`kind: tts`, `vocoder: WavTokenizer-Large-75-F16.gguf`); C:/dev/model has
+  `OuteTTS-0.2-500M-GGUF` (OuteAI Q8_0 + ggml-org WavTokenizer F16).
+- `tts_open` loads both GGUFs as L4 model handles (`open_model_handle`) BESIDE
+  any chat model; `tts_close` closes only the handles and dlcloses its own
+  library reference. Never `close_backend` there: it frees the chat engine's
+  global model. `serve_speech` opens per request and closes after it.
+- Stage 1: OuteTTS-0.2 prompt = `<|im_start|>\n` + en_male_1 speaker words +
+  `outetts_process_text(input)` (numbers to words, a-z only, `<|text_sep|>`)
+  + `<|text_end|>\n` + speaker audio block (ported from llama.cpp tts.cpp
+  67b2b7f2f2d; the local rev 99b9548 tts.cpp is the generic mtmd tool).
+  Generated on a handle request via `backend.generate_on_request`. Sampler
+  default = tts.cpp's top-k 4, temp 0.8, seed 42 (`tts_set_sampler`).
+- Trap (fixed by L4 cdaba0b8b52, `slang_ggml_request_is_eog`): before it, EOG
+  never fired on a model-handle request (is_eog read the default model's
+  vocab), so generation ran to its cap and
+  OuteTTS invented more words (run 1: 2048 tokens, 13.3 s, ASR heard extra).
+  `outetts_spoken_codes` keeps codes up to `<|audio_end|>` and only for the
+  input's word count (safety net). Budget 128 + 64 tokens/word, n_ctx 8192,
+  input <= 100 words (400 `input_too_long`); an over-budget prompt is refused.
+- Stage 2: codes (< 4096) -> `request_set_tokens` on the vocoder handle,
+  `request_embed_configure(POOLING_NONE)`, `request_embeddings` = n_codes x
+  1282 f32 rows `[ln|X| | phase]`. L4's `embed_eval` uses llama_decode and it
+  works for wavtokenizer-dec.
+- ISTFT: n_fft 1280 / hop 320, mag clamp 100, periodic Hann, OLA /
+  sum(hann^2), centre crop; irfft is the exact Hermitian inverse via
+  mixed-radix FFT. First 0.25 s zeroed as in tts.cpp.
+- Live (`test/03_system/lib/slang/feature/slang_tts_live_spec.spl`, release
+  seed, CPU shim): "The capital of France is Paris." -> 2.1 s wav -> Qwen3-ASR
+  chat media -> `The capital of France is Paris.` (top-k and greedy both).
+  Run 5 (L4 shim cdaba0b8b52, EOG works): prompt 901 tokens, 194 generated
+  (cap 512), TTS wall 174 s = generate 4.9 s + vocoder 32 s + ISTFT+wav 128 s;
+  ASR 110 s. Before the EOG fix: generate 16 s (976 tokens), ISTFT+wav
+  117-123 s for ~155 frames. Under `run` the same ISTFT is ~42 ms/frame
+  (200 frames 8.4 s): ~770 vs ~42 ms/frame, cause not isolated
+  (`doc/08_tracking/bug/slang_tts_istft_vocoder_decode_slow_in_spec_2026-11-19.md`).
+- Unit specs: `model_executor/istft_spec.spl` (hand irfft values, naive-sum
+  cross-check, STFT round trip), `model_executor/tts_prompt_spec.spl`,
+  `entrypoints/serving_speech_spec.spl` (validation: `input` <= 4096 chars,
+  only `wav`, else 400 `unsupported_response_format`; base64 JSON envelope
+  `object: audio.speech` until L2's binary body).
 ## Model variety live spec (2026-11-15, Windows, llvm-mingw shim)
 
 `test/03_system/lib/slang/feature/slang_model_variety_live_spec.spl` loads each model under
@@ -461,7 +563,6 @@ Tokens/s below is meaningless for 1-2 token answers.
 | gpu | Qwen3-ASR-0.6B Q8_0 | 95035 | 10 | 424 | 23.5 | language English<asr_text>...Paris. |
 - Device forward pass (2026-11-15): `pure/llama_forward_rocm.spl` runs the stories15M Llama forward on the Radeon 8065S: `rocm_llama_load` (F32 byte-range upload once), `llama_step_rocm` (hidden state and per-layer K/V rows stay on the device; intermediates freed every step), `rocm_generate_greedy` (same prefix-reuse rule as `kv_cache.spl`, shared via `kv_reuse_len`; counts `positions_evaluated`). New device kernels in `tensor_ops_rocm.spl`: rope, kv_write (in place), row lookup, argmax (one i32 readback, never the 32000 logits). Spec: `slang_pure_rocm_generate_spec.spl` (GPU ids == CPU ids, reference text, prefix reuse, perf table in the log; needs `--timeout 3600` because the CPU leg is minutes on the seed). KV capacity is `min(max_position_embeddings, 1024)` (attention keeps scores in shared memory). `hip_compute.rocm_kernel` now destroys the hipRTC program on every path; the code-object buffer is deliberately kept (HIP docs do not say whether `hipModuleLoadData` copies it). `env_get` returns "" when unset, not None: `?? default` never fires.
 - Integration (2026-11-16): `/v1/completions` goes through the same dispatch as chat (`engine_complete_text`) and returns real usage counts; a media request to a pure-runner model is refused (text only), never routed to ggml. Pure/dispatch/variety system specs append evidence and `SKIPPED: <why>` lines to `build/probe/*_evidence.txt` because the runner counts skip() as passed (bug records in doc/08_tracking/bug).
-
 
 ## Host portability (Windows / Linux / macOS, 2026-11-16)
 
@@ -507,13 +608,16 @@ route env, file exists/read, directory list and process capture through SOSIX
 ## Image generation: /v1/images/generations (L6, 2026-11-17)
 
 - `serving/serving_images.spl` -> `model_executor/runners/sd_runner.spl`
-  (`sd_runner_open/run/close`, `engine/kind_dispatch.kind_open` has the
-  `StableDiffusion` arm) -> `src/runtime/slang_sd_shim.c` (stable-diffusion.cpp
+  (`sd_runner_open/run/close`; deliberately NOT wired into `kind_dispatch.kind_open`,
+  which would load a multi-GB model just to answer a 501) -> `src/runtime/slang_sd_shim.c` (stable-diffusion.cpp
   opaque-options C API, **ggml statically linked** into `slang_sd.dll`).
 - Body `{model, prompt, n<=4, size, response_format:"b64_json", steps, seed}`;
   reply `{created, data:[{b64_json}]}` (PNG via `common/image/png_encode.spl`,
   stored deflate). `url` format = 400. `size` = WIDTHxHEIGHT, both multiples of
-  64, <= 768, default 512x512; defaults steps 4, seed 42 (cfg 1.0, sd-turbo).
+  64, <= 768, default 512x512; defaults steps 4 (1..50), n 1..4, negative/absent seed = random (cfg 1.0, sd-turbo).
+  Every field is validated (400) before the runner is touched. One generation at a
+  time: `sd_runner_try_acquire` (AtomicBool) gates open/run/close, a concurrent request
+  gets 503 `busy`. `created` is unix seconds.
   No `SLANG_SD_LIB` / missing DLL = 503 `runner_unavailable`; wrong kind = 400.
 - Build: `sh scripts/check/build-slang-sd-shim.shs` (CPU,
   `build/sffi/sd-cpu/slang_sd.dll`) and `SLANG_SD_VARIANT=vulkan
@@ -531,3 +635,26 @@ route env, file exists/read, directory list and process capture through SOSIX
   `SLANG_LIVE=1 SLANG_MODEL_ROOT SLANG_SD_LIB SLANG_SD_STEPS SLANG_SD_SIZE`).
 - Needs ~10 GiB free for the load; run one image at a time.
 - Host access in the runner goes through `host/slang_host` (`host_env`, `host_file_exists`).
+
+## Post-merge review follow-ups (#10682, 2026-11-22)
+- **Video input:**
+  - ffmpeg output is capped at 16 MiB, the hard cap of `rt_process_run_bounded_bytes`; a larger cap never spawns ffmpeg.
+  - One video part per request (400 `too_many_video_parts`). The check runs before expansion.
+  - Server faults return 503 `video_sampling_failed`.
+  - ffmpeg runs with `-protocol_whitelist file`, and the request is refused when no temp directory is set.
+- **Images:**
+  - A single owner behind an atomic busy flag; a concurrent request gets 503 `busy`.
+  - `n` is 1..4 and `steps` 1..50, checked before the model loads.
+- **Tree KV:** the live spec reads `n_ubatch` from `engine_tree_cache_stats`. Measured on Vulkan:
+  - Qwen2.5-1.5B is exact, with roughly half the prefill and 1.6-1.8x faster.
+  - The Gemma branching digest differs on Vulkan only; see `doc/08_tracking/bug/slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md`.
+
+## L4 + L5 landed together (2026-11-22)
+- **Every kind route is served now:**
+  - chat and multimodal through `llm_engine`;
+  - asr through `whisper_runner` or an audio chat model;
+  - image generation through `sd_runner`;
+  - embeddings and rerank through `pooling_runner_serve`;
+  - tts through `tts_runner`.
+- The 501 stub `kind_not_implemented_response` and `engine/kind_dispatch.spl` were deleted; nothing reached them any more. Earlier mentions of `kind_dispatch.kind_open` above are history.
+- `pooling_runner_serve` is stateless. Each request opens the shim library and a model handle and closes both before returning. Module state is thread-local under the interpreter, so a cached handle would leak a shim model slot on every connection thread.

@@ -173,7 +173,8 @@ pub(crate) fn static_int_width(expr: &Expr, env: &Env) -> StaticIntWidth {
             .declared_int_width(name)
             .map_or(StaticIntWidth::Wide, StaticIntWidth::Narrow),
         Expr::Cast { target_type, .. } => {
-            Env::narrow_signed_width_of(Some(target_type)).map_or(StaticIntWidth::Wide, StaticIntWidth::Narrow)
+            let resolved = crate::interpreter::resolve_generic_type_in_scope(target_type);
+            Env::narrow_signed_width_of(Some(&resolved)).map_or(StaticIntWidth::Wide, StaticIntWidth::Narrow)
         }
         Expr::Unary {
             op: UnaryOp::Neg | UnaryOp::BitNot,

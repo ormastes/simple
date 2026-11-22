@@ -367,6 +367,7 @@ pub use sffi::{
 
 // Re-export stdin mock functions (for testing)
 pub use sffi::{rt_clear_stdin, rt_has_mock_stdin, rt_read_stdin_char, rt_read_stdin_line, rt_set_stdin};
+pub use sffi::io_print::rt_stdin_read_line;
 
 // Re-export print SFFI functions
 pub use sffi::{
@@ -485,6 +486,8 @@ pub use sffi::{
     rt_text_to_bytes,
     rt_file_write_bytes,
     rt_file_write_bytes_array,
+    rt_file_atomic_write,
+    rt_file_atomic_write_mode,
     rt_file_atomic_write_bytes_array,
     rt_file_wrap_smf_dynlib,
     rt_file_extract_smf_dynlib,
@@ -513,6 +516,8 @@ pub use sffi::{
     rt_path_stem,
     rt_path_relative,
     rt_path_join,
+    rt_path_normalize,
+    normalize_lexical_path,
 };
 
 // Re-export hash SFFI functions

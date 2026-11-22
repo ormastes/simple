@@ -594,6 +594,30 @@ pub(crate) fn compile_builtin_method<M: Module>(
         | ("string", "to_float")
         | ("String", "to_f64")
         | ("string", "to_f64") => Some(call_runtime_1(ctx, builder, "rt_string_to_float", receiver_val)),
+        ("String", "to_int") | ("string", "to_int") | ("String", "to_i64") | ("string", "to_i64") => {
+            Some(call_runtime_1(ctx, builder, "rt_string_to_int", receiver_val))
+        }
+        ("String", "parse_int")
+        | ("string", "parse_int")
+        | ("String", "parse_i32")
+        | ("string", "parse_i32")
+        | ("String", "parse_i64")
+        | ("string", "parse_i64") => Some(call_runtime_1(ctx, builder, "rt_string_parse_int", receiver_val)),
+        ("String", "ptr") | ("string", "ptr") => Some(call_runtime_1(ctx, builder, "rt_string_data", receiver_val)),
+        ("Array", "ptr") | ("array", "ptr") | ("Array", "data_ptr") | ("array", "data_ptr") => {
+            Some(call_runtime_1(ctx, builder, "rt_array_data_ptr", receiver_val))
+        }
+        ("Array", "rev")
+        | ("array", "rev")
+        | ("Array", "reversed")
+        | ("array", "reversed")
+        | ("String", "rev")
+        | ("string", "rev")
+        | ("String", "reversed")
+        | ("string", "reversed") => Some(call_runtime_1(ctx, builder, "rt_reverse", receiver_val)),
+        ("Array", "reverse") | ("array", "reverse") | ("String", "reverse") | ("string", "reverse") => {
+            Some(call_runtime_1(ctx, builder, "rt_reverse_mut", receiver_val))
+        }
         ("Array", "slice") | ("array", "slice") | ("String", "slice") | ("string", "slice") => {
             let slice_id = ctx.runtime_funcs["rt_slice_text_bytes"];
             let slice_ref = ctx.module.declare_func_in_func(slice_id, builder.func);

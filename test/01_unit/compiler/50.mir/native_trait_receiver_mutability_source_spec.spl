@@ -1,0 +1,85 @@
+# Static source assertion (a runtime repro needs the full-CLI native-build lane;
+# no runnable full-CLI `simple test` binary existed when this was written).
+#
+# MIR native trait-object admission
+# (src/compiler/50.mir/_MirLowering/native_trait_registration.spl,
+# `native_trait_implementation_rejection`) compares each vtable slot's receiver
+# mutability with the concrete impl and fails closed on a mismatch:
+#   incompatible native trait object signature: ... method write_at:
+#   receiver mutability expected=false actual=true
+# That check is the documented ABI (doc/05_design/native_trait_dispatch_item5_20261008.md:
+# "A slot retains its full receiver/argument/result ABI and mutability"), and the
+# language rule is that every mutating trait method is `me`
+# (doc/07_guide/quick_reference/syntax_quick_reference.md, capability groups).
+# So the source must agree: trait declaration and every impl use the same receiver.
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text?
+
+# Returns "me", "fn", or "" (absent) for `method` declared at 4-space indent
+# inside the block whose header line starts with `header`.
+fn receiver_kind_in_block(path: text, header: text, method: text) -> text:
+    val src = rt_file_read_text(path) ?? ""
+    var inside = false
+    for line in src.split("\n"):
+        if line.starts_with(header):
+            inside = true
+            continue
+        if inside:
+            if line != "" and not line.starts_with(" ") and not line.starts_with("#"):
+                inside = false
+                continue
+            if line.starts_with("    me fn {method}(") or line.starts_with("    me {method}("):
+                return "me"
+            if line.starts_with("    fn {method}("):
+                return "fn"
+    ""
+
+val POSITIONED_TRAIT = "pub trait SosixPositionedVfsBackendV1:"
+val POSITIONED_TRAIT_PATH = "src/os/sosix/fs/service_vfs_backend_v1.spl"
+
+fn positioned_impls() -> [[text]]:
+    [
+        ["src/os/sosix/fs/positioned_backend_composition_v1.spl", "SosixPositionedBackendOwnerV1"],
+        ["src/os/sosix/fs/fat32_positioned_backend_v1.spl", "SosixFat32PositionedBackendV1"],
+        ["src/os/sosix/fs/fat32_positioned_vfs_backend.spl", "SosixFat32PositionedVfsBackendV1"],
+        ["src/os/sosix/fs/dbfs_positioned_vfs_backend.spl", "SosixDbfsPositionedVfsBackendV1"],
+        ["src/os/sosix/fs/nvfs_positioned_vfs_backend.spl", "SosixNvfsPositionedVfsBackendV1"],
+        ["test/01_unit/os/sosix/fs_positioned_token_owner_fixture_spec.spl", "TokenFixtureBackend"],
+        ["test/01_unit/os/sosix/fs_kernel_positioned_dispatch_v1_spec.spl", "KernelPositionedBackend"],
+        ["test/01_unit/os/sosix/fs_service_vfs_backend_v1_spec.spl", "PositionedMemoryBackend"],
+        ["test/01_unit/os/sosix/fs_service_vfs_backend_v1_spec.spl", "UnavailablePositionedBackend"],
+        ["test/01_unit/os/sosix/fs_service_vfs_backend_v1_spec.spl", "OversizePositionedBackend"],
+        ["test/01_unit/os/sosix/fs_positioned_dispatch_owner_v1_spec.spl", "OwnerBackend"],
+        ["test/01_unit/os/sosix/fs_positioned_syscall_provider_v1_spec.spl", "PositionedProviderBackend"],
+        ["test/01_unit/os/sosix/fs_service_dispatch_transaction_v1_spec.spl", "TransactionBackend"]
+    ]
+
+describe "SosixPositionedVfsBackendV1 receiver mutability":
+    it "declares write_at as a mutating `me` method":
+        expect(receiver_kind_in_block(POSITIONED_TRAIT_PATH, POSITIONED_TRAIT, "write_at")).to_equal("me")
+    it "keeps read_at and positioned_io_available non-mutating":
+        expect(receiver_kind_in_block(POSITIONED_TRAIT_PATH, POSITIONED_TRAIT, "read_at")).to_equal("fn")
+        expect(receiver_kind_in_block(POSITIONED_TRAIT_PATH, POSITIONED_TRAIT, "positioned_io_available")).to_equal("fn")
+    it "every impl matches the trait receiver for every slot":
+        val trait_write = receiver_kind_in_block(POSITIONED_TRAIT_PATH, POSITIONED_TRAIT, "write_at")
+        val trait_read = receiver_kind_in_block(POSITIONED_TRAIT_PATH, POSITIONED_TRAIT, "read_at")
+        val trait_avail = receiver_kind_in_block(POSITIONED_TRAIT_PATH, POSITIONED_TRAIT, "positioned_io_available")
+        for entry in positioned_impls():
+            val header = "impl SosixPositionedVfsBackendV1 for {entry[1]}:"
+            expect("{entry[1]} write_at={receiver_kind_in_block(entry[0], header, "write_at")}").to_equal("{entry[1]} write_at={trait_write}")
+            expect("{entry[1]} read_at={receiver_kind_in_block(entry[0], header, "read_at")}").to_equal("{entry[1]} read_at={trait_read}")
+            expect("{entry[1]} positioned_io_available={receiver_kind_in_block(entry[0], header, "positioned_io_available")}").to_equal("{entry[1]} positioned_io_available={trait_avail}")
+
+val BLOCK_TRAIT = "pub trait BlockDevice:"
+val BLOCK_TRAIT_PATH = "src/lib/nogc_sync_mut/fs_driver/block_device.spl"
+
+describe "BlockDevice receiver mutability (pins ad8c8d55e11)":
+    it "declares sector I/O and flush as `me`":
+        expect(receiver_kind_in_block(BLOCK_TRAIT_PATH, BLOCK_TRAIT, "read_sector")).to_equal("me")
+        expect(receiver_kind_in_block(BLOCK_TRAIT_PATH, BLOCK_TRAIT, "write_sector")).to_equal("me")
+        expect(receiver_kind_in_block(BLOCK_TRAIT_PATH, BLOCK_TRAIT, "flush")).to_equal("me")
+        expect(receiver_kind_in_block(BLOCK_TRAIT_PATH, BLOCK_TRAIT, "sector_size")).to_equal("fn")
+    it "the impls named in the Stage 2 MIR failure match the trait":
+        expect(receiver_kind_in_block("src/os/kernel/boot/c_nvme_adapter.spl", "impl BlockDevice for CNvmeBlockAdapterFs:", "read_sector")).to_equal("me")
+        expect(receiver_kind_in_block("src/os/services/vfs/vfs_block_adapters.spl", "impl BlockDevice for NvmeBlockAdapter:", "flush")).to_equal("me")

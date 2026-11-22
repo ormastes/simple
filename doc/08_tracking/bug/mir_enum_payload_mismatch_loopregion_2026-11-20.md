@@ -1,7 +1,7 @@
 # MIR enum payload mismatch at `PerfBodyNodeV1.LoopRegion` (`[T].pop()` is `T?`)
 
 - **Date:** 2026-11-20
-- **Status:** source workaround landed in `src/compiler/35.semantics/perf/cost_summary_v1.spl`; underlying compiler gap OPEN (see "Compiler gap")
+- **Status:** source workaround landed in `src/compiler/35.semantics/perf/cost_summary_v1.spl`; direct-call-argument `.pop()`/`.first()`/`.last()` class CLOSED 2026-11-22 (see "Update 2026-11-22"); rest of the compiler gap OPEN
 - **Found by:** Phase 4 (integ22 Stage 2 compiler native-building the full CLI)
 - **Fixture (green shape):** `test/fixtures/native_recursive_enum_payload_from_pop/main.spl`
 
@@ -80,3 +80,45 @@ behaviour unverified:
 
 Those sites should get the same fail-closed MIR/HIR check (or the HIR type checker should reject
 `T?` where `T` is required) so this class is caught at compile time instead of corrupting values.
+
+## Update 2026-11-22: direct-call argument check (partial close)
+
+**Closed:** a builtin array `.pop()` / `.first()` / `.last()` result (MIR-remembered `T?`, from
+`lower_array_first_or_last`) passed as a **direct call argument** into a non-optional parameter
+whose type is alias-compatible with `T` is now a fatal MIR error, the call-argument twin of the
+payload check:
+
+```
+call 'depth': argument type mismatch at 0: optional 'NodeX?' value from `.pop()` into
+non-optional parameter (declared 'NodeX'); unwrap it first (`if val`, or `.unwrap()` under a
+length guard); function=... module=... arg_at=file:line:col
+```
+
+Code: `call_arg_optional_into_non_optional_message` (`50.mir/_MirLoweringExpr/enum_constructor_payload.spl`),
+called from the direct-call argument loop in `switch_operators_calls.spl` before
+`option_scalar_payload_of` erases the evidence. Declared `T?` / `Any` / generic parameters are not
+judged. Spec: `test/01_unit/compiler/mir/call_arg_optional_into_non_optional_spec.spl`. Negative
+fixture (must FAIL to build once a compiler carries the check):
+`test/fixtures/native_optional_into_nonoptional_arg_negative/main.spl` — with the integ25 Stage 2
+(cranelift, `SIMPLE_BOOTSTRAP=1`) it builds rc=0 today and panics `total enum match fell through on 'NodeX'`.
+
+**Census (before the check), `src/compiler` + `src/app` + `src/lib`:** 2 offending sites, both in
+`src/lib/common/crypto/blake3.spl` (`_b3_parent(key, stack.pop(), ...)` into `left: [u32]`), fixed
+to `.pop().unwrap()`: one inside `while stack.len() > 0`, one in the merge loop where
+`total % 2 == 0` implies a pending left subtree (trailing ones of `i` <= stack size `popcount(i)`).
+Non-hits checked: `self.pop()` in `js/engine/vm.spl` and `svmg/ref_vm.spl` are user methods
+returning non-optional `JsValue` / `i64`; 0 direct-argument `.first()` / `.last()` sites.
+Reproduce: `grep -rnE '\.(pop|first|last)\(\)\s*[,)]' src/compiler src/app src/lib --include=*.spl`
+minus comment lines and `.unwrap()` forms (6 hits after the fix, all the `self.pop()` user methods
+above), plus a multi-line scan for argument lines ending `<expr>.(pop|first|last)()` followed by `,`
+or a closing `)` / `]` on the next line (0 hits).
+
+**Still open (deliberately not judged by this check):**
+
+- bound locals: `val x = xs.pop()` then `f(x)` — 165 `= <expr>.pop()` bindings in the tree, untriaged.
+  A narrowed local (`if x != nil: f(x)`) still remembers `T?` in MIR, so judging `Var` arguments
+  needs flow-narrowing evidence first or it refuses valid code.
+- other MIR `T?` producers as arguments (dict `.get()`, optional-returning calls, nullable merges):
+  no census was possible without running the check over the whole tree.
+- method-call arguments (`lower_method_call_arg`, e.g. `obj.m(xs.pop())`), `[T].push(xs.pop())`,
+  `match` scrutinees and field access on a `T?` local.

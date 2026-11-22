@@ -18,7 +18,9 @@ default 4, clamped to 1..32.
 use std.spec.step
 use std.spec.{describe, it, expect}
 
-use std.gc_async_mut.slang.modality.video_frames.{video_ffmpeg_path, video_frame_count, video_max_bytes, split_mjpeg, sample_frames}
+use std.gc_async_mut.slang.modality.video_frames.{video_ffmpeg_path, video_frame_count, video_max_bytes, video_max_parts, video_reason_is_server_fault, video_run_is_server_fault, split_mjpeg, sample_frames}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ChatMessage, ChatPart}
+use std.gc_async_mut.slang.entrypoints.openai.serving_chat.{media_refusal}
 use std.io_runtime.{env_get}
 
 describe "mjpeg stream splitting":
@@ -63,3 +65,30 @@ describe "video sampling configuration":
             match sample_frames(empty, 8):
                 Err(reason): expect(reason).to_equal("the video is empty")
                 Ok(_): expect(false).to_equal(true)
+
+describe "video request bounds":
+    it "takes at most one video part per request":
+        expect(video_max_parts()).to_equal(1)
+        val v = ChatPart(kind: "video", text: "", data: "AAAA", format: "mp4")
+        val two = [ChatMessage(role: "user", content: "", parts: [v, v])]
+        match media_refusal("m", two, "proj.gguf"):
+            Ok(_): expect(false).to_equal(true)
+            Err(response):
+                expect(response.status).to_equal(400)
+                expect(response.body.contains("too_many_video_parts")).to_equal(true)
+
+    it "tells server faults from bad input":
+        expect(video_reason_is_server_fault("server: could not stage the video in a temp file")).to_equal(true)
+        expect(video_reason_is_server_fault("no frame could be decoded; is the input a video?")).to_equal(false)
+        expect(video_reason_is_server_fault("the video is empty")).to_equal(false)
+
+    it "classifies an ffmpeg run: exit -1 and timeout markers are the server's fault":
+        # ffmpeg's own AVERROR for a corrupt client video (Windows), and a plain error exit
+        expect(video_run_is_server_fault(-1094995529, "Invalid data found when processing input")).to_equal(false)
+        expect(video_run_is_server_fault(1, "moov atom not found")).to_equal(false)
+        # every bytes-lane spawn failure, timeout or signal kill is -1, with or without output
+        expect(video_run_is_server_fault(-1, "")).to_equal(true)
+        expect(video_run_is_server_fault(-1, "frame=    2 fps=0.0")).to_equal(true)
+        # interpreter-lane timeout marker
+        expect(video_run_is_server_fault(124, "partial\nProcess timed out")).to_equal(true)
+        expect(video_run_is_server_fault(0, "")).to_equal(false)

@@ -9,7 +9,7 @@ use compiler.hir.hir_lowering._Items.module_lowering.*
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
 
 use compiler.hir.hir_types.*
-use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
+use compiler.hir.hir_owner_name.{hir_owner_name_is_canonical, hir_symbol_owner_module}
 use compiler.hir.hir_symbol_table_methods.{hir_symbol_declaration_category_v1, hir_declaration_origin_snapshot_skipped_v1}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path}
 use compiler.frontend.declaration_intent_v1.{parser_declaration_intent_index_v1}
@@ -91,6 +91,35 @@ fn hir_module_path_is_scv_snapshot_v1(path: text) -> bool:
     normalized.contains("/scv/") or normalized.contains("/scv_snapshots/") or normalized.contains("scv-revision-")
 
 impl HirLowering:
+    fn owner_canonical_source_path_v1() -> text:
+        if self.module_filename != "" and self.module_surfaces.index_by_name.contains_key(self.module_filename):
+            val s_idx = self.module_surfaces.index_by_name[self.module_filename]
+            if s_idx >= 0 and s_idx < self.module_surfaces.surfaces.len():
+                val surf_path = self.module_surfaces.surfaces[s_idx].canonical_path
+                if surf_path != "":
+                    return surf_path
+        module_surface_canonical_path(self.module_filename)
+
+    fn parsed_module_matches_owner_v1(parsed_name: text) -> bool:
+        if self.module_filename == "":
+            return true
+        val parsed_is_canonical = hir_owner_name_is_canonical(parsed_name)
+        if self.module_surfaces.index_by_name.contains_key(self.module_filename):
+            val s_idx = self.module_surfaces.index_by_name[self.module_filename]
+            if s_idx >= 0 and s_idx < self.module_surfaces.surfaces.len():
+                val surf = self.module_surfaces.surfaces[s_idx]
+                if parsed_is_canonical:
+                    return (surf.module_name != "" and parsed_name == surf.module_name) or parsed_name == surf.canonical_name
+                return surf.canonical_path != "" and module_surface_canonical_path(parsed_name) == surf.canonical_path
+        val owner_is_canonical = hir_owner_name_is_canonical(self.module_filename)
+        if parsed_is_canonical and owner_is_canonical:
+            return parsed_name == self.module_filename
+        if not parsed_is_canonical and not owner_is_canonical:
+            return module_surface_canonical_path(parsed_name) == module_surface_canonical_path(self.module_filename)
+        if not parsed_is_canonical and owner_is_canonical:
+            return hir_symbol_owner_module(parsed_name) == self.module_filename
+        hir_symbol_owner_module(self.module_filename) == parsed_name
+
     me bind_source_declaration_origin_v1(intents: Dict<text, text>, id: SymbolId, category: text, source_name: text):
         val key = category + ":" + source_name
         if not intents.contains_key(key): return
@@ -99,7 +128,7 @@ impl HirLowering:
         if self.module_filename == "": return
         val owner = hir_symbol_owner_module(self.module_filename)
         val bound = self.symbols.bind_declaration_origin_v1(id, owner, source_name,
-            intents[key], module_surface_canonical_path(self.module_filename), key)
+            intents[key], self.owner_canonical_source_path_v1(), key)
         if bound.is_err():
             self.error(bound.unwrap_err(), Span.empty())
         elif not bound.unwrap():
@@ -127,7 +156,7 @@ impl HirLowering:
                 # The SCV-snapshot skip (bootstrap-mode Stage 2) is not a
                 # retention failure; only a genuine Ok(false) reports.
                 if hir_declaration_origin_snapshot_skipped_v1(sym.defining_module ?? "", owner,
-                        module_surface_canonical_path(self.module_filename)):
+                        self.owner_canonical_source_path_v1()):
                     return
                 sym_name = sym.name
                 sym_category = hir_symbol_declaration_category_v1(sym)
@@ -136,7 +165,7 @@ impl HirLowering:
                 " [symbol.name=" + sym_name + " category=" + sym_category +
                 " defining_module=" + sym_defining + " owner=" + owner +
                 " modifier=" + intents[key] + " source_path=" +
-                module_surface_canonical_path(self.module_filename) + "]", Span.empty())
+                self.owner_canonical_source_path_v1() + "]", Span.empty())
 
     # Sub-plan P1 wiring (immutable_views_async_init_revisions_2026-11-13.md
     # section 3.2). Gate SIMPLE_REQUIRED_INIT_CHECK: off (default) | warning |
@@ -187,7 +216,8 @@ impl HirLowering:
             var const_idx = 0
             while const_idx < parser_constants.len():
                 val hir_const = hir_const_with_export_visibility(self.lower_hir_const_decl(parser_constants[const_idx]), recovered_exported_names)
-                recovered_constants[SymbolId(id: const_idx)] = hir_const
+                val recovered_key: SymbolId = if hir_const.symbol.is_valid(): hir_const.symbol else: SymbolId(id: const_idx)
+                recovered_constants[recovered_key] = hir_const
                 const_idx = const_idx + 1
             lowered_module.constants = recovered_constants
         elif lowered_module.constants.keys().len() == 0 and parser_constants.len() > 0:
@@ -196,7 +226,8 @@ impl HirLowering:
             var const_idx = 0
             while const_idx < parser_constants.len():
                 val hir_const = hir_const_with_export_visibility(self.lower_hir_const_decl(parser_constants[const_idx]), recovered_exported_names)
-                recovered_constants[SymbolId(id: const_idx)] = hir_const
+                val recovered_key: SymbolId = if hir_const.symbol.is_valid(): hir_const.symbol else: SymbolId(id: const_idx)
+                recovered_constants[recovered_key] = hir_const
                 const_idx = const_idx + 1
             lowered_module.constants = recovered_constants
         if focused_future_diag:
@@ -375,7 +406,7 @@ impl HirLowering:
         val source_intent_result = parser_declaration_intent_index_v1(module_local.source_declaration_intents_v1)
         if source_intent_result.is_err():
             self.error(source_intent_result.unwrap_err(), Span.empty())
-        elif module_local.source_declaration_intents_v1.len() > 0 and (module_local.source_declaration_digest_v1 == "" or (self.module_filename != "" and module_surface_canonical_path(module_local.name) != module_surface_canonical_path(self.module_filename))):
+        elif module_local.source_declaration_intents_v1.len() > 0 and (module_local.source_declaration_digest_v1 == "" or not self.parsed_module_matches_owner_v1(module_local.name)):
             self.error("source declaration facts do not belong to this HIR module owner", Span.empty())
         else:
             source_intents = source_intent_result.unwrap()
@@ -636,6 +667,7 @@ impl HirLowering:
                 # untyped (declared_callable_type returns nil for them).
                 val bootstrap_decl_type = self.declared_callable_type(bootstrap_decl_fn, nil)
                 val bootstrap_decl_sym = self.symbols.define(bootstrap_decl_fn.name, SymbolKind.Function, bootstrap_decl_type, Span.empty(), Visibility.Private, false, bootstrap_decl_defining_module)
+                self.record_call_arity_row(bootstrap_decl_sym.id, bootstrap_decl_fn, false)
                 # Extern fns must keep their BARE runtime symbol: qualifying
                 # them ("std.nogc_sync_mut.simd.rt_simd_has_avx2") makes every
                 # same-module call emit an undefined module-prefixed symbol at

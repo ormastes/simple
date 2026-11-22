@@ -1,0 +1,51 @@
+use test.fixtures.xray.dual_mode_probe.helper.{dual_mode_compute_sum}
+
+extern fn simple_xray_darwin_enable_counter_v1() -> i64
+extern fn simple_xray_darwin_disable_counter_v1() -> i64
+extern fn simple_xray_darwin_entry_count_v1() -> i64
+extern fn simple_xray_darwin_exit_count_v1() -> i64
+extern fn simple_xray_darwin_max_func_id_v1() -> i64
+extern fn simple_xray_darwin_last_func_id_v1() -> i64
+
+@export("C", name: "__simple_main")
+pub fn dual_mode_xray_live_entry() -> i64:
+    # 1. Dormant check: calling instrumented function before patching emits 0 events.
+    val dormant_sum = dual_mode_compute_sum(20, 22)
+    if dormant_sum != 42:
+        return 10
+    if simple_xray_darwin_entry_count_v1() != 0 or simple_xray_darwin_exit_count_v1() != 0:
+        return 11
+
+    # 2. Multi-module slot discovery check (helper + entry >= 2 functions).
+    val max_id = simple_xray_darwin_max_func_id_v1()
+    if max_id < 2:
+        return 12
+
+    # 3. Live runtime enable + patch across __DATA,__xray_fn_slots.
+    if simple_xray_darwin_enable_counter_v1() != 1:
+        return 13
+    val active_sum = dual_mode_compute_sum(20, 22)
+    if active_sum != 42:
+        return 14
+    val entries_active = simple_xray_darwin_entry_count_v1()
+    val exits_active = simple_xray_darwin_exit_count_v1()
+    val last_fid = simple_xray_darwin_last_func_id_v1()
+    if entries_active < 1 or exits_active < 1 or entries_active != exits_active:
+        return 15
+    if last_fid < 1 or last_fid > max_id:
+        return 16
+
+    # 4. Disable + unpatch check: subsequent calls emit 0 additional events.
+    if simple_xray_darwin_disable_counter_v1() != 1:
+        return 17
+    val snap_entries = simple_xray_darwin_entry_count_v1()
+    val snap_exits = simple_xray_darwin_exit_count_v1()
+    val post_sum = dual_mode_compute_sum(10, 32)
+    if post_sum != 42:
+        return 18
+    if simple_xray_darwin_entry_count_v1() != snap_entries or simple_xray_darwin_exit_count_v1() != snap_exits:
+        return 19
+
+    print "{active_sum}"
+    print "XRAY_LIVE_OK max_id={max_id} entries={entries_active} exits={exits_active} last_fid={last_fid}"
+    0

@@ -1,17 +1,92 @@
 # @gc — module uses GC runtime
 #
-# /v1/audio/speech — stub until lane L5 (TTS) replaces this file.
-# Design: doc/05_design/ml/slang/slang_pluggable_modalities.md §3.5.
-# A model of another kind is 400 wrong_model_kind; a Tts model is 501
-# not_implemented with the runner's reason.
+# /v1/audio/speech — OpenAI speech: {model, input, voice, response_format}.
+# Design: doc/05_design/ml/slang/slang_pluggable_modalities.md §3.5 (lane L5).
+# A model of another kind is 400 wrong_model_kind. Only `wav` is produced.
+# Until the HTTP layer sends binary bodies (lane L2) the wav travels in a JSON
+# envelope, base64 in `audio`:
+#   {"object":"audio.speech","model":..,"format":"wav","content_type":"audio/wav",
+#    "sample_rate":24000,"audio":"<base64 wav>"}
+# `voice` is accepted and echoed; the runner has one speaker (OuteTTS
+# en_male_1), so every voice name maps to it.
 
-use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse}
-use std.gc_async_mut.slang.entrypoints.openai.serving_models.{model_for_kind, kind_not_implemented_response}
-use std.gc_async_mut.slang.modality.kinds.{ModelKind}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, ChatPart, json_string_field, json_text_literal, openai_error_response}
+use std.gc_async_mut.slang.entrypoints.openai.serving_models.{model_for_kind}
+use std.gc_async_mut.slang.modality.kinds.{ModelKind, KindRequest, KindParams}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
+use std.gc_async_mut.slang.model_executor.runners.tts_runner.{TTS_SAMPLE_RATE, TTS_MAX_WORDS, TTS_INPUT_FAULT, outetts_word_count, tts_open, tts_run, tts_close}
+use std.common.base_encoding.base64.{base64_encode_bytes}
+
+
+# OpenAI's own input cap for /v1/audio/speech.
+const SPEECH_MAX_INPUT_CHARS: i64 = 4096
+
+struct SpeechRequest:
+    model: text
+    input: text
+    voice: text
+    response_format: text
+
+fn _bad(message: text, code: text) -> ApiResponse:
+    openai_error_response(400, message, "invalid_request_error", code, "")
+
+fn parse_speech_request(body: text) -> Result<SpeechRequest, ApiResponse>:
+    val input = json_string_field(body, "input")
+    if input.trim() == "":
+        return Err(_bad("missing or empty required field: input", "invalid_request"))
+    if input.len() > SPEECH_MAX_INPUT_CHARS:
+        return Err(_bad("input is " + input.len().to_text() + " characters; the limit is " + SPEECH_MAX_INPUT_CHARS.to_text(), "input_too_long"))
+    val words = outetts_word_count(input)
+    # Normalisation keeps Latin letters and numbers only; input with none of
+    # them would load both models and then generate no audio codes.
+    if words == 0:
+        return Err(_bad("input has no speakable words (the OuteTTS voice reads Latin letters and numbers)", "invalid_request"))
+    if words > TTS_MAX_WORDS:
+        return Err(_bad("input has " + words.to_text() + " words; the limit is " + TTS_MAX_WORDS.to_text(), "input_too_long"))
+    var format = json_string_field(body, "response_format").trim().to_lower()
+    if format == "":
+        format = "wav"
+    if format != "wav":
+        return Err(_bad("response_format '" + format + "' is not supported by slang; use wav", "unsupported_response_format"))
+    Ok(SpeechRequest(model: json_string_field(body, "model"), input: input, voice: json_string_field(body, "voice"), response_format: format))
+
+# 16-bit PCM mono wav of `samples` in the JSON envelope above.
+
+# A wav file in the JSON envelope above.
+fn speech_wav_response(model: text, wav: [u8], sample_rate: i32) -> ApiResponse:
+    val body = "{\"object\":\"audio.speech\",\"model\":" + json_text_literal(model) + ",\"format\":\"wav\",\"content_type\":\"audio/wav\",\"sample_rate\":" + sample_rate.to_text() + ",\"audio\":\"" + base64_encode_bytes(wav) + "\"}"
+    ApiResponse(status: 200, body: body)
+
+fn _kind_request(model_id: text, r: SpeechRequest) -> KindRequest:
+    KindRequest(model_id: model_id, parts: [ChatPart(kind: "text", text: r.input, data: "", format: "")],
+        params: KindParams(max_tokens: 0, n: 1, size: "", steps: 0, seed: -1, voice: r.voice, top_n: 0, response_format: r.response_format))
+
+# Both models are loaded for the request and released after it.
+fn _synthesize(model: NativeModel, r: SpeechRequest) -> ApiResponse:
+    match tts_open(model):
+        Err(reason):
+            tts_close()
+            return openai_error_response(503, "/v1/audio/speech could not load " + model.id + ": " + reason, "server_error", "model_unavailable", "")
+        Ok(_): ()
+    val result = tts_run(_kind_request(model.id, r))
+    tts_close()
+    match result:
+        Err(reason):
+            if reason.starts_with(TTS_INPUT_FAULT):
+                return _bad(reason, "input_too_long")
+            openai_error_response(500, "speech synthesis failed: " + reason, "server_error", "synthesis_failed", "")
+        Ok(out):
+            for p in out.parts:
+                if p.mime == "audio/wav":
+                    return speech_wav_response(model.id, p.bytes, TTS_SAMPLE_RATE)
+            openai_error_response(500, "speech synthesis returned no audio", "server_error", "synthesis_failed", "")
 
 fn serve_speech(model_root: text, body: text) -> ApiResponse:
-    match model_for_kind(model_root, body, ModelKind.Tts, "/v1/audio/speech"):
+    match parse_speech_request(body):
         Err(refusal): refusal
-        Ok(model): kind_not_implemented_response(model, "/v1/audio/speech")
+        Ok(r):
+            match model_for_kind(model_root, body, ModelKind.Tts, "/v1/audio/speech"):
+                Err(refusal): refusal
+                Ok(model): _synthesize(model, r)
 
-export serve_speech
+export SpeechRequest, parse_speech_request, speech_wav_response, serve_speech

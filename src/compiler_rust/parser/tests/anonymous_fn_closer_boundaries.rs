@@ -80,3 +80,9 @@ fn anonymous_fn_nested_match_separate_closer() -> Result<(), String> {
 fn anonymous_fn_nested_enclosing_calls_keep_outer_tail() -> Result<(), String> {
     check(include_str!("fixtures/anonymous_fn_closer/nested_enclosing_calls.spl"), false, true, true)
 }
+
+#[test]
+fn remote_run_command_v1_parses() -> Result<(), String> {
+    let src = include_str!("../../../app/orchestrator/remote_run_command_v1.spl");
+    Parser::new(src).parse().map(|_| ()).map_err(|error| format!("{error:?}"))
+}

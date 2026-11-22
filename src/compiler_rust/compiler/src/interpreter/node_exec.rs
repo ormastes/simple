@@ -463,9 +463,23 @@ pub(crate) fn exec_node(
         }
         Node::Let(let_stmt) => {
             if let Some(value_expr) = &let_stmt.value {
+                // Validate unit type annotation if present
+                // Type can come from either let_stmt.ty OR from a typed pattern (x: Type)
+                // Borrowed, not cloned: this runs on EVERY execution of the
+                // statement (per loop iteration), and a generic annotation such
+                // as `Dict<text, i64>` is a Vec plus several Strings to clone.
+                let type_annotation: Option<&Type> = match &let_stmt.ty {
+                    Some(ty) => Some(ty),
+                    None => match &let_stmt.pattern {
+                        simple_parser::ast::Pattern::Typed { ty, .. } => Some(ty),
+                        _ => None,
+                    },
+                };
                 // Handle method calls on objects - need to persist mutations to self
+                let _expected_target_guard = super::push_expected_target_type(type_annotation.cloned());
                 let (value, update) =
                     handle_method_call_with_self_update(value_expr, env, functions, classes, enums, impl_methods)?;
+                drop(_expected_target_guard);
                 if let Some((obj_name, new_self)) = update {
                     env.insert(obj_name, new_self);
                 }
@@ -483,19 +497,6 @@ pub(crate) fn exec_node(
                     await_value(value)?
                 } else {
                     value
-                };
-
-                // Validate unit type annotation if present
-                // Type can come from either let_stmt.ty OR from a typed pattern (x: Type)
-                // Borrowed, not cloned: this runs on EVERY execution of the
-                // statement (per loop iteration), and a generic annotation such
-                // as `Dict<text, i64>` is a Vec plus several Strings to clone.
-                let type_annotation: Option<&Type> = match &let_stmt.ty {
-                    Some(ty) => Some(ty),
-                    None => match &let_stmt.pattern {
-                        simple_parser::ast::Pattern::Typed { ty, .. } => Some(ty),
-                        _ => None,
-                    },
                 };
 
                 // Helper to extract variable name for error messages
@@ -692,19 +693,25 @@ pub(crate) fn exec_node(
             Ok(Control::Next)
         }
         Node::Assignment(assign) if assign.op == AssignOp::Assign => {
+            let _clear_expected = super::push_expected_target_type(None);
             exec_assignment(assign, env, functions, classes, enums, impl_methods)
         }
         // Handle augmented assignments (+=, -=, *=, /=) and suspension variants (~+=, ~-=, etc.)
-        Node::Assignment(assign) => exec_augmented_assignment(assign, env, functions, classes, enums, impl_methods),
+        Node::Assignment(assign) => {
+            let _clear_expected = super::push_expected_target_type(None);
+            exec_augmented_assignment(assign, env, functions, classes, enums, impl_methods)
+        }
         Node::If(if_stmt) => exec_if(if_stmt, env, functions, classes, enums, impl_methods),
         Node::While(while_stmt) => exec_while(while_stmt, env, functions, classes, enums, impl_methods),
         Node::Loop(loop_stmt) => exec_loop(loop_stmt, env, functions, classes, enums, impl_methods),
         Node::For(for_stmt) => exec_for(for_stmt, env, functions, classes, enums, impl_methods),
         Node::Return(ret) => {
             let value = if let Some(expr) = &ret.value {
+                let _expected_guard = super::push_expected_target_type(super::current_fn_return_type());
                 // Handle method calls on objects - need to persist mutations to self
                 let (val, update) =
                     handle_method_call_with_self_update(expr, env, functions, classes, enums, impl_methods)?;
+                drop(_expected_guard);
                 if let Some((name, new_self)) = update {
                     env.insert(name, new_self);
                 }
@@ -769,6 +776,7 @@ pub(crate) fn exec_node(
             // If condition is Some and true, or if condition is None (else), return the result
             let should_return = match &guard_stmt.condition {
                 Some(cond_expr) => {
+                    let _clear_cond = super::push_expected_target_type(None);
                     let cond = evaluate_expr(cond_expr, env, functions, classes, enums, impl_methods)?;
                     // `is_condition_present` (not plain `.truthy()`): see its
                     // doc comment in `interpreter_control.rs` -- an `.?`
@@ -779,6 +787,7 @@ pub(crate) fn exec_node(
                 None => true, // `? else -> result` always matches
             };
             if should_return {
+                let _expected_guard = super::push_expected_target_type(super::current_fn_return_type());
                 let result = evaluate_expr(&guard_stmt.result, env, functions, classes, enums, impl_methods)?;
                 Ok(Control::Return(result))
             } else {
@@ -789,6 +798,7 @@ pub(crate) fn exec_node(
         Node::Context(ctx_stmt) => exec_context(ctx_stmt, env, functions, classes, enums, impl_methods),
         Node::With(with_stmt) => exec_with(with_stmt, env, functions, classes, enums, impl_methods),
         Node::Expression(expr) => {
+            let _clear_expected = super::push_expected_target_type(None);
             if let Expr::UnsafeBlock(nodes, _) = expr {
                 let (flow, _) = super::exec_unsafe_block(nodes, env, functions, classes, enums, impl_methods)?;
                 return Ok(flow);
@@ -868,26 +878,7 @@ pub(crate) fn exec_node(
             );
             classes.insert(
                 s.name.clone(),
-                Arc::new(ClassDef {
-                    span: s.span,
-                    name: s.name.clone(),
-                    generic_params: Vec::new(),
-                    where_clause: vec![],
-                    fields: s.fields.clone(),
-                    methods: s.methods.clone(),
-                    parent: None,
-                    visibility: s.visibility,
-                    effects: Vec::new(),
-                    attributes: Vec::new(),
-                    doc_comment: None,
-                    invariant: None,
-                    macro_invocations: vec![],
-                    mixins: vec![],
-                    is_generic_template: false,
-                    specialization_of: None,
-                    type_bindings: std::collections::HashMap::new(),
-                    is_value_type: true,
-                }),
+                Arc::new(crate::interpreter::core_types::struct_def_to_class_def(s)),
             );
             // Register static methods as mangled free functions (StructName__method)
             for method in &s.methods {
@@ -1398,20 +1389,23 @@ pub(crate) fn exec_assignment(
         // pre-bound bindings and is cleared by any genuine local declaration.
         // doc/08_tracking/bug/implicit_self_field_assignment_still_silent_in_plain_fn_methods_2026-08-31.md
         if is_first_assignment || env.is_field_prebind(name) {
-            if let Some(Value::Object { class, fields }) = env.get("self") {
-                if fields.contains_key(name) {
-                    let ctx = ErrorContext::new()
-                        .with_code(codes::INVALID_ASSIGNMENT)
-                        .with_help(format!(
-                            "write `self.{name} = ...` to assign the field; `self` is implicit only in the parameter list, not in field access"
-                        ));
-                    return Err(CompileError::semantic_with_context(
-                        format!(
-                            "invalid assignment: `{name}` is a field of `{class}`; a bare `{name} = ...` creates a new local and leaves `self.{name}` unchanged"
-                        ),
-                        ctx,
+            let shadowed_class = match env.get("self") {
+                Some(Value::Object { class, fields }) if fields.contains_key(name) => Some(class.clone()),
+                Some(Value::ClassInstance(instance)) if instance.field(name).is_some() => Some(instance.class().to_string()),
+                _ => None,
+            };
+            if let Some(class) = shadowed_class {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::INVALID_ASSIGNMENT)
+                    .with_help(format!(
+                        "write `self.{name} = ...` to assign the field; `self` is implicit only in the parameter list, not in field access"
                     ));
-                }
+                return Err(CompileError::semantic_with_context(
+                    format!(
+                        "invalid assignment: `{name}` is a field of `{class}`; a bare `{name} = ...` creates a new local and leaves `self.{name}` unchanged"
+                    ),
+                    ctx,
+                ));
             }
         }
 

@@ -52,6 +52,9 @@ pub enum Node {
     StructuredExportStmt(StructuredExportBlock),
     AutoImportStmt(AutoImportStmt),
     RequiresCapabilities(RequiresCapabilitiesStmt),
+    FriendDecl(FriendDecl),
+    InternalExportDecl(InternalExportDecl),
+    LayerDecl(LayerDecl),
 
     // Gherkin-style system test DSL (#606-610)
     // NOTE: Gherkin syntax is now transformed to regular Simple AST:
@@ -153,6 +156,9 @@ impl Node {
             Node::StructuredExportStmt(n) => Some(n.span),
             Node::AutoImportStmt(n) => Some(n.span),
             Node::RequiresCapabilities(n) => Some(n.span),
+            Node::FriendDecl(n) => Some(n.span),
+            Node::InternalExportDecl(n) => Some(n.span),
+            Node::LayerDecl(n) => Some(n.span),
             Node::AopAdvice(n) => Some(n.span),
             Node::DiBinding(n) => Some(n.span),
             Node::InjectGraph(n) => Some(n.span),
@@ -589,6 +595,11 @@ pub enum Expr {
 
     // Compound
     Identifier(String),
+    /// Generic instantiation on an expression: `ident<T>` or `expr<T, U>`
+    GenericInst {
+        expr: Box<Expr>,
+        type_args: Vec<Type>,
+    },
     Path(Vec<String>), // EnumName::Variant or module::item
     Binary {
         op: BinOp,

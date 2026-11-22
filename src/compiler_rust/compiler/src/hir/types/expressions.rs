@@ -87,7 +87,20 @@ pub enum HirExprKind {
         method: String,
         args: Vec<HirExpr>,
         dispatch: DispatchMode,
+        generic_args: Vec<TypeId>,
     },
+
+    /// Constrained static method call on a generic type parameter
+    /// (e.g., `C.from_iter(self)` where `C: FromIterator<Self.Item>` or `T.default()`).
+    TypeParamStaticCall {
+        type_param: String,
+        trait_name: Option<String>,
+        method: String,
+        args: Vec<HirExpr>,
+    },
+
+    /// Const generic parameter reference inside a generic struct/impl method.
+    ConstGeneric(String),
 
     // Struct/field access
     FieldAccess {
@@ -255,11 +268,24 @@ impl HirExprKind {
                 method,
                 args,
                 dispatch,
+                generic_args,
             } => HirExprKind::MethodCall {
                 receiver: Box::new(receiver.substitute_local(from_idx, to_idx)),
                 method: method.clone(),
                 args: args.iter().map(|a| a.substitute_local(from_idx, to_idx)).collect(),
                 dispatch: *dispatch,
+                generic_args: generic_args.clone(),
+            },
+            HirExprKind::TypeParamStaticCall {
+                type_param,
+                trait_name,
+                method,
+                args,
+            } => HirExprKind::TypeParamStaticCall {
+                type_param: type_param.clone(),
+                trait_name: trait_name.clone(),
+                method: method.clone(),
+                args: args.iter().map(|a| a.substitute_local(from_idx, to_idx)).collect(),
             },
             HirExprKind::FieldAccess { receiver, field_index } => HirExprKind::FieldAccess {
                 receiver: Box::new(receiver.substitute_local(from_idx, to_idx)),
@@ -358,11 +384,24 @@ impl HirExprKind {
                 method,
                 args,
                 dispatch,
+                generic_args,
             } => HirExprKind::MethodCall {
                 receiver: Box::new(receiver.substitute_self_with_result()),
                 method: method.clone(),
                 args: args.iter().map(|a| a.substitute_self_with_result()).collect(),
                 dispatch: *dispatch,
+                generic_args: generic_args.clone(),
+            },
+            HirExprKind::TypeParamStaticCall {
+                type_param,
+                trait_name,
+                method,
+                args,
+            } => HirExprKind::TypeParamStaticCall {
+                type_param: type_param.clone(),
+                trait_name: trait_name.clone(),
+                method: method.clone(),
+                args: args.iter().map(|a| a.substitute_self_with_result()).collect(),
             },
             HirExprKind::FieldAccess { receiver, field_index } => HirExprKind::FieldAccess {
                 receiver: Box::new(receiver.substitute_self_with_result()),

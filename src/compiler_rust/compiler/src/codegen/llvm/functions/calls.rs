@@ -3013,7 +3013,24 @@ impl LlvmBackend {
                 // shift, matching Cranelift, whose
                 // `tag_runtime_pool_join_result` defaults to false and is
                 // forced false for native-project builds.
-                let final_ret = ret_val;
+                let mut final_ret = ret_val;
+                if crate::codegen::instr::calls::returns_tagged_bool(sffi_name) {
+                    let i8_type = self.context_ref().i8_type();
+                    let rt_value_as_bool = module.get_function("rt_value_as_bool").unwrap_or_else(|| {
+                        module.add_function("rt_value_as_bool", i8_type.fn_type(&[i64_type.into()], false), None)
+                    });
+                    let bool_i8 = builder
+                        .build_call(rt_value_as_bool, &[ret_val.into()], "tagged_bool_raw")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_as_bool", &e))?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| CompileError::semantic("rt_value_as_bool returned void"))?
+                        .into_int_value();
+                    final_ret = builder
+                        .build_int_z_extend(bool_i8, i64_type, "tagged_bool_i64")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("zext tagged_bool", &e))?
+                        .into();
+                }
                 vreg_map.insert(d, final_ret);
             } else {
                 let default_val = i64_type.const_int(0, false);

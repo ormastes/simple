@@ -435,6 +435,10 @@ fn should_keep_selective_export(item: &Node, requested_names: &[String]) -> bool
                     .iter()
                     .any(|name| requested_names.iter().any(|wanted| wanted == name))
         }
+        Node::InternalExportDecl(decl) => decl
+            .symbols
+            .iter()
+            .any(|name| requested_names.iter().any(|wanted| wanted == name)),
         Node::UseStmt(_) => true,
         Node::Function(f) => requested_names.iter().any(|wanted| wanted == &f.name),
         _ => true,
@@ -489,12 +493,245 @@ fn provided_names_registry() -> &'static std::sync::Mutex<HashMap<std::path::Pat
 
 type PrivateFnNames = Arc<std::collections::HashSet<String>>;
 
-/// Private top-level fn names per owning module, process-wide (a call made on
-/// another thread is judged by the same set). Filled when the flattening
-/// loader parses a module, before any importer's top-level code can run, and
-/// again when the interpreter loader evaluates it.
-fn private_fn_registry() -> &'static std::sync::RwLock<HashMap<Arc<str>, PrivateFnNames>> {
-    static REGISTRY: OnceLock<std::sync::RwLock<HashMap<Arc<str>, PrivateFnNames>>> = OnceLock::new();
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct OwnerFriendPolicy {
+    /// Strictly private top-level `fn` names (not `pub`, not `pub(friend)`,
+    /// not re-exported, and not listed in `internal_export`).
+    private_fns: std::collections::HashSet<String>,
+    /// Friend-scoped top-level `fn` names (`pub(friend)` or listed in
+    /// `internal_export` and not publicly re-exported).
+    friend_fns: std::collections::HashSet<String>,
+    /// Package paths declared with `friend <pkg>` in this module or its
+    /// enclosing `__init__.spl`.
+    friends: Vec<Vec<String>>,
+}
+
+impl OwnerFriendPolicy {
+    fn is_restricted(&self, name: &str) -> bool {
+        self.private_fns.contains(name) || self.friend_fns.contains(name)
+    }
+}
+
+/// Normalize path separators and strip Windows verbatim `\\?\` / `//?/` prefix
+/// so path-based sibling and friend checks match uniformly across canonical
+/// and uncanonicalized paths.
+fn clean_visibility_path(raw: &str) -> String {
+    let normalized = raw.replace('\\', "/");
+    normalized
+        .strip_prefix("//?/")
+        .unwrap_or(&normalized)
+        .to_string()
+}
+
+fn clean_parent_dir(raw: &str) -> Option<String> {
+    let clean = clean_visibility_path(raw);
+    Path::new(&clean)
+        .parent()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+}
+
+fn canonical_pkg_segments(segs: &[String]) -> Vec<&str> {
+    segs.iter()
+        .enumerate()
+        .map(|(i, s)| if i == 0 && s == "std" { "lib" } else { s.as_str() })
+        .collect()
+}
+
+/// Non-inherited friend check: `caller_raw` belongs directly to a package
+/// (or module path) named in `friends`. Subpackages (`pkg/sub/...`) of a
+/// friend package are NOT inherited.
+fn is_declared_friend_path(friends: &[Vec<String>], caller_raw: &str) -> bool {
+    if friends.is_empty() {
+        return false;
+    }
+    let clean = clean_visibility_path(caller_raw);
+    let path = Path::new(&clean);
+    let components: Vec<String> = path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => s.to_str().map(|st| st.to_string()),
+            _ => None,
+        })
+        .collect();
+    let parent_segs = if components.len() > 1 {
+        &components[..components.len() - 1]
+    } else {
+        &components[..0]
+    };
+    let file_stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| *s != "__init__" && *s != "mod");
+    let src_pos = parent_segs.iter().rposition(|s| s == "src");
+
+    for friend_pkg in friends {
+        if friend_pkg.is_empty() {
+            continue;
+        }
+        let norm_friend = canonical_pkg_segments(friend_pkg);
+        if let Some(idx) = src_pos {
+            let pkg_segs = canonical_pkg_segments(&parent_segs[idx + 1..]);
+            if pkg_segs == norm_friend {
+                return true;
+            }
+            if let Some(stem) = file_stem {
+                let mut mod_segs: Vec<String> = parent_segs[idx + 1..].to_vec();
+                mod_segs.push(stem.to_string());
+                if canonical_pkg_segments(&mod_segs) == norm_friend {
+                    return true;
+                }
+            }
+            continue;
+        }
+        if parent_segs.ends_with(friend_pkg.as_slice()) {
+            return true;
+        }
+        if norm_friend[0] == "lib" && parent_segs.len() >= norm_friend.len() {
+            let tail = &parent_segs[parent_segs.len() - norm_friend.len()..];
+            if tail.iter().map(|s| s.as_str()).eq(norm_friend.iter().copied()) {
+                return true;
+            }
+        }
+        if let Some(stem) = file_stem {
+            let mut with_stem = parent_segs.to_vec();
+            with_stem.push(stem.to_string());
+            if with_stem.ends_with(friend_pkg.as_slice()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Legacy BS-P2-2 exception from release commit `8157ad736a0` (protected broker
+/// IO <-> task_runner): allow ONLY the 6 un-marked `operation_health_*` helpers
+/// in `distributed_operation_owner_health_v2.spl` when called from its declared
+/// `friend` package (`lib.nogc_sync_mut.io`), while keeping non-friends rejected.
+fn is_bs_p2_2_friend_legacy(owner: &str, name: &str) -> bool {
+    let clean_owner = clean_visibility_path(owner);
+    clean_owner.ends_with("src/lib/common/task_runner/distributed_operation_owner_health_v2.spl")
+        && matches!(
+            name,
+            "operation_health_end_v2"
+                | "operation_health_linux_begin_v1"
+                | "operation_health_linux_bind_v1"
+                | "operation_health_linux_borrow_v1"
+                | "operation_health_linux_close_step_v1"
+                | "operation_health_linux_open_v1"
+        )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FnVisibilityOutcome {
+    Allowed,
+    FriendOnly,
+    Private,
+}
+
+fn dir_init_friend_metadata(module_path: &Path) -> (Vec<Vec<String>>, std::collections::HashSet<String>) {
+    static CACHE: OnceLock<
+        std::sync::Mutex<HashMap<std::path::PathBuf, Arc<(Vec<Vec<String>>, std::collections::HashSet<String>)>>>,
+    > = OnceLock::new();
+    if module_path.file_name().and_then(|s| s.to_str()) == Some("__init__.spl") {
+        return (Vec::new(), std::collections::HashSet::new());
+    }
+    let Some(parent) = module_path.parent() else {
+        return (Vec::new(), std::collections::HashSet::new());
+    };
+    let init_path = parent.join("__init__.spl");
+    if !init_path.is_file() {
+        return (Vec::new(), std::collections::HashSet::new());
+    }
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(guard) = cache.lock() {
+        if let Some(cached) = guard.get(&init_path) {
+            return (**cached).clone();
+        }
+    }
+    let parsed_meta = fs::read_to_string(&init_path)
+        .ok()
+        .filter(|src| src.contains("friend") || src.contains("internal_export"))
+        .and_then(|src| simple_parser::Parser::new(&src).parse().ok())
+        .map(|module| {
+            let mut friends = Vec::new();
+            let mut internal_exports = std::collections::HashSet::new();
+            for item in &module.items {
+                match item {
+                    Node::FriendDecl(decl) => friends.push(decl.package.segments.clone()),
+                    Node::InternalExportDecl(decl) => {
+                        internal_exports.extend(decl.symbols.iter().cloned());
+                    }
+                    _ => {}
+                }
+            }
+            (friends, internal_exports)
+        })
+        .unwrap_or_default();
+    let shared = Arc::new(parsed_meta.clone());
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(init_path, shared);
+    }
+    parsed_meta
+}
+
+fn owner_friend_policy_from_items(module_path: &Path, items: &[Node]) -> OwnerFriendPolicy {
+    let mut exported = std::collections::HashSet::new();
+    let mut internal_exports = std::collections::HashSet::new();
+    let mut friends = Vec::new();
+
+    let (init_friends, init_internal_exports) = dir_init_friend_metadata(module_path);
+    friends.extend(init_friends);
+    internal_exports.extend(init_internal_exports);
+
+    for item in items {
+        match item {
+            Node::ExportUseStmt(export_stmt) => {
+                exported.extend(export_target_names(&export_stmt.target));
+            }
+            Node::InternalExportDecl(decl) => {
+                internal_exports.extend(decl.symbols.iter().cloned());
+            }
+            Node::FriendDecl(decl) => {
+                friends.push(decl.package.segments.clone());
+            }
+            _ => {}
+        }
+    }
+
+    let mut private_fns = std::collections::HashSet::new();
+    let mut friend_fns = std::collections::HashSet::new();
+    for item in items {
+        if let Node::Function(f) = item {
+            if exported.contains(&f.name) {
+                continue;
+            }
+            match f.visibility {
+                simple_parser::ast::Visibility::Internal => {
+                    friend_fns.insert(f.name.clone());
+                }
+                simple_parser::ast::Visibility::Private => {
+                    if internal_exports.contains(&f.name) {
+                        friend_fns.insert(f.name.clone());
+                    } else {
+                        private_fns.insert(f.name.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    OwnerFriendPolicy {
+        private_fns,
+        friend_fns,
+        friends,
+    }
+}
+
+/// Private and friend-scoped top-level fn metadata per owning module,
+/// process-wide (a call made on another thread is judged by the same policy).
+fn private_fn_registry() -> &'static std::sync::RwLock<HashMap<Arc<str>, Arc<OwnerFriendPolicy>>> {
+    static REGISTRY: OnceLock<std::sync::RwLock<HashMap<Arc<str>, Arc<OwnerFriendPolicy>>>> = OnceLock::new();
     REGISTRY.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
 }
 
@@ -503,26 +740,14 @@ fn private_fn_registry() -> &'static std::sync::RwLock<HashMap<Arc<str>, Private
 static PRIVATE_FN_REGISTRY_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 thread_local! {
-    /// Per-thread cache of `private_fn_registry`: (generation, owner -> names,
+    /// Per-thread cache of `private_fn_registry`: (generation, owner -> policy,
     /// `None` = no entry), so the per-call check takes no lock once an owner
     /// has been looked up.
-    static PRIVATE_FNS_BY_OWNER: std::cell::RefCell<(u64, HashMap<Arc<str>, Option<PrivateFnNames>>)> =
+    static PRIVATE_FNS_BY_OWNER: std::cell::RefCell<(u64, HashMap<Arc<str>, Option<Arc<OwnerFriendPolicy>>>)> =
         std::cell::RefCell::new((0, HashMap::new()));
 }
 
-fn register_private_fns(owner: Arc<str>, names: PrivateFnNames) {
-    let Ok(mut registry) = private_fn_registry().write() else {
-        return;
-    };
-    if registry.get(&owner).is_some_and(|known| **known == *names) {
-        return;
-    }
-    registry.insert(owner, names);
-    PRIVATE_FN_REGISTRY_GEN.fetch_add(1, std::sync::atomic::Ordering::Release);
-}
-
-/// Is `name` a private top-level fn of module `owner` (owner-key form)?
-pub(crate) fn is_private_fn_of(owner: &Arc<str>, name: &str) -> bool {
+fn lookup_owner_policy(owner: &Arc<str>) -> Option<Arc<OwnerFriendPolicy>> {
     let generation = PRIVATE_FN_REGISTRY_GEN.load(std::sync::atomic::Ordering::Acquire);
     PRIVATE_FNS_BY_OWNER.with(|cache| {
         let mut cache = cache.borrow_mut();
@@ -530,35 +755,114 @@ pub(crate) fn is_private_fn_of(owner: &Arc<str>, name: &str) -> bool {
             cache.0 = generation;
             cache.1.clear();
         }
-        if let Some(names) = cache.1.get(owner) {
-            return names.as_ref().is_some_and(|s| s.contains(name));
+        if let Some(policy) = cache.1.get(owner) {
+            return policy.clone();
         }
-        let names = private_fn_registry()
+        let policy = private_fn_registry()
             .read()
             .ok()
             .and_then(|registry| registry.get(owner).cloned());
-        let hit = names.as_ref().is_some_and(|s| s.contains(name));
-        cache.1.insert(Arc::clone(owner), names);
-        hit
+        cache.1.insert(Arc::clone(owner), policy.clone());
+        policy
     })
 }
 
-/// Record the private fns of a module the flattening loader just parsed
-/// (`items` = the module's own items, export statements included). The
-/// interpreter loader registers a module only after evaluating it, which is
-/// after the flattened top-level initializers of its importers have run
-/// (private_fn_registry_late_for_importer_top_level_2026-11-14).
+fn register_owner_policy(owner: Arc<str>, policy: Arc<OwnerFriendPolicy>) {
+    let Ok(mut registry) = private_fn_registry().write() else {
+        return;
+    };
+    if registry.get(&owner).is_some_and(|known| **known == *policy) {
+        return;
+    }
+    registry.insert(owner, policy);
+    PRIVATE_FN_REGISTRY_GEN.fetch_add(1, std::sync::atomic::Ordering::Release);
+}
+
+#[cfg(test)]
+fn register_private_fns(owner: Arc<str>, names: PrivateFnNames) {
+    register_owner_policy(
+        owner,
+        Arc::new(OwnerFriendPolicy {
+            private_fns: (*names).clone(),
+            friend_fns: Default::default(),
+            friends: Default::default(),
+        }),
+    );
+}
+
+/// Is `name` a private or friend-scoped top-level fn of module `owner`?
+pub(crate) fn is_private_fn_of(owner: &Arc<str>, name: &str) -> bool {
+    lookup_owner_policy(owner).is_some_and(|policy| policy.is_restricted(name))
+}
+
+fn fn_visibility_outcome(name: &str, owner: &Arc<str>, current: &str) -> FnVisibilityOutcome {
+    if &**owner == current || current == "<entry>" || is_test_caller(current) {
+        return FnVisibilityOutcome::Allowed;
+    }
+    // A test-written closure run from a non-test frame: the caller is the test.
+    if CLOSURE_ORIGIN_IS_TEST.with(|c| c.get()) == Some(true) {
+        return FnVisibilityOutcome::Allowed;
+    }
+    let Some(policy) = lookup_owner_policy(owner) else {
+        return FnVisibilityOutcome::Allowed;
+    };
+    let in_private = policy.private_fns.contains(name);
+    let in_friend = policy.friend_fns.contains(name);
+    if !in_private && !in_friend {
+        return FnVisibilityOutcome::Allowed;
+    }
+    if clean_parent_dir(owner) == clean_parent_dir(current) {
+        return FnVisibilityOutcome::Allowed;
+    }
+    let owner_clean = clean_visibility_path(owner);
+    if private_import_is_baselined(Path::new(&owner_clean), name) {
+        return FnVisibilityOutcome::Allowed;
+    }
+    let is_friend = is_declared_friend_path(&policy.friends, current);
+    if in_friend && is_friend {
+        return FnVisibilityOutcome::Allowed;
+    }
+    if in_private && is_bs_p2_2_friend_legacy(owner, name) && is_friend {
+        return FnVisibilityOutcome::Allowed;
+    }
+    if in_friend {
+        FnVisibilityOutcome::FriendOnly
+    } else {
+        FnVisibilityOutcome::Private
+    }
+}
+
+pub(crate) fn is_fn_visible_to(name: &str, owner: &Arc<str>, current: &Arc<str>) -> bool {
+    matches!(fn_visibility_outcome(name, owner, current), FnVisibilityOutcome::Allowed)
+}
+
+/// Record the private and friend-scoped fns of a module the flattening loader
+/// just parsed (`items` = the module's own items, export statements included).
 pub(crate) fn register_module_private_fns(module_path: &Path, items: &[Node]) {
-    let names = private_top_level_fn_names(items);
-    if !names.is_empty() {
-        register_private_fns(super::module_cache::module_owner_key(module_path), Arc::new(names));
+    let policy = owner_friend_policy_from_items(module_path, items);
+    if !policy.private_fns.is_empty() || !policy.friend_fns.is_empty() || !policy.friends.is_empty() {
+        register_owner_policy(super::module_cache::module_owner_key(module_path), Arc::new(policy));
     }
 }
 
 fn record_provided_names(module_path: &Path, provided: ProvidedNames) {
     if let Some(p) = provided.as_ref() {
         if !p.private_fns.is_empty() {
-            register_private_fns(super::module_cache::module_owner_key(module_path), Arc::new(p.private_fns.clone()));
+            let owner = super::module_cache::module_owner_key(module_path);
+            let existing = lookup_owner_policy(&owner);
+            let merged = match existing {
+                Some(prev) => OwnerFriendPolicy {
+                    private_fns: p.private_fns.clone(),
+                    friend_fns: prev.friend_fns.clone(),
+                    friends: prev.friends.clone(),
+                },
+                None => OwnerFriendPolicy {
+                    private_fns: p.private_fns.clone(),
+                    friend_fns: Default::default(),
+                    friends: Default::default(),
+                },
+            };
+            register_owner_policy(owner, Arc::new(merged));
         }
     }
     if let Ok(mut registry) = provided_names_registry().lock() {
@@ -625,13 +929,21 @@ fn collect_provided_names(
     for name in locally_defined_names(items) {
         provided.insert(name);
     }
-    // Explicit re-export lists (`export use other.{A, B}`) name real surface even
-    // when the re-exported target failed to evaluate into `exports`.
+    // Explicit re-export lists (`export use other.{A, B}`) and `internal_export`
+    // directives name real surface even when not yet evaluated into `exports`.
     for item in items {
-        if let Node::ExportUseStmt(export_stmt) = item {
-            for name in export_target_names(&export_stmt.target) {
-                provided.insert(name);
+        match item {
+            Node::ExportUseStmt(export_stmt) => {
+                for name in export_target_names(&export_stmt.target) {
+                    provided.insert(name);
+                }
             }
+            Node::InternalExportDecl(decl) => {
+                for name in &decl.symbols {
+                    provided.insert(name.clone());
+                }
+            }
+            _ => {}
         }
     }
     provided.retain(|name| !exports.contains_key(name));
@@ -643,12 +955,18 @@ fn collect_provided_names(
 }
 
 /// Top-level `fn` names with private (default) visibility that no `export`
-/// statement in the module re-exposes.
+/// or `internal_export` statement in the module re-exposes.
 fn private_top_level_fn_names(items: &[Node]) -> std::collections::HashSet<String> {
     let mut exported: std::collections::HashSet<String> = std::collections::HashSet::new();
     for item in items {
-        if let Node::ExportUseStmt(export_stmt) = item {
-            exported.extend(export_target_names(&export_stmt.target));
+        match item {
+            Node::ExportUseStmt(export_stmt) => {
+                exported.extend(export_target_names(&export_stmt.target));
+            }
+            Node::InternalExportDecl(decl) => {
+                exported.extend(decl.symbols.iter().cloned());
+            }
+            _ => {}
         }
     }
     items
@@ -667,6 +985,10 @@ fn private_top_level_fn_names(items: &[Node]) -> std::collections::HashSet<Strin
 /// The driver keys its "never fall back to the interpreter" decision on it, so
 /// both producers interpolate this constant rather than repeating the text.
 pub const PRIVATE_FN_VISIBILITY_HINT: &str = "mark it `pub` or `export` it";
+
+/// Tail of every friend-scoped visibility rejection (import rule and call rule).
+pub const FRIEND_SYMBOL_VISIBILITY_HINT: &str =
+    "only same package or declared `friend` packages may access `pub(friend)` / `internal_export` symbols";
 
 /// Visibility check (interp_private_names_leak_across_modules_2026-11-05):
 /// a braced `use m.{name}` that names a private `fn` of `m` (not re-exported by
@@ -697,15 +1019,27 @@ fn check_private_use_names(
     let Some(requested) = requested_group_import_names(use_stmt) else {
         return Ok(());
     };
+    let owner_key = super::module_cache::module_owner_key(module_path);
+    let has_policy = lookup_owner_policy(&owner_key).is_some();
+    let importer_str = importer.to_string_lossy();
     for name in requested {
-        if !provided.private_fns.contains(&name) {
-            continue;
-        }
-        if private_import_is_baselined(module_path, &name) {
-            // Legacy pair frozen in scripts/check/private_import_baseline.txt:
-            // warn only, so the baseline can ratchet down.
-            if !simple_common::tool_closure_quiet::tool_closure_quiet()
-                && !use_warning_seen(format!("priv\u{1}{}\u{1}{}\u{1}{}", module_path.display(), name, importer.display())) {
+        let outcome = if has_policy {
+            fn_visibility_outcome(&name, &owner_key, &importer_str)
+        } else if provided.private_fns.contains(&name) {
+            if private_import_is_baselined(module_path, &name) {
+                FnVisibilityOutcome::Allowed
+            } else {
+                FnVisibilityOutcome::Private
+            }
+        } else {
+            FnVisibilityOutcome::Allowed
+        };
+        if matches!(outcome, FnVisibilityOutcome::Allowed) {
+            if (provided.private_fns.contains(&name) || lookup_owner_policy(&owner_key).is_some_and(|p| p.private_fns.contains(&name)))
+                && private_import_is_baselined(module_path, &name)
+                && !simple_common::tool_closure_quiet::tool_closure_quiet()
+                && !use_warning_seen(format!("priv\u{1}{}\u{1}{}\u{1}{}", module_path.display(), name, importer.display()))
+            {
                 eprintln!(
                     "[visibility-warning] '{name}' is a private fn of module '{module_label}' ({}); mark it `pub` or `export` it (imported from {})",
                     module_path.display(),
@@ -713,6 +1047,13 @@ fn check_private_use_names(
                 );
             }
             continue;
+        }
+        if matches!(outcome, FnVisibilityOutcome::FriendOnly) {
+            return Err(CompileError::semantic(format!(
+                "friend-scoped symbol `{name}` of module `{module_label}` ({}) is not visible to {} ({FRIEND_SYMBOL_VISIBILITY_HINT})",
+                module_path.display(),
+                importer.display()
+            )));
         }
         return Err(CompileError::semantic(format!(
             "private fn `{name}` of module `{module_label}` ({}) is not visible to {}; {PRIVATE_FN_VISIBILITY_HINT}",
@@ -1170,6 +1511,18 @@ pub fn load_and_merge_module(
     // Check cache first - if we've already loaded this module, return cached exports
     if let Some(cached_exports) = get_cached_module_exports(&module_path) {
         loader_trace!("cache-hit", "{}", module_path.display());
+        // Use-list check on the cache path BEFORE merging definitions into the
+        // caller's maps so a rejected import never leaks private definitions.
+        if let Some(provided) = lookup_provided_names(&module_path) {
+            if let Err(e) = check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided) {
+                clear_partial_module_exports(&module_path);
+                unmark_module_loading(&module_path);
+                decrement_load_depth();
+                return Err(e);
+            }
+            warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided);
+        }
+
         // Merge cached definitions (classes, functions, enums) into caller's HashMaps.
         // This ensures that static method calls work on imported classes.
         // Functions are Arc<FunctionDef> in the cache; we unwrap to raw FunctionDef for
@@ -1186,16 +1539,6 @@ pub fn load_and_merge_module(
         merge_cached_module_definitions(&module_path, classes, functions, enums);
         classes.extend(preserved);
         enums.extend(preserved_enums);
-
-        // Use-list check on the cache path: the AST is gone, so consult the
-        // surface recorded when this module was first loaded.
-        if let Some(provided) = lookup_provided_names(&module_path) {
-            if let Err(e) = check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided) {
-                decrement_load_depth();
-                return Err(e);
-            }
-            warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided);
-        }
 
         decrement_load_depth();
         // If importing a specific item, extract it from cached exports
@@ -1577,6 +1920,7 @@ pub fn load_and_merge_module(
     // compared against what `mod` actually provides. Record the surface so
     // later cache hits can run the same check, then report any name the module
     // does not provide. Reporting only — registration below is unchanged.
+    register_module_private_fns(&module_path, &filtered_items);
     let provided_names = collect_provided_names(
         &filtered_items,
         &exports,
@@ -1870,6 +2214,7 @@ mod tests {
             target,
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         }
     }
 
@@ -2039,6 +2384,7 @@ mod tests {
             target,
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         }
     }
 
@@ -2117,6 +2463,104 @@ mod tests {
         };
 
         assert!(matches!(exports.get("env_get"), Some(Value::Function { .. })));
+    }
+
+    #[test]
+    fn friend_internal_export_and_layer_are_not_opaque_and_unhide_internal_exports() {
+        let src = "friend lib.nogc_sync_mut.io\ninternal_export secret_helper\nlayer domain\nfn secret_helper() -> i64:\n    1\npub(friend) fn pub_friend_helper() -> i64:\n    3\nfn still_private() -> i64:\n    2\n";
+        let module = simple_parser::Parser::new(src).parse().unwrap();
+        assert!(!super::module_surface_is_opaque(&module.items));
+        let private_fns = super::private_top_level_fn_names(&module.items);
+        assert!(!private_fns.contains("secret_helper"));
+        assert!(private_fns.contains("still_private"));
+
+        let owner_path = std::path::PathBuf::from(r"\\?\C:\repo\src\lib\common\task_runner\health_mod_test.spl");
+        let owner_key = super::super::module_cache::module_owner_key(&owner_path);
+        super::register_module_private_fns(&owner_path, &module.items);
+
+        let friend_unc = std::sync::Arc::<str>::from(r"\\?\C:\repo\src\lib\nogc_sync_mut\io\reader.spl");
+        let non_friend = std::sync::Arc::<str>::from("C:/repo/src/app/other/main.spl");
+        let subpackage = std::sync::Arc::<str>::from("C:/repo/src/lib/nogc_sync_mut/io/sub/deep.spl");
+
+        assert!(super::check_private_call_visibility("secret_helper", &owner_key, &friend_unc).is_ok());
+        assert!(super::check_private_call_visibility("pub_friend_helper", &owner_key, &friend_unc).is_ok());
+        assert!(super::check_private_call_visibility("still_private", &owner_key, &friend_unc).is_err());
+
+        assert!(super::check_private_call_visibility("secret_helper", &owner_key, &non_friend).is_err());
+        assert!(super::check_private_call_visibility("pub_friend_helper", &owner_key, &non_friend).is_err());
+        assert!(super::check_private_call_visibility("secret_helper", &owner_key, &subpackage).is_err());
+        assert!(super::check_private_call_visibility("pub_friend_helper", &owner_key, &subpackage).is_err());
+
+        let bsp2_owner = std::path::PathBuf::from(
+            r"\\?\C:\repo\src\lib\common\task_runner\distributed_operation_owner_health_v2.spl",
+        );
+        let bsp2_src = "friend lib.nogc_sync_mut.io\nfn operation_health_end_v2() -> i64:\n    0\nfn unrelated_private() -> i64:\n    1\n";
+        let bsp2_mod = simple_parser::Parser::new(bsp2_src).parse().unwrap();
+        let bsp2_key = super::super::module_cache::module_owner_key(&bsp2_owner);
+        super::register_module_private_fns(&bsp2_owner, &bsp2_mod.items);
+        assert!(super::check_private_call_visibility("operation_health_end_v2", &bsp2_key, &friend_unc).is_ok());
+        assert!(super::check_private_call_visibility("unrelated_private", &bsp2_key, &friend_unc).is_err());
+        assert!(super::check_private_call_visibility("operation_health_end_v2", &bsp2_key, &non_friend).is_err());
+
+        // Runtime call and namespace handout gates must enforce Visibility::Internal (`pub(friend)`)
+        // as well as `Visibility::Private`, not only braced `use mod.{name}`.
+        let mut pub_friend_def = None;
+        let mut secret_def = None;
+        for item in &module.items {
+            if let simple_parser::ast::Node::Function(f) = item {
+                if f.name == "pub_friend_helper" {
+                    pub_friend_def = Some(std::sync::Arc::new(f.clone()));
+                } else if f.name == "secret_helper" {
+                    secret_def = Some(std::sync::Arc::new(f.clone()));
+                }
+            }
+        }
+        let pub_friend_def = pub_friend_def.expect("pub_friend_helper FunctionDef");
+        let secret_def = secret_def.expect("secret_helper FunctionDef");
+        crate::interpreter::FUNCTION_MODULE_OWNER.with(|cell| {
+            let mut map = cell.borrow_mut();
+            map.insert(std::sync::Arc::as_ptr(&pub_friend_def) as usize, std::sync::Arc::clone(&owner_key));
+            map.insert(std::sync::Arc::as_ptr(&secret_def) as usize, std::sync::Arc::clone(&owner_key));
+        });
+        let mut ns_entries = crate::value::DictMap::default();
+        ns_entries.insert(
+            "pub_friend_helper".to_string(),
+            crate::value::Value::Function {
+                name: "pub_friend_helper".to_string(),
+                def: std::sync::Arc::clone(&pub_friend_def),
+                captured_env: std::sync::Arc::new(crate::value::Env::new()),
+            },
+        );
+        ns_entries.insert(
+            "secret_helper".to_string(),
+            crate::value::Value::Function {
+                name: "secret_helper".to_string(),
+                def: std::sync::Arc::clone(&secret_def),
+                captured_env: std::sync::Arc::new(crate::value::Env::new()),
+            },
+        );
+
+        let saved_owner = crate::interpreter::CURRENT_EXEC_MODULE.with(|c| c.borrow().clone());
+        let saved_file = crate::interpreter::CURRENT_FILE.with(|c| c.borrow().clone());
+        let _src_guard = super::ClosureOriginGuard::enter(Some(false));
+
+        crate::interpreter::CURRENT_FILE.with(|c| *c.borrow_mut() = Some(std::path::PathBuf::from("C:/repo/src/app/other/main.spl")));
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = Some(std::sync::Arc::clone(&non_friend)));
+        assert!(crate::interpreter::interpreter_call::gate_private_call("pub_friend_helper", &pub_friend_def).is_err());
+        assert!(crate::interpreter::interpreter_call::gate_private_call("secret_helper", &secret_def).is_err());
+        assert!(crate::interpreter::interpreter_call::gate_namespace_private_entries(&ns_entries).is_err());
+
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = Some(std::sync::Arc::clone(&subpackage)));
+        assert!(crate::interpreter::interpreter_call::gate_private_call("pub_friend_helper", &pub_friend_def).is_err());
+        assert!(crate::interpreter::interpreter_call::gate_namespace_private_entries(&ns_entries).is_err());
+
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = Some(std::sync::Arc::clone(&friend_unc)));
+        assert!(crate::interpreter::interpreter_call::gate_private_call("pub_friend_helper", &pub_friend_def).is_ok());
+        assert!(crate::interpreter::interpreter_call::gate_private_call("secret_helper", &secret_def).is_ok());
+        assert!(crate::interpreter::interpreter_call::gate_namespace_private_entries(&ns_entries).is_ok());
+
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = saved_owner);
+        crate::interpreter::CURRENT_FILE.with(|c| *c.borrow_mut() = saved_file);
     }
 
     #[test]
@@ -2403,6 +2847,7 @@ export register_wiki_tool
             span: simple_parser::token::Span::new(0, 0, 0, 0),
             path: ModulePath { segments: vec![] },
             target: ImportTarget::Group(items),
+            attributes: vec![],
         })
     }
 
@@ -2417,6 +2862,7 @@ export register_wiki_tool
             target: ImportTarget::Group(items),
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         })
     }
 
@@ -2460,6 +2906,7 @@ export register_wiki_tool
             target: ImportTarget::Glob,
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         });
         let requested = vec!["compile_file".to_string()];
         assert!(should_keep_selective_export(&node, &requested));
@@ -3080,27 +3527,15 @@ pub(crate) fn check_private_call_visibility(
     owner: &Arc<str>,
     current: &Arc<str>,
 ) -> Result<(), CompileError> {
-    if owner == current || &**current == "<entry>" || is_test_caller(current) {
-        return Ok(());
+    match fn_visibility_outcome(name, owner, current) {
+        FnVisibilityOutcome::Allowed => Ok(()),
+        FnVisibilityOutcome::FriendOnly => Err(CompileError::semantic(format!(
+            "friend-scoped symbol `{name}` of module `{owner}` is not visible to {current} ({FRIEND_SYMBOL_VISIBILITY_HINT})"
+        ))),
+        FnVisibilityOutcome::Private => Err(CompileError::semantic(format!(
+            "private fn `{name}` of module `{owner}` is not visible to {current}; {PRIVATE_FN_VISIBILITY_HINT}"
+        ))),
     }
-    // A test-written closure run from a non-test frame: the caller is the test.
-    if CLOSURE_ORIGIN_IS_TEST.with(|c| c.get()) == Some(true) {
-        return Ok(());
-    }
-    let is_private = is_private_fn_of(owner, name);
-    if !is_private {
-        return Ok(());
-    }
-    let (owner_path, cur_path) = (Path::new(&**owner), Path::new(&**current));
-    if owner_path.parent() == cur_path.parent() {
-        return Ok(());
-    }
-    if private_import_is_baselined(owner_path, name) {
-        return Ok(());
-    }
-    Err(CompileError::semantic(format!(
-        "private fn `{name}` of module `{owner}` is not visible to {current}; {PRIVATE_FN_VISIBILITY_HINT}"
-    )))
 }
 
 #[cfg(test)]

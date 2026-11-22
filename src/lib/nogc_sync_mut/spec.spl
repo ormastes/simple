@@ -42,6 +42,143 @@ extern fn rt_bdd_executed_total() -> i64
 extern fn rt_bdd_failed_total() -> i64
 extern fn rt_bdd_record_result(passed: i64)
 
+fn _expect_num_kind(s: text) -> i64:
+    # 0 = non-numeric, 1 = i64 integer, 2 = finite f64, 3 = +inf, 4 = -inf, 5 = NaN
+    val n = s.byte_len()
+    if n == 0:
+        return 0
+    val low = s.lower()
+    if low == "nan" or low == "+nan" or low == "-nan":
+        return 5
+    if low == "inf" or low == "+inf" or low == "infinity" or low == "+infinity":
+        return 3
+    if low == "-inf" or low == "-infinity":
+        return 4
+    var i: i64 = 0
+    var neg = false
+    val b0 = s.byte_at(0)
+    if b0 == 43u8:
+        i = 1
+    elif b0 == 45u8:
+        neg = true
+        i = 1
+    if i >= n:
+        return 0
+    var int_digits: i64 = 0
+    var sig_start: i64 = -1
+    while i < n:
+        val b = s.byte_at(i)
+        if b >= 48u8 and b <= 57u8:
+            int_digits = int_digits + 1
+            if b != 48u8 and sig_start < 0:
+                sig_start = i
+            i = i + 1
+        else:
+            break
+    val int_end = i
+    var has_dot = false
+    var frac_digits: i64 = 0
+    if i < n and s.byte_at(i) == 46u8:
+        has_dot = true
+        i = i + 1
+        while i < n:
+            val b = s.byte_at(i)
+            if b >= 48u8 and b <= 57u8:
+                frac_digits = frac_digits + 1
+                i = i + 1
+            else:
+                break
+    if int_digits == 0 and frac_digits == 0:
+        return 0
+    var has_exp = false
+    if i < n:
+        val be = s.byte_at(i)
+        if be == 101u8 or be == 69u8:
+            has_exp = true
+            i = i + 1
+            if i < n:
+                val bs = s.byte_at(i)
+                if bs == 43u8 or bs == 45u8:
+                    i = i + 1
+            var exp_digits: i64 = 0
+            while i < n:
+                val b = s.byte_at(i)
+                if b >= 48u8 and b <= 57u8:
+                    exp_digits = exp_digits + 1
+                    i = i + 1
+                else:
+                    break
+            if exp_digits == 0:
+                return 0
+    if i != n:
+        return 0
+    if has_dot or has_exp:
+        return 2
+    val sig_len: i64 = if sig_start < 0: 0 else: int_end - sig_start
+    if sig_len <= 18:
+        return 1
+    if sig_len == 19:
+        val sig_slice = s.slice(sig_start, int_end)
+        val limit = if neg: "9223372036854775808" else: "9223372036854775807"
+        if sig_slice <= limit:
+            return 1
+    2
+
+fn _expect_compare_num(sa: text, sb: text) -> i64:
+    # Returns -1 (<), 0 (==), 1 (>), or 2 (IEEE-754 unordered when either is NaN).
+    val ka = _expect_num_kind(sa)
+    val kb = _expect_num_kind(sb)
+    if ka == 0 or kb == 0:
+        if sa < sb:
+            return -1
+        if sa > sb:
+            return 1
+        return 0
+    if ka == 5 or kb == 5:
+        return 2
+    if ka == 3 and kb == 3:
+        return 0
+    if ka == 4 and kb == 4:
+        return 0
+    if ka == 3:
+        return 1
+    if kb == 3:
+        return -1
+    if ka == 4:
+        return -1
+    if kb == 4:
+        return 1
+    if ka == 1 and kb == 1:
+        val ai: i64 = sa.to_int()
+        val bi: i64 = sb.to_int()
+        if ai < bi:
+            return -1
+        if ai > bi:
+            return 1
+        return 0
+    val af: f64 = sa.to_float()
+    val bf: f64 = sb.to_float()
+    if af != af or bf != bf:
+        return 2
+    if af < bf:
+        return -1
+    if af > bf:
+        return 1
+    0
+
+fn _expect_is_nil(candidate: any?) -> bool:
+    candidate == None
+
+fn _expect_array_contains(arr: [any], item) -> bool:
+    if arr.len() <= 0:
+        return false
+    arr.contains(item)
+
+fn _expect_dict_contains(dct: Dict<any, any>, item) -> bool:
+    if dct.len() <= 0:
+        return false
+    dct.contains(item)
+
 var current_suite = ""
 var current_context = ""
 var suite_stack: [text] = []
@@ -1512,11 +1649,12 @@ pub class ExpectHelper:
 
     fn to_be_nil():
         _expect_begin_matcher(self.implicit_error)
+        val is_nil = _expect_is_nil(self.value)
         if self.negated:
-            if self.value == nil:
+            if is_nil:
                 fail_assertion("Expected value to NOT be nil")
         else:
-            if self.value != nil:
+            if not is_nil:
                 fail_assertion("Expected nil, got {self.value}")
         ()
 
@@ -1542,41 +1680,57 @@ pub class ExpectHelper:
 
     fn to_be_greater_than(expected):
         _expect_begin_matcher(self.implicit_error)
+        val sa: text = "{self.value}"
+        val sb: text = "{expected}"
+        val cmp = _expect_compare_num(sa, sb)
+        val gt = cmp == 1
         if self.negated:
-            if self.value > expected:
+            if gt:
                 fail_assertion("Expected {self.value} to NOT be greater than {expected}")
         else:
-            if self.value <= expected:
+            if not gt:
                 fail_assertion("Expected {self.value} to be greater than {expected}")
         ()
 
     fn to_be_less_than(expected):
         _expect_begin_matcher(self.implicit_error)
+        val sa: text = "{self.value}"
+        val sb: text = "{expected}"
+        val cmp = _expect_compare_num(sa, sb)
+        val lt = cmp == -1
         if self.negated:
-            if self.value < expected:
+            if lt:
                 fail_assertion("Expected {self.value} to NOT be less than {expected}")
         else:
-            if self.value >= expected:
+            if not lt:
                 fail_assertion("Expected {self.value} to be less than {expected}")
         ()
 
     fn to_be_at_least(expected):
         _expect_begin_matcher(self.implicit_error)
+        val sa: text = "{self.value}"
+        val sb: text = "{expected}"
+        val cmp = _expect_compare_num(sa, sb)
+        val ge = cmp == 0 or cmp == 1
         if self.negated:
-            if self.value >= expected:
+            if ge:
                 fail_assertion("Expected {self.value} to NOT be at least {expected}")
         else:
-            if self.value < expected:
+            if not ge:
                 fail_assertion("Expected {self.value} to be at least {expected}")
         ()
 
     fn to_be_at_most(expected):
         _expect_begin_matcher(self.implicit_error)
+        val sa: text = "{self.value}"
+        val sb: text = "{expected}"
+        val cmp = _expect_compare_num(sa, sb)
+        val le = cmp == 0 or cmp == -1
         if self.negated:
-            if self.value <= expected:
+            if le:
                 fail_assertion("Expected {self.value} to NOT be at most {expected}")
         else:
-            if self.value > expected:
+            if not le:
                 fail_assertion("Expected {self.value} to be at most {expected}")
         ()
 
@@ -1585,7 +1739,11 @@ pub class ExpectHelper:
 
     fn to_contain(item):
         _expect_begin_matcher(self.implicit_error)
-        val contains = self.value.contains(item)
+        var contains = self.value.contains(item)
+        if not contains:
+            contains = _expect_array_contains(self.value, item)
+        if not contains:
+            contains = _expect_dict_contains(self.value, item)
         if self.negated:
             if contains:
                 fail_assertion("Expected {self.value} to NOT contain {item}")

@@ -646,6 +646,8 @@ impl<'a> Parser<'a> {
                     // `spawn` is a soft keyword (actor spawn expr); it must still
                     // work as a named-arg label, e.g. R(spawn: X.Rejected("..")).
                     TokenKind::Spawn => Some("spawn".to_string()),
+                    TokenKind::Admit => Some("admit".to_string()),
+                    TokenKind::Assume => Some("assume".to_string()),
                     _ => None,
                 }
             };
@@ -805,6 +807,9 @@ impl<'a> Parser<'a> {
                         | TokenKind::Extend
                         | TokenKind::Asm
                         | TokenKind::OutErr
+                        | TokenKind::Spawn
+                        | TokenKind::Admit
+                        | TokenKind::Assume
                 );
 
                 if is_likely_named_arg {
@@ -932,13 +937,14 @@ impl<'a> Parser<'a> {
                         break;
                     }
 
-                    // Stop at closing brackets when the lambda body is inside a function call.
+                    // Stop at closing brackets or comma when the lambda body is inside a call/collection.
                     // Example: items.filter(\d:\n    not done.contains(d)).len()
-                    // The `)` that closes .filter(...) terminates the lambda body.
+                    // The `)` or `,` that closes .filter(...) or a struct field terminates the lambda body.
                     if matches!(
                         self.current.kind,
                         TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace
-                    ) {
+                    ) || (!statements.is_empty() && self.check(&TokenKind::Comma))
+                    {
                         break;
                     }
 
@@ -952,15 +958,16 @@ impl<'a> Parser<'a> {
                 }
 
                 // Consume dedent if present.
-                // If we broke at a closing bracket (RParen etc.), the dedent may come
-                // later as the bracket closes. Pop the lexer's indent stack to stay in sync.
+                // If we broke at a closing bracket/comma, the dedent may come
+                // later as the enclosing construct closes. Pop the lexer's indent stack to stay in sync.
                 if self.check(&TokenKind::Dedent) {
                     self.advance();
                 } else if matches!(
                     self.current.kind,
                     TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace
-                ) {
-                    // Lambda body ended at a closing bracket without a Dedent.
+                ) || (!statements.is_empty() && self.check(&TokenKind::Comma))
+                {
+                    // Lambda body ended at a closing bracket or comma without a Dedent.
                     // Pop the indent stack to keep it in sync.
                     self.lexer.pop_indent();
                 }

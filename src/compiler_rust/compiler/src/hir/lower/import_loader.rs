@@ -308,6 +308,7 @@ impl Lowerer {
             Node::Let(let_stmt) => Self::extract_pattern_name(&let_stmt.pattern).as_deref() == Some(name),
             Node::Extern(extern_fn) => extern_fn.name == name,
             Node::ExportUseStmt(export_use) => Self::import_target_exports_name(&export_use.target, name),
+            Node::InternalExportDecl(decl) => decl.symbols.iter().any(|sym| sym == name),
             _ => false,
         }
     }
@@ -329,6 +330,7 @@ impl Lowerer {
             Node::Function(func_def) => func_def.name == name,
             Node::Extern(extern_fn) => extern_fn.name == name,
             Node::ExportUseStmt(export_use) => Self::import_target_exports_name(&export_use.target, name),
+            Node::InternalExportDecl(decl) => decl.symbols.iter().any(|sym| sym == name),
             _ => false,
         }
     }
@@ -431,26 +433,7 @@ impl Lowerer {
             return false;
         };
 
-        requested_names.iter().any(|name| {
-            let fn_pat = format!("fn {}(", name);
-            let extern_pat = format!("extern fn {}(", name);
-            let type_pat = format!("type {}", name);
-            let class_pat = format!("class {}", name);
-            let struct_pat = format!("struct {}", name);
-            let enum_pat = format!("enum {}", name);
-            let trait_pat = format!("trait {}", name);
-            let let_pat = format!("let {}", name);
-            let const_pat = format!("const {}", name);
-            source.contains(&fn_pat)
-                || source.contains(&extern_pat)
-                || source.contains(&type_pat)
-                || source.contains(&class_pat)
-                || source.contains(&struct_pat)
-                || source.contains(&enum_pat)
-                || source.contains(&trait_pat)
-                || source.contains(&let_pat)
-                || source.contains(&const_pat)
-        })
+        crate::pipeline::module_loader::source_might_define_requested_symbol(&source, requested_names)
     }
 
     fn bind_imported_trait_declarations(&mut self, source: &std::path::Path, caller: &std::path::Path, target: &ImportTarget) {
@@ -730,27 +713,33 @@ impl Lowerer {
                     }
                 }
                 Node::Impl(impl_block) => {
-                    let type_name = match &impl_block.target_type {
-                        simple_parser::ast::Type::Simple(name) => Some(name.clone()),
-                        simple_parser::ast::Type::Generic { name, .. } => Some(name.clone()),
-                        _ => None,
-                    };
+                    let type_name = Self::impl_target_type_name(&impl_block.target_type);
 
                     if let Some(ref type_name) = type_name {
-                        if self.should_import_symbol(type_name, target) {
+                        let import_for_trait = impl_block
+                            .trait_name
+                            .as_deref()
+                            .is_some_and(|tn| self.should_import_symbol(tn, target));
+                        if self.should_import_symbol(type_name, target) || import_for_trait {
                             self.record_imported_method_defaults(type_name, &impl_block.methods);
-                            for method in &impl_block.methods {
-                                let ret_ty = self.resolve_type_opt(&method.return_type)?;
-                                let method_full_name = format!("{}.{}", type_name, method.name);
-                                self.globals.insert(method_full_name.clone(), ret_ty);
-                                self.method_return_types.insert(method_full_name.clone(), ret_ty);
-                                // Mark as imported function so MIR lowering skips it as a global
-                                // (prevents IncompatibleDeclaration when codegen declares it as data)
-                                self.imported_function_names.insert(method_full_name);
-                                if method.is_pure() {
-                                    self.pure_functions.insert(format!("{}.{}", type_name, method.name));
+                            let saved_scope = self.enter_impl_signature_scope(impl_block, type_name);
+                            let loop_res: LowerResult<()> = (|| {
+                                for method in &impl_block.methods {
+                                    let ret_ty = self.resolve_type_opt(&method.return_type)?;
+                                    let method_full_name = format!("{}.{}", type_name, method.name);
+                                    self.globals.insert(method_full_name.clone(), ret_ty);
+                                    self.method_return_types.insert(method_full_name.clone(), ret_ty);
+                                    // Mark as imported function so MIR lowering skips it as a global
+                                    // (prevents IncompatibleDeclaration when codegen declares it as data)
+                                    self.imported_function_names.insert(method_full_name);
+                                    if method.is_pure() {
+                                        self.pure_functions.insert(format!("{}.{}", type_name, method.name));
+                                    }
                                 }
-                            }
+                                Ok(())
+                            })();
+                            self.restore_impl_signature_scope(saved_scope);
+                            loop_res?;
                             imported_count += 1;
                         }
                     }

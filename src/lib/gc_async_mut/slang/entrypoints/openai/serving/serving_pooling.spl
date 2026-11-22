@@ -1,22 +1,193 @@
 # @gc — module uses GC runtime
 #
-# /v1/embeddings and /v1/rerank — stub until lane L4 (pooling) replaces this
-# file. Design: doc/05_design/ml/slang/slang_pluggable_modalities.md §3.5.
-# A model of another kind is 400 wrong_model_kind; an Embedding / Rerank
-# model is 501 not_implemented with the runner's reason.
+# /v1/embeddings (OpenAI shape) and /v1/rerank (Jina / Cohere shape).
+# Design: doc/05_design/ml/slang/slang_pluggable_modalities.md §3.5.
+#
+# A model of another kind is 400 wrong_model_kind (model_for_kind). Vectors
+# are L2-normalized, as llama.cpp's server and OpenAI return them;
+# encoding_format "base64" is the normalized float32 little-endian bytes.
+# relevance_score is the sigmoid of the reranker's logit (0..1, Cohere
+# shape); the order is the logit order.
 
-use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse}
-use std.gc_async_mut.slang.entrypoints.openai.serving_models.{model_for_kind, kind_not_implemented_response}
-use std.gc_async_mut.slang.modality.kinds.{ModelKind}
+use std.gc_async_mut.slang.entrypoints.openai.protocol.{ApiResponse, ChatPart, openai_error_response, json_string_field, json_text_literal}
+use std.gc_async_mut.slang.entrypoints.openai.serving_models.{model_for_kind}
+use std.gc_async_mut.slang.modality.kinds.{ModelKind, KindRequest, KindParams, KindResult}
+use std.gc_async_mut.slang.model_executor.backend.{f32_le_to_floats}
+use std.gc_async_mut.slang.model_executor.runners.pooling_runner.{pooling_runner_available, pooling_runner_serve}
+use std.common.json.parser.{json_parse_with_error}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.array_ops.{json_array_get, json_array_length}
+use std.common.base_encoding.base64.{base64_encode_bytes}
+use std.common.binary_io.{f32_to_bits}
+use std.common.math.math.{math_exp, math_sqrt}
+
+fn _bad_request(message: text) -> ApiResponse:
+    openai_error_response(400, message, "invalid_request_error", "invalid_request", "")
+
+fn _text_part(s: text) -> ChatPart:
+    ChatPart(kind: "text", text: s, data: "", format: "")
+
+fn _params(top_n: i64) -> KindParams:
+    KindParams(max_tokens: 0, n: 1, size: "", steps: 0, seed: -1, voice: "", top_n: top_n, response_format: "")
+
+# `key` as a list of strings: a lone string is a one-element list. Err names
+# what was wrong with the field.
+fn _string_list(body: text, key: text) -> Result<[text], text>:
+    val parsed = json_parse_with_error(body)
+    if parsed.1 != "":
+        return Err("request body is not valid JSON: " + parsed.1)
+    if not json_object_get(parsed.0, key).?:
+        return Err("missing required field: " + key)
+    val value = json_object_get(parsed.0, key)!
+    if value.0 == "string":
+        return Ok([value.1])
+    if value.0 != "array":
+        return Err("field '" + key + "' must be a string or an array of strings")
+    var out: [text] = []
+    val count = json_array_length(value)
+    var i = 0
+    while i < count:
+        val found = json_array_get(value, i)
+        if not found.? or found!.0 != "string":
+            return Err("field '" + key + "' item " + i.to_text() + " must be a string (token-id input is not supported)")
+        out.push(found!.1)
+        i = i + 1
+    if out.len() == 0:
+        return Err("field '" + key + "' must not be empty")
+    Ok(out)
+
+fn _run(model_root: text, body: text, kind: ModelKind, route: text, parts: [ChatPart], top_n: i64) -> Result<(text, KindResult), ApiResponse>:
+    match model_for_kind(model_root, body, kind, route):
+        Err(refusal): return Err(refusal)
+        Ok(model):
+            if not pooling_runner_available():
+                return Err(openai_error_response(503, route + " needs the ggml shim (SLANG_GGML_LIB), which is not present", "server_error", "backend_unavailable", ""))
+            match pooling_runner_serve(model, KindRequest(model_id: model.id, parts: parts, params: _params(top_n))):
+                Err(fault):
+                    if fault.0 == 400:
+                        return Err(_bad_request(fault.1))
+                    Err(openai_error_response(503, fault.1, "server_error", "model_load_failed", ""))
+                Ok(result): Ok((model.id, result))
+
+fn _normalized(values: [f64]) -> [f64]:
+    var sum = 0.0
+    for v in values:
+        sum = sum + v * v
+    val norm = math_sqrt(sum)
+    if norm <= 0.0:
+        return values
+    var out: [f64] = []
+    for v in values:
+        out.push(v / norm)
+    out
+
+fn _f32_le(values: [f64]) -> [u8]:
+    var out: [u8] = []
+    for v in values:
+        val bits = f32_to_bits(v as f32)
+        out.push((bits & 255u32) as u8)
+        out.push(((bits >> 8) & 255u32) as u8)
+        out.push(((bits >> 16) & 255u32) as u8)
+        out.push(((bits >> 24) & 255u32) as u8)
+    out
+
+fn _usage(tokens: i64) -> text:
+    "{\"prompt_tokens\":" + tokens.to_text() + ",\"total_tokens\":" + tokens.to_text() + "}"
 
 fn serve_embeddings(model_root: text, body: text) -> ApiResponse:
-    match model_for_kind(model_root, body, ModelKind.Embedding, "/v1/embeddings"):
+    val format = json_string_field(body, "encoding_format")
+    if format != "" and format != "float" and format != "base64":
+        return _bad_request("encoding_format must be 'float' or 'base64'")
+    var inputs: [text] = []
+    match _string_list(body, "input"):
+        Err(reason): return _bad_request(reason)
+        Ok(list): inputs = list
+    var parts: [ChatPart] = []
+    for s in inputs:
+        parts.push(_text_part(s))
+    match _run(model_root, body, ModelKind.Embedding, "/v1/embeddings", parts, 0):
         Err(refusal): refusal
-        Ok(model): kind_not_implemented_response(model, "/v1/embeddings")
+        Ok(done):
+            var data = ""
+            var i = 0
+            while i < done.1.parts.len():
+                val vector = _normalized(f32_le_to_floats(done.1.parts[i].bytes))
+                var embedding = ""
+                if format == "base64":
+                    embedding = json_text_literal(base64_encode_bytes(_f32_le(vector)))
+                else:
+                    var nums: [text] = []
+                    for v in vector:
+                        nums.push(v.to_text())
+                    embedding = "[" + nums.join(",") + "]"
+                if i > 0:
+                    data = data + ","
+                data = data + "{\"object\":\"embedding\",\"index\":" + i.to_text() + ",\"embedding\":" + embedding + "}"
+                i = i + 1
+            ApiResponse(status: 200, body: "{\"object\":\"list\",\"data\":[" + data + "],\"model\":" + json_text_literal(done.0) + ",\"usage\":" + _usage(done.1.prompt_tokens) + "}")
+
+# Named uniquely: a helper called `_sigmoid` returned ~1e-19 for every logit
+# here under the release seed (cause not isolated; bug record filed),
+# while the same expression inline was correct.
+fn rerank_relevance_from_logit(logit: f64) -> f64:
+    val e = math_exp(0.0 - logit)
+    1.0 / (1.0 + e)
+
+# `top_n` as a positive integer, 0 when absent. Read from the parsed tree:
+# protocol.json_int_field calls text.ord(), which the release seed lacks.
+fn _top_n(body: text) -> Result<i64, text>:
+    val parsed = json_parse_with_error(body)
+    if parsed.1 != "":
+        return Err("request body is not valid JSON: " + parsed.1)
+    if not json_object_get(parsed.0, "top_n").?:
+        return Ok(0)
+    val value = json_object_get(parsed.0, "top_n")!
+    if value.0 != "number" or value.1 < 1.0 or ((value.1 as i64) as f64) != value.1:
+        return Err("top_n must be a positive integer")
+    Ok(value.1 as i64)
 
 fn serve_rerank(model_root: text, body: text) -> ApiResponse:
-    match model_for_kind(model_root, body, ModelKind.Rerank, "/v1/rerank"):
+    val query = json_string_field(body, "query")
+    if query == "":
+        return _bad_request("missing or empty required field: query")
+    var documents: [text] = []
+    match _string_list(body, "documents"):
+        Err(reason): return _bad_request(reason)
+        Ok(list): documents = list
+    var top_n = documents.len()
+    match _top_n(body):
+        Err(reason): return _bad_request(reason)
+        Ok(n): if n > 0: top_n = n
+    var parts: [ChatPart] = [_text_part(query)]
+    for d in documents:
+        parts.push(_text_part(d))
+    match _run(model_root, body, ModelKind.Rerank, "/v1/rerank", parts, top_n):
         Err(refusal): refusal
-        Ok(model): kind_not_implemented_response(model, "/v1/rerank")
+        Ok(done):
+            var scores: [f64] = []
+            for p in done.1.parts:
+                val values = f32_le_to_floats(p.bytes)
+                scores.push(if values.len() > 0: values[0] else: -1.0e30)
+            # Selection sort by descending logit: document lists are short.
+            var order: [i64] = []
+            var used: [bool] = []
+            for _s in scores:
+                used.push(false)
+            val limit = if top_n > 0 and top_n < scores.len(): top_n else: scores.len()
+            while order.len() < limit:
+                var best = -1
+                var j = 0
+                while j < scores.len():
+                    if not used[j] and (best < 0 or scores[j] > scores[best]):
+                        best = j
+                    j = j + 1
+                used[best] = true
+                order.push(best)
+            var results = ""
+            for idx in order:
+                if results != "":
+                    results = results + ","
+                results = results + "{\"index\":" + idx.to_text() + ",\"relevance_score\":" + rerank_relevance_from_logit(scores[idx]).to_text() + "}"
+            ApiResponse(status: 200, body: "{\"object\":\"list\",\"model\":" + json_text_literal(done.0) + ",\"results\":[" + results + "],\"usage\":" + _usage(done.1.prompt_tokens) + "}")
 
 export serve_embeddings, serve_rerank

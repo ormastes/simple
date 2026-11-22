@@ -583,7 +583,20 @@ impl Lowerer {
         // Add each method with its vtable slot
         // Methods are assigned slots in declaration order (0-indexed)
         let result = (|| -> LowerResult<()> {
+            let mut trait_params = t.generic_params.clone();
+            if !trait_params.iter().any(|p| p == "Self") {
+                trait_params.push("Self".to_string());
+            }
             for method in &t.methods {
+                let prev_generics = std::mem::take(&mut self.active_fn_generic_params);
+                let mut active = trait_params.clone();
+                for gp in &method.generic_params {
+                    if !active.contains(gp) {
+                        active.push(gp.clone());
+                    }
+                }
+                self.active_fn_generic_params = active;
+
                 // Resolve parameter types (skip self)
                 let param_types: Vec<TypeId> = method
                     .params
@@ -594,8 +607,16 @@ impl Lowerer {
 
                 // Resolve return type
                 let return_type = self.resolve_type_opt(&method.return_type)?;
+                self.active_fn_generic_params = prev_generics;
 
-                trait_info.add_method(method.name.clone(), param_types, return_type);
+                let generic_bounds = Self::extract_generic_bounds(&method.where_clause);
+                trait_info.add_generic_method(
+                    method.name.clone(),
+                    param_types,
+                    return_type,
+                    method.generic_params.clone(),
+                    generic_bounds,
+                );
             }
             Ok(())
         })();

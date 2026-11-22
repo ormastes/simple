@@ -408,8 +408,12 @@ impl MirLowering:
     me lower_function(fn_: HirFunction) -> MirFunction:
         val attr = fn_.func_attr
         val is_gpu_kernel = attr.is_gpu_kernel or fn_.is_gpu_kernel
-        val gpu_target = if attr.gpu_target != "": attr.gpu_target else: fn_.gpu_target
-        val gpu_backend_order = if attr.gpu_backends != "": attr.gpu_backends else: fn_.gpu_backend_order
+        val attr_target = attr.gpu_target ?? ""
+        val fn_target = fn_.gpu_target ?? ""
+        val attr_backends = attr.gpu_backends ?? ""
+        val fn_backends = fn_.gpu_backend_order ?? ""
+        val gpu_target = if attr_target != "": attr_target else: fn_target
+        val gpu_backend_order = if attr_backends != "": attr_backends else: fn_backends
         for param in fn_.params:
             self.refuse_struct_instantiated_dict_generic_v1(param.type_, "parameter '{param.name}' of '{fn_.name}'")
         self.refuse_struct_instantiated_dict_generic_v1(fn_.return_type, "return type of '{fn_.name}'")
@@ -908,7 +912,11 @@ impl MirLowering:
                                     # class's bare name has no field layout in
                                     # this module, so `path[i].children` read
                                     # as Unit and `for c in ...` hit #143.
-                                    self.array_element_struct_syms[local.id] = self.struct_value_provenance_key(element)
+                                    if element.kind == SymbolKind.Struct:
+                                        self.array_element_struct_syms[local.id] = self.struct_value_provenance_key(element)
+                                    elif element.kind == SymbolKind.Class:
+                                        val elem_cls_key = mir_class_identity_raw(self.symbols, element_symbol.id)
+                                        self.array_element_struct_syms[local.id] = if elem_cls_key != "": elem_cls_key else: self.struct_value_provenance_key(element)
                             case _:
                                 ()
                 case HirTypeKind.Any | HirTypeKind.TypeParam(_, _):
@@ -947,7 +955,8 @@ impl MirLowering:
                             var parameter_type_name = ""
                             if val present_parameter_type = optional_parameter_type:
                                 val parameter_type: HirSymbol = present_parameter_type
-                                parameter_type_name = self.struct_value_layout_key(parameter_type)
+                                if parameter_type.kind == SymbolKind.Struct or parameter_type.kind == SymbolKind.Class:
+                                    parameter_type_name = self.struct_value_layout_key(parameter_type)
                             val is_named_struct = parameter_type_name != "" and self.struct_field_order.has(parameter_type_name)
                             if is_named_struct:
                                 self.struct_value_syms[local.id] = parameter_type_name
@@ -963,9 +972,10 @@ impl MirLowering:
                         case Named(type_symbol, _):
                             val optional_reference_owner: HirSymbol? = self.symbols.get_symbol_raw(type_symbol.id)
                             if val reference_owner = optional_reference_owner:
-                                var reference_owner_name = self.struct_value_layout_key(reference_owner)
-                                if self.struct_field_order.has(reference_owner_name):
-                                    self.struct_value_syms[local.id] = reference_owner_name
+                                if reference_owner.kind == SymbolKind.Struct or reference_owner.kind == SymbolKind.Class:
+                                    var reference_owner_name = self.struct_value_layout_key(reference_owner)
+                                    if self.struct_field_order.has(reference_owner_name):
+                                        self.struct_value_syms[local.id] = reference_owner_name
                         case _: ()
                 case Named(type_symbol, _):
                     # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
@@ -974,9 +984,11 @@ impl MirLowering:
                     var is_class_param = false
                     if val present_parameter_type = optional_parameter_type:
                         val parameter_type: HirSymbol = present_parameter_type
-                        parameter_type_name = self.struct_value_layout_key(parameter_type)
                         match parameter_type.kind:
+                            case Struct:
+                                parameter_type_name = self.struct_value_layout_key(parameter_type)
                             case Class:
+                                parameter_type_name = self.struct_value_layout_key(parameter_type)
                                 is_class_param = self.class_type_names.has(parameter_type_name)
                             case _: ()
                     val is_named_struct = parameter_type_name != "" and self.struct_field_order.has(parameter_type_name)
@@ -2292,6 +2304,9 @@ impl MirLowering:
                 self.error_fatal("Result Err field has conflicting value provenance", Some(base.span))
                 return 0
         var layout_owner = ""
+        # Bare value-provenance owner whose single (non-conflicting) layout
+        # lacks the field; armed for the final fallback below.
+        var provenance_lacking_owner = ""
         # Numeric SymbolIds are local to each module and can collide in an
         # entry-closure build. A lowered local's name-keyed provenance is
         # therefore authoritative when available.
@@ -2309,6 +2324,7 @@ impl MirLowering:
                 if value_name.contains("::"):
                     self.error_fatal("field '{field_name}' is absent from exact value layout '{value_name}'", Some(base.span))
                     return 0
+                provenance_lacking_owner = value_name
 
         if self.result_err_record_owners.contains(base_local.id):
             self.error_fatal("Result Err record field has no exact provider layout: {field_name}", Some(base.span))
@@ -2354,7 +2370,7 @@ impl MirLowering:
                         q_idx = q_idx + 1
                     self.error_fatal("field '{field_name}' is absent from exact struct/class layout '{qualified_key}'", Some(base.span))
                     return 0
-            val sym_id = self.symbol_id_value(found_type_sym)
+            val sym_id = found_type_sym.id
             # Presence does not unwrap HirSymbol?: a Some box used as concrete HirSymbol reads its enum header as a struct header (4710b22a991 class).
             val optional_fm_type_symbol: HirSymbol? = self.symbols.get_symbol_raw(found_type_sym.id)
             if self.field_map.has(sym_id):
@@ -2438,6 +2454,15 @@ impl MirLowering:
         # See doc/08_tracking/bug/missing_struct_field_store_writes_field0_2026-10-25.md
         if layout_owner != "":
             self.error_fatal("no field '{field_name}' on '{layout_owner}'", Some(base.span))
+        # Untyped receiver (e.g. `val p = match f(): case Ok(v): v`): no HIR
+        # type, so the qualified tier above never ran, but value provenance
+        # names one unambiguous layout and no tier found the field. Index 0
+        # here read `policy.collection` as the `handoff` record and the MIR
+        # shard worker died 0xC0000005. Fail closed.
+        # See doc/08_tracking/bug/mir_shard_worker_av_missing_policy_collection_field_2026-11-22.md
+        if layout_owner == "" and provenance_lacking_owner != "":
+            self.error_fatal("no field '{field_name}' on '{provenance_lacking_owner}' (receiver type from value provenance)", Some(base.span))
+            return 0
         # An erased generic value (`T`) with no record identity: index 0 would
         # be a silent wrong read of whatever record arrives. The identity must
         # come from the call site (infer_erased_call_result_records, the

@@ -325,6 +325,49 @@ fn rust_abi_type(ty: &str) -> &'static str {
     }
 }
 
+fn configure_runtime_c_build(build: &mut cc::Build, runtime_c_dir: &Path, target_os: &str, linux_uring: bool) {
+    build.define("SIMPLE_RUNTIME_RUST_COLLECTION_CAPTURE_PROVIDER", None);
+    build.opt_level(2).warnings(false).cargo_metadata(false);
+    if linux_uring {
+        build.include(runtime_c_dir.join("platform"));
+        build.include(runtime_c_dir.join("vendor/liburing/include"));
+        build.define("SPL_HAS_IO_URING", None);
+        build.define("SIMPLE_ASYNC_DRIVER_NO_FLAT_API", None);
+        build.define("SIMPLE_ASYNC_DRIVER_NO_EPOLL", None);
+    }
+    if target_os == "windows" {
+        build.include(runtime_c_dir.join("platform"));
+        // Rust owns the rt_driver_* flat ABI; C contributes only the vtable.
+        build.define("SIMPLE_ASYNC_DRIVER_NO_FLAT_API", None);
+    }
+    build.define("SIMPLE_RUNTIME_OPENCL_ONLY", None);
+    // See the runtime_audio.c comment below: this crate doesn't compile
+    // runtime.c, so spl_array_get/spl_as_float are unavailable here.
+    build.define("SIMPLE_RUNTIME_AUDIO_STUB_SPLARRAY", None);
+    // See the runtime_process_owned.c comment below: rt_free_deep lives in
+    // runtime_native.c, which this crate does not compile.
+    build.define("SIMPLE_RUNTIME_PROCESS_OWNED_STRING_FREE", None);
+    // Bootstrap-only compatibility: the seed cannot link the canonical Pure
+    // Simple timestamp module. Stage4 never enables this provider.
+    build.define("SIMPLE_BOOTSTRAP_TIMESTAMP_COMPAT", None);
+    // See the runtime_process.c comment below: the Rust runtime crate already
+    // defines rt_process_run_timeout / rt_process_run_bounded / rt_process_wait.
+    build.define("SIMPLE_RUNTIME_PROCESS_RUST_CORE", None);
+    build.define("SIMPLE_RUNTIME_FILE_VIEW_RUST_OWNER", None);
+    if target_os == "windows" {
+        // runtime_memtrack.c / runtime_simd_dispatch.c weak symbols are strong on
+        // Windows MSVC/GNU; Rust owns these counters and AES helpers here.
+        build.define("SIMPLE_RUNTIME_RUST_PROVIDES_HEAP_COUNTERS", None);
+        build.define("SIMPLE_RUNTIME_RUST_PROVIDES_AES_ROUND_U8X16", None);
+    }
+    if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() != "msvc" {
+        build.flag_if_supported("-std=gnu11");
+    } else {
+        build.flag_if_supported("/std:c11");
+        build.flag_if_supported("/experimental:c11atomics");
+    }
+}
+
 // Standalone declaration tests need no C compiler or Cargo build dependencies.
 #[cfg(not(test))]
 fn compile_c_runtime_sources() {
@@ -502,93 +545,7 @@ fn compile_c_runtime_sources() {
     }
 
     let mut build = cc::Build::new();
-    build.define("SIMPLE_RUNTIME_RUST_COLLECTION_CAPTURE_PROVIDER", None);
-    build.opt_level(2).warnings(false).cargo_metadata(false);
-    if linux_uring {
-        build.include(runtime_c_dir.join("platform"));
-        build.include(runtime_c_dir.join("vendor/liburing/include"));
-        build.define("SPL_HAS_IO_URING", None);
-        build.define("SIMPLE_ASYNC_DRIVER_NO_FLAT_API", None);
-        build.define("SIMPLE_ASYNC_DRIVER_NO_EPOLL", None);
-    }
-    if target_os == "windows" {
-        build.include(runtime_c_dir.join("platform"));
-        // Rust owns the rt_driver_* flat ABI; C contributes only the vtable.
-        build.define("SIMPLE_ASYNC_DRIVER_NO_FLAT_API", None);
-    }
-    build.define("SIMPLE_RUNTIME_OPENCL_ONLY", None);
-    // See the runtime_audio.c comment above: this crate doesn't compile
-    // runtime.c, so spl_array_get/spl_as_float are unavailable here.
-    build.define("SIMPLE_RUNTIME_AUDIO_STUB_SPLARRAY", None);
-    // See the runtime_process_owned.c comment above: rt_free_deep lives in
-    // runtime_native.c, which this crate does not compile.
-    build.define("SIMPLE_RUNTIME_PROCESS_OWNED_STRING_FREE", None);
-    // Bootstrap-only compatibility: the seed cannot link the canonical Pure
-    // Simple timestamp module. Stage4 never enables this provider.
-    build.define("SIMPLE_BOOTSTRAP_TIMESTAMP_COMPAT", None);
-    // See the runtime_process.c comment above: the Rust runtime crate already
-    // defines rt_process_run_timeout / rt_process_run_bounded / rt_process_wait.
-    build.define("SIMPLE_RUNTIME_PROCESS_RUST_CORE", None);
-    build.define("SIMPLE_RUNTIME_FILE_VIEW_RUST_OWNER", None);
-    let target_os_for_heap_counters = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target_os_for_heap_counters == "windows" {
-        // runtime_memtrack.c's rt_heap_live_bytes/rt_heap_peak_bytes fallbacks
-        // are __attribute__((weak)) so the Rust accounting wins whenever both
-        // are linked. MSVC has no weak attribute, so on this lane the C
-        // fallbacks are STRONG and collide with the Rust definitions in
-        // value::heap -- LNK2005, measured on x86_64-pc-windows-msvc. The Rust
-        // runtime always provides them here (mem_snapshot.rs imports both), so
-        // suppress the C fallbacks rather than duplicate them.
-        //
-        // Keyed on target_os, NOT target_env == "msvc" (2026-09-07). The
-        // earlier msvc-only gate reasoned that "the GNU/Darwin lanes keep the
-        // weak fallbacks byte-unchanged", but that holds only for the *Unix*
-        // GNU lanes. runtime_memtrack.c selects its weak branch with
-        // `#elif (__GNUC__ || __clang__) && !defined(_WIN32)`, so
-        // x86_64-pc-windows-gnu skips that branch and lands on the same STRONG
-        // definitions MSVC gets -- deliberately, because a GNU-style weak
-        // symbol on MinGW becomes a `.weak.NAME.ref` COFF alias that ld drops
-        // under --gc-sections (documented at that file's `#else`). With the
-        // suppression gated to msvc, MinGW therefore got the strong C
-        // definitions AND the Rust ones, failing the seed link with:
-        //   multiple definition of `rt_heap_peak_bytes';
-        //   simple_runtime...rcgu.o: first defined here
-        // measured on x86_64-pc-windows-gnu / GCC 16.2 running
-        // `cargo build --profile bootstrap -p simple-driver`.
-        //
-        // Both Windows ABIs need the same suppression for the same reason, so
-        // the condition is the OS. Unix GNU and Darwin still take the weak
-        // branch and are unaffected.
-        build.define("SIMPLE_RUNTIME_RUST_PROVIDES_HEAP_COUNTERS", None);
-        // Same reasoning, same precedent, for rt_simd_aes_round_u8x16 /
-        // rt_simd_aes_round_last_u8x16: runtime_simd_dispatch.c's GNU/Clang
-        // weak definitions already yield to
-        // value/simd_aes_ops.rs's `#[no_mangle]` ones on Unix/Darwin. MSVC
-        // has no weak attribute and Windows-GNU drops a weak COFF alias under
-        // --gc-sections (see runtime_memtrack.c's identical note), so both
-        // Windows ABIs need the C definitions suppressed outright rather than
-        // relying on weak-symbol precedence.
-        build.define("SIMPLE_RUNTIME_RUST_PROVIDES_AES_ROUND_U8X16", None);
-    }
-    if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() != "msvc" {
-        build.flag_if_supported("-std=gnu11");
-    } else {
-        // MSVC's default C mode predates C11 <stdatomic.h> support (used by
-        // runtime_simd_dispatch.c). `-std=gnu11` above is a GCC/Clang-only
-        // flag `cl.exe` doesn't recognize, so `flag_if_supported` silently
-        // dropped it here, leaving MSVC on a C mode without atomics and
-        // failing with "C atomics require C11 or later" (cl.exe's own
-        // vcruntime_c11_stdatomic.h #error). `/std:c11` is cl.exe's
-        // equivalent, supported unconditionally on the VS 2022 17.x toolsets
-        // this repo targets (verified against MSVC 14.44.35207) — but on
-        // THIS toolset `/std:c11` alone still left <stdatomic.h> refusing
-        // with "C atomic support is not enabled" (a second, more specific
-        // #error a level deeper than the first): MSVC 14.44 still gates the
-        // real C11 atomics implementation behind the separate
-        // `/experimental:c11atomics` switch even when `/std:c11` is set.
-        build.flag_if_supported("/std:c11");
-        build.flag_if_supported("/experimental:c11atomics");
-    }
+    configure_runtime_c_build(&mut build, &runtime_c_dir, &target_os, linux_uring);
     if native_all_provider {
         // One registry owns authentication and every session/resource lease.
         // Keep the Rust legacy GPU/dynlib APIs; do not create duplicate owners.
@@ -596,13 +553,45 @@ fn compile_c_runtime_sources() {
         build.define("SIMPLE_GPU_PROVIDER_REGISTRY_ONLY", None);
     }
     for source in &c_sources {
+        // Keep runtime_memory.c in c_sources for runtime-source-list parity
+        // checks, but compile it into its own non-whole-archive library so
+        // native-all consumers supplying a unified SIMPLE_RUNTIME_MEMORY_OWNER=1
+        // bundle do not pull conflicting or untagged runtime_memory objects.
+        if *source == "runtime_memory.c" {
+            continue;
+        }
         let src_path = runtime_c_dir.join(source);
         if src_path.exists() {
             build.file(src_path);
         }
     }
+    if target_os == "windows" && !native_all_provider {
+        // Expose Windows private root & journal handle ABIs (normally header-
+        // included into runtime_native.c) to the seed JIT/cdylib without
+        // colliding with runtime_native.c under native-all-provider builds.
+        let win_priv_stub = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"))
+            .join("windows_private_root_provider.c");
+        let stub_body = "#include \"platform/runtime_windows_private_root.h\"\n";
+        if fs::read_to_string(&win_priv_stub).ok().as_deref() != Some(stub_body) {
+            fs::write(&win_priv_stub, stub_body).expect("write windows_private_root_provider.c");
+        }
+        build.include(&runtime_c_dir);
+        build.file(win_priv_stub);
+    }
     build.define("SIMPLE_RUNTIME_RUST_SDL_PROVIDER", None);
     build.compile("runtime_sffi_c");
+
+    println!("cargo:rerun-if-env-changed=SIMPLE_RUNTIME_MEMORY_OWNER");
+    let memory_source = runtime_c_dir.join("runtime_memory.c");
+    if memory_source.exists() {
+        let mut mem_build = cc::Build::new();
+        configure_runtime_c_build(&mut mem_build, &runtime_c_dir, &target_os, linux_uring);
+        if env::var("SIMPLE_RUNTIME_MEMORY_OWNER").ok().as_deref() == Some("1") {
+            mem_build.define("SIMPLE_RUNTIME_MEMORY_OWNER", Some("1"));
+        }
+        mem_build.file(memory_source);
+        mem_build.compile("runtime_sffi_memory");
+    }
 
     // hosted_cocoa.c is Objective-C behind a .c extension. Keep its symbols
     // private to this Rust crate: cocoa_dynload_owner.rs supplies the public
@@ -662,6 +651,10 @@ fn compile_c_runtime_sources() {
     } else {
         println!("cargo:rustc-link-lib=static=runtime_sffi_c");
     }
+    // Never force +whole-archive on runtime_sffi_memory so native-all consumers
+    // linking their own SIMPLE_RUNTIME_MEMORY_OWNER=1 archive can override or
+    // strip runtime_memory cleanly without pulling conflicting definitions.
+    println!("cargo:rustc-link-lib=static=runtime_sffi_memory");
 
     if target_os != "windows" {
         println!("cargo:rustc-link-lib=dylib=m");
@@ -672,6 +665,7 @@ fn compile_c_runtime_sources() {
         // platform/async_windows.c: AcceptEx/ConnectEx/WSARecv (IOCP provider).
         println!("cargo:rustc-link-lib=dylib=ws2_32");
         println!("cargo:rustc-link-lib=dylib=mswsock");
+        println!("cargo:rustc-link-lib=dylib=advapi32");
     }
     // openpty / forkpty live in libutil on Linux and most BSDs.
     // On macOS they are part of libc itself; on Windows the functions don't exist.
@@ -811,18 +805,66 @@ fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: 
             ],
         ),
         ("runtime_process_owned_cwd_private.h", &["rt_process_observation_v4_close_cwd_value"]),
-        ("runtime_secure_staging.c", &["rt_file_create_excl", "rt_file_sync"]),
+        (
+            "runtime_secure_staging.c",
+            &[
+                "rt_file_create_excl",
+                "rt_file_sync",
+                "rt_file_publish_noreplace",
+                "rt_secure_temp_dir",
+                "rt_dir_is_real_no_follow",
+                "spl_thread_current_id",
+            ],
+        ),
+        (
+            "runtime_secure_temp_split_private.h",
+            &[
+                "rt_secure_temp_dir_set_parent",
+                "rt_secure_temp_dir_set_prefix",
+                "rt_secure_temp_dir_make",
+            ],
+        ),
     ];
-    if target_os == "linux" {
-        for (source, names) in JIT_SCALAR_C_EXPORTS {
-            let Ok(file) = fs::read_to_string(root.join(source)) else {
-                continue;
-            };
-            exported.extend(
-                runtime_export_scan::c_function_definitions(&file)
-                    .into_iter()
-                    .filter(|symbol| names.contains(&symbol.as_str())),
-            );
+    for (source, names) in JIT_SCALAR_C_EXPORTS {
+        if *source == "runtime_linux_group_owner_impl.h" && target_os != "linux" {
+            continue;
+        }
+        // On non-Linux hosts (e.g., Windows), the non-Unix fallback stubs for
+        // runtime_process_owned_cwd_private.h / runtime_process_observation_reserved_v4_impl.h
+        // live directly inside runtime_process_owned.c rather than those headers.
+        let scan_path = if target_os == "linux"
+            || matches!(*source, "runtime_secure_staging.c" | "runtime_secure_temp_split_private.h")
+        {
+            root.join(source)
+        } else {
+            root.join("runtime_process_owned.c")
+        };
+        let Ok(file) = fs::read_to_string(scan_path) else {
+            continue;
+        };
+        exported.extend(
+            runtime_export_scan::c_function_definitions(&file)
+                .into_iter()
+                .filter(|symbol| names.contains(&symbol.as_str())),
+        );
+    }
+
+    if target_os == "windows" && !native_all_provider {
+        for header in [
+            "platform/runtime_windows_private_root.h",
+            "platform/runtime_windows_journal_store_v1.h",
+            "platform/runtime_windows_private_stage_discard_v2.h",
+        ] {
+            if let Ok(file) = fs::read_to_string(root.join(header)) {
+                exported.extend(
+                    runtime_export_scan::c_function_definitions(&file)
+                        .into_iter()
+                        .filter(|symbol| {
+                            symbol.starts_with("rt_windows_private_")
+                                || symbol.starts_with("rt_windows_journal_")
+                        }),
+                );
+            }
         }
     }
 }

@@ -74,6 +74,9 @@ pub(crate) fn non_bool_literal_arg_kind(expr: &Expr) -> Option<&'static str> {
         Expr::Integer(_) | Expr::TypedInteger(..) => Some("integer"),
         Expr::Float(_) | Expr::TypedFloat(..) => Some("float"),
         Expr::String(_) | Expr::TypedString(..) | Expr::FString { .. } => Some("text"),
+        Expr::Array(_) | Expr::ArrayRepeat { .. } => Some("array"),
+        Expr::Tuple(_) => Some("tuple"),
+        Expr::Dict(_) => Some("dict"),
         Expr::Nil => Some("nil"),
         // `~0`, `-1`: a sign or bit-not over a numeric literal is still a literal.
         Expr::Unary {

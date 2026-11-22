@@ -1506,6 +1506,39 @@ pub fn box_device_top_record(node_count: i32, i: i32, frac_milli: i32):
         g_box_device_top = t
     g_box_device_top[i] = frac_milli * k
 
+# An atomic box a LINE placed (a form control) is not on the block cursor: it
+# hangs from the line's baseline, which Chrome finds in device px. Its entry
+# is DEVICE_TOP_REL + dy, whole device px RELATIVE to its nearest
+# cursor-placed ancestor: paint adds every such entry on the way up to that
+# ancestor's own top (`_html_draw_ir_device_top`). Chrome 159, 16px/1.5
+# Liberation Sans at k=4: the baseline is 70 where 4 x 17 is 68, so a default
+# text `<input>` (baseline 60 = 4 x 15) starts on device row 10, not 8.
+pub val DEVICE_TOP_REL: i32 = -2000000
+
+# reason: a device-top table entry in, its kind out; layout-array scalars.
+# @allow(primitive_api)
+pub fn box_device_top_is_inline_dy(entry: i32) -> bool:
+    entry < DEVICE_TOP_REL / 2 - 500000
+
+# reason: node index, node count and a device-px delta are layout-array scalars.
+# @allow(primitive_api)
+pub fn box_device_inline_dy_record(node_count: i32, i: i32, dy_device_px: i32):
+    if g_layout_device_scale <= 1 or i < 0 or i >= node_count:
+        return
+    if g_box_device_top.len() != node_count:
+        if dy_device_px == 0:
+            return
+        var t: [i32] = []
+        var n = 0
+        while n < node_count:
+            t.push(DEVICE_TOP_UNSET)
+            n = n + 1
+        g_box_device_top = t
+    if dy_device_px != 0:
+        g_box_device_top[i] = DEVICE_TOP_REL + dy_device_px
+    elif box_device_top_is_inline_dy(g_box_device_top[i]):
+        g_box_device_top[i] = DEVICE_TOP_UNSET
+
 # A placed subtree moved by `delta_milli` of cursor residual (a collapsed top
 # margin re-topped it after its own layout): its recorded tops move with it.
 # reason: node index and milli residual delta are layout-array scalars.
@@ -1513,7 +1546,7 @@ pub fn box_device_top_record(node_count: i32, i: i32, frac_milli: i32):
 pub fn box_device_top_shift(child_index: HtmlChildIndex, node_index: i32, delta_milli: i32):
     if delta_milli == 0 or node_index < 0 or node_index >= g_box_device_top.len():
         return
-    if g_box_device_top[node_index] != DEVICE_TOP_UNSET:
+    if g_box_device_top[node_index] != DEVICE_TOP_UNSET and not box_device_top_is_inline_dy(g_box_device_top[node_index]):
         g_box_device_top[node_index] = g_box_device_top[node_index] + delta_milli * g_layout_device_scale
     var child = child_index.first_child[node_index]
     while child >= 0:
@@ -1764,6 +1797,36 @@ fn _form_control_widest_option_label_milli(nodes: [HNode], styles: [Style], chil
         c = child_index.next_sibling[c]
     widest
 
+# Device-px baseline of a text-baseline form control (text `<input>`,
+# `<select>`, `<button>`) from its border-box top, minus k x the CSS one. The
+# borders and padding scale by k; the control's own strut is the device one
+# (13.333px Liberation Sans, `normal`: 12, 24, 35, 48 for k x 12 = 36 at k=3),
+# and an auto-height `<select>` has the upper half, rounded up, of its
+# round(1.5k) inner block padding above the label (1, 2, 3, 3 for k x 1).
+# An auto-height `<button>` is measured from its BOTTOM, like its CSS baseline
+# (`inline_widget_baseline_from_top`): the box's device extra height less what
+# the device descent of its last line adds (k=2: a 22 px box of 43 device px,
+# descent 7 for 2 x 3, so 2 x 16 - 2 = 30).
+# Chrome 159 baselines: input / button 15, 30, 44, 60; select 14, 28, 41, 55.
+fn form_control_device_baseline_delta(node: HNode, st: Style, k: i32, extra_h: i32) -> i32:
+    val strut = inline_line_strut_baseline_offset_device(st, k) - k * inline_line_strut_baseline_offset(st)
+    if node.tag == "button" and st.height_px <= 0 and st.min_height_px <= 0 and st.max_height_px <= 0:
+        return extra_h - (style_device_line_h_milli(st, k) / 1000 - k * style_line_h(st)) + strut
+    if node.tag == "select" and st.height_px <= 0:
+        return strut + ((3 * k + 1) / 2 + 1) / 2 - k * (SELECT_INNER_BLOCK_PADDING_PX / 2)
+    strut
+
+# What the label text inside a `<select>` moves by against its frame (device
+# px, k > 1): the frame takes `form_control_device_baseline_delta` less than
+# the line's baseline delta, the label sits on the baseline itself.
+# reason: device-px delta out; a layout scalar.
+# @allow(primitive_api)
+pub fn form_control_label_device_dy(node: HNode, st: Style) -> i32:
+    val k = g_layout_device_scale
+    if k <= 1 or node.tag != "select":
+        return 0
+    form_control_device_baseline_delta(node, st, k, 0)
+
 # Device-px height of an auto-height form control minus k x its CSS height
 # (Chrome 159, 13.333px Liberation Sans, k = 1..4): the `normal` line is the
 # face's per-part rounded sum at the DEVICE size (15, 31, 45, 61), a textarea
@@ -1794,6 +1857,10 @@ fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, h
     val k = g_layout_device_scale
     var ascent = inline_line_strut_baseline_offset_device(line_style, k)
     var descent = style_device_line_h_milli(line_style, k) / 1000 - ascent
+    # The form controls on the line and how far each one's device baseline is
+    # from k x its CSS baseline.
+    var widget_nodes: [i32] = []
+    var widget_deltas: [i32] = []
     var i = 0
     while i < nodes.len():
         val node_index = nodes[i]
@@ -1807,12 +1874,11 @@ fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, h
         var node_ascent = 0
         var node_descent = 0
         if widget_baseline >= 0:
-            node_ascent = k * (margin_ts[i] + widget_baseline)
-            node_descent = k * (bh[node_index] - widget_baseline + margin_bs[i])
-            if widget_baseline >= bh[node_index]:
-                node_ascent = node_ascent + extra_h
-            else:
-                node_descent = node_descent + extra_h
+            val baseline_delta = if widget_baseline >= bh[node_index]: extra_h else: form_control_device_baseline_delta(html_nodes[node_index], node_style, k, extra_h)
+            node_ascent = k * (margin_ts[i] + widget_baseline) + baseline_delta
+            node_descent = k * (bh[node_index] - widget_baseline + margin_bs[i]) + extra_h - baseline_delta
+            widget_nodes.push(node_index)
+            widget_deltas.push(baseline_delta)
         elif bottom_edge_baseline(child_index, node_index, node_style, node_replaced):
             node_ascent = k * (margin_ts[i] + bh[node_index] + margin_bs[i]) + extra_h
         elif inline_box_is_plain_element(html_nodes[node_index], node_style):
@@ -1831,6 +1897,11 @@ fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, h
     if middle_ascent > ascent:
         ascent = middle_ascent
     val line_delta = if has_valign: 0 else: ascent - k * css_ascent
+    # A control hangs from the device baseline by its own device baseline.
+    i = 0
+    while i < widget_nodes.len():
+        box_device_inline_dy_record(html_nodes.len() as i32, widget_nodes[i], if has_valign: 0 else: line_delta - widget_deltas[i])
+        i = i + 1
     i = 0
     while i < nodes.len():
         _text_device_dy_record_subtree(child_index, html_nodes, styles, nodes[i], line_style, line_style, k, line_delta, 0)

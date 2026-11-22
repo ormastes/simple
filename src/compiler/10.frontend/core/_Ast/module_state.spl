@@ -607,6 +607,12 @@ pub fn decl_get(idx: i64) -> CoreDecl:
 # ===== Yield Detection Utilities =====
 # These access both expr and stmt pools so they stay in the unified module.
 
+fn arms_contain_yield(arm_ids: [i64]) -> bool:
+    for arm_id in arm_ids:
+        if expr_contains_yield(arm_get_guard(arm_id)): return true
+        if stmts_contain_yield(arm_get_body(arm_id)): return true
+    false
+
 fn expr_contains_yield(eid: i64) -> bool:
     # `eid` may be stale relative to the CURRENT expr_tag arena (reset by
     # ast_reset() for a later parse, or a cross-module global-var visibility
@@ -619,16 +625,45 @@ fn expr_contains_yield(eid: i64) -> bool:
     if tag == EXPR_LAMBDA: return false
     if expr_contains_yield(expr_owner_left(eid)): return true
     if expr_contains_yield(expr_owner_right(eid)): return true
-    if expr_contains_yield(expr_owner_extra(eid)): return true
+    if tag == EXPR_IF or tag == EXPR_SLICE or tag == EXPR_LIST_COMP or tag == EXPR_DICT_COMP:
+        if expr_contains_yield(expr_owner_extra(eid)): return true
+    if tag == EXPR_ASM_MATCH:
+        return false
+    if tag == EXPR_MATCH:
+        return arms_contain_yield(expr_owner_args(eid))
     for arg_eid in expr_owner_args(eid):
         if expr_contains_yield(arg_eid): return true
+    if tag == EXPR_DICT_LIT or tag == EXPR_LIST_COMP or tag == EXPR_DICT_COMP or tag == EXPR_STRUCT_LIT:
+        for child_eid in expr_owner_stmts(eid):
+            if expr_contains_yield(child_eid): return true
+        return false
     for child_sid in expr_owner_stmts(eid):
         if stmt_contains_yield(child_sid): return true
     false
 
 fn stmt_contains_yield(sid: i64) -> bool:
     # Same stale-arena-id hazard as expr_contains_yield above.
-    if sid < 0 or stmt_get_tag(sid) < 0: return false
+    if sid < 0: return false
+    val tag = stmt_get_tag(sid)
+    if tag < 0 or tag == STMT_USE_IMPORT: return false
+    if tag == STMT_ASSIGN or tag == STMT_COMPOUND_ASSIGN or tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_LAZY_VAL_DECL or tag == STMT_BIND:
+        if expr_contains_yield(stmt_get_expr(sid)): return true
+        for veid in stmt_get_body(sid):
+            if expr_contains_yield(veid): return true
+        return false
+    if tag == STMT_EXPR or tag == STMT_RETURN:
+        return expr_contains_yield(stmt_get_expr(sid))
+    if tag == STMT_IF:
+        val elif_idx = stmt_get_type(sid)
+        if elif_idx >= 0:
+            if expr_contains_yield(elif_get_cond(elif_idx)): return true
+            if stmts_contain_yield(elif_get_body(elif_idx)): return true
+            return stmts_contain_yield(elif_get_else(elif_idx))
+    if tag == STMT_MATCH or tag == STMT_RECEIVE:
+        if expr_contains_yield(stmt_get_expr(sid)): return true
+        if tag == STMT_RECEIVE and stmt_get_type(sid) >= 0:
+            if stmt_contains_yield(stmt_get_type(sid)): return true
+        return arms_contain_yield(stmt_get_body(sid))
     if expr_contains_yield(stmt_get_expr(sid)): return true
     for child_sid in stmt_get_body(sid):
         if stmt_contains_yield(child_sid): return true

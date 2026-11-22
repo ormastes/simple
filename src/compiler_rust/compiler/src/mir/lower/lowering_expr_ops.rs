@@ -527,12 +527,16 @@ impl<'a> MirLowerer<'a> {
                 // Convert non-string side to string. Native scalars must be
                 // boxed first (BoxInt/BoxFloat/rt_value_bool) — passing a raw
                 // i64/f64 to rt_to_string prints "<value:0xN>" (#66).
-                let left_str = if left.ty != TypeId::STRING && left.ty != TypeId::ANY {
+                let left_needs_conv = left.ty != TypeId::STRING && left.ty != TypeId::ANY;
+                let left_fresh = left_needs_conv || super::array_move::is_fresh_string_expr(left);
+                let left_str = if left_needs_conv {
                     self.emit_to_string(left_reg, left.ty)?
                 } else {
                     left_reg
                 };
-                let right_str = if right.ty != TypeId::STRING && right.ty != TypeId::ANY {
+                let right_needs_conv = right.ty != TypeId::STRING && right.ty != TypeId::ANY;
+                let right_fresh = right_needs_conv || super::array_move::is_fresh_string_expr(right);
+                let right_str = if right_needs_conv {
                     self.emit_to_string(right_reg, right.ty)?
                 } else {
                     right_reg
@@ -545,6 +549,18 @@ impl<'a> MirLowerer<'a> {
                         target: crate::mir::CallTarget::from_name("rt_string_concat"),
                         args: vec![left_str, right_str],
                     });
+                    if left_fresh {
+                        block.instructions.push(MirInst::Drop {
+                            value: left_str,
+                            ty: TypeId::STRING,
+                        });
+                    }
+                    if right_fresh {
+                        block.instructions.push(MirInst::Drop {
+                            value: right_str,
+                            ty: TypeId::STRING,
+                        });
+                    }
                     dest
                 })
             } else if is_array_add {

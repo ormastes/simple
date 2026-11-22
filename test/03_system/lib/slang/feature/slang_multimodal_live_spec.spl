@@ -125,8 +125,14 @@ describe "media a model cannot take is refused, not faked":
         val response = serve_chat_completions(_model_root(), _body("SmolVLM2-256M-Video-Instruct-GGUF", parts))
         _record("MM-ANSWER video: HTTP " + response.status.to_text() + " " + response.body)
         expect(response.status).to_equal(400)
-        expect(json_string_field(response.body, "code")).to_equal("unsupported_modality")
-        expect(json_string_field(response.body, "message").find("ffmpeg") >= 0).to_equal(true)
+        # With SLANG_FFMPEG configured the video reaches the sampler, and this 12-byte
+        # truncated mp4 header is the client's bad input: 400 invalid_media. Without
+        # ffmpeg the video is refused up front: 400 unsupported_modality naming ffmpeg.
+        if (env_get("SLANG_FFMPEG") ?? "").trim() != "":
+            expect(json_string_field(response.body, "code")).to_equal("invalid_media")
+        else:
+            expect(json_string_field(response.body, "code")).to_equal("unsupported_modality")
+            expect(json_string_field(response.body, "message").find("ffmpeg") >= 0).to_equal(true)
 
     it "refuses an image sent to a text-only model":
         if not _live_enabled() or not _have("gemma-3-270m-it-GGUF") or not file_exists(_asset("test-1.jpeg")):

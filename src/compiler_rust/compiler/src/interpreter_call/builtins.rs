@@ -51,6 +51,8 @@ pub(super) fn eval_builtin(
                 host_gpu_lane::rt_host_gpu_queue_emit(lane_code, 1, 0, 0);
             }
 
+            let _fn_return_guard = crate::interpreter::push_current_fn_return_type(None);
+            let _expected_target_guard = crate::interpreter::push_expected_target_type(None);
             let body_result: Result<Value, CompileError> = match &args[args.len() - 1].value {
                 Expr::Lambda { body, .. } => match body.as_ref() {
                     Expr::DoBlock(statements) => {

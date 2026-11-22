@@ -25,6 +25,8 @@ only where aot_compile_mir_shard_v1 armed it (the claim loop, after the shared
 lowering setup), and a child claims with its own share cap.
 
 UNEXECUTED: written without running the spec (no builds allowed in that lane).
+Continuous-admission cases (2026-11-22) are likewise unexecuted: no full-CLI
+test binary is deployed.
 """
 use std.spec.step
 use std.spec.{describe, it, assert_equal, assert_true, assert_false}
@@ -36,13 +38,20 @@ use compiler.driver.driver_build.native_mir_fork_v1.{
     native_mir_fork_at_claim_loop_v1, NATIVE_MIR_FORK_WORKERS_ENV_V1,
     native_mir_fork_workers_of_v1, native_mir_fork_child_owner_v1,
     native_mir_fork_is_child_v1, native_mir_fork_reforkable_v1, native_mir_fork_fail_fast_v1,
-    NATIVE_MIR_FORK_RETRIES_PER_SHARE_V1}
+    NATIVE_MIR_FORK_RETRIES_PER_SHARE_V1, native_mir_fork_batch_of_v1,
+    native_mir_fork_child_cap_v1, native_mir_fork_next_batch_v1, NATIVE_MIR_FORK_BATCH_DEFAULT_V1,
+    native_mir_fork_child_kb_of_v1, NATIVE_MIR_FORK_CHILD_KB_DEFAULT_V1,
+    native_mir_fork_child_over_budget_v1, native_mir_fork_private_kib_of_v1,
+    native_mir_fork_budget_cap_v1, native_mir_fork_admit_v1,
+    native_mir_fork_stat_exited_v1, native_mir_fork_auto_workers_of_v1,
+    native_mir_fork_kill_choice_v1, native_mir_fork_front_load_v1}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim,
     hir_shard_recovery_seal, hir_shard_recovery_progress,
     hir_shard_recovery_failure_count, hir_shard_recovery_owner_tree_progress_v1,
     hir_shard_recovery_inventory, hir_shard_recovery_unclaimed_count,
     hir_shard_recovery_excluded, hir_shard_recovery_close_inventory,
-    hir_shard_recovery_withdraw_inventory_v1}
+    hir_shard_recovery_withdraw_inventory_v1, hir_shard_recovery_terminal,
+    hir_shard_recovery_release_memkill_v1, hir_shard_recovery_row_terminal_v1}
 
 fn fresh_ledger(tag: text) -> text:
     val dir = "build/test_tmp/native_mir_fork_{tag}_{getpid()}"
@@ -63,6 +72,238 @@ describe "MIR fork worker count":
         assert_equal(native_mir_fork_workers_of_v1("2"), 2)
         assert_equal(native_mir_fork_workers_of_v1("16"), 16)
         assert_false(native_mir_fork_is_child_v1())
+
+describe "MIR fork child batches":
+    it "bounds a child's claims so its held MIR cannot grow with its whole share":
+        # @req REQ-SSPEC-COMPILER
+        step("bounds a child's claims so its held MIR cannot grow with its whole share")
+        # p4-cli-f23: 4516 modules over 5 children = 904 claims each held
+        # until codegen; three children were OOM-killed at a 104G cap.
+        assert_equal(native_mir_fork_batch_of_v1(""), NATIVE_MIR_FORK_BATCH_DEFAULT_V1)
+        assert_equal(native_mir_fork_batch_of_v1("abc"), NATIVE_MIR_FORK_BATCH_DEFAULT_V1)
+        assert_equal(native_mir_fork_batch_of_v1("-3"), NATIVE_MIR_FORK_BATCH_DEFAULT_V1)
+        assert_equal(native_mir_fork_batch_of_v1("0"), 0)
+        assert_equal(native_mir_fork_batch_of_v1("50"), 50)
+        assert_equal(native_mir_fork_child_cap_v1(904, 200), 200)
+        assert_equal(native_mir_fork_child_cap_v1(120, 200), 120)
+        assert_equal(native_mir_fork_child_cap_v1(904, 0), 904)
+
+    it "forks the next batch only while the finished child claimed something":
+        # @req REQ-SSPEC-COMPILER
+        step("forks the next batch only while the finished child claimed something")
+        # (batched, finished, stop, blocked, child's own claims, unclaimed now)
+        assert_true(native_mir_fork_next_batch_v1(true, true, false, false, 200, 3516))
+        # A child that claimed nothing saw only excluded residue: stop.
+        assert_false(native_mir_fork_next_batch_v1(true, true, false, false, 0, 11))
+        # Unreadable claim count never re-forks.
+        assert_false(native_mir_fork_next_batch_v1(true, true, false, false, -1, 11))
+        assert_false(native_mir_fork_next_batch_v1(true, true, false, false, 200, 0))
+        assert_false(native_mir_fork_next_batch_v1(true, true, false, false, 200, -1))
+        assert_false(native_mir_fork_next_batch_v1(false, true, false, false, 200, 3516))
+        assert_false(native_mir_fork_next_batch_v1(true, false, false, false, 200, 3516))
+        # stop = fail-fast AND a failure already seen (a clean CI batch goes on).
+        assert_false(native_mir_fork_next_batch_v1(true, true, true, false, 200, 3516))
+        assert_false(native_mir_fork_next_batch_v1(true, true, false, true, 200, 3516))
+        # SIMPLE_MIR_FORK_BATCH=0 with the child budget on: a budget-stopped
+        # child is batched too, so the share still gets its next fork.
+        assert_true(native_mir_fork_next_batch_v1(true, true, false, false, 1, 4515))
+
+    it "treats the worker count as a ceiling and auto as the CPU count":
+        # @req REQ-SSPEC-COMPILER
+        step("treats the worker count as a ceiling and auto as the CPU count")
+        assert_equal(native_mir_fork_auto_workers_of_v1(20), 20)
+        assert_equal(native_mir_fork_auto_workers_of_v1(1), 2)
+        assert_equal(native_mir_fork_auto_workers_of_v1(0), 2)
+        assert_equal(native_mir_fork_auto_workers_of_v1(256), 64)
+
+describe "MIR fork child memory budget":
+    it "parses SIMPLE_MIR_FORK_CHILD_KB":
+        # @req REQ-SSPEC-COMPILER
+        step("parses SIMPLE_MIR_FORK_CHILD_KB")
+        assert_equal(native_mir_fork_child_kb_of_v1(""), NATIVE_MIR_FORK_CHILD_KB_DEFAULT_V1)
+        assert_equal(native_mir_fork_child_kb_of_v1("abc"), NATIVE_MIR_FORK_CHILD_KB_DEFAULT_V1)
+        assert_equal(native_mir_fork_child_kb_of_v1("-1"), NATIVE_MIR_FORK_CHILD_KB_DEFAULT_V1)
+        assert_equal(native_mir_fork_child_kb_of_v1("0"), 0)
+        assert_equal(native_mir_fork_child_kb_of_v1("8000000"), 8000000)
+        assert_equal(NATIVE_MIR_FORK_CHILD_KB_DEFAULT_V1, 12000000)
+
+    it "stops claiming over budget only after at least one claim":
+        # @req REQ-SSPEC-COMPILER
+        step("stops claiming over budget only after at least one claim")
+        # A single module bigger than the budget is still lowered.
+        assert_false(native_mir_fork_child_over_budget_v1(0, 55000000, 12000000))
+        assert_true(native_mir_fork_child_over_budget_v1(1, 12000001, 12000000))
+        assert_true(native_mir_fork_child_over_budget_v1(37, 30000000, 12000000))
+        assert_false(native_mir_fork_child_over_budget_v1(37, 12000000, 12000000))
+        assert_false(native_mir_fork_child_over_budget_v1(37, 11000000, 12000000))
+        # Unknown private memory or a disabled budget never stops a child.
+        assert_false(native_mir_fork_child_over_budget_v1(37, -1, 12000000))
+        assert_false(native_mir_fork_child_over_budget_v1(37, 55000000, 0))
+        # The root (not a child) never latches its cap.
+        assert_equal(native_mir_fork_budget_cap_v1(5, 200), 200)
+
+    it "reads private memory from smaps_rollup, not shared COW pages":
+        # @req REQ-SSPEC-COMPILER
+        step("reads private memory from smaps_rollup, not shared COW pages")
+        val rollup = "55d0-7ffd ---p 00000000 00:00 0    [rollup]\nRss:   40000000 kB\nShared_Dirty:  26000000 kB\nPrivate_Clean:     1000 kB\nPrivate_Dirty:  13999000 kB\n"
+        assert_equal(native_mir_fork_private_kib_of_v1(rollup), 14000000)
+        assert_equal(native_mir_fork_private_kib_of_v1("Private_Dirty: 7 kB\n"), 7)
+        assert_equal(native_mir_fork_private_kib_of_v1(""), -1)
+
+describe "MIR fork continuous admission":
+    it "always forks the first child, then admits on idle CPU and memory":
+        # @req REQ-SSPEC-COMPILER
+        step("always forks the first child, then admits on idle CPU and memory")
+        # (live, ceiling, idle_cpu, headroom, child_kb, current, peak); headroom
+        # is already min(cgroup headroom, MemAvailable - reserve).
+        # No child alive: fork even with no CPU and no memory (progress floor).
+        assert_equal(native_mir_fork_admit_v1(0, 5, 0, 0, 12000000, [], []), "fork")
+        # Room for one more 12G budget over two half-grown children (6G each).
+        assert_equal(native_mir_fork_admit_v1(2, 5, 6, 31611392, 12000000,
+            [6000000, 6000000], [6000000, 6000000]), "fork")
+        # No idle CPU slot: wait.
+        assert_equal(native_mir_fork_admit_v1(2, 5, 0, 400000000, 12000000,
+            [6000000, 6000000], [6000000, 6000000]), "cpu")
+        # Low memory: wait.
+        assert_equal(native_mir_fork_admit_v1(1, 5, 10, 5000000, 12000000, [12000000], [12000000]), "memory")
+        # Ceiling reached: wait even with spare CPU and memory.
+        assert_equal(native_mir_fork_admit_v1(5, 5, 10, 400000000, 12000000,
+            [1, 1, 1, 1, 1], [1, 1, 1, 1, 1]), "ceiling")
+        # Memory fails closed with a child alive: unknown headroom (-1) or no
+        # child budget (SIMPLE_MIR_FORK_CHILD_KB=0) refuses a further child.
+        assert_equal(native_mir_fork_admit_v1(1, 5, 3, -1, 12000000, [0], [0]), "memory")
+        assert_equal(native_mir_fork_admit_v1(1, 5, 3, 400000000, 0, [0], [0]), "memory")
+        # ...but with no child alive exactly one is still admitted.
+        assert_equal(native_mir_fork_admit_v1(0, 5, 3, -1, 12000000, [], []), "fork")
+        assert_equal(native_mir_fork_admit_v1(0, 5, 3, 400000000, 0, [], []), "fork")
+
+    it "charges a burst of fresh children their whole budget":
+        # @req REQ-SSPEC-COMPILER
+        step("charges a burst of fresh children their whole budget")
+        # p4-cli-f24 shape: ~49G usable. Three just-forked COW children hold
+        # ~0 private pages but will each grow to 12G: a fourth needs 48G and
+        # fits, a fifth needs 60G.
+        assert_equal(native_mir_fork_admit_v1(3, 20, 15, 51380224, 12000000, [10, 10, 10], [10, 10, 10]), "fork")
+        assert_equal(native_mir_fork_admit_v1(4, 20, 15, 51380224, 12000000,
+            [10, 10, 10, 10], [10, 10, 10, 10]), "memory")
+        # An unreadable child reading is charged the whole budget.
+        assert_equal(native_mir_fork_admit_v1(4, 20, 15, 51380224, 12000000,
+            [-1, -1, -1, -1], [0, 0, 0, 0]), "memory")
+        # An over-budget child is still charged a quarter budget (3G).
+        assert_equal(native_mir_fork_admit_v1(1, 5, 3, 15000000, 12000000, [12000000], [12000000]), "fork")
+        assert_equal(native_mir_fork_admit_v1(1, 5, 3, 14999999, 12000000, [12000000], [12000000]), "memory")
+        # The f25 shape: a child that already peaked at 45.9G is charged up to
+        # its peak, not its 12G budget.
+        assert_equal(native_mir_fork_admit_v1(1, 5, 10, 31611392, 12000000, [6000000], [45900000]), "memory")
+
+describe "MIR fork hard per-child bound":
+    it "kills a child over twice its budget, never the solo child":
+        # @req REQ-SSPEC-COMPILER
+        step("kills a child over twice its budget, never the solo child")
+        # (current, killed, solo_index, child_kb, below_reserve)
+        val (over, over_reason) = native_mir_fork_kill_choice_v1([5000000, 24000001, 3000000],
+            [false, false, false], -1, 12000000, false)
+        assert_equal(over, 1)
+        assert_equal(over_reason, "over-cap")
+        # The cap applies to a sole (non-solo) child too.
+        val (sole_over, _r10) = native_mir_fork_kill_choice_v1([24000001], [false], -1, 12000000, true)
+        assert_equal(sole_over, 0)
+        # Exactly at the cap is not over.
+        val (at_cap, _r0) = native_mir_fork_kill_choice_v1([24000000], [false], -1, 12000000, false)
+        assert_equal(at_cap, -1)
+        # Already signalled: not chosen again.
+        val (again, _r1) = native_mir_fork_kill_choice_v1([30000000], [true], -1, 12000000, false)
+        assert_equal(again, -1)
+        # The solo child runs alone so a heavy module can finish: no cap kill.
+        val (solo, _r2) = native_mir_fork_kill_choice_v1([45900000], [false], 0, 12000000, false)
+        assert_equal(solo, -1)
+        # Unknown reading never kills; budget off has no hard cap.
+        val (unknown, _r3) = native_mir_fork_kill_choice_v1([-1], [false], -1, 12000000, false)
+        assert_equal(unknown, -1)
+        val (off, _r4) = native_mir_fork_kill_choice_v1([90000000], [false], -1, 0, false)
+        assert_equal(off, -1)
+
+    it "sheds the newest child below the reserve only with two or more alive":
+        # @req REQ-SSPEC-COMPILER
+        step("sheds the newest child below the reserve only with two or more alive")
+        val (newest, reason) = native_mir_fork_kill_choice_v1([5000000, 6000000, 7000000],
+            [false, false, false], -1, 12000000, true)
+        assert_equal(newest, 2)
+        assert_equal(reason, "reserve")
+        # Above the reserve: nothing to shed.
+        val (above, _r11) = native_mir_fork_kill_choice_v1([5000000, 6000000],
+            [false, false], -1, 12000000, false)
+        assert_equal(above, -1)
+        # A sole child (the first, or the solo retry) is never reserve-killed.
+        val (sole, _r6) = native_mir_fork_kill_choice_v1([40000000], [false], -1, 50000000, true)
+        assert_equal(sole, -1)
+        val (solo, _r12) = native_mir_fork_kill_choice_v1([45900000], [false], 0, 12000000, true)
+        assert_equal(solo, -1)
+        # A signalled child not yet reaped: no second reserve kill (its memory
+        # is still being freed), so low headroom does not cascade.
+        val (cascade, cascade_reason) = native_mir_fork_kill_choice_v1([5000000, 6000000, 7000000],
+            [false, false, true], -1, 12000000, true)
+        assert_equal(cascade, -1)
+        assert_equal(cascade_reason, "")
+        # ...but an over-cap child is still killed meanwhile.
+        val (over_meanwhile, _r8) = native_mir_fork_kill_choice_v1([30000000, 6000000, 7000000],
+            [false, false, true], -1, 12000000, true)
+        assert_equal(over_meanwhile, 0)
+        # An exited-but-unreaped child reads -1: skipped, the next newest is taken.
+        val (skip_exited, _r9) = native_mir_fork_kill_choice_v1([5000000, 6000000, -1],
+            [false, false, false], -1, 12000000, true)
+        assert_equal(skip_exited, 1)
+
+    it "walks the solo retry rows first":
+        # @req REQ-SSPEC-COMPILER
+        step("walks the solo retry rows first")
+        val names = ["m.a", "m.b", "m.c", "m.d"]
+        val order = native_mir_fork_front_load_v1([2, 0, 3, 1], names, ["m.d", "m.b"])
+        assert_equal(order.len(), 4)
+        assert_equal(order[0], 3)
+        assert_equal(order[1], 1)
+        assert_equal(order[2], 2)
+        assert_equal(order[3], 0)
+        assert_equal(native_mir_fork_front_load_v1([2, 0], names, [])[0], 2)
+
+    it "requeues a memory-killed child's open rows once, for a solo retry":
+        # @req REQ-SSPEC-COMPILER
+        step("requeues a memory-killed child's open rows once, for a solo retry")
+        val queue = fresh_ledger("memkill")
+        assert_true(hir_shard_recovery_inventory(queue, "key", ["mod.a", "mod.b", "mod.c"]))
+        val child = native_mir_fork_child_owner_v1("0/1@0", 0, 2, 0)
+        assert_equal(hir_shard_recovery_claim(queue, child, "mod.a", "key"), 1)
+        assert_equal(hir_shard_recovery_claim(queue, child, "mod.b", "key"), 1)
+        assert_true(hir_shard_recovery_terminal(queue, child, "mod.a", "PASS", true))
+        assert_equal(hir_shard_recovery_unclaimed_count(queue), 1)
+        # The open row is released (unclaimed again, no terminal); PASS stays.
+        val released = hir_shard_recovery_release_memkill_v1(queue, child, []).unwrap()
+        assert_equal(released.len(), 1)
+        assert_equal(released[0], "mod.b")
+        assert_equal(hir_shard_recovery_unclaimed_count(queue), 2)
+        assert_false(hir_shard_recovery_row_terminal_v1(queue, "mod.b"))
+        assert_true(hir_shard_recovery_row_terminal_v1(queue, "mod.a"))
+        assert_equal(hir_shard_recovery_owner_tree_progress_v1(queue, "0/1@0"), 1)
+        # The solo child re-claims it under its own owner.
+        val solo = native_mir_fork_child_owner_v1("0/1@0", 0, 2, 1)
+        assert_equal(hir_shard_recovery_claim(queue, solo, "mod.b", "key"), 1)
+        # Killed again: a row released before is sealed CRASH, not released twice.
+        val again = hir_shard_recovery_release_memkill_v1(queue, solo, released).unwrap()
+        assert_equal(again.len(), 0)
+        assert_true(hir_shard_recovery_row_terminal_v1(queue, "mod.b"))
+        assert_equal(hir_shard_recovery_failure_count(queue), 1)
+        val _removed = dir_remove_all(queue)
+
+    it "reads a reaped-pending child from /proc/<pid>/stat":
+        # @req REQ-SSPEC-COMPILER
+        step("reads a reaped-pending child from /proc/<pid>/stat")
+        assert_equal(native_mir_fork_stat_exited_v1("4242 (simple) Z 4100 4242 0"), 1)
+        assert_equal(native_mir_fork_stat_exited_v1("4242 (simple) X 4100"), 1)
+        assert_equal(native_mir_fork_stat_exited_v1("4242 (simple) R 4100 4242 0"), 0)
+        assert_equal(native_mir_fork_stat_exited_v1("4242 (simple) D 4100"), 0)
+        # A comm containing ") " must not fool the parser: the LAST ")" ends it.
+        assert_equal(native_mir_fork_stat_exited_v1("4242 (a) Z (b) S 1"), 0)
+        assert_equal(native_mir_fork_stat_exited_v1(""), -1)
 
 describe "MIR fork child owners":
     it "are distinct from the root and from coordinator owners":

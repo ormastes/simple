@@ -2074,7 +2074,8 @@ fn try_compile_builtin_method_call<M: Module>(
             }
         }
     }
-    // Extract plain method name from qualified name (e.g., "text.len" -> "len")
+    // Extract qualifier + plain method name from qualified name (e.g., "text.len" -> "len")
+    let receiver_qual = method.rsplit_once('.').map(|(q, _)| q);
     let method = method.rsplit('.').next().unwrap_or(method);
 
     // Handle slice specially since it has optional parameters
@@ -2853,6 +2854,20 @@ fn try_compile_builtin_method_call<M: Module>(
         // rt_contains tag-dispatches on the receiver at runtime (Array/Dict/
         // String; anything else yields 0), so it is safe for untyped receivers.
         "contains_key" | "has_key" | "has" => "rt_contains",
+        "ptr"
+            if args.is_empty()
+                && (matches!(receiver_qual, Some("text" | "String" | "str" | "string"))
+                    || (receiver_qual.is_none()
+                        && ctx.vreg_types.get(&receiver).copied() == Some(crate::hir::TypeId::STRING))) =>
+        {
+            "rt_string_data"
+        }
+        "ptr" | "data_ptr"
+            if args.is_empty()
+                && matches!(receiver_qual, Some("Array" | "Slice" | "List" | "Tuple" | "array")) =>
+        {
+            "rt_array_data_ptr"
+        }
         _ => return Ok(None),
     };
 

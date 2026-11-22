@@ -216,6 +216,14 @@ fn _coff_gc_target(objects: [CoffObject], accepted: [[bool]],
         if found.object_index >= 0: return Ok(found)
     Ok(CoffSymbolLocation(object_index: -1, section_index: -1, rva: 0))
 
+fn _coff_section_gc_eligible(section: CoffSection) -> bool:
+    if (section.characteristics & COFF_SECTION_LNK_COMDAT) != 0:
+        return true
+    section.name.starts_with(".text$") or
+        section.name.starts_with(".rdata$") or
+        section.name.starts_with(".data$") or
+        section.name.starts_with(".bss$")
+
 fn _coff_gc_accepted(objects: [CoffObject], accepted: [[bool]],
         roots: [text], aliases: {text: text}) -> Result<[[bool]], text>:
     var live: [[bool]] = []
@@ -226,7 +234,7 @@ fn _coff_gc_accepted(objects: [CoffObject], accepted: [[bool]],
         while si < objects[oi].sections.len():
             val section = objects[oi].sections[si]
             object_live = object_live.push(accepted[oi][si] and
-                (section.characteristics & COFF_SECTION_LNK_COMDAT) == 0)
+                not _coff_section_gc_eligible(section))
             si = si + 1
         live = live.push(object_live)
         oi = oi + 1
@@ -1123,7 +1131,7 @@ fn _coff_output_section_base(objects: [CoffObject], rvas: [[i64]],
 
 fn _coff_entry_rva(objects: [CoffObject], rvas: [[i64]], requested: text) -> Result<i64, text>:
     if requested != "auto": return _coff_global_symbol_rva(objects, rvas, requested)
-    val candidates = ["mainCRTStartup", "_start", "main"]
+    val candidates: [text] = ["mainCRTStartup", "_start", "main"]
     for candidate in candidates:
         val resolved = _coff_global_symbol_rva(objects, rvas, candidate)
         if resolved.is_ok(): return resolved
@@ -1605,7 +1613,7 @@ fn _coff_synthetic_mingw_lists(objects: [CoffObject], machine: i64) -> CoffObjec
             table_index: symbols.len(), weak_default_index: -1, weak_characteristics: 0))
         sections = sections.push(_coff_synthetic_section("{table}$z", elf_u8_zeros(pointer_size), table_flags))
     var pseudo_needed = false
-    val pseudo_names = [_coff_decorate(machine, "__RUNTIME_PSEUDO_RELOC_LIST__"),
+    val pseudo_names: [text] = [_coff_decorate(machine, "__RUNTIME_PSEUDO_RELOC_LIST__"),
         _coff_decorate(machine, "__RUNTIME_PSEUDO_RELOC_LIST_END__")]
     for name in pseudo_names:
         if _coff_symbol_referenced_undefined(objects, name): pseudo_needed = true

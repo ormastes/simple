@@ -19,15 +19,140 @@ use compiler.driver.driver_build.library_unit_plan_v1.{LibraryUnitPlanEntryV1, l
 
 pub const LIBRARY_UNITS_ENV_V1: text = "SIMPLE_NATIVE_LIBRARY_UNITS"
 pub const LIBRARY_UNITS_FLAG_V1: text = "--library-units"
+pub const STAGE3_LIB_DYNLIB_ENV_V1: text = "SIMPLE_STAGE3_LIB_DYNLIB"
+pub const LIBRARY_UNITS_DYNLIB_EXPLICIT_ENV_V1: text = "SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT"
+pub const DYNLIB_EMBED_CACHE_RPATH_ENV_V1: text = "SIMPLE_DYNLIB_EMBED_CACHE_RPATH"
+pub const LIBRARY_UNITS_DYNLIB_FLAG_V1: text = "--library-units-dynlib"
+pub const NO_LIBRARY_UNITS_FLAG_V1: text = "--no-library-units"
+
+pub enum LibraryUnitBuildModeV1:
+    FlatObjects
+    StaticUnits
+    DynLibUnits
+
+impl LibraryUnitBuildModeV1:
+    pub fn to_text() -> text:
+        match self:
+            case LibraryUnitBuildModeV1.FlatObjects: "flat-objects"
+            case LibraryUnitBuildModeV1.StaticUnits: "static-units"
+            case LibraryUnitBuildModeV1.DynLibUnits: "dyn-lib-units"
+
+pub struct LibraryUnitModeInputsV1:
+    args: [text]
+    build_mode: text
+    stage3_env: text
+    stage4_env: text
+    stage3_dynlib_env: text
+    library_units_env: text
+    whole_program_env: text
+    explicit_emit_mode: text
+    target_or_os: text = ""
+    linker_env: text = ""
+
+pub struct LibraryUnitEnvBindingsV1:
+    mode: LibraryUnitBuildModeV1
+    library_units_env: text
+    stage3_dynlib_env: text
+    dynlib_explicit_env: text
+
+fn _mode_target_is_windows_v1(target_or_os: text) -> bool:
+    val raw = target_or_os.trim().lower()
+    raw == "windows" or raw == "windows-msvc" or raw == "windows-gnu" or
+        raw == "windows-mingw" or raw.contains("-windows-") or raw.contains("mingw")
+
+fn _args_extract_build_mode_v1(args: [text], fallback_mode: text) -> text:
+    var mode = fallback_mode
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if (arg == "--mode" or arg == "--build-mode") and i + 1 < args.len():
+            mode = args[i + 1]
+            i = i + 2
+            continue
+        if arg.starts_with("--mode="):
+            mode = arg.substring(7)
+        elif arg.starts_with("--build-mode="):
+            mode = arg.substring(13)
+        i = i + 1
+    mode
 
 # `env_value` is the raw value of SIMPLE_NATIVE_LIBRARY_UNITS ("" when unset).
 pub fn library_unit_mode_enabled_v1(args: [text], env_value: text) -> bool:
+    for arg in args:
+        if arg == NO_LIBRARY_UNITS_FLAG_V1:
+            return false
     if env_value == "1":
         return true
     for arg in args:
-        if arg == LIBRARY_UNITS_FLAG_V1:
+        if arg == LIBRARY_UNITS_FLAG_V1 or arg == LIBRARY_UNITS_DYNLIB_FLAG_V1:
             return true
     false
+
+# Select flat shard/object linking, static `.a` units, or shared `.dylib`/`.so`/`.dll`
+# units. Phase 3 (`SIMPLE_BOOTSTRAP_STAGE3=1`) `--mode dynload` defaults to
+# `DynLibUnits` (`SIMPLE_STAGE3_LIB_DYNLIB` unset or `"1"`). `SIMPLE_STAGE3_LIB_DYNLIB=0`
+# or `--mode one-binary` (including Stage 4 `--mode one-binary`) opts out cleanly.
+pub fn library_unit_select_build_mode_v1(inputs: LibraryUnitModeInputsV1) -> LibraryUnitBuildModeV1:
+    if inputs.explicit_emit_mode != "":
+        return LibraryUnitBuildModeV1.FlatObjects
+    for arg in inputs.args:
+        if arg == "--emit-object" or arg == "--emit-entry-object" or arg == "--emit-archive" or arg == "--emit-shared":
+            return LibraryUnitBuildModeV1.FlatObjects
+        if arg == NO_LIBRARY_UNITS_FLAG_V1:
+            return LibraryUnitBuildModeV1.FlatObjects
+    val effective_mode = _args_extract_build_mode_v1(inputs.args, inputs.build_mode)
+    if effective_mode == "one-binary":
+        return LibraryUnitBuildModeV1.FlatObjects
+    if inputs.whole_program_env == "1":
+        return LibraryUnitBuildModeV1.FlatObjects
+    val explicit_dynlib_flag = inputs.args.contains(LIBRARY_UNITS_DYNLIB_FLAG_V1)
+    val explicit_static_flag = inputs.args.contains(LIBRARY_UNITS_FLAG_V1)
+    if explicit_dynlib_flag:
+        return LibraryUnitBuildModeV1.DynLibUnits
+    if inputs.linker_env.trim().lower().starts_with("internal"):
+        return LibraryUnitBuildModeV1.FlatObjects
+    if explicit_static_flag:
+        return LibraryUnitBuildModeV1.StaticUnits
+    if inputs.library_units_env == "0" and inputs.stage3_env != "1" and inputs.stage4_env != "1" and inputs.stage3_dynlib_env != "1":
+        return LibraryUnitBuildModeV1.FlatObjects
+    if inputs.stage3_dynlib_env == "0":
+        if inputs.library_units_env == "1":
+            return LibraryUnitBuildModeV1.StaticUnits
+        return LibraryUnitBuildModeV1.FlatObjects
+    val dynload_effective = effective_mode == "" or effective_mode == "dynload"
+    val is_windows = _mode_target_is_windows_v1(inputs.target_or_os)
+    if (inputs.stage3_env == "1" or inputs.stage4_env == "1" or inputs.stage3_dynlib_env == "1") and dynload_effective:
+        if is_windows:
+            if inputs.library_units_env == "1":
+                return LibraryUnitBuildModeV1.StaticUnits
+            return LibraryUnitBuildModeV1.FlatObjects
+        return LibraryUnitBuildModeV1.DynLibUnits
+    if inputs.library_units_env == "1":
+        return LibraryUnitBuildModeV1.StaticUnits
+    LibraryUnitBuildModeV1.FlatObjects
+
+pub fn library_unit_env_bindings_for_inputs_v1(inputs: LibraryUnitModeInputsV1) -> LibraryUnitEnvBindingsV1:
+    val mode = library_unit_select_build_mode_v1(inputs)
+    val explicit_dyn = inputs.args.contains(LIBRARY_UNITS_DYNLIB_FLAG_V1)
+    match mode:
+        case LibraryUnitBuildModeV1.DynLibUnits:
+            LibraryUnitEnvBindingsV1(
+                mode: mode,
+                library_units_env: "1",
+                stage3_dynlib_env: "1",
+                dynlib_explicit_env: if explicit_dyn: "1" else: "")
+        case LibraryUnitBuildModeV1.StaticUnits:
+            LibraryUnitEnvBindingsV1(
+                mode: mode,
+                library_units_env: "1",
+                stage3_dynlib_env: "0",
+                dynlib_explicit_env: "")
+        case LibraryUnitBuildModeV1.FlatObjects:
+            LibraryUnitEnvBindingsV1(
+                mode: mode,
+                library_units_env: "0",
+                stage3_dynlib_env: "0",
+                dynlib_explicit_env: "")
 
 pub struct LibraryUnitLinkEntryV1:
     unit: text

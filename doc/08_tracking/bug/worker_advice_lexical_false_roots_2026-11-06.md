@@ -1,7 +1,6 @@
 # Worker advice inventory classified its own strings/comments as advice
 
-Status: classifier repair verified natively; producer rebuild and full
-qualification remain pending. Source base: release/1.0.0 at
+Status: FIXED (2026-11-22) — lexical `CoreLexer` classifier (`src/compiler/80.driver/driver_advice_scan_v1.spl`) and TLDR advice-root seeding (`src/compiler/80.driver/driver_source_parse_streaming.spl` `mir_advice_paths -> unit_tldr_seeds`) landed with unit spec `test/01_unit/compiler/driver/worker_mir_child_closure_spec.spl`. Source base: release/1.0.0 at
 4d7dda0c117c375568f27feb6936bf76ade808a4.
 
 ## Failure and requirements

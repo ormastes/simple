@@ -1,11 +1,15 @@
 #!/bin/sh
+# ==============================================================================
+# PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER
+# Guarded by: scripts/check/fast-verify-bootstrap-scripts.shs
+# ==============================================================================
 # BUILD MODE (user policy 2026-11-04): default = file-based src -> obj, one
 # process per file (parse -> HIR -> MIR -> obj), then link. Whole-program is
 # opt-in per invocation only: SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1; two-pass shard
 # route: SIMPLE_FILE_WORKERS=0. Never set these as script-global defaults.
-# Exception (2026-11-13): Stage 3 takes SIMPLE_FILE_WORKERS from the tracked
-# config/bootstrap.sdn key stage3_file_workers (env overrides) while the
-# per-file route is broken (bug #8504); delete the key once it is fixed.
+# Stage 3 takes SIMPLE_FILE_WORKERS from the tracked config/bootstrap.sdn key
+# stage3_file_workers (default 1 = per-file worker pool; explicit env
+# SIMPLE_FILE_WORKERS=0 opts out per invocation).
 # 2026-11-05: the admitted compiler's bootstrap_main.spl now applies the same
 # default to EVERY route -- plain positional native-build, Stage 4 and the
 # coordinator/Stage 3 routes (Windows batch included; it delegates here) --
@@ -23,8 +27,14 @@ bootstrap_early_repo_root=$(CDPATH= cd -- "${bootstrap_entry_dir}/../.." && pwd 
 # edits (conflict markers, rewritten stage inputs) cannot break a long lane.
 # Opt out with SIMPLE_BOOTSTRAP_LIVE_TREE=1 (uncommitted edits ARE then built).
 # SIMPLE_BOOTSTRAP_SOURCE_REV picks the commit (default HEAD).
+bootstrap_readonly_probe=0
+for bootstrap_probe_arg in "$@"; do
+  case "${bootstrap_probe_arg}" in
+    --help|-h|--path-check) bootstrap_readonly_probe=1 ;;
+  esac
+done
 if [ "${SIMPLE_BOOTSTRAP_PINNED_ARCHIVE:-}" = "" ] && [ "${SIMPLE_BOOTSTRAP_LIVE_TREE:-0}" != 1 ] &&
-   [ "${1:-}" != progress-watch ] &&
+   [ "${1:-}" != progress-watch ] && [ "${bootstrap_readonly_probe}" -eq 0 ] &&
    git -C "${bootstrap_early_repo_root}" rev-parse --git-dir >/dev/null 2>&1; then
   bootstrap_pinned_dir=$(sh "${bootstrap_entry_dir}/bootstrap-pin-archive.shs" \
     "${bootstrap_early_repo_root}" "${SIMPLE_BOOTSTRAP_SOURCE_REV:-HEAD}" \
@@ -32,8 +42,9 @@ if [ "${SIMPLE_BOOTSTRAP_PINNED_ARCHIVE:-}" = "" ] && [ "${SIMPLE_BOOTSTRAP_LIVE
     echo "bootstrap-pinned-archive-error: could not materialise source snapshot; set SIMPLE_BOOTSTRAP_LIVE_TREE=1 to build the live tree" >&2
     exit 70
   }
+  SIMPLE_BOOTSTRAP_HOST_REPO_ROOT=${SIMPLE_BOOTSTRAP_HOST_REPO_ROOT:-${bootstrap_early_repo_root}}
   SIMPLE_BOOTSTRAP_PINNED_ARCHIVE=${bootstrap_pinned_dir}
-  export SIMPLE_BOOTSTRAP_PINNED_ARCHIVE
+  export SIMPLE_BOOTSTRAP_HOST_REPO_ROOT SIMPLE_BOOTSTRAP_PINNED_ARCHIVE
   # Opt-in retention for older pins (bootstrap-pin-prune.shs: keeps live,
   # admitted-for-resume, young, this run's and the newest pins; never fatal).
   if [ "${SIMPLE_BOOTSTRAP_PIN_PRUNE:-0}" = 1 ]; then
@@ -51,6 +62,11 @@ case "${1:-}" in
     exec sh "${bootstrap_entry_dir}/bootstrap-progress-watch.shs" "$@"
     ;;
 esac
+# Host-config build-start memory reserve (mem_reserve_free_mib, #8931): env
+# SIMPLE_BUILD_MEMORY_RESERVE_BYTES wins; a host without the key is unchanged.
+# Stage 3 knobs are applied in resume-stage3-from-admitted.sh (after --jobs).
+. "${bootstrap_entry_dir}/lib/host-bootstrap-settings.shs"
+bootstrap_host_apply_memory_reserve "${bootstrap_early_repo_root}"
 
 # -- argv-normalize begin
 # Options with a REQUIRED value accept `--opt=value` and `--opt value`
@@ -70,7 +86,8 @@ while [ "${bootstrap_argc}" -gt 0 ]; do
     --strategy|--resume-stage3-from-admitted|--resume-stage4-from-admitted|\
     --resume-managed-from-admitted|\
     --mode|--diagnostic-root|--diagnostic-child-compiler|--target|--jobs|--jobs-memory-policy|\
-    --progress-interval|--invalidate-cache|--refresh-stage2-source-cache)
+    --progress-interval|--invalidate-cache|--refresh-stage2-source-cache|\
+    --compile-mode|--win-config|--simulate-host)
       bootstrap_value_missing=1
       if [ "${bootstrap_argc}" -gt 0 ]; then
         case "$1" in -*) ;; *) bootstrap_value_missing=0 ;; esac
@@ -112,20 +129,236 @@ bootstrap_seed_stop_policy_validate "$@" || exit 64
 . "${bootstrap_entry_dir}/bootstrap-cache-policy.shs"
 bootstrap_compile_failure_policy "$@"
 
+detected_p3_bin=""
+detected_runtime_dir=""
+bootstrap_early_plat=""
+bootstrap_early_exe=""
+
+bootstrap_early_host_probe_vars() {
+  behp_wcfg=${1:-${SIMPLE_WIN_CONFIG:-mingw}}
+  if behp_os_raw=$(uname -s 2>/dev/null); then :; else behp_os_raw="unknown"; fi
+  if behp_cpu_raw=$(uname -m 2>/dev/null); then :; else behp_cpu_raw="unknown"; fi
+  case "${behp_os_raw}" in
+    Linux|linux) behp_os="linux" ;;
+    Darwin|darwin|macos) behp_os="macos" ;;
+    FreeBSD|freebsd) behp_os="freebsd" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows*|windows*) behp_os="windows" ;;
+    SimpleOS|simpleos*) behp_os="simpleos" ;;
+    *) behp_os="unknown" ;;
+  esac
+  case "${behp_cpu_raw}" in
+    x86_64|amd64|AMD64) behp_cpu="x86_64" ;;
+    aarch64|arm64|ARM64) behp_cpu="aarch64" ;;
+    riscv64*) behp_cpu="riscv64" ;;
+    *) behp_cpu="${behp_cpu_raw}" ;;
+  esac
+  bootstrap_early_exe=""
+  case "${behp_os}" in
+    linux) bootstrap_early_plat="${behp_cpu}-unknown-linux-gnu" ;;
+    macos) bootstrap_early_plat="${behp_cpu}-apple-darwin" ;;
+    freebsd) bootstrap_early_plat="${behp_cpu}-unknown-freebsd" ;;
+    windows)
+      bootstrap_early_exe=".exe"
+      case "${behp_wcfg}" in
+        msvc) bootstrap_early_plat="${behp_cpu}-pc-windows-msvc" ;;
+        *) bootstrap_early_plat="${behp_cpu}-pc-windows-gnu" ;;
+      esac
+      ;;
+    simpleos) bootstrap_early_plat="${behp_cpu}-unknown-simpleos" ;;
+    *) bootstrap_early_plat="${behp_cpu}-unknown-${behp_os}" ;;
+  esac
+}
+
+bootstrap_check_single_phase3_candidate() {
+  bcsp_cand=$1
+  [ -n "${bcsp_cand}" ] || return 1
+  [ -f "${bcsp_cand}" ] && [ -x "${bcsp_cand}" ] || return 1
+  case "${bcsp_cand}" in
+    *compiler_rust*|*simple_seed*) return 1 ;;
+  esac
+  if bcsp_cand_dir=$(CDPATH= cd -- "$(dirname -- "${bcsp_cand}")" 2>/dev/null && pwd -P); then
+    bcsp_cand_phys="${bcsp_cand_dir}/$(basename -- "${bcsp_cand}")"
+    case "${bcsp_cand_phys}" in
+      *compiler_rust*|*simple_seed*) return 1 ;;
+    esac
+  fi
+  if bcsp_ver_out=$("${bcsp_cand}" --version 2>&1); then :; else return 1; fi
+  [ -n "${bcsp_ver_out}" ] || return 1
+  case "${bcsp_ver_out}" in
+    *"bootstrap seed only"*|*"Rust seed"*) return 1 ;;
+  esac
+  if bcsp_help_out=$("${bcsp_cand}" native-build --help 2>&1); then :; else return 1; fi
+  case "${bcsp_help_out}" in
+    *--runtime-bundle*) ;;
+    *) return 1 ;;
+  esac
+  detected_p3_bin="${bcsp_cand}"
+  return 0
+}
+
+bootstrap_probe_phase3_binary() {
+  bp3_repo=$1
+  bp3_out=$2
+  bp3_plat=$3
+  bp3_exe=$4
+  detected_p3_bin=""
+  bp3_host_repo="${SIMPLE_BOOTSTRAP_HOST_REPO_ROOT:-${bp3_repo}}"
+
+  for bp3_cand in \
+    "${SIMPLE_PHASE3_COMPILER:-}" \
+    "${bp3_out}/stage3/${bp3_plat}/simple${bp3_exe}" \
+    "${bp3_out}/full/${bp3_plat}/simple${bp3_exe}"; do
+    if bootstrap_check_single_phase3_candidate "${bp3_cand}"; then
+      return 0
+    fi
+  done
+
+  for bp3_glob_cand in \
+    "${bp3_out}"/stage3/*/simple${bp3_exe} \
+    "${bp3_out}"/full/*/simple${bp3_exe}; do
+    if bootstrap_check_single_phase3_candidate "${bp3_glob_cand}"; then
+      return 0
+    fi
+  done
+
+  if [ "${SIMPLE_DEFAULT_RELEASE_CANDIDATE_DIR+x}" = x ]; then
+    if [ -n "${SIMPLE_DEFAULT_RELEASE_CANDIDATE_DIR}" ]; then
+      for bp3_rc_cand in \
+        "${SIMPLE_DEFAULT_RELEASE_CANDIDATE_DIR}/simple${bp3_exe}" \
+        "${SIMPLE_DEFAULT_RELEASE_CANDIDATE_DIR}/${bp3_plat}/simple${bp3_exe}" \
+        "${SIMPLE_DEFAULT_RELEASE_CANDIDATE_DIR}/${bp3_plat}-macho/simple${bp3_exe}" \
+        "${SIMPLE_DEFAULT_RELEASE_CANDIDATE_DIR}/${bp3_plat}-elf/simple${bp3_exe}" \
+        "${SIMPLE_DEFAULT_RELEASE_CANDIDATE_DIR}"/*/simple${bp3_exe}; do
+        if bootstrap_check_single_phase3_candidate "${bp3_rc_cand}"; then
+          return 0
+        fi
+      done
+    fi
+    return 1
+  fi
+
+  for bp3_rel_cand in \
+    "${bp3_repo}/bin/release/${bp3_plat}/simple${bp3_exe}" \
+    "${bp3_repo}/bin/release/${bp3_plat}-macho/simple${bp3_exe}" \
+    "${bp3_repo}/bin/release/${bp3_plat}-elf/simple${bp3_exe}" \
+    "${bp3_repo}"/bin/release/*/simple${bp3_exe} \
+    "${bp3_repo}/bin/simple${bp3_exe}" \
+    "${bp3_host_repo}/bin/release/${bp3_plat}/simple${bp3_exe}" \
+    "${bp3_host_repo}/bin/release/${bp3_plat}-macho/simple${bp3_exe}" \
+    "${bp3_host_repo}/bin/release/${bp3_plat}-elf/simple${bp3_exe}" \
+    "${bp3_host_repo}"/bin/release/*/simple${bp3_exe} \
+    "${bp3_host_repo}/bin/simple${bp3_exe}"; do
+    if bootstrap_check_single_phase3_candidate "${bp3_rel_cand}"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+bootstrap_check_single_runtime_dir() {
+  bcsrt_cand=$1
+  bcsrt_phase=$2
+  [ -n "${bcsrt_cand}" ] && [ -d "${bcsrt_cand}" ] || return 1
+  bcsrt_has_rt=0
+  if [ -f "${bcsrt_cand}/libsimple_runtime.a" ] ||
+     [ -f "${bcsrt_cand}/simple_runtime.lib" ] ||
+     [ -f "${bcsrt_cand}/deps/libsimple_runtime.a" ] ||
+     [ -f "${bcsrt_cand}/deps/simple_runtime.lib" ]; then
+    bcsrt_has_rt=1
+  fi
+  bcsrt_has_bf=0
+  if [ -f "${bcsrt_cand}/libsimple_compiler_backfill.a" ] ||
+     [ -f "${bcsrt_cand}/simple_compiler_backfill.lib" ] ||
+     [ -f "${bcsrt_cand}/deps/libsimple_compiler_backfill.a" ] ||
+     [ -f "${bcsrt_cand}/deps/simple_compiler_backfill.lib" ]; then
+    bcsrt_has_bf=1
+  fi
+  if [ "${bcsrt_phase}" = "p3" ]; then
+    if [ "${bcsrt_has_rt}" -eq 1 ] || [ "${bcsrt_has_bf}" -eq 1 ]; then
+      detected_runtime_dir="${bcsrt_cand}"
+      return 0
+    fi
+  else
+    if [ "${bcsrt_has_rt}" -eq 1 ] && [ "${bcsrt_has_bf}" -eq 1 ]; then
+      detected_runtime_dir="${bcsrt_cand}"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+bootstrap_locate_phase3_runtime_dir() {
+  brt_repo=$1
+  brt_out=$2
+  brt_bin=$3
+  brt_phase=${4:-all}
+  detected_runtime_dir=""
+  brt_bin_dir=$(dirname -- "${brt_bin}")
+  brt_host_repo="${SIMPLE_BOOTSTRAP_HOST_REPO_ROOT:-${brt_repo}}"
+
+  for brt_cand in \
+    "${SIMPLE_RUNTIME_PATH:-}" \
+    "${brt_bin_dir}/runtime" \
+    "${brt_bin_dir}" \
+    "${brt_out}/seed/runtime"; do
+    if bootstrap_check_single_runtime_dir "${brt_cand}" "${brt_phase}"; then
+      return 0
+    fi
+  done
+
+  if [ "${SIMPLE_DEFAULT_RELEASE_CANDIDATE_DIR+x}" != x ]; then
+    for brt_repo_cand in \
+      "${brt_repo}/build/bootstrap/seed/runtime" \
+      "${brt_repo}/src/compiler_rust/target/bootstrap" \
+      "${brt_repo}/src/compiler_rust/target/bootstrap/deps" \
+      "${brt_host_repo}/build/bootstrap/seed/runtime" \
+      "${brt_host_repo}/src/compiler_rust/target/bootstrap" \
+      "${brt_host_repo}/src/compiler_rust/target/bootstrap/deps"; do
+      if bootstrap_check_single_runtime_dir "${brt_repo_cand}" "${brt_phase}"; then
+        return 0
+      fi
+    done
+  fi
+
+  if [ "${brt_phase}" = "p3" ] && [ -z "${SIMPLE_RUNTIME_PATH:-}" ]; then
+    if [ -d "${brt_repo}/src/runtime" ]; then
+      detected_runtime_dir="${brt_repo}/src/runtime"
+      return 0
+    fi
+    if [ -d "${brt_host_repo}/src/runtime" ]; then
+      detected_runtime_dir="${brt_host_repo}/src/runtime"
+      return 0
+    fi
+  fi
+  return 1
+}
+
 # The coordinated strategy supervisor is the default entry for an ordinary
 # multi-stage bootstrap. Single-stage recovery, receipt validation, help, and
 # diagnostic sweeps keep their direct fail-closed paths. The supervisor sets
 # SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED before launching this stage engine.
 if [ "${SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED:-0}" != 1 ]; then
   bootstrap_strategy_entry=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
+  bootstrap_strategy_repo=$(CDPATH= cd -- "${bootstrap_strategy_entry}/../.." && pwd -P) || exit 70
   bootstrap_strategy_arg=${SIMPLE_BOOTSTRAP_STRATEGY:-normal}
   bootstrap_strategy_output=${SIMPLE_BOOTSTRAP_BUILD_ROOT}
+  bootstrap_strategy_win_cfg=${SIMPLE_WIN_CONFIG:-mingw}
+  bootstrap_strategy_phase=all
   bootstrap_strategy_bypass=0
+  bootstrap_strategy_wants_seed=0
   for bootstrap_strategy_option in "$@"; do
     case "${bootstrap_strategy_option}" in
       --strategy=*) bootstrap_strategy_arg=${bootstrap_strategy_option#*=} ;;
       --output=*) bootstrap_strategy_output=${bootstrap_strategy_option#*=} ;;
-      --help|--validate-bootstrap-receipt|--stop-after-seed|--stop-after-stage2|--stop-after-stage3|\
+      --win-config=*) bootstrap_strategy_win_cfg=${bootstrap_strategy_option#*=} ;;
+      --msvc) bootstrap_strategy_win_cfg=msvc ;;
+      --mingw) bootstrap_strategy_win_cfg=mingw ;;
+      --from-seed|--cold-bootstrap|--full-bootstrap) bootstrap_strategy_wants_seed=1 ;;
+      --stop-after-stage3)
+        bootstrap_strategy_phase=p3
+        bootstrap_strategy_bypass=1
+        ;;
+      --help|--path-check|--skip-seed|--validate-bootstrap-receipt|--stop-after-seed|--stop-after-stage2|\
       --produce-stage3-receipt=*|\
       --resume-stage3-from-admitted=*|--resume-stage4-from-admitted=*|\
       --resume-managed-from-admitted=*|--diagnostic-sweep)
@@ -134,6 +367,13 @@ if [ "${SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED:-0}" != 1 ]; then
       --target=simpleos-*|--target=freebsd-*) bootstrap_strategy_bypass=1 ;;
     esac
   done
+  if [ "${bootstrap_strategy_wants_seed}" -eq 0 ] && [ "${bootstrap_strategy_bypass}" -eq 0 ]; then
+    bootstrap_early_host_probe_vars "${bootstrap_strategy_win_cfg}"
+    if bootstrap_probe_phase3_binary "${bootstrap_strategy_repo}" "${bootstrap_strategy_output}" "${bootstrap_early_plat}" "${bootstrap_early_exe}" &&
+       bootstrap_locate_phase3_runtime_dir "${bootstrap_strategy_repo}" "${bootstrap_strategy_output}" "${detected_p3_bin}" "${bootstrap_strategy_phase}"; then
+      bootstrap_strategy_bypass=1
+    fi
+  fi
   if [ "${bootstrap_strategy_bypass}" -eq 0 ] &&
      [ -x "${bootstrap_strategy_entry}/bootstrap-strategy.shs" ]; then
     exec "${bootstrap_strategy_entry}/bootstrap-strategy.shs" \
@@ -182,6 +422,8 @@ case "${1:-}" in
     shift
     [ "$#" -eq 1 ] || { echo 'error: managed resume requires one --bootstrap-receipt planner authority' >&2; exit 2; }
     case "$1" in --bootstrap-receipt=*) managed_resume_planner=${1#*=} ;; *) exit 2 ;; esac
+    . "${bootstrap_early_repo_root}/scripts/bootstrap/bootstrap-materialized-startup.shs"
+    bootstrap_materialized_resume_startup "${bootstrap_early_repo_root}" "${managed_resume_output}" || exit 1
     exec sh "${bootstrap_entry_dir}/run-managed-from-admitted.shs" \
       "--output=${managed_resume_output}" "--planner-receipt=${managed_resume_planner}"
     ;;
@@ -362,6 +604,14 @@ Options:
                      rebuilding Stage 2 or entering legacy Stage 3/4. Requires
                      --bootstrap-receipt=<typed Stage 4 planner receipt>.
   --pure-simple      Compatibility alias for the default no-Rust rebuild mode.
+  --from-seed        Force cold Phase 1 Cargo seed + Phase 2 + Phase 3 + Phase 4.
+  --cold-bootstrap   Compatibility alias for --from-seed.
+  --skip-seed        Require an existing Phase 3+ pure-Simple host compiler and
+                     skip Phase 1/2 (exits 2 if none found).
+  --path-check       Run alive path check without compiling and exit 0.
+  --compile-mode=<mode>     Phase 3 compile mode for shared builder (shard|file, default: shard)
+  --win-config=<cfg>        Windows toolchain config for shared builder (mingw|msvc, default: mingw)
+  --simulate-host=<spec>    Simulated <platform>-<cpu> host for --path-check
   --mode=<name>      Pure-Simple build mode: dynload or one-binary
                      (default: dynload; env: SIMPLE_BOOTSTRAP_MODE)
                      SIMPLE_NO_STUB_FALLBACK=1 also makes staged failures fatal
@@ -444,6 +694,12 @@ jobs=""
 jobs_memory_policy=auto
 pure_simple=0
 full_bootstrap=0
+force_from_seed=0
+require_existing_phase3=0
+path_check=0
+compile_mode="${SIMPLE_P3_COMPILE_MODE:-shard}"
+win_config="${SIMPLE_WIN_CONFIG:-mingw}"
+simulate_host="${STAGE3_SIMULATE_HOST:-}"
 stop_after_seed=0
 resume_stage3_output=""
 resume_stage4_output=""
@@ -496,6 +752,7 @@ produce_stage3_receipt_reason=''
 produce_managed_receipt_reason=''
 produce_managed_receipt_requested=0
 stop_after_stage3=0
+stage4_dual_mode="${SIMPLE_STAGE4_DUAL_MODE:-1}"
 stage3_current_acceptance_status=unverified
 case "${SIMPLE_NO_STUB_FALLBACK:-0}" in
   1|true|yes|on) strict_bootstrap=1 ;;
@@ -545,6 +802,25 @@ while [ "$#" -gt 0 ]; do
     --full-bootstrap)
       full_bootstrap=1
       ;;
+    --from-seed|--cold-bootstrap)
+      force_from_seed=1
+      full_bootstrap=1
+      ;;
+    --skip-seed)
+      require_existing_phase3=1
+      ;;
+    --path-check)
+      path_check=1
+      ;;
+    --compile-mode=*)
+      compile_mode=${1#*=}
+      ;;
+    --win-config=*)
+      win_config=${1#*=}
+      ;;
+    --simulate-host=*)
+      simulate_host=${1#*=}
+      ;;
     --fail-fast|--keep-going)
       # Resolved before supervisor dispatch; inherited by every child.
       ;;
@@ -568,7 +844,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --invalidate-cache=*)
       selected_invalidation_scope=${1#*=}
-      case "${selected_invalidation_scope}" in stage2|stage3|stage4|stage4b-ui-backend|stage5[0-9]*) ;; *) echo 'error: --invalidate-cache requires a build phase scope' >&2; exit 64 ;; esac
+      case "${selected_invalidation_scope}" in stage2|stage3|stage4|stage4-debug|stage4b-ui-backend|stage5[0-9]*) ;; *) echo 'error: --invalidate-cache requires a build phase scope' >&2; exit 64 ;; esac
       invalidate_cache_scope="${invalidate_cache_scope:+${invalidate_cache_scope},}${selected_invalidation_scope}"
       ;;
     --refresh-stage2-source-cache=*)
@@ -633,6 +909,12 @@ while [ "$#" -gt 0 ]; do
     --force-deploy-mcp)
       force_deploy_mcp=1
       ;;
+    --stage4-dual-mode)
+      stage4_dual_mode=1
+      ;;
+    --no-stage4-dual-mode)
+      stage4_dual_mode=0
+      ;;
     --keep-artifacts|--no-verify)
       ;;
     --progress)
@@ -663,6 +945,10 @@ done
 case "${SIMPLE_BOOTSTRAP_STAGE4C_DYNSMF:-0}" in
   0|1) ;;
   *) echo "error: SIMPLE_BOOTSTRAP_STAGE4C_DYNSMF must be 0 or 1 (got '${SIMPLE_BOOTSTRAP_STAGE4C_DYNSMF}')" >&2; exit 64 ;;
+esac
+case "${stage4_dual_mode}" in
+  0|1) ;;
+  *) echo "error: SIMPLE_STAGE4_DUAL_MODE must be 0 or 1 (got '${stage4_dual_mode}')" >&2; exit 64 ;;
 esac
 
 if [ "${stop_after_seed}" -eq 1 ]; then
@@ -729,6 +1015,113 @@ case "${diagnostics_mode}" in
     exit 1
     ;;
 esac
+
+case "${compile_mode}" in
+  shard|phase) compile_mode=shard ;;
+  file) compile_mode=file ;;
+  *)
+    echo "error: --compile-mode requires shard or file (got '${compile_mode}')" >&2
+    exit 2
+    ;;
+esac
+
+case "${win_config}" in
+  mingw|gnu) win_config=mingw ;;
+  msvc) win_config=msvc ;;
+  *)
+    echo "error: --win-config requires mingw or msvc (got '${win_config}')" >&2
+    exit 2
+    ;;
+esac
+
+if [ "${require_existing_phase3}" -eq 1 ] &&
+   { [ "${force_from_seed}" -eq 1 ] || [ "${full_bootstrap}" -eq 1 ] ||
+     [ "${stop_after_seed}" -eq 1 ] || [ "${stop_after_stage2}" -eq 1 ]; }; then
+  echo "error: --skip-seed conflicts with --from-seed, --cold-bootstrap, --full-bootstrap, --stop-after-seed, and --stop-after-stage2" >&2
+  exit 2
+fi
+
+if [ "${path_check}" -eq 1 ]; then
+  STAGE3_POLICY_SDN="${bootstrap_early_repo_root}/scripts/bootstrap/stage3-native-host-link-policy.sdn"
+  export STAGE3_POLICY_SDN
+  . "${bootstrap_early_repo_root}/scripts/bootstrap/stage3-native-host-link-policy.shs"
+  if [ -n "${simulate_host}" ]; then
+    STAGE3_SIMULATE_HOST="${simulate_host}"
+    export STAGE3_SIMULATE_HOST
+  fi
+  stage3_check_native_host_match "${target}" "${win_config}" || exit 2
+  pc_plat="${STAGE3_HOST_PLATFORM}"
+  pc_cpu="${STAGE3_HOST_CPU}"
+  pc_target="${STAGE3_RESOLVED_TARGET}"
+  pc_wcfg="n/a"
+  pc_exe=""
+  if [ "${pc_plat}" = "windows" ]; then
+    pc_wcfg="${win_config}"
+    pc_exe=".exe"
+  fi
+  pc_shared_phase="all"
+  if [ "${stop_after_stage3}" -eq 1 ]; then
+    pc_shared_phase="p3"
+  fi
+  if [ "${SIMPLE_PATH_CHECK_HAS_PHASE3:-}" = "1" ]; then
+    pc_has_phase3=1
+  elif [ "${SIMPLE_PATH_CHECK_HAS_PHASE3:-}" = "0" ]; then
+    pc_has_phase3=0
+  elif bootstrap_probe_phase3_binary "${bootstrap_early_repo_root}" "${output_dir}" "${pc_target}" "${pc_exe}" &&
+       bootstrap_locate_phase3_runtime_dir "${bootstrap_early_repo_root}" "${output_dir}" "${detected_p3_bin}" "${pc_shared_phase}"; then
+    pc_has_phase3=1
+  else
+    pc_has_phase3=0
+  fi
+  if [ "${require_existing_phase3}" -eq 1 ] && [ "${pc_has_phase3}" -eq 0 ]; then
+    echo "error: --skip-seed requires an existing Phase 3+ pure-Simple host compiler and runtime directory, none found" >&2
+    exit 2
+  fi
+  set -- --path-check --phase="${pc_shared_phase}" --compile-mode="${compile_mode}" --win-config="${win_config}"
+  if [ "${bootstrap_mode}" = "dynload" ] || [ "${bootstrap_mode}" = "one-binary" ]; then
+    set -- "$@" --p4-link-mode="${bootstrap_mode}"
+  fi
+  if [ -n "${target}" ]; then
+    set -- "$@" --target="${target}"
+  fi
+  if [ -n "${simulate_host}" ]; then
+    set -- "$@" --simulate-host="${simulate_host}"
+  fi
+  if [ "${force_from_seed}" -eq 0 ] && [ "${full_bootstrap}" -eq 0 ] && [ "${pc_has_phase3}" -eq 1 ]; then
+    printf 'PATH_ACTION|script=bootstrap-from-scratch.sh|platform=%s|cpu=%s|win_config=%s|phase=init|step=detect-phase3-compiler|compile_mode=%s|link_mode=dynlib|xray=0|release=0|status=ALIVE\n' \
+      "${pc_plat}" "${pc_cpu}" "${pc_wcfg}" "${compile_mode}"
+    printf 'PATH_ACTION|script=bootstrap-from-scratch.sh|platform=%s|cpu=%s|win_config=%s|phase=init|step=skip-phase1-phase2|compile_mode=%s|link_mode=dynlib|xray=0|release=0|status=ALIVE\n' \
+      "${pc_plat}" "${pc_cpu}" "${pc_wcfg}" "${compile_mode}"
+    pc_sub_out=$(sh "${bootstrap_early_repo_root}/scripts/bootstrap/build-phase3-phase4.sh" "$@") || exit $?
+    printf '%s\n' "${pc_sub_out}"
+    pc_sub_cnt=$(printf '%s\n' "${pc_sub_out}" | awk '/^PATH_ACTION\|/ { n++ } END { print n + 0 }')
+    pc_total=$((pc_sub_cnt + 2))
+    printf 'PATH_SUMMARY|script=bootstrap-from-scratch.sh|platform=%s|cpu=%s|target=%s|mode=skip-p1-p2|actions=%s|status=PASS\n' \
+      "${pc_plat}" "${pc_cpu}" "${pc_target}" "${pc_total}"
+    exit 0
+  fi
+  printf 'PATH_ACTION|script=bootstrap-from-scratch.sh|platform=%s|cpu=%s|win_config=%s|phase=p1|step=cargo-seed-build|compile_mode=%s|link_mode=one-binary|xray=0|release=0|status=ALIVE\n' \
+    "${pc_plat}" "${pc_cpu}" "${pc_wcfg}" "${compile_mode}"
+  if [ "${stop_after_seed}" -eq 1 ]; then
+    printf 'PATH_SUMMARY|script=bootstrap-from-scratch.sh|platform=%s|cpu=%s|target=%s|mode=cold-seed|actions=1|status=PASS\n' \
+      "${pc_plat}" "${pc_cpu}" "${pc_target}"
+    exit 0
+  fi
+  printf 'PATH_ACTION|script=bootstrap-from-scratch.sh|platform=%s|cpu=%s|win_config=%s|phase=p2|step=seed-to-stage2|compile_mode=%s|link_mode=dynlib|xray=0|release=0|status=ALIVE\n' \
+    "${pc_plat}" "${pc_cpu}" "${pc_wcfg}" "${compile_mode}"
+  if [ "${stop_after_stage2}" -eq 1 ]; then
+    printf 'PATH_SUMMARY|script=bootstrap-from-scratch.sh|platform=%s|cpu=%s|target=%s|mode=cold-seed|actions=2|status=PASS\n' \
+      "${pc_plat}" "${pc_cpu}" "${pc_target}"
+    exit 0
+  fi
+  pc_sub_out=$(sh "${bootstrap_early_repo_root}/scripts/bootstrap/build-phase3-phase4.sh" "$@") || exit $?
+  printf '%s\n' "${pc_sub_out}"
+  pc_sub_cnt=$(printf '%s\n' "${pc_sub_out}" | awk '/^PATH_ACTION\|/ { n++ } END { print n + 0 }')
+  pc_total=$((pc_sub_cnt + 2))
+  printf 'PATH_SUMMARY|script=bootstrap-from-scratch.sh|platform=%s|cpu=%s|target=%s|mode=cold-seed|actions=%s|status=PASS\n' \
+    "${pc_plat}" "${pc_cpu}" "${pc_target}" "${pc_total}"
+  exit 0
+fi
 
 # This is the common staged-bootstrap boundary, including Windows forwarding
 # and admitted Stage 3 resume. A direct/ad-hoc invocation cannot start even
@@ -1019,6 +1412,8 @@ if [ -n "${resume_stage3_output}" ]; then
   [ "${fresh_cache}" -eq 0 ] || RESUME_STAGE3_CACHE_ACTION=clean
   [ "${invalidate_cache_scope}" != stage3 ] || RESUME_STAGE3_CACHE_ACTION=invalidate
   export RESUME_STAGE3_CACHE_ACTION
+  . "${bootstrap_early_repo_root}/scripts/bootstrap/bootstrap-materialized-startup.shs"
+  bootstrap_materialized_resume_startup "${bootstrap_early_repo_root}" "${resume_stage3_output}" || exit 1
   exec /bin/sh "$(dirname -- "$0")/resume-stage3-from-admitted.sh" "${resume_stage3_output}"
 fi
 
@@ -1096,9 +1491,27 @@ fi
 
 # A caller-controlled "supervised" environment marker is routing state, never
 # publication authority. Coordinated normal/full Stage 4 must enter through the
-# admitted resume above, where the immutable lineage receipt is re-verified.
+# admitted resume above, where the immutable lineage receipt is re-verified,
+# UNLESS default Phase 1/2 seed-skip reuses an existing verified Phase 3+ host
+# compiler + runtime directory (`bootstrap_run_shared_phase3_phase4`).
+bootstrap_can_reuse_phase3=0
+if [ "${force_from_seed}" -eq 0 ] && [ "${full_bootstrap}" -eq 0 ] &&
+   [ "${stop_after_seed}" -eq 0 ] && [ "${stop_after_stage2}" -eq 0 ] &&
+   [ -z "${resume_stage3_output}" ] && [ -z "${resume_stage4_output}" ] &&
+   [ -z "${resume_managed_output:-}" ] && [ "${diagnostic_sweep}" -eq 0 ]; then
+  bootstrap_early_phase=all
+  if [ "${stop_after_stage3}" -eq 1 ]; then
+    bootstrap_early_phase=p3
+  fi
+  bootstrap_early_host_probe_vars "${win_config}"
+  if bootstrap_probe_phase3_binary "${bootstrap_early_repo_root}" "${output_dir}" "${bootstrap_early_plat}" "${bootstrap_early_exe}" &&
+     bootstrap_locate_phase3_runtime_dir "${bootstrap_early_repo_root}" "${output_dir}" "${detected_p3_bin}" "${bootstrap_early_phase}"; then
+    bootstrap_can_reuse_phase3=1
+  fi
+fi
 if [ "${bootstrap_strategy}" != adhoc ] && [ "${full_cli}" -eq 1 ] &&
-   [ -z "${resume_stage4_output}" ]; then
+   [ -z "${resume_stage4_output}" ] && [ "${require_existing_phase3}" -eq 0 ] &&
+   [ "${bootstrap_can_reuse_phase3}" -eq 0 ]; then
   echo "error: coordinated Stage 4 requires scheduler lineage admission; use --strategy=adhoc only for the explicit legacy lane" >&2
   exit 1
 fi
@@ -2012,7 +2425,7 @@ ${cache_assurance_payload}
 ${cache_admission_payload}"
       ;;
     stage4*|stage5*)
-      if [ "$1" = stage4 ]; then
+      if [ "$1" = stage4 ] || [ "$1" = stage4-debug ]; then
         cache_environment_payload=$(bootstrap_cache_native_environment "${repo_root}" \
           "SIMPLE_BINARY=$(absolute_path "${cache_producer}")" "SIMPLE_CACHE_SCOPE=$1" \
           SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_STAGE4=1 \
@@ -2022,6 +2435,10 @@ ${cache_admission_payload}"
           SIMPLE_FRONTEND_CACHE=1 "SIMPLE_FRONTEND_CACHE_DIR=${native_cache_dir}/frontend" \
           SIMPLE_HIR_CACHE=1 "SIMPLE_HIR_CACHE_DIR=${native_cache_dir}/hir" \
           SIMPLE_PACKAGE_INDEX_COLD_INIT=1 SIMPLE_NO_STUB_FALLBACK=1) || return 1
+        if [ "$1" = stage4-debug ]; then
+          cache_environment_payload="${cache_environment_payload}
+STAGE4_BUILD_LANE=debug-xray"
+        fi
       elif [ "$1" = stage4b-ui-backend ]; then
         cache_environment_payload=$(bootstrap_cache_native_environment "${repo_root}" \
           "SIMPLE_BINARY=$(absolute_path "${cache_producer}")" \
@@ -2109,7 +2526,7 @@ prepare_native_cache() {
   label=$1
   cache_producer=$2 cache_entry=$3
   cache_build_mode=${bootstrap_mode}
-  [ "${label}" != stage4 ] || cache_build_mode=one-binary
+  [ "${label}" != stage4 ] && [ "${label}" != stage4-debug ] || cache_build_mode=one-binary
   # Each entry and exact producer receives a separate writable object/frontend
   # namespace. Previous producers remain available for explicit manual clean.
   producer_sha=$(hash_file "${cache_producer}") || exit 1
@@ -2992,6 +3409,9 @@ bootstrap_native_build_main() {
   # See doc/08_tracking/bug/stage4_seven_source_roots_rejected_2026-10-24.md
   compiler=$1
   output=$2
+  stage4_variant=${3:-release}
+  stage4_rss_receipt="${log_dir}/stage4-native-build.log.rss.env"
+  stage4_cache_scope="${SIMPLE_CACHE_SCOPE:-stage4}"
   set -- native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
@@ -3000,6 +3420,21 @@ bootstrap_native_build_main() {
     --entry-closure \
     --timeout "${NATIVE_FILE_TIMEOUT_SECONDS}" \
     $([ "${NATIVE_LOW_MEMORY}" = 0 ] || printf -- --low-memory)
+  if [ "${stage4_variant}" = debug-xray ]; then
+    stage4_rss_receipt="${log_dir}/stage4-debug-native-build.log.rss.env"
+    stage4_cache_scope="${SIMPLE_CACHE_SCOPE:-stage4-debug}"
+    set -- "$@" --profile=dev --debug --no-strip
+    case "${backend}:${PLATFORM}" in
+      llvm:aarch64-*-linux-*|llvm:x86_64-*-linux-*|\
+      llvm:aarch64-apple-darwin*|llvm:arm64-apple-darwin*|llvm:x86_64-apple-darwin*|\
+      llvm:aarch64-apple-macosx*|llvm:arm64-apple-macosx*|llvm:x86_64-apple-macosx*|\
+      native:aarch64-*-linux-*|native:x86_64-*-linux-*)
+        set -- "$@" --xray
+        ;;
+    esac
+  else
+    set -- "$@" --profile=prod --release --strip
+  fi
   set -- "$@" \
     --threads "${selfhost_jobs}" \
     --cache-dir "${native_cache_dir}" \
@@ -3041,7 +3476,7 @@ bootstrap_native_build_main() {
     --cap-source="${bootstrap_tree_rss_source}" \
     --cap-bound="${bootstrap_tree_rss_bound}" \
     --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
-    --receipt="${log_dir}/stage4-native-build.log.rss.env" -- \
+    --receipt="${stage4_rss_receipt}" -- \
   env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_BOOTSTRAP=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
@@ -3050,7 +3485,7 @@ bootstrap_native_build_main() {
     SIMPLE_STAGE4_STREAMING_SURFACES=1 \
     SIMPLE_NATIVE_STAGED_CODEGEN_BATCH="${bootstrap_stream_batch}" \
     SIMPLE_NATIVE_GO_TO_END="${bootstrap_go_to_end}" \
-    SIMPLE_CACHE_SCOPE="${SIMPLE_CACHE_SCOPE:-stage4}" \
+    SIMPLE_CACHE_SCOPE="${stage4_cache_scope}" \
     SIMPLE_FRONTEND_CACHE=1 \
     SIMPLE_FRONTEND_CACHE_DIR="${native_cache_dir}/frontend" \
     SIMPLE_HIR_CACHE=1 \
@@ -3170,6 +3605,121 @@ if [ "${diagnostic_sweep}" -eq 1 ]; then
   else
     diagnostic_status=$?
     exit "${diagnostic_status}"
+  fi
+fi
+
+bootstrap_detect_phase3_compiler() {
+  bdp3_phase=${1:-all}
+  bootstrap_probe_phase3_binary "${repo_root}" "${output_dir}" "${PLATFORM}" "${exe_suffix}" || return 1
+  bootstrap_locate_phase3_runtime_dir "${repo_root}" "${output_dir}" "${detected_p3_bin}" "${bdp3_phase}" || return 1
+  return 0
+}
+
+bootstrap_run_shared_phase3_phase4() {
+  shared_phase="all"
+  final_stage="complete"
+  if [ "${stop_after_stage3}" -eq 1 ]; then
+    shared_phase="p3"
+    final_stage="stage3"
+  fi
+  shared_p4_lmode_arg="--p4-link-mode=dynload"
+  if [ "${bootstrap_mode}" = "dynload" ] || [ "${bootstrap_mode}" = "one-binary" ]; then
+    shared_p4_lmode_arg="--p4-link-mode=${bootstrap_mode}"
+  fi
+  shared_builder="${SIMPLE_SHARED_PHASE34_BUILDER:-${repo_root}/scripts/bootstrap/build-phase3-phase4.sh}"
+  echo "Skipping Phase 1 (Cargo seed) & Phase 2 (seed->Stage2): reusing existing Phase 3+ compiler:"
+  echo "  compiler: ${detected_p3_bin}"
+  echo "  runtime:  ${detected_runtime_dir}"
+  echo "  phase:    ${shared_phase} (compile-mode=${compile_mode}, win-config=${win_config})"
+  bootstrap_progress_mark shared-phase3-phase4 ""
+  sh "${shared_builder}" \
+    --non-interactive \
+    --phase="${shared_phase}" \
+    --compile-mode="${compile_mode}" \
+    "${shared_p4_lmode_arg}" \
+    --win-config="${win_config}" \
+    --target="${PLATFORM}" \
+    --backend="${backend:-llvm}" \
+    --threads="${selfhost_jobs:-${jobs:-4}}" \
+    --p2-bin="${detected_p3_bin}" \
+    --seed-dir="${detected_runtime_dir}" \
+    --build-root="${output_dir}/phased-selfhost"
+  if [ "${deploy}" -eq 1 ]; then
+    shared_p4_dir="${output_dir}/phased-selfhost/p4-from-p3b"
+    shared_p4_bin="${shared_p4_dir}/bin/simple${exe_suffix}"
+    [ -x "${shared_p4_bin}" ] || {
+      echo "error: shared Phase 4 output missing for --deploy: ${shared_p4_bin}" >&2
+      bootstrap_abort_reason=shared-phase4-missing
+      exit 1
+    }
+    if shared_deploy_plat=$(simple_release_platform_dir "${PLATFORM}" 2>/dev/null); then :; else
+      shared_deploy_plat="${PLATFORM}"
+    fi
+    shared_deploy_dest="${SIMPLE_SHARED_DEPLOY_DIR:-${repo_root}/bin/release/${shared_deploy_plat}}"
+    mkdir -p "${shared_deploy_dest}"
+    cp -f "${shared_p4_bin}" "${shared_deploy_dest}/simple${exe_suffix}"
+    chmod 0755 "${shared_deploy_dest}/simple${exe_suffix}"
+    if [ -x "${shared_p4_dir}/bin/simple-debug${exe_suffix}" ]; then
+      cp -f "${shared_p4_dir}/bin/simple-debug${exe_suffix}" "${shared_deploy_dest}/simple-debug${exe_suffix}"
+      chmod 0755 "${shared_deploy_dest}/simple-debug${exe_suffix}"
+    fi
+    if [ -d "${shared_p4_dir}/bin/lib" ]; then
+      mkdir -p "${shared_deploy_dest}/lib"
+      for shared_dylib in \
+        "${shared_p4_dir}/bin/lib"/lib*.dylib \
+        "${shared_p4_dir}/bin/lib"/lib*.so* \
+        "${shared_p4_dir}/bin/lib"/*.dll; do
+        [ -f "${shared_dylib}" ] || continue
+        shared_dylib_base=$(basename -- "${shared_dylib}")
+        cp -f "${shared_dylib}" "${shared_deploy_dest}/lib/${shared_dylib_base}"
+        chmod 0755 "${shared_deploy_dest}/lib/${shared_dylib_base}"
+      done
+    fi
+    for shared_ess in simple_test_runner simple_build_runner simple_mcp_server simple_lsp_mcp_server; do
+      if [ -x "${shared_p4_dir}/essentials/${shared_ess}${exe_suffix}" ]; then
+        cp -f "${shared_p4_dir}/essentials/${shared_ess}${exe_suffix}" "${shared_deploy_dest}/${shared_ess}${exe_suffix}"
+        chmod 0755 "${shared_deploy_dest}/${shared_ess}${exe_suffix}"
+      fi
+    done
+    if [ "$(uname -s 2>/dev/null)" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
+      if [ -d "${shared_deploy_dest}/lib" ]; then
+        for shared_sign_lib in "${shared_deploy_dest}/lib/"*.dylib; do
+          [ -f "${shared_sign_lib}" ] || continue
+          if codesign -s - --force "${shared_sign_lib}" >/dev/null 2>&1; then :; fi
+        done
+      fi
+      for shared_sign_bin in \
+        "${shared_deploy_dest}/simple${exe_suffix}" \
+        "${shared_deploy_dest}/simple-debug${exe_suffix}" \
+        "${shared_deploy_dest}/simple_test_runner${exe_suffix}" \
+        "${shared_deploy_dest}/simple_build_runner${exe_suffix}" \
+        "${shared_deploy_dest}/simple_mcp_server${exe_suffix}" \
+        "${shared_deploy_dest}/simple_lsp_mcp_server${exe_suffix}"; do
+        [ -f "${shared_sign_bin}" ] || continue
+        if codesign -s - --force "${shared_sign_bin}" >/dev/null 2>&1; then :; fi
+      done
+    fi
+    echo "Deployed shared Phase 4 CLI and essentials to ${shared_deploy_dest}"
+  fi
+  bootstrap_verdict "ADMITTED: stage=${final_stage} mode=shared-phase3-phase4"
+  bootstrap_progress_mark complete ""
+  exit 0
+}
+
+if [ "${force_from_seed}" -eq 0 ] && [ "${full_bootstrap}" -eq 0 ] &&
+   [ "${stop_after_seed}" -eq 0 ] && [ "${stop_after_stage2}" -eq 0 ] &&
+   [ -z "${resume_stage3_output}" ] && [ -z "${resume_stage4_output}" ] &&
+   [ -z "${resume_managed_output:-}" ] && [ "${diagnostic_sweep}" -eq 0 ]; then
+  bootstrap_detect_req_phase="all"
+  if [ "${stop_after_stage3}" -eq 1 ]; then
+    bootstrap_detect_req_phase="p3"
+  fi
+  if bootstrap_detect_phase3_compiler "${bootstrap_detect_req_phase}"; then
+    bootstrap_run_shared_phase3_phase4
+  elif [ "${require_existing_phase3}" -eq 1 ]; then
+    echo "error: --skip-seed requires an existing Phase 3+ pure-Simple host compiler and runtime directory, none found" >&2
+    bootstrap_abort_reason=missing-phase3-compiler
+    exit 2
   fi
 fi
 
@@ -6442,7 +6992,66 @@ run_logged stage4-essential-tools-smoke run_timeout_kill 180 env \
   SIMPLE_BINARY="$(absolute_path "${full_bin}")" \
   sh scripts/check/check-bootstrap-essential-tools-smoke.shs
 
+full_debug_bin=""
+if [ "${stage4_dual_mode}" -eq 1 ]; then
+  echo "Stage 4a (dual-mode): compiling debug + XRay CLI binary..."
+  full_debug_bin="$(bootstrap_stage3_canonical_path "$(absolute_path "${full_dir}/simple-debug${exe_suffix}")")" || {
+    echo "error: Stage 4 debug output path is not canonical" >&2
+    exit 1
+  }
+  rm -f "${full_debug_bin}"
+  saved_stage4_native_cache_dir="${native_cache_dir}"
+  prepare_native_cache stage4-debug "${stage_for_build}" full-cli-debug
+  bootstrap_progress_mark stage4-debug "$(absolute_path "${log_dir}/stage4-debug-native-build.log")"
+  run_logged stage4-debug-native-build bootstrap_native_build_main \
+    "${stage4_parent}" "${full_debug_bin}" debug-xray
+  native_cache_dir="${saved_stage4_native_cache_dir}"
+  if grep -Eq '\[stmt_get_tag\] OOB|\[flat-bridge\] missing (stmt|expr) tag' "${log_dir}/stage4-debug-native-build.log"; then
+    echo "error: Stage 4 debug+xray emitted stale flat-AST index diagnostics" >&2
+    exit 1
+  fi
+  if [ ! -x "${full_debug_bin}" ]; then
+    echo "error: failed to compile Stage 4 debug+xray CLI binary (simple-debug)" >&2
+    exit 1
+  fi
+  stage4_debug_smoke="$(run_timeout 30 "${full_debug_bin}" -c 'print(1+1)' 2>/dev/null)"
+  if [ "${stage4_debug_smoke}" != "2" ]; then
+    echo "error: stage4 debug+xray binary failed smoke test (-c 'print(1+1)' -> '${stage4_debug_smoke}')" >&2
+    exit 1
+  fi
+  if ! run_timeout 60 env SIMPLE_BINARY="$(absolute_path "${full_debug_bin}")" \
+      "${full_debug_bin}" check src/app/cli/bootstrap_main.spl >/dev/null 2>&1; then
+    echo "error: stage4 debug+xray binary failed source-check smoke" >&2
+    exit 1
+  fi
+  case "${backend}:${PLATFORM}" in
+    llvm:aarch64-*-linux-*|llvm:x86_64-*-linux-*|\
+    llvm:aarch64-apple-darwin*|llvm:arm64-apple-darwin*|llvm:x86_64-apple-darwin*|\
+    llvm:aarch64-apple-macosx*|llvm:arm64-apple-macosx*|llvm:x86_64-apple-macosx*|\
+    native:aarch64-*-linux-*|native:x86_64-*-linux-*)
+      stage4_xray_sym_ok=0
+      if command -v nm >/dev/null 2>&1 && nm "${full_debug_bin}" 2>/dev/null | grep -Eq '(__xray_set_handler|simple_xray_llvm_patch_function|simple_xray_native_handler_v1|__simple_darwin_xray_edge_v1)'; then
+        stage4_xray_sym_ok=1
+      elif command -v llvm-nm >/dev/null 2>&1 && llvm-nm "${full_debug_bin}" 2>/dev/null | grep -Eq '(__xray_set_handler|simple_xray_llvm_patch_function|simple_xray_native_handler_v1|__simple_darwin_xray_edge_v1)'; then
+        stage4_xray_sym_ok=1
+      elif command -v strings >/dev/null 2>&1 && strings "${full_debug_bin}" 2>/dev/null | grep -Eq '(__xray_set_handler|simple_xray_llvm_patch_function|simple_xray_native_handler_v1|__simple_darwin_xray_edge_v1)'; then
+        stage4_xray_sym_ok=1
+      fi
+      if [ "${stage4_xray_sym_ok}" -ne 1 ]; then
+        echo "error: stage4 debug+xray binary is missing expected XRay runtime symbols: ${full_debug_bin}" >&2
+        exit 1
+      fi
+      ;;
+  esac
+  echo "  Stage 4 debug+xray binary: ${full_debug_bin}"
+else
+  rm -f "${full_dir}/simple-debug${exe_suffix}"
+  echo "Stage 4a (dual-mode): skipped (SIMPLE_STAGE4_DUAL_MODE=0)"
+fi
+
 stage4_provenance="${full_bin}.provenance.env"
+STAGE4_DUAL_MODE="${stage4_dual_mode}" \
+STAGE4_DEBUG_CANDIDATE_PATH="${full_debug_bin}" \
 stage4_write_candidate_provenance \
   "${full_bin}" "${stage4_provenance}" "${repo_root}" \
   "${bootstrap_script_path}" "${stage4_parent}" \
@@ -6918,6 +7527,22 @@ if [ "${deploy}" -eq 1 ]; then
     echo "ERROR: deploy refused - compiler transaction admission failed" >&2
     exit 1
   }
+  full_debug_candidate="${full_dir}/simple-debug${exe_suffix}"
+  if [ "${stage4_dual_mode}" -eq 1 ]; then
+    [ -x "${full_debug_candidate}" ] && selfhost_identity_ok "${full_debug_candidate}" || {
+      echo "ERROR: deploy refused - Stage 4 debug+xray candidate missing or failed pure-Simple identity gate: ${full_debug_candidate}" >&2
+      bootstrap_deploy_tx_abort || true
+      exit 1
+    }
+  fi
+  if [ -x "${full_debug_candidate}" ]; then
+    bootstrap_deploy_tx_add "simple-debug${exe_suffix}" "${full_debug_candidate}" \
+      "${deploy_dir}/simple-debug${exe_suffix}" 755 "$(hash_file "${full_debug_candidate}")" || {
+      echo "ERROR: deploy refused - debug+xray compiler transaction admission failed" >&2
+      bootstrap_deploy_tx_abort || true
+      exit 1
+    }
+  fi
   if [ -z "${resume_stage4_output}" ]; then
     bootstrap_deploy_tx_add simple_seed "${seed_src}" "${seed_delegate}" 755 \
       "$(hash_file "${seed_src}")" || {
@@ -7018,7 +7643,11 @@ if [ "${deploy}" -eq 1 ]; then
   bootstrap_add_deploy_authority authority.performance-measurement.env \
     "${phase7_measurement_receipt}" "${phase7_measurement_receipt_sha256}" || exit 1
 
-  for launcher_program in simple simple_seed simple_ui_backend simple_mcp_server simple_lsp_mcp_server; do
+  launcher_programs="simple simple_seed simple_ui_backend simple_mcp_server simple_lsp_mcp_server"
+  if [ -x "${full_dir}/simple-debug${exe_suffix}" ]; then
+    launcher_programs="simple simple-debug simple_seed simple_ui_backend simple_mcp_server simple_lsp_mcp_server"
+  fi
+  for launcher_program in ${launcher_programs}; do
     launcher_candidate="${full_dir}/launcher.${launcher_program}${exe_suffix}"
     simple_release_write_generation_launcher "${launcher_candidate}" "${launcher_program}${exe_suffix}" v1 || exit 1
     bootstrap_deploy_tx_add "launcher.${launcher_program}${exe_suffix}" \
@@ -7078,6 +7707,10 @@ if [ "${deploy}" -eq 1 ]; then
     exit 1
   }
   receipt_entries_sha="$(hash_file "${receipt_entries}")"
+  full_debug_manifest_hash="none"
+  if [ -x "${full_dir}/simple-debug${exe_suffix}" ]; then
+    full_debug_manifest_hash="$(hash_file "${full_dir}/simple-debug${exe_suffix}")"
+  fi
   generation_manifest="${bootstrap_deploy_tx_dir}/bootstrap-generation.env"
   {
     echo "schema=bootstrap-deploy-generation-v1"
@@ -7088,6 +7721,8 @@ if [ "${deploy}" -eq 1 ]; then
     echo "transaction_entries_path=${bootstrap_deploy_tx_final_dir}/receipt-entries.env"
     echo "transaction_entries_sha256=${receipt_entries_sha}"
     echo "stage4_candidate_sha256=${full_hash}"
+    echo "stage4_dual_mode=${stage4_dual_mode}"
+    echo "stage4_debug_candidate_sha256=${full_debug_manifest_hash}"
     echo "stage4_provenance_sha256=${locked_stage4_provenance_sha}"
     echo "stage3_acceptance_sha256=${locked_stage3_acceptance_sha}"
     echo "policy_authority_sha256=${locked_policy_authority_sha}"

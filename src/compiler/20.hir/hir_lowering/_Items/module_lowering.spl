@@ -21,7 +21,8 @@ use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}  # exp
 # ModuleSurfaceCallable) :298, hir_surface_trait_to_trait(surface_trait:
 # ModuleSurfaceTrait, ...) :313, hir_surface_enum_to_enum(surface_enum:
 # ModuleSurfaceEnum) :327.
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceEnum, ModuleSurfaceCallable, ModuleSurfaceParam, ModuleSurfaceTrait}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceEnum, ModuleSurfaceCallable, ModuleSurfaceParam, ModuleSurfaceTrait, ModuleSurfaceExportOriginLookup, ModuleSurfaceExportCategoryV1, ModuleSurfaceExportSelectionStateV1, module_surface_export_origin_index_lookup}
+use compiler.hir.hir_lowering.module_surface_selected_exports_v1.{module_surface_selected_export_lookup_v1}
 use compiler.hir.hir_lowering.module_surface_registry_index.{module_surface_route_arrays_aligned}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
@@ -304,6 +305,47 @@ fn hir_module_surface_index(surfaces: ModuleSurfacesByName, name: text) -> i64:
         slot = _hir_surface_name_next[slot]
     -1
 
+fn hir_export_origin_lookup_v1(
+    surfaces: ModuleSurfacesByName, surface: ModuleSurface, name: text
+) -> ModuleSurfaceExportOriginLookup:
+    """Resolve one facade export origin from legacy index or unique typed selection."""
+    val direct = module_surface_export_origin_index_lookup(surface.export_origin_index, name)
+    if direct.found:
+        return direct
+    if surface.exports.len() == 0 or not surfaces.frozen or not surfaces.selected_exports_v1.frozen:
+        return direct
+    var selected_surface = -1
+    var selected_source = ""
+    var found_selected = false
+    for category in [
+        ModuleSurfaceExportCategoryV1.Function,
+        ModuleSurfaceExportCategoryV1.Class,
+        ModuleSurfaceExportCategoryV1.Struct,
+        ModuleSurfaceExportCategoryV1.Enum,
+        ModuleSurfaceExportCategoryV1.Trait,
+        ModuleSurfaceExportCategoryV1.TypeAlias,
+        ModuleSurfaceExportCategoryV1.Constant
+    ]:
+        val selection = module_surface_selected_export_lookup_v1(
+            surfaces, surface.physical_index, category, name)
+        if selection.state == ModuleSurfaceExportSelectionStateV1.Selected:
+            if found_selected:
+                if selection.terminal_surface != selected_surface or selection.terminal_name != selected_source:
+                    return direct
+            else:
+                selected_surface = selection.terminal_surface
+                selected_source = selection.terminal_name
+                found_selected = true
+        elif selection.state != ModuleSurfaceExportSelectionStateV1.Missing:
+            return direct
+    if not found_selected or selected_surface < 0 or selected_surface >= surfaces.surfaces.len():
+        return direct
+    ModuleSurfaceExportOriginLookup(
+        found: true,
+        owner_module: surfaces.surfaces[selected_surface].preferred_registry_name,
+        source_name: selected_source,
+        resolution_kind: "selected-typed-v1")
+
 fn hir_export_origin_surface_index(
     surfaces: ModuleSurfacesByName, owner_name: text
 ) -> i64:
@@ -343,7 +385,7 @@ fn hir_export_origin_surface_index(
 fn hir_module_declares_item(m: ModuleSurface, name: text) -> bool:
     """True when module `m` itself declares `name` as any importable decl
     kind register_imported_symbol knows how to register (functions covers
-    `extern fn` too — the parser stores externs in ParserModule.functions with
+    `extern fn` too — the parser stores externs in Module.functions with
     is_extern=true)."""
     if module_surface_name_position(m.callable_names, name) >= 0:
         return true
@@ -429,7 +471,7 @@ pub fn hir_payload_terminal_identity(module_name: text, item_name: text, item_ki
 
 fn hir_surface_param_to_param(param: ModuleSurfaceParam) -> Param:
     Param(name: param.name, has_type_: param.has_type_, type_: param.type_,
-        has_default: false, default: Expr(kind: ExprKind.NilLit, span: param.span),
+        has_default: param.has_default, default: Expr(kind: ExprKind.NilLit, span: param.span),
         span: param.span, is_mutable: param.is_mutable)
 
 fn hir_surface_callable_to_header(callable: ModuleSurfaceCallable) -> ParserFunction:

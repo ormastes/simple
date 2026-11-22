@@ -596,17 +596,21 @@ impl MirTextCodegen for MirToLlvm:
                     self.fn_align[fn_owner.name] = fn_owner.align
                     self.fn_align[placement_symbol] = fn_owner.align
         # XRay fail-closed admission (design A.5): LLVM sleds are admitted for
-        # Linux triples only; mode 1 (exit sleds without tail-exit sleds) has
-        # no LLVM spelling; the debug-only bootstrap function table is not
-        # keyed by this module's functions.
+        # Linux, Darwin (aarch64/x86_64), and Windows triples; mode 1 (exit sleds
+        # without tail-exit sleds) has no LLVM spelling; the debug-only bootstrap
+        # function table is not keyed by this module's functions.
         if self.xray_module_on:
-            # Windows: flag-guard sleds (no patching); Linux: compiler-rt sleds.
-            self.xray_flag_guard = self.target_os.starts_with("windows")
+            # Windows and Darwin: flag-guard sleds in writable data (zero .text
+            # self-patching; compliant with Apple Silicon LC_CODE_SIGNATURE / W^X,
+            # __TEXT,__stubs page sharing, and -Wl,-dead_strip); Linux: LLVM sleds.
+            val darwin_xray = (self.target_os.starts_with("darwin") or self.target_os.starts_with("macos")) and
+                (self.target_arch == "aarch64" or self.target_arch == "arm64" or self.target_arch == "x86_64")
+            self.xray_flag_guard = self.target_os.starts_with("windows") or darwin_xray
             if not self.xray_flag_guard and not self.target_os.starts_with("linux"):
-                self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay sleds are admitted for Linux and Windows triples only (target os '{self.target_os}')")
+                self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay sleds are admitted for Linux, Darwin (aarch64/x86_64), and Windows triples only (target os '{self.target_os}', arch '{self.target_arch}')")
             # MSVC (clang-cl / --msvc) has no auto-export: emit_xray_flag_guard_globals
             # writes an explicit `/EXPORT:<sym>,DATA` list into .drectve instead.
-            if self.bootstrap_string_globals_active:
+            if bootstrap_debug:
                 self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay is not supported on the bootstrap translation path")
             for fn_mode in mir_module_functions_sorted(module):
                 if fn_mode.xray_mode == 1:
@@ -1203,10 +1207,35 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[mir-to-llvm] function:done {name}"
 
+    me emit_darwin_xray_flag_guard_globals(module: MirModule):
+        """Darwin Mach-O flag-guard route: one 32-byte per-function slot in
+        `__DATA,__xray_fn_slots` (`{ magic, func_addr, func_name, func_id, enabled }`).
+        Avoids `__TEXT` self-modification on Apple Silicon (`maxprot=r-x`,
+        `LC_CODE_SIGNATURE`, `__TEXT,__stubs` page sharing, `-Wl,-dead_strip`)
+        and carries zero cross-object global symbol collisions across multi-module links."""
+        self.defined_func_names["__simple_darwin_xray_edge_v1"] = true
+        self.builder.emit("")
+        self.builder.emit("; XRay flag-guard slots (Darwin Mach-O __DATA,__xray_fn_slots)")
+        self.builder.emit("declare void @__simple_darwin_xray_edge_v1(ptr, i32)")
+        var slot_idx = 0
+        for fn_slot in mir_module_functions_sorted(module):
+            if fn_slot.xray_mode > 0 and not fn_slot.is_naked and fn_slot.blocks.len() > 0:
+                val symbol = self.llvm_function_symbol_name(fn_slot.name)
+                self.xray_site[fn_slot.name] = slot_idx
+                self.xray_site[symbol] = slot_idx
+                val name_len = escaped_string_byte_len(symbol) + 1
+                val name_text = escape_llvm_string(symbol)
+                self.builder.emit("@__simple_xray_dname_{slot_idx} = private unnamed_addr constant [{name_len} x i8] c\"{name_text}\\00\"")
+                self.builder.emit("@__simple_xray_dslot_{slot_idx} = internal global {{ i64, ptr, ptr, i32, i32 }} {{ i64 6005640646450433073, ptr @{symbol}, ptr @__simple_xray_dname_{slot_idx}, i32 0, i32 0 }}, section \"__DATA,__xray_fn_slots\", align 8")
+                slot_idx = slot_idx + 1
+
     me emit_xray_flag_guard_globals(module: MirModule):
         """Windows flag-guard route: one activation slot per sled function, one
         exported descriptor `{ count, [count x ptr] }` listing the slots in site
         order, and the edge hook declaration. Site id = index in that order."""
+        if self.target_os.starts_with("darwin") or self.target_os.starts_with("macos"):
+            self.emit_darwin_xray_flag_guard_globals(module)
+            return
         var slots: [text] = []
         var slot_names: [text] = []
         for fn_slot in mir_module_functions_sorted(module):
@@ -1321,6 +1350,17 @@ impl MirTextCodegen for MirToLlvm:
         val seq = self.xray_guard_seq
         self.xray_guard_seq = seq + 1
         val site = self.xray_site[name]
+        if self.target_os.starts_with("darwin") or self.target_os.starts_with("macos"):
+            self.builder.emit("  %xg_ptr{seq} = getelementptr inbounds {{ i64, ptr, ptr, i32, i32 }}, ptr @__simple_xray_dslot_{site}, i32 0, i32 4")
+            self.builder.emit("  %xg{seq} = load volatile i32, ptr %xg_ptr{seq}, align 4")
+            self.builder.emit("  %xc{seq} = icmp ne i32 %xg{seq}, 0")
+            self.builder.emit("  br i1 %xc{seq}, label %xs{seq}, label %{continue_label}")
+            self.builder.emit_label("xs{seq}")
+            self.builder.emit("  call void @__simple_darwin_xray_edge_v1(ptr @__simple_xray_dslot_{site}, i32 {kind})")
+            self.builder.emit("  br label %{continue_label}")
+            if continue_label == "xr{seq}":
+                self.builder.emit_label(continue_label)
+            return
         val symbol = self.llvm_function_symbol_name(name)
         self.builder.emit("  %xg{seq} = load volatile i8, ptr @__simple_xray_slot_{symbol}")
         self.builder.emit("  %xc{seq} = icmp ne i8 %xg{seq}, 0")
@@ -2132,12 +2172,11 @@ impl MirTextCodegen for MirToLlvm:
             ret_ty = "i64"
         if ret_ty != "void":
             ret_ty = self.valid_llvm_type(ret_ty)
-        val recorded = self.function_param_types.get(name)
-        if recorded.?:
+        if self.function_param_types.has(name):
             # Keep the element type at the flat-Option boundary. The bootstrap
             # compiler otherwise erases this local's array receiver and can
             # resolve `join` to the unrelated ThreadHandle.join method.
-            val param_tys: [text] = recorded.unwrap()
+            val param_tys: [text] = self.function_param_types[name]
             return "declare {ret_ty} @{name}({param_tys.join(\", \")})"
         "declare {ret_ty} @{name}(...)"
 

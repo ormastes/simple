@@ -2,9 +2,9 @@
 #
 # Common call-graph building logic used by both alloc_inference and call_graph.
 
-use compiler.core.ast.{DECL_FN, EXPR_CALL, EXPR_IDENT}
-use compiler.core.ast.{STMT_IF}
-use compiler.core.ast.{decl_count, decl_get_tag, decl_get_name, decl_get_body}
+use compiler.core.ast.{DECL_FN, EXPR_ASM_MATCH, EXPR_CALL, EXPR_DICT_COMP, EXPR_DICT_LIT, EXPR_IDENT, EXPR_IF, EXPR_LAMBDA, EXPR_LIST_COMP, EXPR_MATCH, EXPR_SLICE, EXPR_STRUCT_LIT}
+use compiler.core.ast.{STMT_ASSIGN, STMT_BIND, STMT_COMPOUND_ASSIGN, STMT_EXPR, STMT_IF, STMT_LAZY_VAL_DECL, STMT_MATCH, STMT_RECEIVE, STMT_RETURN, STMT_USE_IMPORT, STMT_VAL_DECL, STMT_VAR_DECL}
+use compiler.core.ast.{arm_get_body, arm_get_guard, decl_count, decl_get_tag, decl_get_name, decl_get_body}
 use compiler.core.ast.{stmt_get_tag, stmt_get_expr, stmt_get_body, stmt_get_type}
 use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_right, expr_get_extra}
 use compiler.core.ast.{expr_get_args, expr_get_stmts}
@@ -14,7 +14,7 @@ use compiler.core.ast.{elif_get_cond, elif_get_body, elif_get_else}
 
 var ceu_fn_names: [text] = []
 var ceu_fn_count: i64 = 0
-var ceu_fn_index = {}
+var ceu_fn_index: Dict<text, i64> = {}
 var ceu_callees: [[text]] = []
 
 # ===== Public API =====
@@ -53,7 +53,7 @@ fn ceu_get_fn_names() -> [text]:
 fn ceu_get_fn_count() -> i64:
     ceu_fn_count
 
-fn ceu_get_fn_index():
+fn ceu_get_fn_index() -> Dict<text, i64>:
     ceu_fn_index
 
 fn ceu_get_callees() -> [[text]]:
@@ -71,20 +71,44 @@ fn ceu_add_callee(fn_idx: i64, callee_name: text):
     ceu_callees[fn_idx] = updated
 
 fn ceu_collect_calls_from_stmt(stmt_idx: i64, fn_idx: i64):
+    if stmt_idx < 0: return
     val tag = stmt_get_tag(stmt_idx)
+    if tag < 0 or tag == STMT_USE_IMPORT: return
     val expr_idx = stmt_get_expr(stmt_idx)
     val body = stmt_get_body(stmt_idx)
 
-    if expr_idx >= 0:
-        ceu_collect_calls_from_expr(expr_idx, fn_idx)
-
-    for nested in body:
-        ceu_collect_calls_from_stmt(nested, fn_idx)
-
+    if tag == STMT_ASSIGN or tag == STMT_COMPOUND_ASSIGN or tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_LAZY_VAL_DECL or tag == STMT_BIND:
+        if expr_idx >= 0:
+            ceu_collect_calls_from_expr(expr_idx, fn_idx)
+        for veid in body:
+            ceu_collect_calls_from_expr(veid, fn_idx)
+        return
+    if tag == STMT_EXPR or tag == STMT_RETURN:
+        if expr_idx >= 0:
+            ceu_collect_calls_from_expr(expr_idx, fn_idx)
+        return
     if tag == STMT_IF:
         val elif_idx = stmt_get_type(stmt_idx)
         if elif_idx >= 0:
             ceu_collect_calls_from_elif(elif_idx, fn_idx)
+            return
+    if tag == STMT_MATCH or tag == STMT_RECEIVE:
+        if expr_idx >= 0:
+            ceu_collect_calls_from_expr(expr_idx, fn_idx)
+        if tag == STMT_RECEIVE and stmt_get_type(stmt_idx) >= 0:
+            ceu_collect_calls_from_stmt(stmt_get_type(stmt_idx), fn_idx)
+        for arm_id in body:
+            val guard_eid = arm_get_guard(arm_id)
+            if guard_eid >= 0:
+                ceu_collect_calls_from_expr(guard_eid, fn_idx)
+            for arm_sid in arm_get_body(arm_id):
+                ceu_collect_calls_from_stmt(arm_sid, fn_idx)
+        return
+
+    if expr_idx >= 0:
+        ceu_collect_calls_from_expr(expr_idx, fn_idx)
+    for nested in body:
+        ceu_collect_calls_from_stmt(nested, fn_idx)
 
 fn ceu_collect_calls_from_elif(elif_idx: i64, fn_idx: i64):
     if elif_idx < 0:
@@ -122,9 +146,23 @@ fn ceu_collect_calls_from_expr(expr_idx: i64, fn_idx: i64):
         ceu_collect_calls_from_expr(left, fn_idx)
     if right >= 0:
         ceu_collect_calls_from_expr(right, fn_idx)
-    if extra >= 0:
+    if (tag == EXPR_IF or tag == EXPR_SLICE or tag == EXPR_LIST_COMP or tag == EXPR_DICT_COMP) and extra >= 0:
         ceu_collect_calls_from_expr(extra, fn_idx)
+    if tag == EXPR_ASM_MATCH:
+        return
+    if tag == EXPR_MATCH:
+        for arm_id in args:
+            val guard_eid = arm_get_guard(arm_id)
+            if guard_eid >= 0:
+                ceu_collect_calls_from_expr(guard_eid, fn_idx)
+            for arm_sid in arm_get_body(arm_id):
+                ceu_collect_calls_from_stmt(arm_sid, fn_idx)
+        return
     for arg_idx in args:
         ceu_collect_calls_from_expr(arg_idx, fn_idx)
+    if tag == EXPR_LAMBDA or tag == EXPR_DICT_LIT or tag == EXPR_LIST_COMP or tag == EXPR_DICT_COMP or tag == EXPR_STRUCT_LIT:
+        for child_eid in stmts:
+            ceu_collect_calls_from_expr(child_eid, fn_idx)
+        return
     for stmt_idx in stmts:
         ceu_collect_calls_from_stmt(stmt_idx, fn_idx)

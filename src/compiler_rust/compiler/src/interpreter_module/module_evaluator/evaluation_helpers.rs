@@ -15,7 +15,7 @@ use crate::error::CompileError;
 use crate::value::{Env, ExportTable, LayeredEnv, ModuleTable, TableView, Value};
 use crate::interpreter::{
     tag_function_module_owner, FUNCTION_MODULE_OWNER, FUNCTION_OVERLOADS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
-    MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER,
+    MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER, TRAIT_IMPLS, TRAITS,
 };
 
 use crate::interpreter::interpreter_module::export_handler::load_export_source;
@@ -245,26 +245,7 @@ pub(super) fn register_definitions(
             Node::Struct(s) => {
                 // Treat structs like classes for export purposes
                 // Include struct methods so they're available for method calls
-                let mut class_def = ClassDef {
-                    span: s.span,
-                    name: s.name.clone(),
-                    generic_params: s.generic_params.clone(),
-                    where_clause: s.where_clause.clone(),
-                    fields: s.fields.clone(),
-                    methods: s.methods.clone(), // Include struct methods!
-                    parent: None,
-                    visibility: s.visibility,
-                    effects: vec![],
-                    attributes: s.attributes.clone(),
-                    doc_comment: s.doc_comment.clone(),
-                    invariant: s.invariant.clone(),
-                    macro_invocations: vec![],
-                    mixins: vec![],
-                    is_generic_template: s.is_generic_template,
-                    specialization_of: s.specialization_of.clone(),
-                    type_bindings: s.type_bindings.clone(),
-                    is_value_type: true,
-                };
+                let mut class_def = crate::interpreter::core_types::struct_def_to_class_def(s);
                 tag_methods_owner(&mut class_def.methods, module_ident.as_ref());
                 let arc_class_def = Arc::new(class_def);
                 local_classes.insert(s.name.clone(), Arc::clone(&arc_class_def));
@@ -297,27 +278,8 @@ pub(super) fn register_definitions(
             }
             Node::Impl(impl_block) => {
                 // Add impl block methods to the corresponding class/struct/enum
-                let type_name = match &impl_block.target_type {
-                    simple_parser::ast::Type::Simple(name) => Some(name.clone()),
-                    simple_parser::ast::Type::Generic { name, .. } => Some(name.clone()),
-                    _ => None,
-                };
+                let type_name = crate::hir::lower::Lowerer::impl_target_type_name(&impl_block.target_type);
                 if let Some(type_name) = type_name {
-                    // Owner-tag every method pulled from this impl block, the
-                    // same way Node::Class/Node::Struct/Node::Enum already tag
-                    // their inline methods via `tag_methods_owner`. Without
-                    // this, `impl TypeName:` methods (as opposed to methods
-                    // written inline in the class/struct/enum body) never got
-                    // a `FUNCTION_MODULE_OWNER` entry or the
-                    // `FLATTEN_MODULE_OWNER_ATTR_PREFIX` attribute fallback,
-                    // so `function_module_owner()` always returned `None` for
-                    // them, `CURRENT_EXEC_MODULE` was never set while they
-                    // executed, and coverage attribution fell back to the
-                    // `<entry>` sentinel for every impl-block method body in
-                    // the codebase. `method_with_impl_driver_attrs` builds a
-                    // *new* `FunctionDef`, so tagging must happen on its
-                    // result, not on `impl_block.methods` itself. See
-                    // doc/08_tracking/bug/coverage_entry_placeholder_two_root_causes_2026-08-08.md.
                     let tagged_method = |m: &FunctionDef| -> FunctionDef {
                         let mut method = method_with_impl_driver_attrs(m, &impl_block.attributes);
                         if let Some(owner) = module_ident.as_ref() {
@@ -325,36 +287,55 @@ pub(super) fn register_definitions(
                         }
                         method
                     };
+                    let mut methods_to_register: Vec<FunctionDef> =
+                        impl_block.methods.iter().map(tagged_method).collect();
+                    if let Some(ref trait_name) = impl_block.trait_name {
+                        let trait_def_opt = TRAITS.with(|cell| cell.borrow().get(trait_name).cloned());
+                        if let Some(trait_def) = trait_def_opt {
+                            let existing_names: std::collections::HashSet<&str> =
+                                impl_block.methods.iter().map(|m| m.name.as_str()).collect();
+                            for dm in &trait_def.methods {
+                                if !dm.is_abstract && !existing_names.contains(dm.name.as_str()) {
+                                    methods_to_register.push(tagged_method(dm));
+                                }
+                            }
+                        }
+                        let trait_arcs: Vec<Arc<FunctionDef>> =
+                            methods_to_register.iter().cloned().map(Arc::new).collect();
+                        TRAIT_IMPLS.with(|cell| {
+                            cell.borrow_mut()
+                                .insert((trait_name.clone(), type_name.clone()), trait_arcs);
+                        });
+                    }
                     // Handle classes
                     if let Some(class_def) = local_classes.get_mut(&type_name) {
                         Arc::make_mut(class_def)
                             .methods
-                            .extend(impl_block.methods.iter().map(tagged_method));
+                            .extend(methods_to_register.iter().cloned());
                     }
                     let prior_global_class = global_classes.get(&type_name).cloned();
                     if let Some(class_def) = global_classes.get_mut(&type_name) {
                         Arc::make_mut(class_def)
                             .methods
-                            .extend(impl_block.methods.iter().map(tagged_method));
+                            .extend(methods_to_register.iter().cloned());
                     }
                     // Handle enums - add impl methods to enum definition
                     if let Some(enum_def) = local_enums.get_mut(&type_name) {
                         Arc::make_mut(enum_def)
                             .methods
-                            .extend(impl_block.methods.iter().map(tagged_method));
+                            .extend(methods_to_register.iter().cloned());
                     }
                     if let Some(enum_def) = global_enums.get_mut(&type_name) {
                         Arc::make_mut(enum_def)
                             .methods
-                            .extend(impl_block.methods.iter().map(tagged_method));
+                            .extend(methods_to_register.iter().cloned());
                     }
                     // Register static methods from impl blocks as mangled free functions
-                    for method in &impl_block.methods {
-                        let method = tagged_method(method);
+                    for method in &methods_to_register {
                         let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                         if is_static {
                             let mangled = format!("{}__{}", type_name, method.name);
-                            let arc_method = Arc::new(method);
+                            let arc_method = Arc::new(method.clone());
                             record_function_owner(&arc_method, module_ident.as_ref());
                             local_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                             global_functions.insert(mangled.clone(), Arc::clone(&arc_method));
@@ -373,7 +354,7 @@ pub(super) fn register_definitions(
                     GLOBAL_IMPL_METHODS.with(|cell| {
                         let mut global_impls = cell.borrow_mut();
                         let methods = global_impls.entry(type_name.clone()).or_default();
-                        methods.extend(impl_block.methods.iter().map(|m| Arc::new(tagged_method(m))));
+                        methods.extend(methods_to_register.into_iter().map(Arc::new));
                     });
                     // Point the owner-keyed slots that held the PRE-enrichment
                     // allocation at the enriched one (an extension `impl` of a
@@ -461,6 +442,9 @@ pub(super) fn register_definitions(
                 });
             }
             Node::Trait(t) => {
+                TRAITS.with(|cell| {
+                    cell.borrow_mut().insert(t.name.clone(), t.clone());
+                });
                 // Export trait as TraitType so trait exports work
                 let trait_type = Value::TraitType {
                     trait_name: t.name.clone(),
@@ -634,6 +618,16 @@ pub(super) fn process_imports_and_assignments(
                     exports,
                     bare_exports,
                 )?;
+            }
+            Node::InternalExportDecl(decl) => {
+                let names_to_export: Vec<(String, String)> = decl
+                    .symbols
+                    .iter()
+                    .map(|name| (name.clone(), name.clone()))
+                    .collect();
+                if !names_to_export.is_empty() {
+                    bare_exports.push(names_to_export);
+                }
             }
             _ => {}
         }

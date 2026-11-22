@@ -25,12 +25,14 @@ mod path_resolution;
 pub use module_evaluator::evaluate_module_exports;
 pub use module_loader::{get_import_alias, load_and_merge_module};
 pub(crate) use module_loader::{
-    capture_env_with_origin, check_private_call_visibility, closure_created_in_test, owner_written_in_test,
+    capture_env_with_origin, check_private_call_visibility, closure_created_in_test, is_fn_visible_to,
+    is_private_fn_of,
+    owner_written_in_test,
     register_module_private_fns,
     stamp_closure_origin,
     private_call_caller,
     ClosureOriginGuard,
 };
-pub use module_loader::PRIVATE_FN_VISIBILITY_HINT;
+pub use module_loader::{FRIEND_SYMBOL_VISIBILITY_HINT, PRIVATE_FN_VISIBILITY_HINT};
 pub use module_merger::merge_module_definitions;
 pub use path_resolution::{resolve_module_path, clear_path_resolution_cache, print_resolve_stats, reset_resolve_stats};

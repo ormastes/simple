@@ -1363,7 +1363,6 @@ impl MirLowering:
                     if qualified >= 0 and self.symbol_matches_ownership_key(qualified, owner_key):
                         val qualified_symbol: SymbolId = SymbolId(id: qualified)
                         return HirType(kind: HirTypeKind.Named(qualified_symbol, owner_arguments), span: declared.span)
-                # @workaround bug=stage2_test_runner_record_collection_owner_unavailable_2026_10_12 reason=stage2_native_corrupts_SymbolId_option_across_lookup_exact_type_boundary
                 # This is the last lookup before the strict "record collection
                 # payload owner is unavailable in the consumer" refusal. It used
                 # to bind `SymbolId?` from `lookup_exact_type` via `if val`;
@@ -1372,6 +1371,7 @@ impl MirLowering:
                 # docstring), so a present exact owner read as a miss and the
                 # 252-module test-runner build died on a valid provider. Keep
                 # the whole chain scalar: raw id in, raw id out, -1 on miss.
+                # @workaround bug=stage2_test_runner_record_collection_owner_unavailable_2026_10_12 reason=stage2_native_corrupts_SymbolId_option_across_lookup_exact_type_boundary
                 val rebound_raw = self.symbols.lookup_exact_type_raw(owner_key.substring(bare_start))
                 if rebound_raw >= 0 and self.symbol_matches_ownership_key(rebound_raw, owner_key):
                     val rebound: SymbolId = SymbolId(id: rebound_raw)
@@ -1865,11 +1865,7 @@ impl MirLowering:
     fn binop_struct_name_is_enum(name: text) -> bool:
         """A struct_value_syms owner that names an enum declaration (enum
         values share the Struct MIR kind) and no struct/class layout."""
-        if name == "":
-            return false
-        if self.struct_field_order.has(self.declared_struct_layout_key(name)):
-            return false
-        self.enum_variant_index_q.has(name) or self.enum_variant_index.contains(name)
+        self.mir_layout_or_runtime_key_is_enum(name)
 
     fn binop_optional_text_depth_v1(type_: HirType) -> i64:
         """Positive only for an exact Optional chain ending in text."""
@@ -2117,17 +2113,35 @@ impl MirLowering:
             # Compare through the module-qualified layout the field declaration
             # recorded when it is registered; the bare name stays only for the
             # symbol lookup (same-named structs across modules).
+            var nested_ownership = ""
+            if fi < nested_ownership_keys.len():
+                nested_ownership = nested_ownership_keys[fi]
             var nested_layout = nested_name
-            if fi < nested_ownership_keys.len() and nested_ownership_keys[fi] != "":
-                val qualified_nested = self.declared_struct_layout_key(nested_ownership_keys[fi])
+            if nested_ownership != "":
+                val qualified_nested = self.declared_struct_layout_key(nested_ownership)
                 if self.struct_field_order.contains(qualified_nested):
                     nested_layout = qualified_nested
+            var declared_field_is_enum = false
+            if fi < declared_field_types.len():
+                val rebound_df = self.declared_field_type_in_current_table(layout_key, fi, declared_field_types[fi])
+                match rebound_df.kind:
+                    case HirTypeKind.Named(df_sym, _):
+                        if val df_info = self.symbols.get_symbol_raw(df_sym.id):
+                            if df_info.kind == SymbolKind.Enum:
+                                declared_field_is_enum = true
+                    case _: ()
             var nested_symbol = SymbolId(id: -1)
             var compare_nested = false
-            if nested_name != "" and not chain.contains(nested_layout) and self.struct_field_order.contains(nested_layout):
-                val nested_lookup = self.symbols.lookup_or_invalid(nested_name)
-                if nested_lookup.is_valid():
-                    nested_symbol = self.canonical_mir_type_symbol(nested_lookup)
+            if nested_name != "" and not declared_field_is_enum and not self.mir_layout_or_runtime_key_is_enum(nested_ownership) and not self.mir_layout_or_runtime_key_is_enum(nested_layout) and not chain.contains(nested_layout) and self.struct_field_order.contains(nested_layout):
+                var resolved_nested: SymbolId? = self.struct_symbol_for_layout_key(nested_layout)
+                if resolved_nested == None:
+                    val nested_lookup = self.symbols.lookup_or_invalid(nested_name)
+                    if nested_lookup.is_valid():
+                        if val nested_info = self.symbols.get_symbol_raw(nested_lookup.id):
+                            if nested_info.kind == SymbolKind.Struct:
+                                resolved_nested = Some(nested_lookup)
+                if val valid_nested = resolved_nested:
+                    nested_symbol = self.canonical_mir_type_symbol(valid_nested)
                     compare_nested = self.struct_structural_eq_supported(nested_layout)
             # 0 = runtime word, 1 = text, 2 = raw scalar, 3 = nested record
             var field_mode = 0
@@ -4126,9 +4140,9 @@ impl MirLowering:
         if val found_sym = sym:
             val provider_name = self.provider_callable_symbol_name(symbol, found_sym.name)
             if val provider_shape = bootstrap_fn_ret_ok_shape_lookup(provider_name):
-                return Some(provider_shape)
+                return Some(self.record_shape_layout_key(provider_shape))
             if val shape = bootstrap_fn_ret_ok_shape_lookup(found_sym.name):
-                return Some(shape)
+                return Some(self.record_shape_layout_key(shape))
         None
 
     me resolved_call_result_opt_shape(symbol: SymbolId) -> text?:
@@ -4140,9 +4154,9 @@ impl MirLowering:
         if val found_sym = sym:
             val provider_name = self.provider_callable_symbol_name(symbol, found_sym.name)
             if val provider_shape = bootstrap_fn_ret_opt_shape_lookup(provider_name):
-                return Some(provider_shape)
+                return Some(self.record_shape_layout_key(provider_shape))
             if val shape = bootstrap_fn_ret_opt_shape_lookup(found_sym.name):
-                return Some(shape)
+                return Some(self.record_shape_layout_key(shape))
         None
 
     me resolved_call_payload_shape(symbol: SymbolId, variant: text) -> text?:
@@ -4256,12 +4270,16 @@ impl MirLowering:
                     # symbol's dotted-owner key; the layout lives under the key the
                     # declaring module registered. Fold onto that one, else
                     # resolve_field_index finds no field list and reads index 0.
-                    val shape = self.declared_struct_layout_key(return_shape ?? "")
-                    if shape == "__runtime_array__":
+                    val raw_shape = return_shape ?? ""
+                    if raw_shape == "__runtime_array__":
                         self.runtime_array_locals[local.id] = true
                         self.remember_direct_array_return_element(local, call_symbol.name)
-                    elif shape != "":
-                        self.struct_value_syms[local.id] = shape
+                    elif self.mir_layout_or_runtime_key_is_enum(raw_shape):
+                        self.struct_value_syms[local.id] = raw_shape
+                    else:
+                        val shape = self.declared_struct_layout_key(raw_shape)
+                        if shape != "":
+                            self.struct_value_syms[local.id] = shape
         val return_type = self.resolved_call_hir_return_type(symbol)
         if self.extern_fn_symbols.contains(symbol.id):
             self.extern_result_locals[local.id] = true
@@ -5252,7 +5270,7 @@ impl MirLowering:
                 match element.kind:
                     case MirTypeKind.Struct(symbol):
                         val owner = self.mir_struct_symbol_name(symbol)
-                        if owner != "":
+                        if owner != "" and not self.mir_layout_or_runtime_key_is_enum(owner):
                             self.array_element_struct_syms[local.id] = owner
                     case MirTypeKind.Opaque(owner):
                         if owner != "" and owner != "str" and owner != "__runtime_array__":
@@ -5494,7 +5512,7 @@ impl MirLowering:
                 val narrowed = cast_builder.emit_cast(mir_operand_copy(resolved_disc), mir_target)
                 self.builder = cast_builder
                 return narrowed
-            self.error("enum-to-integer cast could not read runtime discriminant", Some(span))
+            self.error_fatal("enum-to-integer cast could not read runtime discriminant", Some(span))
             return operand_local
         # A text operand never reaches the backend as a raw MIR Cast: that asks
         # it to convert a POINTER to i8/f64/..., which has no scalar meaning
@@ -5713,6 +5731,29 @@ impl MirLowering:
         b.switch_to_block(ok_block)
         self.builder = b
 
+    me emit_unit_range_panic_if(cond: LocalId, block_label: text, msg: text, value: LocalId, head: text, tail: text):
+        """Like emit_unit_panic_if, but the rt_panic text embeds the offending
+        runtime value: head + value + tail, built as tagged text."""
+        var b = self.builder
+        val fail_block = b.new_block(Some(block_label))
+        val ok_block = b.new_block(Some("{block_label}_ok"))
+        b.terminate_if(mir_operand_copy(cond), fail_block, ok_block)
+        b.switch_to_block(fail_block)
+        self.builder = b
+        var text_local = self.emit_interpolation_segment(head)
+        text_local = self.emit_interpolation_concat(text_local, self.coerce_concat_operand(value))
+        val tail_local = self.emit_interpolation_segment(tail)
+        text_local = self.emit_interpolation_concat(text_local, mir_operand_copy(tail_local))
+        var b2 = self.builder
+        val panic_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_panic"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [self.bootstrap_text_type()], return_type: MirType.unit(), is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+        b2.emit_call(panic_op, [mir_operand_copy(text_local)], MirType.unit())
+        b2.terminate_abort(msg)
+        b2.switch_to_block(ok_block)
+        self.builder = b2
+
     me emit_unit_div_remainder_check(left_local: LocalId, right_local: LocalId):
         """Native twin of the interpreter's `unit_value_binop` refusal: integer
         unit division that leaves a remainder aborts with SPL-UNIT-002 instead
@@ -5767,7 +5808,13 @@ impl MirLowering:
         var hi_text = "+inf"
         if max_text != "":
             hi_text = max_text
-        val msg = unit_constraint_violation_message(unit_name, "<runtime value outside {lo_text}..{hi_text}>", unit_constraint_predicate(unit_name))
+        val range_text = "{lo_text}..{hi_text}"
+        val predicate = unit_constraint_predicate(unit_name)
+        # Static twin (abort terminator text); the rt_panic call renders the
+        # offending value at runtime.
+        val msg = unit_constraint_violation_message(unit_name, "outside {range_text}", predicate)
+        val head_text = "SPL-UNIT-005: value "
+        val tail_text = " violates the constraint of unit `{unit_name}` (`{predicate}`; range {range_text})"
         # The backend picks signed/unsigned compares from the operand type, so
         # the bound constants carry the raw value's own integer type (a u64
         # above i64::MAX must not compare as negative).
@@ -5780,14 +5827,14 @@ impl MirLowering:
             b_lo.emit_const(lo_const, MirConstValue.Int(unit_range_bound_i64(min_text)), bound_type)
             val below = b_lo.emit_binop(MirBinOp.Lt, mir_operand_copy(raw), mir_operand_copy(lo_const), MirType.bool())
             self.builder = b_lo
-            self.emit_unit_panic_if(below, "unit_range_below", msg)
+            self.emit_unit_range_panic_if(below, "unit_range_below", msg, raw, head_text, tail_text)
         if max_text != "":
             var b_hi = self.builder
             val hi_const = b_hi.new_temp(bound_type)
             b_hi.emit_const(hi_const, MirConstValue.Int(unit_range_bound_i64(max_text)), bound_type)
             val above = b_hi.emit_binop(MirBinOp.Gt, mir_operand_copy(raw), mir_operand_copy(hi_const), MirType.bool())
             self.builder = b_hi
-            self.emit_unit_panic_if(above, "unit_range_above", msg)
+            self.emit_unit_range_panic_if(above, "unit_range_above", msg, raw, head_text, tail_text)
 
     me lower_binary_expr(expr_value: HirExpr, op: HirBinOp, left: HirExpr, right: HirExpr) -> LocalId:
 
@@ -8598,7 +8645,7 @@ impl MirLowering:
                         case HirTypeKind.Named(bang_owner_symbol, _):
                             match self.symbols.get_symbol_raw(bang_owner_symbol.id):
                                 case Some(bang_owner_sym):
-                                    if bang_owner_sym.name != "":
+                                    if bang_owner_sym.name != "" and (bang_owner_sym.kind == SymbolKind.Struct or bang_owner_sym.kind == SymbolKind.Class or bang_owner_sym.kind == SymbolKind.Enum):
                                         var bang_owner_key = self.struct_value_provenance_key(bang_owner_sym)
                                         if bang_owner_sym.kind == SymbolKind.Class:
                                             val bang_class_key = mir_class_identity_raw(self.symbols, bang_owner_symbol.id)
@@ -9086,11 +9133,11 @@ impl MirLowering:
                     self.local_map[symbol.id] = payload
                     pattern_supported = true
                 case _:
-                    self.error("catch pattern is not supported by recoverable MIR lowering", Some(clause.span))
+                    self.error_fatal("catch pattern is not supported by recoverable MIR lowering", Some(clause.span))
             if clause.has_type_:
                 val wanted_tag = mir_exception_type_tag(clause.type_)
                 if wanted_tag == 0:
-                    self.error("typed catch uses a type without a collision-free runtime tag", Some(clause.span))
+                    self.error_fatal("typed catch uses a type without a collision-free runtime tag", Some(clause.span))
                 elif pattern_supported:
                     b = self.builder
                     val arm_block = b.new_block(Some("typed_catch_arm"))
