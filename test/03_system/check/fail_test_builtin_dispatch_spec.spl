@@ -37,32 +37,59 @@ else `bin/simple`.
 use std.spec.step
 
 use std.spec.*
-use std.io_runtime.process_run
+use std.io_runtime.{file_exists, env_get, process_run}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_write}
+
+fn fail_test_spec_binary() -> text:
+    val spec_override = env_get("SIMPLE_SPEC_BIN")
+    if spec_override != "" and spec_override != nil:
+        return spec_override.replace("\\", "/")
+    val test_override = env_get("SIMPLE_TEST_BINARY")
+    if test_override != "" and test_override != nil:
+        return test_override.replace("\\", "/")
+    val bin_override = env_get("SIMPLE_BINARY")
+    if bin_override != "" and bin_override != nil:
+        return bin_override.replace("\\", "/")
+    "bin/simple"
+
+fn run_fail_test_fixture(root: text, file_name: text, body: text) -> (text, text, i64):
+    if file_exists(root):
+        dir_remove_all(root)
+    dir_create_all(root)
+    val spec_path = root + "/" + file_name
+    file_write(spec_path, body)
+    val (stdout, stderr, code) = process_run(fail_test_spec_binary(), [
+        "test", spec_path, "--no-db", "--no-cache", "--no-session-daemon"
+    ])
+    if file_exists(root):
+        dir_remove_all(root)
+    (stdout, stderr, code)
 
 describe "fail_test BDD builtin dispatch":
     # @manual scenario evidence
 
     it "reports the caller's message, not a missing-function error":
         step("Run a fixture whose only assertion is fail_test(<msg>)")
-        val root = "build/fail-test-dispatch-gate"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf 'use std.spec.fail_test\\ndescribe \"f\":\\n    it \"boom\":\\n        fail_test(\"deliberate boom\")\\n' > " + root + "/fail_test_spec.spl && " +
-            "${" + "SIMPLE_SPEC_BIN:-bin/simple} test " + root + "/fail_test_spec.spl"
-        val (stdout, stderr, code) = process_run("/bin/sh", ["-c", command])
+        val (stdout, stderr, code) = run_fail_test_fixture(
+            "build/fail-test-dispatch-gate",
+            "fail_test_spec.spl",
+            "use std.spec.fail_test\ndescribe \"f\":\n    it \"boom\":\n        fail_test(\"deliberate boom\")\n"
+        )
         val output = stdout + stderr
 
         expect(output).to_contain("deliberate boom")
-        expect(output).to_not_contain("function `fail_test` not found")
+        expect(output.contains("function `fail_test` not found")).to_equal(false)
         expect(output).to_contain("1 total, 0 passed, 1 failed")
         expect(code).to_equal(1)
 
     it "does not fail sibling examples that never call fail_test":
         step("Run a fixture with one passing example and one fail_test example")
-        val root = "build/fail-test-dispatch-gate-sibling"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            "printf 'use std.spec.fail_test\\ndescribe \"f\":\\n    it \"ok\":\\n        expect(1).to_equal(1)\\n    it \"boom\":\\n        fail_test(\"deliberate boom\")\\n' > " + root + "/fail_test_sibling_spec.spl && " +
-            "${" + "SIMPLE_SPEC_BIN:-bin/simple} test " + root + "/fail_test_sibling_spec.spl"
-        val (stdout, stderr, code) = process_run("/bin/sh", ["-c", command])
+        val (stdout, stderr, code) = run_fail_test_fixture(
+            "build/fail-test-dispatch-gate-sibling",
+            "fail_test_sibling_spec.spl",
+            "use std.spec.fail_test\ndescribe \"f\":\n    it \"ok\":\n        expect(1).to_equal(1)\n    it \"boom\":\n        fail_test(\"deliberate boom\")\n"
+        )
         val output = stdout + stderr
 
         expect(output).to_contain("2 total, 1 passed, 1 failed")

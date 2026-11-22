@@ -14,22 +14,32 @@ val DECISION_PATH = ".github/workflows/code-idiom-receipt.yml"
 val PUSH_GATE_PATH = "scripts/check/check-push-must-pass.shs"
 val CI_JOB = "code-idiom-gates"
 
-# The gate commands the `code-idiom-gates` job runs, harvested from the
+# The skip-gated commands the `code-idiom-gates` job runs, harvested from the
 # workflow itself. Only the job's own steps are read: the job ends where the
-# next top-level job begins.
+# next top-level job begins. Unconditional `!cancelled()` steps without a
+# `steps.receipt.outputs.skip_ids` condition always run and cannot be skipped
+# by a local-CI receipt, whereas any step referencing `skip_ids` must stay
+# paired with a `ci` row in config/check/must_check_gates.sdn.
 fn workflow_gate_commands(source: text) -> [text]:
     var commands: [text] = []
     var inside = false
+    var step_has_skip_gate = false
     for raw in source.split("\n"):
         if raw.starts_with("  " + CI_JOB + ":"):
             inside = true
+            step_has_skip_gate = false
             continue
         if inside and raw.starts_with("  ") and not raw.starts_with("   ") and raw.trim().ends_with(":"):
             inside = false
+            step_has_skip_gate = false
         if not inside:
             continue
         val line = raw.trim()
-        if line.starts_with("sh scripts/") or line.starts_with("run: sh scripts/"):
+        if line.starts_with("- "):
+            step_has_skip_gate = false
+        if line.contains("steps.receipt.outputs.skip_ids"):
+            step_has_skip_gate = true
+        if step_has_skip_gate and (line.starts_with("sh scripts/") or line.starts_with("run: sh scripts/")):
             var command = line
             if command.starts_with("run: "):
                 command = command["run: ".len():]
@@ -212,8 +222,11 @@ describe "Local CI receipt gate wiring":
         # @req REQ-SSPEC-UNIT
         step("decides skips in BASE code that never runs head content")
         val decision = rt_file_read_text(DECISION_PATH) ?? ""
-        # ADDENDUM_2026-09-06 A: the decision runs from BASE's YAML.
-        expect(decision).to_contain("  pull_request_target:\n    types: [opened, synchronize, reopened]\n    branches: [main]\n")
+        # ADDENDUM_2026-09-06 A: the decision runs from BASE's YAML; 2026-09-27
+        # switched the PR trigger to `types: [labeled]` gated by `ci:full`.
+        expect(decision).to_contain("  pull_request_target:\n    types: [labeled]")
+        expect(decision).to_contain("    branches: [main]\n")
+        expect(decision).to_contain("contains(github.event.pull_request.labels.*.name, 'ci:full')")
         expect(decision).to_contain("[ \"$EVENT_NAME\" = pull_request_target ]")
         # ...and executes nothing of the head: no checkout at all, head read
         # only as blobless git objects in a private repo under RUNNER_TEMP.
@@ -238,6 +251,7 @@ describe "Local CI receipt gate wiring":
         step("runs head gates only on pull_request and imports the decision fail-closed")
         val workflow = rt_file_read_text(WORKFLOW_PATH) ?? ""
         val hygiene = rt_file_read_text(".github/workflows/repo-hygiene.yml") ?? ""
+        val required = rt_file_read_text(".github/workflows/required-gates.yml") ?? ""
         # Head scripts never run under pull_request_target (main's cache scope).
         expect(workflow.contains("pull_request_target:")).to_be(false)
         expect(workflow).to_contain("\n  pull_request:\n")
@@ -252,8 +266,12 @@ describe "Local CI receipt gate wiring":
         expect(workflow.contains(": write")).to_be(false)
         expect(workflow.contains("secrets.")).to_be(false)
         expect(workflow).to_contain(r"group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}")
-        # The job left repo-hygiene.yml, whose `on:` still carries the REQUIRED
-        # fast-gates context on pull_request only.
+        # 2026-09-27 split: the required `fast-gates` job ("Code Idiom &
+        # Structural Ratchet Gates") moved to required-gates.yml, while
+        # repo-hygiene.yml carries advisory jobs on push/dispatch only.
         expect(hygiene.contains("\n  code-idiom-gates:")).to_be(false)
         expect(hygiene.contains("\n  pull_request_target:")).to_be(false)
-        expect(hygiene).to_contain("name: Code Idiom & Structural Ratchet Gates\n")
+        expect(hygiene).to_contain("name: Repo Hygiene Gate\n")
+        expect(required).to_contain("\n  pull_request:\n")
+        expect(required).to_contain("\n  fast-gates:\n")
+        expect(required).to_contain("name: Code Idiom & Structural Ratchet Gates\n")

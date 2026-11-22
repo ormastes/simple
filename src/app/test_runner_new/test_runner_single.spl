@@ -713,6 +713,20 @@ fn parse_spec_file_verdict(output: text) -> (i64, i64, i64, i64, i64):
         return (executed, passed, failed, d_out, 1)
     (0, 0, 0, 0, 0)
 
+fn parse_spec_verdict_outcome_clean(output: text) -> bool:
+    """True when the final SPEC FILE VERDICT line either omits `outcome=` (legacy)
+    or explicitly reports `outcome=OK`."""
+    var clean = true
+    val lines = output.split("\n")
+    for raw_line in lines:
+        val line = raw_line.trim()
+        if line.contains("SPEC FILE VERDICT:"):
+            if line.contains(" outcome="):
+                clean = line.contains(" outcome=OK ") or line.ends_with(" outcome=OK")
+            else:
+                clean = true
+    clean
+
 fn output_was_truncated(output: text) -> bool:
     """True when the bounded-capture reader discarded part of the child output.
 
@@ -1541,6 +1555,18 @@ fn run_directory_target(args: [text], dir: text, dir_at: i64) -> i64:
     else:
         0
 
+fn _single_temp_dir_prefix() -> text:
+    """Resolve a writable temp directory prefix ending with `/` across POSIX and Windows."""
+    var temp_root = env_get("TMPDIR")
+    if temp_root == "":
+        temp_root = env_get("TMP")
+    if temp_root == "":
+        temp_root = env_get("TEMP")
+    if temp_root == "":
+        temp_root = "/tmp"
+    val sep = if temp_root.ends_with("/") or temp_root.ends_with("\\"): "" else: "/"
+    "{temp_root}{sep}"
+
 fn run_single_target(args: [text]) -> i64:
     if args.contains("--spl-doctest") and not _single_has_md_target(args):
         return _single_run_spl_doctest(args)
@@ -1676,13 +1702,14 @@ fn run_single_target(args: [text]) -> i64:
     # Captured before any chdir below: a caller-owned RELATIVE coverage path
     # must stay relative to the runner's cwd, not to the child's project root.
     val runner_cwd = env_cwd_raw()
+    val temp_prefix = _single_temp_dir_prefix()
     if cov_on:
         previous_coverage_output = env_get("SIMPLE_COVERAGE_OUTPUT") ?? ""
         if previous_coverage_output != "":
             runtime_coverage_path = child_cwd_anchor_path(previous_coverage_output, runner_cwd)
             runtime_evidence_is_child_owned = true
         else:
-            runtime_coverage_path = "/tmp/simple_apk_coverage_{getpid()}_{time_now_unix_micros()}.sdn"
+            runtime_coverage_path = "{temp_prefix}simple_apk_coverage_{getpid()}_{time_now_unix_micros()}.sdn"
         if file_exists(runtime_coverage_path):
             val _ = file_delete(runtime_coverage_path)
         if not env_set("SIMPLE_COVERAGE_OUTPUT", runtime_coverage_path):
@@ -1693,7 +1720,7 @@ fn run_single_target(args: [text]) -> i64:
     var previous_child_apk_receipt = ""
     var previous_no_bootstrap_delegate = ""
     if cov_on:
-        child_apk_receipt_path = "/tmp/simple_phase7_child_apk_{getpid()}_{time_now_unix_micros()}.env"
+        child_apk_receipt_path = "{temp_prefix}simple_phase7_child_apk_{getpid()}_{time_now_unix_micros()}.env"
         if file_exists(child_apk_receipt_path):
             val _ = file_delete(child_apk_receipt_path)
         previous_child_apk_required = env_get("SIMPLE_PHASE7_CHILD_APK_REQUIRED") ?? ""
@@ -1715,15 +1742,7 @@ fn run_single_target(args: [text]) -> i64:
     # The non-asserted legacy fallback below remains available only when the
     # child did not produce a valid receipt; valid counts must never be
     # inflated by `✓`/`✗` glyphs inside captured nested-child transcripts.
-    var temp_root = env_get("TMPDIR")
-    if temp_root == "":
-        temp_root = env_get("TMP")
-    if temp_root == "":
-        temp_root = env_get("TEMP")
-    if temp_root == "":
-        temp_root = "/tmp"
-    val temp_sep = if temp_root.ends_with("/") or temp_root.ends_with("\\"): "" else: "/"
-    val evidence_path = "{temp_root}{temp_sep}simple_bdd_result_{getpid()}_{time_now_unix_micros()}.txt"
+    val evidence_path = "{temp_prefix}simple_bdd_result_{getpid()}_{time_now_unix_micros()}.txt"
     remove_structured_result_evidence(evidence_path)
     if file_exists(evidence_path) or file_exists(evidence_path + ".expectations"):
         if cov_on:
@@ -2015,11 +2034,12 @@ fn run_single_target(args: [text]) -> i64:
         # 24cfc32db98 closed on the truncation bypass above. Same rule, same
         # reason: a verdict is positive evidence of completion only when it
         # accounts for every example the file declared.
-        val verdict_clean = has_verdict == 1 and verdict_executed > 0 and verdict_dropped == 0 and verdict_failed == 0
+        val verdict_outcome_clean = parse_spec_verdict_outcome_clean(combined)
+        val verdict_clean = has_verdict == 1 and verdict_executed > 0 and verdict_dropped == 0 and verdict_failed == 0 and verdict_outcome_clean
         val exit_code_spurious = code != 0 and verdict_clean and real_failed == 0 and (has_summary == 0 or summary_failed == 0)
         if exit_code_spurious:
             print "warning: test-runner: child exit {code} contradicted by a clean SPEC FILE VERDICT; trusting the verdict"
-        val exit_ok = code == 0 or exit_code_spurious
+        val exit_ok = (code == 0 or exit_code_spurious) and verdict_outcome_clean
         passed = if has_summary == 1: summary_passed else: (if exit_ok: 1 else: 0)
         failed = if has_summary == 1: summary_failed else: (if exit_ok: 0 else: 1)
         # Fail-closed: never let either counting method's LOWER failure count

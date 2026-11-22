@@ -39,13 +39,17 @@ wrapper means the rejection order or validation set changed — update the
 
 use std.io.{file_read}
 use std.io_runtime.{process_run}
+use std.nogc_sync_mut.io.process_ops.{resolve_shell_argv}
 use std.spec.*
 
 val SCRIPT = "scripts/check/check-freebsd-bootstrap-qemu.shs"
+val PREFLIGHT_CHECKS = "27"
 val PREFLIGHT_ORDER =
-    "mode,port,user,memory,cpus,build_jobs,disk,ssh_timeout,root_ssh_timeout," +
-    "timeout,architecture,qemu_system,qemu_img,ssh,rsync,iso_tool," +
-    "admitted_media,ssh_public_key,ssh_private_key,workspace"
+    "mode,port,user,memory,disk_size,host_free_floor,host_free_space,cpus," +
+    "phase2_backend,phase2_jobs,phase2_build_threads,phase2_test_workers," +
+    "phase2_isolation,ssh_timeout,root_ssh_timeout,timeout,architecture," +
+    "qemu_system,qemu_img,ssh,rsync,iso_tool,admitted_media," +
+    "ssh_public_key,ssh_private_key,workspace"
 
 fn receipt_value(output: text, key: text) -> text:
     val prefix = key + "="
@@ -64,31 +68,32 @@ fn step_freebsd_bootstrap_preflight(extra_env: text) -> (text, text, i64):
     step("Run the FreeBSD QEMU bootstrap preflight without network or QEMU")
     val command =
         "set -eu; " +
-        "fixture='/tmp/freebsd bootstrap qemu preflight spec'; " +
-        "/bin/rm -rf \"$fixture\"; /bin/mkdir -p \"$fixture/bin\"; " +
-        "trap '/bin/rm -rf \"$fixture\"' EXIT; " +
-        "for tool in qemu-img ssh base64 tr timeout genisoimage; do " +
-        "  /bin/ln -s /bin/false \"$fixture/bin/$tool\"; " +
+        "fixture=\"${" + "TMPDIR:-/tmp}/freebsd bootstrap qemu preflight spec-$$\"; " +
+        "rm -rf \"$fixture\"; mkdir -p \"$fixture/bin\"; " +
+        "trap 'rm -rf \"$fixture\"' EXIT INT TERM; " +
+        "for tool in ssh base64 timeout genisoimage; do " +
+        "  printf '%s\\n' '#!/bin/sh' 'exit 1' > \"$fixture/bin/$tool\"; " +
         "done; " +
-        "/bin/printf '%s\\n' '#!/bin/sh' 'if [ \"${" + "QEMU_FAKE_DISABLE_TCG:-0}\" = 1 ]; then exit 1; fi' 'echo tcg' > \"$fixture/bin/qemu-system-x86_64\"; " +
-        "/bin/chmod 755 \"$fixture/bin/qemu-system-x86_64\"; " +
-        "/bin/printf '%s\\n' '#!/bin/sh' 'echo aarch64' > \"$fixture/bin/uname\"; " +
-        "/bin/chmod 755 \"$fixture/bin/uname\"; " +
-        "/bin/printf '%s\\n' '#!/bin/sh' 'exit 0' > \"$fixture/bin/rsync\"; " +
-        "/bin/chmod 755 \"$fixture/bin/rsync\"; " +
-        "/bin/printf '%s\\n' 'base image fixture' > \"$fixture/base.qcow2\"; " +
-        "media_sha=$(/usr/bin/sha256sum \"$fixture/base.qcow2\" | /usr/bin/awk '{print $1}'); " +
-        "/bin/printf '%s\\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFreeBSDPreflightFixture freebsd-preflight' > \"$fixture/key public.pub\"; " +
-        "/bin/printf '%s\\n' '-----BEGIN OPENSSH PRIVATE KEY-----' 'freebsd-preflight-fixture' '-----END OPENSSH PRIVATE KEY-----' > \"$fixture/key private\"; " +
-        "/usr/bin/env PATH=\"$fixture/bin:$PATH\" " +
+        "printf '%s\\n' '#!/bin/sh' 'if [ \"${" + "1:-}\" = check ]; then exit 0; fi' 'exit 1' > \"$fixture/bin/qemu-img\"; " +
+        "printf '%s\\n' '#!/bin/sh' 'if [ \"${" + "QEMU_FAKE_DISABLE_TCG:-0}\" = 1 ]; then exit 1; fi' 'echo tcg' > \"$fixture/bin/qemu-system-x86_64\"; " +
+        "printf '%s\\n' '#!/bin/sh' 'echo aarch64' > \"$fixture/bin/uname\"; " +
+        "printf '%s\\n' '#!/bin/sh' 'exit 0' > \"$fixture/bin/rsync\"; " +
+        "chmod 755 \"$fixture\"/bin/*; " +
+        "printf '%s\\n' 'base image fixture' > \"$fixture/base.qcow2\"; " +
+        "media_sha=$(sha256sum \"$fixture/base.qcow2\" | awk '{print $1}'); " +
+        "printf '%s\\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFreeBSDPreflightFixture freebsd-preflight' > \"$fixture/key public.pub\"; " +
+        "printf '%s\\n' '-----BEGIN OPENSSH PRIVATE KEY-----' 'freebsd-preflight-fixture' '-----END OPENSSH PRIVATE KEY-----' > \"$fixture/key private\"; " +
+        "env PATH=\"$fixture/bin:$PATH\" " +
+        "QEMU_ARCH=amd64 " +
         "QEMU_SSH_PUBLIC_KEY=\"$fixture/key public.pub\" " +
         "QEMU_SSH_PRIVATE_KEY=\"$fixture/key private\" " +
         "QEMU_BASE_VM_PATH=\"$fixture/base.qcow2\" " +
         "SIMPLE_FREEBSD_MEDIA_SHA256=\"$media_sha\" " +
         "QEMU_VM_DIR=\"$fixture/workspace\" " +
         "QEMU_MEM=8G QEMU_USER=freebsd " + extra_env + " " +
-        "/bin/sh " + SCRIPT + " --preflight"
-    process_run("/bin/sh", ["-c", command])
+        "sh " + SCRIPT + " --preflight"
+    val (sh_bin, sh_args) = resolve_shell_argv(command)
+    process_run(sh_bin, sh_args)
 
 describe "FreeBSD QEMU bootstrap bounded preflight":
     # @manual_section: freebsd-bootstrap-qemu-preflight
@@ -100,7 +105,7 @@ describe "FreeBSD QEMU bootstrap bounded preflight":
         val (stdout, stderr, code) = step_freebsd_bootstrap_preflight("")
         expect(code).to_equal(0)  # oracle: canonical inputs must pass the bounded preflight with exit 0
         expect(stderr).to_equal("")
-        expect(receipt_value(stdout, "freebsd_qemu_preflight_checks")).to_equal("21")
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_checks")).to_equal(PREFLIGHT_CHECKS)
         expect(receipt_value(stdout, "freebsd_qemu_preflight_order")).to_equal(PREFLIGHT_ORDER)
         expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("none")
         expect(receipt_value(stdout, "freebsd_qemu_preflight_status")).to_equal("pass")
@@ -114,7 +119,7 @@ describe "FreeBSD QEMU bootstrap bounded preflight":
         val (stdout, _stderr, code) = step_freebsd_bootstrap_preflight(
             "QEMU_PORT=not-a-port")
         expect(code).to_equal(1)  # oracle: a rejected input must exit 1, not fall through to the live check
-        expect(receipt_value(stdout, "freebsd_qemu_preflight_checks")).to_equal("21")
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_checks")).to_equal(PREFLIGHT_CHECKS)
         expect(receipt_value(stdout, "freebsd_qemu_preflight_order")).to_equal(PREFLIGHT_ORDER)
         expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("port")
         expect(receipt_value(stdout, "freebsd_qemu_preflight_status")).to_equal("fail")
@@ -128,7 +133,7 @@ describe "FreeBSD QEMU bootstrap bounded preflight":
         val (stdout, _stderr, code) = step_freebsd_bootstrap_preflight(
             "QEMU_USER=-root")
         expect(code).to_equal(1)  # oracle: an option-injection-shaped user must exit 1
-        expect(receipt_value(stdout, "freebsd_qemu_preflight_checks")).to_equal("21")
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_checks")).to_equal(PREFLIGHT_CHECKS)
         expect(receipt_value(stdout, "freebsd_qemu_preflight_order")).to_equal(PREFLIGHT_ORDER)
         expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("user")
         expect(receipt_value(stdout, "freebsd_qemu_preflight_status")).to_equal("fail")
@@ -138,9 +143,9 @@ describe "FreeBSD QEMU bootstrap bounded preflight":
     it "rejects an overlay smaller than the required guest free space":
         # @req REQ-FREEBSD-PREFLIGHT-007
         val (stdout, _stderr, code) = step_freebsd_bootstrap_preflight(
-            "QEMU_DISK_GB=30 QEMU_GUEST_MIN_FREE_GB=31")
+            "QEMU_DISK_SIZE=30G")
         expect(code).to_equal(1)
-        expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("disk")
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("disk_size")
         expect(receipt_value(stdout, "freebsd_qemu_preflight_status")).to_equal("fail")
 
     it "rejects an ARM host when x86 QEMU lacks TCG":
