@@ -21,6 +21,7 @@ use compiler.borrow.borrow_check.borrow_graph.*
 use compiler.borrow.borrow_check.nll.*
 use compiler.borrow.borrow_check.nll.{NLLError}  # explicit: enum payload owner must name the payload type (hir-payload-origin-unresolved)
 use compiler.mir.mir_data.*
+use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_instruction_support.{MirTerminator, MirOperandKind, MirOperand, MirCallOrigin, BlockId}
 use compiler.mir.mir_types.{LocalId, MirType, MirTypeKind, MirSignature, MirLocal, MirConstValue}  # explicit: a glob is not an import-origin for surface projection
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
@@ -906,8 +907,15 @@ pub fn check_mir_module(module: MirModule) -> [NLLError]:
     var checker = BorrowChecker.create()
     var all_errors: [NLLError] = []
 
-    for symbol in module.functions.keys():
-        val mir_fn = module.functions[symbol]
+    # Index with the keys() element itself: a `for symbol in ...keys()` binding
+    # of a SymbolId is a native struct COPY under the frozen Phase 2 pin, and
+    # struct dict keys hash by address in the C runtime, so the lookup missed
+    # and MirBody.from_function read a nil MirFunction (0xC0000005).
+    val function_keys: [SymbolId] = module.functions.keys()
+    var function_i = 0
+    while function_i < function_keys.len():
+        val mir_fn = module.functions[function_keys[function_i]]
+        function_i = function_i + 1
         val body = MirBody.from_function(mir_fn)
         val entry_block: BlockId = mir_fn.entry_block
         match checker.check_function(body, entry_block.id):
