@@ -41,6 +41,22 @@ use std.nogc_sync_mut.spec.trace_events.{emit_trace_case_event}
 extern fn rt_bdd_executed_total() -> i64
 extern fn rt_bdd_failed_total() -> i64
 extern fn rt_bdd_record_result(passed: i64)
+fn _expect_compare_num(sa: text, sb: text) -> i64:
+    if sa.contains(".") or sb.contains("."):
+        val af: f64 = sa.to_f64()
+        val bf: f64 = sb.to_f64()
+        if af < bf:
+            return -1
+        if af > bf:
+            return 1
+        return 0
+    val ai: i64 = sa.to_int()
+    val bi: i64 = sb.to_int()
+    if ai < bi:
+        return -1
+    if ai > bi:
+        return 1
+    0
 
 var current_suite = ""
 var current_context = ""
@@ -1512,11 +1528,12 @@ pub class ExpectHelper:
 
     fn to_be_nil():
         _expect_begin_matcher(self.implicit_error)
+        val is_nil = self.value == nil or "{self.value}" == "Option::None"
         if self.negated:
-            if self.value == nil:
+            if is_nil:
                 fail_assertion("Expected value to NOT be nil")
         else:
-            if self.value != nil:
+            if not is_nil:
                 fail_assertion("Expected nil, got {self.value}")
         ()
 
@@ -1542,41 +1559,53 @@ pub class ExpectHelper:
 
     fn to_be_greater_than(expected):
         _expect_begin_matcher(self.implicit_error)
+        val sa: text = "{self.value}"
+        val sb: text = "{expected}"
+        val cmp = _expect_compare_num(sa, sb)
         if self.negated:
-            if self.value > expected:
+            if cmp > 0:
                 fail_assertion("Expected {self.value} to NOT be greater than {expected}")
         else:
-            if self.value <= expected:
+            if cmp <= 0:
                 fail_assertion("Expected {self.value} to be greater than {expected}")
         ()
 
     fn to_be_less_than(expected):
         _expect_begin_matcher(self.implicit_error)
+        val sa: text = "{self.value}"
+        val sb: text = "{expected}"
+        val cmp = _expect_compare_num(sa, sb)
         if self.negated:
-            if self.value < expected:
+            if cmp < 0:
                 fail_assertion("Expected {self.value} to NOT be less than {expected}")
         else:
-            if self.value >= expected:
+            if cmp >= 0:
                 fail_assertion("Expected {self.value} to be less than {expected}")
         ()
 
     fn to_be_at_least(expected):
         _expect_begin_matcher(self.implicit_error)
+        val sa: text = "{self.value}"
+        val sb: text = "{expected}"
+        val cmp = _expect_compare_num(sa, sb)
         if self.negated:
-            if self.value >= expected:
+            if cmp >= 0:
                 fail_assertion("Expected {self.value} to NOT be at least {expected}")
         else:
-            if self.value < expected:
+            if cmp < 0:
                 fail_assertion("Expected {self.value} to be at least {expected}")
         ()
 
     fn to_be_at_most(expected):
         _expect_begin_matcher(self.implicit_error)
+        val sa: text = "{self.value}"
+        val sb: text = "{expected}"
+        val cmp = _expect_compare_num(sa, sb)
         if self.negated:
-            if self.value <= expected:
+            if cmp <= 0:
                 fail_assertion("Expected {self.value} to NOT be at most {expected}")
         else:
-            if self.value > expected:
+            if cmp > 0:
                 fail_assertion("Expected {self.value} to be at most {expected}")
         ()
 
@@ -1585,7 +1614,15 @@ pub class ExpectHelper:
 
     fn to_contain(item):
         _expect_begin_matcher(self.implicit_error)
-        val contains = self.value.contains(item)
+        var contains = self.value.contains(item)
+        if not contains:
+            val rendered = "{self.value}"
+            val item_str = "{item}"
+            if rendered.starts_with("[") and rendered.ends_with("]"):
+                contains = (rendered == "[{item_str}]" or
+                    rendered.starts_with("[{item_str}, ") or
+                    rendered.ends_with(", {item_str}]") or
+                    rendered.contains(", {item_str}, "))
         if self.negated:
             if contains:
                 fail_assertion("Expected {self.value} to NOT contain {item}")

@@ -440,28 +440,37 @@ fn ui_web_query_percent_decode(value: text) -> text:
 
 export ui_web_query_percent_decode
 
+fn _json_skip_ws_bytes(json: text, start: i64, json_len: i64) -> i64:
+    var i = start
+    while i < json_len:
+        val b = json.byte_at(i)
+        if b == 32u8 or b == 9u8 or b == 10u8 or b == 13u8:
+            i = i + 1
+        else:
+            return i
+    i
+
 fn _json_field(json: text, field: text) -> text:
     val key = "\"{field}\":"
     val pos = json.find(key)
     if pos < 0:
         return ""
-    val start = pos + key.len()
-    val json_len = json.len()
+    val json_len = json.byte_len()
+    val start = _json_skip_ws_bytes(json, pos + key.byte_len(), json_len)
     if start >= json_len:
         return ""
-    val first_ch = json[start]
-    if first_ch == "\"":
+    if json.byte_at(start) == 34u8:
         val inner = start + 1
         var end = inner
-        while end < json_len and json[end] != "\"":
-            if json[end] == "\\":
+        while end < json_len and json.byte_at(end) != 34u8:
+            if json.byte_at(end) == 92u8:
                 end = end + 1
             end = end + 1
         return json.slice(inner, end)
     var end = start
     while end < json_len:
-        val ch = json[end]
-        if ch == "," or ch == "}" or ch == "]":
+        val b = json.byte_at(end)
+        if b == 44u8 or b == 125u8 or b == 93u8:
             return json.slice(start, end).trim()
         end = end + 1
     return json.slice(start, json_len).trim()
@@ -472,18 +481,27 @@ fn _extract_object(json: text, field: text) -> text:
     val pos = json.find(key)
     if pos < 0:
         return "{}"
-    val after = pos + key.len()
+    val after = pos + key.byte_len()
     val brace = _find_from(json, "{", after)
     if brace < 0:
         return "{}"
     var depth = 0
+    var in_str = false
     var i = brace
-    val json_len = json.len()
+    val json_len = json.byte_len()
     while i < json_len:
-        val ch = json[i]
-        if ch == "{":
+        val b = json.byte_at(i)
+        if in_str:
+            if b == 92u8:
+                i = i + 2
+                continue
+            if b == 34u8:
+                in_str = false
+        elif b == 34u8:
+            in_str = true
+        elif b == 123u8:
             depth = depth + 1
-        elif ch == "}":
+        elif b == 125u8:
             depth = depth - 1
             if depth == 0:
                 return json.slice(brace, i + 1)
@@ -545,12 +563,12 @@ fn _digit(ch: text) -> i64:
 
 fn _find_from(haystack: text, needle: text, start: i64) -> i64:
     if needle == "":
-        val haystack_len_empty = haystack.len()
+        val haystack_len_empty = haystack.byte_len()
         return if start < haystack_len_empty: start else: haystack_len_empty
     if start < 0:
         return -1
-    val needle_len = needle.len()
-    val limit = haystack.len() - needle_len
+    val needle_len = needle.byte_len()
+    val limit = haystack.byte_len() - needle_len
     if limit < start:
         return -1
     var i = start

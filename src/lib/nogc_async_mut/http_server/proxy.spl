@@ -297,7 +297,7 @@ fn async_proxy_parse_header_request(data: text, peer_addr: text) -> AsyncProxyHe
         return async_proxy_empty_header_request("headers-incomplete")
     val head = data.slice(0, split_at)
     val body_start = split_at + 4
-    val body = if body_start <= data.len(): data.slice(body_start, data.byte_len()) else: ""
+    val body = if body_start <= data.byte_len(): data.slice(body_start, data.byte_len()) else: ""
     val lines = head.split("\r\n")
     if lines.len() == 0:
         return async_proxy_empty_header_request("missing-request-line")
@@ -506,10 +506,11 @@ fn async_proxy_clamp_sent(sent: i64, total: i64) -> i64:
     sent
 
 fn async_proxy_remaining_after_send(data: text, sent: i64) -> text:
-    val n = async_proxy_clamp_sent(sent, data.len())
-    if n >= data.len():
+    val dlen = data.byte_len()
+    val n = async_proxy_clamp_sent(sent, dlen)
+    if n >= dlen:
         return ""
-    data.slice(n, data.byte_len())
+    data.slice(n, dlen)
 
 fn async_proxy_bytes_remaining_after_send(data: [u8], sent: i64) -> [u8]:
     val n = async_proxy_clamp_sent(sent, data.len())
@@ -538,22 +539,24 @@ fn async_proxy_bytes_range(data: [u8], start: i64, end: i64) -> [u8]:
     out
 
 fn async_proxy_request_remaining(conn: AsyncProxyConnection) -> text:
-    val offset = async_proxy_clamp_sent(conn.request_bytes_sent, conn.request_wire.len())
-    if offset >= conn.request_wire.len():
+    val wlen = conn.request_wire.byte_len()
+    val offset = async_proxy_clamp_sent(conn.request_bytes_sent, wlen)
+    if offset >= wlen:
         return ""
-    conn.request_wire.slice(offset, conn.request_wire.byte_len())
+    conn.request_wire.slice(offset, wlen)
 
 fn async_proxy_mark_request_sent(conn: AsyncProxyConnection, sent: i64, now: i64) -> AsyncProxyConnection:
     var next = conn
-    next.request_bytes_sent = async_proxy_clamp_sent(conn.request_bytes_sent + sent, conn.request_wire.len())
+    next.request_bytes_sent = async_proxy_clamp_sent(conn.request_bytes_sent + sent, conn.request_wire.byte_len())
     next.last_activity_ms = now
     next
 
 fn async_proxy_tunnel_setup_remaining(conn: AsyncProxyTunnelConnection) -> text:
-    val offset = async_proxy_clamp_sent(conn.setup_bytes_sent, conn.setup_wire.len())
-    if offset >= conn.setup_wire.len():
+    val slen = conn.setup_wire.byte_len()
+    val offset = async_proxy_clamp_sent(conn.setup_bytes_sent, slen)
+    if offset >= slen:
         return ""
-    conn.setup_wire.slice(offset, conn.setup_wire.byte_len())
+    conn.setup_wire.slice(offset, slen)
 
 fn async_proxy_tunnel_setup_complete(conn: AsyncProxyTunnelConnection) -> bool:
     async_proxy_tunnel_setup_remaining(conn) == ""
@@ -561,17 +564,18 @@ fn async_proxy_tunnel_setup_complete(conn: AsyncProxyTunnelConnection) -> bool:
 fn async_proxy_tunnel_mark_setup_sent(conn: AsyncProxyTunnelConnection,
                                       sent: i64, now: i64) -> AsyncProxyTunnelConnection:
     var next = conn
-    next.setup_bytes_sent = async_proxy_clamp_sent(conn.setup_bytes_sent + sent, conn.setup_wire.len())
+    next.setup_bytes_sent = async_proxy_clamp_sent(conn.setup_bytes_sent + sent, conn.setup_wire.byte_len())
     next.last_activity_ms = now
     next
 
 fn async_proxy_header_value_has_token(value: text, token: text) -> bool:
     val wanted = token.to_lower()
     val lower = value.to_lower()
+    val llen = lower.byte_len()
     var start = 0
     var i = 0
-    while i <= lower.len():
-        if i == lower.len() or lower.slice(i, i + 1) == ",":
+    while i <= llen:
+        if i == llen or lower.slice(i, i + 1) == ",":
             if lower.slice(start, i).trim() == wanted:
                 return true
             start = i + 1
@@ -581,11 +585,12 @@ fn async_proxy_header_value_has_token(value: text, token: text) -> bool:
 fn async_proxy_header_value_has_only_token(value: text, token: text) -> bool:
     val wanted = token.to_lower()
     val lower = value.to_lower()
+    val llen = lower.byte_len()
     var found = false
     var start = 0
     var i = 0
-    while i <= lower.len():
-        if i == lower.len() or lower.slice(i, i + 1) == ",":
+    while i <= llen:
+        if i == llen or lower.slice(i, i + 1) == ",":
             val part = lower.slice(start, i).trim()
             if part == "":
                 return false
@@ -603,7 +608,7 @@ fn async_proxy_tunnel_upgrade_response_valid(header_block: text) -> bool:
     if lines.len() == 0:
         return false
     val status = lines[0].trim()
-    if status.len() < 12:
+    if status.byte_len() < 12:
         return false
     if not status.starts_with("HTTP/1."):
         return false
@@ -631,13 +636,13 @@ fn async_proxy_tunnel_upgrade_response_valid(header_block: text) -> bool:
     has_upgrade_value and has_connection_upgrade
 
 fn async_proxy_byte_lower(byte: u8) -> i64:
-    val value = byte.to_i64()
+    val value = (byte as i64)
     if value >= 65 and value <= 90:
         return value + 32
     value
 
 fn async_proxy_byte_is_ows(byte: u8) -> bool:
-    val value = byte.to_i64()
+    val value = (byte as i64)
     value == 32 or value == 9 or value == 13 or value == 10
 
 fn async_proxy_bytes_ci_eq_at(data: [u8], start: i64, word: [i64]) -> bool:
@@ -664,7 +669,7 @@ fn async_proxy_header_value_has_upgrade_token_bytes(data: [u8], start: i64, end:
     var token_start = start
     var i = start
     while i <= end:
-        if i == end or data[i].to_i64() == 44:
+        if i == end or (data[i] as i64) == 44:
             var left = token_start
             var right = i
             while left < right and async_proxy_byte_is_ows(data[left]):
@@ -680,12 +685,12 @@ fn async_proxy_header_value_has_upgrade_token_bytes(data: [u8], start: i64, end:
 fn async_proxy_tunnel_find_header_end_bytes(data: [u8]) -> (i64, i64):
     var i = 0
     while i + 3 < data.len():
-        if data[i].to_i64() == 13 and data[i + 1].to_i64() == 10 and data[i + 2].to_i64() == 13 and data[i + 3].to_i64() == 10:
+        if (data[i] as i64) == 13 and (data[i + 1] as i64) == 10 and (data[i + 2] as i64) == 13 and (data[i + 3] as i64) == 10:
             return (i, 4)
         i = i + 1
     i = 0
     while i + 1 < data.len():
-        if data[i].to_i64() == 10 and data[i + 1].to_i64() == 10:
+        if (data[i] as i64) == 10 and (data[i + 1] as i64) == 10:
             return (i, 2)
         i = i + 1
     (-1, 0)
@@ -695,10 +700,10 @@ fn async_proxy_tunnel_upgrade_response_valid_bytes(data: [u8], header_len: i64) 
         return false
     if not async_proxy_bytes_ci_eq_at(data, 0, [104, 116, 116, 112, 47, 49, 46]):
         return false
-    if data[8].to_i64() != 32 or data[9].to_i64() != 49 or data[10].to_i64() != 48 or data[11].to_i64() != 49:
+    if (data[8] as i64) != 32 or (data[9] as i64) != 49 or (data[10] as i64) != 48 or (data[11] as i64) != 49:
         return false
     var line_start = 0
-    while line_start < header_len and data[line_start].to_i64() != 10:
+    while line_start < header_len and (data[line_start] as i64) != 10:
         line_start = line_start + 1
     if line_start < header_len:
         line_start = line_start + 1
@@ -706,13 +711,13 @@ fn async_proxy_tunnel_upgrade_response_valid_bytes(data: [u8], header_len: i64) 
     var has_connection_upgrade = false
     while line_start < header_len:
         var line_end = line_start
-        while line_end < header_len and data[line_end].to_i64() != 10:
+        while line_end < header_len and (data[line_end] as i64) != 10:
             line_end = line_end + 1
         var trimmed_end = line_end
         while trimmed_end > line_start and async_proxy_byte_is_ows(data[trimmed_end - 1]):
             trimmed_end = trimmed_end - 1
         var colon = line_start
-        while colon < trimmed_end and data[colon].to_i64() != 58:
+        while colon < trimmed_end and (data[colon] as i64) != 58:
             colon = colon + 1
         if colon < trimmed_end:
             var name_end = colon
@@ -729,6 +734,15 @@ fn async_proxy_tunnel_upgrade_response_valid_bytes(data: [u8], header_len: i64) 
         line_start = line_end + 1
     has_upgrade_value and has_connection_upgrade
 
+fn async_proxy_text_to_bytes(s: text) -> [u8]:
+    var out: [u8] = []
+    val n = s.byte_len()
+    var i = 0
+    while i < n:
+        out.push(s.byte_at(i))
+        i = i + 1
+    out
+
 fn async_proxy_tunnel_append_bytes(existing: [u8], data: [u8]) -> [u8]:
     var out = existing
     var i = 0
@@ -744,7 +758,7 @@ fn async_proxy_tunnel_prepare_upstream_handshake(conn: AsyncProxyTunnelConnectio
     var next = conn
     if next.closed or next.tunnel_kind != "upgrade" or next.upstream_handshake_complete:
         return async_proxy_tunnel_queue_upstream_bytes(next, raw_bytes, now)
-    if raw_bytes.len() == 0 and header_text.len() > 0:
+    if raw_bytes.len() == 0 and header_text.byte_len() > 0:
         var direct_split_at = header_text.index_of("\r\n\r\n")
         var direct_delimiter_len = 4
         if direct_split_at < 0:
@@ -758,10 +772,10 @@ fn async_proxy_tunnel_prepare_upstream_handshake(conn: AsyncProxyTunnelConnectio
                 next.upstream_handshake_complete = true
                 next.client_recv_inflight = false
                 next.pending_upstream_to_client = header_text.slice(0, direct_header_end)
-                next.bytes_upstream_to_client = next.bytes_upstream_to_client + next.pending_upstream_to_client.len()
-                if direct_header_end < header_text.len():
+                next.bytes_upstream_to_client = next.bytes_upstream_to_client + next.pending_upstream_to_client.byte_len()
+                if direct_header_end < header_text.byte_len():
                     val direct_tail_text = header_text.slice(direct_header_end, header_text.byte_len())
-                    val direct_tail_bytes = rt_text_to_bytes(direct_tail_text)
+                    val direct_tail_bytes = async_proxy_text_to_bytes(direct_tail_text)
                     var direct_tail_i = 0
                     while direct_tail_i < direct_tail_bytes.len():
                         next.pending_upstream_to_client_bytes.push(direct_tail_bytes[direct_tail_i])
@@ -775,7 +789,7 @@ fn async_proxy_tunnel_prepare_upstream_handshake(conn: AsyncProxyTunnelConnectio
             return next
         next.upstream_handshake_buffer = "{next.upstream_handshake_buffer}{header_text}"
         next.last_activity_ms = now
-        if next.upstream_handshake_buffer.len() > next.max_pending_each_direction_bytes:
+        if next.upstream_handshake_buffer.byte_len() > next.max_pending_each_direction_bytes:
             next.upstream_handshake_valid = false
             next.upstream_handshake_error = "Proxy tunnel upstream upgrade response headers too large"
         return next
@@ -802,10 +816,10 @@ fn async_proxy_tunnel_prepare_upstream_handshake(conn: AsyncProxyTunnelConnectio
                 next.upstream_handshake_complete = true
                 next.client_recv_inflight = false
                 next.pending_upstream_to_client = next.upstream_handshake_buffer.slice(0, text_header_end)
-                next.bytes_upstream_to_client = next.bytes_upstream_to_client + next.pending_upstream_to_client.len()
-                if text_header_end < next.upstream_handshake_buffer.len():
+                next.bytes_upstream_to_client = next.bytes_upstream_to_client + next.pending_upstream_to_client.byte_len()
+                if text_header_end < next.upstream_handshake_buffer.byte_len():
                     val tail_text = next.upstream_handshake_buffer.slice(text_header_end, next.upstream_handshake_buffer.byte_len())
-                    val tail_bytes = rt_text_to_bytes(tail_text)
+                    val tail_bytes = async_proxy_text_to_bytes(tail_text)
                     var j = 0
                     while j < tail_bytes.len():
                         next.pending_upstream_to_client_bytes.push(tail_bytes[j])
@@ -844,10 +858,10 @@ fn async_proxy_tunnel_prepare_upstream_handshake(conn: AsyncProxyTunnelConnectio
                     next.upstream_handshake_complete = true
                     next.client_recv_inflight = false
                     next.pending_upstream_to_client = next.upstream_handshake_buffer.slice(0, text_valid_header_end)
-                    next.bytes_upstream_to_client = next.bytes_upstream_to_client + next.pending_upstream_to_client.len()
-                    if text_valid_header_end < next.upstream_handshake_buffer.len():
+                    next.bytes_upstream_to_client = next.bytes_upstream_to_client + next.pending_upstream_to_client.byte_len()
+                    if text_valid_header_end < next.upstream_handshake_buffer.byte_len():
                         val tail_text = next.upstream_handshake_buffer.slice(text_valid_header_end, next.upstream_handshake_buffer.byte_len())
-                        val tail_bytes = rt_text_to_bytes(tail_text)
+                        val tail_bytes = async_proxy_text_to_bytes(tail_text)
                         var j = 0
                         while j < tail_bytes.len():
                             next.pending_upstream_to_client_bytes.push(tail_bytes[j])
@@ -870,7 +884,7 @@ fn async_proxy_tunnel_prepare_upstream_handshake(conn: AsyncProxyTunnelConnectio
         next.upstream_handshake_bytes = []
         next.upstream_handshake_buffer = ""
         return next
-    val prior_buffer_len = next.upstream_handshake_buffer.len()
+    val prior_buffer_len = next.upstream_handshake_buffer.byte_len()
     next.upstream_handshake_buffer = "{next.upstream_handshake_buffer}{header_text}"
     next.last_activity_ms = now
     var split_at = next.upstream_handshake_buffer.index_of("\r\n\r\n")
@@ -879,7 +893,7 @@ fn async_proxy_tunnel_prepare_upstream_handshake(conn: AsyncProxyTunnelConnectio
         split_at = next.upstream_handshake_buffer.index_of("\n\n")
         delimiter_len = 2
     if split_at < 0:
-        if next.upstream_handshake_buffer.len() > next.max_pending_each_direction_bytes:
+        if next.upstream_handshake_buffer.byte_len() > next.max_pending_each_direction_bytes:
             next.upstream_handshake_valid = false
             next.upstream_handshake_error = "Proxy tunnel upstream upgrade response headers too large"
         return next
@@ -892,7 +906,7 @@ fn async_proxy_tunnel_prepare_upstream_handshake(conn: AsyncProxyTunnelConnectio
     next.upstream_handshake_complete = true
     next.client_recv_inflight = false
     next.pending_upstream_to_client = next.upstream_handshake_buffer.slice(0, header_end)
-    next.bytes_upstream_to_client = next.bytes_upstream_to_client + next.pending_upstream_to_client.len()
+    next.bytes_upstream_to_client = next.bytes_upstream_to_client + next.pending_upstream_to_client.byte_len()
     val current_consumed = header_end - prior_buffer_len
     val trailing = async_proxy_bytes_from(raw_bytes, current_consumed)
     if trailing.len() > 0:
@@ -908,7 +922,7 @@ fn async_proxy_tunnel_queue_client_data(conn: AsyncProxyTunnelConnection,
     if next.closed or data == "":
         return next
     next.pending_client_to_upstream = "{next.pending_client_to_upstream}{data}"
-    next.bytes_client_to_upstream = next.bytes_client_to_upstream + data.len()
+    next.bytes_client_to_upstream = next.bytes_client_to_upstream + data.byte_len()
     next.last_activity_ms = now
     next
 
@@ -918,7 +932,7 @@ fn async_proxy_tunnel_queue_upstream_data(conn: AsyncProxyTunnelConnection,
     if next.closed or data == "":
         return next
     next.pending_upstream_to_client = "{next.pending_upstream_to_client}{data}"
-    next.bytes_upstream_to_client = next.bytes_upstream_to_client + data.len()
+    next.bytes_upstream_to_client = next.bytes_upstream_to_client + data.byte_len()
     next.last_activity_ms = now
     next
 
@@ -947,7 +961,7 @@ fn async_proxy_tunnel_queue_upstream_bytes(conn: AsyncProxyTunnelConnection,
 fn async_proxy_tunnel_mark_client_data_sent(conn: AsyncProxyTunnelConnection,
                                             sent: i64, now: i64) -> AsyncProxyTunnelConnection:
     var next = conn
-    val text_len = next.pending_client_to_upstream.len()
+    val text_len = next.pending_client_to_upstream.byte_len()
     next.pending_client_to_upstream = async_proxy_remaining_after_send(next.pending_client_to_upstream, sent)
     val byte_sent = if sent > text_len: sent - text_len else: 0
     next.pending_client_to_upstream_bytes = async_proxy_bytes_remaining_after_send(next.pending_client_to_upstream_bytes, byte_sent)
@@ -957,7 +971,7 @@ fn async_proxy_tunnel_mark_client_data_sent(conn: AsyncProxyTunnelConnection,
 fn async_proxy_tunnel_mark_upstream_data_sent(conn: AsyncProxyTunnelConnection,
                                               sent: i64, now: i64) -> AsyncProxyTunnelConnection:
     var next = conn
-    val text_len = next.pending_upstream_to_client.len()
+    val text_len = next.pending_upstream_to_client.byte_len()
     next.pending_upstream_to_client = async_proxy_remaining_after_send(next.pending_upstream_to_client, sent)
     val byte_sent = if sent > text_len: sent - text_len else: 0
     next.pending_upstream_to_client_bytes = async_proxy_bytes_remaining_after_send(next.pending_upstream_to_client_bytes, byte_sent)
@@ -967,13 +981,13 @@ fn async_proxy_tunnel_mark_upstream_data_sent(conn: AsyncProxyTunnelConnection,
 fn async_proxy_tunnel_pending_over_budget(conn: AsyncProxyTunnelConnection) -> bool:
     if conn.max_pending_each_direction_bytes <= 0:
         return false
-    if conn.upstream_handshake_buffer.len() > conn.max_pending_each_direction_bytes:
+    if conn.upstream_handshake_buffer.byte_len() > conn.max_pending_each_direction_bytes:
         return true
-    if conn.pending_client_to_upstream.len() > conn.max_pending_each_direction_bytes:
+    if conn.pending_client_to_upstream.byte_len() > conn.max_pending_each_direction_bytes:
         return true
     if conn.pending_client_to_upstream_bytes.len() > conn.max_pending_each_direction_bytes:
         return true
-    if conn.pending_upstream_to_client.len() > conn.max_pending_each_direction_bytes:
+    if conn.pending_upstream_to_client.byte_len() > conn.max_pending_each_direction_bytes:
         return true
     conn.pending_upstream_to_client_bytes.len() > conn.max_pending_each_direction_bytes
 
@@ -1267,8 +1281,9 @@ fn async_proxy_parse_nonnegative_i64(value: text) -> i64:
     if trimmed == "":
         return -1
     var out = 0
+    val tlen = trimmed.byte_len()
     var i = 0
-    while i < trimmed.len():
+    while i < tlen:
         val ch = trimmed.slice(i, i + 1)
         var digit = -1
         if ch == "0":
@@ -1353,7 +1368,7 @@ fn async_proxy_request_content_length(request: HttpRequestData) -> i64:
             return -1
         i = i + 1
     if request.body != "":
-        return request.body.len()
+        return request.body.byte_len()
     0
 
 fn async_proxy_request_upgrade(request: HttpRequestData) -> bool:
@@ -1378,7 +1393,7 @@ fn async_proxy_request_body_streaming_required(request: HttpRequestData,
     val declared_body_bytes = async_proxy_request_content_length(request)
     if declared_body_bytes > max_buffered_request_body_bytes:
         return true
-    request.body.len() > max_buffered_request_body_bytes
+    request.body.byte_len() > max_buffered_request_body_bytes
 
 fn async_proxy_drop_header(name: text) -> bool:
     val lower = name.to_lower()
@@ -1844,16 +1859,17 @@ fn async_proxy_parse_chunk_size(line: text) -> i64:
     # size reads back small — "10000000000000000" (2^64) becomes 0 and would be
     # accepted as the terminal last-chunk, desyncing this proxy from its peer
     # (request smuggling). 15 hex digits (~1 EB) cannot overflow.
+    val st_len = size_text.byte_len()
     var z = 0
-    while z < size_text.len():
+    while z < st_len:
         if size_text.slice(z, z + 1) != "0":
             break
         z = z + 1
-    if size_text.len() - z > 15:
+    if st_len - z > 15:
         return -1
     var out = 0
     var i = 0
-    while i < size_text.len():
+    while i < st_len:
         val v = async_proxy_hex_value(size_text.slice(i, i + 1))
         if v < 0:
             return -1
@@ -1862,12 +1878,11 @@ fn async_proxy_parse_chunk_size(line: text) -> i64:
     out
 
 fn async_proxy_chunked_body_complete(body: text) -> bool:
-    # Boundary-aware (RFC 7230 §4.1): walk chunk-size lines so a "0\r\n\r\n"
-    # inside chunk DATA is never taken as the terminal chunk — the previous
-    # flat contains() scan truncated any body containing those bytes.
+    # Boundary-aware (RFC 7230 §4.1): walk chunk-size lines in UTF-8 byte space.
+    val blen = body.byte_len()
     var pos = 0
-    while pos < body.len():
-        val line_end_rel = body.slice(pos, body.byte_len()).index_of("\r\n")
+    while pos < blen:
+        val line_end_rel = body.slice(pos, blen).index_of("\r\n")
         if line_end_rel < 0:
             return false
         val line_end = pos + line_end_rel
@@ -1876,61 +1891,63 @@ fn async_proxy_chunked_body_complete(body: text) -> bool:
             return false
         pos = line_end + 2
         if size == 0:
-            return true
+            return pos + 2 <= blen and body.slice(pos, pos + 2) == "\r\n"
         pos = pos + size + 2
-        if pos > body.len():
+        if pos > blen:
             return false
         if body.slice(pos - 2, pos) != "\r\n":
             return false
     false
 
 fn async_proxy_dechunk_body(body: text) -> text?:
+    val blen = body.byte_len()
     var pos = 0
     var out = ""
-    while pos < body.len():
-        val line_end_rel = body.slice(pos, body.byte_len()).index_of("\r\n")
+    while pos < blen:
+        val line_end_rel = body.slice(pos, blen).index_of("\r\n")
         if line_end_rel < 0:
-            return nil
+            return None
         val line_end = pos + line_end_rel
         val size = async_proxy_parse_chunk_size(body.slice(pos, line_end))
         if size < 0:
-            return nil
+            return None
         pos = line_end + 2
         if size == 0:
-            return out
-        if pos + size > body.len():
-            return nil
+            return Some(out)
+        if pos + size > blen:
+            return None
         out = "{out}{body.slice(pos, pos + size)}"
         pos = pos + size
-        if pos + 2 > body.len():
-            return nil
+        if pos + 2 > blen:
+            return None
         if body.slice(pos, pos + 2) != "\r\n":
-            return nil
+            return None
         pos = pos + 2
-    nil
+    None
 
 fn async_proxy_decode_available_chunks(body: text) -> AsyncProxyChunkDecode:
+    val blen = body.byte_len()
     var pos = 0
     var out = ""
-    while pos < body.len():
-        val line_end_rel = body.slice(pos, body.byte_len()).index_of("\r\n")
+    while pos < blen:
+        val line_end_rel = body.slice(pos, blen).index_of("\r\n")
         if line_end_rel < 0:
-            return AsyncProxyChunkDecode(decoded: out, remaining: body.slice(pos, body.byte_len()), complete: false, valid: true)
+            return AsyncProxyChunkDecode(decoded: out, remaining: body.slice(pos, blen), complete: false, valid: true)
         val line_end = pos + line_end_rel
         val size = async_proxy_parse_chunk_size(body.slice(pos, line_end))
         if size < 0:
             return AsyncProxyChunkDecode(decoded: out, remaining: "", complete: false, valid: false)
         val data_start = line_end + 2
         if size == 0:
-            if data_start + 2 > body.len():
-                return AsyncProxyChunkDecode(decoded: out, remaining: body.slice(pos, body.byte_len()), complete: false, valid: true)
+            if data_start + 2 > blen:
+                return AsyncProxyChunkDecode(decoded: out, remaining: body.slice(pos, blen), complete: false, valid: true)
             if body.slice(data_start, data_start + 2) != "\r\n":
                 return AsyncProxyChunkDecode(decoded: out, remaining: "", complete: false, valid: false)
-            return AsyncProxyChunkDecode(decoded: out, remaining: body.slice(data_start + 2, body.byte_len()), complete: true, valid: true)
+            return AsyncProxyChunkDecode(decoded: out, remaining: body.slice(data_start + 2, blen), complete: true, valid: true)
         val data_end = data_start + size
         val chunk_end = data_end + 2
-        if chunk_end > body.len():
-            return AsyncProxyChunkDecode(decoded: out, remaining: body.slice(pos, body.byte_len()), complete: false, valid: true)
+        if chunk_end > blen:
+            return AsyncProxyChunkDecode(decoded: out, remaining: body.slice(pos, blen), complete: false, valid: true)
         if body.slice(data_end, chunk_end) != "\r\n":
             return AsyncProxyChunkDecode(decoded: out, remaining: "", complete: false, valid: false)
         out = "{out}{body.slice(data_start, data_end)}"
@@ -1944,14 +1961,14 @@ fn async_proxy_should_recv_client_body(stream: AsyncProxyRequestBodyStream) -> b
         return true
     if stream.max_pending_upstream_bytes <= 0:
         return true
-    stream.pending_upstream_data.len() < (stream.max_pending_upstream_bytes / 2)
+    stream.pending_upstream_data.byte_len() < (stream.max_pending_upstream_bytes / 2)
 
 fn async_proxy_request_pending_over_budget(stream: AsyncProxyRequestBodyStream) -> bool:
     if stream.max_pending_upstream_bytes <= 0:
         return false
-    if stream.pending_upstream_data.len() > stream.max_pending_upstream_bytes:
+    if stream.pending_upstream_data.byte_len() > stream.max_pending_upstream_bytes:
         return true
-    stream.chunked_body_buffer.len() > stream.max_pending_upstream_bytes
+    stream.chunked_body_buffer.byte_len() > stream.max_pending_upstream_bytes
 
 fn async_proxy_request_stream_receive_fixed(stream: AsyncProxyRequestBodyStream,
                                             data: text) -> AsyncProxyRequestBodyStream:
@@ -1962,7 +1979,7 @@ fn async_proxy_request_stream_receive_fixed(stream: AsyncProxyRequestBodyStream,
         next.valid = false
         next.error = "fixed-body-received-for-chunked-stream"
         return next
-    next.bytes_received = next.bytes_received + data.len()
+    next.bytes_received = next.bytes_received + data.byte_len()
     if next.expected_body_bytes >= 0 and next.bytes_received > next.expected_body_bytes:
         next.valid = false
         next.error = "fixed-request-body-too-large"
@@ -1989,7 +2006,7 @@ fn async_proxy_request_stream_receive_chunked(stream: AsyncProxyRequestBodyStrea
         return next
     next.chunked_body_buffer = decoded.remaining
     if decoded.decoded != "":
-        next.bytes_received = next.bytes_received + decoded.decoded.len()
+        next.bytes_received = next.bytes_received + decoded.decoded.byte_len()
         next.pending_upstream_data = "{next.pending_upstream_data}{decoded.decoded}"
     if decoded.complete:
         next.complete = true
@@ -2015,12 +2032,12 @@ fn async_proxy_request_stream_receive_chunked_framed(stream: AsyncProxyRequestBo
         next.valid = false
         next.error = "chunked-request-body-trailing-bytes"
         return next
-    val consumed_len = buffered.len() - decoded.remaining.len()
+    val consumed_len = buffered.byte_len() - decoded.remaining.byte_len()
     if consumed_len > 0:
         next.pending_upstream_data = "{next.pending_upstream_data}{buffered.slice(0, consumed_len)}"
     next.chunked_body_buffer = decoded.remaining
     if decoded.decoded != "":
-        next.bytes_received = next.bytes_received + decoded.decoded.len()
+        next.bytes_received = next.bytes_received + decoded.decoded.byte_len()
     if decoded.complete:
         next.complete = true
     next
@@ -2035,7 +2052,7 @@ fn async_proxy_request_stream_receive_chunked_passthrough(stream: AsyncProxyRequ
         next.error = "chunked-body-received-for-fixed-stream"
         return next
     next.pending_upstream_data = "{next.pending_upstream_data}{data}"
-    next.bytes_received = next.bytes_received + data.len()
+    next.bytes_received = next.bytes_received + data.byte_len()
     val combined = "{next.chunked_body_buffer}{data}"
     val decoded = async_proxy_decode_available_chunks(combined)
     if not decoded.valid:
@@ -2058,10 +2075,11 @@ fn async_proxy_request_stream_mark_upstream_sent(stream: AsyncProxyRequestBodySt
     var next = stream
     if sent_bytes <= 0:
         return next
-    if sent_bytes >= next.pending_upstream_data.len():
+    val plen = next.pending_upstream_data.byte_len()
+    if sent_bytes >= plen:
         next.pending_upstream_data = ""
     else:
-        next.pending_upstream_data = next.pending_upstream_data.slice(sent_bytes, next.pending_upstream_data.byte_len())
+        next.pending_upstream_data = next.pending_upstream_data.slice(sent_bytes, plen)
     next
 
 fn async_proxy_client_chunk_wire(conn: AsyncProxyConnection, decoded: text) -> text:
@@ -2070,7 +2088,7 @@ fn async_proxy_client_chunk_wire(conn: AsyncProxyConnection, decoded: text) -> t
     decoded
 
 fn async_proxy_pending_client_over_budget(conn: AsyncProxyConnection) -> bool:
-    conn.max_pending_client_bytes > 0 and conn.pending_client_data.len() > conn.max_pending_client_bytes
+    conn.max_pending_client_bytes > 0 and conn.pending_client_data.byte_len() > conn.max_pending_client_bytes
 
 fn async_proxy_append_pending_client_data(conn: AsyncProxyConnection, data: text) -> AsyncProxyConnection:
     var next = conn
@@ -2092,7 +2110,7 @@ fn async_proxy_upstream_recv_budget(conn: AsyncProxyConnection, requested: i64) 
         return 0
     if conn.max_pending_client_bytes <= 0:
         return requested
-    val remaining = conn.max_pending_client_bytes - conn.pending_client_data.len()
+    val remaining = conn.max_pending_client_bytes - conn.pending_client_data.byte_len()
     if remaining <= 0:
         return 0
     if remaining < requested:
@@ -2116,7 +2134,7 @@ fn async_proxy_response_allows_reuse(header_block: text) -> bool:
     true
 
 fn async_proxy_status_line_valid(line: text) -> bool:
-    if line.len() < 12:
+    if line.byte_len() < 12:
         return false
     if not line.starts_with("HTTP/1."):
         return false
@@ -2187,7 +2205,7 @@ fn async_proxy_validate_response_headers(header_block: text, max_header_line: i6
         return async_proxy_target_error(502, "Proxy upstream header count budget invalid")
     if lines[0].trim() == "":
         return async_proxy_target_error(502, "Proxy upstream response missing status")
-    if lines[0].len() > max_header_line:
+    if lines[0].byte_len() > max_header_line:
         return async_proxy_target_error(502, "Proxy upstream status line too large")
     if not async_proxy_status_line_valid(lines[0]):
         return async_proxy_target_error(502, "Proxy upstream response status invalid")
@@ -2200,7 +2218,7 @@ fn async_proxy_validate_response_headers(header_block: text, max_header_line: i6
             count = count + 1
             if count > max_headers:
                 return async_proxy_target_error(502, "Proxy upstream response header count exceeded")
-            if line.len() > max_header_line:
+            if line.byte_len() > max_header_line:
                 return async_proxy_target_error(502, "Proxy upstream response header line too large")
             if async_proxy_header_name(line) == "":
                 return async_proxy_target_error(502, "Proxy upstream response header malformed")
@@ -2238,11 +2256,11 @@ fn async_proxy_filter_response_headers(header_block: text) -> text:
 fn async_proxy_prepare_client_chunk(conn: AsyncProxyConnection, upstream_data: text, now: i64) -> AsyncProxyConnection:
     var next = conn
     next.last_activity_ms = now
-    next.bytes_from_upstream = next.bytes_from_upstream + upstream_data.len()
+    next.bytes_from_upstream = next.bytes_from_upstream + upstream_data.byte_len()
     if next.response_headers_done:
         if next.response_chunked:
             next.chunked_body_buffer = "{next.chunked_body_buffer}{upstream_data}"
-            if next.chunked_body_buffer.len() > next.max_response_bytes:
+            if next.chunked_body_buffer.byte_len() > next.max_response_bytes:
                 next.response_header_valid = false
                 next.response_header_error = "Proxy upstream chunked response buffer too large"
                 next.pending_client_data = ""
@@ -2254,20 +2272,20 @@ fn async_proxy_prepare_client_chunk(conn: AsyncProxyConnection, upstream_data: t
                 next.pending_client_data = ""
                 return next
             next.chunked_body_buffer = decoded.remaining
-            if next.body_bytes_forwarded + decoded.decoded.len() > next.max_response_bytes:
+            if next.body_bytes_forwarded + decoded.decoded.byte_len() > next.max_response_bytes:
                 next.response_header_valid = false
                 next.response_header_error = "Proxy upstream chunked response body too large"
                 next.pending_client_data = ""
                 return next
             if decoded.decoded != "":
                 next = async_proxy_append_pending_client_data(next, async_proxy_client_chunk_wire(next, decoded.decoded))
-                next.body_bytes_forwarded = next.body_bytes_forwarded + decoded.decoded.len()
+                next.body_bytes_forwarded = next.body_bytes_forwarded + decoded.decoded.byte_len()
             if decoded.complete:
                 next.response_complete = true
             return next
         next = async_proxy_append_pending_client_data(next, upstream_data)
         if next.expected_body_bytes >= 0:
-            next.body_bytes_forwarded = next.body_bytes_forwarded + upstream_data.len()
+            next.body_bytes_forwarded = next.body_bytes_forwarded + upstream_data.byte_len()
             if next.body_bytes_forwarded >= next.expected_body_bytes:
                 next.response_complete = true
         return next
@@ -2311,7 +2329,7 @@ fn async_proxy_prepare_client_chunk(conn: AsyncProxyConnection, upstream_data: t
             next.upstream_reusable = false
     elif next.response_chunked:
         next.chunked_body_buffer = body_text
-        if next.chunked_body_buffer.len() > next.max_response_bytes:
+        if next.chunked_body_buffer.byte_len() > next.max_response_bytes:
             next.response_header_valid = false
             next.response_header_error = "Proxy upstream chunked response buffer too large"
             next.pending_client_data = ""
@@ -2323,17 +2341,17 @@ fn async_proxy_prepare_client_chunk(conn: AsyncProxyConnection, upstream_data: t
             next.pending_client_data = ""
             return next
         next.chunked_body_buffer = decoded.remaining
-        if decoded.decoded.len() > next.max_response_bytes:
+        if decoded.decoded.byte_len() > next.max_response_bytes:
             next.response_header_valid = false
             next.response_header_error = "Proxy upstream chunked response body too large"
             next.pending_client_data = ""
             return next
         next = async_proxy_append_pending_client_data(next, async_proxy_client_chunk_wire(next, decoded.decoded))
-        next.body_bytes_forwarded = decoded.decoded.len()
+        next.body_bytes_forwarded = decoded.decoded.byte_len()
         if decoded.complete:
             next.response_complete = true
     else:
-        next.body_bytes_forwarded = body_text.len()
+        next.body_bytes_forwarded = body_text.byte_len()
         if next.expected_body_bytes >= 0 and next.body_bytes_forwarded >= next.expected_body_bytes:
             next.response_complete = true
         next = async_proxy_append_pending_client_data(next, "{next.response_client_header_wire}{body_text}")

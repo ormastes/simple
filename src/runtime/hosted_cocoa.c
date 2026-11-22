@@ -278,28 +278,45 @@ int64_t rt_cocoa_window_new(int64_t w, int64_t h, int64_t title_rv) {
     char *title_cstr = text_rv_to_cstr(title_rv);
 
     @autoreleasepool {
-        ensure_app();
+        if (CGMainDisplayID() == 0) {
+            free(title_cstr);
+            return COCOA_INVALID_HANDLE;
+        }
+        NSWindow *ns_window = nil;
+        NSImageView *ns_view = nil;
+        @try {
+            ensure_app();
 
-        NSRect frame = NSMakeRect(0, 0, (CGFloat)w, (CGFloat)h);
-        NSWindowStyleMask style =
-            NSWindowStyleMaskTitled      |
-            NSWindowStyleMaskClosable    |
-            NSWindowStyleMaskResizable   |
-            NSWindowStyleMaskMiniaturizable;
+            NSRect frame = NSMakeRect(0, 0, (CGFloat)w, (CGFloat)h);
+            NSWindowStyleMask style =
+                NSWindowStyleMaskTitled      |
+                NSWindowStyleMaskClosable    |
+                NSWindowStyleMaskResizable   |
+                NSWindowStyleMaskMiniaturizable;
 
-        NSWindow *ns_window = [[NSWindow alloc]
-            initWithContentRect:frame
-                      styleMask:style
-                        backing:NSBackingStoreBuffered
-                          defer:NO];
+            ns_window = [[NSWindow alloc]
+                initWithContentRect:frame
+                          styleMask:style
+                            backing:NSBackingStoreBuffered
+                              defer:NO];
+            if (!ns_window) {
+                free(title_cstr);
+                return COCOA_INVALID_HANDLE;
+            }
 
-        NSString *ns_title = [NSString stringWithUTF8String:title_cstr];
-        [ns_window setTitle:ns_title];
-        [ns_window center];
+            NSString *ns_title = [NSString stringWithUTF8String:title_cstr];
+            if (ns_title) [ns_window setTitle:ns_title];
+            [ns_window center];
 
-        NSImageView *ns_view = [[NSImageView alloc] initWithFrame:frame];
-        [ns_window setContentView:ns_view];
-        [ns_window makeKeyAndOrderFront:nil];
+            ns_view = [[NSImageView alloc] initWithFrame:frame];
+            [ns_view setImageScaling:NSImageScaleAxesIndependently];
+            [ns_window setContentView:ns_view];
+            [ns_window makeKeyAndOrderFront:nil];
+        } @catch (NSException *ex) {
+            (void)ex;
+            free(title_cstr);
+            return COCOA_INVALID_HANDLE;
+        }
 
         CocoaWindow *wnd = (CocoaWindow *)calloc(1, sizeof(CocoaWindow));
         if (!wnd) {
@@ -484,6 +501,8 @@ bool rt_cocoa_layer_present(int64_t win, int64_t layer_id) {
     if (!l) return false;
     pthread_mutex_lock(&g_mutex);
     CocoaWindow *wnd = (CocoaWindow *)handle_get(win,      KIND_WINDOW);
+    int64_t logical_w = wnd ? wnd->w : 0;
+    int64_t logical_h = wnd ? wnd->h : 0;
     NSImageView *view = wnd && wnd->ns_view
         ? (NSImageView *)CFRetain((__bridge CFTypeRef)wnd->ns_view) : NULL;
     pthread_mutex_unlock(&g_mutex);
@@ -536,6 +555,7 @@ bool rt_cocoa_layer_present(int64_t win, int64_t layer_id) {
                             hasAlpha:YES
                             isPlanar:NO
                       colorSpaceName:NSDeviceRGBColorSpace
+                        bitmapFormat:NSBitmapFormatAlphaNonpremultiplied
                          bytesPerRow:(NSInteger)(pw * 4)
                         bitsPerPixel:32];
 
@@ -545,8 +565,10 @@ bool rt_cocoa_layer_present(int64_t win, int64_t layer_id) {
             return false;
         }
         memcpy([bmp bitmapData], rgba, nbytes);
+        CGFloat disp_w = logical_w > 0 ? (CGFloat)logical_w : (CGFloat)pw;
+        CGFloat disp_h = logical_h > 0 ? (CGFloat)logical_h : (CGFloat)ph;
         NSImage *image = [[NSImage alloc]
-            initWithSize:NSMakeSize((CGFloat)pw, (CGFloat)ph)];
+            initWithSize:NSMakeSize(disp_w, disp_h)];
         if (!image) {
             free(rgba);
             CFRelease((__bridge CFTypeRef)view);
@@ -661,7 +683,10 @@ bool rt_cocoa_layer_blur(int64_t layer_id, int64_t x, int64_t y,
         return false;
     }
     uint32_t *tmp = (uint32_t *)malloc(tmp_count * sizeof(uint32_t));
-    if (!tmp) {
+    uint32_t *tmp2 = (uint32_t *)malloc(tmp_count * sizeof(uint32_t));
+    if (!tmp || !tmp2) {
+        free(tmp);
+        free(tmp2);
         layer_unpin(l);
         return false;
     }
@@ -679,28 +704,29 @@ bool rt_cocoa_layer_blur(int64_t layer_id, int64_t x, int64_t y,
                (size_t)(rw) * sizeof(uint32_t));
     }
 
-    /* 3 passes of box blur. */
+    /* 3 passes of symmetric separable FIR box blur (tmp -> tmp2 -> tmp). */
     for (int pass = 0; pass < 3; pass++) {
-        /* Horizontal. */
+        /* Horizontal: read tmp, write tmp2. */
         for (int64_t yy = 0; yy < rh; yy++) {
-            uint32_t *row = tmp + (size_t)(yy * rw);
+            const uint32_t *src_row = tmp + (size_t)(yy * rw);
+            uint32_t *dst_row = tmp2 + (size_t)(yy * rw);
             for (int64_t xx = 0; xx < rw; xx++) {
                 int64_t lo = xx - r; if (lo < 0)   lo = 0;
                 int64_t hi = xx + r; if (hi >= rw)  hi = rw - 1;
                 int64_t cnt = hi - lo + 1;
                 uint64_t sr2 = 0, sg2 = 0, sb2 = 0, sa2 = 0;
                 for (int64_t k = lo; k <= hi; k++) {
-                    uint32_t px = row[k];
+                    uint32_t px = src_row[k];
                     sa2 += (px >> 24) & 0xff;
                     sr2 += (px >> 16) & 0xff;
                     sg2 += (px >>  8) & 0xff;
                     sb2 +=  px        & 0xff;
                 }
-                row[xx] = (uint32_t)(((sa2/cnt) << 24) | ((sr2/cnt) << 16)
-                                   | ((sg2/cnt) <<  8) |  (sb2/cnt));
+                dst_row[xx] = (uint32_t)(((sa2/cnt) << 24) | ((sr2/cnt) << 16)
+                                       | ((sg2/cnt) <<  8) |  (sb2/cnt));
             }
         }
-        /* Vertical. */
+        /* Vertical: read tmp2, write tmp. */
         for (int64_t xx = 0; xx < rw; xx++) {
             for (int64_t yy = 0; yy < rh; yy++) {
                 int64_t lo = yy - r; if (lo < 0)   lo = 0;
@@ -708,7 +734,7 @@ bool rt_cocoa_layer_blur(int64_t layer_id, int64_t x, int64_t y,
                 int64_t cnt = hi - lo + 1;
                 uint64_t sr2 = 0, sg2 = 0, sb2 = 0, sa2 = 0;
                 for (int64_t k = lo; k <= hi; k++) {
-                    uint32_t px = tmp[(size_t)(k * rw + xx)];
+                    uint32_t px = tmp2[(size_t)(k * rw + xx)];
                     sa2 += (px >> 24) & 0xff;
                     sr2 += (px >> 16) & 0xff;
                     sg2 += (px >>  8) & 0xff;
@@ -729,6 +755,7 @@ bool rt_cocoa_layer_blur(int64_t layer_id, int64_t x, int64_t y,
     }
 
     pthread_mutex_unlock(&l->pixels_mutex);
+    free(tmp2);
     free(tmp);
     layer_unpin(l);
     return true;
@@ -751,6 +778,7 @@ bool rt_cocoa_layer_gradient_v(int64_t layer_id, int64_t x, int64_t y,
     }
 
     int64_t span = y1 - y0;
+    int64_t denom = span > 1 ? (span - 1) : 1;
     int64_t r1 = (color_top  >> 16) & 0xff;
     int64_t g1 = (color_top  >>  8) & 0xff;
     int64_t b1 =  color_top         & 0xff;
@@ -760,10 +788,10 @@ bool rt_cocoa_layer_gradient_v(int64_t layer_id, int64_t x, int64_t y,
 
     pthread_mutex_lock(&l->pixels_mutex);
     for (int64_t yy = y0; yy < y1; yy++) {
-        int64_t  t     = yy - y0;
-        uint32_t r     = (uint32_t)((r1 * (span - t) + r2 * t) / span);
-        uint32_t g     = (uint32_t)((g1 * (span - t) + g2 * t) / span);
-        uint32_t b     = (uint32_t)((b1 * (span - t) + b2 * t) / span);
+        int64_t  t     = span > 1 ? (yy - y0) : 0;
+        uint32_t r     = (uint32_t)((r1 * (denom - t) + r2 * t) / denom);
+        uint32_t g     = (uint32_t)((g1 * (denom - t) + g2 * t) / denom);
+        uint32_t b     = (uint32_t)((b1 * (denom - t) + b2 * t) / denom);
         uint32_t color = 0xff000000u | (r << 16) | (g << 8) | b;
         uint32_t *row  = l->pixels + (size_t)(yy * lw);
         for (int64_t xx = x0; xx < x1; xx++)

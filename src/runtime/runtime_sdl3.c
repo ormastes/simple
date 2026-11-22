@@ -134,7 +134,13 @@ static int sdl3_load(void) {
 #if defined(_WIN32)
     const char* names[] = {"SDL3.dll", NULL};
 #elif defined(__APPLE__)
-    const char* names[] = {"libSDL3.0.dylib", "libSDL3.dylib", NULL};
+    const char* names[] = {
+        "libSDL3.0.dylib", "libSDL3.dylib",
+        "/opt/homebrew/lib/libSDL3.0.dylib", "/opt/homebrew/lib/libSDL3.dylib",
+        "/usr/local/lib/libSDL3.0.dylib", "/usr/local/lib/libSDL3.dylib",
+        "/Library/Frameworks/SDL3.framework/SDL3",
+        NULL
+    };
 #else
     const char* names[] = {"libSDL3.so.0", "libSDL3.so", NULL};
 #endif
