@@ -126,6 +126,8 @@ async function run() {
   await second.close();
   passed++;
 
+  fs.writeFileSync(path.join(directory, 'fixture.spl'), 'pub fn fixture_symbol() -> i64:\n    42\n');
+
   // Real diagnostics handler -> bounded native owner -> delegate + descendant.
   // Node interprets cwd/check as its script when invoked with ["check", file].
   const pidFile = path.join(directory, 'descendant.pid');
@@ -138,9 +140,9 @@ fs.writeFileSync(process.env.LSP_TEST_PID_FILE, String(child.pid));
 console.log('fixture.spl:2:3: warning: partial diagnostic');
 setInterval(() => {}, 1000);
 `);
-  const diagnostic = client({ SIMPLE_BINARY: process.execPath, SIMPLE_LSP_ENABLE_DIAGNOSTICS: '1', LSP_TEST_PID_FILE: pidFile, LSP_TEST_QUERY_PID_FILE: queryPidFile });
+  const diagnostic = client({ SIMPLE_BINARY: process.execPath, SIMPLE_LSP_ENABLE_DIAGNOSTICS: '1', SIMPLE_LSP_DIAGNOSTICS_MODE: 'native', LSP_TEST_PID_FILE: pidFile, LSP_TEST_QUERY_PID_FILE: queryPidFile });
   await initialize(diagnostic);
-  const response = diagnostic.request('tools/call', { name: 'lsp_diagnostics', arguments: { file: 'fixture.spl' } }, 20000, -32001);
+  const response = diagnostic.request('tools/call', { name: 'lsp_diagnostics', arguments: { file: 'fixture.spl' } }, 20000);
   // Attach immediately so early request failures do not become unhandled rejections.
   response.catch(() => {});
   await until(() => fs.existsSync(pidFile), 5000, 'diagnostics never launched the delegate fixture');
@@ -149,13 +151,24 @@ setInterval(() => {}, 1000);
   descendants.add(pid);
   assert.equal(live(pid), true, 'fixture descendant was never live');
   const result = await response;
-  assert.equal(result.message, 'lsp request timed out after 10000 ms');
+  assert.equal(result.structuredContent.status, 'timed_out');
+  assert.equal(result.structuredContent.reason, 'diagnostics timed out after 10000 ms');
   assert.equal(JSON.stringify(result).includes('partial diagnostic'), false);
   await until(() => !live(pid), 3000, `diagnostics leaked owned descendant ${pid}`);
   descendants.delete(pid);
   await diagnostic.request('ping');
 
-  // Each file-only/visibility dispatch must preserve the bounded owner's error.
+  // Document symbols must work without a Simple CLI child.
+  const symbolClient = client({ SIMPLE_BINARY: path.join(directory, 'missing-simple') });
+  await initialize(symbolClient);
+  const symbols = await symbolClient.request('tools/call', {
+    name: 'lsp_symbols', arguments: { file: 'fixture.spl', requester: 'fixture.spl:1' },
+  });
+  assert(JSON.parse(symbols.content[0].text).some(symbol => symbol.name === 'fixture_symbol'));
+  await symbolClient.close();
+  passed++;
+
+  // Each remaining child-backed query must preserve the bounded owner's error.
   // These are real child deadlines; no marker injection into the server.
   const queryPath = path.join(directory, 'src', 'app', 'cli', 'query_visibility.spl');
   const samlPath = path.join(directory, 'src', 'app', 'saml', 'main.spl');
@@ -164,7 +177,7 @@ setInterval(() => {}, 1000);
   const hangingQuery = "require('node:fs').writeFileSync(process.env.LSP_TEST_QUERY_PID_FILE, String(process.pid)); console.log('partial query'); setInterval(() => {}, 1000);\n";
   fs.writeFileSync(queryPath, hangingQuery);
   fs.writeFileSync(samlPath, hangingQuery);
-  for (const name of ['lsp_visibility', 'lsp_symbols', 'saml_analyze']) {
+  for (const name of ['lsp_visibility', 'saml_analyze']) {
     const queryResponse = diagnostic.request('tools/call', {
       name, arguments: { file: 'fixture.spl', requester: 'fixture.spl:1' },
     }, 40000, -32001);
