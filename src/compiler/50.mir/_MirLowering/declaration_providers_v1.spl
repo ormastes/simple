@@ -288,10 +288,18 @@ impl MirLowering:
         val expression: HirExpr = loaded.unwrap()
         Some(expression)
 
-    me load_declaration_expression_v1(owner: text, artifact: MirHirExpressionArtifactV1) -> HirExpr?:
+    me load_declaration_expression_v1(owner: text, artifact: MirHirExpressionArtifactV1,
+            declared_slot_type: HirType? = None) -> HirExpr?:
         val raw_expression = self.load_declaration_raw_expression_v1(owner, artifact)
         if raw_expression == None: return None
-        val expression: HirExpr = raw_expression.unwrap()
+        var expression: HirExpr = raw_expression.unwrap()
+        if not expression.has_type_:
+            if val slot_type = declared_slot_type:
+                match slot_type.kind:
+                    case HirTypeKind.Optional(_):
+                        expression.has_type_ = true
+                        expression.type_ = slot_type
+                    case _: ()
         val repository: MirHirDeclarationRepositoryV1 = self.declaration_repository.unwrap()
         val module: MirHirModuleDeclarationsV1 = repository.modules[owner]
         if mir_layout_canonical_module_name(module.name) == self.current_module_id:
@@ -315,7 +323,7 @@ impl MirLowering:
         val field: MirHirFieldDeclarationV1 = fields[index]
         if not field.has_default: return None
         if val artifact = field.default_artifact:
-            return self.load_declaration_expression_v1(self.declaration_field_default_owners[key], artifact)
+            return self.load_declaration_expression_v1(self.declaration_field_default_owners[key], artifact, Some(field.type_))
         self.error_fatal("declaration field default artifact is absent: {key}", Some(field.span))
         None
 
@@ -380,7 +388,14 @@ impl MirLowering:
                 index = index + 1
                 continue
             if val artifact = param.default_artifact:
-                if val expression = self.load_declaration_raw_expression_v1(defaults.module_name, artifact):
+                if val raw_param_expr = self.load_declaration_raw_expression_v1(defaults.module_name, artifact):
+                    var expression = raw_param_expr
+                    if not expression.has_type_:
+                        match param.type_.kind:
+                            case HirTypeKind.Optional(_):
+                                expression.has_type_ = true
+                                expression.type_ = param.type_
+                            case _: ()
                     val remapped = self.remap_declaration_default_expr_v1(expression, frame)
                     if frame.failed: return Err("call default remapping failed")
                     val declared = self.remap_declaration_default_type_v1(param.type_, frame)

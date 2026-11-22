@@ -17,25 +17,43 @@ impl HirLowering:
         # nil/None never reaches a non-optional slot in safe code, and this
         # declaration-side rule is what lets call sites treat an omitted
         # `= None` default as a constant (seed is_constant_default twin).
+        # Lower an explicit parameter annotation ONCE up front so:
+        # 1) written-`Any` diagnostics fire once (never twice on `x: Any? = None`);
+        # 2) aliases expanding to `Option<T>` / `T?` (`type MaybeAny = Any?`) are
+        #    recognized as `HirTypeKind.Optional(_)` before checking `= None`.
+        var type_ = HirType(kind: HirTypeKind.Any, span: p.span)
+        var type_is_optional = false
+        var type_is_error = false
+        if p.has_type_:
+            # The parser backfills a typed receiver with the bare impl owner;
+            # like the impl header it names the owner, so arity does not apply.
+            val previous_impl_header_owner = self.nominal_impl_header_owner
+            if declared_receiver.is_some() and parser_type_kind_named_name(p.type_.kind) != "" and parser_type_kind_named_args(p.type_.kind).len() == 0:
+                self.nominal_impl_header_owner = true
+            type_ = self.lower_type(p.type_)
+            self.nominal_impl_header_owner = previous_impl_header_owner
+            if val bound_receiver = declared_receiver:
+                type_ = self.receiver_with_impl_arguments(type_, bound_receiver)
+            match type_.kind:
+                case HirTypeKind.Optional(_): type_is_optional = true
+                case HirTypeKind.Error: type_is_error = true
+                case _: ()
         if p.has_default and p.has_type_:
             val default_is_none = match p.default.kind:
                 case ExprKind.Ident(n): n == "None"
                 case _: false
-            # Discriminant probe, not `case TypeKind.Optional(_)` (seed
-            # pattern hazard: variant-vs-struct name collision).
-            if default_is_none and not (parser_type_kind_is_optional(p.type_.kind) or parser_type_kind_named_name(p.type_.kind) == "Option"):
+            if default_is_none and not type_is_optional and not type_is_error and not (parser_type_kind_is_optional(p.type_.kind) or parser_type_kind_named_name(p.type_.kind) == "Option"):
                 self.error("parameter `{p.name}` defaults to None but is not declared optional (`T?`)", p.span)
         # An unannotated fn parameter (`fn format_table_row(cells, widths, ...)`,
         # std.common.format_utils) is dynamic in the seed/interpreter. Lowering
         # it to Infer left an inference variable nothing resolves, and MIR
         # failed closed on it ([infer-arm]). Publish `any`, the erased type.
         var optional_param_none = false
-        if p.has_default and p.has_type_:
-            if parser_type_kind_is_optional(p.type_.kind) or parser_type_kind_named_name(p.type_.kind) == "Option":
-                match p.default.kind:
-                    case ExprKind.Ident(ident_name):
-                        optional_param_none = ident_name == "None"
-                    case _: ()
+        if p.has_default and p.has_type_ and type_is_optional:
+            match p.default.kind:
+                case ExprKind.Ident(ident_name):
+                    optional_param_none = ident_name == "None"
+                case _: ()
         val default_ = if p.has_default and optional_param_none:
             var none_sym = self.symbols.lookup_or_invalid("None")
             var needs_builtin_none = not none_sym.is_valid()
@@ -49,8 +67,7 @@ impl HirLowering:
             if none_sym.is_valid() and self.symbols.symbols.has(none_sym.id):
                 val resolved_none: HirSymbol = self.symbols.symbols[none_sym.id]
                 if resolved_none.kind == SymbolKind.Function and (resolved_none.defining_module ?? "") == "":
-                    val opt_param_type = self.lower_type(p.type_)
-                    HirExpr(kind: HirExprKind.NamedVar(none_sym, "None"), has_type_: true, type_: opt_param_type, span: p.default.span)
+                    HirExpr(kind: HirExprKind.NamedVar(none_sym, "None"), has_type_: true, type_: type_, span: p.default.span)
                 else:
                     self.lower_hir_expr(p.default)
             else:
@@ -67,17 +84,8 @@ impl HirLowering:
         # An explicit untyped `self`/`me` keeps its existing receiver typing.
         # An untyped param WITH a default (`fn f(x = 5)`) takes the default's
         # type, as in the seed; `any` only when that cannot be settled.
-        var type_ = HirType(kind: HirTypeKind.Any, span: p.span)
         if p.has_type_:
-            # The parser backfills a typed receiver with the bare impl owner;
-            # like the impl header it names the owner, so arity does not apply.
-            val previous_impl_header_owner = self.nominal_impl_header_owner
-            if declared_receiver.is_some() and parser_type_kind_named_name(p.type_.kind) != "" and parser_type_kind_named_args(p.type_.kind).len() == 0:
-                self.nominal_impl_header_owner = true
-            type_ = self.lower_type(p.type_)
-            self.nominal_impl_header_owner = previous_impl_header_owner
-            if val bound_receiver = declared_receiver:
-                type_ = self.receiver_with_impl_arguments(type_, bound_receiver)
+            ()
         elif val receiver_type = declared_receiver:
             # Supplied only for the first unannotated receiver of its owning
             # nonstatic method. Never manufacture a type for an unknown owner.

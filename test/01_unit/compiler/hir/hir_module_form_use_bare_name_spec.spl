@@ -125,3 +125,40 @@ describe "Pure-Simple HIR + MIR binds bare names from module-form use":
                             load_globals = load_globals + 1
                         case _: ()
         expect(load_globals).to_equal(0)
+
+    it "prefers a same-directory sibling over lib.<name> across both surface and import resolution":
+        val log = Logger(level: 0)
+        val lib_math_path = "src/lib/math.spl"
+        val lib_math_name = "lib.math"
+        val lib_math_src = "pub fn lib_only_fn() -> i64:\n    1\n"
+        val sib_math_path = "app/calc/math.spl"
+        val sib_math_name = "app.calc.math"
+        val sib_math_src = "pub fn sibling_calc_fn() -> i64:\n    7\n"
+        val main_path = "app/calc/main.spl"
+        val main_name = "app.calc.main"
+        val main_src = "use math\n\nfn main() -> i64:\n    sibling_calc_fn()\n"
+
+        val lib_ast = parse_full_frontend(lib_math_src, lib_math_path, lib_math_name, log)
+        val sib_ast = parse_full_frontend(sib_math_src, sib_math_path, sib_math_name, log)
+        val main_ast = parse_full_frontend(main_src, main_path, main_name, log)
+        var modules: Dict<text, Module> = {}
+        modules[lib_math_name] = lib_ast
+        modules[sib_math_name] = sib_ast
+        modules[main_name] = main_ast
+        val sources = [
+            SourceFile(path: lib_math_path, content: lib_math_src, module_name: lib_math_name),
+            SourceFile(path: sib_math_path, content: sib_math_src, module_name: sib_math_name),
+            SourceFile(path: main_path, content: main_src, module_name: main_name)
+        ]
+        val surfaces_res = module_surfaces_from_test_modules(modules, sources)
+        expect(surfaces_res.is_ok()).to_equal(true)
+        val surfaces = surfaces_res.unwrap()
+
+        var main_lowering = hirlowering_for_module(main_name, surfaces)
+        main_lowering.module_filename = main_path
+        val main_hir = main_lowering.lower_module(main_ast)
+        expect(main_lowering.errors.len()).to_equal(0)
+
+        val resolved_sym = main_hir.symbols.lookup_or_invalid("sibling_calc_fn")
+        expect(resolved_sym.is_valid()).to_equal(true)
+        expect(main_hir.symbols.symbol_defining_module_scalar_raw(resolved_sym.id)).to_equal(sib_math_name)

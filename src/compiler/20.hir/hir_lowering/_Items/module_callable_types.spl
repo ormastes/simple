@@ -85,7 +85,11 @@ impl HirLowering:
         if field_type == nil:
             HirType(kind: HirTypeKind.Error, span: field.span)
         else:
-            self.lower_type(field_type)
+            val saved_written_any_depth = self.written_any_unsafe_depth
+            self.written_any_unsafe_depth = saved_written_any_depth + 1
+            val lowered = self.lower_type(field_type)
+            self.written_any_unsafe_depth = saved_written_any_depth
+            lowered
 
     me prescan_composite_field_types(name: text, fields: [ParserField], type_params: [ParserTypeParam]):
         """Register parser struct/class fields before function lowering."""
@@ -166,6 +170,8 @@ impl HirLowering:
         # instantiate `Poll<T>` from the receiver's arguments.
         if type_params.len() == 0:
             return
+        val saved_written_any_depth = self.written_any_unsafe_depth
+        self.written_any_unsafe_depth = saved_written_any_depth + 1
         val saved_parameters = self.prescan_type_parameters
         self.prescan_type_parameters = {}
         self.symbols.push_scope(ScopeKind.Class)
@@ -193,6 +199,7 @@ impl HirLowering:
         self.current_method_self_type = saved_self_type
         self.symbols.pop_scope()
         self.prescan_type_parameters = saved_parameters
+        self.written_any_unsafe_depth = saved_written_any_depth
 
     # Nested-field-access support (native --entry path bug, see
     # struct_field_types_by_name doc comment in types.spl): record this
@@ -1049,7 +1056,11 @@ impl HirLowering:
             if not param.has_type_ and param.has_default:
                 return nil
         if fn_decl.has_return_type:
-            if self.lower_type(fn_decl.return_type).kind == HirTypeKind.Unit:
+            val saved_written_any_depth = self.written_any_unsafe_depth
+            self.written_any_unsafe_depth = saved_written_any_depth + 1
+            val ret_is_unit = self.lower_type(fn_decl.return_type).kind == HirTypeKind.Unit
+            self.written_any_unsafe_depth = saved_written_any_depth
+            if ret_is_unit:
                 return nil
         val fn_params: [Param] = fn_decl.params
         val scan: ReturnScan = self.scan_ast_block_for_returns(fn_decl.body, fn_params)
