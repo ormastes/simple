@@ -1,6 +1,6 @@
 # HTTP and SSH capability manifests are not wired to production owners
 
-Status: open
+Status: verification-pending
 
 `doc/04_architecture/simpleos_complete_os_hardening.md:194` requires each server
 adapter to consume `ProtocolCapabilityManifestV1` and permits advertisement
@@ -24,3 +24,18 @@ their owners remain unavailable.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 SimpleOS release/admission/artifact-blocked item per in-file status; requires the SimpleOS target-artifact pipeline and owner lanes this Windows seed lane cannot run. No change from this lane.
+## 2026-11-22 status: verification-pending
+
+The factories and publishers already exist (`41c8518bb24`):
+`simpleos_server_protocol_capabilities.spl`,
+`HttpServer.protocol_capability_manifests()` (per-generation live TCP probe +
+worker H1 evidence), and `SshDaemon.consume_protocol_probe_handle`
+(one-shot, generation-bound auth+channel handle; SFTP passed as owner-unready).
+Remaining gap closed here: HTTP limits/timeouts were contract defaults, not the
+configured owner. `simpleos_http_capability_manifests_configured` +
+`SimpleosHttpConfiguredBoundsV1` now project `ServerConfig.max_connections`,
+`client_max_body_size`, read/write/idle/drain timeouts; non-positive values fail
+validation. Specs add: config derivation, fail-closed bounds, H3/QUIC/
+WebTransport/WebSocket never projected, SFTP absent without its VFS owner.
+WebSocket stays unadvertised until a reachable dispatch owner exists.
+Pending: live H1/H2/SSH evidence on a SimpleOS target (QEMU + board).

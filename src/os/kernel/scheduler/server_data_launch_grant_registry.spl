@@ -589,28 +589,51 @@ pub(package) fn server_data_launch_grant_commit_cleanup_v1(
         return ServerDataLaunchGrantCleanupMutationStatusV1.Indeterminate
     ServerDataLaunchGrantCleanupMutationStatusV1.Applied
 
-pub(package) fn server_data_launch_grant_revoke_task_lifecycle_v1(
+pub enum ServerDataLaunchGrantLifecycleRevokeStatusV1:
+    """Exact lifecycle-revoke outcome; callers must not collapse these."""
+    Applied
+    AlreadyAbsent
+    Retry
+    Quarantined
+    InvalidIdentity
+    Indeterminate
+
+pub fn server_data_launch_grant_revoke_task_lifecycle_status_v1(
     task_id: u64, lifecycle_generation: u64
-) -> bool:
-    if task_id == 0u64 or lifecycle_generation == 0u64 or
-        not _server_data_launch_grant_lock_v1():
-        return false
+) -> ServerDataLaunchGrantLifecycleRevokeStatusV1:
+    if task_id == 0u64 or lifecycle_generation == 0u64:
+        return ServerDataLaunchGrantLifecycleRevokeStatusV1.InvalidIdentity
+    if not _server_data_launch_grant_lock_v1():
+        return ServerDataLaunchGrantLifecycleRevokeStatusV1.Retry
     val index = _server_data_launch_grant_task_index_v1(
         task_id, lifecycle_generation)
     if index < 0:
-        # Already revoked or not applicable is an idempotent terminal absence.
-        return _server_data_launch_grant_unlock_v1()
+        # Absence is reported as its own outcome, never as Applied.
+        if not _server_data_launch_grant_unlock_v1():
+            return ServerDataLaunchGrantLifecycleRevokeStatusV1.Indeterminate
+        return ServerDataLaunchGrantLifecycleRevokeStatusV1.AlreadyAbsent
     val slot = _server_data_launch_grant_registry_v1.slots[index]
     val next = server_data_launch_grant_protocol_transition_v1(
         slot.state, ServerDataLaunchGrantProtocolEventV1.RevokeLifecycle)
     if next == nil:
         # Quarantined rows remain tombstones and block identity reuse.
         _ = _server_data_launch_grant_unlock_v1()
-        return false
+        return ServerDataLaunchGrantLifecycleRevokeStatusV1.Quarantined
     val generation = slot.generation
     _server_data_launch_grant_registry_v1.slots[index] =
         _server_data_launch_grant_empty_slot_v1(generation)
-    _server_data_launch_grant_unlock_v1()
+    if not _server_data_launch_grant_unlock_v1():
+        return ServerDataLaunchGrantLifecycleRevokeStatusV1.Indeterminate
+    ServerDataLaunchGrantLifecycleRevokeStatusV1.Applied
+
+pub(package) fn server_data_launch_grant_revoke_task_lifecycle_v1(
+    task_id: u64, lifecycle_generation: u64
+) -> bool:
+    """Legacy Boolean projection (unchanged semantics: absence is true)."""
+    val status = server_data_launch_grant_revoke_task_lifecycle_status_v1(
+        task_id, lifecycle_generation)
+    status == ServerDataLaunchGrantLifecycleRevokeStatusV1.Applied or
+        status == ServerDataLaunchGrantLifecycleRevokeStatusV1.AlreadyAbsent
 
 fn _server_data_launch_startup_evidence_consume_for_task_v1(
     task_id: u64, lifecycle_generation: u64, exec_generation: u64
