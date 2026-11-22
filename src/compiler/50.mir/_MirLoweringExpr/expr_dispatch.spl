@@ -1,6 +1,6 @@
 use compiler.mir.mir_instruction_support.{MirCallOrigin}
 use compiler.types.units.unit_ops.{unit_op_is_unit}
-use compiler.frontend.core.unit_constraint.{unit_constraint_find, unit_constraint_min_text, unit_constraint_max_text, unit_constraint_predicate, unit_constraint_violation_message}
+use compiler.frontend.core.unit_constraint.{unit_constraint_find, unit_constraint_min_text, unit_constraint_max_text, unit_constraint_predicate, unit_constraint_violation_message, unit_radix_bound_bits}
 use std.common.text.{parse_i64}
 # Explicit payload owners survive import-surface projection.
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
@@ -5767,30 +5767,30 @@ impl MirLowering:
         b2.switch_to_block(ok_block)
         self.builder = b2
 
-    me emit_unit_div_remainder_check(left_local: LocalId, right_local: LocalId):
+    me emit_unit_div_remainder_check(left_local: LocalId, right_local: LocalId) -> LocalId:
         """Native twin of the interpreter's `unit_value_binop` refusal: integer
-        unit division that leaves a remainder aborts with SPL-UNIT-002 instead
-        of silently truncating the ratio."""
+        unit division by zero, or one that leaves a remainder, aborts with
+        SPL-UNIT-002 instead of trapping or silently truncating the ratio.
+        Returns the i64 quotient of the two payload words."""
         val left_word = self.unit_div_payload_word(left_local)
         val right_word = self.unit_div_payload_word(right_local)
         var b = self.builder
-        # Zero divisor: skip the remainder (Rem by zero is a hardware trap) and
-        # let the division's own divide-by-zero handling report it.
+        # Zero divisor: panic with SPL-UNIT-002 before the remainder (Rem and
+        # Div by zero are a hardware trap natively, SIGFPE/SIGILL).
         val zero_div = b.emit_const_int(0)
         val div_is_zero = b.emit_binop(MirBinOp.Eq, mir_operand_copy(right_word), mir_operand_copy(zero_div), MirType.bool())
-        val check_block = b.new_block(Some("unit_div_nonzero"))
-        val join_block = b.new_block(Some("unit_div_check_done"))
-        b.terminate_if(mir_operand_copy(div_is_zero), join_block, check_block)
-        b.switch_to_block(check_block)
+        self.builder = b
+        self.emit_unit_panic_if(div_is_zero, "unit_div_zero", "SPL-UNIT-002: unit division by zero")
+        b = self.builder
         val remainder = b.emit_binop(MirBinOp.Rem, mir_operand_copy(left_word), mir_operand_copy(right_word), MirType.i64())
         val zero = b.emit_const_int(0)
         val inexact = b.emit_binop(MirBinOp.Ne, mir_operand_copy(remainder), mir_operand_copy(zero), MirType.bool())
         self.builder = b
         self.emit_unit_panic_if(inexact, "unit_div_inexact", "SPL-UNIT-002: integer unit division is inexact (remainder is not zero); use an exact ratio")
-        var b_join = self.builder
-        b_join.terminate_goto(join_block)
-        b_join.switch_to_block(join_block)
-        self.builder = b_join
+        var b_div = self.builder
+        val quotient = b_div.emit_binop(MirBinOp.Div, mir_operand_copy(left_word), mir_operand_copy(right_word), MirType.i64())
+        self.builder = b_div
+        quotient
 
     me hir_expr_is_pure_name_v1(e: HirExpr) -> bool:
         match e.kind:
@@ -6019,7 +6019,13 @@ impl MirLowering:
                     right_local = erased_pair.1
                     if op == HirBinOp.Div and (self.local_is_declared_unit(left_local) or self.local_is_declared_unit(right_local)):
                         if not self.local_is_float(left_local) and not self.local_is_float(right_local):
-                            self.emit_unit_div_remainder_check(left_local, right_local)
+                            val unit_quotient = self.emit_unit_div_remainder_check(left_local, right_local)
+                            # Same-unit ratio is a dimensionless i64: return
+                            # it directly (a plain `unit Dist: i64` has no
+                            # __div__, so the record-operator path below
+                            # would reject it).
+                            if self.local_is_declared_unit(left_local) and self.local_is_declared_unit(right_local):
+                                return unit_quotient
                 else:
                     val eq_negate = match op:
                         case NotEq: true
@@ -9740,4 +9746,8 @@ impl MirLowering:
             self.emit_if_chain_dispatch(scrut_local, int_cases, default_body_value, default_binding, expected_type)
 
 fn unit_range_bound_i64(bound_text: text) -> i64:
+    var radix_ok: [bool] = [false]
+    val bits = unit_radix_bound_bits(bound_text, radix_ok)
+    if radix_ok[0]:
+        return bits
     parse_i64(bound_text)
