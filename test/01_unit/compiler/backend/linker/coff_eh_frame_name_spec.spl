@@ -1,0 +1,90 @@
+use std.spec.*
+use compiler.backend.linker.coff.coff_link.{CoffLinkRequest, coff_link_i386}
+
+# i686 mingw objects (LLVM codegen, libunwind) carry DWARF CFI in `.eh_frame`,
+# a 9-byte name stored in the object string table as `/4`. A PE section header
+# name field is 8 bytes; lld folds the output section to `.eh_fram`.
+
+fn _eh_u16(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result.push(((value >> 8) & 0xff) as u8)
+
+fn _eh_u32(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result = result.push(((value >> 8) & 0xff) as u8)
+    result = result.push(((value >> 16) & 0xff) as u8)
+    result.push(((value >> 24) & 0xff) as u8)
+
+fn _eh_text(bytes: [u8], value: text, width: i64) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < width:
+        result = result.push((if i < value.len(): value.byte_at(i) else: 0) as u8)
+        i = i + 1
+    result
+
+fn _eh_section(bytes: [u8], name: text, raw: i64, flags: i64) -> [u8]:
+    var result = _eh_text(bytes, name, 8)
+    result = _eh_u32(result, 0)
+    result = _eh_u32(result, 0)
+    result = _eh_u32(result, 4)
+    result = _eh_u32(result, raw)
+    result = _eh_u32(result, 0)
+    result = _eh_u32(result, 0)
+    result = _eh_u16(result, 0)
+    result = _eh_u16(result, 0)
+    _eh_u32(result, flags)
+
+# .text (`ret` + pad) and `.eh_frame` (4 zero bytes, a CFI terminator),
+# one external `__start` symbol, string table holding `.eh_frame`.
+fn _eh_object() -> [u8]:
+    var bytes: [u8] = []
+    bytes = _eh_u16(bytes, 0x14c)
+    bytes = _eh_u16(bytes, 2)
+    bytes = _eh_u32(bytes, 0)
+    bytes = _eh_u32(bytes, 108)
+    bytes = _eh_u32(bytes, 1)
+    bytes = _eh_u16(bytes, 0)
+    bytes = _eh_u16(bytes, 0)
+    bytes = _eh_section(bytes, ".text", 100, 0x60000020)
+    bytes = _eh_section(bytes, "/4", 104, 0x40300040)
+    bytes = _eh_u32(bytes, 0x909090c3)
+    bytes = _eh_u32(bytes, 0)
+    bytes = _eh_text(bytes, "__start", 8)
+    bytes = _eh_u32(bytes, 0)
+    bytes = _eh_u16(bytes, 1)
+    bytes = _eh_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    bytes = _eh_u32(bytes, 14)
+    _eh_text(bytes, ".eh_frame", 10)
+
+fn _eh_read_u16(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8)
+
+fn _eh_read_u32(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8) |
+        ((bytes[offset + 2] as i64) << 16) | ((bytes[offset + 3] as i64) << 24)
+
+fn _eh_has_section(image: [u8], name: text) -> bool:
+    val pe_offset = _eh_read_u32(image, 0x3c)
+    val count = _eh_read_u16(image, pe_offset + 6)
+    val optional_size = _eh_read_u16(image, pe_offset + 20)
+    var i: i64 = 0
+    while i < count:
+        val header = pe_offset + 24 + optional_size + i * 40
+        var same = true
+        var j: i64 = 0
+        while j < 8:
+            val want: i64 = if j < name.len(): name.byte_at(j) as i64 else: 0
+            if (image[header + j] as i64) != want: same = false
+            j = j + 1
+        if same: return true
+        i = i + 1
+    false
+
+describe "COFF long DWARF section names":
+    it "links an i386 object with .eh_frame and names the output .eh_fram like lld":
+        val result = coff_link_i386(CoffLinkRequest(
+            objects: [_eh_object()], archives: [], entry: "__start"))
+        expect(result.is_ok()).to_equal(true)
+        expect(_eh_has_section(result.unwrap(), ".eh_fram")).to_equal(true)
