@@ -61,6 +61,28 @@ log="$out/logs/$plat/stage2-compiler-tests.log"
 mkdir -p "$root" "$(dirname "$log")"
 [ ! -e "$root/stage2-compiler-tests.env" ] ||
   { echo "admit-stage2: receipt already published: $root/stage2-compiler-tests.env" >&2; exit 0; }
+# W23 (2026-11-22): this lane and Stage 3 were admitted concurrently on a
+# 64 GiB host (caps 24 GiB + 44 GiB) and both died under memory exhaustion.
+# Stage 3 already refuses concurrent heavy work; apply the SAME scan and gate
+# (scripts/check/lib/bootstrap-stage3/memory-admission.shs, this script's own
+# copy) before anything is superseded, so a busy-host refusal (exit 75) is
+# never recorded as a compiler rejection. There is no override, as for Stage 3:
+# run heavy lanes one at a time. SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT is the
+# shared test fixture hook. The gate's QEMU budget term gets the published cap,
+# else the largest row cap (62914560 KiB, the conservative bound).
+BOOTSTRAP_STAGE3_FACADE_PATH=$(CDPATH= cd -- "$admit_dir/../check/lib" && pwd -P)/bootstrap-stage3-provenance.shs
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "${BOOTSTRAP_STAGE3_FACADE_PATH%/*}/bootstrap-stage3/memory-admission.shs"
+admit_scan="$root/concurrency-scan.env"
+: >"$admit_scan"
+bootstrap_stage3_memory_append_processes "$admit_scan" ||
+  { echo "admit-stage2: concurrent heavy work scan unavailable; refusing (exit 75); see $admit_scan" >&2; exit 75; }
+admit_scan_status=0
+bootstrap_stage3_memory_require_exclusive_heavy "$admit_scan" \
+  "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-62914560}" || admit_scan_status=$?
+[ "$admit_scan_status" -eq 0 ] ||
+  { echo "admit-stage2: refused: concurrent heavy work on this host (Stage 3 / native-build / bootstrap peer; same gate as Stage 3 memory admission), status $admit_scan_status; run heavy lanes one at a time; see $admit_scan" >&2; exit 75; }
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 if [ -e "$root/rejection.env" ]; then
   mv "$root/rejection.env" "$root/rejection.env.superseded-$stamp"
@@ -173,10 +195,14 @@ if [ "$status" -eq 0 ]; then
     "$out" "$plat" "$compiler" "$sha" "$src" "$work/summary.env" "$log" || status=95
 fi
 if [ "$status" -ne 0 ]; then
+  # W21 (2026-11-22): name an RSS-cap kill (campaign or row watchdog) in the
+  # verdict; exit 88 alone was read as a hang / job-terminate timeout.
+  kill_cause=$(sed -n -E 's/.*((rss|phys-footprint)-cap-exceeded cap_kib=[0-9a-z]+ peak_kib=[0-9a-z]+).*/\1/p' "$log" 2>/dev/null | tail -n 1) || kill_cause=
   {
     echo "schema=simple-bootstrap-stage2-compiler-tests-v1"
     echo "status=rejected"
     echo "reason=stage2-compiler-tests-failed"
+    [ -z "$kill_cause" ] || echo "kill_cause=$kill_cause"
     echo "candidate=$compiler"
     echo "candidate_sha256=$sha"
     echo "strategy=$strategy"
@@ -185,7 +211,7 @@ if [ "$status" -ne 0 ]; then
     echo "verification_log=$log"
   } >"$root/rejection.env"
   chmod 400 "$root/rejection.env"
-  echo "admit-stage2: REJECTED (status=$status); log: $log" >&2
+  echo "admit-stage2: REJECTED (status=$status${kill_cause:+, $kill_cause: killed by the process-tree RSS cap, not a timeout}); log: $log" >&2
   exit 1
 fi
 echo "admit-stage2: ADMITTED $compiler ($sha); receipt: $root/stage2-compiler-tests.env"
