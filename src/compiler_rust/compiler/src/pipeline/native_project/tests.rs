@@ -7355,6 +7355,18 @@ fn test_mingw_i686_decorated_crt_symbols_are_never_stub_candidates() {
 }
 
 #[test]
+fn test_mingw_i686_stdcall_decorated_win32_symbols_are_never_stub_candidates() {
+    let target = simple_common::target::Target::parse("i686-pc-windows-gnu").unwrap();
+    for symbol in ["_Sleep@4", "_GetLastError@0", "_CreateProcessW@40", "_CloseHandle@4"] {
+        assert!(
+            super::tools::is_system_symbol_for_target(symbol, target),
+            "{symbol} is a kernel32 stdcall import, never a generated stub"
+        );
+    }
+    assert!(!super::tools::is_system_symbol_for_target("_app_fn@4", target));
+}
+
+#[test]
 fn test_msvc_win32_and_ucrt_imports_are_never_stub_candidates() {
     let target = simple_common::target::Target::parse("x86_64-pc-windows-msvc").unwrap();
     for symbol in [

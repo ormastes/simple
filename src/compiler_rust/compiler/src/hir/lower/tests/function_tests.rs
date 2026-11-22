@@ -320,3 +320,20 @@ fn small_dynamic_module_init_stays_single_function() {
         (0..5).map(|i| format!("g_{i}")).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn extern_abi_system_attribute_is_recorded_only_for_tagged_externs() {
+    let module = parse_and_lower(
+        "@abi(\"system\")\nextern fn Sleep(ms: u32)\n@abi(\"system\")\nextern fn GetLastError() -> u32\nextern fn plain_c(x: i32) -> i32\nfn test() -> i64:\n    0\n",
+    )
+    .unwrap();
+
+    let sleep = module.extern_system_abi.get("Sleep").expect("Sleep recorded");
+    assert_eq!(sleep.0, vec![TypeId::U32]);
+    assert_eq!(sleep.1, TypeId::VOID);
+    let last = module.extern_system_abi.get("GetLastError").expect("GetLastError recorded");
+    assert!(last.0.is_empty());
+    assert_eq!(last.1, TypeId::U32);
+    assert!(!module.extern_system_abi.contains_key("plain_c"));
+    assert!(module.extern_param_types.contains_key("plain_c"));
+}

@@ -69,6 +69,9 @@ pub struct LlvmBackend {
     pub(super) use_map: std::collections::HashMap<String, String>,
     /// Return types for functions declared in the current MIR module.
     pub(super) function_return_types: RefCell<std::collections::HashMap<String, crate::hir::TypeId>>,
+    /// `@abi("system")` externs declared stdcall on Windows x86: name -> return TypeId
+    /// (used to pick sext/zext when widening narrow integer returns).
+    pub(super) system_abi_rets: RefCell<std::collections::HashMap<String, crate::hir::TypeId>>,
     /// Module symbol prefix, used to name the per-module `__module_init_<prefix>`
     /// function so the linker's init-caller aggregator can discover it. Mirrors
     /// the cranelift backend's `module_prefix` (common_backend.rs).
@@ -361,6 +364,7 @@ impl LlvmBackend {
                 data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
                 use_map: std::collections::HashMap::new(),
                 function_return_types: RefCell::new(std::collections::HashMap::new()),
+                system_abi_rets: RefCell::new(std::collections::HashMap::new()),
                 module_prefix: None,
             })
         }
@@ -459,8 +463,92 @@ impl LlvmBackend {
         }
     }
 
+    /// True when `@abi("system")` means stdcall: Windows on 32-bit x86.
+    /// Everywhere else `system` is plain C and nothing changes.
+    pub(super) fn system_abi_is_stdcall(&self) -> bool {
+        self.target.os == TargetOS::Windows && self.target.arch == TargetArch::X86
+    }
+
+    /// Widen a narrow integer return of a stdcall `@abi("system")` extern to
+    /// the runtime word (sext for signed Simple types, zext otherwise). Any
+    /// other callee/value is returned unchanged.
     #[cfg(feature = "llvm")]
-    fn declare_globals(&self, module_ir: &MirModule) {
+    pub(super) fn widen_system_abi_return(
+        &self,
+        callee: &inkwell::values::FunctionValue<'static>,
+        ret_val: inkwell::values::BasicValueEnum<'static>,
+        builder: &Builder<'static>,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        use crate::hir::TypeId as T;
+        let inkwell::values::BasicValueEnum::IntValue(iv) = ret_val else {
+            return Ok(ret_val);
+        };
+        let word = self.runtime_int_type();
+        if callee.get_call_conventions() != 64 || iv.get_type().get_bit_width() >= word.get_bit_width() {
+            return Ok(ret_val);
+        }
+        let name = callee.get_name().to_string_lossy().into_owned();
+        let signed = matches!(
+            self.system_abi_rets.borrow().get(&name),
+            Some(&T::I8) | Some(&T::I16) | Some(&T::I32)
+        );
+        let wide = if signed {
+            builder.build_int_s_extend(iv, word, "sys_ret_sext")
+        } else {
+            builder.build_int_z_extend(iv, word, "sys_ret_zext")
+        }
+        .map_err(|e| crate::error::factory::llvm_build_failed("widen system abi return", &e))?;
+        Ok(wide.into())
+    }
+
+    /// Declare every `@abi("system")` extern up front with its real parameter
+    /// and return types and the LLVM `X86_StdCall` convention (64), so the COFF
+    /// x86 mangler emits `_Name@N`. Must run before anything can `add_function`
+    /// the same name (LLVM would rename ours to `Name.1`). No-op off Windows x86.
+    #[cfg(feature = "llvm")]
+    pub(super) fn declare_system_abi_externs(&self, module_ir: &MirModule) {
+        use inkwell::types::{BasicMetadataTypeEnum, BasicType};
+        use crate::hir::TypeId as T;
+        if !self.system_abi_is_stdcall() || module_ir.extern_system_abi.is_empty() {
+            return;
+        }
+        let m = self.module.borrow();
+        let Some(m) = m.as_ref() else { return };
+        let ctx = self.context_ref();
+        let to_basic = |ty: T| -> inkwell::types::BasicTypeEnum<'static> {
+            match ty {
+                T::BOOL | T::I8 | T::U8 => ctx.i8_type().into(),
+                T::I16 | T::U16 => ctx.i16_type().into(),
+                T::I32 | T::U32 | T::CHAR => ctx.i32_type().into(),
+                T::I64 | T::U64 => ctx.i64_type().into(),
+                T::F32 => ctx.f32_type().into(),
+                T::F64 => ctx.f64_type().into(),
+                _ => ctx.ptr_type(inkwell::AddressSpace::default()).into(),
+            }
+        };
+        let mut names: Vec<&String> = module_ir.extern_system_abi.keys().collect();
+        names.sort();
+        for name in names {
+            if m.get_function(name).is_some() {
+                continue;
+            }
+            let (params, ret) = &module_ir.extern_system_abi[name];
+            let param_types: Vec<BasicMetadataTypeEnum> = params.iter().map(|p| to_basic(*p).into()).collect();
+            let fn_type = if *ret == T::VOID {
+                ctx.void_type().fn_type(&param_types, false)
+            } else {
+                to_basic(*ret).fn_type(&param_types, false)
+            };
+            let f = m.add_function(name, fn_type, None);
+            f.set_linkage(inkwell::module::Linkage::External);
+            // LLVMX86_StdCall
+            f.set_call_conventions(64);
+            self.system_abi_rets.borrow_mut().insert(name.clone(), *ret);
+        }
+    }
+
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn declare_globals(&self, module_ir: &MirModule) {
         let m = self.module.borrow();
         let Some(m) = m.as_ref() else {
             return;
@@ -2051,6 +2139,8 @@ impl NativeBackend for LlvmBackend {
             }
         }
 
+        #[cfg(feature = "llvm")]
+        self.declare_system_abi_externs(module);
         #[cfg(feature = "llvm")]
         self.declare_globals(module);
         #[cfg(feature = "llvm")]

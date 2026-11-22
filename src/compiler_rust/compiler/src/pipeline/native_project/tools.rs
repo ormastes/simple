@@ -4235,6 +4235,11 @@ pub(crate) fn is_system_symbol(sym: &str) -> bool {
 pub(crate) fn is_system_symbol_for_target(sym: &str, target: simple_common::target::Target) -> bool {
     if target.os == simple_common::target::TargetOS::Windows {
         let name = sym.strip_prefix('_').unwrap_or(sym);
+        // i686 stdcall decoration: `_Name@N` (N = arg bytes).
+        let name = match name.rsplit_once('@') {
+            Some((base, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => base,
+            _ => name,
+        };
         return is_windows_system_name(sym)
             || is_windows_system_name(name)
             || is_windows_system_prefix(sym)

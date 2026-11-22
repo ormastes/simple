@@ -341,6 +341,9 @@ pub struct MirModule {
     /// These are globals that hold function pointers and need special handling
     /// in the codegen to initialize with the function's import address.
     pub extern_fn_names: std::collections::HashSet<String>,
+    /// `@abi("system")` externs: name -> (param types, return type). Declared
+    /// stdcall with real types by the LLVM backend on Windows x86 only.
+    pub extern_system_abi: std::collections::HashMap<String, (Vec<crate::hir::TypeId>, crate::hir::TypeId)>,
     /// Vtable impl records: one entry per `impl Trait for Struct` in this module.
     /// Each entry is (struct_type_id, struct_name, vtable_symbol,
     /// method_fns_by_slot, export_symbol).
@@ -386,6 +389,7 @@ impl MirModule {
             dynamic_init_globals: std::collections::HashSet::new(),
             local_globals: std::collections::HashSet::new(),
             extern_fn_names: std::collections::HashSet::new(),
+            extern_system_abi: std::collections::HashMap::new(),
             vtable_impls: Vec::new(),
             type_value_kinds: std::collections::HashMap::new(),
         }

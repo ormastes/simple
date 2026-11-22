@@ -2999,9 +2999,14 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("call", &e))?
         };
 
+        // A call-site convention that differs from the callee's miscompiles
+        // silently (stdcall `@abi("system")` externs declare cc 64).
+        call_site.set_call_convention(called_func.get_call_conventions());
+
         // Store result if there's a destination
         if let Some(d) = dest {
             if let Some(ret_val) = call_site.try_as_basic_value().basic() {
+                let ret_val = self.widen_system_abi_return(&called_func, ret_val, builder)?;
                 // rt_pool_join returns the task's raw i64 result (runtime_pool.c
                 // rt_pool_join; a boxed closure's tagged return is unboxed by the
                 // pool, PR #5507). A `<< 3` here turned `7` into `56`. No tagging
@@ -3561,6 +3566,71 @@ mod tests {
             .find(|l| l.contains("call") && l.contains("rt_println_str"))
             .unwrap_or_else(|| panic!("no rt_println_str call: {ir}"));
         assert!(call.contains("(ptr %"), "expanded text ptr must be passed as ptr: {call}\n{ir}");
+        backend.verify().unwrap();
+    }
+
+    fn system_abi_module() -> (MirModule, MirFunction) {
+        use crate::mir::CallTarget;
+        let mut func = MirFunction::new("main".to_string(), T::I64, Visibility::Public);
+        func.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(0), value: 10 });
+        func.blocks[0].instructions.push(MirInst::Call {
+            dest: None,
+            target: CallTarget::from_name("Sleep"),
+            args: vec![VReg(0)],
+        });
+        func.blocks[0].instructions.push(MirInst::Call {
+            dest: Some(VReg(1)),
+            target: CallTarget::from_name("GetLastError"),
+            args: vec![],
+        });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+        let mut mir = MirModule::new();
+        mir.functions = vec![func.clone()];
+        for name in ["Sleep", "GetLastError"] {
+            mir.extern_fn_names.insert(name.to_string());
+        }
+        mir.extern_system_abi.insert("Sleep".to_string(), (vec![T::U32], T::VOID));
+        mir.extern_system_abi.insert("GetLastError".to_string(), (vec![], T::U32));
+        (mir, func)
+    }
+
+    #[test]
+    fn system_abi_extern_is_stdcall_with_real_types_on_i686_windows() {
+        let backend = LlvmBackend::new(Target::parse("i686-pc-windows-gnu").unwrap()).unwrap();
+        backend.create_module("system_abi_i686").unwrap();
+        let (mir, func) = system_abi_module();
+        backend.declare_system_abi_externs(&mir);
+        backend.declare_globals(&mir);
+        backend.compile_function(&func).unwrap();
+        let ir = backend.get_ir().unwrap();
+
+        assert!(ir.contains("declare x86_stdcallcc void @Sleep(i32)"), "{ir}");
+        assert!(ir.contains("declare x86_stdcallcc i32 @GetLastError()"), "{ir}");
+        let sleep_call = ir
+            .lines()
+            .find(|l| l.contains("call") && l.contains("@Sleep("))
+            .unwrap_or_else(|| panic!("no Sleep call: {ir}"));
+        assert!(sleep_call.contains("x86_stdcallcc"), "{sleep_call}");
+        let err_call = ir
+            .lines()
+            .find(|l| l.contains("call") && l.contains("@GetLastError("))
+            .unwrap_or_else(|| panic!("no GetLastError call: {ir}"));
+        assert!(err_call.contains("x86_stdcallcc i32 @GetLastError()"), "{err_call}");
+        assert!(ir.contains("zext i32"), "u32 return must be zero-extended: {ir}");
+        assert!(!ir.contains("@Sleep.1") && !ir.contains("@GetLastError.1"), "{ir}");
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn system_abi_extern_is_plain_c_on_x86_64_windows() {
+        let backend = LlvmBackend::new(Target::parse("x86_64-pc-windows-gnu").unwrap()).unwrap();
+        backend.create_module("system_abi_x64").unwrap();
+        let (mir, func) = system_abi_module();
+        backend.declare_system_abi_externs(&mir);
+        backend.declare_globals(&mir);
+        backend.compile_function(&func).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(!ir.contains("x86_stdcallcc"), "no-op off x86 windows: {ir}");
         backend.verify().unwrap();
     }
 
