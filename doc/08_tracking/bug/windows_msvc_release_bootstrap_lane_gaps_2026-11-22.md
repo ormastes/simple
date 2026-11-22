@@ -101,7 +101,9 @@ failure`, yet `native-build` exited 0 with no executable, so the producer's
 llc-noop retry never ran and the Stage 2 run aborted with
 `planner-build-produced-no-executable`. Fixed here: that signature retries once
 on the phase route (`SIMPLE_FILE_WORKERS=0`). Still open: `native-build` must not
-exit 0 after a MIR shard aggregate failure that produced no artifact.
+exit 0 after a MIR shard aggregate failure that produced no artifact. This is now
+fixed at route level, with verification pending:
+`native_build_exit0_no_artifact_after_pool_refusal_2026-11-22.md`.
 
 ## 10. Memory pressure source on this host (not a compiler leak)
 
