@@ -26,6 +26,18 @@ under 200.
 | م ر ح               | letter-spacing:2px  | 36.734375   | -          |
 | مرحبا abc           | (none)              | 63.921875   | -          |
 | مرحبا abc           | letter-spacing:2px  | 71.921875   | -          |
+| مرحباabc            | (none)              | 62.796875   | 20..79     |
+| مرحباabc            | letter-spacing:2px  | 68.796875   | 20..83     |
+| مرحبا123            | (none) / 2px        | 63.703125   | 21..79     |
+| مرحبا 123 / 123مرحبا / مرحبا!x / abcمرحبا | 2px | +2 / +0 / +2 / +6 | - |
+
+(2026-11-23 rows: same oracle plus `@font-face` Noto Sans Arabic from
+`assets/fonts/google-fonts/ofl/notosansarabic/`.) Digits and punctuation take
+the script of the Arabic next to them and so take no gap; U+0020 always does.
+A shaped run with no space is painted from its glyph xs, which must carry the
+gaps too. At device scale 4 (`--force-device-scale-factor=4`) Chrome paints
+`مرحباabc` at ink x 84..315, and 84..331 with 2px (+16 device px); `مرحبا123`
+85..317 both (Simple returns no frame for that page at k=4, a separate defect).
 
 Chrome adds letter-spacing to every unit EXCEPT Arabic-script letters, joined
 or isolated (the 13-character sentence grows by 2 = its one space; `م ر ح`
@@ -47,6 +59,9 @@ Traceability: REQ-WEB-TEXT-SPACING-001 — letter-spacing and word-spacing apply
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir
@@ -88,6 +103,25 @@ fn _ink_x(txt: text, style: text) -> [i32]:
         var x = 0
         while x < W:
             val p = px[y * W + x]
+            if _chan(p, 16u32) < 200 or _chan(p, 8u32) < 200 or _chan(p, 0u32) < 200:
+                if x < x0: x0 = x
+                if x > x1: x1 = x
+            x = x + 1
+        y = y + 1
+    [x0, x1]
+
+fn _ink_x4(txt: text, style: text) -> [i32]:
+    val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_page(txt, style), W, H, 4, "cpu_simd")
+    val w = W * 4
+    var x0 = w
+    var x1 = -1
+    if px.len() != (w * H * 4) as i64:
+        return [-2, -2]
+    var y = 0
+    while y < H * 4:
+        var x = 0
+        while x < w:
+            val p = px[y * w + x]
             if _chan(p, 16u32) < 200 or _chan(p, 8u32) < 200 or _chan(p, 0u32) < 200:
                 if x < x0: x0 = x
                 if x > x1: x1 = x
@@ -142,3 +176,28 @@ describe "letter-spacing and word-spacing on shaped runs against Chrome 159":
         step("Chrome مرحبا abc 63.92 -> 71.92 (+8 = space, a, b, c)")
         val d = _run("مرحبا abc", "letter-spacing:2px")[0] - _run("مرحبا abc", "")[0]
         expect(d).to_equal(8)
+
+    it "AC-7: a shaped run with no space moves its Latin glyphs by their gaps":
+        step("Chrome مرحباabc 62.80 -> 68.80 (+6 = a, b, c); ink x0 20 -> 20, x1 79 -> 83 (gaps after a and b)")
+        val b = _ink_x("مرحباabc", "")
+        val s = _ink_x("مرحباabc", "letter-spacing:2px")
+        expect(_run("مرحباabc", "")[1]).to_equal(1)
+        expect(_run("مرحباabc", "letter-spacing:2px")[0] - _run("مرحباabc", "")[0]).to_equal(6)
+        expect(s[0]).to_equal(b[0])
+        expect(s[1] - b[1]).to_equal(4)
+
+    it "AC-8: digits and punctuation next to Arabic take no letter-spacing":
+        step("Chrome +0 مرحبا123, +2 مرحبا 123 (space only), +0 123مرحبا, +2 مرحبا!x (x only), +6 abcمرحبا; مرحبا123 ink 21..79 both")
+        expect(_run("مرحبا123", "letter-spacing:2px")[0] - _run("مرحبا123", "")[0]).to_equal(0)
+        expect(_run("مرحبا 123", "letter-spacing:2px")[0] - _run("مرحبا 123", "")[0]).to_equal(2)
+        expect(_run("123مرحبا", "letter-spacing:2px")[0] - _run("123مرحبا", "")[0]).to_equal(0)
+        expect(_run("مرحبا!x", "letter-spacing:2px")[0] - _run("مرحبا!x", "")[0]).to_equal(2)
+        expect(_run("abcمرحبا", "letter-spacing:2px")[0] - _run("abcمرحبا", "")[0]).to_equal(6)
+        expect(_ink_x("مرحبا123", "letter-spacing:2px")).to_equal(_ink_x("مرحبا123", ""))
+
+    it "AC-9: at device scale 4 the shaped run's Latin glyphs move by k x their gaps":
+        step("Chrome k=4 مرحباabc ink 84..315 -> 84..331 at 2px (+16 device px)")
+        val b = _ink_x4("مرحباabc", "")
+        val s = _ink_x4("مرحباabc", "letter-spacing:2px")
+        expect(s[0]).to_equal(b[0])
+        expect(s[1] - b[1]).to_equal(16)
