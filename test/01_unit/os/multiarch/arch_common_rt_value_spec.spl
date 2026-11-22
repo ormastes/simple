@@ -1,0 +1,65 @@
+# Executes the shared 64-bit RuntimeValue helpers in
+# src/os/kernel/arch/common/rt_value.spl (tagging, boxing, truthy,
+# any_to_int, heap layout by word size, enum/Option checks).
+use std.spec
+use os.kernel.arch.common.rt_value.{rv_tag, rv_box_int, rv_unbox_int, rv_is_int, rv_is_heap, rv_is_float, rv_is_special, rv_box_heap, rv_heap_addr, rv_box_bool, rv_nil, rv_true, rv_false, rv_truthy, rv_f64_bits_to_int, rv_any_to_int_scalar, rv_heap_addr_valid, rv_array_items_offset, rv_array_item_addr, rv_map_keys_offset, rv_map_values_offset, rv_enum_id_offset, rv_enum_disc_offset, rv_enum_payload_offset, rv_enum_is_variant}
+
+describe "arch common rt_value":
+    it "boxes and unboxes ints as v << 3":
+        expect(rv_box_int(5)).to_equal(40)
+        expect(rv_unbox_int(40)).to_equal(5)
+        expect(rv_unbox_int(rv_box_int(-7))).to_equal(-7)
+        expect(rv_is_int(rv_box_int(3))).to_equal(1)
+        expect(rv_tag(rv_box_int(3))).to_equal(0)
+
+    it "encodes heap, nil and bool specials":
+        expect(rv_box_heap(4096)).to_equal(4097)
+        expect(rv_heap_addr(4097)).to_equal(4096)
+        expect(rv_is_heap(4097)).to_equal(1)
+        expect(rv_nil()).to_equal(3)
+        expect(rv_true()).to_equal(11)
+        expect(rv_false()).to_equal(19)
+        expect(rv_box_bool(1)).to_equal(11)
+        expect(rv_box_bool(0)).to_equal(19)
+        expect(rv_is_special(19)).to_equal(1)
+        expect(rv_is_float(2)).to_equal(1)
+
+    it "computes truthiness":
+        expect(rv_truthy(11)).to_equal(1)
+        expect(rv_truthy(19)).to_equal(0)
+        expect(rv_truthy(3)).to_equal(0)
+        expect(rv_truthy(rv_box_int(0))).to_equal(0)
+        expect(rv_truthy(rv_box_int(-1))).to_equal(1)
+        expect(rv_truthy(4097)).to_equal(1)
+        expect(rv_truthy(1)).to_equal(0)
+        # 1.0 = 0x3FF0000000000000, masked float tag 2
+        expect(rv_truthy(0x3FF0000000000002)).to_equal(1)
+        # -0.0 sign bit only
+        expect(rv_truthy(-9223372036854775808 + 2)).to_equal(0)
+
+    it "truncates f64 bits toward zero":
+        expect(rv_f64_bits_to_int(0x4059000000000000)).to_equal(100)
+        expect(rv_f64_bits_to_int(0xC004000000000000)).to_equal(-2)
+        expect(rv_f64_bits_to_int(0x3FE0000000000000)).to_equal(0)
+
+    it "converts scalars with any_to_int":
+        expect(rv_any_to_int_scalar(rv_box_int(42))).to_equal(42)
+        expect(rv_any_to_int_scalar(0x4059000000000002)).to_equal(100)
+        expect(rv_any_to_int_scalar(4097)).to_equal(4097)
+
+    it "lays out heap objects by word size":
+        expect(rv_heap_addr_valid(4096)).to_equal(1)
+        expect(rv_heap_addr_valid(8)).to_equal(0)
+        expect(rv_array_items_offset()).to_equal(16)
+        expect(rv_array_item_addr(4096, 2)).to_equal(4128)
+        expect(rv_map_keys_offset()).to_equal(16)
+        expect(rv_map_values_offset(4)).to_equal(20)
+        expect(rv_map_values_offset(8)).to_equal(24)
+        expect(rv_enum_id_offset()).to_equal(8)
+        expect(rv_enum_disc_offset()).to_equal(12)
+        expect(rv_enum_payload_offset()).to_equal(16)
+
+    it "checks enum variants by id and discriminant":
+        expect(rv_enum_is_variant(1, 5, 1, 5)).to_equal(1)
+        expect(rv_enum_is_variant(1, 5, 1, 6)).to_equal(0)
+        expect(rv_enum_is_variant(2, 5, 1, 5)).to_equal(0)
