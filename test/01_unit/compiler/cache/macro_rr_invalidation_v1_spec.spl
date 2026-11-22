@@ -48,6 +48,7 @@ use compiler.driver.cache.module_artifacts_v1.{module_artifacts_emit_v1}
 use compiler.common.cache.reverse_reference_key.{ReverseReferenceKeyV1}
 use compiler.driver.cache.reverse_reference_receipt.{ReverseReferenceProjectionV1,
     ReverseReferenceGenerationReceiptV1, ReverseReferenceReceiptReadV1,
+    REVERSE_REFERENCE_FAMILIES_V2,
     reverse_reference_receipt_encode_v1, reverse_reference_receipt_decode_v1}
 use compiler.common.cache_contract.macro_rr_contract_v1.{MacroRrFactV1,
     MacroRrChangedSubjectsV1}
@@ -70,16 +71,27 @@ fn provider_text_v1() -> text:
     "macro twice(x: Int) -> (returns result: Int):\n    emit result:\n        x + x\n"
 
 fn user_text_v1() -> text:
-    "fn first() -> i64:\n    twice!(1)\n"
+    "use provider.{{twice}}\n\nfn first() -> i64:\n    twice!(1)\n"
 
 fn receipt_from_facts_v1(facts: [MacroRrFactV1], schema: i64) -> ReverseReferenceGenerationReceiptV1:
     var projections: [ReverseReferenceProjectionV1] = []
+    var covered: [text] = []
     for fact in facts:
+        if not covered.contains(fact.family):
+            covered.push(fact.family)
         projections.push(ReverseReferenceProjectionV1(key: ReverseReferenceKeyV1(
             registry_kind: "semantic", owner_generation: "owner-g1", root_generation: "root-g1",
             subject_identity: fact.subject, projection_kind: fact.family,
             projection_digest: sha256_text(fact.evidence), schema_version: 1),
             consumer_identity: fact.consumer))
+    if schema == 2:
+        for family in REVERSE_REFERENCE_FAMILIES_V2:
+            if not covered.contains(family):
+                projections.push(ReverseReferenceProjectionV1(key: ReverseReferenceKeyV1(
+                    registry_kind: "semantic", owner_generation: "owner-g1", root_generation: "root-g1",
+                    subject_identity: "@family-complete", projection_kind: family,
+                    projection_digest: sha256_text("complete:" + family), schema_version: 1),
+                    consumer_identity: "@generation"))
     ReverseReferenceGenerationReceiptV1(schema_version: schema, owner_generation: "owner-g1",
         root_generation: "root-g1", projections: projections)
 
@@ -149,7 +161,7 @@ describe "macro RR affected sources":
         val affected = macro_rr_affected_sources_v1(fx.receipt, changed, inventory,
             [fx.provider, fx.user])
         expect(affected.exact).to_equal(true)
-        expect(affected.reason).to_equal("")
+        expect(affected.reason).to_equal("ok")
         expect(affected.sources).to_equal([fx.user])
         expect(affected.sources.contains(fx.provider)).to_equal(false)
 
