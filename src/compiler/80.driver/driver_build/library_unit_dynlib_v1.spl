@@ -549,7 +549,7 @@ fn _dynlib_resolve_object_paths_v1(dir: text, unit: text, objects: [text]) -> Re
     Ok(paths)
 
 fn _dynlib_rsp_quote_v1(path: text) -> text:
-    val escaped = path.replace("\\", "\\\\").replace("\"", "\\\"")
+    val escaped = path.replace("\\", "/").replace("\"", "\\\"")
     "\"{escaped}\""
 
 fn _dynlib_target_triple_flag_v1(target_or_os: text) -> text:
@@ -695,7 +695,19 @@ pub fn library_unit_dynlib_complete_v1(req: LibraryUnitDynlibCompleteRequestV1) 
 fn _dynlib_prune_unit_key_dirs_v1(cache_root: text, unit_name: text, current_key: text) -> i64:
     if cache_root == "" or unit_name == "" or current_key.byte_len() != 64:
         return 0
-    disk_bound_keep_newest_dirs("{cache_root}/units/{unit_name}", current_key, "", 64, 2, 0)
+    val raw_keep = (env_get("SIMPLE_UNIT_CACHE_KEEP") ?? "").trim()
+    val keep = if raw_keep == "":
+        4
+    else:
+        val parsed_keep = raw_keep.to_i64() ?? 4
+        if parsed_keep > 0: parsed_keep else: 4
+    val raw_age = (env_get("SIMPLE_UNIT_CACHE_MIN_AGE_S") ?? "").trim()
+    val min_age_s = if raw_age == "":
+        3600
+    else:
+        val parsed_age = raw_age.to_i64() ?? 3600
+        if parsed_age >= 0: parsed_age else: 3600
+    disk_bound_keep_newest_dirs("{cache_root}/units/{unit_name}", current_key, "", 64, keep, min_age_s)
 
 fn _dynlib_stage_beside_output_v1(output_path: text, artifacts: [LibraryUnitDynlibArtifactV1],
         target_or_os: text) -> Result<[text], text>:
@@ -971,20 +983,25 @@ fn _dynlib_transitive_dep_set_v1(plan: [LibraryUnitPlanEntryV1], direct_deps: [t
         frontier = next
     out
 
-fn _dynlib_collect_direct_objects_v1(rows: [LibraryUnitClosureModuleRowV1]) -> Result<([text], [text]), text>:
+fn _dynlib_collect_direct_objects_v1(rows: [LibraryUnitClosureModuleRowV1]) -> Result<Option<[text]>, text>:
     var direct_paths: [text] = []
-    var receipt_names: [text] = []
-    var idx = 0
-    while idx < rows.len():
-        val row = rows[idx]
+    var seen_leaves: {text: bool} = {}
+    var has_duplicate_leaf = false
+    for row in rows:
         if row.object_path != "":
             if not file_exists(row.object_path):
                 return Err("missing module object '{row.object_path}' for {row.module_name}")
-            val safe_mod = row.module_name.replace("/", "_").replace(".", "_").replace(":", "_")
-            direct_paths.push(row.object_path)
-            receipt_names.push("{idx}_{safe_mod}.o")
-        idx = idx + 1
-    Ok((direct_paths, receipt_names))
+            val norm = row.object_path.replace("\\", "/")
+            val slash = norm.rfind("/")
+            val leaf = if slash >= 0: norm.substring(slash + 1) else: norm
+            if seen_leaves.contains_key(leaf):
+                has_duplicate_leaf = true
+            else:
+                seen_leaves[leaf] = true
+            direct_paths.push(norm)
+    if has_duplicate_leaf:
+        return Ok(None)
+    Ok(Some(direct_paths))
 
 fn _dynlib_package_primitive_static_archive_v1(
         root: text,
@@ -1027,13 +1044,23 @@ fn _dynlib_package_primitive_static_archive_v1(
         else:
             val _pruned_hit = _dynlib_prune_unit_key_dirs_v1(cache_root, prim_unit, prim_key)
             return Ok(prim_archive_path)
-    val (obj_paths, _receipt_names) = match _dynlib_collect_direct_objects_v1(primitive_rows):
-        case Ok(pair): pair
-        case Err(e): return Err("unit '{prim_unit}': {e}")
-    if obj_paths.len() == 0:
-        return Err("unit '{prim_unit}': no primitive objects to archive")
     if not dir_create_all(prim_dir):
         return Err("unit '{prim_unit}': cannot create directory {prim_dir}")
+    val obj_paths = match _dynlib_collect_direct_objects_v1(primitive_rows):
+        case Ok(Some(direct_objs)):
+            direct_objs
+        case Ok(None):
+            val staged_names = match _dynlib_stage_objects_into_unit_dir_v1(prim_dir, primitive_rows):
+                case Ok(ns): ns
+                case Err(e): return Err("unit '{prim_unit}': {e}")
+            var staged_paths: [text] = []
+            for sn in staged_names:
+                staged_paths.push("{prim_dir}/objects/{sn}")
+            staged_paths
+        case Err(e):
+            return Err("unit '{prim_unit}': {e}")
+    if obj_paths.len() == 0:
+        return Err("unit '{prim_unit}': no primitive objects to archive")
     val ar_env = (env_get("SIMPLE_AR") ?? "").trim()
     val archiver = if ar_env != "": ar_env else: find_archive_portable()
     if archiver == "":
@@ -1112,13 +1139,27 @@ fn _dynlib_build_or_reuse_unit_artifact_v1(
             pass
     if unit_rows.len() == 0:
         return Ok((iface_built.source_digest, iface_built.iface.digest, None))
-    val (direct_objects, receipt_names) = match _dynlib_collect_direct_objects_v1(unit_rows):
-        case Ok(pair): pair
+    val direct_opt = match _dynlib_collect_direct_objects_v1(unit_rows):
+        case Ok(opt): opt
         case Err(e): return Err("unit '{unit_name}': {e}")
-    if direct_objects.len() == 0:
-        return Ok((iface_built.source_digest, iface_built.iface.digest, None))
+    match direct_opt:
+        case Some(check_empty):
+            if check_empty.len() == 0:
+                return Ok((iface_built.source_digest, iface_built.iface.digest, None))
+        case None:
+            pass
     if not dir_create_all(unit_dir):
         return Err("unit '{unit_name}': cannot create directory {unit_dir}")
+    val link_objects = match direct_opt:
+        case Some(direct_objs):
+            direct_objs
+        case None:
+            val staged_names = match _dynlib_stage_objects_into_unit_dir_v1(unit_dir, unit_rows):
+                case Ok(ns): ns
+                case Err(e): return Err("unit '{unit_name}': {e}")
+            if staged_names.len() == 0:
+                return Ok((iface_built.source_digest, iface_built.iface.digest, None))
+            staged_names
     val iface_path = library_unit_iface_path_v1(unit_dir)
     match library_unit_iface_write_v1(iface_path, iface_built.iface):
         case Ok(_): pass
@@ -1128,7 +1169,7 @@ fn _dynlib_build_or_reuse_unit_artifact_v1(
         case Ok(_): pass
         case Err(e): return Err(e)
     val written = match library_unit_dynlib_write_v1(LibraryUnitDynlibWriteRequestV1(
-            dir: unit_dir, unit: unit_name, objects: direct_objects,
+            dir: unit_dir, unit: unit_name, objects: link_objects,
             dep_dynlibs: dep_dynlibs, target_or_os: req.target_or_os)):
         case Ok(w): w
         case Err(e): return Err(e)
@@ -1140,7 +1181,7 @@ fn _dynlib_build_or_reuse_unit_artifact_v1(
         source_digest: iface_built.source_digest,
         iface_digest: iface_built.iface.digest,
         deps: dep_ifaces,
-        objects: receipt_names,
+        objects: link_objects,
         verdict: "ok",
         failed_modules: [],
         artifact_kind: LIBRARY_UNIT_ARTIFACT_DYNLIB_V1,

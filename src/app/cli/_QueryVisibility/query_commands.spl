@@ -863,10 +863,87 @@ fn leading_space_count(line: text) -> i64:
         count = count + 1
     count
 
+fn _skip_decl_ws_bytes(s: text, start_pos: i64, n: i64) -> i64:
+    var p = start_pos
+    while p < n:
+        val b = s.byte_at(p) as i64
+        if b != 32 and b != 9:
+            return p
+        p = p + 1
+    p
+
+fn _is_decl_pre_modifier(word: text) -> bool:
+    word == "static" or word == "async" or word == "extern" or word == "kernel"
+
+fn _is_decl_keyword(word: text) -> bool:
+    word == "fn" or word == "me" or word == "val" or word == "var" or
+        word == "class" or word == "struct" or word == "enum" or
+        word == "trait" or word == "type" or word == "unit" or word == "actor"
+
+fn _find_bounded_ident_byte(line: text, symbol: text, from_byte: i64) -> i64:
+    val sym_len = symbol.byte_len()
+    val line_len = line.byte_len()
+    if sym_len == 0 or from_byte < 0 or from_byte + sym_len > line_len:
+        return -1
+    val first_b = symbol.byte_at(0) as i64
+    var pos = from_byte
+    while pos + sym_len <= line_len:
+        if (line.byte_at(pos) as i64) == first_b:
+            var matches = true
+            var j = 1
+            while j < sym_len:
+                if (line.byte_at(pos + j) as i64) != (symbol.byte_at(j) as i64):
+                    matches = false
+                    break
+                j = j + 1
+            if matches:
+                val left_ok = if pos == 0: true else: not is_ident_byte(line.byte_at(pos - 1) as i64)
+                val right_pos = pos + sym_len
+                val right_ok = if right_pos >= line_len: true else: not is_ident_byte(line.byte_at(right_pos) as i64)
+                if left_ok and right_ok:
+                    return pos
+        pos = pos + 1
+    -1
+
 fn declaration_name_column(trimmed: text, name: text) -> i64:
-    if name.byte_len() == 0 or trimmed.byte_len() == 0:
+    val n = trimmed.byte_len()
+    if name.byte_len() == 0 or n == 0:
         return 0
-    val idx = trimmed.index_of(name)
+    var pos = _skip_decl_ws_bytes(trimmed, 0, n)
+    while pos < n and is_ident_byte(trimmed.byte_at(pos) as i64):
+        var word_end = pos + 1
+        while word_end < n and is_ident_byte(trimmed.byte_at(word_end) as i64):
+            word_end = word_end + 1
+        val word = trimmed.substring(pos, word_end)
+        if word == "pub" and word_end < n and (trimmed.byte_at(word_end) as i64) == 40:
+            var close = word_end + 1
+            while close < n and (trimmed.byte_at(close) as i64) != 41:
+                close = close + 1
+            if close < n:
+                pos = _skip_decl_ws_bytes(trimmed, close + 1, n)
+                continue
+            break
+        val followed_by_ws = word_end < n and
+            ((trimmed.byte_at(word_end) as i64) == 32 or (trimmed.byte_at(word_end) as i64) == 9)
+        if not followed_by_ws:
+            break
+        val next_pos = _skip_decl_ws_bytes(trimmed, word_end, n)
+        if word == "pub" or word == "pri" or word == "priv" or _is_decl_pre_modifier(word):
+            pos = next_pos
+            continue
+        if word == "const":
+            pos = next_pos
+            if next_pos + 3 <= n and trimmed.substring(next_pos, next_pos + 2) == "fn" and
+                    ((trimmed.byte_at(next_pos + 2) as i64) == 32 or (trimmed.byte_at(next_pos + 2) as i64) == 9):
+                continue
+            break
+        if _is_decl_keyword(word):
+            pos = next_pos
+            break
+        break
+    var idx = _find_bounded_ident_byte(trimmed, name, pos)
+    if idx < 0:
+        idx = _find_bounded_ident_byte(trimmed, name, 0)
     if idx <= 0:
         return 0
     query_text_len(trimmed.substring(0, idx))
@@ -877,7 +954,11 @@ fn query_text_len(value: text) -> i64:
     var i = 0
     while i < n:
         val b = value.byte_at(i) as i64
-        if b < 128 or b >= 192:
+        if b < 128:
+            count = count + 1
+        elif b >= 240:
+            count = count + 2
+        elif b >= 192:
             count = count + 1
         i = i + 1
     count

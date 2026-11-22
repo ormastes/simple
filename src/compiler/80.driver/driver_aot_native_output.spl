@@ -1056,35 +1056,97 @@ fn driver_native_frozen_source_table(
     table
 
 var _driver_frozen_table_key_v1: text = ""
-var _driver_frozen_table_v1: {text: (text, text)} = {}
+var _driver_frozen_table_len_v1: i64 = 0
+var _driver_frozen_table_index_v1: {text: (i64, text, text)} = {}
+
+fn _driver_frozen_arrays_signature_v1(
+    source_paths: [text], source_identities: [text], source_module_names: [text]
+) -> text:
+    val n = source_module_names.len()
+    if n <= 0:
+        return ""
+    if source_paths.len() != n or source_identities.len() != n:
+        return ""
+    sha256_text(
+        source_module_names.join("\n") + "\n===\n" +
+        source_paths.join("\n") + "\n===\n" +
+        source_identities.join("\n")
+    )
 
 fn _driver_frozen_context_signature_v1(ctx: CompileContext) -> text:
-    val n = ctx.source_module_names_owner.len()
-    if ctx.native_sources_fingerprint == "" or n <= 0:
-        return ""
-    if ctx.source_paths_owner.len() != n or ctx.source_identities_owner.len() != n:
-        return ""
-    "{ctx.native_sources_fingerprint}|{n}|{ctx.source_module_names_owner[0]}|{ctx.source_module_names_owner[n - 1]}|{ctx.source_identities_owner[0]}|{ctx.source_identities_owner[n - 1]}"
+    _driver_frozen_arrays_signature_v1(
+        ctx.source_paths_owner, ctx.source_identities_owner, ctx.source_module_names_owner)
+
+fn _driver_build_frozen_source_index_v1(
+    source_paths: [text], source_identities: [text], source_module_names: [text]
+) -> {text: (i64, text, text)}:
+    var index_table: {text: (i64, text, text)} = {}
+    val count = source_module_names.len()
+    if source_paths.len() != source_identities.len() or source_paths.len() != count:
+        return index_table
+    var module_counts: {text: i64} = {}
+    var path_counts: {text: i64} = {}
+    var idx = 0
+    while idx < count:
+        val m = source_module_names[idx]
+        val p = source_paths[idx]
+        module_counts[m] = (module_counts[m] ?? 0) + 1
+        if p != "":
+            path_counts[p] = (path_counts[p] ?? 0) + 1
+        idx = idx + 1
+    var build_idx = 0
+    while build_idx < count:
+        val m = source_module_names[build_idx]
+        val p = source_paths[build_idx]
+        if p != "" and (module_counts[m] ?? 0) == 1 and (path_counts[p] ?? 0) == 1:
+            index_table[m] = (build_idx, p, source_identities[build_idx])
+        build_idx = build_idx + 1
+    index_table
 
 fn _driver_install_frozen_source_table_v1(ctx: CompileContext):
     val sig = _driver_frozen_context_signature_v1(ctx)
     if sig == "":
         _driver_frozen_table_key_v1 = ""
-        _driver_frozen_table_v1 = {}
+        _driver_frozen_table_len_v1 = 0
+        _driver_frozen_table_index_v1 = {}
         return
-    if sig == _driver_frozen_table_key_v1:
+    if sig == _driver_frozen_table_key_v1 and
+            ctx.source_module_names_owner.len() == _driver_frozen_table_len_v1:
         return
-    _driver_frozen_table_v1 = driver_native_frozen_source_table(
+    _driver_frozen_table_index_v1 = _driver_build_frozen_source_index_v1(
         ctx.source_paths_owner, ctx.source_identities_owner, ctx.source_module_names_owner)
+    _driver_frozen_table_len_v1 = ctx.source_module_names_owner.len()
     _driver_frozen_table_key_v1 = sig
 
+fn _driver_frozen_cached_entry_v1(ctx: CompileContext, module_name: text) -> (text, text):
+    val n = ctx.source_module_names_owner.len()
+    if n <= 0 or ctx.source_paths_owner.len() != n or ctx.source_identities_owner.len() != n:
+        return ("", "")
+    if _driver_frozen_table_key_v1 == "" or _driver_frozen_table_len_v1 != n:
+        _driver_install_frozen_source_table_v1(ctx)
+    if _driver_frozen_table_index_v1.contains_key(module_name):
+        val (idx, cached_path, cached_identity) = _driver_frozen_table_index_v1[module_name]
+        if idx >= 0 and idx < n and
+                ctx.source_module_names_owner[idx] == module_name and
+                ctx.source_paths_owner[idx] == cached_path and
+                ctx.source_identities_owner[idx] == cached_identity:
+            return (cached_path, cached_identity)
+        _driver_install_frozen_source_table_v1(ctx)
+        if _driver_frozen_table_index_v1.contains_key(module_name):
+            val (_, refreshed_path, refreshed_identity) = _driver_frozen_table_index_v1[module_name]
+            return (refreshed_path, refreshed_identity)
+        return ("", "")
+    if _driver_frozen_context_signature_v1(ctx) != _driver_frozen_table_key_v1:
+        _driver_install_frozen_source_table_v1(ctx)
+        if _driver_frozen_table_index_v1.contains_key(module_name):
+            val (_, refreshed_path, refreshed_identity) = _driver_frozen_table_index_v1[module_name]
+            return (refreshed_path, refreshed_identity)
+    ("", "")
+
 fn driver_native_module_cache_source(ctx: CompileContext, module_name: text) -> text:
-    val sig = _driver_frozen_context_signature_v1(ctx)
-    if sig != "" and sig == _driver_frozen_table_key_v1:
-        if _driver_frozen_table_v1.contains_key(module_name):
-            val (cached_path, _) = _driver_frozen_table_v1[module_name]
-            return cached_path
-        return ""
+    if _driver_frozen_table_key_v1 != "":
+        val (cached_path, _) = _driver_frozen_cached_entry_v1(ctx, module_name)
+        return cached_path
     val (path, _) = driver_native_frozen_source_lookup(
         ctx.source_paths_owner, ctx.source_identities_owner,
         ctx.source_module_names_owner, module_name)
@@ -1093,12 +1155,9 @@ fn driver_native_module_cache_source(ctx: CompileContext, module_name: text) -> 
 fn driver_native_module_source_identity(
     ctx: CompileContext, module_name: text
 ) -> text:
-    val sig = _driver_frozen_context_signature_v1(ctx)
-    if sig != "" and sig == _driver_frozen_table_key_v1:
-        if _driver_frozen_table_v1.contains_key(module_name):
-            val (_, cached_identity) = _driver_frozen_table_v1[module_name]
-            return cached_identity
-        return ""
+    if _driver_frozen_table_key_v1 != "":
+        val (_, cached_identity) = _driver_frozen_cached_entry_v1(ctx, module_name)
+        return cached_identity
     val (_, identity) = driver_native_frozen_source_lookup(
         ctx.source_paths_owner, ctx.source_identities_owner,
         ctx.source_module_names_owner, module_name)
