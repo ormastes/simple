@@ -51,7 +51,11 @@ ICD=${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}
 # the loader, e.g. VK2D_VULKAN_LINK=/usr/lib/aarch64-linux-gnu/libvulkan.so.1
 # (no unversioned libvulkan.so without the -dev package).
 VK_INCLUDE_DIR=${VK2D_VULKAN_INCLUDE_DIR:-/opt/homebrew/include}
-VK_LINK=${VK2D_VULKAN_LINK:-"-L/opt/homebrew/lib -lvulkan"}
+if [ "$(uname -s)" = Darwin ]; then
+    VK_LINK=${VK2D_VULKAN_LINK:-"-L/opt/homebrew/lib -Wl,-rpath,/opt/homebrew/lib -lvulkan"}
+else
+    VK_LINK=${VK2D_VULKAN_LINK:-"-L/opt/homebrew/lib -lvulkan"}
+fi
 
 fail() { echo "check-vulkan-2d-c-compare: $*" >&2; exit 1; }
 
@@ -640,7 +644,7 @@ else
             ''|*[!0-9]*|0) c_max_rss_bytes=unavailable ;;
         esac
     elif [ -x /usr/bin/time ] && /usr/bin/time -v true >/dev/null 2>&1; then
-        # GNU time (Linux): `-v` reports "Maximum resident set size (kbytes): N".
+        # GNU time (Linux): -v reports "Maximum resident set size (kbytes): N".
         (cd "$OUT_DIR" && /usr/bin/time -v env \
             VK_ICD_FILENAMES="$ICD" VK2D_SCENES="$BENCH_DIR/scenes.txt" \
             VK2D_DUMP_FB="$c_artifact" \
@@ -720,7 +724,7 @@ else
                 c_checksum=$c_checksum_candidate
                 c_bin_sha=$(hash_file "$c_bin")
                 c_artifact_sha=$(hash_file "$c_artifact")
-                # The binary-admission receipt this leg needs to reach `admitted`.
+                # The binary-admission receipt this leg needs to reach admitted.
                 # Written only here, i.e. only after every live-contract check
                 # above passed, and bound to the exact measured binary.
                 c_admission_sha=$(perf_compare_write_binary_admission \
@@ -769,7 +773,9 @@ else
     rm -f "$simple_artifact" "$simple_stdout_raw" "$simple_stderr_raw"
     set +e
     (cd "$ROOT" && SIMPLE_RUST_SEED_WARNING=0 SIMPLE_LIB=src \
-        VK_ICD_FILENAMES="$ICD" VK2D_W="$W" VK2D_H="$H" VK2D_RECTS="$RECTS" VK2D_FRAMES="$FRAMES" \
+        VK_ICD_FILENAMES="$ICD" \
+        DYLD_FALLBACK_LIBRARY_PATH="${DYLD_FALLBACK_LIBRARY_PATH:-/opt/homebrew/lib:/usr/local/lib}" \
+        VK2D_W="$W" VK2D_H="$H" VK2D_RECTS="$RECTS" VK2D_FRAMES="$FRAMES" \
         VK2D_WARMUPS="$WARMUPS" VK2D_READBACK=1 VK2D_DUMP_FB="$simple_artifact" \
         "$SIMPLE_BIN" run test/05_perf/bench/vulkan_2d_c/vk2d_bench.spl \
         >"$simple_stdout_raw" 2>"$simple_stderr_raw")
@@ -898,31 +904,31 @@ fi
 # Split rows for the --aggregate contract path.
 #
 # These MUST go through project_row, exactly as the --aggregate path does. A
-# plain `sed 's/^c_/c_/p'` copies consumer keys (c_status, c_reason, c_p95_ns)
+# plain sed copy includes consumer keys (c_status, c_reason, c_p95_ns)
 # into the row, and perf_admission_validate_projection rejects any key outside
 # its 21-name schema -- so the live path could only ever answer
-# `admission-invalid-left-row:unexpected-key-status`, a second unconditional
+# admission-invalid-left-row:unexpected-key-status, a second unconditional
 # skip stacked on top of Cause 1 of the recorded bug.
 LC_ALL=C grep '^c_' "$OUT_DIR/c.env.raw" > "$OUT_DIR/c.env"
 LC_ALL=C grep '^simple_' "$OUT_DIR/c.env.raw" > "$OUT_DIR/simple.env"
-# `c.env` / `simple.env` keep the consumer keys (status/reason/p95_ns) because
-# the `--aggregate` replay path reads them back out of the published row. The
+# c.env / simple.env keep the consumer keys (status/reason/p95_ns) because
+# the --aggregate replay path reads them back out of the published row. The
 # 21-key PROJECTION that admission actually validates is derived separately --
 # perf_admission_validate_projection rejects any key outside that schema, so
 # feeding it the full row could only ever answer
-# `admission-invalid-left-row:unexpected-key-status`, a second unconditional
+# admission-invalid-left-row:unexpected-key-status, a second unconditional
 # skip stacked on top of Cause 1 of the recorded bug.
 project_row "$OUT_DIR/c.env" c_ "$OUT_DIR/c.env.projected" || fail "malformed or inexact C row"
 project_row "$OUT_DIR/simple.env" simple_ "$OUT_DIR/simple.env.projected" || fail "malformed or inexact Simple row"
 
 # Per-leg admission, against STAGE paths.
 #
-# The durable rows above name the PUBLISHED paths (`$FINAL_RUN_DIR/...`), which
+# The durable rows above name the PUBLISHED paths ($FINAL_RUN_DIR/...), which
 # do not exist until perf_immutable_publish_run runs at the end of this script,
-# so hashing them here would answer `stale-binary` for a perfectly good binary.
+# so hashing them here would answer stale-binary for a perfectly good binary.
 # The admission rows below are byte-identical apart from those four path fields,
 # which name the staged files that are actually on disk right now. The published
-# rows stay authoritative for the `--aggregate` replay path, which re-validates
+# rows stay authoritative for the --aggregate replay path, which re-validates
 # the published copies.
 stage_row() {
     LC_ALL=C sed \

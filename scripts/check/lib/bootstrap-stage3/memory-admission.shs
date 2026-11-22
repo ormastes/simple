@@ -593,6 +593,49 @@ ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT:-}
         rm -f "$bootstrap_stage3_memory_process_tmp"
         return 1
     fi
+    bootstrap_stage3_memory_ancestors=$(awk -F'|' \
+        -v self_pid="$$" \
+        -v parent_pid="${PPID:-}" \
+        -v process_source="$bootstrap_stage3_memory_process_source" '
+        {
+            p = $1; pp = $2
+            if (p ~ /^[0-9]+$/ && pp ~ /^[0-9]+$/) {
+                ppid[p] = pp
+                seen[p] = 1
+            }
+        }
+        END {
+            out = "|"
+            allow_self = (process_source == "ps") || !(self_pid in seen) || \
+                (self_pid + 0 > 200) || (parent_pid != "" && ppid[self_pid] == parent_pid)
+            if (allow_self && self_pid ~ /^[0-9]+$/) {
+                out = out self_pid "|"
+                cur = self_pid
+                for (i = 0; i < 256; i++) {
+                    if (!(cur in seen)) break
+                    nxt = ppid[cur]
+                    if (nxt == "" || nxt == "0" || nxt == "1") break
+                    if (index(out, "|" nxt "|") > 0) break
+                    out = out nxt "|"
+                    cur = nxt
+                }
+            }
+            if (parent_pid ~ /^[0-9]+$/ && parent_pid != "0" && parent_pid != "1" && !(self_pid in seen)) {
+                if (index(out, "|" parent_pid "|") == 0) out = out parent_pid "|"
+                cur = parent_pid
+                for (i = 0; i < 256; i++) {
+                    if (!(cur in seen)) break
+                    nxt = ppid[cur]
+                    if (nxt == "" || nxt == "0" || nxt == "1") break
+                    if (index(out, "|" nxt "|") > 0) break
+                    out = out nxt "|"
+                    cur = nxt
+                }
+            }
+            print out
+        }
+    ' "$bootstrap_stage3_memory_process_tmp") || {
+        rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
     bootstrap_stage3_memory_process_count=0
     bootstrap_stage3_memory_bootstrap_count=0
     bootstrap_stage3_memory_native_count=0
@@ -627,6 +670,9 @@ ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT:-}
                 rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
             [ "$bootstrap_stage3_memory_kind" != none ] || continue
         else
+            case "$bootstrap_stage3_memory_ancestors" in
+                *"|$bootstrap_stage3_memory_pid|"*) continue ;;
+            esac
             case "$bootstrap_stage3_memory_cmd" in
             *qemu-system-*)
                 bootstrap_stage3_memory_kind=qemu ;;

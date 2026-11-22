@@ -344,7 +344,7 @@ class H1Client:
     # Create a one-shot connection.
     me get_connection(
         host: text, port: i64, is_tls: bool, deadline_ms: i64
-    ) -> Result<H1Connection>:
+    ) -> Result<H1Connection, BrowserError>:
         var conn = H1Connection.create(host, port, is_tls, self.logger)
         if is_tls:
             # The request path resolves once, then passes each numeric address
@@ -450,9 +450,11 @@ class H1Client:
                 val _ = tls_conn.close()
                 return Err(network_error("h1: incomplete TLS write for {conn.host}:{conn.port}"))
             val read_result = read_tls_response_bytes(tls_conn, deadline_ms)
-            val closed = tls_conn.close()
+            val close_failed = match tls_conn.close():
+                Ok(_): false
+                Err(_): true
             val read = read_result?
-            val raw_response = read.first
+            val raw_response = read.bytes
             if raw_response.len() == 0:
                 return Err(network_error("h1: TLS read returned no response for {conn.host}:{conn.port}"))
             # Many origins (www.google.com) end a `Connection: close`
@@ -462,7 +464,7 @@ class H1Client:
             # (Content-Length or chunked, both strictly validated by the
             # parser below); a close-delimited body without close_notify
             # could be truncated, so it is still refused.
-            val unclean_eof = read.second or closed.is_err()
+            val unclean_eof = read.unclean_eof or close_failed
             if unclean_eof and not h1_response_is_self_delimited(raw_response):
                 return Err(network_error(
                     "h1: TLS read failed or timed out for {conn.host}:{conn.port}"
@@ -545,7 +547,7 @@ fn h1_response_size_allowed(current_size: i64, incoming_size: i64) -> bool:
 fn h1_write_complete(written: i64, expected: i64) -> bool:
     expected >= 0 and written == expected
 
-fn read_tcp_response_bytes(fd: i64, deadline_ms: i64) -> Result<[u8]>:
+fn read_tcp_response_bytes(fd: i64, deadline_ms: i64) -> Result<[u8], BrowserError>:
     var bytes: [u8] = []
     while true:
         val remaining = h1_deadline_remaining_ms(
@@ -581,9 +583,13 @@ fn h1_response_is_self_delimited(raw: [u8]) -> bool:
 
 # Returns (bytes, unclean_eof): unclean_eof is true when the stream ended in a
 # read error after at least one byte arrived (see execute_tls_http).
+struct TlsResponseRead:
+    bytes: [u8]
+    unclean_eof: bool
+
 fn read_tls_response_bytes(
     conn: TlsConnection, deadline_ms: i64
-) -> Result<Pair<[u8], bool>>:
+) -> Result<TlsResponseRead, BrowserError>:
     var response: [u8] = []
     while true:
         val remaining = h1_deadline_remaining_ms(
@@ -598,7 +604,7 @@ fn read_tls_response_bytes(
             Ok(data): data
             Err(_):
                 if response.len() > 0:
-                    return Ok(Pair(response, true))
+                    return Ok(TlsResponseRead(bytes: response, unclean_eof: true))
                 return Err(network_error("h1: TLS read failed or timed out"))
         if chunk_bytes.len() == 0:
             if h1_deadline_remaining_ms(
@@ -609,7 +615,7 @@ fn read_tls_response_bytes(
         if not h1_response_size_allowed(response.len(), chunk_bytes.len()):
             return Err(network_error("h1: response exceeds 50 MiB limit"))
         response = response + chunk_bytes
-    Ok(Pair(response, false))
+    Ok(TlsResponseRead(bytes: response, unclean_eof: false))
 
 # Parse a raw HTTP/1.x response given as bytes.
 # NOTE: operates on [u8] rather than `text` for the header/body split and
@@ -737,7 +743,7 @@ fn h1_strip_representation_headers(raw_headers: text) -> text:
         out = out + line + "\r\n"
     out
 
-fn parse_status_line(line: text) -> Result<Pair<i64, text>>:
+fn parse_status_line(line: text) -> Result<Pair<i64, text>, BrowserError>:
     # Parse an HTTP/1.1 status line: "HTTP/1.1 200 OK"
     # Returns (status_code, status_text).
     if line.len() < 12:
@@ -791,7 +797,7 @@ fn parse_headers(raw: text) -> [Pair<text, text>]:
                 headers.push(p)
     headers
 
-fn h1_content_length(headers: [Pair<text, text>]) -> Result<i64>:
+fn h1_content_length(headers: [Pair<text, text>]) -> Result<i64, BrowserError>:
     var found = false
     var length: i64 = -1
     for header in headers:
@@ -817,7 +823,7 @@ fn h1_content_length(headers: [Pair<text, text>]) -> Result<i64>:
             length = parsed
     Ok(length)
 
-fn read_response_body_bytes(raw_body: [u8], headers: [Pair<text, text>]) -> Result<[u8]>:
+fn read_response_body_bytes(raw_body: [u8], headers: [Pair<text, text>]) -> Result<[u8], BrowserError>:
     # Read the response body based on headers.
     # Supports Content-Length and chunked transfer encoding. Both are BYTE
     # counts per RFC 7230, so this operates on [u8] directly (see the
@@ -861,7 +867,7 @@ fn h1_chunk_size_value(value: text) -> i64:
         i = i + 1
     result
 
-fn parse_chunked_body_bytes(raw: [u8]) -> Result<[u8]>:
+fn parse_chunked_body_bytes(raw: [u8]) -> Result<[u8], BrowserError>:
     # Decode a chunked transfer-encoded body.
     # Format:
     #   <chunk-size-hex>\r\n

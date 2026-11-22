@@ -1,0 +1,108 @@
+#!/bin/sh
+# Every name imported through the tier-less facade `use std.io_runtime.{...}`
+# must be exported (or declared pub) by src/lib/io_runtime.spl.
+#
+# Tier-less `std.io_runtime` resolves to the ROOT facade src/lib/io_runtime.spl:
+# the module resolver tries the direct lib/ path before any tier search
+# (src/compiler/99.loader/module_resolver/resolution.spl). That facade exports
+# an explicit name list, so importing a name it does not list is an HIR
+# `unresolved name` at native-build time — PR #10770 (cpu_count_checked in
+# compiler.backend.runtime_c_compile_pool_v1 broke Stage 2 -> Stage 3).
+# Fix a FAIL by importing the name from its pub owner module instead.
+#
+# usage: check-io-runtime-facade-imports.shs [--selftest] [repo_root]
+# Scans *.spl under <root>/src and <root>/examples (symlinks not followed;
+# src/compiler_rust and vendor/ excluded — the seed std is a separate tree).
+# Verdict is the last stdout line: PASS (0) / FAIL (1) / ERROR (2).
+# 0 importing files scanned is ERROR, never PASS.
+
+# facade file -> exported/pub names, one per line
+facade_names() {
+    awk '
+    function emit(list,   n, i, a, w) {
+        gsub(/[{}]/, " ", list)
+        n = split(list, a, ",")
+        for (i = 1; i <= n; i++) { w = a[i]; sub(/^[ \t]+/, "", w); sub(/[ \t].*$/, "", w); if (w != "") print w }
+    }
+    /^[ \t]*export[ \t]+use[ \t]/ { acc = $0; while (acc !~ /}/ && (getline line) > 0) acc = acc " " line
+        sub(/^[^{]*\{/, "", acc); sub(/}.*$/, "", acc); emit(acc); next }
+    /^[ \t]*export[ \t]/ { l = $0; sub(/^[ \t]*export[ \t]+/, "", l); sub(/[ \t]+from[ \t].*$/, "", l); emit(l); next }
+    /^pub[ \t]+(fn|struct|class|enum|val|const|var|type|trait)[ \t]/ { l = $0; sub(/^pub[ \t]+[a-z]+[ \t]+/, "", l); sub(/[^A-Za-z0-9_].*$/, "", l); if (l != "") print l }
+    ' "$1"
+}
+
+# importing files on stdin -> "file:line:name" for every imported name
+imported_names() {
+    while IFS= read -r f; do
+        awk -v F="$f" '
+        function emit(list, ln,   n, i, a, w) {
+            n = split(list, a, ",")
+            for (i = 1; i <= n; i++) { w = a[i]; gsub(/[ \t]+/, " ", w); sub(/^ /, "", w); sub(/ .*$/, "", w); if (w != "" && w != "*") print F ":" ln ":" w }
+        }
+        /^[ \t]*(export[ \t]+)?use[ \t]+(lazy[ \t]+)?std\.io_runtime\./ {
+            ln = NR; acc = $0
+            if (acc ~ /std\.io_runtime\.\{/) {
+                while (acc !~ /}/ && (getline line) > 0) acc = acc " " line
+                sub(/^.*std\.io_runtime\.\{/, "", acc); sub(/}.*$/, "", acc); emit(acc, ln)
+            } else { sub(/^.*std\.io_runtime\./, "", acc); sub(/[^A-Za-z0-9_*].*$/, "", acc); emit(acc, ln) }
+        }' "$f"
+    done
+}
+
+check() {
+    root=$1
+    facade="$root/src/lib/io_runtime.spl"
+    [ -f "$facade" ] || { echo "ERROR — nothing was checked (no facade $facade)"; return 2; }
+    tmp=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp)"; return 2; }
+    facade_names "$facade" | sort -u > "$tmp/exp"
+    [ -s "$tmp/exp" ] || { rm -rf "$tmp"; echo "ERROR — nothing was checked (0 names parsed from facade)"; return 2; }
+    dirs=""
+    for sub in src examples; do [ -d "$root/$sub" ] && dirs="$dirs $root/$sub"; done
+    [ -n "$dirs" ] || { rm -rf "$tmp"; echo "ERROR — nothing was checked (no src/ or examples/ under $root)"; return 2; }
+    # shellcheck disable=SC2086
+    grep -rlE '^[[:space:]]*(export[[:space:]]+)?use[[:space:]]+(lazy[[:space:]]+)?std\.io_runtime\.' --include='*.spl' $dirs 2>/dev/null \
+        | grep -v -e '/src/compiler_rust/' -e '/vendor/' > "$tmp/files"
+    nfiles=$(wc -l < "$tmp/files" | tr -d ' ')
+    [ "$nfiles" -gt 0 ] || { rm -rf "$tmp"; echo "ERROR — nothing was checked (0 importing files scanned)"; return 2; }
+    imported_names < "$tmp/files" > "$tmp/imp"
+    nnames=$(wc -l < "$tmp/imp" | tr -d ' ')
+    [ "$nnames" -gt 0 ] || { rm -rf "$tmp"; echo "ERROR — nothing was checked (0 imported names parsed from $nfiles files)"; return 2; }
+    awk -F: 'NR == FNR { ok[$0] = 1; next } !($NF in ok)' "$tmp/exp" "$tmp/imp" > "$tmp/bad"
+    nbad=$(wc -l < "$tmp/bad" | tr -d ' ')
+    nexp=$(wc -l < "$tmp/exp" | tr -d ' ')
+    if [ "$nbad" -gt 0 ]; then
+        sed "s|^$root/||; s|^|  not exported by src/lib/io_runtime.spl: |" "$tmp/bad"
+        names=$(awk -F: '{print $NF}' "$tmp/bad" | sort -u | tr '\n' ' ' | sed 's/ $//')
+        rm -rf "$tmp"
+        echo "FAIL — $nbad imported name(s) in $nfiles file(s) not exported by the std.io_runtime facade: $names"
+        return 1
+    fi
+    rm -rf "$tmp"
+    echo "PASS — $nnames imported name(s) checked in $nfiles file(s), all exported by the std.io_runtime facade ($nexp names)"
+    return 0
+}
+
+selftest() {
+    st_dir=$(mktemp -d) || { echo "ERROR — selftest mktemp"; return 2; }
+    here=$(cd "$(dirname "$0")/../.." && pwd)
+    mkdir -p "$st_dir/src/lib" "$st_dir/src/app"
+    printf 'export process_spawn_async, file_exists from nogc_sync_mut.io_runtime\n' > "$st_dir/src/lib/io_runtime.spl"
+    cp "$here/test/fixtures/io_runtime/green_exported_name.spl" "$st_dir/src/app/g.spl" || { rm -rf "$st_dir"; echo "ERROR — selftest fixture missing"; return 2; }
+    check "$st_dir" >/dev/null; rc=$?
+    [ "$rc" -eq 0 ] || { rm -rf "$st_dir"; echo "ERROR — selftest: exported-name fixture must PASS (rc=$rc)"; return 2; }
+    cp "$here/test/fixtures/io_runtime/red_unexported_name.spl" "$st_dir/src/app/r.spl"
+    out=$(check "$st_dir"); rc=$?
+    [ "$rc" -eq 1 ] || { rm -rf "$st_dir"; echo "ERROR — selftest: unexported-name fixture must FAIL (rc=$rc)"; return 2; }
+    case "$out" in *cpu_count_checked*) ;; *) rm -rf "$st_dir"; echo "ERROR — selftest: FAIL must name cpu_count_checked"; return 2;; esac
+    rm -f "$st_dir/src/app/"*.spl
+    check "$st_dir" >/dev/null; rc=$?
+    rm -rf "$st_dir"
+    [ "$rc" -eq 2 ] || { echo "ERROR — selftest: 0 importing files must ERROR (rc=$rc)"; return 2; }
+    return 0
+}
+
+selftest || exit 2
+[ "$1" = "--selftest" ] && shift
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+check "${1:-$repo_root}"
+exit $?

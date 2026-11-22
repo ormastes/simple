@@ -986,6 +986,10 @@ fn private_top_level_fn_names(items: &[Node]) -> std::collections::HashSet<Strin
 /// both producers interpolate this constant rather than repeating the text.
 pub const PRIVATE_FN_VISIBILITY_HINT: &str = "mark it `pub` or `export` it";
 
+/// Tail of every friend-scoped visibility rejection (import rule and call rule).
+pub const FRIEND_SYMBOL_VISIBILITY_HINT: &str =
+    "only same package or declared `friend` packages may access `pub(friend)` / `internal_export` symbols";
+
 /// Visibility check (interp_private_names_leak_across_modules_2026-11-05):
 /// a braced `use m.{name}` that names a private `fn` of `m` (not re-exported by
 /// an `export`) from a file outside `m`'s directory is a hard error unless the pair is frozen in
@@ -1046,7 +1050,7 @@ fn check_private_use_names(
         }
         if matches!(outcome, FnVisibilityOutcome::FriendOnly) {
             return Err(CompileError::semantic(format!(
-                "friend-scoped symbol `{name}` of module `{module_label}` ({}) is not visible to {} (only same package or declared `friend` packages may access `pub(friend)` / `internal_export` symbols)",
+                "friend-scoped symbol `{name}` of module `{module_label}` ({}) is not visible to {} ({FRIEND_SYMBOL_VISIBILITY_HINT})",
                 module_path.display(),
                 importer.display()
             )));
@@ -1507,6 +1511,18 @@ pub fn load_and_merge_module(
     // Check cache first - if we've already loaded this module, return cached exports
     if let Some(cached_exports) = get_cached_module_exports(&module_path) {
         loader_trace!("cache-hit", "{}", module_path.display());
+        // Use-list check on the cache path BEFORE merging definitions into the
+        // caller's maps so a rejected import never leaks private definitions.
+        if let Some(provided) = lookup_provided_names(&module_path) {
+            if let Err(e) = check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided) {
+                clear_partial_module_exports(&module_path);
+                unmark_module_loading(&module_path);
+                decrement_load_depth();
+                return Err(e);
+            }
+            warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided);
+        }
+
         // Merge cached definitions (classes, functions, enums) into caller's HashMaps.
         // This ensures that static method calls work on imported classes.
         // Functions are Arc<FunctionDef> in the cache; we unwrap to raw FunctionDef for
@@ -1523,16 +1539,6 @@ pub fn load_and_merge_module(
         merge_cached_module_definitions(&module_path, classes, functions, enums);
         classes.extend(preserved);
         enums.extend(preserved_enums);
-
-        // Use-list check on the cache path: the AST is gone, so consult the
-        // surface recorded when this module was first loaded.
-        if let Some(provided) = lookup_provided_names(&module_path) {
-            if let Err(e) = check_private_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided) {
-                decrement_load_depth();
-                return Err(e);
-            }
-            warn_unprovided_use_names(use_stmt, current_file, &module_path, &parts.join("."), &provided);
-        }
 
         decrement_load_depth();
         // If importing a specific item, extract it from cached exports
@@ -2208,6 +2214,7 @@ mod tests {
             target,
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         }
     }
 
@@ -2377,6 +2384,7 @@ mod tests {
             target,
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         }
     }
 
@@ -2839,6 +2847,7 @@ export register_wiki_tool
             span: simple_parser::token::Span::new(0, 0, 0, 0),
             path: ModulePath { segments: vec![] },
             target: ImportTarget::Group(items),
+            attributes: vec![],
         })
     }
 
@@ -2853,6 +2862,7 @@ export register_wiki_tool
             target: ImportTarget::Group(items),
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         })
     }
 
@@ -2896,6 +2906,7 @@ export register_wiki_tool
             target: ImportTarget::Glob,
             is_type_only: false,
             is_lazy: false,
+            attributes: vec![],
         });
         let requested = vec!["compile_file".to_string()];
         assert!(should_keep_selective_export(&node, &requested));
@@ -3519,7 +3530,7 @@ pub(crate) fn check_private_call_visibility(
     match fn_visibility_outcome(name, owner, current) {
         FnVisibilityOutcome::Allowed => Ok(()),
         FnVisibilityOutcome::FriendOnly => Err(CompileError::semantic(format!(
-            "friend-scoped symbol `{name}` of module `{owner}` is not visible to {current} (only same package or declared `friend` packages may access `pub(friend)` / `internal_export` symbols)"
+            "friend-scoped symbol `{name}` of module `{owner}` is not visible to {current} ({FRIEND_SYMBOL_VISIBILITY_HINT})"
         ))),
         FnVisibilityOutcome::Private => Err(CompileError::semantic(format!(
             "private fn `{name}` of module `{owner}` is not visible to {current}; {PRIVATE_FN_VISIBILITY_HINT}"

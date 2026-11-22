@@ -1,0 +1,235 @@
+"""Behavioral specs for COFF '$' subsection GC, Mach-O -dead_strip atom elimination, and obj_taker filtering (#4647)."""
+
+use std.spec.*
+use compiler.backend.linker.coff.coff_link.{
+    CoffLinkRequest, coff_link_amd64_retained_image_policy_opt}
+use compiler.backend.linker.coff.pe_image_writer.{PeImagePolicy}
+use compiler.backend.linker.macho.hosted_link.{MachOHostedRequest, macho_hosted_link}
+use compiler.backend.linker.macho.native_adapter.{native_macho_plan_v1}
+use compiler.backend.linker.native_config.{NativeLinkConfig}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.obj_taker.{
+    SmfSymbol, SymbolType, SymbolBinding,
+    objtaker_section_dead_strip_eligible, objtaker_filter_dead_strip_symbols}
+use compiler.backend.native.macho_writer.{
+    MachOReloc,
+    macho_writer_x86_64, macho_add_section, macho_add_symbol,
+    new_macho_text_section, macho_section_add_reloc,
+    new_macho_func_symbol, new_macho_extern_symbol,
+    write_macho64, X86_64_RELOC_BRANCH}
+
+fn _u16_le(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result.push(((value >> 8) & 0xff) as u8)
+
+fn _u32_le(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes.push((value & 0xff) as u8)
+    result = result.push(((value >> 8) & 0xff) as u8)
+    result = result.push(((value >> 16) & 0xff) as u8)
+    result.push(((value >> 24) & 0xff) as u8)
+
+fn _name8(bytes: [u8], value: text) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < 8:
+        result = result.push((if i < value.len(): value.byte_at(i) else: 0) as u8)
+        i = i + 1
+    result
+
+fn _coff_entry_ret(sym_name: text) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _u16_le(bytes, 0x8664)
+    bytes = _u16_le(bytes, 1)
+    bytes = _u32_le(bytes, 0)
+    bytes = _u32_le(bytes, 61)
+    bytes = _u32_le(bytes, 1)
+    bytes = _u16_le(bytes, 0)
+    bytes = _u16_le(bytes, 0)
+    bytes = _name8(bytes, ".text")
+    bytes = _u32_le(bytes, 0)
+    bytes = _u32_le(bytes, 0)
+    bytes = _u32_le(bytes, 1)
+    bytes = _u32_le(bytes, 60)
+    bytes = _u32_le(bytes, 0)
+    bytes = _u32_le(bytes, 0)
+    bytes = _u16_le(bytes, 0)
+    bytes = _u16_le(bytes, 0)
+    bytes = _u32_le(bytes, 0x60000020)
+    bytes = bytes.push(0xc3)
+    bytes = _name8(bytes, sym_name)
+    bytes = _u32_le(bytes, 0)
+    bytes = _u16_le(bytes, 1)
+    bytes = _u16_le(bytes, 0x20)
+    bytes = bytes.push(2)
+    bytes = bytes.push(0)
+    _u32_le(bytes, 4)
+
+fn _coff_dead_dollar_subsection_calling(sect_name: text, dead_sym: text, missing_target: text) -> [u8]:
+    # Non-COMDAT '.text$*' subsection calling an unresolved external symbol.
+    var bytes: [u8] = []
+    bytes = _u16_le(bytes, 0x8664)
+    bytes = _u16_le(bytes, 1)
+    bytes = _u32_le(bytes, 0)
+    bytes = _u32_le(bytes, 76)   # PointerToSymbolTable: 20 + 40 + 6 + 10
+    bytes = _u32_le(bytes, 2)
+    bytes = _u16_le(bytes, 0)
+    bytes = _u16_le(bytes, 0)
+    # Section 1 header at offset 20 (40 bytes)
+    bytes = _name8(bytes, sect_name)
+    bytes = _u32_le(bytes, 0)
+    bytes = _u32_le(bytes, 0)
+    bytes = _u32_le(bytes, 6)
+    bytes = _u32_le(bytes, 60)
+    bytes = _u32_le(bytes, 66)
+    bytes = _u32_le(bytes, 0)
+    bytes = _u16_le(bytes, 1)
+    bytes = _u16_le(bytes, 0)
+    bytes = _u32_le(bytes, 0x60000020)
+    # Raw code at offset 60 (6 bytes: call rel32; ret)
+    bytes = bytes.push(0xe8).push(0).push(0).push(0).push(0).push(0xc3)
+    # Relocation at offset 66 (10 bytes: VA=1, sym=1, IMAGE_REL_AMD64_REL32=4)
+    bytes = _u32_le(bytes, 1)
+    bytes = _u32_le(bytes, 1)
+    bytes = _u16_le(bytes, 4)
+    # Symbol 0: defined in section 1
+    bytes = _name8(bytes, dead_sym)
+    bytes = _u32_le(bytes, 0)
+    bytes = _u16_le(bytes, 1)
+    bytes = _u16_le(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    # Symbol 1: UNDEF external symbol in string table at offset 4
+    bytes = _u32_le(bytes, 0)
+    bytes = _u32_le(bytes, 4)
+    bytes = _u32_le(bytes, 0)
+    bytes = _u16_le(bytes, 0)
+    bytes = _u16_le(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    # String table
+    bytes = _u32_le(bytes, 4 + missing_target.len() + 1)
+    var i: i64 = 0
+    while i < missing_target.len():
+        bytes = bytes.push(missing_target.byte_at(i) as u8)
+        i = i + 1
+    bytes.push(0)
+
+fn _i64_to_u8(data: [i64]) -> [u8]:
+    var out: [u8] = []
+    for v in data:
+        out.push((v & 0xff) as u8)
+    out
+
+fn _macho_entry_object() -> [u8]:
+    var w = macho_writer_x86_64()
+    w = macho_add_section(w, new_macho_text_section([0xc3]))
+    w = macho_add_symbol(w, new_macho_func_symbol("main", 1, 0))
+    _i64_to_u8(write_macho64(w))
+
+fn _macho_dead_alias_object() -> [u8]:
+    var w = macho_writer_x86_64()
+    var sec = new_macho_text_section([0xe8, 0, 0, 0, 0, 0xc3])
+    sec = macho_section_add_reloc(sec, MachOReloc(
+        offset: 1,
+        symbol_index: 1,
+        reloc_type: X86_64_RELOC_BRANCH,
+        length: 2,
+        is_pc_relative: true,
+        is_extern: true
+    ))
+    w = macho_add_section(w, sec)
+    w = macho_add_symbol(w, new_macho_func_symbol("compat_alias_dead", 1, 0))
+    w = macho_add_symbol(w, new_macho_extern_symbol("missing_dylib_fn"))
+    _i64_to_u8(write_macho64(w))
+
+describe "COFF dollar-subsection GC, Mach-O dead_strip, and ObjTaker filtering":
+    it "drops unreachable non-COMDAT .text$ subsection when COFF gc_sections is enabled":
+        val req = CoffLinkRequest(
+            objects: [
+                _coff_entry_ret("_start"),
+                _coff_dead_dollar_subsection_calling(".text$ca", "deadfn", "__missing_target")
+            ],
+            archives: [],
+            entry: "_start"
+        )
+        val without_gc = coff_link_amd64_retained_image_policy_opt(
+            req, [], PeImagePolicy.default(), 0x140000000, false, false)
+        expect(without_gc.is_err()).to_equal(true)
+        expect(without_gc.unwrap_err()).to_contain("__missing_target")
+
+        val with_gc = coff_link_amd64_retained_image_policy_opt(
+            req, [], PeImagePolicy.default(), 0x140000000, true, false)
+        if with_gc.is_err(): print("coff gc link err: {with_gc.unwrap_err()}")
+        expect(with_gc.is_ok()).to_equal(true)
+
+    it "eliminates unreachable Mach-O alias section under dead_strip and wires -dead_strip flag":
+        var cfg = NativeLinkConfig.default()
+        cfg = NativeLinkConfig(
+            libraries: cfg.libraries,
+            library_paths: cfg.library_paths,
+            runtime_path: cfg.runtime_path,
+            pie: cfg.pie,
+            debug: cfg.debug,
+            verbose: cfg.verbose,
+            allow_duplicate_definitions: cfg.allow_duplicate_definitions,
+            allow_cc_fallback: cfg.allow_cc_fallback,
+            retained_symbols: ["_main"],
+            extra_flags: [
+                "-dead_strip",
+                "-platform_version", "macos", "11.0", "11.0",
+                "--macho-signing-identifier", "test.deadstrip"
+            ]
+        )
+        val plan = native_macho_plan_v1("x86_64", cfg, "/tmp/out_bin")
+        expect(plan.is_ok()).to_equal(true)
+        val plan_val = plan.unwrap()
+        expect(plan_val.request.dead_strip).to_equal(true)
+        expect(plan_val.request.retained_symbols).to_equal(["_main"])
+
+        val objs = [_macho_entry_object(), _macho_dead_alias_object()]
+        val base_req = MachOHostedRequest(
+            target: RelocArch.X86_64,
+            entry: "_main",
+            minimum_os: 0xb0000,
+            sdk: 0xb0000,
+            max_image_bytes: 1048576,
+            identifier: "test.deadstrip",
+            rpaths: [],
+            allow_duplicate_definitions: false,
+            dead_strip: false,
+            retained_symbols: []
+        )
+        val fail_link = macho_hosted_link(objs, [], [], base_req)
+        expect(fail_link.is_err()).to_equal(true)
+
+        val gc_req = MachOHostedRequest(
+            target: RelocArch.X86_64,
+            entry: "_main",
+            minimum_os: 0xb0000,
+            sdk: 0xb0000,
+            max_image_bytes: 1048576,
+            identifier: "test.deadstrip",
+            rpaths: [],
+            allow_duplicate_definitions: false,
+            dead_strip: true,
+            retained_symbols: ["_main"]
+        )
+        val ok_link = macho_hosted_link(objs, [], [], gc_req)
+        if ok_link.is_err(): print("macho dead_strip err: {ok_link.unwrap_err()}")
+        expect(ok_link.is_ok()).to_equal(true)
+
+    it "classifies strippable subsections and filters dead SMF compatibility symbols":
+        expect(objtaker_section_dead_strip_eligible(".text$alias")).to_equal(true)
+        expect(objtaker_section_dead_strip_eligible(".rdata$alias")).to_equal(true)
+        expect(objtaker_section_dead_strip_eligible("__text")).to_equal(true)
+        expect(objtaker_section_dead_strip_eligible(".drectve")).to_equal(false)
+
+        val syms = [
+            SmfSymbol(name: "main", section_index: 0, offset: 0, size: 16, ty: SymbolType.Function, binding: SymbolBinding.Global, is_generic_template: false, template_param_count: 0, template_offset: 0),
+            SmfSymbol(name: "live_helper", section_index: 0, offset: 16, size: 16, ty: SymbolType.Function, binding: SymbolBinding.Global, is_generic_template: false, template_param_count: 0, template_offset: 0),
+            SmfSymbol(name: "compat_alias_dead", section_index: 0, offset: 32, size: 16, ty: SymbolType.Function, binding: SymbolBinding.Global, is_generic_template: false, template_param_count: 0, template_offset: 0)
+        ]
+        var edges: Dict<text, [text]> = {}
+        edges["main"] = ["live_helper"]
+        val kept = objtaker_filter_dead_strip_symbols(syms, ["main"], edges)
+        expect(kept.len()).to_equal(2)
+        expect(kept[0].name).to_equal("main")
+        expect(kept[1].name).to_equal("live_helper")

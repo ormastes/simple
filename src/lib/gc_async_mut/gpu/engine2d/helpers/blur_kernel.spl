@@ -55,6 +55,71 @@ pub fn engine2d_backdrop_blur_pixels(src: [u32], w: i32, h: i32, sigma_milli: i3
     out
 
 
+# The same blur over ONE 8-bit coverage plane (a glyph mask for a blurred
+# text-shadow): a quarter of the work of the four-channel region blur. Lines
+# are extended with zeros, so the plane needs no edge treatment of its own.
+# @allow(primitive_api): raw 8-bit coverage plane and device-px sizes of a text-shadow mask
+pub fn engine2d_blur_coverage(cov: [i64], w: i32, h: i32, sigma_milli: i32) -> [i64]:
+    val n = (w as i64) * (h as i64)
+    if w <= 0 or h <= 0 or sigma_milli <= 0 or cov.len() != n:
+        return cov
+    _e2d_cov_axis(_e2d_cov_axis(cov, w, h, sigma_milli, true), w, h, sigma_milli, false)
+
+fn _e2d_cov_axis(cov: [i64], w: i32, h: i32, sigma_milli: i32, horizontal: bool) -> [i64]:
+    val sigma = sigma_milli.to_f64() / 1000.0
+    val d = (sigma * 3.0 * 2.5066282746310002 / 4.0 + 0.5) as i32
+    val rad = (sigma * 3.0).ceil() as i32
+    val m = rad + 3 * (d / 2 + 1) + 1
+    val lo_a = if d % 2 == 0: d / 2 else: (d - 1) / 2
+    val lo_b = if d % 2 == 0: d / 2 - 1 else: (d - 1) / 2
+    val d_c = if d % 2 == 0: d + 1 else: d
+    var wt: [i64] = []
+    var total: i64 = 0
+    if sigma < 2.0:
+        var t = -rad
+        # cpu-lane-loop-ok: Gaussian kernel taps; bound 2*ceil(3*sigma)+1
+        while t <= rad:
+            val v = (math_exp(-(t * t).to_f64() / (2.0 * sigma * sigma)) * 65536.0 + 0.5) as i64
+            wt.push(v)
+            total = total + v
+            t = t + 1
+    val len = if horizontal: w else: h
+    val lines = if horizontal: h else: w
+    val ext = len + 2 * m
+    var out: [i64] = [0; cov.len()]
+    var line = 0
+    # cpu-lane-loop-ok: one row or column of the mask per step; bound h or w
+    while line < lines:
+        var buf: [i64] = [0; ext]
+        var i = 0
+        # cpu-lane-loop-ok: the zero-extended line; bound len
+        while i < len:
+            val q = if horizontal: (line as i64) * (w as i64) + (i as i64) else: (i as i64) * (w as i64) + (line as i64)
+            buf[(i + m) as i64] = cov[q]
+            i = i + 1
+        var r: [i64] = [0; ext]
+        if sigma >= 2.0:
+            r = _e2d_box_line(_e2d_box_line(_e2d_box_line(buf, d, lo_a), d, lo_b), d_c, d_c / 2)
+        else:
+            i = rad
+            # cpu-lane-loop-ok: Gaussian taps along the line; bound ext * (2*rad+1)
+            while i < ext - rad:
+                var s: i64 = 0
+                var t = -rad
+                while t <= rad:
+                    s = s + buf[(i + t) as i64] * wt[(t + rad) as i64]
+                    t = t + 1
+                r[i as i64] = (s + total / 2) / total
+                i = i + 1
+        i = 0
+        # cpu-lane-loop-ok: crop the extension; bound len
+        while i < len:
+            val q = if horizontal: (line as i64) * (w as i64) + (i as i64) else: (i as i64) * (w as i64) + (line as i64)
+            out[q] = r[(i + m) as i64]
+            i = i + 1
+        line = line + 1
+    out
+
 # Skia's legacy raster blur for sigma >= 2 (the SVG feGaussianBlur box
 # approximation): per axis three box passes of size d (odd d: all centred;
 # even d: d left-biased, d right-biased, then d + 1 centred), each rounded to

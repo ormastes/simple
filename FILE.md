@@ -43,7 +43,7 @@ FILE.md files) are allowed.
 | `.codex` | Codex settings |
 | `.agents` | Agent definitions |
 | `.gemini` | Gemini settings |
-| `.kimi-code` | Kimi Code project MCP layer (`mcp.json`; shell-free spawn spellings, see `doc/07_guide/infra/model_providers/kimi.md`) |
+| `.kimi-code` | Kimi Code project MCP layer — Windows only, untracked: `mcp.json` is installed from `config/mcp/win/.kimi-code/` by `config/mcp/install.ps1` (shell-free spawn spellings, see `doc/07_guide/infra/model_providers/kimi.md`) |
 | `.github` | GitHub workflows and config |
 | `.spipe` | SPipe state files |
 | `.scv` | SCV workspace state; mutable quarantine lives under `.scv/quarantine/` (`scv/` packs, `jit/` notes, `root/` legacy root artifacts) |
