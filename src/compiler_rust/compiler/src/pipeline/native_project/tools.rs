@@ -4450,6 +4450,9 @@ fn is_windows_system_name(name: &str) -> bool {
             | "__security_check_cookie"
             | "__GSHandlerCheck"
             | "___chkstk_ms"
+            // i686 MinGW stack probe (compiler-rt chkstk2.S); i386 COFF
+            // decorates it to `__alloca`. A stub skips guard-page probing.
+            | "_alloca"
             | "__main"
             | "__popcountdi2"
             | "__acrt_iob_func"
