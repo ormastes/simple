@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN — `examples/08_gpu/backends/backends_spec.spl` is deliberately RED on this host
+**Status (2026-11-22): RESOLVED-DISAPPEARED — see the 2026-11-22 section at the end.** Original status: OPEN — `examples/08_gpu/backends/backends_spec.spl` is deliberately RED on this host
 (`Results: 4 total, 3 passed, 1 failed, 1 skipped`), per the "correct spec that fails" rule.
 **Binary:** Rust seed. **Host:** Linux, 2x NVIDIA, Vulkan 1.4.312 live.
 
@@ -123,3 +123,35 @@ After the ok=false change landed (PR 8782), test/03_system/acceptance/gpu_backen
 Concur with the 2026-11-13 fail-loud landing; row stays OPEN. The
 Linux-2x-NVIDIA same-process interference has no reproduction path on this
 Windows host. No in-lane change.
+
+---
+
+## 2026-11-22 live CUDA-then-Vulkan reproduction attempt + CUDA-lane fix (work/cuda-runtime-bugs)
+
+**Status: RESOLVED-DISAPPEARED (not reproducing) — with a clean live CUDA run first, the Vulkan lane in the
+same process returns `ok=true exit=3 records=1 value=9`.**
+
+Host: Linux aarch64, NVIDIA GB10, Vulkan 1.4.312 (integrated GPU). Fixture copies
+`backends_spec.spl`'s sequence (CUDA probe/init/`run_source(HELLO_PROGRAM, 1000, 0)`, then the
+Vulkan one) in one `main`, run with `SIMPLE_EXECUTION_MODE=interpret <seed> run main.spl`.
+
+The precondition (a clean CUDA run first) was never met before, because the CUDA lane could not
+initialise under a seed built without the `cuda` feature:
+
+| seed binary (built from this worktree) | CUDA | Vulkan (after CUDA) |
+|---|---|---|
+| `385dcc7f5c3a7b7d` (before) | `init=[cuda-lane-arena-guard-init-failed]`, `ok=false records=0` | `ok=true exit=3 records=1 v=9` |
+| `d4111f28fdf3b599` (htod fix) | `init=[cuda-lane-module-load-failed]` | `ok=true exit=3 records=1 v=9` |
+| `cdc523be583e4c10` (both fixes) | `ok=true exit=3 records=1 v=9` | `ok=true exit=3 records=1 v=9` |
+
+Root cause of the CUDA failure (and of the 2026-11-13 "CUDA example: index 0 but length 0"):
+`rt_cuda_memcpy_htod_array_fn` and `rt_cuda_module_load_data_array_fn`
+(`src/compiler_rust/compiler/src/interpreter_extern/gpu.rs`) called the runtime's byte-array
+helpers, which are `-3` stubs without the `cuda` feature, so they never reached the dlopen
+driver. Both now route through their pointer-based dlopen siblings
+(`rt_cuda_memcpy_htod_fn`, `rt_cuda_module_load_data_bytes_fn`) in the not-`cuda` build.
+
+Not run: `examples/08_gpu/backends/backends_spec.spl` itself (no full-CLI `simple test` binary on
+this host). Under the seed's compiled `run` mode both lanes still skip
+(`skip:cuda-driver-unavailable`, `skip:vulkan-instance-init-failed` — the latter is
+`vulkan_instance_init_fails_under_run_but_not_test_2026-08-25.md`).
