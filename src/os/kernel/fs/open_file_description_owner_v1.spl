@@ -6,7 +6,11 @@ pins, and the last-reference close protocol.  Backend bindings are opaque
 handles; no raw driver pointer crosses this boundary.
 """
 
-use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use os.kernel.fs.lockless_owner_claim_v1.{
+    LocklessClaimOutcomeV1, LocklessReleaseOutcomeV1,
+    lockless_owner_claim_new_v1, lockless_owner_try_claim_v1,
+    lockless_owner_claim_bounded_v1, lockless_owner_release_v1
+}
 use os.sosix.core.operation.SosixOperationId
 use os.sosix.fs.open_file_description_sequencer.{
     SosixOfdIoState, SosixOfdIoTicket, SosixOfdIoReservation,
@@ -168,7 +172,7 @@ fn _ofd_empty_slot_v1(generation: u32) -> OpenFileDescriptionSlotV1:
         close_dispatched: false,
         io: sosix_ofd_io_state_new(0u64))
 
-val _ofd_mutex_v1: i64 = mutex_raw_create()
+val _ofd_claim_v1 = lockless_owner_claim_new_v1()
 var _ofd_owner_v1 = OpenFileDescriptionOwnerStateV1(
     initialized: false,
     permanently_quarantined: false,
@@ -182,26 +186,48 @@ fn _ofd_ensure_initialized_v1():
         _ofd_owner_v1.free_slots = _ofd_empty_free_slots_v1()
         _ofd_owner_v1.initialized = true
 
+# Entry paths (create/retain/pin/status/snapshot/dispatch) have nothing to
+# undo, so a contended claim rejects immediately with the caller's existing
+# "serialization-unavailable" result. No task blocks, and owner critical
+# sections never span driver I/O.
 fn _ofd_lock_v1() -> bool:
-    if _ofd_mutex_v1 <= 0: return false
-    if not mutex_raw_lock(_ofd_mutex_v1):
-        return false
-    # A waiter may have observed false before a prior unlock failure published
-    # quarantine. Recheck only after acquiring serialization and fail closed.
+    _ofd_admit_claim_v1(lockless_owner_try_claim_v1(_ofd_claim_v1))
+
+# Cleanup paths (complete/cancel/close/quarantine) must not fail spuriously
+# under ordinary contention, or a pin or close ticket would be stranded. They
+# retry the CAS a bounded number of times; exhaustion means the owner made no
+# progress, so it fails closed by permanent quarantine.
+val _OFD_FINALIZE_CLAIM_ATTEMPTS_V1: i64 = 4096
+
+fn _ofd_lock_finalize_v1() -> bool:
+    val outcome = lockless_owner_claim_bounded_v1(_ofd_claim_v1, _OFD_FINALIZE_CLAIM_ATTEMPTS_V1)
+    match outcome:
+        case LocklessClaimOutcomeV1.Busy:
+            # Monotonic, benign unsynchronized write: it only ever moves to true.
+            _ofd_owner_v1.permanently_quarantined = true
+            return false
+        case _: pass
+    _ofd_admit_claim_v1(outcome)
+
+fn _ofd_admit_claim_v1(outcome: LocklessClaimOutcomeV1) -> bool:
+    match outcome:
+        case LocklessClaimOutcomeV1.Claimed: pass
+        case _: return false
+    # A prior release failure published quarantine; fail closed.
     if _ofd_owner_v1.permanently_quarantined:
-        _ = mutex_raw_unlock(_ofd_mutex_v1)
+        _ = lockless_owner_release_v1(_ofd_claim_v1)
         return false
     _ofd_ensure_initialized_v1()
     true
 
 fn _ofd_unlock_v1() -> bool:
-    if mutex_raw_unlock(_ofd_mutex_v1):
-        return true
-    # Runtime contract: pthread failure and invalid-handle failure do not
-    # release ownership; the Windows provider returns true after release, and
-    # the interpreter returns true after clearing its locked bit. Thus false
-    # never means "released but unreported". A mutation may already have
-    # linearized, so suppress every future authority operation.
+    match lockless_owner_release_v1(_ofd_claim_v1):
+        case LocklessReleaseOutcomeV1.Released: return true
+        case LocklessReleaseOutcomeV1.NotHeld: pass
+    # Releasing a claim this owner did not hold means serialization was
+    # violated; a mutation may already have linearized, so suppress every
+    # future authority operation. The write happens outside any claim; it is
+    # monotonic (only ever set to true), so the race is benign.
     _ofd_owner_v1.permanently_quarantined = true
     false
 
@@ -475,7 +501,7 @@ pub(package) fn open_file_description_complete_io_v1(
     backend_selected_offset: u64,
     backend_selected_offset_valid: bool
 ) -> Result<OpenFileDescriptionIoCompleteV1, text>:
-    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    if not _ofd_lock_finalize_v1(): return Err("serialization-unavailable")
     val index = _ofd_pin_index_v1(pin)
     if index < 0:
         _ = _ofd_unlock_v1()
@@ -514,7 +540,7 @@ pub(package) fn open_file_description_cancel_undispatched_io_v1(
     pin: OpenFileDescriptionPinV1
 ) -> Result<OpenFileDescriptionIoCompleteV1, text>:
     """Release a pin only when backend dispatch has not begun."""
-    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    if not _ofd_lock_finalize_v1(): return Err("serialization-unavailable")
     val index = _ofd_pin_index_v1(pin)
     if index < 0:
         _ = _ofd_unlock_v1()
@@ -551,7 +577,7 @@ pub(package) fn open_file_description_complete_io_indeterminate_v1(
     pin: OpenFileDescriptionPinV1
 ) -> Result<OpenFileDescriptionIoCompleteV1, text>:
     """Quarantine a dispatched OFD when actual backend progress is unknown."""
-    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    if not _ofd_lock_finalize_v1(): return Err("serialization-unavailable")
     val index = _ofd_pin_index_v1(pin)
     if index < 0:
         _ = _ofd_unlock_v1()
@@ -612,7 +638,7 @@ pub(package) fn open_file_description_snapshot_v1(
 pub(package) fn open_file_description_begin_close_v1(
     ref_: OpenFileDescriptionRefV1
 ) -> Result<OpenFileDescriptionCloseBeginV1, text>:
-    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    if not _ofd_lock_finalize_v1(): return Err("serialization-unavailable")
     var index = _ofd_ref_index_v1(ref_, OpenFileDescriptionStateV1.Active)
     if index < 0:
         index = _ofd_ref_index_v1(
@@ -694,7 +720,7 @@ pub(package) fn open_file_description_resolve_close_backend_v1(
     ticket: OpenFileDescriptionCloseTicketV1
 ) -> Result<OpenFileDescriptionBackendBindingV1, text>:
     """Resolve an opaque close ticket to the exact owner-stored backend."""
-    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    if not _ofd_lock_finalize_v1(): return Err("serialization-unavailable")
     val index = _ofd_close_ticket_index_v1(ticket)
     if index < 0:
         _ = _ofd_unlock_v1()
@@ -710,7 +736,7 @@ pub(package) fn open_file_description_resolve_close_backend_v1(
 pub(package) fn open_file_description_commit_close_v1(
     ticket: OpenFileDescriptionCloseTicketV1
 ) -> Result<(), text>:
-    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    if not _ofd_lock_finalize_v1(): return Err("serialization-unavailable")
     val index = _ofd_close_ticket_index_v1(ticket)
     if index < 0:
         _ = _ofd_unlock_v1()
@@ -739,7 +765,7 @@ pub(package) fn open_file_description_commit_close_v1(
 pub(package) fn open_file_description_quarantine_close_v1(
     ticket: OpenFileDescriptionCloseTicketV1
 ) -> Result<(), text>:
-    if not _ofd_lock_v1(): return Err("serialization-unavailable")
+    if not _ofd_lock_finalize_v1(): return Err("serialization-unavailable")
     val index = _ofd_close_ticket_index_v1(ticket)
     if index < 0:
         _ = _ofd_unlock_v1()
