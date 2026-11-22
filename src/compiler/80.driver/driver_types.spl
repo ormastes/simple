@@ -577,6 +577,16 @@ class CompileContext:
     api_exposure: Dict<text, ApiModuleExposureV1> = {}
     # Last `extreme_public_api` guard decision of this compile; nil = not run.
     api_publication_decision: ApiPublicationDecisionV1? = nil
+    # Per-CompileContext O(1) projected frozen-source lookup cache (eliminates
+    # module-global cross-context staleness in driver_aot_native_output.spl).
+    frozen_source_lookup_key_v1: text = ""
+    frozen_source_lookup_owner_len_v1: i64 = 0
+    frozen_source_lookup_sources_len_v1: i64 = 0
+    frozen_source_lookup_known_len_v1: i64 = 0
+    frozen_source_lookup_frozen_flag_v1: bool = false
+    frozen_source_lookup_indices_v1: Dict<text, i64> = {}
+    frozen_source_lookup_paths_v1: Dict<text, text> = {}
+    frozen_source_lookup_identities_v1: Dict<text, text> = {}
 
     static fn create(options: CompileOptions) -> CompileContext:
         val normalized_options = compileoptions_normalize_mir_optimization(options)
@@ -774,7 +784,15 @@ class CompileContext:
             runtime_std_cfg_source_digest_by_path: {},
             runtime_std_hir_emissions: {},
             runtime_std_mir_emissions: {},
-            native_objectless_decl_proofs: {}
+            native_objectless_decl_proofs: {},
+            frozen_source_lookup_key_v1: "",
+            frozen_source_lookup_owner_len_v1: 0,
+            frozen_source_lookup_sources_len_v1: 0,
+            frozen_source_lookup_known_len_v1: 0,
+            frozen_source_lookup_frozen_flag_v1: false,
+            frozen_source_lookup_indices_v1: {},
+            frozen_source_lookup_paths_v1: {},
+            frozen_source_lookup_identities_v1: {}
         )
 
     fn storage_binding_rows_well_formed() -> bool:
@@ -1013,6 +1031,7 @@ class CompileContext:
         self.frozen_storage_known_module_names = frozen_known_names
         if not self.frozen_storage_registry_well_formed(): return "invalid"
         self.storage_registry_frozen = true
+        self.frozen_source_lookup_key_v1 = ""
         self.storage_registry_frozen_identity
 
     # Staged native codegen freezes the registry at its FIRST batch, before
@@ -1033,6 +1052,7 @@ class CompileContext:
                 known_seen[scheduled_name] = true
                 known_names.push(scheduled_name)
         self.frozen_storage_known_module_names = known_names
+        self.frozen_source_lookup_key_v1 = ""
         identity
 
     fn frozen_storage_module_snapshot(module_name: text) -> FrozenStorageModuleSnapshotV1:
@@ -1091,16 +1111,61 @@ class CompileContext:
                 result.push(module_name)
         result
 
+    fn _frozen_schedule_uniquely_selects_path_v1(module_name: text, candidate_path: text) -> bool:
+        if not self.storage_registry_frozen or candidate_path == "":
+            return false
+        if self.frozen_storage_known_module_names.len() == 0:
+            return false
+        val owners_aligned =
+            self.source_paths_owner.len() == self.source_identities_owner.len() and
+            self.source_paths_owner.len() == self.source_module_names_owner.len()
+        if not owners_aligned:
+            return false
+        var known_set: {text: bool} = {}
+        var known_mod_count = 0
+        for km in self.frozen_storage_known_module_names:
+            if km == module_name:
+                known_mod_count = known_mod_count + 1
+            known_set[km] = true
+        if known_mod_count != 1:
+            return false
+        var scheduled_on_path = 0
+        var matched_self = false
+        var expected_sha = ""
+        var i = 0
+        while i < self.source_module_names_owner.len():
+            if self.source_paths_owner[i] == candidate_path:
+                val row_sha = self.source_identities_owner[i]
+                if row_sha == "" or row_sha == sha256_text(""):
+                    return false
+                if expected_sha == "":
+                    expected_sha = row_sha
+                elif row_sha != expected_sha:
+                    return false
+                val row_mod = self.source_module_names_owner[i]
+                if known_set.contains_key(row_mod):
+                    scheduled_on_path = scheduled_on_path + 1
+                    if row_mod == module_name:
+                        matched_self = true
+            i = i + 1
+        scheduled_on_path == 1 and matched_self
+
     fn frozen_native_cache_source_v1(module_name: text) -> text:
         var found_path = ""
+        var mod_matches = 0
         for source in self.sources:
             if source.module_name == module_name:
+                mod_matches = mod_matches + 1
                 found_path = source.path
-        if found_path == "": return ""
+        if mod_matches != 1 or found_path == "": return ""
         var path_count = 0
         for source in self.sources:
             if source.path == found_path: path_count = path_count + 1
-        if path_count == 1: found_path else: ""
+        if path_count == 1:
+            return found_path
+        if path_count > 1 and self._frozen_schedule_uniquely_selects_path_v1(module_name, found_path):
+            return found_path
+        ""
 
     # Identity of the bytes source `index` actually compiled.
     #
@@ -1169,13 +1234,17 @@ class CompileContext:
                             alias_identity != owner_identity:
                         owner_alias_hashes_consistent = false
                 index = index + 1
+        val path_uniquely_selected = source_path_matches == 1 or (
+            source_path_matches > 1 and
+            self._frozen_schedule_uniquely_selects_path_v1(module_name, cache_source))
         if owners_aligned and source_module_matches == 1 and
-                source_path_matches == 1 and owner_module_matches == 1 and
+                path_uniquely_selected and owner_module_matches == 1 and
                 owner_path == cache_source and owner_path_matches >= 1 and
                 owner_alias_hashes_consistent and
                 owner_identity != "" and owner_identity != sha256_text(""):
-            # Full-inventory rows may alias this physical path only when their
-            # captured SHA agrees with the exact selected-module owner row.
+            # Full-inventory rows (and streaming-surface retained alias rows) may
+            # alias this physical path only when the frozen lowering schedule
+            # uniquely selects one module for it and all alias rows agree on SHA.
             return owner_identity
         ""
 
@@ -1455,6 +1524,7 @@ class CompileContext:
                 module_name: source.module_name
             ))
         self.sources = metadata
+        self.frozen_source_lookup_key_v1 = ""
         # The streaming owner has already been reclaimed on the successful HIR
         # path. Keep reused contexts fail-closed even when the array contained
         # physical aliases of the source allocations above.
