@@ -5731,6 +5731,29 @@ impl MirLowering:
         b.switch_to_block(ok_block)
         self.builder = b
 
+    me emit_unit_range_panic_if(cond: LocalId, block_label: text, msg: text, value: LocalId, head: text, tail: text):
+        """Like emit_unit_panic_if, but the rt_panic text embeds the offending
+        runtime value: head + value + tail, built as tagged text."""
+        var b = self.builder
+        val fail_block = b.new_block(Some(block_label))
+        val ok_block = b.new_block(Some("{block_label}_ok"))
+        b.terminate_if(mir_operand_copy(cond), fail_block, ok_block)
+        b.switch_to_block(fail_block)
+        self.builder = b
+        var text_local = self.emit_interpolation_segment(head)
+        text_local = self.emit_interpolation_concat(text_local, self.coerce_concat_operand(value))
+        val tail_local = self.emit_interpolation_segment(tail)
+        text_local = self.emit_interpolation_concat(text_local, mir_operand_copy(tail_local))
+        var b2 = self.builder
+        val panic_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_panic"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [self.bootstrap_text_type()], return_type: MirType.unit(), is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+        b2.emit_call(panic_op, [mir_operand_copy(text_local)], MirType.unit())
+        b2.terminate_abort(msg)
+        b2.switch_to_block(ok_block)
+        self.builder = b2
+
     me emit_unit_div_remainder_check(left_local: LocalId, right_local: LocalId):
         """Native twin of the interpreter's `unit_value_binop` refusal: integer
         unit division that leaves a remainder aborts with SPL-UNIT-002 instead
@@ -5785,7 +5808,13 @@ impl MirLowering:
         var hi_text = "+inf"
         if max_text != "":
             hi_text = max_text
-        val msg = unit_constraint_violation_message(unit_name, "<runtime value outside {lo_text}..{hi_text}>", unit_constraint_predicate(unit_name))
+        val range_text = "{lo_text}..{hi_text}"
+        val predicate = unit_constraint_predicate(unit_name)
+        # Static twin (abort terminator text); the rt_panic call renders the
+        # offending value at runtime.
+        val msg = unit_constraint_violation_message(unit_name, "outside {range_text}", predicate)
+        val head_text = "SPL-UNIT-005: value "
+        val tail_text = " violates the constraint of unit `{unit_name}` (`{predicate}`; range {range_text})"
         # The backend picks signed/unsigned compares from the operand type, so
         # the bound constants carry the raw value's own integer type (a u64
         # above i64::MAX must not compare as negative).
@@ -5798,14 +5827,14 @@ impl MirLowering:
             b_lo.emit_const(lo_const, MirConstValue.Int(unit_range_bound_i64(min_text)), bound_type)
             val below = b_lo.emit_binop(MirBinOp.Lt, mir_operand_copy(raw), mir_operand_copy(lo_const), MirType.bool())
             self.builder = b_lo
-            self.emit_unit_panic_if(below, "unit_range_below", msg)
+            self.emit_unit_range_panic_if(below, "unit_range_below", msg, raw, head_text, tail_text)
         if max_text != "":
             var b_hi = self.builder
             val hi_const = b_hi.new_temp(bound_type)
             b_hi.emit_const(hi_const, MirConstValue.Int(unit_range_bound_i64(max_text)), bound_type)
             val above = b_hi.emit_binop(MirBinOp.Gt, mir_operand_copy(raw), mir_operand_copy(hi_const), MirType.bool())
             self.builder = b_hi
-            self.emit_unit_panic_if(above, "unit_range_above", msg)
+            self.emit_unit_range_panic_if(above, "unit_range_above", msg, raw, head_text, tail_text)
 
     me lower_binary_expr(expr_value: HirExpr, op: HirBinOp, left: HirExpr, right: HirExpr) -> LocalId:
 
