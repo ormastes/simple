@@ -179,6 +179,35 @@ A source inventory -> D diagnostics scaffold -> B semantic boundary HIR -> C SFF
 
 RB-TEXT-01, RB-PRIM-02, RB-ORIGIN-01..03, RB-SFFI-01..04, RB-UNIT-01..02, RB-BUILD-01..04, RB-LOAD-01..02, RB-PLUGIN-01..03, RB-SIMD-01, RB-FIX-01..02, RB-DIAG-01, RB-RATCHET-01 — semantics as in the original consolidated plan (ordinary text not flagged; late casts flagged at origin; one boundary check; real C ABI fixtures for int/int32_t/bool/enum/char*; `1km/2hr` parity; orphan/duplicate source ownership errors; archive reuse; hot-swap pinning; host bootstrap without GPU SDKs; guarded SIMD dispatch; atomic fixes; same rule ID across CLI/LSP/interpreter; reproducible ratchet).
 
+### 9.1 Verification matrix mapping (2026-11-22, release/1.0.0 d0e85c0518; `bin/simple.exe test`, host win32)
+
+Evidence is a SPEC FILE VERDICT line. "missing" = no spec or gate found by name/`git grep` on the branch; it is not a claim the behaviour is absent.
+
+| ID | Evidence | Verdict |
+|----|----------|---------|
+| RB-TEXT-01 | `test/01_unit/lib/common/encoding/host_text_boundary_v1_spec.spl` | OK 7/7. Sibling `lib/nogc_async_mut/sosix/text_boundary_spec.spl` ERROR 7/9 (2 RED: malformed byte carriers, resolver normalisation) |
+| RB-PRIM-02 | `test/01_unit/app/llm_caret/messaging/primitive_api_spec.spl` (+ gate `scripts/check/check-primitive-api-semantic-ratchet.shs`, not run) | OK 3/3; weak: covers one app, not the lint rule itself |
+| RB-ORIGIN-01..03 | `compiler/lint/bound_late_cast_spec.spl`, `app/fix/bound_late_cast_fix_spec.spl`, `compiler/tools/fix/bound_late_cast_registry_spec.spl` | OK 55/55, 11/11, 3/3 (late cast flagged at origin + fix). One-boundary-check (ORIGIN-03) has no dedicated spec: partial |
+| RB-SFFI-01..04 | `compiler/sffi_gen/constrained_unit_return_spec.spl`, `sffi_cabi_fixture_spec.spl`, `sffi_borrowed_cstr_spec.spl`, `constraint_error_spec.spl` | OK 11/11, 10/10, 6/6, 4/4 |
+| RB-UNIT-01 | `compiler/units/unit_dimension_parity_spec.spl` | ERROR 8/9: velocity quotient RED (known, bug `unit_ops_no_dimension_quotient_velocity_2026-11-15`) |
+| RB-UNIT-02 | `compiler/mir/unit_div_remainder_native_spec.spl` | OK 5/5 |
+| RB-BUILD-01 | `compiler/80.driver/source_inventory_v1_spec.spl` | OK 10/10 (orphan/duplicate ownership) |
+| RB-BUILD-02 | `compiler/80.driver/library_unit_archive_v1_spec.spl`, `library_unit_link_v1_spec.spl`, `library_unit_dynlib_v1_spec.spl`, `library_unit_drift_v1_spec.spl` | OK 10/10, 12/12, 8/8, 6/6 |
+| RB-BUILD-03 | `compiler/driver/bootstrap_hosted_lane_authority_scope_spec.spl` | OK 2/2; no spec proves host bootstrap without GPU SDKs: partial |
+| RB-BUILD-04 | none | missing |
+| RB-LOAD-01 | `compiler/loader/mapping_lifetime_accounting_v1_spec.spl` | OK 10/10 (mapping lifetime only) |
+| RB-LOAD-02 | none (no hot-swap pinning spec found) | missing |
+| RB-PLUGIN-01 | `compiler/backend_plugin/loader_session_spec.spl` | OK 7/7 |
+| RB-PLUGIN-02 | `compiler/backend_plugin/target_context_v2_spec.spl` | OK 9/9 |
+| RB-PLUGIN-03 | `compiler/backend_plugin/dynamic_loader_spec.spl` | ERROR 2/7: environmental, fixture build needs exact LLVM 23.1.1 clang-cl (absent on this host); unknown-symbol fail-closed unproven here |
+| RB-SIMD-01 | `lib/common/simd_dispatch_facade_spec.spl` | OK 3/3 |
+| RB-FIX-01 | `test/02_integration/app/lsp/diagnostic_fix_transaction_spec.spl` | OK 11/11 |
+| RB-FIX-02 | `app/lsp/code_action_revision_spec.spl` | OK 12/12 |
+| RB-DIAG-01 | `compiler/diagnostics/diagnostic_rule_policy_parity_spec.spl` | OK 6/6 (policy parity; CLI/LSP/interpreter same-ID not proven end to end) |
+| RB-RATCHET-01 | gates `scripts/check/check-rt-dual-implementation-ratchet.shs`, `check-primitive-api-semantic-ratchet.shs` | not run; no reproducibility spec for the RB ratchet: missing |
+
+Missing: RB-BUILD-04, RB-LOAD-02, RB-RATCHET-01. Partial: RB-ORIGIN-03, RB-BUILD-03, RB-DIAG-01. Red: RB-UNIT-01 (known), RB-PLUGIN-03 (env), `sosix/text_boundary_spec` (RB-TEXT-01 sibling).
+
 Evidence classes per host/target: compile-only, link, load provider, execute. Perf targets: cold compile <= +3% CPU / +2% RSS, warm <= +1%; zero added runtime work for unconstrained ABI-compatible SFFI returns.
 
 ## 10. Stop conditions

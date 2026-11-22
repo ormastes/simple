@@ -3536,3 +3536,32 @@ Tables and method: `doc/08_tracking/bug/web_render_layout_census_html_css_layout
 - **Trap:** Engine2D's gray (`set_lcd_text(false)`) glyphs are ~0.4 px high and unhinted vs Chrome's A8 mask; the LCD subpixel mean is the closer mask.
 - **Open:** Chrome's mask sits ~0.3 px left for sigma >= 2; the `raster` lane still paints blurred layers sharp.
 - **Cost:** a blurred-shadow bare-text page now renders on Draw IR (~4.3 s cold at 1x vs 1.5 s on the raster lane, which drew it wrong); plain pages unchanged (byte-identical, 3.24 s both).
+
+## 2026-11-22 — Skia reference comparison runs (native qualification executable)
+
+- **Gate:** `sh scripts/check/check-skia-web-reference-compare.shs [--scene NAME]... [--out build/test-artifacts/vulkan_2d/<tag>]` with `SKIA_QUAL_BIN` and `SKIA_PROVIDER_SO`. Upstream Skia (Ganesh/Vulkan, pinned `35d5edfa…`) rasterises Simple's web DrawIR on the GB10; the readback SHA-256 must equal the Simple oracle constant read from `src/lib/common/renderdoc/*_oracle.spl`. Measured: web-box 16x16, corpus-case01 and corpus-case06 640x480 all `match`; corpus-case02 FAILs (`edge oracle mismatch`, known bug). Classifier authority: `src/app/ui/skia_reference_compare_receipt.spl`, spec `test/01_unit/app/ui/skia_reference_compare_receipt_spec.spl` (6/6); selftest 9 fixtures.
+- **Scope:** Skia leg vs oracle only. The Engine2D physical leg still blocks at device identity (Blocker 9 in `doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`).
+- **Native build:** `SIMPLE_NATIVE_BUILD_RUST=1 <seed> native-build ...` compiles the 506-file closure in ~30 s (the interpreted driver took hours). The seed then cannot link Vulkan/provider externs for a non-bootstrap entry (Blocker 8); the bug doc has the manual link recipe and why the Rust archive must come before the core-C one (argv owner).
+- **Traps:** the runner accepts only an output dir that is a direct child of `build/test-artifacts/vulkan_2d/` with `[A-Za-z0-9_-]` (else `worker-output-or-provider-domain-invalid`); in a `$(...)` under `set -e`, `cmd; echo $?` never reaches the echo — use `rc=0; cmd || rc=$?`; `vkCreateDevice` on the GB10 is intermittent, so workers are retried (default 3).
+- **Lost-half:** merge `e5b290e42a0` also dropped `gpu_provider_device_identity` from `nogc_sync_mut/gpu/provider.spl`; restored, pinned by `provider_spec` (6/6).
+
+## 2026-11-22 — Line-placed form controls hang from the device-px baseline (Chrome 159)
+
+- **Finding first:** the "default controls are 2-3 device rows off at k=4" gap was never a HEIGHT gap. Default heights were already Chrome's (k=4: input / button 85, select 75, textarea 150, checkbox 52). The TOPS were off: every atomic box on a line stayed at k x its CSS top.
+- **Chrome (device px, each control alone on a 16px/1.5 Liberation Sans line, k = 1 / 2 / 3 / 4):**
+  - line baseline (probed with an empty inline-block): 17 / 35 / 51 / 70. Not k x 17 (34, 51, 68).
+  - control baseline from its border-box top: input and button 15 / 30 / 44 / 60; select 14 / 28 / 41 / 55; checkbox, radio, textarea their bottom border edge.
+  - so the tops are: input, button 2 / 5 / 7 / 10; select 3 / 7 / 10 / 15; checkbox, radio 4 / 9 / 12 / 18; textarea 0.
+- **Rule:** device top = line device baseline - control device baseline. The control baseline is k x (border + padding) plus the control's own DEVICE strut (13.333px `normal`: 12, 24, 35, 48 — 35 at k=3, not 36, the subpixel borrow). A `<select>` has the upper half, rounded up, of its round(1.5k) inner block padding above the label: 1, 2, 3, 3. An auto-height `<button>` is measured from its bottom (its CSS box is 22 px at k=2, 43 device px).
+- **Fix:**
+  - `form_control_device_baseline_delta` (`..._layout_foundation.spl`): device baseline minus k x CSS baseline. `align_inline_line_device_dy` uses it for the control's ascent / descent and records `line_delta - baseline_delta` per control with `box_device_inline_dy_record`.
+  - The entry lives in the device-top table as `DEVICE_TOP_REL + dy`: whole device px RELATIVE to the nearest cursor-placed ancestor. `_html_draw_ir_device_top` (`..._paint_layout.spl`) adds every relative entry on the way up, so the frame and everything it owns move together. `box_device_top_shift` skips relative entries.
+  - A `<select>`'s label text gets its own relative entry (`form_control_label_device_dy`, recorded in the form-control branch of `..._layout_engine.spl`): the label sits on the line baseline, the frame one row lower at k=4.
+- **Trap — do not read a baseline off glyph rows.** The top row of an `O` differs by one between the two rasterisers; the empty inline-block probe gives the baseline as a number.
+- **Trap — k=3 is the scale that tells the rules apart.** At k = 2 and 4 the control's device strut equals k x CSS, so "add the line delta" passes; at k=3 the line delta is 0 and the whole move comes from the control's own strut (44 for 45).
+- **Not done (named, not hidden):**
+  - `<input type=submit value>` paints no label at all, at any scale (frame only).
+  - The value text of a text `<input>` is owned by the input and moves with the frame: one device row low at k=3 only (baseline delta -1), exact at k = 2 and 4.
+  - An `<img>` or inline-block on a text line still keeps k x its CSS top; the same rule applies (`bottom_edge_baseline` branch of `align_inline_line_device_dy`) but was left out of this lane.
+- **Spec:** `test/01_unit/browser_engine/form_control_height_dpr_chrome159_spec.spl` (4 cases; base 6b508da8f57 1/4 — the 1x guard — head 4/4).
+- **Catalog 4x:** forms-media 3.06 -> 3.04 (the checkbox and radio rows 664 -> 666, 793 -> 795 as in Chrome; the styled `padding:8px` controls already matched and did not move).
