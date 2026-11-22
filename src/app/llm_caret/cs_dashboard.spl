@@ -312,7 +312,10 @@ fn cs_handle_command(d: CsDashboard, line: text) -> (CsDashboard, text):
             extras_text = extras_text + " " + cs_quote_word_if_needed(launch_words[wi])
             wi = wi + 1
         val shown = display + extras_text
-        val agent_id = "a" + (d.agents.len() + 1).to_text()
+        var next_id = d.agents.len() + 1
+        while _resolve(d, "a" + next_id.to_text()) >= 0:
+            next_id = next_id + 1
+        val agent_id = "a" + next_id.to_text()
         val fresh = CsAgent(agent_id: agent_id, spec: shown,
             status: "pending: not launched", pid: -1, pane_id: "",
             cpu_pct: -1.0, rss_mb: -1, detail: "queued by /launch")
@@ -723,18 +726,26 @@ fn cs_refresh(d: CsDashboard) -> CsDashboard:
     for a in d.agents:
         var next = _unmeasured(a, "gone: pane closed", "pane " + a.pane_id +
             " is no longer listed")
-        if a.pane_id == "" and (a.status.starts_with("pending") or a.status.starts_with("gone") or a.status.starts_with("crashed")):
+        if a.pane_id == "" and (a.status.starts_with("pending") or a.status.starts_with("gone")):
             next = _unmeasured(a, a.status, a.detail)
         for pane in _find_pane(panes, a.pane_id, a.agent_id):
             next = _measured(a, pane, probe_pid)
         for rec in records:
             if rec.agent_id == a.agent_id and rec.state == "crashed":
-                next = _unmeasured(a, "crashed: exit " + rec.exit_code.to_text(),
-                    "container " + rec.name + " worktree " + rec.worktree_path + " preserved for /relaunch")
+                next = CsAgent(agent_id: a.agent_id, spec: a.spec,
+                    status: "crashed: exit " + rec.exit_code.to_text(), pid: -1,
+                    pane_id: "", cpu_pct: -1.0, rss_mb: -1,
+                    detail: "container " + rec.name + " worktree " + rec.worktree_path + " preserved for /relaunch")
             elif rec.agent_id == a.agent_id and rec.state == "exited-clean" and next.status.starts_with("gone"):
                 next = _unmeasured(a, "exited: clean (0)",
                     "container " + rec.name + " ready to /close")
         agents = agents + [next]
+    for rec in records:
+        if _resolve(d, rec.agent_id) < 0:
+            val status = if rec.state == "crashed": "crashed: exit " + rec.exit_code.to_text() else: rec.state
+            agents.push(CsAgent(agent_id: rec.agent_id, spec: rec.spec,
+                status: status, pid: rec.pid, pane_id: rec.pane_id, cpu_pct: -1.0,
+                rss_mb: -1, detail: rec.worktree_path))
     # The header derives agent and running counts from the roster itself.
     _with_screen(_dash(d, "connected: " + backend, agents, d.selected, d.log))
 
@@ -1008,7 +1019,12 @@ fn cs_reap_containers(d: CsDashboard) -> text:
         if rec.state == "crashed":
             note = note + "preserved crashed container " + rec.name + " worktree " + rec.worktree_path + "\n"
         else:
-            val (_ok, msg) = cs_container_close_record_v1(d.session, rec.agent_id, live_ids, false)
+            if rec.state == "running" and rec.pane_id != "" and live_ids.contains(rec.pane_id):
+                val killed = pane_kill(d.session, rec.pane_id)
+                if not killed and _live_pane_ids_for(d.session).contains(rec.pane_id):
+                    note = note + "could not close pane " + rec.pane_id + "\n"
+                    continue
+            val (_ok, msg) = cs_container_close_record_v1(d.session, rec.agent_id, live_ids, rec.state == "running")
             if msg != "" and not _ok:
                 note = note + msg + "\n"
     for a in d.agents:
@@ -1100,12 +1116,16 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
         val target_id = if words.len() > 1: words[1] else: ""
         val pane_id = if words.len() > 2: words[2] else: ""
         val live_before_close = _live_pane_ids_for(d.session)
+        var closing_live = false
+        for rec in cs_container_reconcile_v1(d.session, live_before_close):
+            if rec.agent_id == target_id or rec.name == target_id:
+                closing_live = rec.state == "running"
         if pane_id != "":
             val killed = pane_kill(d.session, pane_id)
             if not killed and _live_pane_ids_for(d.session).contains(pane_id):
                 return (cs_refresh(d), "could not close pane " + pane_id)
         val (cleaned, note) = cs_container_close_record_v1(d.session, target_id,
-            live_before_close, false)
+            live_before_close, closing_live)
         if not cleaned:
             return (cs_refresh(d), note)
         if cs_container_launched(d.session, target_id):
@@ -1143,9 +1163,15 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
         return (d, "pane backend refused to kill " + words[2] + container_note)
     if head == "container:reap-session":
         var reaped_local: [text] = []
-        for rec in cs_container_records_load_v1(d.session):
-            val (_ok, _msg) = cs_container_close_record_v1(d.session, rec.agent_id, [], true)
-            reaped_local.push(rec.name)
+        val live_ids = _live_pane_ids_for(d.session)
+        for rec in cs_container_reconcile_v1(d.session, live_ids):
+            if rec.state == "running" and rec.pane_id != "" and live_ids.contains(rec.pane_id):
+                val killed = pane_kill(d.session, rec.pane_id)
+                if not killed and _live_pane_ids_for(d.session).contains(rec.pane_id):
+                    continue
+            val (removed, _msg) = cs_container_close_record_v1(d.session, rec.agent_id, [], true)
+            if removed:
+                reaped_local.push(rec.name)
         if sosix_host_os() == "macos" and _which("podman") == "":
             if reaped_local.len() == 0:
                 return (cs_refresh(d), "no containers owned by session " + d.session)
