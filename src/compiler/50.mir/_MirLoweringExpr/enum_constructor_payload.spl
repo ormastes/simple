@@ -216,9 +216,50 @@ impl MirLowering:
                 case _: ()
         ""
 
+    me enum_keys_match_declaration_v1(left_key: text, right_key: text) -> bool:
+        if not self.enum_variant_index_q.has(left_key) or not self.enum_variant_index_q.has(right_key):
+            return false
+        val left_variants = self.enum_variant_index_q[left_key]
+        val right_variants = self.enum_variant_index_q[right_key]
+        if left_variants.len() != right_variants.len():
+            return false
+        if (self.generic_enum_constructor_owners.get(left_key) ?? false) != (self.generic_enum_constructor_owners.get(right_key) ?? false):
+            return false
+        val has_left_disc = self.enum_variant_discriminants_q.has(left_key)
+        val has_right_disc = self.enum_variant_discriminants_q.has(right_key)
+        if has_left_disc != has_right_disc:
+            return false
+        var vi = 0
+        while vi < left_variants.len():
+            val vname = left_variants[vi]
+            if vname != right_variants[vi]:
+                return false
+            if has_left_disc:
+                if self.enum_variant_discriminants_q[left_key][vi] != self.enum_variant_discriminants_q[right_key][vi]:
+                    return false
+            val lk = "{left_key}::{vname}"
+            val rk = "{right_key}::{vname}"
+            val lkind = self.enum_variant_payload_kind.get(lk) ?? ""
+            val rkind = self.enum_variant_payload_kind.get(rk) ?? ""
+            if lkind != rkind:
+                return false
+            val ltypes = self.enum_variant_payload_types.get(lk) ?? []
+            val rtypes = self.enum_variant_payload_types.get(rk) ?? []
+            if ltypes.len() != rtypes.len():
+                return false
+            var pi = 0
+            while pi < ltypes.len():
+                if not enum_payload_types_compatible(ltypes[pi], rtypes[pi]) or not enum_payload_types_compatible(rtypes[pi], ltypes[pi]):
+                    return false
+                pi = pi + 1
+            vi = vi + 1
+        true
+
     me enum_constructor_metadata_owner(enum_name: text) -> text:
         if self.enum_variant_index_q.has(enum_name) and self.enum_bare_of(enum_name) != enum_name:
             return enum_name
+        if (self.enum_bare_ambiguous.get(enum_name) ?? false):
+            return ""
         # A bare legacy constructor carries no declaration symbol. Do not
         # select the last registered sibling, even when its variants happen
         # to have identical names/discriminants but different payload types.
@@ -228,15 +269,13 @@ impl MirLowering:
                 if owner != "" and owner != key:
                     # Dual registration of ONE declaration writes both the bare
                     # key and the runtime_name key (module_lowering.spl step c)
-                    # with identical variant lists; that is not an ambiguity.
-                    # Prefer the qualified runtime_name, the canonical identity.
-                    # A genuine collision is two DIFFERENT qualified keys
-                    # sharing a bare tail — only that stays ambiguous.
-                    if key.contains(".") and not owner.contains("."):
-                        owner = key
-                        continue
-                    if owner.contains(".") and not key.contains("."):
-                        continue
+                    # with identical variants, discriminants, and payloads; a
+                    # bare sibling with differing declarations stays ambiguous.
+                    if (key.contains(".") and not owner.contains(".")) or (owner.contains(".") and not key.contains(".")):
+                        if self.enum_keys_match_declaration_v1(owner, key):
+                            if key.contains("."):
+                                owner = key
+                            continue
                     return ""
                 owner = key
         owner

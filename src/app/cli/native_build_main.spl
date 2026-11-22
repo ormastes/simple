@@ -1804,6 +1804,8 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
         return ""
     native_build_bind_cache_dirs_from_args_v1(args)
     native_build_publish_cache_scope_v1(simple_bin)
+    if not native_build_closure_ensure_published_for_shards_v1(args):
+        return ""
     val timeout_ms = native_build_timeout_ms(args)
     # Workers write no run evidence: the memory snapshot is O_EXCL (a worker
     # would take the parent's file); the phase profile and progress events belong to the
@@ -2463,9 +2465,10 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
                 native_build_env_restore_v1("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
                 native_build_env_restore_v1(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
                 return 1
-    # Bound every shard phase by the published closure (first-object latency,
-    # TODO #437): each shard is a process that pays start + load_sources
-    # before claiming one unit, so a tiny closure is faster in process.
+    # Bound every shard phase by the coordinator-published parse closure so
+    # each shard process reuses the preloaded closure without re-walking
+    # load_sources before claiming a unit; a tiny closure still runs faster
+    # in process.
     val presealed_mir_link = (env_get("SIMPLE_MIR_SHARD_LINK") ?? "") != ""
     val closure_files = native_build_closure_selected_count_v1()
     val small_closure_max = native_build_small_closure_max_v1(
@@ -3031,6 +3034,32 @@ pub fn native_build_coordinator_prepublish_closure_v1(worker_args: [text]) -> bo
         case Err(reason):
             eprint "error: " + reason
             false
+
+"""Return whether the current worker inherited a published parse closure."""
+@allow(primitive_api)
+pub fn native_build_shard_worker_closure_reused_v1() -> bool:
+    (env_get(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1) ?? "") == "1" and
+        (env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? "") != "" and
+        (env_get("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST") ?? "") != ""
+
+"""Ensure coordinator prepublishes entry closure before focused shard fan-out."""
+@allow(primitive_api)
+pub fn native_build_closure_ensure_published_for_shards_v1(args: [text]) -> bool:
+    val shard_child = native_build_shard_child_env_v1(
+        env_get("SIMPLE_PARSE_SHARD") ?? "",
+        env_get("SIMPLE_HIR_SHARD") ?? "",
+        env_get("SIMPLE_MIR_SHARD") ?? "")
+    if shard_child or native_build_shard_worker_closure_reused_v1():
+        return true
+    if tldr_imports_enabled_v1() or not args.contains("--entry-closure"):
+        return true
+    val cache_dir = if native_build_frontend_cache_dir_arg(args) != "":
+        native_build_frontend_cache_dir_arg(args)
+    else:
+        env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
+    if cache_dir == "":
+        return true
+    native_build_coordinator_prepublish_closure_v1(args)
 
 # Focused Stage3/Stage4 capsule child/link admission: validate an inherited
 # `SIMPLE_PARSE_CLOSURE_REQUEST` (or leave handoff empty when none was published)

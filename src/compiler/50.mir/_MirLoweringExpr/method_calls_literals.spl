@@ -2092,6 +2092,235 @@ impl MirLowering:
         self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, receiver_local)
         receiver_local
 
+    me emit_radix_digit_char_v1(digit: LocalId, ten: LocalId, code_zero: LocalId, code_a_base: LocalId, char_op: MirOperand) -> LocalId:
+        var b = self.builder
+        val ch_code = b.new_local(None, MirType.i64(), LocalKind.Var)
+        val hex_block = b.new_block(Some("to_string_radix_hex"))
+        val dec_block = b.new_block(Some("to_string_radix_dec"))
+        val join_block = b.new_block(Some("to_string_radix_digit_join"))
+        val is_hex = b.emit_binop(MirBinOp.Ge, mir_operand_copy(digit), mir_operand_copy(ten), MirType.bool())
+        b.terminate_if(mir_operand_copy(is_hex), hex_block, dec_block)
+        b.switch_to_block(hex_block)
+        val hc = b.emit_binop(MirBinOp.Add, mir_operand_copy(code_a_base), mir_operand_copy(digit), MirType.i64())
+        b.emit_copy(ch_code, hc)
+        b.terminate_goto(join_block)
+        b.switch_to_block(dec_block)
+        val dc = b.emit_binop(MirBinOp.Add, mir_operand_copy(code_zero), mir_operand_copy(digit), MirType.i64())
+        b.emit_copy(ch_code, dc)
+        b.terminate_goto(join_block)
+        b.switch_to_block(join_block)
+        val ch_str = b.emit_call_value(char_op, [mir_operand_copy(ch_code)], MirType.i64())
+        self.builder = b
+        ch_str
+
+    me lower_int_to_string_radix_v1(receiver: HirExpr, receiver_local: LocalId, args: [HirCallArg]) -> LocalId?:
+        if self.local_is_str(receiver_local):
+            return None
+        var is_int = false
+        var is_unsigned = false
+        var bits: i64 = 64
+        if val recv_ty = self.local_mir_type_of(receiver_local):
+            match recv_ty.kind:
+                case MirTypeKind.I8:
+                    is_int = true
+                    bits = 8
+                case MirTypeKind.I16:
+                    is_int = true
+                    bits = 16
+                case MirTypeKind.I32:
+                    is_int = true
+                    bits = 32
+                case MirTypeKind.I64:
+                    is_int = true
+                    bits = 64
+                case MirTypeKind.U8:
+                    is_int = true
+                    is_unsigned = true
+                    bits = 8
+                case MirTypeKind.U16:
+                    is_int = true
+                    is_unsigned = true
+                    bits = 16
+                case MirTypeKind.U32:
+                    is_int = true
+                    is_unsigned = true
+                    bits = 32
+                case MirTypeKind.U64:
+                    is_int = true
+                    is_unsigned = true
+                    bits = 64
+                case _: ()
+        var normalized_recv = receiver_local
+        if not is_int and not self.is_runtime_value_local(receiver_local.id):
+            if val decl_ty = self.receiver_declared_type(receiver):
+                match decl_ty.kind:
+                    case HirTypeKind.Int(decl_bits, decl_signed):
+                        if decl_signed or decl_bits < 64:
+                            var b_retype = self.builder
+                            val retyped = b_retype.new_temp(MirType.i64())
+                            b_retype.emit_copy(retyped, receiver_local)
+                            self.builder = b_retype
+                            normalized_recv = retyped
+                            is_int = true
+                            is_unsigned = not decl_signed
+                            bits = decl_bits
+                    case _: ()
+        if not is_int:
+            return None
+
+        val raw_radix = self.lower_expr(args[0].value)
+        if not self.array_slice_bound_is_integer(args[0].value, raw_radix):
+            self.error_fatal("to_string(radix) expects an integer radix", Some(args[0].value.span))
+            return Some(receiver_local)
+
+        var b = self.builder
+        val radix = b.emit_cast(mir_operand_copy(raw_radix), MirType.i64())
+        val zero = b.emit_const_int(0)
+        val one = b.emit_const_int(1)
+        val two = b.emit_const_int(2)
+        val ten = b.emit_const_int(10)
+        val radix_max = b.emit_const_int(36)
+        val code_zero = b.emit_const_int(48)
+        val code_a_base = b.emit_const_int(87)
+        val code_minus = b.emit_const_int(45)
+        val invalid_code = b.emit_const_int(-1)
+        val high_mask = b.emit_const_int(9223372036854775807)
+        val char_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_char_from_code"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+        val concat_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_string_concat"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+        val cstr_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_interp_cstr"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+        val panic_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_panic"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+
+        val check_max = b.new_block(Some("to_string_radix_check_max"))
+        val panic_block = b.new_block(Some("to_string_radix_invalid"))
+        val setup_block = b.new_block(Some("to_string_radix_setup"))
+        val loop_head = b.new_block(Some("to_string_radix_loop"))
+        val after_loop = b.new_block(Some("to_string_radix_after"))
+        val prepend_minus = b.new_block(Some("to_string_radix_neg_sign"))
+        val done_block = b.new_block(Some("to_string_radix_done"))
+
+        val ge_two = b.emit_binop(MirBinOp.Ge, mir_operand_copy(radix), mir_operand_copy(two), MirType.bool())
+        b.terminate_if(mir_operand_copy(ge_two), check_max, panic_block)
+
+        b.switch_to_block(check_max)
+        val le_max = b.emit_binop(MirBinOp.Le, mir_operand_copy(radix), mir_operand_copy(radix_max), MirType.bool())
+        b.terminate_if(mir_operand_copy(le_max), setup_block, panic_block)
+
+        b.switch_to_block(panic_block)
+        val panic_text = "to_string radix must be between 2 and 36"
+        val panic_msg = b.emit_const_str(panic_text)
+        b.emit_call(panic_op, [mir_operand_copy(panic_msg)], MirType.unit())
+        b.terminate_abort(panic_text)
+
+        b.switch_to_block(setup_block)
+        val acc = b.new_local(None, MirType.i64(), LocalKind.Var)
+        val empty_str = b.emit_call_value(char_op, [mir_operand_copy(invalid_code)], MirType.i64())
+        b.emit_copy(acc, empty_str)
+        val neg_val = b.new_local(None, MirType.i64(), LocalKind.Var)
+        val is_neg = b.new_local(None, MirType.bool(), LocalKind.Var)
+        val false_const = b.emit_const_bool(false)
+        b.emit_copy(is_neg, false_const)
+        val val_i64 = if is_unsigned:
+            val u64_tmp = b.emit_cast(mir_operand_copy(normalized_recv), MirType(kind: MirTypeKind.U64))
+            b.emit_cast(mir_operand_copy(u64_tmp), MirType.i64())
+        else:
+            b.emit_cast(mir_operand_copy(normalized_recv), MirType.i64())
+
+        if is_unsigned and bits == 64:
+            val u64_high = b.new_block(Some("to_string_radix_u64_high"))
+            val u64_nonneg = b.new_block(Some("to_string_radix_u64_nonneg"))
+            val high_bit = b.emit_binop(MirBinOp.Lt, mir_operand_copy(val_i64), mir_operand_copy(zero), MirType.bool())
+            b.terminate_if(mir_operand_copy(high_bit), u64_high, u64_nonneg)
+
+            b.switch_to_block(u64_high)
+            val shifted = b.emit_binop(MirBinOp.Shr, mir_operand_copy(val_i64), mir_operand_copy(one), MirType.i64())
+            val half = b.emit_binop(MirBinOp.BitAnd, mir_operand_copy(shifted), mir_operand_copy(high_mask), MirType.i64())
+            val bit0 = b.emit_binop(MirBinOp.BitAnd, mir_operand_copy(val_i64), mir_operand_copy(one), MirType.i64())
+            val q_half = b.emit_binop(MirBinOp.Div, mir_operand_copy(half), mir_operand_copy(radix), MirType.i64())
+            val prod_half = b.emit_binop(MirBinOp.Mul, mir_operand_copy(q_half), mir_operand_copy(radix), MirType.i64())
+            val rem_half = b.emit_binop(MirBinOp.Sub, mir_operand_copy(half), mir_operand_copy(prod_half), MirType.i64())
+            val rem_half2 = b.emit_binop(MirBinOp.Mul, mir_operand_copy(rem_half), mir_operand_copy(two), MirType.i64())
+            val total = b.emit_binop(MirBinOp.Add, mir_operand_copy(rem_half2), mir_operand_copy(bit0), MirType.i64())
+            val extra_q = b.emit_binop(MirBinOp.Div, mir_operand_copy(total), mir_operand_copy(radix), MirType.i64())
+            val extra_prod = b.emit_binop(MirBinOp.Mul, mir_operand_copy(extra_q), mir_operand_copy(radix), MirType.i64())
+            val d0 = b.emit_binop(MirBinOp.Sub, mir_operand_copy(total), mir_operand_copy(extra_prod), MirType.i64())
+            val q_half2 = b.emit_binop(MirBinOp.Mul, mir_operand_copy(q_half), mir_operand_copy(two), MirType.i64())
+            val q0 = b.emit_binop(MirBinOp.Add, mir_operand_copy(q_half2), mir_operand_copy(extra_q), MirType.i64())
+            val neg_q0 = b.emit_binop(MirBinOp.Sub, mir_operand_copy(zero), mir_operand_copy(q0), MirType.i64())
+            b.emit_copy(neg_val, neg_q0)
+            self.builder = b
+            val d0_ch = self.emit_radix_digit_char_v1(d0, ten, code_zero, code_a_base, char_op)
+            b = self.builder
+            val d0_acc = b.emit_call_value(concat_op, [mir_operand_copy(d0_ch), mir_operand_copy(acc)], MirType.i64())
+            b.emit_copy(acc, d0_acc)
+            b.terminate_goto(loop_head)
+
+            b.switch_to_block(u64_nonneg)
+            val u64_neg_init = b.emit_binop(MirBinOp.Sub, mir_operand_copy(zero), mir_operand_copy(val_i64), MirType.i64())
+            b.emit_copy(neg_val, u64_neg_init)
+            b.terminate_goto(loop_head)
+        elif is_unsigned:
+            val unsigned_neg_init = b.emit_binop(MirBinOp.Sub, mir_operand_copy(zero), mir_operand_copy(val_i64), MirType.i64())
+            b.emit_copy(neg_val, unsigned_neg_init)
+            b.terminate_goto(loop_head)
+        else:
+            val signed_neg = b.new_block(Some("to_string_radix_signed_neg"))
+            val signed_pos = b.new_block(Some("to_string_radix_signed_pos"))
+            val neg_flag = b.emit_binop(MirBinOp.Lt, mir_operand_copy(val_i64), mir_operand_copy(zero), MirType.bool())
+            b.emit_copy(is_neg, neg_flag)
+            b.terminate_if(mir_operand_copy(neg_flag), signed_neg, signed_pos)
+
+            b.switch_to_block(signed_neg)
+            b.emit_copy(neg_val, val_i64)
+            b.terminate_goto(loop_head)
+
+            b.switch_to_block(signed_pos)
+            val pos_init = b.emit_binop(MirBinOp.Sub, mir_operand_copy(zero), mir_operand_copy(val_i64), MirType.i64())
+            b.emit_copy(neg_val, pos_init)
+            b.terminate_goto(loop_head)
+
+        b.switch_to_block(loop_head)
+        val q = b.emit_binop(MirBinOp.Div, mir_operand_copy(neg_val), mir_operand_copy(radix), MirType.i64())
+        val prod = b.emit_binop(MirBinOp.Mul, mir_operand_copy(q), mir_operand_copy(radix), MirType.i64())
+        val rem = b.emit_binop(MirBinOp.Sub, mir_operand_copy(neg_val), mir_operand_copy(prod), MirType.i64())
+        val digit = b.emit_binop(MirBinOp.Sub, mir_operand_copy(zero), mir_operand_copy(rem), MirType.i64())
+        self.builder = b
+        val ch_str = self.emit_radix_digit_char_v1(digit, ten, code_zero, code_a_base, char_op)
+        b = self.builder
+        val next_acc = b.emit_call_value(concat_op, [mir_operand_copy(ch_str), mir_operand_copy(acc)], MirType.i64())
+        b.emit_copy(acc, next_acc)
+        b.emit_copy(neg_val, q)
+        val has_more = b.emit_binop(MirBinOp.Ne, mir_operand_copy(neg_val), mir_operand_copy(zero), MirType.bool())
+        b.terminate_if(mir_operand_copy(has_more), loop_head, after_loop)
+
+        b.switch_to_block(after_loop)
+        b.terminate_if(mir_operand_copy(is_neg), prepend_minus, done_block)
+
+        b.switch_to_block(prepend_minus)
+        val minus_str = b.emit_call_value(char_op, [mir_operand_copy(code_minus)], MirType.i64())
+        val neg_acc = b.emit_call_value(concat_op, [mir_operand_copy(minus_str), mir_operand_copy(acc)], MirType.i64())
+        b.emit_copy(acc, neg_acc)
+        b.terminate_goto(done_block)
+
+        b.switch_to_block(done_block)
+        val cstr_result = b.emit_call(cstr_op, [mir_operand_copy(acc)], MirType(kind: MirTypeKind.Opaque("str")))
+        self.builder = b
+        if val res_local = cstr_result:
+            self.remember_local_hir_type(res_local.id, HirType(kind: HirTypeKind.Str, span: receiver.span), 2, 0)
+            return Some(res_local)
+        None
+
     me array_concat_element_authority_v1(expression: HirExpr, local: LocalId) -> HirType?:
         # A direct empty literal has no element authority. A typed variable
         # or cast keeps its declared element type even when its value is empty.
@@ -5874,6 +6103,9 @@ impl MirLowering:
                         self.builder = b_conversion
                         if val conversion_local = conversion_result:
                             return conversion_local
+                if method == "to_string" and args.len() == 1:
+                    if val radix_local = self.lower_int_to_string_radix_v1(receiver, unresolved_receiver_local, args):
+                        return radix_local
 
                 # Primitive NUMERIC conversions (`to_u8`/`to_i32`/`to_u32`/
                 # `to_i64`/`to_f64`/...) have no MethodResolver entry either:

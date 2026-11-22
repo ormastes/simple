@@ -57,7 +57,6 @@ fn native_macho_plan_v1(arch: text, config: NativeLinkConfig, output: text) -> R
     if config.debug: return Err("internal engine: unsupported Mach-O config field 'debug'")
     if config.strip_output: return Err("internal engine: unsupported Mach-O config field 'strip_output'")
     if config.prefer_size_linker: return Err("internal engine: unsupported Mach-O config field 'prefer_size_linker'")
-    if config.retained_symbols.len() != 0: return Err("internal engine: unsupported Mach-O config field 'retained_symbols'")
     if config.runtime_path.contains("\0") or config.runtime_bundle.contains("\0"):
         return Err("internal engine: invalid Mach-O runtime selection")
     if config.runtime_path == "none" and config.runtime_bundle != "" and config.runtime_bundle != "auto":
@@ -73,11 +72,16 @@ fn native_macho_plan_v1(arch: text, config: NativeLinkConfig, output: text) -> R
     var sdk_root = ""
     var client_name: Option<text> = None
     var hosted_darwin_abi = false
+    var dead_strip = false
     var seen: {text: bool} = {}
     var index = 0
     while index < config.extra_flags.len():
         val flag = config.extra_flags[index]
         if flag.contains("\0"): return Err("internal engine: invalid Mach-O flag NUL")
+        if flag == "-dead_strip" or flag == "-Wl,-dead_strip":
+            dead_strip = true
+            index = index + 1
+            continue
         if flag != "-platform_version" and flag != "-e" and flag != "-rpath" and
                 flag != "--macho-signing-identifier" and flag != "--macho-max-image-bytes" and
                 flag != "-syslibroot" and flag != "-client_name" and flag != "--macho-hosted-darwin-abi":
@@ -114,6 +118,8 @@ fn native_macho_plan_v1(arch: text, config: NativeLinkConfig, output: text) -> R
                     return Err("internal engine: invalid Mach-O rpath")
                 rpaths.push(value)
         index = index + operands + 1
+    if not dead_strip and config.retained_symbols.len() != 0:
+        return Err("internal engine: unsupported Mach-O config field 'retained_symbols'")
     if minimum < 0xb0000 or sdk < minimum: return Err("internal engine: invalid Mach-O explicit macOS 11+ minimum/SDK versions required")
     if identifier == "": return Err("internal engine: invalid Mach-O explicit signing identifier required")
     if limit < 32768: return Err("internal engine: invalid Mach-O image byte budget")
@@ -121,7 +127,7 @@ fn native_macho_plan_v1(arch: text, config: NativeLinkConfig, output: text) -> R
     Ok(MachONativePlanV1(request: MachOHostedRequest(target: if arm: RelocArch.AArch64 else: RelocArch.X86_64,
         entry: entry, minimum_os: minimum, sdk: sdk, max_image_bytes: limit,
         identifier: identifier, rpaths: rpaths, allow_duplicate_definitions: config.allow_duplicate_definitions,
-        hosted_darwin_abi: hosted_darwin_abi), libraries: config.libraries,
+        hosted_darwin_abi: hosted_darwin_abi, dead_strip: dead_strip, retained_symbols: config.retained_symbols), libraries: config.libraries,
         library_paths: config.library_paths, runtime_path: config.runtime_path,
         runtime_bundle: config.runtime_bundle, verbose: config.verbose, sdk_root: sdk_root,
         client_name: client_name, hosted_darwin_abi: hosted_darwin_abi))

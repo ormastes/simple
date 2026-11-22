@@ -69,7 +69,7 @@ fn source_of(path: text) -> text:
     if not file_exists(path):
         fail("source not found at {path}; run from the repo root")
         return ""
-    return file_read(path)
+    file_read(path).replace("\r\n", "\n")
 
 fn count_of(haystack: text, needle: text) -> i64:
     haystack.split(needle).len() - 1
@@ -94,7 +94,7 @@ describe "C backend has no silent instruction fallback":
         step("Verify: names the terminal wildcard with the observed discriminant")
         val src = source_of(C_BACKEND)
         expect(src).to_contain("E-BACKEND-C-INST-Unknown")
-        expect(src).to_contain("rt_enum_discriminant(inst.kind)")
+        expect(src).to_contain("_sffi_enum_discriminant(inst.kind)")
 
     it "keeps Drop an EXPLICIT no-op rather than a wildcard casualty":
         # @req REQ-SSPEC-COMPILER
@@ -109,8 +109,13 @@ describe "LLVM text backend no longer drops instructions silently":
         step("replaced the terminal `case _: ()` that emitted nothing at all")
         step("Verify: replaced the terminal `case _: ()` that emitted nothing at all")
         val src = source_of(LLVM)
-        expect(count_of(src, "\n            case _: ()\n")).to_equal(0)
-        expect(src).to_contain("E-BACKEND-LLVM-INST-Unknown")
+        val fn_start = src.index_of("    me translate_instruction_at(") ?? -1
+        val fn_end = src.index_of("    me _unsupported_llvm_inst(") ?? -1
+        expect(fn_start).to_be_greater_than(-1)
+        expect(fn_end).to_be_greater_than(fn_start)
+        val body = src.substring(fn_start, fn_end)
+        expect(count_of(body, "\n            case _: ()\n")).to_equal(0)
+        expect(body).to_contain("E-BACKEND-LLVM-INST-Unknown")
 
     it "raises a NAMED, spanned diagnostic per unlowered variant":
         # @req REQ-SSPEC-COMPILER
