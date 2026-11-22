@@ -170,32 +170,32 @@ fn must_use_nested(block: HirBlock, scope: MustUseScope) -> [MustUseFinding]:
         out = must_use_extend(out, must_use_classify(block.value, scope))
     out
 
-# Module a `use` path names, deterministically. An exact match on the map key
-# or the HIR module name wins (smallest key when several modules share the
-# name); otherwise the longest segment-boundary suffix match wins (path ends
-# with "." + key/name), ties broken by the smallest key. "" when the module is
-# not in the scanned set. Dict iteration order never decides the result.
+# Module a `use` path names, or "" when that cannot be decided. An exact map
+# key wins outright (one hashed lookup, the common case). Otherwise exactly one
+# module whose HIR name equals the path wins; failing that, exactly one module
+# matching on a segment boundary (path ends with "." + key/name). Two or more
+# candidates at the deciding tier are ambiguous and yield "" (no finding, never
+# a guessed module), so Dict iteration order never decides the result.
 fn must_use_find_module(modules: Dict<text, HirModule>, path: text) -> text:
-    var exact = ""
-    var best = ""
-    var best_len = -1
+    if modules.contains_key(path):
+        return path
+    var named = ""
+    var named_count = 0
+    var suffix = ""
+    var suffix_count = 0
     for key in modules.keys():
         val m: HirModule = modules[key]
-        if key == path or (m.name != "" and m.name == path):
-            if exact == "" or key < exact:
-                exact = key
-            continue
-        var matched_len = -1
-        if path.ends_with("." + key):
-            matched_len = key.len()
-        if m.name != "" and path.ends_with("." + m.name) and m.name.len() > matched_len:
-            matched_len = m.name.len()
-        if matched_len > best_len or (matched_len == best_len and matched_len >= 0 and key < best):
-            best = key
-            best_len = matched_len
-    if exact != "":
-        return exact
-    best
+        if m.name != "" and m.name == path:
+            named = key
+            named_count = named_count + 1
+        elif path.ends_with("." + key) or (m.name != "" and path.ends_with("." + m.name)):
+            suffix = key
+            suffix_count = suffix_count + 1
+    if named_count == 1:
+        return named
+    if named_count == 0 and suffix_count == 1:
+        return suffix
+    ""
 
 # Scans every function body in `modules` (impl/class methods are merged into
 # `module.functions`). `marked` is the caller-supplied `@must_use` name set;
