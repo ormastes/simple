@@ -1,0 +1,74 @@
+"""
+## Purpose and audience
+Purpose: Pin where the SECOND line of a wrapped block, and the block after it,
+land at device scale 4 when the first line holds a taller inline box, against
+Chrome 159. At `--force-device-scale-factor=4` a 16px/1.5 Liberation Sans line
+that also holds a 16px monospace `<code>` is 97 device px high (24.25 CSS px),
+not 96: the `code` box reaches one device px further than the strut. Chrome
+moves everything below that line down by the extra device px: line 2 of the
+same block and the next block. This engine applies the extra device px to a
+one-line block (`device_px_block_height_chrome159_spec`), but a block that
+wraps keeps 96 + 96, so its second line and every block after it sit one
+device px high. Catalog css-layout at 4x: each `<li><code>..</code> text`
+second line is one device row high (about 3.2k mismatched px per line).
+Audience: web renderer layout / device-scale maintainers (layout_engine,
+layout_foundation `box_device_extra_h_*` / `text_device_dy_*`).
+
+Chrome oracle (Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=4
+--window-size=500,300`, the page below). `getBoundingClientRect()`, CSS px:
+div y=72 h=48.25; `wrap` (line 2) y=99.25; `tail` p y=120.25. At K=1 the same
+boxes are h=48, y=99 and y=120.
+
+Measured from the screenshot, device px: first row holding a pixel with red
+< 128 in columns 40..900 of each band. Chrome: line 1 (`a b c ..`) 24, the
+wrapped line 409, `tail` 505. Base (ecff7320c13): 24, 408, 504.
+"""
+
+"""
+Traceability: REQ-WEB-DPR4-WRAP-LINE-H-001 — at device scale k>1 a wrapped block keeps the device-px height of each of its lines, so line 2 and the next block start where Chrome's do.
+"""
+# @tag: unit, browser_engine, layout, device_scale, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 500
+val CSS_H: i32 = 150
+
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000;font:16px/1.5 'Liberation Sans'}} p{{margin:0 0 0 10px}} div{{margin:0 0 0 10px;width:200px}}</style></head><body>" +
+    "<p>a b c d e f g h</p><p>x — y</p><p>— y</p>" +
+    "<div><code>ab</code> plain words here that wrap onto a second line</div><p>tail</p></body></html>"
+
+fn _red(px: u32) -> i32:
+    ((px >> 16u32) & 0xFFu32) as i32
+
+# First device row in y0..y1 that holds ink (red < 128) in columns 40..900.
+fn _first_ink_row(px: [u32], y0: i32, y1: i32) -> i32:
+    val w = CSS_W * 4
+    if px.len() != (w * CSS_H * 4) as i64:
+        return -2
+    var y = y0
+    while y < y1:
+        var x = 40
+        while x < 900:
+            if _red(px[y * w + x]) < 128:
+                return y
+            x = x + 1
+        y = y + 1
+    -1
+
+describe "Wrapped block keeps each line's device-px height at device scale 4 (Chrome 159)":
+    it "AC-1 (guard): the first line of the page starts on Chrome's device row 24":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 4, "cpu_simd")
+        expect(_first_ink_row(px, 0, 96)).to_equal(24)
+
+    it "AC-2: the line after a `code` + text line starts on Chrome's device row 409":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 4, "cpu_simd")
+        expect(_first_ink_row(px, 380, 480)).to_equal(409)
+
+    it "AC-3: the block after the wrapped block starts on Chrome's device row 505":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 4, "cpu_simd")
+        expect(_first_ink_row(px, 480, 576)).to_equal(505)

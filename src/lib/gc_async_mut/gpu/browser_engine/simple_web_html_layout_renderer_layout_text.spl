@@ -1286,6 +1286,8 @@ fn compute_style_wrap_ranges_float_band(txt: text, full_w: i32, line_boxes: [i32
                 used = used + by[endv]
                 if tb[endv] == 32:
                     last_space = endv
+                elif wrap_hyphen_break_after(tb, endv, n):
+                    last_space = endv + 1
                 endv = endv + 1
             # As in the normal wrap: break at the last space that fits; with
             # no break opportunity on the line the whole word is taken and
@@ -1425,6 +1427,8 @@ fn _lay_compute_style_wrap_ranges_first_inner(txt: text, first_width: i32, max_w
             used = used + by[endv]
             if tb[endv] == 32:
                 last_space = endv
+            elif wrap_hyphen_break_after(tb, endv, n):
+                last_space = endv + 1
             endv = endv + 1
         # CSS Text 3 `overflow-wrap: normal` (the initial value) forbids a break
         # INSIDE a word: a word wider than the line OVERFLOWS it, it is not
@@ -1492,15 +1496,37 @@ fn first_word_advance_width(node: HNode, st: Style) -> i32:
         k = k + 1
     w
 
-# Byte offset one past the last byte of the word that starts at `start`, i.e.
-# the next ASCII space at or after `start`, or `n` when the run has none. Used
-# by the `overflow-wrap: normal` arm above, where a word that does not fit the
-# line must overflow it whole rather than be cut.
+# True when a line may break AFTER the U+002D at byte `p` (UAX #14 class HY).
+# Measured in Chrome 159 on 1px-wide boxes. Breaks: `ab-|cd`, `ab-|12`,
+# `12-|34`, `ab-|-|cd`, `-|cd`, `ab-|(cd`, `ab-|"cd`, `ab-|=cd`. No break:
+# `-12` and `q -12` (a number's sign), a hyphen before closing or separating
+# punctuation (`,` `.` `)` `]` `}` `/` `!` `;` `:` `?` `$`), and a hyphen at
+# the end of the run.
+fn wrap_hyphen_break_after(tb: [u8], p: i32, n: i32) -> bool:
+    if tb[p] != 45 or p + 1 >= n:
+        return false
+    val b = tb[p + 1]
+    if b == 32 or b == 44 or b == 46 or b == 41 or b == 93 or b == 125 or b == 47 or b == 33 or b == 59 or b == 58 or b == 63 or b == 36:
+        return false
+    if b >= 48 and b <= 57:
+        if p == 0:
+            return false
+        val a = tb[p - 1]
+        return (a >= 48 and a <= 57) or (a >= 65 and a <= 90) or (a >= 97 and a <= 122) or a >= 128
+    true
+
+# Byte offset one past the last byte of the unbreakable piece that starts at
+# `start`: the next ASCII space at or after `start`, one past a hyphen a line
+# may break after, or `n` when the run has neither. Used by the
+# `overflow-wrap: normal` arm above, where a piece that does not fit the line
+# must overflow it whole rather than be cut.
 fn word_end_byte(tb: [u8], start: i32, n: i32) -> i32:
     var k = start
     while k < n:  # cpu-lane-loop-ok: scans one word of one text run, bounded by that run's byte length
         if tb[k] == 32:
             return k
+        if wrap_hyphen_break_after(tb, k, n):
+            return k + 1
         k = k + 1
     n
 
