@@ -15,9 +15,11 @@ session recompiled all 17 SPIR-V shaders and 17 compute pipelines, overwriting
 and resetting `self.ref_count = 1`.
 
 Both `VulkanSessionBackend.init_device()` (`if self.initialized and self.handle != 0`)
-and `VulkanSession.init()` (`if self.is_initialized and self.device > 0`, verified
-against `vulkan_get_device()` so an externally shut-down or replaced runtime
-device cleans up stale handles and re-initializes cleanly) are now idempotent,
+and `VulkanSession.init()` (`if self.is_initialized and self.device > 0`, short-circuiting
+for device-free mock sessions with `selected_device_index < 0` and verifying
+`vulkan_get_device() == self.device` for runtime-bound sessions; on mismatch it
+calls `_reset_local_handles()` without `vulkan_sffi_destroy_*` so a replacement
+device's 1-based shader/pipeline slots are never destroyed) are now idempotent,
 preserving live handles, pipeline state, and reference counts while clearing
 stale error strings until explicit cleanup/release.
 

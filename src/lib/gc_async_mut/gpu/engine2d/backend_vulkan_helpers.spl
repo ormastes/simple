@@ -1792,17 +1792,28 @@ impl VulkanBackend:
         # Render glyphs into host buffer using shared glyph module
         render_text_to_buffer(self.host_buf, self.w, self.h, x, y, text_val, color, font_size)
 
-        # Upload entire host buffer back to GPU and invalidate cached checksum
+        # Upload entire host buffer back to GPU and maintain mirror authority
         val fb_size = _i64(self.w) * _i64(self.h) * 4
         val upload_bytes = _pixels_to_bytes(self.host_buf, _i64(self.w) * _i64(self.h))
         val uploaded = vulkan_sffi_copy_to_buffer(self.d_framebuffer, upload_bytes, 0)
-        self.host_mirror_valid = false
-        self.host_mirror_frame_fresh = false
         self.note_damage_full()
-        if not uploaded:
-            self.last_error = "legacy-text-host-framebuffer-upload-failed: {vulkan_sffi_last_error()}"
+        if uploaded:
+            self.host_mirror_valid = false
+            self.host_mirror_frame_fresh = false
+            self.dirty = true
+        else:
+            var checksum: i64 = 0
+            var ci: i64 = 0
+            while ci < self.host_buf.len().to_i64():
+                val cpx = (self.host_buf[ci] as i64) & 4294967295
+                checksum = (checksum + cpx) % 2147483647
+                ci = ci + 1
+            self.last_host_checksum = checksum
+            self.host_mirror_valid = true
+            self.host_mirror_frame_fresh = true
             self.cpu_fallback_host_surface = true
-        self.dirty = true
+            self.last_error = "legacy-text-host-framebuffer-upload-failed: {vulkan_sffi_last_error()}"
+            self.dirty = true
 
 # ============================================================================
 # Type Conversion Helpers
