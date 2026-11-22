@@ -5,6 +5,8 @@
 use std.common.crypto.sha256.{sha256_bytes}
 use std.common.crypto.types.{bytes_to_hex, crypto_bytes_to_text as bytes_to_text}
 use std.nogc_sync_mut.composition.types.{SimpleAppRecordV1, SimpleInterfaceGroupRecordV1, SimpleProviderRecordV1, SimpleBindingRecordV1, SimpleCliCommandRecordV1, SimpleCompositionImageV1, CompositionReadResultV1, composition_diagnostic_v1, composition_read_error_v1}
+use std.nogc_sync_mut.composition.cli_option_route.{SCI_SECTION_CLI_OPTION_ROUTE_V1}
+use std.nogc_sync_mut.composition.cli_option_route_view.{empty_cli_option_route_view_v1, cli_option_route_view_from_bytes_v1}
 
 val SCI_HEADER_SIZE_V1: i64 = 96
 val SCI_DIRECTORY_ENTRY_SIZE_V1: i64 = 48
@@ -176,21 +178,35 @@ fn _push_directory(out: [u8], section_type: i64, offset: i64, payload: [u8]):
     _append_digest(out, _digest(payload))
 
 pub fn encode_composition_image_v1(image: SimpleCompositionImageV1) -> [u8]:
+    _encode_image_v1(image, [], false)
+
+# Encodes the image with an admitted section-10 route table. The caller's section
+# bytes are verified before encoding; an unverifiable section is refused.
+pub fn encode_composition_image_with_cli_option_route_v1(image: SimpleCompositionImageV1, section: [u8]) -> Result<[u8], text>:
+    val view = cli_option_route_view_from_bytes_v1(section)
+    if not view.handle.ok or not view.integrity_verified:
+        return Err("composition-error: cli-option-route: " + view.handle.error_code)
+    Ok(_encode_image_v1(image, section, true))
+
+fn _encode_image_v1(image: SimpleCompositionImageV1, route_section: [u8], has_route: bool) -> [u8]:
     val payload = _encode_apps(image)
     val provider_cli = _encode_provider_cli(image)
-    val has_provider_cli = image.interface_groups.len() > 0 or image.providers.len() > 0 or image.bindings.len() > 0 or image.commands.len() > 0
-    val section_count = if has_provider_cli: 2 else: 1
+    val has_provider_cli = has_route or image.interface_groups.len() > 0 or image.providers.len() > 0 or image.bindings.len() > 0 or image.commands.len() > 0
+    val section_count = 1 + (if has_provider_cli: 1 else: 0) + (if has_route: 1 else: 0)
     val schema_digest = _digest(_text_bytes("simple.composition/1"))
     val payload_offset = SCI_HEADER_SIZE_V1 + section_count * SCI_DIRECTORY_ENTRY_SIZE_V1
     val provider_cli_offset = payload_offset + payload.len()
-    val total_size = provider_cli_offset + (if has_provider_cli: provider_cli.len() else: 0)
+    val route_offset = provider_cli_offset + (if has_provider_cli: provider_cli.len() else: 0)
+    val total_size = route_offset + (if has_route: route_section.len() else: 0)
     var directories: [u8] = []
     _push_directory(directories, SCI_SECTION_APPS_V1, payload_offset, payload)
     if has_provider_cli: _push_directory(directories, SCI_SECTION_PROVIDER_CLI_V1, provider_cli_offset, provider_cli)
+    if has_route: _push_directory(directories, SCI_SECTION_CLI_OPTION_ROUTE_V1, route_offset, route_section)
     var composition: [u8] = []
-    if has_provider_cli: _append_bytes(composition, directories)
+    if section_count > 1: _append_bytes(composition, directories)
     _append_bytes(composition, payload)
     if has_provider_cli: _append_bytes(composition, provider_cli)
+    if has_route: _append_bytes(composition, route_section)
     val payload_digest = _digest(composition)
     var out: [u8] = []
     out.push(83)
@@ -212,7 +228,14 @@ pub fn encode_composition_image_v1(image: SimpleCompositionImageV1) -> [u8]:
     _append_bytes(out, directories)
     _append_bytes(out, payload)
     if has_provider_cli: _append_bytes(out, provider_cli)
+    if has_route: _append_bytes(out, route_section)
     out
+
+# Returns the admitted section-10 bytes of an image; Err when the image carries none.
+pub fn admitted_composition_cli_option_route_section_v1(image: SimpleCompositionImageV1) -> Result<[u8], text>:
+    if image.cli_option_route_view.handle.ok and image.cli_option_route_view.integrity_verified:
+        return Ok(image.cli_option_route_view.bytes)
+    Err("SCI_CLI_OPTION_ROUTE_SECTION: section 10 is missing")
 
 class _SciCursorV1:
     data: [u8]
@@ -390,7 +413,7 @@ fn _decode_provider_cli(image: SimpleCompositionImageV1, data: [u8], offset: i64
         commands.push(SimpleCliCommandRecordV1(command_name: name, aliases: aliases, summary: summary, binding_service_id: binding, interface_group_id: group))
         i = i + 1
     if cur.pos != cur.end: return Err("composition-error: malformed-section: trailing bytes")
-    Ok(SimpleCompositionImageV1(schema: image.schema, profile: image.profile, apps: image.apps, interface_groups: groups, providers: providers, bindings: bindings, commands: commands, bytes: data, composition_digest: image.composition_digest))
+    Ok(SimpleCompositionImageV1(schema: image.schema, profile: image.profile, apps: image.apps, interface_groups: groups, providers: providers, bindings: bindings, commands: commands, cli_option_route_view: empty_cli_option_route_view_v1(), bytes: data, composition_digest: image.composition_digest))
 
 fn _decode_apps(data: [u8], offset: i64, length: i64) -> Result<SimpleCompositionImageV1, text>:
     val cur = _SciCursorV1(data: data, pos: offset, end: offset + length, error: "")
@@ -423,7 +446,7 @@ fn _decode_apps(data: [u8], offset: i64, length: i64) -> Result<SimpleCompositio
         apps.push(SimpleAppRecordV1(app_id: app_id, display_name: name, artifact_path: artifact, icon: icon, shortcut: shortcut, associations: associations, capabilities: capabilities))
         i = i + 1
     if cur.pos != cur.end: return Err("composition-error: malformed-section: trailing bytes")
-    Ok(SimpleCompositionImageV1(schema: schema, profile: profile, apps: apps, interface_groups: [], providers: [], bindings: [], commands: [], bytes: data, composition_digest: _digest_hex(_copy_range(data, offset, length))))
+    Ok(SimpleCompositionImageV1(schema: schema, profile: profile, apps: apps, interface_groups: [], providers: [], bindings: [], commands: [], cli_option_route_view: empty_cli_option_route_view_v1(), bytes: data, composition_digest: _digest_hex(_copy_range(data, offset, length))))
 
 fn _copy_range(data: [u8], offset: i64, length: i64) -> [u8]:
     var out: [u8] = []
@@ -460,6 +483,8 @@ fn decode_composition_image_v1(data: [u8]) -> CompositionReadResultV1:
     var app_length = -1
     var provider_cli_offset = -1
     var provider_cli_length = -1
+    var route_offset = -1
+    var route_length = -1
     var composition_bytes: [u8] = []
     var has_unknown_optional = false
     var i = 0
@@ -494,6 +519,11 @@ fn decode_composition_image_v1(data: [u8]) -> CompositionReadResultV1:
             if provider_cli_offset >= 0: return composition_read_error_v1("SCI_DUPLICATE_SECTION", "provider-cli", "duplicate provider/CLI section")
             provider_cli_offset = offset
             provider_cli_length = length
+        elif section_type == SCI_SECTION_CLI_OPTION_ROUTE_V1:
+            if section_version != 1: return composition_read_error_v1("SCI_SECTION_VERSION", "cli-option-route", "unsupported cli-option-route section version")
+            if route_offset >= 0: return composition_read_error_v1("SCI_DUPLICATE_SECTION", "cli-option-route", "duplicate cli-option-route section")
+            route_offset = offset
+            route_length = length
         elif (flags & SCI_SECTION_REQUIRED_V1) != 0:
             return composition_read_error_v1("SCI_REQUIRED_SECTION", section_type.to_text(), "unsupported required section")
         else:
@@ -514,11 +544,19 @@ fn decode_composition_image_v1(data: [u8]) -> CompositionReadResultV1:
                 match _decode_provider_cli(image, data, provider_cli_offset, provider_cli_length):
                     case Err(e): return composition_read_error_v1("SCI_PROVIDER_CLI_SECTION", "provider-cli", e)
                     case Ok(value): decoded = value
+            var route_section: [u8] = []
+            var route_view = empty_cli_option_route_view_v1()
+            if route_offset >= 0:
+                route_section = _copy_range(data, route_offset, route_length)
+                route_view = cli_option_route_view_from_bytes_v1(route_section)
+                if not route_view.handle.ok or not route_view.integrity_verified:
+                    val route_message = if route_view.handle.error_message != "": route_view.handle.error_message else: "digest mismatch"
+                    return composition_read_error_v1("SCI_CLI_OPTION_ROUTE_SECTION", "cli-option-route", route_message)
             if _encode_apps(decoded) != _copy_range(data, app_offset, app_length):
                 return composition_read_error_v1("SCI_NON_CANONICAL", "apps", "application section is not canonical")
             if provider_cli_offset >= 0 and _encode_provider_cli(decoded) != _copy_range(data, provider_cli_offset, provider_cli_length):
                 return composition_read_error_v1("SCI_NON_CANONICAL", "provider-cli", "provider/CLI section is not canonical")
-            if not has_unknown_optional and encode_composition_image_v1(decoded) != data:
+            if not has_unknown_optional and _encode_image_v1(decoded, route_section, route_offset >= 0) != data:
                 return composition_read_error_v1("SCI_NON_CANONICAL", "image", "composition image is valid but not canonically encoded")
-            val accepted = SimpleCompositionImageV1(schema: decoded.schema, profile: decoded.profile, apps: decoded.apps, interface_groups: decoded.interface_groups, providers: decoded.providers, bindings: decoded.bindings, commands: decoded.commands, bytes: data, composition_digest: _digest_hex(authenticated))
+            val accepted = SimpleCompositionImageV1(schema: decoded.schema, profile: decoded.profile, apps: decoded.apps, interface_groups: decoded.interface_groups, providers: decoded.providers, bindings: decoded.bindings, commands: decoded.commands, cli_option_route_view: route_view, bytes: data, composition_digest: _digest_hex(authenticated))
             CompositionReadResultV1(ok: true, image: accepted, diagnostic: composition_diagnostic_v1("SCI_OK", "image", "composition image accepted"))

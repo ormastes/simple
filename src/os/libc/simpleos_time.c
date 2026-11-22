@@ -19,6 +19,12 @@ extern int64_t simpleos_syscall(int64_t, int64_t, int64_t, int64_t,
                                  int64_t, int64_t);
 extern int errno;
 
+/* Set errno from a negative syscall result and return -1 */
+static int set_errno_from_result(int64_t r) {
+    errno = (int)(-r);
+    return -1;
+}
+
 /* ====================================================================
  * 1. Clock / time syscalls
  * ==================================================================== */
@@ -31,10 +37,7 @@ int clock_gettime(clockid_t clk_id, struct timespec *tp) {
     int64_t buf[2] = {0, 0}; /* [seconds, nanoseconds] */
     int64_t r = simpleos_syscall(50, (int64_t)clk_id, (int64_t)(uintptr_t)buf,
                                   0, 0, 0);
-    if (r < 0) {
-        errno = (int)(-r);
-        return -1;
-    }
+    if (r < 0) return set_errno_from_result(r);
     tp->tv_sec  = (time_t)buf[0];
     tp->tv_nsec = (long)buf[1];
     return 0;
@@ -78,10 +81,7 @@ int nanosleep(const struct timespec *req, struct timespec *rem) {
     }
     int64_t nanos = (int64_t)req->tv_sec * nanos_per_second + (int64_t)req->tv_nsec;
     int64_t result = simpleos_syscall(51, nanos, 0, 0, 0, 0);
-    if (result < 0) {
-        errno = (int)(-result);
-        return -1;
-    }
+    if (result < 0) return set_errno_from_result(result);
     if (rem) {
         /* Kernel sleep has no partial-remainder receipt; only report zero
          * after an acknowledged completion. */

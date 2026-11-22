@@ -1,0 +1,77 @@
+"""
+## Purpose and audience
+Purpose: Prove RB-ORIGIN-03, a foreign value crosses exactly one boundary check.
+Reaching a unit through an approved adapter yields zero findings downstream, and
+a value that skips the adapter yields exactly one SPL-BOUND-002 at the cast
+site, however many helpers it passes through or how often it is copied.
+Audience: compiler and tooling engineers maintaining robust-boundary lints.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Single-file origin summaries only (same scope as bound_late_cast_spec.spl).
+Plan: doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md section 9.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.semantics.lint.bound_late_cast.{check_bound_late_casts, BoundLateCastFinding}
+
+fn _count(fs: [BoundLateCastFinding], code: text) -> i64:
+    var n = 0
+    for f in fs:
+        if f.code == code:
+            n = n + 1
+    n
+
+# @manual_section: bound_single_boundary_check
+describe "RB-ORIGIN-03: one boundary check per foreign value":
+    """The adapter is the single check; nothing before or after repeats it."""
+
+    it "reports no finding for any use of the value after the adapter":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint an adapter whose unit result is passed through three typed callers")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\n@unsafe(reason: \"verified C ABI\", capabilities: [ffi])\nfn hal() -> Km:\n    Km(c_read())\nfn a() -> Km:\n    hal()\nfn b() -> Km:\n    val v = a()\n    v\nfn c() -> Km:\n    b()\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)
+
+    it "reports exactly one finding for a value cast without the adapter":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a raw extern result cast once in a safe function")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn late() -> Km:\n    val raw = c_read()\n    Km(raw)\n"
+        val fs = check_bound_late_casts(src, "app/km.spl")
+        expect(fs.len()).to_equal(1)
+        expect(fs[0].code).to_equal("SPL-BOUND-002")
+
+    it "reports one finding however many helpers and copies the value passes through":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a value routed through two helpers and two copies before a single cast")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn h1() -> i32:\n    c_read()\nfn h2() -> i32:\n    val v = h1()\n    v\nfn late() -> Km:\n    val a = h2()\n    val b = a\n    Km(b)\n"
+        val fs = check_bound_late_casts(src, "app/km.spl")
+        expect(_count(fs, "SPL-BOUND-002")).to_equal(1)
+        expect(fs[fs.len() - 1].line_num).to_equal(11)
+
+    it "does not double-report the raw escape and the late cast of the same value":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a function that casts the extern value and returns the unit")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn late() -> Km:\n    val raw = c_read()\n    Km(raw)\n"
+        val fs = check_bound_late_casts(src, "app/km.spl")
+        expect(_count(fs, "SPL-BOUND-001")).to_equal(0)
+        expect(_count(fs, "SPL-BOUND-002")).to_equal(1)
+
+    it "counts one finding per cast site, not per use of the foreign name":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint a foreign name read three times with one cast")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\nfn late() -> Km:\n    val raw = c_read()\n    val x = raw + 1\n    val y = raw + 2\n    Km(raw)\n"
+        expect(_count(check_bound_late_casts(src, "app/km.spl"), "SPL-BOUND-002")).to_equal(1)
+
+    it "reports each independent unchecked value once":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint two separate extern values each cast once")
+        val src = "unit Km: i32 as km\nextern fn c_a() -> i32\nextern fn c_b() -> i32\nfn late() -> Km:\n    val a = c_a()\n    val b = c_b()\n    Km(a)\n    Km(b)\n"
+        expect(_count(check_bound_late_casts(src, "app/km.spl"), "SPL-BOUND-002")).to_equal(2)
+
+    it "stays silent when the value is checked at the boundary and not cast again":
+        # @req: REQ-DIAG-POLICY-001
+        step("Lint adapter result then a Simple-origin arithmetic use")
+        val src = "unit Km: i32 as km\nextern fn c_read() -> i32\n@unsafe(reason: \"verified C ABI\", capabilities: [ffi])\nfn hal() -> Km:\n    Km(c_read())\nfn use_it() -> i32:\n    val k = hal()\n    val n = 3\n    n + 1\n"
+        expect(check_bound_late_casts(src, "app/km.spl").len()).to_equal(0)

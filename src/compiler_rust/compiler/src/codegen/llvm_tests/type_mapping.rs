@@ -36,7 +36,7 @@ fn test_pointer_width_32bit() {
 }
 
 /// RuntimeValue matches the C runtime's `uint64_t` even where pointers are
-/// 32-bit (cross_compile_linker_matrix_2026-11-17 item (b): i686 Windows).
+/// 32-bit on hosted targets and wasm32 (cross_compile_linker_matrix_2026-11-17 item (b): i686 Windows).
 #[test]
 #[cfg(feature = "llvm")]
 fn test_runtime_value_is_i64_on_32bit_targets() {
@@ -45,6 +45,27 @@ fn test_runtime_value_is_i64_on_32bit_targets() {
         let backend = LlvmBackend::new(target).unwrap();
         assert_eq!(backend.pointer_width(), 32, "{triple}");
         assert_eq!(backend.runtime_int_type().get_bit_width(), 64, "{triple}");
+    }
+}
+
+/// Freestanding / bare-metal 32-bit targets (`x86_32`, `arm32`, `riscv32` on
+/// `SimpleOS` / `None`) match their 32-bit `typedef int32_t RuntimeValue` /
+/// `intptr_t` stubs and pure-Simple kernel value shims.
+#[test]
+#[cfg(feature = "llvm")]
+fn test_runtime_value_is_i32_on_freestanding_32bit_targets() {
+    for arch in [TargetArch::Riscv32, TargetArch::Arm, TargetArch::X86] {
+        for os in [TargetOS::SimpleOS, TargetOS::None] {
+            let target = Target::new(arch, os);
+            let backend = LlvmBackend::new(target).unwrap();
+            assert_eq!(backend.pointer_width(), 32, "{arch}-{os}");
+            assert_eq!(backend.runtime_int_type().get_bit_width(), 32, "{arch}-{os}");
+        }
+    }
+    for arch in [TargetArch::Riscv64, TargetArch::Aarch64, TargetArch::X86_64] {
+        let target = Target::new(arch, TargetOS::SimpleOS);
+        let backend = LlvmBackend::new(target).unwrap();
+        assert_eq!(backend.runtime_int_type().get_bit_width(), 64, "{arch}-simpleos");
     }
 }
 

@@ -81,11 +81,19 @@ fn receipt_modules(receipts: [ColdHirTypedReceiptV1]) -> [text]:
 describe "cold HIR receipt capture scope":
     it "selects whole-closure capture outside a unit and a held subset inside one":
         expect(cold_hir_receipt_capture_scope_v1(false, false)).to_equal("closure")
+        expect(cold_hir_receipt_capture_scope_v1(false, false, false)).to_equal("closure")
         expect(cold_hir_receipt_capture_scope_v1(true, false)).to_equal("closure")
+        expect(cold_hir_receipt_capture_scope_v1(true, false, false)).to_equal("closure")
         expect(cold_hir_receipt_capture_scope_v1(false, true)).to_equal("held-subset")
+        expect(cold_hir_receipt_capture_scope_v1(false, false, true)).to_equal("held-subset")
+        expect(cold_hir_receipt_capture_scope_v1(false, true, true)).to_equal("held-subset")
 
-    it "fails closed when a unit child is asked for the full inventory":
+    it "fails closed when a unit child or restricted loader is asked for the full inventory":
         expect(cold_hir_receipt_capture_scope_v1(true, true)).to_equal(
+            "cold-hir-full-inventory-file-worker-unit")
+        expect(cold_hir_receipt_capture_scope_v1(true, false, true)).to_equal(
+            "cold-hir-full-inventory-restricted-hir-loads")
+        expect(cold_hir_receipt_capture_scope_v1(true, true, true)).to_equal(
             "cold-hir-full-inventory-file-worker-unit")
 
 describe "per-file unit subset cold HIR capture":
@@ -130,3 +138,22 @@ describe "per-file unit subset cold HIR capture":
         expect(driver_cold_hir_record_verified_object_v1(
             ctx, "pkg.a", "/tmp/pkg-a.o", "capsule-a")).to_equal("")
         expect(ctx.cold_hir_native_capsule_identities.len()).to_equal(0)
+
+    it "captures held subset when HIR loads are restricted without file_worker_unit":
+        val scope = cold_hir_receipt_capture_scope_v1(false, false, true)
+        expect(scope).to_equal("held-subset")
+        val held = subset_receipts(["pkg.a", "pkg.c"], scope == "held-subset")
+        expect(held.is_ok()).to_be(true)
+        expect(receipt_modules(held.unwrap())).to_equal(["pkg.a", "pkg.c"])
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        ctx.cold_hir_typed_receipts = held.unwrap()
+        expect(driver_cold_hir_record_verified_object_v1(
+            ctx, "pkg.a", "/tmp/pkg-a.o", "capsule-a")).to_equal("")
+        expect(ctx.cold_hir_native_capsule_identities["pkg.a"]).to_equal("capsule-a")
+        val un_restricted = cold_hir_receipt_capture_scope_v1(false, false, false)
+        expect(un_restricted).to_equal("closure")
+        val closure = subset_receipts(["pkg.a", "pkg.c"], un_restricted == "held-subset")
+        expect(closure.is_err()).to_be(true)
+        expect(closure.unwrap_err()).to_equal("cold-hir-lowered-module-missing:pkg.b")
+        val full_refused = cold_hir_receipt_capture_scope_v1(true, false, true)
+        expect(full_refused != "closure" and full_refused != "held-subset").to_be(true)

@@ -10,10 +10,12 @@ Run this spec with the test runner and read the SPEC FILE VERDICT line.
 
 use std.spec.*
 use compiler.tools.lint.main.{Linter, lint_cli_source, LintCliPolicy}
-use app.io.cli_lint_commands.{lint_option_error}
+use app.io.cli_lint_commands.{lint_option_error, run_lint_command}
+use std.nogc_sync_mut.io.file_ops.{file_write, dir_remove_all, secure_temp_dir}
 use compiler.tools.lint._LintMain.rule_cost_tier.{
     LintCostTier, LintTierProfile, lint_apply_diagnostic_profile,
-    lint_reset_invocation_counts_v1, lint_rule_cost_tier, lint_tier_admits
+    lint_reset_invocation_counts_v1, lint_rule_cost_tier, lint_tier_admits,
+    lint_rule_invocation_count_v1, lint_rule_cost_skip_count_v1
 }
 
 val COLL_SRC = "fn addp(d: Dict<text, [i64]>):\n    d[\"k\"].push(1)\n"
@@ -62,3 +64,29 @@ describe "simple lint --diagnostic tier":
         expect(LintCliPolicy.from_args(["--fast", "--diagnostic=high"]).error).to_contain("cannot be combined")
         expect(lint_option_error(["a.spl", "--diagnostic", "medium", "--fast"])).to_contain("cannot be combined")
         expect(LintCliPolicy.from_args(["--diagnostic"]).error).to_contain("requires medium or high")
+        expect(lint_option_error(["a.spl", "--diagnostic", "--jobs=4", "medium"])).to_contain("unknown diagnostic tier")
+        expect(lint_option_error(["a.spl", "--profile", "--jobs=4"])).to_contain("--profile requires a tier")
+        expect(lint_option_error(["a.spl", "--diagnostic", "MEDIUM"])).to_equal("")
+        expect(lint_option_error(["a.spl", "--diagnostic=HIGH"])).to_equal("")
+
+    it "run_lint_command accepts both --diagnostic=medium and space-separated --diagnostic medium":
+        """Verifies CLI dispatch consumes space-separated tier value instead of treating it as a file path."""
+        val tmp_dir = secure_temp_dir("/tmp", "lint-diag-cli-").unwrap()
+        val sample = tmp_dir + "/sample.spl"
+        val _w = file_write(sample, COLL_SRC)
+
+        lint_reset_invocation_counts_v1()
+        expect(run_lint_command(["lint", "--diagnostic=medium", sample])).to_equal(0)
+        expect(lint_rule_invocation_count_v1("collection_performance")).to_equal(0)
+        expect(lint_rule_cost_skip_count_v1("collection_performance")).to_be_greater_than(0)
+
+        lint_reset_invocation_counts_v1()
+        expect(run_lint_command(["lint", "--diagnostic", "medium", sample])).to_equal(0)
+        expect(lint_rule_invocation_count_v1("collection_performance")).to_equal(0)
+        expect(lint_rule_cost_skip_count_v1("collection_performance")).to_be_greater_than(0)
+
+        lint_reset_invocation_counts_v1()
+        expect(run_lint_command(["lint", "--diagnostic", "high", sample])).to_equal(0)
+        expect(lint_rule_invocation_count_v1("collection_performance")).to_be_greater_than(0)
+
+        val _rm = dir_remove_all(tmp_dir)

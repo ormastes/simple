@@ -1,0 +1,87 @@
+# Library-unit identity: what a loader must verify about an SMF before it
+# publishes any of the module's symbols.
+#
+# An SMF carries its identity as `.simple_meta` record kind 3 (canonical text
+# from unit_identity_encode). The caller states what it expects; every field is
+# checked fail-closed, and the diagnostics carry a stable SMF-E-UNIT-* code.
+#
+#   iface_digest  interface_digest_of(...) of the unit (action_key.spl)
+#                 SmfManifestEntry.iface_digest
+#   abi_digest    unit/ABI digest (SmfManifestEntry.abi_digest)
+#   target_triple triple the unit was compiled for (SmfManifestEntry.native_target)
+#   policy        build policy/profile; must be equal
+#   capabilities  capabilities the unit declares; must be a subset of the
+#                 capabilities the caller grants
+
+use compiler.backend.linker.smf_meta.{smf_meta_unit_identity_text}
+
+# reason: identity fields are opaque digest/triple/policy/capability tokens compared for byte equality
+@allow(primitive_api)
+struct UnitIdentity:
+    iface_digest: text
+    abi_digest: text
+    target_triple: text
+    policy: text
+    capabilities: [text]
+
+# reason: serialisation of UnitIdentity to its canonical record text
+@allow(primitive_api)
+fn unit_identity_encode(id: UnitIdentity) -> text:
+    var caps = id.capabilities.sorted()
+    "iface={id.iface_digest}\nabi={id.abi_digest}\ntriple={id.target_triple}\npolicy={id.policy}\ncaps={caps.join(",")}"
+
+fn _unit_identity_line(lines: [text], idx: i64, key: text) -> Result<text, text>:
+    if idx >= lines.len():
+        return Err("SMF-E-UNIT-IDENTITY-MALFORMED: missing field '{key}'")
+    val prefix = key + "="
+    if not lines[idx].starts_with(prefix):
+        return Err("SMF-E-UNIT-IDENTITY-MALFORMED: expected '{key}=' at line {idx}")
+    Ok(lines[idx][prefix.len():lines[idx].len()])
+
+# reason: parsing of the canonical record text back into UnitIdentity
+@allow(primitive_api)
+fn unit_identity_decode(raw: text) -> Result<UnitIdentity, text>:
+    val lines = raw.split("\n")
+    if lines.len() != 5:
+        return Err("SMF-E-UNIT-IDENTITY-MALFORMED: expected 5 fields, found {lines.len()}")
+    val iface = _unit_identity_line(lines, 0, "iface")?
+    val abi = _unit_identity_line(lines, 1, "abi")?
+    val triple = _unit_identity_line(lines, 2, "triple")?
+    val policy = _unit_identity_line(lines, 3, "policy")?
+    val caps_raw = _unit_identity_line(lines, 4, "caps")?
+    var caps: [text] = []
+    if caps_raw != "":
+        caps = caps_raw.split(",")
+    Ok(UnitIdentity(iface_digest: iface, abi_digest: abi, target_triple: triple, policy: policy, capabilities: caps))
+
+
+# reason: verdict is a diagnostic text; "" means the identities agree
+@allow(primitive_api)
+fn unit_identity_mismatch(expected: UnitIdentity, actual: UnitIdentity) -> text:
+    if expected.iface_digest == "" or actual.iface_digest != expected.iface_digest:
+        return "SMF-E-UNIT-IFACE-MISMATCH: expected iface digest '{expected.iface_digest}', module has '{actual.iface_digest}'"
+    if expected.abi_digest == "" or actual.abi_digest != expected.abi_digest:
+        return "SMF-E-UNIT-ABI-MISMATCH: expected abi digest '{expected.abi_digest}', module has '{actual.abi_digest}'"
+    if expected.target_triple == "" or actual.target_triple != expected.target_triple:
+        return "SMF-E-UNIT-TRIPLE-MISMATCH: expected target '{expected.target_triple}', module has '{actual.target_triple}'"
+    if actual.policy != expected.policy:
+        return "SMF-E-UNIT-POLICY-MISMATCH: expected policy '{expected.policy}', module has '{actual.policy}'"
+    for cap in actual.capabilities:
+        if not expected.capabilities.contains(cap):
+            return "SMF-E-UNIT-CAPABILITY-DENIED: module requires capability '{cap}' which was not granted"
+    ""
+
+# Verify an SMF image against `expected`. Err carries the SMF-E-UNIT-* code.
+# reason: Result carries a diagnostic text for the loader's LoadResult.Error
+@allow(primitive_api)
+fn unit_identity_check_image(expected: UnitIdentity, image: [u8]) -> Result<(), text>:
+    val raw = smf_meta_unit_identity_text(image)
+    if raw == "":
+        return Err("SMF-E-UNIT-IDENTITY-MISSING: module carries no unit identity record")
+    val actual = unit_identity_decode(raw)?
+    val verdict = unit_identity_mismatch(expected, actual)
+    if verdict != "":
+        return Err(verdict)
+    Ok(())
+
+export UnitIdentity, unit_identity_encode, unit_identity_decode, unit_identity_mismatch, unit_identity_check_image

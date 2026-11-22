@@ -45,9 +45,15 @@ set -u
 # Age of a pin: its .bootstrap-pinned-sha marker (refreshed on reuse), else the
 # directory itself. An unreadable age is NOW, never 0: a dir whose age is
 # unknown must read as young (kept), not as the oldest candidate.
+pin_stat_mtime() {
+    psm_out=$(stat -c %Y "$1" 2>/dev/null) ||
+        psm_out=$(stat -f %m "$1" 2>/dev/null) || return 1
+    echo "$psm_out"
+}
+
 pin_mtime() {
-    pm_stamp=$(stat -c %Y "$1/.bootstrap-pinned-sha" 2>/dev/null) ||
-        pm_stamp=$(stat -c %Y "$1" 2>/dev/null) || pm_stamp=$(date +%s)
+    pm_stamp=$(pin_stat_mtime "$1/.bootstrap-pinned-sha") ||
+        pm_stamp=$(pin_stat_mtime "$1") || pm_stamp=$(date +%s)
     echo "$pm_stamp"
 }
 
@@ -186,8 +192,8 @@ $(pin_mtime "$pp_pin") $pp_pin"
             echo "PRUNE $pp_pin"
         fi
     done >"$pp_report"
-    pp_candidates=$(grep -c '^PRUNE\|^SKIPPED' "$pp_report")
-    pp_removed=$(grep -c '^PRUNED ' "$pp_report")
+    if pp_candidates=$(grep -Ec '^(PRUNE|PRUNED|PRUNE-FAILED|SKIPPED) ' "$pp_report"); then :; else pp_candidates=0; fi
+    if pp_removed=$(grep -Ec '^PRUNED ' "$pp_report"); then :; else pp_removed=0; fi
     cat "$pp_report"; rm -f "$pp_report" "$pp_procs"
     echo "PASS — ${pp_scanned} pin(s) scanned, ${pp_candidates} candidate(s), ${pp_removed} removed"
     return 0
@@ -195,9 +201,13 @@ $(pin_mtime "$pp_pin") $pp_pin"
 
 selftest() {
     st=$(mktemp -d) || return 2; fail=0
+    backdate_days() {
+        touch -d "-$1 days" "$2" 2>/dev/null ||
+            touch -t "$(date -v-"$1"d +%Y%m%d%H%M.%S)" "$2"
+    }
     mk_pin() {  # name age-days [receipt]
         mkdir -p "$st/pins/$1/src" && echo "sha-$1" >"$st/pins/$1/.bootstrap-pinned-sha" &&
-            touch -d "-$2 days" "$st/pins/$1/.bootstrap-pinned-sha"
+            backdate_days "$2" "$st/pins/$1/.bootstrap-pinned-sha"
         [ "${3:-}" = receipt ] && mkdir -p "$st/pins/$1/build/lane" && : >"$st/pins/$1/build/lane/stage3-planner-admission.receipt"
         [ "${3:-}" = admitted ] && mkdir -p "$st/pins/$1/build/lane/stage3/x/stage2-admitted"
         return 0
@@ -207,10 +217,10 @@ selftest() {
     mk_pin pinned-eeee0000prune 7; mk_pin pinned-ffff0000keep 6
     mk_pin pinned-9999000admit2 5 admitted
     mkdir -p "$st/pins/pinned-0000000young/src" && echo y >"$st/pins/pinned-0000000young/.bootstrap-pinned-sha"
-    mkdir -p "$st/pins/pinned-1111000leftover.tmp" && touch -d "-3 days" "$st/pins/pinned-1111000leftover.tmp"
+    mkdir -p "$st/pins/pinned-1111000leftover.tmp" && backdate_days 3 "$st/pins/pinned-1111000leftover.tmp"
     # A clone another run is still writing (named by a live cmdline) and a
     # fresh clone with no marker yet must both survive; no marker => age of dir.
-    mkdir -p "$st/pins/pinned-2222000inflight.tmp" && touch -d "-3 days" "$st/pins/pinned-2222000inflight.tmp"
+    mkdir -p "$st/pins/pinned-2222000inflight.tmp" && backdate_days 3 "$st/pins/pinned-2222000inflight.tmp"
     mkdir -p "$st/pins/pinned-3333000fresh.tmp"
     # Referenced only through /proc/<pid>/exe, only through a mapped library,
     # and one that a run reuses between the scan and its removal.

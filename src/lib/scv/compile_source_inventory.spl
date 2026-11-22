@@ -632,10 +632,21 @@ fn compile_source_inventory_publish_reasoned_v1(
     if not rt_file_exists(generation_path) and
             not compile_source_inventory_publish_blob_v1(generation_path, content):
         return ("", "publish-generation-write-failed path={generation_path}")
+    val _aged_reclaimed = compile_source_inventory_gc_generations_v1(
+        cache_root, COMPILE_SOURCE_INVENTORY_PUBLISH_GC_MIN_AGE_S_V1)
+    val _excess_reclaimed = compile_source_inventory_prune_generations_v1(
+        cache_root, digest, COMPILE_SOURCE_INVENTORY_MAX_EXTRA_GENERATIONS_V1,
+        COMPILE_SOURCE_INVENTORY_PRUNE_MIN_AGE_S_V1)
     (digest, "ok")
 
 # Half the inventory GC floor (compiler_inventory_gc_v1 uses one day).
 val COMPILE_SOURCE_INVENTORY_REUSE_TOUCH_S: i64 = 43200
+# Publish-time retention: sweep unreferenced generations > 1h old and cap total
+# aged unreferenced blobs in source-inventory/generations/ to newest 3 (+ CURRENT)
+# while protecting young blobs (< 600s) for concurrent lockless readers.
+val COMPILE_SOURCE_INVENTORY_PUBLISH_GC_MIN_AGE_S_V1: i64 = 3600
+val COMPILE_SOURCE_INVENTORY_MAX_EXTRA_GENERATIONS_V1: i64 = 3
+val COMPILE_SOURCE_INVENTORY_PRUNE_MIN_AGE_S_V1: i64 = 600
 
 fn compile_source_inventory_publish_blob_v1(final_path: text, content: text) -> bool:
     """Publish one content-addressed immutable file without a lock.
@@ -703,6 +714,106 @@ fn compile_source_inventory_gc_generations_v1(cache_root: text, min_age_s: i64) 
         if recheck <= 0 or now - recheck < min_age_s:
             continue
         if rt_file_delete(path):
+            removed = removed + 1
+    removed
+
+fn _compile_source_inventory_header_generation_v1(path: text) -> i64:
+    val content = compile_source_inventory_read_text_v1(path) ?? ""
+    if content == "":
+        return -1
+    val first_nl = content.index_of("\n")
+    if first_nl < 0 or content.substring(0, first_nl) != "simple-compile-source-inventory-v1":
+        return -1
+    val gen_start = first_nl + 1
+    val second_nl = content.index_of("\n", gen_start)
+    if second_nl <= gen_start:
+        return -1
+    val gen_line = content.substring(gen_start, second_nl)
+    if not gen_line.starts_with("generation="):
+        return -1
+    val (ok, generation) = compile_source_inventory_decimal_v1(
+        gen_line.substring(11, gen_line.byte_len()))
+    if ok: generation else: -1
+
+fn _compile_source_inventory_pointer_digest_v1(pointer_content: text) -> text:
+    val separator = pointer_content.index_of("\n")
+    if separator < 0: pointer_content else: pointer_content.substring(0, separator)
+
+# Bounded newest-N retention: keeps CURRENT (and `keep_digest`) plus at most
+# `max_extra` newest unreferenced `.inventory` generation blobs ordered by
+# (generation, mtime, digest) descending, while never deleting blobs younger
+# than `min_age_s` (protecting concurrent lockless readers and publishers).
+fn compile_source_inventory_prune_generations_v1(
+    cache_root: text, keep_digest: text, max_extra: i64,
+    min_age_s: i64 = COMPILE_SOURCE_INVENTORY_PRUNE_MIN_AGE_S_V1
+) -> i64:
+    if not compile_source_inventory_cache_root_valid_v1(cache_root) or max_extra < 0:
+        return 0
+    val root = compile_source_inventory_storage_v1(cache_root)
+    val referenced = _compile_source_inventory_pointer_digest_v1(
+        compile_source_inventory_read_pointer_content_v1(cache_root) ?? "")
+    var digests: [text] = []
+    var paths: [text] = []
+    var mtimes: [i64] = []
+    var evicted: [bool] = []
+    for name in dir_list_or_empty("{root}/generations"):
+        if not name.ends_with(".inventory") or name.byte_len() <= 10:
+            continue
+        val digest = name.substring(0, name.byte_len() - 10)
+        if (digest == referenced or digest == keep_digest or
+                not compile_source_inventory_digest_valid_v1(digest)):
+            continue
+        val path = "{root}/generations/{name}"
+        digests.push(digest)
+        paths.push(path)
+        mtimes.push(file_modified_time(path))
+        evicted.push(false)
+    if digests.len() <= max_extra:
+        return 0
+    val now = time_now_unix_micros() / 1000000
+    var has_eligible = false
+    var ci = 0
+    while ci < mtimes.len():
+        if mtimes[ci] > 0 and (min_age_s <= 0 or now - mtimes[ci] >= min_age_s):
+            has_eligible = true
+        ci = ci + 1
+    if not has_eligible:
+        return 0
+    var gens: [i64] = []
+    var gi = 0
+    while gi < paths.len():
+        gens.push(_compile_source_inventory_header_generation_v1(paths[gi]))
+        gi = gi + 1
+    var remaining = digests.len()
+    var removed = 0
+    while remaining > max_extra:
+        var oldest = -1
+        var i = 0
+        while i < digests.len():
+            if (not evicted[i] and gens[i] >= 0 and mtimes[i] > 0 and
+                    (min_age_s <= 0 or now - mtimes[i] >= min_age_s)):
+                if oldest < 0:
+                    oldest = i
+                elif gens[i] < gens[oldest]:
+                    oldest = i
+                elif gens[i] == gens[oldest] and mtimes[i] < mtimes[oldest]:
+                    oldest = i
+                elif (gens[i] == gens[oldest] and mtimes[i] == mtimes[oldest] and
+                        digests[i] < digests[oldest]):
+                    oldest = i
+            i = i + 1
+        if oldest < 0:
+            break
+        evicted[oldest] = true
+        remaining = remaining - 1
+        val latest = _compile_source_inventory_pointer_digest_v1(
+            compile_source_inventory_read_pointer_content_v1(cache_root) ?? "")
+        if digests[oldest] == latest or digests[oldest] == keep_digest:
+            continue
+        val recheck_mtime = file_modified_time(paths[oldest])
+        if recheck_mtime <= 0 or (min_age_s > 0 and now - recheck_mtime < min_age_s):
+            continue
+        if rt_file_delete(paths[oldest]):
             removed = removed + 1
     removed
 
@@ -923,7 +1034,7 @@ export compile_source_inventory_read_admitted_digest_v1, compile_source_inventor
 export compile_source_inventory_revalidate_pointer_v1
 export compile_source_inventory_publication_readback_v1
 export compile_source_inventory_recover_v1
-export compile_source_inventory_publish_blob_v1, compile_source_inventory_gc_generations_v1
+export compile_source_inventory_publish_blob_v1, compile_source_inventory_gc_generations_v1, compile_source_inventory_prune_generations_v1
 export compile_source_inventory_snapshot_rows_v1
 
 export compile_source_inventory_revalidate_verified_pointer_v1

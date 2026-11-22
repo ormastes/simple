@@ -1,0 +1,157 @@
+# Regression spec: fast decode-free `hir_cache_has()`, O(N log N)
+# `hir_cache_closure_digest()`, compact `"@"` default-file `Span` in `.hir`
+# codec, and 1 GiB `cache_limits` default.
+# @cover src/compiler/80.driver/driver_hir_cache.spl
+# @cover src/compiler/20.hir/generated/hir_codec.spl
+# @cover src/compiler/80.driver/cache/metadata/cache_limits.spl
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, dir_remove, env_get_opt, env_set, file_write_exact, getpid}
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable, SymbolKind}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirFunction, HirBlock}
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{
+    FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind,
+    VhdlHardwareMetadata, VhdlClockedMetadata, VhdlResetPolarity, VhdlResetSynchrony
+}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, hir_codec_header}
+use compiler.driver.driver_hir_cache.{
+    hir_cache_has, hir_cache_path, hir_cache_header, hir_cache_entry_encode_body,
+    hir_cache_parser_binding_v1, hir_cache_hits, hir_cache_closure_digest
+}
+
+val LONG_SCV_PATH: text = "/work/build/scv/snapshots/scv-revision-v1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/src/compiler/80.driver/driver_hir_cache.spl"
+
+fn lower_at(path: text, src: text) -> HirModule:
+    val parsed = parse_full_frontend(src, path, "sample_mod", Logger(level: 0))
+    var hl = HirLowering.with_filename(path)
+    hl.lower_module(parsed)
+
+describe "Fast decode-free hir_cache_has, O(N log N) closure digest, compact Span, and 1 GiB cache limits":
+    it "validates envelope, parser binding, checksum, and codec header in hir_cache_has without calling hir_module_decode":
+        val dir = "/tmp/hir-cache-fast-has-{getpid()}"
+        val _created = dir_create_all(dir)
+        val old_dir = env_get_opt("SIMPLE_HIR_CACHE_DIR") ?? ""
+        val old_scope = env_get_opt("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
+        val _s1 = env_set("SIMPLE_FRONTEND_CACHE_SCOPE", "fast-has-spec")
+        val _s2 = env_set("SIMPLE_HIR_CACHE_DIR", dir)
+
+        val key = sha256_text("fast-has-key")
+        val binding = hir_cache_parser_binding_v1(key, "sample_mod", "src/x/sample.spl", sha256_text("fn f() -> i64:\n    1\n"))
+        val expected_header = "spl-hircache-v4-parser " + hir_cache_header("")
+        val path = hir_cache_path(key, true)
+
+        # Missing file misses
+        expect(hir_cache_has(key, binding)).to_equal(false)
+
+        # Valid envelope + checksum + codec header with trailing unconsumed token
+        # that hir_module_decode rejects: proves hir_cache_has skips full decode.
+        val base_blob = hir_module_encode(lower_at("src/x/sample.spl", "fn f() -> i64:\n    1\n"))
+        val poison_blob = base_blob + "UNCONSUMED_TRAILING_TOKEN\n"
+        expect(hir_module_decode(poison_blob).is_none()).to_equal(true)
+        val valid_envelope = expected_header + "\n" + hir_cache_entry_encode_body([], poison_blob, "bodyful:" + binding)
+        val _w1 = file_write_exact(path, valid_envelope)
+        val hits_before = hir_cache_hits()
+        expect(hir_cache_has(key, binding)).to_equal(true)
+        expect(hir_cache_hits()).to_equal(hits_before)
+
+        # Wrong parser binding misses
+        val other_binding = sha256_text("other-binding")
+        expect(hir_cache_has(key, other_binding)).to_equal(false)
+
+        # Corrupted body byte fails checksum in hir_cache_has
+        val flipped = valid_envelope.substring(0, valid_envelope.byte_len() - 4) + "XXXX"
+        val _w2 = file_write_exact(path, flipped)
+        expect(hir_cache_has(key, binding)).to_equal(false)
+
+        # Wrong codec header (including stale v22 envelope/blob) fails in hir_cache_has
+        val bad_codec_blob = "spl-hircodec-v22-aspect-owner-declaration-intent-params-binding-versions-effect-region spl-flatpool-v19-aspect-owner-declaration-intent-manifest-v1\nsample_mod\n"
+        val bad_codec_env = expected_header + "\n" + hir_cache_entry_encode_body([], bad_codec_blob, "bodyful:" + binding)
+        val _w3 = file_write_exact(path, bad_codec_env)
+        expect(hir_cache_has(key, binding)).to_equal(false)
+
+        val stale_v22_header = expected_header.replace("spl-hircodec-v23-", "spl-hircodec-v22-")
+        val stale_v22_env = stale_v22_header + "\n" + hir_cache_entry_encode_body([], base_blob, "bodyful:" + binding)
+        val _w4 = file_write_exact(path, stale_v22_env)
+        expect(hir_cache_has(key, binding)).to_equal(false)
+
+        val _r1 = env_set("SIMPLE_HIR_CACHE_DIR", old_dir)
+        val _r2 = env_set("SIMPLE_FRONTEND_CACHE_SCOPE", old_scope)
+        val _rm = dir_remove(dir, true)
+
+    it "sorts many module surfaces deterministically in hir_cache_closure_digest regardless of registration order":
+        var forward_files: [SourceFile] = []
+        var reverse_files: [SourceFile] = []
+        var forward_mods = {}
+        var reverse_mods = {}
+        var i = 0
+        while i < 24:
+            val pad = if i < 10: "0{i}" else: "{i}"
+            val p = "pkg/mod_{pad}.spl"
+            val m = "pkg.mod_{pad}"
+            val src = "pub fn f_{pad}() -> i64:\n    {i}\n"
+            val parsed = parse_and_build_module(src, p)
+            forward_files.push(SourceFile(path: p, content: src, module_name: m))
+            forward_mods[m] = parsed
+            i = i + 1
+        var j = 23
+        while j >= 0:
+            val pad = if j < 10: "0{j}" else: "{j}"
+            val p = "pkg/mod_{pad}.spl"
+            val m = "pkg.mod_{pad}"
+            val src = "pub fn f_{pad}() -> i64:\n    {j}\n"
+            val parsed = parse_and_build_module(src, p)
+            reverse_files.push(SourceFile(path: p, content: src, module_name: m))
+            reverse_mods[m] = parsed
+            j = j - 1
+        val fwd = module_surfaces_from_modules(forward_mods, forward_files).unwrap()
+        val rev = module_surfaces_from_modules(reverse_mods, reverse_files).unwrap()
+        expect(hir_cache_closure_digest(fwd)).to_equal(hir_cache_closure_digest(rev))
+
+    it "compacts default-file Span.file to @, escapes literal @, and decodes legacy full-path blobs":
+        val src = "fn add1(x: i64) -> i64:\n    x + 1\n\nfn add2(x: i64) -> i64:\n    add1(x) + add1(x + 2)\n\nfn compute(a: i64, b: i64) -> i64:\n    if a > b:\n        add2(a - b)\n    else:\n        add2(b - a)\n"
+        val hm = lower_at(LONG_SCV_PATH, src)
+        val compact_blob = hir_module_encode(hm)
+        expect(compact_blob != "").to_equal(true)
+        val at_tokens = compact_blob.split("\n@\n").len() - 1
+        expect(at_tokens).to_be_greater_than(20)
+        val legacy_blob = compact_blob.replace("\n@\n", "\n" + LONG_SCV_PATH + "\n")
+        expect(compact_blob.byte_len()).to_be_less_than(legacy_blob.byte_len() * 60 / 100)
+
+        # Backward compatibility: legacy full-path Span.file lines decode to identical HirModule
+        val decoded_legacy = hir_module_decode(legacy_blob)
+        expect(decoded_legacy.is_some()).to_equal(true)
+        expect(hir_module_encode(decoded_legacy.unwrap())).to_equal(compact_blob)
+
+        # Literal "@" and "@synthetic" Span.file values round-trip losslessly
+        var seeded_mod = hir_module_decode(compact_blob).unwrap()
+        val fn_keys = seeded_mod.functions.keys()
+        expect(fn_keys.len()).to_be_greater_than(1)
+        val k_first = fn_keys[0]
+        var fn_first = seeded_mod.functions[k_first]
+        fn_first.return_type = HirType(
+            kind: HirTypeKind.Unit,
+            span: Span(start: 0, end: 1, line: 1, col: 1, file: "@", length: 1))
+        fn_first.span = Span(start: 0, end: 1, line: 2, col: 1, file: "@synthetic", length: 1)
+        var updated_fns = seeded_mod.functions
+        updated_fns[k_first] = fn_first
+        seeded_mod.functions = updated_fns
+        val at_blob = hir_module_encode(seeded_mod)
+        expect(at_blob).to_contain("\n@@\n")
+        expect(at_blob).to_contain("\n@@synthetic\n")
+        val at_dec = hir_module_decode(at_blob).unwrap()
+        val dec_fn = at_dec.functions[k_first]
+        expect(dec_fn.return_type.span.file).to_equal("@")
+        expect(dec_fn.span.file).to_equal("@synthetic")
+        expect(hir_module_encode(at_dec)).to_equal(at_blob)

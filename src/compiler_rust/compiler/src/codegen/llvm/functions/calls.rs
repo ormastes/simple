@@ -930,7 +930,7 @@ impl LlvmBackend {
         let i64_type = self.runtime_int_type();
         let i8_type = self.context_ref().i8_type();
         let fail = |what: &str, e: &dyn std::fmt::Display| crate::error::factory::llvm_build_failed(what, e);
-        // Never wider than the runtime int (i64 on every target), matching
+        // Never wider than the runtime int (i32 on freestanding 32-bit, i64 otherwise), matching
         // the width of the single load this replaces.
         let bytes = width.min(u64::from(i64_type.get_bit_width() / 8));
         let function = builder
@@ -3314,14 +3314,24 @@ impl LlvmBackend {
                                 crate::error::factory::llvm_build_failed("rt_value_int result", &"missing return value")
                             })?;
                         }
-                        TypeId::F64 => {
-                            // Call rt_value_float to box
-                            let float_fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                        TypeId::F32 | TypeId::F64 => {
+                            // Call rt_value_float(double) -> RuntimeValue to box float
+                            let f64_type = self.context_ref().f64_type();
+                            let f64_val = match value {
+                                inkwell::values::BasicValueEnum::FloatValue(fv) if fv.get_type() == f64_type => fv,
+                                inkwell::values::BasicValueEnum::FloatValue(fv) => builder
+                                    .build_float_ext(fv, f64_type, "interp_fext")
+                                    .map_err(|e| crate::error::factory::llvm_build_failed("float_ext", &e))?,
+                                _ => self
+                                    .coerce_value_to_type(value, Some(f64_type.into()), builder)?
+                                    .into_float_value(),
+                            };
+                            let float_fn_type = i64_type.fn_type(&[f64_type.into()], false);
                             let float_fn = module
                                 .get_function("rt_value_float")
                                 .unwrap_or_else(|| module.add_function("rt_value_float", float_fn_type, None));
                             let call_result = builder
-                                .build_call(float_fn, &[value.into()], "boxed_float")
+                                .build_call(float_fn, &[f64_val.into()], "boxed_float")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_float call", &e))?;
                             value = call_result.try_as_basic_value().basic().ok_or_else(|| {
                                 crate::error::factory::llvm_build_failed(
@@ -3467,5 +3477,43 @@ mod tests {
         // compile() runs the pre-declare pass and verifies the module.
         backend.compile(&mir_module).unwrap();
         assert_interp_call_abi(&backend.get_ir().unwrap());
+    }
+
+    /// `InterpCall` with an `f64` argument must declare `rt_value_float(double)`
+    /// (matching `BoxFloat` and `runtime.h:424`), never `rt_value_float(i64)` /
+    /// `rt_value_float(i32)`.
+    #[test]
+    fn interp_call_f64_arg_uses_double_rt_value_float_signature() {
+        use simple_common::target::{TargetArch, TargetOS};
+
+        for (target, expected_decl) in [
+            (
+                Target::new(TargetArch::Riscv32, TargetOS::SimpleOS),
+                "declare i32 @rt_value_float(double)",
+            ),
+            (
+                Target::parse("x86_64-unknown-linux-gnu").unwrap(),
+                "declare i64 @rt_value_float(double)",
+            ),
+        ] {
+            let backend = LlvmBackend::new(target).unwrap();
+            backend.create_module("interp_f64").unwrap();
+
+            let mut func = MirFunction::new("test_f64".to_string(), T::I64, Visibility::Public);
+            func.blocks[0].instructions.push(MirInst::ConstFloat { dest: VReg(0), value: 3.25 });
+            func.blocks[0].instructions.push(MirInst::BoxFloat { dest: VReg(1), value: VReg(0) });
+            func.blocks[0].instructions.push(MirInst::InterpCall {
+                dest: Some(VReg(2)),
+                func_name: "float_sink".to_string(),
+                args: vec![VReg(0)],
+                boxed_result: false,
+            });
+            func.blocks[0].terminator = Terminator::Return(Some(VReg(2)));
+
+            backend.compile_function(&func).unwrap();
+            let ir = backend.get_ir().unwrap();
+            assert!(ir.contains(expected_decl), "expected `{expected_decl}` in IR:\n{ir}");
+            backend.verify().unwrap();
+        }
     }
 }

@@ -52,15 +52,10 @@ impl super::LlvmBackend {
     /// Get actual LLVM BasicTypeEnum for a TypeId (feature-gated)
     ///
     /// For native-build (bootstrap), ALL values are represented as a single
-    /// integer whose width matches the target's RuntimeValue:
-    /// - 64-bit targets: i64 (tagged 64-bit value)
-    /// - 32-bit targets: i32 (tagged 32-bit value)
-    ///
-    /// The C runtime defines `typedef int64_t RuntimeValue` on 64-bit and
-    /// `typedef int32_t RuntimeValue` on 32-bit (e.g. RV32). Using the
-    /// matching width avoids calling-convention mismatches where the LLVM
-    /// backend would pass i64 in two registers (a0+a1 on RV32) but the C
-    /// function expects a single-register i32 argument.
+    /// integer whose width matches the target's RuntimeValue (`runtime_int_type()`):
+    /// - 64-bit targets and hosted 32-bit / wasm32 targets: i64 (`uint64_t RuntimeValue`)
+    /// - Freestanding / bare-metal 32-bit targets (`x86_32`, `arm32`, `riscv32`
+    ///   on `SimpleOS` / `None`): i32 (`int32_t` / `intptr_t RuntimeValue`)
     #[cfg(feature = "llvm")]
     pub(super) fn llvm_type(&self, _ty: &TypeId) -> Result<BasicTypeEnum<'static>, CompileError> {
         Ok(self.runtime_int_type().into())

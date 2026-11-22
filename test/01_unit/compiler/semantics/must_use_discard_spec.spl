@@ -20,7 +20,7 @@ use compiler.hir.hir_types.{SymbolId}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.config.{Logger}
 use compiler.semantics.must_use_discard.{must_use_discard_scan}
-use compiler.common.must_use_policy.{must_use_finding_severity, MUST_USE_CODE_RESULT, MUST_USE_CODE_MARKED}
+use compiler.common.must_use_policy.{must_use_finding_severity, must_use_r9_marked_lines, must_use_r9_critical_lines, MUST_USE_CODE_RESULT, MUST_USE_CODE_MARKED}
 
 val PRELUDE = "fn risky() -> Result<i64, text>:\n    Ok(1)\nfn maybe() -> i64?:\n    Some(1)\nfn quiet():\n    val q = 1\nfn plain() -> i64:\n    2\n"
 
@@ -81,6 +81,21 @@ describe "ROB-USE must_use discard check":
         expect(must_use_finding_severity(false)).to_equal("error")
         expect(must_use_finding_severity(true)).to_equal("warning")
 
+    it "shared R9 policy lines format marked and critical diagnostics":
+        expect(must_use_r9_marked_lines("risky", "")).to_equal([
+            "error[R9]: return value of function 'risky' must be used",
+            "  = help: assign to variable or use 'val _ = ...' to discard"
+        ])
+        expect(must_use_r9_marked_lines("risky", "check err")).to_equal([
+            "error[R9]: return value of function 'risky' must be used",
+            "  = note: check err",
+            "  = help: assign to variable or use 'val _ = ...' to discard"
+        ])
+        expect(must_use_r9_critical_lines("risky", "i64")).to_equal([
+            "error[R9]: return value of 'risky' (i64) discarded in @profile(critical)",
+            "  = help: assign to variable or use 'val _ = ...' to discard"
+        ])
+
     it "an else branch discard is flagged":
         expect(scan("    if false:\n        quiet()\n    else:\n        risky()\n", [])).to_equal(["SPL-USE-001:caller:risky"])
 
@@ -139,6 +154,21 @@ describe "ROB-USE @must_use attribute and imported callees":
     it "an unmarked sibling is still not flagged":
         val src = "@must_use\nfn plain() -> i64:\n    2\nfn other() -> i64:\n    3\nfn caller():\n    other()\n"
         expect(scan_mods([src]).len()).to_equal(0)
+
+    it "@must_use on one module does not leak into another or mutate caller marked":
+        val a_src = "@must_use\nfn secret() -> i64:\n    2\nfn a_caller():\n    secret()\n"
+        val b_src = "fn secret() -> i64:\n    3\nfn b_caller():\n    secret()\n"
+        val pa = parse_full_frontend(a_src, "a.spl", "a", Logger(level: 0))
+        var la = HirLowering.with_filename("a.spl")
+        val ha = la.lower_module(pa)
+        val pb = parse_full_frontend(b_src, "b.spl", "b", Logger(level: 0))
+        var lb = HirLowering.with_filename("b.spl")
+        val hb = lb.lower_module(pb)
+        val marked: [text] = ["seed_only"]
+        val findings = must_use_discard_scan({"a": ha, "b": hb}, marked)
+        expect(marked).to_equal(["seed_only"])
+        expect(findings.len()).to_equal(1)
+        expect(findings[0].function).to_equal("a_caller")
 
     it "an imported Result-returning function is flagged":
         val a = "fn risky():\n    val q = 1\nfn caller():\n    risky()\n"

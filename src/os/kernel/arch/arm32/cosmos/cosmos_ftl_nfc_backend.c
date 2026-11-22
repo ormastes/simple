@@ -507,6 +507,13 @@ static int data_ppa_io(const struct cosmos_ftl_nfc_backend *backend,
     return status;
 }
 
+static int page_io(const struct cosmos_ftl_nfc_backend *backend,
+                   unsigned int ppa, unsigned int spare_header,
+                   struct cosmos_nfc_io *io) {
+    return spare_header != 0U ? data_ppa_io(backend, ppa, io)
+        : ppa_io(backend, ppa, io);
+}
+
 static int metadata_ppa(unsigned int page, unsigned int *ppa) {
     unsigned int lane;
     unsigned int block;
@@ -594,9 +601,7 @@ static int read_page_state(struct cosmos_ftl_nfc_backend *backend,
     if (needs_refresh != 0) {
         *needs_refresh = 0U;
     }
-    if ((spare_header != 0U
-            ? data_ppa_io(backend, ppa, &io)
-            : ppa_io(backend, ppa, &io)) != COSMOS_OK) {
+    if (page_io(backend, ppa, spare_header, &io) != COSMOS_OK) {
         return COSMOS_INVALID;
     }
     data = spare_header != 0U
@@ -652,9 +657,7 @@ static int write_page(struct cosmos_ftl_nfc_backend *backend,
     int status;
 
     if (payload_length > COSMOS_FTL_NFC_METADATA_PAYLOAD_BYTES ||
-        (spare_header != 0U
-            ? data_ppa_io(backend, ppa, &io)
-            : ppa_io(backend, ppa, &io)) != COSMOS_OK) {
+        page_io(backend, ppa, spare_header, &io) != COSMOS_OK) {
         return COSMOS_INVALID;
     }
     data = data_buffer(backend);

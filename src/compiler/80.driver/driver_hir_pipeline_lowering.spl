@@ -28,6 +28,7 @@ use compiler.driver.driver_types.{CompileContext, driver_native_parsed_module_ha
     driver_native_parsed_objectless_proof_v1}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.common.driver_core_types.{CompileMode}
+use compiler.common.bootstrap_low_memory_config.{bootstrap_stage_low_memory_relief_requested}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable, sosix_cwd}
 use std.nogc_sync_mut.io.time_ops.{current_time_ms}
@@ -432,13 +433,16 @@ impl CompilerDriver:
         if source_root == "" or inventory_binding.snapshot_manifest_digest == "" or inventory_binding.source_inventory_digest == "":
             self.ctx.add_error("cold HIR receipt authority incomplete")
             return false
-        # A per-file unit child holds HIR for its picked batch plus imports
-        # only. Whole-closure capture failed on the first row it never lowered
-        # (Stage 3: cold-hir-lowered-module-missing:app.cli.bootstrap_main);
+        # A per-file unit child or a MIR-shard-scoped worker
+        # (SIMPLE_MIR_SHARD_ONLY_PATHS -> worker_hir_loads_restricted_v1) holds
+        # HIR for its picked batch plus imports only. Whole-closure capture
+        # failed on the first row it never lowered
+        # (Stage 3: cold-hir-lowered-module-missing:...);
         # capturing nothing (#7617) left its objects without capsule
         # identities, which the link rejects (cold-hir-object-identity-invalid).
         val capture_scope = cold_hir_receipt_capture_scope_v1(
-            full_inventory_cold, native_file_worker_unit_active_v1())
+            full_inventory_cold, native_file_worker_unit_active_v1(),
+            worker_hir_loads_restricted_v1())
         if capture_scope != "closure" and capture_scope != "held-subset":
             self.ctx.add_error("cold HIR receipt capture refused: {capture_scope}")
             return false
@@ -1811,6 +1815,7 @@ impl CompilerDriver:
             validation_error_count = validation_error_count + 1
             self.ctx.add_error(validation_error)
         log_phase("phase3:hir:validate:done errors={validation_error_count}")
+        self.release_hir_validation_transports_v1()
         if (self.ctx.error_count_value > 0):
             return false
         log_phase("phase3:hir:cold_receipts:start")
@@ -1860,6 +1865,23 @@ impl CompilerDriver:
         self.streaming_module_surfaces_owner = ModuleSurfacesByName.empty()
         self.streaming_surface_owner_ready = false
         true
+
+    me release_hir_validation_transports_v1():
+        self.ctx.validation_module_array = []
+        self.ctx.validation_module_blobs = []
+
+    me retained_hir_can_reclaim_sources_v1() -> bool:
+        if (env_get("SIMPLE_KEEP_SOURCE_CONTENTS") ?? "") == "1":
+            return false
+        if self.ctx.options.backend == "vhdl":
+            return false
+        if self.ctx.source_contents_reclaimable():
+            return true
+        bootstrap_stage_low_memory_relief_requested(
+            env_get("SIMPLE_BOOTSTRAP") ?? "",
+            env_get("SIMPLE_BOOTSTRAP_STAGE") ?? "",
+            env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "",
+            env_get("SIMPLE_BOOTSTRAP_LOW_MEMORY") ?? "")
 
     # Compatibility snapshot API. Production compilation consumes only the
     # owner's boolean verdict and never reinstalls this aggregate snapshot.
@@ -2756,6 +2778,7 @@ impl CompilerDriver:
             legacy_validation_error_count = legacy_validation_error_count + 1
             self.ctx.add_error(validation_error)
         log_phase("phase3:hir:validate:done errors={legacy_validation_error_count}")
+        self.release_hir_validation_transports_v1()
         log_phase("phase3:hir:post_validate_guard:start")
         if self.ctx.error_count_value > 0:
             log_phase("phase3:hir:post_validate_guard:failed")
@@ -2839,6 +2862,13 @@ impl CompilerDriver:
         else:
             log_phase("phase3:hir:cold_receipts:skipped_prior_errors")
         log_phase("phase3:hir:cold_receipts_gate:done")
+        val can_reclaim_sources = self.retained_hir_can_reclaim_sources_v1()
+        if self.ctx.error_count_value == 0 and can_reclaim_sources:
+            lexer_release_parse_source_globals()
+            val reclaimed_retained_sources = self.ctx.reclaim_source_contents()
+            val reclaimed_retained_owners = self.ctx.reclaim_streaming_source_contents_owner()
+            log_phase("phase3:retained_source_reclaim:done reclaimed={reclaimed_retained_sources} owners={reclaimed_retained_owners}")
+            self.ctx.evict_sources()
         self.ctx.error_count_value == 0
 
     # --------------------------------------------------------------------------

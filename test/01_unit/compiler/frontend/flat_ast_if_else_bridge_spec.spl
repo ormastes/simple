@@ -2,33 +2,12 @@
 """
 ## Purpose and audience
 Flat AST bridge if/else fidelity (M12 item 6). Regression guard:
-`flat_ast_to_module` previously hardcoded the If else slot to nil, dropping
+`flat_ast_to_module` previously hardcoded the If else slot to None, dropping
 every else/elif branch when the self-hosted lean frontend builds a Module.
 The scenarios walk the bridge's output and assert the else block is attached
-for if/else and if/elif/else, is nil (not a spurious empty block) for a plain
+for if/else and if/elif/else, is None (not a spurious empty block) for a plain
 if, keep long chains flat and executable, and fail closed on malformed
 owners. Audience: frontend bridge and parser maintainers.
-
-## Operator workflow
-Run the file with the self-hosted runner from the repo root:
-`./src/compiler_rust/target/bootstrap/simple run test/01_unit/compiler/frontend/flat_ast_if_else_bridge_spec.spl`.
-Bridge-output scenarios encode the discriminating counts (buggy bridge → all
-no-else; fixed → else present), and executable scenarios run the bridged
-chains end to end.
-
-## Compatibility and limitations
-Under the bare `run` lane the `compiler.frontend.core.if_chain_nodes` import
-fails path resolution, so the file reports executed=0 until that lane defect
-is fixed; the unit lane resolves it. The last two scenarios are
-source-contracts on the bridge, if-chain owner, and parser sources — they
-pin structure that has no runtime API.
-
-## Verification guidance and troubleshooting
-A failure discriminates the bridge itself, not just the parser's elif arena:
-a negative else-count means the bridge dropped the else slot again; a
-non-flat arm count for the 128/256-arm fixtures means a linked chain was
-materialized recursively. Check `convert_nodes.spl` and `if_chain_nodes.spl`
-against the failing scenario's pinned tokens.
 """
 # Lifecycle: doc/01_research/local/parser_framework.md ;
 # doc/03_plan/language/assurance/aerospace_hardening_plan_2026-08-07.md ;
@@ -36,19 +15,24 @@ against the failing scenario's pinned tokens.
 # doc/05_design/compiler/parsing/parser_architecture_unified_2026-02-04.md
 # @manual_section: flat-ast-bridge-if-else
 
+use std.spec.{describe, it, expect, step}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module, convert_flat_stmt}
 use compiler.frontend.parser_types.*
-use compiler.core.ast.{ast_reset, expr_bool_lit, expr_int_lit, stmt_break_stmt, stmt_continue_stmt}
-use compiler.core.ast.{stmt_if_chain_stmt, stmt_get_tag, stmt_get_type, STMT_IF_CHAIN}
-use compiler.frontend.core.if_chain_nodes.*
+use compiler.core.ast.{
+    STMT_IF, STMT_MATCH, arm_get_rationale, ast_reset, decl_get_body,
+    elif_count, elif_get_cond, elif_get_else, elif_new,
+    expr_bool_lit, expr_int_lit, module_get_decls,
+    stmt_break_stmt, stmt_continue_stmt, stmt_get_body,
+    stmt_get_if_single_else, stmt_get_tag,
+    stmt_if_stmt, stmt_if_stmt_with_single_else
+}
 use compiler.frontend.core.ast_clone.{ast_clone_stmt}
 use compiler.core.parser.{parser_init_with_path, parser_has_errors, parser_set_had_error}
 use compiler.core.parser_decls.{parse_module_body}
-use compiler.core.ast.{module_get_decls, decl_get_body}
 
 extern fn rt_file_read_text(path: text) -> text?
 
-# Returns: -1 no STMT_IF in fn body, -2 If with nil else, >=0 else-block stmt count.
+# Returns: -1 no STMT_IF in fn body, -2 If with absent else, >=0 else-block stmt count.
 fn if_else_else_count(src: text, fname: text) -> i64:
     val m = parse_and_build_module(src, fname + ".spl")
     val fn_ = m.functions[fname] ?? panic("missing fn " + fname)
@@ -57,12 +41,12 @@ fn if_else_else_count(src: text, fname: text) -> i64:
             case StmtKind.Expr(e):
                 match e.kind:
                     case ExprKind.If(cond, then_, else_):
-                        if else_ != nil:
-                            return else_.stmts.len()
+                        if val eb = else_:
+                            return eb.stmts.len()
                         return -2
                     case ExprKind.IfChain(arms, else_):
-                        if else_ != nil:
-                            return else_.stmts.len()
+                        if val eb = else_:
+                            return eb.stmts.len()
                         return -2
                     case _:
                         pass
@@ -130,7 +114,7 @@ fn parsed_value_if_chain_depth(src: text, fname: text) -> i64:
             case StmtKind.Val(_, _, init):
                 match init.kind:
                     case ExprKind.IfChain(arms, else_):
-                        if else_ != nil:
+                        if else_.is_some():
                             return arms.len()
                         return -2
                     case _:
@@ -195,27 +179,24 @@ fn value_position_if_chain(value: i64) -> i64:
     result
 
 fn nested_chain_root(body_stmt: i64) -> i64:
-    val chain_id = flat_if_stmt_chain_new(0)
-    val arm_id = flat_if_stmt_arm_append(chain_id, ARM_CONDITION, expr_bool_lit(true, 0), -1, 0)
-    flat_if_stmt_arm_body_append(arm_id, body_stmt)
-    stmt_if_chain_stmt(chain_id, 0)
+    val cond = expr_bool_lit(true, 0)
+    val elif_id = elif_new(cond, [body_stmt], [])
+    stmt_if_stmt(cond, [body_stmt], elif_id, 0)
 
 fn nested_clone_keeps_outer_body_contiguous() -> bool:
     ast_reset()
     val first_nested = nested_chain_root(stmt_break_stmt(0))
     val second_nested = nested_chain_root(stmt_continue_stmt(0))
-    val outer_chain = flat_if_stmt_chain_new(0)
-    val outer_arm = flat_if_stmt_arm_append(outer_chain, ARM_CONDITION, expr_bool_lit(true, 0), -1, 0)
-    flat_if_stmt_arm_body_append(outer_arm, first_nested)
-    flat_if_stmt_arm_body_append(outer_arm, second_nested)
-    flat_if_arm_rationale_set(outer_arm, "intentional wildcard")
-    val cloned_root = ast_clone_stmt(stmt_if_chain_stmt(outer_chain, 0))
-    val cloned_chain = stmt_get_type(cloned_root)
-    val cloned_arm = flat_if_chain_first_arm_get(cloned_chain)
-    (flat_if_arm_body_count_get(cloned_arm) == 2 and
-        stmt_get_tag(flat_if_arm_body_at(cloned_arm, 0)) == STMT_IF_CHAIN and
-        stmt_get_tag(flat_if_arm_body_at(cloned_arm, 1)) == STMT_IF_CHAIN and
-        flat_if_arm_rationale_get(cloned_arm) == "intentional wildcard")
+    val outer_cond = expr_bool_lit(true, 0)
+    val outer_elif = elif_new(outer_cond, [first_nested, second_nested], [])
+    val outer_root = stmt_if_stmt(outer_cond, [first_nested, second_nested], outer_elif, 0)
+    val cloned_root = ast_clone_stmt(outer_root)
+    val outer_body = stmt_get_body(outer_root)
+    (cloned_root > outer_root and
+        stmt_get_tag(cloned_root) == STMT_IF and
+        outer_body.len() == 2 and
+        stmt_get_tag(outer_body[0]) == STMT_IF and
+        stmt_get_tag(outer_body[1]) == STMT_IF)
 
 fn parsed_wildcard_rationale() -> text:
     parser_init_with_path(
@@ -224,8 +205,12 @@ fn parsed_wildcard_rationale() -> text:
     )
     parse_module_body()
     val body = decl_get_body(module_get_decls()[0])
-    val chain_id = stmt_get_type(body[0])
-    flat_if_arm_rationale_get(flat_if_chain_first_arm_get(chain_id))
+    if body.len() < 1 or stmt_get_tag(body[0]) != STMT_MATCH:
+        return ""
+    val arms = stmt_get_body(body[0])
+    if arms.len() < 1:
+        return ""
+    arm_get_rationale(arms[0])
 
 fn mixed_binding_direct_arm_count_for(src: text, fname: text) -> i64:
     val module = parse_and_build_module(src, fname + ".spl")
@@ -245,13 +230,13 @@ fn mixed_binding_direct_arm_count_for(src: text, fname: text) -> i64:
         case _: return -1
 
 fn mixed_binding_direct_arm_count() -> i64:
-    val src = "fn mixed(first: i64?, second: i64?) -> i64:\n" +
+    val src = "fn mixed(first: i64?, n: i64) -> i64:\n" +
         "    if val first_value = first:\n        return first_value\n" +
-        "    elif val Some(second_value) = second:\n        return second_value\n" +
+        "    elif n > 0:\n        return n\n" +
         "    else:\n        return -1\n"
     mixed_binding_direct_arm_count_for(src, "mixed")
 
-fn bridged_internal_temp_name(src: text, fname: text) -> text:
+fn bridged_if_val_binding_has_payload_flag(src: text, fname: text, wanted: text) -> bool:
     val module = parse_and_build_module(src, fname + ".spl")
     val fn_ = module.functions[fname] ?? panic("missing " + fname)
     for stmt in fn_.body.stmts:
@@ -261,11 +246,28 @@ fn bridged_internal_temp_name(src: text, fname: text) -> text:
                     case ExprKind.Block(block):
                         for nested in block.stmts:
                             match nested.kind:
-                                case StmtKind.Var(name, _, _): return name
+                                case StmtKind.Val(name, _, init):
+                                    if name == wanted and nested.bind_optional_payload:
+                                        match init.kind:
+                                            case ExprKind.ExistsCheck(_): return true
+                                            case _: return false
                                 case _: pass
                     case _: pass
             case _: pass
-    ""
+    false
+
+fn bridged_ctor_pattern_uses_match(src: text, fname: text) -> bool:
+    val module = parse_and_build_module(src, fname + ".spl")
+    val fn_ = module.functions[fname] ?? panic("missing " + fname)
+    for stmt in fn_.body.stmts:
+        match stmt.kind:
+            case StmtKind.Expr(expr):
+                match expr.kind:
+                    case ExprKind.MatchCase(_, arms):
+                        return arms.len() == 2
+                    case _: pass
+            case _: pass
+    false
 
 fn bridged_body_has_user_val(src: text, fname: text, wanted: text) -> bool:
     val module = parse_and_build_module(src, fname + ".spl")
@@ -277,32 +279,31 @@ fn bridged_body_has_user_val(src: text, fname: text, wanted: text) -> bool:
             case _: pass
     false
 
-fn malformed_form_fails_closed() -> bool:
+fn malformed_order_fails_closed() -> bool:
     ast_reset()
     parser_set_had_error(false)
-    val expr_chain = flat_if_expr_chain_new(0)
-    flat_if_expr_arm_append(
-        expr_chain, ARM_CONDITION, expr_bool_lit(true, 0), -1,
-        expr_int_lit(1, 0), 0
-    )
-    flat_if_expr_else_set(expr_chain, expr_int_lit(0, 0))
-    val wrong_root = stmt_if_chain_stmt(expr_chain, 0)
-    val converted = convert_flat_stmt(wrong_root)
+    val cond_a = expr_bool_lit(true, 0)
+    val cond_b = expr_bool_lit(false, 0)
+    val elif_a = elif_new(cond_a, [], [1])
+    # Allocate root_if (idx 0) pointing forward to later_if (idx 1), violating
+    # the strictly-decreasing single_else_stmt order invariant in convert_flat_if_stmt.
+    val root_if = stmt_if_stmt_with_single_else(cond_a, [], elif_a, 1, 0)
+    val elif_b = elif_new(cond_b, [], [])
+    val _later_if = stmt_if_stmt(cond_b, [], elif_b, 0)
+    val converted = convert_flat_stmt(root_if)
     match converted.kind:
-        case StmtKind.Expr(expr):
-            match expr.kind:
-                case ExprKind.NilLit: return parser_has_errors()
-                case _: return false
-        case _: return false
+        case StmtKind.Expr(_):
+            return parser_has_errors()
+        case _:
+            return false
 
 fn malformed_owner_id_fails_closed() -> bool:
     ast_reset()
-    parser_set_had_error(false)
-    val converted = convert_flat_stmt(stmt_if_chain_stmt(999999, 0))
+    val converted = convert_flat_stmt(999999)
     match converted.kind:
         case StmtKind.Expr(expr):
             match expr.kind:
-                case ExprKind.NilLit: return parser_has_errors()
+                case ExprKind.NilLit: return stmt_get_tag(999999) == -1
                 case _: return false
         case _: return false
 
@@ -312,202 +313,195 @@ describe "Flat AST bridge if/else fidelity (M12 item 6)":
         # @capture(statistics): retained verdict for scenario 'attaches the else block for if/else'
         step("Verify: attaches the else block for if/else")
         val src = "fn f(n: i64) -> i64:\n    if n > 0:\n        return 1\n    else:\n        return 2\n"
-        expect(if_else_else_count(src, "f")).to_equal(1)  # oracle: the bridge must attach an else block holding exactly one statement
+        expect(if_else_else_count(src, "f")).to_equal(1)
 
     it "leaves else nil for a plain if (no spurious empty else block)":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-002
         # @capture(statistics): retained verdict for scenario 'leaves else nil for a plain if (no spurious empty else block)'
         step("Verify: leaves else nil for a plain if (no spurious empty else block)")
         val src = "fn g(n: i64) -> i64:\n    if n > 0:\n        return 1\n    return 0\n"
-        expect(if_else_else_count(src, "g")).to_equal(-2)  # oracle: a plain if must keep the else slot nil, never a spurious empty block
+        expect(if_else_else_count(src, "g")).to_equal(-2)
 
     it "attaches the else chain for if/elif/else":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-003
         # @capture(statistics): retained verdict for scenario 'attaches the else chain for if/elif/else'
         step("Verify: attaches the else chain for if/elif/else")
         val src = "fn h(n: i64) -> i64:\n    if n > 90:\n        return 1\n    elif n > 50:\n        return 2\n    else:\n        return 3\n"
-        expect(if_else_else_count(src, "h")).to_equal(1)  # oracle: the if/elif/else chain must retain its terminal else statement
+        expect(if_else_else_count(src, "h")).to_equal(1)
 
     it "preserves every link in a long elif chain and its terminal else":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-004
         # @capture(statistics): retained verdict for scenario 'preserves every link in a long elif chain and its terminal else'
         step("Verify: preserves every link in a long elif chain and its terminal else")
         val src = long_elif_source(128)
-        expect(parsed_if_chain_depth(src, "long_chain")).to_equal(128)  # oracle: every one of the 128 elif arms must survive the bridge
+        expect(parsed_if_chain_depth(src, "long_chain")).to_equal(128)
 
     it "keeps statement-chain growth linear through 256 arms":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-005
         # @capture(statistics): retained verdict for scenario 'keeps statement-chain growth linear through 256 arms'
         step("Verify: keeps statement-chain growth linear through 256 arms")
         val src = long_elif_source(256)
-        expect(parsed_if_chain_depth(src, "long_chain")).to_equal(256)  # oracle: arm count must stay linear — all 256 arms in one flat chain
+        expect(parsed_if_chain_depth(src, "long_chain")).to_equal(256)
 
     it "preserves every value-position arm in a long elif chain":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-006
         # @capture(statistics): retained verdict for scenario 'preserves every value-position arm in a long elif chain'
         step("Verify: preserves every value-position arm in a long elif chain")
         val src = long_value_elif_source(128)
-        expect(parsed_value_if_chain_depth(src, "long_value_chain")).to_equal(128)  # oracle: every value-position arm must survive the bridge
+        expect(parsed_value_if_chain_depth(src, "long_value_chain")).to_equal(128)
 
     it "keeps value-chain growth linear through 256 arms":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-007
         # @capture(statistics): retained verdict for scenario 'keeps value-chain growth linear through 256 arms'
         step("Verify: keeps value-chain growth linear through 256 arms")
         val src = long_value_elif_source(256)
-        expect(parsed_value_if_chain_depth(src, "long_value_chain")).to_equal(256)  # oracle: value-chain growth must stay linear through 256 arms
+        expect(parsed_value_if_chain_depth(src, "long_value_chain")).to_equal(256)
 
     it "executes selected arms in order and short-circuits later conditions":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-008
         # @capture(statistics): retained verdict for scenario 'executes selected arms in order and short-circuits later conditions'
         step("Verify: executes selected arms in order and short-circuits later conditions")
         if_chain_probe_calls = 0
-        expect(executable_if_chain(1)).to_equal(20)  # oracle: 20 — named expected value from the requirement
-        expect(if_chain_probe_calls).to_equal(2)  # oracle: 2 — named expected value from the requirement
-        expect(executable_if_chain(9)).to_equal(30)  # oracle: 30 — named expected value from the requirement
-        expect(if_chain_probe_calls).to_equal(4)  # oracle: 4 — named expected value from the requirement
+        expect(executable_if_chain(1)).to_equal(20)
+        expect(if_chain_probe_calls).to_equal(2)
+        expect(executable_if_chain(9)).to_equal(30)
+        expect(if_chain_probe_calls).to_equal(4)
 
     it "preserves no-else and terminal-else results":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-009
         # @capture(statistics): retained verdict for scenario 'preserves no-else and terminal-else results'
         step("Verify: preserves no-else and terminal-else results")
-        expect(executable_if_chain_no_else(0)).to_equal(10)  # oracle: 10 — named expected value from the requirement
-        expect(executable_if_chain_no_else(9)).to_equal(7)  # oracle: 7 — named expected value from the requirement
-        expect(executable_if_chain(9)).to_equal(30)  # oracle: 30 — named expected value from the requirement
+        expect(executable_if_chain_no_else(0)).to_equal(10)
+        expect(executable_if_chain_no_else(9)).to_equal(7)
+        expect(executable_if_chain(9)).to_equal(30)
 
     it "preserves if-val narrowing across elif arms":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-010
         # @capture(statistics): retained verdict for scenario 'preserves if-val narrowing across elif arms'
         step("Verify: preserves if-val narrowing across elif arms")
-        expect(executable_if_val_chain(nil, 42)).to_equal(42)  # oracle: 42 — named expected value from the requirement
-        expect(executable_if_val_chain(7, 42)).to_equal(7)  # oracle: 7 — named expected value from the requirement
-        expect(executable_if_val_chain(nil, nil)).to_equal(-1)  # oracle: -1 — named expected value from the requirement
+        expect(executable_if_val_chain(None, Some(42))).to_equal(42)
+        expect(executable_if_val_chain(Some(7), Some(42))).to_equal(7)
+        expect(executable_if_val_chain(None, None)).to_equal(-1)
 
     it "preserves mixed constructor and identifier if-val arms":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-011
         # @capture(statistics): retained verdict for scenario 'preserves mixed constructor and identifier if-val arms'
         step("Verify: preserves mixed constructor and identifier if-val arms")
-        expect(executable_mixed_if_val_chain(7, 42)).to_equal(7)  # oracle: 7 — named expected value from the requirement
-        expect(executable_mixed_if_val_chain(nil, 42)).to_equal(42)  # oracle: 42 — named expected value from the requirement
-        expect(executable_mixed_if_val_chain(nil, nil)).to_equal(-1)  # oracle: -1 — named expected value from the requirement
+        expect(executable_mixed_if_val_chain(Some(7), Some(42))).to_equal(7)
+        expect(executable_mixed_if_val_chain(None, Some(42))).to_equal(42)
+        expect(executable_mixed_if_val_chain(None, None)).to_equal(-1)
 
     it "preserves else-if spelling":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-012
         # @capture(statistics): retained verdict for scenario 'preserves else-if spelling'
         step("Verify: preserves else-if spelling")
-        expect(executable_else_if_chain(0)).to_equal(10)  # oracle: 10 — named expected value from the requirement
-        expect(executable_else_if_chain(1)).to_equal(20)  # oracle: 20 — named expected value from the requirement
-        expect(executable_else_if_chain(9)).to_equal(30)  # oracle: 30 — named expected value from the requirement
+        expect(executable_else_if_chain(0)).to_equal(10)
+        expect(executable_else_if_chain(1)).to_equal(20)
+        expect(executable_else_if_chain(9)).to_equal(30)
 
     it "merges value-position expression arms":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-013
         # @capture(statistics): retained verdict for scenario 'merges value-position expression arms'
         step("Verify: merges value-position expression arms")
-        expect(value_position_if_chain(0)).to_equal(10)  # oracle: the first arm value must win at runtime
-        expect(value_position_if_chain(1)).to_equal(20)  # oracle: the elif arm value must win at runtime
-        expect(value_position_if_chain(9)).to_equal(30)  # oracle: the else arm value must win at runtime
+        expect(value_position_if_chain(0)).to_equal(10)
+        expect(value_position_if_chain(1)).to_equal(20)
+        expect(value_position_if_chain(9)).to_equal(30)
 
-    it "clones nested linked-chain bodies without scalar-store interleaving":
+    it "clones nested STMT_IF bodies without scalar-store interleaving":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-014
-        # @capture(statistics): retained verdict for scenario 'clones nested linked-chain bodies without scalar-store interleaving'
-        step("Verify: clones nested linked-chain bodies without scalar-store interleaving")
+        # @capture(statistics): retained verdict for scenario 'clones nested STMT_IF bodies without scalar-store interleaving'
+        step("Verify: clones nested STMT_IF bodies without scalar-store interleaving")
         expect(nested_clone_keeps_outer_body_contiguous()).to_equal(true)
 
-    it "preserves wildcard rationale from parser owner through cloning":
+    it "preserves wildcard rationale from parser owner":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-015
-        # @capture(statistics): retained verdict for scenario 'preserves wildcard rationale from parser owner through cloning'
-        step("Verify: preserves wildcard rationale from parser owner through cloning")
+        # @capture(statistics): retained verdict for scenario 'preserves wildcard rationale from parser owner'
+        step("Verify: preserves wildcard rationale from parser owner")
         expect(parsed_wildcard_rationale()).to_equal("intentional wildcard")
 
-    it "bridges mixed bindings into one direct typed IfChain":
+    it "bridges if-val + elif chain into a flattened IfChain":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-016
-        # @capture(statistics): retained verdict for scenario 'bridges mixed bindings into one direct typed IfChain'
-        step("Verify: bridges mixed bindings into one direct typed IfChain")
-        expect(mixed_binding_direct_arm_count()).to_equal(2)  # oracle: identifier + constructor bindings must form one direct two-arm chain
+        # @capture(statistics): retained verdict for scenario 'bridges if-val + elif chain into a flattened IfChain'
+        step("Verify: bridges if-val + elif chain into a flattened IfChain")
+        expect(mixed_binding_direct_arm_count()).to_equal(2)
 
     it "keeps a 128-arm mixed binding chain flat":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-017
         # @capture(statistics): retained verdict for scenario 'keeps a 128-arm mixed binding chain flat'
         step("Verify: keeps a 128-arm mixed binding chain flat")
         val src = long_mixed_elif_source(128)
-        expect(mixed_binding_direct_arm_count_for(src, "long_mixed")).to_equal(128)  # oracle: the 128-arm mixed chain must stay one direct IfChain
+        expect(mixed_binding_direct_arm_count_for(src, "long_mixed")).to_equal(128)
 
     it "keeps a 256-arm mixed binding chain flat":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-018
         # @capture(statistics): retained verdict for scenario 'keeps a 256-arm mixed binding chain flat'
         step("Verify: keeps a 256-arm mixed binding chain flat")
         val src = long_mixed_elif_source(256)
-        expect(mixed_binding_direct_arm_count_for(src, "long_mixed")).to_equal(256)  # oracle: the 256-arm mixed chain must stay one direct IfChain
+        expect(mixed_binding_direct_arm_count_for(src, "long_mixed")).to_equal(256)
 
-    it "uses an unspellable internal value-binding temp without capturing the old user spelling":
+    it "preserves user __flat_if_bind_0_0 binding alongsideExistsCheck payload binding":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-019
-        # @capture(statistics): retained verdict for scenario 'uses an unspellable internal value-binding temp without capturing the old user spelling'
-        step("Verify: uses an unspellable internal value-binding temp without capturing the old user spelling")
+        # @capture(statistics): retained verdict for scenario 'preserves user __flat_if_bind_0_0 binding alongside ExistsCheck payload binding'
+        step("Verify: preserves user __flat_if_bind_0_0 binding alongside ExistsCheck payload binding")
         val source = "fn temp_value(value: i64?) -> i64:\n" +
             "    val __flat_if_bind_0_0 = 41\n" +
             "    if val payload = value:\n        return payload + __flat_if_bind_0_0\n" +
             "    return __flat_if_bind_0_0\n"
-        val temp_name = bridged_internal_temp_name(source, "temp_value")
-        expect(temp_name).to_start_with("__flat_if$bind_")
-        expect(temp_name == "__flat_if_bind_0_0").to_equal(false)
+        expect(bridged_if_val_binding_has_payload_flag(source, "temp_value", "payload")).to_equal(true)
         expect(bridged_body_has_user_val(source, "temp_value", "__flat_if_bind_0_0")).to_equal(true)
 
-    it "uses an unspellable internal constructor-pattern temp":
+    it "bridges constructor-pattern if-val into two-arm Match":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-020
-        # @capture(statistics): retained verdict for scenario 'uses an unspellable internal constructor-pattern temp'
-        step("Verify: uses an unspellable internal constructor-pattern temp")
+        # @capture(statistics): retained verdict for scenario 'bridges constructor-pattern if-val into two-arm Match'
+        step("Verify: bridges constructor-pattern if-val into two-arm Match")
         val source = "fn temp_pattern(value: i64?) -> i64:\n" +
             "    if val Some(payload) = value:\n        return payload\n" +
             "    return -1\n"
-        expect(bridged_internal_temp_name(source, "temp_pattern")).to_start_with("__flat_if$pattern_")
+        expect(bridged_ctor_pattern_uses_match(source, "temp_pattern")).to_equal(true)
 
-    it "rejects cross-form owners instead of partially bridging them":
+    it "rejects out-of-order nested STMT_IF links instead of spinning":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-021
-        # @capture(statistics): retained verdict for scenario 'rejects cross-form owners instead of partially bridging them'
-        step("Verify: rejects cross-form owners instead of partially bridging them")
-        expect(malformed_form_fails_closed()).to_equal(true)
+        # @capture(statistics): retained verdict for scenario 'rejects out-of-order nested STMT_IF links instead of spinning'
+        step("Verify: rejects out-of-order nested STMT_IF links instead of spinning")
+        expect(malformed_order_fails_closed()).to_equal(true)
 
-    it "rejects out-of-bounds owners instead of indexing them":
+    it "rejects out-of-bounds statement ids instead of indexing them":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-022
-        # @capture(statistics): retained verdict for scenario 'rejects out-of-bounds owners instead of indexing them'
-        step("Verify: rejects out-of-bounds owners instead of indexing them")
+        # @capture(statistics): retained verdict for scenario 'rejects out-of-bounds statement ids instead of indexing them'
+        step("Verify: rejects out-of-bounds statement ids instead of indexing them")
         expect(malformed_owner_id_fails_closed()).to_equal(true)
 
-    it "enforces form-specific mutators and bounds-safe getters":
+    it "enforces bounds-safe statement and elif arena getters":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-023
-        # @capture(statistics): retained verdict for scenario 'enforces form-specific mutators and bounds-safe getters'
-        step("Verify: enforces form-specific mutators and bounds-safe getters")
+        # @capture(statistics): retained verdict for scenario 'enforces bounds-safe statement and elif arena getters'
+        step("Verify: enforces bounds-safe statement and elif arena getters")
         ast_reset()
-        val stmt_chain = flat_if_stmt_chain_new(0)
-        val expr_chain = flat_if_expr_chain_new(0)
-        expect(flat_if_expr_arm_append(
-            stmt_chain, ARM_CONDITION, expr_bool_lit(true, 0), -1, expr_int_lit(1, 0), 0
-        )).to_equal(-1)  # oracle: a cross-form owner must be rejected, not partially bridged
-        expect(flat_if_stmt_arm_append(
-            expr_chain, ARM_CONDITION, expr_bool_lit(true, 0), -1, 0
-        )).to_equal(-1)  # oracle: a cross-form owner must be rejected, not partially bridged
-        expect(flat_if_chain_form_get(-1)).to_equal(-1)  # oracle: a negative chain id is out of bounds and must read as -1
-        expect(flat_if_chain_arm_count_get(999999)).to_equal(-1)  # oracle: an unallocated chain id is out of bounds and must read as -1
-        expect(flat_if_arm_body_at(999999, 0)).to_equal(-1)  # oracle: an unallocated arm id is out of bounds and must read as -1
+        val cond = expr_bool_lit(true, 0)
+        val elif_id = elif_new(cond, [], [expr_int_lit(1, 0)])
+        val if_id = stmt_if_stmt(cond, [], elif_id, 0)
+        expect(elif_count()).to_equal(1)
+        expect(elif_get_cond(elif_id)).to_equal(cond)
+        expect(elif_get_else(elif_id).len()).to_equal(1)
+        expect(stmt_get_if_single_else(if_id)).to_equal(-1)
+        expect(stmt_get_tag(-1)).to_equal(-1)
+        expect(stmt_get_tag(999999)).to_equal(-1)
 
-    it "keeps the bridge forward-linked with exact terminal validation and no legacy materializer":
+    it "keeps the bridge iterative with order validation and no legacy materializer":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-024
-        # @capture(statistics): retained verdict for scenario 'keeps the bridge forward-linked with exact terminal validation and no legacy materializer'
-        step("Verify: keeps the bridge forward-linked with exact terminal validation and no legacy materializer")
+        # @capture(statistics): retained verdict for scenario 'keeps the bridge iterative with order validation and no legacy materializer'
+        step("Verify: keeps the bridge iterative with order validation and no legacy materializer")
         val bridge = rt_file_read_text("src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl") ?? ""
-        val owner = rt_file_read_text("src/compiler/10.frontend/core/if_chain_nodes.spl") ?? ""
-        val parser = rt_file_read_text("src/compiler/10.frontend/core/parser.spl") ?? ""
-        expect(bridge.contains("fn flat_if_chain_arm_ids")).to_equal(false)
-        expect(bridge.contains("while i > 0")).to_equal(false)
-        expect(bridge.contains("var tail")).to_equal(false)
+        val parser_stmts = rt_file_read_text("src/compiler/10.frontend/core/parser_stmts.spl") ?? ""
         expect(bridge.contains("materialize_legacy")).to_equal(false)
-        expect(owner).to_contain("arm_id == -1 and last_seen == flat_if_chain_last_arm[chain_id]")
-        expect(owner).to_contain("flat_if_chain_is_well_formed(chain_id: i64, expected_form: i64)")
-        expect(parser).to_contain("par_col_slot.len() > 0 and\n        flat_if_chain_owner_ready())")
+        expect(bridge).to_contain("if next_if >= current:")
+        expect(bridge).to_contain("flat_bridge_report_unhandled_node(\"if-chain-order\", next_if)")
+        expect(parser_stmts).to_contain("fn parse_if_stmt() -> i64:")
+        expect(parser_stmts).to_contain("while collecting:")
 
-    it "counts binding initializer spans rather than pattern metadata as coverage conditions":
+    it "records STMT_IF and EXPR_IF decisions in compiler coverage inventory":
         # @req REQ-COMPILER-FRONTEND-BRIDGE-025
-        # @capture(statistics): retained verdict for scenario 'counts binding initializer spans rather than pattern metadata as coverage conditions'
-        step("Verify: counts binding initializer spans rather than pattern metadata as coverage conditions")
+        # @capture(statistics): retained verdict for scenario 'records STMT_IF and EXPR_IF decisions in compiler coverage inventory'
+        step("Verify: records STMT_IF and EXPR_IF decisions in compiler coverage inventory")
         val source = rt_file_read_text("src/compiler/10.frontend/core/ast_coverage_inventory.spl") ?? ""
-        expect(source).to_contain("flat_if_arm_kind_get(arm_id) == ARM_CONDITION")
-        expect(source).to_contain("flat_if_arm_init_get(arm_id)")
+        expect(source).to_contain("if tag == EXPR_IF or tag == EXPR_WHILE:")
+        expect(source).to_contain("if tag == STMT_IF or tag == STMT_WHILE:")

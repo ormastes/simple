@@ -1,0 +1,111 @@
+"""
+## Purpose and audience
+Purpose: Prove RB-BUILD-04. An archive built in an earlier bootstrap stage is
+reused by a later stage only when the unit cache key matches exactly. A changed
+source digest, dependency interface digest or producer identity resolves to a
+different directory that is not complete, so the unit is rebuilt rather than
+silently reused. A failed or incomplete earlier-stage unit is never reused.
+Audience: build and bootstrap engineers maintaining library-unit caching.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Uses small fixture files under build/spec_library_unit_stage_reuse_v1; no archiver
+is invoked, the archive is a placeholder file, as in library_unit_archive_v1_spec.
+Plan: doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md sections 5 and 9.
+"""
+# @req: REQ-BUILD-SRC-001
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_write, file_delete, mkdir_p}
+use compiler.driver.driver_build.library_unit_plan_v1.{library_unit_cache_key_v1}
+use compiler.driver.driver_build.library_unit_archive_v1.{
+    LibraryUnitReceiptV1, library_unit_archive_dir_v1, library_unit_archive_path_v1,
+    library_unit_receipt_path_v1, library_unit_receipt_publish_v1,
+    library_unit_archive_complete_v1}
+
+val ROOT = "build/spec_library_unit_stage_reuse_v1"
+val PRODUCER = "exe=4:abcd;compiler=1:x"
+val SCOPE = "lane=7:default;backend=4:llvm"
+val DEPS = [("simple.runtime", "ifaceB")]
+
+fn _receipt(key: text, src: text, producer: text, deps: [(text, text)], verdict: text) -> LibraryUnitReceiptV1:
+    LibraryUnitReceiptV1(unit: "u", unit_key: key, scope_key: SCOPE, producer_identity: producer,
+        source_digest: src, iface_digest: "iface", deps: deps, objects: ["a.o"], verdict: verdict,
+        failed_modules: if verdict == "failed": ["m.spl"] else: [])
+
+fn _stage_dir(stage: text, key: text) -> text:
+    library_unit_archive_dir_v1("{ROOT}/{stage}", "u", key)
+
+# Stage 3 publishes under its key; stage 4 looks the same key up in stage 3's cache.
+fn _publish_stage3(key: text, src: text, producer: text, deps: [(text, text)], verdict: text) -> text:
+    val dir = _stage_dir("stage3", key)
+    val _m = mkdir_p(dir)
+    val _d = file_delete(library_unit_receipt_path_v1(dir))
+    val _a = file_write(library_unit_archive_path_v1(dir, "u"), "!<arch>\n")
+    val _p = library_unit_receipt_publish_v1(dir, _receipt(key, src, producer, deps, verdict))
+    dir
+
+# @manual_section: library_unit_stage_reuse
+describe "RB-BUILD-04: stage 4 reuses a stage 3 archive only on an exact key":
+    """The unit cache key decides reuse; any input change forces a rebuild."""
+
+    it "reuses the archive when producer, source and dependency digests are unchanged":
+        # @req: REQ-BUILD-SRC-001
+        step("Publish a stage 3 archive then look up the identical key")
+        val key = library_unit_cache_key_v1(PRODUCER, "src-1", DEPS)
+        val dir = _publish_stage3(key, "src-1", PRODUCER, DEPS, "ok")
+        val same = library_unit_cache_key_v1(PRODUCER, "src-1", DEPS)
+        expect(same).to_equal(key)
+        match library_unit_archive_complete_v1(_stage_dir("stage3", same), "u"):
+            case Ok(path):
+                expect(path).to_equal(library_unit_archive_path_v1(dir, "u"))
+            case Err(e):
+                expect(e).to_equal("")
+
+    it "misses when the source digest changes":
+        # @req: REQ-BUILD-SRC-001
+        step("Look up the key of an edited source against the stage 3 cache")
+        val key = library_unit_cache_key_v1(PRODUCER, "src-2", DEPS)
+        val _p = _publish_stage3(key, "src-2", PRODUCER, DEPS, "ok")
+        val edited = library_unit_cache_key_v1(PRODUCER, "src-2-edited", DEPS)
+        expect(edited == key).to_equal(false)
+        expect(library_unit_archive_complete_v1(_stage_dir("stage3", edited), "u").is_err()).to_equal(true)
+
+    it "misses when a dependency interface digest changes":
+        # @req: REQ-BUILD-SRC-001
+        step("Look up the key after a dependency interface digest changed")
+        val key = library_unit_cache_key_v1(PRODUCER, "src-3", DEPS)
+        val _p = _publish_stage3(key, "src-3", PRODUCER, DEPS, "ok")
+        val moved = library_unit_cache_key_v1(PRODUCER, "src-3", [("simple.runtime", "ifaceC")])
+        expect(moved == key).to_equal(false)
+        expect(library_unit_archive_complete_v1(_stage_dir("stage3", moved), "u").is_err()).to_equal(true)
+
+    it "misses when the producer identity changes":
+        # @req: REQ-BUILD-SRC-001
+        step("Look up the key produced by a different compiler binary")
+        val key = library_unit_cache_key_v1(PRODUCER, "src-4", DEPS)
+        val _p = _publish_stage3(key, "src-4", PRODUCER, DEPS, "ok")
+        val other = library_unit_cache_key_v1("exe=4:ffff;compiler=1:x", "src-4", DEPS)
+        expect(other == key).to_equal(false)
+        expect(library_unit_archive_complete_v1(_stage_dir("stage3", other), "u").is_err()).to_equal(true)
+
+    it "never reuses a failed stage 3 unit even under the identical key":
+        # @req: REQ-BUILD-SRC-001
+        step("Publish a failed receipt with an archive present and look it up")
+        val key = library_unit_cache_key_v1(PRODUCER, "src-5", DEPS)
+        val dir = _publish_stage3(key, "src-5", PRODUCER, DEPS, "failed")
+        match library_unit_archive_complete_v1(dir, "u"):
+            case Ok(_):
+                expect("reused").to_equal("Err expected")
+            case Err(e):
+                expect(e.contains("failed")).to_equal(true)
+
+    it "never reuses an archive that has no receipt":
+        # @req: REQ-BUILD-SRC-001
+        step("Write an archive file alone and look it up")
+        val dir = _stage_dir("stage3", "key-no-receipt")
+        val _m = mkdir_p(dir)
+        val _d = file_delete(library_unit_receipt_path_v1(dir))
+        val _a = file_write(library_unit_archive_path_v1(dir, "u"), "!<arch>\n")
+        expect(library_unit_archive_complete_v1(dir, "u").is_err()).to_equal(true)
