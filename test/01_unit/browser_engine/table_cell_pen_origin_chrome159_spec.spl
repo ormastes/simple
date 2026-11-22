@@ -1,0 +1,105 @@
+"""
+## Purpose and audience
+Purpose: Pin the LCD pen PHASE of text in an auto-layout table cell against
+Chrome 159. Chrome sizes auto columns in LayoutUnits (1/64 px): each column is
+`floor(table_width * max_i / sum(max))` and the last takes the rest, so a
+cell's content edge is fractional and its text is painted at that quarter
+phase. Simple rounds the column edges to whole pixels and painted every cell
+run at phase 0. On the catalog `css-paint` page the second column starts at
+416.86 px (text pen 425.36): `Expected` / `Visible` / `Aligned` mismatched
+7.5..8.5 px per px of run width against 2.2..2.6 for the first column.
+Audience: web renderer table layout / Engine2D font maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=1 --window-size=400,300
+--screenshot`, Liberation Sans 16 px, `color:#000` on white), stem row y=6.
+`<table style="margin:0 0 0 1px;font-size:16px;line-height:1;
+border-collapse:collapse;border-spacing:0;width:Wpx">`, cells `padding:0`.
+Cell geometry from `--dump-dom` + `getBoundingClientRect` (x * 64):
+`ll` is 455/64 wide, `l` is 228/64.
+
+| W  | cells    | column edges (1/64)   | pen of the `l` cells | row 6                               |
+|----|----------|-----------------------|----------------------|-------------------------------------|
+| 50 | ll, l    | 64, 2195              | 34.297               | x=34..37 `ffffdf a74f17 0f3f97 d7f7ff` |
+| 61 | ll, l, l | 64, 2013, 2990        | 31.453, 46.719       | x=31..34 `fffff7 d78f3f 0f174f a7e7ff`, x=47..49 `efc777 2f0f1f 67bfef` |
+| 60 | ll, l    | 64, 2622              | 40.969               | x=41..44 `ffe7b7 5f1f07 2f77cf f7ffff` |
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-LCD-001 — a table cell's text run keeps Chrome's fractional column edge for its LCD phase.
+"""
+# @tag: unit, browser_engine, text, table, engine2d, chrome159
+# @tag:in-development
+# Tracks: red handover spec (1/3 on base) — the auto table cell pen-origin fix belongs in layout_engine/layout_text (layout lane); delete this tag in the commit that turns it green.
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 96
+val H: i32 = 32
+# Two LCD16 steps, as in inline_run_pen_origin_chrome159_spec.
+val TOL: i32 = 16
+
+fn _page(width: i32, cells: text) -> text:
+    "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif\"><table style=\"margin:0 0 0 1px;font-size:16px;line-height:1;color:#000;border-collapse:collapse;border-spacing:0;width:" + width.to_string() + "px\"><tr>" + cells + "</tr></table></body></html>"
+
+val CELL_LL: text = "<td style=\"padding:0\">ll</td>"
+val CELL_L: text = "<td style=\"padding:0\">l</td>"
+
+fn _chan(px: u32, shift: u32) -> i32:
+    ((px >> shift) & 0xFFu32).to_i32()
+
+fn _abs(v: i32) -> i32:
+    if v < 0: 0 - v else: v
+
+# Largest per-channel |ours - chrome| over x0..x0+chrome.len()-1 on row y.
+fn _worst_delta(px: [u32], y: i32, x0: i32, chrome: [u32]) -> i32:
+    var worst = 0
+    var i = 0
+    while i < chrome.len().to_i32():
+        val ours = px[y * W + x0 + i]
+        for sh in [16u32, 8u32, 0u32]:
+            val d = _abs(_chan(ours, sh) - _chan(chrome[i], sh))
+            if d > worst:
+                worst = d
+        i = i + 1
+    worst
+
+describe "table cell text pen origin against Chrome 159":
+    it "AC-1: a second column starting at 34.297 paints its run at the .25 phase":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(_page(50, CELL_LL + CELL_L), W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome row 6, x=34..37: ffffdf a74f17 0f3f97 d7f7ff (pen 34.297)")
+        val chrome: [u32] = [0xffffdfu32, 0xa74f17u32, 0x0f3f97u32, 0xd7f7ffu32]
+        expect(_worst_delta(px, 6, 34, chrome) <= TOL).to_be(true)
+
+    it "AC-2: three columns keep the .5 and .75 phases of their floored edges":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(_page(61, CELL_LL + CELL_L + CELL_L), W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome row 6, x=31..34: fffff7 d78f3f 0f174f a7e7ff (pen 31.453)")
+        val second: [u32] = [0xfffff7u32, 0xd78f3fu32, 0x0f174fu32, 0xa7e7ffu32]
+        expect(_worst_delta(px, 6, 31, second) <= TOL).to_be(true)
+        step("Chrome row 6, x=46..49: ffffff efc777 2f0f1f 67bfef (pen 46.719)")
+        val third: [u32] = [0xffffffu32, 0xefc777u32, 0x2f0f1fu32, 0x67bfefu32]
+        expect(_worst_delta(px, 6, 46, third) <= TOL).to_be(true)
+
+    it "AC-3: a column edge within 1/8 px of a whole pixel keeps phase 0":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(_page(60, CELL_LL + CELL_L), W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome row 6, x=41..44: ffe7b7 5f1f07 2f77cf f7ffff (pen 40.969)")
+        val chrome: [u32] = [0xffe7b7u32, 0x5f1f07u32, 0x2f77cfu32, 0xf7ffffu32]
+        expect(_worst_delta(px, 6, 41, chrome) <= TOL).to_be(true)
