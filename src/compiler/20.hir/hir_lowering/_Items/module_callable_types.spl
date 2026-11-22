@@ -481,6 +481,11 @@ impl HirLowering:
         if self.registering_import_symbols:
             return nil
 
+        # Pre-declaring a callable signature publishes its symbol type before bodies
+        # are lowered; written-`Any` diagnostics are emitted once when `lower_function`
+        # lowers the parameter and return annotations.
+        val saved_written_any_depth = self.written_any_unsafe_depth
+        self.written_any_unsafe_depth = saved_written_any_depth + 1
         var param_types: [HirType] = []
         val raw_params = fn_decl.params
         var first_raw_param = 0
@@ -518,6 +523,7 @@ impl HirLowering:
                 # Any callback tail. Other undeclared signatures retain their
                 # existing inference path.
                 if self.dynamic_callback_function_type(fn_decl) == nil:
+                    self.written_any_unsafe_depth = saved_written_any_depth
                     return nil
                 val callback_type = self.dynamic_callback_param_type(fn_decl, raw_param)
                 param_types.push(callback_type ?? HirType(kind: HirTypeKind.Any, span: raw_param.span))
@@ -555,6 +561,7 @@ impl HirLowering:
         # hir_cache_encode_segv_some_box_in_symbol_type_2026-08-23).
         # The sibling `declared_surface_callable_type` below already returns the
         # bare value from its `-> HirType?` tail; match it.
+        self.written_any_unsafe_depth = saved_written_any_depth
         callable_type
 
     me declared_surface_callable_type(callable: ModuleSurfaceCallable, owner_symbol: SymbolId?) -> HirType?:
@@ -567,6 +574,8 @@ impl HirLowering:
             return nil
         if self.registering_import_symbols:
             return nil
+        val saved_written_any_depth = self.written_any_unsafe_depth
+        self.written_any_unsafe_depth = saved_written_any_depth + 1
         var param_types: [HirType] = []
         var param_idx = 0
         match owner_symbol:
@@ -581,6 +590,7 @@ impl HirLowering:
                 ()
         while param_idx < callable.params.len():
             if not callable.params[param_idx].has_type_:
+                self.written_any_unsafe_depth = saved_written_any_depth
                 return nil
             param_types = param_types.push(self.lower_type(callable.params[param_idx].type_))
             param_idx = param_idx + 1
@@ -588,6 +598,7 @@ impl HirLowering:
             self.lower_type(callable.return_type)
         else:
             HirType(kind: HirTypeKind.Unit, span: callable.span)
+        self.written_any_unsafe_depth = saved_written_any_depth
         HirType(
             kind: HirTypeKind.Function(
                 param_types,

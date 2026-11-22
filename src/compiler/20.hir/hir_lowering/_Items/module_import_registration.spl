@@ -33,7 +33,7 @@ use compiler.common.attributes.{parse_function_attrs, parse_export_attrs, parse_
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.dependency.{member_access_scope_for_modules, member_visibility_allows, aggregate_constructor_visibility_allows}
-use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_package_name, module_surface_package_name_from_name}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_package_name, module_surface_package_name_from_name}
 use compiler.common.module_path_naming.{module_logical_name_from_path, module_relative_name_from_path}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
@@ -1418,7 +1418,21 @@ impl HirLowering:
             if key != "" and self.surface_index_for_name(key) >= 0: return key
             return ""
         if not name.starts_with("."):
-            return self.resolve_module_key(name)
+            val absolute_key = self.resolve_module_key(name)
+            if absolute_key != "":
+                return absolute_key
+            if ctx_name == "" and source_path == "":
+                return ""
+            val sibling_key = self.resolve_module_key_relative("." + name, ctx_name, source_path)
+            if sibling_key == "" or sibling_key == ctx_name:
+                return ""
+            val sibling_index = self.surface_index_for_name(sibling_key)
+            if sibling_index < 0:
+                return ""
+            val importer_canon = if source_path != "": module_surface_canonical_path(source_path) else: ""
+            if importer_canon != "" and self.module_surfaces.surfaces[sibling_index].canonical_path == importer_canon:
+                return ""
+            return sibling_key
         # Callers with a logical context already retain its surface/path.
         # Passing that owner avoids an additional per-import registry scan.
         val importer_path = if source_path == "": ctx_name else: source_path

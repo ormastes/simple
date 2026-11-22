@@ -1,0 +1,127 @@
+"""
+## Purpose and audience
+Regression spec for `compiled_hir_module_form_use_bare_names_2026-11-19`:
+pure-Simple HIR + MIR lowering must bind bare function names from module-form
+`use` declarations, both for same-directory sibling imports (`use provider` in
+`test/fixtures/compiled_module_form_use/main.spl`) and for dotted package
+imports whose functions are taken by address (`fn_name as u64`).
+"""
+# @req: REQ-COMPILER-HIR-001
+# @cover src/compiler/20.hir/hir_lowering/module_surface_registry_index.spl
+# @cover src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instruction_support.{MirOperandKind}
+use compiler.mir.mir_types.{MirConstValue}
+use test.helpers.module_surface_owner_fixture.{module_surfaces_from_test_modules}
+
+describe "Pure-Simple HIR + MIR binds bare names from module-form use":
+    it "resolves sibling module-form `use provider` and lowers bare call without LoadGlobal":
+        val log = Logger(level: 0)
+        val provider_path = "test/fixtures/compiled_module_form_use/provider.spl"
+        val provider_name = "test.fixtures.compiled_module_form_use.provider"
+        val provider_src = "pub fn mfu_provider_fn() -> i64:\n    42\n"
+        val main_path = "test/fixtures/compiled_module_form_use/main.spl"
+        val main_name = "test.fixtures.compiled_module_form_use.main"
+        val main_src = "use provider\n\nfn main() -> i64:\n    mfu_provider_fn()\n"
+
+        val provider_ast = parse_full_frontend(provider_src, provider_path, provider_name, log)
+        val main_ast = parse_full_frontend(main_src, main_path, main_name, log)
+        var modules: Dict<text, Module> = {}
+        modules[provider_name] = provider_ast
+        modules[main_name] = main_ast
+        val sources = [
+            SourceFile(path: provider_path, content: provider_src, module_name: provider_name),
+            SourceFile(path: main_path, content: main_src, module_name: main_name)
+        ]
+        val surfaces_res = module_surfaces_from_test_modules(modules, sources)
+        expect(surfaces_res.is_ok()).to_equal(true)
+        val surfaces = surfaces_res.unwrap()
+
+        var main_lowering = hirlowering_for_module(main_name, surfaces)
+        main_lowering.module_filename = main_path
+        val main_hir = main_lowering.lower_module(main_ast)
+        expect(main_lowering.errors.len()).to_equal(0)
+
+        var mir_lowering = MirLowering.new(main_hir.symbols)
+        val _n = mir_lowering.register_surface_callable_origins_v1(
+            provider_name, ["mfu_provider_fn"], [false], [false], [false])
+        val mir = mir_lowering.lower_module(main_hir)
+        expect(mir_lowering.errors.len()).to_equal(0)
+
+        var load_globals = 0
+        var saw_direct_call = false
+        for fn_val in mir.functions.values():
+            if fn_val.name == "main":
+                for block in fn_val.blocks:
+                    for inst in block.instructions:
+                        match inst.kind:
+                            case MirInstKind.LoadGlobal(_, _):
+                                load_globals = load_globals + 1
+                            case MirInstKind.Call(_, callee, _):
+                                match callee.kind:
+                                    case MirOperandKind.Const(MirConstValue.Str(target), _):
+                                        if target == "mfu_provider_fn" or target.ends_with(".mfu_provider_fn"):
+                                            saw_direct_call = true
+                                    case _: ()
+                            case _: ()
+        expect(load_globals).to_equal(0)
+        expect(saw_direct_call).to_equal(true)
+
+    it "lowers address-taken bare function from dotted module-form use without LoadGlobal":
+        val log = Logger(level: 0)
+        val shim_file_path = "src/os/kernel/abi/syscall_shim_file.spl"
+        val shim_file_name = "os.kernel.abi.syscall_shim_file"
+        val shim_file_src = "@export(\"C\", name: \"spl_shim_file_capability_check\")\nfn spl_shim_file_capability_check(id: u64) -> i64:\n    0\n"
+        val shim_hub_path = "src/os/kernel/abi/syscall_shim.spl"
+        val shim_hub_name = "os.kernel.abi.syscall_shim"
+        val shim_hub_src = "use os.kernel.abi.syscall_shim_file\n\nfn keepalive() -> u64:\n    spl_shim_file_capability_check as u64\n"
+
+        val provider_ast = parse_full_frontend(shim_file_src, shim_file_path, shim_file_name, log)
+        val hub_ast = parse_full_frontend(shim_hub_src, shim_hub_path, shim_hub_name, log)
+        var modules: Dict<text, Module> = {}
+        modules[shim_file_name] = provider_ast
+        modules[shim_hub_name] = hub_ast
+        val sources = [
+            SourceFile(path: shim_file_path, content: shim_file_src, module_name: shim_file_name),
+            SourceFile(path: shim_hub_path, content: shim_hub_src, module_name: shim_hub_name)
+        ]
+        val surfaces_res = module_surfaces_from_test_modules(modules, sources)
+        expect(surfaces_res.is_ok()).to_equal(true)
+        val surfaces = surfaces_res.unwrap()
+
+        var provider_hir_lowering = hirlowering_for_module(shim_file_name, surfaces)
+        provider_hir_lowering.module_filename = shim_file_path
+        val provider_hir = provider_hir_lowering.lower_module(provider_ast)
+        expect(provider_hir_lowering.errors.len()).to_equal(0)
+
+        var hub_hir_lowering = hirlowering_for_module(shim_hub_name, surfaces)
+        hub_hir_lowering.module_filename = shim_hub_path
+        val hub_hir = hub_hir_lowering.lower_module(hub_ast)
+        expect(hub_hir_lowering.errors.len()).to_equal(0)
+
+        var mir_lowering = MirLowering.new(hub_hir.symbols)
+        for fn_val in provider_hir.functions.values():
+            mir_lowering.register_provider_callable_link(shim_file_name, provider_hir.symbols, fn_val)
+        val mir = mir_lowering.lower_module(hub_hir)
+        expect(mir_lowering.errors.len()).to_equal(0)
+
+        var load_globals = 0
+        for fn_val in mir.functions.values():
+            for block in fn_val.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case MirInstKind.LoadGlobal(_, _):
+                            load_globals = load_globals + 1
+                        case _: ()
+        expect(load_globals).to_equal(0)

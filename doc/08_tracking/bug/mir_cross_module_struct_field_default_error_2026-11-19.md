@@ -1,6 +1,6 @@
 # MIR lowering rejects a cross-module struct field default `= None` as `HirExprKind.Error`
 
-- Status: open (worked around at the only `src/` construction site)
+- Status: fixed (2026-11-22; caller workaround removed)
 - Found: 2026-11-19 (native Stage 2 full-CLI build, "Phase 4", go-to-end mode)
 - Component: `src/compiler/50.mir` (struct-literal lowering of omitted defaulted fields)
 
@@ -69,3 +69,11 @@ fields. The 24 previously omitted fields use their declared defaults copied
 verbatim, so the semantics are unchanged. The site is tagged
 `@workaround bug=mir_cross_module_struct_field_default_error_2026-11-19`.
 Remove the extra arguments once MIR lowers these defaults.
+
+## Resolution (2026-11-22)
+
+- **Root causes fixed:**
+  1. **Consumer/provider `EnumVariant` `"None"` collision (`provider_metadata.spl`, `declaration_default_bindings_v1.spl`, `declaration_lowering.spl`, `class_declaration_lowering.spl`):** `host_linux_service_agent_v4.spl` imports `ProviderCliOutputDataV1` (`enum ProviderCliOutputDataV1: ... / None`), which binds `"None"` in `consumer.symbols` as `SymbolKind.EnumVariant`. `consumer_builtin_none_symbol_v1` previously returned `SymbolId(id: -1)` whenever lexical `"None"` was an `EnumVariant`, turning `HostAgentAttachmentV4.helper: Option<HostHelperLeaseV1> = None` into `HirExprKind.Error`. It now allocates a non-lexical module-less `SymbolKind.Function` `"None"` symbol when lexical `"None"` is an `EnumVariant` (while still rejecting consumer-owned `Function`/`Const`/`Variable` declarations named `"None"`), and HIR field/parameter default lowering plus MIR relocation also preserve built-in `Option.None` when the provider module itself declares an `EnumVariant` named `"None"`.
+  2. **Declaration-repository struct default keys (`declaration_inventory_barriers_v1.spl`, `declaration_providers_v1.spl`):** Struct field defaults in declaration-repository mode are now registered under both `composite_layout_key` (`owner::StructName`) and bare `StructName` (and re-installed per module via `install_declaration_local_composite_defaults_v1` and `register_provider_struct_from_declarations_v1`), matching class field defaults.
+- **Workaround removed:** Removed `@workaround bug=mir_cross_module_struct_field_default_error_2026-11-19` and all 24 redundant defaulted field arguments at `src/lib/nogc_sync_mut/orchestration/host_linux_service_agent_v4.spl` (`host_agent_attach_archived_v4`).
+- **Spec:** Extended `test/01_unit/compiler/mir/provider_default_builtin_none_spec.spl`.

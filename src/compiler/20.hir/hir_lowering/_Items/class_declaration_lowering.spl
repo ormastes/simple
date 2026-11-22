@@ -29,7 +29,33 @@ impl HirLowering:
         # std.common.format_utils) is dynamic in the seed/interpreter. Lowering
         # it to Infer left an inference variable nothing resolves, and MIR
         # failed closed on it ([infer-arm]). Publish `any`, the erased type.
-        val default_ = if p.has_default:
+        var optional_param_none = false
+        if p.has_default and p.has_type_:
+            if parser_type_kind_is_optional(p.type_.kind) or parser_type_kind_named_name(p.type_.kind) == "Option":
+                match p.default.kind:
+                    case ExprKind.Ident(ident_name):
+                        optional_param_none = ident_name == "None"
+                    case _: ()
+        val default_ = if p.has_default and optional_param_none:
+            var none_sym = self.symbols.lookup_or_invalid("None")
+            var needs_builtin_none = not none_sym.is_valid()
+            if not needs_builtin_none and self.symbols.symbols.has(none_sym.id):
+                val existing_none: HirSymbol = self.symbols.symbols[none_sym.id]
+                if existing_none.kind == SymbolKind.EnumVariant:
+                    needs_builtin_none = true
+            if needs_builtin_none:
+                val bind_lex = not self.symbols.lookup_or_invalid("None").is_valid()
+                none_sym = self.symbols.define_with_binding("None", SymbolKind.Function, None, p.default.span, Visibility.Private, false, None, bind_lex)
+            if none_sym.is_valid() and self.symbols.symbols.has(none_sym.id):
+                val resolved_none: HirSymbol = self.symbols.symbols[none_sym.id]
+                if resolved_none.kind == SymbolKind.Function and (resolved_none.defining_module ?? "") == "":
+                    val opt_param_type = self.lower_type(p.type_)
+                    HirExpr(kind: HirExprKind.NamedVar(none_sym, "None"), has_type_: true, type_: opt_param_type, span: p.default.span)
+                else:
+                    self.lower_hir_expr(p.default)
+            else:
+                self.lower_hir_expr(p.default)
+        elif p.has_default:
             self.lower_hir_expr(p.default)
         else:
             HirExpr(
