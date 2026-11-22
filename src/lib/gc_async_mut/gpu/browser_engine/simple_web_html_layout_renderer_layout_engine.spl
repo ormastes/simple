@@ -17,7 +17,7 @@ use std.common.layout.text_metrics.{codepoint_cells, text_cell_width}
 use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, renderer_default_style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_pen_err_carry_px, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN, box_device_dx_record}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_device_inline_dy_record, form_control_label_device_dy, absolute_margin_t, absolute_containing_width, inline_sole_text_run, box_frac_w_reset, item_frac_w_hand_over, box_frac_w_take, box_frac_w_at, BOX_FRAC_W_UNSET, flex_item_text_frac_delta_milli_px, text_run_exact_width_milli_px, box_device_extra_h_reset, box_device_top_px, box_device_extra_h_record, box_device_extra_w_record, select_device_extra_w, input_type_is_column_sized, form_control_device_extra_h, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_device_dy_rest_add}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{button_device_extra_w}
@@ -4172,6 +4172,14 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # A plain inline element whose one text run wrapped: content
                 # after it continues on its last line, as after a bare run.
                 val span_run_wrapped = run_node >= 0 and run_node != c and out_wrap_starts[run_node].len() > 1
+                if layout_device_scale() > 1 and nodes[c].tag != "#text" and (cst.display != "inline" or grid_item_is_replaced(nodes[c])):
+                    # An atomic box starts at its exact pen in DEVICE px.
+                    box_device_dx_record(nodes.len() as i32, c, inline_pen_err_carry_px((run_pen_origin as i64) * (layout_device_scale() as i64)))
+                if run_node >= 0 and run_node != c:
+                    # The one run of a plain inline element starts at the
+                    # element's pen: `<b>o</b>` after 27.56 px of line
+                    # paints its `o` from 27.56, not from the box at 28.
+                    text_pen_origin_record(nodes.len() as i32, run_node, run_pen_origin)
                 if nodes[c].tag == "#text" or span_run_wrapped:
                     # Reserve the WRAPPED height: a text node that wraps to N
                     # lines occupies N*line-height, not one line. Collapsing it to
@@ -4321,6 +4329,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 )
                 if item_err != INLINE_PEN_ERR_UNKNOWN and item_delta != INLINE_PEN_ERR_UNKNOWN:
                     inline_err_milli = item_err + item_delta
+                    val item_carry = inline_pen_err_carry_px(inline_err_milli)
+                    inline_x = inline_x + item_carry
+                    inline_err_milli = inline_err_milli - (item_carry as i64) * 1000
                     inline_err_x = inline_x
                     inline_err_y = cy
                 if inline_run_has_content:

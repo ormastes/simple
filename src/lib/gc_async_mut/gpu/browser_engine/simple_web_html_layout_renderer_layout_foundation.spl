@@ -1333,6 +1333,64 @@ pub fn inline_pen_err(inline_x: i32, inline_start_x: i32, cy: i32, err_x: i32, e
         return err_milli
     INLINE_PEN_ERR_UNKNOWN
 
+# Exact-minus-integer width (milli-px) of an auto-width `<button>` on a line:
+# its box holds each label rounded UP to a whole pixel, Chrome keeps the
+# label's real width (`Submit` 41.484 px in a 42 px slot, so the box after it
+# starts at 57.48, column 57). INLINE_PEN_ERR_UNKNOWN for a label with no
+# exact width.
+fn inline_button_width_err_milli(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, button_i: i32) -> i64:
+    var delta: i64 = 0
+    var t = child_index.first_child[button_i]
+    while t >= 0:  # cpu-lane-loop-ok: one pass over one button's direct children; bound is that child list
+        if nodes[t].tag != "#text":
+            return INLINE_PEN_ERR_UNKNOWN
+        val tst = styles[t]
+        if nodes[t].text_trimmed.len() > 0:
+            if tst.resolved_font_width <= 0 or tst.resolved_font_width_milli < 0:
+                return INLINE_PEN_ERR_UNKNOWN
+            val real_w = form_control_label_width_px(tst, nodes[t].text_trimmed)
+            val used_w = if real_w > tst.resolved_font_width: real_w else: tst.resolved_font_width
+            delta = delta + tst.resolved_font_width_milli - (used_w as i64) * 1000
+        t = child_index.next_sibling[t]
+    delta
+
+# True when replaced box `node` (canvas, svg, img, video, iframe, embed,
+# object) is as wide as a whole-px `width` attribute with no padding or
+# border, so its laid-out width `bw` has no fraction Chrome would keep.
+# reason: laid-out box width is a whole layout pixel.
+# @allow(primitive_api)
+fn inline_replaced_width_is_exact(node: HNode, st: Style, bw: i32) -> bool:
+    val tag = node.tag
+    if not (tag == "canvas" or tag == "svg" or tag == "img" or tag == "video" or tag == "iframe" or tag == "embed" or tag == "object"):
+        return false
+    if st.pad_l != 0 or st.pad_r != 0 or st.border_l != 0 or st.border_r != 0:
+        return false
+    val raw = attr_value(node.attrs_raw, "width").trim()
+    if raw.len() == 0:
+        return false
+    var i = 0
+    while i < raw.len():  # cpu-lane-loop-ok: one pass over one attribute value
+        val ch = raw[i:i + 1]
+        if ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    parse_int(raw) == bw
+
+# Whole pixels of the cursor's exact-minus-integer error, to nearest. The
+# inline loop moves the cursor by them, so a box after many runs sits where
+# Chrome snaps it (`n <b>o</b> n <i>o</i> ...`: the 9th run at 110, not 107)
+# and the error left for the pen origin stays within half a pixel.
+# reason: milli-px error in, whole layout pixels out.
+# @allow(primitive_api)
+# reason: internal browser_engine pen arithmetic in milli-px, shared by layout_engine; same unit convention as the surrounding layout helpers
+# @allow(primitive_api)
+pub fn inline_pen_err_carry_px(err_milli: i64) -> i32:
+    if err_milli >= 500:
+        return ((err_milli + 500) / 1000) as i32
+    if err_milli < -500:
+        return 0 - (((0 - err_milli) + 499) / 1000) as i32
+    0
+
 # Exact-minus-integer width (milli-px) of inline item `c` as the inline loop
 # advanced past it, or INLINE_PEN_ERR_UNKNOWN. Exact only for what this
 # layout measures from the face: a one-line `#text` run, and a plain inline
@@ -1346,6 +1404,19 @@ pub fn inline_item_width_err_milli(nodes: [HNode], styles: [Style], child_index:
     var run = c
     if nodes[c].tag != "#text":
         val st = styles[c]
+        # An auto-width `<button>` is as wide as its label rounded UP; Chrome
+        # keeps the fraction (`Go` 33.785 px in a 34 px box).
+        if nodes[c].tag == "button" and st.width_px <= 0 and st.min_width_px <= 0 and st.max_width_px <= 0:
+            return inline_button_width_err_milli(nodes, styles, child_index, c)
+        # A control sized in device px (a default `<input>` is 719 device px
+        # at k = 4 in a 185 CSS px box): what follows it starts at that width.
+        if g_layout_device_scale > 1 and box_device_extra_w_at(c) != 0:
+            return (box_device_extra_w_at(c) as i64) * 1000 / (g_layout_device_scale as i64)
+        # A replaced box sized by a whole-px `width` attribute is exactly
+        # that wide: the pen error before it carries on past it (`<canvas
+        # width=60>` then a space then an svg: the svg at 64.45, not 64).
+        if inline_replaced_width_is_exact(nodes[c], st, bw[c]):
+            return 0
         if st.display != "inline" or grid_item_is_replaced(nodes[c]):
             return INLINE_PEN_ERR_UNKNOWN
         if st.pad_l != 0 or st.pad_r != 0 or st.border_l != 0 or st.border_r != 0:
@@ -1696,6 +1767,7 @@ var g_box_device_extra_h: [i32] = []
 
 pub fn box_device_extra_h_reset():
     g_box_device_extra_w = []
+    g_box_device_dx = []
     g_box_device_extra_h = []
 
 # reason: node index, node count and a device-px delta are layout-array scalars.
@@ -1737,6 +1809,42 @@ pub fn box_device_extra_w_record(node_count: i32, i: i32, extra_device_px: i32):
 # @allow(primitive_api)
 pub fn box_device_extra_w_at(i: i32) -> i32:
     if i < 0 or i >= g_box_device_extra_w.len(): 0 else: g_box_device_extra_w[i]
+
+# Device-px x shift of an atomic inline box (button, inline-block, replaced)
+# at device scale k > 1: k x the inline cursor's exact-minus-integer error
+# where the box starts, to the nearest device px. Chrome places the box after
+# a 33.785 px `Go` button at device column 135 (k = 4), not at 4 x 34. The
+# box's whole subtree moves with it. Empty at k == 1 and until a box needs it.
+var g_box_device_dx: [i32] = []
+
+# reason: node index, node count and a device-px delta are layout-array scalars.
+# @allow(primitive_api)
+pub fn box_device_dx_record(node_count: i32, i: i32, dx_device_px: i32):
+    if g_layout_device_scale <= 1 or i < 0 or i >= node_count:
+        return
+    if g_box_device_dx.len() != node_count:
+        if dx_device_px == 0:
+            return
+        g_box_device_dx = zero_i32_list(node_count)
+    g_box_device_dx[i] = dx_device_px
+
+# reason: presence flag for the per-node device dx table, mirrors box_device_top_is_inline_dy in this file
+# @allow(primitive_api)
+pub fn box_device_dx_any() -> bool:
+    g_box_device_dx.len() > 0
+
+# Sum of the shifts of node `i` and its ancestors; 0 when no box has one.
+# reason: node index in, device-px delta out; both are layout-array scalars.
+# @allow(primitive_api)
+pub fn box_device_dx_total(nodes: [HNode], i: i32) -> i32:
+    if g_box_device_dx.len() != nodes.len():
+        return 0
+    var dx = 0
+    var r = i
+    while r >= 0 and r < g_box_device_dx.len():  # cpu-lane-loop-ok: one ancestor walk per emitted command, k > 1 renders with a shifted box only
+        dx = dx + g_box_device_dx[r]
+        r = nodes[r].parent as i32
+    dx
 
 # True (Chrome LayoutUnit) border-box width of a box minus its whole-px width,
 # in milli-px. A flex row snaps an item's EDGES (`CSS Paint`: 73.8125 px at
