@@ -1,0 +1,69 @@
+"""
+## Purpose and audience
+Purpose: Prove `simple lint --diagnostic=medium|high` (P0-5, ROB-COST) maps onto
+the rule cost tiers and that a per-rule timed_out result is reported.
+Audience: compiler and tooling engineers maintaining lint profiles.
+## Operator workflow
+Run this spec with the test runner and read the SPEC FILE VERDICT line.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use compiler.tools.lint.main.{Linter, lint_cli_source, LintCliPolicy}
+use compiler.tools.lint._LintMain.rule_cost_tier.{
+    LintCompleteness, LintCostTier, LintTierProfile, lint_apply_diagnostic_profile,
+    lint_completeness_name, lint_reset_invocation_counts_v1,
+    lint_record_rule_invoked_v1, lint_record_rule_timed_out_v1,
+    lint_rule_completeness_v1, lint_rule_cost_tier, lint_tier_admits
+}
+
+val COLL_SRC = "fn addp(d: Dict<text, [i64]>):\n    d[\"k\"].push(1)\n"
+
+fn coll019_count(linter: Linter) -> i64:
+    var count = 0
+    for result in lint_cli_source(linter, "/tmp/lint_diag_fixture.spl", COLL_SRC):
+        if result.lint.code == "COLL019":
+            count = count + 1
+    count
+
+# @manual_section: lint_diagnostic_tier
+describe "simple lint --diagnostic tier":
+    """Verifies --diagnostic=medium|high parsing, tier admission and per-rule timed_out."""
+
+    it "parses --diagnostic=medium and --diagnostic=high":
+        """Checks LintCliPolicy.from_args records the tier and rejects unknown values."""
+        expect(LintCliPolicy.from_args(["--diagnostic=medium"]).diagnostic).to_equal("medium")
+        expect(LintCliPolicy.from_args(["--diagnostic", "high"]).diagnostic).to_equal("high")
+        expect(LintCliPolicy.from_args([]).diagnostic).to_equal("")
+        expect(LintCliPolicy.from_args(["--diagnostic=low"]).error).to_contain("unknown diagnostic tier")
+
+    it "medium admits Low and Medium but not High":
+        """Checks the tier admission table for the Medium diagnostic profile."""
+        expect(lint_tier_admits(LintTierProfile.DiagnosticMedium, LintCostTier.Low)).to_equal(true)
+        expect(lint_tier_admits(LintTierProfile.DiagnosticMedium, LintCostTier.Medium)).to_equal(true)
+        expect(lint_tier_admits(LintTierProfile.DiagnosticMedium, LintCostTier.High)).to_equal(false)
+
+    it "medium drops the High-tier COLL019 finding before execution":
+        """Runs under --diagnostic=medium and confirms collection_performance does not run."""
+        lint_reset_invocation_counts_v1()
+        val linter = Linter.new()
+        lint_apply_diagnostic_profile(linter.config, "medium")
+        expect(coll019_count(linter)).to_equal(0)
+        expect(lint_rule_cost_tier("collection_performance")).to_equal(LintCostTier.High)
+
+    it "high keeps the High-tier COLL019 finding":
+        """Runs under --diagnostic=high and confirms COLL019 still fires."""
+        lint_reset_invocation_counts_v1()
+        val linter = Linter.new()
+        lint_apply_diagnostic_profile(linter.config, "high")
+        expect(coll019_count(linter)).to_equal(1)
+
+    it "reports a per-rule timed_out result":
+        """A rule recorded as timed out reports timed_out, an invoked one pass, an unseen one not_applicable."""
+        lint_reset_invocation_counts_v1()
+        lint_record_rule_invoked_v1("rule_a")
+        lint_record_rule_invoked_v1("rule_b")
+        lint_record_rule_timed_out_v1("rule_b")
+        expect(lint_completeness_name(lint_rule_completeness_v1("rule_a"))).to_equal("pass")
+        expect(lint_completeness_name(lint_rule_completeness_v1("rule_b"))).to_equal("timed_out")
+        expect(lint_completeness_name(lint_rule_completeness_v1("rule_c"))).to_equal("not_applicable")
