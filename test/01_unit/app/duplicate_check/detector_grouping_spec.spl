@@ -158,6 +158,23 @@ describe "duplicate_check detector grouping regressions":
         expect(groups[0].blocks[1].file).to_equal(file)
         expect(groups[0].blocks[0].line_end).to_be_less_than(groups[0].blocks[1].line_start)
 
+    it "keeps fuzzy intra-file cosine groups when the file is scanned alone":
+        # Regression: doc/08_tracking/bug/2026-11-22_dupcheck_cosine_pass0_scope_dependent_recall.md
+        # The two blocks differ structurally on lines 2 and 5, so no
+        # identifier-normalized min_lines window repeats exactly; Pass 0 must
+        # still admit the file without help from unrelated files in the scan.
+        val root = "/tmp/simple_duplicate_detector_cosine_fuzzy_alone"
+        ensure_clean_dir(root)
+
+        val file = "{root}/fuzzy.spl"
+        val content = "fn alpha_logic(seed: i64) -> i64:\n    val alpha_base = seed + 1\n    val alpha_total = alpha_base * 2\n    if alpha_total > seed:\n        return alpha_total\n    return seed\n\nfn beta_logic(seed: i64) -> i64:\n    val beta_base = -seed\n    val beta_total = beta_base * 2\n    if beta_total > seed:\n        return beta_total + seed\n    return seed\n"
+        write_test_file(file, content)
+
+        val groups = find_duplicates([file], cosine_config(), new_token_cache_manager())
+
+        expect(groups.len()).to_be_greater_than(0)
+        expect(groups[0].blocks[0].file).to_equal(file)
+
     it "does not report overlapping windows as separate cosine occurrences":
         val root = "/tmp/simple_duplicate_detector_cosine_overlap"
         ensure_clean_dir(root)
@@ -233,3 +250,96 @@ describe "duplicate_check detector grouping regressions":
 
         expect(source).to_equal("")
         expect(rt_file_exists(sentinel)).to_equal(false)
+
+    it "preserves identical intra-file cosine recall for a single C file vs a multi-file scan":
+        val root = "/tmp/simple_duplicate_detector_cosine_c_scope"
+        ensure_clean_dir(root)
+
+        val file_db = "{root}/runtime_db.c"
+        val file_peer = "{root}/runtime_peer.c"
+        val shared_header = "static int guard_magic_banner(const char *tag, int version_code) {\n    if (tag == 0) return -100;\n    if (version_code < 3) return -200;\n    return version_code;\n}\n\n"
+        # Two intra-file C clones sharing domain vocabulary (high cosine ~0.92)
+        # while differing by parenthesization on alternating lines so zero 4-line
+        # windows share an exact normalize_identifiers_for_cheap_key inside file_db.
+        val clone_one = "int rt_db_cursor_fetch_primary(int *db_table_rows, int db_row_count, int db_schema_limit) {\n    int db_slot_cursor = db_row_count + 1;\n    int db_slot_stride = db_slot_cursor * 4 + db_schema_limit;\n    if (db_slot_stride > db_schema_limit && db_row_count > 0) {\n        db_table_rows[0] = db_slot_stride + db_slot_cursor;\n        return db_table_rows[0];\n    }\n    return -1;\n}\n\n"
+        val clone_two = "int rt_db_cursor_fetch_replica(int *db_table_rows, int db_row_count, int db_schema_limit) {\n    int db_slot_cursor = (db_row_count) + 1;\n    int db_slot_stride = (db_slot_cursor * 4) + db_schema_limit;\n    if ((db_slot_stride > db_schema_limit) && db_row_count > 0) {\n        db_table_rows[0] = (db_slot_stride) + db_slot_cursor;\n        return (db_table_rows[0]);\n    }\n    return -1;\n}\n"
+        write_test_file(file_db, shared_header + clone_one + clone_two)
+        write_test_file(file_peer, shared_header + "int peer_unrelated_helper(int z) {\n    return z;\n}\n")
+
+        var cfg = cosine_config()
+        cfg.include_c_sources = true
+        cfg.min_lines = 4
+        cfg.min_tokens = 18
+        cfg.similarity_threshold = 0.80
+
+        val single_groups = find_duplicates([file_db], cfg, new_token_cache_manager())
+        val multi_groups = find_duplicates([file_db, file_peer], cfg, new_token_cache_manager())
+
+        var single_intra = 0
+        for g in single_groups:
+            var db_blocks = 0
+            for b in g.blocks:
+                if b.file == file_db and b.line_start >= 7:
+                    db_blocks = db_blocks + 1
+            if db_blocks >= 2:
+                single_intra = single_intra + 1
+
+        var multi_intra = 0
+        for g in multi_groups:
+            var db_blocks = 0
+            for b in g.blocks:
+                if b.file == file_db and b.line_start >= 7:
+                    db_blocks = db_blocks + 1
+            if db_blocks >= 2:
+                multi_intra = multi_intra + 1
+
+        expect(single_intra).to_equal(1)
+        expect(multi_intra).to_equal(1)
+
+        # Confirm opt-in approximate Pass 0 (--pass0) reproduces the historical
+        # single-file pruning on this exact fixture while default cosine does not.
+        var approx_cfg = cfg
+        approx_cfg.use_pass0_prefilter = true
+        val approx_single = find_duplicates([file_db], approx_cfg, new_token_cache_manager())
+        expect(approx_single.len()).to_equal(0)
+
+    it "preserves identical intra-file cosine recall for a single Simple file vs a multi-file scan":
+        val root = "/tmp/simple_duplicate_detector_cosine_spl_scope"
+        ensure_clean_dir(root)
+
+        val file_main = "{root}/solo.spl"
+        val file_peer = "{root}/peer.spl"
+        val boiler = "fn verify_manifest_magic(label_text: text, format_version: i64) -> bool:\n    if label_text == \"\":\n        return false\n    format_version >= 2\n\n"
+        val fuzzy_a = "fn compute_shard_ledger_quota(shard_rows: i64, shard_weight: i64, shard_cap: i64) -> i64:\n    val ledger_base = shard_rows * shard_weight + 1\n    val ledger_adjusted = ledger_base + shard_cap\n    if ledger_adjusted > shard_cap and shard_rows > 0:\n        return ledger_adjusted + shard_weight\n    shard_cap\n\n"
+        val fuzzy_b = "fn compute_shard_ledger_limit(shard_rows: i64, shard_weight: i64, shard_cap: i64) -> i64:\n    val ledger_base = (shard_rows * shard_weight) + 1\n    val ledger_adjusted = (ledger_base) + shard_cap\n    if (ledger_adjusted > shard_cap) and shard_rows > 0:\n        return (ledger_adjusted) + shard_weight\n    shard_cap\n"
+        write_test_file(file_main, boiler + fuzzy_a + fuzzy_b)
+        write_test_file(file_peer, boiler + "fn peer_stub(v: i64) -> i64:\n    v\n")
+
+        var cfg = cosine_config()
+        cfg.min_lines = 4
+        cfg.min_tokens = 16
+        cfg.similarity_threshold = 0.80
+
+        val single_groups = find_duplicates([file_main], cfg, new_token_cache_manager())
+        val multi_groups = find_duplicates([file_main, file_peer], cfg, new_token_cache_manager())
+
+        var single_intra = 0
+        for g in single_groups:
+            var main_blocks = 0
+            for b in g.blocks:
+                if b.file == file_main and b.line_start >= 7:
+                    main_blocks = main_blocks + 1
+            if main_blocks >= 2:
+                single_intra = single_intra + 1
+
+        var multi_intra = 0
+        for g in multi_groups:
+            var main_blocks = 0
+            for b in g.blocks:
+                if b.file == file_main and b.line_start >= 7:
+                    main_blocks = main_blocks + 1
+            if main_blocks >= 2:
+                multi_intra = multi_intra + 1
+
+        expect(single_intra).to_equal(1)
+        expect(multi_intra).to_equal(1)

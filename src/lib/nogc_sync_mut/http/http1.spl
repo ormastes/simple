@@ -162,30 +162,35 @@ fn http1_parse_hex(hex: text) -> i64:
 # substring()-derived receiver returns nil for any non-zero match position, so
 # scan for a single char by index comparison instead. Returns -1 if absent.
 fn http1_find_char(s: text, ch: text) -> i64:
+    if ch.byte_len() == 0:
+        return 0
+    val target = ch.byte_at(0)
+    val slen = s.byte_len()
     var i = 0
-    while i < s.length():
-        if s[i] == ch:
+    while i < slen:
+        if s.byte_at(i) == target:
             return i
         i = i + 1
     return -1
 
-# Find `sub` in `s` starting at `start` by char-scan (robust against the
-# substring-index_of bug above). Returns -1 if absent.
+# Find `sub` in `s` starting at byte offset `start` by byte-scan. Returns -1 if absent.
 fn http1_index_of(s: text, sub: text, start: i64) -> i64:
-    if sub.length() == 0:
+    val sub_len = sub.byte_len()
+    if sub_len == 0:
         return start
     var i = start
     if i < 0:
         i = 0
-    while i <= s.length() - sub.length():
-        var match = true
+    val s_len = s.byte_len()
+    while i <= s_len - sub_len:
+        var matched = true
         var j = 0
-        while j < sub.length():
-            if s[i + j] != sub[j]:
-                match = false
+        while j < sub_len:
+            if s.byte_at(i + j) != sub.byte_at(j):
+                matched = false
                 break
             j = j + 1
-        if match:
+        if matched:
             return i
         i = i + 1
     return -1
@@ -194,9 +199,9 @@ fn http1_index_of(s: text, sub: text, start: i64) -> i64:
 # Chunked Transfer Coding (RFC 9112 §7.1)
 # ============================================================================
 
-# Encode a single body as one chunk + terminating zero chunk.
+# Encode a single body as one chunk + terminating zero chunk (octet length per RFC 9112).
 fn encode_chunked(data: text) -> text:
-    var result = http1_to_hex(data.length())
+    var result = http1_to_hex(data.byte_len())
     result = result + "\r\n"
     result = result + data
     result = result + "\r\n0\r\n\r\n"
@@ -205,8 +210,9 @@ fn encode_chunked(data: text) -> text:
 # Encode body + trailer headers (list of (name, value)) after the zero chunk.
 fn encode_chunked_with_trailers(data: text, trailers: list) -> text:
     var result = ""
-    if data.length() > 0:
-        result = http1_to_hex(data.length())
+    val dlen = data.byte_len()
+    if dlen > 0:
+        result = http1_to_hex(dlen)
         result = result + "\r\n"
         result = result + data
         result = result + "\r\n"
@@ -221,9 +227,13 @@ fn encode_chunked_with_trailers(data: text, trailers: list) -> text:
 
 # Decode a chunked body to its payload. Ignores chunk extensions.
 # Err on any RFC 7230 §4.1 framing error -- see decode_chunked_with_trailers.
+pub class ChunkedBodyWithTrailers:
+    body: text
+    trailers: [(text, text)]
+
 fn decode_chunked(encoded: text) -> Result<text, text>:
     match decode_chunked_with_trailers(encoded):
-        case Ok(pair): return Ok(pair.0)
+        case Ok(decoded): return Ok(decoded.body)
         case Err(e): return Err(e)
 
 # Decode a chunked body, returning (payload, trailers). Handles chunk
@@ -235,13 +245,14 @@ fn decode_chunked(encoded: text) -> Result<text, text>:
 # be treated as a normal end of body -- doing so hands the caller a silently
 # truncated payload and lets this recipient's message boundary diverge from an
 # upstream proxy's (request smuggling). Both are reported as Err.
-fn decode_chunked_with_trailers(encoded: text) -> Result<tuple, text>:
+fn decode_chunked_with_trailers(encoded: text) -> Result<ChunkedBodyWithTrailers, text>:
     var parts: [text] = []
     var trailers: [(text, text)] = []
     var pos = 0
     var saw_last_chunk = false
 
-    while pos < encoded.length():
+    val enc_len = encoded.byte_len()
+    while pos < enc_len:
         val size_end = http1_index_of(encoded, "\r\n", pos)
         if size_end < 0:
             return Err("chunk size line not terminated by CRLF")
@@ -252,10 +263,6 @@ fn decode_chunked_with_trailers(encoded: text) -> Result<tuple, text>:
             size_line = size_line.substring(0, semi)
         if not http1_is_hex_digits(size_line):
             return Err("invalid chunk size (RFC 7230 4.1: chunk-size = 1*HEXDIG)")
-        # RFC 7230 §4.1: reject a chunk-size that does not fit i64 rather than
-        # wrapping it. http1_parse_hex wraps modulo 2^64, so a 17-hex-digit size
-        # reads back small — "10000000000000000" becomes 0 and is accepted as
-        # the terminal last-chunk (request smuggling).
         if not http1_hex_fits_i64(size_line):
             return Err("chunk size overflows i64 (RFC 7230 4.1)")
         val chunk_size = http1_parse_hex(size_line)
@@ -263,7 +270,7 @@ fn decode_chunked_with_trailers(encoded: text) -> Result<tuple, text>:
         if chunk_size == 0:
             saw_last_chunk = true
             var tpos = size_end + 2
-            while tpos < encoded.length():
+            while tpos < enc_len:
                 val tend = http1_index_of(encoded, "\r\n", tpos)
                 if tend < 0:
                     break
@@ -274,21 +281,20 @@ fn decode_chunked_with_trailers(encoded: text) -> Result<tuple, text>:
                 if cpos >= 0:
                     val tname = tline.substring(0, cpos)
                     var vstart = cpos + 1
-                    if vstart < tline.length() and tline[vstart] == " ":
+                    val tline_len = tline.byte_len()
+                    if vstart < tline_len and tline.byte_at(vstart) == 32u8:
                         vstart = vstart + 1
-                    val tval = tline.substring(vstart, tline.byte_len())
+                    val tval = tline.substring(vstart, tline_len)
                     trailers = trailers.push((tname, tval))
                 tpos = tend + 2
             break
 
         val data_start = size_end + 2
         val data_end = data_start + chunk_size
-        if data_end > encoded.length():
+        if data_end > enc_len:
             return Err("chunk data runs past end of body")
         parts.push(encoded.substring(data_start, data_end))
-        # chunk-data is followed by CRLF; a mismatch means the declared size
-        # disagrees with the actual framing.
-        if data_end + 2 > encoded.length():
+        if data_end + 2 > enc_len:
             return Err("chunk data not terminated by CRLF")
         if encoded.substring(data_end, data_end + 2) != "\r\n":
             return Err("chunk data not terminated by CRLF")
@@ -297,7 +303,7 @@ fn decode_chunked_with_trailers(encoded: text) -> Result<tuple, text>:
     if not saw_last_chunk:
         return Err("chunked body ended without a last-chunk")
 
-    Ok((parts.join(""), trailers))
+    Ok(ChunkedBodyWithTrailers(body: parts.join(""), trailers: trailers))
 
 # RFC 7230 §4.1 chunk-size = 1*HEXDIG, where HEXDIG is RFC 5234 §B.1.
 # An empty token is not 1*HEXDIG and is therefore invalid.
@@ -340,7 +346,7 @@ fn scheme_is_secure(scheme: text) -> bool:
 
 # Split "host" or "host:port" into (host, port) using the scheme default
 # when no explicit port is present.
-fn resolve_authority(scheme: text, authority: text) -> tuple:
+fn resolve_authority(scheme: text, authority: text) -> (text, i64):
     val colon = http1_find_char(authority, ":")
     if colon < 0:
         return (authority, scheme_default_port(scheme))

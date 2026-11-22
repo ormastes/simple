@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN (seed dispatch defect, `src/compiler_rust`). **Binary:** Rust seed. **Host:** 2 live CUDA devices.
+**Status (2026-11-22): VERIFIED — see the 2026-11-22 section at the end.** Original status: OPEN (seed dispatch defect, `src/compiler_rust`). **Binary:** Rust seed. **Host:** 2 live CUDA devices.
 
 ## Symptom
 Same functions, different import path, different runtime binding:
@@ -112,3 +112,27 @@ cannot run under the Oct-31 seed (test-runner code uses `byte_len`, the
 documented seed semantic gap); it is expected to run green on any CUDA host
 or under the admitted compiler. Status: fix-implemented-verification-pending
 (CUDA-host N==N parity pending).
+
+---
+
+## 2026-11-22 CUDA-host verification (work/cuda-runtime-bugs, base release/1.0.0 `3c2e4556b6d`)
+
+**Status: VERIFIED — package and direct import bind the same live provider (N == N, N > 0).**
+
+Host: Linux aarch64, NVIDIA GB10 (1 device, sm_121). Binary: debug seed built from this worktree
+(`cargo build --bin simple -j4`, sha256 `cdc523be583e4c10`), `SIMPLE_EXECUTION_MODE=interpret
+<seed> run main.spl`, stdlib read from the worktree (visibility warnings name the fixture's own
+`src` symlink, so no foreign-tree stdlib — the 2026-08-25 trap).
+
+| fixture | body | output |
+|---|---|---|
+| package | `use std.gpu.*`; `gpu_init()`; `gpu_device_count()`; `gpu_device_compute_capability(0)` | `PKG init_ok=true count=1 cc=(12, 1)` |
+| direct | same body, `use std.gc_async_mut.gpu_ops.*` | `DIRECT init_ok=true count=1 cc=(12, 1)` |
+
+`src/lib/gc_async_mut/gpu/__init__.spl:84-93` re-exports the device queries from
+`gc_async_mut.gpu_ops` (the 2026-11-12 fix), so parity holds by construction.
+
+Caveats: the driver API needs `gpu_init()` first (without it both paths report count 0 — the
+same on both). The older seed `5ef615e2b60a80fc` cannot run the package path at all: it fails to
+parse `src/lib/common/types.spl:23` (`unit ByteSize: i64`), a seed-parser gap, not this bug.
+`test/01_unit/lib/gpu_import_path_parity_spec.spl` was not run (no full-CLI test binary).

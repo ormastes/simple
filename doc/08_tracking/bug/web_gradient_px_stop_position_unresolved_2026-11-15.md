@@ -1,6 +1,6 @@
 # Web renderer: `linear-gradient` stop positions in `px` are ignored (both lanes)
 
-Status: OPEN. Found 2026-11-15 on `work/engine2d-lane-parity-20261115`.
+Status: FIXED (2026-11-22 — per-line `px`/`em` stop resolution via `parse_gradient_stops_on_line` verified across both Draw IR and CPU raster lanes and pinned against Chrome 159 in `linear_gradient_angle_draw_ir_chrome159_spec.spl`). Found 2026-11-15 on `work/engine2d-lane-parity-20261115`.
 
 ## Repro
 

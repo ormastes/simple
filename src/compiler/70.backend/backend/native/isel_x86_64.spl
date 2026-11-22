@@ -18,6 +18,9 @@ use compiler.backend.native.mach_inst.{X86_OP_MOV_REG_REG, X86_OP_MOV_REG_IMM, X
 use compiler.backend.native.mach_inst.{X86_OP_VMOVAPS_LOAD_ZMM, X86_OP_VMOVAPS_STORE_ZMM, X86_OP_VADDPS_ZMM, X86_OP_VSUBPS_ZMM, X86_OP_VMULPS_ZMM, X86_OP_VDIVPS_ZMM, X86_OP_VADDPD_ZMM, X86_OP_VSUBPD_ZMM, X86_OP_VMULPD_ZMM, X86_OP_VDIVPD_ZMM, X86_OP_VPADDD_ZMM, X86_OP_VPSUBD_ZMM, X86_OP_VPMULLD_ZMM, X86_OP_VPANDD_ZMM, X86_OP_VPORD_ZMM, X86_OP_VPXORD_ZMM}
 use compiler.backend.native.mach_inst.{X86_OP_MOVZX_REG_MEM8, X86_OP_MOVZX_REG_MEM16, X86_OP_MOV_REG_MEM32, X86_OP_MOV_MEM8_REG, X86_OP_MOV_MEM16_REG, X86_OP_MOV_MEM32_REG}
 use compiler.backend.native.mach_inst.{X86_OP_MOVSX_REG_MEM8, X86_OP_MOVSX_REG_MEM16, X86_OP_MOVSX_REG_MEM32}
+use compiler.backend.native.mach_inst.{X86_OP_MOVQ_XMM_GPR, X86_OP_MOVQ_GPR_XMM, X86_OP_MOVSD_REG_MEM, X86_OP_MOVSD_MEM_REG, X86_OP_MOVSS_REG_MEM, X86_OP_MOVSS_MEM_REG, mach_reg_is_x86_xmm}
+use std.common.binary_io.{f64_to_bits}
+use std.common.math.ieee754_bits.{math_f64_round_to_f32_bits}
 use compiler.backend.common.isel_context.{ISelContext, new_isel_context, isel_alloc_vreg, isel_get_vreg, isel_alloc_frame_slot, isel_frame_offset, isel_add_extern, isel_add_string_data, isel_last_string_label, isel_definition_symbol, isel_call_symbol, isel_module_context}
 use compiler.backend.common.ascii_utils.{char_to_ascii}
 use compiler.backend.native.native_avx2_capability.{NativeAvx2CapabilityV1, native_avx2_denied_v1}
@@ -62,6 +65,17 @@ pub fn x64_lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType, c
             val low = isel_fresh_dest(ctx)
             val inst = new_mach_inst(X86_OP_XOR, [low.result, low.result])
             LoweredOperand(insts: [inst], result: low.result, ctx: low.ctx)
+        case Float(v):
+            val bits = match type_.kind:
+                case F32: math_f64_round_to_f32_bits(v)
+                case _: f64_to_bits(v) as i64
+            isel_emit_one(ctx, X86_OP_MOV_REG_IMM, [op_imm(bits)])
+        case FloatLexeme(decimal_lexeme):
+            val parsed: f64 = decimal_lexeme.to_float()
+            val bits = match type_.kind:
+                case F32: math_f64_round_to_f32_bits(parsed)
+                case _: f64_to_bits(parsed) as i64
+            isel_emit_one(ctx, X86_OP_MOV_REG_IMM, [op_imm(bits)])
         case _:
             isel_emit_one(ctx, X86_OP_MOV_REG_IMM, [op_imm(0)])
 
@@ -219,9 +233,13 @@ fn isel_function_with_x86_simd_capability(ctx: ISelContext, func: MirFunction, c
 
     # Unsigned integer locals pick setb/seta, div and shr (LLVM/Cranelift parity).
     var unsigned_locals: Dict<i64, bool> = {}
+    var float_locals: Dict<i64, i64> = {}
     for local in func.locals:
         if x86_type_is_unsigned(local.type_):
             unsigned_locals[local.id.id] = true
+        val fbits = x64_float_bit_width(local.type_)
+        if fbits > 0:
+            float_locals[local.id.id] = fbits
 
     # Reset vreg counter - use local IDs directly, start high for temps
     var local_ctx = ISelContext(
@@ -236,7 +254,8 @@ fn isel_function_with_x86_simd_capability(ctx: ISelContext, func: MirFunction, c
         global_signed: ctx.global_signed,
         global_mutable: ctx.global_mutable,
         function_names: ctx.function_names,
-        unsigned_locals: unsigned_locals
+        unsigned_locals: unsigned_locals,
+        float_locals: float_locals
     )
 
     # Allocate frame slots for locals that need stack space
@@ -1243,23 +1262,70 @@ pub fn isel_call_with_frame(ctx: ISelContext, dest: LocalId?, func_op: MirOperan
 
     ISelInstResult(insts: insts, ctx: current_ctx)
 
+fn x64_float_bit_width(type_: MirType) -> i64:
+    match type_.kind:
+        case F32: 32
+        case F64: 64
+        case _: 0
+
+fn x64_local_float_bits(ctx: ISelContext, local_id: i64) -> i64:
+    if ctx.float_locals.contains(local_id):
+        return ctx.float_locals[local_id]
+    0
+
+fn x64_operand_float_bits(ctx: ISelContext, op: MirOperand) -> i64:
+    match op.kind:
+        case Copy(local): x64_local_float_bits(ctx, local.id)
+        case Move(local): x64_local_float_bits(ctx, local.id)
+        case Const(_, const_type): x64_float_bit_width(const_type)
+
+fn x64_operand_is_xmm(op: Operand) -> bool:
+    match op.kind:
+        case Reg(r): mach_reg_is_x86_xmm(r)
+        case _: false
+
+"""Reconcile register class and bit-width when storing a field to [base + disp]."""
+@allow(primitive_api)
+pub fn x64_reconcile_store_field_value(ctx: ISelContext, mem: Operand, value: Operand, float_bits: i64) -> ISelInstResult:
+    var insts: [MachInst] = []
+    if x64_operand_is_xmm(value):
+        val op = if float_bits == 32: X86_OP_MOVSS_MEM_REG else: X86_OP_MOVSD_MEM_REG
+        insts.push(new_mach_inst(op, [mem, value]))
+    else:
+        insts.push(new_mach_inst(X86_OP_MOV_MEM_REG, [mem, value]))
+    ISelInstResult(insts: insts, ctx: ctx)
+
+"""Reconcile register class and bit-width when loading a field from [base + disp]."""
+@allow(primitive_api)
+pub fn x64_reconcile_load_field_value(ctx: ISelContext, dest: Operand, mem: Operand, float_bits: i64) -> ISelInstResult:
+    var insts: [MachInst] = []
+    if x64_operand_is_xmm(dest):
+        val op = if float_bits == 32: X86_OP_MOVSS_REG_MEM else: X86_OP_MOVSD_REG_MEM
+        insts.push(new_mach_inst(op, [dest, mem]))
+    else:
+        insts.push(new_mach_inst(X86_OP_MOV_REG_MEM, [dest, mem]))
+    ISelInstResult(insts: insts, ctx: ctx)
+
 fn isel_get_field(ctx: ISelContext, dest: LocalId, base: MirOperand, field: i64) -> ISelInstResult:
     val base_low = lower_operand(ctx, base)
     val dest_op = local_vreg_op(dest.id)
     val offset = field * 8
-    var insts = base_low.insts
-    insts.push(new_mach_inst(X86_OP_MOV_REG_MEM, [dest_op, op_mem(operand_get_reg(base_low.result), offset)]))
-    ISelInstResult(insts: insts, ctx: base_low.ctx)
+    val dest_bits = x64_local_float_bits(base_low.ctx, dest.id)
+    val load_res = x64_reconcile_load_field_value(base_low.ctx, dest_op, op_mem(operand_get_reg(base_low.result), offset), dest_bits)
+    ISelInstResult(insts: base_low.insts + load_res.insts, ctx: load_res.ctx)
 
 fn isel_set_field(ctx: ISelContext, base: MirOperand, field: i64, value: MirOperand) -> ISelInstResult:
     val base_low = lower_operand(ctx, base)
     val val_low = lower_operand(base_low.ctx, value)
     val offset = field * 8
+    val val_bits = x64_operand_float_bits(val_low.ctx, value)
+    val store_res = x64_reconcile_store_field_value(val_low.ctx, op_mem(operand_get_reg(base_low.result), offset), val_low.result, val_bits)
     var insts = base_low.insts
     for ai in val_low.insts:
         insts.push(ai)
-    insts.push(new_mach_inst(X86_OP_MOV_MEM_REG, [op_mem(operand_get_reg(base_low.result), offset), val_low.result]))
-    ISelInstResult(insts: insts, ctx: val_low.ctx)
+    for si in store_res.insts:
+        insts.push(si)
+    ISelInstResult(insts: insts, ctx: store_res.ctx)
 
 fn isel_alloc(ctx: ISelContext, dest: LocalId, type_: MirType) -> ISelInstResult:
     val size = type_.size_bytes()
@@ -1298,7 +1364,11 @@ fn isel_aggregate(ctx: ISelContext, dest: LocalId, operands: [MirOperand]) -> IS
         for ai in op_low.insts:
             insts.push(ai)
         val offset = i * 8
-        insts.push(new_mach_inst(X86_OP_MOV_MEM_REG, [op_mem(base_reg, offset), op_low.result]))
+        val op_bits = x64_operand_float_bits(current_ctx, operands[i])
+        val store_res = x64_reconcile_store_field_value(current_ctx, op_mem(base_reg, offset), op_low.result, op_bits)
+        current_ctx = store_res.ctx
+        for si in store_res.insts:
+            insts.push(si)
 
     ISelInstResult(insts: insts, ctx: current_ctx)
 

@@ -185,6 +185,32 @@ Precedence for every key: CLI flag (where one exists) > env > config > built-in 
 | `compiler`, `compiler_release` | `SIMPLE_BOOTSTRAP_COMPILER` | Next-phase compiler (`resolve-bootstrap-compiler.shs`) |
 | `stage3_file_workers` | `SIMPLE_FILE_WORKERS` | Stage 3 route: `0` two-pass phase route (pinned, bug #8504), `1` per-file; absent = compiler default |
 
+### Host settings (`config/host/<hostname>.sdn`, 2026-11-22)
+
+Host-specific tuning lives in the host config, not in launcher env vars.
+Precedence per knob: env var (or the CLI flag that sets it) > host config
+(`sh scripts/setup/host-env.shs --get KEY`: `SIMPLE_HOST_<KEY>` > user
+`~/.config/simple/host.sdn` > tracked `config/host/<hostname>.sdn`) >
+`config/bootstrap.sdn` (file workers only) > built-in default. A host without
+the key behaves exactly as before. The Stage 3 `env -i` child cannot read host
+config, so the scripts resolve the key and export the env var
+(`scripts/bootstrap/lib/host-bootstrap-settings.shs`).
+
+| Host key | Exported as | Applied by |
+|---|---|---|
+| `mem_reserve_free_mib` | `SIMPLE_BUILD_MEMORY_RESERVE_BYTES` (MiB x 1048576) | `bootstrap-from-scratch.sh` startup, `resume-stage3-from-admitted.sh` |
+| `stage3_tree_rss_cap_kib` | `SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB` | `resume-stage3-from-admitted.sh` (Stage 3 only) |
+| `stage3_threads` | `SIMPLE_NATIVE_BUILD_THREADS` (coordinator route); skipped if either thread variable is set; `--jobs` wins. Direct fan-out (`SIMPLE_STAGE3_DIRECT_THREADS`>1) needs linux/darwin memory evidence and is not a host setting | `resume-stage3-from-admitted.sh` |
+| `stage3_file_workers` (0/1) | `SIMPLE_FILE_WORKERS` lane item | `bootstrap_select_stage3_file_workers` (source `host-config`) |
+
+Note that a user `host.sdn` value beats the tracked per-host file; `--print`
+shows which layer won. `sh scripts/setup/update-host-config.shs [--dry-run]
+[--set KEY=VALUE]...` measures the host (CPUs -> `max_threads`; on Windows,
+available RAM < 1/4 of total while process working sets hold < 1/2 is the
+ballooned-guest pattern, #8931, and gives `mem_reserve_free_mib: 2048`) and
+updates the per-host file in place. `SIMPLE_MIR_SHARDING=0` is a temporary
+crash workaround and does not belong in host config.
+
 Defaults fixed in code, not config (2026-11-13):
 
 - **Stage 3 resume tree RSS cap.** With no

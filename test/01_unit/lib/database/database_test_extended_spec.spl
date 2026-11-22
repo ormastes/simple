@@ -1,28 +1,47 @@
+use std.database.test_extended.{
+    TestDatabaseExtended, create_test_database_extended,
+    TestStatusCounts, TestRunCount
+}
+
 describe "Database Test Extended":
     extern fn rt_file_read_text(path: text) -> text?
 
     fn test_extended_source(path: text) -> text:
         rt_file_read_text("src/lib/nogc_sync_mut/database/test_extended/" + path) ?? ""
 
-    fn test_extended_main_source() -> text:
-        rt_file_read_text("src/lib/nogc_sync_mut/database/test_extended.spl") ?? ""
+    fn test_extended_sync_init_source() -> text:
+        rt_file_read_text("src/lib/nogc_sync_mut/database/test_extended/__init__.spl") ?? ""
 
-    it "keeps extended test database exports available":
-        val source = test_extended_main_source()
+    fn test_extended_async_init_source() -> text:
+        rt_file_read_text("src/lib/nogc_async_mut/database/test_extended/__init__.spl") ?? ""
 
-        step("Verify: re-exported type definitions")
-        expect(source).to_contain("FileRecord, SuiteRecord, TestRecord, CounterRecord")
-        expect(source).to_contain("TimingSummary, TimingRun, ChangeEvent, RunRecord, TestInfo")
-        step("Verify: re-exported database class")
-        expect(source).to_contain("TestDatabaseExtended")
-        step("Verify: re-exported factory functions")
-        expect(source).to_contain("create_test_database_extended, load_test_database_extended")
-        expect(source).to_contain("migrate_from_dual_file, load_with_migration")
-        step("Verify: extension method modules wired in")
-        expect(source).to_contain("std.database.test_extended.core_helpers")
-        expect(source).to_contain("std.database.test_extended.tracking")
-        expect(source).to_contain("std.database.test_extended.runs")
-        expect(source).to_contain("std.database.test_extended.queries")
+    it "keeps extended test database exports available through package __init__ without file-facade shadowing":
+        val sync_init = test_extended_sync_init_source()
+        val async_init = test_extended_async_init_source()
+
+        step("Verify: duplicate shadow file facades are absent")
+        expect(rt_file_read_text("src/lib/nogc_sync_mut/database/test_extended.spl")).to_be_nil()
+        expect(rt_file_read_text("src/lib/nogc_async_mut/database/test_extended.spl")).to_be_nil()
+        step("Verify: re-exported type definitions in both package facades")
+        expect(sync_init).to_contain("FileRecord, SuiteRecord, TestRecord, CounterRecord")
+        expect(sync_init).to_contain("TimingSummary, TimingRun, ChangeEvent, RunRecord, TestInfo")
+        expect(sync_init).to_contain("TestStatusCounts")
+        expect(async_init).to_contain("FileRecord, SuiteRecord, TestRecord, CounterRecord")
+        expect(async_init).to_contain("TimingSummary, TimingRun, ChangeEvent, RunRecord, TestInfo")
+        expect(async_init).to_contain("TestStatusCounts")
+        step("Verify: re-exported database class and factory functions")
+        expect(sync_init).to_contain("TestDatabaseExtended")
+        expect(sync_init).to_contain("create_test_database_extended, load_test_database_extended")
+        expect(sync_init).to_contain("migrate_from_dual_file, load_with_migration")
+        expect(async_init).to_contain("TestDatabaseExtended")
+        expect(async_init).to_contain("create_test_database_extended, load_test_database_extended")
+        expect(async_init).to_contain("migrate_from_dual_file, load_with_migration")
+        step("Verify: live std.database.test_extended import constructs TestStatusCounts and TestDatabaseExtended")
+        val db: TestDatabaseExtended = create_test_database_extended(":memory:")
+        val counts: TestStatusCounts = db.test_count_by_status()
+        val zero = TestRunCount(value: 0)
+        expect(counts.total.value).to_equal(zero.value)
+        expect(counts.passed.value).to_equal(zero.value)
 
     it "keeps extended test tracking records available":
         val source = test_extended_source("types.spl")

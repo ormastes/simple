@@ -31,6 +31,7 @@
 #        - src/compiler_rust/runtime/src/**/*.rs:
 #          `pub extern "C" fn rt_NAME` / `pub fn rt_NAME`
 #        - src/runtime/*.c: `rt_NAME(` at top level (C function definitions)
+#          and column-0 macro instantiations `MACRO(rt_NAME, ...)` (no `;`)
 #        - baremetal stub files (src/runtime/**baremetal**.c,
 #          src/runtime/**baremetal**.rs): same patterns
 #   2. Extract the set of RE-EXPORTED rt_* symbols from
@@ -141,7 +142,18 @@ defined_symbols_c() {
     git -C "$ds_repo" grep -h -o -E \
       '^[A-Za-z_][A-Za-z0-9_ \*]*[[:space:]]rt_[A-Za-z0-9_]+[[:space:]]*\([^;]*\)[[:space:]]*\{' \
       "$ds_rev" -- ':(glob)src/runtime/**/*.[ch]' 2>/dev/null \
-      | $GREP -oE 'rt_[A-Za-z0-9_]+' | sort -u
+      | $GREP -oE 'rt_[A-Za-z0-9_]+' >"$TMPROOT/c_literal.out"
+    # Macro-generated definitions: a column-0 instantiation
+    # `UPPER_MACRO(rt_NAME, ...)` with no trailing ';' (e.g.
+    # SPL_ATOMIC_INT_FETCH_OP, RT_ATOMIC_INT_RMW, RT_SIMD_I64X4_BINOP) defines
+    # rt_NAME. Deleting such a line removes an export, so it must be counted.
+    git -C "$ds_repo" grep -h -E \
+      '^[A-Z][A-Z0-9_]*\([[:space:]]*rt_[A-Za-z0-9_]+[[:space:]]*[,)]' \
+      "$ds_rev" -- ':(glob)src/runtime/**/*.[ch]' 2>/dev/null \
+      | $GREP -vE ';[[:space:]]*$' \
+      | sed -E 's/^[A-Z][A-Z0-9_]*\([[:space:]]*(rt_[A-Za-z0-9_]+).*/\1/' \
+      >"$TMPROOT/c_macro.out"
+    cat "$TMPROOT/c_literal.out" "$TMPROOT/c_macro.out" | sort -u
 }
 
 # ---------------------------------------------------------------------------
@@ -243,7 +255,7 @@ evaluate() {
 # ===========================================================================
 # SELFTEST — proves all four directions. Fatal if it does not pass.
 # ===========================================================================
-SELFTEST_EXPECTED=4
+SELFTEST_EXPECTED=5
 
 selftest() {
     st_dir="$TMPROOT/selftest"
@@ -357,12 +369,44 @@ selftest() {
           # exercised below via the same-range case in MAIN.
     fi
 
+    # --- Fixture E: macro-generated C exports must be counted ----------
+    # C1 defines 5 rt_* via a macro instantiation per line; C2 deletes them.
+    # Must FAIL naming a macro-made symbol (literal-only grep saw nothing).
+    mkdir -p "$st_dir/src/runtime" || return 1
+    {
+        echo '#define FETCH_OP(name, op) int64_t name(int64_t h, int64_t v) { return op; }'
+        echo 'FETCH_OP(rt_m_add, h + v)'
+        echo 'FETCH_OP(rt_m_sub, h - v)'
+        echo 'FETCH_OP(rt_m_and, h & v)'
+        echo 'FETCH_OP(rt_m_or, h | v)'
+        echo 'FETCH_OP(rt_m_xor, h ^ v)'
+        echo 'USE_ONLY(rt_m_not_a_def);'
+    } >"$st_dir/src/runtime/macro_defs.c"
+    c_mac=$(st_commit "runtime: macro-generated exports") || return 1
+    echo '#define FETCH_OP(name, op) int64_t name(int64_t h, int64_t v) { return op; }' \
+        >"$st_dir/src/runtime/macro_defs.c"
+    c_macdel=$(st_commit "runtime: drop macro instantiations") || return 1
+
+    st_ran=$((st_ran + 1))
+    evaluate "$st_dir" "$c_mac" "$c_macdel" "$CFG_MIN_REMOVED"
+    st_got=$?
+    if [ "$st_got" -ne 1 ]; then
+        echo "SELFTEST FAIL: macro-export fixture expected verdict 1, got $st_got" >&2
+        echo "  EV_ERR=$EV_ERR EV_MSG=$EV_MSG" >&2
+        st_fail=1
+    fi
+    case "$EV_MSG" in
+        *rt_m_not_a_def*) echo "SELFTEST FAIL: ';'-terminated macro call counted as a definition: $EV_MSG" >&2; st_fail=1 ;;
+        *rt_m_xor*) : ;;
+        *) echo "SELFTEST FAIL: macro-export EV_MSG does not name rt_m_xor: $EV_MSG" >&2; st_fail=1 ;;
+    esac
+
     if [ "$st_ran" -ne "$SELFTEST_EXPECTED" ]; then
         echo "SELFTEST FAIL: expected $SELFTEST_EXPECTED fixtures, ran $st_ran -- the harness did not run" >&2
         return 1
     fi
     [ "$st_fail" -eq 0 ] || return 1
-    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (1 incident-replay, 1 forward-progress, 1 single-removal, 1 empty-range)"
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (1 incident-replay, 1 forward-progress, 1 single-removal, 1 empty-range, 1 macro-export)"
     return 0
 }
 

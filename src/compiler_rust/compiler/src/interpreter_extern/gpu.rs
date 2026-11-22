@@ -713,20 +713,54 @@ fn runtime_i64_owner(values: &[i64]) -> simple_runtime::value::RuntimeValue {
 
 pub fn rt_cuda_module_load_data_array_fn(args: &[Value]) -> Result<Value, CompileError> {
     let bytes = strict_owned_bytes(args, 0, "rt_cuda_module_load_data_array", 1)?;
-    let owner = runtime_byte_owner(&bytes);
-    let result = simple_runtime::cuda_runtime::rt_cuda_module_load_data_array(owner);
-    release_runtime_owner(owner);
-    Ok(Value::Int(result))
+    #[cfg(not(feature = "cuda"))]
+    {
+        // Same gap as rt_cuda_memcpy_htod_array: the runtime array helper is
+        // the -3 stub without the `cuda` feature; load through the dlopen
+        // driver via the pointer-based sibling.
+        return rt_cuda_module_load_data_bytes_fn(&[
+            Value::Int(bytes.as_ptr() as i64),
+            Value::Int(bytes.len() as i64),
+        ]);
+    }
+    #[cfg(feature = "cuda")]
+    {
+        let owner = runtime_byte_owner(&bytes);
+        let result = simple_runtime::cuda_runtime::rt_cuda_module_load_data_array(owner);
+        release_runtime_owner(owner);
+        Ok(Value::Int(result))
+    }
 }
 
 pub fn rt_cuda_memcpy_htod_array_fn(args: &[Value]) -> Result<Value, CompileError> {
     let dst = arg_i64(args, 0, "rt_cuda_memcpy_htod_array", 3)?;
     let bytes = strict_owned_bytes(args, 1, "rt_cuda_memcpy_htod_array", 3)?;
     let count = arg_i64(args, 2, "rt_cuda_memcpy_htod_array", 3)?;
-    let owner = runtime_byte_owner(&bytes);
-    let result = simple_runtime::cuda_runtime::rt_cuda_memcpy_htod_array(dst, owner, count);
-    release_runtime_owner(owner);
-    Ok(Value::Int(result))
+    #[cfg(not(feature = "cuda"))]
+    {
+        // Without the `cuda` feature the runtime's array helper is the -3
+        // stub, so a working driver was never reached (CUDA lane arena guard
+        // upload failed on every host). Copy through the dlopen driver like
+        // the pointer-based sibling `rt_cuda_memcpy_htod_fn`.
+        let Ok(byte_count) = usize::try_from(count) else {
+            return Ok(Value::Int(-1));
+        };
+        if byte_count > bytes.len() {
+            return Ok(Value::Int(-1));
+        }
+        return rt_cuda_memcpy_htod_fn(&[
+            Value::Int(dst),
+            Value::Int(bytes.as_ptr() as i64),
+            Value::Int(count),
+        ]);
+    }
+    #[cfg(feature = "cuda")]
+    {
+        let owner = runtime_byte_owner(&bytes);
+        let result = simple_runtime::cuda_runtime::rt_cuda_memcpy_htod_array(dst, owner, count);
+        release_runtime_owner(owner);
+        Ok(Value::Int(result))
+    }
 }
 
 pub fn rt_cuda_launch_kernel_name_array_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -1406,7 +1440,11 @@ pub fn rt_cuda_device_compute_capability_fn(args: &[Value]) -> Result<Value, Com
                 if r_major == 0 && r_minor == 0 {
                     return Ok(Value::Int((major * 10 + minor) as i64));
                 }
-                return Ok(Value::Int(if r_major != 0 { r_major } else { r_minor } as i64));
+                // CUresult codes are POSITIVE (3 = NOT_INITIALIZED, 101 =
+                // INVALID_DEVICE); returned raw they read as a plausible
+                // capability. Negate so every failure is <= 0.
+                let rc = if r_major != 0 { r_major } else { r_minor };
+                return Ok(Value::Int(-(rc as i64)));
             }
         }
         Ok(Value::Int(-1))
@@ -3482,6 +3520,19 @@ mod vulkan_dlopen {
     type FnVkDestroyFence = unsafe extern "C" fn(VkDevice, u64, *const c_void);
     type FnVkWaitForFences = unsafe extern "C" fn(VkDevice, u32, *const u64, u32, u64) -> VkResult;
     type FnVkGetFenceStatus = unsafe extern "C" fn(VkDevice, u64) -> VkResult;
+    type FnVkEnumerateDeviceExtensionProperties = unsafe extern "C" fn(
+        VkPhysicalDevice,
+        *const c_char,
+        *mut u32,
+        *mut VkExtensionProperties,
+    ) -> VkResult;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub(super) struct VkExtensionProperties {
+        pub extension_name: [u8; 256],
+        pub spec_version: u32,
+    }
 
     #[repr(C)]
     pub(super) struct VkFenceCreateInfo {
@@ -3561,6 +3612,7 @@ mod vulkan_dlopen {
         pub destroy_fence: FnVkDestroyFence,
         pub wait_for_fences: FnVkWaitForFences,
         pub get_fence_status: FnVkGetFenceStatus,
+        pub enumerate_device_extension_properties: Option<FnVkEnumerateDeviceExtensionProperties>,
     }
     unsafe impl Send for VkFns {}
     unsafe impl Sync for VkFns {}
@@ -3621,6 +3673,8 @@ mod vulkan_dlopen {
     }
 
     pub fn load_vulkan() -> Option<VkFns> {
+        simple_runtime::vulkan_graphics_runtime::ensure_macos_moltenvk_icd_env();
+
         unsafe {
             #[cfg(unix)]
             {
@@ -3727,6 +3781,24 @@ mod vulkan_dlopen {
             device_wait_idle: sym!("vkDeviceWaitIdle"),
             reset_command_buffer: sym!("vkResetCommandBuffer"),
             get_physical_device_properties: sym!("vkGetPhysicalDeviceProperties"),
+            enumerate_device_extension_properties: {
+                let n = CString::new("vkEnumerateDeviceExtensionProperties").ok()?;
+                #[cfg(unix)]
+                let p = libc::dlsym(handle, n.as_ptr());
+                #[cfg(windows)]
+                let p = {
+                    use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+                    match GetProcAddress(handle as _, n.as_ptr() as *const u8) {
+                        Some(f) => f as *mut c_void,
+                        None => std::ptr::null_mut(),
+                    }
+                };
+                if p.is_null() {
+                    None
+                } else {
+                    Some(std::mem::transmute(p))
+                }
+            },
         })
     }
 
@@ -4078,6 +4150,31 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             p_queue_priorities: &priority,
         };
         let features = VkPhysicalDeviceFeatures { _data: [0u32; 55] };
+        let portability_subset_cstr = CString::new("VK_KHR_portability_subset").unwrap();
+        let mut dev_ext_ptrs: Vec<*const std::os::raw::c_char> = Vec::new();
+        if let Some(enum_dev_exts) = fns.enumerate_device_extension_properties {
+            let mut ext_count: u32 = 0;
+            if enum_dev_exts(chosen_phys, ptr::null(), &mut ext_count, ptr::null_mut()) == VK_SUCCESS && ext_count > 0 {
+                let mut exts = vec![
+                    VkExtensionProperties {
+                        extension_name: [0u8; 256],
+                        spec_version: 0,
+                    };
+                    ext_count as usize
+                ];
+                if enum_dev_exts(chosen_phys, ptr::null(), &mut ext_count, exts.as_mut_ptr()) == VK_SUCCESS {
+                    exts.truncate(ext_count as usize);
+                    let has_portability_subset = exts.iter().any(|e| {
+                        std::ffi::CStr::from_bytes_until_nul(&e.extension_name)
+                            .map(|n| n == portability_subset_cstr.as_c_str())
+                            .unwrap_or(false)
+                    });
+                    if has_portability_subset {
+                        dev_ext_ptrs.push(portability_subset_cstr.as_ptr());
+                    }
+                }
+            }
+        }
         let dev_ci = VkDeviceCreateInfo {
             s_type: 3,
             p_next: ptr::null(),
@@ -4086,8 +4183,12 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
             p_queue_create_infos: &queue_ci,
             enabled_layer_count: 0,
             pp_enabled_layer_names: ptr::null(),
-            enabled_extension_count: 0,
-            pp_enabled_extension_names: ptr::null(),
+            enabled_extension_count: dev_ext_ptrs.len() as u32,
+            pp_enabled_extension_names: if dev_ext_ptrs.is_empty() {
+                ptr::null()
+            } else {
+                dev_ext_ptrs.as_ptr()
+            },
             p_enabled_features: &features,
         };
         let mut device: VkDevice = ptr::null_mut();

@@ -247,13 +247,15 @@ fn pe_write_image_policy(sections: [PeImageSection], entry_rva: i64,
     elif image_base <= 0 or image_base % 0x10000 != 0 or
             image_base > 0x7fffffff00000000:
         return Err("PE32+ image base must be a positive 64 KiB-aligned address with 4 GiB headroom")
-    # ARM/Thumb entry points carry the Thumb bit; no other machine may.
-    if (entry_rva & 1) != 0 and machine != PE_MACHINE_ARM_THUMB:
+    # Only ARM/Thumb encodes Thumb interworking in entry RVA bit 0; ARM64 requires
+    # aligned AArch64 entry instructions, whereas byte-aligned x86/AMD64 allows odd RVAs.
+    if (entry_rva & 1) != 0 and machine == PE_MACHINE_ARM64:
         return Err("PE entry RVA {entry_rva} has the Thumb bit set on a non-ARM machine")
     val valid_policy = pe_validate_policy(policy)
     if valid_policy.is_err(): return Err(valid_policy.unwrap_err())
+    val entry_check_rva = if machine == PE_MACHINE_ARM_THUMB: entry_rva - (entry_rva & 1) else: entry_rva
     val valid = _pe_validate_sections(
-        sections, entry_rva - (entry_rva & 1), policy.section_alignment)
+        sections, entry_check_rva, policy.section_alignment)
     if valid.is_err(): return Err(valid.unwrap_err())
     val pe_offset: i64 = 0x80
     val optional_header_size: i64 = if pe32: 0xe0 else: 0xf0

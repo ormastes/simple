@@ -14,7 +14,8 @@ use compiler.driver.cache.integration.shadow_mode.{
 }
 use std.nogc_sync_mut.io_runtime.{dir_create_all, dir_list_optional}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
-use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded,
     file_is_regular_no_follow, file_atomic_write, file_lock, file_unlock}
@@ -2033,6 +2034,8 @@ pub fn dependency_closure_v1(recorded: {text: [text]}, dependencies: [text]) -> 
     Some(incremental_sorted_text(seen))
 
 pub fn build_cache_dependency_closure(cache: BuildCache, dependencies: [text]) -> [text]?:
+    if dependencies.len() == 0:
+        return Some([])
     var recorded: {text: [text]} = {}
     for source in cache.entries.keys():
         recorded[source] = cache.entries[source].dependencies
@@ -2054,6 +2057,19 @@ pub fn incremental_detect_changes_with_tldr_at(cache_path: text, tldr_root: text
                                                source_files: [text]) -> IncrementalCompileResult:
     val cache = build_cache_open_with_tldr_v1(cache_path, tldr_root)
     cache.detect_changes(source_files)
+
+fn _incremental_interface_digest_scoped_v1(source: text) -> text:
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        return interface_digest_of_source(incremental_file_read_text(source) ?? "")
+    val digest = interface_digest_of_source(incremental_file_read_text(source) ?? "")
+    if not transient_scope_pause():
+        transient_scope_end()
+        return interface_digest_of_source(incremental_file_read_text(source) ?? "")
+    val promoted = transient_promote(digest)
+    val ended = transient_scope_end()
+    if not promoted or not ended:
+        return interface_digest_of_source(incremental_file_read_text(source) ?? "")
+    digest
 
 pub fn build_cache_record_entry_with_fp(cache: BuildCache, source: text,
                                         fingerprint: FileFingerprint,
@@ -2086,15 +2102,24 @@ pub fn build_cache_record_entry_with_fp(cache: BuildCache, source: text,
     # witness published by the native AOT owner". This keeps generic legacy
     # record_compilation callers backward compatible.
     var effective_module_witness = module_witness
-    if effective_module_witness == "" and cache.entries.contains_key(source):
-        effective_module_witness = cache.entries[source].module_witness
+    var cached_interface_digest = ""
+    if cache.entries.contains_key(source):
+        val prior_entry = cache.entries[source]
+        if effective_module_witness == "":
+            effective_module_witness = prior_entry.module_witness
+        if prior_entry.fingerprint.content_hash == fingerprint.content_hash and
+                prior_entry.interface_digest != "":
+            cached_interface_digest = prior_entry.interface_digest
+    val resolved_interface_digest = if cached_interface_digest != "":
+        cached_interface_digest
+    else:
+        _incremental_interface_digest_scoped_v1(source)
     cache.fingerprints[source] = fingerprint
     cache.entries[source] = DependencyEntry(
         source: source, fingerprint: fingerprint,
         dependencies: dependencies, outputs: outputs,
         deps_iface: deps_iface,
-        interface_digest: interface_digest_of_source(
-            incremental_file_read_text(source) ?? ""),
+        interface_digest: resolved_interface_digest,
         module_witness: effective_module_witness,
         macro_input_root: macro_input_root)
 
@@ -2190,8 +2215,15 @@ fn build_cache_persist_unscoped_v1(cache: BuildCache, publish_receipt: bool) -> 
     val lock_fd = if cache.cache_path != "": file_lock("{cache.cache_path}.merge.lock", 30) else: -1
     if cache.cache_path != "" and lock_fd < 0:
         return false
-    var merged_entries = cache.entries
-    var merged_fps = cache.fingerprints
+    # Build fresh scratch maps so merging `on_disk` inside `build_cache_persist`'s
+    # transient scope never mutates `cache.entries` / `cache.fingerprints` in place
+    # with transient-allocated keys, entries, or rehashed bucket tables.
+    var merged_entries: {text: DependencyEntry} = {}
+    for mem_src in cache.entries.keys():
+        merged_entries[mem_src] = cache.entries[mem_src]
+    var merged_fps: {text: FileFingerprint} = {}
+    for mem_fp_src in cache.fingerprints.keys():
+        merged_fps[mem_fp_src] = cache.fingerprints[mem_fp_src]
     var base_version = cache.version
     if cache.cache_path != "" and not _g_build_cache_invalidated.contains_key(cache.cache_path) and incremental_file_exists(cache.cache_path):
         val on_disk = BuildCache.load(cache.cache_path)

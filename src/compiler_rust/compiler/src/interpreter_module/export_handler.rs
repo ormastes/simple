@@ -64,6 +64,7 @@ pub fn load_export_source(
         target: use_target,
         is_type_only: false, // Runtime export loading is never type-only
         is_lazy: false,
+        attributes: vec![],
     };
 
     match load_and_merge_module(&use_stmt, current_file, functions, classes, enums) {

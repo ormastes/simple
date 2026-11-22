@@ -1,5 +1,16 @@
 # bootstrap Layer Expert
 
+## Host-config bootstrap settings (2026-11-22)
+
+Host tuning (reserve, Stage 3 tree RSS cap, Stage 3 direct threads, Stage 3
+file workers) is read from host config keys `mem_reserve_free_mib`,
+`stage3_tree_rss_cap_kib`, `stage3_threads`, `stage3_file_workers`
+via `scripts/bootstrap/lib/host-bootstrap-settings.shs` and
+`bootstrap-jobs.shs`; env vars still win, absent keys change nothing. Update
+with `sh scripts/setup/update-host-config.shs --dry-run`. A user
+`~/.config/simple/host.sdn` value shadows `config/host/<hostname>.sdn`.
+Table + precedence: `doc/07_guide/tooling/bootstrap_options.md` § Host settings.
+
 ## Phase 1 whole-test callback evidence (2026-10-27)
 
 For the configured Phase 1 whole-test callback, use
@@ -959,3 +970,13 @@ i64 `SIMPLE_BUILD_MEMORY_RESERVE_BYTES`; absence retains the compiler default
 and malformed values refuse before candidate execution. This does not change
 hard memory enforcement or admit a previously rejected compiler. See
 [reserve scrub evidence](../../../08_tracking/bug/bootstrap_sanity_memory_reserve_scrub_2026_10_30.md).
+
+## Phase 3 HIR `unresolved name: cpu_count_checked` (2026-11-22)
+
+integ25 Stage 2 -> Stage 3 (go-to-end) failed HIR on
+`compiler.backend.runtime_c_compile_pool_v1`: the name was imported through the
+`std.io_runtime` facade, which does not export it. Fixed import-only in #10770;
+`scripts/check/check-io-runtime-facade-imports.shs` (#10777) now catches the
+class statically. Details: [lib](../lib/skill.md) § "`std.io_runtime` facade
+imports" and
+`doc/08_tracking/bug/io_runtime_facade_unexported_import_hir_unresolved_2026-11-22.md`.

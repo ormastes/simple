@@ -1,6 +1,6 @@
 # Seed cfg_strip ignores compound arch `@cfg` (`not(a or b)`)
 
-- **Status:** open
+- **Status:** fixed (2026-11-22)
 - **Severity:** P2. Fails open: wrong code on x86, no diagnostic.
 - **Found:** 2026-11-20, Opus review of PR #10587 (riscv64 kernel link lane)
 - **Component:** seed `src/compiler_rust/compiler/src/pipeline/cfg_strip.rs`
@@ -35,11 +35,5 @@ Use one arch per `@cfg` line (`pci.spl`, `rtc.spl`, `reset.spl` after #10587). T
 `hal_arch_gating_contract_spec.spl` case "uses one arch per @cfg in shared drivers"
 forbids the compound form in those files.
 
-## Fix
-Evaluate the attribute expression tree in the seed (not/or/and over arch
-idents, mirroring `mir_cfg_select`). If any sub-term is not an arch, keep
-returning `None`; never guess. Add a Rust unit test and turn on
-`seed_cfg_strip_compound_arch_spec.spl` (the fix adds `cfg_compound_arch_verdict`).
-
-## Repro
-`test/01_unit/compiler/pipeline/seed_cfg_strip_compound_arch_spec.spl` (`@tag:in-development`, RED).
+## Resolution (2026-11-22)
+Implemented `cfg_compound_arch_verdict` in `src/compiler_rust/compiler/src/pipeline/cfg_strip.rs` (handling `<arch>`, `not(...)` / `!`, `or` / `||`, `and` / `&&`, `all(...)`, and `any(...)` without short-circuiting past non-arch sub-terms, so any mixed non-arch condition returns `None`), wired into both `cfg_attr_arch_verdict` and `cfg_line_arch_verdict`. Added Rust unit tests in `cfg_strip.rs` and enabled `test/01_unit/compiler/pipeline/seed_cfg_strip_compound_arch_spec.spl`.

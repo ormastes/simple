@@ -99,3 +99,29 @@ No code change this lane (nothing left to fix in scope). A full re-run of
 the CUDA fill native probe recipe remains pending a Linux CUDA host.
 
 Status: CLOSED (superseded upstream; bookkeeping synced).
+
+## 2026-11-22 live re-run on a Linux CUDA host (lane work/cuda-compiler-bugs) — CLOSED, verified
+
+Host Linux aarch64, NVIDIA GB10, base `origin/release/1.0.0` `3c2e4556b6d`.
+Producer: integ25 Stage 2 admitted native-build (sha256
+`ef46f0d2ab4274c4550530851db407bf9bad7f21bfabd50f9b56e87e77fd58d6`), runtime
+`stage2-runtime-authority`, under `systemd-run --user --scope -p MemoryMax=8G`.
+
+Documented recipe (`--source src/compiler --source src/app --source src/lib
+--entry-closure --entry src/app/test/processing_cuda_fill_probe.spl --strip`):
+
+- Run 1 (no `--runtime-path`): entry closure collected **112 modules**, parse ->
+  HIR -> native_compile all ran. Link failed on undefined `rt_cuda_*` because the
+  default runtime objects lack the CUDA surface. The zero-files defect does not
+  reproduce.
+- Run 2 (`--runtime-path <stage2-runtime-authority>`): build rc=0, binary
+  produced (sha256 prefix `d23f4ff9137083ce`).
+- `PROCESSING_CUDA_FILL_PROBE_BIN=<bin> sh scripts/check/check-processing-cuda-fill-native.shs`
+  -> `processing_cuda_fill_native_status=fail reason=probe-failed`, probe line
+  `reason=cuda-init-failed`. That is a runtime fault, not the collector: strace
+  shows libcuda is never opened, and the linked binary has no `libcuda` string,
+  so the linked `rt_cuda_init` does not dlopen the driver. Handed to the CUDA
+  runtime/extern lane. It is not part of this record.
+
+The aggregate `bug_db.sdn` row was still `open` even though the 2026-11-12 note
+says it was synced to closed. It is now synced to `closed`.
