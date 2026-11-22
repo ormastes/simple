@@ -4,6 +4,8 @@ use std.common.contracts.execution.simpleos_server_protocol_capabilities.{
     simpleos_http_protocol_reachable,
     simpleos_http_select_alpn,
     simpleos_http_capability_manifests,
+    simpleos_http_capability_manifests_configured,
+    SimpleosHttpConfiguredBoundsV1,
     simpleos_ssh_protocol_reachable,
     simpleos_ssh_capability_manifests,
     ServerProtocolProbeHandle, server_protocol_probe_handle_admitted
@@ -82,3 +84,48 @@ describe "SimpleOS production server capability projection":
             authenticated: false, channel_opened: true, sftp_subsystem_opened: true
         )
         expect(server_protocol_probe_handle_admitted(unauthenticated, 7, 12, "probe-owner-7", 0)).to_equal(false)
+
+    it "derives HTTP limits and timeouts from the configured production owner":
+        val bounds = SimpleosHttpConfiguredBoundsV1(
+            max_connections: 77, max_body_bytes: 4096,
+            read_timeout_ms: 1234, write_timeout_ms: 2345,
+            idle_timeout_ms: 3456, drain_timeout_ms: 4567
+        )
+        val manifests = simpleos_http_capability_manifests_configured(
+            true, true, true, "listener-1", "session-1", bounds)
+        expect(manifests.len()).to_equal(2)
+        expect(manifests[0].limits.max_connections).to_equal(77)
+        expect(manifests[0].limits.max_body_bytes).to_equal(4096)
+        expect(manifests[0].timeouts.handshake_ms).to_equal(1234)
+        expect(manifests[0].timeouts.read_ms).to_equal(1234)
+        expect(manifests[0].timeouts.write_ms).to_equal(2345)
+        expect(manifests[0].timeouts.idle_ms).to_equal(3456)
+        expect(manifests[0].timeouts.drain_ms).to_equal(4567)
+        expect(manifest_valid(manifests[0])).to_equal(true)
+        expect(manifests[1].limits.max_connections).to_equal(77)
+
+    it "fails closed when configured HTTP bounds are not positive":
+        val bounds = SimpleosHttpConfiguredBoundsV1(
+            max_connections: 0, max_body_bytes: 4096,
+            read_timeout_ms: 1, write_timeout_ms: 1,
+            idle_timeout_ms: 1, drain_timeout_ms: 1
+        )
+        val manifests = simpleos_http_capability_manifests_configured(
+            false, true, false, "listener-1", "session-1", bounds)
+        expect(manifests.len()).to_equal(1)
+        expect(manifest_valid(manifests[0])).to_equal(false)
+
+    it "never projects H3 QUIC WebTransport or WebSocket even with every probe verified":
+        val manifests = simpleos_http_capability_manifests(true, true, true, "listener-1", "session-1")
+        var i = 0
+        while i < manifests.len():
+            val p = manifests[i].protocol
+            expect(p == "h3" or p == "quic" or p == "webtransport" or p == "websocket").to_equal(false)
+            i = i + 1
+        expect(simpleos_http_protocol_reachable("websocket")).to_equal(false)
+        expect(simpleos_http_protocol_reachable("quic")).to_equal(false)
+
+    it "never projects SFTP while its filesystem owner is unavailable":
+        val manifests = simpleos_ssh_capability_manifests(true, false, "listener-1", "session-1")
+        expect(manifests.len()).to_equal(1)
+        expect(manifests[0].protocol).to_equal("ssh")

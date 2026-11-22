@@ -53,3 +53,27 @@ describe "SPL-BOUND-002 fix rule registration":
         expect(found).to_equal(true)
         val clean = run_registry_producer("SPL-BOUND-002", fix_unit_from_source("/w/c.spl", "fn f() -> i64:\n    1\n"))
         expect(clean.len()).to_equal(0)
+
+describe "SPL-BOUND-002 variant fix rule registration":
+    """The constrained, move and allow variants are registered producers."""
+
+    it "lists the three variant codes among the registry producers":
+        # @req: REQ-DIAG-POLICY-001
+        step("Read the registered producer codes")
+        var codes: [text] = []
+        for p in registry_fix_producers():
+            codes.push(p.code)
+        expect(codes.contains("SPL-BOUND-002-CONSTRAINED")).to_equal(true)
+        expect(codes.contains("SPL-BOUND-002-MOVE")).to_equal(true)
+        expect(codes.contains("SPL-BOUND-002-ALLOW")).to_equal(true)
+
+    it "dispatches the allow variant only when the author wrote a reason comment":
+        # @req: REQ-DIAG-POLICY-001
+        step("No reason comment: nothing; with one: an Uncertain annotation edit")
+        expect(run_registry_producer("SPL-BOUND-002-ALLOW", fix_unit_from_source("/w/client.spl", src())).len()).to_equal(0)
+        val hinted = "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\n# reason: legacy HAL\nfn get_distance() -> DistanceKm:\n    DistanceKm(c_read_distance())\n"
+        val fixes = run_registry_producer("SPL-BOUND-002-ALLOW", fix_unit_from_source("/w/client.spl", hinted))
+        expect(fixes.len()).to_equal(1)
+        expect(easyfix_code(fixes[0])).to_equal("SPL-BOUND-002-ALLOW")
+        expect(fixes[0].is_safe()).to_equal(false)
+        expect(fixes[0].replacements[0].new_text).to_equal("@allow(bound_late_cast) # reason: legacy HAL\n")
