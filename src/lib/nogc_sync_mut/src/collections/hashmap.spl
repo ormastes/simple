@@ -1,11 +1,11 @@
-# HashMap - Pure Simple Implementation
+# HashMap - Pure Simple Flat SoA Open-Addressing Implementation
 #
 # No SFFI, no Rust - 100% Pure Simple
-# Hash table with chaining for collision resolution
-
+# Packed `(hash << 2) | state` metadata + flat parallel key/value slot arrays,
+# with lazy `capacity = 0` empty initialization.
 
 struct HashMapEntry:
-    """Key-value pair in HashMap."""
+    """Key-value pair in HashMap (preserved for compatibility)."""
     key: text
     value: text
     hash: i64
@@ -17,116 +17,278 @@ struct HashMapProbeResult:
 
 use std.io_runtime.{hash_text}
 
+val HM_EMPTY: i64 = 0
+val HM_OCCUPIED: i64 = 1
+val HM_TOMBSTONE: i64 = 2
+val HM_STATE_MASK: i64 = 3
+val HM_HASH_MASK: i64 = 0x1FFFFFFFFFFFFFFF
+
+fn hm_pack_occupied(hash: i64) -> i64:
+    ((hash & HM_HASH_MASK) << 2) | HM_OCCUPIED
+
+fn hm_slot_for_hash(hash: i64, cap: i64) -> i64:
+    if (cap & (cap - 1)) == 0:
+        return hash & (cap - 1)
+    var rem = hash % cap
+    if rem < 0:
+        rem = 0 - rem
+    rem
+
 class HashMap:
-    """Pure Simple HashMap using array of buckets with chaining.
+    """Pure Simple HashMap using flat SoA open-addressing with packed state/hash headers.
 
     Example:
         var map = HashMap.new()
         map.insert("name", "Alice")
         val name = map.get("name")  # Some("Alice")
     """
-    buckets: [[HashMapEntry]]
+    states: [i64]
+    slot_keys: [text]
+    slot_values: [text]
     size: i64
+    tombstones: i64
     capacity: i64
 
     static fn new() -> HashMap:
-        """Create new empty HashMap with default capacity."""
-        HashMap.with_capacity(16)
+        """Create new empty HashMap with lazy zero-allocation backing (`capacity = 0`)."""
+        HashMap(
+            states: [],
+            slot_keys: [],
+            slot_values: [],
+            size: 0,
+            tombstones: 0,
+            capacity: 0
+        )
 
     static fn with_capacity(requested_capacity: i64) -> HashMap:
-        """Create new empty HashMap with at least requested_capacity buckets."""
-        var capacity = requested_capacity
-        if capacity < 1:
-            capacity = 1
-        var buckets: [[HashMapEntry]] = []
-        var i = 0
-        while i < capacity:
-            var bucket: [HashMapEntry] = []
-            buckets.push(bucket)
-            i = i + 1
+        """Create new empty HashMap reserving at least `requested_capacity` slots lazily."""
+        var cap = requested_capacity
+        if cap < 1:
+            cap = 1
+        HashMap(
+            states: [],
+            slot_keys: [],
+            slot_values: [],
+            size: 0,
+            tombstones: 0,
+            capacity: cap
+        )
 
-        HashMap(buckets: buckets, size: 0, capacity: capacity)
+    me _alloc_blank_storage(cap: i64):
+        var new_states: [i64] = []
+        var new_keys: [text] = []
+        var new_values: [text] = []
+        var i = 0
+        while i < cap:
+            new_states.push(HM_EMPTY)
+            new_keys.push("")
+            new_values.push("")
+            i = i + 1
+        self.states = new_states
+        self.slot_keys = new_keys
+        self.slot_values = new_values
+        self.capacity = cap
+        self.tombstones = 0
 
     me insert(key: text, value: text):
         """Insert or update key-value pair."""
-        # Resize if load factor > 0.75
-        if self.size * 4 > self.capacity * 3:
-            self._resize()
-
         val hash = hash_text(key)
-        val idx = self._bucket_index_hash(hash)
-        var bucket = self.buckets[idx]
+        val packed = hm_pack_occupied(hash)
 
-        # Update if key exists
-        for i in 0..bucket.len():
-            if bucket[i].hash == hash and bucket[i].key == key:
-                bucket[i] = HashMapEntry(key: key, value: value, hash: hash)
-                self.buckets[idx] = bucket
+        if self.states.len() == 0:
+            val init_cap = if self.capacity > 0: self.capacity else: 16
+            self._alloc_blank_storage(init_cap)
+            val slot = hm_slot_for_hash(hash, self.capacity)
+            self.states[slot] = packed
+            self.slot_keys[slot] = key
+            self.slot_values[slot] = value
+            self.size = 1
+            return
+
+        var slot = hm_slot_for_hash(hash, self.capacity)
+        var first_tomb = -1
+        var empty_slot = -1
+        var step = 0
+        while step < self.capacity:
+            val s = self.states[slot]
+            if s == HM_EMPTY:
+                empty_slot = slot
+                break
+            elif s == HM_TOMBSTONE:
+                if first_tomb < 0:
+                    first_tomb = slot
+            elif s == packed and self.slot_keys[slot] == key:
+                self.slot_values[slot] = value
                 return
+            slot = slot + 1
+            if slot >= self.capacity:
+                slot = 0
+            step = step + 1
 
-        # Add new entry
-        bucket.push(HashMapEntry(key: key, value: value, hash: hash))
-        self.buckets[idx] = bucket
+        val need_grow = self.size * 4 > self.capacity * 3 or (first_tomb < 0 and empty_slot < 0)
+        val need_compact = (self.size + self.tombstones) * 4 > self.capacity * 3 and first_tomb < 0
+        if need_grow or need_compact:
+            if not need_grow and self.size * 2 <= self.capacity and self.capacity >= 16:
+                self._rebuild(self.capacity)
+            else:
+                val next_cap = if self.capacity < 8: 16 else: self.capacity * 2
+                self._rebuild(next_cap)
+            var nslot = hm_slot_for_hash(hash, self.capacity)
+            while self.states[nslot] != HM_EMPTY:
+                nslot = nslot + 1
+                if nslot >= self.capacity:
+                    nslot = 0
+            self.states[nslot] = packed
+            self.slot_keys[nslot] = key
+            self.slot_values[nslot] = value
+            self.size = self.size + 1
+            return
+
+        val target = if first_tomb >= 0: first_tomb else: empty_slot
+        if first_tomb >= 0:
+            self.tombstones = self.tombstones - 1
+        self.states[target] = packed
+        self.slot_keys[target] = key
+        self.slot_values[target] = value
         self.size = self.size + 1
+
+    me set(key: text, value: text):
+        """Alias for insert."""
+        self.insert(key, value)
 
     me insert_if_absent(key: text, value: text) -> bool:
         """Insert key-value pair only when the key is missing."""
-        if self.size * 4 > self.capacity * 3:
-            self._resize()
-
         val hash = hash_text(key)
-        val idx = self._bucket_index_hash(hash)
-        var bucket = self.buckets[idx]
+        val packed = hm_pack_occupied(hash)
 
-        for entry in bucket:
-            if entry.hash == hash:
-                if entry.key == key:
-                    return false
+        if self.states.len() == 0:
+            val init_cap = if self.capacity > 0: self.capacity else: 16
+            self._alloc_blank_storage(init_cap)
+            val slot = hm_slot_for_hash(hash, self.capacity)
+            self.states[slot] = packed
+            self.slot_keys[slot] = key
+            self.slot_values[slot] = value
+            self.size = 1
+            return true
 
-        bucket.push(HashMapEntry(key: key, value: value, hash: hash))
-        self.buckets[idx] = bucket
+        var slot = hm_slot_for_hash(hash, self.capacity)
+        var first_tomb = -1
+        var empty_slot = -1
+        var step = 0
+        while step < self.capacity:
+            val s = self.states[slot]
+            if s == HM_EMPTY:
+                empty_slot = slot
+                break
+            elif s == HM_TOMBSTONE:
+                if first_tomb < 0:
+                    first_tomb = slot
+            elif s == packed and self.slot_keys[slot] == key:
+                return false
+            slot = slot + 1
+            if slot >= self.capacity:
+                slot = 0
+            step = step + 1
+
+        val need_grow = self.size * 4 > self.capacity * 3 or (first_tomb < 0 and empty_slot < 0)
+        val need_compact = (self.size + self.tombstones) * 4 > self.capacity * 3 and first_tomb < 0
+        if need_grow or need_compact:
+            if not need_grow and self.size * 2 <= self.capacity and self.capacity >= 16:
+                self._rebuild(self.capacity)
+            else:
+                val next_cap = if self.capacity < 8: 16 else: self.capacity * 2
+                self._rebuild(next_cap)
+            var nslot = hm_slot_for_hash(hash, self.capacity)
+            while self.states[nslot] != HM_EMPTY:
+                nslot = nslot + 1
+                if nslot >= self.capacity:
+                    nslot = 0
+            self.states[nslot] = packed
+            self.slot_keys[nslot] = key
+            self.slot_values[nslot] = value
+            self.size = self.size + 1
+            return true
+
+        val target = if first_tomb >= 0: first_tomb else: empty_slot
+        if first_tomb >= 0:
+            self.tombstones = self.tombstones - 1
+        self.states[target] = packed
+        self.slot_keys[target] = key
+        self.slot_values[target] = value
         self.size = self.size + 1
         true
 
     fn get(key: text) -> text?:
         """Get value for key."""
+        if self.size == 0 or self.states.len() == 0:
+            return None
+
         val hash = hash_text(key)
-        val idx = self._bucket_index_hash(hash)
-        val bucket = self.buckets[idx]
+        val packed = hm_pack_occupied(hash)
+        var slot = hm_slot_for_hash(hash, self.capacity)
+        var step = 0
 
-        for entry in bucket:
-            if entry.hash == hash:
-                if entry.key == key:
-                    return Some(entry.value)
+        while step < self.capacity:
+            val s = self.states[slot]
+            if s == HM_EMPTY:
+                return None
+            if s == packed and self.slot_keys[slot] == key:
+                return Some(self.slot_values[slot])
+            slot = slot + 1
+            if slot >= self.capacity:
+                slot = 0
+            step = step + 1
 
-        nil
+        None
 
     fn get_observed(key: text) -> HashMapProbeResult:
         """Look up once and count examined entries, including the empty miss probe."""
+        if self.states.len() == 0 or self.capacity <= 0:
+            return HashMapProbeResult(value: None, probes: 1, collisions: 0)
+
         val hash = hash_text(key)
-        val idx = self._bucket_index_hash(hash)
-        val bucket = self.buckets[idx]
+        val packed = hm_pack_occupied(hash)
+        var slot = hm_slot_for_hash(hash, self.capacity)
         var probes = 0
         var collisions = 0
-        for entry in bucket:
+        var step = 0
+
+        while step < self.capacity:
+            val s = self.states[slot]
             probes = probes + 1
-            if entry.hash == hash and entry.key == key:
-                return HashMapProbeResult(value: Some(entry.value), probes: probes, collisions: collisions)
-            collisions = collisions + 1
-        probes = probes + 1
-        HashMapProbeResult(value: nil, probes: probes, collisions: collisions)
+            if s == HM_EMPTY:
+                return HashMapProbeResult(value: None, probes: probes, collisions: collisions)
+            if (s & HM_STATE_MASK) == HM_OCCUPIED:
+                if s == packed and self.slot_keys[slot] == key:
+                    return HashMapProbeResult(value: Some(self.slot_values[slot]), probes: probes, collisions: collisions)
+                collisions = collisions + 1
+            slot = slot + 1
+            if slot >= self.capacity:
+                slot = 0
+            step = step + 1
+
+        HashMapProbeResult(value: None, probes: probes + 1, collisions: collisions)
 
     fn contains_key(key: text) -> bool:
         """Check if key exists."""
-        val hash = hash_text(key)
-        val cap = self.capacity
-        val idx = if (cap & (cap - 1)) == 0: hash & (cap - 1) else: if hash < 0: (0 - hash) % cap else: hash % cap
-        val bucket = self.buckets[idx]
+        if self.size == 0 or self.states.len() == 0:
+            return false
 
-        for entry in bucket:
-            if entry.hash == hash:
-                if entry.key == key:
-                    return true
+        val hash = hash_text(key)
+        val packed = hm_pack_occupied(hash)
+        var slot = hm_slot_for_hash(hash, self.capacity)
+        var step = 0
+
+        while step < self.capacity:
+            val s = self.states[slot]
+            if s == HM_EMPTY:
+                return false
+            if s == packed and self.slot_keys[slot] == key:
+                return true
+            slot = slot + 1
+            if slot >= self.capacity:
+                slot = 0
+            step = step + 1
 
         false
 
@@ -136,78 +298,111 @@ class HashMap:
 
     me remove(key: text) -> text?:
         """Remove key and return value."""
+        if self.size == 0 or self.states.len() == 0:
+            return None
+
         val hash = hash_text(key)
-        val idx = self._bucket_index_hash(hash)
-        var bucket = self.buckets[idx]
+        val packed = hm_pack_occupied(hash)
+        var slot = hm_slot_for_hash(hash, self.capacity)
+        var step = 0
 
-        for i in 0..bucket.len():
-            if bucket[i].hash == hash and bucket[i].key == key:
-                val value = bucket[i].value
-                val last_idx = bucket.len() - 1
-                if i != last_idx:
-                    bucket[i] = bucket[last_idx]
-                bucket.pop()
-                self.buckets[idx] = bucket
+        while step < self.capacity:
+            val s = self.states[slot]
+            if s == HM_EMPTY:
+                return None
+            if s == packed and self.slot_keys[slot] == key:
+                val value = self.slot_values[slot]
+                self.states[slot] = HM_TOMBSTONE
+                self.slot_keys[slot] = ""
+                self.slot_values[slot] = ""
                 self.size = self.size - 1
+                self.tombstones = self.tombstones + 1
                 return Some(value)
+            slot = slot + 1
+            if slot >= self.capacity:
+                slot = 0
+            step = step + 1
 
-        nil
+        None
 
     fn keys() -> [text]:
         """Get all keys."""
         var result: [text] = []
-        for bucket in self.buckets:
-            for entry in bucket:
-                result.push(entry.key)
+        val n = self.states.len()
+        var i = 0
+        while i < n:
+            if (self.states[i] & HM_STATE_MASK) == HM_OCCUPIED:
+                result.push(self.slot_keys[i])
+            i = i + 1
         result
 
     fn values() -> [text]:
         """Get all values."""
         var result: [text] = []
-        for bucket in self.buckets:
-            for entry in bucket:
-                result.push(entry.value)
+        val n = self.states.len()
+        var i = 0
+        while i < n:
+            if (self.states[i] & HM_STATE_MASK) == HM_OCCUPIED:
+                result.push(self.slot_values[i])
+            i = i + 1
         result
 
     fn entries() -> [[text]]:
         """Get all entries as [key, value] pairs."""
         var result: [[text]] = []
-        for bucket in self.buckets:
-            for entry in bucket:
-                result.push([entry.key, entry.value])
+        val n = self.states.len()
+        var i = 0
+        while i < n:
+            if (self.states[i] & HM_STATE_MASK) == HM_OCCUPIED:
+                result.push([self.slot_keys[i], self.slot_values[i]])
+            i = i + 1
         result
 
     fn each(f: fn(text, text) -> void):
         """Call f for every key-value pair."""
-        for bucket in self.buckets:
-            for entry in bucket:
-                f(entry.key, entry.value)
+        val n = self.states.len()
+        var i = 0
+        while i < n:
+            if (self.states[i] & HM_STATE_MASK) == HM_OCCUPIED:
+                f(self.slot_keys[i], self.slot_values[i])
+            i = i + 1
 
     fn map_values(f: fn(text) -> text) -> HashMap:
         """Return a new map with the same keys and transformed values."""
-        var result = HashMap.new()
-        for bucket in self.buckets:
-            for entry in bucket:
-                result.insert(entry.key, f(entry.value))
+        var result = if self.size > 0: HashMap.with_capacity(self.size * 2) else: HashMap.new()
+        val n = self.states.len()
+        var i = 0
+        while i < n:
+            if (self.states[i] & HM_STATE_MASK) == HM_OCCUPIED:
+                result.insert(self.slot_keys[i], f(self.slot_values[i]))
+            i = i + 1
         result
 
     fn filter(predicate: fn(text, text) -> bool) -> HashMap:
         """Return a new map containing entries accepted by predicate."""
         var result = HashMap.new()
-        for bucket in self.buckets:
-            for entry in bucket:
-                if predicate(entry.key, entry.value):
-                    result.insert(entry.key, entry.value)
+        val n = self.states.len()
+        var i = 0
+        while i < n:
+            if (self.states[i] & HM_STATE_MASK) == HM_OCCUPIED:
+                val k = self.slot_keys[i]
+                val v = self.slot_values[i]
+                if predicate(k, v):
+                    result.insert(k, v)
+            i = i + 1
         result
 
     me clear():
         """Remove all entries."""
+        val n = self.states.len()
         var i = 0
-        while i < self.capacity:
-            var bucket: [HashMapEntry] = []
-            self.buckets[i] = bucket
+        while i < n:
+            self.states[i] = HM_EMPTY
+            self.slot_keys[i] = ""
+            self.slot_values[i] = ""
             i = i + 1
         self.size = 0
+        self.tombstones = 0
 
     fn len() -> i64:
         """Get number of entries."""
@@ -224,13 +419,9 @@ class HashMap:
 
     fn _bucket_index_hash(hash: i64) -> u64:
         """Compute bucket index from a precomputed hash."""
-        val cap = self.capacity
-        if (cap & (cap - 1)) == 0:
-            (hash & (cap - 1)).to_u64()
-        elif hash < 0:
-            ((0 - hash) % cap).to_u64()
-        else:
-            (hash % cap).to_u64()
+        if self.capacity <= 0:
+            return 0u64
+        hm_slot_for_hash(hash, self.capacity).to_u64()
 
     fn _hash(s: text) -> i64:
         """Hash text using the shared runtime text hash primitive."""
@@ -238,37 +429,47 @@ class HashMap:
 
     me _resize():
         """Double capacity and rehash."""
-        val new_capacity = self.capacity * 2
-        var new_buckets: [[HashMapEntry]] = []
+        val next_cap = if self.capacity <= 0: 16 else: self.capacity * 2
+        self._rebuild(next_cap)
+
+    me _rebuild(new_capacity: i64):
+        var new_states: [i64] = []
+        var new_keys: [text] = []
+        var new_values: [text] = []
         var i = 0
         while i < new_capacity:
-            var bucket: [HashMapEntry] = []
-            new_buckets.push(bucket)
+            new_states.push(HM_EMPTY)
+            new_keys.push("")
+            new_values.push("")
             i = i + 1
 
-        # Rehash all entries
-        for bucket in self.buckets:
-            for entry in bucket:
-                val idx = entry.hash & (new_capacity - 1)
-                var target_bucket = new_buckets[idx]
-                target_bucket.push(entry)
-                new_buckets[idx] = target_bucket
+        val old_len = self.states.len()
+        var j = 0
+        while j < old_len:
+            val s = self.states[j]
+            if (s & HM_STATE_MASK) == HM_OCCUPIED:
+                val k = self.slot_keys[j]
+                val v = self.slot_values[j]
+                val hash = hash_text(k)
+                var slot = hm_slot_for_hash(hash, new_capacity)
+                while new_states[slot] != HM_EMPTY:
+                    slot = slot + 1
+                    if slot >= new_capacity:
+                        slot = 0
+                new_states[slot] = s
+                new_keys[slot] = k
+                new_values[slot] = v
+            j = j + 1
 
-        self.buckets = new_buckets
+        self.states = new_states
+        self.slot_keys = new_keys
+        self.slot_values = new_values
         self.capacity = new_capacity
+        self.tombstones = 0
 
-# Build an empty HashMap whose bucket array is preallocated to the given capacity.
+# Build an empty HashMap whose slot storage is reserved to the given capacity.
 fn hashmap_with_capacity(capacity: i64) -> HashMap:
-    """Create a HashMap with preallocated buckets."""
-    var actual_capacity = capacity
-    if actual_capacity < 1:
-        actual_capacity = 1
-    var buckets: [[HashMapEntry]] = []
-    var i = 0
-    while i < actual_capacity:
-        var bucket: [HashMapEntry] = []
-        buckets.push(bucket)
-        i = i + 1
-    HashMap(buckets: buckets, size: 0, capacity: actual_capacity)
+    """Create a HashMap with reserved capacity."""
+    HashMap.with_capacity(capacity)
 
 export hashmap_with_capacity
