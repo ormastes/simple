@@ -928,6 +928,23 @@ case "${SIMPLE_STAGE3_MISSION_CRITICAL:-}" in
   1) stage3_mc_env="SIMPLE_SAFETY_PROFILE=critical SIMPLE_ASSURANCE_WARNING_PHASE=1" ;;
   *) echo "error: SIMPLE_STAGE3_MISSION_CRITICAL must be unset or exactly 1" >&2; exit 1 ;;
 esac
+# Build-start memory reserve (#8931). The env -i child never saw a caller
+# SIMPLE_BUILD_MEMORY_RESERVE_BYTES (HOME is sandboxed and no hostname is
+# passed, so host-config layers are absent too), so a Hyper-V dynamic-memory
+# guest refused every Stage 3 start against the 24 GiB default. Same contract as
+# the Stage 2 sanity pass-through (bootstrap-from-scratch.sh): absence is
+# preserved, a malformed value is refused. Carried in the mc_env slot, so it is
+# hashed into the args receipt and reconstructed by manifest-verify.shs. The
+# compiler treats it as non-identity (native_build_environment_identity.spl).
+if [ "${SIMPLE_BUILD_MEMORY_RESERVE_BYTES+x}" = x ]; then
+  case "$SIMPLE_BUILD_MEMORY_RESERVE_BYTES" in
+    ''|0*|*[!0-9]*|???????????????????*)
+      echo "error: SIMPLE_BUILD_MEMORY_RESERVE_BYTES must be a positive integer of at most 18 digits" >&2; exit 1 ;;
+  esac
+  [ "$SIMPLE_BUILD_MEMORY_RESERVE_BYTES" -ge 1024 ] || {
+    echo "error: SIMPLE_BUILD_MEMORY_RESERVE_BYTES must be at least 1024" >&2; exit 1; }
+  stage3_mc_env="${stage3_mc_env:+$stage3_mc_env }SIMPLE_BUILD_MEMORY_RESERVE_BYTES=$SIMPLE_BUILD_MEMORY_RESERVE_BYTES"
+fi
 # One-time SCV compile-event-journal cold init for the Stage 3 recompile.
 # OPT-IN, same shape as stage3_mc_env above.  The compiler's own admission
 # (src/app/compiler_entrypoint/inventory_events.spl:207) fails closed on a
