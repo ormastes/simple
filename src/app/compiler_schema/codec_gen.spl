@@ -611,7 +611,7 @@ fn bare_placeholder_literal_v1(u: CodecUniverse, type_text: text, depth: i64) ->
     if s.cat == "prim_char":
         return "0 as char"
     if s.cat == "opt":
-        return "nil"
+        return "None"
     if s.cat == "list" or s.cat == "pair":
         return "[]"
     if s.cat == "dict":
@@ -679,19 +679,22 @@ fn _field_is_bare(u: CodecUniverse, decl: CodecDecl, f: FieldDecl) -> bool:
 fn _placeholder_helper_name(type_name: text) -> text:
     "hc_placeholder_" + _codec_snake(type_name)
 
+fn _dec_or_placeholder_helper_name(type_name: text) -> text:
+    "hc_dec_or_placeholder_" + _codec_snake(type_name)
+
 fn _bare_field_placeholder_expr(u: CodecUniverse, decl_type: text) -> text:
-    """The expression that initialises a bare field local: the literal for the
-    legacy types and enums, a once-emitted helper call for other structs, or ""."""
+    """The expression that initialises a bare field local: a once-emitted helper
+    call for structs and payload-only enums, the literal for unit enums, or ""."""
     val lit = bare_placeholder_literal_v1(u, decl_type, 0)
     if lit == "":
         return ""
-    if bare_node_placeholder_v1(decl_type) == "" and (u.is_struct(decl_type) or (u.is_enum(decl_type) and lit.contains("("))):
+    if u.is_struct(decl_type) or (u.is_enum(decl_type) and lit.contains("(")):
         return _placeholder_helper_name(decl_type) + "()"
     lit
 
 fn _bare_field_helper_types(u: CodecUniverse, order: [text]) -> [text]:
-    """Struct types that some declaration reads into a bare field local (in
-    first-use order), i.e. exactly those _bare_field_placeholder_expr names."""
+    """Struct/payload-enum types that some declaration reads into a bare field
+    local (in first-use order), i.e. those _bare_field_placeholder_expr names."""
     var out: [text] = []
     for name in order:
         val decl = u.decl_of(name)
@@ -706,18 +709,64 @@ fn _bare_field_helper_types(u: CodecUniverse, order: [text]) -> [text]:
                     field_types.push(f.type_text)
         for ft in field_types:
             val shape = u.classify(ft)
-            val dt = _strip_default(ft).trim()
+            val dt = shape.name
             if shape.cat == "node" and (u.is_struct(dt) or u.is_enum(dt)) and not _contains(out, dt):
                 if _bare_field_placeholder_expr(u, dt) == _placeholder_helper_name(dt) + "()":
                     out.push(dt)
     out
 
-fn _emit_placeholder_helpers(u: CodecUniverse, order: [text]) -> text:
-    var out = ""
-    for dt in _bare_field_helper_types(u, order):
-        out = out + "fn " + _placeholder_helper_name(dt) + "() -> " + dt + ":\n"
-        out = out + "    " + bare_placeholder_literal_v1(u, dt, 0) + "\n\n"
+fn _emit_default_file_helpers() -> text:
+    var out = "var _hc_enc_default_file: text = \"\"\n"
+    out = out + "var _hc_dec_default_file: text = \"\"\n\n"
+    out = out + "fn _hc_module_default_file(node: HirModule) -> text:\n"
+    out = out + "    val p: text? = node.path\n"
+    out = out + "    if not p.?:\n"
+    out = out + "        return \"\"\n"
+    out = out + "    p!\n\n"
+    out = out + "fn _hc_enc_span_file(w: HirCodecWriter, v: text):\n"
+    out = out + "    val opt_v: text? = v\n"
+    out = out + "    if not opt_v.?:\n"
+    out = out + "        w.put_nil_text_wire()\n"
+    out = out + "        return\n"
+    out = out + "    val s = opt_v!\n"
+    out = out + "    if _hc_enc_default_file != \"\":\n"
+    out = out + "        if s == _hc_enc_default_file:\n"
+    out = out + "            w.put_text(\"@\")\n"
+    out = out + "            return\n"
+    out = out + "        if s.starts_with(\"@\"):\n"
+    out = out + "            w.put_text(\"@\" + s)\n"
+    out = out + "            return\n"
+    out = out + "    w.put_text(s)\n\n"
+    out = out + "fn _hc_dec_span_file(raw: text) -> text:\n"
+    out = out + "    if raw == \"\\\\N\":\n"
+    out = out + "        return \"\"\n"
+    out = out + "    val unescaped = flat_pool_unescape(raw)\n"
+    out = out + "    if _hc_dec_default_file != \"\":\n"
+    out = out + "        if unescaped == \"@\":\n"
+    out = out + "            return _hc_dec_default_file\n"
+    out = out + "        if unescaped.starts_with(\"@@\"):\n"
+    out = out + "            return unescaped.substring(1, unescaped.byte_len())\n"
+    out = out + "    unescaped\n\n"
     out
+
+fn _emit_placeholder_helpers(u: CodecUniverse, order: [text]) -> text:
+    val helper_types = _bare_field_helper_types(u, order)
+    var out = ""
+    for dt in helper_types:
+        if bare_node_placeholder_v1(dt) == "":
+            out = out + "fn " + _placeholder_helper_name(dt) + "() -> " + dt + ":\n"
+            out = out + "    " + bare_placeholder_literal_v1(u, dt, 0) + "\n\n"
+    for dt in helper_types:
+        if bare_node_placeholder_v1(dt) != "":
+            out = out + "fn " + _placeholder_helper_name(dt) + "() -> " + dt + ":\n"
+            out = out + "    " + bare_placeholder_literal_v1(u, dt, 0) + "\n\n"
+    for dt in helper_types:
+        if u.is_struct(dt):
+            out = out + "fn " + _dec_or_placeholder_helper_name(dt) + "(r: FlatPoolReader) -> " + dt + ":\n"
+            out = out + "    if r.next_i64() == 1:\n"
+            out = out + "        return " + dec_fn_name(dt) + "(r)\n"
+            out = out + "    " + _placeholder_helper_name(dt) + "()\n\n"
+    out + _emit_default_file_helpers()
 
 fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: EmitCounter,
         required_node: bool = false, bare_field: bool = false) -> text:
@@ -750,6 +799,8 @@ fn _emit_dec(u: CodecUniverse, type_text: text, target: text, indent: text, c: E
     if s.cat == "prim_f64":
         return indent + "val " + target + " = hc_read_f64(r)\n"
     if s.cat == "node" or s.cat == "opaque":
+        if bare_field and not required_node and s.cat == "node" and u.is_struct(s.name) and bare_placeholder_literal_v1(u, s.name, 0) != "":
+            return indent + "val " + target + ": " + decl_type + " = " + _dec_or_placeholder_helper_name(s.name) + "(r)\n"
         val callee = if s.cat == "node": dec_fn_name(s.name) else: "hc_dec_opaque_" + _codec_snake(s.name)
         # Bug (selfhost_hir_cache_encode_hir_type_segv_2026-08-22): the
         # if-EXPRESSION form unifies both arms at `T?`, so the taken arm is
@@ -979,6 +1030,8 @@ fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
             body.push("        w.put_i64(0)\n")
             body.push("    else:\n")
             body.push(_emit_enc(u, f.type_text, "node." + f.binder, "        ", c, required_function_entry))
+        elif decl.name == "Span" and f.binder == "file":
+            body.push("    _hc_enc_span_file(w, node.file)\n")
         else:
             # A non-optional i64/bool field refuses nil at ENCODE time, matching
             # the decoder's nil_in_non_optional_scalar guard (bug
@@ -990,6 +1043,8 @@ fn _emit_enc_decl(u: CodecUniverse, decl: CodecDecl) -> text:
                 body.push("    w.put_bool_field(node." + f.binder + ", \"" + decl.name + "." + f.binder + "\")\n")
             else:
                 body.push(_emit_enc(u, f.type_text, "node." + f.binder, "    ", c, required_function_entry))
+                if decl.name == "HirModule" and f.binder == "path":
+                    body.push("    _hc_enc_default_file = _hc_module_default_file(node)\n")
     if body.len() == 0:
         body.push("    val _leaf = 0\n")
     parts.join("") + body.join("")
@@ -1059,13 +1114,25 @@ fn _emit_dec_decl(u: CodecUniverse, decl: CodecDecl) -> text:
         if decoded.contains("return nil") or decoded.contains("hc_restore_enum_nil("):
             parts[0] = "fn " + dec_fn_name(decl.name) + "(r: FlatPoolReader) -> " + decl.name + "?:\n"
         return parts.join("")
+    if decl.name == "HirModule":
+        parts.push("    val prev_default_file = _hc_dec_default_file\n")
+        parts.push("    _hc_dec_default_file = \"\"\n")
     var names: [text] = []
     for f in decl.fields:
         val required_function_entry = decl.name == "HirModule" and f.binder == "functions"
-        parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "    ", c, required_function_entry, _field_is_bare(u, decl, f)))
-        parts.push(_emit_nil_scalar_reject(u, f.type_text, "f_" + f.binder, "    ", "raw{c.n - 1}",
-            decl.name + "." + f.binder))
+        if decl.name == "Span" and f.binder == "file":
+            val k0 = c.next()
+            parts.push("    val raw{k0} = r.next()\n")
+            parts.push("    val f_file = _hc_dec_span_file(raw{k0})\n")
+        else:
+            parts.push(_emit_dec(u, f.type_text, "f_" + f.binder, "    ", c, required_function_entry, _field_is_bare(u, decl, f)))
+            parts.push(_emit_nil_scalar_reject(u, f.type_text, "f_" + f.binder, "    ", "raw{c.n - 1}",
+                decl.name + "." + f.binder))
+            if decl.name == "HirModule" and f.binder == "path":
+                parts.push("    _hc_dec_default_file = f_path\n")
         names.push(f.binder + ": f_" + f.binder)
+    if decl.name == "HirModule":
+        parts.push("    _hc_dec_default_file = prev_default_file\n")
     parts.push("    " + decl.name + "(" + _join(names, ", ") + ")\n")
     parts.join("")
 
@@ -1105,10 +1172,16 @@ pub fn guard_codec_encoder_v1(body: text) -> text:
     val name = signature.substring(3, split)
     val private_name = "_" + name + "_body"
     var out: [text] = [signature,
-        "    if not w.enter_node(): return",
-        "    " + private_name + "(w, node)",
-        "    w.leave_node()", "",
-        "fn " + private_name + signature.substring(split)]
+        "    if not w.enter_node(): return"]
+    if name == "hc_enc_hir_module":
+        out.push("    val prev_default_file = _hc_enc_default_file")
+        out.push("    _hc_enc_default_file = \"\"")
+    out.push("    " + private_name + "(w, node)")
+    if name == "hc_enc_hir_module":
+        out.push("    _hc_enc_default_file = prev_default_file")
+    out.push("    w.leave_node()")
+    out.push("")
+    out.push("fn " + private_name + signature.substring(split))
     var i = 1
     while i < lines.len():
         val line = lines[i]

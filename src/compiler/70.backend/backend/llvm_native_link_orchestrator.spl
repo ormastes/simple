@@ -36,8 +36,9 @@ use compiler.backend.verify.allocator_symbol_scan.{flight_allocator_scan_for_pro
 # Match runtime_compiler and the native linker: use runtime-owned host facts.
 # The std.platform facade can bind an OS/OSTYPE-based detector in a bootstrap
 # capsule; canonical sanity intentionally scrubs those environment variables.
-use std.nogc_sync_mut.io_runtime.{host_arch, host_os, env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256_or_shell, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
-use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.nogc_sync_mut.io_runtime.{host_arch, host_os, env_get, file_copy, file_delete, file_exists, file_read, file_rename, file_write, file_hash_sha256_or_shell, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_list_or_empty, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_modified_time}
+use std.nogc_sync_mut.io.time_ops.{time_now_seconds}
 use compiler.backend.llvm_native_link_stage4_projection.{llvm_link_trace_enabled, llvm_configured_external_link_objects, llvm_external_provider_rpath_flags, llvm_external_provider_retained_symbols, llvm_stage4_final_requested_symbols, llvm_stage4_file_hash_rows, llvm_stage4_selected_archive_hash_rows, llvm_stage4_cleanup_candidate_inputs, llvm_stage4_profile_failure, llvm_stage4_receipt_failure, llvm_stage4_candidate_archive_inventory, llvm_stage4_project_selected_archives}
 use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_owner_mark_known_v1,
@@ -117,6 +118,8 @@ fn _llvm_path_leaf(path: text) -> text:
     parts[parts.len() - 1]
 
 fn _llvm_darwin_link_input_snapshot_dir(snapshot_root: text, index: i64, digest: text) -> text:
+    if index < 0:
+        return snapshot_root + "/" + digest + ".d"
     snapshot_root + "/" + index.to_text() + "-" + digest + ".d"
 
 pub fn llvm_darwin_link_input_snapshot_path(
@@ -127,9 +130,39 @@ pub fn llvm_darwin_link_input_snapshot_path(
     Link-line gates such as native_all_input_present (native_all_support.spl)
     key on the basename; a bare `<idx>-<digest>` leaf silently dropped every
     Darwin support library/framework libsimple_native_all.a needs
-    (CoreFoundation, Security, -lz, -lc++). The `.d` directory keeps the digest
-    keying and cannot collide with a flat snapshot left in an older cache."""
+    (CoreFoundation, Security, -lz, -lc++). Keying by `<digest>.d/<leaf>`
+    (index < 0) avoids re-copying all 1,600 `.o` files when module indices shift."""
     _llvm_darwin_link_input_snapshot_dir(snapshot_root, index, digest) + "/" + _llvm_path_leaf(input)
+
+fn _llvm_darwin_prune_unreferenced_snapshots(
+    snapshot_root: text, referenced_dirs: {text: bool}, min_age_s: i64
+):
+    val young_after = if min_age_s > 0: time_now_seconds() - min_age_s else: 0
+    for entry in dir_list_or_empty(snapshot_root):
+        if entry == "" or entry == "." or entry == "..":
+            continue
+        val leaf = _llvm_path_leaf(entry)
+        if not leaf.ends_with(".d") or referenced_dirs.contains_key(leaf):
+            continue
+        val dir_path = snapshot_root + "/" + leaf
+        if min_age_s > 0:
+            var newest_mtime = file_modified_time(dir_path)
+            for sub in dir_list_or_empty(dir_path):
+                if sub == "" or sub == "." or sub == "..":
+                    continue
+                val sub_mtime = file_modified_time(dir_path + "/" + _llvm_path_leaf(sub))
+                if sub_mtime > newest_mtime:
+                    newest_mtime = sub_mtime
+            if newest_mtime <= 0 or newest_mtime > young_after:
+                continue
+        val _rm = dir_remove_all(dir_path)
+
+fn _llvm_darwin_snapshot_min_age_s() -> i64:
+    val raw = (env_get("SIMPLE_DARWIN_SNAPSHOT_MIN_AGE_S") ?? "").trim()
+    if raw == "":
+        return 1800
+    val parsed = raw.to_i64() ?? 1800
+    if parsed >= 0: parsed else: 1800
 
 fn _llvm_darwin_snapshot_link_inputs(
     inputs: [text], cache_root: text
@@ -138,24 +171,36 @@ fn _llvm_darwin_snapshot_link_inputs(
     if not dir_create_all(snapshot_root):
         return Err("darwin-link-input-snapshot-directory-failed")
     var snapshots: [text] = []
-    var index: i64 = 0
+    var referenced_dirs: {text: bool} = {}
     for input in inputs:
         if not file_exists(input): return Err("darwin-link-input-missing:" + input)
+        val input_size = file_size_raw(input)
         val digest = file_hash_sha256_or_shell(input)
         if digest.len() != 64: return Err("darwin-link-input-digest-failed:" + input)
-        val snapshot = llvm_darwin_link_input_snapshot_path(snapshot_root, index, digest, input)
-        val snapshot_dir = _llvm_darwin_link_input_snapshot_dir(snapshot_root, index, digest)
+        val dir_name = digest + ".d"
+        referenced_dirs[dir_name] = true
+        val snapshot = llvm_darwin_link_input_snapshot_path(snapshot_root, -1, digest, input)
+        val snapshot_dir = _llvm_darwin_link_input_snapshot_dir(snapshot_root, -1, digest)
         if not dir_create_all(snapshot_dir):
             return Err("darwin-link-input-snapshot-directory-failed:" + snapshot_dir)
-        if file_exists(snapshot):
-            if file_hash_sha256_or_shell(snapshot) != digest:
-                return Err("darwin-link-input-snapshot-corrupt:" + snapshot)
-        elif not file_copy(input, snapshot) or file_hash_sha256_or_shell(snapshot) != digest:
-            return Err("darwin-link-input-snapshot-copy-failed:" + input)
+        val snapshot_ready = file_exists(snapshot) and
+            input_size >= 0 and file_size_raw(snapshot) == input_size
+        if not snapshot_ready:
+            val tmp_path = "{snapshot}.tmp.{getpid()}"
+            val _del_tmp = file_delete(tmp_path)
+            if not file_copy(input, tmp_path) or (input_size >= 0 and file_size_raw(tmp_path) != input_size):
+                val _rm_tmp = file_delete(tmp_path)
+                return Err("darwin-link-input-snapshot-copy-failed:" + input)
+            if not file_rename(tmp_path, snapshot):
+                val _rm_tmp = file_delete(tmp_path)
+                if not file_exists(snapshot) or (input_size >= 0 and file_size_raw(snapshot) != input_size):
+                    return Err("darwin-link-input-snapshot-copy-failed:" + input)
+        val _touch = file_write(snapshot_dir + "/.last-use", "")
         snapshots.push(snapshot)
-        index = index + 1
     if snapshots.len() != inputs.len():
         return Err("darwin-link-input-snapshot-count-mismatch")
+    _llvm_darwin_prune_unreferenced_snapshots(
+        snapshot_root, referenced_dirs, _llvm_darwin_snapshot_min_age_s())
     Ok(snapshots)
 
 pub fn orchestrator_link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptions) -> Result<text, text>:

@@ -937,7 +937,7 @@ fn _cs_launch_owned_worktree(d: CsDashboard, agent_id: text, spec_shown: text,
         executable: exe, argv: args, repo_root: repo_root, worktree_path: worktree_path,
         worktree_owned: true, attempt_dir: cs_container_session_store_root_v1(d.session) + "/containers/" + name,
         stderr_path: stderr_path, pane_id: "", pid: -1, instance: cs_container_instance(),
-        network: "", env: [], state: "running", exit_code: -1)
+        network: "", mounts: [], env: [], state: "running", exit_code: -1)
     val runner = cs_container_write_runner_v1(rec, [exe] + args)
     if runner.is_err() or not cs_container_record_save_v1(rec):
         val _rm = cs_worktree_remove_owned_v1(repo_root, worktree_path)
@@ -1170,17 +1170,25 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
     if head == "pane:kill":
         # Reconcile BEFORE killing the pane so already-crashed containers keep
         # their worktree while intentionally killed running agents clean up.
+        val live_before_kill = _live_pane_ids_for(d.session)
         var already_crashed = false
-        for rec in cs_container_reconcile_v1(d.session, _live_pane_ids_for(d.session)):
+        for rec in cs_container_reconcile_v1(d.session, live_before_kill):
             if (rec.agent_id == words[1] or rec.name == words[1]) and rec.state == "crashed":
                 already_crashed = true
         val killed = pane_kill(d.session, words[2])
+        val live_after_kill = _live_pane_ids_for(d.session)
+        val pane_still_live = not killed and live_after_kill.contains(words[2])
         # Closing the pane only ends the engine CLIENT; the container outlives
         # it. Reap whether or not the pane kill succeeded — but only a
         # container this process launched, verified by its instance label.
         var container_note = ""
-        val (lc_cleaned, lc_note) = cs_container_close_record_v1(d.session, words[1],
-            (if already_crashed: _live_pane_ids_for(d.session) else: []), not already_crashed)
+        var lc_cleaned = false
+        var lc_note = ""
+        if not pane_still_live:
+            val close_res = cs_container_close_record_v1(d.session, words[1],
+                (if already_crashed: live_after_kill else: []), not already_crashed)
+            lc_cleaned = close_res.0
+            lc_note = close_res.1
         if lc_note != "":
             container_note = "; " + lc_note
         elif cs_container_launched(d.session, words[1]):

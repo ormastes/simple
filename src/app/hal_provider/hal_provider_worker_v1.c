@@ -124,15 +124,22 @@ static int i64_field(const unsigned char *p, size_t n, size_t *at,
     return 1;
 }
 
+/* Parses `count` '|'-separated u64 fields; the last one is newline-terminated. */
+static int parse_u64_fields(const unsigned char *p, size_t n, size_t *at,
+                            uint64_t *field, int count) {
+    int i;
+    for (i = 0; i < count; ++i)
+        if (!u64_field(p, n, at, &field[i], i == count - 1)) return 0;
+    for (i = 0; i < count; ++i)
+        if (field[i] > INT64_MAX) return 0;
+    return 1;
+}
+
 static int parse_request(const unsigned char *p, size_t n, HalRequestV1 *r) {
     uint64_t *field = &r->contract;
     size_t at = 8;
-    int i;
     if (!prefix(p, n, "HALREQ1|", 8)) return 0;
-    for (i = 0; i < HAL_REQUEST_FIELDS_V1; ++i)
-        if (!u64_field(p, n, &at, &field[i], i == 7)) return 0;
-    for (i = 0; i < HAL_REQUEST_FIELDS_V1; ++i)
-        if (field[i] > INT64_MAX) return 0;
+    if (!parse_u64_fields(p, n, &at, field, HAL_REQUEST_FIELDS_V1)) return 0;
     return at == n && r->contract == 1 && r->operation > 0 &&
         r->invocation > 0 && r->fixture > 0 && r->trace_capacity > 0 &&
         r->input_length <= r->input_capacity &&
@@ -144,12 +151,8 @@ static int parse_request(const unsigned char *p, size_t n, HalRequestV1 *r) {
 static int parse_request_v2(const unsigned char *p, size_t n, HalRequestV2 *r) {
     uint64_t *field = &r->contract;
     size_t at = 8;
-    int i;
     if (!prefix(p, n, "HALREQ2|", 8)) return 0;
-    for (i = 0; i < HAL_REQUEST_FIELDS_V2; ++i)
-        if (!u64_field(p, n, &at, &field[i], i == 10)) return 0;
-    for (i = 0; i < HAL_REQUEST_FIELDS_V2; ++i)
-        if (field[i] > INT64_MAX) return 0;
+    if (!parse_u64_fields(p, n, &at, field, HAL_REQUEST_FIELDS_V2)) return 0;
     return at == n && r->contract == 2 && r->operation > 0 &&
         r->invocation > 0 && r->fixture > 0 &&
         r->result_capacity >= 8 && r->result_capacity <= 32 &&
@@ -264,9 +267,21 @@ static int append_i64(unsigned char *p, size_t cap, size_t *at, int64_t v) {
     return 1;
 }
 
+/* Writes `tag` then `count` '|'-separated i64 fields, newline after the last. */
+static int write_frame(unsigned char *out, size_t cap, const char *tag,
+                       const int64_t *fields, int count) {
+    size_t at = 0;
+    int i;
+    if (!append_text(out, cap, &at, tag)) return 0;
+    for (i = 0; i < count; ++i) {
+        if (!append_i64(out, cap, &at, fields[i]) || at >= cap) return 0;
+        out[at++] = i == count - 1 ? '\n' : '|';
+    }
+    return write_all(out, at);
+}
+
 static int result(const HalRequestV1 *r) {
     unsigned char out[HAL_FRAME_CAP_V1];
-    size_t at = 0;
     int64_t digest = (int64_t)hash_request(r, UINT64_C(1469598103934665603));
     int64_t trace = (int64_t)hash_request(r, UINT64_C(7809847782465536322));
     int64_t fields[16] = {
@@ -277,19 +292,11 @@ static int result(const HalRequestV1 *r) {
         1, (int64_t)r->trace_capacity, 0, -1, 0,
         HAL_REQUEST_FIELDS_V1 * 8
     };
-    int i;
-    if (!append_text(out, sizeof(out), &at, "HALRES1|")) return 0;
-    for (i = 0; i < 16; ++i) {
-        if (!append_i64(out, sizeof(out), &at, fields[i]) || at >= sizeof(out))
-            return 0;
-        out[at++] = i == 15 ? '\n' : '|';
-    }
-    return write_all(out, at);
+    return write_frame(out, sizeof(out), "HALRES1|", fields, 16);
 }
 
 static int result_v2(const HalRequestV2 *r) {
     unsigned char out[HAL_FRAME_CAP_V1];
-    size_t at = 0;
     int64_t fields[19] = {
         HAL_PROVIDER_KIND, (int64_t)r->invocation, 0, 0, 0, 0,
         1, (int64_t)r->captured_scalar, 8, (int64_t)r->result_capacity,
@@ -298,19 +305,11 @@ static int result_v2(const HalRequestV2 *r) {
         (int64_t)r->trace_capacity, 0, -1, 0,
         HAL_REQUEST_FIELDS_V2 * 8
     };
-    int i;
-    if (!append_text(out, sizeof(out), &at, "HALRES2|")) return 0;
-    for (i = 0; i < 19; ++i) {
-        if (!append_i64(out, sizeof(out), &at, fields[i]) || at >= sizeof(out))
-            return 0;
-        out[at++] = i == 18 ? '\n' : '|';
-    }
-    return write_all(out, at);
+    return write_frame(out, sizeof(out), "HALRES2|", fields, 19);
 }
 
 static int bytes_result_v2(const HalBytesRequestV2 *r) {
     unsigned char out[HAL_FRAME_CAP_V1];
-    size_t at = 0;
     int64_t fields[23] = {
         HAL_PROVIDER_KIND, (int64_t)r->invocation, (int64_t)r->status,
         (int64_t)r->error_domain, (int64_t)r->error_code,
@@ -322,14 +321,7 @@ static int bytes_result_v2(const HalBytesRequestV2 *r) {
         (int64_t)r->trace_capacity, 0, -1, 0,
         HAL_REQUEST_BYTES_FIELDS_V2 * 8
     };
-    int i;
-    if (!append_text(out, sizeof(out), &at, "HALRES2B|")) return 0;
-    for (i = 0; i < 23; ++i) {
-        if (!append_i64(out, sizeof(out), &at, fields[i]) || at >= sizeof(out))
-            return 0;
-        out[at++] = i == 22 ? '\n' : '|';
-    }
-    return write_all(out, at);
+    return write_frame(out, sizeof(out), "HALRES2B|", fields, 23);
 }
 
 static int dispatch_request(const unsigned char *line, size_t n,
@@ -352,15 +344,10 @@ static int dispatch_request(const unsigned char *line, size_t n,
 
 static int reset_ok(const uint64_t reset[3]) {
     unsigned char out[96];
-    size_t at = 0;
+    int64_t fields[3];
     int i;
-    if (!append_text(out, sizeof(out), &at, "HALRESETOK1|")) return 0;
-    for (i = 0; i < 3; ++i) {
-        if (!append_i64(out, sizeof(out), &at, (int64_t)reset[i]) ||
-            at >= sizeof(out)) return 0;
-        out[at++] = i == 2 ? '\n' : '|';
-    }
-    return write_all(out, at);
+    for (i = 0; i < 3; ++i) fields[i] = (int64_t)reset[i];
+    return write_frame(out, sizeof(out), "HALRESETOK1|", fields, 3);
 }
 
 int main(int argc, char **argv) {

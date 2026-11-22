@@ -10,6 +10,7 @@
 use os.kernel.hal.arch_context.{Architecture}
 use os.kernel.loader.zstd_decompress.{zstd_decompress}
 use os.kernel.loader.cpio_newc.{CpioEntry, cpio_parse_bounded}
+use os.port.initramfs_validate.{InitramfsRoleGateV1, initramfs_role_gate_v1, simple_toolchain_role_paths}
 use os.kernel.loader.app_registry.{app_registry_fat32_alias, app_registry_root_alias, app_registry_canonical_from_bytes}
 use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
 use common.string_core.{str_char_at}
@@ -51,6 +52,8 @@ var g_initramfs_blob: [u8]? = None
 # Cached parsed cpio entries — populated on first lookup from a real blob.
 var g_cpio_entries: [CpioEntry] = []
 var g_cpio_decoded: bool = false
+# True only after initramfs_role_gate_v1 verified the archive's role manifest.
+var g_toolchain_roles_verified: bool = false
 
 fn _desktop_app_short_alias(path: text) -> text?:
     """Return the FAT32 short-name alias for desktop app binaries via registry."""
@@ -95,6 +98,7 @@ fn set_initramfs_blob(blob: [u8]):
     # Reset cache so it is re-decoded from the new blob on next lookup.
     g_cpio_decoded = false
     g_cpio_entries = []
+    g_toolchain_roles_verified = false
 
 fn _lookup_synthetic(path: text) -> Result<[u8], text>:
     for entry in g_synthetic_entries:
@@ -150,11 +154,31 @@ fn _initramfs_read_file_bytes_or_empty(path: text) -> [u8]:
             g_cpio_entries = []
             g_cpio_decoded = true
             return []
+        # Role/digest gate: an archive whose toolchain manifest does not bind
+        # every role path to its exact archived bytes is refused entirely.
+        match initramfs_role_gate_v1(parsed.unwrap()):
+            case Ok(InitramfsRoleGateV1.ToolchainVerified):
+                g_toolchain_roles_verified = true
+            case Ok(InitramfsRoleGateV1.NoToolchainManifest):
+                g_toolchain_roles_verified = false
+            case Err(reason):
+                log_raw_println("[exec-source] initramfs role-gate-fail reason={reason}")
+                g_cpio_entries = []
+                g_cpio_decoded = true
+                return []
         g_cpio_entries = parsed.unwrap()
         g_cpio_decoded = true
 
+    # Archive entries are stored relative ("sbin/init"); callers pass absolute
+    # guest paths ("/sbin/init").
+    val wanted = if path.starts_with("/"): path.slice(1, path.len()) else: path
+    if not g_toolchain_roles_verified:
+        for role_path in simple_toolchain_role_paths():
+            if role_path == path or role_path == "/" + wanted:
+                log_raw_println("[exec-source] initramfs unverified-role path={path}")
+                return []
     for entry in g_cpio_entries:
-        if entry.path == path:
+        if entry.path == wanted:
             log_raw_println("[exec-source] initramfs hit path={path}")
             return entry.data
     log_raw_println("[exec-source] initramfs miss path={path}")

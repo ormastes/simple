@@ -17,7 +17,7 @@ Two defects, one spec.
 
 Contract:
 - a scope published AFTER a first (empty) read is still observed — no latch;
-- `cache_dir_max_bytes()` defaults to 4 GiB and honours `SIMPLE_CACHE_MAX_BYTES`;
+- `cache_dir_max_bytes()` defaults to 512 MiB and honours `SIMPLE_CACHE_MAX_BYTES`;
 - eviction under the cap is a no-op;
 - eviction over the cap removes least-recently-modified entries until under it;
 - `*.tmp` in-flight stores and entries inside the grace window are NEVER
@@ -39,8 +39,10 @@ use std.nogc_sync_mut.io_runtime.{
 }
 use compiler.frontend.cache_dir_evict.{
     CACHE_DEFAULT_MAX_BYTES, CACHE_EVICT_SWEEP_INTERVAL,
+    CacheTreeEvictRequestV1,
     _CacheDirEvictPlan,
-    cache_dir_max_bytes, cache_dir_evict_due, cache_dir_evict_to_cap
+    cache_dir_max_bytes, cache_dir_evict_due, cache_dir_evict_to_cap,
+    cache_dir_evict_tree_to_cap_v1, _cache_dir_evict_to_cap_at
 }
 use compiler.frontend.frontend_parse_cache.{
     frontend_parse_cache_enabled,
@@ -80,9 +82,10 @@ describe("cache dir default + eviction", fn():
         val _clean = file_delete(SCRATCH + "/" + key + ".fpc")
     )
 
-    it("defaults the cap to 4 GiB and honours SIMPLE_CACHE_MAX_BYTES", fn():
+    it("defaults the cap to 512 MiB and honours SIMPLE_CACHE_MAX_BYTES", fn():
         val _c = env_set("SIMPLE_CACHE_MAX_BYTES", "")
-        assert_equal(cache_dir_max_bytes(), CACHE_DEFAULT_MAX_BYTES, "default cap is 4 GiB")
+        assert_equal(CACHE_DEFAULT_MAX_BYTES, 536870912, "default constant is 512 MiB")
+        assert_equal(cache_dir_max_bytes(), CACHE_DEFAULT_MAX_BYTES, "default cap is 512 MiB")
         val _s = env_set("SIMPLE_CACHE_MAX_BYTES", "12345")
         assert_equal(cache_dir_max_bytes(), 12345, "env override wins")
         val _r = env_set("SIMPLE_CACHE_MAX_BYTES", "")
@@ -174,5 +177,40 @@ describe("cache dir default + eviction", fn():
         assert_equal(plan.total_bytes(), 20, "a confirmed unlink subtracts its exact size")
         assert_equal(plan.removed_count(), 1, "only confirmed unlinks are counted")
         assert_false(plan.over_cap(20), "equality with the cap terminates eviction")
+    )
+
+    it("unlinks .spab.seal sidecar with evicted .spab and reaps aged orphan .seal in flat cache", fn():
+        val flat_dir = SCRATCH + "/flat-spab"
+        val _d = dir_create_all(flat_dir)
+        val _w1 = file_write_exact(flat_dir + "/victim.spab", "012345678901234567890123456789")
+        val _w2 = file_write_exact(flat_dir + "/victim.spab.seal", "0123456789")
+        val _w3 = file_write_exact(flat_dir + "/orphan.spab.seal", "0123456789")
+        # Future clock past grace window (now + 1 hour ~ year 2100 epoch bound safe)
+        val removed = _cache_dir_evict_to_cap_at(flat_dir, ".spab", 10, 4102444800)
+        assert_equal(removed, 1, "evicts primary .spab entry")
+        assert_false(file_exists(flat_dir + "/victim.spab"), "evicted .spab removed")
+        assert_false(file_exists(flat_dir + "/victim.spab.seal"), "evicted .spab.seal sidecar removed")
+        assert_false(file_exists(flat_dir + "/orphan.spab.seal"), "aged orphan .spab.seal reaped")
+    )
+
+    it("evicts .spab + .seal sidecar and reaps aged orphan .seal across sharded subdirectories", fn():
+        val tree_dir = SCRATCH + "/tree-spab/artifacts/v1/sha256"
+        val _da = dir_create_all(tree_dir + "/aa")
+        val _db = dir_create_all(tree_dir + "/bb")
+        val _w1 = file_write_exact(tree_dir + "/aa/first.spab", "012345678901234567890123456789")
+        val _w2 = file_write_exact(tree_dir + "/aa/first.spab.seal", "0123456789")
+        val _w3 = file_write_exact(tree_dir + "/bb/orphan.spab.seal", "0123456789")
+        val _w4 = file_write_exact(tree_dir + "/bb/inflight.spab.tmp", "0123456789")
+        val summary = cache_dir_evict_tree_to_cap_v1(CacheTreeEvictRequestV1(
+            root_dir: SCRATCH + "/tree-spab",
+            suffix: ".spab",
+            max_bytes: 5,
+            now_override_secs: 4102444800))
+        assert_equal(summary.removed, 1, "evicts sharded .spab entry")
+        assert_equal(summary.remaining_bytes, 0, "accounts both .spab and .seal bytes")
+        assert_false(file_exists(tree_dir + "/aa/first.spab"), "sharded .spab removed")
+        assert_false(file_exists(tree_dir + "/aa/first.spab.seal"), "sharded .spab.seal sidecar removed")
+        assert_false(file_exists(tree_dir + "/bb/orphan.spab.seal"), "sharded orphan .spab.seal reaped")
+        assert_true(file_exists(tree_dir + "/bb/inflight.spab.tmp"), "in-flight .tmp never touched")
     )
 )

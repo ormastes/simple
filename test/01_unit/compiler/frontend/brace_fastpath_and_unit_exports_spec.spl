@@ -1,0 +1,212 @@
+# Purpose and audience: executable specification evidence for pure-Simple frontend brace fast-paths and explicit module exports.
+# @req REQ-COMPILER-FRONTEND-001
+
+use std.spec.{describe, it, expect, step}
+use std.common.types.{Capacity, Length, ByteSize, Offset}
+use std.common.net.host_name.{HostName, HostIdentity, host_name_parse, host_identity_parse}
+use std.string_core.{char_from_code, char_code, str_trim, str_repeat, text_to_bytes, bytes_to_text}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module, flat_bridge_decode_brace_escapes}
+use compiler.frontend.core.ast.{DECL_FN, DECL_STRUCT, DECL_ENUM, ast_reset, decl_export_names, module_get_decls}
+use compiler.frontend.core.ast_expr.{EXPR_INT_LIT, EXPR_STRING_LIT, expr_count, expr_get_str}
+use compiler.frontend.core.string_interpolation_expand.{
+    parse_string_interpolation_regions,
+    decode_interpolation_brace_escapes,
+    interp_brace_warnings_reset,
+    interp_brace_warning_count
+}
+use compiler.frontend.core.interpreter.module_loader_lazy.{_scan_source, _scan_ok, _scan_decl_names}
+use compiler.frontend.core.interpreter.module_loader_core.{record_module_surface, warn_unprovided_use_names}
+use compiler.frontend.core.interpreter.eval.{eval_warnings}
+use compiler.frontend.core.interpreter.mod.{core_interpret}
+use compiler.frontend.core.interpreter.value.{val_get_int}
+use compiler.common.cache_contract.canonical_cache_codec_v1.{
+    canonical_cache_encode_envelope_v1,
+    canonical_cache_decode_envelope_v1
+}
+use compiler.driver.smf.runtime_std_native_action_budget_v2.{RuntimeStdNativeActionBudgetV2}
+use compiler.driver.cache.runtime_std_authority_receipt.{
+    RUNTIME_STD_AUTHORITY_ACTION_SCHEMA_V2,
+    RuntimeStdAuthorityReceiptV1,
+    RuntimeStdAuthorityReceiptV2,
+    runtime_std_authority_receipt_encode_v2,
+    runtime_std_authority_receipt_decode_v2
+}
+
+val LB = char_from_code(123)
+val RB = char_from_code(125)
+val LL = LB + LB
+val RR = RB + RB
+val BS = char_from_code(92)
+
+describe "string_interpolation_expand and flat_ast_bridge brace fast-path":
+    # @manual scenario evidence
+    it "preserves single-brace literal text on the fast path while decoding doubled braces":
+        # @req REQ-COMPILER-FRONTEND-001
+        step("Verify single-brace strings return verbatim and doubled-brace escapes decode to single braces")
+        val single_open = "prefix " + LB + " suffix"
+        val single_close = "prefix " + RB + " suffix"
+        val backslash_braces = "sql" + BS + LB + " SELECT 1 " + RB
+        expect(decode_interpolation_brace_escapes(single_open)).to_equal(single_open)
+        expect(decode_interpolation_brace_escapes(single_close)).to_equal(single_close)
+        expect(decode_interpolation_brace_escapes(backslash_braces)).to_equal(backslash_braces)
+        expect(flat_bridge_decode_brace_escapes(single_open)).to_equal(single_open)
+        expect(flat_bridge_decode_brace_escapes(single_close)).to_equal(single_close)
+
+        val doubled = "json:" + LL + "\"ok\":true" + RR
+        val expected_decoded = "json:" + LB + "\"ok\":true" + RB
+        expect(decode_interpolation_brace_escapes(doubled)).to_equal(expected_decoded)
+        expect(flat_bridge_decode_brace_escapes(doubled)).to_equal(expected_decoded)
+
+    it "keeps fast-path guards checking two consecutive braces in source":
+        # @req REQ-COMPILER-FRONTEND-001
+        step("Verify fast-path contains checks spell four braces so lexing retains two braces")
+        val expand_src = file_read_text("src/compiler/10.frontend/core/string_interpolation_expand.spl")
+        val bridge_src = file_read_text("src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl")
+        val four_open = LL + LL
+        val four_close = RR + RR
+        expect(expand_src.contains("value.contains(\"" + four_open + "\")")).to_equal(true)
+        expect(expand_src.contains("value.contains(\"" + four_close + "\")")).to_equal(true)
+        expect(bridge_src.contains("str_regions_val.contains(\"" + four_open + "\")")).to_equal(true)
+        expect(bridge_src.contains("str_regions_val.contains(\"" + four_close + "\")")).to_equal(true)
+
+    it "parses escaped braces without emitting W-STR-BRACE-001":
+        # @req REQ-COMPILER-FRONTEND-001
+        step("Verify parse_string_interpolation_regions emits zero brace warnings on doubled braces")
+        val warmed = parse_and_build_module("fn warm_fastpath_probe() -> i64:\n    7\n", "warm_fastpath_probe.spl")
+        expect(warmed.functions.contains("warm_fastpath_probe")).to_equal(true)
+        interp_brace_warnings_reset()
+        val (rewritten, parts) = parse_string_interpolation_regions(LL + "literal" + RR)
+        expect(parts.len()).to_equal(0)
+        expect(decode_interpolation_brace_escapes(rewritten)).to_equal(LB + "literal" + RB)
+        expect(interp_brace_warning_count()).to_equal(0)
+
+describe "unit exports and lazy outline unit recognition":
+    # @manual scenario evidence
+    it "imports Capacity, Length, and HostName cleanly and scans unit declarations":
+        # @req REQ-COMPILER-FRONTEND-001
+        step("Verify std.common.types and std.common.net.host_name unit types construct and validate")
+        val cap = Capacity(64)
+        val len = Length(12)
+        val bytes = ByteSize(256)
+        val off = Offset(4)
+        expect(cap).to_equal(Capacity(64))
+        expect(len).to_equal(Length(12))
+        expect(bytes).to_equal(ByteSize(256))
+        expect(off).to_equal(Offset(4))
+
+        val parsed_host = host_name_parse("Example.ORG")
+        expect(parsed_host.is_ok()).to_equal(true)
+        expect(parsed_host.unwrap()).to_equal(HostName("example.org"))
+        expect(host_identity_parse("127.0.0.1").is_ok()).to_equal(true)
+
+        step("Verify module_loader_lazy outline scanner accepts unit and pub unit declarations")
+        _scan_source("unit Capacity: i64\npub unit HostName: text\nfn probe_fn() -> i64:\n    1\n")
+        expect(_scan_ok).to_equal(1)
+        expect(_scan_decl_names.contains("Capacity")).to_equal(true)
+        expect(_scan_decl_names.contains("HostName")).to_equal(true)
+        expect(_scan_decl_names.contains("probe_fn")).to_equal(true)
+
+describe "explicit facade exports and record_module_surface braced re-exports":
+    # @manual scenario evidence
+    it "provides full facade symbol surfaces without star re-exports":
+        # @req REQ-COMPILER-FRONTEND-001
+        step("Verify imported constants and functions from all four facades execute")
+        expect(DECL_FN != DECL_STRUCT).to_equal(true)
+        expect(DECL_STRUCT != DECL_ENUM).to_equal(true)
+        expect(EXPR_INT_LIT != EXPR_STRING_LIT).to_equal(true)
+        expect(module_get_decls().len() >= 0).to_equal(true)
+        expect(expr_count() >= 0).to_equal(true)
+        expect(char_code("A")).to_equal(65)
+        expect(str_trim("  hi  ")).to_equal("hi")
+        expect(str_repeat("ab", 3)).to_equal("ababab")
+        expect(bytes_to_text(text_to_bytes("ok"))).to_equal("ok")
+        val expr_probe = expr_get_str(0)
+        expect(expr_probe.len() >= 0).to_equal(true)
+
+        step("Verify none of the four facade files use wildcard export use and private string_core helpers stay unexported")
+        val facades = [
+            "src/lib/string_core.spl",
+            "src/compiler/10.frontend/flat_ast_bridge.spl",
+            "src/compiler/10.frontend/core/ast.spl",
+            "src/compiler/10.frontend/core/ast_expr.spl"
+        ]
+        for path in facades:
+            val content = file_read_text(path)
+            expect(content.contains("export use ")).to_equal(true)
+            expect(content.contains(".*")).to_equal(false)
+            expect(content.contains("@allow(visibility_boundary)")).to_equal(true)
+        val string_facade = file_read_text("src/lib/string_core.spl")
+        expect(string_facade.contains("str_byte_find")).to_equal(false)
+        expect(string_facade.contains("_utf8_char_from_codepoint_inline")).to_equal(false)
+
+    it "records bare trailing identifiers for module-qualified braced export use items":
+        # @req REQ-COMPILER-FRONTEND-001
+        step("Record DECL_EXPORT with M.alpha and M.beta:beta_alias and verify bare imports emit zero warnings")
+        ast_reset()
+        val export_did = decl_export_names(["sub.mod.alpha", "sub.mod.beta:beta_alias"], 0)
+        val surface_path = "spec/probe/braced_reexport_facade.spl"
+        record_module_surface(surface_path, [export_did])
+        val before_count = eval_warnings.len()
+        warn_unprovided_use_names("probe.facade", surface_path, ["alpha", "beta_alias"], "importer_probe.spl")
+        expect(eval_warnings.len() - before_count).to_equal(0)
+        warn_unprovided_use_names("probe.facade", surface_path, ["missing_symbol"], "importer_probe.spl")
+        expect(eval_warnings.len() - before_count).to_equal(1)
+
+describe "cache codec and receipt explicit slice loops across interpreters":
+    # @manual scenario evidence
+    it "round-trips canonical cache envelopes, v2 authority receipts, and explicit copy loops in core_interpret":
+        # @req REQ-COMPILER-FRONTEND-001
+        step("Round-trip canonical cache envelope payload copy")
+        val payload = text_to_bytes("pure-simple-envelope-payload")
+        val encoded_env = canonical_cache_encode_envelope_v1(1, 1, payload)
+        val decoded_env = canonical_cache_decode_envelope_v1(encoded_env)
+        expect(decoded_env.ok).to_equal(true)
+        if val env_val = decoded_env.value:
+            expect(bytes_to_text(env_val.payload)).to_equal("pure-simple-envelope-payload")
+        else:
+            expect(false).to_equal(true)
+
+        step("Round-trip RuntimeStdAuthorityReceiptV2 14-line header copy")
+        val digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val base_v1 = RuntimeStdAuthorityReceiptV1(
+            compiler_digest: digest,
+            action_abi_digest: digest,
+            runtime_abi_digest: digest,
+            std_abi_digest: digest,
+            config_digest: digest,
+            target_triple: "aarch64-apple-darwin",
+            snapshot_revision: "rev-1",
+            runtime_action_digest: digest,
+            std_action_digest: digest,
+            runtime_archive_digest: digest,
+            std_archive_digest: digest,
+            runtime_receipt_digest: digest,
+            std_receipt_digest: digest
+        )
+        val v2 = RuntimeStdAuthorityReceiptV2(
+            base: base_v1,
+            budget: RuntimeStdNativeActionBudgetV2(
+                manager_request_digest: digest,
+                enforced_process_limit_bytes: 536870912
+            ),
+            action_schema: RUNTIME_STD_AUTHORITY_ACTION_SCHEMA_V2
+        )
+        val encoded_v2 = runtime_std_authority_receipt_encode_v2(v2)
+        val decoded_v2 = runtime_std_authority_receipt_decode_v2(encoded_v2)
+        expect(decoded_v2.is_ok()).to_equal(true)
+        expect(decoded_v2.unwrap().budget.enforced_process_limit_bytes).to_equal(536870912)
+
+        step("Execute explicit element copy in pure-Simple core_interpret without range-index failure")
+        val loop_src = "fn copy_sum() -> i64:\n" +
+            "    val values = [10, 20, 30, 40, 50]\n" +
+            "    var copied: [i64] = []\n" +
+            "    var idx = 1\n" +
+            "    while idx < 4:\n" +
+            "        copied.push(values[idx])\n" +
+            "        idx = idx + 1\n" +
+            "    copied[0] + copied[1] + copied[2]\n" +
+            "copy_sum()\n"
+        val result_vid = core_interpret(loop_src, "explicit_copy_probe.spl")
+        expect(result_vid >= 0).to_equal(true)
+        expect(val_get_int(result_vid)).to_equal(90)

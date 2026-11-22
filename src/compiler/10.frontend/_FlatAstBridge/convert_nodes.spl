@@ -851,7 +851,7 @@ fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpol
     while i < n:
         val ch = value[i:i + 1]
         val ch_next = if i + 1 < n: value[i + 1:i + 2] else: ""
-        if depth == 0 and ch == "{" and ch_next == "{":
+        if depth == 0 and ch == "{{" and ch_next == "{{":
             # `{{` escape (Python f-string / Rust format! parity; doc
             # interp_brace_literal_collides_with_string_interpolation): a
             # literal `{` written doubled so it is never mistaken for the
@@ -860,10 +860,10 @@ fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpol
             # doubled-brace skip so the literal-segment positions stay
             # aligned with this function's interps list.
             i = i + 1
-        elif depth == 0 and ch == "}" and ch_next == "}":
+        elif depth == 0 and ch == "}}" and ch_next == "}}":
             # `}}` escape, mirror of `{{` above.
             i = i + 1
-        elif depth == 0 and ch == "{":
+        elif depth == 0 and ch == "{{":
             depth = 1
             region_start = i
             # span.start is a BYTE offset (a converted Span) and i a code-point
@@ -874,9 +874,9 @@ fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpol
             if span.line > 0:
                 region_line = span.line
                 region_col = span.col + 1 + i + 1
-        elif depth > 0 and ch == "{":
+        elif depth > 0 and ch == "{{":
             depth = depth + 1
-        elif depth > 0 and ch == "}":
+        elif depth > 0 and ch == "}}":
             depth = depth - 1
             if depth == 0:
                 # Slice the region from its source bounds instead of retaining
@@ -931,16 +931,16 @@ fn flat_bridge_decode_brace_escapes(value: text) -> text:
     while i < n:
         val ch = value[i:i + 1]
         val ch_next = if i + 1 < n: value[i + 1:i + 2] else: ""
-        if ch == "{" and ch_next == "{":
+        if ch == "{{" and ch_next == "{{":
             if run_start < i:
                 parts.push(value[run_start:i])
-            parts.push("{")
+            parts.push("{{")
             i = i + 2
             run_start = i
-        elif ch == "}" and ch_next == "}":
+        elif ch == "}}" and ch_next == "}}":
             if run_start < i:
                 parts.push(value[run_start:i])
-            parts.push("}")
+            parts.push("}}")
             i = i + 2
             run_start = i
         else:
@@ -980,7 +980,7 @@ fn convert_flat_expr(idx: i64) -> Expr:
             return Expr(kind: ExprKind.StringLit(str_val, None), span: span)
         # Ordinary literals dominate this path. Avoid interpolation parsing and
         # brace-decoder allocation when no brace can affect either operation.
-        if not str_val.contains("{") and not str_val.contains("}"):
+        if not str_val.contains("{{") and not str_val.contains("}}"):
             return Expr(kind: ExprKind.StringLit(str_val, None), span: span)
         val (str_regions_val, str_interps) = flat_bridge_build_string_regions(str_val, span)
         if str_interps.len() > 0:
@@ -991,7 +991,9 @@ fn convert_flat_expr(idx: i64) -> Expr:
             # flat_bridge_decode_brace_escapes).
             # Rejected regions have already been literalized in str_regions_val.
             # Decode that representation so nested literal closers survive.
-            if not str_regions_val.contains("{{") and not str_regions_val.contains("}}"):
+            # Each '{{' / '}}' in a double-quoted literal decodes to one brace,
+            # so spell two consecutive braces as "{{{{" / "}}}}".
+            if not str_regions_val.contains("{{{{") and not str_regions_val.contains("}}}}"):
                 return Expr(kind: ExprKind.StringLit(str_regions_val, None), span: span)
             return Expr(kind: ExprKind.StringLit(flat_bridge_decode_brace_escapes(str_regions_val), None), span: span)
     if tag == EXPR_BOOL_LIT:

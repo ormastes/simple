@@ -465,6 +465,9 @@ class NLLChecker:
     initial_loans: [LoanAlias]
     loan_boundaries: Dict<i64, i64>
     loan_parents: Dict<i64, [LoanParent]>
+    loans_possible: bool = true
+    fast_skip_zero_moves: bool = false
+    has_move_recorded: bool = false
 
     static fn create(cfg: ControlFlowGraph) -> NLLChecker:
         NLLChecker(
@@ -475,7 +478,10 @@ class NLLChecker:
             ownership_flow: OwnershipFlow.create(),
             loan_events: {}, point_uses: {}, point_defs: {},
             initial_loans: [], loan_boundaries: {}, loan_parents: {},
-            errors: []
+            errors: [],
+            loans_possible: true,
+            fast_skip_zero_moves: false,
+            has_move_recorded: false
         )
 
     me check() -> bool:
@@ -483,34 +489,40 @@ class NLLChecker:
 
         Returns true if no errors.
         """
-        # Moves use real edges, including loop backedges. The recorder must not
-        # mutate BorrowGraph.moved_now: that source-order state conflates arms.
-        var points: Dict<i64, [i64]> = {}
-        var successors: Dict<i64, [i64]> = {}
-        for id in self.cfg.blocks.keys():
-            val block = self.cfg.blocks[id]
-            var block_points: [i64] = []
-            for point in block.statements:
-                block_points = block_points.push(point)
-            points[id] = block_points.push(block.terminator_point)
-            successors[id] = block.successors
-        val flow_errors: [OwnershipFlowError] = self.ownership_flow.check(self.cfg.entry, points, successors,
-            self.ownership_flow.work_budget(points, successors))
-        for flow_error in flow_errors:
-            val err: OwnershipFlowError = flow_error
-            self.errors = self.errors.push(NLLError(
-                message: err.message,
-                has_primary_span: true,
-                primary_span: err.point,
-                secondary_spans: [],
-                has_help: false,
-                help: ""
-            ))
+        val need_ownership = not (self.fast_skip_zero_moves and not self.has_move_recorded)
+        val need_loans = not (self.borrow_graph.loan_definitions.is_empty() and self.initial_loans.is_empty() and self.loan_events.is_empty())
+        if need_ownership or need_loans:
+            # Moves use real edges, including loop backedges. The recorder must not
+            # mutate BorrowGraph.moved_now: that source-order state conflates arms.
+            var points: Dict<i64, [i64]> = {}
+            var successors: Dict<i64, [i64]> = {}
+            for id in self.cfg.blocks.keys():
+                val block = self.cfg.blocks[id]
+                var block_points: [i64] = []
+                for point in block.statements:
+                    block_points = block_points.push(point)
+                points[id] = block_points.push(block.terminator_point)
+                successors[id] = block.successors
+            var flow_clean = true
+            if need_ownership:
+                val flow_errors: [OwnershipFlowError] = self.ownership_flow.check(self.cfg.entry, points, successors,
+                    self.ownership_flow.work_budget(points, successors))
+                flow_clean = flow_errors.is_empty()
+                for flow_error in flow_errors:
+                    val err: OwnershipFlowError = flow_error
+                    self.errors = self.errors.push(NLLError(
+                        message: err.message,
+                        has_primary_span: true,
+                        primary_span: err.point,
+                        secondary_spans: [],
+                        has_help: false,
+                        help: ""
+                    ))
 
-        # Loans have their own CFG fixpoint and point liveness. Ownership's
-        # maybe-moved lattice is independent of reference provenance.
-        if flow_errors.is_empty():
-            self.solve_loans(points)
+            # Loans have their own CFG fixpoint and point liveness. Ownership's
+            # maybe-moved lattice is independent of reference provenance.
+            if flow_clean and need_loans:
+                self.solve_loans(points)
 
         # Step 3: Run lifetime inference
         if not self.lifetime_inference.infer():
@@ -662,12 +674,17 @@ class NLLChecker:
     me record_use(point: i64, place: Place):
         """Record use of a place."""
         self.ownership_flow.record(point, OwnershipEvent.Read(place))
+        if not self.loans_possible:
+            return
         self.record_live_use(point, place)
         self.record_loan_event(point, LoanEvent.Use(place, false))
 
     me record_move(point: i64, place: Place):
         """Record move of a place."""
+        self.has_move_recorded = true
         self.ownership_flow.record(point, OwnershipEvent.Move(place))
+        if not self.loans_possible:
+            return
         self.record_live_use(point, place)
         self.record_loan_event(point, LoanEvent.Use(place, true))
 
@@ -678,6 +695,8 @@ class NLLChecker:
         re-initialized local is usable again (see BorrowGraph.record_assign).
         """
         self.ownership_flow.record(point, OwnershipEvent.Revive(place))
+        if not self.loans_possible:
+            return
         self.record_live_def(point, place)
         self.record_loan_event(point, LoanEvent.Assign(place))
 
@@ -687,6 +706,8 @@ class NLLChecker:
         self.loan_events[point] = events.push(event)
 
     me record_live_use(point: i64, place: Place):
+        if not self.loans_possible:
+            return
         match place.base:
             case PlaceBase.Local(local):
                 var uses: [i64] = self.point_uses[point] ?? []
@@ -702,6 +723,8 @@ class NLLChecker:
                 case _: ()
 
     me record_live_def(point: i64, place: Place):
+        if not self.loans_possible:
+            return
         if place.projections.len() != 0: return
         match place.base:
             case PlaceBase.Local(local):
@@ -711,15 +734,21 @@ class NLLChecker:
             case _: ()
 
     me record_loan_copy(point: i64, source: Place, destination: Place):
+        if not self.loans_possible:
+            return
         self.record_live_use(point, source)
         self.record_live_def(point, destination)
         self.record_loan_event(point, LoanEvent.Copy(source, destination))
 
     me record_loan_escape(point: i64, source: Place, reason: text):
+        if not self.loans_possible:
+            return
         self.record_live_use(point, source)
         self.record_loan_event(point, LoanEvent.Escape(source, reason))
 
     me record_suspend(point: i64, reason: text):
+        if not self.loans_possible:
+            return
         self.record_loan_event(point, LoanEvent.Suspend(reason))
 
     me loan_failure(point: i64, message: text):
@@ -816,6 +845,22 @@ class NLLChecker:
                 if not mapped:
                     self.loan_failure(point, "loan event has no CFG point")
                     return
+        # Fast-skip backward variable liveness and loan-alias fixed-point
+        # allocation when the function creates zero loans (no Ref instructions
+        # and no short_borrow parameters). Active loan state is [] everywhere;
+        # only explicit ShortCall contracts on reachable points need checking.
+        if self.borrow_graph.loan_definitions.is_empty() and self.initial_loans.is_empty():
+            if not self.loan_events.is_empty():
+                for block_id in reachable:
+                    for point in points[block_id]:
+                        if self.loan_events.contains_key(point):
+                            for event in self.loan_events[point]:
+                                match event:
+                                    case LoanEvent.ShortCall(arguments, modes):
+                                        self.check_short_call(point, arguments, modes, [])
+                                    case _:
+                                        pass
+            return
         var point_uses: Dict<i64, [i64]> = {}
         var point_defs: Dict<i64, [i64]> = {}
         var block_gen: Dict<i64, [i64]> = {}

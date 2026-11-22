@@ -29,24 +29,24 @@ describe "HIR codec generation: bare locals for non-optional struct and enum fie
     it "REPRO: FunctionAttr.optimization_req and HirFunction.func_attr decode into bare locals":
         val generated = emit_codec_file(CodecUniverse.load(cwd()))
         val attr = body_of(generated, "hc_dec_function_attr")
-        expect(attr).to_contain("    var f_optimization_req: OptimizationReq = ")
-        expect(attr.contains("var f_optimization_req: OptimizationReq? = nil")).to_be(false)
+        expect(attr).to_contain("    val f_optimization_req: OptimizationReq = hc_dec_or_placeholder_optimization_req(r)\n")
+        expect(attr.contains("var f_optimization_req: OptimizationReq?")).to_be(false)
         val func = body_of(generated, "hc_dec_hir_function")
-        expect(func).to_contain("    var f_func_attr: FunctionAttr = ")
-        expect(func.contains("var f_func_attr: FunctionAttr? = nil")).to_be(false)
+        expect(func).to_contain("    val f_func_attr: FunctionAttr = hc_dec_or_placeholder_function_attr(r)\n")
+        expect(func.contains("var f_func_attr: FunctionAttr?")).to_be(false)
 
     it "sibling: HirFunction export_attr, driver_manifest_attr, vhdl_metadata, body and visibility are bare":
         val func = body_of(emit_codec_file(CodecUniverse.load(cwd())), "hc_dec_hir_function")
-        expect(func).to_contain("    var f_body: HirBlock = ")
+        expect(func).to_contain("    val f_body: HirBlock = hc_dec_or_placeholder_hir_block(r)\n")
         expect(func).to_contain("    var f_visibility: Visibility = Visibility.Public\n")
-        expect(func.contains("var f_body: HirBlock? = nil")).to_be(false)
-        expect(func.contains("var f_visibility: Visibility? = nil")).to_be(false)
+        expect(func.contains("var f_body: HirBlock?")).to_be(false)
+        expect(func.contains("var f_visibility: Visibility?")).to_be(false)
 
     it "sibling: OptimizationReq.level and .backend are bare enum locals":
         val req = body_of(emit_codec_file(CodecUniverse.load(cwd())), "hc_dec_optimization_req")
         expect(req).to_contain("    var f_level: OptimizationReqLevel = OptimizationReqLevel.None_\n")
         expect(req).to_contain("    var f_backend: OptimizationBackend = OptimizationBackend.Unknown\n")
-        expect(req.contains("? = nil")).to_be(false)
+        expect(req.contains("? = None")).to_be(false)
 
     it "prevention: opt-inner, list, pair and dict targets keep their optional local":
         val generated = emit_codec_file(CodecUniverse.load(cwd()))
@@ -56,15 +56,16 @@ describe "HIR codec generation: bare locals for non-optional struct and enum fie
             if t.starts_with("var ov") or t.starts_with("var ev") or t.starts_with("var dv") or t.starts_with("var dk") or t.starts_with("var pa") or t.starts_with("var pb"):
                 checked = checked + 1
                 expect(t.contains("hc_placeholder_")).to_be(false)
+                expect(t.contains("hc_dec_or_placeholder_")).to_be(false)
                 expect(t.contains("= SymbolId(id: -1)")).to_be(false)
                 expect(t.contains("= HirType(kind:")).to_be(false)
-                expect(t.contains("= nil") or t.contains("= []") or t.contains("= {}")).to_be(true)
+                expect(t.contains("= None") or t.contains("= []") or t.contains("= {}")).to_be(true)
         expect(checked).to_be_greater_than(10)
 
     it "prevention: a field DECLARED optional keeps its nil local":
         val generated = emit_codec_file(CodecUniverse.load(cwd()))
-        expect(generated).to_contain("var f_section: text? = nil")
-        expect(count_of(generated, "var f_type_: HirType? = nil")).to_equal(2)
+        expect(generated).to_contain("var f_section: text? = None")
+        expect(count_of(generated, "var f_type_: HirType? = None")).to_equal(2)
 
     it "prevention: a non-optional text field decodes absent to the empty string, never nil":
         val attr = body_of(emit_codec_file(CodecUniverse.load(cwd())), "hc_dec_function_attr")
@@ -75,8 +76,10 @@ describe "HIR codec generation: bare locals for non-optional struct and enum fie
         val generated = emit_codec_file(CodecUniverse.load(cwd()))
         expect(count_of(generated, "fn hc_placeholder_function_attr() -> FunctionAttr:")).to_equal(1)
         expect(count_of(generated, "fn hc_placeholder_hir_block() -> HirBlock:")).to_equal(1)
-        expect(generated.contains(": FunctionAttr = nil")).to_be(false)
-        expect(generated.contains(": OptimizationReq = nil")).to_be(false)
+        expect(count_of(generated, "fn hc_dec_or_placeholder_function_attr(r: FlatPoolReader) -> FunctionAttr:")).to_equal(1)
+        expect(count_of(generated, "fn hc_dec_or_placeholder_hir_block(r: FlatPoolReader) -> HirBlock:")).to_equal(1)
+        expect(generated.contains(": FunctionAttr = None")).to_be(false)
+        expect(generated.contains(": OptimizationReq = None")).to_be(false)
 
     it "coverage: the synthesizer on primitives, containers and the three legacy literals":
         val u = CodecUniverse.load(cwd())
@@ -85,7 +88,7 @@ describe "HIR codec generation: bare locals for non-optional struct and enum fie
         expect(bare_placeholder_literal_v1(u, "text", 0)).to_equal("\"\"")
         expect(bare_placeholder_literal_v1(u, "f64", 0)).to_equal("0.0")
         expect(bare_placeholder_literal_v1(u, "char", 0)).to_equal("0 as char")
-        expect(bare_placeholder_literal_v1(u, "HirType?", 0)).to_equal("nil")
+        expect(bare_placeholder_literal_v1(u, "HirType?", 0)).to_equal("None")
         expect(bare_placeholder_literal_v1(u, "[HirType]", 0)).to_equal("[]")
         expect(bare_placeholder_literal_v1(u, "[(i64, text)]", 0)).to_equal("[]")
         for legacy in ["HirType", "SymbolId", "Span"]:
@@ -97,7 +100,7 @@ describe "HIR codec generation: bare locals for non-optional struct and enum fie
         expect(bare_placeholder_literal_v1(u, "Visibility", 0)).to_equal("Visibility.Public")
         val attr = bare_placeholder_literal_v1(u, "FunctionAttr", 0)
         expect(attr).to_start_with("FunctionAttr(is_entry: false, is_naked: false")
-        expect(attr).to_contain("section: nil")
+        expect(attr).to_contain("section: None")
         expect(attr).to_contain("gpu_target: \"\"")
         expect(attr).to_contain("optimization_req: OptimizationReq(level: OptimizationReqLevel.None_, backend: OptimizationBackend.Unknown)")
         expect(attr).to_contain("placement_error: \"\"")
@@ -128,18 +131,18 @@ describe "HIR codec generation: presence-flagged fields keep absence":
     # placeholder and an absent placeholder still re-encodes as absent.
     it "REPRO: HirFunction export_attr, driver_manifest_attr and vhdl_metadata decode into bare locals":
         val func = body_of(emit_codec_file(CodecUniverse.load(cwd())), "hc_dec_hir_function")
-        expect(func.contains("var f_export_attr: ExportAttr? = nil")).to_be(false)
-        expect(func.contains("var f_driver_manifest_attr: DriverManifestAttr? = nil")).to_be(false)
-        expect(func.contains("var f_vhdl_metadata: VhdlHardwareMetadata? = nil")).to_be(false)
-        expect(func).to_contain("    var f_export_attr: ExportAttr = ")
+        expect(func.contains("var f_export_attr: ExportAttr?")).to_be(false)
+        expect(func.contains("var f_driver_manifest_attr: DriverManifestAttr?")).to_be(false)
+        expect(func.contains("var f_vhdl_metadata: VhdlHardwareMetadata?")).to_be(false)
+        expect(func).to_contain("    val f_export_attr: ExportAttr = hc_dec_or_placeholder_export_attr(r)\n")
 
     it "prevention: the encoder gates each flagged payload on its has_* flag":
         val generated = emit_codec_file(CodecUniverse.load(cwd()))
-        expect(generated).to_contain("    if not node.has_export_attr:\n        w.put_i64(0)\n    else:\n        val enc_node_v")
+        expect(generated).to_contain("    if not node.has_export_attr:\n        w.put_i64(0)\n    else:\n        if not w.ok: return\n        val enc_node_v")
         expect(generated).to_contain("    if not node.has_driver_manifest_attr:\n        w.put_i64(0)\n")
         expect(generated).to_contain("    if not node.has_vhdl_metadata:\n        w.put_i64(0)\n")
         expect(generated.contains("if not node.has_type_:")).to_be(false)
 
     it "prevention: HirExpr.type_ stays bare even though has_type_ exists (legacy HirType literal)":
         val generated = emit_codec_file(CodecUniverse.load(cwd()))
-        expect(count_of(generated, "var f_type_: HirType = HirType(kind: HirTypeKind.Error")).to_be_greater_than(5)
+        expect(count_of(generated, "val f_type_: HirType = hc_dec_or_placeholder_hir_type(r)")).to_be_greater_than(5)
