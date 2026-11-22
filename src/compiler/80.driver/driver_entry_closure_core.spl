@@ -139,6 +139,16 @@ var _g_entry_scan_read_count: i64 = 0
 var _g_entry_scan_scan_count: i64 = 0
 var _g_entry_scan_hit_count: i64 = 0
 var _g_source_classification_count: i64 = 0
+var _g_numbered_dir_list_count: i64 = 0
+var _g_live_dir_children_by_parent: Dict<text, [text]> = {}
+var _g_live_dir_exists_by_path: Dict<text, bool> = {}
+var _g_warmed_numbered_roots: Dict<text, bool> = {}
+var _g_entry_physical_key_by_path: Dict<text, text> = {}
+var _g_entry_strict_physical_key_by_path: Dict<text, text> = {}
+var _g_resolved_source_root_import_cache: Dict<text, text> = {}
+var _g_resolved_entry_import_cache: Dict<text, text> = {}
+var _g_last_scv_snapshot_root: text = ""
+var _g_last_resolver_cwd: text = ""
 # Scalar diagnostics only; no source or scratch object escapes the worker.
 var _g_worker_owner_epoch_checks: i64 = 0
 var _g_worker_owner_scopes: i64 = 0
@@ -236,11 +246,42 @@ pub fn driver_closure_timing_report() -> text:
 
 val DRIVER_ENTRY_SCAN_CACHE_MAX_ENTRIES_V1: i64 = 16384
 
+pub struct DriverEntryResolverStatsV1:
+    numbered_dir_lists: i64
+
+pub fn driver_entry_resolver_cache_release_v1():
+    """Release live directory, physical-key, and import-resolution memo tables."""
+    _g_live_dir_children_by_parent = {}
+    _g_live_dir_exists_by_path = {}
+    _g_warmed_numbered_roots = {}
+    _g_entry_physical_key_by_path = {}
+    _g_entry_strict_physical_key_by_path = {}
+    _g_resolved_source_root_import_cache = {}
+    _g_resolved_entry_import_cache = {}
+
+fn _driver_sync_scv_snapshot_cache_v1() -> text:
+    val snap = (sosix_env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "") + ""
+    if snap != _g_last_scv_snapshot_root:
+        driver_entry_resolver_cache_release_v1()
+        _g_last_scv_snapshot_root = snap
+    snap
+
+pub fn driver_entry_sync_resolver_cwd_v1():
+    """Sync working-directory and SCV-snapshot epoch once per scan/closure entrypoint."""
+    val snap = (sosix_env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "") + ""
+    val cur_cwd = ((unsafe(capabilities: [ffi]): rt_path_absolute(".")) ?? "") + ""
+    if snap != _g_last_scv_snapshot_root or (cur_cwd != "" and cur_cwd != _g_last_resolver_cwd):
+        driver_entry_resolver_cache_release_v1()
+        _g_last_scv_snapshot_root = snap
+        _g_last_resolver_cwd = cur_cwd
+
 pub fn driver_entry_scan_cache_release():
     """Release build-local scan payloads while retaining diagnostic counters."""
     _g_entry_scan_content_by_path = {}
     _g_entry_scan_imports_by_path = {}
     _g_entry_scan_siblings_by_path = {}
+    driver_entry_resolver_cache_release_v1()
+    driver_entry_sync_resolver_cwd_v1()
 
 pub fn driver_entry_scan_cache_reset():
     """Start a build with no source payload or counters from a prior build."""
@@ -249,6 +290,10 @@ pub fn driver_entry_scan_cache_reset():
     _g_entry_scan_scan_count = 0
     _g_entry_scan_hit_count = 0
     _g_source_classification_count = 0
+    _g_numbered_dir_list_count = 0
+
+pub fn driver_entry_resolver_stats_v1() -> DriverEntryResolverStatsV1:
+    DriverEntryResolverStatsV1(numbered_dir_lists: _g_numbered_dir_list_count)
 
 fn _entry_scan_reset():
     driver_entry_scan_cache_reset()
@@ -408,21 +453,38 @@ pub fn _driver_canonical_source_path(path: text) -> text:
 
 pub fn _driver_physical_source_key(path: text) -> text:
     """Return the platform-canonical source identity, with lexical fallback."""
-    val resolved = unsafe(capabilities: [ffi]): rt_path_absolute(path)
-    # Documented contract (see docstring): unresolved -> lexical spelling.
-    if resolved == nil:
-        return _driver_canonical_source_path(path)
-    val physical = resolved.unwrap()
-    _driver_canonical_source_path(if physical != "": physical else: path)
+    if path == "":
+        return ""
+    val can_cache = not driver_admitted_epoch_active_v1()
+    if can_cache and transient_array_scope_state_v1() == 0:
+        val _synced = _driver_sync_scv_snapshot_cache_v1()
+    if can_cache and _g_entry_physical_key_by_path.contains_key(path):
+        return _g_entry_physical_key_by_path[path]
+    val physical = (unsafe(capabilities: [ffi]): rt_path_absolute(path)) ?? ""
+    val out = _driver_canonical_source_path(if physical != "": physical else: path)
+    if can_cache and transient_array_scope_state_v1() == 0:
+        if _g_entry_physical_key_by_path.len() >= DRIVER_ENTRY_SCAN_CACHE_MAX_ENTRIES_V1:
+            _g_entry_physical_key_by_path = {}
+        _g_entry_physical_key_by_path[path] = out + ""
+    out
 
 pub fn _driver_physical_source_key_strict_v1(path: text) -> text:
     # Full-inventory authority must not fall back to a lexical spelling when
     # the host cannot resolve a reparse/symlink path.
-    val resolved = unsafe(capabilities: [ffi]): rt_path_absolute(path)
+    if path == "": return ""
+    val can_cache = not driver_admitted_epoch_active_v1()
+    if can_cache and transient_array_scope_state_v1() == 0:
+        val _synced = _driver_sync_scv_snapshot_cache_v1()
+    if can_cache and _g_entry_strict_physical_key_by_path.contains_key(path):
+        return _g_entry_strict_physical_key_by_path[path]
+    val physical = (unsafe(capabilities: [ffi]): rt_path_absolute(path)) ?? ""
     # "" is this fn's documented "unresolved" result (no lexical fallback).
-    if resolved == nil: return ""
-    val physical = resolved.unwrap()
-    if physical == "": "" else: _driver_canonical_source_path(physical)
+    val out = if physical == "": "" else: _driver_canonical_source_path(physical)
+    if can_cache and transient_array_scope_state_v1() == 0:
+        if _g_entry_strict_physical_key_by_path.len() >= DRIVER_ENTRY_SCAN_CACHE_MAX_ENTRIES_V1:
+            _g_entry_strict_physical_key_by_path = {}
+        _g_entry_strict_physical_key_by_path[path] = out + ""
+    out
 
 pub fn _driver_text_bucket_index(key: text, bucket_count: i64) -> i64:
     val raw = hm_hash_text(key) % bucket_count
@@ -1327,16 +1389,97 @@ fn _driver_resolver_observed_file_v1(path: text, observation: DriverEntryResolve
         case DriverEntryResolverObservationV1.Indexed(index):
             index.files.contains_key(path)
 
+fn _driver_has_digit_prefix_dir_v1(entry: text) -> bool:
+    if entry.byte_len() < 3: return false
+    val first = entry.byte_at(0)
+    first >= 48 and first <= 57 and (entry.contains(".") or entry.contains("_"))
+
+# Warm directory listings in persistent scope (state == 0) before opening a
+# per-resolution transient scratch scope so `_driver_resolver_observed_children_v1`
+# answers numbered-directory probes in O(1) without 650k `rt_dir_list` syscalls
+# and without ever storing scratch-owned arrays in a global Dict.
+fn _driver_warm_one_dir_persistent_v1(dir_path: text, depth: i64):
+    if dir_path == "" or transient_array_scope_state_v1() != 0 or driver_admitted_epoch_active_v1():
+        return
+    if _g_live_dir_children_by_parent.contains_key(dir_path):
+        return
+    if _g_live_dir_children_by_parent.len() >= DRIVER_ENTRY_SCAN_CACHE_MAX_ENTRIES_V1:
+        _g_live_dir_children_by_parent = {}
+        _g_live_dir_exists_by_path = {}
+        _g_warmed_numbered_roots = {}
+    val exists = dir_exists(dir_path)
+    if not exists:
+        if _g_last_scv_snapshot_root == "":
+            _g_live_dir_exists_by_path[dir_path] = false
+            _g_live_dir_children_by_parent[dir_path] = []
+        return
+    _g_live_dir_exists_by_path[dir_path] = true
+    _g_numbered_dir_list_count = _g_numbered_dir_list_count + 1
+    val raw_items = (unsafe(capabilities: [ffi]): rt_dir_list(dir_path)) ?? []
+    var owned_entries: [text] = []
+    for item in raw_items:
+        owned_entries = owned_entries.push(item + "")
+    _g_live_dir_children_by_parent[dir_path] = owned_entries
+    if depth < 2:
+        for child in owned_entries:
+            if _driver_has_digit_prefix_dir_v1(child):
+                _driver_warm_one_dir_persistent_v1(dir_path + "/" + child, depth + 1)
+
+fn _driver_warm_numbered_roots_persistent_v1(source_roots: [text], entry_dir: text):
+    if transient_array_scope_state_v1() != 0 or driver_admitted_epoch_active_v1():
+        return
+    val snap = _driver_sync_scv_snapshot_cache_v1()
+    for raw_root in source_roots:
+        if raw_root == "" or raw_root.ends_with(".spl"):
+            continue
+        var norm = raw_root
+        while norm.byte_len() > 1 and norm.ends_with("/"):
+            norm = norm.substring(0, norm.byte_len() - 1)
+        if not _g_warmed_numbered_roots.contains_key(norm):
+            if snap == "" or dir_exists(norm):
+                _g_warmed_numbered_roots[norm] = true
+            _driver_warm_one_dir_persistent_v1(norm, 0)
+            _driver_warm_one_dir_persistent_v1(norm + "/compiler", 0)
+    val prefix = _driver_entry_checkout_prefix_active_v1(entry_dir)
+    val base_key = "@checkout:" + prefix
+    if not _g_warmed_numbered_roots.contains_key(base_key):
+        val src_dir = if prefix == "": "src" else: prefix + "src"
+        val compiler_dir = if prefix == "": "src/compiler" else: prefix + "src/compiler"
+        val test_dir = if prefix == "": "test" else: prefix + "test"
+        if snap == "" or (dir_exists(src_dir) and dir_exists(compiler_dir)):
+            _g_warmed_numbered_roots[base_key] = true
+        _driver_warm_one_dir_persistent_v1(src_dir, 0)
+        _driver_warm_one_dir_persistent_v1(compiler_dir, 0)
+        _driver_warm_one_dir_persistent_v1(test_dir, 0)
+
 fn _driver_resolver_observed_dir_v1(path: text, observation: DriverEntryResolverObservationV1) -> bool:
     match observation:
-        case DriverEntryResolverObservationV1.Live: dir_exists(path)
+        case DriverEntryResolverObservationV1.Live:
+            if not driver_admitted_epoch_active_v1() and _g_live_dir_exists_by_path.contains_key(path):
+                return _g_live_dir_exists_by_path[path]
+            val exists = dir_exists(path)
+            if not driver_admitted_epoch_active_v1() and transient_array_scope_state_v1() == 0 and (exists or _g_last_scv_snapshot_root == ""):
+                if _g_live_dir_exists_by_path.len() < DRIVER_ENTRY_SCAN_CACHE_MAX_ENTRIES_V1:
+                    _g_live_dir_exists_by_path[path + ""] = exists
+            exists
         case DriverEntryResolverObservationV1.Indexed(_): false
 
 fn _driver_resolver_observed_children_v1(path: text,
         observation: DriverEntryResolverObservationV1) -> [text]?:
     match observation:
         case DriverEntryResolverObservationV1.Live:
-            unsafe(capabilities: [ffi]): rt_dir_list(path)
+            if not driver_admitted_epoch_active_v1() and _g_live_dir_children_by_parent.contains_key(path):
+                return Some(_g_live_dir_children_by_parent[path])
+            _g_numbered_dir_list_count = _g_numbered_dir_list_count + 1
+            val listed = unsafe(capabilities: [ffi]): rt_dir_list(path)
+            if not driver_admitted_epoch_active_v1() and transient_array_scope_state_v1() == 0:
+                val items = listed ?? []
+                if dir_exists(path) and _g_live_dir_children_by_parent.len() < DRIVER_ENTRY_SCAN_CACHE_MAX_ENTRIES_V1:
+                    var copy_entries: [text] = []
+                    for item in items:
+                        copy_entries = copy_entries.push(item + "")
+                    _g_live_dir_children_by_parent[path + ""] = copy_entries
+            listed
         case DriverEntryResolverObservationV1.Indexed(_): None
 
 fn _driver_numbered_child_dir_observed_v1(parent: text, segment: text,
@@ -1346,8 +1489,8 @@ fn _driver_numbered_child_dir_observed_v1(parent: text, segment: text,
         return SourceRootResolutionV1.Missing
     var matched = SourceRootResolutionV1.Missing
     val entries_opt = _driver_resolver_observed_children_v1(parent, observation)
-    if entries_opt.is_none(): return SourceRootResolutionV1.Missing
-    for entry in entries_opt.unwrap():
+    val entries = entries_opt ?? []
+    for entry in entries:
         if source_root_numbered_candidate_v1(entry, segment):
             val candidate = parent + "/" + entry
             if _driver_resolver_observed_dir_v1(candidate, observation):
@@ -1903,10 +2046,41 @@ fn _driver_nested_compiler_owner_rel_v1(module_path: text) -> text:
 pub fn _driver_resolve_source_root_entry_import_v1(module_path: text, source_roots: [text]) -> SourceRootResolutionV1:
     _driver_resolve_source_root_entry_import_from_v1(module_path, source_roots, "")
 
+fn _driver_decode_cached_root_resolution_v1(encoded: text) -> SourceRootResolutionV1:
+    if encoded.starts_with("F:"):
+        return SourceRootResolutionV1.Found(encoded.substring(2))
+    if encoded.starts_with("A:"):
+        return SourceRootResolutionV1.Ambiguous(encoded.substring(2))
+    SourceRootResolutionV1.Missing
+
+fn _driver_encode_cached_root_resolution_v1(selected: SourceRootResolutionV1) -> text:
+    match selected:
+        case SourceRootResolutionV1.Found(path): "F:" + path
+        case SourceRootResolutionV1.Ambiguous(reason): "A:" + reason
+        case SourceRootResolutionV1.Missing: "M"
+
 pub fn _driver_resolve_source_root_entry_import_from_v1(module_path: text, source_roots: [text], entry_dir: text) -> SourceRootResolutionV1:
+    if module_path.starts_with("."):
+        return SourceRootResolutionV1.Missing
+    val persistent_outer = transient_array_scope_state_v1() == 0 and not driver_admitted_epoch_active_v1()
+    var cache_key = ""
+    var snap = ""
+    if persistent_outer:
+        snap = _driver_sync_scv_snapshot_cache_v1()
+        _driver_warm_numbered_roots_persistent_v1(source_roots, entry_dir)
+        val prefix = _driver_entry_checkout_prefix_active_v1(entry_dir)
+        cache_key = snap + "\n" + source_roots.join("\t") + "\n" + prefix + "\n" + entry_dir + "\n" + module_path
+        if _g_resolved_source_root_import_cache.contains_key(cache_key):
+            return _driver_decode_cached_root_resolution_v1(_g_resolved_source_root_import_cache[cache_key])
     val owned = _driver_resolver_scratch_begin_v1()
     val selected = _driver_resolve_source_root_entry_import_scratch_v1(module_path, source_roots, entry_dir)
     _driver_resolver_scratch_end_selection_v1(owned, selected)
+    if persistent_outer and owned and transient_array_scope_state_v1() == 0 and cache_key != "":
+        val encoded = _driver_encode_cached_root_resolution_v1(selected)
+        if encoded != "M" or snap == "":
+            if _g_resolved_source_root_import_cache.len() >= DRIVER_ENTRY_SCAN_CACHE_MAX_ENTRIES_V1:
+                _g_resolved_source_root_import_cache = {}
+            _g_resolved_source_root_import_cache[cache_key] = encoded
     selected
 
 fn _driver_resolve_source_root_entry_import_scratch_v1(module_path: text, source_roots: [text], entry_dir: text) -> SourceRootResolutionV1:
@@ -2157,6 +2331,23 @@ fn _driver_alias_content_natively_owns_v1(path: text, content: text, module_name
         if source.module_name == module_name: return true
     false
 
+pub(package) fn driver_file_natively_owns_in_memory_v1(path: text, content: text, module_name: text) -> bool:
+    if not path.ends_with(".spl") or content == "":
+        return false
+    val _platform = host_is_windows_host()
+    if transient_array_scope_state_v1() != 0:
+        return _driver_alias_content_natively_owns_v1(path, content, module_name)
+    var started = false
+    unsafe(capabilities: [ffi]):
+        started = rt_transient_array_scope_begin()
+    if not started: panic("in-memory owner scratch begin failed")
+    val owns = _driver_alias_content_natively_owns_v1(path, content, module_name)
+    var ended = false
+    unsafe(capabilities: [ffi]):
+        ended = rt_transient_array_scope_end()
+    if not ended: panic("in-memory owner scratch end failed")
+    owns
+
 fn _driver_epoch_file_natively_owns_v1(path: text, module_name: text) -> bool:
     if not path.ends_with(".spl"): return false
     val key = _driver_physical_source_key_strict_v1(path)
@@ -2302,6 +2493,16 @@ pub fn _driver_resolve_entry_import(module_path: text, entry_dir: text) -> text:
     out
 
 fn _driver_resolve_entry_import_untimed(module_path: text, entry_dir: text) -> text:
+    val persistent_outer = transient_array_scope_state_v1() == 0 and not driver_admitted_epoch_active_v1()
+    var cache_key = ""
+    var snap = ""
+    if persistent_outer:
+        snap = _driver_sync_scv_snapshot_cache_v1()
+        _driver_warm_numbered_roots_persistent_v1([], entry_dir)
+        val prefix = _driver_entry_checkout_prefix_active_v1(entry_dir)
+        cache_key = snap + "\n" + prefix + "\n" + entry_dir + "\n" + module_path
+        if _g_resolved_entry_import_cache.contains_key(cache_key):
+            return _g_resolved_entry_import_cache[cache_key]
     val owned = _driver_resolver_scratch_begin_v1()
     # @workaround bug=stage3_selfbuild_raw_text_strict_extern_2026-11-18
     # (defect 2). Natively the answer can be a raw char* borrowed from a
@@ -2312,6 +2513,11 @@ fn _driver_resolve_entry_import_untimed(module_path: text, entry_dir: text) -> t
     # once test/fixtures/native_transient_scope_raw_text_escape passes.
     val resolved = _driver_resolve_entry_import_scratch_v1(module_path, entry_dir) + ""
     _driver_resolver_scratch_end_text_v1(owned, resolved)
+    if persistent_outer and owned and transient_array_scope_state_v1() == 0 and cache_key != "":
+        if resolved != "" or snap == "":
+            if _g_resolved_entry_import_cache.len() >= DRIVER_ENTRY_SCAN_CACHE_MAX_ENTRIES_V1:
+                _g_resolved_entry_import_cache = {}
+            _g_resolved_entry_import_cache[cache_key] = resolved + ""
     resolved
 
 fn _driver_resolve_entry_import_scratch_v1(module_path: text, entry_dir: text) -> text:
@@ -2417,6 +2623,7 @@ fn _driver_load_entry_aliases_v1(p: text, entry_closure: bool) -> [SourceFile]:
         p, content, _driver_module_name_from_path(p), entry_closure)
 
 pub fn _driver_collect_requested_entry_source(p: text) -> [SourceFile]:
+    driver_entry_sync_resolver_cwd_v1()
     """The requested entry itself: same alias policy as the closure walk
     (`_driver_entry_closure_mode()`), but no test/doc packaging filter. Those
     filters exclude IMPORTED modules from production closures; applied to the
@@ -2558,6 +2765,7 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
     result
 
 pub fn _driver_collect_sources_via_find(paths: [text]) -> [SourceFile]:
+    driver_entry_sync_resolver_cwd_v1()
     var result: [SourceFile] = []
     for path in paths:
         val loaded = _driver_collect_sources(path)

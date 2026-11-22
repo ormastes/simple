@@ -721,26 +721,23 @@ int64_t spl_str_last_index_of(const char* s, const char* needle) {
     return -1;
 }
 
-char* spl_str_to_upper(const char* s) {
+static char* spl_str_map_case(const char* s, int (*fn)(int)) {
     if (!s) return SPL_STRDUP("", "str");
     size_t len = strlen(s);
     char* result = (char*)SPL_MALLOC(len + 1, "str");
     for (size_t i = 0; i < len; i++) {
-        result[i] = (char)toupper((unsigned char)s[i]);
+        result[i] = (char)fn((unsigned char)s[i]);
     }
     result[len] = '\0';
     return result;
 }
 
+char* spl_str_to_upper(const char* s) {
+    return spl_str_map_case(s, toupper);
+}
+
 char* spl_str_to_lower(const char* s) {
-    if (!s) return SPL_STRDUP("", "str");
-    size_t len = strlen(s);
-    char* result = (char*)SPL_MALLOC(len + 1, "str");
-    for (size_t i = 0; i < len; i++) {
-        result[i] = (char)tolower((unsigned char)s[i]);
-    }
-    result[len] = '\0';
-    return result;
+    return spl_str_map_case(s, tolower);
 }
 
 /* ================================================================
@@ -1178,22 +1175,21 @@ char* spl_file_read(const char* path) {
 #endif
 }
 
-int spl_file_write(const char* path, const char* content) {
+static int spl_file_put(const char* path, const char* content, const char* mode) {
     if (!path) return 0;
-    FILE* f = fopen(path, "wb");
+    FILE* f = fopen(path, mode);
     if (!f) return 0;
     if (content) fputs(content, f);
     fclose(f);
     return 1;
 }
 
+int spl_file_write(const char* path, const char* content) {
+    return spl_file_put(path, content, "wb");
+}
+
 int spl_file_append(const char* path, const char* content) {
-    if (!path) return 0;
-    FILE* f = fopen(path, "ab");
-    if (!f) return 0;
-    if (content) fputs(content, f);
-    fclose(f);
-    return 1;
+    return spl_file_put(path, content, "ab");
 }
 
 int spl_file_exists(const char* path) {
@@ -1511,36 +1507,19 @@ bool rt_atomic_int_compare_exchange(int64_t handle, int64_t current, int64_t new
         memory_order_seq_cst
     );
 }
+#define SPL_ATOMIC_INT_FETCH_OP(name, op)                                         \
+    int64_t name(int64_t handle, int64_t value) {                                 \
+        SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);                \
+        if (!atomic) return 0;                                                    \
+        return op(&atomic->value, value, memory_order_seq_cst);                   \
+    }
 
-int64_t rt_atomic_int_fetch_add(int64_t handle, int64_t value) {
-    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
-    if (!atomic) return 0;
-    return atomic_fetch_add_explicit(&atomic->value, value, memory_order_seq_cst);
-}
-
-int64_t rt_atomic_int_fetch_sub(int64_t handle, int64_t value) {
-    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
-    if (!atomic) return 0;
-    return atomic_fetch_sub_explicit(&atomic->value, value, memory_order_seq_cst);
-}
-
-int64_t rt_atomic_int_fetch_and(int64_t handle, int64_t value) {
-    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
-    if (!atomic) return 0;
-    return atomic_fetch_and_explicit(&atomic->value, value, memory_order_seq_cst);
-}
-
-int64_t rt_atomic_int_fetch_or(int64_t handle, int64_t value) {
-    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
-    if (!atomic) return 0;
-    return atomic_fetch_or_explicit(&atomic->value, value, memory_order_seq_cst);
-}
-
-int64_t rt_atomic_int_fetch_xor(int64_t handle, int64_t value) {
-    SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
-    if (!atomic) return 0;
-    return atomic_fetch_xor_explicit(&atomic->value, value, memory_order_seq_cst);
-}
+SPL_ATOMIC_INT_FETCH_OP(rt_atomic_int_fetch_add, atomic_fetch_add_explicit)
+SPL_ATOMIC_INT_FETCH_OP(rt_atomic_int_fetch_sub, atomic_fetch_sub_explicit)
+SPL_ATOMIC_INT_FETCH_OP(rt_atomic_int_fetch_and, atomic_fetch_and_explicit)
+SPL_ATOMIC_INT_FETCH_OP(rt_atomic_int_fetch_or, atomic_fetch_or_explicit)
+SPL_ATOMIC_INT_FETCH_OP(rt_atomic_int_fetch_xor, atomic_fetch_xor_explicit)
+#undef SPL_ATOMIC_INT_FETCH_OP
 
 void rt_atomic_int_free(int64_t handle) {
     SplAtomicInt* atomic = spl_atomic_int_from_handle(handle);
@@ -2170,24 +2149,23 @@ static int rt_fsync_path(const char* path) {
     return ok ? 1 : 0;
 #endif
 }
-int         rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len) {
+static int rt_fsync_text_path(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     return rt_fsync_path(path);
 }
+int         rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len) {
+    return rt_fsync_text_path(path_ptr, path_len);
+}
 int         rt_file_fsync_cached(const uint8_t* path_ptr, uint64_t path_len) {
-    char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
-    return rt_fsync_path(path);
+    return rt_fsync_text_path(path_ptr, path_len);
 }
 /* rt_file_sync already had the right ARITY -- which is why the signature gate
  * never flagged it -- but it DISCARDED path_len and passed the pointer on as a
  * C string, so it carried the identical defect invisibly. Same family, found
  * while converting its neighbours. */
 int         rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
-    char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
-    return rt_fsync_path(path);
+    return rt_fsync_text_path(path_ptr, path_len);
 }
 int64_t     rt_crc32_text(const char* text, int64_t text_len) {
     if (!text || text_len <= 0) return 0;

@@ -34,6 +34,13 @@ use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer, font_render_confi
 
 val SANS_BOLD = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
 val MONO = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+val BUNDLED_SANS = "assets/fonts/google-fonts/ofl/nunito/Nunito[wght].ttf"
+val BUNDLED_MONO = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+
+fn resolve_face(preferred: text, fallback: text) -> text:
+    if file_exists(preferred):
+        return preferred
+    fallback
 
 # Largest |glyph origin - advance prefix sum| over the staged run.
 fn max_origin_drift(path: text, s: text, size: i32) -> i32:
@@ -65,26 +72,22 @@ fn run_width(path: text, s: text, size: i32) -> i32:
     total
 
 describe "a run staged with resolved advances":
-    it "AC-1: the h1 run measures Chrome's 422 px":
-        if not file_exists(SANS_BOLD):
-            skip("no Liberation Sans Bold on this host")
-            return
-        step("Chrome: 422.25 px")
-        expect(run_width(SANS_BOLD, "Common HTML and CSS in one page", 24)).to_equal(422)
+    if file_exists(SANS_BOLD):
+        it "AC-1: the h1 run measures Chrome's 422 px":
+            step("Chrome: 422.25 px")
+            expect(run_width(SANS_BOLD, "Common HTML and CSS in one page", 24)).to_equal(422)
+    else:
+        skip("AC-1: the h1 run measures Chrome's 422 px", "Liberation/DejaVu Linux fonts absent on this host")
 
     it "AC-2: every h1 glyph origin sits on the advance prefix sum":
-        if not file_exists(SANS_BOLD):
-            skip("no Liberation Sans Bold on this host")
-            return
+        val face = resolve_face(SANS_BOLD, BUNDLED_SANS)
         step("before the fix the last glyph drifted +4 px past its advance pen")
-        expect(max_origin_drift(SANS_BOLD, "Common HTML and CSS in one page", 24)).to_equal(0)
+        expect(max_origin_drift(face, "Common HTML and CSS in one page", 24)).to_equal(0)
 
     it "AC-3: every monospace glyph origin sits on the advance prefix sum":
-        if not file_exists(MONO):
-            skip("no DejaVu Sans Mono on this host")
-            return
+        val face = resolve_face(MONO, BUNDLED_MONO)
         step("before the fix 'inline code' drifted +2 px by its final 'e'")
-        expect(max_origin_drift(MONO, "inline code", 13)).to_equal(0)
+        expect(max_origin_drift(face, "inline code", 13)).to_equal(0)
 
 val SANS = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
 val LCD_RUN = "Hamburgefonstiv"
@@ -93,8 +96,9 @@ val LCD_RUN = "Hamburgefonstiv"
 # the public `get_glyph` first, so each phase-0 cell is rastered before the
 # run is staged (what staging itself did before cells were deferred).
 fn lcd_staged(eager: bool) -> FontRenderer:
+    val face = resolve_face(SANS, BUNDLED_SANS)
     var r = FontRenderer.new()
-    assert_true(r.try_load_runtime_ttf(SANS))
+    assert_true(r.try_load_runtime_ttf(face))
     r.set_lcd_text(true)
     if eager:
         for cp in LCD_RUN.bytes():
@@ -118,9 +122,6 @@ fn lcd_quad_text(r: FontRenderer, i: i64) -> text:
 
 describe "an LCD run staged with resolved advances":
     it "AC-4: the atlas holds only the cells the run draws":
-        if not file_exists(SANS):
-            skip("no Liberation Sans on this host")
-            return
         val r = lcd_staged(false)
         expect(r.staged_valid).to_equal(true)
         expect(r.staged_quads.len()).to_equal(15)
@@ -143,9 +144,6 @@ describe "an LCD run staged with resolved advances":
         expect(r.atlas_glyph_indices.len()).to_equal(drawn.len())
 
     it "AC-5: a deferred run draws the same pixels as an eagerly rastered one":
-        if not file_exists(SANS):
-            skip("no Liberation Sans on this host")
-            return
         val deferred = lcd_staged(false)
         val eager = lcd_staged(true)
         expect(deferred.staged_quads.len()).to_equal(eager.staged_quads.len())
@@ -155,9 +153,6 @@ describe "an LCD run staged with resolved advances":
             i = i + 1
 
     it "AC-6: a glyph read after a deferred run has its pixels":
-        if not file_exists(SANS):
-            skip("no Liberation Sans on this host")
-            return
         var r = lcd_staged(false)
         for cp in LCD_RUN.bytes():
             val g = r.get_glyph(cp as i32, 16)

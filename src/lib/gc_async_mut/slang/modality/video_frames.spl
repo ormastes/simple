@@ -42,6 +42,19 @@ fn video_max_bytes() -> i64:
 fn video_max_parts() -> i64:
     VIDEO_MAX_PARTS
 
+# True when an ffmpeg run failed for a server reason, not because of the input.
+# Exit -1 is what every rt_process_run_bounded_bytes lane reports for a spawn
+# failure, a timeout (C and Rust runtimes carry no marker on the bytes path) and
+# a signal kill, so it is always the server's fault, whatever was written first.
+# The interpreter lane appends "Process timed out"; the text lane's
+# "[TIMEOUT: ...]" marker is accepted too. Any OTHER negative exit is ffmpeg's
+# own AVERROR (e.g. -1094995529, INVALIDDATA, on Windows) for a corrupt client
+# video: the client's fault.
+fn video_run_is_server_fault(exit_code: i64, stderr_text: text) -> bool:
+    if exit_code == -1:
+        return true
+    stderr_text.contains("Process timed out") or stderr_text.contains("[TIMEOUT: Process killed after")
+
 # True when a sample_frames reason is a server fault rather than bad input.
 fn video_reason_is_server_fault(reason: text) -> bool:
     reason.starts_with(VIDEO_SERVER_FAULT)
@@ -141,8 +154,7 @@ fn sample_frames(blob: [u8], n: i64) -> Result<[[u8]], text>:
     val seconds = _duration_seconds(bytes_to_text(probe.1))
     val run = _run_ffmpeg(exe, ["-v", "error", "-nostdin", "-protocol_whitelist", "file", "-i", path, "-an", "-vf", _frame_filter(n, seconds), "-frames:v", n.to_text(), "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "4", "pipe:1"])
     file_delete(path)
-    # A negative exit is a spawn failure or timeout: the server's fault.
-    if run.2 < 0:
+    if video_run_is_server_fault(run.2, bytes_to_text(run.1)):
         return Err(VIDEO_SERVER_FAULT + "the frame sampler did not finish (exit " + run.2.to_text() + ")")
     # A non-zero exit with some frames is a truncated or partly broken clip;
     # answering from part of it would describe a video the client did not send.
@@ -153,4 +165,4 @@ fn sample_frames(blob: [u8], n: i64) -> Result<[[u8]], text>:
         return Err("no frame could be decoded; is the input a video?")
     Ok(frames)
 
-export video_ffmpeg_path, video_max_bytes, video_max_parts, video_reason_is_server_fault, video_frame_count, split_mjpeg, sample_frames
+export video_ffmpeg_path, video_max_bytes, video_max_parts, video_reason_is_server_fault, video_run_is_server_fault, video_frame_count, split_mjpeg, sample_frames

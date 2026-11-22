@@ -115,45 +115,13 @@ static void drain_capture_fds(int stdout_fd, ForkCapture* stdout_capture,
                               int stderr_fd, ForkCapture* stderr_capture,
                               int* stdout_eof, int* stderr_eof);
 
-static void reverse_bytes(char* data, size_t len) {
-    for (size_t left = 0, right = len ? len - 1 : 0; left < right; left++, right--) {
-        char tmp = data[left];
-        data[left] = data[right];
-        data[right] = tmp;
-    }
-}
-
 static void capture_append(ForkCapture* capture, const char* bytes, size_t len) {
     if (UINT64_MAX - capture->total < len) capture->total = UINT64_MAX;
     else capture->total += (uint64_t)len;
 
-    size_t head_add = capture->head_limit - capture->head_len;
-    if (head_add > len) head_add = len;
-    memcpy(capture->data + capture->head_len, bytes, head_add);
-    capture->head_len += head_add;
-    bytes += head_add;
-    len -= head_add;
-    if (len == 0) return;
-
-    if (capture->tail_limit == 0) return;
-    char* tail = capture->data + capture->head_limit;
-    if (len >= capture->tail_limit) {
-        memcpy(tail, bytes + len - capture->tail_limit, capture->tail_limit);
-        capture->tail_start = 0;
-        capture->tail_len = capture->tail_limit;
-        return;
-    }
-
-    size_t overflow = capture->tail_len + len > capture->tail_limit
-        ? capture->tail_len + len - capture->tail_limit : 0;
-    capture->tail_start = (capture->tail_start + overflow) % capture->tail_limit;
-    capture->tail_len -= overflow;
-    size_t write_at = (capture->tail_start + capture->tail_len) % capture->tail_limit;
-    size_t first = capture->tail_limit - write_at;
-    if (first > len) first = len;
-    memcpy(tail + write_at, bytes, first);
-    memcpy(tail, bytes + first, len - first);
-    capture->tail_len += len;
+    rt_capture_ring_append(capture->data, &capture->head_len, capture->head_limit,
+                           capture->data + capture->head_limit, capture->tail_limit,
+                           &capture->tail_start, &capture->tail_len, bytes, len);
 }
 
 /* Append an explicit "this capture is incomplete" marker.
@@ -185,9 +153,9 @@ static size_t capture_finish(ForkCapture* capture) {
     }
     char* tail = capture->data + capture->head_limit;
     if (capture->tail_start != 0 && capture->tail_len != 0) {
-        reverse_bytes(tail, capture->tail_start);
-        reverse_bytes(tail + capture->tail_start, capture->tail_len - capture->tail_start);
-        reverse_bytes(tail, capture->tail_len);
+        rt_capture_reverse_bytes(tail, capture->tail_start);
+        rt_capture_reverse_bytes(tail + capture->tail_start, capture->tail_len - capture->tail_start);
+        rt_capture_reverse_bytes(tail, capture->tail_len);
         capture->tail_start = 0;
     }
 

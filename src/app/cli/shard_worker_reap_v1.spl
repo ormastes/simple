@@ -7,8 +7,21 @@ use std.io_runtime.{time_now_monotonic_ms}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.driver.driver_build.native_file_worker_v1.{NATIVE_FILE_WORKER_TIMEOUT_CODE_V1}
 
-# Poll quantum for a child that may still be running.
-pub const SHARD_REAP_POLL_MS_V1: i64 = 200
+# Responsive base poll quantum (ms) when completions are active; idle rounds
+# back off adaptively via shard_adaptive_poll_ms_v1 up to 50 ms so spawning/reaping
+# 100+ batches never stalls 200 ms per batch.
+pub const SHARD_REAP_POLL_MS_V1: i64 = 10
+
+pub fn shard_adaptive_poll_ms_v1(idle_rounds: i64) -> i64:
+    if idle_rounds <= 1:
+        return 5
+    if idle_rounds <= 4:
+        return 10
+    if idle_rounds <= 10:
+        return 15
+    if idle_rounds <= 25:
+        return 25
+    50
 
 # After a timed-out worker was handed to process_kill (`killed`), the pool
 # re-waits it (`reaped`) and probes liveness (`running`). -2 means it is still
@@ -83,21 +96,30 @@ pub fn parse_shard_reap_v1(pids: [i64], indices: [i64], count: i64, timeout_ms: 
     for pid in pids:
         codes = codes.push(if pid > 0: -2 else: -1)
         if pid > 0: pending = pending + 1
+    var idle_rounds: i64 = 0
     while pending > 0:
         val expired = deadline > 0 and time_now_monotonic_ms() >= deadline
+        val round_poll = shard_adaptive_poll_ms_v1(idle_rounds)
+        val per_child_wait = shard_pool_poll_quantum_v1(pending, round_poll)
+        var reaped_in_round = false
         var k = 0
         while k < pids.len():
             if codes[k] == -2:
                 # Sign-restore: a zero-extended -2 ("still running") must not
                 # be recorded as an exit status for a live child.
-                val code = if expired: -2 else: shard_exit_code_sign_restored_v1(process_wait(pids[k], SHARD_REAP_POLL_MS_V1))
+                val code = if expired: -2 else: shard_exit_code_sign_restored_v1(process_wait(pids[k], per_child_wait))
                 if code != -2 or expired:
                     codes[k] = code
                     pending = pending - 1
+                    reaped_in_round = true
                     if pending > 0 and death_grace_ms > 0 and parse_shard_abnormal_exit_v1(code):
                         deadline = parse_shard_death_deadline_v1(deadline, time_now_monotonic_ms(), death_grace_ms)
                         eprint("[parse-shard] shard={indices[k]}/{count} pid={pids[k]} died {parse_shard_exit_label(code)}; {pending} live sibling(s) bounded by death_grace_ms={death_grace_ms}, remainder parses in process")
             k = k + 1
+        if reaped_in_round:
+            idle_rounds = 0
+        else:
+            idle_rounds = idle_rounds + 1
     var failed: [i64] = []
     var unconfirmed: [i64] = []
     var k = 0

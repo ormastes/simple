@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN
+**Status:** OPEN (2026-11-22: codegen half not reproducing; spec-idiom half open — see end)
 **Found:** 2026-08-20
 **Component:** `bin/simple run` value path (JIT/native codegen) for `extern fn … -> text`
 returns. NOT a Vulkan, ICD, loader, or device-enumeration defect — those are all healthy.
@@ -162,3 +162,30 @@ Status: OPEN (fix site out of lane scope; precisely identified).
 ## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
 
 Concurs with the 2026-11-12 fix-runpath-gpu lane: the defect is the pure-Simple codegen `text`-extern ABI collapse (one machine word for a `text` operand in all three backends), with the confirmed collapse sites and fix design in `doc/05_design/compiler/codegen/pure_simple_text_extern_abi_fix_plan.md` — MIR-lowering + all-backend scope requiring the admitted self-hosted compiler and a Vulkan host to verify run-vs-test parity. Out of a P3 lane's touch list and unverifiable here (no working self-hosted compiler on this host). The spec-idiom half (`assert_true(probe_result.starts_with("skip:"))` in 8+ files) is the same story — runner/spec-lane scope. Additional note for the owner: this lane measured the seed JIT Option-returning parse family returning `Some(nil)` (pure_sql record addendum 2026-11-13), the same "consumer sees a corrupt value on the run/JIT path" failure family; worth auditing together. No in-lane change. Owner: compiler-core codegen lane.
+
+---
+
+## 2026-11-22 re-measurement (work/cuda-runtime-bugs, base release/1.0.0 `3c2e4556b6d`)
+
+**Codegen half: does NOT reproduce on the current native path. Row stays OPEN for the spec-idiom half.**
+
+Device-free fixture (two `extern fn ... -> text` the C runtime defines:
+`rt_text_to_lower_ascii` (boxed value ABI) and `rt_path_basename` (ptr+len ABI)); `val` binding,
+passing across a function parameter, `.len()`, `== "discrete"`, and concat with a literal:
+
+- integ25 Stage 2 (`stage2-admitted/simple`, sha256 `ef46f0d2ab4274c4`),
+  `native-build --entry-closure`, `--backend=llvm` and `--backend=cranelift`: build rc 0, run rc 0,
+  both print `inline len=8 eq=true` / `param len=8 eq=true` / `param-direct len=8 eq=true` /
+  `concat discrete` / `TEXT-EXTERN OK`.
+- seed `seed-tip-20261115/simple` (sha256 `5ef615e2b60a80fc`) `run` (compiled mode, no
+  demotion line): identical output.
+
+The original Vulkan `vulkan_sffi_device_type` repro cannot be re-run through `run` here: the seed
+`run` path fails earlier at instance init (`skip:vulkan-instance-init-failed`, separate record), and
+native builds cannot link GPU externs without a provider DSO.
+
+Still open — spec idiom: `assert_true(probe_result.starts_with("skip:"))` remains at **12 sites
+in 8 files** under `test/` + `examples/` (29 files use `starts_with("skip:")`). The fail-closed
+helper `gpu_lane_probe_verdict` (`src/lib/gc_async_mut/gpu_lane/lane_probe_verdict.spl`) already
+exists and `backends_spec.spl` uses it; the remaining sites need converting, by a lane that can run
+the specs.

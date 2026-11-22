@@ -1,0 +1,316 @@
+# Live host capacity for build worker scheduling: idle CPU slots and memory
+# headroom, read straight from procfs/cgroupfs.
+#
+# Every probe is a plain file read, never a subprocess or a helper thread, so a
+# process that is about to fork (the MIR fork root) can call it safely. The
+# decision functions are pure so the scheduling rules are testable without a
+# host. Unknown inputs are -1; each rule states what unknown means for it.
+use std.nogc_sync_mut.io_runtime.{file_read_nullable, env_get_nullable}
+use std.nogc_sync_mut.sffi.process_memory.{proc_status_kib}
+use std.nogc_sync_mut.io.sysinfo_ops.{cpu_count_checked}
+
+# One probe of the host. cpus: online CPUs (sysconf / available_parallelism);
+# cpu_quota: ceil(cgroup cpu.max quota / period), -1 unlimited; runnable: the
+# instantaneous runnable task count (/proc/loadavg field 4 numerator, includes
+# the probing process); load1: integer part of the 1-minute load average.
+pub struct HostCapacityV1:
+    cpus: i64
+    cpu_quota: i64
+    runnable: i64
+    load1: i64
+    cgroup_headroom_kib: i64
+    mem_available_kib: i64
+    cgroup_readable: bool
+    mem_total_kib: i64
+
+# ceil(quota / period) of a cgroup v2 cpu.max body ("<quota> <period>");
+# -1 for "max", empty or malformed.
+# reason: cgroupfs text in, CPU count out
+@allow(primitive_api)
+pub fn host_cpu_quota_of_v1(cpu_max: text) -> i64:
+    val parts = cpu_max.trim().split(" ")
+    if parts.len() < 2: return -1
+    val quota = parts[0].to_i64() ?? -1
+    val period = parts[1].trim().to_i64() ?? -1
+    if quota <= 0 or period <= 0: return -1
+    (quota + period - 1) / period
+
+# Runnable tasks (numerator of "<running>/<total>", field 4) of a /proc/loadavg
+# body; -1 when absent.
+# reason: procfs text in, task count out
+@allow(primitive_api)
+pub fn host_runnable_of_v1(loadavg: text) -> i64:
+    val fields = loadavg.trim().split(" ")
+    if fields.len() < 4: return -1
+    val pair = fields[3].split("/")
+    if pair.len() != 2: return -1
+    pair[0].to_i64() ?? -1
+
+# Integer part of the 1-minute load average of a /proc/loadavg body; -1 absent.
+# reason: procfs text in, load scalar out
+@allow(primitive_api)
+pub fn host_load1_of_v1(loadavg: text) -> i64:
+    val fields = loadavg.trim().split(" ")
+    if fields.len() < 1 or fields[0] == "": return -1
+    fields[0].split(".")[0].to_i64() ?? -1
+
+# Idle CPU slots: the CPU limit (online CPUs, tightened by a cgroup quota) minus
+# the busy estimate. Busy is the LARGER of the instantaneous runnable count
+# (less the probing process itself) and the 1-minute load: the instant count
+# sees a burst of new work at once, the load average remembers work that is
+# momentarily blocked (page faults, I/O), and on a shared host the larger is
+# the conservative reading. Busy never drops below `own_live`, the caller's own
+# running workers, so just-started workers count before the kernel's figures
+# catch up. Unknown runnable and load counts as `own_live` busy.
+# reason: CPU and task counts
+@allow(primitive_api)
+pub fn host_idle_cpu_slots_of_v1(cpus: i64, cpu_quota: i64, runnable: i64, load1: i64, own_live: i64) -> i64:
+    var limit = if cpus > 0: cpus else: 1
+    if cpu_quota > 0 and cpu_quota < limit:
+        limit = cpu_quota
+    val now_busy = if runnable > 0: runnable - 1 else: -1
+    var busy: i64 = 0
+    if now_busy >= 0 and load1 >= 0:
+        busy = if now_busy > load1: now_busy else: load1
+    elif now_busy >= 0:
+        busy = now_busy
+    elif load1 >= 0:
+        busy = load1
+    if own_live > busy:
+        busy = own_live
+    if busy >= limit: 0 else: limit - busy
+
+# cgroup v2 directories of a /proc/self/cgroup body, leaf first, root last;
+# empty without a "0::" row.
+# reason: procfs text in, cgroupfs directory paths out
+@allow(primitive_api)
+pub fn host_cgroup_dirs_of_v1(table: text) -> [text]:
+    var dirs: [text] = []
+    for line in table.split("\n"):
+        if line.starts_with("0::/"):
+            var rel = line.substring(3).trim()
+            while rel.byte_len() > 1 and rel.ends_with("/"):
+                rel = rel.substring(0, rel.byte_len() - 1)
+            while rel != "/" and rel != "":
+                dirs = dirs.push("/sys/fs/cgroup" + rel)
+                val slash = rel.rfind("/")
+                rel = if slash <= 0: "/" else: rel.substring(0, slash)
+            dirs = dirs.push("/sys/fs/cgroup")
+            return dirs
+    dirs
+
+# cgroup v1 memory-controller directories of a /proc/self/cgroup body (the
+# "<n>:...memory...:/path" row, as on v1-only and hybrid hosts), leaf first,
+# root last; empty without such a row.
+# reason: procfs text in, cgroupfs directory paths out
+@allow(primitive_api)
+pub fn host_cgroup_v1_memory_dirs_of_v1(table: text) -> [text]:
+    var dirs: [text] = []
+    for line in table.split("\n"):
+        val fields = line.split(":")
+        if fields.len() < 3 or not fields[1].split(",").contains("memory"):
+            continue
+        val hier_id: text = fields[0]
+        val controllers: text = fields[1]
+        var rel = line.substring(hier_id.byte_len() + controllers.byte_len() + 2).trim()
+        while rel.byte_len() > 1 and rel.ends_with("/"):
+            rel = rel.substring(0, rel.byte_len() - 1)
+        while rel != "/" and rel != "" and rel.starts_with("/"):
+            dirs = dirs.push("/sys/fs/cgroup/memory" + rel)
+            val slash = rel.rfind("/")
+            rel = if slash <= 0: "/" else: rel.substring(0, slash)
+        dirs = dirs.push("/sys/fs/cgroup/memory")
+        return dirs
+    dirs
+
+# Tightest memory.max - memory.current (KiB) over the levels whose memory.max
+# is numeric; maxes[i]/currents[i] are one level's file bodies ("" unreadable,
+# "max" unlimited). -1 when no level is capped.
+# reason: cgroup file text in, KiB scalar out
+@allow(primitive_api)
+pub fn host_cgroup_headroom_kib_of_v1(maxes: [text], currents: [text]) -> i64:
+    var best: i64 = -1
+    var i: i64 = 0
+    while i < maxes.len() and i < currents.len():
+        val max_bytes = maxes[i].trim().to_i64() ?? -1
+        val current_bytes = currents[i].trim().to_i64() ?? -1
+        if max_bytes > 0 and current_bytes >= 0:
+            val free_bytes = max_bytes - current_bytes
+            val kib = if free_bytes > 0: free_bytes / 1024 else: 0
+            if best < 0 or kib < best:
+                best = kib
+        i = i + 1
+    best
+
+# Tightest cgroup cpu.max quota over the levels (leaf to root); -1 unlimited.
+# reason: cgroupfs text in, CPU count out
+@allow(primitive_api)
+pub fn host_cgroup_cpu_quota_of_v1(cpu_maxes: [text]) -> i64:
+    var best: i64 = -1
+    for body in cpu_maxes:
+        val quota = host_cpu_quota_of_v1(body)
+        if quota > 0 and (best < 0 or quota < best):
+            best = quota
+    best
+
+# Smaller of the cgroup headroom and MemAvailable when both are known; -1 when
+# neither is.
+# reason: KiB scalars
+@allow(primitive_api)
+pub fn host_headroom_kib_of_v1(cgroup_kib: i64, available_kib: i64) -> i64:
+    if cgroup_kib < 0: return available_kib
+    if available_kib < 0 or cgroup_kib < available_kib: cgroup_kib else: available_kib
+
+# Memory admission of one more worker priced at `est_kib`: headroom minus the
+# reserve must cover it plus the not-yet-consumed estimate of every live worker
+# (a just-started worker has consumed ~nothing yet, so it is charged nearly its
+# whole estimate; a negative reading charges the whole estimate). Unknown
+# headroom or no live worker admits: the caller's own floor rules decide then.
+# reason: KiB scalars
+@allow(primitive_api)
+pub fn host_memory_admit_v1(headroom_kib: i64, reserve_kib: i64, est_kib: i64, live_private_kib: [i64]) -> bool:
+    if headroom_kib < 0: return true
+    if live_private_kib.len() == 0: return true
+    var need = est_kib
+    for current in live_private_kib:
+        if current < 0:
+            need = need + est_kib
+        elif current < est_kib:
+            need = need + (est_kib - current)
+    headroom_kib - reserve_kib >= need
+
+# Memory every worker pool leaves free for the rest of the host:
+# max(8 GiB, 10% of MemTotal); unknown MemTotal (-1) keeps 8 GiB.
+pub const HOST_MEMORY_RESERVE_FLOOR_KIB_V1: i64 = 8388608
+pub const HOST_MEMORY_RESERVE_ENV_V1: text = "SIMPLE_WORKER_MEMORY_RESERVE_KB"
+
+# reason: KiB scalars
+@allow(primitive_api)
+pub fn host_memory_reserve_kib_of_v1(mem_total_kib: i64) -> i64:
+    val tenth = if mem_total_kib > 0: mem_total_kib / 10 else: 0
+    if tenth > HOST_MEMORY_RESERVE_FLOOR_KIB_V1: tenth else: HOST_MEMORY_RESERVE_FLOOR_KIB_V1
+
+# SIMPLE_WORKER_MEMORY_RESERVE_KB=K (KiB, >= 0) overrides the default;
+# unset or malformed keeps it.
+# reason: env text and KiB scalars
+@allow(primitive_api)
+pub fn host_memory_reserve_kib_for_v1(raw: text, mem_total_kib: i64) -> i64:
+    val parsed = raw.trim().to_i64() ?? -1
+    if parsed >= 0: parsed else: host_memory_reserve_kib_of_v1(mem_total_kib)
+
+# Per-live-worker charge for admitting one more: what it may still grow to,
+# max(estimate, its observed peak) - its current private use, but never less
+# than a quarter of the estimate (a worker at or over its estimate still grows
+# by its end-of-batch codegen, which the estimate does not see). An unreadable
+# reading (< 0) is charged max(estimate, peak) in full.
+# reason: KiB scalars
+@allow(primitive_api)
+pub fn host_live_charge_kib_v1(est_kib: i64, current_kib: i64, peak_kib: i64) -> i64:
+    val ceiling = if peak_kib > est_kib: peak_kib else: est_kib
+    if current_kib < 0: return ceiling
+    val floor = est_kib / 4
+    val left = ceiling - current_kib
+    if left > floor: left else: floor
+
+# Fail-closed admission of one more worker priced `est_kib`: headroom (already
+# net of the reserve, host_capacity_headroom_kib_v1) must cover it plus every
+# live worker's charge. Unknown headroom (-1) refuses. `current`/`peak` are
+# index-aligned per live worker.
+# reason: KiB scalars
+@allow(primitive_api)
+pub fn host_memory_admit_charged_v1(headroom_kib: i64, est_kib: i64,
+        current_kib: [i64], peak_kib: [i64]) -> bool:
+    if headroom_kib < 0: return false
+    var need = est_kib
+    var i: i64 = 0
+    while i < current_kib.len():
+        val peak = if i < peak_kib.len(): peak_kib[i] else: -1
+        need = need + host_live_charge_kib_v1(est_kib, current_kib[i], peak)
+        i = i + 1
+    headroom_kib >= need
+
+# Opt-in live pool size: idle CPU slots bounded by how many `per_worker_kib`
+# workers fit in headroom (already net of the reserve). At least 1 (a pool
+# always makes progress); unknown headroom or price yields 1 (fail closed).
+# reason: worker count and KiB scalars
+@allow(primitive_api)
+pub fn host_live_worker_slots_v1(idle_cpu: i64, headroom_kib: i64, per_worker_kib: i64) -> i64:
+    if headroom_kib < 0 or per_worker_kib <= 0: return 1
+    val fit = headroom_kib / per_worker_kib
+    val n = if fit < idle_cpu: fit else: idle_cpu
+    if n < 1: 1 else: n
+
+# Read the host now. Direct file reads only (fork-safe, see the header).
+pub fn host_capacity_probe_v1() -> HostCapacityV1:
+    val cpus = match cpu_count_checked():
+        case Ok(n): n
+        case Err(_): 1
+    val loadavg = file_read_nullable("/proc/loadavg") ?? ""
+    val meminfo = file_read_nullable("/proc/meminfo") ?? ""
+    var maxes: [text] = []
+    var currents: [text] = []
+    var cpu_maxes: [text] = []
+    val cgroup_table = file_read_nullable("/proc/self/cgroup")
+    val table = cgroup_table ?? ""
+    for dir in host_cgroup_dirs_of_v1(table):
+        maxes = maxes.push(file_read_nullable(dir + "/memory.max") ?? "")
+        currents = currents.push(file_read_nullable(dir + "/memory.current") ?? "")
+        cpu_maxes = cpu_maxes.push(file_read_nullable(dir + "/cpu.max") ?? "")
+    # v1-only and hybrid hosts: the memory controller's limit/usage pair. A
+    # level with no numeric limit is "no limit there"; no row at all is "no
+    # cgroup limit". Only an unreadable /proc/self/cgroup is unknown.
+    for dir in host_cgroup_v1_memory_dirs_of_v1(table):
+        maxes = maxes.push(file_read_nullable(dir + "/memory.limit_in_bytes") ?? "")
+        currents = currents.push(file_read_nullable(dir + "/memory.usage_in_bytes") ?? "")
+    HostCapacityV1(
+        cpus: cpus,
+        cpu_quota: host_cgroup_cpu_quota_of_v1(cpu_maxes),
+        runnable: host_runnable_of_v1(loadavg),
+        load1: host_load1_of_v1(loadavg),
+        cgroup_headroom_kib: host_cgroup_headroom_kib_of_v1(maxes, currents),
+        mem_available_kib: proc_status_kib(meminfo, "MemAvailable:"),
+        cgroup_readable: cgroup_table.?,
+        mem_total_kib: proc_status_kib(meminfo, "MemTotal:"))
+
+# reason: worker count out
+@allow(primitive_api)
+pub fn host_capacity_idle_cpu_v1(cap: HostCapacityV1, own_live: i64) -> i64:
+    host_idle_cpu_slots_of_v1(cap.cpus, cap.cpu_quota, cap.runnable, cap.load1, own_live)
+
+# Usable headroom = min(cgroup headroom, MemAvailable - reserve). The reserve
+# protects the rest of the HOST, so it comes off MemAvailable only; a cgroup
+# cap is the operator's own bound and is not shrunk again (counting the
+# reserve twice would kill a heavy module that fits its scope). MemAvailable
+# below the reserve reads 0, not negative.
+# reason: KiB scalars
+@allow(primitive_api)
+pub fn host_headroom_after_reserve_kib_of_v1(cgroup_kib: i64, available_kib: i64, reserve_kib: i64) -> i64:
+    if available_kib < 0: return host_headroom_kib_of_v1(cgroup_kib, -1)
+    val host_kib = if available_kib > reserve_kib: available_kib - reserve_kib else: 0
+    host_headroom_kib_of_v1(cgroup_kib, host_kib)
+
+# -1 (unknown) when /proc/self/cgroup or MemAvailable could not be read, so a
+# caller that fails closed on -1 never runs on a silently ignored cgroup cap.
+# reason: KiB scalar out
+@allow(primitive_api)
+pub fn host_capacity_headroom_kib_v1(cap: HostCapacityV1) -> i64:
+    if not cap.cgroup_readable or cap.mem_available_kib < 0: return -1
+    host_headroom_after_reserve_kib_of_v1(cap.cgroup_headroom_kib, cap.mem_available_kib,
+        host_capacity_reserve_kib_v1(cap))
+
+# True when host MemAvailable is known and below the reserve.
+# reason: predicate over the probe
+@allow(primitive_api)
+pub fn host_capacity_below_reserve_v1(cap: HostCapacityV1) -> bool:
+    cap.mem_available_kib >= 0 and cap.mem_available_kib < host_capacity_reserve_kib_v1(cap)
+
+# The reserve for this host: SIMPLE_WORKER_MEMORY_RESERVE_KB, else
+# max(8 GiB, 10% of MemTotal).
+# reason: KiB scalar out
+@allow(primitive_api)
+pub fn host_capacity_reserve_kib_v1(cap: HostCapacityV1) -> i64:
+    host_memory_reserve_kib_for_v1(env_get_nullable(HOST_MEMORY_RESERVE_ENV_V1) ?? "", cap.mem_total_kib)
+
+# One audit line's worth of probe inputs.
+pub fn host_capacity_text_v1(cap: HostCapacityV1) -> text:
+    "cpus={cap.cpus} cpu_quota={cap.cpu_quota} runnable={cap.runnable} load1={cap.load1} cgroup_readable={cap.cgroup_readable} cgroup_headroom_kib={cap.cgroup_headroom_kib} mem_available_kib={cap.mem_available_kib} mem_total_kib={cap.mem_total_kib}"

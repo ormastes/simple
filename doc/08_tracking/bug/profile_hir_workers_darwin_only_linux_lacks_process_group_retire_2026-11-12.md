@@ -1,6 +1,6 @@
 # Profile HIR workers have been Darwin-only since 35541505cd5: Linux lacks PROCESS_GROUP_RETIRE
 
-- Status: fix-implemented (verification pending a runtime-authority + Stage 2 rebuild)
+- Status: fix-implemented-verification-pending (2026-11-22: retire behaviour confirmed on aarch64 Linux by stand-in evidence below; the Stage 3-shape probe named in the acceptance criterion is still unrun)
 - Severity: P1. On Linux, every HIR shard pool (the coordinator and the Stage 3 capsule) runs serially.
 - Found: 2026-11-12, by the early Phase 3 lane on aarch64 Linux
 - Component: `src/runtime/runtime_process_owned.c` (Process Observation V4 owner)
@@ -42,3 +42,34 @@ The `/proc` scan is local to the owner, side-effect free, and matches the Darwin
   - Green: 8/8 checks, stable across 4 consecutive runs.
 - `check-c-runtime-compiles-push.shs`: the same 20 pre-existing vector-provider failures on base and on this change. `runtime_process_owned.c` compiles clean with `-Wall -Wextra`.
 - Native confirmation is PENDING: a Phase 1 runtime authority plus Stage 2 rebuild, then the 3-file pre-flight (`completed_workers=2`) and the Stage 3-shape probe. This is sequenced by the coordinator around run 17.
+
+## Verification 2026-11-22 (aarch64 Linux) — partial evidence (Stage 3-shape probe still pending)
+
+- Host: Linux aarch64 (6.17.0-1032-nvidia), clang 23.1.0, worktree at `origin/release/1.0.0` `3c2e4556b6d`.
+- Fix commit `998622c8624` is an ancestor of `c1a10190b97`, the source of the Stage 2 used below.
+- Unit: `systemd-run --user --scope -p MemoryMax=8G sh scripts/check/check-process-v4-group-admission.shs` ->
+  `runtime_process_observation_v4_selfcheck: PASS`,
+  `runtime_process_group_retire_linux_selfcheck: PASS (36 checks)`,
+  fault-wrapped build `PASS (94 checks)`, cgroup.events parser 27/0. The gate's
+  final stage (population-only `runtime_linux_group_owner_unavailable_selfcheck.c`)
+  still fails to compile; that is the separately tracked, pre-existing
+  `linux_group_owner_unavailable_selfcheck_stale_2026-11-13.md`, not this bug.
+- Native: Stage 2 `stage2-admitted/simple` SHA-256
+  `ef46f0d2ab4274c4550530851db407bf9bad7f21bfabd50f9b56e87e77fd58d6`
+  (runtime authority `libsimple_native_all.a` `1ee15fcff9ea14aaa17e2755b3711d73326b45533599dc49656267e5f9372b01`,
+  integ25 s2probe). Its sanity receipts (`stage2-sanity.env`, bound to that sha)
+  report `result=pass raw_status=0` for both frontend-bootstrap runs; every
+  probe log shows `[hir-shard] done shard=N/6 ... claimed=1` (the HIR pool goes
+  through `worker_hir_owner_start_v1` with `ProcessObservationDescendantPolicyV4.ProcessGroup`,
+  `native_build_main.spl:1316`) and zero `process-group-retire` / `reason:` refusals.
+  The p4 `cli-f26` full-CLI build on the same Stage 2 (log read-only) admitted
+  `threads=8` HIR owners, each its own process-group leader, and reported
+  `[hir-shard] completed_workers=7 failed_workers=1 failed_modules=2 unfinished=0`;
+  the failed owner is `status=FAILED exit=1 ... finished=true` (module compile
+  errors in `codegen.spl` and `os_build_run.spl`), i.e. it too was retired.
+- First-hand: this session's own native-build probe on the same Stage 2
+  (`MemoryMax=8G`) logged 69 `[hir-shard] done` lines through the ProcessGroup
+  owner, rc 0, zero `process-group-retire` / `reason:` lines.
+- Substitution, stated: the record's literal gates (3-file pre-flight
+  `completed_workers=2`, Stage 3-shape probe) were not re-run as named; the
+  6-owner sanity pools, the cli-f26 8-owner pool and the probe above stand in.

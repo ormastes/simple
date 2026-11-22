@@ -1,5 +1,5 @@
 use compiler.common.cache_contract.mir_initializer_plan_v1.{MirInitializerStepV1, MirInitializerPlanV1}
-use compiler.mir.canonical_type_symbol_id_v1.{canonical_type_symbol_id_v1}
+use compiler.mir.canonical_type_symbol_id_v1.{canonical_type_symbol_id_v1, canonical_type_symbol_table_sorted_v1}
 use compiler.mir._MirLowering.verification_calls_v1.*
 use compiler.mir._MirLowering.declaration_enum_metadata_v1.*
 use compiler.mir._MirLoweringExpr.result_err_record_owner.*
@@ -974,6 +974,9 @@ impl MirLowering:
         if symbol.kind == SymbolKind.Class:
             val class_owner = _hir_symbol_owner_module(symbol.defining_module ?? "")
             return if class_owner == "": symbol.name else: "{class_owner}.{symbol.name}"
+        if symbol.kind == SymbolKind.Enum:
+            val enum_owner = _hir_symbol_owner_module(symbol.defining_module ?? "")
+            return if enum_owner == "": symbol.name else: "{enum_owner}.{symbol.name}"
         if symbol.kind != SymbolKind.Struct:
             return symbol.name
         val qualified = self.declared_struct_layout_key(self.composite_layout_key(symbol))
@@ -986,6 +989,24 @@ impl MirLowering:
             return symbol.name
         self.error_fatal("ambiguous struct/class value owner '{symbol.name}': no module-qualified layout matched", Some(symbol.span))
         ""
+
+    fn record_shape_layout_key(shape: text) -> text:
+        """Fold a name-keyed callable payload shape (bootstrap_fn_ret_ok/opt
+        registries, which record a struct's defining-declaration key) onto
+        this lowering's exact layout key. When the declaration has no
+        unambiguous layout here, answer its bare leaf: that is exactly what the
+        registry used to store. Readers fail closed on a CONFLICTING leaf, but
+        a leaf with a single row resolves to whichever declaration owns that
+        row -- which can be another declaration when the right one registered
+        no layout in this lowering. That pre-existing exposure is unchanged by
+        this fallback, not removed (mir_result_ok_payload_bare_owner_2026-11-22)."""
+        val folded = self.declared_struct_layout_key(shape)
+        if self.struct_field_order.has(folded) and not self.struct_field_order_conflict_warned.contains(folded):
+            return folded
+        val separator = shape.rfind("::")
+        if separator <= 0:
+            return folded
+        shape.substring(separator + 2)
 
     fn struct_value_provenance_key(symbol: HirSymbol) -> text:
         """Value-provenance key for a local whose type is the HIR-resolved
@@ -1004,7 +1025,24 @@ impl MirLowering:
             val qualified = self.declared_struct_layout_key(self.composite_layout_key(symbol))
             if qualified != symbol.name and self.struct_field_order.has(qualified) and not self.struct_field_order_conflict_warned.contains(qualified):
                 return qualified
+        if symbol.kind == SymbolKind.Enum:
+            val enum_owner = _hir_symbol_owner_module(symbol.defining_module ?? "")
+            return if enum_owner == "": symbol.name else: "{enum_owner}.{symbol.name}"
         symbol.name
+
+    fn mir_layout_or_runtime_key_is_enum(key: text) -> bool:
+        if key == "":
+            return false
+        val dotted = key.replace("::", ".")
+        if key.contains(".") or key.contains("::"):
+            if self.enum_variant_index_q.has(key) or self.enum_variant_index_q.has(dotted) or self.enum_runtime_to_bare.has(key) or self.enum_runtime_to_bare.has(dotted):
+                return true
+            if self.struct_field_order.has(self.declared_struct_layout_key(key)):
+                return false
+            return false
+        if self.struct_field_order.has(self.declared_struct_layout_key(key)):
+            return false
+        self.enum_variant_index.contains(key) and not self.enum_bare_ambiguous.contains(key)
 
     me register_struct_default_layout_v1(key: text, fields: [text], flags: [bool], defaults: [HirExpr]):
         # Default expressions must belong to the same declaration/order as the
@@ -1145,12 +1183,15 @@ impl MirLowering:
             case Some(info):
                 if info != None and info.name != "":
                     if info.kind == SymbolKind.Class: return mir_class_identity_raw(self.symbols, symbol.id)
-                    if info.kind == SymbolKind.Struct: return self.struct_value_provenance_key(info)
+                    if info.kind == SymbolKind.Struct or info.kind == SymbolKind.Enum:
+                        return self.struct_value_provenance_key(info)
                     return info.name
             case None: ()
         val canonical_key = self.canonical_mir_type_key_v1(symbol.id)
         if canonical_key == "": return ""
         if self.class_type_names.has(canonical_key):
+            return canonical_key
+        if self.enum_variant_index_q.has(canonical_key) or self.enum_runtime_to_bare.has(canonical_key):
             return canonical_key
         val separator = canonical_key.rfind(".")
         if separator <= 0: return canonical_key
@@ -1177,6 +1218,46 @@ impl MirLowering:
                 return canonical_key
             cki = cki + 1
         ""
+
+    me preseed_canonical_type_symbols_v1(modules: [HirModule]):
+        """Pre-seed canonical MIR type symbol IDs in lexically sorted key order across
+        scheduled/provider modules so even rare 30-bit slot collisions resolve
+        deterministically rather than in module lowering visit order."""
+        var keys: [text] = []
+        for existing_key in self.canonical_type_symbols.keys():
+            keys = keys.push(existing_key)
+        var mod_idx = 0
+        while mod_idx < modules.len():
+            val mod_item: HirModule = modules[mod_idx]
+            val mod_canon = mir_layout_canonical_module_name(mod_item.name)
+            if mod_canon != "":
+                for struct_sym in mod_item.structs.keys():
+                    val struct_def = mod_item.structs[struct_sym]
+                    if struct_def.name != "":
+                        keys = keys.push("{mod_canon}.{struct_def.name}")
+                for class_sym in mod_item.classes.keys():
+                    val class_def = mod_item.classes[class_sym]
+                    if class_def.name != "":
+                        keys = keys.push("{mod_canon}.{class_def.name}")
+                for enum_sym in mod_item.enums.keys():
+                    val enum_def = mod_item.enums[enum_sym]
+                    if enum_def.name != "":
+                        keys = keys.push("{mod_canon}.{enum_def.name}")
+                for bf_sym in mod_item.bitfields.keys():
+                    val bf_def = mod_item.bitfields[bf_sym]
+                    if bf_def.name != "":
+                        keys = keys.push("{mod_canon}.{bf_def.name}")
+                for trait_sym in mod_item.traits.keys():
+                    val trait_def = mod_item.traits[trait_sym]
+                    if trait_def.name != "":
+                        keys = keys.push("{mod_canon}.{trait_def.name}")
+                for type_name in mod_item.types:
+                    if type_name != "":
+                        keys = keys.push("{mod_canon}.{type_name}")
+            mod_idx = mod_idx + 1
+        val seeded = canonical_type_symbol_table_sorted_v1(keys)
+        self.canonical_type_symbols = seeded.id_by_key
+        self.canonical_type_symbol_names = seeded.key_by_id
 
     me canonical_mir_type_symbol_for_key_v1(key: text) -> SymbolId:
         # Keep key normalization at the original callers and mint in their
@@ -1783,7 +1864,7 @@ impl MirLowering:
             print "[mir-lower] bootstrap-stub:start {name}"
         val signature = self.bootstrap_function_signature(name)
         var bldr = self.builder
-        bldr.begin_function(symbol, name, signature, None)
+        bldr.begin_function(symbol, name, signature, Span.empty())
         bldr.terminate_return(self.bootstrap_default_return_operand(signature.return_type))
         val fn_result = bldr.end_function()
         self.builder = bldr
@@ -2060,7 +2141,18 @@ impl MirLowering:
         val prescan_module_value: HirModule = modules[module_key]
         val structs: Dict<SymbolId, HirStruct> = prescan_module_value.structs
         val classes: Dict<SymbolId, HirClass> = prescan_module_value.classes
+        val enums: Dict<SymbolId, HirEnum> = prescan_module_value.enums
         val module_name: text = prescan_module_value.name
+        val canonical_mod_name = mir_layout_canonical_module_name(module_name)
+        val prescan_enum_values = enums.values()
+        var pei = 0
+        while pei < prescan_enum_values.len():
+            val prescan_enum: HirEnum = prescan_enum_values[pei]
+            if prescan_enum.runtime_name != "":
+                self.enum_runtime_to_bare[prescan_enum.runtime_name] = prescan_enum.name
+            if canonical_mod_name != "":
+                self.enum_runtime_to_bare["{canonical_mod_name}.{prescan_enum.name}"] = prescan_enum.name
+            pei = pei + 1
         val module_symbols: SymbolTable = prescan_module_value.symbols
         bootstrap_default_provider_register(mir_layout_canonical_module_name(module_name),
             module_symbols, prescan_module_value.constants.values())
@@ -2258,9 +2350,12 @@ impl MirLowering:
                 val optional_prescan_return_symbol: HirSymbol? = module_symbols.get_symbol_raw(prescan_return_symbol_id.id)
                 if val present_prescan_return_symbol = optional_prescan_return_symbol:
                     val prescan_return_symbol: HirSymbol = present_prescan_return_symbol
-                    prescan_return_shape = self.composite_layout_key(prescan_return_symbol)
                     if prescan_return_symbol.kind == SymbolKind.Class:
                         prescan_return_shape = mir_class_identity_raw(module_symbols, prescan_return_symbol_id.id)
+                    elif prescan_return_symbol.kind == SymbolKind.Struct:
+                        prescan_return_shape = self.composite_layout_key(prescan_return_symbol)
+                    elif prescan_return_symbol.kind == SymbolKind.Enum:
+                        prescan_return_shape = self.struct_value_provenance_key(prescan_return_symbol)
             case Array(prescan_element_type, _) | Slice(prescan_element_type):
                 prescan_return_shape = "__runtime_array__"
                 var prescan_element_shape = "__no_struct_element__"
@@ -2318,16 +2413,16 @@ impl MirLowering:
                                 case SymbolKind.Class:
                                     bootstrap_fn_ret_ok_shape_register(prescan_call_name, mir_class_identity_raw(module_symbols, prescan_ok_symbol_id.id))
                                 case SymbolKind.Struct:
-                                    # Bare name, matching the spelling
-                                    # `struct_value_syms`/`lookup_or_invalid`
-                                    # consumers expect downstream
-                                    # (method_calls_literals.spl's
-                                    # unresolved-owner recovery) -- NOT
-                                    # composite_layout_key's module-
-                                    # qualified form, which those bare
-                                    # name-keyed lookups never match.
+                                    # Defining-declaration key, same as the
+                                    # Err and Optional arms. A bare name is
+                                    # ambiguous once two modules declare the
+                                    # same struct leaf (`DirEntry`), and the
+                                    # field reader then fails closed with "no
+                                    # exact layout". Consumers fold it through
+                                    # record_shape_layout_key
+                                    # (mir_result_ok_payload_bare_owner_2026-11-22).
                                     bootstrap_fn_ret_ok_shape_register(
-                                        prescan_call_name, prescan_ok_symbol.name)
+                                        prescan_call_name, self.composite_layout_key(prescan_ok_symbol))
                                 case _: ()
                     case _: ()
             case Optional(prescan_optional_inner):
@@ -3026,6 +3121,7 @@ impl MirLowering:
         # Layout demand likewise starts only at this module's provider pass.
         self.provider_layout_demand_end_v1()
         self.current_module_id = mir_layout_canonical_module_name(module.name)
+        self.mcdc_next_runtime_id = 1
         # SIMPLE_ENUM_REG_TRACE=1 progression receipt (cycle-54/55 MIR livelock
         # localization): brackets every module's lowering so the next failing
         # cycle's last printed module is the one whose pass spins.
@@ -3662,6 +3758,7 @@ impl MirLowering:
         # from struct_value_syms and looks it up here to dispatch the real
         # method instead of failing.
         var static_method_symbol_ids: Dict<i64, bool> = {}
+        var local_method_return_owner: Dict<i64, text> = {}
         # Cycle-98: values+index (bootstrap-branch-proven shape). The
         # keys+index form silently mismatched aggregate SymbolId keys on
         # re-lookup (cycle-97/98 receipts); values are heap refs whose
@@ -3678,6 +3775,16 @@ impl MirLowering:
             if val module_fn = static_element:
                 if module_fn.is_static:
                     static_method_symbol_ids[self.symbol_id_value(module_fn.symbol)] = true
+                # Exact declared struct return owner for local impl methods;
+                # HirImpl.method_return_struct_names carries only the leaf.
+                match module_fn.return_type.kind:
+                    case Named(local_ret_symbol_id, _):
+                        val optional_local_ret_symbol: HirSymbol? = self.symbols.get_symbol_raw(local_ret_symbol_id.id)
+                        if val present_local_ret_symbol = optional_local_ret_symbol:
+                            val local_ret_symbol: HirSymbol = present_local_ret_symbol
+                            if local_ret_symbol.kind == SymbolKind.Struct:
+                                local_method_return_owner[self.symbol_id_value(module_fn.symbol)] = self.struct_value_provenance_key(local_ret_symbol)
+                    case _: ()
             module_fn_i = module_fn_i + 1
 
         var impl_mi = 0
@@ -3724,7 +3831,14 @@ impl MirLowering:
                     # HirImpl.method_return_struct_names doc comment) so a
                     # chained `.m2()` on this call's RESULT can resolve too
                     # (consumed in method_calls_literals.spl's Unresolved arm).
-                    val impl_ret_struct_name = impl_def.method_return_struct_names.get(impl_method_name)
+                    var impl_ret_struct_name = impl_def.method_return_struct_names.get(impl_method_name)
+                    # A leaf shared by another declaration in the closure
+                    # (`Fat32Bpb` in fat32_core and fat32_hardening) is
+                    # ambiguous to every field reader; record the declaring
+                    # module's layout key (mir_result_ok_payload_bare_owner_2026-11-22).
+                    val impl_method_sid = self.symbol_id_value(impl_method_id)
+                    if local_method_return_owner.has(impl_method_sid):
+                        impl_ret_struct_name = Some(local_method_return_owner[impl_method_sid])
                     if impl_ret_struct_name != None and impl_ret_struct_name != "":
                         self.struct_method_return_names["{impl_type_name}::{impl_method_name}"] = impl_ret_struct_name
                         if impl_type_key != impl_type_name:
@@ -4708,7 +4822,9 @@ impl MirLowering:
                                             val optional_ret_symbol: HirSymbol? = self.symbols.get_symbol_raw(ret_sym.id)
                                             if val present_ret_symbol = optional_ret_symbol:
                                                 val ret_symbol: HirSymbol = present_ret_symbol
-                                                return ret_symbol.name
+                                                if ret_symbol.kind == SymbolKind.Struct:
+                                                    return self.struct_value_provenance_key(ret_symbol)
+                                                return ""
                                         case _:
                                             ()
                                 case _:

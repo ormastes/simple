@@ -713,20 +713,54 @@ fn runtime_i64_owner(values: &[i64]) -> simple_runtime::value::RuntimeValue {
 
 pub fn rt_cuda_module_load_data_array_fn(args: &[Value]) -> Result<Value, CompileError> {
     let bytes = strict_owned_bytes(args, 0, "rt_cuda_module_load_data_array", 1)?;
-    let owner = runtime_byte_owner(&bytes);
-    let result = simple_runtime::cuda_runtime::rt_cuda_module_load_data_array(owner);
-    release_runtime_owner(owner);
-    Ok(Value::Int(result))
+    #[cfg(not(feature = "cuda"))]
+    {
+        // Same gap as rt_cuda_memcpy_htod_array: the runtime array helper is
+        // the -3 stub without the `cuda` feature; load through the dlopen
+        // driver via the pointer-based sibling.
+        return rt_cuda_module_load_data_bytes_fn(&[
+            Value::Int(bytes.as_ptr() as i64),
+            Value::Int(bytes.len() as i64),
+        ]);
+    }
+    #[cfg(feature = "cuda")]
+    {
+        let owner = runtime_byte_owner(&bytes);
+        let result = simple_runtime::cuda_runtime::rt_cuda_module_load_data_array(owner);
+        release_runtime_owner(owner);
+        Ok(Value::Int(result))
+    }
 }
 
 pub fn rt_cuda_memcpy_htod_array_fn(args: &[Value]) -> Result<Value, CompileError> {
     let dst = arg_i64(args, 0, "rt_cuda_memcpy_htod_array", 3)?;
     let bytes = strict_owned_bytes(args, 1, "rt_cuda_memcpy_htod_array", 3)?;
     let count = arg_i64(args, 2, "rt_cuda_memcpy_htod_array", 3)?;
-    let owner = runtime_byte_owner(&bytes);
-    let result = simple_runtime::cuda_runtime::rt_cuda_memcpy_htod_array(dst, owner, count);
-    release_runtime_owner(owner);
-    Ok(Value::Int(result))
+    #[cfg(not(feature = "cuda"))]
+    {
+        // Without the `cuda` feature the runtime's array helper is the -3
+        // stub, so a working driver was never reached (CUDA lane arena guard
+        // upload failed on every host). Copy through the dlopen driver like
+        // the pointer-based sibling `rt_cuda_memcpy_htod_fn`.
+        let Ok(byte_count) = usize::try_from(count) else {
+            return Ok(Value::Int(-1));
+        };
+        if byte_count > bytes.len() {
+            return Ok(Value::Int(-1));
+        }
+        return rt_cuda_memcpy_htod_fn(&[
+            Value::Int(dst),
+            Value::Int(bytes.as_ptr() as i64),
+            Value::Int(count),
+        ]);
+    }
+    #[cfg(feature = "cuda")]
+    {
+        let owner = runtime_byte_owner(&bytes);
+        let result = simple_runtime::cuda_runtime::rt_cuda_memcpy_htod_array(dst, owner, count);
+        release_runtime_owner(owner);
+        Ok(Value::Int(result))
+    }
 }
 
 pub fn rt_cuda_launch_kernel_name_array_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -1406,7 +1440,11 @@ pub fn rt_cuda_device_compute_capability_fn(args: &[Value]) -> Result<Value, Com
                 if r_major == 0 && r_minor == 0 {
                     return Ok(Value::Int((major * 10 + minor) as i64));
                 }
-                return Ok(Value::Int(if r_major != 0 { r_major } else { r_minor } as i64));
+                // CUresult codes are POSITIVE (3 = NOT_INITIALIZED, 101 =
+                // INVALID_DEVICE); returned raw they read as a plausible
+                // capability. Negate so every failure is <= 0.
+                let rc = if r_major != 0 { r_major } else { r_minor };
+                return Ok(Value::Int(-(rc as i64)));
             }
         }
         Ok(Value::Int(-1))

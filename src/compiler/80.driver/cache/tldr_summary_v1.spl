@@ -72,15 +72,48 @@ fn _tldr_count_v1(s: text, ch: text) -> i64:
 
 # Names re-exported by `pub use a.b.{x, y as z}` / `export use a.b.{x}`;
 # nil when the form is not an explicit brace list (glob, bare module).
+fn _tldr_strip_line_comment_v1(raw_line: text) -> text:
+    var in_str = false
+    var escaped = false
+    var i = 0
+    val n = raw_line.byte_len()
+    while i < n:
+        val b = raw_line.byte_at(i)
+        if in_str:
+            if escaped:
+                escaped = false
+            elif b == 92:
+                escaped = true
+            elif b == 34:
+                in_str = false
+        else:
+            if b == 34:
+                in_str = true
+            elif b == 35:
+                return raw_line.substring(0, i)
+        i = i + 1
+    raw_line
+
+fn _tldr_strip_stmt_comments_v1(stmt: text) -> text:
+    var cleaned_lines: [text] = []
+    for raw_line in stmt.split("\n"):
+        val trimmed = _tldr_strip_line_comment_v1(raw_line).trim()
+        if trimmed != "":
+            cleaned_lines.push(trimmed)
+    cleaned_lines.join(" ").trim()
+
 fn _tldr_reexport_names_v1(spec: text) -> [text]?:
-    val lb = spec.index_of(".{")
-    if lb < 0 or not spec.ends_with("}"): return nil
+    val cleaned = _tldr_strip_stmt_comments_v1(spec)
+    val lb = cleaned.index_of(".{")
+    if lb < 0 or not cleaned.ends_with("}"): return None
     var names: [text] = []
-    for part in spec.substring(lb + 2, spec.byte_len() - 1).split(","):
+    for part in cleaned.substring(lb + 2, cleaned.byte_len() - 1).split(","):
         val item = part.trim()
-        if item == "" or item == "*": return nil
+        if item == "": continue
+        if item == "*": return None
         val as_at = item.index_of(" as ")
         names.push(if as_at > 0: item.substring(as_at + 4).trim() else: item)
+    if names.len() == 0: return None
     Some(names)
 
 # Summary entries ("<kind>|<body>") of one module's own source, sorted.
@@ -110,10 +143,13 @@ pub fn tldr_summary_entries_v1(module_id: text, source: text) -> [text]:
         val word = if sp > 0: decl.substring(0, sp) else: decl
         val rest = if sp > 0: decl.substring(sp + 1).trim() else: ""
         if word == "import" or word == "use" or word == "export":
-            # Source-ordered statement text: the surface's imports/exports.
-            var stmt = line.trim()
+            # Source-ordered statement text: strip `#` comments outside string
+            # literals on each line BEFORE counting `{` / `}` so comment braces
+            # never corrupt multiline statement accumulation.
+            var stmt = _tldr_strip_line_comment_v1(line).trim()
             while li < lines.len() and _tldr_count_v1(stmt, "{") > _tldr_count_v1(stmt, "}"):
-                stmt = stmt + "\n" + lines[li]
+                val next_line = _tldr_strip_line_comment_v1(lines[li])
+                stmt = stmt + "\n" + next_line
                 li = li + 1
             use_stmts.push(stmt)
         if word == "impl" or word == "extend":
@@ -126,7 +162,12 @@ pub fn tldr_summary_entries_v1(module_id: text, source: text) -> [text]:
             attrs = []
             continue
         if word == "use" or (word == "export" and rest.starts_with("use ")):
-            val spec = if word == "use": rest else: rest.substring(4).trim()
+            var full_stmt = use_stmts[use_stmts.len() - 1]
+            if full_stmt.starts_with("pub "):
+                full_stmt = full_stmt.substring(4).trim()
+            if full_stmt.starts_with("export "):
+                full_stmt = full_stmt.substring(7).trim()
+            val spec = if full_stmt.starts_with("use "): full_stmt.substring(4).trim() else: rest
             match _tldr_reexport_names_v1(spec):
                 case Some(names):
                     for name in names:

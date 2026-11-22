@@ -268,19 +268,39 @@ fn _driver_parse_shard_queue_dir() -> text:
 pub fn driver_parse_shard_claimed() -> i64:
     _driver_parse_shard_claimed
 
+# reason: shard spec string and source count returning partition start index
+@allow(primitive_api)
+pub fn driver_parse_shard_strided_start_for_spec_v1(spec: text, total: i64) -> i64:
+    if total <= 1 or spec == "":
+        return 0
+    val parts = spec.split("/")
+    if parts.len() != 2:
+        return 0
+    val index = parts[0].to_i64() ?? -1
+    val count = parts[1].to_i64() ?? 0
+    if count <= 1 or index <= 0 or index >= count:
+        return 0
+    (index * total) / count
+
+# reason: source count -> partition start index for active parse shard
+@allow(primitive_api)
+pub fn driver_parse_shard_strided_start_v1(total: i64) -> i64:
+    driver_parse_shard_strided_start_for_spec_v1(_driver_parse_shard_spec(), total)
+
 fn _driver_parse_shard_claim(queue_dir: text, path: text) -> bool:
     # Path hash + length: the marker name must agree across processes (same
     # reason the hash is spelled out above) and a collision only costs one
     # module its shard slot -- the real build still parses it.
-    val marker = "{queue_dir}/{driver_parse_shard_hash(path)}-{path.len()}.claim"
-    if file_exists(marker):
-        return false
-    val claimed = file_create_exclusive(marker, _driver_parse_shard_spec())
-    if not claimed and not file_exists(marker):
-        return _driver_parse_shard_owns_static(path)
+    # O_CREAT|O_EXCL directly without a redundant pre-stat; record "<spec>\n<path>"
+    # so parse_shard_release_claims attributes orphaned claims to `path`.
+    val marker = "{queue_dir}/{driver_parse_shard_hash(path)}-{path.byte_len()}.claim"
+    val claimed = file_create_exclusive(marker, "{_driver_parse_shard_spec()}\n{path}")
     if claimed:
         _driver_parse_shard_claimed = _driver_parse_shard_claimed + 1
-    claimed
+        return true
+    if not file_exists(marker):
+        return _driver_parse_shard_owns_static(path)
+    false
 
 fn _driver_parse_shard_owns(path: text) -> bool:
     if _driver_parse_shard_spec() == "":
