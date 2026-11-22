@@ -1,13 +1,13 @@
 # macOS Vulkan live backend is unavailable before rendering
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-22 — MoltenVK portability & provider micro-probe fixes landed
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+**Status:** CLOSED (2026-11-22; `bug_db.sdn` status: `closed`)
 
-## Status
+## Historical Status (2026-07-26)
 
-Open. The current trusted self-hosted Vulkan harness rebuilds, but no current
-framebuffer or event capture exists.
+At filing, the trusted self-hosted Vulkan harness rebuilt, while live
+framebuffer/event capture remained blocked pending provider micro-probe and
+MoltenVK portability fixes documented below.
 
 ## Evidence
 
@@ -79,7 +79,7 @@ Four concrete macOS MoltenVK discovery, portability, and micro-probe defects wer
 1. **`src/compiler_rust/runtime/src/vulkan/instance.rs` (`VUID-VkInstanceCreateInfo-flags-06559`)**:
    - Previously, `create_flags |= vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR` was set on `#[cfg(target_os = "macos")]` unconditionally while `VK_KHR_portability_enumeration` was pushed only under `#[cfg(feature = "vulkan")]`, and `VK_EXT_metal_surface` was pushed without checking `has_ext(...)`.
    - Fixed by enumerating instance extensions unconditionally, gating `VK_EXT_metal_surface` on `has_ext`, and pairing `ENUMERATE_PORTABILITY_KHR` strictly with `has_ext(ash::khr::portability_enumeration::NAME)` across all feature configurations.
-   - Added automatic macOS `VK_ICD_FILENAMES` fallback discovery (`/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json`, `/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json`, `/usr/local/{etc,share}/vulkan/icd.d/MoltenVK_icd.json`) when both `VK_ICD_FILENAMES` and `VK_DRIVER_FILES` are unset.
+   - Added automatic macOS `VK_ICD_FILENAMES` fallback discovery (`/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json`, `/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json`, `/usr/local/{etc,share}/vulkan/icd.d/MoltenVK_icd.json`) when both `VK_ICD_FILENAMES` and `VK_DRIVER_FILES` are unset, owned by a single shared `Once`-guarded `simple_runtime::vulkan_graphics_runtime::ensure_macos_moltenvk_icd_env()` (re-exported in `vulkan::instance` and called by `interpreter_extern/gpu.rs`).
 2. **`src/compiler_rust/runtime/src/vulkan/device.rs` & `src/compiler_rust/compiler/src/interpreter_extern/gpu.rs` (`VUID-VkDeviceCreateInfo-pProperties-04451`)**:
    - MoltenVK physical devices advertise `VK_KHR_portability_subset`, which the Vulkan Portability specification requires `vkCreateDevice` to enable whenever advertised. Both runtime and interpreter `vkCreateDevice` paths now enumerate device extensions and enable `"VK_KHR_portability_subset"` when present (and `device.rs` gates `shader_int64` and `VK_KHR_swapchain` on adapter support).
    - `gpu.rs` also applies the macOS `MoltenVK_icd.json` environment fallback before `dlopen`.

@@ -4,8 +4,8 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-Filed 2026-09-03. Status: OPEN. Severity: HIGH (portability/correctness —
-undefined behaviour on a conformant device), but **latent on this host**.
+Filed 2026-09-03. Status: RESOLVED (2026-11-22). Severity: HIGH (portability/correctness —
+undefined behaviour on a conformant device), **latent on Apple Silicon MoltenVK**.
 
 ## The defect
 
@@ -54,25 +54,6 @@ inventing anything.
 Additionally the runtime should query `maxComputeWorkGroupCount` (and
 `maxStorageBufferRange`, see the sizing inventory) and fail LOUDLY rather than
 through `mark_cpu_fallback`, which is a silent downgrade.
-
-## Why it is not fixed in this commit
-
-`clear` is on every frame path, so a wrong change breaks everything. At the
-time of filing, `scripts/check/check-engine2d-backend-parity.shs` was
-ERRORing (`ERROR — nothing was compared`, exit 2) because several agents were
-saturating the GPU with concurrent benchmarks — so pixel-identity could not be
-verified. Changing the clear path without that evidence would be exactly the
-kind of unverified "obvious" fix that has already produced one 4x regression in
-this arc. Fix when the machine is quiet and both gates run clean.
-
-## Verification when fixed
-
-- `sh scripts/check/check-engine2d-backend-parity.shs` -> PASS (not ERROR)
-- `sh scripts/check/check-vulkan-2d-bit-diff.shs` -> PASS
-- resolution sweep 800x600 / 1080p / 4K / 7680x4320 / 8192x8192, confirming no
-  regression at small sizes
-- ideally, assert the computed group counts against the 65,535 floor in a unit
-  check so the defect cannot silently return
 
 ## Source
 

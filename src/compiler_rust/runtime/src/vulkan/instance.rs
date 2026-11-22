@@ -21,31 +21,7 @@ const VULKAN_LIB_CANDIDATES: &[&str] = &[
     "/usr/local/lib/libvulkan.dylib",
 ];
 
-#[cfg(target_os = "macos")]
-const MOLTENVK_ICD_CANDIDATES: &[&str] = &[
-    "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json",
-    "/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json",
-    "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json",
-    "/usr/local/share/vulkan/icd.d/MoltenVK_icd.json",
-];
-
-#[cfg(target_os = "macos")]
-fn ensure_macos_moltenvk_icd_env() {
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        let has_icd = std::env::var_os("VK_ICD_FILENAMES").is_some_and(|v| !v.is_empty());
-        let has_drv = std::env::var_os("VK_DRIVER_FILES").is_some_and(|v| !v.is_empty());
-        if !has_icd && !has_drv {
-            if let Some(path) = MOLTENVK_ICD_CANDIDATES
-                .iter()
-                .find(|candidate| std::path::Path::new(candidate).is_file())
-            {
-                std::env::set_var("VK_ICD_FILENAMES", path);
-            }
-        }
-    });
-}
+pub use crate::vulkan_graphics_runtime::ensure_macos_moltenvk_icd_env;
 #[cfg(all(unix, not(target_os = "macos")))]
 const VULKAN_LIB_CANDIDATES: &[&str] = &["libvulkan.so.1", "libvulkan.so"];
 #[cfg(windows)]
@@ -79,6 +55,7 @@ impl VulkanInstance {
 
     /// Check if Vulkan is available on this system
     pub fn is_available() -> bool {
+        ensure_macos_moltenvk_icd_env();
         if unsafe { ash::Entry::load() }.is_ok() {
             return true;
         }
@@ -94,7 +71,6 @@ impl VulkanInstance {
     /// the platform-default soname is not on the dyld search path (MoltenVK via
     /// Homebrew installs to /opt/homebrew/lib, which `ash::Entry::load` misses).
     fn load_entry() -> VulkanResult<ash::Entry> {
-        #[cfg(target_os = "macos")]
         ensure_macos_moltenvk_icd_env();
 
         if let Ok(entry) = unsafe { ash::Entry::load() } {

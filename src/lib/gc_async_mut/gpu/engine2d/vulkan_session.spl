@@ -248,9 +248,17 @@ class VulkanSession:
           5 — one or more shader compilations failed
           6 — one or more pipeline creations failed
         """
+        var retained_refs: i64 = 1
         if self.is_initialized and self.device > 0:
-            self.init_error = ""
-            return 0
+            val live_device = vulkan_get_device()
+            if live_device == self.device or (live_device <= 0 and self.selected_device_index < 0):
+                self.init_error = ""
+                return 0
+            # Runtime device was shut down or replaced externally: clear stale
+            # handles before re-initializing, preserving live retain count.
+            if self.ref_count > 1:
+                retained_refs = self.ref_count
+            self._cleanup()
         self.init_error = ""
         if not vulkan_sffi_is_available():
             self.init_error = "availability"
@@ -447,7 +455,7 @@ class VulkanSession:
             else:
                 self.gradient_layer_error = ""
 
-        self.ref_count = 1
+        self.ref_count = retained_refs
         self.is_initialized = true
         self.generation = self.generation + 1
         self.install_pinned_font_atlas_pipeline(spirv_font_atlas_composite())

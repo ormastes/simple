@@ -3672,30 +3672,8 @@ mod vulkan_dlopen {
         &["libvulkan.so.1", "libvulkan.so"]
     }
 
-    #[cfg(target_os = "macos")]
-    fn ensure_macos_moltenvk_icd_env() {
-        use std::sync::Once;
-        static INIT: Once = Once::new();
-        INIT.call_once(|| {
-            const CANDIDATES: &[&str] = &[
-                "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json",
-                "/opt/homebrew/share/vulkan/icd.d/MoltenVK_icd.json",
-                "/usr/local/etc/vulkan/icd.d/MoltenVK_icd.json",
-                "/usr/local/share/vulkan/icd.d/MoltenVK_icd.json",
-            ];
-            let has_icd = std::env::var_os("VK_ICD_FILENAMES").is_some_and(|v| !v.is_empty());
-            let has_drv = std::env::var_os("VK_DRIVER_FILES").is_some_and(|v| !v.is_empty());
-            if !has_icd && !has_drv {
-                if let Some(path) = CANDIDATES.iter().find(|p| std::path::Path::new(p).is_file()) {
-                    std::env::set_var("VK_ICD_FILENAMES", path);
-                }
-            }
-        });
-    }
-
     pub fn load_vulkan() -> Option<VkFns> {
-        #[cfg(target_os = "macos")]
-        ensure_macos_moltenvk_icd_env();
+        simple_runtime::vulkan_graphics_runtime::ensure_macos_moltenvk_icd_env();
 
         unsafe {
             #[cfg(unix)]

@@ -80,7 +80,7 @@ Add `self.dirty = true` before the early `return` in
 
 ## Resolution (2026-11-22)
 
-- `_draw_text_impl` (`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl`) and `_gpu_draw_text_fallback` (`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl`) both now set `self.dirty = true`, `self.host_mirror_frame_fresh = false`, `self.note_damage_full()`, `self.last_text_path = "cpu_raster"`, and `self.last_text_fallback_reason = "backend-uninitialized"` before returning when `not self.initialized`.
-- `_gpu_draw_text_fallback` also invalidates `self.host_mirror_valid = false` and marks `self.dirty = uploaded` after uploading CPU-rasterized glyphs into `self.d_framebuffer`, preventing stale `last_host_checksum` reuse and skipped `present()`.
+- `_draw_text_impl` (`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl`) and `_gpu_draw_text_fallback` (`src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_helpers.spl`) both now set `self.dirty = true`, `self.host_mirror_frame_fresh = false`, `self.note_damage_full()`, `self.last_text_path = "cpu-raster-blit"`, and `self.last_text_fallback_reason = "backend-uninitialized"` before returning when `not self.initialized`.
+- `_gpu_draw_text_fallback` also sets `self.last_text_path = "cpu-raster-blit"` and `self.last_text_fallback_reason = "legacy-text-host-framebuffer-fallback"` on the initialized fallback path, invalidates `self.host_mirror_valid = false`, records `self.last_error` and promotes `self.cpu_fallback_host_surface = true` if the GPU upload fails, and keeps `self.dirty = true` so subsequent `present()` never silently no-ops.
 - Added direct `_gpu_draw_text_fallback` regression coverage in `test/01_unit/lib/gpu/engine2d/backend_vulkan_text_fallback_spec.spl` and verified 3/3 examples pass.
 

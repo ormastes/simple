@@ -15,9 +15,11 @@ session recompiled all 17 SPIR-V shaders and 17 compute pipelines, overwriting
 and resetting `self.ref_count = 1`.
 
 Both `VulkanSessionBackend.init_device()` (`if self.initialized and self.handle != 0`)
-and `VulkanSession.init()` (`if self.is_initialized and self.device > 0`) are now
-idempotent, preserving live handles, pipeline state, and reference counts while
-clearing stale error strings until explicit cleanup/release.
+and `VulkanSession.init()` (`if self.is_initialized and self.device > 0`, verified
+against `vulkan_get_device()` so an externally shut-down or replaced runtime
+device cleans up stale handles and re-initializes cleanly) are now idempotent,
+preserving live handles, pipeline state, and reference counts while clearing
+stale error strings until explicit cleanup/release.
 
 Verified by executing `test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_session_backend_reinit_spec.spl`
-(2/2 examples passed).
+(3/3 examples passed).
