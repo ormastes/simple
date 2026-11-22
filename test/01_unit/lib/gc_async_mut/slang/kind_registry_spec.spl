@@ -374,8 +374,8 @@ describe "the HTTP surface":
         expect(r.body_bytes.len()).to_equal(0)
         expect(r.body.contains("\"slang_kind\":\"chat\",\"input_modalities\":[\"text\",\"image\"],\"output_modalities\":[\"text\"]")).to_equal(true)
 
-    it "answers 400 wrong_model_kind and 501 not_implemented on kind routes":
-        step("Verify: a chat model on /v1/embeddings is refused by kind; an embedder gets the stub 501")
+    it "answers 400 wrong_model_kind on kind routes and reaches the served runners":
+        step("Verify: a chat model on /v1/embeddings is refused by kind; an embedder reaches the pooling runner; a tts model reaches the speech runner")
         val root = fixture_dir("routes")
         dir_create_all(root + "/chat")
         file_write_bytes(root + "/chat/m.gguf", gguf([kv_str("general.architecture", "llama")]))
@@ -384,9 +384,21 @@ describe "the HTTP surface":
         val wrong = slang_api_dispatch("POST", "/v1/embeddings", "{\"model\":\"chat\",\"input\":\"x\"}", root)
         expect(wrong.status).to_equal(400)
         expect(json_string_field(wrong.body, "code")).to_equal("wrong_model_kind")
-        val stub = slang_api_dispatch("POST", "/v1/embeddings", "{\"model\":\"emb\",\"input\":\"x\"}", root)
-        expect(stub.status).to_equal(501)
-        expect(json_string_field(stub.body, "code")).to_equal("not_implemented")
+        # /v1/embeddings is served (lane L4): the route reaches the pooling
+        # runner, which cannot load this metadata-only fixture.
+        val served = slang_api_dispatch("POST", "/v1/embeddings", "{\"model\":\"emb\",\"input\":\"x\"}", root)
+        expect(served.status).to_equal(503)
+        # backend_unavailable without SLANG_GGML_LIB, model_load_failed with it.
+        val served_code = json_string_field(served.body, "code")
+        expect(served_code == "model_load_failed" or served_code == "backend_unavailable").to_equal(true)
+        dir_create_all(root + "/tts")
+        file_write_bytes(root + "/tts/m.gguf", gguf([kv_str("general.architecture", "llama")]))
+        write_file(root + "/tts/slang_kind.sdn", "kind: tts")
+        # /v1/audio/speech is served (lane L5): a metadata-only tts fixture has no
+        # vocoder, so the runner refuses it as unavailable.
+        val stub = slang_api_dispatch("POST", "/v1/audio/speech", "{\"model\":\"tts\",\"input\":\"x\"}", root)
+        expect(stub.status).to_equal(503)
+        expect(json_string_field(stub.body, "code")).to_equal("model_unavailable")
         val chat = slang_api_dispatch("POST", "/v1/chat/completions", "{\"model\":\"emb\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", root)
         expect(chat.status).to_equal(400)
         expect(json_string_field(chat.body, "code")).to_equal("wrong_model_kind")
@@ -410,7 +422,7 @@ describe "the HTTP surface":
         val root = fixture_dir("route_table")
         dir_create_all(root + "/emb")
         file_write_bytes(root + "/emb/m.gguf", gguf([kv_str("general.architecture", "bert")]))
-        val rr = slang_api_dispatch("POST", "/v1/rerank", "{\"model\":\"emb\"}", root)
+        val rr = slang_api_dispatch("POST", "/v1/rerank", "{\"model\":\"emb\",\"query\":\"q\",\"documents\":[\"a\"]}", root)
         expect(rr.status).to_equal(400)
         expect(json_string_field(rr.body, "code")).to_equal("wrong_model_kind")
         expect(slang_api_dispatch("GET", "/v1/rerank", "", root).status).to_equal(405)

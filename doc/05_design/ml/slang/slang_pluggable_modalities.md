@@ -118,7 +118,7 @@ Each runner module exposes the same four free functions:
 - `<r>_close()`
 - `<r>_available() -> bool`
 
-`engine/kind_dispatch.spl` selects one with a `match` on `RunnerKind`. That is
+Each kind route calls its runner directly from its serving module (`engine/kind_dispatch.spl`, a `match` on `RunnerKind`, was removed once every route was served). That is
 plain enum dispatch: no inheritance and no trait objects, which keeps it seed-safe.
 
 Rules:

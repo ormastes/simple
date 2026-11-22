@@ -73,7 +73,7 @@ static void reload(int64_t n_gpu_layers) {
 int main(void) {
     slang_ggml_backend_init();
     reload(0);
-    assert(slang_ggml_capabilities() == 31);
+    assert(slang_ggml_capabilities() == (31 | 256 | 512));
     assert(slang_ggml_prefix_cache_mode_configure(4, 0) < 0);
     assert(slang_ggml_prefix_cache_mode_configure(2, -1) < 0);
     assert(slang_ggml_tree_mode() == 0);

@@ -1,0 +1,491 @@
+# @gc — module uses GC runtime
+#
+# tts_runner — text -> speech, a 2-stage pipeline (design
+# doc/05_design/ml/slang/slang_pluggable_modalities.md, kind Tts):
+#   1. OuteTTS-0.2 (a plain llama/qwen2 decoder) turns a prompt into audio-code
+#      tokens `<|N|>` through the ggml request API;
+#   2. the WavTokenizer vocoder maps the codes to spectrogram rows, which
+#      runners/istft.spl turns into 24 kHz samples.
+#
+# The prompt format, text normalisation and the default speaker are ported
+# from llama.cpp `tools/tts/tts.cpp` at commit 67b2b7f2f2d (the last OuteTTS
+# revision of that tool) — process_text, number_to_words and the en_male_1
+# speaker block from edwko/OuteTTS default_speakers.
+
+use std.common.string_core.{bytes_to_text, text_to_utf8_bytes}
+use std.gc_async_mut.slang.model_executor.backend.{prepare_request_tokens, GgmlBackend, GgmlModelHandle, GgmlRequest, BackendActiveGenerationRequest, SamplerConfig, POOLING_NONE, open_backend, open_model_handle, close_model_handle, open_request_for, close_backend_request, request_configure_sampler, generate_on_request, request_embed_configure, request_set_tokens, request_embeddings, f32_le_to_floats, backend_error_text}
+use std.gc_async_mut.slang.model_executor.runners.istft.{wavtokenizer_istft_params, embd_to_audio}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
+use std.gc_async_mut.slang.modality.kinds.{Modality, KindRequest, KindResult, OutputPart}
+use std.gc_async_mut.slang.modality.kind_registry.{kind_override_field, gguf_files, gguf_facts_are_vocoder}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_lib_path, engine_backend_available}
+use std.nogc_sync_mut.sffi.dynamic.{spl_dlclose}
+use std.common.audio.wav_encode.{encode_wav_pcm16}
+use std.io_runtime.{time_now_monotonic_ms}
+use std.gc_async_mut.slang.host.slang_host.{host_file_exists}
+
+const OUTETTS_TEXT_SEP: text = "<|text_sep|>"
+# Prefix of a tts_run error caused by the input itself (answered 400, not 500).
+const TTS_INPUT_FAULT: text = "input: "
+
+# ---------------------------------------------------------------------------
+# Default speaker (OuteTTS en_male_1), verbatim from tts.cpp 67b2b7f2f2d.
+# ---------------------------------------------------------------------------
+
+fn _speaker_text() -> text:
+    "<|text_start|>the<|text_sep|>overall<|text_sep|>package<|text_sep|>from<|text_sep|>just<|text_sep|>two<|text_sep|>people<|text_sep|>is<|text_sep|>pretty<|text_sep|>remarkable<|text_sep|>sure<|text_sep|>i<|text_sep|>have<|text_sep|>some<|text_sep|>critiques<|text_sep|>about<|text_sep|>some<|text_sep|>of<|text_sep|>the<|text_sep|>gameplay<|text_sep|>aspects<|text_sep|>but<|text_sep|>its<|text_sep|>still<|text_sep|>really<|text_sep|>enjoyable<|text_sep|>and<|text_sep|>it<|text_sep|>looks<|text_sep|>lovely<|text_sep|>"
+
+fn _speaker_audio_lines() -> [text]:
+    [
+        "the<|t_0.08|><|code_start|><|257|><|740|><|636|><|913|><|788|><|1703|><|code_end|>",
+        "overall<|t_0.36|><|code_start|><|127|><|201|><|191|><|774|><|700|><|532|><|1056|><|557|><|798|><|298|><|1741|><|747|><|1662|><|1617|><|1702|><|1527|><|368|><|1588|><|1049|><|1008|><|1625|><|747|><|1576|><|728|><|1019|><|1696|><|1765|><|code_end|>",
+        "package<|t_0.56|><|code_start|><|935|><|584|><|1319|><|627|><|1016|><|1491|><|1344|><|1117|><|1526|><|1040|><|239|><|1435|><|951|><|498|><|723|><|1180|><|535|><|789|><|1649|><|1637|><|78|><|465|><|1668|><|901|><|595|><|1675|><|117|><|1009|><|1667|><|320|><|840|><|79|><|507|><|1762|><|1508|><|1228|><|1768|><|802|><|1450|><|1457|><|232|><|639|><|code_end|>",
+        "from<|t_0.19|><|code_start|><|604|><|782|><|1682|><|872|><|1532|><|1600|><|1036|><|1761|><|647|><|1554|><|1371|><|653|><|1595|><|950|><|code_end|>",
+        "just<|t_0.25|><|code_start|><|1782|><|1670|><|317|><|786|><|1748|><|631|><|599|><|1155|><|1364|><|1524|><|36|><|1591|><|889|><|1535|><|541|><|440|><|1532|><|50|><|870|><|code_end|>",
+        "two<|t_0.24|><|code_start|><|1681|><|1510|><|673|><|799|><|805|><|1342|><|330|><|519|><|62|><|640|><|1138|><|565|><|1552|><|1497|><|1552|><|572|><|1715|><|1732|><|code_end|>",
+        "people<|t_0.39|><|code_start|><|593|><|274|><|136|><|740|><|691|><|633|><|1484|><|1061|><|1138|><|1485|><|344|><|428|><|397|><|1562|><|645|><|917|><|1035|><|1449|><|1669|><|487|><|442|><|1484|><|1329|><|1832|><|1704|><|600|><|761|><|653|><|269|><|code_end|>",
+        "is<|t_0.16|><|code_start|><|566|><|583|><|1755|><|646|><|1337|><|709|><|802|><|1008|><|485|><|1583|><|652|><|10|><|code_end|>",
+        "pretty<|t_0.32|><|code_start|><|1818|><|1747|><|692|><|733|><|1010|><|534|><|406|><|1697|><|1053|><|1521|><|1355|><|1274|><|816|><|1398|><|211|><|1218|><|817|><|1472|><|1703|><|686|><|13|><|822|><|445|><|1068|><|code_end|>",
+        "remarkable<|t_0.68|><|code_start|><|230|><|1048|><|1705|><|355|><|706|><|1149|><|1535|><|1787|><|1356|><|1396|><|835|><|1583|><|486|><|1249|><|286|><|937|><|1076|><|1150|><|614|><|42|><|1058|><|705|><|681|><|798|><|934|><|490|><|514|><|1399|><|572|><|1446|><|1703|><|1346|><|1040|><|1426|><|1304|><|664|><|171|><|1530|><|625|><|64|><|1708|><|1830|><|1030|><|443|><|1509|><|1063|><|1605|><|1785|><|721|><|1440|><|923|><|code_end|>",
+        "sure<|t_0.36|><|code_start|><|792|><|1780|><|923|><|1640|><|265|><|261|><|1525|><|567|><|1491|><|1250|><|1730|><|362|><|919|><|1766|><|543|><|1|><|333|><|113|><|970|><|252|><|1606|><|133|><|302|><|1810|><|1046|><|1190|><|1675|><|code_end|>",
+        "i<|t_0.08|><|code_start|><|123|><|439|><|1074|><|705|><|1799|><|637|><|code_end|>",
+        "have<|t_0.16|><|code_start|><|1509|><|599|><|518|><|1170|><|552|><|1029|><|1267|><|864|><|419|><|143|><|1061|><|0|><|code_end|>",
+        "some<|t_0.16|><|code_start|><|619|><|400|><|1270|><|62|><|1370|><|1832|><|917|><|1661|><|167|><|269|><|1366|><|1508|><|code_end|>",
+        "critiques<|t_0.60|><|code_start|><|559|><|584|><|1163|><|1129|><|1313|><|1728|><|721|><|1146|><|1093|><|577|><|928|><|27|><|630|><|1080|><|1346|><|1337|><|320|><|1382|><|1175|><|1682|><|1556|><|990|><|1683|><|860|><|1721|><|110|><|786|><|376|><|1085|><|756|><|1523|><|234|><|1334|><|1506|><|1578|><|659|><|612|><|1108|><|1466|><|1647|><|308|><|1470|><|746|><|556|><|1061|><|code_end|>",
+        "about<|t_0.29|><|code_start|><|26|><|1649|><|545|><|1367|><|1263|><|1728|><|450|><|859|><|1434|><|497|><|1220|><|1285|><|179|><|755|><|1154|><|779|><|179|><|1229|><|1213|><|922|><|1774|><|1408|><|code_end|>",
+        "some<|t_0.23|><|code_start|><|986|><|28|><|1649|><|778|><|858|><|1519|><|1|><|18|><|26|><|1042|><|1174|><|1309|><|1499|><|1712|><|1692|><|1516|><|1574|><|code_end|>",
+        "of<|t_0.07|><|code_start|><|197|><|716|><|1039|><|1662|><|64|><|code_end|>",
+        "the<|t_0.08|><|code_start|><|1811|><|1568|><|569|><|886|><|1025|><|1374|><|code_end|>",
+        "gameplay<|t_0.48|><|code_start|><|1269|><|1092|><|933|><|1362|><|1762|><|1700|><|1675|><|215|><|781|><|1086|><|461|><|838|><|1022|><|759|><|649|><|1416|><|1004|><|551|><|909|><|787|><|343|><|830|><|1391|><|1040|><|1622|><|1779|><|1360|><|1231|><|1187|><|1317|><|76|><|997|><|989|><|978|><|737|><|189|><|code_end|>",
+        "aspects<|t_0.56|><|code_start|><|1423|><|797|><|1316|><|1222|><|147|><|719|><|1347|><|386|><|1390|><|1558|><|154|><|440|><|634|><|592|><|1097|><|1718|><|712|><|763|><|1118|><|1721|><|1311|><|868|><|580|><|362|><|1435|><|868|><|247|><|221|><|886|><|1145|><|1274|><|1284|><|457|><|1043|><|1459|><|1818|><|62|><|599|><|1035|><|62|><|1649|><|778|><|code_end|>",
+        "but<|t_0.20|><|code_start|><|780|><|1825|><|1681|><|1007|><|861|><|710|><|702|><|939|><|1669|><|1491|><|613|><|1739|><|823|><|1469|><|648|><|code_end|>",
+        "its<|t_0.09|><|code_start|><|92|><|688|><|1623|><|962|><|1670|><|527|><|599|><|code_end|>",
+        "still<|t_0.27|><|code_start|><|636|><|10|><|1217|><|344|><|713|><|957|><|823|><|154|><|1649|><|1286|><|508|><|214|><|1760|><|1250|><|456|><|1352|><|1368|><|921|><|615|><|5|><|code_end|>",
+        "really<|t_0.36|><|code_start|><|55|><|420|><|1008|><|1659|><|27|><|644|><|1266|><|617|><|761|><|1712|><|109|><|1465|><|1587|><|503|><|1541|><|619|><|197|><|1019|><|817|><|269|><|377|><|362|><|1381|><|507|><|1488|><|4|><|1695|><|code_end|>",
+        "enjoyable<|t_0.49|><|code_start|><|678|><|501|><|864|><|319|><|288|><|1472|><|1341|><|686|><|562|><|1463|><|619|><|1563|><|471|><|911|><|730|><|1811|><|1006|><|520|><|861|><|1274|><|125|><|1431|><|638|><|621|><|153|><|876|><|1770|><|437|><|987|><|1653|><|1109|><|898|><|1285|><|80|><|593|><|1709|><|843|><|code_end|>",
+        "and<|t_0.15|><|code_start|><|1285|><|987|><|303|><|1037|><|730|><|1164|><|502|><|120|><|1737|><|1655|><|1318|><|code_end|>",
+        "it<|t_0.09|><|code_start|><|848|><|1366|><|395|><|1601|><|1513|><|593|><|1302|><|code_end|>",
+        "looks<|t_0.27|><|code_start|><|1281|><|1266|><|1755|><|572|><|248|><|1751|><|1257|><|695|><|1380|><|457|><|659|><|585|><|1315|><|1105|><|1776|><|736|><|24|><|736|><|654|><|1027|><|code_end|>",
+        "lovely<|t_0.56|><|code_start|><|634|><|596|><|1766|><|1556|><|1306|><|1285|><|1481|><|1721|><|1123|><|438|><|1246|><|1251|><|795|><|659|><|1381|><|1658|><|217|><|1772|><|562|><|952|><|107|><|1129|><|1112|><|467|><|550|><|1079|><|840|><|1615|><|1469|><|1380|><|168|><|917|><|836|><|1827|><|437|><|583|><|67|><|595|><|1087|><|1646|><|1493|><|1677|><|code_end|>"
+    ]
+
+fn _speaker_audio() -> text:
+    var out = "<|audio_start|>"
+    for line in _speaker_audio_lines():
+        out = out + "\n" + line
+    out
+
+# ---------------------------------------------------------------------------
+# Text normalisation (tts.cpp process_text, OuteTTS v0.2): numbers to words,
+# lower case, [-_/,.\] to spaces, drop everything but a-z and whitespace,
+# collapse and trim whitespace, then each space becomes <|text_sep|>.
+# ---------------------------------------------------------------------------
+
+fn _ones(n: i64) -> text:
+    val words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+                 "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+                 "seventeen", "eighteen", "nineteen"]
+    words[n]
+
+fn _tens(n: i64) -> text:
+    val words = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
+    words[n]
+
+fn _below_thousand(num: i64) -> text:
+    var n = num
+    var out = ""
+    if n >= 100:
+        out = out + _ones(n / 100) + " hundred "
+        n = n % 100
+    if n >= 20:
+        out = out + _tens(n / 10)
+        if n % 10 > 0:
+            out = out + "-" + _ones(n % 10)
+    elif n > 0:
+        out = out + _ones(n)
+    out
+
+fn _is_digit(b: i64) -> bool:
+    b >= 48 and b <= 57
+
+# One `\d+(\.\d+)?` match. tts.cpp parses the integer part with std::stoi and
+# answers " " when it throws (more than 2^31 - 1).
+fn _number_words(int_digits: [i64], frac_digits: [i64], has_frac: bool) -> text:
+    var value: i64 = 0
+    for d in int_digits:
+        value = value * 10 + (d - 48)
+        if value > 2147483647:
+            return " "
+    var out = ""
+    if value == 0:
+        out = "zero"
+    else:
+        var n = value
+        if n >= 1000000000:
+            out = out + _below_thousand(n / 1000000000) + " billion "
+            n = n % 1000000000
+        if n >= 1000000:
+            out = out + _below_thousand(n / 1000000) + " million "
+            n = n % 1000000
+        if n >= 1000:
+            out = out + _below_thousand(n / 1000) + " thousand "
+            n = n % 1000
+        if n > 0:
+            out = out + _below_thousand(n)
+    if has_frac:
+        out = out + " point"
+        for d in frac_digits:
+            out = out + " " + _ones(d - 48)
+    out
+
+fn _replace_numbers(src: [i64]) -> [i64]:
+    var out: [i64] = []
+    var i: i64 = 0
+    val n = src.len()
+    while i < n:
+        if not _is_digit(src[i]):
+            out.push(src[i])
+            i = i + 1
+            continue
+        var int_digits: [i64] = []
+        while i < n and _is_digit(src[i]):
+            int_digits.push(src[i])
+            i = i + 1
+        var frac_digits: [i64] = []
+        var has_frac = false
+        if i + 1 < n and src[i] == 46 and _is_digit(src[i + 1]):
+            has_frac = true
+            i = i + 1
+            while i < n and _is_digit(src[i]):
+                frac_digits.push(src[i])
+                i = i + 1
+        for b in text_to_utf8_bytes(_number_words(int_digits, frac_digits, has_frac)):
+            out.push(b.to_i64())
+    out
+
+fn _is_space(b: i64) -> bool:
+    b == 32 or (b >= 9 and b <= 13)
+
+fn outetts_process_text(input: text) -> text:
+    var src: [i64] = []
+    for b in text_to_utf8_bytes(input):
+        src.push(b.to_i64())
+    val numbered = _replace_numbers(src)
+    # lower case, separators to space, keep only a-z and whitespace
+    var kept: [i64] = []
+    for raw in numbered:
+        var b = raw
+        if b >= 65 and b <= 90:
+            b = b + 32
+        if b == 45 or b == 95 or b == 47 or b == 44 or b == 46 or b == 92:
+            b = 32
+        if (b >= 97 and b <= 122) or _is_space(b):
+            kept.push(b)
+    # collapse whitespace runs, trim, and separate words with <|text_sep|>
+    var out = ""
+    var word: [u8] = []
+    var words = 0
+    var i: i64 = 0
+    while i <= kept.len():
+        if i == kept.len() or _is_space(kept[i]):
+            if word.len() > 0:
+                if words > 0:
+                    out = out + OUTETTS_TEXT_SEP
+                out = out + bytes_to_text(word)
+                words = words + 1
+                word = []
+        else:
+            word.push(kept[i].to_u8())
+        i = i + 1
+    out
+
+# The full OuteTTS-0.2 completion prompt with the default speaker:
+#   <|im_start|>\n <speaker words><text words><|text_end|>\n <speaker audio>
+# The model continues with "\n<word><|t_..|><|code_start|><|N|>...<|code_end|>"
+# per word and ends with <|audio_end|>.
+fn outetts_prompt(input: text) -> text:
+    "<|im_start|>\n" + _speaker_text() + outetts_process_text(input) + "<|text_end|>\n" + _speaker_audio()
+
+# The codes the model spoke for the input: generation ends at the first
+# <|audio_end|>, and only the first `words` word segments (each closed by
+# <|code_end|>) are kept. A safety net: before request-scoped EOG (L4
+# cdaba0b8b52) generation on a model handle ran to its cap, and OuteTTS
+# invented more words (measured: ASR heard extra sentences).
+fn outetts_spoken_codes(generated: text, words: i64) -> [i64]:
+    var body = generated
+    val end = body.find("<|audio_end|>")
+    if end >= 0:
+        body = body.substring(0, end)
+    val segments = body.split("<|code_end|>")
+    var kept = ""
+    var n: i64 = 0
+    while n < segments.len() and n < words:
+        kept = kept + segments[n]
+        n = n + 1
+    _codes_of(kept)
+
+# Words of the normalised input, i.e. the word segments OuteTTS should speak.
+fn outetts_word_count(input: text) -> i64:
+    val p = outetts_process_text(input)
+    if p == "":
+        return 0
+    p.split(OUTETTS_TEXT_SEP).len()
+
+# Every `<|N|>` (N all digits, <= 4100) in order; `<|t_0.08|>`, `<|code_start|>`
+# and the like are skipped. tts.cpp keeps token ids 151672..155772, which are
+# exactly `<|0|>`..`<|4100|>`.
+fn _codes_of(generated: text) -> [i64]:
+    val b = text_to_utf8_bytes(generated)
+    val n = b.len()
+    var codes: [i64] = []
+    var i: i64 = 0
+    while i + 4 < n:
+        if b[i].to_i64() == 60 and b[i + 1].to_i64() == 124:
+            var j = i + 2
+            var value: i64 = 0
+            while j < n and _is_digit(b[j].to_i64()) and value <= 4100:
+                value = value * 10 + (b[j].to_i64() - 48)
+                j = j + 1
+            if j > i + 2 and j + 1 < n and b[j].to_i64() == 124 and b[j + 1].to_i64() == 62 and value <= 4100:
+                codes.push(value)
+                i = j + 2
+                continue
+        i = i + 1
+    codes
+
+
+# ---------------------------------------------------------------------------
+# The runner: tts_available / tts_open / tts_run / tts_close (the runner
+# contract). Both models are loaded only in tts_open, as handles BESIDE any
+# resident chat model, and tts_close releases exactly what tts_open took: the
+# two handles and this module's reference to the library. It never calls
+# close_backend, which would free the chat engine's global model too.
+# ---------------------------------------------------------------------------
+
+# WavTokenizer-Large-75 output rate and its codebook size.
+const TTS_SAMPLE_RATE: i32 = 24000
+const TTS_CODEBOOK: i64 = 4096
+# The en_male_1 prompt is ~1k tokens; 8192 (tts.cpp's n_ctx) leaves room for
+# TTS_MAX_WORDS words at the per-word budget below.
+const TTS_N_CTX: i64 = 8192
+# Generation budget: measured ~27 tokens per spoken word (6 words -> 159
+# codes plus framing); twice that plus slack.
+const TTS_TOKENS_PER_WORD: i64 = 64
+const TTS_MAX_WORDS: i64 = 100
+
+
+var TTS_BACKEND: GgmlBackend? = None
+var TTS_LLM: GgmlModelHandle? = None
+var TTS_VOCODER: GgmlModelHandle? = None
+var TTS_MODEL_ID = ""
+# tts.cpp's sampler: top-k 4 at the default temperature 0.8, fixed seed.
+var TTS_SAMPLER = SamplerConfig(temperature_milli: 800, top_k: 4, top_p_milli: 1000, repeat_penalty_milli: 1000, seed: 42)
+var TTS_LAST_TIMINGS = ""
+
+fn tts_set_sampler(config: SamplerConfig):
+    TTS_SAMPLER = config
+
+# "generate_ms=.. codes=.. vocoder_ms=.. istft_wav_ms=.. samples=.." of the last run.
+fn tts_last_timings() -> text:
+    TTS_LAST_TIMINGS
+
+fn tts_available() -> bool:
+    engine_backend_available()
+
+fn _join(root: text, name: text) -> text:
+    if root.ends_with("/") or root.ends_with("\\"): root + name else: root + "/" + name
+
+# The vocoder GGUF of a Tts model directory: the slang_kind.sdn `vocoder:`
+# file, else the one GGUF whose architecture is wavtokenizer-dec.
+fn tts_vocoder_path(dir: text) -> Result<text, text>:
+    val named = kind_override_field(dir, "vocoder")
+    if named != "":
+        val path = _join(dir, named)
+        if host_file_exists(path):
+            return Ok(path)
+        return Err("slang_kind.sdn names vocoder " + named + " but " + path + " does not exist")
+    for f in gguf_files(dir):
+        if gguf_facts_are_vocoder(f.facts):
+            return Ok(_join(dir, f.name))
+    Err("no WavTokenizer vocoder (wavtokenizer-dec GGUF) in " + dir)
+
+fn _unlink(b: GgmlBackend):
+    unsafe(capabilities: [ffi]): spl_dlclose(b.lib)
+
+fn tts_close():
+    match TTS_BACKEND:
+        case Some(b):
+            match TTS_LLM:
+                case Some(h): close_model_handle(b, h)
+                case None: ()
+            match TTS_VOCODER:
+                case Some(h): close_model_handle(b, h)
+                case None: ()
+            _unlink(b)
+        case None: ()
+    TTS_BACKEND = None
+    TTS_LLM = None
+    TTS_VOCODER = None
+    TTS_MODEL_ID = ""
+
+fn tts_open(model: NativeModel) -> Result<(), text>:
+    if TTS_MODEL_ID == model.id and TTS_BACKEND.?:
+        return Ok(())
+    tts_close()
+    if model.entry_path == "":
+        return Err("model " + model.id + " has no TTS model GGUF")
+    var vocoder = ""
+    match tts_vocoder_path(model.root):
+        Err(reason): return Err(reason)
+        Ok(path): vocoder = path
+    val lib_path = engine_lib_path()
+    match open_backend(lib_path):
+        Err(e):
+            return Err("ggml backend unavailable at " + lib_path + ": " + backend_error_text(e))
+        Ok(b):
+            match open_model_handle(b, model.entry_path, -1):
+                Err(e):
+                    _unlink(b)
+                    return Err("TTS model load failed for " + model.id + ": " + backend_error_text(e))
+                Ok(llm):
+                    match open_model_handle(b, vocoder, -1):
+                        Err(e):
+                            close_model_handle(b, llm)
+                            _unlink(b)
+                            return Err("vocoder load failed (" + vocoder + "): " + backend_error_text(e))
+                        Ok(voc):
+                            TTS_BACKEND = Some(b)
+                            TTS_LLM = Some(llm)
+                            TTS_VOCODER = Some(voc)
+                            TTS_MODEL_ID = model.id
+                            Ok(())
+
+fn _request_text(req: KindRequest) -> text:
+    var out = ""
+    for p in req.parts:
+        if p.kind == "text":
+            if out != "":
+                out = out + " "
+            out = out + p.text
+    out
+
+fn _count_of(digits: text) -> i64:
+    var n: i64 = 0
+    for b in text_to_utf8_bytes(digits):
+        val d = b.to_i64() - 48
+        if d < 0 or d > 9:
+            return 0
+        n = n * 10 + d
+    n
+
+struct TtsGeneration:
+    output: text
+    prompt_tokens: i64
+    completion_tokens: i64
+
+# Stage 1: prompt -> generated text, on a fresh request of the LLM handle.
+fn _generate_codes(b: GgmlBackend, llm: GgmlModelHandle, prompt: text, max_tokens: i64) -> Result<TtsGeneration, text>:
+    match open_request_for(b, llm, TTS_N_CTX):
+        Err(e): Err("TTS request failed: " + backend_error_text(e))
+        Ok(request):
+            match request_configure_sampler(b, request, TTS_SAMPLER):
+                Err(e):
+                    close_backend_request(b, request)
+                    return Err("TTS sampler configure failed: " + backend_error_text(e))
+                Ok(_): ()
+            # Refuse, before any decode, a budget the prompt leaves no room for.
+            match prepare_request_tokens(b, request, prompt):
+                Err(e):
+                    close_backend_request(b, request)
+                    return Err("TTS prompt tokenize failed: " + backend_error_text(e))
+                Ok(count):
+                    if count + max_tokens > TTS_N_CTX:
+                        close_backend_request(b, request)
+                        return Err(TTS_INPUT_FAULT + "TTS prompt (" + count.to_text() + " tokens) plus a " + max_tokens.to_text() + " token budget exceeds the " + TTS_N_CTX.to_text() + " token context")
+            val generated = generate_on_request(BackendActiveGenerationRequest(max_tokens: max_tokens.to_text(), prompt: prompt, backend: b, request: request, chat: false, stops: []))
+            close_backend_request(b, request)
+            match generated:
+                Err(e): Err("TTS generation failed: " + backend_error_text(e))
+                Ok(g): Ok(TtsGeneration(output: g.output, prompt_tokens: g.prompt_tokens, completion_tokens: _count_of(g.generated_tokens)))
+
+# Stage 2: codes -> spectrogram rows (pooling none: one row per code).
+fn _vocode(b: GgmlBackend, voc: GgmlModelHandle, codes: [i64]) -> Result<[f64], text>:
+    match open_request_for(b, voc, codes.len()):
+        Err(e): Err("vocoder request failed: " + backend_error_text(e))
+        Ok(request):
+            val rows = _vocode_on(b, request, codes)
+            close_backend_request(b, request)
+            rows
+
+fn _vocode_on(b: GgmlBackend, request: GgmlRequest, codes: [i64]) -> Result<[f64], text>:
+    match request_embed_configure(b, request, POOLING_NONE):
+        Err(e): return Err("vocoder embeddings configure failed: " + backend_error_text(e))
+        Ok(_): ()
+    match request_set_tokens(b, request, codes):
+        Err(e): return Err("vocoder rejected the codes: " + backend_error_text(e))
+        Ok(_): ()
+    match request_embeddings(b, request):
+        Err(e): Err("vocoder eval failed: " + backend_error_text(e))
+        Ok(bytes): Ok(f32_le_to_floats(bytes))
+
+fn tts_run(req: KindRequest) -> Result<KindResult, text>:
+    val input = _request_text(req)
+    if input.trim() == "":
+        return Err("no text to speak")
+    match TTS_BACKEND:
+        case None: return Err("tts runner is not open")
+        case Some(b):
+            match TTS_LLM:
+                case None: return Err("tts runner is not open")
+                case Some(llm):
+                    match TTS_VOCODER:
+                        case None: return Err("tts runner is not open")
+                        case Some(voc): return _synthesize(b, llm, voc, input, req.params.max_tokens)
+
+fn _synthesize(b: GgmlBackend, llm: GgmlModelHandle, voc: GgmlModelHandle, input: text, max_tokens_param: i64) -> Result<KindResult, text>:
+    val words = outetts_word_count(input)
+    # The cap bounds a model that does not stop (see outetts_spoken_codes).
+    if words > TTS_MAX_WORDS:
+        return Err("input has " + words.to_text() + " words; the TTS limit is " + TTS_MAX_WORDS.to_text())
+    val max_tokens = if max_tokens_param > 0: max_tokens_param else: 128 + TTS_TOKENS_PER_WORD * words
+    val t0 = time_now_monotonic_ms()
+    var gen = TtsGeneration(output: "", prompt_tokens: 0, completion_tokens: 0)
+    match _generate_codes(b, llm, outetts_prompt(input), max_tokens):
+        Err(reason): return Err(reason)
+        Ok(g): gen = g
+    var codes: [i64] = []
+    for c in outetts_spoken_codes(gen.output, words):
+        if c < TTS_CODEBOOK:
+            codes.push(c)
+    if codes.len() == 0:
+        return Err("the TTS model generated no audio codes (" + gen.completion_tokens.to_text() + " tokens)")
+    val t1 = time_now_monotonic_ms()
+    var rows: [f64] = []
+    match _vocode(b, voc, codes):
+        Err(reason): return Err(reason)
+        Ok(r): rows = r
+    if rows.len() == 0 or rows.len() % codes.len() != 0:
+        return Err("vocoder returned " + rows.len().to_text() + " floats for " + codes.len().to_text() + " codes")
+    val t2 = time_now_monotonic_ms()
+    var samples: [f64] = []
+    match embd_to_audio(rows, codes.len(), rows.len() / codes.len(), wavtokenizer_istft_params()):
+        Err(reason): return Err(reason)
+        Ok(s): samples = s
+    # tts.cpp zeroes the first 0.25 s (the speaker prompt's tail bleeds in).
+    # Built in one pass rather than zeroed in place.
+    val quiet = TTS_SAMPLE_RATE.to_i64() / 4
+    var pcm: [f32] = []
+    var i: i64 = 0
+    for s in samples:
+        if i < quiet:
+            pcm.push(0.0 as f32)
+        else:
+            pcm.push(s as f32)
+        i = i + 1
+    val wav = encode_wav_pcm16(pcm, 1, TTS_SAMPLE_RATE)
+    val t3 = time_now_monotonic_ms()
+    TTS_LAST_TIMINGS = "generate_ms=" + (t1 - t0).to_text() + " prompt_tokens=" + gen.prompt_tokens.to_text() + " tokens=" + gen.completion_tokens.to_text() + " codes=" + codes.len().to_text() + " vocoder_ms=" + (t2 - t1).to_text() + " istft_wav_ms=" + (t3 - t2).to_text() + " samples=" + samples.len().to_text()
+    Ok(KindResult(parts: [OutputPart(modality: Modality.Audio, text: "", bytes: wav, mime: "audio/wav")], prompt_tokens: gen.prompt_tokens, completion_tokens: gen.completion_tokens))
+
+export outetts_process_text, outetts_prompt, outetts_spoken_codes, outetts_word_count
+export TTS_SAMPLE_RATE, TTS_MAX_WORDS, TTS_INPUT_FAULT, tts_available, tts_open, tts_run, tts_close, tts_vocoder_path, tts_set_sampler, tts_last_timings

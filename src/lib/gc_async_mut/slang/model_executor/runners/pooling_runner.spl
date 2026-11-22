@@ -1,0 +1,141 @@
+# @gc — module uses GC runtime
+#
+# Pooling runner — Embedding and Rerank kinds on the ggml shim.
+# Design: doc/05_design/ml/slang/slang_pluggable_modalities.md §3.4 (runner
+# interface) and §2 (Embedding / Rerank rows).
+#
+# The model is opened as a shim MODEL HANDLE beside whatever chat model the
+# engine holds, so /v1/embeddings never evicts the resident chat model. The
+# shim library is dlopened only inside pooling_runner_open.
+#
+# Output parts carry packed float32 little-endian bytes
+# (mime application/x-f32le): one vector per input text for Embedding, one
+# score per document for Rerank (parts[0] is the query).
+
+use std.gc_async_mut.slang.model_executor.backend.{GgmlBackend, GgmlModelHandle, GgmlRequest, BackendError, backend_error_text, open_backend, backend_model_handles, open_model_handle, close_model_handle, open_request_for, close_backend_request, request_embed_configure, request_set_text, request_set_rerank_pair, request_embeddings, release_backend_library, POOLING_MODEL_DEFAULT, POOLING_RANK}
+use std.gc_async_mut.slang.engine.llm_engine.{engine_lib_path, engine_backend_available}
+use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel}
+use std.gc_async_mut.slang.modality.kinds.{ModelKind, Modality, KindRequest, KindResult, OutputPart, model_kind_eq, model_kind_text}
+
+# One request context per input. bge-small trains at 512 positions and the
+# reranker at 8192; 2048 bounds the non-causal compute buffer (n_ubatch must
+# equal n_ctx) while covering ordinary passages. Longer inputs are refused.
+const POOLING_N_CTX: i64 = 2048
+const POOLING_MIME: text = "application/x-f32le"
+
+# Stateless by design. Under the interpreter every connection thread starts from
+# a snapshot of module state and its writes stay thread-local (see
+# llm_engine.engine_preload), so a handle cached in a module global would be
+# re-opened -- and leaked -- by every new thread until the shim's model slots run
+# out. Each request therefore opens the library and the model handle, serves, and
+# closes both, so a 5th distinct model can never find the slots exhausted.
+
+fn pooling_runner_available() -> bool:
+    engine_backend_available()
+
+# Err carries (HTTP status, message): 400 for input the model cannot take,
+# 503 for a load or capacity failure on the server side.
+fn _client(msg: text) -> (i64, text):
+    (400, msg)
+
+fn _server(msg: text) -> (i64, text):
+    (503, msg)
+
+fn _error(e: BackendError) -> (i64, text):
+    if e == BackendError.CapacityExceeded:
+        return _client("input is longer than the model can take (at most " + POOLING_N_CTX.to_text() + " tokens, and no more than the model's trained context)")
+    if e == BackendError.TokenizeFailed:
+        return _client(backend_error_text(e))
+    _server(backend_error_text(e))
+
+# One input through one request: configure pooling, set the tokens, read f32s.
+# Returns (bytes, token_count).
+fn _pooled(b: GgmlBackend, h: GgmlModelHandle, first: text, second: text, rerank: bool) -> Result<([u8], i64), (i64, text)>:
+    match open_request_for(b, h, POOLING_N_CTX):
+        Err(e): return Err(_error(e))
+        Ok(r):
+            val result = _pooled_on(b, r, first, second, rerank)
+            close_backend_request(b, r)
+            result
+
+fn _pooled_on(b: GgmlBackend, r: GgmlRequest, first: text, second: text, rerank: bool) -> Result<([u8], i64), (i64, text)>:
+    val pooling = if rerank: POOLING_RANK else: POOLING_MODEL_DEFAULT
+    match request_embed_configure(b, r, pooling):
+        Err(e): return Err(_error(e))
+        Ok(effective):
+            if rerank and effective != POOLING_RANK:
+                return Err(_client("model has no rank pooling head (pooling " + effective.to_text() + ")"))
+    var tokens = 0
+    if rerank:
+        match request_set_rerank_pair(b, r, first, second):
+            Err(e): return Err(_error(e))
+            Ok(n): tokens = n
+    else:
+        match request_set_text(b, r, first):
+            Err(e): return Err(_error(e))
+            Ok(n): tokens = n
+    if tokens > POOLING_N_CTX:
+        return Err(_error(BackendError.CapacityExceeded))
+    match request_embeddings(b, r):
+        Err(e): Err(_error(e))
+        Ok(bytes): Ok((bytes, tokens))
+
+fn _part_text(req: KindRequest, i: i64) -> text:
+    req.parts[i].text
+
+fn _run_on(b: GgmlBackend, h: GgmlModelHandle, rerank: bool, req: KindRequest) -> Result<KindResult, (i64, text)>:
+    var parts: [OutputPart] = []
+    var prompt_tokens = 0
+    if rerank:
+        if req.parts.len() < 2:
+            return Err(_client("rerank needs a query and at least one document"))
+        val query = _part_text(req, 0)
+        var i = 1
+        while i < req.parts.len():
+            match _pooled(b, h, query, _part_text(req, i), true):
+                Err(reason): return Err(reason)
+                Ok(done):
+                    parts.push(OutputPart(modality: Modality.Text, text: "", bytes: done.0, mime: POOLING_MIME))
+                    prompt_tokens = prompt_tokens + done.1
+            i = i + 1
+    else:
+        var i = 0
+        while i < req.parts.len():
+            match _pooled(b, h, _part_text(req, i), "", false):
+                Err(reason): return Err(reason)
+                Ok(done):
+                    parts.push(OutputPart(modality: Modality.Text, text: "", bytes: done.0, mime: POOLING_MIME))
+                    prompt_tokens = prompt_tokens + done.1
+            i = i + 1
+    Ok(KindResult(parts: parts, prompt_tokens: prompt_tokens, completion_tokens: 0))
+
+# Opens `model` as a shim model handle beside whatever chat model the engine
+# holds (so /v1/embeddings never evicts it), serves `req`, and closes the handle
+# and the library reference before returning.
+fn pooling_runner_serve(model: NativeModel, req: KindRequest) -> Result<KindResult, (i64, text)>:
+    val rerank = model_kind_eq(model.profile.kind, ModelKind.Rerank)
+    if not rerank and not model_kind_eq(model.profile.kind, ModelKind.Embedding):
+        return Err(_client("the pooling runner serves embedding and rerank models; '" + model.id + "' is a " + model_kind_text(model.profile.kind) + " model"))
+    if model.entry_path == "":
+        return Err(_server("model '" + model.id + "' has no loadable entry file"))
+    match open_backend(engine_lib_path()):
+        Err(e): return Err(_server("backend unavailable at " + engine_lib_path() + ": " + backend_error_text(e)))
+        Ok(b):
+            if not backend_model_handles(b):
+                release_backend_library(b)
+                return Err(_server("the ggml shim at " + engine_lib_path() + " predates model handles (capability bit 512); rebuild it with scripts/check/build-slang-ggml-shim.shs"))
+            match open_model_handle(b, model.entry_path, -1):
+                Err(e):
+                    release_backend_library(b)
+                    return Err(_server("load failed for '" + model.id + "': " + backend_error_text(e)))
+                Ok(h):
+                    val result = _run_on(b, h, rerank, req)
+                    # Every request opened above is closed inside _pooled, so the
+                    # close cannot be refused as busy; report it if it is.
+                    val closed = close_model_handle(b, h)
+                    release_backend_library(b)
+                    if closed.is_err() and result.is_ok():
+                        return Err(_server("model handle for '" + model.id + "' could not be closed: " + backend_error_text(closed.unwrap_err())))
+                    result
+
+export pooling_runner_available, pooling_runner_serve

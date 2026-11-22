@@ -64,7 +64,8 @@ use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1, file_worker_p
     file_worker_pool_hir_budget_kb_v1, file_worker_pool_mir_budget_kb_v1, file_worker_pool_host_pointer_bits_v1,
     file_worker_pool_serial_memory_admits_v1,
     file_worker_pool_live_unit_hir_budget_kb_v1, file_worker_pool_live_unit_mir_budget_kb_v1}
-use app.cli.shard_mem_clamp.{shard_default_threads, shard_parse_worker_budget_kb_for_v1, shard_host_worker_budget_kb}
+use app.cli.shard_mem_clamp.{shard_default_threads, shard_parse_worker_budget_kb_for_v1, shard_host_worker_budget_kb,
+    shard_live_threads_selected_v1}
 use std.nogc_sync_mut.host_limits.{host_limit_value}
 use app.cli.shard_mem_clamp.{build_memory_reserve_kib, build_memory_start_refusal_v1, shard_tree_headroom_kib_v1}
 use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb,
@@ -77,6 +78,8 @@ use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb,
     shard_worker_estimate_clamped_kib_v1, native_mir_shard_fallback_action_v1}
 use std.nogc_sync_mut.sffi.process_memory.{host_commit_avail_kib}
 use app.io.sysinfo_ops.{process_peak_rss_kb, cpu_count}
+use std.nogc_sync_mut.io.host_capacity.{host_capacity_probe_v1, host_capacity_idle_cpu_v1, host_capacity_text_v1,
+    host_capacity_headroom_kib_v1, host_capacity_reserve_kib_v1, host_live_worker_slots_v1}
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
 use compiler.driver.driver_log_helpers.{build_trace_enabled, log_build_trace,
@@ -831,7 +834,7 @@ fn native_build_parse_shard_count(args: [text]) -> i64:
         return 0      # streaming parse has no front-end parse cache to warm
     val requested = native_build_shard_threads(args, shard_parse_worker_budget_kb_for_v1(
         env_get("SIMPLE_PARSE_SHARD_WORKER_KB") ?? "", env_get("SIMPLE_HIR_SHARD_WORKER_KB") ?? "",
-        shard_host_worker_budget_kb(host_limit_value("worker_mem_mib")), SHARD_PARSE_WORKER_KB_V1))
+        shard_host_worker_budget_kb(host_limit_value("worker_mem_mib")), SHARD_PARSE_WORKER_KB_V1), true)
     if requested <= 0:
         return 0
     # A parse shard is a process, not a lightweight task: the seed interpreter
@@ -849,7 +852,12 @@ fn native_build_parse_shard_count(args: [text]) -> i64:
     val cap = if configured_cap > 0: configured_cap else: default_cap
     if requested > cap: cap else: requested
 
-fn native_build_requested_shard_threads(args: [text]) -> i64:
+# live_budget_kb > 0 (parse and HIR shard pools only): with the opt-in
+# SIMPLE_NATIVE_BUILD_THREADS=auto and no --threads/--jobs, the count is the
+# host's live idle CPU slots bounded by (headroom - reserve) / live_budget_kb.
+# Without the opt-in nothing changes: explicit count, else host max_threads,
+# else serial. MIR spawned shards and the file-worker pool never take it.
+fn native_build_requested_shard_threads(args: [text], live_budget_kb: i64 = 0) -> i64:
     # Keep the Phase-2 shard request aligned with the existing AOT setting.
     # An explicit command-line worker count remains the narrower, per-build
     # override; without it SIMPLE_NATIVE_BUILD_THREADS must warm the same
@@ -867,10 +875,19 @@ fn native_build_requested_shard_threads(args: [text]) -> i64:
         i = i + 1
     # No explicit count: default from host.sdn max_threads (not a hard-coded 8);
     # shard_threads_mem_cap clamps it by available memory / worker budget.
-    shard_default_threads(threads, host_limit_value("max_threads"))
+    if live_budget_kb <= 0 or not shard_live_threads_selected_v1(env_get("SIMPLE_NATIVE_BUILD_THREADS") ?? "", threads):
+        return shard_default_threads(threads, host_limit_value("max_threads"))
+    val capacity = host_capacity_probe_v1()
+    val idle_cpu = host_capacity_idle_cpu_v1(capacity, 0)
+    val headroom_kib = host_capacity_headroom_kib_v1(capacity)
+    val reserve_kib = host_capacity_reserve_kib_v1(capacity)
+    val chosen = host_live_worker_slots_v1(idle_cpu, headroom_kib, live_budget_kb)
+    print "[shard] live threads={chosen} (SIMPLE_NATIVE_BUILD_THREADS=auto; idle_cpu={idle_cpu} headroom_kib={headroom_kib} reserve_kib={reserve_kib} worker_kib={live_budget_kb} {host_capacity_text_v1(capacity)}; memory clamp applies next)"
+    chosen
 
-fn native_build_shard_threads(args: [text], budget_kb: i64) -> i64:
-    val threads = native_build_requested_shard_threads(args)
+fn native_build_shard_threads(args: [text], budget_kb: i64, live_default: bool = false) -> i64:
+    val live_budget_kb = if live_default: budget_kb else: 0
+    val threads = native_build_requested_shard_threads(args, live_budget_kb)
     if threads <= 1:
         return 0
     val capped = shard_threads_mem_cap(threads, budget_kb)
@@ -1031,7 +1048,7 @@ fn native_build_hir_shard_count(args: [text]) -> i64:
     val worker_budget = file_worker_pool_addressable_budget_kb_v1(
         shard_worker_estimate_kib_v1(hir_default, native_build_recorded_worker_peaks_v1(args), hir_override),
         file_worker_pool_host_pointer_bits_v1())
-    val requested = native_build_requested_shard_threads(args)
+    val requested = native_build_requested_shard_threads(args, worker_budget)
     # Serial isolation is admitted too: never revive a rejected child as N=1.
     val isolation_request = if requested > 0: requested else: 1
     shard_threads_mem_cap(isolation_request, worker_budget, parent_peak)
