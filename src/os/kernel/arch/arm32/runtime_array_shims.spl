@@ -10,20 +10,20 @@
 #
 # Layouts are those of
 # examples/09_embedded/simple_os/arch/arm32/boot/baremetal_stubs.c:
-#   RuntimeValue is a 32-bit word: int = v << 3, heap = ptr | 1, nil = 3,
-#   true = 11, false = 19.
+#   RuntimeValue is a 64-bit word on every arch (PR #10816): int = v << 3,
+#   heap = ptr | 1, nil = 3, true = 11, false = 19.
 #   HeapHeader {u32 type; u32 size}; HEAP_STRING = 1, HEAP_ARRAY = 2
 #   RuntimeArray {HeapHeader 8; u32 len @8; u32 cap @12; items[] @16}, items
-#   INLINE 4-byte tagged words (no items pointer, no byte-packed form).
+#   INLINE 8-byte tagged words (no items pointer, no byte-packed form).
 #   RuntimeString {HeapHeader 8; u32 len @8; data[len] @12; NUL}.
-# On arm32 every `i64` below is a 32-bit carrier (codegen/llvm/backend_core.rs
-# runtime_int_type: pointer_width() == 32 -> i32; the LLVM backend lowers
-# RuntimeValue / params / locals as i32), so nothing here is 64-bit: the
-# `u64` typed-words entry points keep one 32-bit tagged slot per element
-# (ENCODE_INT payload: 29 significant bits), exactly like the existing C
-# rt_typed_words_u32_* siblings (set_text / u64_set return the tagged TRUE/FALSE
-# word like the C rt_typed_words_u32_set). Values above 2^28 are truncated; there is no
-# boxed-u64 heap kind on arm32.
+# `i64` below is a true 64-bit value (codegen/llvm/backend_core.rs
+# runtime_int_type is i64 on every target), so slots are read and written with
+# rt_mmio_read_u64 / rt_mmio_write_u64 (the arm32 boot C composes them from two
+# 32-bit accesses). The `u64` typed-words entry points keep one 8-byte tagged
+# slot per element (ENCODE_INT payload: 61 significant bits), exactly like the
+# C rt_typed_words_u32_* siblings (set_text / u64_set return the tagged
+# TRUE/FALSE word like the C rt_typed_words_u32_set). There is no boxed-u64
+# heap kind on arm32.
 #
 # Memory is reached only through the raw rt_mmio_* accessors the arm32 boot C
 # already defines (raw address in, raw value out) and growth/allocation goes
@@ -53,6 +53,10 @@ extern fn rt_mmio_write_u8(addr: i64, value: i64)
 @cfg(arm32)
 extern fn rt_mmio_write_u32(addr: i64, value: i64)
 @cfg(arm32)
+extern fn rt_mmio_read_u64(addr: i64) -> i64
+@cfg(arm32)
+extern fn rt_mmio_write_u64(addr: i64, value: i64)
+@cfg(arm32)
 extern fn rt_alloc(size: i64) -> i64
 @cfg(arm32)
 extern fn rt_array_new_with_cap(cap: i64) -> i64
@@ -73,7 +77,7 @@ val A32_FALSE: i64 = 19
 val A32_HEAP_STRING: i64 = 1
 val A32_HEAP_ARRAY: i64 = 2
 val A32_ARRAY_ITEMS: i64 = 16
-val A32_ITEM_SIZE: i64 = 4
+val A32_ITEM_SIZE: i64 = 8
 val A32_MAX_ELEMS: i64 = 0x100000
 
 # ---------------------------------------------------------------------------
@@ -182,7 +186,7 @@ fn rt_array_fill_span(array: i64, offset: i64, count: i64, value: i64) -> i64:
         return -1
     var i: i64 = 0
     while i < count:
-        rt_mmio_write_u32(_a32_slot(p, offset + i), value)
+        rt_mmio_write_u64(_a32_slot(p, offset + i), value)
         i = i + 1
     0
 
@@ -219,7 +223,7 @@ fn rt_array_copy(array: i64) -> i64:
         return A32_NIL
     var i: i64 = 0
     while i < n:
-        out = rt_array_push(out, rt_mmio_read_u32(_a32_slot(src, i)))
+        out = rt_array_push(out, rt_mmio_read_u64(_a32_slot(src, i)))
         i = i + 1
     out
 
@@ -288,7 +292,7 @@ fn rt_bytes_to_text(array: i64) -> i64:
     rt_mmio_write_u32(s + 8, n)
     var i: i64 = 0
     while i < n:
-        rt_mmio_write_u8(s + 12 + i, a32_raw_or_encoded(rt_mmio_read_u32(_a32_slot(src, i))) & 255)
+        rt_mmio_write_u8(s + 12 + i, a32_raw_or_encoded(rt_mmio_read_u64(_a32_slot(src, i))) & 255)
         i = i + 1
     rt_mmio_write_u8(s + 12 + n, 0)
     s | A32_TAG_HEAP
@@ -304,12 +308,12 @@ fn rt_collection_remove(receiver: i64, key: i64) -> i64:
     val index = a32_raw_or_encoded(key)
     if index < 0 or index >= n:
         return A32_NIL
-    val removed = rt_mmio_read_u32(_a32_slot(p, index))
+    val removed = rt_mmio_read_u64(_a32_slot(p, index))
     var i = index
     while i + 1 < n:
-        rt_mmio_write_u32(_a32_slot(p, i), rt_mmio_read_u32(_a32_slot(p, i + 1)))
+        rt_mmio_write_u64(_a32_slot(p, i), rt_mmio_read_u64(_a32_slot(p, i + 1)))
         i = i + 1
-    rt_mmio_write_u32(_a32_slot(p, n - 1), A32_NIL)
+    rt_mmio_write_u64(_a32_slot(p, n - 1), A32_NIL)
     rt_mmio_write_u32(p + 8, n - 1)
     removed
 
@@ -336,7 +340,7 @@ fn rt_dict_new() -> i64:
 @cfg(arm32)
 @export("C")
 fn rt_typed_bytes_u8_data_at(data: i64, index: i64) -> i64:
-    # Bit 0 is the MIR preheader layout tag: set = 4-byte tagged slots,
+    # Bit 0 is the MIR preheader layout tag: set = 8-byte tagged slots,
     # clear = byte-packed. Out of bounds -> 0.
     val base = data & -2
     if base == 0 or index < 0:
@@ -349,7 +353,7 @@ fn rt_typed_bytes_u8_data_at(data: i64, index: i64) -> i64:
             return 0
         if a32_index_ok(index, _a32_len(p)) == 0:
             return 0
-        return a32_raw_or_encoded(rt_mmio_read_u32(_a32_slot(p, index))) & 255
+        return a32_raw_or_encoded(rt_mmio_read_u64(_a32_slot(p, index))) & 255
     # Byte-packed: arm32 has no byte-packed RuntimeArray (see
     # rt_array_is_byte_packed), so only a raw buffer can reach here and it
     # carries no length; bound by the element limit.
@@ -367,7 +371,7 @@ fn rt_typed_words_u64_at(array: i64, index: i64) -> i64:
     val i = index >> 3
     if (index & A32_TAG_MASK) != 0 or i < 0 or i >= _a32_len(p):
         return 0
-    rt_mmio_read_u32(_a32_slot(p, i))
+    rt_mmio_read_u64(_a32_slot(p, i))
 
 @cfg(arm32)
 @export("C")

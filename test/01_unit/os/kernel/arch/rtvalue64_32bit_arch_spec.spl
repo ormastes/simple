@@ -1,0 +1,79 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# Repro: PR #10816 made codegen emit a 64-bit RuntimeValue on every arch, but the
+# arm32 / riscv32 / x86_32 boot C stubs and the pure-Simple shims still used a
+# 32-bit RuntimeValue and 4-byte array item strides, so a codegen-emitted i64
+# argument and the callee's 32-bit view of it disagreed on 32-bit targets.
+# This spec pins the 8-byte layout: the C typedef/macros, the item stride the
+# shims address, and the executable pure helpers.
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read_text}
+use os.kernel.arch.arm32.runtime_array_shims.{a32_word_encode, a32_cap_arg, A32_ITEM_SIZE}
+use os.kernel.arch.x86_32.core_runtime_layout.{x86_32_rt_array_item_addr, X86_32_RT_ARRAY_ITEMS_OFFSET}
+
+val ARM32_C = "examples/09_embedded/simple_os/arch/arm32/boot/baremetal_stubs.c"
+val X86_C = "examples/09_embedded/simple_os/arch/x86_32/boot/baremetal_stubs.c"
+val RV32_C = "examples/09_embedded/simple_os/arch/riscv32/boot/baremetal_stubs.c"
+val MIN_STDOUT_H = "examples/09_embedded/simple_os/arch/common/baremetal_min_stdout.h"
+val ARM32_ARR = "src/os/kernel/arch/arm32/runtime_array_shims.spl"
+val ARM32_VAL = "src/os/kernel/arch/arm32/runtime_value_shims.spl"
+val RV32_RT = "src/os/kernel/arch/riscv32/core_runtime.spl"
+val X86_RT = "src/os/kernel/arch/x86_32/core_runtime.spl"
+
+describe "32-bit arch boot C uses a 64-bit RuntimeValue":
+    it "typedefs RuntimeValue as a 64-bit integer in every 32-bit arch stub":
+        expect(file_read_text(ARM32_C).contains("typedef uint64_t RuntimeValue;")).to_equal(true)
+        expect(file_read_text(X86_C).contains("typedef uint64_t RuntimeValue;")).to_equal(true)
+        expect(file_read_text(RV32_C).contains("typedef int64_t RuntimeValue;")).to_equal(true)
+        expect(file_read_text(MIN_STDOUT_H).contains("typedef int64_t RuntimeValue;")).to_equal(true)
+
+    it "static-asserts the 8-byte width and tags/decodes through uint64_t":
+        for path in [ARM32_C, X86_C]:
+            val src = file_read_text(path)
+            expect(src.contains("_Static_assert(sizeof(RuntimeValue) == 8")).to_equal(true)
+            expect(src.contains("((uint64_t)(int64_t)(v) << 3)")).to_equal(true)
+            expect(src.contains("((uint64_t)(v) >> 3)")).to_equal(true)
+        expect(file_read_text(ARM32_C).contains("rt_mmio_read_u64")).to_equal(true)
+
+    it "no longer carries the 32-bit RuntimeValue typedefs":
+        expect(file_read_text(ARM32_C).contains("typedef int32_t RuntimeValue;")).to_equal(false)
+        expect(file_read_text(X86_C).contains("typedef int32_t RuntimeValue;")).to_equal(false)
+        expect(file_read_text(RV32_C).contains("typedef intptr_t RuntimeValue;")).to_equal(false)
+
+describe "pure-Simple shims address 8-byte array items":
+    it "uses an 8-byte item stride and 64-bit slot accessors on arm32":
+        expect(A32_ITEM_SIZE).to_equal(8)
+        val arr = file_read_text(ARM32_ARR)
+        expect(arr.contains("rt_mmio_read_u64(_a32_slot")).to_equal(true)
+        expect(arr.contains("rt_mmio_read_u32(_a32_slot")).to_equal(false)
+        val val_src = file_read_text(ARM32_VAL)
+        expect(val_src.contains("p + 16 + i * 8")).to_equal(true)
+        expect(val_src.contains("p + 16 + i * 4")).to_equal(false)
+
+    it "keeps more than 32 payload bits in a typed word":
+        step("ENCODE_INT(0x1000000001) must not be truncated to 32 bits")
+        expect(a32_word_encode(0x1000000001)).to_equal(0x8000000008)
+        expect(a32_word_encode(-1)).to_equal(-8)
+        expect(a32_cap_arg(3)).to_equal(24)
+
+    it "strides x86_32 inline items by 8 bytes from +16":
+        expect(X86_32_RT_ARRAY_ITEMS_OFFSET).to_equal(16)
+        expect(x86_32_rt_array_item_addr(0x00200000, 0)).to_equal(0x00200010)
+        expect(x86_32_rt_array_item_addr(0x00200000, 1)).to_equal(0x00200018)
+        expect(x86_32_rt_array_item_addr(0x00200000, 3)).to_equal(0x00200028)
+
+    it "reads and writes whole 64-bit slots on riscv32 and x86_32":
+        val rv = file_read_text(RV32_RT)
+        expect(rv.contains("_rv32_ld32(obj + 16) + idx * 8")).to_equal(true)
+        expect(rv.contains("_rv32_st64(slot, value)")).to_equal(true)
+        expect(rv.contains("idx * 4")).to_equal(false)
+        val x86 = file_read_text(X86_RT)
+        expect(x86.contains("_x86_32_st64(slot, value)")).to_equal(true)
+        expect(x86.contains("_x86_32_ld64(slot)")).to_equal(true)
+
+    it "uses unsigned u32 variant hashes in the arm32 value shims":
+        val v = file_read_text(ARM32_VAL)
+        expect(v.contains("val A32_HASH_SOME: i64 = 4053299545")).to_equal(true)
+        expect(v.contains("-241667751")).to_equal(false)

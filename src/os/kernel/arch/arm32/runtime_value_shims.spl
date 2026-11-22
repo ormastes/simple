@@ -5,34 +5,35 @@
 # examples/09_embedded/simple_os/arch/arm32/boot/baremetal_stubs.c:
 #   tags: INT=0 HEAP=1 FLOAT=2 SPECIAL=3; NIL=3 TRUE=11 FALSE=19; int = v << 3
 #   HeapHeader {u32 type; u32 size}; HEAP_ARRAY=2, HEAP_ENUM=7
-#   RuntimeArray {HeapHeader 8; u32 len @8; u32 cap @12; items[] @16 (4 bytes)}
-#   RuntimeEnum  {HeapHeader 8; u32 enum_id @8; u32 discriminant @12; payload @16}
-# ABI: on a 32-bit target the LLVM backend makes every RuntimeValue an i32
-# (codegen/llvm/backend_core.rs runtime_int_type), so `i64` below is a 32-bit
-# carrier (same convention as the riscv32 core runtime).
+#   RuntimeArray {HeapHeader 8; u32 len @8; u32 cap @12; items[] @16 (8 bytes each)}
+#   RuntimeEnum  {HeapHeader 8; u32 enum_id @8; u32 discriminant @12; u64 payload @16}
+# ABI: RuntimeValue is a 64-bit word on every arch (PR #10816; codegen/llvm/
+# backend_core.rs runtime_int_type is i64), so `i64` below is a true 64-bit value
+# and enum payloads / array items are read with rt_mmio_read_u64.
 # Bodies are integer-only (no text literals / arrays / untyped compares) so they
 # emit no further rt_* references. Exports never call each other: they delegate
 # to the private _a32_* helpers.
 #
 # Known limits (arm32 has no wide-int heap kind, nor a C string-to-int):
-#   - rt_value_u64 keeps the low 29 bits (tag-int), like riscv32.
+#   - rt_value_u64 keeps the low 61 bits (tag-int); there is no boxed-u64 heap kind.
 #   - rt_any_to_int passes strings / floats / heap handles through unchanged.
 #   - rt_unwrap_or_trap cannot print (no serial dependency); it spins on a
 #     volatile read forever, which the optimiser cannot remove.
-# Also: heap addresses must be < 0x80000000 (signed 32-bit compares; QEMU virt RAM
-# is at 0x40000000), rt_for_iterable is identity (no dict/range conversion),
+# Also: rt_for_iterable is identity (no dict/range conversion),
 # rt_is_present uses the Option discriminant rule, like rt_unwrap_or_trap.
 # arm64 twin: src/os/kernel/arch/arm64/runtime_value_shims.spl.
 
 @cfg(arm32)
 extern fn rt_mmio_read_u32(addr: i64) -> i64
+@cfg(arm32)
+extern fn rt_mmio_read_u64(addr: i64) -> i64
 
 val A32_OPTION_ENUM_ID: i64 = 1
-# FNV-style variant hashes (u32 values as signed i32 carriers).
-val A32_HASH_SOME: i64 = -241667751
-val A32_HASH_NONE: i64 = -1923218599
-val A32_HASH_OK: i64 = -1889615284
-val A32_HASH_ERR: i64 = -94788272
+# FNV-style variant hashes: plain u32 values (the discriminant is read zero-extended).
+val A32_HASH_SOME: i64 = 4053299545
+val A32_HASH_NONE: i64 = 2371748697
+val A32_HASH_OK: i64 = 2405352012
+val A32_HASH_ERR: i64 = 4200179024
 
 @cfg(arm32)
 fn _a32_enum_ptr(v: i64) -> i64:
@@ -131,7 +132,7 @@ fn rt_value_u64(bits: i64) -> i64:
 @export("C")
 fn rt_value_as_u64(v: i64) -> i64:
     if (v & 7) == 0:
-        return (v >> 3) & 0x1fffffff
+        return (v >> 3) & 0x1fffffffffffffff
     v
 
 @cfg(arm32)
@@ -173,12 +174,12 @@ fn rt_unwrap_or_trap(v: i64) -> i64:
     val disc = rt_mmio_read_u32(p + 12)
     if id == A32_OPTION_ENUM_ID:
         if disc == 0 or disc == A32_HASH_SOME:
-            return rt_mmio_read_u32(p + 16)
+            return rt_mmio_read_u64(p + 16)
         if disc == 1 or disc == A32_HASH_NONE:
             return _a32_trap()
         return v
     if disc == A32_HASH_OK:
-        return rt_mmio_read_u32(p + 16)
+        return rt_mmio_read_u64(p + 16)
     if disc == A32_HASH_ERR:
         return _a32_trap()
     v
@@ -193,7 +194,7 @@ fn rt_numeric_contains_u64(array: i64, value: i64) -> i8:
     val n = rt_mmio_read_u32(p + 8)
     var i: i64 = 0
     while i < n:
-        val item = rt_mmio_read_u32(p + 16 + i * 4)
+        val item = rt_mmio_read_u64(p + 16 + i * 8)
         if item == value or ((item & 7) == 0 and (item >> 3) == value):
             return 1
         i = i + 1

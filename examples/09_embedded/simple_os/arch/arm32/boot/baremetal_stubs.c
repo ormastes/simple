@@ -1,7 +1,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-typedef int32_t RuntimeValue;
+typedef uint64_t RuntimeValue; /* 64-bit on every arch (codegen emits i64) */
 
 #define PL011_BASE 0x09000000U
 #include "../../common/baremetal_pl011_serial.h"
@@ -88,21 +88,21 @@ RuntimeValue arm32_harden_print_canary(void)
     return (RuntimeValue)0;
 }
 
-#define TAG_MASK    0x7U
-#define TAG_INT     0x0U
-#define TAG_HEAP    0x1U
-#define TAG_FLOAT   0x2U
-#define TAG_SPECIAL 0x3U
+#define TAG_MASK    0x7ULL
+#define TAG_INT     0x0ULL
+#define TAG_HEAP    0x1ULL
+#define TAG_FLOAT   0x2ULL
+#define TAG_SPECIAL 0x3ULL
 
-#define ENCODE_INT(v)  ((RuntimeValue)(((uint32_t)(int32_t)(v) << 3) | TAG_INT))
-#define DECODE_INT(v)  ((int32_t)((uint32_t)(v) >> 3))
+#define ENCODE_INT(v)  ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
+#define DECODE_INT(v)  ((int64_t)(v) >> 3) /* arithmetic shift: full 61-bit payload, sign preserved */
 
-#define ENCODE_PTR(p)  ((RuntimeValue)((uint32_t)(uintptr_t)(p) | TAG_HEAP))
-#define DECODE_PTR(v)  ((void*)((uint32_t)(v) & ~TAG_MASK))
+#define ENCODE_PTR(p)  ((RuntimeValue)((uint64_t)(uintptr_t)(p) | TAG_HEAP))
+#define DECODE_PTR(v)  ((void*)(uintptr_t)((uint64_t)(v) & ~(uint64_t)TAG_MASK))
 
-#define IS_INT(v)      (((uint32_t)(v) & TAG_MASK) == TAG_INT)
-#define IS_HEAP(v)     (((uint32_t)(v) & TAG_MASK) == TAG_HEAP)
-#define IS_FLOAT(v)    (((uint32_t)(v) & TAG_MASK) == TAG_FLOAT)
+#define IS_INT(v)      (((uint64_t)(v) & TAG_MASK) == TAG_INT)
+#define IS_HEAP(v)     (((uint64_t)(v) & TAG_MASK) == TAG_HEAP)
+#define IS_FLOAT(v)    (((uint64_t)(v) & TAG_MASK) == TAG_FLOAT)
 #define IS_NIL(v)      ((v) == (RuntimeValue)TAG_SPECIAL)
 
 #define NIL_VALUE      ((RuntimeValue)TAG_SPECIAL)
@@ -113,6 +113,7 @@ RuntimeValue arm32_harden_print_canary(void)
 #define FALSE_VALUE    ((RuntimeValue)19)
 _Static_assert(TRUE_VALUE == 11, "TRUE_VALUE must match codegen tagged true (11)");
 _Static_assert(FALSE_VALUE == 19, "FALSE_VALUE must match codegen tagged false (19)");
+_Static_assert(sizeof(RuntimeValue) == 8, "RuntimeValue is 64-bit on every arch (PR #10816)");
 
 typedef struct {
     uint32_t type;
@@ -987,6 +988,19 @@ RuntimeValue rt_mmio_read_u8_real(RuntimeValue addr)
 RuntimeValue rt_mmio_read_u16_real(RuntimeValue addr)
 {
     return (RuntimeValue)*(volatile uint16_t *)(uintptr_t)(uint32_t)addr;
+}
+
+/* HEAP SLOTS ONLY: not single-copy atomic, do not use on 64-bit device registers.
+ * 64-bit load for the shared pure-Simple value core (RuntimeValue is 64-bit
+ * on every arch). Two aligned 32-bit loads, low word first: ARMv7-A has no
+ * single-copy-atomic 64-bit plain load, and the heap words are only written
+ * by this core. */
+RuntimeValue rt_mmio_read_u64(RuntimeValue addr)
+{
+    volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)(uint32_t)addr;
+    uint64_t lo = p[0];
+    uint64_t hi = p[1];
+    return (RuntimeValue)(lo | (hi << 32));
 }
 
 RuntimeValue rt_mmio_read_u32_real(RuntimeValue addr)
@@ -1903,18 +1917,11 @@ RuntimeValue rt_dma_phys_of(RuntimeValue p) { return p; }
 void rt_dma_sync_for_cpu(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; }
 void rt_dma_sync_for_device(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; }
 RuntimeValue rt_dma_virt_of(RuntimeValue p) { return p; }
-RuntimeValue rt_mmio_read_u64(RuntimeValue addr)
-{
-    volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)(uint32_t)addr;
-    uint32_t lo = p[0];
-    uint32_t hi = p[1];
-    return (RuntimeValue)(lo ^ hi);
-}
 RuntimeValue rt_mmio_write_u64(RuntimeValue addr, RuntimeValue val)
 {
     volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)(uint32_t)addr;
     p[0] = (uint32_t)val;
-    p[1] = 0;
+    p[1] = (uint32_t)((uint64_t)val >> 32);
     return NIL_VALUE;
 }
 

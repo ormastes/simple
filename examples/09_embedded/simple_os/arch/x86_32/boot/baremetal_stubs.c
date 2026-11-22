@@ -5,7 +5,7 @@
  * targeting x86_32 bare-metal (QEMU isa-debug-exit, COM1 serial).
  *
  * Differences from x86_64:
- *   - RuntimeValue is int32_t (32-bit pointers)
+ *   - RuntimeValue is uint64_t (64-bit on every arch; 32-bit pointers)
  *   - Heap is 4MB (not 64MB)
  *   - No 64-bit register instructions
  *
@@ -30,7 +30,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-typedef int32_t RuntimeValue;
+typedef uint64_t RuntimeValue;
 
 /* ===================================================================
  * 2. Serial I/O — COM1 at 0x3F8 via x86 outb / inb
@@ -168,24 +168,24 @@ static void x86_32_harden_print_canary(void)
 }
 
 /* ===================================================================
- * 3. RuntimeValue tagging (32-bit)
+ * 3. RuntimeValue tagging (64-bit word, 8-byte strides)
  * =================================================================== */
 
-#define TAG_MASK    0x7U
-#define TAG_INT     0x0U
-#define TAG_HEAP    0x1U
-#define TAG_FLOAT   0x2U
-#define TAG_SPECIAL 0x3U
+#define TAG_MASK    0x7ULL
+#define TAG_INT     0x0ULL
+#define TAG_HEAP    0x1ULL
+#define TAG_FLOAT   0x2ULL
+#define TAG_SPECIAL 0x3ULL
 
-#define ENCODE_INT(v)  ((RuntimeValue)(((uint32_t)(int32_t)(v) << 3) | TAG_INT))
-#define DECODE_INT(v)  ((int32_t)((uint32_t)(v) >> 3))
+#define ENCODE_INT(v)  ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
+#define DECODE_INT(v)  ((int64_t)(v) >> 3) /* arithmetic shift: full 61-bit payload, sign preserved */
 
-#define ENCODE_PTR(p)  ((RuntimeValue)((uint32_t)(uintptr_t)(p) | TAG_HEAP))
-#define DECODE_PTR(v)  ((void*)((uint32_t)(v) & ~TAG_MASK))
+#define ENCODE_PTR(p)  ((RuntimeValue)((uint64_t)(uintptr_t)(p) | TAG_HEAP))
+#define DECODE_PTR(v)  ((void*)(uintptr_t)((uint64_t)(v) & ~(uint64_t)TAG_MASK))
 
-#define IS_INT(v)      (((uint32_t)(v) & TAG_MASK) == TAG_INT)
-#define IS_HEAP(v)     (((uint32_t)(v) & TAG_MASK) == TAG_HEAP)
-#define IS_FLOAT(v)    (((uint32_t)(v) & TAG_MASK) == TAG_FLOAT)
+#define IS_INT(v)      (((uint64_t)(v) & TAG_MASK) == TAG_INT)
+#define IS_HEAP(v)     (((uint64_t)(v) & TAG_MASK) == TAG_HEAP)
+#define IS_FLOAT(v)    (((uint64_t)(v) & TAG_MASK) == TAG_FLOAT)
 #define IS_NIL(v)      ((v) == (RuntimeValue)TAG_SPECIAL)
 
 #define NIL_VALUE      ((RuntimeValue)TAG_SPECIAL)
@@ -196,6 +196,7 @@ static void x86_32_harden_print_canary(void)
 #define FALSE_VALUE    ((RuntimeValue)19)
 _Static_assert(TRUE_VALUE == 11, "TRUE_VALUE must match codegen tagged true (11)");
 _Static_assert(FALSE_VALUE == 19, "FALSE_VALUE must match codegen tagged false (19)");
+_Static_assert(sizeof(RuntimeValue) == 8, "RuntimeValue is 64-bit on every arch (PR #10816)");
 
 typedef struct {
     uint32_t type;

@@ -5,12 +5,12 @@
 #include <stddef.h>
 
 #ifndef BAREMETAL_RUNTIME_H
-typedef intptr_t RuntimeValue;
+typedef int64_t RuntimeValue; /* 64-bit on every arch (PR #10816) */
 
 #define TAG_MASK    ((uintptr_t)0x7)
 #define TAG_INT     ((uintptr_t)0x0)
 #define TAG_HEAP    ((uintptr_t)0x1)
-#define ENCODE_INT(v) ((RuntimeValue)(((uintptr_t)(intptr_t)(v) << 3) | TAG_INT))
+#define ENCODE_INT(v) ((RuntimeValue)(((uint64_t)(int64_t)(v) << 3) | TAG_INT))
 #define DECODE_PTR(v) ((void *)((uintptr_t)(v) & ~TAG_MASK))
 #define IS_HEAP(v)    (((uintptr_t)(v) & TAG_MASK) == TAG_HEAP)
 #define HEAP_STRING 1u
