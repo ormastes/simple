@@ -64,5 +64,11 @@ Specs (`test/01_unit/compiler/50.mir/missing_struct_field_lowering_spec.spl`, de
 
 They run only on a compiler deployed after this change.
 
+Unverified assumption: the guard arms only when `struct_value_syms` holds the receiver's owner.
+Value provenance for an untyped match result comes from `remember_merged_arm_identity`
+(`mir_lowering_stmts.spl` match lowering), and nothing here checks that it is populated for this
+shape. If the reproduction case stays RED, the remaining gap is missing provenance for the
+match-arm binding. That gap must be fixed. The assertion must not be weakened.
+
 ## Verification pending
 Phase 3 rebuild, then the 1-file `--entry-closure` repro above must seal both owners.
