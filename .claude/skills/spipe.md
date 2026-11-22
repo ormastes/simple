@@ -2096,6 +2096,14 @@ defaults for the existing `SIMPLE_*CACHE*` vars; a spec that needs a specific
 cache state sets the consumer var explicitly (it always wins) and never relies
 on the host's user file. Use `host_config_cache_env(entries, env)` to test the
 mapping hermetically.
+Bootstrap tuning knobs live there too (2026-11-22): `mem_reserve_free_mib`,
+`stage3_tree_rss_cap_kib`, `stage3_direct_threads`, `stage3_file_workers`
+default `SIMPLE_BUILD_MEMORY_RESERVE_BYTES`,
+`SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB`, `SIMPLE_STAGE3_DIRECT_THREADS`,
+`SIMPLE_FILE_WORKERS` (env wins). Put host values in
+`config/host/<hostname>.sdn` via `sh scripts/setup/update-host-config.shs
+[--dry-run] [--set KEY=VALUE]`, not launcher env; table in
+`doc/07_guide/tooling/bootstrap_options.md` § Host settings.
 
 ## Running specs on a loaded box (harness truths, 2026-07-29)
 

@@ -1,0 +1,134 @@
+#!/bin/sh
+# Measure this host and write/update its bootstrap settings in
+# config/host/<hostname>.sdn (host_env: block) in place: idempotent, other keys
+# and comments preserved, a missing key appended at the end of the file.
+#
+# Measured (written automatically):
+#   max_threads            online CPUs (getconf _NPROCESSORS_ONLN / nproc)
+#   mem_reserve_free_mib   2048, ONLY on Windows when reported available RAM is
+#                          < 1/4 of total while process working sets hold
+#                          < 1/2 of it (dynamic-memory balloon:
+#                          GlobalMemoryStatusEx under-reports, #8931,
+#                          doc/08_tracking/bug/windows_balloon_memory_headroom_false_refusal_2026-11-13.md)
+# Tuning values are not guessed; pass them explicitly:
+#   --set stage3_tree_rss_cap_kib=N --set stage3_direct_threads=N --set stage3_file_workers=0|1
+#
+# Usage: update-host-config.shs [--dry-run] [--file PATH] [--set KEY=VALUE]... | --selftest
+# Readers + precedence (env > host config > default): doc/07_guide/tooling/bootstrap_options.md
+set -u
+
+uhc_self=$0
+uhc_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd) || exit 2
+
+# uhc_apply FILE OUT KEY=VALUE... -> OUT is FILE with each `  KEY: ...` line
+# replaced (first match) or appended.
+uhc_apply() {
+    uhc_in=$1 uhc_out=$2; shift 2
+    awk -v pairs="$*" '
+        BEGIN { n = split(pairs, p, " "); for (i = 1; i <= n; i++) { k = p[i]; sub(/=.*/, "", k); v = p[i]; sub(/^[^=]*=/, "", v); key[i] = k; val[i] = v; done[i] = 0 } }
+        {
+            for (i = 1; i <= n; i++) if (!done[i] && $0 ~ ("^  " key[i] ":")) { print "  " key[i] ": " val[i]; done[i] = 1; next }
+            print
+        }
+        END { for (i = 1; i <= n; i++) if (!done[i]) print "  " key[i] ": " val[i] }
+    ' "$uhc_in" >"$uhc_out"
+}
+
+uhc_measure() {
+    uhc_cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo "")
+    uhc_total=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null)
+    uhc_avail=$(awk '/^MemAvailable:/ { a = $2 } /^MemFree:/ { f = $2 } END { print int((a ? a : f) / 1024) }' /proc/meminfo 2>/dev/null)
+    uhc_pairs=
+    case "$uhc_cpus" in ''|*[!0-9]*|0) ;; *) uhc_pairs="max_threads=$uhc_cpus" ;; esac
+    uhc_procs=
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*)
+            # Sum of process working sets: RAM that processes actually hold.
+            uhc_procs=$(powershell.exe -NoProfile -Command '[int64]((Get-Process | Measure-Object WorkingSet64 -Sum).Sum / 1MB)' 2>/dev/null | tr -d '\r') ;;
+    esac
+    case "$uhc_procs" in *[!0-9]*) uhc_procs= ;; esac
+    echo "measured: cpus=${uhc_cpus:-?} total_mib=${uhc_total:-?} available_mib=${uhc_avail:-?} process_ws_mib=${uhc_procs:-n/a}" >&2
+    # Ballooned pattern: Windows reports available < 1/4 of total while the
+    # processes themselves hold < 1/2 of total (the rest is taken outside any
+    # process, e.g. a Hyper-V dynamic-memory balloon).
+    if [ -n "$uhc_procs" ] && [ -n "$uhc_total" ] && [ -n "$uhc_avail" ] &&
+       [ $((uhc_avail * 4)) -lt "$uhc_total" ] && [ $((uhc_procs * 2)) -lt "$uhc_total" ]; then
+        echo "measured: available << total with low process use (ballooned, #8931) -> mem_reserve_free_mib=2048" >&2
+        uhc_pairs="$uhc_pairs mem_reserve_free_mib=2048"
+    fi
+}
+
+uhc_selftest() {
+    uhc_t=$(mktemp -d) || return 2
+    printf '# head comment\nhost_env:\n  hostname: fx\n  # keep me\n  max_threads: 2\n  other: x\n' >"$uhc_t/h.sdn"
+    uhc_ok=0
+    uhc_apply "$uhc_t/h.sdn" "$uhc_t/a.sdn" max_threads=8 stage3_file_workers=0
+    uhc_apply "$uhc_t/a.sdn" "$uhc_t/b.sdn" max_threads=8 stage3_file_workers=0
+    grep -qx '  max_threads: 8' "$uhc_t/a.sdn" || uhc_ok=1
+    grep -qx '  stage3_file_workers: 0' "$uhc_t/a.sdn" || uhc_ok=1
+    grep -qx '  # keep me' "$uhc_t/a.sdn" || uhc_ok=1
+    grep -qx '  other: x' "$uhc_t/a.sdn" || uhc_ok=1
+    [ "$(grep -c max_threads "$uhc_t/a.sdn")" = 1 ] || uhc_ok=1
+    cmp -s "$uhc_t/a.sdn" "$uhc_t/b.sdn" || uhc_ok=1
+    sh "$uhc_self" --file "$uhc_t/b.sdn" --dry-run --set stage3_direct_threads=4 >"$uhc_t/d.out" 2>/dev/null
+    grep -q '^+  stage3_direct_threads: 4' "$uhc_t/d.out" || uhc_ok=1
+    cmp -s "$uhc_t/a.sdn" "$uhc_t/b.sdn" || uhc_ok=1
+    rm -rf "$uhc_t"
+    if [ "$uhc_ok" = 0 ]; then echo "PASS — update-host-config selftest: replace, append, idempotent, comments kept, dry-run read-only"; return 0; fi
+    echo "FAIL — update-host-config selftest"; return 1
+}
+
+uhc_dry=0 uhc_file= uhc_set=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) uhc_selftest; exit $? ;;
+        --dry-run) uhc_dry=1 ;;
+        --file) [ $# -ge 2 ] || exit 2; uhc_file=$2; shift ;;
+        --set)
+            [ $# -ge 2 ] || exit 2
+            case "$2" in [a-z]*=?*) ;; *) echo "error: --set needs KEY=VALUE" >&2; exit 2 ;; esac
+            case "$2" in *' '*) echo "error: --set value may not contain spaces" >&2; exit 2 ;; esac
+            uhc_set="$uhc_set $2"; shift ;;
+        *) echo "usage: update-host-config.shs [--dry-run] [--file PATH] [--set KEY=VALUE]... | --selftest" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+uhc_host=$(hostname 2>/dev/null || uname -n)
+[ -n "$uhc_file" ] || uhc_file="$uhc_root/config/host/$uhc_host.sdn"
+uhc_measure
+uhc_pairs="$uhc_pairs$uhc_set"
+[ -n "${uhc_pairs# }" ] || { echo "nothing to write" >&2; exit 0; }
+
+uhc_tmp=$(mktemp) || exit 2
+if [ -f "$uhc_file" ]; then
+    cp "$uhc_file" "$uhc_tmp.in"
+else
+    printf '# Host-specific environment for %s.\n#\n# Schema: simple-host-env-v1\n\nhost_env:\n  schema: simple-host-env-v1\n  hostname: %s\n' "$uhc_host" "$uhc_host" >"$uhc_tmp.in"
+fi
+# shellcheck disable=SC2086
+uhc_apply "$uhc_tmp.in" "$uhc_tmp" $uhc_pairs
+if [ "$uhc_dry" = 1 ]; then
+    if [ -f "$uhc_file" ]; then
+        diff -u "$uhc_file" "$uhc_tmp" || :
+    else
+        cat "$uhc_tmp"
+    fi
+    rm -f "$uhc_tmp" "$uhc_tmp.in"
+    exit 0
+fi
+if cmp -s "$uhc_tmp.in" "$uhc_tmp" && [ -f "$uhc_file" ]; then
+    echo "unchanged: $uhc_file"
+else
+    cat "$uhc_tmp" >"$uhc_file" && echo "updated: $uhc_file"
+fi
+rm -f "$uhc_tmp" "$uhc_tmp.in"
+# A higher layer (SIMPLE_HOST_* env, user host.sdn) silently shadows this file.
+if [ "$uhc_file" = "$uhc_root/config/host/$uhc_host.sdn" ]; then
+    for uhc_kv in $uhc_pairs; do
+        uhc_k=${uhc_kv%%=*}
+        sh "$uhc_root/scripts/setup/host-env.shs" --print 2>/dev/null | grep "^$uhc_k=" | grep -v '(host)$' |
+            sed 's/^/warning: shadowed by a higher host-config layer: /' >&2
+    done
+fi
+exit 0
