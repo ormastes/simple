@@ -3196,9 +3196,11 @@ impl LlvmBackend {
         let slot_bytes = (i64_type.get_bit_width() / 8) as u64;
 
         // Declare rt_interp_call if not exists
+        // name and argv are real C pointers (pointer-width on 32-bit targets),
+        // len/argc/result are 64-bit RuntimeValue-width words.
         let interp_call = module.get_function("rt_interp_call").unwrap_or_else(|| {
             let fn_type = i64_type.fn_type(
-                &[i64_type.into(), i64_type.into(), i64_type.into(), i64_type.into()],
+                &[i8_ptr_type.into(), i64_type.into(), i64_type.into(), i8_ptr_type.into()],
                 false,
             );
             module.add_function("rt_interp_call", fn_type, None)
@@ -3212,14 +3214,11 @@ impl LlvmBackend {
         name_global.set_constant(true);
         name_global.set_linkage(inkwell::module::Linkage::Private);
         let name_ptr = name_global.as_pointer_value();
-        let name_ptr_i64 = builder
-            .build_ptr_to_int(name_ptr, i64_type, "func_name_ptr")
-            .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
         let name_len = i64_type.const_int(name_bytes.len() as u64, false);
 
         let argc = i64_type.const_int(args.len() as u64, false);
         let argv = if args.is_empty() {
-            i64_type.const_int(0, false)
+            i8_ptr_type.const_null()
         } else {
             let alloc_fn_type = i64_type.fn_type(&[i64_type.into()], false);
             let alloc_fn = module
@@ -3349,10 +3348,10 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
             }
 
-            argv_raw
+            argv_ptr
         };
 
-        let call_args = [name_ptr_i64.into(), name_len.into(), argc.into(), argv.into()];
+        let call_args = [name_ptr.into(), name_len.into(), argc.into(), argv.into()];
 
         let call_site = builder
             .build_call(interp_call, &call_args, "interp_call")

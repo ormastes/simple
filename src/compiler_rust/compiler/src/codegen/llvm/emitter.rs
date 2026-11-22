@@ -685,7 +685,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
 
         let interp_call = self.module.get_function("rt_interp_call").unwrap_or_else(|| {
             let fn_type = i64_type.fn_type(
-                &[i64_type.into(), i64_type.into(), i64_type.into(), i64_type.into()],
+                &[i8_ptr_type.into(), i64_type.into(), i64_type.into(), i8_ptr_type.into()],
                 false,
             );
             self.module.add_function("rt_interp_call", fn_type, None)
@@ -697,14 +697,10 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         name_global.set_initializer(&name_const);
         name_global.set_constant(true);
         let name_ptr = name_global.as_pointer_value();
-        let name_ptr_i64 = self
-            .builder
-            .build_ptr_to_int(name_ptr, i64_type, "func_name_ptr")
-            .map_err(|e| format!("LLVM ptr_to_int failed: {}", e))?;
         let name_len = i64_type.const_int(name_bytes.len() as u64, false);
         let argc = i64_type.const_int(args.len() as u64, false);
         let argv = if args.is_empty() {
-            i64_type.const_int(0, false)
+            i8_ptr_type.const_null()
         } else {
             let alloc_fn = self.module.get_function("rt_alloc").unwrap_or_else(|| {
                 let fn_type = i64_type.fn_type(&[i64_type.into()], false);
@@ -760,10 +756,10 @@ impl CodegenEmitter for LlvmEmitter<'_> {
                     .map_err(|e| format!("LLVM store failed: {}", e))?;
             }
 
-            argv_raw
+            argv_ptr
         };
 
-        let call_args = [name_ptr_i64.into(), name_len.into(), argc.into(), argv.into()];
+        let call_args = [name_ptr.into(), name_len.into(), argc.into(), argv.into()];
         let call_site = self
             .builder
             .build_call(interp_call, &call_args, "interp_call")
