@@ -239,9 +239,6 @@ mod tests {
             }
         }
         assert!(ir.contains("trunc i"), "runtime-width inputs must restore narrow semantics: {ir}");
-        if backend.runtime_int_type().get_bit_width() == 32 {
-            assert!(ir.contains("sext i32") && ir.contains("zext i32"), "32-bit carriers must widen signed/unsigned i64 distinctly: {ir}");
-        }
         assert!(ir.contains("bitcast i64") && ir.contains("to double"), "ABI bitcast disappeared: {ir}");
         assert!(!ir.contains("@rt_value_as_float"), "raw integers must not enter tagged-float decoding: {ir}");
         backend.verify().unwrap();

@@ -1,7 +1,7 @@
 # Linux GB10 N2: no runnable qualification executable (seed native-build stall + interpreter "value is not callable")
 
 - **Filed:** 2026-11-18
-- **Status:** open (2, 3 and 4 fixed; 1, 5 and 6 open)
+- **Status:** open (2, 3, 4 and 7 fixed; 1 diagnosed with a workaround; 8 and 9 open; 5 and 6 are interpreter-only — see the 2026-11-22 section)
 - **Blocks:** `doc/08_tracking/todo/simple_2d_skia_renderdoc_linux_n2_2026-09-27.md`
   (cases 01/06/02 on the NVIDIA GB10 have no worker readbacks)
 - **Host:** physical aarch64 Ubuntu 24.04.4 LTS, NVIDIA GB10. There is no
@@ -327,3 +327,119 @@ producer and the fractional and affine wiring) are fixed. Blockers 1 and 5 are
 open; Blocker 6 is by design. A native
 qualification executable is now the single gate for both case 01 legs. The interpreter error
 and the `getpid` ambiguity are defects in their own right.
+
+## 2026-11-22 — Blocker 1 root cause, first native executable, Skia leg green
+
+Release `6b508da8f57`, same blend seed. Worktree branch
+`work/webrender-native-skia-renderdoc-20261122`.
+
+### Blocker 1 root cause: the stall was the interpreted driver, not the build
+
+`simple native-build` on the seed dispatches to the pure-Simple driver
+(`src/app/cli/native_build_main.spl`, interpreted). That is the 60 min front end
+and the ~10 s/file worker. The seed's Rust handler is selected by
+`SIMPLE_NATIVE_BUILD_RUST=1` (`driver/src/main.rs`, `native_build_rust_override`).
+Same recipe plus that variable: `compiled=506`, 29.95 s wall, 1.49 GB RSS cold;
+7–10 s warm. Blocker 1 as filed (throughput) is a defect of the interpreted
+driver and stays open as such; it no longer blocks this lane.
+
+### Blocker 7 (fixed) — `gpu_provider_device_identity` lost in merge `e5b290e42a0`
+
+With the Rust handler, 505 of 506 files compiled. The one failure:
+
+```
+src/lib/skia/backend/upstream_ganesh_vulkan/provider.spl: hir: Unsupported feature: cannot infer field type while lowering _upstream_skia_render_admitted: struct 'ANY' field 'valid'
+```
+
+`provider.spl` imports `gpu_provider_device_identity` from
+`std.nogc_sync_mut.gpu.provider`, which did not define it. `ef35100f1d4` added
+the facade (extern `rt_gpu_provider_device_identity_raw`, struct
+`GpuProviderDeviceIdentity`, 64-byte ABI read); the merge kept the C owner
+(`runtime_dynload.c`), the header and the provider export and dropped the Simple
+half. Restored verbatim. Red/green: `test/01_unit/lib/nogc_sync_mut/gpu/provider_spec.spl`
+5/6 (`function gpu_provider_device_identity not found`) -> 6/6; native-build
+`failed=1` -> `failed=0`.
+
+### Blocker 8 (open) — the seed cannot link a GPU-capable non-bootstrap entry
+
+After compile, the link is refused: `239 runtime symbol(s) referenced by
+generated code have no definition` — 84 `rt_vulkan_*`, 16 `rt_gpu_provider_*`,
+40 `rt_metal_*`, 37 `rt_cuda_*`, 28 `rt_rocm_*`, 10 `rt_oneapi_*`, 10
+`rt_intel_*`, 8 `rt_engine2d_*`, 3 `rt_webgpu_*`, `rt_opengl_*`, `rt_font_load_array`,
+`rt_cpu_arch_name`. Measured lanes:
+
+- default lane: links the core-C archive only; none of the above are in it.
+- `--runtime-bundle host-gpu --runtime-path R`: needs
+  `R/deps/libspl_hosted_runtime-*.rlib` (`find_hosted_runtime_rlib`); the
+  nightly cargo here writes it to `release/build/spl_hosted_runtime/<hash>/out/`,
+  so a plain cargo target dir is rejected with `host-gpu canonical hosted
+  runtime rlib is missing`. With a hand-made `R`, the lane links its core-C
+  "provider loader" supplement, which contains no `runtime_dynload.o`
+  (`nm` shows no `rt_gpu_provider_*`) — the same 239 are reported.
+- `libsimple_native_all.a` built with `--features vulkan`
+  (`cargo build --release -p simple-native-all --features vulkan`, 122 s,
+  4.5 GB RSS) defines 204 of the 239. `selected_runtime_library` admits it only
+  for `bootstrap_main.spl` or the BootstrapTools lane
+  (`reject_unexpected_native_all`); `rust-hosted` is a removed bundle.
+- That archive also has 12 duplicate `rt_vk_*` definitions between
+  `simple_native_all` and `simple_runtime` (needs `-z muldefs`).
+
+Workaround used for the evidence below (NOT a sanctioned build; the binary is
+diagnostic-grade): let the failed native-build keep its objects
+(`.simple/native-objects-*`), then link by hand, Rust archive first so one
+runtime owns the argv family, core-C supplement after it for the 12 C-only names:
+
+```sh
+clang++ -fPIC -no-pie -fuse-ld=lld -Wl,-z,muldefs -o vulkan_2d_qualification \
+  $O/_main_stub.o $O/_init_all.o @$O/spl_objects.rsp \
+  -Wl,-u,rt_function_not_found -Wl,-u,rt_set_args -Wl,-u,rt_string_bytes \
+  $NATIVE_ALL/libsimple_native_all.a $O/host_gpu_core_c_runtime/libsimple_runtime.a \
+  -Wl,--gc-sections -lpthread -ldl -lm -lz -lzstd -ltinfo \
+  -L/home/yoon/.local/lib -l:libvulkan.so.1
+```
+
+Core-C first instead gives a binary whose `sys_get_args` (C) never sees what
+`rt_set_args` (Rust) stored: every invocation prints the usage line. Result:
+31.7 MB, sha256 `8d47265c5de8bb21a0eb2c86caf4179edbd4bcd2c9fa903d7be35d1ec5533c96`,
+kept at `/home/yoon/skia-n2/artifacts/nb_manual_20261122/vulkan_2d_qualification`.
+Real fix: a seed (or self-hosted) runtime lane that links the Vulkan runtime
+and the provider registry for an ordinary entry.
+
+### Skia leg: green on the GB10 for three web scenes
+
+`worker-skia-*` with the 2026-11-18 provider (`758f717f…bc89`), NVIDIA ICD.
+Skia rasterises the DrawIR Simple's web renderer produced from the scene HTML;
+the device readback digest equals the Simple oracle digest:
+
+| scene | size | Skia `pixel_sha256` = oracle | tries |
+|---|---|---|---|
+| web-box (`web-opaque-box-v1`) | 16x16 | `204df3a7…7817` | 1 |
+| corpus-case01 | 640x480 | `2f4d3fb1…39e9` | 1 |
+| corpus-case06 | 640x480 | `0372ef52…ebb1` | 2 |
+| corpus-case02 | — | blocked: `skia-owner:upstream Skia corpus case 02 edge oracle mismatch` (3 of 4 tries; 1 `Vulkan device or Ganesh context unavailable`) | 4 |
+
+Receipts carry `physical_device_uuid: 1883ff9c30a91b8abc50ef34ac2f5a89`,
+`driver_uuid: 6d5e1e18…c390`, `device_type: integrated` — the restored identity
+facade attests the GB10. Case 02 is the known
+`skia_case02_edge_tolerance_exceedance_2026-09-27.md`. Blocker 5 does not apply
+to a native executable. Gate: `scripts/check/check-skia-web-reference-compare.shs`
+(PASS 3 scenes; FAIL on case 02).
+
+### Blocker 9 (open) — native Engine2D leg: device identity empty
+
+`worker-engine2d-web-box` in the same executable, 3 of 3 runs and through
+`run-web-box`:
+
+```
+status=blocked reason=engine2d-capture:selected Vulkan physical device identity unavailable
+```
+
+Strict submit, readback and the device-type/driver checks before it pass, so
+`rt_vulkan_selected_device_identity_v1(expected_device)` returned a string the
+facade rejects. Ruled out: the symbol is the real Rust one (`nm -S`: 0x618
+bytes, not the C weak stub); the `v1:<hex>:<hex>` split and hex validation
+behave identically natively and interpreted (probe on a literal). Not yet
+checked: whether `session.device` (from `vulkan_get_device()`) still equals the
+runtime's `selected_device_token` at capture time (a re-select bumps the
+token), and `device_generation_quarantined`. Until this is fixed there is no
+Engine2D-vs-Skia pixel comparison on the physical device; `run-*` cannot PASS.

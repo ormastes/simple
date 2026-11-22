@@ -1,6 +1,6 @@
 # `background:` shorthand lowercases the image URL (`url(Img/Hero.PNG)` loads `img/hero.png`) (2026-11-15)
 
-Status: OPEN. Severity: medium for Simple web (a mixed-case image path in the
+Status: FIXED (2026-11-22 — `_parse_background_shorthand` now extracts the `url(...)` argument from the original trimmed token rather than the lowercased classifier string; verified in `layout_renderer_background_and_grid_decls_spec.spl`). Severity: medium for Simple web (a mixed-case image path in the
 `background` shorthand fails to load on a case-sensitive file system or
 server; the `background-image` longhand is unaffected).
 

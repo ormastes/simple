@@ -1,0 +1,500 @@
+# Container + git worktree lifecycle for Caret Suite (`cs`) and Orchestrator.
+#
+# Contract:
+# - `--worktree` creates an isolated detached git worktree owned by the session.
+# - Clean close (`/close`, `/kill`, `/quit` on running/exited-clean) deletes the
+#   owned git worktree AND all attempt temp files (`profile.sb`, `run.sh`, `tmp`,
+#   `home`, `exit_code`, `session.sdn`, `stderr`).
+# - Crash (non-zero exit or unexpected termination without exit_code == 0)
+#   preserves the worktree and container record on disk as `state: "crashed"`,
+#   making it listable via `/containers` (`/crashed`) and relaunchable via
+#   `/relaunch <agent_id|container_name>`.
+
+use app.io.mod.{env_get, file_exists, file_read, file_write, file_atomic_write,
+    file_remove, dir_exists, dir_create_all, dir_list, dir_remove, dir_remove_all,
+    process_run_timeout, process_is_running, process_kill}
+use std.nogc_sync_mut.package_sffi.{set_permissions}
+use std.nogc_sync_mut.io.file_ops.{file_modified_time}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.container_session.podman_session_v1.{PodmanMountV1}
+use std.nogc_sync_mut.container_session.macos_seatbelt_session_v1.{MacosSeatbeltSessionSpecV1,
+    macos_seatbelt_canonical_path_v1, macos_seatbelt_compile_profile_v1,
+    macos_seatbelt_run_argv_v1}
+use app.llm_caret.cs_container.{CsContainerRequest, cs_container_owner,
+    cs_container_name, cs_container_rw_refusal, cs_container_normal_path}
+use app.llm_caret.pane_backend.{posix_quote_arg, posix_command_line}
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct CsContainerSessionRecordV1:
+    name: text
+    owner: text
+    session: text
+    agent_id: text
+    spec: text
+    backend: text
+    image: text
+    executable: text
+    argv: [text]
+    repo_root: text
+    worktree_path: text
+    worktree_owned: bool
+    attempt_dir: text
+    stderr_path: text
+    pane_id: text
+    pid: i64
+    instance: text
+    network: text
+    mounts: [text] = []
+    env: [text]
+    state: text
+    exit_code: i64
+
+pub struct CsOldCleanupResultV1:
+    eligible: [text]
+    removed: [text]
+    failures: [text]
+
+fn _cs_rec_encode_mounts_v1(mounts: [PodmanMountV1]) -> [text]:
+    var out: [text] = []
+    for m in mounts:
+        val mode = if m.read_only: "ro" else: "rw"
+        out.push(m.source + ":" + m.target + ":" + mode)
+    out
+
+fn _cs_rec_decode_mounts_v1(raw: [text], home_dir: text) -> Result<[PodmanMountV1], text>:
+    var out: [PodmanMountV1] = []
+    for entry in raw:
+        val parts = entry.split(":")
+        if parts.len() != 3:
+            return Err("container-mount-record-invalid")
+        val mode = parts[2]
+        if mode != "ro" and mode != "rw":
+            return Err("container-mount-mode-invalid")
+        val read_only = mode == "ro"
+        val src = cs_container_normal_path(parts[0])
+        val dst = cs_container_normal_path(parts[1])
+        if src == "" or dst == "":
+            return Err("container-mount-path-invalid")
+        if not read_only:
+            val mr = cs_container_rw_refusal(src, home_dir)
+            if mr != "":
+                return Err(mr + " (--container-mount)")
+        out.push(PodmanMountV1(source: src, target: dst, read_only: read_only))
+    Ok(out)
+
+pub fn cs_worktree_extract_flag_v1(extras: [text]) -> (bool, [text]):
+    var wants_wt = false
+    var rest: [text] = []
+    for word in extras:
+        if word == "--worktree":
+            wants_wt = true
+        else:
+            rest.push(word)
+    (wants_wt, rest)
+
+pub fn cs_strip_workspace_for_cli_harness_v1(harness: text, argv_tail: [text]) -> [text]:
+    if harness == "caret":
+        return argv_tail
+    var out: [text] = []
+    var i = 0
+    while i < argv_tail.len():
+        val w = argv_tail[i]
+        if w == "--workspace" and i + 1 < argv_tail.len():
+            i = i + 2
+            continue
+        if w.starts_with("--workspace="):
+            i = i + 1
+            continue
+        out.push(w)
+        i = i + 1
+    out
+
+pub fn cs_container_session_store_root_v1(session: text) -> text:
+    var base = env_get("SIMPLE_CONTAINER_SESSION_ROOT") ?? ""
+    if base == "":
+        var tmp = env_get("TMPDIR") ?? ""
+        if tmp == "":
+            tmp = "/tmp"
+        if tmp.ends_with("/"):
+            tmp = tmp.substring(0, tmp.byte_len() - 1)
+        base = tmp + "/simple-cs-containers"
+    if base.ends_with("/"):
+        base = base.substring(0, base.byte_len() - 1)
+    macos_seatbelt_canonical_path_v1(base) + "/" + cs_container_owner(session)
+
+pub fn cs_worktree_create_v1(repo_root: text, session: text, agent_id: text) -> Result<text, text>:
+    val root = cs_container_session_store_root_v1(session) + "/worktrees"
+    dir_create_all(root)
+    val wt_path = macos_seatbelt_canonical_path_v1(root) + "/" + agent_id
+    if dir_exists(wt_path):
+        return Err("worktree already exists; close or clean its tracked session first: " + wt_path)
+    val res = process_run_timeout("git", ["-C", repo_root, "worktree", "add", "--detach", wt_path], 30000)
+    if (res.2 as i64) != 0:
+        return Err("worktree add failed: " + (res.0 + res.1).trim())
+    Ok(macos_seatbelt_canonical_path_v1(wt_path))
+
+pub fn cs_worktree_remove_owned_v1(repo_root: text, wt_path: text) -> Result<bool, text>:
+    if wt_path == "":
+        return Ok(true)
+    if dir_exists(wt_path) and repo_root != "" and dir_exists(repo_root):
+        val _r = process_run_timeout("git", ["-C", repo_root, "worktree", "remove", "--force", wt_path], 30000)
+        val _p = process_run_timeout("git", ["-C", repo_root, "worktree", "prune"], 15000)
+    if dir_exists(wt_path):
+        val _d = dir_remove_all(wt_path)
+    if dir_exists(wt_path):
+        return Err("worktree still present: " + wt_path)
+    Ok(true)
+
+fn _cs_rec_encode_v1(rec: CsContainerSessionRecordV1) -> text:
+    var argv_vals: [SdnValue] = []
+    for a in rec.argv:
+        argv_vals.push(SdnValue.String(a))
+    var mount_vals: [SdnValue] = []
+    for m in rec.mounts:
+        mount_vals.push(SdnValue.String(m))
+    var env_vals: [SdnValue] = []
+    for e in rec.env:
+        env_vals.push(SdnValue.String(e))
+    val fields: Dict<text, SdnValue> = {
+        "version": SdnValue.Int(1),
+        "kind": SdnValue.String("cs-container-session-v1"),
+        "name": SdnValue.String(rec.name),
+        "owner": SdnValue.String(rec.owner),
+        "session": SdnValue.String(rec.session),
+        "agentId": SdnValue.String(rec.agent_id),
+        "spec": SdnValue.String(rec.spec),
+        "backend": SdnValue.String(rec.backend),
+        "image": SdnValue.String(rec.image),
+        "executable": SdnValue.String(rec.executable),
+        "argv": SdnValue.Array(argv_vals),
+        "repoRoot": SdnValue.String(rec.repo_root),
+        "worktreePath": SdnValue.String(rec.worktree_path),
+        "worktreeOwned": SdnValue.Bool(rec.worktree_owned),
+        "attemptDir": SdnValue.String(rec.attempt_dir),
+        "stderrPath": SdnValue.String(rec.stderr_path),
+        "paneId": SdnValue.String(rec.pane_id),
+        "pid": SdnValue.Int(rec.pid),
+        "instance": SdnValue.String(rec.instance),
+        "network": SdnValue.String(rec.network),
+        "mounts": SdnValue.Array(mount_vals),
+        "env": SdnValue.Array(env_vals),
+        "state": SdnValue.String(rec.state),
+        "exitCode": SdnValue.Int(rec.exit_code)
+    }
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+fn _cs_rec_str_v1(d: Dict<text, SdnValue>, key: text) -> text:
+    if not d.contains_key(key): return ""
+    match d[key]:
+        case SdnValue.String(v): v
+        case _: ""
+
+fn _cs_rec_int_v1(d: Dict<text, SdnValue>, key: text, fallback: i64) -> i64:
+    if not d.contains_key(key): return fallback
+    match d[key]:
+        case SdnValue.Int(v): v
+        case _: fallback
+
+fn _cs_rec_bool_v1(d: Dict<text, SdnValue>, key: text) -> bool:
+    if not d.contains_key(key): return false
+    match d[key]:
+        case SdnValue.Bool(v): v
+        case _: false
+
+fn _cs_rec_arr_v1(d: Dict<text, SdnValue>, key: text) -> [text]:
+    if not d.contains_key(key): return []
+    match d[key]:
+        case SdnValue.Array(items):
+            var out: [text] = []
+            for item in items:
+                match item:
+                    case SdnValue.String(s): out.push(s)
+                    case _: pass
+            out
+        case _: []
+
+fn _cs_rec_decode_v1(source: text) -> Result<CsContainerSessionRecordV1, text>:
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 131072,
+        max_depth: 6, max_nodes: 1024, max_rows: 0, max_cells: 0, max_columns: 32))
+    if parsed.is_err():
+        return Err("container-session-sdn-invalid")
+    val d = match parsed.unwrap().value:
+        case SdnValue.Dict(fields): fields
+        case _: return Err("container-session-object-required")
+    if _cs_rec_int_v1(d, "version", 0) != 1 or _cs_rec_str_v1(d, "kind") != "cs-container-session-v1":
+        return Err("container-session-header-invalid")
+    Ok(CsContainerSessionRecordV1(
+        name: _cs_rec_str_v1(d, "name"),
+        owner: _cs_rec_str_v1(d, "owner"),
+        session: _cs_rec_str_v1(d, "session"),
+        agent_id: _cs_rec_str_v1(d, "agentId"),
+        spec: _cs_rec_str_v1(d, "spec"),
+        backend: _cs_rec_str_v1(d, "backend"),
+        image: _cs_rec_str_v1(d, "image"),
+        executable: _cs_rec_str_v1(d, "executable"),
+        argv: _cs_rec_arr_v1(d, "argv"),
+        repo_root: _cs_rec_str_v1(d, "repoRoot"),
+        worktree_path: _cs_rec_str_v1(d, "worktreePath"),
+        worktree_owned: _cs_rec_bool_v1(d, "worktreeOwned"),
+        attempt_dir: _cs_rec_str_v1(d, "attemptDir"),
+        stderr_path: _cs_rec_str_v1(d, "stderrPath"),
+        pane_id: _cs_rec_str_v1(d, "paneId"),
+        pid: _cs_rec_int_v1(d, "pid", -1),
+        instance: _cs_rec_str_v1(d, "instance"),
+        network: _cs_rec_str_v1(d, "network"),
+        mounts: _cs_rec_arr_v1(d, "mounts"),
+        env: _cs_rec_arr_v1(d, "env"),
+        state: _cs_rec_str_v1(d, "state"),
+        exit_code: _cs_rec_int_v1(d, "exitCode", -1)
+    ))
+
+# Atomic persistence predicate mirroring `file_atomic_write`.
+@allow(primitive_api)
+pub fn cs_container_record_save_v1(rec: CsContainerSessionRecordV1) -> bool:
+    dir_create_all(rec.attempt_dir)
+    val ok = file_atomic_write(rec.attempt_dir + "/session.sdn", _cs_rec_encode_v1(rec))
+    val _perm = set_permissions(rec.attempt_dir + "/session.sdn", 0o600)
+    ok
+
+pub fn cs_container_write_runner_v1(rec: CsContainerSessionRecordV1, inner_argv: [text]) -> Result<text, text>:
+    dir_create_all(rec.attempt_dir + "/tmp")
+    dir_create_all(rec.attempt_dir + "/home")
+    val _p1 = set_permissions(rec.attempt_dir, 0o700)
+    val _p2 = set_permissions(rec.attempt_dir + "/tmp", 0o700)
+    val _p3 = set_permissions(rec.attempt_dir + "/home", 0o700)
+    val exit_file = rec.attempt_dir + "/exit_code"
+    val _gone = file_remove(exit_file)
+    val workdir = if rec.worktree_path != "": rec.worktree_path else: rec.repo_root
+    var inner_args: [text] = []
+    var i = 1
+    while i < inner_argv.len():
+        inner_args.push(inner_argv[i])
+        i = i + 1
+    val run_path = rec.attempt_dir + "/run.sh"
+    val script = ("#!/bin/sh\n" +
+        "cd " + posix_quote_arg(workdir) + " || exit 125\n" +
+        "TMPDIR=" + posix_quote_arg(rec.attempt_dir + "/tmp") + "; export TMPDIR\n" +
+        posix_command_line(inner_argv[0], inner_args) + "\n" +
+        "rc=$?\n" +
+        "printf '%s\\n' \"$rc\" > " + posix_quote_arg(exit_file + ".tmp") +
+        " && /bin/mv -f " + posix_quote_arg(exit_file + ".tmp") + " " + posix_quote_arg(exit_file) + "\n" +
+        "exit \"$rc\"\n")
+    if not file_write(run_path, script) or not set_permissions(run_path, 0o700):
+        return Err("could not write container runner script")
+    Ok(run_path)
+
+pub fn cs_container_prepare_macos_seatbelt_v1(session: text, agent_id: text, spec_text: text,
+        exe: text, args: [text], repo_root: text, worktree_path: text, worktree_owned: bool,
+        stderr_path: text, home_dir: text, instance: text,
+        request: CsContainerRequest) -> Result<(CsContainerSessionRecordV1, text), text>:
+    if worktree_path != "":
+        val refusal = cs_container_rw_refusal(cs_container_normal_path(worktree_path), home_dir)
+        if refusal != "":
+            return Err(refusal + " (--worktree)")
+    for mount in request.mounts:
+        if not mount.read_only:
+            val mr = cs_container_rw_refusal(mount.source, home_dir)
+            if mr != "":
+                return Err(mr + " (--container-mount)")
+    val name = cs_container_name(session, agent_id)
+    val owner = cs_container_owner(session)
+    val attempt_dir = cs_container_session_store_root_v1(session) + "/containers/" + name
+    dir_create_all(attempt_dir)
+    val workdir = if worktree_path != "": worktree_path else: repo_root
+    val sb_spec = MacosSeatbeltSessionSpecV1(
+        name: name, owner: owner, image: request.image,
+        command: [exe] + args, workdir: workdir, repo_root: repo_root,
+        worktree_path: worktree_path, attempt_dir: attempt_dir, home_dir: home_dir,
+        mounts: request.mounts, network: request.network, env: request.env, instance: instance)
+    val profile = macos_seatbelt_compile_profile_v1(sb_spec)?
+    val profile_path = attempt_dir + "/profile.sb"
+    if not file_atomic_write(profile_path, profile):
+        return Err("could not write seatbelt profile")
+    val inner_argv = macos_seatbelt_run_argv_v1(profile_path, sb_spec)?
+    val rec = CsContainerSessionRecordV1(
+        name: name, owner: owner, session: session, agent_id: agent_id, spec: spec_text,
+        backend: "macos-seatbelt", image: request.image, executable: exe, argv: args,
+        repo_root: repo_root, worktree_path: worktree_path, worktree_owned: worktree_owned,
+        attempt_dir: attempt_dir, stderr_path: stderr_path, pane_id: "", pid: -1,
+        instance: instance, network: request.network,
+        mounts: _cs_rec_encode_mounts_v1(request.mounts),
+        env: request.env, state: "running", exit_code: -1)
+    val run_path = cs_container_write_runner_v1(rec, inner_argv)?
+    if not cs_container_record_save_v1(rec):
+        return Err("could not persist container session record")
+    Ok((rec, run_path))
+
+pub fn cs_container_records_load_v1(session: text) -> [CsContainerSessionRecordV1]:
+    val containers_dir = cs_container_session_store_root_v1(session) + "/containers"
+    if not dir_exists(containers_dir):
+        return []
+    var out: [CsContainerSessionRecordV1] = []
+    for entry in dir_list(containers_dir):
+        val path = containers_dir + "/" + entry + "/session.sdn"
+        if file_exists(path):
+            match _cs_rec_decode_v1(file_read(path)):
+                case Ok(rec): out.push(rec)
+                case Err(_): pass
+    out
+
+pub fn cs_container_reconcile_v1(session: text, live_pane_ids: [text]) -> [CsContainerSessionRecordV1]:
+    var out: [CsContainerSessionRecordV1] = []
+    for rec0 in cs_container_records_load_v1(session):
+        var rec = rec0
+        if rec.state == "running":
+            var alive = false
+            if rec.pane_id != "":
+                for pid_str in live_pane_ids:
+                    if pid_str == rec.pane_id:
+                        alive = true
+            elif rec.pid > 0 and process_is_running(rec.pid):
+                alive = true
+            # Also check if exit_code file was already written (fast-exiting child).
+            val exit_path = rec.attempt_dir + "/exit_code"
+            val has_exit_file = file_exists(exit_path)
+            if not alive or has_exit_file:
+                if has_exit_file:
+                    val parsed = file_read(exit_path).trim().to_i64() ?? -9
+                    rec.exit_code = parsed
+                    rec.state = if parsed == 0: "exited-clean" else: "crashed"
+                    rec.pane_id = if alive: rec.pane_id else: ""
+                    val _s = cs_container_record_save_v1(rec)
+                elif not alive:
+                    rec.exit_code = -9
+                    rec.state = "crashed"
+                    rec.pane_id = ""
+                    val _s = cs_container_record_save_v1(rec)
+        out.push(rec)
+    out
+
+fn _prune_empty_store_dirs_v1(session: text):
+    val root = cs_container_session_store_root_v1(session)
+    for sub in [root + "/containers", root + "/worktrees", root]:
+        if dir_exists(sub) and dir_list(sub).len() == 0:
+            val _rm = dir_remove(sub, false)
+
+fn _cs_container_remove_record_v1(rec: CsContainerSessionRecordV1) -> (bool, text):
+    if rec.state == "running" and rec.pane_id == "" and rec.pid > 0 and process_is_running(rec.pid):
+        val _k = process_kill(rec.pid)
+    if rec.worktree_owned and rec.worktree_path != "":
+        val wt_rm = cs_worktree_remove_owned_v1(rec.repo_root, rec.worktree_path)
+        if wt_rm.is_err():
+            return (false, wt_rm.unwrap_err())
+    if rec.stderr_path != "":
+        val _sp = file_remove(rec.stderr_path)
+        if file_exists(rec.stderr_path):
+            return (false, "could not remove stderr for " + rec.name)
+    if rec.attempt_dir != "" and dir_exists(rec.attempt_dir):
+        val _ad = dir_remove_all(rec.attempt_dir)
+        if dir_exists(rec.attempt_dir):
+            return (false, "could not remove attempt files for " + rec.name)
+    (true, "cleaned container " + rec.name + ", worktree and temp files")
+
+pub fn cs_container_close_record_v1(session: text, key: text, live_pane_ids: [text],
+        force_reap: bool) -> (bool, text):
+    val records = cs_container_reconcile_v1(session, live_pane_ids)
+    for rec in records:
+        if rec.agent_id == key or rec.name == key:
+            if rec.state == "crashed" and not force_reap:
+                return (false, "container " + rec.name + " crashed (exit " + rec.exit_code.to_text() +
+                    "): preserved worktree " + rec.worktree_path + " and state for /relaunch")
+            val result = _cs_container_remove_record_v1(rec)
+            _prune_empty_store_dirs_v1(session)
+            return result
+    (true, "")
+
+pub fn cs_container_cleanup_old_v1(session: text, live_pane_ids: [text],
+        apply_changes: bool) -> CsOldCleanupResultV1:
+    val now_seconds = time_now_unix_micros() / 1000000
+    val root = cs_container_session_store_root_v1(session)
+    var eligible: [text] = []
+    var removed: [text] = []
+    var failures: [text] = []
+    for rec in cs_container_reconcile_v1(session, live_pane_ids):
+        if rec.session != session or rec.state != "exited-clean" or live_pane_ids.contains(rec.pane_id):
+            continue
+        val expected_name = cs_container_name(session, rec.agent_id)
+        val expected_attempt = root + "/containers/" + expected_name
+        if rec.name != expected_name or rec.attempt_dir != expected_attempt:
+            continue
+        if macos_seatbelt_canonical_path_v1(rec.attempt_dir) != expected_attempt:
+            continue
+        if rec.worktree_owned:
+            val expected_worktree = root + "/worktrees/" + rec.agent_id
+            if rec.worktree_path != expected_worktree:
+                continue
+            if dir_exists(expected_worktree):
+                if macos_seatbelt_canonical_path_v1(expected_worktree) != expected_worktree:
+                    continue
+                val worktree_created = file_modified_time(expected_worktree + "/.git")
+                if worktree_created <= 0 or now_seconds - worktree_created < 3600:
+                    continue
+        val finished = file_modified_time(rec.attempt_dir + "/exit_code")
+        if finished <= 0 or now_seconds - finished < 3600:
+            continue
+        eligible.push(rec.agent_id)
+        if apply_changes:
+            val (ok, reason) = _cs_container_remove_record_v1(rec)
+            if ok:
+                removed.push(rec.agent_id)
+            else:
+                failures.push(reason)
+    if apply_changes and removed.len() > 0:
+        _prune_empty_store_dirs_v1(session)
+    CsOldCleanupResultV1(eligible: eligible, removed: removed, failures: failures)
+
+pub fn cs_container_crashed_records_v1(session: text, live_pane_ids: [text]) -> [CsContainerSessionRecordV1]:
+    var crashed: [CsContainerSessionRecordV1] = []
+    for rec in cs_container_reconcile_v1(session, live_pane_ids):
+        if rec.state == "crashed":
+            crashed.push(rec)
+    crashed
+
+pub fn cs_container_prepare_relaunch_v1(session: text, key: text, override_args: [text],
+        live_pane_ids: [text], new_instance: text, home_dir: text) -> Result<(CsContainerSessionRecordV1, text), text>:
+    val records = cs_container_reconcile_v1(session, live_pane_ids)
+    for rec0 in records:
+        if rec0.agent_id == key or rec0.name == key:
+            if rec0.state != "crashed":
+                return Err("container " + rec0.name + " is '" + rec0.state + "', only crashed containers can be relaunched")
+            if rec0.worktree_path != "" and not dir_exists(rec0.worktree_path):
+                return Err("preserved worktree missing for " + rec0.name + ": " + rec0.worktree_path)
+            var rec = rec0
+            if override_args.len() > 0:
+                rec.argv = override_args
+            rec.instance = new_instance
+            rec.state = "running"
+            rec.exit_code = -1
+            rec.pane_id = ""
+            rec.pid = -1
+            var inner_argv = [rec.executable] + rec.argv
+            if rec.backend != "host-worktree":
+                val workdir = if rec.worktree_path != "": rec.worktree_path else: rec.repo_root
+                val restored_mounts = _cs_rec_decode_mounts_v1(rec.mounts, home_dir)?
+                val sb_spec = MacosSeatbeltSessionSpecV1(
+                    name: rec.name, owner: rec.owner, image: rec.image,
+                    command: inner_argv, workdir: workdir, repo_root: rec.repo_root,
+                    worktree_path: rec.worktree_path, attempt_dir: rec.attempt_dir, home_dir: home_dir,
+                    mounts: restored_mounts, network: rec.network, env: rec.env, instance: new_instance)
+                val profile = macos_seatbelt_compile_profile_v1(sb_spec)?
+                val profile_path = rec.attempt_dir + "/profile.sb"
+                if not file_atomic_write(profile_path, profile):
+                    return Err("could not update seatbelt profile for relaunch")
+                inner_argv = macos_seatbelt_run_argv_v1(profile_path, sb_spec)?
+            val run_path = cs_container_write_runner_v1(rec, inner_argv)?
+            if not cs_container_record_save_v1(rec):
+                return Err("could not save relaunched container record")
+            return Ok((rec, run_path))
+    Err("no crashed container matching '" + key + "'")
+
+export CsContainerSessionRecordV1, CsOldCleanupResultV1
+export cs_worktree_extract_flag_v1, cs_strip_workspace_for_cli_harness_v1
+export cs_container_session_store_root_v1, cs_worktree_create_v1, cs_worktree_remove_owned_v1
+export cs_container_record_save_v1, cs_container_write_runner_v1
+export cs_container_prepare_macos_seatbelt_v1, cs_container_records_load_v1
+export cs_container_reconcile_v1, cs_container_close_record_v1
+export cs_container_cleanup_old_v1
+export cs_container_crashed_records_v1, cs_container_prepare_relaunch_v1

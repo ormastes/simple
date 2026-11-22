@@ -83,19 +83,26 @@ static int cosmos_nfc_ranges_overlap(unsigned int first, unsigned int first_size
         first, first_size, second, second_size);
 }
 
-static int cosmos_nfc_ownership_lock_acquire(void) {
+static int cosmos_nfc_spin_lock_acquire(unsigned int *lock) {
     unsigned int remaining;
     for (remaining = COSMOS_NFC_POLL_LIMIT; remaining != 0U; remaining--) {
-        if (__atomic_exchange_n(&cosmos_nfc_ownership_lock, 1U,
-                                __ATOMIC_ACQUIRE) == 0U) {
+        if (__atomic_exchange_n(lock, 1U, __ATOMIC_ACQUIRE) == 0U) {
             return COSMOS_OK;
         }
     }
     return COSMOS_TIMEOUT;
 }
 
+static void cosmos_nfc_spin_lock_release(unsigned int *lock) {
+    __atomic_store_n(lock, 0U, __ATOMIC_RELEASE);
+}
+
+static int cosmos_nfc_ownership_lock_acquire(void) {
+    return cosmos_nfc_spin_lock_acquire(&cosmos_nfc_ownership_lock);
+}
+
 static void cosmos_nfc_ownership_lock_release(void) {
-    __atomic_store_n(&cosmos_nfc_ownership_lock, 0U, __ATOMIC_RELEASE);
+    cosmos_nfc_spin_lock_release(&cosmos_nfc_ownership_lock);
 }
 
 static int cosmos_nfc_dma_reserve(
@@ -164,19 +171,11 @@ static int cosmos_nfc_contract_ready(void) {
 }
 
 static int cosmos_nfc_channel_lock(unsigned int channel) {
-    unsigned int remaining;
-    for (remaining = COSMOS_NFC_POLL_LIMIT; remaining != 0U; remaining--) {
-        if (__atomic_exchange_n(&cosmos_nfc_channel_locks[channel], 1U,
-                                __ATOMIC_ACQUIRE) == 0U) {
-            return COSMOS_OK;
-        }
-    }
-    return COSMOS_TIMEOUT;
+    return cosmos_nfc_spin_lock_acquire(&cosmos_nfc_channel_locks[channel]);
 }
 
 static void cosmos_nfc_channel_unlock(unsigned int channel) {
-    __atomic_store_n(&cosmos_nfc_channel_locks[channel], 0U,
-                     __ATOMIC_RELEASE);
+    cosmos_nfc_spin_lock_release(&cosmos_nfc_channel_locks[channel]);
 }
 
 static int cosmos_nfc_channel_is_faulted(unsigned int channel) {

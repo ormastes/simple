@@ -1,6 +1,6 @@
 # Simple ELF linker drops `.comment` (ld.lld keeps it)
 
-- **Status:** verification-pending
+- **Status:** fixed (2026-11-22)
 - **Date:** 2026-11-19
 - **Area:** `src/compiler/70.backend/linker/elf/elf_static_link.spl`
 
@@ -36,3 +36,7 @@ lld's string would misattribute the output.
 `test/01_unit/compiler/backend/linker/simpleos_user32_link_spec.spl`: arm32
 `.comment` type/flags/entsize/content, and the dedup order of `elf_merge_comment_strings`.
 Baseline 7/8 before the fix (the new engine `it` failed).
+
+## Verification Update (2026-11-22)
+
+- Verified `.comment` section preservation (`SHT_PROGBITS`, `SHF_MERGE | SHF_STRINGS = 0x30`, `sh_entsize = 1`, deduplicated input strings + `Linker: Simple ELF linker`) in `src/compiler/70.backend/linker/elf/elf_comment_section.spl` and `test/01_unit/compiler/backend/linker/simpleos_user32_link_spec.spl`.

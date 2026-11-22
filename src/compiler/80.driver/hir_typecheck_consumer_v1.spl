@@ -12,8 +12,9 @@ use compiler.types.cfg_decl_check.{cfg_decl_check_module}
 use compiler.common.api_signature_facts_v1.{ApiSignatureFactsV1}
 use compiler.types.type_infer.api_signature_projection_v1.{project_api_signatures_v1}
 use compiler.driver.driver_unit_profile.{unit_profile_apply, unit_profile_drain_diagnostics}
-use compiler.semantics.must_use_discard.{must_use_discard_scan, must_use_finding_severity}
 use compiler.core.unit_constraint.{unit_constraint_drain_conflicts}
+use compiler.semantics.must_use_discard.{must_use_discard_scan_module}
+use compiler.common.must_use_policy.{must_use_finding_severity}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 
 # The only values a typecheck body lease may retain. No HIR/type/symbol roots.
@@ -69,7 +70,8 @@ pub fn typecheck_error_is_fn_value_into_data_slot_v1(ictx: HmInferContext, err: 
 
 pub fn collect_module_typecheck_receipt_v1(
     name: text, m: HirModule, severity: TypecheckPassSeverity,
-    collect_api_signatures: bool = false, script_mode: bool = false
+    collect_api_signatures: bool = false, script_mode: bool = false,
+    project_modules: Dict<text, HirModule> = {}
 ) -> HirTypecheckReceiptV1:
     var warnings: [text] = []
     var errors: [text] = []
@@ -152,10 +154,15 @@ pub fn collect_module_typecheck_receipt_v1(
     # ROB-USE-01/02: discarded Result/Option/@must_use value. Error when compiled,
     # warning in script mode (same script_mode as SPL-UNIT-002); the pass
     # severity still bounds it (Advisory drops, Warn downgrades).
+    # `project_modules` is the project's whole HIR set so imported callees
+    # resolve across modules; absent (single-module callers) it is just `m`.
     var scan_modules: Dict<text, HirModule> = {}
-    scan_modules[name] = m
+    if project_modules.contains_key(name):
+        scan_modules = project_modules
+    else:
+        scan_modules[name] = m
     val use_severity = must_use_finding_severity(script_mode)
-    for finding in must_use_discard_scan(scan_modules, []):
+    for finding in must_use_discard_scan_module(scan_modules, name, []):
         val umsg = "[must-use {finding.code}] {name}: in `{finding.function}`: value of `{finding.callee}` is discarded; consume it, or write `_ = {finding.callee}(...)`"
         out = out.push(umsg)
         match severity:

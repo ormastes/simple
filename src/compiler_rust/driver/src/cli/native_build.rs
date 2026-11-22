@@ -809,32 +809,44 @@ fn rd_u64(b: &[u8], off: usize) -> Option<u64> {
 /// tables are read (bounded chunks). A 207 MB debug-info kernel ELF failed
 /// `fs::read` under an 8 GB ulimit. The symbol scan stops at the first defined
 /// FUNC, so `funcs` is only meaningful as `> 0`; text bytes and saw_symtab are
-/// exact. Returns `None` (caller treats as non-ELF) on any bounds problem.
-fn elf64_code_census_file(path: &std::path::Path) -> Option<(usize, u64, bool)> {
+/// exact. `Ok(None)` = not an ELF64 LE image we can parse (bounds problems
+/// included; caller treats as non-ELF). `Err` = an I/O error while reading,
+/// which the caller rejects (fail closed, as the old whole-file read did).
+fn elf64_code_census_file(path: &std::path::Path) -> std::io::Result<Option<(usize, u64, bool)>> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path).ok()?;
-    let file_len = f.metadata().ok()?.len();
-    let mut read_at = |off: u64, len: u64| -> Option<Vec<u8>> {
-        if off.checked_add(len)? > file_len {
-            return None;
+    let mut f = std::fs::File::open(path)?;
+    let file_len = f.metadata()?.len();
+    let mut read_at = |off: u64, len: u64| -> std::io::Result<Option<Vec<u8>>> {
+        match off.checked_add(len) {
+            Some(end) if end <= file_len => {}
+            _ => return Ok(None),
         }
-        f.seek(SeekFrom::Start(off)).ok()?;
-        let mut v = vec![0u8; usize::try_from(len).ok()?];
-        f.read_exact(&mut v).ok()?;
-        Some(v)
+        let Ok(n) = usize::try_from(len) else { return Ok(None) };
+        f.seek(SeekFrom::Start(off))?;
+        let mut v = vec![0u8; n];
+        f.read_exact(&mut v)?;
+        Ok(Some(v))
     };
-    let hdr = read_at(0, 64)?;
+    macro_rules! some_or_none {
+        ($e:expr) => {
+            match $e {
+                Some(v) => v,
+                None => return Ok(None),
+            }
+        };
+    }
+    let hdr = some_or_none!(read_at(0, 64)?);
     if &hdr[0..4] != b"\x7fELF" || hdr[4] != 2 || hdr[5] != 1 {
-        return None;
+        return Ok(None);
     }
-    let e_shoff = rd_u64(&hdr, 0x28)?;
-    let e_shentsize = rd_u16(&hdr, 0x3a)? as u64;
-    let e_shnum = rd_u16(&hdr, 0x3c)? as u64;
-    let e_shstrndx = rd_u16(&hdr, 0x3e)? as u64;
+    let e_shoff = some_or_none!(rd_u64(&hdr, 0x28));
+    let e_shentsize = some_or_none!(rd_u16(&hdr, 0x3a)) as u64;
+    let e_shnum = some_or_none!(rd_u16(&hdr, 0x3c)) as u64;
+    let e_shstrndx = some_or_none!(rd_u16(&hdr, 0x3e)) as u64;
     if e_shoff == 0 || e_shnum == 0 || e_shentsize < 64 || e_shstrndx >= e_shnum {
-        return None;
+        return Ok(None);
     }
-    let shdrs = read_at(e_shoff, e_shnum.checked_mul(e_shentsize)?)?;
+    let shdrs = some_or_none!(read_at(e_shoff, e_shnum * e_shentsize)?);
     let sh = |i: u64| -> Option<(u32, u32, u64, u64, u64)> {
         let o = (i * e_shentsize) as usize;
         Some((
@@ -846,11 +858,11 @@ fn elf64_code_census_file(path: &std::path::Path) -> Option<(usize, u64, bool)> 
         ))
     };
     const SHSTR_CAP: u64 = 16 << 20;
-    let (_, _, shstr_off, shstr_size, _) = sh(e_shstrndx)?;
+    let (_, _, shstr_off, shstr_size, _) = some_or_none!(sh(e_shstrndx));
     if shstr_size > SHSTR_CAP {
-        return None;
+        return Ok(None);
     }
-    let shstr = read_at(shstr_off, shstr_size)?;
+    let shstr = some_or_none!(read_at(shstr_off, shstr_size)?);
     let name_at = |n: u32| -> &str {
         match shstr.get(n as usize..) {
             Some(rest) => {
@@ -880,17 +892,21 @@ fn elf64_code_census_file(path: &std::path::Path) -> Option<(usize, u64, bool)> 
         }
     }
     // Symbol scan in bounded chunks of whole entries; stop at the first FUNC.
+    // A table running past EOF is clamped to the entries that exist, like the
+    // buffer census, which scanned until `buf.get` ran out.
     const CHUNK_ENTRIES: u64 = 4096;
     'tables: for (off, size, entsize) in symtabs {
-        let count = size / entsize;
+        if off >= file_len {
+            continue;
+        }
+        let count = size.min(file_len - off) / entsize;
         let mut k = 0u64;
         while k < count {
             let n = CHUNK_ENTRIES.min(count - k);
-            let Some(chunk) = read_at(off + k * entsize, n * entsize) else { break };
+            let chunk = some_or_none!(read_at(off + k * entsize, n * entsize)?);
             for j in 0..n as usize {
                 let so = j * entsize as usize;
-                let (Some(&st_info), Some(st_shndx)) = (chunk.get(so + 4), rd_u16(&chunk, so + 6)) else { break };
-                if (st_info & 0xf) == 2 && st_shndx != 0 {
+                if (chunk[so + 4] & 0xf) == 2 && u16::from_le_bytes([chunk[so + 6], chunk[so + 7]]) != 0 {
                     func_syms += 1;
                     break 'tables;
                 }
@@ -898,7 +914,7 @@ fn elf64_code_census_file(path: &std::path::Path) -> Option<(usize, u64, bool)> 
             k += n;
         }
     }
-    Some((func_syms, text_bytes, saw_symtab))
+    Ok(Some((func_syms, text_bytes, saw_symtab)))
 }
 
 /// Counts (defined FUNC symbols, total .text bytes) in an ELF64 LE image.
@@ -1096,14 +1112,17 @@ pub(crate) fn verify_emitted_artifact(
             }
         }
     }
-    if let Err(e) = std::fs::File::open(path) {
-        return ArtifactVerdict::Reject(format!(
-            "declared output '{}' is unreadable ({})",
-            path.display(),
-            e
-        ));
-    }
-    match elf64_code_census_file(path) {
+    let census = match elf64_code_census_file(path) {
+        Ok(c) => c,
+        Err(e) => {
+            return ArtifactVerdict::Reject(format!(
+                "declared output '{}' is unreadable ({})",
+                path.display(),
+                e
+            ))
+        }
+    };
+    match census {
         // Not an ELF64 LE image (archive, wasm, mach-o, ELF32): the only claim
         // we can make is non-emptiness, already established above.
         None => ArtifactVerdict::Ok,
@@ -1248,11 +1267,24 @@ mod tests {
     }
 
     #[test]
+    fn rejects_artifact_whose_read_fails_after_open() {
+        // A directory opens on Unix but read_exact fails (EISDIR): an I/O
+        // error after open must Reject, never fall through to the non-ELF Ok.
+        let d = fixture_dir();
+        let dir_artifact = d.join("dir_artifact");
+        std::fs::create_dir_all(&dir_artifact).unwrap();
+        match verify_emitted_artifact(&dir_artifact, None) {
+            ArtifactVerdict::Reject(_) => {}
+            ArtifactVerdict::Ok => panic!("an unreadable artifact was accepted"),
+        }
+    }
+
+    #[test]
     fn streamed_census_matches_buffer_census() {
         let me = std::env::current_exe().unwrap();
         let buf = std::fs::read(&me).unwrap();
         let full = elf64_code_census(&buf).map(|(f, t, s)| (f > 0, t, s));
-        let streamed = elf64_code_census_file(&me).map(|(f, t, s)| (f > 0, t, s));
+        let streamed = elf64_code_census_file(&me).unwrap().map(|(f, t, s)| (f > 0, t, s));
         assert_eq!(full, streamed);
     }
 

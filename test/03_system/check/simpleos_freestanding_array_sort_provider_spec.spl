@@ -5,7 +5,7 @@ extern fn rt_file_read_text(path: text) -> text?
 use std.spec.{describe, it, expect}
 
 val BOOT_RUNTIME: text = "examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c"
-val LINK_OWNER: text = "src/compiler/70.backend/backend/llvm_native_link.spl"
+val LINK_OWNER: text = "src/compiler/70.backend/backend/simpleos_native_linkers.spl"
 val SIMPLE_CORE_OWNER: text = "src/runtime/simple_core/core_array_query.spl"
 val FABRICATION_BASELINE: text = "config/simpleos_fabricated_rt_baseline.sdn"
 
@@ -13,17 +13,31 @@ describe "SimpleOS freestanding array sort provider":
     it "uses the architecture runtime on the x86_64-unknown-none link path":
         val linker = rt_file_read_text(LINK_OWNER) ?? ""
         expect(linker.contains("compile_simpleos_x86_64_c(\"examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c\"")).to_equal(true)
-        expect(linker.contains("simpleos_check_no_fabricated_rt_stubs(simpleos_entry_key(output), user_objects, [crt_o, stubs_o, type_o, init_o])")).to_equal(true)
+        expect(linker.contains("simpleos_check_no_fabricated_rt_stubs(simpleos_entry_key(output), user_objects, [crt_o, stubs_o, service_owners_o, registry_o, type_o, init_o])")).to_equal(true)
 
     it "implements insertion sort instead of selecting the fail-stop stub":
         val runtime = rt_file_read_text(BOOT_RUNTIME) ?? ""
         val simple_core = rt_file_read_text(SIMPLE_CORE_OWNER) ?? ""
         expect(runtime.contains("S1(rt_array_sort)")).to_equal(false)
-        expect(runtime.contains("int8_t rt_array_sort(RuntimeValue arr)")).to_equal(true)
-        expect(runtime.contains("rt_array_sort_compare(items[j - 1], key) > 0")).to_equal(true)
-        expect(runtime.contains("a->hdr.gc_flags & BYTE_PACKED")).to_equal(true)
+        expect(runtime.contains("RuntimeValue rt_array_sort(RuntimeValue arr)")).to_equal(true)
+        expect(runtime.contains("while (j > 0 && (int64_t)items[j - 1] > (int64_t)key)")).to_equal(true)
         expect(simple_core.contains("pub fn rt_array_sort(array: i64) -> i8:")).to_equal(true)
         expect(simple_core.contains("while j >= 0 and sort_compare")).to_equal(true)
+
+    # Restored from the assertion PR #10728 dropped. The original was a
+    # file-wide `a->hdr.gc_flags & BYTE_PACKED` check, which the current file
+    # satisfies ten times over from OTHER functions, so it is scoped to the
+    # rt_array_sort body here. Packed [u8] arrays store bytes, not
+    # RuntimeValue slots; a sort that walks them as slots reads and writes
+    # past the payload. Expected to FAIL until rt_array_sort handles them.
+    it "sorts packed byte arrays as bytes inside rt_array_sort":
+        val runtime = rt_file_read_text(BOOT_RUNTIME) ?? ""
+        val sort_start = runtime.index_of("RuntimeValue rt_array_sort(RuntimeValue arr)")
+        val sort_end = runtime.index_of("S2(rt_array_sort_by)")
+        expect(sort_start).to_be_greater_than(0)
+        expect(sort_end).to_be_greater_than(sort_start)
+        val sort_body = runtime.slice(sort_start, sort_end)
+        expect(sort_body.contains("a->hdr.gc_flags & BYTE_PACKED")).to_equal(true)
 
     it "does not ratchet rt_array_sort into fabricated runtime debt":
         val linker = rt_file_read_text(LINK_OWNER) ?? ""

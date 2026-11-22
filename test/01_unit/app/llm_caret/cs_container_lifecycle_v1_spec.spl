@@ -1,0 +1,132 @@
+use std.spec.*
+use std.nogc_async_mut.sosix.{sosix_host_os, sosix_platform}
+use app.io.mod.{env_get, env_set, cwd, file_exists, file_read, file_write,
+    dir_exists, dir_create_all, dir_remove_all, process_run_timeout, sleep_ms}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.container_session.podman_session_v1.{PodmanMountV1}
+use std.nogc_sync_mut.container_session.macos_seatbelt_session_v1.{macos_seatbelt_canonical_path_v1}
+use app.llm_caret.cs_container.{CsContainerRequest}
+use app.llm_caret.cs_container_lifecycle_v1.{
+    cs_container_prepare_macos_seatbelt_v1, cs_container_record_save_v1,
+    cs_container_prepare_relaunch_v1, cs_worktree_create_v1,
+    cs_container_reconcile_v1}
+use app.llm_caret.cs_dashboard.{CsDashboard, cs_dashboard_new, cs_refresh,
+    cs_handle_command, cs_apply_action}
+use app.llm_caret.pane_backend.{pane_spawn, pane_list, pane_cleanup_session, pane_kill}
+
+describe "cs_container_lifecycle_v1 fixes":
+
+    it "re-exports sosix_host_os from std.nogc_async_mut.sosix alongside sosix_platform":
+        val host = sosix_host_os()
+        val plat = sosix_platform()
+        expect(host != "").to_equal(true)
+        expect(plat == "posix" or plat == "windows").to_equal(true)
+
+    it "persists and restores --container-mount RO/RW entries across crash relaunch":
+        if sosix_host_os() != "macos":
+            return
+        val prev_root = env_get("SIMPLE_CONTAINER_SESSION_ROOT") ?? ""
+        val root = macos_seatbelt_canonical_path_v1(secure_temp_dir("/tmp", "lc-mounts-").unwrap())
+        val repo_dir = root + "/repo"
+        val ro_mount = root + "/ro_data"
+        val rw_mount = root + "/rw_data"
+        dir_create_all(repo_dir)
+        dir_create_all(ro_mount)
+        dir_create_all(rw_mount)
+        env_set("SIMPLE_CONTAINER_SESSION_ROOT", root + "/store")
+
+        val req = CsContainerRequest(
+            image: "macos-seatbelt",
+            network: "host",
+            mounts: [
+                PodmanMountV1(source: ro_mount, target: ro_mount, read_only: true),
+                PodmanMountV1(source: rw_mount, target: rw_mount, read_only: false)
+            ],
+            workspace: repo_dir,
+            rest: [],
+            error: "",
+            env: []
+        )
+        val prep = cs_container_prepare_macos_seatbelt_v1(
+            "lc-mount-sess", "a1", "sh --container macos-seatbelt",
+            "/bin/sh", ["-c", "exit 2"], repo_dir, repo_dir, false,
+            "", "/Users/test", "inst-1", req)
+        expect(prep.is_ok()).to_equal(true)
+        var rec = prep.unwrap().0
+        expect(rec.mounts.len()).to_equal(2)
+
+        # Mark crashed and prepare relaunch; verify profile.sb preserves both mounts.
+        rec.state = "crashed"
+        rec.exit_code = 2
+        expect(cs_container_record_save_v1(rec)).to_equal(true)
+        val relaunch = cs_container_prepare_relaunch_v1(
+            "lc-mount-sess", "a1", ["-c", "echo ok"], [], "inst-2", "/Users/test")
+        expect(relaunch.is_ok()).to_equal(true)
+        val profile = file_read(rec.attempt_dir + "/profile.sb")
+        expect(profile).to_contain("(deny file-write* (subpath \"" + ro_mount + "\"))")
+        expect(profile).to_contain("(allow file-write* (subpath \"" + rw_mount + "\"))")
+
+        env_set("SIMPLE_CONTAINER_SESSION_ROOT", prev_root)
+        val _rm = dir_remove_all(root)
+
+    it "deletes worktree on intentional /close of a live running container and isolates pane cleanup per session":
+        if sosix_host_os() != "macos":
+            return
+        val prev_root = env_get("SIMPLE_CONTAINER_SESSION_ROOT") ?? ""
+        val prev_repo = env_get("SIMPLE_CS_REPO_ROOT") ?? ""
+        val prev_backend = env_get("CS_PANE_BACKEND") ?? ""
+        val root = macos_seatbelt_canonical_path_v1(secure_temp_dir("/tmp", "lc-close-").unwrap())
+        val repo_dir = root + "/repo"
+        dir_create_all(repo_dir)
+        val _g1 = process_run_timeout("git", ["init", repo_dir], 10000)
+        val _g2 = process_run_timeout("git", ["-C", repo_dir, "config", "user.email", "t@s.local"], 5000)
+        val _g3 = process_run_timeout("git", ["-C", repo_dir, "config", "user.name", "Test"], 5000)
+        val _w = file_write(repo_dir + "/README.md", "hi\n")
+        val _g4 = process_run_timeout("git", ["-C", repo_dir, "add", "README.md"], 5000)
+        val _g5 = process_run_timeout("git", ["-C", repo_dir, "commit", "-m", "init"], 10000)
+
+        env_set("SIMPLE_CONTAINER_SESSION_ROOT", root + "/store")
+        env_set("SIMPLE_CS_REPO_ROOT", repo_dir)
+        env_set("CS_PANE_BACKEND", "smux")
+
+        # Prepare a worktree + live running Seatbelt record attached to a real smux pane.
+        val session1 = "lc-close-s1"
+        val session2 = "lc-close-s2"
+        val wt = cs_worktree_create_v1(repo_dir, session1, "a1").unwrap()
+        val live_p1 = pane_spawn(session1, "a1", "/bin/sleep", ["30"])
+        val live_p2 = pane_spawn(session2, "other", "/bin/sleep", ["30"])
+        expect(live_p1.pane_id != "").to_equal(true)
+        expect(live_p2.pane_id != "").to_equal(true)
+
+        val req = CsContainerRequest(
+            image: "macos-seatbelt", network: "host", mounts: [],
+            workspace: wt, rest: [], error: "", env: [])
+        var rec = cs_container_prepare_macos_seatbelt_v1(
+            session1, "a1", "sleep 30", "/bin/sleep", ["30"],
+            repo_dir, wt, true, "", "/Users/test", "inst-live", req).unwrap().0
+        rec.pane_id = live_p1.pane_id
+        rec.pid = live_p1.pid
+        rec.state = "running"
+        expect(cs_container_record_save_v1(rec)).to_equal(true)
+        expect(dir_exists(wt)).to_equal(true)
+
+        # Clean session2 first? No — clean session1 and verify session2 stays alive;
+        # first exercise /close on a LIVE running agent in session1.
+        var d0 = cs_refresh(cs_dashboard_new(session1))
+        val (d1, close_act) = cs_handle_command(d0, "/close a1")
+        val (_d2, close_out) = cs_apply_action(d1, close_act)
+        expect(close_out).to_contain("cleaned container")
+        expect(dir_exists(wt)).to_equal(false)
+        expect(dir_exists(rec.attempt_dir)).to_equal(false)
+
+        # pane_cleanup_session(session1) must leave session2's pane intact.
+        pane_cleanup_session(session1)
+        val s2_panes = pane_list(session2)
+        expect(s2_panes.len()).to_equal(1)
+        expect(s2_panes[0].pane_id).to_equal(live_p2.pane_id)
+
+        pane_cleanup_session(session2)
+        env_set("SIMPLE_CONTAINER_SESSION_ROOT", prev_root)
+        env_set("SIMPLE_CS_REPO_ROOT", prev_repo)
+        env_set("CS_PANE_BACKEND", prev_backend)
+        val _rm = dir_remove_all(root)

@@ -24,6 +24,7 @@ pub enum LintCompleteness:
 
 pub enum LintTierProfile:
     NormalBuild
+    DiagnosticMedium
     DefaultLint
     PerfFast
     PerfStandard
@@ -97,7 +98,7 @@ fn _low_cost_producer_aliases() -> [text]:
      "L:short_grammar", "L:simple_script_required",
      "L:short_grammar_field_access", "W-STR-BRACE-001",
      "SPL-UNIT-001", "SPL-UNIT-003", "SPL-TYPE-001",
-     "constant_interpolation", "leading_operator"]
+     "constant_interpolation", "leading_operator", "not_dot_question"]
 
 fn _medium_cost_producer_aliases() -> [text]:
     ["L:unnamed_duplicate_typed_args", "L:star_import", "L:wide_public",
@@ -191,6 +192,8 @@ pub fn lint_tier_admits(profile: LintTierProfile, tier: LintCostTier) -> bool:
             true
         case NormalBuild:
             tier == LintCostTier.Low
+        case DiagnosticMedium:
+            tier != LintCostTier.High
         case PerfFast:
             tier != LintCostTier.High
         case PerfStandard:
@@ -235,6 +238,12 @@ pub fn lint_rules_for_profile(profile: LintTierProfile, names: [text]) -> [text]
                 if lint_rule_cost_tier(n) == LintCostTier.Low:
                     picked.push(n)
             picked
+        case DiagnosticMedium:
+            var picked_med: [text] = []
+            for n in names:
+                if lint_rule_cost_tier(n) != LintCostTier.High:
+                    picked_med.push(n)
+            picked_med
         case PerfFast:
             val t1 = lint_perf_t1_rule_names()
             var picked_fast: [text] = []
@@ -426,3 +435,22 @@ pub fn lint_active_config_admits_rule_v1(rule_id: text) -> bool:
         lint_record_rule_invoked_v1(rule_id)
         return true
     lint_admit_and_record_v1(_ACTIVE_ADMISSION_CONFIG_V1[0], rule_id)
+
+# ---------------------------------------------------------------------------
+# `lint --diagnostic=medium|high`
+# ---------------------------------------------------------------------------
+
+# medium = Low+Medium rules (High silenced before execution); high = every rule.
+# reason: CLI boundary: tier name text from `--diagnostic=`
+@allow(primitive_api)
+pub fn lint_apply_diagnostic_profile(config: LintConfig, tier: text):
+    if tier == "high":
+        config.tier_profile = LintTierProfile.DefaultLint
+        return
+    config.tier_profile = LintTierProfile.DiagnosticMedium
+    config.perf_profile = None
+    val all = all_lint_names()
+    val keep = lint_rules_for_profile(LintTierProfile.DiagnosticMedium, all)
+    for name in all:
+        if not keep.contains(name):
+            config.set_level(name, LintLevel.Allow)

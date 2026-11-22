@@ -107,7 +107,10 @@ function envelopeFields(proofPath) {
 
 function productionEnvelopeArtifact(proof) {
   try {
-    const envelopePath = path.resolve(proof.production_envelope_path || '');
+    if (typeof proof.production_envelope_path !== 'string' || proof.production_envelope_path.trim() === '') {
+      return { status: 'missing' };
+    }
+    const envelopePath = path.resolve(proof.production_envelope_path);
     const envelopeStat = fs.lstatSync(envelopePath);
     if (!envelopeStat.isFile() || envelopeStat.isSymbolicLink() || envelopeStat.nlink > 1) return { status: 'invalid-envelope' };
     const fields = envelopeFields(envelopePath);

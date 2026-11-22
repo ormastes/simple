@@ -12,7 +12,11 @@
 # reports ERROR -- never a pass.
 #
 # Usage:
-#   sh scripts/check/check-renderdoc-web-capture-lane.shs [--page NAME]... [--selftest]
+#   sh scripts/check/check-renderdoc-web-capture-lane.shs [--page NAME]... [--simple-only] [--selftest]
+#
+# --simple-only captures side (a) only and never starts Chrome. Its verdict and
+# receipt (lane_scope=simple-only, lane_status=pass-simple-only) are distinct
+# from the two-sided ones, so it can never be read as a differential pass.
 #
 # Verdict is the LAST stdout line:
 #   PASS  — <n> page(s) captured on both sides            exit 0
@@ -34,12 +38,14 @@ PAGE_H="${RDOC_WEB_PAGE_H:-760}"
 CAPTURE_TIMEOUT="${RDOC_WEB_TIMEOUT:-300}"
 PAGES=""
 RUN_SELFTEST_ONLY=0
+SIMPLE_ONLY=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --page) shift; [ $# -gt 0 ] || { echo "--page needs a value" >&2; exit 2; }; PAGES="$PAGES $1" ;;
         --selftest) RUN_SELFTEST_ONLY=1 ;;
-        *) echo "usage: $0 [--page NAME]... [--selftest]" >&2; exit 2 ;;
+        --simple-only) SIMPLE_ONLY=1 ;;
+        *) echo "usage: $0 [--page NAME]... [--simple-only] [--selftest]" >&2; exit 2 ;;
     esac
     shift
 done
@@ -130,6 +136,17 @@ EOF
         echo $?')
     t missing-tool-error "$lane_rc" 2
 
+    # 9. --simple-only must not weaken the missing-tool ERROR: no RenderDoc is
+    #    still exit 2, with or without a Chrome binary.
+    lane_rc=$(sh -c '
+        RDOC_WEB_TOOL_SEARCH=isolated; export RDOC_WEB_TOOL_SEARCH
+        RDOC_HOME=""; export RDOC_HOME
+        SIMPLE_RDOC_LANE_INNER=1; export SIMPLE_RDOC_LANE_INNER
+        RDOC_WEB_OUT_DIR="'"$tmp"'/lane-out-simple"; export RDOC_WEB_OUT_DIR
+        /bin/sh "'"$ROOT"'/scripts/check/check-renderdoc-web-capture-lane.shs" --simple-only --page overview >/dev/null 2>&1
+        echo $?')
+    t simple-only-missing-tool-error "$lane_rc" 2
+
     SELFTEST_FIXTURES="$fixtures"
     rm -rf "$tmp"
     if [ "$fails" -gt 0 ]; then
@@ -206,13 +223,14 @@ fi
 
 [ "$RENDERDOC_HOME" != "" ] || error_out "renderdoc-unavailable"
 have vulkaninfo || error_out "vulkan-tools-unavailable"
-[ "$CHROME_BIN" != "" ] || error_out "chrome-unavailable"
+[ "$SIMPLE_ONLY" = 1 ] || [ "$CHROME_BIN" != "" ] || error_out "chrome-unavailable"
 SIMPLE_BIN="${RDOC_SIMPLE_BIN:-$(rdoc_resolve_simple_interpreter "$ROOT" 2>/dev/null || true)}"
 [ "$SIMPLE_BIN" != "" ] || error_out "simple-binary-unavailable"
 
 pages_checked=0
 pages_both=0
 pages_failed=0
+pages_simple=0
 
 for page in $selected; do
     html="$CATALOG_DIR/$page.html"
@@ -255,6 +273,21 @@ for page in $selected; do
     found="$(find "$simple_dir" -type f -name '*.rdc' 2>/dev/null | sed -n 1p)"
     [ -n "$found" ] && cp "$found" "$simple_rdc"
     simple_status="$(classify_rdc_magic "$simple_rdc")"
+
+    if [ "$SIMPLE_ONLY" = 1 ]; then
+        {
+            echo "page_${page}_renderdoc_capture_simple_status=$simple_status"
+            echo "page_${page}_renderdoc_capture_chrome_status=not-attempted"
+            echo "page_${page}_simple_rdc=$simple_rdc"
+            echo "page_${page}_simple_rdc_bytes=$(wc -c < "$simple_rdc" 2>/dev/null || echo 0)"
+        } >> "$RECEIPT"
+        if [ "$simple_status" = pass ]; then
+            pages_simple=$((pages_simple + 1))
+        else
+            pages_failed=$((pages_failed + 1))
+        fi
+        continue
+    fi
 
     # ---- (b) Chrome, Vulkan-backed (ANGLE), same page and size.
     # rdoc_capture_html already carries the GPU-child hooking + display-mode
@@ -331,6 +364,18 @@ if [ "$pages_checked" -le 0 ]; then
     echo "lane_status=error" >> "$RECEIPT"
     echo "ERROR — nothing was checked (0 pages examined)"
     exit 2
+fi
+if [ "$SIMPLE_ONLY" = 1 ]; then
+    echo "lane_scope=simple-only" >> "$RECEIPT"
+    echo "pages_captured_simple=$pages_simple" >> "$RECEIPT"
+    if [ "$pages_failed" -gt 0 ] || [ "$pages_simple" -le 0 ]; then
+        echo "lane_status=fail" >> "$RECEIPT"
+        echo "FAIL — $pages_checked page(s) checked, $pages_failed failed, $pages_simple captured on the Simple side"
+        exit 1
+    fi
+    echo "lane_status=pass-simple-only" >> "$RECEIPT"
+    echo "PASS — $pages_simple page(s) captured on the Simple side only (Chrome side not attempted)"
+    exit 0
 fi
 if [ "$pages_failed" -gt 0 ] || [ "$pages_both" -le 0 ]; then
     echo "lane_status=fail" >> "$RECEIPT"

@@ -1,0 +1,33 @@
+"""
+## Purpose and audience
+Purpose: Prove SPL-BOUND-002 honours a scoped `@allow(bound_late_cast)`
+exemption only when it carries a non-empty `# reason:`, and only for the
+annotated function.
+Audience: compiler and tooling engineers maintaining robust-boundary lints.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Function scope only; the annotation must sit directly above the header.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.semantics.lint.bound_late_cast.{check_bound_late_casts}
+
+fn body(ann: text) -> text:
+    "unit DistanceKm: i32 as km\nextern fn c_read_distance() -> i32\n" + ann + "fn get_distance() -> DistanceKm:\n    DistanceKm(c_read_distance())\nfn other() -> DistanceKm:\n    DistanceKm(c_read_distance())\n"
+
+describe "SPL-BOUND-002 scoped exemption":
+    it "suppresses the annotated function only, when a reason is given":
+        # @req: REQ-DIAG-POLICY-001
+        step("Annotated fn is exempt; the sibling is still reported")
+        val f = check_bound_late_casts(body("@allow(bound_late_cast) # reason: legacy HAL\n"), "/w/a.spl")
+        expect(f.len()).to_equal(1)
+        expect(f[0].line_num).to_equal(7)
+
+    it "ignores an exemption without a reason":
+        # @req: REQ-DIAG-POLICY-001
+        step("No reason: both reported")
+        expect(check_bound_late_casts(body("@allow(bound_late_cast)\n"), "/w/a.spl").len()).to_equal(2)
+        expect(check_bound_late_casts(body("@allow(bound_late_cast) # reason:   \n"), "/w/a.spl").len()).to_equal(2)

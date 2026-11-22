@@ -727,29 +727,67 @@ bootstrap_tree_rss_phase_pricing_resolve() {
 # shrinks the reserve). A malformed explicit bytes value (or one below 1 KiB)
 # yields empty: the two-worker floor then fails closed instead of guessing.
 bootstrap_tree_rss_host_reserve_kib() {
+  btr_hr_out=$(bootstrap_tree_rss_host_reserve_attributed "$@")
+  printf '%s\n' "${btr_hr_out%%|*}"
+}
+
+# bootstrap_tree_rss_host_reserve_attributed HOST_TOTAL_KIB [REPO_ROOT]
+#   -> "KIB|SOURCE" (KIB empty when malformed); same precedence as above.
+bootstrap_tree_rss_host_reserve_attributed() {
   btr_hr_total=${1:-}
   btr_hr_root=${2:-}
   btr_hr_cap=25165824
   case ${SIMPLE_BUILD_MEMORY_RESERVE_BYTES:-} in
     "") ;;
-    *[!0-9]*|0*) printf '\n'; return 0 ;;
+    *[!0-9]*|0*) printf '|SIMPLE_BUILD_MEMORY_RESERVE_BYTES malformed\n'; return 0 ;;
     *) bootstrap_tree_rss_is_uint "$SIMPLE_BUILD_MEMORY_RESERVE_BYTES" 18 &&
-         [ "$SIMPLE_BUILD_MEMORY_RESERVE_BYTES" -ge 1024 ] || { printf '\n'; return 0; }
-       printf '%s\n' $((SIMPLE_BUILD_MEMORY_RESERVE_BYTES / 1024)); return 0 ;;
+         [ "$SIMPLE_BUILD_MEMORY_RESERVE_BYTES" -ge 1024 ] || { printf '|SIMPLE_BUILD_MEMORY_RESERVE_BYTES malformed\n'; return 0; }
+       printf '%s|SIMPLE_BUILD_MEMORY_RESERVE_BYTES\n' $((SIMPLE_BUILD_MEMORY_RESERVE_BYTES / 1024)); return 0 ;;
   esac
   btr_hr_mib=${SIMPLE_HOST_MEM_RESERVE_FREE_MIB:-}
+  btr_hr_src=SIMPLE_HOST_MEM_RESERVE_FREE_MIB
   if [ -z "$btr_hr_mib" ] && [ -n "$btr_hr_root" ] && [ -f "$btr_hr_root/scripts/setup/host-env.shs" ]; then
     btr_hr_mib=$(sh "$btr_hr_root/scripts/setup/host-env.shs" --get mem_reserve_free_mib 2>/dev/null | tail -n 1) || btr_hr_mib=
+    btr_hr_src='host config mem_reserve_free_mib'
   fi
   btr_hr_mib=$(bootstrap_tree_rss_canonical_uint "$btr_hr_mib" 9)
   if bootstrap_tree_rss_is_uint "$btr_hr_mib" 9 && [ "$btr_hr_mib" -gt 0 ]; then
-    printf '%s\n' $((btr_hr_mib * 1024)); return 0
+    printf '%s|%s\n' $((btr_hr_mib * 1024)) "$btr_hr_src"; return 0
   fi
   if bootstrap_tree_rss_is_uint "$btr_hr_total" 15 && [ "$btr_hr_total" -gt 1 ] &&
      [ $((btr_hr_total / 2)) -lt "$btr_hr_cap" ]; then
-    printf '%s\n' $((btr_hr_total / 2)); return 0
+    printf '%s|default host RAM / 2\n' $((btr_hr_total / 2)); return 0
   fi
-  printf '%s\n' "$btr_hr_cap"
+  printf '%s|default 24 GiB\n' "$btr_hr_cap"
+}
+
+# bootstrap_tree_rss_platform -> uname -s; BOOTSTRAP_TREE_RSS_TEST_PLATFORM is
+# honoured only with the BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1 test switch.
+bootstrap_tree_rss_platform() {
+  if [ "${BOOTSTRAP_TREE_RSS_TEST_FIXTURE:-}" = 1 ] && [ -n "${BOOTSTRAP_TREE_RSS_TEST_PLATFORM:-}" ]; then
+    printf '%s\n' "$BOOTSTRAP_TREE_RSS_TEST_PLATFORM"
+    return 0
+  fi
+  uname -s 2>/dev/null || printf 'unknown\n'
+}
+
+# bootstrap_tree_rss_cap_kill_line RECEIPT
+# Prints "<status> cap_kib=<n> peak_kib=<n>" and returns 0 when a watchdog
+# receipt records an RSS (or Darwin phys-footprint) cap kill; returns 1
+# otherwise (timeout, crash, clean exit, missing file). W21 (2026-11-22): a cap
+# kill reached the operator only as exit 88 + timeout_signal=job-terminate.
+bootstrap_tree_rss_cap_kill_line() {
+  [ -f "${1:-}" ] || return 1
+  awk -F= '
+    !($1 in v) { v[$1] = substr($0, length($1) + 2) }
+    END {
+      if (v["status"] == "rss-cap-exceeded") { cap = v["max_rss_kib"]; peak = v["peak_rss_kib"] }
+      else if (v["status"] == "phys-footprint-cap-exceeded") { cap = v["max_phys_footprint_kib"]; peak = v["peak_phys_footprint_kib"] }
+      else exit 1
+      if (cap == "") cap = "unknown"
+      if (peak == "") peak = "unknown"
+      printf "%s cap_kib=%s peak_kib=%s\n", v["status"], cap, peak
+    }' "$1"
 }
 
 # bootstrap_tree_rss_two_worker_floor REQUESTED FIT SMALL RSS_MODE AVAIL_KIB RESERVE_KIB CEILING_KIB
@@ -882,13 +920,40 @@ bootstrap_tree_rss_whole_build_plan() {
     bootstrap_tree_rss_refusal="tree RSS policy: tree_rss_host_pct=$btr_wb_pct exceeds $BOOTSTRAP_TREE_RSS_HOST_PCT_MAX"
     return 1
   }
+  # W21 (2026-11-22, #8931): on a Hyper-V dynamic-memory Windows guest the
+  # instantaneous free RAM (MSYS /proc/meminfo MemFree, GlobalMemoryStatusEx)
+  # is the balloon, not the headroom: 15518280 KiB of a 66865260 KiB host
+  # priced the cap at 11638710 KiB and the campaign killed the full-CLI build
+  # at surface_freeze. When Windows reports less than half of physical RAM
+  # available, the budget uses physical RAM minus the host reserve (host
+  # config mem_reserve_free_mib first, see bootstrap_tree_rss_host_reserve_kib)
+  # instead, and says so. Concurrent heavy lanes, the real reason free RAM can
+  # also be low, are refused by the admission scan (W23), not priced here.
+  # The two-worker floor keeps the measured value: it only ever widens.
+  btr_wb_raw_avail=$bootstrap_tree_rss_host_available_kib
+  btr_wb_avail_label=available
+  btr_wb_avail_note=
+  case "$(bootstrap_tree_rss_platform)" in
+    MINGW*|MSYS*|CYGWIN*)
+      if [ -n "$btr_wb_raw_avail" ] && [ $((btr_wb_raw_avail * 2)) -lt "$bootstrap_tree_rss_host_total_kib" ]; then
+        btr_wb_res=$(bootstrap_tree_rss_host_reserve_attributed "$bootstrap_tree_rss_host_total_kib" "$btr_wb_root")
+        btr_wb_res_kib=${btr_wb_res%%|*}
+        if bootstrap_tree_rss_is_uint "$btr_wb_res_kib" 15 && [ "$btr_wb_res_kib" -lt "$bootstrap_tree_rss_host_total_kib" ]; then
+          bootstrap_tree_rss_host_available_kib=$((bootstrap_tree_rss_host_total_kib - btr_wb_res_kib))
+          btr_wb_avail_label="physical-minus-reserve"
+          btr_wb_avail_note="; Windows available ${btr_wb_raw_avail} KiB is below half of physical RAM (Hyper-V balloon, #8931): budget uses physical ${bootstrap_tree_rss_host_total_kib} KiB - reserve ${btr_wb_res_kib} KiB (${btr_wb_res#*|}) = ${bootstrap_tree_rss_host_available_kib} KiB"
+        else
+          btr_wb_avail_note="; Windows available ${btr_wb_raw_avail} KiB is below half of physical RAM but the host reserve is unusable (${btr_wb_res#*|}); measured available kept"
+        fi
+      fi ;;
+  esac
   btr_wb_budget=$((bootstrap_tree_rss_host_total_kib / 100 * btr_wb_pct))
   btr_wb_budget_bound="host RAM ${bootstrap_tree_rss_host_total_kib} KiB x ${btr_wb_pct}%"
   if [ -n "$bootstrap_tree_rss_host_available_kib" ]; then
     btr_wb_avail=$((bootstrap_tree_rss_host_available_kib / 4 * 3))
     if [ "$btr_wb_avail" -lt "$btr_wb_budget" ]; then
       btr_wb_budget=$btr_wb_avail
-      btr_wb_budget_bound="3/4 of available ${bootstrap_tree_rss_host_available_kib} KiB"
+      btr_wb_budget_bound="3/4 of ${btr_wb_avail_label} ${bootstrap_tree_rss_host_available_kib} KiB"
     fi
   fi
   bootstrap_tree_rss_plan_budget_kib=$btr_wb_budget
@@ -905,7 +970,7 @@ bootstrap_tree_rss_whole_build_plan() {
     btr_wb_sbound="host RAM ${bootstrap_tree_rss_host_total_kib} KiB x ${BOOTSTRAP_TREE_RSS_HOST_PCT_MAX}% (small-host max)"
     if [ -n "$bootstrap_tree_rss_host_available_kib" ] && [ "$btr_wb_avail" -lt "$btr_wb_sbudget" ]; then
       btr_wb_sbudget=$btr_wb_avail
-      btr_wb_sbound="3/4 of available ${bootstrap_tree_rss_host_available_kib} KiB"
+      btr_wb_sbound="3/4 of ${btr_wb_avail_label} ${bootstrap_tree_rss_host_available_kib} KiB"
     fi
     # ponytail: TEMPORARY relaxation, remove with the full-CLI peak RSS fix
     # (doc/08_tracking/bug/stage2_compiler_tests_rss_headroom_temp_2026-11-13.md).
@@ -923,7 +988,7 @@ bootstrap_tree_rss_whole_build_plan() {
       [ "$btr_wb_tbudget" -le "$btr_wb_one" ] || btr_wb_tbudget=$btr_wb_one
       if [ "$btr_wb_tbudget" -gt "$btr_wb_sbudget" ]; then
         btr_wb_sbudget=$btr_wb_tbudget
-        btr_wb_sbound="TEMPORARY available ${bootstrap_tree_rss_host_available_kib} KiB - ${BOOTSTRAP_TREE_RSS_SMALL_HOST_TEMP_HEADROOM_KIB} KiB headroom, <= ${BOOTSTRAP_TREE_RSS_HOST_PCT_MAX}% of host RAM and the one-worker requirement (was 3/4 of available; bug stage2_compiler_tests_rss_headroom_temp_2026-11-13)"
+        btr_wb_sbound="TEMPORARY ${btr_wb_avail_label} ${bootstrap_tree_rss_host_available_kib} KiB -${BOOTSTRAP_TREE_RSS_SMALL_HOST_TEMP_HEADROOM_KIB} KiB headroom, <= ${BOOTSTRAP_TREE_RSS_HOST_PCT_MAX}% of host RAM and the one-worker requirement (was 3/4 of available; bug stage2_compiler_tests_rss_headroom_temp_2026-11-13)"
         btr_wb_temp=1
       fi
     fi
@@ -949,7 +1014,7 @@ bootstrap_tree_rss_whole_build_plan() {
   btr_wb_floor_note=
   if [ "$btr_wb_requested" -ge 2 ] && [ "$bootstrap_tree_rss_plan_workers" -eq 1 ]; then
     bootstrap_tree_rss_two_worker_floor "$btr_wb_requested" 1 "$btr_wb_small" \
-      "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" "${bootstrap_tree_rss_host_available_kib:-}" \
+      "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" "${btr_wb_raw_avail:-}" \
       "$(bootstrap_tree_rss_host_reserve_kib "$bootstrap_tree_rss_host_total_kib" "$btr_wb_root")" \
       "$(bootstrap_tree_rss_ceiling_kib 2 "$bootstrap_tree_rss_host_total_kib")"
     btr_wb_floor_note="; $bootstrap_tree_rss_floor_note"
@@ -1010,7 +1075,7 @@ bootstrap_tree_rss_whole_build_plan() {
       return 1
     }
   fi
-  bootstrap_tree_rss_plan_summary="whole-build phase: workers ${bootstrap_tree_rss_plan_workers} (requested ${btr_wb_requested}, host budget fits ${btr_wb_fit}, timeout scale x${bootstrap_tree_rss_plan_timeout_scale}), cap ${bootstrap_tree_rss_plan_cap_kib} KiB = ${btr_wb_price}$([ "$btr_wb_small" = 1 ] || printf ' x %s' "$bootstrap_tree_rss_plan_workers"), host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}; host RAM via ${bootstrap_tree_rss_host_total_source}), default ceiling ${btr_wb_default_ceiling} KiB, elevated ceiling ${bootstrap_tree_rss_plan_ceiling_kib} KiB, bound ${bootstrap_tree_rss_plan_bound}${btr_wb_cli_note}${btr_wb_floor_note}"
+  bootstrap_tree_rss_plan_summary="whole-build phase: workers ${bootstrap_tree_rss_plan_workers} (requested ${btr_wb_requested}, host budget fits ${btr_wb_fit}, timeout scale x${bootstrap_tree_rss_plan_timeout_scale}), cap ${bootstrap_tree_rss_plan_cap_kib} KiB = ${btr_wb_price}$([ "$btr_wb_small" = 1 ] || printf ' x %s' "$bootstrap_tree_rss_plan_workers"), host budget ${btr_wb_budget} KiB (${btr_wb_budget_bound}; host RAM via ${bootstrap_tree_rss_host_total_source}), default ceiling ${btr_wb_default_ceiling} KiB, elevated ceiling ${bootstrap_tree_rss_plan_ceiling_kib} KiB, bound ${bootstrap_tree_rss_plan_bound}${btr_wb_avail_note}${btr_wb_cli_note}${btr_wb_floor_note}"
 }
 
 # bootstrap_tree_rss_whole_build_export REQUESTED_WORKERS [REPO_ROOT]
@@ -1279,6 +1344,14 @@ bootstrap_tree_rss__selftest() {
   printf 'MemTotal:       133000000 kB\nMemFree:        32505856 kB\nMemAvailable:    32505856 kB\n' >"$btr_st_dir/win-busy"
   printf 'MemTotal:       133000000 kB\nMemFree:        38797312 kB\nMemAvailable:    38797312 kB\n' >"$btr_st_dir/win-busy37"
   printf 'MemTotal:       133000000 kB\nMemFree:        12000000 kB\nMemAvailable:    12000000 kB\n' >"$btr_st_dir/win-very-busy"
+  # W21: MSYS /proc/meminfo on the ballooned 64 GiB Hyper-V guest (no
+  # MemAvailable line), and the same host at more than half free.
+  printf 'MemTotal:        66865260 kB\nMemFree:         15518280 kB\n' >"$btr_st_dir/win-balloon"
+  printf 'MemTotal:        66865260 kB\nMemFree:         40000000 kB\n' >"$btr_st_dir/win-half"
+  # Fixtures are platform-neutral unless a case names a platform (the
+  # Windows balloon substitution is pinned by its own w21-* cases).
+  BOOTSTRAP_TREE_RSS_TEST_PLATFORM=Linux
+  export BOOTSTRAP_TREE_RSS_TEST_PLATFORM
   printf 'host_config:\n  schema: simple-host-config-v1\n  tree_rss_per_job_mib: 200\n' >"$btr_st_dir/good.sdn"
   printf 'host_config:\n  schema: simple-host-config-v1\n  tree_rss_per_job_mib: many\n' >"$btr_st_dir/bad.sdn"
   printf 'host_config:\n  schema: simple-host-config-v1\n  tree_rss_host_pct: 90\n' >"$btr_st_dir/pct.sdn"
@@ -1498,6 +1571,70 @@ bootstrap_tree_rss__selftest() {
   # Another lane holds the host: 3/4 of 44 GB available = 33000000 KiB fits
   # exactly one worker -- workers reduced, cap still >= the floor.
   btr_st_plan aarch64-busy-reduces-workers aarch64-busy 8 1:32505856:0:worker-floor
+  # W21 (2026-11-22): the 64 GiB Hyper-V Windows host reported 15518280 KiB
+  # free (balloon); the old plan priced 11638710 KiB (3/4 of it) and the
+  # campaign killed the full-CLI build. Windows below half of physical uses
+  # physical - reserve (2 GiB host-config reserve on that host): one plain
+  # worker at the 32505856 KiB floor price.
+  btr_st_plan w21-windows-balloon-physical-minus-reserve win-balloon 8 1:32505856:0:worker-floor \
+    'BOOTSTRAP_TREE_RSS_TEST_PLATFORM=MINGW64_NT-10.0-26300 SIMPLE_BUILD_MEMORY_RESERVE_BYTES=2147483648'
+  # The same reading on Linux is real headroom and keeps the old price.
+  btr_st_plan w21-linux-trusts-available win-balloon 8 1:11638710:0:small-host-one-worker \
+    'SIMPLE_BUILD_MEMORY_RESERVE_BYTES=2147483648'
+  # Windows at >= half of physical is not treated as ballooned.
+  btr_st_plan w21-windows-unballooned-trusts-available win-half 8 1:32505856:0:small-host-one-worker-temp \
+    'BOOTSTRAP_TREE_RSS_TEST_PLATFORM=MINGW64_NT-10.0-26300 SIMPLE_BUILD_MEMORY_RESERVE_BYTES=2147483648'
+  # No configured reserve: the default min(24 GiB, RAM / 2) reserve is used.
+  btr_st_plan w21-windows-balloon-default-reserve win-balloon 8 1:32505856:0:small-host-one-worker-temp \
+    'BOOTSTRAP_TREE_RSS_TEST_PLATFORM=MSYS_NT-10.0; unset SIMPLE_BUILD_MEMORY_RESERVE_BYTES SIMPLE_HOST_MEM_RESERVE_FREE_MIB'
+  # The summary names the substitution and the reserve source.
+  btr_st_n=$((btr_st_n + 1))
+  btr_st_got=$(
+    unset SIMPLE_BOOTSTRAP_TREE_RSS_HOST_PCT SIMPLE_HOST_TREE_RSS_HOST_PCT SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+    unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_HOST_CONFIG SIMPLE_HOST_ENV_FILE
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+    BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$btr_st_dir/win-balloon"
+    BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1 BOOTSTRAP_TREE_RSS_TEST_PLATFORM=CYGWIN_NT-10.0
+    SIMPLE_BUILD_MEMORY_RESERVE_BYTES=2147483648
+    bootstrap_tree_rss_whole_build_plan 8 '' || exit 1
+    case "$bootstrap_tree_rss_plan_summary" in
+      *"3/4 of physical-minus-reserve 64768108 KiB"*) ;;
+      *"host RAM 66865260 KiB x 50%"*) ;;
+      *) exit 1 ;;
+    esac
+    case "$bootstrap_tree_rss_plan_summary" in
+      *"Windows available 15518280 KiB is below half of physical RAM"*"reserve 2097152 KiB (SIMPLE_BUILD_MEMORY_RESERVE_BYTES)"*) printf named ;;
+    esac
+  )
+  [ "$btr_st_got" = named ] || {
+    echo "selftest FAIL: w21-summary-names-balloon-source: got '$btr_st_got'" >&2
+    btr_st_fail=1
+  }
+  # The platform hook is test-only: without the fixture switch it is ignored.
+  btr_st_n=$((btr_st_n + 1))
+  btr_st_got=$(unset BOOTSTRAP_TREE_RSS_TEST_FIXTURE; BOOTSTRAP_TREE_RSS_TEST_PLATFORM=MINGW-fake bootstrap_tree_rss_platform)
+  [ "$btr_st_got" = "$(uname -s 2>/dev/null || printf unknown)" ] || {
+    echo "selftest FAIL: w21-platform-hook-needs-fixture-switch: got $btr_st_got" >&2
+    btr_st_fail=1
+  }
+  # W21 (a): a cap kill is named with cap and peak; nothing else is.
+  printf 'status=rss-cap-exceeded\nexit_status=88\nmax_rss_kib=11638710\npeak_rss_kib=11689776\nstatus=nested\ntermination=job-terminate\ntimeout_signal=none\n' >"$btr_st_dir/kill.env"
+  # The pre-fix Windows receipt shape (timeout_signal=job-terminate).
+  printf 'status=rss-cap-exceeded\nexit_status=88\nmax_rss_kib=11638710\npeak_rss_kib=11689776\ntimeout_signal=job-terminate\n' >"$btr_st_dir/kill-old.env"
+  printf 'status=phys-footprint-cap-exceeded\nexit_status=88\nmax_rss_kib=9\nmax_phys_footprint_kib=4000\npeak_phys_footprint_kib=4100\n' >"$btr_st_dir/phys.env"
+  printf 'status=timeout\nexit_status=124\nmax_rss_kib=11638710\npeak_rss_kib=900\ntimeout_signal=job-terminate\n' >"$btr_st_dir/timeout.env"
+  for btr_st_kill in \
+      'kill.env|rss-cap-exceeded cap_kib=11638710 peak_kib=11689776' \
+      'kill-old.env|rss-cap-exceeded cap_kib=11638710 peak_kib=11689776' \
+      'phys.env|phys-footprint-cap-exceeded cap_kib=4000 peak_kib=4100' \
+      'timeout.env|NONE' 'missing.env|NONE'; do
+    btr_st_n=$((btr_st_n + 1))
+    btr_st_got=$(bootstrap_tree_rss_cap_kill_line "$btr_st_dir/${btr_st_kill%%|*}") || btr_st_got=NONE
+    [ "$btr_st_got" = "${btr_st_kill#*|}" ] || {
+      echo "selftest FAIL: w21-cap-kill-line ${btr_st_kill%%|*}: want ${btr_st_kill#*|} got $btr_st_got" >&2
+      btr_st_fail=1
+    }
+  done
   # 64 GiB host (the 2026-10-15 incident host): 50% = 33432600 fits 1 worker.
   btr_st_plan host64-one-worker host64 8 1:32505856:0:worker-floor
   # 128 GB Windows host: 67047100 budget -> 2 workers, above the 56 GiB static

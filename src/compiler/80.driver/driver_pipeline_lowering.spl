@@ -11,6 +11,7 @@ use compiler.mir.mir.*
 use compiler.mir.mir_instructions.{MirModule}
 use compiler.common.build_phase_accounting.{build_phase_record_failed_module_v1}
 use compiler.common.driver_core_modes.{driver_output_format_is_both}
+use compiler.driver.driver_build.smf_staged_parts_v1.{smf_effective_output_is_both_v1}
 use compiler.hir.hir_types.{SymbolTable}
 use compiler.hir.hir_codec.{hir_module_functions_at_v1, hir_fn_scalars_at_v1}
 use compiler.driver.driver_types.{CompileContext}
@@ -45,6 +46,9 @@ use compiler.driver.driver_phase_gates.{
 use compiler.driver.driver_mir_target.{driver_mir_target_context, driver_collection_target_options}
 use compiler.driver.driver_mir_error_owner.{driver_trace_module_mir_errors,
     driver_mir_error_is_fatal_owned_v1}
+use compiler.driver.driver_bootstrap_mir_progress_v1.{
+    driver_bootstrap_mir_build_progress_due_v1,
+    driver_bootstrap_unique_module_names_v1}
 use compiler.driver.driver_mir_physical_owners.{driver_mir_physical_source_indices_v1,
     driver_mir_feed_is_identity_v1, driver_mir_projected_source_identities_v1,
     driver_mir_entry_alias_projection_required_v1, driver_mir_owner_disposition_v1,
@@ -577,12 +581,25 @@ impl CompilerDriver:
             val entry_mir: MirModule = entry_mir_opt.unwrap()
             if self.ctx.mir_modules[entry_mir.name] == nil:
                 bootstrap_only = bootstrap_only.push(entry_mir)
+        # Bind each dict value with a typed statement-form read, not `dict[k]!`
+        # inside an if-expression arm: the frozen Phase 2 pin lowers `!` on a
+        # struct-valued dict read as rt_unwrap_or_self + rt_value_as_int_wide,
+        # so the MirModule pointer was decoded as a tagged int and
+        # `module.name` faulted (0xC0000005 in the MIR shard worker). The names
+        # come from keys() of the same dict, so the read cannot miss.
+        var verify_modules: [MirModule] = []
+        var name_idx = 0
+        while name_idx < mir_module_names.len():
+            val named_module: MirModule = self.ctx.mir_modules[mir_module_names[name_idx]]
+            verify_modules = verify_modules.push(named_module)
+            name_idx = name_idx + 1
+        var extra_idx = 0
+        while extra_idx < bootstrap_only.len():
+            verify_modules = verify_modules.push(bootstrap_only[extra_idx])
+            extra_idx = extra_idx + 1
         var idx = 0
-        while idx < mir_module_names.len() + bootstrap_only.len():
-            val module: MirModule = if idx < mir_module_names.len():
-                self.ctx.mir_modules[mir_module_names[idx]]!
-            else:
-                bootstrap_only[idx - mir_module_names.len()]
+        while idx < verify_modules.len():
+            val module: MirModule = verify_modules[idx]
             idx = idx + 1
             log_phase("mir_verify:module:start idx={idx} module={module.name}")
             val report = mir_verify_module(module)
@@ -1135,22 +1152,35 @@ impl CompilerDriver:
                 self.ctx.demand_mir_admission != nil or self.ctx.demand_dirty_modules.len() > 0)
             # Match the direct lane's declaration prepass order before any
             # bootstrap-flat module body is lowered: struct field identities
-            # first, then enum and composite inventories.
-            # This lane never reaches the direct lane's mir_setup:* rows or its
-            # [mir] i/N line, so a whole-program build sat for hours under the
-            # last shared label, mir_setup:physical_owners
+            # first, then enum and composite inventories, each inside its own
+            # phase-level transient scope so setup intermediates never inflate
+            # the immortal heap walked by per-module promote_transient_owner
             # (bug mir_setup_whole_program_superlinear_2026-11-22).
-            log_build_progress("mir", "modules", 0, self.ctx.sources.len(),
+            var raw_bootstrap_names: [text] = []
+            var raw_bootstrap_idx = 0
+            while raw_bootstrap_idx < self.ctx.sources.len():
+                raw_bootstrap_names = raw_bootstrap_names.push(self.ctx.sources[raw_bootstrap_idx].module_name)
+                raw_bootstrap_idx = raw_bootstrap_idx + 1
+            val bootstrap_unique_names = driver_bootstrap_unique_module_names_v1(raw_bootstrap_names)
+            val bootstrap_total_modules = bootstrap_unique_names.len()
+            log_build_progress("mir", "modules", 0, bootstrap_total_modules,
                 "mir:bootstrap_fixed:struct_prescan", 4, 6, 0, 0, "running")
-            log_phase("aot:bootstrap_fixed:struct_prescan:start")
+            log_phase("aot:bootstrap_fixed:struct_prescan:start total={bootstrap_total_modules}")
             var bootstrap_prescan_idx = 0
-            while bootstrap_prescan_idx < self.ctx.sources.len():
-                val bootstrap_prescan_key: text = self.ctx.sources[bootstrap_prescan_idx].module_name
-                bootstrap_lowering.prescan_module_struct_names(
-                    self.ctx.hir_modules, bootstrap_prescan_key)
+            val bootstrap_prescan_scope = transient_array_scope_begin_v1()
+            while bootstrap_prescan_idx < bootstrap_total_modules:
+                val bootstrap_prescan_key: text = bootstrap_unique_names[bootstrap_prescan_idx]
+                if self.ctx.hir_modules.has(bootstrap_prescan_key):
+                    bootstrap_lowering.prescan_module_struct_names(
+                        self.ctx.hir_modules, bootstrap_prescan_key)
                 bootstrap_prescan_idx = bootstrap_prescan_idx + 1
-                if bootstrap_prescan_idx % 64 == 0:
-                    log_phase("aot:bootstrap_fixed:struct_prescan visited={bootstrap_prescan_idx} total={self.ctx.sources.len()}")
+                if bootstrap_prescan_idx % 64 == 0 or bootstrap_prescan_idx == bootstrap_total_modules:
+                    log_phase("aot:bootstrap_fixed:struct_prescan visited={bootstrap_prescan_idx} total={bootstrap_total_modules}")
+                    log_build_progress("mir", "modules", bootstrap_prescan_idx, bootstrap_total_modules,
+                        "mir:bootstrap_fixed:struct_prescan", 4, 6, 0, 0, "running")
+            if bootstrap_prescan_scope and not driver_mir_inventory_scope_end_v1(bootstrap_lowering):
+                self.ctx.add_error("MIR bootstrap struct prescan transient scope failed (phase scope, {bootstrap_total_modules} modules)")
+                return false
             log_phase("aot:bootstrap_fixed:struct_prescan:done")
             # lower_module's bootstrap-flat branch returns before the
             # non-bootstrap tail, so on this fresh lowering instance NO enum
@@ -1163,19 +1193,56 @@ impl CompilerDriver:
             # stage3 frontier 2026-10-17); the seed seeds a global enum
             # sidecar across the whole closure before lowering. Register
             # the closure's enums + runtime ids + builtin seeds up front.
-            log_build_progress("mir", "modules", 0, self.ctx.sources.len(),
-                "mir:bootstrap_fixed:inventories", 4, 6, 0, 0, "running")
             var bootstrap_enum_modules: [HirModule] = []
             var bootstrap_enum_idx = 0
-            while bootstrap_enum_idx < self.ctx.sources.len():
-                val bootstrap_enum_hir: HirModule? = self.ctx.hir_modules[self.ctx.sources[bootstrap_enum_idx].module_name]
+            while bootstrap_enum_idx < bootstrap_total_modules:
+                val bootstrap_enum_hir: HirModule? = self.ctx.hir_modules[bootstrap_unique_names[bootstrap_enum_idx]]
                 # @workaround bug=stage2_if_val_struct_option_binding_as_int_wide_2026-11-03 reason=frozen stage2 binds `if val x = <struct Option>` through rt_value_as_int_wide; explicit nil check plus annotated unwrap lowers through rt_unwrap_or_self
                 if bootstrap_enum_hir != nil:
                     val present_bootstrap_enum_hir: HirModule = bootstrap_enum_hir.unwrap()
                     bootstrap_enum_modules = bootstrap_enum_modules.push(present_bootstrap_enum_hir)
                 bootstrap_enum_idx = bootstrap_enum_idx + 1
-            bootstrap_lowering.register_module_enum_bootstrap_inventory_v1(bootstrap_enum_modules)
-            bootstrap_lowering.register_module_composite_inventory_v1(bootstrap_enum_modules)
+            val bootstrap_inventory_total = bootstrap_enum_modules.len()
+            bootstrap_lowering.preseed_canonical_type_symbols_v1(bootstrap_enum_modules)
+            log_build_progress("mir", "modules", 0, bootstrap_inventory_total,
+                "mir:bootstrap_fixed:enum_inventory", 4, 6, 0, 0, "running")
+            log_phase("aot:bootstrap_fixed:enum_inventory:start total={bootstrap_inventory_total}")
+            var bootstrap_enum_reg_idx = 0
+            val bootstrap_enum_scope = transient_array_scope_begin_v1()
+            while bootstrap_enum_reg_idx < bootstrap_inventory_total:
+                var enum_chunk: [HirModule] = []
+                var chunk_limit = bootstrap_enum_reg_idx + 64
+                if chunk_limit > bootstrap_inventory_total:
+                    chunk_limit = bootstrap_inventory_total
+                while bootstrap_enum_reg_idx < chunk_limit:
+                    enum_chunk = enum_chunk.push(bootstrap_enum_modules[bootstrap_enum_reg_idx])
+                    bootstrap_enum_reg_idx = bootstrap_enum_reg_idx + 1
+                bootstrap_lowering.register_module_enum_bootstrap_inventory_v1(enum_chunk)
+                log_phase("aot:bootstrap_fixed:enum_inventory visited={bootstrap_enum_reg_idx} total={bootstrap_inventory_total}")
+                log_build_progress("mir", "modules", bootstrap_enum_reg_idx, bootstrap_inventory_total,
+                    "mir:bootstrap_fixed:enum_inventory", 4, 6, 0, 0, "running")
+            if bootstrap_enum_scope and not driver_mir_inventory_scope_end_v1(bootstrap_lowering):
+                self.ctx.add_error("MIR bootstrap enum inventory transient scope failed (phase scope, {bootstrap_inventory_total} modules)")
+                return false
+            log_phase("aot:bootstrap_fixed:enum_inventory:done")
+            log_build_progress("mir", "modules", 0, bootstrap_inventory_total,
+                "mir:bootstrap_fixed:composite_inventory", 4, 6, 0, 0, "running")
+            log_phase("aot:bootstrap_fixed:composite_inventory:start total={bootstrap_inventory_total}")
+            var bootstrap_comp_idx = 0
+            val bootstrap_comp_scope = transient_array_scope_begin_v1()
+            while bootstrap_comp_idx < bootstrap_inventory_total:
+                bootstrap_lowering.register_module_composite_inventory_v1([bootstrap_enum_modules[bootstrap_comp_idx]])
+                bootstrap_comp_idx = bootstrap_comp_idx + 1
+                if bootstrap_comp_idx % 64 == 0 or bootstrap_comp_idx == bootstrap_inventory_total:
+                    log_phase("aot:bootstrap_fixed:composite_inventory visited={bootstrap_comp_idx} total={bootstrap_inventory_total}")
+                    log_build_progress("mir", "modules", bootstrap_comp_idx, bootstrap_inventory_total,
+                        "mir:bootstrap_fixed:composite_inventory", 4, 6, 0, 0, "running")
+            if bootstrap_comp_scope and not driver_mir_inventory_scope_end_v1(bootstrap_lowering):
+                self.ctx.add_error("MIR bootstrap composite inventory transient scope failed (phase scope, {bootstrap_inventory_total} modules)")
+                return false
+            log_phase("aot:bootstrap_fixed:composite_inventory:done")
+            if driver_phase_trace_enabled() or phase_rss_enabled_v1(sosix_env_get_nullable("SIMPLE_PHASE_RSS") ?? ""):
+                log_phase("aot:bootstrap_fixed:inventory_digest {driver_mir_inventory_digest_v1(bootstrap_lowering)}")
             # Emission coverage (site-19, emission divergence 2026-10-17): this
             # lane previously lowered ONLY the entry, so the per-module
             # collection emission iterated just the replayed modules (~40
@@ -1194,19 +1261,29 @@ impl CompilerDriver:
             # the entry must be the LAST module lowered on this instance.
             # Modules already in ctx.mir_modules keep
             # their MIR and are skipped.
-            log_build_progress("mir", "modules", 0, self.ctx.sources.len(),
+            log_build_progress("mir", "modules", 0, bootstrap_total_modules,
                 "mir:bootstrap_fixed:closure_modules", 4, 6, 0, 0, "running")
             val bootstrap_progress_started_ms = time_now_monotonic_ms()
+            var bootstrap_first_closure_logged = false
             var bootstrap_closure_idx = 0
-            while bootstrap_closure_idx < self.ctx.sources.len():
-                val bootstrap_closure_source = self.ctx.sources[bootstrap_closure_idx]
-                val bootstrap_closure_name = bootstrap_closure_source.module_name
+            while bootstrap_closure_idx < bootstrap_total_modules:
+                val bootstrap_closure_name = bootstrap_unique_names[bootstrap_closure_idx]
                 if bootstrap_closure_name != "app.cli.bootstrap_main" and
                         not self.ctx.mir_modules.contains_key(bootstrap_closure_name):
                     val bootstrap_closure_hir = self.ctx.hir_modules[bootstrap_closure_name]
                     if bootstrap_closure_hir != nil:
+                        if not bootstrap_first_closure_logged:
+                            log_build_progress("mir", "modules", bootstrap_closure_idx,
+                                bootstrap_total_modules,
+                                "mir_lower:first_module:{bootstrap_closure_name}",
+                                4, 6, 0, 0, "running")
+                            bootstrap_first_closure_logged = true
+                        val closure_lower_started_ms = time_now_monotonic_ms()
                         val bootstrap_closure_scoped = bootstrap_lowering.lower_bootstrap_closure_module(
                             bootstrap_closure_hir, self.ctx.mir_feed_modules)
+                        val closure_lower_ms = time_now_monotonic_ms() - closure_lower_started_ms
+                        if closure_lower_ms >= 2000:
+                            print "[mir-slow] dt_ms={closure_lower_ms} module={bootstrap_closure_name}"
                         if bootstrap_closure_scoped.is_err():
                             # Fail closed like the direct lane: the scope has
                             # already ended, so the half-reclaimed lowering is
@@ -1218,17 +1295,37 @@ impl CompilerDriver:
                         var bootstrap_closure_mir = bootstrap_closure_scoped.unwrap()
                         bootstrap_closure_mir.name = bootstrap_closure_name
                         self.ctx.mir_modules[bootstrap_closure_name] = bootstrap_closure_mir
+                        phase_rss_set_retained_objects_v1(self.ctx.mir_modules.keys().len())
                         log_phase("aot:bootstrap_fixed:closure_module module={bootstrap_closure_name} functions={bootstrap_closure_mir.functions.len()}")
                 bootstrap_closure_idx = bootstrap_closure_idx + 1
-                if mir_progress_due(bootstrap_closure_idx, self.ctx.sources.len()):
-                    log_mir_progress(bootstrap_closure_idx, self.ctx.sources.len(),
+                if driver_bootstrap_mir_build_progress_due_v1(bootstrap_closure_idx, bootstrap_total_modules):
+                    log_build_progress("mir", "modules", bootstrap_closure_idx,
+                        bootstrap_total_modules, bootstrap_closure_name,
+                        4, 6, 0, 0, "running")
+                if mir_progress_due(bootstrap_closure_idx, bootstrap_total_modules):
+                    log_mir_progress(bootstrap_closure_idx, bootstrap_total_modules,
                         bootstrap_progress_started_ms, bootstrap_closure_name)
+            log_build_progress("mir", "modules",
+                if bootstrap_total_modules > 0: bootstrap_total_modules - 1 else: 0,
+                bootstrap_total_modules,
+                "mir:bootstrap_fixed:entry:app.cli.bootstrap_main", 4, 6, 0, 0, "running")
+            log_phase("aot:bootstrap_fixed:entry:start module=app.cli.bootstrap_main")
+            val entry_lower_started_ms = time_now_monotonic_ms()
             var bootstrap_mir = bootstrap_lowering.lower_bootstrap_entry_module(bootstrap_hir, self.ctx.mir_feed_modules)
+            val entry_lower_ms = time_now_monotonic_ms() - entry_lower_started_ms
+            if entry_lower_ms >= 2000:
+                print "[mir-slow] dt_ms={entry_lower_ms} module=app.cli.bootstrap_main"
             driver_trace_module_mir_errors("app.cli.bootstrap_main", bootstrap_hir.path,
                 bootstrap_lowering.errors, 0)
             bootstrap_mir.name = "app.cli.bootstrap_main"
             self.ctx.mir_modules["app.cli.bootstrap_main"] = bootstrap_mir
             self.ctx.set_bootstrap_entry_mir("app.cli.bootstrap_main", bootstrap_mir)
+            phase_rss_set_retained_objects_v1(self.ctx.mir_modules.keys().len())
+            log_build_progress("mir", "modules", bootstrap_total_modules,
+                bootstrap_total_modules, "app.cli.bootstrap_main",
+                4, 6, 0, 0, "running")
+            log_mir_progress(bootstrap_total_modules, bootstrap_total_modules,
+                bootstrap_progress_started_ms, "app.cli.bootstrap_main")
             _driver_collect_mir_errors(self.ctx, bootstrap_lowering.errors)
             driver_collect_mir_advisories(self.ctx, bootstrap_lowering.mir_advisories)
             log_phase("aot:bootstrap_fixed:done module=app.cli.bootstrap_main functions={bootstrap_mir.functions.len()} closure_modules={self.ctx.mir_modules.keys().len()}")
@@ -1687,7 +1784,7 @@ impl CompilerDriver:
                     # cached object as the PASS instead of lowering it. Both
                     # output lowers anyway: the SMF part needs the module's MIR.
                     var reuse_plan = sosix_env_get_nullable(FILE_WORKER_REUSE_ENV_V1) ?? ""
-                    if driver_output_format_is_both(self.ctx.options.output_format):
+                    if smf_effective_output_is_both_v1(self.ctx.options.output_format):
                         reuse_plan = ""
                     val reused_opt: FileWorkerReuseRowV1? = file_worker_inc_reuse_lookup_v1(reuse_plan, name_direct)
                     # @workaround bug=stage2_if_val_struct_option_binding_as_int_wide_2026-11-03 reason=see bootstrap_enum_hir above

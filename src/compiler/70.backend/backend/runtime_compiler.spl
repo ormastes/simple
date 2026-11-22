@@ -1207,6 +1207,8 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
         print "[RT-COMPILE] object cache dir={cache_dir}"
     val rt_parallel_workers = runtime_c_compile_workers_v1(sources.len())
     val rt_parallel_eligible = rt_parallel_workers >= 2 and windows_toolchain == "" and not native_tool_strict_requested_v1()
+    var resolved_objects: [text] = []
+    var rt_pending_slots: [i64] = []
     var rt_pending_names: [text] = []
     var rt_pending_srcs: [text] = []
     var rt_pending_objs: [text] = []
@@ -1334,10 +1336,9 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
         if cache_obj != "":
             cache_obj_exists = file_exists(cache_obj)
         if cache_obj_exists:
-            if runtime_cache_stage_object_v1(cache_obj, obj_path):
-                cache_hit = true
-                if trace:
-                    print "[RT-COMPILE] cache hit: {name}.c"
+            cache_hit = true
+            if trace:
+                print "[RT-COMPILE] cache hit: {name}.c"
         var comp_out = ""
         var comp_err = ""
         var comp_code = 0
@@ -1358,6 +1359,8 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
                 comp_code = result.exit_code
                 windows_pending_keys.push(result.pending_key)
             elif rt_parallel_eligible:
+                rt_pending_slots.push(resolved_objects.len())
+                resolved_objects.push(obj_path)
                 rt_pending_names.push(name)
                 rt_pending_srcs.push(src_path)
                 rt_pending_objs.push(obj_path)
@@ -1383,17 +1386,26 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
                 comp_detail = "(no compiler output; cc='{cc}' exited with code {comp_code} — the compiler crashed or could not start)"
             return Err("Failed to compile {name}.c:\n{comp_detail}")
 
+        val verified_obj = if cache_hit: cache_obj else: obj_path
         if core_c_profile and name == "runtime_native":
-            match runtime_tagged_callback_owner_v1(src_path, obj_path):
+            match runtime_tagged_callback_owner_v1(src_path, verified_obj):
                 case Ok(_): ()
                 case Err(reason):
                     cleanup_runtime_objects(objects)
                     return Err(reason)
 
+        var published_cache_obj = false
         if cache_obj != "" and not cache_hit:
             # Publish via a private staging name + rename so concurrent builds
             # never observe a half-written object.
-            val _published_cache_obj = runtime_c_cache_publish_object_v1(obj_path, cache_obj, compile_pid, object_count)
+            published_cache_obj = runtime_c_cache_publish_object_v1(obj_path, cache_obj, compile_pid, object_count)
+        if cache_hit:
+            resolved_objects.push(cache_obj)
+        elif published_cache_obj:
+            cleanup_runtime_objects([obj_path])
+            resolved_objects.push(cache_obj)
+        else:
+            resolved_objects.push(obj_path)
 
         object_count = object_count + 1
 
@@ -1403,6 +1415,13 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
         if batch_err != "":
             cleanup_runtime_objects(objects)
             return Err(batch_err)
+        var pi = 0
+        while pi < rt_pending_names.len():
+            val p_cache = rt_pending_caches[pi]
+            if p_cache != "" and file_exists(p_cache):
+                cleanup_runtime_objects([rt_pending_objs[pi]])
+                resolved_objects[rt_pending_slots[pi]] = p_cache
+            pi = pi + 1
 
     if windows_toolchain != "" and not runtime_windows_cache_publish_batch_v1(windows_cache_root, cc, windows_toolchain, windows_pending_keys, objects):
         cleanup_runtime_objects(objects)
@@ -1432,18 +1451,19 @@ pub fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: b
         if checked.is_err():
             cleanup_runtime_objects(objects)
             return Err(checked.unwrap_err())
-        val generated = native_runtime_strict_generated_bind_v1(objects)
+        val generated = native_runtime_strict_generated_bind_v1(resolved_objects)
         if generated.is_err():
             cleanup_runtime_objects(objects)
             return Err(generated.unwrap_err())
-    Ok(objects)
+    Ok(resolved_objects)
 
 fn cleanup_runtime_objects(objects: [text]):
-    """Remove temporary runtime object files."""
+    """Remove temporary runtime object files (preserving shared cache objects)."""
     if native_tool_strict_requested_v1():
         native_runtime_strict_generated_release_v1(objects)
     for obj in objects:
-        file_delete(obj)
+        if obj.contains("/simple_rt_") or obj.contains("\\simple_rt_"):
+            file_delete(obj)
 
 # ============================================================================
 # Exports

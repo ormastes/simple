@@ -1,0 +1,49 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+"""
+Traceability: REQ-SSPEC-UNIT
+"""
+# Pins the classification rules of the upstream-Skia web reference comparison
+# (scripts/check/check-skia-web-reference-compare.shs). The shell lane carries a
+# twin of these rules; this spec is the authority the twin must agree with.
+#
+# Runtime boundary decision (spipe.md § file/process/env I/O):
+#   runtime_need:      none -- both rules are pure text classification
+#   facade_checked:    n/a
+#   chosen_path:       pure-function
+#   rejected_shortcuts: shelling out to the .shs lane (needs the native
+#                      qualification executable, the pinned Skia provider and a
+#                      physical Vulkan device)
+
+use std.spec.step
+
+use std.spec.*
+use app.ui.skia_reference_compare_receipt.{
+    skia_scene_status, skia_lane_verdict, skia_lane_exit_code}
+
+val ORACLE = "204df3a7ca11c4633399761142e60ec5f3775aefe7e91a74863f107b9b647817"
+val OTHER = "8b59b0b26ab92d1a436639b9b65c1ab28388f4871c3b05890eae982189884d4d"
+
+describe "skia web reference comparison receipt classification":
+    it "matches only when worker, receipt, file and oracle digests all agree":
+        expect(skia_scene_status(0, ORACLE, ORACLE, ORACLE)).to_equal("match")  # oracle: the measured web-box digest on the GB10
+
+    it "reports a pixel mismatch when Skia disagrees with the Simple oracle":
+        expect(skia_scene_status(0, OTHER, OTHER, ORACLE)).to_equal("mismatch")  # oracle: different pixels are never a pass
+
+    it "rejects a receipt whose digest is not the digest of the pixel file":
+        expect(skia_scene_status(0, ORACLE, OTHER, ORACLE)).to_equal("receipt-digest-mismatch")  # oracle: the receipt cannot vouch for other bytes
+
+    it "treats a failed worker or a missing digest as blocked, never a match":
+        expect(skia_scene_status(3, ORACLE, ORACLE, ORACLE)).to_equal("blocked")  # oracle: worker exit 3 is status=blocked
+        expect(skia_scene_status(0, "", "", ORACLE)).to_equal("blocked")  # oracle: no readback is not a match
+        expect(skia_scene_status(0, ORACLE, ORACLE, "")).to_equal("blocked")  # oracle: no oracle means nothing was compared
+
+    it "passes only when every checked scene matched":
+        expect(skia_lane_verdict(3, 3, 0)).to_equal("PASS — 3 scene(s) compared, upstream Skia readback equals the Simple web oracle, 0 mismatching")  # oracle: PASS states the non-vacuous count
+        expect(skia_lane_exit_code(skia_lane_verdict(3, 3, 0))).to_equal(0)  # oracle: PASS exits 0
+
+    it "fails when any scene failed and errors when nothing was checked":
+        expect(skia_lane_exit_code(skia_lane_verdict(3, 2, 1))).to_equal(1)  # oracle: a partial lane is not a pass
+        expect(skia_lane_exit_code(skia_lane_verdict(1, 0, 0))).to_equal(1)  # oracle: zero matches is not a pass
+        expect(skia_lane_verdict(0, 0, 0)).to_equal("ERROR — nothing was checked")  # oracle: a zero-scene run is ERROR
+        expect(skia_lane_exit_code(skia_lane_verdict(0, 0, 0))).to_equal(2)  # oracle: ERROR exits 2

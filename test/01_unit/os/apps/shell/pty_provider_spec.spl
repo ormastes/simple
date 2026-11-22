@@ -1,5 +1,8 @@
 use std.spec
 use os.apps.shell.pty_provider as pty
+use os.apps.shell.pty_provider.{PtyLaunchV1, PtyLaunchModeV1}
+# Parity pin: the examples below call every operation std.sys.pty (and so the
+# SOSIX PTY facade) exports. A provider that drops one fails its example.
 
 describe "SimpleOS PTY provider":
     it "runs expr through an attached ShellApp and closes on exit":
@@ -19,4 +22,33 @@ describe "SimpleOS PTY provider":
         val h = pty.open(24, 80)
         expect(pty.spawn_v1(h, "/bin/sh").is_err()).to_equal(true)
         expect(pty.spawn(h, "cmd.exe")).to_equal(-1)
+        expect(pty.close(h)).to_equal(true)
+
+    it "closes idempotently like the host providers":
+        val h = pty.open(24, 80)
+        expect(pty.close(h)).to_equal(true)
+        expect(pty.close(h)).to_equal(true)
+        expect(pty.close(-1)).to_equal(false)
+        expect(pty.close(h + 1000)).to_equal(false)
+
+    it "refuses the host-only operations explicitly":
+        val h = pty.open(24, 80)
+        expect(pty.spawn_v1(h, "/sys/apps/shell").is_ok()).to_equal(true)
+        val _banner = pty.read(h, 0)
+        expect(pty.write_some(h, [101u8, 120u8, 112u8, 114u8, 32u8, 50u8, 32u8, 43u8, 32u8, 51u8, 10u8])).to_equal(11)
+        expect(pty.read(h, 0).contains("5")).to_equal(true)
+        expect(pty.write_some(-1, [65u8])).to_equal(-1)
+        expect(pty.input_pending(h).unwrap()).to_equal(false)
+        expect(pty.input_pending(-1).is_err()).to_equal(true)
+        expect(pty.can_resize()).to_equal(false)
+        expect(pty.resize(h, 30, 100)).to_equal(false)
+        expect(pty.hangup(h)).to_equal(false)
+        expect(pty.cleanup_pending()).to_equal(0)
+        expect(pty.exit_code(h).is_err()).to_equal(true)
+        expect(pty.literal_bytes_supported_v1()).to_equal(false)
+        expect(pty.write_literal_some_v1(h, [65u8]).is_err()).to_equal(true)
+        expect(pty.configured_launch_probe_v1()).to_equal(false)
+        val launch = PtyLaunchV1(mode: PtyLaunchModeV1.Shell(command: "expr 1"), cwd: nil, environment: [])
+        expect(pty.spawn_configured_v1(h, launch).is_err()).to_equal(true)
+        expect(pty.platform_default_shell()).to_equal("/sys/apps/shell")
         expect(pty.close(h)).to_equal(true)

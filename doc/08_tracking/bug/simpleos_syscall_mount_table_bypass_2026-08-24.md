@@ -78,3 +78,32 @@ instruction.
 ## Lane disposition 2026-11-13 (p3-misc-b)
 
 SimpleOS release/admission/artifact-blocked item per in-file status; requires the SimpleOS target-artifact pipeline and owner lanes this Windows seed lane cannot run. No change from this lane.
+---
+
+## Progress 2026-11-22 — lockless OFD serialization (verification-pending)
+
+Status: verification-pending (host interpreter spec only; QEMU and physical
+board boot paths not run — QEMU/WSL lane unavailable in this session).
+
+- `src/os/kernel/fs/lockless_owner_claim_v1.spl`: a one-word CAS claim
+  (0 -> 1 try-claim, 1 -> 0 release) that never waits. A contender gets
+  `Busy`; a release by a non-holder returns `NotHeld`. Both are enums, not
+  bare bools.
+- `open_file_description_owner_v1.spl` no longer uses `mutex_raw_*`. A
+  contended claim takes the existing fail-closed `serialization-unavailable`
+  path on entry operations (create/retain/pin/status/snapshot/dispatch).
+  Cleanup operations (complete/cancel/close/quarantine) use a bounded CAS
+  retry (4096 attempts) so ordinary contention cannot strand a pin or close
+  ticket; exhaustion fails closed via permanent quarantine. Claim allocation
+  failure fails closed (`Unavailable`) instead of panicking. This closes the
+  "global mutation lacked checked serialization" and
+  blocking-lock defects; owner critical sections do no driver I/O. Descriptor
+  lookup stays O(1) by slot index plus generation.
+- Spec: `src/os/kernel/fs/test/lockless_owner_claim_v1_spec.spl` covers
+  exclusive claim / Busy / NotHeld, release after every OFD operation, and
+  `O_RDONLY`/`O_WRONLY` enforcement on the shared description.
+
+Still open: routing `syscall_file.spl` read/write/pread/pwrite through the OFD
+owner, plus O_APPEND, O_TRUNC, positioned-offset, SEEK_END and the path-mutation
+wrappers. `fd_table_descriptor_owner_v1`, `active_fd_context_owner_v1` and the
+FAT32 capsule mount owner still serialize with mutexes and need the same claim.

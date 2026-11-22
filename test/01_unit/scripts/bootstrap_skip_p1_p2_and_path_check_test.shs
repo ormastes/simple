@@ -1,0 +1,465 @@
+#!/bin/sh
+# Unit and black-box contract test for:
+#   1. Protected bootstrap header banners on bootstrap entrypoints
+#   2. bootstrap-from-scratch.sh default-skip-P1-P2 detection & live dispatch
+#   3. Multi-OS --path-check across bootstrap-from-scratch.sh, bootstrap-windows.sh,
+#      and scripts/os/simpleos-native-build.shs
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d "/tmp/bfs-skip-p1p2-pathcheck.XXXXXX" 2>/dev/null || mktemp -d "${TMPDIR:-/tmp}/bfs-skip-p1p2-pathcheck.XXXXXX")
+scratch=$(CDPATH= cd -- "$scratch" && pwd -P)
+TMPDIR="$scratch"
+export TMPDIR
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+
+checks=0
+failures=0
+
+ok() {
+  checks=$((checks + 1))
+}
+
+fail() {
+  checks=$((checks + 1))
+  failures=$((failures + 1))
+  printf 'FAIL [%s]: %s\n' "$checks" "$1" >&2
+}
+
+assert_eq() {
+  if [ "$1" = "$2" ]; then
+    ok
+  else
+    fail "$3 (got '$1', expected '$2')"
+  fi
+}
+
+assert_contains() {
+  if printf '%s\n' "$1" | grep -Fq -- "$2"; then
+    ok
+  else
+    fail "$3 (missing '$2')"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# 1. Protected Header Banner checks + Windows/cmd preservation
+# ---------------------------------------------------------------------------
+for sh_protected in \
+  scripts/bootstrap/bootstrap-from-scratch.sh \
+  scripts/bootstrap/bootstrap-windows.sh \
+  scripts/bootstrap/continue-macos-self-host-chain.shs \
+  scripts/os/simpleos-native-build.shs; do
+  banner=$(sed -n '2,5p' "$root/$sh_protected")
+  assert_contains "$banner" "PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER" "$sh_protected protected header title"
+  assert_contains "$banner" "Guarded by: scripts/check/fast-verify-bootstrap-scripts.shs" "$sh_protected protected header guard ref"
+done
+
+cmd_banner=$(sed -n '2,5p' "$root/scripts/bootstrap/bootstrap-windows.cmd" | tr -d '\r')
+assert_contains "$cmd_banner" "rem PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER" "bootstrap-windows.cmd protected header title"
+assert_contains "$cmd_banner" "rem Guarded by: scripts/check/fast-verify-bootstrap-scripts.shs" "bootstrap-windows.cmd protected header guard ref"
+
+cmd_full=$(tr -d '\r' < "$root/scripts/bootstrap/bootstrap-windows.cmd")
+assert_contains "$cmd_full" "where git.exe" "bootstrap-windows.cmd preserves git discovery"
+assert_contains "$cmd_full" "bash_from_git" "bootstrap-windows.cmd preserves bash_from_git"
+assert_contains "$cmd_full" "System32" "bootstrap-windows.cmd preserves WSL exclusion"
+assert_contains "$cmd_full" "%BOOTSTRAP_BASH%" "bootstrap-windows.cmd preserves explicit bash invocation"
+
+simple_cmd_full=$(tr -d '\r' < "$root/bin/simple.cmd")
+assert_contains "$simple_cmd_full" 'scripts\bootstrap\build-phase3-phase4.bat' "bin/simple.cmd mentions build-phase3-phase4.bat"
+assert_contains "$simple_cmd_full" "mingw" "bin/simple.cmd mentions mingw default"
+
+# Verify fail-open || true count on bootstrap-from-scratch.sh is unchanged vs HEAD
+head_or_true=$(git -C "$root" show HEAD:scripts/bootstrap/bootstrap-from-scratch.sh | awk '/\|\|[[:space:]]*true/ { n++ } END { print n + 0 }')
+curr_or_true=$(awk '/\|\|[[:space:]]*true/ { n++ } END { print n + 0 }' "$root/scripts/bootstrap/bootstrap-from-scratch.sh")
+assert_eq "$curr_or_true" "$head_or_true" "bootstrap-from-scratch.sh || true count unchanged vs HEAD"
+
+# ---------------------------------------------------------------------------
+# 2. bootstrap-from-scratch.sh --path-check (skip-p1-p2 vs cold-seed, multi-OS)
+# ---------------------------------------------------------------------------
+no_create="$scratch/must-not-exist"
+for host_spec in \
+  darwin:aarch64:macos-aarch64:aarch64-apple-darwin:n/a \
+  darwin:x86_64:macos-x86_64:x86_64-apple-darwin:n/a \
+  linux:x86_64:linux-x86_64:x86_64-unknown-linux-gnu:n/a \
+  linux:aarch64:linux-aarch64:aarch64-unknown-linux-gnu:n/a \
+  linux:riscv64:linux-riscv64:riscv64gc-unknown-linux-gnu:n/a \
+  freebsd:x86_64:freebsd-x86_64:x86_64-unknown-freebsd:n/a \
+  windows:x86_64:windows-x86_64:x86_64-pc-windows-gnu:mingw \
+  simpleos:x86_64:simpleos-x86_64:x86_64-unknown-simpleos:n/a; do
+  exp_plat=$(printf '%s' "$host_spec" | cut -d: -f1)
+  exp_cpu=$(printf '%s' "$host_spec" | cut -d: -f2)
+  sim_arg=$(printf '%s' "$host_spec" | cut -d: -f3)
+  exp_target=$(printf '%s' "$host_spec" | cut -d: -f4)
+  exp_wcfg=$(printf '%s' "$host_spec" | cut -d: -f5)
+
+  pc_out=$(SIMPLE_PATH_CHECK_HAS_PHASE3=1 sh "$root/scripts/bootstrap/bootstrap-from-scratch.sh" \
+    --path-check --simulate-host="$sim_arg" --output="$no_create")
+  assert_contains "$pc_out" "PATH_ACTION|script=bootstrap-from-scratch.sh|platform=${exp_plat}|cpu=${exp_cpu}|win_config=${exp_wcfg}|phase=init|step=detect-phase3-compiler|compile_mode=shard|link_mode=dynlib|xray=0|release=0|status=ALIVE" "skip-p1-p2 detect row for $sim_arg"
+  assert_contains "$pc_out" "PATH_ACTION|script=bootstrap-from-scratch.sh|platform=${exp_plat}|cpu=${exp_cpu}|win_config=${exp_wcfg}|phase=init|step=skip-phase1-phase2|compile_mode=shard|link_mode=dynlib|xray=0|release=0|status=ALIVE" "skip-p1-p2 skip row for $sim_arg"
+  assert_contains "$pc_out" "PATH_ACTION|script=build-phase3-phase4.sh|platform=${exp_plat}|cpu=${exp_cpu}|win_config=${exp_wcfg}|phase=p3a|step=compile-bootstrap-stage3|" "delegated p3a row for $sim_arg"
+  assert_contains "$pc_out" "PATH_SUMMARY|script=bootstrap-from-scratch.sh|platform=${exp_plat}|cpu=${exp_cpu}|target=${exp_target}|mode=skip-p1-p2|" "skip-p1-p2 summary for $sim_arg"
+  assert_contains "$pc_out" "|status=PASS" "PASS status for $sim_arg"
+done
+
+if [ ! -e "$no_create" ]; then
+  ok
+else
+  fail "--path-check must not create --output directory"
+fi
+
+# Windows MSVC + space-form --compile-mode file --win-config msvc
+pc_win_msvc=$(SIMPLE_PATH_CHECK_HAS_PHASE3=1 sh "$root/scripts/bootstrap/bootstrap-from-scratch.sh" \
+  --path-check --simulate-host windows-x86_64 --compile-mode file --win-config msvc)
+assert_contains "$pc_win_msvc" "win_config=msvc|phase=init|step=skip-phase1-phase2|compile_mode=file|" "Windows msvc + compile-mode=file action"
+assert_contains "$pc_win_msvc" "PATH_SUMMARY|script=bootstrap-from-scratch.sh|platform=windows|cpu=x86_64|target=x86_64-pc-windows-msvc|mode=skip-p1-p2|" "Windows msvc target summary"
+
+# Cold-seed modes: --from-seed, --cold-bootstrap, and SIMPLE_PATH_CHECK_HAS_PHASE3=0
+for cold_case in "--from-seed" "--cold-bootstrap" "no-p3"; do
+  if [ "$cold_case" = "no-p3" ]; then
+    cold_out=$(SIMPLE_PATH_CHECK_HAS_PHASE3=0 sh "$root/scripts/bootstrap/bootstrap-from-scratch.sh" \
+      --path-check --simulate-host=linux-x86_64)
+  else
+    cold_out=$(SIMPLE_PATH_CHECK_HAS_PHASE3=1 sh "$root/scripts/bootstrap/bootstrap-from-scratch.sh" \
+      --path-check "$cold_case" --simulate-host=linux-x86_64)
+  fi
+  assert_contains "$cold_out" "step=cargo-seed-build" "cold-seed p1 step ($cold_case)"
+  assert_contains "$cold_out" "step=seed-to-stage2" "cold-seed p2 step ($cold_case)"
+  assert_contains "$cold_out" "mode=cold-seed|" "cold-seed summary ($cold_case)"
+done
+
+# --skip-seed without Phase 3 compiler must exit 2
+set +e
+SIMPLE_PATH_CHECK_HAS_PHASE3=0 sh "$root/scripts/bootstrap/bootstrap-from-scratch.sh" \
+  --path-check --skip-seed --simulate-host=linux-x86_64 >"$scratch/skip_err.out" 2>&1
+skip_rc=$?
+sh "$root/scripts/bootstrap/bootstrap-from-scratch.sh" \
+  --path-check --skip-seed --from-seed >"$scratch/conflict.out" 2>&1
+conflict_rc=$?
+set -e
+assert_eq "$skip_rc" "2" "--skip-seed without Phase 3 compiler exits 2"
+assert_eq "$conflict_rc" "2" "--skip-seed + --from-seed conflict exits 2"
+
+# ---------------------------------------------------------------------------
+# 3. bootstrap-windows.sh --path-check & simpleos-native-build.shs --path-check
+# ---------------------------------------------------------------------------
+win_def_out=$(bash "$root/scripts/bootstrap/bootstrap-windows.sh" --path-check)
+assert_contains "$win_def_out" "PATH_ACTION|script=bootstrap-windows.sh|platform=windows|" "bootstrap-windows.sh action"
+assert_contains "$win_def_out" "|win_config=mingw|phase=init|step=windows-toolchain-select|" "bootstrap-windows.sh mingw default"
+assert_contains "$win_def_out" "PATH_SUMMARY|script=bootstrap-windows.sh|platform=windows|" "bootstrap-windows.sh summary"
+assert_contains "$win_def_out" "-pc-windows-gnu|" "bootstrap-windows.sh gnu target"
+
+win_msvc_out=$(bash "$root/scripts/bootstrap/bootstrap-windows.sh" --msvc --path-check --compile-mode=file)
+assert_contains "$win_msvc_out" "|win_config=msvc|phase=init|step=windows-toolchain-select|compile_mode=file|" "bootstrap-windows.sh msvc + file mode"
+assert_contains "$win_msvc_out" "-pc-windows-msvc|" "bootstrap-windows.sh msvc target"
+
+for sos_pair in \
+  "x86_64-unknown-simpleos:x86_64" \
+  "aarch64-unknown-none:aarch64" \
+  "aarch64-unknown-simpleos:aarch64" \
+  "riscv64gc-unknown-none:riscv64" \
+  "riscv64gc-unknown-simpleos:riscv64"; do
+  sos_target=${sos_pair%%:*}
+  sos_cpu=${sos_pair#*:}
+  sos_out=$(sh "$root/scripts/os/simpleos-native-build.shs" --path-check --target="$sos_target")
+  assert_contains "$sos_out" "PATH_ACTION|script=simpleos-native-build.shs|platform=simpleos|cpu=${sos_cpu}|win_config=n/a|phase=cross|step=target-select|compile_mode=shard|link_mode=one-binary|xray=0|release=1|status=ALIVE" "simpleos target-select ($sos_target)"
+  assert_contains "$sos_out" "step=core-runtime-archive|" "simpleos core-runtime-archive ($sos_target)"
+  assert_contains "$sos_out" "step=simpleos-tool-entry|" "simpleos tool-entry ($sos_target)"
+  assert_contains "$sos_out" "PATH_SUMMARY|script=simpleos-native-build.shs|platform=simpleos|cpu=${sos_cpu}|target=${sos_target}|actions=3|status=PASS" "simpleos summary ($sos_target)"
+done
+
+set +e
+sh "$root/scripts/os/simpleos-native-build.shs" --path-check --target=x86_64-unknown-linux-gnu >"$scratch/sos_bad.out" 2>&1
+sos_bad_rc=$?
+set -e
+assert_eq "$sos_bad_rc" "2" "simpleos-native-build.shs rejects non-SimpleOS target in --path-check"
+
+# ---------------------------------------------------------------------------
+# 4. Candidate filter unit checks + live end-to-end default-skip-P1-P2 dispatch
+# ---------------------------------------------------------------------------
+mkdir -p "$scratch/compiler_rust_dir" "$scratch/seed_banner_dir" "$scratch/no_bundle_dir" \
+  "$scratch/valid_p3/runtime" "$scratch/rt_only_p3/runtime" "$scratch/empty_rc"
+printf 'stub-archive\n' >"$scratch/valid_p3/runtime/libsimple_runtime.a"
+printf 'stub-backfill\n' >"$scratch/valid_p3/runtime/libsimple_compiler_backfill.a"
+printf 'stub-archive\n' >"$scratch/rt_only_p3/runtime/libsimple_runtime.a"
+
+# 4a. Binary in *compiler_rust* path must be rejected even if --version looks pure-Simple
+cat >"$scratch/compiler_rust_dir/simple" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  --version) echo "Simple v1.0.0"; exit 0 ;;
+  native-build) echo "usage: native-build --runtime-bundle <name>"; exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$scratch/compiler_rust_dir/simple"
+
+# 4b. Binary reporting Rust seed banner must be rejected
+cat >"$scratch/seed_banner_dir/simple" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  --version) echo "WARNING: this Rust-built Simple binary is a bootstrap seed only"; exit 0 ;;
+  native-build) echo "usage: native-build --runtime-bundle <name>"; exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$scratch/seed_banner_dir/simple"
+
+# 4c. Binary lacking --runtime-bundle in native-build --help must be rejected
+cat >"$scratch/no_bundle_dir/simple" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  --version) echo "Simple v1.0.0"; exit 0 ;;
+  native-build) echo "usage: native-build --entry <file>"; exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$scratch/no_bundle_dir/simple"
+
+# 4d. Valid Phase 3+ pure-Simple host compiler
+cat >"$scratch/valid_p3/simple" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  --version) echo "simple-bootstrap 1.0.0"; exit 0 ;;
+  native-build) echo "usage: native-build --runtime-bundle <bundle> --entry <file>"; exit 0 ;;
+esac
+exit 0
+EOF
+chmod +x "$scratch/valid_p3/simple"
+
+for rejected_bin in \
+  "$scratch/compiler_rust_dir/simple" \
+  "$scratch/seed_banner_dir/simple" \
+  "$scratch/no_bundle_dir/simple"; do
+  rej_out=$(SIMPLE_PHASE3_COMPILER="$rejected_bin" SIMPLE_DEFAULT_RELEASE_CANDIDATE_DIR="$scratch/empty_rc" \
+    sh "$root/scripts/bootstrap/bootstrap-from-scratch.sh" \
+    --path-check --output="$scratch/empty_out")
+  assert_contains "$rej_out" "mode=cold-seed|" "rejected non-Phase3 candidate falls back to cold-seed ($rejected_bin)"
+done
+
+cp "$scratch/valid_p3/simple" "$scratch/rt_only_p3/simple"
+chmod +x "$scratch/rt_only_p3/simple"
+rtonly_all_out=$(SIMPLE_PHASE3_COMPILER="$scratch/rt_only_p3/simple" SIMPLE_DEFAULT_RELEASE_CANDIDATE_DIR="$scratch/empty_rc" \
+  sh "$root/scripts/bootstrap/bootstrap-from-scratch.sh" \
+  --path-check --output="$scratch/empty_out")
+assert_contains "$rtonly_all_out" "mode=cold-seed|" "Stage 4 runtime check rejects runtime dir missing libsimple_compiler_backfill.a"
+
+rtonly_p3_out=$(SIMPLE_PHASE3_COMPILER="$scratch/rt_only_p3/simple" SIMPLE_DEFAULT_RELEASE_CANDIDATE_DIR="$scratch/empty_rc" \
+  sh "$root/scripts/bootstrap/bootstrap-from-scratch.sh" \
+  --path-check --stop-after-stage3 --output="$scratch/empty_out")
+assert_contains "$rtonly_p3_out" "mode=skip-p1-p2|" "--stop-after-stage3 accepts core-c-bootstrap runtime without backfill archive"
+
+acc_out=$(SIMPLE_PHASE3_COMPILER="$scratch/valid_p3/simple" SIMPLE_DEFAULT_RELEASE_CANDIDATE_DIR="$scratch/empty_rc" \
+  sh "$root/scripts/bootstrap/bootstrap-from-scratch.sh" \
+  --path-check --output="$scratch/empty_out")
+assert_contains "$acc_out" "mode=skip-p1-p2|" "valid Phase3 candidate selects skip-p1-p2"
+
+# Synthesize a canonical 29-field planner-admission-v2 receipt bound under scratch
+. "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+ext_root="$scratch/ext-output"
+mkdir -p "$ext_root/stage2/host"
+ext_root=$(CDPATH= cd -- "$ext_root" && pwd -P)
+parent_bin="$ext_root/stage2/host/simple"
+parent_sanity="$ext_root/stage2/host/stage2-sanity.env"
+parent_prov="$ext_root/stage2/host/provenance.env"
+cp "$scratch/valid_p3/simple" "$parent_bin"
+printf 'status=pass\n' >"$parent_sanity"
+printf 'status=pass\n' >"$parent_prov"
+
+rt_snap_content="fixture-runtime-snapshot"
+closure_snap_content="fixture-closure-snapshot"
+rt_sha=$(printf '%s\n' "$rt_snap_content" | bootstrap_planner_v2_hash_stdin)
+closure_sha=$(printf '%s\n' "$closure_snap_content" | bootstrap_planner_v2_hash_stdin)
+scope_key=$(printf '%s:%s\n' "$rt_sha" "$closure_sha" | bootstrap_planner_v2_hash_stdin)
+target_label="//bootstrap:stage4"
+reason_label="self-host-convergence-check"
+adm_dir=$(bootstrap_planner_v2_admission_dir "$ext_root" "$scope_key" "$target_label")
+mkdir -p "$adm_dir"
+printf '%s\n' "$rt_snap_content" >"$adm_dir/runtime.snapshot"
+printf '%s\n' "$closure_snap_content" >"$adm_dir/planner-source-closure.snapshot"
+printf 'clean\n' >"$adm_dir/git-state.txt"
+printf '#!/bin/sh\nexit 0\n' >"$adm_dir/planner"
+chmod +x "$adm_dir/planner"
+printf 'planner-smoke-ok\n' >"$adm_dir/planner-smoke.txt"
+
+parent_sha=$(bootstrap_planner_v2_hash_file "$parent_bin")
+sanity_sha=$(bootstrap_planner_v2_hash_file "$parent_sanity")
+prov_sha=$(bootstrap_planner_v2_hash_file "$parent_prov")
+planner_src="$root/src/app/cli/bootstrap_reason_planner.spl"
+planner_src_sha=$(bootstrap_planner_v2_hash_file "$planner_src")
+git_sha=$(bootstrap_planner_v2_hash_file "$adm_dir/git-state.txt")
+planner_sha=$(bootstrap_planner_v2_hash_file "$adm_dir/planner")
+smoke_sha=$(bootstrap_planner_v2_hash_file "$adm_dir/planner-smoke.txt")
+auth_file="$adm_dir/authorization.receipt"
+bootstrap_planner_v2_authorization_text "$target_label" "$reason_label" \
+  "$parent_sha" "$rt_sha" "$closure_sha" "$planner_sha" >"$auth_file"
+auth_sha=$(bootstrap_planner_v2_hash_file "$auth_file")
+rt_in_repo="$root/scripts/bootstrap"
+argv_sha=$(bootstrap_planner_v2_hash_text "$(bootstrap_planner_v2_canonical_argv_text \
+  "$adm_dir/planner" "$reason_label" "$target_label" "$parent_sha" "$rt_sha" "$closure_sha" "$planner_sha" "$auth_file")")
+env_sha=$(bootstrap_planner_v2_hash_text "$(bootstrap_planner_v2_canonical_env_text "$rt_in_repo")")
+
+valid_receipt="$scratch/valid-stage4.receipt"
+cat >"$valid_receipt" <<EOF
+schema=simple-bootstrap-planner-admission-v2
+status=pass
+platform=host-fixture
+target=${target_label}
+reason=${reason_label}
+parent_compiler_path=${parent_bin}
+parent_compiler_sha256=${parent_sha}
+parent_stage2_sanity_path=${parent_sanity}
+parent_stage2_sanity_sha256=${sanity_sha}
+parent_stage2_provenance_path=${parent_prov}
+parent_stage2_provenance_sha256=${prov_sha}
+runtime_dir=${rt_in_repo}
+runtime_snapshot_path=${adm_dir}/runtime.snapshot
+runtime_snapshot_sha256=${rt_sha}
+planner_source_path=${planner_src}
+planner_source_sha256=${planner_src_sha}
+planner_source_closure_snapshot_path=${adm_dir}/planner-source-closure.snapshot
+planner_source_closure_snapshot_sha256=${closure_sha}
+git_state_path=${adm_dir}/git-state.txt
+git_state_sha256=${git_sha}
+build_argv_sha256=${argv_sha}
+build_env_sha256=${env_sha}
+cache_scope_key=${scope_key}
+planner_path=${adm_dir}/planner
+planner_sha256=${planner_sha}
+planner_smoke_path=${adm_dir}/planner-smoke.txt
+planner_smoke_sha256=${smoke_sha}
+authorization_receipt_path=${auth_file}
+authorization_receipt_sha256=${auth_sha}
+EOF
+
+# Mock shared Phase 3/4 builder to verify exact forwarded argv and deploy artifact creation
+mock_builder="$scratch/mock-build-phase3-phase4.sh"
+cat >"$mock_builder" <<'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' "$@" >"${MOCK_BUILDER_ARGS_FILE}"
+broot=""
+for a in "$@"; do
+  case "$a" in --build-root=*) broot=${a#*=} ;; esac
+done
+mkdir -p "$broot/p4-from-p3b/bin/lib" "$broot/p4-from-p3b/essentials"
+printf '#!/bin/sh\necho simple-p4\n' >"$broot/p4-from-p3b/bin/simple"
+printf '#!/bin/sh\necho simple-p4-debug\n' >"$broot/p4-from-p3b/bin/simple-debug"
+printf 'mock-unit-dynlib\n' >"$broot/p4-from-p3b/bin/lib/libsimple-std.dylib"
+printf '#!/bin/sh\necho test-runner\n' >"$broot/p4-from-p3b/essentials/simple_test_runner"
+chmod +x "$broot/p4-from-p3b/bin/simple" "$broot/p4-from-p3b/bin/simple-debug" \
+  "$broot/p4-from-p3b/essentials/simple_test_runner"
+EOF
+chmod +x "$mock_builder"
+
+live_out_dir="$scratch/live-out"
+deploy_dest="$scratch/deploy-dest"
+args_record="$scratch/builder.args"
+live_log="$scratch/live.log"
+
+set +e
+SIMPLE_BOOTSTRAP_LIVE_TREE=1 \
+SIMPLE_BOOTSTRAP_MIN_FREE_GB=0 \
+SIMPLE_BOOTSTRAP_PROGRESS_LOG= \
+SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT="$ext_root" \
+SIMPLE_PHASE3_COMPILER="$scratch/valid_p3/simple" \
+SIMPLE_RUNTIME_PATH="$scratch/valid_p3/runtime" \
+SIMPLE_SHARED_PHASE34_BUILDER="$mock_builder" \
+SIMPLE_SHARED_DEPLOY_DIR="$deploy_dest" \
+MOCK_BUILDER_ARGS_FILE="$args_record" \
+  sh "$root/scripts/bootstrap/bootstrap-from-scratch.sh" \
+    --bootstrap-receipt="$valid_receipt" \
+    --output="$live_out_dir" \
+    --compile-mode=file \
+    --deploy >"$live_log" 2>&1
+live_rc=$?
+set -e
+if [ "$live_rc" -ne 0 ]; then
+  cat "$live_log" >&2
+fi
+assert_eq "$live_rc" "0" "live default-skip-P1-P2 run exits 0"
+
+live_text=$(cat "$live_log")
+recorded_args=$(cat "$args_record")
+assert_contains "$live_text" "Skipping Phase 1 (Cargo seed) & Phase 2" "live run logs P1/P2 skip"
+assert_contains "$live_text" "VERDICT — ADMITTED: stage=complete mode=shared-phase3-phase4" "live run emits ADMITTED verdict"
+assert_contains "$recorded_args" "--non-interactive" "shared builder receives --non-interactive"
+assert_contains "$recorded_args" "--phase=all" "shared builder receives --phase=all"
+assert_contains "$recorded_args" "--compile-mode=file" "shared builder receives --compile-mode=file"
+assert_contains "$recorded_args" "--p4-link-mode=dynload" "shared builder receives --p4-link-mode=dynload"
+assert_contains "$recorded_args" "--p2-bin=$scratch/valid_p3/simple" "shared builder receives detected Phase 3 binary"
+assert_contains "$recorded_args" "--seed-dir=$scratch/valid_p3/runtime" "shared builder receives detected runtime dir"
+
+if [ -x "$deploy_dest/simple" ] && [ -x "$deploy_dest/simple-debug" ] &&
+   [ -x "$deploy_dest/simple_test_runner" ] && [ -f "$deploy_dest/lib/libsimple-std.dylib" ]; then
+  ok
+else
+  fail "live --deploy did not populate deploy destination with P4 CLI, lib/libsimple-std.dylib, and essentials"
+fi
+
+# Live default run WITHOUT --skip-seed AND WITHOUT SIMPLE_PHASE3_COMPILER (using SIMPLE_DEFAULT_RELEASE_CANDIDATE_DIR)
+# Must bypass bootstrap-strategy.shs and L1343 Stage-4 guard, forward --p4-link-mode=one-binary, and deploy lib/libsimple-std.dylib
+default_live_out="$scratch/live-default-out"
+default_deploy_dest="$scratch/deploy-default-dest"
+default_args_record="$scratch/default-builder.args"
+default_live_log="$scratch/default-live.log"
+
+set +e
+(
+  unset SIMPLE_PHASE3_COMPILER SIMPLE_RUNTIME_PATH
+  SIMPLE_BOOTSTRAP_LIVE_TREE=1 \
+  SIMPLE_BOOTSTRAP_MIN_FREE_GB=0 \
+  SIMPLE_BOOTSTRAP_PROGRESS_LOG= \
+  SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT="$ext_root" \
+  SIMPLE_DEFAULT_RELEASE_CANDIDATE_DIR="$scratch/valid_p3" \
+  SIMPLE_SHARED_PHASE34_BUILDER="$mock_builder" \
+  SIMPLE_SHARED_DEPLOY_DIR="$default_deploy_dest" \
+  MOCK_BUILDER_ARGS_FILE="$default_args_record" \
+    sh "$root/scripts/bootstrap/bootstrap-from-scratch.sh" \
+      --bootstrap-receipt="$valid_receipt" \
+      --output="$default_live_out" \
+      --mode=one-binary \
+      --deploy
+) >"$default_live_log" 2>&1
+default_live_rc=$?
+set -e
+if [ "$default_live_rc" -ne 0 ]; then
+  cat "$default_live_log" >&2
+fi
+assert_eq "$default_live_rc" "0" "default run without --skip-seed or SIMPLE_PHASE3_COMPILER bypasses strategy & L1343 and exits 0"
+default_live_text=$(cat "$default_live_log")
+default_recorded_args=$(cat "$default_args_record")
+assert_contains "$default_live_text" "Skipping Phase 1 (Cargo seed) & Phase 2" "default run without --skip-seed logs P1/P2 skip"
+assert_contains "$default_live_text" "VERDICT — ADMITTED: stage=complete mode=shared-phase3-phase4" "default run without --skip-seed emits ADMITTED verdict"
+assert_contains "$default_recorded_args" "--p4-link-mode=one-binary" "default run forwards --p4-link-mode=one-binary"
+assert_contains "$default_recorded_args" "--p2-bin=$scratch/valid_p3/simple" "default run selects release candidate Phase 3 binary"
+assert_contains "$default_recorded_args" "--seed-dir=$scratch/valid_p3/runtime" "default run selects release candidate runtime dir"
+if [ -f "$default_deploy_dest/lib/libsimple-std.dylib" ] && [ -x "$default_deploy_dest/simple" ]; then
+  ok
+else
+  fail "default --deploy without --skip-seed did not copy simple and lib/libsimple-std.dylib"
+fi
+
+# Live --skip-seed with NO Phase 3+ compiler must exit 2 and emit missing-phase3-compiler verdict
+missing_log="$scratch/missing-p3.log"
+set +e
+SIMPLE_BOOTSTRAP_LIVE_TREE=1 \
+SIMPLE_BOOTSTRAP_MIN_FREE_GB=0 \
+SIMPLE_BOOTSTRAP_PROGRESS_LOG= \
+SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT="$ext_root" \
+SIMPLE_PHASE3_COMPILER="$scratch/seed_banner_dir/simple" \
+SIMPLE_DEFAULT_RELEASE_CANDIDATE_DIR="$scratch/empty_rc" \
+  sh "$root/scripts/bootstrap/bootstrap-from-scratch.sh" \
+    --skip-seed \
+    --bootstrap-receipt="$valid_receipt" \
+    --output="$scratch/live-missing-out" >"$missing_log" 2>&1
+missing_rc=$?
+set -e
+assert_eq "$missing_rc" "2" "live --skip-seed without Phase 3+ compiler exits 2"
+assert_contains "$(cat "$missing_log")" "reason=missing-phase3-compiler" "live --skip-seed emits missing-phase3-compiler verdict"
+
+if [ "$failures" -ne 0 ]; then
+  printf 'FAIL — %s failure(s) across %s check(s)\n' "$failures" "$checks" >&2
+  exit 1
+fi
+printf 'PASS — %s check(s) verified (protected headers, default-skip-P1-P2, and multi-OS --path-check)\n' "$checks"

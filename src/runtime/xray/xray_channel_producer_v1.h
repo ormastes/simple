@@ -47,6 +47,29 @@ SIMPLE_XRAY_NEVER_INSTRUMENT static inline int64_t simple_xray_cas(int64_t *cell
     return expected; /* the observed old value, like rt_par_atomic_cmpxchg_i64 */
 }
 
+/* Claim the one-way handler mode (0 -> want); returns the mode now in force. */
+SIMPLE_XRAY_NEVER_INSTRUMENT static inline uint64_t simple_xray_claim_handler_mode_v1(uint64_t *cell,
+                                                                                    uint64_t want) {
+    uint64_t mode = __atomic_load_n(cell, __ATOMIC_ACQUIRE);
+    if (mode == 0) {
+        uint64_t expected = 0;
+        if (!__atomic_compare_exchange_n(cell, &expected, want, 0, __ATOMIC_ACQ_REL,
+                                         __ATOMIC_ACQUIRE)) mode = expected;
+        else mode = want;
+    }
+    return mode;
+}
+
+/* 1 when the arena describes the stated generation/context, is well formed and open. */
+SIMPLE_XRAY_NEVER_INSTRUMENT static inline int simple_xray_arena_install_ready_v1(
+    int64_t *base, int64_t generation, int64_t context) {
+    int64_t capacity = base[CH_CAPACITY];
+    if (capacity <= 0 || capacity > CH_MAX_RECORDS) return 0;
+    if (base[CH_GENERATION] != generation || base[CH_CONTEXT] != context) return 0;
+    if (base[CH_ARENA_BYTES] != (CH_HEADER_WORDS + capacity * CH_RECORD_WORDS) * 8) return 0;
+    return __atomic_load_n(&base[CH_GATE], __ATOMIC_SEQ_CST) == 0;
+}
+
 SIMPLE_XRAY_NEVER_INSTRUMENT static inline void simple_xray_loss(int64_t *base) {
     int64_t current = __atomic_load_n(&base[CH_LOST], __ATOMIC_SEQ_CST);
     for (int attempt = 0; attempt < 8; attempt++) {

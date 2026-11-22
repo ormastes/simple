@@ -22,14 +22,20 @@ fail() {
     exit 1
 }
 
-receipt_field() {
-    sed -n "s/^$1=//p" "$frames_env" | tail -n 1
-}
+_WMR_CR=$(printf '\r')
 
-require_field() {
-    value=$(receipt_field "$1")
-    [ -n "$value" ] || fail "missing-$1"
-    printf '%s\n' "$value"
+require_into() {
+    _ri_var=$1
+    _ri_prefix="$2="
+    _ri_val=""
+    while IFS= read -r _ri_line || [ -n "$_ri_line" ]; do
+        _ri_line="${_ri_line%$_WMR_CR}"
+        case "$_ri_line" in
+            "$_ri_prefix"*) _ri_val="${_ri_line#"$_ri_prefix"}" ;;
+        esac
+    done < "$frames_env"
+    [ -n "$_ri_val" ] || fail "missing-$2"
+    eval "$_ri_var=\$_ri_val"
 }
 
 positive_int() {
@@ -38,9 +44,11 @@ positive_int() {
 
 sha256_file() {
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | awk '{print $1}'
+        _sha_out=$(sha256sum "$1")
+        printf '%s\n' "${_sha_out%% *}"
     elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$1" | awk '{print $1}'
+        _sha_out=$(shasum -a 256 "$1")
+        printf '%s\n' "${_sha_out%% *}"
     else
         fail sha256-tool-unavailable
     fi
@@ -48,22 +56,29 @@ sha256_file() {
 
 # Extract a `key=value` token from a launch-log line whose provenance segment
 # uses `;` separators (frame_provenance format).
-provenance_field() {
-    printf '%s\n' "$1" | tr ';' ' ' | awk -v key="$2" '
-        {
-            for (i = 1; i <= NF; i++) {
-                split($i, pair, "=")
-                if (pair[1] == key) {
-                    print pair[2]
-                    exit
-                }
-            }
-        }
-    '
-}
-
-last_frame_line() {
-    grep -E '^\[hosted-wm\] frame-presented ' "$1" | tail -n 1 || true
+provenance_into() {
+    _pi_var=$1
+    _pi_line=${2%$_WMR_CR}
+    _pi_key="$3="
+    _pi_old_ifs=$IFS
+    IFS=';'
+    for _pi_seg in $_pi_line; do
+        _pi_old2=$IFS
+        IFS=' '
+        for _pi_tok in $_pi_seg; do
+            case "$_pi_tok" in
+                "$_pi_key"*)
+                    IFS=$_pi_old_ifs
+                    _pi_val="${_pi_tok#"$_pi_key"}"
+                    eval "$_pi_var=\$_pi_val"
+                    return 0
+                    ;;
+            esac
+        done
+        IFS=';'
+    done
+    IFS=$_pi_old_ifs
+    eval "$_pi_var=''"
 }
 
 capture_receipt() {
@@ -73,8 +88,8 @@ capture_receipt() {
     [ -d "$run_dir" ] || fail missing-run-dir
     [ -f "$frames_env" ] || fail missing-frames-env
 
-    platform=$(require_field platform)
-    backend=$(require_field backend)
+    require_into platform platform
+    require_into backend backend
     case "$platform:$backend" in
         hosted:software|hosted:cpu_simd|hosted:metal|simpleos:software|simpleos:cpu_simd) ;;
         *) fail unsupported-platform-backend ;;
@@ -84,24 +99,24 @@ capture_receipt() {
     if [ "$backend" = metal ] && [ "$(uname -s)" != Darwin ]; then
         fail "backend-unavailable:metal-on-$(uname -s | tr '[:upper:]' '[:lower:]')"
     fi
-    viewport_width=$(require_field viewport_width)
-    viewport_height=$(require_field viewport_height)
+    require_into viewport_width viewport_width
+    require_into viewport_height viewport_height
     positive_int "$viewport_width" || fail invalid-viewport_width
     positive_int "$viewport_height" || fail invalid-viewport_height
-    warmup_frames=$(require_field warmup_frames)
+    require_into warmup_frames warmup_frames
     positive_int "$warmup_frames" || fail invalid-warmup_frames
-    frame_budget_ns=$(require_field frame_budget_ns)
+    require_into frame_budget_ns frame_budget_ns
     positive_int "$frame_budget_ns" || fail invalid-frame_budget_ns
-    max_rss_kib=$(require_field max_rss_kib)
+    require_into max_rss_kib max_rss_kib
     positive_int "$max_rss_kib" || fail invalid-max_rss_kib
-    rss_budget_kib=$(require_field rss_budget_kib)
+    require_into rss_budget_kib rss_budget_kib
     positive_int "$rss_budget_kib" || fail invalid-rss_budget_kib
-    baseline_p95_ns=$(require_field baseline_p95_ns)
+    require_into baseline_p95_ns baseline_p95_ns
     positive_int "$baseline_p95_ns" || fail invalid-baseline_p95_ns
-    baseline_max_rss_kib=$(require_field baseline_max_rss_kib)
+    require_into baseline_max_rss_kib baseline_max_rss_kib
     positive_int "$baseline_max_rss_kib" || fail invalid-baseline_max_rss_kib
-    baseline_source_revision=$(require_field baseline_source_revision)
-    source_revision=$(require_field source_revision)
+    require_into baseline_source_revision baseline_source_revision
+    require_into source_revision source_revision
 
     launch_log="$run_dir/launch.log"
     [ -s "$launch_log" ] || fail missing-launch-log
@@ -115,11 +130,17 @@ capture_receipt() {
     if grep -Eq '^\[hosted-wm\] content-provenance-rejected|backend=native-safe-fallback|^\[hosted-wm\] draw-ir-rejected retry=compatibility' "$launch_log"; then
         fail content-provenance-rejected
     fi
-    last_line=$(last_frame_line "$launch_log")
-    actual_backend=$(provenance_field "$last_line" backend)
+    last_line=""
+    while IFS= read -r _lfl_line || [ -n "$_lfl_line" ]; do
+        _lfl_line="${_lfl_line%$_WMR_CR}"
+        case "$_lfl_line" in
+            "[hosted-wm] frame-presented "*) last_line="$_lfl_line" ;;
+        esac
+    done < "$launch_log"
+    provenance_into actual_backend "$last_line" backend
     [ -n "$actual_backend" ] || fail missing-backend-provenance
     [ "$actual_backend" = "$backend" ] || fail "backend-fallback:requested-$backend-actual-$actual_backend"
-    readback_source=$(provenance_field "$last_line" source)
+    provenance_into readback_source "$last_line" source
     case "$backend:$readback_source" in
         software:presented-pixel-buffer|cpu_simd:presented-pixel-buffer|metal:device_readback) ;;
         *:cache|*:cache-only) fail non-live-readback ;;
@@ -132,14 +153,24 @@ capture_receipt() {
     [ "$total_samples" -gt "$warmup_frames" ] || fail insufficient-samples
     sample_frames=$(( total_samples - warmup_frames ))
     [ "$sample_frames" -ge 20 ] || fail insufficient-samples
-    percentiles=$(tail -n "+$(( warmup_frames + 1 ))" "$samples_file" | sort -n | awk '
-        { a[NR] = $1 }
+    percentiles=$(awk -v w="$warmup_frames" '
+        NR > w {
+            v = $1 + 0
+            j = n
+            while (j >= 1 && a[j] > v) {
+                a[j + 1] = a[j]
+                j--
+            }
+            a[j + 1] = v
+            n++
+        }
         END {
-            i50 = int((NR + 1) / 2)
-            i95 = int(NR * 0.95)
+            if (n < 1) exit 1
+            i50 = int((n + 1) / 2)
+            i95 = int(n * 0.95)
             if (i95 < 1) i95 = 1
-            print a[i50], a[i95]
-        }')
+            printf "%d %d\n", a[i50], a[i95]
+        }' "$samples_file")
     frame_p50_ns=${percentiles% *}
     frame_p95_ns=${percentiles#* }
     [ "$frame_p95_ns" -le "$frame_budget_ns" ] || fail frame-budget-exceeded
@@ -149,27 +180,25 @@ capture_receipt() {
     after_capture="$run_dir/after.ppm"
     [ -s "$before_capture" ] || fail missing-before-capture
     [ -s "$after_capture" ] || fail missing-after-capture
-    for capture in "$before_capture" "$after_capture"; do
-        dims=$(perl -e '
-            use strict;
-            my ($path) = @ARGV;
+    perl -e '
+        use strict;
+        my ($exp, @paths) = @ARGV;
+        for my $path (@paths) {
             open my $file, "<:raw", $path or exit 1;
             local $/;
             my $data = <$file>;
             $data =~ /\AP6\r?\n(\d+) (\d+)\r?\n255\r?\n/s or exit 2;
             my ($width, $height) = ($1, $2);
             length(substr($data, $+[0])) == $width * $height * 3 or exit 3;
-            print "$width $height\n";
-        ' "$capture") || fail invalid-capture
-        [ "$dims" = "$viewport_width $viewport_height" ] || fail capture-viewport-mismatch
-    done
-    checksum_before=$(sha256_file "$before_capture")
-    checksum_after=$(sha256_file "$after_capture")
-    [ "$checksum_before" != "$checksum_after" ] || fail unchanged-framebuffer
-
+            "$width $height" eq $exp or exit 4;
+        }
+    ' "$viewport_width $viewport_height" "$before_capture" "$after_capture" || {
+        rc=$?
+        [ "$rc" -eq 4 ] && fail capture-viewport-mismatch
+        fail invalid-capture
+    }
     executable="$run_dir/executable"
     [ -s "$executable" ] || fail missing-executable
-    executable_sha256=$(sha256_file "$executable")
 
     # Retained launch log: the run's own log plus the capture marker the schema
     # validator requires; the digest binds exactly this retained copy.
@@ -177,7 +206,30 @@ capture_receipt() {
     mkdir -p "$(dirname -- "$receipt_out")"
     cp "$launch_log" "$retained_log"
     echo "wm_retained_web2d_perf_capture backend=$backend viewport=${viewport_width}x${viewport_height} samples=$sample_frames" >>"$retained_log"
-    launch_log_sha256=$(sha256_file "$retained_log")
+    if command -v sha256sum >/dev/null 2>&1; then
+        _digests=$(sha256sum "$before_capture" "$after_capture" "$executable" "$retained_log")
+        _d_idx=0
+        _old_ifs=$IFS
+        IFS='
+'
+        for _d_line in $_digests; do
+            _d_hex=${_d_line%% *}
+            case "$_d_idx" in
+                0) checksum_before=$_d_hex ;;
+                1) checksum_after=$_d_hex ;;
+                2) executable_sha256=$_d_hex ;;
+                3) launch_log_sha256=$_d_hex ;;
+            esac
+            _d_idx=$((_d_idx + 1))
+        done
+        IFS=$_old_ifs
+    else
+        checksum_before=$(sha256_file "$before_capture")
+        checksum_after=$(sha256_file "$after_capture")
+        executable_sha256=$(sha256_file "$executable")
+        launch_log_sha256=$(sha256_file "$retained_log")
+    fi
+    [ "$checksum_before" != "$checksum_after" ] || fail unchanged-framebuffer
 
     cat >"$receipt_out" <<EOF
 platform=$platform

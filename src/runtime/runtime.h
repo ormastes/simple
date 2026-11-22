@@ -650,7 +650,7 @@ int64_t  rt_value_to_string(int64_t value);
 int64_t  rt_function_not_found(const uint8_t* name, uint64_t len);
 int64_t  rt_method_not_found(const uint8_t* type_name, uint64_t type_len,
                              const uint8_t* method_name, uint64_t method_len);
-int64_t  rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv);
+int64_t  rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, const uint64_t* argv);
 SplArray* rt_array_new(int64_t cap);
 SplArray* rt_f64_array_alloc(int64_t len);
 SplArray* rt_f32_array_alloc(int64_t len);
@@ -1383,15 +1383,15 @@ bool     rt_process_kill(int64_t pid);
 /* C lane of the rt_pty_* family's liveness probe. POSIX takes the pty MASTER
    fd and answers from POLLHUP; Windows answers from this lane's own ConPTY
    session table. See runtime_process.c for the full contract. */
-#ifdef _WIN32
-/* Windows-only ConPTY lane; `text` values are RuntimeValue strings. */
+#if defined(_WIN32) || defined(__linux__)
+/* Hosted PTY owners use RuntimeValue strings. */
 int32_t  rt_pty_open(int32_t rows, int32_t cols);
 int64_t  rt_pty_spawn(int32_t handle, int64_t program);
-bool     rt_pty_write(int64_t handle, int64_t data);
 int64_t  rt_pty_read(int64_t handle, int64_t timeout_ms);
-bool     rt_pty_close(int64_t handle);
+int64_t  rt_pty_write(int64_t handle, int64_t data);
+int64_t  rt_pty_close(int64_t handle);
 #endif
-bool     rt_pty_is_running(int64_t handle);
+int64_t  rt_pty_is_running(int64_t handle);
 bool     rt_pty_resize(int64_t handle, int32_t rows, int32_t cols);
 bool     rt_pty_hangup(int64_t handle);
 int64_t  rt_pty_spawn_exec_v1(int32_t handle, const char* program, SplArray* args,

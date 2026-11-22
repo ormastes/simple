@@ -15,29 +15,22 @@
 use app.ponytail.audit.{ponytail_audit, ponytail_simplification_report, ponytail_debt}
 use std.common.token_budget.{smart_truncate_bytes}
 use std.io_runtime.{env_get, file_exists, file_read}
-use std.string_core.{char_from_code}
 use .main_lazy_json.{mcp_run_argv, extract_field, first_n_chars, make_tool_error, make_tool_result, shell_cmd}
 
 fn _mcp_json_escape(value: text) -> text:
-    var out = ""
-    var i = 0
-    while i < value.byte_len():
-        val ch = value.char_code_at(i)
-        if ch == 92:
-            out = out + "\\\\"
-        elif ch == 34:
-            out = out + "\\\""
-        elif ch == 10:
-            out = out + "\\n"
+    if not value.contains("\\") and not value.contains("\"") and not value.contains("\n"):
+        return value
+    var parts: [text] = []
+    for ch in value:
+        if ch == "\\":
+            parts.push("\\\\")
+        elif ch == "\"":
+            parts.push("\\\"")
+        elif ch == "\n":
+            parts.push("\\n")
         else:
-            # `text.from_char_code(ch)` (static call on the builtin type name)
-            # does not lower on the native entry-closure HIR path — the
-            # receiver `text` resolves as a value ident and dies "unresolved
-            # name: text". Use the std free function; static-call lowering gap
-            # filed: doc/08_tracking/bug/text_static_method_hir_lowering_2026-07-23.md
-            out = out + char_from_code(ch)
-        i = i + 1
-    out
+            parts.push(ch)
+    parts.join("")
 
 fn _mcp_first_lines(value: text, maximum: i64) -> text:
     var out = ""
@@ -613,19 +606,16 @@ fn handle_simple_pipe_codebase(id: text, body: text) -> text:
 # queries, which name an exact symbol — a plain (kind-less) query is left
 # alone and stays a user-authored BRE pattern, per the comment below.
 fn _mcp_escape_ere_literal(value: text) -> text:
-    var out = ""
-    var i = 0
-    while i < value.byte_len():
-        val ch = value.char_code_at(i)
+    var parts: [text] = []
+    for ch in value:
         # ERE metacharacters: . ^ $ * + ? ( ) [ ] { } | plus backslash itself.
-        if ch == 46 or ch == 94 or ch == 36 or ch == 42 or ch == 43 or ch == 63 or
-           ch == 40 or ch == 41 or ch == 91 or ch == 93 or ch == 123 or ch == 125 or
-           ch == 124 or ch == 92:
-            out = out + "\\" + char_from_code(ch)
+        if (ch == "." or ch == "^" or ch == "$" or ch == "*" or ch == "+" or ch == "?" or
+            ch == "(" or ch == ")" or ch == "[" or ch == "]" or ch == "{" or ch == "}" or
+            ch == "|" or ch == "\\"):
+            parts.push("\\" + ch)
         else:
-            out = out + char_from_code(ch)
-        i = i + 1
-    out
+            parts.push(ch)
+    parts.join("")
 
 fn handle_simple_search(id: text, body: text) -> text:
     val query = extract_field(body, "query")

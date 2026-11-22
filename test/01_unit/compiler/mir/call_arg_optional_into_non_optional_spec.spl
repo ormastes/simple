@@ -1,0 +1,87 @@
+# @req REQ-SSPEC-UNIT
+# @cover src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+#
+# `[T].pop()` (and `.first()` / `.last()`) is `T?` in pure-Simple MIR. The
+# enum-payload check already refuses that `T?` in a non-optional `T` payload
+# slot, but the same value passed as a DIRECT CALL ARGUMENT into a `T`
+# parameter compiled and then panicked at runtime ("total enum match fell
+# through on 'NodeX'" -- reproduced with the integ25 Stage 2 compiler on
+# test/fixtures/native_optional_into_nonoptional_arg_negative/main.spl).
+# Never widen nil: the call-argument boundary now refuses it at MIR time.
+# This spec drives the real pure-Simple HIR + MIR lowering, so it is
+# red/green without a Stage 2 binary.
+# Record: doc/08_tracking/bug/mir_enum_payload_mismatch_loopregion_2026-11-20.md
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+val _PRELUDE = "enum NodeX:\n    Step(work: i64)\n    Loop(count: i64, body: NodeX)\nfn depth(n: NodeX) -> i64:\n    match n:\n        case NodeX.Step(work): work\n        case NodeX.Loop(count, body): count * 100 + depth(body)\nfn depth_opt(n: NodeX?) -> i64:\n    if val present = n:\n        return depth(present)\n    -1\nfn take_i64(x: i64) -> i64:\n    x + 1\nfn ident<T>(x: T) -> T:\n    x\n"
+
+fn _call_arg_errors(body: text) -> [text]:
+    val filename = "call_arg_optional_into_non_optional.spl"
+    val parsed = parse_full_frontend(_PRELUDE + body, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var errors: [text] = []
+    for error in hir_lowering.errors:
+        errors.push("HIR: " + error.message)
+    for error in lowering.errors:
+        errors.push("MIR: " + error.message)
+    if mir.functions.len() == 0:
+        errors.push("no lowered functions")
+    for error in errors:
+        print "CALL_ARG_OPTIONAL_DIAGNOSTIC={error}"
+    errors
+
+fn _refusals(errors: [text], declared: text, method: text) -> i64:
+    var count = 0
+    for error in errors:
+        if error.starts_with("MIR: call ") and error.contains("argument type mismatch at 0: optional '{declared}?' value from `.{method}()` into non-optional parameter (declared '{declared}')"):
+            count = count + 1
+    count
+
+val _STACK = "fn run() -> i64:\n    var built: [NodeX] = []\n    built.push(NodeX.Loop(2, NodeX.Step(4)))\n"
+
+describe "optional builtin array result passed into a non-optional parameter":
+    it "rejects `depth(built.pop())` at MIR time (the runtime-panic shape)":
+        val errors = _call_arg_errors(_STACK + "    depth(built.pop())\n")
+        expect(_refusals(errors, "NodeX", "pop")).to_equal(1)
+
+    it "rejects `.last()` and `.first()` the same way":
+        expect(_refusals(_call_arg_errors(_STACK + "    depth(built.last())\n"), "NodeX", "last")).to_equal(1)
+        expect(_refusals(_call_arg_errors(_STACK + "    depth(built.first())\n"), "NodeX", "first")).to_equal(1)
+
+    it "rejects a scalar element popped into a scalar parameter":
+        val errors = _call_arg_errors("fn run() -> i64:\n    var xs: [i64] = [1, 2]\n    take_i64(xs.pop())\n")
+        expect(_refusals(errors, "i64", "pop")).to_equal(1)
+
+    it "accepts the checked unwrap":
+        val errors = _call_arg_errors(_STACK + "    depth(built.pop().unwrap())\n")
+        expect(errors.len()).to_equal(0)
+
+    it "accepts the if-val unwrap":
+        val errors = _call_arg_errors(_STACK + "    if val node = built.pop():\n        return depth(node)\n    -1\n")
+        expect(errors.len()).to_equal(0)
+
+    it "accepts a declared optional parameter":
+        val errors = _call_arg_errors(_STACK + "    depth_opt(built.pop())\n")
+        expect(errors.len()).to_equal(0)
+
+    it "accepts a narrowed bound local (not judged by this check)":
+        val errors = _call_arg_errors("fn run() -> i64:\n    var xs: [i64] = [1, 2]\n    val v = xs.pop()\n    if v != nil:\n        return take_i64(v)\n    -1\n")
+        expect(errors.len()).to_equal(0)
+
+    it "accepts a generic parameter":
+        val errors = _call_arg_errors(_STACK + "    val n = ident(built.pop())\n    0\n")
+        expect(errors.len()).to_equal(0)
+
+    it "accepts a user-defined non-optional pop() method":
+        val errors = _call_arg_errors("class Vm:\n    stack: [i64]\n    me pop() -> i64:\n        self.stack.len()\nfn run() -> i64:\n    var vm = Vm(stack: [1])\n    take_i64(vm.pop())\n")
+        expect(errors.len()).to_equal(0)

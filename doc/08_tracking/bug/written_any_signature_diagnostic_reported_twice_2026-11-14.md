@@ -1,6 +1,6 @@
 # Written `Any` in a callable signature is diagnosed twice
 
-- **Status:** OPEN
+- **Status:** FIXED (2026-11-22)
 - **Severity:** P3
 - **Filed:** 2026-11-14, lane p3-batch-c (Linux aarch64, Rust seed built from
   `release/1.0.0` @ `c541817df822`)
@@ -63,3 +63,8 @@ reporting 2. The red spec goes green without changing its assertions. Likely
 routes: carry type spans through the flat AST bridge and key the report on
 them, or have the registration pass defer `Any` diagnostics to declaration
 lowering after proving full coverage.
+
+## Resolution (2026-11-22)
+
+- **Root cause fixed:** Up-front signature/declaration registration (`declared_callable_type`, `declared_surface_callable_type` in `src/compiler/20.hir/hir_lowering/_Items/module_callable_types.spl`, and the `module_functions`, `module_constants`, and `module.impls` pre-declaration loops in `src/compiler/20.hir/hir_lowering/_Items/module_declarations_bootstrap.spl`) plus exported-alias private-target re-expansion (`exported_alias_validation_v1` in `src/compiler/20.hir/hir_lowering/types.spl`) now defer `[W-ANY-COMPILE-001]` / `[E-ANY-COMPILE-001]` to each item's authoritative declaration lowerer (`lower_function`, `lower_hir_const_decl`, `lower_trait`, `lower_impl`, `register_type_alias_template`).
+- **Coverage:** Every written `Any` / `any` in free `fn`, `extern fn`, `trait` method, `impl` method, module `val`/`var`, `type` / `pub type` alias, and local annotation is diagnosed exactly once per occurrence (`test/01_unit/compiler/30.types/written_any_compile_mode_spec.spl`).

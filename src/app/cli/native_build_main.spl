@@ -13,6 +13,7 @@ use app.cli.native_build_env_restore_v1.{native_build_env_saved_v1, native_build
 use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait, process_kill, process_is_running}
 use app.io.cli_ops.{_cli_self_exe_via_pid_query, cli_kernel_executable_path}
 use app.cli.native_build_producer_binding.{bootstrap_native_build_producer_binding}
+use app.cli.bootstrap_native_worker_runtime.{native_build_select_worker_runtime, native_build_worker_preflight_code}
 use app.io.file_ops.{path_absolute, file_size_raw}
 use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
     compiler_source_authority_publish_v1, compiler_source_authority_clear_v1,
@@ -82,6 +83,7 @@ use std.nogc_sync_mut.io.host_capacity.{host_capacity_probe_v1, host_capacity_id
     host_capacity_headroom_kib_v1, host_capacity_reserve_kib_v1, host_live_worker_slots_v1}
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
+use compiler.driver.driver_hir_worker_surface_v1.{parse_shard_skeleton_env_v1}
 use compiler.driver.driver_log_helpers.{build_trace_enabled, log_build_trace,
     build_trace_list, build_trace_detail}
 use compiler.driver.driver_tldr_import_route_v1.{tldr_imports_enabled_v1, tldr_closure_walk_check_v1}
@@ -243,28 +245,19 @@ fn native_build_worker_spawn_trace_enabled() -> bool:
 #   - the "bin/simple" fallback is relative, which the timeout wrapper cannot
 #     exec -> worker spawn fails (reported as a spurious timeout).
 # Guard nil, and return an ABSOLUTE path.
+# REQ-RENDER-CLI-002: SIMPLE_BINARY -> SIMPLE_BIN -> invoking exe, never a Rust
+# seed, and no implicit bin/simple fallback: "" fails closed at the caller.
 fn resolve_simple_binary() -> text:
-    val from_binary = env_get("SIMPLE_BINARY")
-    if from_binary != nil and from_binary != "" and file_exists(from_binary):
-        return abs_if_needed(from_binary)
-    val from_bin = env_get("SIMPLE_BIN")
-    if from_bin != nil and from_bin != "" and file_exists(from_bin):
-        return abs_if_needed(from_bin)
-    # Prefer the binary that invoked us during bootstrap.
+    val from_binary = env_get("SIMPLE_BINARY") ?? ""
+    val from_bin = env_get("SIMPLE_BIN") ?? ""
     val se = self_exe()
-    if se != "" and file_exists(se):
-        return abs_if_needed(se)
-    # Windows deploys the compiler as bin/simple.exe; probe it before the
-    # extensionless POSIX name so the fallback names a file that exists. A
-    # tracked bin/simple.exe can be a foreign Windows PE in an isolated clone;
-    # on non-Windows hosts skip it so a runnable bin/simple is preferred.
-    if file_exists("bin/simple.exe") and native_build_worker_binary_host_runnable(abs_path("bin/simple.exe")):
-        return abs_path("bin/simple.exe")
-    if file_exists("bin/simple"):
-        return abs_path("bin/simple")
-    if file_exists("src/compiler_rust/target/bootstrap/simple"):
-        return abs_path("src/compiler_rust/target/bootstrap/simple")
-    "bin/simple"
+    val selected = native_build_select_worker_runtime(
+        from_binary, from_binary != "" and file_exists(from_binary),
+        from_bin, from_bin != "" and file_exists(from_bin),
+        se, se != "" and file_exists(se))
+    if native_build_worker_preflight_code(selected) != 0:
+        return ""
+    abs_if_needed(selected)
 
 val OUTPUT_LIMIT = 12000
 var native_build_stderr_spill_seq: i64 = 0
@@ -1674,6 +1667,13 @@ fn run_mir_shards_resume_v1(args: [text], queue_dir: text, count: i64,
         print native_mir_shard_resume_full_pass_line_v1(mismatch, prior)
         return ("run", 0)
     val resumed = native_mir_shard_resume_adopt_v1(prior, queue_dir)
+    if resumed.reason == "prior inventory unreadable":
+        # A run killed before publishing its inventory leaves a ledger with
+        # nothing to adopt. Adopt wrote nothing into queue_dir on this path, so
+        # run a full pass, exactly as a key mismatch does.
+        val _repointed = file_atomic_write(latest, queue_dir)
+        print "[mir-shard] resume: full pass; prior ledger has no inventory prior={prior}"
+        return ("run", 0)
     if resumed.reason != "":
         eprint "[mir-shard] resume: ledger seeding failed ({resumed.reason}); ledger={queue_dir}"
         return ("fail", 0)
@@ -1796,6 +1796,8 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
         return ""
     native_build_bind_cache_dirs_from_args_v1(args)
     native_build_publish_cache_scope_v1(simple_bin)
+    if not native_build_closure_ensure_published_for_shards_v1(args):
+        return ""
     val timeout_ms = native_build_timeout_ms(args)
     # Workers write no run evidence: the memory snapshot is O_EXCL (a worker
     # would take the parent's file); the phase profile and progress events belong to the
@@ -2088,16 +2090,25 @@ pub fn run_native_file_worker_v1(args: [text]) -> i64:
         native_file_worker_note_error_v1(mir_queue, owner, "HIR ledger has a non-PASS module; MIR not admitted")
         return 1
     # Phase B: MIR + object, one claim batch per child.
+    # Export SIMPLE_NATIVE_FILE_WORKERS with the live worker pool size from `spec`
+    # ("i/n") because `--mir-shard=0/{mir_count}` carries total batch count rather
+    # than concurrent worker count.
+    val phase_b_pool_workers = native_file_worker_plan_batch_v1("", spec, []).worker_count
     val mir_count = native_file_worker_mir_count_v1(native_file_worker_inventory_rows_v1(hir_queue), batch)
     var mir_round: i64 = 0
     var mir_drained = false
     while not mir_drained:
         val child_owner = "{owner}{HIR_SHARD_FORK_OWNER_MARK_V1}-m{mir_round}"
         mir_round = mir_round + 1
+        val old_phase_b_workers = native_build_env_saved_v1("SIMPLE_NATIVE_FILE_WORKERS")
+        env_set("SIMPLE_NATIVE_FILE_WORKERS", "{phase_b_pool_workers}")
         env_set("SIMPLE_MIR_SHARD_QUEUE", mir_queue)
         env_set("SIMPLE_MIR_SHARD_OWNER", child_owner)
         val pid = process_spawn_async(simple_bin, native_file_worker_child_args_v1(args, "--mir-shard=0/{mir_count}"))
         val code = native_build_normalize_exit_code(shard_child_wait_bounded_v1("file-worker mir", pid, native_build_timeout_ms(args)))
+        env_set("SIMPLE_MIR_SHARD_QUEUE", "")
+        env_set("SIMPLE_MIR_SHARD_OWNER", "")
+        native_build_env_restore_v1("SIMPLE_NATIVE_FILE_WORKERS", old_phase_b_workers)
         val obj_done = time_now_monotonic_ms()
         val _sealed = hir_shard_recovery_seal(mir_queue, child_owner, native_file_worker_seal_state_v1(code))
         val claimed = native_file_worker_owner_claims_v1(mir_queue, child_owner)
@@ -2198,6 +2209,11 @@ pub fn native_build_relaunch_past_ice_crashes(worker_bin: text, relaunch_args: [
     # reaches the trapped entrypoint dies the same way, so stepping past the
     # one in flight only burns the retry budget.
     if ice_runtime_trap_symbol(stderr) != "":
+        return (stdout, stderr, code_raw)
+    # An orderly compile failure (plain exit 1 after `[first-compile-error]`)
+    # is not a crash. The run-wide scan below reads every writer's breadcrumbs,
+    # so the crumbs still open belong to live sibling workers, not this one.
+    if worker_status == 1 and stderr.contains("[first-compile-error]"):
         return (stdout, stderr, code_raw)
     val dead = ice_boundary_dead_worker_modules()
     if dead.len() == 0:
@@ -2455,9 +2471,10 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
                 native_build_env_restore_v1("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
                 native_build_env_restore_v1(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
                 return 1
-    # Bound every shard phase by the published closure (first-object latency,
-    # TODO #437): each shard is a process that pays start + load_sources
-    # before claiming one unit, so a tiny closure is faster in process.
+    # Bound every shard phase by the coordinator-published parse closure so
+    # each shard process reuses the preloaded closure without re-walking
+    # load_sources before claiming a unit; a tiny closure still runs faster
+    # in process.
     val presealed_mir_link = (env_get("SIMPLE_MIR_SHARD_LINK") ?? "") != ""
     val closure_files = native_build_closure_selected_count_v1()
     val small_closure_max = native_build_small_closure_max_v1(
@@ -2465,8 +2482,6 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
     val shard_count = if presealed_mir_link: 0 else: native_build_shard_count_for_closure_v1(
         requested_parse_shards, closure_files, small_closure_max)
     log_build_trace("coordinator:shards parse={shard_count} requested={requested_parse_shards} closure_files={closure_files}")
-    if shard_count > 0:
-        run_parse_shards(forwarded_args, shard_count, simple_bin, native_build_timeout_ms(args))
     # The request stays published for the HIR/MIR shard workers and the real
     # worker; it is cleared once the real worker has returned.
     # Then fill the HIR cache the same way, so the real build's HIR phase is
@@ -2483,6 +2498,17 @@ fn run_native_build_worker_inner(raw_args: [text]) -> i64:
         print "[hir-shard] no frozen entry closure (--entry-closure absent); HIR pool skipped, coordinator lowers HIR in process"
         hir_shard_count = 0
     log_build_trace("coordinator:shards hir={hir_shard_count}")
+    if shard_count > 0:
+        # HIR workers parse module skeletons, a different frontend-cache key
+        # from the full source; arm the parse shards to warm it as well only
+        # when a HIR pool follows (driver_parse_shard_entry.spl).
+        val old_skeleton_warm = native_build_env_saved_v1(parse_shard_skeleton_env_v1())
+        # Restored before the HIR pool: its env allowlist
+        # (worker_hir_profile_v1.spl) must never see this key.
+        if hir_shard_count > 0:
+            env_set(parse_shard_skeleton_env_v1(), "1")
+        run_parse_shards(forwarded_args, shard_count, simple_bin, native_build_timeout_ms(args))
+        native_build_env_restore_v1(parse_shard_skeleton_env_v1(), old_skeleton_warm)
     # native_build_hir_ledger_run_v1 may extend the ICE skip list under
     # go-to-end (HIR pool CRASH rows); restored after the final worker.
     val go_to_end_skip_saved = native_build_env_saved_v1("SIMPLE_ICE_SKIP_MODULES")
@@ -3015,6 +3041,32 @@ pub fn native_build_coordinator_prepublish_closure_v1(worker_args: [text]) -> bo
             eprint "error: " + reason
             false
 
+"""Return whether the current worker inherited a published parse closure."""
+@allow(primitive_api)
+pub fn native_build_shard_worker_closure_reused_v1() -> bool:
+    (env_get(NATIVE_BUILD_PARSE_CLOSURE_CONSUMER_ENV_V1) ?? "") == "1" and
+        (env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? "") != "" and
+        (env_get("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST") ?? "") != ""
+
+"""Ensure coordinator prepublishes entry closure before focused shard fan-out."""
+@allow(primitive_api)
+pub fn native_build_closure_ensure_published_for_shards_v1(args: [text]) -> bool:
+    val shard_child = native_build_shard_child_env_v1(
+        env_get("SIMPLE_PARSE_SHARD") ?? "",
+        env_get("SIMPLE_HIR_SHARD") ?? "",
+        env_get("SIMPLE_MIR_SHARD") ?? "")
+    if shard_child or native_build_shard_worker_closure_reused_v1():
+        return true
+    if tldr_imports_enabled_v1() or not args.contains("--entry-closure"):
+        return true
+    val cache_dir = if native_build_frontend_cache_dir_arg(args) != "":
+        native_build_frontend_cache_dir_arg(args)
+    else:
+        env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
+    if cache_dir == "":
+        return true
+    native_build_coordinator_prepublish_closure_v1(args)
+
 # Focused Stage3/Stage4 capsule child/link admission: validate an inherited
 # `SIMPLE_PARSE_CLOSURE_REQUEST` (or leave handoff empty when none was published)
 # and install both the preclosed request and resolved environment-variant policy
@@ -3052,7 +3104,10 @@ pub(package) fn native_build_capsule_admit_preclosed_v1(worker_args: [text]) -> 
     if opened.is_err():
         eprint "error: native-build closure selection rejected: " + opened.unwrap_err()
         return false
-    if not native_entry_closure_handoff_install_capsule_v1(admitted, policy.collection, library_policy):
+    # The collection lives on the handoff: EnvironmentVariantPolicyPreparedHandoffV1
+    # has only handoff/encoded_payload, and Stage 2 lowered the missing
+    # `policy.collection` as an out-of-range slot read (worker AV 0xC0000005).
+    if not native_entry_closure_handoff_install_capsule_v1(admitted, policy.handoff.collection, library_policy):
         eprint "error: native-build closure handoff already installed"
         return false
     true
@@ -3191,7 +3246,10 @@ struct NativeFileUnitProcessInvokerV1:
 
 impl NativeFileUnitInvokerV1 for NativeFileUnitProcessInvokerV1:
     fn run_unit(hir_owner: text, mir_owner: text) -> i64:
+        val old_file_workers = native_build_env_saved_v1("SIMPLE_NATIVE_FILE_WORKERS")
+        val unit_pool_workers = native_file_worker_plan_batch_v1("", self.spec, []).worker_count
         env_set(NATIVE_FILE_WORKER_UNIT_ENV_V1, "1")
+        env_set("SIMPLE_NATIVE_FILE_WORKERS", "{unit_pool_workers}")
         # File-scoped front end: the unit parses only its pick and resolves
         # imports through TLDR summaries under this root, even without --cache-dir.
         env_set(NATIVE_FILE_UNIT_TLDR_ROOT_ENV_V1,
@@ -3205,6 +3263,7 @@ impl NativeFileUnitInvokerV1 for NativeFileUnitProcessInvokerV1:
         val pid = process_spawn_async(self.simple_bin, native_file_worker_child_args_v1(self.args, "--hir-shard={self.spec}"))
         val code = native_build_normalize_exit_code(shard_child_wait_bounded_v1("file-worker unit", pid, native_build_timeout_ms(self.args)))
         env_set(NATIVE_FILE_WORKER_UNIT_ENV_V1, "")
+        native_build_env_restore_v1("SIMPLE_NATIVE_FILE_WORKERS", old_file_workers)
         env_set(NATIVE_FILE_UNIT_TLDR_ROOT_ENV_V1, "")
         env_set("SIMPLE_HIR_SHARD_QUEUE", "")
         env_set("SIMPLE_HIR_SHARD_OWNER", "")

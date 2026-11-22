@@ -388,10 +388,54 @@ fn _bf_adapter_text(site: BoundSite, decl: text) -> text:
     val names = _bf_param_names(decl)
     "@unsafe(reason: \"TODO verify C ABI\", capabilities: [ffi])\nfn " + site.adapter + "(" + decl + ") -> " + site.unit_name + ":\n    " + site.unit_name + "(" + site.extern_name + "(" + names + "))"
 
-# Fix candidates for SPL-BOUND-002 in one file: at most one per adapter name,
-# each grouping every rewritable cast site of that adapter. `version` is the
-# document version the candidate is computed against.
-pub fn bound_late_cast_fix_candidates(source: text, file: text, version: i64) -> [FixCandidate]:
+# `unit Name: T in LO..=HI` declared in `lines` -> (LO, HI) trimmed literals, or
+# None when the unit has no inclusive literal range.
+fn _bf_unit_range(lines: [text], unit_name: text) -> (text, text)?:
+    val head = "unit " + unit_name + ":"
+    for line in lines:
+        var t = line.trim()
+        if t.starts_with("pub "):
+            t = t.substring(4, t.byte_len())
+        if not t.starts_with(head):
+            continue
+        val at = t.find(" in ")
+        if at < 0:
+            return None
+        var range = t.substring(at + 4, t.byte_len())
+        val as_at = range.find(" as ")
+        if as_at >= 0:
+            range = range.substring(0, as_at)
+        val dots = range.find("..=")
+        if dots < 0:
+            return None
+        val lo = range.substring(0, dots).trim()
+        val hi = range.substring(dots + 3, range.byte_len()).trim()
+        if _bf_literal(lo) and _bf_literal(hi):
+            return Some((lo, hi))
+        return None
+    None
+
+fn _bf_has_range(lines: [text], unit_name: text) -> bool:
+    match _bf_unit_range(lines, unit_name):
+        Some(_): true
+        None: false
+
+# Variant adapter name: the constrained form is `<adapter>_checked`.
+fn _bf_adapter_for(mode: text, adapter: text) -> text:
+    if mode == "constrained":
+        return adapter + "_checked"
+    adapter
+
+fn _bf_checked_adapter_text(site: BoundSite, decl: text, lo: text, hi: text, name: text) -> text:
+    val names = _bf_param_names(decl)
+    "@unsafe(reason: \"TODO verify C ABI\", capabilities: [ffi])\nfn " + name + "(" + decl + ") -> " + site.unit_name + "?:\n    val raw = " + site.extern_name + "(" + names + ")\n    if raw < " + lo + " or raw > " + hi + ":\n        return None\n    Some(" + site.unit_name + "(raw))"
+
+# Shared generator. mode "adapter": every rewritable site (id SPL-BOUND-002).
+# "move": only `val r = ext(args)` + later cast sites (SPL-BOUND-002-MOVE).
+# "constrained": direct-call sites of a unit with an inclusive `in LO..=HI`
+# range; the adapter range-checks and returns `Unit?` (SPL-BOUND-002-CONSTRAINED),
+# so rewritten sites now yield an Option the reviewer must handle.
+fn _bf_candidates(source: text, file: text, version: i64, mode: text) -> [FixCandidate]:
     var out: [FixCandidate] = []
     val findings = check_bound_late_casts(source, file)
     if findings.len() == 0:
@@ -402,36 +446,130 @@ pub fn bound_late_cast_fix_candidates(source: text, file: text, version: i64) ->
     for f in findings:
         match _bf_site(lines, externs, f):
             Some(s):
+                if mode == "move" and s.mv_line == 0:
+                    continue
+                if mode == "constrained" and (s.mv_line > 0 or not _bf_has_range(lines, s.unit_name)):
+                    continue
                 # A cast inside the adapter itself would become self-recursive.
-                if not _bf_inside_fn(lines, s.line - 1, s.adapter):
+                if not _bf_inside_fn(lines, s.line - 1, _bf_adapter_for(mode, s.adapter)):
                     sites.push(s)
             None:
                 pass
     var done: [text] = []
     for first in sites:
-        if done.contains(first.adapter):
+        val name = _bf_adapter_for(mode, first.adapter)
+        if done.contains(name):
             continue
-        done.push(first.adapter)
+        done.push(name)
         val decl = _bf_extern_params(lines, first.extern_name) ?? "?"
         if decl == "?" or _bf_arg_count(first.call_args) != _bf_arg_count(decl):
             continue
-        var c = FixCandidate.new(
-            "SPL-BOUND-002:" + first.adapter,
-            "Return " + first.unit_name + " from boundary adapter " + first.adapter,
-            "Review required. Creates (or reuses) @unsafe(reason: \"TODO verify C ABI\", capabilities: [ffi]) fn " + first.adapter + " returning " + first.unit_name + "(" + first.extern_name + "(...)), and rewrites the late cast to " + first.adapter + "(" + first.call_args + "). Verify the C ABI and the unit range before accepting.",
-            DiagnosticFixConfidence.Uncertain,
-            version)
-        if not _bf_has_adapter(lines, first.adapter):
+        var prefix = "SPL-BOUND-002:"
+        if mode == "move":
+            prefix = "SPL-BOUND-002-MOVE:"
+        elif mode == "constrained":
+            prefix = "SPL-BOUND-002-CONSTRAINED:"
+        var summary = "Return " + first.unit_name + " from boundary adapter " + name
+        var detail = "Review required. Creates (or reuses) @unsafe(reason: \"TODO verify C ABI\", capabilities: [ffi]) fn " + name + " returning " + first.unit_name + "(" + first.extern_name + "(...)), and rewrites the late cast to " + name + "(" + first.call_args + "). Verify the C ABI and the unit range before accepting."
+        if mode == "constrained":
+            summary = "Return " + first.unit_name + "? from range-checked adapter " + name
+            detail = "Review required. Creates (or reuses) @unsafe(reason: \"TODO verify C ABI\", capabilities: [ffi]) fn " + name + " that returns None when the raw value is outside the unit's declared range, and rewrites the late cast to " + name + "(" + first.call_args + "). The site now yields " + first.unit_name + "?; handle None before accepting."
+        var c = FixCandidate.new(prefix + name, summary, detail, DiagnosticFixConfidence.Uncertain, version)
+        if not _bf_has_adapter(lines, name):
             val el = _bf_extern_line(lines, first.extern_name)
             val at = _bf_line_offset(lines, el) + lines[el].byte_len()
-            c = c.with_replacement(file, Span.new(at, at, el + 1, lines[el].byte_len() + 1), "\n" + _bf_adapter_text(first, decl), "")
+            var adapter_text = _bf_adapter_text(first, decl)
+            if mode == "constrained":
+                val rg = _bf_unit_range(lines, first.unit_name) ?? ("0", "0")
+                adapter_text = _bf_checked_adapter_text(first, decl, rg.0, rg.1, name)
+            c = c.with_replacement(file, Span.new(at, at, el + 1, lines[el].byte_len() + 1), "\n" + adapter_text, "")
         for s in sites:
-            if s.adapter == first.adapter and _bf_arg_count(s.call_args) == _bf_arg_count(decl):
+            if _bf_adapter_for(mode, s.adapter) == name and _bf_arg_count(s.call_args) == _bf_arg_count(decl):
                 if s.mv_line > 0:
-                    c = c.with_replacement(file, Span.new(s.mv_start, s.mv_end, s.mv_line, s.mv_col), s.adapter + "(" + s.call_args + ")", s.mv_old)
+                    c = c.with_replacement(file, Span.new(s.mv_start, s.mv_end, s.mv_line, s.mv_col), name + "(" + s.call_args + ")", s.mv_old)
                     c = c.with_replacement(file, Span.new(s.start, s.end, s.line, s.col), s.local, s.old_text)
                 else:
-                    c = c.with_replacement(file, Span.new(s.start, s.end, s.line, s.col), s.adapter + "(" + s.call_args + ")", s.old_text)
+                    c = c.with_replacement(file, Span.new(s.start, s.end, s.line, s.col), name + "(" + s.call_args + ")", s.old_text)
+        out.push(c)
+    out
+
+# Fix candidates for SPL-BOUND-002 in one file: at most one per adapter name,
+# each grouping every rewritable cast site of that adapter. `version` is the
+# document version the candidate is computed against.
+pub fn bound_late_cast_fix_candidates(source: text, file: text, version: i64) -> [FixCandidate]:
+    _bf_candidates(source, file, version, "adapter")
+
+# The variants below stamp document version 0: their only consumer is the
+# registry/`simple fix` path, which re-validates against the live snapshot.
+# Move-cast-to-boundary: only the `val r = ext(args)` ... `Unit(r)` sites; the
+# conversion moves to the binding via the adapter and the late cast is dropped.
+pub fn bound_late_cast_move_candidates(source: text, file: text) -> [FixCandidate]:
+    _bf_candidates(source, file, 0, "move")
+
+# Constrained adapter: range-checked, Option-returning, for ranged units.
+pub fn bound_late_cast_constrained_candidates(source: text, file: text) -> [FixCandidate]:
+    _bf_candidates(source, file, 0, "constrained")
+
+# Header line index and name of the function enclosing line index `idx`, or -1.
+fn _bf_enclosing_fn(lines: [text], idx: i64) -> (i64, text):
+    var h = idx - 1
+    while h >= 0:
+        var t = lines[h].trim()
+        for p in ["pub ", "static ", "async ", "unsafe "]:
+            if t.starts_with(p):
+                t = t.substring(p.byte_len(), t.byte_len())
+        if (t.starts_with("fn ") or t.starts_with("me ")) and _bf_indent(lines[h]) < _bf_indent(lines[idx]):
+            val rest = t.substring(3, t.byte_len())
+            var i = 0
+            while i < rest.byte_len() and _bf_ident_char(rest.substring(i, i + 1)):
+                i = i + 1
+            return (h, rest.substring(0, i))
+        h = h - 1
+    (-1, "")
+
+# Scoped exemption: inserts `@allow(bound_late_cast) # reason: <reason>` above
+# each function that holds an SPL-BOUND-002 finding (one candidate per
+# function). A blank reason yields no candidate: the lint ignores an exemption
+# without one, so offering it would be a no-op edit.
+pub fn bound_late_cast_allow_candidates(source: text, file: text, reason: text) -> [FixCandidate]:
+    _bf_allow(source, file, reason, false)
+
+# Registry form: the reason is the `# reason: <text>` comment the author wrote
+# on the line directly above the function header; no comment, no candidate.
+fn _bf_allow_hinted(source: text, file: text) -> [FixCandidate]:
+    _bf_allow(source, file, "", true)
+
+fn _bf_reason_hint(lines: [text], header: i64) -> text:
+    if header < 1:
+        return ""
+    val prev = lines[header - 1].trim()
+    if not prev.starts_with("# reason:"):
+        return ""
+    prev.substring(9, prev.byte_len()).trim()
+
+fn _bf_allow(source: text, file: text, reason: text, hinted: bool) -> [FixCandidate]:
+    var out: [FixCandidate] = []
+    val lines = source.split("\n")
+    var done: [text] = []
+    for f in check_bound_late_casts(source, file):
+        if f.code != "SPL-BOUND-002" or f.line_num < 1 or f.line_num > lines.len():
+            continue
+        val enc = _bf_enclosing_fn(lines, f.line_num - 1)
+        if enc.0 < 0 or enc.1 == "" or done.contains(enc.1):
+            continue
+        done.push(enc.1)
+        val why = (if hinted: _bf_reason_hint(lines, enc.0) else: reason).replace("\n", " ").trim()
+        if why == "":
+            continue
+        val at = _bf_line_offset(lines, enc.0)
+        val pad = lines[enc.0].substring(0, _bf_indent(lines[enc.0]))
+        var c = FixCandidate.new(
+            "SPL-BOUND-002-ALLOW:" + enc.1,
+            "Exempt " + enc.1 + " from SPL-BOUND-002 with a stated reason",
+            "Review required. Adds @allow(bound_late_cast) with the reason \"" + why + "\" above fn " + enc.1 + ". Prefer an adapter fix; use this only when the late cast is intentional.",
+            DiagnosticFixConfidence.Uncertain,
+            0)
+        c = c.with_replacement(file, Span.new(at, at, enc.0 + 1, 1), pad + "@allow(bound_late_cast) # reason: " + why + "\n", "")
         out.push(c)
     out
 
@@ -439,13 +577,26 @@ pub fn bound_late_cast_fix_candidates(source: text, file: text, version: i64) ->
 # (Uncertain: never auto-applied). The id follows the "<code>:<line>" convention
 # with the first late-cast site's line; the fix engine binds and re-validates
 # the proposal against the live snapshot before any write.
-pub fn check_bound_late_cast_easy_fixes(file: text, source: text) -> [EasyFix]:
+fn _bf_easy_fixes(file: text, cs: [FixCandidate], code: text) -> [EasyFix]:
     var out: [EasyFix] = []
-    for c in bound_late_cast_fix_candidates(source, file, 0):
+    for c in cs:
         val last = c.replacements.len() - 1
         val line = c.replacements[last].span.line
-        var fix = EasyFix.create("SPL-BOUND-002:{line}", c.explanation, FixConfidence.Uncertain)
+        var fix = EasyFix.create("{code}:{line}", c.explanation, FixConfidence.Uncertain)
         for r in c.replacements:
             fix.add_replacement(Replacement.create(file, r.span.start, r.span.end, r.span.line, r.span.col, r.new_text))
         out.push(fix)
     out
+
+pub fn check_bound_late_cast_easy_fixes(file: text, source: text) -> [EasyFix]:
+    _bf_easy_fixes(file, bound_late_cast_fix_candidates(source, file, 0), "SPL-BOUND-002")
+
+# MOVE overlaps the base SPL-BOUND-002 proposal on move sites; both are Uncertain and never auto-applied, so the overlap is accepted.
+pub fn check_bound_late_cast_move_easy_fixes(file: text, source: text) -> [EasyFix]:
+    _bf_easy_fixes(file, bound_late_cast_move_candidates(source, file), "SPL-BOUND-002-MOVE")
+
+pub fn check_bound_late_cast_constrained_easy_fixes(file: text, source: text) -> [EasyFix]:
+    _bf_easy_fixes(file, bound_late_cast_constrained_candidates(source, file), "SPL-BOUND-002-CONSTRAINED")
+
+pub fn check_bound_late_cast_allow_easy_fixes(file: text, source: text) -> [EasyFix]:
+    _bf_easy_fixes(file, _bf_allow_hinted(source, file), "SPL-BOUND-002-ALLOW")

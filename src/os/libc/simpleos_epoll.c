@@ -32,20 +32,17 @@ struct simpleos_epoll_instance {
 
 static struct simpleos_epoll_instance g_epoll[SIMPLEOS_EPOLL_MAX_INSTANCES];
 
-static int epoll_index(int epfd) {
-    int idx = epfd - SIMPLEOS_EPOLL_BASE;
-    if (idx < 0 || idx >= SIMPLEOS_EPOLL_MAX_INSTANCES || !g_epoll[idx].used) {
-        errno = EBADF;
-        return -1;
-    }
-    return idx;
-}
-
 static int epoll_index_noerrno(int epfd) {
     int idx = epfd - SIMPLEOS_EPOLL_BASE;
     if (idx < 0 || idx >= SIMPLEOS_EPOLL_MAX_INSTANCES || !g_epoll[idx].used) {
         return -1;
     }
+    return idx;
+}
+
+static int epoll_index(int epfd) {
+    int idx = epoll_index_noerrno(epfd);
+    if (idx < 0) errno = EBADF;
     return idx;
 }
 
