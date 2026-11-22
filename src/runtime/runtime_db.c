@@ -732,7 +732,6 @@ int64_t rt_db_idelete(int64_t handle_in, int64_t pk_int_in) {
 
 int64_t rt_db_table_create(const uint8_t* name_ptr, int64_t name_len,
                            int64_t num_cols, int64_t pk_col) {
-    if ((!name_ptr && name_len != 0) || name_len < 0) return -1;
     char* name = db_text_dup(name_ptr, name_len);
     if (!name) return -1;
     int64_t result = db_table_create_cstr(name, num_cols, pk_col);
@@ -742,7 +741,6 @@ int64_t rt_db_table_create(const uint8_t* name_ptr, int64_t name_len,
 
 int64_t rt_db_put(int64_t handle, const uint8_t* pk_ptr, int64_t pk_len,
                   int64_t num_values) {
-    if ((!pk_ptr && pk_len != 0) || pk_len < 0) return -1;
     char* pk = db_text_dup(pk_ptr, pk_len);
     if (!pk) return -1;
     int64_t result = db_put_cstr(handle, pk, num_values);
@@ -752,7 +750,6 @@ int64_t rt_db_put(int64_t handle, const uint8_t* pk_ptr, int64_t pk_len,
 
 void rt_db_put_value_text(int64_t handle, int64_t row, int64_t col,
                           const uint8_t* value_ptr, int64_t value_len) {
-    if ((!value_ptr && value_len != 0) || value_len < 0) return;
     char* value = db_text_dup(value_ptr, value_len);
     if (!value) return;
     db_put_value_text_cstr(handle, row, col, value);
@@ -760,7 +757,6 @@ void rt_db_put_value_text(int64_t handle, int64_t row, int64_t col,
 }
 
 int64_t rt_db_get(int64_t handle, const uint8_t* pk_ptr, int64_t pk_len) {
-    if ((!pk_ptr && pk_len != 0) || pk_len < 0) return -1;
     char* pk = db_text_dup(pk_ptr, pk_len);
     if (!pk) return -1;
     int64_t result = db_get_cstr(handle, pk);
@@ -780,7 +776,6 @@ int64_t rt_db_get_text(int64_t handle, int64_t row, int64_t col) {
 }
 
 int64_t rt_db_delete(int64_t handle, const uint8_t* pk_ptr, int64_t pk_len) {
-    if ((!pk_ptr && pk_len != 0) || pk_len < 0) return 0;
     char* pk = db_text_dup(pk_ptr, pk_len);
     if (!pk) return 0;
     int64_t result = db_delete_cstr(handle, pk);
@@ -790,7 +785,6 @@ int64_t rt_db_delete(int64_t handle, const uint8_t* pk_ptr, int64_t pk_len) {
 
 int64_t rt_db_put_row3(int64_t handle, const uint8_t* pk_ptr, int64_t pk_len,
                        int64_t type_mask, int64_t v0, int64_t v1, int64_t v2) {
-    if ((!pk_ptr && pk_len != 0) || pk_len < 0) return -1;
     char* pk = db_text_dup(pk_ptr, pk_len);
     if (!pk) return -1;
     int64_t result = db_put_row3_cstr(handle, pk, type_mask, v0, v1, v2);
@@ -800,7 +794,6 @@ int64_t rt_db_put_row3(int64_t handle, const uint8_t* pk_ptr, int64_t pk_len,
 
 int64_t rt_db_get_int_by_pk(int64_t handle, const uint8_t* pk_ptr, int64_t pk_len,
                             int64_t col, int64_t default_val) {
-    if ((!pk_ptr && pk_len != 0) || pk_len < 0) return default_val;
     char* pk = db_text_dup(pk_ptr, pk_len);
     if (!pk) return default_val;
     int64_t result = db_get_int_by_pk_cstr(handle, pk, col, default_val);
@@ -810,7 +803,6 @@ int64_t rt_db_get_int_by_pk(int64_t handle, const uint8_t* pk_ptr, int64_t pk_le
 
 int64_t rt_db_update_int(int64_t handle, const uint8_t* pk_ptr, int64_t pk_len,
                          int64_t col, int64_t value) {
-    if ((!pk_ptr && pk_len != 0) || pk_len < 0) return 0;
     char* pk = db_text_dup(pk_ptr, pk_len);
     if (!pk) return 0;
     int64_t result = db_update_int_cstr(handle, pk, col, value);
@@ -820,8 +812,6 @@ int64_t rt_db_update_int(int64_t handle, const uint8_t* pk_ptr, int64_t pk_len,
 
 int64_t rt_db_update_text(int64_t handle, const uint8_t* pk_ptr, int64_t pk_len,
                           int64_t col, const uint8_t* value_ptr, int64_t value_len) {
-    if ((!pk_ptr && pk_len != 0) || pk_len < 0 ||
-        (!value_ptr && value_len != 0) || value_len < 0) return 0;
     char* pk = db_text_dup(pk_ptr, pk_len);
     char* value = db_text_dup(value_ptr, value_len);
     if (!pk || !value) {
