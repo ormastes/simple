@@ -326,6 +326,9 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
   probe once). Shell gates on MSYS must avoid per-file `$(...)` pipelines: a spawn costs
   seconds there. The conformance test drops `detect_leaks` on Windows (no LSan) and the
   prefix-cache contract test uses llvm-mingw clang there, as `build-slang-ggml-shim.shs` does.
+## Cross-kind system spec (2026-11-22)
+- `test/03_system/lib/slang/feature/slang_system_all_kinds_live_spec.spl` runs these through `slang_api_dispatch` on Vulkan: /v1/models, chat with KV off/on, vision, video, asr, image_gen, embeddings + rerank, and tts. It writes `SYSTEM` / `SYSTEM_KV` rows to `build/probe/slang_system.txt`.
+- The KV prompt stays under 512 tokens (Gemma-3 `n_swa`). The snapshot cache reuses nothing on SWA models past the window. The video clip is 4:3, because a square frame tiles to 17x64 positions and 4 frames overflow 4096. Both are recorded in `doc/08_tracking/bug/slang_snapshot_prefix_cache_swa_long_prompt_2026-11-22.md`.
 ## ROCm GPU ops provider (pure runner)
 - Layering: pure runner -> GPU API -> ROCm. Backend: `src/lib/gc_async_mut/gpu/rocm/hip_compute.spl` (HIP + hipRTC via `spl_dlopen`/`spl_wffi_call_i64`; launch through `hipDrvLaunchKernelEx`, 4 int args, so no wide C shim). Ops: `pure/tensor_ops_rocm.spl` (device-resident f32 `RocmTensor`; matvec, rmsnorm, add, mul, silu, attention; all `Result<_, text>`). Weights upload once; CPU `tensor_ops.spl` is untouched.
 - Specs: `test/01_unit/lib/gc_async_mut/slang/model_executor/pure/tensor_ops_rocm_spec.spl`, `test/03_system/lib/slang/feature/slang_pure_rocm_ops_spec.spl` (skip with reason when `C:\Program Files\AMD\ROCm\7.2\bin` DLLs are absent).
