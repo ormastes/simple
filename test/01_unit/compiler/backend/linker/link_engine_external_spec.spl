@@ -36,6 +36,10 @@ fn with_env(key: text, value: text, block: fn()):
     block()
     rt_env_set(key, previous)
 
+fn link_test_tmp_path(leaf: text) -> text:
+    val base = rt_env_get("TEMP") ?? rt_env_get("TMP") ?? "/tmp"
+    "{base}/{leaf}"
+
 fn header_for(schema_id: KpfId128) -> KpfSchemaHeaderV1:
     KpfSchemaHeaderV1(
         abi_version: KPF_ABI_VERSION_V1,
@@ -210,7 +214,7 @@ describe "link_engine_external - SIMPLE_LINKER=internal":
         val propagated = "requested-linker-unresolved: internal engine is not a linker path: SIMPLE_LINKER=internal runs in link_engine_external as internal:elf"
         expect(classify_link_error(propagated).name()).to_equal("UnsupportedFeature")
 
-    it "link_request_to_native reports UnsupportedFeature as internal:elf for a non-ELF target":
+    it "link_request_to_native reports UnsupportedFeature as internal:macho for a non-ELF Mach-O target":
         # @req REQ-LINKER-A3-INTERNAL-ALIAS
         step("End-to-end: internal override + Mach-O target -> named UnsupportedFeature receipt")
         with_env("SIMPLE_LINKER", "internal", fn():
@@ -219,7 +223,7 @@ describe "link_engine_external - SIMPLE_LINKER=internal":
                 ["test/fixtures/linker/elf/hello_libc_a64.o"],
                 "/tmp/link_engine_external_spec_output")
             expect(receipt.outcome.name()).to_equal("UnsupportedFeature")
-            expect(receipt.engine_id).to_equal("internal:elf")
+            expect(receipt.engine_id).to_equal("internal:macho")
         )
 
     it "link_request_to_native links a Linux aarch64 ELF object internally and the output runs":
@@ -228,27 +232,34 @@ describe "link_engine_external - SIMPLE_LINKER=internal":
         # Scrt1.o/crti.o/crtn.o and libc.so.6 next to them).
         step("End-to-end: internal override -> internal:elf dynamic PIE that prints and exits 42")
         with_env("SIMPLE_LINKER", "internal", fn():
-            val out = "/tmp/link_engine_external_spec_internal_hello"
+            val host = native_host_link_target()
+            val out = link_test_tmp_path("link_engine_external_spec_internal_hello")
             val receipt = link_request_to_native(
                 request_for(linux_aarch64()), fast_policy(),
                 ["test/fixtures/linker/elf/hello_libc_a64.o"], out)
-            expect(receipt.outcome.name()).to_equal("Success")
-            expect(receipt.engine_id).to_equal("internal:elf")
-            val run = shell("'{out}'")
-            expect(run.exit_code).to_equal(42)
-            expect(run.stdout).to_equal("hi from libc\n")
+            if host.os == LINK_OS_LINUX and host.arch == LINK_ARCH_AARCH64:
+                expect(receipt.outcome.name()).to_equal("Success")
+                expect(receipt.engine_id).to_equal("internal:elf")
+                val run = shell("'{out}'")
+                expect(run.exit_code).to_equal(42)
+                expect(run.stdout).to_equal("hi from libc\n")
+            else:
+                expect(receipt.outcome.name()).to_equal("UnsupportedFeature")
+                expect(receipt.engine_id).to_equal("internal:elf")
         )
 
-    it "link_request_to_native reports a missing input as InputError from internal:elf":
+    it "link_request_to_native reports a missing input as InputError from the host internal engine":
         # @req REQ-LINKER-A3-INTERNAL-ALIAS
         step("End-to-end: internal override + unreadable object -> InputError, never an external fallback")
         with_env("SIMPLE_LINKER", "internal", fn():
+            val host = native_host_link_target()
+            val expected_engine = if host.os == LINK_OS_WINDOWS: "internal:coff" elif host.os == LINK_OS_MACOS: "internal:macho" else: "internal:elf"
             val receipt = link_request_to_native(
-                request_for(linux_aarch64()), fast_policy(),
-                ["/tmp/link_engine_external_spec_nonexistent.o"],
-                "/tmp/link_engine_external_spec_output")
+                request_for(host), fast_policy(),
+                [link_test_tmp_path("link_engine_external_spec_nonexistent.o")],
+                link_test_tmp_path("link_engine_external_spec_output"))
             expect(receipt.outcome.name()).to_equal("InputError")
-            expect(receipt.engine_id).to_equal("internal:elf")
+            expect(receipt.engine_id).to_equal(expected_engine)
         )
 
 # ============================================================================
@@ -261,7 +272,7 @@ describe "link_engine_external - link_request_to_native input validation":
         step("Bounded mode + limit 0 -> InputError receipt, no linker probed")
         val receipt = link_request_to_native(
             request_for(linux_x86_64()), bounded_policy(0),
-            [], "/tmp/link_engine_external_spec_should_not_run")
+            [], link_test_tmp_path("link_engine_external_spec_should_not_run"))
         expect(receipt.outcome.name()).to_equal("InputError")
         expect(receipt.engine_id).to_equal("none")
 
@@ -269,8 +280,8 @@ describe "link_engine_external - link_request_to_native input validation":
         step("A8 executor absent: return UnsupportedBudget without reading inputs")
         val receipt = link_request_to_native(
             request_for(linux_x86_64()), bounded_policy(6000000000),
-            ["/tmp/link_engine_external_spec_must_not_be_read.o"],
-            "/tmp/link_engine_external_spec_must_not_be_written")
+            [link_test_tmp_path("link_engine_external_spec_must_not_be_read.o")],
+            link_test_tmp_path("link_engine_external_spec_must_not_be_written"))
         expect(receipt.outcome.name()).to_equal("UnsupportedBudget")
         expect(receipt.accounting_class.name()).to_equal("NotCertified")
         expect(receipt.engine_id).to_equal("none")
@@ -281,6 +292,6 @@ describe "link_engine_external - link_request_to_native input validation":
         val bad_target = LinkTargetV1(arch: LINK_ARCH_X86_64, os: LINK_OS_LINUX, abi: LINK_ABI_GNU, object_format: LINK_OBJECT_FORMAT_ELF, endian: LINK_ENDIAN_LITTLE, address_width: 16)
         val receipt = link_request_to_native(
             request_for(bad_target), fast_policy(),
-            [], "/tmp/link_engine_external_spec_should_not_run_2")
+            [], link_test_tmp_path("link_engine_external_spec_should_not_run_2"))
         expect(receipt.outcome.name()).to_equal("InputError")
         expect(receipt.engine_id).to_equal("none")
