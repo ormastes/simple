@@ -137,20 +137,22 @@ pub fn hir_binding_method_call_return_kind(kind: HirExprKind, symbols: SymbolTab
     match kind:
         case HirExprKind.MethodCall(receiver, method, _, resolution):
             var resolved_method_id: i64 = -1
+            var is_unresolved = false
             match resolution:
                 case MethodResolution.StaticMethod(_, method_id): resolved_method_id = method_id.id
                 case MethodResolution.InstanceMethod(_, method_id): resolved_method_id = method_id.id
+                case MethodResolution.Unresolved: is_unresolved = true
                 case _: ()
             if val resolved_return = _hir_method_return_if_settled(symbols, resolved_method_id):
                 return resolved_return
             var receiver_id: i64 = -1
             match receiver.kind:
                 case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _): receiver_id = symbol.id
-                case _: return nil
-            var receiver_type: HirType? = nil
+                case _: ()
+            var receiver_type: HirType? = None
             if receiver.has_type_:
                 receiver_type = receiver.type_
-            else:
+            elif receiver_id >= 0:
                 if val receiver_decl = symbols.get_symbol_raw(receiver_id):
                     receiver_type = receiver_decl.type_
             if val owner_type = receiver_type:
@@ -162,15 +164,33 @@ pub fn hir_binding_method_call_return_kind(kind: HirExprKind, symbols: SymbolTab
                     # conversion from i64 to void", test_runner_mcdc_report).
                     case HirTypeKind.Optional(payload):
                         if method == "unwrap" and hir_const_type_settled(payload): return payload
+                    case HirTypeKind.Str:
+                        if is_unresolved:
+                            if method == "split" or method == "lines" or method == "partition" or method == "rpartition":
+                                return HirType(kind: HirTypeKind.Array(HirType(kind: HirTypeKind.Str, span: owner_type.span), None), span: owner_type.span)
+                            if method == "trim" or method == "strip" or method == "trim_start" or method == "trim_left" or method == "trim_end" or method == "lower" or method == "to_lower" or method == "upper" or method == "to_upper" or method == "replace" or method == "substring":
+                                return HirType(kind: HirTypeKind.Str, span: owner_type.span)
+                            if method == "byte_len" or method == "char_count" or method == "index_of" or method == "last_index_of" or method == "byte_at" or method == "char_code_at":
+                                return HirType(kind: HirTypeKind.Int(64, true), span: owner_type.span)
+                            if method == "starts_with" or method == "ends_with" or method == "contains" or method == "is_empty":
+                                return HirType(kind: HirTypeKind.Bool, span: owner_type.span)
+                    case HirTypeKind.Array(_, _):
+                        if is_unresolved:
+                            if method == "join":
+                                return HirType(kind: HirTypeKind.Str, span: owner_type.span)
+                            if method == "len":
+                                return HirType(kind: HirTypeKind.Int(64, true), span: owner_type.span)
+                            if method == "is_empty" or method == "contains":
+                                return HirType(kind: HirTypeKind.Bool, span: owner_type.span)
                     case HirTypeKind.Named(owner, owner_args):
                         val applied: [HirType] = owner_args
-                        if applied.len() != 0: return nil
+                        if applied.len() != 0: return None
                         if val method_id = symbols.lookup_method_in_type_raw(owner.id, method):
                             if val method_return = _hir_method_return_if_settled(symbols, method_id.id):
                                 return method_return
                     case _: ()
         case _: ()
-    nil
+    None
 
 pub fn hir_const_type_settled(type_: HirType) -> bool:
     """True when `type_` is a concrete storage type for a module global:

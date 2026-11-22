@@ -12228,8 +12228,23 @@ int64_t rt_tuple_get(int64_t tuple, int64_t idx) {
 }
 
 int64_t rt_tuple_len(int64_t tuple) {
-    RtCoreArray* array = rt_core_as_array(tuple);
-    return array ? array->len : -1;
+    /* Used by system_env_core.env_vars_nilable as a runtime-vs-native tuple
+     * discriminator (returns arity for a registered runtime tuple/array, -1
+     * for a compiled two-word struct pair). Validate registry ownership
+     * quietly without firing rt_core_report_invalid_array_once. */
+    uintptr_t raw = (uintptr_t)tuple;
+    if (raw < 4096) return -1;
+    if ((raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP) {
+        raw &= ~RT_VALUE_TAG_MASK;
+    } else if ((raw & RT_VALUE_TAG_MASK) != 0) {
+        return -1;
+    }
+    RtCoreArray* array = (RtCoreArray*)raw;
+    if (!rt_core_is_registered_immortal_ptr(array) ||
+        array->kind != RT_VALUE_HEAP_ARRAY) {
+        return -1;
+    }
+    return array->len;
 }
 
 /* Enum-eq bug (enumtext lane, filed bug #2): `==` on an enum value has no

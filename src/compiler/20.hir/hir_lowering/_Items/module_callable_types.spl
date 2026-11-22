@@ -201,6 +201,51 @@ impl HirLowering:
         self.prescan_type_parameters = saved_parameters
         self.written_any_unsafe_depth = saved_written_any_depth
 
+    me prescan_generic_function_return(symbol: SymbolId, fn_decl: ParserFunction):
+        """Record a local generic function's declared return type and ordered binders."""
+        if not symbol.is_valid() or fn_decl.type_params.len() == 0 or not fn_decl.has_return_type:
+            return
+        if self.registering_import_symbols:
+            return
+        val saved_written_any_depth = self.written_any_unsafe_depth
+        self.written_any_unsafe_depth = saved_written_any_depth + 1
+        val saved_parameters = self.prescan_type_parameters
+        self.prescan_type_parameters = {}
+        self.symbols.push_scope(ScopeKind.Class)
+        var tp_names: [text] = []
+        for raw_tp in fn_decl.type_params:
+            val tp: ParserTypeParam = raw_tp
+            tp_names = tp_names.push(tp.name)
+            val parameter = self.lower_type_param(tp)
+            self.prescan_type_parameters[parameter.symbol.id] = HirType(
+                kind: HirTypeKind.TypeParam(parameter.name, parameter.bounds),
+                span: parameter.span)
+        val declared_return: Type = fn_decl.return_type
+        val lowered = self.lower_type(declared_return)
+        self.symbols.pop_scope()
+        self.prescan_type_parameters = saved_parameters
+        self.written_any_unsafe_depth = saved_written_any_depth
+        val sym_key = symbol.id.to_text()
+        self.class_method_return_types_by_name["#fn_ret#" + sym_key] = lowered
+        self.struct_type_param_names_by_name["#fn_tp#" + sym_key] = tp_names
+
+    me prescan_imported_generic_function_return(symbol: SymbolId, callable: ModuleSurfaceCallable, fn_type: HirType?):
+        """Record an imported generic function's declared return type and ordered binders."""
+        if not symbol.is_valid() or callable.type_params.len() == 0:
+            return
+        if val sig = fn_type:
+            match sig.kind:
+                case HirTypeKind.Function(_, returned, _):
+                    var tp_names: [text] = []
+                    for raw_tp in callable.type_params:
+                        val tp: ParserTypeParam = raw_tp
+                        tp_names = tp_names.push(tp.name)
+                    val sym_key = symbol.id.to_text()
+                    val returned_type: HirType = returned
+                    self.class_method_return_types_by_name["#fn_ret#" + sym_key] = returned_type
+                    self.struct_type_param_names_by_name["#fn_tp#" + sym_key] = tp_names
+                case _: ()
+
     # Nested-field-access support (native --entry path bug, see
     # struct_field_types_by_name doc comment in types.spl): record this
     # struct's field NAME -> declared HirType, purely from the static

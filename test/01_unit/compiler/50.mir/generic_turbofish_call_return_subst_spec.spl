@@ -1,0 +1,82 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# HIR/MIR lowering: turbofish generic function return substitution & text method binding types
+
+Verifies two Stage-3 self-host regressions:
+1. `if val params = _sffi_tuple_get<[Type]>(payload, 0): for param in params:`
+   previously left `params` untyped (`Infer`), causing `for param in params` to
+   decode raw struct pointers through `rt_value_as_int_wide` (`>> 3`) and
+   segfault during Stage 3b `surface_build`.
+2. Unannotated `val lines = content.split("\\n"); for line in lines: val t = line.trim()`
+   previously left `lines` and `t` untyped (`Infer`), falling back to untyped
+   `rt_len` / `Infer` symbol bindings instead of concrete `[text]` and `text`.
+"""
+
+# @tag: unit, compiler, hir, mir
+
+use std.spec.*
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+struct LoweredCallees:
+    callees: [text]
+    errors: i64
+
+fn callee_count(lst: [text], item: text) -> i64:
+    var n = 0
+    for x in lst:
+        if x == item:
+            n = n + 1
+    n
+
+fn lower_callees(src: text, target: text) -> LoweredCallees:
+    val file = "testdata/generic_turbofish_call_return_subst_spec.spl"
+    val parsed = parse_full_frontend(src, file, "generic_turbofish_call_return_subst_spec", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var callees: [text] = []
+    for function in mir.functions.values():
+        if not (function.name == target or function.name.ends_with("." + target)):
+            continue
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                            case _: pass
+                    case _: pass
+    LoweredCallees(callees: callees, errors: hir_lowering.errors.len() + lowering.errors.len())
+
+val TURBOFISH_ARRAY_IF_VAL_SRC = "@unsafe(reason: \"test tuple slot\", capabilities: [ffi])\nextern fn rt_tuple_get<T>(tuple: i64, index: i64) -> T?\n\nfn _tuple_slot<T>(tuple: i64, index: i64) -> T?:\n    unsafe(capabilities: [ffi]):\n        rt_tuple_get<T>(tuple, index)\n\nstruct Item:\n    tag: i64\n    width: i64\n\nfn consume_item(it: Item, mut acc: [i64]):\n    acc.push(it.tag + it.width)\n\nfn walk_slot(payload: i64) -> i64:\n    var acc: [i64] = []\n    if val items = _tuple_slot<[Item]>(payload, 0):\n        for it in items:\n            consume_item(it, acc)\n    acc.len()\n"
+
+val MULTI_PARAM_TURBOFISH_SRC = "struct Node:\n    id: i64\n\nfn second_opt<A, B>(first: A, second: B) -> B?:\n    Some(second)\n\nfn visit_node(n: Node) -> i64:\n    n.id\n\nfn run_multi() -> i64:\n    val nodes: [Node] = [Node(id: 9)]\n    var sum = 0\n    if val chosen = second_opt<i64, [Node]>(1, nodes):\n        for n in chosen:\n            sum = sum + visit_node(n)\n    sum\n"
+
+val SPLIT_TRIM_TYPED_LOOP_SRC = "fn extract_non_empty(content: text) -> text:\n    val lines = content.split(\"\\n\")\n    var out: [text] = []\n    var total_bytes = lines.len()\n    for line in lines:\n        val trimmed = line.trim()\n        total_bytes = total_bytes + trimmed.byte_len()\n        if trimmed != \"\" and total_bytes > 0:\n            out = out.push(line)\n    out.join(\"\\n\")\n"
+
+describe "turbofish generic call return substitution and text method binding types":
+    it "never decodes [Struct] elements from a generic if-val turbofish call via rt_value_as_int_wide":
+        val res = lower_callees(TURBOFISH_ARRAY_IF_VAL_SRC, "walk_slot")
+        expect(res.errors).to_equal(0)
+        expect(callee_count(res.callees, "rt_value_as_int_wide")).to_equal(0)
+
+    it "substitutes multi-parameter generic function returns in declaration order":
+        val res = lower_callees(MULTI_PARAM_TURBOFISH_SRC, "run_multi")
+        expect(res.errors).to_equal(0)
+        expect(callee_count(res.callees, "rt_value_as_int_wide")).to_equal(0)
+
+    it "preserves [text] and text binding types across split/trim/join for direct length/byte_len lowering":
+        val res = lower_callees(SPLIT_TRIM_TYPED_LOOP_SRC, "extract_non_empty")
+        expect(res.errors).to_equal(0)
+        expect(callee_count(res.callees, "rt_array_len")).to_be_greater_than(0)
+        expect(callee_count(res.callees, "rt_string_len")).to_be_greater_than(0)
+        expect(callee_count(res.callees, "rt_len")).to_equal(0)
+        expect(callee_count(res.callees, "rt_value_as_int_wide")).to_equal(0)
