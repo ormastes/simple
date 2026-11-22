@@ -111,7 +111,7 @@ the former `..._in_development_spec.spl` cases 2/3/5 moved into it when they wen
   so its logits come from one batch shape (fixed drift,
   `doc/08_tracking/bug/slang_prefix_cache_hit_output_drift_2026-11-14.md`).
   The physical paged-KV lane needs a llama.cpp with `include/llama-slang-paged.h`.
-- Tree (radix) prefix cache, opt-in (2026-11-19): `engine_set_prefix_cache_mode(3, 0)` before load = one persistent multi-sequence context, per-sequence KV streams, byte-identical to no-cache greedy (modes 1/2 use unified KV and are NOT exact). Telemetry `engine_tree_cache_stats()`. Numbers + logs: `test/05_perf/slang_kv_cache/README.md`; bug `slang_shim_tree_kv_unified_modes_not_exact_2026-11-19.md`. Snapshot remains default; requests serialised per model (second tree request gets BUSY). Review fixes 2026-11-20: reuse capped by the owner's exact span, first-micro-batch warm-up, `BackendError.Busy`, refused mode fails the load (bug record).
+- Tree (radix) prefix cache, opt-in (2026-11-19): `engine_set_prefix_cache_mode(3, 0)` before load = one persistent multi-sequence context, per-sequence KV streams, digest-equal to no-cache greedy on the CPU build (bits unmeasured); NOT bit-exact on Vulkan, see `slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md` (modes 1/2 use unified KV and are NOT exact). Telemetry `engine_tree_cache_stats()`. Numbers + logs: `test/05_perf/slang_kv_cache/README.md`; bug `slang_shim_tree_kv_unified_modes_not_exact_2026-11-19.md`. Snapshot remains default; requests serialised per model (second tree request gets BUSY). Review fixes 2026-11-20: reuse capped by the owner's exact span, first-micro-batch warm-up, `BackendError.Busy`, refused mode fails the load (bug record).
 
 
 - The HTTP path is unreachable on the bootstrap seed; see
@@ -650,8 +650,8 @@ route env, file exists/read, directory list and process capture through SOSIX
   - A single owner behind an atomic busy flag; a concurrent request gets 503 `busy`.
   - `n` is 1..4 and `steps` 1..50, checked before the model loads.
 - **Tree KV:** the live spec reads `n_ubatch` from `engine_tree_cache_stats`. Measured on Vulkan:
-  - Qwen2.5-1.5B is exact, with roughly half the prefill and 1.6-1.8x faster.
-  - The Gemma branching digest differs on Vulkan only; see `doc/08_tracking/bug/slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md`.
+  - Roughly half the prefill and 1.6-1.8x faster. Qwen2.5-1.5B digests match, but every logits step differs at bit level, so that match is greedy luck.
+  - Mode 3 is not bit-exact against cache-off on Vulkan for any model: ggml-vulkan fusion skips the multi-stream KV write, and stale data in freed KV cells changes flash-attention output. Gemma branching is where argmax flips (live spec 2/3). See `doc/08_tracking/bug/slang_tree_kv_gemma_branching_digest_differs_on_vulkan_2026-11-22.md`.
 
 ## L4 + L5 landed together (2026-11-22)
 - **Every kind route is served now:**
