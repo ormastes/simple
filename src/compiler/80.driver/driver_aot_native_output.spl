@@ -944,16 +944,22 @@ pub fn driver_native_profile_cache_identity_v1(profile_identity: text,
     val static_identity = static_xray.to_text()
     sha256_text("native-target-policy-v1|{profile_identity.len()}:{profile_identity}{static_identity.len()}:{static_identity}{output_format.len()}:{output_format}")
 
-fn driver_native_build_cache_scope(backend: text, cache_dir: text, target: text,
-                                   target_cpu: text, opt_level: i64,
-                                   symbol_mode: text, storage_identity: text,
-                                   environment_identity: text,
-                                   native_profile_identity: text,
-                                   provider_receipt_hash: text = "") -> (text, text):
+fn driver_native_build_cache_scope_for_compiler_id(
+    backend: text, cache_dir: text, target: text,
+    target_cpu: text, opt_level: i64,
+    symbol_mode: text, storage_identity: text,
+    environment_identity: text,
+    native_profile_identity: text,
+    base_compiler_id: text,
+    provider_receipt_hash: text = ""
+) -> (text, text):
     val raw_target = if target == "": nil else: Some(target)
-    val compiler_id = native_build_compiler_identity()
+    # storage_identity is closure-specific and already verified per module in
+    # NativeModuleConfigFactV1.options_identity; excluding it from the scope
+    # directory prevents 41-way s<32hex> cache fragmentation across entrypoints.
+    val _per_module_storage = storage_identity
+    val compiler_id = base_compiler_id
         + if symbol_mode == "": "" else: "-" + symbol_mode
-        + "-storage-" + sha256_text(storage_identity)
         + "-environment-" + environment_identity
         + "-target-profile-" + native_profile_identity
     val host_avx2 = target == "" and _sffi_simd_has_avx2()
@@ -961,42 +967,21 @@ fn driver_native_build_cache_scope(backend: text, cache_dir: text, target: text,
     val scope_raw = native_build_cache_scope_key(
         Some(backend), raw_target, [capability_key], opt_level as i32,
         compiler_id, provider_receipt_hash)
-    # `scope` is a SINGLE directory component, so it must satisfy every
-    # filesystem's component rules at once:
-    #   - POSIX NAME_MAX (255 on ext4/xfs): the old `-storage-<sha256>` growth
-    #     pushed the raw key to 295 chars and every object write failed with
-    #     ENAMETOOLONG ("Failed to write ELF bytes to build/native_cache/...").
-    #   - Windows MAX_PATH (260 for the WHOLE path, incl. NUL): the previous
-    #     scheme's 160-head + ";digest=" + 64 form was ALWAYS 232 chars at
-    #     stage 3 (scope_raw measures 388 with a real compiler identity), and
-    #     the worst stage-3 object path -- <abs repo>/<stage3 cache dir>/
-    #     <scope>/sources-<i64 hash>n<count>/object.<module>.o with an 84-char
-    #     module name -- carries ~226 chars of overhead BESIDES the scope, so
-    #     the total blew far past 260 and cl.exe exits 1 with NO diagnostic at
-    #     all. The scope's budget is therefore ~33 chars. See
-    #     doc/08_tracking/bug/windows_bootstrap_max_path_262_2026-08-30.md.
-    #   - NTFS forbids : * ? " < > | (and \ /) in a component, and the raw key
-    #     ALWAYS contains ':' via "native-avx2-policy-v1:cpu=...", inside the
-    #     old 160-char head -- the directory could not even be created on
-    #     Windows.
-    # So: ALWAYS fold the FULL raw key into a sha256 digest and name the scope
-    # "s" + its first 128 bits -- fixed 33 chars, alphabet [s0-9a-f], which is
-    # inherently NTFS/POSIX-component-safe (no char needs escaping) and the
-    # same shape the Rust keyer uses (`scope-{:016x}`, native_project/mod.rs).
-    # Identity stays SOUND: a 128-bit sha256 prefix is collision-resistant, so
-    # two different raw keys cannot share a directory, and the same key always
-    # maps to the same one (no time, no randomness, no iteration order).
-    # NOTE: this derivation change renames every existing scope directory on
-    # every platform -- a one-time safe cache miss (stale dirs are simply
-    # never matched again), never a wrong reuse. Nothing parses the directory
-    # NAME back apart: lane ownership rides in the `.cache_scope` marker
-    # CONTENT (see check-cache-scope-ownership.shs), and cached-output
-    # filtering is a plain path-prefix match. To recover WHAT a scope dir was
-    # keyed on, recompute: the raw key is fully determined by the lane env,
-    # backend/target/cpu/opt flags, and the compiler identity above.
     val scope = "s" + sha256_text(scope_raw).substring(0, 32)
     val cache_scope_root = _sffi_path_join(cache_dir, scope)
     (cache_scope_root, scope)
+
+fn driver_native_build_cache_scope(backend: text, cache_dir: text, target: text,
+                                   target_cpu: text, opt_level: i64,
+                                   symbol_mode: text, storage_identity: text,
+                                   environment_identity: text,
+                                   native_profile_identity: text,
+                                   provider_receipt_hash: text = "") -> (text, text):
+    driver_native_build_cache_scope_for_compiler_id(
+        backend, cache_dir, target, target_cpu, opt_level,
+        symbol_mode, storage_identity, environment_identity,
+        native_profile_identity, native_build_compiler_identity(),
+        provider_receipt_hash)
 
 pub fn driver_native_capsule_identity_empty_v1(identity: text) -> bool:
     """True when a frozen source identity carries no content.
@@ -1044,7 +1029,124 @@ pub fn driver_native_frozen_source_lookup(
         return (found_path, identity)
     ("", "")
 
+fn driver_native_frozen_source_table(
+    source_paths: [text], source_identities: [text], source_module_names: [text]
+) -> {text: (text, text)}:
+    var table: {text: (text, text)} = {}
+    val count = source_module_names.len()
+    if source_paths.len() != source_identities.len() or source_paths.len() != count:
+        return table
+    var module_counts: {text: i64} = {}
+    var path_counts: {text: i64} = {}
+    var idx = 0
+    while idx < count:
+        val m = source_module_names[idx]
+        val p = source_paths[idx]
+        module_counts[m] = (module_counts[m] ?? 0) + 1
+        if p != "":
+            path_counts[p] = (path_counts[p] ?? 0) + 1
+        idx = idx + 1
+    var build_idx = 0
+    while build_idx < count:
+        val m = source_module_names[build_idx]
+        val p = source_paths[build_idx]
+        if p != "" and (module_counts[m] ?? 0) == 1 and (path_counts[p] ?? 0) == 1:
+            table[m] = (p, source_identities[build_idx])
+        build_idx = build_idx + 1
+    table
+
+var _driver_frozen_table_key_v1: text = ""
+var _driver_frozen_table_len_v1: i64 = 0
+var _driver_frozen_table_index_v1: {text: (i64, text, text)} = {}
+
+fn _driver_frozen_arrays_signature_v1(
+    source_paths: [text], source_identities: [text], source_module_names: [text]
+) -> text:
+    val n = source_module_names.len()
+    if n <= 0:
+        return ""
+    if source_paths.len() != n or source_identities.len() != n:
+        return ""
+    sha256_text(
+        source_module_names.join("\n") + "\n===\n" +
+        source_paths.join("\n") + "\n===\n" +
+        source_identities.join("\n")
+    )
+
+fn _driver_frozen_context_signature_v1(ctx: CompileContext) -> text:
+    _driver_frozen_arrays_signature_v1(
+        ctx.source_paths_owner, ctx.source_identities_owner, ctx.source_module_names_owner)
+
+fn _driver_build_frozen_source_index_v1(
+    source_paths: [text], source_identities: [text], source_module_names: [text]
+) -> {text: (i64, text, text)}:
+    var index_table: {text: (i64, text, text)} = {}
+    val count = source_module_names.len()
+    if source_paths.len() != source_identities.len() or source_paths.len() != count:
+        return index_table
+    var module_counts: {text: i64} = {}
+    var path_counts: {text: i64} = {}
+    var idx = 0
+    while idx < count:
+        val m = source_module_names[idx]
+        val p = source_paths[idx]
+        module_counts[m] = (module_counts[m] ?? 0) + 1
+        if p != "":
+            path_counts[p] = (path_counts[p] ?? 0) + 1
+        idx = idx + 1
+    var build_idx = 0
+    while build_idx < count:
+        val m = source_module_names[build_idx]
+        val p = source_paths[build_idx]
+        if p != "" and (module_counts[m] ?? 0) == 1 and (path_counts[p] ?? 0) == 1:
+            index_table[m] = (build_idx, p, source_identities[build_idx])
+        build_idx = build_idx + 1
+    index_table
+
+fn _driver_install_frozen_source_table_v1(ctx: CompileContext):
+    val sig = _driver_frozen_context_signature_v1(ctx)
+    if sig == "":
+        _driver_frozen_table_key_v1 = ""
+        _driver_frozen_table_len_v1 = 0
+        _driver_frozen_table_index_v1 = {}
+        return
+    if sig == _driver_frozen_table_key_v1 and
+            ctx.source_module_names_owner.len() == _driver_frozen_table_len_v1:
+        return
+    _driver_frozen_table_index_v1 = _driver_build_frozen_source_index_v1(
+        ctx.source_paths_owner, ctx.source_identities_owner, ctx.source_module_names_owner)
+    _driver_frozen_table_len_v1 = ctx.source_module_names_owner.len()
+    _driver_frozen_table_key_v1 = sig
+
+fn _driver_frozen_cached_entry_v1(ctx: CompileContext, module_name: text) -> (text, text):
+    val n = ctx.source_module_names_owner.len()
+    if n <= 0 or ctx.source_paths_owner.len() != n or ctx.source_identities_owner.len() != n:
+        return ("", "")
+    if _driver_frozen_table_key_v1 == "" or _driver_frozen_table_len_v1 != n:
+        _driver_install_frozen_source_table_v1(ctx)
+    if _driver_frozen_table_index_v1.contains_key(module_name):
+        val (idx, cached_path, cached_identity) = _driver_frozen_table_index_v1[module_name]
+        if idx >= 0 and idx < n and
+                ctx.source_module_names_owner[idx] == module_name and
+                ctx.source_paths_owner[idx] == cached_path and
+                ctx.source_identities_owner[idx] == cached_identity:
+            return (cached_path, cached_identity)
+        _driver_install_frozen_source_table_v1(ctx)
+        if _driver_frozen_table_index_v1.contains_key(module_name):
+            val (_, refreshed_path, refreshed_identity) = _driver_frozen_table_index_v1[module_name]
+            return (refreshed_path, refreshed_identity)
+        return ("", "")
+    if _driver_frozen_context_signature_v1(ctx) != _driver_frozen_table_key_v1:
+        _driver_install_frozen_source_table_v1(ctx)
+        if _driver_frozen_table_index_v1.contains_key(module_name):
+            val (_, refreshed_path, refreshed_identity) = _driver_frozen_table_index_v1[module_name]
+            return (refreshed_path, refreshed_identity)
+    ("", "")
+
 fn driver_native_module_cache_source(ctx: CompileContext, module_name: text) -> text:
+    if _driver_frozen_table_key_v1 != "":
+        val (cached_path, _) = _driver_frozen_cached_entry_v1(ctx, module_name)
+        return cached_path
     val (path, _) = driver_native_frozen_source_lookup(
         ctx.source_paths_owner, ctx.source_identities_owner,
         ctx.source_module_names_owner, module_name)
@@ -1053,6 +1155,9 @@ fn driver_native_module_cache_source(ctx: CompileContext, module_name: text) -> 
 fn driver_native_module_source_identity(
     ctx: CompileContext, module_name: text
 ) -> text:
+    if _driver_frozen_table_key_v1 != "":
+        val (_, cached_identity) = _driver_frozen_cached_entry_v1(ctx, module_name)
+        return cached_identity
     val (_, identity) = driver_native_frozen_source_lookup(
         ctx.source_paths_owner, ctx.source_identities_owner,
         ctx.source_module_names_owner, module_name)
@@ -2395,6 +2500,7 @@ impl CompilerDriver:
             ctx.options.output_format
         val low_memory = driver_mir_eviction_enabled(
             (env_get_nullable("SIMPLE_KEEP_MIR") ?? "") != "1", effective_evict_format)
+        _driver_install_frozen_source_table_v1(ctx)
         val all_module_names = ctx.mir_modules.keys()
         var module_names = all_module_names
         var native_group: NativeGroupManifestV1? = nil
@@ -2415,18 +2521,33 @@ impl CompilerDriver:
                     "native group backend or target mismatch")
             native_group = Some(admitted_group)
             module_names = []
+            var candidates_by_leaf: {text: [(text, text)]} = {}
+            for candidate in all_module_names:
+                val candidate_source = driver_native_module_cache_source(ctx,
+                    candidate).replace("\\", "/")
+                if candidate_source == "":
+                    continue
+                val cslash = candidate_source.rfind("/")
+                val cleaf = if cslash >= 0: candidate_source.substring(cslash + 1) else: candidate_source
+                var bucket: [(text, text)] = []
+                if candidates_by_leaf.contains_key(cleaf):
+                    bucket = candidates_by_leaf[cleaf]
+                bucket.push((candidate, candidate_source))
+                candidates_by_leaf[cleaf] = bucket
+            var seen_group_modules: {text: bool} = {}
             for member in admitted_group.members:
+                val mslash = member.source_path.rfind("/")
+                val mleaf = if mslash >= 0: member.source_path.substring(mslash + 1) else: member.source_path
                 var matched = ""
-                for candidate in all_module_names:
-                    val candidate_source = driver_native_module_cache_source(ctx,
-                        candidate).replace("\\", "/")
-                    if candidate_source == member.source_path or
-                            candidate_source.ends_with("/" + member.source_path):
-                        if matched != "":
-                            return CompileResult.CodegenError(
-                                "native group member has multiple logical modules: {member.source_path}")
-                        matched = candidate
-                if matched == "" or module_names.contains(matched):
+                if candidates_by_leaf.contains_key(mleaf):
+                    for (candidate, candidate_source) in candidates_by_leaf[mleaf]:
+                        if candidate_source == member.source_path or
+                                candidate_source.ends_with("/" + member.source_path):
+                            if matched != "":
+                                return CompileResult.CodegenError(
+                                    "native group member has multiple logical modules: {member.source_path}")
+                            matched = candidate
+                if matched == "" or seen_group_modules.contains_key(matched):
                     return CompileResult.CodegenError(
                         "native group member source has no unique MIR module: {member.source_path}")
                 val observed_source = driver_native_module_cache_source(ctx, matched)
@@ -2434,7 +2555,8 @@ impl CompilerDriver:
                     return CompileResult.CodegenError(
                         "native group member source changed: {member.source_path}")
                 group_name_by_source[member.source_path] = matched
-                module_names = module_names.push(matched)
+                seen_group_modules[matched] = true
+                module_names.push(matched)
         val total_modules = module_names.len()
         if trace:
             print "[NATIVE] compiling {total_modules} modules..."

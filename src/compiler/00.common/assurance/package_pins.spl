@@ -227,13 +227,13 @@ pub fn normalize_path(p: text) -> text:
                 var next: [text] = []
                 var i: i64 = 0
                 while i < parts.len() - 1:
-                    next = next + [parts[i]]
+                    next.push(parts[i])
                     i = i + 1
                 parts = next
             else:
-                parts = parts + [".."]
+                parts.push("..")
         else:
-            parts = parts + [seg]
+            parts.push(seg)
     parts.join("/")
 
 pub fn join_path(dir: text, rel: text) -> text:
@@ -288,7 +288,7 @@ fn _string_list(v: SdnValue, key: text) -> [text]:
                 case Some(items):
                     for item in items:
                         match item.as_str():
-                            case Some(s): out = out + [s]
+                            case Some(s): out.push(s)
                             case None: out = out
                     out
 
@@ -314,7 +314,7 @@ fn _strict_string_list(v: SdnValue, key: text, path: text,
                                     errors.push(PinDocError.WrongShape(path,
                                         "`project.dependencies." + key + "` entries must be non-empty and unique"))
                                 else:
-                                    out = out + [value]
+                                    out.push(value)
                     out
 
 fn _strict_link(v: SdnValue, path: text, mut errors: [PinDocError]) -> text:
@@ -379,11 +379,11 @@ fn _parse_waivers(root: SdnValue, path: text, mut errors: [PinDocError]) -> [Wai
         val rule = _pin_opt_text(item, "rule", "")
         if rule == "":
             errors.push(PinDocError.MissingField(path, "assurance.waivers.rule"))
-        out = out + [Waiver(
+        out.push(Waiver(
             rule: rule,
             owner: _pin_opt_text(item, "owner", ""),
             expires: _pin_opt_text(item, "expires", "")
-        )]
+        ))
     out
 
 fn _parse_deps(project: SdnValue, path: text, mut errors: [PinDocError]) -> [DepEdge]:
@@ -403,13 +403,13 @@ fn _parse_deps(project: SdnValue, path: text, mut errors: [PinDocError]) -> [Dep
                             errors.push(PinDocError.WrongShape(path,
                                 "`project.dependencies` entry declares neither `project:` nor `package:`"))
                         else:
-                            out = out + [DepEdge(
+                            out.push(DepEdge(
                                 project_path: proj,
                                 package_name: pkg,
                                 provided_ifaces: _strict_string_list(item, "provides", path, errors),
                                 required_ifaces: _strict_string_list(item, "requires", path, errors),
                                 link: _strict_link(item, path, errors)
-                            )]
+                            ))
                     out
 
 # `dir` is the directory the manifest was read from; it is supplied by the
@@ -489,12 +489,12 @@ pub fn parse_critical_checks(source: text, path: text) -> Result<[CriticalCheck]
                                 val st = _pin_opt_text(item, "status", "")
                                 if st != "mandatory" and st != "advisory":
                                     errors.push(PinDocError.UnknownCheckStatus(path, st))
-                                out = out + [CriticalCheck(
+                                out.push(CriticalCheck(
                                     name: nm,
                                     status: st,
                                     covers: _string_list(item, "covers"),
                                     differential: _pin_opt_bool(item, "differential", false)
-                                )]
+                                ))
             if errors.len() > 0:
                 return Err(errors)
             if out.len() == 0:
@@ -537,12 +537,12 @@ pub fn resolve_edges(pins: [PackagePin], p: PackagePin) -> [text]:
     for e in p.dependencies:
         if e.package_name != "":
             match _pin_find_by_name(pins, e.package_name):
-                case Some(dep): out = out + [dep.package]
-                case None: out = out + [_unresolved(p.package, "package: " + e.package_name)]
+                case Some(dep): out.push(dep.package)
+                case None: out.push(_unresolved(p.package, "package: " + e.package_name))
         else:
             match _find_by_dir(pins, join_path(p.dir, e.project_path)):
-                case Some(dep): out = out + [dep.package]
-                case None: out = out + [_unresolved(p.package, "project: " + e.project_path)]
+                case Some(dep): out.push(dep.package)
+                case None: out.push(_unresolved(p.package, "project: " + e.project_path))
     out
 
 fn _contains(xs: [text], k: text) -> bool:
@@ -557,16 +557,18 @@ fn _contains(xs: [text], k: text) -> bool:
 # never expanded twice.
 pub fn dependency_closure(pins: [PackagePin], p: PackagePin) -> [text]:
     var seen: [text] = []
+    var seen_set: {text: bool} = {}
     var frontier: [text] = resolve_edges(pins, p)
     while frontier.len() > 0:
         var next: [text] = []
         for name in frontier:
-            if not _contains(seen, name) and name != p.package:
-                seen = seen + [name]
+            if not seen_set.contains_key(name) and name != p.package:
+                seen_set[name] = true
+                seen.push(name)
                 match _pin_find_by_name(pins, name):
                     case Some(dep):
                         for e in resolve_edges(pins, dep):
-                            next = next + [e]
+                            next.push(e)
                     case None: next = next
         frontier = next
     seen
@@ -589,7 +591,7 @@ pub fn reasons_with_code(rs: [PinReason], code: text) -> [PinReason]:
     var out: [PinReason] = []
     for r in rs:
         if pin_reason_code(r) == code:
-            out = out + [r]
+            out.push(r)
     out
 
 pub fn count_with_code(rs: [PinReason], code: text) -> i64:
@@ -605,11 +607,11 @@ pub fn check_waivers(p: PackagePin, today: text) -> [PinReason]:
     var out: [PinReason] = []
     for w in p.waivers:
         if w.owner == "":
-            out = out + [PinReason.WaiverWithoutOwner(p.package, w.rule)]
+            out.push(PinReason.WaiverWithoutOwner(p.package, w.rule))
         if w.expires == "":
-            out = out + [PinReason.WaiverWithoutExpiry(p.package, w.rule)]
+            out.push(PinReason.WaiverWithoutExpiry(p.package, w.rule))
         elif today != "" and w.expires < today:
-            out = out + [PinReason.WaiverExpired(p.package, w.rule, w.expires)]
+            out.push(PinReason.WaiverExpired(p.package, w.rule, w.expires))
     out
 
 # Preconditions 2-4, which apply ONLY to a package asking for `critical`.
@@ -619,24 +621,24 @@ pub fn check_critical_preconditions(pins: [PackagePin], p: PackagePin,
 
     for dep_name in dependency_closure(pins, p):
         if is_unresolved(dep_name):
-            out = out + [PinReason.DependencyBelowRobust(p.package, dep_name, "unresolved")]
+            out.push(PinReason.DependencyBelowRobust(p.package, dep_name, "unresolved"))
         else:
             match _pin_find_by_name(pins, dep_name):
                 case None:
-                    out = out + [PinReason.DependencyBelowRobust(p.package, dep_name, "unknown")]
+                    out.push(PinReason.DependencyBelowRobust(p.package, dep_name, "unknown"))
                 case Some(dep):
                     if not is_at_least_robust(dep.profile):
-                        out = out + [PinReason.DependencyBelowRobust(p.package, dep_name, dep.profile)]
+                        out.push(PinReason.DependencyBelowRobust(p.package, dep_name, dep.profile))
 
     var differential = false
     for c in checks:
         if critical_check_covers(c, p.package):
             if not check_is_mandatory(c):
-                out = out + [PinReason.AdvisoryCheckInCritical(p.package, c.name)]
+                out.push(PinReason.AdvisoryCheckInCritical(p.package, c.name))
             if c.differential and check_is_mandatory(c):
                 differential = true
     if not differential:
-        out = out + [PinReason.NoDifferentialCoverage(p.package)]
+        out.push(PinReason.NoDifferentialCoverage(p.package))
     out
 
 # The whole gate. Runs every check over every package before returning, so a
@@ -655,7 +657,7 @@ pub fn check_package_pins(pins: [PackagePin], checks: [CriticalCheck],
             pinned = pinned + 1
         waivers = waivers + p.waivers.len()
         for r in check_waivers(p, today):
-            reasons = reasons + [r]
+            reasons.push(r)
         if p.profile == "critical":
             critical = critical + 1
             deps = deps + dependency_closure(pins, p).len()
@@ -663,7 +665,7 @@ pub fn check_package_pins(pins: [PackagePin], checks: [CriticalCheck],
                 if critical_check_covers(c, p.package):
                     covering = covering + 1
             for r in check_critical_preconditions(pins, p, checks):
-                reasons = reasons + [r]
+                reasons.push(r)
 
     PinReport(
         pinned: pinned,
@@ -685,7 +687,7 @@ pub fn blockers_for_critical(pins: [PackagePin], package: text,
         case Some(p):
             var out: [PinReason] = []
             for r in check_waivers(p, today):
-                out = out + [r]
+                out.push(r)
             for r in check_critical_preconditions(pins, p, checks):
-                out = out + [r]
+                out.push(r)
             out

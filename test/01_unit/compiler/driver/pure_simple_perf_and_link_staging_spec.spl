@@ -1,0 +1,404 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{
+    file_exists, file_write, file_read, dir_create_all, dir_remove_all,
+    dir_exists, list_dir, process_run, host_os, host_arch, env_get
+}
+use std.nogc_sync_mut.io.env_ops.{env_set}
+use app.cli._QueryVisibility.query_commands.{
+    parse_symbols_in_file, query_text_len, declaration_name_column,
+    query_visibility_symbols_payload_core, query_visibility_symbols_payload_v1
+}
+use app.cli._QueryVisibility.symbol_resolution.{contains_symbol_token}
+use std.nogc_sync_mut.lsp.lsp_visibility_provider_v1.{
+    LspVisibilitySourceStatusV1, LspVisibilitySourceV1,
+    LspVisibilitySourceReaderV1, LspVisibilityQueryStatusV1
+}
+use compiler.backend.runtime_compiler.{find_c_compiler, cleanup_runtime_objects}
+use compiler.backend.llvm_native_link_orchestrator.{
+    llvm_darwin_link_input_snapshot_path, _llvm_darwin_snapshot_link_inputs,
+    _llvm_darwin_prune_unreferenced_snapshots
+}
+use compiler.driver.driver_aot_native_output.{
+    driver_native_build_cache_scope_for_compiler_id,
+    driver_native_frozen_source_lookup,
+    driver_native_frozen_source_table,
+    _driver_frozen_arrays_signature_v1
+}
+use compiler.driver.driver_build.library_unit_iface_v1.{library_unit_source_digest_v1}
+use compiler.driver.driver_build.library_unit_archive_v1.{library_unit_receipt_read_v1}
+use compiler.driver.driver_build.library_unit_dynlib_v1.{
+    LibraryUnitClosureModuleRowV1, LibraryUnitClosurePackageRequestV1,
+    library_unit_partition_and_package_closure_v1,
+    _dynlib_collect_direct_objects_v1, _dynlib_rsp_quote_v1
+}
+use compiler.tools.verify.mcdc_scenario_exclusion.{
+    McdcScenarioExclusionStatusV1, parse_mcdc_scenario_exclusion_v1,
+    scan_mcdc_scenario_exclusions_v1, bind_mcdc_scenario_exclusions_v1
+}
+use compiler.common.assurance.package_pins.{
+    Waiver, DepEdge, PackagePin, normalize_path, dependency_closure
+}
+
+var _spec_vis_target_path: text = ""
+var _spec_vis_manifest_path: text = ""
+var _spec_vis_target_reads: i64 = 0
+var _spec_vis_manifest_reads: i64 = 0
+
+fn _spec_counting_vis_reader(path: text) -> LspVisibilitySourceV1:
+    if path == _spec_vis_target_path:
+        _spec_vis_target_reads = _spec_vis_target_reads + 1
+        return LspVisibilitySourceV1(
+            status: LspVisibilitySourceStatusV1.Ready,
+            path: path,
+            uri: "",
+            source_kind: "disk",
+            content: "pub fn exported_alpha() -> i64: 1\npub fn boundary_beta() -> i64: 2\nfn private_gamma() -> i64: 3\npub(peer) fn peer_delta() -> i64: 4\n",
+            version: -1,
+            lifetime_generation: -1,
+            overlay_generation: -1)
+    if path == _spec_vis_manifest_path:
+        _spec_vis_manifest_reads = _spec_vis_manifest_reads + 1
+        return LspVisibilitySourceV1(
+            status: LspVisibilitySourceStatusV1.Ready,
+            path: path,
+            uri: "",
+            source_kind: "disk",
+            content: r"export use pkg.mod.{exported_alpha}" + "\nfriend compiler\n",
+            version: -1,
+            lifetime_generation: -1,
+            overlay_generation: -1)
+    LspVisibilitySourceV1(
+        status: LspVisibilitySourceStatusV1.Missing,
+        path: path,
+        uri: "",
+        source_kind: "",
+        content: "",
+        version: -1,
+        lifetime_generation: -1,
+        overlay_generation: -1)
+
+fn _spec_compile_c_obj(cc: text, src_path: text, obj_path: text, code: text) -> bool:
+    if not file_write(src_path, code):
+        return false
+    val (_out, _err, rc) = process_run(cc, ["-c", "-fPIC", "-O1", src_path, "-o", obj_path])
+    rc == 0 and file_exists(obj_path)
+
+describe "LSP visibility symbols single-read boundary hoisting and byte scanning":
+    it "counts UTF-16 code units, anchors declaration_name_column past modifiers, and matches identifier boundaries":
+        expect(query_text_len("")).to_equal(0)
+        expect(query_text_len("server_name")).to_equal(11)
+        expect(query_text_len("⋯ hidden")).to_equal(8)
+        expect(query_text_len("🚀x")).to_equal(3)
+        expect(declaration_name_column("pub fn p():", "p")).to_equal(7)
+        expect(declaration_name_column("val a = 1", "a")).to_equal(4)
+        expect(declaration_name_column("pub(peer) fn peer():", "peer")).to_equal(13)
+        expect(declaration_name_column("pub(friend) async fn friend():", "friend")).to_equal(21)
+        expect(declaration_name_column("const const_val = 42", "const_val")).to_equal(6)
+        expect(contains_symbol_token(r"export use m.{Alpha, Beta_1}", "Alpha")).to_equal(true)
+        expect(contains_symbol_token(r"export use m.{Alpha, Beta_1}", "Beta_1")).to_equal(true)
+        expect(contains_symbol_token(r"export use m.{Alpha_extra}", "Alpha")).to_equal(false)
+        expect(contains_symbol_token(r"export use m.{my_Alpha}", "Alpha")).to_equal(false)
+
+    it "stores raw_line on ParsedSymbol and reads target + __init__.spl at most once per request":
+        val root = "build/spec_perf_lsp_vis"
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all("{root}/src/pkg")).to_equal(true)
+        expect(file_write("{root}/src/pkg/__init__.spl", r"export use pkg.mod.{exported_alpha}" + "\n")).to_equal(true)
+        expect(file_write("{root}/src/pkg/mod.spl",
+            "# header comment\npub fn exported_alpha() -> i64:\n    1\n\nfn private_gamma() -> i64:\n    2\n")).to_equal(true)
+
+        val parsed = parse_symbols_in_file("{root}/src/pkg/mod.spl")
+        expect(parsed.len()).to_equal(2)
+        expect(parsed[0].raw_line).to_contain("pub fn exported_alpha")
+        expect(parsed[1].raw_line).to_contain("fn private_gamma")
+
+        val (pub_payload, pub_code) = query_visibility_symbols_payload_core(
+            "{root}/src/pkg/mod.spl", "", "public", "", "")
+        expect(pub_code).to_equal(0)
+        expect(pub_payload).to_contain("\"name\":\"exported_alpha\"")
+        expect(pub_payload.contains("\"name\":\"private_gamma\"")).to_equal(false)
+        expect(pub_payload).to_contain("hidden")
+
+        _spec_vis_target_path = "{root}/src/pkg/mod.spl"
+        _spec_vis_manifest_path = "{root}/src/pkg/__init__.spl"
+        _spec_vis_target_reads = 0
+        _spec_vis_manifest_reads = 0
+        val reader = LspVisibilitySourceReaderV1(_spec_counting_vis_reader)
+        val res = query_visibility_symbols_payload_v1(
+            _spec_vis_target_path, "", "all", "", "", reader, 0)
+        expect(res.status).to_equal(LspVisibilityQueryStatusV1.Ready)
+        expect(_spec_vis_target_reads).to_equal(1)
+        expect(_spec_vis_manifest_reads).to_equal(1)
+        expect(res.payload).to_contain("\"name\":\"exported_alpha\"")
+        expect(res.payload).to_contain("\"name\":\"peer_delta\"")
+        val _rm = dir_remove_all(root)
+
+describe "Library unit source digest, object deduplication, and unit_key pruning":
+    it "computes order-independent library_unit_source_digest_v1 via parts.join":
+        val d1 = library_unit_source_digest_v1([("b.spl", "fn b(): 2"), ("a.spl", "fn a(): 1")])
+        val d2 = library_unit_source_digest_v1([("a.spl", "fn a(): 1"), ("b.spl", "fn b(): 2")])
+        expect(d1).to_equal(d2)
+        expect(d1.len()).to_equal(64)
+
+    it "guards duplicate basenames, normalizes rsp slashes, omits unit_dir/objects, and honors recency + keep=4 pruning":
+        expect(_dynlib_rsp_quote_v1("C:\\cache\\objs\\mod.o")).to_equal("\"C:/cache/objs/mod.o\"")
+        val cc = find_c_compiler()
+        if host_os() != "windows" and cc != "":
+            val root = "build/spec_perf_unit_prune"
+            val _clean = dir_remove_all(root)
+            expect(dir_create_all("{root}/src/lib")).to_equal(true)
+            expect(dir_create_all("{root}/src/app")).to_equal(true)
+            expect(dir_create_all("{root}/objs/a")).to_equal(true)
+            expect(dir_create_all("{root}/objs/b")).to_equal(true)
+
+            expect(file_write("{root}/src/lib/simple.sdn",
+                "project:\n  name: perf-lib\n  version: 1.0.0\n  type: library\n  root: .\n")).to_equal(true)
+            expect(file_write("{root}/src/app/simple.sdn",
+                "project:\n  name: perf-app\n  version: 1.0.0\n  type: application\n  root: .\n  dependencies:\n    - project: ../lib\n")).to_equal(true)
+            expect(file_write("{root}/src/app/main.spl", "fn main() -> i64: 0\n")).to_equal(true)
+            expect(_spec_compile_c_obj(cc, "{root}/objs/a/lib.c", "{root}/objs/a/lib.o",
+                "int perf_lib_fn(void) { return 7; }\n")).to_equal(true)
+            expect(_spec_compile_c_obj(cc, "{root}/objs/b/lib.c", "{root}/objs/b/lib.o",
+                "int perf_lib_extra(void) { return 9; }\n")).to_equal(true)
+            expect(_spec_compile_c_obj(cc, "{root}/objs/main.c", "{root}/objs/main.o",
+                "extern int perf_lib_fn(void);\nint main(void) { return perf_lib_fn() - 7; }\n")).to_equal(true)
+
+            # Duplicate basename guard returns None so archiver/linker stages unique {idx}_{mod}.o names.
+            val dup_check = _dynlib_collect_direct_objects_v1([
+                LibraryUnitClosureModuleRowV1(
+                    module_name: "perf_lib.mod",
+                    source_path: "{root}/src/lib/mod.spl",
+                    object_path: "{root}/objs/a/lib.o"),
+                LibraryUnitClosureModuleRowV1(
+                    module_name: "perf_lib.extra",
+                    source_path: "{root}/src/lib/extra.spl",
+                    object_path: "{root}/objs/b/lib.o")
+            ])
+            expect(dup_check.is_ok()).to_equal(true)
+            expect(dup_check.unwrap().is_none()).to_equal(true)
+
+            val cache_root = "{root}/cache"
+            val rows = [
+                LibraryUnitClosureModuleRowV1(
+                    module_name: "perf_lib.mod",
+                    source_path: "{root}/src/lib/mod.spl",
+                    object_path: "{root}/objs/a/lib.o"),
+                LibraryUnitClosureModuleRowV1(
+                    module_name: "perf_app.main",
+                    source_path: "{root}/src/app/main.spl",
+                    object_path: "{root}/objs/main.o")
+            ]
+
+            val old_min_age = env_get("SIMPLE_UNIT_CACHE_MIN_AGE_S") ?? ""
+            env_set("SIMPLE_UNIT_CACHE_MIN_AGE_S", "")
+            for rev in ["1", "2", "3", "4", "5"]:
+                expect(file_write("{root}/src/lib/mod.spl", "pub fn perf_lib_fn() -> i64: {rev}\n")).to_equal(true)
+                val pkg = library_unit_partition_and_package_closure_v1(
+                    LibraryUnitClosurePackageRequestV1(
+                        repo_root: root,
+                        entry_source: "{root}/src/app/main.spl",
+                        output_path: "{root}/dist/perf_app",
+                        cache_root: cache_root,
+                        producer_identity: "perf-prod-v1",
+                        scope_key: "perf-scope-v1",
+                        target_or_os: "",
+                        rows: rows))
+                expect(pkg.is_ok()).to_equal(true)
+                val art = pkg.unwrap().unit_artifacts[0]
+                expect(dir_exists("{art.unit_dir}/objects")).to_equal(false)
+                val rec = library_unit_receipt_read_v1(art.unit_dir).unwrap()
+                expect(rec.objects).to_equal(["{root}/objs/a/lib.o"])
+
+            # Default min_age_s=3600 preserves young concurrent sibling unit_key dirs.
+            var young_dirs = 0
+            for entry in list_dir("{cache_root}/units/perf-lib"):
+                if entry.len() == 64:
+                    young_dirs = young_dirs + 1
+            expect(young_dirs).to_equal(5)
+
+            # With SIMPLE_UNIT_CACHE_MIN_AGE_S=0, keep=4 prunes superseded keys down to 4.
+            env_set("SIMPLE_UNIT_CACHE_MIN_AGE_S", "0")
+            expect(file_write("{root}/src/lib/mod.spl", "pub fn perf_lib_fn() -> i64: 6\n")).to_equal(true)
+            val pkg6 = library_unit_partition_and_package_closure_v1(
+                LibraryUnitClosurePackageRequestV1(
+                    repo_root: root,
+                    entry_source: "{root}/src/app/main.spl",
+                    output_path: "{root}/dist/perf_app",
+                    cache_root: cache_root,
+                    producer_identity: "perf-prod-v1",
+                    scope_key: "perf-scope-v1",
+                    target_or_os: "",
+                    rows: rows))
+            env_set("SIMPLE_UNIT_CACHE_MIN_AGE_S", old_min_age)
+            expect(pkg6.is_ok()).to_equal(true)
+
+            var key_dirs = 0
+            for entry in list_dir("{cache_root}/units/perf-lib"):
+                if entry.len() == 64:
+                    key_dirs = key_dirs + 1
+            expect(key_dirs).to_equal(4)
+            val _rm = dir_remove_all(root)
+
+describe "Cache scope unification, O(1) frozen source table, Darwin link snapshots, and runtime temp cleanup":
+    it "keeps driver_native_build_cache_scope independent of closure-specific storage_identity":
+        val (_, scope_a) = driver_native_build_cache_scope_for_compiler_id(
+            "llvm", "build/native_cache", "aarch64-apple-darwin", "apple-m1", 2,
+            "", "storage-closure-alpha", "env-digest-1", "profile-1", "compiler-id-v1", "prov-1")
+        val (_, scope_b) = driver_native_build_cache_scope_for_compiler_id(
+            "llvm", "build/native_cache", "aarch64-apple-darwin", "apple-m1", 2,
+            "", "storage-closure-beta", "env-digest-1", "profile-1", "compiler-id-v1", "prov-1")
+        val (_, scope_opt3) = driver_native_build_cache_scope_for_compiler_id(
+            "llvm", "build/native_cache", "aarch64-apple-darwin", "apple-m1", 3,
+            "", "storage-closure-beta", "env-digest-1", "profile-1", "compiler-id-v1", "prov-1")
+        expect(scope_a).to_equal(scope_b)
+        expect(scope_a == scope_opt3).to_equal(false)
+
+    it "builds an O(N) frozen source table and exact interior-sensitive signature":
+        val paths = ["a.spl", "b.spl", "dup.spl", "alias.spl", "alias.spl"]
+        val ids = [
+            sha256_text("a"), sha256_text("b"), sha256_text("d"),
+            sha256_text("al1"), sha256_text("al2")
+        ]
+        val mods = ["mod.a", "mod.b", "mod.a", "mod.al1", "mod.al2"]
+        val table = driver_native_frozen_source_table(paths, ids, mods)
+        expect(table.contains_key("mod.b")).to_equal(true)
+        val (b_path, b_id) = table["mod.b"]
+        expect((b_path, b_id)).to_equal(driver_native_frozen_source_lookup(paths, ids, mods, "mod.b"))
+        expect(table.contains_key("mod.a")).to_equal(false)
+        expect(table.contains_key("mod.al1")).to_equal(false)
+        expect(table.contains_key("mod.al2")).to_equal(false)
+
+        val sig_v1 = _driver_frozen_arrays_signature_v1(
+            ["0.spl", "interior.spl", "last.spl"],
+            [sha256_text("0"), sha256_text("body_v1"), sha256_text("last")],
+            ["m.0", "m.interior", "m.last"])
+        val sig_v2 = _driver_frozen_arrays_signature_v1(
+            ["0.spl", "interior.spl", "last.spl"],
+            [sha256_text("0"), sha256_text("body_v2"), sha256_text("last")],
+            ["m.0", "m.interior", "m.last"])
+        expect(sig_v1.len()).to_equal(64)
+        expect(sig_v1 == sig_v2).to_equal(false)
+
+    it "stages Darwin link snapshots atomically without index prefix, preserves young sibling .d dirs, and prunes when min_age_s=0":
+        val root = "build/spec_perf_darwin_snap"
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all("{root}/inputs")).to_equal(true)
+        expect(dir_create_all("{root}/cache/darwin_link_inputs/99-young-sibling.d")).to_equal(true)
+        expect(file_write("{root}/cache/darwin_link_inputs/99-young-sibling.d/sibling.o", "sibling")).to_equal(true)
+        expect(file_write("{root}/inputs/first.o", "obj-bytes-first")).to_equal(true)
+        expect(file_write("{root}/inputs/second.o", "obj-bytes-second")).to_equal(true)
+        expect(file_write("{root}/inputs/extra.o", "obj-bytes-extra")).to_equal(true)
+
+        val old_snap_age = env_get("SIMPLE_DARWIN_SNAPSHOT_MIN_AGE_S") ?? ""
+        env_set("SIMPLE_DARWIN_SNAPSHOT_MIN_AGE_S", "")
+        val snap1 = _llvm_darwin_snapshot_link_inputs(
+            ["{root}/inputs/first.o", "{root}/inputs/second.o"], "{root}/cache")
+        expect(snap1.is_ok()).to_equal(true)
+        val paths1 = snap1.unwrap()
+        expect(paths1.len()).to_equal(2)
+        expect(paths1[0].ends_with(".d/first.o")).to_equal(true)
+        expect(paths1[0].contains("/0-")).to_equal(false)
+        # Default min_age_s=1800 preserves young sibling .d dirs from concurrent Darwin links.
+        expect(dir_exists("{root}/cache/darwin_link_inputs/99-young-sibling.d")).to_equal(true)
+
+        # Prepending extra.o shifts every index, yet first.o and second.o keep the exact same snapshot paths!
+        val snap2 = _llvm_darwin_snapshot_link_inputs(
+            ["{root}/inputs/extra.o", "{root}/inputs/first.o", "{root}/inputs/second.o"], "{root}/cache")
+        expect(snap2.is_ok()).to_equal(true)
+        val paths2 = snap2.unwrap()
+        expect(paths2[1]).to_equal(paths1[0])
+        expect(paths2[2]).to_equal(paths1[1])
+
+        # Explicit min_age_s=0 prunes unreferenced .d directories while preserving referenced ones.
+        val extra_slash = paths2[0].rfind("/")
+        val extra_dir = paths2[0].substring(0, extra_slash)
+        var keep_refs: {text: bool} = {}
+        val p0_dir_slash = paths1[0].rfind("/")
+        val p0_parent = paths1[0].substring(0, p0_dir_slash)
+        val p0_leaf = p0_parent.substring(p0_parent.rfind("/") + 1)
+        val p1_dir_slash = paths1[1].rfind("/")
+        val p1_parent = paths1[1].substring(0, p1_dir_slash)
+        val p1_leaf = p1_parent.substring(p1_parent.rfind("/") + 1)
+        keep_refs[p0_leaf] = true
+        keep_refs[p1_leaf] = true
+        _llvm_darwin_prune_unreferenced_snapshots("{root}/cache/darwin_link_inputs", keep_refs, 0)
+        env_set("SIMPLE_DARWIN_SNAPSHOT_MIN_AGE_S", old_snap_age)
+        expect(dir_exists("{root}/cache/darwin_link_inputs/99-young-sibling.d")).to_equal(false)
+        expect(dir_exists(extra_dir)).to_equal(false)
+        expect(file_exists(paths1[0])).to_equal(true)
+
+        # Legacy >=0 index spelling remains preserved for direct callers.
+        val d64 = sha256_text("native-all")
+        expect(llvm_darwin_link_input_snapshot_path("/cache/darwin_link_inputs", -1, d64, "/x/a.o")).to_equal(
+            "/cache/darwin_link_inputs/" + d64 + ".d/a.o")
+        val _rm = dir_remove_all(root)
+
+    it "deletes /simple_rt_ temp objects while preserving shared cache objects in cleanup_runtime_objects":
+        val root = "build/spec_perf_rt_cleanup"
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all("{root}/cache")).to_equal(true)
+        expect(dir_create_all("{root}/tmp")).to_equal(true)
+        val shared_obj = "{root}/cache/runtime_native.o"
+        val temp_obj = "{root}/tmp/simple_rt_99999_host_runtime_native.o"
+        expect(file_write(shared_obj, "cached-obj")).to_equal(true)
+        expect(file_write(temp_obj, "temp-obj")).to_equal(true)
+        cleanup_runtime_objects([shared_obj, temp_obj])
+        expect(file_exists(shared_obj)).to_equal(true)
+        expect(file_exists(temp_obj)).to_equal(false)
+        val _rm = dir_remove_all(root)
+
+describe "O(N) MCDC exclusion scanning and in-place package_pins normalization":
+    it "scans multi-line sources without directives and rejects malformed directives accurately":
+        val clean_src = "fn alpha() -> i64:\n    1\nfn beta() -> i64:\n    2\n"
+        val clean_audit = scan_mcdc_scenario_exclusions_v1(clean_src, 10)
+        expect(clean_audit.directive_count).to_equal(0)
+        expect(clean_audit.rejected_count).to_equal(0)
+        val clean_bind = bind_mcdc_scenario_exclusions_v1(clean_src, [], 10)
+        expect(clean_bind.exact).to_equal(true)
+
+        val bad_src = "fn alpha() -> i64:\n    # @mcdc-exclude: broken\n    1\n"
+        val bad_audit = scan_mcdc_scenario_exclusions_v1(bad_src, 10)
+        expect(bad_audit.directive_count).to_equal(1)
+        expect(bad_audit.rejected_count).to_equal(1)
+
+        val crlf_clean = "fn alpha() -> i64:\r\n    1\r\n"
+        val crlf_audit = scan_mcdc_scenario_exclusions_v1(crlf_clean, 10)
+        expect(crlf_audit.directive_count).to_equal(0)
+        expect(crlf_audit.rejected_count).to_equal(0)
+        expect(bind_mcdc_scenario_exclusions_v1(crlf_clean, [], 10).exact).to_equal(true)
+
+        # Valid 11-field directive with CRLF is accepted; >=360 × 3-byte '⋯' (> 1024 MCDC_EXCLUSION_MAX_LINE_BYTES,
+        # < 1024 codepoints) hits the byte-length bound directly (Malformed, not InvalidReason).
+        val valid_prefix = "# @mcdc-exclude: scenario=rt.hal.probe | kind=capability-unavailable | code=hal.none | predicate=capability.unavailable | producible=false | reason=hardware probe "
+        val valid_suffix = " | evidence=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef | observed=5 | owner=rt.safety | reviewed=8 | expires=20"
+        val valid_11_crlf = valid_prefix + "unavailable" + valid_suffix + "\r\n"
+        val ok_audit = scan_mcdc_scenario_exclusions_v1(valid_11_crlf, 10)
+        expect(ok_audit.directive_count).to_equal(1)
+        expect(ok_audit.accepted_count).to_equal(1)
+        expect(ok_audit.rejected_count).to_equal(0)
+
+        var dots: [text] = []
+        var di = 0
+        while di < 360:
+            dots.push("⋯")
+            di = di + 1
+        val over_byte_line = valid_prefix + dots.join("") + valid_suffix
+        expect(parse_mcdc_scenario_exclusion_v1(over_byte_line, 10).status).to_equal(
+            McdcScenarioExclusionStatusV1.Malformed)
+        val over_audit = scan_mcdc_scenario_exclusions_v1(over_byte_line + "\r\n", 10)
+        expect(over_audit.directive_count).to_equal(1)
+        expect(over_audit.accepted_count).to_equal(0)
+        expect(over_audit.rejected_count).to_equal(1)
+
+    it "normalizes paths and computes transitive dependency closures with cycles":
+        expect(normalize_path("src/compiler/80.driver/../00.common/./assurance")).to_equal(
+            "src/compiler/00.common/assurance")
+        val p_a = PackagePin(
+            package: "pkg-a", dir: "src/a", profile: "robust", explicit: true, waivers: [],
+            dependencies: [DepEdge(project_path: "", package_name: "pkg-b", provided_ifaces: [], required_ifaces: [], link: "")])
+        val p_b = PackagePin(
+            package: "pkg-b", dir: "src/b", profile: "robust", explicit: true, waivers: [],
+            dependencies: [DepEdge(project_path: "", package_name: "pkg-a", provided_ifaces: [], required_ifaces: [], link: "")])
+        val closure = dependency_closure([p_a, p_b], p_a)
+        expect(closure).to_equal(["pkg-b"])

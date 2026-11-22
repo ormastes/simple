@@ -17,13 +17,17 @@
 #     digest is unchanged, so dependent units keep the exact same `unit_key`
 #     and reuse their existing `.dylib`/`.so` untouched.
 
-use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.sdn.parser (parse)
+use std.common.sdn.value.{SdnValue}
 use std.io_runtime.{
-    file_exists, file_read, file_read_bytes, file_write, file_copy, file_delete,
-    file_rename, file_size_raw, dir_create_all, dir_remove_all, list_dir, is_dir,
+    file_exists, file_read, file_write, file_copy, file_delete,
+    file_rename, file_size_raw, file_hash_sha256_or_shell,
+    dir_create_all, dir_remove_all, list_dir, is_dir,
     is_file, process_run, env_get, host_os, host_arch, getpid
 }
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.nogc_sync_mut.io.disk_bound.{disk_bound_keep_newest_dirs}
 use std.nogc_sync_mut.io.env_ops.{env_set}
 use std.nogc_sync_mut.io.native_tool_authority_v1.{
     native_tool_strict_requested_v1, native_tool_strict_resolve_v1
@@ -34,7 +38,7 @@ use compiler.backend.runtime_compiler.{find_c_compiler}
 use compiler.backend.llvm_capability.{find_nm_portable, find_archive_portable}
 use compiler.backend.linker.archive_response_file.{archive_command_build}
 use compiler.backend.llvm_native_link.{NativeLinkOptions, link_llvm_native_with_receipt_v2}
-use compiler.driver.driver_build.incremental.{build_cache_outputs_for_source_at}
+use compiler.driver.cache.native_object_source_key_v1.{native_object_source_key_v1}
 use compiler.driver.driver_build.source_inventory_glob_v1.{source_inventory_glob_match_v1}
 use compiler.driver.driver_build.source_inventory_scan_v1.{source_inventory_scan_resolve_v1}
 use compiler.driver.driver_build.library_unit_plan_v1.{
@@ -545,7 +549,7 @@ fn _dynlib_resolve_object_paths_v1(dir: text, unit: text, objects: [text]) -> Re
     Ok(paths)
 
 fn _dynlib_rsp_quote_v1(path: text) -> text:
-    val escaped = path.replace("\\", "\\\\").replace("\"", "\\\"")
+    val escaped = path.replace("\\", "/").replace("\"", "\\\"")
     "\"{escaped}\""
 
 fn _dynlib_target_triple_flag_v1(target_or_os: text) -> text:
@@ -688,6 +692,23 @@ pub fn library_unit_dynlib_complete_v1(req: LibraryUnitDynlibCompleteRequestV1) 
         init_symbols: receipt.init_symbols,
         reused: true))
 
+fn _dynlib_prune_unit_key_dirs_v1(cache_root: text, unit_name: text, current_key: text) -> i64:
+    if cache_root == "" or unit_name == "" or current_key.byte_len() != 64:
+        return 0
+    val raw_keep = (env_get("SIMPLE_UNIT_CACHE_KEEP") ?? "").trim()
+    val keep = if raw_keep == "":
+        4
+    else:
+        val parsed_keep = raw_keep.to_i64() ?? 4
+        if parsed_keep > 0: parsed_keep else: 4
+    val raw_age = (env_get("SIMPLE_UNIT_CACHE_MIN_AGE_S") ?? "").trim()
+    val min_age_s = if raw_age == "":
+        3600
+    else:
+        val parsed_age = raw_age.to_i64() ?? 3600
+        if parsed_age >= 0: parsed_age else: 3600
+    disk_bound_keep_newest_dirs("{cache_root}/units/{unit_name}", current_key, "", 64, keep, min_age_s)
+
 fn _dynlib_stage_beside_output_v1(output_path: text, artifacts: [LibraryUnitDynlibArtifactV1],
         target_or_os: text) -> Result<[text], text>:
     val slash = output_path.rfind("/")
@@ -701,11 +722,12 @@ fn _dynlib_stage_beside_output_v1(output_path: text, artifacts: [LibraryUnitDynl
         val naming = library_unit_dynlib_naming_v1(
             LibraryUnitDynlibNamingRequestV1(unit: art.unit, target_or_os: target_or_os))
         val dst = "{lib_dir}/{naming.filename}"
-        val src_hash = sha256_u8_hex(file_read_bytes(art.dynlib_path))
+        val src_size = file_size_raw(art.dynlib_path)
         var needs_copy = true
-        if file_exists(dst) and file_size_raw(dst) > 0:
-            val dst_hash = sha256_u8_hex(file_read_bytes(dst))
-            if dst_hash == src_hash:
+        if src_size > 0 and file_exists(dst) and file_size_raw(dst) == src_size:
+            val src_hash = file_hash_sha256_or_shell(art.dynlib_path)
+            val dst_hash = file_hash_sha256_or_shell(dst)
+            if src_hash.byte_len() == 64 and dst_hash == src_hash:
                 needs_copy = false
         if needs_copy:
             val tmp_dst = "{dst}.tmp.{getpid()}"
@@ -961,6 +983,26 @@ fn _dynlib_transitive_dep_set_v1(plan: [LibraryUnitPlanEntryV1], direct_deps: [t
         frontier = next
     out
 
+fn _dynlib_collect_direct_objects_v1(rows: [LibraryUnitClosureModuleRowV1]) -> Result<Option<[text]>, text>:
+    var direct_paths: [text] = []
+    var seen_leaves: {text: bool} = {}
+    var has_duplicate_leaf = false
+    for row in rows:
+        if row.object_path != "":
+            if not file_exists(row.object_path):
+                return Err("missing module object '{row.object_path}' for {row.module_name}")
+            val norm = row.object_path.replace("\\", "/")
+            val slash = norm.rfind("/")
+            val leaf = if slash >= 0: norm.substring(slash + 1) else: norm
+            if seen_leaves.contains_key(leaf):
+                has_duplicate_leaf = true
+            else:
+                seen_leaves[leaf] = true
+            direct_paths.push(norm)
+    if has_duplicate_leaf:
+        return Ok(None)
+    Ok(Some(direct_paths))
+
 fn _dynlib_package_primitive_static_archive_v1(
         root: text,
         host_tag: LibraryUnitHostTagV1,
@@ -984,7 +1026,7 @@ fn _dynlib_package_primitive_static_archive_v1(
         else:
             ""
         val obj_hash = if row.object_path != "" and file_exists(row.object_path):
-            sha256_u8_hex(file_read_bytes(row.object_path))
+            file_hash_sha256_or_shell(row.object_path)
         else:
             ""
         prim_entries.push((rel_src, src_body + "\n#obj=" + obj_hash))
@@ -996,18 +1038,29 @@ fn _dynlib_package_primitive_static_archive_v1(
     if file_exists(prim_archive_path) and file_size_raw(prim_archive_path) > 0:
         if host_tag.platform == "darwin":
             if darwin_runtime_artifact_error_v1(prim_archive_path, host_tag.cpu) == "":
+                val _pruned_hit = _dynlib_prune_unit_key_dirs_v1(cache_root, prim_unit, prim_key)
                 return Ok(prim_archive_path)
             val _rm_bad = file_delete(prim_archive_path)
         else:
+            val _pruned_hit = _dynlib_prune_unit_key_dirs_v1(cache_root, prim_unit, prim_key)
             return Ok(prim_archive_path)
-    val staged_names = match _dynlib_stage_objects_into_unit_dir_v1(prim_dir, primitive_rows):
-        case Ok(ns): ns
-        case Err(e): return Err("unit '{prim_unit}': {e}")
-    if staged_names.len() == 0:
+    if not dir_create_all(prim_dir):
+        return Err("unit '{prim_unit}': cannot create directory {prim_dir}")
+    val obj_paths = match _dynlib_collect_direct_objects_v1(primitive_rows):
+        case Ok(Some(direct_objs)):
+            direct_objs
+        case Ok(None):
+            val staged_names = match _dynlib_stage_objects_into_unit_dir_v1(prim_dir, primitive_rows):
+                case Ok(ns): ns
+                case Err(e): return Err("unit '{prim_unit}': {e}")
+            var staged_paths: [text] = []
+            for sn in staged_names:
+                staged_paths.push("{prim_dir}/objects/{sn}")
+            staged_paths
+        case Err(e):
+            return Err("unit '{prim_unit}': {e}")
+    if obj_paths.len() == 0:
         return Err("unit '{prim_unit}': no primitive objects to archive")
-    var obj_paths: [text] = []
-    for name in staged_names:
-        obj_paths.push("{prim_dir}/objects/{name}")
     val ar_env = (env_get("SIMPLE_AR") ?? "").trim()
     val archiver = if ar_env != "": ar_env else: find_archive_portable()
     if archiver == "":
@@ -1033,13 +1086,19 @@ fn _dynlib_package_primitive_static_archive_v1(
         return Err("unit '{prim_unit}': archiver {archiver} exited 0 but wrote no {tmp_archive}")
     if file_exists(prim_archive_path) and file_size_raw(prim_archive_path) > 0:
         val _rm_tmp = dir_remove_all(tmp_dir)
+        val _rm_objs = dir_remove_all("{prim_dir}/objects")
+        val _pruned = _dynlib_prune_unit_key_dirs_v1(cache_root, prim_unit, prim_key)
         return Ok(prim_archive_path)
     if not file_rename(tmp_archive, prim_archive_path):
         val _rm_tmp = dir_remove_all(tmp_dir)
         if file_exists(prim_archive_path) and file_size_raw(prim_archive_path) > 0:
+            val _rm_objs = dir_remove_all("{prim_dir}/objects")
+            val _pruned = _dynlib_prune_unit_key_dirs_v1(cache_root, prim_unit, prim_key)
             return Ok(prim_archive_path)
         return Err("unit '{prim_unit}': cannot rename {tmp_archive} to {prim_archive_path}")
     val _rm_tmp = dir_remove_all(tmp_dir)
+    val _rm_objs = dir_remove_all("{prim_dir}/objects")
+    val _pruned = _dynlib_prune_unit_key_dirs_v1(cache_root, prim_unit, prim_key)
     Ok(prim_archive_path)
 
 fn _dynlib_closure_rel_files_for_unit_v1(
@@ -1074,16 +1133,33 @@ fn _dynlib_build_or_reuse_unit_artifact_v1(
     match library_unit_dynlib_complete_v1(LibraryUnitDynlibCompleteRequestV1(
             dir: unit_dir, unit: unit_name, target_or_os: req.target_or_os)):
         case Ok(reused_art):
+            val _pruned_reuse = _dynlib_prune_unit_key_dirs_v1(req.cache_root, unit_name, unit_key)
             return Ok((iface_built.source_digest, iface_built.iface.digest, Some(reused_art)))
         case Err(_):
             pass
     if unit_rows.len() == 0:
         return Ok((iface_built.source_digest, iface_built.iface.digest, None))
-    val staged_names = match _dynlib_stage_objects_into_unit_dir_v1(unit_dir, unit_rows):
-        case Ok(ns): ns
+    val direct_opt = match _dynlib_collect_direct_objects_v1(unit_rows):
+        case Ok(opt): opt
         case Err(e): return Err("unit '{unit_name}': {e}")
-    if staged_names.len() == 0:
-        return Ok((iface_built.source_digest, iface_built.iface.digest, None))
+    match direct_opt:
+        case Some(check_empty):
+            if check_empty.len() == 0:
+                return Ok((iface_built.source_digest, iface_built.iface.digest, None))
+        case None:
+            pass
+    if not dir_create_all(unit_dir):
+        return Err("unit '{unit_name}': cannot create directory {unit_dir}")
+    val link_objects = match direct_opt:
+        case Some(direct_objs):
+            direct_objs
+        case None:
+            val staged_names = match _dynlib_stage_objects_into_unit_dir_v1(unit_dir, unit_rows):
+                case Ok(ns): ns
+                case Err(e): return Err("unit '{unit_name}': {e}")
+            if staged_names.len() == 0:
+                return Ok((iface_built.source_digest, iface_built.iface.digest, None))
+            staged_names
     val iface_path = library_unit_iface_path_v1(unit_dir)
     match library_unit_iface_write_v1(iface_path, iface_built.iface):
         case Ok(_): pass
@@ -1093,7 +1169,7 @@ fn _dynlib_build_or_reuse_unit_artifact_v1(
         case Ok(_): pass
         case Err(e): return Err(e)
     val written = match library_unit_dynlib_write_v1(LibraryUnitDynlibWriteRequestV1(
-            dir: unit_dir, unit: unit_name, objects: staged_names,
+            dir: unit_dir, unit: unit_name, objects: link_objects,
             dep_dynlibs: dep_dynlibs, target_or_os: req.target_or_os)):
         case Ok(w): w
         case Err(e): return Err(e)
@@ -1105,7 +1181,7 @@ fn _dynlib_build_or_reuse_unit_artifact_v1(
         source_digest: iface_built.source_digest,
         iface_digest: iface_built.iface.digest,
         deps: dep_ifaces,
-        objects: staged_names,
+        objects: link_objects,
         verdict: "ok",
         failed_modules: [],
         artifact_kind: LIBRARY_UNIT_ARTIFACT_DYNLIB_V1,
@@ -1120,6 +1196,8 @@ fn _dynlib_build_or_reuse_unit_artifact_v1(
             dir: unit_dir, unit: unit_name, target_or_os: req.target_or_os)):
         case Ok(v): v
         case Err(e): return Err(e)
+    val _rm_dup_objs = dir_remove_all("{unit_dir}/objects")
+    val _pruned_fresh = _dynlib_prune_unit_key_dirs_v1(req.cache_root, unit_name, unit_key)
     val fresh_art = LibraryUnitDynlibArtifactV1(
         unit: verified.unit, unit_key: verified.unit_key, unit_dir: verified.unit_dir,
         dynlib_path: verified.dynlib_path, iface_path: verified.iface_path,
@@ -1394,11 +1472,76 @@ fn _project_stage_file_v1(src_file: text, dst_file: text) -> Result<text, text>:
         return Err("cannot materialize staged source {dst_file}")
     Ok(dst_file)
 
-fn _project_lookup_cached_obj_v1(compile_cache_dir: text, staged_src_path: text) -> text:
+fn _project_norm_cache_source_key_v1(raw: text) -> text:
+    var want = native_object_source_key_v1(raw.replace("\\", "/"))
+    while want.starts_with("./"):
+        want = want.substring(2)
+    want
+
+struct ProjectBuildCacheFileIndexV1:
+    exact: {text: [text]}
+    norm_rows: [(text, [text])]
+
+fn _project_load_build_cache_indices_v1(compile_cache_dir: text) -> [ProjectBuildCacheFileIndexV1]:
+    var loaded: [ProjectBuildCacheFileIndexV1] = []
     for bc_path in _project_find_build_cache_sdn_v1(compile_cache_dir):
-        val outs = build_cache_outputs_for_source_at(bc_path, staged_src_path)
-        if outs.len() > 0 and file_exists(outs[0]):
-            return outs[0]
+        val content = file_read(bc_path)
+        if content.trim() == "":
+            continue
+        match parse(content):
+            case Ok(sdn_value):
+                var exact: {text: [text]} = {}
+                var norm_rows: [(text, [text])] = []
+                val entries_val = sdn_value.get("entries")
+                if val entries_value_raw = entries_val:
+                    val entries_value: SdnValue = entries_value_raw
+                    val arr = entries_value.as_array()
+                    if val entries_array_raw = arr:
+                        val entries_array: [SdnValue] = entries_array_raw
+                        for item_raw in entries_array:
+                            val item: SdnValue = item_raw
+                            var source = ""
+                            if val src_raw = item.get("source"):
+                                val src_val: SdnValue = src_raw
+                                if val src_text = src_val.as_str():
+                                    source = src_text
+                            if source == "":
+                                continue
+                            var outs: [text] = []
+                            if val outs_raw = item.get("outputs"):
+                                val outs_val: SdnValue = outs_raw
+                                if val outs_arr_raw = outs_val.as_array():
+                                    val outs_arr: [SdnValue] = outs_arr_raw
+                                    for o_raw in outs_arr:
+                                        val o_val: SdnValue = o_raw
+                                        if val o_text = o_val.as_str():
+                                            outs.push(o_text)
+                            if outs.len() > 0:
+                                exact[source] = outs
+                                norm_rows.push((_project_norm_cache_source_key_v1(source), outs))
+                loaded.push(ProjectBuildCacheFileIndexV1(exact: exact, norm_rows: norm_rows))
+            case Err(_):
+                pass
+    loaded
+
+fn _project_lookup_cached_obj_in_indices_v1(indices: [ProjectBuildCacheFileIndexV1], staged_src_path: text) -> text:
+    val want = _project_norm_cache_source_key_v1(staged_src_path)
+    for idx in indices:
+        if idx.exact.contains_key(staged_src_path):
+            val direct_outs = idx.exact[staged_src_path]
+            if direct_outs.len() > 0 and file_exists(direct_outs[0]):
+                return direct_outs[0]
+        var matched_outputs: [text] = []
+        var match_count = 0
+        for (kn, outs) in idx.norm_rows:
+            if kn == want or kn.ends_with("/" + want) or want.ends_with("/" + kn):
+                if match_count == 0:
+                    matched_outputs = outs
+                    match_count = 1
+                elif outs != matched_outputs:
+                    match_count = match_count + 1
+        if match_count == 1 and matched_outputs.len() > 0 and file_exists(matched_outputs[0]):
+            return matched_outputs[0]
     ""
 
 fn _project_compile_unit_objects_v1(compiler_bin: text, unit_name: text,
@@ -1481,6 +1624,8 @@ fn _project_compile_unit_objects_v1(compiler_bin: text, unit_name: text,
     val _mk_cache = dir_create_all(tmp_out_dir)
     val tmp_archive = "{tmp_out_dir}/_unit_{unit_name}.a"
     var compiled_in_pass: {text: bool} = {}
+    var latest_indices: [ProjectBuildCacheFileIndexV1] = []
+    var have_latest_indices = false
     for rel in compile_roots:
         val rel_src_in_ws = if unit_dir_rel == ".": rel else: "{unit_dir_rel}/{rel}"
         if compiled_in_pass.contains_key(rel_src_in_ws):
@@ -1502,9 +1647,11 @@ fn _project_compile_unit_objects_v1(compiler_bin: text, unit_name: text,
         if code != 0:
             compile_err = "unit '{unit_name}' isolated compile failed on {rel_src_in_ws} (exit {code}): {stderr}{stdout}"
             break
+        latest_indices = _project_load_build_cache_indices_v1(abs_cache)
+        have_latest_indices = true
         for check_rel in all_unit_files:
             val candidate_rel = if unit_dir_rel == ".": check_rel else: "{unit_dir_rel}/{check_rel}"
-            if _project_lookup_cached_obj_v1(abs_cache, candidate_rel) != "":
+            if _project_lookup_cached_obj_in_indices_v1(latest_indices, candidate_rel) != "":
                 compiled_in_pass[candidate_rel] = true
 
     env_set("SIMPLE_BUILD_MEMORY_RESERVE_BYTES", old_reserve)
@@ -1516,9 +1663,11 @@ fn _project_compile_unit_objects_v1(compiler_bin: text, unit_name: text,
 
     var unit_objects: [text] = []
     if compile_err == "":
+        if not have_latest_indices:
+            latest_indices = _project_load_build_cache_indices_v1(abs_cache)
         for rel in all_unit_files:
             val rel_src_in_ws = if unit_dir_rel == ".": rel else: "{unit_dir_rel}/{rel}"
-            val matched_obj = _project_lookup_cached_obj_v1(abs_cache, rel_src_in_ws)
+            val matched_obj = _project_lookup_cached_obj_in_indices_v1(latest_indices, rel_src_in_ws)
             if matched_obj == "":
                 if is_entry_unit:
                     continue
@@ -1610,6 +1759,7 @@ pub fn library_unit_dynlib_build_project_v1(
         match library_unit_dynlib_complete_v1(LibraryUnitDynlibCompleteRequestV1(
                 dir: unit_dir, unit: entry.name, target_or_os: req.target_or_os)):
             case Ok(reused_art):
+                val _pruned_reuse = _dynlib_prune_unit_key_dirs_v1(req.cache_root, entry.name, unit_key)
                 built_by_unit[entry.name] = reused_art
                 built_forward.push(reused_art)
                 continue
@@ -1637,6 +1787,7 @@ pub fn library_unit_dynlib_build_project_v1(
             case Err(e):
                 val _rm_ws = dir_remove_all(stage_ws_parent)
                 return Err(e)
+        val _rm_ccache = dir_remove_all(compile_cache)
         val iface_path = library_unit_iface_path_v1(unit_dir)
         match library_unit_iface_write_v1(iface_path, iface_built.iface):
             case Ok(_): pass
@@ -1682,6 +1833,7 @@ pub fn library_unit_dynlib_build_project_v1(
             case Err(e):
                 val _rm_ws = dir_remove_all(stage_ws_parent)
                 return Err(e)
+        val _pruned_proj = _dynlib_prune_unit_key_dirs_v1(req.cache_root, entry.name, unit_key)
         val fresh_art = LibraryUnitDynlibArtifactV1(
             unit: verified.unit, unit_key: verified.unit_key, unit_dir: verified.unit_dir,
             dynlib_path: verified.dynlib_path, iface_path: verified.iface_path,
