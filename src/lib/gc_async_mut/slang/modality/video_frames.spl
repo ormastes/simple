@@ -5,13 +5,24 @@
 # container of its own, so the frame source is an ffmpeg the OPERATOR points at
 # with SLANG_FFMPEG; with none configured video stays refused (serving_chat).
 #
-# The video is written to a temp file, ffmpeg is run once for its duration and
-# once to emit `n` evenly spaced frames as an mjpeg image2pipe stream, and the
-# stream is split on the JPEG SOI/EOI markers. The temp file is always removed.
+# The video is written to a temp file with an unguessable name, ffmpeg is run
+# once for its duration and frame rate and once to emit up to `n` distinct
+# frames as an mjpeg image2pipe stream, and the stream is split on the JPEG
+# SOI/EOI markers. The temp file is removed on every path after it is written.
+#
+# Frame selection (video_frame_filter): with a known duration d, frame k is the
+# source frame that is showing at (k + 0.5) * d / n, the middle of its interval,
+# not t = 0. ffmpeg's `select` passes each source frame at most once and
+# `-fps_mode passthrough` stops the muxer from duplicating it, so a clip with
+# fewer frames than `n` (a one-frame clip) yields each frame once. With an
+# unknown duration, one frame per second is decoded for the first
+# VIDEO_UNKNOWN_SCAN seconds and `n` of them are picked evenly; a longer clip
+# with no duration in its container is only sampled over that first stretch.
+# `-fps_mode` needs ffmpeg 5.1 or newer (ffmpeg 9 removed the old `-vsync`).
 
-use std.io_runtime.{env_get, file_write_bytes, file_delete, getpid, time_now_unix_micros}
 use std.common.text_bytes.{bytes_to_text}
-use std.nogc_sync_mut.io.process_ops.{process_run_bounded_bytes}
+use std.io_runtime.{time_now_unix_micros}
+use std.gc_async_mut.slang.host.slang_host.{host_env, host_file_write_bytes, host_file_delete, host_temp_dir, host_random_hex, host_run_bounded_bytes}
 
 const VIDEO_DEFAULT_FRAMES: i64 = 4
 const VIDEO_MAX_FRAMES: i64 = 32
@@ -20,7 +31,7 @@ const VIDEO_MAX_FRAMES: i64 = 32
 const VIDEO_MAX_BYTES: i64 = 10485760
 const VIDEO_TIMEOUT_MS: i64 = 30000
 # rt_process_run_bounded_bytes refuses a cap above 16 MiB and then never spawns
-# (env_process.rs / runtime_process.c), so stay at that hard limit. 32 frames
+# (env_process.rs / runtime_process.c), so stay at that hard limit. 64 frames
 # at 384px mjpeg q4 are far below it.
 const VIDEO_MAX_OUTPUT_BYTES: i64 = 16777216
 # Video parts one request may carry: each one costs two ffmpeg runs.
@@ -31,10 +42,12 @@ const VIDEO_SERVER_FAULT: text = "server: "
 # Long edge of a sampled frame: small enough that n frames fit a small VLM's
 # context, large enough for it to read the scene.
 const VIDEO_FRAME_EDGE: i64 = 384
+# Seconds (at one frame per second) decoded when the duration is unknown.
+const VIDEO_UNKNOWN_SCAN: i64 = 64
 
 # The ffmpeg executable path, or "" when video sampling is not configured.
 fn video_ffmpeg_path() -> text:
-    (env_get("SLANG_FFMPEG") ?? "").trim()
+    host_env("SLANG_FFMPEG").trim()
 
 fn video_max_bytes() -> i64:
     VIDEO_MAX_BYTES
@@ -61,7 +74,7 @@ fn video_reason_is_server_fault(reason: text) -> bool:
 
 # Frames taken per video: SLANG_VIDEO_FRAMES, default 4, clamped to 1..32.
 fn video_frame_count() -> i64:
-    val raw = (env_get("SLANG_VIDEO_FRAMES") ?? "").trim()
+    val raw = host_env("SLANG_VIDEO_FRAMES").trim()
     var n = VIDEO_DEFAULT_FRAMES
     if raw != "":
         match raw.parse_i64():
@@ -73,18 +86,13 @@ fn video_frame_count() -> i64:
         n = VIDEO_MAX_FRAMES
     n
 
-# ONE-LINE LOCAL WRAPPER, marked for replacement: L2 lands
-# sosix_process_run_bounded_bytes; swap this body for it then.
 fn _run_ffmpeg(exe: text, args: [text]) -> ([u8], [u8], i64):
-    process_run_bounded_bytes(exe, args, VIDEO_TIMEOUT_MS, VIDEO_MAX_OUTPUT_BYTES)
+    host_run_bounded_bytes(exe, args, VIDEO_TIMEOUT_MS, VIDEO_MAX_OUTPUT_BYTES)
 
-fn _temp_dir() -> text:
-    for key in ["SLANG_VIDEO_TMP", "TEMP", "TMP", "TMPDIR"]:
-        val v = (env_get(key) ?? "").trim()
-        if v != "":
-            return v
-    # Never the server's working directory: with no temp dir configured, refuse.
-    ""
+# Temp file for one video: an OS-random component, so another local user can
+# neither predict the name nor plant a file there first.
+fn video_temp_path(dir: text) -> text:
+    dir + "/slang_video_" + host_random_hex() + "_" + time_now_unix_micros().to_text() + ".bin"
 
 # Seconds from the "Duration: HH:MM:SS.cc" line ffmpeg prints for `-i` alone;
 # 0 when it prints none (a stream with no known duration).
@@ -101,6 +109,68 @@ fn _duration_seconds(banner: text) -> f64:
             h * 3600.0 + m * 60.0 + s
         case _:
             0.0
+
+# Frame rate from the "..., 25 fps, ..." of ffmpeg's stream line; 0 if absent.
+fn video_fps_from_banner(banner: text) -> f64:
+    val at = banner.find(" fps")
+    if at < 0:
+        return 0.0
+    var start = at
+    while start > 0 and banner[start - 1:start] != " ":
+        start = start - 1
+    match banner.slice(start, at).parse_f64():
+        case Some(fps):
+            if fps > 0.0: fps else: 0.0
+        case None:
+            0.0
+
+# Fixed-point seconds with 6 decimals ("0.062500", "-0.035000"): an ffmpeg
+# expression must never receive exponent notation.
+fn video_seconds_text(seconds: f64) -> text:
+    val rounding = if seconds < 0.0: -0.5 else: 0.5
+    var micros = (seconds * 1000000.0 + rounding).to_i64()
+    var sign = ""
+    if micros < 0:
+        sign = "-"
+        micros = 0 - micros
+    var frac = (micros % 1000000).to_text()
+    while frac.len() < 6:
+        frac = "0" + frac
+    sign + (micros / 1000000).to_text() + "." + frac
+
+# The -vf chain for `n` frames of a clip of `seconds` at `fps` (0 = unknown).
+# Target k is (k + 0.5) * seconds / n; a frame is passed when it starts at or
+# after the target minus one frame time, i.e. it is the frame on screen at the
+# target. Without a known fps the tolerance is half an interval, so the first
+# frame always qualifies.
+fn video_frame_filter(n: i64, seconds: f64, fps: f64) -> text:
+    val edge = VIDEO_FRAME_EDGE.to_text()
+    val scale = "scale=" + edge + ":" + edge + ":force_original_aspect_ratio=decrease"
+    if seconds <= 0.0:
+        return "select=gte(t\\,selected_n*1.000000)," + scale
+    val step = seconds / n.to_f64()
+    val half = step / 2.0
+    var tolerance = half
+    if fps > 0.0 and 1.0 / fps < half:
+        tolerance = 1.0 / fps
+    "select=gte(t\\," + video_seconds_text(half - tolerance) + "+selected_n*" + video_seconds_text(step) + ")," + scale
+
+# `n` of `frames` spread evenly, first and last included; all of them when
+# there are no more than `n`.
+fn video_pick_evenly(frames: [[u8]], n: i64) -> [[u8]]:
+    val total = frames.len()
+    if n <= 0:
+        return []
+    if total <= n:
+        return frames
+    if n == 1:
+        return [frames[0]]
+    var picked: [[u8]] = []
+    var k = 0
+    while k < n:
+        picked.push(frames[(k * (total - 1)) / (n - 1)])
+        k = k + 1
+    picked
 
 # The JPEG files of an mjpeg stream, in order: each runs from an SOI (FF D8)
 # to the next EOI (FF D9). JPEG byte-stuffs FF in entropy data, so an FF D9
@@ -125,15 +195,7 @@ fn split_mjpeg(stream: [u8]) -> [[u8]]:
             i = i + 1
     frames
 
-fn _frame_filter(n: i64, seconds: f64) -> text:
-    val edge = VIDEO_FRAME_EDGE.to_text()
-    val scale = "scale=" + edge + ":" + edge + ":force_original_aspect_ratio=decrease"
-    if seconds <= 0.0:
-        return scale
-    # n frames spread over the clip, each taken mid-interval.
-    "fps=" + n.to_text() + "/" + seconds.to_text() + "," + scale
-
-# Up to `n` JPEG frames sampled evenly across `blob`, an encoded video.
+# Up to `n` JPEG frames sampled across `blob`, an encoded video.
 # Err carries the reason: ffmpeg missing, failing, or yielding no frame.
 fn sample_frames(blob: [u8], n: i64) -> Result<[[u8]], text>:
     val exe = video_ffmpeg_path()
@@ -141,19 +203,26 @@ fn sample_frames(blob: [u8], n: i64) -> Result<[[u8]], text>:
         return Err("SLANG_FFMPEG is not set")
     if blob.len() == 0:
         return Err("the video is empty")
-    val tmp = _temp_dir()
+    val tmp = host_temp_dir()
     if tmp == "":
         return Err(VIDEO_SERVER_FAULT + "no temp directory (set SLANG_VIDEO_TMP, TEMP, TMP or TMPDIR)")
-    val path = tmp + "/slang_video_" + getpid().to_text() + "_" + time_now_unix_micros().to_text() + ".bin"
-    if not file_write_bytes(path, blob):
-        file_delete(path)
+    val path = video_temp_path(tmp)
+    if not host_file_write_bytes(path, blob):
+        # A failed write can leave a partial file behind.
+        host_file_delete(path)
         return Err(VIDEO_SERVER_FAULT + "could not stage the video in a temp file")
     # Input pinned to plain files: an uploaded "video" that is really a playlist
     # (HLS, concat) must not make ffmpeg open other local files or URLs.
+    # `-i` with no output always exits non-zero, so only a server fault counts.
     val probe = _run_ffmpeg(exe, ["-hide_banner", "-nostdin", "-protocol_whitelist", "file", "-i", path])
-    val seconds = _duration_seconds(bytes_to_text(probe.1))
-    val run = _run_ffmpeg(exe, ["-v", "error", "-nostdin", "-protocol_whitelist", "file", "-i", path, "-an", "-vf", _frame_filter(n, seconds), "-frames:v", n.to_text(), "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "4", "pipe:1"])
-    file_delete(path)
+    val banner = bytes_to_text(probe.1)
+    if video_run_is_server_fault(probe.2, banner):
+        host_file_delete(path)
+        return Err(VIDEO_SERVER_FAULT + "the duration probe did not finish (exit " + probe.2.to_text() + ")")
+    val seconds = _duration_seconds(banner)
+    val limit = if seconds > 0.0: n else: VIDEO_UNKNOWN_SCAN
+    val run = _run_ffmpeg(exe, ["-v", "error", "-nostdin", "-protocol_whitelist", "file", "-i", path, "-an", "-vf", video_frame_filter(n, seconds, video_fps_from_banner(banner)), "-fps_mode", "passthrough", "-frames:v", limit.to_text(), "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "4", "pipe:1"])
+    host_file_delete(path)
     if video_run_is_server_fault(run.2, bytes_to_text(run.1)):
         return Err(VIDEO_SERVER_FAULT + "the frame sampler did not finish (exit " + run.2.to_text() + ")")
     # A non-zero exit with some frames is a truncated or partly broken clip;
@@ -163,6 +232,7 @@ fn sample_frames(blob: [u8], n: i64) -> Result<[[u8]], text>:
     val frames = split_mjpeg(run.0)
     if frames.len() == 0:
         return Err("no frame could be decoded; is the input a video?")
-    Ok(frames)
+    Ok(video_pick_evenly(frames, n))
 
 export video_ffmpeg_path, video_max_bytes, video_max_parts, video_reason_is_server_fault, video_run_is_server_fault, video_frame_count, split_mjpeg, sample_frames
+export video_temp_path, video_fps_from_banner, video_seconds_text, video_frame_filter, video_pick_evenly

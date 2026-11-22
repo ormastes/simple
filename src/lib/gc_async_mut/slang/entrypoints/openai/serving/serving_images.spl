@@ -37,6 +37,8 @@ fn _int_field(obj: any, key: text, missing: i64) -> Result<i64, text>:
         case None:
             Ok(missing)
         case Some(v):
+            if v.0 == "null":
+                return Ok(missing)
             if v.0 != "number":
                 return Err("field " + key + " must be an integer")
             val n = v.1.to_i64()
@@ -44,9 +46,29 @@ fn _int_field(obj: any, key: text, missing: i64) -> Result<i64, text>:
                 return Err("field " + key + " must be an integer")
             Ok(n)
 
+# String value of top-level `key`, "" when absent or null. Any other JSON
+# type is the client's error: `"size":512` must not fall back to 512x512.
+fn _string_field(obj: any, key: text) -> Result<text, text>:
+    match json_object_get(obj, key):
+        case None:
+            Ok("")
+        case Some(v):
+            if v.0 == "null":
+                return Ok("")
+            if v.0 != "string":
+                return Err("field " + key + " must be a string")
+            Ok(v.1)
+
 # Validated generation parameters of a request body, or the 400 message.
 fn images_params_from_body(obj: any, now_micros: i64) -> Result<KindParams, text>:
-    val size = json_string_field_of(obj, "size")
+    val format = match _string_field(obj, "response_format"):
+        Err(e): return Err(e)
+        Ok(v): v
+    if format != "" and format != "b64_json":
+        return Err("response_format '" + format + "' is not supported; this server returns \"b64_json\"")
+    val size = match _string_field(obj, "size"):
+        Err(e): return Err(e)
+        Ok(v): v
     match sd_parse_size(size):
         Err(why): return Err(why)
         Ok(_): ()
@@ -67,13 +89,6 @@ fn images_params_from_body(obj: any, now_micros: i64) -> Result<KindParams, text
     val seed = if seed_in < 0: now_micros % 2147483647 else: seed_in
     Ok(KindParams(max_tokens: 0, n: n, size: size, steps: steps, seed: seed, voice: "", top_n: 0, response_format: "b64_json"))
 
-fn json_string_field_of(obj: any, key: text) -> text:
-    match json_object_get(obj, key):
-        case Some(v):
-            if v.0 == "string": v.1 else: ""
-        case None:
-            ""
-
 # The 200 envelope: {"created":<unix seconds>,"data":[{"b64_json":"..."},...]}.
 fn images_ok_response(parts: [OutputPart], created: i64) -> ApiResponse:
     var data = ""
@@ -91,22 +106,27 @@ fn serve_images(model_root: text, body: text) -> ApiResponse:
             if parsed.1 != "":
                 return _bad_request("request body is not valid JSON: " + parsed.1)
             val obj = parsed.0
-            val prompt = json_string_field_of(obj, "prompt")
+            val prompt = match _string_field(obj, "prompt"):
+                Err(why): return _bad_request(why)
+                Ok(v): v
             if prompt == "":
                 return _bad_request("missing or empty required field: prompt")
-            val format = json_string_field_of(obj, "response_format")
-            if format != "" and format != "b64_json":
-                return _bad_request("response_format '" + format + "' is not supported; this server returns \"b64_json\"")
             val now = time_now_unix_micros()
             val params = match images_params_from_body(obj, now):
                 Err(why): return _bad_request(why)
                 Ok(p): p
             val req = KindRequest(model_id: model.id, parts: [ChatPart(kind: "text", text: prompt, data: "", format: "")], params: params)
-            if not sd_runner_try_acquire():
-                return openai_error_response(503, "another image generation is running; retry shortly", "server_error", "busy", "")
-            val answer = _generate(model, req, now / 1000000)
-            sd_runner_release()
-            answer
+            _generate_owned(model, req, now / 1000000)
+
+# Takes the runner gate, generates, and releases the gate on every return path
+# (the deferred release runs after _generate returns). A panic is not covered:
+# Simple has no recover construct and defer does not run on one
+# (doc/08_tracking/bug/slang_sd_busy_flag_not_released_on_panic_2026-11-22.md).
+fn _generate_owned(model: NativeModel, req: KindRequest, created: i64) -> ApiResponse:
+    if not sd_runner_try_acquire():
+        return openai_error_response(503, "another image generation is running; retry shortly", "server_error", "busy", "")
+    defer sd_runner_release()
+    _generate(model, req, created)
 
 fn _generate(model: NativeModel, req: KindRequest, created: i64) -> ApiResponse:
     match sd_runner_open(model):

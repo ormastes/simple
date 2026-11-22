@@ -346,8 +346,12 @@ SLANG_LIVE=1 SLANG_GPU=1 SLANG_MODEL_ROOT=C:/dev/model SLANG_GGML_LIB=build/sffi
 - **Video (L7):** `modality/video_frames.spl` `sample_frames(blob, n)`. With
   `SLANG_FFMPEG=<path to ffmpeg.exe>` set and a projector model, `serving_chat.expand_video_parts`
   replaces each `video_url` part by n JPEG `image` parts (default 4 because 8 SmolVLM2 frames overflow n_ctx 4096; `SLANG_VIDEO_FRAMES`, 1..32; 384 px edge;
-  duration from `ffmpeg -i`, then `fps=n/dur` -> mjpeg image2pipe split on SOI/EOI). ffmpeg runs only via
-  `process_run_bounded_bytes` (local wrapper, to become `sosix_process_run_bounded_bytes`); temp file removed.
+  duration and fps from `ffmpeg -i`, then `select` of the frame on screen at (k+0.5)*dur/n with
+  `-fps_mode passthrough` (ffmpeg >= 5.1), so a one-frame clip yields one frame; unknown duration = 1 fps
+  over the first 64 s, n picked evenly) -> mjpeg image2pipe split on SOI/EOI. A probe spawn failure/timeout
+  is a server fault (503) and stops before the main run. ffmpeg runs via `slang_host.host_run_bounded_bytes`
+  (TODO `slang-sosix-bytes-run`: SOSIX has no bytes run). `slang_video_live_spec` has an ffmpeg-only example (no GPU). Temp file `slang_video_<16 random hex>_<us>.bin`
+  through `slang_host` (`host_temp_dir`, `host_file_write_bytes`, `host_file_delete`, `host_random_hex`), removed on every path.
   Video >10 MiB decoded = 413 `request_too_large`; `SLANG_FFMPEG` not a file = 503; no frame = 400
   `invalid_media`. With no `SLANG_FFMPEG` the old 400 `unsupported_modality` text is kept verbatim.
   Static build: `C:/dev/tools/ffmpeg` (gyan.dev essentials, sha256-verified). Live: `slang_video_live_spec.spl`.
@@ -619,9 +623,11 @@ route env, file exists/read, directory list and process capture through SOSIX
   reply `{created, data:[{b64_json}]}` (PNG via `common/image/png_encode.spl`,
   stored deflate). `url` format = 400. `size` = WIDTHxHEIGHT, both multiples of
   64, <= 768, default 512x512; defaults steps 4 (1..50), n 1..4, negative/absent seed = random (cfg 1.0, sd-turbo).
-  Every field is validated (400) before the runner is touched. One generation at a
+  Every field is validated (400) before the runner is touched; a wrong JSON type
+  (`"size":512`, `"response_format":5`) is 400, JSON null = absent. One generation at a
   time: `sd_runner_try_acquire` (AtomicBool) gates open/run/close, a concurrent request
-  gets 503 `busy`. `created` is unix seconds.
+  gets 503 `busy`; `defer sd_runner_release()` frees it on every return path (not on a
+  panic: `doc/08_tracking/bug/slang_sd_busy_flag_not_released_on_panic_2026-11-22.md`). `created` is unix seconds.
   No `SLANG_SD_LIB` / missing DLL = 503 `runner_unavailable`; wrong kind = 400.
 - Build: `sh scripts/check/build-slang-sd-shim.shs` (CPU,
   `build/sffi/sd-cpu/slang_sd.dll`) and `SLANG_SD_VARIANT=vulkan
@@ -643,7 +649,7 @@ route env, file exists/read, directory list and process capture through SOSIX
 ## Post-merge review follow-ups (#10682, 2026-11-22)
 - **Video input:**
   - ffmpeg output is capped at 16 MiB, the hard cap of `rt_process_run_bounded_bytes`; a larger cap never spawns ffmpeg.
-  - One video part per request (400 `too_many_video_parts`). The check runs before expansion.
+  - One video part per request (400 `too_many_video_parts`). The check runs before expansion; `video_frames_spec` pins it through `/v1/chat/completions`.
   - Server faults return 503 `video_sampling_failed`.
   - ffmpeg runs with `-protocol_whitelist file`, and the request is refused when no temp directory is set.
 - **Images:**

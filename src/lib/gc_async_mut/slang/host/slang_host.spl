@@ -13,9 +13,11 @@
 # dynamic library load (spl_dlopen/dlsym), file size, directory test, ranged
 # and byte reads, sha256.
 
-use std.nogc_async_mut.sosix.host_facade.{sosix_host_os, sosix_env_get_checked, sosix_file_exists, sosix_file_read, sosix_dir_list_checked, sosix_run_bounded_checked}
+use std.nogc_async_mut.sosix.host_facade.{sosix_host_os, sosix_env_get_checked, sosix_file_exists, sosix_file_read, sosix_file_write_bytes, sosix_dir_list_checked, sosix_run_bounded_checked}
 use std.nogc_sync_mut.sosix.windows_memory_v1.{sosix_windows_memory_headroom_v1}
-use std.io_runtime.{file_size, is_dir}
+use std.io_runtime.{file_size, is_dir, file_delete}
+use std.nogc_sync_mut.sffi.math.{random_i64_raw}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded_bytes}
 use std.nogc_sync_mut.io.file_ops.{file_modified_time}
 use std.nogc_sync_mut.io.external_file.{external_file_read_bytes_at}
 
@@ -183,6 +185,19 @@ fn host_file_exists(path: text) -> bool:
 fn host_file_read(path: text) -> text:
     sosix_file_read(path)
 
+@allow(primitive_api)  # reason: success flag forwarded from SOSIX sosix_file_write_bytes
+fn host_file_write_bytes(path: text, bytes: [u8]) -> bool:
+    sosix_file_write_bytes(path, bytes)
+
+# The first non-empty of SLANG_VIDEO_TMP, TEMP, TMP, TMPDIR; "" when none is
+# set. Never the working directory: a caller with no temp dir must refuse.
+fn host_temp_dir() -> text:
+    for key in ["SLANG_VIDEO_TMP", "TEMP", "TMP", "TMPDIR"]:
+        val v = host_env(key).trim()
+        if v != "":
+            return v
+    ""
+
 # None when the directory cannot be listed (same contract as dir_list_optional).
 fn host_dir_list(path: text) -> [text]?:
     match sosix_dir_list_checked(path):
@@ -240,6 +255,36 @@ fn host_file_mtime(path: text) -> i64:
 fn host_is_dir(path: text) -> bool:
     is_dir(path)
 
+@allow(primitive_api)  # reason: success flag forwarded from io_runtime file_delete; no SOSIX accessor yet
+fn host_file_delete(path: text) -> bool:
+    file_delete(path)
+
+# 16 lowercase hex digits from rt_random_i64, for names another local user
+# must not be able to guess. Verified source: OsRng in the interpreter lane;
+# the native C lane's source on Windows is not verified here.
+fn host_random_hex() -> text:
+    val digits = "0123456789abcdef"
+    var v = random_i64_raw()
+    var out = ""
+    var i = 0
+    while i < 16:
+        var d = v % 16
+        if d < 0:
+            d = d + 16
+        out = out + digits[d:d + 1]
+        v = v / 16
+        i = i + 1
+    out
+
+# (stdout, stderr, exit) of `cmd args`, bounded by `timeout_ms` and
+# `max_output_bytes`; exit -1 on spawn failure, timeout or kill.
+# TODO(slang-sosix-bytes-run): route through SOSIX once it has a bytes-returning
+# bounded run; sosix_run_bounded_checked decodes stdout as UTF-8 text, which
+# would corrupt binary output such as an mjpeg stream.
+@allow(primitive_api)  # reason: raw (stdout, stderr, exit) triple forwarded from process_run_bounded_bytes; no SOSIX bytes run yet
+fn host_run_bounded_bytes(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ([u8], [u8], i64):
+    process_run_bounded_bytes(cmd, args, timeout_ms, max_output_bytes)
+
 # `size` bytes of `path` from `offset` (fewer at end of file), or why not.
 fn host_read_bytes_at(path: text, offset: i64, size: i64) -> Result<[u8], text>:
     match external_file_read_bytes_at(path, offset, size):
@@ -250,3 +295,4 @@ export ggml_lib_default, rocm_bin_default_for, hip_lib_names, hiprtc_lib_names, 
 export host_join, parse_meminfo_bytes, parse_int_text, parse_vm_stat_page_size, parse_vm_stat_available_pages, darwin_available_bytes
 export host_os_name, host_env, host_file_exists, host_file_read, host_dir_list, host_run_text, host_run_int, slang_windows_available_bytes_fast
 export host_file_size, host_file_mtime, host_is_dir, host_read_bytes_at
+export host_file_write_bytes, host_file_delete, host_temp_dir, host_random_hex, host_run_bounded_bytes
