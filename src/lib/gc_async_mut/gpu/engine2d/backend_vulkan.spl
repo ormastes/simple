@@ -46,7 +46,8 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
     vulkan_image_upload_u32_requested, vulkan_image_upload_note,
     vulkan_image_upload_last_mode, vulkan_image_upload_last_reason,
     VK_DISPATCH_COMPLETED_INELIGIBLE, RECT_BATCH_MIN_RECTS,
-    VK_IMAGE_COMPOSITE_COPY, VK_IMAGE_COMPOSITE_SRC_OVER, VK_IMAGE_COMPOSITE_SRC_OVER_SOLID
+    VK_IMAGE_COMPOSITE_COPY, VK_IMAGE_COMPOSITE_SRC_OVER, VK_IMAGE_COMPOSITE_SRC_OVER_SOLID,
+    VK_SPEC_MAX_WORKGROUP_COUNT, vulkan_clear_dispatch_groups_x, vulkan_clear_dispatch_groups_y
 }
 use std.gpu.engine2d.backend_emu.{
     emu_draw_rect, emu_draw_line, emu_line_host_work_admitted_v1, emu_draw_circle, emu_draw_circle_filled,
@@ -1405,14 +1406,22 @@ impl RenderBackend for VulkanBackend:
 
     me clear(color: u32):
         if self.completion_unknown: return
+        if self.w <= 0 or self.h <= 0: return
         if self.cpu_fallback_host_surface:
             self._fallback_clear_host(color)
             return
         val total = _i64(self.w) * _i64(self.h)
-        val workgroups = (total + 255) / 256
+        if total > 4294967295:
+            self.last_error = "clear-surface-exceeds-u32-index"
+            return
+        val gx = vulkan_clear_dispatch_groups_x(total)
+        val gy = vulkan_clear_dispatch_groups_y(total)
+        if gx <= 0 or gy <= 0 or gx > VK_SPEC_MAX_WORKGROUP_COUNT or gy > VK_SPEC_MAX_WORKGROUP_COUNT:
+            self.last_error = "clear-workgroup-count-exceeds-spec"
+            return
         val pc = _pack_clear_pc(color, self.w, self.h)
-        self.hint_damage(0, 0, _i64(self.w), _i64(self.h))
-        val dispatched = self._dispatch_framebuffer_checked(self.pipe_clear, pc, workgroups, 1, 1, "clear-dispatch-failed")
+        self.note_damage_full()
+        val dispatched = self._dispatch_framebuffer_checked(self.pipe_clear, pc, gx, gy, 1, "clear-dispatch-failed")
         if dispatched > 0:
             self.dirty = true
             self.host_mirror_frame_fresh = false
@@ -2355,17 +2364,26 @@ impl RenderBackend for VulkanBackend:
             # A degenerate footprint paints nothing; leave the union untouched
             # rather than widening it to the whole surface.
             return
-        # Clip to the surface. A rect entirely outside it damages nothing.
+        # Clip to the surface and active clip rect. GPU compute kernels discard
+        # pixels outside the active clip, so intersecting here keeps clipped
+        # full-surface background clears/rects from inflating frame damage.
         var x0 = if hx < 0: 0 else: hx
         var y0 = if hy < 0: 0 else: hy
         var x1 = hx + hw
         var y1 = hy + hh
         if x1 > _i64(self.w): x1 = _i64(self.w)
         if y1 > _i64(self.h): y1 = _i64(self.h)
+        if self.clip_enabled:
+            val cx0 = _i64(self.clip_x)
+            val cy0 = _i64(self.clip_y)
+            val cx1 = cx0 + _i64(self.clip_w)
+            val cy1 = cy0 + _i64(self.clip_h)
+            if cx0 > x0: x0 = cx0
+            if cy0 > y0: y0 = cy0
+            if cx1 < x1: x1 = cx1
+            if cy1 < y1: y1 = cy1
         if x1 <= x0 or y1 <= y0:
             return
-        # An active clip can only SHRINK the painted area, so ignoring it keeps
-        # the union conservative (a superset), which is the safe direction.
         if not self.frame_damage_valid or self.frame_damage_full:
             if self.frame_damage_full:
                 return
@@ -2567,6 +2585,14 @@ impl RenderBackend for VulkanBackend:
             self.last_error = "Vulkan damaged framebuffer readback byte count mismatch"
             return false
 
+        var checksum: i64 = self.last_host_checksum
+        if checksum < 0:
+            checksum = 0
+            var ci: i64 = 0
+            while ci < self.host_buf.len().to_i64():
+                val cpx = (self.host_buf[ci] as i64) & 4294967295
+                checksum = (checksum + cpx) % 2147483647
+                ci += 1
         var source_index: i64 = 0
         var patched: i64 = 0
         i = 0
@@ -2579,12 +2605,19 @@ impl RenderBackend for VulkanBackend:
             while row < rh:
                 var col = 0
                 while col < rw:
-                    self.host_buf[(y + row) * self.w + x + col] = packed_pixels[source_index]
+                    val dst_idx = (y + row) * self.w + x + col
+                    val old_px = self.host_buf[dst_idx]
+                    val new_px = packed_pixels[source_index]
+                    val old_mod = ((old_px as i64) & 4294967295) % 2147483647
+                    val new_mod = ((new_px as i64) & 4294967295) % 2147483647
+                    checksum = (checksum + 2147483647 - old_mod + new_mod) % 2147483647
+                    self.host_buf[dst_idx] = new_px
                     source_index += 1
                     col += 1
                 row += 1
             patched = patched + _i64(rw) * _i64(rh)
             i += 4
+        self.last_host_checksum = checksum
         self.damage_rect_px = expected_pixels
         self.mirror_copy_iterations = patched
         self.present_readback_bytes = expected_pixels * 4
@@ -2720,7 +2753,24 @@ impl RenderBackend for VulkanBackend:
                 return self._readback_cpu_fallback_host()
             self.damage_rect_px = 0
             self.mirror_copy_iterations = 0
-            # Damage-scoped route FIRST: when a valid mirror from the previous
+            # Explicit staged present-damage route FIRST (used by damaged DrawIR
+            # composition, which reads pixels BEFORE present()): re-download only
+            # the staged disjoint dirty rects into the seeded host mirror and
+            # record exact transferred bytes/rects for present()'s dedup receipt.
+            if self.present_damage_valid and self.host_mirror_valid:
+                if self._refresh_host_damage():
+                    self.host_mirror_frame_fresh = true
+                    self.readback_frame_bytes = self.present_readback_bytes
+                    self.readback_frame_rects = self.present_readback_rect_count
+                    if self.cpu_fallback_used:
+                        return engine2d_readback(self.host_buf, "cpu_fallback")
+                    return Engine2DReadback(
+                        pixels: self.host_buf, source: "device_readback",
+                        backend_handle: self.d_framebuffer,
+                        device_identity: self.session.device,
+                        pixel_count: self.host_buf.len().to_i64(),
+                        checksum: self.last_host_checksum)
+            # Damage-scoped route NEXT: when a valid mirror from the previous
             # frame survives and this frame's draw calls named a sub-rect, only
             # that rect is re-downloaded. The mirror and the returned pixels
             # share one array here exactly as the full arm below does (F8's

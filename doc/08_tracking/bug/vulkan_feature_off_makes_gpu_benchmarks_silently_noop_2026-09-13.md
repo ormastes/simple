@@ -154,3 +154,10 @@ Remaining: re-running `bench_2d_vulkan.spl` end-to-end on an admitted
 self-hosted binary to bind the benchmark path itself (the probe proves the
 compute surface it depends on). Status: fixed (detection); benchmark rerun
 pending the admitted compiler.
+
+## 2026-11-22 Follow-Up Audit & MoltenVK Portability Hardening (work/mac-bugs-vulkan-20261122)
+
+- Verified `vulkan_graphics_runtime_core.rs` (`vulkan_feature_disabled_tests`) and `interpreter_extern/gpu.rs`:
+  - Every `#[cfg(not(feature = "vulkan"))]` stub in `simple_runtime` returns failure and populates `rt_vulkan_get_last_error()` with `VULKAN_FEATURE_DISABLED_ERROR` (never silently succeeding or leaving `last_error` empty).
+  - The interpreter `rt_vulkan_*` dlopen family (`interpreter_extern/gpu.rs`) now also auto-discovers Homebrew/usr-local `MoltenVK_icd.json` when `VK_ICD_FILENAMES` / `VK_DRIVER_FILES` are unset on macOS and enables `VK_KHR_portability_subset` on `vkCreateDevice` when advertised.
+  - `bench_2d_vulkan.spl` and `spirv_clear()` remain 100% compatible with the 2D-bounded clear kernel (`gy = 1` at 1080p `8100 <= 65535`). End-to-end self-hosted benchmark capture awaits the admitted macOS self-hosted compiler outside Seatbelt's `MTLCreateSystemDefaultDevice` restriction.
