@@ -499,6 +499,37 @@ impl LlvmBackend {
                         .build_float_div(l, r, "fdiv")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_float_div", &e))?
                         .into()),
+                    // Float `%` is floored (sign of the divisor), like the
+                    // interpreter (-7.5 % 2.0 == 0.5) and the cranelift backend
+                    // (codegen/instr/core.rs, BinOp::Mod, is_float): a - floor(a/b)*b.
+                    // Not `frem`, which is C fmod (sign of the dividend). Without this
+                    // arm `src/runtime/simple_core/core_any_ops.spl:94` failed with
+                    // `Unsupported float binop: Mod` and the seed could not build the
+                    // simple-core archive.
+                    BinOp::Mod => {
+                        let float_type = l.get_type();
+                        let intrinsic = if float_type == f64_type { "llvm.floor.f64" } else { "llvm.floor.f32" };
+                        let floor_fn = module.get_function(intrinsic).unwrap_or_else(|| {
+                            module.add_function(intrinsic, float_type.fn_type(&[float_type.into()], false), None)
+                        });
+                        let quotient = builder
+                            .build_float_div(l, r, "fmod_div")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("build_float_div", &e))?;
+                        let floored = builder
+                            .build_call(floor_fn, &[quotient.into()], "fmod_floor")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("llvm.floor", &e))?
+                            .try_as_basic_value()
+                            .basic()
+                            .ok_or_else(|| crate::error::factory::unsupported_operation("float binop", &op))?
+                            .into_float_value();
+                        let product = builder
+                            .build_float_mul(floored, r, "fmod_mul")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("build_float_mul", &e))?;
+                        Ok(builder
+                            .build_float_sub(l, product, "fmod")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("build_float_sub", &e))?
+                            .into())
+                    }
                     BinOp::Eq | BinOp::NotEq | BinOp::Is | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
                         let pred = match op {
                             BinOp::Eq => FloatPredicate::OEQ,
