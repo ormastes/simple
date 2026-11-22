@@ -53,7 +53,7 @@ fn _a32t_heap(v: i64, kind: i64) -> i64:
     # Untagged object pointer when v is a heap ref of kind, else 0.
     if (v & 7) != 1:
         return 0
-    val p = v - 1
+    val p = (v & 0xFFFFFFFF) - 1
     if p < 4096:
         return 0
     if _a32t_ld32(p) != kind:
@@ -72,9 +72,10 @@ fn _a32t_plausible_raw(v: i64) -> i64:
     # 1 when v looks like a raw char* into RAM (a raw literal, not an int/nil).
     if (v & 7) != 0:
         return 0
-    if v < 0x40000000:
+    val u = v & 0xFFFFFFFF
+    if u < 0x40000000:
         return 0
-    if v >= 0x80000000:
+    if u >= 0x80000000:
         return 0
     1
 
@@ -85,7 +86,7 @@ fn _a32t_data(v: i64) -> i64:
     if p != 0:
         return p + 12
     if _a32t_plausible_raw(v) != 0:
-        return v
+        return v & 0xFFFFFFFF
     0
 
 @cfg(arm32)
@@ -145,6 +146,8 @@ fn _a32t_bytes_eq(a: i64, b: i64, n: i64) -> i64:
 
 @cfg(arm32)
 fn _a32t_eq(left: i64, right: i64) -> i64:
+    if left == right:
+        return 1
     if left == 3 or right == 3:
         if left == right:
             return 1
@@ -243,12 +246,11 @@ fn _a32t_find(value: i64, needle: i64, start: i64) -> i64:
 @cfg(arm32)
 fn _a32t_parse_int(value: i64) -> i64:
     # Tagged int, or nil (3) for non-text / malformed / outside the 29-bit payload.
-    val p = _a32t_heap(value, 1)
-    if p == 0:
+    val d = _a32t_data(value)
+    if d == 0:
         return 3
-    val d = p + 12
     var b: i64 = 0
-    var e = _a32t_ld32(p + 8)
+    var e = _a32t_len(value)
     while b < e and _a32t_is_ws(_a32t_ld8(d + b)) != 0:
         b = b + 1
     while e > b and _a32t_is_ws(_a32t_ld8(d + e - 1)) != 0:
@@ -370,6 +372,8 @@ fn _a32t_sb_push(h: i64, value: i64) -> i64:
         var ncap: i64 = 32
         if cap > 0:
             ncap = cap
+        if need > 0x3FFFFFFF:
+            return 0
         while ncap < need:
             ncap = ncap * 2
         val r = rt_alloc(ncap + 1)
