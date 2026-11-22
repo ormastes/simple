@@ -2,94 +2,118 @@
 
 use os.drivers.desktop_driver_summary.{desktop_driver_summary_accepts_complete_qemu}
 use common.wine_simpleos_exec_env_gate.{wine_simpleos_exec_env_gate_from_serial_log}
+use std.nogc_sync_mut.io.env_ops.{cwd, env_get, host_os}
+use std.nogc_sync_mut.io.file_ops.{file_delete, file_exists, file_read}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use std.nogc_sync_mut.io.time_ops.{sleep_ms}
+use std.nogc_sync_mut.ffi.io.{file_write_text}
 
-extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
-extern fn rt_env_cwd() -> text?
-extern fn rt_env_get(key: text) -> text?
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text?
+fn _ascii_serial_clean(raw: text) -> text:
+    var out = ""
+    for b in raw.to_bytes():
+        if b == 9u8 or b == 10u8 or b == 13u8 or (b >= 32u8 and b <= 126u8):
+            out = out + char_from_code(b as i64)
+    out
+
+fn _run_x64_serial_probe_windows(cmd_parts: [text], serial_path: text, timeout_ms: u64) -> (text, text, i32):
+    if file_exists(serial_path):
+        _ = file_delete(serial_path)
+    if cmd_parts.len() == 0:
+        return ("", "empty probe command", 1)
+    val (stdout, stderr, raw_exit) = process_run_timeout(
+        cmd_parts[0], cmd_parts.slice(1), timeout_ms as i64)
+    val raw_serial = if file_exists(serial_path):
+        file_read(serial_path)
+    else:
+        val combined = stdout + stderr
+        _ = file_write_text(serial_path, combined)
+        combined
+    val cleaned = _ascii_serial_clean(raw_serial)
+    val exit_code = if cleaned.contains("TEST PASSED"):
+        0
+    elif cleaned.contains("TEST FAILED"):
+        2
+    else:
+        raw_exit
+    (cleaned, stderr, exit_code)
+
+fn _run_x64_serial_probe_posix(cmd_parts: [text], serial_path: text, timeout_ms: u64, propagate_exit: bool) -> (text, text, i32):
+    val fallback_branch = if propagate_exit:
+        "else wait \"$qpid\" 2>/dev/null; code=$?; fi"
+    else:
+        "fi"
+    val shell_cmd =
+        "rm -f \"" + serial_path + "\"; " +
+        "(" + cmd_parts.join(" ") + ") > \"" + serial_path + "\" 2>&1 & qpid=$!; " +
+        "deadline=$(( $(date +%s) + 118 )); code=124; " +
+        "while kill -0 \"$qpid\" 2>/dev/null; do " +
+        "if grep -a -q 'TEST PASSED' \"" + serial_path + "\" 2>/dev/null; then code=0; kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; break; fi; " +
+        "if grep -a -q 'TEST FAILED' \"" + serial_path + "\" 2>/dev/null; then code=2; kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; break; fi; " +
+        "if [ \"$(date +%s)\" -ge \"$deadline\" ]; then kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; break; fi; " +
+        "sleep 0.1; " +
+        "done; " +
+        "if kill -0 \"$qpid\" 2>/dev/null; then kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; fi; " +
+        "if [ \"$code\" = 124 ]; then if grep -a -q 'TEST PASSED' \"" + serial_path + "\" 2>/dev/null; then code=0; elif grep -a -q 'TEST FAILED' \"" + serial_path + "\" 2>/dev/null; then code=2; " + fallback_branch + "; fi; " +
+        "cat \"" + serial_path + "\" 2>/dev/null | tr -cd '\\11\\12\\15\\40-\\176' || true; " +
+        "exit \"$code\""
+    process_run_timeout("sh", ["-c", shell_cmd], timeout_ms as i64)
 
 pub fn run_x64_desktop_disk_probe(cmd_parts: [text], serial_path: text, timeout_ms: u64) -> (text, text, i32):
-    val shell_cmd =
-        "rm -f \"" + serial_path + "\"; " +
-        "(" + cmd_parts.join(" ") + ") > \"" + serial_path + "\" 2>&1 & qpid=$!; " +
-        "deadline=$(( $(date +%s) + 118 )); code=124; " +
-        "while kill -0 \"$qpid\" 2>/dev/null; do " +
-        "if grep -a -q 'TEST PASSED' \"" + serial_path + "\" 2>/dev/null; then code=0; kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; break; fi; " +
-        "if grep -a -q 'TEST FAILED' \"" + serial_path + "\" 2>/dev/null; then code=2; kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; break; fi; " +
-        "if [ \"$(date +%s)\" -ge \"$deadline\" ]; then kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; break; fi; " +
-        "sleep 0.1; " +
-        "done; " +
-        "if kill -0 \"$qpid\" 2>/dev/null; then kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; fi; " +
-        "if [ \"$code\" = 124 ]; then if grep -a -q 'TEST PASSED' \"" + serial_path + "\" 2>/dev/null; then code=0; elif grep -a -q 'TEST FAILED' \"" + serial_path + "\" 2>/dev/null; then code=2; else wait \"$qpid\" 2>/dev/null; code=$?; fi; fi; " +
-        "cat \"" + serial_path + "\" 2>/dev/null | tr -cd '\\11\\12\\15\\40-\\176' || true; " +
-        "exit \"$code\""
-    rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], timeout_ms as i64)
+    if host_os() == "windows":
+        return _run_x64_serial_probe_windows(cmd_parts, serial_path, timeout_ms)
+    _run_x64_serial_probe_posix(cmd_parts, serial_path, timeout_ms, true)
 
 pub fn run_x64_wm_simple_web_probe(cmd_parts: [text], serial_path: text, timeout_ms: u64) -> (text, text, i32):
-    val shell_cmd =
-        "rm -f \"" + serial_path + "\"; " +
-        "(" + cmd_parts.join(" ") + ") > \"" + serial_path + "\" 2>&1 & qpid=$!; " +
-        "deadline=$(( $(date +%s) + 118 )); code=124; " +
-        "while kill -0 \"$qpid\" 2>/dev/null; do " +
-        "if grep -a -q 'TEST PASSED' \"" + serial_path + "\" 2>/dev/null; then code=0; kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; break; fi; " +
-        "if grep -a -q 'TEST FAILED' \"" + serial_path + "\" 2>/dev/null; then code=2; kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; break; fi; " +
-        "if [ \"$(date +%s)\" -ge \"$deadline\" ]; then kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; break; fi; " +
-        "sleep 0.1; " +
-        "done; " +
-        "if kill -0 \"$qpid\" 2>/dev/null; then kill \"$qpid\" 2>/dev/null || true; wait \"$qpid\" 2>/dev/null || true; fi; " +
-        "if [ \"$code\" = 124 ]; then if grep -a -q 'TEST PASSED' \"" + serial_path + "\" 2>/dev/null; then code=0; elif grep -a -q 'TEST FAILED' \"" + serial_path + "\" 2>/dev/null; then code=2; fi; fi; " +
-        "cat \"" + serial_path + "\" 2>/dev/null | tr -cd '\\11\\12\\15\\40-\\176' || true; " +
-        "exit \"$code\""
-    rt_process_run_timeout("/bin/sh", ["-c", shell_cmd], timeout_ms as i64)
+    if host_os() == "windows":
+        return _run_x64_serial_probe_windows(cmd_parts, serial_path, timeout_ms)
+    _run_x64_serial_probe_posix(cmd_parts, serial_path, timeout_ms, false)
 
 pub fn desktop_uefi_serial_log_path() -> text:
-    val override_path = rt_env_get("SIMPLEOS_DESKTOP_UEFI_SERIAL_LOG") ?? ""
+    val override_path = env_get("SIMPLEOS_DESKTOP_UEFI_SERIAL_LOG")
     if override_path != "":
         return override_path
     _desktop_qemu_build_path("build/os/x64-desktop-uefi.serial.log")
 
 pub fn desktop_disk_serial_log_path() -> text:
-    val override_path = rt_env_get("SIMPLEOS_DESKTOP_DISK_SERIAL_LOG") ?? ""
+    val override_path = env_get("SIMPLEOS_DESKTOP_DISK_SERIAL_LOG")
     if override_path != "":
         return override_path
     _desktop_qemu_build_path("build/os/x64-desktop-disk.serial.log")
 
 pub fn wm_simple_web_serial_log_path() -> text:
-    val override_path = rt_env_get("SIMPLEOS_WM_SIMPLE_WEB_SERIAL_LOG") ?? ""
+    val override_path = env_get("SIMPLEOS_WM_SIMPLE_WEB_SERIAL_LOG")
     if override_path != "":
         return override_path
     _desktop_qemu_build_path("build/os/x64-wm-simple-web-check.serial.log")
 
 fn _desktop_qemu_build_path(rel: text) -> text:
-    if val cwd = rt_env_cwd():
-        return cwd + "/" + rel
+    val cur = cwd()
+    if cur != "":
+        return cur + "/" + rel
     # absent: no working directory reported; the relative path resolves against
     # the same process cwd.
     rel
 
 pub fn clear_qemu_serial_log(path: text):
-    val _ = rt_process_run_timeout("/bin/sh", ["-c", "rm -f \"" + path + "\""], 5000)
+    if file_exists(path):
+        val _ = file_delete(path)
 
 pub fn read_qemu_serial_log(path: text) -> text:
-    val _settle = rt_process_run_timeout("/bin/sh", ["-c", "sleep 0.2"], 1000)
+    sleep_ms(200)
     var tries = 0
     while tries < 50:
-        if rt_file_exists(path):
-            if val content = rt_file_read_text(path):
-                if content != "":
-                    return content
-            # absent: unreadable this try; fall through to the cat fallback/retry.
-        val (stdout, _stderr, _exit_code) = rt_process_run_timeout("/bin/sh", ["-c", "cat \"" + path + "\" 2>/dev/null | tr -cd '\\11\\12\\15\\40-\\176' || true"], 5000)
-        if stdout != "":
-            return stdout
-        val _ = rt_process_run_timeout("/bin/sh", ["-c", "sleep 0.1"], 1000)
+        if file_exists(path):
+            val content = file_read(path)
+            if content != "":
+                return content
+        sleep_ms(100)
         tries = tries + 1
     ""
 
 pub fn qemu_serial_log_contains(path: text, marker: text) -> bool:
-    val (_stdout, _stderr, exit_code) = rt_process_run_timeout("/bin/sh", ["-c", "grep -a -q \"" + marker + "\" \"" + path + "\""], 5000)
-    exit_code == 0
+    if not file_exists(path):
+        return false
+    file_read(path).contains(marker)
 
 pub fn desktop_wine_exec_env_required_marker_fragments() -> [text]:
     [

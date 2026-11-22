@@ -68,6 +68,46 @@ class SimpleOsLaneContract:
     board_adapter_id: text
     media_path_hint: text
 
+fn _clone_text_array(items: [text]) -> [text]:
+    var copy: [text] = []
+    for item in items:
+        copy.push(item)
+    copy
+
+fn _clone_staged_app_contract(app: SimpleOsStagedToolchainAppContract) -> SimpleOsStagedToolchainAppContract:
+    SimpleOsStagedToolchainAppContract(
+        app_name: app.app_name,
+        app_path: app.app_path,
+        manifest_path: app.manifest_path,
+        require_process_backed_launch: app.require_process_backed_launch,
+        require_vfs_read: app.require_vfs_read,
+        native_launch_mode: app.native_launch_mode,
+        native_launch_status: app.native_launch_status
+    )
+
+fn _clone_lane_contract(lane: SimpleOsLaneContract) -> SimpleOsLaneContract:
+    """Return an isolated copy so caller edits cannot mutate shared catalog rows."""
+    var cloned_apps: [SimpleOsStagedToolchainAppContract] = []
+    for app in lane.staged_apps:
+        cloned_apps.push(_clone_staged_app_contract(app))
+    SimpleOsLaneContract(
+        name: lane.name,
+        lane_kind: lane.lane_kind,
+        firmware_contract: lane.firmware_contract,
+        image_layout: lane.image_layout,
+        entry: lane.entry,
+        linker_script: lane.linker_script,
+        output: lane.output,
+        qemu_memory: lane.qemu_memory,
+        qemu_bios: lane.qemu_bios,
+        qemu_extra: _clone_text_array(lane.qemu_extra),
+        timeout_ms: lane.timeout_ms,
+        staged_apps: cloned_apps,
+        required_serial_markers: _clone_text_array(lane.required_serial_markers),
+        board_adapter_id: lane.board_adapter_id,
+        media_path_hint: lane.media_path_hint
+    )
+
 class SimpleOsMachineTargetProjection:
     """Machine/runner fields projected from one resolved platform catalog row."""
     canonical_name: text
@@ -103,24 +143,24 @@ class SimpleOsMachineTargetProjection:
 
     fn qemu_lane_or_smoke(lane_name: text) -> SimpleOsLaneContract:
         if self.qemu_smoke_lane.name == lane_name:
-            return self.qemu_smoke_lane
+            return _clone_lane_contract(self.qemu_smoke_lane)
         if self.qemu_acceptance_lane.name == lane_name:
-            return self.qemu_acceptance_lane
+            return _clone_lane_contract(self.qemu_acceptance_lane)
         for lane in self.qemu_additional_lanes:
             if lane.name == lane_name:
-                return lane
-        self.qemu_smoke_lane
+                return _clone_lane_contract(lane)
+        _clone_lane_contract(self.qemu_smoke_lane)
 
     fn default_qemu_lane() -> SimpleOsLaneContract:
         """Return the single catalog-owned default used by `simple os run`."""
         if (self.arch == Architecture.Arm64 or self.arch == Architecture.Arm32 or
             self.arch == Architecture.Riscv32):
-            return self.qemu_acceptance_lane
+            return _clone_lane_contract(self.qemu_acceptance_lane)
         if self.arch == Architecture.Riscv64:
             if self.has_qemu_lane("riscv64-virtio-fat32-smf"):
                 return self.qemu_lane_or_smoke("riscv64-virtio-fat32-smf")
-            return self.qemu_acceptance_lane
-        self.qemu_smoke_lane
+            return _clone_lane_contract(self.qemu_acceptance_lane)
+        _clone_lane_contract(self.qemu_smoke_lane)
 
 class SimpleOsPlatformBuildTarget:
     name: text

@@ -75,7 +75,6 @@ extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
-extern fn rt_exit(code: i32) -> void
 
 fn elf_header(class_byte: u8, data_byte: u8, machine_low: u8, machine_high: u8) -> [u8]:
     [
@@ -274,7 +273,7 @@ describe "Qemu runner serial routing":
         expect(qemu_protection_serial_accepts_hardening("mps2-an505", "enforce", "qemu", an505_serial)).to_equal(true)
         expect(qemu_protection_serial_reason("mps2-an505", "enforce", "none", an505_serial)).to_equal("missing-runtime-check")
 
-        val detect_serial = "protection_probe=pass\n"
+        val detect_serial = "protection_kind=pmsav8-mpu\nprotection_probe=pass\n"
         expect(qemu_protection_serial_accepts_hardening("mps2-an505", "detect", "qemu", detect_serial)).to_equal(false)
         expect(qemu_protection_serial_reason("mps2-an505", "detect", "qemu", detect_serial)).to_equal("diagnostic-protection-mode:detect")
 
@@ -291,7 +290,7 @@ describe "Qemu runner serial routing":
         expect(qemu_scenario_protection_serial_accepts_hardening(x64, "enforce", x64_serial)).to_equal(true)
 
         val rv64 = scenario_riscv64_hosted()
-        val rv64_serial = "[PAGING] MMU enabled (SCTLR_EL1.M=1, C=1, I=1)\npage_contract=pass\nTEST PASSED"
+        val rv64_serial = "[PAGING] MMU enabled (satp_mode=Sv39)\npage_contract=pass\nTEST PASSED"
         expect(qemu_scenario_protection_board_id(rv64)).to_equal("riscv64-virt")
         expect(qemu_scenario_protection_serial_accepts_hardening(rv64, "enforce", rv64_serial)).to_equal(true)
 
@@ -692,7 +691,8 @@ describe "Qemu runner serial routing":
         val catalog_source = rt_file_read_text("src/os/_QemuRunner/scenario_catalog.spl") ?? ""
         val disks_source = rt_file_read_text("src/os/_QemuRunner/scenario_disks.spl") ?? ""
         val exec_source = rt_file_read_text("src/os/_QemuRunner/scenario_exec.spl") ?? ""
-        for lane_source in [targets_source, catalog_source, disks_source, exec_source]:
+        expect(targets_source).to_contain("simpleos_machine_target_projection")
+        for lane_source in [catalog_source, disks_source, exec_source]:
             expect(lane_source).to_contain("simpleos_platform_has_qemu_lane,")
             expect(lane_source).to_contain("simpleos_platform_qemu_lane_or_smoke,")
         expect(source).to_contain("use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}")
@@ -742,24 +742,24 @@ describe "Qemu runner serial routing":
         expect(source).to_contain("process_run_timeout(\"env\", command_args, timeout_ms)")
         expect(source).to_contain("var pinned_candidate = path_absolute(candidate)")
         expect(source).to_contain("pinned_candidate = candidate")
-        expect(source).to_contain("SIMPLE_BINARY={pinned_candidate}")
-        expect(source).to_contain("SIMPLE_BIN={pinned_candidate}")
-        expect(source).to_contain("SIMPLE_BOOTSTRAP_DRIVER={pinned_candidate}")
-        expect(source).to_contain("SIMPLE_FRONTEND_DELEGATE={pinned_candidate}")
+        expect(source).to_contain("SIMPLE_BINARY=\{pinned_candidate}")
+        expect(source).to_contain("SIMPLE_BIN=\{pinned_candidate}")
+        expect(source).to_contain("SIMPLE_BOOTSTRAP_DRIVER=\{pinned_candidate}")
+        expect(source).to_contain("SIMPLE_FRONTEND_DELEGATE=\{pinned_candidate}")
         expect(source).to_contain("SIMPLE_FRONTEND_DELEGATED=1")
         expect(source).to_contain("SIMPLE_NO_STUB_FALLBACK=1")
         expect(source).to_contain("SIMPLE_EXECUTION_MODE=")
         expect(source).to_contain("SIMPLE_NATIVE_BUILD_FORCE_WORKER=0")
         expect(source).to_contain("SIMPLE_BOOTSTRAP=0")
         expect(source).to_contain("simpleos-qemu-admission.")
-        expect(source).to_contain("var temp_root = env_get(\"TMPDIR\") ?? \"\"")
+        expect(source).to_contain("val temp_root = cwd().replace(\"\\\\\", \"/\")")
         expect(source).to_contain("scripts/check/cert/redeploy_gate/fixtures/p2_add.spl")
         expect(source).to_contain("\"--runtime-bundle\", \"core-c-bootstrap\"")
         expect(source).to_contain("\"--entry-closure\"")
         expect(source).to_contain("\"--cache-dir\", probe_dir + \"/cache\"")
         expect(source).to_contain("\"--mode\", \"one-binary\"")
         expect(source).to_contain("candidate, build_args, 60000")
-        expect(source).to_contain("process_run_bounded(probe_output, [], 5000, 4096)")
+        expect(source).to_contain("process_run_timeout(\"env\", [probe_output], 5000)")
         expect(source).to_contain("stdout == \"5\" or stdout == \"5\\n\" or stdout == \"5\\r\\n\"")
         expect(source).to_contain("val cleanup_ok = dir_remove_all(probe_dir)")
         expect(source).to_contain("_candidate_backend_smoke(candidate, backend_name)")
@@ -779,8 +779,8 @@ describe "Qemu runner serial routing":
         expect(bans_frontend_exit_variable).to_equal(false)  # oracle: the removed frontend-exit-code side channel must stay removed
         expect(source).to_contain("\"--backend\", backend_name")
         expect(source.contains("definitely-invalid-mode")).to_equal(false)
-        expect(source).to_contain("if simple_bin == \"\":\n        _remove_stale_build_output(target)")
-        expect(source).to_contain("phase=tooling FAILED: no runnable pure-Simple compiler")
+        expect(source).to_contain("if simple_bin == \"\":\n        print \"[build][\{arch_label}] phase=compiler-admission FAILED: no admitted self-hosted compiler for \{backend_name}\"")
+        expect(source).to_contain("phase=compiler-admission FAILED: no admitted self-hosted compiler")
 
     it "lets callers disable compiled OS logging through native-build args":
         # @req REQ-QEMU-RUNNER-LOG-OFF-022
@@ -918,11 +918,12 @@ describe "Qemu runner serial routing":
             "fs_consumers=fat32,nvfs,dbfs fat32_direct_io=read-write-through nvfs_direct_io=read-write-through dbfs_direct_io=read-write-through fat32_extent_source=freestanding-fat32-extents " +
             "nvfs_extent_source=freestanding-dbfs-arena dbfs_extent_source=freestanding-dbfs-arena " +
             "c_bridge_used=false c_baseline_device=same-nvme c_baseline_scope=in-guest c_baseline_cache=direct " +
+            "vfat_baseline_device=same-nvme vfat_baseline_scope=in-guest vfat_baseline_cache=direct vfat_baseline_filesystem=vfat " +
             "common_logic_shared=true " +
             "allocation_per_io=false simple_read_iops=120000 simple_write_iops=90000 " +
             "simple_read_p99_us=800 simple_write_p99_us=1000 c_read_iops=100000 " +
             "c_write_iops=80000 c_read_p99_us=900 c_write_p99_us=1100 " +
-            "queue_depth=64 warm_runs=5 max_rss_kib=32768 hardware_target=real-nvme " +
+            "queue_depth=64 warm_runs=5 physical_runs=5 max_rss_kib=32768 hardware_target=real-nvme " +
             "qemu=false device_model=Samsung_PM9A3 device_serial=SN123456 " +
             "namespace_nsid=1 measured_on=real-device\n"
         val ready = access + perf + "TEST PASSED\n"
@@ -946,7 +947,7 @@ describe "Qemu runner serial routing":
         expect(scenario_name_or_missing("x64-desktop-disk")).to_equal("x64-desktop-disk")
         if val resolved_disk = disk:
             val disk_cmd = build_scenario_command(resolved_disk, "build/os/simpleos_desktop_e2e_32.elf")
-            expect(disk_cmd).to_contain("drive=nvm")
+            expect(disk_cmd).to_contain("nvme,serial=deadbeef,drive=nvm")
             expect(disk_cmd).to_contain("file=build/os/fat32-x86_64.img,if=none,id=nvm,format=raw")
 
     it "defines a UEFI-native x64 desktop disk boot scenario":
@@ -970,5 +971,3 @@ describe "Qemu runner serial routing":
             expect(cmd).to_contain("nvme,serial=uefi-desktop,drive=uefidisk")
         else:
             expect("missing").to_equal("x64-desktop-uefi")
-
-rt_exit(0)

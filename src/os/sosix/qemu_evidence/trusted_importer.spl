@@ -210,6 +210,8 @@ fn _sosix_qemu_expected_row_field_key(index: i64) -> text:
 fn _sosix_qemu_manifest_wire_valid(manifest: text) -> bool:
     val expected_lines = SOSIX_QEMU_MATRIX_HEADER_FIELD_COUNT +
         SOSIX_QEMU_MATRIX_ROW_COUNT * SOSIX_QEMU_MATRIX_ROW_FIELD_COUNT + 1
+    val hosts = sosix_qemu_matrix_hosts()
+    val guests = sosix_qemu_matrix_guests()
     var line_index: i64 = 0
     for line in manifest.split_lines():
         if line.len() == 0 or line.len() > 8192:
@@ -232,9 +234,13 @@ fn _sosix_qemu_manifest_wire_valid(manifest: text) -> bool:
         if line_index == 0 and value != "1": return false
         if line_index == 1 and value != "24": return false
         if line_index >= 2 and line_index < expected_lines - 1:
-            val field_index = (line_index - SOSIX_QEMU_MATRIX_HEADER_FIELD_COUNT) % SOSIX_QEMU_MATRIX_ROW_FIELD_COUNT
-            if field_index == 0 and not _sosix_qemu_known_host(value): return false
-            if field_index == 1 and not _sosix_qemu_known_guest(value): return false
+            val row_offset = line_index - SOSIX_QEMU_MATRIX_HEADER_FIELD_COUNT
+            val row_idx = row_offset / SOSIX_QEMU_MATRIX_ROW_FIELD_COUNT
+            val field_index = row_offset % SOSIX_QEMU_MATRIX_ROW_FIELD_COUNT
+            val expected_host = hosts[row_idx / guests.len()]
+            val expected_guest = guests[row_idx % guests.len()]
+            if field_index == 0 and value != expected_host: return false
+            if field_index == 1 and value != expected_guest: return false
             if field_index == 2 and not _sosix_qemu_known_status(value): return false
             if field_index == 9 and value != "true" and value != "false": return false
             if field_index == 39 and not _sosix_qemu_lower_hex(value, 64): return false
@@ -462,6 +468,47 @@ fn _sosix_qemu_record_complete_for_descriptor(
         parsed.receipt.artifact_count == descriptor.artifact_count and
         parsed.receipt.artifacts.len() as u32 == descriptor.artifact_count
 
+fn _sosix_qemu_evidence_verified(
+    root: text,
+    descriptor: SosixQemuManifestRowDescriptor
+) -> bool:
+    val ev_candidate = root + "/" + descriptor.evidence_path
+    if not file_exists(ev_candidate) or not file_is_regular_no_follow(ev_candidate):
+        return false
+    val ev_resolved = _sosix_qemu_trim_root(path_absolute(ev_candidate))
+    if ev_resolved != ev_candidate or not ev_resolved.starts_with(root + "/"):
+        return false
+    val ev_bytes = file_read_bytes(ev_resolved)
+    if ev_bytes.len() == 0 or ev_bytes.len() > SOSIX_QEMU_MATRIX_MANIFEST_MAX_BYTES or
+        not _sosix_qemu_ascii_bytes(ev_bytes):
+        return false
+    if not file_is_regular_no_follow(ev_candidate) or _sosix_qemu_trim_root(path_absolute(ev_candidate)) != ev_resolved:
+        return false
+    sha256_u8_hex(ev_bytes) == descriptor.evidence_sha256
+
+fn _sosix_qemu_artifacts_verified(
+    root: text,
+    host: text,
+    guest: text,
+    artifacts: [SosixQemuCollectorArtifact]
+) -> bool:
+    val artifact_root = root + "/rows/" + host + "/" + guest + "/artifacts"
+    for artifact in artifacts:
+        val art_candidate = artifact_root + "/" + artifact.path
+        if not file_exists(art_candidate) or not file_is_regular_no_follow(art_candidate):
+            return false
+        val art_resolved = _sosix_qemu_trim_root(path_absolute(art_candidate))
+        if art_resolved != art_candidate or not art_resolved.starts_with(artifact_root + "/"):
+            return false
+        val art_bytes = file_read_bytes(art_resolved)
+        if art_bytes.len() == 0:
+            return false
+        if not file_is_regular_no_follow(art_candidate) or _sosix_qemu_trim_root(path_absolute(art_candidate)) != art_resolved:
+            return false
+        if sha256_u8_hex(art_bytes) != artifact.sha256:
+            return false
+    true
+
 fn _sosix_qemu_trusted_row_load(
     root: text,
     manifest: text,
@@ -491,6 +538,10 @@ fn _sosix_qemu_trusted_row_load(
         val parsed = sosix_qemu_bundle_admission_from_collector_record(record)
         if not parsed.structurally_valid:
             return _SosixQemuTrustedRowLoad(accepted: false, reason: "admission-record-pass-invalid", row: _sosix_qemu_blank_row())
+        if not _sosix_qemu_evidence_verified(root, descriptor):
+            return _SosixQemuTrustedRowLoad(accepted: false, reason: "evidence-file-hash-mismatch", row: _sosix_qemu_blank_row())
+        if not _sosix_qemu_artifacts_verified(root, host, guest, parsed.receipt.artifacts):
+            return _SosixQemuTrustedRowLoad(accepted: false, reason: "retained-artifact-hash-mismatch", row: _sosix_qemu_blank_row())
         val row = sosix_qemu_structural_row_from_collector_record(record, descriptor.evidence_sha256)
         return _SosixQemuTrustedRowLoad(accepted: true, reason: "trusted-pass-imported", row: row)
     val row = SosixQemuMatrixRow(
